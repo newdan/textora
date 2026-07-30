@@ -68,13 +68,10 @@ impl App {
         let Some(tab_id) = self.active_tab_id() else {
             return AppEffect::NONE;
         };
-        let first_line = &self.frame_cache.first_line;
-        let last_line = &self.frame_cache.last_line;
-        let Some(mut tab) = crate::app_tab::compose_tab_session_mut(
-            &mut self.workspace,
-            &mut self.tab_runtime_store,
-            tab_id,
-        ) else {
+        let runtime_frame_cache = self.editor_runtime.frame_cache_snapshot();
+        let first_line = runtime_frame_cache.first_line;
+        let last_line = runtime_frame_cache.last_line;
+        let Some(mut tab) = self.tab_session_mut(tab_id) else {
             return AppEffect::NONE;
         };
         let display_map = tab.display_map_clone();
@@ -85,8 +82,8 @@ impl App {
             display_map: &display_map,
             cursor_visual_line: tab.cursor_visual_line(),
             advance_cache: &advance_cache,
-            first_line,
-            last_line,
+            first_line: &first_line,
+            last_line: &last_line,
             visible_rows: tab.visible_rows(),
             first_visible_row: tab.display().viewport.first_visible_row(),
             scroll_top: tab.scroll_top(),
@@ -265,13 +262,10 @@ impl App {
         let Some(tab_id) = self.active_tab_id() else {
             return AppEffect::NONE;
         };
-        let first_line = &self.frame_cache.first_line;
-        let last_line = &self.frame_cache.last_line;
-        let Some(mut tab) = crate::app_tab::compose_tab_session_mut(
-            &mut self.workspace,
-            &mut self.tab_runtime_store,
-            tab_id,
-        ) else {
+        let runtime_frame_cache = self.editor_runtime.frame_cache_snapshot();
+        let first_line = runtime_frame_cache.first_line;
+        let last_line = runtime_frame_cache.last_line;
+        let Some(mut tab) = self.tab_session_mut(tab_id) else {
             return AppEffect::NONE;
         };
         let display_map = tab.display_map_clone();
@@ -282,8 +276,8 @@ impl App {
             display_map: &display_map,
             cursor_visual_line: tab.cursor_visual_line(),
             advance_cache: &advance_cache,
-            first_line,
-            last_line,
+            first_line: &first_line,
+            last_line: &last_line,
             visible_rows: tab.visible_rows(),
             first_visible_row: tab.display().viewport.first_visible_row(),
             scroll_top: tab.scroll_top(),
@@ -341,7 +335,7 @@ impl App {
         }
         // Sidebar: scroll sidebar file list when mouse is over sidebar area
         if matches!(view_mode, ui::view_mode::ViewMode::Sidebar)
-            && let Some(ref _gpu) = self.gpu
+            && self.editor_runtime.surface_size().is_some()
         {
             let sidebar_w = self.ui_shell.sidebar_current_width();
             if sidebar_w > 0.0 && (self.mouse.pos.0 as f32) < sidebar_w {
@@ -349,7 +343,7 @@ impl App {
                     MouseScrollDelta::LineDelta(_, y) => y * -40.0,
                     MouseScrollDelta::PixelDelta(pos) => -(pos.y as f32),
                 };
-                let total = self.workspace.len();
+                let total = self.editor_tab_count();
                 self.ui_shell.sidebar_on_scroll(dy, total);
                 return AppEffect::REDRAW;
             }
@@ -382,7 +376,8 @@ impl App {
         // Canvas: wheel input controls the two-dimensional viewport after chrome routing and
         // before generic plugin preview scrolling.
         if self.active_is_canvas() {
-            if self.modifiers.super_key() || self.modifiers.control_key() {
+            let input_modifiers = self.editor_runtime.input_modifiers();
+            if input_modifiers.super_key() || input_modifiers.control_key() {
                 let screen_anchor =
                     CanvasPoint::new(self.mouse.pos.0 as f32, self.mouse.pos.1 as f32);
                 let Some(factor) = canvas_wheel_zoom_factor(delta) else {
@@ -395,7 +390,7 @@ impl App {
             }
 
             return self.apply_canvas_viewport_action(CanvasViewportAction::PanBy(
-                canvas_pan_delta(delta, self.modifiers.shift_key()),
+                canvas_pan_delta(delta, input_modifiers.shift_key()),
             ));
         }
 
@@ -601,10 +596,8 @@ mod tests {
         let document = DocumentView::new(vec!["hello".to_string()], 80, 10.0);
         let tab_id = app.push_entry_for_test(document, Box::new(EditorPlugin::new()));
         app.switch_workspace_for_test(0);
-        app.tab_runtime_store.insert(
-            tab_id,
-            crate::tab_runtime::TabRuntime::new(Box::new(ReadingPlugin::new(5000.0))),
-        );
+        app.tab_runtime_mut(tab_id).expect("test tab runtime must exist").plugin =
+            Box::new(ReadingPlugin::new(5000.0));
 
         let effect = app.plugin_scroll_by_pixels(200.0);
 
@@ -945,7 +938,7 @@ mod tests {
             .snapshot()
             .expect("prepared canvas viewport must retain a snapshot");
         let content_at_anchor = before.screen_to_content(anchor);
-        app.modifiers = ModifiersState::SUPER;
+        app.editor_runtime.set_input_modifiers(ModifiersState::SUPER);
 
         assert_eq!(
             app.handle_scroll(MouseScrollDelta::PixelDelta(PhysicalPosition::new(36.0, 0.25))),
@@ -977,7 +970,7 @@ mod tests {
             .snapshot()
             .expect("prepared canvas viewport must retain a snapshot");
         let content_at_anchor = before.screen_to_content(anchor);
-        app.modifiers = ModifiersState::CONTROL;
+        app.editor_runtime.set_input_modifiers(ModifiersState::CONTROL);
 
         assert_eq!(
             app.handle_scroll(MouseScrollDelta::PixelDelta(PhysicalPosition::new(36.0, 0.25))),
@@ -1010,7 +1003,7 @@ mod tests {
             .canvas_viewport
             .snapshot()
             .expect("prepared canvas viewport must retain a snapshot");
-        app.modifiers = ModifiersState::SHIFT;
+        app.editor_runtime.set_input_modifiers(ModifiersState::SHIFT);
 
         assert_eq!(app.handle_scroll(MouseScrollDelta::LineDelta(0.0, 1.0)), AppEffect::REDRAW);
 

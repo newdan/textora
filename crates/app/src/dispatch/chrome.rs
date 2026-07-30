@@ -67,7 +67,7 @@ impl App {
                             &entries,
                             layout.dropdown_rect_px,
                             screen,
-                            self.workspace.active_index(),
+                            self.active_editor_index().unwrap_or(0),
                             metrics.dpi,
                         );
                         let rect = menu.menu_rect;
@@ -187,7 +187,7 @@ impl App {
 
     fn apply_word_wrap(&mut self, enabled: bool) -> AppEffect {
         self.settings.set_word_wrap(enabled);
-        for tab_id in self.workspace.tab_ids() {
+        for tab_id in self.editor_tab_ids_in_order() {
             if let Some(mut tab) = self.tab_session_mut(tab_id) {
                 tab.invalidate_render_cache_all();
             }
@@ -197,8 +197,8 @@ impl App {
 
     pub(crate) fn rebuild_theme_state(&mut self) {
         let system_theme = self
-            .window
-            .as_ref()
+            .editor_runtime
+            .window()
             .and_then(|window| window.theme())
             .unwrap_or(winit::window::Theme::Dark);
         self.current_theme = ui::Theme::resolve(
@@ -207,6 +207,7 @@ impl App {
             &self.active_theme_pair,
             &self.theme_registry,
         );
+        self.editor_runtime.update_theme(self.current_theme.clone());
     }
 
     pub(crate) fn handle_sidebar_key_action(

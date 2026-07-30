@@ -1064,8 +1064,13 @@ pub fn shape_visible_lines(
         let doc_line = doc_idx;
 
         // skip_visual: only for the first visible doc line
-        let skip_visual_local =
-            if shape_subset_only { 0 } else { if i == 0 { skip_visual } else { 0 } };
+        let skip_visual_local = if shape_subset_only {
+            0
+        } else if i == 0 {
+            skip_visual
+        } else {
+            0
+        };
         let skip_visual_local = skip_visual_local.min(visual_lines.len());
 
         // B4: Cache visual line + cluster data for first/last visible doc lines

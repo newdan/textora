@@ -137,7 +137,7 @@ impl App {
         self.refresh_settings_overlay();
         if failed {
             self.needs_redraw = true;
-            if let Some(window) = &self.window {
+            if let Some(window) = self.editor_runtime.window() {
                 window.request_redraw();
             }
         }

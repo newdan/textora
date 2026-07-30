@@ -128,7 +128,6 @@ pub(crate) use appkit_core::snapshot as dirty_snapshot;
 mod events;
 pub(crate) use appkit_core::file_history;
 pub(crate) use appkit_core::file_safety;
-pub(crate) use appkit_shell::frame_cache;
 
 pub(crate) use appkit_shell::measure_adapter;
 mod menu_handler;

@@ -25,6 +25,7 @@ pub mod display_state;
 pub mod document_presentation;
 pub mod editor_host;
 pub mod editor_plugin;
+pub mod editor_runtime;
 pub mod event;
 pub mod frame_cache;
 pub mod gpu;
@@ -51,3 +52,29 @@ pub mod workspace;
 
 pub use event::{ShellEffect, ShellEffectStep, ShellEvent};
 pub use product_host::{ProductHost, ProductWakeHandle, WakeError};
+
+#[cfg(test)]
+mod architecture_boundary_tests {
+    #[test]
+    fn shell_manifest_has_no_product_dependencies() {
+        let manifest = include_str!("../Cargo.toml");
+        let markdown_dependency = ["textora", "-markdown"].concat();
+        let sync_dependency = ["textora", "-sync"].concat();
+        let app_dependency = ["textora", "-app"].concat();
+
+        assert!(!manifest.contains(&markdown_dependency));
+        assert!(!manifest.contains(&sync_dependency));
+        assert!(
+            !manifest
+                .lines()
+                .any(|line| { line.trim_start().starts_with(&format!("{app_dependency} =")) })
+        );
+    }
+
+    #[test]
+    fn runtime_has_no_migration_model_bridge() {
+        let source = include_str!("editor_runtime/mod.rs");
+        let migration_bridge = ["with_model_session_", "for_migration"].concat();
+        assert!(!source.contains(&migration_bridge));
+    }
+}

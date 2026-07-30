@@ -2,7 +2,8 @@ use crate::app::App;
 use crate::app_effect::AppEffect;
 use crate::canvas_viewport::CanvasViewportAction;
 use crate::dispatch::chrome::SettingsDispatchAction;
-use crate::workspace_tab_factory::{self, ProductPreparedTab};
+use crate::workspace_tab_factory::ProductPreparedTab;
+use appkit_shell::editor_runtime::OpenDisposition;
 use winit::event_loop::ActiveEventLoop;
 
 const DEFAULT_LOGICAL_FONT_SIZE: f32 = 15.0;
@@ -47,17 +48,13 @@ impl App {
         let view_state = RecentFileViewState::from_history_entry(
             self.file_history.entries.iter().find(|entry| entry.file_path == path),
         );
-        let workspace_effect = if let Some(index) = self.workspace.find_by_path(path) {
-            self.workspace.switch_to(index)
+        let workspace_effect = if let Some(tab_id) = self.editor_tab_id_for_path(path) {
+            self.activate_editor_tab(tab_id).unwrap_or(crate::workspace::WorkspaceEffect::None)
         } else {
             let viewport = self.viewport_dimensions(self.screen_height());
             let ProductPreparedTab { prepared, suggested_file_name } =
-                workspace_tab_factory::prepare_file(&self.workspace, path, viewport)?;
-            self.workspace.open_prepared_tab(
-                &mut self.tab_runtime_store,
-                prepared,
-                suggested_file_name,
-            )
+                self.prepare_editor_file(path, viewport)?;
+            self.install_editor_tab(prepared, suggested_file_name, OpenDisposition::Persistent)
         };
         let app_effect = self.apply_workspace_effect(workspace_effect);
 
@@ -89,56 +86,36 @@ impl App {
     /// when the file has no path (untitled).
     pub(crate) fn save_active_entry(&mut self, force_dialog: bool) -> AppEffect {
         let mut effect = AppEffect::NONE;
-        let active_idx = self.workspace.active_index();
-
         if !force_dialog {
-            // Try direct save — extract dirty flag to avoid borrow conflict
-            let save_result = self.workspace.active_doc_mut().map(|dv| {
-                let result = dv.save();
-                (result, dv.dirty)
-            });
-            match save_result {
-                Some((Ok(()), _)) => {
-                    self.update_document_edited(false);
-                    self.refresh_file_monitor_roots();
+            let Some(tab_id) = self.active_tab_id() else {
+                return effect;
+            };
+            match self.submit_editor_save(tab_id, None) {
+                Ok(()) => {
                     return effect.merge(AppEffect::UPDATE_TITLE).merge(AppEffect::REDRAW);
                 }
-                Some((Err(crate::document_view::DocumentSaveError::Untitled), _)) => {
-                    // fall through to dialog
-                }
-                Some((Err(e), dirty)) => {
-                    eprintln!("save error: {e}");
-                    self.update_document_edited(dirty);
+                Err(appkit_shell::editor_runtime::SavePrepareError::Untitled { .. }) => {}
+                Err(error) => {
+                    eprintln!("save error: {error}");
                     return effect.merge(AppEffect::REDRAW);
                 }
-                None => return effect,
             }
         }
 
         // SaveAs dialog
-        let default_name = save_dialog_default_name(self.workspace.entry_title(active_idx));
+        let default_name = save_dialog_default_name(self.active_editor_title());
 
         let mut dialog = rfd::FileDialog::new().set_file_name(&default_name);
-        if let Some(ref w) = self.window {
+        if let Some(w) = self.editor_runtime.window() {
             dialog = dialog.set_parent(w);
         }
 
         if let Some(path) = dialog.save_file() {
-            let save_result = self.workspace.entry_doc_mut(active_idx).map(|dv| {
-                let result = dv.save_as(&path);
-                (result, dv.dirty)
-            });
-            if let Some((result, dirty)) = save_result {
-                if let Err(ref e) = result {
-                    eprintln!("另存失败: {e}");
-                }
-                if result.is_ok() {
-                    self.workspace.clear_suggested_file_name(active_idx);
-                }
-                self.update_document_edited(dirty);
-                if result.is_ok() {
-                    self.refresh_file_monitor_roots();
-                }
+            let Some(tab_id) = self.active_tab_id() else {
+                return effect.merge(AppEffect::REDRAW);
+            };
+            if let Err(error) = self.submit_editor_save(tab_id, Some(&path)) {
+                eprintln!("另存失败: {error}");
             }
             effect = effect.merge(AppEffect::UPDATE_TITLE);
         }
@@ -167,12 +144,12 @@ impl App {
                 effect = effect.merge(self.save_active_entry(true));
             }
             crate::menu_handler::AppCommand::CloseTab(_) => {
-                if let Some(id) = self.workspace.tab_id_at(self.workspace.active_index()) {
+                if let Some(id) = self.active_tab_id() {
                     effect = effect.merge(self.try_close_entry_with_prompt(id));
                 }
             }
             crate::menu_handler::AppCommand::CloseOthers(idx) => {
-                if let Some(id) = self.workspace.tab_id_at(idx) {
+                if let Some(id) = self.editor_tab_id_at(idx) {
                     effect = effect.merge(self.try_close_multiple_with_prompt(
                         ui::popup_menu::ContextMenuAction::CloseOthers,
                         id,
@@ -180,7 +157,7 @@ impl App {
                 }
             }
             crate::menu_handler::AppCommand::CloseRight(idx) => {
-                if let Some(id) = self.workspace.tab_id_at(idx) {
+                if let Some(id) = self.editor_tab_id_at(idx) {
                     effect = effect.merge(self.try_close_multiple_with_prompt(
                         ui::popup_menu::ContextMenuAction::CloseRight,
                         id,
@@ -188,7 +165,7 @@ impl App {
                 }
             }
             crate::menu_handler::AppCommand::CloseAll => {
-                if let Some(id) = self.workspace.tab_id_at(self.workspace.active_index()) {
+                if let Some(id) = self.active_tab_id() {
                     effect = effect.merge(self.try_close_multiple_with_prompt(
                         ui::popup_menu::ContextMenuAction::CloseAll,
                         id,
@@ -196,7 +173,7 @@ impl App {
                 }
             }
             crate::menu_handler::AppCommand::TogglePin => {
-                let ws_effect = self.workspace.toggle_pin();
+                let ws_effect = self.toggle_active_editor_pin();
                 effect = effect.merge(self.handle_nav_effect(ws_effect));
             }
             crate::menu_handler::AppCommand::ToggleFind => {
@@ -344,8 +321,11 @@ mod recent_file_tests {
             assert_eq!(tab.scroll_anchor_pixel_offset(), 8.5);
             assert_eq!(tab.plugin_name(), ui::plugin::PLUGIN_MARKDOWN_EDITOR);
         }
-        assert!(app.tab_runtime_store.contains(active_id));
-        assert_eq!(app.workspace.tab_ids(), app.tab_runtime_store.ids());
+        assert!(app.tab_runtime(active_id).is_some());
+        assert_eq!(
+            app.editor_tab_ids_in_order().into_iter().collect::<std::collections::HashSet<_>>(),
+            app.editor_runtime_tab_ids()
+        );
         assert!(effect.reshape);
         assert!(effect.redraw);
         assert!(effect.update_title);
@@ -362,7 +342,7 @@ mod recent_file_tests {
         app.open_file(&path).expect("fixture file should open");
         let existing_id = app.active_tab_id().expect("fixture file should have a tab id");
         app.new_untitled_doc();
-        let tab_count_before_reopen = app.workspace.len();
+        let tab_count_before_reopen = app.editor_tab_count();
         app.file_history.entries = vec![history_entry(&path, 1, 3, 2, 4.25)];
         std::fs::remove_file(&path)
             .expect("source deletion should prove existing-tab short-circuiting");
@@ -371,7 +351,7 @@ mod recent_file_tests {
             .open_recent_file_path(&path)
             .expect("existing recent tab should reactivate without reading the file");
 
-        assert_eq!(app.workspace.len(), tab_count_before_reopen);
+        assert_eq!(app.editor_tab_count(), tab_count_before_reopen);
         assert_eq!(app.active_tab_id(), Some(existing_id));
         {
             let tab = app.active_tab_session().expect("existing runtime should remain installed");
@@ -381,7 +361,10 @@ mod recent_file_tests {
             assert_eq!(tab.scroll_anchor_doc_line(), 2);
             assert_eq!(tab.scroll_anchor_pixel_offset(), 4.25);
         }
-        assert_eq!(app.workspace.tab_ids(), app.tab_runtime_store.ids());
+        assert_eq!(
+            app.editor_tab_ids_in_order().into_iter().collect::<std::collections::HashSet<_>>(),
+            app.editor_runtime_tab_ids()
+        );
         assert!(effect.reshape);
         assert!(effect.redraw);
         assert!(effect.update_title);

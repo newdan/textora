@@ -3,6 +3,7 @@ pub enum ShellEvent {
     StartBackgroundServices,
     ReshapeResultsReady,
     FileSafetyResultsReady,
+    SaveResultsReady,
     ProductWake,
 }
 

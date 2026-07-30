@@ -126,6 +126,7 @@ impl App {
             _ => return AppEffect::NONE,
         };
         let vertical_navigation = matches!(direction, MoveDirection::Up | MoveDirection::Down);
+        let preferred_x = self.editor_runtime.preferred_x();
 
         // Phase 1: query the semantic target first, then retain byte navigation
         // as the fallback for existing Markdown WYSIWYG plugins.
@@ -135,7 +136,7 @@ impl App {
             };
             let current_byte = tab.document.cursor_offset().to_usize();
             let vertical_anchor_x = if vertical_navigation {
-                self.wysiwyg_preferred_x.or_else(|| wysiwyg_cursor_x(&tab, current_byte))
+                preferred_x.or_else(|| wysiwyg_cursor_x(&tab, current_byte))
             } else {
                 None
             };
@@ -165,9 +166,9 @@ impl App {
         }
 
         if vertical_navigation {
-            self.wysiwyg_preferred_x = vertical_anchor_x;
+            self.editor_runtime.set_preferred_x(vertical_anchor_x);
         } else {
-            self.wysiwyg_preferred_x = None;
+            self.editor_runtime.set_preferred_x(None);
         }
 
         AppEffect::REDRAW
@@ -186,7 +187,7 @@ impl App {
         let selection_anchor = extend_selection
             .then(|| tab.document.cursor().selection_anchor.unwrap_or(current_byte));
         let _snapped = set_wysiwyg_cursor_and_selection(&mut tab, byte, selection_anchor);
-        self.wysiwyg_preferred_x = None;
+        self.editor_runtime.set_preferred_x(None);
         AppEffect::REDRAW
     }
 
@@ -227,7 +228,7 @@ impl App {
             return AppEffect::NONE;
         };
         let _snapped = set_wysiwyg_cursor_and_selection(&mut tab, new_byte, None);
-        self.wysiwyg_preferred_x = None;
+        self.editor_runtime.set_preferred_x(None);
         AppEffect::REDRAW
     }
 }
@@ -390,14 +391,14 @@ impl App {
         kind: AugmentKind,
         fallback: EditCommand,
     ) -> AppEffect {
-        let current_byte = match self.workspace.active_doc() {
-            Some(dv) => dv.cursor_offset().to_usize(),
+        let current_byte = match self.active_tab_session() {
+            Some(tab) => tab.document.cursor_offset().to_usize(),
             None => return dispatch_wysiwyg_command(self, fallback, event_loop),
         };
 
         let aug = self.wysiwyg_query_augment(current_byte, kind.clone());
         log_wysiwyg_augmentation(&kind, current_byte, aug.as_ref());
-        self.wysiwyg_recursing = true;
+        self.editor_runtime.set_wysiwyg_recursing(true);
         let mut result = AppEffect::NONE;
 
         if let Some(augmented) = aug {
@@ -410,25 +411,25 @@ impl App {
             ));
             log_wysiwyg_effect("augment.after_text_change", result);
 
-            if let Some(dv) = self.workspace.active_doc_mut()
-                && cursor_changed_after_augmentation(dv, augmented.cursor_byte_after)
+            if let Some(tab) = self.active_tab_session_mut()
+                && cursor_changed_after_augmentation(tab.document, augmented.cursor_byte_after)
             {
-                dv.cursor_move_to_offset(augmented.cursor_byte_after);
-                dv.cursor_mut().selection_anchor = None;
+                tab.document.cursor_move_to_offset(augmented.cursor_byte_after);
+                tab.document.cursor_mut().selection_anchor = None;
                 result = result.merge(AppEffect::REDRAW);
             }
-            if let Some(dv) = self.workspace.active_doc() {
-                log_wysiwyg_cursor_state("augment.before_sync", dv);
+            if let Some(tab) = self.active_tab_session() {
+                log_wysiwyg_cursor_state("augment.before_sync", tab.document);
             }
         } else {
             result = result.merge(dispatch_wysiwyg_command(self, fallback, event_loop));
             log_wysiwyg_effect("augment.fallback", result);
         }
 
-        self.wysiwyg_recursing = false;
+        self.editor_runtime.set_wysiwyg_recursing(false);
         self.sync_plugin_state();
-        if let Some(dv) = self.workspace.active_doc() {
-            log_wysiwyg_cursor_state("augment.after_sync", dv);
+        if let Some(tab) = self.active_tab_session() {
+            log_wysiwyg_cursor_state("augment.after_sync", tab.document);
         }
         result
     }

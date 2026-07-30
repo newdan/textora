@@ -4,6 +4,7 @@ use crate::app_effect::AppEffect;
 use crate::commands::EditOutcome;
 use crate::input::EditCommand;
 use crate::ui_shell::KeyboardFocusTarget;
+use appkit_shell::editor_runtime::{EditorNotification, EditorOutcome};
 use arboard::Clipboard;
 use winit::event_loop::ActiveEventLoop;
 
@@ -83,23 +84,59 @@ fn edit_requires_reshape(cmd: &EditCommand, outcome: &EditOutcome) -> bool {
     outcome.dirty_lines.as_ref().is_some_and(|range| range.len() > 1)
 }
 
+fn editor_edit_outcome(
+    tab_id: appkit_core::workspace::types::TabId,
+    previous_content_revision: u64,
+    previous_dirty: bool,
+    current_content_revision: u64,
+    current_dirty: bool,
+    shell_effect: AppEffect,
+) -> EditorOutcome {
+    let mut notifications = smallvec::SmallVec::new();
+    if current_content_revision != previous_content_revision {
+        notifications.push(EditorNotification::ContentChanged {
+            tab_id,
+            content_revision: current_content_revision,
+        });
+    }
+    if current_dirty != previous_dirty {
+        notifications.push(EditorNotification::DirtyChanged { tab_id, dirty: current_dirty });
+    }
+    EditorOutcome { shell_effect, notifications }
+}
+
+fn apply_editor_dirty_notifications(
+    app: &App,
+    notifications: &[EditorNotification],
+    fallback_dirty: bool,
+) {
+    let dirty = notifications
+        .iter()
+        .find_map(|notification| match notification {
+            EditorNotification::DirtyChanged { dirty, .. } => Some(*dirty),
+            _ => None,
+        })
+        .unwrap_or(fallback_dirty);
+    app.update_document_edited(dirty);
+}
+
 impl App {
     fn dispatch_keyboard_tab_switch(&mut self, command: &EditCommand) -> AppEffect {
         let index = match command {
-            EditCommand::NextTab if !self.workspace.is_empty() => {
-                (self.workspace.active_index() + 1) % self.workspace.len()
+            EditCommand::NextTab if !self.editor_is_empty() => {
+                (self.active_editor_index().unwrap_or(0) + 1) % self.editor_tab_count()
             }
-            EditCommand::PrevTab if !self.workspace.is_empty() => {
-                if self.workspace.active_index() == 0 {
-                    self.workspace.len() - 1
+            EditCommand::PrevTab if !self.editor_is_empty() => {
+                if self.active_editor_index().unwrap_or(0) == 0 {
+                    self.editor_tab_count() - 1
                 } else {
-                    self.workspace.active_index() - 1
+                    self.active_editor_index().unwrap_or(0) - 1
                 }
             }
             EditCommand::SwitchTab(index) => *index,
             _ => return AppEffect::NONE,
         };
-        if let Some(id) = self.workspace.tab_id_at(index) {
+        if let Some(id) = self.editor_tab_id_at(index) {
             self.dispatch_tab_switch(id)
         } else {
             AppEffect::NONE
@@ -271,7 +308,7 @@ impl App {
             }
         }
 
-        if self.active_allows_editing() && !self.wysiwyg_recursing {
+        if self.active_allows_editing() && !self.editor_runtime.wysiwyg_recursing() {
             self.sync_plugin_state();
 
             if let Some(intent) = crate::edit_transaction::edit_intent_for_command(&cmd) {
@@ -376,11 +413,13 @@ impl App {
                 if let Some(mut tab) = self.active_tab_session_mut() {
                     tab.resize_presentation(visible_rows, viewport_height);
                 }
-                self.init_display_map(self.workspace.active_index());
+                if let Some(active_index) = self.active_editor_index() {
+                    self.init_display_map(active_index);
+                }
                 if let Some(mut tab) = self.active_tab_session_mut() {
                     tab.clear_advance_cache();
                 }
-                self.frame_cache.cluster_pool.clear();
+                self.editor_runtime.clear_frame_cluster_pool();
                 effect = effect.merge(AppEffect::REDRAW);
                 return effect;
             }
@@ -434,7 +473,7 @@ impl App {
                 return effect;
             }
             EditCommand::CloseTab => {
-                if let Some(id) = self.workspace.tab_id_at(self.workspace.active_index()) {
+                if let Some(id) = self.active_tab_id() {
                     self.try_close_entry_with_prompt(id);
                 }
                 return effect;
@@ -444,12 +483,12 @@ impl App {
                 return self.dispatch_keyboard_tab_switch(&cmd);
             }
             EditCommand::NavigateBack => {
-                let ws_effect = self.workspace.go_back();
+                let ws_effect = self.navigate_editor_back();
                 self.handle_nav_effect(ws_effect);
                 return effect;
             }
             EditCommand::NavigateForward => {
-                let ws_effect = self.workspace.go_forward();
+                let ws_effect = self.navigate_editor_forward();
                 self.handle_nav_effect(ws_effect);
                 return effect;
             }
@@ -558,10 +597,17 @@ impl App {
             _ => {}
         }
 
-        let ws_effect = self.workspace.upgrade_preview_if_needed();
+        let ws_effect = self.upgrade_active_editor_preview();
         self.handle_nav_effect(ws_effect);
 
         let lh = self.ui_metrics().line_height;
+        let Some(tab_id) = self.active_tab_id() else {
+            return effect;
+        };
+        let previous_summary = self.editor_runtime.document_summary(tab_id);
+        let previous_content_revision =
+            previous_summary.as_ref().map_or(0, |summary| summary.content_revision);
+        let previous_dirty = previous_summary.as_ref().is_some_and(|summary| summary.dirty);
         let Some(mut tab) = self.active_tab_session_mut() else {
             return effect;
         };
@@ -577,7 +623,11 @@ impl App {
         );
         tab.restore_presentation(presentation);
         tab.restore_advance_cache(ac);
+        let mut current_content_revision = previous_content_revision;
+        let mut current_dirty = previous_dirty;
         if outcome.executed {
+            current_content_revision = tab.document.content_revision();
+            current_dirty = tab.document.dirty;
             let requires_reshape = edit_requires_reshape(&cmd, &outcome);
             if outcome.new_line_count != outcome.old_line_count {
                 let is_insertion = outcome.new_line_count > outcome.old_line_count;
@@ -621,15 +671,22 @@ impl App {
             }
             effect = effect.merge(AppEffect::REDRAW);
         }
-        let edited = self.active_tab_session().is_some_and(|tab| tab.document.dirty);
-        self.update_document_edited(edited);
+        let editor_outcome = editor_edit_outcome(
+            tab_id,
+            previous_content_revision,
+            previous_dirty,
+            current_content_revision,
+            current_dirty,
+            effect,
+        );
+        apply_editor_dirty_notifications(self, &editor_outcome.notifications, current_dirty);
 
         let allows_editing = self.active_allows_editing();
         if allows_editing {
             self.sync_plugin_state();
         }
 
-        effect
+        editor_outcome.shell_effect
     }
 
     pub(crate) fn dispatch_transactional_edit(
@@ -638,6 +695,13 @@ impl App {
         _event_loop: Option<&ActiveEventLoop>,
     ) -> AppEffect {
         let mut effect = AppEffect::NONE;
+        let Some(tab_id) = self.active_tab_id() else {
+            return effect;
+        };
+        let previous_summary = self.editor_runtime.document_summary(tab_id);
+        let previous_content_revision =
+            previous_summary.as_ref().map_or(0, |summary| summary.content_revision);
+        let previous_dirty = previous_summary.as_ref().is_some_and(|summary| summary.dirty);
 
         self.sync_plugin_state();
         let lh = self.ui_metrics().line_height;
@@ -663,8 +727,12 @@ impl App {
             crate::edit_transaction::execute_edit_plan(resolved_plan, tab.document, &ac);
         tab.restore_advance_cache(ac);
 
+        let mut current_content_revision = previous_content_revision;
+        let mut current_dirty = previous_dirty;
         if let Ok(outcome) = outcome_result {
             let text_changed = outcome.edit_outcome.executed;
+            current_content_revision = outcome.content_revision;
+            current_dirty = outcome.dirty;
             let requires_reshape = text_changed
                 && (outcome.edit_outcome.new_line_count != outcome.edit_outcome.old_line_count
                     || outcome
@@ -718,11 +786,19 @@ impl App {
             }
         }
 
-        let edited = tab.document.dirty;
-        self.update_document_edited(edited);
         self.sync_plugin_state();
 
-        effect.merge(AppEffect::REDRAW)
+        let editor_outcome = editor_edit_outcome(
+            tab_id,
+            previous_content_revision,
+            previous_dirty,
+            current_content_revision,
+            current_dirty,
+            effect,
+        );
+        apply_editor_dirty_notifications(self, &editor_outcome.notifications, current_dirty);
+
+        editor_outcome.shell_effect.merge(AppEffect::REDRAW)
     }
 
     #[cfg(test)]
@@ -877,7 +953,7 @@ mod edit_tests {
 
             let effect = app.dispatch_keyboard_tab_switch(&command);
 
-            assert_eq!(app.workspace.active_index(), 1);
+            assert_eq!(app.active_editor_index(), Some(1));
             assert!(effect.redraw);
             assert_eq!(cancel_request_count(&state.borrow()), 1);
             assert_eq!(document_texts(&app), ["abc", "def"]);

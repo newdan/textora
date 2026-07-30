@@ -6,22 +6,20 @@ use crate::reshape_worker::ReshapeRequest;
 
 impl App {
     pub(crate) fn invalidate_reshape(&mut self) {
-        self.reshape_generation += 1;
-        self.pending_reshapes.clear();
-        if let Some(w) = &self.reshape_worker {
-            w.cancel_before(self.reshape_generation);
-        }
+        self.editor_runtime.invalidate_reshape();
     }
 
     pub(crate) fn apply_zoom(&mut self, logical_font_size: f32) -> crate::app_effect::AppEffect {
         let logical_font_size = logical_font_size.clamp(6.0, 72.0);
         self.settings.set_font_size(logical_font_size);
+        self.editor_runtime.update_settings(self.settings.clone());
         let metrics = self.ui_metrics();
-        if let Some(ref mut text) = self.text {
+        let mut render_resources = self.editor_runtime.take_render_resources();
+        if let Some(text) = render_resources.text.as_mut() {
             text.shaper.set_font_size(metrics.font_size);
         }
-        let tab_ids: Vec<_> =
-            (0..self.workspace.len()).filter_map(|index| self.workspace.tab_id_at(index)).collect();
+        self.editor_runtime.restore_render_resources(render_resources);
+        let tab_ids = self.editor_tab_ids_in_order();
         for tab_id in tab_ids.iter().copied() {
             if let Some(mut tab) = self.tab_session_mut(tab_id) {
                 tab.invalidate_render_cache_all();
@@ -42,30 +40,29 @@ impl App {
 
     /// Drain reshape worker results and merge into active dv's DisplayLineMap
     pub(crate) fn drain_reshape_results(&mut self) {
-        let Some(ref worker) = self.reshape_worker else {
+        if !self.editor_runtime.has_reshape_worker() {
+            return;
+        }
+        let _t0 = std::time::Instant::now();
+        let Some(active_index) = self.active_editor_index() else {
             return;
         };
-        let _t0 = std::time::Instant::now();
-        let generation = self.reshape_generation;
-        let results = worker.drain_completed(32);
-        let result_count = results.len();
-        let mut tree_dirty = false;
-        let mut updated = false;
-        let active_index = self.workspace.active_index();
         let lh = self.ui_metrics().line_height;
         let Some(tab_id) = self.active_tab_id() else {
             return;
         };
-        let pending_reshapes = &mut self.pending_reshapes;
-        let Some(mut tab) = crate::app_tab::compose_tab_session_mut(
-            &mut self.workspace,
-            &mut self.tab_runtime_store,
-            tab_id,
-        ) else {
-            return;
-        };
-        for r in results {
-            if r.generation >= generation && r.dv_idx == active_index {
+        let results = self
+            .editor_runtime
+            .drain_reshape_results(32)
+            .into_iter()
+            .filter(|result| self.editor_runtime.accepts_reshape_result(result, active_index))
+            .collect::<Vec<_>>();
+        let result_count = results.len();
+        let mut cleared_lines = Vec::new();
+        let Some((tree_dirty, updated)) = self.tab_session_mut(tab_id).map(|mut tab| {
+            let mut tree_dirty = false;
+            let mut updated = false;
+            for r in results {
                 // Check if reshape result is materially identical to the current entry.
                 // content_hash covers the line identity (byte_offset + byte_length)
                 // and rendering params (viewport_width + font_size). If both hash and
@@ -80,7 +77,7 @@ impl App {
                     .unwrap_or(false);
 
                 if is_unchanged {
-                    pending_reshapes.remove(&r.doc_line);
+                    cleared_lines.push(r.doc_line);
                     updated = true;
                     continue;
                 }
@@ -91,20 +88,26 @@ impl App {
                     .unwrap_or(true);
 
                 tab.update_display_map_entry(r.doc_line, r.entry);
-                pending_reshapes.remove(&r.doc_line);
+                cleared_lines.push(r.doc_line);
                 if height_changed {
                     tree_dirty = true;
                 }
                 tab.invalidate_render_cache_line(r.doc_line);
                 updated = true;
             }
-        }
-        if tree_dirty {
-            tab.rebuild_display_map();
-            // Clamp anchor then derive scroll_top from stable anchor.
-            // anchor is SOT — tree mapping changed but anchor.doc_line stays.
-            tab.clamp_scroll_anchor(lh);
-            tab.derive_scroll_top(lh);
+            if tree_dirty {
+                tab.rebuild_display_map();
+                // Clamp anchor then derive scroll_top from stable anchor.
+                // anchor is SOT — tree mapping changed but anchor.doc_line stays.
+                tab.clamp_scroll_anchor(lh);
+                tab.derive_scroll_top(lh);
+            }
+            (tree_dirty, updated)
+        }) else {
+            return;
+        };
+        for line in cleared_lines {
+            self.editor_runtime.clear_reshape_pending(line);
         }
         self.needs_redraw |= tree_dirty || updated;
         let _elapsed = _t0.elapsed().as_micros();
@@ -118,79 +121,113 @@ impl App {
 
     /// Submit reshape requests for lines just beyond the visible viewport.
     pub(crate) fn submit_reshape_ahead(&mut self) {
-        if self.skip_reshape_submit {
-            self.skip_reshape_submit = false;
+        if self.editor_runtime.take_skip_next_reshape_submit() {
             return;
         }
-        let Some(ref worker) = self.reshape_worker else {
+        if !self.editor_runtime.has_reshape_worker() {
+            return;
+        }
+        let Some(tab_id) = self.active_tab_id() else {
             return;
         };
-        let Some(tab_id) = self.active_tab_id() else {
+        let Some(active_index) = self.active_editor_index() else {
             return;
         };
         let _st0 = std::time::Instant::now();
         let mut _submitted = 0usize;
         let mut _skipped = 0usize;
-        let Some(tab) =
-            crate::app_tab::compose_tab_session(&self.workspace, &self.tab_runtime_store, tab_id)
-        else {
-            return;
-        };
-        let document = tab.document;
-        let viewport_width = self.viewport_content_width(document);
+        let viewport_width = self
+            .active_tab_session()
+            .map(|tab| self.viewport_content_width(tab.document))
+            .unwrap_or(1.0);
         let font_size = self.ui_metrics().font_size;
-
-        let range = tab.visible_doc_range_from_anchor(self.ui_metrics().line_height);
-        // Always include anchor.doc_line so it gets accurate VL on first reshape,
-        // even when scroll_top is derived from placeholder estimates.
-        let anchor_doc = tab.scroll_anchor_doc_line().min(document.line_count().saturating_sub(1));
+        let (range, anchor_doc, document_line_count) = {
+            let Some(tab) = self.tab_session(tab_id) else {
+                return;
+            };
+            let document = tab.document;
+            let range = tab.visible_doc_range_from_anchor(self.ui_metrics().line_height);
+            // Always include anchor.doc_line so it gets accurate VL on first reshape,
+            // even when scroll_top is derived from placeholder estimates.
+            let anchor_doc =
+                tab.scroll_anchor_doc_line().min(document.line_count().saturating_sub(1));
+            (range, anchor_doc, document.line_count())
+        };
 
         // Debounce: if anchor jumped more than the ahead buffer, the previously
         // submitted range has no overlap with the new viewport. Skip to avoid
         // flooding the reshape worker during rapid scrollbar drag.
-        if anchor_doc.abs_diff(self.last_reshape_anchor) > 64 {
-            self.last_reshape_anchor = anchor_doc;
+        if !self.editor_runtime.should_submit_reshape_anchor(anchor_doc, std::time::Instant::now())
+        {
             return;
         }
-        self.last_reshape_anchor = anchor_doc;
+        self.editor_runtime.mark_reshape_anchor_submitted(anchor_doc);
 
-        let start_doc = range.start.saturating_sub(64).min(anchor_doc.saturating_sub(64));
-        let ahead_end = (range.end + 64).max(anchor_doc + 64).min(document.line_count());
-        let generation = self.reshape_generation;
-
-        for dl in start_doc..ahead_end {
-            // Skip lines that are already shaped and up-to-date
-            let is_up_to_date = if let Some(entry) = tab.display_map_entry(dl) {
-                let off = document.line_byte_offset(dl).unwrap_or(0);
-                let len = document.line_byte_length(dl).unwrap_or(0);
-                let current_hash =
-                    crate::content_hash::content_hash(off, len as u32, viewport_width, font_size);
-                entry.content_hash != 0 && entry.content_hash == current_hash
-            } else {
-                false
+        let start_doc = range
+            .start
+            .saturating_sub(appkit_shell::editor_runtime::RESHAPE_AHEAD_LINES)
+            .min(anchor_doc.saturating_sub(appkit_shell::editor_runtime::RESHAPE_AHEAD_LINES));
+        let ahead_end = (range.end + appkit_shell::editor_runtime::RESHAPE_AHEAD_LINES)
+            .max(anchor_doc + appkit_shell::editor_runtime::RESHAPE_AHEAD_LINES)
+            .min(document_line_count);
+        let generation = self.editor_runtime.reshape_generation();
+        let max_line_bytes = self.settings.max_line_bytes_for_shaping;
+        let requests: Vec<(usize, ReshapeRequest)> = {
+            let Some(tab) = self.tab_session(tab_id) else {
+                return;
             };
+            let document = tab.document;
+            (start_doc..ahead_end)
+                .filter_map(|dl| {
+                    // Skip lines that are already shaped and up-to-date
+                    let is_up_to_date = if let Some(entry) = tab.display_map_entry(dl) {
+                        let off = document.line_byte_offset(dl).unwrap_or(0);
+                        let len = document.line_byte_length(dl).unwrap_or(0);
+                        let current_hash = crate::content_hash::content_hash(
+                            off,
+                            len as u32,
+                            viewport_width,
+                            font_size,
+                        );
+                        entry.content_hash != 0 && entry.content_hash == current_hash
+                    } else {
+                        false
+                    };
 
-            if is_up_to_date || self.pending_reshapes.contains(&dl) {
+                    if is_up_to_date || self.editor_runtime.reshape_pending(dl) {
+                        _skipped += 1;
+                        return None;
+                    }
+
+                    let line_bytes = document.doc_line_bytes(dl)?;
+                    let off = document.line_byte_offset(dl).unwrap_or(0);
+                    let len = document.line_byte_length(dl).unwrap_or(0);
+                    Some((
+                        dl,
+                        ReshapeRequest {
+                            generation,
+                            doc_line: dl,
+                            byte_offset: off,
+                            byte_length: len as u32,
+                            line_bytes: std::sync::Arc::from(line_bytes.as_ref()),
+                            viewport_width,
+                            font_size,
+                            max_line_bytes,
+                            dv_idx: active_index,
+                        },
+                    ))
+                })
+                .collect()
+        };
+        for (doc_line, request) in requests {
+            if !self.editor_runtime.mark_reshape_pending(doc_line) {
                 _skipped += 1;
                 continue;
             }
-
-            if let Some(line_bytes) = document.doc_line_bytes(dl) {
-                let off = document.line_byte_offset(dl).unwrap_or(0);
-                let len = document.line_byte_length(dl).unwrap_or(0);
-                self.pending_reshapes.insert(dl);
+            if self.editor_runtime.submit_reshape(request) {
                 _submitted += 1;
-                let _ = worker.submit(ReshapeRequest {
-                    generation,
-                    doc_line: dl,
-                    byte_offset: off,
-                    byte_length: len as u32,
-                    line_bytes: std::sync::Arc::from(line_bytes.as_ref()),
-                    viewport_width,
-                    font_size,
-                    max_line_bytes: self.settings.max_line_bytes_for_shaping,
-                    dv_idx: self.workspace.active_index(),
-                });
+            } else {
+                self.editor_runtime.clear_reshape_pending(doc_line);
             }
         }
         let _selapsed = _st0.elapsed().as_micros();
@@ -207,11 +244,7 @@ impl App {
         let Some(tab_id) = self.active_tab_id() else {
             return;
         };
-        let Some(mut tab) = crate::app_tab::compose_tab_session_mut(
-            &mut self.workspace,
-            &mut self.tab_runtime_store,
-            tab_id,
-        ) else {
+        let Some(mut tab) = self.tab_session_mut(tab_id) else {
             return;
         };
         let mut needs_redraw = false;
@@ -263,18 +296,19 @@ mod zoom_tests {
     #[test]
     fn invalidate_reshape_bumps_generation() {
         let mut app = App::new(None);
-        let gen_before = app.reshape_generation;
+        let gen_before = app.editor_runtime.reshape_generation();
         app.invalidate_reshape();
-        assert_eq!(app.reshape_generation, gen_before + 1);
+        assert_eq!(app.editor_runtime.reshape_generation(), gen_before + 1);
     }
 
     #[test]
     fn invalidate_reshape_clears_pending() {
         let mut app = App::new(None);
-        app.pending_reshapes.insert(42);
-        app.pending_reshapes.insert(100);
+        assert!(app.editor_runtime.mark_reshape_pending(42));
+        assert!(app.editor_runtime.mark_reshape_pending(100));
         app.invalidate_reshape();
-        assert!(app.pending_reshapes.is_empty());
+        assert!(!app.editor_runtime.reshape_pending(42));
+        assert!(!app.editor_runtime.reshape_pending(100));
     }
 
     #[test]
@@ -282,7 +316,7 @@ mod zoom_tests {
         let mut app = App::new(None);
         app.invalidate_reshape();
         app.invalidate_reshape();
-        assert_eq!(app.reshape_generation, 2);
+        assert_eq!(app.editor_runtime.reshape_generation(), 2);
     }
 
     // ── Zoom helpers ───────────────────────────────────────────────
@@ -306,12 +340,13 @@ mod zoom_tests {
         let mut app = App::new(None);
         app.apply_zoom(20.0);
         assert_eq!(app.settings.font_size, 20.0);
+        assert_eq!(app.editor_runtime.settings_snapshot().font_size, 20.0);
     }
 
     #[test]
     fn apply_zoom_returns_reshape_without_applying_it() {
         let mut app = App::new(None);
-        let generation = app.reshape_generation;
+        let generation = app.editor_runtime.reshape_generation();
         app.needs_redraw = false;
 
         let effect = app.apply_zoom(20.0);
@@ -319,7 +354,7 @@ mod zoom_tests {
         assert!(effect.reshape);
         assert!(effect.redraw);
         assert_eq!(app.settings.font_size, 20.0);
-        assert_eq!(app.reshape_generation, generation);
+        assert_eq!(app.editor_runtime.reshape_generation(), generation);
         assert!(!app.needs_redraw);
     }
 

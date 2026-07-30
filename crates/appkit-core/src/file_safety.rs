@@ -438,8 +438,17 @@ pub fn save_if_unchanged(
     if *expected_revision != current_revision {
         return Err(FileSafetyError::ConcurrentModification);
     }
-    core::file::save_file_if_unchanged(path, bytes, Some(expected_revision)).map_err(|error| {
-        match error {
+    save_serialized_if_unchanged(path, Some(expected_revision), bytes)
+}
+
+/// Atomically write immutable serialized contents against an optional disk baseline.
+pub fn save_serialized_if_unchanged(
+    path: &Path,
+    expected_revision: Option<&DiskRevision>,
+    bytes: &[u8],
+) -> Result<DiskRevision, FileSafetyError> {
+    core::file::save_file_if_unchanged(path, bytes, expected_revision).map_err(
+        |error| match error {
             core::file::SaveError::ConcurrentModification { .. } => {
                 FileSafetyError::ConcurrentModification
             }
@@ -453,8 +462,8 @@ pub fn save_if_unchanged(
                     "file is read-only",
                 ),
             },
-        }
-    })
+        },
+    )
 }
 
 pub fn choose_rename_candidate(

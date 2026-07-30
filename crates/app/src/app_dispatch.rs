@@ -157,7 +157,7 @@ impl App {
         match action {
             AppAction::RequestRedraw => AppEffect::REDRAW,
             AppAction::SetCursor(cursor) => {
-                if let Some(window) = &self.window {
+                if let Some(window) = self.editor_runtime.window() {
                     window.set_cursor(cursor);
                 }
                 AppEffect::NONE
@@ -202,7 +202,7 @@ impl App {
             AppAction::NewEmptyTab => self.new_untitled_doc(),
             AppAction::NewDocument(kind) => self.new_typed_untitled_doc(kind),
             AppAction::TogglePin => {
-                let workspace_effect = self.workspace.toggle_pin();
+                let workspace_effect = self.toggle_active_editor_pin();
                 self.handle_nav_effect(workspace_effect)
             }
             AppAction::ScrollTabLeft => self
@@ -210,7 +210,7 @@ impl App {
             AppAction::ScrollTabRight => self
                 .dispatch_chrome_action(ChromeDispatchAction::ScrollTab(TabScrollDirection::Right)),
             AppAction::HoverTab(id_opt) => {
-                let index = id_opt.and_then(|id| self.workspace.index_of(id));
+                let index = id_opt.and_then(|id| self.editor_tab_index(id));
                 self.dispatch_chrome_action(ChromeDispatchAction::HoverTab(index))
             }
             AppAction::ScrollbarAction(action) => {
@@ -540,15 +540,11 @@ impl App {
     }
 
     pub(crate) fn dispatch_tab_switch(&mut self, id: TabId) -> AppEffect {
-        let Some(index) = self.workspace.index_of(id) else {
+        let Some(workspace_effect) = self.switch_editor_tab(id) else {
             return AppEffect::NONE;
         };
-        if index == self.workspace.active_index() {
-            return AppEffect::NONE;
-        }
 
         let cancel_effect = self.cancel_canvas_drag();
-        let workspace_effect = self.workspace.switch_to(index);
         cancel_effect.merge(self.apply_workspace_effect(workspace_effect))
     }
 
@@ -620,7 +616,7 @@ impl App {
         let metrics = self.ui_metrics();
         let dpi = metrics.dpi;
         let preview_top_pad = 16.0 * dpi;
-        let line_count = self.workspace.active_doc().map_or(0, |document| document.line_count());
+        let line_count = self.active_document_line_count();
         let gutter_left_margin = self.editor_left_margin(line_count);
         let content_top = self.content_top_offset();
         (gutter_left_margin, content_top + preview_top_pad)
@@ -782,8 +778,9 @@ pub(crate) mod canvas_drag_test_support {
     }
 
     pub(crate) fn document_texts(app: &App) -> Vec<String> {
-        (0..app.workspace.len())
-            .map(|index| app.workspace.entry(index).expect("tab").full_text())
+        app.editor_tab_ids_in_order()
+            .into_iter()
+            .map(|tab_id| app.tab_session(tab_id).expect("tab session").full_text())
             .collect()
     }
 }
@@ -974,7 +971,7 @@ mod tests {
                 state: second_state,
             }),
         );
-        let first_tab_id = app.workspace.tab_id_at(0).expect("first tab id");
+        let first_tab_id = app.editor_tab_id_at(0).expect("first tab id");
         app.tab_session_mut(first_tab_id).expect("first tab").toggle_mindmap_style_panel();
         app.tab_session_mut(second_tab_id).expect("second tab").toggle_mindmap_style_panel();
         app.switch_workspace_for_test(1);
@@ -1117,8 +1114,18 @@ mod tests {
             ),
             AppEffect::REDRAW
         );
-        assert_eq!(app.workspace.entry(0).expect("first tab").full_text(), "root");
-        assert_eq!(app.workspace.entry(1).expect("second tab").full_text(), "theme=tide");
+        assert_eq!(
+            app.tab_session(app.editor_tab_id_at(0).expect("first tab id"))
+                .expect("first tab")
+                .full_text(),
+            "root"
+        );
+        assert_eq!(
+            app.tab_session(app.editor_tab_id_at(1).expect("second tab id"))
+                .expect("second tab")
+                .full_text(),
+            "theme=tide"
+        );
         assert!(first_state.plan_queries.borrow().is_empty());
         assert_eq!(second_state.plan_queries.borrow().len(), 1);
     }
@@ -1378,14 +1385,14 @@ mod tests {
         let (mut app, state) = app_with_canvas_drag_tabs();
         start_canvas_drag(&mut app);
 
-        let effect = app.dispatch_tab_switch(app.workspace.tab_id_at(1).unwrap());
+        let effect = app.dispatch_tab_switch(app.editor_tab_id_at(1).unwrap());
 
-        assert_eq!(app.workspace.active_index(), 1);
+        assert_eq!(app.active_editor_index(), Some(1));
         assert!(effect.redraw);
         assert_eq!(cancel_request_count(&state.borrow()), 1);
         assert_eq!(document_texts(&app), ["abc", "def"]);
 
-        app.dispatch_tab_switch(app.workspace.tab_id_at(0).unwrap());
+        app.dispatch_tab_switch(app.editor_tab_id_at(0).unwrap());
 
         assert_eq!(cancel_request_count(&state.borrow()), 1);
     }

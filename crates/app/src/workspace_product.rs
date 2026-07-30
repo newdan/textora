@@ -1,5 +1,7 @@
 use std::path::Path;
 
+use appkit_core::document::DocumentModel;
+
 use crate::document_view::DocumentView;
 use crate::file_history::FileHistoryEntry;
 use crate::workspace::Workspace;
@@ -11,6 +13,10 @@ pub(crate) fn hydrate_active_stub(workspace: &mut Workspace) -> bool {
     let Some(document) = workspace.entry_mut(active_index) else {
         return false;
     };
+    hydrate_stub_document(document)
+}
+
+pub(crate) fn hydrate_stub_document(document: &mut DocumentModel) -> bool {
     if document.file_path.is_none() || document.line_count() != 1 || document.buffer_len() != 0 {
         return false;
     }
@@ -82,10 +88,21 @@ fn copy_tab_path_with<E>(
 }
 
 pub(crate) fn copy_tab_path(workspace: &Workspace, index: usize) {
-    copy_tab_path_with(workspace, index, |text| {
+    let Some(document) = workspace.entry(index) else {
+        return;
+    };
+    copy_document_path(document);
+}
+
+pub(crate) fn copy_document_path(document: &DocumentModel) {
+    let Some(path) = document.file_path.as_deref() else {
+        return;
+    };
+    let text = path.to_string_lossy().into_owned();
+    let _ = (|| {
         let mut clipboard = arboard::Clipboard::new().map_err(|_| ())?;
         clipboard.set_text(text).map_err(|_| ())
-    });
+    })();
 }
 
 #[cfg(test)]
@@ -224,12 +241,15 @@ mod tests {
     #[test]
     fn deleted_file_callers_use_the_product_adapter_directly() {
         let lifecycle_source = include_str!("app_lifecycle.rs");
+        let app_tab_source = include_str!("app_tab.rs");
         let external_change_test_source = include_str!("external_change_tests.rs");
 
-        for source in [lifecycle_source, external_change_test_source] {
-            assert!(source.contains("workspace_product::detach_deleted_document"));
-            assert!(!source.contains(".detach_after_deletion("));
-        }
+        assert!(lifecycle_source.contains("detach_deleted_editor_document"));
+        assert!(!lifecycle_source.contains(".detach_after_deletion("));
+        assert!(app_tab_source.contains("editor_runtime.detach_document"));
+
+        assert!(external_change_test_source.contains("workspace_product::detach_deleted_document"));
+        assert!(!external_change_test_source.contains(".detach_after_deletion("));
     }
 
     #[test]

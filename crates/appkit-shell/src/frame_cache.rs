@@ -1,6 +1,7 @@
 //! 每帧渲染缓存：cluster pool、首尾行缓存。
 
 /// 单个可视行的缓存数据（首行或末行）。
+#[derive(Clone)]
 pub struct LineCache {
     pub visual_lines: Vec<(usize, usize, f32)>,
     pub clusters: Vec<(usize, usize, f32)>,
@@ -14,6 +15,7 @@ impl LineCache {
 }
 
 /// 每帧重建的渲染缓存，生命周期与一帧绑定。
+#[derive(Clone)]
 pub struct FrameCache {
     pub cluster_pool: Vec<Vec<(usize, f32, u32)>>,
     pub first_line: LineCache,

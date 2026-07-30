@@ -9,6 +9,8 @@ use ui::plugin::{
 pub struct TransactionalEditOutcome {
     pub edit_outcome: crate::commands::EditOutcome,
     pub cursor_moved: bool,
+    pub content_revision: u64,
+    pub dirty: bool,
 }
 
 pub(crate) trait DocumentModelRef {
@@ -53,6 +55,8 @@ impl TransactionalEditOutcome {
                 new_line_count: doc.line_count(),
             },
             cursor_moved,
+            content_revision: doc.content_revision(),
+            dirty: doc.dirty,
         }
     }
 }
@@ -389,6 +393,8 @@ pub fn execute_edit_plan(
                         new_line_count,
                     },
                     cursor_moved: doc.cursor_offset().to_usize() != cursor_before,
+                    content_revision: doc.content_revision(),
+                    dirty: doc.dirty,
                 });
             }
 
@@ -436,6 +442,8 @@ pub fn execute_edit_plan(
                     new_line_count,
                 },
                 cursor_moved: doc.cursor_offset().to_usize() != cursor_before,
+                content_revision: doc.content_revision(),
+                dirty: doc.dirty,
             })
         }
     }
@@ -645,6 +653,8 @@ mod tests {
         assert!(doc.cursor().selection_anchor.is_none());
         assert!(doc.generation() > generation_before);
         assert!(outcome.edit_outcome.executed);
+        assert_eq!(outcome.content_revision, doc.content_revision());
+        assert!(outcome.dirty);
     }
 
     #[test]

@@ -147,12 +147,10 @@ fn get_node_style(
     // 1. Root or depth style
     let mut style = if layout_node.depth == 0 {
         theme.node.root.clone()
+    } else if theme.node.depth.is_empty() {
+        theme.node.default.clone()
     } else {
-        if theme.node.depth.is_empty() {
-            theme.node.default.clone()
-        } else {
-            theme.node.depth[(layout_node.depth as usize - 1) % theme.node.depth.len()].clone()
-        }
+        theme.node.depth[(layout_node.depth as usize - 1) % theme.node.depth.len()].clone()
     };
 
     // 1.5 分支染色：作用于默认外观的 fill/border/text/accent，语义覆盖仍可覆盖之

@@ -199,7 +199,7 @@ impl DocumentModel {
         let expected_revision = (self.file_path.as_deref() == Some(path))
             .then_some(self.disk_revision.as_ref())
             .flatten();
-        let contents = self.serialized_contents();
+        let contents = self.serialized_contents_for_save();
         let revision = core::file::save_file_if_unchanged(path, &contents, expected_revision)
             .map_err(map_save_error)?;
         self.file_path = Some(path.to_path_buf());
@@ -207,6 +207,39 @@ impl DocumentModel {
         self.dirty = false;
         self.tb.mark_as_clean();
         Ok(())
+    }
+
+    /// Produce an immutable byte snapshot for an off-thread save.
+    pub fn serialized_contents_for_save(&self) -> Vec<u8> {
+        let text = self.full_text();
+        let normalized = if self.crlf { text.replace('\n', "\r\n") } else { text };
+        if !self.had_bom {
+            return normalized.into_bytes();
+        }
+        let mut contents = Vec::with_capacity(normalized.len() + 3);
+        contents.extend_from_slice(&[0xEF, 0xBB, 0xBF]);
+        contents.extend_from_slice(normalized.as_bytes());
+        contents
+    }
+
+    /// Apply a successful worker save without clearing newer edits.
+    ///
+    /// The disk revision always records the worker's actual write. The clean baseline is
+    /// updated only when the saved content revision is still current.
+    pub fn apply_save_completion(
+        &mut self,
+        path: PathBuf,
+        saved_content_revision: u64,
+        disk_revision: DiskRevision,
+    ) -> bool {
+        self.file_path = Some(path);
+        self.disk_revision = Some(disk_revision);
+        if self.content_revision != saved_content_revision {
+            return false;
+        }
+        self.dirty = false;
+        self.tb.mark_as_clean();
+        true
     }
 
     pub fn set_cursor_offset_synced(&mut self, offset: usize) {
@@ -553,18 +586,6 @@ impl DocumentModel {
         self.dirty = self.tb.is_dirty();
         self.line_index = LineIndex::rebuild_from(&self.tb);
     }
-
-    fn serialized_contents(&self) -> Vec<u8> {
-        let text = self.full_text();
-        let normalized = if self.crlf { text.replace('\n', "\r\n") } else { text };
-        if !self.had_bom {
-            return normalized.into_bytes();
-        }
-        let mut contents = Vec::with_capacity(normalized.len() + 3);
-        contents.extend_from_slice(&[0xEF, 0xBB, 0xBF]);
-        contents.extend_from_slice(normalized.as_bytes());
-        contents
-    }
 }
 
 fn map_save_error(error: core::file::SaveError) -> DocumentSaveError {
@@ -660,5 +681,46 @@ mod tests {
         assert_eq!(model.full_text(), "alpha!\nbeta");
         model.redo();
         assert_eq!(model.full_text(), "alpha!\nta");
+    }
+
+    #[test]
+    fn save_snapshot_preserves_crlf_and_bom() {
+        let mut model = model_from_text("first\nsecond");
+        model.crlf = true;
+        model.had_bom = true;
+
+        assert_eq!(model.serialized_contents_for_save(), b"\xEF\xBB\xBFfirst\r\nsecond");
+    }
+
+    #[test]
+    fn matching_save_completion_clears_dirty_and_records_path() {
+        let directory = tempfile::tempdir().expect("save completion test directory should exist");
+        let path = directory.path().join("notes.md");
+        std::fs::write(&path, "old").expect("save completion baseline should be written");
+        let disk_revision = crate::file_safety::capture_revision(&path)
+            .expect("save completion baseline revision should be captured");
+        let mut model = model_from_text("new");
+        model.insert_at_cursor(b"!");
+        let content_revision = model.content_revision();
+
+        assert!(model.apply_save_completion(path.clone(), content_revision, disk_revision));
+        assert_eq!(model.file_path, Some(path));
+        assert!(!model.dirty);
+    }
+
+    #[test]
+    fn stale_save_completion_keeps_newer_edits_dirty() {
+        let directory = tempfile::tempdir().expect("stale save test directory should exist");
+        let path = directory.path().join("notes.md");
+        std::fs::write(&path, "old").expect("stale save baseline should be written");
+        let disk_revision = crate::file_safety::capture_revision(&path)
+            .expect("stale save baseline revision should be captured");
+        let mut model = model_from_text("new");
+        model.insert_at_cursor(b"!");
+        let saved_content_revision = model.content_revision();
+        model.insert_at_cursor(b"?");
+
+        assert!(!model.apply_save_completion(path, saved_content_revision, disk_revision));
+        assert!(model.dirty);
     }
 }

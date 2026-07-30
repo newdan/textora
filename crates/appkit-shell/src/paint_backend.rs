@@ -287,6 +287,17 @@ pub fn drain(
     vertices
 }
 
+/// 将一组语义绘制命令追加到既有顶点缓冲，保持产品 chrome/editor 的提交顺序。
+pub fn drain_into(
+    list: DrawList,
+    screen: Screen,
+    text: Option<&mut TextState>,
+    gpu: Option<&GpuState>,
+    vertices: &mut Vec<GlyphVertex>,
+) {
+    vertices.extend(drain(list, screen, text, gpu));
+}
+
 /// 从 GlyphInstance 列表直接发射 NDC 顶点（用于预览 TextLayout 路径）。
 fn emit_from_instances(
     instances: &[GlyphInstance],

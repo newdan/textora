@@ -580,15 +580,13 @@ impl TextBox {
                     if let Some((anchor, _)) = self.selection {
                         self.selection = Some((anchor, new_cursor));
                     }
+                } else if self.selection.is_some() && !(modifiers.cmd || modifiers.alt) {
+                    // Collapse to the left edge of selection
+                    let (a, b) = self.selection.take().expect("selection was checked above");
+                    self.cursor_byte = a.min(b);
                 } else {
-                    if self.selection.is_some() && !(modifiers.cmd || modifiers.alt) {
-                        // Collapse to the left edge of selection
-                        let (a, b) = self.selection.take().unwrap();
-                        self.cursor_byte = a.min(b);
-                    } else {
-                        self.selection = None;
-                        self.cursor_byte = new_cursor;
-                    }
+                    self.selection = None;
+                    self.cursor_byte = new_cursor;
                 }
                 (true, None)
             }
@@ -608,14 +606,12 @@ impl TextBox {
                     if let Some((anchor, _)) = self.selection {
                         self.selection = Some((anchor, new_cursor));
                     }
+                } else if self.selection.is_some() && !(modifiers.cmd || modifiers.alt) {
+                    let (a, b) = self.selection.take().expect("selection was checked above");
+                    self.cursor_byte = a.max(b);
                 } else {
-                    if self.selection.is_some() && !(modifiers.cmd || modifiers.alt) {
-                        let (a, b) = self.selection.take().unwrap();
-                        self.cursor_byte = a.max(b);
-                    } else {
-                        self.selection = None;
-                        self.cursor_byte = new_cursor;
-                    }
+                    self.selection = None;
+                    self.cursor_byte = new_cursor;
                 }
                 (true, None)
             }
@@ -623,8 +619,7 @@ impl TextBox {
                 self.cursor_byte = if modifiers.shift {
                     if self.selection.is_none() {
                         self.selection = Some((self.cursor_byte, 0));
-                    } else {
-                        let (anchor, _) = self.selection.unwrap();
+                    } else if let Some((anchor, _)) = self.selection {
                         self.selection = Some((anchor, 0));
                     }
                     0
@@ -639,8 +634,7 @@ impl TextBox {
                 self.cursor_byte = if modifiers.shift {
                     if self.selection.is_none() {
                         self.selection = Some((self.cursor_byte, end));
-                    } else {
-                        let (anchor, _) = self.selection.unwrap();
+                    } else if let Some((anchor, _)) = self.selection {
                         self.selection = Some((anchor, end));
                     }
                     end

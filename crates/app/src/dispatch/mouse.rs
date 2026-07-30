@@ -3,6 +3,7 @@ use crate::app_effect::AppEffect;
 use crate::dispatch::wysiwyg::{apply_edit_hit_target, set_wysiwyg_cursor_and_selection};
 use crate::edit_transaction::execute_edit_plan;
 use crate::mouse::CanvasDragEligibility;
+use appkit_shell::editor_runtime::{EditorFocus, EditorInputContext};
 use core::types::UniCharOffset;
 use ui::canvas::CanvasPoint;
 use ui::plugin::{
@@ -12,6 +13,17 @@ use ui::plugin::{
 use winit::event::ElementState;
 
 const PLUGIN_SELECTION_DRAG_THRESHOLD_PX: f32 = 5.0;
+
+fn editor_input_context(app: &App) -> EditorInputContext {
+    let editor_focus =
+        matches!(app.ui_shell.keyboard_focus(), crate::ui_shell::KeyboardFocusTarget::Editor)
+            && app.editor_runtime.window_focused();
+    EditorInputContext {
+        editor_rect: app.ui_shell.editor_rect(),
+        focus: if editor_focus { EditorFocus::Active } else { EditorFocus::Inactive },
+        modal_blocked: app.ui_shell.active_overlay_is_modal(),
+    }
+}
 
 fn semantic_drag_stays_within_scope(
     start_scope: Option<&std::ops::Range<usize>>,
@@ -68,6 +80,11 @@ impl App {
             };
             let pressed = state.is_pressed();
             if pressed {
+                let _ = self.editor_runtime.begin_text_selection(editor_input_context(self));
+            } else {
+                self.editor_runtime.end_pointer_capture();
+            }
+            if pressed {
                 let now = std::time::Instant::now();
                 let elapsed = now.duration_since(self.mouse.last_click_time);
                 let dx = px - self.mouse.last_click_pos.0;
@@ -81,7 +98,7 @@ impl App {
             }
             self.mouse.is_down = pressed;
             let click_count = self.mouse.click_count;
-            let shift_pressed = self.modifiers.shift_key();
+            let shift_pressed = self.editor_runtime.input_modifiers().shift_key();
             let Some(mut tab) = self.active_tab_session_mut() else {
                 return AppEffect::NONE;
             };
@@ -123,6 +140,7 @@ impl App {
             AppEffect::REDRAW
         } else if is_custom_renderer {
             if state.is_pressed() {
+                self.editor_runtime.end_pointer_capture();
                 let _ = self.cancel_canvas_drag();
                 let now = std::time::Instant::now();
                 let elapsed = now.duration_since(self.mouse.last_click_time);
@@ -158,11 +176,14 @@ impl App {
                                 );
                             }
                         }
-                        self.wysiwyg_preferred_x = None;
+                        self.editor_runtime.set_preferred_x(None);
+                        let _ =
+                            self.editor_runtime.begin_text_selection(editor_input_context(self));
                         self.mouse.is_down = true;
                         return AppEffect::REDRAW;
                     }
                     Some(Some(EditHitTarget::CanvasControl { source_range })) => {
+                        self.editor_runtime.end_pointer_capture();
                         self.mouse.wysiwyg_selection_scope = None;
                         let source_generation = self
                             .active_tab_session()
@@ -185,6 +206,7 @@ impl App {
                         return AppEffect::REDRAW;
                     }
                     Some(Some(EditHitTarget::SourceObject { source_range })) => {
+                        let _ = self.editor_runtime.begin_canvas_drag(editor_input_context(self));
                         self.mouse.wysiwyg_selection_scope = None;
                         if let Some(mut tab) = self.active_tab_session_mut() {
                             let source_generation = tab.document.generation();
@@ -200,20 +222,23 @@ impl App {
                                 started: false,
                             });
                         }
-                        self.wysiwyg_preferred_x = None;
+                        self.editor_runtime.set_preferred_x(None);
                         self.mouse.is_down = true;
                         return AppEffect::REDRAW;
                     }
                     Some(Some(target)) => {
+                        let _ =
+                            self.editor_runtime.begin_text_selection(editor_input_context(self));
                         self.mouse.wysiwyg_selection_scope = None;
                         if let Some(mut tab) = self.active_tab_session_mut() {
                             apply_edit_hit_target(&mut tab, target);
                         }
-                        self.wysiwyg_preferred_x = None;
+                        self.editor_runtime.set_preferred_x(None);
                         self.mouse.is_down = true;
                         return AppEffect::REDRAW;
                     }
                     Some(None) => {
+                        self.editor_runtime.end_pointer_capture();
                         self.mouse.wysiwyg_selection_scope = None;
                         self.mouse.is_down = false;
                         return AppEffect::REDRAW;
@@ -225,6 +250,7 @@ impl App {
                     return AppEffect::NONE;
                 };
                 self.mouse.wysiwyg_selection_scope = None;
+                let _ = self.editor_runtime.begin_text_selection(editor_input_context(self));
                 let click_count = self.mouse.click_count;
                 if let Some(mut tab) = self.active_tab_session_mut() {
                     if click_count == 2 {
@@ -245,6 +271,7 @@ impl App {
                 }
                 self.mouse.is_down = true;
             } else {
+                self.editor_runtime.end_pointer_capture();
                 self.mouse.is_down = false;
                 self.mouse.wysiwyg_selection_scope = None;
                 if let Some(session) = self.mouse.canvas_drag.take() {
@@ -269,32 +296,14 @@ impl App {
             AppEffect::REDRAW
         } else {
             let line_height = self.ui_metrics().line_height;
-            let modifiers = self.modifiers;
-            let active_tab_id = self.active_tab_id();
-            let mouse = &mut self.mouse;
-            if let Some(mut tab) = active_tab_id.and_then(|id| {
-                crate::app_tab::compose_tab_session_mut(
-                    &mut self.workspace,
-                    &mut self.tab_runtime_store,
-                    id,
-                )
-            }) {
-                let mut presentation = tab.take_presentation();
-                let handled = crate::mouse::handle_mouse_input_with_cursor_state(
-                    state,
-                    px,
-                    py,
-                    mouse,
-                    tab.document,
-                    &mut presentation.cursor_render_state,
-                    modifiers,
-                    hit,
-                );
-                tab.restore_presentation(presentation);
-                if handled {
-                    tab.ensure_cursor_visible(line_height);
-                    return AppEffect::REDRAW;
-                }
+            let modifiers = self.editor_runtime.input_modifiers();
+            if state.is_pressed() {
+                let _ = self.editor_runtime.begin_text_selection(editor_input_context(self));
+            } else {
+                self.editor_runtime.end_pointer_capture();
+            }
+            if self.handle_editor_mouse_input(state, px, py, modifiers, hit, line_height) {
+                return AppEffect::REDRAW;
             }
             AppEffect::NONE
         }
@@ -316,7 +325,7 @@ impl App {
 
         // Pre-compute mini-render params (immutable borrows must be released
         // before mutable workspace borrow below).
-        let font_system = self.shared_font_system.clone();
+        let font_system = self.editor_runtime.shared_font_system();
         let render_bounds = self.plugin_render_bounds();
         let dpi = self.ui_metrics().dpi;
         let font_size = self.ui_metrics().font_size;
@@ -382,7 +391,7 @@ impl App {
             snapped_candidate
         };
 
-        self.wysiwyg_preferred_x = None;
+        self.editor_runtime.set_preferred_x(None);
         Some(snapped_final)
     }
 
@@ -600,9 +609,7 @@ impl App {
             }
             AppEffect::NONE
         } else {
-            if let Some(dv) = self.workspace.active_doc_mut()
-                && crate::mouse::handle_cursor_moved(px, py, &mut self.mouse, dv, hit)
-            {
+            if self.handle_editor_cursor_moved(px, py, hit) {
                 return AppEffect::REDRAW;
             }
             AppEffect::NONE
@@ -834,11 +841,10 @@ mod tests {
         let font_size = app.ui_metrics().font_size;
         let dpi = app.ui_metrics().dpi;
         let theme = app.current_theme.clone();
-        let mut shaper = if let Some(font_system) = app.shared_font_system.clone() {
-            shaping::Shaper::from_shared_font_system(font_system, font_size, "")
-        } else {
-            shaping::Shaper::new().expect("test shaper should initialize")
-        };
+        let mut shaper = app
+            .editor_runtime
+            .new_shaper(font_size, "")
+            .unwrap_or_else(|| shaping::Shaper::new().expect("test shaper should initialize"));
         let snapshot = app
             .sync_and_prepare_canvas_frame(&mut shaper)
             .expect("mindmap source must resolve a canvas viewport");

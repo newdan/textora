@@ -69,9 +69,17 @@ pub(crate) fn prepare_file(
     path: &Path,
     dimensions: ViewportDimensions,
 ) -> Result<ProductPreparedTab, String> {
+    let plugin = workspace.create_plugin_for_path(path);
+    prepare_file_with_plugin(path, dimensions, plugin)
+}
+
+pub(crate) fn prepare_file_with_plugin(
+    path: &Path,
+    dimensions: ViewportDimensions,
+    plugin: Box<dyn ui::plugin::ViewPlugin>,
+) -> Result<ProductPreparedTab, String> {
     let document =
         DocumentView::from_file(path, dimensions.visible_rows, dimensions.viewport_height)?;
-    let plugin = workspace.create_plugin_for_path(path);
     Ok(prepare_document(document, plugin, None))
 }
 
@@ -81,13 +89,22 @@ pub(crate) fn prepare_external_content(
     content: &str,
     dimensions: ViewportDimensions,
 ) -> ProductPreparedTab {
+    let plugin = workspace.create_plugin_for_path(path);
+    prepare_external_content_with_plugin(path, content, dimensions, plugin)
+}
+
+pub(crate) fn prepare_external_content_with_plugin(
+    path: &Path,
+    content: &str,
+    dimensions: ViewportDimensions,
+    plugin: Box<dyn ui::plugin::ViewPlugin>,
+) -> ProductPreparedTab {
     let document = DocumentView::from_external_content(
         path,
         content,
         dimensions.visible_rows,
         dimensions.viewport_height,
     );
-    let plugin = workspace.create_plugin_for_path(path);
     prepare_document(document, plugin, None)
 }
 
@@ -95,10 +112,17 @@ pub(crate) fn prepare_untitled(
     workspace: &Workspace,
     dimensions: ViewportDimensions,
 ) -> ProductPreparedTab {
+    let plugin = workspace.create_plugin_by_name(PLUGIN_EDITOR);
+    prepare_untitled_with_plugin(dimensions, plugin)
+}
+
+pub(crate) fn prepare_untitled_with_plugin(
+    dimensions: ViewportDimensions,
+    plugin: Box<dyn ui::plugin::ViewPlugin>,
+) -> ProductPreparedTab {
     let mut document =
         DocumentView::new(vec![String::new()], dimensions.visible_rows, dimensions.viewport_height);
     assign_untitled_snapshot(&mut document);
-    let plugin = workspace.create_plugin_by_name(PLUGIN_EDITOR);
     prepare_document(document, plugin, None)
 }
 
@@ -108,6 +132,16 @@ pub(crate) fn prepare_typed_untitled(
     dimensions: ViewportDimensions,
 ) -> ProductPreparedTab {
     let specification = typed_untitled_spec(kind);
+    let plugin = workspace.create_plugin_by_name(specification.plugin_name);
+    prepare_typed_untitled_with_plugin(kind, dimensions, plugin)
+}
+
+pub(crate) fn prepare_typed_untitled_with_plugin(
+    kind: NewDocumentKind,
+    dimensions: ViewportDimensions,
+    plugin: Box<dyn ui::plugin::ViewPlugin>,
+) -> ProductPreparedTab {
+    let specification = typed_untitled_spec(kind);
     let mut document = DocumentView::new(
         vec![specification.initial_text.to_owned()],
         dimensions.visible_rows,
@@ -115,7 +149,6 @@ pub(crate) fn prepare_typed_untitled(
     );
     document.set_cursor_offset_synced(specification.initial_cursor_byte);
     assign_untitled_snapshot(&mut document);
-    let plugin = workspace.create_plugin_by_name(specification.plugin_name);
     prepare_document(document, plugin, Some(specification.suggested_file_name.to_owned()))
 }
 

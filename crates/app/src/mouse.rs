@@ -112,7 +112,7 @@ pub(crate) fn handle_cursor_moved(
     hit: Option<(UniCharOffset, usize, usize)>,
 ) -> bool {
     let dv = dv.document_model_mut();
-    if !mouse.is_down {
+    if !mouse.captures_pointer() {
         return false;
     }
     if let Some((offset, doc_line, _vis_line)) = hit {

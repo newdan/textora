@@ -2308,14 +2308,12 @@ impl NovelView {
         }
         if forward {
             if cur + 1 < headings.len() { Some(cur + 1) } else { None }
+        } else if cur > 0 {
+            Some(cur - 1)
+        } else if engine.scroll_y > 0.0 {
+            Some(0)
         } else {
-            if cur > 0 {
-                Some(cur - 1)
-            } else if engine.scroll_y > 0.0 {
-                Some(0)
-            } else {
-                None
-            }
+            None
         }
     }
 }

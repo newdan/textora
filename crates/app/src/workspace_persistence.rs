@@ -3,6 +3,7 @@ use std::path::Path;
 
 use appkit_core::document::DocumentModel;
 use appkit_core::workspace::types::{PersistedTab, PersistedWorkspace, TabId};
+use appkit_shell::editor_runtime::{EditorTabSnapshot, EditorWorkspaceSnapshot};
 use appkit_shell::prepared_tab::PreparedTab;
 use ui::plugin::PLUGIN_EDITOR;
 
@@ -114,6 +115,91 @@ fn snapshot_dirty_state(document: &DocumentModel, snapshots_dir: &Path) -> Persi
     }
 }
 
+fn snapshot_dirty_state_from_runtime(
+    tab: &EditorTabSnapshot,
+    snapshots_dir: &Path,
+) -> PersistedDirtyState {
+    let empty_state = || PersistedDirtyState {
+        snapshot_filename: None,
+        original_file_size: None,
+        original_mtime_secs: None,
+        original_disk_revision: None,
+    };
+    if !tab.dirty || tab.content_lines.is_empty() {
+        return empty_state();
+    }
+
+    let (filename, original_lines, file_size, modified_time, disk_revision) =
+        if let Some(path) = tab.path.as_deref() {
+            let filename = crate::dirty_snapshot::snapshot_id_for_path(path);
+            let disk_revision = crate::file_safety::capture_revision(path).ok();
+            let (original_lines, file_size, modified_time) = read_disk_baseline(path);
+            (filename, original_lines, file_size, modified_time, disk_revision)
+        } else {
+            let filename = tab.dirty_snapshot_id.clone().unwrap_or_else(|| {
+                crate::dirty_snapshot::snapshot_filename(&crate::dirty_snapshot::untitled_id())
+            });
+            (filename, Vec::new(), 0, 0, None)
+        };
+
+    let write_result = if let Some(revision) = disk_revision.as_ref() {
+        crate::dirty_snapshot::write_snapshot_with_revision(
+            snapshots_dir,
+            &filename,
+            revision,
+            &original_lines,
+            &tab.content_lines,
+        )
+    } else {
+        crate::dirty_snapshot::write_snapshot(
+            snapshots_dir,
+            &filename,
+            file_size,
+            modified_time,
+            &original_lines,
+            &tab.content_lines,
+        )
+    };
+    if let Err(error) = write_result {
+        eprintln!("[workspace] write snapshot failed: {error}");
+        return empty_state();
+    }
+
+    PersistedDirtyState {
+        snapshot_filename: Some(filename),
+        original_file_size: Some(file_size),
+        original_mtime_secs: Some(modified_time),
+        original_disk_revision: disk_revision
+            .as_ref()
+            .map(crate::dirty_snapshot::PersistedDiskRevision::from_disk_revision),
+    }
+}
+
+fn persisted_runtime_tab(tab: &EditorTabSnapshot, snapshots_dir: &Path) -> PersistedTab {
+    let dirty_state = snapshot_dirty_state_from_runtime(tab, snapshots_dir);
+    let active_plugin = (tab.default_plugin_name.as_deref() != Some(tab.plugin_name.as_str()))
+        .then(|| tab.plugin_name.clone());
+
+    PersistedTab {
+        file_path: tab.path.clone(),
+        suggested_file_name: tab.suggested_file_name.clone(),
+        cursor_offset: tab.cursor_offset,
+        selection_anchor: tab.selection_anchor,
+        dirty: tab.dirty,
+        scroll_anchor_line: Some(tab.scroll_anchor_line),
+        scroll_anchor_offset: Some(tab.scroll_anchor_offset),
+        snapshot_filename: dirty_state.snapshot_filename,
+        original_file_size: dirty_state.original_file_size,
+        original_mtime_secs: dirty_state.original_mtime_secs,
+        original_disk_revision: dirty_state.original_disk_revision,
+        unsaved_lines: None,
+        active_plugin,
+        preview_anchor_text: tab.preview_anchor_text.clone(),
+        preview_anchor_offset: tab.preview_anchor_text.as_ref().map(|_| tab.scroll_anchor_offset),
+        clean_untitled_content: tab.clean_untitled_content.clone(),
+    }
+}
+
 fn persisted_tab(
     workspace: &Workspace,
     runtimes: &TabRuntimeStore,
@@ -179,6 +265,25 @@ pub(crate) fn snapshot_workspace(
         version: WORKSPACE_VERSION,
         active_index: workspace.active_index(),
         entries,
+        sidebar_pinned,
+        sidebar_width,
+    }
+}
+
+pub(crate) fn snapshot_runtime_workspace(
+    snapshot: &EditorWorkspaceSnapshot,
+    sidebar_pinned: bool,
+    sidebar_width: Option<f32>,
+    snapshots_dir: &Path,
+) -> PersistedWorkspace {
+    PersistedWorkspace {
+        version: WORKSPACE_VERSION,
+        active_index: snapshot.active_index,
+        entries: snapshot
+            .tabs
+            .iter()
+            .map(|tab| persisted_runtime_tab(tab, snapshots_dir))
+            .collect(),
         sidebar_pinned,
         sidebar_width,
     }

@@ -1,8 +1,8 @@
 use crate::app::App;
 use crate::app_effect::AppEffect;
-use crate::workspace_tab_factory::{self, ProductPreparedTab};
-use appkit_core::document::DocumentModel;
+use crate::workspace_tab_factory::ProductPreparedTab;
 use appkit_core::workspace::types::TabId;
+use appkit_shell::editor_runtime::OpenDisposition;
 
 #[derive(Debug, PartialEq, Eq)]
 enum BatchCloseSaveTarget {
@@ -12,16 +12,16 @@ enum BatchCloseSaveTarget {
 }
 
 fn batch_close_save_target(
-    entry: Option<(&DocumentModel, String)>,
+    entry: Option<crate::app_tab::EditorSaveContext>,
 ) -> Option<BatchCloseSaveTarget> {
-    let (document, title) = entry?;
-    if !document.dirty {
+    let entry = entry?;
+    if !entry.dirty {
         return Some(BatchCloseSaveTarget::Clean);
     }
 
-    match document.file_path.clone() {
+    match entry.file_path {
         Some(path) => Some(BatchCloseSaveTarget::ExistingPath(path)),
-        None => Some(BatchCloseSaveTarget::SaveAs(title)),
+        None => Some(BatchCloseSaveTarget::SaveAs(entry.title)),
     }
 }
 
@@ -30,19 +30,17 @@ impl App {
         &mut self,
         effect: crate::workspace::WorkspaceEffect,
     ) -> AppEffect {
-        effect.reconcile_runtime_store(&mut self.tab_runtime_store);
-
         let effect = match effect {
             crate::workspace::WorkspaceEffect::Closed { activated: None, .. }
-                if self.workspace.is_empty() =>
+                if self.editor_is_empty() =>
             {
                 let viewport = self.viewport_dimensions(self.screen_height());
                 let ProductPreparedTab { prepared, suggested_file_name } =
-                    workspace_tab_factory::prepare_untitled(&self.workspace, viewport);
-                self.workspace.open_prepared_tab(
-                    &mut self.tab_runtime_store,
+                    self.prepare_editor_untitled(viewport);
+                self.install_editor_tab(
                     prepared,
                     suggested_file_name,
+                    appkit_shell::editor_runtime::OpenDisposition::Persistent,
                 )
             }
             other => other,
@@ -52,8 +50,8 @@ impl App {
     }
 
     fn finish_active_workspace_change(&mut self) -> AppEffect {
-        crate::workspace_product::hydrate_active_stub(&mut self.workspace);
-        if !self.workspace.is_empty() {
+        self.hydrate_active_editor_stub();
+        if !self.editor_is_empty() {
             let screen_height = self.screen_height();
             let visible_rows = self.visible_rows(screen_height);
             let viewport_height = self.visible_height_lines(screen_height);
@@ -61,9 +59,11 @@ impl App {
                 tab.resize_presentation(visible_rows, viewport_height);
                 tab.clear_advance_cache();
             }
-            self.init_display_map(self.workspace.active_index());
+            if let Some(active_index) = self.active_editor_index() {
+                self.init_display_map(active_index);
+            }
         }
-        self.frame_cache.cluster_pool.clear();
+        self.editor_runtime.clear_frame_cluster_pool();
         let layout_effect = self.update_entry_layout();
         AppEffect::RESHAPE
             .merge(layout_effect)
@@ -91,19 +91,17 @@ impl App {
 
     pub(crate) fn open_file(&mut self, path: &std::path::Path) -> Result<AppEffect, String> {
         let viewport = self.viewport_dimensions(self.screen_height());
-        let effect = if let Some(index) = self.workspace.find_by_path(path) {
-            self.workspace.switch_to(index)
+        let effect = if let Some(tab_id) = self.editor_tab_id_for_path(path) {
+            self.activate_editor_tab(tab_id).unwrap_or(crate::workspace::WorkspaceEffect::None)
         } else {
             let ProductPreparedTab { prepared, suggested_file_name } =
-                workspace_tab_factory::prepare_file(&self.workspace, path, viewport)?;
-            self.workspace.open_prepared_tab(
-                &mut self.tab_runtime_store,
-                prepared,
-                suggested_file_name,
-            )
+                self.prepare_editor_file(path, viewport)?;
+            self.install_editor_tab(prepared, suggested_file_name, OpenDisposition::Persistent)
         };
         let app_effect = self.apply_workspace_effect(effect);
-        self.record_entry_to_history(self.workspace.active_index());
+        if let Some(active_index) = self.active_editor_index() {
+            self.record_entry_to_history(active_index);
+        }
         self.rebuild_native_menu();
 
         Ok(app_effect)
@@ -193,12 +191,9 @@ impl App {
     pub(crate) fn new_untitled_doc(&mut self) -> AppEffect {
         let viewport = self.viewport_dimensions(self.screen_height());
         let ProductPreparedTab { prepared, suggested_file_name } =
-            workspace_tab_factory::prepare_untitled(&self.workspace, viewport);
-        let effect = self.workspace.open_prepared_tab(
-            &mut self.tab_runtime_store,
-            prepared,
-            suggested_file_name,
-        );
+            self.prepare_editor_untitled(viewport);
+        let effect =
+            self.install_editor_tab(prepared, suggested_file_name, OpenDisposition::Persistent);
         self.apply_workspace_effect(effect)
     }
 
@@ -208,26 +203,25 @@ impl App {
     ) -> AppEffect {
         let viewport = self.viewport_dimensions(self.screen_height());
         let ProductPreparedTab { prepared, suggested_file_name } =
-            workspace_tab_factory::prepare_typed_untitled(&self.workspace, kind, viewport);
-        let effect = self.workspace.open_prepared_tab(
-            &mut self.tab_runtime_store,
-            prepared,
-            suggested_file_name,
-        );
+            self.prepare_typed_editor_untitled(kind, viewport);
+        let effect =
+            self.install_editor_tab(prepared, suggested_file_name, OpenDisposition::Persistent);
         self.apply_workspace_effect(effect)
     }
 
     pub(crate) fn try_close_entry_with_prompt(&mut self, id: TabId) -> AppEffect {
-        let Some(idx) = self.workspace.index_of(id) else {
+        let Some(idx) = self.editor_tab_index(id) else {
             return AppEffect::NONE;
         };
         use crate::workspace::CloseTabDecision;
         let mut app_effect = AppEffect::NONE;
-        let decision = self.workspace.try_close_entry(idx);
+        let decision = self
+            .editor_close_decision(id)
+            .expect("tab index lookup should make close decision available");
         match decision {
             CloseTabDecision::CanClose => {
                 self.record_entry_to_history(idx);
-                if let Ok(effect) = self.workspace.close_entry(idx) {
+                if let Some(effect) = self.close_editor_tab(id) {
                     app_effect = app_effect.merge(self.apply_workspace_effect(effect));
                 }
                 self.save_history();
@@ -236,8 +230,10 @@ impl App {
             }
             CloseTabDecision::Pinned => {}
             CloseTabDecision::NeedsSavePrompt => {
-                let file_name =
-                    self.workspace.entry_title(idx).unwrap_or_else(|| "未命名".to_owned());
+                let file_name = self
+                    .editor_save_context(id)
+                    .map(|context| context.title)
+                    .unwrap_or_else(|| "未命名".to_owned());
                 let msg = format!("是否保存对「{}」的更改？", file_name);
                 let mut dialog = rfd::MessageDialog::new()
                     .set_title("未保存的更改")
@@ -248,55 +244,41 @@ impl App {
                         "取消".to_string(),
                     ))
                     .set_level(rfd::MessageLevel::Warning);
-                if let Some(ref w) = self.window {
+                if let Some(w) = self.editor_runtime.window() {
                     dialog = dialog.set_parent(w);
                 }
                 let result = dialog.show();
                 match result {
                     rfd::MessageDialogResult::Custom(ref label) if label == "保存" => {
                         let need_save_as = self
-                            .workspace
-                            .entry(idx)
-                            .map(|v| v.file_path.is_none())
-                            .unwrap_or(false);
+                            .editor_save_context(id)
+                            .is_some_and(|context| context.file_path.is_none());
                         if need_save_as {
                             let default_name = self
-                                .workspace
-                                .entry_title(idx)
+                                .editor_save_context(id)
+                                .map(|context| context.title)
                                 .unwrap_or_else(|| "未命名".to_owned());
                             if let Some(path) =
                                 rfd::FileDialog::new().set_file_name(&default_name).save_file()
                             {
-                                let Some(document) = self.workspace.entry_doc_mut(idx) else {
-                                    return app_effect;
-                                };
-                                if let Err(e) = document.save_as(&path) {
+                                if let Err(e) =
+                                    self.submit_editor_save_before_close(id, Some(&path))
+                                {
                                     eprintln!("保存失败: {e}");
                                     return app_effect;
                                 }
-                                self.workspace.clear_suggested_file_name(idx);
                             } else {
                                 return app_effect;
                             }
-                        } else {
-                            if let Some(dv) = self.workspace.entry_doc_mut(idx)
-                                && let Err(e) = dv.save()
-                            {
-                                eprintln!("保存失败: {e}");
-                                return app_effect;
-                            }
+                        } else if let Err(e) = self.submit_editor_save_before_close(id, None) {
+                            eprintln!("保存失败: {e}");
+                            return app_effect;
                         }
-                        self.record_entry_to_history(idx);
-                        if let Ok(effect) = self.workspace.close_entry(idx) {
-                            app_effect = app_effect.merge(self.apply_workspace_effect(effect));
-                        }
-                        self.save_history();
-                        self.rebuild_native_menu();
                         app_effect = app_effect.merge(AppEffect::REDRAW);
                     }
                     rfd::MessageDialogResult::Custom(ref label) if label == "放弃" => {
                         self.record_entry_to_history(idx);
-                        if let Ok(effect) = self.workspace.close_entry(idx) {
+                        if let Some(effect) = self.close_editor_tab(id) {
                             app_effect = app_effect.merge(self.apply_workspace_effect(effect));
                         }
                         self.save_history();
@@ -316,26 +298,31 @@ impl App {
         id: TabId,
     ) -> AppEffect {
         let mut app_effect = AppEffect::NONE;
-        let Some(tab_index) = self.workspace.index_of(id) else {
+        let Some(tab_index) = self.editor_tab_index(id) else {
             return app_effect;
         };
         let indices: Vec<usize> = match action {
-            ui::popup_menu::ContextMenuAction::CloseOthers => (0..self.workspace.len())
-                .filter(|&i| i != tab_index && !self.workspace.is_pinned(i))
+            ui::popup_menu::ContextMenuAction::CloseOthers => (0..self.editor_tab_count())
+                .filter(|&i| i != tab_index && !self.is_editor_tab_pinned_at(i))
                 .collect(),
             ui::popup_menu::ContextMenuAction::CloseRight => ((tab_index + 1)
-                ..self.workspace.len())
-                .filter(|i| !self.workspace.is_pinned(*i))
+                ..self.editor_tab_count())
+                .filter(|i| !self.is_editor_tab_pinned_at(*i))
                 .collect(),
             ui::popup_menu::ContextMenuAction::CloseAll => {
-                (0..self.workspace.len()).filter(|i| !self.workspace.is_pinned(*i)).collect()
+                (0..self.editor_tab_count()).filter(|i| !self.is_editor_tab_pinned_at(*i)).collect()
             }
             _ => return app_effect,
         };
+        let mut clean_tab_ids = Vec::new();
 
         let dirty_count = indices
             .iter()
-            .filter(|&&i| self.workspace.entry_doc(i).is_some_and(|document| document.dirty))
+            .filter(|&&i| {
+                self.editor_tab_id_at(i).is_some_and(|tab_id| {
+                    self.editor_save_context(tab_id).is_some_and(|context| context.dirty)
+                })
+            })
             .count();
         if dirty_count > 0 {
             let msg = format!("有 {} 个文件包含未保存的更改。\n是否保存后再关闭？", dirty_count);
@@ -348,29 +335,35 @@ impl App {
                     "取消".to_string(),
                 ))
                 .set_level(rfd::MessageLevel::Warning);
-            if let Some(ref w) = self.window {
+            if let Some(w) = self.editor_runtime.window() {
                 dialog = dialog.set_parent(w);
             }
             let result = dialog.show();
             match result {
                 rfd::MessageDialogResult::Custom(ref label) if label == "全部保存" => {
                     for &i in &indices {
-                        let close_context =
-                            self.workspace.entry(i).zip(self.workspace.entry_title(i));
+                        let close_context = self
+                            .editor_tab_id_at(i)
+                            .and_then(|tab_id| self.editor_save_context(tab_id));
                         let Some(target) = batch_close_save_target(close_context) else {
                             return app_effect;
                         };
                         match target {
-                            BatchCloseSaveTarget::Clean => {}
+                            BatchCloseSaveTarget::Clean => {
+                                if let Some(tab_id) = self.editor_tab_id_at(i) {
+                                    clean_tab_ids.push(tab_id);
+                                }
+                            }
                             BatchCloseSaveTarget::ExistingPath(path) => {
-                                let Some(document) = self.workspace.entry_doc_mut(i) else {
+                                let Some(tab_id) = self.editor_tab_id_at(i) else {
                                     return app_effect;
                                 };
-                                if let Err(error) = document.save_as(&path) {
+                                if let Err(error) =
+                                    self.submit_editor_save_before_close(tab_id, Some(&path))
+                                {
                                     eprintln!("保存失败: {error}");
                                     return app_effect;
                                 }
-                                self.workspace.clear_suggested_file_name(i);
                             }
                             BatchCloseSaveTarget::SaveAs(default_name) => {
                                 let Some(path) =
@@ -378,14 +371,15 @@ impl App {
                                 else {
                                     return app_effect;
                                 };
-                                let Some(document) = self.workspace.entry_doc_mut(i) else {
+                                let Some(tab_id) = self.editor_tab_id_at(i) else {
                                     return app_effect;
                                 };
-                                if let Err(error) = document.save_as(&path) {
+                                if let Err(error) =
+                                    self.submit_editor_save_before_close(tab_id, Some(&path))
+                                {
                                     eprintln!("保存失败: {error}");
                                     return app_effect;
                                 }
-                                self.workspace.clear_suggested_file_name(i);
                             }
                         }
                     }
@@ -395,9 +389,26 @@ impl App {
             }
         }
 
+        if !self.pending_close_after_save.is_empty() {
+            for tab_id in clean_tab_ids {
+                if let Some(index) = self.editor_tab_index(tab_id) {
+                    self.record_entry_to_history(index);
+                    if let Some(effect) = self.close_editor_tab(tab_id) {
+                        app_effect = app_effect.merge(self.apply_workspace_effect(effect));
+                    }
+                }
+            }
+            self.save_history();
+            self.rebuild_native_menu();
+            return app_effect.merge(AppEffect::REDRAW);
+        }
+
         for &i in indices.iter().rev() {
             self.record_entry_to_history(i);
-            if let Ok(effect) = self.workspace.close_entry(i) {
+            let Some(tab_id) = self.editor_tab_id_at(i) else {
+                continue;
+            };
+            if let Some(effect) = self.close_editor_tab(tab_id) {
                 app_effect = app_effect.merge(self.apply_workspace_effect(effect));
             }
         }
@@ -416,7 +427,10 @@ impl App {
         }
         let mut app_effect = AppEffect::NONE;
         for &index in &sorted {
-            if let Ok(next) = self.workspace.close_entry(index) {
+            let Some(tab_id) = self.editor_tab_id_at(index) else {
+                continue;
+            };
+            if let Some(next) = self.close_editor_tab(tab_id) {
                 app_effect = app_effect.merge(self.apply_workspace_effect(next));
             }
         }
@@ -452,17 +466,15 @@ impl App {
             | ContextMenuAction::CloseRight
             | ContextMenuAction::CloseAll => self.try_close_multiple_with_prompt(action, id),
             ContextMenuAction::CopyPath => {
-                let Some(tab_index) = self.workspace.index_of(id) else {
+                if !self.copy_editor_path(id) {
                     return AppEffect::NONE;
-                };
-                crate::workspace_product::copy_tab_path(&self.workspace, tab_index);
+                }
                 AppEffect::NONE
             }
             ContextMenuAction::TogglePin => {
-                let Some(tab_index) = self.workspace.index_of(id) else {
+                let Some(workspace_effect) = self.toggle_editor_pin(id) else {
                     return AppEffect::NONE;
                 };
-                let workspace_effect = self.workspace.toggle_pin_at(tab_index);
                 self.handle_nav_effect(workspace_effect)
             }
         }
@@ -474,19 +486,14 @@ impl App {
         dimensions: crate::workspace::ViewportDimensions,
     ) -> Result<TabId, String> {
         let ProductPreparedTab { prepared, suggested_file_name } =
-            workspace_tab_factory::prepare_file(&self.workspace, path, dimensions)?;
+            self.prepare_editor_file(path, dimensions)?;
         let title = format!("{} — edit+", path.display());
-        if let Some(window) = &self.window {
+        if let Some(window) = self.editor_runtime.window() {
             window.set_title(&title);
         }
-        let id = self.workspace.append_prepared_tab(
-            &mut self.tab_runtime_store,
-            prepared,
-            suggested_file_name,
-        );
+        let id = self.append_editor_tab(prepared, suggested_file_name);
         let appended_index = self
-            .workspace
-            .index_of(id)
+            .editor_tab_index(id)
             .expect("a startup tab must remain installed until display-map initialization");
         self.init_display_map(appended_index);
         Ok(id)
@@ -496,11 +503,11 @@ impl App {
         let Some(path) = self.file_path.clone() else {
             return;
         };
-        let Some(gpu) = self.gpu.as_ref() else {
+        let Some((_, screen_height)) = self.editor_runtime.surface_size() else {
             return;
         };
-        let visible_rows = self.visible_rows(gpu.ctx.config.height as f32);
-        let viewport_height = self.visible_height_lines(gpu.ctx.config.height as f32);
+        let visible_rows = self.visible_rows(screen_height as f32);
+        let viewport_height = self.visible_height_lines(screen_height as f32);
         let dimensions = crate::workspace::ViewportDimensions { visible_rows, viewport_height };
         let _ = self.load_file_with_dimensions(&path, dimensions);
     }
@@ -519,13 +526,8 @@ mod tests {
 
     fn open_untitled_fixture(app: &mut App) {
         let ProductPreparedTab { prepared, suggested_file_name } =
-            workspace_tab_factory::prepare_untitled(&app.workspace, test_viewport());
-        let effect = app.workspace.open_prepared_tab(
-            &mut app.tab_runtime_store,
-            prepared,
-            suggested_file_name,
-        );
-        effect.reconcile_runtime_store(&mut app.tab_runtime_store);
+            app.prepare_editor_untitled(test_viewport());
+        let _ = app.install_editor_tab(prepared, suggested_file_name, OpenDisposition::Persistent);
     }
 
     fn app_with_file_stub_and_active_document(file_path: &std::path::Path) -> App {
@@ -535,7 +537,9 @@ mod tests {
         app.push_entry_for_test(stub, Box::new(EditorPlugin::new()));
         let active = DocumentView::new(vec!["active".to_owned()], 10, 160.0);
         app.push_entry_for_test(active, Box::new(EditorPlugin::new()));
-        let switch_effect = app.workspace.switch_to(1);
+        let switch_effect = app
+            .activate_editor_tab(app.editor_tab_id_at(1).expect("active tab index"))
+            .expect("tab switch should produce an effect");
         app.apply_workspace_effect(switch_effect);
         app
     }
@@ -548,15 +552,15 @@ mod tests {
             .expect("navigation hydration fixture should be written");
         let mut app = app_with_file_stub_and_active_document(&file_path);
 
-        let nav_effect = app.workspace.go_back();
+        let nav_effect = app.navigate_editor_back();
 
         assert_eq!(nav_effect, crate::navigator::NavEffect::ActiveChanged);
-        assert_eq!(app.workspace.active_doc().expect("stub should become active").buffer_len(), 0);
+        assert_eq!(app.active_tab_session().expect("stub should become active").buffer_len(), 0);
 
         let app_effect = app.handle_nav_effect(nav_effect);
 
         assert_eq!(
-            app.workspace.active_doc().expect("active stub should hydrate").full_text(),
+            app.active_tab_session().expect("active stub should hydrate").full_text(),
             "loaded by back navigation"
         );
         assert!(app_effect.reshape);
@@ -571,20 +575,24 @@ mod tests {
             .expect("close hydration fixture should be written");
         let mut app = app_with_file_stub_and_active_document(&file_path);
 
-        let workspace_effect =
-            app.workspace.close_entry(1).expect("active document should close cleanly");
+        let workspace_effect = app
+            .close_editor_tab(app.editor_tab_id_at(1).expect("active tab index"))
+            .expect("active document should close cleanly");
 
-        assert_eq!(app.workspace.active_doc().expect("stub should become active").buffer_len(), 0);
+        assert_eq!(app.active_tab_session().expect("stub should become active").buffer_len(), 0);
 
         let app_effect = app.apply_workspace_effect(workspace_effect);
 
         assert_eq!(
-            app.workspace.active_doc().expect("active stub should hydrate").full_text(),
+            app.active_tab_session().expect("active stub should hydrate").full_text(),
             "loaded after close"
         );
         assert!(app_effect.reshape);
         assert!(app_effect.redraw);
-        assert_eq!(app.workspace.tab_ids(), app.tab_runtime_store.ids());
+        assert_eq!(
+            app.editor_tab_ids_in_order().into_iter().collect::<std::collections::HashSet<_>>(),
+            app.editor_runtime_tab_ids()
+        );
     }
 
     #[test]
@@ -594,12 +602,15 @@ mod tests {
         let effect = app.new_untitled_doc();
 
         let id = app.active_tab_id().expect("new tab id");
-        assert!(app.tab_runtime_store.contains(id));
+        assert!(app.tab_runtime(id).is_some());
         assert!(effect.reshape);
         assert!(effect.redraw);
         assert!(effect.update_title);
         assert!(effect.persist_workspace);
-        assert_eq!(app.workspace.tab_ids(), app.tab_runtime_store.ids());
+        assert_eq!(
+            app.editor_tab_ids_in_order().into_iter().collect::<std::collections::HashSet<_>>(),
+            app.editor_runtime_tab_ids()
+        );
     }
 
     #[test]
@@ -612,7 +623,7 @@ mod tests {
             app.dispatch_context_menu_action(ui::popup_menu::ContextMenuAction::CopyPath, tab_id);
 
         assert_eq!(effect, AppEffect::NONE);
-        assert_eq!(app.workspace.len(), 1);
+        assert_eq!(app.editor_tab_count(), 1);
         assert_eq!(app.active_tab_id(), Some(tab_id));
     }
 
@@ -625,7 +636,7 @@ mod tests {
         let effect =
             app.dispatch_context_menu_action(ui::popup_menu::ContextMenuAction::TogglePin, tab_id);
 
-        assert!(app.workspace.is_pinned(0));
+        assert!(app.is_editor_tab_pinned_at(0));
         assert!(effect.redraw);
         assert!(effect.persist_workspace);
     }
@@ -644,15 +655,18 @@ mod tests {
         assert!(first_effect.redraw);
         assert!(first_effect.update_title);
         assert!(first_effect.persist_workspace);
-        assert_eq!(app.workspace.len(), 1);
+        assert_eq!(app.editor_tab_count(), 1);
         assert_eq!(
             app.active_tab_session().expect("opened file runtime should exist").plugin_name(),
             ui::plugin::PLUGIN_MARKDOWN_EDITOR
         );
-        assert_eq!(app.workspace.tab_ids(), app.tab_runtime_store.ids());
+        assert_eq!(
+            app.editor_tab_ids_in_order().into_iter().collect::<std::collections::HashSet<_>>(),
+            app.editor_runtime_tab_ids()
+        );
 
         app.new_untitled_doc();
-        let len_before_reopen = app.workspace.len();
+        let len_before_reopen = app.editor_tab_count();
         std::fs::remove_file(&path).expect("existing-tab reopen must not need the source file");
         let reopen_effect = app.open_file(&path).expect("existing file should reactivate");
 
@@ -660,7 +674,7 @@ mod tests {
         assert!(reopen_effect.redraw);
         assert!(reopen_effect.update_title);
         assert!(reopen_effect.persist_workspace);
-        assert_eq!(app.workspace.len(), len_before_reopen);
+        assert_eq!(app.editor_tab_count(), len_before_reopen);
         assert_eq!(app.active_tab_id(), Some(opened_id));
         assert_eq!(
             app.active_tab_session()
@@ -669,7 +683,10 @@ mod tests {
                 .full_text(),
             "# Product tab"
         );
-        assert_eq!(app.workspace.tab_ids(), app.tab_runtime_store.ids());
+        assert_eq!(
+            app.editor_tab_ids_in_order().into_iter().collect::<std::collections::HashSet<_>>(),
+            app.editor_runtime_tab_ids()
+        );
     }
 
     #[test]
@@ -681,36 +698,40 @@ mod tests {
         app.new_untitled_doc();
         app.new_untitled_doc();
         let forward_target = app.active_tab_id();
-        let back_effect = app.workspace.go_back();
+        let back_effect = app.navigate_editor_back();
         let _ = app.handle_nav_effect(back_effect);
         let active_before_append = app.active_tab_id();
-        let had_back_history = app.workspace.has_back_history();
-        let had_forward_history = app.workspace.has_forward_history();
+        let had_back_history = app.editor_has_back_history();
+        let had_forward_history = app.editor_has_forward_history();
         app.needs_redraw = false;
-        app.skip_reshape_submit = false;
+        let _ = app.editor_runtime.take_skip_next_reshape_submit();
 
         let appended_id = app
             .load_file_with_dimensions(&path, test_viewport())
             .expect("startup file should append");
         let appended_index =
-            app.workspace.index_of(appended_id).expect("startup file should remain appended");
-        let appended =
-            app.tab_session(appended_id).expect("startup file model and runtime should be paired");
+            app.editor_tab_index(appended_id).expect("startup file should remain appended");
+        let appended_title = app.editor_save_context(appended_id).map(|context| context.title);
 
         assert_eq!(app.active_tab_id(), active_before_append);
-        assert_eq!(app.workspace.has_back_history(), had_back_history);
-        assert_eq!(app.workspace.has_forward_history(), had_forward_history);
+        assert_eq!(app.editor_has_back_history(), had_back_history);
+        assert_eq!(app.editor_has_forward_history(), had_forward_history);
         assert!(!app.needs_redraw);
-        assert!(app.skip_reshape_submit);
-        assert_eq!(appended_index, app.workspace.len() - 1);
+        assert!(app.editor_runtime.take_skip_next_reshape_submit());
+        assert_eq!(appended_index, app.editor_tab_count() - 1);
+        let appended =
+            app.tab_session(appended_id).expect("startup file model and runtime should be paired");
         assert_eq!(appended.document.file_path.as_deref(), Some(path.as_path()));
         assert_eq!(appended.document.full_text(), "startup");
         assert_eq!(appended.plugin_name(), ui::plugin::PLUGIN_EDITOR);
-        assert_eq!(app.workspace.entry_title(appended_index).as_deref(), Some("startup.txt"));
+        assert_eq!(appended_title.as_deref(), Some("startup.txt"));
         assert_eq!(appended.display().display_map.line_count(), appended.document.line_count());
-        assert_eq!(app.workspace.tab_ids(), app.tab_runtime_store.ids());
+        assert_eq!(
+            app.editor_tab_ids_in_order().into_iter().collect::<std::collections::HashSet<_>>(),
+            app.editor_runtime_tab_ids()
+        );
 
-        let forward_effect = app.workspace.go_forward();
+        let forward_effect = app.navigate_editor_forward();
         let _ = app.handle_nav_effect(forward_effect);
         assert_eq!(app.active_tab_id(), forward_target);
     }
@@ -736,17 +757,23 @@ mod tests {
         open_untitled_fixture(&mut app);
         open_untitled_fixture(&mut app);
         open_untitled_fixture(&mut app);
-        let first_id = app.workspace.tab_id_at(0).expect("first tab ID");
-        let second_id = app.workspace.tab_id_at(1).expect("second tab ID");
-        let third_id = app.workspace.tab_id_at(2).expect("third tab ID");
-        assert_eq!(app.workspace.tab_ids(), app.tab_runtime_store.ids());
+        let first_id = app.editor_tab_id_at(0).expect("first tab ID");
+        let second_id = app.editor_tab_id_at(1).expect("second tab ID");
+        let third_id = app.editor_tab_id_at(2).expect("third tab ID");
+        assert_eq!(
+            app.editor_tab_ids_in_order().into_iter().collect::<std::collections::HashSet<_>>(),
+            app.editor_runtime_tab_ids()
+        );
 
         app.execute_batch_close(&[0, 2]);
 
-        assert!(app.tab_runtime_store.get(first_id).is_none());
-        assert!(app.tab_runtime_store.get(second_id).is_some());
-        assert!(app.tab_runtime_store.get(third_id).is_none());
-        assert_eq!(app.workspace.tab_ids(), app.tab_runtime_store.ids());
+        assert!(app.tab_runtime(first_id).is_none());
+        assert!(app.tab_runtime(second_id).is_some());
+        assert!(app.tab_runtime(third_id).is_none());
+        assert_eq!(
+            app.editor_tab_ids_in_order().into_iter().collect::<std::collections::HashSet<_>>(),
+            app.editor_runtime_tab_ids()
+        );
     }
 
     #[test]
@@ -754,32 +781,36 @@ mod tests {
         let mut app = App::new(None);
         app.new_untitled_doc();
         let closed_id = app.active_tab_id().expect("the original tab should have an ID");
-        assert!(app.tab_runtime_store.contains(closed_id));
+        assert!(app.tab_runtime(closed_id).is_some());
 
         let workspace_effect =
-            app.workspace.close_entry(0).expect("the only unpinned tab should close");
+            app.close_editor_tab(closed_id).expect("the only unpinned tab should close");
         let app_effect = app.apply_workspace_effect(workspace_effect);
 
         assert!(app_effect.redraw);
-        assert_eq!(app.workspace.len(), 1);
-        assert_eq!(app.workspace.active_index(), 0);
+        assert_eq!(app.editor_tab_count(), 1);
+        assert_eq!(app.active_editor_index(), Some(0));
         let replacement_id = app.active_tab_id().expect("the replacement tab should have an ID");
         assert_ne!(replacement_id, closed_id);
-        assert!(!app.tab_runtime_store.contains(closed_id));
-        assert!(app.tab_runtime_store.contains(replacement_id));
-        assert_eq!(app.workspace.tab_ids(), app.tab_runtime_store.ids());
+        assert!(app.tab_runtime(closed_id).is_none());
+        assert!(app.tab_runtime(replacement_id).is_some());
+        assert_eq!(
+            app.editor_tab_ids_in_order().into_iter().collect::<std::collections::HashSet<_>>(),
+            app.editor_runtime_tab_ids()
+        );
 
+        let replacement_title =
+            app.editor_save_context(replacement_id).map(|context| context.title);
         let default_entry = app.active_tab_session().expect("a default document should remain");
-        assert_eq!(app.workspace.entry_title(0).as_deref(), Some("untitled"));
+        assert_eq!(replacement_title.as_deref(), Some("untitled"));
         assert_eq!(default_entry.buffer_len(), 0);
         assert!(default_entry.file_path.is_none());
         assert!(!default_entry.dirty);
 
-        app.workspace
-            .active_doc_mut()
+        app.active_tab_session_mut()
             .expect("the default document should be editable")
             .insert_at_cursor(b"x");
-        let edited_document = app.workspace.active_doc().expect("default document exists");
+        let edited_document = app.active_tab_session().expect("default document exists");
         assert_eq!(edited_document.buffer_len(), 1);
         assert!(edited_document.dirty);
     }
@@ -789,10 +820,12 @@ mod tests {
         let mut app = App::new(None);
 
         let effect = app.new_typed_untitled_doc(ui::sidebar::NewDocumentKind::Markdown);
+        let active_tab_id = app.active_tab_id().expect("active tab");
+        let active_title = app.editor_save_context(active_tab_id).map(|context| context.title);
         let entry = app.active_tab_session().expect("new document must be active");
 
         assert!(effect.redraw);
-        assert_eq!(app.workspace.entry_title(0).as_deref(), Some("未命名.md"));
+        assert_eq!(active_title.as_deref(), Some("未命名.md"));
         assert!(entry.file_path.is_none());
         assert_eq!(
             app.active_tab_session().expect("active runtime").plugin_name(),
@@ -811,10 +844,10 @@ mod tests {
         for (kind, expected_name) in cases {
             let mut app = App::new(None);
             app.new_typed_untitled_doc(kind);
-            app.workspace.entry_mut(0).expect("typed entry exists").dirty = true;
+            app.active_tab_session_mut().expect("typed entry exists").document.dirty = true;
 
-            let target =
-                batch_close_save_target(app.workspace.entry(0).zip(app.workspace.entry_title(0)));
+            let target = app.editor_tab_id_at(0).and_then(|tab_id| app.editor_save_context(tab_id));
+            let target = batch_close_save_target(target);
 
             assert_eq!(target, Some(BatchCloseSaveTarget::SaveAs(expected_name.to_owned())));
         }
@@ -827,15 +860,21 @@ mod tests {
         let mut app = App::new(None);
         open_untitled_fixture(&mut app);
         assert_eq!(
-            batch_close_save_target(app.workspace.entry(0).zip(app.workspace.entry_title(0)),),
+            batch_close_save_target(
+                app.editor_tab_id_at(0).and_then(|tab_id| app.editor_save_context(tab_id)),
+            ),
             Some(BatchCloseSaveTarget::Clean)
         );
 
-        app.workspace.entry_mut(0).expect("untitled entry exists").file_path =
-            Some(std::path::PathBuf::from("/tmp/existing.txt"));
-        app.workspace.entry_mut(0).expect("file-backed entry exists").dirty = true;
+        {
+            let session = app.active_tab_session_mut().expect("untitled entry exists");
+            session.document.file_path = Some(std::path::PathBuf::from("/tmp/existing.txt"));
+            session.document.dirty = true;
+        }
         assert_eq!(
-            batch_close_save_target(app.workspace.entry(0).zip(app.workspace.entry_title(0)),),
+            batch_close_save_target(
+                app.editor_tab_id_at(0).and_then(|tab_id| app.editor_save_context(tab_id)),
+            ),
             Some(BatchCloseSaveTarget::ExistingPath(std::path::PathBuf::from("/tmp/existing.txt")))
         );
     }
@@ -848,29 +887,31 @@ mod tests {
         open_untitled_fixture(&mut app);
 
         // Capture the IDs of the tabs originally at index 1 and 2.
-        let closed_id = app.workspace.tab_id_at(0).expect("tab 0 must exist");
-        let target_id = app.workspace.tab_id_at(1).expect("tab 1 must exist");
-        let other_id = app.workspace.tab_id_at(2).expect("tab 2 must exist");
+        let closed_id = app.editor_tab_id_at(0).expect("tab 0 must exist");
+        let target_id = app.editor_tab_id_at(1).expect("tab 1 must exist");
+        let other_id = app.editor_tab_id_at(2).expect("tab 2 must exist");
 
         // Reorder the workspace by closing tab 0: the targeted tab shifts to index 0.
-        let effect = app.workspace.close_entry(0).expect("close clean tab 0");
+        let effect = app.close_editor_tab(closed_id).expect("close clean tab 0");
         assert_eq!(
             effect,
             crate::workspace::WorkspaceEffect::Closed { closed: closed_id, activated: None }
         );
-        effect.reconcile_runtime_store(&mut app.tab_runtime_store);
-        assert_eq!(app.workspace.tab_ids(), app.tab_runtime_store.ids());
+        assert_eq!(
+            app.editor_tab_ids_in_order().into_iter().collect::<std::collections::HashSet<_>>(),
+            app.editor_runtime_tab_ids()
+        );
 
         // A stale index-based close of "index 1" would now remove the wrong tab.
         // Closing by ID must still remove the originally targeted tab.
         app.try_close_entry_with_prompt(target_id);
 
         assert!(
-            app.workspace.index_of(target_id).is_none(),
+            app.editor_tab_index(target_id).is_none(),
             "the originally targeted tab must be closed"
         );
-        assert_eq!(app.workspace.len(), 1);
-        assert_eq!(app.workspace.index_of(other_id), Some(0));
+        assert_eq!(app.editor_tab_count(), 1);
+        assert_eq!(app.editor_tab_index(other_id), Some(0));
     }
 
     #[test]
@@ -880,28 +921,29 @@ mod tests {
         open_untitled_fixture(&mut app);
         open_untitled_fixture(&mut app);
 
-        let stale_id = app.workspace.tab_id_at(1).expect("tab 1 must exist");
+        let stale_id = app.editor_tab_id_at(1).expect("tab 1 must exist");
         let closed_id = stale_id;
         let expected_remaining = vec![
-            app.workspace.tab_id_at(0).expect("tab 0 must exist"),
-            app.workspace.tab_id_at(2).expect("tab 2 must exist"),
+            app.editor_tab_id_at(0).expect("tab 0 must exist"),
+            app.editor_tab_id_at(2).expect("tab 2 must exist"),
         ];
 
-        let effect = app.workspace.close_entry(1).expect("closing the target tab should succeed");
+        let effect = app.close_editor_tab(stale_id).expect("closing the target tab should succeed");
         assert_eq!(
             effect,
             crate::workspace::WorkspaceEffect::Closed { closed: closed_id, activated: None }
         );
-        effect.reconcile_runtime_store(&mut app.tab_runtime_store);
-        assert_eq!(app.workspace.tab_ids(), app.tab_runtime_store.ids());
+        assert_eq!(
+            app.editor_tab_ids_in_order().into_iter().collect::<std::collections::HashSet<_>>(),
+            app.editor_runtime_tab_ids()
+        );
 
         let _ = app.try_close_multiple_with_prompt(
             ui::popup_menu::ContextMenuAction::CloseOthers,
             stale_id,
         );
 
-        let actual_remaining: Vec<_> =
-            (0..app.workspace.len()).map(|index| app.workspace.tab_id_at(index).unwrap()).collect();
+        let actual_remaining = app.editor_tab_ids_in_order();
         assert_eq!(actual_remaining, expected_remaining);
     }
 }

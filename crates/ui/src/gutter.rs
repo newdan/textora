@@ -92,40 +92,37 @@ pub fn generate_line_number_vertices(
 
         let slot = if let Some(cached) = atlas.get(&key) {
             *cached
-        } else {
-            if let Some(bitmap) = shaper.rasterize_glyph(font_id, glyph_id, font_size, (0.0, 0.0)) {
-                if bitmap.width > 0 && bitmap.height > 0 {
-                    if let Some(s) = atlas.insert(
-                        key,
-                        bitmap.width,
-                        bitmap.height,
-                        bitmap.left as f32,
-                        bitmap.top as f32,
-                    ) {
-                        queue.write_texture(
-                            wgpu::TexelCopyTextureInfo {
-                                texture: atlas_texture,
-                                mip_level: 0,
-                                origin: wgpu::Origin3d { x: s.x, y: s.y, z: 0 },
-                                aspect: wgpu::TextureAspect::All,
-                            },
-                            &bitmap.data,
-                            wgpu::TexelCopyBufferLayout {
-                                offset: 0,
-                                bytes_per_row: Some(bitmap.width),
-                                rows_per_image: Some(bitmap.height),
-                            },
-                            wgpu::Extent3d {
-                                width: bitmap.width,
-                                height: bitmap.height,
-                                depth_or_array_layers: 1,
-                            },
-                        );
-                        s
-                    } else {
-                        x_cursor += advance;
-                        continue;
-                    }
+        } else if let Some(bitmap) =
+            shaper.rasterize_glyph(font_id, glyph_id, font_size, (0.0, 0.0))
+        {
+            if bitmap.width > 0 && bitmap.height > 0 {
+                if let Some(s) = atlas.insert(
+                    key,
+                    bitmap.width,
+                    bitmap.height,
+                    bitmap.left as f32,
+                    bitmap.top as f32,
+                ) {
+                    queue.write_texture(
+                        wgpu::TexelCopyTextureInfo {
+                            texture: atlas_texture,
+                            mip_level: 0,
+                            origin: wgpu::Origin3d { x: s.x, y: s.y, z: 0 },
+                            aspect: wgpu::TextureAspect::All,
+                        },
+                        &bitmap.data,
+                        wgpu::TexelCopyBufferLayout {
+                            offset: 0,
+                            bytes_per_row: Some(bitmap.width),
+                            rows_per_image: Some(bitmap.height),
+                        },
+                        wgpu::Extent3d {
+                            width: bitmap.width,
+                            height: bitmap.height,
+                            depth_or_array_layers: 1,
+                        },
+                    );
+                    s
                 } else {
                     x_cursor += advance;
                     continue;
@@ -134,6 +131,9 @@ pub fn generate_line_number_vertices(
                 x_cursor += advance;
                 continue;
             }
+        } else {
+            x_cursor += advance;
+            continue;
         };
 
         let px = (x_cursor + slot.bearing_x).round();

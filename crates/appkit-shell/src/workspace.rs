@@ -12,6 +12,7 @@ use appkit_core::workspace::model::{WorkspaceEntry, WorkspaceModel};
 use appkit_core::workspace::types::TabId;
 
 use crate::editor_plugin::EditorPlugin;
+use crate::editor_runtime::OpenDisposition;
 use crate::prepared_tab::PreparedTab;
 
 #[cfg(test)]
@@ -170,6 +171,51 @@ impl Workspace {
         self.switch_to(index)
     }
 
+    /// 按稳定的打开策略安装并激活一个 prepared tab。
+    pub fn install_prepared_tab(
+        &mut self,
+        runtimes: &mut TabRuntimeStore,
+        prepared: PreparedTab,
+        suggested_file_name: Option<String>,
+        disposition: OpenDisposition,
+    ) -> WorkspaceEffect {
+        let id = self.insert_prepared_tab(runtimes, prepared, suggested_file_name);
+        let mut replaced_preview = None;
+
+        if disposition == OpenDisposition::Preview
+            && let Some(preview_index) = self.preview_index
+            && let Some(preview_id) = self.model.id_at(preview_index)
+            && preview_id != id
+            && !self.model.is_pinned(preview_id)
+            && !self.model.entry(preview_index).is_some_and(|entry| entry.value.dirty)
+        {
+            self.preview_index = None;
+            let _ = self
+                .close_entry_inner(preview_index)
+                .expect("tracked preview must remain closable during replacement");
+            replaced_preview = Some(preview_id);
+        }
+
+        let index = self
+            .index_of(id)
+            .expect("a newly installed tab must remain addressable by its stable ID");
+        if disposition == OpenDisposition::Preview {
+            self.preview_index = Some(index);
+        }
+
+        let activation = if self.len() == 1 {
+            self.model.record_nav_step();
+            WorkspaceEffect::Activated(id)
+        } else {
+            self.switch_to(index)
+        };
+
+        replaced_preview.map_or(activation, |closed| WorkspaceEffect::Closed {
+            closed,
+            activated: self.active_tab_id(),
+        })
+    }
+
     pub fn active_index(&self) -> usize {
         self.model.active_index()
     }
@@ -240,6 +286,34 @@ impl Workspace {
     /// Return the stable ID of the tab at `index`, if one exists.
     pub fn tab_id_at(&self, index: usize) -> Option<TabId> {
         self.model.id_at(index)
+    }
+
+    /// Return a document by its stable tab ID.
+    pub fn entry_by_id(&self, id: TabId) -> Option<&DocumentModel> {
+        self.model.entry_by_id(id).map(|entry| &entry.value)
+    }
+
+    pub(crate) fn apply_save_completion(
+        &mut self,
+        tab_id: TabId,
+        path: PathBuf,
+        content_revision: u64,
+        disk_revision: appkit_core::file_safety::DiskRevision,
+    ) -> Option<(bool, bool)> {
+        let entry = self.model.entry_by_id_mut(tab_id)?;
+        let path_changed = entry.value.file_path.as_ref() != Some(&path);
+        let clean = entry.value.apply_save_completion(path, content_revision, disk_revision);
+        Some((clean, path_changed))
+    }
+
+    /// Return the active stable tab ID, if the workspace is non-empty.
+    pub fn active_tab_id(&self) -> Option<TabId> {
+        self.model.active_id()
+    }
+
+    /// Return the pinned state for a stable tab ID.
+    pub fn is_pinned_id(&self, id: TabId) -> bool {
+        self.model.is_pinned(id)
     }
 
     /// Return the current index of the tab with the given ID, if it is open.

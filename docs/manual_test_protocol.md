@@ -3,6 +3,17 @@
 本文档对应 `plans.md` 各阶段的手动验收步骤。
 每阶段包含：操作步骤、预期结果、边界 case。
 
+## 当前 textora 运行命令
+
+自 ER5 起，当前应用包名为 `textora-app`，使用以下命令启动：
+
+```bash
+cargo run -p textora-app
+cargo run -p textora-app -- path/to/file.md
+```
+
+本文历史章节中的 `edit-plus-app` 命令保留作为历史记录，不代表当前包名。
+
 ---
 
 ## §3：winit + wgpu 空窗口

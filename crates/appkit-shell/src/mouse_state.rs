@@ -9,6 +9,14 @@ pub enum CanvasDragEligibility {
     Disabled,
 }
 
+/// 当前编辑器指针捕获类型。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum MouseCapture {
+    None,
+    TextSelection,
+    CanvasDrag,
+}
+
 #[derive(Clone, Debug)]
 pub struct CanvasDragSession {
     pub source_range: Range<usize>,
@@ -38,6 +46,20 @@ pub struct MouseState {
 }
 
 impl MouseState {
+    pub fn capture(&self) -> MouseCapture {
+        if self.canvas_drag.is_some() {
+            MouseCapture::CanvasDrag
+        } else if self.is_down {
+            MouseCapture::TextSelection
+        } else {
+            MouseCapture::None
+        }
+    }
+
+    pub fn captures_pointer(&self) -> bool {
+        self.capture() != MouseCapture::None
+    }
+
     pub fn new() -> Self {
         Self {
             pos: (0.0, 0.0),
@@ -119,5 +141,25 @@ mod tests {
         assert_eq!(default_state.click_count, new_state.click_count);
         assert_eq!(default_state.last_hover_redraw_pos, new_state.last_hover_redraw_pos);
         assert_eq!(default_state.last_hover_tab, new_state.last_hover_tab);
+    }
+
+    #[test]
+    fn capture_query_prioritizes_canvas_drag_over_text_selection() {
+        let mut mouse = MouseState::new();
+        assert_eq!(mouse.capture(), super::MouseCapture::None);
+        assert!(!mouse.captures_pointer());
+
+        mouse.is_down = true;
+        assert_eq!(mouse.capture(), super::MouseCapture::TextSelection);
+        assert!(mouse.captures_pointer());
+
+        mouse.canvas_drag = Some(super::CanvasDragSession {
+            source_range: 0..1,
+            pressed_at: (0.0, 0.0),
+            source_generation: 1,
+            eligibility: super::CanvasDragEligibility::Enabled,
+            started: false,
+        });
+        assert_eq!(mouse.capture(), super::MouseCapture::CanvasDrag);
     }
 }

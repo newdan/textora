@@ -1,21 +1,14 @@
 use std::collections::{BTreeSet, HashSet};
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
+use appkit_shell::editor_runtime::EditorRuntime;
 use appkit_shell::{ProductHost, ProductWakeHandle};
-use winit::window::Window;
-
-pub(crate) use crate::render_state::{GpuState, TextState};
 
 use crate::file_history::FileHistory;
-use crate::frame_cache::FrameCache;
 use crate::mouse::MouseState;
 use crate::native_menu::NativeMenu;
-use crate::reshape_worker::ReshapeWorker;
-use crate::tab_runtime::TabRuntimeStore;
 use crate::ui_shell::UiShell;
-use crate::workspace::Workspace;
 use ui::theme::Theme;
 
 #[allow(unused_imports)]
@@ -57,21 +50,6 @@ pub(crate) fn reset_cursor_after_edit(
     cursor_render_state.cursor_blink_instant = Instant::now();
 }
 
-pub(crate) fn reset_after_edit(
-    generation: &mut u64,
-    pending_reshapes: &mut HashSet<usize>,
-    reshape_worker: &Option<ReshapeWorker>,
-    cursor_render_state: &mut crate::cursor_motion::CursorRenderState,
-) {
-    *generation += 1;
-    pending_reshapes.clear();
-    if let Some(w) = reshape_worker {
-        w.cancel_before(*generation);
-    }
-    cursor_render_state.sticky_x_dirty = true;
-    cursor_render_state.cursor_blink_instant = Instant::now();
-}
-
 /// The main application state.
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -81,9 +59,6 @@ pub(crate) enum SettingsPersistenceState {
 }
 
 pub struct App {
-    pub(crate) window: Option<Arc<Window>>,
-    pub(crate) gpu: Option<GpuState>,
-    pub(crate) text: Option<TextState>,
     pub(crate) file_path: Option<PathBuf>,
     pub(crate) paths: crate::product_paths::ProductPaths,
     pub(crate) settings: ui::settings::Settings,
@@ -93,70 +68,31 @@ pub struct App {
     pub(crate) active_theme_pair: ui::theme::ActiveThemePair,
     pub(crate) theme_load_report: crate::theme_loader::ThemeLoadReport,
     pub(crate) product: crate::textora_product::TextoraProduct,
-    pub(crate) workspace: Workspace,
-    pub(crate) tab_runtime_store: TabRuntimeStore,
+    pub(crate) editor_runtime: EditorRuntime,
     pub(crate) popup_tab_id_snapshot: Vec<appkit_core::workspace::types::TabId>,
     pub(crate) workspace_store: crate::workspace_store::WorkspaceStore,
     pub(crate) ui_shell: UiShell,
     pub(crate) file_history: FileHistory,
-    pub(crate) file_safety_worker: Option<crate::file_safety::FileSafetyWorker>,
     pub(crate) library_file_monitor: Option<crate::library_file_monitor::LibraryFileMonitor>,
     pub(crate) file_safety_notices: Vec<crate::file_safety::FileSafetyNotice>,
-    pub(crate) file_safety_tracked: HashSet<PathBuf>,
-    pub(crate) file_safety_pending: HashSet<PathBuf>,
-    pub(crate) file_safety_next_request_id: u64,
-    pub(crate) file_safety_next_check: Instant,
-    pub(crate) scale_factor: f64,
+    pub(crate) pending_close_after_save: HashSet<appkit_core::workspace::types::TabId>,
+    pub(crate) pending_quit_after_save: bool,
     pub(crate) running: bool,
     pub(crate) needs_redraw: bool,
     pub(crate) sidebar_animating: bool,
     /// Tab bar smooth-scroll animation.
     pub(crate) tab_scroll: crate::smooth_scroll::SmoothScroll,
-    pub(crate) modifiers: winit::keyboard::ModifiersState,
     /// Mouse state for click/drag handling.
     pub(crate) mouse: MouseState,
-    /// Per-frame rendering cache (advance cache, cluster pool, first/last line).
-    pub(crate) frame_cache: FrameCache,
     /// 上次滚轮事件的时间，用于快速滚动时不渲染、停手后再渲染。
     pub(crate) last_scroll_time: Instant,
-    pub(crate) reshape_worker: Option<ReshapeWorker>,
-    /// Shared FontSystem, created once and passed to worker + TextState.
-    pub(crate) shared_font_system: Option<Arc<Mutex<shaping::FontSystem>>>,
-    pub(crate) reshape_generation: u64,
-    /// Track in-flight reshape submissions to prevent duplicates.
-    pub(crate) pending_reshapes: HashSet<usize>,
-    /// Skip next submit_reshape_ahead after init_display_map full build.
-    pub(crate) skip_reshape_submit: bool,
-    /// Last anchor doc_line we submitted reshape ahead for (debounce rapid scroll).
-    pub(crate) last_reshape_anchor: usize,
-    /// Timestamp of last render() call for frame-interval measurement.
-    pub(crate) last_render_time: std::time::Instant,
-    pub(crate) last_rr_time: std::time::Instant,
-    /// Frame counter for periodic perf logging (debug only).
-    pub(crate) render_frame_count: u32,
-    /// Pending resize event (throttled to ~16ms / 60fps).
-    pub(crate) pending_resize: Option<winit::dpi::PhysicalSize<u32>>,
-    /// Timestamp of last handled resize (for 16ms throttle).
-    pub(crate) last_resize_handled: Instant,
     /// 上一帧的光标可见状态，用于 about_to_wait 检测 phase 变化
     pub(crate) last_cursor_visible: bool,
-    /// 窗口是否处于激活/聚焦状态
-    pub(crate) window_focused: bool,
     /// 事件循环代理，用于后台线程唤醒主线程。
     pub(crate) event_loop_proxy:
         Option<winit::event_loop::EventLoopProxy<crate::app_event::AppEvent>>,
-    /// IME 预编辑文本（正在组合中、尚未确认的拼音/字母）
-    pub(crate) preedit_text: String,
-    /// IME 预编辑光标位置 (start_byte, end_byte)，用于下划线高亮
-    pub(crate) preedit_cursor: Option<(usize, usize)>,
     /// IME 预编辑文字的总像素宽度（每帧在 shape_visible_lines 前计算）
     pub(crate) preedit_advance_px: f32,
-    /// WYSIWYG 模式下，上下移动时保持的首选 X 像素位置（sticky column）。
-    pub(crate) wysiwyg_preferred_x: Option<f32>,
-    /// 防止 WYSIWYG 拦截重入（augmented enter/backspace 递归时跳过拦截）。
-    pub(crate) wysiwyg_recursing: bool,
-    /// 首帧是否已 present（用于窗口延迟显示，避免启动白闪）。
-    pub(crate) first_frame_presented: bool,
     /// 应用状态构造开始时刻，用于记录首帧可见的端到端耗时。
     pub(crate) startup_started_at: Instant,
 }
@@ -198,8 +134,7 @@ impl App {
     }
 
     pub(crate) fn snapshot_popup_tab_ids(&mut self) {
-        self.popup_tab_id_snapshot =
-            (0..self.workspace.len()).filter_map(|index| self.workspace.tab_id_at(index)).collect();
+        self.popup_tab_id_snapshot = self.editor_tab_ids_in_order();
     }
 
     pub(crate) fn clear_popup_tab_id_snapshot(&mut self) {
@@ -210,7 +145,7 @@ impl App {
         &self,
         index: usize,
     ) -> Option<appkit_core::workspace::types::TabId> {
-        self.popup_tab_id_snapshot.get(index).copied().or_else(|| self.workspace.tab_id_at(index))
+        self.popup_tab_id_snapshot.get(index).copied().or_else(|| self.editor_tab_id_at(index))
     }
 
     /// Register the event-loop proxy before background work is started.
@@ -219,13 +154,12 @@ impl App {
         event_loop_proxy: winit::event_loop::EventLoopProxy<crate::app_event::AppEvent>,
     ) {
         self.event_loop_proxy = Some(event_loop_proxy.clone());
-        if self.file_safety_worker.is_none() {
-            let file_safety_proxy = event_loop_proxy.clone();
-            self.file_safety_worker =
-                Some(crate::file_safety::FileSafetyWorker::spawn(move || {
-                    let _ = file_safety_proxy
-                        .send_event(crate::app_event::AppEvent::FileSafetyResultsReady);
-                }));
+        let file_safety_proxy = event_loop_proxy.clone();
+        if !self.editor_runtime.file_safety_worker_started() {
+            self.editor_runtime.start_file_safety_worker(move || {
+                let _ = file_safety_proxy
+                    .send_event(crate::app_event::AppEvent::FileSafetyResultsReady);
+            });
         }
     }
 
@@ -241,7 +175,6 @@ impl App {
                 Ok(monitor) => {
                     self.library_file_monitor = Some(monitor);
                     self.refresh_file_monitor_roots();
-                    self.file_safety_next_check = Instant::now();
                 }
                 Err(error) => eprintln!("[file-monitor] failed to start: {error}"),
             }
@@ -254,10 +187,10 @@ impl App {
     }
 
     fn file_monitor_roots(&self) -> Vec<PathBuf> {
-        self.workspace
-            .entries()
+        self.editor_runtime
+            .document_summaries()
             .iter()
-            .filter_map(|entry| entry.value.file_path.as_deref())
+            .filter_map(|summary| summary.path.as_deref())
             .filter_map(|path| path.parent())
             .map(Path::to_owned)
             .collect::<BTreeSet<_>>()
@@ -316,11 +249,11 @@ impl App {
     }
 
     pub(crate) fn screen_width(&self) -> f32 {
-        self.gpu.as_ref().map(|g| g.ctx.config.width as f32).unwrap_or(800.0)
+        self.editor_runtime.surface_size().map_or(800.0, |(width, _)| width as f32)
     }
 
     pub(crate) fn screen_height(&self) -> f32 {
-        self.gpu.as_ref().map(|g| g.ctx.config.height as f32).unwrap_or(600.0)
+        self.editor_runtime.surface_size().map_or(600.0, |(_, height)| height as f32)
     }
 
     pub(crate) fn viewport_content_width(
@@ -346,7 +279,7 @@ impl App {
         &self,
         metrics: &ui::settings::UiMetrics,
     ) -> f32 {
-        if self.settings.view_mode == ui::view_mode::ViewMode::Tabs && self.workspace.len() > 1 {
+        if self.settings.view_mode == ui::view_mode::ViewMode::Tabs && self.editor_tab_count() > 1 {
             ui::tab_bar::tab_bar_height(metrics.dpi)
         } else {
             0.0
@@ -357,13 +290,17 @@ impl App {
     /// Settings holds logical (pre-DPI-scale) values; this multiplies by
     /// the current scale factor to produce physical pixel values.
     pub(crate) fn ui_metrics(&self) -> ui::settings::UiMetrics {
-        ui::settings::UiMetrics::from_settings(&self.settings, self.scale_factor as f32)
+        ui::settings::UiMetrics::from_settings(
+            &self.settings,
+            self.editor_runtime.scale_factor() as f32,
+        )
     }
 
     /// Store the new scale factor. Does NOT modify dimensional settings fields.
     pub(crate) fn update_scale_factor(&mut self, scale_factor: f64) {
-        self.scale_factor =
+        let normalized_scale_factor =
             if scale_factor.is_finite() && scale_factor > 0.0 { scale_factor } else { 1.0 };
+        self.editor_runtime.set_scale_factor(normalized_scale_factor);
     }
 
     /// Logical (pre-DPI-scale) font size, for persistence.
@@ -378,7 +315,7 @@ impl App {
 
     /// Convert the current physical sidebar width to logical units for persistence.
     pub(crate) fn sidebar_width_for_persistence(&self) -> f32 {
-        let dpi = self.scale_factor as f32;
+        let dpi = self.editor_runtime.scale_factor() as f32;
         self.ui_shell.sidebar_width() / dpi.max(f32::EPSILON)
     }
 
@@ -387,7 +324,7 @@ impl App {
     }
 
     pub(crate) fn sync_window_chrome(&self) {
-        let Some(window) = self.window.as_ref() else {
+        let Some(window) = self.editor_runtime.window() else {
             return;
         };
         match self.settings.view_mode {
@@ -414,7 +351,7 @@ impl App {
                 AppEffectStep::PersistWorkspace => self.persist_workspace_state(),
                 AppEffectStep::Redraw => {
                     self.needs_redraw = true;
-                    if let Some(window) = &self.window {
+                    if let Some(window) = self.editor_runtime.window() {
                         window.request_redraw();
                     }
                 }
@@ -425,6 +362,20 @@ impl App {
 
 #[cfg(test)]
 mod product_ownership_boundary_tests {
+    #[test]
+    fn app_tab_contains_the_semantic_model_adapter() {
+        let source = include_str!("app_tab.rs");
+        for method_name in [
+            "install_editor_tab",
+            "activate_editor_tab",
+            "append_editor_tab",
+            "editor_close_decision",
+            "close_editor_tab",
+        ] {
+            assert!(source.contains(&format!("fn {method_name}")));
+        }
+    }
+
     #[test]
     fn app_does_not_declare_sync_controller_field() {
         let app_source = include_str!("app.rs");
@@ -509,8 +460,8 @@ mod background_startup_boundary_tests {
 #[cfg(test)]
 impl App {
     pub(crate) fn switch_workspace_for_test(&mut self, index: usize) {
-        let effect = self.workspace.switch_to(index);
-        effect.reconcile_runtime_store(&mut self.tab_runtime_store);
+        let tab_id = self.editor_tab_id_at(index).expect("test tab index should be valid");
+        let _ = self.activate_editor_tab(tab_id);
     }
 }
 

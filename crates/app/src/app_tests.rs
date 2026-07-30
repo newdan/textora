@@ -1,9 +1,54 @@
 use super::*;
 use crate::document_view::DocumentView;
+use appkit_shell::editor_runtime::{EditorFocus, EditorInputContext};
 use core::types::ByteIndex;
 use core::types::UniCharOffset;
 use ui::layout::compute_visual_lines;
 use ui::viewport::Viewport;
+
+fn editor_input_context_for_test(app: &App) -> EditorInputContext {
+    EditorInputContext {
+        editor_rect: app.ui_shell.editor_rect(),
+        focus: EditorFocus::Active,
+        modal_blocked: false,
+    }
+}
+
+fn set_editor_preedit_for_test(
+    app: &mut App,
+    text: impl Into<String>,
+    cursor: Option<(usize, usize)>,
+) {
+    let context = editor_input_context_for_test(app);
+    assert!(app.editor_runtime.update_preedit(context, text.into(), cursor));
+}
+
+fn editor_document_for_test(
+    app: &mut App,
+    index: usize,
+) -> &mut appkit_core::document::DocumentModel {
+    let tab_id = app.editor_tab_id_at(index).expect("test tab index should be valid");
+    app.tab_session_mut(tab_id).expect("test tab session should exist").document
+}
+
+fn active_document_text(app: &App) -> String {
+    app.active_tab_session().expect("active document should exist").full_text()
+}
+
+fn close_editor_tab_for_test(app: &mut App, index: usize) {
+    let tab_id = app.editor_tab_id_at(index).expect("test tab index should be valid");
+    let effect = app.close_editor_tab(tab_id).expect("test tab should close");
+    app.apply_workspace_effect(effect);
+}
+
+fn update_runtime_frame_cache(
+    app: &mut App,
+    update: impl FnOnce(&mut appkit_shell::frame_cache::FrameCache),
+) {
+    let mut resources = app.editor_runtime.take_render_resources();
+    update(&mut resources.frame_cache);
+    app.editor_runtime.restore_render_resources(resources);
+}
 
 /// Helper: create a GlyphCluster for testing
 fn mock_cluster(byte_start: usize, byte_end: usize, advance: f32) -> shaping::GlyphCluster {
@@ -220,21 +265,25 @@ fn mouse_drag_creates_range_via_app_state() {
 #[test]
 fn mouse_drag_backward_creates_range() {
     let mut app = app_with_content(vec!["hello world"]);
-    let dv = app.workspace.entry_mut(0).unwrap();
+    let tab_id = app.editor_tab_id_at(0).expect("test tab index should be valid");
 
     // Mouse down at offset 8
-    dv.cursor_move_to_offset(8);
-    app.mouse.down_byte_offset = Some(8);
-    app.mouse.is_down = true;
+    app.with_editor_document_and_mouse_for_test(tab_id, |mouse, document| {
+        document.cursor_move_to_offset(8);
+        mouse.down_byte_offset = Some(8);
+        mouse.is_down = true;
 
-    // Drag backward to offset 3
-    if let Some(anchor) = app.mouse.down_byte_offset.take() {
-        dv.cursor_mut().selection_anchor = Some(anchor);
-    }
-    dv.set_cursor_offset_synced(3);
+        // Drag backward to offset 3
+        if let Some(anchor) = mouse.down_byte_offset.take() {
+            document.cursor_mut().selection_anchor = Some(anchor);
+        }
+        document.set_cursor_offset_synced(3);
+    })
+    .expect("test tab session should exist");
 
     // Selection should be min..max
-    let (start, end) = dv.selection_range().unwrap();
+    let (start, end) =
+        app.active_tab_session().expect("active tab session").selection_range().unwrap();
     assert_eq!(start, 3, "start should be min(anchor, cursor)");
     assert_eq!(end, 8, "end should be max(anchor, cursor)");
 }
@@ -242,50 +291,57 @@ fn mouse_drag_backward_creates_range() {
 #[test]
 fn mouse_click_without_drag_no_selection() {
     let mut app = app_with_content(vec!["hello world"]);
-    let dv = app.workspace.entry_mut(0).unwrap();
+    let tab_id = app.editor_tab_id_at(0).expect("test tab index should be valid");
 
     // Mouse down at offset 5
-    dv.cursor_move_to_offset(5);
-    app.mouse.down_byte_offset = Some(5);
-    app.mouse.is_down = true;
+    app.with_editor_document_and_mouse_for_test(tab_id, |mouse, document| {
+        document.cursor_move_to_offset(5);
+        mouse.down_byte_offset = Some(5);
+        mouse.is_down = true;
 
-    // Mouse up immediately (no drag)
-    app.mouse.is_down = false;
-    app.mouse.down_byte_offset = None;
+        // Mouse up immediately (no drag)
+        mouse.is_down = false;
+        mouse.down_byte_offset = None;
+    })
+    .expect("test tab session should exist");
 
     // No selection should exist
-    assert!(!dv.has_selection(), "click without drag should not create selection");
-    assert_eq!(dv.cursor().offset, ByteIndex(5), "cursor should stay at click position");
+    let document = app.active_tab_session().expect("active tab session");
+    assert!(!document.has_selection(), "click without drag should not create selection");
+    assert_eq!(document.cursor().offset, ByteIndex(5), "cursor should stay at click position");
 }
 
 #[test]
 fn mouse_drag_then_click_clears_selection() {
     let mut app = app_with_content(vec!["hello world"]);
-    let dv = app.workspace.entry_mut(0).unwrap();
+    let tab_id = app.editor_tab_id_at(0).expect("test tab index should be valid");
 
     // First: create a selection via drag
-    dv.cursor_move_to_offset(3);
-    app.mouse.down_byte_offset = Some(3);
-    app.mouse.is_down = true;
+    app.with_editor_document_and_mouse_for_test(tab_id, |mouse, document| {
+        document.cursor_move_to_offset(3);
+        mouse.down_byte_offset = Some(3);
+        mouse.is_down = true;
 
-    if let Some(anchor) = app.mouse.down_byte_offset.take() {
-        dv.cursor_mut().selection_anchor = Some(anchor);
-    }
-    dv.set_cursor_offset_synced(8);
-    assert!(dv.has_selection());
+        if let Some(anchor) = mouse.down_byte_offset.take() {
+            document.cursor_mut().selection_anchor = Some(anchor);
+        }
+        document.set_cursor_offset_synced(8);
+        assert!(document.has_selection());
 
-    // Mouse up
-    app.mouse.is_down = false;
-    app.mouse.down_byte_offset = None;
+        // Mouse up
+        mouse.is_down = false;
+        mouse.down_byte_offset = None;
 
-    // New click at offset 5 (single click, no drag)
-    dv.cursor_move_to_offset(5);
-    app.mouse.down_byte_offset = Some(5);
-    app.mouse.is_down = true;
+        // New click at offset 5 (single click, no drag)
+        document.cursor_move_to_offset(5);
+        mouse.down_byte_offset = Some(5);
+        mouse.is_down = true;
 
-    // Selection should be cleared (cursor_move_to_offset clears anchor)
-    assert!(!dv.has_selection(), "new click should clear previous selection");
-    assert_eq!(dv.cursor().offset, ByteIndex(5));
+        // Selection should be cleared (cursor_move_to_offset clears anchor)
+        assert!(!document.has_selection(), "new click should clear previous selection");
+        assert_eq!(document.cursor().offset, ByteIndex(5));
+    })
+    .expect("test tab session should exist");
 }
 
 // --- Viewport offset revision: missing tests (A2, A3, B1) ---
@@ -322,13 +378,15 @@ fn move_up_into_skipped_area_moves_cursor_byte() {
             clusters: vec![(4, 31.2, 0), (5, 39.0, 0), (6, 46.8, 0), (7, 54.6, 0)],
         },
     ];
-    app.frame_cache.first_line.visual_lines = vec![(0, 7, 54.6), (7, 14, 54.6), (14, 20, 46.8)];
-    app.frame_cache.first_line.clusters = (0..20).map(|i| (i, i + 1, 7.8)).collect();
-    app.frame_cache.first_line.doc_offset = 0;
+    update_runtime_frame_cache(&mut app, |frame_cache| {
+        frame_cache.first_line.visual_lines = vec![(0, 7, 54.6), (7, 14, 54.6), (14, 20, 46.8)];
+        frame_cache.first_line.clusters = (0..20).map(|i| (i, i + 1, 7.8)).collect();
+        frame_cache.first_line.doc_offset = 0;
+    });
 
     app.move_cursor_visual(-1);
 
-    let dv = app.workspace.entry_mut(0).unwrap();
+    let dv = editor_document_for_test(&mut app, 0);
     assert_eq!(
         dv.cursor().offset,
         ByteIndex(2),
@@ -371,12 +429,14 @@ fn move_down_past_visible_preserves_sticky_x() {
         vl_grapheme_start: 0,
         clusters: vec![(7, 54.6, 0)],
     }];
-    app.frame_cache.last_line.visual_lines = vec![(0, 7, 54.6), (7, 14, 54.6)];
-    app.frame_cache.last_line.clusters = (0..14).map(|i| (i, i + 1, 7.8)).collect();
+    update_runtime_frame_cache(&mut app, |frame_cache| {
+        frame_cache.last_line.visual_lines = vec![(0, 7, 54.6), (7, 14, 54.6)];
+        frame_cache.last_line.clusters = (0..14).map(|i| (i, i + 1, 7.8)).collect();
+    });
 
     app.move_cursor_visual(1);
 
-    let dv = app.workspace.entry_mut(0).unwrap();
+    let dv = editor_document_for_test(&mut app, 0);
     assert_eq!(
         dv.cursor().offset,
         ByteIndex(9),
@@ -420,7 +480,7 @@ fn move_down_wrapped_line_uses_correct_byte_offset() {
 
     app.move_cursor_visual(1);
 
-    let dv = app.workspace.entry_mut(0).unwrap();
+    let dv = editor_document_for_test(&mut app, 0);
     assert_eq!(
         dv.cursor().offset,
         ByteIndex(7),
@@ -451,12 +511,14 @@ fn move_down_wrapped_line_boundary_no_stall() {
         clusters: vec![(7, 54.6, 0)],
     }];
     // last_line data used by 4c when target_vis >= cache.len()
-    app.frame_cache.last_line.visual_lines = vec![(0, 7, 54.6), (7, 14, 54.6)];
-    app.frame_cache.last_line.clusters = (0..14).map(|i| (i, i + 1, 7.8)).collect();
+    update_runtime_frame_cache(&mut app, |frame_cache| {
+        frame_cache.last_line.visual_lines = vec![(0, 7, 54.6), (7, 14, 54.6)];
+        frame_cache.last_line.clusters = (0..14).map(|i| (i, i + 1, 7.8)).collect();
+    });
 
     app.move_cursor_visual(1);
 
-    let dv = app.workspace.entry_mut(0).unwrap();
+    let dv = editor_document_for_test(&mut app, 0);
     // Should move to VL1 (byte 7), not stay at byte 0
     assert_eq!(dv.cursor().offset, ByteIndex(7), "cursor should advance to VL1 start (byte 7)");
 }
@@ -1237,7 +1299,7 @@ fn regression_wrap_shift_down_extends_by_visual_line() {
     app.extend_selection_visual(1);
 
     // cursor 应该移动到下一个 visual 行，而不是跳到 doc line 末尾
-    let dv = app.workspace.entry_mut(0).unwrap();
+    let dv = editor_document_for_test(&mut app, 0);
     assert!(
         dv.cursor().offset > offset_before,
         "Shift+Down should move to next visual line (before={}, after={})",
@@ -1334,13 +1396,11 @@ fn close_entry_active_rebuilds_wrap_index() {
     // active 仍是 1 (doc2)
 
     // 关闭 active tab (doc2, index 1)
-    if let Ok(effect) = app.workspace.close_entry(1) {
-        app.apply_workspace_effect(effect);
-    }
+    close_editor_tab_for_test(&mut app, 1);
 
     // doc3 滑入 index 1，wrap_index 应该是 10 行
-    assert_eq!(app.workspace.active_index(), 1);
-    assert_eq!(app.workspace.len(), 2);
+    assert_eq!(app.active_editor_index(), Some(1));
+    assert_eq!(app.editor_tab_count(), 2);
     let tab = app.active_tab_session().expect("reactivated tab should have a runtime session");
     assert_eq!(
         tab.display().display_map.total_rows(),
@@ -1368,12 +1428,10 @@ fn close_entry_before_active_shifts_index() {
     app.init_display_map(2);
 
     // 关闭 index 0 的 doc1
-    if let Ok(effect) = app.workspace.close_entry(0) {
-        app.apply_workspace_effect(effect);
-    }
+    close_editor_tab_for_test(&mut app, 0);
 
     // active 应从 2 偏移到 1，且仍指向 doc3（7行）
-    assert_eq!(app.workspace.active_index(), 1, "关闭前面的 tab 后 active_index 应减 1");
+    assert_eq!(app.active_editor_index(), Some(1), "关闭前面的 tab 后 active_index 应减 1");
     let tab = app.active_tab_session().expect("surviving active tab should have a runtime session");
     assert_eq!(tab.display().display_map.total_rows(), 7);
     assert_eq!(tab.display().display_map.line_count(), 7);
@@ -1392,18 +1450,14 @@ fn close_entry_down_to_single_document() {
     app.init_display_map(2);
 
     // 关闭 index 1
-    if let Ok(effect) = app.workspace.close_entry(1) {
-        app.apply_workspace_effect(effect);
-    }
-    assert_eq!(app.workspace.len(), 2);
-    assert_eq!(app.workspace.active_index(), 1);
+    close_editor_tab_for_test(&mut app, 1);
+    assert_eq!(app.editor_tab_count(), 2);
+    assert_eq!(app.active_editor_index(), Some(1));
 
     // 关闭 index 0
-    if let Ok(effect) = app.workspace.close_entry(0) {
-        app.apply_workspace_effect(effect);
-    }
-    assert_eq!(app.workspace.len(), 1);
-    assert_eq!(app.workspace.active_index(), 0);
+    close_editor_tab_for_test(&mut app, 0);
+    assert_eq!(app.editor_tab_count(), 1);
+    assert_eq!(app.active_editor_index(), Some(0));
     let tab = app.active_tab_session().expect("last tab should have a runtime session");
     assert_eq!(tab.display().display_map.total_rows(), 3, "最终只剩 doc3 时 wrap_index 应为 3 行");
     assert_eq!(tab.display().display_map.line_count(), 3);
@@ -1415,8 +1469,8 @@ fn tab_runtime_by_id_mut_updates_exact_tab() {
     let second = DocumentView::new(vec!["doc2".to_string()], 80, 10.0);
     app.push_entry_for_test(second, Box::new(EditorPlugin::new()));
 
-    let first_id = app.workspace.tab_id_at(0).expect("first tab id");
-    let second_id = app.workspace.tab_id_at(1).expect("second tab id");
+    let first_id = app.editor_tab_id_at(0).expect("first tab id");
+    let second_id = app.editor_tab_id_at(1).expect("second tab id");
 
     app.tab_runtime_mut(second_id).expect("second runtime").toc_visible = true;
 
@@ -1436,10 +1490,9 @@ fn tab_runtime_by_id_is_none_after_close() {
     let second = DocumentView::new(vec!["doc2".to_string()], 80, 10.0);
     app.push_entry_for_test(second, Box::new(EditorPlugin::new()));
 
-    let closed_id = app.workspace.tab_id_at(0).expect("closed tab id");
-    let surviving_id = app.workspace.tab_id_at(1).expect("surviving tab id");
-    let effect = app.workspace.close_entry(0).expect("close first tab");
-    app.apply_workspace_effect(effect);
+    let closed_id = app.editor_tab_id_at(0).expect("closed tab id");
+    let surviving_id = app.editor_tab_id_at(1).expect("surviving tab id");
+    close_editor_tab_for_test(&mut app, 0);
 
     assert!(app.tab_runtime(closed_id).is_none(), "closed tab runtime must be gone");
     assert!(app.tab_runtime(surviving_id).is_some(), "surviving tab runtime must remain");
@@ -1451,24 +1504,11 @@ fn apply_workspace_effect_removes_closed_runtime_from_store_by_exact_tab_id() {
     let mut app = app_with_content(vec!["doc1"]);
     let second = DocumentView::new(vec!["doc2".to_string()], 80, 10.0);
     let second_id = app.push_entry_for_test(second, Box::new(EditorPlugin::new()));
-    let first_id = app.workspace.tab_id_at(0).expect("first tab id");
+    let first_id = app.editor_tab_id_at(0).expect("first tab id");
+    close_editor_tab_for_test(&mut app, 0);
 
-    app.tab_runtime_store
-        .insert(first_id, crate::tab_runtime::TabRuntime::new(Box::new(EditorPlugin::new())));
-    app.tab_runtime_store
-        .insert(second_id, crate::tab_runtime::TabRuntime::new(Box::new(EditorPlugin::new())));
-
-    let effect = app.workspace.close_entry(0).expect("close first tab");
-    app.apply_workspace_effect(effect);
-
-    assert!(
-        app.tab_runtime_store.get(first_id).is_none(),
-        "closed tab runtime must be removed from store"
-    );
-    assert!(
-        app.tab_runtime_store.get(second_id).is_some(),
-        "surviving tab runtime must remain in store"
-    );
+    assert!(app.tab_runtime(first_id).is_none(), "closed tab runtime must be removed from store");
+    assert!(app.tab_runtime(second_id).is_some(), "surviving tab runtime must remain in store");
 }
 
 #[test]
@@ -1477,9 +1517,7 @@ fn tab_runtime_lookup_reads_the_runtime_store() {
     let second = DocumentView::new(vec!["doc2".to_string()], 80, 10.0);
     let second_id = app.push_entry_for_test(second, Box::new(EditorPlugin::new()));
 
-    app.tab_runtime_store
-        .insert(second_id, crate::tab_runtime::TabRuntime::new(Box::new(EditorPlugin::new())));
-    app.tab_runtime_store.get_mut(second_id).expect("store runtime").toc_visible = true;
+    app.tab_runtime_mut(second_id).expect("store runtime").toc_visible = true;
 
     assert!(
         app.tab_runtime(second_id).expect("runtime from store").toc_visible,
@@ -1489,8 +1527,8 @@ fn tab_runtime_lookup_reads_the_runtime_store() {
 
 fn assert_workspace_runtime_bijection(app: &App) {
     assert_eq!(
-        app.workspace.tab_ids(),
-        app.tab_runtime_store.ids(),
+        app.editor_tab_ids_in_order().into_iter().collect::<std::collections::HashSet<_>>(),
+        app.editor_runtime_tab_ids(),
         "every open document must have exactly one runtime with the same TabId"
     );
 }
@@ -1514,19 +1552,17 @@ fn runtime_store_stays_bijective_across_create_switch_and_close() {
     app.open_file(&file_path).expect("opening an existing tab should activate it");
     assert_workspace_runtime_bijection(&app);
 
-    let first_id = app.workspace.tab_id_at(0).expect("first tab id");
+    let first_id = app.editor_tab_id_at(0).expect("first tab id");
     app.dispatch_tab_switch(first_id);
     assert_workspace_runtime_bijection(&app);
 
-    let effect = app.workspace.close_entry(1).expect("close second tab");
-    app.apply_workspace_effect(effect);
+    close_editor_tab_for_test(&mut app, 1);
     assert_workspace_runtime_bijection(&app);
 
     app.execute_batch_close(&[1]);
     assert_workspace_runtime_bijection(&app);
 
-    let effect = app.workspace.close_entry(0).expect("close last tab");
-    app.apply_workspace_effect(effect);
+    close_editor_tab_for_test(&mut app, 0);
     assert_workspace_runtime_bijection(&app);
 }
 
@@ -1536,9 +1572,7 @@ fn tab_session_borrows_document_and_store_runtime_for_exact_id() {
     let second = DocumentView::new(vec!["doc2".to_string()], 80, 10.0);
     let second_id = app.push_entry_for_test(second, Box::new(EditorPlugin::new()));
 
-    app.tab_runtime_store
-        .insert(second_id, crate::tab_runtime::TabRuntime::new(Box::new(EditorPlugin::new())));
-    app.tab_runtime_store.get_mut(second_id).expect("store runtime").toc_visible = true;
+    app.tab_runtime_mut(second_id).expect("store runtime").toc_visible = true;
 
     let session = app.tab_session(second_id).expect("second tab session");
 
@@ -1553,13 +1587,10 @@ fn tab_session_mut_updates_store_runtime() {
     let second = DocumentView::new(vec!["doc2".to_string()], 80, 10.0);
     let second_id = app.push_entry_for_test(second, Box::new(EditorPlugin::new()));
 
-    app.tab_runtime_store
-        .insert(second_id, crate::tab_runtime::TabRuntime::new(Box::new(EditorPlugin::new())));
-
     app.tab_session_mut(second_id).expect("second mutable tab session").runtime.toc_visible = true;
 
     assert!(
-        app.tab_runtime_store.get(second_id).expect("store runtime").toc_visible,
+        app.tab_runtime(second_id).expect("store runtime").toc_visible,
         "mutable session must update the runtime store"
     );
 }
@@ -1582,47 +1613,56 @@ fn active_tab_session_tracks_workspace_activation_by_tab_id() {
 #[test]
 fn test_double_click_spatial_proximity() {
     let mut app = app_with_content(vec!["hello world this is a test"]);
-    let dv = app.workspace.entry_mut(0).unwrap();
+    let tab_id = app.editor_tab_id_at(0).expect("test tab index should be valid");
     let modifiers = winit::keyboard::ModifiersState::empty();
     let mut cursor_render_state = crate::cursor_motion::CursorRenderState::new();
 
     // First click at position (10, 10)
-    crate::mouse::handle_mouse_input_with_cursor_state(
-        winit::event::ElementState::Pressed,
-        10.0,
-        10.0,
-        &mut app.mouse,
-        dv,
-        &mut cursor_render_state,
-        modifiers,
-        Some((UniCharOffset(0), 0, 0)),
-    );
+    app.with_editor_document_and_mouse_for_test(tab_id, |mouse, document| {
+        crate::mouse::handle_mouse_input_with_cursor_state(
+            winit::event::ElementState::Pressed,
+            10.0,
+            10.0,
+            mouse,
+            document,
+            &mut cursor_render_state,
+            modifiers,
+            Some((UniCharOffset(0), 0, 0)),
+        );
+    })
+    .expect("test tab session should exist");
 
     assert_eq!(app.mouse.click_count, 1);
 
     // Release
-    crate::mouse::handle_mouse_input_with_cursor_state(
-        winit::event::ElementState::Released,
-        10.0,
-        10.0,
-        &mut app.mouse,
-        dv,
-        &mut cursor_render_state,
-        modifiers,
-        Some((UniCharOffset(0), 0, 0)),
-    );
+    app.with_editor_document_and_mouse_for_test(tab_id, |mouse, document| {
+        crate::mouse::handle_mouse_input_with_cursor_state(
+            winit::event::ElementState::Released,
+            10.0,
+            10.0,
+            mouse,
+            document,
+            &mut cursor_render_state,
+            modifiers,
+            Some((UniCharOffset(0), 0, 0)),
+        );
+    })
+    .expect("test tab session should exist");
 
     // Second click within 500ms but FAR AWAY (100, 100) -> distance squared is large
-    crate::mouse::handle_mouse_input_with_cursor_state(
-        winit::event::ElementState::Pressed,
-        100.0,
-        100.0,
-        &mut app.mouse,
-        dv,
-        &mut cursor_render_state,
-        modifiers,
-        Some((UniCharOffset(15), 0, 0)),
-    );
+    app.with_editor_document_and_mouse_for_test(tab_id, |mouse, document| {
+        crate::mouse::handle_mouse_input_with_cursor_state(
+            winit::event::ElementState::Pressed,
+            100.0,
+            100.0,
+            mouse,
+            document,
+            &mut cursor_render_state,
+            modifiers,
+            Some((UniCharOffset(15), 0, 0)),
+        );
+    })
+    .expect("test tab session should exist");
 
     // Click count should be reset to 1 due to spatial proximity check
     assert_eq!(
@@ -1634,39 +1674,49 @@ fn test_double_click_spatial_proximity() {
 #[test]
 fn test_mouse_release_clears_empty_selection() {
     let mut app = app_with_content(vec!["hello world"]);
-    let dv = app.workspace.entry_mut(0).unwrap();
+    let tab_id = app.editor_tab_id_at(0).expect("test tab index should be valid");
     let modifiers = winit::keyboard::ModifiersState::empty();
     let mut cursor_render_state = crate::cursor_motion::CursorRenderState::new();
 
     // Single click
-    crate::mouse::handle_mouse_input_with_cursor_state(
-        winit::event::ElementState::Pressed,
-        10.0,
-        10.0,
-        &mut app.mouse,
-        dv,
-        &mut cursor_render_state,
-        modifiers,
-        Some((UniCharOffset(5), 0, 0)),
-    );
+    app.with_editor_document_and_mouse_for_test(tab_id, |mouse, document| {
+        crate::mouse::handle_mouse_input_with_cursor_state(
+            winit::event::ElementState::Pressed,
+            10.0,
+            10.0,
+            mouse,
+            document,
+            &mut cursor_render_state,
+            modifiers,
+            Some((UniCharOffset(5), 0, 0)),
+        );
+    })
+    .expect("test tab session should exist");
 
     // Simulate drag but cursor hasn't moved (so selection anchor == cursor)
-    dv.cursor_mut().selection_anchor = Some(5);
-    dv.cursor_move_to_offset(5);
+    app.tab_session_mut(tab_id)
+        .expect("test tab session should exist")
+        .cursor_mut()
+        .selection_anchor = Some(5);
+    app.tab_session_mut(tab_id).expect("test tab session should exist").cursor_move_to_offset(5);
 
     // Release
-    crate::mouse::handle_mouse_input_with_cursor_state(
-        winit::event::ElementState::Released,
-        10.0,
-        10.0,
-        &mut app.mouse,
-        dv,
-        &mut cursor_render_state,
-        modifiers,
-        Some((UniCharOffset(5), 0, 0)),
-    );
+    app.with_editor_document_and_mouse_for_test(tab_id, |mouse, document| {
+        crate::mouse::handle_mouse_input_with_cursor_state(
+            winit::event::ElementState::Released,
+            10.0,
+            10.0,
+            mouse,
+            document,
+            &mut cursor_render_state,
+            modifiers,
+            Some((UniCharOffset(5), 0, 0)),
+        );
+    })
+    .expect("test tab session should exist");
 
     // Empty selection should be cleared on release
+    let dv = app.active_tab_session().expect("active tab session");
     assert_eq!(
         dv.cursor().selection_anchor,
         None,
@@ -1677,7 +1727,7 @@ fn test_mouse_release_clears_empty_selection() {
 #[test]
 fn test_backspace_with_empty_selection() {
     let mut app = app_with_content(vec!["hello world"]);
-    let dv = app.workspace.entry_mut(0).unwrap();
+    let dv = editor_document_for_test(&mut app, 0);
 
     dv.cursor_move_to_offset(5);
     dv.cursor_mut().selection_anchor = Some(5); // Empty selection
@@ -1765,7 +1815,10 @@ fn persisted_font_size_returns_logical_value() {
 #[test]
 fn viewport_dimensions_use_instance_line_height_and_chrome() {
     let mut app = App::new(None);
-    app.workspace = crate::app_init::build_product_workspace();
+    app.replace_editor_model(
+        crate::app_init::build_product_workspace(),
+        crate::tab_runtime::TabRuntimeStore::default(),
+    );
     let dv = crate::document_view::DocumentView::new(vec!["".into()], 80, 10.0);
     app.push_entry_for_test(dv, Box::new(EditorPlugin::new()));
     app.settings.view_mode = ui::view_mode::ViewMode::Tabs;
@@ -1819,12 +1872,12 @@ fn dpi_zoom_and_sidebar_width_are_reversible() {
     let logical_font = app.settings.font_size;
     let logical_sidebar = app.ui_shell.sidebar_width() / app.ui_metrics().dpi;
     let settings_version = app.settings.version;
-    let reshape_generation = app.reshape_generation;
+    let reshape_generation = app.editor_runtime.reshape_generation();
 
     app.handle_scale_factor_changed(2.0);
     assert_eq!(app.settings.font_size, logical_font);
     assert_eq!(app.settings.version, settings_version);
-    assert!(app.reshape_generation > reshape_generation);
+    assert!(app.editor_runtime.reshape_generation() > reshape_generation);
     assert_eq!(app.ui_metrics().font_size, logical_font * 2.0);
     assert_eq!(app.ui_shell.sidebar_width(), logical_sidebar * 2.0);
 
@@ -1847,11 +1900,11 @@ use crate::plugins::editor::EditorPlugin;
 fn apply_effect_runs_reshape_before_redraw_without_window() {
     let mut app = App::new(None);
     app.needs_redraw = false;
-    let generation = app.reshape_generation;
+    let generation = app.editor_runtime.reshape_generation();
 
     app.apply_effect(AppEffect::RESHAPE);
 
-    assert_eq!(app.reshape_generation, generation + 1);
+    assert_eq!(app.editor_runtime.reshape_generation(), generation + 1);
     assert!(app.needs_redraw);
 }
 
@@ -2099,7 +2152,7 @@ fn markdown_empty_list_enter_uses_structural_edit_policy() {
 
     app.dispatch_transactional_edit_for_test(EditCommand::InsertNewline);
 
-    assert_eq!(app.workspace.active_doc().expect("active document").full_text(), "");
+    assert_eq!(active_document_text(&app), "");
 }
 
 #[test]
@@ -2540,11 +2593,10 @@ fn render_active_wysiwyg_plugin_in_bounds_for_test(
     let theme = app.current_theme.clone();
     let dpi = app.ui_metrics().dpi;
     let font_size = app.ui_metrics().font_size;
-    let mut shaper = if let Some(font_system) = app.shared_font_system.clone() {
-        shaping::Shaper::from_shared_font_system(font_system, font_size, "")
-    } else {
-        shaping::Shaper::new().expect("test shaper should initialize")
-    };
+    let mut shaper = app
+        .editor_runtime
+        .new_shaper(font_size, "")
+        .unwrap_or_else(|| shaping::Shaper::new().expect("test shaper should initialize"));
     let mut tab = app.active_tab_session_mut().expect("active entry");
     tab.render_plugin(bounds, &theme, &mut shaper, dpi)
 }
@@ -2556,11 +2608,10 @@ fn prepare_and_render_active_mmap_canvas_for_test(
     let font_size = app.ui_metrics().font_size;
     let dpi = app.ui_metrics().dpi;
     let theme = app.current_theme.clone();
-    let mut shaper = if let Some(font_system) = app.shared_font_system.clone() {
-        shaping::Shaper::from_shared_font_system(font_system, font_size, "")
-    } else {
-        shaping::Shaper::new().expect("test shaper should initialize")
-    };
+    let mut shaper = app
+        .editor_runtime
+        .new_shaper(font_size, "")
+        .unwrap_or_else(|| shaping::Shaper::new().expect("test shaper should initialize"));
     let snapshot = app
         .sync_and_prepare_canvas_frame(&mut shaper)
         .expect("valid mmap source must resolve a canvas viewport");
@@ -2577,11 +2628,10 @@ fn render_active_mmap_canvas_snapshot_for_test(
     let font_size = app.ui_metrics().font_size;
     let dpi = app.ui_metrics().dpi;
     let theme = app.current_theme.clone();
-    let mut shaper = if let Some(font_system) = app.shared_font_system.clone() {
-        shaping::Shaper::from_shared_font_system(font_system, font_size, "")
-    } else {
-        shaping::Shaper::new().expect("test shaper should initialize")
-    };
+    let mut shaper = app
+        .editor_runtime
+        .new_shaper(font_size, "")
+        .unwrap_or_else(|| shaping::Shaper::new().expect("test shaper should initialize"));
     let mut tab = app.active_tab_session_mut().expect("active mmap tab");
     let _ = tab.render_canvas_plugin(&snapshot, &theme, &mut shaper, dpi);
 }
@@ -2759,7 +2809,7 @@ fn mmap_node_card_bounds_in_render_bounds(
 
 #[cfg(feature = "markdown")]
 fn drag_mmap_node(app: &mut App, source_title: &str, target: DragTarget<'_>) {
-    let source = app.workspace.active_doc().expect("active mmap document").full_text();
+    let source = active_document_text(app);
     let source_range = mmap_node_subtree_range_by_title(&source, source_title);
     let source_card = mmap_node_card_bounds(app, source_range);
     let anchor_title = match target {
@@ -3031,26 +3081,22 @@ fn mmap_selected_node_typing_replaces_title_then_undo_and_redo_restore_it() {
     let parent_range = tree.root.children[0].subtree_source_range.clone();
     let mut app = app_with_mmap_source(source);
     select_mmap_source_object(&mut app, parent_range);
-    let generation_before = app.workspace.active_doc().expect("active document").generation();
+    let generation_before =
+        app.active_tab_session().expect("active document").document.generation();
 
     app.dispatch_transactional_edit_for_test(EditCommand::InsertChar("Renamed".into()));
-    assert_eq!(
-        app.workspace.active_doc().expect("active document").full_text(),
-        "# Root\n## Renamed\n### Child\n## Next\n"
-    );
+    assert_eq!(active_document_text(&app), "# Root\n## Renamed\n### Child\n## Next\n");
     assert!(
-        app.workspace.active_doc().expect("active document").generation() > generation_before,
+        app.active_tab_session().expect("active document").document.generation()
+            > generation_before,
         "replacing a selected mmap title must advance the source generation"
     );
 
     undo_active_mmap_edit(&mut app);
-    assert_eq!(app.workspace.active_doc().expect("active document").full_text(), source);
+    assert_eq!(active_document_text(&app), source);
 
     redo_active_mmap_edit(&mut app);
-    assert_eq!(
-        app.workspace.active_doc().expect("active document").full_text(),
-        "# Root\n## Renamed\n### Child\n## Next\n"
-    );
+    assert_eq!(active_document_text(&app), "# Root\n## Renamed\n### Child\n## Next\n");
 }
 
 #[test]
@@ -3067,11 +3113,11 @@ fn mmap_tab_creates_empty_child_and_enter_creates_empty_sibling() {
     app.sync_plugin_state();
 
     app.dispatch_transactional_edit_for_test(EditCommand::Tab);
-    let after_child = app.workspace.active_doc().expect("active document").full_text();
+    let after_child = active_document_text(&app);
     assert!(after_child.contains("###\n"));
 
     app.dispatch_transactional_edit_for_test(EditCommand::InsertNewline);
-    let after_sibling = app.workspace.active_doc().expect("active document").full_text();
+    let after_sibling = active_document_text(&app);
     let parsed = textora_markdown::mmf::parser::parse(&after_sibling).expect("parse edited map");
     assert_eq!(parsed.root.children[0].children.len(), 2);
     assert!(parsed.root.children[0].children.iter().all(|child| child.title.is_empty()));
@@ -3087,13 +3133,10 @@ fn mmap_demote_adjusts_whole_subtree_and_undoes_once() {
     select_mmap_source_object(&mut app, second_range);
 
     app.dispatch_transactional_edit(ui::plugin::EditIntent::DemoteObject, None);
-    assert_eq!(
-        app.workspace.active_doc().expect("active document").full_text(),
-        "# Root\n## First\n### Second\n#### Leaf\n"
-    );
+    assert_eq!(active_document_text(&app), "# Root\n## First\n### Second\n#### Leaf\n");
 
     undo_active_mmap_edit(&mut app);
-    assert_eq!(app.workspace.active_doc().expect("active document").full_text(), source);
+    assert_eq!(active_document_text(&app), source);
 }
 
 #[test]
@@ -3106,13 +3149,10 @@ fn mmap_selected_node_delete_removes_subtree_then_undo_restores_it() {
     select_mmap_source_object(&mut app, parent_range);
 
     app.dispatch_transactional_edit_for_test(EditCommand::DeleteForward);
-    assert_eq!(
-        app.workspace.active_doc().expect("active document").full_text(),
-        "# Root\n## Next\n"
-    );
+    assert_eq!(active_document_text(&app), "# Root\n## Next\n");
 
     undo_active_mmap_edit(&mut app);
-    assert_eq!(app.workspace.active_doc().expect("active document").full_text(), source);
+    assert_eq!(active_document_text(&app), source);
 }
 
 #[test]
@@ -3123,14 +3163,13 @@ fn mmap_preedit_does_not_change_document_until_commit() {
     let selected_range = tree.root.children[0].subtree_source_range.clone();
     let mut app = app_with_mmap_source(source);
     select_mmap_source_object(&mut app, selected_range);
-    app.preedit_text = "ni".into();
-    app.preedit_cursor = Some((2, 2));
+    set_editor_preedit_for_test(&mut app, "ni", Some((2, 2)));
     app.sync_plugin_state();
 
-    assert_eq!(app.workspace.active_doc().expect("active document").full_text(), source);
+    assert_eq!(active_document_text(&app), source);
 
     app.dispatch_transactional_edit_for_test(EditCommand::InsertChar("你".into()));
-    assert_eq!(app.workspace.active_doc().expect("active document").full_text(), "# Root\n## 你\n");
+    assert_eq!(active_document_text(&app), "# Root\n## 你\n");
 }
 
 #[test]
@@ -3189,8 +3228,8 @@ fn mmap_canvas_tab_switch_restores_each_session_and_new_doc_item_refits() {
         );
     }
 
-    let first_id = app.workspace.tab_id_at(0).expect("first tab id");
-    let second_id = app.workspace.tab_id_at(1).expect("second tab id");
+    let first_id = app.editor_tab_id_at(0).expect("first tab id");
+    let second_id = app.editor_tab_id_at(1).expect("second tab id");
     for id in [first_id, second_id] {
         app.tab_session_mut(id)
             .expect("test tab session")
@@ -3844,8 +3883,7 @@ fn sync_plugin_state_pushes_source_and_cursor() {
     doc.cursor_move_to_offset("hello **world**".len());
     app.push_entry_for_test(doc, Box::new(RecordingWysiwygPlugin::new(state.clone())));
     app.switch_workspace_for_test(0);
-    app.preedit_text = "ni".into();
-    app.preedit_cursor = Some((2, 2));
+    set_editor_preedit_for_test(&mut app, "ni", Some((2, 2)));
 
     app.sync_plugin_state();
 
@@ -3981,9 +4019,8 @@ fn ime_commit_clears_preedit_and_preferred_x() {
     app.switch_workspace_for_test(0);
 
     // Set preedit/composition state as if IME was active
-    app.preedit_text = "ni".into();
-    app.preedit_cursor = Some((1, 2));
-    app.wysiwyg_preferred_x = Some(100.0);
+    set_editor_preedit_for_test(&mut app, "ni", Some((1, 2)));
+    app.editor_runtime.set_preferred_x(Some(100.0));
 
     // Simulate the commit path: insert char, sync, clear
     {
@@ -3993,13 +4030,13 @@ fn ime_commit_clears_preedit_and_preferred_x() {
     app.sync_plugin_state();
 
     // Clear IME state — these are the lines added to the commit handler
-    app.preedit_text.clear();
-    app.preedit_cursor = None;
-    app.wysiwyg_preferred_x = None;
+    set_editor_preedit_for_test(&mut app, "", None);
+    app.editor_runtime.set_preferred_x(None);
 
-    assert!(app.preedit_text.is_empty());
-    assert!(app.preedit_cursor.is_none());
-    assert!(app.wysiwyg_preferred_x.is_none());
+    let (preedit_text, preedit_cursor) = app.editor_runtime.preedit();
+    assert!(preedit_text.is_empty());
+    assert!(preedit_cursor.is_none());
+    assert!(app.editor_runtime.preferred_x().is_none());
 }
 
 #[test]
@@ -4083,7 +4120,7 @@ fn wysiwyg_vertical_navigation_preserves_starting_target_x_across_short_line() {
         "first vertical move should seed target_x from the starting cursor rect"
     );
     assert_eq!(
-        app.wysiwyg_preferred_x,
+        app.editor_runtime.preferred_x(),
         Some(ANCHOR_X),
         "preferred x should remain the starting column after landing on a short line"
     );
@@ -4318,7 +4355,7 @@ fn wysiwyg_preedit_cursor_rect_resolves_with_cursor_window_rect() {
     app.switch_workspace_for_test(0);
 
     // Set preedit text to simulate IME composition
-    app.preedit_text = "ni".to_string();
+    set_editor_preedit_for_test(&mut app, "ni", None);
 
     // Search not visible: preedit should render
     assert!(!app.active_tab_session().unwrap().search_state().panel_visible);

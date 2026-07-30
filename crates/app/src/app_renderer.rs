@@ -9,6 +9,7 @@ use std::time::Instant;
 
 use crate::app::App;
 use crate::render_state::GpuState;
+use appkit_shell::editor_runtime::{EditorFrame, RenderResources};
 use ui::canvas::CanvasViewportSnapshot;
 use ui::plugin::{PLUGIN_EDITOR, PLUGIN_MARKDOWN_EDITOR, PLUGIN_NOVEL_VIEW};
 
@@ -681,10 +682,12 @@ impl App {
         screen_h: f32,
         tab_bar_height: f32,
     ) -> Vec<GlyphVertex> {
-        let Some(dv) = self.workspace.active_doc() else {
+        let line_count = self.active_document_line_count();
+        if line_count == 0 {
             return vec![];
-        };
-        let gutter_w = self.settings.gutter_width(dv.line_count()) * self.scale_factor as f32;
+        }
+        let gutter_w =
+            self.settings.gutter_width(line_count) * self.editor_runtime.scale_factor() as f32;
         if gutter_w <= 0.0 {
             return vec![];
         }
@@ -733,8 +736,9 @@ impl App {
         tab_bar_height: f32,
         tree_dirty: &mut bool,
         metrics: &ui::settings::UiMetrics,
+        resources: &mut RenderResources,
     ) -> Vec<GlyphVertex> {
-        let lc = self.workspace.active_doc().map(|dv| dv.line_count()).unwrap_or(0);
+        let lc = self.active_document_line_count();
         let gutter_w = self.settings.gutter_width(lc) * metrics.dpi;
         let left_margin =
             self.toc_left_offset() + self.editor_left_margin_with_metrics(lc, metrics);
@@ -743,43 +747,42 @@ impl App {
         let Some(tab_id) = self.active_tab_id() else {
             return vec![];
         };
-        let (text_opt, gpu_opt) = (self.text.as_mut(), self.gpu.as_ref());
-        let (Some(text), Some(gpu)) = (text_opt, gpu_opt) else { return vec![] };
-        let Some(mut tab) = crate::app_tab::compose_tab_session_mut(
-            &mut self.workspace,
-            &mut self.tab_runtime_store,
-            tab_id,
-        ) else {
+        let App { editor_runtime, ui_shell, preedit_advance_px, current_theme, settings, .. } =
+            self;
+        let (Some(text), Some(gpu)) = (resources.text.as_mut(), resources.gpu.as_ref()) else {
             return vec![];
         };
+        let (preedit_text, _) = editor_runtime.preedit();
 
         let screen_w = gpu.ctx.config.width as f32;
         let screen_h = gpu.ctx.config.height as f32;
 
+        let Some(mut tab) = editor_runtime.tab_session_mut(tab_id) else {
+            return vec![];
+        };
         let search_has_focus =
-            tab.search_state().panel_visible && self.ui_shell.search_bar_has_keyboard_focus();
+            tab.search_state().panel_visible && ui_shell.search_bar_has_keyboard_focus();
 
-        let (preedit_advance_px, preedit_cursor_col) = if !self.preedit_text.is_empty()
-            && !search_has_focus
+        let (preedit_advance, preedit_cursor_col) = if !preedit_text.is_empty() && !search_has_focus
         {
             let font_size = metrics.font_size;
-            let adv = measure_preedit_advance_px(&mut text.shaper, &self.preedit_text, font_size);
-            self.preedit_advance_px = adv;
-            (adv, tab.document.cursor_column())
+            let advance = measure_preedit_advance_px(&mut text.shaper, &preedit_text, font_size);
+            *preedit_advance_px = advance;
+            (advance, tab.document.cursor_column())
         } else {
-            self.preedit_advance_px = 0.0;
+            *preedit_advance_px = 0.0;
             (0.0, 0)
         };
 
-        let ctx = ui::gutter::RenderContext {
-            theme: &self.current_theme,
+        let context = ui::gutter::RenderContext {
+            theme: current_theme,
             screen_w,
             screen_h,
             left_margin,
             tab_bar_height,
             is_active_tab: true,
             gutter_width: gutter_w,
-            preedit_advance_px,
+            preedit_advance_px: preedit_advance,
             preedit_cursor_col,
         };
 
@@ -788,17 +791,17 @@ impl App {
         let vertices = crate::render_pipeline::shape_visible_lines(
             metrics,
             min_punct_ratio,
-            &ctx,
+            &context,
             tab.document,
             &mut presentation,
             text,
             gpu,
             &mut advance_cache,
-            &mut self.frame_cache.cluster_pool,
-            &mut self.frame_cache.first_line,
-            &mut self.frame_cache.last_line,
+            &mut resources.frame_cache.cluster_pool,
+            &mut resources.frame_cache.first_line,
+            &mut resources.frame_cache.last_line,
             tree_dirty,
-            self.settings.word_wrap,
+            settings.word_wrap,
         );
         tab.restore_presentation(presentation);
         tab.restore_advance_cache(advance_cache);
@@ -806,10 +809,22 @@ impl App {
     }
 
     pub(crate) fn render(&mut self) -> Option<()> {
+        let mut render_resources = self.editor_runtime.take_render_resources();
+        let mut frame = self.editor_runtime.begin_frame().ok()?;
+        let result = self.render_with_runtime_resources(&mut render_resources, &mut frame);
+        let _frame_outcome = frame.present();
+        self.editor_runtime.restore_render_resources(render_resources);
+        result
+    }
+
+    fn render_with_runtime_resources(
+        &mut self,
+        resources: &mut RenderResources,
+        frame: &mut EditorFrame,
+    ) -> Option<()> {
         let _render_t0 = std::time::Instant::now();
-        let _frame_interval_us = _render_t0.duration_since(self.last_render_time).as_micros();
-        self.last_render_time = _render_t0;
-        if self.workspace.is_empty() || self.workspace.active_index() >= self.workspace.len() {
+        let _frame_interval_us = self.editor_runtime.note_render_started(_render_t0);
+        if self.editor_is_empty() || self.active_editor_index().is_none() {
             return None;
         }
         self.needs_redraw = false;
@@ -831,9 +846,8 @@ impl App {
         let mut perf_editor_selection_us = 0;
         let mut perf_editor_search_us = 0;
         let mut perf_editor_cursor_us = 0;
-        let mut perf_chrome_drain_us = 0;
         let sync_plugin_state_started_at = Instant::now();
-        let mut text_state = self.text.take();
+        let mut text_state = resources.text.take();
         let normal_canvas_frame = if let Some(text) = text_state.as_mut() {
             let frame = self.run_normal_canvas_frame(&mut text.shaper);
             if frame.is_none() {
@@ -846,18 +860,18 @@ impl App {
             None
         };
         let perf_sync_prepare_us = sync_plugin_state_started_at.elapsed().as_micros();
-        self.text = text_state;
+        resources.text = text_state;
 
         let content_top = self.content_top_offset();
 
         let mut vertices = Vec::new();
         let _editor_r = self.ui_shell.editor_rect();
-        let dv = self.workspace.active_doc();
+        let line_count = self.active_document_line_count();
         let toc_off = self.toc_left_offset();
         let shows_gutter = self.active_shows_gutter();
 
         let gutter_left_margin =
-            dv.map(|dv| toc_off + self.editor_left_margin(dv.line_count())).unwrap_or(0.0);
+            if line_count > 0 { toc_off + self.editor_left_margin(line_count) } else { 0.0 };
 
         if shows_gutter {
             vertices.extend(self.gutter_bg_vertices(
@@ -887,14 +901,8 @@ impl App {
                 let active_id = self.active_tab_id();
                 let theme = self.current_theme.clone();
                 let toc_max_depth = self.settings.toc_max_depth;
-                let shaper = self.text.as_mut().map(|text| &mut text.shaper);
-                let session = active_id.and_then(|id| {
-                    crate::app_tab::compose_tab_session_mut(
-                        &mut self.workspace,
-                        &mut self.tab_runtime_store,
-                        id,
-                    )
-                });
+                let shaper = resources.text.as_mut().map(|text| &mut text.shaper);
+                let session = active_id.and_then(|id| self.editor_runtime.tab_session_mut(id));
                 if let Some(mut tab) = session
                     && handles_own_rendering
                 {
@@ -925,7 +933,7 @@ impl App {
             let screen = ui::core::Screen::new(screen_w, screen_h);
             let mut deferred_preview_verts: Option<Vec<render::GlyphVertex>> = None;
             if needs_drain {
-                if let (Some(text), Some(gpu)) = (self.text.as_mut(), self.gpu.as_ref()) {
+                if let (Some(text), Some(gpu)) = (resources.text.as_mut(), resources.gpu.as_ref()) {
                     // Vertex caching handled by plugin internally
                     let plugin_drain_started_at = Instant::now();
                     deferred_preview_verts =
@@ -956,8 +964,8 @@ impl App {
                     let sel_verts = crate::paint_backend::drain(
                         sel_dl,
                         screen,
-                        self.text.as_mut().map(|t| &mut *t),
-                        self.gpu.as_ref(),
+                        resources.text.as_mut().map(|t| &mut *t),
+                        resources.gpu.as_ref(),
                     );
                     perf_plugin_selection_drain_us = sel_drain_started_at.elapsed().as_micros();
 
@@ -1006,8 +1014,8 @@ impl App {
                     let search_verts = crate::paint_backend::drain(
                         search_dl,
                         screen,
-                        self.text.as_mut().map(|t| &mut *t),
-                        self.gpu.as_ref(),
+                        resources.text.as_mut().map(|t| &mut *t),
+                        resources.gpu.as_ref(),
                     );
                     perf_plugin_search_drain_us = search_drain_started_at.elapsed().as_micros();
                     deferred_search_verts = Some(search_verts);
@@ -1033,11 +1041,12 @@ impl App {
             let search_has_focus =
                 self.active_tab_session().is_some_and(|tab| tab.search_state().panel_visible)
                     && self.ui_shell.search_bar_has_keyboard_focus();
-            if !self.preedit_text.is_empty() && !search_has_focus {
-                if let Some(text) = self.text.as_mut() {
+            let (preedit_text, _) = self.editor_runtime.preedit();
+            if !preedit_text.is_empty() && !search_has_focus {
+                if let Some(text) = resources.text.as_mut() {
                     self.preedit_advance_px = measure_preedit_advance_px(
                         &mut text.shaper,
-                        &self.preedit_text,
+                        &preedit_text,
                         metrics.font_size,
                     );
                 } else {
@@ -1054,7 +1063,8 @@ impl App {
 
             let mut tree_dirty = false;
             let shape_started_at = Instant::now();
-            let shape_verts = self.shape_visible_lines(content_top, &mut tree_dirty, &metrics);
+            let shape_verts =
+                self.shape_visible_lines(content_top, &mut tree_dirty, &metrics, resources);
             perf_editor_shape_us = shape_started_at.elapsed().as_micros();
 
             if tree_dirty {
@@ -1144,7 +1154,8 @@ impl App {
             let cursor_started_at = Instant::now();
             vertices.extend(self.cursor_vertices(screen_w, screen_h, content_top));
             // IME preedit text rendering for document cursor
-            if !self.preedit_text.is_empty() {
+            let (preedit_text, _) = self.editor_runtime.preedit();
+            if !preedit_text.is_empty() {
                 let search_has_focus =
                     self.active_tab_session().is_some_and(|tab| tab.search_state().panel_visible)
                         && self.ui_shell.search_bar_has_keyboard_focus();
@@ -1152,14 +1163,10 @@ impl App {
                 if !search_has_focus {
                     let ime_fallback_x = toc_off + self.editor_left_margin(0);
                     let active_tab_id = self.active_tab_id();
-                    if let (Some(text), Some(gpu)) = (&mut self.text, &self.gpu)
-                        && let Some(tab) = active_tab_id.and_then(|id| {
-                            crate::app_tab::compose_tab_session(
-                                &self.workspace,
-                                &self.tab_runtime_store,
-                                id,
-                            )
-                        })
+                    if let (Some(text), Some(gpu)) =
+                        (resources.text.as_mut(), resources.gpu.as_ref())
+                        && let Some(tab) =
+                            active_tab_id.and_then(|id| self.editor_runtime.tab_session(id))
                     {
                         if let Some(cursor_vl) = tab.cursor_visual_line() {
                             let line_height = metrics.line_height;
@@ -1169,7 +1176,7 @@ impl App {
                                 content_top + cursor_vl as f32 * line_height + sub_line_offset;
                             vertices.extend(crate::render_pipeline::preedit_text_vertices(
                                 &metrics,
-                                &self.preedit_text,
+                                &preedit_text,
                                 cursor_x,
                                 cursor_y,
                                 text,
@@ -1181,7 +1188,7 @@ impl App {
                         } else {
                             vertices.extend(crate::render_pipeline::preedit_text_vertices(
                                 &metrics,
-                                &self.preedit_text,
+                                &preedit_text,
                                 ime_fallback_x,
                                 content_top,
                                 text,
@@ -1203,21 +1210,20 @@ impl App {
             let chrome_list = self.ui_shell.paint_chrome(
                 &self.current_theme,
                 dpi,
-                self.text.as_mut().map(|t| &mut t.shaper),
+                resources.text.as_mut().map(|t| &mut t.shaper),
             );
-            if !chrome_list.cmds.is_empty() {
-                let screen = ui::core::Screen::new(screen_w, screen_h);
-                if let (Some(text), Some(gpu)) = (self.text.as_mut(), self.gpu.as_ref()) {
-                    let chrome_drain_started_at = Instant::now();
-                    let chrome_verts =
-                        crate::paint_backend::drain(chrome_list, screen, Some(text), Some(gpu));
-                    perf_chrome_drain_us = chrome_drain_started_at.elapsed().as_micros();
-                    vertices.extend(chrome_verts);
-                }
-            }
+            frame.with_paint_context(|context| {
+                context.list.cmds.extend(chrome_list.cmds);
+            });
         }
 
-        let gpu = self.gpu.as_mut()?;
+        let editor_rect = self.ui_shell.editor_rect();
+        frame.paint_editor_vertices(editor_rect, vertices.drain(..)).ok()?;
+        let frame_drain_started_at = Instant::now();
+        frame.drain_into(ui::core::Screen::new(screen_w, screen_h), resources, &mut vertices);
+        let perf_chrome_drain_us = frame_drain_started_at.elapsed().as_micros();
+
+        let gpu = resources.gpu.as_mut()?;
         let gpu: &mut GpuState = gpu;
         let output = match gpu.ctx.surface.get_current_texture() {
             wgpu::CurrentSurfaceTexture::Success(tex)
@@ -1230,7 +1236,7 @@ impl App {
             label: Some("render encoder"),
         });
 
-        if let Some(text) = self.text.as_mut() {
+        if let Some(text) = resources.text.as_mut() {
             if !vertices.is_empty() {
                 let vertex_bytes = bytemuck::cast_slice(&vertices);
                 let needed = vertices.len() as u32;
@@ -1331,9 +1337,9 @@ impl App {
         output.present();
         let perf_gpu_submit_us = gpu_submit_started_at.elapsed().as_micros();
 
-        if !self.first_frame_presented {
-            self.first_frame_presented = true;
-            if let Some(ref w) = self.window {
+        if !self.editor_runtime.first_frame_presented() {
+            self.editor_runtime.mark_frame_presented();
+            if let Some(w) = self.editor_runtime.window() {
                 crate::sys::macos_titlebar::set_window_alpha(w, 1.0);
             }
             eprintln!(
@@ -1392,25 +1398,23 @@ impl App {
             );
         }
 
-        self.render_frame_count = self.render_frame_count.wrapping_add(1);
+        let render_frame_count = self.editor_runtime.render_frame_count();
         #[cfg(debug_assertions)]
-        if self.render_frame_count.is_multiple_of(60) {
+        if render_frame_count.is_multiple_of(60) {
             eprintln!(
                 "[perf] frame#{} total={}us interval={}us",
-                self.render_frame_count, _total_render_us, _frame_interval_us,
+                render_frame_count, _total_render_us, _frame_interval_us,
             );
         }
 
         // ── Atlas exhaustion recovery ──
-        if self.text.as_ref().is_some_and(|t| t.atlas.allocation_failed) {
-            if let Some(text) = &mut self.text {
+        if resources.text.as_ref().is_some_and(|t| t.atlas.allocation_failed) {
+            if let Some(text) = resources.text.as_mut() {
                 text.atlas.clear();
                 text.preview_cache.invalidate_all();
                 text.atlas_generation += 1;
             }
-            let tab_ids: Vec<_> = (0..self.workspace.len())
-                .filter_map(|index| self.workspace.tab_id_at(index))
-                .collect();
+            let tab_ids = self.editor_tab_ids_in_order();
             for tab_id in tab_ids {
                 if let Some(mut tab) = self.tab_session_mut(tab_id) {
                     tab.invalidate_render_cache_all();
@@ -1461,6 +1465,7 @@ impl App {
                     .map(|v| (v.viewport_height(), v.total_display_rows(), v.scroll_top()))
             };
             let conflict_label = self.file_safety_status_label();
+            let (preedit_text, _) = self.editor_runtime.preedit();
             let active_shell_input = self.active_tab_session().map(|entry| {
                 let document = entry.document;
                 let status = StatusBarInput {
@@ -1476,7 +1481,7 @@ impl App {
                 let search_input = SearchBarSnapshot {
                     query: search.query.clone(),
                     preedit_text: if search.panel_visible {
-                        self.preedit_text.clone()
+                        preedit_text.clone()
                     } else {
                         String::new()
                     },
@@ -1503,24 +1508,28 @@ impl App {
             // Phase 6：注入 tab bar 数据
             {
                 let tab_infos: Vec<ui::tab_bar::TabInfo> = self
-                    .workspace
-                    .tab_indices()
-                    .filter_map(|i| {
-                        let dv = self.workspace.entry_doc(i)?;
+                    .editor_tab_ids_in_order()
+                    .into_iter()
+                    .enumerate()
+                    .filter_map(|(index, tab_id)| {
+                        let save_context = self.editor_save_context(tab_id)?;
                         Some(ui::tab_bar::TabInfo {
-                            title: self.workspace.entry_title(i)?,
-                            file_path: dv.file_path.clone(),
-                            is_dirty: dv.dirty,
-                            pinned: self.workspace.is_pinned(i),
+                            title: save_context.title,
+                            file_path: save_context.file_path,
+                            is_dirty: save_context.dirty,
+                            pinned: self.is_editor_tab_pinned_at(index),
                             language: String::new(),
                         })
                     })
                     .collect();
+                let active_tab_index = self.active_editor_index();
+                let has_back_history = self.editor_has_back_history();
+                let has_forward_history = self.editor_has_forward_history();
                 self.ui_shell.set_tabs_input(
                     tab_infos.clone(),
-                    Some(self.workspace.active_index()),
-                    self.workspace.has_back_history(),
-                    self.workspace.has_forward_history(),
+                    active_tab_index,
+                    has_back_history,
+                    has_forward_history,
                     self.ui_shell.tab_bar_hovered_index(),
                     self.tab_scroll.current(),
                 );
@@ -1530,12 +1539,12 @@ impl App {
                 self.ui_shell.set_sidebar_input(
                     self.ui_shell.sidebar_cfg().clone(),
                     tab_infos,
-                    Some(self.workspace.active_index()),
+                    active_tab_index,
                     traffic_inset,
                 );
 
-                let file_path = self.workspace.active_doc().and_then(|dv| dv.file_path.clone());
-                let toggle_target = self.workspace.toggle_target();
+                let file_path = self.active_editor_file_path();
+                let toggle_target = self.active_editor_toggle_target();
                 let can_toggle = toggle_target.is_some();
                 let toggled = self.active_is_toggled();
                 let toggle_label = toggle_target.map(|name| match name {
@@ -1692,9 +1701,8 @@ impl App {
         let mut source_build_us = 0;
         let mut update_source_us = 0;
         let mut source_len = 0;
-        let preedit_text = self.preedit_text.clone();
+        let (preedit_text, preedit_cursor) = self.editor_runtime.preedit();
         let preedit_len = preedit_text.len();
-        let preedit_cursor = self.preedit_cursor;
         let should_sync_selection = !self.mouse.is_down;
         let mouse_is_down = self.mouse.is_down;
         let Some(mut tab) = self.active_tab_session_mut() else {

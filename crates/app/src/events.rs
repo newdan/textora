@@ -17,6 +17,7 @@ use crate::input::key_to_command;
 use crate::menu_handler::AppCommand;
 use crate::mouse::hit_test_with_sub_line_offset as mouse_hit_test;
 use appkit_core::workspace::types::TabId;
+use appkit_shell::editor_runtime::MouseCapture;
 use appkit_shell::window_input::{
     command_allowed_during_preedit, is_ime_process_key, ui_modifiers,
 };
@@ -33,7 +34,9 @@ fn mmap_cursor_icon(app: &mut App, px: f32, py: f32) -> Option<CursorIcon> {
         return None;
     }
 
-    if app.mouse.canvas_drag.as_ref().is_some_and(|session| session.started) {
+    if app.editor_runtime.pointer_capture() == MouseCapture::CanvasDrag
+        || app.mouse.canvas_drag.as_ref().is_some_and(|session| session.started)
+    {
         return Some(CursorIcon::Grabbing);
     }
 
@@ -64,7 +67,8 @@ pub(crate) fn handle_keyboard(app: &mut App, event: &winit::event::KeyEvent) -> 
 
     let key_code =
         crate::app_lifecycle::winit_key_to_keycode(&event.logical_key, event.text.as_deref());
-    let modifiers = ui_modifiers(app.modifiers);
+    let input_modifiers = app.editor_runtime.input_modifiers();
+    let modifiers = ui_modifiers(input_modifiers);
     let mapped_intent = key_code.as_ref().and_then(|key_code| {
         app.active_tab_session().and_then(|tab| tab.map_key_intent(key_code, &modifiers))
     });
@@ -76,9 +80,10 @@ pub(crate) fn handle_keyboard(app: &mut App, event: &winit::event::KeyEvent) -> 
 
     // 条件 2：当前正处于 IME composition（preedit_text 非空）。
     // 保留导航 / 快捷键命令，跳过 InsertChar。
-    if !app.preedit_text.is_empty() {
-        if let Some(cmd) = key_to_command(&event.logical_key, app.modifiers)
-            && command_allowed_during_preedit(&app.preedit_text, &cmd)
+    let (preedit_text, _) = app.editor_runtime.preedit();
+    if !preedit_text.is_empty() {
+        if let Some(cmd) = key_to_command(&event.logical_key, input_modifiers)
+            && command_allowed_during_preedit(&preedit_text, &cmd)
         {
             actions.push(AppAction::ExecuteAppCommands(vec![AppCommand::Edit(cmd)]));
         }
@@ -86,7 +91,7 @@ pub(crate) fn handle_keyboard(app: &mut App, event: &winit::event::KeyEvent) -> 
     }
 
     let key_text = event.logical_key.to_text();
-    if app.modifiers.super_key() && app.modifiers.shift_key() && key_text == Some("p") {
+    if input_modifiers.super_key() && input_modifiers.shift_key() && key_text == Some("p") {
         actions.push(AppAction::TogglePin);
         return actions;
     }
@@ -99,7 +104,7 @@ pub(crate) fn handle_keyboard(app: &mut App, event: &winit::event::KeyEvent) -> 
         }
     }
 
-    let fallback_cmd = key_to_command(&event.logical_key, app.modifiers);
+    let fallback_cmd = key_to_command(&event.logical_key, input_modifiers);
 
     // Reading mode: Space acts as PageDown instead of inserting a character.
     let is_reading_mode = app.active_is_reading_mode();
@@ -262,7 +267,7 @@ pub(crate) fn handle_cursor_moved(app: &mut App, px: f32, py: f32) -> Vec<AppAct
     // so subsequent frames can dedupe HoverTab(None) pushes (方案 2026-07-06 阶段 4a).
     for a in &widget_actions {
         if let AppAction::HoverTab(id_opt) = a {
-            app.mouse.last_hover_tab = id_opt.and_then(|id| app.workspace.index_of(id));
+            app.mouse.last_hover_tab = id_opt.and_then(|id| app.editor_tab_index(id));
         }
     }
     actions.extend(widget_actions);
@@ -280,7 +285,7 @@ pub(crate) fn handle_cursor_moved(app: &mut App, px: f32, py: f32) -> Vec<AppAct
 
     // During an editor drag (mouse button held), don't let widgets consume
     // the event — the editor must receive EditorCursorMoved for selection.
-    let dragging = app.mouse.is_down;
+    let dragging = app.mouse.is_down || app.editor_runtime.pointer_capture() != MouseCapture::None;
 
     if !dragging && consumed {
         // Widget consumed the event (sidebar click, scrollbar, etc.) — stop here.
@@ -302,7 +307,7 @@ pub(crate) fn handle_cursor_moved(app: &mut App, px: f32, py: f32) -> Vec<AppAct
 
     // 4. Editor hit-test fallthrough
     let content_top = app.content_top_offset();
-    let line_count = app.workspace.active_doc().map(|dv| dv.line_count()).unwrap_or(0);
+    let line_count = app.active_document_line_count();
     let left_margin = app.editor_left_margin(line_count);
     let gutter_w = app.settings.gutter_width(line_count) * app.ui_metrics().dpi;
     let hit = {
@@ -388,7 +393,8 @@ pub(crate) fn handle_mouse_input_left(
 
     // During an editor drag (mouse button held), don't let widgets consume
     // MouseUp — the editor must receive it to reset is_down.
-    if consumed && !app.mouse.is_down {
+    if consumed && !app.mouse.is_down && app.editor_runtime.pointer_capture() == MouseCapture::None
+    {
         return actions;
     }
 
@@ -541,7 +547,7 @@ fn translate_search_action(sa: &ui::search_bar::SearchBarAction, actions: &mut V
 }
 
 fn tab_id_for_index(app: &App, index: usize) -> Option<TabId> {
-    app.workspace.tab_id_at(index)
+    app.editor_tab_id_at(index)
 }
 
 fn popup_tab_id_for_index(app: &App, index: usize) -> Option<TabId> {
@@ -611,9 +617,9 @@ fn translate_tab_action(ta: &ui::tab_bar::TabBarAction, app: &App, actions: &mut
         TA::NavigateForward => {}
         TA::OpenOverflowMenu => actions.push(AppAction::OpenPopupOverflow),
         TA::OpenContextMenuPx { tab_index, anchor_px } => {
-            let is_pinned = app.workspace.is_pinned(*tab_index);
-            let screen_w = app.gpu.as_ref().map(|g| g.ctx.config.width as f32).unwrap_or(800.0);
-            let screen_h = app.gpu.as_ref().map(|g| g.ctx.config.height as f32).unwrap_or(600.0);
+            let is_pinned = app.is_editor_tab_pinned_at(*tab_index);
+            let screen_w = app.screen_width();
+            let screen_h = app.screen_height();
             let dpi = app.ui_metrics().dpi;
             let pm = ui::popup_menu::PopupMenu::context_px(
                 *tab_index,
@@ -722,7 +728,7 @@ mod tests {
     use crate::sync_settings_types::SyncSettingsInput;
     use crate::textora_settings_overlay::TextoraSettingsOverlay;
     use crate::workspace::ViewportDimensions;
-    use crate::workspace_tab_factory::{self, ProductPreparedTab};
+    use crate::workspace_tab_factory::ProductPreparedTab;
 
     use std::cell::RefCell;
     use std::rc::Rc;
@@ -732,13 +738,12 @@ mod tests {
     fn open_untitled_fixture(app: &mut App) {
         let dimensions = ViewportDimensions { visible_rows: 22, viewport_height: 22.0 };
         let ProductPreparedTab { prepared, suggested_file_name } =
-            workspace_tab_factory::prepare_untitled(&app.workspace, dimensions);
-        let effect = app.workspace.open_prepared_tab(
-            &mut app.tab_runtime_store,
+            app.prepare_editor_untitled(dimensions);
+        let _ = app.install_editor_tab(
             prepared,
             suggested_file_name,
+            appkit_shell::editor_runtime::OpenDisposition::Persistent,
         );
-        effect.reconcile_runtime_store(&mut app.tab_runtime_store);
     }
 
     struct MmapCursorTestPlugin {
@@ -1246,7 +1251,7 @@ mod tests {
         for _ in 0..4 {
             open_untitled_fixture(&mut app);
         }
-        let expected_id = app.workspace.tab_id_at(3).unwrap();
+        let expected_id = app.editor_tab_id_at(3).unwrap();
         let mut actions: Vec<AppAction> = Vec::new();
         let ta = ui::tab_bar::TabBarAction::HoverTab(Some(3));
         translate_tab_action(&ta, &app, &mut actions);
@@ -1277,8 +1282,8 @@ mod tests {
             open_untitled_fixture(&mut app);
         }
 
-        let closed_id = app.workspace.tab_id_at(0).expect("tab 0 must exist");
-        let original_target_id = app.workspace.tab_id_at(1).expect("tab 1 must exist");
+        let closed_id = app.editor_tab_id_at(0).expect("tab 0 must exist");
+        let original_target_id = app.editor_tab_id_at(1).expect("tab 1 must exist");
         let popup_action = ui::popup_menu::PopupMenuAction::Context {
             action: ui::popup_menu::ContextMenuAction::Close,
             tab_index: 1,
@@ -1291,13 +1296,15 @@ mod tests {
         );
 
         let effect =
-            app.workspace.close_entry(0).expect("closing tab 0 should reorder remaining tabs");
+            app.close_editor_tab(closed_id).expect("closing tab 0 should reorder remaining tabs");
         assert_eq!(
             effect,
             crate::workspace::WorkspaceEffect::Closed { closed: closed_id, activated: None }
         );
-        effect.reconcile_runtime_store(&mut app.tab_runtime_store);
-        assert_eq!(app.workspace.tab_ids(), app.tab_runtime_store.ids());
+        assert_eq!(
+            app.editor_tab_ids_in_order().into_iter().collect::<std::collections::HashSet<_>>(),
+            app.editor_runtime_tab_ids()
+        );
 
         let mut actions = Vec::new();
         translate_popup_action(&popup_action, &app, &mut actions);

@@ -5,10 +5,11 @@ use crate::app_event::AppEvent;
 use crate::app::compute_cursor_phase;
 
 use appkit_shell::ProductHost;
+use appkit_shell::editor_runtime::{EditorFocus, EditorInputContext};
 pub(crate) use appkit_shell::window_input::winit_key_to_keycode;
 use appkit_shell::window_input::{scroll_delta_pixels, ui_modifiers};
 use std::path::{Path, PathBuf};
-use std::time::{Duration, Instant};
+use std::time::Instant;
 use winit::application::ApplicationHandler;
 use winit::event::{Ime, MouseButton, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, ControlFlow};
@@ -27,6 +28,17 @@ use ui::render_geom::{AdvanceCacheEntry, compute_selection_highlight_quads};
 
 // Font size and line height are now in Settings
 const FALLBACK_LOCAL_DEVICE_SHORT_ID: &str = "local";
+
+fn editor_input_context(app: &App) -> EditorInputContext {
+    let editor_focus =
+        matches!(app.ui_shell.keyboard_focus(), crate::ui_shell::KeyboardFocusTarget::Editor)
+            && app.editor_runtime.window_focused();
+    EditorInputContext {
+        editor_rect: app.ui_shell.editor_rect(),
+        focus: if editor_focus { EditorFocus::Active } else { EditorFocus::Inactive },
+        modal_blocked: app.ui_shell.active_overlay_is_modal(),
+    }
+}
 
 /// 计算光标当前是否可见，以及下一次切换的时间点。
 
@@ -279,21 +291,16 @@ impl App {
         path: &Path,
         content: &str,
     ) -> crate::app_effect::AppEffect {
-        let effect = if let Some(index) = self.workspace.find_by_path(path) {
-            self.workspace.switch_to(index)
+        let effect = if let Some(tab_id) = self.editor_tab_id_for_path(path) {
+            self.activate_editor_tab(tab_id).unwrap_or(crate::workspace::WorkspaceEffect::None)
         } else {
             let dimensions = self.viewport_dimensions(self.screen_height());
             let crate::workspace_tab_factory::ProductPreparedTab { prepared, suggested_file_name } =
-                crate::workspace_tab_factory::prepare_external_content(
-                    &self.workspace,
-                    path,
-                    content,
-                    dimensions,
-                );
-            self.workspace.open_prepared_tab(
-                &mut self.tab_runtime_store,
+                self.prepare_external_editor_content(path, content, dimensions);
+            self.install_editor_tab(
                 prepared,
                 suggested_file_name,
+                appkit_shell::editor_runtime::OpenDisposition::Persistent,
             )
         };
         self.apply_workspace_effect(effect)
@@ -313,17 +320,18 @@ impl App {
             self.ui_shell.scale_sidebar_width(ratio);
             self.ui_shell.sidebar_clamp_width(new_dpi);
         }
-        for tab_id in self.workspace.tab_ids() {
-            if let Some(mut tab) = self.tab_session_mut(tab_id) {
+        let tab_ids = self.editor_tab_ids_in_order();
+        for tab_id in &tab_ids {
+            if let Some(mut tab) = self.tab_session_mut(*tab_id) {
                 tab.invalidate_render_cache_all();
             }
         }
         if let Some(mut tab) = self.active_tab_session_mut() {
             tab.clear_advance_cache();
         }
-        self.frame_cache.cluster_pool.clear();
-        if self.workspace.active_index() < self.workspace.len() {
-            self.init_display_map(self.workspace.active_index());
+        self.editor_runtime.clear_frame_cluster_pool();
+        if let Some(active_index) = self.active_editor_index() {
+            self.init_display_map(active_index);
         }
         self.invalidate_reshape();
         self.needs_redraw = true;
@@ -345,17 +353,22 @@ impl App {
         }
     }
 
-    fn handle_user_event(&mut self, event: AppEvent) {
+    fn handle_user_event(&mut self, event: AppEvent) -> bool {
         match event {
-            AppEvent::StartBackgroundServices => self.start_background_services(),
+            AppEvent::StartBackgroundServices => {
+                self.start_background_services();
+                false
+            }
             AppEvent::ReshapeResultsReady => {
                 self.needs_redraw = true;
+                false
             }
             AppEvent::ProductWake => {
                 let open_document_paths = self.product.drain_open_documents();
                 self.handle_open_file_requests(open_document_paths);
                 let effect = ProductHost::drain_product_events(&mut self.product);
                 self.apply_effect(effect);
+                false
             }
             AppEvent::FileSafetyResultsReady => {
                 self.drain_file_safety_results();
@@ -368,17 +381,19 @@ impl App {
                         reported
                     });
                 if monitor_reported_change {
-                    self.file_safety_next_check = Instant::now();
+                    self.editor_runtime.request_file_safety_check_now(Instant::now());
                 }
                 self.needs_redraw = true;
+                false
             }
+            AppEvent::SaveResultsReady => self.drain_save_results(),
         }
     }
 
     /// Actual resumed logic, wrapped in catch_unwind by the trait method.
     fn do_resumed(&mut self, event_loop: &ActiveEventLoop) {
         self.running = true;
-        if self.window.is_none()
+        if self.editor_runtime.window().is_none()
             && let Err(_e) = self.init_window(event_loop)
         {
             event_loop.exit();
@@ -386,16 +401,10 @@ impl App {
         }
         // Build native menu bar after window creation (NSApp is ready)
         if self.native_menu().is_none() {
-            let workspace_root = {
-                let paths: Vec<&std::path::Path> = self
-                    .workspace
-                    .entries()
-                    .iter()
-                    .map(|t| &t.value)
-                    .filter_map(|dv| dv.file_path.as_deref())
-                    .collect();
-                compute_workspace_root(&paths)
-            };
+            let summaries = self.editor_runtime.document_summaries();
+            let paths: Vec<&std::path::Path> =
+                summaries.iter().filter_map(|summary| summary.path.as_deref()).collect();
+            let workspace_root = compute_workspace_root(&paths);
             self.set_native_menu(NativeMenu::build_loading());
             let Some(event_loop_proxy) = self.event_loop_proxy.clone() else {
                 eprintln!("[startup] recent file loader unavailable: event loop proxy missing");
@@ -432,70 +441,101 @@ impl App {
         match event {
             WindowEvent::CloseRequested => {
                 // If there are unsaved changes, try to save first
-                let dirty = self.workspace.active_doc().is_some_and(|document| document.dirty);
-                if dirty
-                    && let Some(dv) = self.workspace.active_doc_mut()
-                    && dv.file_path.is_some()
-                {
-                    // Auto-save on close
-                    if let Err(e) = dv.save() {
-                        eprintln!("auto-save on close failed: {e}");
+                let dirty = self.active_tab_session().is_some_and(|tab| tab.document.dirty);
+                let file_backed =
+                    self.active_tab_session().is_some_and(|tab| tab.document.file_path.is_some());
+                if dirty && file_backed {
+                    let Some(tab_id) = self.active_tab_id() else {
+                        self.quit_app(event_loop);
+                        return;
+                    };
+                    self.pending_quit_after_save = true;
+                    if let Err(error) = self.submit_editor_save(tab_id, None) {
+                        self.pending_quit_after_save = false;
+                        eprintln!("auto-save on close failed: {error}");
+                        self.quit_app(event_loop);
                     }
+                    return;
                 }
                 // If no file path (new unsaved doc), just discard
                 self.quit_app(event_loop);
             }
             WindowEvent::ModifiersChanged(modifiers) => {
-                self.modifiers = modifiers.state();
+                self.editor_runtime.set_input_modifiers(modifiers.state());
             }
             WindowEvent::Ime(Ime::Preedit(text, cursor)) => {
-                let dpi = self.scale_factor as f32;
+                let dpi = self.editor_runtime.scale_factor() as f32;
                 if self.ui_shell.active_overlay_is_modal() {
                     let _ = self.ui_shell.forward_ime(
                         ui::core::Event::ImePreedit { text, cursor },
                         &self.current_theme,
                         dpi,
                     );
+                    let _ = self.editor_runtime.update_preedit(
+                        editor_input_context(self),
+                        String::new(),
+                        None,
+                    );
                 } else {
                     let panel_event = ui::core::Event::ImePreedit { text: text.clone(), cursor };
                     if mindmap_style_panel_consumes_ime(&self.ui_shell, &panel_event) {
+                        let _ = self.editor_runtime.update_preedit(
+                            editor_input_context(self),
+                            String::new(),
+                            None,
+                        );
                         self.needs_redraw = true;
                         return;
                     }
                     let action = self.ui_shell.forward_ime(panel_event, &self.current_theme, dpi);
                     if action.is_none() {
-                        self.preedit_text = text;
-                        self.preedit_cursor = cursor;
+                        let _ = self.editor_runtime.update_preedit(
+                            editor_input_context(self),
+                            text,
+                            cursor,
+                        );
+                    } else {
+                        let _ = self.editor_runtime.update_preedit(
+                            editor_input_context(self),
+                            String::new(),
+                            None,
+                        );
                     }
                 }
                 self.needs_redraw = true;
             }
             WindowEvent::Ime(Ime::Enabled) => {
-                let dpi = self.scale_factor as f32;
+                let dpi = self.editor_runtime.scale_factor() as f32;
                 let action =
                     self.ui_shell.forward_ime(ui::core::Event::ImeEnable, &self.current_theme, dpi);
                 if action.is_none() {
-                    self.preedit_text.clear();
-                    self.preedit_cursor = None;
+                    let _ = self.editor_runtime.update_preedit(
+                        editor_input_context(self),
+                        String::new(),
+                        None,
+                    );
                 }
                 self.needs_redraw = true;
             }
             WindowEvent::Ime(Ime::Disabled) => {
-                let dpi = self.scale_factor as f32;
+                let dpi = self.editor_runtime.scale_factor() as f32;
                 let action = self.ui_shell.forward_ime(
                     ui::core::Event::ImeDisable,
                     &self.current_theme,
                     dpi,
                 );
                 if action.is_none() {
-                    self.preedit_text.clear();
-                    self.preedit_cursor = None;
+                    let _ = self.editor_runtime.update_preedit(
+                        editor_input_context(self),
+                        String::new(),
+                        None,
+                    );
                 }
                 self.needs_redraw = true;
             }
 
             WindowEvent::Ime(Ime::Commit(text)) => {
-                let dpi = self.scale_factor as f32;
+                let dpi = self.editor_runtime.scale_factor() as f32;
                 if self.ui_shell.active_overlay_is_modal() {
                     if let Some(route) = route_modal_ime_input(
                         &mut self.ui_shell,
@@ -527,20 +567,24 @@ impl App {
                             self.dispatch_edit_command(EditCommand::InsertText(text), event_loop);
                         self.apply_effect(effect);
                         // Clear IME composition state
-                        self.preedit_text.clear();
-                        self.preedit_cursor = None;
-
+                        let _ = self.editor_runtime.update_preedit(
+                            editor_input_context(self),
+                            String::new(),
+                            None,
+                        );
                         // Reset WYSIWYG preferred x so the next vertical move
                         // doesn't anchor to a stale position
-                        self.wysiwyg_preferred_x = None;
+                        self.editor_runtime.set_preferred_x(None);
+                        self.editor_runtime.set_preferred_x(None);
                     }
                 }
             }
             WindowEvent::KeyboardInput { event, .. } if event.state.is_pressed() => {
                 if self.ui_shell.active_overlay_is_modal() {
                     let key_code = winit_key_to_keycode(&event.logical_key, event.text.as_deref());
-                    let modifiers = ui_modifiers(self.modifiers);
-                    let dpi = self.scale_factor as f32;
+                    let input_modifiers = self.editor_runtime.input_modifiers();
+                    let modifiers = ui_modifiers(input_modifiers);
+                    let dpi = self.editor_runtime.scale_factor() as f32;
                     let Some(route) = route_modal_keyboard_input(
                         &mut self.ui_shell,
                         key_code,
@@ -557,10 +601,11 @@ impl App {
                     return;
                 }
 
-                let sup = self.modifiers.super_key();
-                let shift = self.modifiers.shift_key();
-                let alt = self.modifiers.alt_key();
-                let ctrl = self.modifiers.control_key();
+                let input_modifiers = self.editor_runtime.input_modifiers();
+                let sup = input_modifiers.super_key();
+                let shift = input_modifiers.shift_key();
+                let alt = input_modifiers.alt_key();
+                let ctrl = input_modifiers.control_key();
                 if mindmap_style_panel_should_receive_keyboard(
                     &self.ui_shell,
                     &event.logical_key,
@@ -571,8 +616,8 @@ impl App {
                 ) {
                     let focused_widget_key_code =
                         winit_key_to_keycode(&event.logical_key, event.text.as_deref());
-                    let focused_widget_modifiers = ui_modifiers(self.modifiers);
-                    let dpi = self.scale_factor as f32;
+                    let focused_widget_modifiers = ui_modifiers(input_modifiers);
+                    let dpi = self.editor_runtime.scale_factor() as f32;
                     if let Some(route) = route_mindmap_style_panel_keyboard_input(
                         &mut self.ui_shell,
                         focused_widget_key_code,
@@ -600,8 +645,8 @@ impl App {
                     if let Some(kc) =
                         winit_key_to_keycode(&event.logical_key, event.text.as_deref())
                     {
-                        let mods = ui_modifiers(self.modifiers);
-                        let dpi = self.scale_factor as f32;
+                        let mods = ui_modifiers(input_modifiers);
+                        let dpi = self.editor_runtime.scale_factor() as f32;
                         if let Some(action) =
                             self.ui_shell.forward_key(kc, mods, &self.current_theme, dpi)
                         {
@@ -629,16 +674,19 @@ impl App {
                 if mode == ui::settings::ThemeMode::System {
                     self.rebuild_theme_state();
                     self.needs_redraw = true;
-                    if let Some(w) = self.window.as_ref() {
+                    if let Some(w) = self.editor_runtime.window() {
                         w.request_redraw();
                     }
                 }
             }
             WindowEvent::Resized(physical_size) => {
-                self.pending_resize = Some(physical_size);
-                let now = Instant::now();
-                if now.duration_since(self.last_resize_handled).as_millis() >= 16 {
-                    self.flush_pending_resize();
+                if let appkit_shell::editor_runtime::ResizeOutcome::Applied {
+                    width_changed,
+                    height,
+                    ..
+                } = self.editor_runtime.request_resize(physical_size.width, physical_size.height)
+                {
+                    self.apply_resize_layout(height, width_changed);
                 }
             }
             WindowEvent::ScaleFactorChanged { scale_factor, .. } => {
@@ -653,7 +701,7 @@ impl App {
                         self.mouse.pos,
                         line_height,
                         &self.current_theme,
-                        self.scale_factor as f32,
+                        self.editor_runtime.scale_factor() as f32,
                     ) {
                         match route {
                             ModalInputRoute::Dispatch(action) => self.dispatch(action, event_loop),
@@ -703,8 +751,7 @@ impl App {
             WindowEvent::RedrawRequested => {
                 // 诊断：记录 RedrawRequested 到达时间
                 let _rr_arrive = std::time::Instant::now();
-                let _since_last_rr = _rr_arrive.duration_since(self.last_rr_time).as_micros();
-                self.last_rr_time = _rr_arrive;
+                let _since_last_rr = self.editor_runtime.note_reshape_result_arrived(_rr_arrive);
 
                 self.needs_redraw = false;
                 self.flush_pending_resize();
@@ -747,7 +794,7 @@ impl App {
     }
 
     fn handle_window_focus_changed(&mut self, focused: bool) -> crate::app_effect::AppEffect {
-        self.window_focused = focused;
+        self.editor_runtime.set_window_focus(focused);
         let mut effect = crate::app_effect::AppEffect::REDRAW;
         if !focused {
             effect = effect.merge(self.cancel_canvas_drag());
@@ -767,86 +814,12 @@ impl App {
 
     fn submit_file_safety_checks(&mut self) {
         let now = Instant::now();
-        if now < self.file_safety_next_check {
+        if !self.editor_runtime.file_safety_should_check(now) {
             return;
         }
-        self.file_safety_next_check = now + Duration::from_secs(2);
-        let Some(worker) = self.file_safety_worker.as_ref() else { return };
+        self.editor_runtime.schedule_file_safety_check(now);
         let local_device_short_id = self.local_device_short_id();
-        let candidates: Vec<(
-            std::path::PathBuf,
-            bool,
-            String,
-            Option<crate::file_safety::DiskRevision>,
-            u64,
-        )> = self
-            .workspace
-            .entries()
-            .iter()
-            .filter_map(|entry| {
-                let path = entry.value.file_path.clone()?;
-                Some((
-                    path,
-                    entry.value.dirty,
-                    entry.value.full_text(),
-                    entry.value.disk_revision.clone(),
-                    entry.value.content_revision(),
-                ))
-            })
-            .collect();
-        for (path, dirty, current_content, baseline, content_revision) in candidates {
-            if !self.file_safety_tracked.contains(&path) {
-                let should_reconcile = dirty && baseline.is_some();
-                let command = if should_reconcile {
-                    baseline.map(|baseline| {
-                        crate::file_safety::FileSafetyCommand::ReconcileDirtySnapshot {
-                            request_id: self.file_safety_next_request_id,
-                            path: path.clone(),
-                            baseline,
-                            content_revision,
-                            current_content: current_content.clone(),
-                            local_device_short_id: local_device_short_id.clone(),
-                        }
-                    })
-                } else {
-                    None
-                };
-                let submitted = if let Some(command) = command {
-                    worker.submit(command).is_ok()
-                } else {
-                    worker
-                        .submit(crate::file_safety::FileSafetyCommand::Track { path: path.clone() })
-                        .is_ok()
-                };
-                if submitted {
-                    self.file_safety_tracked.insert(path.clone());
-                    if should_reconcile {
-                        self.file_safety_pending.insert(path);
-                        self.file_safety_next_request_id =
-                            self.file_safety_next_request_id.saturating_add(1);
-                        continue;
-                    }
-                }
-            }
-            if self.file_safety_pending.contains(&path) {
-                continue;
-            }
-            let request_id = self.file_safety_next_request_id;
-            self.file_safety_next_request_id = self.file_safety_next_request_id.saturating_add(1);
-            if worker
-                .submit(crate::file_safety::FileSafetyCommand::Observe {
-                    request_id,
-                    path: path.clone(),
-                    dirty,
-                    content_revision,
-                    current_content,
-                    local_device_short_id: local_device_short_id.clone(),
-                })
-                .is_ok()
-            {
-                self.file_safety_pending.insert(path);
-            }
-        }
+        let _ = self.editor_runtime.submit_file_safety_checks(&local_device_short_id);
     }
 
     fn local_device_short_id(&self) -> String {
@@ -862,52 +835,112 @@ impl App {
     }
 
     fn drain_file_safety_results(&mut self) {
-        let mut results = Vec::new();
-        if let Some(worker) = self.file_safety_worker.as_ref() {
-            while let Some(result) = worker.try_recv() {
-                results.push(result);
-            }
+        for observation in self.editor_runtime.drain_file_safety_observations() {
+            self.apply_file_safety_outcome(
+                observation.tab_id,
+                observation.path,
+                observation.dirty,
+                observation.content_revision,
+                observation.outcome,
+            );
         }
-        for result in results {
-            match result {
-                crate::file_safety::FileSafetyResult::Tracked { path, outcome } => {
-                    if outcome.is_err() {
-                        self.file_safety_tracked.remove(&path);
-                    }
-                }
-                crate::file_safety::FileSafetyResult::Observed {
-                    path,
-                    dirty,
-                    content_revision,
-                    outcome,
+    }
+
+    fn drain_save_results(&mut self) -> bool {
+        let mut should_quit = false;
+        for completion in self.editor_runtime.drain_save_completions() {
+            let outcome = self.editor_runtime.apply_save_completion(completion);
+            let completed_tab = outcome.notifications.iter().find_map(|notification| {
+                if let appkit_shell::editor_runtime::EditorNotification::SaveCompleted {
+                    tab_id,
                     ..
-                } => {
-                    self.file_safety_pending.remove(&path);
-                    self.apply_file_safety_outcome(path, dirty, content_revision, outcome);
+                } = notification
+                {
+                    Some(*tab_id)
+                } else {
+                    None
+                }
+            });
+            let failed_tab = outcome.notifications.iter().find_map(|notification| {
+                if let appkit_shell::editor_runtime::EditorNotification::SaveFailed {
+                    tab_id, ..
+                } = notification
+                {
+                    Some(*tab_id)
+                } else {
+                    None
+                }
+            });
+            for notification in &outcome.notifications {
+                match notification {
+                    appkit_shell::editor_runtime::EditorNotification::DirtyChanged {
+                        tab_id,
+                        dirty,
+                    } if self.active_tab_id() == Some(*tab_id) => {
+                        self.update_document_edited(*dirty);
+                    }
+                    appkit_shell::editor_runtime::EditorNotification::PathChanged {
+                        tab_id,
+                        ..
+                    } => {
+                        self.clear_editor_suggested_file_name(*tab_id);
+                        self.refresh_file_monitor_roots();
+                    }
+                    appkit_shell::editor_runtime::EditorNotification::SaveFailed {
+                        message,
+                        ..
+                    } => eprintln!("save error: {message}"),
+                    _ => {}
                 }
             }
+            let mut effect = outcome.shell_effect;
+            if let Some(tab_id) = failed_tab {
+                self.pending_close_after_save.remove(&tab_id);
+                self.pending_quit_after_save = false;
+            }
+            if let Some(tab_id) = completed_tab
+                && self.pending_close_after_save.remove(&tab_id)
+                && self
+                    .editor_runtime
+                    .document_summary(tab_id)
+                    .is_some_and(|summary| !summary.dirty)
+                && let Some(index) = self.editor_tab_index(tab_id)
+            {
+                self.record_entry_to_history(index);
+                if let Some(workspace_effect) = self.close_editor_tab(tab_id) {
+                    effect = effect.merge(self.apply_workspace_effect(workspace_effect));
+                }
+                self.save_history();
+                self.rebuild_native_menu();
+            }
+            if self.pending_quit_after_save
+                && completed_tab.is_some_and(|tab_id| self.active_tab_id() == Some(tab_id))
+                && self.active_tab_session().is_none_or(|tab| !tab.document.dirty)
+            {
+                self.pending_quit_after_save = false;
+                should_quit = true;
+            }
+            self.apply_effect(effect);
         }
+        should_quit
     }
 
     fn apply_file_safety_outcome(
         &mut self,
+        tab_id: appkit_core::workspace::types::TabId,
         path: std::path::PathBuf,
         expected_dirty: bool,
         expected_content_revision: u64,
         outcome: Result<crate::file_safety::FileSafetyOutcome, crate::file_safety::FileSafetyError>,
     ) {
-        let Some(index) = self.workspace.find_by_path(&path) else {
-            self.file_safety_tracked.remove(&path);
+        let Some(tab) = self.tab_session(tab_id) else {
+            self.editor_runtime.forget_file_safety_tab(tab_id);
             return;
         };
-        let Some(tab_id) = self.workspace.tab_id_at(index) else {
-            return;
-        };
-        let Some(tab) = self.tab_session(tab_id) else { return };
-        if tab.document.dirty != expected_dirty
-            || tab.document.file_path.as_ref() != Some(&path)
-            || tab.document.content_revision() != expected_content_revision
-        {
+        let is_current = tab.document.dirty == expected_dirty
+            && tab.document.file_path.as_ref() == Some(&path)
+            && tab.document.content_revision() == expected_content_revision;
+        if !is_current {
             if let Ok(crate::file_safety::FileSafetyOutcome::Conflict { conflict, .. }) = outcome {
                 self.file_safety_notices.push(
                     crate::file_safety::FileSafetyNotice::ConflictCopyCreated {
@@ -916,8 +949,8 @@ impl App {
                     },
                 );
             }
-            self.file_safety_tracked.remove(&path);
-            self.file_safety_next_check = Instant::now();
+            self.editor_runtime.forget_file_safety_tab(tab_id);
+            self.editor_runtime.request_file_safety_check_now(Instant::now());
             return;
         }
         match outcome {
@@ -938,66 +971,44 @@ impl App {
                 document.dirty = false;
                 document.restore_edit_position(cursor_offset, selection_anchor, scroll_anchor);
                 let (model, _) = document.into_parts();
-                if let Some(current) = self.workspace.entry_doc_mut(index) {
-                    *current = model;
-                }
-                if index == self.workspace.active_index() {
-                    self.init_display_map(index);
+                self.replace_editor_document(tab_id, model);
+                if self.active_tab_id() == Some(tab_id)
+                    && let Some(active_index) = self.active_editor_index()
+                {
+                    self.init_display_map(active_index);
                 }
                 self.refresh_file_monitor_roots();
                 self.file_safety_notices
                     .push(crate::file_safety::FileSafetyNotice::CleanDocumentReloaded { path });
             }
             Ok(crate::file_safety::FileSafetyOutcome::Conflict { conflict, content, .. }) => {
-                if let Some(document) = self.workspace.entry_doc_mut(index) {
-                    document.file_path = Some(conflict.clone());
-                    document.disk_revision = None;
-                    document.set_language_from_path(&conflict);
-                }
-                self.file_safety_tracked.remove(&path);
-                if let Some(worker) = self.file_safety_worker.as_ref() {
-                    let _ = worker.submit(crate::file_safety::FileSafetyCommand::Track {
-                        path: conflict.clone(),
-                    });
-                }
+                self.update_editor_document_path(tab_id, conflict.clone(), None);
+                self.editor_runtime.forget_file_safety_tab(tab_id);
                 self.file_safety_notices.push(
                     crate::file_safety::FileSafetyNotice::ConflictCopyCreated {
                         original: path.clone(),
                         conflict,
                     },
                 );
-                if index == self.workspace.active_index() {
+                if self.active_tab_id() == Some(tab_id) {
                     let _ = self.open_external_content_tab(&path, &content);
                 }
             }
             Ok(crate::file_safety::FileSafetyOutcome::Renamed { new_path, revision }) => {
-                if let Some(document) = self.workspace.entry_doc_mut(index) {
-                    document.file_path = Some(new_path.clone());
-                    document.disk_revision = Some(revision);
-                    document.set_language_from_path(&new_path);
-                }
-                self.file_safety_tracked.remove(&path);
-                self.file_safety_tracked.insert(new_path);
+                self.update_editor_document_path(tab_id, new_path.clone(), Some(revision));
+                self.editor_runtime.forget_file_safety_tab(tab_id);
                 self.refresh_file_monitor_roots();
             }
             Ok(crate::file_safety::FileSafetyOutcome::AmbiguousRename { original }) => {
-                self.file_safety_tracked.remove(&path);
-                crate::workspace_product::detach_deleted_document(
-                    &mut self.workspace,
-                    index,
-                    &original,
-                );
+                self.editor_runtime.forget_file_safety_tab(tab_id);
+                self.detach_deleted_editor_document(tab_id, &original);
                 self.refresh_file_monitor_roots();
                 self.file_safety_notices
                     .push(crate::file_safety::FileSafetyNotice::AmbiguousRename { original });
             }
             Ok(crate::file_safety::FileSafetyOutcome::Deleted) => {
-                self.file_safety_tracked.remove(&path);
-                crate::workspace_product::detach_deleted_document(
-                    &mut self.workspace,
-                    index,
-                    &path,
-                );
+                self.editor_runtime.forget_file_safety_tab(tab_id);
+                self.detach_deleted_editor_document(tab_id, &path);
                 self.refresh_file_monitor_roots();
                 self.file_safety_notices.push(
                     crate::file_safety::FileSafetyNotice::DocumentDetachedAfterDeletion {
@@ -1032,8 +1043,10 @@ impl ApplicationHandler<AppEvent> for App {
         }
     }
 
-    fn user_event(&mut self, _event_loop: &ActiveEventLoop, event: AppEvent) {
-        self.handle_user_event(event);
+    fn user_event(&mut self, event_loop: &ActiveEventLoop, event: AppEvent) {
+        if self.handle_user_event(event) {
+            self.quit_app(event_loop);
+        }
     }
 
     fn suspended(&mut self, _event_loop: &ActiveEventLoop) {
@@ -1068,7 +1081,7 @@ impl ApplicationHandler<AppEvent> for App {
             self.dispatch_menu_action(action, event_loop);
         }
 
-        if self.window.is_none() {
+        if self.editor_runtime.window().is_none() {
             return;
         }
 
@@ -1080,7 +1093,7 @@ impl ApplicationHandler<AppEvent> for App {
         // 检测光标闪烁 phase 变化 → 触发渲染
         // 窗口未激活时不闪烁；搜索框焦点时跳过（TextBox 自己管理闪烁）
         // 预览模式没有可见光标，跳过闪烁检测
-        if self.window_focused
+        if self.editor_runtime.window_focused()
             && !self.ui_shell.search_bar_has_keyboard_focus()
             && self.active_needs_cursor_blink_wakeup()
             && let Some(tab) = self.active_tab_session()
@@ -1102,7 +1115,7 @@ impl ApplicationHandler<AppEvent> for App {
         // 仅在有需要时 request_redraw（不再无条件刷新）
         let did_request = self.needs_redraw;
         if self.needs_redraw
-            && let Some(window) = &self.window
+            && let Some(window) = self.editor_runtime.window()
         {
             window.request_redraw();
         }
@@ -1164,8 +1177,10 @@ mod file_safety_race_tests {
         document.mark_content_changed();
         let mut app = App::new(None);
         app.push_entry_for_test(document, Box::new(EditorPlugin::new()));
+        let tab_id = app.active_tab_id().expect("race fixture should have an active tab");
 
         app.apply_file_safety_outcome(
+            tab_id,
             path.clone(),
             false,
             0,
@@ -1176,8 +1191,7 @@ mod file_safety_race_tests {
         assert_eq!(entry.document.full_text(), "local edit");
         assert_eq!(entry.document.file_path, Some(path.clone()));
         assert!(entry.document.dirty);
-        assert!(!app.file_safety_tracked.contains(&path));
-        assert!(app.file_safety_next_check <= Instant::now());
+        assert!(app.editor_runtime.file_safety_should_check(Instant::now()));
     }
 
     #[test]
@@ -1194,8 +1208,10 @@ mod file_safety_race_tests {
         document.mark_content_changed();
         let mut app = App::new(None);
         app.push_entry_for_test(document, Box::new(EditorPlugin::new()));
+        let tab_id = app.active_tab_id().expect("race fixture should have an active tab");
 
         app.apply_file_safety_outcome(
+            tab_id,
             path.clone(),
             true,
             0,
@@ -1236,11 +1252,14 @@ mod file_safety_race_tests {
         assert_eq!(active.document.file_path.as_ref(), Some(&path));
         assert_eq!(active.document.full_text(), "# Shared");
         assert_eq!(active.plugin_name(), ui::plugin::PLUGIN_MARKDOWN_EDITOR);
-        assert_eq!(app.workspace.tab_ids(), app.tab_runtime_store.ids());
+        assert_eq!(
+            app.editor_tab_ids_in_order().into_iter().collect::<std::collections::HashSet<_>>(),
+            app.editor_runtime_tab_ids()
+        );
 
         let external_tab_id = app.active_tab_id().expect("external content should have a tab ID");
         app.new_untitled_doc();
-        let len_before_reopen = app.workspace.len();
+        let len_before_reopen = app.editor_tab_count();
 
         let reopen_effect = app.open_external_content_tab(&path, "# Replacement");
         let reopened =
@@ -1250,10 +1269,13 @@ mod file_safety_race_tests {
         assert!(reopen_effect.redraw);
         assert!(reopen_effect.update_title);
         assert!(reopen_effect.persist_workspace);
-        assert_eq!(app.workspace.len(), len_before_reopen);
+        assert_eq!(app.editor_tab_count(), len_before_reopen);
         assert_eq!(app.active_tab_id(), Some(external_tab_id));
         assert_eq!(reopened.document.full_text(), "# Shared");
-        assert_eq!(app.workspace.tab_ids(), app.tab_runtime_store.ids());
+        assert_eq!(
+            app.editor_tab_ids_in_order().into_iter().collect::<std::collections::HashSet<_>>(),
+            app.editor_runtime_tab_ids()
+        );
     }
 }
 
@@ -1340,10 +1362,32 @@ mod tests {
             .split("#[cfg(test)]")
             .next()
             .expect("application lifecycle production source should precede tests");
-        let expected_route =
-            ["AppEvent::StartBackgroundServices => self.start_background_", "services(),"].concat();
+        assert!(production_source.contains("AppEvent::StartBackgroundServices => {"));
+        assert!(production_source.contains("self.start_background_services();"));
+    }
 
-        assert!(production_source.contains(&expected_route));
+    #[test]
+    fn product_save_paths_use_async_runtime_protocol() {
+        let lifecycle_source = include_str!("app_lifecycle.rs")
+            .split("#[cfg(test)]")
+            .next()
+            .expect("application lifecycle production source should precede tests");
+        let command_source = include_str!("dispatch/commands.rs")
+            .split("#[cfg(test)]")
+            .next()
+            .expect("command production source should precede tests");
+        let tabs_source = include_str!("dispatch/tabs.rs")
+            .split("#[cfg(test)]")
+            .next()
+            .expect("tab command production source should precede tests");
+        let synchronous_save_call = [".", "save_as("].concat();
+
+        assert!(command_source.contains("submit_editor_save("));
+        assert!(tabs_source.contains("submit_editor_save_before_close("));
+        assert!(lifecycle_source.contains("drain_save_results("));
+        assert!(!command_source.contains(&synchronous_save_call));
+        assert!(!tabs_source.contains(&synchronous_save_call));
+        assert!(!lifecycle_source.contains(&synchronous_save_call));
     }
 
     #[test]
@@ -2287,12 +2331,12 @@ mod tests {
         std::fs::write(&path, "# dropped file\n")
             .expect("temporary markdown file should be written");
         let mut app = App::new(None);
-        let generation_before = app.reshape_generation;
+        let generation_before = app.editor_runtime.reshape_generation();
         app.needs_redraw = false;
 
         app.handle_dropped_file(&path);
 
-        assert_eq!(app.reshape_generation, generation_before + 1);
+        assert_eq!(app.editor_runtime.reshape_generation(), generation_before + 1);
         assert!(app.needs_redraw);
     }
 
@@ -2303,16 +2347,19 @@ mod tests {
         std::fs::write(&valid_path, "# valid\n")
             .expect("temporary markdown file should be written");
         let mut app = App::new(None);
-        app.workspace = crate::app_init::build_product_workspace();
+        app.replace_editor_model(
+            crate::app_init::build_product_workspace(),
+            crate::tab_runtime::TabRuntimeStore::default(),
+        );
 
         app.open_document_sender()
             .send(vec![directory.path().join("missing.md"), valid_path.clone()])
             .expect("app owns the product open-document receiver");
         app.handle_user_event(AppEvent::ProductWake);
 
-        assert_eq!(app.workspace.len(), 1);
+        assert_eq!(app.editor_tab_count(), 1);
         assert_eq!(
-            app.workspace.active_doc().and_then(|document| document.file_path.as_deref()),
+            app.active_tab_session().and_then(|session| session.document.file_path.as_deref()),
             Some(valid_path.as_path())
         );
     }
@@ -2324,7 +2371,7 @@ mod tests {
 
         let effect = app.handle_window_focus_changed(false);
 
-        assert!(!app.window_focused);
+        assert!(!app.editor_runtime.window_focused());
         assert!(effect.redraw);
         assert_eq!(cancel_request_count(&state.borrow()), 1);
         assert_eq!(document_texts(&app), ["abc", "def"]);

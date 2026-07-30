@@ -6,12 +6,11 @@ use std::sync::{Arc, Mutex};
 
 use crate::app::App;
 use crate::file_history::FileHistory;
-use crate::frame_cache::FrameCache;
 use crate::product_paths::ProductPaths;
-use crate::tab_runtime::TabRuntimeStore;
 use crate::ui_shell::UiShell;
 use crate::view_route::{ViewPathMatcher, ViewRouteRule, ViewRouteTable};
 use crate::workspace::Workspace;
+use appkit_shell::editor_runtime::{EditorRuntime, EditorRuntimeConfig, EditorRuntimeError};
 
 const MINDMAP_ROUTE_PRIORITY: u16 = 400;
 const MARKDOWN_ROUTE_PRIORITY: u16 = 300;
@@ -34,6 +33,7 @@ fn register_plugin_factory(
     registry.register(factory);
 }
 
+/// 构造 textora 产品的插件和路径路由；runtime 只接收这一步产出的 shared 配置。
 pub(crate) fn build_product_workspace() -> Workspace {
     use ui::plugin::{PLUGIN_EDITOR, PLUGIN_MARKDOWN_EDITOR, PLUGIN_MINDMAP, PLUGIN_NOVEL_VIEW};
 
@@ -104,6 +104,36 @@ pub(crate) fn build_product_workspace() -> Workspace {
     .expect("textora product routes must reference unique priorities and registered plugins");
 
     Workspace::with_plugins(registry, routes)
+}
+
+pub(crate) fn build_product_editor_runtime(
+    settings: &ui::settings::Settings,
+    theme: &ui::Theme,
+    snapshots_directory: &std::path::Path,
+) -> Result<EditorRuntime, EditorRuntimeError> {
+    let empty_routes = ViewRouteTable::new(Vec::new(), &HashSet::new())
+        .expect("an empty migration route table must be valid");
+    EditorRuntime::new_with_model(
+        EditorRuntimeConfig {
+            plugin_registry: ui::plugin::PluginRegistry::new(),
+            view_routes: empty_routes,
+            initial_settings: settings.clone(),
+            initial_theme: theme.clone(),
+            snapshots_directory: snapshots_directory.to_owned(),
+        },
+        build_product_workspace(),
+        Default::default(),
+    )
+}
+
+#[cfg(test)]
+mod product_runtime_assembly_tests {
+    #[test]
+    fn product_factory_keeps_plugin_registration_outside_shared_shell() {
+        let source = include_str!("app_init.rs");
+        assert!(source.contains("build_product_workspace"));
+        assert!(source.contains("register_plugin_factory"));
+    }
 }
 
 fn settings_from_persisted(
@@ -195,10 +225,11 @@ impl App {
                 &theme_registry,
             )
         };
+        let mut editor_runtime =
+            build_product_editor_runtime(&settings, &current_theme, &paths.snapshots_dir)
+                .expect("textora editor runtime must be constructible");
+        editor_runtime.set_shared_font_system(shared_fs.clone());
         let mut app = Self {
-            window: None,
-            gpu: None,
-            text: None,
             file_path,
             paths,
             settings,
@@ -208,48 +239,24 @@ impl App {
             active_theme_pair,
             theme_load_report,
             product: crate::textora_product::TextoraProduct::new(),
-            workspace: build_product_workspace(),
-            tab_runtime_store: TabRuntimeStore::default(),
+            editor_runtime,
             popup_tab_id_snapshot: Vec::new(),
             workspace_store,
             ui_shell: UiShell::new(),
             file_history,
-            file_safety_worker: None,
             library_file_monitor: None,
             file_safety_notices: Vec::new(),
-            file_safety_tracked: HashSet::new(),
-            file_safety_pending: HashSet::new(),
-            file_safety_next_request_id: 1,
-            file_safety_next_check: std::time::Instant::now(),
-            scale_factor: 1.0,
+            pending_close_after_save: HashSet::new(),
+            pending_quit_after_save: false,
             running: false,
             needs_redraw: true,
             sidebar_animating: false,
             tab_scroll: crate::smooth_scroll::SmoothScroll::new(),
-            modifiers: winit::keyboard::ModifiersState::default(),
             mouse: crate::mouse::MouseState::new(),
-            frame_cache: FrameCache::new(),
             last_scroll_time: std::time::Instant::now(),
-            reshape_worker: None,
-            shared_font_system: Some(shared_fs),
-            reshape_generation: 0,
-            pending_reshapes: HashSet::new(),
-            skip_reshape_submit: false,
-            last_reshape_anchor: usize::MAX,
-            last_rr_time: std::time::Instant::now(),
-            last_render_time: std::time::Instant::now(),
-            render_frame_count: 0,
-            pending_resize: None,
-            last_resize_handled: std::time::Instant::now(),
             last_cursor_visible: true,
-            window_focused: true,
             event_loop_proxy: None,
-            preedit_text: String::new(),
-            preedit_cursor: None,
             preedit_advance_px: 0.0,
-            wysiwyg_preferred_x: None,
-            wysiwyg_recursing: false,
-            first_frame_presented: false,
             startup_started_at,
         };
         // Apply persisted sidebar width (logical pixels, will be scaled by DPI later)
@@ -260,7 +267,7 @@ impl App {
     }
 
     pub(crate) fn init_display_map(&mut self, dv_idx: usize) {
-        let Some(tab_id) = self.workspace.tab_id_at(dv_idx) else {
+        let Some(tab_id) = self.editor_tab_id_at(dv_idx) else {
             return;
         };
         let metrics = self.ui_metrics();
@@ -279,8 +286,7 @@ impl App {
                 if let Some(entry) = tab.display_map_entry(anchor_doc) {
                     let alen = dv.line_byte_length(anchor_doc).unwrap_or(0);
                     let aoff = dv.line_byte_offset(anchor_doc).unwrap_or(0);
-                    let screen_w =
-                        self.gpu.as_ref().map(|g| g.ctx.config.width as f32).unwrap_or(800.0);
+                    let screen_w = self.screen_width();
                     let metrics = self.ui_metrics();
                     let vp_w = screen_w
                         - metrics.scrollbar_reserve
@@ -306,7 +312,7 @@ impl App {
                 }
             }
 
-            let screen_w = self.gpu.as_ref().map(|g| g.ctx.config.width as f32).unwrap_or(800.0);
+            let screen_w = self.screen_width();
             let metrics = self.ui_metrics();
             let vw =
                 screen_w - metrics.scrollbar_reserve - self.editor_left_margin(dv.line_count());
@@ -343,7 +349,8 @@ impl App {
         // Phase 2: shape viewport lines with main-thread shaper
         let mut pre_entries: std::collections::HashMap<usize, crate::snap_tree::DisplayLineEntry> =
             std::collections::HashMap::new();
-        if let Some(ref mut text) = self.text {
+        let mut render_resources = self.editor_runtime.take_render_resources();
+        if let Some(text) = render_resources.text.as_mut() {
             text.shaper.set_font_size(font_size);
             for (dl, line_str, off, len) in &viewport_line_data {
                 let shaped = match text.shaper.shape_fast(line_str) {
@@ -398,6 +405,7 @@ impl App {
                 }
             }
         }
+        self.editor_runtime.restore_render_resources(render_resources);
 
         // Phase 3: build all entries and commit
         if let Some(mut tab) = self.tab_session_mut(tab_id) {
@@ -432,7 +440,7 @@ impl App {
             }
             tab.clamp_scroll_anchor(lh);
             tab.derive_scroll_top(lh);
-            self.skip_reshape_submit = true;
+            self.editor_runtime.mark_skip_next_reshape_submit();
         }
     }
 }

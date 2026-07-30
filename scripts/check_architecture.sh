@@ -19,10 +19,51 @@ check_forbidden_dependency textora-appkit-core \
 check_forbidden_dependency textora-appkit-shell \
   textora-markdown textora-sync textora-app
 
-if rg -n '\.edit\+' crates/appkit-core crates/appkit-shell; then
-  echo "shared crates must not hardcode .edit+" >&2
-  exit 1
-fi
+check_forbidden_source_tokens() {
+  local source_dir="$1"
+  shift
+
+  [[ -d "$source_dir" ]] || return 0
+
+  local forbidden_token
+  for forbidden_token in "$@"; do
+    if rg -n --glob '*.rs' --fixed-strings "$forbidden_token" "$source_dir"; then
+      echo "forbidden product or escape-hatch token '$forbidden_token' found in $source_dir" >&2
+      exit 1
+    fi
+  done
+}
+
+local_product_markdown="textora"_"markdown"
+local_product_sync="textora"_"sync"
+local_textora_product="Textora""Product"
+local_note_id="Note""Id"
+local_edit_snapshot=".edit""+"
+local_notora_snapshot=".notora"
+check_forbidden_source_tokens crates/appkit-shell \
+  "$local_product_markdown" \
+  "$local_product_sync" \
+  "$local_textora_product" \
+  "$local_note_id" \
+  "$local_edit_snapshot" \
+  "$local_notora_snapshot"
+
+check_forbidden_source_tokens crates/appkit-core \
+  "$local_textora_product" \
+  "$local_note_id" \
+  "$local_edit_snapshot" \
+  "$local_notora_snapshot"
+
+local_runtime_dir="crates/appkit-shell/src/editor_runtime"
+local_workspace_mut="workspace"_"_mut"
+local_document_mut="document"_"_mut"
+local_gpu_mut="gpu"_"_mut"
+local_runtime_store_mut="tab_runtime_store"_"_mut"
+check_forbidden_source_tokens "$local_runtime_dir" \
+  "$local_workspace_mut" \
+  "$local_document_mut" \
+  "$local_gpu_mut" \
+  "$local_runtime_store_mut"
 
 if rg -n 'SyncSettings|textora_sync' crates/ui/src; then
   echo "ui must not contain textora sync product types" >&2
