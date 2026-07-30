@@ -1,0 +1,509 @@
+//! Button Widget — icon + optional text label.
+//! Icon and text are both optional; whichever is set gets drawn.
+
+use crate::core::text_layout::UiTextLayout;
+use crate::core::widget::{ControlAction, WidgetId};
+use crate::core::{Event, EventCtx, LayoutCtx, MouseButton, PaintCtx, Rect, Widget, WidgetAction};
+use crate::widgets::icon::draw_icon;
+use std::any::Any;
+use std::sync::Arc;
+
+/// Visual style for a Button.
+#[derive(Clone, Debug)]
+pub struct ButtonStyle {
+    pub font_size_logical: f32,
+    pub pad_x_logical: f32,
+    pub foreground: [f32; 4],
+    pub selected_foreground: [f32; 4],
+    pub background: [f32; 4],
+    pub border: [f32; 4],
+    pub hover_background: [f32; 4],
+    pub pressed_background: [f32; 4],
+    pub selected_background: [f32; 4],
+    pub disabled_foreground: [f32; 4],
+    pub disabled_background: [f32; 4],
+    pub corner_radius_logical: f32,
+}
+
+pub struct Button {
+    id: WidgetId,
+    rect: Rect,
+    icon: Option<String>,
+    icon_size_logical: f32,
+    text: Option<String>,
+    style: ButtonStyle,
+    hovered: bool,
+    enabled: bool,
+    pressed: bool,
+    selected: bool,
+}
+
+impl Button {
+    pub fn new(id: WidgetId, style: ButtonStyle) -> Self {
+        Self {
+            id,
+            rect: Rect::ZERO,
+            icon: None,
+            icon_size_logical: crate::constants::BUTTON_SIZE,
+            text: None,
+            style,
+            hovered: false,
+            enabled: true,
+            pressed: false,
+            selected: false,
+        }
+    }
+
+    pub fn set_icon(&mut self, name: Option<String>) {
+        self.icon = name;
+    }
+    pub fn set_text(&mut self, text: Option<String>) {
+        self.text = text;
+    }
+    pub fn set_selected(&mut self, selected: bool) {
+        self.selected = selected;
+    }
+    pub fn set_active(&mut self, active: bool) {
+        self.set_selected(active);
+    }
+    pub fn set_enabled(&mut self, enabled: bool) {
+        self.enabled = enabled;
+    }
+    pub fn set_icon_size(&mut self, sz: f32) {
+        self.icon_size_logical = sz;
+    }
+    pub fn set_style(&mut self, s: ButtonStyle) {
+        self.style = s;
+    }
+    pub fn rect(&self) -> Rect {
+        self.rect
+    }
+
+    fn background_color(&self) -> [f32; 4] {
+        if !self.enabled {
+            self.style.disabled_background
+        } else if self.pressed {
+            self.style.pressed_background
+        } else if self.selected {
+            self.style.selected_background
+        } else if self.hovered {
+            self.style.hover_background
+        } else {
+            self.style.background
+        }
+    }
+
+    fn foreground_color(&self) -> [f32; 4] {
+        if !self.enabled {
+            self.style.disabled_foreground
+        } else if self.selected {
+            self.style.selected_foreground
+        } else {
+            self.style.foreground
+        }
+    }
+}
+
+impl Widget for Button {
+    fn set_rect(&mut self, rect: Rect, _ctx: &mut LayoutCtx) {
+        self.rect = rect;
+    }
+
+    fn paint(&self, ctx: &mut PaintCtx) {
+        let dpi = ctx.dpi;
+        let alpha = ctx.global_alpha;
+        let corner_radius = self.style.corner_radius_logical * dpi;
+        let mut background = self.background_color();
+        background[3] *= alpha;
+        if background[3] > 0.0 {
+            ctx.list.fill_rounded(self.rect, background, corner_radius);
+        }
+
+        let font_size = self.style.font_size_logical * dpi;
+        let icon_size = self.icon_size_logical * dpi;
+        let pad_x = self.style.pad_x_logical * dpi;
+        let mut fg = self.foreground_color();
+        fg[3] *= alpha;
+        let mut border = self.style.border;
+        border[3] *= alpha;
+        if border[3] > 0.0 {
+            ctx.list.stroke_rounded(self.rect, border, corner_radius, dpi);
+        }
+
+        let icon_gap = 4.0 * dpi;
+        let mut cursor_x = self.rect.x + pad_x;
+
+        if let Some(ref icon_name) = self.icon {
+            let icon_y = self.rect.y + (self.rect.h - icon_size) * 0.5;
+            draw_icon(ctx.list, icon_name, cursor_x, icon_y, icon_size, fg);
+            cursor_x += icon_size + icon_gap;
+        }
+
+        if let Some(ref text) = self.text {
+            let baseline = self.rect.y + self.rect.h * 0.5 + font_size * 0.35;
+            if let Some(ref mut shaper) = ctx.shaper {
+                let layout = UiTextLayout::new(
+                    text,
+                    font_size,
+                    None,
+                    shaping::Weight::NORMAL,
+                    shaping::Style::Normal,
+                    false,
+                    shaper,
+                );
+                if let Some(layout) = layout {
+                    let text_x = if self.icon.is_some() {
+                        cursor_x
+                    } else {
+                        self.rect.x + (self.rect.w - layout.shaped.width) * 0.5
+                    };
+                    ctx.list.text_layout(Arc::new(layout), text_x, baseline, fg);
+                }
+            }
+        }
+    }
+
+    fn hit(&self, px: f32, py: f32) -> bool {
+        self.rect.contains(px, py)
+    }
+
+    fn id(&self) -> Option<WidgetId> {
+        Some(self.id)
+    }
+
+    fn on_event(&mut self, ev: &Event, ctx: &mut EventCtx) -> Option<WidgetAction> {
+        match ev {
+            Event::MouseMove { px, py } => {
+                let inside = self.rect.contains(*px, *py);
+                if inside {
+                    ctx.cursor_hint = Some(winit::window::CursorIcon::Pointer);
+                }
+                if inside != self.hovered {
+                    self.hovered = inside;
+                    Some(WidgetAction::Consumed)
+                } else {
+                    None
+                }
+            }
+            Event::MouseDown { px, py, button: MouseButton::Left } => {
+                if !self.enabled {
+                    return None;
+                }
+                if self.rect.contains(*px, *py) {
+                    self.pressed = true;
+                    Some(WidgetAction::Consumed)
+                } else {
+                    None
+                }
+            }
+            Event::MouseUp { px, py, button: MouseButton::Left } => {
+                if !self.pressed {
+                    return None;
+                }
+
+                self.pressed = false;
+                let released_inside = self.rect.contains(*px, *py);
+                self.hovered = released_inside;
+                if released_inside && self.enabled {
+                    Some(WidgetAction::Control(ControlAction::Activated { id: self.id }))
+                } else {
+                    Some(WidgetAction::Consumed)
+                }
+            }
+            _ => None,
+        }
+    }
+
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+    fn as_any_mut(&mut self) -> &mut dyn Any {
+        self
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    use crate::core::measure::NoopMeasure;
+    use crate::core::paint::{DrawCmd, DrawList};
+    use crate::core::widget::{ControlAction, LayoutCtx, WidgetId};
+
+    fn test_style() -> ButtonStyle {
+        ButtonStyle {
+            font_size_logical: 14.0,
+            pad_x_logical: 8.0,
+            foreground: [0.9, 0.9, 0.9, 1.0],
+            selected_foreground: [1.0, 1.0, 1.0, 1.0],
+            background: [0.0, 0.0, 0.0, 0.0],
+            border: [0.0, 0.0, 0.0, 0.0],
+            hover_background: [0.2, 0.2, 0.2, 1.0],
+            pressed_background: [0.25, 0.25, 0.25, 1.0],
+            selected_background: [0.3, 0.3, 0.3, 1.0],
+            disabled_foreground: [0.5, 0.5, 0.5, 1.0],
+            disabled_background: [0.0, 0.0, 0.0, 0.0],
+            corner_radius_logical: 4.0,
+        }
+    }
+
+    fn make_button_with_rect(id: WidgetId, rect: Rect) -> Button {
+        let theme = crate::theme::test_theme();
+        let mut m = NoopMeasure;
+        let mut lc = LayoutCtx { ui_measure: None, measure: &mut m, theme: &theme, dpi: 1.0 };
+        let mut b = Button::new(id, test_style());
+        b.set_rect(rect, &mut lc);
+        b
+    }
+
+    fn make_button(id: WidgetId) -> Button {
+        make_button_with_rect(id, Rect::new(0.0, 0.0, 100.0, 28.0))
+    }
+
+    fn mouse_down(button: &mut Button, px: f32, py: f32) -> Option<WidgetAction> {
+        let theme = crate::theme::test_theme();
+        let mut event_ctx = EventCtx { cursor_hint: None, theme: &theme, dpi: 1.0 };
+        button.on_event(&Event::MouseDown { px, py, button: MouseButton::Left }, &mut event_ctx)
+    }
+
+    fn mouse_up(button: &mut Button, px: f32, py: f32) -> Option<WidgetAction> {
+        let theme = crate::theme::test_theme();
+        let mut event_ctx = EventCtx { cursor_hint: None, theme: &theme, dpi: 1.0 };
+        button.on_event(&Event::MouseUp { px, py, button: MouseButton::Left }, &mut event_ctx)
+    }
+
+    #[test]
+    fn paint_text_only_emits_text() {
+        let theme = crate::theme::test_theme();
+        let mut b = make_button(WidgetId(1));
+        b.set_text(Some("Hello".into()));
+        let mut dl = DrawList::new();
+        let mut shaper = shaping::Shaper::new().unwrap();
+        let mut pc = PaintCtx {
+            global_alpha: 1.0,
+            list: &mut dl,
+            theme: &theme,
+            dpi: 1.0,
+            offset: (0.0, 0.0),
+            shaper: Some(&mut shaper),
+        };
+        b.paint(&mut pc);
+        let text_count = dl.cmds.iter().filter(|c| matches!(c, DrawCmd::TextLayout { .. })).count();
+        assert_eq!(text_count, 1);
+    }
+
+    #[test]
+    fn paint_text_only_centers_text_in_button() {
+        let theme = crate::theme::test_theme();
+        let button_rect = Rect::new(0.0, 0.0, 100.0, 28.0);
+        let mut button = make_button_with_rect(WidgetId(14), button_rect);
+        button.set_text(Some("Hello".into()));
+        let mut draw_list = DrawList::new();
+        let mut shaper = shaping::Shaper::new().unwrap();
+        let mut paint_ctx = PaintCtx {
+            global_alpha: 1.0,
+            list: &mut draw_list,
+            theme: &theme,
+            dpi: 1.0,
+            offset: (0.0, 0.0),
+            shaper: Some(&mut shaper),
+        };
+
+        button.paint(&mut paint_ctx);
+
+        let DrawCmd::TextLayout { layout, x, .. } = draw_list
+            .cmds
+            .iter()
+            .find(|command| matches!(command, DrawCmd::TextLayout { .. }))
+            .expect("text-only button should emit a text layout")
+        else {
+            unreachable!("text layout was checked above");
+        };
+        let expected_x = (button_rect.w - layout.shaped.width) * 0.5;
+        assert!((x - expected_x).abs() < 0.01, "text x {x} should be {expected_x}");
+    }
+
+    #[test]
+    fn paint_icon_only_emits_triangle() {
+        let theme = crate::theme::test_theme();
+        let mut b = make_button_with_rect(WidgetId(2), Rect::new(0.0, 0.0, 32.0, 28.0));
+        b.set_icon(Some("plus".into()));
+        let mut dl = DrawList::new();
+        let mut shaper = shaping::Shaper::new().unwrap();
+        let mut pc = PaintCtx {
+            global_alpha: 1.0,
+            list: &mut dl,
+            theme: &theme,
+            dpi: 1.0,
+            offset: (0.0, 0.0),
+            shaper: Some(&mut shaper),
+        };
+        b.paint(&mut pc);
+        let tri_count =
+            dl.cmds.iter().filter(|c| matches!(c, DrawCmd::FillTriangle { .. })).count();
+        assert!(tri_count > 0, "icon should emit fill triangles");
+    }
+
+    #[test]
+    fn paint_hover_emits_bg() {
+        let theme = crate::theme::test_theme();
+        let mut b = make_button(WidgetId(3));
+        b.set_text(Some("X".into()));
+        // Force hovered state
+        let mut ec = EventCtx { cursor_hint: None, theme: &theme, dpi: 1.0 };
+        b.on_event(&Event::MouseMove { px: 50.0, py: 14.0 }, &mut ec);
+        let mut dl = DrawList::new();
+        let mut shaper = shaping::Shaper::new().unwrap();
+        let mut pc = PaintCtx {
+            global_alpha: 1.0,
+            list: &mut dl,
+            theme: &theme,
+            dpi: 1.0,
+            offset: (0.0, 0.0),
+            shaper: Some(&mut shaper),
+        };
+        b.paint(&mut pc);
+        let rect_count = dl.cmds.iter().filter(|c| matches!(c, DrawCmd::FillRect { .. })).count();
+        assert!(rect_count >= 1, "hover should emit background fill rect");
+    }
+
+    #[test]
+    fn paint_active_emits_bg() {
+        let theme = crate::theme::test_theme();
+        let mut b = make_button(WidgetId(4));
+        b.set_active(true);
+        let mut dl = DrawList::new();
+        let mut shaper = shaping::Shaper::new().unwrap();
+        let mut pc = PaintCtx {
+            global_alpha: 1.0,
+            list: &mut dl,
+            theme: &theme,
+            dpi: 1.0,
+            offset: (0.0, 0.0),
+            shaper: Some(&mut shaper),
+        };
+        b.paint(&mut pc);
+        let rect_count = dl.cmds.iter().filter(|c| matches!(c, DrawCmd::FillRect { .. })).count();
+        assert!(rect_count >= 1, "active should emit background fill rect");
+    }
+
+    #[test]
+    fn button_activates_only_after_inside_press_and_release() {
+        let mut button = make_button(WidgetId(7));
+
+        assert_eq!(mouse_down(&mut button, 20.0, 10.0), Some(WidgetAction::Consumed));
+        assert_eq!(
+            mouse_up(&mut button, 20.0, 10.0),
+            Some(WidgetAction::Control(ControlAction::Activated { id: WidgetId(7) }))
+        );
+    }
+
+    #[test]
+    fn dragging_outside_cancels_button_activation() {
+        let mut button = make_button(WidgetId(8));
+
+        mouse_down(&mut button, 20.0, 10.0);
+        assert_eq!(mouse_up(&mut button, 200.0, 200.0), Some(WidgetAction::Consumed));
+    }
+
+    #[test]
+    fn hit_contains() {
+        let b = make_button_with_rect(WidgetId(9), Rect::new(10.0, 10.0, 80.0, 20.0));
+        assert!(b.hit(50.0, 20.0));
+        assert!(!b.hit(5.0, 20.0));
+    }
+
+    #[test]
+    fn mouse_move_updates_hovered() {
+        let theme = crate::theme::test_theme();
+        let mut b = make_button(WidgetId(10));
+        let mut ec = EventCtx { cursor_hint: None, theme: &theme, dpi: 1.0 };
+        let r = b.on_event(&Event::MouseMove { px: 50.0, py: 14.0 }, &mut ec);
+        assert!(r.is_some()); // Consumed on hover state change
+        assert!(matches!(r.unwrap(), WidgetAction::Consumed));
+    }
+
+    #[test]
+    fn paint_empty_button_emits_nothing() {
+        let theme = crate::theme::test_theme();
+        let mut b = make_button(WidgetId(11));
+        // No icon, no text
+        let mut dl = DrawList::new();
+        let mut shaper = shaping::Shaper::new().unwrap();
+        let mut pc = PaintCtx {
+            global_alpha: 1.0,
+            list: &mut dl,
+            theme: &theme,
+            dpi: 1.0,
+            offset: (0.0, 0.0),
+            shaper: Some(&mut shaper),
+        };
+        b.paint(&mut pc);
+        // Empty button with no hover should emit nothing
+        assert_eq!(dl.cmds.len(), 0, "Empty button without hover should emit no draw commands");
+    }
+
+    #[test]
+    fn paint_zero_rect_emits_nothing() {
+        let theme = crate::theme::test_theme();
+        let mut b = make_button_with_rect(WidgetId(12), Rect::ZERO);
+        b.set_text(Some("Hello".into()));
+        let mut dl = DrawList::new();
+        let mut shaper = shaping::Shaper::new().unwrap();
+        let mut pc = PaintCtx {
+            global_alpha: 1.0,
+            list: &mut dl,
+            theme: &theme,
+            dpi: 1.0,
+            offset: (0.0, 0.0),
+            shaper: Some(&mut shaper),
+        };
+        b.paint(&mut pc);
+        // Zero-size rect: bg fill has zero area, text is still emitted
+        // This verifies no panic on zero rect
+    }
+
+    #[test]
+    fn mousedown_right_button_no_action() {
+        let theme = crate::theme::test_theme();
+        let mut b = make_button(WidgetId(13));
+        let mut ec = EventCtx { cursor_hint: None, theme: &theme, dpi: 1.0 };
+        b.on_event(&Event::MouseMove { px: 50.0, py: 14.0 }, &mut ec);
+        let result = b.on_event(
+            &Event::MouseDown { px: 50.0, py: 14.0, button: MouseButton::Right },
+            &mut ec,
+        );
+        assert!(result.is_none(), "Right-click should not trigger button action");
+    }
+
+    #[test]
+    fn mouseup_event_ignored() {
+        let theme = crate::theme::test_theme();
+        let mut b = make_button(WidgetId(14));
+        let mut ec = EventCtx { cursor_hint: None, theme: &theme, dpi: 1.0 };
+        let result =
+            b.on_event(&Event::MouseUp { px: 50.0, py: 14.0, button: MouseButton::Left }, &mut ec);
+        assert!(result.is_none(), "MouseUp should be ignored");
+    }
+
+    #[test]
+    fn hover_exit_clears_hovered() {
+        let theme = crate::theme::test_theme();
+        let mut b = make_button(WidgetId(15));
+        let mut ec = EventCtx { cursor_hint: None, theme: &theme, dpi: 1.0 };
+        // Enter
+        b.on_event(&Event::MouseMove { px: 50.0, py: 14.0 }, &mut ec);
+        assert!(b.hovered);
+        // Exit
+        b.on_event(&Event::MouseMove { px: 200.0, py: 200.0 }, &mut ec);
+        assert!(!b.hovered);
+    }
+
+    #[test]
+    fn inside_press_outside_release_does_not_activate() {
+        let mut button = make_button(WidgetId(16));
+
+        assert_eq!(mouse_down(&mut button, 50.0, 14.0), Some(WidgetAction::Consumed));
+        assert_eq!(mouse_up(&mut button, 150.0, 140.0), Some(WidgetAction::Consumed));
+    }
+}

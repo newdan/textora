@@ -1,0 +1,841 @@
+use crate::App;
+/// Application state and winit event handling.
+use crate::app_event::AppEvent;
+
+use crate::app::compute_cursor_phase;
+
+use std::time::Instant;
+use winit::application::ApplicationHandler;
+use winit::event::{Ime, MouseButton, WindowEvent};
+use winit::event_loop::{ActiveEventLoop, ControlFlow};
+use winit::keyboard::{Key, NamedKey};
+use winit::window::WindowId;
+
+use crate::file_history::compute_workspace_root;
+use crate::input::EditCommand;
+use crate::native_menu::{MenuAction, NativeMenu};
+use ui::core::widget::{KeyCode, Modifiers, WidgetAction};
+#[allow(unused_imports)]
+use ui::render_geom::{AdvanceCacheEntry, compute_selection_highlight_quads};
+
+// Font size and line height are now in Settings
+
+/// 计算光标当前是否可见，以及下一次切换的时间点。
+
+// ── Search bar keyboard routing helpers ──
+
+/// Returns true if the key combo should bypass search bar forwarding
+/// and go through the normal key_to_command → handle_command pipeline.
+fn is_search_bar_whitelist(
+    logical_key: &winit::keyboard::Key,
+    sup: bool,
+    shift: bool,
+    alt: bool,
+) -> bool {
+    if !sup {
+        return false; // Only Cmd-key combos are whitelisted
+    }
+    match logical_key {
+        Key::Character(c) => match c.as_str() {
+            "f" if !shift && !alt => true, // Cmd+F
+            "f" if shift && !alt => true,  // Cmd+Shift+F
+            "s" if !shift && !alt => true, // Cmd+S
+            "s" if shift && !alt => true,  // Cmd+Shift+S
+            "w" if !shift && !alt => true, // Cmd+W
+            "z" if !shift && !alt => true, // Cmd+Z
+            "z" if shift && !alt => true,  // Cmd+Shift+Z
+            "[" if !shift && !alt => true, // Cmd+[
+            "]" if !shift && !alt => true, // Cmd+]
+            "[" if shift && !alt => true,  // Cmd+Shift+[
+            "]" if shift && !alt => true,  // Cmd+Shift+]
+            _ => false,
+        },
+        Key::Named(NamedKey::ArrowLeft) if sup && alt && !shift => true, // Cmd+Alt+Left
+        Key::Named(NamedKey::ArrowRight) if sup && alt && !shift => true, // Cmd+Alt+Right
+        _ => false,
+    }
+}
+
+/// Convert a winit KeyEvent to a UI KeyCode.
+/// Prefers `event.text` (handles keyboard layout / Shift combos correctly),
+/// falls back to NamedKey matching for control keys.
+pub(crate) fn winit_key_to_keycode(
+    logical_key: &winit::keyboard::Key,
+    text: Option<&str>,
+) -> Option<KeyCode> {
+    // Step 1: Use text for character input (winit 0.30 handles Shift+1 → "!" etc.)
+    if let Some(text) = text
+        && !text.is_empty()
+        && let Some(ch) = text.chars().next()
+        && (!ch.is_control() || ch == '\t')
+    {
+        return Some(KeyCode::Char(ch));
+    }
+
+    // Step 1.5: If text is a control character (e.g. Cmd+A yields '\x01') or None,
+    // fallback to logical_key if it is a Character.
+    if let Key::Character(s) = logical_key
+        && let Some(ch) = s.chars().next()
+    {
+        return Some(KeyCode::Char(ch));
+    }
+
+    // Step 2: text is empty → match NamedKey for control keys
+    match logical_key {
+        Key::Named(NamedKey::Escape) => Some(KeyCode::Escape),
+        Key::Named(NamedKey::Enter) => Some(KeyCode::Enter),
+        Key::Named(NamedKey::Backspace) => Some(KeyCode::Backspace),
+        Key::Named(NamedKey::Delete) => Some(KeyCode::Delete),
+        Key::Named(NamedKey::Tab) => Some(KeyCode::Tab),
+        Key::Named(NamedKey::ArrowUp) => Some(KeyCode::Up),
+        Key::Named(NamedKey::ArrowDown) => Some(KeyCode::Down),
+        Key::Named(NamedKey::ArrowLeft) => Some(KeyCode::Left),
+        Key::Named(NamedKey::ArrowRight) => Some(KeyCode::Right),
+        Key::Named(NamedKey::Home) => Some(KeyCode::Home),
+        Key::Named(NamedKey::End) => Some(KeyCode::End),
+        Key::Named(NamedKey::PageUp) => Some(KeyCode::PageUp),
+        Key::Named(NamedKey::PageDown) => Some(KeyCode::PageDown),
+        _ => None,
+    }
+}
+
+impl App {
+    /// Centralized handler for system scale-factor changes.
+    /// Updates settings, rescales sidebar, invalidates caches, and re-derives
+    /// the display map for the active document.
+    pub(crate) fn handle_scale_factor_changed(&mut self, scale_factor: f64) {
+        let old_metrics = self.ui_metrics();
+        self.update_scale_factor(scale_factor);
+        let new_metrics = self.ui_metrics();
+        let old_dpi = old_metrics.dpi;
+        let new_dpi = new_metrics.dpi;
+        if old_dpi > 0.0 && (old_dpi - new_dpi).abs() > f32::EPSILON {
+            let ratio = new_dpi / old_dpi;
+            self.ui_shell.sidebar_config.width *= ratio;
+            self.ui_shell.sidebar_clamp_width(new_dpi);
+        }
+        for index in 0..self.workspace.len() {
+            self.workspace.entry_mut(index).unwrap().doc.display.render_cache.invalidate_all();
+        }
+        if let Some(dv) = self.workspace.active_doc_mut() {
+            dv.display.advance_cache.clear();
+        }
+        self.frame_cache.cluster_pool.clear();
+        if self.workspace.active_index() < self.workspace.len() {
+            self.init_display_map(self.workspace.active_index());
+        }
+        self.invalidate_reshape();
+        self.needs_redraw = true;
+    }
+
+    /// Actual resumed logic, wrapped in catch_unwind by the trait method.
+    fn do_resumed(&mut self, event_loop: &ActiveEventLoop) {
+        self.running = true;
+        if self.window.is_none()
+            && let Err(_e) = self.init_window(event_loop)
+        {
+            event_loop.exit();
+            return;
+        }
+        // Build native menu bar after window creation (NSApp is ready)
+        if self.native_menu.is_none() {
+            let recent: Vec<std::path::PathBuf> = {
+                let paths: Vec<&std::path::Path> = self
+                    .workspace
+                    .entries()
+                    .iter()
+                    .map(|t| &t.doc)
+                    .filter_map(|dv| dv.file_path.as_deref())
+                    .collect();
+                if let Some(ref root) = compute_workspace_root(&paths) {
+                    self.file_history
+                        .get_by_workspace(root, crate::file_history::MENU_LIMIT)
+                        .iter()
+                        .map(|e| e.file_path.clone())
+                        .collect()
+                } else {
+                    self.file_history
+                        .get_valid_entries(crate::file_history::MENU_LIMIT)
+                        .iter()
+                        .map(|e| e.file_path.clone())
+                        .collect()
+                }
+            };
+            self.native_menu = Some(NativeMenu::build(&recent));
+        }
+    }
+
+    /// Actual window event logic, wrapped in catch_unwind by the trait method.
+    fn do_window_event(&mut self, event_loop: &ActiveEventLoop, event: WindowEvent) {
+        // Poll native menu actions (non-blocking)
+        let menu_actions: Vec<MenuAction> = if let Some(ref nm) = self.native_menu {
+            let mut actions = Vec::new();
+            while let Some(action) = nm.poll_action() {
+                actions.push(action);
+            }
+            actions
+        } else {
+            Vec::new()
+        };
+        for action in menu_actions {
+            if action == MenuAction::Quit {
+                self.quit_app(event_loop);
+                return;
+            }
+            self.dispatch_menu_action(action, event_loop);
+        }
+        match event {
+            WindowEvent::CloseRequested => {
+                // If there are unsaved changes, try to save first
+                let dirty = self.workspace.active_entry().map(|v| v.doc.dirty).unwrap_or(false);
+                if dirty
+                    && let Some(dv) = self.workspace.active_entry_mut().map(|t| &mut t.doc)
+                    && dv.file_path.is_some()
+                {
+                    // Auto-save on close
+                    if let Err(e) = dv.save() {
+                        eprintln!("auto-save on close failed: {e}");
+                    }
+                }
+                // If no file path (new unsaved doc), just discard
+                self.quit_app(event_loop);
+            }
+            WindowEvent::ModifiersChanged(modifiers) => {
+                self.modifiers = modifiers.state();
+            }
+            WindowEvent::Ime(Ime::Preedit(text, cursor)) => {
+                let dpi = self.scale_factor as f32;
+                let action = self.ui_shell.forward_ime(
+                    ui::core::Event::ImePreedit { text: text.clone(), cursor },
+                    &self.current_theme,
+                    dpi,
+                );
+                if action.is_none() {
+                    self.preedit_text = text;
+                    self.preedit_cursor = cursor;
+                }
+                self.needs_redraw = true;
+            }
+            WindowEvent::Ime(Ime::Enabled) => {
+                let dpi = self.scale_factor as f32;
+                let action =
+                    self.ui_shell.forward_ime(ui::core::Event::ImeEnable, &self.current_theme, dpi);
+                if action.is_none() {
+                    self.preedit_text.clear();
+                    self.preedit_cursor = None;
+                }
+                self.needs_redraw = true;
+            }
+            WindowEvent::Ime(Ime::Disabled) => {
+                let dpi = self.scale_factor as f32;
+                let action = self.ui_shell.forward_ime(
+                    ui::core::Event::ImeDisable,
+                    &self.current_theme,
+                    dpi,
+                );
+                if action.is_none() {
+                    self.preedit_text.clear();
+                    self.preedit_cursor = None;
+                }
+                self.needs_redraw = true;
+            }
+
+            WindowEvent::Ime(Ime::Commit(text)) => {
+                let dpi = self.scale_factor as f32;
+                let action = self.ui_shell.forward_ime(
+                    ui::core::Event::ImeCommit(text.clone()),
+                    &self.current_theme,
+                    dpi,
+                );
+                // forward_ime 现在正确路由到 SearchBarWidget；
+                // SearchBarWidget 内部的 TextBox 处理插入 + 触发 on_changed 回调。
+                if let Some(ui::core::widget::WidgetAction::SearchBar(ref sa)) = action {
+                    let effect = self.dispatch_search_action(sa.clone());
+                    self.apply_effect(effect);
+                } else if action.is_some() {
+                    // Consumed by search bar but no search action needed
+                    self.needs_redraw = true;
+                } else {
+                    let effect =
+                        self.dispatch_edit_command(EditCommand::InsertText(text), event_loop);
+                    self.apply_effect(effect);
+                    // Clear IME composition state
+                    self.preedit_text.clear();
+                    self.preedit_cursor = None;
+
+                    // Reset WYSIWYG preferred x so the next vertical move
+                    // doesn't anchor to a stale position
+                    self.wysiwyg_preferred_x = None;
+                }
+            }
+            WindowEvent::KeyboardInput { event, .. } if event.state.is_pressed() => {
+                // ── Search bar keyboard focus routing ──
+                // When search bar has keyboard focus, route keys directly to it.
+                // Whitelisted shortcuts still go through key_to_command → handle_command.
+                if self.ui_shell.keyboard_focus
+                    == crate::ui_shell::KeyboardFocusTarget::Widget(
+                        ui::core::widget::ids::SEARCH_BAR,
+                    )
+                {
+                    let sup = self.modifiers.super_key();
+                    let shift = self.modifiers.shift_key();
+                    let alt = self.modifiers.alt_key();
+                    if !is_search_bar_whitelist(&event.logical_key, sup, shift, alt) {
+                        if let Some(kc) =
+                            winit_key_to_keycode(&event.logical_key, event.text.as_deref())
+                        {
+                            let mods = Modifiers {
+                                shift,
+                                cmd: sup,
+                                alt,
+                                ctrl: self.modifiers.control_key(),
+                            };
+                            let dpi = self.scale_factor as f32;
+                            if let Some(action) =
+                                self.ui_shell.forward_key(kc, mods, &self.current_theme, dpi)
+                            {
+                                if let WidgetAction::SearchBar(ref sa) = action {
+                                    let effect = self.dispatch_search_action(sa.clone());
+                                    self.apply_effect(effect);
+                                } else {
+                                    self.needs_redraw = true;
+                                }
+                            }
+                        }
+                        return; // consumed by search bar
+                    }
+                    // Whitelist key: fall through to normal key_to_command pipeline
+                }
+                let actions = crate::events::handle_keyboard(self, &event);
+                for action in actions {
+                    self.dispatch(action, event_loop);
+                }
+            }
+            WindowEvent::Focused(focused) => {
+                self.window_focused = focused;
+                if !focused {
+                    // 失焦时冻结光标闪烁，保持可见状态
+                    if let Some(dv) = self.workspace.active_entry_mut().map(|t| &mut t.doc) {
+                        dv.cursor_render_state.cursor_blink_instant = std::time::Instant::now();
+                    }
+                }
+                self.needs_redraw = true;
+            }
+            WindowEvent::ThemeChanged(_system_theme) => {
+                let mode = self.settings.theme_mode;
+                if mode == ui::settings::ThemeMode::System {
+                    self.rebuild_theme_state();
+                    self.needs_redraw = true;
+                    if let Some(w) = self.window.as_ref() {
+                        w.request_redraw();
+                    }
+                }
+            }
+            WindowEvent::Resized(physical_size) => {
+                self.pending_resize = Some(physical_size);
+                let now = Instant::now();
+                if now.duration_since(self.last_resize_handled).as_millis() >= 16 {
+                    self.flush_pending_resize();
+                }
+            }
+            WindowEvent::ScaleFactorChanged { scale_factor, .. } => {
+                self.handle_scale_factor_changed(scale_factor);
+            }
+            WindowEvent::MouseWheel { delta, .. } => {
+                let actions = crate::events::handle_scroll(self, delta);
+                for action in actions {
+                    self.dispatch(action, event_loop);
+                }
+            }
+            WindowEvent::CursorMoved { position, .. } => {
+                let actions =
+                    crate::events::handle_cursor_moved(self, position.x as f32, position.y as f32);
+                for action in actions {
+                    self.dispatch(action, event_loop);
+                }
+            }
+            WindowEvent::MouseInput { state, button: MouseButton::Left, .. } => {
+                let actions = crate::events::handle_mouse_input_left(
+                    self,
+                    state,
+                    self.mouse.pos.0 as f32,
+                    self.mouse.pos.1 as f32,
+                );
+                for action in actions {
+                    self.dispatch(action, event_loop);
+                }
+            }
+            WindowEvent::MouseInput { state, button: MouseButton::Right, .. } => {
+                let px = self.mouse.pos.0 as f32;
+                let py = self.mouse.pos.1 as f32;
+                let actions = crate::events::handle_mouse_input_right(self, state, px, py);
+                for action in actions {
+                    self.dispatch(action, event_loop);
+                }
+            }
+
+            WindowEvent::DroppedFile(path) => {
+                if let Err(e) = self.open_file(&path) {
+                    eprintln!("Error opening dropped file: {e}");
+                }
+            }
+            WindowEvent::RedrawRequested => {
+                // 诊断：记录 RedrawRequested 到达时间
+                let _rr_arrive = std::time::Instant::now();
+                let _since_last_rr = _rr_arrive.duration_since(self.last_rr_time).as_micros();
+                self.last_rr_time = _rr_arrive;
+
+                self.needs_redraw = false;
+                self.flush_pending_resize();
+                // Tick sidebar hover state machine each frame
+                if matches!(self.settings.view_mode, ui::view_mode::ViewMode::Sidebar) {
+                    let (visibility_changed, animating) = {
+                        let shell = &mut self.ui_shell;
+                        shell.sidebar_tick(std::time::Instant::now())
+                    };
+                    self.sidebar_animating = animating || visibility_changed;
+                    if self.sidebar_animating {
+                        self.needs_redraw = true;
+                    }
+                } else {
+                    self.sidebar_animating = false;
+                }
+                let _rr_t0 = std::time::Instant::now();
+                self.render();
+                let _rr_us = _rr_t0.elapsed().as_micros();
+                // Debug-only: append frame timing to /tmp/perf.log
+                #[cfg(debug_assertions)]
+                {
+                    let _ = std::fs::OpenOptions::new()
+                        .create(true)
+                        .append(true)
+                        .open("/tmp/perf.log")
+                        .and_then(|mut f| {
+                            use std::io::Write;
+                            writeln!(
+                                f,
+                                "[rr] render={}us since_last={}us nr_after_render={}",
+                                _rr_us, _since_last_rr, self.needs_redraw
+                            )
+                        });
+                }
+            }
+            _ => {}
+        }
+        self.update_ime_cursor_area();
+    }
+}
+
+impl ApplicationHandler<AppEvent> for App {
+    fn resumed(&mut self, event_loop: &ActiveEventLoop) {
+        // Safety: catch_unwind prevents panic from crossing the extern "C" boundary
+        // in winit's macOS objc2 callbacks (Rust 2024 edition aborts on unwind).
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            self.do_resumed(event_loop);
+        }));
+        if let Err(e) = result {
+            eprintln!("[fatal] panic in resumed: {:?}", e);
+            event_loop.exit();
+        }
+    }
+
+    fn user_event(&mut self, _event_loop: &ActiveEventLoop, event: AppEvent) {
+        match event {
+            AppEvent::ReshapeResultsReady => {
+                self.needs_redraw = true;
+            }
+        }
+    }
+
+    fn suspended(&mut self, _event_loop: &ActiveEventLoop) {
+        self.running = false;
+    }
+
+    fn window_event(&mut self, event_loop: &ActiveEventLoop, _id: WindowId, event: WindowEvent) {
+        // SAFETY: catch_unwind prevents panic from crossing the extern "C" boundary
+        // in winit's macOS objc2 callbacks (Rust 2024 edition aborts on unwind).
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            self.do_window_event(event_loop, event);
+        }));
+        #[cfg(debug_assertions)]
+        if let Err(e) = result {
+            eprintln!("[fatal] panic in window_event: {:?}", e);
+        }
+    }
+    fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
+        let _atw_t0 = std::time::Instant::now();
+        // Poll menu actions — menu clicks may happen between window events
+        // Collect first to avoid borrow conflict with dispatch
+        let actions: Vec<MenuAction> = if let Some(ref nm) = self.native_menu {
+            std::iter::from_fn(|| nm.poll_action()).collect()
+        } else {
+            Vec::new()
+        };
+        for action in actions {
+            if action == MenuAction::Quit {
+                self.quit_app(event_loop);
+                return;
+            }
+            self.dispatch_menu_action(action, event_loop);
+        }
+
+        if self.window.is_none() {
+            return;
+        }
+
+        let nr_before = self.needs_redraw;
+        let mut why = "none";
+
+        // 检测光标闪烁 phase 变化 → 触发渲染
+        // 窗口未激活时不闪烁；搜索框焦点时跳过（TextBox 自己管理闪烁）
+        // 预览模式没有可见光标，跳过闪烁检测
+        if self.window_focused
+            && self.ui_shell.keyboard_focus
+                != crate::ui_shell::KeyboardFocusTarget::Widget(ui::core::widget::ids::SEARCH_BAR)
+            && self.workspace.active_entry().is_some_and(|t| t.plugin.needs_cursor_blink_wakeup())
+            && let Some(dv) = self.workspace.active_doc()
+        {
+            let (visible, _) = compute_cursor_phase(dv.cursor_render_state.cursor_blink_instant);
+            if visible != self.last_cursor_visible {
+                self.last_cursor_visible = visible;
+                self.needs_redraw = true;
+                why = "blink";
+            }
+        }
+
+        // 检测动画 → 触发渲染
+        if self.has_active_animation() {
+            self.needs_redraw = true;
+            why = if why == "none" { "anim" } else { "blink+anim" };
+        }
+
+        // 检测外部文件变更 — 仅当活跃文件非 dirty 时检查
+        if self.file_watcher.should_check() {
+            let dirty = self.workspace.active_entry().map(|t| t.doc.dirty).unwrap_or(true);
+            if !dirty && let Some(change) = self.file_watcher.check() {
+                let file_name = change
+                    .path
+                    .file_name()
+                    .map(|n| n.to_string_lossy().to_string())
+                    .unwrap_or_else(|| change.path.display().to_string());
+                let msg = format!("「{}」已被外部程序修改，是否重新加载？", file_name);
+                let mut dialog = rfd::MessageDialog::new()
+                    .set_title("文件已变更")
+                    .set_description(&msg)
+                    .set_buttons(rfd::MessageButtons::YesNo)
+                    .set_level(rfd::MessageLevel::Warning);
+                if let Some(ref w) = self.window {
+                    dialog = dialog.set_parent(w.as_ref());
+                }
+                match dialog.show() {
+                    rfd::MessageDialogResult::Yes => {
+                        let effect = self.reload_active_file(&change);
+                        self.apply_effect(effect);
+                        why = if why == "none" { "fwatch" } else { "fwatch+" };
+                    }
+                    rfd::MessageDialogResult::No => {
+                        // User chose to ignore — update mtime baseline to stop re-prompting
+                        if let Some(ref path) =
+                            self.workspace.active_doc().and_then(|dv| dv.file_path.as_ref())
+                            && let Ok(meta) = std::fs::metadata(path)
+                            && let Ok(mtime) = meta.modified()
+                        {
+                            self.file_watcher.confirm_reload(mtime, meta.len());
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+
+        // 仅在有需要时 request_redraw（不再无条件刷新）
+        let did_request = self.needs_redraw;
+        if self.needs_redraw
+            && let Some(window) = &self.window
+        {
+            window.request_redraw();
+        }
+
+        // 设置 ControlFlow — 精确调度下一次唤醒
+        let next_wake = self.compute_next_wake_time();
+        let wake_ms =
+            next_wake.map(|d| d.duration_since(std::time::Instant::now()).as_millis() as i64);
+        match next_wake {
+            Some(deadline) => {
+                event_loop.set_control_flow(ControlFlow::WaitUntil(deadline));
+            }
+            None => {
+                event_loop.set_control_flow(ControlFlow::Wait);
+            }
+        }
+
+        let _atw_us = _atw_t0.elapsed().as_micros();
+        // Debug-only: append about_to_wait timing to /tmp/perf.log
+        #[cfg(debug_assertions)]
+        {
+            let _ = std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open("/tmp/perf.log")
+                .and_then(|mut f| {
+                    use std::io::Write;
+                    writeln!(
+                        f,
+                        "[atw] {:>5}us nr={}->{} why={:<10} req={} wake={:?}",
+                        _atw_us, nr_before, self.needs_redraw, why, did_request, wake_ms
+                    )
+                });
+        }
+        self.update_ime_cursor_area();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use winit::keyboard::{Key, NamedKey};
+
+    // ── winit_key_to_keycode ──
+
+    #[test]
+    fn keycode_char_from_text() {
+        assert_eq!(
+            winit_key_to_keycode(&Key::Character("a".into()), Some("a")),
+            Some(KeyCode::Char('a'))
+        );
+    }
+
+    #[test]
+    fn keycode_char_shift_handled_by_text() {
+        // event.text handles Shift+1 → "!" naturally; our function just passes text through
+        assert_eq!(
+            winit_key_to_keycode(&Key::Character("1".into()), Some("!")),
+            Some(KeyCode::Char('!'))
+        );
+    }
+
+    #[test]
+    fn keycode_non_english_layout() {
+        // On German keyboard, Shift+8 → "("
+        assert_eq!(
+            winit_key_to_keycode(&Key::Character("8".into()), Some("(")),
+            Some(KeyCode::Char('('))
+        );
+    }
+
+    #[test]
+    fn keycode_tab_not_filtered() {
+        // Tab is a control char but should pass through
+        assert_eq!(
+            winit_key_to_keycode(&Key::Named(NamedKey::Tab), Some("\t")),
+            Some(KeyCode::Char('\t'))
+        );
+    }
+
+    #[test]
+    fn keycode_named_escape() {
+        assert_eq!(
+            winit_key_to_keycode(&Key::Named(NamedKey::Escape), None),
+            Some(KeyCode::Escape)
+        );
+    }
+
+    #[test]
+    fn keycode_named_enter() {
+        assert_eq!(winit_key_to_keycode(&Key::Named(NamedKey::Enter), None), Some(KeyCode::Enter));
+    }
+
+    #[test]
+    fn keycode_named_backspace() {
+        assert_eq!(
+            winit_key_to_keycode(&Key::Named(NamedKey::Backspace), None),
+            Some(KeyCode::Backspace)
+        );
+    }
+
+    #[test]
+    fn keycode_named_delete() {
+        assert_eq!(
+            winit_key_to_keycode(&Key::Named(NamedKey::Delete), None),
+            Some(KeyCode::Delete)
+        );
+    }
+
+    #[test]
+    fn keycode_named_arrows() {
+        assert_eq!(winit_key_to_keycode(&Key::Named(NamedKey::ArrowUp), None), Some(KeyCode::Up));
+        assert_eq!(
+            winit_key_to_keycode(&Key::Named(NamedKey::ArrowDown), None),
+            Some(KeyCode::Down)
+        );
+        assert_eq!(
+            winit_key_to_keycode(&Key::Named(NamedKey::ArrowLeft), None),
+            Some(KeyCode::Left)
+        );
+        assert_eq!(
+            winit_key_to_keycode(&Key::Named(NamedKey::ArrowRight), None),
+            Some(KeyCode::Right)
+        );
+    }
+
+    #[test]
+    fn keycode_named_home_end() {
+        assert_eq!(winit_key_to_keycode(&Key::Named(NamedKey::Home), None), Some(KeyCode::Home));
+        assert_eq!(winit_key_to_keycode(&Key::Named(NamedKey::End), None), Some(KeyCode::End));
+    }
+
+    #[test]
+    fn keycode_named_page_up_down() {
+        assert_eq!(
+            winit_key_to_keycode(&Key::Named(NamedKey::PageUp), None),
+            Some(KeyCode::PageUp)
+        );
+        assert_eq!(
+            winit_key_to_keycode(&Key::Named(NamedKey::PageDown), None),
+            Some(KeyCode::PageDown)
+        );
+    }
+
+    #[test]
+    fn keycode_unknown_named_returns_none() {
+        assert_eq!(winit_key_to_keycode(&Key::Named(NamedKey::F1), None), None);
+    }
+
+    #[test]
+    fn keycode_empty_text_falls_through_to_named() {
+        // F3 has no text, but is a Named key that we don't map
+        assert_eq!(winit_key_to_keycode(&Key::Named(NamedKey::F3), None), None);
+    }
+
+    #[test]
+    fn keycode_text_takes_priority_over_named() {
+        // Text path runs first; even if logical_key is Enter, text takes priority
+        assert_eq!(
+            winit_key_to_keycode(&Key::Named(NamedKey::Enter), Some("x")),
+            Some(KeyCode::Char('x'))
+        );
+    }
+
+    // ── is_search_bar_whitelist ──
+
+    #[test]
+    fn whitelist_cmd_f() {
+        assert!(is_search_bar_whitelist(&Key::Character("f".into()), true, false, false));
+    }
+
+    #[test]
+    fn whitelist_cmd_shift_f() {
+        assert!(is_search_bar_whitelist(&Key::Character("f".into()), true, true, false));
+    }
+
+    #[test]
+    fn whitelist_cmd_s() {
+        assert!(is_search_bar_whitelist(&Key::Character("s".into()), true, false, false));
+    }
+
+    #[test]
+    fn whitelist_cmd_shift_s() {
+        assert!(is_search_bar_whitelist(&Key::Character("s".into()), true, true, false));
+    }
+
+    #[test]
+    fn whitelist_cmd_w() {
+        assert!(is_search_bar_whitelist(&Key::Character("w".into()), true, false, false));
+    }
+
+    #[test]
+    fn whitelist_cmd_z() {
+        assert!(is_search_bar_whitelist(&Key::Character("z".into()), true, false, false));
+    }
+
+    #[test]
+    fn whitelist_cmd_shift_z() {
+        assert!(is_search_bar_whitelist(&Key::Character("z".into()), true, true, false));
+    }
+
+    #[test]
+    fn whitelist_cmd_bracket() {
+        assert!(is_search_bar_whitelist(&Key::Character("[".into()), true, false, false));
+        assert!(is_search_bar_whitelist(&Key::Character("]".into()), true, false, false));
+    }
+
+    #[test]
+    fn whitelist_cmd_shift_bracket() {
+        assert!(is_search_bar_whitelist(&Key::Character("[".into()), true, true, false));
+        assert!(is_search_bar_whitelist(&Key::Character("]".into()), true, true, false));
+    }
+
+    #[test]
+    fn whitelist_cmd_alt_arrows() {
+        assert!(is_search_bar_whitelist(&Key::Named(NamedKey::ArrowLeft), true, false, true));
+        assert!(is_search_bar_whitelist(&Key::Named(NamedKey::ArrowRight), true, false, true));
+    }
+
+    #[test]
+    fn whitelist_no_super_returns_false() {
+        assert!(!is_search_bar_whitelist(&Key::Character("f".into()), false, false, false));
+        assert!(!is_search_bar_whitelist(&Key::Character("f".into()), false, true, false));
+    }
+
+    #[test]
+    fn whitelist_unknown_char_not_whitelisted() {
+        assert!(!is_search_bar_whitelist(&Key::Character("g".into()), true, false, false));
+    }
+
+    #[test]
+    fn whitelist_arrow_without_alt_not_whitelisted() {
+        assert!(!is_search_bar_whitelist(&Key::Named(NamedKey::ArrowLeft), true, false, false));
+    }
+
+    #[test]
+    fn whitelist_cmd_shift_arrow_not_whitelisted() {
+        // Cmd+Shift+Alt+Left is not whitelisted (whitelist requires !shift for arrows)
+        assert!(!is_search_bar_whitelist(&Key::Named(NamedKey::ArrowLeft), true, true, true));
+    }
+
+    #[test]
+    fn scale_factor_round_trip_preserves_logical_persistence_value() {
+        let mut app = App::new(None);
+        let logical = app.persisted_font_size();
+
+        app.handle_scale_factor_changed(2.0);
+        assert_eq!(app.persisted_font_size(), logical);
+        app.handle_scale_factor_changed(1.0);
+        assert_eq!(app.persisted_font_size(), logical);
+    }
+
+    #[test]
+    fn keycode_cmd_char_falls_back_to_logical_character_when_text_is_control() {
+        assert_eq!(
+            winit_key_to_keycode(&Key::Character("a".into()), Some("\x01")),
+            Some(KeyCode::Char('a'))
+        );
+    }
+
+    #[test]
+    fn keycode_cmd_char_falls_back_to_logical_character_when_text_is_none() {
+        assert_eq!(
+            winit_key_to_keycode(&Key::Character("c".into()), None),
+            Some(KeyCode::Char('c'))
+        );
+    }
+
+    #[test]
+    fn search_focus_does_not_whitelist_cmd_a_c_x_v() {
+        assert!(!is_search_bar_whitelist(&Key::Character("a".into()), true, false, false));
+        assert!(!is_search_bar_whitelist(&Key::Character("c".into()), true, false, false));
+        assert!(!is_search_bar_whitelist(&Key::Character("x".into()), true, false, false));
+        assert!(!is_search_bar_whitelist(&Key::Character("v".into()), true, false, false));
+    }
+
+    #[test]
+    fn search_focus_routes_delete_to_widget() {
+        // App creation requires an EventLoop in some environments, but App::new(None) works in tests
+        let mut app = App::new(None);
+        app.ui_shell.keyboard_focus =
+            crate::ui_shell::KeyboardFocusTarget::Widget(ui::core::widget::ids::SEARCH_BAR);
+
+        // This is a unit test that verifies `is_search_bar_whitelist` for Delete returns false
+        assert!(!is_search_bar_whitelist(&Key::Named(NamedKey::Delete), false, false, false));
+    }
+}

@@ -1,0 +1,107 @@
+#[display_name = "TOML"]
+#[path = "**/*.toml"]
+pub fn toml() {
+    // Table headers: [[array.of.tables]] or [table.name]
+    if /\[\[[^\]]*\]\]/ {
+        yield meta.header;
+    } else if /\[[^\]]*\]/ {
+        yield meta.header;
+    }
+
+    until /$/ {
+        yield other;
+
+        // Comments
+        if /#.*/ {
+            yield comment;
+        }
+        // Multi-line basic string """
+        else if /"""/ {
+            loop {
+                yield string;
+                if /"""/ {
+                    yield string;
+                    break;
+                }
+                await input;
+            }
+        }
+        // Multi-line literal string '''
+        else if /'''/ {
+            loop {
+                yield string;
+                if /'''/ {
+                    yield string;
+                    break;
+                }
+                await input;
+            }
+        }
+        // Basic string "..."
+        else if /"/ {
+            double_quote_string();
+        }
+        // Literal string '...'
+        else if /'/ {
+            single_quote_string();
+        }
+        // Key: dotted bare key = (e.g. name, a.b.c, package-name)
+        else if /([\w.-]+)\s*=/ {
+            yield $1 as property;
+        }
+        // Key: quoted key = (e.g. "key.name" = ...)
+        else if /("[^"]*")\s*=/ {
+            yield $1 as property;
+        }
+        // Key: literal quoted key = (e.g. 'key.name' = ...)
+        else if /('[^']*')\s*=/ {
+            yield $1 as property;
+        }
+        // Boolean
+        else if /(?:true|false)/ {
+            if /\w+/ {
+                // Not a boolean (e.g. trueish)
+            } else {
+                yield boolean;
+            }
+        }
+        // Special float: inf, nan
+        else if /[+-]?(?:inf|nan)/ {
+            if /\w+/ {
+                // Not a special value (e.g. info)
+            } else {
+                yield constant.language;
+            }
+        }
+        // Hex integer
+        else if /[+-]?0x[\da-fA-F][\da-fA-F_]*/ {
+            if /\w+/ {} else { yield constant.numeric; }
+        }
+        // Octal integer
+        else if /[+-]?0o[0-7][0-7_]*/ {
+            if /\w+/ {} else { yield constant.numeric; }
+        }
+        // Binary integer
+        else if /[+-]?0b[01][01_]*/ {
+            if /\w+/ {} else { yield constant.numeric; }
+        }
+        // Datetime (must be before plain number)
+        else if /\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})?/ {
+            yield constant.numeric;
+        }
+        // Date
+        else if /\d{4}-\d{2}-\d{2}/ {
+            yield constant.numeric;
+        }
+        // Time
+        else if /\d{2}:\d{2}:\d{2}(?:\.\d+)?/ {
+            yield constant.numeric;
+        }
+        // Decimal integer and float
+        else if /[+-]?\d[\d_]*(?:\.\d[\d_]*)?(?:[eE][+-]?\d[\d_]*)?/ {
+            if /\w+/ {} else { yield constant.numeric; }
+        }
+
+        yield other;
+    }
+}

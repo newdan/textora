@@ -1,0 +1,16 @@
+--- crates/app/src/app_lifecycle.rs
++++ crates/app/src/app_lifecycle.rs
+@@ -190,6 +190,13 @@
+         event: winit::event::Event<()>,
+         event_loop: &winit::event_loop::ActiveEventLoop,
+     ) {
++        match &event {
++            winit::event::Event::AboutToWait | winit::event::Event::WindowEvent { event: winit::event::WindowEvent::RedrawRequested, .. } => {},
++            _ => {
++                eprintln!("[event] {:?}", event);
++            }
++        }
++
+         let _t0 = std::time::Instant::now();
+         if self.gpu_failed {
+             event_loop.exit();

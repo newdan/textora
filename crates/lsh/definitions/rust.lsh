@@ -1,0 +1,82 @@
+#[display_name = "Rust"]
+#[path = "**/*.rs"]
+pub fn rust() {
+    until /$/ {
+        yield other;
+
+        if /\/\/.*/ {
+            yield comment;
+        } else if /\/\*/ {
+            loop {
+                yield comment;
+                await input;
+                if /\*\// {
+                    yield comment;
+                    break;
+                }
+            }
+        } else if /b?"/ {
+            until /$/ {
+                yield string;
+                if /\\./ {}
+                else if /"/ { yield string; break; }
+                await input;
+            }
+        } else if /b?r#+"/ {
+            loop {
+                yield string;
+                if /"#/ { yield string; break; }
+                await input;
+            }
+        } else if /b?r"/ {
+            loop {
+                yield string;
+                if /"/ { yield string; break; }
+                await input;
+            }
+        } else if /b?'(?:\\.|[^'\\])'/ {
+            yield string;
+        } else if /'[a-zA-Z_]\w*\>/ {
+            yield variable.special;
+        } else if /(?:break|continue|else|if|match|return|loop|while|for)\>/ {
+            yield keyword.control;
+        } else if /(?:use|pub|crate|super|mod)\>/ {
+            yield keyword.import;
+        } else if /(?:fn|struct|enum|trait|impl|type|const|static|let|mut)\>/ {
+            yield keyword.declaration;
+        } else if /(?:self|Self)\>/ {
+            yield variable.special;
+        } else if /(?:as|async|await|dyn|move|ref|where|unsafe|in)\>/ {
+            yield keyword.other;
+        } else if /(?:true|false)\>/ {
+            yield boolean;
+        } else if /(?:String|Vec|Option|Result|Box|Rc|Arc|Cell|RefCell|HashMap|HashSet)\>/ {
+            yield constant.language;
+        } else if /(?i:-?(?:0x[\da-f_]+|0b[01_]+|0o[0-7_]+|[\d_]+\.?[\d_]*|\.[\d_]+)(?:e[+-]?[\d_]+)?(?:[if](?:8|16|32|64|128|size))?)/ {
+            if /\w+/ {
+                // Invalid numeric literal
+            } else {
+                yield constant.numeric;
+            }
+        } else if /#\!\[[^\]]*\]/ {
+            yield markup.link;
+        } else if /#\[[^\]]*\]/ {
+            yield markup.link;
+        } else if /![a-zA-Z_]\w*/ {
+            yield keyword.other; // macro invocation
+        } else if /\.(\w+)/ {
+            yield $1 as property;
+        } else if /(\w+)\s*!/ {
+            yield $1 as keyword.other;
+        } else if /(\w+)\s*\(/ {
+            yield $1 as method;
+        } else if /[A-Z][a-zA-Z0-9_]*/ {
+            // Title case identifiers are often types
+            yield constant.language;
+        } else if /\w+/ {
+            yield variable;
+        }
+
+        yield other;
+    }
+}

@@ -1,0 +1,51 @@
+{
+  "system_version": {
+    "version": "v2.1.1",
+    "arch": "arm64",
+    "os": "darwin"
+  },
+  "system_status": {
+    "myID": "ABCDEFG-ABCDEFG-ABCDEFG-ABCDEFG-ABCDEFG-ABCDEFG-ABCDEFG-ABCDEFG",
+    "pathSeparator": "/",
+    "uptime": 123
+  },
+  "connections": {
+    "connections": {
+      "HIJKLMN-HIJKLMN-HIJKLMN-HIJKLMN-HIJKLMN-HIJKLMN-HIJKLMN-HIJKLMN": {
+        "connected": true
+      }
+    }
+  },
+  "pending_devices": {
+    "HIJKLMN-HIJKLMN-HIJKLMN-HIJKLMN-HIJKLMN-HIJKLMN-HIJKLMN-HIJKLMN": {
+      "name": "Remote"
+    }
+  },
+  "pending_folders": {
+    "notes": {
+      "offeredBy": {
+        "HIJKLMN-HIJKLMN-HIJKLMN-HIJKLMN-HIJKLMN-HIJKLMN-HIJKLMN-HIJKLMN": {
+          "label": "Notes"
+        }
+      }
+    }
+  },
+  "folder_status": {
+    "state": "idle",
+    "globalBytes": 100,
+    "inSyncBytes": 100,
+    "needBytes": 0,
+    "needTotalItems": 0,
+    "pullErrors": 0
+  },
+  "folder_errors": {
+    "errors": []
+  },
+  "events": [
+    {
+      "id": 1,
+      "type": "FolderStateChanged",
+      "data": {}
+    }
+  ]
+}

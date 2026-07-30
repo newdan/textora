@@ -1,0 +1,74 @@
+[package]
+name = "textora-app"
+version = "0.1.0"
+
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[[bin]]
+name = "textora"
+path = "src/main.rs"
+
+[features]
+default = ["markdown"]
+ci-no-fonts = ["appkit-shell/ci-no-fonts"]
+markdown = ["dep:textora-markdown"]
+
+[dependencies]
+unicode_categories = { workspace = true }
+ui.workspace = true
+winit.workspace = true
+wgpu.workspace = true
+shaping.workspace = true
+textora-markdown = { path = "../markdown", optional = true }
+appkit-core = { path = "../appkit-core", package = "textora-appkit-core" }
+appkit-shell = { path = "../appkit-shell", package = "textora-appkit-shell" }
+render.workspace = true
+pollster = "0.4"
+core.workspace = true
+stdext.workspace = true
+serde = { workspace = true }
+toml = "0.5"
+bytemuck = { version = "1", features = ["derive"] }
+hashlink.workspace = true
+arboard.workspace = true
+rfd = { version = "0.15", default-features = false }
+similar = "2"
+blake3 = "1"
+dirs = "6"
+smallvec = { workspace = true }
+textora-sync = { path = "../sync" }
+semver = "1"
+notify = "8"
+
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2.workspace = true
+objc2-app-kit.workspace = true
+objc2-foundation.workspace = true
+security-framework = "3.7"
+security-framework-sys = "2.17"
+wgpu = { workspace = true, features = ["metal"] }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+wgpu = { workspace = true, features = ["vulkan"] }
+
+[target.'cfg(target_os = "windows")'.dependencies]
+wgpu = { workspace = true, features = ["dx12"] }
+
+[dev-dependencies]
+tempfile = "3"
+criterion = { workspace = true }
+
+[[bench]]
+name = "tab_bench"
+harness = false
+
+[[bench]]
+name = "scroll_bench"
+harness = false
+
+[[bench]]
+name = "snap_tree_bench"
+harness = false

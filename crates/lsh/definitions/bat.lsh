@@ -1,0 +1,86 @@
+#[display_name = "Batch File"]
+#[path = "**/*.bat"]
+#[path = "**/*.cmd"]
+#[path = "**/*.btm"]
+pub fn bat() {
+    until /$/ {
+        yield other;
+
+        // Comments: REM or double-colon
+        if /(?i:rem)\s/ {
+            yield comment;
+            until /$/ {
+                if /.*/ {}
+                yield comment;
+            }
+            yield other;
+        } else if /::.*/ {
+            yield comment;
+        } else if /@echo\>/ {
+            yield keyword.other;
+            if /\s+(?i:on|off)\>/ {
+                yield constant.language;
+            }
+        // Control flow
+        } else if /(?i:if)\>/ {
+            yield keyword.control;
+            if /\s+(?i:not\s+)?(?i:exist|defined|errorlevel|cmdextversion)\>/ {
+                yield keyword.control;
+            }
+        } else if /(?i:else)\>/ {
+            yield keyword.control;
+        } else if /(?i:for)\>/ {
+            yield keyword.control;
+        } else if /(?i:in|do)\>/ {
+            yield keyword.control;
+        } else if /(?i:goto)\>/ {
+            yield keyword.control;
+            if /\s+:?(\w+)/ {
+                yield $1 as constant.language;
+            }
+        // Labels :label
+        } else if /:\w+/ {
+            yield constant.language;
+        // Built-in commands
+        } else if /(?i:call|start|exit|pause|shift|color|title|ver|vol|date|time|cls|chdir|cd|md|mkdir|rd|rmdir|del|erase|copy|move|ren|rename|type|more|find|findstr|sort|fc|comp|assoc|ftype|setlocal|endlocal|path|prompt|pushd|popd|dir|echo|break|verify|replace|print|xcopy|robocopy|mklink|attrib|icacls|takeown|where|whoami|setx|choice|timeout|tasklist|taskkill|schtasks|wmic|reg|net|sc)\>/ {
+            yield keyword.other;
+        // SET variable
+        } else if /(?i:set)\s+\/?[aA]\s+/ {
+            yield keyword.other;
+            if /(\w+)=/ {
+                yield $1 as variable;
+            }
+        // %VAR%
+        } else if /%[^%]+%/ {
+            yield variable;
+        // !VAR! (delayed expansion)
+        } else if /![^!]+!/ {
+            yield variable;
+        // %~dp0 etc.
+        } else if /%~?(?:[dpnxsatz]+\d|\*|\d)/ {
+            yield variable;
+        // %%a (FOR variables)
+        } else if /%%[a-zA-Z]/ {
+            yield variable;
+        // Strings
+        } else if /"/ {
+            until /$/ {
+                yield string;
+                if /%[^%]+%/ {
+                    yield variable;
+                }
+                if /"/ { yield string; break; }
+                await input;
+            }
+        // Operators
+        } else if /[<>|&]{1,2}/ {
+            yield keyword.other;
+        // Numbers
+        } else if /-?\d+/ {
+            yield constant.numeric;
+        } else if /\w+/ {
+        }
+
+        yield other;
+    }
+}

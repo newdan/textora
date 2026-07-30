@@ -1,0 +1,74 @@
+#[display_name = "JavaScript"]
+#[path = "**/*.cjs"]
+#[path = "**/*.js"]
+#[path = "**/*.jsx"]
+#[path = "**/*.mjs"]
+pub fn javascript() {
+    until /$/ {
+        yield other;
+
+        if /\/\/.*/ {
+            yield comment;
+        } else if /\/\*/ {
+            loop {
+                yield comment;
+                await input;
+                if /\*\// {
+                    yield comment;
+                    break;
+                }
+            }
+        } else if /'/ {
+            until /$/ {
+                yield string;
+                if /\\./ {}
+                else if /'/ { yield string; break; }
+                await input;
+            }
+        } else if /"/ {
+            until /$/ {
+                yield string;
+                if /\\./ {}
+                else if /"/ { yield string; break; }
+                await input;
+            }
+        } else if /`/ {
+            loop {
+                yield string;
+                if /\\./ {}
+                else if /`/ { yield string; break; }
+                await input;
+            }
+        } else if /(?:break|case|catch|continue|debugger|default|do|else|finally|for|if|return|switch|throw|try|while)\>/ {
+            yield keyword.control;
+        } else if /(?:import|export|from)\>/ {
+            yield keyword.import;
+        } else if /(?:const|let|var|function|class)\>/ {
+            yield keyword.declaration;
+        } else if /(?:this|super)\>/ {
+            yield variable.special;
+        } else if /(?:async|await|delete|extends|in|instanceof|new|of|static|typeof|void|yield|with)\>/ {
+            yield keyword.other;
+        } else if /(?:null|undefined|NaN|Infinity)\>/ {
+            yield constant.language;
+        } else if /(?:true|false)\>/ {
+            yield boolean;
+        } else if /(?i:-?(?:0x[\da-fA-F_]+|0b[01_]+|0o[0-7_]+|[\d_]+\.?[\d_]*|\.[\d_]+)(?:e[+-]?[\d_]+)?)n?/ {
+            if /\w+/ {
+                // Invalid numeric literal
+            } else {
+                yield constant.numeric;
+            }
+        } else if /\.(\w+)/ {
+            // Property access: obj.prop
+            yield $1 as property;
+        } else if /(\w+)\s*\(/ {
+            yield $1 as method;
+        } else if /\w+/ {
+            // Identifier: yielded as variable
+            yield variable;
+        }
+
+        yield other;
+    }
+}

@@ -1,0 +1,1953 @@
+//! TextBox — single-line text input component.
+//! Manages text state, cursor, selection, IME preedit, and clipboard callbacks.
+
+use crate::core::widget::{ControlAction, SensitiveText, TextPayload, WidgetId};
+use crate::core::{
+    Event, EventCtx, KeyCode, LayoutCtx, Modifiers, MouseButton, PaintCtx, Rect, Widget,
+    WidgetAction,
+};
+
+const MASKED_ECHO_GLYPH: char = '•';
+
+/// IME event type — received by TextBox from the parent widget.
+#[derive(Clone)]
+pub enum TextBoxIme {
+    Preedit { text: String, cursor: Option<(usize, usize)> },
+    Commit(String),
+    Enabled,
+    Disabled,
+}
+
+impl std::fmt::Debug for TextBoxIme {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Preedit { cursor, .. } => formatter
+                .debug_struct("Preedit")
+                .field("text", &"<redacted>")
+                .field("cursor", cursor)
+                .finish(),
+            Self::Commit(_) => formatter.write_str("Commit(<redacted>)"),
+            Self::Enabled => formatter.write_str("Enabled"),
+            Self::Disabled => formatter.write_str("Disabled"),
+        }
+    }
+}
+
+impl zeroize::Zeroize for TextBoxIme {
+    fn zeroize(&mut self) {
+        match self {
+            Self::Preedit { text, .. } | Self::Commit(text) => {
+                zeroize::Zeroize::zeroize(text);
+            }
+            Self::Enabled | Self::Disabled => {}
+        }
+    }
+}
+
+impl zeroize::ZeroizeOnDrop for TextBoxIme {}
+
+impl Drop for TextBoxIme {
+    fn drop(&mut self) {
+        zeroize::Zeroize::zeroize(self);
+    }
+}
+
+pub type ClipboardGetCb = Box<dyn Fn() -> String>;
+pub type ClipboardSetCb = Box<dyn Fn(String)>;
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum EchoMode {
+    #[default]
+    Plain,
+    Masked,
+}
+
+#[derive(Clone, PartialEq)]
+enum TextStorage {
+    Plain(String),
+    Sensitive(SensitiveText),
+}
+
+impl TextStorage {
+    fn as_str(&self) -> &str {
+        match self {
+            Self::Plain(value) => value,
+            Self::Sensitive(value) => value.expose(),
+        }
+    }
+
+    fn set_echo_mode(&mut self, echo_mode: EchoMode) {
+        let already_matches = matches!(
+            (&*self, echo_mode),
+            (Self::Plain(_), EchoMode::Plain) | (Self::Sensitive(_), EchoMode::Masked)
+        );
+        if already_matches {
+            return;
+        }
+
+        let previous = std::mem::replace(self, Self::Plain(String::new()));
+        *self = match previous {
+            Self::Plain(value) => Self::Sensitive(SensitiveText::new(value)),
+            Self::Sensitive(value) => Self::Plain(value.expose().to_owned()),
+        };
+    }
+
+    fn replace(&mut self, value: &str) {
+        match self {
+            Self::Plain(current) => *current = value.to_owned(),
+            Self::Sensitive(current) => *current = SensitiveText::new(value.to_owned()),
+        }
+    }
+
+    fn clear(&mut self) {
+        match self {
+            Self::Plain(value) => value.clear(),
+            Self::Sensitive(value) => value.clear(),
+        }
+    }
+
+    fn replace_range(&mut self, range: std::ops::Range<usize>, replacement: &str) {
+        match self {
+            Self::Plain(value) => value.replace_range(range, replacement),
+            Self::Sensitive(value) => value.replace_range(range, replacement),
+        }
+    }
+
+    fn insert_str(&mut self, byte_index: usize, value: &str) {
+        self.replace_range(byte_index..byte_index, value);
+    }
+
+    fn insert(&mut self, byte_index: usize, value: char) {
+        let mut encoded = [0; 4];
+        self.insert_str(byte_index, value.encode_utf8(&mut encoded));
+    }
+
+    fn payload(&self) -> TextPayload {
+        match self {
+            Self::Plain(value) => TextPayload::Plain(value.clone()),
+            Self::Sensitive(value) => TextPayload::Sensitive(value.clone()),
+        }
+    }
+}
+
+impl std::fmt::Debug for TextStorage {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Plain(value) => formatter.debug_tuple("Plain").field(value).finish(),
+            Self::Sensitive(_) => formatter.write_str("Sensitive(<redacted>)"),
+        }
+    }
+}
+
+impl std::ops::Deref for TextStorage {
+    type Target = str;
+
+    fn deref(&self) -> &Self::Target {
+        self.as_str()
+    }
+}
+
+impl PartialEq<&str> for TextStorage {
+    fn eq(&self, other: &&str) -> bool {
+        self.as_str() == *other
+    }
+}
+
+pub struct TextBox {
+    id: Option<WidgetId>,
+    rect: Rect,
+
+    // Text state
+    text: TextStorage,
+    cursor_byte: usize,
+
+    // Selection: (anchor_byte, cursor_byte), no ordering guarantee. None = no selection.
+    selection: Option<(usize, usize)>,
+
+    // IME
+    preedit: TextStorage,
+    preedit_cursor: Option<(usize, usize)>,
+
+    // Visual
+    placeholder: String,
+    echo_mode: EchoMode,
+    blink_on: bool,
+    focused: bool,
+
+    // Mouse drag
+    dragging: bool,
+
+    // Layout cache
+    cursor_x: f32,
+    preedit_width: f32,
+    preedit_cursor_x: f32,
+    /// byte_offset → pixel_x 映射（layout 时填充），用于鼠标点击定位光标。
+    char_offsets: Vec<(usize, f32)>,
+    /// 文本区域左侧 padding（layout 时按 DPI 缓存）
+    text_pad: f32,
+    fixed_size_logical: Option<(f32, f32)>,
+
+    pub on_copy: Option<ClipboardSetCb>,
+    pub on_cut: Option<ClipboardSetCb>,
+    pub on_paste: Option<ClipboardGetCb>,
+    pub max_len_bytes: usize,
+    committed_payload: Option<TextPayload>,
+}
+
+impl Default for TextBox {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl TextBox {
+    pub fn new() -> Self {
+        Self {
+            id: None,
+            rect: Rect::ZERO,
+            text: TextStorage::Plain(String::new()),
+            cursor_byte: 0,
+            selection: None,
+            preedit: TextStorage::Plain(String::new()),
+            preedit_cursor: None,
+            placeholder: String::new(),
+            echo_mode: EchoMode::Plain,
+            blink_on: false,
+            focused: false,
+            dragging: false,
+            cursor_x: 0.0,
+            preedit_width: 0.0,
+            preedit_cursor_x: 0.0,
+            char_offsets: Vec::new(),
+            text_pad: 0.0,
+            fixed_size_logical: None,
+            on_copy: None,
+            on_cut: None,
+            on_paste: None,
+            max_len_bytes: usize::MAX,
+            committed_payload: None,
+        }
+    }
+
+    pub fn with_id(id: WidgetId) -> Self {
+        let mut text_box = Self::new();
+        text_box.id = Some(id);
+        text_box
+    }
+
+    // ── Accessors ──
+
+    pub fn text(&self) -> &str {
+        self.text.as_str()
+    }
+    pub fn cursor_byte(&self) -> usize {
+        self.cursor_byte
+    }
+    pub fn is_focused(&self) -> bool {
+        self.focused
+    }
+    pub fn rect(&self) -> Rect {
+        self.rect
+    }
+
+    pub fn set_text(&mut self, text: &str) {
+        self.text.replace(text);
+        self.cursor_byte = self.text.len();
+        self.selection = None;
+    }
+
+    pub fn set_placeholder(&mut self, ph: &str) {
+        self.placeholder = ph.to_string();
+    }
+
+    pub fn set_fixed_size_logical(&mut self, width: f32, height: f32) {
+        self.fixed_size_logical = Some((width.max(0.0), height.max(0.0)));
+    }
+
+    pub fn set_echo_mode(&mut self, echo_mode: EchoMode) {
+        self.text.set_echo_mode(echo_mode);
+        self.preedit.set_echo_mode(echo_mode);
+        self.echo_mode = echo_mode;
+    }
+
+    pub fn take_committed_payload(&mut self) -> Option<TextPayload> {
+        self.committed_payload.take()
+    }
+
+    /// Compatibility helper for password fields that do not need committed payloads.
+    pub fn set_password_mode(&mut self, enabled: bool) {
+        self.set_echo_mode(if enabled { EchoMode::Masked } else { EchoMode::Plain });
+    }
+
+    pub fn set_max_len_bytes(&mut self, max: usize) {
+        self.max_len_bytes = max;
+    }
+
+    pub fn set_blink(&mut self, on: bool) {
+        self.blink_on = on;
+    }
+
+    pub fn set_focus(&mut self, focused: bool) {
+        if self.focused != focused {
+            self.focused = focused;
+            if !focused {
+                self.selection = None;
+                self.dragging = false;
+            }
+        }
+    }
+
+    pub fn select_all(&mut self) {
+        if !self.text.is_empty() {
+            self.selection = Some((0, self.text.len()));
+            self.cursor_byte = self.text.len();
+        }
+    }
+
+    pub fn selection_text(&self) -> Option<&str> {
+        if self.echo_mode == EchoMode::Masked {
+            return None;
+        }
+        self.selection.map(|(a, b)| {
+            let start = a.min(b);
+            let end = a.max(b);
+            &self.text.as_str()[start..end]
+        })
+    }
+
+    // ── Helpers ──
+
+    /// Find the char boundary before `pos` (for Backspace).
+    fn prev_char_boundary(s: &str, pos: usize) -> usize {
+        if pos == 0 {
+            return 0;
+        }
+        let mut prev = pos - 1;
+        while prev > 0 && !s.is_char_boundary(prev) {
+            prev -= 1;
+        }
+        prev
+    }
+
+    /// Find the char boundary after `pos` (for Right arrow).
+    fn next_char_boundary(s: &str, pos: usize) -> usize {
+        if pos >= s.len() {
+            return s.len();
+        }
+        let mut next = pos + 1;
+        while next < s.len() && !s.is_char_boundary(next) {
+            next += 1;
+        }
+        next
+    }
+
+    /// Delete selected range and return true if something was deleted.
+    fn prev_word_boundary(s: &str, pos: usize) -> usize {
+        if pos == 0 {
+            return 0;
+        }
+        let mut i = pos;
+        while i > 0 {
+            let prev = Self::prev_char_boundary(s, i);
+            if s[prev..i].chars().next().unwrap().is_alphanumeric() {
+                break;
+            }
+            i = prev;
+        }
+        while i > 0 {
+            let prev = Self::prev_char_boundary(s, i);
+            if !s[prev..i].chars().next().unwrap().is_alphanumeric() {
+                break;
+            }
+            i = prev;
+        }
+        i
+    }
+
+    fn next_word_boundary(s: &str, pos: usize) -> usize {
+        let len = s.len();
+        if pos >= len {
+            return len;
+        }
+        let mut i = pos;
+        while i < len {
+            let next = Self::next_char_boundary(s, i);
+            if !s[i..next].chars().next().unwrap().is_alphanumeric() {
+                break;
+            }
+            i = next;
+        }
+        while i < len {
+            let next = Self::next_char_boundary(s, i);
+            if s[i..next].chars().next().unwrap().is_alphanumeric() {
+                break;
+            }
+            i = next;
+        }
+        i
+    }
+
+    fn delete_selection(&mut self) -> bool {
+        if let Some((a, b)) = self.selection.take() {
+            if a == b {
+                return false;
+            }
+            let start = a.min(b);
+            let end = a.max(b);
+            self.text.replace_range(start..end, "");
+            self.cursor_byte = start;
+            true
+        } else {
+            false
+        }
+    }
+
+    fn edited_action(&self) -> Option<ControlAction> {
+        let id = self.id?;
+        Some(ControlAction::TextEdited { id, value: self.text.payload() })
+    }
+
+    fn edited_action_if_text_changed(&self, previous_text: &TextStorage) -> Option<ControlAction> {
+        if &self.text == previous_text { None } else { self.edited_action() }
+    }
+
+    fn committed_action(&self) -> Option<ControlAction> {
+        let id = self.id?;
+        Some(ControlAction::TextCommitted { id, value: self.build_committed_payload() })
+    }
+
+    fn focus_requested_action(&self) -> Option<ControlAction> {
+        self.id.map(|id| ControlAction::FocusRequested { id })
+    }
+
+    fn display_value(&self, text: &str) -> String {
+        match self.echo_mode {
+            EchoMode::Plain => text.to_string(),
+            EchoMode::Masked => Self::mask_text(text),
+        }
+    }
+
+    fn display_prefix_value(&self, text: &str, byte_end: usize) -> String {
+        self.display_value(&text[..byte_end])
+    }
+
+    fn display_text(&self) -> String {
+        self.display_value(self.text.as_str())
+    }
+
+    fn display_prefix_text(&self, byte_end: usize) -> String {
+        self.display_prefix_value(self.text.as_str(), byte_end)
+    }
+
+    fn display_suffix_text(&self, byte_start: usize) -> String {
+        self.display_value(&self.text.as_str()[byte_start..])
+    }
+
+    fn display_preedit_text(&self) -> String {
+        self.display_value(self.preedit.as_str())
+    }
+
+    fn display_preedit_prefix_text(&self, byte_end: usize) -> String {
+        self.display_prefix_value(self.preedit.as_str(), byte_end)
+    }
+
+    fn mask_text(text: &str) -> String {
+        std::iter::repeat_n(MASKED_ECHO_GLYPH, text.chars().count()).collect()
+    }
+
+    fn build_committed_payload(&self) -> TextPayload {
+        self.text.payload()
+    }
+
+    /// Process a key event. Returns true if the event was consumed.
+    pub fn on_key(&mut self, kc: KeyCode, modifiers: Modifiers) -> bool {
+        self.handle_key_down(kc, modifiers).0
+    }
+
+    fn handle_key_down(
+        &mut self,
+        kc: KeyCode,
+        modifiers: Modifiers,
+    ) -> (bool, Option<ControlAction>) {
+        match kc {
+            KeyCode::Char(c) => {
+                if modifiers.cmd {
+                    match c {
+                        'a' | 'A' => {
+                            self.select_all();
+                            return (true, None);
+                        }
+                        'c' | 'C' => {
+                            if self.echo_mode == EchoMode::Plain
+                                && let Some(text) = self.selection_text()
+                                && let Some(ref callback) = self.on_copy
+                            {
+                                callback(text.to_string());
+                            }
+                            return (true, None);
+                        }
+                        'x' | 'X' => {
+                            let previous_text = self.text.clone();
+                            if self.echo_mode == EchoMode::Plain
+                                && let Some(text) = self.selection_text()
+                                && let Some(ref callback) = self.on_cut
+                            {
+                                callback(text.to_string());
+                            }
+                            self.delete_selection();
+                            return (true, self.edited_action_if_text_changed(&previous_text));
+                        }
+                        'v' | 'V' => {
+                            let previous_text = self.text.clone();
+                            if let Some(ref cb) = self.on_paste {
+                                let pasted = match self.echo_mode {
+                                    EchoMode::Plain => TextStorage::Plain(cb()),
+                                    EchoMode::Masked => {
+                                        TextStorage::Sensitive(SensitiveText::new(cb()))
+                                    }
+                                };
+                                if !pasted.is_empty() {
+                                    self.delete_selection();
+                                    let mut to_insert = pasted.as_str();
+                                    if self.text.len() + to_insert.len() > self.max_len_bytes {
+                                        let allowed =
+                                            self.max_len_bytes.saturating_sub(self.text.len());
+                                        if allowed > 0 {
+                                            let mut cutoff = allowed;
+                                            while !to_insert.is_char_boundary(cutoff) && cutoff > 0
+                                            {
+                                                cutoff -= 1;
+                                            }
+                                            to_insert = &to_insert[..cutoff];
+                                        } else {
+                                            to_insert = "";
+                                        }
+                                    }
+                                    if !to_insert.is_empty() {
+                                        let pos = self.cursor_byte;
+                                        self.text.insert_str(pos, to_insert);
+                                        self.cursor_byte += to_insert.len();
+                                    }
+                                }
+                            }
+                            return (true, self.edited_action_if_text_changed(&previous_text));
+                        }
+                        _ => return (false, None),
+                    }
+                }
+                // Regular char insertion
+                let previous_text = self.text.clone();
+                self.delete_selection();
+                if self.text.len() + c.len_utf8() <= self.max_len_bytes {
+                    let pos = self.cursor_byte;
+                    self.text.insert(pos, c);
+                    self.cursor_byte = Self::next_char_boundary(&self.text, pos);
+                }
+                (true, self.edited_action_if_text_changed(&previous_text))
+            }
+            KeyCode::Backspace => {
+                let previous_text = self.text.clone();
+                if !self.delete_selection() && self.cursor_byte > 0 {
+                    let prev = Self::prev_char_boundary(&self.text, self.cursor_byte);
+                    self.text.replace_range(prev..self.cursor_byte, "");
+                    self.cursor_byte = prev;
+                }
+                (true, self.edited_action_if_text_changed(&previous_text))
+            }
+            KeyCode::Delete => {
+                let previous_text = self.text.clone();
+                if !self.delete_selection() && self.cursor_byte < self.text.len() {
+                    let next = Self::next_char_boundary(&self.text, self.cursor_byte);
+                    self.text.replace_range(self.cursor_byte..next, "");
+                }
+                (true, self.edited_action_if_text_changed(&previous_text))
+            }
+            KeyCode::Left => {
+                let new_cursor = if modifiers.cmd {
+                    0
+                } else if modifiers.alt {
+                    Self::prev_word_boundary(&self.text, self.cursor_byte)
+                } else {
+                    Self::prev_char_boundary(&self.text, self.cursor_byte)
+                };
+                if modifiers.shift {
+                    // Extend/start selection
+                    if self.selection.is_none() {
+                        self.selection = Some((self.cursor_byte, self.cursor_byte));
+                    }
+                    self.cursor_byte = new_cursor;
+                    // Update selection cursor end
+                    if let Some((anchor, _)) = self.selection {
+                        self.selection = Some((anchor, new_cursor));
+                    }
+                } else {
+                    if self.selection.is_some() && !(modifiers.cmd || modifiers.alt) {
+                        // Collapse to the left edge of selection
+                        let (a, b) = self.selection.take().unwrap();
+                        self.cursor_byte = a.min(b);
+                    } else {
+                        self.selection = None;
+                        self.cursor_byte = new_cursor;
+                    }
+                }
+                (true, None)
+            }
+            KeyCode::Right => {
+                let new_cursor = if modifiers.cmd {
+                    self.text.len()
+                } else if modifiers.alt {
+                    Self::next_word_boundary(&self.text, self.cursor_byte)
+                } else {
+                    Self::next_char_boundary(&self.text, self.cursor_byte)
+                };
+                if modifiers.shift {
+                    if self.selection.is_none() {
+                        self.selection = Some((self.cursor_byte, self.cursor_byte));
+                    }
+                    self.cursor_byte = new_cursor;
+                    if let Some((anchor, _)) = self.selection {
+                        self.selection = Some((anchor, new_cursor));
+                    }
+                } else {
+                    if self.selection.is_some() && !(modifiers.cmd || modifiers.alt) {
+                        let (a, b) = self.selection.take().unwrap();
+                        self.cursor_byte = a.max(b);
+                    } else {
+                        self.selection = None;
+                        self.cursor_byte = new_cursor;
+                    }
+                }
+                (true, None)
+            }
+            KeyCode::Home => {
+                self.cursor_byte = if modifiers.shift {
+                    if self.selection.is_none() {
+                        self.selection = Some((self.cursor_byte, 0));
+                    } else {
+                        let (anchor, _) = self.selection.unwrap();
+                        self.selection = Some((anchor, 0));
+                    }
+                    0
+                } else {
+                    self.selection = None;
+                    0
+                };
+                (true, None)
+            }
+            KeyCode::End => {
+                let end = self.text.len();
+                self.cursor_byte = if modifiers.shift {
+                    if self.selection.is_none() {
+                        self.selection = Some((self.cursor_byte, end));
+                    } else {
+                        let (anchor, _) = self.selection.unwrap();
+                        self.selection = Some((anchor, end));
+                    }
+                    end
+                } else {
+                    self.selection = None;
+                    end
+                };
+                (true, None)
+            }
+            KeyCode::Enter => {
+                self.committed_payload = Some(self.build_committed_payload());
+                (true, self.committed_action())
+            }
+            KeyCode::Escape => (true, None),
+            KeyCode::Up | KeyCode::Down | KeyCode::PageUp | KeyCode::PageDown => (true, None),
+            _ => (false, None),
+        }
+    }
+
+    /// Mouse down: position cursor, clear selection, begin drag.
+    pub fn on_mouse_down(&mut self, px: f32, _py: f32) -> bool {
+        if !self.rect.contains(px, _py) {
+            return false;
+        }
+        self.selection = None;
+        self.dragging = true;
+        // 将点击的 px 转换为相对于文本区域的偏移
+        let rel_x = (px - self.rect.x - self.text_pad).max(0.0);
+        // 在 char_offsets 中找最近的字节偏移
+        if self.char_offsets.is_empty() {
+            self.cursor_byte = 0;
+        } else {
+            let mut best_byte = 0usize;
+            let mut best_dist = f32::MAX;
+            for &(byte, off_x) in &self.char_offsets {
+                let dist = (off_x - rel_x).abs();
+                if dist < best_dist {
+                    best_dist = dist;
+                    best_byte = byte;
+                }
+            }
+            self.cursor_byte = best_byte;
+        }
+        true
+    }
+
+    fn handle_mouse_down(&mut self, px: f32, py: f32) -> (bool, Option<ControlAction>) {
+        if !self.on_mouse_down(px, py) {
+            return (false, None);
+        }
+        (true, self.focus_requested_action())
+    }
+
+    /// Mouse drag: extend selection.
+    pub fn on_mouse_drag(&mut self, _px: f32, _py: f32) {
+        if !self.dragging {
+            return;
+        }
+        if self.selection.is_none() {
+            self.selection = Some((self.cursor_byte, self.cursor_byte));
+        }
+        // px → byte offset, update cursor_byte and selection end
+    }
+
+    /// Mouse up: end drag.
+    pub fn on_mouse_up(&mut self) {
+        self.dragging = false;
+    }
+
+    /// Receive an IME event from the parent widget.
+    pub fn on_ime(&mut self, ev: &TextBoxIme) {
+        self.handle_ime_event(ev);
+    }
+
+    fn handle_ime_event(&mut self, ev: &TextBoxIme) -> Option<ControlAction> {
+        match ev {
+            TextBoxIme::Preedit { text, cursor } => self.handle_ime_preedit(text, *cursor),
+            TextBoxIme::Commit(text) => self.handle_ime_commit(text),
+            TextBoxIme::Enabled | TextBoxIme::Disabled => {
+                self.preedit.clear();
+                self.preedit_cursor = None;
+                None
+            }
+        }
+    }
+
+    fn handle_ime_preedit(
+        &mut self,
+        text: &str,
+        cursor: Option<(usize, usize)>,
+    ) -> Option<ControlAction> {
+        self.preedit.replace(text);
+        self.preedit_cursor = cursor;
+        None
+    }
+
+    fn handle_ime_commit(&mut self, text: &str) -> Option<ControlAction> {
+        let previous_text = self.text.clone();
+        self.preedit.clear();
+        self.preedit_cursor = None;
+        if text.is_empty() {
+            return self.edited_action_if_text_changed(&previous_text);
+        }
+
+        self.delete_selection();
+        let mut to_insert = text;
+        if self.text.len() + to_insert.len() > self.max_len_bytes {
+            let allowed = self.max_len_bytes.saturating_sub(self.text.len());
+            if allowed == 0 {
+                to_insert = "";
+            } else {
+                let mut cutoff = allowed;
+                while !to_insert.is_char_boundary(cutoff) && cutoff > 0 {
+                    cutoff -= 1;
+                }
+                to_insert = &to_insert[..cutoff];
+            }
+        }
+        if !to_insert.is_empty() {
+            let insert_at = self.cursor_byte;
+            self.text.insert_str(insert_at, to_insert);
+            self.cursor_byte = insert_at + to_insert.len();
+        }
+        self.edited_action_if_text_changed(&previous_text)
+    }
+
+    /// Pixel rect where the OS IME candidate window should appear.
+    pub fn ime_cursor_rect(&self) -> Rect {
+        let cursor_h = self.rect.h * 0.6;
+        let cursor_y = self.rect.y + (self.rect.h - cursor_h) * 0.5;
+        let effective_x = self.cursor_x + self.preedit_cursor_x;
+        Rect::new(self.rect.x + effective_x, cursor_y, 2.0, cursor_h)
+    }
+
+    pub fn has_preedit(&self) -> bool {
+        !self.preedit.is_empty()
+    }
+
+    /// Compute layout: measure text widths for cursor positioning.
+    /// Called by parent during set_rect / layout phase.
+    pub fn layout(&mut self, rect: Rect, ctx: &mut LayoutCtx) {
+        self.rect = rect;
+        let font_size = 14.0 * ctx.dpi;
+
+        // Measure text up to cursor for cursor_x
+        let measure: &mut dyn crate::core::measure::TextMeasure = match ctx.ui_measure {
+            Some(ref mut m) => &mut **m,
+            None => ctx.measure,
+        };
+        self.cursor_x = measure.measure(&self.display_prefix_text(self.cursor_byte), font_size);
+
+        // Measure preedit text width
+        if !self.preedit.is_empty() {
+            self.preedit_width = measure.measure(&self.display_preedit_text(), font_size);
+
+            let cur = self.preedit_cursor.map(|(_, c)| c).unwrap_or(self.preedit.len());
+            let mut valid_cur = cur.min(self.preedit.len());
+            while valid_cur > 0 && !self.preedit.is_char_boundary(valid_cur) {
+                valid_cur -= 1;
+            }
+            self.preedit_cursor_x =
+                measure.measure(&self.display_preedit_prefix_text(valid_cur), font_size);
+        } else {
+            self.preedit_width = 0.0;
+            self.preedit_cursor_x = 0.0;
+        }
+
+        self.text_pad = 4.0 * ctx.dpi;
+
+        // Build byte→pixel offset table for mouse click positioning
+        self.char_offsets.clear();
+        self.char_offsets.push((0, 0.0));
+        let mut byte_pos = 0;
+        for ch in self.text.chars() {
+            let ch_len = ch.len_utf8();
+            byte_pos += ch_len;
+            let px = measure.measure(&self.display_prefix_text(byte_pos), font_size);
+            self.char_offsets.push((byte_pos, px));
+        }
+    }
+
+    /// Paint the text input: background, border, text/placeholder, selection, cursor, preedit.
+    pub fn paint(&self, ctx: &mut PaintCtx) {
+        if self.rect.w <= 0.0 || self.rect.h <= 0.0 {
+            return;
+        }
+        let dpi = ctx.dpi;
+        let font_size = 14.0 * dpi;
+        let baseline = self.rect.y + self.rect.h * 0.5 + font_size * 0.35;
+        let corner_radius = 3.0 * dpi;
+
+        // 1. Background — focused 时略亮
+        let bg = {
+            let mut c = ctx.theme.palette.input_bg;
+            if self.focused {
+                c[0] = (c[0] + 0.04).min(1.0);
+                c[1] = (c[1] + 0.04).min(1.0);
+                c[2] = (c[2] + 0.04).min(1.0);
+            }
+            c
+        };
+        ctx.list.fill_rounded(self.rect, bg, corner_radius);
+
+        // 2. Border — 用 stroke_rounded 描边，不覆盖背景
+        let border_color =
+            if self.focused { ctx.theme.palette.accent } else { ctx.theme.palette.input_border };
+        let line_w = if self.focused { 1.5 * dpi } else { 1.0 * dpi };
+        ctx.list.stroke_rounded(self.rect, border_color, corner_radius, line_w);
+
+        let text_x = self.rect.x + 4.0 * dpi;
+
+        // 3. Selection highlight
+        if let Some((anchor, cur)) = self.selection {
+            let sel_start = anchor.min(cur);
+            let sel_end = anchor.max(cur);
+            // 从 char_offsets 查找像素位置
+            let mut sx = 0.0f32;
+            let mut ex = 0.0f32;
+            for &(byte, px) in &self.char_offsets {
+                if byte == sel_start {
+                    sx = px;
+                }
+                if byte == sel_end {
+                    ex = px;
+                }
+            }
+            if ex > sx {
+                let sel_rect = Rect::new(
+                    text_x + sx,
+                    self.rect.y + 2.0 * dpi,
+                    ex - sx,
+                    self.rect.h - 4.0 * dpi,
+                );
+                ctx.list.fill_rounded(sel_rect, ctx.theme.editor.selection, 2.0 * dpi);
+            }
+        }
+
+        // 4. Text or placeholder
+        if !self.text.is_empty() {
+            let display_text = self.display_text();
+            if let Some(ref mut shaper) = ctx.shaper {
+                if self.preedit.is_empty() {
+                    ctx.list.text_shaped(
+                        text_x,
+                        baseline,
+                        font_size,
+                        ctx.theme.palette.input_fg,
+                        &display_text,
+                        shaper,
+                    );
+                } else {
+                    let head = self.display_prefix_text(self.cursor_byte);
+                    let tail = self.display_suffix_text(self.cursor_byte);
+                    if !head.is_empty() {
+                        ctx.list.text_shaped(
+                            text_x,
+                            baseline,
+                            font_size,
+                            ctx.theme.palette.input_fg,
+                            &head,
+                            shaper,
+                        );
+                    }
+                    if !tail.is_empty() {
+                        ctx.list.text_shaped(
+                            text_x + self.cursor_x + self.preedit_width,
+                            baseline,
+                            font_size,
+                            ctx.theme.palette.input_fg,
+                            &tail,
+                            shaper,
+                        );
+                    }
+                }
+            }
+        } else if self.preedit.is_empty() && !self.placeholder.is_empty() {
+            let ph_color = {
+                let mut c = ctx.theme.palette.input_fg;
+                c[3] *= 0.4;
+                c
+            };
+            if let Some(ref mut shaper) = ctx.shaper {
+                ctx.list.text_shaped(
+                    text_x,
+                    baseline,
+                    font_size,
+                    ph_color,
+                    &self.placeholder,
+                    shaper,
+                );
+            }
+        }
+
+        // 5. IME preedit text + underline
+        if !self.preedit.is_empty() {
+            let preedit_x = text_x + self.cursor_x;
+            if let Some(ref mut shaper) = ctx.shaper {
+                ctx.list.text_shaped(
+                    preedit_x,
+                    baseline,
+                    font_size,
+                    ctx.theme.palette.input_fg,
+                    &self.display_preedit_text(),
+                    shaper,
+                );
+            }
+            // Underline
+            let ul_y = baseline + 2.0 * dpi;
+            let ul_h = 1.5 * dpi;
+            let ul_w = self.preedit_width;
+            ctx.list.fill(Rect::new(preedit_x, ul_y, ul_w, ul_h), ctx.theme.palette.input_fg);
+        }
+
+        // 6. Cursor
+        if self.blink_on && self.focused && self.selection.is_none() {
+            let cursor_h = font_size * 1.2;
+            let cursor_w = 2.0 * dpi;
+            let cursor_y = self.rect.y + (self.rect.h - cursor_h) * 0.5;
+            let effective_cursor_x = self.cursor_x + self.preedit_cursor_x;
+            let cursor_rect = Rect::new(
+                text_x + effective_cursor_x - cursor_w * 0.5,
+                cursor_y,
+                cursor_w,
+                cursor_h,
+            );
+            ctx.list.fill(cursor_rect, ctx.theme.palette.input_fg);
+        }
+    }
+
+    /// Sync text from an external source (e.g., app-layer snapshot).
+    /// Only overwrites when the external text differs from internal text.
+    /// This prevents snapshot-based state injection from overwriting
+    /// live user input that hasn't been flushed yet.
+    pub fn sync_text(&mut self, ext_text: &str) {
+        if self.text != ext_text {
+            self.text.replace(ext_text);
+            if self.cursor_byte > self.text.len() {
+                self.cursor_byte = self.text.len();
+            }
+            self.selection = None;
+        }
+    }
+}
+
+impl Widget for TextBox {
+    fn set_rect(&mut self, rect: Rect, ctx: &mut LayoutCtx) {
+        let layout_rect =
+            self.fixed_size_logical.map_or(rect, |(width_logical, height_logical)| {
+                let width = (width_logical * ctx.dpi).min(rect.w);
+                let height = (height_logical * ctx.dpi).min(rect.h);
+                Rect::new(rect.x, rect.y + (rect.h - height) * 0.5, width, height)
+            });
+        self.layout(layout_rect, ctx);
+    }
+
+    fn paint(&self, ctx: &mut PaintCtx) {
+        TextBox::paint(self, ctx);
+    }
+
+    fn hit(&self, px: f32, py: f32) -> bool {
+        self.rect.contains(px, py)
+    }
+
+    fn id(&self) -> Option<WidgetId> {
+        self.id
+    }
+
+    fn is_focusable(&self) -> bool {
+        self.id.is_some()
+    }
+
+    fn set_keyboard_focus(&mut self, focused_id: Option<WidgetId>) {
+        if let Some(id) = self.id {
+            self.set_focus(focused_id == Some(id));
+        }
+    }
+
+    fn on_event(&mut self, ev: &Event, _ctx: &mut EventCtx) -> Option<WidgetAction> {
+        match ev {
+            Event::KeyDown(key_code, modifiers) => {
+                let (consumed, action) = self.handle_key_down(*key_code, *modifiers);
+                action
+                    .map(WidgetAction::Control)
+                    .or_else(|| consumed.then_some(WidgetAction::Consumed))
+            }
+            Event::ImePreedit { text, cursor } => {
+                self.handle_ime_preedit(text, *cursor);
+                Some(WidgetAction::Consumed)
+            }
+            Event::ImeCommit(text) => self
+                .handle_ime_commit(text)
+                .map(WidgetAction::Control)
+                .or(Some(WidgetAction::Consumed)),
+            Event::ImeEnable => {
+                self.handle_ime_event(&TextBoxIme::Enabled);
+                Some(WidgetAction::Consumed)
+            }
+            Event::ImeDisable => {
+                self.handle_ime_event(&TextBoxIme::Disabled);
+                Some(WidgetAction::Consumed)
+            }
+            Event::MouseDown { px, py, button: MouseButton::Left } => {
+                let (consumed, action) = self.handle_mouse_down(*px, *py);
+                action
+                    .map(WidgetAction::Control)
+                    .or_else(|| consumed.then_some(WidgetAction::Consumed))
+            }
+            Event::MouseUp { button: MouseButton::Left, .. } => {
+                if self.dragging {
+                    self.on_mouse_up();
+                    Some(WidgetAction::Consumed)
+                } else {
+                    None
+                }
+            }
+            Event::MouseMove { px, py } => {
+                if self.dragging {
+                    self.on_mouse_drag(*px, *py);
+                    Some(WidgetAction::Consumed)
+                } else {
+                    None
+                }
+            }
+            _ => None,
+        }
+    }
+
+    fn is_capturing(&self) -> bool {
+        self.dragging
+    }
+
+    fn as_any_mut(&mut self) -> &mut dyn std::any::Any {
+        self
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::core::widget::{ControlAction, Event, EventCtx, Widget, WidgetAction, WidgetId};
+
+    fn paint_laid_out(tb: &mut TextBox) -> crate::core::paint::DrawList {
+        use crate::core::measure::NoopMeasure;
+
+        let theme = crate::theme::test_theme();
+        let mut measure = NoopMeasure;
+        let mut layout_ctx =
+            LayoutCtx { measure: &mut measure, ui_measure: None, theme: &theme, dpi: 1.0 };
+        tb.layout(Rect::new(0.0, 0.0, 200.0, 28.0), &mut layout_ctx);
+
+        let mut draw_list = crate::core::paint::DrawList::new();
+        let mut shaper = shaping::Shaper::new().expect("test shaper should initialize");
+        let mut paint_ctx = PaintCtx {
+            global_alpha: 1.0,
+            list: &mut draw_list,
+            theme: &theme,
+            dpi: 1.0,
+            offset: (0.0, 0.0),
+            shaper: Some(&mut shaper),
+        };
+        tb.paint(&mut paint_ctx);
+        draw_list
+    }
+
+    fn laid_out_widget(mut text_box: TextBox) -> TextBox {
+        use crate::core::measure::NoopMeasure;
+
+        let theme = crate::theme::test_theme();
+        let mut measure = NoopMeasure;
+        let mut layout_ctx =
+            LayoutCtx { measure: &mut measure, ui_measure: None, theme: &theme, dpi: 1.0 };
+        text_box.set_rect(Rect::new(0.0, 0.0, 200.0, 28.0), &mut layout_ctx);
+        text_box
+    }
+
+    fn key(text_box: &mut TextBox, key_code: KeyCode) -> Option<WidgetAction> {
+        key_with_modifiers(text_box, key_code, Modifiers::NONE)
+    }
+
+    fn key_with_modifiers(
+        text_box: &mut TextBox,
+        key_code: KeyCode,
+        modifiers: Modifiers,
+    ) -> Option<WidgetAction> {
+        let theme = crate::theme::test_theme();
+        let mut event_ctx = EventCtx { cursor_hint: None, theme: &theme, dpi: 1.0 };
+        text_box.on_event(&Event::KeyDown(key_code, modifiers), &mut event_ctx)
+    }
+
+    #[test]
+    fn fixed_size_text_box_is_left_aligned_and_vertically_centered() {
+        let theme = crate::theme::test_theme();
+        let mut measure = crate::core::measure::NoopMeasure;
+        let mut layout =
+            LayoutCtx { ui_measure: None, measure: &mut measure, theme: &theme, dpi: 1.0 };
+        let mut text_box = TextBox::with_id(WidgetId(90));
+        text_box.set_fixed_size_logical(200.0, 32.0);
+
+        text_box.set_rect(Rect::new(0.0, 0.0, 240.0, 56.0), &mut layout);
+
+        assert_eq!(text_box.rect(), Rect::new(0.0, 12.0, 200.0, 32.0));
+    }
+
+    #[test]
+    fn textbox_widget_emits_plain_edit_and_commit_actions() {
+        let mut box_ = laid_out_widget(TextBox::with_id(WidgetId(30)));
+        assert_eq!(
+            key(&mut box_, KeyCode::Char('x')),
+            Some(WidgetAction::Control(ControlAction::TextEdited {
+                id: WidgetId(30),
+                value: TextPayload::Plain("x".into()),
+            }))
+        );
+        assert!(matches!(
+            key(&mut box_, KeyCode::Enter),
+            Some(WidgetAction::Control(ControlAction::TextCommitted {
+                id: WidgetId(30),
+                value: TextPayload::Plain(text),
+            })) if text == "x"
+        ));
+    }
+
+    #[test]
+    fn no_change_key_path_cmd_x_without_selection_consumes_without_edit_action() {
+        let mut box_ = laid_out_widget(TextBox::with_id(WidgetId(31)));
+        box_.set_text("hello");
+
+        let cmd = Modifiers { cmd: true, ..Modifiers::NONE };
+        assert_eq!(
+            key_with_modifiers(&mut box_, KeyCode::Char('x'), cmd),
+            Some(WidgetAction::Consumed)
+        );
+        assert_eq!(box_.text(), "hello");
+    }
+
+    #[test]
+    fn no_change_key_path_backspace_at_start_consumes_without_edit_action() {
+        let mut box_ = laid_out_widget(TextBox::with_id(WidgetId(32)));
+        box_.set_text("a");
+        box_.cursor_byte = 0;
+
+        assert_eq!(key(&mut box_, KeyCode::Backspace), Some(WidgetAction::Consumed));
+        assert_eq!(box_.text(), "a");
+        assert_eq!(box_.cursor_byte(), 0);
+    }
+
+    #[test]
+    fn no_change_key_path_delete_at_end_consumes_without_edit_action() {
+        let mut box_ = laid_out_widget(TextBox::with_id(WidgetId(33)));
+        box_.set_text("a");
+        box_.cursor_byte = box_.text.len();
+
+        assert_eq!(key(&mut box_, KeyCode::Delete), Some(WidgetAction::Consumed));
+        assert_eq!(box_.text(), "a");
+        assert_eq!(box_.cursor_byte(), 1);
+    }
+
+    #[test]
+    fn new_textbox_is_empty() {
+        let tb = TextBox::new();
+        assert_eq!(tb.text(), "");
+        assert_eq!(tb.cursor_byte(), 0);
+        assert!(tb.selection.is_none());
+    }
+
+    #[test]
+    fn insert_char() {
+        let mut tb = TextBox::new();
+        tb.on_key(KeyCode::Char('a'), Modifiers::NONE);
+        assert_eq!(tb.text(), "a");
+        assert_eq!(tb.cursor_byte(), 1);
+        tb.on_key(KeyCode::Char('b'), Modifiers::NONE);
+        assert_eq!(tb.text(), "ab");
+        assert_eq!(tb.cursor_byte(), 2);
+    }
+
+    #[test]
+    fn backspace() {
+        let mut tb = TextBox::new();
+        tb.set_text("hello");
+        tb.on_key(KeyCode::Backspace, Modifiers::NONE);
+        assert_eq!(tb.text(), "hell");
+        assert_eq!(tb.cursor_byte(), 4);
+    }
+
+    #[test]
+    fn backspace_at_start_does_nothing() {
+        let mut tb = TextBox::new();
+        tb.set_text("a");
+        tb.cursor_byte = 0;
+        tb.on_key(KeyCode::Backspace, Modifiers::NONE);
+        assert_eq!(tb.text(), "a");
+        assert_eq!(tb.cursor_byte(), 0);
+    }
+
+    #[test]
+    fn backspace_utf8_char() {
+        let mut tb = TextBox::new();
+        tb.set_text("ab中d");
+        // cursor is at end (byte 6 for "ab中d")
+        tb.on_key(KeyCode::Backspace, Modifiers::NONE);
+        assert_eq!(tb.text(), "ab中");
+        assert_eq!(tb.cursor_byte(), 5); // "中" is 3 bytes in UTF-8
+    }
+
+    #[test]
+    fn set_text_resets_cursor_and_selection() {
+        let mut tb = TextBox::new();
+        tb.selection = Some((0, 3));
+        tb.set_text("new");
+        assert_eq!(tb.text(), "new");
+        assert_eq!(tb.cursor_byte(), 3);
+        assert!(tb.selection.is_none());
+    }
+
+    #[test]
+    fn cursor_rendering_is_centered() {
+        use crate::core::paint::{DrawCmd, DrawList};
+        use crate::core::{LayoutCtx, PaintCtx};
+
+        let mut tb = TextBox::new();
+        tb.set_text("a");
+
+        struct DummyMeasure;
+        impl crate::core::measure::TextMeasure for DummyMeasure {
+            fn measure(&mut self, text: &str, _size: f32) -> f32 {
+                text.len() as f32 * 10.0
+            }
+        }
+        let mut measure = DummyMeasure;
+        let theme = crate::theme::test_theme();
+
+        let mut lctx =
+            LayoutCtx { measure: &mut measure, ui_measure: None, theme: &theme, dpi: 1.0 };
+        // text_pad will be 4.0 * dpi = 4.0
+        // text_x will be 0.0 + 4.0 = 4.0
+        tb.layout(Rect::new(0.0, 0.0, 100.0, 30.0), &mut lctx);
+
+        tb.set_focus(true);
+        tb.set_blink(true);
+
+        let mut dl = DrawList::new();
+        let mut pctx = PaintCtx::new(&mut dl, &theme, 1.0);
+        tb.paint(&mut pctx);
+
+        // Filter FillRect with 0 radius (cursor). Background has corner_radius 3.0, selection is not drawn.
+        let cursor_cmds: Vec<_> = dl
+            .cmds
+            .iter()
+            .filter_map(|cmd| match cmd {
+                DrawCmd::FillRect { rect, radius, .. } if *radius == 0.0 => Some(rect),
+                _ => None,
+            })
+            .collect();
+
+        assert_eq!(cursor_cmds.len(), 1, "Should emit one FillRect for cursor");
+
+        let cursor_rect = cursor_cmds[0];
+
+        // Logical cursor_x = 10.0 (text length 1 * 10.0)
+        // rect.x = 0.0, text_x = 4.0
+        // logical drawing center = text_x + cursor_x = 14.0
+        // cursor_w = 2.0 * dpi = 2.0
+        // centered left bound = 14.0 - 1.0 = 13.0
+        assert_eq!(cursor_rect.x, 13.0);
+        assert_eq!(cursor_rect.w, 2.0);
+
+        // ime_cursor_rect must remain unchanged (logical x)
+        let ime_rect = tb.ime_cursor_rect();
+        assert_eq!(ime_rect.x, 10.0); // self.rect.x(0) + self.cursor_x(10.0) + self.preedit_cursor_x(0.0)
+    }
+
+    #[test]
+    fn selection_text_returns_correct_slice() {
+        let mut tb = TextBox::new();
+        tb.set_text("hello world");
+        tb.selection = Some((0, 5));
+        assert_eq!(tb.selection_text(), Some("hello"));
+        // Order doesn't matter
+        tb.selection = Some((11, 6));
+        assert_eq!(tb.selection_text(), Some("world"));
+    }
+
+    #[test]
+    fn delete_selection_replaces_on_insert() {
+        let mut tb = TextBox::new();
+        tb.set_text("hello");
+        tb.selection = Some((0, 5));
+        tb.on_key(KeyCode::Char('x'), Modifiers::NONE);
+        assert_eq!(tb.text(), "x");
+        assert_eq!(tb.cursor_byte(), 1);
+        assert!(tb.selection.is_none());
+    }
+
+    #[test]
+    fn backspace_deletes_selection() {
+        let mut tb = TextBox::new();
+        tb.set_text("hello");
+        tb.selection = Some((0, 3));
+        tb.on_key(KeyCode::Backspace, Modifiers::NONE);
+        assert_eq!(tb.text(), "lo");
+        assert_eq!(tb.cursor_byte(), 0);
+        assert!(tb.selection.is_none());
+    }
+
+    #[test]
+    fn cursor_left_right() {
+        let mut tb = TextBox::new();
+        tb.set_text("abc");
+        tb.cursor_byte = 0;
+        tb.on_key(KeyCode::Right, Modifiers::NONE);
+        assert_eq!(tb.cursor_byte(), 1);
+        tb.on_key(KeyCode::Right, Modifiers::NONE);
+        assert_eq!(tb.cursor_byte(), 2);
+        tb.on_key(KeyCode::Left, Modifiers::NONE);
+        assert_eq!(tb.cursor_byte(), 1);
+    }
+
+    #[test]
+    fn cursor_home_end() {
+        let mut tb = TextBox::new();
+        tb.set_text("abc");
+        tb.cursor_byte = 1;
+        tb.on_key(KeyCode::Home, Modifiers::NONE);
+        assert_eq!(tb.cursor_byte(), 0);
+        tb.on_key(KeyCode::End, Modifiers::NONE);
+        assert_eq!(tb.cursor_byte(), 3);
+    }
+
+    #[test]
+    fn shift_right_creates_selection() {
+        let mut tb = TextBox::new();
+        tb.set_text("abc");
+        tb.cursor_byte = 0;
+        let shift = Modifiers { shift: true, ..Modifiers::NONE };
+        tb.on_key(KeyCode::Right, shift);
+        assert!(tb.selection.is_some());
+        let (anchor, cursor) = tb.selection.unwrap();
+        assert_eq!(anchor, 0);
+        assert_eq!(cursor, 1);
+        assert_eq!(tb.cursor_byte(), 1);
+    }
+
+    #[test]
+    fn shift_left_creates_selection() {
+        let mut tb = TextBox::new();
+        tb.set_text("abc");
+        tb.cursor_byte = 3;
+        let shift = Modifiers { shift: true, ..Modifiers::NONE };
+        tb.on_key(KeyCode::Left, shift);
+        assert!(tb.selection.is_some());
+    }
+
+    #[test]
+    fn left_collapses_selection() {
+        let mut tb = TextBox::new();
+        tb.set_text("hello");
+        tb.selection = Some((0, 5));
+        tb.on_key(KeyCode::Left, Modifiers::NONE);
+        assert!(tb.selection.is_none());
+        assert_eq!(tb.cursor_byte(), 0);
+    }
+
+    #[test]
+    fn right_collapses_selection() {
+        let mut tb = TextBox::new();
+        tb.set_text("hello");
+        tb.selection = Some((0, 5));
+        tb.on_key(KeyCode::Right, Modifiers::NONE);
+        assert!(tb.selection.is_none());
+        assert_eq!(tb.cursor_byte(), 5);
+    }
+
+    #[test]
+    fn select_all_works() {
+        let mut tb = TextBox::new();
+        tb.set_text("hello");
+        tb.select_all();
+        assert_eq!(tb.selection, Some((0, 5)));
+        assert_eq!(tb.selection_text(), Some("hello"));
+    }
+
+    #[test]
+    fn selection_text_utf8() {
+        let mut tb = TextBox::new();
+        tb.set_text("a中b");
+        tb.selection = Some((1, 4)); // "中" in UTF-8: a=byte0, 中=bytes 1-3, b=byte4
+        assert_eq!(tb.selection_text(), Some("中"));
+    }
+
+    #[test]
+    fn set_focus_clears_selection() {
+        let mut tb = TextBox::new();
+        tb.set_focus(true);
+        tb.set_text("hello");
+        tb.selection = Some((0, 3));
+        tb.set_focus(false);
+        assert!(tb.selection.is_none());
+    }
+
+    #[test]
+    fn ime_preedit_updates_state() {
+        let mut tb = TextBox::new();
+        tb.on_ime(&TextBoxIme::Preedit { text: "ni".into(), cursor: Some((2, 2)) });
+        assert!(tb.has_preedit());
+        assert_eq!(tb.preedit, "ni");
+    }
+
+    #[test]
+    fn ime_commit_inserts_text() {
+        let mut tb = TextBox::new();
+        tb.on_ime(&TextBoxIme::Preedit { text: "ni".into(), cursor: Some((2, 2)) });
+        tb.on_ime(&TextBoxIme::Commit("你好".into()));
+        assert!(!tb.has_preedit());
+        assert_eq!(tb.text(), "你好");
+        assert_eq!(tb.cursor_byte(), 6);
+    }
+
+    #[test]
+    fn text_box_ime_debug_never_exposes_text() {
+        fn assert_zeroize_on_drop<T: zeroize::ZeroizeOnDrop>() {}
+
+        const SECRET: &str = "text-box-ime-secret";
+        let preedit = TextBoxIme::Preedit { text: SECRET.to_owned(), cursor: Some((0, 4)) };
+        let commit = TextBoxIme::Commit(SECRET.to_owned());
+
+        assert_zeroize_on_drop::<TextBoxIme>();
+        assert!(!format!("{preedit:?}").contains(SECRET));
+        assert!(!format!("{commit:?}").contains(SECRET));
+    }
+
+    #[test]
+    fn layout_computes_cursor_x() {
+        use crate::core::measure::NoopMeasure;
+
+        let mut tb = TextBox::new();
+        tb.set_text("abc");
+        tb.cursor_byte = 2;
+
+        let theme = crate::theme::test_theme();
+        let mut measure = NoopMeasure;
+        let mut ctx =
+            LayoutCtx { measure: &mut measure, ui_measure: None, theme: &theme, dpi: 1.0 };
+        let rect = Rect::new(10.0, 0.0, 200.0, 28.0);
+        tb.layout(rect, &mut ctx);
+        assert_eq!(tb.rect.x, 10.0);
+        // cursor_x is 0.0 with NoopMeasure since it returns 0 for everything
+        assert_eq!(tb.cursor_x, 0.0);
+    }
+
+    #[test]
+    fn paint_empty_shows_placeholder() {
+        use crate::core::paint::{DrawCmd, DrawList};
+
+        let mut tb = TextBox::new();
+        tb.set_placeholder("Search...");
+        tb.rect = Rect::new(0.0, 0.0, 200.0, 28.0);
+        tb.blink_on = true;
+        tb.focused = true;
+
+        let theme = crate::theme::test_theme();
+        let mut dl = DrawList::new();
+        let mut shaper = shaping::Shaper::new().unwrap();
+        let mut pc = PaintCtx {
+            global_alpha: 1.0,
+            list: &mut dl,
+            theme: &theme,
+            dpi: 1.0,
+            offset: (0.0, 0.0),
+            shaper: Some(&mut shaper),
+        };
+        tb.paint(&mut pc);
+
+        // Should have: bg, border, placeholder text, cursor
+        assert!(dl.cmds.len() >= 4);
+        let texts: Vec<_> =
+            dl.cmds.iter().filter(|c| matches!(c, DrawCmd::TextLayout { .. })).collect();
+        assert_eq!(texts.len(), 1, "expected 1 text (placeholder)");
+    }
+
+    #[test]
+    fn paint_shows_text_not_placeholder() {
+        use crate::core::paint::{DrawCmd, DrawList};
+
+        let mut tb = TextBox::new();
+        tb.set_text("hello");
+        tb.set_placeholder("Search...");
+        tb.rect = Rect::new(0.0, 0.0, 200.0, 28.0);
+
+        let theme = crate::theme::test_theme();
+        let mut dl = DrawList::new();
+        let mut shaper = shaping::Shaper::new().unwrap();
+        let mut pc = PaintCtx {
+            global_alpha: 1.0,
+            list: &mut dl,
+            theme: &theme,
+            dpi: 1.0,
+            offset: (0.0, 0.0),
+            shaper: Some(&mut shaper),
+        };
+        tb.paint(&mut pc);
+
+        let texts: Vec<_> =
+            dl.cmds.iter().filter(|c| matches!(c, DrawCmd::TextLayout { .. })).collect();
+        assert_eq!(texts.len(), 1);
+        if let DrawCmd::TextLayout { layout, .. } = &texts[0] {
+            assert_eq!(&layout.text, "hello");
+        }
+    }
+
+    #[test]
+    fn masked_textbox_paints_bullets_and_commits_sensitive_payload() {
+        let mut box_ = TextBox::new();
+        box_.set_echo_mode(EchoMode::Masked);
+        box_.set_text("secret-value");
+
+        let draw_list = paint_laid_out(&mut box_);
+        assert!(!format!("{:?}", draw_list.cmds).contains("secret-value"));
+
+        assert!(box_.on_key(KeyCode::Enter, Modifiers::NONE));
+        assert!(matches!(
+            box_.take_committed_payload(),
+            Some(TextPayload::Sensitive(secret)) if secret.expose() == "secret-value"
+        ));
+    }
+
+    #[test]
+    fn masked_text_and_preedit_storage_never_debug_plaintext() {
+        let mut text_box = TextBox::new();
+        text_box.set_echo_mode(EchoMode::Masked);
+        text_box.set_text("stored-api-key");
+        text_box
+            .on_ime(&TextBoxIme::Preedit { text: "preedit-secret".into(), cursor: Some((0, 14)) });
+
+        let stored_text_debug = format!("{:?}", text_box.text);
+        let preedit_debug = format!("{:?}", text_box.preedit);
+        assert!(!stored_text_debug.contains("stored-api-key"));
+        assert!(!preedit_debug.contains("preedit-secret"));
+    }
+
+    #[test]
+    fn masked_copy_and_cut_never_send_plaintext_to_clipboard() {
+        use std::cell::RefCell;
+        use std::rc::Rc;
+
+        let copied_values = Rc::new(RefCell::new(Vec::new()));
+        let copied_values_for_callback = Rc::clone(&copied_values);
+        let mut text_box = TextBox::new();
+        text_box.set_echo_mode(EchoMode::Masked);
+        text_box.set_text("clipboard-secret");
+        text_box.select_all();
+        text_box.on_copy = Some(Box::new(move |value| {
+            copied_values_for_callback.borrow_mut().push(value);
+        }));
+
+        let command = Modifiers { cmd: true, ..Modifiers::NONE };
+        assert!(text_box.on_key(KeyCode::Char('c'), command));
+        assert!(copied_values.borrow().is_empty());
+
+        text_box.on_cut = text_box.on_copy.take();
+        assert!(text_box.on_key(KeyCode::Char('x'), command));
+        assert!(copied_values.borrow().is_empty());
+        assert_eq!(text_box.text(), "");
+    }
+
+    #[test]
+    fn masked_text_edit_emits_only_sensitive_payload() {
+        let mut masked = laid_out_widget(TextBox::with_id(WidgetId(41)));
+        masked.set_echo_mode(EchoMode::Masked);
+        masked.sync_text("never-print-m");
+        let action = key(&mut masked, KeyCode::Char('e'));
+        assert!(matches!(
+            action,
+            Some(WidgetAction::Control(ControlAction::TextEdited {
+                id: WidgetId(41),
+                value: TextPayload::Sensitive(_),
+            }))
+        ));
+        assert!(!format!("{action:?}").contains("never-print-me"));
+
+        masked.selection = Some((0, masked.text.len()));
+        assert!(matches!(
+            key(&mut masked, KeyCode::Delete),
+            Some(WidgetAction::Control(ControlAction::TextEdited {
+                value: TextPayload::Sensitive(_),
+                ..
+            }))
+        ));
+
+        masked.set_text("ab");
+        masked.cursor_byte = masked.text.len();
+        assert!(matches!(
+            key(&mut masked, KeyCode::Backspace),
+            Some(WidgetAction::Control(ControlAction::TextEdited {
+                value: TextPayload::Sensitive(_),
+                ..
+            }))
+        ));
+
+        masked.set_text("ab");
+        masked.cursor_byte = 0;
+        assert!(matches!(
+            key(&mut masked, KeyCode::Delete),
+            Some(WidgetAction::Control(ControlAction::TextEdited {
+                value: TextPayload::Sensitive(_),
+                ..
+            }))
+        ));
+
+        masked.set_text("");
+        masked.cursor_byte = 0;
+        masked.on_paste = Some(Box::new(|| String::from("paste")));
+        let paste_modifiers = Modifiers { cmd: true, ..Modifiers::NONE };
+        let theme = crate::theme::test_theme();
+        let mut event_ctx = EventCtx { cursor_hint: None, theme: &theme, dpi: 1.0 };
+        assert!(matches!(
+            masked.on_event(&Event::KeyDown(KeyCode::Char('v'), paste_modifiers), &mut event_ctx),
+            Some(WidgetAction::Control(ControlAction::TextEdited {
+                value: TextPayload::Sensitive(_),
+                ..
+            }))
+        ));
+
+        masked.set_text("");
+        masked.cursor_byte = 0;
+        assert!(matches!(
+            masked.on_event(&Event::ImeCommit(String::from("你好")), &mut event_ctx),
+            Some(WidgetAction::Control(ControlAction::TextEdited {
+                value: TextPayload::Sensitive(_),
+                ..
+            }))
+        ));
+
+        let mut plain = laid_out_widget(TextBox::with_id(WidgetId(42)));
+        assert_eq!(
+            key(&mut plain, KeyCode::Char('p')),
+            Some(WidgetAction::Control(ControlAction::TextEdited {
+                id: WidgetId(42),
+                value: TextPayload::Plain("p".into()),
+            }))
+        );
+    }
+
+    #[test]
+    fn masked_preedit_uses_bullets_for_layout_and_paint() {
+        use crate::core::measure::TextMeasure;
+        use crate::core::paint::{DrawCmd, DrawList};
+
+        struct DistinguishingMeasure;
+
+        impl TextMeasure for DistinguishingMeasure {
+            fn measure(&mut self, text: &str, _size: f32) -> f32 {
+                text.chars().map(|ch| if ch == MASKED_ECHO_GLYPH { 7.0 } else { 13.0 }).sum()
+            }
+        }
+
+        let mut tb = TextBox::new();
+        tb.set_echo_mode(EchoMode::Masked);
+        tb.set_text("secret");
+        tb.cursor_byte = tb.text.len();
+        tb.on_ime(&TextBoxIme::Preedit { text: "ni".into(), cursor: Some((0, 1)) });
+
+        let theme = crate::theme::test_theme();
+        let mut measure = DistinguishingMeasure;
+        let mut layout_ctx =
+            LayoutCtx { measure: &mut measure, ui_measure: None, theme: &theme, dpi: 1.0 };
+        tb.layout(Rect::new(0.0, 0.0, 200.0, 28.0), &mut layout_ctx);
+
+        assert_eq!(tb.preedit_width, 14.0);
+        assert_eq!(tb.preedit_cursor_x, 7.0);
+
+        let mut draw_list = DrawList::new();
+        let mut shaper = shaping::Shaper::new().expect("test shaper should initialize");
+        let mut paint_ctx = PaintCtx {
+            global_alpha: 1.0,
+            list: &mut draw_list,
+            theme: &theme,
+            dpi: 1.0,
+            offset: (0.0, 0.0),
+            shaper: Some(&mut shaper),
+        };
+        tb.paint(&mut paint_ctx);
+
+        let debug_output = format!("{:?}", draw_list.cmds);
+        assert!(!debug_output.contains("ni"));
+
+        let text_layouts: Vec<_> =
+            draw_list.cmds.iter().filter(|cmd| matches!(cmd, DrawCmd::TextLayout { .. })).collect();
+        assert_eq!(text_layouts.len(), 2, "expected masked text plus masked preedit");
+        if let DrawCmd::TextLayout { layout, .. } = &text_layouts[1] {
+            assert_eq!(&layout.text, "••");
+        }
+
+        let underline_count = draw_list
+            .cmds
+            .iter()
+            .filter(|cmd| {
+                matches!(
+                    cmd,
+                    DrawCmd::FillRect { rect, radius, .. }
+                    if *radius == 0.0 && rect.w == 14.0 && rect.h == 1.5
+                )
+            })
+            .count();
+        assert_eq!(underline_count, 1, "expected masked preedit underline to remain visible");
+    }
+
+    #[test]
+    fn paint_hides_cursor_when_blink_off() {
+        use crate::core::paint::{DrawCmd, DrawList};
+
+        let mut tb = TextBox::new();
+        tb.set_text("x");
+        tb.rect = Rect::new(0.0, 0.0, 200.0, 28.0);
+        tb.focused = true;
+        tb.blink_on = false;
+
+        let theme = crate::theme::test_theme();
+        let mut dl = DrawList::new();
+        let mut shaper = shaping::Shaper::new().unwrap();
+        let mut pc = PaintCtx {
+            global_alpha: 1.0,
+            list: &mut dl,
+            theme: &theme,
+            dpi: 1.0,
+            offset: (0.0, 0.0),
+            shaper: Some(&mut shaper),
+        };
+        tb.paint(&mut pc);
+
+        let fills: Vec<_> =
+            dl.cmds.iter().filter(|c| matches!(c, DrawCmd::FillRect { .. })).collect();
+        // Border is now StrokeRect, so only bg fill remains (no cursor fill)
+        assert_eq!(fills.len(), 1, "expected only bg fill, no cursor");
+    }
+
+    #[test]
+    fn paint_preedit_draws_text_and_underline() {
+        use crate::core::paint::{DrawCmd, DrawList};
+
+        let mut tb = TextBox::new();
+        tb.set_text("hello ");
+        tb.cursor_byte = 6;
+        tb.rect = Rect::new(0.0, 0.0, 200.0, 28.0);
+        tb.on_ime(&TextBoxIme::Preedit { text: "世界".into(), cursor: Some((0, 6)) });
+        tb.preedit_width = 28.0; // simulate layout
+
+        let theme = crate::theme::test_theme();
+        let mut dl = DrawList::new();
+        let mut shaper = shaping::Shaper::new().unwrap();
+        let mut pc = PaintCtx {
+            global_alpha: 1.0,
+            list: &mut dl,
+            theme: &theme,
+            dpi: 1.0,
+            offset: (0.0, 0.0),
+            shaper: Some(&mut shaper),
+        };
+        tb.paint(&mut pc);
+
+        let texts: Vec<_> =
+            dl.cmds.iter().filter(|c| matches!(c, DrawCmd::TextLayout { .. })).collect();
+        assert_eq!(texts.len(), 2, "expected main text + preedit text");
+        if let DrawCmd::TextLayout { layout, .. } = &texts[1] {
+            assert_eq!(&layout.text, "世界");
+        }
+    }
+
+    #[test]
+    fn sync_text_overwrites_when_different() {
+        let mut tb = TextBox::new();
+        tb.set_text("hello");
+        tb.cursor_byte = 3;
+        tb.sync_text("world");
+        assert_eq!(tb.text(), "world");
+        assert!(tb.selection.is_none());
+    }
+
+    #[test]
+    fn sync_text_noop_when_same() {
+        let mut tb = TextBox::new();
+        tb.set_text("hello");
+        tb.cursor_byte = 3;
+        tb.sync_text("hello");
+        assert_eq!(tb.text(), "hello");
+        assert_eq!(tb.cursor_byte(), 3); // preserved!
+    }
+
+    #[test]
+    fn sync_text_clamps_cursor_when_shorter() {
+        let mut tb = TextBox::new();
+        tb.set_text("long text");
+        tb.sync_text("short");
+        assert_eq!(tb.cursor_byte(), 5); // clamped to "short".len()
+    }
+
+    #[test]
+    fn ime_cursor_rect_includes_preedit_width() {
+        let mut tb = TextBox::new();
+        tb.rect = Rect::new(10.0, 0.0, 200.0, 28.0);
+        tb.cursor_x = 50.0;
+        tb.preedit_cursor_x = 30.0;
+        let r = tb.ime_cursor_rect();
+        assert_eq!(r.x, 10.0 + 50.0 + 30.0);
+    }
+
+    #[test]
+    fn ime_cursor_rect_no_preedit() {
+        let mut tb = TextBox::new();
+        tb.rect = Rect::new(10.0, 0.0, 200.0, 28.0);
+        tb.cursor_x = 50.0;
+        tb.preedit_width = 0.0;
+        let r = tb.ime_cursor_rect();
+        assert_eq!(r.x, 10.0 + 50.0);
+    }
+
+    #[test]
+    fn enter_key_records_committed_payload_without_widget_binding() {
+        let mut tb = TextBox::new();
+        tb.set_text("hello");
+        let result = tb.on_key(KeyCode::Enter, Modifiers::NONE);
+        assert!(result);
+        assert_eq!(tb.take_committed_payload(), Some(TextPayload::Plain("hello".into())));
+    }
+
+    #[test]
+    fn escape_key_is_consumed_without_action() {
+        let mut tb = laid_out_widget(TextBox::with_id(WidgetId(43)));
+        assert_eq!(key(&mut tb, KeyCode::Escape), Some(WidgetAction::Consumed));
+    }
+
+    #[test]
+    fn delete_removes_char_after_cursor() {
+        let mut tb = TextBox::new();
+        tb.set_text("abc");
+        tb.cursor_byte = 1;
+        tb.on_key(KeyCode::Delete, Modifiers::NONE);
+        assert_eq!(tb.text(), "ac");
+        assert_eq!(tb.cursor_byte(), 1);
+    }
+
+    #[test]
+    fn delete_removes_selection() {
+        let mut tb = TextBox::new();
+        tb.set_text("hello");
+        tb.selection = Some((1, 4));
+        tb.on_key(KeyCode::Delete, Modifiers::NONE);
+        assert_eq!(tb.text(), "ho");
+        assert_eq!(tb.cursor_byte(), 1);
+        assert!(tb.selection.is_none());
+    }
+
+    #[test]
+    fn alt_left_right_moves_by_word() {
+        let mut tb = TextBox::new();
+        tb.set_text("hello world!");
+        tb.cursor_byte = 0;
+        let alt = Modifiers { alt: true, ..Modifiers::NONE };
+
+        tb.on_key(KeyCode::Right, alt);
+        assert_eq!(tb.cursor_byte(), 6);
+
+        tb.on_key(KeyCode::Right, alt);
+        assert_eq!(tb.cursor_byte(), 12);
+
+        tb.on_key(KeyCode::Left, alt);
+        assert_eq!(tb.cursor_byte(), 6);
+
+        tb.on_key(KeyCode::Left, alt);
+        assert_eq!(tb.cursor_byte(), 0);
+    }
+
+    #[test]
+    fn cmd_left_right_moves_to_edges() {
+        let mut tb = TextBox::new();
+        tb.set_text("hello world!");
+        tb.cursor_byte = 5;
+        let cmd = Modifiers { cmd: true, ..Modifiers::NONE };
+
+        tb.on_key(KeyCode::Left, cmd);
+        assert_eq!(tb.cursor_byte(), 0);
+
+        tb.cursor_byte = 5;
+        tb.on_key(KeyCode::Right, cmd);
+        assert_eq!(tb.cursor_byte(), 12);
+    }
+
+    #[test]
+    fn up_down_are_consumed_without_mutating_text() {
+        let mut tb = TextBox::new();
+        tb.set_text("hello");
+        tb.cursor_byte = 3;
+
+        let res_up = tb.on_key(KeyCode::Up, Modifiers::NONE);
+        assert!(res_up);
+        assert_eq!(tb.text(), "hello");
+        assert_eq!(tb.cursor_byte(), 3);
+
+        let res_down = tb.on_key(KeyCode::Down, Modifiers::NONE);
+        assert!(res_down);
+        assert_eq!(tb.text(), "hello");
+        assert_eq!(tb.cursor_byte(), 3);
+
+        let res_pgup = tb.on_key(KeyCode::PageUp, Modifiers::NONE);
+        assert!(res_pgup);
+
+        let res_pgdn = tb.on_key(KeyCode::PageDown, Modifiers::NONE);
+        assert!(res_pgdn);
+    }
+}

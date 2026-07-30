@@ -1,0 +1,54 @@
+[workspace]
+resolver = "2"
+default-members = ["crates/app"]
+members = ["crates/*"]
+
+[workspace.package]
+edition = "2024"
+license = "MIT"
+repository = "https://github.com/dan/textora"
+rust-version = "1.93"
+
+[profile.release]
+codegen-units = 1
+debug = 0
+lto = true
+opt-level = "s"
+panic = "abort"
+strip = "symbols"
+incremental = false
+
+[profile.profiling]
+inherits = "release"
+debug = "full"
+split-debuginfo = "packed"
+strip = "none"
+incremental = true
+
+[profile.bench]
+codegen-units = 16
+lto = "thin"
+
+[workspace.dependencies]
+core = { path = "./crates/core", package = "textora-core" }
+lsh = { path = "./crates/lsh" }
+render = { path = "./crates/render", package = "textora-render" }
+shaping = { path = "./crates/shaping", package = "textora-shaping" }
+stdext = { path = "./crates/stdext" }
+hashlink = "0.12"
+smallvec = { version = "1", features = ["const_generics"] }
+ui = { path = "./crates/ui", package = "textora-ui" }
+winit = { version = "0.30", default-features = false, features = ["rwh_06"] }
+wgpu = { git = "https://github.com/zed-industries/wgpu.git", rev = "357a0c56e0070480ad9daea5d2eaa83150b79e88", default-features = false, features = ["wgsl"] }
+criterion = { version = "0.5", features = ["html_reports"] }
+arboard = { version = "3", default-features = false }
+objc2 = "0.6.4"
+serde = { version = "1", features = ["derive"] }
+toml = "0.5"
+objc2-app-kit = "0.3.2"
+objc2-foundation = "0.3.2"
+cosmic-text = { version = "0.12", default-features = false, features = ["std", "swash"] }
+unicode_categories = "0.1"
+unicode-segmentation = "1"
+unicode-width = "0.1"
+zeroize = "1"

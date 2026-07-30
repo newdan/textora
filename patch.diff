@@ -1,0 +1,14 @@
+--- crates/app/src/app_window.rs
++++ crates/app/src/app_window.rs
+@@ -248,7 +248,11 @@
+     }
+ 
+     pub(crate) fn has_active_animation(&self) -> bool {
+-        self.tab_scroll.is_animating() || self.sidebar_animating
++        let t = self.tab_scroll.is_animating();
++        let s = self.sidebar_animating;
++        if t || s {
++            eprintln!("[anim] tab={} sidebar={}", t, s);
++        }
++        t || s
+     }

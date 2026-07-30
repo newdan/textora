@@ -1,0 +1,601 @@
+//! PopupMenu — merged from old `ui/src/popup_menu.rs` + `ui/src/widgets/popup_menu.rs`.
+
+mod types;
+
+pub use types::{ContextMenuAction, OverflowEntry, PopupMenu, PopupMenuAction, PopupMenuItem};
+
+use crate::core::geom::Rect;
+use crate::core::widget::{
+    Event, EventCtx, KeyCode, LayoutCtx, MouseButton, PaintCtx, Widget, WidgetAction,
+};
+use std::any::Any;
+use winit::window::CursorIcon;
+
+/// 弹出菜单的操作结果（上行给 app 层）。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PopupOutcome {
+    /// 用户选中了某个菜单项。
+    Selected(PopupMenuAction),
+    /// 用户点击了菜单外区域 / 按 Escape 关闭菜单。
+    Dismiss,
+}
+
+/// 包装 PopupMenu 的 Widget，用于 UiShell::overlays。
+pub struct PopupMenuWidget {
+    menu: PopupMenu,
+    rect: Rect,
+    hovered: Option<usize>,
+}
+
+impl PopupMenuWidget {
+    pub fn new(mut menu: PopupMenu) -> Self {
+        let rect = menu.menu_rect;
+        let dx = -rect.x;
+        let dy = -rect.y;
+        menu.menu_rect.x += dx;
+        menu.menu_rect.y += dy;
+        for r in &mut menu.item_rects {
+            r.x += dx;
+            r.y += dy;
+        }
+        Self { menu, rect: Rect::new(0.0, 0.0, rect.w, rect.h), hovered: None }
+    }
+
+    /// 暴露内部菜单引用（供 app 层 downcast 后读取）。
+    pub fn menu(&self) -> &PopupMenu {
+        &self.menu
+    }
+}
+
+impl Widget for PopupMenuWidget {
+    fn set_rect(&mut self, rect: Rect, _ctx: &mut LayoutCtx) {
+        self.rect = Rect::new(0.0, 0.0, rect.w, rect.h);
+    }
+
+    fn paint(&self, ctx: &mut PaintCtx) {
+        self.menu.paint(ctx, self.hovered);
+    }
+
+    fn hit(&self, px: f32, py: f32) -> bool {
+        self.rect.contains(px, py)
+    }
+
+    fn on_event(&mut self, ev: &Event, ctx: &mut EventCtx) -> Option<WidgetAction> {
+        match ev {
+            Event::MouseMove { px, py } => {
+                let inside = self.rect.contains(*px, *py);
+                if inside {
+                    ctx.cursor_hint = Some(CursorIcon::Default);
+                }
+                self.hovered = if inside {
+                    self.menu
+                        .item_rects
+                        .iter()
+                        .enumerate()
+                        .find(|(_, r)| r.contains(*px, *py))
+                        .map(|(i, _)| i)
+                } else {
+                    None
+                };
+                None
+            }
+            Event::MouseDown { px, py, button: MouseButton::Left } => {
+                if let Some(action) = self.menu.hit_test_px(*px, *py) {
+                    Some(WidgetAction::Popup(PopupOutcome::Selected(action.clone())))
+                } else if !self.rect.contains(*px, *py) {
+                    Some(WidgetAction::Popup(PopupOutcome::Dismiss))
+                } else {
+                    None
+                }
+            }
+            Event::KeyDown(KeyCode::Escape, _) => Some(WidgetAction::Popup(PopupOutcome::Dismiss)),
+            _ => None,
+        }
+    }
+
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+
+    fn as_any_mut(&mut self) -> &mut dyn Any {
+        self
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::core::paint::{DrawCmd, DrawList};
+    use crate::core::widget::{Event, EventCtx, KeyCode, Modifiers, MouseButton, Widget};
+    use crate::settings::Settings;
+    use crate::tab_bar::{NavButtonLayout, TabBarCtx, TabBarLayout, TabEntry, TabIndicator};
+
+    fn make_ctx() -> TabBarCtx {
+        TabBarCtx { screen_w: 1200.0, screen_h: 800.0, dpi: 1.0 }
+    }
+
+    // ── PopupMenu 类型测试（从旧 popup_menu.rs 合并）──
+
+    #[test]
+    fn hit_test_returns_none_for_outside_position() {
+        let ctx = make_ctx();
+        let menu =
+            PopupMenu::context_px(0, (600.0, 400.0), (ctx.screen_w, ctx.screen_h), false, 1.0);
+        assert!(menu.hit_test_px(6.0, 0.0).is_none());
+    }
+
+    #[test]
+    fn hit_test_returns_action_for_item_center() {
+        let ctx = make_ctx();
+        let menu =
+            PopupMenu::context_px(0, (600.0, 400.0), (ctx.screen_w, ctx.screen_h), false, 1.0);
+        let first = menu.item_rects[0];
+        let cx = first.x + first.w * 0.5;
+        let cy = first.y + first.h * 0.5;
+        let hit = menu.hit_test_px(cx, cy);
+        assert!(hit.is_some());
+    }
+
+    #[test]
+    fn overflow_does_not_panic() {
+        let layout = TabBarLayout {
+            tabs: vec![TabEntry {
+                index: 0,
+                title: "a very long filename that should be truncated.rs".into(),
+                indicator: TabIndicator::None,
+                pinned: false,
+                preview: false,
+                disambiguation: None,
+                rect_px: Rect::ZERO,
+                close_rect_px: Rect::ZERO,
+            }],
+            clip_left_px: 0.0,
+            clip_right_px: 0.0,
+            overflow: false,
+            scroll_offset: 0.0,
+            max_scroll: 0.0,
+            nav_buttons: NavButtonLayout {
+                back_rect_px: Rect::ZERO,
+                forward_rect_px: Rect::ZERO,
+                back_enabled: false,
+                forward_enabled: false,
+            },
+            dropdown_rect_px: Rect::ZERO,
+            overflow_left_rect_px: Rect::ZERO,
+            overflow_right_rect_px: Rect::ZERO,
+            new_tab_rect_px: Rect::ZERO,
+            fade_left_rect_px: Rect::ZERO,
+            fade_right_rect_px: Rect::ZERO,
+            left_arrow_disabled: false,
+            right_arrow_disabled: false,
+            pinned_total_width: 0.0,
+        };
+        let ctx = make_ctx();
+        let dd = layout.dropdown_rect_px;
+        let entries: Vec<OverflowEntry> = layout
+            .tabs
+            .iter()
+            .map(|e| OverflowEntry { tab_index: e.index, title: e.title.clone() })
+            .collect();
+        let menu = PopupMenu::overflow_px(&entries, dd, (ctx.screen_w, ctx.screen_h), 0, 1.0);
+        assert!(!menu.items.is_empty());
+        assert_eq!(menu.items.len(), menu.item_rects.len());
+    }
+
+    #[test]
+    fn context_menu_contains_expected_actions() {
+        let ctx = make_ctx();
+        let menu =
+            PopupMenu::context_px(5, (600.0, 400.0), (ctx.screen_w, ctx.screen_h), false, 1.0);
+        assert_eq!(menu.items.len(), 7);
+
+        let actions: Vec<_> = menu.items.iter().map(|i| &i.action).collect();
+        assert!(matches!(
+            actions[0],
+            PopupMenuAction::Context { action: ContextMenuAction::Close, tab_index: 5 }
+        ));
+        assert!(matches!(
+            actions[1],
+            PopupMenuAction::Context { action: ContextMenuAction::CloseOthers, .. }
+        ));
+        assert!(matches!(
+            actions[2],
+            PopupMenuAction::Context { action: ContextMenuAction::CloseRight, .. }
+        ));
+        assert!(matches!(
+            actions[3],
+            PopupMenuAction::Context { action: ContextMenuAction::CloseAll, .. }
+        ));
+        assert!(menu.items[4].is_separator, "item 4 should be a separator");
+        assert!(matches!(
+            actions[5],
+            PopupMenuAction::Context { action: ContextMenuAction::CopyPath, .. }
+        ));
+        assert!(matches!(
+            actions[6],
+            PopupMenuAction::Context { action: ContextMenuAction::TogglePin, .. }
+        ));
+    }
+
+    // ── PopupMenuWidget 测试（从旧 widgets/popup_menu.rs 合并）──
+
+    #[test]
+    fn widget_hit_returns_true_for_menu_rect() {
+        let _ = Box::leak(Box::new(Settings::new()));
+        let menu = PopupMenu::context_px(0, (100.0, 100.0), (1200.0, 800.0), false, 1.0);
+        let widget = PopupMenuWidget::new(menu);
+        let cx = widget.rect.x + widget.rect.w * 0.5;
+        let cy = widget.rect.y + widget.rect.h * 0.5;
+        assert!(widget.hit(cx, cy));
+    }
+
+    #[test]
+    fn widget_on_event_escape_dismisses() {
+        let _ = Box::leak(Box::new(Settings::new()));
+        let menu = PopupMenu::context_px(0, (100.0, 100.0), (1200.0, 800.0), false, 1.0);
+        let mut widget = PopupMenuWidget::new(menu);
+        let theme = crate::theme::test_theme();
+        let mut ctx = EventCtx { cursor_hint: None, theme: &theme, dpi: 1.0 };
+        let result = widget.on_event(&Event::KeyDown(KeyCode::Escape, Modifiers::NONE), &mut ctx);
+        assert!(result.is_some());
+        assert!(matches!(result.unwrap(), WidgetAction::Popup(PopupOutcome::Dismiss)));
+    }
+
+    #[test]
+    fn widget_on_event_click_outside_dismisses() {
+        let _ = Box::leak(Box::new(Settings::new()));
+        let menu = PopupMenu::context_px(0, (400.0, 200.0), (1200.0, 800.0), false, 1.0);
+        let mut widget = PopupMenuWidget::new(menu);
+        let theme = crate::theme::test_theme();
+        let mut ctx = EventCtx { cursor_hint: None, theme: &theme, dpi: 1.0 };
+        let result = widget.on_event(
+            &Event::MouseDown { px: -10.0, py: -10.0, button: MouseButton::Left },
+            &mut ctx,
+        );
+        assert!(result.is_some());
+        assert!(matches!(result.unwrap(), WidgetAction::Popup(PopupOutcome::Dismiss)));
+    }
+
+    #[test]
+    fn widget_on_event_click_on_item_selects() {
+        let _ = Box::leak(Box::new(Settings::new()));
+        let menu = PopupMenu::context_px(0, (400.0, 200.0), (1200.0, 800.0), false, 1.0);
+        let mut widget = PopupMenuWidget::new(menu);
+        let theme = crate::theme::test_theme();
+        let mut ctx = EventCtx { cursor_hint: None, theme: &theme, dpi: 1.0 };
+        let r = widget.menu.item_rects[0];
+        let cx = r.x + r.w * 0.5;
+        let cy = r.y + r.h * 0.5;
+        let result = widget
+            .on_event(&Event::MouseDown { px: cx, py: cy, button: MouseButton::Left }, &mut ctx);
+        assert!(result.is_some());
+        assert!(matches!(result.unwrap(), WidgetAction::Popup(PopupOutcome::Selected(_))));
+    }
+
+    #[test]
+    fn widget_mouse_move_updates_hover() {
+        let _ = Box::leak(Box::new(Settings::new()));
+        let menu = PopupMenu::context_px(0, (400.0, 200.0), (1200.0, 800.0), false, 1.0);
+        let mut widget = PopupMenuWidget::new(menu);
+        let theme = crate::theme::test_theme();
+        let mut ctx = EventCtx { cursor_hint: None, theme: &theme, dpi: 1.0 };
+        let r = widget.menu.item_rects[0];
+        let cx = r.x + r.w * 0.5;
+        let cy = r.y + r.h * 0.5;
+        let result = widget.on_event(&Event::MouseMove { px: cx, py: cy }, &mut ctx);
+        assert!(result.is_none());
+    }
+
+    // ── paint 测试 ──
+
+    #[test]
+    fn paint_context_menu_emits_shadow_bg_border_and_text() {
+        let _ = Box::leak(Box::new(Settings::new()));
+        let menu = PopupMenu::context_px(0, (400.0, 200.0), (1200.0, 800.0), false, 1.0);
+        let widget = PopupMenuWidget::new(menu);
+        let theme = crate::theme::test_theme();
+        let mut dl = DrawList::new();
+        let mut shaper = shaping::Shaper::new().unwrap();
+        let mut pc = PaintCtx {
+            global_alpha: 1.0,
+            list: &mut dl,
+            theme: &theme,
+            dpi: 1.0,
+            offset: (0.0, 0.0),
+            shaper: Some(&mut shaper),
+        };
+        widget.paint(&mut pc);
+
+        // Print all command types for debugging
+        for (i, cmd) in dl.cmds.iter().enumerate() {
+            let kind = match cmd {
+                DrawCmd::FillRect { .. } => "FillRect",
+                DrawCmd::StrokeRect { .. } => "StrokeRect",
+                DrawCmd::TextLayout { .. } => "Text",
+                _ => "Other",
+            };
+            eprintln!("cmd[{}]: {}", i, kind);
+        }
+
+        // Border + Background + separator fill + 6 * text = 2 + 1 + 6 = 9
+        assert!(dl.cmds.len() >= 9, "expected at least 9 draw commands, got {}", dl.cmds.len());
+        // First is border (fill_rounded outer)
+        assert!(matches!(dl.cmds[0], DrawCmd::FillRect { .. }));
+        // Second is background (fill_rounded)
+        assert!(matches!(dl.cmds[1], DrawCmd::FillRect { .. }));
+        // Fourth is first item fill (no hover/active → no extra fill, just text)
+        // Actually: context menu items are not active and not hovered,
+        // so there should be no fill for them, only text
+        // Let's just check there are text commands for each item
+        let text_count = dl.cmds.iter().filter(|c| matches!(c, DrawCmd::TextLayout { .. })).count();
+        assert_eq!(text_count, 6, "should have 6 text commands (separator has no text)");
+    }
+
+    #[test]
+    fn paint_hover_item_gets_hover_highlight() {
+        let _ = Box::leak(Box::new(Settings::new()));
+        let menu = PopupMenu::context_px(0, (400.0, 200.0), (1200.0, 800.0), false, 1.0);
+        let widget = PopupMenuWidget::new(menu);
+        let theme = crate::theme::test_theme();
+        let mut dl = DrawList::new();
+        let mut shaper = shaping::Shaper::new().unwrap();
+        let mut pc = PaintCtx {
+            global_alpha: 1.0,
+            list: &mut dl,
+            theme: &theme,
+            dpi: 1.0,
+            offset: (0.0, 0.0),
+            shaper: Some(&mut shaper),
+        };
+
+        // Simulate hover on first item by calling paint with hovered=Some(0)
+        // We need to call menu.paint directly since PopupMenuWidget.paint uses internal state
+        widget.menu.paint(&mut pc, Some(0));
+
+        // The first item's FillRect should use menu_hover color
+        // Command order: border, bg, [item_fill, item_text] * n
+        // item 0 fill at index 2
+        if let DrawCmd::FillRect { color, .. } = &dl.cmds[2] {
+            assert_eq!(
+                *color, theme.palette.sidebar_hover_bg,
+                "hovered item should use menu_hover color"
+            );
+        } else {
+            panic!("expected FillRect for hovered item");
+        }
+    }
+
+    #[test]
+    fn paint_active_item_gets_highlight_background() {
+        let _ = Box::leak(Box::new(Settings::new()));
+        let menu = PopupMenu::context_px(0, (400.0, 200.0), (1200.0, 800.0), false, 1.0);
+        let mut menu = menu;
+        menu.items[0].is_active = true;
+        let theme = crate::theme::test_theme();
+        let mut dl = DrawList::new();
+        let mut shaper = shaping::Shaper::new().unwrap();
+        let mut pc = PaintCtx {
+            global_alpha: 1.0,
+            list: &mut dl,
+            theme: &theme,
+            dpi: 1.0,
+            offset: (0.0, 0.0),
+            shaper: Some(&mut shaper),
+        };
+        menu.paint(&mut pc, None);
+
+        // Active item should get menu_selected background highlight
+        let has_selected_bg = dl.cmds.iter().any(|cmd| {
+            if let DrawCmd::FillRect { color, .. } = cmd {
+                *color == theme.palette.sidebar_active_bg
+            } else {
+                false
+            }
+        });
+        assert!(has_selected_bg, "active item should have menu_selected background highlight");
+    }
+
+    #[test]
+    fn paint_active_item_no_checkmark() {
+        let _ = Box::leak(Box::new(Settings::new()));
+        let menu = PopupMenu::context_px(0, (400.0, 200.0), (1200.0, 800.0), false, 1.0);
+        let mut menu = menu;
+        menu.items[0].is_active = true;
+        let theme = crate::theme::test_theme();
+        let mut dl = DrawList::new();
+        let mut shaper = shaping::Shaper::new().unwrap();
+        let mut pc = PaintCtx {
+            global_alpha: 1.0,
+            list: &mut dl,
+            theme: &theme,
+            dpi: 1.0,
+            offset: (0.0, 0.0),
+            shaper: Some(&mut shaper),
+        };
+        menu.paint(&mut pc, None);
+
+        // Active item should NOT render a checkmark character
+        let has_checkmark = dl.cmds.iter().any(|cmd| {
+            if let DrawCmd::TextLayout { layout, .. } = cmd {
+                layout.text == "\u{2713}"
+            } else {
+                false
+            }
+        });
+        assert!(!has_checkmark, "active item should NOT render checkmark");
+    }
+
+    #[test]
+    fn paint_overflow_menu_item_count_matches() {
+        let _ = Box::leak(Box::new(Settings::new()));
+        let entries: Vec<OverflowEntry> =
+            (0..5).map(|i| OverflowEntry { tab_index: i, title: format!("tab_{}", i) }).collect();
+        let menu = PopupMenu::overflow_px(
+            &entries,
+            Rect::new(900.0, 0.0, 60.0, 28.0),
+            (1200.0, 800.0),
+            0,
+            1.0,
+        );
+        let widget = PopupMenuWidget::new(menu);
+        let theme = crate::theme::test_theme();
+        let mut dl = DrawList::new();
+        let mut shaper = shaping::Shaper::new().unwrap();
+        let mut pc = PaintCtx {
+            global_alpha: 1.0,
+            list: &mut dl,
+            theme: &theme,
+            dpi: 1.0,
+            offset: (0.0, 0.0),
+            shaper: Some(&mut shaper),
+        };
+        widget.paint(&mut pc);
+
+        // All items get 1 text each (no checkmark) = 5 total
+        let text_count = dl.cmds.iter().filter(|c| matches!(c, DrawCmd::TextLayout { .. })).count();
+        assert_eq!(text_count, 5, "all items have 1 text each (no checkmark)");
+    }
+
+    // ── show_checkmarks 测试 ──
+
+    #[test]
+    fn context_menu_show_checkmarks_false() {
+        let _ = Box::leak(Box::new(Settings::new()));
+        let menu = PopupMenu::context_px(0, (400.0, 200.0), (1200.0, 800.0), false, 1.0);
+        assert!(!menu.show_checkmarks, "context menu should have show_checkmarks=false");
+    }
+
+    #[test]
+    fn overflow_menu_show_checkmarks_false() {
+        let _ = Box::leak(Box::new(Settings::new()));
+        let entries: Vec<OverflowEntry> =
+            vec![OverflowEntry { tab_index: 0, title: "test.rs".into() }];
+        let menu = PopupMenu::overflow_px(
+            &entries,
+            Rect::new(900.0, 0.0, 60.0, 28.0),
+            (1200.0, 800.0),
+            0,
+            1.0,
+        );
+        assert!(!menu.show_checkmarks, "overflow menu should have show_checkmarks=false");
+    }
+
+    #[test]
+    fn paint_show_checkmarks_active_item_renders_checkmark() {
+        let _ = Box::leak(Box::new(Settings::new()));
+        let menu = PopupMenu::context_px(0, (400.0, 200.0), (1200.0, 800.0), false, 1.0);
+        let mut menu = menu;
+        menu.show_checkmarks = true;
+        menu.items[0].is_active = true;
+        let theme = crate::theme::test_theme();
+        let mut dl = DrawList::new();
+        let mut shaper = shaping::Shaper::new().unwrap();
+        let mut pc = PaintCtx {
+            global_alpha: 1.0,
+            list: &mut dl,
+            theme: &theme,
+            dpi: 1.0,
+            offset: (0.0, 0.0),
+            shaper: Some(&mut shaper),
+        };
+        menu.paint(&mut pc, None);
+
+        // Active item should render a checkmark character when show_checkmarks=true
+        let has_checkmark = dl.cmds.iter().any(|cmd| {
+            if let DrawCmd::TextLayout { layout, .. } = cmd {
+                layout.text == "\u{2713}"
+            } else {
+                false
+            }
+        });
+        assert!(has_checkmark, "active item should render checkmark when show_checkmarks=true");
+    }
+
+    #[test]
+    fn paint_show_checkmarks_inactive_item_no_checkmark() {
+        let _ = Box::leak(Box::new(Settings::new()));
+        let menu = PopupMenu::context_px(0, (400.0, 200.0), (1200.0, 800.0), false, 1.0);
+        let mut menu = menu;
+        menu.show_checkmarks = true;
+        // items[0] is_active defaults to false
+        let theme = crate::theme::test_theme();
+        let mut dl = DrawList::new();
+        let mut shaper = shaping::Shaper::new().unwrap();
+        let mut pc = PaintCtx {
+            global_alpha: 1.0,
+            list: &mut dl,
+            theme: &theme,
+            dpi: 1.0,
+            offset: (0.0, 0.0),
+            shaper: Some(&mut shaper),
+        };
+        menu.paint(&mut pc, None);
+
+        // Inactive item should NOT render a checkmark
+        let has_checkmark = dl.cmds.iter().any(|cmd| {
+            if let DrawCmd::TextLayout { layout, .. } = cmd {
+                layout.text == "\u{2713}"
+            } else {
+                false
+            }
+        });
+        assert!(!has_checkmark, "inactive item should NOT render checkmark");
+    }
+
+    #[test]
+    fn paint_show_checkmarks_text_offset_right() {
+        let _ = Box::leak(Box::new(Settings::new()));
+        let menu = PopupMenu::context_px(0, (400.0, 200.0), (1200.0, 800.0), false, 1.0);
+        let mut menu_no_check = menu.clone();
+        menu_no_check.show_checkmarks = false;
+        let mut menu_with_check = menu;
+        menu_with_check.show_checkmarks = true;
+
+        let theme = crate::theme::test_theme();
+
+        // Paint without checkmarks
+        let mut dl1 = DrawList::new();
+        let mut shaper = shaping::Shaper::new().unwrap();
+        let mut pc1 = PaintCtx {
+            global_alpha: 1.0,
+            list: &mut dl1,
+            theme: &theme,
+            dpi: 1.0,
+            offset: (0.0, 0.0),
+            shaper: Some(&mut shaper),
+        };
+        menu_no_check.paint(&mut pc1, None);
+
+        // Paint with checkmarks
+        let mut dl2 = DrawList::new();
+        let mut shaper = shaping::Shaper::new().unwrap();
+        let mut pc2 = PaintCtx {
+            global_alpha: 1.0,
+            list: &mut dl2,
+            theme: &theme,
+            dpi: 1.0,
+            offset: (0.0, 0.0),
+            shaper: Some(&mut shaper),
+        };
+        menu_with_check.paint(&mut pc2, None);
+
+        // Get text x positions for first item
+        let get_first_text_x = |dl: &DrawList| -> f32 {
+            for cmd in &dl.cmds {
+                if let DrawCmd::TextLayout { x, .. } = cmd {
+                    return *x;
+                }
+            }
+            panic!("no text command found");
+        };
+
+        let x1 = get_first_text_x(&dl1);
+        let x2 = get_first_text_x(&dl2);
+        assert!(
+            x2 > x1,
+            "text with checkmarks should be offset to the right (x1={}, x2={})",
+            x1,
+            x2
+        );
+    }
+}

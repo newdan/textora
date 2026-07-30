@@ -1,0 +1,39 @@
+[package]
+name = "textora-core"
+version = "0.0.0"
+
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[lib]
+name = "core"
+path = "src/lib.rs"
+
+[dependencies]
+lsh.workspace = true
+stdext.workspace = true
+unicode_categories.workspace = true
+encoding_rs = "0.8"
+blake3 = "1"
+
+[build-dependencies]
+stdext.workspace = true
+lsh.workspace = true
+
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
+[dev-dependencies]
+criterion = { workspace = true }
+tempfile = "3"
+
+[[bench]]
+name = "cursor_nav"
+harness = false
+
+[[bench]]
+name = "file_loading"
+harness = false

@@ -1,0 +1,7 @@
+# Review Notes for TextBox Widget Design
+
+- **Statefulness**: The design makes TextBox stateful, which is a great approach for an internal component. It encapsulates the complexity of selection, IME, and cursor management.
+- **Callbacks over WidgetAction**: Using callbacks instead of extending `WidgetAction` for internal communication is a solid architectural choice. It decouples the `TextBox` from the app-specific `SearchBarAction`.
+- **IME Handling**: Moving IME state into `TextBox` is a huge win. However, routing `Ime` events from `app` directly to `TextBox` violates the UI encapsulation. Consider adding `Ime` events to `ui::core::Event`.
+- **Text Measurement**: `TextBox` needs `LayoutCtx` to measure text for cursor positioning. `set_rect` should be modified to accept `LayoutCtx`.
+- **State Synchronization**: `SearchBarWidget` receives `SearchBarSnapshot` from the app every frame. This can overwrite `TextBox`'s internal state. We need a synchronization mechanism to prevent this.
