@@ -7,10 +7,12 @@
 
 #![forbid(unsafe_code)]
 
+pub mod catalog;
 pub mod domain;
 pub mod summary_parser;
 pub mod workspace;
 
+pub use catalog::{Catalog, CatalogError};
 pub use domain::{
     DocumentIdentity, DocumentKind, DocumentOrigin, ExternalFileId, NavigationScope, NoteId,
     NoteLifecycle, NoteSummary, TagId, TagSummary, WorkspaceId,
