@@ -9,6 +9,7 @@
 
 pub mod catalog;
 pub mod domain;
+pub mod reconciliation;
 pub mod scan;
 pub mod summary_parser;
 pub mod workspace;
@@ -17,6 +18,10 @@ pub use catalog::{Catalog, CatalogError, CatalogNote};
 pub use domain::{
     DocumentIdentity, DocumentKind, DocumentOrigin, ExternalFileId, NavigationScope, NoteId,
     NoteLifecycle, NoteSummary, TagId, TagSummary, WorkspaceId,
+};
+pub use reconciliation::{
+    DiscoveredNote, ReconciliationChange, ReconciliationError, ReconciliationPlan,
+    reconcile_catalog,
 };
 pub use scan::{ScanCompletion, ScanError, ScanFailure, scan_workspace};
 pub use summary_parser::{MAX_EXCERPT_GRAPHEMES, NoteTextSummary, parse_note_text_summary};
