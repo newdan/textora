@@ -9,10 +9,32 @@ use crate::gpu::GpuError;
 use crate::ui_shell::ShellInputs;
 use crate::workspace_persistence::restore_workspace;
 use appkit_shell::ProductHost;
-use winit::dpi::{PhysicalPosition, PhysicalSize};
+use winit::dpi::{LogicalSize, PhysicalPosition, PhysicalSize, Size};
 use winit::window::WindowAttributes;
 
 const WINDOW_TITLE: &str = "edit+";
+const MINIMUM_WINDOW_WIDTH_LOGICAL: u32 = 800;
+const MINIMUM_WINDOW_HEIGHT_LOGICAL: u32 = 600;
+
+fn logical_window_dimension(physical_dimension: u32, scale_factor: f64) -> u32 {
+    let normalized_scale_factor =
+        if scale_factor.is_finite() && scale_factor > 0.0 { scale_factor } else { 1.0 };
+    (physical_dimension as f64 / normalized_scale_factor).round().clamp(1.0, u32::MAX as f64) as u32
+}
+
+fn restored_window_dimension(
+    persisted_dimension: u32,
+    geometry_is_logical: bool,
+    scale_factor: f64,
+    minimum_logical_dimension: u32,
+) -> u32 {
+    let logical_dimension = if geometry_is_logical {
+        persisted_dimension
+    } else {
+        logical_window_dimension(persisted_dimension, scale_factor)
+    };
+    logical_dimension.max(minimum_logical_dimension)
+}
 
 pub(crate) fn ime_cursor_x(
     cursor_rect: ui::core::geom::Rect,
@@ -122,8 +144,10 @@ impl App {
             settings.window_y = Some(pos.y);
         }
         let size = window.inner_size();
-        settings.window_width = Some(size.width);
-        settings.window_height = Some(size.height);
+        let scale_factor = window.scale_factor();
+        settings.window_width = Some(logical_window_dimension(size.width, scale_factor));
+        settings.window_height = Some(logical_window_dimension(size.height, scale_factor));
+        settings.window_geometry_is_logical = true;
         let (
             theme_mode,
             show_line_numbers,
@@ -337,8 +361,24 @@ impl App {
         };
         let mut attrs = WindowAttributes::default().with_title(WINDOW_TITLE);
         if let (Some(w), Some(h)) = (persisted.window_width, persisted.window_height) {
-            attrs = attrs
-                .with_inner_size(winit::dpi::Size::Physical(winit::dpi::PhysicalSize::new(w, h)));
+            let scale_factor =
+                event_loop.primary_monitor().map_or(1.0, |monitor| monitor.scale_factor());
+            let logical_width = restored_window_dimension(
+                w,
+                persisted.window_geometry_is_logical,
+                scale_factor,
+                MINIMUM_WINDOW_WIDTH_LOGICAL,
+            );
+            let logical_height = restored_window_dimension(
+                h,
+                persisted.window_geometry_is_logical,
+                scale_factor,
+                MINIMUM_WINDOW_HEIGHT_LOGICAL,
+            );
+            attrs = attrs.with_inner_size(Size::Logical(LogicalSize::new(
+                logical_width as f64,
+                logical_height as f64,
+            )));
         }
         let shared_font_system =
             self.editor_runtime.shared_font_system().expect("FontSystem not initialized");
@@ -454,6 +494,19 @@ mod build_shell_inputs_tests {
 
     use ui::plugin::ViewPlugin;
     use ui::sidebar::Visibility;
+
+    #[test]
+    fn persisted_window_dimension_is_logical_across_display_scale_changes() {
+        assert_eq!(super::logical_window_dimension(1600, 2.0), 800);
+    }
+
+    #[test]
+    fn legacy_physical_window_geometry_keeps_a_usable_high_dpi_work_area() {
+        assert_eq!(
+            super::restored_window_dimension(1600, false, 4.0, super::MINIMUM_WINDOW_WIDTH_LOGICAL),
+            super::MINIMUM_WINDOW_WIDTH_LOGICAL
+        );
+    }
 
     /// 辅助：创建含 n 个文档的 App 实例（无 GPU）。
     fn app_with_n_docs(n: usize) -> App {

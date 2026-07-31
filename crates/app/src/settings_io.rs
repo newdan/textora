@@ -36,11 +36,14 @@ pub(crate) struct PersistedSettings {
     /// Sidebar width in logical pixels (before DPI scaling).
     #[serde(default = "default_sidebar_width")]
     pub sidebar_width: f32,
-    /// Window geometry: None means not persisted or first run.
+    /// Window geometry in logical pixels: None means not persisted or first run.
     pub window_x: Option<i32>,
     pub window_y: Option<i32>,
     pub window_width: Option<u32>,
     pub window_height: Option<u32>,
+    /// Whether `window_width` and `window_height` are stored in logical pixels.
+    #[serde(default)]
+    pub window_geometry_is_logical: bool,
 }
 
 impl Default for PersistedSettings {
@@ -60,6 +63,7 @@ impl Default for PersistedSettings {
             window_y: None,
             window_width: None,
             window_height: None,
+            window_geometry_is_logical: false,
         }
     }
 }
@@ -196,6 +200,7 @@ mod tests {
             window_y: Some(20),
             window_width: Some(1000),
             window_height: Some(700),
+            window_geometry_is_logical: true,
         };
         save(&path, &expected).unwrap();
         let loaded = load(&path).unwrap();
