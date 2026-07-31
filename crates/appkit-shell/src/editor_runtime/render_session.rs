@@ -73,10 +73,11 @@ impl RenderSession {
         let size = window.inner_size();
         let gpu_context = gpu::create_gpu_context(window.clone(), size.width, size.height)?;
         let gpu = GpuState { ctx: gpu_context, size };
+        let scale_factor = window.scale_factor();
         let text =
-            TextState::init(&gpu, font_size * self.scale_factor as f32, font_system, font_family)?;
+            TextState::init(&gpu, font_size * scale_factor as f32, font_system, font_family)?;
 
-        self.scale_factor = window.scale_factor();
+        self.scale_factor = scale_factor;
         self.window = Some(window);
         self.gpu = Some(gpu);
         self.text = Some(text);

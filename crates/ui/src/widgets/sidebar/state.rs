@@ -183,6 +183,7 @@ const NEW_MENU_BUTTON_WIDTH: f32 = 32.0;
 const SETTINGS_BTN_H: f32 = constants::ROW_HEIGHT;
 const PADDING: f32 = 6.0;
 const EDGE_RESIZE_W: f32 = 4.0;
+const MINIMUM_EDITOR_WIDTH_LOGICAL: f32 = 100.0;
 
 impl SidebarState {
     pub fn on_drag_start(
@@ -401,7 +402,9 @@ impl SidebarState {
         metrics: &crate::settings::UiMetrics,
     ) {
         // Extreme narrow window: force hide sidebar even if pinned
-        if matches!(self.visibility, Visibility::Pinned) && input.screen_w < cfg.width + 100.0 {
+        if matches!(self.visibility, Visibility::Pinned)
+            && input.screen_w < cfg.width + MINIMUM_EDITOR_WIDTH_LOGICAL * metrics.dpi
+        {
             self.visibility = Visibility::Hidden;
         }
         if matches!(self.visibility, Visibility::Hidden) {
@@ -1154,6 +1157,28 @@ mod tests {
         );
         let layout = s.current_layout().expect("layout populated");
         assert!(layout.items.is_empty());
+    }
+
+    #[test]
+    fn high_dpi_narrow_window_hides_pinned_sidebar_before_editor_becomes_too_narrow() {
+        let dpi = 2.0;
+        let mut cfg = SidebarConfig::new_default(dpi);
+        cfg.pinned = true;
+        let metrics =
+            crate::settings::UiMetrics::from_settings(&crate::settings::Settings::new(), dpi);
+        let mut state = SidebarState::new(&cfg);
+        let input = SidebarInput {
+            tabs: &[],
+            active_index: None,
+            screen_w: cfg.width + 180.0,
+            screen_h: 800.0 * dpi,
+            traffic_light_inset: (0.0, 0.0),
+            content_top: 0.0,
+        };
+
+        state.update_layout(&input, &cfg, &metrics);
+
+        assert_eq!(state.visibility(), Visibility::Hidden);
     }
 
     #[test]
