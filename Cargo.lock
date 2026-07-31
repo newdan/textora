@@ -1447,6 +1447,7 @@ dependencies = [
  "serde",
  "tempfile",
  "toml",
+ "unicode-segmentation",
  "uuid",
 ]
 
