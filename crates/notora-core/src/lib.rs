@@ -8,8 +8,10 @@
 #![forbid(unsafe_code)]
 
 pub mod domain;
+pub mod workspace;
 
 pub use domain::{
     DocumentIdentity, DocumentKind, DocumentOrigin, ExternalFileId, NavigationScope, NoteId,
     NoteLifecycle, NoteSummary, TagId, TagSummary, WorkspaceId,
 };
+pub use workspace::{Workspace, WorkspaceDescriptor, WorkspaceError, WorkspaceManifest};
