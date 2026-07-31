@@ -26,6 +26,7 @@ pub(crate) struct RenderSession {
     window: Option<Arc<Window>>,
     gpu: Option<GpuState>,
     text: Option<TextState>,
+    surface_size: Option<PhysicalSize<u32>>,
     frame_cache: FrameCache,
     scale_factor: f64,
     pending_resize: Option<PhysicalSize<u32>>,
@@ -44,6 +45,7 @@ impl RenderSession {
             window: None,
             gpu: None,
             text: None,
+            surface_size: None,
             frame_cache: FrameCache::new(),
             scale_factor: 1.0,
             pending_resize: None,
@@ -78,6 +80,7 @@ impl RenderSession {
             TextState::init(&gpu, font_size * scale_factor as f32, font_system, font_family)?;
 
         self.scale_factor = scale_factor;
+        self.update_surface_size(size);
         self.window = Some(window);
         self.gpu = Some(gpu);
         self.text = Some(text);
@@ -118,6 +121,7 @@ impl RenderSession {
         gpu.ctx.config.height = size.height;
         gpu.ctx.surface.configure(&gpu.ctx.device, &gpu.ctx.config);
         gpu.ctx.recreate_msaa();
+        self.update_surface_size(size);
         self.last_resize_handled = Instant::now();
         self.redraw_requested = true;
         ResizeResult::Applied { width_changed }
@@ -164,7 +168,11 @@ impl RenderSession {
     }
 
     pub(crate) fn surface_size(&self) -> Option<PhysicalSize<u32>> {
-        self.gpu.as_ref().map(|gpu| gpu.size)
+        self.surface_size
+    }
+
+    fn update_surface_size(&mut self, size: PhysicalSize<u32>) {
+        self.surface_size = Some(size);
     }
 
     pub(crate) fn take_render_resources(&mut self) -> RenderResources {
@@ -210,6 +218,7 @@ impl RenderSession {
         self.text = None;
         self.gpu = None;
         self.window = None;
+        self.surface_size = None;
         self.pending_resize = None;
         self.redraw_requested = false;
         self.first_frame_presented = false;
@@ -251,5 +260,16 @@ mod tests {
         assert!(session.first_frame_presented());
         session.shutdown();
         assert!(!session.first_frame_presented());
+    }
+
+    #[test]
+    fn surface_size_survives_temporary_render_resource_take() {
+        let mut session = RenderSession::new();
+        let expected_size = PhysicalSize::new(1600, 1200);
+        session.update_surface_size(expected_size);
+
+        let _resources = session.take_render_resources();
+
+        assert_eq!(session.surface_size(), Some(expected_size));
     }
 }
