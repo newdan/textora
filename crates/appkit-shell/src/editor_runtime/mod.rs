@@ -58,6 +58,7 @@ pub struct EditorRuntime {
     save_session: document_save::SaveSession,
     _settings: ui::settings::Settings,
     theme: ui::Theme,
+    ui_shaper: Option<Arc<Mutex<shaping::Shaper>>>,
     _snapshots_directory: PathBuf,
 }
 
@@ -79,6 +80,7 @@ impl EditorRuntime {
             save_session: document_save::SaveSession::new(),
             _settings: initial_settings,
             theme: initial_theme,
+            ui_shaper: None,
             _snapshots_directory: snapshots_directory,
         })
     }
@@ -511,10 +513,9 @@ impl EditorRuntime {
     }
 
     pub fn begin_frame(&mut self) -> Result<EditorFrame, RenderError> {
-        Ok(EditorFrame::new_for_backend(
-            self.theme.clone(),
-            self.render_session.scale_factor() as f32,
-        ))
+        let theme = self.theme.clone();
+        let dpi = self.render_session.scale_factor() as f32;
+        Ok(EditorFrame::new_for_backend(theme, dpi, self.ui_shaper.clone()))
     }
 
     pub fn update_theme(&mut self, theme: ui::Theme) {
@@ -579,9 +580,19 @@ impl EditorRuntime {
         font_size: f32,
         font_family: &str,
     ) -> Result<(), EditorRuntimeError> {
+        let ui_font_system = Arc::clone(&font_system);
         self.render_session
             .resume(event_loop, attributes, font_system, font_size, font_family)
-            .map_err(|error| EditorRuntimeError::GpuInitialization { message: error.to_string() })
+            .map_err(|error| EditorRuntimeError::GpuInitialization {
+                message: error.to_string(),
+            })?;
+        let scaled_font_size = font_size * self.render_session.scale_factor() as f32;
+        self.ui_shaper = Some(Arc::new(Mutex::new(shaping::Shaper::from_shared_font_system(
+            ui_font_system,
+            scaled_font_size,
+            font_family,
+        ))));
+        Ok(())
     }
 
     pub fn window(&self) -> Option<&Window> {
@@ -785,6 +796,7 @@ impl EditorRuntime {
         self.file_safety_session.shutdown();
         self.reshape_session.shutdown();
         self.render_session.shutdown();
+        self.ui_shaper = None;
     }
 
     fn resize_outcome(&self, result: render_session::ResizeResult) -> ResizeOutcome {

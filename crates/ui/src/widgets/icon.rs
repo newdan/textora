@@ -346,6 +346,57 @@ const DATA_FOLDER_OPEN: IconSvg = IconSvg {
     stroke_width: 2.0,
 };
 
+const DATA_STAR: IconSvg = IconSvg {
+    paths: &[
+        "M12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26Z",
+    ],
+    circles: &[],
+    stroke_width: 2.0,
+};
+
+const DATA_TRASH_2: IconSvg = IconSvg {
+    paths: &[
+        "M3 6h18",
+        "M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6",
+        "M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2",
+        "M10 11v6",
+        "M14 11v6",
+    ],
+    circles: &[],
+    stroke_width: 2.0,
+};
+
+const DATA_FILE: IconSvg = IconSvg {
+    paths: &["M14.5 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V7.5Z", "M14 2v6h6"],
+    circles: &[],
+    stroke_width: 2.0,
+};
+
+const DATA_FILE_TEXT: IconSvg = IconSvg {
+    paths: &[
+        "M14.5 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V7.5Z",
+        "M14 2v6h6",
+        "M16 13H8",
+        "M16 17H8",
+        "M10 9H8",
+    ],
+    circles: &[],
+    stroke_width: 2.0,
+};
+
+const DATA_NOTEBOOK_PEN: IconSvg = IconSvg {
+    paths: &[
+        "M13.4 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-7.4",
+        "M2 6h4",
+        "M2 10h4",
+        "M2 14h4",
+        "M2 18h4",
+        "M21.378 5.626a1 1 0 0 0-3.004-3.004l-5.01 5.012a2 2 0 0 0-.506.854l-.837 2.87a.5.5 0 0 0 .62.62l2.87-.837a2 2 0 0 0 .854-.506Z",
+    ],
+    circles: &[],
+    stroke_width: 2.0,
+};
+
 const DATA_SETTINGS: IconSvg = IconSvg {
     paths: &[
         "M9.671 4.136a2.34 2.34 0 0 1 4.659 0 2.34 2.34 0 0 0 3.319 1.915 2.34 2.34 0 0 1 2.33 4.033 2.34 2.34 0 0 0 0 3.831 2.34 2.34 0 0 1-2.33 4.033 2.34 2.34 0 0 0-3.319 1.915 2.34 2.34 0 0 1-4.659 0 2.34 2.34 0 0 0-3.32-1.915 2.34 2.34 0 0 1-2.33-4.033 2.34 2.34 0 0 0 0-3.831A2.34 2.34 0 0 1 6.35 6.051a2.34 2.34 0 0 0 3.319-1.915",
@@ -437,6 +488,11 @@ fn icon_svg(name: &str) -> Option<&'static IconSvg> {
     match name {
         "plus" => Some(&DATA_PLUS),
         "folder-open" => Some(&DATA_FOLDER_OPEN),
+        "star" => Some(&DATA_STAR),
+        "trash-2" => Some(&DATA_TRASH_2),
+        "file" => Some(&DATA_FILE),
+        "file-text" => Some(&DATA_FILE_TEXT),
+        "notebook-pen" => Some(&DATA_NOTEBOOK_PEN),
         "settings" => Some(&DATA_SETTINGS),
         "search" => Some(&DATA_SEARCH),
         "regex" => Some(&DATA_REGEX),
@@ -600,10 +656,25 @@ mod tests {
 
     #[test]
     fn icon_svg_known_names() {
-        assert!(icon_svg("plus").is_some());
-        assert!(icon_svg("search").is_some());
-        assert!(icon_svg("eye").is_some());
-        assert!(icon_svg("eye-off").is_some());
+        for icon_name in [
+            "plus",
+            "search",
+            "eye",
+            "eye-off",
+            "star",
+            "trash-2",
+            "file",
+            "file-text",
+            "notebook-pen",
+        ] {
+            assert!(icon_svg(icon_name).is_some(), "{icon_name} should be registered");
+            assert!(ensure_icon(icon_name).is_some(), "{icon_name} should tessellate");
+            let cache = ICON_CACHE.read().expect("icon cache lock should remain available");
+            assert!(
+                cache.get(icon_name).is_some_and(|triangles| !triangles.is_empty()),
+                "{icon_name} should produce drawable triangles"
+            );
+        }
         assert!(icon_svg("nonexistent").is_none());
     }
 

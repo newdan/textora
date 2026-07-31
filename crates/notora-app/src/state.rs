@@ -192,7 +192,7 @@ impl NotoraState {
         }
         let scope = NavigationScope::Search { query };
         self.library.navigation_scope = scope.clone();
-        self.layout.focus_target = FocusTarget::CardList;
+        self.layout.focus_target = FocusTarget::NavigationSearch;
         vec![NotoraEffect::QueryCards(CardQuery::from(scope)), NotoraEffect::Redraw]
     }
 
@@ -300,6 +300,16 @@ mod tests {
             ]
         );
         assert_eq!(state.library.navigation_scope, NavigationScope::Starred);
+    }
+
+    #[test]
+    fn non_empty_search_keeps_keyboard_focus_in_the_search_box() {
+        let mut state = NotoraState::default();
+        let _ = state.reduce(NotoraAction::FocusRequested(FocusTarget::NavigationSearch));
+
+        let _ = state.reduce(NotoraAction::SearchCommitted("roadmap".to_owned()));
+
+        assert_eq!(state.layout.focus_target, FocusTarget::NavigationSearch);
     }
 
     #[test]

@@ -3,10 +3,11 @@ use std::collections::HashMap;
 use appkit_shell::editor_runtime::{EditorFrame, RenderError};
 use notora_core::NavigationScope;
 use ui::core::WidgetAction;
-use ui::core::widget::WidgetId;
-use ui::search_bar::{SearchBarAction, SearchBarSnapshot, SearchBarWidget};
+use ui::core::widget::{ControlAction, TextPayload, WidgetId};
+use ui::icon::draw_icon;
 use ui::splitter::{SplitterAction, SplitterInput, SplitterWidget};
 use ui::status_state::{StatusStateInput, StatusStateKind, StatusStateWidget};
+use ui::text_box::TextBox;
 use ui::tree_list::{
     TreeListAction, TreeListInput, TreeListWidget, TreeRowExpansion, TreeRowInput, TreeRowKey,
     TreeRowSelection,
@@ -20,9 +21,14 @@ use crate::action::NotoraAction;
 use crate::shell::layout::ShellLayout;
 use crate::{FocusTarget, NotoraState, OverlayState, Pane, ResponsiveLayoutMode};
 
+const GLOBAL_SEARCH_BOX_ID: WidgetId = WidgetId(9_000);
 const SETTINGS_BUTTON_ID: WidgetId = WidgetId(9_001);
-const SEARCH_BAR_HEIGHT_LOGICAL: f32 = 36.0;
+const SEARCH_BAR_HEIGHT_LOGICAL: f32 = 32.0;
+const SEARCH_ICON_AREA_WIDTH_LOGICAL: f32 = 32.0;
 const SHELL_PADDING_LOGICAL: f32 = 12.0;
+const SIDEBAR_CONTROL_HEIGHT_LOGICAL: f32 = 32.0;
+const SIDEBAR_ICON_SIZE_LOGICAL: f32 = 16.0;
+const SIDEBAR_LABEL_FONT_SIZE_LOGICAL: f32 = 15.0;
 
 /// 静态产品壳所需的纯展示输入。领域状态在此映射后不再传入 widget。
 #[derive(Clone, Debug, Default)]
@@ -43,7 +49,7 @@ impl NotoraRenderModel {
             navigation_row(
                 1,
                 "Workspace",
-                "folder",
+                "folder-open",
                 NavigationScope::WorkspaceRoot,
                 selected_scope,
             ),
@@ -69,7 +75,7 @@ impl NotoraRenderModel {
 
 /// 三栏静态壳；仅持有通用 widget 与当帧键到产品动作的映射。
 pub struct NotoraShell {
-    search_bar: SearchBarWidget,
+    search_box: TextBox,
     navigation_tree: TreeListWidget,
     card_list: VirtualCardListWidget,
     card_empty_state: StatusStateWidget,
@@ -92,8 +98,12 @@ impl Default for NotoraShell {
 
 impl NotoraShell {
     pub fn new() -> Self {
+        let mut search_box = TextBox::with_id(GLOBAL_SEARCH_BOX_ID);
+        search_box.set_placeholder("Search notes...");
+        search_box.set_max_len_bytes(2_048);
+        search_box.set_leading_content_inset_logical(SEARCH_ICON_AREA_WIDTH_LOGICAL);
         Self {
-            search_bar: SearchBarWidget::new(),
+            search_box,
             navigation_tree: TreeListWidget::new(),
             card_list: VirtualCardListWidget::new(),
             card_empty_state: StatusStateWidget::new(),
@@ -123,11 +133,7 @@ impl NotoraShell {
         });
         self.card_list
             .set_input(VirtualCardListInput { cards: model.cards.clone(), scroll_offset_px: 0.0 });
-        self.search_bar.set_input(SearchBarSnapshot {
-            query: model.search_query.clone(),
-            visible: true,
-            ..SearchBarSnapshot::default()
-        });
+        self.search_box.sync_text(&model.search_query);
         self.card_empty_state.set_input(StatusStateInput {
             kind: StatusStateKind::Empty,
             title: "No notes here".to_owned(),
@@ -161,18 +167,19 @@ impl NotoraShell {
             (layout.navigation_rect.w - padding * 2.0).max(0.0),
             SEARCH_BAR_HEIGHT_LOGICAL * dpi,
         );
+        let search_icon_area_width = SEARCH_ICON_AREA_WIDTH_LOGICAL * dpi;
         let tree_rect = Rect::new(
-            layout.navigation_rect.x,
+            layout.navigation_rect.x + padding,
             search_rect.bottom() + padding,
-            layout.navigation_rect.w,
+            (layout.navigation_rect.w - padding * 2.0).max(0.0),
             (layout.navigation_rect.bottom() - search_rect.bottom() - padding * 3.0).max(0.0),
         );
         self.navigation_tree_rect = tree_rect;
         let settings_rect = Rect::new(
             layout.navigation_rect.x + padding,
-            layout.navigation_rect.bottom() - 40.0 * dpi,
+            layout.navigation_rect.bottom() - (SIDEBAR_CONTROL_HEIGHT_LOGICAL + 10.0) * dpi,
             (layout.navigation_rect.w - padding * 2.0).max(0.0),
-            28.0 * dpi,
+            SIDEBAR_CONTROL_HEIGHT_LOGICAL * dpi,
         );
         self.search_rect = search_rect;
         self.settings_rect = settings_rect;
@@ -197,7 +204,7 @@ impl NotoraShell {
         );
         self.card_content_rect = card_content_rect;
         frame.with_layout_context(|context| {
-            self.search_bar.set_rect(search_rect, context);
+            self.search_box.set_rect(search_rect, context);
             self.navigation_tree.set_rect(tree_rect, context);
             self.card_list.set_rect(card_content_rect, context);
             self.card_empty_state.set_rect(card_content_rect, context);
@@ -206,27 +213,42 @@ impl NotoraShell {
             self.card_list_splitter.set_rect(layout.card_list_splitter_rect, context);
         });
         frame.with_paint_context(|context| {
-            context.list.fill(layout.navigation_rect, context.theme.palette.bg_base);
-            context.list.fill(layout.card_list_rect, context.theme.palette.bg_surface);
+            context.list.fill(layout.navigation_rect, context.theme.palette.bg_surface);
+            context.list.fill(layout.card_list_rect, context.theme.palette.bg_base);
             context.list.fill(layout.editor_rect, context.theme.editor.background);
-            let previous_offset = context.list.offset;
-            context.list.offset =
-                (previous_offset.0 + search_rect.x, previous_offset.1 + search_rect.y);
-            self.search_bar.paint(context);
-            context.list.offset = previous_offset;
+            self.search_box.paint(context);
+            let search_icon_size = SIDEBAR_ICON_SIZE_LOGICAL * context.dpi;
+            draw_icon(
+                context.list,
+                "search",
+                search_rect.x + (search_icon_area_width - search_icon_size) * 0.5,
+                search_rect.y + (search_rect.h - search_icon_size) * 0.5,
+                search_icon_size,
+                context.theme.palette.text_muted,
+            );
             self.navigation_tree.paint(context);
             self.navigation_splitter.paint(context);
             self.card_list_splitter.paint(context);
-            context.list.fill_rounded(
-                settings_rect,
-                context.theme.palette.bg_elevated,
-                6.0 * context.dpi,
+            let settings_icon_size = SIDEBAR_ICON_SIZE_LOGICAL * context.dpi;
+            let settings_horizontal_inset = SHELL_PADDING_LOGICAL * context.dpi;
+            draw_icon(
+                context.list,
+                "settings",
+                settings_rect.x + settings_horizontal_inset,
+                settings_rect.y + (settings_rect.h - settings_icon_size) * 0.5,
+                settings_icon_size,
+                context.theme.palette.text_muted,
             );
             context.text(
-                settings_rect.x + 10.0 * context.dpi,
-                settings_rect.y + settings_rect.h * 0.5 + 5.0 * context.dpi,
-                13.0 * context.dpi,
-                context.theme.palette.text_main,
+                settings_rect.x
+                    + settings_horizontal_inset
+                    + settings_icon_size
+                    + 2.0 * context.dpi,
+                settings_rect.y
+                    + settings_rect.h * 0.5
+                    + SIDEBAR_LABEL_FONT_SIZE_LOGICAL * 0.35 * context.dpi,
+                SIDEBAR_LABEL_FONT_SIZE_LOGICAL * context.dpi,
+                context.theme.palette.text_muted,
                 "Settings",
             );
             context.text(
@@ -284,9 +306,17 @@ impl NotoraShell {
             {
                 Some(NotoraAction::OpenSettings)
             }
-            WidgetAction::SearchBar(SearchBarAction::QueryChanged(query)) => {
-                Some(NotoraAction::SearchCommitted(query.clone()))
+            WidgetAction::Control(ControlAction::TextEdited {
+                id: GLOBAL_SEARCH_BOX_ID,
+                value: TextPayload::Plain(query),
+            }) => Some(NotoraAction::SearchCommitted(query.clone())),
+            WidgetAction::Control(ControlAction::FocusRequested { id: GLOBAL_SEARCH_BOX_ID }) => {
+                Some(NotoraAction::FocusRequested(FocusTarget::NavigationSearch))
             }
+            WidgetAction::Control(ControlAction::TextCommitted {
+                id: GLOBAL_SEARCH_BOX_ID,
+                ..
+            }) => Some(NotoraAction::FocusRequested(FocusTarget::CardList)),
             _ => None,
         }
     }
@@ -300,6 +330,7 @@ impl NotoraShell {
         dpi: f32,
     ) -> Vec<NotoraAction> {
         let mut event_context = EventCtx { theme, dpi, cursor_hint: None };
+        self.search_box.set_focus(focus_target == FocusTarget::NavigationSearch);
         if let Some(action) = self.route_splitter_event(event, &mut event_context) {
             return action.into_iter().collect();
         }
@@ -307,18 +338,18 @@ impl NotoraShell {
             return vec![action];
         }
         let widget_action = match pointer_target(event, self) {
-            Some(FocusTarget::NavigationSearch) => self
-                .search_bar
-                .on_event(&search_local_event(event, self.search_rect), &mut event_context),
+            Some(FocusTarget::NavigationSearch) => {
+                self.search_box.on_event(event, &mut event_context)
+            }
             Some(FocusTarget::NavigationTree) => {
                 self.navigation_tree.on_event(event, &mut event_context)
             }
             Some(FocusTarget::CardList) => self.card_list.on_event(event, &mut event_context),
             Some(FocusTarget::Editor | FocusTarget::Overlay) => None,
             None => match focus_target {
-                FocusTarget::NavigationSearch => self
-                    .search_bar
-                    .on_event(&search_local_event(event, self.search_rect), &mut event_context),
+                FocusTarget::NavigationSearch => {
+                    self.search_box.on_event(event, &mut event_context)
+                }
                 FocusTarget::NavigationTree => {
                     self.navigation_tree.on_event(event, &mut event_context)
                 }
@@ -408,24 +439,6 @@ fn settings_button_action(event: &Event, settings_rect: Rect) -> Option<NotoraAc
     settings_rect.contains(*px, *py).then_some(NotoraAction::OpenSettings)
 }
 
-fn search_local_event(event: &Event, search_rect: Rect) -> Event {
-    match event {
-        Event::MouseMove { px, py } => {
-            Event::MouseMove { px: *px - search_rect.x, py: *py - search_rect.y }
-        }
-        Event::MouseDown { px, py, button } => {
-            Event::MouseDown { px: *px - search_rect.x, py: *py - search_rect.y, button: *button }
-        }
-        Event::MouseUp { px, py, button } => {
-            Event::MouseUp { px: *px - search_rect.x, py: *py - search_rect.y, button: *button }
-        }
-        Event::Wheel { dx, dy, px, py } => {
-            Event::Wheel { dx: *dx, dy: *dy, px: *px - search_rect.x, py: *py - search_rect.y }
-        }
-        _ => event.clone(),
-    }
-}
-
 fn navigation_row(
     key: u64,
     label: &str,
@@ -479,6 +492,7 @@ mod tests {
     fn builds_a_static_render_model() {
         let model = NotoraRenderModel::from_state(&NotoraState::default());
         assert_eq!(model.navigation_rows.len(), 4);
+        assert_eq!(model.navigation_rows[0].icon.as_deref(), Some("folder-open"));
         assert_eq!(model.card_list_title, "Workspace");
         assert!(model.cards.is_empty());
     }
@@ -504,6 +518,13 @@ mod tests {
                 ui::core::widget::ControlAction::Activated { id: shell.settings_button_id() },
             )),
             Some(NotoraAction::OpenSettings)
+        );
+        assert_eq!(
+            shell.translate_widget_action(&WidgetAction::Control(ControlAction::TextEdited {
+                id: GLOBAL_SEARCH_BOX_ID,
+                value: TextPayload::Plain("roadmap".to_owned()),
+            })),
+            Some(NotoraAction::SearchCommitted("roadmap".to_owned()))
         );
     }
 }

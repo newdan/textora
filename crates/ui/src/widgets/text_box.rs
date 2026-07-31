@@ -185,6 +185,7 @@ pub struct TextBox {
     char_offsets: Vec<(usize, f32)>,
     /// 文本区域左侧 padding（layout 时按 DPI 缓存）
     text_pad: f32,
+    leading_content_inset_logical: f32,
     fixed_size_logical: Option<(f32, f32)>,
 
     pub on_copy: Option<ClipboardSetCb>,
@@ -220,6 +221,7 @@ impl TextBox {
             preedit_cursor_x: 0.0,
             char_offsets: Vec::new(),
             text_pad: 0.0,
+            leading_content_inset_logical: 4.0,
             fixed_size_logical: None,
             on_copy: None,
             on_cut: None,
@@ -262,6 +264,11 @@ impl TextBox {
 
     pub fn set_fixed_size_logical(&mut self, width: f32, height: f32) {
         self.fixed_size_logical = Some((width.max(0.0), height.max(0.0)));
+    }
+
+    /// 设置输入内容相对控件左边缘的逻辑像素距离，可为前置图标预留空间。
+    pub fn set_leading_content_inset_logical(&mut self, inset: f32) {
+        self.leading_content_inset_logical = inset.max(0.0);
     }
 
     pub fn set_echo_mode(&mut self, echo_mode: EchoMode) {
@@ -802,7 +809,7 @@ impl TextBox {
             self.preedit_cursor_x = 0.0;
         }
 
-        self.text_pad = 4.0 * ctx.dpi;
+        self.text_pad = self.leading_content_inset_logical * ctx.dpi;
 
         // Build byte→pixel offset table for mouse click positioning
         self.char_offsets.clear();
@@ -1136,6 +1143,16 @@ mod tests {
         text_box.set_rect(Rect::new(0.0, 0.0, 240.0, 56.0), &mut layout);
 
         assert_eq!(text_box.rect(), Rect::new(0.0, 12.0, 200.0, 32.0));
+    }
+
+    #[test]
+    fn leading_content_inset_reserves_room_for_an_input_icon() {
+        let mut text_box = TextBox::with_id(WidgetId(91));
+        text_box.set_leading_content_inset_logical(28.0);
+
+        let text_box = laid_out_widget(text_box);
+
+        assert_eq!(text_box.text_pad, 28.0);
     }
 
     #[test]

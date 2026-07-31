@@ -2,6 +2,7 @@
 
 use crate::editor_runtime::EditorOutcome;
 use render::GlyphVertex;
+use std::sync::{Arc, Mutex};
 
 pub struct RenderResources {
     pub text: Option<crate::render_state::TextState>,
@@ -33,16 +34,22 @@ pub struct EditorFrame {
     text_measure: ui::NoopMeasure,
     theme: ui::Theme,
     dpi: f32,
+    ui_shaper: Option<Arc<Mutex<shaping::Shaper>>>,
     editor_vertices: Vec<GlyphVertex>,
 }
 
 impl EditorFrame {
-    pub(crate) fn new_for_backend(theme: ui::Theme, dpi: f32) -> Self {
+    pub(crate) fn new_for_backend(
+        theme: ui::Theme,
+        dpi: f32,
+        ui_shaper: Option<Arc<Mutex<shaping::Shaper>>>,
+    ) -> Self {
         Self {
             draw_list: ui::DrawList::new(),
             text_measure: ui::NoopMeasure,
             theme,
             dpi,
+            ui_shaper,
             editor_vertices: Vec::new(),
         }
     }
@@ -61,7 +68,17 @@ impl EditorFrame {
     }
 
     pub fn with_paint_context<T>(&mut self, paint: impl FnOnce(&mut ui::PaintCtx<'_>) -> T) -> T {
-        let mut context = ui::PaintCtx::new(&mut self.draw_list, &self.theme, self.dpi);
+        let mut ui_shaper = self.ui_shaper.as_ref().map(|shaper| {
+            shaper.lock().expect("UI shaper mutex must not be poisoned by another paint callback")
+        });
+        let mut context = ui::PaintCtx {
+            list: &mut self.draw_list,
+            theme: &self.theme,
+            dpi: self.dpi,
+            offset: (0.0, 0.0),
+            global_alpha: 1.0,
+            shaper: ui_shaper.as_deref_mut(),
+        };
         paint(&mut context)
     }
 
@@ -81,8 +98,20 @@ impl EditorFrame {
             return Ok(None);
         }
         let mut result = None;
+        let theme = &self.theme;
+        let dpi = self.dpi;
+        let mut ui_shaper = self.ui_shaper.as_ref().map(|shaper| {
+            shaper.lock().expect("UI shaper mutex must not be poisoned by another paint callback")
+        });
         self.draw_list.clip(editor_rect, |draw_list| {
-            let mut context = ui::PaintCtx::new(draw_list, &self.theme, self.dpi);
+            let mut context = ui::PaintCtx {
+                list: draw_list,
+                theme,
+                dpi,
+                offset: (0.0, 0.0),
+                global_alpha: 1.0,
+                shaper: ui_shaper.as_deref_mut(),
+            };
             result = Some(paint(&mut context));
         });
         Ok(result)
@@ -144,7 +173,7 @@ mod tests {
     #[test]
     fn layout_and_paint_contexts_are_only_borrowed_inside_callbacks() {
         let theme = theme();
-        let mut frame = EditorFrame::new_for_backend(theme, 2.0);
+        let mut frame = EditorFrame::new_for_backend(theme, 2.0, None);
 
         let layout_dpi = frame.with_layout_context(|context| context.dpi);
         let paint_dpi = frame.with_paint_context(|context| {
@@ -158,9 +187,30 @@ mod tests {
     }
 
     #[test]
+    fn product_text_is_shaped_into_the_frame_draw_list() {
+        let theme = theme();
+        let shaper = shaping::Shaper::new().expect("system fonts should create a UI shaper");
+        let mut frame =
+            EditorFrame::new_for_backend(theme, 1.0, Some(Arc::new(Mutex::new(shaper))));
+
+        frame.with_paint_context(|context| {
+            context.text(12.0, 24.0, 14.0, [1.0; 4], "Workspace");
+        });
+
+        assert!(
+            frame
+                .draw_list
+                .cmds
+                .iter()
+                .any(|command| matches!(command, ui::DrawCmd::TextLayout { .. })),
+            "product chrome text must produce a shaped draw command"
+        );
+    }
+
+    #[test]
     fn product_editor_overlay_order_shares_one_draw_list() {
         let theme = theme();
-        let mut frame = EditorFrame::new_for_backend(theme, 1.0);
+        let mut frame = EditorFrame::new_for_backend(theme, 1.0, None);
 
         frame.with_paint_context(|context| {
             context.list.fill(ui::Rect::new(0.0, 0.0, 10.0, 10.0), [0.0; 4]);
@@ -177,7 +227,7 @@ mod tests {
     #[test]
     fn invalid_or_zero_editor_rects_are_safe() {
         let theme = theme();
-        let mut frame = EditorFrame::new_for_backend(theme, 1.0);
+        let mut frame = EditorFrame::new_for_backend(theme, 1.0, None);
 
         assert_eq!(
             frame.paint_editor(ui::Rect::new(-1.0, 0.0, 10.0, 10.0)),
@@ -190,7 +240,7 @@ mod tests {
     #[test]
     fn editor_vertices_are_submitted_before_product_chrome() {
         let theme = theme();
-        let mut frame = EditorFrame::new_for_backend(theme, 1.0);
+        let mut frame = EditorFrame::new_for_backend(theme, 1.0, None);
         frame.with_paint_context(|context| {
             context.list.fill(ui::Rect::new(10.0, 10.0, 5.0, 5.0), [1.0; 4]);
         });
