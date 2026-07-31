@@ -1,10 +1,10 @@
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use rusqlite::{Row, params};
+use rusqlite::{OptionalExtension, Row, params};
 use uuid::Uuid;
 
-use crate::{DocumentKind, NoteId};
+use crate::{DocumentKind, NoteId, TagId};
 
 use super::{Catalog, CatalogError};
 
@@ -28,6 +28,62 @@ pub struct CatalogNote {
 }
 
 impl Catalog {
+    /// 原子插入由新建命令产生的笔记，并可同时关联一个已有标签。
+    pub fn create_active_note(
+        &self,
+        note: &CatalogNote,
+        tag_to_attach: Option<TagId>,
+    ) -> Result<(), CatalogError> {
+        let modified_nanoseconds = system_time_to_nanoseconds(note.modified_at)?;
+        let file_size =
+            i64::try_from(note.file_size).map_err(|_| CatalogError::InvalidStoredValue {
+                column: "file_size",
+                value: note.file_size.to_string(),
+            })?;
+        let transaction = self
+            .connection()
+            .unchecked_transaction()
+            .map_err(|source| CatalogError::sql("note creation transaction start", source))?;
+        transaction
+            .execute(
+                "INSERT INTO notes (
+                    note_id, relative_path, kind, title, excerpt, modified_ns, file_size, content_hash, lifecycle
+                ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+                params![
+                    note.note_id.to_string(),
+                    note.relative_path.to_string_lossy(),
+                    document_kind_to_database(note.kind),
+                    note.title,
+                    note.excerpt,
+                    modified_nanoseconds,
+                    file_size,
+                    note.content_hash,
+                    ACTIVE_NOTE_LIFECYCLE,
+                ],
+            )
+            .map_err(|source| CatalogError::sql("created note insert", source))?;
+        if let Some(tag_id) = tag_to_attach {
+            let attached_rows = transaction
+                .execute(
+                    "INSERT INTO note_tags (note_id, tag_id)
+                     SELECT ?1, ?2
+                     WHERE EXISTS (SELECT 1 FROM tags WHERE tag_id = ?2)",
+                    params![note.note_id.to_string(), tag_id.to_string()],
+                )
+                .map_err(|source| CatalogError::sql("created note tag attachment", source))?;
+            if attached_rows == 0 {
+                return Err(CatalogError::InvalidStoredValue {
+                    column: "tag_id",
+                    value: tag_id.to_string(),
+                });
+            }
+        }
+        transaction
+            .commit()
+            .map_err(|source| CatalogError::sql("note creation transaction commit", source))?;
+        Ok(())
+    }
+
     /// 插入新笔记，或按稳定 `NoteId` 更新扫描得到的派生字段。
     ///
     /// 星标属于用户 metadata，扫描更新不得覆盖它。
@@ -84,6 +140,48 @@ impl Catalog {
             .map_err(|source| CatalogError::sql("active notes row read", source))?;
 
         stored_notes.into_iter().map(CatalogNote::try_from).collect()
+    }
+
+    /// 按稳定 ID 精确读取活动笔记，避免文件命令以路径猜测来源。
+    pub fn active_note(&self, note_id: NoteId) -> Result<Option<CatalogNote>, CatalogError> {
+        let stored_note = self
+            .connection()
+            .query_row(
+                "SELECT note_id, relative_path, kind, title, excerpt, modified_ns, file_size, content_hash, starred
+                 FROM notes
+                 WHERE note_id = ?1 AND lifecycle = ?2",
+                params![note_id.to_string(), ACTIVE_NOTE_LIFECYCLE],
+                stored_note_from_row,
+            )
+            .optional()
+            .map_err(|source| CatalogError::sql("active note query", source))?;
+        stored_note.map(CatalogNote::try_from).transpose()
+    }
+
+    /// 在文件系统移动成功后更新活动笔记的相对路径，保持其 `NoteId` 不变。
+    pub fn update_active_note_path(
+        &self,
+        note_id: NoteId,
+        relative_path: &Path,
+    ) -> Result<(), CatalogError> {
+        let updated_rows = self
+            .connection()
+            .execute(
+                "UPDATE notes
+                 SET relative_path = ?1
+                 WHERE note_id = ?2 AND lifecycle = ?3",
+                params![
+                    relative_path.to_string_lossy(),
+                    note_id.to_string(),
+                    ACTIVE_NOTE_LIFECYCLE,
+                ],
+            )
+            .map_err(|source| CatalogError::sql("note path update", source))?;
+        if updated_rows == 1 {
+            return Ok(());
+        }
+
+        Err(CatalogError::InvalidStoredValue { column: "note_id", value: note_id.to_string() })
     }
 }
 

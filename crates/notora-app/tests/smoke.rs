@@ -50,3 +50,17 @@ fn modal_menu_and_tooltip_are_painted_after_the_editor() {
     assert!(modal_position < menu_position);
     assert!(menu_position < tooltip_position);
 }
+
+#[test]
+fn system_open_entry_reuses_an_external_file_session_without_a_duplicate_tab() {
+    let directory = tempfile::tempdir().expect("external fixture directory should exist");
+    let path = directory.path().join("shared.txt");
+    std::fs::write(&path, "shared external document").expect("external fixture should be written");
+    let mut app = app();
+
+    app.receive_system_open_paths(vec![path.clone()]);
+    app.receive_system_open_paths(vec![path]);
+
+    assert_eq!(app.editor_runtime_tab_count(), 1);
+    assert_eq!(app.state().external_files.sessions().len(), 1);
+}

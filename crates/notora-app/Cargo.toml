@@ -25,6 +25,7 @@ core.workspace = true
 dirs.workspace = true
 notora-core = { path = "../notora-core" }
 render.workspace = true
+rfd = { version = "0.15", default-features = false }
 shaping.workspace = true
 textora-markdown = { path = "../markdown" }
 ui.workspace = true

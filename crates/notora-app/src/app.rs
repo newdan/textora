@@ -1,26 +1,29 @@
 //! notora 窗口应用状态；编辑器会话只经 shared runtime 管理。
 
-use std::collections::HashSet;
 use std::sync::{Arc, Mutex};
 
-use appkit_shell::editor_plugin::EditorPluginFactory;
 use appkit_shell::editor_runtime::{
-    EditorRuntime, EditorRuntimeConfig, EditorRuntimeError, RenderError, RenderResources,
+    EditorNotification, EditorOutcome, EditorRuntime, EditorRuntimeConfig, EditorRuntimeError,
+    OpenDisposition, RenderError, RenderResources,
 };
 use appkit_shell::render_state::{GpuState, TextState};
-use appkit_shell::view_route::ViewRouteTable;
 use appkit_shell::{ProductHost, ProductWakeHandle, ShellEffect, ShellEvent};
-use ui::plugin::PLUGIN_EDITOR;
 use winit::event_loop::{ActiveEventLoop, EventLoopProxy};
 use winit::window::WindowAttributes;
 
-use crate::action::{CardQuery, NoteCreationTarget, NotoraAction};
-use crate::effect_executor::{EffectExecutor, NotoraEffectService};
+use crate::action::{CardQuery, DocumentLoadRequest, NoteCreationTarget, NotoraAction};
+use crate::document_registry::DocumentRegistry;
+use crate::editor_adapter::{LoadedDocument, build_editor_plugins, prepare_loaded_document};
+use crate::effect_executor::{EffectExecutor, ExternalOpenRequest, NotoraEffectService};
 use crate::events;
+use crate::external_files::{ExternalFileSession, validate_external_text_file};
 use crate::product::NotoraProduct;
 use crate::render::{NotoraRenderModel, NotoraShell};
 use crate::shell::layout::{ShellLayout, ShellLayoutInput};
-use crate::{NotoraPaths, NotoraPathsError, NotoraState};
+use crate::{
+    NotoraPaths, NotoraPathsError, NotoraState, WorkspaceCommand, WorkspaceCommandResult,
+    WorkspaceController, WorkspaceControllerError,
+};
 use notora_core::{DocumentIdentity, DocumentKind};
 
 const DEFAULT_WINDOW_WIDTH_PX: f32 = 1_200.0;
@@ -60,6 +63,8 @@ pub struct NotoraApp {
     theme: ui::Theme,
     state: NotoraState,
     product: NotoraProduct,
+    workspace_controller: WorkspaceController,
+    document_registry: DocumentRegistry,
     editor_runtime: EditorRuntime,
     shell: NotoraShell,
     window_focused: bool,
@@ -91,6 +96,8 @@ impl NotoraApp {
             theme,
             state: NotoraState::default(),
             product: NotoraProduct::new(),
+            workspace_controller: WorkspaceController::default(),
+            document_registry: DocumentRegistry::default(),
             editor_runtime,
             shell: NotoraShell::new(),
             window_focused: true,
@@ -112,6 +119,33 @@ impl NotoraApp {
 
     pub fn state(&self) -> &NotoraState {
         &self.state
+    }
+
+    pub fn document_tab_for(
+        &self,
+        identity: DocumentIdentity,
+    ) -> Option<appkit_core::workspace::types::TabId> {
+        self.document_registry.tab_for(identity)
+    }
+
+    pub fn request_preview_promotion(&mut self) {
+        self.dispatch_action(NotoraAction::PromotePreviewRequested);
+    }
+
+    /// 系统 open event 与拖入路径的统一产品入口。
+    pub fn receive_system_open_paths(&mut self, paths: Vec<std::path::PathBuf>) {
+        self.dispatch_action(NotoraAction::ExternalPathsReceived(paths));
+    }
+
+    pub fn request_external_file_dialog(&mut self) {
+        self.dispatch_action(NotoraAction::OpenExternalFileDialogRequested);
+    }
+
+    pub fn execute_workspace_command(
+        &mut self,
+        command: WorkspaceCommand,
+    ) -> Result<WorkspaceCommandResult, WorkspaceControllerError> {
+        self.workspace_controller.execute(command, &mut self.product)
     }
 
     pub fn shell_layout(&self) -> ShellLayout {
@@ -250,6 +284,29 @@ impl NotoraApp {
 
     pub(crate) fn drain_product_events(&mut self) {
         let effect = ProductHost::drain_product_events(&mut self.product);
+        for event in self.product.take_workspace_events() {
+            match event {
+                crate::product::NotoraProductEvent::NoteCommandCompleted { result, .. } => {
+                    self.dispatch_action(NotoraAction::NoteCommandCompleted(result));
+                }
+                crate::product::NotoraProductEvent::NoteCommandFailed { message, .. } => {
+                    self.dispatch_action(NotoraAction::NoteCommandFailed(message));
+                }
+                crate::product::NotoraProductEvent::DocumentLoaded {
+                    request, document, ..
+                } => self.install_loaded_preview(request, document),
+                crate::product::NotoraProductEvent::DocumentLoadFailed {
+                    request, message, ..
+                } if self.selection_matches(request) => {
+                    self.dispatch_action(NotoraAction::NoteCommandFailed(message));
+                }
+                crate::product::NotoraProductEvent::DocumentLoadFailed { .. } => {}
+                crate::product::NotoraProductEvent::CardQueryCompleted { .. }
+                | crate::product::NotoraProductEvent::WorkspaceScanCompleted { .. }
+                | crate::product::NotoraProductEvent::WorkspaceChanged { .. }
+                | crate::product::NotoraProductEvent::WorkspaceIndexFailed { .. } => {}
+            }
+        }
         self.apply_shell_effect(effect);
     }
 
@@ -299,6 +356,89 @@ impl NotoraApp {
         if effect.redraw {
             self.needs_redraw = true;
             self.editor_runtime.request_redraw();
+        }
+    }
+
+    fn install_loaded_preview(&mut self, request: DocumentLoadRequest, document: LoadedDocument) {
+        if !self.selection_matches(request) {
+            return;
+        }
+        let identity = request.identity;
+        if let Some(tab_id) = self.document_registry.tab_for(identity) {
+            self.document_registry.touch_tab(tab_id);
+            let outcome = self.editor_runtime.activate(tab_id);
+            self.apply_editor_outcome(outcome);
+            return;
+        }
+        let prepared = match prepare_loaded_document(&self.editor_runtime, document) {
+            Ok(prepared) => prepared,
+            Err(error) => {
+                self.dispatch_action(NotoraAction::NoteCommandFailed(error.to_string()));
+                return;
+            }
+        };
+        let replaced_preview = self.document_registry.preview_tab();
+        let outcome =
+            self.editor_runtime.install_prepared_tab(prepared, None, OpenDisposition::Preview);
+        let Some(tab_id) = self.editor_runtime.active_tab_id() else {
+            self.dispatch_action(NotoraAction::NoteCommandFailed(
+                "editor runtime did not activate the installed preview".to_owned(),
+            ));
+            return;
+        };
+        if let Some(replaced_preview) = replaced_preview {
+            self.document_registry.remove_tab(replaced_preview);
+        }
+        let _ = self.document_registry.register_preview(identity, tab_id);
+        self.apply_editor_outcome(outcome);
+    }
+
+    fn promote_active_preview_tab(&mut self) {
+        let Some(tab_id) = self.editor_runtime.active_tab_id() else {
+            return;
+        };
+        self.promote_preview_for_tab(tab_id);
+    }
+
+    fn promote_preview_for_tab(&mut self, tab_id: appkit_core::workspace::types::TabId) {
+        if self.editor_runtime.active_tab_id() != Some(tab_id) {
+            return;
+        }
+        if self.editor_runtime.upgrade_active_preview() == appkit_core::navigator::NavEffect::None {
+            return;
+        }
+        if self.document_registry.upgrade_preview(tab_id) {
+            self.needs_redraw = true;
+            self.editor_runtime.request_redraw();
+        }
+    }
+
+    fn apply_editor_outcome(&mut self, outcome: EditorOutcome) {
+        for notification in &outcome.notifications {
+            self.handle_editor_notification(notification);
+        }
+        self.apply_shell_effect(outcome.shell_effect);
+    }
+
+    fn selection_matches(&self, request: DocumentLoadRequest) -> bool {
+        self.state.library.selected_card == Some(request.identity)
+            && self.state.library.selected_document_generation == request.selection_generation
+    }
+
+    pub(crate) fn handle_editor_notification(&mut self, notification: &EditorNotification) {
+        match notification {
+            EditorNotification::ActiveDocumentChanged { tab_id: Some(tab_id) } => {
+                self.document_registry.touch_tab(*tab_id);
+            }
+            EditorNotification::ContentChanged { tab_id, .. } => {
+                self.promote_preview_for_tab(*tab_id);
+            }
+            EditorNotification::ActiveDocumentChanged { tab_id: None }
+            | EditorNotification::PathChanged { .. }
+            | EditorNotification::DirtyChanged { .. }
+            | EditorNotification::SaveCompleted { .. }
+            | EditorNotification::SaveFailed { .. }
+            | EditorNotification::CloseRequested { .. } => {}
         }
     }
 }
@@ -417,9 +557,85 @@ impl NotoraEffectService for NotoraApp {
 
     fn request_note_creation(&mut self, _kind: DocumentKind, _target: NoteCreationTarget) {}
 
-    fn prepare_document(&mut self, _identity: DocumentIdentity) {}
+    fn execute_note_command(&mut self, command: notora_core::note_command::NoteCommand) {
+        if let Err(error) = self.workspace_controller.execute_note_command(command) {
+            self.dispatch_action(NotoraAction::NoteCommandFailed(error.to_string()));
+        }
+    }
+
+    fn prepare_document(&mut self, request: DocumentLoadRequest) {
+        let identity = request.identity;
+        if let DocumentIdentity::ExternalFile(external_file_id) = identity {
+            self.prepare_external_document(request, external_file_id);
+            return;
+        }
+        if let Some(tab_id) = self.document_registry.tab_for(identity) {
+            self.document_registry.touch_tab(tab_id);
+            let outcome = self.editor_runtime.activate(tab_id);
+            self.apply_editor_outcome(outcome);
+            return;
+        }
+        if let Err(error) = self.workspace_controller.prepare_document(request) {
+            self.dispatch_action(NotoraAction::NoteCommandFailed(error.to_string()));
+        }
+    }
+
+    fn promote_active_preview(&mut self) {
+        self.promote_active_preview_tab();
+    }
+
+    fn open_external_files(&mut self, request: ExternalOpenRequest) {
+        let paths = match request {
+            ExternalOpenRequest::ShowFileDialog => rfd::FileDialog::new()
+                .add_filter("Text documents", &["txt", "md"])
+                .pick_files()
+                .unwrap_or_default(),
+            ExternalOpenRequest::Paths(paths) => paths,
+        };
+        self.open_external_paths(paths);
+    }
 
     fn persist_layout(&mut self) {}
+}
+
+impl NotoraApp {
+    fn open_external_paths(&mut self, paths: Vec<std::path::PathBuf>) {
+        for path in paths {
+            let validated = match validate_external_text_file(&path) {
+                Ok(validated) => validated,
+                Err(error) => {
+                    self.dispatch_action(NotoraAction::NoteCommandFailed(error.to_string()));
+                    continue;
+                }
+            };
+            let identity =
+                self.state.external_files.open_existing(validated.canonical_path).identity();
+            self.dispatch_action(NotoraAction::ExternalFileOpened(identity));
+        }
+    }
+
+    fn prepare_external_document(
+        &mut self,
+        request: DocumentLoadRequest,
+        external_file_id: notora_core::ExternalFileId,
+    ) {
+        let Some(ExternalFileSession::Existing { canonical_path, .. }) =
+            self.state.external_files.session(external_file_id)
+        else {
+            self.dispatch_action(NotoraAction::NoteCommandFailed(
+                "external document is unavailable; relocate or remove its session".to_owned(),
+            ));
+            return;
+        };
+        let document = match crate::editor_adapter::load_document(canonical_path.as_path()) {
+            Ok(document) => document,
+            Err(error) => {
+                self.dispatch_action(NotoraAction::NoteCommandFailed(error.to_string()));
+                return;
+            }
+        };
+        self.install_loaded_preview(request, document);
+    }
 }
 
 fn build_editor_runtime(
@@ -427,10 +643,7 @@ fn build_editor_runtime(
     theme: &ui::Theme,
     paths: &NotoraPaths,
 ) -> Result<EditorRuntime, NotoraAppError> {
-    let mut plugin_registry = ui::plugin::PluginRegistry::new();
-    plugin_registry.register(Box::new(EditorPluginFactory));
-    let registered_plugin_ids = HashSet::from([PLUGIN_EDITOR]);
-    let view_routes = ViewRouteTable::new(Vec::new(), &registered_plugin_ids)
+    let (plugin_registry, view_routes) = build_editor_plugins()
         .map_err(EditorRuntimeError::InvalidRoute)
         .map_err(NotoraAppError::Runtime)?;
     EditorRuntime::new(EditorRuntimeConfig {
@@ -445,9 +658,13 @@ fn build_editor_runtime(
 
 #[cfg(test)]
 mod tests {
+    use std::thread;
+    use std::time::{Duration, Instant};
+
     use super::NotoraApp;
     use crate::action::NotoraAction;
-    use crate::{FocusTarget, NotoraPaths, OverlayState};
+    use crate::editor_adapter::LoadedDocument;
+    use crate::{FocusTarget, NotoraPaths, OverlayState, WorkspaceCommand};
     use notora_core::NavigationScope;
 
     fn app() -> NotoraApp {
@@ -490,5 +707,234 @@ mod tests {
             NavigationScope::Search { query: "路线图".to_owned() }
         );
         assert_eq!(app.editor_runtime.preedit().0, "document");
+    }
+
+    #[test]
+    fn active_workspace_note_creation_reaches_the_worker_and_updates_product_state() {
+        let workspace_directory =
+            tempfile::tempdir().expect("workspace test directory should be created");
+        let mut app = app();
+        app.execute_workspace_command(WorkspaceCommand::OpenExisting {
+            root: workspace_directory.path().to_path_buf(),
+        })
+        .expect("workspace should open");
+
+        app.dispatch_action(NotoraAction::CreateRequested(notora_core::DocumentKind::Markdown));
+        let deadline = Instant::now() + Duration::from_secs(2);
+        loop {
+            app.drain_product_events();
+            if matches!(
+                app.state().library.selected_card,
+                Some(notora_core::DocumentIdentity::Note(_))
+            ) {
+                break;
+            }
+            assert!(Instant::now() < deadline, "note completion should update product state");
+            thread::sleep(Duration::from_millis(10));
+        }
+
+        assert!(workspace_directory.path().join("未命名 1.md").is_file());
+        assert_eq!(app.state().library.last_command_error, None);
+    }
+
+    #[test]
+    fn selected_note_is_loaded_by_the_worker_and_installed_as_a_preview_tab() {
+        let workspace_directory =
+            tempfile::tempdir().expect("workspace test directory should be created");
+        let mut app = app();
+        app.execute_workspace_command(WorkspaceCommand::OpenExisting {
+            root: workspace_directory.path().to_path_buf(),
+        })
+        .expect("workspace should open");
+        app.dispatch_action(NotoraAction::CreateRequested(notora_core::DocumentKind::Markdown));
+
+        let deadline = Instant::now() + Duration::from_secs(2);
+        let selected_identity = loop {
+            app.drain_product_events();
+            if let Some(identity) = app.state().library.selected_card
+                && app.document_tab_for(identity).is_some()
+            {
+                break identity;
+            }
+            assert!(Instant::now() < deadline, "selected note should install a preview tab");
+            thread::sleep(Duration::from_millis(10));
+        };
+
+        assert_eq!(app.editor_runtime_tab_count(), 1);
+        assert!(app.document_tab_for(selected_identity).is_some());
+        assert_eq!(app.state().library.last_command_error, None);
+    }
+
+    #[test]
+    fn promoting_a_preview_preserves_its_tab_when_the_next_preview_opens() {
+        let workspace_directory =
+            tempfile::tempdir().expect("workspace test directory should be created");
+        let mut app = app();
+        app.execute_workspace_command(WorkspaceCommand::OpenExisting {
+            root: workspace_directory.path().to_path_buf(),
+        })
+        .expect("workspace should open");
+        app.dispatch_action(NotoraAction::CreateRequested(notora_core::DocumentKind::Markdown));
+
+        let deadline = Instant::now() + Duration::from_secs(2);
+        let first_identity = loop {
+            app.drain_product_events();
+            if let Some(identity) = app.state().library.selected_card
+                && app.document_tab_for(identity).is_some()
+            {
+                break identity;
+            }
+            assert!(Instant::now() < deadline, "first preview should install");
+            thread::sleep(Duration::from_millis(10));
+        };
+        app.request_preview_promotion();
+        app.dispatch_action(NotoraAction::CreateRequested(notora_core::DocumentKind::Text));
+
+        loop {
+            app.drain_product_events();
+            if let Some(identity) = app.state().library.selected_card
+                && identity != first_identity
+                && app.document_tab_for(identity).is_some()
+            {
+                break;
+            }
+            assert!(Instant::now() < deadline, "second preview should install");
+            thread::sleep(Duration::from_millis(10));
+        }
+
+        assert_eq!(app.editor_runtime_tab_count(), 2);
+        assert!(app.document_tab_for(first_identity).is_some());
+    }
+
+    #[test]
+    fn first_content_change_promotes_the_active_preview_before_the_next_preview_opens() {
+        let workspace_directory =
+            tempfile::tempdir().expect("workspace test directory should be created");
+        let mut app = app();
+        app.execute_workspace_command(WorkspaceCommand::OpenExisting {
+            root: workspace_directory.path().to_path_buf(),
+        })
+        .expect("workspace should open");
+        app.dispatch_action(NotoraAction::CreateRequested(notora_core::DocumentKind::Markdown));
+
+        let deadline = Instant::now() + Duration::from_secs(2);
+        let first_identity = loop {
+            app.drain_product_events();
+            if let Some(identity) = app.state().library.selected_card
+                && app.document_tab_for(identity).is_some()
+            {
+                break identity;
+            }
+            assert!(Instant::now() < deadline, "first preview should install");
+            thread::sleep(Duration::from_millis(10));
+        };
+        let first_tab_id = app
+            .document_tab_for(first_identity)
+            .expect("first preview should have a registered tab");
+        app.handle_editor_notification(
+            &appkit_shell::editor_runtime::EditorNotification::ContentChanged {
+                tab_id: first_tab_id,
+                content_revision: 1,
+            },
+        );
+        app.dispatch_action(NotoraAction::CreateRequested(notora_core::DocumentKind::Text));
+
+        loop {
+            app.drain_product_events();
+            if let Some(identity) = app.state().library.selected_card
+                && identity != first_identity
+                && app.document_tab_for(identity).is_some()
+            {
+                break;
+            }
+            assert!(Instant::now() < deadline, "second preview should install");
+            thread::sleep(Duration::from_millis(10));
+        }
+
+        assert_eq!(app.editor_runtime_tab_count(), 2);
+        assert!(app.document_tab_for(first_identity).is_some());
+    }
+
+    #[test]
+    fn open_external_path_switches_to_files_and_reuses_the_existing_tab() {
+        let directory = tempfile::tempdir().expect("external file fixture directory should exist");
+        let path = directory.path().join("outside.md");
+        std::fs::write(&path, "# Outside").expect("external file fixture should be written");
+        let mut app = app();
+
+        app.receive_system_open_paths(vec![path.clone()]);
+        app.receive_system_open_paths(vec![path]);
+
+        let identity = app
+            .state()
+            .library
+            .selected_card
+            .expect("external file should become the active selection");
+        assert_eq!(
+            app.state().library.navigation_scope,
+            notora_core::NavigationScope::ExternalFiles
+        );
+        assert!(matches!(identity, notora_core::DocumentIdentity::ExternalFile(_)));
+        assert_eq!(app.editor_runtime_tab_count(), 1);
+        assert!(app.document_tab_for(identity).is_some());
+        assert_eq!(app.state().external_files.sessions().len(), 1);
+        assert_eq!(app.state().library.last_command_error, None);
+    }
+
+    #[test]
+    fn late_document_load_from_an_earlier_same_identity_selection_is_discarded() {
+        let mut app = app();
+        let selected_identity =
+            notora_core::DocumentIdentity::Note(notora_core::NoteId::generate());
+        let intervening_identity =
+            notora_core::DocumentIdentity::Note(notora_core::NoteId::generate());
+        app.dispatch_action(NotoraAction::CardSelected(selected_identity));
+        let outdated_generation = app.state().library.selected_document_generation;
+        app.dispatch_action(NotoraAction::CardSelected(intervening_identity));
+        app.dispatch_action(NotoraAction::CardSelected(selected_identity));
+        let current_generation = app.state().library.selected_document_generation;
+
+        app.install_loaded_preview(
+            crate::action::DocumentLoadRequest {
+                identity: selected_identity,
+                selection_generation: outdated_generation,
+            },
+            LoadedDocument {
+                path: std::path::PathBuf::from("older.md"),
+                contents: "# Older".to_owned(),
+            },
+        );
+        app.install_loaded_preview(
+            crate::action::DocumentLoadRequest {
+                identity: selected_identity,
+                selection_generation: current_generation,
+            },
+            LoadedDocument {
+                path: std::path::PathBuf::from("current.md"),
+                contents: "# Current".to_owned(),
+            },
+        );
+
+        assert_eq!(app.editor_runtime_tab_count(), 1);
+        assert!(app.document_tab_for(selected_identity).is_some());
+        assert_eq!(app.document_tab_for(intervening_identity), None);
+    }
+
+    #[test]
+    fn editor_runtime_routes_text_markdown_and_mindmap_documents_to_product_plugins() {
+        let app = app();
+
+        assert_eq!(
+            app.editor_runtime.create_plugin_for_path(std::path::Path::new("draft.txt")).name(),
+            ui::plugin::PLUGIN_EDITOR
+        );
+        assert_eq!(
+            app.editor_runtime.create_plugin_for_path(std::path::Path::new("draft.md")).name(),
+            ui::plugin::PLUGIN_MARKDOWN_EDITOR
+        );
+        assert_eq!(
+            app.editor_runtime.create_plugin_for_path(std::path::Path::new("draft.mmap.md")).name(),
+            ui::plugin::PLUGIN_MINDMAP
+        );
     }
 }

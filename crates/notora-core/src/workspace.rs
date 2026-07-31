@@ -99,7 +99,11 @@ impl Workspace {
         let unresolved_suffix = lexical_path
             .strip_prefix(&existing_ancestor)
             .map_err(|_| WorkspaceError::OutsideWorkspace { path: lexical_path.clone() })?;
-        let resolved_path = canonical_ancestor.join(unresolved_suffix);
+        let resolved_path = if unresolved_suffix.as_os_str().is_empty() {
+            canonical_ancestor
+        } else {
+            canonical_ancestor.join(unresolved_suffix)
+        };
         if resolved_path.starts_with(&self.metadata_directory) {
             return Err(WorkspaceError::ReservedMetadataPath { path: resolved_path });
         }
@@ -374,5 +378,20 @@ mod tests {
             workspace.resolve_relative_path(Path::new("linked/escape.md")),
             Err(WorkspaceError::OutsideWorkspace { .. })
         ));
+    }
+
+    #[test]
+    fn resolving_an_existing_file_returns_a_file_path_without_a_trailing_separator() {
+        let directory = tempfile::tempdir().expect("workspace test directory should be created");
+        fs::write(directory.path().join("note.md"), "# Note")
+            .expect("note fixture should be written");
+        let workspace =
+            Workspace::open_or_initialize(directory.path()).expect("workspace should initialize");
+
+        let resolved_path = workspace
+            .resolve_relative_path(Path::new("note.md"))
+            .expect("existing note should resolve");
+
+        assert!(fs::metadata(resolved_path).expect("resolved note metadata should load").is_file());
     }
 }

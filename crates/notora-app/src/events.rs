@@ -11,6 +11,7 @@ use winit::window::WindowId;
 use crate::NotoraApp;
 use crate::action::NotoraAction;
 use crate::{FocusTarget, NotoraState, OverlayState, shell::layout::ShellLayout};
+use ui::core::Modifiers;
 
 /// 根据产品焦点和 overlay 状态构造 runtime 输入上下文。
 pub fn editor_input_context(
@@ -101,6 +102,9 @@ impl ApplicationHandler<ShellEvent> for NotoraApp {
                     let _ = self.runtime_accepts_pointer_input(px, py);
                 }
             }
+            WindowEvent::DroppedFile(path) => {
+                self.receive_system_open_paths(vec![path]);
+            }
             WindowEvent::Ime(Ime::Preedit(text, cursor)) => {
                 if !self.route_product_event(&ui::Event::ImePreedit { text: text.clone(), cursor })
                 {
@@ -128,10 +132,12 @@ impl ApplicationHandler<ShellEvent> for NotoraApp {
                     self.dispatch_action(NotoraAction::EscapePressed);
                     return;
                 }
-                let key_event = ui::Event::KeyDown(
-                    key_code,
-                    ui_modifiers(self.editor_runtime_mut().input_modifiers()),
-                );
+                let modifiers = ui_modifiers(self.editor_runtime_mut().input_modifiers());
+                if is_open_external_shortcut(key_code, modifiers) {
+                    self.request_external_file_dialog();
+                    return;
+                }
+                let key_event = ui::Event::KeyDown(key_code, modifiers);
                 if !self.route_product_event(&key_event) {
                     let _ = self.runtime_accepts_keyboard_input();
                 }
@@ -153,6 +159,11 @@ impl ApplicationHandler<ShellEvent> for NotoraApp {
     }
 }
 
+fn is_open_external_shortcut(key_code: ui::KeyCode, modifiers: Modifiers) -> bool {
+    matches!(key_code, ui::KeyCode::Char('o') | ui::KeyCode::Char('O'))
+        && (modifiers.cmd || modifiers.ctrl)
+}
+
 fn map_mouse_button(button: WinitMouseButton) -> Option<ui::core::widget::MouseButton> {
     match button {
         WinitMouseButton::Left => Some(ui::core::widget::MouseButton::Left),
@@ -165,8 +176,9 @@ fn map_mouse_button(button: WinitMouseButton) -> Option<ui::core::widget::MouseB
 #[cfg(test)]
 mod tests {
     use appkit_shell::editor_runtime::EditorFocus;
+    use ui::core::Modifiers;
 
-    use super::editor_input_context;
+    use super::{editor_input_context, is_open_external_shortcut};
     use crate::{FocusTarget, NotoraState, OverlayState, shell::layout::ShellLayoutInput};
 
     fn layout() -> crate::shell::layout::ShellLayout {
@@ -194,5 +206,18 @@ mod tests {
         state.layout.overlay = OverlayState::None;
         let unfocused_context = editor_input_context(&state, layout(), false);
         assert_eq!(unfocused_context.focus, EditorFocus::Inactive);
+    }
+
+    #[test]
+    fn command_or_control_o_uses_the_external_open_shortcut() {
+        assert!(is_open_external_shortcut(
+            ui::KeyCode::Char('o'),
+            Modifiers { cmd: true, ..Modifiers::NONE }
+        ));
+        assert!(is_open_external_shortcut(
+            ui::KeyCode::Char('O'),
+            Modifiers { ctrl: true, ..Modifiers::NONE }
+        ));
+        assert!(!is_open_external_shortcut(ui::KeyCode::Char('o'), Modifiers::NONE));
     }
 }

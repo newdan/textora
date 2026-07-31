@@ -2,13 +2,55 @@ use std::fmt;
 use std::sync::{Arc, Mutex, mpsc};
 
 use appkit_shell::{ProductHost, ProductWakeHandle, ShellEffect};
-use notora_core::WorkspaceId;
+use notora_core::note_command::NoteCommandResult;
+use notora_core::{ScanCompletion, WorkspaceId};
+
+use crate::action::DocumentLoadRequest;
 
 /// 后台服务只能经 notora 自有 channel 发送的 payload。
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum NotoraProductEvent {
-    CardQueryCompleted { workspace_id: WorkspaceId, workspace_generation: u64 },
-    WorkspaceChanged { workspace_id: WorkspaceId, workspace_generation: u64 },
+    CardQueryCompleted {
+        workspace_id: WorkspaceId,
+        workspace_generation: u64,
+    },
+    WorkspaceScanCompleted {
+        workspace_id: WorkspaceId,
+        workspace_generation: u64,
+        completion: ScanCompletion,
+    },
+    WorkspaceChanged {
+        workspace_id: WorkspaceId,
+        workspace_generation: u64,
+        changed_paths: Vec<std::path::PathBuf>,
+    },
+    WorkspaceIndexFailed {
+        workspace_id: WorkspaceId,
+        workspace_generation: u64,
+        message: String,
+    },
+    NoteCommandCompleted {
+        workspace_id: WorkspaceId,
+        workspace_generation: u64,
+        result: NoteCommandResult,
+    },
+    NoteCommandFailed {
+        workspace_id: WorkspaceId,
+        workspace_generation: u64,
+        message: String,
+    },
+    DocumentLoaded {
+        workspace_id: WorkspaceId,
+        workspace_generation: u64,
+        request: DocumentLoadRequest,
+        document: crate::editor_adapter::LoadedDocument,
+    },
+    DocumentLoadFailed {
+        workspace_id: WorkspaceId,
+        workspace_generation: u64,
+        request: DocumentLoadRequest,
+        message: String,
+    },
 }
 
 #[derive(Clone)]
@@ -51,6 +93,7 @@ pub struct NotoraProduct {
     event_receiver: mpsc::Receiver<NotoraProductEvent>,
     wake_handle: Arc<Mutex<Option<ProductWakeHandle>>>,
     active_workspace: Option<(WorkspaceId, u64)>,
+    workspace_events: Vec<NotoraProductEvent>,
     service_shutdown_handles: Vec<Box<dyn ProductServiceShutdown>>,
     services_started: bool,
     shutdown: bool,
@@ -68,6 +111,7 @@ impl NotoraProduct {
             event_receiver,
             wake_handle,
             active_workspace: None,
+            workspace_events: Vec::new(),
             service_shutdown_handles: Vec::new(),
             services_started: false,
             shutdown: false,
@@ -80,6 +124,15 @@ impl NotoraProduct {
 
     pub fn set_active_workspace(&mut self, workspace_id: WorkspaceId, workspace_generation: u64) {
         self.active_workspace = Some((workspace_id, workspace_generation));
+    }
+
+    pub fn clear_active_workspace(&mut self) {
+        self.active_workspace = None;
+    }
+
+    /// 取出当前活动工作区产生的后台更新；旧 generation 已在 drain 时丢弃。
+    pub fn take_workspace_events(&mut self) -> Vec<NotoraProductEvent> {
+        std::mem::take(&mut self.workspace_events)
     }
 
     pub fn register_service_shutdown(
@@ -96,9 +149,25 @@ impl NotoraProduct {
     fn event_matches_active_workspace(&self, event: &NotoraProductEvent) -> bool {
         let event_workspace = match event {
             NotoraProductEvent::CardQueryCompleted { workspace_id, workspace_generation }
-            | NotoraProductEvent::WorkspaceChanged { workspace_id, workspace_generation } => {
-                (*workspace_id, *workspace_generation)
+            | NotoraProductEvent::WorkspaceScanCompleted {
+                workspace_id,
+                workspace_generation,
+                ..
             }
+            | NotoraProductEvent::WorkspaceChanged { workspace_id, workspace_generation, .. }
+            | NotoraProductEvent::WorkspaceIndexFailed {
+                workspace_id, workspace_generation, ..
+            }
+            | NotoraProductEvent::NoteCommandCompleted {
+                workspace_id, workspace_generation, ..
+            }
+            | NotoraProductEvent::NoteCommandFailed {
+                workspace_id, workspace_generation, ..
+            }
+            | NotoraProductEvent::DocumentLoaded { workspace_id, workspace_generation, .. }
+            | NotoraProductEvent::DocumentLoadFailed {
+                workspace_id, workspace_generation, ..
+            } => (*workspace_id, *workspace_generation),
         };
         self.active_workspace == Some(event_workspace)
     }
@@ -125,6 +194,7 @@ impl ProductHost for NotoraProduct {
         let mut effect = ShellEffect::NONE;
         while let Ok(event) = self.event_receiver.try_recv() {
             if self.event_matches_active_workspace(&event) {
+                self.workspace_events.push(event);
                 effect = effect.merge(ShellEffect::REDRAW);
             }
         }
@@ -156,6 +226,7 @@ mod tests {
     use notora_core::WorkspaceId;
 
     use super::{NotoraProduct, NotoraProductEvent, ProductServiceShutdown};
+    use crate::action::DocumentLoadRequest;
 
     struct ShutdownRecorder {
         call_count: Rc<Cell<usize>>,
@@ -188,6 +259,7 @@ mod tests {
             .send(NotoraProductEvent::WorkspaceChanged {
                 workspace_id: active_workspace_id,
                 workspace_generation: 4,
+                changed_paths: vec![],
             })
             .expect("product receiver should be alive");
 
@@ -204,10 +276,39 @@ mod tests {
             .send(NotoraProductEvent::WorkspaceChanged {
                 workspace_id: WorkspaceId::generate(),
                 workspace_generation: 4,
+                changed_paths: vec![],
             })
             .expect("product receiver should be alive");
 
         assert_eq!(product.drain_product_events(), ShellEffect::NONE);
+    }
+
+    #[test]
+    fn drain_keeps_document_load_results_for_the_active_workspace_generation() {
+        let mut product = NotoraProduct::new();
+        let workspace_id = WorkspaceId::generate();
+        let identity = notora_core::DocumentIdentity::Note(notora_core::NoteId::generate());
+        product.set_active_workspace(workspace_id, 9);
+        product
+            .event_sender()
+            .send(NotoraProductEvent::DocumentLoadFailed {
+                workspace_id,
+                workspace_generation: 9,
+                request: DocumentLoadRequest { identity, selection_generation: 2 },
+                message: "fixture read failed".to_owned(),
+            })
+            .expect("product receiver should be alive");
+
+        assert_eq!(product.drain_product_events(), ShellEffect::REDRAW);
+        assert!(matches!(
+            product.take_workspace_events().as_slice(),
+            [NotoraProductEvent::DocumentLoadFailed {
+                workspace_id: event_workspace_id,
+                workspace_generation: 9,
+                request: DocumentLoadRequest { identity: event_identity, selection_generation: 2 },
+                ..
+            }] if *event_workspace_id == workspace_id && *event_identity == identity
+        ));
     }
 
     #[test]
@@ -218,6 +319,7 @@ mod tests {
                 .send(NotoraProductEvent::WorkspaceChanged {
                     workspace_id: WorkspaceId::generate(),
                     workspace_generation: 1,
+                    changed_paths: vec![],
                 })
                 .is_err()
         );

@@ -5,20 +5,33 @@
 //! 子任务中逐步实现。
 
 mod app;
+pub mod document_registry;
+mod editor_adapter;
 pub mod effect_executor;
 pub mod events;
+pub mod external_files;
 mod paths;
 pub mod product;
 pub mod render;
 pub mod shell;
 mod state;
+pub mod workspace_controller;
 
 pub mod action;
 
 pub use app::{NotoraApp, NotoraAppError};
+pub use external_files::{
+    CanonicalExternalPath, ExternalFileOpenError, ExternalFilePathError, ExternalFileSession,
+    ExternalFileSessions, OpenExistingExternalFile, RelocateExternalFile,
+    ValidatedExternalTextFile, validate_external_text_file,
+};
 pub use paths::{NotoraPaths, NotoraPathsError};
 pub use state::{
     FocusTarget, LayoutState, LibraryState, NotoraState, OverlayState, Pane, ResponsiveLayoutMode,
+};
+pub use workspace_controller::{
+    ActiveWorkspace, WorkspaceCommand, WorkspaceCommandResult, WorkspaceController,
+    WorkspaceControllerError,
 };
 
 #[cfg(test)]

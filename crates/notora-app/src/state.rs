@@ -1,6 +1,11 @@
 use notora_core::{DocumentIdentity, DocumentKind, NavigationScope};
 
-use crate::action::{CardQuery, NoteCreationTarget, NotoraAction, NotoraEffect};
+use crate::action::{
+    CardQuery, DocumentLoadRequest, NoteCreationTarget, NotoraAction, NotoraEffect,
+    move_note_command, rename_note_command,
+};
+use crate::effect_executor::ExternalOpenRequest;
+use crate::external_files::ExternalFileSessions;
 
 /// 当前键盘输入应交给的唯一目标。
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -44,6 +49,8 @@ pub struct LibraryState {
     pub navigation_scope: NavigationScope,
     pub search_scope_before_search: Option<NavigationScope>,
     pub selected_card: Option<DocumentIdentity>,
+    pub selected_document_generation: u64,
+    pub last_command_error: Option<String>,
 }
 
 impl Default for LibraryState {
@@ -52,6 +59,8 @@ impl Default for LibraryState {
             navigation_scope: NavigationScope::WorkspaceRoot,
             search_scope_before_search: None,
             selected_card: None,
+            selected_document_generation: 0,
+            last_command_error: None,
         }
     }
 }
@@ -82,6 +91,8 @@ impl Default for LayoutState {
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct NotoraState {
     pub library: LibraryState,
+    /// 外部 session 不属于 catalog、搜索、星标、标签或 Trash 的任何一项。
+    pub external_files: ExternalFileSessions,
     pub layout: LayoutState,
 }
 
@@ -91,11 +102,47 @@ impl NotoraState {
             NotoraAction::NavigationSelected(scope) => self.select_navigation_scope(scope),
             NotoraAction::SearchCommitted(query) => self.commit_search(query),
             NotoraAction::CardSelected(identity) => {
-                self.library.selected_card = Some(identity);
+                let request = self.select_document(identity);
                 self.layout.focus_target = FocusTarget::CardList;
-                vec![NotoraEffect::PrepareDocument(identity), NotoraEffect::Redraw]
+                vec![NotoraEffect::PrepareDocument(request), NotoraEffect::Redraw]
+            }
+            NotoraAction::OpenExternalFileDialogRequested => {
+                vec![NotoraEffect::OpenExternalFiles(ExternalOpenRequest::ShowFileDialog)]
+            }
+            NotoraAction::ExternalPathsReceived(paths) => {
+                vec![NotoraEffect::OpenExternalFiles(ExternalOpenRequest::Paths(paths))]
+            }
+            NotoraAction::ExternalFileOpened(identity) => {
+                let request = self.select_document(identity);
+                self.library.navigation_scope = NavigationScope::ExternalFiles;
+                self.layout.focus_target = FocusTarget::CardList;
+                vec![NotoraEffect::PrepareDocument(request), NotoraEffect::Redraw]
+            }
+            NotoraAction::PromotePreviewRequested => {
+                vec![NotoraEffect::PromoteActivePreview, NotoraEffect::Redraw]
             }
             NotoraAction::CreateRequested(kind) => self.request_note_creation(kind),
+            NotoraAction::RenameRequested { note_id, new_file_name } => {
+                self.library.last_command_error = None;
+                vec![
+                    NotoraEffect::ExecuteNoteCommand(rename_note_command(note_id, new_file_name)),
+                    NotoraEffect::Redraw,
+                ]
+            }
+            NotoraAction::NoteCommandCompleted(result) => {
+                self.apply_note_command_completion(result)
+            }
+            NotoraAction::NoteCommandFailed(message) => {
+                self.library.last_command_error = Some(message);
+                vec![NotoraEffect::Redraw]
+            }
+            NotoraAction::MoveRequested { note_id, target_directory } => {
+                self.library.last_command_error = None;
+                vec![
+                    NotoraEffect::ExecuteNoteCommand(move_note_command(note_id, target_directory)),
+                    NotoraEffect::Redraw,
+                ]
+            }
             NotoraAction::SplitterDragged { pane, logical_width } => {
                 self.set_pane_width(pane, logical_width);
                 vec![NotoraEffect::PersistLayout, NotoraEffect::Redraw]
@@ -120,6 +167,9 @@ impl NotoraState {
         }
         self.library.navigation_scope = scope.clone();
         self.layout.focus_target = FocusTarget::NavigationTree;
+        if scope == NavigationScope::ExternalFiles {
+            return vec![NotoraEffect::Redraw];
+        }
         vec![NotoraEffect::QueryCards(CardQuery::from(scope)), NotoraEffect::Redraw]
     }
 
@@ -150,13 +200,40 @@ impl NotoraState {
         let Some(target) = creation_target(&self.library.navigation_scope) else {
             return vec![NotoraEffect::Redraw];
         };
-        vec![NotoraEffect::RequestNoteCreation { kind, target }, NotoraEffect::Redraw]
+        self.library.last_command_error = None;
+        vec![NotoraEffect::ExecuteNoteCommand(target.create_command(kind)), NotoraEffect::Redraw]
+    }
+
+    fn apply_note_command_completion(
+        &mut self,
+        result: notora_core::note_command::NoteCommandResult,
+    ) -> Vec<NotoraEffect> {
+        let identity = DocumentIdentity::Note(result.note.note_id);
+        let request = self.select_document(identity);
+        self.library.last_command_error = None;
+        self.layout.focus_target = FocusTarget::CardList;
+        let scope = self.library.navigation_scope.clone();
+        vec![
+            NotoraEffect::QueryCards(CardQuery::from(scope)),
+            NotoraEffect::PrepareDocument(request),
+            NotoraEffect::Redraw,
+        ]
     }
 
     fn set_pane_width(&mut self, pane: Pane, logical_width: f32) {
         match pane {
             Pane::Navigation => self.layout.navigation_width_logical = logical_width,
             Pane::CardList => self.layout.card_list_width_logical = logical_width,
+        }
+    }
+
+    fn select_document(&mut self, identity: DocumentIdentity) -> DocumentLoadRequest {
+        self.library.selected_card = Some(identity);
+        self.library.selected_document_generation =
+            self.library.selected_document_generation.wrapping_add(1);
+        DocumentLoadRequest {
+            identity,
+            selection_generation: self.library.selected_document_generation,
         }
     }
 
@@ -201,7 +278,7 @@ fn creation_target(scope: &NavigationScope) -> Option<NoteCreationTarget> {
 #[cfg(test)]
 mod tests {
     use super::{FocusTarget, LibraryState, NotoraState, OverlayState};
-    use crate::action::{CardQuery, NoteCreationTarget, NotoraAction, NotoraEffect};
+    use crate::action::{CardQuery, NotoraAction, NotoraEffect};
     use notora_core::{DocumentKind, NavigationScope, TagId};
 
     #[test]
@@ -237,6 +314,16 @@ mod tests {
     }
 
     #[test]
+    fn external_files_scope_does_not_query_the_workspace_catalog() {
+        let mut state = NotoraState::default();
+
+        assert_eq!(
+            state.reduce(NotoraAction::NavigationSelected(NavigationScope::ExternalFiles)),
+            vec![NotoraEffect::Redraw]
+        );
+    }
+
+    #[test]
     fn tag_scope_requests_tag_attachment_for_new_notes() {
         let mut state = NotoraState::default();
         let tag_id = TagId::generate();
@@ -245,13 +332,89 @@ mod tests {
         assert_eq!(
             state.reduce(NotoraAction::CreateRequested(DocumentKind::Markdown)),
             vec![
-                NotoraEffect::RequestNoteCreation {
-                    kind: DocumentKind::Markdown,
-                    target: NoteCreationTarget { directory: None, tag_to_attach: Some(tag_id) },
-                },
+                NotoraEffect::ExecuteNoteCommand(notora_core::note_command::NoteCommand::Create(
+                    notora_core::note_command::CreateNoteRequest {
+                        kind: DocumentKind::Markdown,
+                        target_directory: None,
+                        tag_to_attach: Some(tag_id),
+                    },
+                ),),
                 NotoraEffect::Redraw,
             ]
         );
+    }
+
+    #[test]
+    fn note_requests_reduce_to_a_typed_domain_command_effect() {
+        let mut state = NotoraState::default();
+
+        assert!(matches!(
+            state.reduce(NotoraAction::CreateRequested(DocumentKind::Markdown)).as_slice(),
+            [
+                NotoraEffect::ExecuteNoteCommand(notora_core::note_command::NoteCommand::Create(
+                    notora_core::note_command::CreateNoteRequest {
+                        kind: DocumentKind::Markdown,
+                        ..
+                    }
+                )),
+                NotoraEffect::Redraw
+            ]
+        ));
+    }
+
+    #[test]
+    fn command_failure_preserves_the_existing_selection_and_exposes_a_recoverable_message() {
+        let mut state = NotoraState::default();
+        let selected_note = notora_core::DocumentIdentity::Note(notora_core::NoteId::generate());
+        let _ = state.reduce(NotoraAction::CardSelected(selected_note));
+
+        assert_eq!(
+            state.reduce(NotoraAction::NoteCommandFailed("destination exists".to_owned())),
+            vec![NotoraEffect::Redraw]
+        );
+        assert_eq!(state.library.selected_card, Some(selected_note));
+        assert_eq!(state.library.last_command_error.as_deref(), Some("destination exists"));
+    }
+
+    #[test]
+    fn preview_promotion_is_an_explicit_runtime_effect() {
+        let mut state = NotoraState::default();
+
+        assert_eq!(
+            state.reduce(NotoraAction::PromotePreviewRequested),
+            vec![NotoraEffect::PromoteActivePreview, NotoraEffect::Redraw]
+        );
+    }
+
+    #[test]
+    fn repeated_selection_of_the_same_document_uses_distinct_load_generations() {
+        let mut state = NotoraState::default();
+        let identity = notora_core::DocumentIdentity::Note(notora_core::NoteId::generate());
+
+        let first_effects = state.reduce(NotoraAction::CardSelected(identity));
+        let second_effects = state.reduce(NotoraAction::CardSelected(identity));
+
+        assert!(matches!(
+            first_effects.as_slice(),
+            [
+                NotoraEffect::PrepareDocument(crate::action::DocumentLoadRequest {
+                    identity: first_identity,
+                    selection_generation: 1,
+                }),
+                NotoraEffect::Redraw,
+            ] if *first_identity == identity
+        ));
+        assert!(matches!(
+            second_effects.as_slice(),
+            [
+                NotoraEffect::PrepareDocument(crate::action::DocumentLoadRequest {
+                    identity: second_identity,
+                    selection_generation: 2,
+                }),
+                NotoraEffect::Redraw,
+            ] if *second_identity == identity
+        ));
+        assert_eq!(state.library.selected_document_generation, 2);
     }
 
     #[test]

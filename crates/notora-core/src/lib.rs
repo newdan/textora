@@ -10,6 +10,7 @@
 pub mod catalog;
 pub mod domain;
 pub mod file_monitor;
+pub mod note_command;
 pub mod reconciliation;
 pub mod scan;
 pub mod summary_parser;
@@ -21,6 +22,9 @@ pub use domain::{
     NoteLifecycle, NoteSummary, TagId, TagSummary, WorkspaceId,
 };
 pub use file_monitor::{WorkspaceFileBatch, WorkspaceFileMonitor, WorkspaceFileMonitorError};
+pub use note_command::{
+    CreateNoteRequest, CreateNoteResult, NoteCommand, NoteCommandError, execute_note_command,
+};
 pub use reconciliation::{
     DiscoveredNote, ReconciliationChange, ReconciliationError, ReconciliationPlan,
     reconcile_catalog,

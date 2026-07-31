@@ -1479,6 +1479,7 @@ dependencies = [
  "bytemuck",
  "dirs",
  "notora-core",
+ "rfd",
  "tempfile",
  "textora-appkit-core",
  "textora-appkit-shell",
