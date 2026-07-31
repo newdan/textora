@@ -1477,6 +1477,7 @@ name = "notora-core"
 version = "0.1.0"
 dependencies = [
  "blake3",
+ "notify",
  "rusqlite",
  "serde",
  "tempfile",

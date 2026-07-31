@@ -9,6 +9,7 @@
 
 pub mod catalog;
 pub mod domain;
+pub mod file_monitor;
 pub mod reconciliation;
 pub mod scan;
 pub mod summary_parser;
@@ -19,6 +20,7 @@ pub use domain::{
     DocumentIdentity, DocumentKind, DocumentOrigin, ExternalFileId, NavigationScope, NoteId,
     NoteLifecycle, NoteSummary, TagId, TagSummary, WorkspaceId,
 };
+pub use file_monitor::{WorkspaceFileBatch, WorkspaceFileMonitor, WorkspaceFileMonitorError};
 pub use reconciliation::{
     DiscoveredNote, ReconciliationChange, ReconciliationError, ReconciliationPlan,
     reconcile_catalog,
