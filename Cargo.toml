@@ -52,3 +52,10 @@ unicode_categories = "0.1"
 unicode-segmentation = "1"
 unicode-width = "0.1"
 zeroize = "1"
+blake3 = "1"
+dirs = "6"
+notify = "8"
+rfd = { version = "0.15", default-features = false }
+rusqlite = { version = "0.37", features = ["backup", "bundled"] }
+tempfile = "3"
+uuid = { version = "1", features = ["serde", "v4"] }
