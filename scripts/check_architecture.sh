@@ -15,8 +15,13 @@ check_forbidden_dependency() {
 }
 
 check_forbidden_dependency textora-appkit-core \
-  textora-ui winit wgpu textora-render textora-shaping textora-markdown textora-sync
+  textora-ui winit wgpu textora-render textora-shaping textora-markdown textora-sync notora-core notora-app
 check_forbidden_dependency textora-appkit-shell \
+  textora-markdown textora-sync textora-app notora-core notora-app
+check_forbidden_dependency textora-ui \
+  notora-core notora-app
+check_forbidden_dependency notora-core \
+  textora-ui winit wgpu textora-render textora-shaping textora-appkit-core textora-appkit-shell \
   textora-markdown textora-sync textora-app
 
 check_forbidden_source_tokens() {
@@ -37,22 +42,37 @@ check_forbidden_source_tokens() {
 local_product_markdown="textora"_"markdown"
 local_product_sync="textora"_"sync"
 local_textora_product="Textora""Product"
+local_notora_product="Notora""Product"
 local_note_id="Note""Id"
+local_navigation_scope="Navigation""Scope"
 local_edit_snapshot=".edit""+"
 local_notora_snapshot=".notora"
 check_forbidden_source_tokens crates/appkit-shell \
   "$local_product_markdown" \
   "$local_product_sync" \
   "$local_textora_product" \
+  "$local_notora_product" \
   "$local_note_id" \
+  "$local_navigation_scope" \
   "$local_edit_snapshot" \
   "$local_notora_snapshot"
 
 check_forbidden_source_tokens crates/appkit-core \
   "$local_textora_product" \
+  "$local_notora_product" \
   "$local_note_id" \
+  "$local_navigation_scope" \
   "$local_edit_snapshot" \
   "$local_notora_snapshot"
+
+check_forbidden_source_tokens crates/ui \
+  "$local_notora_product" \
+  "$local_note_id" \
+  "$local_navigation_scope" \
+  "$local_notora_snapshot"
+
+check_forbidden_source_tokens crates/notora-core \
+  "$local_edit_snapshot"
 
 local_runtime_dir="crates/appkit-shell/src/editor_runtime"
 local_workspace_mut="workspace"_"_mut"
