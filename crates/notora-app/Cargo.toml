@@ -1,0 +1,44 @@
+[package]
+name = "notora-app"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[lib]
+name = "notora_app"
+path = "src/lib.rs"
+
+[[bin]]
+name = "notora"
+path = "src/main.rs"
+
+[features]
+ci-no-fonts = ["appkit-shell/ci-no-fonts"]
+
+[dependencies]
+appkit-core = { path = "../appkit-core", package = "textora-appkit-core" }
+appkit-shell = { path = "../appkit-shell", package = "textora-appkit-shell" }
+bytemuck = { version = "1", features = ["derive"] }
+core.workspace = true
+dirs.workspace = true
+notora-core = { path = "../notora-core" }
+render.workspace = true
+shaping.workspace = true
+textora-markdown = { path = "../markdown" }
+ui.workspace = true
+wgpu.workspace = true
+winit.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+
+[target.'cfg(target_os = "macos")'.dependencies]
+wgpu = { workspace = true, features = ["metal"] }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+wgpu = { workspace = true, features = ["vulkan"] }
+
+[target.'cfg(target_os = "windows")'.dependencies]
+wgpu = { workspace = true, features = ["dx12"] }

@@ -183,6 +183,9 @@ fn translate_widget_action(action: &WidgetAction, app: &App, actions: &mut Vec<A
         WidgetAction::SearchBar(sa) => translate_search_action(sa, actions),
         WidgetAction::Popup(outcome) => translate_popup_outcome(outcome, app, actions),
         WidgetAction::List(_) => {}
+        WidgetAction::TreeList(_) => {}
+        WidgetAction::VirtualCardList(_) => {}
+        WidgetAction::Splitter(_) => {}
         WidgetAction::TitleBar(ta) => translate_title_bar_action(ta, actions),
         WidgetAction::Toc(ta) => translate_toc_action(ta, actions),
         WidgetAction::MindmapStylePanel(action) => {

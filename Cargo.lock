@@ -1473,6 +1473,25 @@ dependencies = [
 ]
 
 [[package]]
+name = "notora-app"
+version = "0.1.0"
+dependencies = [
+ "bytemuck",
+ "dirs",
+ "notora-core",
+ "tempfile",
+ "textora-appkit-core",
+ "textora-appkit-shell",
+ "textora-core",
+ "textora-markdown",
+ "textora-render",
+ "textora-shaping",
+ "textora-ui",
+ "wgpu",
+ "winit",
+]
+
+[[package]]
 name = "notora-core"
 version = "0.1.0"
 dependencies = [

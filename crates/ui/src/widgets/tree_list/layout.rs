@@ -1,0 +1,134 @@
+use crate::core::Rect;
+
+use super::TreeRowInput;
+
+pub const TREE_ROW_HEIGHT_LOGICAL: f32 = 28.0;
+pub const TREE_ROW_FONT_SIZE_LOGICAL: f32 = 13.0;
+pub const TREE_ROW_HORIZONTAL_PADDING_LOGICAL: f32 = 8.0;
+pub const TREE_ROW_INDENT_LOGICAL: f32 = 16.0;
+pub const TREE_EXPANDER_SIZE_LOGICAL: f32 = 14.0;
+pub const TREE_ICON_SIZE_LOGICAL: f32 = 16.0;
+pub const TREE_ICON_GAP_LOGICAL: f32 = 6.0;
+pub const TREE_BADGE_HORIZONTAL_PADDING_LOGICAL: f32 = 6.0;
+pub const TREE_BADGE_MINIMUM_WIDTH_LOGICAL: f32 = 20.0;
+pub const TREE_BADGE_DIGIT_WIDTH_RATIO: f32 = 0.65;
+
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct TreeRowLayout {
+    pub row_rect: Rect,
+    pub expander_rect: Rect,
+    pub icon_rect: Option<Rect>,
+    pub label_rect: Rect,
+    pub badge_rect: Option<Rect>,
+}
+
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct TreeListLayout {
+    pub rows: Vec<TreeRowLayout>,
+    pub content_height_px: f32,
+}
+
+pub(super) fn build_tree_layout(
+    rows: &[TreeRowInput],
+    rect: Rect,
+    scroll_offset_px: f32,
+    dpi: f32,
+) -> TreeListLayout {
+    let row_height = TREE_ROW_HEIGHT_LOGICAL * dpi;
+    let horizontal_padding = TREE_ROW_HORIZONTAL_PADDING_LOGICAL * dpi;
+    let expander_size = TREE_EXPANDER_SIZE_LOGICAL * dpi;
+    let icon_size = TREE_ICON_SIZE_LOGICAL * dpi;
+    let icon_gap = TREE_ICON_GAP_LOGICAL * dpi;
+    let badge_height = (TREE_ROW_FONT_SIZE_LOGICAL + 6.0) * dpi;
+    let badge_padding = TREE_BADGE_HORIZONTAL_PADDING_LOGICAL * dpi;
+
+    let row_layouts = rows
+        .iter()
+        .enumerate()
+        .map(|(index, row)| {
+            let row_rect = Rect::new(
+                rect.x,
+                rect.y + index as f32 * row_height - scroll_offset_px,
+                rect.w,
+                row_height,
+            );
+            let mut cursor_x =
+                rect.x + horizontal_padding + row.depth as f32 * TREE_ROW_INDENT_LOGICAL * dpi;
+            let expander_rect = Rect::new(
+                cursor_x,
+                row_rect.y + (row_height - expander_size) * 0.5,
+                expander_size,
+                expander_size,
+            );
+            cursor_x += expander_size + icon_gap;
+
+            let icon_rect = row.icon.as_ref().map(|_| {
+                let icon_rect = Rect::new(
+                    cursor_x,
+                    row_rect.y + (row_height - icon_size) * 0.5,
+                    icon_size,
+                    icon_size,
+                );
+                cursor_x += icon_size + icon_gap;
+                icon_rect
+            });
+
+            let badge_rect = row.badge.map(|badge| {
+                let requested_badge_width = (badge.to_string().len() as f32
+                    * TREE_ROW_FONT_SIZE_LOGICAL
+                    * TREE_BADGE_DIGIT_WIDTH_RATIO
+                    * dpi
+                    + badge_padding * 2.0)
+                    .max(TREE_BADGE_MINIMUM_WIDTH_LOGICAL * dpi);
+                let available_badge_width = (rect.right() - horizontal_padding - cursor_x).max(0.0);
+                let badge_width = requested_badge_width.min(available_badge_width);
+                Rect::new(
+                    rect.right() - horizontal_padding - badge_width,
+                    row_rect.y + (row_height - badge_height) * 0.5,
+                    badge_width,
+                    badge_height,
+                )
+            });
+            let label_right = badge_rect
+                .map(|badge| badge.x - badge_padding)
+                .unwrap_or(rect.right() - horizontal_padding);
+            let label_rect =
+                Rect::new(cursor_x, row_rect.y, (label_right - cursor_x).max(0.0), row_height);
+
+            TreeRowLayout { row_rect, expander_rect, icon_rect, label_rect, badge_rect }
+        })
+        .collect();
+
+    TreeListLayout { rows: row_layouts, content_height_px: rows.len() as f32 * row_height }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::widgets::tree_list::{TreeRowExpansion, TreeRowKey, TreeRowSelection};
+
+    fn row(depth: usize) -> TreeRowInput {
+        TreeRowInput {
+            key: TreeRowKey(1),
+            label: "Nested".to_owned(),
+            icon: None,
+            depth,
+            expansion: TreeRowExpansion::Leaf,
+            selection: TreeRowSelection::Unselected,
+            badge: Some(10_000),
+        }
+    }
+
+    #[test]
+    fn layout_keeps_rows_inside_their_scrolled_content_space() {
+        let layout = build_tree_layout(&[row(3)], Rect::new(20.0, 10.0, 180.0, 100.0), 8.0, 1.5);
+
+        assert_eq!(layout.content_height_px, TREE_ROW_HEIGHT_LOGICAL * 1.5);
+        assert_eq!(layout.rows[0].row_rect.y, 2.0);
+        assert!(layout.rows[0].label_rect.x > 90.0);
+        assert!(
+            layout.rows[0].badge_rect.expect("badge input should produce badge geometry").w
+                > TREE_BADGE_MINIMUM_WIDTH_LOGICAL * 1.5
+        );
+    }
+}

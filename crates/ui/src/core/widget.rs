@@ -328,6 +328,9 @@ pub enum WidgetAction {
     List(crate::widgets::list::ListAction),
     TitleBar(crate::widgets::title_bar::TitleBarAction),
     Toc(crate::widgets::toc::TocAction),
+    TreeList(crate::widgets::tree_list::TreeListAction),
+    VirtualCardList(crate::widgets::virtual_card_list::VirtualCardListAction),
+    Splitter(crate::widgets::splitter::SplitterAction),
     MindmapStylePanel(MindmapStylePanelAction),
     /// 事件已消费但无需 AppAction（如 hover 更新）
     Consumed,
