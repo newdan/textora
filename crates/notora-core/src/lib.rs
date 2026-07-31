@@ -9,13 +9,18 @@
 
 pub mod catalog;
 pub mod domain;
+pub mod scan;
 pub mod summary_parser;
 pub mod workspace;
 
-pub use catalog::{Catalog, CatalogError};
+pub use catalog::{Catalog, CatalogError, CatalogNote};
 pub use domain::{
     DocumentIdentity, DocumentKind, DocumentOrigin, ExternalFileId, NavigationScope, NoteId,
     NoteLifecycle, NoteSummary, TagId, TagSummary, WorkspaceId,
 };
+pub use scan::{ScanCompletion, ScanError, ScanFailure, scan_workspace};
 pub use summary_parser::{MAX_EXCERPT_GRAPHEMES, NoteTextSummary, parse_note_text_summary};
-pub use workspace::{Workspace, WorkspaceDescriptor, WorkspaceError, WorkspaceManifest};
+pub use workspace::{
+    WORKSPACE_METADATA_DIRECTORY_NAME, Workspace, WorkspaceDescriptor, WorkspaceError,
+    WorkspaceManifest,
+};
