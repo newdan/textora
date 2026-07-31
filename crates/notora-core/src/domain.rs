@@ -40,6 +40,12 @@ impl NoteId {
     }
 }
 
+impl From<Uuid> for NoteId {
+    fn from(value: Uuid) -> Self {
+        Self(value)
+    }
+}
+
 impl std::fmt::Display for NoteId {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         self.0.fmt(formatter)

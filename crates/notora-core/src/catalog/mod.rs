@@ -1,10 +1,12 @@
 mod migration;
+mod note_repository;
 
 use std::path::Path;
 
 use rusqlite::Connection;
 
 pub use migration::CATALOG_SCHEMA_VERSION;
+pub use note_repository::CatalogNote;
 
 /// 已完成基础迁移的工作区 catalog 连接。
 pub struct Catalog {
@@ -25,8 +27,7 @@ impl Catalog {
         migration::schema_version(&self.connection)
     }
 
-    #[cfg(test)]
-    fn connection(&self) -> &Connection {
+    pub(crate) fn connection(&self) -> &Connection {
         &self.connection
     }
 }
@@ -36,6 +37,7 @@ pub enum CatalogError {
     Open { path: std::path::PathBuf, source: rusqlite::Error },
     Sql { operation: &'static str, source: rusqlite::Error },
     UnsupportedSchema { found: u32 },
+    InvalidStoredValue { column: &'static str, value: String },
 }
 
 impl CatalogError {
@@ -56,6 +58,9 @@ impl std::fmt::Display for CatalogError {
             Self::UnsupportedSchema { found } => {
                 write!(formatter, "unsupported catalog schema version: {found}")
             }
+            Self::InvalidStoredValue { column, value } => {
+                write!(formatter, "catalog contains invalid {column}: {value}")
+            }
         }
     }
 }
@@ -64,7 +69,7 @@ impl std::error::Error for CatalogError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
             Self::Open { source, .. } | Self::Sql { source, .. } => Some(source),
-            Self::UnsupportedSchema { .. } => None,
+            Self::UnsupportedSchema { .. } | Self::InvalidStoredValue { .. } => None,
         }
     }
 }
