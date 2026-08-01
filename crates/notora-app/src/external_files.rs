@@ -183,6 +183,21 @@ pub enum RelocateExternalFile {
     ReusedExisting(DocumentIdentity),
 }
 
+/// Save As 对外部 session 的结果；已经打开的目标路径不会吞掉当前 session。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SaveExternalFileAs {
+    Updated(DocumentIdentity),
+    PathAlreadyOpen(DocumentIdentity),
+}
+
+impl SaveExternalFileAs {
+    pub fn identity(self) -> DocumentIdentity {
+        match self {
+            Self::Updated(identity) | Self::PathAlreadyOpen(identity) => identity,
+        }
+    }
+}
+
 impl RelocateExternalFile {
     pub fn identity(self) -> DocumentIdentity {
         match self {
@@ -263,6 +278,32 @@ impl ExternalFileSessions {
         Some(RelocateExternalFile::Relocated(identity))
     }
 
+    /// Save As 成功后保留原有 external identity，并以规范化目标路径替换 session 状态。
+    ///
+    /// 若该路径已由另一个 session 打开，则保持原 session 不变，交由产品层提示用户。
+    pub fn save_as(
+        &mut self,
+        external_file_id: ExternalFileId,
+        canonical_path: CanonicalExternalPath,
+    ) -> Option<SaveExternalFileAs> {
+        let session_index = self.index_for(external_file_id)?;
+        if let Some(existing_identity) = self.sessions.iter().find_map(|session| match session {
+            ExternalFileSession::Existing { canonical_path: known_path, .. }
+                if known_path == &canonical_path
+                    && session.external_file_id() != external_file_id =>
+            {
+                Some(session.identity())
+            }
+            _ => None,
+        }) {
+            return Some(SaveExternalFileAs::PathAlreadyOpen(existing_identity));
+        }
+        let identity = DocumentIdentity::ExternalFile(external_file_id);
+        self.sessions[session_index] =
+            ExternalFileSession::Existing { external_file_id, canonical_path };
+        Some(SaveExternalFileAs::Updated(identity))
+    }
+
     /// 仅移除产品 session；不会删除或移动磁盘文件。
     pub fn remove(&mut self, external_file_id: ExternalFileId) -> Option<ExternalFileSession> {
         let index = self.index_for(external_file_id)?;
@@ -290,7 +331,8 @@ mod tests {
 
     use super::{
         CanonicalExternalPath, ExternalFileOpenError, ExternalFileSession, ExternalFileSessions,
-        OpenExistingExternalFile, RelocateExternalFile, validate_external_text_file,
+        OpenExistingExternalFile, RelocateExternalFile, SaveExternalFileAs,
+        validate_external_text_file,
     };
 
     fn canonical_fixture(name: &str) -> CanonicalExternalPath {
@@ -372,6 +414,41 @@ mod tests {
             sessions.session(external_file_id),
             Some(ExternalFileSession::Existing { canonical_path, .. })
                 if canonical_path == &relocated_path
+        ));
+    }
+
+    #[test]
+    fn save_as_keeps_an_untitled_external_identity_and_updates_its_canonical_path() {
+        let path = canonical_fixture("saved-from-untitled.md");
+        let mut sessions = ExternalFileSessions::default();
+        let identity = sessions.create_untitled(DocumentKind::Markdown);
+        let external_file_id = external_file_id(identity);
+
+        assert_eq!(
+            sessions.save_as(external_file_id, path.clone()),
+            Some(SaveExternalFileAs::Updated(identity))
+        );
+        assert!(matches!(
+            sessions.session(external_file_id),
+            Some(ExternalFileSession::Existing { canonical_path, .. }) if canonical_path == &path
+        ));
+    }
+
+    #[test]
+    fn save_as_rejects_a_path_owned_by_another_external_session_without_mutating_either() {
+        let first_path = canonical_fixture("first.md");
+        let mut sessions = ExternalFileSessions::default();
+        let existing_identity = sessions.open_existing(first_path.clone()).identity();
+        let untitled_identity = sessions.create_untitled(DocumentKind::Markdown);
+        let untitled_id = external_file_id(untitled_identity);
+
+        assert_eq!(
+            sessions.save_as(untitled_id, first_path),
+            Some(SaveExternalFileAs::PathAlreadyOpen(existing_identity))
+        );
+        assert!(matches!(
+            sessions.session(untitled_id),
+            Some(ExternalFileSession::Untitled { .. })
         ));
     }
 

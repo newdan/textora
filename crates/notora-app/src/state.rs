@@ -1,8 +1,8 @@
 use notora_core::{DocumentIdentity, DocumentKind, NavigationScope};
 
 use crate::action::{
-    CardQuery, DocumentLoadRequest, NoteCreationTarget, NotoraAction, NotoraEffect,
-    move_note_command, rename_note_command,
+    CardQuery, ConflictResolution, DocumentLoadRequest, NoteCreationTarget, NotoraAction,
+    NotoraEffect, SaveConflictRequest, move_note_command, rename_note_command,
 };
 use crate::effect_executor::ExternalOpenRequest;
 use crate::external_files::ExternalFileSessions;
@@ -51,6 +51,7 @@ pub struct LibraryState {
     pub selected_card: Option<DocumentIdentity>,
     pub selected_document_generation: u64,
     pub last_command_error: Option<String>,
+    pub save_conflict: Option<SaveConflict>,
 }
 
 impl Default for LibraryState {
@@ -61,8 +62,16 @@ impl Default for LibraryState {
             selected_card: None,
             selected_document_generation: 0,
             last_command_error: None,
+            save_conflict: None,
         }
     }
+}
+
+/// 供 shell 展示的冲突摘要；tab 映射仍保留在产品层 registry。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct SaveConflict {
+    pub identity: DocumentIdentity,
+    pub content_revision: u64,
 }
 
 /// 仅保存窗口壳的纯布局状态。
@@ -143,6 +152,19 @@ impl NotoraState {
                     NotoraEffect::Redraw,
                 ]
             }
+            NotoraAction::SaveConflictDetected { identity, content_revision } => {
+                self.library.save_conflict = Some(SaveConflict { identity, content_revision });
+                vec![NotoraEffect::Redraw]
+            }
+            NotoraAction::SaveConflictResolutionRequested(resolution) => {
+                self.resolve_save_conflict(resolution)
+            }
+            NotoraAction::SaveConflictResolved { identity } => {
+                if self.library.save_conflict.map(|conflict| conflict.identity) == Some(identity) {
+                    self.library.save_conflict = None;
+                }
+                vec![NotoraEffect::Redraw]
+            }
             NotoraAction::SplitterDragged { pane, logical_width } => {
                 self.set_pane_width(pane, logical_width);
                 vec![NotoraEffect::PersistLayout, NotoraEffect::Redraw]
@@ -202,6 +224,23 @@ impl NotoraState {
         };
         self.library.last_command_error = None;
         vec![NotoraEffect::ExecuteNoteCommand(target.create_command(kind)), NotoraEffect::Redraw]
+    }
+
+    fn resolve_save_conflict(&mut self, resolution: ConflictResolution) -> Vec<NotoraEffect> {
+        let Some(conflict) = self.library.save_conflict else {
+            return vec![NotoraEffect::Redraw];
+        };
+        if resolution == ConflictResolution::Cancel {
+            self.library.save_conflict = None;
+            return vec![NotoraEffect::Redraw];
+        }
+        vec![
+            NotoraEffect::ResolveSaveConflict(SaveConflictRequest {
+                identity: conflict.identity,
+                resolution,
+            }),
+            NotoraEffect::Redraw,
+        ]
     }
 
     fn apply_note_command_completion(
@@ -442,5 +481,25 @@ mod tests {
         state.layout.focus_target = FocusTarget::Editor;
         let _ = state.reduce(NotoraAction::EscapePressed);
         assert_eq!(state.layout.focus_target, FocusTarget::NavigationTree);
+    }
+
+    #[test]
+    fn concurrent_save_requires_an_explicit_typed_resolution() {
+        let mut state = NotoraState::default();
+        let identity = notora_core::DocumentIdentity::Note(notora_core::NoteId::generate());
+        let _ = state.reduce(NotoraAction::SaveConflictDetected { identity, content_revision: 7 });
+
+        assert_eq!(
+            state.reduce(NotoraAction::SaveConflictResolutionRequested(
+                crate::action::ConflictResolution::RetrySave,
+            )),
+            vec![
+                NotoraEffect::ResolveSaveConflict(crate::action::SaveConflictRequest {
+                    identity,
+                    resolution: crate::action::ConflictResolution::RetrySave,
+                }),
+                NotoraEffect::Redraw,
+            ]
+        );
     }
 }

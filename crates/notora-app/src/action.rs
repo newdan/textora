@@ -32,6 +32,22 @@ pub struct DocumentLoadRequest {
     pub selection_generation: u64,
 }
 
+/// 外部修改与本地 dirty 内容冲突后的显式用户决策。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ConflictResolution {
+    ReloadFromDisk,
+    SaveCopy,
+    RetrySave,
+    Cancel,
+}
+
+/// 不依赖 runtime tab 的冲突处理请求；产品边界负责从 identity 解析活动 tab。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct SaveConflictRequest {
+    pub identity: DocumentIdentity,
+    pub resolution: ConflictResolution,
+}
+
 /// 产品层的类型化用户动作。
 #[derive(Clone, Debug, PartialEq)]
 pub enum NotoraAction {
@@ -45,6 +61,9 @@ pub enum NotoraAction {
     CreateRequested(DocumentKind),
     RenameRequested { note_id: notora_core::NoteId, new_file_name: PathBuf },
     MoveRequested { note_id: notora_core::NoteId, target_directory: PathBuf },
+    SaveConflictDetected { identity: DocumentIdentity, content_revision: u64 },
+    SaveConflictResolutionRequested(ConflictResolution),
+    SaveConflictResolved { identity: DocumentIdentity },
     NoteCommandCompleted(NoteCommandResult),
     NoteCommandFailed(String),
     SplitterDragged { pane: Pane, logical_width: f32 },
@@ -62,6 +81,7 @@ pub enum NotoraEffect {
     PrepareDocument(DocumentLoadRequest),
     PromoteActivePreview,
     OpenExternalFiles(crate::effect_executor::ExternalOpenRequest),
+    ResolveSaveConflict(SaveConflictRequest),
     PersistLayout,
     Redraw,
 }

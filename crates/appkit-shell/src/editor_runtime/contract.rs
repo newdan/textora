@@ -70,6 +70,7 @@ pub struct EditorTabSnapshot {
     pub cursor_line: usize,
     pub cursor_column: usize,
     pub dirty: bool,
+    pub disk_revision: Option<appkit_core::file_safety::DiskRevision>,
     pub dirty_snapshot_id: Option<String>,
     pub scroll_anchor_line: usize,
     pub scroll_anchor_offset: f32,

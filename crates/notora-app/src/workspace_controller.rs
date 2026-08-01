@@ -158,6 +158,16 @@ impl WorkspaceController {
             .map_err(|_| WorkspaceControllerError::CommandWorkerDisconnected)
     }
 
+    /// 保存成功后的派生 catalog 字段由既有 worker 重建，绝不在主线程读取正文或执行 SQL。
+    pub fn request_catalog_reindex(&self) -> Result<(), WorkspaceControllerError> {
+        let session =
+            self.active_session.as_ref().ok_or(WorkspaceControllerError::NoActiveWorkspace)?;
+        session
+            .command_sender
+            .send(WorkspaceWorkerCommand::ReindexCatalog)
+            .map_err(|_| WorkspaceControllerError::CommandWorkerDisconnected)
+    }
+
     fn open_existing(
         &mut self,
         root: PathBuf,
@@ -263,6 +273,7 @@ impl WorkspaceSession {
 enum WorkspaceWorkerCommand {
     ExecuteNoteCommand(NoteCommand),
     PrepareDocument(DocumentLoadRequest),
+    ReindexCatalog,
 }
 
 fn run_indexer(
@@ -343,6 +354,9 @@ fn execute_workspace_command(
                 request,
                 event_sender,
             );
+        }
+        WorkspaceWorkerCommand::ReindexCatalog => {
+            index_workspace(workspace, catalog, workspace_id, workspace_generation, event_sender);
         }
     }
 }

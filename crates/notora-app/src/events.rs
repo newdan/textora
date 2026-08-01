@@ -38,10 +38,13 @@ impl ApplicationHandler<ShellEvent> for NotoraApp {
     fn user_event(&mut self, _event_loop: &ActiveEventLoop, event: ShellEvent) {
         match event {
             ShellEvent::ProductWake => self.drain_product_events(),
+            ShellEvent::SaveResultsReady => {
+                self.drain_runtime_save_completions();
+                self.request_window_redraw();
+            }
             ShellEvent::StartBackgroundServices
             | ShellEvent::ReshapeResultsReady
-            | ShellEvent::FileSafetyResultsReady
-            | ShellEvent::SaveResultsReady => self.request_window_redraw(),
+            | ShellEvent::FileSafetyResultsReady => self.request_window_redraw(),
         }
     }
 
@@ -137,6 +140,10 @@ impl ApplicationHandler<ShellEvent> for NotoraApp {
                     self.request_external_file_dialog();
                     return;
                 }
+                if is_save_shortcut(key_code, modifiers) {
+                    self.request_manual_save();
+                    return;
+                }
                 let key_event = ui::Event::KeyDown(key_code, modifiers);
                 if !self.route_product_event(&key_event) {
                     let _ = self.runtime_accepts_keyboard_input();
@@ -152,15 +159,23 @@ impl ApplicationHandler<ShellEvent> for NotoraApp {
     }
 
     fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
+        self.process_due_autosaves();
         if self.take_redraw_request() {
             self.request_window_redraw();
         }
-        event_loop.set_control_flow(ControlFlow::Wait);
+        event_loop.set_control_flow(
+            self.next_autosave_deadline().map(ControlFlow::WaitUntil).unwrap_or(ControlFlow::Wait),
+        );
     }
 }
 
 fn is_open_external_shortcut(key_code: ui::KeyCode, modifiers: Modifiers) -> bool {
     matches!(key_code, ui::KeyCode::Char('o') | ui::KeyCode::Char('O'))
+        && (modifiers.cmd || modifiers.ctrl)
+}
+
+fn is_save_shortcut(key_code: ui::KeyCode, modifiers: Modifiers) -> bool {
+    matches!(key_code, ui::KeyCode::Char('s') | ui::KeyCode::Char('S'))
         && (modifiers.cmd || modifiers.ctrl)
 }
 
@@ -178,7 +193,7 @@ mod tests {
     use appkit_shell::editor_runtime::EditorFocus;
     use ui::core::Modifiers;
 
-    use super::{editor_input_context, is_open_external_shortcut};
+    use super::{editor_input_context, is_open_external_shortcut, is_save_shortcut};
     use crate::{FocusTarget, NotoraState, OverlayState, shell::layout::ShellLayoutInput};
 
     fn layout() -> crate::shell::layout::ShellLayout {
@@ -219,5 +234,18 @@ mod tests {
             Modifiers { ctrl: true, ..Modifiers::NONE }
         ));
         assert!(!is_open_external_shortcut(ui::KeyCode::Char('o'), Modifiers::NONE));
+    }
+
+    #[test]
+    fn command_or_control_s_uses_the_explicit_save_shortcut() {
+        assert!(is_save_shortcut(
+            ui::KeyCode::Char('s'),
+            Modifiers { cmd: true, ..Modifiers::NONE }
+        ));
+        assert!(is_save_shortcut(
+            ui::KeyCode::Char('S'),
+            Modifiers { ctrl: true, ..Modifiers::NONE }
+        ));
+        assert!(!is_save_shortcut(ui::KeyCode::Char('s'), Modifiers::NONE));
     }
 }

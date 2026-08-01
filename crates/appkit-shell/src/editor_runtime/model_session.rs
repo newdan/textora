@@ -338,6 +338,7 @@ impl ModelSession {
                     cursor_line: document.cursor_line(),
                     cursor_column: document.cursor_column(),
                     dirty: document.dirty,
+                    disk_revision: document.disk_revision.clone(),
                     dirty_snapshot_id: document.dirty_snapshot_id.clone(),
                     scroll_anchor_line: scroll_anchor.doc_line,
                     scroll_anchor_offset: scroll_anchor.pixel_offset,

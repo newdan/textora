@@ -51,6 +51,12 @@ pub enum NotoraProductEvent {
         request: DocumentLoadRequest,
         message: String,
     },
+    ConflictCopyCompleted {
+        workspace_id: WorkspaceId,
+        workspace_generation: u64,
+        identity: notora_core::DocumentIdentity,
+        result: Result<(), String>,
+    },
 }
 
 #[derive(Clone)]
@@ -167,6 +173,11 @@ impl NotoraProduct {
             | NotoraProductEvent::DocumentLoaded { workspace_id, workspace_generation, .. }
             | NotoraProductEvent::DocumentLoadFailed {
                 workspace_id, workspace_generation, ..
+            }
+            | NotoraProductEvent::ConflictCopyCompleted {
+                workspace_id,
+                workspace_generation,
+                ..
             } => (*workspace_id, *workspace_generation),
         };
         self.active_workspace == Some(event_workspace)

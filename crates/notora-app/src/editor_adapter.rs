@@ -20,6 +20,7 @@ const TEXT_ROUTE_PRIORITY: u16 = 100;
 pub struct LoadedDocument {
     pub path: PathBuf,
     pub contents: String,
+    pub disk_revision: Option<appkit_core::file_safety::DiskRevision>,
 }
 
 /// 文件读取和 `PreparedTab` 构造失败。
@@ -27,6 +28,7 @@ pub struct LoadedDocument {
 #[allow(dead_code, reason = "N3-7 surfaces preparation failures through product events")]
 pub(crate) enum DocumentPreparationError {
     Read { path: PathBuf, source: std::io::Error },
+    Revision { path: PathBuf, source: appkit_core::file_safety::FileSafetyError },
     Buffer { message: String },
 }
 
@@ -35,6 +37,13 @@ impl std::fmt::Display for DocumentPreparationError {
         match self {
             Self::Read { path, source } => {
                 write!(formatter, "could not read {}: {source}", path.display())
+            }
+            Self::Revision { path, source } => {
+                write!(
+                    formatter,
+                    "could not capture disk revision for {}: {source}",
+                    path.display()
+                )
             }
             Self::Buffer { message } => {
                 write!(formatter, "could not prepare document buffer: {message}")
@@ -47,6 +56,7 @@ impl std::error::Error for DocumentPreparationError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
             Self::Read { source, .. } => Some(source),
+            Self::Revision { source, .. } => Some(source),
             Self::Buffer { .. } => None,
         }
     }
@@ -57,7 +67,10 @@ impl std::error::Error for DocumentPreparationError {
 pub(crate) fn load_document(path: &Path) -> Result<LoadedDocument, DocumentPreparationError> {
     let contents = std::fs::read_to_string(path)
         .map_err(|source| DocumentPreparationError::Read { path: path.to_path_buf(), source })?;
-    Ok(LoadedDocument { path: path.to_path_buf(), contents })
+    let disk_revision = appkit_core::file_safety::capture_revision(path).map_err(|source| {
+        DocumentPreparationError::Revision { path: path.to_path_buf(), source }
+    })?;
+    Ok(LoadedDocument { path: path.to_path_buf(), contents, disk_revision: Some(disk_revision) })
 }
 
 /// 仅在主线程调用：将已读取文本与产品路由组合为完整 `PreparedTab`。
@@ -71,6 +84,7 @@ pub(crate) fn prepare_loaded_document(
     text_buffer.write_raw(loaded.contents.as_bytes());
     let mut document = appkit_core::document::DocumentModel::new(text_buffer);
     document.file_path = Some(loaded.path.clone());
+    document.disk_revision = loaded.disk_revision;
     document.set_language_from_path(&loaded.path);
     Ok(PreparedTab::new(document, TabRuntime::new(runtime.create_plugin_for_path(&loaded.path))))
 }

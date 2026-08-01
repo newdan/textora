@@ -5,6 +5,8 @@
 //! 子任务中逐步实现。
 
 mod app;
+pub mod autosave;
+pub mod dirty_snapshot;
 pub mod document_registry;
 mod editor_adapter;
 pub mod effect_executor;
