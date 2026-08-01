@@ -2,7 +2,7 @@ use rusqlite::{Connection, Transaction};
 
 use super::{CatalogError, CatalogError::UnsupportedSchema};
 
-pub const CATALOG_SCHEMA_VERSION: u32 = 1;
+pub const CATALOG_SCHEMA_VERSION: u32 = 2;
 
 const INITIAL_SCHEMA: &str = r#"
 CREATE TABLE notes (
@@ -41,6 +41,30 @@ CREATE TABLE trash_entries (
 );
 "#;
 
+const FULL_TEXT_SEARCH_SCHEMA: &str = r#"
+CREATE VIRTUAL TABLE note_search USING fts5(
+    note_id UNINDEXED,
+    title,
+    relative_path,
+    body,
+    tags,
+    tokenize = 'trigram'
+);
+
+CREATE INDEX notes_active_modified_path_index
+ON notes(lifecycle, modified_ns DESC, relative_path ASC, note_id ASC);
+"#;
+
+const FTS5_TRIGRAM_CAPABILITY_PROBE: &str = "CREATE VIRTUAL TABLE temp.notora_fts5_trigram_probe USING fts5(contents, tokenize = 'trigram');";
+const FTS5_TRIGRAM_CAPABILITY_CLEANUP: &str = "DROP TABLE temp.notora_fts5_trigram_probe;";
+
+pub(super) fn verify_fts5_trigram_support(connection: &Connection) -> Result<(), CatalogError> {
+    connection
+        .execute_batch(FTS5_TRIGRAM_CAPABILITY_PROBE)
+        .map_err(fts5_trigram_capability_error)?;
+    connection.execute_batch(FTS5_TRIGRAM_CAPABILITY_CLEANUP).map_err(fts5_trigram_capability_error)
+}
+
 pub(super) fn migrate(connection: &mut Connection) -> Result<(), CatalogError> {
     let schema_version = schema_version(connection)?;
     if schema_version > CATALOG_SCHEMA_VERSION {
@@ -65,12 +89,22 @@ pub(super) fn schema_version(connection: &Connection) -> Result<u32, CatalogErro
 
 fn apply_pending_migrations(
     transaction: &Transaction<'_>,
-    schema_version: u32,
+    mut schema_version: u32,
 ) -> Result<(), CatalogError> {
     if schema_version == 0 {
         transaction
             .execute_batch(INITIAL_SCHEMA)
             .map_err(|source| CatalogError::sql("initial schema migration", source))?;
+        transaction
+            .pragma_update(None, "user_version", 1_u32)
+            .map_err(|source| CatalogError::sql("schema version write", source))?;
+        schema_version = 1;
+    }
+
+    if schema_version == 1 {
+        transaction
+            .execute_batch(FULL_TEXT_SEARCH_SCHEMA)
+            .map_err(full_text_search_schema_error)?;
         transaction
             .pragma_update(None, "user_version", CATALOG_SCHEMA_VERSION)
             .map_err(|source| CatalogError::sql("schema version write", source))?;
@@ -78,4 +112,103 @@ fn apply_pending_migrations(
     }
 
     Err(UnsupportedSchema { found: schema_version })
+}
+
+fn fts5_trigram_capability_error(source: rusqlite::Error) -> CatalogError {
+    CatalogError::Fts5TrigramUnavailable { source }
+}
+
+fn full_text_search_schema_error(source: rusqlite::Error) -> CatalogError {
+    if is_missing_fts5_trigram_support(&source) {
+        return CatalogError::Fts5TrigramUnavailable { source };
+    }
+
+    CatalogError::sql("full-text search schema migration", source)
+}
+
+fn is_missing_fts5_trigram_support(source: &rusqlite::Error) -> bool {
+    let diagnostic = source.to_string();
+    diagnostic.contains("no such module: fts5")
+        || diagnostic.contains("no such tokenizer: trigram")
+        || diagnostic.contains("unknown tokenizer: trigram")
+}
+
+#[cfg(test)]
+mod tests {
+    use rusqlite::Connection;
+
+    use super::{
+        CATALOG_SCHEMA_VERSION, INITIAL_SCHEMA, migrate, schema_version,
+        verify_fts5_trigram_support,
+    };
+
+    #[test]
+    fn bundled_sqlite_supports_fts5_trigram() {
+        let connection = Connection::open_in_memory().expect("in-memory catalog should open");
+
+        verify_fts5_trigram_support(&connection)
+            .expect("bundled SQLite must support the FTS5 trigram tokenizer");
+    }
+
+    #[test]
+    fn version_one_catalog_migrates_to_fts_schema_atomically() {
+        let mut connection = Connection::open_in_memory().expect("in-memory catalog should open");
+        connection
+            .execute_batch(INITIAL_SCHEMA)
+            .expect("version one schema fixture should initialize");
+        connection
+            .pragma_update(None, "user_version", 1_u32)
+            .expect("version one schema fixture should be marked");
+
+        migrate(&mut connection).expect("FTS schema migration should succeed");
+
+        assert_eq!(
+            schema_version(&connection).expect("schema version should be readable"),
+            CATALOG_SCHEMA_VERSION
+        );
+        let fts_definition: String = connection
+            .query_row(
+                "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'note_search'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("FTS table definition should exist");
+        assert!(fts_definition.contains("tokenize = 'trigram'"));
+        let paging_index_exists: bool = connection
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type = 'index' AND name = 'notes_active_modified_path_index')",
+                [],
+                |row| row.get(0),
+            )
+            .expect("paging index lookup should succeed");
+        assert!(paging_index_exists);
+    }
+
+    #[test]
+    fn failed_fts_migration_keeps_the_version_one_schema_usable() {
+        let mut connection = Connection::open_in_memory().expect("in-memory catalog should open");
+        connection
+            .execute_batch(INITIAL_SCHEMA)
+            .expect("version one schema fixture should initialize");
+        connection
+            .execute_batch("CREATE TABLE note_search (note_id TEXT NOT NULL);")
+            .expect("conflicting FTS fixture should initialize");
+        connection
+            .pragma_update(None, "user_version", 1_u32)
+            .expect("version one schema fixture should be marked");
+
+        assert!(matches!(
+            migrate(&mut connection),
+            Err(super::CatalogError::Sql { operation: "full-text search schema migration", .. })
+        ));
+        assert_eq!(schema_version(&connection).expect("schema version should remain readable"), 1);
+        let paging_index_exists: bool = connection
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type = 'index' AND name = 'notes_active_modified_path_index')",
+                [],
+                |row| row.get(0),
+            )
+            .expect("paging index lookup should succeed");
+        assert!(!paging_index_exists);
+    }
 }

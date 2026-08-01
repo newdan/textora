@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 
 use appkit_shell::editor_runtime::{EditorFrame, RenderError};
-use notora_core::NavigationScope;
+use notora_core::{DocumentIdentity, DocumentKind, NavigationScope};
 use ui::core::WidgetAction;
 use ui::core::widget::{ControlAction, TextPayload, WidgetId};
 use ui::icon::draw_icon;
@@ -13,12 +13,15 @@ use ui::tree_list::{
     TreeRowSelection,
 };
 use ui::virtual_card_list::{
-    CardInput, CardKey, VirtualCardListAction, VirtualCardListInput, VirtualCardListWidget,
+    CardInput, CardKey, CardSelection, VirtualCardListAction, VirtualCardListInput,
+    VirtualCardListWidget,
 };
 use ui::{Event, EventCtx, Rect, Widget};
 
 use crate::action::NotoraAction;
+use crate::external_files::ExternalFileSession;
 use crate::shell::layout::ShellLayout;
+use crate::state::CardPageState;
 use crate::{FocusTarget, NotoraState, OverlayState, Pane, ResponsiveLayoutMode};
 
 const GLOBAL_SEARCH_BOX_ID: WidgetId = WidgetId(9_000);
@@ -29,13 +32,27 @@ const SHELL_PADDING_LOGICAL: f32 = 12.0;
 const SIDEBAR_CONTROL_HEIGHT_LOGICAL: f32 = 32.0;
 const SIDEBAR_ICON_SIZE_LOGICAL: f32 = 16.0;
 const SIDEBAR_LABEL_FONT_SIZE_LOGICAL: f32 = 15.0;
+const CARD_LOAD_MORE_THRESHOLD_LOGICAL: f32 = 160.0;
+
+/// UI 之前的产品展示卡片；保持领域身份，避免将 app 状态泄漏给 ui crate。
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RenderCard {
+    pub identity: DocumentIdentity,
+    pub title: String,
+    pub excerpt: String,
+    pub timestamp: String,
+    pub icon: Option<String>,
+    pub tag_summary: String,
+}
 
 /// 静态产品壳所需的纯展示输入。领域状态在此映射后不再传入 widget。
 #[derive(Clone, Debug, Default)]
 pub struct NotoraRenderModel {
     pub search_query: String,
     pub navigation_rows: Vec<TreeRowInput>,
-    pub cards: Vec<CardInput>,
+    pub cards: Vec<RenderCard>,
+    pub selected_card: Option<DocumentIdentity>,
+    pub card_scroll_offset_px: f32,
     pub card_list_title: String,
     pub show_settings_overlay: bool,
     pub show_menu: bool,
@@ -57,14 +74,13 @@ impl NotoraRenderModel {
             navigation_row(3, "Trash", "trash-2", NavigationScope::Trash, selected_scope),
             navigation_row(4, "Files", "file", NavigationScope::ExternalFiles, selected_scope),
         ];
-        let search_query = match selected_scope {
-            NavigationScope::Search { query } => query.clone(),
-            _ => String::new(),
-        };
+        let search_query = state.library.search_text.clone();
         Self {
             search_query,
             navigation_rows,
-            cards: Vec::new(),
+            cards: render_cards(state),
+            selected_card: state.library.selected_card,
+            card_scroll_offset_px: state.library.card_scroll_offset_px,
             card_list_title: card_list_title(selected_scope).to_owned(),
             show_settings_overlay: state.layout.overlay == OverlayState::Settings,
             show_menu: false,
@@ -84,6 +100,8 @@ pub struct NotoraShell {
     card_list_splitter: SplitterWidget,
     navigation_actions: HashMap<TreeRowKey, NotoraAction>,
     card_actions: HashMap<CardKey, NotoraAction>,
+    card_keys: HashMap<DocumentIdentity, CardKey>,
+    next_card_key: u64,
     search_rect: Rect,
     navigation_tree_rect: Rect,
     card_content_rect: Rect,
@@ -112,6 +130,8 @@ impl NotoraShell {
             card_list_splitter: SplitterWidget::new(),
             navigation_actions: HashMap::new(),
             card_actions: HashMap::new(),
+            card_keys: HashMap::new(),
+            next_card_key: 1,
             search_rect: Rect::ZERO,
             navigation_tree_rect: Rect::ZERO,
             card_content_rect: Rect::ZERO,
@@ -127,12 +147,35 @@ impl NotoraShell {
             }
         }
         self.card_actions.clear();
+        let cards = model
+            .cards
+            .iter()
+            .map(|card| {
+                let key = self.card_key_for(card.identity);
+                self.card_actions.insert(key, NotoraAction::CardSelected(card.identity));
+                CardInput {
+                    key,
+                    title: card.title.clone(),
+                    excerpt: card.excerpt.clone(),
+                    timestamp: card.timestamp.clone(),
+                    icon: card.icon.clone(),
+                    tag_summary: card.tag_summary.clone(),
+                    selection: if model.selected_card == Some(card.identity) {
+                        CardSelection::Selected
+                    } else {
+                        CardSelection::Unselected
+                    },
+                }
+            })
+            .collect();
         self.navigation_tree.set_input(TreeListInput {
             rows: model.navigation_rows.clone(),
             scroll_offset_px: 0.0,
         });
-        self.card_list
-            .set_input(VirtualCardListInput { cards: model.cards.clone(), scroll_offset_px: 0.0 });
+        self.card_list.set_input(VirtualCardListInput {
+            cards,
+            scroll_offset_px: model.card_scroll_offset_px,
+        });
         self.search_box.sync_text(&model.search_query);
         self.card_empty_state.set_input(StatusStateInput {
             kind: StatusStateKind::Empty,
@@ -301,6 +344,16 @@ impl NotoraShell {
             WidgetAction::VirtualCardList(VirtualCardListAction::Selected(key)) => {
                 self.card_actions.get(key).cloned()
             }
+            WidgetAction::VirtualCardList(VirtualCardListAction::ScrollOffsetChanged(
+                offset_px,
+            )) => {
+                let layout = self.card_list.layout();
+                let remaining_px = layout.content_height_px - (*offset_px + layout.viewport_rect.h);
+                Some(NotoraAction::CardListScrolled {
+                    offset_px: *offset_px,
+                    near_end: remaining_px <= CARD_LOAD_MORE_THRESHOLD_LOGICAL,
+                })
+            }
             WidgetAction::Control(ui::core::widget::ControlAction::Activated { id })
                 if *id == SETTINGS_BUTTON_ID =>
             {
@@ -309,7 +362,7 @@ impl NotoraShell {
             WidgetAction::Control(ControlAction::TextEdited {
                 id: GLOBAL_SEARCH_BOX_ID,
                 value: TextPayload::Plain(query),
-            }) => Some(NotoraAction::SearchCommitted(query.clone())),
+            }) => Some(NotoraAction::SearchTextChanged(query.clone())),
             WidgetAction::Control(ControlAction::FocusRequested { id: GLOBAL_SEARCH_BOX_ID }) => {
                 Some(NotoraAction::FocusRequested(FocusTarget::NavigationSearch))
             }
@@ -388,6 +441,102 @@ impl NotoraShell {
     pub fn settings_button_id(&self) -> WidgetId {
         SETTINGS_BUTTON_ID
     }
+
+    fn card_key_for(&mut self, identity: DocumentIdentity) -> CardKey {
+        if let Some(key) = self.card_keys.get(&identity) {
+            return *key;
+        }
+        let key = CardKey(self.next_card_key);
+        self.next_card_key = self.next_card_key.wrapping_add(1).max(1);
+        self.card_keys.insert(identity, key);
+        key
+    }
+}
+
+fn render_cards(state: &NotoraState) -> Vec<RenderCard> {
+    if state.library.navigation_scope == NavigationScope::ExternalFiles {
+        return state.external_files.sessions().iter().map(render_external_file_card).collect();
+    }
+    match &state.library.card_page {
+        CardPageState::Ready { cards, .. }
+        | CardPageState::LoadingNextPage { cards, .. }
+        | CardPageState::Failed { cards, .. } => cards.iter().map(render_catalog_card).collect(),
+        CardPageState::Idle
+        | CardPageState::LoadingInitial { .. }
+        | CardPageState::Empty { .. } => Vec::new(),
+    }
+}
+
+fn render_catalog_card(card: &notora_core::CatalogCard) -> RenderCard {
+    let mut summary_parts = Vec::with_capacity(card.tags.len() + usize::from(card.starred));
+    if card.starred {
+        summary_parts.push("★".to_owned());
+    }
+    summary_parts.extend(card.tags.iter().map(|tag| format!("#{tag}")));
+    RenderCard {
+        identity: DocumentIdentity::Note(card.note_id),
+        title: card.title.clone(),
+        excerpt: card.excerpt.clone(),
+        timestamp: format_modified_timestamp(card.modified_nanoseconds),
+        icon: Some(document_icon(card.kind).to_owned()),
+        tag_summary: summary_parts.join(" "),
+    }
+}
+
+fn render_external_file_card(session: &ExternalFileSession) -> RenderCard {
+    match session {
+        ExternalFileSession::Existing { canonical_path, .. } => RenderCard {
+            identity: session.identity(),
+            title: canonical_path
+                .as_path()
+                .file_name()
+                .and_then(|name| name.to_str())
+                .unwrap_or("Untitled")
+                .to_owned(),
+            excerpt: canonical_path.as_path().display().to_string(),
+            timestamp: "External file".to_owned(),
+            icon: Some(
+                document_icon(
+                    DocumentKind::from_path(canonical_path.as_path()).unwrap_or(DocumentKind::Text),
+                )
+                .to_owned(),
+            ),
+            tag_summary: String::new(),
+        },
+        ExternalFileSession::Untitled { kind, .. } => RenderCard {
+            identity: session.identity(),
+            title: "Untitled".to_owned(),
+            excerpt: "Unsaved external file".to_owned(),
+            timestamp: "External file".to_owned(),
+            icon: Some(document_icon(*kind).to_owned()),
+            tag_summary: String::new(),
+        },
+        ExternalFileSession::Missing { last_known_path, .. } => RenderCard {
+            identity: session.identity(),
+            title: last_known_path
+                .file_name()
+                .and_then(|name| name.to_str())
+                .unwrap_or("Missing file")
+                .to_owned(),
+            excerpt: last_known_path.display().to_string(),
+            timestamp: "Missing".to_owned(),
+            icon: Some("file-warning".to_owned()),
+            tag_summary: String::new(),
+        },
+    }
+}
+
+fn document_icon(kind: DocumentKind) -> &'static str {
+    match kind {
+        DocumentKind::Text => "file-text",
+        DocumentKind::Markdown => "file-code-2",
+        DocumentKind::Mindmap => "git-fork",
+    }
+}
+
+fn format_modified_timestamp(modified_nanoseconds: i64) -> String {
+    let seconds = modified_nanoseconds.div_euclid(1_000_000_000);
+    format!("Modified {seconds}")
 }
 
 fn pointer_target(event: &Event, shell: &NotoraShell) -> Option<FocusTarget> {
@@ -487,6 +636,9 @@ fn card_list_title(scope: &NavigationScope) -> &'static str {
 mod tests {
     use super::*;
     use crate::NotoraState;
+    use crate::action::CardQuery;
+    use crate::state::CardPageState;
+    use notora_core::{CatalogCard, DocumentIdentity, DocumentKind, NavigationScope, NoteId};
 
     #[test]
     fn builds_a_static_render_model() {
@@ -524,7 +676,48 @@ mod tests {
                 id: GLOBAL_SEARCH_BOX_ID,
                 value: TextPayload::Plain("roadmap".to_owned()),
             })),
-            Some(NotoraAction::SearchCommitted("roadmap".to_owned()))
+            Some(NotoraAction::SearchTextChanged("roadmap".to_owned()))
         );
+    }
+
+    #[test]
+    fn virtual_cards_map_catalog_dtos_with_stable_keys_and_selection() {
+        let note_id = NoteId::generate();
+        let identity = DocumentIdentity::Note(note_id);
+        let mut state = NotoraState::default();
+        state.library.selected_card = Some(identity);
+        state.library.card_scroll_offset_px = 36.0;
+        state.library.card_page = CardPageState::Ready {
+            query: CardQuery::from(NavigationScope::WorkspaceRoot),
+            cards: vec![CatalogCard {
+                note_id,
+                relative_path: "notes/roadmap.md".into(),
+                kind: DocumentKind::Markdown,
+                title: "Roadmap".to_owned(),
+                excerpt: "Ship virtual cards".to_owned(),
+                modified_nanoseconds: 42,
+                starred: true,
+                tags: vec!["plan".to_owned()],
+            }],
+            next_cursor: None,
+        };
+        let model = NotoraRenderModel::from_state(&state);
+        assert_eq!(model.cards.len(), 1);
+        assert_eq!(model.cards[0].tag_summary, "★ #plan");
+
+        let mut shell = NotoraShell::new();
+        shell.update_model(&model);
+        let first_key = shell.card_list.input().cards[0].key;
+        assert_eq!(shell.card_list.input().scroll_offset_px, 36.0);
+        assert_eq!(shell.card_list.input().cards[0].selection, CardSelection::Selected);
+        assert_eq!(
+            shell.translate_widget_action(&WidgetAction::VirtualCardList(
+                VirtualCardListAction::Selected(first_key),
+            )),
+            Some(NotoraAction::CardSelected(identity))
+        );
+
+        shell.update_model(&model);
+        assert_eq!(shell.card_list.input().cards[0].key, first_key);
     }
 }

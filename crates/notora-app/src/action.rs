@@ -13,6 +13,19 @@ use crate::state::{FocusTarget, Pane};
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct CardQuery {
     pub scope: NavigationScope,
+    pub cursor: Option<CardPageCursor>,
+    pub page_size: usize,
+}
+
+/// 由稳定排序键组成的下一页游标；绝不依赖会因实时更新漂移的裸 offset。
+pub use notora_core::CatalogCardCursor as CardPageCursor;
+
+pub const DEFAULT_CARD_PAGE_SIZE: usize = 50;
+
+impl CardQuery {
+    pub fn next_page(&self, cursor: CardPageCursor) -> Self {
+        Self { scope: self.scope.clone(), cursor: Some(cursor), page_size: self.page_size }
+    }
 }
 
 /// 新建笔记的有效目标。回收站不是有效目标。
@@ -52,7 +65,11 @@ pub struct SaveConflictRequest {
 #[derive(Clone, Debug, PartialEq)]
 pub enum NotoraAction {
     NavigationSelected(NavigationScope),
+    SearchTextChanged(String),
     SearchCommitted(String),
+    CardQueryCompleted { query: CardQuery, page: notora_core::CatalogCardPage },
+    CardQueryFailed { query: CardQuery, message: String },
+    CardListScrolled { offset_px: f32, near_end: bool },
     CardSelected(DocumentIdentity),
     OpenExternalFileDialogRequested,
     ExternalPathsReceived(Vec<PathBuf>),
@@ -106,18 +123,33 @@ pub fn move_note_command(note_id: notora_core::NoteId, target_directory: PathBuf
 
 impl From<NavigationScope> for CardQuery {
     fn from(scope: NavigationScope) -> Self {
-        Self { scope }
+        Self { scope, cursor: None, page_size: DEFAULT_CARD_PAGE_SIZE }
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::CardQuery;
+    use super::{CardPageCursor, CardQuery, DEFAULT_CARD_PAGE_SIZE};
     use notora_core::NavigationScope;
 
     #[test]
     fn card_query_keeps_navigation_scope_typed() {
         let query = CardQuery::from(NavigationScope::Starred);
         assert_eq!(query.scope, NavigationScope::Starred);
+        assert_eq!(query.cursor, None);
+        assert_eq!(query.page_size, DEFAULT_CARD_PAGE_SIZE);
+    }
+
+    #[test]
+    fn next_page_retains_scope_and_uses_a_typed_stable_cursor() {
+        let cursor = CardPageCursor {
+            modified_nanoseconds: 42,
+            relative_path: "notes/roadmap.md".into(),
+            note_id: notora_core::NoteId::generate(),
+        };
+        let next_query = CardQuery::from(NavigationScope::WorkspaceRoot).next_page(cursor.clone());
+
+        assert_eq!(next_query.scope, NavigationScope::WorkspaceRoot);
+        assert_eq!(next_query.cursor, Some(cursor));
     }
 }

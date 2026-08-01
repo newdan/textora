@@ -1,12 +1,16 @@
+mod card_repository;
 mod migration;
 mod note_repository;
+mod search_repository;
 
 use std::path::Path;
 
 use rusqlite::Connection;
 
+pub use card_repository::{CatalogCard, CatalogCardCursor, CatalogCardPage};
 pub use migration::CATALOG_SCHEMA_VERSION;
 pub use note_repository::CatalogNote;
+pub use search_repository::SearchIndexEntry;
 
 /// 已完成基础迁移的工作区 catalog 连接。
 pub struct Catalog {
@@ -18,6 +22,7 @@ impl Catalog {
         let mut connection = Connection::open(path)
             .map_err(|source| CatalogError::Open { path: path.to_path_buf(), source })?;
         configure_connection(&connection)?;
+        migration::verify_fts5_trigram_support(&connection)?;
         migration::migrate(&mut connection)?;
 
         Ok(Self { connection })
@@ -36,6 +41,7 @@ impl Catalog {
 pub enum CatalogError {
     Open { path: std::path::PathBuf, source: rusqlite::Error },
     Sql { operation: &'static str, source: rusqlite::Error },
+    Fts5TrigramUnavailable { source: rusqlite::Error },
     UnsupportedSchema { found: u32 },
     InvalidStoredValue { column: &'static str, value: String },
 }
@@ -55,6 +61,12 @@ impl std::fmt::Display for CatalogError {
             Self::Sql { operation, source } => {
                 write!(formatter, "catalog {operation} failed: {source}")
             }
+            Self::Fts5TrigramUnavailable { source } => {
+                write!(
+                    formatter,
+                    "catalog requires SQLite FTS5 with the trigram tokenizer: {source}"
+                )
+            }
             Self::UnsupportedSchema { found } => {
                 write!(formatter, "unsupported catalog schema version: {found}")
             }
@@ -68,7 +80,9 @@ impl std::fmt::Display for CatalogError {
 impl std::error::Error for CatalogError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
-            Self::Open { source, .. } | Self::Sql { source, .. } => Some(source),
+            Self::Open { source, .. }
+            | Self::Sql { source, .. }
+            | Self::Fts5TrigramUnavailable { source } => Some(source),
             Self::UnsupportedSchema { .. } | Self::InvalidStoredValue { .. } => None,
         }
     }

@@ -34,6 +34,7 @@ use crate::external_files::{
 };
 use crate::product::NotoraProduct;
 use crate::render::{NotoraRenderModel, NotoraShell};
+use crate::search_controller::SearchController;
 use crate::shell::layout::{ShellLayout, ShellLayoutInput};
 use crate::{
     NotoraPaths, NotoraPathsError, NotoraState, WorkspaceCommand, WorkspaceCommandResult,
@@ -91,6 +92,7 @@ pub struct NotoraApp {
     autosave: AutoSaveScheduler,
     pending_external_save_as: HashMap<appkit_core::workspace::types::TabId, PendingExternalSaveAs>,
     catalog_reconciliation_pending: bool,
+    search_controller: SearchController,
     editor_runtime: EditorRuntime,
     shell: NotoraShell,
     window_focused: bool,
@@ -127,6 +129,7 @@ impl NotoraApp {
             autosave: AutoSaveScheduler::new(),
             pending_external_save_as: HashMap::new(),
             catalog_reconciliation_pending: false,
+            search_controller: SearchController::default(),
             editor_runtime,
             shell: NotoraShell::new(),
             window_focused: true,
@@ -206,6 +209,15 @@ impl NotoraApp {
         command: WorkspaceCommand,
     ) -> Result<WorkspaceCommandResult, WorkspaceControllerError> {
         let result = self.workspace_controller.execute(command, &mut self.product)?;
+        match &result {
+            WorkspaceCommandResult::Opened(workspace) => self
+                .search_controller
+                .set_active_workspace(workspace.descriptor.workspace_id, workspace.generation),
+            WorkspaceCommandResult::Closed { .. } => {
+                self.search_controller.clear_active_workspace()
+            }
+            WorkspaceCommandResult::Unchanged => {}
+        }
         if !matches!(result, WorkspaceCommandResult::Unchanged) {
             self.autosave.clear();
             self.pending_external_save_as.clear();
@@ -226,9 +238,20 @@ impl NotoraApp {
     }
 
     pub fn dispatch_action(&mut self, action: NotoraAction) {
+        let committed_without_workspace = match &action {
+            NotoraAction::SearchTextChanged(query) => {
+                !self.search_controller.schedule_committed_query(query.clone(), Instant::now())
+            }
+            _ => false,
+        };
         for effect in self.state.reduce(action) {
             let shell_effect = EffectExecutor::execute(self, effect);
             self.apply_shell_effect(shell_effect);
+        }
+        if committed_without_workspace {
+            self.dispatch_action(NotoraAction::SearchCommitted(
+                self.state.library.search_text.clone(),
+            ));
         }
     }
 
@@ -267,8 +290,21 @@ impl NotoraApp {
         }
     }
 
-    pub(crate) fn next_autosave_deadline(&self) -> Option<std::time::Instant> {
-        self.autosave.next_deadline()
+    pub(crate) fn process_due_searches(&mut self) {
+        let Some(request) = self.search_controller.take_due_request(Instant::now()) else {
+            return;
+        };
+        self.dispatch_action(NotoraAction::SearchCommitted(request.query));
+    }
+
+    pub(crate) fn next_deadline(&self) -> Option<std::time::Instant> {
+        match (self.autosave.next_deadline(), self.search_controller.next_deadline()) {
+            (Some(autosave_deadline), Some(search_deadline)) => {
+                Some(autosave_deadline.min(search_deadline))
+            }
+            (Some(deadline), None) | (None, Some(deadline)) => Some(deadline),
+            (None, None) => None,
+        }
     }
 
     pub(crate) fn drain_runtime_save_completions(&mut self) {
@@ -424,8 +460,13 @@ impl NotoraApp {
                 crate::product::NotoraProductEvent::WorkspaceIndexFailed { .. } => {
                     self.catalog_reconciliation_pending = true;
                 }
-                crate::product::NotoraProductEvent::CardQueryCompleted { .. }
-                | crate::product::NotoraProductEvent::WorkspaceChanged { .. } => {}
+                crate::product::NotoraProductEvent::CardQueryCompleted { query, page, .. } => {
+                    self.dispatch_action(NotoraAction::CardQueryCompleted { query, page });
+                }
+                crate::product::NotoraProductEvent::CardQueryFailed { query, message, .. } => {
+                    self.dispatch_action(NotoraAction::CardQueryFailed { query, message });
+                }
+                crate::product::NotoraProductEvent::WorkspaceChanged { .. } => {}
             }
         }
         self.apply_shell_effect(effect);
@@ -885,7 +926,14 @@ impl Default for NotoraApp {
 }
 
 impl NotoraEffectService for NotoraApp {
-    fn query_cards(&mut self, _query: CardQuery) {}
+    fn query_cards(&mut self, query: CardQuery) {
+        if let Err(error) = self.workspace_controller.query_cards(query.clone()) {
+            self.dispatch_action(NotoraAction::CardQueryFailed {
+                query,
+                message: error.to_string(),
+            });
+        }
+    }
 
     fn request_note_creation(&mut self, _kind: DocumentKind, _target: NoteCreationTarget) {}
 

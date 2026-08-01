@@ -3,7 +3,7 @@ use std::sync::{Arc, Mutex, mpsc};
 
 use appkit_shell::{ProductHost, ProductWakeHandle, ShellEffect};
 use notora_core::note_command::NoteCommandResult;
-use notora_core::{ScanCompletion, WorkspaceId};
+use notora_core::{CatalogCardPage, ScanCompletion, WorkspaceId};
 
 use crate::action::DocumentLoadRequest;
 
@@ -13,6 +13,14 @@ pub enum NotoraProductEvent {
     CardQueryCompleted {
         workspace_id: WorkspaceId,
         workspace_generation: u64,
+        query: crate::action::CardQuery,
+        page: CatalogCardPage,
+    },
+    CardQueryFailed {
+        workspace_id: WorkspaceId,
+        workspace_generation: u64,
+        query: crate::action::CardQuery,
+        message: String,
     },
     WorkspaceScanCompleted {
         workspace_id: WorkspaceId,
@@ -154,7 +162,10 @@ impl NotoraProduct {
 
     fn event_matches_active_workspace(&self, event: &NotoraProductEvent) -> bool {
         let event_workspace = match event {
-            NotoraProductEvent::CardQueryCompleted { workspace_id, workspace_generation }
+            NotoraProductEvent::CardQueryCompleted {
+                workspace_id, workspace_generation, ..
+            }
+            | NotoraProductEvent::CardQueryFailed { workspace_id, workspace_generation, .. }
             | NotoraProductEvent::WorkspaceScanCompleted {
                 workspace_id,
                 workspace_generation,
@@ -264,6 +275,8 @@ mod tests {
             .send(NotoraProductEvent::CardQueryCompleted {
                 workspace_id: active_workspace_id,
                 workspace_generation: 3,
+                query: crate::action::CardQuery::from(notora_core::NavigationScope::WorkspaceRoot),
+                page: notora_core::CatalogCardPage { cards: vec![], next_cursor: None },
             })
             .expect("product receiver should be alive");
         sender

@@ -1,4 +1,6 @@
-use notora_core::{DocumentIdentity, DocumentKind, NavigationScope};
+use notora_core::{
+    CatalogCard, CatalogCardCursor, DocumentIdentity, DocumentKind, NavigationScope,
+};
 
 use crate::action::{
     CardQuery, ConflictResolution, DocumentLoadRequest, NoteCreationTarget, NotoraAction,
@@ -44,10 +46,13 @@ pub enum Pane {
 }
 
 /// 只包含产品导航、选择和卡片查询状态；编辑会话保留在 EditorRuntime。
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct LibraryState {
     pub navigation_scope: NavigationScope,
     pub search_scope_before_search: Option<NavigationScope>,
+    pub search_text: String,
+    pub card_page: CardPageState,
+    pub card_scroll_offset_px: f32,
     pub selected_card: Option<DocumentIdentity>,
     pub selected_document_generation: u64,
     pub last_command_error: Option<String>,
@@ -59,12 +64,43 @@ impl Default for LibraryState {
         Self {
             navigation_scope: NavigationScope::WorkspaceRoot,
             search_scope_before_search: None,
+            search_text: String::new(),
+            card_page: CardPageState::Idle,
+            card_scroll_offset_px: 0.0,
             selected_card: None,
             selected_document_generation: 0,
             last_command_error: None,
             save_conflict: None,
         }
     }
+}
+
+/// 中栏数据加载状态；任何时刻只表示一种结果，避免 loading/failed bool 组合。
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub enum CardPageState {
+    #[default]
+    Idle,
+    LoadingInitial {
+        query: CardQuery,
+    },
+    LoadingNextPage {
+        query: CardQuery,
+        cards: Vec<CatalogCard>,
+    },
+    Empty {
+        query: CardQuery,
+    },
+    Ready {
+        query: CardQuery,
+        cards: Vec<CatalogCard>,
+        next_cursor: Option<CatalogCardCursor>,
+    },
+    Failed {
+        query: CardQuery,
+        cards: Vec<CatalogCard>,
+        next_cursor: Option<CatalogCardCursor>,
+        message: String,
+    },
 }
 
 /// 供 shell 展示的冲突摘要；tab 映射仍保留在产品层 registry。
@@ -109,7 +145,23 @@ impl NotoraState {
     pub fn reduce(&mut self, action: NotoraAction) -> Vec<NotoraEffect> {
         match action {
             NotoraAction::NavigationSelected(scope) => self.select_navigation_scope(scope),
+            NotoraAction::SearchTextChanged(query) => {
+                self.library.search_text = query;
+                self.layout.focus_target = FocusTarget::NavigationSearch;
+                vec![NotoraEffect::Redraw]
+            }
             NotoraAction::SearchCommitted(query) => self.commit_search(query),
+            NotoraAction::CardQueryCompleted { query, page } => self.apply_card_page(query, page),
+            NotoraAction::CardQueryFailed { query, message } => {
+                self.apply_card_query_failure(query, message)
+            }
+            NotoraAction::CardListScrolled { offset_px, near_end } => {
+                self.library.card_scroll_offset_px = offset_px;
+                if near_end {
+                    return self.request_next_card_page();
+                }
+                vec![NotoraEffect::Redraw]
+            }
             NotoraAction::CardSelected(identity) => {
                 let request = self.select_document(identity);
                 self.layout.focus_target = FocusTarget::CardList;
@@ -186,16 +238,18 @@ impl NotoraState {
     fn select_navigation_scope(&mut self, scope: NavigationScope) -> Vec<NotoraEffect> {
         if !matches!(scope, NavigationScope::Search { .. }) {
             self.library.search_scope_before_search = None;
+            self.library.search_text.clear();
         }
         self.library.navigation_scope = scope.clone();
         self.layout.focus_target = FocusTarget::NavigationTree;
         if scope == NavigationScope::ExternalFiles {
             return vec![NotoraEffect::Redraw];
         }
-        vec![NotoraEffect::QueryCards(CardQuery::from(scope)), NotoraEffect::Redraw]
+        self.request_card_query(CardQuery::from(scope))
     }
 
     fn commit_search(&mut self, query: String) -> Vec<NotoraEffect> {
+        self.library.search_text = query.clone();
         if query.is_empty() {
             let scope = self
                 .library
@@ -204,7 +258,7 @@ impl NotoraState {
                 .unwrap_or(NavigationScope::WorkspaceRoot);
             self.library.navigation_scope = scope.clone();
             self.layout.focus_target = FocusTarget::NavigationTree;
-            return vec![NotoraEffect::QueryCards(CardQuery::from(scope)), NotoraEffect::Redraw];
+            return self.request_card_query(CardQuery::from(scope));
         }
 
         if self.library.search_scope_before_search.is_none()
@@ -215,7 +269,7 @@ impl NotoraState {
         let scope = NavigationScope::Search { query };
         self.library.navigation_scope = scope.clone();
         self.layout.focus_target = FocusTarget::NavigationSearch;
-        vec![NotoraEffect::QueryCards(CardQuery::from(scope)), NotoraEffect::Redraw]
+        self.request_card_query(CardQuery::from(scope))
     }
 
     fn request_note_creation(&mut self, kind: DocumentKind) -> Vec<NotoraEffect> {
@@ -252,11 +306,77 @@ impl NotoraState {
         self.library.last_command_error = None;
         self.layout.focus_target = FocusTarget::CardList;
         let scope = self.library.navigation_scope.clone();
-        vec![
-            NotoraEffect::QueryCards(CardQuery::from(scope)),
-            NotoraEffect::PrepareDocument(request),
-            NotoraEffect::Redraw,
-        ]
+        let mut effects = self.request_card_query(CardQuery::from(scope));
+        effects.insert(1, NotoraEffect::PrepareDocument(request));
+        effects
+    }
+
+    fn request_card_query(&mut self, query: CardQuery) -> Vec<NotoraEffect> {
+        self.library.card_scroll_offset_px = 0.0;
+        self.library.card_page = CardPageState::LoadingInitial { query: query.clone() };
+        vec![NotoraEffect::QueryCards(query), NotoraEffect::Redraw]
+    }
+
+    fn request_next_card_page(&mut self) -> Vec<NotoraEffect> {
+        let CardPageState::Ready { query, cards, next_cursor: Some(cursor) } =
+            &self.library.card_page
+        else {
+            return vec![NotoraEffect::Redraw];
+        };
+        let next_query = query.next_page(cursor.clone());
+        self.library.card_page =
+            CardPageState::LoadingNextPage { query: next_query.clone(), cards: cards.clone() };
+        vec![NotoraEffect::QueryCards(next_query), NotoraEffect::Redraw]
+    }
+
+    fn apply_card_page(
+        &mut self,
+        query: CardQuery,
+        page: notora_core::CatalogCardPage,
+    ) -> Vec<NotoraEffect> {
+        match &self.library.card_page {
+            CardPageState::LoadingInitial { query: pending_query } if pending_query == &query => {
+                self.library.card_page = if page.cards.is_empty() {
+                    CardPageState::Empty { query }
+                } else {
+                    CardPageState::Ready { query, cards: page.cards, next_cursor: page.next_cursor }
+                };
+            }
+            CardPageState::LoadingNextPage { query: pending_query, cards }
+                if pending_query == &query =>
+            {
+                let mut merged_cards = cards.clone();
+                for card in page.cards {
+                    if !merged_cards.iter().any(|known_card| known_card.note_id == card.note_id) {
+                        merged_cards.push(card);
+                    }
+                }
+                self.library.card_page = CardPageState::Ready {
+                    query,
+                    cards: merged_cards,
+                    next_cursor: page.next_cursor,
+                };
+            }
+            _ => return Vec::new(),
+        }
+        vec![NotoraEffect::Redraw]
+    }
+
+    fn apply_card_query_failure(&mut self, query: CardQuery, message: String) -> Vec<NotoraEffect> {
+        let (cards, next_cursor) = match &self.library.card_page {
+            CardPageState::LoadingInitial { query: pending_query } if pending_query == &query => {
+                (Vec::new(), None)
+            }
+            CardPageState::LoadingNextPage { query: pending_query, cards }
+                if pending_query == &query =>
+            {
+                let cursor = query.cursor.clone();
+                (cards.clone(), cursor)
+            }
+            _ => return Vec::new(),
+        };
+        self.library.card_page = CardPageState::Failed { query, cards, next_cursor, message };
+        vec![NotoraEffect::Redraw]
     }
 
     fn set_pane_width(&mut self, pane: Pane, logical_width: f32) {
@@ -292,6 +412,10 @@ impl NotoraState {
         if matches!(self.library.navigation_scope, NavigationScope::Search { .. }) {
             return self.commit_search(String::new());
         }
+        if !self.library.search_text.is_empty() {
+            self.library.search_text.clear();
+            return vec![NotoraEffect::Redraw];
+        }
         self.layout.focus_target = FocusTarget::NavigationTree;
         vec![NotoraEffect::Redraw]
     }
@@ -316,9 +440,25 @@ fn creation_target(scope: &NavigationScope) -> Option<NoteCreationTarget> {
 
 #[cfg(test)]
 mod tests {
-    use super::{FocusTarget, LibraryState, NotoraState, OverlayState};
+    use super::{CardPageState, FocusTarget, LibraryState, NotoraState, OverlayState};
     use crate::action::{CardQuery, NotoraAction, NotoraEffect};
-    use notora_core::{DocumentKind, NavigationScope, TagId};
+    use notora_core::{
+        CatalogCard, CatalogCardCursor, CatalogCardPage, DocumentIdentity, DocumentKind,
+        NavigationScope, NoteId, TagId,
+    };
+
+    fn card(note_id: NoteId, title: &str, modified_nanoseconds: i64) -> CatalogCard {
+        CatalogCard {
+            note_id,
+            relative_path: format!("notes/{title}.md").into(),
+            kind: DocumentKind::Markdown,
+            title: title.to_owned(),
+            excerpt: format!("{title} excerpt"),
+            modified_nanoseconds,
+            starred: false,
+            tags: vec!["计划".to_owned()],
+        }
+    }
 
     #[test]
     fn starts_in_workspace_root_scope() {
@@ -339,6 +479,18 @@ mod tests {
             ]
         );
         assert_eq!(state.library.navigation_scope, NavigationScope::Starred);
+    }
+
+    #[test]
+    fn search_text_updates_immediately_without_querying_until_the_debounce_commits() {
+        let mut state = NotoraState::default();
+
+        assert_eq!(
+            state.reduce(NotoraAction::SearchTextChanged("roadmap".to_owned())),
+            vec![NotoraEffect::Redraw]
+        );
+        assert_eq!(state.library.search_text, "roadmap");
+        assert_eq!(state.library.navigation_scope, NavigationScope::WorkspaceRoot);
     }
 
     #[test]
@@ -501,5 +653,72 @@ mod tests {
                 NotoraEffect::Redraw,
             ]
         );
+    }
+
+    #[test]
+    fn card_query_next_page_merges_cards_and_preserves_selection() {
+        let mut state = NotoraState::default();
+        let first_note_id = NoteId::generate();
+        let second_note_id = NoteId::generate();
+        let initial_query = CardQuery::from(NavigationScope::WorkspaceRoot);
+        let _ = state.reduce(NotoraAction::NavigationSelected(NavigationScope::WorkspaceRoot));
+        let _ = state.reduce(NotoraAction::CardQueryCompleted {
+            query: initial_query.clone(),
+            page: CatalogCardPage {
+                cards: vec![card(first_note_id, "first", 20)],
+                next_cursor: Some(CatalogCardCursor {
+                    modified_nanoseconds: 20,
+                    relative_path: "notes/first.md".into(),
+                    note_id: first_note_id,
+                }),
+            },
+        });
+        let _ = state.reduce(NotoraAction::CardSelected(DocumentIdentity::Note(first_note_id)));
+
+        let effects =
+            state.reduce(NotoraAction::CardListScrolled { offset_px: 240.0, near_end: true });
+        let next_query = initial_query.next_page(CatalogCardCursor {
+            modified_nanoseconds: 20,
+            relative_path: "notes/first.md".into(),
+            note_id: first_note_id,
+        });
+        assert_eq!(
+            effects,
+            vec![NotoraEffect::QueryCards(next_query.clone()), NotoraEffect::Redraw]
+        );
+        assert!(matches!(
+            &state.library.card_page,
+            CardPageState::LoadingNextPage { query, cards }
+                if query == &next_query && cards.len() == 1
+        ));
+
+        let _ = state.reduce(NotoraAction::CardQueryCompleted {
+            query: next_query,
+            page: CatalogCardPage {
+                cards: vec![card(second_note_id, "second", 10)],
+                next_cursor: None,
+            },
+        });
+        assert_eq!(state.library.selected_card, Some(DocumentIdentity::Note(first_note_id)));
+        assert!(matches!(
+            &state.library.card_page,
+            CardPageState::Ready { cards, next_cursor: None, .. }
+                if cards.iter().map(|card| card.note_id).collect::<Vec<_>>()
+                    == vec![first_note_id, second_note_id]
+        ));
+    }
+
+    #[test]
+    fn card_query_empty_result_uses_an_explicit_empty_state() {
+        let mut state = NotoraState::default();
+        let query = CardQuery::from(NavigationScope::Starred);
+        let _ = state.reduce(NotoraAction::NavigationSelected(NavigationScope::Starred));
+
+        let _ = state.reduce(NotoraAction::CardQueryCompleted {
+            query: query.clone(),
+            page: CatalogCardPage { cards: Vec::new(), next_cursor: None },
+        });
+
+        assert_eq!(state.library.card_page, CardPageState::Empty { query });
     }
 }

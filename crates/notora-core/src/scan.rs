@@ -2,6 +2,7 @@ use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 
+use crate::catalog::SearchIndexEntry;
 use crate::{
     Catalog, CatalogError, CatalogNote, DocumentKind, NoteId, WORKSPACE_METADATA_DIRECTORY_NAME,
     Workspace, parse_note_text_summary,
@@ -60,7 +61,16 @@ pub fn scan_workspace(
         .map(|note| (note.relative_path, note.note_id))
         .collect();
     let mut completion = ScanCompletion::default();
-    scan_directory(workspace, catalog, workspace.root(), &existing_note_ids, &mut completion);
+    let mut search_entries = Vec::new();
+    scan_directory(
+        workspace,
+        catalog,
+        workspace.root(),
+        &existing_note_ids,
+        &mut search_entries,
+        &mut completion,
+    );
+    catalog.index_note_batch(&search_entries).map_err(ScanError::Catalog)?;
     Ok(completion)
 }
 
@@ -69,6 +79,7 @@ fn scan_directory(
     catalog: &Catalog,
     directory: &Path,
     existing_note_ids: &HashMap<PathBuf, NoteId>,
+    search_entries: &mut Vec<SearchIndexEntry>,
     completion: &mut ScanCompletion,
 ) {
     let read_directory = match fs::read_dir(directory) {
@@ -100,11 +111,18 @@ fn scan_directory(
             continue;
         }
         if file_type.is_dir() {
-            scan_directory(workspace, catalog, &path, existing_note_ids, completion);
+            scan_directory(
+                workspace,
+                catalog,
+                &path,
+                existing_note_ids,
+                search_entries,
+                completion,
+            );
             continue;
         }
         if file_type.is_file() {
-            scan_file(workspace, catalog, &path, existing_note_ids, completion);
+            scan_file(workspace, catalog, &path, existing_note_ids, search_entries, completion);
         }
     }
 }
@@ -114,6 +132,7 @@ fn scan_file(
     catalog: &Catalog,
     path: &Path,
     existing_note_ids: &HashMap<PathBuf, NoteId>,
+    search_entries: &mut Vec<SearchIndexEntry>,
     completion: &mut ScanCompletion,
 ) {
     let Some(kind) = DocumentKind::from_path(path) else {
@@ -174,6 +193,15 @@ fn scan_file(
         completion.failures.push(ScanFailure { relative_path, message: error.to_string() });
         return;
     }
+    search_entries.push(SearchIndexEntry {
+        note_id: note.note_id,
+        title: note.title,
+        relative_path,
+        body: contents,
+        // N6 的 metadata repository 会在标签变更后发送增量索引命令；扫描阶段不猜测
+        // 用户 metadata，避免用文件名或正文伪造标签。
+        tags: Vec::new(),
+    });
     completion.indexed_files += 1;
 }
 
@@ -243,5 +271,12 @@ mod tests {
         assert_eq!(first_notes, second_notes);
         assert_eq!(first_notes[0].kind, DocumentKind::Mindmap);
         assert_eq!(first_notes[1].kind, DocumentKind::Markdown);
+        assert!(
+            catalog
+                .search_active_notes("Body", 10)
+                .expect("scanner should write searchable note bodies")
+                .iter()
+                .any(|search_match| search_match.note_id == first_notes[1].note_id)
+        );
     }
 }

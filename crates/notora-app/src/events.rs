@@ -140,6 +140,12 @@ impl ApplicationHandler<ShellEvent> for NotoraApp {
                     self.request_external_file_dialog();
                     return;
                 }
+                if is_search_shortcut(key_code, modifiers) {
+                    self.dispatch_action(NotoraAction::FocusRequested(
+                        crate::FocusTarget::NavigationSearch,
+                    ));
+                    return;
+                }
                 if is_save_shortcut(key_code, modifiers) {
                     self.request_manual_save();
                     return;
@@ -160,11 +166,12 @@ impl ApplicationHandler<ShellEvent> for NotoraApp {
 
     fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
         self.process_due_autosaves();
+        self.process_due_searches();
         if self.take_redraw_request() {
             self.request_window_redraw();
         }
         event_loop.set_control_flow(
-            self.next_autosave_deadline().map(ControlFlow::WaitUntil).unwrap_or(ControlFlow::Wait),
+            self.next_deadline().map(ControlFlow::WaitUntil).unwrap_or(ControlFlow::Wait),
         );
     }
 }
@@ -176,6 +183,11 @@ fn is_open_external_shortcut(key_code: ui::KeyCode, modifiers: Modifiers) -> boo
 
 fn is_save_shortcut(key_code: ui::KeyCode, modifiers: Modifiers) -> bool {
     matches!(key_code, ui::KeyCode::Char('s') | ui::KeyCode::Char('S'))
+        && (modifiers.cmd || modifiers.ctrl)
+}
+
+fn is_search_shortcut(key_code: ui::KeyCode, modifiers: Modifiers) -> bool {
+    matches!(key_code, ui::KeyCode::Char('f') | ui::KeyCode::Char('F'))
         && (modifiers.cmd || modifiers.ctrl)
 }
 
@@ -193,7 +205,9 @@ mod tests {
     use appkit_shell::editor_runtime::EditorFocus;
     use ui::core::Modifiers;
 
-    use super::{editor_input_context, is_open_external_shortcut, is_save_shortcut};
+    use super::{
+        editor_input_context, is_open_external_shortcut, is_save_shortcut, is_search_shortcut,
+    };
     use crate::{FocusTarget, NotoraState, OverlayState, shell::layout::ShellLayoutInput};
 
     fn layout() -> crate::shell::layout::ShellLayout {
@@ -247,5 +261,18 @@ mod tests {
             Modifiers { ctrl: true, ..Modifiers::NONE }
         ));
         assert!(!is_save_shortcut(ui::KeyCode::Char('s'), Modifiers::NONE));
+    }
+
+    #[test]
+    fn command_or_control_f_uses_the_global_search_shortcut() {
+        assert!(is_search_shortcut(
+            ui::KeyCode::Char('f'),
+            Modifiers { cmd: true, ..Modifiers::NONE }
+        ));
+        assert!(is_search_shortcut(
+            ui::KeyCode::Char('F'),
+            Modifiers { ctrl: true, ..Modifiers::NONE }
+        ));
+        assert!(!is_search_shortcut(ui::KeyCode::Char('f'), Modifiers::NONE));
     }
 }

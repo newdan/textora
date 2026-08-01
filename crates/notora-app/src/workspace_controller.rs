@@ -3,7 +3,6 @@
 use std::fs;
 use std::path::PathBuf;
 use std::sync::mpsc;
-use std::thread::{self, JoinHandle};
 use std::time::Duration;
 
 use notora_core::note_command::NoteCommand;
@@ -13,11 +12,11 @@ use notora_core::{
     scan_workspace,
 };
 
-use crate::action::DocumentLoadRequest;
+use crate::action::{CardQuery, DocumentLoadRequest};
+use crate::index_worker::{IndexWorker, IndexWorkerCommand};
 use crate::product::{NotoraProduct, NotoraProductEvent, NotoraProductEventSender};
 
 const CATALOG_FILE_NAME: &str = "catalog.sqlite3";
-const WORKSPACE_INDEXER_THREAD_NAME: &str = "notora-workspace-indexer";
 const WORKSPACE_WORKER_IDLE_WAIT: Duration = Duration::from_millis(25);
 
 /// 用户或恢复流程发起的工作区操作。
@@ -140,8 +139,8 @@ impl WorkspaceController {
         let session =
             self.active_session.as_ref().ok_or(WorkspaceControllerError::NoActiveWorkspace)?;
         session
-            .command_sender
-            .send(WorkspaceWorkerCommand::ExecuteNoteCommand(command))
+            .indexer
+            .send(IndexWorkerCommand::ExecuteNoteCommand(command))
             .map_err(|_| WorkspaceControllerError::CommandWorkerDisconnected)
     }
 
@@ -153,8 +152,17 @@ impl WorkspaceController {
         let session =
             self.active_session.as_ref().ok_or(WorkspaceControllerError::NoActiveWorkspace)?;
         session
-            .command_sender
-            .send(WorkspaceWorkerCommand::PrepareDocument(request))
+            .indexer
+            .send(IndexWorkerCommand::PrepareDocument(request))
+            .map_err(|_| WorkspaceControllerError::CommandWorkerDisconnected)
+    }
+
+    pub fn query_cards(&self, query: CardQuery) -> Result<(), WorkspaceControllerError> {
+        let session =
+            self.active_session.as_ref().ok_or(WorkspaceControllerError::NoActiveWorkspace)?;
+        session
+            .indexer
+            .send(IndexWorkerCommand::QueryCards(query))
             .map_err(|_| WorkspaceControllerError::CommandWorkerDisconnected)
     }
 
@@ -163,8 +171,8 @@ impl WorkspaceController {
         let session =
             self.active_session.as_ref().ok_or(WorkspaceControllerError::NoActiveWorkspace)?;
         session
-            .command_sender
-            .send(WorkspaceWorkerCommand::ReindexCatalog)
+            .indexer
+            .send(IndexWorkerCommand::ReindexCatalog)
             .map_err(|_| WorkspaceControllerError::CommandWorkerDisconnected)
     }
 
@@ -219,8 +227,7 @@ impl Drop for WorkspaceController {
 struct WorkspaceSession {
     active_workspace: ActiveWorkspace,
     file_monitor: WorkspaceFileMonitor,
-    command_sender: mpsc::Sender<WorkspaceWorkerCommand>,
-    indexer: Option<JoinHandle<()>>,
+    indexer: IndexWorker,
 }
 
 impl WorkspaceSession {
@@ -235,26 +242,22 @@ impl WorkspaceSession {
         let (file_monitor, file_batches) =
             WorkspaceFileMonitor::start(workspace.root().to_path_buf())
                 .map_err(WorkspaceControllerError::FileMonitor)?;
-        let (command_sender, command_receiver) = mpsc::channel();
-        let indexer = thread::Builder::new()
-            .name(WORKSPACE_INDEXER_THREAD_NAME.to_owned())
-            .spawn(move || {
-                run_indexer(
-                    workspace,
-                    catalog_path,
-                    indexer_descriptor,
-                    generation,
-                    file_batches,
-                    command_receiver,
-                    event_sender,
-                )
-            })
-            .map_err(|_| WorkspaceControllerError::IndexerThreadUnavailable)?;
+        let indexer = IndexWorker::start(move |command_receiver| {
+            run_indexer(
+                workspace,
+                catalog_path,
+                indexer_descriptor,
+                generation,
+                file_batches,
+                command_receiver,
+                event_sender,
+            )
+        })
+        .map_err(|_| WorkspaceControllerError::IndexerThreadUnavailable)?;
         Ok(Self {
             active_workspace: ActiveWorkspace { descriptor, generation },
             file_monitor,
-            command_sender,
-            indexer: Some(indexer),
+            indexer,
         })
     }
 
@@ -264,16 +267,8 @@ impl WorkspaceSession {
 
     fn shutdown(&mut self) {
         self.file_monitor.shutdown();
-        if let Some(indexer) = self.indexer.take() {
-            let _ = indexer.join();
-        }
+        self.indexer.shutdown();
     }
-}
-
-enum WorkspaceWorkerCommand {
-    ExecuteNoteCommand(NoteCommand),
-    PrepareDocument(DocumentLoadRequest),
-    ReindexCatalog,
 }
 
 fn run_indexer(
@@ -282,7 +277,7 @@ fn run_indexer(
     descriptor: WorkspaceDescriptor,
     generation: u64,
     file_batches: mpsc::Receiver<WorkspaceFileBatch>,
-    command_receiver: mpsc::Receiver<WorkspaceWorkerCommand>,
+    command_receiver: mpsc::Receiver<IndexWorkerCommand>,
     event_sender: NotoraProductEventSender,
 ) {
     let Ok(catalog) = Catalog::open(&catalog_path) else {
@@ -331,11 +326,32 @@ fn execute_workspace_command(
     catalog: &Catalog,
     workspace_id: notora_core::WorkspaceId,
     workspace_generation: u64,
-    command: WorkspaceWorkerCommand,
+    command: IndexWorkerCommand,
     event_sender: &NotoraProductEventSender,
 ) {
     match command {
-        WorkspaceWorkerCommand::ExecuteNoteCommand(command) => {
+        IndexWorkerCommand::QueryCards(query) => {
+            match catalog.query_catalog_cards(&query.scope, query.cursor.as_ref(), query.page_size)
+            {
+                Ok(page) => {
+                    let _ = event_sender.send(NotoraProductEvent::CardQueryCompleted {
+                        workspace_id,
+                        workspace_generation,
+                        query,
+                        page,
+                    });
+                }
+                Err(error) => {
+                    let _ = event_sender.send(NotoraProductEvent::CardQueryFailed {
+                        workspace_id,
+                        workspace_generation,
+                        query,
+                        message: error.to_string(),
+                    });
+                }
+            }
+        }
+        IndexWorkerCommand::ExecuteNoteCommand(command) => {
             execute_note_command_in_worker(
                 workspace,
                 catalog,
@@ -345,7 +361,7 @@ fn execute_workspace_command(
                 event_sender,
             );
         }
-        WorkspaceWorkerCommand::PrepareDocument(request) => {
+        IndexWorkerCommand::PrepareDocument(request) => {
             prepare_document_in_worker(
                 workspace,
                 catalog,
@@ -355,7 +371,7 @@ fn execute_workspace_command(
                 event_sender,
             );
         }
-        WorkspaceWorkerCommand::ReindexCatalog => {
+        IndexWorkerCommand::ReindexCatalog => {
             index_workspace(workspace, catalog, workspace_id, workspace_generation, event_sender);
         }
     }
@@ -469,6 +485,7 @@ mod tests {
     use super::{
         WorkspaceCommand, WorkspaceCommandResult, WorkspaceController, WorkspaceControllerError,
     };
+    use crate::action::CardQuery;
     use crate::product::{NotoraProduct, NotoraProductEvent};
 
     #[test]
@@ -643,6 +660,48 @@ mod tests {
                 break;
             }
             assert!(Instant::now() < deadline, "note command completion should arrive promptly");
+            thread::sleep(Duration::from_millis(10));
+        }
+    }
+
+    #[test]
+    fn active_workspace_worker_returns_card_query_completion_with_its_generation() {
+        let directory = tempfile::tempdir().expect("workspace test directory should be created");
+        let mut controller = WorkspaceController::default();
+        let mut product = NotoraProduct::new();
+        let WorkspaceCommandResult::Opened(active_workspace) = controller
+            .execute(
+                WorkspaceCommand::OpenExisting { root: directory.path().to_path_buf() },
+                &mut product,
+            )
+            .expect("workspace should open")
+        else {
+            panic!("open command should activate the workspace");
+        };
+        let query = CardQuery::from(notora_core::NavigationScope::WorkspaceRoot);
+        controller.query_cards(query.clone()).expect("worker should accept card query");
+
+        let deadline = Instant::now() + Duration::from_secs(2);
+        loop {
+            let _ = product.drain_product_events();
+            let events = product.take_workspace_events();
+            if events.iter().any(|event| {
+                matches!(
+                    event,
+                    NotoraProductEvent::CardQueryCompleted {
+                        workspace_id,
+                        workspace_generation,
+                        query: completed_query,
+                        page,
+                    } if *workspace_id == active_workspace.descriptor.workspace_id
+                        && *workspace_generation == active_workspace.generation
+                        && completed_query == &query
+                        && page.cards.is_empty()
+                )
+            }) {
+                break;
+            }
+            assert!(Instant::now() < deadline, "card query completion should arrive promptly");
             thread::sleep(Duration::from_millis(10));
         }
     }

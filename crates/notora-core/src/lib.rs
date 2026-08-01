@@ -16,7 +16,9 @@ pub mod scan;
 pub mod summary_parser;
 pub mod workspace;
 
-pub use catalog::{Catalog, CatalogError, CatalogNote};
+pub use catalog::{
+    Catalog, CatalogCard, CatalogCardCursor, CatalogCardPage, CatalogError, CatalogNote,
+};
 pub use domain::{
     DocumentIdentity, DocumentKind, DocumentOrigin, ExternalFileId, NavigationScope, NoteId,
     NoteLifecycle, NoteSummary, TagId, TagSummary, WorkspaceId,

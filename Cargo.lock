@@ -1477,6 +1477,7 @@ name = "notora-app"
 version = "0.1.0"
 dependencies = [
  "bytemuck",
+ "criterion",
  "dirs",
  "notora-core",
  "rfd",
