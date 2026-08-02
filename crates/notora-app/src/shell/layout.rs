@@ -1,6 +1,6 @@
 use ui::Rect;
 
-use crate::ResponsiveLayoutMode;
+use crate::{CompactContent, CompactNavigation, ResponsiveLayoutMode};
 
 pub const DEFAULT_NAVIGATION_WIDTH_LOGICAL: f32 = 220.0;
 pub const DEFAULT_CARD_LIST_WIDTH_LOGICAL: f32 = 340.0;
@@ -20,6 +20,8 @@ pub struct ShellLayoutInput {
     pub dpi: f32,
     pub navigation_width_logical: f32,
     pub card_list_width_logical: f32,
+    pub compact_content: CompactContent,
+    pub compact_navigation: CompactNavigation,
 }
 
 /// 一帧 shell 的独立区域。overlay、menu 与 tooltip 位于 editor 之后绘制。
@@ -77,9 +79,16 @@ impl ShellLayout {
                 dpi,
                 requested_card_width_logical,
                 splitter_width_px,
+                input.compact_navigation,
             );
         }
-        Self::editor_overlay(window_rect, dpi, requested_card_width_logical)
+        Self::editor_overlay(
+            window_rect,
+            dpi,
+            requested_card_width_logical,
+            input.compact_content,
+            input.compact_navigation,
+        )
     }
 
     fn three_pane(
@@ -129,6 +138,7 @@ impl ShellLayout {
         dpi: f32,
         requested_card_width_logical: f32,
         splitter_width_px: f32,
+        compact_navigation: CompactNavigation,
     ) -> Self {
         let editor_width_px = MINIMUM_EDITOR_WIDTH_LOGICAL * dpi;
         let card_width_px = (window_rect.w - editor_width_px - splitter_width_px).max(0.0);
@@ -148,7 +158,7 @@ impl ShellLayout {
         Self {
             responsive_mode: ResponsiveLayoutMode::NavigationOverlay,
             dpi,
-            navigation_rect: Rect::ZERO,
+            navigation_rect: compact_navigation_rect(window_rect, dpi, compact_navigation),
             navigation_splitter_rect: Rect::ZERO,
             card_list_rect,
             card_list_splitter_rect,
@@ -161,15 +171,25 @@ impl ShellLayout {
         }
     }
 
-    fn editor_overlay(window_rect: Rect, dpi: f32, requested_card_width_logical: f32) -> Self {
+    fn editor_overlay(
+        window_rect: Rect,
+        dpi: f32,
+        requested_card_width_logical: f32,
+        compact_content: CompactContent,
+        compact_navigation: CompactNavigation,
+    ) -> Self {
+        let (card_list_rect, editor_rect) = match compact_content {
+            CompactContent::CardList => (window_rect, Rect::ZERO),
+            CompactContent::Editor => (Rect::ZERO, window_rect),
+        };
         Self {
             responsive_mode: ResponsiveLayoutMode::EditorOverlay,
             dpi,
-            navigation_rect: Rect::ZERO,
+            navigation_rect: compact_navigation_rect(window_rect, dpi, compact_navigation),
             navigation_splitter_rect: Rect::ZERO,
-            card_list_rect: window_rect,
+            card_list_rect,
             card_list_splitter_rect: Rect::ZERO,
-            editor_rect: Rect::ZERO,
+            editor_rect,
             overlay_rect: window_rect,
             menu_rect: Rect::ZERO,
             tooltip_rect: Rect::ZERO,
@@ -177,6 +197,22 @@ impl ShellLayout {
             card_list_width_logical: requested_card_width_logical.min(window_rect.w / dpi),
         }
     }
+}
+
+fn compact_navigation_rect(
+    window_rect: Rect,
+    dpi: f32,
+    compact_navigation: CompactNavigation,
+) -> Rect {
+    if compact_navigation != CompactNavigation::Visible {
+        return Rect::ZERO;
+    }
+    Rect::new(
+        window_rect.x,
+        window_rect.y,
+        (MAXIMUM_NAVIGATION_WIDTH_LOGICAL * dpi).min(window_rect.w),
+        window_rect.h,
+    )
 }
 
 #[cfg(test)]
@@ -190,6 +226,8 @@ mod tests {
             dpi,
             navigation_width_logical: DEFAULT_NAVIGATION_WIDTH_LOGICAL,
             card_list_width_logical: DEFAULT_CARD_LIST_WIDTH_LOGICAL,
+            compact_content: CompactContent::CardList,
+            compact_navigation: CompactNavigation::Hidden,
         }
     }
 
@@ -234,6 +272,20 @@ mod tests {
         assert_eq!(editor_overlay.responsive_mode, ResponsiveLayoutMode::EditorOverlay);
         assert_non_negative(navigation_overlay);
         assert_non_negative(editor_overlay);
+    }
+
+    #[test]
+    fn responsive_layout_uses_editor_or_cards_and_can_overlay_navigation() {
+        let mut compact_input = input(400.0, 1.0);
+        compact_input.compact_content = CompactContent::Editor;
+        compact_input.compact_navigation = CompactNavigation::Visible;
+
+        let layout = ShellLayout::compute(compact_input);
+
+        assert_eq!(layout.responsive_mode, ResponsiveLayoutMode::EditorOverlay);
+        assert_eq!(layout.card_list_rect, Rect::ZERO);
+        assert_eq!(layout.editor_rect.w, 400.0);
+        assert!(layout.navigation_rect.w > 0.0);
     }
 
     #[test]

@@ -44,6 +44,7 @@ pub struct AutoSaveRequest {
 #[derive(Debug)]
 pub struct AutoSaveScheduler<C = SystemAutoSaveClock> {
     clock: C,
+    idle_delay: Duration,
     states: HashMap<TabId, AutoSaveState>,
 }
 
@@ -64,7 +65,15 @@ where
     C: AutoSaveClock,
 {
     pub fn with_clock(clock: C) -> Self {
-        Self { clock, states: HashMap::new() }
+        Self::with_clock_and_idle_delay(clock, AUTO_SAVE_IDLE_DELAY)
+    }
+
+    pub fn with_clock_and_idle_delay(clock: C, idle_delay: Duration) -> Self {
+        Self { clock, idle_delay, states: HashMap::new() }
+    }
+
+    pub fn set_idle_delay(&mut self, idle_delay: Duration) {
+        self.idle_delay = idle_delay;
     }
 
     /// 内容实际提交后刷新 deadline。IME preedit 不应调用这个方法。
@@ -78,7 +87,7 @@ where
             self.cancel(tab_id);
             return;
         }
-        self.schedule(tab_id, content_revision, AUTO_SAVE_IDLE_DELAY);
+        self.schedule(tab_id, content_revision, self.idle_delay);
     }
 
     /// 明确记录 preedit 被忽略，避免调用方误把 IME 组合态当成一次内容修改。

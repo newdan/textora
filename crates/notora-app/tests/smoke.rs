@@ -1,5 +1,7 @@
 use notora_app::action::NotoraAction;
 use notora_app::{FocusTarget, NotoraApp, NotoraPaths};
+use std::thread;
+use std::time::{Duration, Instant};
 
 fn app() -> NotoraApp {
     let directory = tempfile::tempdir().expect("test should create a temporary directory");
@@ -40,15 +42,40 @@ fn modal_menu_and_tooltip_are_painted_after_the_editor() {
     let editor_position = source
         .find("frame.paint_editor_with")
         .expect("shell should paint the editor through EditorFrame");
-    let modal_position =
-        source.find("if model.show_settings_overlay").expect("shell should paint a modal overlay");
-    let menu_position = source.find("if model.show_menu").expect("shell should paint a menu layer");
-    let tooltip_position =
-        source.find("if model.show_tooltip").expect("shell should paint a tooltip layer");
+    let overlay_source = &source[editor_position..];
+    let modal_position = overlay_source
+        .find("if model.show_settings_overlay")
+        .expect("shell should paint a modal overlay after the editor");
+    let menu_position = overlay_source
+        .find("if model.show_menu")
+        .expect("shell should paint a menu layer after the editor");
+    let tooltip_position = overlay_source
+        .find("if model.show_tooltip")
+        .expect("shell should paint a tooltip layer after the editor");
 
-    assert!(editor_position < modal_position);
     assert!(modal_position < menu_position);
     assert!(menu_position < tooltip_position);
+}
+
+#[test]
+fn session_restore_is_scheduled_only_after_the_first_presented_frame() {
+    let app_source = include_str!("../src/app.rs");
+    let events_source = include_str!("../src/events.rs");
+    let resume_start = app_source.find("pub(crate) fn resume").expect("resume should exist");
+    let resume_end = app_source[resume_start..]
+        .find("pub(crate) fn resize_window")
+        .map(|offset| resume_start + offset)
+        .expect("resume should end before resize_window");
+
+    assert!(!app_source[resume_start..resume_end].contains("restore_pending_session"));
+    let redraw_start =
+        events_source.find("WindowEvent::RedrawRequested").expect("redraw handling should exist");
+    let redraw_source = &events_source[redraw_start..];
+    let render_position = redraw_source.find("self.render()").expect("redraw should render");
+    let restore_position = redraw_source
+        .find("self.restore_session_after_first_frame()")
+        .expect("redraw should schedule session restore");
+    assert!(render_position < restore_position);
 }
 
 #[test]
@@ -60,6 +87,13 @@ fn system_open_entry_reuses_an_external_file_session_without_a_duplicate_tab() {
 
     app.receive_system_open_paths(vec![path.clone()]);
     app.receive_system_open_paths(vec![path]);
+
+    let deadline = Instant::now() + Duration::from_secs(2);
+    while app.editor_runtime_tab_count() == 0 {
+        app.drain_product_events();
+        assert!(Instant::now() < deadline, "external preview should install promptly");
+        thread::sleep(Duration::from_millis(10));
+    }
 
     assert_eq!(app.editor_runtime_tab_count(), 1);
     assert_eq!(app.state().external_files.sessions().len(), 1);

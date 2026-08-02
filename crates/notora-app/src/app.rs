@@ -1,6 +1,7 @@
 //! notora 窗口应用状态；编辑器会话只经 shared runtime 管理。
 
 use std::collections::HashMap;
+use std::num::NonZeroUsize;
 use std::sync::mpsc;
 use std::sync::{Arc, Mutex};
 use std::thread;
@@ -12,6 +13,7 @@ use appkit_shell::editor_runtime::{
 };
 use appkit_shell::render_state::{GpuState, TextState};
 use appkit_shell::{ProductHost, ProductWakeHandle, ShellEffect, ShellEvent};
+use winit::dpi::{PhysicalPosition, PhysicalSize};
 use winit::event_loop::{ActiveEventLoop, EventLoopProxy};
 use winit::window::WindowAttributes;
 
@@ -24,6 +26,7 @@ use crate::dirty_snapshot::{collect_dirty_snapshots, write_dirty_snapshot};
 use crate::document_registry::DocumentRegistry;
 use crate::editor_adapter::{
     LoadedDocument, build_editor_plugins, load_document, prepare_loaded_document,
+    prepare_untitled_document,
 };
 use crate::effect_executor::{
     EffectExecutor, ExternalOpenRequest, ManualSaveRequest, NotoraEffectService,
@@ -34,6 +37,7 @@ use crate::external_files::{
 };
 use crate::product::NotoraProduct;
 use crate::render::{NotoraRenderModel, NotoraShell};
+use crate::runtime_lru::{RuntimeLru, RuntimeTabState};
 use crate::search_controller::SearchController;
 use crate::shell::layout::{ShellLayout, ShellLayoutInput};
 use crate::{
@@ -44,8 +48,15 @@ use notora_core::{DocumentIdentity, DocumentKind};
 
 const DEFAULT_WINDOW_WIDTH_PX: f32 = 1_200.0;
 const DEFAULT_WINDOW_HEIGHT_PX: f32 = 800.0;
+const SESSION_PERSIST_DEBOUNCE_DELAY: Duration = Duration::from_millis(300);
+const CATALOG_BACKUP_DEBOUNCE_DELAY: Duration = Duration::from_millis(300);
 const SHUTDOWN_SAVE_DRAIN_TIMEOUT: Duration = Duration::from_secs(2);
 const SHUTDOWN_SAVE_DRAIN_POLL_INTERVAL: Duration = Duration::from_millis(10);
+const DEFAULT_RUNTIME_TAB_LIMIT: usize = 12;
+const TRASH_SAVE_FAILURE_MESSAGE: &str =
+    "the note could not be saved, so it was not moved to Trash";
+const TRASH_SAVE_STALE_MESSAGE: &str =
+    "the note changed before its Trash save completed, so it was not moved to Trash";
 
 #[derive(Clone, Copy, Debug)]
 struct PendingExternalSaveAs {
@@ -59,11 +70,18 @@ struct PendingConflictRetry {
     content_revision: u64,
 }
 
+#[derive(Clone, Copy, Debug)]
+struct PendingTrashMove {
+    note_id: notora_core::NoteId,
+    content_revision: u64,
+}
+
 /// notora 应用初始化失败。
 #[derive(Debug)]
 pub enum NotoraAppError {
     Paths(NotoraPathsError),
     Runtime(EditorRuntimeError),
+    PersistenceWorker(std::io::Error),
 }
 
 impl std::fmt::Display for NotoraAppError {
@@ -72,6 +90,9 @@ impl std::fmt::Display for NotoraAppError {
             Self::Paths(error) => write!(formatter, "could not initialize notora paths: {error}"),
             Self::Runtime(error) => {
                 write!(formatter, "could not initialize editor runtime: {error}")
+            }
+            Self::PersistenceWorker(error) => {
+                write!(formatter, "could not initialize persistence worker: {error}")
             }
         }
     }
@@ -82,6 +103,7 @@ impl std::error::Error for NotoraAppError {
         match self {
             Self::Paths(error) => Some(error),
             Self::Runtime(error) => Some(error),
+            Self::PersistenceWorker(error) => Some(error),
         }
     }
 }
@@ -89,15 +111,23 @@ impl std::error::Error for NotoraAppError {
 /// 组合产品状态、后台宿主和共享 editor runtime 的 notora 应用。
 pub struct NotoraApp {
     paths: NotoraPaths,
+    product_settings: crate::settings::ProductSettings,
+    pending_session: Option<crate::session::ProductSession>,
+    pending_session_persist_at: Option<Instant>,
+    pending_catalog_backup_at: Option<Instant>,
+    runtime_lru: RuntimeLru,
     settings: ui::Settings,
     theme: ui::Theme,
     state: NotoraState,
     product: NotoraProduct,
+    persistence_worker: crate::persistence_worker::PersistenceWorker,
     workspace_controller: WorkspaceController,
     document_registry: DocumentRegistry,
     autosave: AutoSaveScheduler,
     pending_external_save_as: HashMap<appkit_core::workspace::types::TabId, PendingExternalSaveAs>,
+    pending_external_documents: HashMap<notora_core::ExternalFileId, LoadedDocument>,
     pending_conflict_retries: HashMap<appkit_core::workspace::types::TabId, PendingConflictRetry>,
+    pending_trash_moves: HashMap<appkit_core::workspace::types::TabId, PendingTrashMove>,
     catalog_reconciliation_pending: bool,
     search_controller: SearchController,
     editor_runtime: EditorRuntime,
@@ -122,20 +152,60 @@ impl NotoraApp {
     }
 
     pub fn with_paths(paths: NotoraPaths) -> Result<Self, NotoraAppError> {
-        let settings = ui::Settings::new();
+        let loaded_product_settings = crate::settings::load_product_settings(&paths.settings_file);
+        let loaded_session = crate::session::load_product_session(&paths.session_file);
+        let product_settings = loaded_product_settings.settings;
+        let mut settings = ui::Settings::new();
+        product_settings.apply_to_ui(&mut settings);
         let theme = ui::Theme::from_definition(&ui::theme::ThemeDefinition::default_dark());
         let editor_runtime = build_editor_runtime(&settings, &theme, &paths)?;
+        let mut state = NotoraState::default();
+        state.layout.navigation_width_logical = loaded_session.session.navigation_width_logical;
+        state.layout.card_list_width_logical = loaded_session.session.card_list_width_logical;
+        state.library.last_command_error =
+            loaded_product_settings.diagnostic.or(loaded_session.diagnostic);
+        let runtime_tab_limit = NonZeroUsize::new(product_settings.interface.runtime_tab_limit)
+            .or_else(|| NonZeroUsize::new(DEFAULT_RUNTIME_TAB_LIMIT))
+            .expect("default runtime tab limit must be non-zero");
+        let auto_save_delay =
+            Duration::from_millis(product_settings.workspace.auto_save_delay_millis);
+        let migration_backup_retention = notora_core::BackupRetention::keep_latest(
+            product_settings.workspace.catalog_backup_retention,
+        )
+        .unwrap_or_else(|| {
+            notora_core::BackupRetention::keep_latest(1)
+                .expect("a minimum migration backup retention must be non-zero")
+        });
+        let catalog_backups_directory = paths.catalog_backups_directory.clone();
+        let product = NotoraProduct::new();
+        let persistence_worker =
+            crate::persistence_worker::PersistenceWorker::start(product.event_sender())
+                .map_err(NotoraAppError::PersistenceWorker)?;
         Ok(Self {
             paths,
+            product_settings,
+            pending_session: Some(loaded_session.session),
+            pending_session_persist_at: None,
+            pending_catalog_backup_at: None,
+            runtime_lru: RuntimeLru::new(runtime_tab_limit),
             settings,
             theme,
-            state: NotoraState::default(),
-            product: NotoraProduct::new(),
-            workspace_controller: WorkspaceController::default(),
+            state,
+            product,
+            persistence_worker,
+            workspace_controller: WorkspaceController::with_catalog_backups_directory_and_retention(
+                catalog_backups_directory,
+                migration_backup_retention,
+            ),
             document_registry: DocumentRegistry::default(),
-            autosave: AutoSaveScheduler::new(),
+            autosave: AutoSaveScheduler::with_clock_and_idle_delay(
+                crate::autosave::SystemAutoSaveClock,
+                auto_save_delay,
+            ),
             pending_external_save_as: HashMap::new(),
+            pending_external_documents: HashMap::new(),
             pending_conflict_retries: HashMap::new(),
+            pending_trash_moves: HashMap::new(),
             catalog_reconciliation_pending: false,
             search_controller: SearchController::default(),
             editor_runtime,
@@ -235,7 +305,11 @@ impl NotoraApp {
             self.autosave.clear();
             self.pending_external_save_as.clear();
             self.pending_conflict_retries.clear();
+            self.pending_trash_moves.clear();
             self.catalog_reconciliation_pending = false;
+        }
+        if matches!(result, WorkspaceCommandResult::Opened(_)) {
+            self.request_navigation_tree();
         }
         Ok(result)
     }
@@ -248,10 +322,13 @@ impl NotoraApp {
             dpi,
             navigation_width_logical: self.state.layout.navigation_width_logical,
             card_list_width_logical: self.state.layout.card_list_width_logical,
+            compact_content: self.state.layout.compact_content,
+            compact_navigation: self.state.layout.compact_navigation,
         })
     }
 
     pub fn dispatch_action(&mut self, action: NotoraAction) {
+        let should_persist_session = action_requires_session_persistence(&action);
         let committed_without_workspace = match &action {
             NotoraAction::SearchTextChanged(query) => {
                 !self.search_controller.schedule_committed_query(query.clone(), Instant::now())
@@ -267,6 +344,9 @@ impl NotoraApp {
                 query: self.state.library.search_text.clone(),
                 search_generation: None,
             });
+        }
+        if should_persist_session {
+            self.schedule_session_persistence();
         }
     }
 
@@ -340,14 +420,43 @@ impl NotoraApp {
         });
     }
 
-    pub(crate) fn next_deadline(&self) -> Option<std::time::Instant> {
-        match (self.autosave.next_deadline(), self.search_controller.next_deadline()) {
-            (Some(autosave_deadline), Some(search_deadline)) => {
-                Some(autosave_deadline.min(search_deadline))
-            }
-            (Some(deadline), None) | (None, Some(deadline)) => Some(deadline),
-            (None, None) => None,
+    pub(crate) fn process_due_session_persistence(&mut self) {
+        let Some(deadline) = self.pending_session_persist_at else {
+            return;
+        };
+        if deadline > Instant::now() {
+            return;
         }
+        self.pending_session_persist_at = None;
+        if let Err(error) = self
+            .persistence_worker
+            .save_session(self.paths.session_file.clone(), self.capture_product_session())
+        {
+            self.state.library.last_command_error = Some(error.to_string());
+        }
+    }
+
+    pub(crate) fn process_due_catalog_backups(&mut self) {
+        let Some(deadline) = self.pending_catalog_backup_at else {
+            return;
+        };
+        if deadline > Instant::now() {
+            return;
+        }
+        self.pending_catalog_backup_at = None;
+        self.start_catalog_backup();
+    }
+
+    pub(crate) fn next_deadline(&self) -> Option<std::time::Instant> {
+        [
+            self.autosave.next_deadline(),
+            self.search_controller.next_deadline(),
+            self.pending_session_persist_at,
+            self.pending_catalog_backup_at,
+        ]
+        .into_iter()
+        .flatten()
+        .min()
     }
 
     pub(crate) fn drain_runtime_save_completions(&mut self) {
@@ -369,6 +478,11 @@ impl NotoraApp {
                 .get(&request.tab_id)
                 .copied()
                 .filter(|retry| retry.content_revision == request.content_revision);
+            let pending_trash_move = self
+                .pending_trash_moves
+                .get(&request.tab_id)
+                .copied()
+                .filter(|pending| pending.content_revision == request.content_revision);
             if completed_conflict_retry.is_some() {
                 self.pending_conflict_retries.remove(&request.tab_id);
             }
@@ -379,6 +493,19 @@ impl NotoraApp {
             if save_succeeded {
                 self.autosave.on_save_completed(request);
                 self.request_catalog_reindex_after_note_save(request.tab_id);
+                if let Some(pending_trash_move) = pending_trash_move {
+                    if self.pending_trash_move_has_current_saved_document(
+                        request.tab_id,
+                        pending_trash_move,
+                    ) {
+                        self.pending_trash_moves.remove(&request.tab_id);
+                        self.execute_trash_operation(crate::action::TrashOperation::MoveToTrash {
+                            note_id: pending_trash_move.note_id,
+                        });
+                    } else {
+                        self.cancel_pending_trash_move(request, TRASH_SAVE_STALE_MESSAGE);
+                    }
+                }
                 if let Some(retry) = completed_conflict_retry {
                     self.dispatch_action(NotoraAction::SaveConflictResolved {
                         identity: retry.identity,
@@ -386,6 +513,7 @@ impl NotoraApp {
                 }
             } else {
                 self.autosave.on_save_failed(request);
+                self.cancel_pending_trash_move(request, TRASH_SAVE_FAILURE_MESSAGE);
                 if let Some(identity) = conflict_identity {
                     self.dispatch_action(NotoraAction::SaveConflictDetected {
                         identity,
@@ -453,6 +581,19 @@ impl NotoraApp {
             )
             .map_err(NotoraAppError::Runtime)?;
         if let Some((width, height)) = self.editor_runtime.window().map(|window| {
+            let geometry = self
+                .pending_session
+                .as_ref()
+                .map(|session| session.window_geometry.clone())
+                .unwrap_or_default();
+            window.set_outer_position(PhysicalPosition::new(
+                geometry.x_px.round() as i32,
+                geometry.y_px.round() as i32,
+            ));
+            let _ = window.request_inner_size(PhysicalSize::new(
+                geometry.width_px.round().max(1.0) as u32,
+                geometry.height_px.round().max(1.0) as u32,
+            ));
             let size = window.inner_size();
             window.set_ime_allowed(true);
             (size.width, size.height)
@@ -475,7 +616,8 @@ impl NotoraApp {
         self.needs_redraw = true;
     }
 
-    pub(crate) fn drain_product_events(&mut self) {
+    /// 处理后台产品结果；无事件循环的宿主可主动轮询此入口。
+    pub fn drain_product_events(&mut self) {
         let effect = ProductHost::drain_product_events(&mut self.product);
         for event in self.product.take_workspace_events() {
             match event {
@@ -485,6 +627,34 @@ impl NotoraApp {
                 }
                 crate::product::NotoraProductEvent::NoteCommandFailed { message, .. } => {
                     self.dispatch_action(NotoraAction::NoteCommandFailed(message));
+                }
+                crate::product::NotoraProductEvent::MetadataMutationCompleted { .. } => {
+                    self.schedule_catalog_backup();
+                    self.request_navigation_tree();
+                    self.dispatch_action(NotoraAction::MetadataMutationCompleted);
+                }
+                crate::product::NotoraProductEvent::MetadataMutationFailed { message, .. } => {
+                    self.dispatch_action(NotoraAction::MetadataMutationFailed(message));
+                }
+                crate::product::NotoraProductEvent::CatalogBackupCompleted { .. } => {}
+                crate::product::NotoraProductEvent::CatalogBackupFailed { message, .. } => {
+                    self.dispatch_action(NotoraAction::MetadataMutationFailed(format!(
+                        "metadata was saved, but its catalog backup failed: {message}"
+                    )));
+                }
+                crate::product::NotoraProductEvent::CatalogRecoveryNotified { message, .. } => {
+                    self.dispatch_action(NotoraAction::CatalogRecoveryNotified(message));
+                }
+                crate::product::NotoraProductEvent::TrashOperationCompleted {
+                    operation, ..
+                } => {
+                    self.complete_trash_operation(operation);
+                    self.schedule_catalog_backup();
+                    self.request_navigation_tree();
+                    self.dispatch_action(NotoraAction::TrashOperationCompleted);
+                }
+                crate::product::NotoraProductEvent::TrashOperationFailed { failure, .. } => {
+                    self.dispatch_action(NotoraAction::TrashOperationFailed(failure));
                 }
                 crate::product::NotoraProductEvent::DocumentLoaded {
                     request, document, ..
@@ -503,11 +673,87 @@ impl NotoraApp {
                     Ok(()) => self.dispatch_action(NotoraAction::SaveConflictResolved { identity }),
                     Err(message) => self.dispatch_action(NotoraAction::NoteCommandFailed(message)),
                 },
+                crate::product::NotoraProductEvent::ExternalFileOpenCompleted {
+                    canonical_path,
+                    document,
+                    activate,
+                } => self.complete_external_file_open(canonical_path, document, activate),
+                crate::product::NotoraProductEvent::ExternalFileOpenFailed { message } => {
+                    self.dispatch_action(NotoraAction::NoteCommandFailed(message));
+                }
+                crate::product::NotoraProductEvent::ExternalDocumentLoaded {
+                    request,
+                    document,
+                } => self.install_loaded_preview(request, document),
+                crate::product::NotoraProductEvent::ExternalDocumentLoadFailed {
+                    request,
+                    message,
+                } if self.selection_matches(request) => {
+                    self.dispatch_action(NotoraAction::NoteCommandFailed(message));
+                }
+                crate::product::NotoraProductEvent::ExternalDocumentLoadFailed { .. } => {}
+                crate::product::NotoraProductEvent::ExternalSaveAsCanonicalized {
+                    tab_id,
+                    external_file_id,
+                    content_revision,
+                    result,
+                } => self.complete_external_save_as_canonicalization(
+                    tab_id,
+                    external_file_id,
+                    content_revision,
+                    result,
+                ),
+                crate::product::NotoraProductEvent::ConflictReloadCompleted {
+                    identity,
+                    tab_id,
+                    content_revision,
+                    document,
+                } => self.complete_conflict_reload(identity, tab_id, content_revision, document),
+                crate::product::NotoraProductEvent::ConflictReloadFailed { identity, message } => {
+                    if self
+                        .state
+                        .library
+                        .save_conflict
+                        .is_some_and(|conflict| conflict.identity == identity)
+                    {
+                        self.dispatch_action(NotoraAction::NoteCommandFailed(message));
+                    }
+                }
+                crate::product::NotoraProductEvent::ConflictRetryRevisionCaptured {
+                    identity,
+                    tab_id,
+                    content_revision,
+                    path,
+                    disk_revision,
+                } => self.complete_conflict_retry_revision_capture(
+                    identity,
+                    tab_id,
+                    content_revision,
+                    path,
+                    disk_revision,
+                ),
+                crate::product::NotoraProductEvent::ConflictRetryRevisionFailed {
+                    identity,
+                    message,
+                } => {
+                    if self
+                        .state
+                        .library
+                        .save_conflict
+                        .is_some_and(|conflict| conflict.identity == identity)
+                    {
+                        self.dispatch_action(NotoraAction::NoteCommandFailed(message));
+                    }
+                }
+                crate::product::NotoraProductEvent::PersistenceFailed { message } => {
+                    self.dispatch_action(NotoraAction::NoteCommandFailed(message));
+                }
                 crate::product::NotoraProductEvent::WorkspaceScanCompleted { .. } => {
                     self.catalog_reconciliation_pending = false;
                 }
-                crate::product::NotoraProductEvent::WorkspaceIndexFailed { .. } => {
+                crate::product::NotoraProductEvent::WorkspaceIndexFailed { message, .. } => {
                     self.catalog_reconciliation_pending = true;
+                    self.dispatch_action(NotoraAction::NavigationTreeFailed(message));
                 }
                 crate::product::NotoraProductEvent::CardQueryCompleted { query, page, .. }
                     if query.search_generation.is_none_or(|generation| {
@@ -525,6 +771,12 @@ impl NotoraApp {
                     self.dispatch_action(NotoraAction::CardQueryFailed { query, message });
                 }
                 crate::product::NotoraProductEvent::CardQueryFailed { .. } => {}
+                crate::product::NotoraProductEvent::NavigationTreeLoaded { tree, .. } => {
+                    self.dispatch_action(NotoraAction::NavigationTreeLoaded(tree));
+                }
+                crate::product::NotoraProductEvent::NavigationTreeFailed { message, .. } => {
+                    self.dispatch_action(NotoraAction::NavigationTreeFailed(message));
+                }
                 crate::product::NotoraProductEvent::WorkspaceChanged { .. } => {}
             }
         }
@@ -551,7 +803,7 @@ impl NotoraApp {
     pub(crate) fn render(&mut self) -> Result<(), RenderError> {
         self.needs_redraw = false;
         let layout = self.shell_layout();
-        let model = NotoraRenderModel::from_state(&self.state);
+        let model = NotoraRenderModel::from_state_and_settings(&self.state, &self.product_settings);
         let mut render_resources = self.editor_runtime.take_render_resources();
         let mut frame = self.editor_runtime.begin_frame()?;
         self.shell.render(&mut frame, layout, &model)?;
@@ -570,6 +822,20 @@ impl NotoraApp {
 
     pub(crate) fn shutdown(&mut self) {
         self.finish_saves_and_snapshot_dirty_documents();
+        self.flush_pending_catalog_backup();
+        if let Err(error) = self
+            .persistence_worker
+            .save_session(self.paths.session_file.clone(), self.capture_product_session())
+        {
+            self.state.library.last_command_error = Some(error.to_string());
+        }
+        if let Err(error) = self
+            .persistence_worker
+            .save_settings(self.paths.settings_file.clone(), self.product_settings.clone())
+        {
+            self.state.library.last_command_error = Some(error.to_string());
+        }
+        self.persistence_worker.shutdown();
         ProductHost::shutdown(&mut self.product);
         self.editor_runtime.shutdown();
     }
@@ -633,9 +899,31 @@ impl NotoraApp {
                 return;
             }
         };
+        self.install_prepared_preview(request, prepared, None);
+    }
+
+    fn install_prepared_preview(
+        &mut self,
+        request: DocumentLoadRequest,
+        prepared: appkit_shell::prepared_tab::PreparedTab,
+        suggested_file_name: Option<String>,
+    ) {
+        if !self.selection_matches(request) {
+            return;
+        }
+        let identity = request.identity;
+        if let Some(tab_id) = self.document_registry.tab_for(identity) {
+            self.document_registry.touch_tab(tab_id);
+            let outcome = self.editor_runtime.activate(tab_id);
+            self.apply_editor_outcome(outcome);
+            return;
+        }
         let replaced_preview = self.document_registry.preview_tab();
-        let outcome =
-            self.editor_runtime.install_prepared_tab(prepared, None, OpenDisposition::Preview);
+        let outcome = self.editor_runtime.install_prepared_tab(
+            prepared,
+            suggested_file_name,
+            OpenDisposition::Preview,
+        );
         let Some(tab_id) = self.editor_runtime.active_tab_id() else {
             self.dispatch_action(NotoraAction::NoteCommandFailed(
                 "editor runtime did not activate the installed preview".to_owned(),
@@ -647,6 +935,7 @@ impl NotoraApp {
         }
         let _ = self.document_registry.register_preview(identity, tab_id);
         self.apply_editor_outcome(outcome);
+        self.evict_excess_runtime_tabs();
     }
 
     fn promote_active_preview_tab(&mut self) {
@@ -654,6 +943,33 @@ impl NotoraApp {
             return;
         };
         self.promote_preview_for_tab(tab_id);
+    }
+
+    fn evict_excess_runtime_tabs(&mut self) {
+        let active_tab_id = self.editor_runtime.active_tab_id();
+        let runtime_tabs = self
+            .editor_runtime
+            .tab_ids_in_order()
+            .into_iter()
+            .filter_map(|tab_id| {
+                let summary = self.editor_runtime.document_summary(tab_id)?;
+                Some(RuntimeTabState {
+                    tab_id,
+                    is_dirty: summary.dirty,
+                    is_saving: matches!(
+                        self.autosave.state(tab_id),
+                        Some(crate::autosave::AutoSaveState::Saving { .. })
+                    ),
+                    is_pinned: self.editor_runtime.is_pinned(tab_id),
+                    is_active: active_tab_id == Some(tab_id),
+                })
+            })
+            .collect::<Vec<_>>();
+        for candidate in self.runtime_lru.select_evictions(&self.document_registry, &runtime_tabs) {
+            self.autosave.cancel(candidate.tab_id);
+            let _ = self.editor_runtime.close_for_product(candidate.tab_id);
+            self.document_registry.remove_tab(candidate.tab_id);
+        }
     }
 
     fn synchronize_open_note_path(
@@ -678,8 +994,7 @@ impl NotoraApp {
             return;
         }
         let next_path = workspace.descriptor.root.join(&result.note.relative_path);
-        let disk_revision = appkit_core::file_safety::capture_revision(&next_path).ok();
-        if self.editor_runtime.update_document_path(tab_id, next_path, disk_revision) {
+        if self.editor_runtime.update_document_path(tab_id, next_path, None) {
             self.editor_runtime.request_file_safety_check_now(Instant::now());
             self.needs_redraw = true;
             self.editor_runtime.request_redraw();
@@ -734,22 +1049,50 @@ impl NotoraApp {
     fn submit_autosave(&mut self, request: AutoSaveRequest) {
         let Some(summary) = self.editor_runtime.document_summary(request.tab_id) else {
             self.autosave.cancel(request.tab_id);
+            self.cancel_pending_trash_move(request, TRASH_SAVE_FAILURE_MESSAGE);
             return;
         };
         if !summary.dirty || summary.content_revision != request.content_revision {
-            self.autosave.on_save_completed(request);
+            self.autosave.on_save_failed(request);
+            self.cancel_pending_trash_move(request, TRASH_SAVE_FAILURE_MESSAGE);
             return;
         }
         let prepared = match self.editor_runtime.prepare_save(request.tab_id) {
             Ok(prepared) => prepared,
             Err(_) => {
                 self.autosave.on_save_failed(request);
+                self.cancel_pending_trash_move(request, TRASH_SAVE_FAILURE_MESSAGE);
                 return;
             }
         };
         if self.submit_prepared_save(prepared).is_err() {
             self.autosave.on_save_failed(request);
+            self.cancel_pending_trash_move(request, TRASH_SAVE_FAILURE_MESSAGE);
         }
+    }
+
+    fn pending_trash_move_has_current_saved_document(
+        &self,
+        tab_id: appkit_core::workspace::types::TabId,
+        pending_trash_move: PendingTrashMove,
+    ) -> bool {
+        self.editor_runtime.document_summary(tab_id).is_some_and(|summary| {
+            !summary.dirty && summary.content_revision == pending_trash_move.content_revision
+        })
+    }
+
+    fn cancel_pending_trash_move(&mut self, request: AutoSaveRequest, message: &str) {
+        let is_matching_pending_move = self
+            .pending_trash_moves
+            .get(&request.tab_id)
+            .is_some_and(|pending| pending.content_revision == request.content_revision);
+        if !is_matching_pending_move {
+            return;
+        }
+        self.pending_trash_moves.remove(&request.tab_id);
+        self.dispatch_action(NotoraAction::TrashOperationFailed(
+            crate::action::TrashOperationFailure::Message(message.to_owned()),
+        ));
     }
 
     fn submit_prepared_save(
@@ -830,21 +1173,63 @@ impl NotoraApp {
         if pending_save.content_revision != request.content_revision {
             return;
         }
-        self.pending_external_save_as.remove(&request.tab_id);
         if !save_succeeded {
+            self.pending_external_save_as.remove(&request.tab_id);
             return;
         }
         let Some(saved_path) = saved_path else {
+            self.pending_external_save_as.remove(&request.tab_id);
             return;
         };
-        let canonical_path = match CanonicalExternalPath::canonicalize(&saved_path) {
+        let sender = self.product.event_sender();
+        let external_file_id = pending_save.external_file_id;
+        let content_revision = pending_save.content_revision;
+        if thread::Builder::new()
+            .name("notora-external-save-as-canonicalize".to_owned())
+            .spawn(move || {
+                let result = CanonicalExternalPath::canonicalize(&saved_path)
+                    .map_err(|error| error.to_string());
+                let _ =
+                    sender.send(crate::product::NotoraProductEvent::ExternalSaveAsCanonicalized {
+                        tab_id: request.tab_id,
+                        external_file_id,
+                        content_revision,
+                        result,
+                    });
+            })
+            .is_err()
+        {
+            self.pending_external_save_as.remove(&request.tab_id);
+            self.dispatch_action(NotoraAction::NoteCommandFailed(
+                "could not start the external Save As path worker".to_owned(),
+            ));
+        }
+    }
+
+    fn complete_external_save_as_canonicalization(
+        &mut self,
+        tab_id: appkit_core::workspace::types::TabId,
+        external_file_id: notora_core::ExternalFileId,
+        content_revision: u64,
+        result: Result<CanonicalExternalPath, String>,
+    ) {
+        let Some(pending_save) = self.pending_external_save_as.get(&tab_id).copied() else {
+            return;
+        };
+        if pending_save.external_file_id != external_file_id
+            || pending_save.content_revision != content_revision
+        {
+            return;
+        }
+        self.pending_external_save_as.remove(&tab_id);
+        let canonical_path = match result {
             Ok(canonical_path) => canonical_path,
-            Err(error) => {
-                self.dispatch_action(NotoraAction::NoteCommandFailed(error.to_string()));
+            Err(message) => {
+                self.dispatch_action(NotoraAction::NoteCommandFailed(message));
                 return;
             }
         };
-        match self.state.external_files.save_as(pending_save.external_file_id, canonical_path) {
+        match self.state.external_files.save_as(external_file_id, canonical_path) {
             Some(SaveExternalFileAs::Updated(_)) => {}
             Some(SaveExternalFileAs::PathAlreadyOpen(_)) => {
                 self.dispatch_action(NotoraAction::NoteCommandFailed(
@@ -1013,9 +1398,43 @@ fn to_wgpu_color(color: [f32; 4]) -> wgpu::Color {
     wgpu::Color { r: color[0] as f64, g: color[1] as f64, b: color[2] as f64, a: color[3] as f64 }
 }
 
+fn action_requires_session_persistence(action: &NotoraAction) -> bool {
+    matches!(
+        action,
+        NotoraAction::NavigationSelected(_)
+            | NotoraAction::NavigationExpansionToggled(_)
+            | NotoraAction::CardSelected(_)
+            | NotoraAction::CardActivated(_)
+            | NotoraAction::CompactNavigationRequested
+            | NotoraAction::CompactBackRequested
+            | NotoraAction::ExternalFileOpened(_)
+            | NotoraAction::SplitterDragged { .. }
+    )
+}
+
 impl Default for NotoraApp {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+#[cfg(test)]
+mod session_restore_tests {
+    use super::action_requires_session_persistence;
+    use crate::action::NotoraAction;
+
+    #[test]
+    fn session_restore_related_user_actions_are_debounced_for_persistence() {
+        assert!(action_requires_session_persistence(&NotoraAction::NavigationSelected(
+            notora_core::NavigationScope::Starred
+        )));
+        assert!(action_requires_session_persistence(&NotoraAction::CardSelected(
+            notora_core::DocumentIdentity::Note(notora_core::NoteId::generate())
+        )));
+        assert!(!action_requires_session_persistence(&NotoraAction::CardListScrolled {
+            offset_px: 5.0,
+            near_end: false
+        }));
     }
 }
 
@@ -1034,6 +1453,50 @@ impl NotoraEffectService for NotoraApp {
     fn execute_note_command(&mut self, command: notora_core::note_command::NoteCommand) {
         if let Err(error) = self.workspace_controller.execute_note_command(command) {
             self.dispatch_action(NotoraAction::NoteCommandFailed(error.to_string()));
+        }
+    }
+
+    fn execute_metadata_mutation(&mut self, mutation: crate::action::MetadataMutation) {
+        if let Err(error) = self.workspace_controller.execute_metadata_mutation(mutation) {
+            self.dispatch_action(NotoraAction::MetadataMutationFailed(error.to_string()));
+        }
+    }
+
+    fn execute_trash_operation(&mut self, operation: crate::action::TrashOperation) {
+        if let crate::action::TrashOperation::MoveToTrash { note_id } = operation {
+            let identity = DocumentIdentity::Note(note_id);
+            if let Some(tab_id) = self.document_registry.tab_for(identity) {
+                let Some(summary) = self.editor_runtime.document_summary(tab_id) else {
+                    self.dispatch_action(NotoraAction::TrashOperationFailed(
+                        crate::action::TrashOperationFailure::Message(
+                            "the open note is no longer available".to_owned(),
+                        ),
+                    ));
+                    return;
+                };
+                if summary.dirty {
+                    let Some(origin) = self.document_origin_for_tab(tab_id) else {
+                        self.dispatch_action(NotoraAction::TrashOperationFailed(
+                            crate::action::TrashOperationFailure::Message(
+                                "only workspace notes can be moved to Trash".to_owned(),
+                            ),
+                        ));
+                        return;
+                    };
+                    self.pending_trash_moves.insert(
+                        tab_id,
+                        PendingTrashMove { note_id, content_revision: summary.content_revision },
+                    );
+                    self.autosave.request_immediate_save(&origin, tab_id, summary.content_revision);
+                    self.process_due_autosaves();
+                    return;
+                }
+            }
+        }
+        if let Err(error) = self.workspace_controller.execute_trash_operation(operation) {
+            self.dispatch_action(NotoraAction::TrashOperationFailed(
+                crate::action::TrashOperationFailure::Message(error.to_string()),
+            ));
         }
     }
 
@@ -1131,6 +1594,11 @@ impl NotoraEffectService for NotoraApp {
         self.open_external_paths(paths);
     }
 
+    fn create_untitled_external(&mut self, kind: notora_core::DocumentKind) {
+        let identity = self.state.external_files.create_untitled(kind);
+        self.dispatch_action(NotoraAction::ExternalFileOpened(identity));
+    }
+
     fn save_document_manually(&mut self, request: ManualSaveRequest) {
         match request {
             ManualSaveRequest::Note { tab_id, content_revision } => {
@@ -1158,28 +1626,316 @@ impl NotoraEffectService for NotoraApp {
         }
     }
 
-    fn persist_layout(&mut self) {}
+    fn apply_product_settings_update(
+        &mut self,
+        update: crate::settings_overlay::ProductSettingsUpdate,
+    ) {
+        update.apply_to(&mut self.product_settings);
+        self.product_settings.apply_to_ui(&mut self.settings);
+        let runtime_tab_limit =
+            NonZeroUsize::new(self.product_settings.interface.runtime_tab_limit)
+                .or_else(|| NonZeroUsize::new(DEFAULT_RUNTIME_TAB_LIMIT))
+                .expect("default runtime tab limit must be non-zero");
+        self.runtime_lru = RuntimeLru::new(runtime_tab_limit);
+        self.evict_excess_runtime_tabs();
+        self.autosave.set_idle_delay(Duration::from_millis(
+            self.product_settings.workspace.auto_save_delay_millis,
+        ));
+        self.editor_runtime.update_settings(self.settings.clone());
+        self.theme = match self.product_settings.appearance.theme_mode {
+            ui::ThemeMode::Light => {
+                ui::Theme::from_definition(&ui::theme::ThemeDefinition::default_light())
+            }
+            ui::ThemeMode::System | ui::ThemeMode::Dark => {
+                ui::Theme::from_definition(&ui::theme::ThemeDefinition::default_dark())
+            }
+        };
+        if let Err(error) = self
+            .persistence_worker
+            .save_settings(self.paths.settings_file.clone(), self.product_settings.clone())
+        {
+            self.state.library.last_command_error = Some(error.to_string());
+        }
+    }
+
+    fn persist_layout(&mut self) {
+        self.schedule_session_persistence();
+    }
 }
 
 impl NotoraApp {
+    fn schedule_session_persistence(&mut self) {
+        self.pending_session_persist_at = Some(Instant::now() + SESSION_PERSIST_DEBOUNCE_DELAY);
+    }
+    fn capture_product_session(&self) -> crate::session::ProductSession {
+        let (workspace_root, workspace_id) = self
+            .workspace_controller
+            .active_workspace()
+            .map(|workspace| {
+                (Some(workspace.descriptor.root), Some(workspace.descriptor.workspace_id))
+            })
+            .unwrap_or((None, None));
+        let external_paths = self
+            .state
+            .external_files
+            .sessions()
+            .iter()
+            .filter_map(|session| match session {
+                ExternalFileSession::Existing { canonical_path, .. } => {
+                    Some(canonical_path.as_path().to_path_buf())
+                }
+                ExternalFileSession::Untitled { .. } | ExternalFileSession::Missing { .. } => None,
+            })
+            .collect();
+        let last_document = match self.state.library.selected_card {
+            Some(DocumentIdentity::Note(note_id)) => {
+                Some(crate::session::SavedDocument::Note { note_id })
+            }
+            Some(DocumentIdentity::ExternalFile(external_file_id)) => {
+                self.state.external_files.session(external_file_id).and_then(
+                    |session| match session {
+                        ExternalFileSession::Existing { canonical_path, .. } => {
+                            Some(crate::session::SavedDocument::ExternalPath {
+                                path: canonical_path.as_path().to_path_buf(),
+                            })
+                        }
+                        ExternalFileSession::Untitled { .. }
+                        | ExternalFileSession::Missing { .. } => None,
+                    },
+                )
+            }
+            None => None,
+        };
+        crate::session::ProductSession {
+            workspace_root,
+            workspace_id,
+            external_paths,
+            last_navigation_scope: (&self.state.library.navigation_scope).into(),
+            last_document,
+            expanded_directories: self
+                .state
+                .library
+                .navigation_tree
+                .expanded_directories
+                .iter()
+                .cloned()
+                .collect(),
+            navigation_width_logical: self.state.layout.navigation_width_logical,
+            card_list_width_logical: self.state.layout.card_list_width_logical,
+            window_geometry: self.capture_window_geometry(),
+            ..crate::session::ProductSession::default()
+        }
+    }
+
+    fn capture_window_geometry(&self) -> crate::session::WindowGeometry {
+        let fallback = crate::session::WindowGeometry {
+            width_px: self.window_width_px,
+            height_px: self.window_height_px,
+            ..crate::session::WindowGeometry::default()
+        };
+        let Some(window) = self.editor_runtime.window() else {
+            return fallback;
+        };
+        let outer_position = window.outer_position().ok();
+        let inner_size = window.inner_size();
+        crate::session::WindowGeometry {
+            x_px: outer_position.map_or(fallback.x_px, |position| position.x as f32),
+            y_px: outer_position.map_or(fallback.y_px, |position| position.y as f32),
+            width_px: inner_size.width as f32,
+            height_px: inner_size.height as f32,
+        }
+    }
+
+    fn restore_pending_session(&mut self) {
+        let Some(session) = self.pending_session.take() else {
+            return;
+        };
+        self.window_width_px = session.window_geometry.width_px;
+        self.window_height_px = session.window_geometry.height_px;
+        let workspace_restored = match session.workspace_root {
+            Some(root) if root.is_dir() => match self
+                .execute_workspace_command(WorkspaceCommand::OpenExisting { root })
+            {
+                Ok(WorkspaceCommandResult::Opened(workspace))
+                    if session
+                        .workspace_id
+                        .is_none_or(|saved_id| saved_id == workspace.descriptor.workspace_id) =>
+                {
+                    true
+                }
+                Ok(WorkspaceCommandResult::Opened(_)) => {
+                    let _ = self.execute_workspace_command(WorkspaceCommand::Close);
+                    false
+                }
+                Ok(WorkspaceCommandResult::Unchanged | WorkspaceCommandResult::Closed { .. })
+                | Err(_) => false,
+            },
+            Some(_) | None => false,
+        };
+        if !workspace_restored && session.workspace_id.is_some() {
+            self.state.library.last_command_error = Some(
+                "the previous workspace is unavailable or no longer matches its saved identity"
+                    .to_owned(),
+            );
+        }
+        let saved_last_document = session.last_document.clone();
+        let saved_external_path = match &saved_last_document {
+            Some(crate::session::SavedDocument::ExternalPath { path }) => Some(path.as_path()),
+            Some(crate::session::SavedDocument::Note { .. }) | None => None,
+        };
+        self.restore_external_paths(session.external_paths, saved_external_path);
+        if workspace_restored {
+            self.state
+                .library
+                .navigation_tree
+                .expanded_directories
+                .extend(session.expanded_directories);
+            self.dispatch_action(NotoraAction::NavigationSelected(
+                session.last_navigation_scope.into(),
+            ));
+        } else if session.last_navigation_scope
+            == crate::session::SavedNavigationScope::ExternalFiles
+        {
+            self.dispatch_action(NotoraAction::NavigationSelected(
+                notora_core::NavigationScope::ExternalFiles,
+            ));
+        }
+        match saved_last_document {
+            Some(crate::session::SavedDocument::Note { note_id }) if workspace_restored => {
+                self.dispatch_action(NotoraAction::CardSelected(DocumentIdentity::Note(note_id)));
+            }
+            Some(crate::session::SavedDocument::ExternalPath { .. }) => {}
+            Some(crate::session::SavedDocument::Note { .. }) | None => {}
+        }
+    }
+
+    pub(crate) fn restore_session_after_first_frame(&mut self) {
+        if self.pending_session.is_none() {
+            return;
+        }
+        self.restore_pending_session();
+        self.needs_redraw = true;
+    }
+
+    fn request_navigation_tree(&mut self) {
+        if let Err(error) = self.workspace_controller.query_navigation_tree() {
+            self.dispatch_action(NotoraAction::NavigationTreeFailed(error.to_string()));
+        }
+    }
+
+    fn complete_trash_operation(&mut self, operation: crate::action::TrashOperation) {
+        let crate::action::TrashOperation::MoveToTrash { note_id } = operation else {
+            return;
+        };
+        let identity = DocumentIdentity::Note(note_id);
+        let Some(tab_id) = self.document_registry.tab_for(identity) else {
+            return;
+        };
+        self.autosave.cancel(tab_id);
+        let _ = self.editor_runtime.close_for_product(tab_id);
+        self.document_registry.remove_tab(tab_id);
+        if self.state.library.selected_card == Some(identity) {
+            self.state.library.selected_card = None;
+        }
+    }
+
+    fn schedule_catalog_backup(&mut self) {
+        self.pending_catalog_backup_at = Some(Instant::now() + CATALOG_BACKUP_DEBOUNCE_DELAY);
+    }
+
+    fn start_catalog_backup(&mut self) {
+        let Some(active_workspace) = self.workspace_controller.active_workspace() else {
+            return;
+        };
+        let Some(retention) = notora_core::BackupRetention::keep_latest(
+            self.product_settings.workspace.catalog_backup_retention,
+        ) else {
+            return;
+        };
+        let directory = self
+            .paths
+            .catalog_backups_directory
+            .join(active_workspace.descriptor.workspace_id.to_string());
+        if let Err(error) = self.workspace_controller.create_catalog_backup(directory, retention) {
+            self.dispatch_action(NotoraAction::MetadataMutationFailed(format!(
+                "metadata was saved, but its catalog backup could not start: {error}"
+            )));
+        }
+    }
+
+    fn flush_pending_catalog_backup(&mut self) {
+        if self.pending_catalog_backup_at.take().is_some() {
+            self.start_catalog_backup();
+        }
+    }
+
     fn retry_conflicted_document_save(&mut self, identity: DocumentIdentity) {
         let Some(tab_id) = self.document_registry.tab_for(identity) else {
             return;
         };
-        let Some(request) = self.manual_save_request_for_tab(tab_id) else {
+        let Some(summary) = self.editor_runtime.document_summary(tab_id) else {
             return;
         };
-        if !self.refresh_disk_revision_for_conflict_retry(tab_id) {
+        let Some(path) = summary.path else {
+            return;
+        };
+        let content_revision = summary.content_revision;
+        let sender = self.product.event_sender();
+        if thread::Builder::new()
+            .name("notora-conflict-retry-revision".to_owned())
+            .spawn(move || {
+                let event = match appkit_core::file_safety::capture_revision(&path) {
+                    Ok(disk_revision) => {
+                        crate::product::NotoraProductEvent::ConflictRetryRevisionCaptured {
+                            identity,
+                            tab_id,
+                            content_revision,
+                            path,
+                            disk_revision,
+                        }
+                    }
+                    Err(error) => {
+                        crate::product::NotoraProductEvent::ConflictRetryRevisionFailed {
+                            identity,
+                            message: format!(
+                                "could not read the current disk version before retrying the save: {error}"
+                            ),
+                        }
+                    }
+                };
+                let _ = sender.send(event);
+            })
+            .is_err()
+        {
             self.dispatch_action(NotoraAction::NoteCommandFailed(
-                "could not read the current disk version before retrying the save".to_owned(),
+                "could not start the conflict retry revision worker".to_owned(),
             ));
+        }
+    }
+
+    fn complete_conflict_retry_revision_capture(
+        &mut self,
+        identity: DocumentIdentity,
+        tab_id: appkit_core::workspace::types::TabId,
+        content_revision: u64,
+        path: std::path::PathBuf,
+        disk_revision: appkit_core::file_safety::DiskRevision,
+    ) {
+        if self.document_registry.identity_for(tab_id) != Some(identity) {
             return;
         }
         let Some(summary) = self.editor_runtime.document_summary(tab_id) else {
             return;
         };
-        let pending_retry =
-            PendingConflictRetry { identity, content_revision: summary.content_revision };
+        if summary.content_revision != content_revision
+            || !self.editor_runtime.update_document_path(tab_id, path, Some(disk_revision))
+        {
+            return;
+        }
+        let Some(request) = self.manual_save_request_for_tab(tab_id) else {
+            return;
+        };
+        let pending_retry = PendingConflictRetry { identity, content_revision };
         match request {
             ManualSaveRequest::Note { .. } => {
                 self.pending_conflict_retries.insert(tab_id, pending_retry);
@@ -1196,22 +1952,6 @@ impl NotoraApp {
                 ));
             }
         }
-    }
-
-    fn refresh_disk_revision_for_conflict_retry(
-        &mut self,
-        tab_id: appkit_core::workspace::types::TabId,
-    ) -> bool {
-        let Some(summary) = self.editor_runtime.document_summary(tab_id) else {
-            return false;
-        };
-        let Some(path) = summary.path else {
-            return false;
-        };
-        let Ok(disk_revision) = appkit_core::file_safety::capture_revision(&path) else {
-            return false;
-        };
-        self.editor_runtime.update_document_path(tab_id, path, Some(disk_revision))
     }
 
     fn save_conflicted_note_copy(&mut self, identity: DocumentIdentity) {
@@ -1265,39 +2005,96 @@ impl NotoraApp {
         let Some(tab_id) = self.document_registry.tab_for(identity) else {
             return;
         };
-        let Some(path) =
-            self.editor_runtime.document_summary(tab_id).and_then(|summary| summary.path)
-        else {
+        let Some(summary) = self.editor_runtime.document_summary(tab_id) else {
             return;
         };
-        let document = match load_document(&path)
-            .and_then(|loaded| prepare_loaded_document(&self.editor_runtime, loaded))
+        let Some(path) = summary.path else {
+            return;
+        };
+        let content_revision = summary.content_revision;
+        let sender = self.product.event_sender();
+        if thread::Builder::new()
+            .name("notora-conflict-reload".to_owned())
+            .spawn(move || match load_document(&path) {
+                Ok(document) => {
+                    let _ =
+                        sender.send(crate::product::NotoraProductEvent::ConflictReloadCompleted {
+                            identity,
+                            tab_id,
+                            content_revision,
+                            document,
+                        });
+                }
+                Err(error) => {
+                    let _ = sender.send(crate::product::NotoraProductEvent::ConflictReloadFailed {
+                        identity,
+                        message: error.to_string(),
+                    });
+                }
+            })
+            .is_err()
         {
-            Ok(prepared) => prepared.document,
-            Err(error) => {
-                self.dispatch_action(NotoraAction::NoteCommandFailed(error.to_string()));
-                return;
-            }
-        };
-        if !self.editor_runtime.replace_document(tab_id, document) {
-            return;
+            self.dispatch_action(NotoraAction::NoteCommandFailed(
+                "could not start the conflict reload worker".to_owned(),
+            ));
         }
-        self.autosave.cancel(tab_id);
-        self.dispatch_action(NotoraAction::SaveConflictResolved { identity });
     }
 
     fn open_external_paths(&mut self, paths: Vec<std::path::PathBuf>) {
-        for path in paths {
-            let validated = match validate_external_text_file(&path) {
-                Ok(validated) => validated,
-                Err(error) => {
-                    self.dispatch_action(NotoraAction::NoteCommandFailed(error.to_string()));
-                    continue;
+        self.start_external_file_reads(paths.into_iter().map(|path| (path, true)).collect());
+    }
+
+    fn restore_external_paths(
+        &mut self,
+        paths: Vec<std::path::PathBuf>,
+        saved_last_path: Option<&std::path::Path>,
+    ) {
+        let requests = paths
+            .into_iter()
+            .map(|path| {
+                let activate = saved_last_path.is_some_and(|saved_path| saved_path == path);
+                (path, activate)
+            })
+            .collect();
+        self.start_external_file_reads(requests);
+    }
+
+    fn start_external_file_reads(&mut self, requests: Vec<(std::path::PathBuf, bool)>) {
+        if requests.is_empty() {
+            return;
+        }
+        let sender = self.product.event_sender();
+        if thread::Builder::new()
+            .name("notora-external-open".to_owned())
+            .spawn(move || {
+                for (path, activate) in requests {
+                    let result = validate_external_text_file(&path)
+                        .map_err(|error| error.to_string())
+                        .and_then(|validated| {
+                            load_document(validated.canonical_path.as_path())
+                                .map(|document| (validated.canonical_path, document))
+                                .map_err(|error| error.to_string())
+                        });
+                    let event = match result {
+                        Ok((canonical_path, document)) => {
+                            crate::product::NotoraProductEvent::ExternalFileOpenCompleted {
+                                canonical_path,
+                                document,
+                                activate,
+                            }
+                        }
+                        Err(message) => {
+                            crate::product::NotoraProductEvent::ExternalFileOpenFailed { message }
+                        }
+                    };
+                    let _ = sender.send(event);
                 }
-            };
-            let identity =
-                self.state.external_files.open_existing(validated.canonical_path).identity();
-            self.dispatch_action(NotoraAction::ExternalFileOpened(identity));
+            })
+            .is_err()
+        {
+            self.dispatch_action(NotoraAction::NoteCommandFailed(
+                "could not start the external file reader".to_owned(),
+            ));
         }
     }
 
@@ -1306,22 +2103,119 @@ impl NotoraApp {
         request: DocumentLoadRequest,
         external_file_id: notora_core::ExternalFileId,
     ) {
-        let Some(ExternalFileSession::Existing { canonical_path, .. }) =
-            self.state.external_files.session(external_file_id)
-        else {
+        let Some(session) = self.state.external_files.session(external_file_id).cloned() else {
             self.dispatch_action(NotoraAction::NoteCommandFailed(
                 "external document is unavailable; relocate or remove its session".to_owned(),
             ));
             return;
         };
-        let document = match crate::editor_adapter::load_document(canonical_path.as_path()) {
-            Ok(document) => document,
+        match session {
+            ExternalFileSession::Existing { canonical_path, .. } => {
+                if let Some(document) = self.pending_external_documents.remove(&external_file_id) {
+                    self.install_loaded_preview(request, document);
+                    return;
+                }
+                self.start_external_document_load(request, canonical_path);
+            }
+            ExternalFileSession::Untitled { kind, .. } => {
+                let (prepared, suggested_file_name) =
+                    match prepare_untitled_document(&self.editor_runtime, kind) {
+                        Ok(prepared) => prepared,
+                        Err(error) => {
+                            self.dispatch_action(NotoraAction::NoteCommandFailed(
+                                error.to_string(),
+                            ));
+                            return;
+                        }
+                    };
+                self.install_prepared_preview(request, prepared, Some(suggested_file_name));
+            }
+            ExternalFileSession::Missing { .. } => {
+                self.dispatch_action(NotoraAction::NoteCommandFailed(
+                    "external document is unavailable; relocate or remove its session".to_owned(),
+                ))
+            }
+        }
+    }
+
+    fn complete_external_file_open(
+        &mut self,
+        canonical_path: CanonicalExternalPath,
+        document: LoadedDocument,
+        activate: bool,
+    ) {
+        let identity = self.state.external_files.open_existing(canonical_path).identity();
+        if !activate {
+            return;
+        }
+        let DocumentIdentity::ExternalFile(external_file_id) = identity else {
+            return;
+        };
+        if self.document_registry.tab_for(identity).is_none() {
+            self.pending_external_documents.insert(external_file_id, document);
+        }
+        self.dispatch_action(NotoraAction::ExternalFileOpened(identity));
+    }
+
+    fn start_external_document_load(
+        &mut self,
+        request: DocumentLoadRequest,
+        canonical_path: CanonicalExternalPath,
+    ) {
+        let sender = self.product.event_sender();
+        if thread::Builder::new()
+            .name("notora-external-document-load".to_owned())
+            .spawn(move || {
+                let event = match load_document(canonical_path.as_path()) {
+                    Ok(document) => crate::product::NotoraProductEvent::ExternalDocumentLoaded {
+                        request,
+                        document,
+                    },
+                    Err(error) => crate::product::NotoraProductEvent::ExternalDocumentLoadFailed {
+                        request,
+                        message: error.to_string(),
+                    },
+                };
+                let _ = sender.send(event);
+            })
+            .is_err()
+        {
+            self.dispatch_action(NotoraAction::NoteCommandFailed(
+                "could not start the external document reader".to_owned(),
+            ));
+        }
+    }
+
+    fn complete_conflict_reload(
+        &mut self,
+        identity: DocumentIdentity,
+        tab_id: appkit_core::workspace::types::TabId,
+        content_revision: u64,
+        loaded: LoadedDocument,
+    ) {
+        if self.document_registry.identity_for(tab_id) != Some(identity) {
+            return;
+        }
+        let Some(summary) = self.editor_runtime.document_summary(tab_id) else {
+            return;
+        };
+        if summary.content_revision != content_revision {
+            self.dispatch_action(NotoraAction::NoteCommandFailed(
+                "the document changed while its disk version was loading".to_owned(),
+            ));
+            return;
+        }
+        let prepared = match prepare_loaded_document(&self.editor_runtime, loaded) {
+            Ok(prepared) => prepared,
             Err(error) => {
                 self.dispatch_action(NotoraAction::NoteCommandFailed(error.to_string()));
                 return;
             }
         };
-        self.install_loaded_preview(request, document);
+        if self.editor_runtime.replace_document(tab_id, prepared.document) {
+            self.autosave.cancel(tab_id);
+            self.dispatch_action(NotoraAction::SaveConflictResolved { identity });
+        }
     }
 }
 
@@ -1387,12 +2281,14 @@ mod tests {
     use std::thread;
     use std::time::{Duration, Instant};
 
-    use super::{NotoraApp, rename_file_name_for_destination, workspace_relative_directory};
+    use super::{
+        NotoraApp, PendingTrashMove, rename_file_name_for_destination, workspace_relative_directory,
+    };
     use crate::action::NotoraAction;
     use crate::autosave::AutoSaveState;
     use crate::editor_adapter::LoadedDocument;
-    use crate::{FocusTarget, NotoraPaths, OverlayState, WorkspaceCommand};
-    use notora_core::NavigationScope;
+    use crate::{ExternalFileSession, FocusTarget, NotoraPaths, OverlayState, WorkspaceCommand};
+    use notora_core::{DocumentIdentity, NavigationScope, WorkspaceId};
 
     fn app() -> NotoraApp {
         let directory = tempfile::tempdir().expect("test should create a temporary directory");
@@ -1437,6 +2333,154 @@ mod tests {
         app.dispatch_action(NotoraAction::OpenSettings);
         assert_eq!(app.state().layout.overlay, OverlayState::Settings);
         assert!(!app.update_editor_preedit("音".to_owned(), Some((0, 1))));
+    }
+
+    #[test]
+    fn watcher_disconnection_marks_reconciliation_pending_and_surfaces_a_diagnostic() {
+        let workspace_directory = tempfile::tempdir().expect("workspace fixture should be created");
+        let mut app = app();
+        app.execute_workspace_command(WorkspaceCommand::OpenExisting {
+            root: workspace_directory.path().to_path_buf(),
+        })
+        .expect("workspace should open");
+        app.drain_product_events();
+        let active_workspace = app
+            .workspace_controller
+            .active_workspace()
+            .expect("opened workspace should stay active");
+        app.product
+            .event_sender()
+            .send(crate::product::NotoraProductEvent::WorkspaceIndexFailed {
+                workspace_id: active_workspace.descriptor.workspace_id,
+                workspace_generation: active_workspace.generation,
+                message: "workspace file monitor disconnected; automatic reconciliation stopped"
+                    .to_owned(),
+            })
+            .expect("product receiver should stay available");
+
+        app.drain_product_events();
+
+        assert!(app.catalog_reconciliation_pending);
+        assert!(
+            app.state()
+                .library
+                .last_command_error
+                .as_deref()
+                .is_some_and(|message| message.contains("file monitor disconnected"))
+        );
+    }
+
+    #[test]
+    fn session_workspace_identity_mismatch_closes_the_unexpected_workspace() {
+        let workspace_directory = tempfile::tempdir().expect("workspace fixture should be created");
+        notora_core::Workspace::open_or_initialize(workspace_directory.path())
+            .expect("workspace metadata should initialize");
+        let mut app = app();
+        app.pending_session = Some(crate::session::ProductSession {
+            workspace_root: Some(workspace_directory.path().to_path_buf()),
+            workspace_id: Some(WorkspaceId::generate()),
+            ..crate::session::ProductSession::default()
+        });
+
+        app.restore_pending_session();
+
+        assert_eq!(app.workspace_controller.active_workspace(), None);
+        assert!(
+            app.state
+                .library
+                .last_command_error
+                .as_deref()
+                .is_some_and(|message| message.contains("no longer matches"))
+        );
+    }
+
+    #[test]
+    fn session_restore_registers_all_external_paths_but_activates_only_the_saved_last_document() {
+        let directory = tempfile::tempdir().expect("external fixture directory should be created");
+        let saved_last_path = directory.path().join("last.md");
+        let other_path = directory.path().join("other.md");
+        std::fs::write(&saved_last_path, "# Last").expect("last document should be written");
+        std::fs::write(&other_path, "# Other").expect("other document should be written");
+        let mut app = app();
+        app.pending_session = Some(crate::session::ProductSession {
+            external_paths: vec![saved_last_path.clone(), other_path],
+            last_document: Some(crate::session::SavedDocument::ExternalPath {
+                path: saved_last_path.clone(),
+            }),
+            ..crate::session::ProductSession::default()
+        });
+
+        app.restore_pending_session();
+
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while app.state.external_files.sessions().len() < 2 {
+            app.drain_product_events();
+            assert!(Instant::now() < deadline, "external sessions should restore promptly");
+            thread::sleep(Duration::from_millis(10));
+        }
+        let selected_identity = app
+            .state
+            .library
+            .selected_card
+            .expect("saved last external document should be selected");
+        let selected_path = match selected_identity {
+            DocumentIdentity::ExternalFile(external_file_id) => {
+                app.state
+                    .external_files
+                    .session(external_file_id)
+                    .and_then(|session| match session {
+                        ExternalFileSession::Existing { canonical_path, .. } => {
+                            Some(canonical_path.as_path())
+                        }
+                        ExternalFileSession::Untitled { .. }
+                        | ExternalFileSession::Missing { .. } => None,
+                    })
+                    .expect("selected external session should have a path")
+            }
+            DocumentIdentity::Note(_) => panic!("session should restore an external document"),
+        };
+        let canonical_saved_last_path = std::fs::canonicalize(saved_last_path)
+            .expect("saved last document should canonicalize");
+        assert_eq!(selected_path, canonical_saved_last_path.as_path());
+        assert_eq!(app.editor_runtime_tab_count(), 1);
+    }
+
+    #[test]
+    fn headless_session_capture_uses_the_latest_window_size_with_safe_position_defaults() {
+        let mut app = app();
+        app.set_window_size(1_024, 768);
+
+        let geometry = app.capture_window_geometry();
+
+        assert_eq!(geometry.x_px, crate::session::WindowGeometry::default().x_px);
+        assert_eq!(geometry.y_px, crate::session::WindowGeometry::default().y_px);
+        assert_eq!(geometry.width_px, 1_024.0);
+        assert_eq!(geometry.height_px, 768.0);
+    }
+
+    #[test]
+    fn settings_persistence_failure_returns_through_the_background_product_channel() {
+        let mut app = app();
+        let occupied_parent = app.paths.config_directory.join("occupied-settings-parent");
+        std::fs::write(&occupied_parent, "not a directory")
+            .expect("settings failure fixture should be written");
+        app.paths.settings_file = occupied_parent.join("settings.toml");
+
+        crate::effect_executor::NotoraEffectService::apply_product_settings_update(
+            &mut app,
+            crate::settings_overlay::ProductSettingsUpdate::WordWrap(false),
+        );
+
+        assert_eq!(app.state.library.last_command_error, None);
+        let deadline = Instant::now() + Duration::from_secs(2);
+        loop {
+            app.drain_product_events();
+            if app.state.library.last_command_error.is_some() {
+                break;
+            }
+            assert!(Instant::now() < deadline, "settings persistence failure should arrive");
+            thread::sleep(Duration::from_millis(10));
+        }
     }
 
     #[test]
@@ -1486,6 +2530,128 @@ mod tests {
         }
 
         assert!(workspace_directory.path().join("未命名 1.md").is_file());
+        assert_eq!(app.state().library.last_command_error, None);
+    }
+
+    #[test]
+    fn dirty_note_is_not_moved_to_trash_when_its_required_save_fails() {
+        let workspace_directory = tempfile::tempdir().expect("workspace fixture should be created");
+        let mut app = app();
+        app.execute_workspace_command(WorkspaceCommand::OpenExisting {
+            root: workspace_directory.path().to_path_buf(),
+        })
+        .expect("workspace should open");
+        app.dispatch_action(NotoraAction::CreateRequested(notora_core::DocumentKind::Markdown));
+
+        let deadline = Instant::now() + Duration::from_secs(2);
+        let note_id = loop {
+            app.drain_product_events();
+            if let Some(notora_core::DocumentIdentity::Note(note_id)) =
+                app.state().library.selected_card
+                && app.document_tab_for(notora_core::DocumentIdentity::Note(note_id)).is_some()
+            {
+                break note_id;
+            }
+            assert!(Instant::now() < deadline, "created note should install a preview tab");
+            thread::sleep(Duration::from_millis(10));
+        };
+        let identity = notora_core::DocumentIdentity::Note(note_id);
+        let tab_id = app.document_tab_for(identity).expect("note should have an open tab");
+        app.dispatch_action(NotoraAction::FocusRequested(FocusTarget::Editor));
+        app.commit_editor_text("unsaved edit".to_owned());
+        assert!(
+            app.editor_runtime.document_summary(tab_id).expect("tab should remain available").dirty
+        );
+
+        app.dispatch_action(NotoraAction::TrashOperationRequested(
+            crate::action::TrashOperation::MoveToTrash { note_id },
+        ));
+
+        assert!(workspace_directory.path().join("未命名 1.md").is_file());
+        assert_eq!(app.document_tab_for(identity), Some(tab_id));
+        assert_eq!(app.state().library.selected_card, Some(identity));
+        assert!(app.pending_trash_moves.is_empty());
+        assert!(
+            app.state()
+                .library
+                .last_command_error
+                .as_deref()
+                .is_some_and(|message| message.contains("not moved to Trash"))
+        );
+    }
+
+    #[test]
+    fn pending_trash_move_rejects_a_document_changed_after_its_save_started() {
+        let workspace_directory = tempfile::tempdir().expect("workspace fixture should be created");
+        let mut app = app();
+        app.execute_workspace_command(WorkspaceCommand::OpenExisting {
+            root: workspace_directory.path().to_path_buf(),
+        })
+        .expect("workspace should open");
+        app.dispatch_action(NotoraAction::CreateRequested(notora_core::DocumentKind::Markdown));
+
+        let deadline = Instant::now() + Duration::from_secs(2);
+        let (note_id, tab_id, saved_revision) = loop {
+            app.drain_product_events();
+            if let Some(notora_core::DocumentIdentity::Note(note_id)) =
+                app.state().library.selected_card
+                && let Some(tab_id) =
+                    app.document_tab_for(notora_core::DocumentIdentity::Note(note_id))
+                && let Some(summary) = app.editor_runtime.document_summary(tab_id)
+            {
+                break (note_id, tab_id, summary.content_revision);
+            }
+            assert!(Instant::now() < deadline, "created note should install a preview tab");
+            thread::sleep(Duration::from_millis(10));
+        };
+        let pending_move = PendingTrashMove { note_id, content_revision: saved_revision };
+        assert!(app.pending_trash_move_has_current_saved_document(tab_id, pending_move));
+
+        app.dispatch_action(NotoraAction::FocusRequested(FocusTarget::Editor));
+        app.commit_editor_text("newer edit".to_owned());
+
+        assert!(!app.pending_trash_move_has_current_saved_document(tab_id, pending_move));
+    }
+
+    #[test]
+    fn clean_note_moves_to_trash_and_closes_its_runtime_after_the_worker_confirms() {
+        let workspace_directory = tempfile::tempdir().expect("workspace fixture should be created");
+        let mut app = app();
+        app.execute_workspace_command(WorkspaceCommand::OpenExisting {
+            root: workspace_directory.path().to_path_buf(),
+        })
+        .expect("workspace should open");
+        app.dispatch_action(NotoraAction::CreateRequested(notora_core::DocumentKind::Markdown));
+
+        let deadline = Instant::now() + Duration::from_secs(2);
+        let note_id = loop {
+            app.drain_product_events();
+            if let Some(notora_core::DocumentIdentity::Note(note_id)) =
+                app.state().library.selected_card
+                && app.document_tab_for(notora_core::DocumentIdentity::Note(note_id)).is_some()
+            {
+                break note_id;
+            }
+            assert!(Instant::now() < deadline, "created note should install a preview tab");
+            thread::sleep(Duration::from_millis(10));
+        };
+        let identity = notora_core::DocumentIdentity::Note(note_id);
+        app.dispatch_action(NotoraAction::TrashOperationRequested(
+            crate::action::TrashOperation::MoveToTrash { note_id },
+        ));
+
+        loop {
+            app.drain_product_events();
+            if app.document_tab_for(identity).is_none() {
+                break;
+            }
+            assert!(Instant::now() < deadline, "trash completion should close the matching tab");
+            thread::sleep(Duration::from_millis(10));
+        }
+
+        assert!(!workspace_directory.path().join("未命名 1.md").exists());
+        assert_eq!(app.state().library.selected_card, None);
+        assert_eq!(app.editor_runtime_tab_count(), 0);
         assert_eq!(app.state().library.last_command_error, None);
     }
 
@@ -1679,12 +2845,23 @@ mod tests {
 
         app.receive_system_open_paths(vec![path.clone()]);
         app.receive_system_open_paths(vec![path]);
+        assert_eq!(
+            app.state().library.selected_card,
+            None,
+            "external path validation and reads must not complete on the caller thread"
+        );
 
-        let identity = app
-            .state()
-            .library
-            .selected_card
-            .expect("external file should become the active selection");
+        let deadline = Instant::now() + Duration::from_secs(2);
+        let identity = loop {
+            app.drain_product_events();
+            if let Some(identity) = app.state().library.selected_card
+                && app.document_tab_for(identity).is_some()
+            {
+                break identity;
+            }
+            assert!(Instant::now() < deadline, "external preview should install promptly");
+            thread::sleep(Duration::from_millis(10));
+        };
         assert_eq!(
             app.state().library.navigation_scope,
             notora_core::NavigationScope::ExternalFiles
@@ -1697,32 +2874,58 @@ mod tests {
     }
 
     #[test]
-    fn conflict_retry_classifies_existing_external_files_as_manual_saves() {
+    fn conflict_retry_captures_the_replacement_revision_off_the_caller_thread() {
         let directory = tempfile::tempdir().expect("external file fixture directory should exist");
         let path = directory.path().join("outside.md");
         std::fs::write(&path, "# Outside").expect("external file fixture should be written");
         let mut app = app();
         app.receive_system_open_paths(vec![path]);
-        let identity = app.state().library.selected_card.expect("external file should be selected");
+        let deadline = Instant::now() + Duration::from_secs(2);
+        let identity = loop {
+            app.drain_product_events();
+            if let Some(identity) = app.state().library.selected_card
+                && app.document_tab_for(identity).is_some()
+            {
+                break identity;
+            }
+            assert!(Instant::now() < deadline, "external preview should install promptly");
+            thread::sleep(Duration::from_millis(10));
+        };
         let tab_id = app.document_tab_for(identity).expect("external file should have a tab");
-
-        assert_eq!(
-            app.manual_save_request_for_tab(tab_id),
-            Some(crate::effect_executor::ManualSaveRequest::ExistingExternalFile { tab_id })
-        );
-
-        let external_path = app
+        let initial_summary = app
             .editor_runtime
             .document_summary(tab_id)
-            .and_then(|summary| summary.path)
-            .expect("external tab should retain its path");
+            .expect("external tab should have a summary");
+        let external_path =
+            initial_summary.path.clone().expect("external tab should retain its path");
+        let initial_disk_revision = initial_summary.disk_revision;
         std::fs::write(&external_path, "# Changed elsewhere")
             .expect("external fixture should change on disk");
-        assert!(app.refresh_disk_revision_for_conflict_retry(tab_id));
+        app.dispatch_action(NotoraAction::SaveConflictDetected {
+            identity,
+            content_revision: initial_summary.content_revision,
+        });
+        app.dispatch_action(NotoraAction::SaveConflictResolutionRequested(
+            crate::action::ConflictResolution::RetrySave,
+        ));
+
         assert_eq!(
             app.editor_runtime.document_summary(tab_id).and_then(|summary| summary.disk_revision),
-            appkit_core::file_safety::capture_revision(&external_path).ok()
+            initial_disk_revision,
+            "revision capture must not run on the conflict action caller"
         );
+        loop {
+            app.drain_product_events();
+            if app
+                .editor_runtime
+                .document_summary(tab_id)
+                .is_some_and(|summary| summary.disk_revision != initial_disk_revision)
+            {
+                break;
+            }
+            assert!(Instant::now() < deadline, "replacement revision should arrive promptly");
+            thread::sleep(Duration::from_millis(10));
+        }
     }
 
     #[test]

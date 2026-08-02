@@ -1,8 +1,14 @@
+use std::fs;
 use std::time::{Duration, UNIX_EPOCH};
 
+use appkit_core::workspace::types::TabIdAllocator;
 use criterion::{Criterion, criterion_group, criterion_main};
+use notora_app::document_registry::DocumentRegistry;
 use notora_core::catalog::SearchIndexEntry;
-use notora_core::{Catalog, CatalogNote, DocumentKind, NavigationScope, NoteId};
+use notora_core::{
+    Catalog, CatalogNote, DocumentIdentity, DocumentKind, NavigationScope, NoteId, Workspace,
+    scan_workspace,
+};
 use ui::core::Widget;
 use ui::virtual_card_list::{
     CardInput, CardKey, CardSelection, VirtualCardListInput, VirtualCardListWidget,
@@ -74,6 +80,54 @@ fn benchmark_library_queries(criterion: &mut Criterion) {
     });
 }
 
+fn benchmark_workspace_scan(criterion: &mut Criterion) {
+    let directory = tempfile::tempdir().expect("benchmark workspace directory should be created");
+    let workspace = Workspace::open_or_initialize(directory.path())
+        .expect("benchmark workspace should initialize");
+    let notes_directory = workspace.root().join("notes");
+    fs::create_dir_all(&notes_directory).expect("benchmark notes directory should exist");
+    for index in 0..BENCH_NOTE_COUNT {
+        fs::write(
+            notes_directory.join(format!("{index:05}.md")),
+            format!("# Benchmark {index}\n\nSynthetic workspace scan content."),
+        )
+        .expect("benchmark note should write");
+    }
+    let catalog = Catalog::open(&workspace.metadata_directory().join("catalog.sqlite3"))
+        .expect("benchmark catalog should initialize");
+    let _ = scan_workspace(&workspace, &catalog).expect("initial benchmark scan should succeed");
+
+    criterion.bench_function("library/workspace_scan_10k", |bencher| {
+        bencher.iter(|| {
+            let completion = scan_workspace(&workspace, &catalog)
+                .expect("repeated benchmark scan should succeed");
+            std::hint::black_box(completion);
+        });
+    });
+}
+
+fn benchmark_tab_registry_switch(criterion: &mut Criterion) {
+    const BENCH_RUNTIME_TAB_COUNT: usize = 12;
+    let mut tabs = TabIdAllocator::new();
+    let mut registry = DocumentRegistry::default();
+    let tab_ids = (0..BENCH_RUNTIME_TAB_COUNT)
+        .map(|_| {
+            let tab_id = tabs.allocate();
+            let _ = registry.register(DocumentIdentity::Note(NoteId::generate()), tab_id);
+            tab_id
+        })
+        .collect::<Vec<_>>();
+    let mut next_tab_index = 0usize;
+
+    criterion.bench_function("library/tab_registry_switch_12", |bencher| {
+        bencher.iter(|| {
+            let tab_id = tab_ids[next_tab_index];
+            next_tab_index = (next_tab_index + 1) % tab_ids.len();
+            std::hint::black_box(registry.touch_tab(tab_id));
+        });
+    });
+}
+
 fn benchmark_virtual_card_layout(criterion: &mut Criterion) {
     let cards = (0..BENCH_NOTE_COUNT)
         .map(|index| CardInput {
@@ -106,6 +160,6 @@ fn benchmark_virtual_card_layout(criterion: &mut Criterion) {
 criterion_group!(
     name = library_benches;
     config = Criterion::default().measurement_time(Duration::from_secs(3));
-    targets = benchmark_library_queries, benchmark_virtual_card_layout
+    targets = benchmark_library_queries, benchmark_workspace_scan, benchmark_tab_registry_switch, benchmark_virtual_card_layout
 );
 criterion_main!(library_benches);

@@ -1,4 +1,6 @@
 use notora_app::{NotoraApp, NotoraPaths, WorkspaceCommand};
+use std::thread;
+use std::time::{Duration, Instant};
 
 fn app() -> NotoraApp {
     let directory = tempfile::tempdir().expect("test should create a temporary directory");
@@ -20,8 +22,14 @@ fn opening_supported_external_text_formats_preserves_promoted_tabs() {
     }
     let mut app = app();
 
-    for path in paths {
+    for (expected_tab_count, path) in paths.into_iter().enumerate() {
         app.receive_system_open_paths(vec![path]);
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while app.editor_runtime_tab_count() <= expected_tab_count {
+            app.drain_product_events();
+            assert!(Instant::now() < deadline, "external preview should install promptly");
+            thread::sleep(Duration::from_millis(10));
+        }
         app.request_preview_promotion();
     }
 

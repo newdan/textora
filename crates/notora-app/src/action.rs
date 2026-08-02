@@ -5,9 +5,10 @@ use std::path::PathBuf;
 use notora_core::note_command::{
     CreateNoteRequest, MoveNoteRequest, NoteCommand, NoteCommandResult, RenameNoteRequest,
 };
-use notora_core::{DocumentIdentity, DocumentKind, NavigationScope, TagId};
+use notora_core::{DocumentIdentity, DocumentKind, NavigationScope, NoteId, TagId};
 
 use crate::search_controller::SearchGeneration;
+use crate::settings_overlay::ProductSettingsUpdate;
 use crate::state::{FocusTarget, Pane};
 
 /// 中栏查询的纯输入。
@@ -68,6 +69,41 @@ pub struct SaveConflictRequest {
     pub resolution: ConflictResolution,
 }
 
+/// 仅描述用户意图的 catalog metadata 变更；SQL 只允许由后台 effect 执行。
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum MetadataMutation {
+    ToggleStar { note_id: NoteId },
+    CreateTag { display_name: String },
+    RenameTag { tag_id: TagId, display_name: String },
+    DeleteTag { tag_id: TagId },
+    AttachTag { note_id: NoteId, tag_id: TagId },
+    DetachTag { note_id: NoteId, tag_id: TagId },
+}
+
+/// 标签名称弹层的单一编辑目标；领域标签身份不交给 UI widget 保存。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TagEditorMode {
+    Create,
+    Rename { tag_id: TagId },
+}
+
+/// 只针对工作区 NoteId 的回收站操作；外部文件没有可表达的变体。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TrashOperation {
+    MoveToTrash { note_id: NoteId },
+    Restore { note_id: NoteId },
+    RestoreWithRenamedPath { note_id: NoteId },
+    PermanentlyDelete { note_id: NoteId },
+    Empty,
+}
+
+/// 回收站后台操作失败的可恢复分类；仅在用户必须作出下一步决定时保留结构化信息。
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum TrashOperationFailure {
+    RestoreConflict { note_id: NoteId },
+    Message(String),
+}
+
 /// 产品层的类型化用户动作。
 #[derive(Clone, Debug, PartialEq)]
 pub enum NotoraAction {
@@ -76,9 +112,15 @@ pub enum NotoraAction {
     SearchCommitted { query: String, search_generation: Option<SearchGeneration> },
     CardQueryCompleted { query: CardQuery, page: notora_core::CatalogCardPage },
     CardQueryFailed { query: CardQuery, message: String },
+    NavigationTreeLoaded(notora_core::CatalogNavigationTree),
+    NavigationTreeFailed(String),
+    CatalogRecoveryNotified(String),
+    NavigationExpansionToggled(PathBuf),
     CardListScrolled { offset_px: f32, near_end: bool },
     CardSelected(DocumentIdentity),
     CardActivated(DocumentIdentity),
+    CompactNavigationRequested,
+    CompactBackRequested,
     OpenExternalFileDialogRequested,
     ExternalPathsReceived(Vec<PathBuf>),
     ExternalFileOpened(DocumentIdentity),
@@ -89,6 +131,19 @@ pub enum NotoraAction {
     MoveDialogRequested(notora_core::NoteId),
     RenameRequested { note_id: notora_core::NoteId, new_file_name: PathBuf },
     MoveRequested { note_id: notora_core::NoteId, target_directory: PathBuf },
+    MetadataMutationRequested(MetadataMutation),
+    MetadataMutationCompleted,
+    MetadataMutationFailed(String),
+    TagEditorRequested(TagEditorMode),
+    TagEditorNameChanged(String),
+    TagEditorConfirmed,
+    TagDeletionRequested(TagId),
+    TagDeletionConfirmed,
+    TrashOperationRequested(TrashOperation),
+    TrashPermanentDeletionConfirmed,
+    TrashRestoreWithRenamedPathConfirmed,
+    TrashOperationCompleted,
+    TrashOperationFailed(TrashOperationFailure),
     SaveConflictDetected { identity: DocumentIdentity, content_revision: u64 },
     SaveConflictResolutionRequested(ConflictResolution),
     SaveConflictResolved { identity: DocumentIdentity },
@@ -97,6 +152,7 @@ pub enum NotoraAction {
     SplitterDragged { pane: Pane, logical_width: f32 },
     FocusRequested(FocusTarget),
     OpenSettings,
+    ProductSettingsUpdateRequested(ProductSettingsUpdate),
     OverlayDismissed,
     EscapePressed,
 }
@@ -106,12 +162,16 @@ pub enum NotoraAction {
 pub enum NotoraEffect {
     QueryCards(CardQuery),
     ExecuteNoteCommand(NoteCommand),
+    ExecuteMetadataMutation(MetadataMutation),
+    ExecuteTrashOperation(TrashOperation),
     ChooseNoteRenameDestination(notora_core::NoteId),
     ChooseNoteMoveDirectory(notora_core::NoteId),
     PrepareDocument(DocumentLoadRequest),
     PromoteActivePreview,
     OpenExternalFiles(crate::effect_executor::ExternalOpenRequest),
+    CreateUntitledExternal(DocumentKind),
     ResolveSaveConflict(SaveConflictRequest),
+    ApplyProductSettingsUpdate(ProductSettingsUpdate),
     PersistLayout,
     Redraw,
 }

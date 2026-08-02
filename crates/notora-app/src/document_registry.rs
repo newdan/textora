@@ -26,6 +26,14 @@ pub struct ReplacedDocumentMapping {
     pub tab_id: TabId,
 }
 
+/// LRU 回收候选的注册表快照；不携带 editor runtime 状态。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RegisteredDocument {
+    pub identity: DocumentIdentity,
+    pub tab_id: TabId,
+    pub is_preview: bool,
+}
+
 /// 外部文件路径不能 canonicalize 时的错误。
 #[derive(Debug)]
 pub struct ExternalPathError {
@@ -169,6 +177,26 @@ impl DocumentRegistry {
             .iter()
             .min_by_key(|(_, entry)| entry.last_access_sequence)
             .map(|(identity, entry)| (*identity, entry.tab_id))
+    }
+
+    /// 按最久未使用到最近使用顺序返回注册表快照，供产品层结合 runtime 状态筛选。
+    pub fn documents_by_least_recently_used(&self) -> Vec<RegisteredDocument> {
+        let mut documents = self
+            .entries_by_identity
+            .iter()
+            .map(|(identity, entry)| {
+                (
+                    entry.last_access_sequence,
+                    RegisteredDocument {
+                        identity: *identity,
+                        tab_id: entry.tab_id,
+                        is_preview: entry.disposition == TabDisposition::Preview,
+                    },
+                )
+            })
+            .collect::<Vec<_>>();
+        documents.sort_by_key(|(access_sequence, _)| *access_sequence);
+        documents.into_iter().map(|(_, document)| document).collect()
     }
 
     fn next_access_sequence(&mut self) -> u64 {

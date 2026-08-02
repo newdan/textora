@@ -8,6 +8,7 @@ use appkit_shell::editor_runtime::EditorRuntime;
 use appkit_shell::prepared_tab::PreparedTab;
 use appkit_shell::tab_runtime::TabRuntime;
 use appkit_shell::view_route::{ViewPathMatcher, ViewRouteError, ViewRouteRule, ViewRouteTable};
+use notora_core::DocumentKind;
 use ui::plugin::{PLUGIN_EDITOR, PLUGIN_MARKDOWN_EDITOR, PLUGIN_MINDMAP};
 
 const MINDMAP_ROUTE_PRIORITY: u16 = 300;
@@ -16,7 +17,6 @@ const TEXT_ROUTE_PRIORITY: u16 = 100;
 
 /// 读取完成、尚未触及 UI/runtime 的不可变文档输入。
 #[derive(Debug, Clone, PartialEq, Eq)]
-#[allow(dead_code, reason = "N3-7 installs these completed inputs after preview selection")]
 pub struct LoadedDocument {
     pub path: PathBuf,
     pub contents: String,
@@ -25,7 +25,6 @@ pub struct LoadedDocument {
 
 /// 文件读取和 `PreparedTab` 构造失败。
 #[derive(Debug)]
-#[allow(dead_code, reason = "N3-7 surfaces preparation failures through product events")]
 pub(crate) enum DocumentPreparationError {
     Read { path: PathBuf, source: std::io::Error },
     Revision { path: PathBuf, source: appkit_core::file_safety::FileSafetyError },
@@ -63,7 +62,6 @@ impl std::error::Error for DocumentPreparationError {
 }
 
 /// 此函数可在后台 worker 执行；失败时不会创建 runtime tab。
-#[allow(dead_code, reason = "N3-7 schedules file reads before tab installation")]
 pub(crate) fn load_document(path: &Path) -> Result<LoadedDocument, DocumentPreparationError> {
     let contents = std::fs::read_to_string(path)
         .map_err(|source| DocumentPreparationError::Read { path: path.to_path_buf(), source })?;
@@ -74,7 +72,6 @@ pub(crate) fn load_document(path: &Path) -> Result<LoadedDocument, DocumentPrepa
 }
 
 /// 仅在主线程调用：将已读取文本与产品路由组合为完整 `PreparedTab`。
-#[allow(dead_code, reason = "N3-7 installs preview tabs from this main-thread adapter")]
 pub(crate) fn prepare_loaded_document(
     runtime: &EditorRuntime,
     loaded: LoadedDocument,
@@ -87,6 +84,24 @@ pub(crate) fn prepare_loaded_document(
     document.disk_revision = loaded.disk_revision;
     document.set_language_from_path(&loaded.path);
     Ok(PreparedTab::new(document, TabRuntime::new(runtime.create_plugin_for_path(&loaded.path))))
+}
+
+/// 在主线程构造没有磁盘路径的临时外部文档；插件只由类型对应的虚拟文件名选择。
+pub(crate) fn prepare_untitled_document(
+    runtime: &EditorRuntime,
+    kind: DocumentKind,
+) -> Result<(PreparedTab, String), DocumentPreparationError> {
+    let text_buffer = core::buffer::TextBuffer::new(false)
+        .map_err(|error| DocumentPreparationError::Buffer { message: error.to_string() })?;
+    let document = appkit_core::document::DocumentModel::new(text_buffer);
+    let suggested_file_name = match kind {
+        DocumentKind::Text => "Untitled.txt",
+        DocumentKind::Markdown => "Untitled.md",
+        DocumentKind::Mindmap => "Untitled.mmap.md",
+    }
+    .to_owned();
+    let plugin = runtime.create_plugin_for_path(Path::new(&suggested_file_name));
+    Ok((PreparedTab::new(document, TabRuntime::new(plugin)), suggested_file_name))
 }
 
 /// 创建 notora 专属的 plugin registry 与有序路径路由。

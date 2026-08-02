@@ -2,7 +2,7 @@ use rusqlite::{Connection, Transaction};
 
 use super::{CatalogError, CatalogError::UnsupportedSchema};
 
-pub const CATALOG_SCHEMA_VERSION: u32 = 2;
+pub const CATALOG_SCHEMA_VERSION: u32 = 3;
 
 const INITIAL_SCHEMA: &str = r#"
 CREATE TABLE notes (
@@ -53,6 +53,12 @@ CREATE VIRTUAL TABLE note_search USING fts5(
 
 CREATE INDEX notes_active_modified_path_index
 ON notes(lifecycle, modified_ns DESC, relative_path ASC, note_id ASC);
+"#;
+
+const MISSING_FILE_CONFIRMATION_SCHEMA: &str = r#"
+ALTER TABLE notes
+ADD COLUMN missing_scan_count INTEGER NOT NULL DEFAULT 0
+CHECK (missing_scan_count >= 0);
 "#;
 
 const FTS5_TRIGRAM_CAPABILITY_PROBE: &str = "CREATE VIRTUAL TABLE temp.notora_fts5_trigram_probe USING fts5(contents, tokenize = 'trigram');";
@@ -106,6 +112,16 @@ fn apply_pending_migrations(
             .execute_batch(FULL_TEXT_SEARCH_SCHEMA)
             .map_err(full_text_search_schema_error)?;
         transaction
+            .pragma_update(None, "user_version", 2_u32)
+            .map_err(|source| CatalogError::sql("schema version write", source))?;
+        schema_version = 2;
+    }
+
+    if schema_version == 2 {
+        transaction
+            .execute_batch(MISSING_FILE_CONFIRMATION_SCHEMA)
+            .map_err(|source| CatalogError::sql("missing file confirmation migration", source))?;
+        transaction
             .pragma_update(None, "user_version", CATALOG_SCHEMA_VERSION)
             .map_err(|source| CatalogError::sql("schema version write", source))?;
         return Ok(());
@@ -138,7 +154,7 @@ mod tests {
     use rusqlite::Connection;
 
     use super::{
-        CATALOG_SCHEMA_VERSION, INITIAL_SCHEMA, migrate, schema_version,
+        CATALOG_SCHEMA_VERSION, FULL_TEXT_SEARCH_SCHEMA, INITIAL_SCHEMA, migrate, schema_version,
         verify_fts5_trigram_support,
     };
 
@@ -182,6 +198,35 @@ mod tests {
             )
             .expect("paging index lookup should succeed");
         assert!(paging_index_exists);
+    }
+
+    #[test]
+    fn version_two_catalog_adds_missing_file_confirmation_state() {
+        let mut connection = Connection::open_in_memory().expect("in-memory catalog should open");
+        connection
+            .execute_batch(INITIAL_SCHEMA)
+            .expect("version one schema fixture should initialize");
+        connection
+            .execute_batch(FULL_TEXT_SEARCH_SCHEMA)
+            .expect("version two FTS fixture should initialize");
+        connection
+            .pragma_update(None, "user_version", 2_u32)
+            .expect("version two fixture should be marked");
+
+        migrate(&mut connection).expect("missing confirmation migration should succeed");
+
+        assert_eq!(
+            schema_version(&connection).expect("schema version should be readable"),
+            CATALOG_SCHEMA_VERSION
+        );
+        let missing_scan_count_column_exists: bool = connection
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM pragma_table_info('notes') WHERE name = 'missing_scan_count')",
+                [],
+                |row| row.get(0),
+            )
+            .expect("missing confirmation column should be queryable");
+        assert!(missing_scan_count_column_exists);
     }
 
     #[test]

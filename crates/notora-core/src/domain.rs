@@ -67,6 +67,12 @@ impl TagId {
     }
 }
 
+impl From<Uuid> for TagId {
+    fn from(value: Uuid) -> Self {
+        Self(value)
+    }
+}
+
 impl std::fmt::Display for TagId {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         self.0.fmt(formatter)

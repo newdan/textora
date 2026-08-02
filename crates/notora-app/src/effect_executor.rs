@@ -5,8 +5,10 @@ use appkit_shell::ShellEffect;
 use std::path::PathBuf;
 
 use crate::action::{
-    CardQuery, DocumentLoadRequest, NoteCreationTarget, NotoraEffect, SaveConflictRequest,
+    CardQuery, DocumentLoadRequest, MetadataMutation, NoteCreationTarget, NotoraEffect,
+    SaveConflictRequest, TrashOperation,
 };
+use crate::settings_overlay::ProductSettingsUpdate;
 use notora_core::DocumentKind;
 use notora_core::note_command::NoteCommand;
 
@@ -30,13 +32,17 @@ pub trait NotoraEffectService {
     fn query_cards(&mut self, query: CardQuery);
     fn request_note_creation(&mut self, kind: DocumentKind, target: NoteCreationTarget);
     fn execute_note_command(&mut self, _command: NoteCommand) {}
+    fn execute_metadata_mutation(&mut self, _mutation: MetadataMutation) {}
+    fn execute_trash_operation(&mut self, _operation: TrashOperation) {}
     fn choose_note_rename_destination(&mut self, _note_id: notora_core::NoteId) {}
     fn choose_note_move_directory(&mut self, _note_id: notora_core::NoteId) {}
     fn prepare_document(&mut self, request: DocumentLoadRequest);
     fn promote_active_preview(&mut self) {}
     fn open_external_files(&mut self, _request: ExternalOpenRequest) {}
+    fn create_untitled_external(&mut self, _kind: DocumentKind) {}
     fn save_document_manually(&mut self, _request: ManualSaveRequest) {}
     fn resolve_save_conflict(&mut self, _request: SaveConflictRequest) {}
+    fn apply_product_settings_update(&mut self, _update: ProductSettingsUpdate) {}
     fn persist_layout(&mut self);
 }
 
@@ -52,6 +58,14 @@ impl EffectExecutor {
             }
             NotoraEffect::ExecuteNoteCommand(command) => {
                 service.execute_note_command(command);
+                ShellEffect::NONE
+            }
+            NotoraEffect::ExecuteMetadataMutation(mutation) => {
+                service.execute_metadata_mutation(mutation);
+                ShellEffect::NONE
+            }
+            NotoraEffect::ExecuteTrashOperation(operation) => {
+                service.execute_trash_operation(operation);
                 ShellEffect::NONE
             }
             NotoraEffect::ChooseNoteRenameDestination(note_id) => {
@@ -74,9 +88,17 @@ impl EffectExecutor {
                 service.open_external_files(request);
                 ShellEffect::NONE
             }
+            NotoraEffect::CreateUntitledExternal(kind) => {
+                service.create_untitled_external(kind);
+                ShellEffect::NONE
+            }
             NotoraEffect::ResolveSaveConflict(request) => {
                 service.resolve_save_conflict(request);
                 ShellEffect::NONE
+            }
+            NotoraEffect::ApplyProductSettingsUpdate(update) => {
+                service.apply_product_settings_update(update);
+                ShellEffect::PERSIST_SETTINGS
             }
             NotoraEffect::PersistLayout => {
                 service.persist_layout();
@@ -98,7 +120,9 @@ impl EffectExecutor {
 #[cfg(test)]
 mod tests {
     use super::{EffectExecutor, ManualSaveRequest, NotoraEffectService};
-    use crate::action::{CardQuery, DocumentLoadRequest, NoteCreationTarget, NotoraEffect};
+    use crate::action::{
+        CardQuery, DocumentLoadRequest, MetadataMutation, NoteCreationTarget, NotoraEffect,
+    };
     use notora_core::note_command::NoteCommand;
     use notora_core::{DocumentIdentity, DocumentKind, ExternalFileId, NavigationScope};
 
@@ -107,6 +131,7 @@ mod tests {
         card_query_count: usize,
         prepared_document: Option<DocumentLoadRequest>,
         executed_note_command_count: usize,
+        metadata_mutation: Option<MetadataMutation>,
         promoted_preview_count: usize,
         manual_save_request: Option<ManualSaveRequest>,
     }
@@ -120,6 +145,10 @@ mod tests {
 
         fn execute_note_command(&mut self, _command: NoteCommand) {
             self.executed_note_command_count += 1;
+        }
+
+        fn execute_metadata_mutation(&mut self, mutation: MetadataMutation) {
+            self.metadata_mutation = Some(mutation);
         }
 
         fn prepare_document(&mut self, request: DocumentLoadRequest) {
@@ -173,6 +202,21 @@ mod tests {
             appkit_shell::ShellEffect::NONE
         );
         assert_eq!(recorder.executed_note_command_count, 1);
+    }
+
+    #[test]
+    fn executor_routes_metadata_mutations_through_the_typed_service_boundary() {
+        let mut recorder = Recorder::default();
+        let mutation = MetadataMutation::ToggleStar { note_id: notora_core::NoteId::generate() };
+
+        assert_eq!(
+            EffectExecutor::execute(
+                &mut recorder,
+                NotoraEffect::ExecuteMetadataMutation(mutation.clone())
+            ),
+            appkit_shell::ShellEffect::NONE
+        );
+        assert_eq!(recorder.metadata_mutation, Some(mutation));
     }
 
     #[test]

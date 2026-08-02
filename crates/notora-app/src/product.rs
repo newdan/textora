@@ -22,6 +22,16 @@ pub enum NotoraProductEvent {
         query: crate::action::CardQuery,
         message: String,
     },
+    NavigationTreeLoaded {
+        workspace_id: WorkspaceId,
+        workspace_generation: u64,
+        tree: notora_core::CatalogNavigationTree,
+    },
+    NavigationTreeFailed {
+        workspace_id: WorkspaceId,
+        workspace_generation: u64,
+        message: String,
+    },
     WorkspaceScanCompleted {
         workspace_id: WorkspaceId,
         workspace_generation: u64,
@@ -47,6 +57,40 @@ pub enum NotoraProductEvent {
         workspace_generation: u64,
         message: String,
     },
+    MetadataMutationCompleted {
+        workspace_id: WorkspaceId,
+        workspace_generation: u64,
+    },
+    MetadataMutationFailed {
+        workspace_id: WorkspaceId,
+        workspace_generation: u64,
+        message: String,
+    },
+    CatalogBackupCompleted {
+        workspace_id: WorkspaceId,
+        workspace_generation: u64,
+        backup_path: std::path::PathBuf,
+    },
+    CatalogBackupFailed {
+        workspace_id: WorkspaceId,
+        workspace_generation: u64,
+        message: String,
+    },
+    CatalogRecoveryNotified {
+        workspace_id: WorkspaceId,
+        workspace_generation: u64,
+        message: String,
+    },
+    TrashOperationCompleted {
+        workspace_id: WorkspaceId,
+        workspace_generation: u64,
+        operation: crate::action::TrashOperation,
+    },
+    TrashOperationFailed {
+        workspace_id: WorkspaceId,
+        workspace_generation: u64,
+        failure: crate::action::TrashOperationFailure,
+    },
     DocumentLoaded {
         workspace_id: WorkspaceId,
         workspace_generation: u64,
@@ -64,6 +108,52 @@ pub enum NotoraProductEvent {
         workspace_generation: u64,
         identity: notora_core::DocumentIdentity,
         result: Result<(), String>,
+    },
+    ExternalFileOpenCompleted {
+        canonical_path: crate::external_files::CanonicalExternalPath,
+        document: crate::editor_adapter::LoadedDocument,
+        activate: bool,
+    },
+    ExternalFileOpenFailed {
+        message: String,
+    },
+    ExternalDocumentLoaded {
+        request: DocumentLoadRequest,
+        document: crate::editor_adapter::LoadedDocument,
+    },
+    ExternalDocumentLoadFailed {
+        request: DocumentLoadRequest,
+        message: String,
+    },
+    ExternalSaveAsCanonicalized {
+        tab_id: appkit_core::workspace::types::TabId,
+        external_file_id: notora_core::ExternalFileId,
+        content_revision: u64,
+        result: Result<crate::external_files::CanonicalExternalPath, String>,
+    },
+    ConflictReloadCompleted {
+        identity: notora_core::DocumentIdentity,
+        tab_id: appkit_core::workspace::types::TabId,
+        content_revision: u64,
+        document: crate::editor_adapter::LoadedDocument,
+    },
+    ConflictReloadFailed {
+        identity: notora_core::DocumentIdentity,
+        message: String,
+    },
+    ConflictRetryRevisionCaptured {
+        identity: notora_core::DocumentIdentity,
+        tab_id: appkit_core::workspace::types::TabId,
+        content_revision: u64,
+        path: std::path::PathBuf,
+        disk_revision: appkit_core::file_safety::DiskRevision,
+    },
+    ConflictRetryRevisionFailed {
+        identity: notora_core::DocumentIdentity,
+        message: String,
+    },
+    PersistenceFailed {
+        message: String,
     },
 }
 
@@ -162,10 +252,26 @@ impl NotoraProduct {
 
     fn event_matches_active_workspace(&self, event: &NotoraProductEvent) -> bool {
         let event_workspace = match event {
+            NotoraProductEvent::ExternalFileOpenCompleted { .. }
+            | NotoraProductEvent::ExternalFileOpenFailed { .. }
+            | NotoraProductEvent::ExternalDocumentLoaded { .. }
+            | NotoraProductEvent::ExternalDocumentLoadFailed { .. }
+            | NotoraProductEvent::ExternalSaveAsCanonicalized { .. }
+            | NotoraProductEvent::ConflictReloadCompleted { .. }
+            | NotoraProductEvent::ConflictReloadFailed { .. }
+            | NotoraProductEvent::ConflictRetryRevisionCaptured { .. }
+            | NotoraProductEvent::ConflictRetryRevisionFailed { .. }
+            | NotoraProductEvent::PersistenceFailed { .. } => return true,
             NotoraProductEvent::CardQueryCompleted {
                 workspace_id, workspace_generation, ..
             }
             | NotoraProductEvent::CardQueryFailed { workspace_id, workspace_generation, .. }
+            | NotoraProductEvent::NavigationTreeLoaded {
+                workspace_id, workspace_generation, ..
+            }
+            | NotoraProductEvent::NavigationTreeFailed {
+                workspace_id, workspace_generation, ..
+            }
             | NotoraProductEvent::WorkspaceScanCompleted {
                 workspace_id,
                 workspace_generation,
@@ -179,6 +285,36 @@ impl NotoraProduct {
                 workspace_id, workspace_generation, ..
             }
             | NotoraProductEvent::NoteCommandFailed {
+                workspace_id, workspace_generation, ..
+            }
+            | NotoraProductEvent::MetadataMutationCompleted {
+                workspace_id,
+                workspace_generation,
+            }
+            | NotoraProductEvent::MetadataMutationFailed {
+                workspace_id,
+                workspace_generation,
+                ..
+            }
+            | NotoraProductEvent::CatalogBackupCompleted {
+                workspace_id,
+                workspace_generation,
+                ..
+            }
+            | NotoraProductEvent::CatalogBackupFailed {
+                workspace_id, workspace_generation, ..
+            }
+            | NotoraProductEvent::CatalogRecoveryNotified {
+                workspace_id,
+                workspace_generation,
+                ..
+            }
+            | NotoraProductEvent::TrashOperationCompleted {
+                workspace_id,
+                workspace_generation,
+                ..
+            }
+            | NotoraProductEvent::TrashOperationFailed {
                 workspace_id, workspace_generation, ..
             }
             | NotoraProductEvent::DocumentLoaded { workspace_id, workspace_generation, .. }

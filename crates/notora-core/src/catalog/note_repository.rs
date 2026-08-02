@@ -12,6 +12,8 @@ const DOCUMENT_KIND_TEXT: i64 = 1;
 const DOCUMENT_KIND_MARKDOWN: i64 = 2;
 const DOCUMENT_KIND_MINDMAP: i64 = 3;
 const ACTIVE_NOTE_LIFECYCLE: i64 = 0;
+const TRASHED_NOTE_LIFECYCLE: i64 = 1;
+const MISSING_SCAN_CONFIRMATION_COUNT: i64 = 2;
 
 /// 已由扫描器读取并准备写入 catalog 的活动笔记记录。
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -25,6 +27,15 @@ pub struct CatalogNote {
     pub file_size: u64,
     pub content_hash: Vec<u8>,
     pub starred: bool,
+}
+
+/// 一条已移入工作区回收站的笔记记录；路径始终相对于工作区根。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TrashEntry {
+    pub note_id: NoteId,
+    pub original_relative_path: PathBuf,
+    pub trash_relative_path: PathBuf,
+    pub deleted_at: SystemTime,
 }
 
 impl Catalog {
@@ -106,7 +117,8 @@ impl Catalog {
                     excerpt = excluded.excerpt,
                     modified_ns = excluded.modified_ns,
                     file_size = excluded.file_size,
-                    content_hash = excluded.content_hash",
+                    content_hash = excluded.content_hash,
+                    missing_scan_count = 0",
                 params![
                     note.note_id.to_string(),
                     note.relative_path.to_string_lossy(),
@@ -184,28 +196,246 @@ impl Catalog {
         Err(CatalogError::InvalidStoredValue { column: "note_id", value: note_id.to_string() })
     }
 
-    /// 清理一次完整扫描确认已不存在的活动笔记及其全文索引。
-    pub fn remove_missing_active_notes(&self, note_ids: &[NoteId]) -> Result<(), CatalogError> {
-        if note_ids.is_empty() {
-            return Ok(());
-        }
+    /// 记录一次完整扫描观察到的缺失笔记，并只删除连续两次完整扫描都缺失的行。
+    ///
+    /// 在两次扫描之间重新出现的笔记会清除确认计数，避免 watcher 的瞬态 rename 或
+    /// 原子替换事件直接删除 catalog identity 与用户 metadata。
+    pub fn reconcile_active_note_presence(
+        &self,
+        present_note_ids: &[NoteId],
+        missing_note_ids: &[NoteId],
+    ) -> Result<usize, CatalogError> {
         let transaction = self.connection().unchecked_transaction().map_err(|source| {
-            CatalogError::sql("missing note cleanup transaction start", source)
+            CatalogError::sql("missing note confirmation transaction start", source)
         })?;
-        for note_id in note_ids {
+        for note_id in present_note_ids {
             transaction
-                .execute("DELETE FROM note_search WHERE note_id = ?1", [note_id.to_string()])
-                .map_err(|source| CatalogError::sql("missing note search cleanup", source))?;
+                .execute(
+                    "UPDATE notes
+                     SET missing_scan_count = 0
+                     WHERE note_id = ?1 AND lifecycle = ?2 AND missing_scan_count > 0",
+                    params![note_id.to_string(), ACTIVE_NOTE_LIFECYCLE],
+                )
+                .map_err(|source| CatalogError::sql("missing note confirmation reset", source))?;
+        }
+
+        let mut removed_count = 0;
+        for note_id in missing_note_ids {
+            let note_id = note_id.to_string();
+            let updated_rows = transaction
+                .execute(
+                    "UPDATE notes
+                     SET missing_scan_count = missing_scan_count + 1
+                     WHERE note_id = ?1 AND lifecycle = ?2",
+                    params![note_id, ACTIVE_NOTE_LIFECYCLE],
+                )
+                .map_err(|source| CatalogError::sql("missing note confirmation update", source))?;
+            if updated_rows == 0 {
+                continue;
+            }
+            let confirmation_count: i64 = transaction
+                .query_row(
+                    "SELECT missing_scan_count FROM notes WHERE note_id = ?1",
+                    [&note_id],
+                    |row| row.get(0),
+                )
+                .map_err(|source| CatalogError::sql("missing note confirmation read", source))?;
+            if confirmation_count < MISSING_SCAN_CONFIRMATION_COUNT {
+                continue;
+            }
+            transaction
+                .execute("DELETE FROM note_search WHERE note_id = ?1", [&note_id])
+                .map_err(|source| CatalogError::sql("confirmed missing search cleanup", source))?;
             transaction
                 .execute(
                     "DELETE FROM notes WHERE note_id = ?1 AND lifecycle = ?2",
-                    params![note_id.to_string(), ACTIVE_NOTE_LIFECYCLE],
+                    params![note_id, ACTIVE_NOTE_LIFECYCLE],
                 )
-                .map_err(|source| CatalogError::sql("missing active note cleanup", source))?;
+                .map_err(|source| CatalogError::sql("confirmed missing note cleanup", source))?;
+            removed_count += 1;
+        }
+        transaction.commit().map_err(|source| {
+            CatalogError::sql("missing note confirmation transaction commit", source)
+        })?;
+        Ok(removed_count)
+    }
+
+    /// 将已完成磁盘移动的活动笔记标记为 Trash；metadata 不会被删除。
+    pub fn record_note_trashed(
+        &self,
+        note_id: NoteId,
+        trash_relative_path: &Path,
+        deleted_at: SystemTime,
+    ) -> Result<TrashEntry, CatalogError> {
+        let deleted_at_nanoseconds = system_time_to_nanoseconds(deleted_at)?;
+        let transaction = self
+            .connection()
+            .unchecked_transaction()
+            .map_err(|source| CatalogError::sql("trash record transaction start", source))?;
+        let original_relative_path: String = transaction
+            .query_row(
+                "SELECT relative_path FROM notes WHERE note_id = ?1 AND lifecycle = ?2",
+                params![note_id.to_string(), ACTIVE_NOTE_LIFECYCLE],
+                |row| row.get(0),
+            )
+            .map_err(|source| CatalogError::sql("trash source note query", source))?;
+        let updated_rows = transaction
+            .execute(
+                "UPDATE notes SET lifecycle = ?1, relative_path = ?2 WHERE note_id = ?3 AND lifecycle = ?4",
+                params![
+                    TRASHED_NOTE_LIFECYCLE,
+                    trash_relative_path.to_string_lossy(),
+                    note_id.to_string(),
+                    ACTIVE_NOTE_LIFECYCLE,
+                ],
+            )
+            .map_err(|source| CatalogError::sql("trash note lifecycle update", source))?;
+        if updated_rows != 1 {
+            return Err(CatalogError::InvalidStoredValue {
+                column: "active_note_id",
+                value: note_id.to_string(),
+            });
+        }
+        transaction
+            .execute(
+                "INSERT INTO trash_entries (
+                    note_id, original_relative_path, trash_relative_path, deleted_at_ns
+                ) VALUES (?1, ?2, ?3, ?4)",
+                params![
+                    note_id.to_string(),
+                    original_relative_path,
+                    trash_relative_path.to_string_lossy(),
+                    deleted_at_nanoseconds,
+                ],
+            )
+            .map_err(|source| CatalogError::sql("trash entry insert", source))?;
+        transaction
+            .commit()
+            .map_err(|source| CatalogError::sql("trash record transaction commit", source))?;
+        Ok(TrashEntry {
+            note_id,
+            original_relative_path: original_relative_path.into(),
+            trash_relative_path: trash_relative_path.to_path_buf(),
+            deleted_at,
+        })
+    }
+
+    /// 读取精确 Trash entry；不存在时返回 `None`，调用方不得用路径猜测回收目标。
+    pub fn trash_entry(&self, note_id: NoteId) -> Result<Option<TrashEntry>, CatalogError> {
+        self.connection()
+            .query_row(
+                "SELECT note_id, original_relative_path, trash_relative_path, deleted_at_ns
+                 FROM trash_entries WHERE note_id = ?1",
+                [note_id.to_string()],
+                trash_entry_from_row,
+            )
+            .optional()
+            .map_err(|source| CatalogError::sql("trash entry query", source))
+    }
+
+    /// 解析当前 Trash 的固定目标列表，供批量清空在执行前冻结范围。
+    pub fn trash_entries(&self) -> Result<Vec<TrashEntry>, CatalogError> {
+        let mut statement = self
+            .connection()
+            .prepare(
+                "SELECT note_id, original_relative_path, trash_relative_path, deleted_at_ns
+                 FROM trash_entries ORDER BY deleted_at_ns ASC, note_id ASC",
+            )
+            .map_err(|source| CatalogError::sql("trash entries query preparation", source))?;
+        statement
+            .query_map([], trash_entry_from_row)
+            .map_err(|source| CatalogError::sql("trash entries query", source))?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|source| CatalogError::sql("trash entries row read", source))
+    }
+
+    /// 在完成磁盘 restore 后恢复 catalog 生命周期和原相对路径。
+    pub fn restore_trashed_note(&self, note_id: NoteId) -> Result<TrashEntry, CatalogError> {
+        self.restore_trashed_note_to_path(note_id, None)
+    }
+
+    /// 在完成磁盘 restore 后恢复 catalog 生命周期；可显式指定冲突后的新相对路径。
+    pub fn restore_trashed_note_to_path(
+        &self,
+        note_id: NoteId,
+        restored_relative_path: Option<&Path>,
+    ) -> Result<TrashEntry, CatalogError> {
+        let transaction = self
+            .connection()
+            .unchecked_transaction()
+            .map_err(|source| CatalogError::sql("trash restore transaction start", source))?;
+        let entry = transaction
+            .query_row(
+                "SELECT note_id, original_relative_path, trash_relative_path, deleted_at_ns
+                 FROM trash_entries WHERE note_id = ?1",
+                [note_id.to_string()],
+                trash_entry_from_row,
+            )
+            .map_err(|source| CatalogError::sql("trash restore entry query", source))?;
+        let updated_rows = transaction
+            .execute(
+                "UPDATE notes SET lifecycle = ?1, relative_path = ?2 WHERE note_id = ?3 AND lifecycle = ?4",
+                params![
+                    ACTIVE_NOTE_LIFECYCLE,
+                    restored_relative_path
+                        .unwrap_or(&entry.original_relative_path)
+                        .to_string_lossy(),
+                    note_id.to_string(),
+                    TRASHED_NOTE_LIFECYCLE,
+                ],
+            )
+            .map_err(|source| CatalogError::sql("trash restore note update", source))?;
+        if updated_rows != 1 {
+            return Err(CatalogError::InvalidStoredValue {
+                column: "trashed_note_id",
+                value: note_id.to_string(),
+            });
+        }
+        transaction
+            .execute("DELETE FROM trash_entries WHERE note_id = ?1", [note_id.to_string()])
+            .map_err(|source| CatalogError::sql("trash entry delete after restore", source))?;
+        transaction
+            .commit()
+            .map_err(|source| CatalogError::sql("trash restore transaction commit", source))?;
+        Ok(entry)
+    }
+
+    /// 在文件已进入受控删除暂存位置后，永久删除其精确 catalog entry 与 metadata。
+    pub fn permanently_delete_trashed_note(
+        &self,
+        note_id: NoteId,
+    ) -> Result<TrashEntry, CatalogError> {
+        let transaction = self
+            .connection()
+            .unchecked_transaction()
+            .map_err(|source| CatalogError::sql("permanent deletion transaction start", source))?;
+        let entry = transaction
+            .query_row(
+                "SELECT note_id, original_relative_path, trash_relative_path, deleted_at_ns
+                 FROM trash_entries WHERE note_id = ?1",
+                [note_id.to_string()],
+                trash_entry_from_row,
+            )
+            .map_err(|source| CatalogError::sql("permanent deletion entry query", source))?;
+        transaction
+            .execute("DELETE FROM note_search WHERE note_id = ?1", [note_id.to_string()])
+            .map_err(|source| CatalogError::sql("permanent deletion search cleanup", source))?;
+        let deleted_rows = transaction
+            .execute(
+                "DELETE FROM notes WHERE note_id = ?1 AND lifecycle = ?2",
+                params![note_id.to_string(), TRASHED_NOTE_LIFECYCLE],
+            )
+            .map_err(|source| CatalogError::sql("permanent deletion note cleanup", source))?;
+        if deleted_rows != 1 {
+            return Err(CatalogError::InvalidStoredValue {
+                column: "trashed_note_id",
+                value: note_id.to_string(),
+            });
         }
         transaction
             .commit()
-            .map_err(|source| CatalogError::sql("missing note cleanup transaction commit", source))
+            .map_err(|source| CatalogError::sql("permanent deletion transaction commit", source))?;
+        Ok(entry)
     }
 }
 
@@ -272,6 +502,31 @@ fn stored_note_from_row(row: &Row<'_>) -> rusqlite::Result<StoredNote> {
         file_size: row.get(6)?,
         content_hash: row.get(7)?,
         starred: row.get(8)?,
+    })
+}
+
+fn trash_entry_from_row(row: &Row<'_>) -> rusqlite::Result<TrashEntry> {
+    let note_id: String = row.get(0)?;
+    let note_id = Uuid::parse_str(&note_id).map(NoteId::from).map_err(|_| {
+        rusqlite::Error::FromSqlConversionFailure(
+            0,
+            rusqlite::types::Type::Text,
+            "invalid note identifier".into(),
+        )
+    })?;
+    let deleted_at_nanoseconds: i64 = row.get(3)?;
+    let deleted_at = nanoseconds_to_system_time(deleted_at_nanoseconds).map_err(|error| {
+        rusqlite::Error::FromSqlConversionFailure(
+            3,
+            rusqlite::types::Type::Integer,
+            error.to_string().into(),
+        )
+    })?;
+    Ok(TrashEntry {
+        note_id,
+        original_relative_path: row.get::<_, String>(1)?.into(),
+        trash_relative_path: row.get::<_, String>(2)?.into(),
+        deleted_at,
     })
 }
 

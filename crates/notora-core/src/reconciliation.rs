@@ -83,7 +83,7 @@ pub fn reconcile_catalog(
     reconcile_notes(existing_notes, discovered_notes)
 }
 
-fn reconcile_notes(
+pub(crate) fn reconcile_notes(
     existing_notes: Vec<CatalogNote>,
     discovered_notes: impl IntoIterator<Item = DiscoveredNote>,
 ) -> Result<ReconciliationPlan, ReconciliationError> {

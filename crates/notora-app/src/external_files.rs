@@ -314,6 +314,23 @@ impl ExternalFileSessions {
         self.sessions.iter().find(|session| session.external_file_id() == external_file_id)
     }
 
+    /// 根据规范化路径读取已有会话身份，供 session 恢复精确选回最后一个 external 文档。
+    pub fn identity_for_canonical_path(
+        &self,
+        canonical_path: &CanonicalExternalPath,
+    ) -> Option<DocumentIdentity> {
+        self.sessions.iter().find_map(|session| match session {
+            ExternalFileSession::Existing { canonical_path: known_path, .. }
+                if known_path == canonical_path =>
+            {
+                Some(session.identity())
+            }
+            ExternalFileSession::Existing { .. }
+            | ExternalFileSession::Untitled { .. }
+            | ExternalFileSession::Missing { .. } => None,
+        })
+    }
+
     pub fn sessions(&self) -> &[ExternalFileSession] {
         &self.sessions
     }
@@ -361,6 +378,15 @@ mod tests {
         assert!(matches!(first, OpenExistingExternalFile::Created(_)));
         assert_eq!(second, OpenExistingExternalFile::Reused(first.identity()));
         assert_eq!(sessions.sessions().len(), 1);
+    }
+
+    #[test]
+    fn session_restore_can_find_an_existing_external_document_by_its_canonical_path() {
+        let path = canonical_fixture("restore-target.md");
+        let mut sessions = ExternalFileSessions::default();
+        let identity = sessions.open_existing(path.clone()).identity();
+
+        assert_eq!(sessions.identity_for_canonical_path(&path), Some(identity));
     }
 
     #[test]

@@ -1,18 +1,23 @@
 //! 工作区专属的后台索引 worker 生命周期与命令边界。
 
+use std::path::PathBuf;
 use std::sync::mpsc;
 use std::thread::{self, JoinHandle};
 
 use notora_core::note_command::NoteCommand;
 
-use crate::action::{CardQuery, DocumentLoadRequest};
+use crate::action::{CardQuery, DocumentLoadRequest, MetadataMutation, TrashOperation};
 
 const INDEX_WORKER_THREAD_NAME: &str = "notora-workspace-indexer";
 
 /// 只能由后台 catalog owner 执行的索引相关命令。
 pub(crate) enum IndexWorkerCommand {
     QueryCards(CardQuery),
+    QueryNavigationTree,
     ExecuteNoteCommand(NoteCommand),
+    ExecuteMetadataMutation(MetadataMutation),
+    CreateCatalogBackup { directory: PathBuf, retention: notora_core::BackupRetention },
+    ExecuteTrashOperation(TrashOperation),
     PrepareDocument(DocumentLoadRequest),
     ReindexCatalog,
 }

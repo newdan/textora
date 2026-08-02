@@ -23,6 +23,8 @@ check_forbidden_dependency textora-ui \
 check_forbidden_dependency notora-core \
   textora-ui winit wgpu textora-render textora-shaping textora-appkit-core textora-appkit-shell \
   textora-markdown textora-sync textora-app
+check_forbidden_dependency notora-app \
+  textora-app textora-sync
 
 check_forbidden_source_tokens() {
   local source_dir="$1"
@@ -72,6 +74,8 @@ check_forbidden_source_tokens crates/ui \
   "$local_notora_snapshot"
 
 check_forbidden_source_tokens crates/notora-core \
+  "$local_edit_snapshot"
+check_forbidden_source_tokens crates/notora-app \
   "$local_edit_snapshot"
 
 local_runtime_dir="crates/appkit-shell/src/editor_runtime"

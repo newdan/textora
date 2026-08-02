@@ -1,5 +1,8 @@
+use std::collections::BTreeSet;
+
 use notora_core::{
-    CatalogCard, CatalogCardCursor, DocumentIdentity, DocumentKind, NavigationScope,
+    CatalogCard, CatalogCardCursor, CatalogNavigationTree, DocumentIdentity, DocumentKind,
+    NavigationScope, TagId, TagWithActiveNoteCount,
 };
 
 use crate::action::{
@@ -27,6 +30,17 @@ pub enum OverlayState {
     None,
     Settings,
     NewDocumentMenu,
+    DeleteTagConfirmation {
+        tag_id: TagId,
+    },
+    TrashPermanentDeletionConfirmation {
+        operation: crate::action::TrashOperation,
+    },
+    TrashRestoreConflictConfirmation {
+        note_id: notora_core::NoteId,
+    },
+    TagEditor,
+    SaveConflict,
 }
 
 /// 响应式三栏壳的互斥布局模式。
@@ -36,6 +50,22 @@ pub enum ResponsiveLayoutMode {
     ThreePane,
     NavigationOverlay,
     EditorOverlay,
+}
+
+/// 紧凑布局中间栏与编辑器之间的唯一可见内容。
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum CompactContent {
+    #[default]
+    CardList,
+    Editor,
+}
+
+/// 紧凑布局的左侧导航抽屉状态。
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum CompactNavigation {
+    #[default]
+    Hidden,
+    Visible,
 }
 
 /// 分隔条影响的相邻 pane。
@@ -57,6 +87,8 @@ pub struct LibraryState {
     pub selected_document_generation: u64,
     pub last_command_error: Option<String>,
     pub save_conflict: Option<SaveConflict>,
+    pub navigation_tree: NavigationTreeState,
+    pub tag_editor: Option<TagEditorState>,
 }
 
 impl Default for LibraryState {
@@ -71,8 +103,25 @@ impl Default for LibraryState {
             selected_document_generation: 0,
             last_command_error: None,
             save_conflict: None,
+            navigation_tree: NavigationTreeState::default(),
+            tag_editor: None,
         }
     }
+}
+
+/// 左栏的数据快照，由 app 接收 worker DTO 后存入；render 不读 catalog。
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct NavigationTreeState {
+    pub directories: Vec<std::path::PathBuf>,
+    pub tags: Vec<TagWithActiveNoteCount>,
+    pub expanded_directories: BTreeSet<std::path::PathBuf>,
+}
+
+/// 只保存用户当前编辑的标签名称；确认后才映射为后台 metadata mutation。
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct TagEditorState {
+    pub mode: crate::action::TagEditorMode,
+    pub display_name: String,
 }
 
 /// 中栏数据加载状态；任何时刻只表示一种结果，避免 loading/failed bool 组合。
@@ -116,6 +165,8 @@ pub struct LayoutState {
     pub navigation_width_logical: f32,
     pub card_list_width_logical: f32,
     pub responsive_mode: ResponsiveLayoutMode,
+    pub compact_content: CompactContent,
+    pub compact_navigation: CompactNavigation,
     pub focus_target: FocusTarget,
     pub overlay: OverlayState,
 }
@@ -126,6 +177,8 @@ impl Default for LayoutState {
             navigation_width_logical: 220.0,
             card_list_width_logical: 340.0,
             responsive_mode: ResponsiveLayoutMode::ThreePane,
+            compact_content: CompactContent::CardList,
+            compact_navigation: CompactNavigation::Hidden,
             focus_target: FocusTarget::NavigationTree,
             overlay: OverlayState::None,
         }
@@ -157,6 +210,18 @@ impl NotoraState {
             NotoraAction::CardQueryFailed { query, message } => {
                 self.apply_card_query_failure(query, message)
             }
+            NotoraAction::NavigationTreeLoaded(tree) => self.apply_navigation_tree(tree),
+            NotoraAction::NavigationTreeFailed(message) => {
+                self.library.last_command_error = Some(message);
+                vec![NotoraEffect::Redraw]
+            }
+            NotoraAction::CatalogRecoveryNotified(message) => {
+                self.library.last_command_error = Some(message);
+                vec![NotoraEffect::Redraw]
+            }
+            NotoraAction::NavigationExpansionToggled(relative_path) => {
+                self.toggle_navigation_expansion(relative_path)
+            }
             NotoraAction::CardListScrolled { offset_px, near_end } => {
                 self.library.card_scroll_offset_px = offset_px;
                 if near_end {
@@ -167,6 +232,7 @@ impl NotoraState {
             NotoraAction::CardSelected(identity) => {
                 let request = self.select_document(identity);
                 self.layout.focus_target = FocusTarget::CardList;
+                self.layout.compact_content = CompactContent::CardList;
                 vec![NotoraEffect::PrepareDocument(request), NotoraEffect::Redraw]
             }
             NotoraAction::CardActivated(identity) => {
@@ -174,7 +240,19 @@ impl NotoraState {
                     return vec![NotoraEffect::Redraw];
                 }
                 self.layout.focus_target = FocusTarget::Editor;
+                self.layout.compact_content = CompactContent::Editor;
                 vec![NotoraEffect::PromoteActivePreview, NotoraEffect::Redraw]
+            }
+            NotoraAction::CompactNavigationRequested => {
+                self.layout.compact_navigation = CompactNavigation::Visible;
+                self.layout.focus_target = FocusTarget::NavigationTree;
+                vec![NotoraEffect::Redraw]
+            }
+            NotoraAction::CompactBackRequested => {
+                self.layout.compact_content = CompactContent::CardList;
+                self.layout.compact_navigation = CompactNavigation::Hidden;
+                self.layout.focus_target = FocusTarget::CardList;
+                vec![NotoraEffect::Redraw]
             }
             NotoraAction::OpenExternalFileDialogRequested => {
                 vec![NotoraEffect::OpenExternalFiles(ExternalOpenRequest::ShowFileDialog)]
@@ -224,8 +302,109 @@ impl NotoraState {
                     NotoraEffect::Redraw,
                 ]
             }
+            NotoraAction::MetadataMutationRequested(mutation) => {
+                self.library.last_command_error = None;
+                vec![NotoraEffect::ExecuteMetadataMutation(mutation), NotoraEffect::Redraw]
+            }
+            NotoraAction::MetadataMutationCompleted => {
+                self.library.last_command_error = None;
+                if self.library.navigation_scope == NavigationScope::ExternalFiles {
+                    return vec![NotoraEffect::Redraw];
+                }
+                self.request_card_query(CardQuery::from(self.library.navigation_scope.clone()))
+            }
+            NotoraAction::MetadataMutationFailed(message) => {
+                self.library.last_command_error = Some(message);
+                vec![NotoraEffect::Redraw]
+            }
+            NotoraAction::TagEditorRequested(mode) => self.open_tag_editor(mode),
+            NotoraAction::TagEditorNameChanged(display_name) => {
+                if let Some(editor) = self.library.tag_editor.as_mut() {
+                    editor.display_name = display_name;
+                }
+                vec![NotoraEffect::Redraw]
+            }
+            NotoraAction::TagEditorConfirmed => self.confirm_tag_editor(),
+            NotoraAction::TagDeletionRequested(tag_id) => {
+                self.layout.overlay = OverlayState::DeleteTagConfirmation { tag_id };
+                self.layout.focus_target = FocusTarget::Overlay;
+                vec![NotoraEffect::Redraw]
+            }
+            NotoraAction::TagDeletionConfirmed => {
+                let OverlayState::DeleteTagConfirmation { tag_id } = self.layout.overlay else {
+                    return vec![NotoraEffect::Redraw];
+                };
+                self.layout.overlay = OverlayState::None;
+                self.layout.focus_target = FocusTarget::NavigationTree;
+                self.library.last_command_error = None;
+                vec![
+                    NotoraEffect::ExecuteMetadataMutation(
+                        crate::action::MetadataMutation::DeleteTag { tag_id },
+                    ),
+                    NotoraEffect::Redraw,
+                ]
+            }
+            NotoraAction::TrashOperationRequested(operation) => {
+                if matches!(
+                    operation,
+                    crate::action::TrashOperation::PermanentlyDelete { .. }
+                        | crate::action::TrashOperation::Empty
+                ) {
+                    self.layout.overlay =
+                        OverlayState::TrashPermanentDeletionConfirmation { operation };
+                    self.layout.focus_target = FocusTarget::Overlay;
+                    return vec![NotoraEffect::Redraw];
+                }
+                self.library.last_command_error = None;
+                vec![NotoraEffect::ExecuteTrashOperation(operation), NotoraEffect::Redraw]
+            }
+            NotoraAction::TrashPermanentDeletionConfirmed => {
+                let OverlayState::TrashPermanentDeletionConfirmation { operation } =
+                    self.layout.overlay
+                else {
+                    return vec![NotoraEffect::Redraw];
+                };
+                self.layout.overlay = OverlayState::None;
+                self.layout.focus_target = FocusTarget::NavigationTree;
+                self.library.last_command_error = None;
+                vec![NotoraEffect::ExecuteTrashOperation(operation), NotoraEffect::Redraw]
+            }
+            NotoraAction::TrashRestoreWithRenamedPathConfirmed => {
+                let OverlayState::TrashRestoreConflictConfirmation { note_id } =
+                    self.layout.overlay
+                else {
+                    return vec![NotoraEffect::Redraw];
+                };
+                self.layout.overlay = OverlayState::None;
+                self.layout.focus_target = FocusTarget::NavigationTree;
+                self.library.last_command_error = None;
+                vec![
+                    NotoraEffect::ExecuteTrashOperation(
+                        crate::action::TrashOperation::RestoreWithRenamedPath { note_id },
+                    ),
+                    NotoraEffect::Redraw,
+                ]
+            }
+            NotoraAction::TrashOperationCompleted => {
+                self.library.last_command_error = None;
+                self.request_card_query(CardQuery::from(self.library.navigation_scope.clone()))
+            }
+            NotoraAction::TrashOperationFailed(failure) => match failure {
+                crate::action::TrashOperationFailure::RestoreConflict { note_id } => {
+                    self.layout.overlay =
+                        OverlayState::TrashRestoreConflictConfirmation { note_id };
+                    self.layout.focus_target = FocusTarget::Overlay;
+                    vec![NotoraEffect::Redraw]
+                }
+                crate::action::TrashOperationFailure::Message(message) => {
+                    self.library.last_command_error = Some(message);
+                    vec![NotoraEffect::Redraw]
+                }
+            },
             NotoraAction::SaveConflictDetected { identity, content_revision } => {
                 self.library.save_conflict = Some(SaveConflict { identity, content_revision });
+                self.layout.overlay = OverlayState::SaveConflict;
+                self.layout.focus_target = FocusTarget::Overlay;
                 vec![NotoraEffect::Redraw]
             }
             NotoraAction::SaveConflictResolutionRequested(resolution) => {
@@ -234,6 +413,8 @@ impl NotoraState {
             NotoraAction::SaveConflictResolved { identity } => {
                 if self.library.save_conflict.map(|conflict| conflict.identity) == Some(identity) {
                     self.library.save_conflict = None;
+                    self.layout.overlay = OverlayState::None;
+                    self.layout.focus_target = FocusTarget::Editor;
                 }
                 vec![NotoraEffect::Redraw]
             }
@@ -250,6 +431,9 @@ impl NotoraState {
                 self.layout.focus_target = FocusTarget::Overlay;
                 vec![NotoraEffect::Redraw]
             }
+            NotoraAction::ProductSettingsUpdateRequested(update) => {
+                vec![NotoraEffect::ApplyProductSettingsUpdate(update), NotoraEffect::Redraw]
+            }
             NotoraAction::OverlayDismissed => self.dismiss_overlay(),
             NotoraAction::EscapePressed => self.handle_escape(),
         }
@@ -262,6 +446,8 @@ impl NotoraState {
         }
         self.library.navigation_scope = scope.clone();
         self.layout.focus_target = FocusTarget::NavigationTree;
+        self.layout.compact_navigation = CompactNavigation::Hidden;
+        self.layout.compact_content = CompactContent::CardList;
         if scope == NavigationScope::ExternalFiles {
             return vec![NotoraEffect::Redraw];
         }
@@ -303,6 +489,9 @@ impl NotoraState {
             self.layout.overlay = OverlayState::None;
             self.layout.focus_target = FocusTarget::CardList;
         }
+        if self.library.navigation_scope == NavigationScope::ExternalFiles {
+            return vec![NotoraEffect::CreateUntitledExternal(kind), NotoraEffect::Redraw];
+        }
         let Some(target) = creation_target(&self.library.navigation_scope) else {
             return vec![NotoraEffect::Redraw];
         };
@@ -316,6 +505,8 @@ impl NotoraState {
         };
         if resolution == ConflictResolution::Cancel {
             self.library.save_conflict = None;
+            self.layout.overlay = OverlayState::None;
+            self.layout.focus_target = FocusTarget::Editor;
             return vec![NotoraEffect::Redraw];
         }
         vec![
@@ -345,6 +536,50 @@ impl NotoraState {
         self.library.card_scroll_offset_px = 0.0;
         self.library.card_page = CardPageState::LoadingInitial { query: query.clone() };
         vec![NotoraEffect::QueryCards(query), NotoraEffect::Redraw]
+    }
+
+    fn apply_navigation_tree(&mut self, tree: CatalogNavigationTree) -> Vec<NotoraEffect> {
+        self.library.navigation_tree = NavigationTreeState {
+            expanded_directories: self
+                .library
+                .navigation_tree
+                .expanded_directories
+                .iter()
+                .filter(|path| tree.directories.contains(path))
+                .cloned()
+                .collect(),
+            directories: tree.directories,
+            tags: tree.tags,
+        };
+        let scope_is_valid = match &self.library.navigation_scope {
+            NavigationScope::Directory { relative_path } => self
+                .library
+                .navigation_tree
+                .directories
+                .iter()
+                .any(|directory| directory == relative_path),
+            NavigationScope::Tag { tag_id } => {
+                self.library.navigation_tree.tags.iter().any(|tag| tag.tag_id == *tag_id)
+            }
+            _ => true,
+        };
+        if scope_is_valid {
+            return vec![NotoraEffect::Redraw];
+        }
+        self.select_navigation_scope(NavigationScope::WorkspaceRoot)
+    }
+
+    fn toggle_navigation_expansion(
+        &mut self,
+        relative_path: std::path::PathBuf,
+    ) -> Vec<NotoraEffect> {
+        if !self.library.navigation_tree.directories.contains(&relative_path) {
+            return vec![NotoraEffect::Redraw];
+        }
+        if !self.library.navigation_tree.expanded_directories.remove(&relative_path) {
+            self.library.navigation_tree.expanded_directories.insert(relative_path);
+        }
+        vec![NotoraEffect::Redraw]
     }
 
     fn request_next_card_page(&mut self) -> Vec<NotoraEffect> {
@@ -430,9 +665,66 @@ impl NotoraState {
         if self.layout.overlay == OverlayState::None {
             return vec![NotoraEffect::Redraw];
         }
+        let restore_editor_focus = self.layout.overlay == OverlayState::SaveConflict;
+        match self.layout.overlay {
+            OverlayState::TagEditor => self.library.tag_editor = None,
+            OverlayState::SaveConflict => self.library.save_conflict = None,
+            OverlayState::None
+            | OverlayState::Settings
+            | OverlayState::NewDocumentMenu
+            | OverlayState::DeleteTagConfirmation { .. }
+            | OverlayState::TrashPermanentDeletionConfirmation { .. }
+            | OverlayState::TrashRestoreConflictConfirmation { .. } => {}
+        }
+        self.layout.overlay = OverlayState::None;
+        self.layout.focus_target =
+            if restore_editor_focus { FocusTarget::Editor } else { FocusTarget::NavigationTree };
+        vec![NotoraEffect::Redraw]
+    }
+
+    fn open_tag_editor(&mut self, mode: crate::action::TagEditorMode) -> Vec<NotoraEffect> {
+        let display_name = match mode {
+            crate::action::TagEditorMode::Create => String::new(),
+            crate::action::TagEditorMode::Rename { tag_id } => {
+                let Some(tag) =
+                    self.library.navigation_tree.tags.iter().find(|tag| tag.tag_id == tag_id)
+                else {
+                    self.library.last_command_error =
+                        Some("the selected tag no longer exists".to_owned());
+                    return vec![NotoraEffect::Redraw];
+                };
+                tag.display_name.clone()
+            }
+        };
+        self.library.tag_editor = Some(TagEditorState { mode, display_name });
+        self.library.last_command_error = None;
+        self.layout.overlay = OverlayState::TagEditor;
+        self.layout.focus_target = FocusTarget::Overlay;
+        vec![NotoraEffect::Redraw]
+    }
+
+    fn confirm_tag_editor(&mut self) -> Vec<NotoraEffect> {
+        let Some(editor) = self.library.tag_editor.take() else {
+            return vec![NotoraEffect::Redraw];
+        };
+        let display_name = editor.display_name.trim().to_owned();
+        if display_name.is_empty() {
+            self.library.last_command_error = Some("a tag name is required".to_owned());
+            self.library.tag_editor = Some(editor);
+            return vec![NotoraEffect::Redraw];
+        }
+        let mutation = match editor.mode {
+            crate::action::TagEditorMode::Create => {
+                crate::action::MetadataMutation::CreateTag { display_name }
+            }
+            crate::action::TagEditorMode::Rename { tag_id } => {
+                crate::action::MetadataMutation::RenameTag { tag_id, display_name }
+            }
+        };
         self.layout.overlay = OverlayState::None;
         self.layout.focus_target = FocusTarget::NavigationTree;
-        vec![NotoraEffect::Redraw]
+        self.library.last_command_error = None;
+        vec![NotoraEffect::ExecuteMetadataMutation(mutation), NotoraEffect::Redraw]
     }
 
     fn handle_escape(&mut self) -> Vec<NotoraEffect> {
@@ -448,6 +740,203 @@ impl NotoraState {
         }
         self.layout.focus_target = FocusTarget::NavigationTree;
         vec![NotoraEffect::Redraw]
+    }
+}
+
+#[cfg(test)]
+mod metadata_actions {
+    use notora_core::{
+        CatalogNavigationTree, NavigationScope, NoteId, TagId, TagWithActiveNoteCount,
+    };
+
+    use super::{NotoraState, OverlayState};
+    use crate::action::{MetadataMutation, NotoraAction, NotoraEffect, TagEditorMode};
+
+    #[test]
+    fn metadata_completion_refreshes_the_current_catalog_scope_without_optimistic_mutation() {
+        let note_id = NoteId::generate();
+        let mut state = NotoraState::default();
+        let effects =
+            state.reduce(NotoraAction::MetadataMutationRequested(MetadataMutation::ToggleStar {
+                note_id,
+            }));
+        assert_eq!(
+            effects,
+            vec![
+                NotoraEffect::ExecuteMetadataMutation(MetadataMutation::ToggleStar { note_id }),
+                NotoraEffect::Redraw
+            ]
+        );
+        assert_eq!(state.library.last_command_error, None);
+
+        let effects = state.reduce(NotoraAction::MetadataMutationCompleted);
+        assert_eq!(
+            effects,
+            vec![
+                NotoraEffect::QueryCards(NavigationScope::WorkspaceRoot.into()),
+                NotoraEffect::Redraw
+            ]
+        );
+    }
+
+    #[test]
+    fn deleting_a_tag_requires_a_confirmation_overlay_before_the_effect_runs() {
+        let tag_id = TagId::generate();
+        let mut state = NotoraState::default();
+        assert_eq!(
+            state.reduce(NotoraAction::TagDeletionRequested(tag_id)),
+            vec![NotoraEffect::Redraw]
+        );
+        assert_eq!(state.layout.overlay, OverlayState::DeleteTagConfirmation { tag_id });
+
+        assert_eq!(
+            state.reduce(NotoraAction::TagDeletionConfirmed),
+            vec![
+                NotoraEffect::ExecuteMetadataMutation(MetadataMutation::DeleteTag { tag_id }),
+                NotoraEffect::Redraw
+            ]
+        );
+    }
+
+    #[test]
+    fn navigation_tree_preserves_valid_expansion_and_falls_back_after_scope_removal() {
+        let mut state = NotoraState::default();
+        let plans_directory = std::path::PathBuf::from("plans");
+        state.library.navigation_scope =
+            NavigationScope::Directory { relative_path: plans_directory.clone() };
+        state.library.navigation_tree.expanded_directories.insert(plans_directory.clone());
+
+        assert_eq!(
+            state.reduce(NotoraAction::NavigationTreeLoaded(CatalogNavigationTree {
+                directories: vec![plans_directory.clone(), "plans/q3".into()],
+                tags: Vec::new(),
+            })),
+            vec![NotoraEffect::Redraw]
+        );
+        assert!(state.library.navigation_tree.expanded_directories.contains(&plans_directory));
+
+        assert_eq!(
+            state.reduce(NotoraAction::NavigationTreeLoaded(CatalogNavigationTree {
+                directories: Vec::new(),
+                tags: Vec::new(),
+            })),
+            vec![
+                NotoraEffect::QueryCards(NavigationScope::WorkspaceRoot.into()),
+                NotoraEffect::Redraw,
+            ]
+        );
+        assert_eq!(state.library.navigation_scope, NavigationScope::WorkspaceRoot);
+    }
+
+    #[test]
+    fn tag_editor_maps_create_and_rename_to_typed_metadata_mutations() {
+        let tag_id = TagId::generate();
+        let mut state = NotoraState::default();
+        state.library.navigation_tree.tags = vec![TagWithActiveNoteCount {
+            tag_id,
+            display_name: "Plans".to_owned(),
+            active_note_count: 0,
+        }];
+
+        assert_eq!(
+            state.reduce(NotoraAction::TagEditorRequested(TagEditorMode::Create)),
+            vec![NotoraEffect::Redraw]
+        );
+        assert_eq!(state.layout.overlay, OverlayState::TagEditor);
+        let _ = state.reduce(NotoraAction::TagEditorNameChanged("Roadmap".to_owned()));
+        assert_eq!(
+            state.reduce(NotoraAction::TagEditorConfirmed),
+            vec![
+                NotoraEffect::ExecuteMetadataMutation(MetadataMutation::CreateTag {
+                    display_name: "Roadmap".to_owned(),
+                }),
+                NotoraEffect::Redraw,
+            ]
+        );
+
+        let _ = state.reduce(NotoraAction::TagEditorRequested(TagEditorMode::Rename { tag_id }));
+        assert_eq!(
+            state.library.tag_editor.as_ref().map(|editor| editor.display_name.as_str()),
+            Some("Plans")
+        );
+        let _ = state.reduce(NotoraAction::TagEditorNameChanged("Quarterly plans".to_owned()));
+        assert_eq!(
+            state.reduce(NotoraAction::TagEditorConfirmed),
+            vec![
+                NotoraEffect::ExecuteMetadataMutation(MetadataMutation::RenameTag {
+                    tag_id,
+                    display_name: "Quarterly plans".to_owned(),
+                }),
+                NotoraEffect::Redraw,
+            ]
+        );
+    }
+}
+
+#[cfg(test)]
+mod trash_actions {
+    use crate::action::{NotoraAction, NotoraEffect, TrashOperation};
+    use crate::{FocusTarget, NotoraState, OverlayState};
+
+    #[test]
+    fn permanent_trash_operations_require_explicit_confirmation() {
+        let note_id = notora_core::NoteId::generate();
+        let operation = TrashOperation::PermanentlyDelete { note_id };
+        let mut state = NotoraState::default();
+
+        assert_eq!(
+            state.reduce(NotoraAction::TrashOperationRequested(operation)),
+            vec![NotoraEffect::Redraw]
+        );
+        assert_eq!(
+            state.layout.overlay,
+            OverlayState::TrashPermanentDeletionConfirmation { operation }
+        );
+        assert_eq!(state.layout.focus_target, FocusTarget::Overlay);
+
+        assert_eq!(
+            state.reduce(NotoraAction::TrashPermanentDeletionConfirmed),
+            vec![NotoraEffect::ExecuteTrashOperation(operation), NotoraEffect::Redraw]
+        );
+        assert_eq!(state.layout.overlay, OverlayState::None);
+    }
+
+    #[test]
+    fn recoverable_trash_moves_do_not_require_the_permanent_deletion_confirmation() {
+        let operation = TrashOperation::MoveToTrash { note_id: notora_core::NoteId::generate() };
+        let mut state = NotoraState::default();
+
+        assert_eq!(
+            state.reduce(NotoraAction::TrashOperationRequested(operation)),
+            vec![NotoraEffect::ExecuteTrashOperation(operation), NotoraEffect::Redraw]
+        );
+    }
+
+    #[test]
+    fn restore_conflict_offers_an_explicit_renamed_restore_or_cancel() {
+        let note_id = notora_core::NoteId::generate();
+        let mut state = NotoraState::default();
+
+        assert_eq!(
+            state.reduce(NotoraAction::TrashOperationFailed(
+                crate::action::TrashOperationFailure::RestoreConflict { note_id },
+            )),
+            vec![NotoraEffect::Redraw]
+        );
+        assert_eq!(
+            state.layout.overlay,
+            OverlayState::TrashRestoreConflictConfirmation { note_id }
+        );
+
+        assert_eq!(
+            state.reduce(NotoraAction::TrashRestoreWithRenamedPathConfirmed),
+            vec![
+                NotoraEffect::ExecuteTrashOperation(TrashOperation::RestoreWithRenamedPath {
+                    note_id,
+                }),
+                NotoraEffect::Redraw,
+            ]
+        );
     }
 }
 
@@ -472,7 +961,10 @@ fn creation_target(scope: &NavigationScope) -> Option<NoteCreationTarget> {
 mod tests {
     use std::time::{Duration, Instant};
 
-    use super::{CardPageState, FocusTarget, LibraryState, NotoraState, OverlayState};
+    use super::{
+        CardPageState, CompactContent, CompactNavigation, FocusTarget, LibraryState, NotoraState,
+        OverlayState,
+    };
     use crate::action::{CardQuery, NotoraAction, NotoraEffect};
     use crate::search_controller::{SEARCH_DEBOUNCE_DELAY, SearchController};
     use notora_core::{
@@ -762,10 +1254,30 @@ mod tests {
     }
 
     #[test]
+    fn compact_navigation_and_back_use_explicit_mutually_exclusive_layout_state() {
+        let mut state = NotoraState::default();
+        let identity = notora_core::DocumentIdentity::Note(notora_core::NoteId::generate());
+        state.library.selected_card = Some(identity);
+
+        let _ = state.reduce(NotoraAction::CompactNavigationRequested);
+        assert_eq!(state.layout.compact_navigation, CompactNavigation::Visible);
+
+        let _ = state.reduce(NotoraAction::CardActivated(identity));
+        assert_eq!(state.layout.compact_content, CompactContent::Editor);
+
+        let _ = state.reduce(NotoraAction::CompactBackRequested);
+        assert_eq!(state.layout.compact_content, CompactContent::CardList);
+        assert_eq!(state.layout.compact_navigation, CompactNavigation::Hidden);
+    }
+
+    #[test]
     fn concurrent_save_requires_an_explicit_typed_resolution() {
         let mut state = NotoraState::default();
         let identity = notora_core::DocumentIdentity::Note(notora_core::NoteId::generate());
         let _ = state.reduce(NotoraAction::SaveConflictDetected { identity, content_revision: 7 });
+
+        assert_eq!(state.layout.overlay, OverlayState::SaveConflict);
+        assert_eq!(state.layout.focus_target, FocusTarget::Overlay);
 
         assert_eq!(
             state.reduce(NotoraAction::SaveConflictResolutionRequested(
@@ -776,6 +1288,20 @@ mod tests {
                     identity,
                     resolution: crate::action::ConflictResolution::RetrySave,
                 }),
+                NotoraEffect::Redraw,
+            ]
+        );
+    }
+
+    #[test]
+    fn files_scope_creates_an_untitled_external_document() {
+        let mut state = NotoraState::default();
+        let _ = state.reduce(NotoraAction::NavigationSelected(NavigationScope::ExternalFiles));
+
+        assert_eq!(
+            state.reduce(NotoraAction::CreateRequested(DocumentKind::Markdown)),
+            vec![
+                NotoraEffect::CreateUntitledExternal(DocumentKind::Markdown),
                 NotoraEffect::Redraw,
             ]
         );

@@ -14,9 +14,14 @@ pub mod events;
 pub mod external_files;
 mod index_worker;
 mod paths;
+mod persistence_worker;
 pub mod product;
 pub mod render;
+pub mod runtime_lru;
 pub mod search_controller;
+pub mod session;
+pub mod settings;
+pub mod settings_overlay;
 pub mod shell;
 mod state;
 pub mod workspace_controller;
@@ -30,8 +35,17 @@ pub use external_files::{
     ValidatedExternalTextFile, validate_external_text_file,
 };
 pub use paths::{NotoraPaths, NotoraPathsError};
+pub use session::{
+    LoadedProductSession, ProductSession, SavedDocument, SavedNavigationScope, SessionError,
+    WindowGeometry, load_product_session, save_product_session,
+};
+pub use settings::{
+    AppearanceSettings, EditorSettings, InterfaceSettings, LoadedProductSettings, ProductSettings,
+    SettingsError, WorkspaceSettings, load_product_settings, save_product_settings,
+};
 pub use state::{
-    FocusTarget, LayoutState, LibraryState, NotoraState, OverlayState, Pane, ResponsiveLayoutMode,
+    CompactContent, CompactNavigation, FocusTarget, LayoutState, LibraryState, NavigationTreeState,
+    NotoraState, OverlayState, Pane, ResponsiveLayoutMode,
 };
 pub use workspace_controller::{
     ActiveWorkspace, WorkspaceCommand, WorkspaceCommandResult, WorkspaceController,

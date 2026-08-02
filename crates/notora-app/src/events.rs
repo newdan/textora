@@ -140,6 +140,10 @@ impl ApplicationHandler<ShellEvent> for NotoraApp {
                     self.request_external_file_dialog();
                     return;
                 }
+                if is_open_settings_shortcut(key_code, modifiers) {
+                    self.dispatch_action(NotoraAction::OpenSettings);
+                    return;
+                }
                 if let Some(action) = create_shortcut_action(key_code, modifiers) {
                     self.dispatch_action(action);
                     return;
@@ -159,11 +163,10 @@ impl ApplicationHandler<ShellEvent> for NotoraApp {
                     self.handle_editor_key_input(key_code, modifiers);
                 }
             }
-            WindowEvent::RedrawRequested => {
-                if let Err(error) = self.render() {
-                    eprintln!("notora frame rendering failed: {error}");
-                }
-            }
+            WindowEvent::RedrawRequested => match self.render() {
+                Ok(()) => self.restore_session_after_first_frame(),
+                Err(error) => eprintln!("notora frame rendering failed: {error}"),
+            },
             _ => {}
         }
     }
@@ -171,6 +174,8 @@ impl ApplicationHandler<ShellEvent> for NotoraApp {
     fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
         self.process_due_autosaves();
         self.process_due_searches();
+        self.process_due_session_persistence();
+        self.process_due_catalog_backups();
         if self.take_redraw_request() {
             self.request_window_redraw();
         }
@@ -183,6 +188,10 @@ impl ApplicationHandler<ShellEvent> for NotoraApp {
 fn is_open_external_shortcut(key_code: ui::KeyCode, modifiers: Modifiers) -> bool {
     matches!(key_code, ui::KeyCode::Char('o') | ui::KeyCode::Char('O'))
         && (modifiers.cmd || modifiers.ctrl)
+}
+
+fn is_open_settings_shortcut(key_code: ui::KeyCode, modifiers: Modifiers) -> bool {
+    matches!(key_code, ui::KeyCode::Char(',')) && (modifiers.cmd || modifiers.ctrl)
 }
 
 fn create_shortcut_action(key_code: ui::KeyCode, modifiers: Modifiers) -> Option<NotoraAction> {
@@ -223,8 +232,8 @@ mod tests {
     use ui::core::Modifiers;
 
     use super::{
-        create_shortcut_action, editor_input_context, is_open_external_shortcut, is_save_shortcut,
-        is_search_shortcut,
+        create_shortcut_action, editor_input_context, is_open_external_shortcut,
+        is_open_settings_shortcut, is_save_shortcut, is_search_shortcut,
     };
     use crate::action::NotoraAction;
     use crate::{FocusTarget, NotoraState, OverlayState, shell::layout::ShellLayoutInput};
@@ -236,6 +245,8 @@ mod tests {
             dpi: 1.0,
             navigation_width_logical: 220.0,
             card_list_width_logical: 340.0,
+            compact_content: crate::CompactContent::CardList,
+            compact_navigation: crate::CompactNavigation::Hidden,
         })
     }
 
@@ -267,6 +278,19 @@ mod tests {
             Modifiers { ctrl: true, ..Modifiers::NONE }
         ));
         assert!(!is_open_external_shortcut(ui::KeyCode::Char('o'), Modifiers::NONE));
+    }
+
+    #[test]
+    fn command_or_control_comma_opens_settings() {
+        assert!(is_open_settings_shortcut(
+            ui::KeyCode::Char(','),
+            Modifiers { cmd: true, ..Modifiers::NONE }
+        ));
+        assert!(is_open_settings_shortcut(
+            ui::KeyCode::Char(','),
+            Modifiers { ctrl: true, ..Modifiers::NONE }
+        ));
+        assert!(!is_open_settings_shortcut(ui::KeyCode::Char(','), Modifiers::NONE));
     }
 
     #[test]
