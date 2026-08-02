@@ -79,6 +79,18 @@ fn session_restore_is_scheduled_only_after_the_first_presented_frame() {
 }
 
 #[test]
+fn gpu_preparation_starts_before_event_loop_construction() {
+    let main_source = include_str!("../src/main.rs");
+    let app_construction = main_source
+        .find("NotoraApp::try_new()")
+        .expect("main should construct the notora application");
+    let event_loop_construction =
+        main_source.find("let event_loop =").expect("main should construct the event loop");
+
+    assert!(app_construction < event_loop_construction);
+}
+
+#[test]
 fn system_open_entry_reuses_an_external_file_session_without_a_duplicate_tab() {
     let directory = tempfile::tempdir().expect("external fixture directory should exist");
     let path = directory.path().join("shared.txt");

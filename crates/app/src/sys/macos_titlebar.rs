@@ -42,13 +42,6 @@ mod imp {
         ns_win.setStyleMask(mask);
     }
 
-    pub fn set_window_alpha(window: &Window, alpha: f64) {
-        let Some(ns_win) = ns_window(window) else {
-            return;
-        };
-        ns_win.setAlphaValue(alpha);
-    }
-
     pub fn disable_full_size_content(window: &Window) {
         let Some(ns_win) = ns_window(window) else {
             return;
@@ -89,12 +82,9 @@ mod imp {
     pub fn disable_full_size_content(window: &Window) {}
 
     #[allow(unused_variables)]
-    pub fn set_window_alpha(window: &Window, alpha: f64) {}
-
-    #[allow(unused_variables)]
     pub fn traffic_light_inset(window: &Window) -> (f32, f32) {
         (0.0, 0.0)
     }
 }
 
-pub(crate) use imp::{disable_full_size_content, enable_full_size_content, set_window_alpha};
+pub(crate) use imp::{disable_full_size_content, enable_full_size_content};

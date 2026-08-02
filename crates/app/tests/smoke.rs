@@ -47,6 +47,19 @@ fn test_app_construction() {
     let _app = textora_app::App::new(None);
 }
 
+#[test]
+fn launch_preparation_starts_before_event_loop_construction() {
+    let source = include_str!("../src/main.rs");
+    let app_position = source
+        .find("App::new_for_launch")
+        .expect("production entry point must use the parallel launch constructor");
+    let event_loop_position = source
+        .find("EventLoop::<AppEvent>::with_user_event")
+        .expect("production entry point must construct the event loop");
+
+    assert!(app_position < event_loop_position);
+}
+
 // ── Test: App window title is correct ───────────────────────────────────────
 
 #[test]

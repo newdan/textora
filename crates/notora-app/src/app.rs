@@ -53,10 +53,48 @@ const CATALOG_BACKUP_DEBOUNCE_DELAY: Duration = Duration::from_millis(300);
 const SHUTDOWN_SAVE_DRAIN_TIMEOUT: Duration = Duration::from_secs(2);
 const SHUTDOWN_SAVE_DRAIN_POLL_INTERVAL: Duration = Duration::from_millis(10);
 const DEFAULT_RUNTIME_TAB_LIMIT: usize = 12;
+const STARTUP_TRACE_ENVIRONMENT_VARIABLE: &str = "NOTORA_TRACE_STARTUP";
 const TRASH_SAVE_FAILURE_MESSAGE: &str =
     "the note could not be saved, so it was not moved to Trash";
 const TRASH_SAVE_STALE_MESSAGE: &str =
     "the note changed before its Trash save completed, so it was not moved to Trash";
+
+#[derive(Debug)]
+struct StartupTrace {
+    started_at: Instant,
+    first_frame_reported: bool,
+}
+
+enum FontSystemPreparation {
+    Deferred,
+    InProgress(thread::JoinHandle<shaping::FontSystem>),
+}
+
+impl StartupTrace {
+    fn from_environment() -> Option<Self> {
+        std::env::var_os(STARTUP_TRACE_ENVIRONMENT_VARIABLE).is_some().then(Self::started_now)
+    }
+
+    fn started_now() -> Self {
+        Self { started_at: Instant::now(), first_frame_reported: false }
+    }
+
+    fn record_stage(&self, label: &str, stage_started_at: Instant) {
+        eprintln!(
+            "[startup] {label} stage={:.2}ms total={:.2}ms",
+            stage_started_at.elapsed().as_secs_f64() * 1_000.0,
+            self.started_at.elapsed().as_secs_f64() * 1_000.0,
+        );
+    }
+
+    fn take_first_frame_elapsed(&mut self) -> Option<Duration> {
+        if self.first_frame_reported {
+            return None;
+        }
+        self.first_frame_reported = true;
+        Some(self.started_at.elapsed())
+    }
+}
 
 #[derive(Clone, Copy, Debug)]
 struct PendingExternalSaveAs {
@@ -132,6 +170,8 @@ impl std::error::Error for NotoraAppError {
 
 /// 组合产品状态、后台宿主和共享 editor runtime 的 notora 应用。
 pub struct NotoraApp {
+    startup_trace: Option<StartupTrace>,
+    font_system_preparation: FontSystemPreparation,
     paths: NotoraPaths,
     product_settings: crate::settings::ProductSettings,
     pending_session: Option<crate::session::ProductSession>,
@@ -170,11 +210,23 @@ impl NotoraApp {
     }
 
     pub fn try_new() -> Result<Self, NotoraAppError> {
+        let startup_trace = StartupTrace::from_environment();
         let paths = NotoraPaths::from_platform_directory().map_err(NotoraAppError::Paths)?;
-        Self::with_paths(paths)
+        let mut app = Self::with_paths_and_startup_trace(paths, startup_trace)?;
+        app.editor_runtime.start_gpu_preparation().map_err(NotoraAppError::Runtime)?;
+        app.start_font_system_preparation();
+        Ok(app)
     }
 
     pub fn with_paths(paths: NotoraPaths) -> Result<Self, NotoraAppError> {
+        Self::with_paths_and_startup_trace(paths, StartupTrace::from_environment())
+    }
+
+    fn with_paths_and_startup_trace(
+        paths: NotoraPaths,
+        startup_trace: Option<StartupTrace>,
+    ) -> Result<Self, NotoraAppError> {
+        let configuration_started_at = Instant::now();
         let loaded_product_settings = crate::settings::load_product_settings(&paths.settings_file);
         let loaded_session = crate::session::load_product_session(&paths.session_file);
         let product_settings = loaded_product_settings.settings;
@@ -184,7 +236,14 @@ impl NotoraApp {
             product_settings.appearance.theme_mode,
             winit::window::Theme::Dark,
         );
+        if let Some(trace) = &startup_trace {
+            trace.record_stage("configuration_loaded", configuration_started_at);
+        }
+        let editor_runtime_started_at = Instant::now();
         let editor_runtime = build_editor_runtime(&settings, &theme, &paths)?;
+        if let Some(trace) = &startup_trace {
+            trace.record_stage("editor_runtime_constructed", editor_runtime_started_at);
+        }
         let mut state = NotoraState::default();
         state.layout.navigation_width_logical = loaded_session.session.navigation_width_logical;
         state.layout.card_list_width_logical = loaded_session.session.card_list_width_logical;
@@ -207,7 +266,9 @@ impl NotoraApp {
         let persistence_worker =
             crate::persistence_worker::PersistenceWorker::start(product.event_sender())
                 .map_err(NotoraAppError::PersistenceWorker)?;
-        Ok(Self {
+        let app = Self {
+            startup_trace,
+            font_system_preparation: FontSystemPreparation::Deferred,
             paths,
             product_settings,
             pending_session: Some(loaded_session.session),
@@ -243,7 +304,11 @@ impl NotoraApp {
             pointer_position: (0.0, 0.0),
             needs_redraw: true,
             event_loop_proxy: None,
-        })
+        };
+        if let Some(trace) = &app.startup_trace {
+            trace.record_stage("application_constructed", trace.started_at);
+        }
+        Ok(app)
     }
 
     pub fn editor_runtime_tab_count(&self) -> usize {
@@ -617,10 +682,13 @@ impl NotoraApp {
         if self.editor_runtime.window().is_some() {
             return Ok(());
         }
-        let font_system = Arc::new(Mutex::new(shaping::font_cache::new_font_system_with_cache(
-            &self.paths.config_directory.join("font-cache.bin"),
-        )));
+        let font_system_started_at = Instant::now();
+        let font_system = Arc::new(Mutex::new(self.take_prepared_font_system()));
+        if let Some(trace) = &self.startup_trace {
+            trace.record_stage("font_system_ready", font_system_started_at);
+        }
         self.editor_runtime.set_shared_font_system(Arc::clone(&font_system));
+        let editor_runtime_resume_started_at = Instant::now();
         self.editor_runtime
             .resume(
                 event_loop,
@@ -630,6 +698,9 @@ impl NotoraApp {
                 &self.settings.font_family,
             )
             .map_err(NotoraAppError::Runtime)?;
+        if let Some(trace) = &self.startup_trace {
+            trace.record_stage("window_gpu_text_ready", editor_runtime_resume_started_at);
+        }
         self.rebuild_theme_for_system_appearance(self.current_system_appearance());
         if let Some((width, height)) = self.editor_runtime.window().map(|window| {
             let geometry = self
@@ -659,6 +730,49 @@ impl NotoraApp {
         }
         self.needs_redraw = true;
         Ok(())
+    }
+
+    fn start_font_system_preparation(&mut self) {
+        if matches!(self.font_system_preparation, FontSystemPreparation::InProgress(_)) {
+            return;
+        }
+        let cache_path = self.paths.config_directory.join("font-cache.bin");
+        match thread::Builder::new()
+            .name("notora-font-system-preparation".to_owned())
+            .spawn(move || shaping::font_cache::new_font_system_with_cache(&cache_path))
+        {
+            Ok(worker) => {
+                self.font_system_preparation = FontSystemPreparation::InProgress(worker);
+            }
+            Err(error) => {
+                eprintln!(
+                    "notora font preparation worker unavailable; falling back to synchronous initialization: {error}"
+                );
+            }
+        }
+    }
+
+    fn take_prepared_font_system(&mut self) -> shaping::FontSystem {
+        let preparation =
+            std::mem::replace(&mut self.font_system_preparation, FontSystemPreparation::Deferred);
+        if let FontSystemPreparation::InProgress(worker) = preparation
+            && let Ok(font_system) = worker.join()
+        {
+            return font_system;
+        }
+        shaping::font_cache::new_font_system_with_cache(
+            &self.paths.config_directory.join("font-cache.bin"),
+        )
+    }
+
+    pub(crate) fn record_first_frame_visible(&mut self) {
+        let Some(trace) = self.startup_trace.as_mut() else {
+            return;
+        };
+        let Some(elapsed) = trace.take_first_frame_elapsed() else {
+            return;
+        };
+        eprintln!("[startup] first_frame_visible total={:.2}ms", elapsed.as_secs_f64() * 1_000.0,);
     }
 
     pub(crate) fn resize_window(&mut self, width: u32, height: u32) {
@@ -2353,8 +2467,8 @@ mod tests {
     use std::time::{Duration, Instant};
 
     use super::{
-        NotoraApp, PendingTrashMove, SettingsPersistenceState, rename_file_name_for_destination,
-        workspace_relative_directory,
+        FontSystemPreparation, NotoraApp, PendingTrashMove, SettingsPersistenceState, StartupTrace,
+        rename_file_name_for_destination, workspace_relative_directory,
     };
     use crate::action::NotoraAction;
     use crate::autosave::AutoSaveState;
@@ -2367,6 +2481,31 @@ mod tests {
         let paths = NotoraPaths::from_config_directory(directory.keep().join("notora"))
             .expect("test should create isolated product paths");
         NotoraApp::with_paths(paths).expect("notora app should construct without a window")
+    }
+
+    #[test]
+    fn startup_trace_reports_the_first_frame_once() {
+        let mut trace = StartupTrace::started_now();
+
+        assert!(trace.take_first_frame_elapsed().is_some());
+        assert!(trace.take_first_frame_elapsed().is_none());
+    }
+
+    #[test]
+    fn background_font_preparation_returns_to_the_deferred_state_after_join() {
+        let directory = tempfile::tempdir().expect("test should create a temporary directory");
+        let paths = NotoraPaths::from_config_directory(directory.path().join("notora"))
+            .expect("test should create isolated product paths");
+        let mut app =
+            NotoraApp::with_paths(paths).expect("notora app should construct without a window");
+
+        app.start_font_system_preparation();
+        assert!(matches!(&app.font_system_preparation, FontSystemPreparation::InProgress(_)));
+
+        let font_system = app.take_prepared_font_system();
+
+        std::hint::black_box(font_system);
+        assert!(matches!(app.font_system_preparation, FontSystemPreparation::Deferred));
     }
 
     #[test]

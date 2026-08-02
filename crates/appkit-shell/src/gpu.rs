@@ -45,6 +45,14 @@ pub struct GpuContext {
     pub msaa_view: wgpu::TextureView,
 }
 
+/// A surface-independent adapter and device prepared before a window is available.
+pub struct PreparedGpuDevice {
+    instance: wgpu::Instance,
+    adapter: wgpu::Adapter,
+    device: wgpu::Device,
+    queue: wgpu::Queue,
+}
+
 /// Create a multisampled texture for MSAA resolve.
 fn create_msaa_texture(
     device: &wgpu::Device,
@@ -86,22 +94,66 @@ pub fn create_gpu_context(
     height: u32,
 ) -> Result<GpuContext, GpuError> {
     let instance = wgpu::Instance::default();
-
     let surface = instance
         .create_surface(window.clone())
         .map_err(|e| GpuError::SurfaceCreation(e.to_string()))?;
-
     let adapter = pollster::block_on(request_adapter(&instance, Some(&surface)))
         .ok_or(GpuError::NoAdapter)?;
+    let (device, queue) = request_device(&adapter)?;
 
-    let (device, queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
+    configure_gpu_context(surface, &adapter, device, queue, width, height)
+}
+
+/// Request the adapter and device before a native window exists.
+pub fn prepare_gpu_device() -> Result<PreparedGpuDevice, GpuError> {
+    let instance = wgpu::Instance::default();
+    let adapter =
+        pollster::block_on(request_adapter(&instance, None)).ok_or(GpuError::NoAdapter)?;
+    let (device, queue) = request_device(&adapter)?;
+    Ok(PreparedGpuDevice { instance, adapter, device, queue })
+}
+
+/// Attach a prepared adapter and device to a newly created window surface.
+///
+/// A surface-less adapter may be incompatible on some platforms. In that case,
+/// retry through the existing surface-aware synchronous path.
+pub fn create_gpu_context_from_prepared_device(
+    window: Arc<winit::window::Window>,
+    width: u32,
+    height: u32,
+    prepared: PreparedGpuDevice,
+) -> Result<GpuContext, GpuError> {
+    let PreparedGpuDevice { instance, adapter, device, queue } = prepared;
+    let surface = instance
+        .create_surface(Arc::clone(&window))
+        .map_err(|error| GpuError::SurfaceCreation(error.to_string()))?;
+    if !adapter.is_surface_supported(&surface) {
+        return create_gpu_context(window, width, height);
+    }
+    match configure_gpu_context(surface, &adapter, device, queue, width, height) {
+        Err(GpuError::NoSurfaceFormat) => create_gpu_context(window, width, height),
+        result => result,
+    }
+}
+
+fn request_device(adapter: &wgpu::Adapter) -> Result<(wgpu::Device, wgpu::Queue), GpuError> {
+    pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
         label: Some("edit+ device"),
         required_features: wgpu::Features::DUAL_SOURCE_BLENDING,
         ..Default::default()
     }))
-    .map_err(|e| GpuError::DeviceCreation(e.to_string()))?;
+    .map_err(|error| GpuError::DeviceCreation(error.to_string()))
+}
 
-    let surface_caps = surface.get_capabilities(&adapter);
+fn configure_gpu_context(
+    surface: wgpu::Surface<'static>,
+    adapter: &wgpu::Adapter,
+    device: wgpu::Device,
+    queue: wgpu::Queue,
+    width: u32,
+    height: u32,
+) -> Result<GpuContext, GpuError> {
+    let surface_caps = surface.get_capabilities(adapter);
     // Prefer sRGB for correct color rendering (critical on macOS)
     let format = surface_caps
         .formats

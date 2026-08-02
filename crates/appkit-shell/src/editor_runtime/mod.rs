@@ -85,6 +85,16 @@ impl EditorRuntime {
         })
     }
 
+    /// Start surface-independent GPU initialization while the product prepares
+    /// its event loop and persisted state.
+    pub fn start_gpu_preparation(&mut self) -> Result<(), EditorRuntimeError> {
+        self.render_session.start_gpu_preparation().map_err(|error| {
+            EditorRuntimeError::GpuInitialization {
+                message: format!("could not start GPU preparation worker: {error}"),
+            }
+        })
+    }
+
     #[doc(hidden)]
     pub fn new_with_model(
         config: EditorRuntimeConfig,

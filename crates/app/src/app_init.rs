@@ -17,6 +17,22 @@ const MARKDOWN_ROUTE_PRIORITY: u16 = 300;
 const MARKDOWN_LONG_EXTENSION_ROUTE_PRIORITY: u16 = 299;
 const TEXT_ROUTE_PRIORITY: u16 = 200;
 const PLUGIN_MARKDOWN_VIEW: &str = "markdown_view";
+const FONT_PREPARATION_THREAD_NAME: &str = "textora-font-preparation";
+
+#[derive(Clone, Copy)]
+enum AppStartupMode {
+    TestReady,
+    LaunchParallel,
+}
+
+fn load_font_system() -> shaping::FontSystem {
+    let started_at = std::time::Instant::now();
+    let font_system = shaping::font_cache::new_font_system_with_cache(
+        &shaping::font_cache::default_cache_path().unwrap_or_default(),
+    );
+    eprintln!("[startup] FontSystem::new: {:?}", started_at.elapsed());
+    font_system
+}
 
 fn register_plugin_factory(
     registry: &mut ui::plugin::PluginRegistry,
@@ -169,6 +185,14 @@ fn load_user_themes(
 
 impl App {
     pub fn new(file_path: Option<PathBuf>) -> Self {
+        Self::new_with_startup_mode(file_path, AppStartupMode::TestReady)
+    }
+
+    pub fn new_for_launch(file_path: Option<PathBuf>) -> Self {
+        Self::new_with_startup_mode(file_path, AppStartupMode::LaunchParallel)
+    }
+
+    fn new_with_startup_mode(file_path: Option<PathBuf>, startup_mode: AppStartupMode) -> Self {
         let startup_started_at = std::time::Instant::now();
         let _t0 = startup_started_at;
 
@@ -186,14 +210,21 @@ impl App {
         };
         let settings = settings_from_persisted(&persisted);
 
-        // Create FontSystem once, shared between main thread and reshape worker.
-        // Uses disk cache to skip font parsing on subsequent startups.
-        let _t1 = std::time::Instant::now();
-        let font_system = shaping::font_cache::new_font_system_with_cache(
-            &shaping::font_cache::default_cache_path().unwrap_or_default(),
-        );
-        eprintln!("[startup] FontSystem::new: {:?}", _t1.elapsed());
-        let shared_fs = Arc::new(Mutex::new(font_system));
+        let (ready_font_system, startup_font_preparation) = match startup_mode {
+            AppStartupMode::TestReady => (Some(Arc::new(Mutex::new(load_font_system()))), None),
+            AppStartupMode::LaunchParallel => {
+                match std::thread::Builder::new()
+                    .name(FONT_PREPARATION_THREAD_NAME.to_owned())
+                    .spawn(load_font_system)
+                {
+                    Ok(preparation) => (None, Some(preparation)),
+                    Err(error) => {
+                        eprintln!("[startup] could not start font preparation worker: {error}");
+                        (Some(Arc::new(Mutex::new(load_font_system()))), None)
+                    }
+                }
+            }
+        };
 
         // ReshapeWorker creation is deferred to init_window() where the actual
         // scale factor is known.  We store None here and spawn the worker
@@ -226,7 +257,14 @@ impl App {
         let mut editor_runtime =
             build_product_editor_runtime(&settings, &current_theme, &paths.snapshots_dir)
                 .expect("textora editor runtime must be constructible");
-        editor_runtime.set_shared_font_system(shared_fs.clone());
+        if let Some(font_system) = ready_font_system {
+            editor_runtime.set_shared_font_system(font_system);
+        }
+        if matches!(startup_mode, AppStartupMode::LaunchParallel)
+            && let Err(error) = editor_runtime.start_gpu_preparation()
+        {
+            eprintln!("[startup] could not start GPU preparation: {error}");
+        }
         let mut app = Self {
             file_path,
             paths,
@@ -256,12 +294,35 @@ impl App {
             event_loop_proxy: None,
             preedit_advance_px: 0.0,
             startup_started_at,
+            startup_font_preparation,
         };
         // Apply persisted sidebar width (logical pixels, will be scaled by DPI later)
         app.ui_shell.set_sidebar_width(persisted.sidebar_width);
         app.ui_shell.sidebar_clamp_width(1.0); // Clamp to valid range [160, 400] at default DPI
         eprintln!("[startup] App::new total: {:?}", _t0.elapsed());
         app
+    }
+
+    pub(crate) fn resolve_startup_font_system(&mut self) -> Arc<Mutex<shaping::FontSystem>> {
+        if let Some(font_system) = self.editor_runtime.shared_font_system() {
+            return font_system;
+        }
+
+        let wait_started_at = std::time::Instant::now();
+        let font_system = match self.startup_font_preparation.take() {
+            Some(preparation) => match preparation.join() {
+                Ok(font_system) => font_system,
+                Err(_) => {
+                    eprintln!("[startup] font preparation worker panicked; retrying synchronously");
+                    load_font_system()
+                }
+            },
+            None => load_font_system(),
+        };
+        let shared_font_system = Arc::new(Mutex::new(font_system));
+        self.editor_runtime.set_shared_font_system(Arc::clone(&shared_font_system));
+        eprintln!("[startup] font preparation wait: {:?}", wait_started_at.elapsed());
+        shared_font_system
     }
 
     pub(crate) fn init_display_map(&mut self, dv_idx: usize) {
@@ -477,6 +538,22 @@ mod settings_tests {
     fn startup_timestamp_is_initialized() {
         let app = App::new(None);
         assert!(app.startup_started_at.elapsed() < std::time::Duration::from_secs(60));
+    }
+
+    #[test]
+    fn launch_constructor_prepares_fonts_without_blocking_app_construction() {
+        let app = App::new_for_launch(None);
+
+        assert!(app.editor_runtime.shared_font_system().is_none());
+        assert!(app.startup_font_preparation.is_some());
+    }
+
+    #[test]
+    fn test_constructor_keeps_fonts_ready_for_headless_app_tests() {
+        let app = App::new(None);
+
+        assert!(app.editor_runtime.shared_font_system().is_some());
+        assert!(app.startup_font_preparation.is_none());
     }
 
     #[test]

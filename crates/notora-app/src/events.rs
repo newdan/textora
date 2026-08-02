@@ -167,7 +167,10 @@ impl ApplicationHandler<ShellEvent> for NotoraApp {
                 }
             }
             WindowEvent::RedrawRequested => match self.render() {
-                Ok(()) => self.restore_session_after_first_frame(),
+                Ok(()) => {
+                    self.record_first_frame_visible();
+                    self.restore_session_after_first_frame();
+                }
                 Err(error) => eprintln!("notora frame rendering failed: {error}"),
             },
             _ => {}

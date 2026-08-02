@@ -23,6 +23,9 @@ pub(crate) enum ResizeResult {
 
 /// Runtime 持有的窗口和绘制资源；产品只通过语义方法驱动它。
 pub(crate) struct RenderSession {
+    gpu_preparation: Option<
+        std::thread::JoinHandle<Result<crate::gpu::PreparedGpuDevice, crate::gpu::GpuError>>,
+    >,
     window: Option<Arc<Window>>,
     gpu: Option<GpuState>,
     text: Option<TextState>,
@@ -42,6 +45,7 @@ pub(crate) struct RenderSession {
 impl RenderSession {
     pub(crate) fn new() -> Self {
         Self {
+            gpu_preparation: None,
             window: None,
             gpu: None,
             text: None,
@@ -59,6 +63,18 @@ impl RenderSession {
         }
     }
 
+    pub(crate) fn start_gpu_preparation(&mut self) -> std::io::Result<()> {
+        if self.gpu_preparation.is_some() || self.gpu.is_some() {
+            return Ok(());
+        }
+        self.gpu_preparation = Some(
+            std::thread::Builder::new()
+                .name("textora-gpu-preparation".to_owned())
+                .spawn(gpu::prepare_gpu_device)?,
+        );
+        Ok(())
+    }
+
     pub(crate) fn resume(
         &mut self,
         event_loop: &ActiveEventLoop,
@@ -73,7 +89,20 @@ impl RenderSession {
                 .map_err(|error| GpuError::SurfaceCreation(error.to_string()))?,
         );
         let size = window.inner_size();
-        let gpu_context = gpu::create_gpu_context(window.clone(), size.width, size.height)?;
+        let prepared_gpu = self
+            .gpu_preparation
+            .take()
+            .and_then(|preparation| preparation.join().ok())
+            .and_then(Result::ok);
+        let gpu_context = match prepared_gpu {
+            Some(prepared) => gpu::create_gpu_context_from_prepared_device(
+                window.clone(),
+                size.width,
+                size.height,
+                prepared,
+            )?,
+            None => gpu::create_gpu_context(window.clone(), size.width, size.height)?,
+        };
         let gpu = GpuState { ctx: gpu_context, size };
         let scale_factor = window.scale_factor();
         let text =

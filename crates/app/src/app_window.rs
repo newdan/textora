@@ -15,6 +15,7 @@ use winit::window::WindowAttributes;
 const WINDOW_TITLE: &str = "edit+";
 const MINIMUM_WINDOW_WIDTH_LOGICAL: u32 = 800;
 const MINIMUM_WINDOW_HEIGHT_LOGICAL: u32 = 600;
+const MINIMUM_VISIBLE_WINDOW_EDGE_PHYSICAL: i64 = 64;
 
 fn logical_window_dimension(physical_dimension: u32, scale_factor: f64) -> u32 {
     let normalized_scale_factor =
@@ -34,6 +35,37 @@ fn restored_window_dimension(
         logical_window_dimension(persisted_dimension, scale_factor)
     };
     logical_dimension.max(minimum_logical_dimension)
+}
+
+fn window_position_has_visible_region(
+    window_x: i32,
+    window_y: i32,
+    window_width: u32,
+    window_height: u32,
+    monitor_bounds: &[(i32, i32, u32, u32)],
+) -> bool {
+    if window_width == 0 || window_height == 0 {
+        return false;
+    }
+
+    let window_left = i64::from(window_x);
+    let window_top = i64::from(window_y);
+    let window_right = window_left + i64::from(window_width);
+    let window_bottom = window_top + i64::from(window_height);
+    let required_visible_width = i64::from(window_width).min(MINIMUM_VISIBLE_WINDOW_EDGE_PHYSICAL);
+    let required_visible_height =
+        i64::from(window_height).min(MINIMUM_VISIBLE_WINDOW_EDGE_PHYSICAL);
+
+    monitor_bounds.iter().any(|&(monitor_x, monitor_y, monitor_width, monitor_height)| {
+        let monitor_left = i64::from(monitor_x);
+        let monitor_top = i64::from(monitor_y);
+        let monitor_right = monitor_left + i64::from(monitor_width);
+        let monitor_bottom = monitor_top + i64::from(monitor_height);
+        let visible_width = window_right.min(monitor_right) - window_left.max(monitor_left);
+        let visible_height = window_bottom.min(monitor_bottom) - window_top.max(monitor_top);
+
+        visible_width >= required_visible_width && visible_height >= required_visible_height
+    })
 }
 
 pub(crate) fn ime_cursor_x(
@@ -380,8 +412,7 @@ impl App {
                 logical_height as f64,
             )));
         }
-        let shared_font_system =
-            self.editor_runtime.shared_font_system().expect("FontSystem not initialized");
+        let shared_font_system = self.resolve_startup_font_system();
         self.editor_runtime
             .resume(
                 event_loop,
@@ -395,9 +426,6 @@ impl App {
         self.ui_shell.scale_sidebar_width(scale_factor as f32);
         self.ui_shell.sidebar_clamp_width(scale_factor as f32);
         let window = self.editor_runtime.window().ok_or(GpuError::NoAdapter)?;
-        // 首帧 present 前将窗口设为完全透明，避免启动白闪；
-        // 首帧 present 完成后在 app_renderer.rs 中恢复为不透明。
-        crate::sys::macos_titlebar::set_window_alpha(window, 0.0);
         window.set_ime_allowed(true);
         window.set_cursor(winit::window::CursorIcon::Text);
         // Follow system appearance after runtime creates the window.
@@ -420,12 +448,31 @@ impl App {
         }
 
         // Restore window position from persisted settings (after titlebar config)
-        if let Some(w) = self.editor_runtime.window()
-            && let (Some(x), Some(y)) = (persisted.window_x, persisted.window_y)
+        if let Some(window) = self.editor_runtime.window()
+            && let (Some(window_x), Some(window_y)) = (persisted.window_x, persisted.window_y)
         {
-            w.set_outer_position(winit::dpi::Position::Physical(
-                winit::dpi::PhysicalPosition::new(x, y),
-            ));
+            let window_size = window.outer_size();
+            let monitor_bounds = window
+                .available_monitors()
+                .map(|monitor| {
+                    let position = monitor.position();
+                    let size = monitor.size();
+                    (position.x, position.y, size.width, size.height)
+                })
+                .collect::<Vec<_>>();
+            if window_position_has_visible_region(
+                window_x,
+                window_y,
+                window_size.width,
+                window_size.height,
+                &monitor_bounds,
+            ) {
+                window.set_outer_position(winit::dpi::Position::Physical(
+                    winit::dpi::PhysicalPosition::new(window_x, window_y),
+                ));
+            } else {
+                eprintln!("[startup] ignored off-screen window position: ({window_x}, {window_y})");
+            }
         }
 
         // TextState and reshape worker are created and owned by EditorRuntime.
@@ -494,6 +541,29 @@ mod build_shell_inputs_tests {
 
     use ui::plugin::ViewPlugin;
     use ui::sidebar::Visibility;
+
+    #[test]
+    fn startup_does_not_hide_the_window_before_surface_acquisition() {
+        let source = include_str!("app_window.rs");
+        let transparent_window_call = ["set_window_alpha(window, ", "0.0)"].concat();
+
+        assert!(!source.contains(&transparent_window_call));
+    }
+
+    #[test]
+    fn persisted_window_position_requires_a_visible_region() {
+        let monitors = [(0, 0, 1512, 982)];
+
+        assert!(super::window_position_has_visible_region(1400, 400, 800, 600, &monitors));
+        assert!(!super::window_position_has_visible_region(1582, 488, 800, 600, &monitors));
+    }
+
+    #[test]
+    fn persisted_window_position_accepts_an_attached_secondary_monitor() {
+        let monitors = [(0, 0, 1512, 982), (1512, 0, 1920, 1080)];
+
+        assert!(super::window_position_has_visible_region(1582, 488, 800, 600, &monitors));
+    }
 
     #[test]
     fn persisted_window_dimension_is_logical_across_display_scale_changes() {

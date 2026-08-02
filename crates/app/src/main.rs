@@ -25,6 +25,8 @@ fn main() {
         return;
     }
 
+    let mut app = App::new_for_launch(cli.file);
+
     #[cfg(target_os = "macos")]
     let event_loop = {
         use winit::platform::macos::EventLoopBuilderExtMacOS;
@@ -38,7 +40,6 @@ fn main() {
         EventLoop::<AppEvent>::with_user_event().build().expect("failed to create event loop");
 
     let event_loop_proxy = event_loop.create_proxy();
-    let mut app = App::new(cli.file);
     #[cfg(target_os = "macos")]
     if let Err(error) = textora_app::install_macos_open_document_handler(
         ProductWakeHandle::new(event_loop_proxy.clone()),

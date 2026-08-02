@@ -1059,9 +1059,9 @@ impl ApplicationHandler<AppEvent> for App {
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             self.do_window_event(event_loop, event);
         }));
-        #[cfg(debug_assertions)]
         if let Err(e) = result {
             eprintln!("[fatal] panic in window_event: {:?}", e);
+            event_loop.exit();
         }
     }
     fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
@@ -1087,8 +1087,10 @@ impl ApplicationHandler<AppEvent> for App {
 
         self.submit_file_safety_checks();
 
-        let nr_before = self.needs_redraw;
-        let mut why = "none";
+        #[cfg(debug_assertions)]
+        let redraw_before = self.needs_redraw;
+        #[cfg(debug_assertions)]
+        let mut redraw_reason = "none";
 
         // 检测光标闪烁 phase 变化 → 触发渲染
         // 窗口未激活时不闪烁；搜索框焦点时跳过（TextBox 自己管理闪烁）
@@ -1102,18 +1104,25 @@ impl ApplicationHandler<AppEvent> for App {
             if visible != self.last_cursor_visible {
                 self.last_cursor_visible = visible;
                 self.needs_redraw = true;
-                why = "blink";
+                #[cfg(debug_assertions)]
+                {
+                    redraw_reason = "blink";
+                }
             }
         }
 
         // 检测动画 → 触发渲染
         if self.has_active_animation() {
             self.needs_redraw = true;
-            why = if why == "none" { "anim" } else { "blink+anim" };
+            #[cfg(debug_assertions)]
+            {
+                redraw_reason = if redraw_reason == "none" { "anim" } else { "blink+anim" };
+            }
         }
 
         // 仅在有需要时 request_redraw（不再无条件刷新）
-        let did_request = self.needs_redraw;
+        #[cfg(debug_assertions)]
+        let redraw_requested = self.needs_redraw;
         if self.needs_redraw
             && let Some(window) = self.editor_runtime.window()
         {
@@ -1122,7 +1131,8 @@ impl ApplicationHandler<AppEvent> for App {
 
         // 设置 ControlFlow — 精确调度下一次唤醒
         let next_wake = self.compute_next_wake_time();
-        let wake_ms =
+        #[cfg(debug_assertions)]
+        let wake_after_millis =
             next_wake.map(|d| d.duration_since(std::time::Instant::now()).as_millis() as i64);
         match next_wake {
             Some(deadline) => {
@@ -1146,7 +1156,12 @@ impl ApplicationHandler<AppEvent> for App {
                     writeln!(
                         f,
                         "[atw] {:>5}us nr={}->{} why={:<10} req={} wake={:?}",
-                        _atw_us, nr_before, self.needs_redraw, why, did_request, wake_ms
+                        _atw_us,
+                        redraw_before,
+                        self.needs_redraw,
+                        redraw_reason,
+                        redraw_requested,
+                        wake_after_millis
                     )
                 });
         }

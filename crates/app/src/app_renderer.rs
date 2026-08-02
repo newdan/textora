@@ -1339,9 +1339,6 @@ impl App {
 
         if !self.editor_runtime.first_frame_presented() {
             self.editor_runtime.mark_frame_presented();
-            if let Some(w) = self.editor_runtime.window() {
-                crate::sys::macos_titlebar::set_window_alpha(w, 1.0);
-            }
             eprintln!(
                 "[startup] first_frame_visible total: {:?}",
                 self.startup_started_at.elapsed()
@@ -1398,13 +1395,15 @@ impl App {
             );
         }
 
-        let render_frame_count = self.editor_runtime.render_frame_count();
         #[cfg(debug_assertions)]
-        if render_frame_count.is_multiple_of(60) {
-            eprintln!(
-                "[perf] frame#{} total={}us interval={}us",
-                render_frame_count, _total_render_us, _frame_interval_us,
-            );
+        {
+            let render_frame_count = self.editor_runtime.render_frame_count();
+            if render_frame_count.is_multiple_of(60) {
+                eprintln!(
+                    "[perf] frame#{} total={}us interval={}us",
+                    render_frame_count, _total_render_us, _frame_interval_us,
+                );
+            }
         }
 
         // ── Atlas exhaustion recovery ──

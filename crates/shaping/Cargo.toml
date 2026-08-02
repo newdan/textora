@@ -27,3 +27,6 @@ criterion = { workspace = true }
 name = "shaping_bench"
 harness = false
 
+[[bench]]
+name = "font_cache_bench"
+harness = false

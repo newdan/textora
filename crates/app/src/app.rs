@@ -95,6 +95,8 @@ pub struct App {
     pub(crate) preedit_advance_px: f32,
     /// 应用状态构造开始时刻，用于记录首帧可见的端到端耗时。
     pub(crate) startup_started_at: Instant,
+    /// 生产启动时并行构建字体缓存；普通测试构造器保持字体立即可用。
+    pub(crate) startup_font_preparation: Option<std::thread::JoinHandle<shaping::FontSystem>>,
 }
 
 impl App {
