@@ -152,7 +152,10 @@ pub enum NotoraProductEvent {
         identity: notora_core::DocumentIdentity,
         message: String,
     },
-    PersistenceFailed {
+    SettingsPersistenceCompleted {
+        result: Result<(), String>,
+    },
+    SessionPersistenceFailed {
         message: String,
     },
 }
@@ -261,7 +264,8 @@ impl NotoraProduct {
             | NotoraProductEvent::ConflictReloadFailed { .. }
             | NotoraProductEvent::ConflictRetryRevisionCaptured { .. }
             | NotoraProductEvent::ConflictRetryRevisionFailed { .. }
-            | NotoraProductEvent::PersistenceFailed { .. } => return true,
+            | NotoraProductEvent::SettingsPersistenceCompleted { .. }
+            | NotoraProductEvent::SessionPersistenceFailed { .. } => return true,
             NotoraProductEvent::CardQueryCompleted {
                 workspace_id, workspace_generation, ..
             }

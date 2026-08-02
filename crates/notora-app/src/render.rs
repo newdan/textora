@@ -655,9 +655,10 @@ impl NotoraShell {
             }
         });
         frame.with_paint_context(|context| {
-            context.list.fill(layout.navigation_rect, context.theme.palette.bg_surface);
-            context.list.fill(layout.card_list_rect, context.theme.palette.bg_base);
-            context.list.fill(layout.editor_rect, context.theme.editor.background);
+            let application_theme = context.theme.application_theme();
+            context.list.fill(layout.navigation_rect, application_theme.navigation_surface);
+            context.list.fill(layout.card_list_rect, application_theme.content_surface);
+            context.list.fill(layout.editor_rect, application_theme.editor_surface);
             self.search_box.paint(context);
             let search_icon_size = SIDEBAR_ICON_SIZE_LOGICAL * context.dpi;
             draw_icon(
@@ -666,7 +667,7 @@ impl NotoraShell {
                 search_rect.x + (search_icon_area_width - search_icon_size) * 0.5,
                 search_rect.y + (search_rect.h - search_icon_size) * 0.5,
                 search_icon_size,
-                context.theme.palette.text_muted,
+                application_theme.text_secondary,
             );
             self.navigation_tree.paint(context);
             self.navigation_splitter.paint(context);
@@ -680,7 +681,7 @@ impl NotoraShell {
                 settings_rect.x + settings_horizontal_inset,
                 settings_rect.y + (settings_rect.h - settings_icon_size) * 0.5,
                 settings_icon_size,
-                context.theme.palette.text_muted,
+                application_theme.text_secondary,
             );
             context.text(
                 settings_rect.x
@@ -691,14 +692,14 @@ impl NotoraShell {
                     + settings_rect.h * 0.5
                     + SIDEBAR_LABEL_FONT_SIZE_LOGICAL * 0.35 * context.dpi,
                 SIDEBAR_LABEL_FONT_SIZE_LOGICAL * context.dpi,
-                context.theme.palette.text_muted,
+                application_theme.text_secondary,
                 "Settings",
             );
             context.text(
                 layout.card_list_rect.x + padding,
                 layout.card_list_rect.y + 28.0 * context.dpi,
                 16.0 * context.dpi,
-                context.theme.palette.text_main,
+                application_theme.text_primary,
                 &model.card_list_title,
             );
             if self.compact_navigation_rect != Rect::ZERO {
@@ -728,30 +729,35 @@ impl NotoraShell {
         }
         if model.show_settings_overlay {
             frame.with_paint_context(|context| {
-                context.list.fill_rounded(layout.overlay_rect, [0.0, 0.0, 0.0, 0.45], 0.0);
+                context.list.fill_rounded(
+                    layout.overlay_rect,
+                    context.theme.application_theme().modal_scrim,
+                    0.0,
+                );
                 self.settings_overlay.paint(context);
             });
         }
         if let Some(confirmation) = &model.confirmation {
             frame.with_paint_context(|context| {
-                context.list.fill_rounded(layout.overlay_rect, [0.0, 0.0, 0.0, 0.45], 0.0);
+                let application_theme = context.theme.application_theme();
+                context.list.fill_rounded(layout.overlay_rect, application_theme.modal_scrim, 0.0);
                 context.list.fill_rounded(
                     self.confirmation_panel_rect,
-                    context.theme.palette.bg_elevated,
+                    application_theme.overlay_surface,
                     10.0 * context.dpi,
                 );
                 context.text(
                     self.confirmation_panel_rect.x + 20.0 * context.dpi,
                     self.confirmation_panel_rect.y + 38.0 * context.dpi,
                     17.0 * context.dpi,
-                    context.theme.palette.text_main,
+                    application_theme.text_primary,
                     &confirmation.title,
                 );
                 context.text(
                     self.confirmation_panel_rect.x + 20.0 * context.dpi,
                     self.confirmation_panel_rect.y + 72.0 * context.dpi,
                     13.0 * context.dpi,
-                    context.theme.palette.text_muted,
+                    application_theme.text_secondary,
                     &confirmation.description,
                 );
                 paint_note_tool_button(context, self.confirmation_cancel_rect, "Cancel");
@@ -764,21 +770,30 @@ impl NotoraShell {
         }
         if let Some(editor) = &model.tag_editor {
             frame.with_paint_context(|context| {
-                context.list.fill_rounded(layout.overlay_rect, [0.0, 0.0, 0.0, 0.45], 0.0);
+                context.list.fill_rounded(
+                    layout.overlay_rect,
+                    context.theme.application_theme().modal_scrim,
+                    0.0,
+                );
                 self.paint_tag_editor_overlay(context, editor);
             });
         }
         if model.save_conflict.is_some() {
             frame.with_paint_context(|context| {
-                context.list.fill_rounded(layout.overlay_rect, [0.0, 0.0, 0.0, 0.45], 0.0);
+                context.list.fill_rounded(
+                    layout.overlay_rect,
+                    context.theme.application_theme().modal_scrim,
+                    0.0,
+                );
                 self.paint_save_conflict_overlay(context);
             });
         }
         if model.show_menu {
             frame.with_paint_context(|context| {
+                let application_theme = context.theme.application_theme();
                 context.list.fill_rounded(
                     self.new_document_menu_rect,
-                    context.theme.palette.bg_elevated,
+                    application_theme.overlay_surface,
                     6.0 * context.dpi,
                 );
                 for (index, label) in ["Markdown", "Text", "Mind map"].iter().enumerate() {
@@ -788,7 +803,7 @@ impl NotoraShell {
                         self.new_document_menu_rect.x + 10.0 * context.dpi,
                         item_top + 22.0 * context.dpi,
                         14.0 * context.dpi,
-                        context.theme.palette.text_main,
+                        application_theme.text_primary,
                         label,
                     );
                 }
@@ -798,7 +813,7 @@ impl NotoraShell {
             frame.with_paint_context(|context| {
                 context.list.fill_rounded(
                     layout.tooltip_rect,
-                    context.theme.palette.bg_elevated,
+                    context.theme.application_theme().overlay_surface,
                     4.0 * context.dpi,
                 );
             });
@@ -1082,23 +1097,24 @@ impl NotoraShell {
     }
 
     fn paint_save_conflict_overlay(&self, context: &mut ui::PaintCtx<'_>) {
+        let application_theme = context.theme.application_theme();
         context.list.fill_rounded(
             self.save_conflict_panel_rect,
-            context.theme.palette.bg_elevated,
+            application_theme.overlay_surface,
             10.0 * context.dpi,
         );
         context.text(
             self.save_conflict_panel_rect.x + 20.0 * context.dpi,
             self.save_conflict_panel_rect.y + 38.0 * context.dpi,
             17.0 * context.dpi,
-            context.theme.palette.text_main,
+            application_theme.text_primary,
             "File changed on disk",
         );
         context.text(
             self.save_conflict_panel_rect.x + 20.0 * context.dpi,
             self.save_conflict_panel_rect.y + 72.0 * context.dpi,
             13.0 * context.dpi,
-            context.theme.palette.text_muted,
+            application_theme.text_secondary,
             "Choose how to resolve the local edits without silently overwriting the file.",
         );
         for (rect, label) in
@@ -1137,16 +1153,17 @@ impl NotoraShell {
         context: &mut ui::PaintCtx<'_>,
         editor: &TagEditorOverlayInput,
     ) {
+        let application_theme = context.theme.application_theme();
         context.list.fill_rounded(
             self.tag_editor_panel_rect,
-            context.theme.palette.bg_elevated,
+            application_theme.overlay_surface,
             10.0 * context.dpi,
         );
         context.text(
             self.tag_editor_panel_rect.x + 20.0 * context.dpi,
             self.tag_editor_panel_rect.y + 36.0 * context.dpi,
             16.0 * context.dpi,
-            context.theme.palette.text_main,
+            application_theme.text_primary,
             &editor.title,
         );
         self.tag_editor_box.paint(context);
@@ -1171,13 +1188,14 @@ impl NotoraShell {
     }
 
     fn paint_compact_navigation_overlay(&self, context: &mut ui::PaintCtx<'_>) {
+        let application_theme = context.theme.application_theme();
         let panel_rect = Rect::new(
             self.search_rect.x - SHELL_PADDING_LOGICAL * context.dpi,
             0.0,
             self.search_rect.w + SHELL_PADDING_LOGICAL * context.dpi * 2.0,
             self.settings_rect.bottom() + 10.0 * context.dpi,
         );
-        context.list.fill(panel_rect, context.theme.palette.bg_surface);
+        context.list.fill(panel_rect, application_theme.navigation_surface);
         self.search_box.paint(context);
         let search_icon_size = SIDEBAR_ICON_SIZE_LOGICAL * context.dpi;
         draw_icon(
@@ -1187,7 +1205,7 @@ impl NotoraShell {
                 + (SEARCH_ICON_AREA_WIDTH_LOGICAL * context.dpi - search_icon_size) * 0.5,
             self.search_rect.y + (self.search_rect.h - search_icon_size) * 0.5,
             search_icon_size,
-            context.theme.palette.text_muted,
+            application_theme.text_secondary,
         );
         self.navigation_tree.paint(context);
         self.new_note_button.paint(context);
@@ -1199,7 +1217,7 @@ impl NotoraShell {
             self.settings_rect.x + settings_horizontal_inset,
             self.settings_rect.y + (self.settings_rect.h - settings_icon_size) * 0.5,
             settings_icon_size,
-            context.theme.palette.text_muted,
+            application_theme.text_secondary,
         );
         context.text(
             self.settings_rect.x
@@ -1210,7 +1228,7 @@ impl NotoraShell {
                 + self.settings_rect.h * 0.5
                 + SIDEBAR_LABEL_FONT_SIZE_LOGICAL * 0.35 * context.dpi,
             SIDEBAR_LABEL_FONT_SIZE_LOGICAL * context.dpi,
-            context.theme.palette.text_muted,
+            application_theme.text_secondary,
             "Settings",
         );
     }
@@ -1366,6 +1384,8 @@ fn settings_overlay_action_to_notora_action(action: SettingsOverlayAction) -> No
         SettingsOverlayAction::Update(update) => {
             NotoraAction::ProductSettingsUpdateRequested(update)
         }
+        SettingsOverlayAction::RetryPersistence => NotoraAction::RetryProductSettingsPersistence,
+        SettingsOverlayAction::ViewChanged => NotoraAction::SettingsViewChanged,
         SettingsOverlayAction::Dismiss => NotoraAction::OverlayDismissed,
     }
 }
@@ -1495,12 +1515,13 @@ fn directory_has_children(directory: &std::path::Path, directories: &[std::path:
 }
 
 fn paint_note_tool_button(context: &mut ui::PaintCtx<'_>, rect: Rect, label: &str) {
-    context.list.fill_rounded(rect, context.theme.palette.bg_elevated, 4.0 * context.dpi);
+    let application_theme = context.theme.application_theme();
+    context.list.fill_rounded(rect, application_theme.overlay_surface, 4.0 * context.dpi);
     context.text(
         rect.x + 8.0 * context.dpi,
         rect.y + rect.h * 0.5 + 5.0 * context.dpi,
         12.0 * context.dpi,
-        context.theme.palette.text_muted,
+        application_theme.text_secondary,
         label,
     );
 }

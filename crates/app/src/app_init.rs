@@ -213,9 +213,7 @@ impl App {
         for error in &theme_load_report.registry_errors {
             eprintln!("[theme] {error}");
         }
-        let mut active_theme_pair = ui::theme::ActiveThemePair::default();
-        active_theme_pair.light = "spec-light".into();
-        active_theme_pair.dark = "spec-dark".into();
+        let active_theme_pair = ui::theme::ActiveThemePair::default();
         let current_theme = {
             let mode = settings.theme_mode;
             ui::Theme::resolve(

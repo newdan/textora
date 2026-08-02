@@ -3,6 +3,7 @@
 //! Follows system appearance automatically via winit Theme events.
 //! Syntax colors are inspired by Zed's One Dark / One Light palettes.
 
+mod application;
 mod color;
 mod editor;
 mod markdown;
@@ -10,6 +11,7 @@ mod mindmap;
 mod novel;
 mod settings;
 
+pub use application::ApplicationTheme;
 pub use color::ColorPalette;
 pub use editor::EditorTheme;
 pub use markdown::{MarkdownSpacing, MarkdownTheme};
@@ -104,6 +106,15 @@ impl Theme {
         Theme::from_definition(registry.get_or_default(id, is_dark))
     }
 
+    /// Resolve one of the shared built-in themes without product-owned theme configuration.
+    pub fn resolve_builtin(
+        mode: crate::settings::ThemeMode,
+        system_theme: winit::window::Theme,
+    ) -> Self {
+        let registry = ThemeRegistry::new();
+        Self::resolve(mode, system_theme, &ActiveThemePair::default(), &registry)
+    }
+
     /// Apply display gamma correction (~2.2) so sRGB-intended colors appear
     /// correctly on non-sRGB framebuffers (e.g. macOS Metal surfaces).
     fn gamma_correct(&mut self) {
@@ -126,7 +137,11 @@ impl Theme {
     }
 
     pub fn settings_theme(&self) -> SettingsTheme {
-        SettingsTheme::from_palette(&self.palette)
+        SettingsTheme::from_application(&self.application_theme())
+    }
+
+    pub fn application_theme(&self) -> ApplicationTheme {
+        ApplicationTheme::from_theme(&self.palette, &self.editor)
     }
 }
 
@@ -645,6 +660,23 @@ mod tests {
     }
 
     #[test]
+    fn builtin_theme_resolution_follows_the_requested_or_system_appearance() {
+        let system_light =
+            Theme::resolve_builtin(crate::settings::ThemeMode::System, winit::window::Theme::Light);
+        let system_dark =
+            Theme::resolve_builtin(crate::settings::ThemeMode::System, winit::window::Theme::Dark);
+        let forced_light =
+            Theme::resolve_builtin(crate::settings::ThemeMode::Light, winit::window::Theme::Dark);
+        let forced_dark =
+            Theme::resolve_builtin(crate::settings::ThemeMode::Dark, winit::window::Theme::Light);
+
+        assert!(!system_light.is_dark);
+        assert!(system_dark.is_dark);
+        assert!(!forced_light.is_dark);
+        assert!(forced_dark.is_dark);
+    }
+
+    #[test]
     fn settings_tokens_are_derived_from_palette() {
         let theme = crate::theme::test_theme();
         let tokens = theme.settings_theme();
@@ -655,5 +687,28 @@ mod tests {
         assert_eq!(tokens.focus_ring, theme.palette.accent);
         assert_eq!(tokens.text_primary, theme.palette.text_main);
         assert_eq!(tokens.text_secondary, theme.palette.text_muted);
+    }
+
+    #[test]
+    fn application_tokens_are_derived_from_shared_theme_roles() {
+        let theme = crate::theme::test_theme();
+        let tokens = theme.application_theme();
+
+        assert_eq!(tokens.window_surface, theme.palette.bg_base);
+        assert_eq!(tokens.navigation_surface, theme.palette.bg_surface);
+        assert_eq!(tokens.content_surface, theme.palette.bg_base);
+        assert_eq!(tokens.editor_surface, theme.editor.background);
+        assert_eq!(tokens.overlay_surface, theme.palette.bg_elevated);
+        assert_eq!(tokens.text_primary, theme.palette.text_main);
+        assert_eq!(tokens.text_secondary, theme.palette.text_muted);
+        assert_eq!(tokens.divider, theme.palette.border_subtle);
+    }
+
+    #[test]
+    fn application_modal_scrim_has_a_consistent_minimum_opacity() {
+        let mut theme = crate::theme::test_theme();
+        theme.palette.shadow = [0.1, 0.2, 0.3, 0.1];
+
+        assert_eq!(theme.application_theme().modal_scrim, [0.1, 0.2, 0.3, 0.45]);
     }
 }

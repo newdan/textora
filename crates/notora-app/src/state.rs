@@ -434,6 +434,10 @@ impl NotoraState {
             NotoraAction::ProductSettingsUpdateRequested(update) => {
                 vec![NotoraEffect::ApplyProductSettingsUpdate(update), NotoraEffect::Redraw]
             }
+            NotoraAction::RetryProductSettingsPersistence => {
+                vec![NotoraEffect::PersistProductSettings, NotoraEffect::Redraw]
+            }
+            NotoraAction::SettingsViewChanged => vec![NotoraEffect::Redraw],
             NotoraAction::OverlayDismissed => self.dismiss_overlay(),
             NotoraAction::EscapePressed => self.handle_escape(),
         }
@@ -988,6 +992,17 @@ mod tests {
     #[test]
     fn starts_in_workspace_root_scope() {
         assert_eq!(LibraryState::default().navigation_scope, NavigationScope::WorkspaceRoot);
+    }
+
+    #[test]
+    fn settings_view_actions_request_only_their_owned_effects() {
+        let mut state = NotoraState::default();
+
+        assert_eq!(state.reduce(NotoraAction::SettingsViewChanged), vec![NotoraEffect::Redraw]);
+        assert_eq!(
+            state.reduce(NotoraAction::RetryProductSettingsPersistence),
+            vec![NotoraEffect::PersistProductSettings, NotoraEffect::Redraw]
+        );
     }
 
     #[test]

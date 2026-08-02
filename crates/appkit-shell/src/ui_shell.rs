@@ -27,7 +27,6 @@ use ui::tooltip::{TooltipHint, TooltipWidget};
 use crate::editor_host::EditorHostWidget;
 
 const OVERLAY_LOCAL_ORIGIN: f32 = 0.0;
-const MODAL_SCRIM_MIN_ALPHA: f32 = 0.45;
 
 /// Shell 输入：从 App / Workspace 读出的 chrome 状态。
 #[derive(Debug, Clone)]
@@ -1069,9 +1068,7 @@ impl UiShell {
     }
 
     fn overlay_scrim_color(theme: &Theme) -> [f32; 4] {
-        let mut scrim = theme.palette.shadow;
-        scrim[3] = scrim[3].max(MODAL_SCRIM_MIN_ALPHA);
-        scrim
+        theme.application_theme().modal_scrim
     }
 
     fn current_screen_rect(&self) -> Rect {
@@ -1190,7 +1187,8 @@ impl UiShell {
                     }
                 })
                 .unwrap_or(fr.w);
-            ctx.list.fill(Rect::new(fr.x, fr.y, divider_w, 1.0), ctx.theme.palette.border_subtle);
+            ctx.list
+                .fill(Rect::new(fr.x, fr.y, divider_w, 1.0), ctx.theme.application_theme().divider);
         }
 
         // dock children（tab, search, status, sidebar, scrollbar）
@@ -1677,6 +1675,23 @@ mod tests {
             harness.shell.clear_overlays();
 
             assert_eq!(harness.shell.keyboard_focus, KeyboardFocusTarget::Editor);
+        }
+
+        #[test]
+        fn modal_overlay_uses_the_shared_application_scrim() {
+            let mut theme = test_theme();
+            theme.palette.shadow = [0.1, 0.2, 0.3, 0.1];
+            let harness = shell_with_modal(noop_widget());
+
+            let draw_list = harness.shell.paint_chrome(&theme, 1.0, None);
+
+            assert!(draw_list.cmds.iter().any(|command| {
+                matches!(
+                    command,
+                    DrawCmd::FillRect { color, .. }
+                        if *color == theme.application_theme().modal_scrim
+                )
+            }));
         }
     }
 

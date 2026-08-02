@@ -76,6 +76,28 @@ struct PendingTrashMove {
     content_revision: u64,
 }
 
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+enum SettingsPersistenceState {
+    #[default]
+    Saved,
+    SaveFailed {
+        message: String,
+    },
+}
+
+impl SettingsPersistenceState {
+    fn to_view(&self) -> crate::settings_overlay::NotoraSettingsPersistenceView {
+        match self {
+            Self::Saved => crate::settings_overlay::NotoraSettingsPersistenceView::Saved,
+            Self::SaveFailed { message } => {
+                crate::settings_overlay::NotoraSettingsPersistenceView::SaveFailed {
+                    message: message.clone(),
+                }
+            }
+        }
+    }
+}
+
 /// notora 应用初始化失败。
 #[derive(Debug)]
 pub enum NotoraAppError {
@@ -117,6 +139,7 @@ pub struct NotoraApp {
     pending_catalog_backup_at: Option<Instant>,
     runtime_lru: RuntimeLru,
     settings: ui::Settings,
+    settings_persistence: SettingsPersistenceState,
     theme: ui::Theme,
     state: NotoraState,
     product: NotoraProduct,
@@ -157,7 +180,10 @@ impl NotoraApp {
         let product_settings = loaded_product_settings.settings;
         let mut settings = ui::Settings::new();
         product_settings.apply_to_ui(&mut settings);
-        let theme = ui::Theme::from_definition(&ui::theme::ThemeDefinition::default_dark());
+        let theme = ui::Theme::resolve_builtin(
+            product_settings.appearance.theme_mode,
+            winit::window::Theme::Dark,
+        );
         let editor_runtime = build_editor_runtime(&settings, &theme, &paths)?;
         let mut state = NotoraState::default();
         state.layout.navigation_width_logical = loaded_session.session.navigation_width_logical;
@@ -189,6 +215,7 @@ impl NotoraApp {
             pending_catalog_backup_at: None,
             runtime_lru: RuntimeLru::new(runtime_tab_limit),
             settings,
+            settings_persistence: SettingsPersistenceState::Saved,
             theme,
             state,
             product,
@@ -563,6 +590,29 @@ impl NotoraApp {
         self.needs_redraw = true;
     }
 
+    fn current_system_appearance(&self) -> winit::window::Theme {
+        self.editor_runtime
+            .window()
+            .and_then(|window| window.theme())
+            .unwrap_or(winit::window::Theme::Dark)
+    }
+
+    pub(crate) fn follows_system_theme(&self) -> bool {
+        self.product_settings.appearance.theme_mode == ui::ThemeMode::System
+    }
+
+    pub(crate) fn rebuild_theme_for_system_appearance(
+        &mut self,
+        system_appearance: winit::window::Theme,
+    ) {
+        self.theme = ui::Theme::resolve_builtin(
+            self.product_settings.appearance.theme_mode,
+            system_appearance,
+        );
+        self.editor_runtime.update_theme(self.theme.clone());
+        self.needs_redraw = true;
+    }
+
     pub(crate) fn resume(&mut self, event_loop: &ActiveEventLoop) -> Result<(), NotoraAppError> {
         if self.editor_runtime.window().is_some() {
             return Ok(());
@@ -580,6 +630,7 @@ impl NotoraApp {
                 &self.settings.font_family,
             )
             .map_err(NotoraAppError::Runtime)?;
+        self.rebuild_theme_for_system_appearance(self.current_system_appearance());
         if let Some((width, height)) = self.editor_runtime.window().map(|window| {
             let geometry = self
                 .pending_session
@@ -745,7 +796,10 @@ impl NotoraApp {
                         self.dispatch_action(NotoraAction::NoteCommandFailed(message));
                     }
                 }
-                crate::product::NotoraProductEvent::PersistenceFailed { message } => {
+                crate::product::NotoraProductEvent::SettingsPersistenceCompleted { result } => {
+                    self.record_settings_persistence_result(result);
+                }
+                crate::product::NotoraProductEvent::SessionPersistenceFailed { message } => {
                     self.dispatch_action(NotoraAction::NoteCommandFailed(message));
                 }
                 crate::product::NotoraProductEvent::WorkspaceScanCompleted { .. } => {
@@ -785,6 +839,8 @@ impl NotoraApp {
 
     pub(crate) fn route_product_event(&mut self, event: &ui::Event) -> bool {
         let focus_target = self.state.layout.focus_target;
+        let settings_modal_is_open =
+            self.state.layout.overlay == crate::state::OverlayState::Settings;
         let actions = self.shell.route_event(
             event,
             focus_target,
@@ -792,7 +848,7 @@ impl NotoraApp {
             self.editor_runtime.scale_factor() as f32,
         );
         if actions.is_empty() {
-            return false;
+            return settings_modal_is_open;
         }
         for action in actions {
             self.dispatch_action(action);
@@ -803,7 +859,9 @@ impl NotoraApp {
     pub(crate) fn render(&mut self) -> Result<(), RenderError> {
         self.needs_redraw = false;
         let layout = self.shell_layout();
-        let model = NotoraRenderModel::from_state_and_settings(&self.state, &self.product_settings);
+        let mut model =
+            NotoraRenderModel::from_state_and_settings(&self.state, &self.product_settings);
+        model.settings_overlay.persistence = self.settings_persistence.to_view();
         let mut render_resources = self.editor_runtime.take_render_resources();
         let mut frame = self.editor_runtime.begin_frame()?;
         self.shell.render(&mut frame, layout, &model)?;
@@ -813,7 +871,11 @@ impl NotoraApp {
             &mut render_resources,
             &mut vertices,
         );
-        submit_shell_frame(&mut render_resources, &vertices, self.theme.editor.background);
+        submit_shell_frame(
+            &mut render_resources,
+            &vertices,
+            self.theme.application_theme().editor_surface,
+        );
         let _ = frame.present()?;
         self.editor_runtime.restore_render_resources(render_resources);
         self.editor_runtime.mark_frame_presented();
@@ -1642,20 +1704,12 @@ impl NotoraEffectService for NotoraApp {
             self.product_settings.workspace.auto_save_delay_millis,
         ));
         self.editor_runtime.update_settings(self.settings.clone());
-        self.theme = match self.product_settings.appearance.theme_mode {
-            ui::ThemeMode::Light => {
-                ui::Theme::from_definition(&ui::theme::ThemeDefinition::default_light())
-            }
-            ui::ThemeMode::System | ui::ThemeMode::Dark => {
-                ui::Theme::from_definition(&ui::theme::ThemeDefinition::default_dark())
-            }
-        };
-        if let Err(error) = self
-            .persistence_worker
-            .save_settings(self.paths.settings_file.clone(), self.product_settings.clone())
-        {
-            self.state.library.last_command_error = Some(error.to_string());
-        }
+        self.rebuild_theme_for_system_appearance(self.current_system_appearance());
+        self.enqueue_product_settings_persistence();
+    }
+
+    fn persist_product_settings(&mut self) {
+        self.enqueue_product_settings_persistence();
     }
 
     fn persist_layout(&mut self) {
@@ -1664,6 +1718,23 @@ impl NotoraEffectService for NotoraApp {
 }
 
 impl NotoraApp {
+    fn enqueue_product_settings_persistence(&mut self) {
+        if let Err(error) = self
+            .persistence_worker
+            .save_settings(self.paths.settings_file.clone(), self.product_settings.clone())
+        {
+            self.record_settings_persistence_result(Err(error.to_string()));
+        }
+    }
+
+    fn record_settings_persistence_result(&mut self, result: Result<(), String>) {
+        self.settings_persistence = match result {
+            Ok(()) => SettingsPersistenceState::Saved,
+            Err(message) => SettingsPersistenceState::SaveFailed { message },
+        };
+        self.needs_redraw = true;
+    }
+
     fn schedule_session_persistence(&mut self) {
         self.pending_session_persist_at = Some(Instant::now() + SESSION_PERSIST_DEBOUNCE_DELAY);
     }
@@ -2282,7 +2353,8 @@ mod tests {
     use std::time::{Duration, Instant};
 
     use super::{
-        NotoraApp, PendingTrashMove, rename_file_name_for_destination, workspace_relative_directory,
+        NotoraApp, PendingTrashMove, SettingsPersistenceState, rename_file_name_for_destination,
+        workspace_relative_directory,
     };
     use crate::action::NotoraAction;
     use crate::autosave::AutoSaveState;
@@ -2333,6 +2405,43 @@ mod tests {
         app.dispatch_action(NotoraAction::OpenSettings);
         assert_eq!(app.state().layout.overlay, OverlayState::Settings);
         assert!(!app.update_editor_preedit("音".to_owned(), Some((0, 1))));
+    }
+
+    #[test]
+    fn settings_modal_consumes_unhandled_keyboard_input() {
+        let mut app = app();
+        app.dispatch_action(NotoraAction::OpenSettings);
+
+        assert!(app.route_product_event(&ui::Event::KeyDown(
+            ui::KeyCode::Char('x'),
+            ui::core::Modifiers::NONE,
+        )));
+    }
+
+    #[test]
+    fn notora_theme_mode_resolves_against_its_own_product_settings() {
+        let mut app = app();
+        app.product_settings.appearance.theme_mode = ui::ThemeMode::System;
+        app.rebuild_theme_for_system_appearance(winit::window::Theme::Light);
+        assert!(!app.theme.is_dark);
+        app.rebuild_theme_for_system_appearance(winit::window::Theme::Dark);
+        assert!(app.theme.is_dark);
+
+        app.product_settings.appearance.theme_mode = ui::ThemeMode::Light;
+        app.rebuild_theme_for_system_appearance(winit::window::Theme::Dark);
+        assert!(!app.theme.is_dark);
+    }
+
+    #[test]
+    fn notora_editor_setting_updates_its_product_and_runtime_snapshots() {
+        let mut app = app();
+
+        app.dispatch_action(NotoraAction::ProductSettingsUpdateRequested(
+            crate::settings_overlay::ProductSettingsUpdate::FontSize(20.0),
+        ));
+
+        assert_eq!(app.product_settings.editor.font_size, 20.0);
+        assert_eq!(app.editor_runtime.settings_snapshot().font_size, 20.0);
     }
 
     #[test]
@@ -2459,7 +2568,7 @@ mod tests {
     }
 
     #[test]
-    fn settings_persistence_failure_returns_through_the_background_product_channel() {
+    fn settings_persistence_failure_is_visible_and_retry_clears_it() {
         let mut app = app();
         let occupied_parent = app.paths.config_directory.join("occupied-settings-parent");
         std::fs::write(&occupied_parent, "not a directory")
@@ -2475,12 +2584,31 @@ mod tests {
         let deadline = Instant::now() + Duration::from_secs(2);
         loop {
             app.drain_product_events();
-            if app.state.library.last_command_error.is_some() {
+            if matches!(app.settings_persistence, SettingsPersistenceState::SaveFailed { .. }) {
                 break;
             }
             assert!(Instant::now() < deadline, "settings persistence failure should arrive");
             thread::sleep(Duration::from_millis(10));
         }
+
+        assert!(matches!(
+            app.settings_persistence.to_view(),
+            crate::settings_overlay::NotoraSettingsPersistenceView::SaveFailed { .. }
+        ));
+        let retry_path = app.paths.config_directory.join("retry-settings.toml");
+        app.paths.settings_file = retry_path.clone();
+        app.dispatch_action(NotoraAction::RetryProductSettingsPersistence);
+
+        let deadline = Instant::now() + Duration::from_secs(2);
+        loop {
+            app.drain_product_events();
+            if app.settings_persistence == SettingsPersistenceState::Saved {
+                break;
+            }
+            assert!(Instant::now() < deadline, "settings persistence retry should complete");
+            thread::sleep(Duration::from_millis(10));
+        }
+        assert!(!crate::settings::load_product_settings(&retry_path).settings.editor.word_wrap);
     }
 
     #[test]

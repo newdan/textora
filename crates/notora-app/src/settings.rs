@@ -6,9 +6,18 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use serde::{Deserialize, Serialize};
 
 const SETTINGS_SCHEMA_VERSION: u32 = 1;
+const MINIMUM_FONT_SIZE: f32 = 6.0;
+const MAXIMUM_FONT_SIZE: f32 = 72.0;
+const MINIMUM_LINE_HEIGHT_RATIO: f32 = 1.0;
+const MAXIMUM_LINE_HEIGHT_RATIO: f32 = 3.0;
+const MINIMUM_TAB_WIDTH: usize = 1;
+const MAXIMUM_TAB_WIDTH: usize = 16;
 const MINIMUM_RUNTIME_TAB_LIMIT: usize = 1;
+const MAXIMUM_RUNTIME_TAB_LIMIT: usize = 128;
 const MINIMUM_AUTO_SAVE_DELAY_MILLIS: u64 = 100;
+const MAXIMUM_AUTO_SAVE_DELAY_MILLIS: u64 = 60_000;
 const MINIMUM_CATALOG_BACKUP_RETENTION: usize = 1;
+const MAXIMUM_CATALOG_BACKUP_RETENTION: usize = 100;
 static SETTINGS_TEMPORARY_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
 /// notora 的持久化设置；不包含其他 textora 产品的兼容状态。
@@ -110,17 +119,43 @@ impl ProductSettings {
     }
 
     fn validate(&self) -> Result<(), &'static str> {
-        if self.interface.runtime_tab_limit < MINIMUM_RUNTIME_TAB_LIMIT {
-            return Err("runtime tab limit must be at least one");
+        if self.editor.font_family.trim().is_empty() {
+            return Err("font family must not be empty");
         }
-        if self.workspace.auto_save_delay_millis < MINIMUM_AUTO_SAVE_DELAY_MILLIS {
-            return Err("auto-save delay must be at least 100 milliseconds");
+        if !float_is_in_range(self.editor.font_size, MINIMUM_FONT_SIZE, MAXIMUM_FONT_SIZE) {
+            return Err("font size must be between 6 and 72");
         }
-        if self.workspace.catalog_backup_retention < MINIMUM_CATALOG_BACKUP_RETENTION {
-            return Err("catalog backup retention must be at least one");
+        if !float_is_in_range(
+            self.editor.line_height_ratio,
+            MINIMUM_LINE_HEIGHT_RATIO,
+            MAXIMUM_LINE_HEIGHT_RATIO,
+        ) {
+            return Err("line height ratio must be between 1 and 3");
+        }
+        if !(MINIMUM_TAB_WIDTH..=MAXIMUM_TAB_WIDTH).contains(&self.editor.tab_width) {
+            return Err("tab width must be between 1 and 16");
+        }
+        if !(MINIMUM_RUNTIME_TAB_LIMIT..=MAXIMUM_RUNTIME_TAB_LIMIT)
+            .contains(&self.interface.runtime_tab_limit)
+        {
+            return Err("runtime tab limit must be between 1 and 128");
+        }
+        if !(MINIMUM_AUTO_SAVE_DELAY_MILLIS..=MAXIMUM_AUTO_SAVE_DELAY_MILLIS)
+            .contains(&self.workspace.auto_save_delay_millis)
+        {
+            return Err("auto-save delay must be between 100 and 60000 milliseconds");
+        }
+        if !(MINIMUM_CATALOG_BACKUP_RETENTION..=MAXIMUM_CATALOG_BACKUP_RETENTION)
+            .contains(&self.workspace.catalog_backup_retention)
+        {
+            return Err("catalog backup retention must be between 1 and 100");
         }
         Ok(())
     }
+}
+
+fn float_is_in_range(value: f32, minimum: f32, maximum: f32) -> bool {
+    value.is_finite() && (minimum..=maximum).contains(&value)
 }
 
 /// 配置读取失败会安全回退，但保留可展示的诊断文本。
@@ -292,5 +327,17 @@ mod tests {
         let loaded = load_product_settings(&path);
         assert_eq!(loaded.settings, ProductSettings::default());
         assert!(loaded.diagnostic.as_deref().is_some_and(|message| message.contains("tab limit")));
+    }
+
+    #[test]
+    fn invalid_editor_settings_fall_back_before_reaching_the_ui_runtime() {
+        let directory = tempfile::tempdir().expect("settings test directory should exist");
+        let path = directory.path().join("settings.toml");
+        std::fs::write(&path, "schema_version = 1\n[editor]\nfont_size = 100\n")
+            .expect("fixture should write");
+
+        let loaded = load_product_settings(&path);
+        assert_eq!(loaded.settings, ProductSettings::default());
+        assert!(loaded.diagnostic.as_deref().is_some_and(|message| message.contains("font size")));
     }
 }

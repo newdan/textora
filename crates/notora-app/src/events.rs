@@ -64,6 +64,9 @@ impl ApplicationHandler<ShellEvent> for NotoraApp {
                 self.set_scale_factor(scale_factor)
             }
             WindowEvent::Focused(focused) => self.set_window_focused(focused),
+            WindowEvent::ThemeChanged(system_appearance) if self.follows_system_theme() => {
+                self.rebuild_theme_for_system_appearance(system_appearance);
+            }
             WindowEvent::ModifiersChanged(modifiers) => {
                 self.editor_runtime_mut().set_input_modifiers(modifiers.state());
             }

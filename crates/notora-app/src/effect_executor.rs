@@ -43,6 +43,8 @@ pub trait NotoraEffectService {
     fn save_document_manually(&mut self, _request: ManualSaveRequest) {}
     fn resolve_save_conflict(&mut self, _request: SaveConflictRequest) {}
     fn apply_product_settings_update(&mut self, _update: ProductSettingsUpdate) {}
+
+    fn persist_product_settings(&mut self) {}
     fn persist_layout(&mut self);
 }
 
@@ -100,6 +102,10 @@ impl EffectExecutor {
                 service.apply_product_settings_update(update);
                 ShellEffect::PERSIST_SETTINGS
             }
+            NotoraEffect::PersistProductSettings => {
+                service.persist_product_settings();
+                ShellEffect::PERSIST_SETTINGS
+            }
             NotoraEffect::PersistLayout => {
                 service.persist_layout();
                 ShellEffect::PERSIST_SETTINGS
@@ -134,6 +140,7 @@ mod tests {
         metadata_mutation: Option<MetadataMutation>,
         promoted_preview_count: usize,
         manual_save_request: Option<ManualSaveRequest>,
+        product_settings_persistence_count: usize,
     }
 
     impl NotoraEffectService for Recorder {
@@ -157,6 +164,10 @@ mod tests {
 
         fn promote_active_preview(&mut self) {
             self.promoted_preview_count += 1;
+        }
+
+        fn persist_product_settings(&mut self) {
+            self.product_settings_persistence_count += 1;
         }
 
         fn persist_layout(&mut self) {}
@@ -184,6 +195,17 @@ mod tests {
         assert_eq!(recorder.prepared_document, Some(request));
         let _ = EffectExecutor::execute(&mut recorder, NotoraEffect::PromoteActivePreview);
         assert_eq!(recorder.promoted_preview_count, 1);
+    }
+
+    #[test]
+    fn executor_routes_product_settings_persistence_through_the_service_boundary() {
+        let mut recorder = Recorder::default();
+
+        assert_eq!(
+            EffectExecutor::execute(&mut recorder, NotoraEffect::PersistProductSettings),
+            appkit_shell::ShellEffect::PERSIST_SETTINGS
+        );
+        assert_eq!(recorder.product_settings_persistence_count, 1);
     }
 
     #[test]

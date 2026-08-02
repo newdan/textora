@@ -153,6 +153,8 @@ pub enum NotoraAction {
     FocusRequested(FocusTarget),
     OpenSettings,
     ProductSettingsUpdateRequested(ProductSettingsUpdate),
+    RetryProductSettingsPersistence,
+    SettingsViewChanged,
     OverlayDismissed,
     EscapePressed,
 }
@@ -172,6 +174,7 @@ pub enum NotoraEffect {
     CreateUntitledExternal(DocumentKind),
     ResolveSaveConflict(SaveConflictRequest),
     ApplyProductSettingsUpdate(ProductSettingsUpdate),
+    PersistProductSettings,
     PersistLayout,
     Redraw,
 }

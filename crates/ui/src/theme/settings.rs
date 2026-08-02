@@ -1,4 +1,4 @@
-use super::ColorPalette;
+use super::ApplicationTheme;
 
 /// Settings 界面的视觉语义令牌。
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -18,20 +18,20 @@ pub struct SettingsTheme {
 }
 
 impl SettingsTheme {
-    pub(crate) fn from_palette(palette: &ColorPalette) -> Self {
+    pub(crate) fn from_application(application: &ApplicationTheme) -> Self {
         Self {
-            modal_surface: palette.bg_elevated,
-            sidebar_surface: palette.bg_surface,
-            section_surface: palette.bg_elevated,
-            section_border: palette.border_subtle,
-            separator: palette.border_subtle,
-            control_surface: palette.input_bg,
-            control_border: palette.input_border,
-            focus_ring: palette.accent,
-            accent: palette.accent,
-            text_primary: palette.text_main,
-            text_secondary: palette.text_muted,
-            text_inverse: palette.text_inverse,
+            modal_surface: application.overlay_surface,
+            sidebar_surface: application.navigation_surface,
+            section_surface: application.overlay_surface,
+            section_border: application.divider,
+            separator: application.divider,
+            control_surface: application.control_surface,
+            control_border: application.control_border,
+            focus_ring: application.accent,
+            accent: application.accent,
+            text_primary: application.text_primary,
+            text_secondary: application.text_secondary,
+            text_inverse: application.text_inverse,
         }
     }
 }

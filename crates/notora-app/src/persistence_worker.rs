@@ -80,19 +80,21 @@ fn run_persistence_worker(
     event_sender: NotoraProductEventSender,
 ) {
     while let Ok(command) = command_receiver.recv() {
-        let result = match command {
+        match command {
             PersistenceCommand::SaveSettings { path, settings } => {
-                crate::settings::save_product_settings(&path, &settings)
-                    .map_err(|error| format!("could not persist product settings: {error}"))
+                let result = crate::settings::save_product_settings(&path, &settings)
+                    .map_err(|error| format!("could not persist product settings: {error}"));
+                let _ =
+                    event_sender.send(NotoraProductEvent::SettingsPersistenceCompleted { result });
             }
             PersistenceCommand::SaveSession { path, session } => {
-                crate::session::save_product_session(&path, &session)
-                    .map_err(|error| format!("could not persist product session: {error}"))
+                if let Err(error) = crate::session::save_product_session(&path, &session) {
+                    let _ = event_sender.send(NotoraProductEvent::SessionPersistenceFailed {
+                        message: format!("could not persist product session: {error}"),
+                    });
+                }
             }
             PersistenceCommand::Shutdown => return,
-        };
-        if let Err(message) = result {
-            let _ = event_sender.send(NotoraProductEvent::PersistenceFailed { message });
         }
     }
 }
@@ -123,6 +125,12 @@ mod tests {
         worker.shutdown();
 
         assert_eq!(crate::settings::load_product_settings(&settings_path).settings, latest);
-        assert_eq!(product.drain_product_events(), appkit_shell::ShellEffect::NONE);
+        assert_eq!(product.drain_product_events(), appkit_shell::ShellEffect::REDRAW);
+        let completion_events = product.take_workspace_events();
+        assert_eq!(completion_events.len(), 2);
+        assert!(completion_events.iter().all(|event| matches!(
+            event,
+            crate::product::NotoraProductEvent::SettingsPersistenceCompleted { result: Ok(()) }
+        )));
     }
 }
