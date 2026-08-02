@@ -7,6 +7,7 @@ use notora_core::note_command::{
 };
 use notora_core::{DocumentIdentity, DocumentKind, NavigationScope, TagId};
 
+use crate::search_controller::SearchGeneration;
 use crate::state::{FocusTarget, Pane};
 
 /// 中栏查询的纯输入。
@@ -15,6 +16,7 @@ pub struct CardQuery {
     pub scope: NavigationScope,
     pub cursor: Option<CardPageCursor>,
     pub page_size: usize,
+    pub search_generation: Option<SearchGeneration>,
 }
 
 /// 由稳定排序键组成的下一页游标；绝不依赖会因实时更新漂移的裸 offset。
@@ -24,7 +26,12 @@ pub const DEFAULT_CARD_PAGE_SIZE: usize = 50;
 
 impl CardQuery {
     pub fn next_page(&self, cursor: CardPageCursor) -> Self {
-        Self { scope: self.scope.clone(), cursor: Some(cursor), page_size: self.page_size }
+        Self {
+            scope: self.scope.clone(),
+            cursor: Some(cursor),
+            page_size: self.page_size,
+            search_generation: self.search_generation,
+        }
     }
 }
 
@@ -66,16 +73,20 @@ pub struct SaveConflictRequest {
 pub enum NotoraAction {
     NavigationSelected(NavigationScope),
     SearchTextChanged(String),
-    SearchCommitted(String),
+    SearchCommitted { query: String, search_generation: Option<SearchGeneration> },
     CardQueryCompleted { query: CardQuery, page: notora_core::CatalogCardPage },
     CardQueryFailed { query: CardQuery, message: String },
     CardListScrolled { offset_px: f32, near_end: bool },
     CardSelected(DocumentIdentity),
+    CardActivated(DocumentIdentity),
     OpenExternalFileDialogRequested,
     ExternalPathsReceived(Vec<PathBuf>),
     ExternalFileOpened(DocumentIdentity),
     PromotePreviewRequested,
+    OpenNewDocumentMenu,
     CreateRequested(DocumentKind),
+    RenameDialogRequested(notora_core::NoteId),
+    MoveDialogRequested(notora_core::NoteId),
     RenameRequested { note_id: notora_core::NoteId, new_file_name: PathBuf },
     MoveRequested { note_id: notora_core::NoteId, target_directory: PathBuf },
     SaveConflictDetected { identity: DocumentIdentity, content_revision: u64 },
@@ -95,6 +106,8 @@ pub enum NotoraAction {
 pub enum NotoraEffect {
     QueryCards(CardQuery),
     ExecuteNoteCommand(NoteCommand),
+    ChooseNoteRenameDestination(notora_core::NoteId),
+    ChooseNoteMoveDirectory(notora_core::NoteId),
     PrepareDocument(DocumentLoadRequest),
     PromoteActivePreview,
     OpenExternalFiles(crate::effect_executor::ExternalOpenRequest),
@@ -123,7 +136,7 @@ pub fn move_note_command(note_id: notora_core::NoteId, target_directory: PathBuf
 
 impl From<NavigationScope> for CardQuery {
     fn from(scope: NavigationScope) -> Self {
-        Self { scope, cursor: None, page_size: DEFAULT_CARD_PAGE_SIZE }
+        Self { scope, cursor: None, page_size: DEFAULT_CARD_PAGE_SIZE, search_generation: None }
     }
 }
 

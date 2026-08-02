@@ -4,8 +4,8 @@ use std::path::{Path, PathBuf};
 
 use crate::catalog::SearchIndexEntry;
 use crate::{
-    Catalog, CatalogError, CatalogNote, DocumentKind, NoteId, WORKSPACE_METADATA_DIRECTORY_NAME,
-    Workspace, parse_note_text_summary,
+    Catalog, CatalogError, DiscoveredNote, DocumentKind, ReconciliationChange, ReconciliationError,
+    WORKSPACE_METADATA_DIRECTORY_NAME, Workspace, parse_note_text_summary, reconcile_catalog,
 };
 
 const MACOS_FINDER_METADATA_FILE_NAME: &str = ".DS_Store";
@@ -27,6 +27,7 @@ pub struct ScanCompletion {
 #[derive(Debug)]
 pub enum ScanError {
     Catalog(CatalogError),
+    Reconciliation(ReconciliationError),
 }
 
 impl std::fmt::Display for ScanError {
@@ -35,6 +36,7 @@ impl std::fmt::Display for ScanError {
             Self::Catalog(source) => {
                 write!(formatter, "workspace scan catalog access failed: {source}")
             }
+            Self::Reconciliation(source) => source.fmt(formatter),
         }
     }
 }
@@ -43,6 +45,7 @@ impl std::error::Error for ScanError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
             Self::Catalog(source) => Some(source),
+            Self::Reconciliation(source) => Some(source),
         }
     }
 }
@@ -54,32 +57,54 @@ pub fn scan_workspace(
     workspace: &Workspace,
     catalog: &Catalog,
 ) -> Result<ScanCompletion, ScanError> {
-    let existing_note_ids = catalog
-        .active_notes()
-        .map_err(ScanError::Catalog)?
-        .into_iter()
-        .map(|note| (note.relative_path, note.note_id))
-        .collect();
     let mut completion = ScanCompletion::default();
-    let mut search_entries = Vec::new();
-    scan_directory(
-        workspace,
-        catalog,
-        workspace.root(),
-        &existing_note_ids,
-        &mut search_entries,
-        &mut completion,
-    );
+    let mut discovered_files = Vec::new();
+    scan_directory(workspace, workspace.root(), &mut discovered_files, &mut completion);
+    let plan = reconcile_catalog(catalog, discovered_files.iter().map(|file| file.note.clone()))
+        .map_err(ScanError::Reconciliation)?;
+    let mut note_ids_by_path = HashMap::new();
+    let mut missing_note_ids = Vec::new();
+    for change in plan.changes {
+        match change {
+            ReconciliationChange::Updated(note)
+            | ReconciliationChange::Added(note)
+            | ReconciliationChange::Moved { note, .. } => {
+                note_ids_by_path.insert(note.relative_path.clone(), note.note_id);
+                catalog.upsert_active_note(&note).map_err(ScanError::Catalog)?;
+            }
+            ReconciliationChange::Missing(note) => missing_note_ids.push(note.note_id),
+        }
+    }
+    if completion.failures.is_empty() {
+        catalog.remove_missing_active_notes(&missing_note_ids).map_err(ScanError::Catalog)?;
+    }
+    let search_entries = discovered_files
+        .into_iter()
+        .filter_map(|file| {
+            let note_id = note_ids_by_path.get(&file.note.relative_path).copied()?;
+            Some(SearchIndexEntry {
+                note_id,
+                title: file.note.title,
+                relative_path: file.note.relative_path,
+                body: file.body,
+                tags: Vec::new(),
+            })
+        })
+        .collect::<Vec<_>>();
     catalog.index_note_batch(&search_entries).map_err(ScanError::Catalog)?;
+    completion.indexed_files = search_entries.len();
     Ok(completion)
+}
+
+struct DiscoveredFile {
+    note: DiscoveredNote,
+    body: String,
 }
 
 fn scan_directory(
     workspace: &Workspace,
-    catalog: &Catalog,
     directory: &Path,
-    existing_note_ids: &HashMap<PathBuf, NoteId>,
-    search_entries: &mut Vec<SearchIndexEntry>,
+    discovered_files: &mut Vec<DiscoveredFile>,
     completion: &mut ScanCompletion,
 ) {
     let read_directory = match fs::read_dir(directory) {
@@ -111,28 +136,19 @@ fn scan_directory(
             continue;
         }
         if file_type.is_dir() {
-            scan_directory(
-                workspace,
-                catalog,
-                &path,
-                existing_note_ids,
-                search_entries,
-                completion,
-            );
+            scan_directory(workspace, &path, discovered_files, completion);
             continue;
         }
         if file_type.is_file() {
-            scan_file(workspace, catalog, &path, existing_note_ids, search_entries, completion);
+            scan_file(workspace, &path, discovered_files, completion);
         }
     }
 }
 
 fn scan_file(
     workspace: &Workspace,
-    catalog: &Catalog,
     path: &Path,
-    existing_note_ids: &HashMap<PathBuf, NoteId>,
-    search_entries: &mut Vec<SearchIndexEntry>,
+    discovered_files: &mut Vec<DiscoveredFile>,
     completion: &mut ScanCompletion,
 ) {
     let Some(kind) = DocumentKind::from_path(path) else {
@@ -178,8 +194,7 @@ fn scan_file(
         return;
     };
     let summary = parse_note_text_summary(kind, file_stem, &contents);
-    let note = CatalogNote {
-        note_id: existing_note_ids.get(&relative_path).copied().unwrap_or_else(NoteId::generate),
+    let note = DiscoveredNote {
         relative_path: relative_path.clone(),
         kind,
         title: summary.title,
@@ -187,22 +202,8 @@ fn scan_file(
         modified_at,
         file_size: metadata.len(),
         content_hash: blake3::hash(contents.as_bytes()).as_bytes().to_vec(),
-        starred: false,
     };
-    if let Err(error) = catalog.upsert_active_note(&note) {
-        completion.failures.push(ScanFailure { relative_path, message: error.to_string() });
-        return;
-    }
-    search_entries.push(SearchIndexEntry {
-        note_id: note.note_id,
-        title: note.title,
-        relative_path,
-        body: contents,
-        // N6 的 metadata repository 会在标签变更后发送增量索引命令；扫描阶段不猜测
-        // 用户 metadata，避免用文件名或正文伪造标签。
-        tags: Vec::new(),
-    });
-    completion.indexed_files += 1;
+    discovered_files.push(DiscoveredFile { note, body: contents });
 }
 
 fn should_ignore(path: &Path) -> bool {
@@ -278,5 +279,51 @@ mod tests {
                 .iter()
                 .any(|search_match| search_match.note_id == first_notes[1].note_id)
         );
+    }
+
+    #[test]
+    fn rescan_removes_deleted_notes_from_active_catalog_and_search() {
+        let directory = tempfile::tempdir().expect("workspace test directory should be created");
+        let note_path = directory.path().join("obsolete.md");
+        fs::write(&note_path, "# Obsolete\n\nunique deletion marker")
+            .expect("markdown fixture should be written");
+        let workspace =
+            Workspace::open_or_initialize(directory.path()).expect("workspace should initialize");
+        let catalog = Catalog::open(&workspace.metadata_directory().join("catalog.sqlite3"))
+            .expect("catalog should initialize");
+        scan_workspace(&workspace, &catalog).expect("initial scan should complete");
+
+        fs::remove_file(note_path).expect("fixture note should be deleted");
+        scan_workspace(&workspace, &catalog).expect("deletion scan should complete");
+
+        assert!(catalog.active_notes().expect("active notes should load").is_empty());
+        assert!(
+            catalog
+                .search_active_notes("deletion marker", 10)
+                .expect("search should complete")
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn rescan_preserves_note_identity_for_a_unique_external_move() {
+        let directory = tempfile::tempdir().expect("workspace test directory should be created");
+        let original_path = directory.path().join("original.md");
+        let moved_path = directory.path().join("moved.md");
+        fs::write(&original_path, "# Stable identity\n\nmove marker")
+            .expect("markdown fixture should be written");
+        let workspace =
+            Workspace::open_or_initialize(directory.path()).expect("workspace should initialize");
+        let catalog = Catalog::open(&workspace.metadata_directory().join("catalog.sqlite3"))
+            .expect("catalog should initialize");
+        scan_workspace(&workspace, &catalog).expect("initial scan should complete");
+        let original_note = catalog.active_notes().expect("initial notes should load").remove(0);
+
+        fs::rename(original_path, moved_path).expect("fixture note should move");
+        scan_workspace(&workspace, &catalog).expect("move scan should complete");
+        let moved_note = catalog.active_notes().expect("moved notes should load").remove(0);
+
+        assert_eq!(moved_note.note_id, original_note.note_id);
+        assert_eq!(moved_note.relative_path, std::path::Path::new("moved.md"));
     }
 }

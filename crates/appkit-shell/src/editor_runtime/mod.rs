@@ -56,7 +56,7 @@ pub struct EditorRuntime {
     reshape_session: reshape_session::ReshapeSession,
     file_safety_session: file_safety_session::FileSafetySession,
     save_session: document_save::SaveSession,
-    _settings: ui::settings::Settings,
+    settings: ui::settings::Settings,
     theme: ui::Theme,
     ui_shaper: Option<Arc<Mutex<shaping::Shaper>>>,
     _snapshots_directory: PathBuf,
@@ -78,7 +78,7 @@ impl EditorRuntime {
             reshape_session: reshape_session::ReshapeSession::new(),
             file_safety_session: file_safety_session::FileSafetySession::new(),
             save_session: document_save::SaveSession::new(),
-            _settings: initial_settings,
+            settings: initial_settings,
             theme: initial_theme,
             ui_shaper: None,
             _snapshots_directory: snapshots_directory,
@@ -635,8 +635,99 @@ impl EditorRuntime {
         self.input_session.keyboard_allowed(context)
     }
 
+    pub fn commit_text(&mut self, context: EditorInputContext, text: String) -> EditorOutcome {
+        if text.is_empty() || !self.input_session.keyboard_allowed(context) {
+            return EditorOutcome::default();
+        }
+        let _ = self.input_session.update_preedit(context, String::new(), None);
+        self.model_session.edit_active_document(
+            ui::plugin::EditIntent::InsertText(text),
+            self.editor_line_height(),
+        )
+    }
+
+    pub fn handle_key_input(
+        &mut self,
+        context: EditorInputContext,
+        key: ui::KeyCode,
+        modifiers: ui::core::Modifiers,
+    ) -> EditorOutcome {
+        if !self.input_session.keyboard_allowed(context) {
+            return EditorOutcome::default();
+        }
+
+        let command = modifiers.cmd || modifiers.ctrl;
+        if command {
+            match key {
+                ui::KeyCode::Char('a' | 'A') => {
+                    return self.model_session.select_all_active_document();
+                }
+                ui::KeyCode::Char('z' | 'Z') => {
+                    return self
+                        .model_session
+                        .undo_or_redo_active_document(modifiers.shift, self.editor_line_height());
+                }
+                ui::KeyCode::Char('y' | 'Y') if modifiers.ctrl => {
+                    return self
+                        .model_session
+                        .undo_or_redo_active_document(true, self.editor_line_height());
+                }
+                _ => {}
+            }
+        }
+
+        let intent = match key {
+            ui::KeyCode::Enter => Some(ui::plugin::EditIntent::InsertParagraphBreak),
+            ui::KeyCode::Backspace => Some(ui::plugin::EditIntent::DeleteBackward),
+            ui::KeyCode::Delete => Some(ui::plugin::EditIntent::DeleteForward),
+            ui::KeyCode::Tab if modifiers.shift => Some(ui::plugin::EditIntent::Outdent),
+            ui::KeyCode::Tab => Some(ui::plugin::EditIntent::Indent),
+            ui::KeyCode::Char(character) if !command && !modifiers.alt => {
+                Some(ui::plugin::EditIntent::InsertText(character.to_string()))
+            }
+            ui::KeyCode::Left
+            | ui::KeyCode::Right
+            | ui::KeyCode::Up
+            | ui::KeyCode::Down
+            | ui::KeyCode::Home
+            | ui::KeyCode::End
+            | ui::KeyCode::PageUp
+            | ui::KeyCode::PageDown => {
+                return self.model_session.navigate_active_document(
+                    key,
+                    modifiers,
+                    self.editor_line_height(),
+                );
+            }
+            ui::KeyCode::Escape | ui::KeyCode::Char(_) => None,
+        };
+        intent.map_or_else(EditorOutcome::default, |intent| {
+            self.model_session.edit_active_document(intent, self.editor_line_height())
+        })
+    }
+
+    pub fn scroll_editor(
+        &mut self,
+        context: EditorInputContext,
+        position: (f32, f32),
+        pixels: f32,
+    ) -> EditorOutcome {
+        if !self.input_session.pointer_allowed(context, position) {
+            return EditorOutcome::default();
+        }
+        self.model_session.scroll_active_document(pixels, self.editor_line_height())
+    }
+
     pub fn pointer_input_allowed(&self, context: EditorInputContext, position: (f32, f32)) -> bool {
         self.input_session.pointer_allowed(context, position)
+    }
+
+    fn editor_line_height(&self) -> f32 {
+        ui::settings::UiMetrics::from_settings(
+            &self.settings,
+            self.render_session.scale_factor() as f32,
+        )
+        .line_height
     }
 
     pub fn begin_text_selection(&mut self, context: EditorInputContext) -> bool {
@@ -785,11 +876,11 @@ impl EditorRuntime {
     }
 
     pub fn update_settings(&mut self, settings: ui::settings::Settings) {
-        self._settings = settings;
+        self.settings = settings;
     }
 
     pub fn settings_snapshot(&self) -> ui::settings::Settings {
-        self._settings.clone()
+        self.settings.clone()
     }
 
     pub fn shutdown(&mut self) {
@@ -924,5 +1015,46 @@ mod tests {
         )));
         assert!(runtime.document_summary(tab_id).is_none());
         assert!(!runtime.accepts_reshape_result(&result, 0));
+    }
+
+    #[test]
+    fn committed_text_mutates_the_active_document_and_reports_content_change() {
+        let mut runtime = runtime_with_clean_tab();
+        let tab_id = runtime.active_tab_id().expect("test runtime should have an active tab");
+        let context = EditorInputContext {
+            editor_rect: ui::Rect::new(0.0, 0.0, 640.0, 480.0),
+            focus: EditorFocus::Active,
+            modal_blocked: false,
+        };
+
+        let outcome = runtime.commit_text(context, "中".to_owned());
+
+        assert_eq!(runtime.workspace_snapshot().tabs[0].content_lines, vec!["clean中"]);
+        assert!(outcome.notifications.iter().any(|notification| matches!(
+            notification,
+            EditorNotification::ContentChanged { tab_id: changed_tab_id, content_revision: 1 }
+                if *changed_tab_id == tab_id
+        )));
+        assert!(outcome.notifications.iter().any(|notification| matches!(
+            notification,
+            EditorNotification::DirtyChanged { tab_id: changed_tab_id, dirty: true }
+                if *changed_tab_id == tab_id
+        )));
+    }
+
+    #[test]
+    fn editor_key_input_is_rejected_without_editor_focus() {
+        let mut runtime = runtime_with_clean_tab();
+        let context = EditorInputContext {
+            editor_rect: ui::Rect::new(0.0, 0.0, 640.0, 480.0),
+            focus: EditorFocus::Inactive,
+            modal_blocked: false,
+        };
+
+        let outcome =
+            runtime.handle_key_input(context, ui::KeyCode::Backspace, ui::core::Modifiers::NONE);
+
+        assert_eq!(outcome, EditorOutcome::default());
+        assert_eq!(runtime.workspace_snapshot().tabs[0].content_lines, vec!["clean"]);
     }
 }

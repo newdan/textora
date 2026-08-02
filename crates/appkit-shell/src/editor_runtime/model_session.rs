@@ -5,8 +5,8 @@ use std::path::Path;
 use appkit_core::workspace::types::TabId;
 
 use crate::editor_runtime::{
-    CloseConfirmation, EditorDocumentSummary, EditorTabSnapshot, EditorWorkspaceSnapshot,
-    OpenDisposition,
+    CloseConfirmation, EditorDocumentSummary, EditorNotification, EditorOutcome, EditorTabSnapshot,
+    EditorWorkspaceSnapshot, OpenDisposition,
 };
 use crate::prepared_tab::PreparedTab;
 use crate::tab_runtime::{TabRuntime, TabRuntimeStore};
@@ -181,6 +181,199 @@ impl ModelSession {
             content_revision: document.content_revision(),
             disk_revision: document.disk_revision.clone(),
             pinned: self.workspace.is_pinned_id(tab_id),
+        })
+    }
+
+    pub(crate) fn edit_active_document(
+        &mut self,
+        intent: ui::plugin::EditIntent,
+        line_height: f32,
+    ) -> EditorOutcome {
+        let Some(tab_id) = self.active_tab_id() else {
+            return EditorOutcome::default();
+        };
+        let Some(previous_summary) = self.document_summary(tab_id) else {
+            return EditorOutcome::default();
+        };
+        let Some(request) = self.edit_request(tab_id, intent) else {
+            return EditorOutcome::default();
+        };
+        let Some(plan) = self.resolve_edit_plan(tab_id, &request) else {
+            return EditorOutcome::default();
+        };
+        let Some(mut tab) = self.tab_session_mut(tab_id) else {
+            return EditorOutcome::default();
+        };
+        if !apply_edit_plan(tab.document, plan) {
+            return EditorOutcome::default();
+        }
+
+        refresh_presentation_after_edit(&mut tab, line_height);
+        let current_revision = tab.document.content_revision();
+        let current_dirty = tab.document.dirty;
+        let source = tab.document.full_text();
+        let source_generation = tab.document.generation();
+        let _ = tab.send_message(ui::plugin::PluginMessage::UpdateSource {
+            text: source,
+            generation: source_generation,
+        });
+        edit_outcome(
+            tab_id,
+            previous_summary.content_revision,
+            previous_summary.dirty,
+            current_revision,
+            current_dirty,
+        )
+    }
+
+    pub(crate) fn navigate_active_document(
+        &mut self,
+        key: ui::KeyCode,
+        modifiers: ui::core::Modifiers,
+        line_height: f32,
+    ) -> EditorOutcome {
+        let Some(tab_id) = self.active_tab_id() else {
+            return EditorOutcome::default();
+        };
+        let Some(mut tab) = self.tab_session_mut(tab_id) else {
+            return EditorOutcome::default();
+        };
+        let document = &mut tab.document;
+        match (key, modifiers.shift, modifiers.cmd || modifiers.ctrl, modifiers.alt) {
+            (ui::KeyCode::Left, true, _, true) => document.extend_selection_word_left(),
+            (ui::KeyCode::Right, true, _, true) => document.extend_selection_word_right(),
+            (ui::KeyCode::Left, true, true, _) => document.extend_selection_to_line_start(),
+            (ui::KeyCode::Right, true, true, _) => document.extend_selection_to_line_end(),
+            (ui::KeyCode::Up, true, true, _) => document.extend_selection_to_doc_start(),
+            (ui::KeyCode::Down, true, true, _) => document.extend_selection_to_doc_end(),
+            (ui::KeyCode::Left, true, _, _) => document.extend_selection_left(),
+            (ui::KeyCode::Right, true, _, _) => document.extend_selection_right(),
+            (ui::KeyCode::Up, true, _, _) => document.extend_selection_up(),
+            (ui::KeyCode::Down, true, _, _) => document.extend_selection_down(),
+            (ui::KeyCode::Left, false, _, true) => document.cursor_move_word_left(),
+            (ui::KeyCode::Right, false, _, true) => document.cursor_move_word_right(),
+            (ui::KeyCode::Left | ui::KeyCode::Home, false, true, _) => {
+                document.cursor_move_to_line_start()
+            }
+            (ui::KeyCode::Right | ui::KeyCode::End, false, true, _) => {
+                document.cursor_move_to_line_end()
+            }
+            (ui::KeyCode::Up, false, true, _) => document.cursor_move_to_offset(0),
+            (ui::KeyCode::Down, false, true, _) => {
+                document.cursor_move_to_offset(document.buffer_len())
+            }
+            (ui::KeyCode::Left, false, _, _) => document.cursor_move_left(),
+            (ui::KeyCode::Right, false, _, _) => document.cursor_move_right(),
+            (ui::KeyCode::Up, false, _, _) => document.cursor_move_up(),
+            (ui::KeyCode::Down, false, _, _) => document.cursor_move_down(),
+            (ui::KeyCode::Home, false, _, _) => document.cursor_move_to_line_start(),
+            (ui::KeyCode::End, false, _, _) => document.cursor_move_to_line_end(),
+            (ui::KeyCode::PageUp, false, _, _) => tab.page_up(line_height),
+            (ui::KeyCode::PageDown, false, _, _) => tab.page_down(line_height),
+            _ => return EditorOutcome::default(),
+        }
+        tab.cursor_render_state_mut().cursor_blink_instant = std::time::Instant::now();
+        tab.ensure_cursor_visible(line_height);
+        EditorOutcome {
+            shell_effect: crate::event::ShellEffect::REDRAW,
+            ..EditorOutcome::default()
+        }
+    }
+
+    pub(crate) fn select_all_active_document(&mut self) -> EditorOutcome {
+        let Some(tab_id) = self.active_tab_id() else {
+            return EditorOutcome::default();
+        };
+        let Some(tab) = self.tab_session_mut(tab_id) else {
+            return EditorOutcome::default();
+        };
+        tab.document.select_all();
+        EditorOutcome {
+            shell_effect: crate::event::ShellEffect::REDRAW,
+            ..EditorOutcome::default()
+        }
+    }
+
+    pub(crate) fn undo_or_redo_active_document(
+        &mut self,
+        redo: bool,
+        line_height: f32,
+    ) -> EditorOutcome {
+        let Some(tab_id) = self.active_tab_id() else {
+            return EditorOutcome::default();
+        };
+        let Some(previous_summary) = self.document_summary(tab_id) else {
+            return EditorOutcome::default();
+        };
+        let Some(mut tab) = self.tab_session_mut(tab_id) else {
+            return EditorOutcome::default();
+        };
+        if redo {
+            tab.document.redo();
+        } else {
+            tab.document.undo();
+        }
+        refresh_presentation_after_edit(&mut tab, line_height);
+        edit_outcome(
+            tab_id,
+            previous_summary.content_revision,
+            previous_summary.dirty,
+            tab.document.content_revision(),
+            tab.document.dirty,
+        )
+    }
+
+    pub(crate) fn scroll_active_document(
+        &mut self,
+        pixels: f32,
+        line_height: f32,
+    ) -> EditorOutcome {
+        if pixels == 0.0 {
+            return EditorOutcome::default();
+        }
+        let Some(tab_id) = self.active_tab_id() else {
+            return EditorOutcome::default();
+        };
+        let Some(mut tab) = self.tab_session_mut(tab_id) else {
+            return EditorOutcome::default();
+        };
+        tab.scroll_viewport_by_pixels(pixels, line_height);
+        EditorOutcome {
+            shell_effect: crate::event::ShellEffect::REDRAW
+                .merge(crate::event::ShellEffect::RESHAPE),
+            ..EditorOutcome::default()
+        }
+    }
+
+    fn edit_request(
+        &self,
+        tab_id: TabId,
+        intent: ui::plugin::EditIntent,
+    ) -> Option<ui::plugin::EditRequest> {
+        let tab = self.tab_session(tab_id)?;
+        let selection = tab
+            .document
+            .selection_range()
+            .and_then(|(start, end)| (start < end).then_some(start..end));
+        Some(ui::plugin::EditRequest {
+            source_generation: tab.document.generation(),
+            cursor_byte: tab.document.cursor_offset().to_usize(),
+            selection,
+            intent,
+        })
+    }
+
+    fn resolve_edit_plan(
+        &self,
+        tab_id: TabId,
+        request: &ui::plugin::EditRequest,
+    ) -> Option<ui::plugin::EditPlan> {
+        let tab = self.tab_session(tab_id)?;
+        let plan = tab.plan_edit_request(request);
+        Some(if plan == ui::plugin::EditPlan::UseDefault {
+            default_edit_plan(request, tab.document)
+        } else {
+            plan
         })
     }
 
@@ -428,6 +621,171 @@ impl ModelSession {
         effect.reconcile_runtime_store(&mut self.runtimes);
         debug_assert_eq!(self.workspace.tab_ids(), self.runtimes.ids());
     }
+}
+
+fn default_edit_plan(
+    request: &ui::plugin::EditRequest,
+    document: &appkit_core::document::DocumentModel,
+) -> ui::plugin::EditPlan {
+    use ui::plugin::{EditIntent, EditPlan, EditTransaction};
+
+    let replacement = match &request.intent {
+        EditIntent::InsertText(text) => Some(text.clone()),
+        EditIntent::InsertParagraphBreak => Some("\n".to_owned()),
+        EditIntent::Indent => Some(if document.tb.indent_with_tabs() {
+            "\t".to_owned()
+        } else {
+            " ".repeat(document.tb.tab_size() as usize)
+        }),
+        EditIntent::DeleteBackward | EditIntent::DeleteForward => None,
+        EditIntent::Outdent
+        | EditIntent::PromoteObject
+        | EditIntent::DemoteObject
+        | EditIntent::SelectObject => return EditPlan::Consume,
+    };
+    if let Some(text) = replacement {
+        let range = request.selection.clone().unwrap_or(request.cursor_byte..request.cursor_byte);
+        let cursor_after = range.start + text.len();
+        return EditPlan::Apply(EditTransaction::replace(
+            request.source_generation,
+            range,
+            text,
+            cursor_after,
+        ));
+    }
+
+    let range = request.selection.clone().unwrap_or_else(|| {
+        let direction = if request.intent == EditIntent::DeleteBackward { -1 } else { 1 };
+        let target = document
+            .tb
+            .grapheme_boundary_delta(core::types::ByteIndex(request.cursor_byte), direction)
+            .to_usize();
+        target.min(request.cursor_byte)..target.max(request.cursor_byte)
+    });
+    EditPlan::Apply(EditTransaction::replace(
+        request.source_generation,
+        range.clone(),
+        String::new(),
+        range.start,
+    ))
+}
+
+fn apply_edit_plan(
+    document: &mut appkit_core::document::DocumentModel,
+    plan: ui::plugin::EditPlan,
+) -> bool {
+    use ui::plugin::EditPlan;
+
+    match plan {
+        EditPlan::UseDefault | EditPlan::Consume => false,
+        EditPlan::MoveCursor(update) => {
+            if !valid_document_boundary(document, update.cursor_after) {
+                return false;
+            }
+            document.cursor_move_to_offset(update.cursor_after);
+            true
+        }
+        EditPlan::SetSelection(selection) => apply_edit_selection(document, selection),
+        EditPlan::Apply(transaction) => {
+            if transaction.source_generation != document.generation() {
+                return false;
+            }
+            let mut replacements = transaction.replacements;
+            replacements.sort_by_key(|replacement| replacement.range.start);
+            if replacements.windows(2).any(|pair| pair[0].range.end > pair[1].range.start)
+                || replacements.iter().any(|replacement| {
+                    replacement.range.start > replacement.range.end
+                        || replacement.range.end > document.buffer_len()
+                        || !valid_document_boundary(document, replacement.range.start)
+                        || !valid_document_boundary(document, replacement.range.end)
+                })
+            {
+                return false;
+            }
+            if replacements.is_empty() {
+                return apply_edit_selection(document, transaction.selection_after);
+            }
+
+            document.tb.edit_begin_grouping();
+            for replacement in replacements.iter().rev() {
+                document.tb.replace_range(replacement.range.clone(), replacement.text.as_bytes());
+            }
+            document.tb.edit_end_grouping();
+            document.line_index = appkit_core::line_index::LineIndex::rebuild_from(&document.tb);
+            document.mark_content_changed();
+            document.dirty = document.tb.is_dirty();
+            document.sync_cursor_from_buffer();
+            apply_edit_selection(document, transaction.selection_after)
+        }
+    }
+}
+
+fn valid_document_boundary(document: &appkit_core::document::DocumentModel, byte: usize) -> bool {
+    if byte > document.buffer_len() {
+        return false;
+    }
+    let source = document.full_text();
+    core::unicode::CursorNav::new(&source).goto_byte(core::types::ByteIndex(byte)).offset
+        == core::types::ByteIndex(byte)
+}
+
+fn apply_edit_selection(
+    document: &mut appkit_core::document::DocumentModel,
+    selection: ui::plugin::EditSelection,
+) -> bool {
+    use ui::plugin::EditSelection;
+
+    match selection {
+        EditSelection::Caret(byte) if valid_document_boundary(document, byte) => {
+            document.cursor_move_to_offset(byte);
+            document.cursor_mut().selection_anchor = None;
+            true
+        }
+        EditSelection::Range { anchor, cursor }
+            if valid_document_boundary(document, anchor)
+                && valid_document_boundary(document, cursor) =>
+        {
+            document.cursor_move_to_offset(cursor);
+            document.cursor_mut().selection_anchor = Some(anchor);
+            true
+        }
+        EditSelection::Caret(_) | EditSelection::Range { .. } => false,
+    }
+}
+
+fn refresh_presentation_after_edit(tab: &mut TabSessionMut<'_>, line_height: f32) {
+    let entries = (0..tab.document.line_count())
+        .map(|document_line| {
+            let byte_offset = tab.document.line_byte_offset(document_line).unwrap_or(0);
+            let byte_length = tab.document.line_byte_length(document_line).unwrap_or(0) as u32;
+            crate::snap_tree::DisplayLineEntry::placeholder(byte_offset, byte_length, 0, 1)
+        })
+        .collect();
+    tab.display_mut().display_map.set_entries(entries);
+    tab.invalidate_render_cache_all();
+    tab.cursor_render_state_mut().click_hint = None;
+    tab.cursor_render_state_mut().cursor_blink_instant = std::time::Instant::now();
+    tab.ensure_cursor_visible(line_height);
+}
+
+fn edit_outcome(
+    tab_id: TabId,
+    previous_content_revision: u64,
+    previous_dirty: bool,
+    current_content_revision: u64,
+    current_dirty: bool,
+) -> EditorOutcome {
+    let mut notifications = smallvec::SmallVec::new();
+    if current_content_revision != previous_content_revision {
+        notifications.push(EditorNotification::ContentChanged {
+            tab_id,
+            content_revision: current_content_revision,
+        });
+    }
+    if current_dirty != previous_dirty {
+        notifications.push(EditorNotification::DirtyChanged { tab_id, dirty: current_dirty });
+    }
+    EditorOutcome { shell_effect: crate::event::ShellEffect::REDRAW, notifications }
 }
 
 #[cfg(test)]

@@ -13,9 +13,6 @@ const TAG_SEPARATOR: &str = "\n";
 const DELETE_ALL_SEARCH_INDEX_ENTRIES: &str = "DELETE FROM note_search";
 const ACTIVE_NOTE_LIFECYCLE: i64 = 0;
 const MINIMUM_TRIGRAM_QUERY_GRAPHEMES: usize = 3;
-const MINIMUM_SEARCH_CANDIDATE_COUNT: usize = 64;
-const MAXIMUM_SEARCH_CANDIDATE_COUNT: usize = 512;
-const SEARCH_CANDIDATE_MULTIPLIER: usize = 8;
 const SHORT_QUERY_BODY_CANDIDATE_LIMIT: usize = 128;
 
 const TITLE_MATCH_WEIGHT: i64 = 160;
@@ -28,8 +25,7 @@ const FULL_TEXT_CANDIDATES_SQL: &str = "
 SELECT n.note_id, n.title, n.relative_path, n.modified_ns, s.body, s.tags
 FROM note_search AS s
 JOIN notes AS n ON n.note_id = s.note_id
-WHERE n.lifecycle = ?1 AND note_search MATCH ?2
-LIMIT ?3";
+WHERE n.lifecycle = ?1 AND note_search MATCH ?2";
 
 const SHORT_QUERY_STRUCTURED_CANDIDATES_SQL: &str = "
 SELECT n.note_id, n.title, n.relative_path, n.modified_ns, s.body, s.tags
@@ -142,7 +138,7 @@ impl Catalog {
 
         let candidates =
             if normalized_query.graphemes(true).count() >= MINIMUM_TRIGRAM_QUERY_GRAPHEMES {
-                self.full_text_search_candidates(&normalized_query, maximum_results)?
+                self.full_text_search_candidates(&normalized_query)?
             } else {
                 self.short_query_search_candidates(&normalized_query)?
             };
@@ -163,19 +159,14 @@ impl Catalog {
     fn full_text_search_candidates(
         &self,
         normalized_query: &str,
-        maximum_results: usize,
     ) -> Result<Vec<SearchCandidate>, CatalogError> {
         let mut statement = self
             .connection()
             .prepare(FULL_TEXT_CANDIDATES_SQL)
             .map_err(|source| CatalogError::sql("full-text search query preparation", source))?;
         let fts_query = fts_phrase_query(normalized_query);
-        let candidate_limit = search_candidate_limit(maximum_results);
         statement
-            .query_map(
-                params![ACTIVE_NOTE_LIFECYCLE, fts_query, candidate_limit],
-                search_candidate_from_row,
-            )
+            .query_map(params![ACTIVE_NOTE_LIFECYCLE, fts_query], search_candidate_from_row)
             .map_err(|source| CatalogError::sql("full-text search query", source))?
             .collect::<Result<Vec<_>, _>>()
             .map_err(|source| CatalogError::sql("full-text search row read", source))?
@@ -348,12 +339,6 @@ fn compare_ranked_search_candidates(
         })
         .then_with(|| left.candidate.relative_path.cmp(&right.candidate.relative_path))
         .then_with(|| left.candidate.note_id.as_uuid().cmp(&right.candidate.note_id.as_uuid()))
-}
-
-fn search_candidate_limit(maximum_results: usize) -> usize {
-    maximum_results
-        .saturating_mul(SEARCH_CANDIDATE_MULTIPLIER)
-        .clamp(MINIMUM_SEARCH_CANDIDATE_COUNT, MAXIMUM_SEARCH_CANDIDATE_COUNT)
 }
 
 fn normalize_search_text(value: &str) -> String {

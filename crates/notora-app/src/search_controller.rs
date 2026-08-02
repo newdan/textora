@@ -90,6 +90,10 @@ impl SearchController {
             && self.active_search_generation == request.search_generation
     }
 
+    pub fn accepts_generation(&self, search_generation: SearchGeneration) -> bool {
+        self.active_search_generation == search_generation
+    }
+
     fn invalidate_pending_search(&mut self) {
         self.pending_search = None;
         self.advance_search_generation();

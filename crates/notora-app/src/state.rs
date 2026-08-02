@@ -150,7 +150,9 @@ impl NotoraState {
                 self.layout.focus_target = FocusTarget::NavigationSearch;
                 vec![NotoraEffect::Redraw]
             }
-            NotoraAction::SearchCommitted(query) => self.commit_search(query),
+            NotoraAction::SearchCommitted { query, search_generation } => {
+                self.commit_search(query, search_generation)
+            }
             NotoraAction::CardQueryCompleted { query, page } => self.apply_card_page(query, page),
             NotoraAction::CardQueryFailed { query, message } => {
                 self.apply_card_query_failure(query, message)
@@ -167,6 +169,13 @@ impl NotoraState {
                 self.layout.focus_target = FocusTarget::CardList;
                 vec![NotoraEffect::PrepareDocument(request), NotoraEffect::Redraw]
             }
+            NotoraAction::CardActivated(identity) => {
+                if self.library.selected_card != Some(identity) {
+                    return vec![NotoraEffect::Redraw];
+                }
+                self.layout.focus_target = FocusTarget::Editor;
+                vec![NotoraEffect::PromoteActivePreview, NotoraEffect::Redraw]
+            }
             NotoraAction::OpenExternalFileDialogRequested => {
                 vec![NotoraEffect::OpenExternalFiles(ExternalOpenRequest::ShowFileDialog)]
             }
@@ -182,7 +191,18 @@ impl NotoraState {
             NotoraAction::PromotePreviewRequested => {
                 vec![NotoraEffect::PromoteActivePreview, NotoraEffect::Redraw]
             }
+            NotoraAction::OpenNewDocumentMenu => {
+                self.layout.overlay = OverlayState::NewDocumentMenu;
+                self.layout.focus_target = FocusTarget::Overlay;
+                vec![NotoraEffect::Redraw]
+            }
             NotoraAction::CreateRequested(kind) => self.request_note_creation(kind),
+            NotoraAction::RenameDialogRequested(note_id) => {
+                vec![NotoraEffect::ChooseNoteRenameDestination(note_id), NotoraEffect::Redraw]
+            }
+            NotoraAction::MoveDialogRequested(note_id) => {
+                vec![NotoraEffect::ChooseNoteMoveDirectory(note_id), NotoraEffect::Redraw]
+            }
             NotoraAction::RenameRequested { note_id, new_file_name } => {
                 self.library.last_command_error = None;
                 vec![
@@ -248,7 +268,11 @@ impl NotoraState {
         self.request_card_query(CardQuery::from(scope))
     }
 
-    fn commit_search(&mut self, query: String) -> Vec<NotoraEffect> {
+    fn commit_search(
+        &mut self,
+        query: String,
+        search_generation: Option<crate::search_controller::SearchGeneration>,
+    ) -> Vec<NotoraEffect> {
         self.library.search_text = query.clone();
         if query.is_empty() {
             let scope = self
@@ -269,10 +293,16 @@ impl NotoraState {
         let scope = NavigationScope::Search { query };
         self.library.navigation_scope = scope.clone();
         self.layout.focus_target = FocusTarget::NavigationSearch;
-        self.request_card_query(CardQuery::from(scope))
+        let mut card_query = CardQuery::from(scope);
+        card_query.search_generation = search_generation;
+        self.request_card_query(card_query)
     }
 
     fn request_note_creation(&mut self, kind: DocumentKind) -> Vec<NotoraEffect> {
+        if self.layout.overlay == OverlayState::NewDocumentMenu {
+            self.layout.overlay = OverlayState::None;
+            self.layout.focus_target = FocusTarget::CardList;
+        }
         let Some(target) = creation_target(&self.library.navigation_scope) else {
             return vec![NotoraEffect::Redraw];
         };
@@ -410,7 +440,7 @@ impl NotoraState {
             return self.dismiss_overlay();
         }
         if matches!(self.library.navigation_scope, NavigationScope::Search { .. }) {
-            return self.commit_search(String::new());
+            return self.commit_search(String::new(), None);
         }
         if !self.library.search_text.is_empty() {
             self.library.search_text.clear();
@@ -440,8 +470,11 @@ fn creation_target(scope: &NavigationScope) -> Option<NoteCreationTarget> {
 
 #[cfg(test)]
 mod tests {
+    use std::time::{Duration, Instant};
+
     use super::{CardPageState, FocusTarget, LibraryState, NotoraState, OverlayState};
     use crate::action::{CardQuery, NotoraAction, NotoraEffect};
+    use crate::search_controller::{SEARCH_DEBOUNCE_DELAY, SearchController};
     use notora_core::{
         CatalogCard, CatalogCardCursor, CatalogCardPage, DocumentIdentity, DocumentKind,
         NavigationScope, NoteId, TagId,
@@ -469,10 +502,16 @@ mod tests {
     fn empty_search_restores_the_scope_before_search() {
         let mut state = NotoraState::default();
         let _ = state.reduce(NotoraAction::NavigationSelected(NavigationScope::Starred));
-        let _ = state.reduce(NotoraAction::SearchCommitted("roadmap".to_owned()));
+        let _ = state.reduce(NotoraAction::SearchCommitted {
+            query: "roadmap".to_owned(),
+            search_generation: None,
+        });
 
         assert_eq!(
-            state.reduce(NotoraAction::SearchCommitted(String::new())),
+            state.reduce(NotoraAction::SearchCommitted {
+                query: String::new(),
+                search_generation: None,
+            }),
             vec![
                 NotoraEffect::QueryCards(CardQuery::from(NavigationScope::Starred)),
                 NotoraEffect::Redraw,
@@ -498,7 +537,10 @@ mod tests {
         let mut state = NotoraState::default();
         let _ = state.reduce(NotoraAction::FocusRequested(FocusTarget::NavigationSearch));
 
-        let _ = state.reduce(NotoraAction::SearchCommitted("roadmap".to_owned()));
+        let _ = state.reduce(NotoraAction::SearchCommitted {
+            query: "roadmap".to_owned(),
+            search_generation: None,
+        });
 
         assert_eq!(state.layout.focus_target, FocusTarget::NavigationSearch);
     }
@@ -564,6 +606,21 @@ mod tests {
     }
 
     #[test]
+    fn rename_and_move_dialog_entries_stay_behind_typed_effects() {
+        let mut state = NotoraState::default();
+        let note_id = NoteId::generate();
+
+        assert_eq!(
+            state.reduce(NotoraAction::RenameDialogRequested(note_id)),
+            vec![NotoraEffect::ChooseNoteRenameDestination(note_id), NotoraEffect::Redraw]
+        );
+        assert_eq!(
+            state.reduce(NotoraAction::MoveDialogRequested(note_id)),
+            vec![NotoraEffect::ChooseNoteMoveDirectory(note_id), NotoraEffect::Redraw]
+        );
+    }
+
+    #[test]
     fn command_failure_preserves_the_existing_selection_and_exposes_a_recoverable_message() {
         let mut state = NotoraState::default();
         let selected_note = notora_core::DocumentIdentity::Note(notora_core::NoteId::generate());
@@ -585,6 +642,28 @@ mod tests {
             state.reduce(NotoraAction::PromotePreviewRequested),
             vec![NotoraEffect::PromoteActivePreview, NotoraEffect::Redraw]
         );
+    }
+
+    #[test]
+    fn new_document_menu_owns_focus_until_dismissed() {
+        let mut state = NotoraState::default();
+
+        assert_eq!(state.reduce(NotoraAction::OpenNewDocumentMenu), vec![NotoraEffect::Redraw]);
+        assert_eq!(state.layout.overlay, OverlayState::NewDocumentMenu);
+        assert_eq!(state.layout.focus_target, FocusTarget::Overlay);
+    }
+
+    #[test]
+    fn activating_the_selected_card_promotes_preview_and_focuses_the_editor() {
+        let mut state = NotoraState::default();
+        let identity = notora_core::DocumentIdentity::Note(notora_core::NoteId::generate());
+        let _ = state.reduce(NotoraAction::CardSelected(identity));
+
+        assert_eq!(
+            state.reduce(NotoraAction::CardActivated(identity)),
+            vec![NotoraEffect::PromoteActivePreview, NotoraEffect::Redraw]
+        );
+        assert_eq!(state.layout.focus_target, FocusTarget::Editor);
     }
 
     #[test]
@@ -619,6 +698,50 @@ mod tests {
     }
 
     #[test]
+    fn stale_a_b_a_search_completion_cannot_replace_the_latest_generation() {
+        let mut controller = SearchController::default();
+        controller.set_active_workspace(notora_core::WorkspaceId::generate(), 1);
+        let start = Instant::now();
+        controller.schedule_committed_query("same".to_owned(), start);
+        let first_request = controller
+            .take_due_request(start + SEARCH_DEBOUNCE_DELAY)
+            .expect("first search should become due");
+        controller.schedule_committed_query("other".to_owned(), start);
+        let _ = controller
+            .take_due_request(start + SEARCH_DEBOUNCE_DELAY)
+            .expect("intermediate search should become due");
+        controller.schedule_committed_query("same".to_owned(), start + Duration::from_millis(1));
+        let latest_request = controller
+            .take_due_request(start + SEARCH_DEBOUNCE_DELAY + Duration::from_millis(1))
+            .expect("latest repeated search should become due");
+        let mut state = NotoraState::default();
+        let _ = state.reduce(NotoraAction::SearchCommitted {
+            query: latest_request.query,
+            search_generation: Some(latest_request.search_generation),
+        });
+        let stale_query = CardQuery {
+            scope: NavigationScope::Search { query: first_request.query },
+            cursor: None,
+            page_size: crate::action::DEFAULT_CARD_PAGE_SIZE,
+            search_generation: Some(first_request.search_generation),
+        };
+
+        assert!(
+            state
+                .reduce(NotoraAction::CardQueryCompleted {
+                    query: stale_query,
+                    page: CatalogCardPage { cards: Vec::new(), next_cursor: None },
+                })
+                .is_empty()
+        );
+        assert!(matches!(
+            state.library.card_page,
+            CardPageState::LoadingInitial { query }
+                if query.search_generation == Some(latest_request.search_generation)
+        ));
+    }
+
+    #[test]
     fn escape_closes_overlay_then_clears_search_then_focuses_navigation() {
         let mut state = NotoraState::default();
         let _ = state.reduce(NotoraAction::OpenSettings);
@@ -626,7 +749,10 @@ mod tests {
         let _ = state.reduce(NotoraAction::EscapePressed);
         assert_eq!(state.layout.overlay, OverlayState::None);
 
-        let _ = state.reduce(NotoraAction::SearchCommitted("idea".to_owned()));
+        let _ = state.reduce(NotoraAction::SearchCommitted {
+            query: "idea".to_owned(),
+            search_generation: None,
+        });
         let _ = state.reduce(NotoraAction::EscapePressed);
         assert_eq!(state.library.navigation_scope, NavigationScope::WorkspaceRoot);
 

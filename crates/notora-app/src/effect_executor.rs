@@ -30,6 +30,8 @@ pub trait NotoraEffectService {
     fn query_cards(&mut self, query: CardQuery);
     fn request_note_creation(&mut self, kind: DocumentKind, target: NoteCreationTarget);
     fn execute_note_command(&mut self, _command: NoteCommand) {}
+    fn choose_note_rename_destination(&mut self, _note_id: notora_core::NoteId) {}
+    fn choose_note_move_directory(&mut self, _note_id: notora_core::NoteId) {}
     fn prepare_document(&mut self, request: DocumentLoadRequest);
     fn promote_active_preview(&mut self) {}
     fn open_external_files(&mut self, _request: ExternalOpenRequest) {}
@@ -50,6 +52,14 @@ impl EffectExecutor {
             }
             NotoraEffect::ExecuteNoteCommand(command) => {
                 service.execute_note_command(command);
+                ShellEffect::NONE
+            }
+            NotoraEffect::ChooseNoteRenameDestination(note_id) => {
+                service.choose_note_rename_destination(note_id);
+                ShellEffect::NONE
+            }
+            NotoraEffect::ChooseNoteMoveDirectory(note_id) => {
+                service.choose_note_move_directory(note_id);
                 ShellEffect::NONE
             }
             NotoraEffect::PrepareDocument(request) => {

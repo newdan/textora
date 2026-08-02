@@ -48,6 +48,7 @@ pub struct VirtualCardListInput {
 #[derive(Clone, Debug, PartialEq)]
 pub enum VirtualCardListAction {
     Selected(CardKey),
+    Activated(CardKey),
     ScrollOffsetChanged(f32),
     HoverChanged(Option<CardKey>),
 }
@@ -281,6 +282,9 @@ impl Widget for VirtualCardListWidget {
             }
             Event::KeyDown(KeyCode::Up, _) => self.select_adjacent_card(-1),
             Event::KeyDown(KeyCode::Down, _) => self.select_adjacent_card(1),
+            Event::KeyDown(KeyCode::Enter, _) => {
+                self.selected_key.map(VirtualCardListAction::Activated)
+            }
             _ => None,
         }?;
         if let VirtualCardListAction::Selected(key) = action {
@@ -401,6 +405,10 @@ mod tests {
         assert_eq!(
             widget.on_event(&Event::KeyDown(KeyCode::Up, Modifiers::NONE), &mut context),
             Some(WidgetAction::VirtualCardList(VirtualCardListAction::Selected(CardKey(1))))
+        );
+        assert_eq!(
+            widget.on_event(&Event::KeyDown(KeyCode::Enter, Modifiers::NONE), &mut context),
+            Some(WidgetAction::VirtualCardList(VirtualCardListAction::Activated(CardKey(1))))
         );
     }
 }

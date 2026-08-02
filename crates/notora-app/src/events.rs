@@ -102,7 +102,7 @@ impl ApplicationHandler<ShellEvent> for NotoraApp {
                 let product_consumed =
                     self.route_product_event(&ui::Event::Wheel { dx, dy, px, py });
                 if !product_consumed {
-                    let _ = self.runtime_accepts_pointer_input(px, py);
+                    self.scroll_editor(px, py, -dy);
                 }
             }
             WindowEvent::DroppedFile(path) => {
@@ -115,8 +115,8 @@ impl ApplicationHandler<ShellEvent> for NotoraApp {
                 }
             }
             WindowEvent::Ime(Ime::Commit(text)) => {
-                if !self.route_product_event(&ui::Event::ImeCommit(text)) {
-                    let _ = self.update_editor_preedit(String::new(), None);
+                if !self.route_product_event(&ui::Event::ImeCommit(text.clone())) {
+                    self.commit_editor_text(text);
                 }
             }
             WindowEvent::Ime(Ime::Enabled) => {
@@ -140,6 +140,10 @@ impl ApplicationHandler<ShellEvent> for NotoraApp {
                     self.request_external_file_dialog();
                     return;
                 }
+                if let Some(action) = create_shortcut_action(key_code, modifiers) {
+                    self.dispatch_action(action);
+                    return;
+                }
                 if is_search_shortcut(key_code, modifiers) {
                     self.dispatch_action(NotoraAction::FocusRequested(
                         crate::FocusTarget::NavigationSearch,
@@ -152,7 +156,7 @@ impl ApplicationHandler<ShellEvent> for NotoraApp {
                 }
                 let key_event = ui::Event::KeyDown(key_code, modifiers);
                 if !self.route_product_event(&key_event) {
-                    let _ = self.runtime_accepts_keyboard_input();
+                    self.handle_editor_key_input(key_code, modifiers);
                 }
             }
             WindowEvent::RedrawRequested => {
@@ -181,6 +185,19 @@ fn is_open_external_shortcut(key_code: ui::KeyCode, modifiers: Modifiers) -> boo
         && (modifiers.cmd || modifiers.ctrl)
 }
 
+fn create_shortcut_action(key_code: ui::KeyCode, modifiers: Modifiers) -> Option<NotoraAction> {
+    if !matches!(key_code, ui::KeyCode::Char('n') | ui::KeyCode::Char('N'))
+        || !(modifiers.cmd || modifiers.ctrl)
+    {
+        return None;
+    }
+    Some(if modifiers.shift {
+        NotoraAction::OpenNewDocumentMenu
+    } else {
+        NotoraAction::CreateRequested(notora_core::DocumentKind::Markdown)
+    })
+}
+
 fn is_save_shortcut(key_code: ui::KeyCode, modifiers: Modifiers) -> bool {
     matches!(key_code, ui::KeyCode::Char('s') | ui::KeyCode::Char('S'))
         && (modifiers.cmd || modifiers.ctrl)
@@ -206,8 +223,10 @@ mod tests {
     use ui::core::Modifiers;
 
     use super::{
-        editor_input_context, is_open_external_shortcut, is_save_shortcut, is_search_shortcut,
+        create_shortcut_action, editor_input_context, is_open_external_shortcut, is_save_shortcut,
+        is_search_shortcut,
     };
+    use crate::action::NotoraAction;
     use crate::{FocusTarget, NotoraState, OverlayState, shell::layout::ShellLayoutInput};
 
     fn layout() -> crate::shell::layout::ShellLayout {
@@ -274,5 +293,24 @@ mod tests {
             Modifiers { ctrl: true, ..Modifiers::NONE }
         ));
         assert!(!is_search_shortcut(ui::KeyCode::Char('f'), Modifiers::NONE));
+    }
+
+    #[test]
+    fn command_or_control_n_creates_markdown_and_shift_opens_the_type_menu() {
+        assert_eq!(
+            create_shortcut_action(
+                ui::KeyCode::Char('n'),
+                Modifiers { cmd: true, ..Modifiers::NONE }
+            ),
+            Some(NotoraAction::CreateRequested(notora_core::DocumentKind::Markdown))
+        );
+        assert_eq!(
+            create_shortcut_action(
+                ui::KeyCode::Char('N'),
+                Modifiers { ctrl: true, shift: true, ..Modifiers::NONE }
+            ),
+            Some(NotoraAction::OpenNewDocumentMenu)
+        );
+        assert_eq!(create_shortcut_action(ui::KeyCode::Char('n'), Modifiers::NONE), None);
     }
 }

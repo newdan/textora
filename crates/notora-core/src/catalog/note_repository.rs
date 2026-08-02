@@ -183,6 +183,30 @@ impl Catalog {
 
         Err(CatalogError::InvalidStoredValue { column: "note_id", value: note_id.to_string() })
     }
+
+    /// 清理一次完整扫描确认已不存在的活动笔记及其全文索引。
+    pub fn remove_missing_active_notes(&self, note_ids: &[NoteId]) -> Result<(), CatalogError> {
+        if note_ids.is_empty() {
+            return Ok(());
+        }
+        let transaction = self.connection().unchecked_transaction().map_err(|source| {
+            CatalogError::sql("missing note cleanup transaction start", source)
+        })?;
+        for note_id in note_ids {
+            transaction
+                .execute("DELETE FROM note_search WHERE note_id = ?1", [note_id.to_string()])
+                .map_err(|source| CatalogError::sql("missing note search cleanup", source))?;
+            transaction
+                .execute(
+                    "DELETE FROM notes WHERE note_id = ?1 AND lifecycle = ?2",
+                    params![note_id.to_string(), ACTIVE_NOTE_LIFECYCLE],
+                )
+                .map_err(|source| CatalogError::sql("missing active note cleanup", source))?;
+        }
+        transaction
+            .commit()
+            .map_err(|source| CatalogError::sql("missing note cleanup transaction commit", source))
+    }
 }
 
 #[derive(Debug)]

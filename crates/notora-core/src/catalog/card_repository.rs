@@ -10,7 +10,6 @@ use super::{Catalog, CatalogError};
 const ACTIVE_NOTE_LIFECYCLE: i64 = 0;
 const TRASHED_NOTE_LIFECYCLE: i64 = 1;
 const CARD_QUERY_EXTRA_ROW_COUNT: usize = 1;
-const MAXIMUM_SEARCH_CARD_RESULTS: usize = 512;
 
 /// 一张中栏卡片所需的预计算 catalog 字段。
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -115,7 +114,7 @@ impl Catalog {
         cursor: Option<&CatalogCardCursor>,
         page_size: usize,
     ) -> Result<CatalogCardPage, CatalogError> {
-        let matches = self.search_active_notes(search_query, MAXIMUM_SEARCH_CARD_RESULTS)?;
+        let matches = self.search_active_notes(search_query, usize::MAX)?;
         let start_index = match cursor {
             Some(cursor) => matches
                 .iter()
@@ -437,5 +436,45 @@ mod tests {
             .expect("short Chinese search should load its second page");
         assert_eq!(second_page.cards[0].note_id, second_note_id);
         assert_eq!(second_page.next_cursor, None);
+    }
+
+    #[test]
+    fn search_pagination_reaches_matches_beyond_the_previous_candidate_cap() {
+        const MATCH_COUNT: usize = 600;
+        const PAGE_SIZE: usize = 100;
+
+        let directory = tempfile::tempdir().expect("catalog test directory should be created");
+        let catalog = Catalog::open(&directory.path().join("catalog.sqlite3"))
+            .expect("catalog should initialize");
+        let mut search_entries = Vec::with_capacity(MATCH_COUNT);
+        for index in 0..MATCH_COUNT {
+            let note_id = NoteId::generate();
+            let relative_path = format!("bulk/note-{index:04}.md");
+            insert_note(&catalog, note_id, &relative_path, index as u64);
+            search_entries.push(SearchIndexEntry {
+                note_id,
+                title: format!("Needle {index}"),
+                relative_path: relative_path.into(),
+                body: "pagination needle marker".to_owned(),
+                tags: Vec::new(),
+            });
+        }
+        catalog.index_note_batch(&search_entries).expect("bulk search fixture should index");
+
+        let scope = NavigationScope::Search { query: "needle".to_owned() };
+        let mut cursor = None;
+        let mut returned_note_ids = std::collections::HashSet::new();
+        loop {
+            let page = catalog
+                .query_catalog_cards(&scope, cursor.as_ref(), PAGE_SIZE)
+                .expect("search page should load");
+            returned_note_ids.extend(page.cards.into_iter().map(|card| card.note_id));
+            let Some(next_cursor) = page.next_cursor else {
+                break;
+            };
+            cursor = Some(next_cursor);
+        }
+
+        assert_eq!(returned_note_ids.len(), MATCH_COUNT);
     }
 }

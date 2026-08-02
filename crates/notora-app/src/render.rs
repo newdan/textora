@@ -1,10 +1,11 @@
 use std::collections::HashMap;
 
 use appkit_shell::editor_runtime::{EditorFrame, RenderError};
-use notora_core::{DocumentIdentity, DocumentKind, NavigationScope};
+use notora_core::{DocumentIdentity, DocumentKind, NavigationScope, NoteId};
 use ui::core::WidgetAction;
 use ui::core::widget::{ControlAction, TextPayload, WidgetId};
 use ui::icon::draw_icon;
+use ui::split_button::{SplitButtonInput, SplitButtonWidget};
 use ui::splitter::{SplitterAction, SplitterInput, SplitterWidget};
 use ui::status_state::{StatusStateInput, StatusStateKind, StatusStateWidget};
 use ui::text_box::TextBox;
@@ -26,6 +27,10 @@ use crate::{FocusTarget, NotoraState, OverlayState, Pane, ResponsiveLayoutMode};
 
 const GLOBAL_SEARCH_BOX_ID: WidgetId = WidgetId(9_000);
 const SETTINGS_BUTTON_ID: WidgetId = WidgetId(9_001);
+const NEW_NOTE_BUTTON_ID: WidgetId = WidgetId(9_002);
+const NEW_NOTE_MENU_BUTTON_ID: WidgetId = WidgetId(9_003);
+const NOTE_TOOL_BUTTON_WIDTH_LOGICAL: f32 = 64.0;
+const NOTE_TOOL_BUTTON_HEIGHT_LOGICAL: f32 = 28.0;
 const SEARCH_BAR_HEIGHT_LOGICAL: f32 = 32.0;
 const SEARCH_ICON_AREA_WIDTH_LOGICAL: f32 = 32.0;
 const SHELL_PADDING_LOGICAL: f32 = 12.0;
@@ -33,6 +38,7 @@ const SIDEBAR_CONTROL_HEIGHT_LOGICAL: f32 = 32.0;
 const SIDEBAR_ICON_SIZE_LOGICAL: f32 = 16.0;
 const SIDEBAR_LABEL_FONT_SIZE_LOGICAL: f32 = 15.0;
 const CARD_LOAD_MORE_THRESHOLD_LOGICAL: f32 = 160.0;
+const NEW_DOCUMENT_MENU_ITEM_HEIGHT_LOGICAL: f32 = 34.0;
 
 /// UI 之前的产品展示卡片；保持领域身份，避免将 app 状态泄漏给 ui crate。
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -57,6 +63,8 @@ pub struct NotoraRenderModel {
     pub show_settings_overlay: bool,
     pub show_menu: bool,
     pub show_tooltip: bool,
+    pub can_create_note: bool,
+    pub selected_note_id: Option<NoteId>,
 }
 
 impl NotoraRenderModel {
@@ -83,8 +91,16 @@ impl NotoraRenderModel {
             card_scroll_offset_px: state.library.card_scroll_offset_px,
             card_list_title: card_list_title(selected_scope).to_owned(),
             show_settings_overlay: state.layout.overlay == OverlayState::Settings,
-            show_menu: false,
+            show_menu: state.layout.overlay == OverlayState::NewDocumentMenu,
             show_tooltip: false,
+            can_create_note: !matches!(
+                selected_scope,
+                NavigationScope::Trash | NavigationScope::ExternalFiles
+            ),
+            selected_note_id: state.library.selected_card.and_then(|identity| match identity {
+                DocumentIdentity::Note(note_id) => Some(note_id),
+                DocumentIdentity::ExternalFile(_) => None,
+            }),
         }
     }
 }
@@ -98,14 +114,20 @@ pub struct NotoraShell {
     editor_empty_state: StatusStateWidget,
     navigation_splitter: SplitterWidget,
     card_list_splitter: SplitterWidget,
+    new_note_button: SplitButtonWidget,
     navigation_actions: HashMap<TreeRowKey, NotoraAction>,
-    card_actions: HashMap<CardKey, NotoraAction>,
+    card_identities: HashMap<CardKey, DocumentIdentity>,
     card_keys: HashMap<DocumentIdentity, CardKey>,
     next_card_key: u64,
     search_rect: Rect,
     navigation_tree_rect: Rect,
     card_content_rect: Rect,
     settings_rect: Rect,
+    new_document_menu_rect: Rect,
+    new_document_menu_open: bool,
+    selected_note_id: Option<NoteId>,
+    rename_note_rect: Rect,
+    move_note_rect: Rect,
 }
 
 impl Default for NotoraShell {
@@ -120,6 +142,8 @@ impl NotoraShell {
         search_box.set_placeholder("Search notes...");
         search_box.set_max_len_bytes(2_048);
         search_box.set_leading_content_inset_logical(SEARCH_ICON_AREA_WIDTH_LOGICAL);
+        let mut new_note_button = SplitButtonWidget::new();
+        new_note_button.set_action_ids(NEW_NOTE_BUTTON_ID, NEW_NOTE_MENU_BUTTON_ID);
         Self {
             search_box,
             navigation_tree: TreeListWidget::new(),
@@ -128,14 +152,20 @@ impl NotoraShell {
             editor_empty_state: StatusStateWidget::new(),
             navigation_splitter: SplitterWidget::new(),
             card_list_splitter: SplitterWidget::new(),
+            new_note_button,
             navigation_actions: HashMap::new(),
-            card_actions: HashMap::new(),
+            card_identities: HashMap::new(),
             card_keys: HashMap::new(),
             next_card_key: 1,
             search_rect: Rect::ZERO,
             navigation_tree_rect: Rect::ZERO,
             card_content_rect: Rect::ZERO,
             settings_rect: Rect::ZERO,
+            new_document_menu_rect: Rect::ZERO,
+            new_document_menu_open: false,
+            selected_note_id: None,
+            rename_note_rect: Rect::ZERO,
+            move_note_rect: Rect::ZERO,
         }
     }
 
@@ -146,13 +176,13 @@ impl NotoraShell {
                 self.navigation_actions.insert(row.key, NotoraAction::NavigationSelected(scope));
             }
         }
-        self.card_actions.clear();
+        self.card_identities.clear();
         let cards = model
             .cards
             .iter()
             .map(|card| {
                 let key = self.card_key_for(card.identity);
-                self.card_actions.insert(key, NotoraAction::CardSelected(card.identity));
+                self.card_identities.insert(key, card.identity);
                 CardInput {
                     key,
                     title: card.title.clone(),
@@ -177,6 +207,12 @@ impl NotoraShell {
             scroll_offset_px: model.card_scroll_offset_px,
         });
         self.search_box.sync_text(&model.search_query);
+        self.new_note_button.set_input(SplitButtonInput {
+            label: "New note".to_owned(),
+            enabled: model.can_create_note,
+        });
+        self.new_document_menu_open = model.show_menu;
+        self.selected_note_id = model.selected_note_id;
         self.card_empty_state.set_input(StatusStateInput {
             kind: StatusStateKind::Empty,
             title: "No notes here".to_owned(),
@@ -226,6 +262,18 @@ impl NotoraShell {
         );
         self.search_rect = search_rect;
         self.settings_rect = settings_rect;
+        let new_note_rect = Rect::new(
+            settings_rect.x,
+            settings_rect.y - (SIDEBAR_CONTROL_HEIGHT_LOGICAL + 8.0) * dpi,
+            settings_rect.w,
+            SIDEBAR_CONTROL_HEIGHT_LOGICAL * dpi,
+        );
+        self.new_document_menu_rect = Rect::new(
+            new_note_rect.x,
+            new_note_rect.y - (NEW_DOCUMENT_MENU_ITEM_HEIGHT_LOGICAL * 3.0 + 4.0) * dpi,
+            new_note_rect.w,
+            NEW_DOCUMENT_MENU_ITEM_HEIGHT_LOGICAL * 3.0 * dpi,
+        );
         let splitters_enabled = layout.responsive_mode == ResponsiveLayoutMode::ThreePane;
         self.navigation_splitter.set_input(SplitterInput {
             logical_position: layout.navigation_width_logical,
@@ -246,6 +294,20 @@ impl NotoraShell {
             (layout.card_list_rect.h - 56.0 * dpi).max(0.0),
         );
         self.card_content_rect = card_content_rect;
+        let tool_button_width = NOTE_TOOL_BUTTON_WIDTH_LOGICAL * dpi;
+        let tool_button_height = NOTE_TOOL_BUTTON_HEIGHT_LOGICAL * dpi;
+        self.move_note_rect = Rect::new(
+            layout.card_list_rect.right() - padding - tool_button_width,
+            layout.card_list_rect.y + 8.0 * dpi,
+            tool_button_width,
+            tool_button_height,
+        );
+        self.rename_note_rect = Rect::new(
+            self.move_note_rect.x - tool_button_width - 6.0 * dpi,
+            self.move_note_rect.y,
+            tool_button_width,
+            tool_button_height,
+        );
         frame.with_layout_context(|context| {
             self.search_box.set_rect(search_rect, context);
             self.navigation_tree.set_rect(tree_rect, context);
@@ -254,6 +316,7 @@ impl NotoraShell {
             self.editor_empty_state.set_rect(layout.editor_rect, context);
             self.navigation_splitter.set_rect(layout.navigation_splitter_rect, context);
             self.card_list_splitter.set_rect(layout.card_list_splitter_rect, context);
+            self.new_note_button.set_rect(new_note_rect, context);
         });
         frame.with_paint_context(|context| {
             context.list.fill(layout.navigation_rect, context.theme.palette.bg_surface);
@@ -272,6 +335,7 @@ impl NotoraShell {
             self.navigation_tree.paint(context);
             self.navigation_splitter.paint(context);
             self.card_list_splitter.paint(context);
+            self.new_note_button.paint(context);
             let settings_icon_size = SIDEBAR_ICON_SIZE_LOGICAL * context.dpi;
             let settings_horizontal_inset = SHELL_PADDING_LOGICAL * context.dpi;
             draw_icon(
@@ -301,6 +365,10 @@ impl NotoraShell {
                 context.theme.palette.text_main,
                 &model.card_list_title,
             );
+            if model.selected_note_id.is_some() {
+                paint_note_tool_button(context, self.rename_note_rect, "Rename");
+                paint_note_tool_button(context, self.move_note_rect, "Move");
+            }
             if model.cards.is_empty() {
                 self.card_empty_state.paint(context);
             } else {
@@ -318,10 +386,21 @@ impl NotoraShell {
         if model.show_menu {
             frame.with_paint_context(|context| {
                 context.list.fill_rounded(
-                    layout.menu_rect,
+                    self.new_document_menu_rect,
                     context.theme.palette.bg_elevated,
                     6.0 * context.dpi,
                 );
+                for (index, label) in ["Markdown", "Text", "Mind map"].iter().enumerate() {
+                    let item_top = self.new_document_menu_rect.y
+                        + index as f32 * NEW_DOCUMENT_MENU_ITEM_HEIGHT_LOGICAL * context.dpi;
+                    context.text(
+                        self.new_document_menu_rect.x + 10.0 * context.dpi,
+                        item_top + 22.0 * context.dpi,
+                        14.0 * context.dpi,
+                        context.theme.palette.text_main,
+                        label,
+                    );
+                }
             });
         }
         if model.show_tooltip {
@@ -342,7 +421,10 @@ impl NotoraShell {
                 self.navigation_actions.get(key).cloned()
             }
             WidgetAction::VirtualCardList(VirtualCardListAction::Selected(key)) => {
-                self.card_actions.get(key).cloned()
+                self.card_identities.get(key).copied().map(NotoraAction::CardSelected)
+            }
+            WidgetAction::VirtualCardList(VirtualCardListAction::Activated(key)) => {
+                self.card_identities.get(key).copied().map(NotoraAction::CardActivated)
             }
             WidgetAction::VirtualCardList(VirtualCardListAction::ScrollOffsetChanged(
                 offset_px,
@@ -358,6 +440,14 @@ impl NotoraShell {
                 if *id == SETTINGS_BUTTON_ID =>
             {
                 Some(NotoraAction::OpenSettings)
+            }
+            WidgetAction::Control(ControlAction::Activated { id }) if *id == NEW_NOTE_BUTTON_ID => {
+                Some(NotoraAction::CreateRequested(DocumentKind::Markdown))
+            }
+            WidgetAction::Control(ControlAction::Activated { id })
+                if *id == NEW_NOTE_MENU_BUTTON_ID =>
+            {
+                Some(NotoraAction::OpenNewDocumentMenu)
             }
             WidgetAction::Control(ControlAction::TextEdited {
                 id: GLOBAL_SEARCH_BOX_ID,
@@ -384,6 +474,32 @@ impl NotoraShell {
     ) -> Vec<NotoraAction> {
         let mut event_context = EventCtx { theme, dpi, cursor_hint: None };
         self.search_box.set_focus(focus_target == FocusTarget::NavigationSearch);
+        if self.new_document_menu_open {
+            if let Some(action) = new_document_menu_action(event, self.new_document_menu_rect) {
+                return vec![action];
+            }
+            return Vec::new();
+        }
+        if let Some(action) = note_tool_action(
+            event,
+            self.selected_note_id,
+            self.rename_note_rect,
+            self.move_note_rect,
+        ) {
+            return vec![action];
+        }
+        if matches!(
+            event,
+            Event::MouseMove { .. } | Event::MouseDown { .. } | Event::MouseUp { .. }
+        ) && let Some(widget_action) = self.new_note_button.on_event(event, &mut event_context)
+        {
+            if let Some(action) = self.translate_widget_action(&widget_action) {
+                return vec![action];
+            }
+            if widget_action == WidgetAction::Consumed {
+                return Vec::new();
+            }
+        }
         if let Some(action) = self.route_splitter_event(event, &mut event_context) {
             return action.into_iter().collect();
         }
@@ -610,6 +726,51 @@ fn navigation_row(
     }
 }
 
+fn paint_note_tool_button(context: &mut ui::PaintCtx<'_>, rect: Rect, label: &str) {
+    context.list.fill_rounded(rect, context.theme.palette.bg_elevated, 4.0 * context.dpi);
+    context.text(
+        rect.x + 8.0 * context.dpi,
+        rect.y + rect.h * 0.5 + 5.0 * context.dpi,
+        12.0 * context.dpi,
+        context.theme.palette.text_muted,
+        label,
+    );
+}
+
+fn note_tool_action(
+    event: &Event,
+    selected_note_id: Option<NoteId>,
+    rename_rect: Rect,
+    move_rect: Rect,
+) -> Option<NotoraAction> {
+    let note_id = selected_note_id?;
+    let Event::MouseDown { px, py, button: ui::core::MouseButton::Left } = event else {
+        return None;
+    };
+    if rename_rect.contains(*px, *py) {
+        return Some(NotoraAction::RenameDialogRequested(note_id));
+    }
+    move_rect.contains(*px, *py).then_some(NotoraAction::MoveDialogRequested(note_id))
+}
+
+fn new_document_menu_action(event: &Event, menu_rect: Rect) -> Option<NotoraAction> {
+    let Event::MouseDown { px, py, button: ui::core::MouseButton::Left } = event else {
+        return None;
+    };
+    if !menu_rect.contains(*px, *py) || menu_rect.h <= 0.0 {
+        return None;
+    }
+    let item_height = menu_rect.h / 3.0;
+    let item_index = ((*py - menu_rect.y) / item_height).floor() as usize;
+    let kind = match item_index {
+        0 => DocumentKind::Markdown,
+        1 => DocumentKind::Text,
+        2 => DocumentKind::Mindmap,
+        _ => return None,
+    };
+    Some(NotoraAction::CreateRequested(kind))
+}
+
 fn navigation_scope_for_key(key: TreeRowKey) -> Option<NavigationScope> {
     match key.0 {
         1 => Some(NavigationScope::WorkspaceRoot),
@@ -716,8 +877,32 @@ mod tests {
             )),
             Some(NotoraAction::CardSelected(identity))
         );
+        assert_eq!(
+            shell.translate_widget_action(&WidgetAction::VirtualCardList(
+                VirtualCardListAction::Activated(first_key),
+            )),
+            Some(NotoraAction::CardActivated(identity))
+        );
 
         shell.update_model(&model);
         assert_eq!(shell.card_list.input().cards[0].key, first_key);
+    }
+
+    #[test]
+    fn selected_note_toolbar_produces_rename_and_move_dialog_actions() {
+        let note_id = NoteId::generate();
+        let rename_rect = Rect::new(10.0, 10.0, 60.0, 28.0);
+        let move_rect = Rect::new(76.0, 10.0, 60.0, 28.0);
+        let click = |px| Event::MouseDown { px, py: 20.0, button: ui::core::MouseButton::Left };
+
+        assert_eq!(
+            note_tool_action(&click(20.0), Some(note_id), rename_rect, move_rect),
+            Some(NotoraAction::RenameDialogRequested(note_id))
+        );
+        assert_eq!(
+            note_tool_action(&click(90.0), Some(note_id), rename_rect, move_rect),
+            Some(NotoraAction::MoveDialogRequested(note_id))
+        );
+        assert_eq!(note_tool_action(&click(20.0), None, rename_rect, move_rect), None);
     }
 }
