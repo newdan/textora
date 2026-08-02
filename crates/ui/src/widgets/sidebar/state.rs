@@ -11,6 +11,7 @@ use crate::core::{PaintCtx, Rect};
 use crate::view_mode::ViewMode;
 use crate::widgets::icon::draw_icon;
 use crate::widgets::popup_menu::{PopupMenu, PopupMenuAction as PMA, PopupMenuItem};
+use crate::widgets::split_button::SPLIT_BUTTON_MENU_WIDTH_LOGICAL;
 
 struct EdgeDragState {
     start_px: f32,
@@ -179,7 +180,6 @@ impl SidebarState {
 const HEADER_H: f32 = constants::TITLE_BAR_HEIGHT;
 const ROW_H: f32 = constants::ROW_HEIGHT;
 const NEW_BTN_H: f32 = constants::ROW_HEIGHT;
-const NEW_MENU_BUTTON_WIDTH: f32 = 32.0;
 const SETTINGS_BTN_H: f32 = constants::ROW_HEIGHT;
 const PADDING: f32 = 6.0;
 const EDGE_RESIZE_W: f32 = 4.0;
@@ -455,7 +455,7 @@ impl SidebarState {
         // New document button
         let new_y = top + header_h + pad;
         let new_row_rect = Rect::new(12.0 * dpi, new_y, w - 24.0 * dpi, new_h);
-        let new_menu_width = NEW_MENU_BUTTON_WIDTH * dpi;
+        let new_menu_width = SPLIT_BUTTON_MENU_WIDTH_LOGICAL * dpi;
         let new_btn_rect = Rect::new(
             new_row_rect.x,
             new_row_rect.y,
@@ -806,46 +806,6 @@ impl SidebarState {
                     line_w * 0.5,
                 );
             }
-        }
-
-        // 4) New document button
-        {
-            let g =
-                self.action_btn_geom(ctx, layout.new_btn_rect, SidebarHoverButton::NewDoc, alpha);
-            let icon_sz = 14.0 * g.dpi;
-            draw_icon(ctx.list, "plus", g.cx - icon_sz * 0.5, g.cy - icon_sz * 0.5, icon_sz, g.fg);
-            let font_size = 15.0 * g.dpi;
-            if let Some(ref mut shaper) = ctx.shaper {
-                ctx.list.text_shaped(
-                    g.cx + g.icon_half + 6.0 * g.dpi,
-                    g.cy + font_size * 0.35,
-                    font_size,
-                    g.fg,
-                    "\u{65b0}\u{5efa}",
-                    shaper,
-                );
-            };
-        }
-
-        // 4.1) New document menu button
-        {
-            if self.hovered_button == SidebarHoverButton::NewDoc {
-                let mut h_bg = ctx.theme.palette.sidebar_hover_bg;
-                h_bg[3] *= alpha;
-                ctx.list.fill_rounded(layout.new_menu_btn_rect, h_bg, 8.0 * ctx.dpi);
-            }
-
-            let mut fg = ctx.theme.palette.text_muted;
-            fg[3] *= alpha;
-            let cx = layout.new_menu_btn_rect.x + layout.new_menu_btn_rect.w * 0.5;
-            let cy = layout.new_menu_btn_rect.y + layout.new_menu_btn_rect.h * 0.5;
-            let chevron_half = 4.0 * ctx.dpi;
-            ctx.list.fill_triangle(
-                [cx - chevron_half, cy - chevron_half * 0.5],
-                [cx + chevron_half, cy - chevron_half * 0.5],
-                [cx, cy + chevron_half * 0.5],
-                fg,
-            );
         }
 
         // 4.5) Open file button

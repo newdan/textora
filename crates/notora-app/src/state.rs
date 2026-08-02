@@ -270,6 +270,9 @@ impl NotoraState {
                 vec![NotoraEffect::PromoteActivePreview, NotoraEffect::Redraw]
             }
             NotoraAction::OpenNewDocumentMenu => {
+                if self.library.navigation_scope == NavigationScope::Trash {
+                    return vec![NotoraEffect::Redraw];
+                }
                 self.layout.overlay = OverlayState::NewDocumentMenu;
                 self.layout.focus_target = FocusTarget::Overlay;
                 vec![NotoraEffect::Redraw]
@@ -1158,6 +1161,16 @@ mod tests {
         assert_eq!(state.reduce(NotoraAction::OpenNewDocumentMenu), vec![NotoraEffect::Redraw]);
         assert_eq!(state.layout.overlay, OverlayState::NewDocumentMenu);
         assert_eq!(state.layout.focus_target, FocusTarget::Overlay);
+    }
+
+    #[test]
+    fn trash_scope_cannot_open_the_new_document_menu() {
+        let mut state = NotoraState::default();
+        let _ = state.reduce(NotoraAction::NavigationSelected(NavigationScope::Trash));
+
+        assert_eq!(state.reduce(NotoraAction::OpenNewDocumentMenu), vec![NotoraEffect::Redraw]);
+        assert_eq!(state.layout.overlay, OverlayState::None);
+        assert_ne!(state.layout.focus_target, FocusTarget::Overlay);
     }
 
     #[test]

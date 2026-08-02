@@ -18,16 +18,20 @@ pub use types::{
 };
 
 // SidebarWidget — Phase 7.5：内嵌 ListWidget 管理 items 渲染/命中。
-// 框架（bg/header/按钮）仍由 SidebarState::paint 负责；
-// items 的渲染和点击命中委托给 ListWidget。
+// 框架背景与普通按钮由 SidebarState::paint 负责；新建按钮和列表分别委托给子 widget。
 
 use std::any::Any;
 
-use crate::core::widget::WidgetAction;
+use crate::core::widget::{ControlAction, WidgetAction, WidgetId};
 use crate::core::{Event, EventCtx, KeyCode, LayoutCtx, MouseButton, PaintCtx, Rect, Widget};
 use crate::widgets::list::{
     ListItem, ListItemIndicator, ListItemKind, ListStyle, ListWidget, Orientation,
 };
+use crate::widgets::split_button::{SplitButtonInput, SplitButtonWidget};
+
+const NEW_DOCUMENT_BUTTON_ID: WidgetId = WidgetId(8_100);
+const NEW_DOCUMENT_MENU_BUTTON_ID: WidgetId = WidgetId(8_101);
+
 pub struct SidebarWidget {
     pub(crate) rect: Rect,
     pub(crate) state: SidebarState,
@@ -35,6 +39,7 @@ pub struct SidebarWidget {
 
     // ── 子 widget ──
     pub(crate) list: ListWidget,
+    new_document_button: SplitButtonWidget,
 
     // ── 外部注入数据 ──
     pub(crate) tabs: Vec<crate::tab_bar::TabInfo>,
@@ -102,11 +107,17 @@ impl SidebarWidget {
             },
             Orientation::Vertical,
         );
+        let mut new_document_button = SplitButtonWidget::new();
+        new_document_button.set_action_ids(NEW_DOCUMENT_BUTTON_ID, NEW_DOCUMENT_MENU_BUTTON_ID);
+        new_document_button.set_icon(Some("plus".to_owned()));
+        new_document_button
+            .set_input(SplitButtonInput { label: "新建".to_owned(), enabled: true });
         Self {
             rect: Rect::ZERO,
             state,
             cfg,
             list,
+            new_document_button,
             tabs: Vec::new(),
             active_index: None,
             tab_index_map: Vec::new(),
@@ -211,12 +222,16 @@ impl SidebarWidget {
 
     /// 委托：设置打开菜单
     pub fn set_open_menu(&mut self, menu: Option<crate::widgets::popup_menu::PopupMenu>) {
+        let new_document_menu_open = menu.as_ref().is_some_and(is_new_document_menu);
         self.state.set_open_menu(menu);
+        self.new_document_button.set_menu_open(new_document_menu_open);
     }
 
     /// 委托：分发菜单点击
     pub fn dispatch_menu_click(&mut self, px: f32, py: f32) -> Option<SidebarAction> {
-        self.state.dispatch_menu_click(px, py, &self.metrics)
+        let action = self.state.dispatch_menu_click(px, py, &self.metrics);
+        self.new_document_button.set_menu_open(false);
+        action
     }
 
     /// 委托：滚动
@@ -284,6 +299,7 @@ impl SidebarWidget {
             &self.metrics,
             &self.settings_input,
         );
+        self.new_document_button.set_menu_open(false);
     }
 
     /// on_mouse_move（完整签名，兼容 events.rs）
@@ -324,6 +340,18 @@ impl Widget for SidebarWidget {
 
         // list 子 widget 的矩形 = list_clip
         let list_rect = self.state.current_layout().map(|l| l.list_clip).unwrap_or(Rect::ZERO);
+        let new_document_rect = self
+            .state
+            .current_layout()
+            .map(|layout| {
+                Rect::new(
+                    layout.new_btn_rect.x,
+                    layout.new_btn_rect.y,
+                    (layout.new_menu_btn_rect.right() - layout.new_btn_rect.x).max(0.0),
+                    layout.new_btn_rect.h,
+                )
+            })
+            .unwrap_or(Rect::ZERO);
 
         // 把 theme 颜色灌进 list style
         self.list.set_style(make_style_from_theme(ctx.theme));
@@ -354,6 +382,7 @@ impl Widget for SidebarWidget {
         self.list.set_active(self.active_index);
         self.list.set_rect(list_rect, ctx);
         self.list.set_scroll_offset(self.list_scroll_offset());
+        self.new_document_button.set_rect(new_document_rect, ctx);
     }
 
     fn paint(&self, ctx: &mut PaintCtx) {
@@ -430,6 +459,7 @@ impl Widget for SidebarWidget {
 
         // 框架（bg/header/按钮/文字）
         self.state.paint(ctx, self.active_index);
+        self.new_document_button.paint(ctx);
         // items 列表
         if let Some(_layout) = self.state.current_layout() {
             self.list.paint(ctx);
@@ -461,7 +491,7 @@ impl Widget for SidebarWidget {
     }
 
     fn is_capturing(&self) -> bool {
-        self.dragging || self.state.open_menu().is_some()
+        self.dragging || self.state.open_menu().is_some() || self.new_document_button.is_capturing()
     }
 
     fn on_event(&mut self, ev: &Event, ctx: &mut EventCtx) -> Option<WidgetAction> {
@@ -482,6 +512,7 @@ impl Widget for SidebarWidget {
                     &self.cfg,
                     &self.metrics,
                 );
+                let new_document_action = self.new_document_button.on_event(ev, ctx);
                 // Delegate hover to list widget; capture whether list hover changed
                 let list_hover_changed = if let Some(_layout) = self.state.current_layout() {
                     self.list.set_scroll_offset(self.list_scroll_offset());
@@ -519,7 +550,7 @@ impl Widget for SidebarWidget {
                 }
 
                 // Trigger redraw when sidebar or list hover target changed
-                if hover_changed || list_hover_changed {
+                if hover_changed || list_hover_changed || new_document_action.is_some() {
                     return Some(WidgetAction::Sidebar(SidebarAction::Hovered));
                 }
                 // Consume event when inside sidebar OR in auto-hide hot zone
@@ -560,23 +591,21 @@ impl Widget for SidebarWidget {
                 // 0) If settings menu is open, dispatch clicks to it
                 if self.state.open_menu().is_some() {
                     if let Some(action) = self.state.dispatch_menu_click(px, py, &self.metrics) {
+                        self.new_document_button.set_menu_open(false);
                         return Some(WidgetAction::Sidebar(action));
                     }
                     // Click outside menu: dismiss
                     self.state.set_open_menu(None);
+                    self.new_document_button.set_menu_open(false);
                     return None;
+                }
+
+                if let Some(action) = self.new_document_button.on_event(ev, ctx) {
+                    return Some(action);
                 }
 
                 // 1) Hit test sidebar framework buttons (header/new/settings)
                 if let Some(action) = self.state.hit_test_px(px, py, &self.metrics) {
-                    if action == SidebarAction::OpenNewDocumentMenu {
-                        self.state.open_new_document_menu(
-                            self.screen_w,
-                            self.screen_h,
-                            &self.metrics,
-                        );
-                        return Some(WidgetAction::Sidebar(SidebarAction::Hovered));
-                    }
                     return Some(WidgetAction::Sidebar(action));
                 }
 
@@ -600,10 +629,34 @@ impl Widget for SidebarWidget {
 
             Event::KeyDown(KeyCode::Escape, _) if self.state.open_menu().is_some() => {
                 self.state.set_open_menu(None);
+                self.new_document_button.set_menu_open(false);
                 Some(WidgetAction::Sidebar(SidebarAction::Hovered))
             }
 
-            Event::MouseUp { .. } => None,
+            Event::MouseUp { .. } => {
+                let action = self.new_document_button.on_event(ev, ctx)?;
+                match action {
+                    WidgetAction::Control(ControlAction::Activated {
+                        id: NEW_DOCUMENT_BUTTON_ID,
+                    }) => Some(WidgetAction::Sidebar(SidebarAction::NewDocument(
+                        NewDocumentKind::Markdown,
+                    ))),
+                    WidgetAction::Control(ControlAction::Activated {
+                        id: NEW_DOCUMENT_MENU_BUTTON_ID,
+                    }) => {
+                        self.state.open_new_document_menu(
+                            self.screen_w,
+                            self.screen_h,
+                            &self.metrics,
+                        );
+                        self.new_document_button.set_menu_open(true);
+                        Some(WidgetAction::Sidebar(SidebarAction::Hovered))
+                    }
+                    WidgetAction::Consumed => Some(WidgetAction::Consumed),
+                    _ => None,
+                }
+            }
+
             _ => None,
         }
     }
@@ -614,6 +667,12 @@ impl Widget for SidebarWidget {
     fn as_any_mut(&mut self) -> &mut dyn Any {
         self
     }
+}
+
+fn is_new_document_menu(menu: &crate::widgets::popup_menu::PopupMenu) -> bool {
+    menu.items.iter().any(|item| {
+        matches!(item.action, crate::widgets::popup_menu::PopupMenuAction::NewDocument(_))
+    })
 }
 
 #[cfg(test)]

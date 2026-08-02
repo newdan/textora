@@ -83,6 +83,20 @@ mod tests {
         SidebarAction::NewDocument(kind)
     }
 
+    fn click_new_document_region(
+        widget: &mut SidebarWidget,
+        rect: Rect,
+        event_ctx: &mut EventCtx<'_>,
+    ) -> Option<WidgetAction> {
+        let px = rect.x + rect.w * 0.5;
+        let py = rect.y + rect.h * 0.5;
+        assert_eq!(
+            widget.on_event(&Event::MouseDown { px, py, button: MouseButton::Left }, event_ctx,),
+            Some(WidgetAction::Consumed)
+        );
+        widget.on_event(&Event::MouseUp { px, py, button: MouseButton::Left }, event_ctx)
+    }
+
     #[test]
     fn widget_input_replaces_geometry_metrics_and_behavior() {
         let mut widget = SidebarWidget::new(SidebarConfig::new_default(1.0), metrics(1.0));
@@ -149,7 +163,7 @@ mod tests {
     // ── on_event: click dispatch ──
 
     #[test]
-    fn widget_mousedown_new_doc_button() {
+    fn widget_new_document_button_activates_on_matching_mouse_release() {
         let cfg = SidebarConfig { pinned: true, width: 220.0 };
         let mut w = SidebarWidget::new(
             cfg,
@@ -169,14 +183,12 @@ mod tests {
         let mut lc = LayoutCtx { ui_measure: None, measure: &mut m, theme: &t, dpi: 1.0 };
         w.set_rect(Rect::new(0.0, 0.0, 220.0, 800.0), &mut lc);
 
-        let dpi = 1.0;
-        let new_y = 34.0 * dpi;
         let mut ctx = EventCtx { cursor_hint: None, theme: &t, dpi: 1.0 };
-        let ev = Event::MouseDown { px: 110.0, py: new_y + 10.0, button: MouseButton::Left };
-        let action = w.on_event(&ev, &mut ctx);
-        assert!(action.is_some());
-        let a = action.unwrap();
-        assert_eq!(a, WidgetAction::Sidebar(SidebarAction::NewDocument(NewDocumentKind::Markdown)));
+        let main = w.current_layout().expect("layout must exist").new_btn_rect;
+        assert_eq!(
+            click_new_document_region(&mut w, main, &mut ctx),
+            Some(WidgetAction::Sidebar(SidebarAction::NewDocument(NewDocumentKind::Markdown)))
+        );
     }
 
     #[test]
@@ -187,17 +199,66 @@ mod tests {
         let dropdown = widget.current_layout().expect("layout must exist").new_menu_btn_rect;
         let mut event_ctx = EventCtx { cursor_hint: None, theme: &theme, dpi: 1.0 };
 
-        let action = widget.on_event(
-            &Event::MouseDown {
-                px: dropdown.x + dropdown.w * 0.5,
-                py: dropdown.y + dropdown.h * 0.5,
-                button: MouseButton::Left,
-            },
-            &mut event_ctx,
-        );
+        let action = click_new_document_region(&mut widget, dropdown, &mut event_ctx);
 
         assert_eq!(action, Some(WidgetAction::Sidebar(SidebarAction::Hovered)));
         assert!(widget.open_menu().is_some());
+    }
+
+    #[test]
+    fn new_document_button_uses_shared_split_geometry() {
+        let mut widget = new_document_widget();
+        let theme = test_theme();
+        layout_new_document_widget(&mut widget, &theme);
+        let layout = widget.current_layout().expect("layout must exist");
+
+        assert_eq!(widget.new_document_button.main_rect(), layout.new_btn_rect);
+        assert_eq!(widget.new_document_button.menu_rect(), layout.new_menu_btn_rect);
+    }
+
+    #[test]
+    fn open_new_document_menu_keeps_the_dropdown_segment_active() {
+        let mut widget = new_document_widget();
+        let theme = test_theme();
+        layout_new_document_widget(&mut widget, &theme);
+        let dropdown = widget.current_layout().expect("layout must exist").new_menu_btn_rect;
+        let mut event_ctx = EventCtx { cursor_hint: None, theme: &theme, dpi: 1.0 };
+        let _ = click_new_document_region(&mut widget, dropdown, &mut event_ctx);
+        let mut draw_list = DrawList::new();
+
+        widget.paint(&mut PaintCtx::new(&mut draw_list, &theme, 1.0));
+
+        assert!(draw_list.cmds.iter().any(|command| {
+            matches!(
+                command,
+                DrawCmd::FillRect { rect, color, .. }
+                    if *rect == dropdown && *color == theme.palette.bg_active
+            )
+        }));
+    }
+
+    #[test]
+    fn new_document_button_does_not_activate_after_release_outside() {
+        let mut widget = new_document_widget();
+        let theme = test_theme();
+        layout_new_document_widget(&mut widget, &theme);
+        let main = widget.current_layout().expect("layout must exist").new_btn_rect;
+        let px = main.x + main.w * 0.5;
+        let py = main.y + main.h * 0.5;
+        let mut event_ctx = EventCtx { cursor_hint: None, theme: &theme, dpi: 1.0 };
+
+        assert_eq!(
+            widget
+                .on_event(&Event::MouseDown { px, py, button: MouseButton::Left }, &mut event_ctx,),
+            Some(WidgetAction::Consumed)
+        );
+        assert_eq!(
+            widget.on_event(
+                &Event::MouseUp { px: 500.0, py: 500.0, button: MouseButton::Left },
+                &mut event_ctx,
+            ),
+            Some(WidgetAction::Consumed)
+        );
     }
 
     #[test]
@@ -222,14 +283,7 @@ mod tests {
         let dropdown = widget.current_layout().expect("layout must exist").new_menu_btn_rect;
         let mut event_ctx = EventCtx { cursor_hint: None, theme: &theme, dpi: 1.0 };
 
-        let _ = widget.on_event(
-            &Event::MouseDown {
-                px: dropdown.x + dropdown.w * 0.5,
-                py: dropdown.y + dropdown.h * 0.5,
-                button: MouseButton::Left,
-            },
-            &mut event_ctx,
-        );
+        let _ = click_new_document_region(&mut widget, dropdown, &mut event_ctx);
         let menu = widget.open_menu().expect("dropdown click must open menu").clone();
         let item = menu.item_rects[item_index];
         let action = widget.on_event(
@@ -253,14 +307,7 @@ mod tests {
         let dropdown = widget.current_layout().expect("layout must exist").new_menu_btn_rect;
         let mut event_ctx = EventCtx { cursor_hint: None, theme: &theme, dpi: 1.0 };
 
-        let _ = widget.on_event(
-            &Event::MouseDown {
-                px: dropdown.x + dropdown.w * 0.5,
-                py: dropdown.y + dropdown.h * 0.5,
-                button: MouseButton::Left,
-            },
-            &mut event_ctx,
-        );
+        let _ = click_new_document_region(&mut widget, dropdown, &mut event_ctx);
         assert!(widget.open_menu().is_some());
 
         let action =
@@ -939,10 +986,8 @@ mod tests {
 
         // new_btn_rect center at dpi=1.0: (6 + 208/2=110, 34+14=48)
         let mut ec = EventCtx { cursor_hint: None, theme: &t, dpi: 1.0 };
-        let action = w.on_event(
-            &Event::MouseDown { px: 110.0, py: 48.0, button: MouseButton::Left },
-            &mut ec,
-        );
+        let main = w.current_layout().expect("layout must exist").new_btn_rect;
+        let action = click_new_document_region(&mut w, main, &mut ec);
         assert!(action.is_some(), "new_btn click should produce an action");
         if let Some(WidgetAction::Sidebar(sa)) = action {
             assert!(

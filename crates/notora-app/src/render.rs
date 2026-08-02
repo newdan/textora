@@ -33,6 +33,7 @@ const GLOBAL_SEARCH_BOX_ID: WidgetId = WidgetId(9_000);
 const SETTINGS_BUTTON_ID: WidgetId = WidgetId(9_001);
 const NEW_NOTE_BUTTON_ID: WidgetId = WidgetId(9_002);
 const NEW_NOTE_MENU_BUTTON_ID: WidgetId = WidgetId(9_003);
+const NEW_NOTE_BUTTON_WIDTH_LOGICAL: f32 = 104.0;
 const NOTE_TOOL_BUTTON_WIDTH_LOGICAL: f32 = 64.0;
 const NOTE_TOOL_BUTTON_HEIGHT_LOGICAL: f32 = 28.0;
 const NOTE_TOOL_BUTTON_GAP_LOGICAL: f32 = 6.0;
@@ -44,6 +45,11 @@ const SIDEBAR_ICON_SIZE_LOGICAL: f32 = 16.0;
 const SIDEBAR_LABEL_FONT_SIZE_LOGICAL: f32 = 15.0;
 const CARD_LOAD_MORE_THRESHOLD_LOGICAL: f32 = 160.0;
 const NEW_DOCUMENT_MENU_ITEM_HEIGHT_LOGICAL: f32 = 34.0;
+const NEW_DOCUMENT_MENU_ITEMS: [(&str, DocumentKind); 3] = [
+    ("TXT", DocumentKind::Text),
+    ("MD", DocumentKind::Markdown),
+    ("MMAP.MD", DocumentKind::Mindmap),
+];
 const COMPACT_NAVIGATION_BUTTON_WIDTH_LOGICAL: f32 = 72.0;
 const COMPACT_BACK_BUTTON_WIDTH_LOGICAL: f32 = 64.0;
 const CONFIRMATION_PANEL_WIDTH_LOGICAL: f32 = 360.0;
@@ -96,6 +102,20 @@ pub struct SaveConflictOverlayInput {
     pub actions: [NotoraAction; 4],
 }
 
+/// 中栏标题栏的新建入口状态；隐藏态不保留可点击矩形。
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum NewNoteControlState {
+    #[default]
+    Hidden,
+    Visible,
+}
+
+impl NewNoteControlState {
+    fn is_visible(self) -> bool {
+        self == Self::Visible
+    }
+}
+
 /// 静态产品壳所需的纯展示输入。领域状态在此映射后不再传入 widget。
 #[derive(Clone, Debug, Default)]
 pub struct NotoraRenderModel {
@@ -112,7 +132,7 @@ pub struct NotoraRenderModel {
     pub confirmation: Option<ConfirmationOverlayInput>,
     pub show_menu: bool,
     pub show_tooltip: bool,
-    pub can_create_note: bool,
+    pub new_note_control: NewNoteControlState,
     pub note_toolbar: Vec<NoteToolbarButtonInput>,
     pub tag_editor: Option<TagEditorOverlayInput>,
     pub save_conflict: Option<SaveConflictOverlayInput>,
@@ -241,7 +261,7 @@ impl NotoraRenderModel {
             confirmation: confirmation_overlay_input(state.layout.overlay),
             show_menu: state.layout.overlay == OverlayState::NewDocumentMenu,
             show_tooltip: false,
-            can_create_note: *selected_scope != NavigationScope::Trash,
+            new_note_control: new_note_control_state(selected_scope),
             note_toolbar: note_toolbar_buttons(selected_scope, selected_note_id),
             tag_editor: state.library.tag_editor.as_ref().map(tag_editor_input),
             save_conflict: state.library.save_conflict.map(|conflict| SaveConflictOverlayInput {
@@ -264,6 +284,18 @@ fn note_toolbar_buttons(
     scope: &NavigationScope,
     selected_note_id: Option<NoteId>,
 ) -> Vec<NoteToolbarButtonInput> {
+    if *scope == NavigationScope::ExternalFiles {
+        return vec![NoteToolbarButtonInput {
+            label: "Open".to_owned(),
+            action: NotoraAction::OpenExternalFileDialogRequested,
+        }];
+    }
+    if matches!(scope, NavigationScope::Search { .. }) {
+        return vec![NoteToolbarButtonInput {
+            label: "Clear".to_owned(),
+            action: NotoraAction::SearchCommitted { query: String::new(), search_generation: None },
+        }];
+    }
     let selected_tag_id = match scope {
         NavigationScope::Tag { tag_id } => Some(*tag_id),
         _ => None,
@@ -351,6 +383,17 @@ fn note_toolbar_buttons(
     ]
 }
 
+fn new_note_control_state(scope: &NavigationScope) -> NewNoteControlState {
+    match scope {
+        NavigationScope::Search { .. } | NavigationScope::Trash => NewNoteControlState::Hidden,
+        NavigationScope::WorkspaceRoot
+        | NavigationScope::Directory { .. }
+        | NavigationScope::Starred
+        | NavigationScope::Tag { .. }
+        | NavigationScope::ExternalFiles => NewNoteControlState::Visible,
+    }
+}
+
 fn tag_editor_input(editor: &crate::state::TagEditorState) -> TagEditorOverlayInput {
     let title = match editor.mode {
         TagEditorMode::Create => "Create tag",
@@ -428,6 +471,7 @@ impl NotoraShell {
         search_box.set_leading_content_inset_logical(SEARCH_ICON_AREA_WIDTH_LOGICAL);
         let mut new_note_button = SplitButtonWidget::new();
         new_note_button.set_action_ids(NEW_NOTE_BUTTON_ID, NEW_NOTE_MENU_BUTTON_ID);
+        new_note_button.set_icon(Some("plus".to_owned()));
         let mut tag_editor_box = TextBox::with_id(TAG_EDITOR_TEXT_BOX_ID);
         tag_editor_box.set_placeholder("Tag name");
         tag_editor_box.set_max_len_bytes(512);
@@ -507,8 +551,9 @@ impl NotoraShell {
         self.search_box.sync_text(&model.search_query);
         self.new_note_button.set_input(SplitButtonInput {
             label: "New note".to_owned(),
-            enabled: model.can_create_note,
+            enabled: model.new_note_control.is_visible(),
         });
+        self.new_note_button.set_menu_open(model.show_menu);
         self.settings_overlay.set_input(model.settings_overlay.clone());
         self.settings_overlay_open = model.show_settings_overlay;
         self.confirmation_action =
@@ -554,33 +599,26 @@ impl NotoraShell {
             SEARCH_BAR_HEIGHT_LOGICAL * dpi,
         );
         let search_icon_area_width = SEARCH_ICON_AREA_WIDTH_LOGICAL * dpi;
-        let tree_rect = Rect::new(
-            layout.navigation_rect.x + padding,
-            search_rect.bottom() + padding,
-            (layout.navigation_rect.w - padding * 2.0).max(0.0),
-            (layout.navigation_rect.bottom() - search_rect.bottom() - padding * 3.0).max(0.0),
-        );
-        self.navigation_tree_rect = tree_rect;
         let settings_rect = Rect::new(
             layout.navigation_rect.x + padding,
             layout.navigation_rect.bottom() - (SIDEBAR_CONTROL_HEIGHT_LOGICAL + 10.0) * dpi,
             (layout.navigation_rect.w - padding * 2.0).max(0.0),
             SIDEBAR_CONTROL_HEIGHT_LOGICAL * dpi,
         );
+        let tree_rect = Rect::new(
+            layout.navigation_rect.x + padding,
+            search_rect.bottom() + padding,
+            (layout.navigation_rect.w - padding * 2.0).max(0.0),
+            (settings_rect.y - search_rect.bottom() - padding * 2.0).max(0.0),
+        );
+        self.navigation_tree_rect = tree_rect;
         self.search_rect = search_rect;
         self.settings_rect = settings_rect;
-        let new_note_rect = Rect::new(
-            settings_rect.x,
-            settings_rect.y - (SIDEBAR_CONTROL_HEIGHT_LOGICAL + 8.0) * dpi,
-            settings_rect.w,
-            SIDEBAR_CONTROL_HEIGHT_LOGICAL * dpi,
-        );
-        self.new_document_menu_rect = Rect::new(
-            new_note_rect.x,
-            new_note_rect.y - (NEW_DOCUMENT_MENU_ITEM_HEIGHT_LOGICAL * 3.0 + 4.0) * dpi,
-            new_note_rect.w,
-            NEW_DOCUMENT_MENU_ITEM_HEIGHT_LOGICAL * 3.0 * dpi,
-        );
+        let new_note_anchor_rect =
+            new_note_button_rect(layout.card_list_rect, dpi, NewNoteControlState::Visible);
+        let new_note_rect =
+            new_note_button_rect(layout.card_list_rect, dpi, model.new_note_control);
+        self.new_document_menu_rect = new_document_menu_rect(new_note_anchor_rect, dpi);
         let splitters_enabled = layout.responsive_mode == ResponsiveLayoutMode::ThreePane;
         self.navigation_splitter.set_input(SplitterInput {
             logical_position: layout.navigation_width_logical,
@@ -603,9 +641,15 @@ impl NotoraShell {
         self.card_content_rect = card_content_rect;
         let tool_button_width = NOTE_TOOL_BUTTON_WIDTH_LOGICAL * dpi;
         let tool_button_height = NOTE_TOOL_BUTTON_HEIGHT_LOGICAL * dpi;
+        let toolbar_trailing_inset = if model.new_note_control.is_visible() {
+            layout.card_list_rect.right() - new_note_rect.x + NOTE_TOOL_BUTTON_GAP_LOGICAL * dpi
+        } else {
+            padding
+        };
         self.note_toolbar_buttons = layout_note_toolbar(
             layout.card_list_rect,
             padding,
+            toolbar_trailing_inset,
             tool_button_width,
             tool_button_height,
             &model.note_toolbar,
@@ -796,7 +840,7 @@ impl NotoraShell {
                     application_theme.overlay_surface,
                     6.0 * context.dpi,
                 );
-                for (index, label) in ["Markdown", "Text", "Mind map"].iter().enumerate() {
+                for (index, (label, _)) in NEW_DOCUMENT_MENU_ITEMS.iter().enumerate() {
                     let item_top = self.new_document_menu_rect.y
                         + index as f32 * NEW_DOCUMENT_MENU_ITEM_HEIGHT_LOGICAL * context.dpi;
                     context.text(
@@ -910,6 +954,13 @@ impl NotoraShell {
         if self.new_document_menu_open {
             if let Some(action) = new_document_menu_action(event, self.new_document_menu_rect) {
                 return vec![action];
+            }
+            if should_dismiss_new_document_menu(
+                event,
+                self.new_document_menu_rect,
+                self.new_note_button.menu_rect(),
+            ) {
+                return vec![NotoraAction::OverlayDismissed];
             }
             return Vec::new();
         }
@@ -1208,7 +1259,6 @@ impl NotoraShell {
             application_theme.text_secondary,
         );
         self.navigation_tree.paint(context);
-        self.new_note_button.paint(context);
         let settings_icon_size = SIDEBAR_ICON_SIZE_LOGICAL * context.dpi;
         let settings_horizontal_inset = SHELL_PADDING_LOGICAL * context.dpi;
         draw_icon(
@@ -1529,13 +1579,14 @@ fn paint_note_tool_button(context: &mut ui::PaintCtx<'_>, rect: Rect, label: &st
 fn layout_note_toolbar(
     card_list_rect: Rect,
     padding: f32,
+    trailing_inset: f32,
     button_width: f32,
     button_height: f32,
     inputs: &[NoteToolbarButtonInput],
 ) -> Vec<RenderedToolbarButton> {
     let scale = button_height / NOTE_TOOL_BUTTON_HEIGHT_LOGICAL;
     let gap = NOTE_TOOL_BUTTON_GAP_LOGICAL * scale;
-    let available_width = (card_list_rect.w - padding * 2.0).max(0.0);
+    let available_width = (card_list_rect.w - padding - trailing_inset).max(0.0);
     let count = inputs.len();
     let fitted_width = if count == 0 {
         0.0
@@ -1552,7 +1603,7 @@ fn layout_note_toolbar(
         .map(|(index, input)| RenderedToolbarButton {
             rect: Rect::new(
                 card_list_rect.right()
-                    - padding
+                    - trailing_inset
                     - fitted_width
                     - index as f32 * (fitted_width + gap),
                 button_y,
@@ -1617,13 +1668,42 @@ fn new_document_menu_action(event: &Event, menu_rect: Rect) -> Option<NotoraActi
     }
     let item_height = menu_rect.h / 3.0;
     let item_index = ((*py - menu_rect.y) / item_height).floor() as usize;
-    let kind = match item_index {
-        0 => DocumentKind::Markdown,
-        1 => DocumentKind::Text,
-        2 => DocumentKind::Mindmap,
-        _ => return None,
+    let (_, kind) = NEW_DOCUMENT_MENU_ITEMS.get(item_index)?;
+    Some(NotoraAction::CreateRequested(*kind))
+}
+
+fn should_dismiss_new_document_menu(event: &Event, menu_rect: Rect, trigger_rect: Rect) -> bool {
+    let Event::MouseDown { px, py, button: ui::core::MouseButton::Left } = event else {
+        return false;
     };
-    Some(NotoraAction::CreateRequested(kind))
+    trigger_rect.contains(*px, *py) || !menu_rect.contains(*px, *py)
+}
+
+fn new_note_button_rect(card_list_rect: Rect, dpi: f32, state: NewNoteControlState) -> Rect {
+    if !state.is_visible() || card_list_rect.w <= 0.0 || card_list_rect.h <= 0.0 {
+        return Rect::ZERO;
+    }
+    let padding = SHELL_PADDING_LOGICAL * dpi;
+    let width =
+        (NEW_NOTE_BUTTON_WIDTH_LOGICAL * dpi).min((card_list_rect.w - padding * 2.0).max(0.0));
+    Rect::new(
+        card_list_rect.right() - padding - width,
+        card_list_rect.y + 8.0 * dpi,
+        width,
+        NOTE_TOOL_BUTTON_HEIGHT_LOGICAL * dpi,
+    )
+}
+
+fn new_document_menu_rect(button_rect: Rect, dpi: f32) -> Rect {
+    if button_rect == Rect::ZERO {
+        return Rect::ZERO;
+    }
+    Rect::new(
+        button_rect.x,
+        button_rect.bottom() + 4.0 * dpi,
+        button_rect.w,
+        NEW_DOCUMENT_MENU_ITEM_HEIGHT_LOGICAL * 3.0 * dpi,
+    )
 }
 
 fn card_list_title(scope: &NavigationScope) -> &'static str {
@@ -1653,6 +1733,116 @@ mod tests {
         assert_eq!(model.navigation_rows[0].icon.as_deref(), Some("folder-open"));
         assert_eq!(model.card_list_title, "Workspace");
         assert!(model.cards.is_empty());
+    }
+
+    #[test]
+    fn new_note_control_is_hidden_for_search_and_trash() {
+        for scope in
+            [NavigationScope::Search { query: "roadmap".to_owned() }, NavigationScope::Trash]
+        {
+            let mut state = NotoraState::default();
+            state.library.navigation_scope = scope;
+
+            assert_eq!(
+                NotoraRenderModel::from_state(&state).new_note_control,
+                NewNoteControlState::Hidden
+            );
+        }
+    }
+
+    #[test]
+    fn new_note_control_is_laid_out_inside_the_middle_column() {
+        let navigation_rect = Rect::new(0.0, 0.0, 220.0, 600.0);
+        let card_list_rect = Rect::new(228.0, 0.0, 340.0, 600.0);
+
+        let button_rect = new_note_button_rect(card_list_rect, 1.0, NewNoteControlState::Visible);
+
+        assert!(button_rect != Rect::ZERO);
+        assert!(card_list_rect.contains(button_rect.x, button_rect.y));
+        assert!(card_list_rect.contains(button_rect.right(), button_rect.bottom()));
+        assert!(!navigation_rect.contains(button_rect.x, button_rect.y));
+        assert_eq!(
+            new_note_button_rect(card_list_rect, 1.0, NewNoteControlState::Hidden),
+            Rect::ZERO
+        );
+    }
+
+    #[test]
+    fn files_toolbar_exposes_open_external_file_action() {
+        let mut state = NotoraState::default();
+        state.library.navigation_scope = NavigationScope::ExternalFiles;
+
+        let model = NotoraRenderModel::from_state(&state);
+
+        assert_eq!(
+            model.note_toolbar,
+            vec![NoteToolbarButtonInput {
+                label: "Open".to_owned(),
+                action: NotoraAction::OpenExternalFileDialogRequested,
+            }]
+        );
+    }
+
+    #[test]
+    fn search_toolbar_exposes_clear_without_a_new_note_control() {
+        let mut state = NotoraState::default();
+        state.library.navigation_scope = NavigationScope::Search { query: "roadmap".to_owned() };
+
+        let model = NotoraRenderModel::from_state(&state);
+
+        assert_eq!(model.new_note_control, NewNoteControlState::Hidden);
+        assert_eq!(
+            model.note_toolbar,
+            vec![NoteToolbarButtonInput {
+                label: "Clear".to_owned(),
+                action: NotoraAction::SearchCommitted {
+                    query: String::new(),
+                    search_generation: None,
+                },
+            }]
+        );
+    }
+
+    #[test]
+    fn new_document_menu_uses_text_markdown_mindmap_order() {
+        let menu_rect = Rect::new(10.0, 20.0, 120.0, 102.0);
+        let click_item = |index: usize| Event::MouseDown {
+            px: 20.0,
+            py: menu_rect.y + (index as f32 + 0.5) * menu_rect.h / 3.0,
+            button: ui::core::MouseButton::Left,
+        };
+
+        assert_eq!(
+            new_document_menu_action(&click_item(0), menu_rect),
+            Some(NotoraAction::CreateRequested(DocumentKind::Text))
+        );
+        assert_eq!(
+            new_document_menu_action(&click_item(1), menu_rect),
+            Some(NotoraAction::CreateRequested(DocumentKind::Markdown))
+        );
+        assert_eq!(
+            new_document_menu_action(&click_item(2), menu_rect),
+            Some(NotoraAction::CreateRequested(DocumentKind::Mindmap))
+        );
+    }
+
+    #[test]
+    fn new_document_menu_dismisses_from_its_trigger_or_backdrop_only() {
+        let menu_rect = Rect::new(100.0, 50.0, 120.0, 102.0);
+        let trigger_rect = Rect::new(192.0, 14.0, 28.0, 28.0);
+        let click = |px, py| Event::MouseDown { px, py, button: ui::core::MouseButton::Left };
+
+        assert!(should_dismiss_new_document_menu(
+            &click(trigger_rect.x + 4.0, trigger_rect.y + 4.0),
+            menu_rect,
+            trigger_rect,
+        ));
+        assert!(should_dismiss_new_document_menu(&click(20.0, 20.0), menu_rect, trigger_rect,));
+        assert!(!should_dismiss_new_document_menu(
+            &click(menu_rect.x + 4.0, menu_rect.y + 4.0),
+            menu_rect,
+            trigger_rect,
+        ));
     }
 
     #[test]
