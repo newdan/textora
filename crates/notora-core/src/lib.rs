@@ -11,6 +11,7 @@ pub mod backup;
 pub mod catalog;
 pub mod domain;
 pub mod file_monitor;
+pub mod hashtags;
 pub mod note_command;
 pub mod reconciliation;
 pub mod scan;
@@ -31,6 +32,7 @@ pub use domain::{
     NoteLifecycle, NoteSummary, TagId, TagSummary, WorkspaceId,
 };
 pub use file_monitor::{WorkspaceFileBatch, WorkspaceFileMonitor, WorkspaceFileMonitorError};
+pub use hashtags::extract_hashtags;
 pub use note_command::{
     CreateNoteRequest, CreateNoteResult, NoteCommand, NoteCommandError, execute_note_command,
 };

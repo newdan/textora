@@ -254,6 +254,17 @@ impl Catalog {
                 .map_err(|source| CatalogError::sql("confirmed missing note cleanup", source))?;
             removed_count += 1;
         }
+        if removed_count > 0 {
+            transaction
+                .execute(
+                    "DELETE FROM tags
+                     WHERE NOT EXISTS (
+                         SELECT 1 FROM note_tags WHERE note_tags.tag_id = tags.tag_id
+                     )",
+                    [],
+                )
+                .map_err(|source| CatalogError::sql("orphaned tag cleanup", source))?;
+        }
         transaction.commit().map_err(|source| {
             CatalogError::sql("missing note confirmation transaction commit", source)
         })?;

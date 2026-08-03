@@ -73,18 +73,6 @@ pub struct SaveConflictRequest {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum MetadataMutation {
     ToggleStar { note_id: NoteId },
-    CreateTag { display_name: String },
-    RenameTag { tag_id: TagId, display_name: String },
-    DeleteTag { tag_id: TagId },
-    AttachTag { note_id: NoteId, tag_id: TagId },
-    DetachTag { note_id: NoteId, tag_id: TagId },
-}
-
-/// 标签名称弹层的单一编辑目标；领域标签身份不交给 UI widget 保存。
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum TagEditorMode {
-    Create,
-    Rename { tag_id: TagId },
 }
 
 /// 只针对工作区 NoteId 的回收站操作；外部文件没有可表达的变体。
@@ -114,6 +102,7 @@ pub enum NotoraAction {
     CardQueryFailed { query: CardQuery, message: String },
     NavigationTreeLoaded(notora_core::CatalogNavigationTree),
     NavigationTreeFailed(String),
+    CatalogReindexed,
     CatalogRecoveryNotified(String),
     NavigationExpansionToggled(PathBuf),
     CardListScrolled { offset_px: f32, near_end: bool },
@@ -134,11 +123,6 @@ pub enum NotoraAction {
     MetadataMutationRequested(MetadataMutation),
     MetadataMutationCompleted,
     MetadataMutationFailed(String),
-    TagEditorRequested(TagEditorMode),
-    TagEditorNameChanged(String),
-    TagEditorConfirmed,
-    TagDeletionRequested(TagId),
-    TagDeletionConfirmed,
     TrashOperationRequested(TrashOperation),
     TrashPermanentDeletionConfirmed,
     TrashRestoreWithRenamedPathConfirmed,

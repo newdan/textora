@@ -2,8 +2,11 @@
 
 use std::any::Any;
 
+use crate::core::text_util::compute_text_width;
 use crate::core::widget::{ControlAction, WidgetId};
-use crate::core::{Event, EventCtx, LayoutCtx, MouseButton, PaintCtx, Rect, Widget, WidgetAction};
+use crate::core::{
+    DrawCmd, Event, EventCtx, LayoutCtx, MouseButton, PaintCtx, Rect, Widget, WidgetAction,
+};
 use crate::widgets::icon::draw_icon;
 
 /// 状态的视觉种类，不包含产品错误类型。
@@ -90,9 +93,17 @@ impl Widget for StatusStateWidget {
         if self.rect.w <= 0.0 || self.rect.h <= 0.0 {
             return;
         }
+        let clip_rect = Rect::new(
+            self.rect.x + ctx.list.offset.0,
+            self.rect.y + ctx.list.offset.1,
+            self.rect.w,
+            self.rect.h,
+        );
+        ctx.list.cmds.push(DrawCmd::PushClip(clip_rect));
         let center_x = self.rect.x + self.rect.w * 0.5;
         let title_font_size = 16.0 * ctx.dpi;
         let description_font_size = 13.0 * ctx.dpi;
+        let horizontal_inset = 12.0 * ctx.dpi;
         let icon_size = 28.0 * ctx.dpi;
         let title_y = self.rect.y + self.rect.h * 0.38;
         if let Some(icon) = &self.input.icon {
@@ -105,10 +116,17 @@ impl Widget for StatusStateWidget {
                 ctx.theme.palette.text_muted,
             );
         }
-        let title_x = center_x - self.input.title.len() as f32 * title_font_size * 0.3;
+        let title_width =
+            compute_text_width(&self.input.title, title_font_size, ctx.shaper.as_deref_mut());
+        let title_x = (center_x - title_width * 0.5).max(self.rect.x + horizontal_inset);
         ctx.text(title_x, title_y, title_font_size, ctx.theme.palette.text_main, &self.input.title);
+        let description_width = compute_text_width(
+            &self.input.description,
+            description_font_size,
+            ctx.shaper.as_deref_mut(),
+        );
         let description_x =
-            center_x - self.input.description.len() as f32 * description_font_size * 0.3;
+            (center_x - description_width * 0.5).max(self.rect.x + horizontal_inset);
         ctx.text(
             description_x,
             title_y + 28.0 * ctx.dpi,
@@ -126,8 +144,9 @@ impl Widget for StatusStateWidget {
             };
             ctx.list.fill_rounded(self.action_rect, background, 6.0 * ctx.dpi);
             let label = self.input.action_label.as_deref().unwrap_or_default();
-            let label_x = self.action_rect.x
-                + (self.action_rect.w - label.len() as f32 * 7.0 * ctx.dpi) * 0.5;
+            let label_width =
+                compute_text_width(label, description_font_size, ctx.shaper.as_deref_mut());
+            let label_x = self.action_rect.x + (self.action_rect.w - label_width) * 0.5;
             ctx.text(
                 label_x,
                 self.action_rect.y + self.action_rect.h * 0.5 + description_font_size * 0.35,
@@ -136,6 +155,7 @@ impl Widget for StatusStateWidget {
                 label,
             );
         }
+        ctx.list.cmds.push(DrawCmd::PopClip);
     }
 
     fn hit(&self, px: f32, py: f32) -> bool {
@@ -186,7 +206,7 @@ impl Widget for StatusStateWidget {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::core::{EventCtx, LayoutCtx, NoopMeasure};
+    use crate::core::{DrawCmd, DrawList, EventCtx, LayoutCtx, NoopMeasure, PaintCtx};
 
     fn layout(widget: &mut StatusStateWidget, rect: Rect, dpi: f32) {
         let theme = crate::theme::test_theme();
@@ -216,6 +236,47 @@ mod tests {
 
         assert!(widget.action_rect().x >= status_rect.x);
         assert!(widget.action_rect().right() <= status_rect.right());
+    }
+
+    #[test]
+    fn long_chinese_description_is_clipped_and_centered_inside_status_rect() {
+        let mut widget = StatusStateWidget::new();
+        widget.set_input(StatusStateInput {
+            kind: StatusStateKind::Empty,
+            title: "暂无笔记".to_owned(),
+            description: "新建一篇笔记，或者从左侧选择其他位置。".to_owned(),
+            ..StatusStateInput::default()
+        });
+        let status_rect = Rect::new(220.0, 0.0, 244.0, 400.0);
+        layout(&mut widget, status_rect, 1.0);
+        let theme = crate::theme::test_theme();
+        let mut draw_list = DrawList::new();
+        let mut shaper = shaping::Shaper::new().expect("test shaper should initialize");
+        let mut paint_context = PaintCtx {
+            list: &mut draw_list,
+            theme: &theme,
+            dpi: 1.0,
+            offset: (0.0, 0.0),
+            global_alpha: 1.0,
+            shaper: Some(&mut shaper),
+        };
+
+        widget.paint(&mut paint_context);
+
+        assert!(
+            matches!(draw_list.cmds.first(), Some(DrawCmd::PushClip(rect)) if *rect == status_rect)
+        );
+        assert!(matches!(draw_list.cmds.last(), Some(DrawCmd::PopClip)));
+        assert!(
+            draw_list
+                .cmds
+                .iter()
+                .filter_map(|command| match command {
+                    DrawCmd::TextLayout { x, .. } => Some(*x),
+                    _ => None,
+                })
+                .all(|text_x| text_x >= status_rect.x)
+        );
     }
 
     #[test]

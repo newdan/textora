@@ -10,6 +10,10 @@ pub const MINIMUM_CARD_LIST_WIDTH_LOGICAL: f32 = 260.0;
 pub const MAXIMUM_CARD_LIST_WIDTH_LOGICAL: f32 = 520.0;
 pub const MINIMUM_EDITOR_WIDTH_LOGICAL: f32 = 300.0;
 pub const SPLITTER_WIDTH_LOGICAL: f32 = 8.0;
+pub const MINIMUM_WINDOW_WIDTH_LOGICAL: f32 = DEFAULT_NAVIGATION_WIDTH_LOGICAL
+    + DEFAULT_CARD_LIST_WIDTH_LOGICAL
+    + MINIMUM_EDITOR_WIDTH_LOGICAL
+    + SPLITTER_WIDTH_LOGICAL * 2.0;
 pub const MINIMUM_WINDOW_HEIGHT_LOGICAL: f32 = 600.0;
 
 /// 三栏布局的纯输入；宽度以逻辑像素持久化，窗口尺寸以物理像素传入。
@@ -53,8 +57,8 @@ impl ShellLayout {
             .card_list_width_logical
             .clamp(MINIMUM_CARD_LIST_WIDTH_LOGICAL, MAXIMUM_CARD_LIST_WIDTH_LOGICAL);
         let splitter_width_px = SPLITTER_WIDTH_LOGICAL * dpi;
-        let minimum_three_pane_width_px = (MINIMUM_NAVIGATION_WIDTH_LOGICAL
-            + MINIMUM_CARD_LIST_WIDTH_LOGICAL
+        let minimum_three_pane_width_px = (navigation_width_logical
+            + requested_card_width_logical
             + MINIMUM_EDITOR_WIDTH_LOGICAL
             + SPLITTER_WIDTH_LOGICAL * 2.0)
             * dpi;
@@ -69,7 +73,7 @@ impl ShellLayout {
             );
         }
         if window_rect.w
-            >= (MINIMUM_CARD_LIST_WIDTH_LOGICAL
+            >= (requested_card_width_logical
                 + MINIMUM_EDITOR_WIDTH_LOGICAL
                 + SPLITTER_WIDTH_LOGICAL)
                 * dpi
@@ -99,11 +103,7 @@ impl ShellLayout {
         splitter_width_px: f32,
     ) -> Self {
         let navigation_width_px = navigation_width_logical * dpi;
-        let editor_width_px = MINIMUM_EDITOR_WIDTH_LOGICAL * dpi;
-        let maximum_card_width_px =
-            (window_rect.w - navigation_width_px - editor_width_px - splitter_width_px * 2.0)
-                .max(MINIMUM_CARD_LIST_WIDTH_LOGICAL * dpi);
-        let card_width_px = (requested_card_width_logical * dpi).min(maximum_card_width_px);
+        let card_width_px = requested_card_width_logical * dpi;
         let navigation_rect = Rect::new(0.0, 0.0, navigation_width_px, window_rect.h);
         let navigation_splitter_rect =
             Rect::new(navigation_rect.right(), 0.0, splitter_width_px, window_rect.h);
@@ -140,8 +140,7 @@ impl ShellLayout {
         splitter_width_px: f32,
         compact_navigation: CompactNavigation,
     ) -> Self {
-        let editor_width_px = MINIMUM_EDITOR_WIDTH_LOGICAL * dpi;
-        let card_width_px = (window_rect.w - editor_width_px - splitter_width_px).max(0.0);
+        let card_width_px = requested_card_width_logical * dpi;
         let card_list_rect = Rect::new(0.0, 0.0, card_width_px, window_rect.h);
         let card_list_splitter_rect = Rect::new(
             card_list_rect.right(),
@@ -167,7 +166,7 @@ impl ShellLayout {
             menu_rect: Rect::ZERO,
             tooltip_rect: Rect::ZERO,
             navigation_width_logical: DEFAULT_NAVIGATION_WIDTH_LOGICAL,
-            card_list_width_logical: (card_width_px / dpi).min(requested_card_width_logical),
+            card_list_width_logical: requested_card_width_logical,
         }
     }
 
@@ -252,6 +251,24 @@ mod tests {
         assert_eq!(layout.navigation_rect.w, DEFAULT_NAVIGATION_WIDTH_LOGICAL);
         assert_eq!(layout.card_list_rect.w, DEFAULT_CARD_LIST_WIDTH_LOGICAL);
         assert!(layout.editor_rect.x >= layout.card_list_splitter_rect.right());
+    }
+
+    #[test]
+    fn minimum_window_width_matches_default_fixed_panes_and_editor_minimum() {
+        assert_eq!(MINIMUM_WINDOW_WIDTH_LOGICAL, 876.0);
+    }
+
+    #[test]
+    fn configured_side_panes_are_not_shrunk_to_force_three_pane_mode() {
+        let compact_layout = ShellLayout::compute(input(800.0, 1.0));
+        let three_pane_layout = ShellLayout::compute(input(880.0, 1.0));
+
+        assert_eq!(compact_layout.responsive_mode, ResponsiveLayoutMode::NavigationOverlay);
+        assert_eq!(compact_layout.card_list_rect.w, DEFAULT_CARD_LIST_WIDTH_LOGICAL);
+        assert_eq!(three_pane_layout.responsive_mode, ResponsiveLayoutMode::ThreePane);
+        assert_eq!(three_pane_layout.navigation_rect.w, DEFAULT_NAVIGATION_WIDTH_LOGICAL);
+        assert_eq!(three_pane_layout.card_list_rect.w, DEFAULT_CARD_LIST_WIDTH_LOGICAL);
+        assert!(three_pane_layout.editor_rect.w >= MINIMUM_EDITOR_WIDTH_LOGICAL);
     }
 
     #[test]

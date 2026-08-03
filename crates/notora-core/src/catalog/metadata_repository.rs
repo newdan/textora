@@ -1,3 +1,4 @@
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use rusqlite::{OptionalExtension, Transaction, params};
@@ -129,6 +130,79 @@ impl Catalog {
     /// 移除笔记的标签关联。缺失关联是成功且不改变状态。
     pub fn detach_tag(&self, note_id: NoteId, tag_id: TagId) -> Result<bool, CatalogError> {
         self.update_tag_attachment(note_id, tag_id, false)
+    }
+
+    /// 用正文解析结果原子替换活动笔记的完整标签集合。
+    pub fn replace_note_tags(
+        &self,
+        note_id: NoteId,
+        display_names: &[String],
+    ) -> Result<(), CatalogError> {
+        let mut names_by_normalized = BTreeMap::new();
+        for display_name in display_names {
+            let tag_name = TagName::parse(display_name)?;
+            names_by_normalized.entry(tag_name.normalized.clone()).or_insert(tag_name);
+        }
+        let transaction = self.connection().unchecked_transaction().map_err(|source| {
+            CatalogError::sql("note tag replacement transaction start", source)
+        })?;
+        let note_exists = transaction
+            .query_row(
+                "SELECT EXISTS (
+                    SELECT 1 FROM notes WHERE note_id = ?1 AND lifecycle = ?2
+                )",
+                params![note_id.to_string(), ACTIVE_NOTE_LIFECYCLE],
+                |row| row.get::<_, bool>(0),
+            )
+            .map_err(|source| CatalogError::sql("note tag replacement note validation", source))?;
+        if !note_exists {
+            return Err(CatalogError::InvalidStoredValue {
+                column: "active_note_id",
+                value: note_id.to_string(),
+            });
+        }
+        let mut tag_ids = Vec::with_capacity(names_by_normalized.len());
+        for tag_name in names_by_normalized.into_values() {
+            transaction
+                .execute(
+                    "INSERT OR IGNORE INTO tags (tag_id, normalized_name, display_name)
+                     VALUES (?1, ?2, ?3)",
+                    params![TagId::generate().to_string(), tag_name.normalized, tag_name.display],
+                )
+                .map_err(|source| CatalogError::sql("document tag creation", source))?;
+            let tag_id = transaction
+                .query_row(
+                    "SELECT tag_id FROM tags WHERE normalized_name = ?1",
+                    [tag_name.normalized],
+                    |row| row.get::<_, String>(0),
+                )
+                .map_err(|source| CatalogError::sql("document tag identity query", source))?;
+            tag_ids.push(tag_id);
+        }
+        transaction
+            .execute("DELETE FROM note_tags WHERE note_id = ?1", [note_id.to_string()])
+            .map_err(|source| CatalogError::sql("document tag detachment", source))?;
+        for tag_id in tag_ids {
+            transaction
+                .execute(
+                    "INSERT INTO note_tags (note_id, tag_id) VALUES (?1, ?2)",
+                    params![note_id.to_string(), tag_id],
+                )
+                .map_err(|source| CatalogError::sql("document tag attachment", source))?;
+        }
+        transaction
+            .execute(
+                "DELETE FROM tags
+                 WHERE NOT EXISTS (
+                    SELECT 1 FROM note_tags WHERE note_tags.tag_id = tags.tag_id
+                 )",
+                [],
+            )
+            .map_err(|source| CatalogError::sql("orphan document tag cleanup", source))?;
+        refresh_search_tags(&transaction, &[note_id.to_string()])?;
+        transaction
+            .commit()
+            .map_err(|source| CatalogError::sql("note tag replacement transaction commit", source))
     }
 
     /// 读取指定标签，供改名后的导航选择保持稳定 ID。
@@ -509,6 +583,59 @@ mod tests {
                 .search_active_notes("archive", 10)
                 .expect("detached tag should search")
                 .is_empty()
+        );
+    }
+
+    #[test]
+    fn replacing_document_tags_creates_missing_tags_and_removes_only_orphans() {
+        let directory = tempfile::tempdir().expect("catalog test directory should be created");
+        let catalog = Catalog::open(&directory.path().join("catalog.sqlite3"))
+            .expect("catalog should initialize");
+        let first_note_id = NoteId::generate();
+        let second_note_id = NoteId::generate();
+        insert_note(&catalog, first_note_id, "first.md");
+        insert_note(&catalog, second_note_id, "second.md");
+
+        catalog
+            .replace_note_tags(
+                first_note_id,
+                &["计划".to_owned(), "共享".to_owned(), "計劃".to_owned()],
+            )
+            .expect("first tag set should replace");
+        catalog
+            .replace_note_tags(second_note_id, &["共享".to_owned()])
+            .expect("second tag set should replace");
+        catalog
+            .replace_note_tags(first_note_id, &["归档".to_owned()])
+            .expect("replacement tag set should replace");
+
+        assert_eq!(
+            catalog
+                .tags_for_note(first_note_id)
+                .expect("first note tags should query")
+                .into_iter()
+                .map(|tag| tag.display_name)
+                .collect::<Vec<_>>(),
+            vec!["归档".to_owned()]
+        );
+        assert_eq!(
+            catalog
+                .tags_for_note(second_note_id)
+                .expect("second note tags should query")
+                .into_iter()
+                .map(|tag| tag.display_name)
+                .collect::<Vec<_>>(),
+            vec!["共享".to_owned()]
+        );
+        assert!(
+            catalog
+                .connection()
+                .query_row(
+                    "SELECT NOT EXISTS (SELECT 1 FROM tags WHERE display_name IN ('计划', '計劃'))",
+                    [],
+                    |row| row.get::<_, bool>(0),
+                )
+                .expect("orphan tag query should succeed")
         );
     }
 }

@@ -182,6 +182,9 @@ fn apply_scan_results(
                     continue;
                 };
                 catalog.upsert_active_note(&note).map_err(ScanError::Catalog)?;
+                catalog
+                    .replace_note_tags(note.note_id, &crate::extract_hashtags(body))
+                    .map_err(ScanError::Catalog)?;
                 search_entries.push(search_entry(catalog, &note, body.clone())?);
             }
             ReconciliationChange::Added(note) | ReconciliationChange::Moved { note, .. } => {
@@ -190,6 +193,9 @@ fn apply_scan_results(
                     continue;
                 };
                 catalog.upsert_active_note(&note).map_err(ScanError::Catalog)?;
+                catalog
+                    .replace_note_tags(note.note_id, &crate::extract_hashtags(body))
+                    .map_err(ScanError::Catalog)?;
                 search_entries.push(search_entry(catalog, &note, body.clone())?);
             }
             ReconciliationChange::Missing(note) => missing_note_ids.push(note.note_id),
@@ -435,7 +441,7 @@ mod tests {
     fn missing_note_requires_two_complete_scans_before_catalog_removal() {
         let directory = tempfile::tempdir().expect("workspace test directory should be created");
         let note_path = directory.path().join("temporarily-missing.md");
-        fs::write(&note_path, "# Keep me\n\nrecoverable")
+        fs::write(&note_path, "# Keep me\n\nrecoverable #temporary")
             .expect("markdown fixture should be written");
         let workspace =
             Workspace::open_or_initialize(directory.path()).expect("workspace should initialize");
@@ -443,12 +449,16 @@ mod tests {
             .expect("catalog should initialize");
         scan_workspace(&workspace, &catalog).expect("initial scan should complete");
         let note_id = catalog.active_notes().expect("initial notes should load").remove(0).note_id;
+        assert_eq!(
+            catalog.navigation_tree().expect("initial tag navigation should load").tags.len(),
+            1
+        );
 
         fs::remove_file(&note_path).expect("fixture note should become temporarily missing");
         scan_workspace(&workspace, &catalog).expect("first missing scan should complete");
         assert!(catalog.active_note(note_id).expect("note lookup should succeed").is_some());
 
-        fs::write(&note_path, "# Keep me\n\nrecoverable")
+        fs::write(&note_path, "# Keep me\n\nrecoverable #temporary")
             .expect("temporarily missing note should return");
         scan_workspace(&workspace, &catalog).expect("reappearance scan should complete");
         fs::remove_file(&note_path).expect("fixture note should become missing again");
@@ -457,6 +467,9 @@ mod tests {
 
         scan_workspace(&workspace, &catalog).expect("confirming missing scan should complete");
         assert!(catalog.active_note(note_id).expect("note lookup should succeed").is_none());
+        assert!(
+            catalog.navigation_tree().expect("orphaned tag navigation should load").tags.is_empty()
+        );
     }
 
     #[test]
@@ -492,6 +505,58 @@ mod tests {
             1
         );
         assert!(catalog.active_notes().expect("catalog notes should remain").len() == 2);
+    }
+
+    #[test]
+    fn changed_document_hashtags_replace_navigation_and_search_tags() {
+        let directory = tempfile::tempdir().expect("workspace test directory should be created");
+        let note_path = directory.path().join("tagged.md");
+        fs::write(&note_path, "# 标题\n\n正文 #计划 #共享")
+            .expect("tagged fixture should be written");
+        let workspace =
+            Workspace::open_or_initialize(directory.path()).expect("workspace should initialize");
+        let catalog = Catalog::open(&workspace.metadata_directory().join("catalog.sqlite3"))
+            .expect("catalog should initialize");
+
+        scan_workspace(&workspace, &catalog).expect("initial scan should complete");
+        assert_eq!(
+            catalog
+                .navigation_tree()
+                .expect("initial tag navigation should load")
+                .tags
+                .into_iter()
+                .map(|tag| tag.display_name)
+                .collect::<Vec<_>>(),
+            vec!["共享".to_owned(), "计划".to_owned()]
+        );
+        assert_eq!(
+            catalog
+                .search_active_notes("计划", 10)
+                .expect("tag should participate in search")
+                .len(),
+            1
+        );
+
+        fs::write(&note_path, "# 标题\n\n正文 #归档").expect("tagged fixture should be updated");
+        scan_workspace_paths(&workspace, &catalog, &[std::path::PathBuf::from("tagged.md")])
+            .expect("targeted tag scan should complete");
+
+        assert_eq!(
+            catalog
+                .navigation_tree()
+                .expect("replacement tag navigation should load")
+                .tags
+                .into_iter()
+                .map(|tag| tag.display_name)
+                .collect::<Vec<_>>(),
+            vec!["归档".to_owned()]
+        );
+        assert!(
+            catalog
+                .search_active_notes("计划", 10)
+                .expect("removed tag search should complete")
+                .is_empty()
+        );
     }
 
     #[test]

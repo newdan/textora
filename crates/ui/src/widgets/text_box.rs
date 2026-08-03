@@ -773,7 +773,7 @@ impl TextBox {
         let cursor_h = self.rect.h * 0.6;
         let cursor_y = self.rect.y + (self.rect.h - cursor_h) * 0.5;
         let effective_x = self.cursor_x + self.preedit_cursor_x;
-        Rect::new(self.rect.x + effective_x, cursor_y, 2.0, cursor_h)
+        Rect::new(self.rect.x + self.text_pad + effective_x, cursor_y, 2.0, cursor_h)
     }
 
     pub fn has_preedit(&self) -> bool {
@@ -851,7 +851,7 @@ impl TextBox {
         let line_w = if self.focused { 1.5 * dpi } else { 1.0 * dpi };
         ctx.list.stroke_rounded(self.rect, border_color, corner_radius, line_w);
 
-        let text_x = self.rect.x + 4.0 * dpi;
+        let text_x = self.rect.x + self.text_pad;
 
         // 3. Selection highlight
         if let Some((anchor, cur)) = self.selection {
@@ -1148,11 +1148,15 @@ mod tests {
     #[test]
     fn leading_content_inset_reserves_room_for_an_input_icon() {
         let mut text_box = TextBox::with_id(WidgetId(91));
+        text_box.set_placeholder("Search...");
         text_box.set_leading_content_inset_logical(28.0);
 
-        let text_box = laid_out_widget(text_box);
+        let draw_list = paint_laid_out(&mut text_box);
 
         assert_eq!(text_box.text_pad, 28.0);
+        assert!(draw_list.cmds.iter().any(|command| {
+            matches!(command, crate::core::paint::DrawCmd::TextLayout { x, .. } if *x == 28.0)
+        }));
     }
 
     #[test]
@@ -1319,9 +1323,9 @@ mod tests {
         assert_eq!(cursor_rect.x, 13.0);
         assert_eq!(cursor_rect.w, 2.0);
 
-        // ime_cursor_rect must remain unchanged (logical x)
+        // IME candidate window follows the painted cursor, including the text inset.
         let ime_rect = tb.ime_cursor_rect();
-        assert_eq!(ime_rect.x, 10.0); // self.rect.x(0) + self.cursor_x(10.0) + self.preedit_cursor_x(0.0)
+        assert_eq!(ime_rect.x, 14.0);
     }
 
     #[test]

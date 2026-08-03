@@ -44,6 +44,9 @@ fn augment_backspace(source: &str, current_byte: usize) -> Option<EditAugmentati
     if let Some(aug) = backspace_empty_source_line(source, current_byte) {
         return Some(aug);
     }
+    if let Some(aug) = backspace_paragraph_boundary(source, current_byte) {
+        return Some(aug);
+    }
     if let Some(aug) = backspace_last_interblock_paragraph_grapheme(source, current_byte) {
         return Some(aug);
     }
@@ -222,6 +225,47 @@ fn backspace_empty_source_line(source: &str, current_byte: usize) -> Option<Edit
     Some(aug)
 }
 
+fn backspace_paragraph_boundary(source: &str, current_byte: usize) -> Option<EditAugmentation> {
+    let (line_start, _, line_end) = locate_source_line_bounds(source, current_byte)?;
+    if current_byte != line_start
+        || line_start == line_end
+        || !matches!(
+            classify_enter_context(source, current_byte),
+            EnterContext::TopLevelParagraphEnd | EnterContext::ParagraphInterior
+        )
+    {
+        return None;
+    }
+
+    let source_bytes = source.as_bytes();
+    let mut boundary_start = current_byte;
+    while boundary_start > 0 && source_bytes[boundary_start - 1] == b'\n' {
+        boundary_start -= 1;
+        if boundary_start > 0 && source_bytes[boundary_start - 1] == b'\r' {
+            boundary_start -= 1;
+        }
+    }
+    if boundary_start == current_byte {
+        return None;
+    }
+    if !matches!(
+        classify_enter_context(source, boundary_start),
+        EnterContext::TopLevelParagraphEnd
+            | EnterContext::ParagraphInterior
+            | EnterContext::Heading { .. }
+    ) {
+        return None;
+    }
+
+    let aug = EditAugmentation {
+        insert_text: Some(String::new()),
+        replace_range: Some(boundary_start..current_byte),
+        cursor_byte_after: boundary_start,
+    };
+    debug_assert_augmentation(&aug, source);
+    Some(aug)
+}
+
 fn previous_non_empty_line_end(source: &str, current_byte: usize) -> Option<usize> {
     let bytes = source.as_bytes();
     let mut line_end = current_byte.min(source.len());
@@ -315,7 +359,8 @@ fn enter_context_augmentation(
 }
 
 fn paragraph_enter_augmentation(source: &str, current_byte: usize) -> EditAugmentation {
-    // 段尾/段中：Typora 语义 = 切两半（`\n\n`）；跨已有 `\n` 时用 emit_block_break 处理边界。
+    // 段尾/段中：Typora 语义 = 切两半（`\n\n`）；跨已有 `\n` 时用
+    // emit_block_break 保留光标下方的原源码行。
     if cursor_touches_source_newline(source, current_byte) {
         if source.as_bytes().get(current_byte) == Some(&b'\n') {
             return emit_block_break(source, current_byte);
@@ -331,19 +376,6 @@ fn heading_enter_augmentation(
     at_end: bool,
 ) -> Option<EditAugmentation> {
     if at_end {
-        if source.as_bytes().get(current_byte) == Some(&b'\n') {
-            let insertion = String::from("\n");
-            let aug = EditAugmentation {
-                cursor_byte_after: current_byte + b"\n\n".len(),
-                insert_text: Some(insertion),
-                ..Default::default()
-            };
-            debug_assert_augmentation(&aug, source);
-            return Some(aug);
-        }
-        if cursor_touches_source_newline(source, current_byte) {
-            return Some(emit_source_newline(source, current_byte));
-        }
         return Some(emit_block_break(source, current_byte));
     }
 
@@ -435,7 +467,7 @@ fn classify_heading_hit(
     let hash_prefix = level as usize + 1; // "# " / "## " / ...
     let content_start = start.saturating_add(hash_prefix);
     let at_end = current_byte == end;
-    if current_byte >= content_start {
+    if current_byte >= content_start && current_byte <= end {
         EnterContext::Heading { level, at_end }
     } else {
         EnterContext::Other
@@ -742,6 +774,19 @@ fn locate_blockquote_line(source: &str, byte: usize) -> Option<(usize, usize, us
 mod tests {
     use super::*;
 
+    fn apply_augmentation_at(
+        source: &str,
+        current_byte: usize,
+        augmentation: &EditAugmentation,
+    ) -> String {
+        let replacement_range =
+            augmentation.replace_range.clone().unwrap_or(current_byte..current_byte);
+        let mut edited_source = source.to_owned();
+        edited_source
+            .replace_range(replacement_range, augmentation.insert_text.as_deref().unwrap_or(""));
+        edited_source
+    }
+
     #[test]
     fn parses_supported_list_marker_boundaries() {
         assert_eq!(parse_list_marker("42. item", 0), Some((ListBullet::Ordered(42), 4)));
@@ -752,6 +797,145 @@ mod tests {
         assert_eq!(parse_list_marker("7)\titem", 0), Some((ListBullet::Ordered(7), 3)));
         assert_eq!(parse_list_marker("- [ ] item", 0), Some((ListBullet::TaskList(false), 6)));
         assert_eq!(parse_list_marker("1234567890. item", 0), None);
+    }
+
+    #[test]
+    fn paragraph_enter_before_soft_break_preserves_following_source_line() {
+        let source = "first line\nsecond line";
+        let current_byte = "first line".len();
+
+        let augmentation = augment_edit(source, current_byte, AugmentKind::Enter)
+            .expect("paragraph Enter should split the paragraph");
+        let edited_source = apply_augmentation_at(source, current_byte, &augmentation);
+
+        assert_eq!(augmentation.insert_text.as_deref(), Some("\n\n"));
+        assert_eq!(augmentation.cursor_byte_after, current_byte + 2);
+        assert_eq!(edited_source, "first line\n\n\nsecond line");
+    }
+
+    #[test]
+    fn heading_enter_before_single_newline_creates_editable_empty_paragraph() {
+        let source = "# Heading\nparagraph";
+        let current_byte = "# Heading".len();
+
+        let augmentation = augment_edit(source, current_byte, AugmentKind::Enter)
+            .expect("heading-end Enter should create an empty paragraph");
+        let edited_source = apply_augmentation_at(source, current_byte, &augmentation);
+
+        assert_eq!(augmentation.insert_text.as_deref(), Some("\n\n"));
+        assert_eq!(augmentation.cursor_byte_after, current_byte + 2);
+        assert_eq!(edited_source, "# Heading\n\n\nparagraph");
+    }
+
+    #[test]
+    fn backspace_at_start_of_split_paragraph_restores_original_paragraph() {
+        let original_source = "hello world";
+        let split_byte = "hello ".len();
+        let enter_augmentation = augment_edit(original_source, split_byte, AugmentKind::Enter)
+            .expect("paragraph Enter should split at the cursor");
+        let split_source = apply_augmentation_at(original_source, split_byte, &enter_augmentation);
+
+        let backspace_augmentation = augment_edit(
+            &split_source,
+            enter_augmentation.cursor_byte_after,
+            AugmentKind::Backspace,
+        )
+        .expect("Backspace at the second paragraph start should join both paragraphs");
+        let restored_source = apply_augmentation_at(
+            &split_source,
+            enter_augmentation.cursor_byte_after,
+            &backspace_augmentation,
+        );
+
+        assert_eq!(restored_source, original_source);
+        assert_eq!(backspace_augmentation.cursor_byte_after, split_byte);
+    }
+
+    #[test]
+    fn backspace_at_paragraph_start_after_heading_joins_heading() {
+        let source = "# Heading\n\nparagraph";
+        let current_byte = "# Heading\n\n".len();
+
+        let augmentation = augment_edit(source, current_byte, AugmentKind::Backspace)
+            .expect("Backspace at a block start should remove the complete source boundary");
+        let edited_source = apply_augmentation_at(source, current_byte, &augmentation);
+
+        assert_eq!(edited_source, "# Headingparagraph");
+        assert_eq!(augmentation.cursor_byte_after, "# Heading".len());
+    }
+
+    #[test]
+    fn enter_then_backspace_restores_plain_paragraph_and_heading_cases() {
+        let cases = [
+            ("hello world", "hello ".len()),
+            ("hello", "hello".len()),
+            ("# hello world", "# he".len()),
+            ("# Heading", "# Heading".len()),
+            ("first\n\nsecond", "first".len()),
+            ("# Heading\n\nparagraph", "# Heading".len()),
+        ];
+
+        for (source, current_byte) in cases {
+            let enter_augmentation = augment_edit(source, current_byte, AugmentKind::Enter)
+                .unwrap_or_else(|| panic!("Enter must handle fixture {source:?}"));
+            let edited_source = apply_augmentation_at(source, current_byte, &enter_augmentation);
+            let backspace_augmentation = augment_edit(
+                &edited_source,
+                enter_augmentation.cursor_byte_after,
+                AugmentKind::Backspace,
+            )
+            .unwrap_or_else(|| panic!("Backspace must reverse Enter for {source:?}"));
+            let restored_source = apply_augmentation_at(
+                &edited_source,
+                enter_augmentation.cursor_byte_after,
+                &backspace_augmentation,
+            );
+
+            assert_eq!(restored_source, source, "Enter/Backspace mismatch for {source:?}");
+            assert_eq!(backspace_augmentation.cursor_byte_after, current_byte);
+        }
+    }
+
+    #[test]
+    fn backspace_at_soft_line_start_removes_single_source_newline() {
+        let source = "first line\nsecond line";
+        let current_byte = "first line\n".len();
+
+        let augmentation = augment_edit(source, current_byte, AugmentKind::Backspace)
+            .expect("Backspace at a soft line start should join both visual lines");
+        let edited_source = apply_augmentation_at(source, current_byte, &augmentation);
+
+        assert_eq!(edited_source, "first linesecond line");
+        assert_eq!(augmentation.replace_range, Some("first line".len()..current_byte));
+        assert_eq!(augmentation.cursor_byte_after, "first line".len());
+    }
+
+    #[test]
+    fn backspace_at_crlf_paragraph_start_removes_complete_boundary() {
+        let source = "first\r\n\r\nsecond";
+        let current_byte = "first\r\n\r\n".len();
+
+        let augmentation = augment_edit(source, current_byte, AugmentKind::Backspace)
+            .expect("Backspace should treat CRLF sequences as complete source newlines");
+        let edited_source = apply_augmentation_at(source, current_byte, &augmentation);
+
+        assert_eq!(edited_source, "firstsecond");
+        assert_eq!(augmentation.replace_range, Some("first".len()..current_byte));
+        assert_eq!(augmentation.cursor_byte_after, "first".len());
+    }
+
+    #[test]
+    fn backspace_after_non_text_block_uses_existing_specialized_or_fallback_behavior() {
+        let cases = ["---\n\nparagraph", "- item\n\nparagraph", "```\ncode\n```\n\nparagraph"];
+
+        for source in cases {
+            let current_byte = source.find("paragraph").expect("fixture must contain a paragraph");
+
+            assert!(
+                augment_edit(source, current_byte, AugmentKind::Backspace).is_none(),
+                "generic paragraph joining must not consume a {source:?} boundary"
+            );
+        }
     }
 
     #[test]

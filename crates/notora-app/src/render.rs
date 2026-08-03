@@ -19,9 +19,7 @@ use ui::virtual_card_list::{
 };
 use ui::{Event, EventCtx, Rect, Widget};
 
-use crate::action::{
-    ConflictResolution, MetadataMutation, NotoraAction, TagEditorMode, TrashOperation,
-};
+use crate::action::{ConflictResolution, MetadataMutation, NotoraAction, TrashOperation};
 use crate::external_files::ExternalFileSession;
 use crate::settings::ProductSettings;
 use crate::settings_overlay::{SettingsOverlay, SettingsOverlayAction, SettingsOverlayInput};
@@ -33,10 +31,16 @@ const GLOBAL_SEARCH_BOX_ID: WidgetId = WidgetId(9_000);
 const SETTINGS_BUTTON_ID: WidgetId = WidgetId(9_001);
 const NEW_NOTE_BUTTON_ID: WidgetId = WidgetId(9_002);
 const NEW_NOTE_MENU_BUTTON_ID: WidgetId = WidgetId(9_003);
-const NEW_NOTE_BUTTON_WIDTH_LOGICAL: f32 = 104.0;
+const NEW_NOTE_BUTTON_WIDTH_LOGICAL: f32 = 128.0;
 const NOTE_TOOL_BUTTON_WIDTH_LOGICAL: f32 = 64.0;
 const NOTE_TOOL_BUTTON_HEIGHT_LOGICAL: f32 = 28.0;
 const NOTE_TOOL_BUTTON_GAP_LOGICAL: f32 = 6.0;
+const CARD_HEADER_TITLE_FONT_SIZE_LOGICAL: f32 = 16.0;
+const CARD_HEADER_TITLE_BASELINE_LOGICAL: f32 = 28.0;
+const CARD_HEADER_CONTROL_TOP_LOGICAL: f32 = 8.0;
+const CARD_HEADER_WRAPPED_CONTROL_TOP_LOGICAL: f32 = 44.0;
+const CARD_HEADER_CONTENT_TOP_LOGICAL: f32 = 44.0;
+const CARD_HEADER_WRAPPED_CONTENT_TOP_LOGICAL: f32 = 80.0;
 const SEARCH_BAR_HEIGHT_LOGICAL: f32 = 32.0;
 const SEARCH_ICON_AREA_WIDTH_LOGICAL: f32 = 32.0;
 const SHELL_PADDING_LOGICAL: f32 = 12.0;
@@ -56,10 +60,6 @@ const CONFIRMATION_PANEL_WIDTH_LOGICAL: f32 = 360.0;
 const CONFIRMATION_PANEL_HEIGHT_LOGICAL: f32 = 160.0;
 const CONFIRMATION_BUTTON_WIDTH_LOGICAL: f32 = 88.0;
 const CONFIRMATION_BUTTON_HEIGHT_LOGICAL: f32 = 32.0;
-const TAG_EDITOR_PANEL_WIDTH_LOGICAL: f32 = 360.0;
-const TAG_EDITOR_PANEL_HEIGHT_LOGICAL: f32 = 176.0;
-const TAG_EDITOR_TEXT_BOX_HEIGHT_LOGICAL: f32 = 32.0;
-const TAG_EDITOR_TEXT_BOX_ID: WidgetId = WidgetId(9_004);
 const SAVE_CONFLICT_PANEL_WIDTH_LOGICAL: f32 = 440.0;
 const SAVE_CONFLICT_PANEL_HEIGHT_LOGICAL: f32 = 196.0;
 const WORKSPACE_NAVIGATION_KEY: u64 = 1;
@@ -87,13 +87,6 @@ pub struct NoteToolbarButtonInput {
     pub action: NotoraAction,
 }
 
-/// 标签名称编辑弹层的纯输入。
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct TagEditorOverlayInput {
-    pub title: String,
-    pub display_name: String,
-}
-
 /// 保存竞态发生后展示的四路显式决策；按钮只保存产品 action，不保存 runtime tab。
 #[derive(Clone, Debug, PartialEq)]
 pub struct SaveConflictOverlayInput {
@@ -108,6 +101,13 @@ pub enum NewNoteControlState {
     #[default]
     Hidden,
     Visible,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct CardHeaderLayout {
+    title_baseline_y: f32,
+    control_top_y: f32,
+    content_top_y: f32,
 }
 
 impl NewNoteControlState {
@@ -134,7 +134,6 @@ pub struct NotoraRenderModel {
     pub show_tooltip: bool,
     pub new_note_control: NewNoteControlState,
     pub note_toolbar: Vec<NoteToolbarButtonInput>,
-    pub tag_editor: Option<TagEditorOverlayInput>,
     pub save_conflict: Option<SaveConflictOverlayInput>,
 }
 
@@ -155,7 +154,7 @@ impl NotoraRenderModel {
             &mut navigation_rows,
             &mut navigation_actions,
             WORKSPACE_NAVIGATION_KEY,
-            "Workspace".to_owned(),
+            "工作区".to_owned(),
             "folder-open",
             0,
             None,
@@ -193,7 +192,7 @@ impl NotoraRenderModel {
             &mut navigation_rows,
             &mut navigation_actions,
             STARRED_NAVIGATION_KEY,
-            "Starred".to_owned(),
+            "星标".to_owned(),
             "star",
             0,
             None,
@@ -218,7 +217,7 @@ impl NotoraRenderModel {
             &mut navigation_rows,
             &mut navigation_actions,
             TRASH_NAVIGATION_KEY,
-            "Trash".to_owned(),
+            "回收站".to_owned(),
             "trash-2",
             0,
             None,
@@ -229,7 +228,7 @@ impl NotoraRenderModel {
             &mut navigation_rows,
             &mut navigation_actions,
             EXTERNAL_FILES_NAVIGATION_KEY,
-            "Files".to_owned(),
+            "文件".to_owned(),
             "file",
             0,
             None,
@@ -263,7 +262,6 @@ impl NotoraRenderModel {
             show_tooltip: false,
             new_note_control: new_note_control_state(selected_scope),
             note_toolbar: note_toolbar_buttons(selected_scope, selected_note_id),
-            tag_editor: state.library.tag_editor.as_ref().map(tag_editor_input),
             save_conflict: state.library.save_conflict.map(|conflict| SaveConflictOverlayInput {
                 identity: conflict.identity,
                 content_revision: conflict.content_revision,
@@ -286,98 +284,56 @@ fn note_toolbar_buttons(
 ) -> Vec<NoteToolbarButtonInput> {
     if *scope == NavigationScope::ExternalFiles {
         return vec![NoteToolbarButtonInput {
-            label: "Open".to_owned(),
+            label: "打开".to_owned(),
             action: NotoraAction::OpenExternalFileDialogRequested,
         }];
     }
     if matches!(scope, NavigationScope::Search { .. }) {
         return vec![NoteToolbarButtonInput {
-            label: "Clear".to_owned(),
+            label: "清除".to_owned(),
             action: NotoraAction::SearchCommitted { query: String::new(), search_generation: None },
         }];
     }
-    let selected_tag_id = match scope {
-        NavigationScope::Tag { tag_id } => Some(*tag_id),
-        _ => None,
-    };
     if *scope == NavigationScope::Trash {
         let Some(note_id) = selected_note_id else {
             return vec![NoteToolbarButtonInput {
-                label: "Empty".to_owned(),
+                label: "清空".to_owned(),
                 action: NotoraAction::TrashOperationRequested(TrashOperation::Empty),
             }];
         };
         return vec![
             NoteToolbarButtonInput {
-                label: "Restore".to_owned(),
+                label: "恢复".to_owned(),
                 action: NotoraAction::TrashOperationRequested(TrashOperation::Restore { note_id }),
             },
             NoteToolbarButtonInput {
-                label: "Delete".to_owned(),
+                label: "删除".to_owned(),
                 action: NotoraAction::TrashOperationRequested(TrashOperation::PermanentlyDelete {
                     note_id,
                 }),
             },
         ];
     }
-    if let Some(tag_id) = selected_tag_id {
-        let mut buttons = vec![
-            NoteToolbarButtonInput {
-                label: "Rename".to_owned(),
-                action: NotoraAction::TagEditorRequested(TagEditorMode::Rename { tag_id }),
-            },
-            NoteToolbarButtonInput {
-                label: "Delete".to_owned(),
-                action: NotoraAction::TagDeletionRequested(tag_id),
-            },
-        ];
-        if let Some(note_id) = selected_note_id {
-            buttons.extend([
-                NoteToolbarButtonInput {
-                    label: "Add".to_owned(),
-                    action: NotoraAction::MetadataMutationRequested(MetadataMutation::AttachTag {
-                        note_id,
-                        tag_id,
-                    }),
-                },
-                NoteToolbarButtonInput {
-                    label: "Remove".to_owned(),
-                    action: NotoraAction::MetadataMutationRequested(MetadataMutation::DetachTag {
-                        note_id,
-                        tag_id,
-                    }),
-                },
-            ]);
-        }
-        return buttons;
-    }
     let Some(note_id) = selected_note_id else {
-        return vec![NoteToolbarButtonInput {
-            label: "+Tag".to_owned(),
-            action: NotoraAction::TagEditorRequested(TagEditorMode::Create),
-        }];
+        return Vec::new();
     };
     vec![
         NoteToolbarButtonInput {
-            label: "+Tag".to_owned(),
-            action: NotoraAction::TagEditorRequested(TagEditorMode::Create),
-        },
-        NoteToolbarButtonInput {
-            label: "Rename".to_owned(),
+            label: "重命名".to_owned(),
             action: NotoraAction::RenameDialogRequested(note_id),
         },
         NoteToolbarButtonInput {
-            label: "Move".to_owned(),
+            label: "移动".to_owned(),
             action: NotoraAction::MoveDialogRequested(note_id),
         },
         NoteToolbarButtonInput {
-            label: "Star".to_owned(),
+            label: "星标".to_owned(),
             action: NotoraAction::MetadataMutationRequested(MetadataMutation::ToggleStar {
                 note_id,
             }),
         },
         NoteToolbarButtonInput {
-            label: "Trash".to_owned(),
+            label: "回收站".to_owned(),
             action: NotoraAction::TrashOperationRequested(TrashOperation::MoveToTrash { note_id }),
         },
     ]
@@ -392,14 +348,6 @@ fn new_note_control_state(scope: &NavigationScope) -> NewNoteControlState {
         | NavigationScope::Tag { .. }
         | NavigationScope::ExternalFiles => NewNoteControlState::Visible,
     }
-}
-
-fn tag_editor_input(editor: &crate::state::TagEditorState) -> TagEditorOverlayInput {
-    let title = match editor.mode {
-        TagEditorMode::Create => "Create tag",
-        TagEditorMode::Rename { .. } => "Rename tag",
-    };
-    TagEditorOverlayInput { title: title.to_owned(), display_name: editor.display_name.clone() }
 }
 
 /// 产品层已决定的确认弹层纯展示输入；UI 不保存 TagId 或 Trash entry。
@@ -441,11 +389,6 @@ pub struct NotoraShell {
     new_document_menu_rect: Rect,
     new_document_menu_open: bool,
     note_toolbar_buttons: Vec<RenderedToolbarButton>,
-    tag_editor_box: TextBox,
-    tag_editor_open: bool,
-    tag_editor_panel_rect: Rect,
-    tag_editor_confirm_rect: Rect,
-    tag_editor_cancel_rect: Rect,
     compact_navigation_rect: Rect,
     compact_back_rect: Rect,
     confirmation_panel_rect: Rect,
@@ -466,15 +409,12 @@ impl Default for NotoraShell {
 impl NotoraShell {
     pub fn new() -> Self {
         let mut search_box = TextBox::with_id(GLOBAL_SEARCH_BOX_ID);
-        search_box.set_placeholder("Search notes...");
+        search_box.set_placeholder("搜索笔记...");
         search_box.set_max_len_bytes(2_048);
         search_box.set_leading_content_inset_logical(SEARCH_ICON_AREA_WIDTH_LOGICAL);
         let mut new_note_button = SplitButtonWidget::new();
         new_note_button.set_action_ids(NEW_NOTE_BUTTON_ID, NEW_NOTE_MENU_BUTTON_ID);
         new_note_button.set_icon(Some("plus".to_owned()));
-        let mut tag_editor_box = TextBox::with_id(TAG_EDITOR_TEXT_BOX_ID);
-        tag_editor_box.set_placeholder("Tag name");
-        tag_editor_box.set_max_len_bytes(512);
         Self {
             search_box,
             navigation_tree: TreeListWidget::new(),
@@ -498,11 +438,6 @@ impl NotoraShell {
             new_document_menu_rect: Rect::ZERO,
             new_document_menu_open: false,
             note_toolbar_buttons: Vec::new(),
-            tag_editor_box,
-            tag_editor_open: false,
-            tag_editor_panel_rect: Rect::ZERO,
-            tag_editor_confirm_rect: Rect::ZERO,
-            tag_editor_cancel_rect: Rect::ZERO,
             compact_navigation_rect: Rect::ZERO,
             compact_back_rect: Rect::ZERO,
             confirmation_panel_rect: Rect::ZERO,
@@ -550,7 +485,7 @@ impl NotoraShell {
         });
         self.search_box.sync_text(&model.search_query);
         self.new_note_button.set_input(SplitButtonInput {
-            label: "New note".to_owned(),
+            label: "新建笔记".to_owned(),
             enabled: model.new_note_control.is_visible(),
         });
         self.new_note_button.set_menu_open(model.show_menu);
@@ -559,24 +494,20 @@ impl NotoraShell {
         self.confirmation_action =
             model.confirmation.as_ref().map(|input| input.confirm_action.clone());
         self.new_document_menu_open = model.show_menu;
-        self.tag_editor_open = model.tag_editor.is_some();
         self.save_conflict_actions =
             model.save_conflict.as_ref().map(|conflict| conflict.actions.clone());
-        if let Some(editor) = &model.tag_editor {
-            self.tag_editor_box.sync_text(&editor.display_name);
-        }
         self.card_empty_state.set_input(StatusStateInput {
             kind: StatusStateKind::Empty,
-            title: "No notes here".to_owned(),
-            description: "Create a note or choose another location.".to_owned(),
+            title: "暂无笔记".to_owned(),
+            description: "新建一篇笔记，或者从左侧选择其他位置。".to_owned(),
             icon: Some("notebook-pen".to_owned()),
             action_label: None,
             action_id: None,
         });
         self.editor_empty_state.set_input(StatusStateInput {
             kind: StatusStateKind::Empty,
-            title: "Select a note".to_owned(),
-            description: "Its editor will appear here.".to_owned(),
+            title: "请选择笔记".to_owned(),
+            description: "编辑器将在此处显示。".to_owned(),
             icon: Some("file-text".to_owned()),
             action_label: None,
             action_id: None,
@@ -614,11 +545,20 @@ impl NotoraShell {
         self.navigation_tree_rect = tree_rect;
         self.search_rect = search_rect;
         self.settings_rect = settings_rect;
-        let new_note_anchor_rect =
-            new_note_button_rect(layout.card_list_rect, dpi, NewNoteControlState::Visible);
-        let new_note_rect =
-            new_note_button_rect(layout.card_list_rect, dpi, model.new_note_control);
-        self.new_document_menu_rect = new_document_menu_rect(new_note_anchor_rect, dpi);
+        let card_header = card_header_layout(
+            layout.card_list_rect,
+            dpi,
+            &model.card_list_title,
+            model.new_note_control,
+            model.note_toolbar.len(),
+        );
+        let new_note_rect = new_note_button_rect(
+            layout.card_list_rect,
+            dpi,
+            model.new_note_control,
+            card_header.control_top_y,
+        );
+        self.new_document_menu_rect = new_document_menu_rect(new_note_rect, dpi);
         let splitters_enabled = layout.responsive_mode == ResponsiveLayoutMode::ThreePane;
         self.navigation_splitter.set_input(SplitterInput {
             logical_position: layout.navigation_width_logical,
@@ -634,9 +574,9 @@ impl NotoraShell {
         });
         let card_content_rect = Rect::new(
             layout.card_list_rect.x + padding,
-            layout.card_list_rect.y + 44.0 * dpi,
+            card_header.content_top_y,
             (layout.card_list_rect.w - padding * 2.0).max(0.0),
-            (layout.card_list_rect.h - 56.0 * dpi).max(0.0),
+            (layout.card_list_rect.bottom() - card_header.content_top_y - padding).max(0.0),
         );
         self.card_content_rect = card_content_rect;
         let tool_button_width = NOTE_TOOL_BUTTON_WIDTH_LOGICAL * dpi;
@@ -652,6 +592,7 @@ impl NotoraShell {
             toolbar_trailing_inset,
             tool_button_width,
             tool_button_height,
+            card_header.control_top_y,
             &model.note_toolbar,
         );
         self.compact_navigation_rect = if layout.responsive_mode != ResponsiveLayoutMode::ThreePane
@@ -679,7 +620,6 @@ impl NotoraShell {
             Rect::ZERO
         };
         self.layout_confirmation_overlay(layout.overlay_rect, dpi, model.confirmation.is_some());
-        self.layout_tag_editor_overlay(layout.overlay_rect, dpi, model.tag_editor.is_some());
         self.layout_save_conflict_overlay(layout.overlay_rect, dpi, model.save_conflict.is_some());
         frame.with_layout_context(|context| {
             self.search_box.set_rect(search_rect, context);
@@ -692,10 +632,6 @@ impl NotoraShell {
             self.new_note_button.set_rect(new_note_rect, context);
             if model.show_settings_overlay {
                 self.settings_overlay.set_rect(layout.overlay_rect, context);
-            }
-            if model.tag_editor.is_some() {
-                self.tag_editor_box
-                    .set_rect(tag_editor_text_box_rect(self.tag_editor_panel_rect, dpi), context);
             }
         });
         frame.with_paint_context(|context| {
@@ -737,17 +673,17 @@ impl NotoraShell {
                     + SIDEBAR_LABEL_FONT_SIZE_LOGICAL * 0.35 * context.dpi,
                 SIDEBAR_LABEL_FONT_SIZE_LOGICAL * context.dpi,
                 application_theme.text_secondary,
-                "Settings",
+                "设置",
             );
             context.text(
                 layout.card_list_rect.x + padding,
-                layout.card_list_rect.y + 28.0 * context.dpi,
-                16.0 * context.dpi,
+                card_header.title_baseline_y,
+                CARD_HEADER_TITLE_FONT_SIZE_LOGICAL * context.dpi,
                 application_theme.text_primary,
                 &model.card_list_title,
             );
             if self.compact_navigation_rect != Rect::ZERO {
-                paint_note_tool_button(context, self.compact_navigation_rect, "Library");
+                paint_note_tool_button(context, self.compact_navigation_rect, "笔记库");
             }
             for button in &self.note_toolbar_buttons {
                 paint_note_tool_button(context, button.rect, &button.label);
@@ -768,7 +704,7 @@ impl NotoraShell {
         }
         if self.compact_back_rect != Rect::ZERO {
             frame.with_paint_context(|context| {
-                paint_note_tool_button(context, self.compact_back_rect, "Back");
+                paint_note_tool_button(context, self.compact_back_rect, "返回");
             });
         }
         if model.show_settings_overlay {
@@ -804,22 +740,12 @@ impl NotoraShell {
                     application_theme.text_secondary,
                     &confirmation.description,
                 );
-                paint_note_tool_button(context, self.confirmation_cancel_rect, "Cancel");
+                paint_note_tool_button(context, self.confirmation_cancel_rect, "取消");
                 paint_note_tool_button(
                     context,
                     self.confirmation_confirm_rect,
                     &confirmation.confirm_label,
                 );
-            });
-        }
-        if let Some(editor) = &model.tag_editor {
-            frame.with_paint_context(|context| {
-                context.list.fill_rounded(
-                    layout.overlay_rect,
-                    context.theme.application_theme().modal_scrim,
-                    0.0,
-                );
-                self.paint_tag_editor_overlay(context, editor);
             });
         }
         if model.save_conflict.is_some() {
@@ -936,9 +862,6 @@ impl NotoraShell {
                 .map(settings_overlay_action_to_notora_action)
                 .into_iter()
                 .collect();
-        }
-        if self.tag_editor_open {
-            return self.route_tag_editor_event(event, &mut event_context).into_iter().collect();
         }
         if self.save_conflict_actions.is_some() {
             return self.route_save_conflict_event(event).into_iter().collect();
@@ -1073,38 +996,6 @@ impl NotoraShell {
         );
     }
 
-    fn layout_tag_editor_overlay(&mut self, overlay_rect: Rect, dpi: f32, visible: bool) {
-        if !visible {
-            self.tag_editor_panel_rect = Rect::ZERO;
-            self.tag_editor_confirm_rect = Rect::ZERO;
-            self.tag_editor_cancel_rect = Rect::ZERO;
-            return;
-        }
-        let panel_width = (TAG_EDITOR_PANEL_WIDTH_LOGICAL * dpi).min(overlay_rect.w.max(0.0));
-        let panel_height = (TAG_EDITOR_PANEL_HEIGHT_LOGICAL * dpi).min(overlay_rect.h.max(0.0));
-        self.tag_editor_panel_rect = Rect::new(
-            overlay_rect.x + (overlay_rect.w - panel_width) * 0.5,
-            overlay_rect.y + (overlay_rect.h - panel_height) * 0.5,
-            panel_width,
-            panel_height,
-        );
-        let button_width = CONFIRMATION_BUTTON_WIDTH_LOGICAL * dpi;
-        let button_height = CONFIRMATION_BUTTON_HEIGHT_LOGICAL * dpi;
-        let button_y = self.tag_editor_panel_rect.bottom() - button_height - 16.0 * dpi;
-        self.tag_editor_confirm_rect = Rect::new(
-            self.tag_editor_panel_rect.right() - button_width - 20.0 * dpi,
-            button_y,
-            button_width,
-            button_height,
-        );
-        self.tag_editor_cancel_rect = Rect::new(
-            self.tag_editor_confirm_rect.x - button_width - 8.0 * dpi,
-            button_y,
-            button_width,
-            button_height,
-        );
-    }
-
     fn layout_save_conflict_overlay(&mut self, overlay_rect: Rect, dpi: f32, visible: bool) {
         if !visible {
             self.save_conflict_panel_rect = Rect::ZERO;
@@ -1159,67 +1050,20 @@ impl NotoraShell {
             self.save_conflict_panel_rect.y + 38.0 * context.dpi,
             17.0 * context.dpi,
             application_theme.text_primary,
-            "File changed on disk",
+            "磁盘文件已更改",
         );
         context.text(
             self.save_conflict_panel_rect.x + 20.0 * context.dpi,
             self.save_conflict_panel_rect.y + 72.0 * context.dpi,
             13.0 * context.dpi,
             application_theme.text_secondary,
-            "Choose how to resolve the local edits without silently overwriting the file.",
+            "请选择如何处理本地编辑，文件不会被静默覆盖。",
         );
         for (rect, label) in
-            self.save_conflict_button_rects.iter().zip(["Reload", "Save copy", "Retry", "Cancel"])
+            self.save_conflict_button_rects.iter().zip(["重新载入", "保存副本", "重试", "取消"])
         {
             paint_note_tool_button(context, *rect, label);
         }
-    }
-
-    fn route_tag_editor_event(
-        &mut self,
-        event: &Event,
-        context: &mut EventCtx<'_>,
-    ) -> Option<NotoraAction> {
-        let Event::MouseDown { px, py, button: ui::core::MouseButton::Left } = event else {
-            self.tag_editor_box.set_focus(true);
-            return self
-                .tag_editor_box
-                .on_event(event, context)
-                .and_then(tag_editor_text_box_action);
-        };
-        if self.tag_editor_confirm_rect.contains(*px, *py) {
-            return Some(NotoraAction::TagEditorConfirmed);
-        }
-        if self.tag_editor_cancel_rect.contains(*px, *py)
-            || !self.tag_editor_panel_rect.contains(*px, *py)
-        {
-            return Some(NotoraAction::OverlayDismissed);
-        }
-        self.tag_editor_box.set_focus(true);
-        self.tag_editor_box.on_event(event, context).and_then(tag_editor_text_box_action)
-    }
-
-    fn paint_tag_editor_overlay(
-        &self,
-        context: &mut ui::PaintCtx<'_>,
-        editor: &TagEditorOverlayInput,
-    ) {
-        let application_theme = context.theme.application_theme();
-        context.list.fill_rounded(
-            self.tag_editor_panel_rect,
-            application_theme.overlay_surface,
-            10.0 * context.dpi,
-        );
-        context.text(
-            self.tag_editor_panel_rect.x + 20.0 * context.dpi,
-            self.tag_editor_panel_rect.y + 36.0 * context.dpi,
-            16.0 * context.dpi,
-            application_theme.text_primary,
-            &editor.title,
-        );
-        self.tag_editor_box.paint(context);
-        paint_note_tool_button(context, self.tag_editor_cancel_rect, "Cancel");
-        paint_note_tool_button(context, self.tag_editor_confirm_rect, "Save");
     }
 
     fn confirmation_overlay_action(&self, event: &Event) -> Option<NotoraAction> {
@@ -1279,7 +1123,7 @@ impl NotoraShell {
                 + SIDEBAR_LABEL_FONT_SIZE_LOGICAL * 0.35 * context.dpi,
             SIDEBAR_LABEL_FONT_SIZE_LOGICAL * context.dpi,
             application_theme.text_secondary,
-            "Settings",
+            "设置",
         );
     }
 
@@ -1332,10 +1176,10 @@ fn render_external_file_card(session: &ExternalFileSession) -> RenderCard {
                 .as_path()
                 .file_name()
                 .and_then(|name| name.to_str())
-                .unwrap_or("Untitled")
+                .unwrap_or("未命名")
                 .to_owned(),
             excerpt: canonical_path.as_path().display().to_string(),
-            timestamp: "External file".to_owned(),
+            timestamp: "外部文件".to_owned(),
             icon: Some(
                 document_icon(
                     DocumentKind::from_path(canonical_path.as_path()).unwrap_or(DocumentKind::Text),
@@ -1346,9 +1190,9 @@ fn render_external_file_card(session: &ExternalFileSession) -> RenderCard {
         },
         ExternalFileSession::Untitled { kind, .. } => RenderCard {
             identity: session.identity(),
-            title: "Untitled".to_owned(),
-            excerpt: "Unsaved external file".to_owned(),
-            timestamp: "External file".to_owned(),
+            title: "未命名".to_owned(),
+            excerpt: "尚未保存的外部文件".to_owned(),
+            timestamp: "外部文件".to_owned(),
             icon: Some(document_icon(*kind).to_owned()),
             tag_summary: String::new(),
         },
@@ -1357,10 +1201,10 @@ fn render_external_file_card(session: &ExternalFileSession) -> RenderCard {
             title: last_known_path
                 .file_name()
                 .and_then(|name| name.to_str())
-                .unwrap_or("Missing file")
+                .unwrap_or("文件已丢失")
                 .to_owned(),
             excerpt: last_known_path.display().to_string(),
-            timestamp: "Missing".to_owned(),
+            timestamp: "已丢失".to_owned(),
             icon: Some("file-warning".to_owned()),
             tag_summary: String::new(),
         },
@@ -1377,7 +1221,7 @@ fn document_icon(kind: DocumentKind) -> &'static str {
 
 fn format_modified_timestamp(modified_nanoseconds: i64) -> String {
     let seconds = modified_nanoseconds.div_euclid(1_000_000_000);
-    format!("Modified {seconds}")
+    format!("修改时间 {seconds}")
 }
 
 fn pointer_target(event: &Event, shell: &NotoraShell) -> Option<FocusTarget> {
@@ -1442,21 +1286,13 @@ fn settings_overlay_action_to_notora_action(action: SettingsOverlayAction) -> No
 
 fn confirmation_overlay_input(overlay: OverlayState) -> Option<ConfirmationOverlayInput> {
     match overlay {
-        OverlayState::DeleteTagConfirmation { .. } => Some(ConfirmationOverlayInput {
-            title: "Delete tag?".to_owned(),
-            description: "Notes keep their content; only this tag and its links are removed."
-                .to_owned(),
-            confirm_label: "Delete".to_owned(),
-            confirm_action: NotoraAction::TagDeletionConfirmed,
-        }),
         OverlayState::TrashPermanentDeletionConfirmation { operation } => {
             let (title, description) = match operation {
-                crate::action::TrashOperation::PermanentlyDelete { .. } => (
-                    "Delete note permanently?",
-                    "This removes the selected Trash entry and cannot be undone.",
-                ),
+                crate::action::TrashOperation::PermanentlyDelete { .. } => {
+                    ("永久删除笔记？", "所选回收站项目将被删除，且无法撤销。")
+                }
                 crate::action::TrashOperation::Empty => {
-                    ("Empty Trash?", "This removes every current Trash entry and cannot be undone.")
+                    ("清空回收站？", "当前回收站中的所有项目都将被删除，且无法撤销。")
                 }
                 crate::action::TrashOperation::MoveToTrash { .. }
                 | crate::action::TrashOperation::Restore { .. }
@@ -1465,22 +1301,19 @@ fn confirmation_overlay_input(overlay: OverlayState) -> Option<ConfirmationOverl
             Some(ConfirmationOverlayInput {
                 title: title.to_owned(),
                 description: description.to_owned(),
-                confirm_label: "Delete".to_owned(),
+                confirm_label: "删除".to_owned(),
                 confirm_action: NotoraAction::TrashPermanentDeletionConfirmed,
             })
         }
         OverlayState::TrashRestoreConflictConfirmation { .. } => Some(ConfirmationOverlayInput {
-            title: "A file already exists".to_owned(),
-            description:
-                "Restore this note using a distinct name, leaving the existing file unchanged."
-                    .to_owned(),
-            confirm_label: "Restore copy".to_owned(),
+            title: "文件已存在".to_owned(),
+            description: "请使用其他名称恢复此笔记，现有文件不会被更改。".to_owned(),
+            confirm_label: "恢复副本".to_owned(),
             confirm_action: NotoraAction::TrashRestoreWithRenamedPathConfirmed,
         }),
         OverlayState::None
         | OverlayState::Settings
         | OverlayState::NewDocumentMenu
-        | OverlayState::TagEditor
         | OverlayState::SaveConflict => None,
     }
 }
@@ -1582,6 +1415,7 @@ fn layout_note_toolbar(
     trailing_inset: f32,
     button_width: f32,
     button_height: f32,
+    button_y: f32,
     inputs: &[NoteToolbarButtonInput],
 ) -> Vec<RenderedToolbarButton> {
     let scale = button_height / NOTE_TOOL_BUTTON_HEIGHT_LOGICAL;
@@ -1595,7 +1429,6 @@ fn layout_note_toolbar(
             .max(0.0)
             .min(button_width)
     };
-    let button_y = card_list_rect.y + 8.0 * scale;
     inputs
         .iter()
         .rev()
@@ -1614,28 +1447,6 @@ fn layout_note_toolbar(
             action: input.action.clone(),
         })
         .collect()
-}
-
-fn tag_editor_text_box_rect(panel_rect: Rect, dpi: f32) -> Rect {
-    Rect::new(
-        panel_rect.x + 20.0 * dpi,
-        panel_rect.y + 54.0 * dpi,
-        (panel_rect.w - 40.0 * dpi).max(0.0),
-        TAG_EDITOR_TEXT_BOX_HEIGHT_LOGICAL * dpi,
-    )
-}
-
-fn tag_editor_text_box_action(action: WidgetAction) -> Option<NotoraAction> {
-    match action {
-        WidgetAction::Control(ControlAction::TextEdited {
-            id: TAG_EDITOR_TEXT_BOX_ID,
-            value: TextPayload::Plain(display_name),
-        }) => Some(NotoraAction::TagEditorNameChanged(display_name)),
-        WidgetAction::Control(ControlAction::TextCommitted {
-            id: TAG_EDITOR_TEXT_BOX_ID, ..
-        }) => Some(NotoraAction::TagEditorConfirmed),
-        _ => None,
-    }
 }
 
 fn note_toolbar_action(event: &Event, buttons: &[RenderedToolbarButton]) -> Option<NotoraAction> {
@@ -1679,7 +1490,56 @@ fn should_dismiss_new_document_menu(event: &Event, menu_rect: Rect, trigger_rect
     trigger_rect.contains(*px, *py) || !menu_rect.contains(*px, *py)
 }
 
-fn new_note_button_rect(card_list_rect: Rect, dpi: f32, state: NewNoteControlState) -> Rect {
+fn card_header_layout(
+    card_list_rect: Rect,
+    dpi: f32,
+    title: &str,
+    new_note_state: NewNoteControlState,
+    toolbar_button_count: usize,
+) -> CardHeaderLayout {
+    let padding = SHELL_PADDING_LOGICAL * dpi;
+    let gap = NOTE_TOOL_BUTTON_GAP_LOGICAL * dpi;
+    let title_width = ui::core::text_util::estimate_text_width_px(
+        title,
+        CARD_HEADER_TITLE_FONT_SIZE_LOGICAL * dpi,
+    );
+    let toolbar_width = if toolbar_button_count == 0 {
+        0.0
+    } else {
+        NOTE_TOOL_BUTTON_WIDTH_LOGICAL * dpi * toolbar_button_count as f32
+            + gap * toolbar_button_count.saturating_sub(1) as f32
+    };
+    let new_note_width =
+        if new_note_state.is_visible() { NEW_NOTE_BUTTON_WIDTH_LOGICAL * dpi } else { 0.0 };
+    let control_group_gap = if toolbar_width > 0.0 && new_note_width > 0.0 { gap } else { 0.0 };
+    let controls_width = toolbar_width + control_group_gap + new_note_width;
+    let title_control_gap = if controls_width > 0.0 { gap } else { 0.0 };
+    let inner_width = (card_list_rect.w - padding * 2.0).max(0.0);
+    let wraps = title_width + title_control_gap + controls_width > inner_width;
+    let control_top_logical = if wraps {
+        CARD_HEADER_WRAPPED_CONTROL_TOP_LOGICAL
+    } else {
+        CARD_HEADER_CONTROL_TOP_LOGICAL
+    };
+    let content_top_logical = if wraps {
+        CARD_HEADER_WRAPPED_CONTENT_TOP_LOGICAL
+    } else {
+        CARD_HEADER_CONTENT_TOP_LOGICAL
+    };
+
+    CardHeaderLayout {
+        title_baseline_y: card_list_rect.y + CARD_HEADER_TITLE_BASELINE_LOGICAL * dpi,
+        control_top_y: card_list_rect.y + control_top_logical * dpi,
+        content_top_y: card_list_rect.y + content_top_logical * dpi,
+    }
+}
+
+fn new_note_button_rect(
+    card_list_rect: Rect,
+    dpi: f32,
+    state: NewNoteControlState,
+    control_top_y: f32,
+) -> Rect {
     if !state.is_visible() || card_list_rect.w <= 0.0 || card_list_rect.h <= 0.0 {
         return Rect::ZERO;
     }
@@ -1688,7 +1548,7 @@ fn new_note_button_rect(card_list_rect: Rect, dpi: f32, state: NewNoteControlSta
         (NEW_NOTE_BUTTON_WIDTH_LOGICAL * dpi).min((card_list_rect.w - padding * 2.0).max(0.0));
     Rect::new(
         card_list_rect.right() - padding - width,
-        card_list_rect.y + 8.0 * dpi,
+        control_top_y,
         width,
         NOTE_TOOL_BUTTON_HEIGHT_LOGICAL * dpi,
     )
@@ -1708,13 +1568,13 @@ fn new_document_menu_rect(button_rect: Rect, dpi: f32) -> Rect {
 
 fn card_list_title(scope: &NavigationScope) -> &'static str {
     match scope {
-        NavigationScope::Search { .. } => "Search",
-        NavigationScope::WorkspaceRoot => "Workspace",
-        NavigationScope::Directory { .. } => "Folder",
-        NavigationScope::Starred => "Starred",
-        NavigationScope::Trash => "Trash",
-        NavigationScope::Tag { .. } => "Tag",
-        NavigationScope::ExternalFiles => "Files",
+        NavigationScope::Search { .. } => "搜索结果",
+        NavigationScope::WorkspaceRoot => "工作区",
+        NavigationScope::Directory { .. } => "文件夹",
+        NavigationScope::Starred => "星标",
+        NavigationScope::Trash => "回收站",
+        NavigationScope::Tag { .. } => "标签",
+        NavigationScope::ExternalFiles => "文件",
     }
 }
 
@@ -1731,7 +1591,11 @@ mod tests {
         let model = NotoraRenderModel::from_state(&NotoraState::default());
         assert_eq!(model.navigation_rows.len(), 4);
         assert_eq!(model.navigation_rows[0].icon.as_deref(), Some("folder-open"));
-        assert_eq!(model.card_list_title, "Workspace");
+        assert_eq!(model.navigation_rows[0].label, "工作区");
+        assert_eq!(model.navigation_rows[1].label, "星标");
+        assert_eq!(model.navigation_rows[2].label, "回收站");
+        assert_eq!(model.navigation_rows[3].label, "文件");
+        assert_eq!(model.card_list_title, "工作区");
         assert!(model.cards.is_empty());
     }
 
@@ -1755,16 +1619,68 @@ mod tests {
         let navigation_rect = Rect::new(0.0, 0.0, 220.0, 600.0);
         let card_list_rect = Rect::new(228.0, 0.0, 340.0, 600.0);
 
-        let button_rect = new_note_button_rect(card_list_rect, 1.0, NewNoteControlState::Visible);
+        let button_rect = new_note_button_rect(
+            card_list_rect,
+            1.0,
+            NewNoteControlState::Visible,
+            CARD_HEADER_CONTROL_TOP_LOGICAL,
+        );
 
         assert!(button_rect != Rect::ZERO);
         assert!(card_list_rect.contains(button_rect.x, button_rect.y));
         assert!(card_list_rect.contains(button_rect.right(), button_rect.bottom()));
         assert!(!navigation_rect.contains(button_rect.x, button_rect.y));
         assert_eq!(
-            new_note_button_rect(card_list_rect, 1.0, NewNoteControlState::Hidden),
+            new_note_button_rect(
+                card_list_rect,
+                1.0,
+                NewNoteControlState::Hidden,
+                CARD_HEADER_CONTROL_TOP_LOGICAL,
+            ),
             Rect::ZERO
         );
+    }
+
+    #[test]
+    fn narrow_card_header_keeps_the_title_clear_of_toolbar_buttons() {
+        let card_list_rect = Rect::new(228.0, 0.0, 268.0, 600.0);
+        let padding = SHELL_PADDING_LOGICAL;
+        let header = card_header_layout(
+            card_list_rect,
+            1.0,
+            "一个很长的中栏标题",
+            NewNoteControlState::Visible,
+            1,
+        );
+        let new_note_rect = new_note_button_rect(
+            card_list_rect,
+            1.0,
+            NewNoteControlState::Visible,
+            header.control_top_y,
+        );
+        let toolbar = layout_note_toolbar(
+            card_list_rect,
+            padding,
+            card_list_rect.right() - new_note_rect.x + NOTE_TOOL_BUTTON_GAP_LOGICAL,
+            NOTE_TOOL_BUTTON_WIDTH_LOGICAL,
+            NOTE_TOOL_BUTTON_HEIGHT_LOGICAL,
+            header.control_top_y,
+            &[NoteToolbarButtonInput {
+                label: "操作".to_owned(),
+                action: NotoraAction::SettingsViewChanged,
+            }],
+        );
+        let title_right = card_list_rect.x
+            + padding
+            + ui::core::text_util::estimate_text_width_px("一个很长的中栏标题", 16.0);
+        let title_bottom = card_list_rect.y + 36.0;
+        let first_button = &toolbar[0].rect;
+
+        assert!(
+            first_button.x >= title_right + NOTE_TOOL_BUTTON_GAP_LOGICAL
+                || first_button.y >= title_bottom
+        );
+        assert!(header.content_top_y >= first_button.bottom());
     }
 
     #[test]
@@ -1777,7 +1693,7 @@ mod tests {
         assert_eq!(
             model.note_toolbar,
             vec![NoteToolbarButtonInput {
-                label: "Open".to_owned(),
+                label: "打开".to_owned(),
                 action: NotoraAction::OpenExternalFileDialogRequested,
             }]
         );
@@ -1794,7 +1710,7 @@ mod tests {
         assert_eq!(
             model.note_toolbar,
             vec![NoteToolbarButtonInput {
-                label: "Clear".to_owned(),
+                label: "清除".to_owned(),
                 action: NotoraAction::SearchCommitted {
                     query: String::new(),
                     search_generation: None,
@@ -1902,12 +1818,6 @@ mod tests {
 
     #[test]
     fn confirmation_overlay_maps_only_to_product_confirmation_actions() {
-        let tag_confirmation = confirmation_overlay_input(OverlayState::DeleteTagConfirmation {
-            tag_id: notora_core::TagId::generate(),
-        })
-        .expect("tag confirmation should render");
-        assert_eq!(tag_confirmation.confirm_action, NotoraAction::TagDeletionConfirmed);
-
         let trash_confirmation =
             confirmation_overlay_input(OverlayState::TrashPermanentDeletionConfirmation {
                 operation: crate::action::TrashOperation::Empty,
@@ -2035,33 +1945,13 @@ mod tests {
     }
 
     #[test]
-    fn tag_and_trash_toolbars_map_to_typed_domain_actions() {
+    fn tag_scope_has_no_manual_tag_mutation_toolbar_actions() {
         let tag_id = notora_core::TagId::generate();
         let note_id = NoteId::generate();
         let tag_buttons = note_toolbar_buttons(&NavigationScope::Tag { tag_id }, Some(note_id));
-        assert!(tag_buttons.iter().any(|button| {
-            button.action
-                == NotoraAction::MetadataMutationRequested(MetadataMutation::AttachTag {
-                    note_id,
-                    tag_id,
-                })
-        }));
-        assert!(tag_buttons.iter().any(|button| {
-            button.action
-                == NotoraAction::MetadataMutationRequested(MetadataMutation::DetachTag {
-                    note_id,
-                    tag_id,
-                })
-        }));
-
-        let trash_buttons = note_toolbar_buttons(&NavigationScope::Trash, Some(note_id));
         assert_eq!(
-            trash_buttons[0].action,
-            NotoraAction::TrashOperationRequested(TrashOperation::Restore { note_id })
-        );
-        assert_eq!(
-            trash_buttons[1].action,
-            NotoraAction::TrashOperationRequested(TrashOperation::PermanentlyDelete { note_id })
+            tag_buttons.iter().map(|button| button.label.as_str()).collect::<Vec<_>>(),
+            vec!["重命名", "移动", "星标", "回收站"]
         );
     }
 
@@ -2078,14 +1968,5 @@ mod tests {
             model.note_toolbar[0].action,
             NotoraAction::TrashOperationRequested(TrashOperation::Empty)
         );
-    }
-
-    #[test]
-    fn tag_editor_text_box_keeps_the_name_update_at_the_product_boundary() {
-        let action = tag_editor_text_box_action(WidgetAction::Control(ControlAction::TextEdited {
-            id: TAG_EDITOR_TEXT_BOX_ID,
-            value: TextPayload::Plain("Roadmap".to_owned()),
-        }));
-        assert_eq!(action, Some(NotoraAction::TagEditorNameChanged("Roadmap".to_owned())));
     }
 }

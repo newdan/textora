@@ -65,23 +65,15 @@ impl std::fmt::Display for WorkspaceControllerError {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::CreateDirectory { path, source } => {
-                write!(
-                    formatter,
-                    "could not create workspace directory {}: {source}",
-                    path.display()
-                )
+                write!(formatter, "无法创建工作区目录 {}：{source}", path.display())
             }
-            Self::Workspace(source) => write!(formatter, "could not open workspace: {source}"),
+            Self::Workspace(source) => write!(formatter, "无法打开工作区：{source}"),
             Self::FileMonitor(source) => {
-                write!(formatter, "could not watch workspace files: {source}")
+                write!(formatter, "无法监视工作区文件：{source}")
             }
-            Self::IndexerThreadUnavailable => {
-                formatter.write_str("could not start the workspace indexing worker")
-            }
-            Self::NoActiveWorkspace => formatter.write_str("no workspace is active"),
-            Self::CommandWorkerDisconnected => {
-                formatter.write_str("workspace command worker is unavailable")
-            }
+            Self::IndexerThreadUnavailable => formatter.write_str("无法启动工作区索引线程"),
+            Self::NoActiveWorkspace => formatter.write_str("当前没有活动工作区"),
+            Self::CommandWorkerDisconnected => formatter.write_str("工作区命令线程不可用"),
         }
     }
 }
@@ -295,14 +287,11 @@ impl WorkspaceController {
 }
 
 fn recovered_catalog_notice(backup_path: &std::path::Path) -> String {
-    format!("the catalog was damaged and metadata was restored from {}", backup_path.display())
+    format!("目录索引已损坏，元数据已从 {} 恢复", backup_path.display())
 }
 
 fn rebuilt_catalog_notice(corrupt_path: &std::path::Path) -> String {
-    format!(
-        "the catalog was damaged; the original was kept at {} and metadata may have been lost",
-        corrupt_path.display()
-    )
+    format!("目录索引已损坏；原文件已保存在 {}，部分元数据可能已丢失", corrupt_path.display())
 }
 
 impl Default for WorkspaceController {
@@ -401,7 +390,7 @@ fn run_indexer(
         let _ = event_sender.send(NotoraProductEvent::WorkspaceIndexFailed {
             workspace_id: descriptor.workspace_id,
             workspace_generation: generation,
-            message: format!("workspace catalog backup before migration failed: {error}"),
+            message: format!("迁移前备份工作区目录索引失败：{error}"),
         });
         return;
     }
@@ -426,7 +415,7 @@ fn run_indexer(
         let _ = event_sender.send(NotoraProductEvent::WorkspaceIndexFailed {
             workspace_id: descriptor.workspace_id,
             workspace_generation: generation,
-            message: "workspace catalog is unavailable to the indexing worker".to_owned(),
+            message: "索引线程无法访问工作区目录索引".to_owned(),
         });
         return;
     };
@@ -475,9 +464,7 @@ fn run_indexer(
                 let _ = event_sender.send(NotoraProductEvent::WorkspaceIndexFailed {
                     workspace_id: descriptor.workspace_id,
                     workspace_generation: generation,
-                    message:
-                        "workspace file monitor disconnected; automatic reconciliation stopped"
-                            .to_owned(),
+                    message: "工作区文件监视器已断开，自动同步已停止".to_owned(),
                 });
                 return;
             }
@@ -659,19 +646,6 @@ fn execute_metadata_mutation_in_worker(
         MetadataMutation::ToggleStar { note_id } => {
             catalog.toggle_note_starred(note_id).map(|_| ())
         }
-        MetadataMutation::CreateTag { display_name } => {
-            catalog.create_tag(&display_name).map(|_| ())
-        }
-        MetadataMutation::RenameTag { tag_id, display_name } => {
-            catalog.rename_tag(tag_id, &display_name)
-        }
-        MetadataMutation::DeleteTag { tag_id } => catalog.delete_tag(tag_id).map(|_| ()),
-        MetadataMutation::AttachTag { note_id, tag_id } => {
-            catalog.attach_tag(note_id, tag_id).map(|_| ())
-        }
-        MetadataMutation::DetachTag { note_id, tag_id } => {
-            catalog.detach_tag(note_id, tag_id).map(|_| ())
-        }
     };
     match result {
         Ok(()) => {
@@ -729,7 +703,7 @@ fn prepare_document_in_worker(
         DocumentIdentity::Note(note_id) => catalog
             .active_note(note_id)
             .map_err(|error| error.to_string())
-            .and_then(|note| note.ok_or_else(|| format!("active note {note_id} no longer exists")))
+            .and_then(|note| note.ok_or_else(|| format!("活动笔记 {note_id} 已不存在")))
             .and_then(|note| {
                 workspace
                     .resolve_relative_path(&note.relative_path)
@@ -738,9 +712,7 @@ fn prepare_document_in_worker(
             .and_then(|path| {
                 crate::editor_adapter::load_document(&path).map_err(|error| error.to_string())
             }),
-        DocumentIdentity::ExternalFile(_) => {
-            Err("external documents must be loaded by the external session service".to_owned())
-        }
+        DocumentIdentity::ExternalFile(_) => Err("外部文档必须由外部文件会话加载".to_owned()),
     };
     match result {
         Ok(document) => {
@@ -823,8 +795,9 @@ mod tests {
     use appkit_shell::ProductHost;
 
     use super::{
-        CATALOG_FILE_NAME, Catalog, WorkspaceCommand, WorkspaceCommandResult, WorkspaceController,
-        WorkspaceControllerError, default_migration_backup_retention, run_indexer,
+        CATALOG_FILE_NAME, Catalog, Workspace, WorkspaceCommand, WorkspaceCommandResult,
+        WorkspaceController, WorkspaceControllerError, default_migration_backup_retention,
+        run_indexer, scan_workspace,
     };
     use crate::action::CardQuery;
     use crate::product::{NotoraProduct, NotoraProductEvent};
@@ -993,7 +966,7 @@ mod tests {
                     message,
                 } if *workspace_id == descriptor.workspace_id
                     && *workspace_generation == 1
-                    && message.contains("file monitor disconnected")
+                    && message.contains("文件监视器已断开")
             )
         }));
     }
@@ -1049,7 +1022,7 @@ mod tests {
                     message,
                 } if *workspace_id == descriptor.workspace_id
                     && *workspace_generation == 1
-                    && message.contains("metadata was restored")
+                    && message.contains("元数据已从")
             )
         }));
     }
@@ -1215,6 +1188,21 @@ mod tests {
     #[test]
     fn active_workspace_worker_executes_metadata_mutations_off_the_main_thread() {
         let directory = tempfile::tempdir().expect("workspace test directory should be created");
+        std::fs::write(directory.path().join("note.md"), "body")
+            .expect("workspace note should be written");
+        let workspace = Workspace::open_or_initialize(directory.path())
+            .expect("workspace metadata should initialize");
+        let catalog_path = workspace.metadata_directory().join(CATALOG_FILE_NAME);
+        let catalog = Catalog::open(&catalog_path).expect("workspace catalog should open");
+        scan_workspace(&workspace, &catalog).expect("workspace note should be indexed");
+        let note_id = catalog
+            .active_notes()
+            .expect("active notes should load")
+            .first()
+            .expect("indexed note should exist")
+            .note_id;
+        drop(catalog);
+        drop(workspace);
         let mut controller = WorkspaceController::default();
         let mut product = NotoraProduct::new();
         let WorkspaceCommandResult::Opened(active_workspace) = controller
@@ -1228,9 +1216,7 @@ mod tests {
         };
 
         controller
-            .execute_metadata_mutation(crate::action::MetadataMutation::CreateTag {
-                display_name: "Plan".to_owned(),
-            })
+            .execute_metadata_mutation(crate::action::MetadataMutation::ToggleStar { note_id })
             .expect("active workspace should accept metadata mutations");
 
         let deadline = Instant::now() + Duration::from_secs(2);
@@ -1430,7 +1416,7 @@ mod tests {
                         message,
                     } if *workspace_id == active_workspace.descriptor.workspace_id
                         && *workspace_generation == active_workspace.generation
-                        && message.contains("metadata may have been lost")
+                        && message.contains("元数据可能已丢失")
                 )
             }) {
                 break;

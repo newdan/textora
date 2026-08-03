@@ -13,7 +13,7 @@ use appkit_shell::editor_runtime::{
 };
 use appkit_shell::render_state::{GpuState, TextState};
 use appkit_shell::{ProductHost, ProductWakeHandle, ShellEffect, ShellEvent};
-use winit::dpi::{PhysicalPosition, PhysicalSize};
+use winit::dpi::{LogicalSize, PhysicalPosition, PhysicalSize};
 use winit::event_loop::{ActiveEventLoop, EventLoopProxy};
 use winit::window::WindowAttributes;
 
@@ -54,10 +54,8 @@ const SHUTDOWN_SAVE_DRAIN_TIMEOUT: Duration = Duration::from_secs(2);
 const SHUTDOWN_SAVE_DRAIN_POLL_INTERVAL: Duration = Duration::from_millis(10);
 const DEFAULT_RUNTIME_TAB_LIMIT: usize = 12;
 const STARTUP_TRACE_ENVIRONMENT_VARIABLE: &str = "NOTORA_TRACE_STARTUP";
-const TRASH_SAVE_FAILURE_MESSAGE: &str =
-    "the note could not be saved, so it was not moved to Trash";
-const TRASH_SAVE_STALE_MESSAGE: &str =
-    "the note changed before its Trash save completed, so it was not moved to Trash";
+const TRASH_SAVE_FAILURE_MESSAGE: &str = "笔记保存失败，因此未移入回收站";
+const TRASH_SAVE_STALE_MESSAGE: &str = "笔记在保存完成前发生变化，因此未移入回收站";
 
 #[derive(Debug)]
 struct StartupTrace {
@@ -147,12 +145,12 @@ pub enum NotoraAppError {
 impl std::fmt::Display for NotoraAppError {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::Paths(error) => write!(formatter, "could not initialize notora paths: {error}"),
+            Self::Paths(error) => write!(formatter, "无法初始化 notora 路径：{error}"),
             Self::Runtime(error) => {
-                write!(formatter, "could not initialize editor runtime: {error}")
+                write!(formatter, "无法初始化编辑器运行时：{error}")
             }
             Self::PersistenceWorker(error) => {
-                write!(formatter, "could not initialize persistence worker: {error}")
+                write!(formatter, "无法初始化持久化线程：{error}")
             }
         }
     }
@@ -692,7 +690,12 @@ impl NotoraApp {
         self.editor_runtime
             .resume(
                 event_loop,
-                WindowAttributes::default().with_title("notora"),
+                WindowAttributes::default().with_title("notora").with_min_inner_size(
+                    LogicalSize::new(
+                        crate::shell::layout::MINIMUM_WINDOW_WIDTH_LOGICAL,
+                        crate::shell::layout::MINIMUM_WINDOW_HEIGHT_LOGICAL,
+                    ),
+                ),
                 font_system,
                 self.settings.font_size,
                 &self.settings.font_family,
@@ -804,7 +807,7 @@ impl NotoraApp {
                 crate::product::NotoraProductEvent::CatalogBackupCompleted { .. } => {}
                 crate::product::NotoraProductEvent::CatalogBackupFailed { message, .. } => {
                     self.dispatch_action(NotoraAction::MetadataMutationFailed(format!(
-                        "metadata was saved, but its catalog backup failed: {message}"
+                        "元数据已保存，但目录索引备份失败：{message}"
                     )));
                 }
                 crate::product::NotoraProductEvent::CatalogRecoveryNotified { message, .. } => {
@@ -918,6 +921,8 @@ impl NotoraApp {
                 }
                 crate::product::NotoraProductEvent::WorkspaceScanCompleted { .. } => {
                     self.catalog_reconciliation_pending = false;
+                    self.request_navigation_tree();
+                    self.dispatch_action(NotoraAction::CatalogReindexed);
                 }
                 crate::product::NotoraProductEvent::WorkspaceIndexFailed { message, .. } => {
                     self.catalog_reconciliation_pending = true;
@@ -1102,7 +1107,7 @@ impl NotoraApp {
         );
         let Some(tab_id) = self.editor_runtime.active_tab_id() else {
             self.dispatch_action(NotoraAction::NoteCommandFailed(
-                "editor runtime did not activate the installed preview".to_owned(),
+                "编辑器运行时未激活已安装的预览".to_owned(),
             ));
             return;
         };
@@ -1278,7 +1283,7 @@ impl NotoraApp {
         let event_loop_proxy = self
             .event_loop_proxy
             .clone()
-            .ok_or_else(|| "save worker is unavailable before the event loop starts".to_owned())?;
+            .ok_or_else(|| "事件循环启动前保存线程不可用".to_owned())?;
         self.editor_runtime.submit_save(prepared, move || {
             let _ = event_loop_proxy.send_event(ShellEvent::SaveResultsReady);
         })
@@ -1307,8 +1312,7 @@ impl NotoraApp {
         tab_id: appkit_core::workspace::types::TabId,
         external_file_id: notora_core::ExternalFileId,
     ) {
-        let Some(path) =
-            rfd::FileDialog::new().add_filter("Text documents", &["txt", "md"]).save_file()
+        let Some(path) = rfd::FileDialog::new().add_filter("文本文档", &["txt", "md"]).save_file()
         else {
             return;
         };
@@ -1377,7 +1381,7 @@ impl NotoraApp {
         {
             self.pending_external_save_as.remove(&request.tab_id);
             self.dispatch_action(NotoraAction::NoteCommandFailed(
-                "could not start the external Save As path worker".to_owned(),
+                "无法启动外部文件另存为路径处理线程".to_owned(),
             ));
         }
     }
@@ -1407,13 +1411,11 @@ impl NotoraApp {
         };
         match self.state.external_files.save_as(external_file_id, canonical_path) {
             Some(SaveExternalFileAs::Updated(_)) => {}
-            Some(SaveExternalFileAs::PathAlreadyOpen(_)) => {
-                self.dispatch_action(NotoraAction::NoteCommandFailed(
-                    "save as target is already open in another external session".to_owned(),
-                ))
-            }
+            Some(SaveExternalFileAs::PathAlreadyOpen(_)) => self.dispatch_action(
+                NotoraAction::NoteCommandFailed("另存为目标已在其他外部文件会话中打开".to_owned()),
+            ),
             None => self.dispatch_action(NotoraAction::NoteCommandFailed(
-                "external session was closed before save as completed".to_owned(),
+                "另存为完成前外部文件会话已关闭".to_owned(),
             )),
         }
     }
@@ -1645,7 +1647,7 @@ impl NotoraEffectService for NotoraApp {
                 let Some(summary) = self.editor_runtime.document_summary(tab_id) else {
                     self.dispatch_action(NotoraAction::TrashOperationFailed(
                         crate::action::TrashOperationFailure::Message(
-                            "the open note is no longer available".to_owned(),
+                            "已打开的笔记不再可用".to_owned(),
                         ),
                     ));
                     return;
@@ -1654,7 +1656,7 @@ impl NotoraEffectService for NotoraApp {
                     let Some(origin) = self.document_origin_for_tab(tab_id) else {
                         self.dispatch_action(NotoraAction::TrashOperationFailed(
                             crate::action::TrashOperationFailure::Message(
-                                "only workspace notes can be moved to Trash".to_owned(),
+                                "只有工作区笔记可以移入回收站".to_owned(),
                             ),
                         ));
                         return;
@@ -1680,7 +1682,7 @@ impl NotoraEffectService for NotoraApp {
         let identity = DocumentIdentity::Note(note_id);
         let Some(tab_id) = self.document_registry.tab_for(identity) else {
             self.dispatch_action(NotoraAction::NoteCommandFailed(
-                "open the note before renaming it".to_owned(),
+                "请先打开笔记再重命名".to_owned(),
             ));
             return;
         };
@@ -1762,7 +1764,7 @@ impl NotoraEffectService for NotoraApp {
     fn open_external_files(&mut self, request: ExternalOpenRequest) {
         let paths = match request {
             ExternalOpenRequest::ShowFileDialog => rfd::FileDialog::new()
-                .add_filter("Text documents", &["txt", "md"])
+                .add_filter("文本文档", &["txt", "md"])
                 .pick_files()
                 .unwrap_or_default(),
             ExternalOpenRequest::Paths(paths) => paths,
@@ -1958,10 +1960,8 @@ impl NotoraApp {
             Some(_) | None => false,
         };
         if !workspace_restored && session.workspace_id.is_some() {
-            self.state.library.last_command_error = Some(
-                "the previous workspace is unavailable or no longer matches its saved identity"
-                    .to_owned(),
-            );
+            self.state.library.last_command_error =
+                Some("上次使用的工作区不可用，或与保存的标识不再匹配".to_owned());
         }
         let saved_last_document = session.last_document.clone();
         let saved_external_path = match &saved_last_document {
@@ -2043,7 +2043,7 @@ impl NotoraApp {
             .join(active_workspace.descriptor.workspace_id.to_string());
         if let Err(error) = self.workspace_controller.create_catalog_backup(directory, retention) {
             self.dispatch_action(NotoraAction::MetadataMutationFailed(format!(
-                "metadata was saved, but its catalog backup could not start: {error}"
+                "元数据已保存，但无法启动目录索引备份：{error}"
             )));
         }
     }
@@ -2079,21 +2079,17 @@ impl NotoraApp {
                             disk_revision,
                         }
                     }
-                    Err(error) => {
-                        crate::product::NotoraProductEvent::ConflictRetryRevisionFailed {
-                            identity,
-                            message: format!(
-                                "could not read the current disk version before retrying the save: {error}"
-                            ),
-                        }
-                    }
+                    Err(error) => crate::product::NotoraProductEvent::ConflictRetryRevisionFailed {
+                        identity,
+                        message: format!("重试保存前无法读取当前磁盘版本：{error}"),
+                    },
                 };
                 let _ = sender.send(event);
             })
             .is_err()
         {
             self.dispatch_action(NotoraAction::NoteCommandFailed(
-                "could not start the conflict retry revision worker".to_owned(),
+                "无法启动冲突保存重试线程".to_owned(),
             ));
         }
     }
@@ -2133,7 +2129,7 @@ impl NotoraApp {
             }
             ManualSaveRequest::UntitledExternalFile { .. } => {
                 self.dispatch_action(NotoraAction::NoteCommandFailed(
-                    "an untitled document has no disk conflict to retry".to_owned(),
+                    "未命名文档没有可重试的磁盘冲突".to_owned(),
                 ));
             }
         }
@@ -2143,8 +2139,7 @@ impl NotoraApp {
         let Some(tab_id) = self.document_registry.tab_for(identity) else {
             return;
         };
-        let Some(path) =
-            rfd::FileDialog::new().add_filter("Text documents", &["txt", "md"]).save_file()
+        let Some(path) = rfd::FileDialog::new().add_filter("文本文档", &["txt", "md"]).save_file()
         else {
             return;
         };
@@ -2157,7 +2152,7 @@ impl NotoraApp {
         };
         let Some(workspace) = self.workspace_controller.active_workspace() else {
             self.dispatch_action(NotoraAction::NoteCommandFailed(
-                "cannot save a conflict copy after its workspace is closed".to_owned(),
+                "工作区关闭后无法保存冲突副本".to_owned(),
             ));
             return;
         };
@@ -2181,7 +2176,7 @@ impl NotoraApp {
             .is_err()
         {
             self.dispatch_action(NotoraAction::NoteCommandFailed(
-                "could not start the conflict copy worker".to_owned(),
+                "无法启动冲突副本保存线程".to_owned(),
             ));
         }
     }
@@ -2220,7 +2215,7 @@ impl NotoraApp {
             .is_err()
         {
             self.dispatch_action(NotoraAction::NoteCommandFailed(
-                "could not start the conflict reload worker".to_owned(),
+                "无法启动冲突重新加载线程".to_owned(),
             ));
         }
     }
@@ -2278,7 +2273,7 @@ impl NotoraApp {
             .is_err()
         {
             self.dispatch_action(NotoraAction::NoteCommandFailed(
-                "could not start the external file reader".to_owned(),
+                "无法启动外部文件读取线程".to_owned(),
             ));
         }
     }
@@ -2290,7 +2285,7 @@ impl NotoraApp {
     ) {
         let Some(session) = self.state.external_files.session(external_file_id).cloned() else {
             self.dispatch_action(NotoraAction::NoteCommandFailed(
-                "external document is unavailable; relocate or remove its session".to_owned(),
+                "外部文档不可用；请重新定位或移除对应会话".to_owned(),
             ));
             return;
         };
@@ -2317,7 +2312,7 @@ impl NotoraApp {
             }
             ExternalFileSession::Missing { .. } => {
                 self.dispatch_action(NotoraAction::NoteCommandFailed(
-                    "external document is unavailable; relocate or remove its session".to_owned(),
+                    "外部文档不可用；请重新定位或移除对应会话".to_owned(),
                 ))
             }
         }
@@ -2366,7 +2361,7 @@ impl NotoraApp {
             .is_err()
         {
             self.dispatch_action(NotoraAction::NoteCommandFailed(
-                "could not start the external document reader".to_owned(),
+                "无法启动外部文档读取线程".to_owned(),
             ));
         }
     }
@@ -2386,7 +2381,7 @@ impl NotoraApp {
         };
         if summary.content_revision != content_revision {
             self.dispatch_action(NotoraAction::NoteCommandFailed(
-                "the document changed while its disk version was loading".to_owned(),
+                "加载磁盘版本时文档已发生变化".to_owned(),
             ));
             return;
         }
@@ -2408,25 +2403,20 @@ fn rename_file_name_for_destination(
     current_path: &std::path::Path,
     destination: &std::path::Path,
 ) -> Result<std::path::PathBuf, String> {
-    let current_parent = current_path
-        .parent()
-        .ok_or_else(|| "the current note has no parent directory".to_owned())?;
-    let destination_parent = destination
-        .parent()
-        .ok_or_else(|| "the rename destination has no parent directory".to_owned())?;
+    let current_parent = current_path.parent().ok_or_else(|| "当前笔记没有父目录".to_owned())?;
+    let destination_parent =
+        destination.parent().ok_or_else(|| "重命名目标没有父目录".to_owned())?;
     let current_parent = std::fs::canonicalize(current_parent)
-        .map_err(|error| format!("could not resolve the current note directory: {error}"))?;
+        .map_err(|error| format!("无法解析当前笔记目录：{error}"))?;
     let destination_parent = std::fs::canonicalize(destination_parent)
-        .map_err(|error| format!("could not resolve the rename destination: {error}"))?;
+        .map_err(|error| format!("无法解析重命名目标：{error}"))?;
     if current_parent != destination_parent {
-        return Err(
-            "Rename keeps the note in its current folder; use Move for another folder".to_owned()
-        );
+        return Err("重命名只能保留在当前文件夹中；如需更换文件夹，请使用移动".to_owned());
     }
     destination
         .file_name()
         .map(std::path::PathBuf::from)
-        .ok_or_else(|| "the rename destination has no file name".to_owned())
+        .ok_or_else(|| "重命名目标没有文件名".to_owned())
 }
 
 fn workspace_relative_directory(
@@ -2434,13 +2424,13 @@ fn workspace_relative_directory(
     destination: &std::path::Path,
 ) -> Result<std::path::PathBuf, String> {
     let workspace_root = std::fs::canonicalize(workspace_root)
-        .map_err(|error| format!("could not resolve the active workspace: {error}"))?;
-    let destination = std::fs::canonicalize(destination)
-        .map_err(|error| format!("could not resolve the move destination: {error}"))?;
+        .map_err(|error| format!("无法解析活动工作区：{error}"))?;
+    let destination =
+        std::fs::canonicalize(destination).map_err(|error| format!("无法解析移动目标：{error}"))?;
     destination
         .strip_prefix(&workspace_root)
         .map(std::path::Path::to_path_buf)
-        .map_err(|_| "Move destination must stay inside the active workspace".to_owned())
+        .map_err(|_| "移动目标必须位于活动工作区内".to_owned())
 }
 
 fn build_editor_runtime(
@@ -2601,8 +2591,7 @@ mod tests {
             .send(crate::product::NotoraProductEvent::WorkspaceIndexFailed {
                 workspace_id: active_workspace.descriptor.workspace_id,
                 workspace_generation: active_workspace.generation,
-                message: "workspace file monitor disconnected; automatic reconciliation stopped"
-                    .to_owned(),
+                message: "工作区文件监视器已断开，自动同步已停止".to_owned(),
             })
             .expect("product receiver should stay available");
 
@@ -2614,7 +2603,7 @@ mod tests {
                 .library
                 .last_command_error
                 .as_deref()
-                .is_some_and(|message| message.contains("file monitor disconnected"))
+                .is_some_and(|message| message.contains("文件监视器已断开"))
         );
     }
 
@@ -2638,7 +2627,7 @@ mod tests {
                 .library
                 .last_command_error
                 .as_deref()
-                .is_some_and(|message| message.contains("no longer matches"))
+                .is_some_and(|message| message.contains("不再匹配"))
         );
     }
 
@@ -2843,7 +2832,7 @@ mod tests {
                 .library
                 .last_command_error
                 .as_deref()
-                .is_some_and(|message| message.contains("not moved to Trash"))
+                .is_some_and(|message| message.contains("未移入回收站"))
         );
     }
 

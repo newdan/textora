@@ -380,6 +380,42 @@ mod tests {
     }
 
     #[test]
+    fn inter_block_spacing_hides_only_the_required_separator_line() {
+        let cases = [("a\n\nb", 0), ("a\n\n\nb", 1), ("a\n\n\n\nb", 2)];
+
+        for (source, expected_editable_lines) in cases {
+            let next_block_start = source.find('b').expect("fixture must contain a second block");
+            let rendered_lines = vec![
+                RenderedLineLayout { source_range: 0..1, y_top: 0.0, height: 24.0 },
+                RenderedLineLayout {
+                    source_range: next_block_start..next_block_start + 1,
+                    y_top: 100.0,
+                    height: 24.0,
+                },
+            ];
+            let mut map = SourceLineMap::from_source(source);
+            map.attach_layout(&rendered_lines, 24.0, 12.0);
+
+            let hidden_separators = map
+                .lines()
+                .iter()
+                .filter(|line| line.role == SourceLineRole::HiddenBlockSeparator)
+                .count();
+            let editable_lines = map
+                .lines()
+                .iter()
+                .filter(|line| line.role == SourceLineRole::EditableEmpty)
+                .count();
+
+            assert_eq!(hidden_separators, 1, "block separator mismatch for {source:?}");
+            assert_eq!(
+                editable_lines, expected_editable_lines,
+                "editable empty-line mismatch for {source:?}"
+            );
+        }
+    }
+
+    #[test]
     fn source_line_height_includes_all_soft_wrapped_segments() {
         let mut map = SourceLineMap::from_source("abcdefghij\n\nnext");
         let rendered = vec![

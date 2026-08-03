@@ -3636,7 +3636,10 @@ mod wysiwyg_tests {
         render_editor_once(&mut view, &doc);
         view.engine.handle_set_cursor_byte(heading_end);
 
-        let aug = view.engine.augment_edit(heading_end, AugmentKind::Enter).unwrap();
+        let aug = view
+            .engine
+            .augment_edit(heading_end, AugmentKind::Enter)
+            .expect("heading-end Enter must create an editable paragraph");
 
         assert_eq!(aug.insert_text.as_deref(), Some("\n"));
         assert_eq!(aug.cursor_byte_after, heading_end + 2);
@@ -3667,6 +3670,32 @@ mod wysiwyg_tests {
     }
 
     #[test]
+    fn heading_enter_before_adjacent_block_creates_visible_empty_line() {
+        let source = "# Heading\nparagraph";
+        let heading_end = "# Heading".len();
+        let mut doc = StubDoc::new(source);
+        let mut view = MarkdownEditorView::new();
+        view.set_source(source.to_string(), 1);
+        render_editor_once(&mut view, &doc);
+        view.engine.handle_set_cursor_byte(heading_end);
+
+        let aug = view.engine.augment_edit(heading_end, AugmentKind::Enter).unwrap();
+        doc.text.replace_range(
+            heading_end..heading_end,
+            aug.insert_text.as_deref().expect("heading Enter should insert a block break"),
+        );
+        view.set_source(doc.text.clone(), 2);
+        view.engine.handle_set_cursor_byte(aug.cursor_byte_after);
+        render_editor_once(&mut view, &doc);
+
+        assert_eq!(doc.text, "# Heading\n\n\nparagraph");
+        assert!(
+            view.engine().cursor_screen_pos().is_some(),
+            "cursor should land on the editable empty line, not the next block"
+        );
+    }
+
+    #[test]
     fn augment_edit_softbreak_boundary_before_newline_inserts_source_newline() {
         let source = "first line\nsecond line";
         let softbreak_byte = "first line".len();
@@ -3678,6 +3707,15 @@ mod wysiwyg_tests {
 
         assert_eq!(aug.insert_text.as_deref(), Some("\n\n"));
         assert_eq!(aug.cursor_byte_after, softbreak_byte + 2);
+
+        let mut edited_source = source.to_owned();
+        edited_source.replace_range(
+            softbreak_byte..softbreak_byte,
+            aug.insert_text
+                .as_deref()
+                .expect("paragraph Enter before a soft break must insert a block break"),
+        );
+        assert_eq!(edited_source, "first line\n\n\nsecond line");
     }
 
     #[test]

@@ -2,7 +2,7 @@ use std::collections::BTreeSet;
 
 use notora_core::{
     CatalogCard, CatalogCardCursor, CatalogNavigationTree, DocumentIdentity, DocumentKind,
-    NavigationScope, TagId, TagWithActiveNoteCount,
+    NavigationScope, TagWithActiveNoteCount,
 };
 
 use crate::action::{
@@ -30,16 +30,12 @@ pub enum OverlayState {
     None,
     Settings,
     NewDocumentMenu,
-    DeleteTagConfirmation {
-        tag_id: TagId,
-    },
     TrashPermanentDeletionConfirmation {
         operation: crate::action::TrashOperation,
     },
     TrashRestoreConflictConfirmation {
         note_id: notora_core::NoteId,
     },
-    TagEditor,
     SaveConflict,
 }
 
@@ -88,7 +84,6 @@ pub struct LibraryState {
     pub last_command_error: Option<String>,
     pub save_conflict: Option<SaveConflict>,
     pub navigation_tree: NavigationTreeState,
-    pub tag_editor: Option<TagEditorState>,
 }
 
 impl Default for LibraryState {
@@ -104,7 +99,6 @@ impl Default for LibraryState {
             last_command_error: None,
             save_conflict: None,
             navigation_tree: NavigationTreeState::default(),
-            tag_editor: None,
         }
     }
 }
@@ -115,13 +109,6 @@ pub struct NavigationTreeState {
     pub directories: Vec<std::path::PathBuf>,
     pub tags: Vec<TagWithActiveNoteCount>,
     pub expanded_directories: BTreeSet<std::path::PathBuf>,
-}
-
-/// 只保存用户当前编辑的标签名称；确认后才映射为后台 metadata mutation。
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct TagEditorState {
-    pub mode: crate::action::TagEditorMode,
-    pub display_name: String,
 }
 
 /// 中栏数据加载状态；任何时刻只表示一种结果，避免 loading/failed bool 组合。
@@ -320,32 +307,11 @@ impl NotoraState {
                 self.library.last_command_error = Some(message);
                 vec![NotoraEffect::Redraw]
             }
-            NotoraAction::TagEditorRequested(mode) => self.open_tag_editor(mode),
-            NotoraAction::TagEditorNameChanged(display_name) => {
-                if let Some(editor) = self.library.tag_editor.as_mut() {
-                    editor.display_name = display_name;
-                }
-                vec![NotoraEffect::Redraw]
-            }
-            NotoraAction::TagEditorConfirmed => self.confirm_tag_editor(),
-            NotoraAction::TagDeletionRequested(tag_id) => {
-                self.layout.overlay = OverlayState::DeleteTagConfirmation { tag_id };
-                self.layout.focus_target = FocusTarget::Overlay;
-                vec![NotoraEffect::Redraw]
-            }
-            NotoraAction::TagDeletionConfirmed => {
-                let OverlayState::DeleteTagConfirmation { tag_id } = self.layout.overlay else {
+            NotoraAction::CatalogReindexed => {
+                if self.library.navigation_scope == NavigationScope::ExternalFiles {
                     return vec![NotoraEffect::Redraw];
-                };
-                self.layout.overlay = OverlayState::None;
-                self.layout.focus_target = FocusTarget::NavigationTree;
-                self.library.last_command_error = None;
-                vec![
-                    NotoraEffect::ExecuteMetadataMutation(
-                        crate::action::MetadataMutation::DeleteTag { tag_id },
-                    ),
-                    NotoraEffect::Redraw,
-                ]
+                }
+                self.request_card_query(CardQuery::from(self.library.navigation_scope.clone()))
             }
             NotoraAction::TrashOperationRequested(operation) => {
                 if matches!(
@@ -674,12 +640,10 @@ impl NotoraState {
         }
         let restore_editor_focus = self.layout.overlay == OverlayState::SaveConflict;
         match self.layout.overlay {
-            OverlayState::TagEditor => self.library.tag_editor = None,
             OverlayState::SaveConflict => self.library.save_conflict = None,
             OverlayState::None
             | OverlayState::Settings
             | OverlayState::NewDocumentMenu
-            | OverlayState::DeleteTagConfirmation { .. }
             | OverlayState::TrashPermanentDeletionConfirmation { .. }
             | OverlayState::TrashRestoreConflictConfirmation { .. } => {}
         }
@@ -687,51 +651,6 @@ impl NotoraState {
         self.layout.focus_target =
             if restore_editor_focus { FocusTarget::Editor } else { FocusTarget::NavigationTree };
         vec![NotoraEffect::Redraw]
-    }
-
-    fn open_tag_editor(&mut self, mode: crate::action::TagEditorMode) -> Vec<NotoraEffect> {
-        let display_name = match mode {
-            crate::action::TagEditorMode::Create => String::new(),
-            crate::action::TagEditorMode::Rename { tag_id } => {
-                let Some(tag) =
-                    self.library.navigation_tree.tags.iter().find(|tag| tag.tag_id == tag_id)
-                else {
-                    self.library.last_command_error =
-                        Some("the selected tag no longer exists".to_owned());
-                    return vec![NotoraEffect::Redraw];
-                };
-                tag.display_name.clone()
-            }
-        };
-        self.library.tag_editor = Some(TagEditorState { mode, display_name });
-        self.library.last_command_error = None;
-        self.layout.overlay = OverlayState::TagEditor;
-        self.layout.focus_target = FocusTarget::Overlay;
-        vec![NotoraEffect::Redraw]
-    }
-
-    fn confirm_tag_editor(&mut self) -> Vec<NotoraEffect> {
-        let Some(editor) = self.library.tag_editor.take() else {
-            return vec![NotoraEffect::Redraw];
-        };
-        let display_name = editor.display_name.trim().to_owned();
-        if display_name.is_empty() {
-            self.library.last_command_error = Some("a tag name is required".to_owned());
-            self.library.tag_editor = Some(editor);
-            return vec![NotoraEffect::Redraw];
-        }
-        let mutation = match editor.mode {
-            crate::action::TagEditorMode::Create => {
-                crate::action::MetadataMutation::CreateTag { display_name }
-            }
-            crate::action::TagEditorMode::Rename { tag_id } => {
-                crate::action::MetadataMutation::RenameTag { tag_id, display_name }
-            }
-        };
-        self.layout.overlay = OverlayState::None;
-        self.layout.focus_target = FocusTarget::NavigationTree;
-        self.library.last_command_error = None;
-        vec![NotoraEffect::ExecuteMetadataMutation(mutation), NotoraEffect::Redraw]
     }
 
     fn handle_escape(&mut self) -> Vec<NotoraEffect> {
@@ -752,12 +671,10 @@ impl NotoraState {
 
 #[cfg(test)]
 mod metadata_actions {
-    use notora_core::{
-        CatalogNavigationTree, NavigationScope, NoteId, TagId, TagWithActiveNoteCount,
-    };
+    use notora_core::{CatalogNavigationTree, NavigationScope, NoteId, TagId};
 
-    use super::{NotoraState, OverlayState};
-    use crate::action::{MetadataMutation, NotoraAction, NotoraEffect, TagEditorMode};
+    use super::NotoraState;
+    use crate::action::{MetadataMutation, NotoraAction, NotoraEffect};
 
     #[test]
     fn metadata_completion_refreshes_the_current_catalog_scope_without_optimistic_mutation() {
@@ -787,22 +704,18 @@ mod metadata_actions {
     }
 
     #[test]
-    fn deleting_a_tag_requires_a_confirmation_overlay_before_the_effect_runs() {
+    fn catalog_reindex_refreshes_the_current_scope_after_content_tags_change() {
         let tag_id = TagId::generate();
         let mut state = NotoraState::default();
-        assert_eq!(
-            state.reduce(NotoraAction::TagDeletionRequested(tag_id)),
-            vec![NotoraEffect::Redraw]
-        );
-        assert_eq!(state.layout.overlay, OverlayState::DeleteTagConfirmation { tag_id });
+        state.library.navigation_scope = NavigationScope::Tag { tag_id };
 
-        assert_eq!(
-            state.reduce(NotoraAction::TagDeletionConfirmed),
-            vec![
-                NotoraEffect::ExecuteMetadataMutation(MetadataMutation::DeleteTag { tag_id }),
-                NotoraEffect::Redraw
-            ]
-        );
+        let effects = state.reduce(NotoraAction::CatalogReindexed);
+
+        assert!(matches!(
+            effects.as_slice(),
+            [NotoraEffect::QueryCards(query), NotoraEffect::Redraw]
+                if query.scope == NavigationScope::Tag { tag_id }
+        ));
     }
 
     #[test]
@@ -833,50 +746,6 @@ mod metadata_actions {
             ]
         );
         assert_eq!(state.library.navigation_scope, NavigationScope::WorkspaceRoot);
-    }
-
-    #[test]
-    fn tag_editor_maps_create_and_rename_to_typed_metadata_mutations() {
-        let tag_id = TagId::generate();
-        let mut state = NotoraState::default();
-        state.library.navigation_tree.tags = vec![TagWithActiveNoteCount {
-            tag_id,
-            display_name: "Plans".to_owned(),
-            active_note_count: 0,
-        }];
-
-        assert_eq!(
-            state.reduce(NotoraAction::TagEditorRequested(TagEditorMode::Create)),
-            vec![NotoraEffect::Redraw]
-        );
-        assert_eq!(state.layout.overlay, OverlayState::TagEditor);
-        let _ = state.reduce(NotoraAction::TagEditorNameChanged("Roadmap".to_owned()));
-        assert_eq!(
-            state.reduce(NotoraAction::TagEditorConfirmed),
-            vec![
-                NotoraEffect::ExecuteMetadataMutation(MetadataMutation::CreateTag {
-                    display_name: "Roadmap".to_owned(),
-                }),
-                NotoraEffect::Redraw,
-            ]
-        );
-
-        let _ = state.reduce(NotoraAction::TagEditorRequested(TagEditorMode::Rename { tag_id }));
-        assert_eq!(
-            state.library.tag_editor.as_ref().map(|editor| editor.display_name.as_str()),
-            Some("Plans")
-        );
-        let _ = state.reduce(NotoraAction::TagEditorNameChanged("Quarterly plans".to_owned()));
-        assert_eq!(
-            state.reduce(NotoraAction::TagEditorConfirmed),
-            vec![
-                NotoraEffect::ExecuteMetadataMutation(MetadataMutation::RenameTag {
-                    tag_id,
-                    display_name: "Quarterly plans".to_owned(),
-                }),
-                NotoraEffect::Redraw,
-            ]
-        );
     }
 }
 
@@ -953,8 +822,8 @@ fn creation_target(scope: &NavigationScope) -> Option<NoteCreationTarget> {
         NavigationScope::Directory { relative_path } => {
             Some(NoteCreationTarget { directory: Some(relative_path.clone()), tag_to_attach: None })
         }
-        NavigationScope::Tag { tag_id } => {
-            Some(NoteCreationTarget { directory: None, tag_to_attach: Some(*tag_id) })
+        NavigationScope::Tag { .. } => {
+            Some(NoteCreationTarget { directory: None, tag_to_attach: None })
         }
         NavigationScope::Search { .. }
         | NavigationScope::WorkspaceRoot
@@ -1077,7 +946,7 @@ mod tests {
     }
 
     #[test]
-    fn tag_scope_requests_tag_attachment_for_new_notes() {
+    fn tag_scope_requires_content_hashtags_instead_of_implicit_attachment() {
         let mut state = NotoraState::default();
         let tag_id = TagId::generate();
         let _ = state.reduce(NotoraAction::NavigationSelected(NavigationScope::Tag { tag_id }));
@@ -1089,7 +958,7 @@ mod tests {
                     notora_core::note_command::CreateNoteRequest {
                         kind: DocumentKind::Markdown,
                         target_directory: None,
-                        tag_to_attach: Some(tag_id),
+                        tag_to_attach: None,
                     },
                 ),),
                 NotoraEffect::Redraw,

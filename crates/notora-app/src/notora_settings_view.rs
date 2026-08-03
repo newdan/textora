@@ -396,7 +396,7 @@ impl NotoraSettingsView {
                 ),
                 text_row(
                     TAB_WIDTH_ID,
-                    "Tab 宽度",
+                    "制表符宽度",
                     "允许范围：1–16 个空格。",
                     &editor.tab_width.to_string(),
                     "1–16",
@@ -443,7 +443,7 @@ impl NotoraSettingsView {
                 ),
                 text_row(
                     CATALOG_BACKUP_RETENTION_ID,
-                    "Catalog 备份数",
+                    "目录索引备份数",
                     "允许范围：1–100。",
                     &workspace.catalog_backup_retention.to_string(),
                     "1–100",
