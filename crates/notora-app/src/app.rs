@@ -958,21 +958,17 @@ impl NotoraApp {
 
     pub(crate) fn route_product_event(&mut self, event: &ui::Event) -> bool {
         let focus_target = self.state.layout.focus_target;
-        let settings_modal_is_open =
-            self.state.layout.overlay == crate::state::OverlayState::Settings;
-        let actions = self.shell.route_event(
+        let product_modal_is_open = self.state.layout.overlay != crate::state::OverlayState::None;
+        let route = self.shell.route_event(
             event,
             focus_target,
             &self.theme,
             self.editor_runtime.scale_factor() as f32,
         );
-        if actions.is_empty() {
-            return settings_modal_is_open;
-        }
-        for action in actions {
+        for action in route.actions {
             self.dispatch_action(action);
         }
-        true
+        route.consumed || product_modal_is_open
     }
 
     pub(crate) fn render(&mut self) -> Result<(), RenderError> {
@@ -2787,6 +2783,39 @@ mod tests {
 
         assert!(workspace_directory.path().join("未命名 1.md").is_file());
         assert_eq!(app.state().library.last_command_error, None);
+    }
+
+    #[test]
+    fn workspace_new_note_button_click_creates_a_markdown_note() {
+        let workspace_directory =
+            tempfile::tempdir().expect("workspace test directory should be created");
+        let mut app = app();
+        app.execute_workspace_command(WorkspaceCommand::OpenExisting {
+            root: workspace_directory.path().to_path_buf(),
+        })
+        .expect("workspace should open");
+        app.render().expect("headless shell frame should render");
+        let layout = app.shell_layout();
+        let click_x = layout.card_list_rect.right() - 76.0 * layout.dpi;
+        let click_y = 22.0 * layout.dpi;
+
+        assert!(app.route_product_event(&ui::Event::MouseDown {
+            px: click_x,
+            py: click_y,
+            button: ui::core::widget::MouseButton::Left,
+        }));
+        assert!(app.route_product_event(&ui::Event::MouseUp {
+            px: click_x,
+            py: click_y,
+            button: ui::core::widget::MouseButton::Left,
+        }));
+
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while !workspace_directory.path().join("未命名 1.md").is_file() {
+            app.drain_product_events();
+            assert!(Instant::now() < deadline, "button click should create a markdown note");
+            thread::sleep(Duration::from_millis(10));
+        }
     }
 
     #[test]

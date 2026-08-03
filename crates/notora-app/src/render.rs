@@ -365,6 +365,22 @@ struct RenderedToolbarButton {
     action: NotoraAction,
 }
 
+/// 产品事件的路由结果；控件可以只消费事件而不立即产生产品动作。
+pub struct NotoraEventRoute {
+    pub actions: Vec<NotoraAction>,
+    pub consumed: bool,
+}
+
+impl NotoraEventRoute {
+    fn ignored() -> Self {
+        Self { actions: Vec::new(), consumed: false }
+    }
+
+    fn consumed(action: Option<NotoraAction>) -> Self {
+        Self { actions: action.into_iter().collect(), consumed: true }
+    }
+}
+
 /// 三栏静态壳；仅持有通用 widget 与当帧键到产品动作的映射。
 pub struct NotoraShell {
     search_box: TextBox,
@@ -845,68 +861,64 @@ impl NotoraShell {
         }
     }
 
-    /// 产品事件先路由给本产品 widget；返回空表示可继续交给 editor runtime。
+    /// 产品事件先路由给本产品 widget，并独立返回消费状态与产品动作。
     pub fn route_event(
         &mut self,
         event: &Event,
         focus_target: FocusTarget,
         theme: &ui::Theme,
         dpi: f32,
-    ) -> Vec<NotoraAction> {
+    ) -> NotoraEventRoute {
         let mut event_context = EventCtx { theme, dpi, cursor_hint: None };
         self.search_box.set_focus(focus_target == FocusTarget::NavigationSearch);
         if self.settings_overlay_open() {
-            return self
+            let action = self
                 .settings_overlay
                 .route_event(event, &mut event_context)
-                .map(settings_overlay_action_to_notora_action)
-                .into_iter()
-                .collect();
+                .map(settings_overlay_action_to_notora_action);
+            return NotoraEventRoute::consumed(action);
         }
         if self.save_conflict_actions.is_some() {
-            return self.route_save_conflict_event(event).into_iter().collect();
+            let action = self.route_save_conflict_event(event);
+            return NotoraEventRoute::consumed(action);
         }
         if let Some(action) = self.confirmation_overlay_action(event) {
-            return vec![action];
+            return NotoraEventRoute::consumed(Some(action));
         }
         if let Some(action) =
             compact_layout_action(event, self.compact_navigation_rect, self.compact_back_rect)
         {
-            return vec![action];
+            return NotoraEventRoute::consumed(Some(action));
         }
         if self.new_document_menu_open {
             if let Some(action) = new_document_menu_action(event, self.new_document_menu_rect) {
-                return vec![action];
+                return NotoraEventRoute::consumed(Some(action));
             }
             if should_dismiss_new_document_menu(
                 event,
                 self.new_document_menu_rect,
                 self.new_note_button.menu_rect(),
             ) {
-                return vec![NotoraAction::OverlayDismissed];
+                return NotoraEventRoute::consumed(Some(NotoraAction::OverlayDismissed));
             }
-            return Vec::new();
+            return NotoraEventRoute::consumed(None);
         }
         if let Some(action) = note_toolbar_action(event, &self.note_toolbar_buttons) {
-            return vec![action];
+            return NotoraEventRoute::consumed(Some(action));
         }
         if matches!(
             event,
             Event::MouseMove { .. } | Event::MouseDown { .. } | Event::MouseUp { .. }
         ) && let Some(widget_action) = self.new_note_button.on_event(event, &mut event_context)
         {
-            if let Some(action) = self.translate_widget_action(&widget_action) {
-                return vec![action];
-            }
-            if widget_action == WidgetAction::Consumed {
-                return Vec::new();
-            }
+            let action = self.translate_widget_action(&widget_action);
+            return NotoraEventRoute::consumed(action);
         }
         if let Some(action) = self.route_splitter_event(event, &mut event_context) {
-            return action.into_iter().collect();
+            return NotoraEventRoute::consumed(action);
         }
         if let Some(action) = settings_button_action(event, self.settings_rect) {
-            return vec![action];
+            return NotoraEventRoute::consumed(Some(action));
         }
         let widget_action = match pointer_target(event, self) {
             Some(FocusTarget::NavigationSearch) => {
@@ -925,18 +937,25 @@ impl NotoraShell {
                     self.navigation_tree.on_event(event, &mut event_context)
                 }
                 FocusTarget::CardList => self.card_list.on_event(event, &mut event_context),
-                FocusTarget::Editor | FocusTarget::Overlay => return Vec::new(),
+                FocusTarget::Editor | FocusTarget::Overlay => return NotoraEventRoute::ignored(),
             },
         };
-        let actions: Vec<_> = widget_action
+        let action = widget_action
             .as_ref()
-            .and_then(|action| self.translate_widget_action(action))
-            .into_iter()
-            .collect();
-        if !actions.is_empty() || !is_left_mouse_down(event) {
-            return actions;
+            .and_then(|widget_action| self.translate_widget_action(widget_action));
+        if action.is_some() {
+            return NotoraEventRoute::consumed(action);
         }
-        pointer_target(event, self).map(NotoraAction::FocusRequested).into_iter().collect()
+        if is_left_mouse_down(event) {
+            let focus_action = pointer_target(event, self).map(NotoraAction::FocusRequested);
+            if focus_action.is_some() {
+                return NotoraEventRoute::consumed(focus_action);
+            }
+        }
+        if widget_action.is_some() {
+            return NotoraEventRoute::consumed(None);
+        }
+        NotoraEventRoute::ignored()
     }
 
     fn route_splitter_event(
