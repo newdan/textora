@@ -33,12 +33,15 @@ use crate::settings::ProductSettings;
 use crate::settings_overlay::{SettingsOverlay, SettingsOverlayAction, SettingsOverlayInput};
 use crate::shell::layout::ShellLayout;
 use crate::state::CardPageState;
-use crate::{FocusTarget, NotoraState, OverlayState, Pane, ResponsiveLayoutMode};
+use crate::{
+    FocusTarget, NotoraState, OverlayState, Pane, ResponsiveLayoutMode, WorkspaceRootState,
+};
 
 const GLOBAL_SEARCH_BOX_ID: WidgetId = WidgetId(9_000);
 const SETTINGS_BUTTON_ID: WidgetId = WidgetId(9_001);
 const NEW_NOTE_BUTTON_ID: WidgetId = WidgetId(9_002);
 const NEW_NOTE_MENU_BUTTON_ID: WidgetId = WidgetId(9_003);
+const SET_WORKSPACE_ROOT_BUTTON_ID: WidgetId = WidgetId(9_004);
 const NEW_NOTE_BUTTON_WIDTH_LOGICAL: f32 = 128.0;
 const NOTE_TOOL_BUTTON_WIDTH_LOGICAL: f32 = 64.0;
 const NOTE_TOOL_BUTTON_HEIGHT_LOGICAL: f32 = 28.0;
@@ -110,7 +113,8 @@ pub struct SaveConflictOverlayInput {
 pub enum NewNoteControlState {
     #[default]
     Hidden,
-    Visible,
+    Disabled,
+    Enabled,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -122,7 +126,11 @@ struct CardHeaderLayout {
 
 impl NewNoteControlState {
     fn is_visible(self) -> bool {
-        self == Self::Visible
+        self != Self::Hidden
+    }
+
+    fn is_enabled(self) -> bool {
+        self == Self::Enabled
     }
 }
 
@@ -137,6 +145,7 @@ pub struct NotoraRenderModel {
     pub selected_card: Option<DocumentIdentity>,
     pub card_scroll_offset_px: f32,
     pub card_list_title: String,
+    pub card_empty_state: StatusStateInput,
     pub show_settings_overlay: bool,
     pub settings_overlay: SettingsOverlayInput,
     pub confirmation: Option<ConfirmationOverlayInput>,
@@ -297,6 +306,7 @@ impl NotoraRenderModel {
             selected_card: state.library.selected_card,
             card_scroll_offset_px: state.library.card_scroll_offset_px,
             card_list_title: card_list_title(selected_scope).to_owned(),
+            card_empty_state: card_empty_state_input(state),
             show_settings_overlay: state.layout.overlay == OverlayState::Settings,
             settings_overlay: SettingsOverlayInput::from_product_settings(product_settings),
             confirmation: confirmation_overlay_input(state.layout.overlay),
@@ -304,7 +314,7 @@ impl NotoraRenderModel {
             creation_panel,
             creation_actions,
             show_tooltip: false,
-            new_note_control: new_note_control_state(selected_scope),
+            new_note_control: new_note_control_state(selected_scope, state.workspace_root),
             note_toolbar: note_toolbar_buttons(selected_scope, selected_note_id),
             save_conflict: state.library.save_conflict.map(|conflict| SaveConflictOverlayInput {
                 identity: conflict.identity,
@@ -835,14 +845,41 @@ fn note_toolbar_buttons(
     Vec::new()
 }
 
-fn new_note_control_state(scope: &NavigationScope) -> NewNoteControlState {
+fn new_note_control_state(
+    scope: &NavigationScope,
+    workspace_root: WorkspaceRootState,
+) -> NewNoteControlState {
     match scope {
         NavigationScope::Search { .. } | NavigationScope::Trash => NewNoteControlState::Hidden,
         NavigationScope::WorkspaceRoot
         | NavigationScope::Directory { .. }
         | NavigationScope::Starred
         | NavigationScope::Tag { .. }
-        | NavigationScope::ExternalFiles => NewNoteControlState::Visible,
+        | NavigationScope::ExternalFiles => match workspace_root {
+            WorkspaceRootState::Missing => NewNoteControlState::Disabled,
+            WorkspaceRootState::Active => NewNoteControlState::Enabled,
+        },
+    }
+}
+
+fn card_empty_state_input(state: &NotoraState) -> StatusStateInput {
+    if state.workspace_root == WorkspaceRootState::Missing {
+        return StatusStateInput {
+            kind: StatusStateKind::Empty,
+            title: "尚未设置工作区根目录".to_owned(),
+            description: "请先选择一个文件夹作为工作区根目录。".to_owned(),
+            icon: Some("folder-open".to_owned()),
+            action_label: Some("设置根目录".to_owned()),
+            action_id: Some(SET_WORKSPACE_ROOT_BUTTON_ID),
+        };
+    }
+    StatusStateInput {
+        kind: StatusStateKind::Empty,
+        title: "暂无笔记".to_owned(),
+        description: "新建一篇笔记，或者从左侧选择其他位置。".to_owned(),
+        icon: Some("notebook-pen".to_owned()),
+        action_label: None,
+        action_id: None,
     }
 }
 
@@ -883,6 +920,7 @@ pub struct NotoraShell {
     navigation_tree: TreeListWidget,
     card_list: VirtualCardListWidget,
     card_empty_state: StatusStateWidget,
+    card_empty_state_visible: bool,
     editor_empty_state: StatusStateWidget,
     navigation_splitter: SplitterWidget,
     card_list_splitter: SplitterWidget,
@@ -940,6 +978,7 @@ impl NotoraShell {
             navigation_tree: TreeListWidget::new(),
             card_list: VirtualCardListWidget::new(),
             card_empty_state: StatusStateWidget::new(),
+            card_empty_state_visible: false,
             editor_empty_state: StatusStateWidget::new(),
             navigation_splitter: SplitterWidget::new(),
             card_list_splitter: SplitterWidget::new(),
@@ -1014,7 +1053,7 @@ impl NotoraShell {
         self.search_box.sync_text(&model.search_query);
         self.new_note_button.set_input(SplitButtonInput {
             label: "新建笔记".to_owned(),
-            enabled: model.new_note_control.is_visible(),
+            enabled: model.new_note_control.is_enabled(),
         });
         self.new_note_button.set_menu_open(false);
         self.note_creation_panel.set_input(model.creation_panel.clone());
@@ -1031,14 +1070,8 @@ impl NotoraShell {
         self.editor_location_actions.clone_from(&model.editor_location_actions);
         self.editor_tag_actions.clone_from(&model.editor_tag_actions);
         self.editor_command_actions.clone_from(&model.editor_command_actions);
-        self.card_empty_state.set_input(StatusStateInput {
-            kind: StatusStateKind::Empty,
-            title: "暂无笔记".to_owned(),
-            description: "新建一篇笔记，或者从左侧选择其他位置。".to_owned(),
-            icon: Some("notebook-pen".to_owned()),
-            action_label: None,
-            action_id: None,
-        });
+        self.card_empty_state.set_input(model.card_empty_state.clone());
+        self.card_empty_state_visible = model.cards.is_empty();
         self.editor_empty_state.set_input(StatusStateInput {
             kind: StatusStateKind::Empty,
             title: "请选择笔记".to_owned(),
@@ -1434,6 +1467,11 @@ impl NotoraShell {
             {
                 Some(NotoraAction::OpenSettings)
             }
+            WidgetAction::Control(ControlAction::Activated { id })
+                if *id == SET_WORKSPACE_ROOT_BUTTON_ID =>
+            {
+                Some(NotoraAction::WorkspaceRootSelectionRequested)
+            }
             WidgetAction::Control(ControlAction::Activated { id }) if *id == NEW_NOTE_BUTTON_ID => {
                 Some(NotoraAction::OpenNewDocumentMenu)
             }
@@ -1524,6 +1562,12 @@ impl NotoraShell {
         }
         if let Some(action) = settings_button_action(event, self.settings_rect) {
             return NotoraEventRoute::consumed(Some(action));
+        }
+        if self.card_empty_state_visible
+            && let Some(widget_action) = self.card_empty_state.on_event(event, &mut event_context)
+        {
+            let action = self.translate_widget_action(&widget_action);
+            return NotoraEventRoute::consumed(action);
         }
         let widget_action = match pointer_target(event, self) {
             Some(FocusTarget::NavigationSearch) => {
@@ -2297,6 +2341,24 @@ mod tests {
     }
 
     #[test]
+    fn missing_workspace_disables_new_note_and_exposes_a_separate_root_action() {
+        let model = NotoraRenderModel::from_state(&NotoraState::default());
+
+        assert_eq!(model.new_note_control, NewNoteControlState::Disabled);
+        assert_eq!(model.card_empty_state.title, "尚未设置工作区根目录");
+        assert_eq!(model.card_empty_state.action_label.as_deref(), Some("设置根目录"));
+
+        let mut shell = NotoraShell::new();
+        shell.update_model(&model);
+        assert_eq!(
+            shell.translate_widget_action(&WidgetAction::Control(ControlAction::Activated {
+                id: SET_WORKSPACE_ROOT_BUTTON_ID,
+            })),
+            Some(NotoraAction::WorkspaceRootSelectionRequested)
+        );
+    }
+
+    #[test]
     fn new_note_control_is_laid_out_inside_the_middle_column() {
         let navigation_rect = Rect::new(0.0, 0.0, 220.0, 600.0);
         let card_list_rect = Rect::new(228.0, 0.0, 340.0, 600.0);
@@ -2304,7 +2366,7 @@ mod tests {
         let button_rect = new_note_button_rect(
             card_list_rect,
             1.0,
-            NewNoteControlState::Visible,
+            NewNoteControlState::Enabled,
             CARD_HEADER_CONTROL_TOP_LOGICAL,
         );
 
@@ -2331,13 +2393,13 @@ mod tests {
             card_list_rect,
             1.0,
             "一个很长的中栏标题",
-            NewNoteControlState::Visible,
+            NewNoteControlState::Enabled,
             1,
         );
         let new_note_rect = new_note_button_rect(
             card_list_rect,
             1.0,
-            NewNoteControlState::Visible,
+            NewNoteControlState::Enabled,
             header.control_top_y,
         );
         let toolbar = layout_note_toolbar(
@@ -2403,7 +2465,8 @@ mod tests {
 
     #[test]
     fn creation_panel_exposes_typed_options_without_creating_a_note() {
-        let mut state = NotoraState::default();
+        let mut state =
+            NotoraState { workspace_root: WorkspaceRootState::Active, ..NotoraState::default() };
         state.library.navigation_tree.directories = vec!["plans".into()];
         let _ = state.reduce(NotoraAction::OpenNewDocumentMenu);
 

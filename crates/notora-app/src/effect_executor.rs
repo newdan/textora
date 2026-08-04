@@ -40,6 +40,7 @@ pub trait NotoraEffectService {
     fn choose_note_move_directory(&mut self, _note_id: notora_core::NoteId) {}
     fn prepare_document(&mut self, request: DocumentLoadRequest);
     fn promote_active_preview(&mut self) {}
+    fn choose_workspace_root(&mut self) {}
     fn open_external_files(&mut self, _request: ExternalOpenRequest) {}
     fn create_untitled_external(&mut self, _kind: DocumentKind) {}
     fn save_document_manually(&mut self, _request: ManualSaveRequest) {}
@@ -100,6 +101,10 @@ impl EffectExecutor {
                 service.promote_active_preview();
                 ShellEffect::NONE
             }
+            NotoraEffect::ChooseWorkspaceRoot => {
+                service.choose_workspace_root();
+                ShellEffect::NONE
+            }
             NotoraEffect::OpenExternalFiles(request) => {
                 service.open_external_files(request);
                 ShellEffect::NONE
@@ -155,6 +160,7 @@ mod tests {
         title_commit: Option<String>,
         metadata_mutation: Option<MetadataMutation>,
         promoted_preview_count: usize,
+        workspace_root_selection_count: usize,
         manual_save_request: Option<ManualSaveRequest>,
         product_settings_persistence_count: usize,
     }
@@ -188,6 +194,10 @@ mod tests {
             self.promoted_preview_count += 1;
         }
 
+        fn choose_workspace_root(&mut self) {
+            self.workspace_root_selection_count += 1;
+        }
+
         fn persist_product_settings(&mut self) {
             self.product_settings_persistence_count += 1;
         }
@@ -217,6 +227,8 @@ mod tests {
         assert_eq!(recorder.prepared_document, Some(request));
         let _ = EffectExecutor::execute(&mut recorder, NotoraEffect::PromoteActivePreview);
         assert_eq!(recorder.promoted_preview_count, 1);
+        let _ = EffectExecutor::execute(&mut recorder, NotoraEffect::ChooseWorkspaceRoot);
+        assert_eq!(recorder.workspace_root_selection_count, 1);
     }
 
     #[test]

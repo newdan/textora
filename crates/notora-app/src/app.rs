@@ -43,7 +43,7 @@ use crate::search_controller::SearchController;
 use crate::shell::layout::{ShellLayout, ShellLayoutInput};
 use crate::{
     NotoraPaths, NotoraPathsError, NotoraState, WorkspaceCommand, WorkspaceCommandResult,
-    WorkspaceController, WorkspaceControllerError,
+    WorkspaceController, WorkspaceControllerError, WorkspaceRootState,
 };
 use notora_core::note_command::{ConfiguredCreateNoteRequest, MoveNoteRequest, NoteCommand};
 use notora_core::{
@@ -72,7 +72,7 @@ const SAVE_STATUS_FAILED: &str = "保存失败";
 type WorkspaceDirectoryChooser = Box<dyn Fn() -> Option<std::path::PathBuf>>;
 
 fn choose_workspace_directory() -> Option<std::path::PathBuf> {
-    rfd::FileDialog::new().set_title("选择或创建工作区").pick_folder()
+    rfd::FileDialog::new().set_title("设置工作区根目录").pick_folder()
 }
 
 #[derive(Debug)]
@@ -415,11 +415,14 @@ impl NotoraApp {
     ) -> Result<WorkspaceCommandResult, WorkspaceControllerError> {
         let result = self.workspace_controller.execute(command, &mut self.product)?;
         match &result {
-            WorkspaceCommandResult::Opened(workspace) => self
-                .search_controller
-                .set_active_workspace(workspace.descriptor.workspace_id, workspace.generation),
+            WorkspaceCommandResult::Opened(workspace) => {
+                self.state.workspace_root = WorkspaceRootState::Active;
+                self.search_controller
+                    .set_active_workspace(workspace.descriptor.workspace_id, workspace.generation);
+            }
             WorkspaceCommandResult::Closed { .. } => {
-                self.search_controller.clear_active_workspace()
+                self.state.workspace_root = WorkspaceRootState::Missing;
+                self.search_controller.clear_active_workspace();
             }
             WorkspaceCommandResult::Unchanged => {}
         }
@@ -436,6 +439,7 @@ impl NotoraApp {
         if matches!(result, WorkspaceCommandResult::Opened(_)) {
             self.request_navigation_tree();
         }
+        self.needs_redraw = true;
         Ok(result)
     }
 
@@ -1977,9 +1981,10 @@ impl NotoraEffectService for NotoraApp {
     }
 
     fn request_note_creation(&mut self, kind: DocumentKind, target: NoteCreationTarget) {
-        if self.workspace_controller.active_workspace().is_none()
-            && !self.select_workspace_for_note_creation()
-        {
+        if self.workspace_controller.active_workspace().is_none() {
+            self.dispatch_action(NotoraAction::NoteCreationFailed(
+                "请先设置工作区根目录".to_owned(),
+            ));
             return;
         }
         let encryption = self
@@ -1996,6 +2001,10 @@ impl NotoraEffectService for NotoraApp {
             target_directory: target.directory,
             encryption,
         }));
+    }
+
+    fn choose_workspace_root(&mut self) {
+        self.select_workspace_root();
     }
 
     fn execute_note_command(&mut self, command: notora_core::note_command::NoteCommand) {
@@ -2268,7 +2277,7 @@ impl NotoraApp {
         generation
     }
 
-    fn select_workspace_for_note_creation(&mut self) -> bool {
+    fn select_workspace_root(&mut self) -> bool {
         let Some(root) = (self.workspace_directory_chooser)() else {
             return false;
         };
@@ -2961,7 +2970,7 @@ mod tests {
     use crate::state::CardPageState;
     use crate::{
         CompactContent, ExternalFileSession, FocusTarget, NotoraPaths, OverlayState,
-        WorkspaceCommand,
+        WorkspaceCommand, WorkspaceRootState,
     };
     use notora_core::{DocumentIdentity, DocumentKind, NavigationScope, WorkspaceId};
 
@@ -3477,32 +3486,45 @@ mod tests {
     }
 
     #[test]
-    fn workspace_new_note_button_click_opens_creation_panel_without_creating_a_note() {
-        let workspace_directory =
-            tempfile::tempdir().expect("workspace test directory should be created");
+    fn new_note_button_is_disabled_until_a_workspace_root_is_selected() {
         let mut app = app();
-        let selected_workspace_root = workspace_directory.path().to_path_buf();
-        app.workspace_directory_chooser = Box::new(move || Some(selected_workspace_root.clone()));
         app.render().expect("headless shell frame should render");
         let layout = app.shell_layout();
         let click_x = layout.card_list_rect.right() - 76.0 * layout.dpi;
         let click_y = 22.0 * layout.dpi;
 
-        assert!(app.route_product_event(&ui::Event::MouseDown {
+        app.route_product_event(&ui::Event::MouseDown {
             px: click_x,
             py: click_y,
             button: ui::core::widget::MouseButton::Left,
-        }));
-        assert!(app.route_product_event(&ui::Event::MouseUp {
+        });
+        app.route_product_event(&ui::Event::MouseUp {
             px: click_x,
             py: click_y,
             button: ui::core::widget::MouseButton::Left,
-        }));
+        });
 
+        assert_eq!(app.state().layout.overlay, OverlayState::None);
+        assert_eq!(app.state().layout.focus_target, FocusTarget::NavigationTree);
+        assert!(app.state().new_note_draft.is_none());
+    }
+
+    #[test]
+    fn workspace_root_selection_is_completed_before_note_creation_becomes_available() {
+        let workspace_directory =
+            tempfile::tempdir().expect("workspace test directory should be created");
+        let selected_workspace_root = workspace_directory.path().to_path_buf();
+        let mut app = app();
+        app.workspace_directory_chooser = Box::new(move || Some(selected_workspace_root.clone()));
+
+        app.dispatch_action(NotoraAction::WorkspaceRootSelectionRequested);
+
+        assert_eq!(app.state().workspace_root, WorkspaceRootState::Active);
+        assert_eq!(app.state().layout.overlay, OverlayState::None);
+        assert!(app.state().new_note_draft.is_none());
+
+        app.dispatch_action(NotoraAction::OpenNewDocumentMenu);
         assert_eq!(app.state().layout.overlay, OverlayState::NewNoteCreationPanel);
-        assert_eq!(app.state().layout.focus_target, FocusTarget::Overlay);
-        assert!(app.state().new_note_draft.is_some());
-        assert!(!workspace_directory.path().join("未命名 1.md").exists());
     }
 
     #[test]
@@ -3519,7 +3541,7 @@ mod tests {
         first_app.workspace_directory_chooser =
             Box::new(move || Some(selected_workspace_root.clone()));
 
-        assert!(first_app.select_workspace_for_note_creation());
+        assert!(first_app.select_workspace_root());
         first_app.pending_session_persist_at = Some(Instant::now());
         first_app.process_due_session_persistence();
 

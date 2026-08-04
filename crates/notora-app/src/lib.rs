@@ -47,7 +47,7 @@ pub use settings::{
 };
 pub use state::{
     CompactContent, CompactNavigation, FocusTarget, LayoutState, LibraryState, NavigationTreeState,
-    NotoraState, OverlayState, Pane, ResponsiveLayoutMode,
+    NotoraState, OverlayState, Pane, ResponsiveLayoutMode, WorkspaceRootState,
 };
 pub use workspace_controller::{
     ActiveWorkspace, WorkspaceCommand, WorkspaceCommandResult, WorkspaceController,

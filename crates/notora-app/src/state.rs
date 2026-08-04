@@ -73,6 +73,14 @@ pub enum Pane {
     CardList,
 }
 
+/// 是否已经存在可供笔记读写的工作区根目录。
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum WorkspaceRootState {
+    #[default]
+    Missing,
+    Active,
+}
+
 /// 只包含产品导航、选择和卡片查询状态；编辑会话保留在 EditorRuntime。
 #[derive(Clone, Debug, PartialEq)]
 pub struct LibraryState {
@@ -188,6 +196,7 @@ impl Default for LayoutState {
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct NotoraState {
     pub library: LibraryState,
+    pub workspace_root: WorkspaceRootState,
     /// 外部 session 不属于 catalog、搜索、星标、标签或 Trash 的任何一项。
     pub external_files: ExternalFileSessions,
     pub layout: LayoutState,
@@ -274,6 +283,9 @@ impl NotoraState {
             }
             NotoraAction::PromotePreviewRequested => {
                 vec![NotoraEffect::PromoteActivePreview, NotoraEffect::Redraw]
+            }
+            NotoraAction::WorkspaceRootSelectionRequested => {
+                vec![NotoraEffect::ChooseWorkspaceRoot, NotoraEffect::Redraw]
             }
             NotoraAction::OpenNewDocumentMenu => self.open_note_creation_panel(),
             NotoraAction::CreateRequested(kind) => self.request_note_creation(kind),
@@ -485,7 +497,9 @@ impl NotoraState {
     }
 
     fn open_note_creation_panel(&mut self) -> Vec<NotoraEffect> {
-        if self.library.navigation_scope == NavigationScope::Trash {
+        if self.workspace_root == WorkspaceRootState::Missing
+            || self.library.navigation_scope == NavigationScope::Trash
+        {
             return vec![NotoraEffect::Redraw];
         }
         self.new_note_draft = Some(NewNoteDraft::markdown(default_creation_directory(
@@ -571,6 +585,9 @@ impl NotoraState {
     }
 
     fn request_note_creation(&mut self, kind: DocumentKind) -> Vec<NotoraEffect> {
+        if self.workspace_root == WorkspaceRootState::Missing {
+            return vec![NotoraEffect::Redraw];
+        }
         if self.layout.overlay == OverlayState::NewNoteCreationPanel {
             self.new_note_draft = None;
             self.layout.overlay = OverlayState::None;
@@ -1143,7 +1160,7 @@ mod tests {
 
     use super::{
         CardPageState, CompactContent, CompactNavigation, FocusTarget, LibraryState, NotoraState,
-        OverlayState,
+        OverlayState, WorkspaceRootState,
     };
     use crate::action::{CardQuery, NotoraAction, NotoraEffect};
     use crate::search_controller::{SEARCH_DEBOUNCE_DELAY, SearchController};
@@ -1163,6 +1180,10 @@ mod tests {
             starred: false,
             tags: vec!["计划".to_owned()],
         }
+    }
+
+    fn state_with_active_workspace() -> NotoraState {
+        NotoraState { workspace_root: WorkspaceRootState::Active, ..NotoraState::default() }
     }
 
     #[test]
@@ -1257,7 +1278,7 @@ mod tests {
 
     #[test]
     fn trash_scope_cannot_request_note_creation() {
-        let mut state = NotoraState::default();
+        let mut state = state_with_active_workspace();
         let _ = state.reduce(NotoraAction::NavigationSelected(NavigationScope::Trash));
 
         assert_eq!(
@@ -1278,7 +1299,7 @@ mod tests {
 
     #[test]
     fn tag_scope_requires_content_hashtags_instead_of_implicit_attachment() {
-        let mut state = NotoraState::default();
+        let mut state = state_with_active_workspace();
         let tag_id = TagId::generate();
         let _ = state.reduce(NotoraAction::NavigationSelected(NavigationScope::Tag { tag_id }));
 
@@ -1296,7 +1317,7 @@ mod tests {
 
     #[test]
     fn note_requests_reduce_to_a_typed_domain_command_effect() {
-        let mut state = NotoraState::default();
+        let mut state = state_with_active_workspace();
 
         assert!(matches!(
             state.reduce(NotoraAction::CreateRequested(DocumentKind::Markdown)).as_slice(),
@@ -1378,7 +1399,7 @@ mod tests {
 
     #[test]
     fn opening_new_note_panel_creates_a_default_draft_without_creating_a_note() {
-        let mut state = NotoraState::default();
+        let mut state = state_with_active_workspace();
 
         assert_eq!(state.reduce(NotoraAction::OpenNewDocumentMenu), vec![NotoraEffect::Redraw]);
         assert_eq!(state.layout.overlay, OverlayState::NewNoteCreationPanel);
@@ -1387,8 +1408,29 @@ mod tests {
     }
 
     #[test]
-    fn escape_cancels_the_new_note_panel_and_discards_its_draft() {
+    fn missing_workspace_root_cannot_open_the_new_note_panel() {
         let mut state = NotoraState::default();
+
+        assert_eq!(state.reduce(NotoraAction::OpenNewDocumentMenu), vec![NotoraEffect::Redraw]);
+        assert_eq!(state.layout.overlay, OverlayState::None);
+        assert_eq!(state.new_note_draft, None);
+    }
+
+    #[test]
+    fn workspace_root_selection_is_separate_from_note_creation() {
+        let mut state = NotoraState::default();
+
+        assert_eq!(
+            state.reduce(NotoraAction::WorkspaceRootSelectionRequested),
+            vec![NotoraEffect::ChooseWorkspaceRoot, NotoraEffect::Redraw]
+        );
+        assert_eq!(state.layout.overlay, OverlayState::None);
+        assert_eq!(state.new_note_draft, None);
+    }
+
+    #[test]
+    fn escape_cancels_the_new_note_panel_and_discards_its_draft() {
+        let mut state = state_with_active_workspace();
         let _ = state.reduce(NotoraAction::OpenNewDocumentMenu);
         let _ = state.reduce(NotoraAction::NoteCreationTypeSelected(DocumentKind::Text));
 
@@ -1400,7 +1442,7 @@ mod tests {
 
     #[test]
     fn trash_scope_cannot_open_the_new_note_panel() {
-        let mut state = NotoraState::default();
+        let mut state = state_with_active_workspace();
         let _ = state.reduce(NotoraAction::NavigationSelected(NavigationScope::Trash));
 
         assert_eq!(state.reduce(NotoraAction::OpenNewDocumentMenu), vec![NotoraEffect::Redraw]);
@@ -1410,7 +1452,7 @@ mod tests {
 
     #[test]
     fn note_creation_selection_updates_the_typed_draft() {
-        let mut state = NotoraState::default();
+        let mut state = state_with_active_workspace();
         let _ = state.reduce(NotoraAction::OpenNewDocumentMenu);
 
         let _ = state.reduce(NotoraAction::NoteCreationTypeSelected(DocumentKind::Mindmap));
@@ -1432,7 +1474,7 @@ mod tests {
 
     #[test]
     fn note_creation_submission_enters_submitting_state_and_keeps_the_panel_open() {
-        let mut state = NotoraState::default();
+        let mut state = state_with_active_workspace();
         let _ = state.reduce(NotoraAction::OpenNewDocumentMenu);
 
         let effects = state.reduce(NotoraAction::NoteCreationSubmitted);
@@ -1453,7 +1495,7 @@ mod tests {
 
     #[test]
     fn note_creation_failure_keeps_the_draft_editable_for_retry() {
-        let mut state = NotoraState::default();
+        let mut state = state_with_active_workspace();
         let _ = state.reduce(NotoraAction::OpenNewDocumentMenu);
         let _ = state.reduce(NotoraAction::NoteCreationSubmitted);
 
@@ -1618,7 +1660,7 @@ mod tests {
 
     #[test]
     fn files_scope_creates_an_untitled_external_document() {
-        let mut state = NotoraState::default();
+        let mut state = state_with_active_workspace();
         let _ = state.reduce(NotoraAction::NavigationSelected(NavigationScope::ExternalFiles));
 
         assert_eq!(
