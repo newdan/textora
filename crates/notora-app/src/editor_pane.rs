@@ -154,6 +154,10 @@ impl EditorPaneChrome {
         self.header.set_keyboard_focus(focused_id);
     }
 
+    pub fn set_title_blink_visible(&mut self, visible: bool) {
+        self.header.set_title_blink_visible(visible);
+    }
+
     pub fn route_event(
         &mut self,
         event: &Event,
@@ -554,5 +558,48 @@ mod tests {
 
         chrome.set_title_focus(false);
         assert!(!chrome.header.title_is_focused());
+    }
+
+    #[test]
+    fn pane_forwards_title_blink_visibility_to_the_header() {
+        use ui::core::paint::{DrawCmd, DrawList};
+
+        let mut chrome = EditorPaneChrome::new();
+        chrome.set_input(input(EditorPaneMode::WorkspaceNote));
+        let theme = ui::theme::test_theme();
+        let mut measure = ui::NoopMeasure;
+        let mut layout_context =
+            ui::LayoutCtx { ui_measure: None, measure: &mut measure, theme: &theme, dpi: 1.0 };
+        chrome.set_rects(
+            EditorPaneRects {
+                header: Rect::new(0.0, 0.0, 640.0, 108.0),
+                toolbar: Rect::new(0.0, 108.0, 640.0, 40.0),
+                body: Rect::new(0.0, 148.0, 640.0, 400.0),
+            },
+            &mut layout_context,
+        );
+        chrome.set_title_focus(true);
+
+        chrome.set_title_blink_visible(true);
+        let mut visible_draw_list = DrawList::new();
+        let mut visible_paint_context = ui::PaintCtx::new(&mut visible_draw_list, &theme, 1.0);
+        chrome.paint_underlay(&mut visible_paint_context);
+        assert!(visible_draw_list.cmds.iter().any(|command| is_caret_command(command, &theme)));
+
+        chrome.set_title_blink_visible(false);
+        let mut hidden_draw_list = DrawList::new();
+        let mut hidden_paint_context = ui::PaintCtx::new(&mut hidden_draw_list, &theme, 1.0);
+        chrome.paint_underlay(&mut hidden_paint_context);
+        assert!(!hidden_draw_list.cmds.iter().any(|command| is_caret_command(command, &theme)));
+
+        fn is_caret_command(command: &DrawCmd, theme: &ui::Theme) -> bool {
+            matches!(
+                command,
+                DrawCmd::FillRect { rect, color, radius }
+                    if *radius == 0.0
+                        && rect.w == 2.0
+                        && *color == theme.palette.input_fg
+            )
+        }
     }
 }

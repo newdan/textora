@@ -1,5 +1,5 @@
 use std::collections::HashMap;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use appkit_shell::editor_runtime::{EditorFrame, RenderError};
 use notora_core::{DocumentIdentity, DocumentKind, NavigationScope, NoteId};
@@ -73,6 +73,7 @@ const CONFIRMATION_BUTTON_WIDTH_LOGICAL: f32 = 88.0;
 const CONFIRMATION_BUTTON_HEIGHT_LOGICAL: f32 = 32.0;
 const SAVE_CONFLICT_PANEL_WIDTH_LOGICAL: f32 = 440.0;
 const SAVE_CONFLICT_PANEL_HEIGHT_LOGICAL: f32 = 196.0;
+const TEXT_CURSOR_BLINK_INTERVAL: Duration = Duration::from_millis(500);
 const WORKSPACE_NAVIGATION_KEY: u64 = 1;
 const STARRED_NAVIGATION_KEY: u64 = 2;
 const TRASH_NAVIGATION_KEY: u64 = 3;
@@ -960,6 +961,9 @@ pub struct NotoraShell {
     save_conflict_panel_rect: Rect,
     save_conflict_button_rects: [Rect; 4],
     save_conflict_actions: Option<[NotoraAction; 4]>,
+    focused_text_input: Option<FocusTarget>,
+    text_cursor_visible: bool,
+    next_text_cursor_blink_at: Option<Instant>,
 }
 
 impl Default for NotoraShell {
@@ -1019,7 +1023,53 @@ impl NotoraShell {
             save_conflict_panel_rect: Rect::ZERO,
             save_conflict_button_rects: [Rect::ZERO; 4],
             save_conflict_actions: None,
+            focused_text_input: None,
+            text_cursor_visible: true,
+            next_text_cursor_blink_at: None,
         }
+    }
+
+    pub(crate) fn synchronize_focus(&mut self, focus_target: FocusTarget, now: Instant) {
+        let focused_text_input = match focus_target {
+            FocusTarget::NavigationSearch | FocusTarget::EditorTitle => Some(focus_target),
+            _ => None,
+        };
+        if self.focused_text_input != focused_text_input {
+            self.focused_text_input = focused_text_input;
+            self.text_cursor_visible = true;
+            self.next_text_cursor_blink_at =
+                focused_text_input.map(|_| now + TEXT_CURSOR_BLINK_INTERVAL);
+        }
+        self.search_box.set_focus(focus_target == FocusTarget::NavigationSearch);
+        self.editor_pane.set_title_focus(focus_target == FocusTarget::EditorTitle);
+        self.apply_text_cursor_visibility();
+    }
+
+    pub(crate) fn advance_text_cursor_blink(&mut self, now: Instant) -> bool {
+        let Some(deadline) = self.next_text_cursor_blink_at else {
+            return false;
+        };
+        if now < deadline {
+            return false;
+        }
+        self.text_cursor_visible = !self.text_cursor_visible;
+        self.next_text_cursor_blink_at = Some(now + TEXT_CURSOR_BLINK_INTERVAL);
+        self.apply_text_cursor_visibility();
+        true
+    }
+
+    pub(crate) fn next_text_cursor_blink_at(&self) -> Option<Instant> {
+        self.next_text_cursor_blink_at
+    }
+
+    #[cfg(test)]
+    pub(crate) fn search_box_is_focused(&self) -> bool {
+        self.search_box.is_focused()
+    }
+
+    fn apply_text_cursor_visibility(&mut self) {
+        self.search_box.set_blink(self.text_cursor_visible);
+        self.editor_pane.set_title_blink_visible(self.text_cursor_visible);
     }
 
     pub fn update_model(&mut self, model: &NotoraRenderModel) {
@@ -1512,8 +1562,7 @@ impl NotoraShell {
         dpi: f32,
     ) -> NotoraEventRoute {
         let mut event_context = EventCtx { theme, dpi, cursor_hint: None };
-        self.search_box.set_focus(focus_target == FocusTarget::NavigationSearch);
-        self.editor_pane.set_title_focus(focus_target == FocusTarget::EditorTitle);
+        self.synchronize_focus(focus_target, Instant::now());
         if self.settings_overlay_open() {
             let action = self
                 .settings_overlay
@@ -2472,7 +2521,7 @@ mod tests {
     }
 
     #[test]
-    fn first_search_box_click_focuses_and_paints_the_caret() {
+    fn search_box_focus_request_paints_the_caret_after_state_sync() {
         use ui::core::paint::{DrawCmd, DrawList};
 
         let mut shell = NotoraShell::new();
@@ -2489,13 +2538,7 @@ mod tests {
             route.actions,
             vec![NotoraAction::FocusRequested(FocusTarget::NavigationSearch)]
         );
-
-        let _ = shell.route_event(
-            &Event::MouseUp { px: 24.0, py: 24.0, button: ui::core::MouseButton::Left },
-            FocusTarget::NavigationSearch,
-            &theme,
-            1.0,
-        );
+        shell.synchronize_focus(FocusTarget::NavigationSearch, Instant::now());
         assert!(shell.search_box.is_focused());
 
         let mut draw_list = DrawList::new();
@@ -2505,6 +2548,43 @@ mod tests {
         assert!(draw_list.cmds.iter().any(|command| {
             matches!(command, DrawCmd::FillRect { radius, .. } if *radius == 0.0)
         }));
+    }
+
+    #[test]
+    fn focused_search_box_toggles_the_caret_every_blink_interval() {
+        use ui::core::paint::{DrawCmd, DrawList};
+
+        fn paints_caret(shell: &NotoraShell, theme: &ui::Theme) -> bool {
+            let mut draw_list = DrawList::new();
+            let mut paint_context = ui::PaintCtx::new(&mut draw_list, theme, 1.0);
+            shell.search_box.paint(&mut paint_context);
+            draw_list.cmds.iter().any(
+                |command| matches!(command, DrawCmd::FillRect { radius, .. } if *radius == 0.0),
+            )
+        }
+
+        let mut shell = NotoraShell::new();
+        let theme = ui::theme::test_theme();
+        let mut measure = ui::NoopMeasure;
+        let mut layout_context =
+            ui::LayoutCtx { ui_measure: None, measure: &mut measure, theme: &theme, dpi: 1.0 };
+        shell.search_box.set_rect(Rect::new(8.0, 8.0, 240.0, 32.0), &mut layout_context);
+        let focused_at = Instant::now();
+
+        shell.synchronize_focus(FocusTarget::NavigationSearch, focused_at);
+        assert_eq!(
+            shell.next_text_cursor_blink_at(),
+            Some(focused_at + TEXT_CURSOR_BLINK_INTERVAL)
+        );
+        assert!(paints_caret(&shell, &theme));
+
+        assert!(shell.advance_text_cursor_blink(focused_at + TEXT_CURSOR_BLINK_INTERVAL));
+        assert!(!paints_caret(&shell, &theme));
+
+        assert!(shell.advance_text_cursor_blink(
+            focused_at + TEXT_CURSOR_BLINK_INTERVAL + TEXT_CURSOR_BLINK_INTERVAL
+        ));
+        assert!(paints_caret(&shell, &theme));
     }
 
     #[test]

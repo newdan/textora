@@ -92,6 +92,10 @@ impl EditorHeaderWidget {
         self.title_box.is_focused()
     }
 
+    pub fn set_title_blink_visible(&mut self, visible: bool) {
+        self.title_box.set_blink(visible);
+    }
+
     pub fn handle_event(
         &mut self,
         event: &Event,
@@ -535,6 +539,36 @@ mod tests {
         assert!(draw_list.cmds.iter().any(|command| {
             matches!(command, DrawCmd::FillRect { radius, .. } if *radius == 0.0)
         }));
+    }
+
+    #[test]
+    fn focused_title_caret_follows_the_explicit_blink_visibility() {
+        use crate::core::paint::{DrawCmd, DrawList};
+
+        let mut header = EditorHeaderWidget::new();
+        header.set_input(input());
+        let theme = crate::theme::test_theme();
+        let mut measure = HeaderMeasure;
+        let mut layout_context =
+            LayoutCtx { ui_measure: None, measure: &mut measure, theme: &theme, dpi: 1.0 };
+        header.set_rect(Rect::new(0.0, 0.0, 640.0, 128.0), &mut layout_context);
+        header.set_keyboard_focus(Some(EDITOR_HEADER_TITLE_ID));
+
+        header.set_title_blink_visible(true);
+        let mut visible_draw_list = DrawList::new();
+        let mut visible_paint_context = PaintCtx::new(&mut visible_draw_list, &theme, 1.0);
+        header.title_box.paint(&mut visible_paint_context);
+        assert!(visible_draw_list.cmds.iter().any(is_caret_command));
+
+        header.set_title_blink_visible(false);
+        let mut hidden_draw_list = DrawList::new();
+        let mut hidden_paint_context = PaintCtx::new(&mut hidden_draw_list, &theme, 1.0);
+        header.title_box.paint(&mut hidden_paint_context);
+        assert!(!hidden_draw_list.cmds.iter().any(is_caret_command));
+
+        fn is_caret_command(command: &DrawCmd) -> bool {
+            matches!(command, DrawCmd::FillRect { radius, .. } if *radius == 0.0)
+        }
     }
 
     #[test]

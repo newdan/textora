@@ -468,6 +468,7 @@ impl NotoraApp {
             let shell_effect = EffectExecutor::execute(self, effect);
             self.apply_shell_effect(shell_effect);
         }
+        self.shell.synchronize_focus(self.state.layout.focus_target, Instant::now());
         if committed_without_workspace {
             self.dispatch_action(NotoraAction::SearchCommitted {
                 query: self.state.library.search_text.clone(),
@@ -530,7 +531,10 @@ impl NotoraApp {
     }
 
     pub(crate) fn take_redraw_request(&mut self) -> bool {
-        std::mem::take(&mut self.needs_redraw) || self.editor_runtime.take_redraw_request()
+        let text_cursor_blink_due = self.shell.advance_text_cursor_blink(Instant::now());
+        std::mem::take(&mut self.needs_redraw)
+            || self.editor_runtime.take_redraw_request()
+            || text_cursor_blink_due
     }
 
     pub(crate) fn process_due_autosaves(&mut self) {
@@ -577,11 +581,14 @@ impl NotoraApp {
     }
 
     pub(crate) fn next_deadline(&self) -> Option<std::time::Instant> {
+        let text_cursor_blink_at =
+            if self.window_focused { self.shell.next_text_cursor_blink_at() } else { None };
         [
             self.autosave.next_deadline(),
             self.search_controller.next_deadline(),
             self.pending_session_persist_at,
             self.pending_catalog_backup_at,
+            text_cursor_blink_at,
         ]
         .into_iter()
         .flatten()
@@ -3084,6 +3091,33 @@ mod tests {
             button: ui::core::widget::MouseButton::Left,
         }));
         assert_eq!(app.state().layout.focus_target, FocusTarget::Editor);
+    }
+
+    #[test]
+    fn product_text_focus_schedules_its_blink_before_another_input_event() {
+        let mut app = app();
+        assert_eq!(app.shell.next_text_cursor_blink_at(), None);
+
+        app.dispatch_action(NotoraAction::FocusRequested(FocusTarget::NavigationSearch));
+
+        assert!(app.shell.next_text_cursor_blink_at().is_some());
+        assert_eq!(app.next_deadline(), app.shell.next_text_cursor_blink_at());
+    }
+
+    #[test]
+    fn first_search_click_synchronizes_widget_focus_before_the_next_input_event() {
+        let mut app = app();
+        app.render().expect("headless shell frame should render");
+        app.dispatch_action(NotoraAction::FocusRequested(FocusTarget::Editor));
+
+        assert!(app.route_product_event(&ui::Event::MouseDown {
+            px: 24.0,
+            py: 24.0,
+            button: ui::core::MouseButton::Left,
+        }));
+
+        assert_eq!(app.state().layout.focus_target, FocusTarget::NavigationSearch);
+        assert!(app.shell.search_box_is_focused());
     }
 
     #[test]
