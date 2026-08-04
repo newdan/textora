@@ -3078,12 +3078,16 @@ mod tests {
         app.dispatch_action(NotoraAction::FocusRequested(FocusTarget::CardList));
         let editor_rect = app.shell_layout().editor_rect;
 
-        assert!(app.route_product_event(&ui::Event::MouseDown {
+        assert!(!app.route_product_event(&ui::Event::MouseDown {
             px: editor_rect.x + editor_rect.w * 0.5,
             py: editor_rect.y + editor_rect.h * 0.5,
             button: ui::core::widget::MouseButton::Left,
         }));
         assert_eq!(app.state().layout.focus_target, FocusTarget::Editor);
+        assert!(app.runtime_accepts_pointer_input(
+            editor_rect.x + editor_rect.w * 0.5,
+            editor_rect.y + editor_rect.h * 0.5,
+        ));
     }
 
     #[test]

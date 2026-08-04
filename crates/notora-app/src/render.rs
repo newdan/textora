@@ -912,6 +912,10 @@ impl NotoraEventRoute {
     fn consumed(action: Option<NotoraAction>) -> Self {
         Self { actions: action.into_iter().collect(), consumed: true }
     }
+
+    fn passthrough(action: NotoraAction) -> Self {
+        Self { actions: vec![action], consumed: false }
+    }
 }
 
 /// 三栏静态壳；仅持有通用 widget 与当帧键到产品动作的映射。
@@ -1597,11 +1601,14 @@ impl NotoraShell {
         if action.is_some() {
             return NotoraEventRoute::consumed(action);
         }
-        if is_left_mouse_down(event) {
-            let focus_action = pointer_target(event, self).map(NotoraAction::FocusRequested);
-            if focus_action.is_some() {
-                return NotoraEventRoute::consumed(focus_action);
+        if is_left_mouse_down(event)
+            && let Some(focus_target) = pointer_target(event, self)
+        {
+            let focus_action = NotoraAction::FocusRequested(focus_target);
+            if focus_target == FocusTarget::Editor {
+                return NotoraEventRoute::passthrough(focus_action);
             }
+            return NotoraEventRoute::consumed(Some(focus_action));
         }
         if widget_action.is_some() {
             return NotoraEventRoute::consumed(None);

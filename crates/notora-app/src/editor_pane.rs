@@ -15,7 +15,7 @@ const EDITOR_PANE_TAG_HORIZONTAL_INSET_LOGICAL: f32 = 16.0;
 const EDITOR_PANE_LOCATION_WIDTH_LOGICAL: f32 = 360.0;
 const EDITOR_PANE_LOCATION_HEIGHT_LOGICAL: f32 = 220.0;
 const EDITOR_PANE_LOCATION_INSET_LOGICAL: f32 = 16.0;
-const EDITOR_PANE_COMPACT_HEADER_HEIGHT_LOGICAL: f32 = 64.0;
+const EDITOR_PANE_COMPACT_DOCUMENT_HEADER_HEIGHT_LOGICAL: f32 = 72.0;
 const EDITOR_PANE_COMPACT_HEADER_WIDTH_LOGICAL: f32 = 420.0;
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -90,6 +90,7 @@ pub struct EditorPaneChrome {
     tag_editor: TagEditorWidget,
     toolbar: EditorToolbarWidget,
     rects: EditorPaneRects,
+    document_header_rect: Rect,
     tag_rect: Rect,
     location_rect: Rect,
     tag_editor_active: bool,
@@ -104,6 +105,7 @@ impl EditorPaneChrome {
             tag_editor: TagEditorWidget::new(),
             toolbar: EditorToolbarWidget::new(),
             rects: EditorPaneRects::default(),
+            document_header_rect: Rect::ZERO,
             tag_rect: Rect::ZERO,
             location_rect: Rect::ZERO,
             tag_editor_active: false,
@@ -127,15 +129,17 @@ impl EditorPaneChrome {
 
     pub fn set_rects(&mut self, rects: EditorPaneRects, context: &mut LayoutCtx<'_>) {
         self.rects = rects;
+        self.document_header_rect = document_header_rect(rects.header, context.dpi);
         let compact = rects.header.w / context.dpi <= EDITOR_PANE_COMPACT_HEADER_WIDTH_LOGICAL
-            || rects.header.h / context.dpi <= EDITOR_PANE_COMPACT_HEADER_HEIGHT_LOGICAL;
+            || self.document_header_rect.h / context.dpi
+                <= EDITOR_PANE_COMPACT_DOCUMENT_HEADER_HEIGHT_LOGICAL;
         self.input.header.compact = compact;
         self.input.tags.compact = compact;
         self.header.set_input(self.input.header.clone());
         self.tag_editor.set_input(self.input.tags.clone());
-        self.tag_rect = tag_rect(rects.header, context.dpi, self.input.should_render_chrome());
+        self.tag_rect = tag_rect(rects.header, context.dpi, self.input.tags.enabled);
         self.location_rect = location_rect(rects.header, context.dpi, self.input.location.open);
-        self.header.set_rect(local_rect(rects.header), context);
+        self.header.set_rect(local_rect(self.document_header_rect), context);
         self.toolbar.set_rect(local_rect(rects.toolbar), context);
         self.tag_editor.set_rect(local_rect(self.tag_rect), context);
         self.location_picker.set_rect(local_rect(self.location_rect), context);
@@ -170,8 +174,11 @@ impl EditorPaneChrome {
         if self.input.tags.suggestions_open || self.tag_editor_active {
             let local_event = translate_event(event, self.tag_rect.x, self.tag_rect.y);
             if let Some(action) = self.tag_editor.on_event(&local_event, context) {
+                let dismissed = is_tag_dismiss_action(&action);
                 self.close_tag_after_action(&action);
-                return Some(action);
+                if !dismissed {
+                    return Some(action);
+                }
             }
             if self.tag_editor_active || self.input.tags.suggestions_open {
                 return Some(WidgetAction::Consumed);
@@ -186,10 +193,11 @@ impl EditorPaneChrome {
             return Some(WidgetAction::Consumed);
         }
 
-        if event_is_inside(event, self.rects.header)
+        if event_is_inside(event, self.document_header_rect)
             || (self.header.title_is_focused() && event_is_keyboard(event))
         {
-            let local_event = translate_event(event, self.rects.header.x, self.rects.header.y);
+            let local_event =
+                translate_event(event, self.document_header_rect.x, self.document_header_rect.y);
             if let Some(action) = self.header.on_event(&local_event, context) {
                 return Some(action);
             }
@@ -206,7 +214,7 @@ impl EditorPaneChrome {
         if !self.input.should_render_chrome() {
             return;
         }
-        paint_at(context, self.rects.header, |context| self.header.paint(context));
+        paint_at(context, self.document_header_rect, |context| self.header.paint(context));
         if self.input.tags.enabled {
             paint_at(context, self.tag_rect, |context| self.tag_editor.paint(context));
         }
@@ -268,6 +276,11 @@ fn local_rect(rect: Rect) -> Rect {
     Rect::new(0.0, 0.0, rect.w, rect.h)
 }
 
+fn document_header_rect(header: Rect, dpi: f32) -> Rect {
+    let tag_row_height = (EDITOR_PANE_TAG_ROW_HEIGHT_LOGICAL * dpi).min(header.h);
+    Rect::new(header.x, header.y, header.w, (header.h - tag_row_height).max(0.0))
+}
+
 fn tag_rect(header: Rect, dpi: f32, visible: bool) -> Rect {
     if !visible || header.w <= 0.0 || header.h <= 0.0 {
         return Rect::ZERO;
@@ -275,9 +288,18 @@ fn tag_rect(header: Rect, dpi: f32, visible: bool) -> Rect {
     let height = (EDITOR_PANE_TAG_ROW_HEIGHT_LOGICAL * dpi).min(header.h);
     Rect::new(
         header.x + EDITOR_PANE_TAG_HORIZONTAL_INSET_LOGICAL * dpi,
-        header.bottom() - height - EDITOR_PANE_TAG_HORIZONTAL_INSET_LOGICAL * dpi,
+        header.bottom() - height,
         (header.w - EDITOR_PANE_TAG_HORIZONTAL_INSET_LOGICAL * dpi * 2.0).max(0.0),
         height,
+    )
+}
+
+fn is_tag_dismiss_action(action: &WidgetAction) -> bool {
+    matches!(
+        action,
+        WidgetAction::Control(ControlAction::Activated {
+            id: ui::tag_editor::TAG_EDITOR_DISMISS_ID
+        })
     )
 }
 
@@ -474,6 +496,39 @@ mod tests {
 
         assert!(chrome.input.header.compact);
         assert!(chrome.input.tags.compact);
+    }
+
+    #[test]
+    fn tag_editor_uses_a_dedicated_row_below_the_document_header() {
+        let tags = tag_rect(Rect::new(0.0, 0.0, 640.0, 108.0), 1.0, true);
+
+        assert_eq!(tags.y, 80.0);
+        assert_eq!(tags.h, EDITOR_PANE_TAG_ROW_HEIGHT_LOGICAL);
+    }
+
+    #[test]
+    fn dismissing_the_tag_editor_does_not_consume_the_body_click() {
+        let mut chrome = EditorPaneChrome::new();
+        chrome.set_input(input(EditorPaneMode::WorkspaceNote));
+        chrome.tag_editor_active = true;
+        let theme = ui::theme::test_theme();
+        let mut measure = ui::NoopMeasure;
+        let mut layout_context =
+            ui::LayoutCtx { ui_measure: None, measure: &mut measure, theme: &theme, dpi: 1.0 };
+        chrome.set_rects(
+            EditorPaneRects {
+                header: Rect::new(0.0, 0.0, 640.0, 108.0),
+                toolbar: Rect::new(0.0, 108.0, 640.0, 40.0),
+                body: Rect::new(0.0, 148.0, 640.0, 400.0),
+            },
+            &mut layout_context,
+        );
+        let mut event_context = ui::EventCtx { theme: &theme, dpi: 1.0, cursor_hint: None };
+        let body_click =
+            ui::Event::MouseDown { px: 320.0, py: 240.0, button: ui::MouseButton::Left };
+
+        assert_eq!(chrome.route_event(&body_click, &mut event_context), None);
+        assert!(!chrome.tag_editor_active);
     }
 
     #[test]
