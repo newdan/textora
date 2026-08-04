@@ -262,6 +262,13 @@ pub enum PluginQuery {
         /// Preferred X pixel position when moving up/down (sticky column).
         target_x: Option<f32>,
     },
+    /// Plan a product semantic editing command without mutating the document.
+    PlanSemanticEdit {
+        command: SemanticEditCommand,
+        source_generation: u32,
+        cursor_byte: usize,
+        selection: Option<std::ops::Range<usize>>,
+    },
 }
 
 /// Responses returned from [`PluginQuery`].
@@ -295,6 +302,8 @@ pub enum PluginResponse {
     Augmentation(Option<EditAugmentation>),
     /// The file-level mindmap theme selection reported by the plugin.
     MindmapThemeSelection(crate::theme::MindmapThemeSelection),
+    /// Result of planning a product semantic editing command.
+    SemanticEdit(SemanticEditPlan),
 }
 
 // ---------------------------------------------------------------------------
@@ -349,6 +358,34 @@ pub enum Direction {
 // ---------------------------------------------------------------------------
 // Edit Transaction Protocol
 // ---------------------------------------------------------------------------
+
+/// Product-level commands whose document-specific edit semantics belong to a plugin.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum SemanticEditCommand {
+    Undo,
+    Redo,
+    SetHeadingLevel(u8),
+    ToggleBold,
+    ToggleItalic,
+    ToggleStrikethrough,
+    ToggleInlineCode,
+    UnorderedList,
+    OrderedList,
+    TaskList,
+    Quote,
+    CodeBlock,
+    InsertLink,
+    PromoteObject,
+    DemoteObject,
+}
+
+/// Typed result returned by a plugin when planning a semantic command.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum SemanticEditPlan {
+    Unsupported,
+    NoChange,
+    Apply(EditTransaction),
+}
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum EditIntent {

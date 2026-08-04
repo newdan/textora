@@ -642,22 +642,48 @@ fn execute_metadata_mutation_in_worker(
     mutation: MetadataMutation,
     event_sender: &NotoraProductEventSender,
 ) {
-    let result = match mutation {
+    let note_id = match &mutation {
+        MetadataMutation::ToggleStar { note_id }
+        | MetadataMutation::AttachTagByName { note_id, .. }
+        | MetadataMutation::DetachTag { note_id, .. } => *note_id,
+    };
+    let mutation_result = match &mutation {
         MetadataMutation::ToggleStar { note_id } => {
-            catalog.toggle_note_starred(note_id).map(|_| ())
+            catalog.toggle_note_starred(*note_id).map(|_| ())
+        }
+        MetadataMutation::AttachTagByName { note_id, display_name } => {
+            catalog.attach_tag_by_name(*note_id, display_name).map(|_| ())
+        }
+        MetadataMutation::DetachTag { note_id, tag_id } => {
+            catalog.detach_tag(*note_id, *tag_id).map(|_| ())
         }
     };
+    let result = mutation_result.and_then(|()| {
+        let metadata = catalog.note_editor_metadata(note_id)?.ok_or(
+            notora_core::CatalogError::InvalidStoredValue {
+                column: "note_id",
+                value: note_id.to_string(),
+            },
+        )?;
+        let tags = catalog.tags_for_note(note_id)?;
+        Ok((note_id, metadata, tags))
+    });
     match result {
-        Ok(()) => {
+        Ok((note_id, metadata, tags)) => {
             let _ = event_sender.send(NotoraProductEvent::MetadataMutationCompleted {
                 workspace_id,
                 workspace_generation,
+                mutation,
+                note_id,
+                metadata,
+                tags,
             });
         }
         Err(error) => {
             let _ = event_sender.send(NotoraProductEvent::MetadataMutationFailed {
                 workspace_id,
                 workspace_generation,
+                mutation,
                 message: error.to_string(),
             });
         }
@@ -705,22 +731,29 @@ fn prepare_document_in_worker(
             .map_err(|error| error.to_string())
             .and_then(|note| note.ok_or_else(|| format!("活动笔记 {note_id} 已不存在")))
             .and_then(|note| {
-                workspace
+                let metadata = catalog
+                    .note_editor_metadata(note_id)
+                    .map_err(|error| error.to_string())?
+                    .ok_or_else(|| format!("活动笔记 {note_id} 缺少编辑区 metadata"))?;
+                let tags = catalog.tags_for_note(note_id).map_err(|error| error.to_string())?;
+                let path = workspace
                     .resolve_relative_path(&note.relative_path)
-                    .map_err(|error| error.to_string())
-            })
-            .and_then(|path| {
-                crate::editor_adapter::load_document(&path).map_err(|error| error.to_string())
+                    .map_err(|error| error.to_string())?;
+                let document = crate::editor_adapter::load_document(&path)
+                    .map_err(|error| error.to_string())?;
+                Ok((document, metadata, tags))
             }),
         DocumentIdentity::ExternalFile(_) => Err("外部文档必须由外部文件会话加载".to_owned()),
     };
     match result {
-        Ok(document) => {
+        Ok((document, metadata, tags)) => {
             let _ = event_sender.send(NotoraProductEvent::DocumentLoaded {
                 workspace_id,
                 workspace_generation,
                 request,
                 document,
+                metadata,
+                tags,
             });
         }
         Err(message) => {
@@ -799,8 +832,9 @@ mod tests {
         WorkspaceController, WorkspaceControllerError, default_migration_backup_retention,
         run_indexer, scan_workspace,
     };
-    use crate::action::CardQuery;
+    use crate::action::{CardQuery, DocumentLoadRequest};
     use crate::product::{NotoraProduct, NotoraProductEvent};
+    use notora_core::DocumentIdentity;
 
     #[test]
     fn cancelled_selection_keeps_the_current_workspace_unchanged() {
@@ -1111,11 +1145,11 @@ mod tests {
         };
 
         controller
-            .execute_note_command(notora_core::note_command::NoteCommand::Create(
-                notora_core::note_command::CreateNoteRequest {
+            .execute_note_command(notora_core::note_command::NoteCommand::CreateConfigured(
+                notora_core::note_command::ConfiguredCreateNoteRequest {
                     kind: notora_core::DocumentKind::Markdown,
                     target_directory: None,
-                    tag_to_attach: None,
+                    encryption: notora_core::NoteEncryption::Unencrypted,
                 },
             ))
             .expect("active workspace should accept the note command");
@@ -1186,6 +1220,73 @@ mod tests {
     }
 
     #[test]
+    fn document_load_completion_carries_editor_metadata_and_formal_tags() {
+        let directory = tempfile::tempdir().expect("workspace test directory should be created");
+        std::fs::write(directory.path().join("note.md"), "# 路线图\n\n正文")
+            .expect("workspace note should be written");
+        let workspace = Workspace::open_or_initialize(directory.path())
+            .expect("workspace metadata should initialize");
+        let catalog_path = workspace.metadata_directory().join(CATALOG_FILE_NAME);
+        let catalog = Catalog::open(&catalog_path).expect("workspace catalog should open");
+        scan_workspace(&workspace, &catalog).expect("workspace note should be indexed");
+        let note_id = catalog
+            .active_notes()
+            .expect("active notes should load")
+            .first()
+            .expect("indexed note should exist")
+            .note_id;
+        let formal_tag = catalog.create_tag("产品/Notora").expect("formal tag should be created");
+        let formal_tag_id = formal_tag.tag_id;
+        catalog.attach_tag(note_id, formal_tag_id).expect("formal tag should attach");
+        drop(catalog);
+        drop(workspace);
+
+        let mut controller = WorkspaceController::default();
+        let mut product = NotoraProduct::new();
+        let WorkspaceCommandResult::Opened(active_workspace) = controller
+            .execute(
+                WorkspaceCommand::OpenExisting { root: directory.path().to_path_buf() },
+                &mut product,
+            )
+            .expect("workspace should open")
+        else {
+            panic!("open command should activate the workspace");
+        };
+        let request = DocumentLoadRequest {
+            identity: DocumentIdentity::Note(note_id),
+            selection_generation: 7,
+        };
+        controller.prepare_document(request).expect("worker should accept document loading");
+
+        let deadline = Instant::now() + Duration::from_secs(2);
+        loop {
+            let _ = product.drain_product_events();
+            let events = product.take_workspace_events();
+            if events.iter().any(|event| {
+                matches!(
+                    event,
+                    NotoraProductEvent::DocumentLoaded {
+                        workspace_id,
+                        workspace_generation,
+                        request: completed_request,
+                        metadata,
+                        tags,
+                        ..
+                    } if *workspace_id == active_workspace.descriptor.workspace_id
+                        && *workspace_generation == active_workspace.generation
+                        && *completed_request == request
+                        && metadata.note_id == note_id
+                        && tags.iter().any(|tag| tag.tag_id == formal_tag_id)
+                )
+            }) {
+                break;
+            }
+            assert!(Instant::now() < deadline, "document metadata should arrive promptly");
+            thread::sleep(Duration::from_millis(10));
+        }
+    }
+
+    #[test]
     fn active_workspace_worker_executes_metadata_mutations_off_the_main_thread() {
         let directory = tempfile::tempdir().expect("workspace test directory should be created");
         std::fs::write(directory.path().join("note.md"), "body")
@@ -1216,7 +1317,10 @@ mod tests {
         };
 
         controller
-            .execute_metadata_mutation(crate::action::MetadataMutation::ToggleStar { note_id })
+            .execute_metadata_mutation(crate::action::MetadataMutation::AttachTagByName {
+                note_id,
+                display_name: "产品/Notora".to_owned(),
+            })
             .expect("active workspace should accept metadata mutations");
 
         let deadline = Instant::now() + Duration::from_secs(2);
@@ -1229,8 +1333,22 @@ mod tests {
                     NotoraProductEvent::MetadataMutationCompleted {
                         workspace_id,
                         workspace_generation,
+                        note_id: completed_note_id,
+                        metadata,
+                        tags,
+                        mutation: crate::action::MetadataMutation::AttachTagByName {
+                            note_id: mutation_note_id,
+                            display_name,
+                        },
                     } if *workspace_id == active_workspace.descriptor.workspace_id
                         && *workspace_generation == active_workspace.generation
+                        && *completed_note_id == note_id
+                        && metadata.note_id == note_id
+                        && metadata.encryption == notora_core::NoteEncryption::Unencrypted
+                        && *mutation_note_id == note_id
+                        && display_name == "产品/Notora"
+                        && tags.len() == 1
+                        && tags[0].display_name == "产品/Notora"
                 )
             }) {
                 break;
@@ -1441,11 +1559,11 @@ mod tests {
             panic!("open command should activate the workspace");
         };
         controller
-            .execute_note_command(notora_core::note_command::NoteCommand::Create(
-                notora_core::note_command::CreateNoteRequest {
+            .execute_note_command(notora_core::note_command::NoteCommand::CreateConfigured(
+                notora_core::note_command::ConfiguredCreateNoteRequest {
                     kind: notora_core::DocumentKind::Markdown,
                     target_directory: None,
-                    tag_to_attach: None,
+                    encryption: notora_core::NoteEncryption::Unencrypted,
                 },
             ))
             .expect("worker should create a note");

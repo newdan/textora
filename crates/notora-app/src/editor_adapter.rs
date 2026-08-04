@@ -110,7 +110,7 @@ pub(crate) fn build_editor_plugins()
     let mut plugin_registry = ui::plugin::PluginRegistry::new();
     plugin_registry.register(Box::new(EditorPluginFactory));
     plugin_registry.register(Box::new(textora_markdown::mindmap_view::MindmapPluginFactory));
-    plugin_registry.register(Box::new(textora_markdown::view::MarkdownEditorViewFactory));
+    plugin_registry.register(Box::new(textora_markdown::view::NotoraMarkdownEditorViewFactory));
     let registered_plugin_ids =
         HashSet::from([PLUGIN_EDITOR, PLUGIN_MINDMAP, PLUGIN_MARKDOWN_EDITOR]);
     let view_routes = ViewRouteTable::new(

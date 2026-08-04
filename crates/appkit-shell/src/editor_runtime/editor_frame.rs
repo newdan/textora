@@ -28,9 +28,11 @@ impl std::fmt::Display for RenderError {
 
 impl std::error::Error for RenderError {}
 
-/// 在同一 DrawList 中组合产品 chrome 和编辑器内容的短生命周期对象。
+/// 按 underlay、editor、overlay 顺序组合产品 chrome 和编辑器内容的短生命周期对象。
 pub struct EditorFrame {
-    draw_list: ui::DrawList,
+    product_underlay: ui::DrawList,
+    editor_draw_list: ui::DrawList,
+    product_overlay: ui::DrawList,
     text_measure: ui::NoopMeasure,
     theme: ui::Theme,
     dpi: f32,
@@ -45,7 +47,9 @@ impl EditorFrame {
         ui_shaper: Option<Arc<Mutex<shaping::Shaper>>>,
     ) -> Self {
         Self {
-            draw_list: ui::DrawList::new(),
+            product_underlay: ui::DrawList::new(),
+            editor_draw_list: ui::DrawList::new(),
+            product_overlay: ui::DrawList::new(),
             text_measure: ui::NoopMeasure,
             theme,
             dpi,
@@ -68,18 +72,27 @@ impl EditorFrame {
     }
 
     pub fn with_paint_context<T>(&mut self, paint: impl FnOnce(&mut ui::PaintCtx<'_>) -> T) -> T {
-        let mut ui_shaper = self.ui_shaper.as_ref().map(|shaper| {
-            shaper.lock().expect("UI shaper mutex must not be poisoned by another paint callback")
-        });
-        let mut context = ui::PaintCtx {
-            list: &mut self.draw_list,
-            theme: &self.theme,
-            dpi: self.dpi,
-            offset: (0.0, 0.0),
-            global_alpha: 1.0,
-            shaper: ui_shaper.as_deref_mut(),
-        };
-        paint(&mut context)
+        paint_with_context(
+            &mut self.product_overlay,
+            &self.theme,
+            self.dpi,
+            self.ui_shaper.as_ref(),
+            paint,
+        )
+    }
+
+    /// 绘制必须位于编辑器内容下方的产品背景与固定 chrome。
+    pub fn with_underlay_paint_context<T>(
+        &mut self,
+        paint: impl FnOnce(&mut ui::PaintCtx<'_>) -> T,
+    ) -> T {
+        paint_with_context(
+            &mut self.product_underlay,
+            &self.theme,
+            self.dpi,
+            self.ui_shaper.as_ref(),
+            paint,
+        )
     }
 
     pub fn paint_editor(&mut self, editor_rect: ui::Rect) -> Result<(), RenderError> {
@@ -103,7 +116,7 @@ impl EditorFrame {
         let mut ui_shaper = self.ui_shaper.as_ref().map(|shaper| {
             shaper.lock().expect("UI shaper mutex must not be poisoned by another paint callback")
         });
-        self.draw_list.clip(editor_rect, |draw_list| {
+        self.editor_draw_list.clip(editor_rect, |draw_list| {
             let mut context = ui::PaintCtx {
                 list: draw_list,
                 theme,
@@ -139,9 +152,23 @@ impl EditorFrame {
         resources: &mut RenderResources,
         vertices: &mut Vec<GlyphVertex>,
     ) {
+        crate::paint_backend::drain_into(
+            std::mem::take(&mut self.product_underlay),
+            screen,
+            resources.text.as_mut(),
+            resources.gpu.as_ref(),
+            vertices,
+        );
         vertices.append(&mut self.editor_vertices);
         crate::paint_backend::drain_into(
-            std::mem::take(&mut self.draw_list),
+            std::mem::take(&mut self.editor_draw_list),
+            screen,
+            resources.text.as_mut(),
+            resources.gpu.as_ref(),
+            vertices,
+        );
+        crate::paint_backend::drain_into(
+            std::mem::take(&mut self.product_overlay),
             screen,
             resources.text.as_mut(),
             resources.gpu.as_ref(),
@@ -152,6 +179,27 @@ impl EditorFrame {
     pub fn present(self) -> Result<EditorOutcome, RenderError> {
         Ok(EditorOutcome::default())
     }
+}
+
+fn paint_with_context<T>(
+    list: &mut ui::DrawList,
+    theme: &ui::Theme,
+    dpi: f32,
+    ui_shaper: Option<&Arc<Mutex<shaping::Shaper>>>,
+    paint: impl FnOnce(&mut ui::PaintCtx<'_>) -> T,
+) -> T {
+    let mut ui_shaper = ui_shaper.map(|shaper| {
+        shaper.lock().expect("UI shaper mutex must not be poisoned by another paint callback")
+    });
+    let mut context = ui::PaintCtx {
+        list,
+        theme,
+        dpi,
+        offset: (0.0, 0.0),
+        global_alpha: 1.0,
+        shaper: ui_shaper.as_deref_mut(),
+    };
+    paint(&mut context)
 }
 
 fn is_valid_rect(rect: ui::Rect) -> bool {
@@ -199,7 +247,7 @@ mod tests {
 
         assert!(
             frame
-                .draw_list
+                .product_overlay
                 .cmds
                 .iter()
                 .any(|command| matches!(command, ui::DrawCmd::TextLayout { .. })),
@@ -208,7 +256,7 @@ mod tests {
     }
 
     #[test]
-    fn product_editor_overlay_order_shares_one_draw_list() {
+    fn product_editor_and_overlay_layers_compose_in_one_frame() {
         let theme = theme();
         let mut frame = EditorFrame::new_for_backend(theme, 1.0, None);
 
@@ -262,5 +310,47 @@ mod tests {
         assert_eq!(vertices.first().expect("editor vertex must be retained").position, [0.25, 0.5]);
         assert_eq!(vertices.len(), 7, "one editor vertex plus one product quad");
         frame.present().expect("frame should be consumed once");
+    }
+
+    #[test]
+    fn explicit_editor_layer_is_between_product_underlay_and_overlay() {
+        let theme = theme();
+        let mut frame = EditorFrame::new_for_backend(theme, 1.0, None);
+        let underlay_color = [0.1, 0.2, 0.3, 1.0];
+        let editor_color = [0.4, 0.5, 0.6, 1.0];
+        let overlay_color = [0.7, 0.8, 0.9, 1.0];
+
+        frame.with_underlay_paint_context(|context| {
+            context.list.fill(ui::Rect::new(0.0, 0.0, 10.0, 10.0), underlay_color);
+        });
+        frame
+            .paint_editor(ui::Rect::new(20.0, 20.0, 80.0, 60.0))
+            .expect("editor layer should divide product paint phases");
+        frame
+            .paint_editor_vertices(
+                ui::Rect::new(20.0, 20.0, 80.0, 60.0),
+                [GlyphVertex {
+                    position: [0.25, 0.5],
+                    tex_coords: [0.0, 0.0],
+                    color: editor_color,
+                }],
+            )
+            .expect("editor layer should accept vertices");
+        frame.with_paint_context(|context| {
+            context.list.fill(ui::Rect::new(30.0, 30.0, 5.0, 5.0), overlay_color);
+        });
+
+        let mut resources = RenderResources {
+            text: None,
+            gpu: None,
+            frame_cache: crate::frame_cache::FrameCache::new(),
+        };
+        let mut vertices = Vec::new();
+        frame.drain_into(ui::Screen::new(100.0, 100.0), &mut resources, &mut vertices);
+
+        assert_eq!(vertices.len(), 13, "two product quads should surround one editor vertex");
+        assert_eq!(vertices[0].color, underlay_color);
+        assert_eq!(vertices[6].color, editor_color);
+        assert_eq!(vertices[7].color, overlay_color);
     }
 }

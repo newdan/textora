@@ -162,19 +162,9 @@ impl Widget for SplitButtonWidget {
                 continue;
             };
             region_color[3] *= alpha;
-            ctx.list.fill_rounded(rect, region_color, corner_radius);
-            let square_inner_edge = match region {
-                SplitButtonRegion::Main => Rect::new(
-                    (rect.right() - corner_radius).max(rect.x),
-                    rect.y,
-                    corner_radius.min(rect.w),
-                    rect.h,
-                ),
-                SplitButtonRegion::Menu => {
-                    Rect::new(rect.x, rect.y, corner_radius.min(rect.w), rect.h)
-                }
-            };
-            ctx.list.fill(square_inner_edge, region_color);
+            ctx.list.clip(rect, |draw_list| {
+                draw_list.fill_rounded(self.rect, region_color, corner_radius);
+            });
         }
 
         let mut divider_color = ctx.theme.palette.border_subtle;
@@ -418,13 +408,14 @@ mod tests {
 
         widget.paint(&mut PaintCtx::new(&mut draw_list, &theme, 1.0));
 
-        assert!(draw_list.cmds.iter().any(|command| {
-            matches!(
-                command,
-                DrawCmd::FillRect { rect, color, .. }
-                    if *rect == widget.main_rect()
-                        && *color == theme.palette.bg_hover
-            )
+        assert!(draw_list.cmds.windows(3).any(|commands| {
+            matches!(commands[0], DrawCmd::PushClip(rect) if rect == widget.main_rect())
+                && matches!(
+                    commands[1],
+                    DrawCmd::FillRect { rect, color, .. }
+                        if rect == widget.rect && color == theme.palette.bg_hover
+                )
+                && matches!(commands[2], DrawCmd::PopClip)
         }));
         assert!(draw_list.cmds.iter().any(|command| {
             matches!(
@@ -445,6 +436,27 @@ mod tests {
     }
 
     #[test]
+    fn translucent_hover_highlight_does_not_overlap_itself() {
+        let mut widget = widget();
+        let mut theme = crate::theme::test_theme();
+        theme.palette.bg_hover[3] = 0.5;
+        let mut event_context = event_context(&theme);
+        let _ = widget.on_event(&Event::MouseMove { px: 20.0, py: 30.0 }, &mut event_context);
+        let mut draw_list = DrawList::new();
+
+        widget.paint(&mut PaintCtx::new(&mut draw_list, &theme, 1.0));
+
+        let hover_fill_count = draw_list
+            .cmds
+            .iter()
+            .filter(|command| {
+                matches!(command, DrawCmd::FillRect { color, .. } if *color == theme.palette.bg_hover)
+            })
+            .count();
+        assert_eq!(hover_fill_count, 1, "hover 色不得在同一区域重复合成");
+    }
+
+    #[test]
     fn open_menu_keeps_only_the_menu_region_active() {
         let mut widget = widget();
         widget.set_menu_open(true);
@@ -453,13 +465,14 @@ mod tests {
 
         widget.paint(&mut PaintCtx::new(&mut draw_list, &theme, 1.0));
 
-        assert!(draw_list.cmds.iter().any(|command| {
-            matches!(
-                command,
-                DrawCmd::FillRect { rect, color, .. }
-                    if *rect == widget.menu_rect()
-                        && *color == theme.palette.bg_active
-            )
+        assert!(draw_list.cmds.windows(3).any(|commands| {
+            matches!(commands[0], DrawCmd::PushClip(rect) if rect == widget.menu_rect())
+                && matches!(
+                    commands[1],
+                    DrawCmd::FillRect { rect, color, .. }
+                        if rect == widget.rect && color == theme.palette.bg_active
+                )
+                && matches!(commands[2], DrawCmd::PopClip)
         }));
         assert!(!draw_list.cmds.iter().any(|command| {
             matches!(

@@ -4,7 +4,8 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use rusqlite::{OptionalExtension, Row, params};
 use uuid::Uuid;
 
-use crate::{DocumentKind, NoteId, TagId};
+use crate::domain::NoteEncryption;
+use crate::{DocumentKind, NoteId};
 
 use super::{Catalog, CatalogError};
 
@@ -14,6 +15,8 @@ const DOCUMENT_KIND_MINDMAP: i64 = 3;
 const ACTIVE_NOTE_LIFECYCLE: i64 = 0;
 const TRASHED_NOTE_LIFECYCLE: i64 = 1;
 const MISSING_SCAN_CONFIRMATION_COUNT: i64 = 2;
+const NOTE_ENCRYPTION_UNENCRYPTED: i64 = 0;
+const NOTE_ENCRYPTION_ENCRYPTED: i64 = 1;
 
 /// 已由扫描器读取并准备写入 catalog 的活动笔记记录。
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -29,6 +32,8 @@ pub struct CatalogNote {
     pub starred: bool,
 }
 
+pub use crate::domain::NoteEditorMetadata;
+
 /// 一条已移入工作区回收站的笔记记录；路径始终相对于工作区根。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TrashEntry {
@@ -39,11 +44,11 @@ pub struct TrashEntry {
 }
 
 impl Catalog {
-    /// 原子插入由新建命令产生的笔记，并可同时关联一个已有标签。
+    /// 原子插入由新建命令产生的笔记；正式标签由正文外的 metadata 流程维护。
     pub fn create_active_note(
         &self,
         note: &CatalogNote,
-        tag_to_attach: Option<TagId>,
+        encryption: NoteEncryption,
     ) -> Result<(), CatalogError> {
         let modified_nanoseconds = system_time_to_nanoseconds(note.modified_at)?;
         let file_size =
@@ -58,8 +63,8 @@ impl Catalog {
         transaction
             .execute(
                 "INSERT INTO notes (
-                    note_id, relative_path, kind, title, excerpt, modified_ns, file_size, content_hash, lifecycle
-                ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+                    note_id, relative_path, kind, title, excerpt, created_ns, modified_ns, file_size, content_hash, encryption, lifecycle
+                ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?6, ?7, ?8, ?9, ?10)",
                 params![
                     note.note_id.to_string(),
                     note.relative_path.to_string_lossy(),
@@ -69,26 +74,11 @@ impl Catalog {
                     modified_nanoseconds,
                     file_size,
                     note.content_hash,
+                    note_encryption_to_database(encryption),
                     ACTIVE_NOTE_LIFECYCLE,
                 ],
             )
             .map_err(|source| CatalogError::sql("created note insert", source))?;
-        if let Some(tag_id) = tag_to_attach {
-            let attached_rows = transaction
-                .execute(
-                    "INSERT INTO note_tags (note_id, tag_id)
-                     SELECT ?1, ?2
-                     WHERE EXISTS (SELECT 1 FROM tags WHERE tag_id = ?2)",
-                    params![note.note_id.to_string(), tag_id.to_string()],
-                )
-                .map_err(|source| CatalogError::sql("created note tag attachment", source))?;
-            if attached_rows == 0 {
-                return Err(CatalogError::InvalidStoredValue {
-                    column: "tag_id",
-                    value: tag_id.to_string(),
-                });
-            }
-        }
         transaction
             .commit()
             .map_err(|source| CatalogError::sql("note creation transaction commit", source))?;
@@ -108,8 +98,8 @@ impl Catalog {
         self.connection()
             .execute(
                 "INSERT INTO notes (
-                    note_id, relative_path, kind, title, excerpt, modified_ns, file_size, content_hash, lifecycle
-                ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
+                    note_id, relative_path, kind, title, excerpt, created_ns, modified_ns, file_size, content_hash, encryption, lifecycle
+                ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?6, ?7, ?8, ?9, ?10)
                 ON CONFLICT(note_id) DO UPDATE SET
                     relative_path = excluded.relative_path,
                     kind = excluded.kind,
@@ -128,6 +118,7 @@ impl Catalog {
                     modified_nanoseconds,
                     file_size,
                     note.content_hash,
+                    NOTE_ENCRYPTION_UNENCRYPTED,
                     ACTIVE_NOTE_LIFECYCLE,
                 ],
             )
@@ -168,6 +159,24 @@ impl Catalog {
             .optional()
             .map_err(|source| CatalogError::sql("active note query", source))?;
         stored_note.map(CatalogNote::try_from).transpose()
+    }
+
+    /// 读取编辑区需要的创建时间与持久化加密状态；不改变扫描器的 `CatalogNote`。
+    pub fn note_editor_metadata(
+        &self,
+        note_id: NoteId,
+    ) -> Result<Option<NoteEditorMetadata>, CatalogError> {
+        self.connection()
+            .query_row(
+                "SELECT note_id, created_ns, modified_ns, encryption
+                 FROM notes WHERE note_id = ?1",
+                [note_id.to_string()],
+                editor_metadata_from_row,
+            )
+            .optional()
+            .map_err(|source| CatalogError::sql("note editor metadata query", source))?
+            .map(NoteEditorMetadata::try_from)
+            .transpose()
     }
 
     /// 在文件系统移动成功后更新活动笔记的相对路径，保持其 `NoteId` 不变。
@@ -450,6 +459,54 @@ impl Catalog {
     }
 }
 
+fn note_encryption_to_database(encryption: NoteEncryption) -> i64 {
+    match encryption {
+        NoteEncryption::Unencrypted => NOTE_ENCRYPTION_UNENCRYPTED,
+        NoteEncryption::Encrypted => NOTE_ENCRYPTION_ENCRYPTED,
+    }
+}
+
+#[derive(Debug)]
+struct StoredEditorMetadata {
+    note_id: String,
+    created_nanoseconds: i64,
+    modified_nanoseconds: i64,
+    encryption: i64,
+}
+
+impl TryFrom<StoredEditorMetadata> for NoteEditorMetadata {
+    type Error = CatalogError;
+
+    fn try_from(stored_metadata: StoredEditorMetadata) -> Result<Self, Self::Error> {
+        let note_id =
+            Uuid::parse_str(&stored_metadata.note_id).map(NoteId::from).map_err(|_| {
+                CatalogError::InvalidStoredValue {
+                    column: "note_id",
+                    value: stored_metadata.note_id,
+                }
+            })?;
+        let created_at =
+            nanoseconds_to_system_time(stored_metadata.created_nanoseconds).map_err(|_| {
+                CatalogError::InvalidStoredValue {
+                    column: "created_ns",
+                    value: stored_metadata.created_nanoseconds.to_string(),
+                }
+            })?;
+        let modified_at = nanoseconds_to_system_time(stored_metadata.modified_nanoseconds)?;
+        let encryption = note_encryption_from_database(stored_metadata.encryption)?;
+        Ok(Self { note_id, created_at, modified_at, encryption })
+    }
+}
+
+fn editor_metadata_from_row(row: &Row<'_>) -> rusqlite::Result<StoredEditorMetadata> {
+    Ok(StoredEditorMetadata {
+        note_id: row.get(0)?,
+        created_nanoseconds: row.get(1)?,
+        modified_nanoseconds: row.get(2)?,
+        encryption: row.get(3)?,
+    })
+}
+
 #[derive(Debug)]
 struct StoredNote {
     note_id: String,
@@ -558,6 +615,16 @@ fn document_kind_from_database(value: i64) -> Result<DocumentKind, CatalogError>
     }
 }
 
+fn note_encryption_from_database(value: i64) -> Result<NoteEncryption, CatalogError> {
+    match value {
+        NOTE_ENCRYPTION_UNENCRYPTED => Ok(NoteEncryption::Unencrypted),
+        NOTE_ENCRYPTION_ENCRYPTED => Ok(NoteEncryption::Encrypted),
+        _ => {
+            Err(CatalogError::InvalidStoredValue { column: "encryption", value: value.to_string() })
+        }
+    }
+}
+
 fn system_time_to_nanoseconds(value: SystemTime) -> Result<i64, CatalogError> {
     let duration =
         value.duration_since(UNIX_EPOCH).map_err(|_| CatalogError::InvalidStoredValue {
@@ -584,7 +651,8 @@ fn nanoseconds_to_system_time(value: i64) -> Result<SystemTime, CatalogError> {
 mod tests {
     use std::time::{Duration, UNIX_EPOCH};
 
-    use super::CatalogNote;
+    use super::{CatalogNote, note_encryption_from_database};
+    use crate::domain::{NoteEditorMetadata, NoteEncryption};
     use crate::{Catalog, DocumentKind, NoteId};
 
     fn catalog_note(note_id: NoteId, relative_path: &str, title: &str) -> CatalogNote {
@@ -638,5 +706,38 @@ mod tests {
                 .upsert_active_note(&catalog_note(NoteId::generate(), "duplicate.md", "Second"))
                 .is_err()
         );
+    }
+
+    #[test]
+    fn editor_metadata_round_trips_creation_time_and_encryption_without_changing_scan_model() {
+        let directory = tempfile::tempdir().expect("catalog test directory should be created");
+        let catalog = Catalog::open(&directory.path().join("catalog.sqlite3"))
+            .expect("catalog should initialize");
+        let note_id = NoteId::generate();
+        catalog
+            .upsert_active_note(&catalog_note(note_id, "metadata.md", "Metadata"))
+            .expect("note should insert");
+
+        let metadata = catalog
+            .note_editor_metadata(note_id)
+            .expect("metadata should query")
+            .expect("metadata should exist");
+        assert_eq!(
+            metadata,
+            NoteEditorMetadata {
+                note_id,
+                created_at: UNIX_EPOCH + Duration::from_secs(1),
+                modified_at: UNIX_EPOCH + Duration::from_secs(1),
+                encryption: NoteEncryption::Unencrypted,
+            }
+        );
+    }
+
+    #[test]
+    fn invalid_encryption_value_is_rejected_instead_of_being_treated_as_plaintext() {
+        assert!(matches!(
+            note_encryption_from_database(9),
+            Err(crate::CatalogError::InvalidStoredValue { column: "encryption", .. })
+        ));
     }
 }

@@ -9,6 +9,7 @@ pub mod autosave;
 pub mod dirty_snapshot;
 pub mod document_registry;
 mod editor_adapter;
+pub mod editor_pane;
 pub mod effect_executor;
 pub mod events;
 pub mod external_files;

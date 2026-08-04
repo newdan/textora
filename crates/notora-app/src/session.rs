@@ -53,6 +53,7 @@ impl From<SavedNavigationScope> for NavigationScope {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
 pub enum SavedDocument {
     Note { note_id: NoteId },
     ExternalPath { path: PathBuf },
@@ -94,10 +95,10 @@ pub struct ProductSession {
     pub workspace_id: Option<WorkspaceId>,
     pub external_paths: Vec<PathBuf>,
     pub last_navigation_scope: SavedNavigationScope,
-    pub last_document: Option<SavedDocument>,
     pub expanded_directories: Vec<PathBuf>,
     pub navigation_width_logical: f32,
     pub card_list_width_logical: f32,
+    pub last_document: Option<SavedDocument>,
     pub window_geometry: WindowGeometry,
 }
 
@@ -109,10 +110,10 @@ impl Default for ProductSession {
             workspace_id: None,
             external_paths: Vec::new(),
             last_navigation_scope: SavedNavigationScope::WorkspaceRoot,
-            last_document: None,
             expanded_directories: Vec::new(),
             navigation_width_logical: 220.0,
             card_list_width_logical: 340.0,
+            last_document: None,
             window_geometry: WindowGeometry::default(),
         }
     }
@@ -276,7 +277,7 @@ mod tests {
     use std::path::PathBuf;
 
     use super::{
-        ProductSession, SavedNavigationScope, WindowGeometry, load_product_session,
+        ProductSession, SavedDocument, SavedNavigationScope, WindowGeometry, load_product_session,
         save_product_session,
     };
 
@@ -286,9 +287,11 @@ mod tests {
         let external_path = directory.path().join("external.md");
         std::fs::write(&external_path, "# External").expect("fixture external file should write");
         let path = directory.path().join("session.toml");
+        let note_id = notora_core::NoteId::generate();
         let session = ProductSession {
             external_paths: vec![external_path.clone(), directory.path().join("missing.md")],
             last_navigation_scope: SavedNavigationScope::Starred,
+            last_document: Some(SavedDocument::Note { note_id }),
             expanded_directories: vec![PathBuf::from("plans"), PathBuf::from("plans/q3")],
             window_geometry: WindowGeometry {
                 x_px: f32::NAN,
@@ -303,6 +306,7 @@ mod tests {
         assert_eq!(loaded.diagnostic, None);
         assert_eq!(loaded.session.external_paths, vec![external_path]);
         assert_eq!(loaded.session.last_navigation_scope, SavedNavigationScope::Starred);
+        assert_eq!(loaded.session.last_document, Some(SavedDocument::Note { note_id }));
         assert_eq!(
             loaded.session.expanded_directories,
             vec![PathBuf::from("plans"), PathBuf::from("plans/q3")]

@@ -60,10 +60,15 @@ pub enum NotoraProductEvent {
     MetadataMutationCompleted {
         workspace_id: WorkspaceId,
         workspace_generation: u64,
+        mutation: crate::action::MetadataMutation,
+        note_id: notora_core::NoteId,
+        metadata: notora_core::NoteEditorMetadata,
+        tags: Vec<notora_core::TagSummary>,
     },
     MetadataMutationFailed {
         workspace_id: WorkspaceId,
         workspace_generation: u64,
+        mutation: crate::action::MetadataMutation,
         message: String,
     },
     CatalogBackupCompleted {
@@ -96,6 +101,8 @@ pub enum NotoraProductEvent {
         workspace_generation: u64,
         request: DocumentLoadRequest,
         document: crate::editor_adapter::LoadedDocument,
+        metadata: notora_core::NoteEditorMetadata,
+        tags: Vec<notora_core::TagSummary>,
     },
     DocumentLoadFailed {
         workspace_id: WorkspaceId,
@@ -294,6 +301,7 @@ impl NotoraProduct {
             | NotoraProductEvent::MetadataMutationCompleted {
                 workspace_id,
                 workspace_generation,
+                ..
             }
             | NotoraProductEvent::MetadataMutationFailed {
                 workspace_id,

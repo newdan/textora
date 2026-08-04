@@ -11,7 +11,6 @@ pub mod backup;
 pub mod catalog;
 pub mod domain;
 pub mod file_monitor;
-pub mod hashtags;
 pub mod note_command;
 pub mod reconciliation;
 pub mod scan;
@@ -28,20 +27,24 @@ pub use catalog::{
     CatalogNote, CatalogOpenOutcome, CatalogRecoveryError, TagWithActiveNoteCount, TrashEntry,
 };
 pub use domain::{
-    DocumentIdentity, DocumentKind, DocumentOrigin, ExternalFileId, NavigationScope, NoteId,
-    NoteLifecycle, NoteSummary, TagId, TagSummary, WorkspaceId,
+    DocumentIdentity, DocumentKind, DocumentOrigin, ExternalFileId, NavigationScope,
+    NoteEditorMetadata, NoteEncryption, NoteId, NoteLifecycle, NoteSummary, TagId, TagSummary,
+    WorkspaceId,
 };
 pub use file_monitor::{WorkspaceFileBatch, WorkspaceFileMonitor, WorkspaceFileMonitorError};
-pub use hashtags::extract_hashtags;
 pub use note_command::{
-    CreateNoteRequest, CreateNoteResult, NoteCommand, NoteCommandError, execute_note_command,
+    ConfiguredCreateNoteRequest, CreateNoteResult, NoteCommand, NoteCommandError,
+    execute_note_command,
 };
 pub use reconciliation::{
     DiscoveredNote, ReconciliationChange, ReconciliationError, ReconciliationPlan,
     reconcile_catalog,
 };
 pub use scan::{ScanCompletion, ScanError, ScanFailure, scan_workspace, scan_workspace_paths};
-pub use summary_parser::{MAX_EXCERPT_GRAPHEMES, NoteTextSummary, parse_note_text_summary};
+pub use summary_parser::{
+    DocumentTitleProjection, MAX_EXCERPT_GRAPHEMES, NoteTextSummary, document_title_projection,
+    parse_note_text_summary, replace_document_title,
+};
 pub use trash::{
     TrashError, empty_trash, move_to_trash, permanently_delete_trashed_note, restore_from_trash,
     restore_from_trash_with_renamed_path,

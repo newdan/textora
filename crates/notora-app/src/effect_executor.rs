@@ -32,6 +32,8 @@ pub trait NotoraEffectService {
     fn query_cards(&mut self, query: CardQuery);
     fn request_note_creation(&mut self, kind: DocumentKind, target: NoteCreationTarget);
     fn execute_note_command(&mut self, _command: NoteCommand) {}
+    fn commit_title(&mut self, _title: String) {}
+    fn execute_semantic_edit(&mut self, _command: ui::plugin::SemanticEditCommand) {}
     fn execute_metadata_mutation(&mut self, _mutation: MetadataMutation) {}
     fn execute_trash_operation(&mut self, _operation: TrashOperation) {}
     fn choose_note_rename_destination(&mut self, _note_id: notora_core::NoteId) {}
@@ -58,8 +60,20 @@ impl EffectExecutor {
                 service.query_cards(query);
                 ShellEffect::NONE
             }
+            NotoraEffect::RequestNoteCreation { kind, target } => {
+                service.request_note_creation(kind, target);
+                ShellEffect::NONE
+            }
             NotoraEffect::ExecuteNoteCommand(command) => {
                 service.execute_note_command(command);
+                ShellEffect::NONE
+            }
+            NotoraEffect::CommitTitle(title) => {
+                service.commit_title(title);
+                ShellEffect::NONE
+            }
+            NotoraEffect::ExecuteSemanticEdit(command) => {
+                service.execute_semantic_edit(command);
                 ShellEffect::NONE
             }
             NotoraEffect::ExecuteMetadataMutation(mutation) => {
@@ -135,8 +149,10 @@ mod tests {
     #[derive(Default)]
     struct Recorder {
         card_query_count: usize,
+        note_creation_request: Option<(DocumentKind, NoteCreationTarget)>,
         prepared_document: Option<DocumentLoadRequest>,
         executed_note_command_count: usize,
+        title_commit: Option<String>,
         metadata_mutation: Option<MetadataMutation>,
         promoted_preview_count: usize,
         manual_save_request: Option<ManualSaveRequest>,
@@ -148,10 +164,16 @@ mod tests {
             self.card_query_count += 1;
         }
 
-        fn request_note_creation(&mut self, _kind: DocumentKind, _target: NoteCreationTarget) {}
+        fn request_note_creation(&mut self, kind: DocumentKind, target: NoteCreationTarget) {
+            self.note_creation_request = Some((kind, target));
+        }
 
         fn execute_note_command(&mut self, _command: NoteCommand) {
             self.executed_note_command_count += 1;
+        }
+
+        fn commit_title(&mut self, title: String) {
+            self.title_commit = Some(title);
         }
 
         fn execute_metadata_mutation(&mut self, mutation: MetadataMutation) {
@@ -211,11 +233,11 @@ mod tests {
     #[test]
     fn executor_routes_note_commands_without_exposing_file_io_to_the_reducer() {
         let mut recorder = Recorder::default();
-        let command = notora_core::note_command::NoteCommand::Create(
-            notora_core::note_command::CreateNoteRequest {
+        let command = notora_core::note_command::NoteCommand::CreateConfigured(
+            notora_core::note_command::ConfiguredCreateNoteRequest {
                 kind: DocumentKind::Markdown,
                 target_directory: None,
-                tag_to_attach: None,
+                encryption: notora_core::NoteEncryption::Unencrypted,
             },
         );
 
@@ -224,6 +246,38 @@ mod tests {
             appkit_shell::ShellEffect::NONE
         );
         assert_eq!(recorder.executed_note_command_count, 1);
+    }
+
+    #[test]
+    fn executor_routes_title_commits_through_the_runtime_service_boundary() {
+        let mut recorder = Recorder::default();
+
+        assert_eq!(
+            EffectExecutor::execute(
+                &mut recorder,
+                NotoraEffect::CommitTitle("新的标题".to_owned()),
+            ),
+            appkit_shell::ShellEffect::NONE
+        );
+        assert_eq!(recorder.title_commit, Some("新的标题".to_owned()));
+    }
+
+    #[test]
+    fn executor_routes_note_creation_through_the_workspace_aware_service_boundary() {
+        let mut recorder = Recorder::default();
+        let target = NoteCreationTarget { directory: None };
+
+        assert_eq!(
+            EffectExecutor::execute(
+                &mut recorder,
+                NotoraEffect::RequestNoteCreation {
+                    kind: DocumentKind::Markdown,
+                    target: target.clone(),
+                },
+            ),
+            appkit_shell::ShellEffect::NONE
+        );
+        assert_eq!(recorder.note_creation_request, Some((DocumentKind::Markdown, target)));
     }
 
     #[test]

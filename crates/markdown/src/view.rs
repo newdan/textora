@@ -2478,6 +2478,18 @@ pub struct MarkdownEditorView {
     source: String,
     cached_source_hash: u64,
     cached_generation: u32,
+    hide_first_h1: bool,
+}
+
+fn remove_first_top_level_h1(doc: &mut MarkdownDoc) {
+    let Some(index) = doc
+        .blocks
+        .iter()
+        .position(|block| matches!(block.kind, crate::builder::BlockKind::Heading { level: 1 }))
+    else {
+        return;
+    };
+    doc.blocks.remove(index);
 }
 
 impl Default for MarkdownEditorView {
@@ -2490,7 +2502,19 @@ impl MarkdownEditorView {
     pub fn new() -> Self {
         let mut engine = PreviewEngine::new();
         engine.set_edit_source(Some(String::new()));
-        Self { engine, source: String::new(), cached_source_hash: 0, cached_generation: 0 }
+        Self {
+            engine,
+            source: String::new(),
+            cached_source_hash: 0,
+            cached_generation: 0,
+            hide_first_h1: false,
+        }
+    }
+
+    pub fn new_with_external_title() -> Self {
+        let mut view = Self::new();
+        view.hide_first_h1 = true;
+        view
     }
 
     pub fn set_source(&mut self, text: String, generation: u32) {
@@ -2656,7 +2680,11 @@ impl ViewPlugin for MarkdownEditorView {
             &style,
             |s| {
                 let parsed = crate::parser::parse_markdown(source);
-                crate::builder::MarkdownDoc::build(&parsed, s)
+                let mut doc = crate::builder::MarkdownDoc::build(&parsed, s);
+                if self.hide_first_h1 {
+                    remove_first_top_level_h1(&mut doc);
+                }
+                doc
             },
             Some(shaper),
             &string_doc,
@@ -2747,6 +2775,18 @@ impl ViewPlugin for MarkdownEditorView {
                 // WYSIWYG editor delegates search to the app layer.
                 PluginResponse::DrawList(DrawList::new())
             }
+            PluginQuery::PlanSemanticEdit {
+                command,
+                source_generation,
+                cursor_byte,
+                selection,
+            } => PluginResponse::SemanticEdit(crate::commands::plan_semantic_edit(
+                &self.source,
+                source_generation,
+                cursor_byte,
+                selection,
+                command,
+            )),
             _ => PluginResponse::None,
         }
     }
@@ -2766,6 +2806,23 @@ impl PluginFactory for MarkdownEditorViewFactory {
     }
     fn create(&self) -> Box<dyn ViewPlugin> {
         Box::new(MarkdownEditorView::new())
+    }
+}
+
+/// Notora 使用的 Markdown 工厂：首个 H1 由产品头部承载，正文不重复显示。
+pub struct NotoraMarkdownEditorViewFactory;
+
+impl PluginFactory for NotoraMarkdownEditorViewFactory {
+    fn name(&self) -> &str {
+        "markdown_editor"
+    }
+
+    fn can_handle(&self, path: Option<&Path>) -> bool {
+        MarkdownEditorViewFactory.can_handle(path)
+    }
+
+    fn create(&self) -> Box<dyn ViewPlugin> {
+        Box::new(MarkdownEditorView::new_with_external_title())
     }
 }
 
@@ -2964,6 +3021,47 @@ mod wysiwyg_tests {
 
     fn default_settings() -> MarkdownRenderSettings {
         MarkdownRenderSettings { font_size: 15.0, line_height: 24.0, toc_max_depth: 5 }
+    }
+
+    #[test]
+    fn notora_markdown_editor_hides_only_the_first_h1_and_preserves_body_projections() {
+        let source = "# 页面标题\n\n正文内容\n\n# 正文章节";
+        let document = StubDoc::new(source);
+        let mut view = MarkdownEditorView::new_with_external_title();
+        view.set_source(source.to_owned(), 1);
+
+        render_editor_once(&mut view, &document);
+
+        let rendered_text =
+            view.engine().flat_lines().iter().map(|line| line.text.as_str()).collect::<Vec<_>>();
+        assert!(!rendered_text.iter().any(|line| line.contains("页面标题")));
+        assert!(rendered_text.iter().any(|line| line.contains("正文内容")));
+        assert!(rendered_text.iter().any(|line| line.contains("正文章节")));
+        assert!(
+            view.engine()
+                .projection_index()
+                .visual_position_for_source(
+                    source.find("正文内容").expect("body must exist"),
+                    CursorAffinity::Downstream
+                )
+                .is_some(),
+            "body source bytes must remain mapped after hiding the title"
+        );
+    }
+
+    #[test]
+    fn default_markdown_editor_keeps_the_first_h1_for_textora() {
+        let source = "# 页面标题\n\n正文内容";
+        let document = StubDoc::new(source);
+        let mut view = MarkdownEditorView::new();
+        view.set_source(source.to_owned(), 1);
+
+        render_editor_once(&mut view, &document);
+
+        assert!(
+            view.engine().flat_lines().iter().any(|line| line.text.contains("页面标题")),
+            "the shared textora Markdown editor must retain its default rendering"
+        );
     }
 
     /// Build a MarkdownView, set source, render, and return it.

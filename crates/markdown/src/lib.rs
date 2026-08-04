@@ -8,6 +8,7 @@
 
 pub mod augmenter;
 pub mod builder;
+pub mod commands;
 pub mod edit;
 pub mod edit_context;
 pub mod grapheme_map;

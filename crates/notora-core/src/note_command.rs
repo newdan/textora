@@ -5,19 +5,19 @@ use std::io::Write;
 use std::path::{Component, Path, PathBuf};
 
 use crate::{
-    Catalog, CatalogError, CatalogNote, DocumentKind, NoteId, TagId, Workspace, WorkspaceError,
-    parse_note_text_summary,
+    Catalog, CatalogError, CatalogNote, DocumentKind, NoteEncryption, NoteId, Workspace,
+    WorkspaceError, parse_note_text_summary,
 };
 
 const CATALOG_NOTE_TITLE_PREFIX: &str = "未命名";
 const MAXIMUM_AUTOMATIC_NOTE_SUFFIX: u32 = 1_000_000;
 
-/// 新建笔记的已验证目标。
+/// 已显式确定文档类型、位置与持久化属性的新建请求。
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct CreateNoteRequest {
+pub struct ConfiguredCreateNoteRequest {
     pub kind: DocumentKind,
     pub target_directory: Option<PathBuf>,
-    pub tag_to_attach: Option<TagId>,
+    pub encryption: NoteEncryption,
 }
 
 /// 重命名笔记时传入的单个新文件名；不能包含目录成分。
@@ -37,7 +37,7 @@ pub struct MoveNoteRequest {
 /// 所有会变更工作区文件的类型化命令。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum NoteCommand {
-    Create(CreateNoteRequest),
+    CreateConfigured(ConfiguredCreateNoteRequest),
     Rename(RenameNoteRequest),
     Move(MoveNoteRequest),
 }
@@ -102,6 +102,7 @@ pub enum NoteCommandError {
     AutomaticNameExhausted {
         directory: PathBuf,
     },
+    EncryptionUnavailable,
 }
 
 impl std::fmt::Display for NoteCommandError {
@@ -161,6 +162,12 @@ impl std::fmt::Display for NoteCommandError {
             Self::AutomaticNameExhausted { directory } => {
                 write!(formatter, "no automatic note name is available in {}", directory.display())
             }
+            Self::EncryptionUnavailable => {
+                write!(
+                    formatter,
+                    "encrypted note creation is unavailable before the encryption engine is installed"
+                )
+            }
         }
     }
 }
@@ -181,7 +188,8 @@ impl std::error::Error for NoteCommandError {
             | Self::InvalidFileName { .. }
             | Self::DocumentKindChange { .. }
             | Self::TargetAlreadyExists { .. }
-            | Self::AutomaticNameExhausted { .. } => None,
+            | Self::AutomaticNameExhausted { .. }
+            | Self::EncryptionUnavailable => None,
         }
     }
 }
@@ -193,17 +201,22 @@ pub fn execute_note_command(
     command: NoteCommand,
 ) -> Result<NoteCommandResult, NoteCommandError> {
     match command {
-        NoteCommand::Create(request) => create_note(workspace, catalog, request),
+        NoteCommand::CreateConfigured(request) => {
+            create_configured_note(workspace, catalog, request)
+        }
         NoteCommand::Rename(request) => rename_note(workspace, catalog, request),
         NoteCommand::Move(request) => move_note(workspace, catalog, request),
     }
 }
 
-fn create_note(
+fn create_configured_note(
     workspace: &Workspace,
     catalog: &Catalog,
-    request: CreateNoteRequest,
+    request: ConfiguredCreateNoteRequest,
 ) -> Result<NoteCommandResult, NoteCommandError> {
+    if request.encryption != NoteEncryption::Unencrypted {
+        return Err(NoteCommandError::EncryptionUnavailable);
+    }
     let target_directory =
         resolve_target_directory(workspace, request.target_directory.as_deref())?;
     let initial_contents = initial_contents(request.kind);
@@ -222,7 +235,7 @@ fn create_note(
                     initial_contents,
                     &absolute_path,
                 )?;
-                catalog.create_active_note(&note, request.tag_to_attach).map_err(|source| {
+                catalog.create_active_note(&note, request.encryption).map_err(|source| {
                     NoteCommandError::CatalogAfterFileWrite { relative_path, source }
                 })?;
                 return Ok(NoteCommandResult { note, previous_relative_path: None });
@@ -426,9 +439,10 @@ mod create {
     use std::sync::{Arc, Barrier};
     use std::thread;
 
-    use crate::{Catalog, DocumentKind, TagId, Workspace};
+    use crate::domain::NoteEncryption;
+    use crate::{Catalog, DocumentKind, Workspace};
 
-    use super::{CreateNoteRequest, NoteCommand, execute_note_command};
+    use super::{ConfiguredCreateNoteRequest, NoteCommand, execute_note_command};
 
     #[test]
     fn create_places_each_kind_in_the_requested_workspace_directory() {
@@ -442,20 +456,20 @@ mod create {
         let markdown = execute_note_command(
             &workspace,
             &catalog,
-            NoteCommand::Create(CreateNoteRequest {
+            NoteCommand::CreateConfigured(ConfiguredCreateNoteRequest {
                 kind: DocumentKind::Markdown,
                 target_directory: None,
-                tag_to_attach: None,
+                encryption: NoteEncryption::Unencrypted,
             }),
         )
         .expect("markdown note should be created");
         let mindmap = execute_note_command(
             &workspace,
             &catalog,
-            NoteCommand::Create(CreateNoteRequest {
+            NoteCommand::CreateConfigured(ConfiguredCreateNoteRequest {
                 kind: DocumentKind::Mindmap,
                 target_directory: Some("nested".into()),
-                tag_to_attach: None,
+                encryption: NoteEncryption::Unencrypted,
             }),
         )
         .expect("mindmap note should be created");
@@ -468,44 +482,6 @@ mod create {
             "#"
         );
         assert_eq!(catalog.active_notes().expect("created notes should be indexed").len(), 2);
-    }
-
-    #[test]
-    fn create_attaches_an_existing_tag_in_the_same_catalog_transaction() {
-        let directory = tempfile::tempdir().expect("workspace test directory should be created");
-        let workspace =
-            Workspace::open_or_initialize(directory.path()).expect("workspace should initialize");
-        let catalog = Catalog::open(&workspace.metadata_directory().join("catalog.sqlite3"))
-            .expect("catalog should initialize");
-        let tag_id = TagId::generate();
-        catalog
-            .connection()
-            .execute(
-                "INSERT INTO tags (tag_id, normalized_name, display_name) VALUES (?1, ?2, ?3)",
-                [tag_id.to_string(), "project".to_owned(), "Project".to_owned()],
-            )
-            .expect("tag fixture should be inserted");
-
-        let created = execute_note_command(
-            &workspace,
-            &catalog,
-            NoteCommand::Create(CreateNoteRequest {
-                kind: DocumentKind::Text,
-                target_directory: None,
-                tag_to_attach: Some(tag_id),
-            }),
-        )
-        .expect("tagged note should be created");
-        let attached: String = catalog
-            .connection()
-            .query_row(
-                "SELECT tag_id FROM note_tags WHERE note_id = ?1",
-                [created.note.note_id.to_string()],
-                |row| row.get(0),
-            )
-            .expect("note should retain the requested tag");
-
-        assert_eq!(attached, tag_id.to_string());
     }
 
     #[test]
@@ -532,10 +508,10 @@ mod create {
                     execute_note_command(
                         &workspace,
                         &catalog,
-                        NoteCommand::Create(CreateNoteRequest {
+                        NoteCommand::CreateConfigured(ConfiguredCreateNoteRequest {
                             kind: DocumentKind::Markdown,
                             target_directory: None,
-                            tag_to_attach: None,
+                            encryption: NoteEncryption::Unencrypted,
                         }),
                     )
                     .expect("concurrent note creation should choose a free name")
@@ -564,14 +540,37 @@ mod create {
             execute_note_command(
                 &workspace,
                 &catalog,
-                NoteCommand::Create(CreateNoteRequest {
+                NoteCommand::CreateConfigured(ConfiguredCreateNoteRequest {
                     kind: DocumentKind::Markdown,
                     target_directory: Some(".notora".into()),
-                    tag_to_attach: None,
+                    encryption: NoteEncryption::Unencrypted,
                 }),
             )
             .is_err()
         );
+    }
+
+    #[test]
+    fn configured_creation_rejects_encryption_until_the_real_engine_is_available() {
+        let directory = tempfile::tempdir().expect("workspace test directory should be created");
+        let workspace =
+            Workspace::open_or_initialize(directory.path()).expect("workspace should initialize");
+        let catalog = Catalog::open(&workspace.metadata_directory().join("catalog.sqlite3"))
+            .expect("catalog should initialize");
+
+        let result = execute_note_command(
+            &workspace,
+            &catalog,
+            NoteCommand::CreateConfigured(ConfiguredCreateNoteRequest {
+                kind: DocumentKind::Markdown,
+                target_directory: None,
+                encryption: NoteEncryption::Encrypted,
+            }),
+        );
+
+        assert!(matches!(result, Err(super::NoteCommandError::EncryptionUnavailable)));
+        assert!(!directory.path().join("未命名 1.md").exists());
+        assert!(catalog.active_notes().expect("catalog should remain readable").is_empty());
     }
 }
 
@@ -579,9 +578,12 @@ mod create {
 mod rename {
     use std::fs;
 
+    use crate::domain::NoteEncryption;
     use crate::{Catalog, DocumentKind, Workspace};
 
-    use super::{CreateNoteRequest, NoteCommand, RenameNoteRequest, execute_note_command};
+    use super::{
+        ConfiguredCreateNoteRequest, NoteCommand, RenameNoteRequest, execute_note_command,
+    };
 
     #[test]
     fn rename_updates_the_catalog_path_without_changing_the_note_id() {
@@ -593,10 +595,10 @@ mod rename {
         let created = execute_note_command(
             &workspace,
             &catalog,
-            NoteCommand::Create(CreateNoteRequest {
+            NoteCommand::CreateConfigured(ConfiguredCreateNoteRequest {
                 kind: DocumentKind::Markdown,
                 target_directory: None,
-                tag_to_attach: None,
+                encryption: NoteEncryption::Unencrypted,
             }),
         )
         .expect("note fixture should be created");
@@ -631,10 +633,10 @@ mod rename {
         let created = execute_note_command(
             &workspace,
             &catalog,
-            NoteCommand::Create(CreateNoteRequest {
+            NoteCommand::CreateConfigured(ConfiguredCreateNoteRequest {
                 kind: DocumentKind::Markdown,
                 target_directory: None,
-                tag_to_attach: None,
+                encryption: NoteEncryption::Unencrypted,
             }),
         )
         .expect("note fixture should be created");
@@ -667,9 +669,10 @@ mod rename {
 mod move_note {
     use std::fs;
 
+    use crate::domain::NoteEncryption;
     use crate::{Catalog, DocumentKind, Workspace};
 
-    use super::{CreateNoteRequest, MoveNoteRequest, NoteCommand, execute_note_command};
+    use super::{ConfiguredCreateNoteRequest, MoveNoteRequest, NoteCommand, execute_note_command};
 
     #[test]
     fn move_keeps_the_note_id_and_updates_its_relative_path() {
@@ -683,10 +686,10 @@ mod move_note {
         let created = execute_note_command(
             &workspace,
             &catalog,
-            NoteCommand::Create(CreateNoteRequest {
+            NoteCommand::CreateConfigured(ConfiguredCreateNoteRequest {
                 kind: DocumentKind::Mindmap,
                 target_directory: None,
-                tag_to_attach: None,
+                encryption: NoteEncryption::Unencrypted,
             }),
         )
         .expect("note fixture should be created");
@@ -720,10 +723,10 @@ mod move_note {
         let created = execute_note_command(
             &workspace,
             &catalog,
-            NoteCommand::Create(CreateNoteRequest {
+            NoteCommand::CreateConfigured(ConfiguredCreateNoteRequest {
                 kind: DocumentKind::Text,
                 target_directory: None,
-                tag_to_attach: None,
+                encryption: NoteEncryption::Unencrypted,
             }),
         )
         .expect("note fixture should be created");

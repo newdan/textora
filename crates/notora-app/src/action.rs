@@ -3,9 +3,11 @@
 use std::path::PathBuf;
 
 use notora_core::note_command::{
-    CreateNoteRequest, MoveNoteRequest, NoteCommand, NoteCommandResult, RenameNoteRequest,
+    MoveNoteRequest, NoteCommand, NoteCommandResult, RenameNoteRequest,
 };
-use notora_core::{DocumentIdentity, DocumentKind, NavigationScope, NoteId, TagId};
+use notora_core::{
+    DocumentIdentity, DocumentKind, NavigationScope, NoteEditorMetadata, NoteId, TagId, TagSummary,
+};
 
 use crate::search_controller::SearchGeneration;
 use crate::settings_overlay::ProductSettingsUpdate;
@@ -40,7 +42,44 @@ impl CardQuery {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct NoteCreationTarget {
     pub directory: Option<PathBuf>,
-    pub tag_to_attach: Option<TagId>,
+}
+
+/// 创建面板中的持久化方式；加密选项在密钥服务接入前保持不可提交。
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum NoteCreationStorageMode {
+    #[default]
+    Unencrypted,
+    Encrypted,
+}
+
+/// 创建面板的提交状态；面板打开期间只允许存在一种状态。
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum NoteCreationSubmission {
+    #[default]
+    Editing,
+    Submitting,
+    Failed,
+    Succeeded,
+}
+
+/// 创建面板草稿；保留用户已确认的类型、目录和存储方式。
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct NewNoteDraft {
+    pub kind: DocumentKind,
+    pub directory: Option<PathBuf>,
+    pub storage_mode: NoteCreationStorageMode,
+    pub submission: NoteCreationSubmission,
+}
+
+impl NewNoteDraft {
+    pub fn markdown(directory: Option<PathBuf>) -> Self {
+        Self {
+            kind: DocumentKind::Markdown,
+            directory,
+            storage_mode: NoteCreationStorageMode::Unencrypted,
+            submission: NoteCreationSubmission::Editing,
+        }
+    }
 }
 
 /// 一次卡片选择触发的后台加载请求。
@@ -73,6 +112,8 @@ pub struct SaveConflictRequest {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum MetadataMutation {
     ToggleStar { note_id: NoteId },
+    AttachTagByName { note_id: NoteId, display_name: String },
+    DetachTag { note_id: NoteId, tag_id: TagId },
 }
 
 /// 只针对工作区 NoteId 的回收站操作；外部文件没有可表达的变体。
@@ -97,17 +138,38 @@ pub enum TrashOperationFailure {
 pub enum NotoraAction {
     NavigationSelected(NavigationScope),
     SearchTextChanged(String),
-    SearchCommitted { query: String, search_generation: Option<SearchGeneration> },
-    CardQueryCompleted { query: CardQuery, page: notora_core::CatalogCardPage },
-    CardQueryFailed { query: CardQuery, message: String },
+    SearchCommitted {
+        query: String,
+        search_generation: Option<SearchGeneration>,
+    },
+    CardQueryCompleted {
+        query: CardQuery,
+        page: notora_core::CatalogCardPage,
+    },
+    CardQueryFailed {
+        query: CardQuery,
+        message: String,
+    },
     NavigationTreeLoaded(notora_core::CatalogNavigationTree),
     NavigationTreeFailed(String),
     CatalogReindexed,
     CatalogRecoveryNotified(String),
     NavigationExpansionToggled(PathBuf),
-    CardListScrolled { offset_px: f32, near_end: bool },
+    CardListScrolled {
+        offset_px: f32,
+        near_end: bool,
+    },
     CardSelected(DocumentIdentity),
     CardActivated(DocumentIdentity),
+    ActiveEditorMetadataLoaded {
+        request: DocumentLoadRequest,
+        metadata: NoteEditorMetadata,
+        tags: Vec<TagSummary>,
+    },
+    ActiveEditorSaved {
+        identity: DocumentIdentity,
+        saved_at: std::time::SystemTime,
+    },
     CompactNavigationRequested,
     CompactBackRequested,
     OpenExternalFileDialogRequested,
@@ -116,24 +178,50 @@ pub enum NotoraAction {
     PromotePreviewRequested,
     OpenNewDocumentMenu,
     CreateRequested(DocumentKind),
+    NoteCreationTypeSelected(DocumentKind),
+    NoteCreationDirectorySelected(Option<PathBuf>),
+    NoteCreationStorageSelected(NoteCreationStorageMode),
+    NoteCreationSubmitted,
+    NoteCreationCancelled,
+    NoteCreationFailed(String),
+    TitleCommitRequested(String),
+    SemanticEditRequested(ui::plugin::SemanticEditCommand),
     RenameDialogRequested(notora_core::NoteId),
     MoveDialogRequested(notora_core::NoteId),
-    RenameRequested { note_id: notora_core::NoteId, new_file_name: PathBuf },
-    MoveRequested { note_id: notora_core::NoteId, target_directory: PathBuf },
+    RenameRequested {
+        note_id: notora_core::NoteId,
+        new_file_name: PathBuf,
+    },
+    MoveRequested {
+        note_id: notora_core::NoteId,
+        target_directory: PathBuf,
+    },
     MetadataMutationRequested(MetadataMutation),
-    MetadataMutationCompleted,
+    MetadataMutationCompleted {
+        note_id: NoteId,
+        metadata: NoteEditorMetadata,
+        selection_generation: u64,
+    },
     MetadataMutationFailed(String),
     TrashOperationRequested(TrashOperation),
     TrashPermanentDeletionConfirmed,
     TrashRestoreWithRenamedPathConfirmed,
     TrashOperationCompleted,
     TrashOperationFailed(TrashOperationFailure),
-    SaveConflictDetected { identity: DocumentIdentity, content_revision: u64 },
+    SaveConflictDetected {
+        identity: DocumentIdentity,
+        content_revision: u64,
+    },
     SaveConflictResolutionRequested(ConflictResolution),
-    SaveConflictResolved { identity: DocumentIdentity },
+    SaveConflictResolved {
+        identity: DocumentIdentity,
+    },
     NoteCommandCompleted(NoteCommandResult),
     NoteCommandFailed(String),
-    SplitterDragged { pane: Pane, logical_width: f32 },
+    SplitterDragged {
+        pane: Pane,
+        logical_width: f32,
+    },
     FocusRequested(FocusTarget),
     OpenSettings,
     ProductSettingsUpdateRequested(ProductSettingsUpdate),
@@ -147,7 +235,10 @@ pub enum NotoraAction {
 #[derive(Clone, Debug, PartialEq)]
 pub enum NotoraEffect {
     QueryCards(CardQuery),
+    RequestNoteCreation { kind: DocumentKind, target: NoteCreationTarget },
     ExecuteNoteCommand(NoteCommand),
+    CommitTitle(String),
+    ExecuteSemanticEdit(ui::plugin::SemanticEditCommand),
     ExecuteMetadataMutation(MetadataMutation),
     ExecuteTrashOperation(TrashOperation),
     ChooseNoteRenameDestination(notora_core::NoteId),
@@ -161,16 +252,6 @@ pub enum NotoraEffect {
     PersistProductSettings,
     PersistLayout,
     Redraw,
-}
-
-impl NoteCreationTarget {
-    pub fn create_command(self, kind: DocumentKind) -> NoteCommand {
-        NoteCommand::Create(CreateNoteRequest {
-            kind,
-            target_directory: self.directory,
-            tag_to_attach: self.tag_to_attach,
-        })
-    }
 }
 
 pub fn rename_note_command(note_id: notora_core::NoteId, new_file_name: PathBuf) -> NoteCommand {
@@ -189,7 +270,10 @@ impl From<NavigationScope> for CardQuery {
 
 #[cfg(test)]
 mod tests {
-    use super::{CardPageCursor, CardQuery, DEFAULT_CARD_PAGE_SIZE};
+    use super::{
+        CardPageCursor, CardQuery, DEFAULT_CARD_PAGE_SIZE, MetadataMutation, NotoraAction,
+        NotoraEffect,
+    };
     use notora_core::NavigationScope;
 
     #[test]
@@ -211,5 +295,32 @@ mod tests {
 
         assert_eq!(next_query.scope, NavigationScope::WorkspaceRoot);
         assert_eq!(next_query.cursor, Some(cursor));
+    }
+
+    #[test]
+    fn metadata_mutations_keep_tag_changes_typed_and_note_scoped() {
+        let note_id = notora_core::NoteId::generate();
+        let tag_id = notora_core::TagId::generate();
+
+        assert_eq!(
+            MetadataMutation::AttachTagByName { note_id, display_name: "产品/Notora".to_owned() },
+            MetadataMutation::AttachTagByName { note_id, display_name: "产品/Notora".to_owned() }
+        );
+        assert_ne!(
+            MetadataMutation::DetachTag { note_id, tag_id },
+            MetadataMutation::ToggleStar { note_id }
+        );
+    }
+
+    #[test]
+    fn semantic_edit_requests_remain_typed_until_the_runtime_boundary() {
+        let mut state = crate::state::NotoraState::default();
+        let effects = state.reduce(NotoraAction::SemanticEditRequested(
+            ui::plugin::SemanticEditCommand::ToggleBold,
+        ));
+
+        assert!(effects.contains(&NotoraEffect::ExecuteSemanticEdit(
+            ui::plugin::SemanticEditCommand::ToggleBold,
+        )));
     }
 }

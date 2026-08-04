@@ -21,7 +21,7 @@ pub fn editor_input_context(
 ) -> EditorInputContext {
     let editor_is_focused = state.layout.focus_target == FocusTarget::Editor && window_focused;
     EditorInputContext {
-        editor_rect: layout.editor_rect,
+        editor_rect: layout.editor_body_rect,
         focus: if editor_is_focused { EditorFocus::Active } else { EditorFocus::Inactive },
         modal_blocked: state.layout.overlay != OverlayState::None,
     }
@@ -206,11 +206,7 @@ fn create_shortcut_action(key_code: ui::KeyCode, modifiers: Modifiers) -> Option
     {
         return None;
     }
-    Some(if modifiers.shift {
-        NotoraAction::OpenNewDocumentMenu
-    } else {
-        NotoraAction::CreateRequested(notora_core::DocumentKind::Markdown)
-    })
+    Some(NotoraAction::OpenNewDocumentMenu)
 }
 
 fn is_save_shortcut(key_code: ui::KeyCode, modifiers: Modifiers) -> bool {
@@ -263,6 +259,7 @@ mod tests {
         let active_context = editor_input_context(&state, layout(), true);
         assert_eq!(active_context.focus, EditorFocus::Active);
         assert!(!active_context.modal_blocked);
+        assert_eq!(active_context.editor_rect, layout().editor_body_rect);
 
         state.layout.overlay = OverlayState::Settings;
         let modal_context = editor_input_context(&state, layout(), true);
@@ -271,6 +268,27 @@ mod tests {
         state.layout.overlay = OverlayState::None;
         let unfocused_context = editor_input_context(&state, layout(), false);
         assert_eq!(unfocused_context.focus, EditorFocus::Inactive);
+    }
+
+    #[test]
+    fn editor_chrome_does_not_enter_runtime_document_input_region() {
+        let mut state = NotoraState::default();
+        state.layout.focus_target = FocusTarget::Editor;
+        let shell_layout = layout();
+        let context = editor_input_context(&state, shell_layout, true);
+
+        assert!(!context.editor_rect.contains(
+            shell_layout.editor_header_rect.x + shell_layout.editor_header_rect.w * 0.5,
+            shell_layout.editor_header_rect.y + shell_layout.editor_header_rect.h * 0.5,
+        ));
+        assert!(!context.editor_rect.contains(
+            shell_layout.editor_toolbar_rect.x + shell_layout.editor_toolbar_rect.w * 0.5,
+            shell_layout.editor_toolbar_rect.y + shell_layout.editor_toolbar_rect.h * 0.5,
+        ));
+        assert!(context.editor_rect.contains(
+            shell_layout.editor_body_rect.x + shell_layout.editor_body_rect.w * 0.5,
+            shell_layout.editor_body_rect.y + shell_layout.editor_body_rect.h * 0.5,
+        ));
     }
 
     #[test]
@@ -326,13 +344,13 @@ mod tests {
     }
 
     #[test]
-    fn command_or_control_n_creates_markdown_and_shift_opens_the_type_menu() {
+    fn command_or_control_n_opens_the_creation_panel_for_both_variants() {
         assert_eq!(
             create_shortcut_action(
                 ui::KeyCode::Char('n'),
                 Modifiers { cmd: true, ..Modifiers::NONE }
             ),
-            Some(NotoraAction::CreateRequested(notora_core::DocumentKind::Markdown))
+            Some(NotoraAction::OpenNewDocumentMenu)
         );
         assert_eq!(
             create_shortcut_action(

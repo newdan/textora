@@ -1,5 +1,6 @@
 //! `EditorRuntime` 的产品无关公共契约。
 
+use std::ops::Range;
 use std::path::PathBuf;
 
 use appkit_core::workspace::types::TabId;
@@ -57,6 +58,32 @@ pub struct EditorDocumentSummary {
     pub content_revision: u64,
     pub disk_revision: Option<appkit_core::file_safety::DiskRevision>,
     pub pinned: bool,
+}
+
+/// 产品读取的不可变正文快照；revision 与文本必须成对使用。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DocumentTextSnapshot {
+    pub tab_id: TabId,
+    pub text: String,
+    pub content_revision: u64,
+}
+
+/// 产品提交的 revision-checked 正文范围替换请求。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DocumentTextReplacement {
+    pub tab_id: TabId,
+    pub content_revision: u64,
+    pub range: Range<usize>,
+    pub replacement: String,
+}
+
+/// 正文替换被拒绝时的稳定错误分类。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DocumentTextEditError {
+    UnknownTab { tab_id: TabId },
+    StaleRevision { expected: u64, actual: u64 },
+    InvalidByteRange { range: Range<usize>, text_length: usize },
+    ReadOnly { tab_id: TabId },
 }
 
 /// 产品持久化适配器所需的单个编辑器 tab 只读快照。

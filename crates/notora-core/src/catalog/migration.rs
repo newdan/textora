@@ -2,7 +2,7 @@ use rusqlite::{Connection, Transaction};
 
 use super::{CatalogError, CatalogError::UnsupportedSchema};
 
-pub const CATALOG_SCHEMA_VERSION: u32 = 3;
+pub const CATALOG_SCHEMA_VERSION: u32 = 4;
 
 const INITIAL_SCHEMA: &str = r#"
 CREATE TABLE notes (
@@ -11,10 +11,12 @@ CREATE TABLE notes (
     kind INTEGER NOT NULL,
     title TEXT NOT NULL,
     excerpt TEXT NOT NULL,
+    created_ns INTEGER NOT NULL DEFAULT 0 CHECK (created_ns >= 0),
     modified_ns INTEGER NOT NULL,
     file_size INTEGER NOT NULL,
     content_hash BLOB NOT NULL,
     starred INTEGER NOT NULL DEFAULT 0 CHECK (starred IN (0, 1)),
+    encryption INTEGER NOT NULL DEFAULT 0 CHECK (encryption IN (0, 1)),
     lifecycle INTEGER NOT NULL DEFAULT 0 CHECK (lifecycle IN (0, 1))
 );
 
@@ -122,12 +124,57 @@ fn apply_pending_migrations(
             .execute_batch(MISSING_FILE_CONFIRMATION_SCHEMA)
             .map_err(|source| CatalogError::sql("missing file confirmation migration", source))?;
         transaction
+            .pragma_update(None, "user_version", 3_u32)
+            .map_err(|source| CatalogError::sql("schema version write", source))?;
+        schema_version = 3;
+    }
+
+    if schema_version == 3 {
+        apply_editor_metadata_migration(transaction)?;
+        transaction
             .pragma_update(None, "user_version", CATALOG_SCHEMA_VERSION)
             .map_err(|source| CatalogError::sql("schema version write", source))?;
         return Ok(());
     }
 
     Err(UnsupportedSchema { found: schema_version })
+}
+
+fn apply_editor_metadata_migration(transaction: &Transaction<'_>) -> Result<(), CatalogError> {
+    if !table_has_column(transaction, "notes", "created_ns")? {
+        transaction
+            .execute_batch(
+                "ALTER TABLE notes ADD COLUMN created_ns INTEGER NOT NULL DEFAULT 0 CHECK (created_ns >= 0);",
+            )
+            .map_err(|source| CatalogError::sql("created time migration", source))?;
+    }
+    if !table_has_column(transaction, "notes", "encryption")? {
+        transaction
+            .execute_batch(
+                "ALTER TABLE notes ADD COLUMN encryption INTEGER NOT NULL DEFAULT 0 CHECK (encryption IN (0, 1));",
+            )
+            .map_err(|source| CatalogError::sql("encryption migration", source))?;
+    }
+    transaction
+        .execute("UPDATE notes SET created_ns = modified_ns WHERE created_ns = 0", [])
+        .map_err(|source| CatalogError::sql("created time backfill", source))?;
+    Ok(())
+}
+
+fn table_has_column(
+    transaction: &Transaction<'_>,
+    table_name: &str,
+    column_name: &str,
+) -> Result<bool, CatalogError> {
+    transaction
+        .query_row(
+            "SELECT EXISTS(
+                SELECT 1 FROM pragma_table_info(?1) WHERE name = ?2
+            )",
+            [table_name, column_name],
+            |row| row.get(0),
+        )
+        .map_err(|source| CatalogError::sql("schema column lookup", source))
 }
 
 fn fts5_trigram_capability_error(source: rusqlite::Error) -> CatalogError {
@@ -227,6 +274,34 @@ mod tests {
             )
             .expect("missing confirmation column should be queryable");
         assert!(missing_scan_count_column_exists);
+    }
+
+    #[test]
+    fn version_three_catalog_backfills_editor_metadata_without_changing_modified_time() {
+        let mut connection = Connection::open_in_memory().expect("in-memory catalog should open");
+        connection.execute_batch(INITIAL_SCHEMA).expect("legacy schema fixture should initialize");
+        connection
+            .pragma_update(None, "user_version", 3_u32)
+            .expect("version three fixture should be marked");
+        connection
+            .execute(
+                "INSERT INTO notes (
+                    note_id, relative_path, kind, title, excerpt, modified_ns, file_size, content_hash, lifecycle
+                ) VALUES ('legacy', 'legacy.md', 2, 'Legacy', '', 123, 0, X'', 0)",
+                [],
+            )
+            .expect("legacy note should insert");
+
+        migrate(&mut connection).expect("version three should migrate");
+
+        let editor_metadata: (i64, i64) = connection
+            .query_row(
+                "SELECT created_ns, encryption FROM notes WHERE note_id = 'legacy'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .expect("editor metadata should be readable");
+        assert_eq!(editor_metadata, (123, 0));
     }
 
     #[test]

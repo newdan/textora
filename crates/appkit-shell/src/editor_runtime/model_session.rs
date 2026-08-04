@@ -5,8 +5,9 @@ use std::path::Path;
 use appkit_core::workspace::types::TabId;
 
 use crate::editor_runtime::{
-    CloseConfirmation, EditorDocumentSummary, EditorNotification, EditorOutcome, EditorTabSnapshot,
-    EditorWorkspaceSnapshot, OpenDisposition,
+    CloseConfirmation, DocumentTextEditError, DocumentTextReplacement, DocumentTextSnapshot,
+    EditorDocumentSummary, EditorNotification, EditorOutcome, EditorTabSnapshot,
+    EditorWorkspaceSnapshot, OpenDisposition, SemanticEditResult,
 };
 use crate::prepared_tab::PreparedTab;
 use crate::tab_runtime::{TabRuntime, TabRuntimeStore};
@@ -184,6 +185,81 @@ impl ModelSession {
         })
     }
 
+    pub(crate) fn document_text_snapshot(&self, tab_id: TabId) -> Option<DocumentTextSnapshot> {
+        let document = self.workspace.entry_by_id(tab_id)?;
+        Some(DocumentTextSnapshot {
+            tab_id,
+            text: document.full_text(),
+            content_revision: document.content_revision(),
+        })
+    }
+
+    pub(crate) fn replace_document_text(
+        &mut self,
+        request: DocumentTextReplacement,
+        line_height: f32,
+    ) -> Result<EditorOutcome, DocumentTextEditError> {
+        let Some(previous_summary) = self.document_summary(request.tab_id) else {
+            return Err(DocumentTextEditError::UnknownTab { tab_id: request.tab_id });
+        };
+        let actual_revision = previous_summary.content_revision;
+        if request.content_revision != actual_revision {
+            return Err(DocumentTextEditError::StaleRevision {
+                expected: request.content_revision,
+                actual: actual_revision,
+            });
+        }
+        let (source_generation, cursor_after) = {
+            let Some(tab) = self.tab_session(request.tab_id) else {
+                return Err(DocumentTextEditError::UnknownTab { tab_id: request.tab_id });
+            };
+            if !tab.allows_editing() {
+                return Err(DocumentTextEditError::ReadOnly { tab_id: request.tab_id });
+            }
+            let text_length = tab.document.buffer_len();
+            if request.range.start > request.range.end
+                || request.range.end > text_length
+                || !valid_document_boundary(tab.document, request.range.start)
+                || !valid_document_boundary(tab.document, request.range.end)
+            {
+                return Err(DocumentTextEditError::InvalidByteRange {
+                    range: request.range,
+                    text_length,
+                });
+            }
+            (tab.document.generation(), request.range.start + request.replacement.len())
+        };
+        let plan = ui::plugin::EditPlan::Apply(ui::plugin::EditTransaction::replace(
+            source_generation,
+            request.range,
+            request.replacement,
+            cursor_after,
+        ));
+        let Some(mut tab) = self.tab_session_mut(previous_summary.tab_id) else {
+            return Err(DocumentTextEditError::UnknownTab { tab_id: previous_summary.tab_id });
+        };
+        if !apply_edit_plan(tab.document, plan) {
+            return Err(DocumentTextEditError::InvalidByteRange {
+                range: cursor_after..cursor_after,
+                text_length: tab.document.buffer_len(),
+            });
+        }
+        refresh_presentation_after_edit(&mut tab, line_height);
+        let source = tab.document.full_text();
+        let source_generation = tab.document.generation();
+        let _ = tab.send_message(ui::plugin::PluginMessage::UpdateSource {
+            text: source,
+            generation: source_generation,
+        });
+        Ok(edit_outcome(
+            previous_summary.tab_id,
+            previous_summary.content_revision,
+            previous_summary.dirty,
+            tab.document.content_revision(),
+            tab.document.dirty,
+        ))
+    }
+
     pub(crate) fn edit_active_document(
         &mut self,
         intent: ui::plugin::EditIntent,
@@ -343,6 +419,120 @@ impl ModelSession {
                 .merge(crate::event::ShellEffect::RESHAPE),
             ..EditorOutcome::default()
         }
+    }
+
+    pub(crate) fn execute_semantic_edit(
+        &mut self,
+        command: ui::plugin::SemanticEditCommand,
+        line_height: f32,
+    ) -> (SemanticEditResult, EditorOutcome) {
+        let Some(tab_id) = self.active_tab_id() else {
+            return (SemanticEditResult::NoChange, EditorOutcome::default());
+        };
+        let Some(previous_summary) = self.document_summary(tab_id) else {
+            return (SemanticEditResult::NoChange, EditorOutcome::default());
+        };
+        if matches!(
+            command,
+            ui::plugin::SemanticEditCommand::Undo | ui::plugin::SemanticEditCommand::Redo
+        ) {
+            let redo = matches!(command, ui::plugin::SemanticEditCommand::Redo);
+            let outcome = self.undo_or_redo_active_document(redo, line_height);
+            let changed = self.document_summary(tab_id).is_some_and(|summary| {
+                summary.content_revision != previous_summary.content_revision
+            });
+            return (
+                if changed { SemanticEditResult::Applied } else { SemanticEditResult::NoChange },
+                outcome,
+            );
+        }
+
+        let structural_intent = match &command {
+            ui::plugin::SemanticEditCommand::PromoteObject => {
+                Some(ui::plugin::EditIntent::PromoteObject)
+            }
+            ui::plugin::SemanticEditCommand::DemoteObject => {
+                Some(ui::plugin::EditIntent::DemoteObject)
+            }
+            _ => None,
+        };
+        if let Some(intent) = structural_intent {
+            let Some(request) = self.edit_request(tab_id, intent) else {
+                return (SemanticEditResult::NoChange, EditorOutcome::default());
+            };
+            let Some(plan) = self.resolve_edit_plan(tab_id, &request) else {
+                return (SemanticEditResult::Unsupported, EditorOutcome::default());
+            };
+            return self.apply_semantic_edit_plan(tab_id, previous_summary, plan, line_height);
+        }
+
+        let plan = {
+            let Some(tab) = self.tab_session(tab_id) else {
+                return (SemanticEditResult::NoChange, EditorOutcome::default());
+            };
+            let selection = tab
+                .document
+                .selection_range()
+                .and_then(|(start, end)| (start < end).then_some(start..end));
+            let query = ui::plugin::PluginQuery::PlanSemanticEdit {
+                command,
+                source_generation: tab.document.generation(),
+                cursor_byte: tab.document.cursor_offset().to_usize(),
+                selection,
+            };
+            match tab.query(query) {
+                ui::plugin::PluginResponse::SemanticEdit(plan) => plan,
+                _ => ui::plugin::SemanticEditPlan::Unsupported,
+            }
+        };
+        let ui::plugin::SemanticEditPlan::Apply(transaction) = plan else {
+            return (
+                match plan {
+                    ui::plugin::SemanticEditPlan::NoChange => SemanticEditResult::NoChange,
+                    ui::plugin::SemanticEditPlan::Unsupported
+                    | ui::plugin::SemanticEditPlan::Apply(_) => SemanticEditResult::Unsupported,
+                },
+                EditorOutcome::default(),
+            );
+        };
+        self.apply_semantic_edit_plan(
+            tab_id,
+            previous_summary,
+            ui::plugin::EditPlan::Apply(transaction),
+            line_height,
+        )
+    }
+
+    fn apply_semantic_edit_plan(
+        &mut self,
+        tab_id: TabId,
+        previous_summary: EditorDocumentSummary,
+        plan: ui::plugin::EditPlan,
+        line_height: f32,
+    ) -> (SemanticEditResult, EditorOutcome) {
+        let Some(mut tab) = self.tab_session_mut(tab_id) else {
+            return (SemanticEditResult::NoChange, EditorOutcome::default());
+        };
+        if !apply_edit_plan(tab.document, plan) {
+            return (SemanticEditResult::NoChange, EditorOutcome::default());
+        }
+        refresh_presentation_after_edit(&mut tab, line_height);
+        let source = tab.document.full_text();
+        let source_generation = tab.document.generation();
+        let _ = tab.send_message(ui::plugin::PluginMessage::UpdateSource {
+            text: source,
+            generation: source_generation,
+        });
+        (
+            SemanticEditResult::Applied,
+            edit_outcome(
+                tab_id,
+                previous_summary.content_revision,
+                previous_summary.dirty,
+                tab.document.content_revision(),
+                tab.document.dirty,
+            ),
+        )
     }
 
     fn edit_request(
@@ -794,7 +984,7 @@ mod tests {
 
     use appkit_core::document::DocumentModel;
     use core::buffer::TextBuffer;
-    use ui::plugin::PLUGIN_EDITOR;
+    use ui::plugin::{PLUGIN_EDITOR, SemanticEditCommand};
 
     use super::*;
     use crate::editor_plugin::EditorPluginFactory;
@@ -913,5 +1103,29 @@ mod tests {
         let discarded = session.confirm_close(tab_id, CloseConfirmation::Cancel);
         assert!(discarded.is_none());
         assert!(session.document_summary(tab_id).is_some());
+    }
+
+    #[test]
+    fn unsupported_semantic_command_is_typed_and_does_not_mutate_document() {
+        let mut session = model_session();
+        let effect =
+            session.install_prepared_tab(prepared_text("正文"), None, OpenDisposition::Persistent);
+        let tab_id = match effect {
+            WorkspaceEffect::Activated(tab_id) => tab_id,
+            _ => panic!("first tab should activate"),
+        };
+        let before = session
+            .document_text_snapshot(tab_id)
+            .expect("installed tab should expose a text snapshot");
+
+        let (result, outcome) =
+            session.execute_semantic_edit(SemanticEditCommand::ToggleBold, 20.0);
+
+        assert_eq!(result, super::super::SemanticEditResult::Unsupported);
+        assert!(outcome.notifications.is_empty());
+        let after =
+            session.document_text_snapshot(tab_id).expect("installed tab should remain available");
+        assert_eq!(after.text, before.text);
+        assert_eq!(after.content_revision, before.content_revision);
     }
 }

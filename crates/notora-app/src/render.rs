@@ -1,10 +1,15 @@
 use std::collections::HashMap;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use appkit_shell::editor_runtime::{EditorFrame, RenderError};
 use notora_core::{DocumentIdentity, DocumentKind, NavigationScope, NoteId};
 use ui::core::WidgetAction;
 use ui::core::widget::{ControlAction, TextPayload, WidgetId};
 use ui::icon::draw_icon;
+use ui::note_creation_panel::{
+    NoteCreationOptionInput, NoteCreationPanelInput, NoteCreationPanelWidget,
+    NoteCreationSubmissionState,
+};
 use ui::split_button::{SplitButtonInput, SplitButtonWidget};
 use ui::splitter::{SplitterAction, SplitterInput, SplitterWidget};
 use ui::status_state::{StatusStateInput, StatusStateKind, StatusStateWidget};
@@ -19,7 +24,10 @@ use ui::virtual_card_list::{
 };
 use ui::{Event, EventCtx, Rect, Widget};
 
-use crate::action::{ConflictResolution, MetadataMutation, NotoraAction, TrashOperation};
+use crate::action::{
+    ConflictResolution, MetadataMutation, NoteCreationStorageMode, NotoraAction, TrashOperation,
+};
+use crate::editor_pane::{EditorPaneChrome, EditorPaneInput, EditorPaneMode, EditorPaneRects};
 use crate::external_files::ExternalFileSession;
 use crate::settings::ProductSettings;
 use crate::settings_overlay::{SettingsOverlay, SettingsOverlayAction, SettingsOverlayInput};
@@ -48,12 +56,12 @@ const SIDEBAR_CONTROL_HEIGHT_LOGICAL: f32 = 32.0;
 const SIDEBAR_ICON_SIZE_LOGICAL: f32 = 16.0;
 const SIDEBAR_LABEL_FONT_SIZE_LOGICAL: f32 = 15.0;
 const CARD_LOAD_MORE_THRESHOLD_LOGICAL: f32 = 160.0;
-const NEW_DOCUMENT_MENU_ITEM_HEIGHT_LOGICAL: f32 = 34.0;
-const NEW_DOCUMENT_MENU_ITEMS: [(&str, DocumentKind); 3] = [
-    ("TXT", DocumentKind::Text),
-    ("MD", DocumentKind::Markdown),
-    ("MMAP.MD", DocumentKind::Mindmap),
-];
+const NOTE_CREATION_PANEL_WIDTH_LOGICAL: f32 = 360.0;
+const NOTE_CREATION_PANEL_ROW_HEIGHT_LOGICAL: f32 = 28.0;
+const NOTE_CREATION_PANEL_SECTION_GAP_LOGICAL: f32 = 8.0;
+const NOTE_CREATION_PANEL_VERTICAL_PADDING_LOGICAL: f32 = 16.0;
+const NOTE_CREATION_ROOT_DIRECTORY_KEY: &str = "root";
+const NOTE_CREATION_UNENCRYPTED_KEY: &str = "unencrypted";
 const COMPACT_NAVIGATION_BUTTON_WIDTH_LOGICAL: f32 = 72.0;
 const COMPACT_BACK_BUTTON_WIDTH_LOGICAL: f32 = 64.0;
 const CONFIRMATION_PANEL_WIDTH_LOGICAL: f32 = 360.0;
@@ -68,6 +76,8 @@ const TRASH_NAVIGATION_KEY: u64 = 3;
 const EXTERNAL_FILES_NAVIGATION_KEY: u64 = 4;
 const DIRECTORY_NAVIGATION_KEY_START: u64 = 100;
 const TAG_NAVIGATION_KEY_START: u64 = 10_000;
+const EDITOR_ROOT_DIRECTORY_ROW_KEY: &str = "root";
+const EDITOR_TAG_SUGGESTION_KEY_PREFIX: &str = "suggestion:";
 
 /// UI 之前的产品展示卡片；保持领域身份，避免将 app 状态泄漏给 ui crate。
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -130,11 +140,26 @@ pub struct NotoraRenderModel {
     pub show_settings_overlay: bool,
     pub settings_overlay: SettingsOverlayInput,
     pub confirmation: Option<ConfirmationOverlayInput>,
-    pub show_menu: bool,
+    pub show_creation_panel: bool,
+    pub creation_panel: NoteCreationPanelInput,
+    pub creation_actions: HashMap<String, NotoraAction>,
     pub show_tooltip: bool,
     pub new_note_control: NewNoteControlState,
     pub note_toolbar: Vec<NoteToolbarButtonInput>,
     pub save_conflict: Option<SaveConflictOverlayInput>,
+    pub editor_chrome: EditorPaneInput,
+    pub editor_note_id: Option<NoteId>,
+    pub editor_location_actions: HashMap<String, NotoraAction>,
+    pub editor_tag_actions: HashMap<String, NotoraAction>,
+    pub editor_command_actions: HashMap<String, NotoraAction>,
+    pub editor_pane: EditorPaneState,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum EditorPaneState {
+    #[default]
+    Empty,
+    Active,
 }
 
 impl NotoraRenderModel {
@@ -246,6 +271,23 @@ impl NotoraRenderModel {
             DocumentIdentity::ExternalFile(_) => None,
             DocumentIdentity::Note(_) => None,
         });
+        let editor_note_id = state.library.selected_card.and_then(|identity| match identity {
+            DocumentIdentity::Note(note_id) => Some(note_id),
+            DocumentIdentity::ExternalFile(_) => None,
+        });
+        let editor_chrome = editor_pane_input(state, &cards);
+        let (editor_location_actions, editor_tag_actions) = editor_action_maps(state);
+        let mut editor_command_actions = editor_command_actions();
+        if let Some(note_id) = editor_note_id
+            && state.library.navigation_scope != NavigationScope::Trash
+            && state.library.navigation_scope != NavigationScope::ExternalFiles
+        {
+            editor_command_actions.insert(
+                "delete".to_owned(),
+                NotoraAction::TrashOperationRequested(TrashOperation::MoveToTrash { note_id }),
+            );
+        }
+        let (creation_panel, creation_actions) = note_creation_panel_input(state);
         Self {
             search_query,
             navigation_rows,
@@ -258,7 +300,9 @@ impl NotoraRenderModel {
             show_settings_overlay: state.layout.overlay == OverlayState::Settings,
             settings_overlay: SettingsOverlayInput::from_product_settings(product_settings),
             confirmation: confirmation_overlay_input(state.layout.overlay),
-            show_menu: state.layout.overlay == OverlayState::NewDocumentMenu,
+            show_creation_panel: state.layout.overlay == OverlayState::NewNoteCreationPanel,
+            creation_panel,
+            creation_actions,
             show_tooltip: false,
             new_note_control: new_note_control_state(selected_scope),
             note_toolbar: note_toolbar_buttons(selected_scope, selected_note_id),
@@ -274,8 +318,481 @@ impl NotoraRenderModel {
                     NotoraAction::SaveConflictResolutionRequested(ConflictResolution::Cancel),
                 ],
             }),
+            editor_chrome,
+            editor_note_id,
+            editor_location_actions,
+            editor_tag_actions,
+            editor_command_actions,
+            editor_pane: EditorPaneState::Empty,
         }
     }
+}
+
+fn editor_pane_input(state: &NotoraState, cards: &[RenderCard]) -> EditorPaneInput {
+    let Some(identity) = state.library.selected_card else {
+        return EditorPaneInput::default();
+    };
+    let selected_card = cards.iter().find(|card| card.identity == identity);
+    let mode = match identity {
+        DocumentIdentity::ExternalFile(_) => EditorPaneMode::ExternalFile,
+        DocumentIdentity::Note(_) if state.library.navigation_scope == NavigationScope::Trash => {
+            EditorPaneMode::TrashNote
+        }
+        DocumentIdentity::Note(_) => EditorPaneMode::WorkspaceNote,
+    };
+    let document_key = match identity {
+        DocumentIdentity::Note(note_id) => format!("note:{note_id}"),
+        DocumentIdentity::ExternalFile(file_id) => format!("external:{file_id}"),
+    };
+    let title = selected_card.map(|card| card.title.clone()).unwrap_or_else(|| match mode {
+        EditorPaneMode::TrashNote => "回收站笔记".to_owned(),
+        EditorPaneMode::WorkspaceNote => "无标题".to_owned(),
+        EditorPaneMode::ExternalFile | EditorPaneMode::Empty => "未命名".to_owned(),
+    });
+    let starred = selected_card.is_some_and(|card| card.tag_summary.starts_with('★'));
+    let tags = selected_card
+        .map(|card| {
+            card.tag_summary
+                .split_whitespace()
+                .filter_map(|tag| tag.strip_prefix('#'))
+                .enumerate()
+                .map(|(index, label)| ui::tag_editor::TagChipInput {
+                    chip_key: format!("tag-{index}"),
+                    label: label.to_owned(),
+                    removable: true,
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    let location_directories = if mode == EditorPaneMode::WorkspaceNote {
+        let mut directories = vec![ui::location_picker::LocationDirectoryInput {
+            row_key: EDITOR_ROOT_DIRECTORY_ROW_KEY.to_owned(),
+            label: "工作区根目录".to_owned(),
+            depth: 0,
+            expanded: true,
+            has_children: !state.library.navigation_tree.directories.is_empty(),
+            enabled: true,
+        }];
+        directories.extend(state.library.navigation_tree.directories.iter().map(|directory| {
+            ui::location_picker::LocationDirectoryInput {
+                row_key: directory.to_string_lossy().to_string(),
+                label: directory
+                    .file_name()
+                    .map(|name| name.to_string_lossy().to_string())
+                    .unwrap_or_else(|| directory.to_string_lossy().to_string()),
+                depth: directory.components().count().saturating_sub(1),
+                expanded: state.library.navigation_tree.expanded_directories.contains(directory),
+                has_children: state
+                    .library
+                    .navigation_tree
+                    .directories
+                    .iter()
+                    .any(|candidate| candidate.parent().is_some_and(|parent| parent == directory)),
+                enabled: true,
+            }
+        }));
+        directories
+    } else {
+        Vec::new()
+    };
+    let mut input = EditorPaneInput {
+        mode,
+        document_key,
+        header: ui::editor_header::EditorHeaderInput {
+            title,
+            title_editable: mode == EditorPaneMode::WorkspaceNote,
+            created_at_text: String::new(),
+            modified_at_text: selected_card.map(|card| card.timestamp.clone()).unwrap_or_default(),
+            save_status_text: match mode {
+                EditorPaneMode::ExternalFile => "外部文件".to_owned(),
+                EditorPaneMode::TrashNote => "回收站".to_owned(),
+                EditorPaneMode::WorkspaceNote => "已保存".to_owned(),
+                EditorPaneMode::Empty => String::new(),
+            },
+            starred,
+            star_enabled: mode == EditorPaneMode::WorkspaceNote,
+            encryption: match mode {
+                EditorPaneMode::ExternalFile => ui::editor_header::EncryptionStatusInput::Hidden,
+                EditorPaneMode::Empty
+                | EditorPaneMode::WorkspaceNote
+                | EditorPaneMode::TrashNote => {
+                    ui::editor_header::EncryptionStatusInput::Unencrypted
+                }
+            },
+            delete_visible: mode == EditorPaneMode::WorkspaceNote,
+            delete_enabled: mode == EditorPaneMode::WorkspaceNote,
+            compact: false,
+        },
+        location: ui::location_picker::LocationPickerInput {
+            workspace_name: if mode == EditorPaneMode::WorkspaceNote {
+                "Notora".to_owned()
+            } else {
+                String::new()
+            },
+            directories: location_directories,
+            ..ui::location_picker::LocationPickerInput::default()
+        },
+        tags: ui::tag_editor::TagEditorInput {
+            chips: tags,
+            enabled: mode == EditorPaneMode::WorkspaceNote,
+            ..ui::tag_editor::TagEditorInput::default()
+        },
+        toolbar: editor_toolbar_input(mode),
+    };
+    if let Some(snapshot) = state.library.active_editor_metadata.as_ref()
+        && snapshot.identity == identity
+    {
+        input.header.created_at_text = format_created_time(snapshot.metadata.created_at);
+        input.header.modified_at_text =
+            format_modified_time(snapshot.metadata.modified_at, SystemTime::now());
+        input.header.encryption = match snapshot.metadata.encryption {
+            notora_core::NoteEncryption::Unencrypted => {
+                ui::editor_header::EncryptionStatusInput::Unencrypted
+            }
+            notora_core::NoteEncryption::Encrypted => {
+                ui::editor_header::EncryptionStatusInput::Encrypted
+            }
+        };
+        input.tags.chips = snapshot
+            .tags
+            .iter()
+            .map(|tag| ui::tag_editor::TagChipInput {
+                chip_key: tag.tag_id.to_string(),
+                label: tag.display_name.clone(),
+                removable: true,
+            })
+            .collect();
+        input.tags.suggestions = state
+            .library
+            .navigation_tree
+            .tags
+            .iter()
+            .filter(|candidate| {
+                !snapshot.tags.iter().any(|attached| attached.tag_id == candidate.tag_id)
+            })
+            .map(|candidate| ui::tag_editor::TagSuggestionInput {
+                option_key: editor_tag_suggestion_key(candidate.tag_id),
+                label: candidate.display_name.clone(),
+                enabled: true,
+            })
+            .collect();
+    }
+    input
+}
+
+fn note_creation_panel_input(
+    state: &NotoraState,
+) -> (NoteCreationPanelInput, HashMap<String, NotoraAction>) {
+    let Some(draft) = state.new_note_draft.as_ref() else {
+        return (NoteCreationPanelInput::default(), HashMap::new());
+    };
+    let mut actions = HashMap::new();
+    let document_types = [
+        ("text", "TXT", DocumentKind::Text),
+        ("markdown", "Markdown", DocumentKind::Markdown),
+        ("mindmap", "Mindmap", DocumentKind::Mindmap),
+    ]
+    .into_iter()
+    .map(|(key, label, kind)| {
+        actions.insert(key.to_owned(), NotoraAction::NoteCreationTypeSelected(kind));
+        NoteCreationOptionInput {
+            option_key: key.to_owned(),
+            label: label.to_owned(),
+            enabled: true,
+        }
+    })
+    .collect();
+
+    let mut directories = vec![NoteCreationOptionInput {
+        option_key: NOTE_CREATION_ROOT_DIRECTORY_KEY.to_owned(),
+        label: "工作区根目录".to_owned(),
+        enabled: true,
+    }];
+    actions.insert(
+        NOTE_CREATION_ROOT_DIRECTORY_KEY.to_owned(),
+        NotoraAction::NoteCreationDirectorySelected(None),
+    );
+    for directory in &state.library.navigation_tree.directories {
+        let option_key = directory.to_string_lossy().to_string();
+        let label = directory
+            .file_name()
+            .map(|name| name.to_string_lossy().to_string())
+            .unwrap_or_else(|| option_key.clone());
+        directories.push(NoteCreationOptionInput {
+            option_key: option_key.clone(),
+            label,
+            enabled: true,
+        });
+        actions.insert(
+            option_key,
+            NotoraAction::NoteCreationDirectorySelected(Some(directory.clone())),
+        );
+    }
+
+    actions.insert(
+        NOTE_CREATION_UNENCRYPTED_KEY.to_owned(),
+        NotoraAction::NoteCreationStorageSelected(NoteCreationStorageMode::Unencrypted),
+    );
+    let storage_modes = vec![NoteCreationOptionInput {
+        option_key: NOTE_CREATION_UNENCRYPTED_KEY.to_owned(),
+        label: "普通存储".to_owned(),
+        enabled: true,
+    }];
+    let selected_directory = Some(match &draft.directory {
+        Some(directory) => directory.to_string_lossy().to_string(),
+        None => NOTE_CREATION_ROOT_DIRECTORY_KEY.to_owned(),
+    });
+    let selected_storage_mode = match draft.storage_mode {
+        NoteCreationStorageMode::Unencrypted => Some(NOTE_CREATION_UNENCRYPTED_KEY.to_owned()),
+        NoteCreationStorageMode::Encrypted => None,
+    };
+    let submission = match draft.submission {
+        crate::action::NoteCreationSubmission::Editing => NoteCreationSubmissionState::Idle,
+        crate::action::NoteCreationSubmission::Submitting => {
+            NoteCreationSubmissionState::Submitting
+        }
+        crate::action::NoteCreationSubmission::Failed => NoteCreationSubmissionState::Failed,
+        crate::action::NoteCreationSubmission::Succeeded => NoteCreationSubmissionState::Succeeded,
+    };
+    (
+        NoteCreationPanelInput {
+            document_types,
+            directories,
+            storage_modes,
+            selected_document_type: Some(document_kind_key(draft.kind).to_owned()),
+            selected_directory,
+            selected_storage_mode,
+            submission,
+        },
+        actions,
+    )
+}
+
+fn document_kind_key(kind: DocumentKind) -> &'static str {
+    match kind {
+        DocumentKind::Text => "text",
+        DocumentKind::Markdown => "markdown",
+        DocumentKind::Mindmap => "mindmap",
+    }
+}
+
+fn format_created_time(timestamp: SystemTime) -> String {
+    let Some((year, month, day)) = utc_calendar_date(timestamp) else {
+        return "创建时间未知".to_owned();
+    };
+    format!("创建 {year:04}/{month:02}/{day:02} UTC")
+}
+
+fn format_modified_time(timestamp: SystemTime, now: SystemTime) -> String {
+    let elapsed_seconds =
+        now.duration_since(timestamp).map(|elapsed| elapsed.as_secs()).unwrap_or(0);
+    if elapsed_seconds < 60 {
+        return "修改 刚刚".to_owned();
+    }
+    if elapsed_seconds < 3_600 {
+        return format!("修改 {} 分钟前", elapsed_seconds / 60);
+    }
+    if elapsed_seconds < 86_400 {
+        return format!("修改 {} 小时前", elapsed_seconds / 3_600);
+    }
+    format!("修改 {} 天前", elapsed_seconds / 86_400)
+}
+
+fn utc_calendar_date(timestamp: SystemTime) -> Option<(i64, i64, i64)> {
+    let elapsed_seconds = timestamp.duration_since(UNIX_EPOCH).ok()?.as_secs();
+    let days_since_epoch = i64::try_from(elapsed_seconds / 86_400).ok()?;
+    let shifted_days = days_since_epoch.checked_add(719_468)?;
+    let era = shifted_days.div_euclid(146_097);
+    let day_of_era = shifted_days - era * 146_097;
+    let year_of_era =
+        (day_of_era - day_of_era / 1_460 + day_of_era / 36_524 - day_of_era / 146_096) / 365;
+    let mut year = year_of_era + era * 400;
+    let day_of_year = day_of_era - (365 * year_of_era + year_of_era / 4 - year_of_era / 100);
+    let month_parameter = (5 * day_of_year + 2) / 153;
+    let day = day_of_year - (153 * month_parameter + 2) / 5 + 1;
+    let month = month_parameter + if month_parameter < 10 { 3 } else { -9 };
+    year += i64::from(month <= 2);
+    Some((year, month, day))
+}
+
+fn editor_action_maps(
+    state: &NotoraState,
+) -> (HashMap<String, NotoraAction>, HashMap<String, NotoraAction>) {
+    let Some(DocumentIdentity::Note(note_id)) = state.library.selected_card else {
+        return (HashMap::new(), HashMap::new());
+    };
+    if state.library.navigation_scope == NavigationScope::Trash
+        || state.library.navigation_scope == NavigationScope::ExternalFiles
+    {
+        return (HashMap::new(), HashMap::new());
+    }
+    let mut location_actions = HashMap::new();
+    location_actions.insert(
+        EDITOR_ROOT_DIRECTORY_ROW_KEY.to_owned(),
+        NotoraAction::MoveRequested { note_id, target_directory: std::path::PathBuf::new() },
+    );
+    for directory in &state.library.navigation_tree.directories {
+        let row_key = directory.to_string_lossy().to_string();
+        location_actions.insert(
+            row_key,
+            NotoraAction::MoveRequested { note_id, target_directory: directory.clone() },
+        );
+    }
+    let mut tag_actions: HashMap<String, NotoraAction> = state
+        .library
+        .active_editor_metadata
+        .as_ref()
+        .filter(|snapshot| {
+            snapshot.identity == DocumentIdentity::Note(note_id)
+                && snapshot.selection_generation == state.library.selected_document_generation
+        })
+        .map(|snapshot| {
+            snapshot
+                .tags
+                .iter()
+                .map(|tag| {
+                    (
+                        tag.tag_id.to_string(),
+                        NotoraAction::MetadataMutationRequested(MetadataMutation::DetachTag {
+                            note_id,
+                            tag_id: tag.tag_id,
+                        }),
+                    )
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    tag_actions.extend(state.library.navigation_tree.tags.iter().map(|tag| {
+        (
+            editor_tag_suggestion_key(tag.tag_id),
+            NotoraAction::MetadataMutationRequested(MetadataMutation::AttachTagByName {
+                note_id,
+                display_name: tag.display_name.clone(),
+            }),
+        )
+    }));
+    (location_actions, tag_actions)
+}
+
+fn editor_tag_suggestion_key(tag_id: notora_core::TagId) -> String {
+    format!("{EDITOR_TAG_SUGGESTION_KEY_PREFIX}{tag_id}")
+}
+
+fn editor_toolbar_input(mode: EditorPaneMode) -> ui::editor_toolbar::EditorToolbarInput {
+    match mode {
+        EditorPaneMode::WorkspaceNote => markdown_toolbar_input(),
+        EditorPaneMode::ExternalFile => history_toolbar_input(),
+        EditorPaneMode::Empty | EditorPaneMode::TrashNote => {
+            ui::editor_toolbar::EditorToolbarInput::default()
+        }
+    }
+}
+
+pub(crate) fn editor_toolbar_input_for_plugin(
+    mode: EditorPaneMode,
+    plugin_name: &str,
+) -> ui::editor_toolbar::EditorToolbarInput {
+    if mode != EditorPaneMode::WorkspaceNote {
+        return editor_toolbar_input(mode);
+    }
+    match plugin_name {
+        ui::plugin::PLUGIN_MARKDOWN_EDITOR => markdown_toolbar_input(),
+        ui::plugin::PLUGIN_MINDMAP => mindmap_toolbar_input(),
+        _ => history_toolbar_input(),
+    }
+}
+
+pub(crate) fn add_compact_editor_toolbar_commands(
+    toolbar: &mut ui::editor_toolbar::EditorToolbarInput,
+) {
+    let Some(group) = toolbar.groups.first_mut() else {
+        return;
+    };
+    if group.commands.iter().any(|command| command.command_key == "delete") {
+        return;
+    }
+    group.commands.push(ui::editor_toolbar::EditorToolbarCommandInput {
+        command_key: "delete".to_owned(),
+        label: "移入回收站".to_owned(),
+        enabled: true,
+        overflow_priority: u8::MAX,
+    });
+}
+
+fn history_toolbar_input() -> ui::editor_toolbar::EditorToolbarInput {
+    toolbar_input(&[("undo", "撤销", 0), ("redo", "重做", 0)])
+}
+
+fn markdown_toolbar_input() -> ui::editor_toolbar::EditorToolbarInput {
+    toolbar_input(&[
+        ("undo", "撤销", 0),
+        ("redo", "重做", 0),
+        ("heading", "标题", 3),
+        ("bold", "粗体", 4),
+        ("italic", "斜体", 5),
+        ("strike", "删除线", 6),
+        ("inline_code", "行内代码", 7),
+        ("unordered_list", "项目列表", 8),
+        ("ordered_list", "编号列表", 9),
+        ("task_list", "任务列表", 10),
+        ("quote", "引用", 11),
+        ("code_block", "代码块", 12),
+        ("link", "链接", 13),
+    ])
+}
+
+fn mindmap_toolbar_input() -> ui::editor_toolbar::EditorToolbarInput {
+    toolbar_input(&[
+        ("undo", "撤销", 0),
+        ("redo", "重做", 0),
+        ("promote", "提升层级", 3),
+        ("demote", "降低层级", 4),
+    ])
+}
+
+fn toolbar_input(commands: &[(&str, &str, u8)]) -> ui::editor_toolbar::EditorToolbarInput {
+    ui::editor_toolbar::EditorToolbarInput {
+        groups: vec![ui::editor_toolbar::EditorToolbarGroupInput {
+            label: "编辑".to_owned(),
+            commands: commands
+                .iter()
+                .map(|(command_key, label, overflow_priority)| {
+                    ui::editor_toolbar::EditorToolbarCommandInput {
+                        command_key: (*command_key).to_owned(),
+                        label: (*label).to_owned(),
+                        enabled: true,
+                        overflow_priority: *overflow_priority,
+                    }
+                })
+                .collect(),
+        }],
+        overflow_open: false,
+    }
+}
+
+fn editor_command_actions() -> HashMap<String, NotoraAction> {
+    use ui::plugin::SemanticEditCommand;
+
+    [
+        ("undo", SemanticEditCommand::Undo),
+        ("redo", SemanticEditCommand::Redo),
+        ("heading", SemanticEditCommand::SetHeadingLevel(2)),
+        ("bold", SemanticEditCommand::ToggleBold),
+        ("italic", SemanticEditCommand::ToggleItalic),
+        ("strike", SemanticEditCommand::ToggleStrikethrough),
+        ("inline_code", SemanticEditCommand::ToggleInlineCode),
+        ("unordered_list", SemanticEditCommand::UnorderedList),
+        ("ordered_list", SemanticEditCommand::OrderedList),
+        ("task_list", SemanticEditCommand::TaskList),
+        ("quote", SemanticEditCommand::Quote),
+        ("code_block", SemanticEditCommand::CodeBlock),
+        ("link", SemanticEditCommand::InsertLink),
+        ("promote", SemanticEditCommand::PromoteObject),
+        ("demote", SemanticEditCommand::DemoteObject),
+    ]
+    .into_iter()
+    .map(|(key, command)| (key.to_owned(), NotoraAction::SemanticEditRequested(command)))
+    .collect()
 }
 
 fn note_toolbar_buttons(
@@ -314,29 +831,8 @@ fn note_toolbar_buttons(
             },
         ];
     }
-    let Some(note_id) = selected_note_id else {
-        return Vec::new();
-    };
-    vec![
-        NoteToolbarButtonInput {
-            label: "重命名".to_owned(),
-            action: NotoraAction::RenameDialogRequested(note_id),
-        },
-        NoteToolbarButtonInput {
-            label: "移动".to_owned(),
-            action: NotoraAction::MoveDialogRequested(note_id),
-        },
-        NoteToolbarButtonInput {
-            label: "星标".to_owned(),
-            action: NotoraAction::MetadataMutationRequested(MetadataMutation::ToggleStar {
-                note_id,
-            }),
-        },
-        NoteToolbarButtonInput {
-            label: "回收站".to_owned(),
-            action: NotoraAction::TrashOperationRequested(TrashOperation::MoveToTrash { note_id }),
-        },
-    ]
+    let _ = selected_note_id;
+    Vec::new()
 }
 
 fn new_note_control_state(scope: &NavigationScope) -> NewNoteControlState {
@@ -391,6 +887,12 @@ pub struct NotoraShell {
     navigation_splitter: SplitterWidget,
     card_list_splitter: SplitterWidget,
     new_note_button: SplitButtonWidget,
+    note_creation_panel: NoteCreationPanelWidget,
+    editor_pane: EditorPaneChrome,
+    editor_note_id: Option<NoteId>,
+    editor_location_actions: HashMap<String, NotoraAction>,
+    editor_tag_actions: HashMap<String, NotoraAction>,
+    editor_command_actions: HashMap<String, NotoraAction>,
     settings_overlay: SettingsOverlay,
     settings_overlay_open: bool,
     navigation_actions: HashMap<TreeRowKey, NotoraAction>,
@@ -401,9 +903,11 @@ pub struct NotoraShell {
     search_rect: Rect,
     navigation_tree_rect: Rect,
     card_content_rect: Rect,
+    editor_rect: Rect,
     settings_rect: Rect,
-    new_document_menu_rect: Rect,
-    new_document_menu_open: bool,
+    note_creation_panel_rect: Rect,
+    note_creation_panel_open: bool,
+    creation_actions: HashMap<String, NotoraAction>,
     note_toolbar_buttons: Vec<RenderedToolbarButton>,
     compact_navigation_rect: Rect,
     compact_back_rect: Rect,
@@ -440,6 +944,13 @@ impl NotoraShell {
             navigation_splitter: SplitterWidget::new(),
             card_list_splitter: SplitterWidget::new(),
             new_note_button,
+            note_creation_panel: NoteCreationPanelWidget::new(),
+            editor_pane: EditorPaneChrome::new(),
+            editor_note_id: None,
+            editor_location_actions: HashMap::new(),
+            editor_tag_actions: HashMap::new(),
+            editor_command_actions: HashMap::new(),
+            creation_actions: HashMap::new(),
             settings_overlay: SettingsOverlay::new(),
             settings_overlay_open: false,
             navigation_actions: HashMap::new(),
@@ -450,9 +961,10 @@ impl NotoraShell {
             search_rect: Rect::ZERO,
             navigation_tree_rect: Rect::ZERO,
             card_content_rect: Rect::ZERO,
+            editor_rect: Rect::ZERO,
             settings_rect: Rect::ZERO,
-            new_document_menu_rect: Rect::ZERO,
-            new_document_menu_open: false,
+            note_creation_panel_rect: Rect::ZERO,
+            note_creation_panel_open: false,
             note_toolbar_buttons: Vec::new(),
             compact_navigation_rect: Rect::ZERO,
             compact_back_rect: Rect::ZERO,
@@ -504,14 +1016,21 @@ impl NotoraShell {
             label: "新建笔记".to_owned(),
             enabled: model.new_note_control.is_visible(),
         });
-        self.new_note_button.set_menu_open(model.show_menu);
+        self.new_note_button.set_menu_open(false);
+        self.note_creation_panel.set_input(model.creation_panel.clone());
+        self.creation_actions.clone_from(&model.creation_actions);
         self.settings_overlay.set_input(model.settings_overlay.clone());
         self.settings_overlay_open = model.show_settings_overlay;
         self.confirmation_action =
             model.confirmation.as_ref().map(|input| input.confirm_action.clone());
-        self.new_document_menu_open = model.show_menu;
+        self.note_creation_panel_open = model.show_creation_panel;
         self.save_conflict_actions =
             model.save_conflict.as_ref().map(|conflict| conflict.actions.clone());
+        self.editor_pane.set_input(model.editor_chrome.clone());
+        self.editor_note_id = model.editor_note_id;
+        self.editor_location_actions.clone_from(&model.editor_location_actions);
+        self.editor_tag_actions.clone_from(&model.editor_tag_actions);
+        self.editor_command_actions.clone_from(&model.editor_command_actions);
         self.card_empty_state.set_input(StatusStateInput {
             kind: StatusStateKind::Empty,
             title: "暂无笔记".to_owned(),
@@ -560,6 +1079,17 @@ impl NotoraShell {
         );
         self.navigation_tree_rect = tree_rect;
         self.search_rect = search_rect;
+        self.editor_rect = layout.editor_rect;
+        frame.with_layout_context(|context| {
+            self.editor_pane.set_rects(
+                EditorPaneRects {
+                    header: layout.editor_header_rect,
+                    toolbar: layout.editor_toolbar_rect,
+                    body: layout.editor_body_rect,
+                },
+                context,
+            );
+        });
         self.settings_rect = settings_rect;
         let card_header = card_header_layout(
             layout.card_list_rect,
@@ -574,7 +1104,12 @@ impl NotoraShell {
             model.new_note_control,
             card_header.control_top_y,
         );
-        self.new_document_menu_rect = new_document_menu_rect(new_note_rect, dpi);
+        self.note_creation_panel_rect = note_creation_panel_rect(
+            layout.overlay_rect,
+            dpi,
+            &model.creation_panel,
+            model.show_creation_panel,
+        );
         let splitters_enabled = layout.responsive_mode == ResponsiveLayoutMode::ThreePane;
         self.navigation_splitter.set_input(SplitterInput {
             logical_position: layout.navigation_width_logical,
@@ -642,19 +1177,21 @@ impl NotoraShell {
             self.navigation_tree.set_rect(tree_rect, context);
             self.card_list.set_rect(card_content_rect, context);
             self.card_empty_state.set_rect(card_content_rect, context);
-            self.editor_empty_state.set_rect(layout.editor_rect, context);
+            self.editor_empty_state.set_rect(layout.editor_body_rect, context);
             self.navigation_splitter.set_rect(layout.navigation_splitter_rect, context);
             self.card_list_splitter.set_rect(layout.card_list_splitter_rect, context);
             self.new_note_button.set_rect(new_note_rect, context);
+            self.note_creation_panel.set_rect(local_rect(self.note_creation_panel_rect), context);
             if model.show_settings_overlay {
                 self.settings_overlay.set_rect(layout.overlay_rect, context);
             }
         });
-        frame.with_paint_context(|context| {
+        frame.with_underlay_paint_context(|context| {
             let application_theme = context.theme.application_theme();
             context.list.fill(layout.navigation_rect, application_theme.navigation_surface);
             context.list.fill(layout.card_list_rect, application_theme.content_surface);
             context.list.fill(layout.editor_rect, application_theme.editor_surface);
+            self.editor_pane.paint_underlay(context);
             self.search_box.paint(context);
             let search_icon_size = SIDEBAR_ICON_SIZE_LOGICAL * context.dpi;
             draw_icon(
@@ -710,9 +1247,15 @@ impl NotoraShell {
                 self.card_list.paint(context);
             }
         });
-        frame.paint_editor_with(layout.editor_rect, |context| {
-            self.editor_empty_state.paint(context)
-        })?;
+        match model.editor_pane {
+            EditorPaneState::Empty => {
+                frame.paint_editor_with(layout.editor_body_rect, |context| {
+                    self.editor_empty_state.paint(context)
+                })?;
+            }
+            EditorPaneState::Active => frame.paint_editor(layout.editor_body_rect)?,
+        }
+        frame.with_paint_context(|context| self.editor_pane.paint_overlay(context));
         if layout.responsive_mode != ResponsiveLayoutMode::ThreePane
             && layout.navigation_rect != Rect::ZERO
         {
@@ -774,25 +1317,13 @@ impl NotoraShell {
                 self.paint_save_conflict_overlay(context);
             });
         }
-        if model.show_menu {
+        if model.show_creation_panel {
             frame.with_paint_context(|context| {
                 let application_theme = context.theme.application_theme();
-                context.list.fill_rounded(
-                    self.new_document_menu_rect,
-                    application_theme.overlay_surface,
-                    6.0 * context.dpi,
-                );
-                for (index, (label, _)) in NEW_DOCUMENT_MENU_ITEMS.iter().enumerate() {
-                    let item_top = self.new_document_menu_rect.y
-                        + index as f32 * NEW_DOCUMENT_MENU_ITEM_HEIGHT_LOGICAL * context.dpi;
-                    context.text(
-                        self.new_document_menu_rect.x + 10.0 * context.dpi,
-                        item_top + 22.0 * context.dpi,
-                        14.0 * context.dpi,
-                        application_theme.text_primary,
-                        label,
-                    );
-                }
+                context.list.fill_rounded(layout.overlay_rect, application_theme.modal_scrim, 0.0);
+                paint_at(context, self.note_creation_panel_rect, |context| {
+                    self.note_creation_panel.paint(context);
+                });
             });
         }
         if model.show_tooltip {
@@ -809,6 +1340,71 @@ impl NotoraShell {
 
     pub fn translate_widget_action(&self, action: &WidgetAction) -> Option<NotoraAction> {
         match action {
+            WidgetAction::Control(ControlAction::TextCommitted {
+                id: ui::note_creation_panel::NOTE_CREATION_TYPE_ID,
+                value: TextPayload::Plain(option_key),
+            }) => self.creation_actions.get(option_key).cloned(),
+            WidgetAction::Control(ControlAction::TextCommitted {
+                id: ui::note_creation_panel::NOTE_CREATION_DIRECTORY_ID,
+                value: TextPayload::Plain(option_key),
+            }) => self.creation_actions.get(option_key).cloned(),
+            WidgetAction::Control(ControlAction::TextCommitted {
+                id: ui::note_creation_panel::NOTE_CREATION_STORAGE_ID,
+                value: TextPayload::Plain(option_key),
+            }) => self.creation_actions.get(option_key).cloned(),
+            WidgetAction::Control(ControlAction::Activated {
+                id: ui::note_creation_panel::NOTE_CREATION_SUBMIT_ID,
+            }) => Some(NotoraAction::NoteCreationSubmitted),
+            WidgetAction::Control(ControlAction::Activated {
+                id: ui::note_creation_panel::NOTE_CREATION_CANCEL_ID,
+            }) => Some(NotoraAction::NoteCreationCancelled),
+            WidgetAction::Control(ControlAction::TextCommitted {
+                id: ui::location_picker::LOCATION_PICKER_SELECT_ID,
+                value: TextPayload::Plain(row_key),
+            }) => self.editor_location_actions.get(row_key).cloned(),
+            WidgetAction::Control(ControlAction::TextCommitted {
+                id: ui::tag_editor::TAG_EDITOR_SUBMIT_ID,
+                value: TextPayload::Plain(display_name),
+            }) => self.editor_note_id.map(|note_id| {
+                NotoraAction::MetadataMutationRequested(MetadataMutation::AttachTagByName {
+                    note_id,
+                    display_name: display_name.clone(),
+                })
+            }),
+            WidgetAction::Control(ControlAction::TextCommitted {
+                id: ui::tag_editor::TAG_EDITOR_REMOVE_ID,
+                value: TextPayload::Plain(chip_key),
+            }) => self.editor_tag_actions.get(chip_key).cloned(),
+            WidgetAction::Control(ControlAction::TextCommitted {
+                id: ui::tag_editor::TAG_EDITOR_SUGGESTION_ID,
+                value: TextPayload::Plain(option_key),
+            }) => self.editor_tag_actions.get(option_key).cloned(),
+            WidgetAction::Control(ControlAction::TextCommitted {
+                id: ui::editor_toolbar::EDITOR_TOOLBAR_COMMAND_ID,
+                value: TextPayload::Plain(command_key),
+            }) => self.editor_command_actions.get(command_key).cloned(),
+            WidgetAction::Control(ControlAction::TextCommitted {
+                id: ui::editor_header::EDITOR_HEADER_TITLE_ID,
+                value,
+            }) => match value {
+                TextPayload::Plain(title) => {
+                    Some(NotoraAction::TitleCommitRequested(title.clone()))
+                }
+                TextPayload::Sensitive(_) => None,
+            },
+            WidgetAction::Control(ControlAction::Activated {
+                id: ui::editor_header::EDITOR_HEADER_CANCEL_TITLE_ID,
+            }) => Some(NotoraAction::FocusRequested(FocusTarget::Editor)),
+            WidgetAction::Control(ControlAction::Activated {
+                id: ui::editor_header::EDITOR_HEADER_STAR_ID,
+            }) => self.editor_note_id.map(|note_id| {
+                NotoraAction::MetadataMutationRequested(MetadataMutation::ToggleStar { note_id })
+            }),
+            WidgetAction::Control(ControlAction::Activated {
+                id: ui::editor_header::EDITOR_HEADER_DELETE_ID,
+            }) => self.editor_note_id.map(|note_id| {
+                NotoraAction::TrashOperationRequested(TrashOperation::MoveToTrash { note_id })
+            }),
             WidgetAction::TreeList(TreeListAction::Selected(key)) => {
                 self.navigation_actions.get(key).cloned()
             }
@@ -839,7 +1435,7 @@ impl NotoraShell {
                 Some(NotoraAction::OpenSettings)
             }
             WidgetAction::Control(ControlAction::Activated { id }) if *id == NEW_NOTE_BUTTON_ID => {
-                Some(NotoraAction::CreateRequested(DocumentKind::Markdown))
+                Some(NotoraAction::OpenNewDocumentMenu)
             }
             WidgetAction::Control(ControlAction::Activated { id })
                 if *id == NEW_NOTE_MENU_BUTTON_ID =>
@@ -853,6 +1449,9 @@ impl NotoraShell {
             WidgetAction::Control(ControlAction::FocusRequested { id: GLOBAL_SEARCH_BOX_ID }) => {
                 Some(NotoraAction::FocusRequested(FocusTarget::NavigationSearch))
             }
+            WidgetAction::Control(ControlAction::FocusRequested {
+                id: ui::editor_header::EDITOR_HEADER_TITLE_ID,
+            }) => Some(NotoraAction::FocusRequested(FocusTarget::EditorTitle)),
             WidgetAction::Control(ControlAction::TextCommitted {
                 id: GLOBAL_SEARCH_BOX_ID,
                 ..
@@ -871,6 +1470,7 @@ impl NotoraShell {
     ) -> NotoraEventRoute {
         let mut event_context = EventCtx { theme, dpi, cursor_hint: None };
         self.search_box.set_focus(focus_target == FocusTarget::NavigationSearch);
+        self.editor_pane.set_title_focus(focus_target == FocusTarget::EditorTitle);
         if self.settings_overlay_open() {
             let action = self
                 .settings_overlay
@@ -890,18 +1490,23 @@ impl NotoraShell {
         {
             return NotoraEventRoute::consumed(Some(action));
         }
-        if self.new_document_menu_open {
-            if let Some(action) = new_document_menu_action(event, self.new_document_menu_rect) {
-                return NotoraEventRoute::consumed(Some(action));
-            }
-            if should_dismiss_new_document_menu(
+        if self.note_creation_panel_open {
+            let local_event = translate_event(
                 event,
-                self.new_document_menu_rect,
-                self.new_note_button.menu_rect(),
-            ) {
-                return NotoraEventRoute::consumed(Some(NotoraAction::OverlayDismissed));
+                self.note_creation_panel_rect.x,
+                self.note_creation_panel_rect.y,
+            );
+            if let Some(widget_action) =
+                self.note_creation_panel.on_event(&local_event, &mut event_context)
+            {
+                let action = self.translate_widget_action(&widget_action);
+                return NotoraEventRoute::consumed(action);
             }
             return NotoraEventRoute::consumed(None);
+        }
+        if let Some(widget_action) = self.editor_pane.route_event(event, &mut event_context) {
+            let action = self.translate_widget_action(&widget_action);
+            return NotoraEventRoute::consumed(action);
         }
         if let Some(action) = note_toolbar_action(event, &self.note_toolbar_buttons) {
             return NotoraEventRoute::consumed(Some(action));
@@ -928,7 +1533,7 @@ impl NotoraShell {
                 self.navigation_tree.on_event(event, &mut event_context)
             }
             Some(FocusTarget::CardList) => self.card_list.on_event(event, &mut event_context),
-            Some(FocusTarget::Editor | FocusTarget::Overlay) => None,
+            Some(FocusTarget::Editor | FocusTarget::EditorTitle | FocusTarget::Overlay) => None,
             None => match focus_target {
                 FocusTarget::NavigationSearch => {
                     self.search_box.on_event(event, &mut event_context)
@@ -937,7 +1542,9 @@ impl NotoraShell {
                     self.navigation_tree.on_event(event, &mut event_context)
                 }
                 FocusTarget::CardList => self.card_list.on_event(event, &mut event_context),
-                FocusTarget::Editor | FocusTarget::Overlay => return NotoraEventRoute::ignored(),
+                FocusTarget::Editor | FocusTarget::EditorTitle | FocusTarget::Overlay => {
+                    return NotoraEventRoute::ignored();
+                }
             },
         };
         let action = widget_action
@@ -1254,6 +1861,9 @@ fn pointer_target(event: &Event, shell: &NotoraShell) -> Option<FocusTarget> {
     if shell.card_content_rect.contains(px, py) {
         return Some(FocusTarget::CardList);
     }
+    if shell.editor_rect.contains(px, py) {
+        return Some(FocusTarget::Editor);
+    }
     None
 }
 
@@ -1332,7 +1942,7 @@ fn confirmation_overlay_input(overlay: OverlayState) -> Option<ConfirmationOverl
         }),
         OverlayState::None
         | OverlayState::Settings
-        | OverlayState::NewDocumentMenu
+        | OverlayState::NewNoteCreationPanel
         | OverlayState::SaveConflict => None,
     }
 }
@@ -1489,26 +2099,6 @@ fn compact_layout_action(
     compact_back_rect.contains(*px, *py).then_some(NotoraAction::CompactBackRequested)
 }
 
-fn new_document_menu_action(event: &Event, menu_rect: Rect) -> Option<NotoraAction> {
-    let Event::MouseDown { px, py, button: ui::core::MouseButton::Left } = event else {
-        return None;
-    };
-    if !menu_rect.contains(*px, *py) || menu_rect.h <= 0.0 {
-        return None;
-    }
-    let item_height = menu_rect.h / 3.0;
-    let item_index = ((*py - menu_rect.y) / item_height).floor() as usize;
-    let (_, kind) = NEW_DOCUMENT_MENU_ITEMS.get(item_index)?;
-    Some(NotoraAction::CreateRequested(*kind))
-}
-
-fn should_dismiss_new_document_menu(event: &Event, menu_rect: Rect, trigger_rect: Rect) -> bool {
-    let Event::MouseDown { px, py, button: ui::core::MouseButton::Left } = event else {
-        return false;
-    };
-    trigger_rect.contains(*px, *py) || !menu_rect.contains(*px, *py)
-}
-
 fn card_header_layout(
     card_list_rect: Rect,
     dpi: f32,
@@ -1573,16 +2163,65 @@ fn new_note_button_rect(
     )
 }
 
-fn new_document_menu_rect(button_rect: Rect, dpi: f32) -> Rect {
-    if button_rect == Rect::ZERO {
+fn note_creation_panel_rect(
+    overlay_rect: Rect,
+    dpi: f32,
+    input: &NoteCreationPanelInput,
+    visible: bool,
+) -> Rect {
+    if !visible || overlay_rect.w <= 0.0 || overlay_rect.h <= 0.0 {
         return Rect::ZERO;
     }
+    let section_count = [&input.document_types, &input.directories, &input.storage_modes]
+        .into_iter()
+        .filter(|options| !options.is_empty())
+        .count();
+    let option_count =
+        input.document_types.len() + input.directories.len() + input.storage_modes.len();
+    let panel_width = (NOTE_CREATION_PANEL_WIDTH_LOGICAL * dpi).min(overlay_rect.w);
+    let panel_height = (NOTE_CREATION_PANEL_VERTICAL_PADDING_LOGICAL * 2.0
+        + option_count as f32 * NOTE_CREATION_PANEL_ROW_HEIGHT_LOGICAL
+        + section_count.saturating_mul(1) as f32 * NOTE_CREATION_PANEL_SECTION_GAP_LOGICAL)
+        * dpi;
     Rect::new(
-        button_rect.x,
-        button_rect.bottom() + 4.0 * dpi,
-        button_rect.w,
-        NEW_DOCUMENT_MENU_ITEM_HEIGHT_LOGICAL * 3.0 * dpi,
+        overlay_rect.x + (overlay_rect.w - panel_width) * 0.5,
+        overlay_rect.y + (overlay_rect.h - panel_height) * 0.5,
+        panel_width,
+        panel_height.min(overlay_rect.h),
     )
+}
+
+fn local_rect(rect: Rect) -> Rect {
+    Rect::new(0.0, 0.0, rect.w, rect.h)
+}
+
+fn paint_at(context: &mut ui::PaintCtx<'_>, rect: Rect, paint: impl FnOnce(&mut ui::PaintCtx<'_>)) {
+    let saved_offset = context.list.offset;
+    context.list.offset = (saved_offset.0 + rect.x, saved_offset.1 + rect.y);
+    paint(context);
+    context.list.offset = saved_offset;
+}
+
+fn translate_event(event: &Event, offset_x: f32, offset_y: f32) -> Event {
+    match event {
+        Event::MouseMove { px, py } => Event::MouseMove { px: *px - offset_x, py: *py - offset_y },
+        Event::MouseDown { px, py, button } => {
+            Event::MouseDown { px: *px - offset_x, py: *py - offset_y, button: *button }
+        }
+        Event::MouseUp { px, py, button } => {
+            Event::MouseUp { px: *px - offset_x, py: *py - offset_y, button: *button }
+        }
+        Event::Wheel { dx, dy, px, py } => {
+            Event::Wheel { dx: *dx, dy: *dy, px: *px - offset_x, py: *py - offset_y }
+        }
+        Event::KeyDown(key, modifiers) => Event::KeyDown(*key, *modifiers),
+        Event::ImePreedit { text, cursor } => {
+            Event::ImePreedit { text: text.clone(), cursor: *cursor }
+        }
+        Event::ImeCommit(text) => Event::ImeCommit(text.clone()),
+        Event::ImeEnable => Event::ImeEnable,
+        Event::ImeDisable => Event::ImeDisable,
+    }
 }
 
 fn card_list_title(scope: &NavigationScope) -> &'static str {
@@ -1616,6 +2255,30 @@ mod tests {
         assert_eq!(model.navigation_rows[3].label, "文件");
         assert_eq!(model.card_list_title, "工作区");
         assert!(model.cards.is_empty());
+    }
+
+    #[test]
+    fn editor_times_use_calendar_dates_and_bounded_relative_labels() {
+        let now = UNIX_EPOCH + std::time::Duration::from_secs(4 * 86_400);
+
+        assert_eq!(format_created_time(UNIX_EPOCH), "创建 1970/01/01 UTC");
+        assert_eq!(format_modified_time(now, now), "修改 刚刚");
+        assert_eq!(
+            format_modified_time(now - std::time::Duration::from_secs(5 * 60), now),
+            "修改 5 分钟前"
+        );
+        assert_eq!(
+            format_modified_time(now - std::time::Duration::from_secs(2 * 3_600), now),
+            "修改 2 小时前"
+        );
+        assert_eq!(
+            format_modified_time(now - std::time::Duration::from_secs(3 * 86_400), now),
+            "修改 3 天前"
+        );
+        assert_eq!(
+            format_modified_time(now + std::time::Duration::from_secs(60), now),
+            "修改 刚刚"
+        );
     }
 
     #[test]
@@ -1739,45 +2402,56 @@ mod tests {
     }
 
     #[test]
-    fn new_document_menu_uses_text_markdown_mindmap_order() {
-        let menu_rect = Rect::new(10.0, 20.0, 120.0, 102.0);
-        let click_item = |index: usize| Event::MouseDown {
-            px: 20.0,
-            py: menu_rect.y + (index as f32 + 0.5) * menu_rect.h / 3.0,
-            button: ui::core::MouseButton::Left,
-        };
+    fn creation_panel_exposes_typed_options_without_creating_a_note() {
+        let mut state = NotoraState::default();
+        state.library.navigation_tree.directories = vec!["plans".into()];
+        let _ = state.reduce(NotoraAction::OpenNewDocumentMenu);
 
+        let model = NotoraRenderModel::from_state(&state);
+
+        assert!(model.show_creation_panel);
+        assert_eq!(model.creation_panel.selected_document_type.as_deref(), Some("markdown"));
+        assert_eq!(model.creation_panel.selected_directory.as_deref(), Some("root"));
+        assert_eq!(model.creation_panel.storage_modes.len(), 1);
         assert_eq!(
-            new_document_menu_action(&click_item(0), menu_rect),
-            Some(NotoraAction::CreateRequested(DocumentKind::Text))
+            model.creation_actions.get("plans"),
+            Some(&NotoraAction::NoteCreationDirectorySelected(Some("plans".into())))
         );
-        assert_eq!(
-            new_document_menu_action(&click_item(1), menu_rect),
-            Some(NotoraAction::CreateRequested(DocumentKind::Markdown))
-        );
-        assert_eq!(
-            new_document_menu_action(&click_item(2), menu_rect),
-            Some(NotoraAction::CreateRequested(DocumentKind::Mindmap))
+        assert!(
+            !model
+                .creation_actions
+                .values()
+                .any(|action| matches!(action, NotoraAction::CreateRequested(_)))
         );
     }
 
     #[test]
-    fn new_document_menu_dismisses_from_its_trigger_or_backdrop_only() {
-        let menu_rect = Rect::new(100.0, 50.0, 120.0, 102.0);
-        let trigger_rect = Rect::new(192.0, 14.0, 28.0, 28.0);
-        let click = |px, py| Event::MouseDown { px, py, button: ui::core::MouseButton::Left };
+    fn creation_panel_is_centered_and_has_no_legacy_menu_rect() {
+        let input = NoteCreationPanelInput {
+            document_types: vec![NoteCreationOptionInput {
+                option_key: "markdown".to_owned(),
+                label: "Markdown".to_owned(),
+                enabled: true,
+            }],
+            directories: vec![NoteCreationOptionInput {
+                option_key: "root".to_owned(),
+                label: "工作区根目录".to_owned(),
+                enabled: true,
+            }],
+            storage_modes: vec![NoteCreationOptionInput {
+                option_key: "unencrypted".to_owned(),
+                label: "普通存储".to_owned(),
+                enabled: true,
+            }],
+            ..NoteCreationPanelInput::default()
+        };
+        let overlay_rect = Rect::new(0.0, 0.0, 800.0, 600.0);
+        let panel_rect = note_creation_panel_rect(overlay_rect, 1.0, &input, true);
 
-        assert!(should_dismiss_new_document_menu(
-            &click(trigger_rect.x + 4.0, trigger_rect.y + 4.0),
-            menu_rect,
-            trigger_rect,
-        ));
-        assert!(should_dismiss_new_document_menu(&click(20.0, 20.0), menu_rect, trigger_rect,));
-        assert!(!should_dismiss_new_document_menu(
-            &click(menu_rect.x + 4.0, menu_rect.y + 4.0),
-            menu_rect,
-            trigger_rect,
-        ));
+        assert!(panel_rect.w > 0.0);
+        assert!(panel_rect.h > 0.0);
+        assert_eq!(panel_rect.x + panel_rect.w * 0.5, 400.0);
+        assert_eq!(panel_rect.y + panel_rect.h * 0.5, 300.0);
     }
 
     #[test]
@@ -1934,33 +2608,9 @@ mod tests {
     }
 
     #[test]
-    fn selected_note_toolbar_keeps_product_actions_out_of_the_widget_state() {
+    fn workspace_note_toolbar_has_no_note_level_commands() {
         let note_id = NoteId::generate();
-        let buttons = vec![
-            RenderedToolbarButton {
-                rect: Rect::new(10.0, 10.0, 60.0, 28.0),
-                label: "Rename".to_owned(),
-                action: NotoraAction::RenameDialogRequested(note_id),
-            },
-            RenderedToolbarButton {
-                rect: Rect::new(76.0, 10.0, 60.0, 28.0),
-                label: "Trash".to_owned(),
-                action: NotoraAction::TrashOperationRequested(TrashOperation::MoveToTrash {
-                    note_id,
-                }),
-            },
-        ];
-        let click = |px| Event::MouseDown { px, py: 20.0, button: ui::core::MouseButton::Left };
-
-        assert_eq!(
-            note_toolbar_action(&click(20.0), &buttons),
-            Some(NotoraAction::RenameDialogRequested(note_id))
-        );
-        assert_eq!(
-            note_toolbar_action(&click(90.0), &buttons),
-            Some(NotoraAction::TrashOperationRequested(TrashOperation::MoveToTrash { note_id }))
-        );
-        assert_eq!(note_toolbar_action(&click(160.0), &buttons), None);
+        assert!(note_toolbar_buttons(&NavigationScope::WorkspaceRoot, Some(note_id)).is_empty());
     }
 
     #[test]
@@ -1968,10 +2618,7 @@ mod tests {
         let tag_id = notora_core::TagId::generate();
         let note_id = NoteId::generate();
         let tag_buttons = note_toolbar_buttons(&NavigationScope::Tag { tag_id }, Some(note_id));
-        assert_eq!(
-            tag_buttons.iter().map(|button| button.label.as_str()).collect::<Vec<_>>(),
-            vec!["重命名", "移动", "星标", "回收站"]
-        );
+        assert!(tag_buttons.is_empty());
     }
 
     #[test]
@@ -1986,6 +2633,189 @@ mod tests {
         assert_eq!(
             model.note_toolbar[0].action,
             NotoraAction::TrashOperationRequested(TrashOperation::Empty)
+        );
+    }
+
+    #[test]
+    fn editor_pane_input_matrix_keeps_external_and_trash_metadata_read_only() {
+        let note_id = NoteId::generate();
+        let external_id = notora_core::ExternalFileId::generate();
+
+        let empty_state = NotoraState::default();
+        assert_eq!(editor_pane_input(&empty_state, &[]).mode, EditorPaneMode::Empty);
+
+        let mut note_state = NotoraState::default();
+        note_state.library.selected_card = Some(DocumentIdentity::Note(note_id));
+        let note_input = editor_pane_input(
+            &note_state,
+            &[RenderCard {
+                identity: DocumentIdentity::Note(note_id),
+                title: "路线图".to_owned(),
+                excerpt: String::new(),
+                timestamp: String::new(),
+                icon: None,
+                tag_summary: "★ #产品/Notora".to_owned(),
+            }],
+        );
+        assert_eq!(note_input.mode, EditorPaneMode::WorkspaceNote);
+        assert!(note_input.header.title_editable);
+        assert!(note_input.header.star_enabled);
+        assert_eq!(note_input.tags.chips[0].label, "产品/Notora");
+
+        note_state.library.navigation_scope = NavigationScope::Trash;
+        let trash_input = editor_pane_input(&note_state, &[]);
+        assert_eq!(trash_input.mode, EditorPaneMode::TrashNote);
+        assert!(!trash_input.header.title_editable);
+        assert!(!trash_input.tags.enabled);
+
+        let mut external_state = NotoraState::default();
+        external_state.library.selected_card = Some(DocumentIdentity::ExternalFile(external_id));
+        let external_input = editor_pane_input(&external_state, &[]);
+        assert_eq!(external_input.mode, EditorPaneMode::ExternalFile);
+        assert!(!external_input.header.title_editable);
+        assert_eq!(
+            external_input.header.encryption,
+            ui::editor_header::EncryptionStatusInput::Hidden
+        );
+        assert!(!external_input.location.open);
+    }
+
+    #[test]
+    fn editor_toolbar_commands_follow_the_active_plugin_capabilities() {
+        let command_keys = |input: ui::editor_toolbar::EditorToolbarInput| {
+            input
+                .groups
+                .into_iter()
+                .flat_map(|group| group.commands)
+                .map(|command| command.command_key)
+                .collect::<Vec<_>>()
+        };
+        assert!(
+            command_keys(editor_toolbar_input_for_plugin(
+                EditorPaneMode::WorkspaceNote,
+                ui::plugin::PLUGIN_MARKDOWN_EDITOR,
+            ))
+            .contains(&"bold".to_owned())
+        );
+        assert_eq!(
+            command_keys(editor_toolbar_input_for_plugin(
+                EditorPaneMode::WorkspaceNote,
+                ui::plugin::PLUGIN_EDITOR,
+            )),
+            vec!["undo".to_owned(), "redo".to_owned()]
+        );
+        assert_eq!(
+            command_keys(editor_toolbar_input_for_plugin(
+                EditorPaneMode::WorkspaceNote,
+                ui::plugin::PLUGIN_MINDMAP,
+            )),
+            vec!["undo".to_owned(), "redo".to_owned(), "promote".to_owned(), "demote".to_owned()]
+        );
+        let mut compact_toolbar = editor_toolbar_input_for_plugin(
+            EditorPaneMode::WorkspaceNote,
+            ui::plugin::PLUGIN_MARKDOWN_EDITOR,
+        );
+        add_compact_editor_toolbar_commands(&mut compact_toolbar);
+        assert!(command_keys(compact_toolbar).contains(&"delete".to_owned()));
+    }
+
+    #[test]
+    fn editor_widget_keys_translate_to_typed_note_actions() {
+        let note_id = NoteId::generate();
+        let tag_id = notora_core::TagId::generate();
+        let suggestion_tag_id = notora_core::TagId::generate();
+        let mut state = NotoraState::default();
+        state.library.selected_card = Some(DocumentIdentity::Note(note_id));
+        state.library.selected_document_generation = 4;
+        state.library.active_editor_metadata = Some(crate::state::ActiveEditorMetadata {
+            identity: DocumentIdentity::Note(note_id),
+            selection_generation: 4,
+            metadata: notora_core::NoteEditorMetadata {
+                note_id,
+                created_at: SystemTime::UNIX_EPOCH,
+                modified_at: SystemTime::UNIX_EPOCH,
+                encryption: notora_core::NoteEncryption::Unencrypted,
+            },
+            tags: vec![notora_core::TagSummary {
+                tag_id, display_name: "产品/Notora".to_owned()
+            }],
+        });
+        state.library.navigation_tree.tags = vec![
+            notora_core::TagWithActiveNoteCount {
+                tag_id,
+                display_name: "产品/Notora".to_owned(),
+                active_note_count: 1,
+            },
+            notora_core::TagWithActiveNoteCount {
+                tag_id: suggestion_tag_id,
+                display_name: "设计/UI".to_owned(),
+                active_note_count: 2,
+            },
+        ];
+        let model = NotoraRenderModel::from_state(&state);
+        assert_eq!(
+            model.editor_chrome.tags.suggestions,
+            vec![ui::tag_editor::TagSuggestionInput {
+                option_key: format!("suggestion:{suggestion_tag_id}"),
+                label: "设计/UI".to_owned(),
+                enabled: true,
+            }]
+        );
+        let mut shell = NotoraShell::new();
+        shell.update_model(&model);
+
+        assert_eq!(
+            shell.translate_widget_action(&WidgetAction::Control(ControlAction::TextCommitted {
+                id: ui::tag_editor::TAG_EDITOR_SUBMIT_ID,
+                value: TextPayload::Plain("设计/UI".to_owned()),
+            })),
+            Some(NotoraAction::MetadataMutationRequested(MetadataMutation::AttachTagByName {
+                note_id,
+                display_name: "设计/UI".to_owned(),
+            }))
+        );
+        assert_eq!(
+            shell.translate_widget_action(&WidgetAction::Control(ControlAction::FocusRequested {
+                id: ui::editor_header::EDITOR_HEADER_TITLE_ID,
+            })),
+            Some(NotoraAction::FocusRequested(FocusTarget::EditorTitle))
+        );
+        assert_eq!(
+            shell.translate_widget_action(&WidgetAction::Control(ControlAction::TextCommitted {
+                id: ui::tag_editor::TAG_EDITOR_SUGGESTION_ID,
+                value: TextPayload::Plain(format!("suggestion:{suggestion_tag_id}")),
+            })),
+            Some(NotoraAction::MetadataMutationRequested(MetadataMutation::AttachTagByName {
+                note_id,
+                display_name: "设计/UI".to_owned(),
+            }))
+        );
+        assert_eq!(
+            shell.translate_widget_action(&WidgetAction::Control(ControlAction::TextCommitted {
+                id: ui::tag_editor::TAG_EDITOR_REMOVE_ID,
+                value: TextPayload::Plain(tag_id.to_string()),
+            })),
+            Some(NotoraAction::MetadataMutationRequested(MetadataMutation::DetachTag {
+                note_id,
+                tag_id,
+            }))
+        );
+        assert_eq!(
+            shell.translate_widget_action(&WidgetAction::Control(ControlAction::TextCommitted {
+                id: ui::location_picker::LOCATION_PICKER_SELECT_ID,
+                value: TextPayload::Plain(EDITOR_ROOT_DIRECTORY_ROW_KEY.to_owned()),
+            })),
+            Some(NotoraAction::MoveRequested {
+                note_id,
+                target_directory: std::path::PathBuf::new(),
+            })
+        );
+        assert_eq!(
+            shell.translate_widget_action(&WidgetAction::Control(ControlAction::TextCommitted {
+                id: ui::editor_toolbar::EDITOR_TOOLBAR_COMMAND_ID,
+                value: TextPayload::Plain("bold".to_owned()),
+            })),
+            Some(NotoraAction::SemanticEditRequested(ui::plugin::SemanticEditCommand::ToggleBold,))
         );
     }
 }

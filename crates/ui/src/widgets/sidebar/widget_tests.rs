@@ -228,12 +228,13 @@ mod tests {
 
         widget.paint(&mut PaintCtx::new(&mut draw_list, &theme, 1.0));
 
-        assert!(draw_list.cmds.iter().any(|command| {
-            matches!(
-                command,
-                DrawCmd::FillRect { rect, color, .. }
-                    if *rect == dropdown && *color == theme.palette.bg_active
-            )
+        assert!(draw_list.cmds.windows(3).any(|commands| {
+            matches!(commands[0], DrawCmd::PushClip(rect) if rect == dropdown)
+                && matches!(
+                    commands[1],
+                    DrawCmd::FillRect { color, .. } if color == theme.palette.bg_active
+                )
+                && matches!(commands[2], DrawCmd::PopClip)
         }));
     }
 

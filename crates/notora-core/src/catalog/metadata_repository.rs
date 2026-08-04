@@ -205,6 +205,58 @@ impl Catalog {
             .map_err(|source| CatalogError::sql("note tag replacement transaction commit", source))
     }
 
+    /// 按规范化展示名创建或复用标签，并在同一事务中幂等附加到活动笔记。
+    pub fn attach_tag_by_name(
+        &self,
+        note_id: NoteId,
+        display_name: &str,
+    ) -> Result<TagSummary, CatalogError> {
+        let tag_name = TagName::parse(display_name)?;
+        let transaction = self.connection().unchecked_transaction().map_err(|source| {
+            CatalogError::sql("named tag attachment transaction start", source)
+        })?;
+        let note_exists = transaction
+            .query_row(
+                "SELECT EXISTS(
+                    SELECT 1 FROM notes WHERE note_id = ?1 AND lifecycle = ?2
+                )",
+                params![note_id.to_string(), ACTIVE_NOTE_LIFECYCLE],
+                |row| row.get::<_, bool>(0),
+            )
+            .map_err(|source| CatalogError::sql("named tag note validation", source))?;
+        if !note_exists {
+            return Err(CatalogError::InvalidStoredValue {
+                column: "active_note_id",
+                value: note_id.to_string(),
+            });
+        }
+        transaction
+            .execute(
+                "INSERT OR IGNORE INTO tags (tag_id, normalized_name, display_name)
+                 VALUES (?1, ?2, ?3)",
+                params![TagId::generate().to_string(), tag_name.normalized, tag_name.display],
+            )
+            .map_err(|source| CatalogError::sql("named tag creation", source))?;
+        let tag = transaction
+            .query_row(
+                "SELECT tag_id, display_name FROM tags WHERE normalized_name = ?1",
+                [tag_name.normalized],
+                tag_summary_from_row,
+            )
+            .map_err(|source| CatalogError::sql("named tag identity query", source))?;
+        transaction
+            .execute(
+                "INSERT OR IGNORE INTO note_tags (note_id, tag_id) VALUES (?1, ?2)",
+                params![note_id.to_string(), tag.tag_id.to_string()],
+            )
+            .map_err(|source| CatalogError::sql("named tag attachment", source))?;
+        refresh_search_tags(&transaction, &[note_id.to_string()])?;
+        transaction.commit().map_err(|source| {
+            CatalogError::sql("named tag attachment transaction commit", source)
+        })?;
+        Ok(tag)
+    }
+
     /// 读取指定标签，供改名后的导航选择保持稳定 ID。
     pub fn tag(&self, tag_id: TagId) -> Result<Option<TagSummary>, CatalogError> {
         self.connection()
@@ -404,13 +456,17 @@ struct TagName {
 
 impl TagName {
     fn parse(display_name: &str) -> Result<Self, CatalogError> {
-        let display = display_name.trim().nfc().collect::<String>();
-        if display.is_empty() {
+        let segments = display_name
+            .split('/')
+            .map(|segment| segment.trim().nfc().collect::<String>())
+            .collect::<Vec<_>>();
+        if segments.iter().any(String::is_empty) {
             return Err(CatalogError::InvalidStoredValue {
                 column: "tag_display_name",
-                value: "empty tag name".to_owned(),
+                value: "empty tag path segment".to_owned(),
             });
         }
+        let display = segments.join("/");
         Ok(Self { normalized: display.to_lowercase(), display })
     }
 }
@@ -637,5 +693,43 @@ mod tests {
                 )
                 .expect("orphan tag query should succeed")
         );
+    }
+
+    #[test]
+    fn hierarchical_tag_paths_trim_each_segment_and_reject_empty_segments() {
+        let directory = tempfile::tempdir().expect("catalog test directory should be created");
+        let catalog = Catalog::open(&directory.path().join("catalog.sqlite3"))
+            .expect("catalog should initialize");
+
+        let tag =
+            catalog.create_tag(" 产品 / Notora / 编辑器 ").expect("hierarchical tag should create");
+        assert_eq!(tag.display_name, "产品/Notora/编辑器");
+        assert!(catalog.create_tag("产品//编辑器").is_err());
+        assert!(catalog.create_tag("/产品").is_err());
+        assert!(catalog.create_tag("产品/").is_err());
+        assert!(catalog.create_tag(" / ").is_err());
+        let unicode_tag =
+            catalog.create_tag("Cafe\u{301}/UI").expect("unicode tag should normalize");
+        assert_eq!(unicode_tag.display_name, "Café/UI");
+        assert!(catalog.create_tag("Café/UI").is_err());
+    }
+
+    #[test]
+    fn attach_tag_by_name_is_idempotent_and_reuses_the_normalized_path() {
+        let directory = tempfile::tempdir().expect("catalog test directory should be created");
+        let catalog = Catalog::open(&directory.path().join("catalog.sqlite3"))
+            .expect("catalog should initialize");
+        let note_id = NoteId::generate();
+        insert_note(&catalog, note_id, "tagged.md");
+
+        let first = catalog
+            .attach_tag_by_name(note_id, " 产品 / Notora ")
+            .expect("tag should attach by name");
+        let second = catalog
+            .attach_tag_by_name(note_id, "产品/Notora")
+            .expect("duplicate path should be idempotent");
+
+        assert_eq!(first, second);
+        assert_eq!(catalog.tags_for_note(note_id).expect("tags should query").len(), 1);
     }
 }

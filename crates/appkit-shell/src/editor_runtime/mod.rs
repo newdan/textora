@@ -3,6 +3,7 @@
 mod contract;
 mod document_save;
 mod editor_frame;
+mod editor_painter;
 #[allow(dead_code, reason = "ER4-4 wires file safety results into the App lifecycle")]
 mod file_safety_session;
 #[allow(dead_code, reason = "ER2-2 wires the product-neutral input session into event routing")]
@@ -15,16 +16,27 @@ mod reshape_session;
 
 pub use crate::mouse_state::MouseCapture;
 pub use contract::{
-    CloseConfirmation, EditorDocumentSummary, EditorFocus, EditorInputContext, EditorNotification,
-    EditorOutcome, EditorRuntimeConfig, EditorRuntimeError, EditorTabSnapshot,
-    EditorWorkspaceSnapshot, OpenDisposition,
+    CloseConfirmation, DocumentTextEditError, DocumentTextReplacement, DocumentTextSnapshot,
+    EditorDocumentSummary, EditorFocus, EditorInputContext, EditorNotification, EditorOutcome,
+    EditorRuntimeConfig, EditorRuntimeError, EditorTabSnapshot, EditorWorkspaceSnapshot,
+    OpenDisposition,
 };
 pub use document_save::{
     PreparedDocumentSave, SaveCompletion, SavePrepareError, execute_prepared_save,
 };
 pub use editor_frame::{EditorFrame, RenderError, RenderResources};
+pub use editor_painter::EditorSurfacePaint;
 pub use file_safety_session::{FileSafetyCandidate, FileSafetyObservation};
 pub const RESHAPE_AHEAD_LINES: usize = reshape_session::RESHAPE_AHEAD_LINES;
+
+/// Product semantic editing result; unsupported commands are explicit and never
+/// silently fall back to a source mutation.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SemanticEditResult {
+    Applied,
+    NoChange,
+    Unsupported,
+}
 
 use crate::tab_runtime::TabRuntime;
 use crate::tab_session::{TabSession, TabSessionMut};
@@ -338,6 +350,20 @@ impl EditorRuntime {
         tab_id: appkit_core::workspace::types::TabId,
     ) -> Option<EditorDocumentSummary> {
         self.model_session.document_summary(tab_id)
+    }
+
+    pub fn document_text_snapshot(
+        &self,
+        tab_id: appkit_core::workspace::types::TabId,
+    ) -> Option<DocumentTextSnapshot> {
+        self.model_session.document_text_snapshot(tab_id)
+    }
+
+    pub fn replace_document_text(
+        &mut self,
+        request: DocumentTextReplacement,
+    ) -> Result<EditorOutcome, DocumentTextEditError> {
+        self.model_session.replace_document_text(request, self.editor_line_height())
     }
 
     pub fn document_summaries(&self) -> Vec<EditorDocumentSummary> {
@@ -716,6 +742,13 @@ impl EditorRuntime {
         })
     }
 
+    pub fn execute_semantic_edit(
+        &mut self,
+        command: ui::plugin::SemanticEditCommand,
+    ) -> (SemanticEditResult, EditorOutcome) {
+        self.model_session.execute_semantic_edit(command, self.editor_line_height())
+    }
+
     pub fn scroll_editor(
         &mut self,
         context: EditorInputContext,
@@ -1007,6 +1040,24 @@ mod tests {
     }
 
     #[test]
+    fn active_document_uses_the_shared_editor_surface_in_a_product_frame() {
+        let mut runtime = runtime_with_clean_tab();
+        let mut resources = runtime.take_render_resources();
+        let mut frame = runtime.begin_frame().expect("headless frame should begin");
+
+        let painted = runtime
+            .paint_active_editor(
+                &mut frame,
+                &mut resources,
+                ui::Rect::new(240.0, 32.0, 640.0, 480.0),
+            )
+            .expect("active editor should accept a product-owned rect");
+
+        assert!(matches!(painted, EditorSurfacePaint::Document { .. }));
+        runtime.restore_render_resources(resources);
+    }
+
+    #[test]
     fn closing_a_tab_invalidates_late_reshape_results() {
         let mut runtime = runtime_with_clean_tab();
         let tab_id = runtime.active_tab_id().expect("test runtime should have an active tab");
@@ -1050,6 +1101,72 @@ mod tests {
             EditorNotification::DirtyChanged { tab_id: changed_tab_id, dirty: true }
                 if *changed_tab_id == tab_id
         )));
+    }
+
+    #[test]
+    fn revision_checked_document_replacement_uses_undo_and_rejects_stale_or_invalid_ranges() {
+        let mut runtime = runtime_with_clean_tab();
+        let tab_id = runtime.active_tab_id().expect("test runtime should have an active tab");
+        let snapshot = runtime.document_text_snapshot(tab_id).expect("text snapshot should exist");
+
+        let outcome = runtime
+            .replace_document_text(DocumentTextReplacement {
+                tab_id,
+                content_revision: snapshot.content_revision,
+                range: 0..5,
+                replacement: "changed".to_owned(),
+            })
+            .expect("revision-checked replacement should succeed");
+        assert_eq!(
+            runtime.document_text_snapshot(tab_id).expect("snapshot should exist").text,
+            "changed"
+        );
+        assert!(outcome.notifications.iter().any(|notification| matches!(
+            notification,
+            EditorNotification::ContentChanged { tab_id: changed_tab_id, .. }
+                if *changed_tab_id == tab_id
+        )));
+
+        let stale_error = runtime
+            .replace_document_text(DocumentTextReplacement {
+                tab_id,
+                content_revision: snapshot.content_revision,
+                range: 0..0,
+                replacement: "stale".to_owned(),
+            })
+            .expect_err("stale replacement must not overwrite newer input");
+        assert!(matches!(stale_error, DocumentTextEditError::StaleRevision { .. }));
+
+        let current_revision =
+            runtime.document_text_snapshot(tab_id).expect("snapshot should exist").content_revision;
+        let invalid_error = runtime
+            .replace_document_text(DocumentTextReplacement {
+                tab_id,
+                content_revision: current_revision,
+                range: 0..8,
+                replacement: "invalid".to_owned(),
+            })
+            .expect_err("out-of-bounds byte range must be rejected");
+        assert!(matches!(invalid_error, DocumentTextEditError::InvalidByteRange { .. }));
+
+        let undo_outcome = runtime.handle_key_input(
+            EditorInputContext {
+                editor_rect: ui::Rect::new(0.0, 0.0, 640.0, 480.0),
+                focus: EditorFocus::Active,
+                modal_blocked: false,
+            },
+            ui::KeyCode::Char('z'),
+            ui::core::Modifiers { cmd: true, ..ui::core::Modifiers::NONE },
+        );
+        assert!(undo_outcome.notifications.iter().any(|notification| matches!(
+            notification,
+            EditorNotification::ContentChanged { tab_id: changed_tab_id, .. }
+                if *changed_tab_id == tab_id
+        )));
+        assert_eq!(
+            runtime.document_text_snapshot(tab_id).expect("snapshot should exist").text,
+            "clean"
+        );
     }
 
     #[test]

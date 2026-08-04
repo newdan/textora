@@ -1,15 +1,16 @@
 //! notora 窗口应用状态；编辑器会话只经 shared runtime 管理。
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::num::NonZeroUsize;
 use std::sync::mpsc;
 use std::sync::{Arc, Mutex};
 use std::thread;
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime};
 
 use appkit_shell::editor_runtime::{
-    EditorNotification, EditorOutcome, EditorRuntime, EditorRuntimeConfig, EditorRuntimeError,
-    OpenDisposition, RenderError, RenderResources,
+    DocumentTextEditError, DocumentTextReplacement, EditorNotification, EditorOutcome,
+    EditorRuntime, EditorRuntimeConfig, EditorRuntimeError, OpenDisposition, RenderError,
+    RenderResources,
 };
 use appkit_shell::render_state::{GpuState, TextState};
 use appkit_shell::{ProductHost, ProductWakeHandle, ShellEffect, ShellEvent};
@@ -18,10 +19,10 @@ use winit::event_loop::{ActiveEventLoop, EventLoopProxy};
 use winit::window::WindowAttributes;
 
 use crate::action::{
-    CardQuery, ConflictResolution, DocumentLoadRequest, NoteCreationTarget, NotoraAction,
-    SaveConflictRequest,
+    CardQuery, ConflictResolution, DocumentLoadRequest, NoteCreationStorageMode,
+    NoteCreationTarget, NotoraAction, SaveConflictRequest,
 };
-use crate::autosave::{AutoSaveRequest, AutoSaveScheduler};
+use crate::autosave::{AutoSaveRequest, AutoSaveScheduler, AutoSaveState};
 use crate::dirty_snapshot::{collect_dirty_snapshots, write_dirty_snapshot};
 use crate::document_registry::DocumentRegistry;
 use crate::editor_adapter::{
@@ -36,7 +37,7 @@ use crate::external_files::{
     CanonicalExternalPath, ExternalFileSession, SaveExternalFileAs, validate_external_text_file,
 };
 use crate::product::NotoraProduct;
-use crate::render::{NotoraRenderModel, NotoraShell};
+use crate::render::{EditorPaneState, NotoraRenderModel, NotoraShell};
 use crate::runtime_lru::{RuntimeLru, RuntimeTabState};
 use crate::search_controller::SearchController;
 use crate::shell::layout::{ShellLayout, ShellLayoutInput};
@@ -44,7 +45,11 @@ use crate::{
     NotoraPaths, NotoraPathsError, NotoraState, WorkspaceCommand, WorkspaceCommandResult,
     WorkspaceController, WorkspaceControllerError,
 };
-use notora_core::{DocumentIdentity, DocumentKind};
+use notora_core::note_command::{ConfiguredCreateNoteRequest, MoveNoteRequest, NoteCommand};
+use notora_core::{
+    DocumentIdentity, DocumentKind, NoteEncryption, document_title_projection,
+    replace_document_title,
+};
 
 const DEFAULT_WINDOW_WIDTH_PX: f32 = 1_200.0;
 const DEFAULT_WINDOW_HEIGHT_PX: f32 = 800.0;
@@ -56,6 +61,19 @@ const DEFAULT_RUNTIME_TAB_LIMIT: usize = 12;
 const STARTUP_TRACE_ENVIRONMENT_VARIABLE: &str = "NOTORA_TRACE_STARTUP";
 const TRASH_SAVE_FAILURE_MESSAGE: &str = "笔记保存失败，因此未移入回收站";
 const TRASH_SAVE_STALE_MESSAGE: &str = "笔记在保存完成前发生变化，因此未移入回收站";
+const MOVE_SAVE_FAILURE_MESSAGE: &str = "笔记保存失败，因此未移动";
+const MOVE_SAVE_STALE_MESSAGE: &str = "笔记在保存完成前发生变化，因此未移动";
+const SAVE_STATUS_SAVED: &str = "已保存";
+const SAVE_STATUS_UNSAVED: &str = "未保存";
+const SAVE_STATUS_PENDING: &str = "待保存";
+const SAVE_STATUS_SAVING: &str = "保存中";
+const SAVE_STATUS_FAILED: &str = "保存失败";
+
+type WorkspaceDirectoryChooser = Box<dyn Fn() -> Option<std::path::PathBuf>>;
+
+fn choose_workspace_directory() -> Option<std::path::PathBuf> {
+    rfd::FileDialog::new().set_title("选择或创建工作区").pick_folder()
+}
 
 #[derive(Debug)]
 struct StartupTrace {
@@ -109,6 +127,12 @@ struct PendingConflictRetry {
 #[derive(Clone, Copy, Debug)]
 struct PendingTrashMove {
     note_id: notora_core::NoteId,
+    content_revision: u64,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct PendingNoteMove {
+    request: MoveNoteRequest,
     content_revision: u64,
 }
 
@@ -183,12 +207,16 @@ pub struct NotoraApp {
     product: NotoraProduct,
     persistence_worker: crate::persistence_worker::PersistenceWorker,
     workspace_controller: WorkspaceController,
+    workspace_directory_chooser: WorkspaceDirectoryChooser,
     document_registry: DocumentRegistry,
     autosave: AutoSaveScheduler,
     pending_external_save_as: HashMap<appkit_core::workspace::types::TabId, PendingExternalSaveAs>,
     pending_external_documents: HashMap<notora_core::ExternalFileId, LoadedDocument>,
     pending_conflict_retries: HashMap<appkit_core::workspace::types::TabId, PendingConflictRetry>,
     pending_trash_moves: HashMap<appkit_core::workspace::types::TabId, PendingTrashMove>,
+    pending_note_moves: HashMap<appkit_core::workspace::types::TabId, PendingNoteMove>,
+    pending_metadata_generations: HashMap<notora_core::NoteId, VecDeque<u64>>,
+    pending_metadata_mutations: Vec<crate::action::MetadataMutation>,
     catalog_reconciliation_pending: bool,
     search_controller: SearchController,
     editor_runtime: EditorRuntime,
@@ -283,6 +311,7 @@ impl NotoraApp {
                 catalog_backups_directory,
                 migration_backup_retention,
             ),
+            workspace_directory_chooser: Box::new(choose_workspace_directory),
             document_registry: DocumentRegistry::default(),
             autosave: AutoSaveScheduler::with_clock_and_idle_delay(
                 crate::autosave::SystemAutoSaveClock,
@@ -292,6 +321,9 @@ impl NotoraApp {
             pending_external_documents: HashMap::new(),
             pending_conflict_retries: HashMap::new(),
             pending_trash_moves: HashMap::new(),
+            pending_note_moves: HashMap::new(),
+            pending_metadata_generations: HashMap::new(),
+            pending_metadata_mutations: Vec::new(),
             catalog_reconciliation_pending: false,
             search_controller: SearchController::default(),
             editor_runtime,
@@ -396,6 +428,9 @@ impl NotoraApp {
             self.pending_external_save_as.clear();
             self.pending_conflict_retries.clear();
             self.pending_trash_moves.clear();
+            self.pending_note_moves.clear();
+            self.pending_metadata_generations.clear();
+            self.pending_metadata_mutations.clear();
             self.catalog_reconciliation_pending = false;
         }
         if matches!(result, WorkspaceCommandResult::Opened(_)) {
@@ -573,6 +608,11 @@ impl NotoraApp {
                 .get(&request.tab_id)
                 .copied()
                 .filter(|pending| pending.content_revision == request.content_revision);
+            let pending_note_move = self
+                .pending_note_moves
+                .get(&request.tab_id)
+                .cloned()
+                .filter(|pending| pending.content_revision == request.content_revision);
             if completed_conflict_retry.is_some() {
                 self.pending_conflict_retries.remove(&request.tab_id);
             }
@@ -596,6 +636,17 @@ impl NotoraApp {
                         self.cancel_pending_trash_move(request, TRASH_SAVE_STALE_MESSAGE);
                     }
                 }
+                if let Some(pending_note_move) = pending_note_move {
+                    if self.pending_note_move_has_current_saved_document(
+                        request.tab_id,
+                        &pending_note_move,
+                    ) {
+                        self.pending_note_moves.remove(&request.tab_id);
+                        self.submit_note_command(NoteCommand::Move(pending_note_move.request));
+                    } else {
+                        self.cancel_pending_note_move(request, MOVE_SAVE_STALE_MESSAGE);
+                    }
+                }
                 if let Some(retry) = completed_conflict_retry {
                     self.dispatch_action(NotoraAction::SaveConflictResolved {
                         identity: retry.identity,
@@ -604,6 +655,7 @@ impl NotoraApp {
             } else {
                 self.autosave.on_save_failed(request);
                 self.cancel_pending_trash_move(request, TRASH_SAVE_FAILURE_MESSAGE);
+                self.cancel_pending_note_move(request, MOVE_SAVE_FAILURE_MESSAGE);
                 if let Some(identity) = conflict_identity {
                     self.dispatch_action(NotoraAction::SaveConflictDetected {
                         identity,
@@ -796,12 +848,52 @@ impl NotoraApp {
                 crate::product::NotoraProductEvent::NoteCommandFailed { message, .. } => {
                     self.dispatch_action(NotoraAction::NoteCommandFailed(message));
                 }
-                crate::product::NotoraProductEvent::MetadataMutationCompleted { .. } => {
+                crate::product::NotoraProductEvent::MetadataMutationCompleted {
+                    mutation,
+                    note_id,
+                    metadata,
+                    tags,
+                    ..
+                } => {
+                    remove_pending_metadata_mutation(
+                        &mut self.pending_metadata_mutations,
+                        &mutation,
+                    );
+                    let Some(selection_generation) = self.take_pending_metadata_generation(note_id)
+                    else {
+                        continue;
+                    };
+                    if self.state.library.selected_card != Some(DocumentIdentity::Note(note_id))
+                        || self.state.library.selected_document_generation != selection_generation
+                    {
+                        continue;
+                    }
                     self.schedule_catalog_backup();
                     self.request_navigation_tree();
-                    self.dispatch_action(NotoraAction::MetadataMutationCompleted);
+                    self.dispatch_action(NotoraAction::ActiveEditorMetadataLoaded {
+                        request: crate::action::DocumentLoadRequest {
+                            identity: DocumentIdentity::Note(note_id),
+                            selection_generation,
+                        },
+                        metadata: metadata.clone(),
+                        tags,
+                    });
+                    self.dispatch_action(NotoraAction::MetadataMutationCompleted {
+                        note_id,
+                        metadata,
+                        selection_generation,
+                    });
                 }
-                crate::product::NotoraProductEvent::MetadataMutationFailed { message, .. } => {
+                crate::product::NotoraProductEvent::MetadataMutationFailed {
+                    mutation,
+                    message,
+                    ..
+                } => {
+                    remove_pending_metadata_mutation(
+                        &mut self.pending_metadata_mutations,
+                        &mutation,
+                    );
+                    self.take_pending_metadata_generation(metadata_mutation_note_id(&mutation));
                     self.dispatch_action(NotoraAction::MetadataMutationFailed(message));
                 }
                 crate::product::NotoraProductEvent::CatalogBackupCompleted { .. } => {}
@@ -825,8 +917,19 @@ impl NotoraApp {
                     self.dispatch_action(NotoraAction::TrashOperationFailed(failure));
                 }
                 crate::product::NotoraProductEvent::DocumentLoaded {
-                    request, document, ..
-                } => self.install_loaded_preview(request, document),
+                    request,
+                    document,
+                    metadata,
+                    tags,
+                    ..
+                } => {
+                    self.install_loaded_preview(request, document);
+                    self.dispatch_action(NotoraAction::ActiveEditorMetadataLoaded {
+                        request,
+                        metadata,
+                        tags,
+                    });
+                }
                 crate::product::NotoraProductEvent::DocumentLoadFailed {
                     request, message, ..
                 } if self.selection_matches(request) => {
@@ -972,14 +1075,77 @@ impl NotoraApp {
     }
 
     pub(crate) fn render(&mut self) -> Result<(), RenderError> {
+        self.render_frame().map(|_| ())
+    }
+
+    fn update_editor_render_model(
+        &self,
+        model: &mut NotoraRenderModel,
+        tab_id: appkit_core::workspace::types::TabId,
+        layout: ShellLayout,
+    ) {
+        let Some(summary) = self.editor_runtime.document_summary(tab_id) else {
+            model.editor_chrome = crate::editor_pane::EditorPaneInput::default();
+            return;
+        };
+        model.editor_chrome.header.save_status_text =
+            Self::editor_save_status(self.autosave.state(tab_id), summary.dirty);
+        model.editor_chrome.header.compact = layout.editor_header_rect.h / layout.dpi
+            < crate::shell::layout::EDITOR_COMPACT_HEIGHT_THRESHOLD_LOGICAL;
+        if let Some(plugin_name) =
+            self.editor_runtime.tab_session(tab_id).map(|tab| tab.plugin_name())
+        {
+            model.editor_chrome.toolbar = crate::render::editor_toolbar_input_for_plugin(
+                model.editor_chrome.mode,
+                plugin_name,
+            );
+            if model.editor_chrome.header.compact {
+                crate::render::add_compact_editor_toolbar_commands(
+                    &mut model.editor_chrome.toolbar,
+                );
+            }
+        }
+        if model.editor_chrome.mode != crate::editor_pane::EditorPaneMode::WorkspaceNote {
+            return;
+        }
+        let Some(path) = summary.path.as_deref() else {
+            return;
+        };
+        let Some(kind) = DocumentKind::from_path(path) else {
+            return;
+        };
+        let Some(snapshot) = self.editor_runtime.document_text_snapshot(tab_id) else {
+            return;
+        };
+        model.editor_chrome.header.title = document_title_projection(kind, &snapshot.text).title;
+    }
+
+    fn render_frame(
+        &mut self,
+    ) -> Result<appkit_shell::editor_runtime::EditorSurfacePaint, RenderError> {
         self.needs_redraw = false;
         let layout = self.shell_layout();
         let mut model =
             NotoraRenderModel::from_state_and_settings(&self.state, &self.product_settings);
         model.settings_overlay.persistence = self.settings_persistence.to_view();
+        model.editor_pane = if self.editor_runtime.active_tab_id().is_some() {
+            EditorPaneState::Active
+        } else {
+            EditorPaneState::Empty
+        };
+        if let Some(tab_id) = self.editor_runtime.active_tab_id() {
+            self.update_editor_render_model(&mut model, tab_id, layout);
+        } else {
+            model.editor_chrome = crate::editor_pane::EditorPaneInput::default();
+        }
         let mut render_resources = self.editor_runtime.take_render_resources();
         let mut frame = self.editor_runtime.begin_frame()?;
         self.shell.render(&mut frame, layout, &model)?;
+        let editor_surface = self.editor_runtime.paint_active_editor(
+            &mut frame,
+            &mut render_resources,
+            layout.editor_body_rect,
+        )?;
         let mut vertices = Vec::new();
         frame.drain_into(
             ui::Screen::new(self.window_width_px, self.window_height_px),
@@ -994,7 +1160,17 @@ impl NotoraApp {
         let _ = frame.present()?;
         self.editor_runtime.restore_render_resources(render_resources);
         self.editor_runtime.mark_frame_presented();
-        Ok(())
+        Ok(editor_surface)
+    }
+
+    fn editor_save_status(state: Option<AutoSaveState>, dirty: bool) -> String {
+        match state {
+            Some(AutoSaveState::Saving { .. }) => SAVE_STATUS_SAVING.to_owned(),
+            Some(AutoSaveState::Failed { .. }) => SAVE_STATUS_FAILED.to_owned(),
+            Some(AutoSaveState::Scheduled { .. }) => SAVE_STATUS_PENDING.to_owned(),
+            Some(AutoSaveState::Idle) | None if dirty => SAVE_STATUS_UNSAVED.to_owned(),
+            Some(AutoSaveState::Idle) | None => SAVE_STATUS_SAVED.to_owned(),
+        }
     }
 
     pub(crate) fn shutdown(&mut self) {
@@ -1214,10 +1390,17 @@ impl NotoraApp {
                     self.autosave.on_content_changed(&origin, *tab_id, *content_revision);
                 }
             }
+            EditorNotification::SaveCompleted { tab_id, .. } => {
+                if let Some(identity) = self.document_registry.identity_for(*tab_id) {
+                    self.dispatch_action(NotoraAction::ActiveEditorSaved {
+                        identity,
+                        saved_at: SystemTime::now(),
+                    });
+                }
+            }
             EditorNotification::ActiveDocumentChanged { tab_id: None }
             | EditorNotification::PathChanged { .. }
             | EditorNotification::DirtyChanged { .. }
-            | EditorNotification::SaveCompleted { .. }
             | EditorNotification::SaveFailed { .. }
             | EditorNotification::CloseRequested { .. } => {}
         }
@@ -1227,11 +1410,13 @@ impl NotoraApp {
         let Some(summary) = self.editor_runtime.document_summary(request.tab_id) else {
             self.autosave.cancel(request.tab_id);
             self.cancel_pending_trash_move(request, TRASH_SAVE_FAILURE_MESSAGE);
+            self.cancel_pending_note_move(request, MOVE_SAVE_FAILURE_MESSAGE);
             return;
         };
         if !summary.dirty || summary.content_revision != request.content_revision {
             self.autosave.on_save_failed(request);
             self.cancel_pending_trash_move(request, TRASH_SAVE_FAILURE_MESSAGE);
+            self.cancel_pending_note_move(request, MOVE_SAVE_STALE_MESSAGE);
             return;
         }
         let prepared = match self.editor_runtime.prepare_save(request.tab_id) {
@@ -1239,12 +1424,14 @@ impl NotoraApp {
             Err(_) => {
                 self.autosave.on_save_failed(request);
                 self.cancel_pending_trash_move(request, TRASH_SAVE_FAILURE_MESSAGE);
+                self.cancel_pending_note_move(request, MOVE_SAVE_FAILURE_MESSAGE);
                 return;
             }
         };
         if self.submit_prepared_save(prepared).is_err() {
             self.autosave.on_save_failed(request);
             self.cancel_pending_trash_move(request, TRASH_SAVE_FAILURE_MESSAGE);
+            self.cancel_pending_note_move(request, MOVE_SAVE_FAILURE_MESSAGE);
         }
     }
 
@@ -1270,6 +1457,28 @@ impl NotoraApp {
         self.dispatch_action(NotoraAction::TrashOperationFailed(
             crate::action::TrashOperationFailure::Message(message.to_owned()),
         ));
+    }
+
+    fn pending_note_move_has_current_saved_document(
+        &self,
+        tab_id: appkit_core::workspace::types::TabId,
+        pending_note_move: &PendingNoteMove,
+    ) -> bool {
+        self.editor_runtime.document_summary(tab_id).is_some_and(|summary| {
+            !summary.dirty && summary.content_revision == pending_note_move.content_revision
+        })
+    }
+
+    fn cancel_pending_note_move(&mut self, request: AutoSaveRequest, message: &str) {
+        let is_matching_pending_move = self
+            .pending_note_moves
+            .get(&request.tab_id)
+            .is_some_and(|pending| pending.content_revision == request.content_revision);
+        if !is_matching_pending_move {
+            return;
+        }
+        self.pending_note_moves.remove(&request.tab_id);
+        self.dispatch_action(NotoraAction::NoteCommandFailed(message.to_owned()));
     }
 
     fn submit_prepared_save(
@@ -1467,6 +1676,119 @@ impl NotoraApp {
             }
         }
     }
+
+    fn commit_active_note_title(&mut self, title: String) {
+        let Some(tab_id) = self.editor_runtime.active_tab_id() else {
+            self.dispatch_action(NotoraAction::NoteCommandFailed("当前没有活动笔记".to_owned()));
+            return;
+        };
+        let Some(identity @ DocumentIdentity::Note(_)) =
+            self.document_registry.identity_for(tab_id)
+        else {
+            self.dispatch_action(NotoraAction::NoteCommandFailed(
+                "标题只能编辑工作区笔记".to_owned(),
+            ));
+            return;
+        };
+        if self.state.library.selected_card != Some(identity)
+            || matches!(
+                self.state.library.navigation_scope,
+                notora_core::NavigationScope::Trash | notora_core::NavigationScope::ExternalFiles
+            )
+        {
+            self.dispatch_action(NotoraAction::NoteCommandFailed(
+                "当前活动文档不是可编辑的工作区笔记".to_owned(),
+            ));
+            return;
+        }
+        let Some(snapshot) = self.editor_runtime.document_text_snapshot(tab_id) else {
+            self.dispatch_action(NotoraAction::NoteCommandFailed(
+                "无法读取当前笔记正文".to_owned(),
+            ));
+            return;
+        };
+        let Some(path) =
+            self.editor_runtime.document_summary(tab_id).and_then(|summary| summary.path)
+        else {
+            self.dispatch_action(NotoraAction::NoteCommandFailed(
+                "当前笔记没有可识别的文档类型".to_owned(),
+            ));
+            return;
+        };
+        let Some(kind) = DocumentKind::from_path(&path) else {
+            self.dispatch_action(NotoraAction::NoteCommandFailed(
+                "当前笔记没有可识别的文档类型".to_owned(),
+            ));
+            return;
+        };
+        let projected_source = replace_document_title(kind, &snapshot.text, &title);
+        let Some((range, replacement)) =
+            single_range_replacement(&snapshot.text, &projected_source)
+        else {
+            return;
+        };
+        let request = DocumentTextReplacement {
+            tab_id,
+            content_revision: snapshot.content_revision,
+            range,
+            replacement,
+        };
+        match self.editor_runtime.replace_document_text(request) {
+            Ok(outcome) => self.apply_editor_outcome(outcome),
+            Err(error) => self
+                .dispatch_action(NotoraAction::NoteCommandFailed(title_edit_error_message(error))),
+        }
+    }
+}
+
+fn single_range_replacement(
+    original: &str,
+    projected: &str,
+) -> Option<(std::ops::Range<usize>, String)> {
+    if original == projected {
+        return None;
+    }
+    let original_bytes = original.as_bytes();
+    let projected_bytes = projected.as_bytes();
+    let mut prefix = 0;
+    while prefix < original_bytes.len()
+        && prefix < projected_bytes.len()
+        && original_bytes[prefix] == projected_bytes[prefix]
+    {
+        prefix += 1;
+    }
+    while prefix > 0 && (!original.is_char_boundary(prefix) || !projected.is_char_boundary(prefix))
+    {
+        prefix -= 1;
+    }
+
+    let mut suffix = 0;
+    while suffix < original_bytes.len().saturating_sub(prefix)
+        && suffix < projected_bytes.len().saturating_sub(prefix)
+        && original_bytes[original_bytes.len() - suffix - 1]
+            == projected_bytes[projected_bytes.len() - suffix - 1]
+    {
+        suffix += 1;
+    }
+    while suffix > 0
+        && (!original.is_char_boundary(original.len() - suffix)
+            || !projected.is_char_boundary(projected.len() - suffix))
+    {
+        suffix -= 1;
+    }
+
+    let original_end = original.len() - suffix;
+    let projected_end = projected.len() - suffix;
+    Some((prefix..original_end, projected[prefix..projected_end].to_owned()))
+}
+
+fn title_edit_error_message(error: DocumentTextEditError) -> String {
+    match error {
+        DocumentTextEditError::UnknownTab { .. } => "当前笔记已关闭，请重新选择".to_owned(),
+        DocumentTextEditError::StaleRevision { .. } => "笔记已发生变化，请重新提交标题".to_owned(),
+        DocumentTextEditError::InvalidByteRange { .. } => "标题范围无效，请重新提交".to_owned(),
+        DocumentTextEditError::ReadOnly { .. } => "当前笔记不可编辑".to_owned(),
+    }
 }
 
 fn submit_shell_frame(
@@ -1579,6 +1901,7 @@ fn action_requires_session_persistence(action: &NotoraAction) -> bool {
             | NotoraAction::NavigationExpansionToggled(_)
             | NotoraAction::CardSelected(_)
             | NotoraAction::CardActivated(_)
+            | NotoraAction::NoteCommandCompleted(_)
             | NotoraAction::CompactNavigationRequested
             | NotoraAction::CompactBackRequested
             | NotoraAction::ExternalFileOpened(_)
@@ -1594,8 +1917,11 @@ impl Default for NotoraApp {
 
 #[cfg(test)]
 mod session_restore_tests {
-    use super::action_requires_session_persistence;
+    use std::time::Instant;
+
+    use super::{NotoraApp, action_requires_session_persistence};
     use crate::action::NotoraAction;
+    use crate::autosave::AutoSaveState;
 
     #[test]
     fn session_restore_related_user_actions_are_debounced_for_persistence() {
@@ -1610,6 +1936,34 @@ mod session_restore_tests {
             near_end: false
         }));
     }
+
+    #[test]
+    fn editor_save_status_is_derived_from_typed_autosave_state() {
+        let deadline = Instant::now();
+        assert_eq!(
+            NotoraApp::editor_save_status(
+                Some(AutoSaveState::Saving { content_revision: 3 }),
+                true
+            ),
+            "保存中"
+        );
+        assert_eq!(
+            NotoraApp::editor_save_status(
+                Some(AutoSaveState::Failed { content_revision: 3 }),
+                true
+            ),
+            "保存失败"
+        );
+        assert_eq!(
+            NotoraApp::editor_save_status(
+                Some(AutoSaveState::Scheduled { deadline, content_revision: 3 }),
+                true
+            ),
+            "待保存"
+        );
+        assert_eq!(NotoraApp::editor_save_status(None, true), "未保存");
+        assert_eq!(NotoraApp::editor_save_status(None, false), "已保存");
+    }
 }
 
 impl NotoraEffectService for NotoraApp {
@@ -1622,16 +1976,61 @@ impl NotoraEffectService for NotoraApp {
         }
     }
 
-    fn request_note_creation(&mut self, _kind: DocumentKind, _target: NoteCreationTarget) {}
+    fn request_note_creation(&mut self, kind: DocumentKind, target: NoteCreationTarget) {
+        if self.workspace_controller.active_workspace().is_none()
+            && !self.select_workspace_for_note_creation()
+        {
+            return;
+        }
+        let encryption = self
+            .state
+            .new_note_draft
+            .as_ref()
+            .map(|draft| match draft.storage_mode {
+                NoteCreationStorageMode::Unencrypted => NoteEncryption::Unencrypted,
+                NoteCreationStorageMode::Encrypted => NoteEncryption::Encrypted,
+            })
+            .unwrap_or(NoteEncryption::Unencrypted);
+        self.submit_note_command(NoteCommand::CreateConfigured(ConfiguredCreateNoteRequest {
+            kind,
+            target_directory: target.directory,
+            encryption,
+        }));
+    }
 
     fn execute_note_command(&mut self, command: notora_core::note_command::NoteCommand) {
-        if let Err(error) = self.workspace_controller.execute_note_command(command) {
-            self.dispatch_action(NotoraAction::NoteCommandFailed(error.to_string()));
+        if let NoteCommand::Move(request) = command {
+            self.submit_or_defer_note_move(request);
+            return;
         }
+        self.submit_note_command(command);
+    }
+
+    fn commit_title(&mut self, title: String) {
+        self.commit_active_note_title(title);
+    }
+
+    fn execute_semantic_edit(&mut self, command: ui::plugin::SemanticEditCommand) {
+        let (_result, outcome) = self.editor_runtime.execute_semantic_edit(command);
+        self.apply_editor_outcome(outcome);
     }
 
     fn execute_metadata_mutation(&mut self, mutation: crate::action::MetadataMutation) {
-        if let Err(error) = self.workspace_controller.execute_metadata_mutation(mutation) {
+        if !register_pending_metadata_mutation(
+            &mut self.pending_metadata_mutations,
+            mutation.clone(),
+        ) {
+            return;
+        }
+        let note_id = metadata_mutation_note_id(&mutation);
+        let selection_generation = self.state.library.selected_document_generation;
+        self.pending_metadata_generations
+            .entry(note_id)
+            .or_default()
+            .push_back(selection_generation);
+        if let Err(error) = self.workspace_controller.execute_metadata_mutation(mutation.clone()) {
+            self.take_pending_metadata_generation(note_id);
+            remove_pending_metadata_mutation(&mut self.pending_metadata_mutations, &mutation);
             self.dispatch_action(NotoraAction::MetadataMutationFailed(error.to_string()));
         }
     }
@@ -1829,7 +2228,103 @@ impl NotoraEffectService for NotoraApp {
     }
 }
 
+fn metadata_mutation_note_id(mutation: &crate::action::MetadataMutation) -> notora_core::NoteId {
+    match mutation {
+        crate::action::MetadataMutation::ToggleStar { note_id }
+        | crate::action::MetadataMutation::AttachTagByName { note_id, .. }
+        | crate::action::MetadataMutation::DetachTag { note_id, .. } => *note_id,
+    }
+}
+
+fn register_pending_metadata_mutation(
+    pending_mutations: &mut Vec<crate::action::MetadataMutation>,
+    mutation: crate::action::MetadataMutation,
+) -> bool {
+    if pending_mutations.contains(&mutation) {
+        return false;
+    }
+    pending_mutations.push(mutation);
+    true
+}
+
+fn remove_pending_metadata_mutation(
+    pending_mutations: &mut Vec<crate::action::MetadataMutation>,
+    completed_mutation: &crate::action::MetadataMutation,
+) {
+    if let Some(index) =
+        pending_mutations.iter().position(|mutation| mutation == completed_mutation)
+    {
+        pending_mutations.remove(index);
+    }
+}
+
 impl NotoraApp {
+    fn take_pending_metadata_generation(&mut self, note_id: notora_core::NoteId) -> Option<u64> {
+        let queue = self.pending_metadata_generations.get_mut(&note_id)?;
+        let generation = queue.pop_front();
+        if queue.is_empty() {
+            self.pending_metadata_generations.remove(&note_id);
+        }
+        generation
+    }
+
+    fn select_workspace_for_note_creation(&mut self) -> bool {
+        let Some(root) = (self.workspace_directory_chooser)() else {
+            return false;
+        };
+        if let Err(error) = self.execute_workspace_command(WorkspaceCommand::OpenExisting { root })
+        {
+            self.dispatch_action(NotoraAction::NoteCommandFailed(error.to_string()));
+            return false;
+        }
+        if self.workspace_controller.active_workspace().is_none() {
+            self.dispatch_action(NotoraAction::NoteCommandFailed(
+                "选择的目录未能激活为工作区".to_owned(),
+            ));
+            return false;
+        }
+        self.dispatch_action(NotoraAction::NavigationSelected(
+            notora_core::NavigationScope::WorkspaceRoot,
+        ));
+        true
+    }
+
+    fn submit_note_command(&mut self, command: notora_core::note_command::NoteCommand) {
+        if let Err(error) = self.workspace_controller.execute_note_command(command) {
+            self.dispatch_action(NotoraAction::NoteCommandFailed(error.to_string()));
+        }
+    }
+
+    fn submit_or_defer_note_move(&mut self, request: MoveNoteRequest) {
+        let identity = DocumentIdentity::Note(request.note_id);
+        let Some(tab_id) = self.document_registry.tab_for(identity) else {
+            self.submit_note_command(NoteCommand::Move(request));
+            return;
+        };
+        let Some(summary) = self.editor_runtime.document_summary(tab_id) else {
+            self.dispatch_action(NotoraAction::NoteCommandFailed(
+                "已打开的笔记不再可用，因此未移动".to_owned(),
+            ));
+            return;
+        };
+        if !summary.dirty {
+            self.submit_note_command(NoteCommand::Move(request));
+            return;
+        }
+        let Some(origin) = self.document_origin_for_tab(tab_id) else {
+            self.dispatch_action(NotoraAction::NoteCommandFailed(
+                "只有工作区笔记可以移动".to_owned(),
+            ));
+            return;
+        };
+        self.pending_note_moves.insert(
+            tab_id,
+            PendingNoteMove { request, content_revision: summary.content_revision },
+        );
+        self.autosave.request_immediate_save(&origin, tab_id, summary.content_revision);
+        self.process_due_autosaves();
+    }
+
     fn enqueue_product_settings_persistence(&mut self) {
         if let Err(error) = self
             .persistence_worker
@@ -1983,7 +2478,9 @@ impl NotoraApp {
         }
         match saved_last_document {
             Some(crate::session::SavedDocument::Note { note_id }) if workspace_restored => {
-                self.dispatch_action(NotoraAction::CardSelected(DocumentIdentity::Note(note_id)));
+                let identity = DocumentIdentity::Note(note_id);
+                self.dispatch_action(NotoraAction::CardSelected(identity));
+                self.dispatch_action(NotoraAction::CardActivated(identity));
             }
             Some(crate::session::SavedDocument::ExternalPath { .. }) => {}
             Some(crate::session::SavedDocument::Note { .. }) | None => {}
@@ -2453,20 +2950,53 @@ mod tests {
     use std::time::{Duration, Instant};
 
     use super::{
-        FontSystemPreparation, NotoraApp, PendingTrashMove, SettingsPersistenceState, StartupTrace,
-        rename_file_name_for_destination, workspace_relative_directory,
+        FontSystemPreparation, NotoraApp, PendingNoteMove, PendingTrashMove,
+        SettingsPersistenceState, StartupTrace, register_pending_metadata_mutation,
+        remove_pending_metadata_mutation, rename_file_name_for_destination,
+        workspace_relative_directory,
     };
-    use crate::action::NotoraAction;
+    use crate::action::{MetadataMutation, NotoraAction};
     use crate::autosave::AutoSaveState;
     use crate::editor_adapter::LoadedDocument;
-    use crate::{ExternalFileSession, FocusTarget, NotoraPaths, OverlayState, WorkspaceCommand};
-    use notora_core::{DocumentIdentity, NavigationScope, WorkspaceId};
+    use crate::state::CardPageState;
+    use crate::{
+        CompactContent, ExternalFileSession, FocusTarget, NotoraPaths, OverlayState,
+        WorkspaceCommand,
+    };
+    use notora_core::{DocumentIdentity, DocumentKind, NavigationScope, WorkspaceId};
 
     fn app() -> NotoraApp {
         let directory = tempfile::tempdir().expect("test should create a temporary directory");
         let paths = NotoraPaths::from_config_directory(directory.keep().join("notora"))
             .expect("test should create isolated product paths");
         NotoraApp::with_paths(paths).expect("notora app should construct without a window")
+    }
+
+    fn card_page_contains_note(card_page: &CardPageState, note_id: notora_core::NoteId) -> bool {
+        let cards = match card_page {
+            CardPageState::LoadingNextPage { cards, .. }
+            | CardPageState::Ready { cards, .. }
+            | CardPageState::Failed { cards, .. } => cards,
+            CardPageState::Idle
+            | CardPageState::LoadingInitial { .. }
+            | CardPageState::Empty { .. } => return false,
+        };
+        cards.iter().any(|card| card.note_id == note_id)
+    }
+
+    #[test]
+    fn duplicate_metadata_mutations_share_one_pending_worker_request() {
+        let note_id = notora_core::NoteId::generate();
+        let mutation =
+            MetadataMutation::AttachTagByName { note_id, display_name: "产品/Notora".to_owned() };
+        let mut pending_mutations = Vec::new();
+
+        assert!(register_pending_metadata_mutation(&mut pending_mutations, mutation.clone()));
+        assert!(!register_pending_metadata_mutation(&mut pending_mutations, mutation.clone()));
+        assert_eq!(pending_mutations, vec![mutation.clone()]);
+
+        remove_pending_metadata_mutation(&mut pending_mutations, &mutation);
+        assert!(pending_mutations.is_empty());
     }
 
     #[test]
@@ -2530,6 +3060,21 @@ mod tests {
         app.dispatch_action(NotoraAction::OpenSettings);
         assert_eq!(app.state().layout.overlay, OverlayState::Settings);
         assert!(!app.update_editor_preedit("音".to_owned(), Some((0, 1))));
+    }
+
+    #[test]
+    fn clicking_the_editor_transfers_keyboard_focus_from_the_card_list() {
+        let mut app = app();
+        app.render().expect("shell layout should be available for pointer routing");
+        app.dispatch_action(NotoraAction::FocusRequested(FocusTarget::CardList));
+        let editor_rect = app.shell_layout().editor_rect;
+
+        assert!(app.route_product_event(&ui::Event::MouseDown {
+            px: editor_rect.x + editor_rect.w * 0.5,
+            py: editor_rect.y + editor_rect.h * 0.5,
+            button: ui::core::widget::MouseButton::Left,
+        }));
+        assert_eq!(app.state().layout.focus_target, FocusTarget::Editor);
     }
 
     #[test]
@@ -2786,7 +3331,39 @@ mod tests {
     }
 
     #[test]
-    fn workspace_new_note_button_click_creates_a_markdown_note() {
+    fn creation_panel_submits_a_configured_plain_note_and_opens_it() {
+        let workspace_directory =
+            tempfile::tempdir().expect("workspace test directory should be created");
+        let notes_directory = workspace_directory.path().join("notes");
+        std::fs::create_dir_all(&notes_directory).expect("notes directory should be created");
+        let mut app = app();
+        app.execute_workspace_command(WorkspaceCommand::OpenExisting {
+            root: workspace_directory.path().to_path_buf(),
+        })
+        .expect("workspace should open");
+
+        app.dispatch_action(NotoraAction::OpenNewDocumentMenu);
+        app.dispatch_action(NotoraAction::NoteCreationTypeSelected(DocumentKind::Text));
+        app.dispatch_action(NotoraAction::NoteCreationDirectorySelected(Some("notes".into())));
+        app.dispatch_action(NotoraAction::NoteCreationSubmitted);
+
+        let deadline = Instant::now() + Duration::from_secs(2);
+        loop {
+            app.drain_product_events();
+            if matches!(app.state().library.selected_card, Some(DocumentIdentity::Note(_))) {
+                break;
+            }
+            assert!(Instant::now() < deadline, "configured note should be created");
+            thread::sleep(Duration::from_millis(10));
+        }
+
+        assert!(notes_directory.join("未命名 1.txt").is_file());
+        assert_eq!(app.state().new_note_draft, None);
+        assert_eq!(app.state().layout.overlay, OverlayState::None);
+    }
+
+    #[test]
+    fn creation_failure_keeps_the_panel_draft_for_retry() {
         let workspace_directory =
             tempfile::tempdir().expect("workspace test directory should be created");
         let mut app = app();
@@ -2794,6 +3371,118 @@ mod tests {
             root: workspace_directory.path().to_path_buf(),
         })
         .expect("workspace should open");
+
+        app.dispatch_action(NotoraAction::OpenNewDocumentMenu);
+        app.dispatch_action(NotoraAction::NoteCreationDirectorySelected(Some("missing".into())));
+        app.dispatch_action(NotoraAction::NoteCreationSubmitted);
+
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while app.state().library.last_command_error.is_none() {
+            app.drain_product_events();
+            assert!(Instant::now() < deadline, "creation failure should return to the app");
+            thread::sleep(Duration::from_millis(10));
+        }
+
+        assert_eq!(app.state().layout.overlay, OverlayState::NewNoteCreationPanel);
+        assert_eq!(
+            app.state().new_note_draft.as_ref().map(|draft| draft.submission),
+            Some(crate::action::NoteCreationSubmission::Failed)
+        );
+        assert!(!workspace_directory.path().join("missing").exists());
+    }
+
+    #[test]
+    fn title_commit_updates_the_active_workspace_note_through_editor_runtime() {
+        let workspace_directory =
+            tempfile::tempdir().expect("workspace test directory should be created");
+        let mut app = app();
+        app.execute_workspace_command(WorkspaceCommand::OpenExisting {
+            root: workspace_directory.path().to_path_buf(),
+        })
+        .expect("workspace should open");
+
+        app.dispatch_action(NotoraAction::CreateRequested(DocumentKind::Markdown));
+        let deadline = Instant::now() + Duration::from_secs(2);
+        let identity = loop {
+            app.drain_product_events();
+            if let Some(identity) = app.state().library.selected_card {
+                break identity;
+            }
+            assert!(Instant::now() < deadline, "note completion should select a note");
+            thread::sleep(Duration::from_millis(10));
+        };
+        let tab_id = loop {
+            app.drain_product_events();
+            if let Some(tab_id) = app.document_tab_for(identity) {
+                break tab_id;
+            }
+            assert!(Instant::now() < deadline, "created note should have an editor tab");
+            thread::sleep(Duration::from_millis(10));
+        };
+
+        app.dispatch_action(NotoraAction::TitleCommitRequested("项目路线图".to_owned()));
+
+        let snapshot = app
+            .editor_runtime
+            .document_text_snapshot(tab_id)
+            .expect("created note text should remain available");
+        assert_eq!(snapshot.text, "# 项目路线图\n\n");
+        assert!(snapshot.content_revision > 0);
+    }
+
+    #[test]
+    fn completed_tag_mutation_refreshes_active_editor_chips() {
+        let workspace_directory =
+            tempfile::tempdir().expect("workspace test directory should be created");
+        let mut app = app();
+        app.execute_workspace_command(WorkspaceCommand::OpenExisting {
+            root: workspace_directory.path().to_path_buf(),
+        })
+        .expect("workspace should open");
+
+        app.dispatch_action(NotoraAction::CreateRequested(DocumentKind::Markdown));
+        let deadline = Instant::now() + Duration::from_secs(2);
+        let note_id = loop {
+            app.drain_product_events();
+            if let Some(DocumentIdentity::Note(note_id)) = app.state().library.selected_card
+                && app.state().library.active_editor_metadata.is_some()
+            {
+                break note_id;
+            }
+            assert!(Instant::now() < deadline, "created note metadata should load");
+            thread::sleep(Duration::from_millis(10));
+        };
+
+        app.dispatch_action(NotoraAction::MetadataMutationRequested(
+            MetadataMutation::AttachTagByName { note_id, display_name: "产品/Notora".to_owned() },
+        ));
+
+        loop {
+            app.drain_product_events();
+            let labels = app
+                .state()
+                .library
+                .active_editor_metadata
+                .as_ref()
+                .map(|snapshot| {
+                    snapshot.tags.iter().map(|tag| tag.display_name.as_str()).collect::<Vec<_>>()
+                })
+                .unwrap_or_default();
+            if labels == ["产品/Notora"] {
+                break;
+            }
+            assert!(Instant::now() < deadline, "completed tag mutation should refresh chips");
+            thread::sleep(Duration::from_millis(10));
+        }
+    }
+
+    #[test]
+    fn workspace_new_note_button_click_opens_creation_panel_without_creating_a_note() {
+        let workspace_directory =
+            tempfile::tempdir().expect("workspace test directory should be created");
+        let mut app = app();
+        let selected_workspace_root = workspace_directory.path().to_path_buf();
+        app.workspace_directory_chooser = Box::new(move || Some(selected_workspace_root.clone()));
         app.render().expect("headless shell frame should render");
         let layout = app.shell_layout();
         let click_x = layout.card_list_rect.right() - 76.0 * layout.dpi;
@@ -2810,12 +3499,109 @@ mod tests {
             button: ui::core::widget::MouseButton::Left,
         }));
 
-        let deadline = Instant::now() + Duration::from_secs(2);
-        while !workspace_directory.path().join("未命名 1.md").is_file() {
-            app.drain_product_events();
-            assert!(Instant::now() < deadline, "button click should create a markdown note");
+        assert_eq!(app.state().layout.overlay, OverlayState::NewNoteCreationPanel);
+        assert_eq!(app.state().layout.focus_target, FocusTarget::Overlay);
+        assert!(app.state().new_note_draft.is_some());
+        assert!(!workspace_directory.path().join("未命名 1.md").exists());
+    }
+
+    #[test]
+    fn completed_note_creation_is_persisted_and_restored_after_restart() {
+        let configuration_directory =
+            tempfile::tempdir().expect("configuration fixture should be created");
+        let workspace_directory = tempfile::tempdir().expect("workspace fixture should be created");
+        let paths =
+            NotoraPaths::from_config_directory(configuration_directory.path().join("notora"))
+                .expect("isolated product paths should be created");
+        let mut first_app =
+            NotoraApp::with_paths(paths.clone()).expect("first app should construct");
+        let selected_workspace_root = workspace_directory.path().to_path_buf();
+        first_app.workspace_directory_chooser =
+            Box::new(move || Some(selected_workspace_root.clone()));
+
+        assert!(first_app.select_workspace_for_note_creation());
+        first_app.pending_session_persist_at = Some(Instant::now());
+        first_app.process_due_session_persistence();
+
+        let workspace_session_deadline = Instant::now() + Duration::from_secs(2);
+        while crate::session::load_product_session(&paths.session_file)
+            .session
+            .workspace_root
+            .is_none()
+        {
+            assert!(
+                Instant::now() < workspace_session_deadline,
+                "selected workspace should be persisted before note completion"
+            );
             thread::sleep(Duration::from_millis(10));
         }
+
+        first_app.dispatch_action(NotoraAction::CreateRequested(DocumentKind::Markdown));
+        let creation_deadline = Instant::now() + Duration::from_secs(2);
+        let note_id = loop {
+            first_app.drain_product_events();
+            if let Some(DocumentIdentity::Note(note_id)) = first_app.state().library.selected_card
+                && first_app.document_tab_for(DocumentIdentity::Note(note_id)).is_some()
+            {
+                break note_id;
+            }
+            assert!(Instant::now() < creation_deadline, "created note should load promptly");
+            thread::sleep(Duration::from_millis(10));
+        };
+
+        assert!(
+            first_app.pending_session_persist_at.is_some(),
+            "note completion should schedule persistence for the new last document"
+        );
+        assert_eq!(
+            first_app.capture_product_session().last_document,
+            Some(crate::session::SavedDocument::Note { note_id })
+        );
+        first_app.pending_session_persist_at = Some(Instant::now());
+        first_app.process_due_session_persistence();
+        first_app.persistence_worker.shutdown();
+        first_app.drain_product_events();
+        assert_eq!(first_app.state().library.last_command_error, None);
+        drop(first_app);
+        let note_session_deadline = Instant::now() + Duration::from_secs(2);
+        loop {
+            let loaded_session = crate::session::load_product_session(&paths.session_file);
+            if loaded_session.session.last_document
+                == Some(crate::session::SavedDocument::Note { note_id })
+            {
+                break;
+            }
+            assert!(
+                Instant::now() < note_session_deadline,
+                "created note should become the persisted last document: {loaded_session:?}"
+            );
+            thread::sleep(Duration::from_millis(10));
+        }
+
+        let mut restarted_app =
+            NotoraApp::with_paths(paths).expect("restarted app should construct");
+        restarted_app.restore_pending_session();
+        let restore_deadline = Instant::now() + Duration::from_secs(2);
+        loop {
+            restarted_app.drain_product_events();
+            let identity = DocumentIdentity::Note(note_id);
+            if card_page_contains_note(&restarted_app.state().library.card_page, note_id)
+                && restarted_app.document_tab_for(identity).is_some()
+            {
+                break;
+            }
+            assert!(
+                Instant::now() < restore_deadline,
+                "restarted app should restore the new note in the workspace"
+            );
+            thread::sleep(Duration::from_millis(10));
+        }
+        assert_eq!(restarted_app.state().layout.focus_target, FocusTarget::Editor);
+        assert_eq!(restarted_app.state().layout.compact_content, CompactContent::Editor);
+        assert!(matches!(
+            restarted_app.render_frame().expect("restored note frame should compose"),
+            appkit_shell::editor_runtime::EditorSurfacePaint::Document { .. }
+        ));
     }
 
     #[test]
@@ -2866,6 +3652,68 @@ mod tests {
     }
 
     #[test]
+    fn dirty_note_move_waits_for_save_before_worker_command() {
+        let workspace_directory = tempfile::tempdir().expect("workspace fixture should be created");
+        let archive_directory = workspace_directory.path().join("archive");
+        std::fs::create_dir(&archive_directory).expect("move target directory should be created");
+        let mut app = app();
+        app.execute_workspace_command(WorkspaceCommand::OpenExisting {
+            root: workspace_directory.path().to_path_buf(),
+        })
+        .expect("workspace should open");
+        app.dispatch_action(NotoraAction::CreateRequested(notora_core::DocumentKind::Markdown));
+
+        let deadline = Instant::now() + Duration::from_secs(2);
+        let (note_id, tab_id, original_path) = loop {
+            app.drain_product_events();
+            if let Some(notora_core::DocumentIdentity::Note(note_id)) =
+                app.state().library.selected_card
+                && let Some(tab_id) =
+                    app.document_tab_for(notora_core::DocumentIdentity::Note(note_id))
+                && let Some(path) =
+                    app.editor_runtime.document_summary(tab_id).and_then(|summary| summary.path)
+            {
+                break (note_id, tab_id, path);
+            }
+            assert!(Instant::now() < deadline, "created note should install a preview tab");
+            thread::sleep(Duration::from_millis(10));
+        };
+        app.dispatch_action(NotoraAction::FocusRequested(FocusTarget::Editor));
+        app.commit_editor_text("unsaved edit".to_owned());
+        assert!(
+            app.editor_runtime
+                .document_summary(tab_id)
+                .expect("note tab should remain available")
+                .dirty
+        );
+
+        app.dispatch_action(NotoraAction::MoveRequested {
+            note_id,
+            target_directory: std::path::PathBuf::from("archive"),
+        });
+
+        let moved_path = archive_directory
+            .join(original_path.file_name().expect("created note should have a file name"));
+        let move_check_deadline = Instant::now() + Duration::from_secs(1);
+        while Instant::now() < move_check_deadline
+            && original_path.is_file()
+            && !moved_path.is_file()
+        {
+            app.drain_product_events();
+            thread::sleep(Duration::from_millis(10));
+        }
+        assert!(original_path.is_file());
+        assert!(!moved_path.is_file());
+        assert!(
+            app.state()
+                .library
+                .last_command_error
+                .as_deref()
+                .is_some_and(|message| message.contains("未移动"))
+        );
+    }
+
+    #[test]
     fn pending_trash_move_rejects_a_document_changed_after_its_save_started() {
         let workspace_directory = tempfile::tempdir().expect("workspace fixture should be created");
         let mut app = app();
@@ -2896,6 +3744,45 @@ mod tests {
         app.commit_editor_text("newer edit".to_owned());
 
         assert!(!app.pending_trash_move_has_current_saved_document(tab_id, pending_move));
+    }
+
+    #[test]
+    fn pending_note_move_rejects_a_document_changed_after_its_save_started() {
+        let workspace_directory = tempfile::tempdir().expect("workspace fixture should be created");
+        let mut app = app();
+        app.execute_workspace_command(WorkspaceCommand::OpenExisting {
+            root: workspace_directory.path().to_path_buf(),
+        })
+        .expect("workspace should open");
+        app.dispatch_action(NotoraAction::CreateRequested(notora_core::DocumentKind::Markdown));
+
+        let deadline = Instant::now() + Duration::from_secs(2);
+        let (note_id, tab_id, saved_revision) = loop {
+            app.drain_product_events();
+            if let Some(notora_core::DocumentIdentity::Note(note_id)) =
+                app.state().library.selected_card
+                && let Some(tab_id) =
+                    app.document_tab_for(notora_core::DocumentIdentity::Note(note_id))
+                && let Some(summary) = app.editor_runtime.document_summary(tab_id)
+            {
+                break (note_id, tab_id, summary.content_revision);
+            }
+            assert!(Instant::now() < deadline, "created note should install a preview tab");
+            thread::sleep(Duration::from_millis(10));
+        };
+        let pending_move = PendingNoteMove {
+            request: notora_core::note_command::MoveNoteRequest {
+                note_id,
+                target_directory: std::path::PathBuf::from("archive"),
+            },
+            content_revision: saved_revision,
+        };
+        assert!(app.pending_note_move_has_current_saved_document(tab_id, &pending_move));
+
+        app.dispatch_action(NotoraAction::FocusRequested(FocusTarget::Editor));
+        app.commit_editor_text("newer edit".to_owned());
+
+        assert!(!app.pending_note_move_has_current_saved_document(tab_id, &pending_move));
     }
 
     #[test]

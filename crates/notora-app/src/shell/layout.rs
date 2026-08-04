@@ -10,6 +10,10 @@ pub const MINIMUM_CARD_LIST_WIDTH_LOGICAL: f32 = 260.0;
 pub const MAXIMUM_CARD_LIST_WIDTH_LOGICAL: f32 = 520.0;
 pub const MINIMUM_EDITOR_WIDTH_LOGICAL: f32 = 300.0;
 pub const SPLITTER_WIDTH_LOGICAL: f32 = 8.0;
+pub const EDITOR_HEADER_HEIGHT_LOGICAL: f32 = 128.0;
+pub const EDITOR_COMPACT_HEADER_HEIGHT_LOGICAL: f32 = 56.0;
+pub const EDITOR_TOOLBAR_HEIGHT_LOGICAL: f32 = 40.0;
+pub const EDITOR_COMPACT_HEIGHT_THRESHOLD_LOGICAL: f32 = 480.0;
 pub const MINIMUM_WINDOW_WIDTH_LOGICAL: f32 = DEFAULT_NAVIGATION_WIDTH_LOGICAL
     + DEFAULT_CARD_LIST_WIDTH_LOGICAL
     + MINIMUM_EDITOR_WIDTH_LOGICAL
@@ -38,6 +42,9 @@ pub struct ShellLayout {
     pub card_list_rect: Rect,
     pub card_list_splitter_rect: Rect,
     pub editor_rect: Rect,
+    pub editor_header_rect: Rect,
+    pub editor_toolbar_rect: Rect,
+    pub editor_body_rect: Rect,
     pub overlay_rect: Rect,
     pub menu_rect: Rect,
     pub tooltip_rect: Rect,
@@ -117,6 +124,8 @@ impl ShellLayout {
             (window_rect.right() - card_list_splitter_rect.right()).max(0.0),
             window_rect.h,
         );
+        let (editor_header_rect, editor_toolbar_rect, editor_body_rect) =
+            editor_chrome_rects(editor_rect, dpi);
         Self {
             responsive_mode: ResponsiveLayoutMode::ThreePane,
             dpi,
@@ -125,6 +134,9 @@ impl ShellLayout {
             card_list_rect,
             card_list_splitter_rect,
             editor_rect,
+            editor_header_rect,
+            editor_toolbar_rect,
+            editor_body_rect,
             overlay_rect: window_rect,
             menu_rect: Rect::ZERO,
             tooltip_rect: Rect::ZERO,
@@ -154,6 +166,8 @@ impl ShellLayout {
             (window_rect.right() - card_list_splitter_rect.right()).max(0.0),
             window_rect.h,
         );
+        let (editor_header_rect, editor_toolbar_rect, editor_body_rect) =
+            editor_chrome_rects(editor_rect, dpi);
         Self {
             responsive_mode: ResponsiveLayoutMode::NavigationOverlay,
             dpi,
@@ -162,6 +176,9 @@ impl ShellLayout {
             card_list_rect,
             card_list_splitter_rect,
             editor_rect,
+            editor_header_rect,
+            editor_toolbar_rect,
+            editor_body_rect,
             overlay_rect: window_rect,
             menu_rect: Rect::ZERO,
             tooltip_rect: Rect::ZERO,
@@ -181,6 +198,8 @@ impl ShellLayout {
             CompactContent::CardList => (window_rect, Rect::ZERO),
             CompactContent::Editor => (Rect::ZERO, window_rect),
         };
+        let (editor_header_rect, editor_toolbar_rect, editor_body_rect) =
+            editor_chrome_rects(editor_rect, dpi);
         Self {
             responsive_mode: ResponsiveLayoutMode::EditorOverlay,
             dpi,
@@ -189,6 +208,9 @@ impl ShellLayout {
             card_list_rect,
             card_list_splitter_rect: Rect::ZERO,
             editor_rect,
+            editor_header_rect,
+            editor_toolbar_rect,
+            editor_body_rect,
             overlay_rect: window_rect,
             menu_rect: Rect::ZERO,
             tooltip_rect: Rect::ZERO,
@@ -196,6 +218,29 @@ impl ShellLayout {
             card_list_width_logical: requested_card_width_logical.min(window_rect.w / dpi),
         }
     }
+}
+
+fn editor_chrome_rects(editor_rect: Rect, dpi: f32) -> (Rect, Rect, Rect) {
+    if editor_rect.w <= 0.0 || editor_rect.h <= 0.0 {
+        return (Rect::ZERO, Rect::ZERO, Rect::ZERO);
+    }
+
+    let available_height_logical = editor_rect.h / dpi;
+    let header_height_logical =
+        if available_height_logical < EDITOR_COMPACT_HEIGHT_THRESHOLD_LOGICAL {
+            EDITOR_COMPACT_HEADER_HEIGHT_LOGICAL
+        } else {
+            EDITOR_HEADER_HEIGHT_LOGICAL
+        };
+    let header_height_px = (header_height_logical * dpi).min(editor_rect.h);
+    let remaining_after_header = (editor_rect.h - header_height_px).max(0.0);
+    let toolbar_height_px = (EDITOR_TOOLBAR_HEIGHT_LOGICAL * dpi).min(remaining_after_header);
+    let body_height_px = (remaining_after_header - toolbar_height_px).max(0.0);
+    let header_rect = Rect::new(editor_rect.x, editor_rect.y, editor_rect.w, header_height_px);
+    let toolbar_rect =
+        Rect::new(editor_rect.x, header_rect.bottom(), editor_rect.w, toolbar_height_px);
+    let body_rect = Rect::new(editor_rect.x, toolbar_rect.bottom(), editor_rect.w, body_height_px);
+    (header_rect, toolbar_rect, body_rect)
 }
 
 fn compact_navigation_rect(
@@ -237,10 +282,32 @@ mod tests {
             layout.card_list_rect,
             layout.card_list_splitter_rect,
             layout.editor_rect,
+            layout.editor_header_rect,
+            layout.editor_toolbar_rect,
+            layout.editor_body_rect,
             layout.overlay_rect,
         ] {
             assert!(rect.w >= 0.0 && rect.h >= 0.0, "rect must not be negative: {rect:?}");
         }
+    }
+
+    fn assert_editor_chrome_is_partitioned(layout: ShellLayout) {
+        if layout.editor_rect == Rect::ZERO {
+            assert_eq!(layout.editor_header_rect, Rect::ZERO);
+            assert_eq!(layout.editor_toolbar_rect, Rect::ZERO);
+            assert_eq!(layout.editor_body_rect, Rect::ZERO);
+            return;
+        }
+        assert_eq!(layout.editor_header_rect.x, layout.editor_rect.x);
+        assert_eq!(layout.editor_header_rect.y, layout.editor_rect.y);
+        assert_eq!(layout.editor_header_rect.w, layout.editor_rect.w);
+        assert_eq!(layout.editor_toolbar_rect.x, layout.editor_rect.x);
+        assert_eq!(layout.editor_toolbar_rect.w, layout.editor_rect.w);
+        assert_eq!(layout.editor_body_rect.x, layout.editor_rect.x);
+        assert_eq!(layout.editor_body_rect.w, layout.editor_rect.w);
+        assert_eq!(layout.editor_header_rect.bottom(), layout.editor_toolbar_rect.y);
+        assert_eq!(layout.editor_toolbar_rect.bottom(), layout.editor_body_rect.y);
+        assert_eq!(layout.editor_body_rect.bottom(), layout.editor_rect.bottom());
     }
 
     #[test]
@@ -251,6 +318,7 @@ mod tests {
         assert_eq!(layout.navigation_rect.w, DEFAULT_NAVIGATION_WIDTH_LOGICAL);
         assert_eq!(layout.card_list_rect.w, DEFAULT_CARD_LIST_WIDTH_LOGICAL);
         assert!(layout.editor_rect.x >= layout.card_list_splitter_rect.right());
+        assert_editor_chrome_is_partitioned(layout);
     }
 
     #[test]
@@ -269,6 +337,7 @@ mod tests {
         assert_eq!(three_pane_layout.navigation_rect.w, DEFAULT_NAVIGATION_WIDTH_LOGICAL);
         assert_eq!(three_pane_layout.card_list_rect.w, DEFAULT_CARD_LIST_WIDTH_LOGICAL);
         assert!(three_pane_layout.editor_rect.w >= MINIMUM_EDITOR_WIDTH_LOGICAL);
+        assert_editor_chrome_is_partitioned(three_pane_layout);
     }
 
     #[test]
@@ -278,6 +347,7 @@ mod tests {
         assert_eq!(layout.navigation_rect.w, DEFAULT_NAVIGATION_WIDTH_LOGICAL * 2.0);
         assert_eq!(layout.card_list_rect.w, DEFAULT_CARD_LIST_WIDTH_LOGICAL * 2.0);
         assert_eq!(layout.navigation_width_logical, DEFAULT_NAVIGATION_WIDTH_LOGICAL);
+        assert_editor_chrome_is_partitioned(layout);
     }
 
     #[test]
@@ -289,6 +359,8 @@ mod tests {
         assert_eq!(editor_overlay.responsive_mode, ResponsiveLayoutMode::EditorOverlay);
         assert_non_negative(navigation_overlay);
         assert_non_negative(editor_overlay);
+        assert_editor_chrome_is_partitioned(navigation_overlay);
+        assert_editor_chrome_is_partitioned(editor_overlay);
     }
 
     #[test]
@@ -303,6 +375,17 @@ mod tests {
         assert_eq!(layout.card_list_rect, Rect::ZERO);
         assert_eq!(layout.editor_rect.w, 400.0);
         assert!(layout.navigation_rect.w > 0.0);
+        assert_editor_chrome_is_partitioned(layout);
+    }
+
+    #[test]
+    fn minimum_window_height_keeps_editor_body_as_the_remaining_region() {
+        let mut layout_input = input(880.0, 1.0);
+        layout_input.window_height_px = 1.0;
+        let layout = ShellLayout::compute(layout_input);
+
+        assert_editor_chrome_is_partitioned(layout);
+        assert!(layout.editor_body_rect.h >= 0.0);
     }
 
     #[test]

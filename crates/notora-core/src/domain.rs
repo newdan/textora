@@ -108,6 +108,22 @@ pub enum DocumentKind {
     Mindmap,
 }
 
+/// 笔记的持久化加密属性；创建后不可切换。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum NoteEncryption {
+    Unencrypted,
+    Encrypted,
+}
+
+/// 编辑区头部读取的持久化 metadata，不混入扫描器的派生记录。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NoteEditorMetadata {
+    pub note_id: NoteId,
+    pub created_at: SystemTime,
+    pub modified_at: SystemTime,
+    pub encryption: NoteEncryption,
+}
+
 impl DocumentKind {
     /// 根据完整文件名和扩展名识别可编辑文本类型。
     ///
@@ -197,7 +213,9 @@ pub enum NavigationScope {
 mod tests {
     use std::path::Path;
 
-    use super::{DocumentIdentity, DocumentKind, DocumentOrigin, ExternalFileId, NoteId};
+    use super::{
+        DocumentIdentity, DocumentKind, DocumentOrigin, ExternalFileId, NoteEncryption, NoteId,
+    };
 
     #[test]
     fn mindmap_suffix_has_priority_over_markdown_extension() {
@@ -237,5 +255,11 @@ mod tests {
         };
 
         assert_eq!(untitled.identity(), saved.identity());
+    }
+
+    #[test]
+    fn note_encryption_is_an_explicit_mutually_exclusive_domain_state() {
+        assert_ne!(NoteEncryption::Unencrypted, NoteEncryption::Encrypted);
+        assert_eq!(NoteEncryption::Unencrypted, NoteEncryption::Unencrypted);
     }
 }

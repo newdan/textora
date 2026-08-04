@@ -182,9 +182,6 @@ fn apply_scan_results(
                     continue;
                 };
                 catalog.upsert_active_note(&note).map_err(ScanError::Catalog)?;
-                catalog
-                    .replace_note_tags(note.note_id, &crate::extract_hashtags(body))
-                    .map_err(ScanError::Catalog)?;
                 search_entries.push(search_entry(catalog, &note, body.clone())?);
             }
             ReconciliationChange::Added(note) | ReconciliationChange::Moved { note, .. } => {
@@ -193,9 +190,6 @@ fn apply_scan_results(
                     continue;
                 };
                 catalog.upsert_active_note(&note).map_err(ScanError::Catalog)?;
-                catalog
-                    .replace_note_tags(note.note_id, &crate::extract_hashtags(body))
-                    .map_err(ScanError::Catalog)?;
                 search_entries.push(search_entry(catalog, &note, body.clone())?);
             }
             ReconciliationChange::Missing(note) => missing_note_ids.push(note.note_id),
@@ -449,6 +443,8 @@ mod tests {
             .expect("catalog should initialize");
         scan_workspace(&workspace, &catalog).expect("initial scan should complete");
         let note_id = catalog.active_notes().expect("initial notes should load").remove(0).note_id;
+        let formal_tag = catalog.create_tag("正式标签").expect("formal tag should create");
+        catalog.attach_tag(note_id, formal_tag.tag_id).expect("formal tag should attach");
         assert_eq!(
             catalog.navigation_tree().expect("initial tag navigation should load").tags.len(),
             1
@@ -508,7 +504,7 @@ mod tests {
     }
 
     #[test]
-    fn changed_document_hashtags_replace_navigation_and_search_tags() {
+    fn changed_document_hashtags_do_not_replace_formal_navigation_tags() {
         let directory = tempfile::tempdir().expect("workspace test directory should be created");
         let note_path = directory.path().join("tagged.md");
         fs::write(&note_path, "# 标题\n\n正文 #计划 #共享")
@@ -519,6 +515,10 @@ mod tests {
             .expect("catalog should initialize");
 
         scan_workspace(&workspace, &catalog).expect("initial scan should complete");
+        let formal_tag = catalog.create_tag("正式/标签").expect("formal tag should create");
+        catalog
+            .attach_tag(note_id_for(&catalog), formal_tag.tag_id)
+            .expect("formal tag should attach");
         assert_eq!(
             catalog
                 .navigation_tree()
@@ -527,12 +527,12 @@ mod tests {
                 .into_iter()
                 .map(|tag| tag.display_name)
                 .collect::<Vec<_>>(),
-            vec!["共享".to_owned(), "计划".to_owned()]
+            vec!["正式/标签".to_owned()]
         );
         assert_eq!(
             catalog
-                .search_active_notes("计划", 10)
-                .expect("tag should participate in search")
+                .search_active_notes("正式/标签", 10)
+                .expect("formal tag should participate in search")
                 .len(),
             1
         );
@@ -549,13 +549,75 @@ mod tests {
                 .into_iter()
                 .map(|tag| tag.display_name)
                 .collect::<Vec<_>>(),
-            vec!["归档".to_owned()]
+            vec!["正式/标签".to_owned()]
         );
         assert!(
             catalog
-                .search_active_notes("计划", 10)
-                .expect("removed tag search should complete")
-                .is_empty()
+                .search_active_notes("正式/标签", 10)
+                .expect("formal tag search should remain")
+                .len()
+                == 1
+        );
+        assert_eq!(
+            catalog
+                .search_active_notes("归档", 10)
+                .expect("body hashtag should remain searchable")
+                .len(),
+            1
+        );
+    }
+
+    fn note_id_for(catalog: &Catalog) -> crate::NoteId {
+        catalog
+            .active_notes()
+            .expect("active notes should load")
+            .into_iter()
+            .next()
+            .expect("fixture note should exist")
+            .note_id
+    }
+
+    #[test]
+    fn formal_tags_survive_a_full_rescan_after_body_hashtag_changes() {
+        let directory = tempfile::tempdir().expect("workspace test directory should be created");
+        let note_path = directory.path().join("tagged.md");
+        fs::write(&note_path, "# 标题\n\n正文 #正文标签")
+            .expect("tagged fixture should be written");
+        let workspace =
+            Workspace::open_or_initialize(directory.path()).expect("workspace should initialize");
+        let catalog = Catalog::open(&workspace.metadata_directory().join("catalog.sqlite3"))
+            .expect("catalog should initialize");
+        scan_workspace(&workspace, &catalog).expect("initial scan should complete");
+        let note_id = note_id_for(&catalog);
+        let formal_tag = catalog.create_tag("产品/Notora").expect("formal tag should create");
+        catalog.attach_tag(note_id, formal_tag.tag_id).expect("formal tag should attach");
+
+        fs::write(&note_path, "# 标题\n\n正文 #另一个正文标签")
+            .expect("tagged fixture should be updated");
+        scan_workspace(&workspace, &catalog).expect("rescan should complete");
+
+        assert_eq!(
+            catalog
+                .tags_for_note(note_id)
+                .expect("formal tags should query")
+                .into_iter()
+                .map(|tag| tag.display_name)
+                .collect::<Vec<_>>(),
+            vec!["产品/Notora".to_owned()]
+        );
+        assert!(
+            catalog
+                .search_active_notes("另一个正文标签", 10)
+                .expect("body hashtag should remain searchable")
+                .iter()
+                .any(|search_match| search_match.note_id == note_id)
+        );
+        assert!(
+            catalog
+                .search_active_notes("产品/Notora", 10)
+                .expect("formal tag should remain searchable")
+                .iter()
+                .any(|search_match| search_match.note_id == note_id)
         );
     }
 
