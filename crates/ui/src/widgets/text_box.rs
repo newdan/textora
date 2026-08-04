@@ -709,6 +709,9 @@ impl TextBox {
     /// Mouse up: end drag.
     pub fn on_mouse_up(&mut self) {
         self.dragging = false;
+        if matches!(self.selection, Some((anchor, cursor)) if anchor == cursor) {
+            self.selection = None;
+        }
     }
 
     /// Receive an IME event from the parent widget.
@@ -1129,6 +1132,30 @@ mod tests {
         let theme = crate::theme::test_theme();
         let mut event_ctx = EventCtx { cursor_hint: None, theme: &theme, dpi: 1.0 };
         text_box.on_event(&Event::KeyDown(key_code, modifiers), &mut event_ctx)
+    }
+
+    #[test]
+    fn tiny_pointer_move_during_click_keeps_caret_visible_after_mouse_up() {
+        use crate::core::paint::DrawCmd;
+
+        let mut text_box = laid_out_widget(TextBox::new());
+        text_box.set_text("hello");
+        text_box.set_focus(true);
+        text_box.set_blink(true);
+
+        assert!(text_box.on_mouse_down(20.0, 14.0));
+        text_box.on_mouse_drag(20.25, 14.0);
+        text_box.on_mouse_up();
+
+        assert_eq!(text_box.selection, None);
+        let draw_list = paint_laid_out(&mut text_box);
+        assert!(draw_list.cmds.iter().any(|command| {
+            matches!(
+                command,
+                DrawCmd::FillRect { rect, radius, .. }
+                    if *radius == 0.0 && rect.w == 2.0
+            )
+        }));
     }
 
     #[test]
