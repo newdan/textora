@@ -10,13 +10,13 @@ use crate::widgets::text_box::TextBox;
 use std::any::Any;
 
 const HEADER_HORIZONTAL_PADDING_LOGICAL: f32 = 16.0;
-const HEADER_VERTICAL_PADDING_LOGICAL: f32 = 8.0;
 const HEADER_ACTION_SIZE_LOGICAL: f32 = 28.0;
 const HEADER_ACTION_GAP_LOGICAL: f32 = 6.0;
 const HEADER_META_GAP_LOGICAL: f32 = 12.0;
 const HEADER_META_FONT_SIZE_LOGICAL: f32 = 11.0;
 const HEADER_MINIMUM_TITLE_WIDTH_LOGICAL: f32 = 120.0;
 const HEADER_TITLE_HEIGHT_LOGICAL: f32 = 40.0;
+const HEADER_ROW_GAP_LOGICAL: f32 = 4.0;
 const HEADER_COMPACT_HEIGHT_THRESHOLD_LOGICAL: f32 = 64.0;
 const HEADER_COMPACT_WIDTH_THRESHOLD_LOGICAL: f32 = 420.0;
 
@@ -156,8 +156,7 @@ impl Widget for EditorHeaderWidget {
         self.rect = Rect::new(0.0, 0.0, rect.w, rect.h);
         let dpi = ctx.dpi;
         let horizontal_padding = HEADER_HORIZONTAL_PADDING_LOGICAL * dpi;
-        let vertical_padding = HEADER_VERTICAL_PADDING_LOGICAL * dpi;
-        let action_size = HEADER_ACTION_SIZE_LOGICAL * dpi;
+        let action_size = (HEADER_ACTION_SIZE_LOGICAL * dpi).min(self.rect.h);
         let action_gap = HEADER_ACTION_GAP_LOGICAL * dpi;
         let encryption_width = match self.input.encryption {
             EncryptionStatusInput::Encrypted | EncryptionStatusInput::Unencrypted => action_size,
@@ -176,20 +175,31 @@ impl Widget for EditorHeaderWidget {
                 action_size,
                 action_gap,
             );
-            let required_width = horizontal_padding * 2.0
-                + HEADER_MINIMUM_TITLE_WIDTH_LOGICAL * dpi
-                + HEADER_META_GAP_LOGICAL * dpi
+            let title_row_width =
+                horizontal_padding * 2.0 + HEADER_MINIMUM_TITLE_WIDTH_LOGICAL * dpi;
+            let metadata_row_width = horizontal_padding * 2.0
                 + full_metadata_width
+                + HEADER_META_GAP_LOGICAL * dpi
                 + trailing_width;
+            let required_width = title_row_width.max(metadata_row_width);
             compact = rect.w < required_width;
         }
         self.input.compact = compact;
+        let row_gap = (HEADER_ROW_GAP_LOGICAL * dpi).min((self.rect.h - action_size).max(0.0));
+        let title_height =
+            (HEADER_TITLE_HEIGHT_LOGICAL * dpi).min((self.rect.h - action_size - row_gap).max(0.0));
+        let content_height = title_height + row_gap + action_size;
+        let title_y = (self.rect.h - content_height).max(0.0) * 0.5;
+        let second_row_y = title_y + title_height + row_gap;
+        let title_x = horizontal_padding;
+        let title_width = (self.rect.w - horizontal_padding * 2.0).max(0.0);
+        self.title_box.set_rect(Rect::new(title_x, title_y, title_width, title_height), ctx);
+
         let mut right_edge = self.rect.right() - horizontal_padding;
-        let action_y = (self.rect.h - action_size).max(0.0) * 0.5;
 
         self.delete_rect = if self.input.delete_visible && !self.input.compact {
             right_edge -= action_size;
-            let action_rect = Rect::new(right_edge, action_y, action_size, action_size);
+            let action_rect = Rect::new(right_edge, second_row_y, action_size, action_size);
             right_edge -= action_gap;
             action_rect
         } else {
@@ -197,7 +207,7 @@ impl Widget for EditorHeaderWidget {
         };
         self.star_rect = if self.input.star_enabled {
             right_edge -= action_size;
-            let action_rect = Rect::new(right_edge, action_y, action_size, action_size);
+            let action_rect = Rect::new(right_edge, second_row_y, action_size, action_size);
             right_edge -= action_gap;
             action_rect
         } else {
@@ -206,14 +216,13 @@ impl Widget for EditorHeaderWidget {
         self.encryption_rect = match self.input.encryption {
             EncryptionStatusInput::Encrypted | EncryptionStatusInput::Unencrypted => {
                 right_edge -= encryption_width;
-                let badge_rect = Rect::new(right_edge, action_y, encryption_width, action_size);
+                let badge_rect = Rect::new(right_edge, second_row_y, encryption_width, action_size);
                 right_edge -= action_gap;
                 badge_rect
             }
             EncryptionStatusInput::Hidden => Rect::ZERO,
         };
 
-        let title_x = horizontal_padding;
         let metadata_text = self.metadata_text();
         self.metadata_rect = if metadata_text.is_empty() {
             Rect::ZERO
@@ -222,17 +231,8 @@ impl Widget for EditorHeaderWidget {
                 .measure
                 .measure(&metadata_text, HEADER_META_FONT_SIZE_LOGICAL * dpi)
                 .min((right_edge - title_x).max(0.0));
-            right_edge -= metadata_width;
-            let metadata_rect = Rect::new(right_edge, action_y, metadata_width, action_size);
-            right_edge -= HEADER_META_GAP_LOGICAL * dpi;
-            metadata_rect
+            Rect::new(title_x, second_row_y, metadata_width, action_size)
         };
-        let title_right = right_edge.max(title_x);
-        let title_width = (title_right - title_x).min(self.rect.w - title_x * 2.0).max(0.0);
-        let available_title_height = (self.rect.h - vertical_padding * 2.0).max(0.0);
-        let title_height = available_title_height.min(HEADER_TITLE_HEIGHT_LOGICAL * dpi);
-        let title_y = (self.rect.h - title_height).max(0.0) * 0.5;
-        self.title_box.set_rect(Rect::new(title_x, title_y, title_width, title_height), ctx);
     }
 
     fn paint(&self, ctx: &mut PaintCtx) {
@@ -245,8 +245,9 @@ impl Widget for EditorHeaderWidget {
         let dpi = ctx.dpi;
         let metadata_text = self.metadata_text();
         if !metadata_text.is_empty() {
-            let baseline =
-                self.rect.y + self.rect.h * 0.5 + HEADER_META_FONT_SIZE_LOGICAL * dpi * 0.35;
+            let baseline = self.metadata_rect.y
+                + self.metadata_rect.h * 0.5
+                + HEADER_META_FONT_SIZE_LOGICAL * dpi * 0.35;
             ctx.text(
                 self.metadata_rect.x,
                 baseline,
@@ -524,17 +525,15 @@ mod tests {
         let mut layout_context =
             LayoutCtx { ui_measure: None, measure: &mut measure, theme: &theme, dpi: 1.0 };
 
-        header.set_rect(Rect::new(0.0, 0.0, 760.0, 72.0), &mut layout_context);
+        header.set_rect(Rect::new(0.0, 0.0, 760.0, 80.0), &mut layout_context);
 
         assert!(!header.input.compact);
         assert_eq!(header.title_box.rect().h, HEADER_TITLE_HEIGHT_LOGICAL);
-        assert_eq!(header.title_box.rect().y, 16.0);
-        assert_eq!(header.star_rect.y, 22.0);
+        assert!(header.title_box.rect().bottom() <= header.metadata_rect.y);
+        assert_eq!(header.title_box.rect().x, HEADER_HORIZONTAL_PADDING_LOGICAL);
+        assert_eq!(header.title_box.rect().right(), 760.0 - HEADER_HORIZONTAL_PADDING_LOGICAL);
         assert_eq!(header.metadata_rect.y, header.star_rect.y);
         assert!(header.metadata_rect.w > 0.0);
-        assert!(
-            header.title_box.rect().right() + HEADER_META_GAP_LOGICAL <= header.metadata_rect.x
-        );
         assert!(
             header.metadata_rect.right() + HEADER_ACTION_GAP_LOGICAL <= header.encryption_rect.x
         );
