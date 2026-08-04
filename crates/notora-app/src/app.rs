@@ -676,23 +676,23 @@ impl NotoraApp {
         }
     }
 
-    pub(crate) fn runtime_accepts_pointer_input(&self, px: f32, py: f32) -> bool {
-        self.editor_runtime.pointer_input_allowed(
-            events::editor_input_context(&self.state, self.shell_layout(), self.window_focused),
-            (px, py),
-        )
+    pub(crate) fn handle_editor_pointer_event(&mut self, event: &ui::Event) {
+        let context =
+            events::editor_input_context(&self.state, self.shell_layout(), self.window_focused);
+        let outcome = self.editor_runtime.handle_pointer_event(context, event);
+        self.apply_editor_outcome(outcome);
     }
 
-    pub(crate) fn begin_editor_text_selection(&mut self) -> bool {
-        self.editor_runtime.begin_text_selection(events::editor_input_context(
-            &self.state,
-            self.shell_layout(),
-            self.window_focused,
-        ))
+    pub(crate) fn route_pointer_event(&mut self, event: &ui::Event) -> bool {
+        let product_consumed = self.route_product_event(event);
+        if !product_consumed || self.editor_pointer_is_captured() {
+            self.handle_editor_pointer_event(event);
+        }
+        product_consumed
     }
 
-    pub(crate) fn end_editor_pointer_capture(&mut self) {
-        self.editor_runtime.end_pointer_capture();
+    pub(crate) fn editor_pointer_is_captured(&self) -> bool {
+        self.editor_runtime.pointer_capture() != appkit_shell::editor_runtime::MouseCapture::None
     }
 
     pub(crate) fn set_pointer_position(&mut self, px: f32, py: f32) {
@@ -3078,16 +3078,12 @@ mod tests {
         app.dispatch_action(NotoraAction::FocusRequested(FocusTarget::CardList));
         let editor_rect = app.shell_layout().editor_rect;
 
-        assert!(!app.route_product_event(&ui::Event::MouseDown {
+        assert!(!app.route_pointer_event(&ui::Event::MouseDown {
             px: editor_rect.x + editor_rect.w * 0.5,
             py: editor_rect.y + editor_rect.h * 0.5,
             button: ui::core::widget::MouseButton::Left,
         }));
         assert_eq!(app.state().layout.focus_target, FocusTarget::Editor);
-        assert!(app.runtime_accepts_pointer_input(
-            editor_rect.x + editor_rect.w * 0.5,
-            editor_rect.y + editor_rect.h * 0.5,
-        ));
     }
 
     #[test]

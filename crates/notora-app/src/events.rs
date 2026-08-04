@@ -73,10 +73,8 @@ impl ApplicationHandler<ShellEvent> for NotoraApp {
             WindowEvent::CursorMoved { position, .. } => {
                 let (px, py) = (position.x as f32, position.y as f32);
                 self.set_pointer_position(px, py);
-                let product_consumed = self.route_product_event(&ui::Event::MouseMove { px, py });
-                if !product_consumed {
-                    let _ = self.runtime_accepts_pointer_input(px, py);
-                }
+                let pointer_event = ui::Event::MouseMove { px, py };
+                self.route_pointer_event(&pointer_event);
             }
             WindowEvent::MouseInput { state, button, .. } => {
                 let Some(button) = map_mouse_button(button) else {
@@ -87,17 +85,7 @@ impl ApplicationHandler<ShellEvent> for NotoraApp {
                     ElementState::Pressed => ui::Event::MouseDown { px, py, button },
                     ElementState::Released => ui::Event::MouseUp { px, py, button },
                 };
-                let product_consumed = self.route_product_event(&product_event);
-                if product_consumed {
-                    return;
-                }
-                match state {
-                    ElementState::Pressed if self.runtime_accepts_pointer_input(px, py) => {
-                        let _ = self.begin_editor_text_selection();
-                    }
-                    ElementState::Released => self.end_editor_pointer_capture(),
-                    ElementState::Pressed => {}
-                }
+                self.route_pointer_event(&product_event);
             }
             WindowEvent::MouseWheel { delta, .. } => {
                 let (px, py) = self.pointer_position();

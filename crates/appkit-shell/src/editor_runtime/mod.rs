@@ -4,6 +4,7 @@ mod contract;
 mod document_save;
 mod editor_frame;
 mod editor_painter;
+mod editor_pointer;
 #[allow(dead_code, reason = "ER4-4 wires file safety results into the App lifecycle")]
 mod file_safety_session;
 #[allow(dead_code, reason = "ER2-2 wires the product-neutral input session into event routing")]
@@ -988,6 +989,47 @@ mod tests {
     use std::path::PathBuf;
     use ui::plugin::PluginFactory;
 
+    struct PointerProbePlugin;
+
+    impl ui::plugin::ViewPlugin for PointerProbePlugin {
+        fn name(&self) -> &str {
+            "pointer-probe"
+        }
+
+        fn render(
+            &mut self,
+            _document: &dyn core::document::DocView,
+            _bounds: ui::Rect,
+            _theme: &ui::Theme,
+            _shaper: &mut shaping::Shaper,
+            _dpi_scale: f32,
+        ) -> ui::DrawList {
+            ui::DrawList::new()
+        }
+
+        fn query(
+            &self,
+            query: ui::plugin::PluginQuery,
+            _document: &dyn core::document::DocView,
+        ) -> ui::plugin::PluginResponse {
+            match query {
+                ui::plugin::PluginQuery::HitTestEditTarget { .. } => {
+                    ui::plugin::PluginResponse::EditHitTarget(Some(
+                        ui::plugin::EditHitTarget::TextCaret {
+                            byte_offset: 2,
+                            selection_scope: None,
+                        },
+                    ))
+                }
+                _ => ui::plugin::PluginResponse::None,
+            }
+        }
+
+        fn handles_own_rendering(&self) -> bool {
+            true
+        }
+    }
+
     fn runtime_with_clean_tab() -> EditorRuntime {
         let mut registry = ui::plugin::PluginRegistry::new();
         registry.register(Box::new(EditorPluginFactory));
@@ -1101,6 +1143,57 @@ mod tests {
             EditorNotification::DirtyChanged { tab_id: changed_tab_id, dirty: true }
                 if *changed_tab_id == tab_id
         )));
+    }
+
+    #[test]
+    fn custom_editor_pointer_press_places_the_document_caret() {
+        let mut runtime = runtime_with_clean_tab();
+        let tab_id = runtime.active_tab_id().expect("test runtime should have an active tab");
+        runtime
+            .tab_session_mut(tab_id)
+            .expect("active tab should have a runtime")
+            .replace_plugin(Box::new(PointerProbePlugin));
+        let context = EditorInputContext {
+            editor_rect: ui::Rect::new(100.0, 200.0, 640.0, 480.0),
+            focus: EditorFocus::Active,
+            modal_blocked: false,
+        };
+
+        let outcome = runtime.handle_pointer_event(
+            context,
+            &ui::Event::MouseDown { px: 180.0, py: 260.0, button: ui::MouseButton::Left },
+        );
+
+        assert_eq!(runtime.workspace_snapshot().tabs[0].cursor_offset, 2);
+        assert_ne!(outcome, EditorOutcome::default());
+    }
+
+    #[test]
+    fn text_editor_pointer_press_uses_the_rendered_cluster_cache() {
+        let mut runtime = runtime_with_clean_tab();
+        let tab_id = runtime.active_tab_id().expect("test runtime should have an active tab");
+        runtime
+            .tab_session_mut(tab_id)
+            .expect("active tab should have a runtime")
+            .display_mut()
+            .advance_cache = vec![ui::render_geom::AdvanceCacheEntry {
+            doc_line: 0,
+            vl_byte_start: 0,
+            vl_grapheme_start: 0,
+            clusters: vec![(1, 180.0, 0), (2, 220.0, 1), (3, 260.0, 2)],
+        }];
+        let context = EditorInputContext {
+            editor_rect: ui::Rect::new(100.0, 200.0, 640.0, 480.0),
+            focus: EditorFocus::Active,
+            modal_blocked: false,
+        };
+
+        runtime.handle_pointer_event(
+            context,
+            &ui::Event::MouseDown { px: 210.0, py: 205.0, button: ui::MouseButton::Left },
+        );
+
+        assert_eq!(runtime.workspace_snapshot().tabs[0].cursor_offset, 2);
     }
 
     #[test]

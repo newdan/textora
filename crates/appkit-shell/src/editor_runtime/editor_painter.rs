@@ -267,7 +267,7 @@ fn editor_screen(resources: &RenderResources, editor_rect: ui::Rect) -> ui::Scre
     )
 }
 
-fn plugin_bounds(editor_rect: ui::Rect, dpi: f32, is_canvas: bool) -> ui::Rect {
+pub(super) fn plugin_bounds(editor_rect: ui::Rect, dpi: f32, is_canvas: bool) -> ui::Rect {
     if is_canvas {
         return editor_rect;
     }
