@@ -2,12 +2,15 @@
 
 use crate::core::widget::{ControlAction, TextPayload, WidgetId};
 use crate::core::{Event, EventCtx, LayoutCtx, PaintCtx, Rect, Widget, WidgetAction};
+use crate::widgets::icon::draw_icon;
 use std::any::Any;
 
-const TOOLBAR_COMMAND_WIDTH_LOGICAL: f32 = 44.0;
+const TOOLBAR_COMMAND_SIZE_LOGICAL: f32 = 32.0;
 const TOOLBAR_COMMAND_GAP_LOGICAL: f32 = 4.0;
-const TOOLBAR_OVERFLOW_WIDTH_LOGICAL: f32 = 32.0;
+const TOOLBAR_HORIZONTAL_PADDING_LOGICAL: f32 = 16.0;
+const TOOLBAR_ICON_SIZE_LOGICAL: f32 = 16.0;
 const TOOLBAR_FONT_SIZE_LOGICAL: f32 = 12.0;
+const TOOLBAR_CORNER_RADIUS_LOGICAL: f32 = 5.0;
 
 pub const EDITOR_TOOLBAR_COMMAND_ID: WidgetId = WidgetId(10_301);
 pub const EDITOR_TOOLBAR_OVERFLOW_ID: WidgetId = WidgetId(10_302);
@@ -43,11 +46,18 @@ pub enum EditorToolbarAction {
 pub struct EditorToolbarWidget {
     input: EditorToolbarInput,
     rect: Rect,
+    hovered_command_key: Option<String>,
+    overflow_hovered: bool,
 }
 
 impl EditorToolbarWidget {
     pub fn new() -> Self {
-        Self { input: EditorToolbarInput::default(), rect: Rect::ZERO }
+        Self {
+            input: EditorToolbarInput::default(),
+            rect: Rect::ZERO,
+            hovered_command_key: None,
+            overflow_hovered: false,
+        }
     }
 
     pub fn set_input(&mut self, input: EditorToolbarInput) {
@@ -56,11 +66,19 @@ impl EditorToolbarWidget {
 
     pub fn visible_command_keys(&self, available_width: f32) -> (Vec<String>, Vec<String>) {
         let commands = self.commands();
-        let mut remaining_width = (available_width - TOOLBAR_OVERFLOW_WIDTH_LOGICAL).max(0.0);
+        let content_width = (available_width - TOOLBAR_HORIZONTAL_PADDING_LOGICAL * 2.0).max(0.0);
+        let all_commands_width =
+            command_row_width(&commands, |command| self.command_width(command));
+        if all_commands_width <= content_width {
+            return (commands.into_iter().map(|command| command.command_key).collect(), Vec::new());
+        }
+
+        let mut remaining_width =
+            (content_width - TOOLBAR_COMMAND_SIZE_LOGICAL - TOOLBAR_COMMAND_GAP_LOGICAL).max(0.0);
         let mut visible_indices = Vec::new();
         let mut overflow_indices = Vec::new();
         for (index, command) in commands.iter().enumerate() {
-            let command_width = self.command_width(command);
+            let command_width = self.command_width(command) + TOOLBAR_COMMAND_GAP_LOGICAL;
             let must_remain_visible = command.overflow_priority == 0;
             if must_remain_visible || command_width <= remaining_width {
                 visible_indices.push(index);
@@ -85,23 +103,46 @@ impl EditorToolbarWidget {
     }
 
     fn command_width(&self, command: &EditorToolbarCommandInput) -> f32 {
+        if toolbar_icon(&command.command_key).is_some() {
+            return TOOLBAR_COMMAND_SIZE_LOGICAL;
+        }
         let label_width = command.label.chars().count() as f32 * TOOLBAR_FONT_SIZE_LOGICAL * 0.55;
-        (label_width + TOOLBAR_COMMAND_WIDTH_LOGICAL * 0.5).max(TOOLBAR_COMMAND_WIDTH_LOGICAL)
+        (label_width + TOOLBAR_COMMAND_SIZE_LOGICAL * 0.5).max(TOOLBAR_COMMAND_SIZE_LOGICAL)
     }
 
-    fn command_index_at(&self, px: f32, dpi: f32) -> Option<usize> {
+    fn command_key_at(&self, px: f32, py: f32, dpi: f32) -> Option<String> {
         let (visible, _) = self.visible_command_keys(self.rect.w / dpi);
-        let mut left = self.rect.x;
-        for (index, key) in visible.iter().enumerate() {
-            let command =
-                self.commands().into_iter().find(|command| command.command_key == *key)?;
-            let width = self.command_width(&command) * dpi;
-            if Rect::new(left, self.rect.y, width, self.rect.h).contains(px, self.rect.y + 1.0) {
-                return Some(index);
+        let commands = self.commands();
+        let mut left = self.rect.x + TOOLBAR_HORIZONTAL_PADDING_LOGICAL * dpi;
+        for key in visible {
+            let command = commands.iter().find(|command| command.command_key == key)?;
+            let width = self.command_width(command) * dpi;
+            if Rect::new(left, self.rect.y, width, self.rect.h).contains(px, py) {
+                return Some(key);
             }
             left += width + TOOLBAR_COMMAND_GAP_LOGICAL * dpi;
         }
         None
+    }
+
+    fn overflow_rect(&self, dpi: f32) -> Rect {
+        let (visible, overflow) = self.visible_command_keys(self.rect.w / dpi);
+        if overflow.is_empty() {
+            return Rect::ZERO;
+        }
+        let commands = self.commands();
+        let visible_width = visible
+            .iter()
+            .filter_map(|key| commands.iter().find(|command| command.command_key == *key))
+            .map(|command| self.command_width(command) + TOOLBAR_COMMAND_GAP_LOGICAL)
+            .sum::<f32>()
+            * dpi;
+        Rect::new(
+            self.rect.x + TOOLBAR_HORIZONTAL_PADDING_LOGICAL * dpi + visible_width,
+            self.rect.y,
+            TOOLBAR_COMMAND_SIZE_LOGICAL * dpi,
+            self.rect.h,
+        )
     }
 }
 
@@ -122,29 +163,66 @@ impl Widget for EditorToolbarWidget {
         }
         let (visible, overflow) = self.visible_command_keys(self.rect.w / ctx.dpi);
         let commands = self.commands();
-        let mut left = self.rect.x;
+        let mut left = self.rect.x + TOOLBAR_HORIZONTAL_PADDING_LOGICAL * ctx.dpi;
         for key in visible {
             let Some(command) = commands.iter().find(|command| command.command_key == key) else {
                 continue;
             };
             let width = self.command_width(command) * ctx.dpi;
-            let color = ctx.theme.palette.text_muted;
-            ctx.text(
-                left + 8.0 * ctx.dpi,
-                self.rect.y + self.rect.h * 0.5 + TOOLBAR_FONT_SIZE_LOGICAL * ctx.dpi * 0.35,
-                TOOLBAR_FONT_SIZE_LOGICAL * ctx.dpi,
-                color,
-                &command.label,
-            );
+            let button_rect = Rect::new(left, self.rect.y, width, self.rect.h);
+            if self.hovered_command_key.as_deref() == Some(command.command_key.as_str())
+                && command.enabled
+            {
+                ctx.list.fill_rounded(
+                    button_rect,
+                    ctx.theme.palette.bg_hover,
+                    TOOLBAR_CORNER_RADIUS_LOGICAL * ctx.dpi,
+                );
+            }
+            let mut color = ctx.theme.palette.text_muted;
+            if !command.enabled {
+                color[3] *= 0.45;
+            }
+            if let Some(icon) = toolbar_icon(&command.command_key) {
+                let icon_size = TOOLBAR_ICON_SIZE_LOGICAL * ctx.dpi;
+                draw_icon(
+                    ctx.list,
+                    icon,
+                    button_rect.x + (button_rect.w - icon_size) * 0.5,
+                    button_rect.y + (button_rect.h - icon_size) * 0.5,
+                    icon_size,
+                    color,
+                );
+            } else {
+                ctx.text(
+                    button_rect.x + 8.0 * ctx.dpi,
+                    button_rect.y
+                        + button_rect.h * 0.5
+                        + TOOLBAR_FONT_SIZE_LOGICAL * ctx.dpi * 0.35,
+                    TOOLBAR_FONT_SIZE_LOGICAL * ctx.dpi,
+                    color,
+                    &command.label,
+                );
+            }
             left += width + TOOLBAR_COMMAND_GAP_LOGICAL * ctx.dpi;
         }
         if !overflow.is_empty() {
-            ctx.text(
-                left + 8.0 * ctx.dpi,
-                self.rect.y + self.rect.h * 0.5 + TOOLBAR_FONT_SIZE_LOGICAL * ctx.dpi * 0.35,
-                TOOLBAR_FONT_SIZE_LOGICAL * ctx.dpi,
+            let overflow_rect = self.overflow_rect(ctx.dpi);
+            if self.overflow_hovered {
+                ctx.list.fill_rounded(
+                    overflow_rect,
+                    ctx.theme.palette.bg_hover,
+                    TOOLBAR_CORNER_RADIUS_LOGICAL * ctx.dpi,
+                );
+            }
+            let icon_size = TOOLBAR_ICON_SIZE_LOGICAL * ctx.dpi;
+            draw_icon(
+                ctx.list,
+                "ellipsis",
+                overflow_rect.x + (overflow_rect.w - icon_size) * 0.5,
+                overflow_rect.y + (overflow_rect.h - icon_size) * 0.5,
+                icon_size,
                 ctx.theme.palette.text_muted,
-                "更多",
             );
         }
     }
@@ -160,15 +238,21 @@ impl Widget for EditorToolbarWidget {
                     id: EDITOR_TOOLBAR_DISMISS_ID,
                 }))
             }
+            Event::MouseMove { px, py } => {
+                self.hovered_command_key = self.command_key_at(*px, *py, ctx.dpi);
+                self.overflow_hovered = self.overflow_rect(ctx.dpi).contains(*px, *py);
+                if self.hovered_command_key.is_some() || self.overflow_hovered {
+                    ctx.cursor_hint = Some(winit::window::CursorIcon::Pointer);
+                }
+                None
+            }
             Event::MouseDown { px, py, button: crate::core::MouseButton::Left } => {
                 if !self.rect.contains(*px, *py) {
                     return Some(WidgetAction::Control(ControlAction::Activated {
                         id: EDITOR_TOOLBAR_DISMISS_ID,
                     }));
                 }
-                if let Some(index) = self.command_index_at(*px, ctx.dpi) {
-                    let (visible, _) = self.visible_command_keys(self.rect.w / ctx.dpi);
-                    let key = visible.get(index)?.clone();
+                if let Some(key) = self.command_key_at(*px, *py, ctx.dpi) {
                     let command =
                         self.commands().into_iter().find(|command| command.command_key == key)?;
                     if !command.enabled {
@@ -179,9 +263,9 @@ impl Widget for EditorToolbarWidget {
                         value: TextPayload::Plain(key),
                     }));
                 }
-                Some(WidgetAction::Control(ControlAction::Activated {
-                    id: EDITOR_TOOLBAR_OVERFLOW_ID,
-                }))
+                self.overflow_rect(ctx.dpi).contains(*px, *py).then_some(WidgetAction::Control(
+                    ControlAction::Activated { id: EDITOR_TOOLBAR_OVERFLOW_ID },
+                ))
             }
             _ => None,
         }
@@ -193,6 +277,37 @@ impl Widget for EditorToolbarWidget {
 
     fn as_any_mut(&mut self) -> &mut dyn Any {
         self
+    }
+}
+
+fn command_row_width(
+    commands: &[EditorToolbarCommandInput],
+    command_width: impl Fn(&EditorToolbarCommandInput) -> f32,
+) -> f32 {
+    let commands_width = commands.iter().map(command_width).sum::<f32>();
+    let gap_count = commands.len().saturating_sub(1) as f32;
+    commands_width + gap_count * TOOLBAR_COMMAND_GAP_LOGICAL
+}
+
+fn toolbar_icon(command_key: &str) -> Option<&'static str> {
+    match command_key {
+        "undo" => Some("undo-2"),
+        "redo" => Some("redo-2"),
+        "heading" => Some("heading"),
+        "bold" => Some("bold"),
+        "italic" => Some("italic"),
+        "strike" => Some("strikethrough"),
+        "inline_code" => Some("code"),
+        "unordered_list" => Some("list"),
+        "ordered_list" => Some("list-ordered"),
+        "task_list" => Some("list-checks"),
+        "quote" => Some("quote"),
+        "code_block" => Some("square-code"),
+        "link" => Some("link"),
+        "promote" => Some("outdent"),
+        "demote" => Some("indent"),
+        "delete" => Some("trash-2"),
+        _ => None,
     }
 }
 
@@ -232,5 +347,29 @@ mod tests {
             toolbar.visible_command_keys(48.0),
             (vec!["undo".to_owned()], vec!["link".to_owned()])
         );
+    }
+
+    #[test]
+    fn icon_commands_use_compact_fixed_width_buttons() {
+        let mut toolbar = EditorToolbarWidget::new();
+        toolbar.set_input(EditorToolbarInput {
+            groups: vec![EditorToolbarGroupInput {
+                label: "编辑".to_owned(),
+                commands: ["undo", "redo", "promote", "demote"]
+                    .into_iter()
+                    .map(|command_key| EditorToolbarCommandInput {
+                        command_key: command_key.to_owned(),
+                        label: command_key.to_owned(),
+                        enabled: true,
+                        overflow_priority: 0,
+                    })
+                    .collect(),
+            }],
+            overflow_open: false,
+        });
+
+        for command in toolbar.commands() {
+            assert_eq!(toolbar.command_width(&command), 32.0, "{}", command.command_key);
+        }
     }
 }

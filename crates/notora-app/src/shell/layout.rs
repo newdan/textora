@@ -10,7 +10,7 @@ pub const MINIMUM_CARD_LIST_WIDTH_LOGICAL: f32 = 260.0;
 pub const MAXIMUM_CARD_LIST_WIDTH_LOGICAL: f32 = 520.0;
 pub const MINIMUM_EDITOR_WIDTH_LOGICAL: f32 = 300.0;
 pub const SPLITTER_WIDTH_LOGICAL: f32 = 8.0;
-pub const EDITOR_HEADER_HEIGHT_LOGICAL: f32 = 128.0;
+pub const EDITOR_HEADER_HEIGHT_LOGICAL: f32 = 72.0;
 pub const EDITOR_COMPACT_HEADER_HEIGHT_LOGICAL: f32 = 56.0;
 pub const EDITOR_TOOLBAR_HEIGHT_LOGICAL: f32 = 40.0;
 pub const EDITOR_COMPACT_HEIGHT_THRESHOLD_LOGICAL: f32 = 480.0;
@@ -317,6 +317,7 @@ mod tests {
         assert_eq!(layout.responsive_mode, ResponsiveLayoutMode::ThreePane);
         assert_eq!(layout.navigation_rect.w, DEFAULT_NAVIGATION_WIDTH_LOGICAL);
         assert_eq!(layout.card_list_rect.w, DEFAULT_CARD_LIST_WIDTH_LOGICAL);
+        assert_eq!(layout.editor_header_rect.h, 72.0);
         assert!(layout.editor_rect.x >= layout.card_list_splitter_rect.right());
         assert_editor_chrome_is_partitioned(layout);
     }

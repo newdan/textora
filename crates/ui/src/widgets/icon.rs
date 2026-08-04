@@ -484,6 +484,109 @@ const DATA_PALETTE: IconSvg = IconSvg {
     stroke_width: 2.0,
 };
 
+const DATA_UNDO_2: IconSvg = IconSvg {
+    paths: &["M9 14 4 9 9 4", "M4 9h10a6 6 0 0 1 6 6v1"],
+    circles: &[],
+    stroke_width: 2.0,
+};
+
+const DATA_REDO_2: IconSvg = IconSvg {
+    paths: &["M15 14 20 9 15 4", "M20 9H10a6 6 0 0 0-6 6v1"],
+    circles: &[],
+    stroke_width: 2.0,
+};
+
+const DATA_HEADING: IconSvg =
+    IconSvg { paths: &["M6 4v16", "M18 4v16", "M6 12h12"], circles: &[], stroke_width: 2.0 };
+
+const DATA_BOLD: IconSvg = IconSvg {
+    paths: &["M7 4v16", "M7 4h6l3 2v4l-3 2H7", "M13 12l4 2v4l-3 2H7"],
+    circles: &[],
+    stroke_width: 2.0,
+};
+
+const DATA_ITALIC: IconSvg =
+    IconSvg { paths: &["M10 4h9", "M5 20h9", "M15 4 9 20"], circles: &[], stroke_width: 2.0 };
+
+const DATA_STRIKETHROUGH: IconSvg = IconSvg {
+    paths: &["M17 5H9L7 7v3l2 2h6l2 2v3l-2 2H7", "M4 12h16"],
+    circles: &[],
+    stroke_width: 2.0,
+};
+
+const DATA_CODE: IconSvg =
+    IconSvg { paths: &["M8 6 2 12 8 18", "M16 6 22 12 16 18"], circles: &[], stroke_width: 2.0 };
+
+const DATA_LIST_ORDERED: IconSvg = IconSvg {
+    paths: &["M10 6h11", "M10 12h11", "M10 18h11", "M4 4v4", "M3 8h3", "M3 14h3l-3 4h3"],
+    circles: &[],
+    stroke_width: 2.0,
+};
+
+const DATA_LIST_CHECKS: IconSvg = IconSvg {
+    paths: &[
+        "M3 5l2 2 3-4",
+        "M3 12l2 2 3-4",
+        "M3 19l2 2 3-4",
+        "M11 6h10",
+        "M11 13h10",
+        "M11 20h10",
+    ],
+    circles: &[],
+    stroke_width: 2.0,
+};
+
+const DATA_QUOTE: IconSvg = IconSvg {
+    paths: &["M6 7h5v5H7v5H4v-7l2-3", "M15 7h5v5h-4v5h-3v-7l2-3"],
+    circles: &[],
+    stroke_width: 2.0,
+};
+
+const DATA_SQUARE_CODE: IconSvg = IconSvg {
+    paths: &["M4 3h16l1 1v16l-1 1H4l-1-1V4l1-1", "M10 8 6 12l4 4", "M14 8l4 4-4 4"],
+    circles: &[],
+    stroke_width: 2.0,
+};
+
+const DATA_LINK: IconSvg = IconSvg {
+    paths: &[
+        "M10 13a5 5 0 0 0 7 0l2-2a5 5 0 0 0-7-7l-1 1",
+        "M14 11a5 5 0 0 0-7 0l-2 2a5 5 0 0 0 7 7l1-1",
+    ],
+    circles: &[],
+    stroke_width: 2.0,
+};
+
+const DATA_OUTDENT: IconSvg = IconSvg {
+    paths: &["M9 5h12", "M9 12h12", "M9 19h12", "M3 12h4", "M5 9l-3 3 3 3"],
+    circles: &[],
+    stroke_width: 2.0,
+};
+
+const DATA_INDENT: IconSvg = IconSvg {
+    paths: &["M9 5h12", "M9 12h12", "M9 19h12", "M2 12h4", "M3 9l3 3-3 3"],
+    circles: &[],
+    stroke_width: 2.0,
+};
+
+const DATA_LOCK: IconSvg = IconSvg {
+    paths: &["M7 11V7a5 5 0 0 1 10 0v4", "M5 11h14v10H5z"],
+    circles: &[(12.0, 16.0, 1.0)],
+    stroke_width: 2.0,
+};
+
+const DATA_LOCK_OPEN: IconSvg = IconSvg {
+    paths: &["M8 11V7a5 5 0 0 1 9-3", "M5 11h14v10H5z"],
+    circles: &[(12.0, 16.0, 1.0)],
+    stroke_width: 2.0,
+};
+
+const DATA_ELLIPSIS: IconSvg = IconSvg {
+    paths: &[],
+    circles: &[(5.0, 12.0, 1.0), (12.0, 12.0, 1.0), (19.0, 12.0, 1.0)],
+    stroke_width: 2.0,
+};
+
 fn icon_svg(name: &str) -> Option<&'static IconSvg> {
     match name {
         "plus" => Some(&DATA_PLUS),
@@ -505,6 +608,23 @@ fn icon_svg(name: &str) -> Option<&'static IconSvg> {
         "list" => Some(&DATA_LIST),
         "list-tree" => Some(&DATA_LIST_TREE),
         "palette" => Some(&DATA_PALETTE),
+        "undo-2" => Some(&DATA_UNDO_2),
+        "redo-2" => Some(&DATA_REDO_2),
+        "heading" => Some(&DATA_HEADING),
+        "bold" => Some(&DATA_BOLD),
+        "italic" => Some(&DATA_ITALIC),
+        "strikethrough" => Some(&DATA_STRIKETHROUGH),
+        "code" => Some(&DATA_CODE),
+        "list-ordered" => Some(&DATA_LIST_ORDERED),
+        "list-checks" => Some(&DATA_LIST_CHECKS),
+        "quote" => Some(&DATA_QUOTE),
+        "square-code" => Some(&DATA_SQUARE_CODE),
+        "link" => Some(&DATA_LINK),
+        "outdent" => Some(&DATA_OUTDENT),
+        "indent" => Some(&DATA_INDENT),
+        "lock" => Some(&DATA_LOCK),
+        "lock-open" => Some(&DATA_LOCK_OPEN),
+        "ellipsis" => Some(&DATA_ELLIPSIS),
         _ => None,
     }
 }
@@ -666,6 +786,23 @@ mod tests {
             "file",
             "file-text",
             "notebook-pen",
+            "undo-2",
+            "redo-2",
+            "heading",
+            "bold",
+            "italic",
+            "strikethrough",
+            "code",
+            "list-ordered",
+            "list-checks",
+            "quote",
+            "square-code",
+            "link",
+            "outdent",
+            "indent",
+            "lock",
+            "lock-open",
+            "ellipsis",
         ] {
             assert!(icon_svg(icon_name).is_some(), "{icon_name} should be registered");
             assert!(ensure_icon(icon_name).is_some(), "{icon_name} should tessellate");
