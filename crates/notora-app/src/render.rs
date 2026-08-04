@@ -974,6 +974,7 @@ impl NotoraShell {
         search_box.set_placeholder("搜索笔记...");
         search_box.set_max_len_bytes(2_048);
         search_box.set_leading_content_inset_logical(SEARCH_ICON_AREA_WIDTH_LOGICAL);
+        search_box.set_blink(true);
         let mut new_note_button = SplitButtonWidget::new();
         new_note_button.set_action_ids(NEW_NOTE_BUTTON_ID, NEW_NOTE_MENU_BUTTON_ID);
         new_note_button.set_icon(Some("plus".to_owned()));
@@ -2468,6 +2469,42 @@ mod tests {
                 },
             }]
         );
+    }
+
+    #[test]
+    fn first_search_box_click_focuses_and_paints_the_caret() {
+        use ui::core::paint::{DrawCmd, DrawList};
+
+        let mut shell = NotoraShell::new();
+        let theme = ui::theme::test_theme();
+        let mut measure = ui::NoopMeasure;
+        let mut layout_context =
+            ui::LayoutCtx { ui_measure: None, measure: &mut measure, theme: &theme, dpi: 1.0 };
+        shell.search_rect = Rect::new(8.0, 8.0, 240.0, 32.0);
+        shell.search_box.set_rect(shell.search_rect, &mut layout_context);
+        let click = Event::MouseDown { px: 24.0, py: 24.0, button: ui::core::MouseButton::Left };
+
+        let route = shell.route_event(&click, FocusTarget::Editor, &theme, 1.0);
+        assert_eq!(
+            route.actions,
+            vec![NotoraAction::FocusRequested(FocusTarget::NavigationSearch)]
+        );
+
+        let _ = shell.route_event(
+            &Event::MouseUp { px: 24.0, py: 24.0, button: ui::core::MouseButton::Left },
+            FocusTarget::NavigationSearch,
+            &theme,
+            1.0,
+        );
+        assert!(shell.search_box.is_focused());
+
+        let mut draw_list = DrawList::new();
+        let mut paint_context = ui::PaintCtx::new(&mut draw_list, &theme, 1.0);
+        shell.search_box.paint(&mut paint_context);
+
+        assert!(draw_list.cmds.iter().any(|command| {
+            matches!(command, DrawCmd::FillRect { radius, .. } if *radius == 0.0)
+        }));
     }
 
     #[test]

@@ -62,10 +62,12 @@ pub struct EditorHeaderWidget {
 
 impl EditorHeaderWidget {
     pub fn new() -> Self {
+        let mut title_box = TextBox::with_id(EDITOR_HEADER_TITLE_ID);
+        title_box.set_blink(true);
         Self {
             input: EditorHeaderInput::default(),
             rect: Rect::ZERO,
-            title_box: TextBox::with_id(EDITOR_HEADER_TITLE_ID),
+            title_box,
             star_rect: Rect::ZERO,
             delete_rect: Rect::ZERO,
             encryption_rect: Rect::ZERO,
@@ -495,6 +497,44 @@ mod tests {
             ),
             Some(ControlAction::Activated { id: EDITOR_HEADER_DELETE_ID })
         );
+    }
+
+    #[test]
+    fn focused_title_box_paints_the_caret_after_the_first_click() {
+        use crate::core::paint::{DrawCmd, DrawList};
+
+        let mut header = EditorHeaderWidget::new();
+        header.set_input(input());
+        let theme = crate::theme::test_theme();
+        let mut measure = HeaderMeasure;
+        let mut layout_context =
+            LayoutCtx { ui_measure: None, measure: &mut measure, theme: &theme, dpi: 1.0 };
+        header.set_rect(Rect::new(0.0, 0.0, 640.0, 128.0), &mut layout_context);
+        let mut event_context = EventCtx { theme: &theme, dpi: 1.0, cursor_hint: None };
+        let title_rect = header.title_box.rect();
+
+        assert_eq!(
+            header.handle_event(
+                &Event::MouseDown {
+                    px: title_rect.x + 4.0,
+                    py: title_rect.y + title_rect.h * 0.5,
+                    button: MouseButton::Left,
+                },
+                &mut event_context,
+            ),
+            Some(ControlAction::FocusRequested { id: EDITOR_HEADER_TITLE_ID })
+        );
+
+        header.set_keyboard_focus(Some(EDITOR_HEADER_TITLE_ID));
+        assert!(header.title_is_focused());
+
+        let mut draw_list = DrawList::new();
+        let mut paint_context = PaintCtx::new(&mut draw_list, &theme, 1.0);
+        header.title_box.paint(&mut paint_context);
+
+        assert!(draw_list.cmds.iter().any(|command| {
+            matches!(command, DrawCmd::FillRect { radius, .. } if *radius == 0.0)
+        }));
     }
 
     #[test]
