@@ -7,6 +7,8 @@ use std::any::Any;
 const TAG_EDITOR_ROW_HEIGHT_LOGICAL: f32 = 26.0;
 const TAG_EDITOR_HORIZONTAL_PADDING_LOGICAL: f32 = 8.0;
 const TAG_EDITOR_FONT_SIZE_LOGICAL: f32 = 12.0;
+const TAG_EDITOR_LABEL: &str = "标签：";
+const TAG_EDITOR_ADD_PROMPT: &str = "添加标签";
 
 pub const TAG_EDITOR_INPUT_ID: WidgetId = WidgetId(10_201);
 pub const TAG_EDITOR_SUBMIT_ID: WidgetId = WidgetId(10_202);
@@ -155,6 +157,19 @@ impl Widget for TagEditorWidget {
         let mut x = self.rect.x + TAG_EDITOR_HORIZONTAL_PADDING_LOGICAL * ctx.dpi;
         let baseline =
             self.rect.y + self.rect.h * 0.5 + TAG_EDITOR_FONT_SIZE_LOGICAL * ctx.dpi * 0.35;
+        let label = if self.input.chips.is_empty() && self.input.pending_text.is_empty() {
+            format!("{TAG_EDITOR_LABEL}{TAG_EDITOR_ADD_PROMPT}")
+        } else {
+            TAG_EDITOR_LABEL.to_owned()
+        };
+        ctx.text(
+            x,
+            baseline,
+            TAG_EDITOR_FONT_SIZE_LOGICAL * ctx.dpi,
+            ctx.theme.palette.text_muted,
+            &label,
+        );
+        x += label.chars().count() as f32 * TAG_EDITOR_FONT_SIZE_LOGICAL * ctx.dpi * 0.55;
         for chip in self.input.chips.iter().take(visible_count) {
             let label = format!("{}  ", chip.label);
             ctx.text(
@@ -304,5 +319,37 @@ mod tests {
             ),
             Some(TagEditorAction::SuggestionSelected("product/textora".to_owned()))
         );
+    }
+
+    #[test]
+    fn empty_tag_editor_shows_an_add_tag_prompt() {
+        use crate::core::paint::{DrawCmd, DrawList};
+
+        let theme = crate::theme::test_theme();
+        let mut measure = crate::core::NoopMeasure;
+        let mut layout_context =
+            LayoutCtx { ui_measure: None, measure: &mut measure, theme: &theme, dpi: 1.0 };
+        let mut editor = TagEditorWidget::new();
+        editor.set_input(TagEditorInput { enabled: true, ..TagEditorInput::default() });
+        editor.set_rect(
+            Rect::new(0.0, 0.0, 320.0, TAG_EDITOR_ROW_HEIGHT_LOGICAL),
+            &mut layout_context,
+        );
+
+        let mut draw_list = DrawList::new();
+        let mut shaper = shaping::Shaper::new().expect("test shaper should initialize");
+        let mut paint_context = PaintCtx {
+            list: &mut draw_list,
+            theme: &theme,
+            dpi: 1.0,
+            offset: (0.0, 0.0),
+            global_alpha: 1.0,
+            shaper: Some(&mut shaper),
+        };
+        editor.paint(&mut paint_context);
+
+        assert!(draw_list.cmds.iter().any(
+            |command| matches!(command, DrawCmd::TextLayout { layout, .. } if layout.text == "标签：添加标签")
+        ));
     }
 }

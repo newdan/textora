@@ -12,6 +12,9 @@ use ui::{Event, EventCtx, LayoutCtx, PaintCtx, Rect, Widget};
 
 const EDITOR_PANE_TAG_ROW_HEIGHT_LOGICAL: f32 = 28.0;
 const EDITOR_PANE_TAG_HORIZONTAL_INSET_LOGICAL: f32 = 16.0;
+const EDITOR_PANE_PROPERTY_ROW_GAP_LOGICAL: f32 = 12.0;
+const EDITOR_PANE_PROPERTY_FONT_SIZE_LOGICAL: f32 = 12.0;
+const EDITOR_PANE_MAXIMUM_WORKSPACE_WIDTH_RATIO: f32 = 0.45;
 const EDITOR_PANE_LOCATION_WIDTH_LOGICAL: f32 = 360.0;
 const EDITOR_PANE_LOCATION_HEIGHT_LOGICAL: f32 = 220.0;
 const EDITOR_PANE_LOCATION_INSET_LOGICAL: f32 = 16.0;
@@ -91,6 +94,7 @@ pub struct EditorPaneChrome {
     toolbar: EditorToolbarWidget,
     rects: EditorPaneRects,
     document_header_rect: Rect,
+    workspace_rect: Rect,
     tag_rect: Rect,
     location_rect: Rect,
     tag_editor_active: bool,
@@ -106,6 +110,7 @@ impl EditorPaneChrome {
             toolbar: EditorToolbarWidget::new(),
             rects: EditorPaneRects::default(),
             document_header_rect: Rect::ZERO,
+            workspace_rect: Rect::ZERO,
             tag_rect: Rect::ZERO,
             location_rect: Rect::ZERO,
             tag_editor_active: false,
@@ -137,7 +142,10 @@ impl EditorPaneChrome {
         self.input.tags.compact = compact;
         self.header.set_input(self.input.header.clone());
         self.tag_editor.set_input(self.input.tags.clone());
-        self.tag_rect = tag_rect(rects.header, context.dpi, self.input.tags.enabled);
+        self.workspace_rect =
+            workspace_rect(rects.header, context, workspace_label(&self.input.location).as_deref());
+        self.tag_rect =
+            tag_rect(rects.header, context.dpi, self.input.tags.enabled, self.workspace_rect.w);
         self.location_rect = location_rect(rects.header, context.dpi, self.input.location.open);
         self.header.set_rect(local_rect(self.document_header_rect), context);
         self.toolbar.set_rect(local_rect(rects.toolbar), context);
@@ -219,6 +227,18 @@ impl EditorPaneChrome {
             return;
         }
         paint_at(context, self.document_header_rect, |context| self.header.paint(context));
+        if let Some(label) = workspace_label(&self.input.location) {
+            let baseline = self.workspace_rect.y
+                + self.workspace_rect.h * 0.5
+                + EDITOR_PANE_PROPERTY_FONT_SIZE_LOGICAL * context.dpi * 0.35;
+            context.text(
+                self.workspace_rect.x,
+                baseline,
+                EDITOR_PANE_PROPERTY_FONT_SIZE_LOGICAL * context.dpi,
+                context.theme.palette.text_muted,
+                &label,
+            );
+        }
         if self.input.tags.enabled {
             paint_at(context, self.tag_rect, |context| self.tag_editor.paint(context));
         }
@@ -285,15 +305,39 @@ fn document_header_rect(header: Rect, dpi: f32) -> Rect {
     Rect::new(header.x, header.y, header.w, (header.h - tag_row_height).max(0.0))
 }
 
-fn tag_rect(header: Rect, dpi: f32, visible: bool) -> Rect {
+fn workspace_label(location: &LocationPickerInput) -> Option<String> {
+    (!location.workspace_name.is_empty())
+        .then(|| format!("所属工作区：{}", location.workspace_name))
+}
+
+fn workspace_rect(header: Rect, context: &mut LayoutCtx<'_>, label: Option<&str>) -> Rect {
+    let Some(label) = label else {
+        return Rect::ZERO;
+    };
+    let property_row = property_row_rect(header, context.dpi);
+    let measured_width =
+        context.measure.measure(label, EDITOR_PANE_PROPERTY_FONT_SIZE_LOGICAL * context.dpi);
+    let maximum_width = property_row.w * EDITOR_PANE_MAXIMUM_WORKSPACE_WIDTH_RATIO;
+    Rect::new(property_row.x, property_row.y, measured_width.min(maximum_width), property_row.h)
+}
+
+fn tag_rect(header: Rect, dpi: f32, visible: bool, workspace_width: f32) -> Rect {
     if !visible || header.w <= 0.0 || header.h <= 0.0 {
         return Rect::ZERO;
     }
+    let property_row = property_row_rect(header, dpi);
+    let gap = if workspace_width > 0.0 { EDITOR_PANE_PROPERTY_ROW_GAP_LOGICAL * dpi } else { 0.0 };
+    let x = property_row.x + workspace_width + gap;
+    Rect::new(x, property_row.y, (property_row.right() - x).max(0.0), property_row.h)
+}
+
+fn property_row_rect(header: Rect, dpi: f32) -> Rect {
+    let horizontal_inset = EDITOR_PANE_TAG_HORIZONTAL_INSET_LOGICAL * dpi;
     let height = (EDITOR_PANE_TAG_ROW_HEIGHT_LOGICAL * dpi).min(header.h);
     Rect::new(
-        header.x + EDITOR_PANE_TAG_HORIZONTAL_INSET_LOGICAL * dpi,
+        header.x + horizontal_inset,
         header.bottom() - height,
-        (header.w - EDITOR_PANE_TAG_HORIZONTAL_INSET_LOGICAL * dpi * 2.0).max(0.0),
+        (header.w - horizontal_inset * 2.0).max(0.0),
         height,
     )
 }
@@ -437,6 +481,16 @@ mod tests {
     }
 
     #[test]
+    fn workspace_property_has_a_clear_label() {
+        let location = LocationPickerInput {
+            workspace_name: "textora".to_owned(),
+            ..LocationPickerInput::default()
+        };
+
+        assert_eq!(workspace_label(&location).as_deref(), Some("所属工作区：textora"));
+    }
+
+    #[test]
     fn an_empty_pane_does_not_leave_popup_hit_targets() {
         let mut chrome = EditorPaneChrome::new();
         chrome.set_input(input(EditorPaneMode::Empty));
@@ -503,9 +557,10 @@ mod tests {
     }
 
     #[test]
-    fn tag_editor_uses_a_dedicated_row_below_the_document_header() {
-        let tags = tag_rect(Rect::new(0.0, 0.0, 640.0, 108.0), 1.0, true);
+    fn property_row_places_tags_after_the_workspace_label() {
+        let tags = tag_rect(Rect::new(0.0, 0.0, 640.0, 108.0), 1.0, true, 120.0);
 
+        assert_eq!(tags.x, 148.0);
         assert_eq!(tags.y, 80.0);
         assert_eq!(tags.h, EDITOR_PANE_TAG_ROW_HEIGHT_LOGICAL);
     }
