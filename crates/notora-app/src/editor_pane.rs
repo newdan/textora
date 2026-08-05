@@ -15,6 +15,7 @@ const EDITOR_PANE_TAG_HORIZONTAL_INSET_LOGICAL: f32 = 16.0;
 const EDITOR_PANE_PROPERTY_ROW_GAP_LOGICAL: f32 = 12.0;
 const EDITOR_PANE_PROPERTY_FONT_SIZE_LOGICAL: f32 = 12.0;
 const EDITOR_PANE_MAXIMUM_WORKSPACE_WIDTH_RATIO: f32 = 0.45;
+const EDITOR_PANE_ESTIMATED_TEXT_WIDTH_RATIO: f32 = 0.55;
 const EDITOR_PANE_LOCATION_WIDTH_LOGICAL: f32 = 360.0;
 const EDITOR_PANE_LOCATION_HEIGHT_LOGICAL: f32 = 220.0;
 const EDITOR_PANE_LOCATION_INSET_LOGICAL: f32 = 16.0;
@@ -317,8 +318,17 @@ fn workspace_rect(header: Rect, context: &mut LayoutCtx<'_>, label: Option<&str>
     let property_row = property_row_rect(header, context.dpi);
     let measured_width =
         context.measure.measure(label, EDITOR_PANE_PROPERTY_FONT_SIZE_LOGICAL * context.dpi);
+    let estimated_width = label.chars().count() as f32
+        * EDITOR_PANE_PROPERTY_FONT_SIZE_LOGICAL
+        * context.dpi
+        * EDITOR_PANE_ESTIMATED_TEXT_WIDTH_RATIO;
     let maximum_width = property_row.w * EDITOR_PANE_MAXIMUM_WORKSPACE_WIDTH_RATIO;
-    Rect::new(property_row.x, property_row.y, measured_width.min(maximum_width), property_row.h)
+    Rect::new(
+        property_row.x,
+        property_row.y,
+        measured_width.max(estimated_width).min(maximum_width),
+        property_row.h,
+    )
 }
 
 fn tag_rect(header: Rect, dpi: f32, visible: bool, workspace_width: f32) -> Rect {
@@ -563,6 +573,20 @@ mod tests {
         assert_eq!(tags.x, 148.0);
         assert_eq!(tags.y, 80.0);
         assert_eq!(tags.h, EDITOR_PANE_TAG_ROW_HEIGHT_LOGICAL);
+    }
+
+    #[test]
+    fn workspace_label_reserves_tag_space_without_font_measurement() {
+        let theme = ui::theme::test_theme();
+        let mut measure = ui::NoopMeasure;
+        let mut layout_context =
+            ui::LayoutCtx { ui_measure: None, measure: &mut measure, theme: &theme, dpi: 1.0 };
+        let header = Rect::new(0.0, 0.0, 640.0, 108.0);
+        let workspace = workspace_rect(header, &mut layout_context, Some("所属工作区：textora"));
+        let tags = tag_rect(header, 1.0, true, workspace.w);
+
+        assert!(workspace.w > 0.0);
+        assert!(tags.x > property_row_rect(header, 1.0).x);
     }
 
     #[test]
