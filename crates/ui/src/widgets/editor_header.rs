@@ -6,7 +6,7 @@ use crate::core::{
     WidgetAction,
 };
 use crate::widgets::icon::draw_icon;
-use crate::widgets::text_box::TextBox;
+use crate::widgets::text_box::{TextBox, TextBoxChrome};
 use std::any::Any;
 
 const HEADER_HORIZONTAL_PADDING_LOGICAL: f32 = 16.0;
@@ -19,6 +19,7 @@ const HEADER_TITLE_HEIGHT_LOGICAL: f32 = 40.0;
 const HEADER_ROW_GAP_LOGICAL: f32 = 4.0;
 const HEADER_COMPACT_HEIGHT_THRESHOLD_LOGICAL: f32 = 64.0;
 const HEADER_COMPACT_WIDTH_THRESHOLD_LOGICAL: f32 = 420.0;
+const HEADER_TITLE_FONT_SIZE_LOGICAL: f32 = 24.0;
 
 pub const EDITOR_HEADER_TITLE_ID: WidgetId = WidgetId(10_001);
 pub const EDITOR_HEADER_STAR_ID: WidgetId = WidgetId(10_002);
@@ -64,6 +65,10 @@ impl EditorHeaderWidget {
     pub fn new() -> Self {
         let mut title_box = TextBox::with_id(EDITOR_HEADER_TITLE_ID);
         title_box.set_blink(true);
+        title_box.set_chrome(TextBoxChrome::Seamless);
+        title_box.set_font_size_logical(HEADER_TITLE_FONT_SIZE_LOGICAL);
+        title_box.set_leading_content_inset_logical(0.0);
+        title_box.set_placeholder("无标题");
         Self {
             input: EditorHeaderInput::default(),
             rect: Rect::ZERO,
@@ -610,6 +615,27 @@ mod tests {
         assert!(header.metadata_rect.w > 0.0);
         assert!(
             header.metadata_rect.right() + HEADER_ACTION_GAP_LOGICAL <= header.encryption_rect.x
+        );
+    }
+
+    #[test]
+    fn idle_title_is_painted_without_an_input_border() {
+        use crate::core::paint::{DrawCmd, DrawList};
+
+        let mut header = EditorHeaderWidget::new();
+        header.set_input(input());
+        let theme = crate::theme::test_theme();
+        let mut measure = HeaderMeasure;
+        let mut layout_context =
+            LayoutCtx { ui_measure: None, measure: &mut measure, theme: &theme, dpi: 1.0 };
+        header.set_rect(Rect::new(0.0, 0.0, 760.0, 80.0), &mut layout_context);
+        let mut draw_list = DrawList::new();
+        let mut paint_context = PaintCtx::new(&mut draw_list, &theme, 1.0);
+
+        header.paint(&mut paint_context);
+
+        assert!(
+            !draw_list.cmds.iter().any(|command| matches!(command, DrawCmd::StrokeRect { .. }))
         );
     }
 

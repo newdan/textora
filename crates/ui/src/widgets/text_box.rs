@@ -8,6 +8,17 @@ use crate::core::{
 };
 
 const MASKED_ECHO_GLYPH: char = '•';
+const DEFAULT_FONT_SIZE_LOGICAL: f32 = 14.0;
+const MINIMUM_FONT_SIZE_LOGICAL: f32 = 1.0;
+const FRAMED_CORNER_RADIUS_LOGICAL: f32 = 3.0;
+const SEAMLESS_FOCUS_CORNER_RADIUS_LOGICAL: f32 = 6.0;
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum TextBoxChrome {
+    #[default]
+    Framed,
+    Seamless,
+}
 
 /// IME event type — received by TextBox from the parent widget.
 #[derive(Clone)]
@@ -173,6 +184,8 @@ pub struct TextBox {
     echo_mode: EchoMode,
     blink_on: bool,
     focused: bool,
+    chrome: TextBoxChrome,
+    font_size_logical: f32,
 
     // Mouse drag
     dragging: bool,
@@ -215,6 +228,8 @@ impl TextBox {
             echo_mode: EchoMode::Plain,
             blink_on: false,
             focused: false,
+            chrome: TextBoxChrome::Framed,
+            font_size_logical: DEFAULT_FONT_SIZE_LOGICAL,
             dragging: false,
             cursor_x: 0.0,
             preedit_width: 0.0,
@@ -260,6 +275,14 @@ impl TextBox {
 
     pub fn set_placeholder(&mut self, ph: &str) {
         self.placeholder = ph.to_string();
+    }
+
+    pub fn set_chrome(&mut self, chrome: TextBoxChrome) {
+        self.chrome = chrome;
+    }
+
+    pub fn set_font_size_logical(&mut self, font_size_logical: f32) {
+        self.font_size_logical = font_size_logical.max(MINIMUM_FONT_SIZE_LOGICAL);
     }
 
     pub fn set_fixed_size_logical(&mut self, width: f32, height: f32) {
@@ -787,7 +810,7 @@ impl TextBox {
     /// Called by parent during set_rect / layout phase.
     pub fn layout(&mut self, rect: Rect, ctx: &mut LayoutCtx) {
         self.rect = rect;
-        let font_size = 14.0 * ctx.dpi;
+        let font_size = self.font_size_logical * ctx.dpi;
 
         // Measure text up to cursor for cursor_x
         let measure: &mut dyn crate::core::measure::TextMeasure = match ctx.ui_measure {
@@ -832,27 +855,9 @@ impl TextBox {
             return;
         }
         let dpi = ctx.dpi;
-        let font_size = 14.0 * dpi;
+        let font_size = self.font_size_logical * dpi;
         let baseline = self.rect.y + self.rect.h * 0.5 + font_size * 0.35;
-        let corner_radius = 3.0 * dpi;
-
-        // 1. Background — focused 时略亮
-        let bg = {
-            let mut c = ctx.theme.palette.input_bg;
-            if self.focused {
-                c[0] = (c[0] + 0.04).min(1.0);
-                c[1] = (c[1] + 0.04).min(1.0);
-                c[2] = (c[2] + 0.04).min(1.0);
-            }
-            c
-        };
-        ctx.list.fill_rounded(self.rect, bg, corner_radius);
-
-        // 2. Border — 用 stroke_rounded 描边，不覆盖背景
-        let border_color =
-            if self.focused { ctx.theme.palette.accent } else { ctx.theme.palette.input_border };
-        let line_w = if self.focused { 1.5 * dpi } else { 1.0 * dpi };
-        ctx.list.stroke_rounded(self.rect, border_color, corner_radius, line_w);
+        self.paint_chrome(ctx);
 
         let text_x = self.rect.x + self.text_pad;
 
@@ -972,6 +977,34 @@ impl TextBox {
             );
             ctx.list.fill(cursor_rect, ctx.theme.palette.input_fg);
         }
+    }
+
+    fn paint_chrome(&self, ctx: &mut PaintCtx) {
+        let dpi = ctx.dpi;
+        if self.chrome == TextBoxChrome::Seamless {
+            if self.focused {
+                ctx.list.fill_rounded(
+                    self.rect,
+                    ctx.theme.palette.bg_hover,
+                    SEAMLESS_FOCUS_CORNER_RADIUS_LOGICAL * dpi,
+                );
+            }
+            return;
+        }
+
+        let mut background = ctx.theme.palette.input_bg;
+        if self.focused {
+            background[0] = (background[0] + 0.04).min(1.0);
+            background[1] = (background[1] + 0.04).min(1.0);
+            background[2] = (background[2] + 0.04).min(1.0);
+        }
+        let corner_radius = FRAMED_CORNER_RADIUS_LOGICAL * dpi;
+        ctx.list.fill_rounded(self.rect, background, corner_radius);
+
+        let border_color =
+            if self.focused { ctx.theme.palette.accent } else { ctx.theme.palette.input_border };
+        let line_width = if self.focused { 1.5 * dpi } else { 1.0 * dpi };
+        ctx.list.stroke_rounded(self.rect, border_color, corner_radius, line_width);
     }
 
     /// Sync text from an external source (e.g., app-layer snapshot).
@@ -1591,6 +1624,23 @@ mod tests {
         if let DrawCmd::TextLayout { layout, .. } = &texts[0] {
             assert_eq!(&layout.text, "hello");
         }
+    }
+
+    #[test]
+    fn seamless_chrome_removes_the_idle_input_frame() {
+        use crate::core::paint::DrawCmd;
+
+        let mut text_box = TextBox::new();
+        text_box.set_text("沉浸式标题");
+        text_box.set_chrome(TextBoxChrome::Seamless);
+
+        let draw_list = paint_laid_out(&mut text_box);
+
+        assert!(!draw_list.cmds.iter().any(|command| matches!(
+            command,
+            DrawCmd::FillRect { .. } | DrawCmd::StrokeRect { .. }
+        )));
+        assert!(draw_list.cmds.iter().any(|command| matches!(command, DrawCmd::TextLayout { .. })));
     }
 
     #[test]

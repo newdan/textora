@@ -1128,7 +1128,8 @@ impl NotoraApp {
         let Some(snapshot) = self.editor_runtime.document_text_snapshot(tab_id) else {
             return;
         };
-        model.editor_chrome.header.title = document_title_projection(kind, &snapshot.text).title;
+        model.editor_chrome.header.title =
+            editor_title_from_source(&model.editor_chrome.header.title, kind, &snapshot.text);
     }
 
     fn render_frame(
@@ -1800,6 +1801,14 @@ fn title_edit_error_message(error: DocumentTextEditError) -> String {
         DocumentTextEditError::InvalidByteRange { .. } => "标题范围无效，请重新提交".to_owned(),
         DocumentTextEditError::ReadOnly { .. } => "当前笔记不可编辑".to_owned(),
     }
+}
+
+fn editor_title_from_source(current_title: &str, kind: DocumentKind, source: &str) -> String {
+    let projected_title = document_title_projection(kind, source).title;
+    if projected_title.is_empty() {
+        return current_title.to_owned();
+    }
+    projected_title
 }
 
 fn submit_shell_frame(
@@ -2967,9 +2976,9 @@ mod tests {
 
     use super::{
         FontSystemPreparation, NotoraApp, PendingNoteMove, PendingTrashMove,
-        SettingsPersistenceState, StartupTrace, register_pending_metadata_mutation,
-        remove_pending_metadata_mutation, rename_file_name_for_destination,
-        workspace_relative_directory,
+        SettingsPersistenceState, StartupTrace, editor_title_from_source,
+        register_pending_metadata_mutation, remove_pending_metadata_mutation,
+        rename_file_name_for_destination, workspace_relative_directory,
     };
     use crate::action::{MetadataMutation, NotoraAction};
     use crate::autosave::AutoSaveState;
@@ -2986,6 +2995,14 @@ mod tests {
         let paths = NotoraPaths::from_config_directory(directory.keep().join("notora"))
             .expect("test should create isolated product paths");
         NotoraApp::with_paths(paths).expect("notora app should construct without a window")
+    }
+
+    #[test]
+    fn editor_title_keeps_catalog_title_when_source_has_no_title_projection() {
+        assert_eq!(
+            editor_title_from_source("项目路线图", DocumentKind::Markdown, "正文内容\n"),
+            "项目路线图"
+        );
     }
 
     fn card_page_contains_note(card_page: &CardPageState, note_id: notora_core::NoteId) -> bool {
