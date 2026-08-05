@@ -3,6 +3,9 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use appkit_shell::editor_runtime::{EditorFrame, RenderError};
 use notora_core::{DocumentIdentity, DocumentKind, NavigationScope, NoteId};
+use ui::canvas_scrollbars::{
+    CanvasScrollbarsAction, CanvasScrollbarsInput, CanvasScrollbarsWidget,
+};
 use ui::core::WidgetAction;
 use ui::core::widget::{ControlAction, TextPayload, WidgetId};
 use ui::icon::draw_icon;
@@ -903,19 +906,28 @@ struct RenderedToolbarButton {
 pub struct NotoraEventRoute {
     pub actions: Vec<NotoraAction>,
     pub consumed: bool,
+    pub canvas_scrollbar_action: Option<CanvasScrollbarsAction>,
 }
 
 impl NotoraEventRoute {
     fn ignored() -> Self {
-        Self { actions: Vec::new(), consumed: false }
+        Self { actions: Vec::new(), consumed: false, canvas_scrollbar_action: None }
     }
 
     fn consumed(action: Option<NotoraAction>) -> Self {
-        Self { actions: action.into_iter().collect(), consumed: true }
+        Self {
+            actions: action.into_iter().collect(),
+            consumed: true,
+            canvas_scrollbar_action: None,
+        }
     }
 
     fn passthrough(action: NotoraAction) -> Self {
-        Self { actions: vec![action], consumed: false }
+        Self { actions: vec![action], consumed: false, canvas_scrollbar_action: None }
+    }
+
+    fn canvas_scrollbar(action: Option<CanvasScrollbarsAction>) -> Self {
+        Self { actions: Vec::new(), consumed: true, canvas_scrollbar_action: action }
     }
 }
 
@@ -927,6 +939,9 @@ pub struct NotoraShell {
     card_empty_state: StatusStateWidget,
     card_empty_state_visible: bool,
     editor_empty_state: StatusStateWidget,
+    canvas_scrollbars: CanvasScrollbarsWidget,
+    canvas_scrollbars_input: Option<CanvasScrollbarsInput>,
+    canvas_rect: Rect,
     navigation_splitter: SplitterWidget,
     card_list_splitter: SplitterWidget,
     new_note_button: SplitButtonWidget,
@@ -989,6 +1004,9 @@ impl NotoraShell {
             card_empty_state: StatusStateWidget::new(),
             card_empty_state_visible: false,
             editor_empty_state: StatusStateWidget::new(),
+            canvas_scrollbars: CanvasScrollbarsWidget::new(),
+            canvas_scrollbars_input: None,
+            canvas_rect: Rect::ZERO,
             navigation_splitter: SplitterWidget::new(),
             card_list_splitter: SplitterWidget::new(),
             new_note_button,
@@ -1048,6 +1066,25 @@ impl NotoraShell {
         self.search_box.set_focus(focus_target == FocusTarget::NavigationSearch);
         self.editor_pane.set_title_focus(focus_target == FocusTarget::EditorTitle);
         self.apply_text_cursor_visibility();
+    }
+
+    pub fn set_canvas_scrollbars_input(
+        &mut self,
+        input: Option<CanvasScrollbarsInput>,
+        canvas_rect: Rect,
+        context: &mut ui::LayoutCtx<'_>,
+    ) {
+        self.canvas_scrollbars_input = input;
+        self.canvas_rect = canvas_rect;
+        self.canvas_scrollbars.set_input(input.unwrap_or_default());
+        self.canvas_scrollbars.set_rect(local_rect(canvas_rect), context);
+    }
+
+    pub fn paint_canvas_scrollbars(&self, context: &mut ui::PaintCtx<'_>) {
+        if self.canvas_scrollbars_input.is_none() {
+            return;
+        }
+        paint_at(context, self.canvas_rect, |context| self.canvas_scrollbars.paint(context));
     }
 
     pub(crate) fn advance_text_cursor_blink(&mut self, now: Instant) -> bool {
@@ -1605,6 +1642,9 @@ impl NotoraShell {
             }
             return NotoraEventRoute::consumed(None);
         }
+        if let Some(route) = self.route_canvas_scrollbars_event(event, &mut event_context) {
+            return route;
+        }
         if let Some(widget_action) = self.editor_pane.route_event(event, &mut event_context) {
             let action = self.translate_widget_action(&widget_action);
             return NotoraEventRoute::consumed(action);
@@ -1673,6 +1713,51 @@ impl NotoraShell {
             return NotoraEventRoute::consumed(None);
         }
         NotoraEventRoute::ignored()
+    }
+
+    fn route_canvas_scrollbars_event(
+        &mut self,
+        event: &Event,
+        event_context: &mut EventCtx,
+    ) -> Option<NotoraEventRoute> {
+        if !matches!(
+            event,
+            Event::MouseMove { .. }
+                | Event::MouseDown { .. }
+                | Event::MouseUp { .. }
+                | Event::Wheel { .. }
+        ) {
+            return None;
+        }
+        let was_capturing = self.canvas_scrollbars.is_capturing();
+        if self.canvas_scrollbars_input.is_none() && !was_capturing {
+            return None;
+        }
+        let local_event = translate_event(event, self.canvas_rect.x, self.canvas_rect.y);
+        let pointer_hits_scrollbar = match &local_event {
+            Event::MouseMove { px, py }
+            | Event::MouseDown { px, py, .. }
+            | Event::MouseUp { px, py, .. }
+            | Event::Wheel { px, py, .. } => self.canvas_scrollbars.hit(*px, *py),
+            _ => false,
+        };
+        let should_dispatch =
+            was_capturing || pointer_hits_scrollbar || matches!(event, Event::MouseMove { .. });
+        if !should_dispatch {
+            return None;
+        }
+        let widget_action = self.canvas_scrollbars.on_event(&local_event, event_context);
+        match widget_action {
+            Some(WidgetAction::CanvasScrollbars(action)) => {
+                Some(NotoraEventRoute::canvas_scrollbar(Some(action)))
+            }
+            Some(_) => Some(NotoraEventRoute::canvas_scrollbar(None)),
+            None if matches!(event, Event::Wheel { .. }) => None,
+            None if was_capturing || pointer_hits_scrollbar => {
+                Some(NotoraEventRoute::canvas_scrollbar(None))
+            }
+            None => None,
+        }
     }
 
     fn route_splitter_event(
@@ -2594,6 +2679,102 @@ mod tests {
             focused_at + TEXT_CURSOR_BLINK_INTERVAL + TEXT_CURSOR_BLINK_INTERVAL
         ));
         assert!(paints_caret(&shell, &theme));
+    }
+
+    #[test]
+    fn canvas_scrollbar_captures_drag_and_reports_axis_action() {
+        use ui::canvas::CanvasAxis;
+        use ui::canvas_scrollbars::CanvasScrollbarsInput;
+        use ui::scrollbar::{ScrollbarAction, ScrollbarInput};
+
+        let mut shell = NotoraShell::new();
+        let theme = ui::theme::test_theme();
+        let mut measure = ui::NoopMeasure;
+        let mut layout_context =
+            ui::LayoutCtx { ui_measure: None, measure: &mut measure, theme: &theme, dpi: 1.0 };
+        let editor_rect = Rect::new(200.0, 80.0, 800.0, 600.0);
+        shell.set_canvas_scrollbars_input(
+            Some(CanvasScrollbarsInput {
+                horizontal: None,
+                vertical: Some(ScrollbarInput {
+                    viewport_height_px: 600.0,
+                    total_display_rows: 2_400,
+                    scroll_top_rows: 0.0,
+                }),
+            }),
+            editor_rect,
+            &mut layout_context,
+        );
+
+        let press = Event::MouseDown {
+            px: editor_rect.right() - 2.0,
+            py: editor_rect.y + 24.0,
+            button: ui::MouseButton::Left,
+        };
+        let route = shell.route_event(&press, FocusTarget::Editor, &theme, 1.0);
+
+        assert!(route.consumed);
+        assert_eq!(
+            route.canvas_scrollbar_action,
+            Some(ui::canvas_scrollbars::CanvasScrollbarsAction {
+                axis: CanvasAxis::Vertical,
+                action: ScrollbarAction::StartDrag,
+            })
+        );
+
+        let release = Event::MouseUp {
+            px: editor_rect.x - 200.0,
+            py: editor_rect.bottom() + 200.0,
+            button: ui::MouseButton::Left,
+        };
+        let route = shell.route_event(&release, FocusTarget::Editor, &theme, 1.0);
+        assert_eq!(
+            route.canvas_scrollbar_action,
+            Some(ui::canvas_scrollbars::CanvasScrollbarsAction {
+                axis: CanvasAxis::Vertical,
+                action: ScrollbarAction::EndDrag,
+            })
+        );
+
+        let wheel = Event::Wheel {
+            dx: 0.0,
+            dy: -40.0,
+            px: editor_rect.right() - 2.0,
+            py: editor_rect.y + 120.0,
+        };
+        let route = shell.route_event(&wheel, FocusTarget::Editor, &theme, 1.0);
+        assert!(!route.consumed, "wheel over the track must fall through to canvas panning");
+    }
+
+    #[test]
+    fn canvas_scrollbar_paints_over_the_editor_surface() {
+        use ui::canvas_scrollbars::CanvasScrollbarsInput;
+        use ui::scrollbar::ScrollbarInput;
+
+        let mut shell = NotoraShell::new();
+        let theme = ui::theme::test_theme();
+        let mut measure = ui::NoopMeasure;
+        let mut layout_context =
+            ui::LayoutCtx { ui_measure: None, measure: &mut measure, theme: &theme, dpi: 1.0 };
+        let editor_rect = Rect::new(200.0, 80.0, 800.0, 600.0);
+        shell.set_canvas_scrollbars_input(
+            Some(CanvasScrollbarsInput {
+                horizontal: Some(ScrollbarInput {
+                    viewport_height_px: 800.0,
+                    total_display_rows: 3_200,
+                    scroll_top_rows: 0.0,
+                }),
+                vertical: None,
+            }),
+            editor_rect,
+            &mut layout_context,
+        );
+        let mut draw_list = ui::DrawList::new();
+        let mut paint_context = ui::PaintCtx::new(&mut draw_list, &theme, 1.0);
+
+        shell.paint_canvas_scrollbars(&mut paint_context);
+
+        assert!(!draw_list.cmds.is_empty());
     }
 
     #[test]

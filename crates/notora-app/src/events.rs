@@ -4,14 +4,80 @@ use appkit_shell::ShellEvent;
 use appkit_shell::editor_runtime::{EditorFocus, EditorInputContext};
 use appkit_shell::window_input::{scroll_delta_pixels, ui_modifiers, winit_key_to_keycode};
 use winit::application::ApplicationHandler;
-use winit::event::{ElementState, Ime, MouseButton as WinitMouseButton, WindowEvent};
+use winit::event::{
+    ElementState, Ime, MouseButton as WinitMouseButton, MouseScrollDelta, WindowEvent,
+};
 use winit::event_loop::{ActiveEventLoop, ControlFlow};
+use winit::keyboard::ModifiersState;
 use winit::window::WindowId;
 
 use crate::NotoraApp;
 use crate::action::NotoraAction;
 use crate::{FocusTarget, NotoraState, OverlayState, shell::layout::ShellLayout};
 use ui::core::Modifiers;
+
+const CANVAS_LINE_SCROLL_DISTANCE_PX: f32 = 40.0;
+const MIN_CANVAS_ZOOM_FACTOR: f32 = 0.01;
+
+fn canvas_wheel_action(
+    delta: MouseScrollDelta,
+    modifiers: ModifiersState,
+    pointer_position: (f32, f32),
+) -> Option<appkit_shell::canvas_viewport::CanvasViewportAction> {
+    use appkit_shell::canvas_viewport::CanvasViewportAction;
+    use ui::canvas::CanvasPoint;
+
+    if modifiers.super_key() || modifiers.control_key() {
+        let vertical_delta = match delta {
+            MouseScrollDelta::LineDelta(_, vertical_delta) => vertical_delta as f64,
+            MouseScrollDelta::PixelDelta(position) => position.y,
+        };
+        if !vertical_delta.is_finite() {
+            return None;
+        }
+        let factor = (1.0 + vertical_delta as f32).max(MIN_CANVAS_ZOOM_FACTOR);
+        if !factor.is_finite() {
+            return None;
+        }
+        return Some(CanvasViewportAction::ZoomBy {
+            factor,
+            screen_anchor: CanvasPoint::new(pointer_position.0, pointer_position.1),
+        });
+    }
+
+    let pan_delta = match delta {
+        MouseScrollDelta::LineDelta(horizontal_delta, vertical_delta) => CanvasPoint::new(
+            -horizontal_delta * CANVAS_LINE_SCROLL_DISTANCE_PX,
+            -vertical_delta * CANVAS_LINE_SCROLL_DISTANCE_PX,
+        ),
+        MouseScrollDelta::PixelDelta(position) => {
+            CanvasPoint::new(-(position.x as f32), -(position.y as f32))
+        }
+    };
+    let pan_delta = if modifiers.shift_key() && pan_delta.x == 0.0 {
+        CanvasPoint::new(pan_delta.y, 0.0)
+    } else {
+        pan_delta
+    };
+    Some(CanvasViewportAction::PanBy(pan_delta))
+}
+
+fn canvas_pinch_action(
+    delta: f64,
+    pointer_position: (f32, f32),
+) -> Option<appkit_shell::canvas_viewport::CanvasViewportAction> {
+    if !delta.is_finite() {
+        return None;
+    }
+    let factor = (1.0 + delta as f32).max(MIN_CANVAS_ZOOM_FACTOR);
+    if !factor.is_finite() {
+        return None;
+    }
+    Some(appkit_shell::canvas_viewport::CanvasViewportAction::ZoomBy {
+        factor,
+        screen_anchor: ui::canvas::CanvasPoint::new(pointer_position.0, pointer_position.1),
+    })
+}
 
 /// 根据产品焦点和 overlay 状态构造 runtime 输入上下文。
 pub fn editor_input_context(
@@ -92,8 +158,21 @@ impl ApplicationHandler<ShellEvent> for NotoraApp {
                 let (dx, dy) = scroll_delta_pixels(&delta, self.shell_layout().dpi * 16.0);
                 let product_consumed =
                     self.route_product_event(&ui::Event::Wheel { dx, dy, px, py });
-                if !product_consumed {
-                    self.scroll_editor(px, py, -dy);
+                if product_consumed {
+                    return;
+                }
+                let modifiers = self.editor_runtime_mut().input_modifiers();
+                if let Some(action) = canvas_wheel_action(delta, modifiers, (px, py))
+                    && self.apply_canvas_viewport_action_at(px, py, action)
+                {
+                    return;
+                }
+                self.scroll_editor(px, py, -dy);
+            }
+            WindowEvent::PinchGesture { delta, .. } => {
+                let (px, py) = self.pointer_position();
+                if let Some(action) = canvas_pinch_action(delta, (px, py)) {
+                    let _ = self.apply_canvas_viewport_action_at(px, py, action);
                 }
             }
             WindowEvent::DroppedFile(path) => {
@@ -218,12 +297,16 @@ fn map_mouse_button(button: WinitMouseButton) -> Option<ui::core::widget::MouseB
 
 #[cfg(test)]
 mod tests {
+    use appkit_shell::canvas_viewport::CanvasViewportAction;
     use appkit_shell::editor_runtime::EditorFocus;
     use ui::core::Modifiers;
+    use winit::dpi::PhysicalPosition;
+    use winit::event::MouseScrollDelta;
+    use winit::keyboard::ModifiersState;
 
     use super::{
-        create_shortcut_action, editor_input_context, is_open_external_shortcut,
-        is_open_settings_shortcut, is_save_shortcut, is_search_shortcut,
+        canvas_pinch_action, canvas_wheel_action, create_shortcut_action, editor_input_context,
+        is_open_external_shortcut, is_open_settings_shortcut, is_save_shortcut, is_search_shortcut,
     };
     use crate::action::NotoraAction;
     use crate::{FocusTarget, NotoraState, OverlayState, shell::layout::ShellLayoutInput};
@@ -348,5 +431,45 @@ mod tests {
             Some(NotoraAction::OpenNewDocumentMenu)
         );
         assert_eq!(create_shortcut_action(ui::KeyCode::Char('n'), Modifiers::NONE), None);
+    }
+
+    #[test]
+    fn canvas_pixel_wheel_follows_natural_touchpad_on_both_axes() {
+        let action = canvas_wheel_action(
+            MouseScrollDelta::PixelDelta(PhysicalPosition::new(36.0, -72.0)),
+            ModifiersState::empty(),
+            (500.0, 400.0),
+        );
+
+        assert_eq!(
+            action,
+            Some(CanvasViewportAction::PanBy(ui::canvas::CanvasPoint::new(-36.0, 72.0)))
+        );
+    }
+
+    #[test]
+    fn canvas_command_wheel_and_pinch_zoom_at_the_pointer() {
+        let anchor = (500.0, 400.0);
+        let command_wheel = canvas_wheel_action(
+            MouseScrollDelta::LineDelta(0.0, 0.25),
+            ModifiersState::SUPER,
+            anchor,
+        );
+        let pinch = canvas_pinch_action(0.2, anchor);
+
+        assert_eq!(
+            command_wheel,
+            Some(CanvasViewportAction::ZoomBy {
+                factor: 1.25,
+                screen_anchor: ui::canvas::CanvasPoint::new(anchor.0, anchor.1),
+            })
+        );
+        assert_eq!(
+            pinch,
+            Some(CanvasViewportAction::ZoomBy {
+                factor: 1.2,
+                screen_anchor: ui::canvas::CanvasPoint::new(anchor.0, anchor.1),
+            })
+        );
     }
 }

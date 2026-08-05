@@ -3,7 +3,7 @@
 use std::time::Instant;
 
 use crate::editor_runtime::{EditorFocus, EditorInputContext};
-use crate::mouse_state::MouseCapture;
+use crate::mouse_state::{CanvasDragSession, MouseCapture};
 
 const CURSOR_BLINK_PERIOD_MS: u64 = 500;
 
@@ -11,6 +11,7 @@ const CURSOR_BLINK_PERIOD_MS: u64 = 500;
 pub(crate) struct EditorInputSession {
     modifiers: winit::keyboard::ModifiersState,
     pointer_capture: MouseCapture,
+    canvas_drag_session: Option<CanvasDragSession>,
     preedit_text: String,
     preedit_cursor: Option<(usize, usize)>,
     preferred_x: Option<f32>,
@@ -23,6 +24,7 @@ impl EditorInputSession {
         Self {
             modifiers: winit::keyboard::ModifiersState::default(),
             pointer_capture: MouseCapture::None,
+            canvas_drag_session: None,
             preedit_text: String::new(),
             preedit_cursor: None,
             preferred_x: None,
@@ -59,6 +61,7 @@ impl EditorInputSession {
         if !self.keyboard_allowed(context) {
             return false;
         }
+        self.canvas_drag_session = None;
         self.pointer_capture = MouseCapture::TextSelection;
         self.reset_cursor_blink();
         true
@@ -72,8 +75,29 @@ impl EditorInputSession {
         true
     }
 
+    pub(crate) fn start_canvas_drag_session(
+        &mut self,
+        context: EditorInputContext,
+        session: CanvasDragSession,
+    ) -> bool {
+        if !self.start_canvas_drag(context) {
+            return false;
+        }
+        self.canvas_drag_session = Some(session);
+        true
+    }
+
+    pub(crate) fn canvas_drag_session_mut(&mut self) -> Option<&mut CanvasDragSession> {
+        self.canvas_drag_session.as_mut()
+    }
+
+    pub(crate) fn take_canvas_drag_session(&mut self) -> Option<CanvasDragSession> {
+        self.canvas_drag_session.take()
+    }
+
     pub(crate) fn end_pointer_capture(&mut self) {
         self.pointer_capture = MouseCapture::None;
+        self.canvas_drag_session = None;
     }
 
     pub(crate) fn pointer_capture(&self) -> MouseCapture {
@@ -139,6 +163,7 @@ impl EditorInputSession {
 
     pub(crate) fn focus_lost(&mut self) {
         self.pointer_capture = MouseCapture::None;
+        self.canvas_drag_session = None;
         self.clear_preedit();
         self.preferred_x = None;
         self.wysiwyg_recursing = false;

@@ -511,6 +511,54 @@ impl NotoraApp {
         self.apply_editor_outcome(outcome);
     }
 
+    pub(crate) fn apply_canvas_viewport_action_at(
+        &mut self,
+        px: f32,
+        py: f32,
+        action: appkit_shell::canvas_viewport::CanvasViewportAction,
+    ) -> bool {
+        let context =
+            events::editor_input_context(&self.state, self.shell_layout(), self.window_focused);
+        if context.modal_blocked || !context.editor_rect.contains(px, py) {
+            return false;
+        }
+        let outcome = self.editor_runtime.apply_active_canvas_viewport_action(action);
+        let applied = outcome.shell_effect.redraw;
+        self.apply_editor_outcome(outcome);
+        applied
+    }
+
+    fn handle_canvas_scrollbar_action(
+        &mut self,
+        action: ui::canvas_scrollbars::CanvasScrollbarsAction,
+    ) {
+        use appkit_shell::canvas_viewport::CanvasViewportAction;
+        use ui::scrollbar::ScrollbarAction;
+
+        let viewport_action = match action.action {
+            ScrollbarAction::DragTo(position) => CanvasViewportAction::SetAxisPosition {
+                axis: action.axis,
+                position: position as f32,
+            },
+            ScrollbarAction::PageUp => {
+                CanvasViewportAction::Page { axis: action.axis, direction: -1.0 }
+            }
+            ScrollbarAction::PageDown => {
+                CanvasViewportAction::Page { axis: action.axis, direction: 1.0 }
+            }
+            ScrollbarAction::StartDrag
+            | ScrollbarAction::EndDrag
+            | ScrollbarAction::HoverChanged(_) => {
+                if self.editor_runtime.active_canvas_viewport_snapshot().is_some() {
+                    self.apply_shell_effect(ShellEffect::REDRAW);
+                }
+                return;
+            }
+        };
+        let outcome = self.editor_runtime.apply_active_canvas_viewport_action(viewport_action);
+        self.apply_editor_outcome(outcome);
+    }
+
     pub fn set_event_loop_proxy(&mut self, event_loop_proxy: EventLoopProxy<ShellEvent>) {
         self.event_loop_proxy = Some(event_loop_proxy);
     }
@@ -1079,6 +1127,9 @@ impl NotoraApp {
             &self.theme,
             self.editor_runtime.scale_factor() as f32,
         );
+        if let Some(action) = route.canvas_scrollbar_action {
+            self.handle_canvas_scrollbar_action(action);
+        }
         for action in route.actions {
             self.dispatch_action(action);
         }
@@ -1158,6 +1209,17 @@ impl NotoraApp {
             &mut render_resources,
             layout.editor_body_rect,
         )?;
+        let canvas_scrollbars_input = (self.state.layout.overlay == crate::OverlayState::None)
+            .then(|| self.editor_runtime.active_canvas_scrollbars_input())
+            .flatten();
+        frame.with_layout_context(|context| {
+            self.shell.set_canvas_scrollbars_input(
+                canvas_scrollbars_input,
+                layout.editor_body_rect,
+                context,
+            );
+        });
+        frame.with_paint_context(|context| self.shell.paint_canvas_scrollbars(context));
         let mut vertices = Vec::new();
         frame.drain_into(
             ui::Screen::new(self.window_width_px, self.window_height_px),

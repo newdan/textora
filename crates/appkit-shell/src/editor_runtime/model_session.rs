@@ -302,6 +302,42 @@ impl ModelSession {
         )
     }
 
+    pub(crate) fn apply_active_edit_transaction(
+        &mut self,
+        transaction: ui::plugin::EditTransaction,
+        line_height: f32,
+    ) -> EditorOutcome {
+        let Some(tab_id) = self.active_tab_id() else {
+            return EditorOutcome::default();
+        };
+        let Some(previous_summary) = self.document_summary(tab_id) else {
+            return EditorOutcome::default();
+        };
+        let Some(mut tab) = self.tab_session_mut(tab_id) else {
+            return EditorOutcome::default();
+        };
+        if !apply_edit_plan(tab.document, ui::plugin::EditPlan::Apply(transaction)) {
+            return EditorOutcome::default();
+        }
+
+        refresh_presentation_after_edit(&mut tab, line_height);
+        let current_revision = tab.document.content_revision();
+        let current_dirty = tab.document.dirty;
+        let source = tab.document.full_text();
+        let source_generation = tab.document.generation();
+        let _ = tab.send_message(ui::plugin::PluginMessage::UpdateSource {
+            text: source,
+            generation: source_generation,
+        });
+        edit_outcome(
+            tab_id,
+            previous_summary.content_revision,
+            previous_summary.dirty,
+            current_revision,
+            current_dirty,
+        )
+    }
+
     pub(crate) fn navigate_active_document(
         &mut self,
         key: ui::KeyCode,

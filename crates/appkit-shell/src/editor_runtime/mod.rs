@@ -762,6 +762,53 @@ impl EditorRuntime {
         self.model_session.scroll_active_document(pixels, self.editor_line_height())
     }
 
+    /// 返回活动画布最近一次成功解析的视口快照。
+    pub fn active_canvas_viewport_snapshot(&self) -> Option<ui::canvas::CanvasViewportSnapshot> {
+        let tab_id = self.active_tab_id()?;
+        let tab = self.tab_session(tab_id)?;
+        if !tab.is_canvas() {
+            return None;
+        }
+        tab.runtime.canvas_viewport.snapshot()
+    }
+
+    /// 将活动画布的二维滚动范围转换为产品壳可直接渲染的纯 UI 输入。
+    pub fn active_canvas_scrollbars_input(
+        &self,
+    ) -> Option<ui::canvas_scrollbars::CanvasScrollbarsInput> {
+        let tab_id = self.active_tab_id()?;
+        let tab = self.tab_session(tab_id)?;
+        if !tab.is_canvas() || !tab.has_canvas_viewport_snapshot() {
+            return None;
+        }
+        let input = tab.runtime.canvas_viewport.scrollbars_input();
+        Some(ui::canvas_scrollbars::CanvasScrollbarsInput {
+            horizontal: input.horizontal,
+            vertical: input.vertical,
+        })
+    }
+
+    /// 把产品输入归约为活动画布视口动作；普通文档保持无副作用。
+    pub fn apply_active_canvas_viewport_action(
+        &mut self,
+        action: crate::canvas_viewport::CanvasViewportAction,
+    ) -> EditorOutcome {
+        let Some(tab_id) = self.active_tab_id() else {
+            return EditorOutcome::default();
+        };
+        let Some(mut tab) = self.tab_session_mut(tab_id) else {
+            return EditorOutcome::default();
+        };
+        if !tab.is_canvas() || !tab.has_canvas_viewport_snapshot() {
+            return EditorOutcome::default();
+        }
+        tab.apply_canvas_viewport_action(action);
+        EditorOutcome {
+            shell_effect: crate::event::ShellEffect::REDRAW,
+            ..EditorOutcome::default()
+        }
+    }
+
     pub fn pointer_input_allowed(&self, context: EditorInputContext, position: (f32, f32)) -> bool {
         self.input_session.pointer_allowed(context, position)
     }
@@ -986,10 +1033,102 @@ mod tests {
     use crate::view_route::ViewRouteTable;
     use appkit_core::document::DocumentModel;
     use core::buffer::TextBuffer;
+    use std::cell::RefCell;
     use std::path::PathBuf;
+    use std::rc::Rc;
     use ui::plugin::PluginFactory;
 
     struct PointerProbePlugin;
+
+    struct CanvasViewportProbePlugin;
+
+    struct CanvasDragProbePlugin {
+        phases: Rc<RefCell<Vec<ui::plugin::CanvasDragPhase>>>,
+    }
+
+    impl ui::plugin::ViewPlugin for CanvasDragProbePlugin {
+        fn name(&self) -> &str {
+            "canvas-drag-probe"
+        }
+
+        fn render(
+            &mut self,
+            _document: &dyn core::document::DocView,
+            _bounds: ui::Rect,
+            _theme: &ui::Theme,
+            _shaper: &mut shaping::Shaper,
+            _dpi_scale: f32,
+        ) -> ui::DrawList {
+            ui::DrawList::new()
+        }
+
+        fn query(
+            &self,
+            query: ui::plugin::PluginQuery,
+            _document: &dyn core::document::DocView,
+        ) -> ui::plugin::PluginResponse {
+            match query {
+                ui::plugin::PluginQuery::HitTestEditTarget { .. } => {
+                    ui::plugin::PluginResponse::EditHitTarget(Some(
+                        ui::plugin::EditHitTarget::SourceObject { source_range: 0..5 },
+                    ))
+                }
+                _ => ui::plugin::PluginResponse::None,
+            }
+        }
+
+        fn handle_canvas_drag(
+            &mut self,
+            request: ui::plugin::CanvasDragRequest,
+            _document: &dyn core::document::DocView,
+        ) -> ui::plugin::CanvasDragResponse {
+            self.phases.borrow_mut().push(request.phase);
+            if request.phase == ui::plugin::CanvasDragPhase::Drop {
+                return ui::plugin::CanvasDragResponse::Apply(
+                    ui::plugin::EditTransaction::replace(
+                        request.source_generation,
+                        request.source_range,
+                        "moved".to_owned(),
+                        5,
+                    ),
+                );
+            }
+            ui::plugin::CanvasDragResponse::Ignore
+        }
+
+        fn handles_own_rendering(&self) -> bool {
+            true
+        }
+
+        fn is_canvas(&self) -> bool {
+            true
+        }
+    }
+
+    impl ui::plugin::ViewPlugin for CanvasViewportProbePlugin {
+        fn name(&self) -> &str {
+            "canvas-viewport-probe"
+        }
+
+        fn render(
+            &mut self,
+            _document: &dyn core::document::DocView,
+            _bounds: ui::Rect,
+            _theme: &ui::Theme,
+            _shaper: &mut shaping::Shaper,
+            _dpi_scale: f32,
+        ) -> ui::DrawList {
+            ui::DrawList::new()
+        }
+
+        fn handles_own_rendering(&self) -> bool {
+            true
+        }
+
+        fn is_canvas(&self) -> bool {
+            true
+        }
+    }
 
     impl ui::plugin::ViewPlugin for PointerProbePlugin {
         fn name(&self) -> &str {
@@ -1058,6 +1197,101 @@ mod tests {
             OpenDisposition::Persistent,
         );
         runtime
+    }
+
+    fn runtime_with_prepared_canvas() -> EditorRuntime {
+        let mut runtime = runtime_with_clean_tab();
+        let tab_id = runtime.active_tab_id().expect("test canvas tab should be active");
+        {
+            let tab = runtime.tab_session_mut(tab_id).expect("test canvas tab should exist");
+            tab.runtime.plugin = Box::new(CanvasViewportProbePlugin);
+            let snapshot = tab.runtime.canvas_viewport.prepare(
+                ui::plugin::CanvasContentMetrics {
+                    content_bounds: ui::Rect::new(0.0, 0.0, 5_000.0, 4_000.0),
+                    focus_anchor: None,
+                },
+                ui::Rect::new(200.0, 80.0, 1_000.0, 800.0),
+                ui::canvas::CanvasViewportConfig::for_dpi(1.0),
+            );
+            assert!(snapshot.is_some(), "test canvas viewport should prepare");
+        }
+        runtime
+    }
+
+    #[test]
+    fn active_canvas_exposes_scrollbars_and_applies_viewport_actions() {
+        let mut runtime = runtime_with_prepared_canvas();
+        let before = runtime
+            .active_canvas_viewport_snapshot()
+            .expect("prepared canvas should expose a viewport snapshot");
+        let scrollbars = runtime
+            .active_canvas_scrollbars_input()
+            .expect("overflowing canvas should expose scrollbar input");
+
+        assert!(scrollbars.horizontal.is_some());
+        assert!(scrollbars.vertical.is_some());
+
+        let outcome = runtime.apply_active_canvas_viewport_action(
+            crate::canvas_viewport::CanvasViewportAction::ZoomBy {
+                factor: 1.25,
+                screen_anchor: ui::canvas::CanvasPoint::new(700.0, 480.0),
+            },
+        );
+        let after = runtime
+            .active_canvas_viewport_snapshot()
+            .expect("canvas action should retain the viewport snapshot");
+
+        assert!(outcome.shell_effect.redraw);
+        assert!(after.zoom > before.zoom);
+    }
+
+    #[test]
+    fn canvas_source_object_drag_crosses_threshold_and_applies_drop_transaction() {
+        let mut runtime = runtime_with_clean_tab();
+        let phases = Rc::new(RefCell::new(Vec::new()));
+        let tab_id = runtime.active_tab_id().expect("test canvas drag tab should be active");
+        runtime
+            .tab_session_mut(tab_id)
+            .expect("test canvas drag tab should exist")
+            .runtime
+            .plugin = Box::new(CanvasDragProbePlugin { phases: phases.clone() });
+        let context = EditorInputContext {
+            editor_rect: ui::Rect::new(100.0, 50.0, 800.0, 600.0),
+            focus: EditorFocus::Active,
+            modal_blocked: false,
+        };
+
+        runtime.handle_pointer_event(
+            context,
+            &ui::Event::MouseDown { px: 300.0, py: 240.0, button: ui::MouseButton::Left },
+        );
+        assert_eq!(runtime.pointer_capture(), MouseCapture::CanvasDrag);
+
+        runtime.handle_pointer_event(context, &ui::Event::MouseMove { px: 302.0, py: 242.0 });
+        assert!(phases.borrow().is_empty(), "small pointer jitter must not start a drag");
+
+        runtime.handle_pointer_event(context, &ui::Event::MouseMove { px: 310.0, py: 250.0 });
+        runtime.handle_pointer_event(context, &ui::Event::MouseMove { px: 320.0, py: 260.0 });
+        let outcome = runtime.handle_pointer_event(
+            context,
+            &ui::Event::MouseUp { px: 320.0, py: 260.0, button: ui::MouseButton::Left },
+        );
+
+        assert_eq!(
+            *phases.borrow(),
+            vec![
+                ui::plugin::CanvasDragPhase::Start,
+                ui::plugin::CanvasDragPhase::Update,
+                ui::plugin::CanvasDragPhase::Drop,
+            ]
+        );
+        assert_eq!(runtime.workspace_snapshot().tabs[0].content_lines, vec!["moved"]);
+        assert!(outcome.notifications.iter().any(|notification| matches!(
+            notification,
+            EditorNotification::ContentChanged { tab_id: changed_tab_id, .. }
+                if *changed_tab_id == tab_id
+        )));
+        assert_eq!(runtime.pointer_capture(), MouseCapture::None);
     }
 
     #[test]

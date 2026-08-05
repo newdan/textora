@@ -1,10 +1,14 @@
 //! 产品无关的编辑器指针命中与选择会话。
 
 use ui::plugin::EditHitTarget;
+use ui::plugin::{CanvasDragPhase, CanvasDragRequest, CanvasDragResponse};
 
 use super::{EditorInputContext, EditorOutcome, EditorRuntime, MouseCapture};
 use crate::event::ShellEffect;
+use crate::mouse_state::{CanvasDragEligibility, CanvasDragSession};
 use crate::tab_session::TabSessionMut;
+
+const CANVAS_DRAG_THRESHOLD_PX: f32 = 5.0;
 
 impl EditorRuntime {
     pub fn handle_pointer_event(
@@ -17,6 +21,9 @@ impl EditorRuntime {
         };
         match phase {
             PointerPhase::Press if self.pointer_input_allowed(context, position) => {
+                if self.begin_canvas_source_drag(context, position) {
+                    return redraw_outcome();
+                }
                 if !self.begin_text_selection(context)
                     || !self.place_pointer_selection(context.editor_rect, position, false)
                 {
@@ -26,12 +33,21 @@ impl EditorRuntime {
                 redraw_outcome()
             }
             PointerPhase::Move
+                if self.pointer_capture() == MouseCapture::CanvasDrag
+                    && self.pointer_input_allowed(context, position) =>
+            {
+                self.update_canvas_source_drag(context.editor_rect, position)
+            }
+            PointerPhase::Move
                 if self.pointer_capture() == MouseCapture::TextSelection
                     && self.pointer_input_allowed(context, position) =>
             {
                 self.place_pointer_selection(context.editor_rect, position, true)
                     .then(redraw_outcome)
                     .unwrap_or_default()
+            }
+            PointerPhase::Release if self.pointer_capture() == MouseCapture::CanvasDrag => {
+                self.finish_canvas_source_drag(context.editor_rect, position)
             }
             PointerPhase::Release if self.pointer_capture() != MouseCapture::None => {
                 self.end_pointer_capture();
@@ -41,6 +57,137 @@ impl EditorRuntime {
             PointerPhase::Press | PointerPhase::Move | PointerPhase::Release => {
                 EditorOutcome::default()
             }
+        }
+    }
+
+    fn begin_canvas_source_drag(
+        &mut self,
+        context: EditorInputContext,
+        position: (f32, f32),
+    ) -> bool {
+        let Some(tab_id) = self.active_tab_id() else {
+            return false;
+        };
+        let dpi = self.scale_factor() as f32;
+        let (source_range, source_generation) = {
+            let Some(tab) = self.tab_session_mut(tab_id) else {
+                return false;
+            };
+            if !tab.is_canvas() || !tab.runtime.plugin.handles_own_rendering() {
+                return false;
+            }
+            let bounds = super::editor_painter::plugin_bounds(context.editor_rect, dpi, true);
+            let Some(Some(EditHitTarget::SourceObject { source_range })) =
+                tab.hit_test_edit_target(position.0, position.1, bounds.x, bounds.y)
+            else {
+                return false;
+            };
+            let source_generation = tab.document.generation();
+            tab.document.cursor_mut().selection_anchor = Some(source_range.start);
+            tab.document.set_cursor_offset_synced(source_range.end);
+            (source_range, source_generation)
+        };
+
+        self.input_session.start_canvas_drag_session(
+            context,
+            CanvasDragSession {
+                source_range,
+                pressed_at: position,
+                source_generation,
+                eligibility: CanvasDragEligibility::Enabled,
+                started: false,
+            },
+        )
+    }
+
+    fn update_canvas_source_drag(
+        &mut self,
+        editor_rect: ui::Rect,
+        position: (f32, f32),
+    ) -> EditorOutcome {
+        let (phase, session) = {
+            let Some(session) = self.input_session.canvas_drag_session_mut() else {
+                return EditorOutcome::default();
+            };
+            if session.eligibility == CanvasDragEligibility::Disabled {
+                return EditorOutcome::default();
+            }
+            if !session.started {
+                let horizontal_distance = position.0 - session.pressed_at.0;
+                let vertical_distance = position.1 - session.pressed_at.1;
+                let threshold_squared = CANVAS_DRAG_THRESHOLD_PX * CANVAS_DRAG_THRESHOLD_PX;
+                if horizontal_distance * horizontal_distance + vertical_distance * vertical_distance
+                    <= threshold_squared
+                {
+                    return EditorOutcome::default();
+                }
+                session.started = true;
+                (CanvasDragPhase::Start, session.clone())
+            } else {
+                (CanvasDragPhase::Update, session.clone())
+            }
+        };
+        let response = self.dispatch_canvas_drag(editor_rect, position, phase, &session);
+        self.canvas_drag_response(phase, response)
+    }
+
+    fn finish_canvas_source_drag(
+        &mut self,
+        editor_rect: ui::Rect,
+        position: (f32, f32),
+    ) -> EditorOutcome {
+        let session = self.input_session.take_canvas_drag_session();
+        self.end_pointer_capture();
+        let Some(session) = session.filter(|session| session.started) else {
+            return redraw_outcome();
+        };
+        let response =
+            self.dispatch_canvas_drag(editor_rect, position, CanvasDragPhase::Drop, &session);
+        let mut outcome = self.canvas_drag_response(CanvasDragPhase::Drop, response);
+        outcome.shell_effect = outcome.shell_effect.merge(ShellEffect::REDRAW);
+        outcome
+    }
+
+    fn dispatch_canvas_drag(
+        &mut self,
+        editor_rect: ui::Rect,
+        position: (f32, f32),
+        phase: CanvasDragPhase,
+        session: &CanvasDragSession,
+    ) -> CanvasDragResponse {
+        let Some(tab_id) = self.active_tab_id() else {
+            return CanvasDragResponse::Ignore;
+        };
+        let dpi = self.scale_factor() as f32;
+        let bounds = super::editor_painter::plugin_bounds(editor_rect, dpi, true);
+        let Some(mut tab) = self.tab_session_mut(tab_id) else {
+            return CanvasDragResponse::Ignore;
+        };
+        tab.handle_canvas_drag_plugin(CanvasDragRequest {
+            phase,
+            source_range: session.source_range.clone(),
+            pointer_x: position.0,
+            pointer_y: position.1,
+            pressed_x: session.pressed_at.0,
+            pressed_y: session.pressed_at.1,
+            offset_x: bounds.x,
+            offset_y: bounds.y,
+            source_generation: session.source_generation,
+        })
+    }
+
+    fn canvas_drag_response(
+        &mut self,
+        phase: CanvasDragPhase,
+        response: CanvasDragResponse,
+    ) -> EditorOutcome {
+        match response {
+            CanvasDragResponse::Ignore => EditorOutcome::default(),
+            CanvasDragResponse::Preview(_) => redraw_outcome(),
+            CanvasDragResponse::Apply(transaction) if phase == CanvasDragPhase::Drop => self
+                .model_session
+                .apply_active_edit_transaction(transaction, self.editor_line_height()),
+            CanvasDragResponse::Apply(_) => EditorOutcome::default(),
         }
     }
 

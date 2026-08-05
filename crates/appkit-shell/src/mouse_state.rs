@@ -17,7 +17,7 @@ pub enum MouseCapture {
     CanvasDrag,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct CanvasDragSession {
     pub source_range: Range<usize>,
     pub pressed_at: (f32, f32),
