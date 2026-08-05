@@ -15,7 +15,8 @@ const EDITOR_PANE_TAG_HORIZONTAL_INSET_LOGICAL: f32 = 16.0;
 const EDITOR_PANE_PROPERTY_ROW_GAP_LOGICAL: f32 = 12.0;
 const EDITOR_PANE_PROPERTY_FONT_SIZE_LOGICAL: f32 = 12.0;
 const EDITOR_PANE_MAXIMUM_WORKSPACE_WIDTH_RATIO: f32 = 0.45;
-const EDITOR_PANE_ESTIMATED_TEXT_WIDTH_RATIO: f32 = 0.55;
+const EDITOR_PANE_ASCII_TEXT_WIDTH_RATIO: f32 = 0.55;
+const EDITOR_PANE_WIDE_TEXT_WIDTH_RATIO: f32 = 1.0;
 const EDITOR_PANE_LOCATION_WIDTH_LOGICAL: f32 = 360.0;
 const EDITOR_PANE_LOCATION_HEIGHT_LOGICAL: f32 = 220.0;
 const EDITOR_PANE_LOCATION_INSET_LOGICAL: f32 = 16.0;
@@ -119,14 +120,22 @@ impl EditorPaneChrome {
     }
 
     pub fn set_input(&mut self, input: EditorPaneInput) {
-        let effective_input = input.effective();
+        let mut effective_input = input.effective();
+        let preserve_tag_draft = self.input.document_key == effective_input.document_key
+            && self.tag_editor_active
+            && effective_input.tags.enabled;
         if self.input.document_key != effective_input.document_key {
             self.tag_editor_active = false;
+        }
+        if preserve_tag_draft {
+            effective_input.tags.pending_text = self.tag_editor.pending_text().to_owned();
+            effective_input.tags.suggestions_open = self.tag_editor.suggestions_open();
         }
         self.input = effective_input;
         self.header.set_input(self.input.header.clone());
         self.location_picker.set_input(self.input.location.clone());
         self.tag_editor.set_input(self.input.tags.clone());
+        self.tag_editor.set_editing(self.tag_editor_active);
         self.toolbar.set_input(self.input.toolbar.clone());
         if !self.input.should_render_chrome() {
             self.tag_editor_active = false;
@@ -143,6 +152,7 @@ impl EditorPaneChrome {
         self.input.tags.compact = compact;
         self.header.set_input(self.input.header.clone());
         self.tag_editor.set_input(self.input.tags.clone());
+        self.tag_editor.set_editing(self.tag_editor_active);
         self.workspace_rect =
             workspace_rect(rects.header, context, workspace_label(&self.input.location).as_deref());
         self.tag_rect =
@@ -198,6 +208,7 @@ impl EditorPaneChrome {
             }
         } else if event_is_inside(event, self.tag_rect) {
             self.tag_editor_active = true;
+            self.tag_editor.set_editing(true);
             let local_event = translate_event(event, self.tag_rect.x, self.tag_rect.y);
             if let Some(action) = self.tag_editor.on_event(&local_event, context) {
                 self.close_tag_after_action(&action);
@@ -287,6 +298,7 @@ impl EditorPaneChrome {
         {
             self.tag_editor_active = false;
             self.input.tags.suggestions_open = false;
+            self.tag_editor.set_editing(false);
         }
     }
 }
@@ -318,10 +330,18 @@ fn workspace_rect(header: Rect, context: &mut LayoutCtx<'_>, label: Option<&str>
     let property_row = property_row_rect(header, context.dpi);
     let measured_width =
         context.measure.measure(label, EDITOR_PANE_PROPERTY_FONT_SIZE_LOGICAL * context.dpi);
-    let estimated_width = label.chars().count() as f32
+    let estimated_width = label
+        .chars()
+        .map(|character| {
+            if character.is_ascii() {
+                EDITOR_PANE_ASCII_TEXT_WIDTH_RATIO
+            } else {
+                EDITOR_PANE_WIDE_TEXT_WIDTH_RATIO
+            }
+        })
+        .sum::<f32>()
         * EDITOR_PANE_PROPERTY_FONT_SIZE_LOGICAL
-        * context.dpi
-        * EDITOR_PANE_ESTIMATED_TEXT_WIDTH_RATIO;
+        * context.dpi;
     let maximum_width = property_row.w * EDITOR_PANE_MAXIMUM_WORKSPACE_WIDTH_RATIO;
     Rect::new(
         property_row.x,
@@ -585,8 +605,30 @@ mod tests {
         let workspace = workspace_rect(header, &mut layout_context, Some("所属工作区：textora"));
         let tags = tag_rect(header, 1.0, true, workspace.w);
 
-        assert!(workspace.w > 0.0);
+        assert!(workspace.w >= 100.0);
         assert!(tags.x > property_row_rect(header, 1.0).x);
+    }
+
+    #[test]
+    fn active_tag_input_survives_a_render_model_refresh() {
+        let mut chrome = EditorPaneChrome::new();
+        let pane_input = input(EditorPaneMode::WorkspaceNote);
+        chrome.set_input(pane_input.clone());
+        chrome.tag_editor_active = true;
+        chrome.tag_editor.set_editing(true);
+        let theme = ui::theme::test_theme();
+        let mut event_context = ui::EventCtx { theme: &theme, dpi: 1.0, cursor_hint: None };
+
+        assert_eq!(
+            chrome.route_event(
+                &ui::Event::KeyDown(ui::KeyCode::Char('x'), ui::core::Modifiers::NONE),
+                &mut event_context,
+            ),
+            Some(WidgetAction::Consumed)
+        );
+        chrome.set_input(pane_input);
+
+        assert_eq!(chrome.tag_editor.pending_text(), "x");
     }
 
     #[test]

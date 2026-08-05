@@ -9,6 +9,9 @@ const TAG_EDITOR_HORIZONTAL_PADDING_LOGICAL: f32 = 8.0;
 const TAG_EDITOR_FONT_SIZE_LOGICAL: f32 = 12.0;
 const TAG_EDITOR_LABEL: &str = "标签：";
 const TAG_EDITOR_ADD_PROMPT: &str = "添加标签";
+const TAG_EDITOR_CARET_WIDTH_LOGICAL: f32 = 1.0;
+const TAG_EDITOR_CARET_VERTICAL_INSET_LOGICAL: f32 = 6.0;
+const TAG_EDITOR_ASCII_TEXT_WIDTH_RATIO: f32 = 0.55;
 
 pub const TAG_EDITOR_INPUT_ID: WidgetId = WidgetId(10_201);
 pub const TAG_EDITOR_SUBMIT_ID: WidgetId = WidgetId(10_202);
@@ -53,15 +56,28 @@ pub enum TagEditorAction {
 pub struct TagEditorWidget {
     input: TagEditorInput,
     rect: Rect,
+    editing: bool,
 }
 
 impl TagEditorWidget {
     pub fn new() -> Self {
-        Self { input: TagEditorInput::default(), rect: Rect::ZERO }
+        Self { input: TagEditorInput::default(), rect: Rect::ZERO, editing: false }
     }
 
     pub fn set_input(&mut self, input: TagEditorInput) {
         self.input = input;
+    }
+
+    pub fn set_editing(&mut self, editing: bool) {
+        self.editing = editing && self.input.enabled;
+    }
+
+    pub fn pending_text(&self) -> &str {
+        &self.input.pending_text
+    }
+
+    pub fn suggestions_open(&self) -> bool {
+        self.input.suggestions_open
     }
 
     pub fn visible_chip_counts(&self, max_visible: usize) -> (usize, usize) {
@@ -77,6 +93,7 @@ impl TagEditorWidget {
             Event::KeyDown(crate::core::KeyCode::Escape, _) => {
                 self.input.pending_text.clear();
                 self.input.suggestions_open = false;
+                self.editing = false;
                 Some(TagEditorAction::Cancelled)
             }
             Event::KeyDown(crate::core::KeyCode::Backspace, _) => {
@@ -109,8 +126,10 @@ impl TagEditorWidget {
             }
             Event::MouseDown { px, py, button: crate::core::MouseButton::Left } => {
                 if !self.rect.contains(*px, *py) {
+                    self.editing = false;
                     return Some(TagEditorAction::Dismissed);
                 }
+                self.editing = true;
                 if !self.input.suggestions_open {
                     return None;
                 }
@@ -169,7 +188,10 @@ impl Widget for TagEditorWidget {
             ctx.theme.palette.text_muted,
             &label,
         );
-        x += label.chars().count() as f32 * TAG_EDITOR_FONT_SIZE_LOGICAL * ctx.dpi * 0.55;
+        x += label.chars().count() as f32
+            * TAG_EDITOR_FONT_SIZE_LOGICAL
+            * ctx.dpi
+            * TAG_EDITOR_ASCII_TEXT_WIDTH_RATIO;
         for chip in self.input.chips.iter().take(visible_count) {
             let label = format!("{}  ", chip.label);
             ctx.text(
@@ -179,7 +201,10 @@ impl Widget for TagEditorWidget {
                 ctx.theme.palette.text_muted,
                 &label,
             );
-            x += label.chars().count() as f32 * TAG_EDITOR_FONT_SIZE_LOGICAL * ctx.dpi * 0.55;
+            x += label.chars().count() as f32
+                * TAG_EDITOR_FONT_SIZE_LOGICAL
+                * ctx.dpi
+                * TAG_EDITOR_ASCII_TEXT_WIDTH_RATIO;
         }
         if hidden_count > 0 {
             let folded = format!("+{hidden_count}");
@@ -198,6 +223,22 @@ impl Widget for TagEditorWidget {
                 TAG_EDITOR_FONT_SIZE_LOGICAL * ctx.dpi,
                 ctx.theme.palette.text_main,
                 &self.input.pending_text,
+            );
+            x += self.input.pending_text.chars().count() as f32
+                * TAG_EDITOR_FONT_SIZE_LOGICAL
+                * ctx.dpi
+                * TAG_EDITOR_ASCII_TEXT_WIDTH_RATIO;
+        }
+        if self.editing {
+            let vertical_inset = TAG_EDITOR_CARET_VERTICAL_INSET_LOGICAL * ctx.dpi;
+            ctx.list.fill(
+                Rect::new(
+                    x,
+                    self.rect.y + vertical_inset,
+                    TAG_EDITOR_CARET_WIDTH_LOGICAL * ctx.dpi,
+                    (self.rect.h - vertical_inset * 2.0).max(0.0),
+                ),
+                ctx.theme.palette.input_fg,
             );
         }
     }
@@ -351,5 +392,33 @@ mod tests {
         assert!(draw_list.cmds.iter().any(
             |command| matches!(command, DrawCmd::TextLayout { layout, .. } if layout.text == "标签：添加标签")
         ));
+    }
+
+    #[test]
+    fn editing_empty_tag_editor_paints_an_input_caret() {
+        use crate::core::paint::{DrawCmd, DrawList};
+
+        let theme = crate::theme::test_theme();
+        let mut measure = crate::core::NoopMeasure;
+        let mut layout_context =
+            LayoutCtx { ui_measure: None, measure: &mut measure, theme: &theme, dpi: 1.0 };
+        let mut editor = TagEditorWidget::new();
+        editor.set_input(TagEditorInput { enabled: true, ..TagEditorInput::default() });
+        editor.set_editing(true);
+        editor.set_rect(
+            Rect::new(0.0, 0.0, 320.0, TAG_EDITOR_ROW_HEIGHT_LOGICAL),
+            &mut layout_context,
+        );
+
+        let mut draw_list = DrawList::new();
+        let mut paint_context = PaintCtx::new(&mut draw_list, &theme, 1.0);
+        editor.paint(&mut paint_context);
+
+        assert!(
+            draw_list
+                .cmds
+                .iter()
+                .any(|command| matches!(command, DrawCmd::FillRect { rect, .. } if rect.w == 1.0))
+        );
     }
 }
