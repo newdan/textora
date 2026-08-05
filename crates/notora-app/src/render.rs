@@ -1030,10 +1030,15 @@ impl NotoraShell {
     }
 
     pub(crate) fn synchronize_focus(&mut self, focus_target: FocusTarget, now: Instant) {
-        let focused_text_input = match focus_target {
-            FocusTarget::NavigationSearch | FocusTarget::EditorTitle => Some(focus_target),
-            _ => None,
-        };
+        let focused_text_input =
+            if focus_target == FocusTarget::Editor && self.editor_pane.tag_editor_is_active() {
+                Some(FocusTarget::Editor)
+            } else {
+                match focus_target {
+                    FocusTarget::NavigationSearch | FocusTarget::EditorTitle => Some(focus_target),
+                    _ => None,
+                }
+            };
         if self.focused_text_input != focused_text_input {
             self.focused_text_input = focused_text_input;
             self.text_cursor_visible = true;
@@ -1070,6 +1075,7 @@ impl NotoraShell {
     fn apply_text_cursor_visibility(&mut self) {
         self.search_box.set_blink(self.text_cursor_visible);
         self.editor_pane.set_title_blink_visible(self.text_cursor_visible);
+        self.editor_pane.set_tag_blink_visible(self.text_cursor_visible);
     }
 
     pub fn update_model(&mut self, model: &NotoraRenderModel) {
@@ -1545,6 +1551,9 @@ impl NotoraShell {
             WidgetAction::Control(ControlAction::FocusRequested {
                 id: ui::editor_header::EDITOR_HEADER_TITLE_ID,
             }) => Some(NotoraAction::FocusRequested(FocusTarget::EditorTitle)),
+            WidgetAction::Control(ControlAction::FocusRequested {
+                id: ui::tag_editor::TAG_EDITOR_INPUT_ID,
+            }) => Some(NotoraAction::FocusRequested(FocusTarget::Editor)),
             WidgetAction::Control(ControlAction::TextCommitted {
                 id: GLOBAL_SEARCH_BOX_ID,
                 ..

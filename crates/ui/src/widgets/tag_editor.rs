@@ -57,11 +57,17 @@ pub struct TagEditorWidget {
     input: TagEditorInput,
     rect: Rect,
     editing: bool,
+    blink_visible: bool,
 }
 
 impl TagEditorWidget {
     pub fn new() -> Self {
-        Self { input: TagEditorInput::default(), rect: Rect::ZERO, editing: false }
+        Self {
+            input: TagEditorInput::default(),
+            rect: Rect::ZERO,
+            editing: false,
+            blink_visible: false,
+        }
     }
 
     pub fn set_input(&mut self, input: TagEditorInput) {
@@ -70,6 +76,10 @@ impl TagEditorWidget {
 
     pub fn set_editing(&mut self, editing: bool) {
         self.editing = editing && self.input.enabled;
+    }
+
+    pub fn set_blink_visible(&mut self, visible: bool) {
+        self.blink_visible = visible;
     }
 
     pub fn pending_text(&self) -> &str {
@@ -176,11 +186,12 @@ impl Widget for TagEditorWidget {
         let mut x = self.rect.x + TAG_EDITOR_HORIZONTAL_PADDING_LOGICAL * ctx.dpi;
         let baseline =
             self.rect.y + self.rect.h * 0.5 + TAG_EDITOR_FONT_SIZE_LOGICAL * ctx.dpi * 0.35;
-        let label = if self.input.chips.is_empty() && self.input.pending_text.is_empty() {
-            format!("{TAG_EDITOR_LABEL}{TAG_EDITOR_ADD_PROMPT}")
-        } else {
-            TAG_EDITOR_LABEL.to_owned()
-        };
+        let label =
+            if self.input.chips.is_empty() && self.input.pending_text.is_empty() && !self.editing {
+                format!("{TAG_EDITOR_LABEL}{TAG_EDITOR_ADD_PROMPT}")
+            } else {
+                TAG_EDITOR_LABEL.to_owned()
+            };
         ctx.text(
             x,
             baseline,
@@ -229,7 +240,7 @@ impl Widget for TagEditorWidget {
                 * ctx.dpi
                 * TAG_EDITOR_ASCII_TEXT_WIDTH_RATIO;
         }
-        if self.editing {
+        if self.editing && self.blink_visible {
             let vertical_inset = TAG_EDITOR_CARET_VERTICAL_INSET_LOGICAL * ctx.dpi;
             ctx.list.fill(
                 Rect::new(
@@ -405,6 +416,7 @@ mod tests {
         let mut editor = TagEditorWidget::new();
         editor.set_input(TagEditorInput { enabled: true, ..TagEditorInput::default() });
         editor.set_editing(true);
+        editor.set_blink_visible(true);
         editor.set_rect(
             Rect::new(0.0, 0.0, 320.0, TAG_EDITOR_ROW_HEIGHT_LOGICAL),
             &mut layout_context,

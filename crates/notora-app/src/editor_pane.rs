@@ -177,6 +177,14 @@ impl EditorPaneChrome {
         self.header.set_title_blink_visible(visible);
     }
 
+    pub fn set_tag_blink_visible(&mut self, visible: bool) {
+        self.tag_editor.set_blink_visible(visible);
+    }
+
+    pub fn tag_editor_is_active(&self) -> bool {
+        self.tag_editor_active
+    }
+
     pub fn route_event(
         &mut self,
         event: &Event,
@@ -214,7 +222,9 @@ impl EditorPaneChrome {
                 self.close_tag_after_action(&action);
                 return Some(action);
             }
-            return Some(WidgetAction::Consumed);
+            return Some(WidgetAction::Control(ControlAction::FocusRequested {
+                id: ui::tag_editor::TAG_EDITOR_INPUT_ID,
+            }));
         }
 
         if event_is_inside(event, self.document_header_rect)
