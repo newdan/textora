@@ -6,9 +6,8 @@ use notora_core::{
 };
 
 use crate::action::{
-    CardQuery, ConflictResolution, DocumentLoadRequest, NewNoteDraft, NoteCreationStorageMode,
-    NoteCreationSubmission, NoteCreationTarget, NotoraAction, NotoraEffect, SaveConflictRequest,
-    move_note_command, rename_note_command,
+    CardQuery, ConflictResolution, DocumentLoadRequest, NoteCreationTarget, NotoraAction,
+    NotoraEffect, SaveConflictRequest, move_note_command, rename_note_command,
 };
 use crate::effect_executor::ExternalOpenRequest;
 use crate::external_files::ExternalFileSessions;
@@ -32,7 +31,7 @@ pub enum OverlayState {
     #[default]
     None,
     Settings,
-    NewNoteCreationPanel,
+    NewDocumentMenu,
     TrashPermanentDeletionConfirmation {
         operation: crate::action::TrashOperation,
     },
@@ -206,7 +205,6 @@ pub struct NotoraState {
     /// 外部 session 不属于 catalog、搜索、星标、标签或 Trash 的任何一项。
     pub external_files: ExternalFileSessions,
     pub layout: LayoutState,
-    pub new_note_draft: Option<NewNoteDraft>,
 }
 
 impl NotoraState {
@@ -293,20 +291,8 @@ impl NotoraState {
             NotoraAction::WorkspaceRootSelectionRequested => {
                 vec![NotoraEffect::ChooseWorkspaceRoot, NotoraEffect::Redraw]
             }
-            NotoraAction::OpenNewDocumentMenu => self.open_note_creation_panel(),
+            NotoraAction::OpenNewDocumentMenu => self.open_new_document_menu(),
             NotoraAction::CreateRequested(kind) => self.request_note_creation(kind),
-            NotoraAction::NoteCreationTypeSelected(kind) => {
-                self.update_note_creation_draft(|draft| draft.kind = kind)
-            }
-            NotoraAction::NoteCreationDirectorySelected(directory) => {
-                self.update_note_creation_draft(|draft| draft.directory = directory)
-            }
-            NotoraAction::NoteCreationStorageSelected(storage_mode) => {
-                self.update_note_creation_draft(|draft| draft.storage_mode = storage_mode)
-            }
-            NotoraAction::NoteCreationSubmitted => self.submit_note_creation(),
-            NotoraAction::NoteCreationCancelled => self.cancel_note_creation(),
-            NotoraAction::NoteCreationFailed(message) => self.fail_note_creation(message),
             NotoraAction::TitleCommitRequested(title) => self.request_title_commit(title),
             NotoraAction::SemanticEditRequested(command) => {
                 self.layout.focus_target = FocusTarget::Editor;
@@ -328,7 +314,10 @@ impl NotoraState {
             NotoraAction::NoteCommandCompleted(result) => {
                 self.apply_note_command_completion(result)
             }
-            NotoraAction::NoteCommandFailed(message) => self.fail_note_creation(message),
+            NotoraAction::NoteCommandFailed(message) => {
+                self.library.last_command_error = Some(message);
+                vec![NotoraEffect::Redraw]
+            }
             NotoraAction::MoveRequested { note_id, target_directory } => {
                 self.library.last_command_error = None;
                 vec![
@@ -502,91 +491,15 @@ impl NotoraState {
         self.request_card_query(card_query)
     }
 
-    fn open_note_creation_panel(&mut self) -> Vec<NotoraEffect> {
+    fn open_new_document_menu(&mut self) -> Vec<NotoraEffect> {
         if self.workspace_root == WorkspaceRootState::Missing
             || self.library.navigation_scope == NavigationScope::Trash
         {
             return vec![NotoraEffect::Redraw];
         }
-        self.new_note_draft = Some(NewNoteDraft::markdown(default_creation_directory(
-            &self.library.navigation_scope,
-        )));
         self.library.last_command_error = None;
-        self.layout.overlay = OverlayState::NewNoteCreationPanel;
+        self.layout.overlay = OverlayState::NewDocumentMenu;
         self.layout.focus_target = FocusTarget::Overlay;
-        vec![NotoraEffect::Redraw]
-    }
-
-    fn update_note_creation_draft(
-        &mut self,
-        update: impl FnOnce(&mut NewNoteDraft),
-    ) -> Vec<NotoraEffect> {
-        if self.layout.overlay != OverlayState::NewNoteCreationPanel {
-            return vec![NotoraEffect::Redraw];
-        }
-        let Some(draft) = self.new_note_draft.as_mut() else {
-            return vec![NotoraEffect::Redraw];
-        };
-        if matches!(
-            draft.submission,
-            NoteCreationSubmission::Submitting | NoteCreationSubmission::Succeeded
-        ) {
-            return vec![NotoraEffect::Redraw];
-        }
-        update(draft);
-        draft.submission = NoteCreationSubmission::Editing;
-        self.library.last_command_error = None;
-        vec![NotoraEffect::Redraw]
-    }
-
-    fn submit_note_creation(&mut self) -> Vec<NotoraEffect> {
-        if self.layout.overlay != OverlayState::NewNoteCreationPanel {
-            return vec![NotoraEffect::Redraw];
-        }
-        let Some(draft) = self.new_note_draft.as_mut() else {
-            return vec![NotoraEffect::Redraw];
-        };
-        if !matches!(
-            draft.submission,
-            NoteCreationSubmission::Editing | NoteCreationSubmission::Failed
-        ) {
-            return vec![NotoraEffect::Redraw];
-        }
-        if draft.storage_mode == NoteCreationStorageMode::Encrypted {
-            return self
-                .fail_note_creation("加密笔记创建尚未接入密钥服务，请选择普通存储。".to_owned());
-        }
-        draft.submission = NoteCreationSubmission::Submitting;
-        self.library.last_command_error = None;
-        vec![
-            NotoraEffect::RequestNoteCreation {
-                kind: draft.kind,
-                target: NoteCreationTarget { directory: draft.directory.clone() },
-            },
-            NotoraEffect::Redraw,
-        ]
-    }
-
-    fn cancel_note_creation(&mut self) -> Vec<NotoraEffect> {
-        if self.layout.overlay != OverlayState::NewNoteCreationPanel {
-            return vec![NotoraEffect::Redraw];
-        }
-        self.new_note_draft = None;
-        self.layout.overlay = OverlayState::None;
-        self.layout.focus_target = FocusTarget::CardList;
-        vec![NotoraEffect::Redraw]
-    }
-
-    fn fail_note_creation(&mut self, message: String) -> Vec<NotoraEffect> {
-        let Some(draft) = self.new_note_draft.as_mut() else {
-            self.library.last_command_error = Some(message);
-            return vec![NotoraEffect::Redraw];
-        };
-        if self.layout.overlay == OverlayState::NewNoteCreationPanel {
-            draft.submission = NoteCreationSubmission::Failed;
-            self.layout.focus_target = FocusTarget::Overlay;
-        }
-        self.library.last_command_error = Some(message);
         vec![NotoraEffect::Redraw]
     }
 
@@ -594,8 +507,7 @@ impl NotoraState {
         if self.workspace_root == WorkspaceRootState::Missing {
             return vec![NotoraEffect::Redraw];
         }
-        if self.layout.overlay == OverlayState::NewNoteCreationPanel {
-            self.new_note_draft = None;
+        if self.layout.overlay == OverlayState::NewDocumentMenu {
             self.layout.overlay = OverlayState::None;
             self.layout.focus_target = FocusTarget::CardList;
         }
@@ -648,13 +560,6 @@ impl NotoraState {
         let identity = DocumentIdentity::Note(result.note.note_id);
         let request = self.select_document(identity);
         self.library.last_command_error = None;
-        if created_note && self.layout.overlay == OverlayState::NewNoteCreationPanel {
-            if let Some(draft) = self.new_note_draft.as_mut() {
-                draft.submission = NoteCreationSubmission::Succeeded;
-            }
-            self.new_note_draft = None;
-            self.layout.overlay = OverlayState::None;
-        }
         if created_note {
             self.layout.focus_target = FocusTarget::EditorTitle;
             self.layout.compact_content = CompactContent::Editor;
@@ -892,12 +797,9 @@ impl NotoraState {
             OverlayState::SaveConflict => self.library.save_conflict = None,
             OverlayState::None
             | OverlayState::Settings
-            | OverlayState::NewNoteCreationPanel
+            | OverlayState::NewDocumentMenu
             | OverlayState::TrashPermanentDeletionConfirmation { .. }
             | OverlayState::TrashRestoreConflictConfirmation { .. } => {}
-        }
-        if matches!(self.layout.overlay, OverlayState::NewNoteCreationPanel) {
-            self.new_note_draft = None;
         }
         self.layout.overlay = OverlayState::None;
         self.layout.focus_target =
@@ -1201,18 +1103,6 @@ mod trash_actions {
     }
 }
 
-fn default_creation_directory(scope: &NavigationScope) -> Option<std::path::PathBuf> {
-    match scope {
-        NavigationScope::Directory { relative_path } => Some(relative_path.clone()),
-        NavigationScope::Trash
-        | NavigationScope::ExternalFiles
-        | NavigationScope::Search { .. }
-        | NavigationScope::WorkspaceRoot
-        | NavigationScope::Starred
-        | NavigationScope::Tag { .. } => None,
-    }
-}
-
 fn creation_target(scope: &NavigationScope) -> Option<NoteCreationTarget> {
     match scope {
         NavigationScope::Trash | NavigationScope::ExternalFiles => None,
@@ -1470,22 +1360,20 @@ mod tests {
     }
 
     #[test]
-    fn opening_new_note_panel_creates_a_default_draft_without_creating_a_note() {
+    fn opening_new_document_menu_only_opens_the_menu() {
         let mut state = state_with_active_workspace();
 
         assert_eq!(state.reduce(NotoraAction::OpenNewDocumentMenu), vec![NotoraEffect::Redraw]);
-        assert_eq!(state.layout.overlay, OverlayState::NewNoteCreationPanel);
+        assert_eq!(state.layout.overlay, OverlayState::NewDocumentMenu);
         assert_eq!(state.layout.focus_target, FocusTarget::Overlay);
-        assert_eq!(state.new_note_draft, Some(crate::action::NewNoteDraft::markdown(None)));
     }
 
     #[test]
-    fn missing_workspace_root_cannot_open_the_new_note_panel() {
+    fn missing_workspace_root_cannot_open_the_new_document_menu() {
         let mut state = NotoraState::default();
 
         assert_eq!(state.reduce(NotoraAction::OpenNewDocumentMenu), vec![NotoraEffect::Redraw]);
         assert_eq!(state.layout.overlay, OverlayState::None);
-        assert_eq!(state.new_note_draft, None);
     }
 
     #[test]
@@ -1497,89 +1385,26 @@ mod tests {
             vec![NotoraEffect::ChooseWorkspaceRoot, NotoraEffect::Redraw]
         );
         assert_eq!(state.layout.overlay, OverlayState::None);
-        assert_eq!(state.new_note_draft, None);
     }
 
     #[test]
-    fn escape_cancels_the_new_note_panel_and_discards_its_draft() {
+    fn escape_closes_the_new_document_menu() {
         let mut state = state_with_active_workspace();
         let _ = state.reduce(NotoraAction::OpenNewDocumentMenu);
-        let _ = state.reduce(NotoraAction::NoteCreationTypeSelected(DocumentKind::Text));
 
         assert_eq!(state.reduce(NotoraAction::EscapePressed), vec![NotoraEffect::Redraw]);
         assert_eq!(state.layout.overlay, OverlayState::None);
-        assert_eq!(state.new_note_draft, None);
         assert_eq!(state.layout.focus_target, FocusTarget::NavigationTree);
     }
 
     #[test]
-    fn trash_scope_cannot_open_the_new_note_panel() {
+    fn trash_scope_cannot_open_the_new_document_menu() {
         let mut state = state_with_active_workspace();
         let _ = state.reduce(NotoraAction::NavigationSelected(NavigationScope::Trash));
 
         assert_eq!(state.reduce(NotoraAction::OpenNewDocumentMenu), vec![NotoraEffect::Redraw]);
         assert_eq!(state.layout.overlay, OverlayState::None);
         assert_ne!(state.layout.focus_target, FocusTarget::Overlay);
-    }
-
-    #[test]
-    fn note_creation_selection_updates_the_typed_draft() {
-        let mut state = state_with_active_workspace();
-        let _ = state.reduce(NotoraAction::OpenNewDocumentMenu);
-
-        let _ = state.reduce(NotoraAction::NoteCreationTypeSelected(DocumentKind::Mindmap));
-        let _ = state.reduce(NotoraAction::NoteCreationDirectorySelected(Some("plans".into())));
-        let _ = state.reduce(NotoraAction::NoteCreationStorageSelected(
-            crate::action::NoteCreationStorageMode::Unencrypted,
-        ));
-
-        assert_eq!(
-            state.new_note_draft,
-            Some(crate::action::NewNoteDraft {
-                kind: DocumentKind::Mindmap,
-                directory: Some("plans".into()),
-                storage_mode: crate::action::NoteCreationStorageMode::Unencrypted,
-                submission: crate::action::NoteCreationSubmission::Editing,
-            })
-        );
-    }
-
-    #[test]
-    fn note_creation_submission_enters_submitting_state_and_keeps_the_panel_open() {
-        let mut state = state_with_active_workspace();
-        let _ = state.reduce(NotoraAction::OpenNewDocumentMenu);
-
-        let effects = state.reduce(NotoraAction::NoteCreationSubmitted);
-
-        assert!(matches!(
-            effects.as_slice(),
-            [
-                NotoraEffect::RequestNoteCreation { kind: DocumentKind::Markdown, .. },
-                NotoraEffect::Redraw
-            ]
-        ));
-        assert_eq!(state.layout.overlay, OverlayState::NewNoteCreationPanel);
-        assert_eq!(
-            state.new_note_draft.as_ref().map(|draft| draft.submission),
-            Some(crate::action::NoteCreationSubmission::Submitting)
-        );
-    }
-
-    #[test]
-    fn note_creation_failure_keeps_the_draft_editable_for_retry() {
-        let mut state = state_with_active_workspace();
-        let _ = state.reduce(NotoraAction::OpenNewDocumentMenu);
-        let _ = state.reduce(NotoraAction::NoteCreationSubmitted);
-
-        let _ = state.reduce(NotoraAction::NoteCreationFailed("创建失败".to_owned()));
-
-        assert_eq!(state.layout.overlay, OverlayState::NewNoteCreationPanel);
-        assert_eq!(state.layout.focus_target, FocusTarget::Overlay);
-        assert_eq!(
-            state.new_note_draft.as_ref().map(|draft| draft.submission),
-            Some(crate::action::NoteCreationSubmission::Failed)
-        );
-        assert_eq!(state.library.last_command_error.as_deref(), Some("创建失败"));
     }
 
     #[test]

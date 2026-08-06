@@ -37,7 +37,7 @@ fn non_editor_focus_and_modal_block_document_ime() {
 }
 
 #[test]
-fn modal_creation_panel_and_tooltip_are_painted_after_the_editor() {
+fn modal_new_document_menu_and_tooltip_are_painted_after_the_editor() {
     let source = include_str!("../src/render.rs");
     let editor_position = source
         .find("frame.paint_editor_with")
@@ -46,15 +46,15 @@ fn modal_creation_panel_and_tooltip_are_painted_after_the_editor() {
     let modal_position = overlay_source
         .find("if model.show_settings_overlay")
         .expect("shell should paint a modal overlay after the editor");
-    let creation_panel_position = overlay_source
-        .find("if model.show_creation_panel")
-        .expect("shell should paint the creation panel after the editor");
+    let new_document_menu_position = overlay_source
+        .find("if let Some(menu) = self.new_document_menu.as_ref()")
+        .expect("shell should paint the new document menu after the editor");
     let tooltip_position = overlay_source
         .find("if model.show_tooltip")
         .expect("shell should paint a tooltip layer after the editor");
 
-    assert!(modal_position < creation_panel_position);
-    assert!(creation_panel_position < tooltip_position);
+    assert!(modal_position < new_document_menu_position);
+    assert!(new_document_menu_position < tooltip_position);
 }
 
 #[test]

@@ -44,44 +44,6 @@ pub struct NoteCreationTarget {
     pub directory: Option<PathBuf>,
 }
 
-/// 创建面板中的持久化方式；加密选项在密钥服务接入前保持不可提交。
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub enum NoteCreationStorageMode {
-    #[default]
-    Unencrypted,
-    Encrypted,
-}
-
-/// 创建面板的提交状态；面板打开期间只允许存在一种状态。
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub enum NoteCreationSubmission {
-    #[default]
-    Editing,
-    Submitting,
-    Failed,
-    Succeeded,
-}
-
-/// 创建面板草稿；保留用户已确认的类型、目录和存储方式。
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct NewNoteDraft {
-    pub kind: DocumentKind,
-    pub directory: Option<PathBuf>,
-    pub storage_mode: NoteCreationStorageMode,
-    pub submission: NoteCreationSubmission,
-}
-
-impl NewNoteDraft {
-    pub fn markdown(directory: Option<PathBuf>) -> Self {
-        Self {
-            kind: DocumentKind::Markdown,
-            directory,
-            storage_mode: NoteCreationStorageMode::Unencrypted,
-            submission: NoteCreationSubmission::Editing,
-        }
-    }
-}
-
 /// 一次卡片选择触发的后台加载请求。
 ///
 /// `selection_generation` 使 A→B→A 的两次同 identity 选择保持可区分，旧读取结果
@@ -179,12 +141,6 @@ pub enum NotoraAction {
     WorkspaceRootSelectionRequested,
     OpenNewDocumentMenu,
     CreateRequested(DocumentKind),
-    NoteCreationTypeSelected(DocumentKind),
-    NoteCreationDirectorySelected(Option<PathBuf>),
-    NoteCreationStorageSelected(NoteCreationStorageMode),
-    NoteCreationSubmitted,
-    NoteCreationCancelled,
-    NoteCreationFailed(String),
     TitleCommitRequested(String),
     SemanticEditRequested(ui::plugin::SemanticEditCommand),
     RenameDialogRequested(notora_core::NoteId),

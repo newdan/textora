@@ -7,7 +7,7 @@ pub(crate) mod state;
 pub mod types;
 
 // Re-export all public types for backward compatibility
-pub use menu::build_settings_menu;
+pub use menu::{build_new_document_menu, build_settings_menu};
 pub use persistent::SidebarPersistent;
 pub(crate) use state::SidebarState;
 #[allow(unused_imports)]

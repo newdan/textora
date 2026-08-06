@@ -9,10 +9,8 @@ use ui::canvas_scrollbars::{
 use ui::core::WidgetAction;
 use ui::core::widget::{ControlAction, TextPayload, WidgetId};
 use ui::icon::draw_icon;
-use ui::note_creation_panel::{
-    NoteCreationOptionInput, NoteCreationPanelInput, NoteCreationPanelWidget,
-    NoteCreationSubmissionState,
-};
+use ui::popup_menu::{PopupMenuAction, PopupMenuWidget, PopupOutcome};
+use ui::sidebar::NewDocumentKind;
 use ui::split_button::{SplitButtonInput, SplitButtonWidget};
 use ui::splitter::{SplitterAction, SplitterInput, SplitterWidget};
 use ui::status_state::{StatusStateInput, StatusStateKind, StatusStateWidget};
@@ -27,9 +25,7 @@ use ui::virtual_card_list::{
 };
 use ui::{Event, EventCtx, Rect, Widget};
 
-use crate::action::{
-    ConflictResolution, MetadataMutation, NoteCreationStorageMode, NotoraAction, TrashOperation,
-};
+use crate::action::{ConflictResolution, MetadataMutation, NotoraAction, TrashOperation};
 use crate::editor_pane::{EditorPaneChrome, EditorPaneInput, EditorPaneMode, EditorPaneRects};
 use crate::external_files::ExternalFileSession;
 use crate::settings::ProductSettings;
@@ -62,12 +58,6 @@ const SIDEBAR_CONTROL_HEIGHT_LOGICAL: f32 = 32.0;
 const SIDEBAR_ICON_SIZE_LOGICAL: f32 = 16.0;
 const SIDEBAR_LABEL_FONT_SIZE_LOGICAL: f32 = 15.0;
 const CARD_LOAD_MORE_THRESHOLD_LOGICAL: f32 = 160.0;
-const NOTE_CREATION_PANEL_WIDTH_LOGICAL: f32 = 360.0;
-const NOTE_CREATION_PANEL_ROW_HEIGHT_LOGICAL: f32 = 28.0;
-const NOTE_CREATION_PANEL_SECTION_GAP_LOGICAL: f32 = 8.0;
-const NOTE_CREATION_PANEL_VERTICAL_PADDING_LOGICAL: f32 = 16.0;
-const NOTE_CREATION_ROOT_DIRECTORY_KEY: &str = "root";
-const NOTE_CREATION_UNENCRYPTED_KEY: &str = "unencrypted";
 const COMPACT_NAVIGATION_BUTTON_WIDTH_LOGICAL: f32 = 72.0;
 const COMPACT_BACK_BUTTON_WIDTH_LOGICAL: f32 = 64.0;
 const CONFIRMATION_PANEL_WIDTH_LOGICAL: f32 = 360.0;
@@ -153,9 +143,7 @@ pub struct NotoraRenderModel {
     pub show_settings_overlay: bool,
     pub settings_overlay: SettingsOverlayInput,
     pub confirmation: Option<ConfirmationOverlayInput>,
-    pub show_creation_panel: bool,
-    pub creation_panel: NoteCreationPanelInput,
-    pub creation_actions: HashMap<String, NotoraAction>,
+    pub show_new_document_menu: bool,
     pub show_tooltip: bool,
     pub new_note_control: NewNoteControlState,
     pub note_toolbar: Vec<NoteToolbarButtonInput>,
@@ -300,7 +288,6 @@ impl NotoraRenderModel {
                 NotoraAction::TrashOperationRequested(TrashOperation::MoveToTrash { note_id }),
             );
         }
-        let (creation_panel, creation_actions) = note_creation_panel_input(state);
         Self {
             search_query,
             navigation_rows,
@@ -314,9 +301,7 @@ impl NotoraRenderModel {
             show_settings_overlay: state.layout.overlay == OverlayState::Settings,
             settings_overlay: SettingsOverlayInput::from_product_settings(product_settings),
             confirmation: confirmation_overlay_input(state.layout.overlay),
-            show_creation_panel: state.layout.overlay == OverlayState::NewNoteCreationPanel,
-            creation_panel,
-            creation_actions,
+            show_new_document_menu: state.layout.overlay == OverlayState::NewDocumentMenu,
             show_tooltip: false,
             new_note_control: new_note_control_state(selected_scope, state.workspace_root),
             note_toolbar: note_toolbar_buttons(selected_scope, selected_note_id),
@@ -492,102 +477,6 @@ fn editor_pane_input(state: &NotoraState, cards: &[RenderCard]) -> EditorPaneInp
             .collect();
     }
     input
-}
-
-fn note_creation_panel_input(
-    state: &NotoraState,
-) -> (NoteCreationPanelInput, HashMap<String, NotoraAction>) {
-    let Some(draft) = state.new_note_draft.as_ref() else {
-        return (NoteCreationPanelInput::default(), HashMap::new());
-    };
-    let mut actions = HashMap::new();
-    let document_types = [
-        ("text", "TXT", DocumentKind::Text),
-        ("markdown", "Markdown", DocumentKind::Markdown),
-        ("mindmap", "Mindmap", DocumentKind::Mindmap),
-    ]
-    .into_iter()
-    .map(|(key, label, kind)| {
-        actions.insert(key.to_owned(), NotoraAction::NoteCreationTypeSelected(kind));
-        NoteCreationOptionInput {
-            option_key: key.to_owned(),
-            label: label.to_owned(),
-            enabled: true,
-        }
-    })
-    .collect();
-
-    let mut directories = vec![NoteCreationOptionInput {
-        option_key: NOTE_CREATION_ROOT_DIRECTORY_KEY.to_owned(),
-        label: "工作区根目录".to_owned(),
-        enabled: true,
-    }];
-    actions.insert(
-        NOTE_CREATION_ROOT_DIRECTORY_KEY.to_owned(),
-        NotoraAction::NoteCreationDirectorySelected(None),
-    );
-    for directory in &state.library.navigation_tree.directories {
-        let option_key = directory.to_string_lossy().to_string();
-        let label = directory
-            .file_name()
-            .map(|name| name.to_string_lossy().to_string())
-            .unwrap_or_else(|| option_key.clone());
-        directories.push(NoteCreationOptionInput {
-            option_key: option_key.clone(),
-            label,
-            enabled: true,
-        });
-        actions.insert(
-            option_key,
-            NotoraAction::NoteCreationDirectorySelected(Some(directory.clone())),
-        );
-    }
-
-    actions.insert(
-        NOTE_CREATION_UNENCRYPTED_KEY.to_owned(),
-        NotoraAction::NoteCreationStorageSelected(NoteCreationStorageMode::Unencrypted),
-    );
-    let storage_modes = vec![NoteCreationOptionInput {
-        option_key: NOTE_CREATION_UNENCRYPTED_KEY.to_owned(),
-        label: "普通存储".to_owned(),
-        enabled: true,
-    }];
-    let selected_directory = Some(match &draft.directory {
-        Some(directory) => directory.to_string_lossy().to_string(),
-        None => NOTE_CREATION_ROOT_DIRECTORY_KEY.to_owned(),
-    });
-    let selected_storage_mode = match draft.storage_mode {
-        NoteCreationStorageMode::Unencrypted => Some(NOTE_CREATION_UNENCRYPTED_KEY.to_owned()),
-        NoteCreationStorageMode::Encrypted => None,
-    };
-    let submission = match draft.submission {
-        crate::action::NoteCreationSubmission::Editing => NoteCreationSubmissionState::Idle,
-        crate::action::NoteCreationSubmission::Submitting => {
-            NoteCreationSubmissionState::Submitting
-        }
-        crate::action::NoteCreationSubmission::Failed => NoteCreationSubmissionState::Failed,
-        crate::action::NoteCreationSubmission::Succeeded => NoteCreationSubmissionState::Succeeded,
-    };
-    (
-        NoteCreationPanelInput {
-            document_types,
-            directories,
-            storage_modes,
-            selected_document_type: Some(document_kind_key(draft.kind).to_owned()),
-            selected_directory,
-            selected_storage_mode,
-            submission,
-        },
-        actions,
-    )
-}
-
-fn document_kind_key(kind: DocumentKind) -> &'static str {
-    match kind {
-        DocumentKind::Text => "text",
-        DocumentKind::Markdown => "markdown",
-        DocumentKind::Mindmap => "mindmap",
-    }
 }
 
 fn format_created_time(timestamp: SystemTime) -> String {
@@ -962,7 +851,7 @@ pub struct NotoraShell {
     navigation_splitter: SplitterWidget,
     card_list_splitter: SplitterWidget,
     new_note_button: SplitButtonWidget,
-    note_creation_panel: NoteCreationPanelWidget,
+    new_document_menu: Option<PopupMenuWidget>,
     editor_pane: EditorPaneChrome,
     editor_note_id: Option<NoteId>,
     editor_location_actions: HashMap<String, NotoraAction>,
@@ -980,9 +869,8 @@ pub struct NotoraShell {
     card_content_rect: Rect,
     editor_rect: Rect,
     settings_rect: Rect,
-    note_creation_panel_rect: Rect,
-    note_creation_panel_open: bool,
-    creation_actions: HashMap<String, NotoraAction>,
+    new_document_menu_rect: Rect,
+    new_document_menu_open: bool,
     note_toolbar_buttons: Vec<RenderedToolbarButton>,
     compact_navigation_rect: Rect,
     compact_back_rect: Rect,
@@ -1027,13 +915,12 @@ impl NotoraShell {
             navigation_splitter: SplitterWidget::new(),
             card_list_splitter: SplitterWidget::new(),
             new_note_button,
-            note_creation_panel: NoteCreationPanelWidget::new(),
+            new_document_menu: None,
             editor_pane: EditorPaneChrome::new(),
             editor_note_id: None,
             editor_location_actions: HashMap::new(),
             editor_tag_actions: HashMap::new(),
             editor_command_actions: HashMap::new(),
-            creation_actions: HashMap::new(),
             settings_overlay: SettingsOverlay::new(),
             settings_overlay_open: false,
             navigation_actions: HashMap::new(),
@@ -1046,8 +933,8 @@ impl NotoraShell {
             card_content_rect: Rect::ZERO,
             editor_rect: Rect::ZERO,
             settings_rect: Rect::ZERO,
-            note_creation_panel_rect: Rect::ZERO,
-            note_creation_panel_open: false,
+            new_document_menu_rect: Rect::ZERO,
+            new_document_menu_open: false,
             note_toolbar_buttons: Vec::new(),
             compact_navigation_rect: Rect::ZERO,
             compact_back_rect: Rect::ZERO,
@@ -1170,14 +1057,12 @@ impl NotoraShell {
             label: "新建笔记".to_owned(),
             enabled: model.new_note_control.is_enabled(),
         });
-        self.new_note_button.set_menu_open(false);
-        self.note_creation_panel.set_input(model.creation_panel.clone());
-        self.creation_actions.clone_from(&model.creation_actions);
+        self.new_note_button.set_menu_open(model.show_new_document_menu);
         self.settings_overlay.set_input(model.settings_overlay.clone());
         self.settings_overlay_open = model.show_settings_overlay;
         self.confirmation_action =
             model.confirmation.as_ref().map(|input| input.confirm_action.clone());
-        self.note_creation_panel_open = model.show_creation_panel;
+        self.new_document_menu_open = model.show_new_document_menu;
         self.save_conflict_actions =
             model.save_conflict.as_ref().map(|conflict| conflict.actions.clone());
         self.editor_pane.set_input(model.editor_chrome.clone());
@@ -1252,12 +1137,20 @@ impl NotoraShell {
             model.new_note_control,
             card_header.control_top_y,
         );
-        self.note_creation_panel_rect = note_creation_panel_rect(
-            layout.overlay_rect,
-            dpi,
-            &model.creation_panel,
-            model.show_creation_panel,
-        );
+        if model.show_new_document_menu {
+            let metrics =
+                ui::settings::UiMetrics::from_settings(&ui::settings::Settings::new(), dpi);
+            let menu = ui::sidebar::build_new_document_menu(
+                new_note_rect,
+                (layout.overlay_rect.right(), layout.overlay_rect.bottom()),
+                &metrics,
+            );
+            self.new_document_menu_rect = menu.menu_rect;
+            self.new_document_menu = Some(PopupMenuWidget::new(menu));
+        } else {
+            self.new_document_menu_rect = Rect::ZERO;
+            self.new_document_menu = None;
+        }
         let splitters_enabled = layout.responsive_mode == ResponsiveLayoutMode::ThreePane;
         self.navigation_splitter.set_input(SplitterInput {
             logical_position: layout.navigation_width_logical,
@@ -1329,7 +1222,9 @@ impl NotoraShell {
             self.navigation_splitter.set_rect(layout.navigation_splitter_rect, context);
             self.card_list_splitter.set_rect(layout.card_list_splitter_rect, context);
             self.new_note_button.set_rect(new_note_rect, context);
-            self.note_creation_panel.set_rect(local_rect(self.note_creation_panel_rect), context);
+            if let Some(menu) = self.new_document_menu.as_mut() {
+                menu.set_rect(local_rect(self.new_document_menu_rect), context);
+            }
             if model.show_settings_overlay {
                 self.settings_overlay.set_rect(layout.overlay_rect, context);
             }
@@ -1465,13 +1360,9 @@ impl NotoraShell {
                 self.paint_save_conflict_overlay(context);
             });
         }
-        if model.show_creation_panel {
+        if let Some(menu) = self.new_document_menu.as_ref() {
             frame.with_paint_context(|context| {
-                let application_theme = context.theme.application_theme();
-                context.list.fill_rounded(layout.overlay_rect, application_theme.modal_scrim, 0.0);
-                paint_at(context, self.note_creation_panel_rect, |context| {
-                    self.note_creation_panel.paint(context);
-                });
+                paint_at(context, self.new_document_menu_rect, |context| menu.paint(context));
             });
         }
         if model.show_tooltip {
@@ -1488,24 +1379,6 @@ impl NotoraShell {
 
     pub fn translate_widget_action(&self, action: &WidgetAction) -> Option<NotoraAction> {
         match action {
-            WidgetAction::Control(ControlAction::TextCommitted {
-                id: ui::note_creation_panel::NOTE_CREATION_TYPE_ID,
-                value: TextPayload::Plain(option_key),
-            }) => self.creation_actions.get(option_key).cloned(),
-            WidgetAction::Control(ControlAction::TextCommitted {
-                id: ui::note_creation_panel::NOTE_CREATION_DIRECTORY_ID,
-                value: TextPayload::Plain(option_key),
-            }) => self.creation_actions.get(option_key).cloned(),
-            WidgetAction::Control(ControlAction::TextCommitted {
-                id: ui::note_creation_panel::NOTE_CREATION_STORAGE_ID,
-                value: TextPayload::Plain(option_key),
-            }) => self.creation_actions.get(option_key).cloned(),
-            WidgetAction::Control(ControlAction::Activated {
-                id: ui::note_creation_panel::NOTE_CREATION_SUBMIT_ID,
-            }) => Some(NotoraAction::NoteCreationSubmitted),
-            WidgetAction::Control(ControlAction::Activated {
-                id: ui::note_creation_panel::NOTE_CREATION_CANCEL_ID,
-            }) => Some(NotoraAction::NoteCreationCancelled),
             WidgetAction::Control(ControlAction::TextCommitted {
                 id: ui::location_picker::LOCATION_PICKER_SELECT_ID,
                 value: TextPayload::Plain(row_key),
@@ -1588,7 +1461,7 @@ impl NotoraShell {
                 Some(NotoraAction::WorkspaceRootSelectionRequested)
             }
             WidgetAction::Control(ControlAction::Activated { id }) if *id == NEW_NOTE_BUTTON_ID => {
-                Some(NotoraAction::OpenNewDocumentMenu)
+                Some(NotoraAction::CreateRequested(DocumentKind::Markdown))
             }
             WidgetAction::Control(ControlAction::Activated { id })
                 if *id == NEW_NOTE_MENU_BUTTON_ID =>
@@ -1656,16 +1529,18 @@ impl NotoraShell {
         {
             return NotoraEventRoute::consumed(Some(action));
         }
-        if self.note_creation_panel_open {
+        if self.new_document_menu_open {
             let local_event = translate_event(
                 event,
-                self.note_creation_panel_rect.x,
-                self.note_creation_panel_rect.y,
+                self.new_document_menu_rect.x,
+                self.new_document_menu_rect.y,
             );
-            if let Some(widget_action) =
-                self.note_creation_panel.on_event(&local_event, event_context)
+            if let Some(widget_action) = self
+                .new_document_menu
+                .as_mut()
+                .and_then(|menu| menu.on_event(&local_event, event_context))
             {
-                let action = self.translate_widget_action(&widget_action);
+                let action = new_document_menu_action(&widget_action);
                 return NotoraEventRoute::consumed(action);
             }
             return NotoraEventRoute::consumed(None);
@@ -2178,7 +2053,7 @@ fn confirmation_overlay_input(overlay: OverlayState) -> Option<ConfirmationOverl
         }),
         OverlayState::None
         | OverlayState::Settings
-        | OverlayState::NewNoteCreationPanel
+        | OverlayState::NewDocumentMenu
         | OverlayState::SaveConflict => None,
     }
 }
@@ -2335,6 +2210,23 @@ fn compact_layout_action(
     compact_back_rect.contains(*px, *py).then_some(NotoraAction::CompactBackRequested)
 }
 
+fn new_document_menu_action(action: &WidgetAction) -> Option<NotoraAction> {
+    let WidgetAction::Popup(outcome) = action else {
+        return None;
+    };
+    match outcome {
+        PopupOutcome::Selected(PopupMenuAction::NewDocument(kind)) => {
+            Some(NotoraAction::CreateRequested(match kind {
+                NewDocumentKind::Text => DocumentKind::Text,
+                NewDocumentKind::Mindmap => DocumentKind::Mindmap,
+                NewDocumentKind::Markdown => DocumentKind::Markdown,
+            }))
+        }
+        PopupOutcome::Dismiss => Some(NotoraAction::OverlayDismissed),
+        PopupOutcome::Selected(_) => None,
+    }
+}
+
 fn card_header_layout(
     card_list_rect: Rect,
     dpi: f32,
@@ -2396,34 +2288,6 @@ fn new_note_button_rect(
         control_top_y,
         width,
         NOTE_TOOL_BUTTON_HEIGHT_LOGICAL * dpi,
-    )
-}
-
-fn note_creation_panel_rect(
-    overlay_rect: Rect,
-    dpi: f32,
-    input: &NoteCreationPanelInput,
-    visible: bool,
-) -> Rect {
-    if !visible || overlay_rect.w <= 0.0 || overlay_rect.h <= 0.0 {
-        return Rect::ZERO;
-    }
-    let section_count = [&input.document_types, &input.directories, &input.storage_modes]
-        .into_iter()
-        .filter(|options| !options.is_empty())
-        .count();
-    let option_count =
-        input.document_types.len() + input.directories.len() + input.storage_modes.len();
-    let panel_width = (NOTE_CREATION_PANEL_WIDTH_LOGICAL * dpi).min(overlay_rect.w);
-    let panel_height = (NOTE_CREATION_PANEL_VERTICAL_PADDING_LOGICAL * 2.0
-        + option_count as f32 * NOTE_CREATION_PANEL_ROW_HEIGHT_LOGICAL
-        + section_count.saturating_mul(1) as f32 * NOTE_CREATION_PANEL_SECTION_GAP_LOGICAL)
-        * dpi;
-    Rect::new(
-        overlay_rect.x + (overlay_rect.w - panel_width) * 0.5,
-        overlay_rect.y + (overlay_rect.h - panel_height) * 0.5,
-        panel_width,
-        panel_height.min(overlay_rect.h),
     )
 }
 
@@ -2831,7 +2695,7 @@ mod tests {
     }
 
     #[test]
-    fn creation_panel_exposes_typed_options_without_creating_a_note() {
+    fn new_document_menu_exposes_only_direct_creation_actions() {
         let mut state =
             NotoraState { workspace_root: WorkspaceRootState::Active, ..NotoraState::default() };
         state.library.navigation_tree.directories = vec!["plans".into()];
@@ -2839,49 +2703,44 @@ mod tests {
 
         let model = NotoraRenderModel::from_state(&state);
 
-        assert!(model.show_creation_panel);
-        assert_eq!(model.creation_panel.selected_document_type.as_deref(), Some("markdown"));
-        assert_eq!(model.creation_panel.selected_directory.as_deref(), Some("root"));
-        assert_eq!(model.creation_panel.storage_modes.len(), 1);
+        assert!(model.show_new_document_menu);
+
+        let metrics = ui::settings::UiMetrics::from_settings(&ui::settings::Settings::new(), 1.0);
+        let button_rect = Rect::new(300.0, 20.0, 128.0, 28.0);
+        let menu = ui::sidebar::build_new_document_menu(button_rect, (800.0, 600.0), &metrics);
+        let labels: Vec<&str> = menu.items.iter().map(|item| item.label.as_str()).collect();
+
+        assert_eq!(labels, vec!["新建 TXT", "新建 MMAP", "新建 MD"]);
+        assert!(menu.menu_rect.y > button_rect.bottom());
+    }
+
+    #[test]
+    fn new_note_main_button_creates_markdown_directly() {
+        let shell = NotoraShell::new();
+
         assert_eq!(
-            model.creation_actions.get("plans"),
-            Some(&NotoraAction::NoteCreationDirectorySelected(Some("plans".into())))
-        );
-        assert!(
-            !model
-                .creation_actions
-                .values()
-                .any(|action| matches!(action, NotoraAction::CreateRequested(_)))
+            shell.translate_widget_action(&WidgetAction::Control(ControlAction::Activated {
+                id: NEW_NOTE_BUTTON_ID,
+            })),
+            Some(NotoraAction::CreateRequested(DocumentKind::Markdown))
         );
     }
 
     #[test]
-    fn creation_panel_is_centered_and_has_no_legacy_menu_rect() {
-        let input = NoteCreationPanelInput {
-            document_types: vec![NoteCreationOptionInput {
-                option_key: "markdown".to_owned(),
-                label: "Markdown".to_owned(),
-                enabled: true,
-            }],
-            directories: vec![NoteCreationOptionInput {
-                option_key: "root".to_owned(),
-                label: "工作区根目录".to_owned(),
-                enabled: true,
-            }],
-            storage_modes: vec![NoteCreationOptionInput {
-                option_key: "unencrypted".to_owned(),
-                label: "普通存储".to_owned(),
-                enabled: true,
-            }],
-            ..NoteCreationPanelInput::default()
-        };
-        let overlay_rect = Rect::new(0.0, 0.0, 800.0, 600.0);
-        let panel_rect = note_creation_panel_rect(overlay_rect, 1.0, &input, true);
+    fn popup_menu_actions_map_to_typed_creation_requests() {
+        for (kind, expected) in [
+            (NewDocumentKind::Text, DocumentKind::Text),
+            (NewDocumentKind::Mindmap, DocumentKind::Mindmap),
+            (NewDocumentKind::Markdown, DocumentKind::Markdown),
+        ] {
+            let action =
+                WidgetAction::Popup(PopupOutcome::Selected(PopupMenuAction::NewDocument(kind)));
 
-        assert!(panel_rect.w > 0.0);
-        assert!(panel_rect.h > 0.0);
-        assert_eq!(panel_rect.x + panel_rect.w * 0.5, 400.0);
-        assert_eq!(panel_rect.y + panel_rect.h * 0.5, 300.0);
+            assert_eq!(
+                new_document_menu_action(&action),
+                Some(NotoraAction::CreateRequested(expected))
+            );
+        }
     }
 
     #[test]

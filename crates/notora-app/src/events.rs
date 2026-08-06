@@ -394,7 +394,7 @@ mod tests {
     }
 
     #[test]
-    fn command_or_control_n_opens_the_creation_panel_for_both_variants() {
+    fn command_or_control_n_opens_the_new_document_menu_for_both_variants() {
         assert_eq!(
             create_shortcut_action(
                 ui::KeyCode::Char('n'),

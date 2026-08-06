@@ -19,8 +19,8 @@ use winit::event_loop::{ActiveEventLoop, EventLoopProxy};
 use winit::window::WindowAttributes;
 
 use crate::action::{
-    CardQuery, ConflictResolution, DocumentLoadRequest, NoteCreationStorageMode,
-    NoteCreationTarget, NotoraAction, SaveConflictRequest,
+    CardQuery, ConflictResolution, DocumentLoadRequest, NoteCreationTarget, NotoraAction,
+    SaveConflictRequest,
 };
 use crate::autosave::{AutoSaveRequest, AutoSaveScheduler, AutoSaveState};
 use crate::dirty_snapshot::{collect_dirty_snapshots, write_dirty_snapshot};
@@ -2126,24 +2126,15 @@ impl NotoraEffectService for NotoraApp {
 
     fn request_note_creation(&mut self, kind: DocumentKind, target: NoteCreationTarget) {
         if self.workspace_controller.active_workspace().is_none() {
-            self.dispatch_action(NotoraAction::NoteCreationFailed(
+            self.dispatch_action(NotoraAction::NoteCommandFailed(
                 "请先设置工作区根目录".to_owned(),
             ));
             return;
         }
-        let encryption = self
-            .state
-            .new_note_draft
-            .as_ref()
-            .map(|draft| match draft.storage_mode {
-                NoteCreationStorageMode::Unencrypted => NoteEncryption::Unencrypted,
-                NoteCreationStorageMode::Encrypted => NoteEncryption::Encrypted,
-            })
-            .unwrap_or(NoteEncryption::Unencrypted);
         self.submit_note_command(NoteCommand::CreateConfigured(ConfiguredCreateNoteRequest {
             kind,
             target_directory: target.directory,
-            encryption,
+            encryption: NoteEncryption::Unencrypted,
         }));
     }
 
@@ -3564,7 +3555,7 @@ mod tests {
     }
 
     #[test]
-    fn creation_panel_submits_a_configured_plain_note_and_opens_it() {
+    fn typed_menu_creation_uses_the_selected_directory_and_opens_the_note() {
         let workspace_directory =
             tempfile::tempdir().expect("workspace test directory should be created");
         let notes_directory = workspace_directory.path().join("notes");
@@ -3575,10 +3566,11 @@ mod tests {
         })
         .expect("workspace should open");
 
+        app.dispatch_action(NotoraAction::NavigationSelected(NavigationScope::Directory {
+            relative_path: "notes".into(),
+        }));
         app.dispatch_action(NotoraAction::OpenNewDocumentMenu);
-        app.dispatch_action(NotoraAction::NoteCreationTypeSelected(DocumentKind::Text));
-        app.dispatch_action(NotoraAction::NoteCreationDirectorySelected(Some("notes".into())));
-        app.dispatch_action(NotoraAction::NoteCreationSubmitted);
+        app.dispatch_action(NotoraAction::CreateRequested(DocumentKind::Text));
 
         let deadline = Instant::now() + Duration::from_secs(2);
         loop {
@@ -3591,12 +3583,11 @@ mod tests {
         }
 
         assert!(notes_directory.join("未命名 1.txt").is_file());
-        assert_eq!(app.state().new_note_draft, None);
         assert_eq!(app.state().layout.overlay, OverlayState::None);
     }
 
     #[test]
-    fn creation_failure_keeps_the_panel_draft_for_retry() {
+    fn creation_failure_closes_the_menu_and_reports_the_error() {
         let workspace_directory =
             tempfile::tempdir().expect("workspace test directory should be created");
         let mut app = app();
@@ -3605,9 +3596,11 @@ mod tests {
         })
         .expect("workspace should open");
 
+        app.dispatch_action(NotoraAction::NavigationSelected(NavigationScope::Directory {
+            relative_path: "missing".into(),
+        }));
         app.dispatch_action(NotoraAction::OpenNewDocumentMenu);
-        app.dispatch_action(NotoraAction::NoteCreationDirectorySelected(Some("missing".into())));
-        app.dispatch_action(NotoraAction::NoteCreationSubmitted);
+        app.dispatch_action(NotoraAction::CreateRequested(DocumentKind::Markdown));
 
         let deadline = Instant::now() + Duration::from_secs(2);
         while app.state().library.last_command_error.is_none() {
@@ -3616,11 +3609,7 @@ mod tests {
             thread::sleep(Duration::from_millis(10));
         }
 
-        assert_eq!(app.state().layout.overlay, OverlayState::NewNoteCreationPanel);
-        assert_eq!(
-            app.state().new_note_draft.as_ref().map(|draft| draft.submission),
-            Some(crate::action::NoteCreationSubmission::Failed)
-        );
+        assert_eq!(app.state().layout.overlay, OverlayState::None);
         assert!(!workspace_directory.path().join("missing").exists());
     }
 
@@ -3730,7 +3719,6 @@ mod tests {
 
         assert_eq!(app.state().layout.overlay, OverlayState::None);
         assert_eq!(app.state().layout.focus_target, FocusTarget::NavigationTree);
-        assert!(app.state().new_note_draft.is_none());
     }
 
     #[test]
@@ -3745,10 +3733,9 @@ mod tests {
 
         assert_eq!(app.state().workspace_root, WorkspaceRootState::Active);
         assert_eq!(app.state().layout.overlay, OverlayState::None);
-        assert!(app.state().new_note_draft.is_none());
 
         app.dispatch_action(NotoraAction::OpenNewDocumentMenu);
-        assert_eq!(app.state().layout.overlay, OverlayState::NewNoteCreationPanel);
+        assert_eq!(app.state().layout.overlay, OverlayState::NewDocumentMenu);
     }
 
     #[test]

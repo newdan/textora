@@ -30,7 +30,6 @@ pub mod label;
 pub mod location_picker;
 pub mod mindmap_style_panel;
 pub mod modal_frame;
-pub mod note_creation_panel;
 pub mod settings_view;
 pub mod toc;
 pub mod tree_list;
