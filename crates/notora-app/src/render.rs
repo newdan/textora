@@ -1966,6 +1966,7 @@ fn render_cards(state: &NotoraState) -> Vec<RenderCard> {
     match &state.library.card_page {
         CardPageState::Ready { cards, .. }
         | CardPageState::LoadingNextPage { cards, .. }
+        | CardPageState::Refreshing { cards, .. }
         | CardPageState::Failed { cards, .. } => cards.iter().map(render_catalog_card).collect(),
         CardPageState::Idle
         | CardPageState::LoadingInitial { .. }

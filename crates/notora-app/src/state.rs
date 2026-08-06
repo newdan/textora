@@ -143,6 +143,11 @@ pub enum CardPageState {
         query: CardQuery,
         cards: Vec<CatalogCard>,
     },
+    Refreshing {
+        query: CardQuery,
+        cards: Vec<CatalogCard>,
+        next_cursor: Option<CatalogCardCursor>,
+    },
     Empty {
         query: CardQuery,
     },
@@ -350,7 +355,7 @@ impl NotoraState {
                 if self.library.navigation_scope == NavigationScope::ExternalFiles {
                     return vec![NotoraEffect::Redraw];
                 }
-                self.request_card_query(CardQuery::from(self.library.navigation_scope.clone()))
+                self.refresh_card_query(CardQuery::from(self.library.navigation_scope.clone()))
             }
             NotoraAction::TrashOperationRequested(operation) => {
                 if matches!(
@@ -667,6 +672,25 @@ impl NotoraState {
         vec![NotoraEffect::QueryCards(query), NotoraEffect::Redraw]
     }
 
+    fn refresh_card_query(&mut self, query: CardQuery) -> Vec<NotoraEffect> {
+        let (cards, next_cursor) = match &self.library.card_page {
+            CardPageState::Ready { cards, next_cursor, .. }
+            | CardPageState::Refreshing { cards, next_cursor, .. }
+            | CardPageState::Failed { cards, next_cursor, .. } => {
+                (cards.clone(), next_cursor.clone())
+            }
+            CardPageState::LoadingNextPage { query, cards } => {
+                (cards.clone(), query.cursor.clone())
+            }
+            CardPageState::Idle
+            | CardPageState::LoadingInitial { .. }
+            | CardPageState::Empty { .. } => return self.request_card_query(query),
+        };
+        self.library.card_page =
+            CardPageState::Refreshing { query: query.clone(), cards, next_cursor };
+        vec![NotoraEffect::QueryCards(query), NotoraEffect::Redraw]
+    }
+
     fn apply_navigation_tree(&mut self, tree: CatalogNavigationTree) -> Vec<NotoraEffect> {
         self.library.navigation_tree = NavigationTreeState {
             expanded_directories: self
@@ -736,6 +760,13 @@ impl NotoraState {
                     CardPageState::Ready { query, cards: page.cards, next_cursor: page.next_cursor }
                 };
             }
+            CardPageState::Refreshing { query: pending_query, .. } if pending_query == &query => {
+                self.library.card_page = if page.cards.is_empty() {
+                    CardPageState::Empty { query }
+                } else {
+                    CardPageState::Ready { query, cards: page.cards, next_cursor: page.next_cursor }
+                };
+            }
             CardPageState::LoadingNextPage { query: pending_query, cards }
                 if pending_query == &query =>
             {
@@ -766,6 +797,11 @@ impl NotoraState {
             {
                 let cursor = query.cursor.clone();
                 (cards.clone(), cursor)
+            }
+            CardPageState::Refreshing { query: pending_query, cards, next_cursor }
+                if pending_query == &query =>
+            {
+                (cards.clone(), next_cursor.clone())
             }
             _ => return Vec::new(),
         };
@@ -889,12 +925,12 @@ mod metadata_actions {
     use std::time::SystemTime;
 
     use notora_core::{
-        CatalogNavigationTree, DocumentIdentity, NavigationScope, NoteEditorMetadata,
-        NoteEncryption, NoteId, TagId,
+        CatalogCard, CatalogNavigationTree, DocumentIdentity, DocumentKind, NavigationScope,
+        NoteEditorMetadata, NoteEncryption, NoteId, TagId,
     };
 
-    use super::{ActiveEditorMetadata, NotoraState};
-    use crate::action::{MetadataMutation, NotoraAction, NotoraEffect};
+    use super::{ActiveEditorMetadata, CardPageState, NotoraState};
+    use crate::action::{CardQuery, MetadataMutation, NotoraAction, NotoraEffect};
 
     #[test]
     fn stale_editor_metadata_cannot_cross_a_selection_generation() {
@@ -1029,6 +1065,41 @@ mod metadata_actions {
             [NotoraEffect::QueryCards(query), NotoraEffect::Redraw]
                 if query.scope == NavigationScope::Tag { tag_id }
         ));
+    }
+
+    #[test]
+    fn catalog_reindex_keeps_middle_and_editor_panes_stable_while_refreshing() {
+        let note_id = NoteId::generate();
+        let query = CardQuery::from(NavigationScope::WorkspaceRoot);
+        let mut state = NotoraState::default();
+        state.library.selected_card = Some(DocumentIdentity::Note(note_id));
+        state.library.card_scroll_offset_px = 180.0;
+        state.library.card_page = CardPageState::Ready {
+            query,
+            cards: vec![CatalogCard {
+                note_id,
+                relative_path: "项目路线图.md".into(),
+                kind: DocumentKind::Markdown,
+                title: "项目路线图".to_owned(),
+                excerpt: "第三季度计划".to_owned(),
+                modified_nanoseconds: 42,
+                starred: false,
+                tags: Vec::new(),
+            }],
+            next_cursor: None,
+        };
+
+        let effects = state.reduce(NotoraAction::CatalogReindexed);
+        let render_model = crate::render::NotoraRenderModel::from_state(&state);
+
+        assert!(matches!(
+            effects.as_slice(),
+            [NotoraEffect::QueryCards(query), NotoraEffect::Redraw]
+                if query.scope == NavigationScope::WorkspaceRoot
+        ));
+        assert_eq!(render_model.cards.len(), 1, "refresh must retain the visible middle pane");
+        assert_eq!(render_model.editor_chrome.header.title, "项目路线图");
+        assert_eq!(state.library.card_scroll_offset_px, 180.0);
     }
 
     #[test]

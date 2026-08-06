@@ -3070,6 +3070,7 @@ mod tests {
     fn card_page_contains_note(card_page: &CardPageState, note_id: notora_core::NoteId) -> bool {
         let cards = match card_page {
             CardPageState::LoadingNextPage { cards, .. }
+            | CardPageState::Refreshing { cards, .. }
             | CardPageState::Ready { cards, .. }
             | CardPageState::Failed { cards, .. } => cards,
             CardPageState::Idle
