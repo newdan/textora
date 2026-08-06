@@ -174,6 +174,8 @@ pub(crate) fn layout_block(block: &BlockNode, ctx: &mut LayoutCtx) {
                     current += l.len() + 1; // +1 for \n
                 }
                 (lines_vec, Some(st))
+            } else if let Some(content_start) = empty_fenced_code_content_start(block, ctx.doc) {
+                (vec![String::new()], Some(vec![content_start]))
             } else {
                 let raw = collect_text_lines(block, ctx.doc);
                 let lines_vec: Vec<String> =
@@ -595,6 +597,22 @@ fn is_fenced_code_block(block: &BlockNode, doc: &dyn core::document::DocView) ->
     }
 
     first_line.chars().take_while(|character| *character == fence_character).count() >= 3
+}
+
+fn empty_fenced_code_content_start(
+    block: &BlockNode,
+    doc: &dyn core::document::DocView,
+) -> Option<usize> {
+    if !block.text_lines.is_empty()
+        || block.code_line_source_starts.is_some()
+        || !is_fenced_code_block(block, doc)
+    {
+        return None;
+    }
+
+    let source = doc.doc_text_in_range(block.block_range.clone());
+    let opening_line_end = source.find('\n')?;
+    Some(block.block_range.start + opening_line_end + '\n'.len_utf8())
 }
 
 fn metadata_lines_with_source_starts(block: &BlockNode) -> Vec<(String, usize)> {

@@ -7986,6 +7986,50 @@ viebcoding 用过吗?
         assert_eq!(aug.replace_range, None, "Should not replace anything");
         assert_eq!(aug.insert_text, Some(String::from("\n2. ")), "Should continue numbering");
     }
+
+    #[test]
+    fn empty_fenced_code_block_exposes_editable_content_line() {
+        const OPENING_FENCE: &str = "```\n";
+        let source = "before\n\n```\n```\n\nafter";
+        let content_start =
+            source.find(OPENING_FENCE).expect("fixture must contain an opening fence")
+                + OPENING_FENCE.len();
+        let mut document = StubDoc::new(source);
+        let mut view = MarkdownEditorView::new();
+        view.set_source(source.to_owned(), 1);
+        render_editor_once(&mut view, &document);
+
+        let content_line = view
+            .engine()
+            .flat_lines()
+            .iter()
+            .find(|line| {
+                line.source_projection.as_ref().is_some_and(|projection| {
+                    projection.boundaries.iter().any(|anchor| anchor.byte == content_start)
+                })
+            })
+            .expect("empty fenced code block must retain an editable content projection");
+        let hit = view.engine().hit_test_byte(
+            content_line.rect.x,
+            content_line.rect.y + content_line.rect.h * 0.5,
+            0.0,
+            0.0,
+        );
+
+        assert_eq!(hit, Some(content_start));
+
+        view.handle_message(ui::plugin::PluginMessage::SetCursorByte(content_start), &mut document);
+        render_editor_once(&mut view, &document);
+        let (cursor_x, cursor_y, _cursor_width, cursor_height) = view
+            .engine()
+            .cursor_screen_pos()
+            .expect("clicking the empty code content must reveal a cursor");
+
+        assert_eq!(
+            view.engine().hit_test_byte(cursor_x, cursor_y + cursor_height * 0.5, 0.0, 0.0,),
+            Some(content_start),
+        );
+    }
 }
 
 #[cfg(test)]

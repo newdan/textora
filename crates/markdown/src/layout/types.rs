@@ -456,6 +456,10 @@ impl<S: BlockSource> LazyLayout<S> {
             .collect::<Vec<_>>();
         if let Some(source_text) = self.source_text.as_deref() {
             for projection in &mut visual_lines {
+                // A zero-width projection is an insertion anchor, not a line-terminal boundary.
+                if projection.source_extent.is_empty() {
+                    continue;
+                }
                 let Some(last_boundary) = projection.boundaries.last_mut() else {
                     continue;
                 };
