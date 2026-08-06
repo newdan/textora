@@ -1107,6 +1107,64 @@ mod tests {
         phases: Rc<RefCell<Vec<ui::plugin::CanvasDragPhase>>>,
     }
 
+    struct CanvasControlProbePlugin {
+        planned_ranges: Rc<RefCell<Vec<std::ops::Range<usize>>>>,
+    }
+
+    impl ui::plugin::ViewPlugin for CanvasControlProbePlugin {
+        fn name(&self) -> &str {
+            "canvas-control-probe"
+        }
+
+        fn render(
+            &mut self,
+            _document: &dyn core::document::DocView,
+            _bounds: ui::Rect,
+            _theme: &ui::Theme,
+            _shaper: &mut shaping::Shaper,
+            _dpi_scale: f32,
+        ) -> ui::DrawList {
+            ui::DrawList::new()
+        }
+
+        fn query(
+            &self,
+            query: ui::plugin::PluginQuery,
+            _document: &dyn core::document::DocView,
+        ) -> ui::plugin::PluginResponse {
+            match query {
+                ui::plugin::PluginQuery::HitTestEditTarget { .. } => {
+                    ui::plugin::PluginResponse::EditHitTarget(Some(
+                        ui::plugin::EditHitTarget::CanvasControl { source_range: 1..2 },
+                    ))
+                }
+                ui::plugin::PluginQuery::PlanCanvasControl { source_range, source_generation } => {
+                    self.planned_ranges.borrow_mut().push(source_range);
+                    ui::plugin::PluginResponse::EditPlan(ui::plugin::EditPlan::Apply(
+                        ui::plugin::EditTransaction::replace(
+                            source_generation,
+                            1..2,
+                            "expanded".to_owned(),
+                            8,
+                        ),
+                    ))
+                }
+                ui::plugin::PluginQuery::ContentHeight => {
+                    ui::plugin::PluginResponse::Float(1_000.0)
+                }
+                _ => ui::plugin::PluginResponse::None,
+            }
+        }
+
+        fn handles_own_rendering(&self) -> bool {
+            true
+        }
+
+        fn is_canvas(&self) -> bool {
+            true
+        }
+    }
+
     impl ui::plugin::ViewPlugin for CanvasDragProbePlugin {
         fn name(&self) -> &str {
             "canvas-drag-probe"
@@ -1409,6 +1467,37 @@ mod tests {
             ]
         );
         assert_eq!(runtime.workspace_snapshot().tabs[0].content_lines, vec!["moved"]);
+        assert!(outcome.notifications.iter().any(|notification| matches!(
+            notification,
+            EditorNotification::ContentChanged { tab_id: changed_tab_id, .. }
+                if *changed_tab_id == tab_id
+        )));
+        assert_eq!(runtime.pointer_capture(), MouseCapture::None);
+    }
+
+    #[test]
+    fn canvas_control_press_applies_its_edit_plan() {
+        let mut runtime = runtime_with_clean_tab();
+        let planned_ranges = Rc::new(RefCell::new(Vec::new()));
+        let tab_id = runtime.active_tab_id().expect("test canvas control tab should be active");
+        runtime
+            .tab_session_mut(tab_id)
+            .expect("test canvas control tab should exist")
+            .runtime
+            .plugin = Box::new(CanvasControlProbePlugin { planned_ranges: planned_ranges.clone() });
+        let context = EditorInputContext {
+            editor_rect: ui::Rect::new(100.0, 50.0, 800.0, 600.0),
+            focus: EditorFocus::Active,
+            modal_blocked: false,
+        };
+
+        let outcome = runtime.handle_pointer_event(
+            context,
+            &ui::Event::MouseDown { px: 300.0, py: 240.0, button: ui::MouseButton::Left },
+        );
+
+        assert_eq!(*planned_ranges.borrow(), vec![1..2]);
+        assert_eq!(runtime.workspace_snapshot().tabs[0].content_lines, vec!["cexpandedean"]);
         assert!(outcome.notifications.iter().any(|notification| matches!(
             notification,
             EditorNotification::ContentChanged { tab_id: changed_tab_id, .. }

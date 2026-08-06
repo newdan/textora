@@ -2050,8 +2050,18 @@ fn document_icon(kind: DocumentKind) -> &'static str {
 }
 
 fn format_modified_timestamp(modified_nanoseconds: i64) -> String {
-    let seconds = modified_nanoseconds.div_euclid(1_000_000_000);
-    format!("修改时间 {seconds}")
+    format_modified_timestamp_at(modified_nanoseconds, SystemTime::now())
+}
+
+fn format_modified_timestamp_at(modified_nanoseconds: i64, now: SystemTime) -> String {
+    let Ok(modified_nanoseconds) = u64::try_from(modified_nanoseconds) else {
+        return "修改时间未知".to_owned();
+    };
+    let Some(modified_at) = UNIX_EPOCH.checked_add(Duration::from_nanos(modified_nanoseconds))
+    else {
+        return "修改时间未知".to_owned();
+    };
+    format_modified_time(modified_at, now)
 }
 
 fn pointer_target(event: &Event, shell: &NotoraShell) -> Option<FocusTarget> {
@@ -2483,6 +2493,14 @@ mod tests {
             format_modified_time(now + std::time::Duration::from_secs(60), now),
             "修改 刚刚"
         );
+    }
+
+    #[test]
+    fn catalog_modified_timestamp_uses_the_same_relative_label_as_the_editor() {
+        let now = UNIX_EPOCH + std::time::Duration::from_secs(10 * 60);
+        let modified_nanoseconds = 5 * 60 * 1_000_000_000;
+
+        assert_eq!(format_modified_timestamp_at(modified_nanoseconds, now), "修改 5 分钟前");
     }
 
     #[test]

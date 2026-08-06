@@ -21,6 +21,9 @@ impl EditorRuntime {
         };
         match phase {
             PointerPhase::Press if self.pointer_input_allowed(context, position) => {
+                if let Some(outcome) = self.activate_canvas_control(context.editor_rect, position) {
+                    return outcome;
+                }
                 if self.begin_canvas_source_drag(context, position) {
                     return redraw_outcome();
                 }
@@ -58,6 +61,36 @@ impl EditorRuntime {
                 EditorOutcome::default()
             }
         }
+    }
+
+    fn activate_canvas_control(
+        &mut self,
+        editor_rect: ui::Rect,
+        position: (f32, f32),
+    ) -> Option<EditorOutcome> {
+        let tab_id = self.active_tab_id()?;
+        let dpi = self.scale_factor() as f32;
+        let bounds = super::editor_painter::plugin_bounds(editor_rect, dpi, true);
+        let edit_plan = {
+            let tab = self.tab_session(tab_id)?;
+            if !tab.is_canvas() || !tab.runtime.plugin.handles_own_rendering() {
+                return None;
+            }
+            let Some(Some(EditHitTarget::CanvasControl { source_range })) =
+                tab.hit_test_edit_target(position.0, position.1, bounds.x, bounds.y)
+            else {
+                return None;
+            };
+            tab.canvas_control_edit_plan(source_range, tab.document.generation())
+        };
+        self.end_pointer_capture();
+        let Some(ui::plugin::EditPlan::Apply(transaction)) = edit_plan else {
+            return Some(redraw_outcome());
+        };
+        Some(
+            self.model_session
+                .apply_active_edit_transaction(transaction, self.editor_line_height()),
+        )
     }
 
     fn begin_canvas_source_drag(
