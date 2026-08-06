@@ -22,6 +22,7 @@ pub enum FocusTarget {
     CardList,
     Editor,
     EditorTitle,
+    EditorTag,
     Overlay,
 }
 

@@ -84,6 +84,7 @@ fn paint_plugin_editor(
     let (Some(text), Some(gpu)) = (resources.text.as_mut(), resources.gpu.as_ref()) else {
         return Vec::new();
     };
+    let cursor_paint_enabled = runtime.active_cursor_paint_enabled();
     let Some(mut tab) = runtime.tab_session_mut(tab_id) else {
         return Vec::new();
     };
@@ -94,7 +95,8 @@ fn paint_plugin_editor(
         line_height: metrics.line_height / metrics.dpi,
         toc_max_depth,
     });
-    let cursor_visible = (tab.cursor_blink_instant().elapsed().as_millis() / 500).is_multiple_of(2);
+    let cursor_visible = cursor_paint_enabled
+        && (tab.cursor_blink_instant().elapsed().as_millis() / 500).is_multiple_of(2);
     tab.send_message(PluginMessage::SetCursorVisible(cursor_visible));
 
     let bounds = plugin_bounds(editor_rect, metrics.dpi, tab.is_canvas());

@@ -293,7 +293,7 @@ impl NotoraApp {
         let persistence_worker =
             crate::persistence_worker::PersistenceWorker::start(product.event_sender())
                 .map_err(NotoraAppError::PersistenceWorker)?;
-        let app = Self {
+        let mut app = Self {
             startup_trace,
             font_system_preparation: FontSystemPreparation::Deferred,
             paths,
@@ -337,6 +337,7 @@ impl NotoraApp {
             needs_redraw: true,
             event_loop_proxy: None,
         };
+        app.synchronize_product_focus();
         if let Some(trace) = &app.startup_trace {
             trace.record_stage("application_constructed", trace.started_at);
         }
@@ -470,7 +471,7 @@ impl NotoraApp {
             let shell_effect = EffectExecutor::execute(self, effect);
             self.apply_shell_effect(shell_effect);
         }
-        self.shell.synchronize_focus(self.state.layout.focus_target, Instant::now());
+        self.synchronize_product_focus();
         if committed_without_workspace {
             self.dispatch_action(NotoraAction::SearchCommitted {
                 query: self.state.library.search_text.clone(),
@@ -480,6 +481,13 @@ impl NotoraApp {
         if should_persist_session {
             self.schedule_session_persistence();
         }
+    }
+
+    fn synchronize_product_focus(&mut self) {
+        let focus_target = self.state.layout.focus_target;
+        self.editor_runtime
+            .set_active_cursor_paint_enabled(focus_target == crate::FocusTarget::Editor);
+        self.shell.synchronize_focus(focus_target, Instant::now());
     }
 
     pub fn update_editor_preedit(&mut self, text: String, cursor: Option<(usize, usize)>) -> bool {
@@ -3219,6 +3227,13 @@ mod tests {
         app.dispatch_action(NotoraAction::FocusRequested(FocusTarget::Editor));
 
         assert!(app.next_deadline().is_some());
+        assert!(app.editor_runtime.active_cursor_paint_enabled());
+
+        app.dispatch_action(NotoraAction::FocusRequested(FocusTarget::EditorTitle));
+        assert!(!app.editor_runtime.active_cursor_paint_enabled());
+
+        app.dispatch_action(NotoraAction::FocusRequested(FocusTarget::EditorTag));
+        assert!(!app.editor_runtime.active_cursor_paint_enabled());
 
         app.dispatch_action(NotoraAction::FocusRequested(FocusTarget::CardList));
         assert_eq!(app.next_deadline(), None);

@@ -1049,8 +1049,8 @@ impl NotoraShell {
 
     pub(crate) fn synchronize_focus(&mut self, focus_target: FocusTarget, now: Instant) {
         let focused_text_input =
-            if focus_target == FocusTarget::Editor && self.editor_pane.tag_editor_is_active() {
-                Some(FocusTarget::Editor)
+            if focus_target == FocusTarget::EditorTag && self.editor_pane.tag_editor_is_active() {
+                Some(FocusTarget::EditorTag)
             } else {
                 match focus_target {
                     FocusTarget::NavigationSearch | FocusTarget::EditorTitle => Some(focus_target),
@@ -1590,7 +1590,7 @@ impl NotoraShell {
             }) => Some(NotoraAction::FocusRequested(FocusTarget::EditorTitle)),
             WidgetAction::Control(ControlAction::FocusRequested {
                 id: ui::tag_editor::TAG_EDITOR_INPUT_ID,
-            }) => Some(NotoraAction::FocusRequested(FocusTarget::Editor)),
+            }) => Some(NotoraAction::FocusRequested(FocusTarget::EditorTag)),
             WidgetAction::Control(ControlAction::TextCommitted {
                 id: GLOBAL_SEARCH_BOX_ID,
                 ..
@@ -1680,7 +1680,12 @@ impl NotoraShell {
                 self.navigation_tree.on_event(event, &mut event_context)
             }
             Some(FocusTarget::CardList) => self.card_list.on_event(event, &mut event_context),
-            Some(FocusTarget::Editor | FocusTarget::EditorTitle | FocusTarget::Overlay) => None,
+            Some(
+                FocusTarget::Editor
+                | FocusTarget::EditorTitle
+                | FocusTarget::EditorTag
+                | FocusTarget::Overlay,
+            ) => None,
             None => match focus_target {
                 FocusTarget::NavigationSearch => {
                     self.search_box.on_event(event, &mut event_context)
@@ -1689,7 +1694,10 @@ impl NotoraShell {
                     self.navigation_tree.on_event(event, &mut event_context)
                 }
                 FocusTarget::CardList => self.card_list.on_event(event, &mut event_context),
-                FocusTarget::Editor | FocusTarget::EditorTitle | FocusTarget::Overlay => {
+                FocusTarget::Editor
+                | FocusTarget::EditorTitle
+                | FocusTarget::EditorTag
+                | FocusTarget::Overlay => {
                     return NotoraEventRoute::ignored();
                 }
             },
@@ -3157,6 +3165,12 @@ mod tests {
                 id: ui::editor_header::EDITOR_HEADER_TITLE_ID,
             })),
             Some(NotoraAction::FocusRequested(FocusTarget::EditorTitle))
+        );
+        assert_eq!(
+            shell.translate_widget_action(&WidgetAction::Control(ControlAction::FocusRequested {
+                id: ui::tag_editor::TAG_EDITOR_INPUT_ID,
+            })),
+            Some(NotoraAction::FocusRequested(FocusTarget::EditorTag))
         );
         assert_eq!(
             shell.translate_widget_action(&WidgetAction::Control(ControlAction::TextCommitted {

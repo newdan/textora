@@ -80,6 +80,7 @@ pub struct EditorRuntime {
     save_session: document_save::SaveSession,
     settings: ui::settings::Settings,
     theme: ui::Theme,
+    active_cursor_paint_enabled: bool,
     ui_shaper: Option<Arc<Mutex<shaping::Shaper>>>,
     _snapshots_directory: PathBuf,
 }
@@ -102,6 +103,7 @@ impl EditorRuntime {
             save_session: document_save::SaveSession::new(),
             settings: initial_settings,
             theme: initial_theme,
+            active_cursor_paint_enabled: true,
             ui_shaper: None,
             _snapshots_directory: snapshots_directory,
         })
@@ -670,7 +672,7 @@ impl EditorRuntime {
     }
 
     pub fn active_cursor_blink_phase(&self) -> Option<EditorCursorBlinkPhase> {
-        if !self.window_focused() {
+        if !self.window_focused() || !self.active_cursor_paint_enabled {
             return None;
         }
         let tab_id = self.active_tab_id()?;
@@ -679,6 +681,14 @@ impl EditorRuntime {
             return None;
         }
         Some(cursor_blink_phase(tab.cursor_blink_instant(), std::time::Instant::now()))
+    }
+
+    pub fn set_active_cursor_paint_enabled(&mut self, enabled: bool) {
+        self.active_cursor_paint_enabled = enabled;
+    }
+
+    pub fn active_cursor_paint_enabled(&self) -> bool {
+        self.active_cursor_paint_enabled
     }
 
     pub fn request_redraw(&mut self) {
@@ -1218,6 +1228,10 @@ mod tests {
         fn handles_own_rendering(&self) -> bool {
             true
         }
+
+        fn needs_cursor_blink_wakeup(&self) -> bool {
+            true
+        }
     }
 
     impl ui::plugin::ViewPlugin for WysiwygInputProbePlugin {
@@ -1449,6 +1463,23 @@ mod tests {
                     CURSOR_BLINK_INTERVAL_MS * 2 + CURSOR_BLINK_WAKE_TOLERANCE_MS,
                 )
         );
+    }
+
+    #[test]
+    fn disabling_active_cursor_paint_suppresses_its_blink_phase() {
+        let mut runtime = runtime_with_clean_tab();
+        let tab_id = runtime.active_tab_id().expect("test runtime should have an active tab");
+        runtime
+            .tab_session_mut(tab_id)
+            .expect("active tab should have a runtime")
+            .replace_plugin(Box::new(PointerProbePlugin));
+
+        assert!(runtime.active_cursor_blink_phase().is_some());
+
+        runtime.set_active_cursor_paint_enabled(false);
+
+        assert!(!runtime.active_cursor_paint_enabled());
+        assert_eq!(runtime.active_cursor_blink_phase(), None);
     }
 
     #[test]

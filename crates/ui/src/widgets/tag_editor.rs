@@ -12,6 +12,7 @@ const TAG_EDITOR_ADD_PROMPT: &str = "添加标签";
 const TAG_EDITOR_CARET_WIDTH_LOGICAL: f32 = 1.0;
 const TAG_EDITOR_CARET_VERTICAL_INSET_LOGICAL: f32 = 6.0;
 const TAG_EDITOR_ASCII_TEXT_WIDTH_RATIO: f32 = 0.55;
+const TAG_EDITOR_WIDE_TEXT_WIDTH_RATIO: f32 = 1.0;
 
 pub const TAG_EDITOR_INPUT_ID: WidgetId = WidgetId(10_201);
 pub const TAG_EDITOR_SUBMIT_ID: WidgetId = WidgetId(10_202);
@@ -166,6 +167,29 @@ impl TagEditorWidget {
     }
 }
 
+fn paint_text_and_measure(
+    context: &mut PaintCtx<'_>,
+    x: f32,
+    baseline: f32,
+    color: [f32; 4],
+    text: &str,
+) -> f32 {
+    let font_size = TAG_EDITOR_FONT_SIZE_LOGICAL * context.dpi;
+    if let Some(shaper) = context.shaper.as_deref_mut() {
+        return context.list.text_shaped(x, baseline, font_size, color, text, shaper);
+    }
+    text.chars()
+        .map(|character| {
+            if character.is_ascii() {
+                TAG_EDITOR_ASCII_TEXT_WIDTH_RATIO
+            } else {
+                TAG_EDITOR_WIDE_TEXT_WIDTH_RATIO
+            }
+        })
+        .sum::<f32>()
+        * font_size
+}
+
 impl Default for TagEditorWidget {
     fn default() -> Self {
         Self::new()
@@ -192,53 +216,23 @@ impl Widget for TagEditorWidget {
             } else {
                 TAG_EDITOR_LABEL.to_owned()
             };
-        ctx.text(
-            x,
-            baseline,
-            TAG_EDITOR_FONT_SIZE_LOGICAL * ctx.dpi,
-            ctx.theme.palette.text_muted,
-            &label,
-        );
-        x += label.chars().count() as f32
-            * TAG_EDITOR_FONT_SIZE_LOGICAL
-            * ctx.dpi
-            * TAG_EDITOR_ASCII_TEXT_WIDTH_RATIO;
+        x += paint_text_and_measure(ctx, x, baseline, ctx.theme.palette.text_muted, &label);
         for chip in self.input.chips.iter().take(visible_count) {
             let label = format!("{}  ", chip.label);
-            ctx.text(
-                x,
-                baseline,
-                TAG_EDITOR_FONT_SIZE_LOGICAL * ctx.dpi,
-                ctx.theme.palette.text_muted,
-                &label,
-            );
-            x += label.chars().count() as f32
-                * TAG_EDITOR_FONT_SIZE_LOGICAL
-                * ctx.dpi
-                * TAG_EDITOR_ASCII_TEXT_WIDTH_RATIO;
+            x += paint_text_and_measure(ctx, x, baseline, ctx.theme.palette.text_muted, &label);
         }
         if hidden_count > 0 {
             let folded = format!("+{hidden_count}");
-            ctx.text(
-                x,
-                baseline,
-                TAG_EDITOR_FONT_SIZE_LOGICAL * ctx.dpi,
-                ctx.theme.palette.text_muted,
-                &folded,
-            );
+            x += paint_text_and_measure(ctx, x, baseline, ctx.theme.palette.text_muted, &folded);
         }
         if !self.input.pending_text.is_empty() {
-            ctx.text(
+            x += paint_text_and_measure(
+                ctx,
                 x,
                 baseline,
-                TAG_EDITOR_FONT_SIZE_LOGICAL * ctx.dpi,
                 ctx.theme.palette.text_main,
                 &self.input.pending_text,
             );
-            x += self.input.pending_text.chars().count() as f32
-                * TAG_EDITOR_FONT_SIZE_LOGICAL
-                * ctx.dpi
-                * TAG_EDITOR_ASCII_TEXT_WIDTH_RATIO;
         }
         if self.editing && self.blink_visible {
             let vertical_inset = TAG_EDITOR_CARET_VERTICAL_INSET_LOGICAL * ctx.dpi;
@@ -408,6 +402,7 @@ mod tests {
     #[test]
     fn editing_empty_tag_editor_paints_an_input_caret() {
         use crate::core::paint::{DrawCmd, DrawList};
+        use crate::core::text_layout::UiTextLayout;
 
         let theme = crate::theme::test_theme();
         let mut measure = crate::core::NoopMeasure;
@@ -423,14 +418,43 @@ mod tests {
         );
 
         let mut draw_list = DrawList::new();
-        let mut paint_context = PaintCtx::new(&mut draw_list, &theme, 1.0);
+        let mut shaper = shaping::Shaper::new().expect("test shaper should initialize");
+        let label_width = UiTextLayout::new(
+            TAG_EDITOR_LABEL,
+            TAG_EDITOR_FONT_SIZE_LOGICAL,
+            None,
+            shaping::Weight::NORMAL,
+            shaping::Style::Normal,
+            false,
+            &mut shaper,
+        )
+        .expect("tag label should shape")
+        .shaped
+        .width;
+        let mut paint_context = PaintCtx {
+            list: &mut draw_list,
+            theme: &theme,
+            dpi: 1.0,
+            offset: (0.0, 0.0),
+            global_alpha: 1.0,
+            shaper: Some(&mut shaper),
+        };
         editor.paint(&mut paint_context);
 
+        let caret_x = draw_list
+            .cmds
+            .iter()
+            .find_map(|command| match command {
+                DrawCmd::FillRect { rect, .. } if rect.w == TAG_EDITOR_CARET_WIDTH_LOGICAL => {
+                    Some(rect.x)
+                }
+                _ => None,
+            })
+            .expect("editing tag input should paint a caret");
+        let expected_x = TAG_EDITOR_HORIZONTAL_PADDING_LOGICAL + label_width;
         assert!(
-            draw_list
-                .cmds
-                .iter()
-                .any(|command| matches!(command, DrawCmd::FillRect { rect, .. } if rect.w == 1.0))
+            (caret_x - expected_x).abs() < 0.01,
+            "tag caret x {caret_x} should follow shaped label width at {expected_x}"
         );
     }
 }
