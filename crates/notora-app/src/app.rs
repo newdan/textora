@@ -1203,7 +1203,22 @@ impl NotoraApp {
     }
 
     pub(crate) fn render(&mut self) -> Result<(), RenderError> {
-        self.render_frame().map(|_| ())
+        let _ = self.render_frame()?;
+        self.update_focused_text_input_ime_cursor_area();
+        Ok(())
+    }
+
+    fn update_focused_text_input_ime_cursor_area(&self) {
+        let Some(ime_rect) = self.shell.focused_text_input_ime_cursor_rect() else {
+            return;
+        };
+        let Some(window) = self.editor_runtime.window() else {
+            return;
+        };
+        window.set_ime_cursor_area(
+            PhysicalPosition::new(ime_rect.x as f64, (ime_rect.y + ime_rect.h) as f64),
+            PhysicalSize::new(ime_rect.w.max(2.0) as f64, ime_rect.h as f64),
+        );
     }
 
     fn update_editor_render_model(

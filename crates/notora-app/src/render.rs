@@ -1008,6 +1008,18 @@ impl NotoraShell {
         self.next_text_cursor_blink_at
     }
 
+    pub(crate) fn focused_text_input_ime_cursor_rect(&self) -> Option<Rect> {
+        match self.focused_text_input? {
+            FocusTarget::NavigationSearch => Some(self.search_box.ime_cursor_rect()),
+            FocusTarget::EditorTitle => self.editor_pane.focused_ime_cursor_rect(),
+            FocusTarget::NavigationTree
+            | FocusTarget::CardList
+            | FocusTarget::Editor
+            | FocusTarget::EditorTag
+            | FocusTarget::Overlay => None,
+        }
+    }
+
     #[cfg(test)]
     pub(crate) fn search_box_is_focused(&self) -> bool {
         self.search_box.is_focused()
@@ -2555,6 +2567,40 @@ mod tests {
         assert!(draw_list.cmds.iter().any(|command| {
             matches!(command, DrawCmd::FillRect { radius, .. } if *radius == 0.0)
         }));
+    }
+
+    #[test]
+    fn focused_title_exposes_a_window_space_ime_cursor_rect() {
+        let mut shell = NotoraShell::new();
+        let editor_input = EditorPaneInput {
+            mode: EditorPaneMode::WorkspaceNote,
+            header: ui::editor_header::EditorHeaderInput {
+                title_editable: true,
+                ..ui::editor_header::EditorHeaderInput::default()
+            },
+            ..EditorPaneInput::default()
+        };
+        shell.editor_pane.set_input(editor_input);
+        let theme = ui::theme::test_theme();
+        let mut measure = ui::NoopMeasure;
+        let mut layout_context =
+            ui::LayoutCtx { ui_measure: None, measure: &mut measure, theme: &theme, dpi: 1.0 };
+        shell.editor_pane.set_rects(
+            EditorPaneRects {
+                header: Rect::new(420.0, 48.0, 640.0, 108.0),
+                toolbar: Rect::new(420.0, 156.0, 640.0, 40.0),
+                body: Rect::new(420.0, 196.0, 640.0, 400.0),
+            },
+            &mut layout_context,
+        );
+        shell.synchronize_focus(FocusTarget::EditorTitle, Instant::now());
+
+        let ime_rect = shell
+            .focused_text_input_ime_cursor_rect()
+            .expect("focused title must provide an IME candidate anchor");
+
+        assert!(ime_rect.x >= 420.0 + 16.0);
+        assert!(ime_rect.y >= 48.0);
     }
 
     #[test]

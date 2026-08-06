@@ -62,8 +62,21 @@ impl EditorFrame {
         &mut self,
         layout: impl FnOnce(&mut ui::LayoutCtx<'_>) -> T,
     ) -> T {
+        let Some(ui_shaper) = self.ui_shaper.as_ref() else {
+            let mut context = ui::LayoutCtx {
+                measure: &mut self.text_measure,
+                ui_measure: None,
+                theme: &self.theme,
+                dpi: self.dpi,
+            };
+            return layout(&mut context);
+        };
+        let mut ui_shaper = ui_shaper
+            .lock()
+            .expect("UI shaper mutex must not be poisoned by another layout callback");
+        let mut text_measure = crate::measure_adapter::MeasureFromShaper(&mut ui_shaper);
         let mut context = ui::LayoutCtx {
-            measure: &mut self.text_measure,
+            measure: &mut text_measure,
             ui_measure: None,
             theme: &self.theme,
             dpi: self.dpi,
@@ -253,6 +266,20 @@ mod tests {
                 .any(|command| matches!(command, ui::DrawCmd::TextLayout { .. })),
             "product chrome text must produce a shaped draw command"
         );
+    }
+
+    #[test]
+    #[cfg(not(feature = "ci-no-fonts"))]
+    fn product_layout_context_measures_text_with_the_frame_shaper() {
+        let theme = theme();
+        let shaper = shaping::Shaper::new().expect("system fonts should create a UI shaper");
+        let mut frame =
+            EditorFrame::new_for_backend(theme, 1.0, Some(Arc::new(Mutex::new(shaper))));
+
+        let measured_width =
+            frame.with_layout_context(|context| context.measure.measure("标题预编辑", 24.0));
+
+        assert!(measured_width > 0.0, "product text input layout must use shaped text widths");
     }
 
     #[test]

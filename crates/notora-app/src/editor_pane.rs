@@ -177,6 +177,16 @@ impl EditorPaneChrome {
         self.header.set_title_blink_visible(visible);
     }
 
+    pub fn focused_ime_cursor_rect(&self) -> Option<Rect> {
+        let local_rect = self.header.focused_ime_cursor_rect()?;
+        Some(Rect::new(
+            self.document_header_rect.x + local_rect.x,
+            self.document_header_rect.y + local_rect.y,
+            local_rect.w,
+            local_rect.h,
+        ))
+    }
+
     pub fn set_tag_blink_visible(&mut self, visible: bool) {
         self.tag_editor.set_blink_visible(visible);
     }
@@ -689,6 +699,38 @@ mod tests {
 
         chrome.set_title_focus(false);
         assert!(!chrome.header.title_is_focused());
+    }
+
+    #[test]
+    fn title_ime_cursor_rect_is_translated_to_window_coordinates() {
+        let mut chrome = EditorPaneChrome::new();
+        chrome.set_input(input(EditorPaneMode::WorkspaceNote));
+        chrome.set_title_focus(true);
+        let theme = ui::theme::test_theme();
+        let mut measure = ui::NoopMeasure;
+        let mut layout_context =
+            ui::LayoutCtx { ui_measure: None, measure: &mut measure, theme: &theme, dpi: 1.0 };
+        chrome.set_rects(
+            EditorPaneRects {
+                header: Rect::new(100.0, 40.0, 640.0, 108.0),
+                toolbar: Rect::new(100.0, 148.0, 640.0, 40.0),
+                body: Rect::new(100.0, 188.0, 640.0, 400.0),
+            },
+            &mut layout_context,
+        );
+
+        let local_rect = chrome
+            .header
+            .focused_ime_cursor_rect()
+            .expect("focused title should expose a local IME cursor rect");
+        let window_rect = chrome
+            .focused_ime_cursor_rect()
+            .expect("editor pane should expose a window-space IME cursor rect");
+
+        assert_eq!(window_rect.x, chrome.document_header_rect.x + local_rect.x);
+        assert_eq!(window_rect.y, chrome.document_header_rect.y + local_rect.y);
+        assert_eq!(window_rect.w, local_rect.w);
+        assert_eq!(window_rect.h, local_rect.h);
     }
 
     #[test]

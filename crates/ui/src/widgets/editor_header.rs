@@ -97,6 +97,10 @@ impl EditorHeaderWidget {
         self.title_box.is_focused()
     }
 
+    pub fn focused_ime_cursor_rect(&self) -> Option<Rect> {
+        self.title_box.is_focused().then(|| self.title_box.ime_cursor_rect())
+    }
+
     pub fn set_title_blink_visible(&mut self, visible: bool) {
         self.title_box.set_blink(visible);
     }
@@ -574,6 +578,31 @@ mod tests {
         fn is_caret_command(command: &DrawCmd) -> bool {
             matches!(command, DrawCmd::FillRect { radius, .. } if *radius == 0.0)
         }
+    }
+
+    #[test]
+    fn focused_title_reports_its_preedit_cursor_rect() {
+        let mut header = EditorHeaderWidget::new();
+        header.set_input(input());
+        header.set_keyboard_focus(Some(EDITOR_HEADER_TITLE_ID));
+        let theme = crate::theme::test_theme();
+        let mut measure = HeaderMeasure;
+        let mut layout_context =
+            LayoutCtx { ui_measure: None, measure: &mut measure, theme: &theme, dpi: 1.0 };
+        header.set_rect(Rect::new(0.0, 0.0, 640.0, 128.0), &mut layout_context);
+        let mut event_context = EventCtx { theme: &theme, dpi: 1.0, cursor_hint: None };
+
+        let _ = header.handle_event(
+            &Event::ImePreedit { text: "拼音".to_owned(), cursor: Some((0, 6)) },
+            &mut event_context,
+        );
+        header.set_rect(Rect::new(0.0, 0.0, 640.0, 128.0), &mut layout_context);
+
+        let ime_rect = header
+            .focused_ime_cursor_rect()
+            .expect("focused title should expose the painted preedit cursor");
+        assert_eq!(ime_rect, header.title_box.ime_cursor_rect());
+        assert!(ime_rect.x > header.title_box.rect().x);
     }
 
     #[test]
