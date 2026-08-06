@@ -6,6 +6,7 @@ use crate::core::{
     Event, EventCtx, KeyCode, LayoutCtx, Modifiers, MouseButton, PaintCtx, Rect, Widget,
     WidgetAction,
 };
+use unicode_segmentation::UnicodeSegmentation;
 
 const MASKED_ECHO_GLYPH: char = '•';
 const DEFAULT_FONT_SIZE_LOGICAL: f32 = 14.0;
@@ -194,8 +195,8 @@ pub struct TextBox {
     cursor_x: f32,
     preedit_width: f32,
     preedit_cursor_x: f32,
-    /// byte_offset → pixel_x 映射（layout 时填充），用于鼠标点击定位光标。
-    char_offsets: Vec<(usize, f32)>,
+    /// grapheme 边界的 byte_offset → pixel_x 映射（layout 时填充），用于鼠标点击定位光标。
+    grapheme_offsets: Vec<(usize, f32)>,
     /// 文本区域左侧 padding（layout 时按 DPI 缓存）
     text_pad: f32,
     leading_content_inset_logical: f32,
@@ -234,7 +235,7 @@ impl TextBox {
             cursor_x: 0.0,
             preedit_width: 0.0,
             preedit_cursor_x: 0.0,
-            char_offsets: Vec::new(),
+            grapheme_offsets: Vec::new(),
             text_pad: 0.0,
             leading_content_inset_logical: 4.0,
             fixed_size_logical: None,
@@ -347,28 +348,30 @@ impl TextBox {
 
     // ── Helpers ──
 
-    /// Find the char boundary before `pos` (for Backspace).
-    fn prev_char_boundary(s: &str, pos: usize) -> usize {
-        if pos == 0 {
-            return 0;
+    fn prev_grapheme_boundary(s: &str, pos: usize) -> usize {
+        let current = Self::clamp_to_grapheme_boundary(s, pos);
+        if current < pos {
+            return current;
         }
-        let mut prev = pos - 1;
-        while prev > 0 && !s.is_char_boundary(prev) {
-            prev -= 1;
-        }
-        prev
+        s[..current].grapheme_indices(true).next_back().map(|(byte, _)| byte).unwrap_or(0)
     }
 
-    /// Find the char boundary after `pos` (for Right arrow).
-    fn next_char_boundary(s: &str, pos: usize) -> usize {
+    fn next_grapheme_boundary(s: &str, pos: usize) -> usize {
         if pos >= s.len() {
             return s.len();
         }
-        let mut next = pos + 1;
-        while next < s.len() && !s.is_char_boundary(next) {
-            next += 1;
+        s.grapheme_indices(true).map(|(byte, _)| byte).find(|&byte| byte > pos).unwrap_or(s.len())
+    }
+
+    fn clamp_to_grapheme_boundary(s: &str, pos: usize) -> usize {
+        if pos >= s.len() {
+            return s.len();
         }
-        next
+        s.grapheme_indices(true)
+            .map(|(byte, _)| byte)
+            .take_while(|&byte| byte <= pos)
+            .last()
+            .unwrap_or(0)
     }
 
     /// Delete selected range and return true if something was deleted.
@@ -378,14 +381,14 @@ impl TextBox {
         }
         let mut i = pos;
         while i > 0 {
-            let prev = Self::prev_char_boundary(s, i);
+            let prev = Self::prev_grapheme_boundary(s, i);
             if s[prev..i].chars().next().unwrap().is_alphanumeric() {
                 break;
             }
             i = prev;
         }
         while i > 0 {
-            let prev = Self::prev_char_boundary(s, i);
+            let prev = Self::prev_grapheme_boundary(s, i);
             if !s[prev..i].chars().next().unwrap().is_alphanumeric() {
                 break;
             }
@@ -401,14 +404,14 @@ impl TextBox {
         }
         let mut i = pos;
         while i < len {
-            let next = Self::next_char_boundary(s, i);
+            let next = Self::next_grapheme_boundary(s, i);
             if !s[i..next].chars().next().unwrap().is_alphanumeric() {
                 break;
             }
             i = next;
         }
         while i < len {
-            let next = Self::next_char_boundary(s, i);
+            let next = Self::next_grapheme_boundary(s, i);
             if s[i..next].chars().next().unwrap().is_alphanumeric() {
                 break;
             }
@@ -482,7 +485,7 @@ impl TextBox {
     }
 
     fn mask_text(text: &str) -> String {
-        std::iter::repeat_n(MASKED_ECHO_GLYPH, text.chars().count()).collect()
+        std::iter::repeat_n(MASKED_ECHO_GLYPH, text.graphemes(true).count()).collect()
     }
 
     fn build_committed_payload(&self) -> TextPayload {
@@ -543,11 +546,9 @@ impl TextBox {
                                         let allowed =
                                             self.max_len_bytes.saturating_sub(self.text.len());
                                         if allowed > 0 {
-                                            let mut cutoff = allowed;
-                                            while !to_insert.is_char_boundary(cutoff) && cutoff > 0
-                                            {
-                                                cutoff -= 1;
-                                            }
+                                            let cutoff = Self::clamp_to_grapheme_boundary(
+                                                to_insert, allowed,
+                                            );
                                             to_insert = &to_insert[..cutoff];
                                         } else {
                                             to_insert = "";
@@ -571,14 +572,14 @@ impl TextBox {
                 if self.text.len() + c.len_utf8() <= self.max_len_bytes {
                     let pos = self.cursor_byte;
                     self.text.insert(pos, c);
-                    self.cursor_byte = Self::next_char_boundary(&self.text, pos);
+                    self.cursor_byte = Self::next_grapheme_boundary(&self.text, pos);
                 }
                 (true, self.edited_action_if_text_changed(&previous_text))
             }
             KeyCode::Backspace => {
                 let previous_text = self.text.clone();
                 if !self.delete_selection() && self.cursor_byte > 0 {
-                    let prev = Self::prev_char_boundary(&self.text, self.cursor_byte);
+                    let prev = Self::prev_grapheme_boundary(&self.text, self.cursor_byte);
                     self.text.replace_range(prev..self.cursor_byte, "");
                     self.cursor_byte = prev;
                 }
@@ -587,7 +588,7 @@ impl TextBox {
             KeyCode::Delete => {
                 let previous_text = self.text.clone();
                 if !self.delete_selection() && self.cursor_byte < self.text.len() {
-                    let next = Self::next_char_boundary(&self.text, self.cursor_byte);
+                    let next = Self::next_grapheme_boundary(&self.text, self.cursor_byte);
                     self.text.replace_range(self.cursor_byte..next, "");
                 }
                 (true, self.edited_action_if_text_changed(&previous_text))
@@ -598,7 +599,7 @@ impl TextBox {
                 } else if modifiers.alt {
                     Self::prev_word_boundary(&self.text, self.cursor_byte)
                 } else {
-                    Self::prev_char_boundary(&self.text, self.cursor_byte)
+                    Self::prev_grapheme_boundary(&self.text, self.cursor_byte)
                 };
                 if modifiers.shift {
                     // Extend/start selection
@@ -626,7 +627,7 @@ impl TextBox {
                 } else if modifiers.alt {
                     Self::next_word_boundary(&self.text, self.cursor_byte)
                 } else {
-                    Self::next_char_boundary(&self.text, self.cursor_byte)
+                    Self::next_grapheme_boundary(&self.text, self.cursor_byte)
                 };
                 if modifiers.shift {
                     if self.selection.is_none() {
@@ -693,13 +694,13 @@ impl TextBox {
         self.dragging = true;
         // 将点击的 px 转换为相对于文本区域的偏移
         let rel_x = (px - self.rect.x - self.text_pad).max(0.0);
-        // 在 char_offsets 中找最近的字节偏移
-        if self.char_offsets.is_empty() {
+        // 在 grapheme_offsets 中找最近的字节偏移
+        if self.grapheme_offsets.is_empty() {
             self.cursor_byte = 0;
         } else {
             let mut best_byte = 0usize;
             let mut best_dist = f32::MAX;
-            for &(byte, off_x) in &self.char_offsets {
+            for &(byte, off_x) in &self.grapheme_offsets {
                 let dist = (off_x - rel_x).abs();
                 if dist < best_dist {
                     best_dist = dist;
@@ -779,10 +780,7 @@ impl TextBox {
             if allowed == 0 {
                 to_insert = "";
             } else {
-                let mut cutoff = allowed;
-                while !to_insert.is_char_boundary(cutoff) && cutoff > 0 {
-                    cutoff -= 1;
-                }
+                let cutoff = Self::clamp_to_grapheme_boundary(to_insert, allowed);
                 to_insert = &to_insert[..cutoff];
             }
         }
@@ -824,10 +822,7 @@ impl TextBox {
             self.preedit_width = measure.measure(&self.display_preedit_text(), font_size);
 
             let cur = self.preedit_cursor.map(|(_, c)| c).unwrap_or(self.preedit.len());
-            let mut valid_cur = cur.min(self.preedit.len());
-            while valid_cur > 0 && !self.preedit.is_char_boundary(valid_cur) {
-                valid_cur -= 1;
-            }
+            let valid_cur = Self::clamp_to_grapheme_boundary(self.preedit.as_str(), cur);
             self.preedit_cursor_x =
                 measure.measure(&self.display_preedit_prefix_text(valid_cur), font_size);
         } else {
@@ -838,14 +833,12 @@ impl TextBox {
         self.text_pad = self.leading_content_inset_logical * ctx.dpi;
 
         // Build byte→pixel offset table for mouse click positioning
-        self.char_offsets.clear();
-        self.char_offsets.push((0, 0.0));
-        let mut byte_pos = 0;
-        for ch in self.text.chars() {
-            let ch_len = ch.len_utf8();
-            byte_pos += ch_len;
+        self.grapheme_offsets.clear();
+        self.grapheme_offsets.push((0, 0.0));
+        for (byte_start, grapheme) in self.text.as_str().grapheme_indices(true) {
+            let byte_pos = byte_start + grapheme.len();
             let px = measure.measure(&self.display_prefix_text(byte_pos), font_size);
-            self.char_offsets.push((byte_pos, px));
+            self.grapheme_offsets.push((byte_pos, px));
         }
     }
 
@@ -865,10 +858,10 @@ impl TextBox {
         if let Some((anchor, cur)) = self.selection {
             let sel_start = anchor.min(cur);
             let sel_end = anchor.max(cur);
-            // 从 char_offsets 查找像素位置
+            // 从 grapheme_offsets 查找像素位置
             let mut sx = 0.0f32;
             let mut ex = 0.0f32;
-            for &(byte, px) in &self.char_offsets {
+            for &(byte, px) in &self.grapheme_offsets {
                 if byte == sel_start {
                     sx = px;
                 }
@@ -1014,9 +1007,8 @@ impl TextBox {
     pub fn sync_text(&mut self, ext_text: &str) {
         if self.text != ext_text {
             self.text.replace(ext_text);
-            if self.cursor_byte > self.text.len() {
-                self.cursor_byte = self.text.len();
-            }
+            self.cursor_byte =
+                Self::clamp_to_grapheme_boundary(self.text.as_str(), self.cursor_byte);
             self.selection = None;
         }
     }
@@ -1319,6 +1311,48 @@ mod tests {
         tb.on_key(KeyCode::Backspace, Modifiers::NONE);
         assert_eq!(tb.text(), "ab中");
         assert_eq!(tb.cursor_byte(), 5); // "中" is 3 bytes in UTF-8
+    }
+
+    #[test]
+    fn cursor_and_backspace_treat_combining_sequence_as_one_grapheme() {
+        let mut tb = TextBox::new();
+        tb.set_text("e\u{301}");
+
+        tb.on_key(KeyCode::Left, Modifiers::NONE);
+        assert_eq!(tb.cursor_byte(), 0);
+
+        tb.on_key(KeyCode::End, Modifiers::NONE);
+        tb.on_key(KeyCode::Backspace, Modifiers::NONE);
+        assert_eq!(tb.text(), "");
+        assert_eq!(tb.cursor_byte(), 0);
+    }
+
+    #[test]
+    fn cursor_and_delete_treat_zwj_emoji_as_one_grapheme() {
+        let family = "👨‍👩‍👧‍👦";
+        let mut tb = TextBox::new();
+        tb.set_text(family);
+
+        tb.on_key(KeyCode::Left, Modifiers::NONE);
+        assert_eq!(tb.cursor_byte(), 0);
+
+        tb.on_key(KeyCode::Delete, Modifiers::NONE);
+        assert_eq!(tb.text(), "");
+    }
+
+    #[test]
+    fn layout_exposes_only_grapheme_boundaries_for_pointer_hit_testing() {
+        let combining_sequence = "e\u{301}";
+        let family = "👨‍👩‍👧‍👦";
+        let text = format!("{combining_sequence}{family}");
+        let mut tb = TextBox::new();
+        tb.set_text(&text);
+
+        paint_laid_out(&mut tb);
+
+        let boundaries: Vec<_> =
+            tb.grapheme_offsets.iter().map(|(byte_offset, _)| *byte_offset).collect();
+        assert_eq!(boundaries, vec![0, combining_sequence.len(), text.len()]);
     }
 
     #[test]
@@ -1660,6 +1694,29 @@ mod tests {
     }
 
     #[test]
+    fn masked_text_uses_one_bullet_per_grapheme() {
+        let mut text_box = TextBox::new();
+        text_box.set_echo_mode(EchoMode::Masked);
+        text_box.set_text("e\u{301}👨‍👩‍👧‍👦");
+
+        assert_eq!(text_box.display_text(), "••");
+    }
+
+    #[test]
+    fn byte_limit_does_not_insert_partial_grapheme_from_ime_or_clipboard() {
+        let mut text_box = TextBox::new();
+        text_box.set_max_len_bytes(1);
+
+        text_box.on_ime(&TextBoxIme::Commit("e\u{301}".into()));
+        assert_eq!(text_box.text(), "");
+
+        text_box.on_paste = Some(Box::new(|| "e\u{301}".into()));
+        let command = Modifiers { cmd: true, ..Modifiers::NONE };
+        text_box.on_key(KeyCode::Char('v'), command);
+        assert_eq!(text_box.text(), "");
+    }
+
+    #[test]
     fn masked_text_and_preedit_storage_never_debug_plaintext() {
         let mut text_box = TextBox::new();
         text_box.set_echo_mode(EchoMode::Masked);
@@ -1927,6 +1984,29 @@ mod tests {
         tb.set_text("long text");
         tb.sync_text("short");
         assert_eq!(tb.cursor_byte(), 5); // clamped to "short".len()
+    }
+
+    #[test]
+    fn sync_text_clamps_cursor_to_utf8_char_boundary() {
+        let mut tb = TextBox::new();
+        tb.set_text("123456789");
+
+        tb.sync_text("H2AI 战略");
+
+        assert_eq!(tb.cursor_byte(), 8);
+        assert!(tb.text().is_char_boundary(tb.cursor_byte()));
+        paint_laid_out(&mut tb);
+    }
+
+    #[test]
+    fn sync_text_clamps_cursor_to_grapheme_boundary() {
+        let mut tb = TextBox::new();
+        tb.set_text("x");
+
+        tb.sync_text("e\u{301}");
+
+        assert_eq!(tb.cursor_byte(), 0);
+        paint_laid_out(&mut tb);
     }
 
     #[test]

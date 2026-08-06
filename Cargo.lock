@@ -2821,6 +2821,7 @@ dependencies = [
  "textora-render",
  "textora-shaping",
  "toml",
+ "unicode-segmentation",
  "unicode_categories",
  "wgpu",
  "winit",
