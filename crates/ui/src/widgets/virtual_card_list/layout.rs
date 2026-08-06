@@ -2,7 +2,7 @@ use std::ops::Range;
 
 use crate::core::Rect;
 
-pub const CARD_HEIGHT_LOGICAL: f32 = 108.0;
+pub const CARD_HEIGHT_LOGICAL: f32 = 96.0;
 pub const CARD_VERTICAL_GAP_LOGICAL: f32 = 8.0;
 pub const CARD_HORIZONTAL_PADDING_LOGICAL: f32 = 14.0;
 pub const CARD_VERTICAL_PADDING_LOGICAL: f32 = 12.0;
@@ -67,9 +67,10 @@ impl VirtualCardListLayout {
         let excerpt_y = title_y + title_font_size + 8.0 * self.dpi;
         let metadata_y = card_rect.bottom() - vertical_padding - metadata_font_size;
         let text_right = card_rect.right() - horizontal_padding;
-        let metadata_width = (text_right - title_x) * 0.42;
+        let secondary_text_x = card_rect.x + horizontal_padding;
+        let metadata_width = (text_right - secondary_text_x) * 0.42;
         let metadata_rect =
-            Rect::new(title_x, metadata_y, metadata_width.max(0.0), metadata_font_size);
+            Rect::new(secondary_text_x, metadata_y, metadata_width.max(0.0), metadata_font_size);
 
         CardGeometry {
             card_rect,
@@ -82,9 +83,9 @@ impl VirtualCardListLayout {
             ),
             title_baseline: title_y + title_font_size * 0.8,
             excerpt_rect: Rect::new(
-                card_rect.x + horizontal_padding,
+                secondary_text_x,
                 excerpt_y,
-                (text_right - card_rect.x - horizontal_padding).max(0.0),
+                (text_right - secondary_text_x).max(0.0),
                 excerpt_font_size,
             ),
             excerpt_baseline: excerpt_y + excerpt_font_size * 0.8,
@@ -129,5 +130,27 @@ pub(super) fn build_virtual_card_layout(
         card_stride_px,
         scroll_offset_px,
         dpi,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn card_secondary_text_uses_one_left_alignment() {
+        let layout = build_virtual_card_layout(1, Rect::new(20.0, 30.0, 300.0, 500.0), 0.0, 1.0);
+        let geometry = layout.card_geometry(0);
+        let expected_text_x = geometry.card_rect.x + CARD_HORIZONTAL_PADDING_LOGICAL;
+
+        assert_eq!(geometry.excerpt_rect.x, expected_text_x);
+        assert_eq!(geometry.metadata_rect.x, expected_text_x);
+    }
+
+    #[test]
+    fn card_height_keeps_the_three_text_rows_compact() {
+        let layout = build_virtual_card_layout(1, Rect::new(0.0, 0.0, 300.0, 500.0), 0.0, 1.0);
+
+        assert_eq!(layout.card_geometry(0).card_rect.h, 96.0);
     }
 }

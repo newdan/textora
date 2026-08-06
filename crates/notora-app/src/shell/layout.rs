@@ -9,6 +9,7 @@ pub const MAXIMUM_NAVIGATION_WIDTH_LOGICAL: f32 = 320.0;
 pub const MINIMUM_CARD_LIST_WIDTH_LOGICAL: f32 = 260.0;
 pub const MAXIMUM_CARD_LIST_WIDTH_LOGICAL: f32 = 520.0;
 pub const MINIMUM_EDITOR_WIDTH_LOGICAL: f32 = 300.0;
+/// 仅作为可点击、可拖动的命中范围，不占用栏间视觉宽度。
 pub const SPLITTER_WIDTH_LOGICAL: f32 = 8.0;
 pub const EDITOR_HEADER_HEIGHT_LOGICAL: f32 = 108.0;
 pub const EDITOR_COMPACT_HEADER_HEIGHT_LOGICAL: f32 = 100.0;
@@ -16,8 +17,7 @@ pub const EDITOR_TOOLBAR_HEIGHT_LOGICAL: f32 = 40.0;
 pub const EDITOR_COMPACT_HEIGHT_THRESHOLD_LOGICAL: f32 = 480.0;
 pub const MINIMUM_WINDOW_WIDTH_LOGICAL: f32 = DEFAULT_NAVIGATION_WIDTH_LOGICAL
     + DEFAULT_CARD_LIST_WIDTH_LOGICAL
-    + MINIMUM_EDITOR_WIDTH_LOGICAL
-    + SPLITTER_WIDTH_LOGICAL * 2.0;
+    + MINIMUM_EDITOR_WIDTH_LOGICAL;
 pub const MINIMUM_WINDOW_HEIGHT_LOGICAL: f32 = 600.0;
 
 /// 三栏布局的纯输入；宽度以逻辑像素持久化，窗口尺寸以物理像素传入。
@@ -66,8 +66,7 @@ impl ShellLayout {
         let splitter_width_px = SPLITTER_WIDTH_LOGICAL * dpi;
         let minimum_three_pane_width_px = (navigation_width_logical
             + requested_card_width_logical
-            + MINIMUM_EDITOR_WIDTH_LOGICAL
-            + SPLITTER_WIDTH_LOGICAL * 2.0)
+            + MINIMUM_EDITOR_WIDTH_LOGICAL)
             * dpi;
 
         if window_rect.w >= minimum_three_pane_width_px {
@@ -79,12 +78,7 @@ impl ShellLayout {
                 splitter_width_px,
             );
         }
-        if window_rect.w
-            >= (requested_card_width_logical
-                + MINIMUM_EDITOR_WIDTH_LOGICAL
-                + SPLITTER_WIDTH_LOGICAL)
-                * dpi
-        {
+        if window_rect.w >= (requested_card_width_logical + MINIMUM_EDITOR_WIDTH_LOGICAL) * dpi {
             return Self::navigation_overlay(
                 window_rect,
                 dpi,
@@ -113,15 +107,14 @@ impl ShellLayout {
         let card_width_px = requested_card_width_logical * dpi;
         let navigation_rect = Rect::new(0.0, 0.0, navigation_width_px, window_rect.h);
         let navigation_splitter_rect =
-            Rect::new(navigation_rect.right(), 0.0, splitter_width_px, window_rect.h);
-        let card_list_rect =
-            Rect::new(navigation_splitter_rect.right(), 0.0, card_width_px, window_rect.h);
+            centered_splitter_rect(navigation_rect.right(), window_rect.h, splitter_width_px);
+        let card_list_rect = Rect::new(navigation_rect.right(), 0.0, card_width_px, window_rect.h);
         let card_list_splitter_rect =
-            Rect::new(card_list_rect.right(), 0.0, splitter_width_px, window_rect.h);
+            centered_splitter_rect(card_list_rect.right(), window_rect.h, splitter_width_px);
         let editor_rect = Rect::new(
-            card_list_splitter_rect.right(),
+            card_list_rect.right(),
             0.0,
-            (window_rect.right() - card_list_splitter_rect.right()).max(0.0),
+            (window_rect.right() - card_list_rect.right()).max(0.0),
             window_rect.h,
         );
         let (editor_header_rect, editor_toolbar_rect, editor_body_rect) =
@@ -154,16 +147,15 @@ impl ShellLayout {
     ) -> Self {
         let card_width_px = requested_card_width_logical * dpi;
         let card_list_rect = Rect::new(0.0, 0.0, card_width_px, window_rect.h);
-        let card_list_splitter_rect = Rect::new(
+        let card_list_splitter_rect = centered_splitter_rect(
             card_list_rect.right(),
-            0.0,
-            splitter_width_px.min(window_rect.w),
             window_rect.h,
+            splitter_width_px.min(window_rect.w),
         );
         let editor_rect = Rect::new(
-            card_list_splitter_rect.right(),
+            card_list_rect.right(),
             0.0,
-            (window_rect.right() - card_list_splitter_rect.right()).max(0.0),
+            (window_rect.right() - card_list_rect.right()).max(0.0),
             window_rect.h,
         );
         let (editor_header_rect, editor_toolbar_rect, editor_body_rect) =
@@ -218,6 +210,10 @@ impl ShellLayout {
             card_list_width_logical: requested_card_width_logical.min(window_rect.w / dpi),
         }
     }
+}
+
+fn centered_splitter_rect(boundary_x: f32, height: f32, hit_width: f32) -> Rect {
+    Rect::new(boundary_x - hit_width * 0.5, 0.0, hit_width, height)
 }
 
 fn editor_chrome_rects(editor_rect: Rect, dpi: f32) -> (Rect, Rect, Rect) {
@@ -318,13 +314,25 @@ mod tests {
         assert_eq!(layout.navigation_rect.w, DEFAULT_NAVIGATION_WIDTH_LOGICAL);
         assert_eq!(layout.card_list_rect.w, DEFAULT_CARD_LIST_WIDTH_LOGICAL);
         assert_eq!(layout.editor_header_rect.h, 108.0);
-        assert!(layout.editor_rect.x >= layout.card_list_splitter_rect.right());
+        assert_eq!(layout.editor_rect.x, layout.card_list_rect.right());
         assert_editor_chrome_is_partitioned(layout);
     }
 
     #[test]
     fn minimum_window_width_matches_default_fixed_panes_and_editor_minimum() {
-        assert_eq!(MINIMUM_WINDOW_WIDTH_LOGICAL, 876.0);
+        assert_eq!(MINIMUM_WINDOW_WIDTH_LOGICAL, 860.0);
+    }
+
+    #[test]
+    fn splitter_hit_targets_overlay_adjacent_panes_without_visible_gutters() {
+        let layout = ShellLayout::compute(input(880.0, 1.0));
+
+        assert_eq!(layout.navigation_rect.right(), layout.card_list_rect.x);
+        assert_eq!(layout.card_list_rect.right(), layout.editor_rect.x);
+        assert!(layout.navigation_splitter_rect.x < layout.card_list_rect.x);
+        assert!(layout.navigation_splitter_rect.right() > layout.card_list_rect.x);
+        assert!(layout.card_list_splitter_rect.x < layout.editor_rect.x);
+        assert!(layout.card_list_splitter_rect.right() > layout.editor_rect.x);
     }
 
     #[test]

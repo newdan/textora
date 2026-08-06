@@ -1944,7 +1944,7 @@ fn render_external_file_card(session: &ExternalFileSession) -> RenderCard {
                 .to_owned(),
             excerpt: last_known_path.display().to_string(),
             timestamp: "已丢失".to_owned(),
-            icon: Some("file-warning".to_owned()),
+            icon: Some("file".to_owned()),
             tag_summary: String::new(),
         },
     }
@@ -1953,8 +1953,8 @@ fn render_external_file_card(session: &ExternalFileSession) -> RenderCard {
 fn document_icon(kind: DocumentKind) -> &'static str {
     match kind {
         DocumentKind::Text => "file-text",
-        DocumentKind::Markdown => "file-code-2",
-        DocumentKind::Mindmap => "git-fork",
+        DocumentKind::Markdown => "code",
+        DocumentKind::Mindmap => "list-tree",
     }
 }
 
@@ -2399,6 +2399,13 @@ mod tests {
         let modified_nanoseconds = 5 * 60 * 1_000_000_000;
 
         assert_eq!(format_modified_timestamp_at(modified_nanoseconds, now), "修改 5 分钟前");
+    }
+
+    #[test]
+    fn document_kinds_use_icons_registered_by_the_ui_renderer() {
+        assert_eq!(document_icon(DocumentKind::Text), "file-text");
+        assert_eq!(document_icon(DocumentKind::Markdown), "code");
+        assert_eq!(document_icon(DocumentKind::Mindmap), "list-tree");
     }
 
     #[test]
