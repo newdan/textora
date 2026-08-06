@@ -225,6 +225,7 @@ pub struct NotoraApp {
     window_width_px: f32,
     window_height_px: f32,
     pointer_position: (f32, f32),
+    last_editor_cursor_visible: bool,
     needs_redraw: bool,
     event_loop_proxy: Option<EventLoopProxy<ShellEvent>>,
 }
@@ -332,6 +333,7 @@ impl NotoraApp {
             window_width_px: DEFAULT_WINDOW_WIDTH_PX,
             window_height_px: DEFAULT_WINDOW_HEIGHT_PX,
             pointer_position: (0.0, 0.0),
+            last_editor_cursor_visible: true,
             needs_redraw: true,
             event_loop_proxy: None,
         };
@@ -580,9 +582,21 @@ impl NotoraApp {
 
     pub(crate) fn take_redraw_request(&mut self) -> bool {
         let text_cursor_blink_due = self.shell.advance_text_cursor_blink(Instant::now());
+        let editor_cursor_blink_due = match self.editor_cursor_blink_phase() {
+            Some(phase) => {
+                let changed = phase.visible != self.last_editor_cursor_visible;
+                self.last_editor_cursor_visible = phase.visible;
+                changed
+            }
+            None => {
+                self.last_editor_cursor_visible = true;
+                false
+            }
+        };
         std::mem::take(&mut self.needs_redraw)
             || self.editor_runtime.take_redraw_request()
             || text_cursor_blink_due
+            || editor_cursor_blink_due
     }
 
     pub(crate) fn process_due_autosaves(&mut self) {
@@ -631,16 +645,28 @@ impl NotoraApp {
     pub(crate) fn next_deadline(&self) -> Option<std::time::Instant> {
         let text_cursor_blink_at =
             if self.window_focused { self.shell.next_text_cursor_blink_at() } else { None };
+        let editor_cursor_blink_at =
+            self.editor_cursor_blink_phase().map(|phase| phase.next_transition_at);
         [
             self.autosave.next_deadline(),
             self.search_controller.next_deadline(),
             self.pending_session_persist_at,
             self.pending_catalog_backup_at,
             text_cursor_blink_at,
+            editor_cursor_blink_at,
         ]
         .into_iter()
         .flatten()
         .min()
+    }
+
+    fn editor_cursor_blink_phase(
+        &self,
+    ) -> Option<appkit_shell::editor_runtime::EditorCursorBlinkPhase> {
+        if self.state.layout.focus_target != crate::FocusTarget::Editor {
+            return None;
+        }
+        self.editor_runtime.active_cursor_blink_phase()
     }
 
     pub(crate) fn drain_runtime_save_completions(&mut self) {
@@ -3171,6 +3197,31 @@ mod tests {
             button: ui::core::widget::MouseButton::Left,
         }));
         assert_eq!(app.state().layout.focus_target, FocusTarget::Editor);
+    }
+
+    #[test]
+    fn focused_markdown_document_schedules_cursor_blink() {
+        let mut app = app();
+        let prepared = crate::editor_adapter::prepare_loaded_document(
+            &app.editor_runtime,
+            LoadedDocument {
+                path: std::path::PathBuf::from("caret.md"),
+                contents: "正文内容".to_owned(),
+                disk_revision: None,
+            },
+        )
+        .expect("Markdown fixture should prepare");
+        app.editor_runtime.install_prepared_tab(
+            prepared,
+            None,
+            appkit_shell::editor_runtime::OpenDisposition::Persistent,
+        );
+        app.dispatch_action(NotoraAction::FocusRequested(FocusTarget::Editor));
+
+        assert!(app.next_deadline().is_some());
+
+        app.dispatch_action(NotoraAction::FocusRequested(FocusTarget::CardList));
+        assert_eq!(app.next_deadline(), None);
     }
 
     #[test]

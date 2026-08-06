@@ -52,6 +52,15 @@ use crate::reshape_worker::{ReshapeRequest, ReshapeResult, ReshapeWorker};
 use crate::tab_runtime::TabRuntimeStore;
 use crate::workspace::Workspace;
 
+const CURSOR_BLINK_INTERVAL_MS: u64 = 500;
+const CURSOR_BLINK_WAKE_TOLERANCE_MS: u64 = 5;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct EditorCursorBlinkPhase {
+    pub visible: bool,
+    pub next_transition_at: std::time::Instant,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ResizeOutcome {
     NotReady,
@@ -660,6 +669,18 @@ impl EditorRuntime {
         self.render_session.window_focused()
     }
 
+    pub fn active_cursor_blink_phase(&self) -> Option<EditorCursorBlinkPhase> {
+        if !self.window_focused() {
+            return None;
+        }
+        let tab_id = self.active_tab_id()?;
+        let tab = self.tab_session(tab_id)?;
+        if !tab.needs_cursor_blink_wakeup() {
+            return None;
+        }
+        Some(cursor_blink_phase(tab.cursor_blink_instant(), std::time::Instant::now()))
+    }
+
     pub fn request_redraw(&mut self) {
         self.render_session.request_redraw();
     }
@@ -1030,6 +1051,25 @@ impl EditorRuntime {
     }
 }
 
+fn cursor_blink_phase(
+    started_at: std::time::Instant,
+    now: std::time::Instant,
+) -> EditorCursorBlinkPhase {
+    let elapsed_ms = now.saturating_duration_since(started_at).as_millis() as u64;
+    let cycle_ms = CURSOR_BLINK_INTERVAL_MS * 2;
+    let phase_ms = elapsed_ms % cycle_ms;
+    let visible = phase_ms < CURSOR_BLINK_INTERVAL_MS;
+    let transition_delay_ms =
+        if visible { CURSOR_BLINK_INTERVAL_MS - phase_ms } else { cycle_ms - phase_ms };
+    EditorCursorBlinkPhase {
+        visible,
+        next_transition_at: now
+            + std::time::Duration::from_millis(
+                transition_delay_ms + CURSOR_BLINK_WAKE_TOLERANCE_MS,
+            ),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1382,6 +1422,33 @@ mod tests {
             .paint_editor(ui::Rect::new(16.0, 24.0, 320.0, 240.0))
             .expect("headless editor rect should paint");
         frame.present().expect("headless frame should present");
+    }
+
+    #[test]
+    fn cursor_blink_phase_alternates_and_schedules_the_next_transition() {
+        let started_at = std::time::Instant::now();
+        let visible_now = cursor_blink_phase(started_at, started_at);
+        let hidden_now = cursor_blink_phase(
+            started_at,
+            started_at + std::time::Duration::from_millis(CURSOR_BLINK_INTERVAL_MS),
+        );
+
+        assert!(visible_now.visible);
+        assert!(!hidden_now.visible);
+        assert_eq!(
+            visible_now.next_transition_at,
+            started_at
+                + std::time::Duration::from_millis(
+                    CURSOR_BLINK_INTERVAL_MS + CURSOR_BLINK_WAKE_TOLERANCE_MS,
+                )
+        );
+        assert_eq!(
+            hidden_now.next_transition_at,
+            started_at
+                + std::time::Duration::from_millis(
+                    CURSOR_BLINK_INTERVAL_MS * 2 + CURSOR_BLINK_WAKE_TOLERANCE_MS,
+                )
+        );
     }
 
     #[test]
