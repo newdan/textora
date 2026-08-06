@@ -759,7 +759,13 @@ impl EditorRuntime {
         if !self.input_session.pointer_allowed(context, position) {
             return EditorOutcome::default();
         }
-        self.model_session.scroll_active_document(pixels, self.editor_line_height())
+        let plugin_viewport_height =
+            editor_painter::plugin_bounds(context.editor_rect, self.scale_factor() as f32, false).h;
+        self.model_session.scroll_active_document(
+            pixels,
+            plugin_viewport_height,
+            self.editor_line_height(),
+        )
     }
 
     /// 返回活动画布最近一次成功解析的视口快照。
@@ -1033,12 +1039,17 @@ mod tests {
     use crate::view_route::ViewRouteTable;
     use appkit_core::document::DocumentModel;
     use core::buffer::TextBuffer;
-    use std::cell::RefCell;
+    use std::cell::{Cell, RefCell};
     use std::path::PathBuf;
     use std::rc::Rc;
     use ui::plugin::PluginFactory;
 
     struct PointerProbePlugin;
+
+    struct WysiwygInputProbePlugin {
+        scroll_y: Rc<Cell<f32>>,
+        hit_test_count: Rc<Cell<usize>>,
+    }
 
     struct CanvasViewportProbePlugin;
 
@@ -1159,6 +1170,64 @@ mod tests {
                             selection_scope: None,
                         },
                     ))
+                }
+                _ => ui::plugin::PluginResponse::None,
+            }
+        }
+
+        fn handles_own_rendering(&self) -> bool {
+            true
+        }
+    }
+
+    impl ui::plugin::ViewPlugin for WysiwygInputProbePlugin {
+        fn name(&self) -> &str {
+            "wysiwyg-input-probe"
+        }
+
+        fn render(
+            &mut self,
+            _document: &dyn core::document::DocView,
+            _bounds: ui::Rect,
+            _theme: &ui::Theme,
+            _shaper: &mut shaping::Shaper,
+            _dpi_scale: f32,
+        ) -> ui::DrawList {
+            ui::DrawList::new()
+        }
+
+        fn handle_message(
+            &mut self,
+            message: ui::plugin::PluginMessage,
+            _document: &mut dyn core::document::DocViewMut,
+        ) -> bool {
+            match message {
+                ui::plugin::PluginMessage::Scroll { delta, .. } => {
+                    self.scroll_y.set(self.scroll_y.get() + delta);
+                    true
+                }
+                ui::plugin::PluginMessage::SetCursorByte(_) => true,
+                _ => false,
+            }
+        }
+
+        fn query(
+            &self,
+            query: ui::plugin::PluginQuery,
+            _document: &dyn core::document::DocView,
+        ) -> ui::plugin::PluginResponse {
+            match query {
+                ui::plugin::PluginQuery::ScrollY => {
+                    ui::plugin::PluginResponse::Float(self.scroll_y.get())
+                }
+                ui::plugin::PluginQuery::HitTestByte { .. } => {
+                    let query_index = self.hit_test_count.get();
+                    self.hit_test_count.set(query_index + 1);
+                    let byte = if query_index == 0 { 2 } else { 3 };
+                    ui::plugin::PluginResponse::BytePosition(Some(byte))
+                }
+                ui::plugin::PluginQuery::CursorScreenPos(_) => {
+                    ui::plugin::PluginResponse::CursorScreenRect(Some((24.0, 12.0, 2.0, 18.0)))
                 }
                 _ => ui::plugin::PluginResponse::None,
             }
@@ -1400,6 +1469,56 @@ mod tests {
 
         assert_eq!(runtime.workspace_snapshot().tabs[0].cursor_offset, 2);
         assert_ne!(outcome, EditorOutcome::default());
+    }
+
+    #[test]
+    fn wysiwyg_wheel_scrolls_the_plugin_viewport() {
+        let mut runtime = runtime_with_clean_tab();
+        let scroll_y = Rc::new(Cell::new(0.0));
+        let tab_id = runtime.active_tab_id().expect("test runtime should have an active tab");
+        runtime.tab_session_mut(tab_id).expect("active tab should have a runtime").replace_plugin(
+            Box::new(WysiwygInputProbePlugin {
+                scroll_y: scroll_y.clone(),
+                hit_test_count: Rc::new(Cell::new(0)),
+            }),
+        );
+        let context = EditorInputContext {
+            editor_rect: ui::Rect::new(100.0, 200.0, 640.0, 480.0),
+            focus: EditorFocus::Active,
+            modal_blocked: false,
+        };
+
+        let outcome = runtime.scroll_editor(context, (180.0, 260.0), 72.0);
+
+        assert_eq!(scroll_y.get(), 72.0);
+        assert!(outcome.shell_effect.redraw);
+        assert!(!outcome.shell_effect.reshape);
+    }
+
+    #[test]
+    fn wysiwyg_pointer_press_rehits_after_expanding_the_candidate_cursor() {
+        let mut runtime = runtime_with_clean_tab();
+        let hit_test_count = Rc::new(Cell::new(0));
+        let tab_id = runtime.active_tab_id().expect("test runtime should have an active tab");
+        runtime.tab_session_mut(tab_id).expect("active tab should have a runtime").replace_plugin(
+            Box::new(WysiwygInputProbePlugin {
+                scroll_y: Rc::new(Cell::new(0.0)),
+                hit_test_count: hit_test_count.clone(),
+            }),
+        );
+        let context = EditorInputContext {
+            editor_rect: ui::Rect::new(100.0, 200.0, 640.0, 480.0),
+            focus: EditorFocus::Active,
+            modal_blocked: false,
+        };
+
+        runtime.handle_pointer_event(
+            context,
+            &ui::Event::MouseDown { px: 180.0, py: 260.0, button: ui::MouseButton::Left },
+        );
+
+        assert_eq!(hit_test_count.get(), 2);
+        assert_eq!(runtime.workspace_snapshot().tabs[0].cursor_offset, 3);
     }
 
     #[test]

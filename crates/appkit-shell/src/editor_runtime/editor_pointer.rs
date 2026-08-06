@@ -203,16 +203,143 @@ impl EditorRuntime {
         let dpi = self.scale_factor() as f32;
         let settings = self.settings.clone();
         let metrics = ui::settings::UiMetrics::from_settings(&settings, dpi);
+        let handles_own_rendering =
+            self.tab_session(tab_id).is_some_and(|tab| tab.runtime.plugin.handles_own_rendering());
+        if handles_own_rendering {
+            return self.place_plugin_pointer_selection(tab_id, editor_rect, position, dpi, extend);
+        }
         let Some(mut tab) = self.tab_session_mut(tab_id) else {
             return false;
         };
-        if tab.runtime.plugin.handles_own_rendering() {
-            return place_plugin_selection(&mut tab, editor_rect, position, dpi, extend);
-        }
         let byte_offset = hit_test_text_byte(&tab, editor_rect, position, &settings, &metrics)
             .unwrap_or_else(|| tab.document.buffer_len());
         place_text_caret(&mut tab, byte_offset, extend);
         true
+    }
+
+    fn place_plugin_pointer_selection(
+        &mut self,
+        tab_id: appkit_core::workspace::types::TabId,
+        editor_rect: ui::Rect,
+        position: (f32, f32),
+        dpi: f32,
+        extend: bool,
+    ) -> bool {
+        let bounds = {
+            let Some(tab) = self.tab_session(tab_id) else {
+                return false;
+            };
+            super::editor_painter::plugin_bounds(editor_rect, dpi, tab.is_canvas())
+        };
+        let edit_target = {
+            let Some(tab) = self.tab_session(tab_id) else {
+                return false;
+            };
+            tab.hit_test_edit_target(position.0, position.1, bounds.x, bounds.y)
+        };
+        match edit_target {
+            Some(Some(EditHitTarget::TextCaret { byte_offset, .. })) => {
+                let Some(mut tab) = self.tab_session_mut(tab_id) else {
+                    return false;
+                };
+                place_text_caret(&mut tab, byte_offset, extend);
+                true
+            }
+            Some(Some(EditHitTarget::SourceObject { source_range })) if !extend => {
+                let Some(tab) = self.tab_session_mut(tab_id) else {
+                    return false;
+                };
+                tab.document.cursor_mut().selection_anchor = Some(source_range.start);
+                tab.document.set_cursor_offset_synced(source_range.end);
+                true
+            }
+            Some(Some(EditHitTarget::ClearFocus)) if !extend => {
+                let Some(tab) = self.tab_session_mut(tab_id) else {
+                    return false;
+                };
+                tab.document.cursor_mut().selection_anchor = None;
+                tab.document.set_cursor_offset_synced(tab.document.buffer_len());
+                true
+            }
+            Some(Some(EditHitTarget::CanvasControl { .. })) | Some(None) => false,
+            Some(Some(EditHitTarget::SourceObject { .. } | EditHitTarget::ClearFocus)) => false,
+            None => self.place_plugin_byte_selection(tab_id, bounds, position, extend),
+        }
+    }
+
+    fn place_plugin_byte_selection(
+        &mut self,
+        tab_id: appkit_core::workspace::types::TabId,
+        bounds: ui::Rect,
+        position: (f32, f32),
+        extend: bool,
+    ) -> bool {
+        let candidate = {
+            let Some(tab) = self.tab_session(tab_id) else {
+                return false;
+            };
+            tab.hit_test_byte(position.0, position.1, bounds.x, bounds.y).or_else(|| {
+                (position.1 - bounds.y > tab.content_height()).then(|| tab.document.buffer_len())
+            })
+        };
+        let Some(candidate) = candidate else {
+            return false;
+        };
+        let snapped_candidate = {
+            let Some(mut tab) = self.tab_session_mut(tab_id) else {
+                return false;
+            };
+            place_text_caret(&mut tab, candidate, extend);
+            let snapped_candidate = tab.document.cursor_offset().to_usize();
+            tab.send_message(ui::plugin::PluginMessage::SetCursorByte(snapped_candidate));
+            snapped_candidate
+        };
+        if extend {
+            return true;
+        }
+
+        self.refresh_plugin_layout_for_pointer_hit(tab_id, bounds);
+        let final_byte = {
+            let Some(tab) = self.tab_session(tab_id) else {
+                return false;
+            };
+            let expanded_position = expanded_plugin_hit_position(
+                position,
+                tab.query_cursor_screen_rect(snapped_candidate),
+                bounds,
+            );
+            tab.hit_test_byte(expanded_position.0, expanded_position.1, bounds.x, bounds.y)
+                .unwrap_or(snapped_candidate)
+        };
+        if final_byte != snapped_candidate {
+            let Some(mut tab) = self.tab_session_mut(tab_id) else {
+                return false;
+            };
+            place_text_caret(&mut tab, final_byte, false);
+            let snapped_final = tab.document.cursor_offset().to_usize();
+            tab.send_message(ui::plugin::PluginMessage::SetCursorByte(snapped_final));
+        }
+        self.input_session.set_preferred_x(None);
+        true
+    }
+
+    fn refresh_plugin_layout_for_pointer_hit(
+        &mut self,
+        tab_id: appkit_core::workspace::types::TabId,
+        bounds: ui::Rect,
+    ) {
+        let metrics =
+            ui::settings::UiMetrics::from_settings(&self.settings, self.scale_factor() as f32);
+        let Some(mut shaper) = self.new_shaper(metrics.font_size, &self.settings.font_family)
+        else {
+            return;
+        };
+        let theme = self.theme.clone();
+        let dpi = metrics.dpi;
+        let Some(mut tab) = self.tab_session_mut(tab_id) else {
+            return;
+        };
+        let _ = tab.render_plugin(bounds, &theme, &mut shaper, dpi);
     }
 
     fn clear_collapsed_selection(&mut self) {
@@ -248,36 +375,15 @@ fn pointer_event(event: &ui::Event) -> Option<((f32, f32), PointerPhase)> {
     }
 }
 
-fn place_plugin_selection(
-    tab: &mut TabSessionMut<'_>,
-    editor_rect: ui::Rect,
-    position: (f32, f32),
-    dpi: f32,
-    extend: bool,
-) -> bool {
-    let bounds = super::editor_painter::plugin_bounds(editor_rect, dpi, tab.is_canvas());
-    match tab.hit_test_edit_target(position.0, position.1, bounds.x, bounds.y) {
-        Some(Some(EditHitTarget::TextCaret { byte_offset, .. })) => {
-            place_text_caret(tab, byte_offset, extend);
-            true
-        }
-        Some(Some(EditHitTarget::SourceObject { source_range })) if !extend => {
-            tab.document.cursor_mut().selection_anchor = Some(source_range.start);
-            tab.document.set_cursor_offset_synced(source_range.end);
-            true
-        }
-        Some(Some(EditHitTarget::ClearFocus)) if !extend => {
-            tab.document.cursor_mut().selection_anchor = None;
-            tab.document.set_cursor_offset_synced(tab.document.buffer_len());
-            true
-        }
-        Some(Some(EditHitTarget::CanvasControl { .. })) | Some(None) => false,
-        Some(Some(EditHitTarget::SourceObject { .. } | EditHitTarget::ClearFocus)) => false,
-        None => tab
-            .hit_test_byte(position.0, position.1, bounds.x, bounds.y)
-            .map(|byte_offset| place_text_caret(tab, byte_offset, extend))
-            .is_some(),
-    }
+fn expanded_plugin_hit_position(
+    pointer_position: (f32, f32),
+    cursor_rect: Option<(f32, f32, f32, f32)>,
+    bounds: ui::Rect,
+) -> (f32, f32) {
+    let Some((cursor_x, cursor_y, _cursor_width, cursor_height)) = cursor_rect else {
+        return pointer_position;
+    };
+    (bounds.x + cursor_x, bounds.y + cursor_y + cursor_height * 0.5)
 }
 
 fn place_text_caret(tab: &mut TabSessionMut<'_>, byte_offset: usize, extend: bool) {

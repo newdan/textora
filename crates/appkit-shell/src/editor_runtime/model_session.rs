@@ -438,6 +438,7 @@ impl ModelSession {
     pub(crate) fn scroll_active_document(
         &mut self,
         pixels: f32,
+        plugin_viewport_height: f32,
         line_height: f32,
     ) -> EditorOutcome {
         if pixels == 0.0 {
@@ -449,6 +450,17 @@ impl ModelSession {
         let Some(mut tab) = self.tab_session_mut(tab_id) else {
             return EditorOutcome::default();
         };
+        if tab.runtime.plugin.handles_own_rendering()
+            && tab.send_message(ui::plugin::PluginMessage::Scroll {
+                delta: pixels,
+                viewport_h: plugin_viewport_height,
+            })
+        {
+            return EditorOutcome {
+                shell_effect: crate::event::ShellEffect::REDRAW,
+                ..EditorOutcome::default()
+            };
+        }
         tab.scroll_viewport_by_pixels(pixels, line_height);
         EditorOutcome {
             shell_effect: crate::event::ShellEffect::REDRAW
