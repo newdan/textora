@@ -110,12 +110,25 @@ impl EditorHeaderWidget {
         event: &Event,
         context: &mut EventCtx<'_>,
     ) -> Option<ControlAction> {
+        let WidgetAction::Control(control) = self.handle_widget_event(event, context)? else {
+            return None;
+        };
+        Some(control)
+    }
+
+    fn handle_widget_event(
+        &mut self,
+        event: &Event,
+        context: &mut EventCtx<'_>,
+    ) -> Option<WidgetAction> {
         if let Event::KeyDown(KeyCode::Escape, Modifiers { .. }) = event
             && self.title_box.is_focused()
         {
             self.title_box.set_text(&self.input.title);
             self.title_box.set_focus(false);
-            return Some(ControlAction::Activated { id: EDITOR_HEADER_CANCEL_TITLE_ID });
+            return Some(WidgetAction::Control(ControlAction::Activated {
+                id: EDITOR_HEADER_CANCEL_TITLE_ID,
+            }));
         }
 
         if let Event::MouseMove { px, py } = event {
@@ -131,13 +144,17 @@ impl EditorHeaderWidget {
 
         if let Event::MouseDown { px, py, button: MouseButton::Left } = event {
             if self.input.star_enabled && self.star_rect.contains(*px, *py) {
-                return Some(ControlAction::Activated { id: EDITOR_HEADER_STAR_ID });
+                return Some(WidgetAction::Control(ControlAction::Activated {
+                    id: EDITOR_HEADER_STAR_ID,
+                }));
             }
             if self.input.delete_visible
                 && self.input.delete_enabled
                 && self.delete_rect.contains(*px, *py)
             {
-                return Some(ControlAction::Activated { id: EDITOR_HEADER_DELETE_ID });
+                return Some(WidgetAction::Control(ControlAction::Activated {
+                    id: EDITOR_HEADER_DELETE_ID,
+                }));
             }
             if self.encryption_rect.contains(*px, *py) {
                 return None;
@@ -148,15 +165,15 @@ impl EditorHeaderWidget {
             return None;
         }
         let action = self.title_box.on_event(event, context)?;
-        let WidgetAction::Control(control) = action else {
-            return None;
-        };
-        if let ControlAction::TextCommitted { id: EDITOR_HEADER_TITLE_ID, value } = &control
+        if let WidgetAction::Control(ControlAction::TextCommitted {
+            id: EDITOR_HEADER_TITLE_ID,
+            value,
+        }) = &action
             && let Some(title) = text_payload_string(value)
         {
             self.input.title = title;
         }
-        Some(control)
+        Some(action)
     }
 }
 
@@ -308,7 +325,7 @@ impl Widget for EditorHeaderWidget {
     }
 
     fn on_event(&mut self, event: &Event, context: &mut EventCtx) -> Option<WidgetAction> {
-        self.handle_event(event, context).map(WidgetAction::Control)
+        self.handle_widget_event(event, context)
     }
 
     fn as_any(&self) -> &dyn Any {
@@ -464,6 +481,26 @@ mod tests {
 
         assert_eq!(header.title_text(), "原始标题");
         assert_eq!(action, Some(ControlAction::Activated { id: EDITOR_HEADER_CANCEL_TITLE_ID }));
+    }
+
+    #[test]
+    fn focused_title_consumes_direction_keys_without_bubbling_to_the_editor() {
+        let mut header = EditorHeaderWidget::new();
+        header.set_input(input());
+        header.set_keyboard_focus(Some(EDITOR_HEADER_TITLE_ID));
+        let theme = crate::theme::test_theme();
+        let mut event_context = EventCtx { theme: &theme, dpi: 1.0, cursor_hint: None };
+
+        for key_code in [KeyCode::Left, KeyCode::Right, KeyCode::Up, KeyCode::Down] {
+            assert_eq!(
+                header.on_event(
+                    &Event::KeyDown(key_code, crate::core::Modifiers::NONE),
+                    &mut event_context,
+                ),
+                Some(WidgetAction::Consumed),
+                "{key_code:?} should stay inside the focused title"
+            );
+        }
     }
 
     #[test]

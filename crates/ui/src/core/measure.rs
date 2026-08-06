@@ -5,6 +5,18 @@
 /// app 端通过 `MeasureFromShaper` 包一层 `Shaper` 实现。
 pub trait TextMeasure {
     fn measure(&mut self, s: &str, font_size: f32) -> f32;
+
+    fn measure_with_font(
+        &mut self,
+        text: &str,
+        font_size: f32,
+        font_family: Option<&str>,
+        font_weight: shaping::Weight,
+        font_style: shaping::Style,
+    ) -> f32 {
+        let _ = (font_family, font_weight, font_style);
+        self.measure(text, font_size)
+    }
 }
 
 /// 测试用空实现：所有测量返回 0.0。

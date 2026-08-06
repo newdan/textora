@@ -484,6 +484,20 @@ impl TextBox {
         self.display_prefix_value(self.preedit.as_str(), byte_end)
     }
 
+    fn measure_display_text(
+        measure: &mut dyn crate::core::measure::TextMeasure,
+        text: &str,
+        font_size: f32,
+    ) -> f32 {
+        measure.measure_with_font(
+            text,
+            font_size,
+            None,
+            shaping::Weight::NORMAL,
+            shaping::Style::Normal,
+        )
+    }
+
     fn mask_text(text: &str) -> String {
         std::iter::repeat_n(MASKED_ECHO_GLYPH, text.graphemes(true).count()).collect()
     }
@@ -815,16 +829,24 @@ impl TextBox {
             Some(ref mut m) => &mut **m,
             None => ctx.measure,
         };
-        self.cursor_x = measure.measure(&self.display_prefix_text(self.cursor_byte), font_size);
+        self.cursor_x = Self::measure_display_text(
+            measure,
+            &self.display_prefix_text(self.cursor_byte),
+            font_size,
+        );
 
         // Measure preedit text width
         if !self.preedit.is_empty() {
-            self.preedit_width = measure.measure(&self.display_preedit_text(), font_size);
+            self.preedit_width =
+                Self::measure_display_text(measure, &self.display_preedit_text(), font_size);
 
             let cur = self.preedit_cursor.map(|(_, c)| c).unwrap_or(self.preedit.len());
             let valid_cur = Self::clamp_to_grapheme_boundary(self.preedit.as_str(), cur);
-            self.preedit_cursor_x =
-                measure.measure(&self.display_preedit_prefix_text(valid_cur), font_size);
+            self.preedit_cursor_x = Self::measure_display_text(
+                measure,
+                &self.display_preedit_prefix_text(valid_cur),
+                font_size,
+            );
         } else {
             self.preedit_width = 0.0;
             self.preedit_cursor_x = 0.0;
@@ -837,7 +859,8 @@ impl TextBox {
         self.grapheme_offsets.push((0, 0.0));
         for (byte_start, grapheme) in self.text.as_str().grapheme_indices(true) {
             let byte_pos = byte_start + grapheme.len();
-            let px = measure.measure(&self.display_prefix_text(byte_pos), font_size);
+            let px =
+                Self::measure_display_text(measure, &self.display_prefix_text(byte_pos), font_size);
             self.grapheme_offsets.push((byte_pos, px));
         }
     }
