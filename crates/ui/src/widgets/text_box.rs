@@ -700,30 +700,28 @@ impl TextBox {
     }
 
     /// Mouse down: position cursor, clear selection, begin drag.
-    pub fn on_mouse_down(&mut self, px: f32, _py: f32) -> bool {
-        if !self.rect.contains(px, _py) {
+    pub fn on_mouse_down(&mut self, px: f32, py: f32) -> bool {
+        if !self.rect.contains(px, py) {
             return false;
         }
         self.selection = None;
         self.dragging = true;
-        // 将点击的 px 转换为相对于文本区域的偏移
-        let rel_x = (px - self.rect.x - self.text_pad).max(0.0);
-        // 在 grapheme_offsets 中找最近的字节偏移
-        if self.grapheme_offsets.is_empty() {
-            self.cursor_byte = 0;
-        } else {
-            let mut best_byte = 0usize;
-            let mut best_dist = f32::MAX;
-            for &(byte, off_x) in &self.grapheme_offsets {
-                let dist = (off_x - rel_x).abs();
-                if dist < best_dist {
-                    best_dist = dist;
-                    best_byte = byte;
-                }
-            }
-            self.cursor_byte = best_byte;
-        }
+        self.cursor_byte = self.nearest_grapheme_byte_at_x(px);
         true
+    }
+
+    fn nearest_grapheme_byte_at_x(&self, px: f32) -> usize {
+        let rel_x = (px - self.rect.x - self.text_pad).max(0.0);
+        let mut nearest_byte = 0;
+        let mut nearest_distance = f32::MAX;
+        for &(byte, offset_x) in &self.grapheme_offsets {
+            let distance = (offset_x - rel_x).abs();
+            if distance < nearest_distance {
+                nearest_distance = distance;
+                nearest_byte = byte;
+            }
+        }
+        nearest_byte
     }
 
     fn handle_mouse_down(&mut self, px: f32, py: f32) -> (bool, Option<ControlAction>) {
@@ -734,14 +732,13 @@ impl TextBox {
     }
 
     /// Mouse drag: extend selection.
-    pub fn on_mouse_drag(&mut self, _px: f32, _py: f32) {
+    pub fn on_mouse_drag(&mut self, px: f32, _py: f32) {
         if !self.dragging {
             return;
         }
-        if self.selection.is_none() {
-            self.selection = Some((self.cursor_byte, self.cursor_byte));
-        }
-        // px → byte offset, update cursor_byte and selection end
+        let anchor = self.selection.map_or(self.cursor_byte, |(anchor, _)| anchor);
+        self.cursor_byte = self.nearest_grapheme_byte_at_x(px);
+        self.selection = Some((anchor, self.cursor_byte));
     }
 
     /// Mouse up: end drag.
@@ -1376,6 +1373,32 @@ mod tests {
         let boundaries: Vec<_> =
             tb.grapheme_offsets.iter().map(|(byte_offset, _)| *byte_offset).collect();
         assert_eq!(boundaries, vec![0, combining_sequence.len(), text.len()]);
+    }
+
+    #[test]
+    fn mouse_drag_selects_complete_graphemes() {
+        struct GraphemeMeasure;
+
+        impl crate::core::measure::TextMeasure for GraphemeMeasure {
+            fn measure(&mut self, text: &str, _font_size: f32) -> f32 {
+                text.graphemes(true).count() as f32 * 10.0
+            }
+        }
+
+        let mut text_box = TextBox::new();
+        text_box.set_text("ae\u{301}中b");
+        let theme = crate::theme::test_theme();
+        let mut measure = GraphemeMeasure;
+        let mut layout_context =
+            LayoutCtx { measure: &mut measure, ui_measure: None, theme: &theme, dpi: 1.0 };
+        text_box.layout(Rect::new(0.0, 0.0, 200.0, 28.0), &mut layout_context);
+        let text_origin_x = text_box.rect.x + text_box.text_pad;
+
+        assert!(text_box.on_mouse_down(text_origin_x + 10.0, 14.0));
+        text_box.on_mouse_drag(text_origin_x + 30.0, 14.0);
+
+        assert_eq!(text_box.selection_text(), Some("e\u{301}中"));
+        assert_eq!(text_box.cursor_byte(), "ae\u{301}中".len());
     }
 
     #[test]

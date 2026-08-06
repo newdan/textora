@@ -311,6 +311,17 @@ impl Widget for SearchBarWidget {
                 Some(WidgetAction::Consumed)
             }
             Event::MouseMove { px, py } => {
+                let text_box_action = if self.find_box.is_capturing() {
+                    self.find_box.on_event(ev, _ctx)
+                } else if self.replace_box.is_capturing() {
+                    self.replace_box.on_event(ev, _ctx)
+                } else {
+                    None
+                };
+                if text_box_action.is_some() {
+                    return self.map_text_box_widget_action(text_box_action);
+                }
+
                 let old = self.hovered_btn;
                 self.hovered_btn = HoveredButton::None;
                 self.update_hover(*px, *py);
@@ -348,6 +359,10 @@ impl Widget for SearchBarWidget {
 
     fn id(&self) -> Option<WidgetId> {
         Some(crate::core::widget::ids::SEARCH_BAR)
+    }
+
+    fn is_capturing(&self) -> bool {
+        self.find_box.is_capturing() || self.replace_box.is_capturing()
     }
 
     fn as_any(&self) -> &dyn Any {
@@ -1170,6 +1185,40 @@ mod tests {
         let action = w.on_event(&Event::KeyDown(KeyCode::Char('a'), cmd), &mut ctx);
         assert_eq!(action, Some(WidgetAction::Consumed));
         assert_eq!(w.find_box.selection_text(), Some("hello"));
+    }
+
+    #[test]
+    fn dragging_find_text_keeps_mouse_capture_and_forwards_pointer_moves() {
+        use crate::core::EventCtx;
+
+        let mut search_bar = setup_search_bar("hello");
+        let theme = test_theme();
+        let mut event_context = EventCtx { cursor_hint: None, theme: &theme, dpi: 1.0 };
+        let find_rect = search_bar.find_box.rect();
+
+        assert!(
+            search_bar
+                .on_event(
+                    &Event::MouseDown {
+                        px: find_rect.x + 1.0,
+                        py: find_rect.y + find_rect.h * 0.5,
+                        button: MouseButton::Left,
+                    },
+                    &mut event_context,
+                )
+                .is_some()
+        );
+        assert!(search_bar.is_capturing());
+        assert_eq!(
+            search_bar.on_event(
+                &Event::MouseMove {
+                    px: find_rect.right() - 1.0,
+                    py: find_rect.y + find_rect.h * 0.5,
+                },
+                &mut event_context,
+            ),
+            Some(WidgetAction::Consumed)
+        );
     }
 
     #[test]
