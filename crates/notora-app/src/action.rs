@@ -141,6 +141,7 @@ pub enum NotoraAction {
     WorkspaceRootSelectionRequested,
     OpenNewDocumentMenu,
     CreateRequested(DocumentKind),
+    TitleTextChanged(String),
     TitleCommitRequested(String),
     SemanticEditRequested(ui::plugin::SemanticEditCommand),
     RenameDialogRequested(notora_core::NoteId),

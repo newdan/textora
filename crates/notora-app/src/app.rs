@@ -3668,6 +3668,45 @@ mod tests {
     }
 
     #[test]
+    fn title_text_change_updates_the_active_note_before_explicit_commit() {
+        let workspace_directory =
+            tempfile::tempdir().expect("workspace test directory should be created");
+        let mut app = app();
+        app.execute_workspace_command(WorkspaceCommand::OpenExisting {
+            root: workspace_directory.path().to_path_buf(),
+        })
+        .expect("workspace should open");
+
+        app.dispatch_action(NotoraAction::CreateRequested(DocumentKind::Markdown));
+        let deadline = Instant::now() + Duration::from_secs(2);
+        let identity = loop {
+            app.drain_product_events();
+            if let Some(identity) = app.state().library.selected_card {
+                break identity;
+            }
+            assert!(Instant::now() < deadline, "note completion should select a note");
+            thread::sleep(Duration::from_millis(10));
+        };
+        let tab_id = loop {
+            app.drain_product_events();
+            if let Some(tab_id) = app.document_tab_for(identity) {
+                break tab_id;
+            }
+            assert!(Instant::now() < deadline, "created note should have an editor tab");
+            thread::sleep(Duration::from_millis(10));
+        };
+
+        app.dispatch_action(NotoraAction::TitleTextChanged("项目路线图".to_owned()));
+
+        let snapshot = app
+            .editor_runtime
+            .document_text_snapshot(tab_id)
+            .expect("created note text should remain available");
+        assert_eq!(snapshot.text, "# 项目路线图\n\n");
+        assert_eq!(app.state().layout.focus_target, FocusTarget::EditorTitle);
+    }
+
+    #[test]
     fn completed_tag_mutation_refreshes_active_editor_chips() {
         let workspace_directory =
             tempfile::tempdir().expect("workspace test directory should be created");

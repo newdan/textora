@@ -293,6 +293,7 @@ impl NotoraState {
             }
             NotoraAction::OpenNewDocumentMenu => self.open_new_document_menu(),
             NotoraAction::CreateRequested(kind) => self.request_note_creation(kind),
+            NotoraAction::TitleTextChanged(title) => self.request_title_update(title),
             NotoraAction::TitleCommitRequested(title) => self.request_title_commit(title),
             NotoraAction::SemanticEditRequested(command) => {
                 self.layout.focus_target = FocusTarget::Editor;
@@ -521,7 +522,7 @@ impl NotoraState {
         vec![NotoraEffect::RequestNoteCreation { kind, target }, NotoraEffect::Redraw]
     }
 
-    fn request_title_commit(&mut self, title: String) -> Vec<NotoraEffect> {
+    fn request_title_update(&mut self, title: String) -> Vec<NotoraEffect> {
         if self.library.navigation_scope == NavigationScope::ExternalFiles
             || self.library.navigation_scope == NavigationScope::Trash
             || !matches!(self.library.selected_card, Some(DocumentIdentity::Note(_)))
@@ -529,8 +530,15 @@ impl NotoraState {
             return vec![NotoraEffect::Redraw];
         }
         self.library.last_command_error = None;
-        self.layout.focus_target = FocusTarget::Editor;
         vec![NotoraEffect::CommitTitle(title), NotoraEffect::Redraw]
+    }
+
+    fn request_title_commit(&mut self, title: String) -> Vec<NotoraEffect> {
+        let effects = self.request_title_update(title);
+        if matches!(effects.first(), Some(NotoraEffect::CommitTitle(_))) {
+            self.layout.focus_target = FocusTarget::Editor;
+        }
+        effects
     }
 
     fn resolve_save_conflict(&mut self, resolution: ConflictResolution) -> Vec<NotoraEffect> {
@@ -1189,6 +1197,20 @@ mod tests {
             state.reduce(NotoraAction::TitleCommitRequested("外部文件".to_owned())),
             vec![NotoraEffect::Redraw]
         );
+    }
+
+    #[test]
+    fn title_text_changes_update_the_note_without_leaving_title_focus() {
+        let note_id = NoteId::generate();
+        let mut state = NotoraState::default();
+        state.library.selected_card = Some(DocumentIdentity::Note(note_id));
+        state.layout.focus_target = FocusTarget::EditorTitle;
+
+        assert_eq!(
+            state.reduce(NotoraAction::TitleTextChanged("项目路线图".to_owned())),
+            vec![NotoraEffect::CommitTitle("项目路线图".to_owned()), NotoraEffect::Redraw]
+        );
+        assert_eq!(state.layout.focus_target, FocusTarget::EditorTitle);
     }
 
     #[test]

@@ -1416,6 +1416,13 @@ impl NotoraShell {
                 id: ui::editor_toolbar::EDITOR_TOOLBAR_COMMAND_ID,
                 value: TextPayload::Plain(command_key),
             }) => self.editor_command_actions.get(command_key).cloned(),
+            WidgetAction::Control(ControlAction::TextEdited {
+                id: ui::editor_header::EDITOR_HEADER_TITLE_ID,
+                value,
+            }) => match value {
+                TextPayload::Plain(title) => Some(NotoraAction::TitleTextChanged(title.clone())),
+                TextPayload::Sensitive(_) => None,
+            },
             WidgetAction::Control(ControlAction::TextCommitted {
                 id: ui::editor_header::EDITOR_HEADER_TITLE_ID,
                 value,
@@ -3121,6 +3128,13 @@ mod tests {
                 id: ui::editor_header::EDITOR_HEADER_TITLE_ID,
             })),
             Some(NotoraAction::FocusRequested(FocusTarget::EditorTitle))
+        );
+        assert_eq!(
+            shell.translate_widget_action(&WidgetAction::Control(ControlAction::TextEdited {
+                id: ui::editor_header::EDITOR_HEADER_TITLE_ID,
+                value: TextPayload::Plain("新的标题".to_owned()),
+            })),
+            Some(NotoraAction::TitleTextChanged("新的标题".to_owned()))
         );
         assert_eq!(
             shell.translate_widget_action(&WidgetAction::Control(ControlAction::FocusRequested {
