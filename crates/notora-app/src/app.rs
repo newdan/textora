@@ -71,6 +71,13 @@ const SAVE_STATUS_FAILED: &str = "保存失败";
 
 type WorkspaceDirectoryChooser = Box<dyn Fn() -> Option<std::path::PathBuf>>;
 
+fn resolve_pointer_cursor(
+    product_cursor: Option<winit::window::CursorIcon>,
+    editor_cursor: Option<winit::window::CursorIcon>,
+) -> winit::window::CursorIcon {
+    product_cursor.or(editor_cursor).unwrap_or(winit::window::CursorIcon::Default)
+}
+
 fn choose_workspace_directory() -> Option<std::path::PathBuf> {
     rfd::FileDialog::new().set_title("设置工作区根目录").pick_folder()
 }
@@ -765,17 +772,24 @@ impl NotoraApp {
         }
     }
 
-    pub(crate) fn handle_editor_pointer_event(&mut self, event: &ui::Event) {
-        let context =
-            events::editor_input_context(&self.state, self.shell_layout(), self.window_focused);
-        let outcome = self.editor_runtime.handle_pointer_event(context, event);
-        self.apply_editor_outcome(outcome);
-    }
-
     pub(crate) fn route_pointer_event(&mut self, event: &ui::Event) -> bool {
-        let product_consumed = self.route_product_event(event);
-        if !product_consumed || self.editor_pointer_is_captured() {
-            self.handle_editor_pointer_event(event);
+        let (product_consumed, product_cursor) = self.route_product_event_with_feedback(event);
+        let pointer_move = matches!(event, ui::Event::MouseMove { .. });
+        let editor_cursor = if pointer_move
+            || !product_consumed
+            || self.editor_pointer_is_captured()
+        {
+            let context =
+                events::editor_input_context(&self.state, self.shell_layout(), self.window_focused);
+            let outcome = self.editor_runtime.handle_pointer_event(context, event);
+            let cursor_icon = outcome.cursor_icon;
+            self.apply_editor_outcome(outcome.editor);
+            cursor_icon
+        } else {
+            None
+        };
+        if pointer_move || product_cursor.is_some() || editor_cursor.is_some() {
+            self.set_window_cursor(resolve_pointer_cursor(product_cursor, editor_cursor));
         }
         product_consumed
     }
@@ -1153,6 +1167,17 @@ impl NotoraApp {
     }
 
     pub(crate) fn route_product_event(&mut self, event: &ui::Event) -> bool {
+        let (consumed, cursor_hint) = self.route_product_event_with_feedback(event);
+        if let Some(cursor_hint) = cursor_hint {
+            self.set_window_cursor(cursor_hint);
+        }
+        consumed
+    }
+
+    fn route_product_event_with_feedback(
+        &mut self,
+        event: &ui::Event,
+    ) -> (bool, Option<winit::window::CursorIcon>) {
         let focus_target = self.state.layout.focus_target;
         let product_modal_is_open = self.state.layout.overlay != crate::state::OverlayState::None;
         let route = self.shell.route_event(
@@ -1161,13 +1186,20 @@ impl NotoraApp {
             &self.theme,
             self.editor_runtime.scale_factor() as f32,
         );
+        let cursor_hint = route.cursor_hint;
         if let Some(action) = route.canvas_scrollbar_action {
             self.handle_canvas_scrollbar_action(action);
         }
         for action in route.actions {
             self.dispatch_action(action);
         }
-        route.consumed || product_modal_is_open
+        (route.consumed || product_modal_is_open, cursor_hint)
+    }
+
+    fn set_window_cursor(&self, cursor_icon: winit::window::CursorIcon) {
+        if let Some(window) = self.editor_runtime.window() {
+            window.set_cursor(cursor_icon);
+        }
     }
 
     pub(crate) fn render(&mut self) -> Result<(), RenderError> {
@@ -3074,7 +3106,7 @@ mod tests {
         FontSystemPreparation, NotoraApp, PendingNoteMove, PendingTrashMove,
         SettingsPersistenceState, StartupTrace, editor_title_from_source,
         register_pending_metadata_mutation, remove_pending_metadata_mutation,
-        rename_file_name_for_destination, workspace_relative_directory,
+        rename_file_name_for_destination, resolve_pointer_cursor, workspace_relative_directory,
     };
     use crate::action::{MetadataMutation, NotoraAction};
     use crate::autosave::AutoSaveState;
@@ -3085,6 +3117,18 @@ mod tests {
         WorkspaceCommand, WorkspaceRootState,
     };
     use notora_core::{DocumentIdentity, DocumentKind, NavigationScope, WorkspaceId};
+
+    #[test]
+    fn product_pointer_cursor_takes_priority_over_editor_feedback() {
+        use winit::window::CursorIcon;
+
+        assert_eq!(
+            resolve_pointer_cursor(Some(CursorIcon::EwResize), Some(CursorIcon::Text)),
+            CursorIcon::EwResize
+        );
+        assert_eq!(resolve_pointer_cursor(None, Some(CursorIcon::Grab)), CursorIcon::Grab);
+        assert_eq!(resolve_pointer_cursor(None, None), CursorIcon::Default);
+    }
 
     fn app() -> NotoraApp {
         let directory = tempfile::tempdir().expect("test should create a temporary directory");

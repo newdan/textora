@@ -907,11 +907,17 @@ pub struct NotoraEventRoute {
     pub actions: Vec<NotoraAction>,
     pub consumed: bool,
     pub canvas_scrollbar_action: Option<CanvasScrollbarsAction>,
+    pub cursor_hint: Option<winit::window::CursorIcon>,
 }
 
 impl NotoraEventRoute {
     fn ignored() -> Self {
-        Self { actions: Vec::new(), consumed: false, canvas_scrollbar_action: None }
+        Self {
+            actions: Vec::new(),
+            consumed: false,
+            canvas_scrollbar_action: None,
+            cursor_hint: None,
+        }
     }
 
     fn consumed(action: Option<NotoraAction>) -> Self {
@@ -919,15 +925,26 @@ impl NotoraEventRoute {
             actions: action.into_iter().collect(),
             consumed: true,
             canvas_scrollbar_action: None,
+            cursor_hint: None,
         }
     }
 
     fn passthrough(action: NotoraAction) -> Self {
-        Self { actions: vec![action], consumed: false, canvas_scrollbar_action: None }
+        Self {
+            actions: vec![action],
+            consumed: false,
+            canvas_scrollbar_action: None,
+            cursor_hint: None,
+        }
     }
 
     fn canvas_scrollbar(action: Option<CanvasScrollbarsAction>) -> Self {
-        Self { actions: Vec::new(), consumed: true, canvas_scrollbar_action: action }
+        Self {
+            actions: Vec::new(),
+            consumed: true,
+            canvas_scrollbar_action: action,
+            cursor_hint: None,
+        }
     }
 }
 
@@ -1609,10 +1626,21 @@ impl NotoraShell {
     ) -> NotoraEventRoute {
         let mut event_context = EventCtx { theme, dpi, cursor_hint: None };
         self.synchronize_focus(focus_target, Instant::now());
+        let mut route = self.route_event_with_context(event, focus_target, &mut event_context);
+        route.cursor_hint = event_context.cursor_hint;
+        route
+    }
+
+    fn route_event_with_context(
+        &mut self,
+        event: &Event,
+        focus_target: FocusTarget,
+        event_context: &mut EventCtx,
+    ) -> NotoraEventRoute {
         if self.settings_overlay_open() {
             let action = self
                 .settings_overlay
-                .route_event(event, &mut event_context)
+                .route_event(event, event_context)
                 .map(settings_overlay_action_to_notora_action);
             return NotoraEventRoute::consumed(action);
         }
@@ -1635,17 +1663,17 @@ impl NotoraShell {
                 self.note_creation_panel_rect.y,
             );
             if let Some(widget_action) =
-                self.note_creation_panel.on_event(&local_event, &mut event_context)
+                self.note_creation_panel.on_event(&local_event, event_context)
             {
                 let action = self.translate_widget_action(&widget_action);
                 return NotoraEventRoute::consumed(action);
             }
             return NotoraEventRoute::consumed(None);
         }
-        if let Some(route) = self.route_canvas_scrollbars_event(event, &mut event_context) {
+        if let Some(route) = self.route_canvas_scrollbars_event(event, event_context) {
             return route;
         }
-        if let Some(widget_action) = self.editor_pane.route_event(event, &mut event_context) {
+        if let Some(widget_action) = self.editor_pane.route_event(event, event_context) {
             let action = self.translate_widget_action(&widget_action);
             return NotoraEventRoute::consumed(action);
         }
@@ -1655,31 +1683,29 @@ impl NotoraShell {
         if matches!(
             event,
             Event::MouseMove { .. } | Event::MouseDown { .. } | Event::MouseUp { .. }
-        ) && let Some(widget_action) = self.new_note_button.on_event(event, &mut event_context)
+        ) && let Some(widget_action) = self.new_note_button.on_event(event, event_context)
         {
             let action = self.translate_widget_action(&widget_action);
             return NotoraEventRoute::consumed(action);
         }
-        if let Some(action) = self.route_splitter_event(event, &mut event_context) {
+        if let Some(action) = self.route_splitter_event(event, event_context) {
             return NotoraEventRoute::consumed(action);
         }
         if let Some(action) = settings_button_action(event, self.settings_rect) {
             return NotoraEventRoute::consumed(Some(action));
         }
         if self.card_empty_state_visible
-            && let Some(widget_action) = self.card_empty_state.on_event(event, &mut event_context)
+            && let Some(widget_action) = self.card_empty_state.on_event(event, event_context)
         {
             let action = self.translate_widget_action(&widget_action);
             return NotoraEventRoute::consumed(action);
         }
         let widget_action = match pointer_target(event, self) {
-            Some(FocusTarget::NavigationSearch) => {
-                self.search_box.on_event(event, &mut event_context)
-            }
+            Some(FocusTarget::NavigationSearch) => self.search_box.on_event(event, event_context),
             Some(FocusTarget::NavigationTree) => {
-                self.navigation_tree.on_event(event, &mut event_context)
+                self.navigation_tree.on_event(event, event_context)
             }
-            Some(FocusTarget::CardList) => self.card_list.on_event(event, &mut event_context),
+            Some(FocusTarget::CardList) => self.card_list.on_event(event, event_context),
             Some(
                 FocusTarget::Editor
                 | FocusTarget::EditorTitle
@@ -1687,13 +1713,9 @@ impl NotoraShell {
                 | FocusTarget::Overlay,
             ) => None,
             None => match focus_target {
-                FocusTarget::NavigationSearch => {
-                    self.search_box.on_event(event, &mut event_context)
-                }
-                FocusTarget::NavigationTree => {
-                    self.navigation_tree.on_event(event, &mut event_context)
-                }
-                FocusTarget::CardList => self.card_list.on_event(event, &mut event_context),
+                FocusTarget::NavigationSearch => self.search_box.on_event(event, event_context),
+                FocusTarget::NavigationTree => self.navigation_tree.on_event(event, event_context),
+                FocusTarget::CardList => self.card_list.on_event(event, event_context),
                 FocusTarget::Editor
                 | FocusTarget::EditorTitle
                 | FocusTarget::EditorTag
@@ -2732,6 +2754,10 @@ mod tests {
             editor_rect,
             &mut layout_context,
         );
+
+        let hover = Event::MouseMove { px: editor_rect.right() - 2.0, py: editor_rect.y + 24.0 };
+        let route = shell.route_event(&hover, FocusTarget::Editor, &theme, 1.0);
+        assert_eq!(route.cursor_hint, Some(winit::window::CursorIcon::Default));
 
         let press = Event::MouseDown {
             px: editor_rect.right() - 2.0,

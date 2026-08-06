@@ -8,6 +8,11 @@ use ui::core::geom::Rect;
 use ui::plugin::CanvasContentMetrics;
 use ui::scrollbar::ScrollbarInput;
 
+const CANVAS_LINE_PAN_DISTANCE_PX: f32 = 40.0;
+const WHEEL_ZOOM_PER_LINE: f64 = 0.182_321_556_793_954_6;
+const WHEEL_ZOOM_PER_PIXEL: f64 = WHEEL_ZOOM_PER_LINE / 100.0;
+const MAX_SINGLE_GESTURE_ZOOM_EXPONENT: f64 = 1.386_294_361_119_890_6;
+
 /// 画布视口的互斥状态。
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) enum CanvasViewportState {
@@ -25,6 +30,79 @@ pub enum CanvasViewportAction {
     SetAxisPosition { axis: CanvasAxis, position: f32 },
     Page { axis: CanvasAxis, direction: f32 },
     ResetView,
+}
+
+/// 平台滚轮事件归一化后的单位。
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum CanvasWheelDelta {
+    Lines(CanvasPoint),
+    Pixels(CanvasPoint),
+}
+
+/// 修饰键决定的互斥滚轮意图。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CanvasWheelMode {
+    Pan,
+    PanHorizontally,
+    Zoom,
+}
+
+/// 将平台无关的滚轮量转换为画布动作。
+pub fn canvas_wheel_viewport_action(
+    delta: CanvasWheelDelta,
+    mode: CanvasWheelMode,
+    screen_anchor: CanvasPoint,
+) -> Option<CanvasViewportAction> {
+    if !is_valid_point(screen_anchor) {
+        return None;
+    }
+    let (wheel_delta, unit_scale) = match delta {
+        CanvasWheelDelta::Lines(delta) => (delta, CANVAS_LINE_PAN_DISTANCE_PX),
+        CanvasWheelDelta::Pixels(delta) => (delta, 1.0),
+    };
+    if !is_valid_point(wheel_delta) {
+        return None;
+    }
+
+    if mode == CanvasWheelMode::Zoom {
+        let sensitivity = match delta {
+            CanvasWheelDelta::Lines(_) => WHEEL_ZOOM_PER_LINE,
+            CanvasWheelDelta::Pixels(_) => WHEEL_ZOOM_PER_PIXEL,
+        };
+        let factor = exponential_zoom_factor(f64::from(wheel_delta.y), sensitivity)?;
+        return Some(CanvasViewportAction::ZoomBy { factor, screen_anchor });
+    }
+
+    let mut pan_delta = CanvasPoint::new(-wheel_delta.x * unit_scale, -wheel_delta.y * unit_scale);
+    if mode == CanvasWheelMode::PanHorizontally && pan_delta.x == 0.0 {
+        pan_delta = CanvasPoint::new(pan_delta.y, 0.0);
+    }
+    Some(CanvasViewportAction::PanBy(pan_delta))
+}
+
+/// 将捏合手势量转换为与滚轮一致的指数缩放动作。
+pub fn canvas_pinch_viewport_action(
+    magnification_delta: f64,
+    screen_anchor: CanvasPoint,
+) -> Option<CanvasViewportAction> {
+    if !is_valid_point(screen_anchor) {
+        return None;
+    }
+    let factor = exponential_zoom_factor(magnification_delta, 1.0)?;
+    Some(CanvasViewportAction::ZoomBy { factor, screen_anchor })
+}
+
+fn exponential_zoom_factor(delta: f64, sensitivity: f64) -> Option<f32> {
+    if !delta.is_finite() || !sensitivity.is_finite() {
+        return None;
+    }
+    let exponent = (delta * sensitivity)
+        .clamp(-MAX_SINGLE_GESTURE_ZOOM_EXPONENT, MAX_SINGLE_GESTURE_ZOOM_EXPONENT);
+    if exponent == 0.0 {
+        return None;
+    }
+    let factor = exponent.exp() as f32;
+    factor.is_finite().then_some(factor)
 }
 
 /// 画布两个方向滚动条的每帧纯数据输入。
@@ -349,7 +427,10 @@ mod tests {
     use ui::core::geom::Rect;
     use ui::plugin::CanvasContentMetrics;
 
-    use super::{CanvasViewportAction, CanvasViewportSession};
+    use super::{
+        CanvasViewportAction, CanvasViewportSession, CanvasWheelDelta, CanvasWheelMode,
+        canvas_pinch_viewport_action, canvas_wheel_viewport_action,
+    };
     fn viewport() -> Rect {
         Rect::new(100.0, 50.0, 1_000.0, 800.0)
     }
@@ -387,6 +468,66 @@ mod tests {
 
         let after = snapshot(&session).screen_to_content(anchor);
         assert_point_close(after, before);
+    }
+
+    #[test]
+    fn equal_opposite_wheel_and_pinch_inputs_produce_inverse_zoom() {
+        let anchor = CanvasPoint::new(620.0, 410.0);
+        let wheel_in = canvas_wheel_viewport_action(
+            CanvasWheelDelta::Lines(CanvasPoint::new(0.0, 1.0)),
+            CanvasWheelMode::Zoom,
+            anchor,
+        );
+        let wheel_out = canvas_wheel_viewport_action(
+            CanvasWheelDelta::Lines(CanvasPoint::new(0.0, -1.0)),
+            CanvasWheelMode::Zoom,
+            anchor,
+        );
+        let pinch_in = canvas_pinch_viewport_action(0.25, anchor);
+        let pinch_out = canvas_pinch_viewport_action(-0.25, anchor);
+
+        assert_inverse_zoom(wheel_in, wheel_out);
+        assert_inverse_zoom(pinch_in, pinch_out);
+    }
+
+    #[test]
+    fn canvas_gesture_conversion_rejects_invalid_or_empty_input() {
+        let anchor = CanvasPoint::new(620.0, 410.0);
+
+        assert_eq!(
+            canvas_wheel_viewport_action(
+                CanvasWheelDelta::Lines(CanvasPoint::new(0.0, f32::NAN)),
+                CanvasWheelMode::Zoom,
+                anchor,
+            ),
+            None
+        );
+        assert_eq!(canvas_pinch_viewport_action(0.0, anchor), None);
+        assert_eq!(canvas_pinch_viewport_action(f64::INFINITY, anchor), None);
+    }
+
+    #[test]
+    fn shifted_vertical_wheel_pans_horizontally() {
+        let action = canvas_wheel_viewport_action(
+            CanvasWheelDelta::Lines(CanvasPoint::new(0.0, -2.0)),
+            CanvasWheelMode::PanHorizontally,
+            CanvasPoint::new(620.0, 410.0),
+        );
+
+        assert_eq!(action, Some(CanvasViewportAction::PanBy(CanvasPoint::new(80.0, 0.0))));
+    }
+
+    fn assert_inverse_zoom(
+        first: Option<CanvasViewportAction>,
+        second: Option<CanvasViewportAction>,
+    ) {
+        let Some(CanvasViewportAction::ZoomBy { factor: first, .. }) = first else {
+            panic!("first gesture should produce zoom");
+        };
+        let Some(CanvasViewportAction::ZoomBy { factor: second, .. }) = second else {
+            panic!("second gesture should produce zoom");
+        };
+        assert!((first * second - 1.0).abs() < 0.000_01);
     }
 
     #[test]

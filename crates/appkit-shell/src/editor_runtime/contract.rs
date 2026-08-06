@@ -153,6 +153,22 @@ impl EditorOutcome {
     }
 }
 
+/// 一次编辑器指针路由产生的模型副作用和语义光标。
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub struct EditorPointerOutcome {
+    pub editor: EditorOutcome,
+    pub cursor_icon: Option<winit::window::CursorIcon>,
+}
+
+impl EditorPointerOutcome {
+    pub fn from_editor(
+        editor: EditorOutcome,
+        cursor_icon: Option<winit::window::CursorIcon>,
+    ) -> Self {
+        Self { editor, cursor_icon }
+    }
+}
+
 /// Runtime 构造和生命周期错误。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum EditorRuntimeError {

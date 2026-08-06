@@ -19,8 +19,8 @@ pub use crate::mouse_state::MouseCapture;
 pub use contract::{
     CloseConfirmation, DocumentTextEditError, DocumentTextReplacement, DocumentTextSnapshot,
     EditorDocumentSummary, EditorFocus, EditorInputContext, EditorNotification, EditorOutcome,
-    EditorRuntimeConfig, EditorRuntimeError, EditorTabSnapshot, EditorWorkspaceSnapshot,
-    OpenDisposition,
+    EditorPointerOutcome, EditorRuntimeConfig, EditorRuntimeError, EditorTabSnapshot,
+    EditorWorkspaceSnapshot, OpenDisposition,
 };
 pub use document_save::{
     PreparedDocumentSave, SaveCompletion, SavePrepareError, execute_prepared_save,
@@ -664,6 +664,10 @@ impl EditorRuntime {
     }
 
     pub fn set_window_focus(&mut self, focused: bool) {
+        let canvas_pointer_changed = !focused && self.clear_active_canvas_pointer();
+        if self.render_session.window_focused() != focused || canvas_pointer_changed {
+            self.render_session.request_redraw();
+        }
         self.render_session.set_window_focused(focused);
     }
 
@@ -913,8 +917,12 @@ impl EditorRuntime {
     }
 
     pub fn focus_lost(&mut self) {
+        let canvas_pointer_changed = self.clear_active_canvas_pointer();
         self.input_session.focus_lost();
         self.render_session.set_window_focused(false);
+        if canvas_pointer_changed {
+            self.render_session.request_redraw();
+        }
     }
 
     pub fn invalidate_reshape(&mut self) -> u64 {
@@ -1109,6 +1117,7 @@ mod tests {
 
     struct CanvasControlProbePlugin {
         planned_ranges: Rc<RefCell<Vec<std::ops::Range<usize>>>>,
+        pointer_positions: Rc<RefCell<Vec<Option<ui::canvas::CanvasPoint>>>>,
     }
 
     impl ui::plugin::ViewPlugin for CanvasControlProbePlugin {
@@ -1154,6 +1163,18 @@ mod tests {
                 }
                 _ => ui::plugin::PluginResponse::None,
             }
+        }
+
+        fn handle_message(
+            &mut self,
+            message: ui::plugin::PluginMessage,
+            _document: &mut dyn core::document::DocViewMut,
+        ) -> bool {
+            let ui::plugin::PluginMessage::SetCanvasPointer(pointer) = message else {
+                return false;
+            };
+            self.pointer_positions.borrow_mut().push(pointer);
+            true
         }
 
         fn handles_own_rendering(&self) -> bool {
@@ -1442,13 +1463,19 @@ mod tests {
             modal_blocked: false,
         };
 
+        let hover_outcome =
+            runtime.handle_pointer_event(context, &ui::Event::MouseMove { px: 300.0, py: 240.0 });
+        assert_eq!(hover_outcome.cursor_icon, Some(winit::window::CursorIcon::Grab));
+
         runtime.handle_pointer_event(
             context,
             &ui::Event::MouseDown { px: 300.0, py: 240.0, button: ui::MouseButton::Left },
         );
         assert_eq!(runtime.pointer_capture(), MouseCapture::CanvasDrag);
 
-        runtime.handle_pointer_event(context, &ui::Event::MouseMove { px: 302.0, py: 242.0 });
+        let captured_move =
+            runtime.handle_pointer_event(context, &ui::Event::MouseMove { px: 302.0, py: 242.0 });
+        assert_eq!(captured_move.cursor_icon, Some(winit::window::CursorIcon::Grabbing));
         assert!(phases.borrow().is_empty(), "small pointer jitter must not start a drag");
 
         runtime.handle_pointer_event(context, &ui::Event::MouseMove { px: 310.0, py: 250.0 });
@@ -1467,7 +1494,7 @@ mod tests {
             ]
         );
         assert_eq!(runtime.workspace_snapshot().tabs[0].content_lines, vec!["moved"]);
-        assert!(outcome.notifications.iter().any(|notification| matches!(
+        assert!(outcome.editor.notifications.iter().any(|notification| matches!(
             notification,
             EditorNotification::ContentChanged { tab_id: changed_tab_id, .. }
                 if *changed_tab_id == tab_id
@@ -1484,7 +1511,10 @@ mod tests {
             .tab_session_mut(tab_id)
             .expect("test canvas control tab should exist")
             .runtime
-            .plugin = Box::new(CanvasControlProbePlugin { planned_ranges: planned_ranges.clone() });
+            .plugin = Box::new(CanvasControlProbePlugin {
+            planned_ranges: planned_ranges.clone(),
+            pointer_positions: Rc::new(RefCell::new(Vec::new())),
+        });
         let context = EditorInputContext {
             editor_rect: ui::Rect::new(100.0, 50.0, 800.0, 600.0),
             focus: EditorFocus::Active,
@@ -1498,12 +1528,55 @@ mod tests {
 
         assert_eq!(*planned_ranges.borrow(), vec![1..2]);
         assert_eq!(runtime.workspace_snapshot().tabs[0].content_lines, vec!["cexpandedean"]);
-        assert!(outcome.notifications.iter().any(|notification| matches!(
+        assert_eq!(outcome.cursor_icon, Some(winit::window::CursorIcon::Pointer));
+        assert!(outcome.editor.notifications.iter().any(|notification| matches!(
             notification,
             EditorNotification::ContentChanged { tab_id: changed_tab_id, .. }
                 if *changed_tab_id == tab_id
         )));
         assert_eq!(runtime.pointer_capture(), MouseCapture::None);
+    }
+
+    #[test]
+    fn canvas_pointer_hover_is_forwarded_and_cleared_by_pointer_lifecycle() {
+        let mut runtime = runtime_with_clean_tab();
+        let pointer_positions = Rc::new(RefCell::new(Vec::new()));
+        let tab_id = runtime.active_tab_id().expect("test canvas hover tab should be active");
+        runtime
+            .tab_session_mut(tab_id)
+            .expect("test canvas hover tab should exist")
+            .runtime
+            .plugin = Box::new(CanvasControlProbePlugin {
+            planned_ranges: Rc::new(RefCell::new(Vec::new())),
+            pointer_positions: pointer_positions.clone(),
+        });
+        let context = EditorInputContext {
+            editor_rect: ui::Rect::new(100.0, 50.0, 800.0, 600.0),
+            focus: EditorFocus::Inactive,
+            modal_blocked: false,
+        };
+        let hovered_point = ui::canvas::CanvasPoint::new(300.0, 240.0);
+
+        let hover_outcome = runtime.handle_pointer_event(
+            context,
+            &ui::Event::MouseMove { px: hovered_point.x, py: hovered_point.y },
+        );
+        let leave_outcome =
+            runtime.handle_pointer_event(context, &ui::Event::MouseMove { px: 20.0, py: 20.0 });
+        runtime.handle_pointer_event(
+            context,
+            &ui::Event::MouseMove { px: hovered_point.x, py: hovered_point.y },
+        );
+        runtime.set_window_focus(false);
+
+        assert_eq!(
+            *pointer_positions.borrow(),
+            vec![Some(hovered_point), None, Some(hovered_point), None]
+        );
+        assert!(hover_outcome.editor.shell_effect.redraw);
+        assert!(leave_outcome.editor.shell_effect.redraw);
+        assert_eq!(hover_outcome.cursor_icon, Some(winit::window::CursorIcon::Pointer));
+        assert_eq!(leave_outcome.cursor_icon, None);
     }
 
     #[test]
@@ -1655,7 +1728,7 @@ mod tests {
         );
 
         assert_eq!(runtime.workspace_snapshot().tabs[0].cursor_offset, 2);
-        assert_ne!(outcome, EditorOutcome::default());
+        assert_ne!(outcome.editor, EditorOutcome::default());
     }
 
     #[test]

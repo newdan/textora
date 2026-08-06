@@ -1,6 +1,9 @@
 //! notora 产品事件与 editor runtime 输入门控。
 
 use appkit_shell::ShellEvent;
+use appkit_shell::canvas_viewport::{
+    CanvasWheelDelta, CanvasWheelMode, canvas_pinch_viewport_action, canvas_wheel_viewport_action,
+};
 use appkit_shell::editor_runtime::{EditorFocus, EditorInputContext};
 use appkit_shell::window_input::{scroll_delta_pixels, ui_modifiers, winit_key_to_keycode};
 use winit::application::ApplicationHandler;
@@ -16,67 +19,43 @@ use crate::action::NotoraAction;
 use crate::{FocusTarget, NotoraState, OverlayState, shell::layout::ShellLayout};
 use ui::core::Modifiers;
 
-const CANVAS_LINE_SCROLL_DISTANCE_PX: f32 = 40.0;
-const MIN_CANVAS_ZOOM_FACTOR: f32 = 0.01;
-
 fn canvas_wheel_action(
     delta: MouseScrollDelta,
     modifiers: ModifiersState,
     pointer_position: (f32, f32),
 ) -> Option<appkit_shell::canvas_viewport::CanvasViewportAction> {
-    use appkit_shell::canvas_viewport::CanvasViewportAction;
     use ui::canvas::CanvasPoint;
 
-    if modifiers.super_key() || modifiers.control_key() {
-        let vertical_delta = match delta {
-            MouseScrollDelta::LineDelta(_, vertical_delta) => vertical_delta as f64,
-            MouseScrollDelta::PixelDelta(position) => position.y,
-        };
-        if !vertical_delta.is_finite() {
-            return None;
+    let delta = match delta {
+        MouseScrollDelta::LineDelta(horizontal_delta, vertical_delta) => {
+            CanvasWheelDelta::Lines(CanvasPoint::new(horizontal_delta, vertical_delta))
         }
-        let factor = (1.0 + vertical_delta as f32).max(MIN_CANVAS_ZOOM_FACTOR);
-        if !factor.is_finite() {
-            return None;
-        }
-        return Some(CanvasViewportAction::ZoomBy {
-            factor,
-            screen_anchor: CanvasPoint::new(pointer_position.0, pointer_position.1),
-        });
-    }
-
-    let pan_delta = match delta {
-        MouseScrollDelta::LineDelta(horizontal_delta, vertical_delta) => CanvasPoint::new(
-            -horizontal_delta * CANVAS_LINE_SCROLL_DISTANCE_PX,
-            -vertical_delta * CANVAS_LINE_SCROLL_DISTANCE_PX,
-        ),
         MouseScrollDelta::PixelDelta(position) => {
-            CanvasPoint::new(-(position.x as f32), -(position.y as f32))
+            CanvasWheelDelta::Pixels(CanvasPoint::new(position.x as f32, position.y as f32))
         }
     };
-    let pan_delta = if modifiers.shift_key() && pan_delta.x == 0.0 {
-        CanvasPoint::new(pan_delta.y, 0.0)
+    let mode = if modifiers.super_key() || modifiers.control_key() {
+        CanvasWheelMode::Zoom
+    } else if modifiers.shift_key() {
+        CanvasWheelMode::PanHorizontally
     } else {
-        pan_delta
+        CanvasWheelMode::Pan
     };
-    Some(CanvasViewportAction::PanBy(pan_delta))
+    canvas_wheel_viewport_action(
+        delta,
+        mode,
+        CanvasPoint::new(pointer_position.0, pointer_position.1),
+    )
 }
 
 fn canvas_pinch_action(
     delta: f64,
     pointer_position: (f32, f32),
 ) -> Option<appkit_shell::canvas_viewport::CanvasViewportAction> {
-    if !delta.is_finite() {
-        return None;
-    }
-    let factor = (1.0 + delta as f32).max(MIN_CANVAS_ZOOM_FACTOR);
-    if !factor.is_finite() {
-        return None;
-    }
-    Some(appkit_shell::canvas_viewport::CanvasViewportAction::ZoomBy {
-        factor,
-        screen_anchor: ui::canvas::CanvasPoint::new(pointer_position.0, pointer_position.1),
-    })
+    canvas_pinch_viewport_action(
+        delta,
+        ui::canvas::CanvasPoint::new(pointer_position.0, pointer_position.1),
+    )
 }
 
 /// 根据产品焦点和 overlay 状态构造 runtime 输入上下文。
@@ -457,19 +436,24 @@ mod tests {
         );
         let pinch = canvas_pinch_action(0.2, anchor);
 
-        assert_eq!(
-            command_wheel,
-            Some(CanvasViewportAction::ZoomBy {
-                factor: 1.25,
-                screen_anchor: ui::canvas::CanvasPoint::new(anchor.0, anchor.1),
-            })
-        );
-        assert_eq!(
-            pinch,
-            Some(CanvasViewportAction::ZoomBy {
-                factor: 1.2,
-                screen_anchor: ui::canvas::CanvasPoint::new(anchor.0, anchor.1),
-            })
-        );
+        let Some(CanvasViewportAction::ZoomBy {
+            factor: wheel_factor,
+            screen_anchor: wheel_anchor,
+        }) = command_wheel
+        else {
+            panic!("command wheel should produce a zoom action");
+        };
+        let Some(CanvasViewportAction::ZoomBy {
+            factor: pinch_factor,
+            screen_anchor: pinch_anchor,
+        }) = pinch
+        else {
+            panic!("pinch should produce a zoom action");
+        };
+
+        assert_eq!(wheel_anchor, ui::canvas::CanvasPoint::new(anchor.0, anchor.1));
+        assert_eq!(pinch_anchor, wheel_anchor);
+        assert!(wheel_factor > 1.0);
+        assert!(pinch_factor > wheel_factor);
     }
 }
