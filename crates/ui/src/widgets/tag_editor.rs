@@ -59,6 +59,9 @@ pub struct TagEditorWidget {
     rect: Rect,
     editing: bool,
     blink_visible: bool,
+    preedit_text: String,
+    preedit_cursor: Option<(usize, usize)>,
+    ime_cursor_x: f32,
 }
 
 impl TagEditorWidget {
@@ -68,15 +71,25 @@ impl TagEditorWidget {
             rect: Rect::ZERO,
             editing: false,
             blink_visible: false,
+            preedit_text: String::new(),
+            preedit_cursor: None,
+            ime_cursor_x: 0.0,
         }
     }
 
     pub fn set_input(&mut self, input: TagEditorInput) {
+        if !input.enabled {
+            self.clear_preedit();
+        }
         self.input = input;
     }
 
     pub fn set_editing(&mut self, editing: bool) {
-        self.editing = editing && self.input.enabled;
+        let editing = editing && self.input.enabled;
+        if !editing {
+            self.clear_preedit();
+        }
+        self.editing = editing;
     }
 
     pub fn set_blink_visible(&mut self, visible: bool) {
@@ -91,6 +104,20 @@ impl TagEditorWidget {
         self.input.suggestions_open
     }
 
+    /// Return the local rectangle where the operating system should place IME candidates.
+    ///
+    /// The parent translates this local rectangle into window coordinates. A tag editor only
+    /// owns the IME while it is enabled and actively editing; returning `None` otherwise keeps
+    /// stale tag geometry from being used after focus moves to another control.
+    pub fn ime_cursor_rect(&self) -> Option<Rect> {
+        if !self.input.enabled || !self.editing || self.rect.w <= 0.0 || self.rect.h <= 0.0 {
+            return None;
+        }
+        let cursor_height = (self.rect.h * 0.6).max(1.0);
+        let cursor_y = self.rect.y + (self.rect.h - cursor_height) * 0.5;
+        Some(Rect::new(self.rect.x + self.ime_cursor_x, cursor_y, 2.0, cursor_height))
+    }
+
     pub fn visible_chip_counts(&self, max_visible: usize) -> (usize, usize) {
         let visible = self.input.chips.len().min(max_visible);
         (visible, self.input.chips.len().saturating_sub(visible))
@@ -100,11 +127,19 @@ impl TagEditorWidget {
         if !self.input.enabled {
             return None;
         }
+        if is_ime_event(event) {
+            if !self.editing {
+                return None;
+            }
+            self.handle_ime_event(event);
+            return None;
+        }
         match event {
             Event::KeyDown(crate::core::KeyCode::Escape, _) => {
                 self.input.pending_text.clear();
                 self.input.suggestions_open = false;
                 self.editing = false;
+                self.clear_preedit();
                 Some(TagEditorAction::Cancelled)
             }
             Event::KeyDown(crate::core::KeyCode::Backspace, _) => {
@@ -119,6 +154,9 @@ impl TagEditorWidget {
                     .map(|chip| TagEditorAction::ChipRemoved(chip.chip_key.clone()))
             }
             Event::KeyDown(crate::core::KeyCode::Enter, _) => {
+                if !self.preedit_text.is_empty() {
+                    return None;
+                }
                 let text = self.input.pending_text.trim();
                 if text.is_empty() {
                     return None;
@@ -126,11 +164,13 @@ impl TagEditorWidget {
                 let submitted = text.to_owned();
                 self.input.pending_text.clear();
                 self.input.suggestions_open = false;
+                self.clear_preedit();
                 Some(TagEditorAction::TextSubmitted(submitted))
             }
             Event::KeyDown(crate::core::KeyCode::Char(character), modifiers)
                 if !modifiers.cmd && !modifiers.ctrl && !modifiers.alt =>
             {
+                self.clear_preedit();
                 self.input.pending_text.push(*character);
                 self.input.suggestions_open = true;
                 None
@@ -138,6 +178,7 @@ impl TagEditorWidget {
             Event::MouseDown { px, py, button: crate::core::MouseButton::Left } => {
                 if !self.rect.contains(*px, *py) {
                     self.editing = false;
+                    self.clear_preedit();
                     return Some(TagEditorAction::Dismissed);
                 }
                 self.editing = true;
@@ -155,6 +196,76 @@ impl TagEditorWidget {
             }
             _ => None,
         }
+    }
+
+    fn handle_ime_event(&mut self, event: &Event) {
+        match event {
+            Event::ImePreedit { text, cursor } => {
+                self.preedit_text.clone_from(text);
+                self.preedit_cursor = *cursor;
+            }
+            Event::ImeCommit(text) => {
+                self.clear_preedit();
+                if !text.is_empty() {
+                    self.input.pending_text.push_str(text);
+                    self.input.suggestions_open = true;
+                }
+            }
+            Event::ImeEnable => {
+                self.clear_preedit();
+            }
+            Event::ImeDisable => {
+                self.clear_preedit();
+            }
+            _ => {}
+        }
+    }
+
+    fn clear_preedit(&mut self) {
+        self.preedit_text.clear();
+        self.preedit_cursor = None;
+    }
+
+    fn preedit_cursor_byte(&self) -> usize {
+        let requested = self
+            .preedit_cursor
+            .map(|(_, cursor)| cursor)
+            .unwrap_or(self.preedit_text.len())
+            .min(self.preedit_text.len());
+        let mut boundary = requested;
+        while boundary > 0 && !self.preedit_text.is_char_boundary(boundary) {
+            boundary -= 1;
+        }
+        boundary
+    }
+
+    fn refresh_ime_cursor_position(&mut self, context: &mut LayoutCtx<'_>) {
+        let font_size = TAG_EDITOR_FONT_SIZE_LOGICAL * context.dpi;
+        let measure: &mut dyn crate::core::measure::TextMeasure = match context.ui_measure {
+            Some(ref mut measure) => &mut **measure,
+            None => context.measure,
+        };
+        let visible_count =
+            self.visible_chip_counts(if self.input.compact { 2 } else { self.input.chips.len() }).0;
+        let mut cursor_x = self.rect.x + TAG_EDITOR_HORIZONTAL_PADDING_LOGICAL * context.dpi;
+        let label =
+            if self.input.chips.is_empty() && self.input.pending_text.is_empty() && !self.editing {
+                format!("{TAG_EDITOR_LABEL}{TAG_EDITOR_ADD_PROMPT}")
+            } else {
+                TAG_EDITOR_LABEL.to_owned()
+            };
+        cursor_x += measure.measure(&label, font_size);
+        for chip in self.input.chips.iter().take(visible_count) {
+            cursor_x += measure.measure(&format!("{}  ", chip.label), font_size);
+        }
+        if self.input.chips.len() > visible_count {
+            cursor_x +=
+                measure.measure(&format!("+{}", self.input.chips.len() - visible_count), font_size);
+        }
+        cursor_x += measure.measure(&self.input.pending_text, font_size);
+        let preedit_prefix = &self.preedit_text[..self.preedit_cursor_byte()];
+        cursor_x += measure.measure(preedit_prefix, font_size);
+        self.ime_cursor_x = cursor_x;
     }
 
     fn suggestion_index_at(&self, py: f32, dpi: f32) -> Option<usize> {
@@ -190,6 +301,13 @@ fn paint_text_and_measure(
         * font_size
 }
 
+fn is_ime_event(event: &Event) -> bool {
+    matches!(
+        event,
+        Event::ImePreedit { .. } | Event::ImeCommit(_) | Event::ImeEnable | Event::ImeDisable
+    )
+}
+
 impl Default for TagEditorWidget {
     fn default() -> Self {
         Self::new()
@@ -197,8 +315,9 @@ impl Default for TagEditorWidget {
 }
 
 impl Widget for TagEditorWidget {
-    fn set_rect(&mut self, rect: Rect, _ctx: &mut LayoutCtx) {
+    fn set_rect(&mut self, rect: Rect, context: &mut LayoutCtx) {
         self.rect = Rect::new(0.0, 0.0, rect.w, rect.h);
+        self.refresh_ime_cursor_position(context);
     }
 
     fn paint(&self, ctx: &mut PaintCtx) {
@@ -234,11 +353,20 @@ impl Widget for TagEditorWidget {
                 &self.input.pending_text,
             );
         }
+        if !self.preedit_text.is_empty() {
+            paint_text_and_measure(
+                ctx,
+                x,
+                baseline,
+                ctx.theme.palette.input_fg,
+                &self.preedit_text,
+            );
+        }
         if self.editing && self.blink_visible {
             let vertical_inset = TAG_EDITOR_CARET_VERTICAL_INSET_LOGICAL * ctx.dpi;
             ctx.list.fill(
                 Rect::new(
-                    x,
+                    if self.preedit_text.is_empty() { x } else { self.ime_cursor_x },
                     self.rect.y + vertical_inset,
                     TAG_EDITOR_CARET_WIDTH_LOGICAL * ctx.dpi,
                     (self.rect.h - vertical_inset * 2.0).max(0.0),
@@ -253,6 +381,13 @@ impl Widget for TagEditorWidget {
     }
 
     fn on_event(&mut self, event: &Event, ctx: &mut EventCtx) -> Option<WidgetAction> {
+        if is_ime_event(event) {
+            if !self.input.enabled || !self.editing {
+                return None;
+            }
+            self.handle_ime_event(event);
+            return Some(WidgetAction::Consumed);
+        }
         self.event_action(event, ctx.dpi).map(|action| match action {
             TagEditorAction::TextSubmitted(text) => {
                 WidgetAction::Control(ControlAction::TextCommitted {
@@ -293,7 +428,7 @@ impl Widget for TagEditorWidget {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::core::{Event, KeyCode, Modifiers};
+    use crate::core::{Event, EventCtx, KeyCode, Modifiers, WidgetAction};
 
     fn input() -> TagEditorInput {
         TagEditorInput {
@@ -319,6 +454,41 @@ mod tests {
             enabled: true,
             compact: false,
         }
+    }
+
+    fn paint_editor(editor: &TagEditorWidget) -> crate::core::paint::DrawList {
+        let theme = crate::theme::test_theme();
+        let mut draw_list = crate::core::paint::DrawList::new();
+        let mut shaper = shaping::Shaper::new().expect("test shaper should initialize");
+        let mut paint_context = PaintCtx {
+            list: &mut draw_list,
+            theme: &theme,
+            dpi: 1.0,
+            offset: (0.0, 0.0),
+            global_alpha: 1.0,
+            shaper: Some(&mut shaper),
+        };
+        editor.paint(&mut paint_context);
+        draw_list
+    }
+
+    struct TestMeasure;
+
+    impl crate::core::measure::TextMeasure for TestMeasure {
+        fn measure(&mut self, text: &str, font_size: f32) -> f32 {
+            text.chars().count() as f32 * font_size * 0.5
+        }
+    }
+
+    fn layout_editor(editor: &mut TagEditorWidget) {
+        let theme = crate::theme::test_theme();
+        let mut measure = TestMeasure;
+        let mut layout_context =
+            LayoutCtx { ui_measure: None, measure: &mut measure, theme: &theme, dpi: 1.0 };
+        editor.set_rect(
+            Rect::new(0.0, 0.0, 320.0, TAG_EDITOR_ROW_HEIGHT_LOGICAL),
+            &mut layout_context,
+        );
     }
 
     #[test]
@@ -364,6 +534,166 @@ mod tests {
                 1.0,
             ),
             Some(TagEditorAction::SuggestionSelected("product/textora".to_owned()))
+        );
+    }
+
+    #[test]
+    fn tag_editor_commits_ime_text_only_while_focused() {
+        let mut editor = TagEditorWidget::new();
+        editor.set_input(TagEditorInput { enabled: true, ..input() });
+
+        let theme = crate::theme::test_theme();
+        let mut context = EventCtx { theme: &theme, dpi: 1.0, cursor_hint: None };
+        assert_eq!(
+            editor.on_event(&Event::ImeCommit("未聚焦".to_owned()), &mut context),
+            None,
+            "IME must not mutate a tag editor that does not own keyboard focus"
+        );
+        assert_eq!(editor.pending_text(), "");
+
+        editor.set_editing(true);
+        assert_eq!(
+            editor.on_event(&Event::ImeCommit("你好".to_owned()), &mut context),
+            Some(WidgetAction::Consumed),
+            "focused tag editor must consume IME commit without submitting a chip"
+        );
+        assert_eq!(editor.pending_text(), "你好");
+    }
+
+    #[test]
+    fn tag_editor_consumes_ime_enable_and_disable_only_while_focused() {
+        let mut editor = TagEditorWidget::new();
+        editor.set_input(TagEditorInput { enabled: true, ..input() });
+
+        let theme = crate::theme::test_theme();
+        let mut context = EventCtx { theme: &theme, dpi: 1.0, cursor_hint: None };
+        assert_eq!(editor.on_event(&Event::ImeEnable, &mut context), None);
+        assert_eq!(editor.on_event(&Event::ImeDisable, &mut context), None);
+
+        editor.set_editing(true);
+        assert_eq!(editor.on_event(&Event::ImeEnable, &mut context), Some(WidgetAction::Consumed));
+        assert_eq!(
+            editor.on_event(
+                &Event::ImePreedit { text: "拼".to_owned(), cursor: Some((0, 3)) },
+                &mut context,
+            ),
+            Some(WidgetAction::Consumed)
+        );
+        assert_eq!(editor.on_event(&Event::ImeDisable, &mut context), Some(WidgetAction::Consumed));
+        assert_eq!(editor.pending_text(), "");
+
+        layout_editor(&mut editor);
+        let draw_list = paint_editor(&editor);
+        assert!(draw_list.cmds.iter().all(
+            |command| !matches!(command, crate::core::paint::DrawCmd::TextLayout { layout, .. } if layout.text == "拼")
+        ));
+    }
+
+    #[test]
+    fn tag_editor_reports_an_ime_cursor_rect_only_while_editing() {
+        let mut editor = TagEditorWidget::new();
+        editor.set_input(TagEditorInput {
+            enabled: true,
+            pending_text: "已提交".to_owned(),
+            ..input()
+        });
+        layout_editor(&mut editor);
+        assert_eq!(editor.ime_cursor_rect(), None);
+
+        editor.set_editing(true);
+        layout_editor(&mut editor);
+        let committed_rect = editor.ime_cursor_rect().expect("focused tag should expose IME rect");
+        assert!(committed_rect.x > 0.0);
+        assert_eq!(committed_rect.w, 2.0);
+        assert!(committed_rect.h > 0.0);
+
+        let theme = crate::theme::test_theme();
+        let mut context = EventCtx { theme: &theme, dpi: 1.0, cursor_hint: None };
+        let _ = editor.on_event(
+            &Event::ImePreedit { text: "拼音".to_owned(), cursor: Some((0, 6)) },
+            &mut context,
+        );
+        layout_editor(&mut editor);
+        let preedit_rect = editor.ime_cursor_rect().expect("active preedit should keep IME rect");
+        assert!(preedit_rect.x > committed_rect.x);
+
+        editor.set_editing(false);
+        assert_eq!(editor.ime_cursor_rect(), None);
+    }
+
+    #[test]
+    fn tag_editor_preedit_is_painted_without_submitting_a_tag() {
+        let mut editor = TagEditorWidget::new();
+        editor.set_input(TagEditorInput { enabled: true, ..input() });
+        editor.set_editing(true);
+
+        let theme = crate::theme::test_theme();
+        let mut context = EventCtx { theme: &theme, dpi: 1.0, cursor_hint: None };
+        assert_eq!(
+            editor.on_event(
+                &Event::ImePreedit { text: "拼音".to_owned(), cursor: Some((0, 6)) },
+                &mut context,
+            ),
+            Some(WidgetAction::Consumed),
+            "focused tag editor must consume preedit"
+        );
+        assert_eq!(editor.pending_text(), "", "preedit must remain separate from committed draft");
+
+        layout_editor(&mut editor);
+        let draw_list = paint_editor(&editor);
+        assert!(
+            draw_list.cmds.iter().any(
+                |command| matches!(command, crate::core::paint::DrawCmd::TextLayout { layout, .. } if layout.text == "拼音")
+            ),
+            "active tag editor should paint the current IME preedit"
+        );
+
+        assert_eq!(
+            editor.on_event(&Event::KeyDown(KeyCode::Enter, Modifiers::NONE), &mut context),
+            None,
+            "preedit alone must not submit a tag"
+        );
+        assert_eq!(editor.pending_text(), "");
+    }
+
+    #[test]
+    fn leaving_tag_focus_clears_preedit_without_losing_committed_draft() {
+        let mut editor = TagEditorWidget::new();
+        editor.set_input(TagEditorInput { enabled: true, ..input() });
+        editor.set_editing(true);
+
+        let theme = crate::theme::test_theme();
+        let mut context = EventCtx { theme: &theme, dpi: 1.0, cursor_hint: None };
+        assert_eq!(
+            editor.on_event(&Event::ImeCommit("已提交".to_owned()), &mut context),
+            Some(WidgetAction::Consumed)
+        );
+        assert_eq!(editor.pending_text(), "已提交");
+
+        assert_eq!(
+            editor.on_event(
+                &Event::ImePreedit { text: "未完成".to_owned(), cursor: Some((0, 6)) },
+                &mut context,
+            ),
+            Some(WidgetAction::Consumed)
+        );
+
+        editor.set_editing(false);
+        assert_eq!(
+            editor.on_event(&Event::ImeDisable, &mut context),
+            None,
+            "IME events must stop at the tag editor after focus leaves it"
+        );
+        assert_eq!(editor.pending_text(), "已提交");
+
+        editor.set_editing(true);
+        layout_editor(&mut editor);
+        let draw_list = paint_editor(&editor);
+        assert!(
+            draw_list.cmds.iter().all(
+                |command| !matches!(command, crate::core::paint::DrawCmd::TextLayout { layout, .. } if layout.text == "未完成")
+            ),
+            "disabling IME must clear the uncommitted preedit"
         );
     }
 

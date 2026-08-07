@@ -158,13 +158,22 @@ impl ApplicationHandler<ShellEvent> for NotoraApp {
                 self.receive_system_open_paths(vec![path]);
             }
             WindowEvent::Ime(Ime::Preedit(text, cursor)) => {
-                if !self.route_product_event(&ui::Event::ImePreedit { text: text.clone(), cursor })
-                {
+                let product_consumed =
+                    self.route_product_event(&ui::Event::ImePreedit { text: text.clone(), cursor });
+                if should_forward_input_to_editor(
+                    self.state().layout.focus_target,
+                    product_consumed,
+                ) {
                     let _ = self.update_editor_preedit(text, cursor);
                 }
             }
             WindowEvent::Ime(Ime::Commit(text)) => {
-                if !self.route_product_event(&ui::Event::ImeCommit(text.clone())) {
+                let product_consumed =
+                    self.route_product_event(&ui::Event::ImeCommit(text.clone()));
+                if should_forward_input_to_editor(
+                    self.state().layout.focus_target,
+                    product_consumed,
+                ) {
                     self.commit_editor_text(text);
                 }
             }
@@ -180,37 +189,8 @@ impl ApplicationHandler<ShellEvent> for NotoraApp {
                 else {
                     return;
                 };
-                if key_code == ui::KeyCode::Escape {
-                    self.dispatch_action(NotoraAction::EscapePressed);
-                    return;
-                }
                 let modifiers = ui_modifiers(self.editor_runtime_mut().input_modifiers());
-                if is_open_external_shortcut(key_code, modifiers) {
-                    self.request_external_file_dialog();
-                    return;
-                }
-                if is_open_settings_shortcut(key_code, modifiers) {
-                    self.dispatch_action(NotoraAction::OpenSettings);
-                    return;
-                }
-                if let Some(action) = create_shortcut_action(key_code, modifiers) {
-                    self.dispatch_action(action);
-                    return;
-                }
-                if is_search_shortcut(key_code, modifiers) {
-                    self.dispatch_action(NotoraAction::FocusRequested(
-                        crate::FocusTarget::NavigationSearch,
-                    ));
-                    return;
-                }
-                if is_save_shortcut(key_code, modifiers) {
-                    self.request_manual_save();
-                    return;
-                }
-                let key_event = ui::Event::KeyDown(key_code, modifiers);
-                if !self.route_product_event(&key_event) {
-                    self.handle_editor_key_input(key_code, modifiers);
-                }
+                self.handle_key_input(key_code, modifiers);
             }
             WindowEvent::RedrawRequested => match self.render() {
                 Ok(()) => {
@@ -235,6 +215,52 @@ impl ApplicationHandler<ShellEvent> for NotoraApp {
             self.next_deadline().map(ControlFlow::WaitUntil).unwrap_or(ControlFlow::Wait),
         );
     }
+}
+
+impl NotoraApp {
+    pub(crate) fn handle_key_input(&mut self, key_code: ui::KeyCode, modifiers: Modifiers) {
+        let key_event = ui::Event::KeyDown(key_code, modifiers);
+        if key_code == ui::KeyCode::Escape {
+            if !self.route_product_event(&key_event) {
+                self.dispatch_action(NotoraAction::EscapePressed);
+            }
+            return;
+        }
+        if self.state().layout.overlay != OverlayState::None {
+            let _ = self.route_product_event(&key_event);
+            return;
+        }
+        if is_open_external_shortcut(key_code, modifiers) {
+            self.request_external_file_dialog();
+            return;
+        }
+        if is_open_settings_shortcut(key_code, modifiers) {
+            self.dispatch_action(NotoraAction::OpenSettings);
+            return;
+        }
+        if let Some(action) = create_shortcut_action(key_code, modifiers) {
+            self.dispatch_action(action);
+            return;
+        }
+        if is_search_shortcut(key_code, modifiers) {
+            self.dispatch_action(NotoraAction::FocusRequested(
+                crate::FocusTarget::NavigationSearch,
+            ));
+            return;
+        }
+        if is_save_shortcut(key_code, modifiers) {
+            self.request_manual_save();
+            return;
+        }
+        let product_consumed = self.route_product_event(&key_event);
+        if should_forward_input_to_editor(self.state().layout.focus_target, product_consumed) {
+            self.handle_editor_key_input(key_code, modifiers);
+        }
+    }
+}
+
+fn should_forward_input_to_editor(focus_target: FocusTarget, product_consumed: bool) -> bool {
+    focus_target == FocusTarget::Editor && !product_consumed
 }
 
 fn is_open_external_shortcut(key_code: ui::KeyCode, modifiers: Modifiers) -> bool {
@@ -286,6 +312,7 @@ mod tests {
     use super::{
         canvas_pinch_action, canvas_wheel_action, create_shortcut_action, editor_input_context,
         is_open_external_shortcut, is_open_settings_shortcut, is_save_shortcut, is_search_shortcut,
+        should_forward_input_to_editor,
     };
     use crate::action::NotoraAction;
     use crate::{FocusTarget, NotoraState, OverlayState, shell::layout::ShellLayoutInput};
@@ -339,6 +366,22 @@ mod tests {
             shell_layout.editor_body_rect.x + shell_layout.editor_body_rect.w * 0.5,
             shell_layout.editor_body_rect.y + shell_layout.editor_body_rect.h * 0.5,
         ));
+    }
+
+    #[test]
+    fn only_unconsumed_editor_input_is_forwarded_to_the_runtime() {
+        for focus_target in [
+            FocusTarget::NavigationSearch,
+            FocusTarget::NavigationTree,
+            FocusTarget::CardList,
+            FocusTarget::EditorTitle,
+            FocusTarget::EditorTag,
+            FocusTarget::Overlay,
+        ] {
+            assert!(!should_forward_input_to_editor(focus_target, false));
+        }
+        assert!(!should_forward_input_to_editor(FocusTarget::Editor, true));
+        assert!(should_forward_input_to_editor(FocusTarget::Editor, false));
     }
 
     #[test]

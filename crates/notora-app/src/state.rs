@@ -431,7 +431,11 @@ impl NotoraState {
                 vec![NotoraEffect::PersistLayout, NotoraEffect::Redraw]
             }
             NotoraAction::FocusRequested(focus_target) => {
-                self.layout.focus_target = focus_target;
+                self.layout.focus_target = if self.layout.overlay == OverlayState::None {
+                    focus_target
+                } else {
+                    FocusTarget::Overlay
+                };
                 vec![NotoraEffect::Redraw]
             }
             NotoraAction::OpenSettings => {
@@ -1401,6 +1405,17 @@ mod tests {
         let mut state = state_with_active_workspace();
 
         assert_eq!(state.reduce(NotoraAction::OpenNewDocumentMenu), vec![NotoraEffect::Redraw]);
+        assert_eq!(state.layout.overlay, OverlayState::NewDocumentMenu);
+        assert_eq!(state.layout.focus_target, FocusTarget::Overlay);
+    }
+
+    #[test]
+    fn focus_requests_cannot_escape_an_open_product_overlay() {
+        let mut state = state_with_active_workspace();
+        let _ = state.reduce(NotoraAction::OpenNewDocumentMenu);
+
+        let _ = state.reduce(NotoraAction::FocusRequested(FocusTarget::Editor));
+
         assert_eq!(state.layout.overlay, OverlayState::NewDocumentMenu);
         assert_eq!(state.layout.focus_target, FocusTarget::Overlay);
     }

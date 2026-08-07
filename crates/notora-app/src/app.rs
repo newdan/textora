@@ -1192,9 +1192,10 @@ impl NotoraApp {
             self.dispatch_action(NotoraAction::FocusRequested(crate::FocusTarget::Editor));
             return (!forward_to_editor, None);
         }
-        let route = self.shell.route_event(
+        let route = self.shell.route_event_with_overlay(
             event,
             focus_target,
+            self.state.layout.overlay,
             &self.theme,
             self.editor_runtime.scale_factor() as f32,
         );
@@ -1208,7 +1209,7 @@ impl NotoraApp {
         for action in route.actions {
             self.dispatch_action(action);
         }
-        (route.consumed || product_modal_is_open, cursor_hint)
+        (route.consumed, cursor_hint)
     }
 
     fn set_window_cursor(&self, cursor_icon: winit::window::CursorIcon) {
@@ -3378,6 +3379,50 @@ mod tests {
             ui::KeyCode::Char('x'),
             ui::core::Modifiers::NONE,
         )));
+    }
+
+    #[test]
+    fn settings_modal_blocks_splitter_keyboard_adjustments() {
+        let mut app = app();
+        app.render().expect("shell layout should initialize splitter inputs");
+        let navigation_width_before_modal = app.state().layout.navigation_width_logical;
+
+        app.dispatch_action(NotoraAction::OpenSettings);
+
+        assert_eq!(app.state().layout.overlay, OverlayState::Settings);
+        assert!(app.route_product_event(&ui::Event::KeyDown(
+            ui::KeyCode::Left,
+            ui::core::Modifiers::NONE,
+        )));
+        assert_eq!(
+            app.state().layout.navigation_width_logical,
+            navigation_width_before_modal,
+            "modal keyboard input must not resize an underlying splitter"
+        );
+    }
+
+    #[test]
+    fn modal_state_blocks_workspace_shortcuts_and_escape_closes_the_modal() {
+        let mut app = app();
+        app.dispatch_action(NotoraAction::OpenSettings);
+        let modal_focus = app.state().layout.focus_target;
+
+        let command_modifiers = ui::core::Modifiers { cmd: true, ..ui::core::Modifiers::NONE };
+        for key_code in [
+            ui::KeyCode::Char('n'),
+            ui::KeyCode::Char('o'),
+            ui::KeyCode::Char('f'),
+            ui::KeyCode::Char('s'),
+        ] {
+            app.handle_key_input(key_code, command_modifiers);
+        }
+
+        assert_eq!(app.state().layout.overlay, OverlayState::Settings);
+        assert_eq!(app.state().layout.focus_target, modal_focus);
+
+        app.handle_key_input(ui::KeyCode::Escape, ui::core::Modifiers::NONE);
+        assert_eq!(app.state().layout.overlay, OverlayState::None);
+        assert_eq!(app.state().layout.focus_target, FocusTarget::NavigationTree);
     }
 
     #[test]

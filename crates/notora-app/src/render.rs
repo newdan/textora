@@ -979,6 +979,7 @@ impl NotoraShell {
     }
 
     pub(crate) fn synchronize_focus(&mut self, focus_target: FocusTarget, now: Instant) {
+        self.editor_pane.set_tag_focus(focus_target == FocusTarget::EditorTag);
         let focused_text_input =
             if focus_target == FocusTarget::EditorTag && self.editor_pane.tag_editor_is_active() {
                 Some(FocusTarget::EditorTag)
@@ -1038,11 +1039,12 @@ impl NotoraShell {
     pub(crate) fn focused_text_input_ime_cursor_rect(&self) -> Option<Rect> {
         match self.focused_text_input? {
             FocusTarget::NavigationSearch => Some(self.search_box.ime_cursor_rect()),
-            FocusTarget::EditorTitle => self.editor_pane.focused_ime_cursor_rect(),
+            FocusTarget::EditorTitle | FocusTarget::EditorTag => {
+                self.editor_pane.focused_ime_cursor_rect()
+            }
             FocusTarget::NavigationTree
             | FocusTarget::CardList
             | FocusTarget::Editor
-            | FocusTarget::EditorTag
             | FocusTarget::Overlay => None,
         }
     }
@@ -1468,6 +1470,9 @@ impl NotoraShell {
                 id: ui::editor_header::EDITOR_HEADER_CANCEL_TITLE_ID,
             }) => Some(NotoraAction::FocusRequested(FocusTarget::Editor)),
             WidgetAction::Control(ControlAction::Activated {
+                id: ui::tag_editor::TAG_EDITOR_CANCEL_ID,
+            }) => Some(NotoraAction::FocusRequested(FocusTarget::Editor)),
+            WidgetAction::Control(ControlAction::Activated {
                 id: ui::editor_header::EDITOR_HEADER_STAR_ID,
             }) => self.editor_note_id.map(|note_id| {
                 NotoraAction::MetadataMutationRequested(MetadataMutation::ToggleStar { note_id })
@@ -1550,7 +1555,24 @@ impl NotoraShell {
     ) -> NotoraEventRoute {
         let mut event_context = EventCtx { theme, dpi, cursor_hint: None };
         self.synchronize_focus(focus_target, Instant::now());
-        let mut route = self.route_event_with_context(event, focus_target, &mut event_context);
+        let mut route =
+            self.route_event_with_context(event, focus_target, None, &mut event_context);
+        route.cursor_hint = event_context.cursor_hint;
+        route
+    }
+
+    pub(crate) fn route_event_with_overlay(
+        &mut self,
+        event: &Event,
+        focus_target: FocusTarget,
+        overlay: OverlayState,
+        theme: &ui::Theme,
+        dpi: f32,
+    ) -> NotoraEventRoute {
+        let mut event_context = EventCtx { theme, dpi, cursor_hint: None };
+        self.synchronize_focus(focus_target, Instant::now());
+        let mut route =
+            self.route_event_with_context(event, focus_target, Some(overlay), &mut event_context);
         route.cursor_hint = event_context.cursor_hint;
         route
     }
@@ -1559,97 +1581,126 @@ impl NotoraShell {
         &mut self,
         event: &Event,
         focus_target: FocusTarget,
+        product_overlay: Option<OverlayState>,
         event_context: &mut EventCtx,
     ) -> NotoraEventRoute {
-        if self.settings_overlay_open() {
+        if let Some(route) = self.route_product_overlay_event(event, product_overlay, event_context)
+        {
+            return route;
+        }
+        if self.editor_pane.has_open_popup() {
+            return self.route_editor_popup_event(event, event_context);
+        }
+        if event_is_keyboard(event) {
+            return self.route_keyboard_or_ime_event(event, focus_target, event_context);
+        }
+        self.route_pointer_event(event, focus_target, event_context)
+    }
+
+    fn route_product_overlay_event(
+        &mut self,
+        event: &Event,
+        product_overlay: Option<OverlayState>,
+        event_context: &mut EventCtx,
+    ) -> Option<NotoraEventRoute> {
+        if product_overlay.is_some_and(|overlay| {
+            overlay != OverlayState::None && !self.modal_input_is_ready(overlay)
+        }) {
+            return Some(NotoraEventRoute::consumed(escape_dismiss_action(event)));
+        }
+        if self.settings_overlay_open()
+            && product_overlay.is_none_or(|overlay| overlay == OverlayState::Settings)
+        {
             let action = self
                 .settings_overlay
                 .route_event(event, event_context)
                 .map(settings_overlay_action_to_notora_action);
-            return NotoraEventRoute::consumed(action);
+            return Some(NotoraEventRoute::consumed(action));
         }
-        if self.save_conflict_actions.is_some() {
-            let action = self.route_save_conflict_event(event);
-            return NotoraEventRoute::consumed(action);
-        }
-        if let Some(action) = self.confirmation_overlay_action(event) {
-            return NotoraEventRoute::consumed(Some(action));
-        }
-        if let Some(action) =
-            compact_layout_action(event, self.compact_navigation_rect, self.compact_back_rect)
+        if self.save_conflict_actions.is_some()
+            && product_overlay.is_none_or(|overlay| overlay == OverlayState::SaveConflict)
         {
-            return NotoraEventRoute::consumed(Some(action));
+            let action =
+                self.route_save_conflict_event(event).or_else(|| escape_dismiss_action(event));
+            return Some(NotoraEventRoute::consumed(action));
         }
-        if self.new_document_menu_open {
-            let local_event = translate_event(
-                event,
-                self.new_document_menu_rect.x,
-                self.new_document_menu_rect.y,
-            );
-            if let Some(widget_action) = self
-                .new_document_menu
-                .as_mut()
-                .and_then(|menu| menu.on_event(&local_event, event_context))
-            {
-                let action = new_document_menu_action(&widget_action);
-                return NotoraEventRoute::consumed(action);
-            }
+        if self.confirmation_action.is_some() && product_overlay.is_none_or(is_confirmation_overlay)
+        {
+            let action =
+                self.confirmation_overlay_action(event).or_else(|| escape_dismiss_action(event));
+            return Some(NotoraEventRoute::consumed(action));
+        }
+        if self.new_document_menu_open
+            && product_overlay.is_none_or(|overlay| overlay == OverlayState::NewDocumentMenu)
+        {
+            return Some(self.route_new_document_menu_event(event, event_context));
+        }
+        None
+    }
+
+    fn route_new_document_menu_event(
+        &mut self,
+        event: &Event,
+        event_context: &mut EventCtx,
+    ) -> NotoraEventRoute {
+        let local_event =
+            translate_event(event, self.new_document_menu_rect.x, self.new_document_menu_rect.y);
+        let action = self
+            .new_document_menu
+            .as_mut()
+            .and_then(|menu| menu.on_event(&local_event, event_context))
+            .as_ref()
+            .and_then(new_document_menu_action);
+        NotoraEventRoute::consumed(action)
+    }
+
+    fn route_editor_popup_event(
+        &mut self,
+        event: &Event,
+        event_context: &mut EventCtx,
+    ) -> NotoraEventRoute {
+        let widget_action = self.editor_pane.route_event(event, event_context);
+        let action = widget_action.as_ref().and_then(|action| self.translate_widget_action(action));
+        NotoraEventRoute::consumed(action)
+    }
+
+    fn route_keyboard_or_ime_event(
+        &mut self,
+        event: &Event,
+        focus_target: FocusTarget,
+        event_context: &mut EventCtx,
+    ) -> NotoraEventRoute {
+        if matches!(focus_target, FocusTarget::EditorTitle | FocusTarget::EditorTag)
+            && let Some(widget_action) = self.editor_pane.route_event(event, event_context)
+        {
+            let action = self.translate_widget_action(&widget_action);
+            return NotoraEventRoute::consumed(action);
+        }
+        let widget_action = self.route_focused_widget_event(event, focus_target, event_context);
+        let action = widget_action
+            .as_ref()
+            .and_then(|widget_action| self.translate_widget_action(widget_action));
+        if action.is_some() || widget_action.is_some() {
+            return NotoraEventRoute::consumed(action);
+        }
+        if matches!(focus_target, FocusTarget::EditorTag | FocusTarget::Overlay) {
             return NotoraEventRoute::consumed(None);
         }
-        if let Some(route) = self.route_canvas_scrollbars_event(event, event_context) {
+        NotoraEventRoute::ignored()
+    }
+
+    fn route_pointer_event(
+        &mut self,
+        event: &Event,
+        focus_target: FocusTarget,
+        event_context: &mut EventCtx,
+    ) -> NotoraEventRoute {
+        if let Some(route) = self.route_pointer_chrome_event(event, event_context) {
             return route;
         }
-        if let Some(widget_action) = self.editor_pane.route_event(event, event_context) {
-            let action = self.translate_widget_action(&widget_action);
-            return NotoraEventRoute::consumed(action);
-        }
-        if let Some(action) = note_toolbar_action(event, &self.note_toolbar_buttons) {
-            return NotoraEventRoute::consumed(Some(action));
-        }
-        if matches!(
-            event,
-            Event::MouseMove { .. } | Event::MouseDown { .. } | Event::MouseUp { .. }
-        ) && let Some(widget_action) = self.new_note_button.on_event(event, event_context)
-        {
-            let action = self.translate_widget_action(&widget_action);
-            return NotoraEventRoute::consumed(action);
-        }
-        if let Some(action) = self.route_splitter_event(event, event_context) {
-            return NotoraEventRoute::consumed(action);
-        }
-        if let Some(action) = settings_button_action(event, self.settings_rect) {
-            return NotoraEventRoute::consumed(Some(action));
-        }
-        if self.card_empty_state_visible
-            && let Some(widget_action) = self.card_empty_state.on_event(event, event_context)
-        {
-            let action = self.translate_widget_action(&widget_action);
-            return NotoraEventRoute::consumed(action);
-        }
-        let widget_action = match pointer_target(event, self) {
-            Some(FocusTarget::NavigationSearch) => self.search_box.on_event(event, event_context),
-            Some(FocusTarget::NavigationTree) => {
-                self.navigation_tree.on_event(event, event_context)
-            }
-            Some(FocusTarget::CardList) => self.card_list.on_event(event, event_context),
-            Some(
-                FocusTarget::Editor
-                | FocusTarget::EditorTitle
-                | FocusTarget::EditorTag
-                | FocusTarget::Overlay,
-            ) => None,
-            None => match focus_target {
-                FocusTarget::NavigationSearch => self.search_box.on_event(event, event_context),
-                FocusTarget::NavigationTree => self.navigation_tree.on_event(event, event_context),
-                FocusTarget::CardList => self.card_list.on_event(event, event_context),
-                FocusTarget::Editor
-                | FocusTarget::EditorTitle
-                | FocusTarget::EditorTag
-                | FocusTarget::Overlay => {
-                    return NotoraEventRoute::ignored();
-                }
-            },
-        };
+        let pointer_focus = pointer_target(event, self);
+        let widget_focus = pointer_focus.unwrap_or(focus_target);
+        let widget_action = self.route_focused_widget_event(event, widget_focus, event_context);
         let action = widget_action
             .as_ref()
             .and_then(|widget_action| self.translate_widget_action(widget_action));
@@ -1657,7 +1708,7 @@ impl NotoraShell {
             return NotoraEventRoute::consumed(action);
         }
         if is_left_mouse_down(event)
-            && let Some(focus_target) = pointer_target(event, self)
+            && let Some(focus_target) = pointer_focus
         {
             let focus_action = NotoraAction::FocusRequested(focus_target);
             if focus_target == FocusTarget::Editor {
@@ -1669,6 +1720,77 @@ impl NotoraShell {
             return NotoraEventRoute::consumed(None);
         }
         NotoraEventRoute::ignored()
+    }
+
+    fn route_pointer_chrome_event(
+        &mut self,
+        event: &Event,
+        event_context: &mut EventCtx,
+    ) -> Option<NotoraEventRoute> {
+        if let Some(action) =
+            compact_layout_action(event, self.compact_navigation_rect, self.compact_back_rect)
+        {
+            return Some(NotoraEventRoute::consumed(Some(action)));
+        }
+        if let Some(route) = self.route_canvas_scrollbars_event(event, event_context) {
+            return Some(route);
+        }
+        if let Some(widget_action) = self.editor_pane.route_event(event, event_context) {
+            let action = self.translate_widget_action(&widget_action);
+            return Some(NotoraEventRoute::consumed(action));
+        }
+        if let Some(action) = note_toolbar_action(event, &self.note_toolbar_buttons) {
+            return Some(NotoraEventRoute::consumed(Some(action)));
+        }
+        if is_splitter_pointer_event(event)
+            && let Some(widget_action) = self.new_note_button.on_event(event, event_context)
+        {
+            let action = self.translate_widget_action(&widget_action);
+            return Some(NotoraEventRoute::consumed(action));
+        }
+        if let Some(action) = self.route_splitter_event(event, event_context) {
+            return Some(NotoraEventRoute::consumed(action));
+        }
+        if let Some(action) = settings_button_action(event, self.settings_rect) {
+            return Some(NotoraEventRoute::consumed(Some(action)));
+        }
+        if self.card_empty_state_visible
+            && let Some(widget_action) = self.card_empty_state.on_event(event, event_context)
+        {
+            let action = self.translate_widget_action(&widget_action);
+            return Some(NotoraEventRoute::consumed(action));
+        }
+        None
+    }
+
+    fn route_focused_widget_event(
+        &mut self,
+        event: &Event,
+        focus_target: FocusTarget,
+        event_context: &mut EventCtx,
+    ) -> Option<WidgetAction> {
+        match focus_target {
+            FocusTarget::NavigationSearch => self.search_box.on_event(event, event_context),
+            FocusTarget::NavigationTree => self.navigation_tree.on_event(event, event_context),
+            FocusTarget::CardList => self.card_list.on_event(event, event_context),
+            FocusTarget::Editor
+            | FocusTarget::EditorTitle
+            | FocusTarget::EditorTag
+            | FocusTarget::Overlay => None,
+        }
+    }
+
+    fn modal_input_is_ready(&self, overlay: OverlayState) -> bool {
+        match overlay {
+            OverlayState::None => true,
+            OverlayState::Settings => self.settings_overlay_open,
+            OverlayState::NewDocumentMenu => self.new_document_menu_open,
+            OverlayState::TrashPermanentDeletionConfirmation { .. }
+            | OverlayState::TrashRestoreConflictConfirmation { .. } => {
+                self.confirmation_action.is_some()
+            }
+            OverlayState::SaveConflict => self.save_conflict_actions.is_some(),
+        }
     }
 
     fn route_canvas_scrollbars_event(
@@ -1721,6 +1843,9 @@ impl NotoraShell {
         event: &Event,
         event_context: &mut EventCtx,
     ) -> Option<Option<NotoraAction>> {
+        if !is_splitter_pointer_event(event) {
+            return None;
+        }
         let navigation_action = self.navigation_splitter.on_event(event, event_context);
         if navigation_action.is_some() {
             return Some(
@@ -2041,6 +2166,34 @@ fn event_pointer_position(event: &Event) -> Option<(f32, f32)> {
         | Event::ImeEnable
         | Event::ImeDisable => None,
     }
+}
+
+fn event_is_keyboard(event: &Event) -> bool {
+    matches!(
+        event,
+        Event::KeyDown(..)
+            | Event::ImePreedit { .. }
+            | Event::ImeCommit(_)
+            | Event::ImeEnable
+            | Event::ImeDisable
+    )
+}
+
+fn escape_dismiss_action(event: &Event) -> Option<NotoraAction> {
+    matches!(event, Event::KeyDown(ui::KeyCode::Escape, _))
+        .then_some(NotoraAction::OverlayDismissed)
+}
+
+fn is_confirmation_overlay(overlay: OverlayState) -> bool {
+    matches!(
+        overlay,
+        OverlayState::TrashPermanentDeletionConfirmation { .. }
+            | OverlayState::TrashRestoreConflictConfirmation { .. }
+    )
+}
+
+fn is_splitter_pointer_event(event: &Event) -> bool {
+    matches!(event, Event::MouseMove { .. } | Event::MouseDown { .. } | Event::MouseUp { .. })
 }
 
 fn is_left_mouse_down(event: &Event) -> bool {
@@ -2650,6 +2803,42 @@ mod tests {
     }
 
     #[test]
+    fn focused_tag_exposes_an_ime_cursor_rect_until_focus_moves_away() {
+        let mut shell = NotoraShell::new();
+        shell.editor_pane.set_input(EditorPaneInput {
+            mode: EditorPaneMode::WorkspaceNote,
+            tags: ui::tag_editor::TagEditorInput {
+                enabled: true,
+                ..ui::tag_editor::TagEditorInput::default()
+            },
+            ..EditorPaneInput::default()
+        });
+        let theme = ui::theme::test_theme();
+        let mut measure = ui::NoopMeasure;
+        let mut layout_context =
+            ui::LayoutCtx { ui_measure: None, measure: &mut measure, theme: &theme, dpi: 1.0 };
+        shell.editor_pane.set_rects(
+            EditorPaneRects {
+                header: Rect::new(420.0, 48.0, 640.0, 108.0),
+                toolbar: Rect::new(420.0, 156.0, 640.0, 40.0),
+                body: Rect::new(420.0, 196.0, 640.0, 400.0),
+            },
+            &mut layout_context,
+        );
+
+        shell.synchronize_focus(FocusTarget::EditorTag, Instant::now());
+        let ime_rect = shell
+            .focused_text_input_ime_cursor_rect()
+            .expect("focused tag should provide an IME candidate anchor");
+        assert!(ime_rect.x >= 420.0);
+        assert!(ime_rect.y >= 48.0);
+
+        shell.synchronize_focus(FocusTarget::NavigationTree, Instant::now());
+        assert!(!shell.editor_pane.tag_editor_is_active());
+        assert!(shell.focused_text_input_ime_cursor_rect().is_none());
+    }
+
+    #[test]
     fn focused_search_box_toggles_the_caret_every_blink_interval() {
         use ui::core::paint::{DrawCmd, DrawList};
 
@@ -2684,6 +2873,147 @@ mod tests {
             focused_at + TEXT_CURSOR_BLINK_INTERVAL + TEXT_CURSOR_BLINK_INTERVAL
         ));
         assert!(paints_caret(&shell, &theme));
+    }
+
+    #[test]
+    fn direction_keys_do_not_resize_splitters_without_splitter_focus() {
+        let mut shell = NotoraShell::new();
+        shell.navigation_splitter.set_input(SplitterInput {
+            logical_position: 220.0,
+            minimum_logical_position: 180.0,
+            maximum_logical_position: 320.0,
+            enabled: true,
+        });
+        shell.card_list_splitter.set_input(SplitterInput {
+            logical_position: 340.0,
+            minimum_logical_position: 280.0,
+            maximum_logical_position: 480.0,
+            enabled: true,
+        });
+        let theme = ui::theme::test_theme();
+
+        let route = shell.route_event(
+            &Event::KeyDown(ui::KeyCode::Left, ui::core::Modifiers::NONE),
+            FocusTarget::Editor,
+            &theme,
+            1.0,
+        );
+
+        assert!(!route.consumed);
+        assert!(route.actions.is_empty());
+        assert_eq!(shell.navigation_splitter.logical_position(), 220.0);
+        assert_eq!(shell.card_list_splitter.logical_position(), 340.0);
+    }
+
+    #[test]
+    fn confirmation_overlay_blocks_keyboard_and_background_pointer_input() {
+        let mut shell = NotoraShell::new();
+        shell.navigation_splitter.set_input(SplitterInput {
+            logical_position: 220.0,
+            minimum_logical_position: 180.0,
+            maximum_logical_position: 320.0,
+            enabled: true,
+        });
+        shell.card_list_splitter.set_input(SplitterInput {
+            logical_position: 340.0,
+            minimum_logical_position: 280.0,
+            maximum_logical_position: 480.0,
+            enabled: true,
+        });
+        shell.confirmation_action = Some(NotoraAction::OverlayDismissed);
+        shell.confirmation_panel_rect = Rect::new(200.0, 100.0, 400.0, 240.0);
+        let theme = ui::theme::test_theme();
+
+        let keyboard_route = shell.route_event_with_overlay(
+            &Event::KeyDown(ui::KeyCode::Right, ui::core::Modifiers::NONE),
+            FocusTarget::Editor,
+            OverlayState::TrashPermanentDeletionConfirmation {
+                operation: crate::action::TrashOperation::Empty,
+            },
+            &theme,
+            1.0,
+        );
+        let pointer_route = shell.route_event_with_overlay(
+            &Event::MouseDown { px: 300.0, py: 180.0, button: ui::MouseButton::Left },
+            FocusTarget::Editor,
+            OverlayState::TrashPermanentDeletionConfirmation {
+                operation: crate::action::TrashOperation::Empty,
+            },
+            &theme,
+            1.0,
+        );
+
+        assert!(keyboard_route.consumed);
+        assert!(pointer_route.consumed);
+        assert_eq!(shell.navigation_splitter.logical_position(), 220.0);
+        assert_eq!(shell.card_list_splitter.logical_position(), 340.0);
+    }
+
+    #[test]
+    fn new_document_menu_blocks_compact_layout_controls() {
+        let mut shell = NotoraShell::new();
+        shell.new_document_menu_open = true;
+        shell.compact_navigation_rect = Rect::new(8.0, 8.0, 40.0, 40.0);
+        let theme = ui::theme::test_theme();
+
+        let route = shell.route_event_with_overlay(
+            &Event::MouseDown { px: 24.0, py: 24.0, button: ui::MouseButton::Left },
+            FocusTarget::Overlay,
+            OverlayState::NewDocumentMenu,
+            &theme,
+            1.0,
+        );
+
+        assert!(route.consumed);
+        assert!(route.actions.is_empty());
+    }
+
+    #[test]
+    fn editor_popup_blocks_canvas_scrollbar_pointer_input() {
+        use ui::canvas_scrollbars::CanvasScrollbarsInput;
+        use ui::scrollbar::ScrollbarInput;
+
+        let mut shell = NotoraShell::new();
+        shell.editor_pane.set_input(EditorPaneInput {
+            mode: EditorPaneMode::WorkspaceNote,
+            tags: ui::tag_editor::TagEditorInput {
+                enabled: true,
+                suggestions_open: true,
+                ..ui::tag_editor::TagEditorInput::default()
+            },
+            ..EditorPaneInput::default()
+        });
+        let theme = ui::theme::test_theme();
+        let mut measure = ui::NoopMeasure;
+        let mut layout_context =
+            ui::LayoutCtx { ui_measure: None, measure: &mut measure, theme: &theme, dpi: 1.0 };
+        let editor_rect = Rect::new(200.0, 80.0, 800.0, 600.0);
+        shell.set_canvas_scrollbars_input(
+            Some(CanvasScrollbarsInput {
+                horizontal: None,
+                vertical: Some(ScrollbarInput {
+                    viewport_height_px: 600.0,
+                    total_display_rows: 2_400,
+                    scroll_top_rows: 0.0,
+                }),
+            }),
+            editor_rect,
+            &mut layout_context,
+        );
+
+        let route = shell.route_event(
+            &Event::MouseDown {
+                px: editor_rect.right() - 2.0,
+                py: editor_rect.y + 24.0,
+                button: ui::MouseButton::Left,
+            },
+            FocusTarget::EditorTag,
+            &theme,
+            1.0,
+        );
+
+        assert!(route.consumed);
+        assert_eq!(route.canvas_scrollbar_action, None);
     }
 
     #[test]
@@ -3203,6 +3533,12 @@ mod tests {
                 id: ui::tag_editor::TAG_EDITOR_INPUT_ID,
             })),
             Some(NotoraAction::FocusRequested(FocusTarget::EditorTag))
+        );
+        assert_eq!(
+            shell.translate_widget_action(&WidgetAction::Control(ControlAction::Activated {
+                id: ui::tag_editor::TAG_EDITOR_CANCEL_ID,
+            })),
+            Some(NotoraAction::FocusRequested(FocusTarget::Editor))
         );
         assert_eq!(
             shell.translate_widget_action(&WidgetAction::Control(ControlAction::TextCommitted {

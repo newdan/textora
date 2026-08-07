@@ -168,9 +168,29 @@ impl EditorPaneChrome {
         self.input.location.open || self.input.tags.suggestions_open
     }
 
+    pub fn has_open_popup(&self) -> bool {
+        self.has_open_property_popup() || self.input.toolbar.overflow_open
+    }
+
     pub fn set_title_focus(&mut self, focused: bool) {
+        if focused {
+            self.set_tag_focus(false);
+        }
         let focused_id = focused.then_some(ui::editor_header::EDITOR_HEADER_TITLE_ID);
         self.header.set_keyboard_focus(focused_id);
+    }
+
+    pub fn set_tag_focus(&mut self, focused: bool) {
+        if focused && self.input.tags.enabled {
+            self.tag_editor_active = true;
+            self.tag_editor.set_editing(true);
+            return;
+        }
+        self.input.tags.pending_text = self.tag_editor.pending_text().to_owned();
+        self.tag_editor_active = false;
+        self.input.tags.suggestions_open = false;
+        self.tag_editor.set_input(self.input.tags.clone());
+        self.tag_editor.set_editing(false);
     }
 
     pub fn set_title_blink_visible(&mut self, visible: bool) {
@@ -178,10 +198,13 @@ impl EditorPaneChrome {
     }
 
     pub fn focused_ime_cursor_rect(&self) -> Option<Rect> {
-        let local_rect = self.header.focused_ime_cursor_rect()?;
+        let local_rect =
+            self.header.focused_ime_cursor_rect().or_else(|| self.tag_editor.ime_cursor_rect())?;
+        let offset =
+            if self.header.title_is_focused() { self.document_header_rect } else { self.tag_rect };
         Some(Rect::new(
-            self.document_header_rect.x + local_rect.x,
-            self.document_header_rect.y + local_rect.y,
+            offset.x + local_rect.x,
+            offset.y + local_rect.y,
             local_rect.w,
             local_rect.h,
         ))
@@ -628,6 +651,30 @@ mod tests {
     }
 
     #[test]
+    fn open_popup_boundary_covers_location_tags_and_toolbar_overflow() {
+        let mut chrome = EditorPaneChrome::new();
+        let mut pane_input = input(EditorPaneMode::WorkspaceNote);
+
+        pane_input.location.open = true;
+        chrome.set_input(pane_input.clone());
+        assert!(chrome.has_open_popup());
+
+        pane_input.location.open = false;
+        pane_input.tags.suggestions_open = true;
+        chrome.set_input(pane_input.clone());
+        assert!(chrome.has_open_popup());
+
+        pane_input.tags.suggestions_open = false;
+        pane_input.toolbar.overflow_open = true;
+        chrome.set_input(pane_input.clone());
+        assert!(chrome.has_open_popup());
+
+        pane_input.toolbar.overflow_open = false;
+        chrome.set_input(pane_input);
+        assert!(!chrome.has_open_popup());
+    }
+
+    #[test]
     fn compact_geometry_is_forwarded_to_header_and_tag_widgets() {
         let mut chrome = EditorPaneChrome::new();
         chrome.set_input(input(EditorPaneMode::WorkspaceNote));
@@ -742,6 +789,41 @@ mod tests {
 
         chrome.set_title_focus(false);
         assert!(!chrome.header.title_is_focused());
+    }
+
+    #[test]
+    fn moving_focus_to_the_title_clears_the_active_tag_editor() {
+        let mut chrome = EditorPaneChrome::new();
+        chrome.set_input(input(EditorPaneMode::WorkspaceNote));
+        chrome.tag_editor_active = true;
+        chrome.tag_editor.set_editing(true);
+
+        chrome.set_title_focus(true);
+
+        assert!(chrome.header.title_is_focused());
+        assert!(!chrome.tag_editor_is_active());
+    }
+
+    #[test]
+    fn leaving_tag_focus_preserves_the_unsubmitted_draft() {
+        let mut chrome = EditorPaneChrome::new();
+        chrome.set_input(input(EditorPaneMode::WorkspaceNote));
+        chrome.set_tag_focus(true);
+        let theme = ui::theme::test_theme();
+        let mut event_context = ui::EventCtx { theme: &theme, dpi: 1.0, cursor_hint: None };
+
+        assert_eq!(
+            chrome.route_event(
+                &ui::Event::KeyDown(ui::KeyCode::Char('x'), ui::core::Modifiers::NONE),
+                &mut event_context,
+            ),
+            Some(WidgetAction::Consumed)
+        );
+
+        chrome.set_tag_focus(false);
+        chrome.set_tag_focus(true);
+
+        assert_eq!(chrome.tag_editor.pending_text(), "x");
     }
 
     #[test]
