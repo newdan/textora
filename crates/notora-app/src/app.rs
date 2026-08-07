@@ -1180,6 +1180,18 @@ impl NotoraApp {
     ) -> (bool, Option<winit::window::CursorIcon>) {
         let focus_target = self.state.layout.focus_target;
         let product_modal_is_open = self.state.layout.overlay != crate::state::OverlayState::None;
+        if !product_modal_is_open
+            && focus_target == crate::FocusTarget::EditorTitle
+            && matches!(event, ui::Event::KeyDown(ui::KeyCode::Tab, _))
+        {
+            let forward_to_editor = self
+                .editor_runtime
+                .active_tab_id()
+                .and_then(|tab_id| self.editor_runtime.tab_session(tab_id))
+                .is_some_and(|tab| tab.plugin_name() == ui::plugin::PLUGIN_MINDMAP);
+            self.dispatch_action(NotoraAction::FocusRequested(crate::FocusTarget::Editor));
+            return (!forward_to_editor, None);
+        }
         let route = self.shell.route_event(
             event,
             focus_target,
@@ -3748,6 +3760,90 @@ mod tests {
         let tree = textora_markdown::mmf::parser::parse(&snapshot.text)
             .expect("renamed mmap must retain one valid root");
         assert_eq!(tree.root.title, "项目路线图");
+    }
+
+    #[test]
+    fn tab_from_a_new_mindmap_title_hands_input_to_the_canvas_and_creates_a_child() {
+        let workspace_directory =
+            tempfile::tempdir().expect("workspace test directory should be created");
+        let mut app = app();
+        app.execute_workspace_command(WorkspaceCommand::OpenExisting {
+            root: workspace_directory.path().to_path_buf(),
+        })
+        .expect("workspace should open");
+
+        app.dispatch_action(NotoraAction::CreateRequested(DocumentKind::Mindmap));
+        let deadline = Instant::now() + Duration::from_secs(2);
+        let tab_id = loop {
+            app.drain_product_events();
+            if let Some(identity) = app.state().library.selected_card
+                && let Some(tab_id) = app.document_tab_for(identity)
+            {
+                break tab_id;
+            }
+            assert!(Instant::now() < deadline, "created mmap should have an editor tab");
+            thread::sleep(Duration::from_millis(10));
+        };
+        app.render().expect("created mmap should render its title editor");
+        app.dispatch_action(NotoraAction::TitleTextChanged("项目路线图".to_owned()));
+        assert_eq!(app.state().layout.focus_target, FocusTarget::EditorTitle);
+
+        let tab_event = ui::Event::KeyDown(ui::KeyCode::Tab, ui::core::Modifiers::NONE);
+        if !app.route_product_event(&tab_event) {
+            app.handle_editor_key_input(ui::KeyCode::Tab, ui::core::Modifiers::NONE);
+        }
+
+        let snapshot = app
+            .editor_runtime
+            .document_text_snapshot(tab_id)
+            .expect("created mmap source should remain available");
+        assert_eq!(snapshot.text, "# 项目路线图\n##\n");
+        assert_eq!(app.state().layout.focus_target, FocusTarget::Editor);
+
+        app.commit_editor_text("子节点".to_owned());
+        let snapshot = app
+            .editor_runtime
+            .document_text_snapshot(tab_id)
+            .expect("created mmap child should remain available");
+        assert_eq!(snapshot.text, "# 项目路线图\n##子节点\n");
+    }
+
+    #[test]
+    fn tab_from_a_new_markdown_title_focuses_the_body_without_indenting_the_heading() {
+        let workspace_directory =
+            tempfile::tempdir().expect("workspace test directory should be created");
+        let mut app = app();
+        app.execute_workspace_command(WorkspaceCommand::OpenExisting {
+            root: workspace_directory.path().to_path_buf(),
+        })
+        .expect("workspace should open");
+
+        app.dispatch_action(NotoraAction::CreateRequested(DocumentKind::Markdown));
+        let deadline = Instant::now() + Duration::from_secs(2);
+        let tab_id = loop {
+            app.drain_product_events();
+            if let Some(identity) = app.state().library.selected_card
+                && let Some(tab_id) = app.document_tab_for(identity)
+            {
+                break tab_id;
+            }
+            assert!(Instant::now() < deadline, "created markdown should have an editor tab");
+            thread::sleep(Duration::from_millis(10));
+        };
+        app.render().expect("created markdown should render its title editor");
+        app.dispatch_action(NotoraAction::TitleTextChanged("项目记录".to_owned()));
+
+        let tab_event = ui::Event::KeyDown(ui::KeyCode::Tab, ui::core::Modifiers::NONE);
+        if !app.route_product_event(&tab_event) {
+            app.handle_editor_key_input(ui::KeyCode::Tab, ui::core::Modifiers::NONE);
+        }
+
+        let snapshot = app
+            .editor_runtime
+            .document_text_snapshot(tab_id)
+            .expect("created markdown source should remain available");
+        assert_eq!(snapshot.text, "# 项目记录\n\n");
+        assert_eq!(app.state().layout.focus_target, FocusTarget::Editor);
     }
 
     #[test]
