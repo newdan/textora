@@ -1184,11 +1184,7 @@ impl NotoraApp {
             && focus_target == crate::FocusTarget::EditorTitle
             && matches!(event, ui::Event::KeyDown(ui::KeyCode::Tab, _))
         {
-            let forward_to_editor = self
-                .editor_runtime
-                .active_tab_id()
-                .and_then(|tab_id| self.editor_runtime.tab_session(tab_id))
-                .is_some_and(|tab| tab.plugin_name() == ui::plugin::PLUGIN_MINDMAP);
+            let forward_to_editor = self.prepare_active_mindmap_root_for_title_tab();
             self.dispatch_action(NotoraAction::FocusRequested(crate::FocusTarget::Editor));
             return (!forward_to_editor, None);
         }
@@ -1210,6 +1206,30 @@ impl NotoraApp {
             self.dispatch_action(action);
         }
         (route.consumed, cursor_hint)
+    }
+
+    fn prepare_active_mindmap_root_for_title_tab(&mut self) -> bool {
+        let Some(tab_id) = self.editor_runtime.active_tab_id() else {
+            return false;
+        };
+        let Some(tab) = self.editor_runtime.tab_session(tab_id) else {
+            return false;
+        };
+        if tab.plugin_name() != ui::plugin::PLUGIN_MINDMAP {
+            return false;
+        }
+        let Some(snapshot) = self.editor_runtime.document_text_snapshot(tab_id) else {
+            return false;
+        };
+        let Ok(tree) = textora_markdown::mmf::parser::parse(&snapshot.text) else {
+            return false;
+        };
+        let Some(tab) = self.editor_runtime.tab_session_mut(tab_id) else {
+            return false;
+        };
+        tab.document.cursor_mut().selection_anchor = None;
+        tab.document.cursor_move_to_offset(tree.root.title_byte_range.end);
+        true
     }
 
     fn set_window_cursor(&self, cursor_icon: winit::window::CursorIcon) {
@@ -3805,6 +3825,58 @@ mod tests {
         let tree = textora_markdown::mmf::parser::parse(&snapshot.text)
             .expect("renamed mmap must retain one valid root");
         assert_eq!(tree.root.title, "项目路线图");
+    }
+
+    #[test]
+    fn tab_from_an_untitled_new_mindmap_root_creates_a_child_without_spaces() {
+        let workspace_directory =
+            tempfile::tempdir().expect("workspace test directory should be created");
+        let mut app = app();
+        app.execute_workspace_command(WorkspaceCommand::OpenExisting {
+            root: workspace_directory.path().to_path_buf(),
+        })
+        .expect("workspace should open");
+
+        app.dispatch_action(NotoraAction::CreateRequested(DocumentKind::Mindmap));
+        let deadline = Instant::now() + Duration::from_secs(2);
+        let tab_id = loop {
+            app.drain_product_events();
+            if let Some(identity) = app.state().library.selected_card
+                && let Some(tab_id) = app.document_tab_for(identity)
+            {
+                break tab_id;
+            }
+            assert!(Instant::now() < deadline, "created mmap should have an editor tab");
+            thread::sleep(Duration::from_millis(10));
+        };
+        app.render().expect("created mmap should render its empty root editor");
+        assert_eq!(
+            app.editor_runtime
+                .tab_session(tab_id)
+                .expect("created mmap should have a runtime session")
+                .plugin_name(),
+            ui::plugin::PLUGIN_MINDMAP
+        );
+
+        let tab_event = ui::Event::KeyDown(ui::KeyCode::Tab, ui::core::Modifiers::NONE);
+        assert!(!app.route_product_event(&tab_event));
+        assert_eq!(
+            app.editor_runtime
+                .tab_session(tab_id)
+                .expect("created mmap should retain its runtime session")
+                .document
+                .cursor_offset()
+                .to_usize(),
+            1
+        );
+        app.handle_editor_key_input(ui::KeyCode::Tab, ui::core::Modifiers::NONE);
+
+        let snapshot = app
+            .editor_runtime
+            .document_text_snapshot(tab_id)
+            .expect("created mmap source should remain available");
+        assert_eq!(snapshot.text, "#\n##\n");
+        assert_eq!(app.state().layout.focus_target, FocusTarget::Editor);
     }
 
     #[test]

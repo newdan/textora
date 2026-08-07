@@ -55,8 +55,7 @@ impl ModelSession {
             suggested_file_name,
             disposition,
         );
-        self.reconcile_runtime_store(&effect);
-        effect
+        self.apply_workspace_effect(effect)
     }
 
     pub(crate) fn append_prepared_tab(
@@ -852,12 +851,32 @@ impl ModelSession {
 
     fn apply_workspace_effect(&mut self, effect: WorkspaceEffect) -> WorkspaceEffect {
         self.reconcile_runtime_store(&effect);
+        let activated_tab_id = match effect {
+            WorkspaceEffect::Activated(tab_id) => Some(tab_id),
+            WorkspaceEffect::Closed { activated, .. } => activated,
+            WorkspaceEffect::None => None,
+        };
+        if let Some(tab_id) = activated_tab_id {
+            self.synchronize_plugin_source(tab_id);
+        }
         effect
     }
 
     fn reconcile_runtime_store(&mut self, effect: &WorkspaceEffect) {
         effect.reconcile_runtime_store(&mut self.runtimes);
         debug_assert_eq!(self.workspace.tab_ids(), self.runtimes.ids());
+    }
+
+    fn synchronize_plugin_source(&mut self, tab_id: TabId) {
+        let Some(mut tab) = self.tab_session_mut(tab_id) else {
+            return;
+        };
+        let source = tab.document.full_text();
+        let source_generation = tab.document.generation();
+        let _ = tab.send_message(ui::plugin::PluginMessage::UpdateSource {
+            text: source,
+            generation: source_generation,
+        });
     }
 }
 
@@ -1028,7 +1047,9 @@ fn edit_outcome(
 
 #[cfg(test)]
 mod tests {
+    use std::cell::RefCell;
     use std::collections::HashSet;
+    use std::rc::Rc;
 
     use appkit_core::document::DocumentModel;
     use core::buffer::TextBuffer;
@@ -1056,6 +1077,97 @@ mod tests {
             DocumentModel::new(text_buffer),
             TabRuntime::new(EditorPluginFactory.create()),
         )
+    }
+
+    struct SourceSyncProbePlugin {
+        sources: Rc<RefCell<Vec<(String, u32)>>>,
+    }
+
+    impl ui::plugin::ViewPlugin for SourceSyncProbePlugin {
+        fn name(&self) -> &str {
+            "source-sync-probe"
+        }
+
+        fn render(
+            &mut self,
+            _document: &dyn core::document::DocView,
+            _bounds: ui::Rect,
+            _theme: &ui::Theme,
+            _shaper: &mut shaping::Shaper,
+            _dpi_scale: f32,
+        ) -> ui::DrawList {
+            ui::DrawList::new()
+        }
+
+        fn handle_message(
+            &mut self,
+            message: ui::plugin::PluginMessage,
+            _document: &mut dyn core::document::DocViewMut,
+        ) -> bool {
+            let ui::plugin::PluginMessage::UpdateSource { text, generation } = message else {
+                return false;
+            };
+            self.sources.borrow_mut().push((text, generation));
+            true
+        }
+    }
+
+    #[test]
+    fn install_synchronizes_plugin_source_before_the_first_paint() {
+        let mut session = model_session();
+        let mut text_buffer =
+            TextBuffer::new(false).expect("source sync test requires a writable text buffer");
+        text_buffer.write_raw(b"#");
+        let document = DocumentModel::new(text_buffer);
+        let expected_generation = document.generation();
+        let sources = Rc::new(RefCell::new(Vec::new()));
+        let prepared = PreparedTab::new(
+            document,
+            TabRuntime::new(Box::new(SourceSyncProbePlugin { sources: Rc::clone(&sources) })),
+        );
+
+        let effect = session.install_prepared_tab(prepared, None, OpenDisposition::Persistent);
+
+        assert!(matches!(effect, WorkspaceEffect::Activated(_)));
+        assert_eq!(sources.borrow().as_slice(), &[("#".to_owned(), expected_generation)]);
+    }
+
+    #[test]
+    fn activate_synchronizes_the_target_plugin_source_after_switching_tabs() {
+        let mut session = model_session();
+        let first_sources = Rc::new(RefCell::new(Vec::new()));
+        let first = session.install_prepared_tab(
+            PreparedTab::new(
+                prepared_text("first").document,
+                TabRuntime::new(Box::new(SourceSyncProbePlugin {
+                    sources: Rc::clone(&first_sources),
+                })),
+            ),
+            None,
+            OpenDisposition::Persistent,
+        );
+        let first_id = match first {
+            WorkspaceEffect::Activated(tab_id) => tab_id,
+            _ => panic!("first tab should activate"),
+        };
+
+        let second_sources = Rc::new(RefCell::new(Vec::new()));
+        let _ = session.install_prepared_tab(
+            PreparedTab::new(
+                prepared_text("second").document,
+                TabRuntime::new(Box::new(SourceSyncProbePlugin {
+                    sources: Rc::clone(&second_sources),
+                })),
+            ),
+            None,
+            OpenDisposition::Persistent,
+        );
+        first_sources.borrow_mut().clear();
+
+        let effect = session.activate(first_id).expect("first tab should be addressable");
+
+        assert!(matches!(effect, WorkspaceEffect::Activated(tab_id) if tab_id == first_id));
+        assert_eq!(first_sources.borrow().as_slice(), &[("first".to_owned(), 1)]);
     }
 
     #[test]
