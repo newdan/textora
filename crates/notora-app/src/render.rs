@@ -1025,6 +1025,11 @@ impl NotoraShell {
         self.search_box.is_focused()
     }
 
+    #[cfg(test)]
+    pub(crate) fn search_box_rect(&self) -> Rect {
+        self.search_box.rect()
+    }
+
     fn apply_text_cursor_visibility(&mut self) {
         self.search_box.set_blink(self.text_cursor_visible);
         self.editor_pane.set_title_blink_visible(self.text_cursor_visible);

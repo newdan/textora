@@ -1187,6 +1187,9 @@ impl NotoraApp {
             self.editor_runtime.scale_factor() as f32,
         );
         let cursor_hint = route.cursor_hint;
+        if route.consumed {
+            self.apply_shell_effect(ShellEffect::REDRAW);
+        }
         if let Some(action) = route.canvas_scrollbar_action {
             self.handle_canvas_scrollbar_action(action);
         }
@@ -3314,6 +3317,33 @@ mod tests {
 
         assert_eq!(app.state().layout.focus_target, FocusTarget::NavigationSearch);
         assert!(app.shell.search_box_is_focused());
+    }
+
+    #[test]
+    fn search_text_drag_requests_redraw_in_the_same_pointer_event_cycle() {
+        let mut app = app();
+        app.dispatch_action(NotoraAction::SearchTextChanged("路线图".to_owned()));
+        app.render().expect("headless search box should render");
+        let search_rect = app.shell.search_box_rect();
+
+        assert!(app.route_pointer_event(&ui::Event::MouseDown {
+            px: search_rect.x + 8.0,
+            py: search_rect.y + search_rect.h * 0.5,
+            button: ui::core::widget::MouseButton::Left,
+        }));
+        app.render().expect("focused search box should render");
+        let _ = app.take_redraw_request();
+        assert!(!app.take_redraw_request());
+
+        assert!(app.route_pointer_event(&ui::Event::MouseMove {
+            px: search_rect.right() - 8.0,
+            py: search_rect.y + search_rect.h * 0.5,
+        }));
+        assert!(app.needs_redraw, "drag selection should schedule a redraw");
+        assert!(
+            app.editor_runtime.take_redraw_request(),
+            "drag selection should wake the renderer without waiting for about_to_wait"
+        );
     }
 
     #[test]

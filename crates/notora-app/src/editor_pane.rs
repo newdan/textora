@@ -734,6 +734,70 @@ mod tests {
     }
 
     #[test]
+    fn title_drag_reaches_the_text_box_and_paints_selection_highlight() {
+        use ui::core::paint::{DrawCmd, DrawList};
+
+        struct TitleMeasure;
+
+        impl ui::TextMeasure for TitleMeasure {
+            fn measure(&mut self, text: &str, _font_size: f32) -> f32 {
+                text.chars().count() as f32 * 20.0
+            }
+        }
+
+        let mut chrome = EditorPaneChrome::new();
+        chrome.set_input(input(EditorPaneMode::WorkspaceNote));
+        let theme = ui::theme::test_theme();
+        let mut measure = TitleMeasure;
+        let mut layout_context =
+            ui::LayoutCtx { ui_measure: None, measure: &mut measure, theme: &theme, dpi: 1.0 };
+        chrome.set_rects(
+            EditorPaneRects {
+                header: Rect::new(100.0, 40.0, 640.0, 108.0),
+                toolbar: Rect::new(100.0, 148.0, 640.0, 40.0),
+                body: Rect::new(100.0, 188.0, 640.0, 400.0),
+            },
+            &mut layout_context,
+        );
+        chrome.set_title_focus(true);
+        let caret_rect = chrome
+            .focused_ime_cursor_rect()
+            .expect("focused title should expose its first grapheme boundary");
+        let pointer_y = caret_rect.y + caret_rect.h * 0.5;
+        let mut event_context = ui::EventCtx { theme: &theme, dpi: 1.0, cursor_hint: None };
+
+        assert!(
+            chrome
+                .route_event(
+                    &ui::Event::MouseDown {
+                        px: caret_rect.x,
+                        py: pointer_y,
+                        button: ui::MouseButton::Left,
+                    },
+                    &mut event_context,
+                )
+                .is_some()
+        );
+        assert_eq!(
+            chrome.route_event(
+                &ui::Event::MouseMove { px: caret_rect.x + 60.0, py: pointer_y },
+                &mut event_context,
+            ),
+            Some(WidgetAction::Consumed)
+        );
+
+        let mut draw_list = DrawList::new();
+        let mut paint_context = ui::PaintCtx::new(&mut draw_list, &theme, 1.0);
+        chrome.paint_underlay(&mut paint_context);
+
+        assert!(draw_list.cmds.iter().any(|command| matches!(
+            command,
+            DrawCmd::FillRect { rect, color, .. }
+                if rect.w > 0.0 && *color == theme.editor.selection
+        )));
+    }
+
+    #[test]
     fn pane_forwards_title_blink_visibility_to_the_header() {
         use ui::core::paint::{DrawCmd, DrawList};
 
