@@ -3806,6 +3806,16 @@ mod tests {
             .document_text_snapshot(tab_id)
             .expect("created mmap child should remain available");
         assert_eq!(snapshot.text, "# 项目路线图\n##子节点\n");
+
+        let tab_event = ui::Event::KeyDown(ui::KeyCode::Tab, ui::core::Modifiers::NONE);
+        if !app.route_product_event(&tab_event) {
+            app.handle_editor_key_input(ui::KeyCode::Tab, ui::core::Modifiers::NONE);
+        }
+        let snapshot = app
+            .editor_runtime
+            .document_text_snapshot(tab_id)
+            .expect("created mmap grandchild should remain available");
+        assert_eq!(snapshot.text, "# 项目路线图\n##子节点\n###\n");
     }
 
     #[test]
@@ -3844,6 +3854,60 @@ mod tests {
             .expect("created markdown source should remain available");
         assert_eq!(snapshot.text, "# 项目记录\n\n");
         assert_eq!(app.state().layout.focus_target, FocusTarget::Editor);
+    }
+
+    #[test]
+    fn source_view_backspace_and_delete_edit_graphemes_through_product_routing() {
+        let workspace_directory =
+            tempfile::tempdir().expect("workspace test directory should be created");
+        let mut app = app();
+        app.execute_workspace_command(WorkspaceCommand::OpenExisting {
+            root: workspace_directory.path().to_path_buf(),
+        })
+        .expect("workspace should open");
+
+        app.dispatch_action(NotoraAction::CreateRequested(DocumentKind::Mindmap));
+        let deadline = Instant::now() + Duration::from_secs(2);
+        let tab_id = loop {
+            app.drain_product_events();
+            if let Some(identity) = app.state().library.selected_card
+                && let Some(tab_id) = app.document_tab_for(identity)
+            {
+                break tab_id;
+            }
+            assert!(Instant::now() < deadline, "created mmap should have an editor tab");
+            thread::sleep(Duration::from_millis(10));
+        };
+        app.dispatch_action(NotoraAction::TitleTextChanged("项目路线图".to_owned()));
+        app.dispatch_action(NotoraAction::ToggleSourceViewRequested);
+        assert_eq!(app.state().layout.focus_target, FocusTarget::Editor);
+        assert_eq!(
+            app.editor_runtime
+                .tab_session(tab_id)
+                .expect("source view should keep the runtime session")
+                .plugin_name(),
+            ui::plugin::PLUGIN_EDITOR
+        );
+
+        let backspace_event = ui::Event::KeyDown(ui::KeyCode::Backspace, ui::core::Modifiers::NONE);
+        if !app.route_product_event(&backspace_event) {
+            app.handle_editor_key_input(ui::KeyCode::Backspace, ui::core::Modifiers::NONE);
+        }
+        app.editor_runtime
+            .tab_session_mut(tab_id)
+            .expect("source view should keep the mutable runtime session")
+            .document
+            .cursor_move_to_offset("# ".len());
+        let delete_event = ui::Event::KeyDown(ui::KeyCode::Delete, ui::core::Modifiers::NONE);
+        if !app.route_product_event(&delete_event) {
+            app.handle_editor_key_input(ui::KeyCode::Delete, ui::core::Modifiers::NONE);
+        }
+
+        let snapshot = app
+            .editor_runtime
+            .document_text_snapshot(tab_id)
+            .expect("source text should remain available");
+        assert_eq!(snapshot.text, "# 目路线");
     }
 
     #[test]
