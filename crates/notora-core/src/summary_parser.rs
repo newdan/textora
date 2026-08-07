@@ -44,6 +44,14 @@ pub fn replace_document_title(kind: DocumentKind, source: &str, title: &str) -> 
         return replaced_source;
     }
 
+    if kind == DocumentKind::Mindmap
+        && let Some(range) = first_marker_only_root_range(source)
+    {
+        let mut replaced_source = source.to_owned();
+        replaced_source.replace_range(range, &format!("# {normalized_title}"));
+        return replaced_source;
+    }
+
     match kind {
         DocumentKind::Text => format!("{normalized_title}\n{source}"),
         DocumentKind::Markdown | DocumentKind::Mindmap => {
@@ -164,6 +172,20 @@ fn first_heading_range(source: &str) -> Option<Range<usize>> {
     None
 }
 
+fn first_marker_only_root_range(source: &str) -> Option<Range<usize>> {
+    let mut line_start = 0;
+    for line in source.split_inclusive('\n') {
+        let content_end = line_content_end(line);
+        let content = &line[..content_end];
+        if content.trim() == "#" {
+            let indentation = content.len() - content.trim_start().len();
+            return Some(line_start + indentation..line_start + content_end);
+        }
+        line_start += line.len();
+    }
+    None
+}
+
 fn heading_content_range(line_start: usize, content: &str) -> Option<Range<usize>> {
     let indentation = content.len() - content.trim_start().len();
     let heading = content[indentation..].strip_prefix("# ")?;
@@ -266,6 +288,11 @@ mod tests {
             replace_document_title(DocumentKind::Mindmap, source, "根节点"),
             "# 根节点\n\n# 第二\n"
         );
+    }
+
+    #[test]
+    fn mindmap_title_replaces_the_marker_only_root_instead_of_adding_a_second_root() {
+        assert_eq!(replace_document_title(DocumentKind::Mindmap, "#", "根节点"), "# 根节点");
     }
 
     #[test]

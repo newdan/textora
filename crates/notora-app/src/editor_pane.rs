@@ -247,7 +247,9 @@ impl EditorPaneChrome {
             }
         }
 
-        if event_is_inside_or_keyboard(event, self.rects.toolbar) {
+        if event_is_inside_or_keyboard(event, self.rects.toolbar)
+            || matches!(event, Event::MouseMove { .. })
+        {
             let local_event = translate_event(event, self.rects.toolbar.x, self.rects.toolbar.y);
             return self.toolbar.on_event(&local_event, context);
         }
@@ -554,6 +556,47 @@ mod tests {
                 &mut event_context,
             ),
             None
+        );
+    }
+
+    #[test]
+    fn toolbar_hover_changes_are_consumed_inside_and_when_leaving_the_toolbar() {
+        let mut pane_input = input(EditorPaneMode::WorkspaceNote);
+        pane_input.toolbar = EditorToolbarInput {
+            groups: vec![ui::editor_toolbar::EditorToolbarGroupInput {
+                label: "编辑".to_owned(),
+                commands: vec![ui::editor_toolbar::EditorToolbarCommandInput {
+                    command_key: "undo".to_owned(),
+                    label: "撤销".to_owned(),
+                    enabled: true,
+                    overflow_priority: 0,
+                }],
+            }],
+            overflow_open: false,
+        };
+        let mut chrome = EditorPaneChrome::new();
+        chrome.set_input(pane_input);
+        let theme = ui::theme::test_theme();
+        let mut measure = ui::NoopMeasure;
+        let mut layout_context =
+            ui::LayoutCtx { ui_measure: None, measure: &mut measure, theme: &theme, dpi: 1.0 };
+        chrome.set_rects(
+            EditorPaneRects {
+                header: Rect::new(100.0, 20.0, 640.0, 128.0),
+                toolbar: Rect::new(100.0, 148.0, 640.0, 40.0),
+                body: Rect::new(100.0, 188.0, 640.0, 400.0),
+            },
+            &mut layout_context,
+        );
+        let mut event_context = ui::EventCtx { theme: &theme, dpi: 1.0, cursor_hint: None };
+
+        assert_eq!(
+            chrome.route_event(&ui::Event::MouseMove { px: 120.0, py: 168.0 }, &mut event_context,),
+            Some(WidgetAction::Consumed)
+        );
+        assert_eq!(
+            chrome.route_event(&ui::Event::MouseMove { px: 120.0, py: 240.0 }, &mut event_context,),
+            Some(WidgetAction::Consumed)
         );
     }
 

@@ -33,6 +33,7 @@ pub trait NotoraEffectService {
     fn request_note_creation(&mut self, kind: DocumentKind, target: NoteCreationTarget);
     fn execute_note_command(&mut self, _command: NoteCommand) {}
     fn commit_title(&mut self, _title: String) {}
+    fn toggle_editor_view(&mut self) {}
     fn execute_semantic_edit(&mut self, _command: ui::plugin::SemanticEditCommand) {}
     fn execute_metadata_mutation(&mut self, _mutation: MetadataMutation) {}
     fn execute_trash_operation(&mut self, _operation: TrashOperation) {}
@@ -72,6 +73,10 @@ impl EffectExecutor {
             NotoraEffect::CommitTitle(title) => {
                 service.commit_title(title);
                 ShellEffect::NONE
+            }
+            NotoraEffect::ToggleEditorView => {
+                service.toggle_editor_view();
+                ShellEffect::REDRAW
             }
             NotoraEffect::ExecuteSemanticEdit(command) => {
                 service.execute_semantic_edit(command);
@@ -158,6 +163,7 @@ mod tests {
         prepared_document: Option<DocumentLoadRequest>,
         executed_note_command_count: usize,
         title_commit: Option<String>,
+        editor_view_toggle_count: usize,
         metadata_mutation: Option<MetadataMutation>,
         promoted_preview_count: usize,
         workspace_root_selection_count: usize,
@@ -180,6 +186,10 @@ mod tests {
 
         fn commit_title(&mut self, title: String) {
             self.title_commit = Some(title);
+        }
+
+        fn toggle_editor_view(&mut self) {
+            self.editor_view_toggle_count += 1;
         }
 
         fn execute_metadata_mutation(&mut self, mutation: MetadataMutation) {
@@ -272,6 +282,17 @@ mod tests {
             appkit_shell::ShellEffect::NONE
         );
         assert_eq!(recorder.title_commit, Some("新的标题".to_owned()));
+    }
+
+    #[test]
+    fn executor_toggles_the_editor_view_and_requests_redraw() {
+        let mut recorder = Recorder::default();
+
+        assert_eq!(
+            EffectExecutor::execute(&mut recorder, NotoraEffect::ToggleEditorView),
+            appkit_shell::ShellEffect::REDRAW
+        );
+        assert_eq!(recorder.editor_view_toggle_count, 1);
     }
 
     #[test]

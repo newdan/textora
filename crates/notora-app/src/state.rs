@@ -295,6 +295,10 @@ impl NotoraState {
             NotoraAction::CreateRequested(kind) => self.request_note_creation(kind),
             NotoraAction::TitleTextChanged(title) => self.request_title_update(title),
             NotoraAction::TitleCommitRequested(title) => self.request_title_commit(title),
+            NotoraAction::ToggleSourceViewRequested => {
+                self.layout.focus_target = FocusTarget::Editor;
+                vec![NotoraEffect::ToggleEditorView]
+            }
             NotoraAction::SemanticEditRequested(command) => {
                 self.layout.focus_target = FocusTarget::Editor;
                 vec![NotoraEffect::ExecuteSemanticEdit(command), NotoraEffect::Redraw]
@@ -1211,6 +1215,17 @@ mod tests {
             vec![NotoraEffect::CommitTitle("项目路线图".to_owned()), NotoraEffect::Redraw]
         );
         assert_eq!(state.layout.focus_target, FocusTarget::EditorTitle);
+    }
+
+    #[test]
+    fn source_view_toggle_is_a_typed_editor_effect() {
+        let mut state = NotoraState::default();
+
+        assert_eq!(
+            state.reduce(NotoraAction::ToggleSourceViewRequested),
+            vec![NotoraEffect::ToggleEditorView]
+        );
+        assert_eq!(state.layout.focus_target, FocusTarget::Editor);
     }
 
     #[test]

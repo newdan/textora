@@ -1245,6 +1245,13 @@ impl NotoraApp {
                 model.editor_chrome.mode,
                 plugin_name,
             );
+            if self.editor_runtime.toggle_target().is_some() {
+                let showing_source = self.editor_runtime.active_is_toggled(plugin_name);
+                crate::render::add_source_toggle_command(
+                    &mut model.editor_chrome.toolbar,
+                    showing_source,
+                );
+            }
             if model.editor_chrome.header.compact {
                 crate::render::add_compact_editor_toolbar_commands(
                     &mut model.editor_chrome.toolbar,
@@ -2170,6 +2177,10 @@ impl NotoraEffectService for NotoraApp {
 
     fn commit_title(&mut self, title: String) {
         self.commit_active_note_title(title);
+    }
+
+    fn toggle_editor_view(&mut self) {
+        self.editor_runtime.switch_active_plugin();
     }
 
     fn execute_semantic_edit(&mut self, command: ui::plugin::SemanticEditCommand) {
@@ -3695,6 +3706,105 @@ mod tests {
             .expect("created note text should remain available");
         assert_eq!(snapshot.text, "# 项目路线图\n\n");
         assert!(snapshot.content_revision > 0);
+    }
+
+    #[test]
+    fn mindmap_title_commit_renames_the_existing_empty_root() {
+        let workspace_directory =
+            tempfile::tempdir().expect("workspace test directory should be created");
+        let mut app = app();
+        app.execute_workspace_command(WorkspaceCommand::OpenExisting {
+            root: workspace_directory.path().to_path_buf(),
+        })
+        .expect("workspace should open");
+
+        app.dispatch_action(NotoraAction::CreateRequested(DocumentKind::Mindmap));
+        let deadline = Instant::now() + Duration::from_secs(2);
+        let tab_id = loop {
+            app.drain_product_events();
+            if let Some(identity) = app.state().library.selected_card
+                && let Some(tab_id) = app.document_tab_for(identity)
+            {
+                break tab_id;
+            }
+            assert!(Instant::now() < deadline, "created mmap should have an editor tab");
+            thread::sleep(Duration::from_millis(10));
+        };
+        assert_eq!(
+            app.editor_runtime
+                .document_text_snapshot(tab_id)
+                .expect("created mmap source should exist")
+                .text,
+            "#"
+        );
+
+        app.dispatch_action(NotoraAction::TitleCommitRequested("项目路线图".to_owned()));
+
+        let snapshot = app
+            .editor_runtime
+            .document_text_snapshot(tab_id)
+            .expect("renamed mmap source should remain available");
+        assert_eq!(snapshot.text, "# 项目路线图");
+        let tree = textora_markdown::mmf::parser::parse(&snapshot.text)
+            .expect("renamed mmap must retain one valid root");
+        assert_eq!(tree.root.title, "项目路线图");
+    }
+
+    #[test]
+    fn markdown_and_mindmap_toolbar_actions_toggle_real_source_views() {
+        let workspace_directory =
+            tempfile::tempdir().expect("workspace test directory should be created");
+        let mut app = app();
+        app.execute_workspace_command(WorkspaceCommand::OpenExisting {
+            root: workspace_directory.path().to_path_buf(),
+        })
+        .expect("workspace should open");
+
+        let mut previous_identity = None;
+        for (kind, visual_plugin) in [
+            (DocumentKind::Markdown, ui::plugin::PLUGIN_MARKDOWN_EDITOR),
+            (DocumentKind::Mindmap, ui::plugin::PLUGIN_MINDMAP),
+        ] {
+            app.dispatch_action(NotoraAction::CreateRequested(kind));
+            let deadline = Instant::now() + Duration::from_secs(2);
+            let (identity, tab_id) = loop {
+                app.drain_product_events();
+                if let Some(identity) = app.state().library.selected_card
+                    && Some(identity) != previous_identity
+                    && let Some(tab_id) = app.document_tab_for(identity)
+                {
+                    break (identity, tab_id);
+                }
+                assert!(Instant::now() < deadline, "created note should install its visual view");
+                thread::sleep(Duration::from_millis(10));
+            };
+            previous_identity = Some(identity);
+            assert_eq!(
+                app.editor_runtime
+                    .tab_session(tab_id)
+                    .expect("created note should have a runtime session")
+                    .plugin_name(),
+                visual_plugin
+            );
+
+            app.dispatch_action(NotoraAction::ToggleSourceViewRequested);
+            assert_eq!(
+                app.editor_runtime
+                    .tab_session(tab_id)
+                    .expect("source view should keep the runtime session")
+                    .plugin_name(),
+                ui::plugin::PLUGIN_EDITOR
+            );
+
+            app.dispatch_action(NotoraAction::ToggleSourceViewRequested);
+            assert_eq!(
+                app.editor_runtime
+                    .tab_session(tab_id)
+                    .expect("visual view should be restorable")
+                    .plugin_name(),
+                visual_plugin
+            );
+        }
     }
 
     #[test]

@@ -118,7 +118,7 @@ pub(crate) fn build_editor_plugins()
             ViewRouteRule {
                 matcher: ViewPathMatcher::FileNameSuffix(".mmap.md"),
                 default_plugin: PLUGIN_MINDMAP,
-                toggle_target: Some(PLUGIN_MARKDOWN_EDITOR),
+                toggle_target: Some(PLUGIN_EDITOR),
                 priority: MINDMAP_ROUTE_PRIORITY,
             },
             ViewRouteRule {
@@ -153,6 +153,10 @@ mod tests {
         assert_eq!(
             routes.resolve(Path::new("mindmap.mmap.md")).map(|route| route.default_plugin),
             Some(PLUGIN_MINDMAP)
+        );
+        assert_eq!(
+            routes.resolve(Path::new("mindmap.mmap.md")).and_then(|route| route.toggle_target),
+            Some(PLUGIN_EDITOR)
         );
         assert_eq!(
             routes.resolve(Path::new("document.md")).map(|route| route.default_plugin),

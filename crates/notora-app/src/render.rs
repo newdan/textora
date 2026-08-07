@@ -622,6 +622,32 @@ pub(crate) fn add_compact_editor_toolbar_commands(
     });
 }
 
+pub(crate) fn add_source_toggle_command(
+    toolbar: &mut ui::editor_toolbar::EditorToolbarInput,
+    showing_source: bool,
+) {
+    let Some(group) = toolbar.groups.first_mut() else {
+        return;
+    };
+    if group.commands.iter().any(|command| command.command_key == "toggle_source") {
+        return;
+    }
+    let insertion_index = group
+        .commands
+        .iter()
+        .position(|command| command.overflow_priority > 0)
+        .unwrap_or(group.commands.len());
+    group.commands.insert(
+        insertion_index,
+        ui::editor_toolbar::EditorToolbarCommandInput {
+            command_key: "toggle_source".to_owned(),
+            label: if showing_source { "可视化" } else { "源码" }.to_owned(),
+            enabled: true,
+            overflow_priority: 0,
+        },
+    );
+}
+
 fn history_toolbar_input() -> ui::editor_toolbar::EditorToolbarInput {
     toolbar_input(&[("undo", "撤销", 0), ("redo", "重做", 0)])
 }
@@ -695,6 +721,7 @@ fn editor_command_actions() -> HashMap<String, NotoraAction> {
     ]
     .into_iter()
     .map(|(key, command)| (key.to_owned(), NotoraAction::SemanticEditRequested(command)))
+    .chain(std::iter::once(("toggle_source".to_owned(), NotoraAction::ToggleSourceViewRequested)))
     .collect()
 }
 
@@ -3074,6 +3101,36 @@ mod tests {
     }
 
     #[test]
+    fn source_toggle_command_stays_visible_and_reflects_the_current_view() {
+        let mut visual_toolbar = editor_toolbar_input_for_plugin(
+            EditorPaneMode::WorkspaceNote,
+            ui::plugin::PLUGIN_MARKDOWN_EDITOR,
+        );
+        add_source_toggle_command(&mut visual_toolbar, false);
+        let source_command = visual_toolbar.groups[0]
+            .commands
+            .iter()
+            .find(|command| command.command_key == "toggle_source")
+            .expect("source toggle should be present");
+        assert_eq!(source_command.command_key, "toggle_source");
+        assert_eq!(source_command.label, "源码");
+        assert_eq!(source_command.overflow_priority, 0);
+        assert_eq!(visual_toolbar.groups[0].commands[2].command_key, "toggle_source");
+
+        let mut source_toolbar = history_toolbar_input();
+        add_source_toggle_command(&mut source_toolbar, true);
+        assert_eq!(
+            source_toolbar.groups[0]
+                .commands
+                .iter()
+                .find(|command| command.command_key == "toggle_source")
+                .expect("visual toggle should be present")
+                .label,
+            "可视化"
+        );
+    }
+
+    #[test]
     fn editor_widget_keys_translate_to_typed_note_actions() {
         let note_id = NoteId::generate();
         let tag_id = notora_core::TagId::generate();
@@ -3183,6 +3240,13 @@ mod tests {
                 value: TextPayload::Plain("bold".to_owned()),
             })),
             Some(NotoraAction::SemanticEditRequested(ui::plugin::SemanticEditCommand::ToggleBold,))
+        );
+        assert_eq!(
+            shell.translate_widget_action(&WidgetAction::Control(ControlAction::TextCommitted {
+                id: ui::editor_toolbar::EDITOR_TOOLBAR_COMMAND_ID,
+                value: TextPayload::Plain("toggle_source".to_owned()),
+            })),
+            Some(NotoraAction::ToggleSourceViewRequested)
         );
     }
 }

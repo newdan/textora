@@ -239,12 +239,16 @@ impl Widget for EditorToolbarWidget {
                 }))
             }
             Event::MouseMove { px, py } => {
-                self.hovered_command_key = self.command_key_at(*px, *py, ctx.dpi);
-                self.overflow_hovered = self.overflow_rect(ctx.dpi).contains(*px, *py);
+                let hovered_command_key = self.command_key_at(*px, *py, ctx.dpi);
+                let overflow_hovered = self.overflow_rect(ctx.dpi).contains(*px, *py);
+                let hover_changed = self.hovered_command_key != hovered_command_key
+                    || self.overflow_hovered != overflow_hovered;
+                self.hovered_command_key = hovered_command_key;
+                self.overflow_hovered = overflow_hovered;
                 if self.hovered_command_key.is_some() || self.overflow_hovered {
                     ctx.cursor_hint = Some(winit::window::CursorIcon::Pointer);
                 }
-                None
+                hover_changed.then_some(WidgetAction::Consumed)
             }
             Event::MouseDown { px, py, button: crate::core::MouseButton::Left } => {
                 if !self.rect.contains(*px, *py) {
@@ -371,5 +375,25 @@ mod tests {
         for command in toolbar.commands() {
             assert_eq!(toolbar.command_width(&command), 32.0, "{}", command.command_key);
         }
+    }
+
+    #[test]
+    fn hover_state_changes_emit_an_immediate_redraw_signal() {
+        let mut toolbar = toolbar();
+        toolbar.rect = Rect::new(0.0, 0.0, 320.0, 40.0);
+        let theme = crate::theme::test_theme();
+        let mut context = EventCtx { theme: &theme, dpi: 1.0, cursor_hint: None };
+
+        assert_eq!(
+            toolbar.on_event(&Event::MouseMove { px: 20.0, py: 20.0 }, &mut context),
+            Some(WidgetAction::Consumed)
+        );
+        assert_eq!(toolbar.hovered_command_key.as_deref(), Some("undo"));
+
+        assert_eq!(
+            toolbar.on_event(&Event::MouseMove { px: 400.0, py: 20.0 }, &mut context),
+            Some(WidgetAction::Consumed)
+        );
+        assert_eq!(toolbar.hovered_command_key, None);
     }
 }
