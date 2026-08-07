@@ -1695,10 +1695,14 @@ impl NotoraShell {
         focus_target: FocusTarget,
         event_context: &mut EventCtx,
     ) -> NotoraEventRoute {
-        if let Some(route) = self.route_pointer_chrome_event(event, event_context) {
+        let pointer_focus = pointer_target(event, self);
+        let card_hover_cleared = matches!(event, Event::MouseMove { .. })
+            && pointer_focus != Some(FocusTarget::CardList)
+            && self.card_list.on_event(event, event_context).is_some();
+        if let Some(mut route) = self.route_pointer_chrome_event(event, event_context) {
+            route.consumed |= card_hover_cleared;
             return route;
         }
-        let pointer_focus = pointer_target(event, self);
         let widget_focus = pointer_focus.unwrap_or(focus_target);
         let widget_action = self.route_focused_widget_event(event, widget_focus, event_context);
         let action = widget_action
@@ -1716,7 +1720,7 @@ impl NotoraShell {
             }
             return NotoraEventRoute::consumed(Some(focus_action));
         }
-        if widget_action.is_some() {
+        if widget_action.is_some() || card_hover_cleared {
             return NotoraEventRoute::consumed(None);
         }
         NotoraEventRoute::ignored()
@@ -3316,6 +3320,61 @@ mod tests {
 
         shell.update_model(&model);
         assert_eq!(shell.card_list.input().cards[0].key, first_key);
+    }
+
+    #[test]
+    fn moving_pointer_to_other_pane_clears_card_hover() {
+        use ui::core::paint::{DrawCmd, DrawList};
+
+        fn paints_card_hover(shell: &NotoraShell, theme: &ui::Theme) -> bool {
+            let mut draw_list = DrawList::new();
+            let mut paint_context = ui::PaintCtx::new(&mut draw_list, theme, 1.0);
+            shell.card_list.paint(&mut paint_context);
+            draw_list.cmds.iter().any(|command| {
+                matches!(
+                    command,
+                    DrawCmd::FillRect { color, .. }
+                        if *color == theme.palette.sidebar_hover_bg
+                )
+            })
+        }
+
+        let mut shell = NotoraShell::new();
+        let theme = ui::theme::test_theme();
+        let mut measure = ui::NoopMeasure;
+        let mut layout_context =
+            ui::LayoutCtx { ui_measure: None, measure: &mut measure, theme: &theme, dpi: 1.0 };
+        shell.navigation_tree_rect = Rect::new(0.0, 0.0, 200.0, 600.0);
+        shell.card_content_rect = Rect::new(220.0, 0.0, 300.0, 600.0);
+        shell.editor_rect = Rect::new(540.0, 0.0, 600.0, 600.0);
+        shell.card_list.set_input(VirtualCardListInput {
+            cards: vec![CardInput {
+                key: CardKey(1),
+                title: "Card".to_owned(),
+                excerpt: String::new(),
+                timestamp: String::new(),
+                icon: None,
+                tag_summary: String::new(),
+                selection: CardSelection::Unselected,
+            }],
+            scroll_offset_px: 0.0,
+        });
+        shell.card_list.set_rect(shell.card_content_rect, &mut layout_context);
+        let card_rect = shell.card_list.layout().card_geometry(0).card_rect;
+        let hover_card = Event::MouseMove {
+            px: card_rect.x + card_rect.w * 0.5,
+            py: card_rect.y + card_rect.h * 0.5,
+        };
+
+        for destination in
+            [Event::MouseMove { px: 100.0, py: 100.0 }, Event::MouseMove { px: 700.0, py: 100.0 }]
+        {
+            shell.route_event(&hover_card, FocusTarget::Editor, &theme, 1.0);
+            assert!(paints_card_hover(&shell, &theme));
+
+            shell.route_event(&destination, FocusTarget::Editor, &theme, 1.0);
+            assert!(!paints_card_hover(&shell, &theme));
+        }
     }
 
     #[test]
