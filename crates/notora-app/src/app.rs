@@ -1224,6 +1224,20 @@ impl NotoraApp {
         let Ok(tree) = textora_markdown::mmf::parser::parse(&snapshot.text) else {
             return false;
         };
+        let editor_title = self.shell.editor_title_text().to_owned();
+        let root_title = if editor_title.trim().is_empty() && !tree.root.title.is_empty() {
+            tree.root.title.clone()
+        } else {
+            editor_title
+        };
+        self.dispatch_action(NotoraAction::TitleCommitRequested(root_title));
+
+        let Some(snapshot) = self.editor_runtime.document_text_snapshot(tab_id) else {
+            return false;
+        };
+        let Ok(tree) = textora_markdown::mmf::parser::parse(&snapshot.text) else {
+            return false;
+        };
         let Some(tab) = self.editor_runtime.tab_session_mut(tab_id) else {
             return false;
         };
@@ -3857,6 +3871,7 @@ mod tests {
                 .plugin_name(),
             ui::plugin::PLUGIN_MINDMAP
         );
+        assert!(app.shell.editor_title_text().is_empty());
 
         let tab_event = ui::Event::KeyDown(ui::KeyCode::Tab, ui::core::Modifiers::NONE);
         assert!(!app.route_product_event(&tab_event));
@@ -3867,7 +3882,7 @@ mod tests {
                 .document
                 .cursor_offset()
                 .to_usize(),
-            1
+            "# 无标题".len()
         );
         app.handle_editor_key_input(ui::KeyCode::Tab, ui::core::Modifiers::NONE);
 
@@ -3875,7 +3890,7 @@ mod tests {
             .editor_runtime
             .document_text_snapshot(tab_id)
             .expect("created mmap source should remain available");
-        assert_eq!(snapshot.text, "#\n##\n");
+        assert_eq!(snapshot.text, "# 无标题\n##\n");
         assert_eq!(app.state().layout.focus_target, FocusTarget::Editor);
     }
 
@@ -3904,6 +3919,7 @@ mod tests {
         app.render().expect("created mmap should render its title editor");
         app.dispatch_action(NotoraAction::TitleTextChanged("项目路线图".to_owned()));
         assert_eq!(app.state().layout.focus_target, FocusTarget::EditorTitle);
+        assert!(app.shell.editor_title_text().is_empty());
 
         let tab_event = ui::Event::KeyDown(ui::KeyCode::Tab, ui::core::Modifiers::NONE);
         if !app.route_product_event(&tab_event) {

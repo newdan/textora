@@ -1000,6 +1000,10 @@ impl NotoraShell {
         self.apply_text_cursor_visibility();
     }
 
+    pub(crate) fn editor_title_text(&self) -> &str {
+        self.editor_pane.title_text()
+    }
+
     pub fn set_canvas_scrollbars_input(
         &mut self,
         input: Option<CanvasScrollbarsInput>,

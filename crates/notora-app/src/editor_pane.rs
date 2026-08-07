@@ -197,6 +197,10 @@ impl EditorPaneChrome {
         self.header.set_title_blink_visible(visible);
     }
 
+    pub fn title_text(&self) -> &str {
+        self.header.title_text()
+    }
+
     pub fn focused_ime_cursor_rect(&self) -> Option<Rect> {
         let local_rect =
             self.header.focused_ime_cursor_rect().or_else(|| self.tag_editor.ime_cursor_rect())?;
