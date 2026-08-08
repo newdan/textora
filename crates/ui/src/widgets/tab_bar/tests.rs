@@ -1,6 +1,5 @@
 //! tab_bar/tests.rs — 所有测试。
 
-use super::hit::hit_test;
 use super::layout::is_tab_in_clip;
 use super::layout::layout_tabs;
 use super::*;
@@ -21,6 +20,12 @@ fn sample_tabs(count: usize) -> Vec<TabInfo> {
             language: String::new(),
         })
         .collect()
+}
+
+fn hit_test(x: f32, y: f32, layout: &TabBarLayout) -> Option<TabHit> {
+    let mut state = TabBarState::new();
+    state.set_layout_raw(layout.clone());
+    state.hit_test_px(x, y)
 }
 
 #[cfg(test)]
