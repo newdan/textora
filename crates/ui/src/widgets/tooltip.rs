@@ -4,7 +4,10 @@
 use crate::core::geom::Rect;
 use crate::core::text_util::estimate_text_width_px;
 use crate::core::widget::{Event, EventCtx, LayoutCtx, PaintCtx, Widget, WidgetAction};
+use crate::core::{AccessibilityContext, AccessibilityId, AccessibilityNode, AccessibilityRole};
 use std::any::Any;
+
+const TOOLTIP_ACCESSIBILITY_ID: AccessibilityId = AccessibilityId(0x746f_6f6c_7469_7001);
 
 /// Font size in logical pixels (before DPI scaling).
 const FONT_SIZE: f32 = 11.0;
@@ -164,6 +167,20 @@ impl Widget for TooltipWidget {
         }
     }
 
+    fn accessibility_node(&self, ctx: &AccessibilityContext) -> Option<AccessibilityNode> {
+        if self.label.is_empty() || self.rect.w <= 0.0 || self.rect.h <= 0.0 {
+            return None;
+        }
+        Some(
+            AccessibilityNode::new(
+                TOOLTIP_ACCESSIBILITY_ID,
+                AccessibilityRole::Tooltip,
+                ctx.screen_bounds(self.rect),
+            )
+            .with_name(self.label.clone()),
+        )
+    }
+
     fn on_event(&mut self, _event: &Event, _ctx: &mut EventCtx) -> Option<WidgetAction> {
         None // Tooltip doesn't handle events
     }
@@ -260,5 +277,22 @@ mod tests {
         let (widget, _) = TooltipWidget::new(&hint, 1.0, 800.0, 600.0);
         assert!(!widget.hit(0.0, 0.0));
         assert!(!widget.hit(25.0, 10.0));
+    }
+
+    #[test]
+    fn accessibility_exposes_tooltip_text_without_focus_or_actions() {
+        let hint = make_hint("保存文档", Rect::new(10.0, 20.0, 30.0, 20.0));
+        let (widget, _) = TooltipWidget::new(&hint, 1.0, 800.0, 600.0);
+
+        let node = widget
+            .accessibility_node(&crate::core::AccessibilityContext::new(100.0, 200.0))
+            .expect("visible tooltip should expose semantics");
+
+        assert_eq!(node.role, crate::core::AccessibilityRole::Tooltip);
+        assert_eq!(node.name.as_deref(), Some("保存文档"));
+        assert_eq!(node.bounds.x, 100.0);
+        assert_eq!(node.bounds.y, 200.0);
+        assert!(node.actions.is_empty());
+        assert!(!widget.is_focusable());
     }
 }
