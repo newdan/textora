@@ -1259,13 +1259,6 @@ mod tests {
         })
     }
 
-    fn ime_text_allocation(event: &Event) -> *const u8 {
-        match event {
-            Event::ImePreedit { text, .. } | Event::ImeCommit(text) => text.as_ptr(),
-            _ => unreachable!("test event must carry IME text"),
-        }
-    }
-
     #[test]
     fn appearance_category_uses_selected_buttons_and_validated_textboxes() {
         let mut view = settings_fixture(SettingsCategory::Appearance);

@@ -695,7 +695,6 @@ mod tests {
     fn dock_dispatch_routes_to_topmost_hit() {
         struct ActionWidget {
             rect: Rect,
-            id: u32,
         }
         impl Widget for ActionWidget {
             fn set_rect(&mut self, rect: Rect, _ctx: &mut LayoutCtx) {
@@ -713,9 +712,9 @@ mod tests {
             }
         }
 
-        let mut dock = Dock::new(Box::new(ActionWidget { rect: Rect::ZERO, id: 99 }));
+        let mut dock = Dock::new(Box::new(ActionWidget { rect: Rect::ZERO }));
         dock.children.push(DockChild {
-            widget: Box::new(ActionWidget { rect: Rect::ZERO, id: 1 }),
+            widget: Box::new(ActionWidget { rect: Rect::ZERO }),
             side: Side::Top,
             thickness: Box::new(|_, _| 40.0),
             visible: true,
