@@ -45,6 +45,10 @@ pub fn line_num_str(buf: &([u8; 8], usize)) -> &str {
 }
 
 /// Generate line number vertices for a single line in the gutter.
+#[allow(
+    clippy::too_many_arguments,
+    reason = "gutter rendering bridges shaping, atlas, viewport, and line-map boundaries"
+)]
 pub fn generate_line_number_vertices(
     ctx: &RenderContext,
     shaped: &shaping::ShapedRun,
