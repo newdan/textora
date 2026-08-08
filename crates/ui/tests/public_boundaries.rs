@@ -94,6 +94,21 @@ fn implementation_modules_are_not_public() {
 }
 
 #[test]
+fn ui_crate_has_no_high_risk_blanket_lint_suppression() {
+    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let lib = fs::read_to_string(root.join("src/lib.rs")).unwrap();
+    for forbidden in [
+        "#![allow(unused_must_use)]",
+        "#![allow(dead_code)]",
+        "#![allow(unused_mut)]",
+        "#![allow(clippy::type_complexity)]",
+        "#![allow(clippy::too_many_arguments)]",
+    ] {
+        assert!(!lib.contains(forbidden), "high-risk crate lint suppression: {forbidden}");
+    }
+}
+
+#[test]
 fn ui_has_no_app_types_or_production_filesystem_access() {
     let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     let source = joined_sources_stripped(&root.join("src"));
