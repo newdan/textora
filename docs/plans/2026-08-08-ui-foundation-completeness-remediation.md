@@ -293,21 +293,21 @@ cargo test -p textora-ui widgets::sidebar
 
 **步骤：**
 
-- [ ] 定义 role、state、action、node 和稳定语义 ID；
-- [ ] `Widget` 默认不产生节点，但可递归收集子节点；
-- [ ] bounds 使用屏幕物理像素，容器偏移只能应用一次；
-- [ ] 敏感 TextBox 不得把真实 value 放入语义树；
-- [ ] 对重复 ID、无效 bounds 和孤立 focused node 提供验证错误，而不是静默接受。
+- [x] 定义 role、state、action、node 和稳定语义 ID；
+- [x] `Widget` 默认不产生节点，但可递归收集子节点；
+- [x] bounds 使用屏幕物理像素，容器偏移只能应用一次；
+- [x] 敏感 TextBox 不得把真实 value 放入语义树；
+- [x] 对重复 ID、无效 bounds 和孤立 focused node 提供验证错误，而不是静默接受。
 
 #### Task 4.2：覆盖叶子基础控件
 
 按每组最多 3 个文件实施：
 
-- [ ] Button、Checkbox、Switch；
-- [ ] TextBox、Label、Tooltip；
-- [ ] Splitter、Scrollbar、CanvasScrollbars；
-- [ ] List、TreeList、VirtualCardList；
-- [ ] PopupMenu、SplitButton、EditorToolbar。
+- [x] Button、Checkbox、Switch；
+- [x] TextBox、Label、Tooltip；
+- [x] Splitter、Scrollbar、CanvasScrollbars；
+- [x] List、TreeList、VirtualCardList；
+- [x] PopupMenu、SplitButton、EditorToolbar。
 
 每个控件至少验证 role、name/value、focused、disabled、checked/selected、bounds 与可用 action；所有语义 action 必须复用现有 typed action，不得开第二条业务通道。
 
@@ -321,11 +321,11 @@ cargo test -p textora-ui widgets::sidebar
 
 **步骤：**
 
-- [ ] Dock 按视觉层级构造语义子树；
-- [ ] FormRow 将 Label/description 关联到 control；
-- [ ] modal 节点声明 Dialog role，并只暴露最上层 modal 子树；
-- [ ] 隐藏、裁剪出视口或 disabled 的节点遵循统一暴露规则；
-- [ ] 焦点恢复后语义树中只能有一个 focused node。
+- [x] Dock 按视觉层级构造语义子树；
+- [x] FormRow 将 Label/description 关联到 control；
+- [x] modal 节点声明 Dialog role，并只暴露最上层 modal 子树；
+- [x] 隐藏、裁剪出视口或 disabled 的节点遵循统一暴露规则；
+- [x] 焦点恢复后语义树中只能有一个 focused node。
 
 #### Task 4.4：平台后端接入
 
@@ -337,11 +337,17 @@ cargo test -p textora-ui widgets::sidebar
 
 **步骤：**
 
-- [ ] 先确认当前 winit 版本可用的平台可访问性后端及版本兼容性；
-- [ ] 将纯语义树转换为平台节点树；
-- [ ] 将平台 Focus/Activate/Toggle/SetValue 等 action 转回 `WidgetAction`；
-- [ ] 后端不可用时允许显式 no-op adapter，但不得影响 UI 行为；
-- [ ] 至少完成 macOS VoiceOver 的真实窗口手工回归，Windows/Linux 支持状态如实记录。
+- [x] 先确认当前 winit 版本可用的平台可访问性后端及版本兼容性；
+- [x] 将纯语义树转换为平台节点树；
+- [x] 将平台 Focus/Activate/Toggle/SetValue 等 action 转回 `WidgetAction`；
+- [x] 后端不可用时允许显式 no-op adapter，但不得影响 UI 行为；
+- [x] 至少完成 macOS VoiceOver 的真实窗口手工回归，Windows/Linux 支持状态如实记录。
+
+**2026-08-08 平台验收记录：**
+
+- macOS：使用本工作树构建的临时 `.app` 通过真实 AX 客户端回归。设置页暴露 Dialog、Button、Switch、TextField；Activate、Toggle、SetValue 和关闭 Dialog 均能回到现有 typed action；API Key 显示为 secure text field 且不暴露 value。
+- Windows：`accesskit_winit` 在当前版本提供原生 Windows 后端，转换层与动作反向映射有自动化覆盖；本轮未在 Windows 真实窗口手工验证。
+- Linux/BSD：当前依赖显式关闭 `accesskit_unix`，因此使用可编译的 no-op adapter；尚未声明运行时辅助功能支持。
 
 ---
 
