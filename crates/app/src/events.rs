@@ -13,6 +13,7 @@ use winit::window::CursorIcon;
 
 use crate::actions::AppAction;
 use crate::app::App;
+use crate::app_effect::AppEffect;
 use crate::input::key_to_command;
 use crate::menu_handler::AppCommand;
 use crate::mouse::hit_test_with_sub_line_offset as mouse_hit_test;
@@ -164,6 +165,40 @@ fn dispatch_mouse(app: &mut App, ev: Event) -> (Vec<AppAction>, bool, Option<Cur
     }
 
     (actions, false, ctx.cursor_hint)
+}
+
+fn dispatch_lifecycle_to_ui(app: &mut App, event: Event) {
+    let metrics = app.ui_metrics();
+    let mut context = EventCtx { cursor_hint: None, theme: &app.current_theme, dpi: metrics.dpi };
+    let _ = app.ui_shell.dispatch(&event, &mut context);
+}
+
+pub(crate) fn handle_pointer_leave(app: &mut App) -> Vec<AppAction> {
+    dispatch_lifecycle_to_ui(app, Event::PointerLeave);
+    app.mouse.last_hover_redraw_pos = None;
+
+    let mut actions = Vec::new();
+    if app.mouse.last_hover_tab.take().is_some() {
+        actions.push(AppAction::HoverTab(None));
+    }
+    actions.push(AppAction::SetCursor(CursorIcon::Default));
+    actions.push(AppAction::RequestRedraw);
+    actions
+}
+
+pub(crate) fn handle_interaction_cancel(app: &mut App) -> AppEffect {
+    dispatch_lifecycle_to_ui(app, Event::InteractionCancel);
+    let effect = app.cancel_canvas_drag();
+    app.editor_runtime.focus_lost();
+    app.mouse.is_down = false;
+    app.mouse.down_byte_offset = None;
+    app.mouse.wysiwyg_selection_scope = None;
+    app.mouse.last_hover_redraw_pos = None;
+    app.mouse.last_hover_tab = None;
+    if let Some(window) = app.editor_runtime.window() {
+        window.set_cursor(CursorIcon::Default);
+    }
+    effect.merge(AppEffect::REDRAW)
 }
 
 /// Translate a single WidgetAction into AppActions.
@@ -973,6 +1008,27 @@ mod tests {
     }
 
     #[test]
+    fn pointer_leave_clears_hover_and_cursor_without_ending_editor_capture() {
+        let mut app = App::new(None);
+        app.mouse.is_down = true;
+        app.mouse.last_hover_tab = Some(0);
+        app.mouse.last_hover_redraw_pos = Some((10.0, 20.0));
+
+        let actions = handle_pointer_leave(&mut app);
+
+        assert!(app.mouse.is_down, "leaving the window must preserve legal pointer capture");
+        assert_eq!(app.mouse.last_hover_tab, None);
+        assert_eq!(app.mouse.last_hover_redraw_pos, None);
+        assert!(actions.iter().any(|action| matches!(action, AppAction::HoverTab(None))));
+        assert!(
+            actions
+                .iter()
+                .any(|action| matches!(action, AppAction::SetCursor(CursorIcon::Default)))
+        );
+        assert!(actions.iter().any(|action| matches!(action, AppAction::RequestRedraw)));
+    }
+
+    #[test]
     fn mmap_cursor_reflects_edit_and_drag_targets() {
         let (mut app, target) = app_with_mmap_cursor_plugin(Some(EditHitTarget::TextCaret {
             byte_offset: 1,
@@ -1496,7 +1552,11 @@ mod tests {
         // Click on the second list item (b.rs).
         // list_clip starts at y=137.0, row_h=28, so item 1 is at y=165.0..193.0
         // Click at y=180 (within item 1 range)
-        let actions = handle_mouse_input_left(&mut app, ElementState::Pressed, 110.0, 180.0);
+        let pressed_actions =
+            handle_mouse_input_left(&mut app, ElementState::Pressed, 110.0, 180.0);
+        assert!(!pressed_actions.iter().any(|action| matches!(action, AppAction::SwitchTab(_))));
+
+        let actions = handle_mouse_input_left(&mut app, ElementState::Released, 110.0, 180.0);
 
         let has_switch_tab = actions.iter().any(|a| matches!(a, AppAction::SwitchTab(_)));
         assert!(

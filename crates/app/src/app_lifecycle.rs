@@ -720,6 +720,11 @@ impl App {
                     self.dispatch(action, event_loop);
                 }
             }
+            WindowEvent::CursorLeft { .. } => {
+                for action in crate::events::handle_pointer_leave(self) {
+                    self.dispatch(action, event_loop);
+                }
+            }
             WindowEvent::CursorMoved { position, .. } => {
                 let actions =
                     crate::events::handle_cursor_moved(self, position.x as f32, position.y as f32);
@@ -794,14 +799,15 @@ impl App {
     }
 
     fn handle_window_focus_changed(&mut self, focused: bool) -> crate::app_effect::AppEffect {
-        self.editor_runtime.set_window_focus(focused);
-        let mut effect = crate::app_effect::AppEffect::REDRAW;
-        if !focused {
-            effect = effect.merge(self.cancel_canvas_drag());
-            // 失焦时冻结光标闪烁，保持可见状态
-            if let Some(mut tab) = self.active_tab_session_mut() {
-                tab.cursor_render_state_mut().cursor_blink_instant = std::time::Instant::now();
-            }
+        if focused {
+            self.editor_runtime.set_window_focus(true);
+            return crate::app_effect::AppEffect::REDRAW;
+        }
+
+        let effect = crate::events::handle_interaction_cancel(self);
+        // 失焦时冻结光标闪烁，保持可见状态
+        if let Some(mut tab) = self.active_tab_session_mut() {
+            tab.cursor_render_state_mut().cursor_blink_instant = std::time::Instant::now();
         }
         effect
     }
@@ -2393,6 +2399,45 @@ mod tests {
         app.handle_window_focus_changed(false);
 
         assert_eq!(cancel_request_count(&state.borrow()), 1);
+    }
+
+    #[test]
+    fn window_focus_loss_clears_text_selection_capture_preedit_and_mouse_state() {
+        let mut app = App::new(None);
+        app.replace_editor_model(
+            crate::app_init::build_product_workspace(),
+            crate::tab_runtime::TabRuntimeStore::default(),
+        );
+        let context = editor_input_context(&app);
+        assert!(app.editor_runtime.begin_text_selection(context));
+        assert!(app.editor_runtime.update_preedit(context, "未完成".to_owned(), Some((0, 6)),));
+        app.mouse.is_down = true;
+        app.mouse.down_byte_offset = Some(0);
+        app.mouse.wysiwyg_selection_scope = Some(0..1);
+        app.mouse.last_hover_redraw_pos = Some((10.0, 20.0));
+        app.mouse.last_hover_tab = Some(0);
+
+        let effect = app.handle_window_focus_changed(false);
+
+        assert!(effect.redraw);
+        assert!(!app.editor_runtime.window_focused());
+        assert_eq!(
+            app.editor_runtime.pointer_capture(),
+            appkit_shell::editor_runtime::MouseCapture::None
+        );
+        assert_eq!(app.editor_runtime.preedit(), (String::new(), None));
+        assert!(!app.mouse.is_down);
+        assert_eq!(app.mouse.down_byte_offset, None);
+        assert_eq!(app.mouse.wysiwyg_selection_scope, None);
+        assert_eq!(app.mouse.last_hover_redraw_pos, None);
+        assert_eq!(app.mouse.last_hover_tab, None);
+
+        app.handle_window_focus_changed(false);
+        assert_eq!(
+            app.editor_runtime.pointer_capture(),
+            appkit_shell::editor_runtime::MouseCapture::None
+        );
+        assert_eq!(app.editor_runtime.preedit(), (String::new(), None));
     }
 
     #[test]

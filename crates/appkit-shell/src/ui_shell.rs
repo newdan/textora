@@ -1413,6 +1413,10 @@ impl UiShell {
             self.tooltip_timer = None;
         }
 
+        if matches!(ev, Event::PointerLeave | Event::InteractionCancel) {
+            return self.broadcast_lifecycle_event(ev, ctx);
+        }
+
         // Overlays first (popup, dialog, etc.) — last pushed gets first dibs
         for index in (0..self.overlays.len()).rev() {
             let outcome = {
@@ -1441,6 +1445,21 @@ impl UiShell {
             self.check_tooltips(*px, *py);
         }
         result
+    }
+
+    fn broadcast_lifecycle_event(
+        &mut self,
+        event: &Event,
+        ctx: &mut EventCtx,
+    ) -> Option<WidgetAction> {
+        ctx.cursor_hint = None;
+        let mut interaction_changed = false;
+        for overlay in self.overlays.iter_mut().rev() {
+            interaction_changed |= overlay.widget.on_event(event, ctx).is_some();
+        }
+        interaction_changed |= self.canvas_scrollbars.on_event(event, ctx).is_some();
+        interaction_changed |= self.dock.dispatch(event, ctx).is_some();
+        interaction_changed.then_some(WidgetAction::Consumed)
     }
 
     fn dispatch_canvas_scrollbars(
@@ -1883,6 +1902,110 @@ mod tests {
             matches!(end, Some(ui::core::widget::WidgetAction::CanvasScrollbars(_))),
             "拖动捕获时，指针移出轨道仍须分发给画布滚动条"
         );
+    }
+
+    #[test]
+    fn interaction_cancel_reaches_modal_and_every_shell_capture_owner() {
+        let theme = test_theme();
+        let mut measure = NoopMeasure;
+        let mut layout_ctx =
+            LayoutCtx { ui_measure: None, measure: &mut measure, theme: &theme, dpi: 1.0 };
+        let mut event_ctx = EventCtx { cursor_hint: None, theme: &theme, dpi: 1.0 };
+        let mut shell = UiShell::new();
+
+        let button_style = ui::button::ButtonStyle {
+            font_size_logical: 12.0,
+            pad_x_logical: 4.0,
+            foreground: [1.0; 4],
+            selected_foreground: [1.0; 4],
+            background: [0.0; 4],
+            border: [0.0; 4],
+            hover_background: [0.2; 4],
+            pressed_background: [0.3; 4],
+            selected_background: [0.2; 4],
+            disabled_foreground: [0.5; 4],
+            disabled_background: [0.0; 4],
+            corner_radius_logical: 4.0,
+        };
+        let mut button = ui::button::Button::new(ui::core::WidgetId(31), button_style);
+        button.set_rect(Rect::new(0.0, 0.0, 100.0, 28.0), &mut layout_ctx);
+        let _ = button.on_event(
+            &Event::MouseDown { px: 10.0, py: 10.0, button: ui::core::MouseButton::Left },
+            &mut event_ctx,
+        );
+
+        let mut scrollbar = ui::scrollbar::ScrollbarWidget::new();
+        scrollbar.set_input(ui::scrollbar::ScrollbarInput {
+            viewport_height_px: 100.0,
+            total_display_rows: 200,
+            scroll_top_rows: 0.0,
+        });
+        scrollbar.set_rect(Rect::new(0.0, 0.0, 12.0, 744.0), &mut layout_ctx);
+        let _ = scrollbar.on_event(
+            &Event::MouseDown { px: 6.0, py: 68.0, button: ui::core::MouseButton::Left },
+            &mut event_ctx,
+        );
+
+        let mut splitter = ui::splitter::SplitterWidget::new();
+        splitter.set_input(ui::splitter::SplitterInput {
+            logical_position: 200.0,
+            minimum_logical_position: 180.0,
+            maximum_logical_position: 320.0,
+            enabled: true,
+        });
+        splitter.set_rect(Rect::new(0.0, 0.0, 8.0, 500.0), &mut layout_ctx);
+        let _ = splitter.on_event(
+            &Event::MouseDown { px: 2.0, py: 20.0, button: ui::core::MouseButton::Left },
+            &mut event_ctx,
+        );
+
+        for widget in [
+            Box::new(button) as Box<dyn Widget>,
+            Box::new(scrollbar) as Box<dyn Widget>,
+            Box::new(splitter) as Box<dyn Widget>,
+        ] {
+            assert!(widget.is_capturing());
+            shell.dock.children.push(DockChild {
+                widget,
+                side: Side::Top,
+                thickness: Box::new(|_, _| 28.0),
+                visible: true,
+                layout_rect: Rect::ZERO,
+            });
+        }
+
+        let mut modal = ui::modal_frame::ModalFrame::new("测试", noop_widget());
+        modal.set_rect(Rect::new(0.0, 0.0, 320.0, 180.0), &mut layout_ctx);
+        let _ = modal.on_event(
+            &Event::MouseDown { px: 294.0, py: 14.0, button: ui::core::MouseButton::Left },
+            &mut event_ctx,
+        );
+        assert!(modal.is_capturing());
+        shell.push_overlay_with_policy(
+            Box::new(modal),
+            OverlayLayout::Fixed(Rect::new(0.0, 0.0, 320.0, 180.0)),
+            OverlayInputPolicy::Modal,
+            DismissPolicy::ExplicitOnly,
+        );
+
+        event_ctx.cursor_hint = Some(winit::window::CursorIcon::EwResize);
+        assert_eq!(
+            shell.dispatch(&Event::PointerLeave, &mut event_ctx),
+            Some(WidgetAction::Consumed)
+        );
+        assert_eq!(event_ctx.cursor_hint, None);
+        assert!(shell.overlays.last().expect("modal should remain open").widget.is_capturing());
+        assert!(shell.dock.children.iter().all(|child| child.widget.is_capturing()));
+
+        event_ctx.cursor_hint = Some(winit::window::CursorIcon::EwResize);
+        assert_eq!(
+            shell.dispatch(&Event::InteractionCancel, &mut event_ctx),
+            Some(WidgetAction::Consumed)
+        );
+        assert_eq!(event_ctx.cursor_hint, None);
+        assert!(!shell.overlays.last().expect("modal should remain open").widget.is_capturing());
+        assert!(shell.dock.children.iter().all(|child| !child.widget.is_capturing()));
+        assert_eq!(shell.dispatch(&Event::InteractionCancel, &mut event_ctx), None);
     }
 
     #[test]
