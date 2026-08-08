@@ -354,6 +354,21 @@ impl Widget for ModalFrame {
         }
 
         match event {
+            Event::PointerLeave => {
+                let hover_target = self.hover_target.take();
+                let action =
+                    hover_target.and_then(|target| self.dispatch_to_target(target, event, ctx));
+                action.or_else(|| hover_target.map(|_| WidgetAction::Consumed))
+            }
+            Event::InteractionCancel => {
+                let container_changed =
+                    self.pointer_target.take().is_some() | self.hover_target.take().is_some();
+                let close_action = self.dispatch_to_close_button(event, ctx);
+                let content_action = self.dispatch_to_content(event, ctx);
+                close_action
+                    .or(content_action)
+                    .or_else(|| container_changed.then_some(WidgetAction::Consumed))
+            }
             Event::MouseDown { px, py, button: MouseButton::Left } => {
                 let target = self.pointer_target_at(*px, *py)?;
                 self.pointer_target = Some(target);
@@ -668,6 +683,47 @@ mod tests {
         ];
         let child = stub_content(&mut modal);
         assert_eq!(child.events, expected_events);
+    }
+
+    #[test]
+    fn modal_leave_preserves_close_press_and_cancel_clears_all_pointer_state() {
+        let mut modal = fixture_modal();
+        let theme = crate::theme::test_theme();
+        let mut ctx = EventCtx { cursor_hint: None, theme: &theme, dpi: 1.0 };
+        let close_px = modal.close_button_rect.x + modal.close_button_rect.w * 0.5;
+        let close_py = modal.close_button_rect.y + modal.close_button_rect.h * 0.5;
+
+        assert!(
+            modal
+                .on_event(
+                    &Event::MouseDown { px: close_px, py: close_py, button: MouseButton::Left },
+                    &mut ctx,
+                )
+                .is_some()
+        );
+        assert!(modal.is_capturing());
+
+        assert_eq!(modal.on_event(&Event::PointerLeave, &mut ctx), Some(WidgetAction::Consumed));
+        assert!(modal.is_capturing());
+
+        assert_eq!(
+            modal.on_event(&Event::InteractionCancel, &mut ctx),
+            Some(WidgetAction::Consumed)
+        );
+        assert!(!modal.is_capturing());
+        assert_eq!(modal.on_event(&Event::InteractionCancel, &mut ctx), None);
+        assert_eq!(
+            modal.on_event(
+                &Event::MouseUp { px: close_px, py: close_py, button: MouseButton::Left },
+                &mut ctx,
+            ),
+            None
+        );
+
+        assert_eq!(
+            stub_content(&mut modal).events,
+            vec![Event::InteractionCancel, Event::InteractionCancel]
+        );
     }
 
     #[test]
