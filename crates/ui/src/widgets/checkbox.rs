@@ -8,7 +8,6 @@ use crate::core::{
 };
 
 const CHECKBOX_SIZE_LOGICAL: f32 = 20.0;
-const CHECKBOX_CORNER_RADIUS_LOGICAL: f32 = 4.0;
 const CHECKBOX_BORDER_WIDTH_LOGICAL: f32 = 1.0;
 const CHECK_ICON_INSET_LOGICAL: f32 = 5.0;
 const CHECK_MARK_START_RATIO: [f32; 2] = [0.14, 0.52];
@@ -98,10 +97,10 @@ impl Checkbox {
     }
 
     fn check_icon_color(&self, ctx: &PaintCtx) -> [f32; 4] {
-        let settings = ctx.theme.settings_theme();
-        let base_color = settings.text_primary;
+        let application = ctx.theme.application_theme();
+        let base_color = application.text_inverse;
         let color = if self.hovered {
-            blend_color(base_color, settings.accent, CHECK_ICON_HOVER_BLEND)
+            blend_color(base_color, application.text_primary, CHECK_ICON_HOVER_BLEND)
         } else {
             base_color
         };
@@ -168,14 +167,15 @@ impl Widget for Checkbox {
         }
 
         let dpi = ctx.dpi;
-        let corner_radius = CHECKBOX_CORNER_RADIUS_LOGICAL * dpi;
+        let metrics = ctx.theme.control_metrics();
+        let corner_radius = metrics.compact_corner_radius_logical * dpi;
+        let outline_width = if self.focused {
+            metrics.focus_ring_width_logical
+        } else {
+            CHECKBOX_BORDER_WIDTH_LOGICAL
+        } * dpi;
         ctx.list.fill_rounded(self.rect, self.surface_color(ctx), corner_radius);
-        ctx.list.stroke_rounded(
-            self.rect,
-            self.outline_color(ctx),
-            corner_radius,
-            CHECKBOX_BORDER_WIDTH_LOGICAL * dpi,
-        );
+        ctx.list.stroke_rounded(self.rect, self.outline_color(ctx), corner_radius, outline_width);
 
         if self.checked {
             let icon_rect = self.check_icon_rect(dpi);
@@ -421,12 +421,13 @@ mod tests {
     }
 
     fn is_checkbox_outline(cmd: &DrawCmd) -> bool {
+        let corner_radius = crate::theme::ControlMetrics::default().compact_corner_radius_logical;
         matches!(
             cmd,
             DrawCmd::StrokeRect { rect, radius, .. }
                 if rect.w == CHECKBOX_SIZE_LOGICAL
                     && rect.h == CHECKBOX_SIZE_LOGICAL
-                    && *radius == CHECKBOX_CORNER_RADIUS_LOGICAL
+                    && *radius == corner_radius
         )
     }
 
@@ -458,6 +459,49 @@ mod tests {
             draw_list.cmds.iter().any(|cmd| matches!(cmd, DrawCmd::FillTriangle { .. })),
             "checked checkbox should emit triangle commands for check mark"
         );
+    }
+
+    #[test]
+    fn checked_checkbox_uses_semantic_icon_and_focus_metrics_across_themes_and_dpi() {
+        for theme in [
+            crate::theme::Theme::resolve_builtin(
+                crate::settings::ThemeMode::Light,
+                winit::window::Theme::Light,
+            ),
+            crate::theme::Theme::resolve_builtin(
+                crate::settings::ThemeMode::Dark,
+                winit::window::Theme::Dark,
+            ),
+        ] {
+            for dpi in [1.0, 2.0] {
+                let metrics = theme.control_metrics();
+                let application = theme.application_theme();
+                let mut checkbox = Checkbox::new(WidgetId(91), true);
+                checkbox.set_keyboard_focus(Some(WidgetId(91)));
+                checkbox.rect =
+                    Rect::new(0.0, 0.0, CHECKBOX_SIZE_LOGICAL * dpi, CHECKBOX_SIZE_LOGICAL * dpi);
+
+                let mut draw_list = DrawList::new();
+                checkbox.paint(&mut PaintCtx::new(&mut draw_list, &theme, dpi));
+
+                let outline = draw_list
+                    .cmds
+                    .iter()
+                    .find_map(|command| match command {
+                        DrawCmd::StrokeRect { radius, line_width, .. } => {
+                            Some((*radius, *line_width))
+                        }
+                        _ => None,
+                    })
+                    .expect("checkbox should paint an outline");
+                assert_eq!(outline.0, metrics.compact_corner_radius_logical * dpi);
+                assert_eq!(outline.1, metrics.focus_ring_width_logical * dpi);
+                assert!(draw_list.cmds.iter().any(|command| matches!(
+                    command,
+                    DrawCmd::FillTriangle { color, .. } if *color == application.text_inverse
+                )));
+            }
+        }
     }
 
     #[test]

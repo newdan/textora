@@ -16,8 +16,6 @@ const UNCHECKED_HOVER_BLEND: f32 = 0.08;
 const CHECKED_HOVER_BLEND: f32 = 0.12;
 const BORDER_HOVER_BLEND: f32 = 0.22;
 const THUMB_HOVER_BLEND: f32 = 0.18;
-const CHECKED_THUMB_COLOR: [f32; 4] = [0.98, 0.98, 0.97, 1.0];
-const CHECKED_THUMB_HOVER_COLOR: [f32; 4] = [1.0, 1.0, 1.0, 1.0];
 
 pub struct Switch {
     id: WidgetId,
@@ -103,8 +101,10 @@ impl Switch {
 
     fn track_color(&self, ctx: &PaintCtx) -> [f32; 4] {
         let settings = ctx.theme.settings_theme();
+        let application = ctx.theme.application_theme();
         let base_color = if self.checked { settings.accent } else { settings.control_surface };
-        let hover_target = if self.checked { CHECKED_THUMB_COLOR } else { settings.text_primary };
+        let hover_target =
+            if self.checked { application.text_inverse } else { settings.text_primary };
         let hover_blend = if self.checked { CHECKED_HOVER_BLEND } else { UNCHECKED_HOVER_BLEND };
         let color = if self.hovered {
             blend_color(base_color, hover_target, hover_blend)
@@ -133,9 +133,11 @@ impl Switch {
 
     fn thumb_color(&self, ctx: &PaintCtx) -> [f32; 4] {
         let settings = ctx.theme.settings_theme();
-        let base_color = if self.checked { CHECKED_THUMB_COLOR } else { settings.text_secondary };
+        let application = ctx.theme.application_theme();
+        let base_color =
+            if self.checked { application.text_inverse } else { settings.text_secondary };
         let hover_target =
-            if self.checked { CHECKED_THUMB_HOVER_COLOR } else { settings.text_primary };
+            if self.checked { application.text_primary } else { settings.text_primary };
         let color = if self.hovered {
             blend_color(base_color, hover_target, THUMB_HOVER_BLEND)
         } else {
@@ -174,15 +176,16 @@ impl Widget for Switch {
         }
 
         let dpi = ctx.dpi;
+        let metrics = ctx.theme.control_metrics();
         let track_rect = self.track_rect_with_dpi(dpi);
         let track_radius = track_rect.h * 0.5;
+        let border_width = if self.focused {
+            metrics.focus_ring_width_logical
+        } else {
+            SWITCH_BORDER_WIDTH_LOGICAL
+        } * dpi;
         ctx.list.fill_rounded(track_rect, self.track_color(ctx), track_radius);
-        ctx.list.stroke_rounded(
-            track_rect,
-            self.border_color(ctx),
-            track_radius,
-            SWITCH_BORDER_WIDTH_LOGICAL * dpi,
-        );
+        ctx.list.stroke_rounded(track_rect, self.border_color(ctx), track_radius, border_width);
 
         let thumb_rect = self.thumb_rect(dpi);
         let thumb_radius = thumb_rect.h * 0.5;
@@ -517,6 +520,40 @@ mod tests {
         let thumb_color = switch.thumb_color(&paint_ctx);
         assert!(thumb_color[0] >= 0.95 && thumb_color[1] >= 0.95 && thumb_color[2] >= 0.95);
         assert_eq!(switch.border_color(&paint_ctx), light_theme.palette.accent);
+    }
+
+    #[test]
+    fn checked_switch_uses_semantic_thumb_and_focus_metrics_across_themes_and_dpi() {
+        for theme in [
+            crate::theme::Theme::resolve_builtin(
+                crate::settings::ThemeMode::Light,
+                winit::window::Theme::Light,
+            ),
+            crate::theme::Theme::resolve_builtin(
+                crate::settings::ThemeMode::Dark,
+                winit::window::Theme::Dark,
+            ),
+        ] {
+            for dpi in [1.0, 2.0] {
+                let application = theme.application_theme();
+                let metrics = theme.control_metrics();
+                let mut switch = Switch::new(WidgetId(92), true);
+                switch.set_keyboard_focus(Some(WidgetId(92)));
+                switch.rect =
+                    Rect::new(0.0, 0.0, SWITCH_WIDTH_LOGICAL * dpi, SWITCH_HEIGHT_LOGICAL * dpi);
+
+                let mut draw_list = DrawList::new();
+                switch.paint(&mut PaintCtx::new(&mut draw_list, &theme, dpi));
+
+                assert_eq!(fill_color(&draw_list.cmds[2]), application.text_inverse);
+                match &draw_list.cmds[1] {
+                    DrawCmd::StrokeRect { line_width, .. } => {
+                        assert_eq!(*line_width, metrics.focus_ring_width_logical * dpi);
+                    }
+                    other => panic!("expected StrokeRect, got {other:?}"),
+                }
+            }
+        }
     }
 
     #[test]
