@@ -301,13 +301,32 @@ impl Widget for FormRow {
     }
 
     fn on_event(&mut self, event: &Event, ctx: &mut EventCtx) -> Option<WidgetAction> {
+        if matches!(event, Event::PointerLeave) {
+            let hover_changed = self.hover_target.take().is_some();
+            return self
+                .dispatch_to_control(event, ctx)
+                .or_else(|| hover_changed.then_some(WidgetAction::Consumed));
+        }
+
+        if matches!(event, Event::InteractionCancel) {
+            let container_changed =
+                self.pointer_target.take().is_some() | self.hover_target.take().is_some();
+            return self
+                .dispatch_to_control(event, ctx)
+                .or_else(|| container_changed.then_some(WidgetAction::Consumed));
+        }
+
         if self.control.is_capturing()
             && matches!(
                 event,
                 Event::MouseMove { .. } | Event::MouseUp { .. } | Event::Wheel { .. }
             )
         {
-            return self.dispatch_to_control(event, ctx);
+            let action = self.dispatch_to_control(event, ctx);
+            if matches!(event, Event::MouseUp { .. }) {
+                self.pointer_target = None;
+            }
+            return action;
         }
 
         match event {
@@ -358,7 +377,7 @@ impl Widget for FormRow {
     }
 
     fn is_capturing(&self) -> bool {
-        self.control.is_capturing()
+        self.pointer_target.is_some() || self.control.is_capturing()
     }
 
     fn as_any(&self) -> &dyn Any {

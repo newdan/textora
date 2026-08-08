@@ -385,7 +385,9 @@ impl Widget for FormView {
     }
 
     fn is_capturing(&self) -> bool {
-        self.scrollbar.is_dragging() || self.capturing_section_index().is_some()
+        self.pointer_section_index.is_some()
+            || self.scrollbar.is_dragging()
+            || self.capturing_section_index().is_some()
     }
 
     fn collect_focusable_ids(&self, output: &mut Vec<WidgetId>) {
@@ -402,6 +404,24 @@ impl Widget for FormView {
     }
 
     fn on_event(&mut self, event: &Event, ctx: &mut EventCtx) -> Option<WidgetAction> {
+        if matches!(event, Event::PointerLeave | Event::InteractionCancel) {
+            let container_changed = if matches!(event, Event::InteractionCancel) {
+                self.pointer_section_index.take().is_some()
+                    | self.hover_section_index.take().is_some()
+            } else {
+                self.hover_section_index.take().is_some()
+            };
+            let mut first_action = self.dispatch_scrollbar_event(event, ctx);
+            for section_index in 0..self.sections.len() {
+                if let Some(action) = self.dispatch_to_section(section_index, event, ctx)
+                    && first_action.is_none()
+                {
+                    first_action = Some(action);
+                }
+            }
+            return first_action.or_else(|| container_changed.then_some(WidgetAction::Consumed));
+        }
+
         if self.scrollbar.is_dragging()
             && matches!(event, Event::MouseMove { .. } | Event::MouseUp { .. })
         {
@@ -414,7 +434,11 @@ impl Widget for FormView {
                 Event::MouseMove { .. } | Event::MouseUp { .. } | Event::Wheel { .. }
             )
         {
-            return self.dispatch_to_section(section_index, event, ctx);
+            let action = self.dispatch_to_section(section_index, event, ctx);
+            if matches!(event, Event::MouseUp { .. }) {
+                self.pointer_section_index = None;
+            }
+            return action;
         }
 
         match event {
@@ -772,6 +796,38 @@ mod tests {
         assert_eq!(
             pointer_event(&mut view, Event::MouseMove { px: 900.0, py: 400.0 }),
             Some(WidgetAction::Consumed),
+        );
+    }
+
+    #[test]
+    fn form_view_leave_preserves_nested_press_and_cancel_clears_container_capture() {
+        let mut view = laid_out_form_view(content_height(200.0), viewport_height(300.0));
+        let pointer = (300.0, 80.0);
+
+        assert!(
+            pointer_event(
+                &mut view,
+                Event::MouseDown { px: pointer.0, py: pointer.1, button: MouseButton::Left },
+            )
+            .is_some()
+        );
+        assert!(view.is_capturing());
+
+        assert!(pointer_event(&mut view, Event::PointerLeave).is_some());
+        assert!(view.is_capturing());
+
+        assert_eq!(
+            pointer_event(&mut view, Event::InteractionCancel),
+            Some(WidgetAction::Consumed)
+        );
+        assert!(!view.is_capturing());
+        assert_eq!(pointer_event(&mut view, Event::InteractionCancel), None);
+        assert_eq!(
+            pointer_event(
+                &mut view,
+                Event::MouseUp { px: pointer.0, py: pointer.1, button: MouseButton::Left },
+            ),
+            None
         );
     }
 

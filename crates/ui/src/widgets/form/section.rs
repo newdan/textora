@@ -325,14 +325,39 @@ impl Widget for FormSection {
         }
     }
 
+    fn is_capturing(&self) -> bool {
+        self.pointer_row_index.is_some() || self.capturing_row_index().is_some()
+    }
+
     fn on_event(&mut self, event: &Event, ctx: &mut EventCtx) -> Option<WidgetAction> {
+        if matches!(event, Event::PointerLeave | Event::InteractionCancel) {
+            let container_changed = if matches!(event, Event::InteractionCancel) {
+                self.pointer_row_index.take().is_some() | self.hover_row_index.take().is_some()
+            } else {
+                self.hover_row_index.take().is_some()
+            };
+            let mut first_action = None;
+            for row_index in 0..self.rows.len() {
+                if let Some(action) = self.dispatch_to_row(row_index, event, ctx)
+                    && first_action.is_none()
+                {
+                    first_action = Some(action);
+                }
+            }
+            return first_action.or_else(|| container_changed.then_some(WidgetAction::Consumed));
+        }
+
         if let Some(row_index) = self.capturing_row_index()
             && matches!(
                 event,
                 Event::MouseMove { .. } | Event::MouseUp { .. } | Event::Wheel { .. }
             )
         {
-            return self.dispatch_to_row(row_index, event, ctx);
+            let action = self.dispatch_to_row(row_index, event, ctx);
+            if matches!(event, Event::MouseUp { .. }) {
+                self.pointer_row_index = None;
+            }
+            return action;
         }
 
         match event {
