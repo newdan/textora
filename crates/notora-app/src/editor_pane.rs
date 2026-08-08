@@ -477,12 +477,14 @@ fn event_is_keyboard(event: &Event) -> bool {
 fn translate_event(event: &Event, offset_x: f32, offset_y: f32) -> Event {
     match event {
         Event::MouseMove { px, py } => Event::MouseMove { px: *px - offset_x, py: *py - offset_y },
+        Event::PointerLeave => Event::PointerLeave,
         Event::MouseDown { px, py, button } => {
             Event::MouseDown { px: *px - offset_x, py: *py - offset_y, button: *button }
         }
         Event::MouseUp { px, py, button } => {
             Event::MouseUp { px: *px - offset_x, py: *py - offset_y, button: *button }
         }
+        Event::InteractionCancel => Event::InteractionCancel,
         Event::Wheel { dx, dy, px, py } => {
             Event::Wheel { dx: *dx, dy: *dy, px: *px - offset_x, py: *py - offset_y }
         }
@@ -503,6 +505,15 @@ mod tests {
     use ui::editor_toolbar::EditorToolbarInput;
     use ui::location_picker::LocationPickerInput;
     use ui::tag_editor::TagEditorInput;
+
+    #[test]
+    fn lifecycle_events_remain_unchanged_when_translated_to_child_coordinates() {
+        assert_eq!(translate_event(&Event::PointerLeave, 10.0, 20.0), Event::PointerLeave);
+        assert_eq!(
+            translate_event(&Event::InteractionCancel, 10.0, 20.0),
+            Event::InteractionCancel
+        );
+    }
 
     fn input(mode: EditorPaneMode) -> EditorPaneInput {
         EditorPaneInput {
