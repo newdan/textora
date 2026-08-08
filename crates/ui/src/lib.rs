@@ -6,7 +6,6 @@
 #![allow(clippy::too_many_arguments)]
 #![allow(deprecated)]
 #![allow(clippy::overly_complex_bool_expr)]
-#![allow(unused_mut)]
 #![allow(clippy::type_complexity)]
 #![allow(clippy::empty_line_after_doc_comments)]
 #![allow(clippy::doc_lazy_continuation)]
