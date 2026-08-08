@@ -489,13 +489,13 @@ pub fn shape_visible_lines(
         }
 
         // ── Check RenderCache ──
-        // Fast content_hash: use byte offset + length (stable even without reading bytes)
+        // Validate caches against the actual line content as well as layout inputs.
         let viewport_width =
             render_viewport_width(ctx.screen_w, ctx.left_margin, metrics, word_wrap);
-        let content_hash_fast = {
+        let current_content_hash = {
             let off = dv.line_byte_offset(doc_line_idx).unwrap_or(0);
-            let len = dv.line_byte_length(doc_line_idx).unwrap_or(0);
-            content_hash::content_hash(off, len as u32, viewport_width, metrics.font_size)
+            let line_bytes = line_bytes_early.as_deref().unwrap_or_default();
+            content_hash::content_hash(line_bytes, off, viewport_width, metrics.font_size)
         };
         // IME preedit: skip cache for cursor line (positions need shifting)
         let preedit_on_cursor_line =
@@ -508,7 +508,7 @@ pub fn shape_visible_lines(
                 .render_cache
                 .get(doc_line_idx)
                 .filter(|c| {
-                    c.content_hash == content_hash_fast
+                    c.content_hash == current_content_hash
                         && c.visual_lines.len() == c.visual_line_instance_starts.len()
                 })
                 .cloned()
@@ -772,7 +772,7 @@ pub fn shape_visible_lines(
             .display
             .display_map
             .get_entry(doc_line_idx_miss)
-            .map(|entry| ShapeMissMapStats::from_entry(entry, content_hash_fast));
+            .map(|entry| ShapeMissMapStats::from_entry(entry, current_content_hash));
         let is_placeholder = map_stats.map(|stats| stats.is_placeholder).unwrap_or(true);
 
         if is_placeholder && line_len > max_sync_bytes {
@@ -843,7 +843,7 @@ pub fn shape_visible_lines(
         if !is_placeholder
             && line_len > max_sync_bytes
             && let Some(entry) = presentation.display.display_map.get_entry(doc_line_idx_miss)
-            && entry.content_hash == content_hash_fast
+            && entry.content_hash == current_content_hash
             && !entry.visual_breaks.is_empty()
         {
             let skip = if i == 0 { skip_visual } else { 0 };
@@ -1019,7 +1019,7 @@ pub fn shape_visible_lines(
                 let is_placeholder = entry.visual_breaks.len() == 1
                     && entry.visual_breaks[0].pixel_width == 0.0
                     && entry.byte_length > 0;
-                if entry.content_hash == content_hash_fast
+                if entry.content_hash == current_content_hash
                     && !entry.visual_breaks.is_empty()
                     && !is_placeholder
                 {
@@ -1397,7 +1397,7 @@ pub fn shape_visible_lines(
             preedit_on_cursor_line,
             cache_exists,
         ) {
-            let content_hash = content_hash_fast;
+            let content_hash = current_content_hash;
             let mut all_instances: Vec<GlyphInstance> = Vec::new();
             let mut vl_instance_starts: Vec<usize> = Vec::new();
 

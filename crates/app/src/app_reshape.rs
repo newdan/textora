@@ -179,13 +179,13 @@ impl App {
             let document = tab.document;
             (start_doc..ahead_end)
                 .filter_map(|dl| {
+                    let line_bytes = document.doc_line_bytes(dl)?;
                     // Skip lines that are already shaped and up-to-date
                     let is_up_to_date = if let Some(entry) = tab.display_map_entry(dl) {
                         let off = document.line_byte_offset(dl).unwrap_or(0);
-                        let len = document.line_byte_length(dl).unwrap_or(0);
                         let current_hash = crate::content_hash::content_hash(
+                            line_bytes.as_ref(),
                             off,
-                            len as u32,
                             viewport_width,
                             font_size,
                         );
@@ -199,7 +199,6 @@ impl App {
                         return None;
                     }
 
-                    let line_bytes = document.doc_line_bytes(dl)?;
                     let off = document.line_byte_offset(dl).unwrap_or(0);
                     let len = document.line_byte_length(dl).unwrap_or(0);
                     Some((
