@@ -12,7 +12,7 @@ use crate::widgets::icon::draw_icon;
 use std::any::Any;
 use std::sync::Arc;
 
-const BUTTON_FOCUS_RING_WIDTH_LOGICAL: f32 = 2.0;
+const BUTTON_DISABLED_ALPHA: f32 = 0.45;
 
 /// Visual style for a Button.
 #[derive(Clone, Debug)]
@@ -29,6 +29,32 @@ pub struct ButtonStyle {
     pub disabled_foreground: [f32; 4],
     pub disabled_background: [f32; 4],
     pub corner_radius_logical: f32,
+}
+
+impl ButtonStyle {
+    pub fn from_theme(theme: &crate::theme::Theme) -> Self {
+        let metrics = theme.control_metrics();
+        let application = theme.application_theme();
+        Self {
+            font_size_logical: metrics.font_size_logical,
+            pad_x_logical: metrics.horizontal_padding_logical,
+            foreground: application.text_primary,
+            selected_foreground: application.navigation_selected_text,
+            background: application.control_surface,
+            border: application.control_border,
+            hover_background: application.hover_surface,
+            pressed_background: application.selected_surface,
+            selected_background: application.selected_surface,
+            disabled_foreground: with_alpha(application.text_primary, BUTTON_DISABLED_ALPHA),
+            disabled_background: with_alpha(application.control_surface, BUTTON_DISABLED_ALPHA),
+            corner_radius_logical: metrics.corner_radius_logical,
+        }
+    }
+}
+
+fn with_alpha(mut color: [f32; 4], alpha: f32) -> [f32; 4] {
+    color[3] *= alpha;
+    color
 }
 
 pub struct Button {
@@ -129,6 +155,7 @@ impl Widget for Button {
 
     fn paint(&self, ctx: &mut PaintCtx) {
         let dpi = ctx.dpi;
+        let metrics = ctx.theme.control_metrics();
         let alpha = ctx.global_alpha;
         let corner_radius = self.style.corner_radius_logical * dpi;
         let mut background = self.background_color();
@@ -154,11 +181,11 @@ impl Widget for Button {
                 self.rect,
                 focus_ring,
                 corner_radius,
-                BUTTON_FOCUS_RING_WIDTH_LOGICAL * dpi,
+                metrics.focus_ring_width_logical * dpi,
             );
         }
 
-        let icon_gap = 4.0 * dpi;
+        let icon_gap = metrics.compact_spacing_logical * dpi;
         let mut cursor_x = self.rect.x + pad_x;
 
         if let Some(ref icon_name) = self.icon {
@@ -404,6 +431,31 @@ mod tests {
             button.accessibility_node(&context).expect("disabled button remains discoverable");
         assert!(disabled_node.state.disabled);
         assert!(disabled_node.actions.is_empty());
+    }
+
+    #[test]
+    fn standard_style_uses_shared_metrics_and_semantic_theme_colors() {
+        for theme in [
+            crate::theme::Theme::resolve_builtin(
+                crate::settings::ThemeMode::Light,
+                winit::window::Theme::Light,
+            ),
+            crate::theme::Theme::resolve_builtin(
+                crate::settings::ThemeMode::Dark,
+                winit::window::Theme::Dark,
+            ),
+        ] {
+            let metrics = theme.control_metrics();
+            let application = theme.application_theme();
+            let style = ButtonStyle::from_theme(&theme);
+
+            assert_eq!(style.font_size_logical, metrics.font_size_logical);
+            assert_eq!(style.pad_x_logical, metrics.horizontal_padding_logical);
+            assert_eq!(style.corner_radius_logical, metrics.corner_radius_logical);
+            assert_eq!(style.background, application.control_surface);
+            assert_eq!(style.foreground, application.text_primary);
+            assert_eq!(style.hover_background, application.hover_surface);
+        }
     }
 
     #[test]

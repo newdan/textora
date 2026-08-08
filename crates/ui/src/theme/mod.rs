@@ -5,6 +5,7 @@
 
 mod application;
 mod color;
+mod controls;
 mod editor;
 mod markdown;
 mod mindmap;
@@ -13,6 +14,7 @@ mod settings;
 
 pub use application::ApplicationTheme;
 pub use color::ColorPalette;
+pub use controls::ControlMetrics;
 pub use editor::EditorTheme;
 pub use markdown::{MarkdownSpacing, MarkdownTheme};
 pub use mindmap::*;
@@ -142,6 +144,10 @@ impl Theme {
 
     pub fn application_theme(&self) -> ApplicationTheme {
         ApplicationTheme::from_theme(&self.palette, &self.editor)
+    }
+
+    pub fn control_metrics(&self) -> ControlMetrics {
+        ControlMetrics::default()
     }
 }
 
