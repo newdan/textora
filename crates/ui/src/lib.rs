@@ -23,7 +23,6 @@ pub mod plugin;
 pub mod render_geom;
 pub mod settings;
 pub mod tapered_path;
-mod text_renderer;
 pub mod theme;
 mod theme_file;
 mod theme_registry;
