@@ -1990,6 +1990,46 @@ mod tests {
         }
 
         #[test]
+        fn dismissing_modal_restores_keyboard_and_accessibility_focus_to_a_widget() {
+            const RESTORED_WIDGET_ID: ui::core::widget::WidgetId = ui::core::widget::WidgetId(10);
+            let theme = test_theme();
+            let mut measure = NoopMeasure;
+            let mut harness = shell_with_focus(KeyboardFocusTarget::Widget(RESTORED_WIDGET_ID));
+            harness.shell.dock.fill =
+                Box::new(SemanticProbe::new(RESTORED_WIDGET_ID.0, WidgetAction::Consumed));
+            harness.shell.update_frame(
+                Screen::new(1200.0, 800.0),
+                &theme,
+                &mut measure,
+                &shell_inputs(),
+            );
+            harness.shell.push_overlay_with_policy(
+                Box::new(SemanticProbe::new(20, WidgetAction::Consumed)),
+                OverlayLayout::Fixed(Rect::new(100.0, 100.0, 300.0, 200.0)),
+                OverlayInputPolicy::Modal,
+                DismissPolicy::ExplicitOnly,
+            );
+
+            assert_eq!(
+                harness.shell.accessibility_tree("textora").focus,
+                Some(ui::core::AccessibilityId(20))
+            );
+
+            let _ = harness.shell.pop_overlay();
+            let restored_tree = harness.shell.accessibility_tree("textora");
+
+            assert_eq!(
+                harness.shell.keyboard_focus(),
+                KeyboardFocusTarget::Widget(RESTORED_WIDGET_ID)
+            );
+            assert_eq!(
+                restored_tree.focus,
+                Some(ui::core::AccessibilityId::from(RESTORED_WIDGET_ID))
+            );
+            assert_eq!(restored_tree.validate(), Ok(()));
+        }
+
+        #[test]
         fn modal_overlay_uses_the_shared_application_scrim() {
             let mut theme = test_theme();
             theme.palette.shadow = [0.1, 0.2, 0.3, 0.1];

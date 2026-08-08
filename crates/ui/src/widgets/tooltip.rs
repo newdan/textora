@@ -402,18 +402,22 @@ mod tests {
     }
 
     #[test]
-    fn long_multilingual_tooltip_is_wrapped_and_bounded_at_high_dpi() {
-        let hint = make_hint(
-            "A very long tooltip with English words、中文说明和 emoji 👨‍👩‍👧‍👦 that must stay visible",
-            Rect::new(580.0, 320.0, 20.0, 20.0),
-        );
-        let (widget, layout) = TooltipWidget::new(&hint, 2.0, 600.0, 360.0);
+    fn long_multilingual_tooltip_is_wrapped_and_bounded_at_standard_and_high_dpi() {
+        for dpi in [1.0, 2.0] {
+            let screen_width = 300.0 * dpi;
+            let screen_height = 180.0 * dpi;
+            let hint = make_hint(
+                "A very long tooltip with English words、中文说明和 emoji 👨‍👩‍👧‍👦 that must stay visible",
+                Rect::new(290.0 * dpi, 160.0 * dpi, 10.0 * dpi, 10.0 * dpi),
+            );
+            let (widget, layout) = TooltipWidget::new(&hint, dpi, screen_width, screen_height);
 
-        assert!(widget.display_lines.len() > 1);
-        assert!(layout.x.is_finite() && layout.y.is_finite());
-        assert!(layout.x >= 0.0 && layout.y >= 0.0);
-        assert!(layout.right() <= 600.0);
-        assert!(layout.bottom() <= 360.0);
+            assert!(widget.display_lines.len() > 1, "dpi={dpi}");
+            assert!(layout.x.is_finite() && layout.y.is_finite(), "dpi={dpi}");
+            assert!(layout.x >= 0.0 && layout.y >= 0.0, "dpi={dpi}");
+            assert!(layout.right() <= screen_width, "dpi={dpi}");
+            assert!(layout.bottom() <= screen_height, "dpi={dpi}");
+        }
     }
 
     #[test]

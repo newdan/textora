@@ -461,7 +461,7 @@ cargo check --workspace --all-targets
 - `cargo fmt --all -- --check`、`cargo test -p textora-ui`、`cargo test -p textora-appkit-shell`、`cargo test -p textora-app --lib`、`cargo check --workspace --all-targets` 全部通过；
 - `./scripts/verify.sh` 在允许绑定本机回环端口的环境完整通过，包含架构边界、格式、全工作区 Clippy `-D warnings`、全工作区测试和文档测试；
 - 沙箱内首次运行仅有 `textora-sync` 的 12 个 mock server 用例因回环端口监听被系统拒绝；相同门禁在非沙箱环境通过，确认不是代码回归；
-- PointerLeave/InteractionCancel、PopupMenu disabled 与输入封闭、Tooltip 中英文/emoji/高 DPI/零尺寸边界、modal 焦点恢复均有自动化回归覆盖；
+- PointerLeave/InteractionCancel、PopupMenu disabled 与输入封闭、Tooltip 中英文/emoji/1x/2x DPI/零尺寸边界、modal 键盘与语义树双焦点恢复均有自动化回归覆盖；
 - macOS 真实 AX 回归结果见 Phase 4 平台验收记录。上方更宽的真实窗口操作清单仍按实际完成情况单独勾选，不以自动化结果替代。
 
 ## 7. 完成定义
