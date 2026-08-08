@@ -119,7 +119,7 @@ impl MindmapTheme {
             correct(c);
         }
 
-        let mut correct_style = |s: &mut MindmapNodeStyle| {
+        let correct_style = |s: &mut MindmapNodeStyle| {
             correct(&mut s.fill);
             correct(&mut s.border);
             correct(&mut s.text);

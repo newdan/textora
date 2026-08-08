@@ -101,7 +101,7 @@ impl TabBarState {
     pub fn update_layout(
         &mut self,
         input: &TabBarInput<'_>,
-        mut shaper: Option<&mut shaping::Shaper>,
+        shaper: Option<&mut shaping::Shaper>,
         dpi: f32,
     ) {
         let ctx = TabBarCtx { screen_w: input.screen_w, screen_h: input.screen_h, dpi };
