@@ -1454,7 +1454,7 @@ mod tests {
 
     #[test]
     fn hit_row_returns_none_for_separator() {
-        let mut w = make_list(
+        let w = make_list(
             vec![
                 item("a.rs"),
                 ListItem {
@@ -1477,7 +1477,7 @@ mod tests {
 
     #[test]
     fn hit_row_returns_none_for_header() {
-        let mut w = make_list(
+        let w = make_list(
             vec![
                 ListItem {
                     label: "Section".into(),
@@ -1561,7 +1561,7 @@ mod tests {
 
     #[test]
     fn indicator_dot_hit_center_returns_index() {
-        let mut w = make_list(
+        let w = make_list(
             vec![ListItem {
                 label: "x".into(),
                 kind: ListItemKind::Normal,
@@ -1622,7 +1622,7 @@ mod tests {
 
     #[test]
     fn pinned_item_hit_center_returns_index() {
-        let mut w = make_list(vec![pinned_item("main.rs")], Rect::new(0.0, 0.0, 220.0, 40.0));
+        let w = make_list(vec![pinned_item("main.rs")], Rect::new(0.0, 0.0, 220.0, 40.0));
         let center_y = 4.0 + 12.0;
         assert_eq!(w.hit_row(110.0, center_y, 1.0), Some(0));
     }
@@ -1818,7 +1818,7 @@ mod tests {
 
     #[test]
     fn nonpinned_item_close_button_not_shown_without_hover() {
-        let mut w = make_list(vec![item("file.rs")], Rect::new(0.0, 0.0, 220.0, 40.0));
+        let w = make_list(vec![item("file.rs")], Rect::new(0.0, 0.0, 220.0, 40.0));
 
         let dpi = 1.0f32;
         let row_rect = w.item_rect(0, dpi);

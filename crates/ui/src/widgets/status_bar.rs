@@ -379,7 +379,7 @@ mod tests {
 
     #[test]
     fn paint_zero_size_no_panic() {
-        let mut w = StatusBarWidget::new();
+        let w = StatusBarWidget::new();
         let t = test_theme();
         let mut dl = DrawList::new();
         let mut pc = PaintCtx::new(&mut dl, &t, 1.0);

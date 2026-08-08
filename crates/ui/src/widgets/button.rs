@@ -615,7 +615,7 @@ mod tests {
     #[test]
     fn paint_empty_button_emits_nothing() {
         let theme = crate::theme::test_theme();
-        let mut b = make_button(WidgetId(11));
+        let b = make_button(WidgetId(11));
         // No icon, no text
         let mut dl = DrawList::new();
         let mut shaper = shaping::Shaper::new().unwrap();
