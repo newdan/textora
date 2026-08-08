@@ -80,7 +80,7 @@ pub struct ListStyle {
     pub indicator_color: [f32; 4],
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum ListAction {
     /// 用户单击了第 index 行（已过滤 Separator/Header）
     Selected(usize),
@@ -88,6 +88,14 @@ pub enum ListAction {
     HoverChanged(Option<usize>),
     /// 用户点击了关闭按钮
     CloseRequested(usize),
+    /// 用户请求了某行的上下文菜单。
+    ContextRequested { index: usize, anchor_px: (f32, f32) },
+}
+
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+enum ListPressTarget {
+    Row(usize),
+    CloseButton(usize),
 }
 
 pub struct ListWidget {
@@ -96,6 +104,7 @@ pub struct ListWidget {
     active_index: Option<usize>,
     hovered_index: Option<usize>,
     close_hovered: bool,
+    press_target: Option<ListPressTarget>,
     style: ListStyle,
     scroll_offset: f32,
     orientation: Orientation,
@@ -111,6 +120,7 @@ impl ListWidget {
             active_index: None,
             hovered_index: None,
             close_hovered: false,
+            press_target: None,
             style,
             scroll_offset: 0.0,
             orientation,
@@ -125,6 +135,13 @@ impl ListWidget {
 
     pub fn set_items(&mut self, items: Vec<ListItem>) {
         self.items = items;
+        if self.press_target.is_some_and(|target| match target {
+            ListPressTarget::Row(index) | ListPressTarget::CloseButton(index) => {
+                index >= self.items.len()
+            }
+        }) {
+            self.press_target = None;
+        }
     }
     pub fn set_active(&mut self, idx: Option<usize>) {
         self.active_index = idx;
@@ -507,11 +524,37 @@ impl Widget for ListWidget {
     fn on_event(&mut self, ev: &Event, ctx: &mut EventCtx) -> Option<WidgetAction> {
         match ev {
             Event::MouseDown { px, py, button: MouseButton::Left } => {
-                // Close button 优先
-                if let Some(idx) = self.hit_close_btn(*px, *py, ctx.dpi) {
-                    return Some(WidgetAction::List(ListAction::CloseRequested(idx)));
-                }
-                self.hit_row(*px, *py, ctx.dpi).map(|_| WidgetAction::Consumed)
+                self.press_target = self
+                    .hit_close_btn(*px, *py, ctx.dpi)
+                    .map(ListPressTarget::CloseButton)
+                    .or_else(|| self.hit_row(*px, *py, ctx.dpi).map(ListPressTarget::Row));
+                self.press_target.map(|_| WidgetAction::Consumed)
+            }
+            Event::MouseDown { px, py, button: MouseButton::Right } => {
+                self.hit_row(*px, *py, ctx.dpi).map(|index| {
+                    WidgetAction::List(ListAction::ContextRequested {
+                        index,
+                        anchor_px: (*px, *py),
+                    })
+                })
+            }
+            Event::MouseUp { px, py, button: MouseButton::Left } => {
+                let press_target = self.press_target.take()?;
+                let action = match press_target {
+                    ListPressTarget::Row(index)
+                        if self.hit_row(*px, *py, ctx.dpi) == Some(index)
+                            && self.hit_close_btn(*px, *py, ctx.dpi).is_none() =>
+                    {
+                        WidgetAction::List(ListAction::Selected(index))
+                    }
+                    ListPressTarget::CloseButton(index)
+                        if self.hit_close_btn(*px, *py, ctx.dpi) == Some(index) =>
+                    {
+                        WidgetAction::List(ListAction::CloseRequested(index))
+                    }
+                    _ => WidgetAction::Consumed,
+                };
+                Some(action)
             }
             Event::MouseMove { px, py } => {
                 let new = self.hit_row(*px, *py, ctx.dpi);
@@ -529,6 +572,10 @@ impl Widget for ListWidget {
             }
             _ => None,
         }
+    }
+
+    fn is_capturing(&self) -> bool {
+        self.press_target.is_some()
     }
 
     fn as_any(&self) -> &dyn std::any::Any {
@@ -665,14 +712,86 @@ mod tests {
         let theme = crate::theme::test_theme();
         let mut ctx = EventCtx { cursor_hint: None, theme: &theme, dpi: 1.0 };
         // 第二行：top = 4 + 24 = 28；中线 40
-        let action = w
-            .on_event(
+        assert_eq!(
+            w.on_event(
                 &Event::MouseDown { px: 100.0, py: 40.0, button: MouseButton::Left },
                 &mut ctx,
-            )
-            .unwrap();
-        let typed = action;
-        assert_eq!(typed, WidgetAction::Consumed);
+            ),
+            Some(WidgetAction::Consumed)
+        );
+        assert!(w.is_capturing());
+        assert_eq!(
+            w.on_event(
+                &Event::MouseUp { px: 100.0, py: 40.0, button: MouseButton::Left },
+                &mut ctx,
+            ),
+            Some(WidgetAction::List(ListAction::Selected(1)))
+        );
+        assert!(!w.is_capturing());
+    }
+
+    #[test]
+    fn releasing_on_another_row_or_outside_cancels_selection() {
+        let mut w =
+            make_list(vec![item("a"), item("b"), item("c")], Rect::new(0.0, 0.0, 220.0, 100.0));
+        let theme = crate::theme::test_theme();
+        let mut ctx = EventCtx { cursor_hint: None, theme: &theme, dpi: 1.0 };
+
+        assert_eq!(
+            w.on_event(
+                &Event::MouseDown { px: 100.0, py: 16.0, button: MouseButton::Left },
+                &mut ctx,
+            ),
+            Some(WidgetAction::Consumed)
+        );
+        assert_eq!(
+            w.on_event(
+                &Event::MouseUp { px: 100.0, py: 40.0, button: MouseButton::Left },
+                &mut ctx,
+            ),
+            Some(WidgetAction::Consumed)
+        );
+
+        assert_eq!(
+            w.on_event(
+                &Event::MouseDown { px: 100.0, py: 16.0, button: MouseButton::Left },
+                &mut ctx,
+            ),
+            Some(WidgetAction::Consumed)
+        );
+        assert_eq!(
+            w.on_event(
+                &Event::MouseUp { px: 300.0, py: 160.0, button: MouseButton::Left },
+                &mut ctx,
+            ),
+            Some(WidgetAction::Consumed)
+        );
+    }
+
+    #[test]
+    fn close_press_release_emits_only_close_action() {
+        let mut w = make_list(vec![item("a")], Rect::new(0.0, 0.0, 220.0, 40.0));
+        let theme = crate::theme::test_theme();
+        let mut ctx = EventCtx { cursor_hint: None, theme: &theme, dpi: 1.0 };
+        let row_rect = w.item_rect(0, 1.0);
+        let close_x = row_rect.right() - style().pad_x_logical - CLOSE_BTN_SIZE_LOGICAL * 0.5;
+        let close_y = row_rect.y + row_rect.h * 0.5;
+        let _ = w.on_event(&Event::MouseMove { px: close_x, py: close_y }, &mut ctx);
+
+        assert_eq!(
+            w.on_event(
+                &Event::MouseDown { px: close_x, py: close_y, button: MouseButton::Left },
+                &mut ctx,
+            ),
+            Some(WidgetAction::Consumed)
+        );
+        assert_eq!(
+            w.on_event(
+                &Event::MouseUp { px: close_x, py: close_y, button: MouseButton::Left },
+                &mut ctx,
+            ),
+            Some(WidgetAction::List(ListAction::CloseRequested(0)))
+        );
     }
 
     #[test]

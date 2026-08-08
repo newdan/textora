@@ -25,7 +25,7 @@ use std::any::Any;
 use crate::core::widget::{ControlAction, WidgetAction, WidgetId};
 use crate::core::{Event, EventCtx, KeyCode, LayoutCtx, MouseButton, PaintCtx, Rect, Widget};
 use crate::widgets::list::{
-    ListItem, ListItemIndicator, ListItemKind, ListStyle, ListWidget, Orientation,
+    ListAction, ListItem, ListItemIndicator, ListItemKind, ListStyle, ListWidget, Orientation,
 };
 use crate::widgets::split_button::{SplitButtonInput, SplitButtonWidget};
 
@@ -213,6 +213,31 @@ impl SidebarWidget {
 
     pub fn on_key(&mut self, key: types::SidebarKey) -> Option<SidebarAction> {
         self.state.on_key(key, &mut self.cfg)
+    }
+
+    fn translate_list_action(&self, action: WidgetAction) -> Option<WidgetAction> {
+        let WidgetAction::List(action) = action else {
+            return Some(action);
+        };
+        let workspace_index = |sorted_index: usize| {
+            self.tab_index_map.get(sorted_index).copied().unwrap_or(sorted_index)
+        };
+        match action {
+            ListAction::Selected(index) => {
+                Some(WidgetAction::Sidebar(SidebarAction::SwitchTab(workspace_index(index))))
+            }
+            ListAction::CloseRequested(index) => {
+                Some(WidgetAction::Sidebar(SidebarAction::CloseTab(workspace_index(index))))
+            }
+            ListAction::ContextRequested { index, anchor_px } => {
+                Some(WidgetAction::Sidebar(SidebarAction::ContextMenuPx {
+                    tab_index: workspace_index(index),
+                    anchor_px,
+                    screen_size: (self.screen_w, self.screen_h),
+                }))
+            }
+            ListAction::HoverChanged(_) => Some(WidgetAction::Sidebar(SidebarAction::Hovered)),
+        }
     }
 
     /// 委托：打开菜单状态
@@ -491,7 +516,10 @@ impl Widget for SidebarWidget {
     }
 
     fn is_capturing(&self) -> bool {
-        self.dragging || self.state.open_menu().is_some() || self.new_document_button.is_capturing()
+        self.dragging
+            || self.state.open_menu().is_some()
+            || self.new_document_button.is_capturing()
+            || self.list.is_capturing()
     }
 
     fn on_event(&mut self, ev: &Event, ctx: &mut EventCtx) -> Option<WidgetAction> {
@@ -564,16 +592,10 @@ impl Widget for SidebarWidget {
                     self.state.set_open_menu(None);
                 }
 
-                // Check list items first (tab context menu)
-                let dpi = ctx.dpi;
-                if let Some(_layout) = self.state.current_layout()
-                    && let Some(idx) = self.list.hit_row(*px, *py, dpi)
+                if self.state.current_layout().is_some()
+                    && let Some(action) = self.list.on_event(ev, ctx)
                 {
-                    return Some(WidgetAction::Sidebar(SidebarAction::ContextMenuPx {
-                        tab_index: idx,
-                        anchor_px: (*px, *py),
-                        screen_size: (self.screen_w, self.screen_h),
-                    }));
+                    return self.translate_list_action(action);
                 }
 
                 // Check framework buttons (hamburger toggle)
@@ -609,19 +631,10 @@ impl Widget for SidebarWidget {
                     return Some(WidgetAction::Sidebar(action));
                 }
 
-                // 3) Hit test list items; map sorted list index back to workspace index
-                if let Some(_layout) = self.state.current_layout() {
-                    // Close button 优先
-                    if let Some(sorted_idx) = self.list.hit_close_btn(px, py, ctx.dpi) {
-                        let ws_idx =
-                            self.tab_index_map.get(sorted_idx).copied().unwrap_or(sorted_idx);
-                        return Some(WidgetAction::Sidebar(SidebarAction::CloseTab(ws_idx)));
-                    }
-                    if let Some(sorted_idx) = self.list.hit_row(px, py, ctx.dpi) {
-                        let ws_idx =
-                            self.tab_index_map.get(sorted_idx).copied().unwrap_or(sorted_idx);
-                        return Some(WidgetAction::Sidebar(SidebarAction::SwitchTab(ws_idx)));
-                    }
+                if self.state.current_layout().is_some()
+                    && let Some(action) = self.list.on_event(ev, ctx)
+                {
+                    return self.translate_list_action(action);
                 }
 
                 None
@@ -634,6 +647,10 @@ impl Widget for SidebarWidget {
             }
 
             Event::MouseUp { .. } => {
+                if self.list.is_capturing() {
+                    let action = self.list.on_event(ev, ctx)?;
+                    return self.translate_list_action(action);
+                }
                 let action = self.new_document_button.on_event(ev, ctx)?;
                 match action {
                     WidgetAction::Control(ControlAction::Activated {

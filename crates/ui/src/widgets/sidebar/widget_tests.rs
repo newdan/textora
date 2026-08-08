@@ -344,8 +344,15 @@ mod tests {
         let cy = list_clip.y + 12.0; // 第一行中点附近
 
         let mut ctx = EventCtx { cursor_hint: None, theme: &t, dpi: 1.0 };
+        assert_eq!(
+            w.on_event(
+                &Event::MouseDown { px: 100.0, py: cy, button: MouseButton::Left },
+                &mut ctx,
+            ),
+            Some(WidgetAction::Consumed)
+        );
         let action = w
-            .on_event(&Event::MouseDown { px: 100.0, py: cy, button: MouseButton::Left }, &mut ctx)
+            .on_event(&Event::MouseUp { px: 100.0, py: cy, button: MouseButton::Left }, &mut ctx)
             .unwrap();
         let typed = action;
         assert!(matches!(typed, WidgetAction::Sidebar(SidebarAction::SwitchTab(0))));
@@ -1087,10 +1094,15 @@ mod tests {
         assert_eq!(hit, Some(0), "List hit_close_btn should return Some(0)");
 
         // Now click through the sidebar widget
-        let action = w.on_event(
-            &Event::MouseDown { px: btn_x, py: btn_y, button: MouseButton::Left },
-            &mut ec,
+        assert_eq!(
+            w.on_event(
+                &Event::MouseDown { px: btn_x, py: btn_y, button: MouseButton::Left },
+                &mut ec,
+            ),
+            Some(WidgetAction::Consumed)
         );
+        let action = w
+            .on_event(&Event::MouseUp { px: btn_x, py: btn_y, button: MouseButton::Left }, &mut ec);
         if let Some(WidgetAction::Sidebar(sa)) = action {
             assert!(matches!(sa, SidebarAction::CloseTab(0)), "Expected CloseTab(0), got {:?}", sa);
         } else {
@@ -1153,10 +1165,15 @@ mod tests {
         // Click close button on sorted index 1
         let btn_x = row1.x + row1.w - 12.0 - 12.0 + 6.0;
         let btn_y = row1.y + row1.h * 0.5;
-        let action = w.on_event(
-            &Event::MouseDown { px: btn_x, py: btn_y, button: MouseButton::Left },
-            &mut ec,
+        assert_eq!(
+            w.on_event(
+                &Event::MouseDown { px: btn_x, py: btn_y, button: MouseButton::Left },
+                &mut ec,
+            ),
+            Some(WidgetAction::Consumed)
         );
+        let action = w
+            .on_event(&Event::MouseUp { px: btn_x, py: btn_y, button: MouseButton::Left }, &mut ec);
         if let Some(WidgetAction::Sidebar(sa)) = action {
             assert!(
                 matches!(sa, SidebarAction::CloseTab(0)),
