@@ -51,13 +51,6 @@ pub struct SidebarWidget {
     pub(crate) screen_h: f32,
     pub metrics: crate::settings::UiMetrics,
 
-    // ── resize 拖拽状态（入口已移除，保留实现） ──
-    #[allow(dead_code)]
-    dragging: bool,
-    #[allow(dead_code)]
-    drag_start_px: f32,
-    #[allow(dead_code)]
-    drag_start_width: f32,
     // ── 脏检查缓存 ──
     pub(crate) list_items: Vec<ListItem>,
     pub(crate) list_items_dirty: bool,
@@ -125,9 +118,6 @@ impl SidebarWidget {
             traffic_light_inset: (0.0, 0.0),
             screen_w: 800.0,
             screen_h: 600.0,
-            dragging: false,
-            drag_start_px: 0.0,
-            drag_start_width: 0.0,
             list_items: Vec::new(),
             list_items_dirty: true,
             metrics,
@@ -517,8 +507,7 @@ impl Widget for SidebarWidget {
     }
 
     fn is_capturing(&self) -> bool {
-        self.dragging
-            || self.state.open_menu().is_some()
+        self.state.open_menu().is_some()
             || self.new_document_button.is_capturing()
             || self.list.is_capturing()
     }
