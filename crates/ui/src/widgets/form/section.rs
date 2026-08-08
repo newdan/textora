@@ -852,7 +852,7 @@ mod tests {
     #[test]
     fn form_section_returns_none_when_focus_is_missing_or_not_a_text_box() {
         let checkbox_id = WidgetId(1);
-        let mut section = laid_out_section(2);
+        let section = laid_out_section(2);
 
         let section = section;
         assert_eq!(section.focused_ime_cursor_rect(), None);

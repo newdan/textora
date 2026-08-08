@@ -795,7 +795,7 @@ mod tests {
     #[test]
     fn form_row_returns_none_when_focus_is_missing_or_not_a_text_box() {
         let checkbox_id = WidgetId(101);
-        let mut row = checkbox_row();
+        let row = checkbox_row();
 
         let row = row;
         assert_eq!(row.focused_ime_cursor_rect(), None);
