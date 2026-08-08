@@ -8,6 +8,8 @@ use crate::widgets::icon::draw_icon;
 use std::any::Any;
 use std::sync::Arc;
 
+const BUTTON_FOCUS_RING_WIDTH_LOGICAL: f32 = 2.0;
+
 /// Visual style for a Button.
 #[derive(Clone, Debug)]
 pub struct ButtonStyle {
@@ -34,6 +36,7 @@ pub struct Button {
     style: ButtonStyle,
     hovered: bool,
     enabled: bool,
+    focused: bool,
     pressed: bool,
     selected: bool,
 }
@@ -49,6 +52,7 @@ impl Button {
             style,
             hovered: false,
             enabled: true,
+            focused: false,
             pressed: false,
             selected: false,
         }
@@ -68,6 +72,11 @@ impl Button {
     }
     pub fn set_enabled(&mut self, enabled: bool) {
         self.enabled = enabled;
+        if !enabled {
+            self.hovered = false;
+            self.focused = false;
+            self.pressed = false;
+        }
     }
     pub fn set_icon_size(&mut self, sz: f32) {
         self.icon_size_logical = sz;
@@ -129,6 +138,16 @@ impl Widget for Button {
         if border[3] > 0.0 {
             ctx.list.stroke_rounded(self.rect, border, corner_radius, dpi);
         }
+        if self.focused && self.enabled {
+            let mut focus_ring = ctx.theme.settings_theme().focus_ring;
+            focus_ring[3] *= alpha;
+            ctx.list.stroke_rounded(
+                self.rect,
+                focus_ring,
+                corner_radius,
+                BUTTON_FOCUS_RING_WIDTH_LOGICAL * dpi,
+            );
+        }
 
         let icon_gap = 4.0 * dpi;
         let mut cursor_x = self.rect.x + pad_x;
@@ -171,6 +190,14 @@ impl Widget for Button {
         Some(self.id)
     }
 
+    fn is_focusable(&self) -> bool {
+        self.enabled
+    }
+
+    fn set_keyboard_focus(&mut self, focused_id: Option<WidgetId>) {
+        self.focused = self.enabled && focused_id == Some(self.id);
+    }
+
     fn on_event(&mut self, ev: &Event, ctx: &mut EventCtx) -> Option<WidgetAction> {
         match ev {
             Event::MouseMove { px, py } => {
@@ -191,7 +218,11 @@ impl Widget for Button {
                 }
                 if self.rect.contains(*px, *py) {
                     self.pressed = true;
-                    Some(WidgetAction::Consumed)
+                    if self.focused {
+                        Some(WidgetAction::Consumed)
+                    } else {
+                        Some(WidgetAction::Control(ControlAction::FocusRequested { id: self.id }))
+                    }
                 } else {
                     None
                 }
@@ -209,6 +240,17 @@ impl Widget for Button {
                 } else {
                     Some(WidgetAction::Consumed)
                 }
+            }
+            Event::KeyDown(key, modifiers)
+                if self.enabled
+                    && self.focused
+                    && *modifiers == crate::core::Modifiers::NONE
+                    && matches!(
+                        key,
+                        crate::core::KeyCode::Enter | crate::core::KeyCode::Char(' ')
+                    ) =>
+            {
+                Some(WidgetAction::Control(ControlAction::Activated { id: self.id }))
             }
             _ => None,
         }
@@ -228,7 +270,7 @@ mod tests {
 
     use crate::core::measure::NoopMeasure;
     use crate::core::paint::{DrawCmd, DrawList};
-    use crate::core::widget::{ControlAction, LayoutCtx, WidgetId};
+    use crate::core::widget::{ControlAction, KeyCode, LayoutCtx, Modifiers, WidgetId};
 
     fn test_style() -> ButtonStyle {
         ButtonStyle {
@@ -391,7 +433,10 @@ mod tests {
     fn button_activates_only_after_inside_press_and_release() {
         let mut button = make_button(WidgetId(7));
 
-        assert_eq!(mouse_down(&mut button, 20.0, 10.0), Some(WidgetAction::Consumed));
+        assert_eq!(
+            mouse_down(&mut button, 20.0, 10.0),
+            Some(WidgetAction::Control(ControlAction::FocusRequested { id: WidgetId(7) }))
+        );
         assert_eq!(
             mouse_up(&mut button, 20.0, 10.0),
             Some(WidgetAction::Control(ControlAction::Activated { id: WidgetId(7) }))
@@ -503,7 +548,98 @@ mod tests {
     fn inside_press_outside_release_does_not_activate() {
         let mut button = make_button(WidgetId(16));
 
-        assert_eq!(mouse_down(&mut button, 50.0, 14.0), Some(WidgetAction::Consumed));
+        assert_eq!(
+            mouse_down(&mut button, 50.0, 14.0),
+            Some(WidgetAction::Control(ControlAction::FocusRequested { id: WidgetId(16) }))
+        );
         assert_eq!(mouse_up(&mut button, 150.0, 140.0), Some(WidgetAction::Consumed));
+    }
+
+    #[test]
+    fn enabled_button_is_collected_as_focusable() {
+        let mut button = make_button(WidgetId(17));
+        let mut focusable_ids = Vec::new();
+
+        button.collect_focusable_ids(&mut focusable_ids);
+        assert_eq!(focusable_ids, vec![WidgetId(17)]);
+
+        button.set_enabled(false);
+        focusable_ids.clear();
+        button.collect_focusable_ids(&mut focusable_ids);
+        assert!(focusable_ids.is_empty());
+    }
+
+    #[test]
+    fn button_keyboard_activation_requires_focus() {
+        let id = WidgetId(18);
+        let mut button = make_button(id);
+        let theme = crate::theme::test_theme();
+        let mut event_ctx = EventCtx { cursor_hint: None, theme: &theme, dpi: 1.0 };
+
+        for key in [KeyCode::Enter, KeyCode::Char(' ')] {
+            assert_eq!(
+                button.on_event(&Event::KeyDown(key, Modifiers::NONE), &mut event_ctx),
+                None
+            );
+        }
+
+        button.set_keyboard_focus(Some(id));
+        for key in [KeyCode::Enter, KeyCode::Char(' ')] {
+            assert_eq!(
+                button.on_event(&Event::KeyDown(key, Modifiers::NONE), &mut event_ctx),
+                Some(WidgetAction::Control(ControlAction::Activated { id }))
+            );
+        }
+    }
+
+    #[test]
+    fn button_mouse_down_requests_focus_and_release_still_activates() {
+        let id = WidgetId(19);
+        let mut button = make_button(id);
+
+        assert_eq!(
+            mouse_down(&mut button, 20.0, 10.0),
+            Some(WidgetAction::Control(ControlAction::FocusRequested { id }))
+        );
+        assert_eq!(
+            mouse_up(&mut button, 20.0, 10.0),
+            Some(WidgetAction::Control(ControlAction::Activated { id }))
+        );
+    }
+
+    #[test]
+    fn disabling_button_clears_focus_and_pressed_state() {
+        let id = WidgetId(20);
+        let mut button = make_button(id);
+        button.set_keyboard_focus(Some(id));
+        assert_eq!(mouse_down(&mut button, 20.0, 10.0), Some(WidgetAction::Consumed));
+
+        button.set_enabled(false);
+        button.set_enabled(true);
+
+        let theme = crate::theme::test_theme();
+        let mut event_ctx = EventCtx { cursor_hint: None, theme: &theme, dpi: 1.0 };
+        assert_eq!(
+            button.on_event(&Event::KeyDown(KeyCode::Enter, Modifiers::NONE), &mut event_ctx),
+            None
+        );
+        assert_eq!(mouse_up(&mut button, 20.0, 10.0), None);
+    }
+
+    #[test]
+    fn focused_button_paints_theme_focus_ring() {
+        let id = WidgetId(21);
+        let mut button = make_button(id);
+        button.set_keyboard_focus(Some(id));
+        let theme = crate::theme::test_theme();
+        let focus_ring = theme.settings_theme().focus_ring;
+        let mut draw_list = DrawList::new();
+        let mut paint_ctx = PaintCtx::new(&mut draw_list, &theme, 1.0);
+
+        button.paint(&mut paint_ctx);
+
+        assert!(draw_list.cmds.iter().any(
+            |command| matches!(command, DrawCmd::StrokeRect { color, .. } if *color == focus_ring)
+        ));
     }
 }

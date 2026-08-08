@@ -460,6 +460,17 @@ impl SettingsView {
         }
     }
 
+    fn set_focused_control(&mut self, focused_id: Option<WidgetId>) {
+        self.focused_id = focused_id;
+        for (_, button) in &mut self.category_buttons {
+            button.set_keyboard_focus(focused_id);
+        }
+        self.form.set_keyboard_focus(focused_id);
+        if let Some(banner) = self.persistence_banner.as_mut() {
+            banner.set_keyboard_focus(focused_id);
+        }
+    }
+
     fn handle_category_action(&mut self, action: ControlAction) -> Option<WidgetAction> {
         let ControlAction::Activated { id } = action else {
             return Some(WidgetAction::Consumed);
@@ -497,7 +508,10 @@ impl SettingsView {
             ControlAction::TextEdited { .. } => Some(WidgetAction::Consumed),
             ControlAction::TextCommitted { id, value } => self.handle_text_commit(id, value),
             ControlAction::Toggled { id, checked } => self.handle_toggle(id, checked),
-            ControlAction::FocusRequested { .. } => Some(WidgetAction::Consumed),
+            ControlAction::FocusRequested { id } => {
+                self.set_focused_control(Some(id));
+                Some(WidgetAction::Consumed)
+            }
         }
     }
 
@@ -628,8 +642,7 @@ impl SettingsView {
         match action {
             WidgetAction::Control(control_action) => {
                 if let ControlAction::FocusRequested { id } = control_action {
-                    self.focused_id = Some(id);
-                    self.form.set_keyboard_focus(Some(id));
+                    self.set_focused_control(Some(id));
                     return Some(WidgetAction::Consumed);
                 }
                 self.handle_control_action(control_action)
@@ -822,15 +835,33 @@ impl Widget for SettingsView {
     }
 
     fn collect_focusable_ids(&self, output: &mut Vec<WidgetId>) {
+        if self.category_navigation_visible {
+            for (_, button) in &self.category_buttons {
+                button.collect_focusable_ids(output);
+            }
+        }
         self.form.collect_focusable_ids(output);
+        if let Some(banner) = &self.persistence_banner {
+            banner.collect_focusable_ids(output);
+        }
     }
 
     fn set_keyboard_focus(&mut self, focused_id: Option<WidgetId>) {
-        self.focused_id = focused_id;
-        self.form.set_keyboard_focus(focused_id);
+        self.set_focused_control(focused_id);
     }
 
     fn on_event(&mut self, event: &Event, ctx: &mut EventCtx) -> Option<WidgetAction> {
+        if matches!(event, Event::KeyDown(..)) {
+            if let Some(index) = self.category_buttons.iter().position(|(_, button)| {
+                button.id() == self.focused_id && self.category_navigation_visible
+            }) {
+                return self.dispatch_category_event(index, event, ctx);
+            }
+            if self.focused_id == Some(RETRY_PERSISTENCE_ID) && self.persistence_banner.is_some() {
+                return self.dispatch_banner_event(event, ctx);
+            }
+        }
+
         if self.persistence_banner.as_ref().is_some_and(Widget::is_capturing)
             && matches!(event, Event::MouseMove { .. } | Event::MouseUp { .. })
         {
@@ -1086,6 +1117,7 @@ mod tests {
     use super::*;
     use crate::core::measure::NoopMeasure;
     use crate::core::paint::{DrawCmd, DrawList};
+    use crate::core::{KeyCode, Modifiers};
     use crate::view_mode::ViewMode;
 
     fn settings_fixture(category: SettingsCategory) -> SettingsView {
@@ -1503,5 +1535,24 @@ mod tests {
             draw_list.cmds.last(),
             Some(DrawCmd::StrokeRect { color, .. }) if *color == light_settings.control_border
         ));
+    }
+
+    #[test]
+    fn category_and_segmented_buttons_share_settings_focus_protocol() {
+        let theme = crate::theme::test_theme();
+        let mut view = settings_fixture(SettingsCategory::Appearance);
+        layout_settings_view(&mut view, &theme, Rect::new(0.0, 0.0, 600.0, 400.0));
+
+        let mut focusable_ids = Vec::new();
+        view.collect_focusable_ids(&mut focusable_ids);
+        assert!(focusable_ids.contains(&APPEARANCE_CATEGORY_ID));
+        assert!(focusable_ids.contains(&THEME_DARK_ID));
+
+        view.set_keyboard_focus(Some(THEME_DARK_ID));
+        let mut ctx = EventCtx { cursor_hint: None, theme: &theme, dpi: 1.0 };
+        assert_eq!(
+            view.on_event(&Event::KeyDown(KeyCode::Enter, Modifiers::NONE), &mut ctx),
+            Some(WidgetAction::Settings(SettingsViewAction::SetThemeMode(ThemeMode::Dark)))
+        );
     }
 }

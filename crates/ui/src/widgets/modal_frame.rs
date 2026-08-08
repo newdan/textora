@@ -60,6 +60,7 @@ pub struct ModalFrame {
     close_button: Button,
     content: Box<dyn Widget>,
     style: ModalFrameStyle,
+    focused_id: Option<WidgetId>,
     pointer_target: Option<PointerTarget>,
     hover_target: Option<PointerTarget>,
 }
@@ -94,6 +95,7 @@ impl ModalFrame {
             close_button,
             content,
             style,
+            focused_id: None,
             pointer_target: None,
             hover_target: None,
         }
@@ -335,6 +337,7 @@ impl Widget for ModalFrame {
     }
 
     fn set_keyboard_focus(&mut self, focused_id: Option<WidgetId>) {
+        self.focused_id = focused_id;
         self.close_button.set_keyboard_focus(focused_id);
         self.content.set_keyboard_focus(focused_id);
     }
@@ -342,6 +345,12 @@ impl Widget for ModalFrame {
     fn on_event(&mut self, event: &Event, ctx: &mut EventCtx) -> Option<WidgetAction> {
         if matches!(event, Event::KeyDown(KeyCode::Escape, _)) {
             return Some(WidgetAction::Overlay(crate::OverlayAction::DismissRequested));
+        }
+
+        if matches!(event, Event::KeyDown(..))
+            && self.focused_id == Some(MODAL_FRAME_CLOSE_BUTTON_ID)
+        {
+            return self.dispatch_to_close_button(event, ctx);
         }
 
         match event {
@@ -554,6 +563,24 @@ mod tests {
             key_escape(&mut modal),
             Some(WidgetAction::Overlay(crate::OverlayAction::DismissRequested))
         );
+    }
+
+    #[test]
+    fn modal_close_button_is_focusable_and_activates_from_keyboard() {
+        let mut modal = fixture_modal();
+        let mut focusable_ids = Vec::new();
+        modal.collect_focusable_ids(&mut focusable_ids);
+        assert_eq!(focusable_ids.first(), Some(&MODAL_FRAME_CLOSE_BUTTON_ID));
+
+        modal.set_keyboard_focus(Some(MODAL_FRAME_CLOSE_BUTTON_ID));
+        let theme = crate::theme::test_theme();
+        let mut ctx = EventCtx { cursor_hint: None, theme: &theme, dpi: 1.0 };
+        for key in [KeyCode::Enter, KeyCode::Char(' ')] {
+            assert_eq!(
+                modal.on_event(&Event::KeyDown(key, Modifiers::NONE), &mut ctx),
+                Some(WidgetAction::Overlay(crate::OverlayAction::DismissRequested))
+            );
+        }
     }
 
     #[test]
