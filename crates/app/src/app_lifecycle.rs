@@ -5,6 +5,9 @@ use crate::app_event::AppEvent;
 use crate::app::compute_cursor_phase;
 
 use appkit_shell::ProductHost;
+use appkit_shell::accessibility_adapter::{
+    PlatformAccessibilityEvent, PlatformAccessibilityWindowEvent,
+};
 use appkit_shell::editor_runtime::{EditorFocus, EditorInputContext};
 pub(crate) use appkit_shell::window_input::winit_key_to_keycode;
 use appkit_shell::window_input::{scroll_delta_pixels, ui_modifiers};
@@ -28,6 +31,7 @@ use ui::render_geom::{AdvanceCacheEntry, compute_selection_highlight_quads};
 
 // Font size and line height are now in Settings
 const FALLBACK_LOCAL_DEVICE_SHORT_ID: &str = "local";
+const ACCESSIBILITY_WINDOW_NAME: &str = "textora";
 
 fn editor_input_context(app: &App) -> EditorInputContext {
     let editor_focus =
@@ -391,6 +395,56 @@ impl App {
         }
     }
 
+    fn publish_accessibility_tree(&mut self) {
+        let tree = self.ui_shell.accessibility_tree(ACCESSIBILITY_WINDOW_NAME);
+        if let Err(errors) = tree.validate() {
+            eprintln!("[accessibility] invalid semantic tree: {errors:?}");
+            return;
+        }
+        let Some(adapter) = self.accessibility_adapter.as_mut() else { return };
+        adapter.update(&tree);
+    }
+
+    fn handle_accessibility_event(
+        &mut self,
+        event: &PlatformAccessibilityEvent,
+        event_loop: &ActiveEventLoop,
+    ) {
+        let Some(window) = self.editor_runtime.window() else { return };
+        if window.id() != event.window_id {
+            return;
+        }
+
+        match &event.window_event {
+            PlatformAccessibilityWindowEvent::InitialTreeRequested => {
+                self.publish_accessibility_tree();
+            }
+            PlatformAccessibilityWindowEvent::ActionRequested(platform_request) => {
+                let shared_request = self
+                    .accessibility_adapter
+                    .as_ref()
+                    .and_then(|adapter| adapter.translate_action(platform_request));
+                let Some(shared_request) = shared_request else { return };
+                let Some(widget_action) =
+                    self.ui_shell.dispatch_accessibility_action(&shared_request)
+                else {
+                    return;
+                };
+
+                let mut actions = Vec::new();
+                crate::events::translate_widget_action(&widget_action, self, &mut actions);
+                if let Some(sync_action) = self.take_pending_sync_settings_action() {
+                    actions.push(AppAction::Sync(sync_action));
+                }
+                for action in actions {
+                    self.dispatch(action, event_loop);
+                }
+                self.needs_redraw = true;
+            }
+            PlatformAccessibilityWindowEvent::AccessibilityDeactivated => {}
+        }
+    }
+
     /// Actual resumed logic, wrapped in catch_unwind by the trait method.
     fn do_resumed(&mut self, event_loop: &ActiveEventLoop) {
         self.running = true;
@@ -422,6 +476,12 @@ impl App {
 
     /// Actual window event logic, wrapped in catch_unwind by the trait method.
     fn do_window_event(&mut self, event_loop: &ActiveEventLoop, event: WindowEvent) {
+        if let Some(adapter) = self.accessibility_adapter.as_mut()
+            && let Some(window) = self.editor_runtime.window()
+        {
+            adapter.process_window_event(window, &event);
+        }
+
         // Poll native menu actions (non-blocking)
         let menu_actions: Vec<MenuAction> = if let Some(native_menu) = self.native_menu() {
             let mut actions = Vec::new();
@@ -776,6 +836,7 @@ impl App {
                 }
                 let _rr_t0 = std::time::Instant::now();
                 self.render();
+                self.publish_accessibility_tree();
                 let _rr_us = _rr_t0.elapsed().as_micros();
                 // Debug-only: append frame timing to /tmp/perf.log
                 #[cfg(debug_assertions)]
@@ -1051,8 +1112,15 @@ impl ApplicationHandler<AppEvent> for App {
     }
 
     fn user_event(&mut self, event_loop: &ActiveEventLoop, event: AppEvent) {
-        if self.handle_user_event(event) {
-            self.quit_app(event_loop);
+        match event {
+            AppEvent::Accessibility(event) => {
+                self.handle_accessibility_event(&event, event_loop);
+            }
+            event => {
+                if self.handle_user_event(event) {
+                    self.quit_app(event_loop);
+                }
+            }
         }
     }
 
@@ -1386,6 +1454,28 @@ mod tests {
             .expect("application lifecycle production source should precede tests");
         assert!(production_source.contains("AppEvent::StartBackgroundServices => {"));
         assert!(production_source.contains("self.start_background_services();"));
+    }
+
+    #[test]
+    fn platform_accessibility_wraps_native_input_and_publishes_after_render() {
+        let production_source = include_str!("app_lifecycle.rs")
+            .split("#[cfg(test)]")
+            .next()
+            .expect("application lifecycle production source should precede tests");
+        let process_event = ["process_", "window_event"].concat();
+        let render = ["self.", "render();"].concat();
+        let publish_tree = ["self.publish_", "accessibility_tree();"].concat();
+
+        let process_position =
+            production_source.find(&process_event).expect("native event must reach AccessKit");
+        let render_position = production_source.find(&render).expect("frame must render");
+        let publish_position = production_source[render_position..]
+            .find(&publish_tree)
+            .map(|relative_position| render_position + relative_position)
+            .expect("semantic tree must be published after rendering");
+
+        assert!(process_position < render_position);
+        assert!(render_position < publish_position);
     }
 
     #[test]

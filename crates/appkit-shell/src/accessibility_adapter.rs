@@ -12,6 +12,10 @@ use ui::core::{
     AccessibilityOrientation, AccessibilityRole, AccessibilityTree,
 };
 
+pub use accesskit_winit::{
+    Event as PlatformAccessibilityEvent, WindowEvent as PlatformAccessibilityWindowEvent,
+};
+
 #[derive(Clone)]
 struct ActionTarget {
     actions: Vec<AccessibilityAction>,

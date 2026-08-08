@@ -202,7 +202,11 @@ pub(crate) fn handle_interaction_cancel(app: &mut App) -> AppEffect {
 }
 
 /// Translate a single WidgetAction into AppActions.
-fn translate_widget_action(action: &WidgetAction, app: &App, actions: &mut Vec<AppAction>) {
+pub(crate) fn translate_widget_action(
+    action: &WidgetAction,
+    app: &App,
+    actions: &mut Vec<AppAction>,
+) {
     match action {
         WidgetAction::Control(_) => {}
         WidgetAction::Overlay(overlay_action) => translate_overlay_action(overlay_action, actions),
