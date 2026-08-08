@@ -2,7 +2,10 @@ use std::any::Any;
 
 use ui::button::{Button, ButtonStyle};
 use ui::core::widget::{ControlAction, WidgetId};
-use ui::core::{Event, EventCtx, LayoutCtx, PaintCtx, Rect, Widget, WidgetAction};
+use ui::core::{
+    AccessibilityActionRequest, AccessibilityContext, AccessibilityNode, Event, EventCtx,
+    LayoutCtx, PaintCtx, Rect, Widget, WidgetAction,
+};
 use ui::settings_view::{SettingsView, SettingsViewInput};
 use ui::theme::SettingsTheme;
 
@@ -235,6 +238,32 @@ impl TextoraSettingsOverlay {
             .or(previous_hover_action)
     }
 
+    fn dispatch_interaction_lifecycle(
+        &mut self,
+        event: &Event,
+        ctx: &mut EventCtx,
+    ) -> Option<WidgetAction> {
+        let container_changed = if matches!(event, Event::InteractionCancel) {
+            self.category_pointer_index.take().is_some() | self.hover_target.take().is_some()
+        } else {
+            self.hover_target.take().is_some()
+        };
+        let mut first_action = None;
+        for category_index in 0..self.category_buttons.len() {
+            if let Some(action) = self.dispatch_category_event(category_index, event, ctx)
+                && first_action.is_none()
+            {
+                first_action = Some(action);
+            }
+        }
+        if let Some(action) = self.dispatch_active_page_event(event, ctx)
+            && first_action.is_none()
+        {
+            first_action = Some(action);
+        }
+        first_action.or_else(|| container_changed.then_some(WidgetAction::Consumed))
+    }
+
     fn layout_category_buttons(&mut self, ctx: &mut LayoutCtx) {
         self.category_rects.clear();
         let mut category_y = SETTINGS_SIDEBAR_TOP_INSET_LOGICAL * ctx.dpi;
@@ -342,6 +371,9 @@ impl Widget for TextoraSettingsOverlay {
     }
 
     fn collect_focusable_ids(&self, output: &mut Vec<WidgetId>) {
+        for (_, button) in &self.category_buttons {
+            button.collect_focusable_ids(output);
+        }
         if self.active_category == ProductSettingsCategory::Sync {
             self.sync_page.collect_focusable_ids(output);
         } else {
@@ -350,6 +382,9 @@ impl Widget for TextoraSettingsOverlay {
     }
 
     fn set_keyboard_focus(&mut self, focused_id: Option<WidgetId>) {
+        for (_, button) in &mut self.category_buttons {
+            button.set_keyboard_focus(focused_id);
+        }
         if self.active_category == ProductSettingsCategory::Sync {
             self.sync_page.set_keyboard_focus(focused_id);
         } else {
@@ -357,7 +392,62 @@ impl Widget for TextoraSettingsOverlay {
         }
     }
 
+    fn collect_accessibility_nodes(
+        &self,
+        context: &AccessibilityContext,
+        output: &mut Vec<AccessibilityNode>,
+    ) {
+        for ((_, button), rect) in self.category_buttons.iter().zip(&self.category_rects) {
+            if rect.w > 0.0 && rect.h > 0.0 {
+                button.collect_accessibility_nodes(&context.offset_by(rect.x, rect.y), output);
+            }
+        }
+
+        let page_rect = self.active_page_rect();
+        let page_context = context.offset_by(page_rect.x, page_rect.y);
+        if self.active_category == ProductSettingsCategory::Sync {
+            self.sync_page.collect_accessibility_nodes(&page_context, output);
+        } else {
+            self.settings_view.collect_accessibility_nodes(&page_context, output);
+        }
+    }
+
+    fn on_accessibility_action(
+        &mut self,
+        request: &AccessibilityActionRequest,
+    ) -> Option<WidgetAction> {
+        for index in 0..self.category_buttons.len() {
+            let Some(action) = self.category_buttons[index].1.on_accessibility_action(request)
+            else {
+                continue;
+            };
+            return match action {
+                WidgetAction::Control(ControlAction::Activated { .. }) => {
+                    let category = self.category_buttons[index].0;
+                    self.activate_category(category);
+                    Some(WidgetAction::Consumed)
+                }
+                WidgetAction::Control(ControlAction::FocusRequested { id }) => {
+                    self.set_keyboard_focus(Some(id));
+                    Some(WidgetAction::Control(ControlAction::FocusRequested { id }))
+                }
+                WidgetAction::Control(_) => Some(WidgetAction::Consumed),
+                other => Some(other),
+            };
+        }
+
+        if self.active_category == ProductSettingsCategory::Sync {
+            self.sync_page.on_accessibility_action(request)
+        } else {
+            self.settings_view.on_accessibility_action(request)
+        }
+    }
+
     fn on_event(&mut self, event: &Event, ctx: &mut EventCtx) -> Option<WidgetAction> {
+        if matches!(event, Event::PointerLeave | Event::InteractionCancel) {
+            return self.dispatch_interaction_lifecycle(event, ctx);
+        }
+
         if self.active_page_is_capturing()
             && matches!(event, Event::MouseMove { .. } | Event::MouseUp { .. })
         {
@@ -560,6 +650,71 @@ mod tests {
         assert_eq!(overlay.take_pending_sync_action(), None);
     }
 
+    #[test]
+    fn product_overlay_exposes_active_page_semantics_and_routes_category_activation() {
+        let mut overlay = laid_out_overlay(SettingsPersistenceView::Saved);
+        let mut nodes = Vec::new();
+        overlay.collect_accessibility_nodes(
+            &ui::core::AccessibilityContext::new(40.0, 60.0),
+            &mut nodes,
+        );
+
+        assert!(semantic_roles(&nodes).contains(&ui::core::AccessibilityRole::TextField));
+        let mut root = ui::core::AccessibilityNode::new(
+            ui::core::AccessibilityId(0x7465_7874_6f72_6173),
+            ui::core::AccessibilityRole::Group,
+            Rect::new(40.0, 60.0, 720.0, 480.0),
+        );
+        root.children = nodes;
+        assert_eq!(ui::core::AccessibilityTree::new(root, None).validate(), Ok(()));
+
+        assert_eq!(
+            overlay.on_accessibility_action(&ui::core::AccessibilityActionRequest::new(
+                ui::core::AccessibilityId::from(EDITOR_CATEGORY_ID),
+                ui::core::AccessibilityAction::Activate,
+            )),
+            Some(WidgetAction::Consumed)
+        );
+        assert_eq!(overlay.active_category, ProductSettingsCategory::Editor);
+    }
+
+    #[test]
+    fn product_category_press_is_cleared_by_interaction_cancel() {
+        let mut overlay = laid_out_overlay(SettingsPersistenceView::Saved);
+        let editor_rect = overlay.category_rects[1];
+        let pointer = (editor_rect.x + editor_rect.w * 0.5, editor_rect.y + editor_rect.h * 0.5);
+        let theme = ui::theme::test_theme();
+        let mut event_ctx = EventCtx { theme: &theme, dpi: 1.0, cursor_hint: None };
+
+        assert!(
+            overlay
+                .on_event(
+                    &Event::MouseDown { px: pointer.0, py: pointer.1, button: MouseButton::Left },
+                    &mut event_ctx,
+                )
+                .is_some()
+        );
+        assert!(overlay.is_capturing());
+
+        overlay.on_event(&Event::PointerLeave, &mut event_ctx);
+        assert!(overlay.is_capturing());
+
+        assert_eq!(
+            overlay.on_event(&Event::InteractionCancel, &mut event_ctx),
+            Some(WidgetAction::Consumed)
+        );
+        assert!(!overlay.is_capturing());
+        assert_eq!(overlay.on_event(&Event::InteractionCancel, &mut event_ctx), None);
+        assert_eq!(
+            overlay.on_event(
+                &Event::MouseUp { px: pointer.0, py: pointer.1, button: MouseButton::Left },
+                &mut event_ctx,
+            ),
+            None
+        );
+        assert_eq!(overlay.active_category, ProductSettingsCategory::Appearance);
+    }
+
     fn settings_input(persistence: SettingsPersistenceView) -> SettingsViewInput {
         SettingsViewInput {
             theme_mode: ThemeMode::System,
@@ -573,6 +728,15 @@ mod tests {
             show_status_bar: false,
             persistence,
         }
+    }
+
+    fn semantic_roles(nodes: &[ui::core::AccessibilityNode]) -> Vec<ui::core::AccessibilityRole> {
+        let mut roles = Vec::new();
+        for node in nodes {
+            roles.push(node.role);
+            roles.extend(semantic_roles(&node.children));
+        }
+        roles
     }
 
     fn laid_out_overlay(persistence: SettingsPersistenceView) -> TextoraSettingsOverlay {

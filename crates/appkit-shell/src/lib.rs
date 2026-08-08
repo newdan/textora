@@ -17,6 +17,7 @@
     reason = "style preference for readability during active development"
 )]
 
+pub mod accessibility_adapter;
 pub mod canvas_viewport;
 mod clipboard;
 pub mod cursor_motion;

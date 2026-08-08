@@ -3,7 +3,10 @@ use std::borrow::Cow;
 
 use ui::button::{Button, ButtonStyle};
 use ui::core::widget::{ControlAction, SensitiveText, TextPayload, WidgetId};
-use ui::core::{Event, EventCtx, LayoutCtx, PaintCtx, Rect, Widget, WidgetAction};
+use ui::core::{
+    AccessibilityActionRequest, AccessibilityContext, AccessibilityNode, Event, EventCtx,
+    LayoutCtx, PaintCtx, Rect, Widget, WidgetAction,
+};
 use ui::form::{FormRow, FormRowStyle, FormSection, FormSectionStyle, FormView};
 use ui::inline_group::{CrossAlignment, InlineChild, InlineGroup};
 use ui::label::{Label, LabelForeground, LabelStyle};
@@ -169,6 +172,25 @@ impl Widget for StackedConnectionActions {
 
     fn on_event(&mut self, event: &Event, ctx: &mut EventCtx) -> Option<WidgetAction> {
         match event {
+            Event::PointerLeave => {
+                let hover_index = self.hover_index.take();
+                let action =
+                    hover_index.and_then(|index| self.dispatch_to_button(index, event, ctx));
+                action.or_else(|| hover_index.map(|_| WidgetAction::Consumed))
+            }
+            Event::InteractionCancel => {
+                let container_changed =
+                    self.pointer_index.take().is_some() | self.hover_index.take().is_some();
+                let mut first_action = None;
+                for index in 0..self.buttons.len() {
+                    if let Some(action) = self.dispatch_to_button(index, event, ctx)
+                        && first_action.is_none()
+                    {
+                        first_action = Some(action);
+                    }
+                }
+                first_action.or_else(|| container_changed.then_some(WidgetAction::Consumed))
+            }
             Event::MouseDown { px, py, .. } => {
                 let index = self.button_index_at(*px, *py)?;
                 self.pointer_index = Some(index);
@@ -768,6 +790,25 @@ impl Widget for SyncSettingsPage {
         self.form.set_keyboard_focus(focused_id);
     }
 
+    fn collect_accessibility_nodes(
+        &self,
+        context: &AccessibilityContext,
+        output: &mut Vec<AccessibilityNode>,
+    ) {
+        self.form.collect_accessibility_nodes(context, output);
+    }
+
+    fn on_accessibility_action(
+        &mut self,
+        request: &AccessibilityActionRequest,
+    ) -> Option<WidgetAction> {
+        let action = self.form.on_accessibility_action(request)?;
+        match action {
+            WidgetAction::Control(control_action) => self.handle_control_action(control_action),
+            other => Some(other),
+        }
+    }
+
     fn on_event(&mut self, event: &Event, ctx: &mut EventCtx) -> Option<WidgetAction> {
         let action = self.form.on_event(event, ctx)?;
         match action {
@@ -1049,6 +1090,31 @@ mod tests {
     }
 
     #[test]
+    fn sync_page_exposes_sensitive_field_without_value_and_routes_set_value() {
+        let mut page = laid_out_page(SyncSettingsInput::default());
+        let mut nodes = Vec::new();
+        page.collect_accessibility_nodes(
+            &ui::core::AccessibilityContext::new(10.0, 20.0),
+            &mut nodes,
+        );
+        let api_key_id = ui::core::AccessibilityId::from(API_KEY_ID);
+        let api_key = semantic_node_with_id(&nodes, api_key_id)
+            .expect("API key field must be exposed through the sync page");
+
+        assert_eq!(api_key.role, ui::core::AccessibilityRole::TextField);
+        assert!(api_key.state.sensitive);
+        assert_eq!(api_key.value, None);
+        assert_eq!(
+            page.on_accessibility_action(&ui::core::AccessibilityActionRequest::set_value(
+                api_key_id,
+                TextPayload::Sensitive(SensitiveText::new("voiceover-secret".to_owned())),
+            )),
+            Some(WidgetAction::Consumed)
+        );
+        assert_eq!(page.api_key_draft_for_test(), Some("voiceover-secret"));
+    }
+
+    #[test]
     fn configure_activation_is_consumed_and_can_be_taken_as_a_product_action() {
         let mut page = SyncSettingsPage::new(SyncSettingsInput::default());
         page.handle_control_action(ControlAction::TextEdited {
@@ -1310,6 +1376,58 @@ mod tests {
     }
 
     #[test]
+    fn stacked_connection_actions_cancel_pressed_button_without_activation() {
+        let theme = ui::theme::test_theme();
+        let settings_theme = theme.settings_theme();
+        let mut measure = ui::core::measure::NoopMeasure;
+        let mut layout =
+            LayoutCtx { measure: &mut measure, ui_measure: None, theme: &theme, dpi: 1.0 };
+        let mut actions = StackedConnectionActions::new(
+            action_button(TEST_CONNECTION_ID, "测试连接", true, settings_theme),
+            action_button(CONFIGURE_CONNECTION_ID, "保存连接", true, settings_theme),
+        );
+        actions.set_rect(Rect::new(0.0, 0.0, 160.0, 80.0), &mut layout);
+        let mut event_ctx = EventCtx { theme: &theme, dpi: 1.0, cursor_hint: None };
+        let first_button = actions.button_rects[0];
+        let pointer =
+            (first_button.x + first_button.w * 0.5, first_button.y + first_button.h * 0.5);
+
+        assert!(
+            actions
+                .on_event(
+                    &Event::MouseDown {
+                        px: pointer.0,
+                        py: pointer.1,
+                        button: ui::core::MouseButton::Left,
+                    },
+                    &mut event_ctx,
+                )
+                .is_some()
+        );
+        assert!(actions.is_capturing());
+        let _ = actions.on_event(&Event::PointerLeave, &mut event_ctx);
+        assert!(actions.is_capturing());
+
+        assert_eq!(
+            actions.on_event(&Event::InteractionCancel, &mut event_ctx),
+            Some(WidgetAction::Consumed)
+        );
+        assert!(!actions.is_capturing());
+        assert_eq!(actions.on_event(&Event::InteractionCancel, &mut event_ctx), None);
+        assert_eq!(
+            actions.on_event(
+                &Event::MouseUp {
+                    px: pointer.0,
+                    py: pointer.1,
+                    button: ui::core::MouseButton::Left,
+                },
+                &mut event_ctx,
+            ),
+            None
+        );
+    }
+
+    #[test]
     fn narrow_library_rows_paint_all_five_action_buttons_at_full_width() {
         let page = laid_out_page_at_width(380.0, 1_200.0, connected_input_with_two_libraries());
         let draw = paint_for_test(&page);
@@ -1344,6 +1462,18 @@ mod tests {
 
     fn laid_out_page(input: SyncSettingsInput) -> SyncSettingsPage {
         laid_out_page_at_width(520.0, 260.0, input)
+    }
+
+    fn semantic_node_with_id(
+        nodes: &[ui::core::AccessibilityNode],
+        id: ui::core::AccessibilityId,
+    ) -> Option<&ui::core::AccessibilityNode> {
+        nodes.iter().find_map(|node| {
+            if node.id == id {
+                return Some(node);
+            }
+            semantic_node_with_id(&node.children, id)
+        })
     }
 
     fn laid_out_page_at_width(

@@ -3,7 +3,8 @@ use std::borrow::Cow;
 
 use crate::core::widget::ControlAction;
 use crate::core::{
-    Event, EventCtx, KeyCode, LayoutCtx, Modifiers, PaintCtx, Rect, Widget, WidgetAction, WidgetId,
+    AccessibilityActionRequest, AccessibilityContext, AccessibilityNode, Event, EventCtx, KeyCode,
+    LayoutCtx, Modifiers, PaintCtx, Rect, Widget, WidgetAction, WidgetId,
 };
 use crate::widgets::form::section::FormSection;
 use crate::widgets::scrollbar::{
@@ -192,6 +193,17 @@ impl FormView {
     fn section_draw_rect(&self, section_index: usize) -> Option<Rect> {
         let rect = *self.section_rects.get(section_index)?;
         Some(Rect::new(rect.x, rect.y - self.scroll_offset, rect.w, rect.h))
+    }
+
+    fn visible_section_rect(&self, section_rect: Rect) -> Option<Rect> {
+        let left = section_rect.x.max(0.0);
+        let top = section_rect.y.max(0.0);
+        let right = section_rect.right().min(self.rect.w);
+        let bottom = section_rect.bottom().min(self.rect.h);
+        if right <= left || bottom <= top {
+            return None;
+        }
+        Some(Rect::new(left - section_rect.x, top - section_rect.y, right - left, bottom - top))
     }
 
     fn local_event<'a>(event: &'a Event, child_rect: Rect) -> Cow<'a, Event> {
@@ -385,7 +397,9 @@ impl Widget for FormView {
     }
 
     fn is_capturing(&self) -> bool {
-        self.scrollbar.is_dragging() || self.capturing_section_index().is_some()
+        self.pointer_section_index.is_some()
+            || self.scrollbar.is_dragging()
+            || self.capturing_section_index().is_some()
     }
 
     fn collect_focusable_ids(&self, output: &mut Vec<WidgetId>) {
@@ -401,7 +415,59 @@ impl Widget for FormView {
         }
     }
 
+    fn collect_accessibility_nodes(
+        &self,
+        context: &AccessibilityContext,
+        output: &mut Vec<AccessibilityNode>,
+    ) {
+        for (section_index, section) in self.sections.iter().enumerate() {
+            let Some(section_rect) = self.section_draw_rect(section_index) else { continue };
+            let Some(visible_rect) = self.visible_section_rect(section_rect) else { continue };
+            section.collect_accessibility_nodes_in_viewport(
+                &context.offset_by(section_rect.x, section_rect.y),
+                visible_rect,
+                output,
+            );
+        }
+        if self.scrollbar_rect.w > 0.0 && self.scrollbar_rect.h > 0.0 {
+            self.scrollbar.collect_accessibility_nodes(
+                &context.offset_by(self.scrollbar_rect.x, self.scrollbar_rect.y),
+                output,
+            );
+        }
+    }
+
+    fn on_accessibility_action(
+        &mut self,
+        request: &AccessibilityActionRequest,
+    ) -> Option<WidgetAction> {
+        if let Some(action) =
+            self.sections.iter_mut().find_map(|section| section.on_accessibility_action(request))
+        {
+            return Some(action);
+        }
+        self.scrollbar.on_accessibility_action(request)
+    }
+
     fn on_event(&mut self, event: &Event, ctx: &mut EventCtx) -> Option<WidgetAction> {
+        if matches!(event, Event::PointerLeave | Event::InteractionCancel) {
+            let container_changed = if matches!(event, Event::InteractionCancel) {
+                self.pointer_section_index.take().is_some()
+                    | self.hover_section_index.take().is_some()
+            } else {
+                self.hover_section_index.take().is_some()
+            };
+            let mut first_action = self.dispatch_scrollbar_event(event, ctx);
+            for section_index in 0..self.sections.len() {
+                if let Some(action) = self.dispatch_to_section(section_index, event, ctx)
+                    && first_action.is_none()
+                {
+                    first_action = Some(action);
+                }
+            }
+            return first_action.or_else(|| container_changed.then_some(WidgetAction::Consumed));
+        }
+
         if self.scrollbar.is_dragging()
             && matches!(event, Event::MouseMove { .. } | Event::MouseUp { .. })
         {
@@ -414,7 +480,11 @@ impl Widget for FormView {
                 Event::MouseMove { .. } | Event::MouseUp { .. } | Event::Wheel { .. }
             )
         {
-            return self.dispatch_to_section(section_index, event, ctx);
+            let action = self.dispatch_to_section(section_index, event, ctx);
+            if matches!(event, Event::MouseUp { .. }) {
+                self.pointer_section_index = None;
+            }
+            return action;
         }
 
         match event {
@@ -482,11 +552,7 @@ impl Widget for FormView {
                 Some(WidgetAction::Consumed)
             }
             Event::KeyDown(KeyCode::Tab, modifiers) => self.cycle_focus(*modifiers),
-            Event::KeyDown(..)
-            | Event::ImePreedit { .. }
-            | Event::ImeCommit(..)
-            | Event::ImeEnable
-            | Event::ImeDisable => self
+            _ => self
                 .focused_section_index()
                 .and_then(|section_index| self.dispatch_to_section(section_index, event, ctx)),
         }
@@ -776,6 +842,38 @@ mod tests {
         assert_eq!(
             pointer_event(&mut view, Event::MouseMove { px: 900.0, py: 400.0 }),
             Some(WidgetAction::Consumed),
+        );
+    }
+
+    #[test]
+    fn form_view_leave_preserves_nested_press_and_cancel_clears_container_capture() {
+        let mut view = laid_out_form_view(content_height(200.0), viewport_height(300.0));
+        let pointer = (300.0, 80.0);
+
+        assert!(
+            pointer_event(
+                &mut view,
+                Event::MouseDown { px: pointer.0, py: pointer.1, button: MouseButton::Left },
+            )
+            .is_some()
+        );
+        assert!(view.is_capturing());
+
+        assert!(pointer_event(&mut view, Event::PointerLeave).is_some());
+        assert!(view.is_capturing());
+
+        assert_eq!(
+            pointer_event(&mut view, Event::InteractionCancel),
+            Some(WidgetAction::Consumed)
+        );
+        assert!(!view.is_capturing());
+        assert_eq!(pointer_event(&mut view, Event::InteractionCancel), None);
+        assert_eq!(
+            pointer_event(
+                &mut view,
+                Event::MouseUp { px: pointer.0, py: pointer.1, button: MouseButton::Left },
+            ),
+            None
         );
     }
 

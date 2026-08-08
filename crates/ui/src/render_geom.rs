@@ -110,6 +110,10 @@ pub fn x_to_unichar(target_x: f32, clusters: &[(usize, f32, u32)], left_margin: 
 /// `advance_cache`: per-visual-line data.
 /// `sel_range`: `(start_byte, end_byte)` of the selection (end is exclusive).
 /// Returns GlyphVertex quads (6 vertices per quad) for semi-transparent highlight rectangles.
+#[allow(
+    clippy::too_many_arguments,
+    reason = "selection geometry consumes independent line-map, viewport, and style inputs"
+)]
 pub fn compute_selection_highlight_quads(
     advance_cache: &[AdvanceCacheEntry],
     sel_range: (usize, usize),

@@ -3,6 +3,10 @@ use shaping;
 use unicode_categories::UnicodeCategories;
 
 /// Build advance cache entries for a single doc line's visible visual lines.
+#[allow(
+    clippy::too_many_arguments,
+    reason = "advance cache construction keeps shaped text and viewport coordinates explicit"
+)]
 pub fn build_advance_cache_entries(
     visual_lines: &[(usize, usize, f32)],
     skip_visual: usize,

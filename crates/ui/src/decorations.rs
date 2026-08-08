@@ -31,6 +31,10 @@ pub fn draw_caret(
 }
 
 /// Generate selection highlight vertices.
+#[allow(
+    clippy::too_many_arguments,
+    reason = "editor decoration geometry consumes independent viewport and document slices"
+)]
 pub fn selection_vertices(
     selection_range: Option<(usize, usize)>,
     advance_cache: &[AdvanceCacheEntry],
@@ -63,6 +67,10 @@ pub fn selection_vertices(
 }
 
 /// Generate cursor vertices.
+#[allow(
+    clippy::too_many_arguments,
+    reason = "caret geometry keeps viewport, blink, and dimming inputs independently testable"
+)]
 pub fn cursor_vertices(
     theme: &Theme,
     cursor_visual_line: Option<usize>,
@@ -137,6 +145,10 @@ pub fn highlight_color_for_offset(
 }
 
 /// Generate search match highlight vertices — only for visible viewport.
+#[allow(
+    clippy::too_many_arguments,
+    reason = "search decoration geometry consumes independent match, viewport, and document inputs"
+)]
 pub fn search_match_vertices(
     matches: &[(usize, usize)],
     active_match_idx: usize,

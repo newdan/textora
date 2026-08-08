@@ -4,6 +4,7 @@
 
 use crate::core::geom::Rect;
 use crate::core::widget::{Event, EventCtx, LayoutCtx, PaintCtx, Widget, WidgetAction};
+use crate::core::{AccessibilityActionRequest, AccessibilityContext, AccessibilityNode};
 use crate::theme::Theme;
 use std::borrow::Cow;
 
@@ -16,11 +17,14 @@ pub enum Side {
     Right,
 }
 
+/// Resolves a docked child's physical thickness from the active theme and DPI.
+pub type DockThickness = Box<dyn Fn(&Theme, f32) -> f32>;
+
 /// Dock 子项：一个 widget + 吸边方向 + 厚度回调 + 可见性。
 pub struct DockChild {
     pub widget: Box<dyn Widget>,
     pub side: Side,
-    pub thickness: Box<dyn Fn(&Theme, f32) -> f32>,
+    pub thickness: DockThickness,
     pub visible: bool,
     /// 布局阶段计算的绝对坐标矩形。paint 和事件分发使用它做坐标变换。
     pub layout_rect: Rect,
@@ -45,10 +49,13 @@ impl Dock {
 
         for child in self.children.iter_mut() {
             if !child.visible {
+                child.layout_rect = Rect::ZERO;
+                child.widget.set_rect(Rect::ZERO, ctx);
                 continue;
             }
             let t = (child.thickness)(ctx.theme, ctx.dpi);
             if t <= 0.0 {
+                child.layout_rect = Rect::ZERO;
                 child.widget.set_rect(Rect::ZERO, ctx);
                 continue;
             }
@@ -58,6 +65,7 @@ impl Dock {
                 Side::Left | Side::Right => remaining.w,
             });
             if t_clamped <= 0.0 {
+                child.layout_rect = Rect::ZERO;
                 child.widget.set_rect(Rect::ZERO, ctx);
                 continue;
             }
@@ -114,11 +122,43 @@ impl Dock {
                 }
             };
             child.layout_rect = child_rect;
-            child.widget.set_rect(child_rect, ctx);
+            child.widget.set_rect(Rect::new(0.0, 0.0, child_rect.w, child_rect.h), ctx);
         }
 
         self.fill_rect = remaining;
         self.fill.set_rect(remaining, ctx);
+    }
+
+    /// 按实际绘制层级收集语义节点：fill 在底层，chrome 子项依次覆盖其上。
+    pub fn collect_accessibility_nodes(
+        &self,
+        ctx: &AccessibilityContext,
+        output: &mut Vec<AccessibilityNode>,
+    ) {
+        self.fill.collect_accessibility_nodes(ctx, output);
+        for child in &self.children {
+            if !child.visible || child.layout_rect.w <= 0.0 || child.layout_rect.h <= 0.0 {
+                continue;
+            }
+            let child_context = ctx.offset_by(child.layout_rect.x, child.layout_rect.y);
+            child.widget.collect_accessibility_nodes(&child_context, output);
+        }
+    }
+
+    /// 将辅助技术动作交给对应子树；视觉上层优先。
+    pub fn dispatch_accessibility_action(
+        &mut self,
+        request: &AccessibilityActionRequest,
+    ) -> Option<WidgetAction> {
+        for child in self.children.iter_mut().rev() {
+            if !child.visible {
+                continue;
+            }
+            if let Some(action) = child.widget.on_accessibility_action(request) {
+                return Some(action);
+            }
+        }
+        self.fill.on_accessibility_action(request)
     }
 
     /// 绘制：先 fill，再按 children 顺序绘制 chrome（chrome 在 fill 之上）。
@@ -142,6 +182,10 @@ impl Dock {
     /// sidebar resize 中），所有鼠标事件优先派给该 widget，跳过 hit test。
     /// 这保证拖动中光标移出 widget 矩形仍能继续接收 MouseMove / MouseUp。
     pub fn dispatch(&mut self, ev: &Event, ctx: &mut EventCtx) -> Option<WidgetAction> {
+        if matches!(ev, Event::PointerLeave | Event::InteractionCancel) {
+            return self.broadcast_lifecycle_event(ev, ctx);
+        }
+
         let is_mouse = matches!(
             ev,
             Event::MouseMove { .. }
@@ -237,6 +281,27 @@ impl Dock {
         self.fill.on_event(ev, ctx)
     }
 
+    fn broadcast_lifecycle_event(
+        &mut self,
+        event: &Event,
+        ctx: &mut EventCtx,
+    ) -> Option<WidgetAction> {
+        let mut first_action = None;
+        for child in self.children.iter_mut().rev() {
+            if !child.visible {
+                continue;
+            }
+            let local_event = Self::to_local(event, child.layout_rect.x, child.layout_rect.y);
+            if let Some(action) = child.widget.on_event(&local_event, ctx)
+                && first_action.is_none()
+            {
+                first_action = Some(action);
+            }
+        }
+        let fill_action = self.fill.on_event(event, ctx);
+        first_action.or(fill_action)
+    }
+
     /// 将鼠标事件坐标从绝对坐标系转为子 widget 的相对坐标系。
     pub fn to_local<'a>(event: &'a Event, dx: f32, dy: f32) -> Cow<'a, Event> {
         match event {
@@ -253,6 +318,8 @@ impl Dock {
                 Cow::Owned(Event::Wheel { dx: *wheel_dx, dy: *wheel_dy, px: px - dx, py: py - dy })
             }
             Event::KeyDown(..)
+            | Event::PointerLeave
+            | Event::InteractionCancel
             | Event::ImePreedit { .. }
             | Event::ImeCommit(..)
             | Event::ImeEnable
@@ -267,6 +334,11 @@ mod tests {
     use crate::core::measure::NoopMeasure;
     use crate::core::paint::DrawCmd;
     use crate::core::paint::DrawList;
+    use crate::core::{
+        AccessibilityContext, AccessibilityId, AccessibilityNode, AccessibilityRole,
+    };
+    use std::cell::RefCell;
+    use std::rc::Rc;
 
     /// 最小测试 widget：记录 set_rect 参数
     struct StubWidget {
@@ -303,6 +375,76 @@ mod tests {
         crate::theme::test_theme()
     }
 
+    struct SemanticWidget {
+        id: AccessibilityId,
+        rect: Rect,
+    }
+
+    impl SemanticWidget {
+        fn new(id: u64) -> Self {
+            Self { id: AccessibilityId(id), rect: Rect::ZERO }
+        }
+    }
+
+    impl Widget for SemanticWidget {
+        fn set_rect(&mut self, rect: Rect, _ctx: &mut LayoutCtx) {
+            self.rect = rect;
+        }
+
+        fn paint(&self, _ctx: &mut PaintCtx) {}
+
+        fn hit(&self, px: f32, py: f32) -> bool {
+            self.rect.contains(px, py)
+        }
+
+        fn accessibility_node(&self, ctx: &AccessibilityContext) -> Option<AccessibilityNode> {
+            Some(AccessibilityNode::new(
+                self.id,
+                AccessibilityRole::Group,
+                ctx.screen_bounds(self.rect),
+            ))
+        }
+
+        fn as_any_mut(&mut self) -> &mut dyn std::any::Any {
+            self
+        }
+    }
+
+    #[test]
+    fn dock_collects_visible_semantics_in_visual_order_without_double_offset() {
+        let mut dock = Dock::new(Box::new(SemanticWidget::new(10)));
+        dock.children.push(DockChild {
+            widget: Box::new(SemanticWidget::new(11)),
+            side: Side::Top,
+            thickness: Box::new(|_, _| 40.0),
+            visible: true,
+            layout_rect: Rect::ZERO,
+        });
+        dock.children.push(DockChild {
+            widget: Box::new(SemanticWidget::new(12)),
+            side: Side::Bottom,
+            thickness: Box::new(|_, _| 20.0),
+            visible: false,
+            layout_rect: Rect::ZERO,
+        });
+
+        let theme = dummy_theme();
+        let mut measure = NoopMeasure;
+        let mut layout_ctx =
+            LayoutCtx { ui_measure: None, measure: &mut measure, theme: &theme, dpi: 1.0 };
+        dock.layout(Rect::new(0.0, 0.0, 800.0, 600.0), &mut layout_ctx);
+
+        let mut nodes = Vec::new();
+        dock.collect_accessibility_nodes(&AccessibilityContext::new(10.0, 20.0), &mut nodes);
+
+        assert_eq!(
+            nodes.iter().map(|node| node.id).collect::<Vec<_>>(),
+            [AccessibilityId(10), AccessibilityId(11),]
+        );
+        assert_eq!(nodes[0].bounds, Rect::new(10.0, 60.0, 800.0, 560.0));
+        assert_eq!(nodes[1].bounds, Rect::new(10.0, 20.0, 800.0, 40.0));
+    }
+
     #[test]
     fn ime_coordinate_routing_reuses_the_original_text_allocation() {
         let event = Event::ImeCommit("sensitive-ime-route".to_owned());
@@ -318,6 +460,105 @@ mod tests {
         };
 
         assert_eq!(local_allocation, original_allocation);
+    }
+
+    #[test]
+    fn lifecycle_events_are_broadcast_and_cancel_does_not_depend_on_hit_testing() {
+        #[derive(Default)]
+        struct LifecycleCounts {
+            pointer_leave: usize,
+            interaction_cancel: usize,
+            mouse_move: usize,
+        }
+
+        struct LifecycleProbe {
+            rect: Rect,
+            counts: Rc<RefCell<LifecycleCounts>>,
+            capturing: bool,
+        }
+
+        impl Widget for LifecycleProbe {
+            fn set_rect(&mut self, rect: Rect, _ctx: &mut LayoutCtx) {
+                self.rect = rect;
+            }
+
+            fn paint(&self, _ctx: &mut PaintCtx) {}
+
+            fn hit(&self, px: f32, py: f32) -> bool {
+                self.rect.contains(px, py)
+            }
+
+            fn on_event(&mut self, event: &Event, _ctx: &mut EventCtx) -> Option<WidgetAction> {
+                let mut counts = self.counts.borrow_mut();
+                match event {
+                    Event::PointerLeave => counts.pointer_leave += 1,
+                    Event::InteractionCancel => counts.interaction_cancel += 1,
+                    Event::MouseMove { .. } => counts.mouse_move += 1,
+                    _ => {}
+                }
+                None
+            }
+
+            fn is_capturing(&self) -> bool {
+                self.capturing
+            }
+
+            fn as_any_mut(&mut self) -> &mut dyn std::any::Any {
+                self
+            }
+        }
+
+        let fill_counts = Rc::new(RefCell::new(LifecycleCounts::default()));
+        let visible_counts = Rc::new(RefCell::new(LifecycleCounts::default()));
+        let hidden_counts = Rc::new(RefCell::new(LifecycleCounts::default()));
+        let mut dock = Dock::new(Box::new(LifecycleProbe {
+            rect: Rect::ZERO,
+            counts: fill_counts.clone(),
+            capturing: false,
+        }));
+        dock.children.push(DockChild {
+            widget: Box::new(LifecycleProbe {
+                rect: Rect::ZERO,
+                counts: visible_counts.clone(),
+                capturing: true,
+            }),
+            side: Side::Top,
+            thickness: Box::new(|_, _| 40.0),
+            visible: true,
+            layout_rect: Rect::ZERO,
+        });
+        dock.children.push(DockChild {
+            widget: Box::new(LifecycleProbe {
+                rect: Rect::ZERO,
+                counts: hidden_counts.clone(),
+                capturing: false,
+            }),
+            side: Side::Bottom,
+            thickness: Box::new(|_, _| 40.0),
+            visible: false,
+            layout_rect: Rect::ZERO,
+        });
+        let theme = dummy_theme();
+        let mut measure = NoopMeasure;
+        let mut layout_ctx =
+            LayoutCtx { ui_measure: None, measure: &mut measure, theme: &theme, dpi: 1.0 };
+        dock.layout(Rect::new(0.0, 0.0, 800.0, 600.0), &mut layout_ctx);
+        let mut event_ctx = EventCtx { cursor_hint: None, theme: &theme, dpi: 1.0 };
+
+        dock.dispatch(&Event::PointerLeave, &mut event_ctx);
+        dock.dispatch(&Event::MouseMove { px: 700.0, py: 500.0 }, &mut event_ctx);
+        dock.dispatch(&Event::InteractionCancel, &mut event_ctx);
+
+        let visible = visible_counts.borrow();
+        assert_eq!(visible.pointer_leave, 1);
+        assert_eq!(visible.mouse_move, 1, "pointer leave must not terminate capture");
+        assert_eq!(visible.interaction_cancel, 1);
+        let fill = fill_counts.borrow();
+        assert_eq!(fill.pointer_leave, 1);
+        assert_eq!(fill.interaction_cancel, 1);
+        let hidden = hidden_counts.borrow();
+        assert_eq!(hidden.pointer_leave, 0);
+        assert_eq!(hidden.interaction_cancel, 0);
     }
 
     #[test]
@@ -346,7 +587,7 @@ mod tests {
 
         assert!(dock.children[0].widget.hit(0.0, 0.0), "top child");
         let bottom_widget = &dock.children[1].widget;
-        assert!(bottom_widget.hit(0.0, 576.0), "bottom child at y=576");
+        assert!(bottom_widget.hit(0.0, 0.0), "bottom child uses local coordinates");
         assert!(dock.fill.hit(0.0, 32.0), "fill starts at y=32");
         assert!(!dock.fill.hit(0.0, 31.0), "fill should not start above y=32");
         assert!(dock.fill.hit(0.0, 575.0), "fill ends before y=576");
@@ -426,8 +667,8 @@ mod tests {
 
         // Top child gets full 400
         assert!(dock.children[0].widget.hit(0.0, 399.0));
-        // Bottom child gets clamped to 200: y = 600-200 = 400
-        assert!(dock.children[1].widget.hit(0.0, 400.0));
+        // Bottom child gets clamped to 200 and uses local coordinates.
+        assert!(dock.children[1].widget.hit(0.0, 0.0));
         // Fill gets ZERO (no space left)
         assert!(!dock.fill.hit(0.0, 0.0));
     }
@@ -457,7 +698,6 @@ mod tests {
     fn dock_dispatch_routes_to_topmost_hit() {
         struct ActionWidget {
             rect: Rect,
-            id: u32,
         }
         impl Widget for ActionWidget {
             fn set_rect(&mut self, rect: Rect, _ctx: &mut LayoutCtx) {
@@ -475,9 +715,9 @@ mod tests {
             }
         }
 
-        let mut dock = Dock::new(Box::new(ActionWidget { rect: Rect::ZERO, id: 99 }));
+        let mut dock = Dock::new(Box::new(ActionWidget { rect: Rect::ZERO }));
         dock.children.push(DockChild {
-            widget: Box::new(ActionWidget { rect: Rect::ZERO, id: 1 }),
+            widget: Box::new(ActionWidget { rect: Rect::ZERO }),
             side: Side::Top,
             thickness: Box::new(|_, _| 40.0),
             visible: true,

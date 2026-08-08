@@ -1,7 +1,10 @@
 use std::any::Any;
 
 use crate::core::text_util::estimate_text_width_px;
-use crate::core::{Event, EventCtx, LayoutCtx, PaintCtx, Rect, Widget, WidgetAction};
+use crate::core::{
+    AccessibilityContext, AccessibilityId, AccessibilityNode, AccessibilityRole, Event, EventCtx,
+    LayoutCtx, PaintCtx, Rect, Widget, WidgetAction,
+};
 use crate::widgets::icon::draw_icon;
 
 const DEFAULT_LABEL_FONT_SIZE_LOGICAL: f32 = 13.0;
@@ -40,11 +43,19 @@ pub struct Label {
     leading_icon: Option<String>,
     trailing_icon: Option<String>,
     style: LabelStyle,
+    accessibility_id: Option<AccessibilityId>,
 }
 
 impl Label {
     pub fn new(text: impl Into<String>, style: LabelStyle) -> Self {
-        Self { rect: Rect::ZERO, text: text.into(), leading_icon: None, trailing_icon: None, style }
+        Self {
+            rect: Rect::ZERO,
+            text: text.into(),
+            leading_icon: None,
+            trailing_icon: None,
+            style,
+            accessibility_id: None,
+        }
     }
 
     pub fn set_leading_icon(&mut self, icon: Option<String>) {
@@ -53,6 +64,10 @@ impl Label {
 
     pub fn set_trailing_icon(&mut self, icon: Option<String>) {
         self.trailing_icon = icon;
+    }
+
+    pub fn set_accessibility_id(&mut self, id: Option<AccessibilityId>) {
+        self.accessibility_id = id;
     }
 
     fn resolved_foreground(&self, ctx: &PaintCtx) -> [f32; 4] {
@@ -155,6 +170,14 @@ impl Widget for Label {
         self.rect.contains(px, py)
     }
 
+    fn accessibility_node(&self, ctx: &AccessibilityContext) -> Option<AccessibilityNode> {
+        let id = self.accessibility_id?;
+        Some(
+            AccessibilityNode::new(id, AccessibilityRole::StaticText, ctx.screen_bounds(self.rect))
+                .with_name(self.text.clone()),
+        )
+    }
+
     fn on_event(&mut self, _ev: &Event, _ctx: &mut EventCtx) -> Option<WidgetAction> {
         None
     }
@@ -221,5 +244,23 @@ mod tests {
             label.on_event(&Event::KeyDown(KeyCode::Enter, Modifiers::NONE), &mut event_ctx()),
             None
         );
+    }
+
+    #[test]
+    fn accessibility_exposes_identified_label_as_static_text() {
+        let mut label = Label::new("连接状态", LabelStyle::default());
+        label.set_accessibility_id(Some(crate::core::AccessibilityId(71)));
+        set_test_rect(&mut label, Rect::new(3.0, 4.0, 120.0, 28.0));
+
+        let node = label
+            .accessibility_node(&crate::core::AccessibilityContext::new(10.0, 20.0))
+            .expect("identified label should expose semantics");
+
+        assert_eq!(node.id, crate::core::AccessibilityId(71));
+        assert_eq!(node.role, crate::core::AccessibilityRole::StaticText);
+        assert_eq!(node.name.as_deref(), Some("连接状态"));
+        assert_eq!(node.bounds, Rect::new(13.0, 24.0, 120.0, 28.0));
+        assert!(node.actions.is_empty());
+        assert!(!label.is_focusable());
     }
 }

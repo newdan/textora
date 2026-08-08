@@ -2,6 +2,7 @@ use std::collections::{BTreeSet, HashSet};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
+use appkit_shell::accessibility_adapter::PlatformAccessibilityAdapter;
 use appkit_shell::editor_runtime::EditorRuntime;
 use appkit_shell::{ProductHost, ProductWakeHandle};
 
@@ -69,6 +70,7 @@ pub struct App {
     pub(crate) theme_load_report: crate::theme_loader::ThemeLoadReport,
     pub(crate) product: crate::textora_product::TextoraProduct,
     pub(crate) editor_runtime: EditorRuntime,
+    pub(crate) accessibility_adapter: Option<PlatformAccessibilityAdapter>,
     pub(crate) popup_tab_id_snapshot: Vec<appkit_core::workspace::types::TabId>,
     pub(crate) workspace_store: crate::workspace_store::WorkspaceStore,
     pub(crate) ui_shell: UiShell,

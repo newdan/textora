@@ -9,6 +9,7 @@ use crate::gpu::GpuError;
 use crate::ui_shell::ShellInputs;
 use crate::workspace_persistence::restore_workspace;
 use appkit_shell::ProductHost;
+use appkit_shell::accessibility_adapter::PlatformAccessibilityAdapter;
 use winit::dpi::{LogicalSize, PhysicalPosition, PhysicalSize, Size};
 use winit::window::WindowAttributes;
 
@@ -391,7 +392,7 @@ impl App {
                 crate::settings_io::PersistedSettings::default()
             }
         };
-        let mut attrs = WindowAttributes::default().with_title(WINDOW_TITLE);
+        let mut attrs = WindowAttributes::default().with_title(WINDOW_TITLE).with_visible(false);
         if let (Some(w), Some(h)) = (persisted.window_width, persisted.window_height) {
             let scale_factor =
                 event_loop.primary_monitor().map_or(1.0, |monitor| monitor.scale_factor());
@@ -426,6 +427,11 @@ impl App {
         self.ui_shell.scale_sidebar_width(scale_factor as f32);
         self.ui_shell.sidebar_clamp_width(scale_factor as f32);
         let window = self.editor_runtime.window().ok_or(GpuError::NoAdapter)?;
+        if let Some(event_loop_proxy) = self.event_loop_proxy.clone() {
+            self.accessibility_adapter =
+                Some(PlatformAccessibilityAdapter::new(event_loop, window, event_loop_proxy));
+        }
+        window.set_visible(true);
         window.set_ime_allowed(true);
         window.set_cursor(winit::window::CursorIcon::Text);
         // Follow system appearance after runtime creates the window.
@@ -548,6 +554,22 @@ mod build_shell_inputs_tests {
         let transparent_window_call = ["set_window_alpha(window, ", "0.0)"].concat();
 
         assert!(!source.contains(&transparent_window_call));
+    }
+
+    #[test]
+    fn accessibility_adapter_is_initialized_before_the_window_becomes_visible() {
+        let source = include_str!("app_window.rs");
+        let hidden_window = ["with_visible(", "false)"].concat();
+        let adapter_creation = ["PlatformAccessibilityAdapter", "::new"].concat();
+        let visible_window = ["window.set_visible(", "true)"].concat();
+
+        let hidden_position = source.find(&hidden_window).expect("window must start hidden");
+        let adapter_position =
+            source.find(&adapter_creation).expect("accessibility adapter must be initialized");
+        let visible_position = source.find(&visible_window).expect("window must become visible");
+
+        assert!(hidden_position < adapter_position);
+        assert!(adapter_position < visible_position);
     }
 
     #[test]

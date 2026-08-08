@@ -2,7 +2,11 @@
 //! viewport_height / total_display_rows / scroll_top 由 app 通过 set_input 注入。
 
 use crate::canvas::CanvasAxis;
-use crate::core::{Event, EventCtx, LayoutCtx, MouseButton, PaintCtx, Rect, Widget, WidgetAction};
+use crate::core::{
+    AccessibilityAction, AccessibilityActionRequest, AccessibilityContext, AccessibilityId,
+    AccessibilityNode, AccessibilityOrientation, AccessibilityRole, Event, EventCtx, LayoutCtx,
+    MouseButton, PaintCtx, Rect, Widget, WidgetAction,
+};
 use winit::window::CursorIcon;
 // ── 设计常量（从旧 scrollbar.rs 合并）──────────────────────────────
 
@@ -165,6 +169,14 @@ impl ScrollbarState {
         self.interaction = ScrollbarInteraction::Hovered;
         true
     }
+
+    fn cancel_interaction(&mut self) -> bool {
+        if matches!(self.interaction, ScrollbarInteraction::Idle) {
+            return false;
+        }
+        self.interaction = ScrollbarInteraction::Idle;
+        true
+    }
 }
 
 // ── Action ─────────────────────────────────────────────────────────
@@ -207,6 +219,8 @@ pub struct ScrollbarWidget {
     state: ScrollbarState,
     /// 由 app 每帧注入
     pub input: ScrollbarInput,
+    accessibility_id: Option<AccessibilityId>,
+    accessibility_label: Option<String>,
 }
 
 impl Default for ScrollbarWidget {
@@ -226,6 +240,8 @@ impl ScrollbarWidget {
             axis: CanvasAxis::Vertical,
             state: ScrollbarState::new(),
             input: ScrollbarInput::default(),
+            accessibility_id: None,
+            accessibility_label: None,
         }
     }
 
@@ -235,6 +251,8 @@ impl ScrollbarWidget {
             axis: CanvasAxis::Horizontal,
             state: ScrollbarState::new(),
             input: ScrollbarInput::default(),
+            accessibility_id: None,
+            accessibility_label: None,
         }
     }
 
@@ -249,6 +267,20 @@ impl ScrollbarWidget {
 
     pub fn is_dragging(&self) -> bool {
         self.state.is_dragging()
+    }
+
+    pub fn set_accessibility_id(&mut self, id: Option<AccessibilityId>) {
+        self.accessibility_id = id;
+    }
+
+    pub fn set_accessibility_label(&mut self, label: Option<String>) {
+        self.accessibility_label = label;
+    }
+
+    fn maximum_scroll(&self) -> f64 {
+        let total = self.input.total_display_rows.max(1) as f64;
+        let visible = self.input.viewport_height_px.max(1.0);
+        (total - visible).max(0.0)
     }
 
     /// 当前是否处于 active 状态（hover 或 drag）。
@@ -338,6 +370,52 @@ impl Widget for ScrollbarWidget {
         self.state.is_dragging()
     }
 
+    fn accessibility_node(&self, ctx: &AccessibilityContext) -> Option<AccessibilityNode> {
+        let id = self.accessibility_id?;
+        let maximum_scroll = self.maximum_scroll();
+        if maximum_scroll <= 0.0 || self.rect.w <= 0.0 || self.rect.h <= 0.0 {
+            return None;
+        }
+        let orientation = match self.axis {
+            CanvasAxis::Horizontal => AccessibilityOrientation::Horizontal,
+            CanvasAxis::Vertical => AccessibilityOrientation::Vertical,
+        };
+        let fallback_name = match self.axis {
+            CanvasAxis::Horizontal => "水平滚动条",
+            CanvasAxis::Vertical => "垂直滚动条",
+        };
+        Some(
+            AccessibilityNode::new(id, AccessibilityRole::ScrollBar, ctx.screen_bounds(self.rect))
+                .with_name(self.accessibility_label.as_deref().unwrap_or(fallback_name))
+                .with_numeric_value(
+                    self.input.scroll_top_rows.clamp(0.0, maximum_scroll),
+                    0.0,
+                    maximum_scroll,
+                )
+                .with_orientation(orientation)
+                .with_action(AccessibilityAction::Increment)
+                .with_action(AccessibilityAction::Decrement),
+        )
+    }
+
+    fn on_accessibility_action(
+        &mut self,
+        request: &AccessibilityActionRequest,
+    ) -> Option<WidgetAction> {
+        if Some(request.target) != self.accessibility_id || self.maximum_scroll() <= 0.0 {
+            return None;
+        }
+        match request.action {
+            AccessibilityAction::Increment => {
+                Some(WidgetAction::Scrollbar(ScrollbarAction::PageDown))
+            }
+            AccessibilityAction::Decrement => {
+                Some(WidgetAction::Scrollbar(ScrollbarAction::PageUp))
+            }
+            _ => None,
+        }
+    }
+
     fn on_event(&mut self, ev: &Event, ctx: &mut EventCtx) -> Option<WidgetAction> {
         match ev {
             Event::MouseMove { px, py } => {
@@ -377,6 +455,13 @@ impl Widget for ScrollbarWidget {
                 }
                 None
             }
+            Event::PointerLeave => {
+                if self.state.is_dragging() || !self.state.is_hovered() {
+                    return None;
+                }
+                self.state.set_hovered(false);
+                Some(WidgetAction::Scrollbar(ScrollbarAction::HoverChanged(false)))
+            }
             Event::MouseDown { px, py, button: MouseButton::Left } => {
                 // Only handle clicks within the scrollbar's bounds
                 if !self.pointer_in_bar(*px, *py) {
@@ -408,6 +493,9 @@ impl Widget for ScrollbarWidget {
                 } else {
                     None
                 }
+            }
+            Event::InteractionCancel => {
+                self.state.cancel_interaction().then_some(WidgetAction::Consumed)
             }
             _ => None,
         }
@@ -449,6 +537,39 @@ mod tests {
         let mut lc = LayoutCtx { ui_measure: None, measure: &mut m, theme: &t, dpi };
         w.set_rect(rect, &mut lc);
         w
+    }
+
+    #[test]
+    fn accessibility_exposes_scrollbar_range_and_page_actions() {
+        let accessibility_id = crate::core::AccessibilityId(70);
+        let mut widget = make_widget(Rect::new(0.0, 0.0, 14.0, 200.0), 1.0, 100.0, 400, 50.0);
+        widget.set_accessibility_id(Some(accessibility_id));
+        widget.set_accessibility_label(Some("文档垂直滚动".into()));
+        let node = widget
+            .accessibility_node(&crate::core::AccessibilityContext::new(10.0, 20.0))
+            .expect("overflowing scrollbar should expose semantics");
+
+        assert_eq!(node.role, crate::core::AccessibilityRole::ScrollBar);
+        assert_eq!(node.name.as_deref(), Some("文档垂直滚动"));
+        assert_eq!(node.numeric_value, Some(50.0));
+        assert_eq!(node.numeric_minimum, Some(0.0));
+        assert_eq!(node.numeric_maximum, Some(300.0));
+        assert_eq!(node.orientation, Some(crate::core::AccessibilityOrientation::Vertical));
+        assert_eq!(node.bounds, Rect::new(10.0, 20.0, 14.0, 200.0));
+        assert_eq!(
+            widget.on_accessibility_action(&crate::core::AccessibilityActionRequest::new(
+                accessibility_id,
+                crate::core::AccessibilityAction::Increment,
+            )),
+            Some(WidgetAction::Scrollbar(ScrollbarAction::PageDown))
+        );
+
+        widget.set_input(ScrollbarInput {
+            viewport_height_px: 400.0,
+            total_display_rows: 100,
+            scroll_top_rows: 0.0,
+        });
+        assert!(widget.accessibility_node(&crate::core::AccessibilityContext::default()).is_none());
     }
 
     // ── ScrollbarInput ──
@@ -597,6 +718,39 @@ mod tests {
         let a = w.on_event(&Event::MouseMove { px: -1188.0, py: -32.0 }, &mut ec);
         let a = a.unwrap();
         assert_eq!(a, WidgetAction::Scrollbar(ScrollbarAction::HoverChanged(false)));
+    }
+
+    #[test]
+    fn lifecycle_leave_preserves_drag_and_cancel_is_idempotent() {
+        let mut widget = make_widget(Rect::new(1188.0, 32.0, 12.0, 744.0), 1.0, 100.0, 200, 0.0);
+        let theme = test_theme();
+        let mut event_ctx = EventCtx { cursor_hint: None, theme: &theme, dpi: 1.0 };
+
+        assert_eq!(
+            widget.on_event(&Event::MouseMove { px: 6.0, py: 68.0 }, &mut event_ctx),
+            Some(WidgetAction::Scrollbar(ScrollbarAction::HoverChanged(true)))
+        );
+        assert_eq!(
+            widget.on_event(
+                &Event::MouseDown { px: 6.0, py: 68.0, button: MouseButton::Left },
+                &mut event_ctx,
+            ),
+            Some(WidgetAction::Scrollbar(ScrollbarAction::StartDrag))
+        );
+        assert_eq!(widget.on_event(&Event::PointerLeave, &mut event_ctx), None);
+        assert!(widget.is_capturing());
+
+        assert_eq!(
+            widget.on_event(&Event::InteractionCancel, &mut event_ctx),
+            Some(WidgetAction::Consumed)
+        );
+        assert!(!widget.is_capturing());
+        assert!(!widget.active());
+        assert_eq!(widget.on_event(&Event::InteractionCancel, &mut event_ctx), None);
+        assert_eq!(
+            widget.on_event(&Event::MouseMove { px: 6.0, py: 468.0 }, &mut event_ctx),
+            Some(WidgetAction::Scrollbar(ScrollbarAction::HoverChanged(true)))
+        );
     }
 
     #[test]

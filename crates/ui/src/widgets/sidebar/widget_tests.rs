@@ -344,8 +344,15 @@ mod tests {
         let cy = list_clip.y + 12.0; // 第一行中点附近
 
         let mut ctx = EventCtx { cursor_hint: None, theme: &t, dpi: 1.0 };
+        assert_eq!(
+            w.on_event(
+                &Event::MouseDown { px: 100.0, py: cy, button: MouseButton::Left },
+                &mut ctx,
+            ),
+            Some(WidgetAction::Consumed)
+        );
         let action = w
-            .on_event(&Event::MouseDown { px: 100.0, py: cy, button: MouseButton::Left }, &mut ctx)
+            .on_event(&Event::MouseUp { px: 100.0, py: cy, button: MouseButton::Left }, &mut ctx)
             .unwrap();
         let typed = action;
         assert!(matches!(typed, WidgetAction::Sidebar(SidebarAction::SwitchTab(0))));
@@ -1087,10 +1094,15 @@ mod tests {
         assert_eq!(hit, Some(0), "List hit_close_btn should return Some(0)");
 
         // Now click through the sidebar widget
-        let action = w.on_event(
-            &Event::MouseDown { px: btn_x, py: btn_y, button: MouseButton::Left },
-            &mut ec,
+        assert_eq!(
+            w.on_event(
+                &Event::MouseDown { px: btn_x, py: btn_y, button: MouseButton::Left },
+                &mut ec,
+            ),
+            Some(WidgetAction::Consumed)
         );
+        let action = w
+            .on_event(&Event::MouseUp { px: btn_x, py: btn_y, button: MouseButton::Left }, &mut ec);
         if let Some(WidgetAction::Sidebar(sa)) = action {
             assert!(matches!(sa, SidebarAction::CloseTab(0)), "Expected CloseTab(0), got {:?}", sa);
         } else {
@@ -1153,10 +1165,15 @@ mod tests {
         // Click close button on sorted index 1
         let btn_x = row1.x + row1.w - 12.0 - 12.0 + 6.0;
         let btn_y = row1.y + row1.h * 0.5;
-        let action = w.on_event(
-            &Event::MouseDown { px: btn_x, py: btn_y, button: MouseButton::Left },
-            &mut ec,
+        assert_eq!(
+            w.on_event(
+                &Event::MouseDown { px: btn_x, py: btn_y, button: MouseButton::Left },
+                &mut ec,
+            ),
+            Some(WidgetAction::Consumed)
         );
+        let action = w
+            .on_event(&Event::MouseUp { px: btn_x, py: btn_y, button: MouseButton::Left }, &mut ec);
         if let Some(WidgetAction::Sidebar(sa)) = action {
             assert!(
                 matches!(sa, SidebarAction::CloseTab(0)),
@@ -1542,76 +1559,6 @@ mod sidebar_integration_tests {
         );
         assert!(!changed);
         assert_eq!(state.visibility(), Visibility::Pinned);
-    }
-
-    // ── 边缘拖拽改宽 ──
-
-    #[test]
-    fn edge_drag_clamps_width_min_max() {
-        let mut cfg = SidebarConfig { pinned: true, width: 220.0 };
-        let mut state = SidebarState::new(&cfg);
-        let started = state.on_drag_start(
-            220.0,
-            100.0,
-            &cfg,
-            800.0,
-            &crate::settings::UiMetrics::from_settings(&crate::settings::Settings::new(), 1.0),
-        );
-        assert!(started);
-        state.on_drag(
-            620.0,
-            100.0,
-            &mut cfg,
-            &crate::settings::UiMetrics::from_settings(&crate::settings::Settings::new(), 1.0),
-        );
-        assert!(cfg.width <= 400.0, "width capped at 400");
-
-        let mut cfg2 = SidebarConfig { pinned: true, width: 220.0 };
-        let mut state2 = SidebarState::new(&cfg2);
-        state2.on_drag_start(
-            220.0,
-            100.0,
-            &cfg2,
-            800.0,
-            &crate::settings::UiMetrics::from_settings(&crate::settings::Settings::new(), 1.0),
-        );
-        state2.on_drag(
-            20.0,
-            100.0,
-            &mut cfg2,
-            &crate::settings::UiMetrics::from_settings(&crate::settings::Settings::new(), 1.0),
-        );
-        assert!(cfg2.width >= 160.0, "width clamped at 160");
-    }
-
-    #[test]
-    fn edge_drag_end_persists() {
-        let cfg = SidebarConfig { pinned: true, width: 220.0 };
-        let mut state = SidebarState::new(&cfg);
-        state.on_drag_start(
-            220.0,
-            100.0,
-            &cfg,
-            800.0,
-            &crate::settings::UiMetrics::from_settings(&crate::settings::Settings::new(), 1.0),
-        );
-        let action = state.on_drag_end();
-        assert_eq!(action, Some(SidebarAction::PersistConfig));
-    }
-
-    #[test]
-    fn edge_drag_noop_when_hidden() {
-        let cfg = SidebarConfig { pinned: false, width: 220.0 };
-        let mut state = SidebarState::new(&cfg);
-        assert_eq!(state.visibility(), Visibility::Hidden);
-        let started = state.on_drag_start(
-            220.0,
-            100.0,
-            &cfg,
-            800.0,
-            &crate::settings::UiMetrics::from_settings(&crate::settings::Settings::new(), 1.0),
-        );
-        assert!(!started);
     }
 
     // ── 设置菜单 ──

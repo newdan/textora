@@ -5,8 +5,11 @@
 
 use crate::core::measure::TextMeasure;
 use crate::core::text_util::truncate_title_precise;
+use crate::core::widget::ControlAction;
 use crate::core::{
-    DrawCmd, Event, EventCtx, LayoutCtx, MouseButton, PaintCtx, Rect, Widget, WidgetAction,
+    AccessibilityAction, AccessibilityActionRequest, AccessibilityContext, AccessibilityId,
+    AccessibilityNode, AccessibilityRole, DrawCmd, Event, EventCtx, KeyCode, LayoutCtx, Modifiers,
+    MouseButton, PaintCtx, Rect, Widget, WidgetAction, WidgetId,
 };
 
 /// Layout direction for the list.
@@ -23,8 +26,6 @@ const PIN_BAR_MARGIN_LOGICAL: f32 = 6.0;
 /// 关闭按钮尺寸（逻辑像素）
 const CLOSE_BTN_SIZE_LOGICAL: f32 = 12.0;
 
-/// 关闭按钮命中区域额外扩展（逻辑像素）
-const CLOSE_BTN_HIT_PAD_LOGICAL: f32 = 6.0;
 /// 关闭按钮与 label 文字之间的间距（逻辑像素）
 const CLOSE_BTN_LABEL_GAP_LOGICAL: f32 = 2.0;
 /// extra_label 预留宽度（逻辑像素）
@@ -80,7 +81,30 @@ pub struct ListStyle {
     pub indicator_color: [f32; 4],
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+impl ListStyle {
+    pub fn from_theme(theme: &crate::theme::Theme) -> Self {
+        let metrics = theme.control_metrics();
+        let application = theme.application_theme();
+        Self {
+            row_h_logical: metrics.control_height_logical,
+            item_w_logical: crate::constants::SIDEBAR_MIN_WIDTH,
+            pad_x_logical: metrics.horizontal_padding_logical,
+            pad_y_logical: 0.0,
+            font_size_logical: metrics.font_size_logical,
+            bg: application.navigation_surface,
+            item_active_bg: application.navigation_selected_surface,
+            item_hover_bg: application.navigation_hover_surface,
+            item_fg: application.text_primary,
+            item_active_fg: application.navigation_selected_text,
+            item_hover_fg: application.text_primary,
+            item_accent: application.accent,
+            separator: application.divider,
+            indicator_color: application.warning,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq)]
 pub enum ListAction {
     /// 用户单击了第 index 行（已过滤 Separator/Header）
     Selected(usize),
@@ -88,35 +112,60 @@ pub enum ListAction {
     HoverChanged(Option<usize>),
     /// 用户点击了关闭按钮
     CloseRequested(usize),
+    /// 用户请求了某行的上下文菜单。
+    ContextRequested { index: usize, anchor_px: (f32, f32) },
+}
+
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+enum ListPressTarget {
+    Row(usize),
+    CloseButton(usize),
 }
 
 pub struct ListWidget {
+    id: Option<WidgetId>,
     rect: Rect,
     items: Vec<ListItem>,
     active_index: Option<usize>,
     hovered_index: Option<usize>,
     close_hovered: bool,
+    press_target: Option<ListPressTarget>,
+    focused: bool,
+    focused_index: Option<usize>,
     style: ListStyle,
     scroll_offset: f32,
     orientation: Orientation,
     truncated_labels: Vec<String>,
     truncated_label_widths: Vec<f32>,
+    dpi: f32,
+    accessibility_label: Option<String>,
 }
 
 impl ListWidget {
     pub fn new(style: ListStyle, orientation: Orientation) -> Self {
         Self {
+            id: None,
             rect: Rect::ZERO,
             items: Vec::new(),
             active_index: None,
             hovered_index: None,
             close_hovered: false,
+            press_target: None,
+            focused: false,
+            focused_index: None,
             style,
             scroll_offset: 0.0,
             orientation,
             truncated_labels: Vec::new(),
             truncated_label_widths: Vec::new(),
+            dpi: 1.0,
+            accessibility_label: None,
         }
+    }
+
+    pub fn with_id(mut self, id: WidgetId) -> Self {
+        self.id = Some(id);
+        self
     }
 
     pub fn set_scroll_offset(&mut self, off: f32) {
@@ -125,12 +174,23 @@ impl ListWidget {
 
     pub fn set_items(&mut self, items: Vec<ListItem>) {
         self.items = items;
+        if self.press_target.is_some_and(|target| match target {
+            ListPressTarget::Row(index) | ListPressTarget::CloseButton(index) => {
+                index >= self.items.len()
+            }
+        }) {
+            self.press_target = None;
+        }
+        self.normalize_focused_index(false);
     }
     pub fn set_active(&mut self, idx: Option<usize>) {
         self.active_index = idx;
     }
     pub fn set_style(&mut self, s: ListStyle) {
         self.style = s;
+    }
+    pub fn set_accessibility_label(&mut self, label: Option<String>) {
+        self.accessibility_label = label;
     }
     pub fn rect(&self) -> Rect {
         self.rect
@@ -143,6 +203,89 @@ impl ListWidget {
     }
     pub fn set_hovered_index(&mut self, idx: Option<usize>) {
         self.hovered_index = idx;
+    }
+
+    pub fn focused_index(&self) -> Option<usize> {
+        self.focused_index
+    }
+
+    fn is_selectable(&self, index: usize) -> bool {
+        self.items.get(index).is_some_and(|item| item.kind == ListItemKind::Normal)
+    }
+
+    fn first_selectable_index(&self) -> Option<usize> {
+        self.items.iter().position(|item| item.kind == ListItemKind::Normal)
+    }
+
+    fn last_selectable_index(&self) -> Option<usize> {
+        self.items.iter().rposition(|item| item.kind == ListItemKind::Normal)
+    }
+
+    fn normalize_focused_index(&mut self, prefer_active: bool) {
+        if prefer_active
+            && let Some(active_index) = self.active_index.filter(|index| self.is_selectable(*index))
+        {
+            self.focused_index = Some(active_index);
+            return;
+        }
+        if self.focused_index.is_some_and(|index| self.is_selectable(index)) {
+            return;
+        }
+        self.focused_index = self.first_selectable_index();
+    }
+
+    fn move_focused_index(&mut self, forward: bool) {
+        self.normalize_focused_index(false);
+        let Some(current_index) = self.focused_index else {
+            return;
+        };
+        self.focused_index = if forward {
+            ((current_index + 1)..self.items.len())
+                .find(|index| self.is_selectable(*index))
+                .or(Some(current_index))
+        } else {
+            (0..current_index)
+                .rev()
+                .find(|index| self.is_selectable(*index))
+                .or(Some(current_index))
+        };
+    }
+
+    fn handle_keyboard_event(
+        &mut self,
+        key: KeyCode,
+        modifiers: Modifiers,
+    ) -> Option<WidgetAction> {
+        if !self.focused || modifiers != Modifiers::NONE {
+            return None;
+        }
+        let move_forward = match (self.orientation, key) {
+            (Orientation::Vertical, KeyCode::Down) | (Orientation::Horizontal, KeyCode::Right) => {
+                Some(true)
+            }
+            (Orientation::Vertical, KeyCode::Up) | (Orientation::Horizontal, KeyCode::Left) => {
+                Some(false)
+            }
+            _ => None,
+        };
+        if let Some(forward) = move_forward {
+            self.move_focused_index(forward);
+            return Some(WidgetAction::Consumed);
+        }
+        match key {
+            KeyCode::Home => {
+                self.focused_index = self.first_selectable_index();
+                Some(WidgetAction::Consumed)
+            }
+            KeyCode::End => {
+                self.focused_index = self.last_selectable_index();
+                Some(WidgetAction::Consumed)
+            }
+            KeyCode::Enter | KeyCode::Char(' ') => {
+                self.focused_index.map(|index| WidgetAction::List(ListAction::Selected(index)))
+            }
+            _ => None,
+        }
     }
 
     /// pinned item 左侧竖线占用的总宽度（0 表示非 pinned 或 Horizontal 模式）
@@ -216,7 +359,8 @@ impl ListWidget {
         // Close button 位于行右侧
         let btn_x = row_rect.x + row_rect.w - pad_x - btn_size;
         let btn_y = row_rect.y + (row_rect.h - btn_size) * 0.5;
-        let hit_pad = CLOSE_BTN_HIT_PAD_LOGICAL * dpi;
+        let minimum_hit_target = crate::theme::ControlMetrics::default().minimum_hit_target_logical;
+        let hit_pad = ((minimum_hit_target - CLOSE_BTN_SIZE_LOGICAL) * 0.5).max(0.0) * dpi;
         let btn_rect = Rect::new(
             btn_x - hit_pad,
             btn_y - hit_pad,
@@ -234,6 +378,7 @@ impl Widget for ListWidget {
     fn set_rect(&mut self, rect: Rect, ctx: &mut LayoutCtx) {
         self.rect = rect;
         let dpi = ctx.dpi;
+        self.dpi = dpi;
         let font_size = self.style.font_size_logical * dpi;
         let measure: &mut dyn TextMeasure = ctx.measure;
         let pad_x = self.style.pad_x_logical * dpi;
@@ -300,6 +445,7 @@ impl Widget for ListWidget {
         ctx.list.cmds.push(DrawCmd::PushClip(clip_rect));
 
         let dpi = ctx.dpi;
+        let metrics = ctx.theme.control_metrics();
         let pad_x = self.style.pad_x_logical * dpi;
         let font_size = self.style.font_size_logical * dpi;
 
@@ -355,7 +501,8 @@ impl Widget for ListWidget {
                 }
                 ListItemKind::Header | ListItemKind::Normal => {
                     let is_active = item.is_active || Some(i) == self.active_index;
-                    let is_hovered = Some(i) == self.hovered_index;
+                    let is_keyboard_focused = self.focused && Some(i) == self.focused_index;
+                    let is_hovered = Some(i) == self.hovered_index || is_keyboard_focused;
 
                     if matches!(item.kind, ListItemKind::Normal) {
                         if is_active {
@@ -367,12 +514,20 @@ impl Widget for ListWidget {
                             color[3] *= alpha;
                             ctx.list.fill_menu_hover(row_rect, color, dpi);
                         }
+                        if is_keyboard_focused {
+                            ctx.list.stroke_rounded(
+                                row_rect,
+                                ctx.theme.settings_theme().focus_ring,
+                                metrics.compact_corner_radius_logical * dpi,
+                                metrics.focus_ring_width_logical * dpi,
+                            );
+                        }
                     }
 
                     // Pin bar
                     if item.pinned {
                         let bar_len = PIN_BAR_WIDTH_LOGICAL * dpi;
-                        let bar_pad = 8.0 * dpi;
+                        let bar_pad = metrics.content_spacing_logical * dpi;
                         let mut bar_color = self.style.item_accent;
                         bar_color[3] *= alpha;
                         match self.orientation {
@@ -416,7 +571,7 @@ impl Widget for ListWidget {
                     fg[3] *= alpha;
                     let left_offset = self.pinned_left_offset(item, dpi);
                     let icon_extra = if item.icon.is_some() {
-                        (self.style.font_size_logical + 4.0) * dpi
+                        (self.style.font_size_logical + metrics.compact_spacing_logical) * dpi
                     } else {
                         0.0
                     };
@@ -482,7 +637,13 @@ impl Widget for ListWidget {
                     // Close button on hovered closeable items
                     if item.closeable && is_hovered {
                         let btn_size = CLOSE_BTN_SIZE_LOGICAL * dpi;
-                        let close_fg = [0.4, 0.4, 0.4, alpha * 0.9];
+                        let application = ctx.theme.application_theme();
+                        let mut close_fg = if self.close_hovered {
+                            application.text_primary
+                        } else {
+                            application.text_secondary
+                        };
+                        close_fg[3] *= alpha;
                         if let Some(ref mut shaper) = ctx.shaper {
                             ctx.list.text_shaped(
                                 row_rect.x + row_rect.w - pad_x - btn_size * 0.5,
@@ -504,14 +665,118 @@ impl Widget for ListWidget {
         self.rect.contains(px, py)
     }
 
+    fn id(&self) -> Option<WidgetId> {
+        self.id
+    }
+
+    fn is_focusable(&self) -> bool {
+        self.id.is_some()
+    }
+
+    fn set_keyboard_focus(&mut self, focused_id: Option<WidgetId>) {
+        self.focused = self.id.is_some_and(|id| focused_id == Some(id));
+        if self.focused {
+            self.normalize_focused_index(true);
+        }
+    }
+
+    fn accessibility_node(&self, ctx: &AccessibilityContext) -> Option<AccessibilityNode> {
+        let id = self.id?;
+        if self.rect.w <= 0.0 || self.rect.h <= 0.0 {
+            return None;
+        }
+        let root_id = AccessibilityId::from(id);
+        let mut root =
+            AccessibilityNode::new(root_id, AccessibilityRole::List, ctx.screen_bounds(self.rect))
+                .with_name(self.accessibility_label.as_deref().unwrap_or("列表"))
+                .with_focused(self.focused && self.focused_index.is_none())
+                .with_action(AccessibilityAction::Focus);
+        for (index, item) in self.items.iter().enumerate() {
+            if item.kind != ListItemKind::Normal {
+                continue;
+            }
+            let item_rect = self.item_rect(index, self.dpi);
+            if item_rect.bottom() <= self.rect.top() || item_rect.top() >= self.rect.bottom() {
+                continue;
+            }
+            let selected = item.is_active || self.active_index == Some(index);
+            let child = AccessibilityNode::new(
+                root_id.child(index as u64 + 1),
+                AccessibilityRole::ListItem,
+                ctx.screen_bounds(item_rect),
+            )
+            .with_name(item.label.clone())
+            .with_selected(selected)
+            .with_focused(self.focused && self.focused_index == Some(index))
+            .with_action(AccessibilityAction::Focus)
+            .with_action(AccessibilityAction::Activate);
+            root.children.push(child);
+        }
+        Some(root)
+    }
+
+    fn on_accessibility_action(
+        &mut self,
+        request: &AccessibilityActionRequest,
+    ) -> Option<WidgetAction> {
+        let id = self.id?;
+        let root_id = AccessibilityId::from(id);
+        if request.target == root_id && request.action == AccessibilityAction::Focus {
+            return Some(WidgetAction::Control(ControlAction::FocusRequested { id }));
+        }
+        let index = (0..self.items.len()).find(|index| {
+            root_id.child(*index as u64 + 1) == request.target && self.is_selectable(*index)
+        })?;
+        match request.action {
+            AccessibilityAction::Focus => {
+                self.focused_index = Some(index);
+                Some(WidgetAction::Control(ControlAction::FocusRequested { id }))
+            }
+            AccessibilityAction::Activate => Some(WidgetAction::List(ListAction::Selected(index))),
+            _ => None,
+        }
+    }
+
     fn on_event(&mut self, ev: &Event, ctx: &mut EventCtx) -> Option<WidgetAction> {
         match ev {
             Event::MouseDown { px, py, button: MouseButton::Left } => {
-                // Close button 优先
-                if let Some(idx) = self.hit_close_btn(*px, *py, ctx.dpi) {
-                    return Some(WidgetAction::List(ListAction::CloseRequested(idx)));
+                self.press_target = self
+                    .hit_close_btn(*px, *py, ctx.dpi)
+                    .map(ListPressTarget::CloseButton)
+                    .or_else(|| self.hit_row(*px, *py, ctx.dpi).map(ListPressTarget::Row));
+                self.press_target?;
+                if let Some(id) = self.id
+                    && !self.focused
+                {
+                    return Some(WidgetAction::Control(ControlAction::FocusRequested { id }));
                 }
-                self.hit_row(*px, *py, ctx.dpi).map(|_| WidgetAction::Consumed)
+                Some(WidgetAction::Consumed)
+            }
+            Event::MouseDown { px, py, button: MouseButton::Right } => {
+                self.hit_row(*px, *py, ctx.dpi).map(|index| {
+                    WidgetAction::List(ListAction::ContextRequested {
+                        index,
+                        anchor_px: (*px, *py),
+                    })
+                })
+            }
+            Event::MouseUp { px, py, button: MouseButton::Left } => {
+                let press_target = self.press_target.take()?;
+                let action = match press_target {
+                    ListPressTarget::Row(index)
+                        if self.hit_row(*px, *py, ctx.dpi) == Some(index)
+                            && self.hit_close_btn(*px, *py, ctx.dpi).is_none() =>
+                    {
+                        WidgetAction::List(ListAction::Selected(index))
+                    }
+                    ListPressTarget::CloseButton(index)
+                        if self.hit_close_btn(*px, *py, ctx.dpi) == Some(index) =>
+                    {
+                        WidgetAction::List(ListAction::CloseRequested(index))
+                    }
+                    _ => WidgetAction::Consumed,
+                };
+                Some(action)
             }
             Event::MouseMove { px, py } => {
                 let new = self.hit_row(*px, *py, ctx.dpi);
@@ -527,8 +792,24 @@ impl Widget for ListWidget {
                     None
                 }
             }
+            Event::PointerLeave => {
+                let hover_changed =
+                    self.hovered_index.take().is_some() | std::mem::take(&mut self.close_hovered);
+                hover_changed.then_some(WidgetAction::Consumed)
+            }
+            Event::InteractionCancel => {
+                let interaction_changed = self.hovered_index.take().is_some()
+                    | std::mem::take(&mut self.close_hovered)
+                    | self.press_target.take().is_some();
+                interaction_changed.then_some(WidgetAction::Consumed)
+            }
+            Event::KeyDown(key, modifiers) => self.handle_keyboard_event(*key, *modifiers),
             _ => None,
         }
+    }
+
+    fn is_capturing(&self) -> bool {
+        self.press_target.is_some()
     }
 
     fn as_any(&self) -> &dyn std::any::Any {
@@ -587,6 +868,79 @@ mod tests {
         w
     }
 
+    #[test]
+    fn standard_list_style_uses_shared_metrics_and_semantic_colors() {
+        for theme in [
+            crate::theme::Theme::resolve_builtin(
+                crate::settings::ThemeMode::Light,
+                winit::window::Theme::Light,
+            ),
+            crate::theme::Theme::resolve_builtin(
+                crate::settings::ThemeMode::Dark,
+                winit::window::Theme::Dark,
+            ),
+        ] {
+            let metrics = theme.control_metrics();
+            let application = theme.application_theme();
+            let style = ListStyle::from_theme(&theme);
+
+            assert_eq!(style.row_h_logical, metrics.control_height_logical);
+            assert_eq!(style.pad_x_logical, metrics.horizontal_padding_logical);
+            assert_eq!(style.font_size_logical, metrics.font_size_logical);
+            assert_eq!(style.item_fg, application.text_primary);
+            assert_eq!(style.item_hover_bg, application.navigation_hover_surface);
+        }
+    }
+
+    #[test]
+    fn close_icon_uses_semantic_colors_at_two_times_dpi() {
+        for theme in [
+            crate::theme::Theme::resolve_builtin(
+                crate::settings::ThemeMode::Light,
+                winit::window::Theme::Light,
+            ),
+            crate::theme::Theme::resolve_builtin(
+                crate::settings::ThemeMode::Dark,
+                winit::window::Theme::Dark,
+            ),
+        ] {
+            let application = theme.application_theme();
+            assert_eq!(painted_close_icon_color(&theme, false), application.text_secondary);
+            assert_eq!(painted_close_icon_color(&theme, true), application.text_primary);
+        }
+    }
+
+    fn painted_close_icon_color(theme: &Theme, close_hovered: bool) -> [f32; 4] {
+        let mut widget = ListWidget::new(ListStyle::from_theme(theme), Orientation::Vertical);
+        widget.set_items(vec![item("Document")]);
+        widget.hovered_index = Some(0);
+        widget.close_hovered = close_hovered;
+
+        let mut measure = NoopMeasure;
+        let mut layout = LayoutCtx { ui_measure: None, measure: &mut measure, theme, dpi: 2.0 };
+        widget.set_rect(Rect::new(0.0, 0.0, 440.0, 80.0), &mut layout);
+
+        let mut draw_list = DrawList::new();
+        let mut shaper = shaping::Shaper::new().expect("test shaper should initialize");
+        widget.paint(&mut PaintCtx {
+            global_alpha: 1.0,
+            list: &mut draw_list,
+            theme,
+            dpi: 2.0,
+            offset: (0.0, 0.0),
+            shaper: Some(&mut shaper),
+        });
+
+        draw_list
+            .cmds
+            .iter()
+            .find_map(|command| match command {
+                DrawCmd::TextLayout { layout, color, .. } if layout.text == "x" => Some(*color),
+                _ => None,
+            })
+            .expect("hovered closeable row should paint a close icon")
+    }
+
     fn item(label: &str) -> ListItem {
         ListItem {
             label: label.into(),
@@ -598,6 +952,37 @@ mod tests {
             is_active: false,
             closeable: true,
         }
+    }
+
+    #[test]
+    fn accessibility_exposes_list_items_and_selection_action() {
+        let id = WidgetId(70);
+        let mut widget = ListWidget::new(style(), Orientation::Vertical).with_id(id);
+        widget.set_accessibility_label(Some("打开的文档".into()));
+        widget.set_items(vec![item("a.rs"), item("b.rs")]);
+        widget.set_active(Some(1));
+        let theme = crate::theme::test_theme();
+        let mut measure = NoopMeasure;
+        widget.set_rect(Rect::new(0.0, 0.0, 220.0, 100.0), &mut layout_ctx(&theme, &mut measure));
+        widget.set_keyboard_focus(Some(id));
+        let node = widget
+            .accessibility_node(&crate::core::AccessibilityContext::new(10.0, 20.0))
+            .expect("identified list should expose semantics");
+
+        assert_eq!(node.role, crate::core::AccessibilityRole::List);
+        assert_eq!(node.name.as_deref(), Some("打开的文档"));
+        assert_eq!(node.children.len(), 2);
+        assert_eq!(node.children[0].name.as_deref(), Some("a.rs"));
+        assert_eq!(node.children[1].state.selected, Some(true));
+        assert!(node.children[1].state.focused);
+        assert_eq!(node.children[0].bounds, Rect::new(10.0, 24.0, 220.0, 24.0));
+        assert_eq!(
+            widget.on_accessibility_action(&crate::core::AccessibilityActionRequest::new(
+                node.children[0].id,
+                crate::core::AccessibilityAction::Activate,
+            )),
+            Some(WidgetAction::List(ListAction::Selected(0)))
+        );
     }
 
     fn pinned_item(label: &str) -> ListItem {
@@ -665,14 +1050,253 @@ mod tests {
         let theme = crate::theme::test_theme();
         let mut ctx = EventCtx { cursor_hint: None, theme: &theme, dpi: 1.0 };
         // 第二行：top = 4 + 24 = 28；中线 40
-        let action = w
-            .on_event(
+        assert_eq!(
+            w.on_event(
                 &Event::MouseDown { px: 100.0, py: 40.0, button: MouseButton::Left },
                 &mut ctx,
-            )
-            .unwrap();
-        let typed = action;
-        assert_eq!(typed, WidgetAction::Consumed);
+            ),
+            Some(WidgetAction::Consumed)
+        );
+        assert!(w.is_capturing());
+        assert_eq!(
+            w.on_event(
+                &Event::MouseUp { px: 100.0, py: 40.0, button: MouseButton::Left },
+                &mut ctx,
+            ),
+            Some(WidgetAction::List(ListAction::Selected(1)))
+        );
+        assert!(!w.is_capturing());
+    }
+
+    #[test]
+    fn releasing_on_another_row_or_outside_cancels_selection() {
+        let mut w =
+            make_list(vec![item("a"), item("b"), item("c")], Rect::new(0.0, 0.0, 220.0, 100.0));
+        let theme = crate::theme::test_theme();
+        let mut ctx = EventCtx { cursor_hint: None, theme: &theme, dpi: 1.0 };
+
+        assert_eq!(
+            w.on_event(
+                &Event::MouseDown { px: 100.0, py: 16.0, button: MouseButton::Left },
+                &mut ctx,
+            ),
+            Some(WidgetAction::Consumed)
+        );
+        assert_eq!(
+            w.on_event(
+                &Event::MouseUp { px: 100.0, py: 40.0, button: MouseButton::Left },
+                &mut ctx,
+            ),
+            Some(WidgetAction::Consumed)
+        );
+
+        assert_eq!(
+            w.on_event(
+                &Event::MouseDown { px: 100.0, py: 16.0, button: MouseButton::Left },
+                &mut ctx,
+            ),
+            Some(WidgetAction::Consumed)
+        );
+        assert_eq!(
+            w.on_event(
+                &Event::MouseUp { px: 300.0, py: 160.0, button: MouseButton::Left },
+                &mut ctx,
+            ),
+            Some(WidgetAction::Consumed)
+        );
+    }
+
+    #[test]
+    fn list_leave_preserves_press_and_cancel_is_idempotent() {
+        let mut widget = make_list(vec![item("a"), item("b")], Rect::new(0.0, 0.0, 220.0, 100.0));
+        let theme = crate::theme::test_theme();
+        let mut ctx = EventCtx { cursor_hint: None, theme: &theme, dpi: 1.0 };
+
+        assert_eq!(
+            widget.on_event(&Event::MouseMove { px: 100.0, py: 16.0 }, &mut ctx),
+            Some(WidgetAction::Consumed)
+        );
+        assert_eq!(
+            widget.on_event(
+                &Event::MouseDown { px: 100.0, py: 16.0, button: MouseButton::Left },
+                &mut ctx,
+            ),
+            Some(WidgetAction::Consumed)
+        );
+        assert_eq!(widget.on_event(&Event::PointerLeave, &mut ctx), Some(WidgetAction::Consumed));
+        assert_eq!(widget.hovered_index(), None);
+        assert!(!widget.close_hovered);
+        assert!(widget.is_capturing());
+
+        assert_eq!(
+            widget.on_event(&Event::InteractionCancel, &mut ctx),
+            Some(WidgetAction::Consumed)
+        );
+        assert!(!widget.is_capturing());
+        assert_eq!(widget.on_event(&Event::InteractionCancel, &mut ctx), None);
+        assert_eq!(
+            widget.on_event(
+                &Event::MouseUp { px: 100.0, py: 16.0, button: MouseButton::Left },
+                &mut ctx,
+            ),
+            None
+        );
+    }
+
+    #[test]
+    fn close_press_release_emits_only_close_action() {
+        let mut w = make_list(vec![item("a")], Rect::new(0.0, 0.0, 220.0, 40.0));
+        let theme = crate::theme::test_theme();
+        let mut ctx = EventCtx { cursor_hint: None, theme: &theme, dpi: 1.0 };
+        let row_rect = w.item_rect(0, 1.0);
+        let close_x = row_rect.right() - style().pad_x_logical - CLOSE_BTN_SIZE_LOGICAL * 0.5;
+        let close_y = row_rect.y + row_rect.h * 0.5;
+        let _ = w.on_event(&Event::MouseMove { px: close_x, py: close_y }, &mut ctx);
+
+        assert_eq!(
+            w.on_event(
+                &Event::MouseDown { px: close_x, py: close_y, button: MouseButton::Left },
+                &mut ctx,
+            ),
+            Some(WidgetAction::Consumed)
+        );
+        assert_eq!(
+            w.on_event(
+                &Event::MouseUp { px: close_x, py: close_y, button: MouseButton::Left },
+                &mut ctx,
+            ),
+            Some(WidgetAction::List(ListAction::CloseRequested(0)))
+        );
+    }
+
+    #[test]
+    fn focusable_vertical_list_skips_non_selectable_rows_and_activates_focused_row() {
+        let list_id = crate::WidgetId(41);
+        let mut w = ListWidget::new(style(), Orientation::Vertical).with_id(list_id);
+        w.set_items(vec![
+            ListItem { label: "Header".into(), kind: ListItemKind::Header, ..ListItem::default() },
+            item("a"),
+            ListItem { kind: ListItemKind::Separator, ..ListItem::default() },
+            item("b"),
+        ]);
+        let theme = crate::theme::test_theme();
+        let mut measure = NoopMeasure;
+        w.set_rect(Rect::new(0.0, 0.0, 220.0, 120.0), &mut layout_ctx(&theme, &mut measure));
+        let mut focusable_ids = Vec::new();
+        w.collect_focusable_ids(&mut focusable_ids);
+        assert_eq!(focusable_ids, vec![list_id]);
+
+        let mut ctx = EventCtx { cursor_hint: None, theme: &theme, dpi: 1.0 };
+        assert_eq!(
+            w.on_event(
+                &Event::KeyDown(crate::KeyCode::Down, crate::core::Modifiers::NONE),
+                &mut ctx
+            ),
+            None
+        );
+        w.set_keyboard_focus(Some(list_id));
+        assert_eq!(w.focused_index(), Some(1));
+        assert_eq!(
+            w.on_event(
+                &Event::KeyDown(crate::KeyCode::Down, crate::core::Modifiers::NONE),
+                &mut ctx
+            ),
+            Some(WidgetAction::Consumed)
+        );
+        assert_eq!(w.focused_index(), Some(3));
+        assert_eq!(
+            w.on_event(
+                &Event::KeyDown(crate::KeyCode::Enter, crate::core::Modifiers::NONE),
+                &mut ctx
+            ),
+            Some(WidgetAction::List(ListAction::Selected(3)))
+        );
+        assert_eq!(
+            w.on_event(
+                &Event::KeyDown(crate::KeyCode::Char(' '), crate::core::Modifiers::NONE),
+                &mut ctx,
+            ),
+            Some(WidgetAction::List(ListAction::Selected(3)))
+        );
+    }
+
+    #[test]
+    fn horizontal_list_uses_left_right_and_home_end() {
+        let list_id = crate::WidgetId(42);
+        let mut w = ListWidget::new(style(), Orientation::Horizontal).with_id(list_id);
+        w.set_items(vec![item("a"), item("b"), item("c")]);
+        w.set_keyboard_focus(Some(list_id));
+        let theme = crate::theme::test_theme();
+        let mut ctx = EventCtx { cursor_hint: None, theme: &theme, dpi: 1.0 };
+
+        assert_eq!(w.focused_index(), Some(0));
+        assert_eq!(
+            w.on_event(
+                &Event::KeyDown(crate::KeyCode::Right, crate::core::Modifiers::NONE),
+                &mut ctx
+            ),
+            Some(WidgetAction::Consumed)
+        );
+        assert_eq!(w.focused_index(), Some(1));
+        let _ = w
+            .on_event(&Event::KeyDown(crate::KeyCode::End, crate::core::Modifiers::NONE), &mut ctx);
+        assert_eq!(w.focused_index(), Some(2));
+        let _ = w.on_event(
+            &Event::KeyDown(crate::KeyCode::Home, crate::core::Modifiers::NONE),
+            &mut ctx,
+        );
+        assert_eq!(w.focused_index(), Some(0));
+        let _ = w.on_event(
+            &Event::KeyDown(crate::KeyCode::Left, crate::core::Modifiers::NONE),
+            &mut ctx,
+        );
+        assert_eq!(w.focused_index(), Some(0));
+    }
+
+    #[test]
+    fn focused_row_is_normalized_when_items_change() {
+        let list_id = crate::WidgetId(43);
+        let mut w = ListWidget::new(style(), Orientation::Vertical).with_id(list_id);
+        w.set_items(vec![item("a"), item("b"), item("c")]);
+        w.set_active(Some(1));
+        w.set_keyboard_focus(Some(list_id));
+        assert_eq!(w.focused_index(), Some(1));
+
+        w.set_items(vec![
+            item("replacement"),
+            ListItem { kind: ListItemKind::Header, ..ListItem::default() },
+        ]);
+
+        assert_eq!(w.focused_index(), Some(0));
+    }
+
+    #[test]
+    fn pointer_press_on_focusable_list_requests_focus_and_keeps_release_selection() {
+        let list_id = crate::WidgetId(44);
+        let mut w = ListWidget::new(style(), Orientation::Vertical).with_id(list_id);
+        w.set_items(vec![item("a")]);
+        let theme = crate::theme::test_theme();
+        let mut measure = NoopMeasure;
+        w.set_rect(Rect::new(0.0, 0.0, 220.0, 40.0), &mut layout_ctx(&theme, &mut measure));
+        let mut ctx = EventCtx { cursor_hint: None, theme: &theme, dpi: 1.0 };
+
+        assert_eq!(
+            w.on_event(
+                &Event::MouseDown { px: 100.0, py: 16.0, button: MouseButton::Left },
+                &mut ctx,
+            ),
+            Some(WidgetAction::Control(crate::core::widget::ControlAction::FocusRequested {
+                id: list_id,
+            }))
+        );
+        w.set_keyboard_focus(Some(list_id));
+        assert_eq!(
+            w.on_event(
+                &Event::MouseUp { px: 100.0, py: 16.0, button: MouseButton::Left },
+                &mut ctx,
+            ),
+            Some(WidgetAction::List(ListAction::Selected(0)))
+        );
     }
 
     #[test]
@@ -828,7 +1452,7 @@ mod tests {
 
     #[test]
     fn hit_row_returns_none_for_separator() {
-        let mut w = make_list(
+        let w = make_list(
             vec![
                 item("a.rs"),
                 ListItem {
@@ -851,7 +1475,7 @@ mod tests {
 
     #[test]
     fn hit_row_returns_none_for_header() {
-        let mut w = make_list(
+        let w = make_list(
             vec![
                 ListItem {
                     label: "Section".into(),
@@ -935,7 +1559,7 @@ mod tests {
 
     #[test]
     fn indicator_dot_hit_center_returns_index() {
-        let mut w = make_list(
+        let w = make_list(
             vec![ListItem {
                 label: "x".into(),
                 kind: ListItemKind::Normal,
@@ -996,7 +1620,7 @@ mod tests {
 
     #[test]
     fn pinned_item_hit_center_returns_index() {
-        let mut w = make_list(vec![pinned_item("main.rs")], Rect::new(0.0, 0.0, 220.0, 40.0));
+        let w = make_list(vec![pinned_item("main.rs")], Rect::new(0.0, 0.0, 220.0, 40.0));
         let center_y = 4.0 + 12.0;
         assert_eq!(w.hit_row(110.0, center_y, 1.0), Some(0));
     }
@@ -1192,7 +1816,7 @@ mod tests {
 
     #[test]
     fn nonpinned_item_close_button_not_shown_without_hover() {
-        let mut w = make_list(vec![item("file.rs")], Rect::new(0.0, 0.0, 220.0, 40.0));
+        let w = make_list(vec![item("file.rs")], Rect::new(0.0, 0.0, 220.0, 40.0));
 
         let dpi = 1.0f32;
         let row_rect = w.item_rect(0, dpi);

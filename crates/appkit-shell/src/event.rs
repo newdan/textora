@@ -1,3 +1,5 @@
+use std::sync::Arc;
+
 #[derive(Debug, Clone)]
 pub enum ShellEvent {
     StartBackgroundServices,
@@ -5,6 +7,13 @@ pub enum ShellEvent {
     FileSafetyResultsReady,
     SaveResultsReady,
     ProductWake,
+    Accessibility(Arc<accesskit_winit::Event>),
+}
+
+impl From<accesskit_winit::Event> for ShellEvent {
+    fn from(event: accesskit_winit::Event) -> Self {
+        Self::Accessibility(Arc::new(event))
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

@@ -2179,7 +2179,9 @@ fn event_pointer_position(event: &Event) -> Option<(f32, f32)> {
         | Event::ImePreedit { .. }
         | Event::ImeCommit(_)
         | Event::ImeEnable
-        | Event::ImeDisable => None,
+        | Event::ImeDisable
+        | Event::PointerLeave
+        | Event::InteractionCancel => None,
     }
 }
 
@@ -2524,12 +2526,14 @@ fn paint_at(context: &mut ui::PaintCtx<'_>, rect: Rect, paint: impl FnOnce(&mut 
 fn translate_event(event: &Event, offset_x: f32, offset_y: f32) -> Event {
     match event {
         Event::MouseMove { px, py } => Event::MouseMove { px: *px - offset_x, py: *py - offset_y },
+        Event::PointerLeave => Event::PointerLeave,
         Event::MouseDown { px, py, button } => {
             Event::MouseDown { px: *px - offset_x, py: *py - offset_y, button: *button }
         }
         Event::MouseUp { px, py, button } => {
             Event::MouseUp { px: *px - offset_x, py: *py - offset_y, button: *button }
         }
+        Event::InteractionCancel => Event::InteractionCancel,
         Event::Wheel { dx, dy, px, py } => {
             Event::Wheel { dx: *dx, dy: *dy, px: *px - offset_x, py: *py - offset_y }
         }
@@ -2558,6 +2562,14 @@ fn card_list_title(scope: &NavigationScope) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn lifecycle_events_have_no_pointer_position_and_survive_coordinate_translation() {
+        for event in [Event::PointerLeave, Event::InteractionCancel] {
+            assert_eq!(event_pointer_position(&event), None);
+            assert_eq!(translate_event(&event, 10.0, 20.0), event);
+        }
+    }
     use crate::NotoraState;
     use crate::action::CardQuery;
     use crate::state::CardPageState;

@@ -8,8 +8,14 @@ use crate::core::geom::Rect;
 use crate::core::widget::{
     Event, EventCtx, KeyCode, LayoutCtx, MouseButton, PaintCtx, Widget, WidgetAction,
 };
+use crate::core::{
+    AccessibilityAction, AccessibilityActionRequest, AccessibilityContext, AccessibilityId,
+    AccessibilityNode, AccessibilityRole,
+};
 use std::any::Any;
 use winit::window::CursorIcon;
+
+const POPUP_MENU_ACCESSIBILITY_ID: AccessibilityId = AccessibilityId(0x706f_7075_706d_656e);
 
 /// 弹出菜单的操作结果（上行给 app 层）。
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -25,10 +31,16 @@ pub struct PopupMenuWidget {
     menu: PopupMenu,
     rect: Rect,
     hovered: Option<usize>,
+    highlighted: Option<usize>,
 }
 
 impl PopupMenuWidget {
     pub fn new(mut menu: PopupMenu) -> Self {
+        let highlighted = menu
+            .items
+            .iter()
+            .position(|item| item.is_active && item.is_selectable())
+            .or_else(|| menu.items.iter().position(PopupMenuItem::is_selectable));
         let rect = menu.menu_rect;
         let dx = -rect.x;
         let dy = -rect.y;
@@ -38,12 +50,60 @@ impl PopupMenuWidget {
             r.x += dx;
             r.y += dy;
         }
-        Self { menu, rect: Rect::new(0.0, 0.0, rect.w, rect.h), hovered: None }
+        Self { menu, rect: Rect::new(0.0, 0.0, rect.w, rect.h), hovered: None, highlighted }
     }
 
     /// 暴露内部菜单引用（供 app 层 downcast 后读取）。
     pub fn menu(&self) -> &PopupMenu {
         &self.menu
+    }
+
+    pub fn highlighted_index(&self) -> Option<usize> {
+        self.highlighted
+    }
+
+    fn first_selectable_index(&self) -> Option<usize> {
+        self.menu.items.iter().position(PopupMenuItem::is_selectable)
+    }
+
+    fn last_selectable_index(&self) -> Option<usize> {
+        self.menu.items.iter().rposition(PopupMenuItem::is_selectable)
+    }
+
+    fn move_highlight(&mut self, forward: bool) {
+        let item_count = self.menu.items.len();
+        if item_count == 0 {
+            self.highlighted = None;
+            return;
+        }
+        let Some(current) = self.highlighted else {
+            self.highlighted =
+                if forward { self.first_selectable_index() } else { self.last_selectable_index() };
+            return;
+        };
+        for distance in 1..=item_count {
+            let index = if forward {
+                (current + distance) % item_count
+            } else {
+                (current + item_count - distance % item_count) % item_count
+            };
+            if self.menu.items[index].is_selectable() {
+                self.highlighted = Some(index);
+                return;
+            }
+        }
+        self.highlighted = None;
+    }
+
+    fn activate_highlighted(&self) -> WidgetAction {
+        let Some(index) = self.highlighted else {
+            return WidgetAction::Consumed;
+        };
+        let item = &self.menu.items[index];
+        if !item.is_selectable() {
+            return WidgetAction::Consumed;
+        }
+        WidgetAction::Popup(PopupOutcome::Selected(item.action.clone()))
     }
 }
 
@@ -53,11 +113,62 @@ impl Widget for PopupMenuWidget {
     }
 
     fn paint(&self, ctx: &mut PaintCtx) {
-        self.menu.paint(ctx, self.hovered);
+        self.menu.paint(ctx, self.hovered.or(self.highlighted));
     }
 
     fn hit(&self, px: f32, py: f32) -> bool {
         self.rect.contains(px, py)
+    }
+
+    fn accessibility_node(&self, ctx: &AccessibilityContext) -> Option<AccessibilityNode> {
+        if self.rect.w <= 0.0 || self.rect.h <= 0.0 {
+            return None;
+        }
+        let mut root = AccessibilityNode::new(
+            POPUP_MENU_ACCESSIBILITY_ID,
+            AccessibilityRole::Menu,
+            ctx.screen_bounds(self.rect),
+        )
+        .with_name("弹出菜单");
+        for (index, (item, item_rect)) in
+            self.menu.items.iter().zip(&self.menu.item_rects).enumerate()
+        {
+            let role = if item.is_separator {
+                AccessibilityRole::Separator
+            } else {
+                AccessibilityRole::MenuItem
+            };
+            let mut child = AccessibilityNode::new(
+                POPUP_MENU_ACCESSIBILITY_ID.child(index as u64 + 1),
+                role,
+                ctx.screen_bounds(*item_rect),
+            )
+            .with_disabled(!item.enabled)
+            .with_selected(item.is_active)
+            .with_focused(self.highlighted == Some(index));
+            if !item.label.is_empty() {
+                child = child.with_name(item.label.clone());
+            }
+            if item.is_selectable() {
+                child = child.with_action(AccessibilityAction::Activate);
+            }
+            root.children.push(child);
+        }
+        Some(root)
+    }
+
+    fn on_accessibility_action(
+        &mut self,
+        request: &AccessibilityActionRequest,
+    ) -> Option<WidgetAction> {
+        if request.action != AccessibilityAction::Activate {
+            return None;
+        }
+        let index = (0..self.menu.items.len())
+            .find(|index| POPUP_MENU_ACCESSIBILITY_ID.child(*index as u64 + 1) == request.target)?;
+        let item = self.menu.items.get(index)?;
+        item.is_selectable()
+            .then(|| WidgetAction::Popup(PopupOutcome::Selected(item.action.clone())))
     }
 
     fn on_event(&mut self, ev: &Event, ctx: &mut EventCtx) -> Option<WidgetAction> {
@@ -72,12 +183,17 @@ impl Widget for PopupMenuWidget {
                         .item_rects
                         .iter()
                         .enumerate()
-                        .find(|(_, r)| r.contains(*px, *py))
+                        .find(|(index, r)| {
+                            r.contains(*px, *py) && self.menu.items[*index].is_selectable()
+                        })
                         .map(|(i, _)| i)
                 } else {
                     None
                 };
                 None
+            }
+            Event::PointerLeave | Event::InteractionCancel => {
+                self.hovered.take().map(|_| WidgetAction::Consumed)
             }
             Event::MouseDown { px, py, button: MouseButton::Left } => {
                 if let Some(action) = self.menu.hit_test_px(*px, *py) {
@@ -85,10 +201,27 @@ impl Widget for PopupMenuWidget {
                 } else if !self.rect.contains(*px, *py) {
                     Some(WidgetAction::Popup(PopupOutcome::Dismiss))
                 } else {
-                    None
+                    Some(WidgetAction::Consumed)
                 }
             }
             Event::KeyDown(KeyCode::Escape, _) => Some(WidgetAction::Popup(PopupOutcome::Dismiss)),
+            Event::KeyDown(key, modifiers) => {
+                if *modifiers != crate::core::widget::Modifiers::NONE {
+                    return Some(WidgetAction::Consumed);
+                }
+                self.hovered = None;
+                match key {
+                    KeyCode::Up => self.move_highlight(false),
+                    KeyCode::Down => self.move_highlight(true),
+                    KeyCode::Home => self.highlighted = self.first_selectable_index(),
+                    KeyCode::End => self.highlighted = self.last_selectable_index(),
+                    KeyCode::Enter | KeyCode::Char(' ') => {
+                        return Some(self.activate_highlighted());
+                    }
+                    _ => return Some(WidgetAction::Consumed),
+                }
+                Some(WidgetAction::Consumed)
+            }
             _ => None,
         }
     }
@@ -112,6 +245,57 @@ mod tests {
 
     fn make_ctx() -> TabBarCtx {
         TabBarCtx { screen_w: 1200.0, screen_h: 800.0, dpi: 1.0 }
+    }
+
+    fn menu_from_items(items: Vec<PopupMenuItem>) -> PopupMenu {
+        const ITEM_HEIGHT_PX: f32 = 20.0;
+        const MENU_WIDTH_PX: f32 = 120.0;
+        let item_rects = (0..items.len())
+            .map(|index| {
+                Rect::new(0.0, index as f32 * ITEM_HEIGHT_PX, MENU_WIDTH_PX, ITEM_HEIGHT_PX)
+            })
+            .collect();
+        PopupMenu {
+            menu_rect: Rect::new(0.0, 0.0, MENU_WIDTH_PX, items.len() as f32 * ITEM_HEIGHT_PX),
+            items,
+            item_rects,
+            screen_size: (MENU_WIDTH_PX, 800.0),
+            show_checkmarks: false,
+        }
+    }
+
+    fn key_result(widget: &mut PopupMenuWidget, key: KeyCode) -> Option<WidgetAction> {
+        let theme = crate::theme::test_theme();
+        let mut ctx = EventCtx { cursor_hint: None, theme: &theme, dpi: 1.0 };
+        widget.on_event(&Event::KeyDown(key, Modifiers::NONE), &mut ctx)
+    }
+
+    #[test]
+    fn accessibility_exposes_menu_items_disabled_state_and_selected_action() {
+        let menu = menu_from_items(vec![
+            PopupMenuItem::action("禁用", PopupMenuAction::ToggleLineNumbers).with_enabled(false),
+            PopupMenuItem::action("自动换行", PopupMenuAction::ToggleWordWrap).with_active(true),
+        ]);
+        let mut widget = PopupMenuWidget::new(menu);
+        let node = widget
+            .accessibility_node(&crate::core::AccessibilityContext::new(10.0, 20.0))
+            .expect("popup menu should expose semantics");
+
+        assert_eq!(node.role, crate::core::AccessibilityRole::Menu);
+        assert_eq!(node.children.len(), 2);
+        assert!(node.children[0].state.disabled);
+        assert!(node.children[0].actions.is_empty());
+        assert_eq!(node.children[1].name.as_deref(), Some("自动换行"));
+        assert_eq!(node.children[1].state.selected, Some(true));
+        assert!(node.children[1].state.focused);
+        assert_eq!(node.children[1].bounds, Rect::new(10.0, 40.0, 120.0, 20.0));
+        assert_eq!(
+            widget.on_accessibility_action(&crate::core::AccessibilityActionRequest::new(
+                node.children[1].id,
+                crate::core::AccessibilityAction::Activate,
+            )),
+            Some(WidgetAction::Popup(PopupOutcome::Selected(PopupMenuAction::ToggleWordWrap)))
+        );
     }
 
     // ── PopupMenu 类型测试（从旧 popup_menu.rs 合并）──
@@ -284,6 +468,154 @@ mod tests {
         let cy = r.y + r.h * 0.5;
         let result = widget.on_event(&Event::MouseMove { px: cx, py: cy }, &mut ctx);
         assert!(result.is_none());
+    }
+
+    #[test]
+    fn keyboard_highlight_prefers_an_active_selectable_item() {
+        let menu = menu_from_items(vec![
+            PopupMenuItem::separator(PopupMenuAction::ToggleLineNumbers),
+            PopupMenuItem::action("禁用", PopupMenuAction::ToggleWordWrap).with_enabled(false),
+            PopupMenuItem::action("当前", PopupMenuAction::ToggleStatusBar).with_active(true),
+            PopupMenuItem::action("其他", PopupMenuAction::OpenSettingsFile),
+        ]);
+
+        let widget = PopupMenuWidget::new(menu);
+
+        assert_eq!(widget.highlighted_index(), Some(2));
+    }
+
+    #[test]
+    fn keyboard_navigation_skips_disabled_items_and_separators_and_wraps() {
+        let menu = menu_from_items(vec![
+            PopupMenuItem::separator(PopupMenuAction::ToggleLineNumbers),
+            PopupMenuItem::action("禁用", PopupMenuAction::ToggleWordWrap).with_enabled(false),
+            PopupMenuItem::action("第一个", PopupMenuAction::ToggleStatusBar),
+            PopupMenuItem::separator(PopupMenuAction::OpenSettingsFile),
+            PopupMenuItem::action("禁用二", PopupMenuAction::ToggleLineNumbers).with_enabled(false),
+            PopupMenuItem::action("最后一个", PopupMenuAction::ToggleWordWrap),
+        ]);
+        let mut widget = PopupMenuWidget::new(menu);
+
+        assert_eq!(widget.highlighted_index(), Some(2));
+        assert_eq!(key_result(&mut widget, KeyCode::Down), Some(WidgetAction::Consumed));
+        assert_eq!(widget.highlighted_index(), Some(5));
+        assert_eq!(key_result(&mut widget, KeyCode::Down), Some(WidgetAction::Consumed));
+        assert_eq!(widget.highlighted_index(), Some(2));
+        assert_eq!(key_result(&mut widget, KeyCode::Up), Some(WidgetAction::Consumed));
+        assert_eq!(widget.highlighted_index(), Some(5));
+        assert_eq!(key_result(&mut widget, KeyCode::Home), Some(WidgetAction::Consumed));
+        assert_eq!(widget.highlighted_index(), Some(2));
+        assert_eq!(key_result(&mut widget, KeyCode::End), Some(WidgetAction::Consumed));
+        assert_eq!(widget.highlighted_index(), Some(5));
+        assert_eq!(
+            key_result(&mut widget, KeyCode::Enter),
+            Some(WidgetAction::Popup(PopupOutcome::Selected(PopupMenuAction::ToggleWordWrap)))
+        );
+    }
+
+    #[test]
+    fn all_disabled_menu_consumes_keys_without_selecting() {
+        let menu = menu_from_items(vec![
+            PopupMenuItem::action("禁用", PopupMenuAction::ToggleLineNumbers).with_enabled(false),
+            PopupMenuItem::separator(PopupMenuAction::ToggleWordWrap),
+        ]);
+        let mut widget = PopupMenuWidget::new(menu);
+
+        assert_eq!(widget.highlighted_index(), None);
+        for key in [
+            KeyCode::Up,
+            KeyCode::Down,
+            KeyCode::Home,
+            KeyCode::End,
+            KeyCode::Enter,
+            KeyCode::Char(' '),
+            KeyCode::Tab,
+        ] {
+            assert_eq!(key_result(&mut widget, key), Some(WidgetAction::Consumed));
+            assert_eq!(widget.highlighted_index(), None);
+        }
+    }
+
+    #[test]
+    fn single_item_and_long_menu_navigation_remain_in_bounds() {
+        let mut single = PopupMenuWidget::new(menu_from_items(vec![PopupMenuItem::action(
+            "唯一",
+            PopupMenuAction::ToggleLineNumbers,
+        )]));
+        for key in [KeyCode::Up, KeyCode::Down, KeyCode::Home, KeyCode::End] {
+            assert_eq!(key_result(&mut single, key), Some(WidgetAction::Consumed));
+            assert_eq!(single.highlighted_index(), Some(0));
+        }
+        assert_eq!(
+            key_result(&mut single, KeyCode::Char(' ')),
+            Some(WidgetAction::Popup(PopupOutcome::Selected(PopupMenuAction::ToggleLineNumbers)))
+        );
+
+        let long_items = (0..100)
+            .map(|index| {
+                PopupMenuItem::action(format!("菜单项 {index}"), PopupMenuAction::SwitchTab(index))
+                    .with_enabled(index % 7 != 0)
+            })
+            .collect();
+        let mut long_menu = PopupMenuWidget::new(menu_from_items(long_items));
+        for _ in 0..250 {
+            assert_eq!(key_result(&mut long_menu, KeyCode::Down), Some(WidgetAction::Consumed));
+            let index = long_menu
+                .highlighted_index()
+                .expect("long menu should retain a selectable highlight");
+            assert_ne!(index % 7, 0);
+            assert!(index < 100);
+        }
+    }
+
+    #[test]
+    fn disabled_item_rejects_mouse_hover_and_activation() {
+        let menu = menu_from_items(vec![
+            PopupMenuItem::action("禁用", PopupMenuAction::ToggleLineNumbers).with_enabled(false),
+            PopupMenuItem::action("可用", PopupMenuAction::ToggleWordWrap),
+        ]);
+        let mut widget = PopupMenuWidget::new(menu);
+        let theme = crate::theme::test_theme();
+        let mut ctx = EventCtx { cursor_hint: None, theme: &theme, dpi: 1.0 };
+
+        assert_eq!(widget.on_event(&Event::MouseMove { px: 10.0, py: 10.0 }, &mut ctx), None);
+        assert_eq!(widget.hovered, None);
+        assert_eq!(
+            widget.on_event(
+                &Event::MouseDown { px: 10.0, py: 10.0, button: MouseButton::Left },
+                &mut ctx,
+            ),
+            Some(WidgetAction::Consumed)
+        );
+    }
+
+    #[test]
+    fn popup_lifecycle_clears_pointer_hover_without_losing_keyboard_highlight() {
+        let menu = menu_from_items(vec![
+            PopupMenuItem::action("第一个", PopupMenuAction::ToggleLineNumbers),
+            PopupMenuItem::action("第二个", PopupMenuAction::ToggleWordWrap),
+        ]);
+        let mut widget = PopupMenuWidget::new(menu);
+        let theme = crate::theme::test_theme();
+        let mut ctx = EventCtx { cursor_hint: None, theme: &theme, dpi: 1.0 };
+
+        assert_eq!(widget.on_event(&Event::MouseMove { px: 10.0, py: 30.0 }, &mut ctx), None);
+        assert_eq!(widget.hovered, Some(1));
+        assert_eq!(widget.highlighted_index(), Some(0));
+        assert_eq!(widget.on_event(&Event::PointerLeave, &mut ctx), Some(WidgetAction::Consumed));
+        assert_eq!(widget.hovered, None);
+        assert_eq!(widget.highlighted_index(), Some(0));
+
+        let _ = widget.on_event(&Event::MouseMove { px: 10.0, py: 30.0 }, &mut ctx);
+        assert_eq!(
+            widget.on_event(&Event::InteractionCancel, &mut ctx),
+            Some(WidgetAction::Consumed)
+        );
+        assert_eq!(widget.on_event(&Event::InteractionCancel, &mut ctx), None);
+        assert_eq!(
+            key_result(&mut widget, KeyCode::Enter),
+            Some(WidgetAction::Popup(PopupOutcome::Selected(PopupMenuAction::ToggleLineNumbers)))
+        );
     }
 
     // ── paint 测试 ──

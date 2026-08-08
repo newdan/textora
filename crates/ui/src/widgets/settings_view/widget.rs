@@ -2,7 +2,10 @@ use std::any::Any;
 use std::borrow::Cow;
 
 use crate::core::widget::{ControlAction, TextPayload, WidgetId};
-use crate::core::{Event, EventCtx, LayoutCtx, PaintCtx, Rect, Widget, WidgetAction};
+use crate::core::{
+    AccessibilityActionRequest, AccessibilityContext, AccessibilityNode, Event, EventCtx,
+    LayoutCtx, PaintCtx, Rect, Widget, WidgetAction,
+};
 use crate::theme::SettingsTheme;
 use crate::widgets::button::{Button, ButtonStyle};
 use crate::widgets::form::{FormRow, FormRowStyle, FormSection, FormSectionStyle, FormView};
@@ -460,6 +463,17 @@ impl SettingsView {
         }
     }
 
+    fn set_focused_control(&mut self, focused_id: Option<WidgetId>) {
+        self.focused_id = focused_id;
+        for (_, button) in &mut self.category_buttons {
+            button.set_keyboard_focus(focused_id);
+        }
+        self.form.set_keyboard_focus(focused_id);
+        if let Some(banner) = self.persistence_banner.as_mut() {
+            banner.set_keyboard_focus(focused_id);
+        }
+    }
+
     fn handle_category_action(&mut self, action: ControlAction) -> Option<WidgetAction> {
         let ControlAction::Activated { id } = action else {
             return Some(WidgetAction::Consumed);
@@ -497,7 +511,10 @@ impl SettingsView {
             ControlAction::TextEdited { .. } => Some(WidgetAction::Consumed),
             ControlAction::TextCommitted { id, value } => self.handle_text_commit(id, value),
             ControlAction::Toggled { id, checked } => self.handle_toggle(id, checked),
-            ControlAction::FocusRequested { .. } => Some(WidgetAction::Consumed),
+            ControlAction::FocusRequested { id } => {
+                self.set_focused_control(Some(id));
+                Some(WidgetAction::Consumed)
+            }
         }
     }
 
@@ -628,8 +645,7 @@ impl SettingsView {
         match action {
             WidgetAction::Control(control_action) => {
                 if let ControlAction::FocusRequested { id } = control_action {
-                    self.focused_id = Some(id);
-                    self.form.set_keyboard_focus(Some(id));
+                    self.set_focused_control(Some(id));
                     return Some(WidgetAction::Consumed);
                 }
                 self.handle_control_action(control_action)
@@ -677,6 +693,37 @@ impl SettingsView {
             SettingsHoverTarget::Content => self.dispatch_active_page_event(event, ctx),
             SettingsHoverTarget::PersistenceBanner => self.dispatch_banner_event(event, ctx),
         }
+    }
+
+    fn dispatch_interaction_lifecycle(
+        &mut self,
+        event: &Event,
+        ctx: &mut EventCtx,
+    ) -> Option<WidgetAction> {
+        let container_changed = if matches!(event, Event::InteractionCancel) {
+            self.category_pointer_index.take().is_some() | self.hover_target.take().is_some()
+        } else {
+            self.hover_target.take().is_some()
+        };
+        let mut first_action = None;
+        for category_index in 0..self.category_buttons.len() {
+            if let Some(action) = self.dispatch_category_event(category_index, event, ctx)
+                && first_action.is_none()
+            {
+                first_action = Some(action);
+            }
+        }
+        if let Some(action) = self.dispatch_active_page_event(event, ctx)
+            && first_action.is_none()
+        {
+            first_action = Some(action);
+        }
+        if let Some(action) = self.dispatch_banner_event(event, ctx)
+            && first_action.is_none()
+        {
+            first_action = Some(action);
+        }
+        first_action.or_else(|| container_changed.then_some(WidgetAction::Consumed))
     }
 }
 
@@ -822,15 +869,96 @@ impl Widget for SettingsView {
     }
 
     fn collect_focusable_ids(&self, output: &mut Vec<WidgetId>) {
+        if self.category_navigation_visible {
+            for (_, button) in &self.category_buttons {
+                button.collect_focusable_ids(output);
+            }
+        }
         self.form.collect_focusable_ids(output);
+        if let Some(banner) = &self.persistence_banner {
+            banner.collect_focusable_ids(output);
+        }
     }
 
     fn set_keyboard_focus(&mut self, focused_id: Option<WidgetId>) {
-        self.focused_id = focused_id;
-        self.form.set_keyboard_focus(focused_id);
+        self.set_focused_control(focused_id);
+    }
+
+    fn collect_accessibility_nodes(
+        &self,
+        context: &AccessibilityContext,
+        output: &mut Vec<AccessibilityNode>,
+    ) {
+        if self.category_navigation_visible {
+            for ((_, button), rect) in self.category_buttons.iter().zip(&self.category_rects) {
+                if rect.w > 0.0 && rect.h > 0.0 {
+                    button.collect_accessibility_nodes(&context.offset_by(rect.x, rect.y), output);
+                }
+            }
+        }
+        if self.form_rect.w > 0.0 && self.form_rect.h > 0.0 {
+            self.form.collect_accessibility_nodes(
+                &context.offset_by(self.form_rect.x, self.form_rect.y),
+                output,
+            );
+        }
+        if let Some(banner) = &self.persistence_banner
+            && self.persistence_banner_rect.w > 0.0
+            && self.persistence_banner_rect.h > 0.0
+        {
+            banner.collect_accessibility_nodes(
+                &context.offset_by(self.persistence_banner_rect.x, self.persistence_banner_rect.y),
+                output,
+            );
+        }
+    }
+
+    fn on_accessibility_action(
+        &mut self,
+        request: &AccessibilityActionRequest,
+    ) -> Option<WidgetAction> {
+        if self.category_navigation_visible {
+            for index in 0..self.category_buttons.len() {
+                let action = self.category_buttons[index].1.on_accessibility_action(request);
+                if let Some(action) = action {
+                    return match action {
+                        WidgetAction::Control(control_action) => {
+                            self.handle_control_action(control_action)
+                        }
+                        other => Some(other),
+                    };
+                }
+            }
+        }
+        if let Some(action) = self.form.on_accessibility_action(request) {
+            return match action {
+                WidgetAction::Control(control_action) => self.handle_control_action(control_action),
+                other => Some(other),
+            };
+        }
+        let action = self.persistence_banner.as_mut()?.on_accessibility_action(request)?;
+        match action {
+            WidgetAction::Control(control_action) => self.handle_control_action(control_action),
+            other => Some(other),
+        }
     }
 
     fn on_event(&mut self, event: &Event, ctx: &mut EventCtx) -> Option<WidgetAction> {
+        if matches!(event, Event::PointerLeave | Event::InteractionCancel) {
+            return self.dispatch_interaction_lifecycle(event, ctx);
+        }
+
+        if matches!(event, Event::KeyDown(..)) {
+            if let Some(index) = self.category_buttons.iter().position(|(_, button)| {
+                button.id() == self.focused_id && self.category_navigation_visible
+            }) {
+                return self.dispatch_category_event(index, event, ctx);
+            }
+            if self.focused_id == Some(RETRY_PERSISTENCE_ID) && self.persistence_banner.is_some() {
+                return self.dispatch_banner_event(event, ctx);
+            }
+        }
+
         if self.persistence_banner.as_ref().is_some_and(Widget::is_capturing)
             && matches!(event, Event::MouseMove { .. } | Event::MouseUp { .. })
         {
@@ -1086,6 +1214,7 @@ mod tests {
     use super::*;
     use crate::core::measure::NoopMeasure;
     use crate::core::paint::{DrawCmd, DrawList};
+    use crate::core::{KeyCode, Modifiers};
     use crate::view_mode::ViewMode;
 
     fn settings_fixture(category: SettingsCategory) -> SettingsView {
@@ -1118,11 +1247,16 @@ mod tests {
         view.on_event(&event, &mut ctx)
     }
 
-    fn ime_text_allocation(event: &Event) -> *const u8 {
-        match event {
-            Event::ImePreedit { text, .. } | Event::ImeCommit(text) => text.as_ptr(),
-            _ => unreachable!("test event must carry IME text"),
-        }
+    fn semantic_node_with_id(
+        nodes: &[crate::core::AccessibilityNode],
+        id: crate::core::AccessibilityId,
+    ) -> Option<&crate::core::AccessibilityNode> {
+        nodes.iter().find_map(|node| {
+            if node.id == id {
+                return Some(node);
+            }
+            semantic_node_with_id(&node.children, id)
+        })
     }
 
     #[test]
@@ -1148,6 +1282,49 @@ mod tests {
             .is_none()
         );
         assert!(view.has_validation_error());
+    }
+
+    #[test]
+    fn settings_semantics_reach_nested_fields_and_reuse_category_actions() {
+        let theme = crate::theme::test_theme();
+        let mut view = settings_fixture(SettingsCategory::Appearance);
+        layout_settings_view(&mut view, &theme, Rect::new(0.0, 0.0, 900.0, 600.0));
+        let mut nodes = Vec::new();
+        view.collect_accessibility_nodes(
+            &crate::core::AccessibilityContext::new(20.0, 30.0),
+            &mut nodes,
+        );
+
+        let font_size_id = crate::core::AccessibilityId::from(FONT_SIZE_ID);
+        let font_size = semantic_node_with_id(&nodes, font_size_id)
+            .expect("nested font-size field must be exposed");
+        assert_eq!(font_size.role, crate::core::AccessibilityRole::TextField);
+        let [label_id] = font_size.labelled_by.as_slice() else {
+            panic!("font-size field must reference its row label");
+        };
+        assert_eq!(
+            semantic_node_with_id(&nodes, *label_id).and_then(|label| label.name.as_deref()),
+            Some("字号")
+        );
+        assert!(font_size.bounds.x >= 20.0);
+        assert!(font_size.bounds.y >= 30.0);
+
+        let editor_category_id = crate::core::AccessibilityId::from(EDITOR_CATEGORY_ID);
+        let mut root = crate::core::AccessibilityNode::new(
+            crate::core::AccessibilityId(0x7365_7474_696e_6773),
+            crate::core::AccessibilityRole::Group,
+            Rect::new(20.0, 30.0, 900.0, 600.0),
+        );
+        root.children = nodes;
+        assert_eq!(crate::core::AccessibilityTree::new(root, None).validate(), Ok(()));
+        assert_eq!(
+            view.on_accessibility_action(&crate::core::AccessibilityActionRequest::new(
+                editor_category_id,
+                crate::core::AccessibilityAction::Activate,
+            )),
+            Some(WidgetAction::Consumed)
+        );
+        assert_eq!(view.active_category(), SettingsCategory::Editor);
     }
 
     #[test]
@@ -1247,6 +1424,50 @@ mod tests {
 
         assert_eq!(view.active_category(), SettingsCategory::Editor);
         assert_eq!(view.form.focused_id(), Some(WORD_WRAP_ID));
+    }
+
+    #[test]
+    fn category_press_survives_pointer_leave_and_is_cleared_by_interaction_cancel() {
+        let mut view = settings_fixture(SettingsCategory::Appearance);
+        let theme = crate::theme::test_theme();
+        layout_settings_view(&mut view, &theme, Rect::new(0.0, 0.0, 720.0, 480.0));
+        let editor_rect = view.category_rects[1];
+        let pointer = (editor_rect.x + editor_rect.w * 0.5, editor_rect.y + editor_rect.h * 0.5);
+
+        assert!(
+            dispatch_settings_event(
+                &mut view,
+                Event::MouseDown {
+                    px: pointer.0,
+                    py: pointer.1,
+                    button: crate::core::widget::MouseButton::Left,
+                },
+            )
+            .is_some()
+        );
+        assert!(view.is_capturing());
+
+        dispatch_settings_event(&mut view, Event::PointerLeave);
+        assert!(view.is_capturing());
+
+        assert_eq!(
+            dispatch_settings_event(&mut view, Event::InteractionCancel),
+            Some(WidgetAction::Consumed)
+        );
+        assert!(!view.is_capturing());
+        assert_eq!(dispatch_settings_event(&mut view, Event::InteractionCancel), None);
+        assert_eq!(
+            dispatch_settings_event(
+                &mut view,
+                Event::MouseUp {
+                    px: pointer.0,
+                    py: pointer.1,
+                    button: crate::core::widget::MouseButton::Left,
+                },
+            ),
+            None
+        );
+        assert_eq!(view.active_category(), SettingsCategory::Appearance);
     }
 
     fn click_category_button(view: &mut SettingsView, category_index: usize) {
@@ -1503,5 +1724,24 @@ mod tests {
             draw_list.cmds.last(),
             Some(DrawCmd::StrokeRect { color, .. }) if *color == light_settings.control_border
         ));
+    }
+
+    #[test]
+    fn category_and_segmented_buttons_share_settings_focus_protocol() {
+        let theme = crate::theme::test_theme();
+        let mut view = settings_fixture(SettingsCategory::Appearance);
+        layout_settings_view(&mut view, &theme, Rect::new(0.0, 0.0, 600.0, 400.0));
+
+        let mut focusable_ids = Vec::new();
+        view.collect_focusable_ids(&mut focusable_ids);
+        assert!(focusable_ids.contains(&APPEARANCE_CATEGORY_ID));
+        assert!(focusable_ids.contains(&THEME_DARK_ID));
+
+        view.set_keyboard_focus(Some(THEME_DARK_ID));
+        let mut ctx = EventCtx { cursor_hint: None, theme: &theme, dpi: 1.0 };
+        assert_eq!(
+            view.on_event(&Event::KeyDown(KeyCode::Enter, Modifiers::NONE), &mut ctx),
+            Some(WidgetAction::Settings(SettingsViewAction::SetThemeMode(ThemeMode::Dark)))
+        );
     }
 }

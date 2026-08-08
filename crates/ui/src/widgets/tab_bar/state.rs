@@ -101,7 +101,7 @@ impl TabBarState {
     pub fn update_layout(
         &mut self,
         input: &TabBarInput<'_>,
-        mut shaper: Option<&mut shaping::Shaper>,
+        shaper: Option<&mut shaping::Shaper>,
         dpi: f32,
     ) {
         let ctx = TabBarCtx { screen_w: input.screen_w, screen_h: input.screen_h, dpi };
@@ -404,6 +404,10 @@ fn draw_tab_bg(
 }
 
 /// Draw tab content: pin indicator, close button, separators, dirty mark, text label.
+#[allow(
+    clippy::too_many_arguments,
+    reason = "tab paint helper receives already-derived geometry and semantic colors"
+)]
 fn draw_tab_content(
     dl: &mut DrawList,
     entry: &super::layout::TabEntry,

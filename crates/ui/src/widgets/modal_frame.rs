@@ -1,7 +1,9 @@
 use crate::constants::{BAR_HEIGHT, BODY_FONT_SIZE, CLOSE_BTN_SIZE, H_PADDING, SMALL_GAP};
 use crate::core::widget::{ControlAction, WidgetId};
 use crate::core::{
-    Event, EventCtx, KeyCode, LayoutCtx, MouseButton, PaintCtx, Rect, Widget, WidgetAction,
+    AccessibilityActionRequest, AccessibilityContext, AccessibilityId, AccessibilityNode,
+    AccessibilityRole, Event, EventCtx, KeyCode, LayoutCtx, MouseButton, PaintCtx, Rect, Widget,
+    WidgetAction,
 };
 use crate::theme::SettingsTheme;
 use crate::widgets::button::{Button, ButtonStyle};
@@ -16,6 +18,7 @@ const DEFAULT_MODAL_HEADER_GAP_LOGICAL: f32 = SMALL_GAP;
 const DEFAULT_MODAL_HEADER_HEIGHT_LOGICAL: f32 = BAR_HEIGHT;
 const DEFAULT_MODAL_TITLE_FONT_SIZE_LOGICAL: f32 = BODY_FONT_SIZE;
 const MODAL_FRAME_CLOSE_BUTTON_ID: WidgetId = WidgetId(0x6d6f_6461_6c5f_636c);
+const MODAL_FRAME_ACCESSIBILITY_ID: AccessibilityId = AccessibilityId(0x6d6f_6461_6c5f_726f);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum PointerTarget {
@@ -56,10 +59,12 @@ pub struct ModalFrame {
     title_rect: Rect,
     close_button_rect: Rect,
     content_rect: Rect,
+    title_text: String,
     title: Label,
     close_button: Button,
     content: Box<dyn Widget>,
     style: ModalFrameStyle,
+    focused_id: Option<WidgetId>,
     pointer_target: Option<PointerTarget>,
     hover_target: Option<PointerTarget>,
 }
@@ -74,15 +79,18 @@ impl ModalFrame {
         content: Box<dyn Widget>,
         style: ModalFrameStyle,
     ) -> Self {
-        let title = Label::new(
-            title,
+        let title_text = title.into();
+        let mut title = Label::new(
+            title_text.clone(),
             LabelStyle {
                 font_size_logical: style.title_font_size_logical,
                 foreground: LabelForeground::ThemeMain,
                 ..LabelStyle::default()
             },
         );
-        let close_button = Self::build_close_button(&style, None);
+        title.set_accessibility_id(Some(MODAL_FRAME_ACCESSIBILITY_ID.named_child("title")));
+        let mut close_button = Self::build_close_button(&style, None);
+        close_button.set_accessibility_label(Some(format!("关闭 {title_text}")));
 
         Self {
             rect: Rect::ZERO,
@@ -90,10 +98,12 @@ impl ModalFrame {
             title_rect: Rect::ZERO,
             close_button_rect: Rect::ZERO,
             content_rect: Rect::ZERO,
+            title_text,
             title,
             close_button,
             content,
             style,
+            focused_id: None,
             pointer_target: None,
             hover_target: None,
         }
@@ -335,8 +345,53 @@ impl Widget for ModalFrame {
     }
 
     fn set_keyboard_focus(&mut self, focused_id: Option<WidgetId>) {
+        self.focused_id = focused_id;
         self.close_button.set_keyboard_focus(focused_id);
         self.content.set_keyboard_focus(focused_id);
+    }
+
+    fn accessibility_node(&self, ctx: &AccessibilityContext) -> Option<AccessibilityNode> {
+        if self.rect.w <= 0.0 || self.rect.h <= 0.0 {
+            return None;
+        }
+
+        let mut node = AccessibilityNode::new(
+            MODAL_FRAME_ACCESSIBILITY_ID,
+            AccessibilityRole::Dialog,
+            ctx.screen_bounds(self.rect),
+        )
+        .with_name(self.title_text.clone());
+        self.title.collect_accessibility_nodes(
+            &ctx.offset_by(self.title_rect.x, self.title_rect.y),
+            &mut node.children,
+        );
+        self.close_button.collect_accessibility_nodes(
+            &ctx.offset_by(self.close_button_rect.x, self.close_button_rect.y),
+            &mut node.children,
+        );
+        self.content.collect_accessibility_nodes(
+            &ctx.offset_by(self.content_rect.x, self.content_rect.y),
+            &mut node.children,
+        );
+        Some(node)
+    }
+
+    fn on_accessibility_action(
+        &mut self,
+        request: &AccessibilityActionRequest,
+    ) -> Option<WidgetAction> {
+        if request.target == AccessibilityId::from(MODAL_FRAME_CLOSE_BUTTON_ID) {
+            let action = self.close_button.on_accessibility_action(request)?;
+            return match action {
+                WidgetAction::Control(ControlAction::Activated { id })
+                    if id == MODAL_FRAME_CLOSE_BUTTON_ID =>
+                {
+                    Some(WidgetAction::Overlay(crate::OverlayAction::DismissRequested))
+                }
+                _ => Some(action),
+            };
+        }
+        self.content.on_accessibility_action(request)
     }
 
     fn on_event(&mut self, event: &Event, ctx: &mut EventCtx) -> Option<WidgetAction> {
@@ -344,7 +399,28 @@ impl Widget for ModalFrame {
             return Some(WidgetAction::Overlay(crate::OverlayAction::DismissRequested));
         }
 
+        if matches!(event, Event::KeyDown(..))
+            && self.focused_id == Some(MODAL_FRAME_CLOSE_BUTTON_ID)
+        {
+            return self.dispatch_to_close_button(event, ctx);
+        }
+
         match event {
+            Event::PointerLeave => {
+                let hover_target = self.hover_target.take();
+                let action =
+                    hover_target.and_then(|target| self.dispatch_to_target(target, event, ctx));
+                action.or_else(|| hover_target.map(|_| WidgetAction::Consumed))
+            }
+            Event::InteractionCancel => {
+                let container_changed =
+                    self.pointer_target.take().is_some() | self.hover_target.take().is_some();
+                let close_action = self.dispatch_to_close_button(event, ctx);
+                let content_action = self.dispatch_to_content(event, ctx);
+                close_action
+                    .or(content_action)
+                    .or_else(|| container_changed.then_some(WidgetAction::Consumed))
+            }
             Event::MouseDown { px, py, button: MouseButton::Left } => {
                 let target = self.pointer_target_at(*px, *py)?;
                 self.pointer_target = Some(target);
@@ -377,11 +453,7 @@ impl Widget for ModalFrame {
                 self.dispatch_to_target(target, event, ctx)
             }
             Event::MouseDown { .. } => None,
-            Event::KeyDown(..)
-            | Event::ImePreedit { .. }
-            | Event::ImeCommit(..)
-            | Event::ImeEnable
-            | Event::ImeDisable => self.dispatch_to_content(event, ctx),
+            _ => self.dispatch_to_content(event, ctx),
         }
     }
 
@@ -399,7 +471,12 @@ mod tests {
     use super::*;
     use crate::core::measure::NoopMeasure;
     use crate::core::paint::{DrawCmd, DrawList};
-    use crate::core::{Event, EventCtx, KeyCode, LayoutCtx, Modifiers, MouseButton, PaintCtx};
+    use crate::core::{
+        AccessibilityAction, AccessibilityActionRequest, AccessibilityContext, AccessibilityId,
+        AccessibilityRole, AccessibilityTree, Event, EventCtx, KeyCode, LayoutCtx, Modifiers,
+        MouseButton, PaintCtx,
+    };
+    use crate::widgets::text_box::TextBox;
     use winit::window::CursorIcon;
 
     #[derive(Default)]
@@ -482,6 +559,38 @@ mod tests {
     }
 
     #[test]
+    fn modal_frame_exposes_dialog_tree_and_routes_accessibility_actions() {
+        let content_id = WidgetId(902);
+        let mut modal = fixture_modal_with_content(Box::new(TextBox::with_id(content_id)));
+        modal.set_keyboard_focus(Some(content_id));
+
+        let node = modal
+            .accessibility_node(&AccessibilityContext::new(30.0, 40.0))
+            .expect("modal frame should expose dialog semantics");
+
+        assert_eq!(node.role, AccessibilityRole::Dialog);
+        assert_eq!(node.name.as_deref(), Some("Settings"));
+        assert_eq!(node.children.len(), 3);
+        assert_eq!(node.children[0].role, AccessibilityRole::StaticText);
+        assert_eq!(node.children[1].role, AccessibilityRole::Button);
+        assert_eq!(node.children[2].role, AccessibilityRole::TextField);
+        assert_eq!(node.children[1].name.as_deref(), Some("关闭 Settings"));
+        assert_eq!(node.children[2].bounds.x, 30.0 + modal.content_rect().x);
+        assert_eq!(
+            AccessibilityTree::new(node, Some(AccessibilityId::from(content_id))).validate(),
+            Ok(())
+        );
+
+        assert_eq!(
+            modal.on_accessibility_action(&AccessibilityActionRequest::new(
+                AccessibilityId::from(MODAL_FRAME_CLOSE_BUTTON_ID),
+                AccessibilityAction::Activate,
+            )),
+            Some(WidgetAction::Overlay(crate::OverlayAction::DismissRequested))
+        );
+    }
+
+    #[test]
     fn ime_content_routing_reuses_the_original_text_allocation() {
         let event = Event::ImeCommit("modal-sensitive-ime-route".to_owned());
         let original_allocation = match &event {
@@ -554,6 +663,24 @@ mod tests {
             key_escape(&mut modal),
             Some(WidgetAction::Overlay(crate::OverlayAction::DismissRequested))
         );
+    }
+
+    #[test]
+    fn modal_close_button_is_focusable_and_activates_from_keyboard() {
+        let mut modal = fixture_modal();
+        let mut focusable_ids = Vec::new();
+        modal.collect_focusable_ids(&mut focusable_ids);
+        assert_eq!(focusable_ids.first(), Some(&MODAL_FRAME_CLOSE_BUTTON_ID));
+
+        modal.set_keyboard_focus(Some(MODAL_FRAME_CLOSE_BUTTON_ID));
+        let theme = crate::theme::test_theme();
+        let mut ctx = EventCtx { cursor_hint: None, theme: &theme, dpi: 1.0 };
+        for key in [KeyCode::Enter, KeyCode::Char(' ')] {
+            assert_eq!(
+                modal.on_event(&Event::KeyDown(key, Modifiers::NONE), &mut ctx),
+                Some(WidgetAction::Overlay(crate::OverlayAction::DismissRequested))
+            );
+        }
     }
 
     #[test]
@@ -645,6 +772,47 @@ mod tests {
         ];
         let child = stub_content(&mut modal);
         assert_eq!(child.events, expected_events);
+    }
+
+    #[test]
+    fn modal_leave_preserves_close_press_and_cancel_clears_all_pointer_state() {
+        let mut modal = fixture_modal();
+        let theme = crate::theme::test_theme();
+        let mut ctx = EventCtx { cursor_hint: None, theme: &theme, dpi: 1.0 };
+        let close_px = modal.close_button_rect.x + modal.close_button_rect.w * 0.5;
+        let close_py = modal.close_button_rect.y + modal.close_button_rect.h * 0.5;
+
+        assert!(
+            modal
+                .on_event(
+                    &Event::MouseDown { px: close_px, py: close_py, button: MouseButton::Left },
+                    &mut ctx,
+                )
+                .is_some()
+        );
+        assert!(modal.is_capturing());
+
+        assert_eq!(modal.on_event(&Event::PointerLeave, &mut ctx), Some(WidgetAction::Consumed));
+        assert!(modal.is_capturing());
+
+        assert_eq!(
+            modal.on_event(&Event::InteractionCancel, &mut ctx),
+            Some(WidgetAction::Consumed)
+        );
+        assert!(!modal.is_capturing());
+        assert_eq!(modal.on_event(&Event::InteractionCancel, &mut ctx), None);
+        assert_eq!(
+            modal.on_event(
+                &Event::MouseUp { px: close_px, py: close_py, button: MouseButton::Left },
+                &mut ctx,
+            ),
+            None
+        );
+
+        assert_eq!(
+            stub_content(&mut modal).events,
+            vec![Event::InteractionCancel, Event::InteractionCancel]
+        );
     }
 
     #[test]

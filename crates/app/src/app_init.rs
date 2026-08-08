@@ -276,6 +276,7 @@ impl App {
             theme_load_report,
             product: crate::textora_product::TextoraProduct::new(),
             editor_runtime,
+            accessibility_adapter: None,
             popup_tab_id_snapshot: Vec::new(),
             workspace_store,
             ui_shell: UiShell::new(),

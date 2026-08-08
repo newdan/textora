@@ -3,15 +3,10 @@
 //! Provides rendering primitives and widget components.
 //! Depends on core, render, shaping, stdext — no app-layer types.
 
-#![allow(clippy::too_many_arguments)]
 #![allow(deprecated)]
-#![allow(dead_code)]
 #![allow(clippy::overly_complex_bool_expr)]
-#![allow(unused_mut)]
-#![allow(clippy::type_complexity)]
 #![allow(clippy::empty_line_after_doc_comments)]
 #![allow(clippy::doc_lazy_continuation)]
-#![allow(unused_must_use)]
 
 pub mod canvas;
 pub mod constants;
@@ -24,7 +19,6 @@ pub mod plugin;
 pub mod render_geom;
 pub mod settings;
 pub mod tapered_path;
-mod text_renderer;
 pub mod theme;
 mod theme_file;
 mod theme_registry;
@@ -46,8 +40,12 @@ pub use settings::{Settings, ThemeMode, UiMetrics};
 pub use theme::Theme;
 
 // 骨架（Phase 1）
+pub use core::widget::ControlAction;
 pub use core::{
-    DismissPolicy, Dock, DockChild, DrawCmd, DrawList, Event, EventCtx, KeyCode, LayoutCtx,
-    MouseButton, NoopMeasure, OverlayAction, OverlayInputPolicy, OverlayLayout, PaintCtx, Rect,
-    Screen, Side, TextMeasure, Widget, WidgetId,
+    AccessibilityAction, AccessibilityActionRequest, AccessibilityContext, AccessibilityId,
+    AccessibilityNode, AccessibilityOrientation, AccessibilityRole, AccessibilityState,
+    AccessibilityTree, AccessibilityValidationError, DismissPolicy, Dock, DockChild, DrawCmd,
+    DrawList, Event, EventCtx, KeyCode, LayoutCtx, Modifiers, MouseButton, NoopMeasure,
+    OverlayAction, OverlayInputPolicy, OverlayLayout, PaintCtx, Rect, Screen, Side, TextMeasure,
+    Widget, WidgetAction, WidgetId,
 };

@@ -27,6 +27,8 @@ use ui::tooltip::{TooltipHint, TooltipWidget};
 use crate::editor_host::EditorHostWidget;
 
 const OVERLAY_LOCAL_ORIGIN: f32 = 0.0;
+const UI_SHELL_ACCESSIBILITY_ID: ui::core::AccessibilityId =
+    ui::core::AccessibilityId(0x7465_7874_6f72_615f);
 
 /// Shell 输入：从 App / Workspace 读出的 chrome 状态。
 #[derive(Debug, Clone)]
@@ -70,6 +72,7 @@ struct TooltipTimer {
 pub enum KeyboardFocusTarget {
     Editor,
     Widget(ui::core::widget::WidgetId),
+    Overlay,
 }
 
 enum OverlayDispatchOutcome {
@@ -643,6 +646,9 @@ impl UiShell {
         let focus = match self.keyboard_focus {
             KeyboardFocusTarget::Widget(id) => id,
             KeyboardFocusTarget::Editor => return None,
+            KeyboardFocusTarget::Overlay => {
+                return self.dispatch_focused_overlay_event(&overlay_event, theme, dpi);
+            }
         };
         let ev = Event::KeyDown(key, modifiers);
         let mut ctx = EventCtx { cursor_hint: None, theme, dpi };
@@ -727,11 +733,14 @@ impl UiShell {
 
         // Search bar keyboard focus: auto-focus on first open, clear on close.
         // Subsequent focus changes are driven by mouse/key events (Phase 3).
-        if inputs.search_visible && !search_was_visible {
-            self.keyboard_focus = KeyboardFocusTarget::Widget(ui::core::widget::ids::SEARCH_BAR);
-        }
-        if !inputs.search_visible && search_was_visible {
-            self.keyboard_focus = KeyboardFocusTarget::Editor;
+        if self.overlays.is_empty() {
+            if inputs.search_visible && !search_was_visible {
+                self.keyboard_focus =
+                    KeyboardFocusTarget::Widget(ui::core::widget::ids::SEARCH_BAR);
+            }
+            if !inputs.search_visible && search_was_visible {
+                self.keyboard_focus = KeyboardFocusTarget::Editor;
+            }
         }
 
         // Step 3: Layout
@@ -1075,6 +1084,92 @@ impl UiShell {
         Rect::new(0.0, 0.0, self.screen_w, self.screen_h)
     }
 
+    /// 构造当前窗口唯一可见的语义树；overlay 存在时不会暴露被遮挡的底层 UI。
+    pub fn accessibility_tree(&self, window_name: &str) -> ui::core::AccessibilityTree {
+        let context = ui::core::AccessibilityContext::default();
+        let mut children = Vec::new();
+        if let Some(overlay) = self.overlays.last() {
+            overlay.widget.collect_accessibility_nodes(
+                &context.offset_by(overlay.layout_rect.x, overlay.layout_rect.y),
+                &mut children,
+            );
+        } else {
+            self.dock.collect_accessibility_nodes(&context, &mut children);
+            if self.canvas_scrollbars_input.is_some() {
+                self.canvas_scrollbars.collect_accessibility_nodes(
+                    &context.offset_by(self.dock.fill_rect.x, self.dock.fill_rect.y),
+                    &mut children,
+                );
+            }
+            if let Some(tooltip) = &self.tooltip_overlay {
+                tooltip.widget.collect_accessibility_nodes(
+                    &context.offset_by(tooltip.layout_rect.x, tooltip.layout_rect.y),
+                    &mut children,
+                );
+            }
+        }
+
+        let preferred_focus = match self.keyboard_focus {
+            KeyboardFocusTarget::Widget(id) if self.overlays.is_empty() => {
+                Some(ui::core::AccessibilityId::from(id))
+            }
+            KeyboardFocusTarget::Overlay => first_focused_accessibility_id(&children)
+                .or_else(|| first_actionable_accessibility_id(&children))
+                .or_else(|| children.first().map(|node| node.id)),
+            KeyboardFocusTarget::Editor | KeyboardFocusTarget::Widget(_) => None,
+        };
+        clear_accessibility_focus(&mut children);
+        let focus = preferred_focus.filter(|id| set_accessibility_focus(&mut children, *id));
+
+        let mut root = ui::core::AccessibilityNode::new(
+            UI_SHELL_ACCESSIBILITY_ID,
+            ui::core::AccessibilityRole::Window,
+            self.current_screen_rect(),
+        )
+        .with_name(window_name)
+        .with_focused(focus.is_none());
+        root.children = children;
+        ui::core::AccessibilityTree::new(root, focus.or(Some(UI_SHELL_ACCESSIBILITY_ID)))
+    }
+
+    /// 将平台辅助技术动作路由到当前可见语义子树。
+    pub fn dispatch_accessibility_action(
+        &mut self,
+        request: &ui::core::AccessibilityActionRequest,
+    ) -> Option<WidgetAction> {
+        if let Some(overlay) = self.overlays.last_mut() {
+            let action = overlay.widget.on_accessibility_action(request)?;
+            if let WidgetAction::Control(ui::core::widget::ControlAction::FocusRequested { id }) =
+                action
+            {
+                overlay.widget.set_keyboard_focus(Some(id));
+                return Some(WidgetAction::Control(
+                    ui::core::widget::ControlAction::FocusRequested { id },
+                ));
+            }
+            return Some(action);
+        }
+
+        if self.canvas_scrollbars_input.is_some()
+            && let Some(action) = self.canvas_scrollbars.on_accessibility_action(request)
+        {
+            return Some(action);
+        }
+        let action = self.dock.dispatch_accessibility_action(request)?;
+        if let WidgetAction::Control(ui::core::widget::ControlAction::FocusRequested { id }) =
+            action
+        {
+            self.keyboard_focus = KeyboardFocusTarget::Widget(id);
+            for child in &mut self.dock.children {
+                child.widget.set_keyboard_focus(Some(id));
+            }
+            return Some(WidgetAction::Control(ui::core::widget::ControlAction::FocusRequested {
+                id,
+            }));
+        }
+        Some(action)
+    }
+
     fn dismisses_on_escape(policy: DismissPolicy) -> bool {
         matches!(policy, DismissPolicy::EscapeOrExplicit | DismissPolicy::EscapeBackdropOrExplicit)
     }
@@ -1103,14 +1198,16 @@ impl UiShell {
         dismiss_policy: DismissPolicy,
     ) {
         let layout_rect = layout.resolve(self.current_screen_rect(), self.last_dpi);
+        let restore_focus = self.keyboard_focus;
         self.overlays.push(OverlayEntry {
             widget,
             layout,
             layout_rect,
             input_policy,
             dismiss_policy,
-            restore_focus: self.keyboard_focus,
+            restore_focus,
         });
+        self.keyboard_focus = KeyboardFocusTarget::Overlay;
         self.tooltip_overlay = None;
         self.tooltip_timer = None;
     }
@@ -1278,6 +1375,9 @@ impl UiShell {
         let focus = match self.keyboard_focus {
             KeyboardFocusTarget::Widget(id) => id,
             KeyboardFocusTarget::Editor => return None,
+            KeyboardFocusTarget::Overlay => {
+                return self.dispatch_focused_overlay_event(&ev, theme, dpi);
+            }
         };
         let mut ctx = ui::core::EventCtx { theme, dpi, cursor_hint: None };
         for child in &mut self.dock.children {
@@ -1304,6 +1404,28 @@ impl UiShell {
             OverlayDispatchOutcome::SilentConsumed => Some(WidgetAction::Consumed),
             OverlayDispatchOutcome::Action(action) => Some(action),
         }
+    }
+
+    fn dispatch_focused_overlay_event(
+        &mut self,
+        ev: &Event,
+        theme: &Theme,
+        dpi: f32,
+    ) -> Option<WidgetAction> {
+        let overlay = self.overlays.last_mut()?;
+        let mut ctx = EventCtx { cursor_hint: None, theme, dpi };
+        let outcome = match overlay.input_policy {
+            OverlayInputPolicy::Modal => Self::dispatch_modal_overlay_event(overlay, ev, &mut ctx),
+            OverlayInputPolicy::PassThrough => {
+                Self::dispatch_pass_through_overlay_event(overlay, ev, &mut ctx)
+            }
+        };
+        Some(match outcome {
+            OverlayDispatchOutcome::Action(action) => action,
+            OverlayDispatchOutcome::NotHandled | OverlayDispatchOutcome::SilentConsumed => {
+                WidgetAction::Consumed
+            }
+        })
     }
 
     fn dispatch_modal_overlay_event(
@@ -1379,6 +1501,10 @@ impl UiShell {
             self.tooltip_timer = None;
         }
 
+        if matches!(ev, Event::PointerLeave | Event::InteractionCancel) {
+            return self.broadcast_lifecycle_event(ev, ctx);
+        }
+
         // Overlays first (popup, dialog, etc.) — last pushed gets first dibs
         for index in (0..self.overlays.len()).rev() {
             let outcome = {
@@ -1407,6 +1533,21 @@ impl UiShell {
             self.check_tooltips(*px, *py);
         }
         result
+    }
+
+    fn broadcast_lifecycle_event(
+        &mut self,
+        event: &Event,
+        ctx: &mut EventCtx,
+    ) -> Option<WidgetAction> {
+        ctx.cursor_hint = None;
+        let mut interaction_changed = false;
+        for overlay in self.overlays.iter_mut().rev() {
+            interaction_changed |= overlay.widget.on_event(event, ctx).is_some();
+        }
+        interaction_changed |= self.canvas_scrollbars.on_event(event, ctx).is_some();
+        interaction_changed |= self.dock.dispatch(event, ctx).is_some();
+        interaction_changed.then_some(WidgetAction::Consumed)
     }
 
     fn dispatch_canvas_scrollbars(
@@ -1447,6 +1588,50 @@ impl UiShell {
     }
 }
 
+fn first_focused_accessibility_id(
+    nodes: &[ui::core::AccessibilityNode],
+) -> Option<ui::core::AccessibilityId> {
+    nodes.iter().find_map(|node| {
+        node.state
+            .focused
+            .then_some(node.id)
+            .or_else(|| first_focused_accessibility_id(&node.children))
+    })
+}
+
+fn first_actionable_accessibility_id(
+    nodes: &[ui::core::AccessibilityNode],
+) -> Option<ui::core::AccessibilityId> {
+    nodes.iter().find_map(|node| {
+        (!node.actions.is_empty())
+            .then_some(node.id)
+            .or_else(|| first_actionable_accessibility_id(&node.children))
+    })
+}
+
+fn clear_accessibility_focus(nodes: &mut [ui::core::AccessibilityNode]) {
+    for node in nodes {
+        node.state.focused = false;
+        clear_accessibility_focus(&mut node.children);
+    }
+}
+
+fn set_accessibility_focus(
+    nodes: &mut [ui::core::AccessibilityNode],
+    target: ui::core::AccessibilityId,
+) -> bool {
+    for node in nodes {
+        if node.id == target {
+            node.state.focused = true;
+            return true;
+        }
+        if set_accessibility_focus(&mut node.children, target) {
+            return true;
+        }
+    }
+    false
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1457,6 +1642,133 @@ mod tests {
     use ui::core::paint::DrawCmd;
     use ui::core::widget::{KeyCode, Modifiers, WidgetAction};
     use ui::{DismissPolicy, OverlayInputPolicy, OverlayLayout};
+
+    struct SemanticProbe {
+        id: ui::core::AccessibilityId,
+        rect: Rect,
+        focused: bool,
+        action: WidgetAction,
+    }
+
+    impl SemanticProbe {
+        fn new(id: u64, action: WidgetAction) -> Self {
+            Self { id: ui::core::AccessibilityId(id), rect: Rect::ZERO, focused: false, action }
+        }
+    }
+
+    impl Widget for SemanticProbe {
+        fn set_rect(&mut self, rect: Rect, _ctx: &mut LayoutCtx) {
+            self.rect = rect;
+        }
+
+        fn paint(&self, _ctx: &mut PaintCtx) {}
+
+        fn hit(&self, px: f32, py: f32) -> bool {
+            self.rect.contains(px, py)
+        }
+
+        fn accessibility_node(
+            &self,
+            context: &ui::core::AccessibilityContext,
+        ) -> Option<ui::core::AccessibilityNode> {
+            Some(
+                ui::core::AccessibilityNode::new(
+                    self.id,
+                    ui::core::AccessibilityRole::Button,
+                    context.screen_bounds(self.rect),
+                )
+                .with_name(format!("probe-{}", self.id.0))
+                .with_focused(self.focused)
+                .with_action(ui::core::AccessibilityAction::Activate),
+            )
+        }
+
+        fn on_accessibility_action(
+            &mut self,
+            request: &ui::core::AccessibilityActionRequest,
+        ) -> Option<WidgetAction> {
+            (request.target == self.id).then(|| self.action.clone())
+        }
+
+        fn as_any(&self) -> &dyn Any {
+            self
+        }
+
+        fn as_any_mut(&mut self) -> &mut dyn Any {
+            self
+        }
+    }
+
+    #[test]
+    fn accessibility_tree_exposes_only_the_top_overlay_and_one_focus_node() {
+        let mut harness = shell_with_focus(KeyboardFocusTarget::Editor);
+        harness.shell.dock.fill = Box::new(SemanticProbe::new(10, WidgetAction::Consumed));
+        harness.shell.push_overlay_with_policy(
+            Box::new(SemanticProbe::new(20, WidgetAction::Consumed)),
+            OverlayLayout::Fixed(Rect::new(100.0, 100.0, 300.0, 200.0)),
+            OverlayInputPolicy::PassThrough,
+            DismissPolicy::ExplicitOnly,
+        );
+        harness.shell.push_overlay_with_policy(
+            Box::new(SemanticProbe::new(30, WidgetAction::Consumed)),
+            OverlayLayout::Fixed(Rect::new(200.0, 150.0, 240.0, 180.0)),
+            OverlayInputPolicy::Modal,
+            DismissPolicy::ExplicitOnly,
+        );
+        let theme = test_theme();
+        let mut measure = NoopMeasure;
+        harness.shell.update_frame(
+            Screen::new(1200.0, 800.0),
+            &theme,
+            &mut measure,
+            &shell_inputs(),
+        );
+
+        let tree = harness.shell.accessibility_tree("textora");
+
+        assert_eq!(tree.root.role, ui::core::AccessibilityRole::Window);
+        assert_eq!(tree.root.children.len(), 1);
+        assert_eq!(tree.root.children[0].id, ui::core::AccessibilityId(30));
+        assert_eq!(tree.root.children[0].bounds, Rect::new(200.0, 150.0, 240.0, 180.0));
+        assert_eq!(tree.focus, Some(ui::core::AccessibilityId(30)));
+        assert!(tree.root.children[0].state.focused);
+        assert_eq!(tree.validate(), Ok(()));
+    }
+
+    #[test]
+    fn accessibility_actions_do_not_pass_through_the_top_overlay() {
+        let mut harness = shell_with_focus(KeyboardFocusTarget::Editor);
+        harness.shell.dock.fill = Box::new(SemanticProbe::new(10, WidgetAction::Consumed));
+        harness.shell.push_overlay_with_policy(
+            Box::new(SemanticProbe::new(
+                20,
+                WidgetAction::Overlay(OverlayAction::DismissRequested),
+            )),
+            OverlayLayout::Fixed(Rect::new(100.0, 100.0, 300.0, 200.0)),
+            OverlayInputPolicy::Modal,
+            DismissPolicy::ExplicitOnly,
+        );
+
+        assert_eq!(
+            harness.shell.dispatch_accessibility_action(
+                &ui::core::AccessibilityActionRequest::new(
+                    ui::core::AccessibilityId(20),
+                    ui::core::AccessibilityAction::Activate,
+                )
+            ),
+            Some(WidgetAction::Overlay(OverlayAction::DismissRequested))
+        );
+        assert_eq!(
+            harness.shell.dispatch_accessibility_action(
+                &ui::core::AccessibilityActionRequest::new(
+                    ui::core::AccessibilityId(10),
+                    ui::core::AccessibilityAction::Activate,
+                )
+            ),
+            None,
+            "hidden dock semantics must not receive overlay-scoped actions"
+        );
+    }
 
     fn metrics(dpi: f32) -> ui::settings::UiMetrics {
         ui::settings::UiMetrics::from_settings(&ui::settings::Settings::new(), dpi)
@@ -1678,6 +1990,46 @@ mod tests {
         }
 
         #[test]
+        fn dismissing_modal_restores_keyboard_and_accessibility_focus_to_a_widget() {
+            const RESTORED_WIDGET_ID: ui::core::widget::WidgetId = ui::core::widget::WidgetId(10);
+            let theme = test_theme();
+            let mut measure = NoopMeasure;
+            let mut harness = shell_with_focus(KeyboardFocusTarget::Widget(RESTORED_WIDGET_ID));
+            harness.shell.dock.fill =
+                Box::new(SemanticProbe::new(RESTORED_WIDGET_ID.0, WidgetAction::Consumed));
+            harness.shell.update_frame(
+                Screen::new(1200.0, 800.0),
+                &theme,
+                &mut measure,
+                &shell_inputs(),
+            );
+            harness.shell.push_overlay_with_policy(
+                Box::new(SemanticProbe::new(20, WidgetAction::Consumed)),
+                OverlayLayout::Fixed(Rect::new(100.0, 100.0, 300.0, 200.0)),
+                OverlayInputPolicy::Modal,
+                DismissPolicy::ExplicitOnly,
+            );
+
+            assert_eq!(
+                harness.shell.accessibility_tree("textora").focus,
+                Some(ui::core::AccessibilityId(20))
+            );
+
+            let _ = harness.shell.pop_overlay();
+            let restored_tree = harness.shell.accessibility_tree("textora");
+
+            assert_eq!(
+                harness.shell.keyboard_focus(),
+                KeyboardFocusTarget::Widget(RESTORED_WIDGET_ID)
+            );
+            assert_eq!(
+                restored_tree.focus,
+                Some(ui::core::AccessibilityId::from(RESTORED_WIDGET_ID))
+            );
+            assert_eq!(restored_tree.validate(), Ok(()));
+        }
+
+        #[test]
         fn modal_overlay_uses_the_shared_application_scrim() {
             let mut theme = test_theme();
             theme.palette.shadow = [0.1, 0.2, 0.3, 0.1];
@@ -1692,6 +2044,47 @@ mod tests {
                         if *color == theme.application_theme().modal_scrim
                 )
             }));
+        }
+    }
+
+    mod overlay_focus_tests {
+        use super::*;
+
+        #[test]
+        fn popup_overlay_owns_keyboard_focus_and_restores_previous_target() {
+            let theme = test_theme();
+            let mut harness =
+                shell_with_focus(KeyboardFocusTarget::Widget(ui::core::widget::ids::SEARCH_BAR));
+            let menu = ui::popup_menu::PopupMenu::context_px(
+                0,
+                (100.0, 100.0),
+                (1200.0, 800.0),
+                false,
+                1.0,
+            );
+            let layout_rect = menu.menu_rect;
+            harness.shell.push_overlay_with_policy(
+                Box::new(ui::popup_menu::PopupMenuWidget::new(menu)),
+                OverlayLayout::Fixed(layout_rect),
+                OverlayInputPolicy::PassThrough,
+                DismissPolicy::ExplicitOnly,
+            );
+
+            assert_eq!(harness.shell.keyboard_focus(), KeyboardFocusTarget::Overlay);
+            assert!(matches!(
+                harness.shell.forward_key(KeyCode::Enter, Modifiers::NONE, &theme, 1.0),
+                Some(WidgetAction::Popup(ui::popup_menu::PopupOutcome::Selected(_)))
+            ));
+            assert_eq!(
+                harness.shell.forward_key(KeyCode::Tab, Modifiers::NONE, &theme, 1.0),
+                Some(WidgetAction::Consumed)
+            );
+
+            let _ = harness.shell.pop_overlay();
+            assert_eq!(
+                harness.shell.keyboard_focus(),
+                KeyboardFocusTarget::Widget(ui::core::widget::ids::SEARCH_BAR)
+            );
         }
     }
 
@@ -1808,6 +2201,110 @@ mod tests {
             matches!(end, Some(ui::core::widget::WidgetAction::CanvasScrollbars(_))),
             "拖动捕获时，指针移出轨道仍须分发给画布滚动条"
         );
+    }
+
+    #[test]
+    fn interaction_cancel_reaches_modal_and_every_shell_capture_owner() {
+        let theme = test_theme();
+        let mut measure = NoopMeasure;
+        let mut layout_ctx =
+            LayoutCtx { ui_measure: None, measure: &mut measure, theme: &theme, dpi: 1.0 };
+        let mut event_ctx = EventCtx { cursor_hint: None, theme: &theme, dpi: 1.0 };
+        let mut shell = UiShell::new();
+
+        let button_style = ui::button::ButtonStyle {
+            font_size_logical: 12.0,
+            pad_x_logical: 4.0,
+            foreground: [1.0; 4],
+            selected_foreground: [1.0; 4],
+            background: [0.0; 4],
+            border: [0.0; 4],
+            hover_background: [0.2; 4],
+            pressed_background: [0.3; 4],
+            selected_background: [0.2; 4],
+            disabled_foreground: [0.5; 4],
+            disabled_background: [0.0; 4],
+            corner_radius_logical: 4.0,
+        };
+        let mut button = ui::button::Button::new(ui::core::WidgetId(31), button_style);
+        button.set_rect(Rect::new(0.0, 0.0, 100.0, 28.0), &mut layout_ctx);
+        let _ = button.on_event(
+            &Event::MouseDown { px: 10.0, py: 10.0, button: ui::core::MouseButton::Left },
+            &mut event_ctx,
+        );
+
+        let mut scrollbar = ui::scrollbar::ScrollbarWidget::new();
+        scrollbar.set_input(ui::scrollbar::ScrollbarInput {
+            viewport_height_px: 100.0,
+            total_display_rows: 200,
+            scroll_top_rows: 0.0,
+        });
+        scrollbar.set_rect(Rect::new(0.0, 0.0, 12.0, 744.0), &mut layout_ctx);
+        let _ = scrollbar.on_event(
+            &Event::MouseDown { px: 6.0, py: 68.0, button: ui::core::MouseButton::Left },
+            &mut event_ctx,
+        );
+
+        let mut splitter = ui::splitter::SplitterWidget::new();
+        splitter.set_input(ui::splitter::SplitterInput {
+            logical_position: 200.0,
+            minimum_logical_position: 180.0,
+            maximum_logical_position: 320.0,
+            enabled: true,
+        });
+        splitter.set_rect(Rect::new(0.0, 0.0, 8.0, 500.0), &mut layout_ctx);
+        let _ = splitter.on_event(
+            &Event::MouseDown { px: 2.0, py: 20.0, button: ui::core::MouseButton::Left },
+            &mut event_ctx,
+        );
+
+        for widget in [
+            Box::new(button) as Box<dyn Widget>,
+            Box::new(scrollbar) as Box<dyn Widget>,
+            Box::new(splitter) as Box<dyn Widget>,
+        ] {
+            assert!(widget.is_capturing());
+            shell.dock.children.push(DockChild {
+                widget,
+                side: Side::Top,
+                thickness: Box::new(|_, _| 28.0),
+                visible: true,
+                layout_rect: Rect::ZERO,
+            });
+        }
+
+        let mut modal = ui::modal_frame::ModalFrame::new("测试", noop_widget());
+        modal.set_rect(Rect::new(0.0, 0.0, 320.0, 180.0), &mut layout_ctx);
+        let _ = modal.on_event(
+            &Event::MouseDown { px: 294.0, py: 14.0, button: ui::core::MouseButton::Left },
+            &mut event_ctx,
+        );
+        assert!(modal.is_capturing());
+        shell.push_overlay_with_policy(
+            Box::new(modal),
+            OverlayLayout::Fixed(Rect::new(0.0, 0.0, 320.0, 180.0)),
+            OverlayInputPolicy::Modal,
+            DismissPolicy::ExplicitOnly,
+        );
+
+        event_ctx.cursor_hint = Some(winit::window::CursorIcon::EwResize);
+        assert_eq!(
+            shell.dispatch(&Event::PointerLeave, &mut event_ctx),
+            Some(WidgetAction::Consumed)
+        );
+        assert_eq!(event_ctx.cursor_hint, None);
+        assert!(shell.overlays.last().expect("modal should remain open").widget.is_capturing());
+        assert!(shell.dock.children.iter().all(|child| child.widget.is_capturing()));
+
+        event_ctx.cursor_hint = Some(winit::window::CursorIcon::EwResize);
+        assert_eq!(
+            shell.dispatch(&Event::InteractionCancel, &mut event_ctx),
+            Some(WidgetAction::Consumed)
+        );
+        assert_eq!(event_ctx.cursor_hint, None);
+        assert!(!shell.overlays.last().expect("modal should remain open").widget.is_capturing());
+        assert!(shell.dock.children.iter().all(|child| !child.widget.is_capturing()));
+        assert_eq!(shell.dispatch(&Event::InteractionCancel, &mut event_ctx), None);
     }
 
     #[test]
@@ -2485,6 +2982,31 @@ mod tests {
                 "Hovering close button should create tooltip timer, rect={:?}",
                 r
             );
+        }
+    }
+
+    #[test]
+    fn tooltip_owner_clears_timer_and_overlay_on_leave_or_cancel() {
+        let theme = test_theme();
+        let mut harness = bare_shell();
+        let hint =
+            TooltipHint { label: "提示".into(), target_rect: Rect::new(10.0, 10.0, 20.0, 20.0) };
+
+        for event in [Event::PointerLeave, Event::InteractionCancel] {
+            harness.shell.tooltip_timer = Some(TooltipTimer {
+                hint: hint.clone(),
+                target_screen_rect: hint.target_rect,
+                start: Instant::now(),
+            });
+            harness.shell.tooltip_overlay = Some(OverlayChild {
+                widget: noop_widget(),
+                layout_rect: Rect::new(10.0, 30.0, 50.0, 20.0),
+            });
+
+            let _ = harness.shell.dispatch(&event, &mut event_ctx(&theme));
+
+            assert!(!harness.shell.has_tooltip_timer());
+            assert!(harness.shell.tooltip_overlay.is_none());
         }
     }
 

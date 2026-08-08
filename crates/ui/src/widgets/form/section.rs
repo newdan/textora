@@ -2,7 +2,8 @@ use std::any::Any;
 use std::borrow::Cow;
 
 use crate::core::{
-    DrawCmd, Event, EventCtx, LayoutCtx, PaintCtx, Rect, Widget, WidgetAction, WidgetId,
+    AccessibilityActionRequest, AccessibilityContext, AccessibilityNode, DrawCmd, Event, EventCtx,
+    LayoutCtx, PaintCtx, Rect, Widget, WidgetAction, WidgetId,
 };
 use crate::widgets::form::row::FormRow;
 use crate::widgets::label::Label;
@@ -171,6 +172,38 @@ impl FormSection {
         }
     }
 
+    pub(crate) fn collect_accessibility_nodes_in_viewport(
+        &self,
+        context: &AccessibilityContext,
+        visible_rect: Rect,
+        output: &mut Vec<AccessibilityNode>,
+    ) {
+        if visible_rect.w <= 0.0 || visible_rect.h <= 0.0 {
+            return;
+        }
+
+        if Self::rects_intersect(self.title_rect, visible_rect) {
+            self.title.collect_accessibility_nodes(
+                &context.offset_by(self.title_rect.x, self.title_rect.y),
+                output,
+            );
+        }
+        if let (Some(description), Some(description_rect)) =
+            (&self.description, self.description_rect)
+            && Self::rects_intersect(description_rect, visible_rect)
+        {
+            description.collect_accessibility_nodes(
+                &context.offset_by(description_rect.x, description_rect.y),
+                output,
+            );
+        }
+        for (row, row_rect) in self.rows.iter().zip(&self.row_rects) {
+            if Self::rects_intersect(*row_rect, visible_rect) {
+                row.collect_accessibility_nodes(&context.offset_by(row_rect.x, row_rect.y), output);
+            }
+        }
+    }
+
     fn local_event<'a>(event: &'a Event, child_rect: Rect) -> Cow<'a, Event> {
         crate::core::dock::Dock::to_local(event, child_rect.x, child_rect.y)
     }
@@ -325,14 +358,46 @@ impl Widget for FormSection {
         }
     }
 
+    fn on_accessibility_action(
+        &mut self,
+        request: &AccessibilityActionRequest,
+    ) -> Option<WidgetAction> {
+        self.rows.iter_mut().find_map(|row| row.on_accessibility_action(request))
+    }
+
+    fn is_capturing(&self) -> bool {
+        self.pointer_row_index.is_some() || self.capturing_row_index().is_some()
+    }
+
     fn on_event(&mut self, event: &Event, ctx: &mut EventCtx) -> Option<WidgetAction> {
+        if matches!(event, Event::PointerLeave | Event::InteractionCancel) {
+            let container_changed = if matches!(event, Event::InteractionCancel) {
+                self.pointer_row_index.take().is_some() | self.hover_row_index.take().is_some()
+            } else {
+                self.hover_row_index.take().is_some()
+            };
+            let mut first_action = None;
+            for row_index in 0..self.rows.len() {
+                if let Some(action) = self.dispatch_to_row(row_index, event, ctx)
+                    && first_action.is_none()
+                {
+                    first_action = Some(action);
+                }
+            }
+            return first_action.or_else(|| container_changed.then_some(WidgetAction::Consumed));
+        }
+
         if let Some(row_index) = self.capturing_row_index()
             && matches!(
                 event,
                 Event::MouseMove { .. } | Event::MouseUp { .. } | Event::Wheel { .. }
             )
         {
-            return self.dispatch_to_row(row_index, event, ctx);
+            let action = self.dispatch_to_row(row_index, event, ctx);
+            if matches!(event, Event::MouseUp { .. }) {
+                self.pointer_row_index = None;
+            }
+            return action;
         }
 
         match event {
@@ -372,11 +437,7 @@ impl Widget for FormSection {
             Event::Wheel { px, py, .. } => self
                 .row_index_at(*px, *py)
                 .and_then(|row_index| self.dispatch_to_row(row_index, event, ctx)),
-            Event::KeyDown(..)
-            | Event::ImePreedit { .. }
-            | Event::ImeCommit(..)
-            | Event::ImeEnable
-            | Event::ImeDisable => self
+            _ => self
                 .focused_row_index()
                 .and_then(|row_index| self.dispatch_to_row(row_index, event, ctx)),
         }
@@ -791,7 +852,7 @@ mod tests {
     #[test]
     fn form_section_returns_none_when_focus_is_missing_or_not_a_text_box() {
         let checkbox_id = WidgetId(1);
-        let mut section = laid_out_section(2);
+        let section = laid_out_section(2);
 
         let section = section;
         assert_eq!(section.focused_ime_cursor_rect(), None);

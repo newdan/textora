@@ -13,7 +13,7 @@ use crate::widgets::tooltip::TooltipHint;
 use std::any::Any;
 use std::cell::Cell;
 
-#[derive(Copy, Clone, PartialEq, Eq)]
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
 enum HoveredButton {
     None,
     CloseBar,
@@ -146,12 +146,17 @@ impl SearchBarWidget {
     }
 
     pub fn set_input(&mut self, snap: SearchBarSnapshot) {
+        if !snap.visible {
+            self.hovered_btn = HoveredButton::None;
+            self.find_box.cancel_transient_interaction();
+            self.replace_box.cancel_transient_interaction();
+        }
         self.find_box.sync_text(&snap.query);
         self.replace_box.sync_text(&snap.replace_query);
         self.find_box.set_blink(snap.blink_on);
         self.replace_box.set_blink(snap.blink_on);
-        self.find_box.set_focus(!snap.replace_mode || !snap.focus_replace);
-        self.replace_box.set_focus(snap.replace_mode && snap.focus_replace);
+        self.find_box.set_focus(snap.visible && (!snap.replace_mode || !snap.focus_replace));
+        self.replace_box.set_focus(snap.visible && snap.replace_mode && snap.focus_replace);
         self.snap = snap;
     }
 
@@ -253,6 +258,20 @@ impl Widget for SearchBarWidget {
         }
 
         match ev {
+            Event::PointerLeave => {
+                let hover_changed = self.hovered_btn != HoveredButton::None;
+                self.hovered_btn = HoveredButton::None;
+                let _ = self.find_box.on_event(ev, _ctx);
+                let _ = self.replace_box.on_event(ev, _ctx);
+                hover_changed.then_some(WidgetAction::SearchBar(SearchBarAction::HoverChanged))
+            }
+            Event::InteractionCancel => {
+                let hover_changed = self.hovered_btn != HoveredButton::None;
+                self.hovered_btn = HoveredButton::None;
+                let find_changed = self.find_box.on_event(ev, _ctx).is_some();
+                let replace_changed = self.replace_box.on_event(ev, _ctx).is_some();
+                (hover_changed || find_changed || replace_changed).then_some(WidgetAction::Consumed)
+            }
             Event::KeyDown(kc, _modifiers) => {
                 // Handle tab locally
                 if *kc == KeyCode::Tab {
@@ -1219,6 +1238,86 @@ mod tests {
             ),
             Some(WidgetAction::Consumed)
         );
+    }
+
+    #[test]
+    fn search_bar_leave_clears_hover_and_cancel_ends_child_interaction() {
+        let mut search_bar = setup_search_bar("hello");
+        let theme = test_theme();
+        let mut event_context = EventCtx { cursor_hint: None, theme: &theme, dpi: 1.0 };
+        let close_rect = search_bar.close_btn_rect();
+        let find_rect = search_bar.find_box.rect();
+
+        assert_eq!(
+            search_bar.on_event(
+                &Event::MouseMove {
+                    px: close_rect.x + close_rect.w * 0.5,
+                    py: close_rect.y + close_rect.h * 0.5,
+                },
+                &mut event_context,
+            ),
+            Some(WidgetAction::SearchBar(SearchBarAction::HoverChanged))
+        );
+        assert_eq!(search_bar.hovered_btn, HoveredButton::CloseBar);
+        let _ = search_bar.on_event(
+            &Event::MouseDown {
+                px: find_rect.x + 1.0,
+                py: find_rect.y + find_rect.h * 0.5,
+                button: MouseButton::Left,
+            },
+            &mut event_context,
+        );
+        let _ = search_bar.on_event(
+            &Event::ImePreedit { text: "未完成".to_owned(), cursor: Some((0, 6)) },
+            &mut event_context,
+        );
+
+        assert_eq!(
+            search_bar.on_event(&Event::PointerLeave, &mut event_context),
+            Some(WidgetAction::SearchBar(SearchBarAction::HoverChanged))
+        );
+        assert_eq!(search_bar.hovered_btn, HoveredButton::None);
+        assert!(search_bar.is_capturing());
+        assert!(search_bar.find_box.has_preedit());
+
+        assert_eq!(
+            search_bar.on_event(&Event::InteractionCancel, &mut event_context),
+            Some(WidgetAction::Consumed)
+        );
+        assert!(!search_bar.is_capturing());
+        assert!(!search_bar.find_box.has_preedit());
+        assert_eq!(search_bar.on_event(&Event::InteractionCancel, &mut event_context), None);
+    }
+
+    #[test]
+    fn hiding_search_bar_releases_child_capture_and_preedit() {
+        let mut search_bar = setup_search_bar("hello");
+        let theme = test_theme();
+        let mut event_context = EventCtx { cursor_hint: None, theme: &theme, dpi: 1.0 };
+        let find_rect = search_bar.find_box.rect();
+        let _ = search_bar.on_event(
+            &Event::MouseDown {
+                px: find_rect.x + 1.0,
+                py: find_rect.y + find_rect.h * 0.5,
+                button: MouseButton::Left,
+            },
+            &mut event_context,
+        );
+        let _ = search_bar.on_event(
+            &Event::ImePreedit { text: "未完成".to_owned(), cursor: Some((0, 6)) },
+            &mut event_context,
+        );
+        assert!(search_bar.is_capturing());
+        assert!(search_bar.find_box.has_preedit());
+
+        search_bar.set_input(SearchBarSnapshot {
+            query: "hello".to_owned(),
+            visible: false,
+            ..SearchBarSnapshot::default()
+        });
+
+        assert!(!search_bar.is_capturing());
+        assert!(!search_bar.find_box.has_preedit());
     }
 
     #[test]

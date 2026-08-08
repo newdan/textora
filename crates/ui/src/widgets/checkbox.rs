@@ -2,11 +2,11 @@ use std::any::Any;
 
 use crate::core::widget::{ControlAction, WidgetId};
 use crate::core::{
-    Event, EventCtx, KeyCode, LayoutCtx, MouseButton, PaintCtx, Rect, Widget, WidgetAction,
+    AccessibilityAction, AccessibilityActionRequest, AccessibilityContext, AccessibilityId,
+    AccessibilityNode, AccessibilityRole, Event, EventCtx, KeyCode, LayoutCtx, MouseButton,
+    PaintCtx, Rect, Widget, WidgetAction,
 };
 
-const CHECKBOX_SIZE_LOGICAL: f32 = 20.0;
-const CHECKBOX_CORNER_RADIUS_LOGICAL: f32 = 4.0;
 const CHECKBOX_BORDER_WIDTH_LOGICAL: f32 = 1.0;
 const CHECK_ICON_INSET_LOGICAL: f32 = 5.0;
 const CHECK_MARK_START_RATIO: [f32; 2] = [0.14, 0.52];
@@ -26,6 +26,7 @@ pub struct Checkbox {
     focused: bool,
     hovered: bool,
     pressed: bool,
+    accessibility_label: Option<String>,
 }
 
 impl Checkbox {
@@ -38,7 +39,33 @@ impl Checkbox {
             focused: false,
             hovered: false,
             pressed: false,
+            accessibility_label: None,
         }
+    }
+
+    pub fn checked(&self) -> bool {
+        self.checked
+    }
+
+    pub fn set_checked(&mut self, checked: bool) {
+        self.checked = checked;
+    }
+
+    pub fn is_enabled(&self) -> bool {
+        self.enabled
+    }
+
+    pub fn set_enabled(&mut self, enabled: bool) {
+        self.enabled = enabled;
+        if !enabled {
+            self.focused = false;
+            self.hovered = false;
+            self.pressed = false;
+        }
+    }
+
+    pub fn set_accessibility_label(&mut self, label: Option<String>) {
+        self.accessibility_label = label;
     }
 
     fn toggle_action(&mut self) -> WidgetAction {
@@ -69,10 +96,10 @@ impl Checkbox {
     }
 
     fn check_icon_color(&self, ctx: &PaintCtx) -> [f32; 4] {
-        let settings = ctx.theme.settings_theme();
-        let base_color = settings.text_primary;
+        let application = ctx.theme.application_theme();
+        let base_color = application.text_inverse;
         let color = if self.hovered {
-            blend_color(base_color, settings.accent, CHECK_ICON_HOVER_BLEND)
+            blend_color(base_color, application.text_primary, CHECK_ICON_HOVER_BLEND)
         } else {
             base_color
         };
@@ -139,14 +166,15 @@ impl Widget for Checkbox {
         }
 
         let dpi = ctx.dpi;
-        let corner_radius = CHECKBOX_CORNER_RADIUS_LOGICAL * dpi;
+        let metrics = ctx.theme.control_metrics();
+        let corner_radius = metrics.compact_corner_radius_logical * dpi;
+        let outline_width = if self.focused {
+            metrics.focus_ring_width_logical
+        } else {
+            CHECKBOX_BORDER_WIDTH_LOGICAL
+        } * dpi;
         ctx.list.fill_rounded(self.rect, self.surface_color(ctx), corner_radius);
-        ctx.list.stroke_rounded(
-            self.rect,
-            self.outline_color(ctx),
-            corner_radius,
-            CHECKBOX_BORDER_WIDTH_LOGICAL * dpi,
-        );
+        ctx.list.stroke_rounded(self.rect, self.outline_color(ctx), corner_radius, outline_width);
 
         if self.checked {
             let icon_rect = self.check_icon_rect(dpi);
@@ -169,10 +197,52 @@ impl Widget for Checkbox {
     }
 
     fn set_keyboard_focus(&mut self, focused_id: Option<WidgetId>) {
-        self.focused = focused_id == Some(self.id);
+        self.focused = self.enabled && focused_id == Some(self.id);
+    }
+
+    fn accessibility_node(&self, ctx: &AccessibilityContext) -> Option<AccessibilityNode> {
+        let mut node = AccessibilityNode::new(
+            AccessibilityId::from(self.id),
+            AccessibilityRole::CheckBox,
+            ctx.screen_bounds(self.rect),
+        )
+        .with_disabled(!self.enabled)
+        .with_focused(self.focused)
+        .with_checked(self.checked);
+        if let Some(label) = &self.accessibility_label {
+            node = node.with_name(label.clone());
+        }
+        if self.enabled {
+            node = node
+                .with_action(AccessibilityAction::Focus)
+                .with_action(AccessibilityAction::Toggle);
+        }
+        Some(node)
+    }
+
+    fn on_accessibility_action(
+        &mut self,
+        request: &AccessibilityActionRequest,
+    ) -> Option<WidgetAction> {
+        if !self.enabled || request.target != AccessibilityId::from(self.id) {
+            return None;
+        }
+        match request.action {
+            AccessibilityAction::Focus => {
+                Some(WidgetAction::Control(ControlAction::FocusRequested { id: self.id }))
+            }
+            AccessibilityAction::Activate | AccessibilityAction::Toggle => {
+                Some(self.toggle_action())
+            }
+            _ => None,
+        }
     }
 
     fn on_event(&mut self, ev: &Event, ctx: &mut EventCtx) -> Option<WidgetAction> {
+        if !self.enabled {
+            return None;
+        }
+
         match ev {
             Event::MouseMove { px, py } => {
                 let inside = self.hit(*px, *py);
@@ -185,10 +255,13 @@ impl Widget for Checkbox {
                 }
                 None
             }
+            Event::PointerLeave => {
+                std::mem::take(&mut self.hovered).then_some(WidgetAction::Consumed)
+            }
             Event::MouseDown { px, py, button: MouseButton::Left } => {
                 let inside = self.hit(*px, *py);
                 self.hovered = inside;
-                if !self.enabled || !inside {
+                if !inside {
                     self.pressed = false;
                     return None;
                 }
@@ -207,10 +280,6 @@ impl Widget for Checkbox {
                 if inside {
                     ctx.cursor_hint = Some(winit::window::CursorIcon::Pointer);
                 }
-                if !self.enabled {
-                    self.pressed = false;
-                    return None;
-                }
                 let was_pressed = self.pressed;
                 self.pressed = false;
                 if !was_pressed || !inside {
@@ -218,13 +287,22 @@ impl Widget for Checkbox {
                 }
                 Some(self.toggle_action())
             }
+            Event::InteractionCancel => {
+                let interaction_changed =
+                    std::mem::take(&mut self.hovered) | std::mem::take(&mut self.pressed);
+                interaction_changed.then_some(WidgetAction::Consumed)
+            }
             Event::KeyDown(KeyCode::Char(' '), modifiers)
-                if self.enabled && self.focused && *modifiers == crate::core::Modifiers::NONE =>
+                if self.focused && *modifiers == crate::core::Modifiers::NONE =>
             {
                 Some(self.toggle_action())
             }
             _ => None,
         }
+    }
+
+    fn is_capturing(&self) -> bool {
+        self.pressed
     }
 
     fn as_any(&self) -> &dyn Any {
@@ -239,6 +317,8 @@ impl Widget for Checkbox {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    const CHECKBOX_SIZE_LOGICAL: f32 = 20.0;
 
     use crate::core::measure::NoopMeasure;
     use crate::core::widget::{LayoutCtx, Modifiers};
@@ -311,13 +391,44 @@ mod tests {
         draw_list
     }
 
+    #[test]
+    fn accessibility_exposes_checkbox_state_and_toggles_through_typed_action() {
+        let id = WidgetId(90);
+        let mut checkbox = focused_checkbox(id, false);
+        checkbox.set_accessibility_label(Some("显示行号".into()));
+        let context = crate::core::AccessibilityContext::new(4.0, 8.0);
+        let node = checkbox.accessibility_node(&context).expect("checkbox should expose semantics");
+
+        assert_eq!(node.role, crate::core::AccessibilityRole::CheckBox);
+        assert_eq!(node.name.as_deref(), Some("显示行号"));
+        assert_eq!(node.bounds, Rect::new(4.0, 8.0, 20.0, 20.0));
+        assert!(node.state.focused);
+        assert_eq!(node.state.checked, Some(false));
+        assert!(node.actions.contains(&crate::core::AccessibilityAction::Toggle));
+        assert_eq!(
+            checkbox.on_accessibility_action(&crate::core::AccessibilityActionRequest::new(
+                node.id,
+                crate::core::AccessibilityAction::Toggle,
+            )),
+            Some(WidgetAction::Control(ControlAction::Toggled { id, checked: true }))
+        );
+        assert!(checkbox.checked());
+
+        checkbox.set_enabled(false);
+        let disabled_node =
+            checkbox.accessibility_node(&context).expect("disabled checkbox remains discoverable");
+        assert!(disabled_node.state.disabled);
+        assert!(disabled_node.actions.is_empty());
+    }
+
     fn is_checkbox_outline(cmd: &DrawCmd) -> bool {
+        let corner_radius = crate::theme::ControlMetrics::default().compact_corner_radius_logical;
         matches!(
             cmd,
             DrawCmd::StrokeRect { rect, radius, .. }
                 if rect.w == CHECKBOX_SIZE_LOGICAL
                     && rect.h == CHECKBOX_SIZE_LOGICAL
-                    && *radius == CHECKBOX_CORNER_RADIUS_LOGICAL
+                    && *radius == corner_radius
         )
     }
 
@@ -349,5 +460,121 @@ mod tests {
             draw_list.cmds.iter().any(|cmd| matches!(cmd, DrawCmd::FillTriangle { .. })),
             "checked checkbox should emit triangle commands for check mark"
         );
+    }
+
+    #[test]
+    fn checked_checkbox_uses_semantic_icon_and_focus_metrics_across_themes_and_dpi() {
+        for theme in [
+            crate::theme::Theme::resolve_builtin(
+                crate::settings::ThemeMode::Light,
+                winit::window::Theme::Light,
+            ),
+            crate::theme::Theme::resolve_builtin(
+                crate::settings::ThemeMode::Dark,
+                winit::window::Theme::Dark,
+            ),
+        ] {
+            for dpi in [1.0, 2.0] {
+                let metrics = theme.control_metrics();
+                let application = theme.application_theme();
+                let mut checkbox = Checkbox::new(WidgetId(91), true);
+                checkbox.set_keyboard_focus(Some(WidgetId(91)));
+                checkbox.rect =
+                    Rect::new(0.0, 0.0, CHECKBOX_SIZE_LOGICAL * dpi, CHECKBOX_SIZE_LOGICAL * dpi);
+
+                let mut draw_list = DrawList::new();
+                checkbox.paint(&mut PaintCtx::new(&mut draw_list, &theme, dpi));
+
+                let outline = draw_list
+                    .cmds
+                    .iter()
+                    .find_map(|command| match command {
+                        DrawCmd::StrokeRect { radius, line_width, .. } => {
+                            Some((*radius, *line_width))
+                        }
+                        _ => None,
+                    })
+                    .expect("checkbox should paint an outline");
+                assert_eq!(outline.0, metrics.compact_corner_radius_logical * dpi);
+                assert_eq!(outline.1, metrics.focus_ring_width_logical * dpi);
+                assert!(draw_list.cmds.iter().any(|command| matches!(
+                    command,
+                    DrawCmd::FillTriangle { color, .. } if *color == application.text_inverse
+                )));
+            }
+        }
+    }
+
+    #[test]
+    fn checkbox_external_state_sync_is_silent_and_idempotent() {
+        let mut checkbox = focused_checkbox(WidgetId(25), false);
+
+        assert!(!checkbox.checked());
+        checkbox.set_checked(true);
+        checkbox.set_checked(true);
+
+        assert!(checkbox.checked());
+        assert_toggle(key_space(&mut checkbox), WidgetId(25), false);
+        checkbox.set_checked(false);
+        assert!(!checkbox.checked());
+    }
+
+    #[test]
+    fn disabled_checkbox_clears_interaction_and_rejects_all_input() {
+        let id = WidgetId(26);
+        let mut checkbox = focused_checkbox(id, false);
+        assert_eq!(mouse_down(&mut checkbox, true), Some(WidgetAction::Consumed));
+        checkbox.set_enabled(false);
+
+        assert!(!checkbox.is_enabled());
+        assert!(!checkbox.is_focusable());
+        assert!(!checkbox.is_capturing());
+        assert_eq!(key_space(&mut checkbox), None);
+        assert_eq!(mouse_up(&mut checkbox), None);
+
+        let mut ctx = event_ctx();
+        assert_eq!(
+            checkbox.on_event(
+                &Event::MouseMove {
+                    px: CHECKBOX_SIZE_LOGICAL * 0.5,
+                    py: CHECKBOX_SIZE_LOGICAL * 0.5,
+                },
+                &mut ctx,
+            ),
+            None
+        );
+        assert_eq!(ctx.cursor_hint, None);
+    }
+
+    #[test]
+    fn checkbox_leave_preserves_press_and_cancel_is_idempotent() {
+        let id = WidgetId(27);
+        let mut checkbox = focused_checkbox(id, false);
+        let mut ctx = event_ctx();
+
+        assert_eq!(
+            checkbox.on_event(
+                &Event::MouseMove {
+                    px: CHECKBOX_SIZE_LOGICAL * 0.5,
+                    py: CHECKBOX_SIZE_LOGICAL * 0.5,
+                },
+                &mut ctx,
+            ),
+            Some(WidgetAction::Consumed)
+        );
+        assert_eq!(mouse_down(&mut checkbox, true), Some(WidgetAction::Consumed));
+        assert!(checkbox.is_capturing());
+        assert_eq!(checkbox.on_event(&Event::PointerLeave, &mut ctx), Some(WidgetAction::Consumed));
+        assert!(!checkbox.hovered);
+        assert!(checkbox.is_capturing());
+
+        assert_eq!(
+            checkbox.on_event(&Event::InteractionCancel, &mut ctx),
+            Some(WidgetAction::Consumed)
+        );
+        assert!(!checkbox.is_capturing());
+        assert!(!checkbox.checked());
+        assert_eq!(checkbox.on_event(&Event::InteractionCancel, &mut ctx), None);
+        assert_eq!(mouse_up(&mut checkbox), None);
     }
 }

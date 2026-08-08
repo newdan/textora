@@ -3,8 +3,9 @@
 
 use crate::core::widget::{ControlAction, SensitiveText, TextPayload, WidgetId};
 use crate::core::{
-    Event, EventCtx, KeyCode, LayoutCtx, Modifiers, MouseButton, PaintCtx, Rect, Widget,
-    WidgetAction,
+    AccessibilityAction, AccessibilityActionRequest, AccessibilityContext, AccessibilityId,
+    AccessibilityNode, AccessibilityRole, Event, EventCtx, KeyCode, LayoutCtx, Modifiers,
+    MouseButton, PaintCtx, Rect, Widget, WidgetAction,
 };
 use unicode_segmentation::UnicodeSegmentation;
 
@@ -182,6 +183,7 @@ pub struct TextBox {
 
     // Visual
     placeholder: String,
+    accessibility_label: Option<String>,
     echo_mode: EchoMode,
     blink_on: bool,
     focused: bool,
@@ -226,6 +228,7 @@ impl TextBox {
             preedit: TextStorage::Plain(String::new()),
             preedit_cursor: None,
             placeholder: String::new(),
+            accessibility_label: None,
             echo_mode: EchoMode::Plain,
             blink_on: false,
             focused: false,
@@ -276,6 +279,10 @@ impl TextBox {
 
     pub fn set_placeholder(&mut self, ph: &str) {
         self.placeholder = ph.to_string();
+    }
+
+    pub fn set_accessibility_label(&mut self, label: Option<String>) {
+        self.accessibility_label = label;
     }
 
     pub fn set_chrome(&mut self, chrome: TextBoxChrome) {
@@ -749,6 +756,14 @@ impl TextBox {
         }
     }
 
+    pub(super) fn cancel_transient_interaction(&mut self) -> bool {
+        let interaction_changed = std::mem::take(&mut self.dragging)
+            | !self.preedit.is_empty()
+            | self.preedit_cursor.take().is_some();
+        self.preedit.clear();
+        interaction_changed
+    }
+
     /// Receive an IME event from the parent widget.
     pub fn on_ime(&mut self, ev: &TextBoxIme) {
         self.handle_ime_event(ev);
@@ -1067,6 +1082,67 @@ impl Widget for TextBox {
         }
     }
 
+    fn accessibility_node(&self, ctx: &AccessibilityContext) -> Option<AccessibilityNode> {
+        let id = self.id?;
+        let sensitive = self.echo_mode == EchoMode::Masked;
+        let mut node = AccessibilityNode::new(
+            AccessibilityId::from(id),
+            AccessibilityRole::TextField,
+            ctx.screen_bounds(self.rect),
+        )
+        .with_focused(self.focused)
+        .with_sensitive(sensitive)
+        .with_action(AccessibilityAction::Focus)
+        .with_action(AccessibilityAction::SetValue);
+        if let Some(name) = self
+            .accessibility_label
+            .as_ref()
+            .or_else(|| (!self.placeholder.is_empty()).then_some(&self.placeholder))
+        {
+            node = node.with_name(name.clone());
+        }
+        if !sensitive {
+            node = node.with_value(self.text.as_str());
+        }
+        Some(node)
+    }
+
+    fn on_accessibility_action(
+        &mut self,
+        request: &AccessibilityActionRequest,
+    ) -> Option<WidgetAction> {
+        let id = self.id?;
+        if request.target != AccessibilityId::from(id) {
+            return None;
+        }
+        match request.action {
+            AccessibilityAction::Focus => {
+                Some(WidgetAction::Control(ControlAction::FocusRequested { id }))
+            }
+            AccessibilityAction::SetValue => {
+                let requested_value = match request.value.as_ref()? {
+                    TextPayload::Plain(value) => value.as_str(),
+                    TextPayload::Sensitive(value) => value.expose(),
+                };
+                let accepted_end = if requested_value.len() <= self.max_len_bytes {
+                    requested_value.len()
+                } else {
+                    Self::clamp_to_grapheme_boundary(requested_value, self.max_len_bytes)
+                };
+                let accepted_value = &requested_value[..accepted_end];
+                if self.text.as_str() == accepted_value {
+                    return Some(WidgetAction::Consumed);
+                }
+                self.set_text(accepted_value);
+                Some(WidgetAction::Control(ControlAction::TextEdited {
+                    id,
+                    value: self.text.payload(),
+                }))
+            }
+            _ => None,
+        }
+    }
+
     fn on_event(&mut self, ev: &Event, _ctx: &mut EventCtx) -> Option<WidgetAction> {
         match ev {
             Event::KeyDown(key_code, modifiers) => {
@@ -1112,6 +1188,9 @@ impl Widget for TextBox {
                 } else {
                     None
                 }
+            }
+            Event::InteractionCancel => {
+                self.cancel_transient_interaction().then_some(WidgetAction::Consumed)
             }
             _ => None,
         }
@@ -1177,6 +1256,98 @@ mod tests {
         let theme = crate::theme::test_theme();
         let mut event_ctx = EventCtx { cursor_hint: None, theme: &theme, dpi: 1.0 };
         text_box.on_event(&Event::KeyDown(key_code, modifiers), &mut event_ctx)
+    }
+
+    #[test]
+    fn accessibility_exposes_plain_value_and_set_value_reuses_text_edited_action() {
+        let id = WidgetId(80);
+        let mut text_box = laid_out_widget(TextBox::with_id(id));
+        text_box.set_accessibility_label(Some("字体名称".into()));
+        text_box.set_text("Menlo");
+        text_box.set_keyboard_focus(Some(id));
+        let context = crate::core::AccessibilityContext::new(10.0, 20.0);
+        let node =
+            text_box.accessibility_node(&context).expect("identified textbox exposes semantics");
+
+        assert_eq!(node.role, crate::core::AccessibilityRole::TextField);
+        assert_eq!(node.name.as_deref(), Some("字体名称"));
+        assert_eq!(node.value.as_deref(), Some("Menlo"));
+        assert_eq!(node.bounds, Rect::new(10.0, 20.0, 200.0, 28.0));
+        assert!(node.state.focused);
+        assert!(!node.state.sensitive);
+        assert!(node.actions.contains(&crate::core::AccessibilityAction::SetValue));
+
+        assert_eq!(
+            text_box.on_accessibility_action(&crate::core::AccessibilityActionRequest::set_value(
+                node.id,
+                TextPayload::Plain("Monaco".into()),
+            )),
+            Some(WidgetAction::Control(ControlAction::TextEdited {
+                id,
+                value: TextPayload::Plain("Monaco".into()),
+            }))
+        );
+        assert_eq!(text_box.text(), "Monaco");
+    }
+
+    #[test]
+    fn accessibility_never_exposes_masked_text_value() {
+        let id = WidgetId(81);
+        let mut text_box = laid_out_widget(TextBox::with_id(id));
+        text_box.set_accessibility_label(Some("访问令牌".into()));
+        text_box.set_password_mode(true);
+        text_box.set_text("secret-token");
+
+        let node = text_box
+            .accessibility_node(&crate::core::AccessibilityContext::default())
+            .expect("masked textbox remains discoverable");
+
+        assert_eq!(node.value, None);
+        assert!(node.state.sensitive);
+        assert_eq!(crate::core::AccessibilityTree::new(node, None).validate(), Ok(()));
+    }
+
+    #[test]
+    fn pointer_leave_preserves_text_drag_and_cancel_clears_drag_and_preedit() {
+        let mut text_box = laid_out_widget(TextBox::new());
+        text_box.set_text("hello");
+        let theme = crate::theme::test_theme();
+        let mut event_context = EventCtx { cursor_hint: None, theme: &theme, dpi: 1.0 };
+
+        assert!(
+            text_box
+                .on_event(
+                    &Event::MouseDown { px: 10.0, py: 14.0, button: MouseButton::Left },
+                    &mut event_context,
+                )
+                .is_some()
+        );
+        assert_eq!(
+            text_box.on_event(
+                &Event::ImePreedit { text: "未完成".to_owned(), cursor: Some((0, 6)) },
+                &mut event_context,
+            ),
+            Some(WidgetAction::Consumed)
+        );
+
+        assert_eq!(text_box.on_event(&Event::PointerLeave, &mut event_context), None);
+        assert!(text_box.is_capturing());
+        assert!(text_box.has_preedit());
+
+        assert_eq!(
+            text_box.on_event(&Event::InteractionCancel, &mut event_context),
+            Some(WidgetAction::Consumed)
+        );
+        assert!(!text_box.is_capturing());
+        assert!(!text_box.has_preedit());
+        assert_eq!(text_box.on_event(&Event::InteractionCancel, &mut event_context), None);
+        assert_eq!(
+            text_box.on_event(
+                &Event::MouseUp { px: 10.0, py: 14.0, button: MouseButton::Left },
+                &mut event_context,
+            ),
+            None
+        );
     }
 
     #[test]

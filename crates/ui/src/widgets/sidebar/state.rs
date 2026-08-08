@@ -13,11 +13,6 @@ use crate::widgets::icon::draw_icon;
 use crate::widgets::popup_menu::{PopupMenu, PopupMenuAction as PMA, PopupMenuItem};
 use crate::widgets::split_button::SPLIT_BUTTON_MENU_WIDTH_LOGICAL;
 
-struct EdgeDragState {
-    start_px: f32,
-    start_width: f32,
-}
-
 #[derive(Default)]
 pub struct SidebarState {
     visibility: Visibility,
@@ -26,7 +21,6 @@ pub struct SidebarState {
     menu_hovered_index: Option<usize>,
     hovered_index: Option<usize>,
     list_scroll_offset: f32,
-    drag: Option<EdgeDragState>,
     hover_enter_at: Option<Instant>,
     hover_leave_at: Option<Instant>,
     hover_peek_start: Option<Instant>,
@@ -68,11 +62,12 @@ impl SidebarState {
                 .item_rects
                 .iter()
                 .enumerate()
-                .find(|(i, r)| r.contains(px, py) && !menu.items[*i].is_separator)
+                .find(|(i, r)| r.contains(px, py) && menu.items[*i].is_selectable())
                 .map(|(i, _)| i);
         }
     }
-    pub fn menu_hovered_index(&self) -> Option<usize> {
+    #[cfg(test)]
+    fn menu_hovered_index(&self) -> Option<usize> {
         self.menu_hovered_index
     }
     pub fn hovered_index(&self) -> Option<usize> {
@@ -105,10 +100,6 @@ impl SidebarState {
     pub fn list_scroll_offset(&self) -> f32 {
         self.list_scroll_offset
     }
-    pub fn set_list_scroll_offset(&mut self, off: f32) {
-        self.list_scroll_offset = off;
-    }
-
     pub fn to_persistent(&self) -> SidebarPersistent {
         SidebarPersistent {
             visibility: self.visibility,
@@ -150,15 +141,6 @@ impl SidebarState {
         self.list_scroll_offset = self.list_scroll_offset.clamp(0.0, max_scroll);
     }
 
-    pub fn current_width(&self, cfg: &SidebarConfig) -> f32 {
-        match self.visibility {
-            Visibility::Hidden => 0.0,
-            Visibility::HoverPeek | Visibility::HoverPeekFadingOut | Visibility::Pinned => {
-                cfg.width
-            }
-        }
-    }
-
     pub fn editor_left_offset(
         &self,
         cfg: &SidebarConfig,
@@ -186,49 +168,6 @@ const EDGE_RESIZE_W: f32 = 4.0;
 const MINIMUM_EDITOR_WIDTH_LOGICAL: f32 = 100.0;
 
 impl SidebarState {
-    pub fn on_drag_start(
-        &mut self,
-        px: f32,
-        _py: f32,
-        cfg: &SidebarConfig,
-        screen_w: f32,
-        metrics: &crate::settings::UiMetrics,
-    ) -> bool {
-        if !self.is_visible() {
-            return false;
-        }
-        let edge = cfg.width;
-        let band = 4.0 * metrics.dpi;
-        if (px - edge).abs() <= band && px < screen_w {
-            self.drag = Some(EdgeDragState { start_px: px, start_width: cfg.width });
-            true
-        } else {
-            false
-        }
-    }
-
-    pub fn on_drag(
-        &mut self,
-        px: f32,
-        _py: f32,
-        cfg: &mut SidebarConfig,
-        _metrics: &crate::settings::UiMetrics,
-    ) -> Option<SidebarAction> {
-        let drag = self.drag.as_ref()?;
-        let dpi = 1.0;
-        let mut new_w = drag.start_width + (px - drag.start_px);
-        let lo = 160.0 * dpi;
-        let hi = 400.0 * dpi;
-        new_w = new_w.clamp(lo, hi);
-        cfg.width = new_w;
-        Some(SidebarAction::SetWidth(new_w))
-    }
-
-    pub fn on_drag_end(&mut self) -> Option<SidebarAction> {
-        self.drag.take()?;
-        Some(SidebarAction::PersistConfig)
-    }
-
     // ── Settings menu ──
 
     pub fn open_settings_menu(
@@ -256,78 +195,27 @@ impl SidebarState {
         let theme_mode = input.theme_mode;
         let current_mode = input.view_mode;
         let items = vec![
-            PopupMenuItem {
-                label: "显示行号".into(),
-                is_active: show_line_numbers,
-                is_separator: false,
-                action: PMA::ToggleLineNumbers,
-            },
-            PopupMenuItem {
-                label: "自动换行".into(),
-                is_active: word_wrap,
-                is_separator: false,
-                action: PMA::ToggleWordWrap,
-            },
-            PopupMenuItem {
-                label: "显示状态栏".into(),
-                is_active: show_status_bar,
-                is_separator: false,
-                action: PMA::ToggleStatusBar,
-            },
-            PopupMenuItem {
-                label: "".into(),
-                is_active: false,
-                is_separator: true,
-                action: PMA::SetViewMode(ViewMode::Sidebar), // unused for separator
-            },
-            PopupMenuItem {
-                label: "跟随系统".into(),
-                is_active: theme_mode == crate::settings::ThemeMode::System,
-                is_separator: false,
-                action: PMA::SetThemeMode(crate::settings::ThemeMode::System),
-            },
-            PopupMenuItem {
-                label: "深色模式".into(),
-                is_active: theme_mode == crate::settings::ThemeMode::Dark,
-                is_separator: false,
-                action: PMA::SetThemeMode(crate::settings::ThemeMode::Dark),
-            },
-            PopupMenuItem {
-                label: "浅色模式".into(),
-                is_active: theme_mode == crate::settings::ThemeMode::Light,
-                is_separator: false,
-                action: PMA::SetThemeMode(crate::settings::ThemeMode::Light),
-            },
-            PopupMenuItem {
-                label: "".into(),
-                is_active: false,
-                is_separator: true,
-                action: PMA::SetViewMode(ViewMode::Sidebar), // unused for separator
-            },
-            PopupMenuItem {
-                label: "Sidebar 模式".into(),
-                is_active: current_mode == ViewMode::Sidebar,
-                is_separator: false,
-                action: PMA::SetViewMode(ViewMode::Sidebar),
-            },
-            PopupMenuItem {
-                label: "Tabs 模式".into(),
-                is_active: current_mode == ViewMode::Tabs,
-                is_separator: false,
-                action: PMA::SetViewMode(ViewMode::Tabs),
-            },
-            PopupMenuItem {
-                label: "".into(),
-                is_active: false,
-                is_separator: true,
-                action: PMA::SetViewMode(ViewMode::Sidebar), // unused for separator
-            },
-            PopupMenuItem {
-                label: "打开Settings".into(),
-                is_active: false,
-                is_separator: false,
-                action: PMA::OpenSettingsFile,
-            },
+            PopupMenuItem::action("显示行号", PMA::ToggleLineNumbers)
+                .with_active(show_line_numbers),
+            PopupMenuItem::action("自动换行", PMA::ToggleWordWrap).with_active(word_wrap),
+            PopupMenuItem::action("显示状态栏", PMA::ToggleStatusBar).with_active(show_status_bar),
+            PopupMenuItem::separator(PMA::SetViewMode(ViewMode::Sidebar)),
+            PopupMenuItem::action(
+                "跟随系统",
+                PMA::SetThemeMode(crate::settings::ThemeMode::System),
+            )
+            .with_active(theme_mode == crate::settings::ThemeMode::System),
+            PopupMenuItem::action("深色模式", PMA::SetThemeMode(crate::settings::ThemeMode::Dark))
+                .with_active(theme_mode == crate::settings::ThemeMode::Dark),
+            PopupMenuItem::action("浅色模式", PMA::SetThemeMode(crate::settings::ThemeMode::Light))
+                .with_active(theme_mode == crate::settings::ThemeMode::Light),
+            PopupMenuItem::separator(PMA::SetViewMode(ViewMode::Sidebar)),
+            PopupMenuItem::action("Sidebar 模式", PMA::SetViewMode(ViewMode::Sidebar))
+                .with_active(current_mode == ViewMode::Sidebar),
+            PopupMenuItem::action("Tabs 模式", PMA::SetViewMode(ViewMode::Tabs))
+                .with_active(current_mode == ViewMode::Tabs),
+            PopupMenuItem::separator(PMA::SetViewMode(ViewMode::Sidebar)),
+            PopupMenuItem::action("打开Settings", PMA::OpenSettingsFile),
         ];
 
         let menu_left = anchor_x.min(screen_w - menu_w).max(0.0);
@@ -569,7 +457,6 @@ impl SidebarState {
                         self.hover_enter_at = Some(Instant::now());
                     }
                 } else {
-                    self.hover_enter_at.is_some();
                     self.hover_enter_at = None;
                     self.suppress_hover_enter = false;
                 }
@@ -578,13 +465,11 @@ impl SidebarState {
                 let sidebar_w = cfg.width;
                 let in_sidebar = px >= 0.0 && px <= sidebar_w && px < screen_w;
                 if !in_sidebar {
-                    self.hover_leave_at.is_none();
                     self.hovered_button = SidebarHoverButton::None;
                     if self.hover_leave_at.is_none() {
                         self.hover_leave_at = Some(Instant::now());
                     }
                 } else {
-                    self.hover_leave_at.is_some();
                     self.hover_leave_at = None;
                 }
             }
@@ -1039,7 +924,6 @@ mod tests {
         cfg.pinned = true;
         let s = SidebarState::new(&cfg);
         assert_eq!(s.visibility(), Visibility::Pinned);
-        assert_eq!(s.current_width(&cfg), 220.0);
         assert_eq!(
             s.editor_left_offset(
                 &cfg,
@@ -1054,7 +938,6 @@ mod tests {
         let cfg = SidebarConfig { pinned: false, width: 220.0 };
         let s = SidebarState::new(&cfg);
         assert_eq!(s.visibility(), Visibility::Hidden);
-        assert_eq!(s.current_width(&cfg), 0.0);
         assert_eq!(
             s.editor_left_offset(
                 &cfg,
@@ -1093,7 +976,6 @@ mod tests {
             ),
             0.0
         );
-        assert_eq!(s.current_width(&cfg), 220.0);
         assert!(s.is_visible());
     }
 
@@ -1309,7 +1191,7 @@ mod tests {
     fn sidebar_scroll_clamps_to_zero() {
         let cfg = SidebarConfig::new_default(1.0);
         let mut s = SidebarState::new(&cfg);
-        s.set_list_scroll_offset(-50.0);
+        s.list_scroll_offset = -50.0;
         let dpi = 1.0;
         s.clamp_scroll(5, 24.0 * dpi, 200.0 * dpi);
         assert_eq!(s.list_scroll_offset(), 0.0);
@@ -1322,205 +1204,10 @@ mod tests {
         let dpi = 1.0;
         let row_h = 24.0 * dpi;
         // 10 items at 24px row_h in 200px visible area: max = 10*24 - 200 = 40
-        s.set_list_scroll_offset(999.0);
+        s.list_scroll_offset = 999.0;
         s.clamp_scroll(10, row_h, 200.0 * dpi);
         let expected_max = (10.0 * row_h - 200.0 * dpi).max(0.0);
         assert_eq!(s.list_scroll_offset(), expected_max);
-    }
-
-    #[test]
-    fn sidebar_width_drag_clamp_to_min() {
-        let mut cfg = SidebarConfig::new_default(1.0);
-        let mut s = SidebarState::new(&cfg);
-        s.set_visibility(Visibility::Pinned);
-        assert!(s.on_drag_start(
-            220.0,
-            100.0,
-            &cfg,
-            1200.0,
-            &crate::settings::UiMetrics::from_settings(&crate::settings::Settings::new(), 1.0)
-        ));
-        // Drag to 50px → clamp to min 160
-        let action = s.on_drag(
-            50.0,
-            100.0,
-            &mut cfg,
-            &crate::settings::UiMetrics::from_settings(&crate::settings::Settings::new(), 1.0),
-        );
-        assert!(matches!(action, Some(SidebarAction::SetWidth(w)) if (w - 160.0).abs() < 0.01));
-    }
-
-    #[test]
-    fn sidebar_width_drag_clamp_to_max() {
-        let mut cfg = SidebarConfig::new_default(1.0);
-        let mut s = SidebarState::new(&cfg);
-        s.set_visibility(Visibility::Pinned);
-        assert!(s.on_drag_start(
-            220.0,
-            100.0,
-            &cfg,
-            1200.0,
-            &crate::settings::UiMetrics::from_settings(&crate::settings::Settings::new(), 1.0)
-        ));
-        // Drag to 9999 → clamp to max 400
-        let action = s.on_drag(
-            9999.0,
-            100.0,
-            &mut cfg,
-            &crate::settings::UiMetrics::from_settings(&crate::settings::Settings::new(), 1.0),
-        );
-        assert!(matches!(action, Some(SidebarAction::SetWidth(w)) if (w - 400.0).abs() < 0.01));
-    }
-
-    #[test]
-    fn sidebar_width_drag_clamp_dpi_scaled() {
-        let mut cfg = SidebarConfig::new_default(1.0);
-        let mut s = SidebarState::new(&cfg);
-        s.set_visibility(Visibility::Pinned);
-        // width=220; global dpi=1 → clamp [160, 400]
-        assert!(s.on_drag_start(
-            220.0,
-            100.0,
-            &cfg,
-            1200.0,
-            &crate::settings::UiMetrics::from_settings(&crate::settings::Settings::new(), 1.0)
-        ));
-        // Drag to min (drag px below 160)
-        let action = s.on_drag(
-            160.0 - 100.0,
-            100.0,
-            &mut cfg,
-            &crate::settings::UiMetrics::from_settings(&crate::settings::Settings::new(), 1.0),
-        );
-        assert!(matches!(action, Some(SidebarAction::SetWidth(w)) if (w - 160.0).abs() < 0.01));
-        // Drag to max
-        s.on_drag(
-            9999.0,
-            100.0,
-            &mut cfg,
-            &crate::settings::UiMetrics::from_settings(&crate::settings::Settings::new(), 1.0),
-        );
-        assert!((cfg.width - 400.0).abs() < 0.01);
-        // Verify cfg.width was mutated
-        assert_eq!(cfg.width, 400.0);
-    }
-
-    #[test]
-    fn sidebar_drag_end_persists() {
-        let mut cfg = SidebarConfig::new_default(1.0);
-        let mut s = SidebarState::new(&cfg);
-        s.set_visibility(Visibility::Pinned);
-        assert!(s.on_drag_start(
-            220.0,
-            100.0,
-            &cfg,
-            1200.0,
-            &crate::settings::UiMetrics::from_settings(&crate::settings::Settings::new(), 1.0)
-        ));
-        let mid = s.on_drag(
-            300.0,
-            100.0,
-            &mut cfg,
-            &crate::settings::UiMetrics::from_settings(&crate::settings::Settings::new(), 1.0),
-        );
-        assert!(matches!(mid, Some(SidebarAction::SetWidth(_))));
-        let end = s.on_drag_end();
-        assert!(matches!(end, Some(SidebarAction::PersistConfig)));
-        // After drag_end, a second call returns None (drag state consumed)
-        assert!(s.on_drag_end().is_none());
-    }
-
-    #[test]
-    fn sidebar_drag_start_outside_band_returns_false() {
-        let cfg = SidebarConfig::new_default(1.0);
-        let mut s = SidebarState::new(&cfg);
-        s.set_visibility(Visibility::Pinned);
-        // width=220, band=4; px=50 is far from 220
-        assert!(!s.on_drag_start(
-            50.0,
-            100.0,
-            &cfg,
-            1200.0,
-            &crate::settings::UiMetrics::from_settings(&crate::settings::Settings::new(), 1.0)
-        ));
-        // px=1000 is far from 220
-        assert!(!s.on_drag_start(
-            1000.0,
-            100.0,
-            &cfg,
-            1200.0,
-            &crate::settings::UiMetrics::from_settings(&crate::settings::Settings::new(), 1.0)
-        ));
-    }
-
-    #[test]
-    fn sidebar_drag_start_in_band_returns_true() {
-        let cfg = SidebarConfig::new_default(1.0);
-        let mut s = SidebarState::new(&cfg);
-        s.set_visibility(Visibility::Pinned);
-        // width=220, band=4; px=218 is within band
-        assert!(s.on_drag_start(
-            218.0,
-            100.0,
-            &cfg,
-            1200.0,
-            &crate::settings::UiMetrics::from_settings(&crate::settings::Settings::new(), 1.0)
-        ));
-    }
-
-    #[test]
-    fn sidebar_drag_hidden_returns_false() {
-        let cfg = SidebarConfig { pinned: false, width: 220.0 };
-        let mut s = SidebarState::new(&cfg);
-        // Hidden by default
-        assert!(!s.on_drag_start(
-            220.0,
-            100.0,
-            &cfg,
-            1200.0,
-            &crate::settings::UiMetrics::from_settings(&crate::settings::Settings::new(), 1.0)
-        ));
-    }
-
-    #[test]
-    fn sidebar_drag_without_start_returns_none() {
-        let mut cfg = SidebarConfig::new_default(1.0);
-        let mut s = SidebarState::new(&cfg);
-        s.set_visibility(Visibility::Pinned);
-        // No drag_start called → on_drag returns None
-        assert!(
-            s.on_drag(
-                300.0,
-                100.0,
-                &mut cfg,
-                &crate::settings::UiMetrics::from_settings(&crate::settings::Settings::new(), 1.0)
-            )
-            .is_none()
-        );
-    }
-
-    #[test]
-    fn sidebar_drag_respects_initial_width() {
-        let mut cfg = SidebarConfig::new_default(1.0);
-        cfg.width = 300.0;
-        let mut s = SidebarState::new(&cfg);
-        s.set_visibility(Visibility::Pinned);
-        // Start drag at the right edge (300)
-        assert!(s.on_drag_start(
-            300.0,
-            100.0,
-            &cfg,
-            1200.0,
-            &crate::settings::UiMetrics::from_settings(&crate::settings::Settings::new(), 1.0)
-        ));
-        // Move 20px right
-        s.on_drag(
-            320.0,
-            100.0,
-            &mut cfg,
-            &crate::settings::UiMetrics::from_settings(&crate::settings::Settings::new(), 1.0),
-        );
-        assert!((cfg.width - 320.0).abs() < 0.01);
     }
 
     // ── Hover state machine tests ──
@@ -2169,7 +1856,7 @@ mod tests {
         let cfg = SidebarConfig { pinned: true, width: 220.0 };
         let _t0 = Instant::now();
         let mut s = SidebarState::new(&cfg);
-        s.set_list_scroll_offset(42.0);
+        s.list_scroll_offset = 42.0;
         s.hovered_index = Some(3);
 
         let p = s.to_persistent();
