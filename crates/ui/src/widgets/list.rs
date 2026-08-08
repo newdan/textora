@@ -7,8 +7,9 @@ use crate::core::measure::TextMeasure;
 use crate::core::text_util::truncate_title_precise;
 use crate::core::widget::ControlAction;
 use crate::core::{
-    DrawCmd, Event, EventCtx, KeyCode, LayoutCtx, Modifiers, MouseButton, PaintCtx, Rect, Widget,
-    WidgetAction, WidgetId,
+    AccessibilityAction, AccessibilityActionRequest, AccessibilityContext, AccessibilityId,
+    AccessibilityNode, AccessibilityRole, DrawCmd, Event, EventCtx, KeyCode, LayoutCtx, Modifiers,
+    MouseButton, PaintCtx, Rect, Widget, WidgetAction, WidgetId,
 };
 
 /// Layout direction for the list.
@@ -116,6 +117,8 @@ pub struct ListWidget {
     orientation: Orientation,
     truncated_labels: Vec<String>,
     truncated_label_widths: Vec<f32>,
+    dpi: f32,
+    accessibility_label: Option<String>,
 }
 
 impl ListWidget {
@@ -135,6 +138,8 @@ impl ListWidget {
             orientation,
             truncated_labels: Vec::new(),
             truncated_label_widths: Vec::new(),
+            dpi: 1.0,
+            accessibility_label: None,
         }
     }
 
@@ -163,6 +168,9 @@ impl ListWidget {
     }
     pub fn set_style(&mut self, s: ListStyle) {
         self.style = s;
+    }
+    pub fn set_accessibility_label(&mut self, label: Option<String>) {
+        self.accessibility_label = label;
     }
     pub fn rect(&self) -> Rect {
         self.rect
@@ -349,6 +357,7 @@ impl Widget for ListWidget {
     fn set_rect(&mut self, rect: Rect, ctx: &mut LayoutCtx) {
         self.rect = rect;
         let dpi = ctx.dpi;
+        self.dpi = dpi;
         let font_size = self.style.font_size_logical * dpi;
         let measure: &mut dyn TextMeasure = ctx.measure;
         let pad_x = self.style.pad_x_logical * dpi;
@@ -643,6 +652,63 @@ impl Widget for ListWidget {
         }
     }
 
+    fn accessibility_node(&self, ctx: &AccessibilityContext) -> Option<AccessibilityNode> {
+        let id = self.id?;
+        if self.rect.w <= 0.0 || self.rect.h <= 0.0 {
+            return None;
+        }
+        let root_id = AccessibilityId::from(id);
+        let mut root =
+            AccessibilityNode::new(root_id, AccessibilityRole::List, ctx.screen_bounds(self.rect))
+                .with_name(self.accessibility_label.as_deref().unwrap_or("列表"))
+                .with_focused(self.focused && self.focused_index.is_none())
+                .with_action(AccessibilityAction::Focus);
+        for (index, item) in self.items.iter().enumerate() {
+            if item.kind != ListItemKind::Normal {
+                continue;
+            }
+            let item_rect = self.item_rect(index, self.dpi);
+            if item_rect.bottom() <= self.rect.top() || item_rect.top() >= self.rect.bottom() {
+                continue;
+            }
+            let selected = item.is_active || self.active_index == Some(index);
+            let child = AccessibilityNode::new(
+                root_id.child(index as u64 + 1),
+                AccessibilityRole::ListItem,
+                ctx.screen_bounds(item_rect),
+            )
+            .with_name(item.label.clone())
+            .with_selected(selected)
+            .with_focused(self.focused && self.focused_index == Some(index))
+            .with_action(AccessibilityAction::Focus)
+            .with_action(AccessibilityAction::Activate);
+            root.children.push(child);
+        }
+        Some(root)
+    }
+
+    fn on_accessibility_action(
+        &mut self,
+        request: &AccessibilityActionRequest,
+    ) -> Option<WidgetAction> {
+        let id = self.id?;
+        let root_id = AccessibilityId::from(id);
+        if request.target == root_id && request.action == AccessibilityAction::Focus {
+            return Some(WidgetAction::Control(ControlAction::FocusRequested { id }));
+        }
+        let index = (0..self.items.len()).find(|index| {
+            root_id.child(*index as u64 + 1) == request.target && self.is_selectable(*index)
+        })?;
+        match request.action {
+            AccessibilityAction::Focus => {
+                self.focused_index = Some(index);
+                Some(WidgetAction::Control(ControlAction::FocusRequested { id }))
+            }
+            AccessibilityAction::Activate => Some(WidgetAction::List(ListAction::Selected(index))),
+            _ => None,
+        }
+    }
+
     fn on_event(&mut self, ev: &Event, ctx: &mut EventCtx) -> Option<WidgetAction> {
         match ev {
             Event::MouseDown { px, py, button: MouseButton::Left } => {
@@ -787,6 +853,37 @@ mod tests {
             is_active: false,
             closeable: true,
         }
+    }
+
+    #[test]
+    fn accessibility_exposes_list_items_and_selection_action() {
+        let id = WidgetId(70);
+        let mut widget = ListWidget::new(style(), Orientation::Vertical).with_id(id);
+        widget.set_accessibility_label(Some("打开的文档".into()));
+        widget.set_items(vec![item("a.rs"), item("b.rs")]);
+        widget.set_active(Some(1));
+        let theme = crate::theme::test_theme();
+        let mut measure = NoopMeasure;
+        widget.set_rect(Rect::new(0.0, 0.0, 220.0, 100.0), &mut layout_ctx(&theme, &mut measure));
+        widget.set_keyboard_focus(Some(id));
+        let node = widget
+            .accessibility_node(&crate::core::AccessibilityContext::new(10.0, 20.0))
+            .expect("identified list should expose semantics");
+
+        assert_eq!(node.role, crate::core::AccessibilityRole::List);
+        assert_eq!(node.name.as_deref(), Some("打开的文档"));
+        assert_eq!(node.children.len(), 2);
+        assert_eq!(node.children[0].name.as_deref(), Some("a.rs"));
+        assert_eq!(node.children[1].state.selected, Some(true));
+        assert!(node.children[1].state.focused);
+        assert_eq!(node.children[0].bounds, Rect::new(10.0, 24.0, 220.0, 24.0));
+        assert_eq!(
+            widget.on_accessibility_action(&crate::core::AccessibilityActionRequest::new(
+                node.children[0].id,
+                crate::core::AccessibilityAction::Activate,
+            )),
+            Some(WidgetAction::List(ListAction::Selected(0)))
+        );
     }
 
     fn pinned_item(label: &str) -> ListItem {

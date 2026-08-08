@@ -4,8 +4,11 @@ mod layout;
 
 use std::any::Any;
 
+use crate::core::widget::{ControlAction, WidgetId};
 use crate::core::{
-    DrawCmd, Event, EventCtx, KeyCode, LayoutCtx, MouseButton, PaintCtx, Rect, Widget, WidgetAction,
+    AccessibilityAction, AccessibilityActionRequest, AccessibilityContext, AccessibilityId,
+    AccessibilityNode, AccessibilityRole, DrawCmd, Event, EventCtx, KeyCode, LayoutCtx,
+    MouseButton, PaintCtx, Rect, Widget, WidgetAction,
 };
 use crate::widgets::icon::draw_icon;
 
@@ -55,11 +58,14 @@ pub enum VirtualCardListAction {
 
 /// 仅布局可见卡片范围的纵向列表组件。
 pub struct VirtualCardListWidget {
+    id: Option<WidgetId>,
     rect: Rect,
     input: VirtualCardListInput,
     layout: VirtualCardListLayout,
     selected_key: Option<CardKey>,
     hovered_key: Option<CardKey>,
+    focused: bool,
+    accessibility_label: Option<String>,
 }
 
 impl Default for VirtualCardListWidget {
@@ -71,12 +77,24 @@ impl Default for VirtualCardListWidget {
 impl VirtualCardListWidget {
     pub fn new() -> Self {
         Self {
+            id: None,
             rect: Rect::ZERO,
             input: VirtualCardListInput::default(),
             layout: VirtualCardListLayout::default(),
             selected_key: None,
             hovered_key: None,
+            focused: false,
+            accessibility_label: None,
         }
+    }
+
+    pub fn with_id(mut self, id: WidgetId) -> Self {
+        self.id = Some(id);
+        self
+    }
+
+    pub fn set_accessibility_label(&mut self, label: Option<String>) {
+        self.accessibility_label = label;
     }
 
     /// 更新当前帧输入，同时按稳定键保留仍存在的选择和悬停状态。
@@ -258,7 +276,84 @@ impl Widget for VirtualCardListWidget {
         self.rect.contains(px, py)
     }
 
+    fn id(&self) -> Option<WidgetId> {
+        self.id
+    }
+
+    fn is_focusable(&self) -> bool {
+        self.id.is_some()
+    }
+
+    fn set_keyboard_focus(&mut self, focused_id: Option<WidgetId>) {
+        self.focused = self.id.is_some_and(|id| focused_id == Some(id));
+    }
+
+    fn accessibility_node(&self, ctx: &AccessibilityContext) -> Option<AccessibilityNode> {
+        let id = self.id?;
+        if self.rect.w <= 0.0 || self.rect.h <= 0.0 {
+            return None;
+        }
+        let root_id = AccessibilityId::from(id);
+        let mut root =
+            AccessibilityNode::new(root_id, AccessibilityRole::List, ctx.screen_bounds(self.rect))
+                .with_name(self.accessibility_label.as_deref().unwrap_or("卡片列表"))
+                .with_focused(self.focused)
+                .with_action(AccessibilityAction::Focus);
+        for index in self.layout.visible_range.clone() {
+            let Some(card) = self.input.cards.get(index) else {
+                continue;
+            };
+            let geometry = self.layout.card_geometry(index);
+            if geometry.card_rect.bottom() <= self.rect.top()
+                || geometry.card_rect.top() >= self.rect.bottom()
+            {
+                continue;
+            }
+            let description =
+                [card.excerpt.as_str(), card.timestamp.as_str(), card.tag_summary.as_str()]
+                    .into_iter()
+                    .filter(|part| !part.is_empty())
+                    .collect::<Vec<_>>()
+                    .join("，");
+            let mut child = AccessibilityNode::new(
+                root_id.child(card.key.0),
+                AccessibilityRole::ListItem,
+                ctx.screen_bounds(geometry.card_rect),
+            )
+            .with_name(card.title.clone())
+            .with_selected(card.selection == CardSelection::Selected)
+            .with_action(AccessibilityAction::Activate);
+            if !description.is_empty() {
+                child = child.with_description(description);
+            }
+            root.children.push(child);
+        }
+        Some(root)
+    }
+
+    fn on_accessibility_action(
+        &mut self,
+        request: &AccessibilityActionRequest,
+    ) -> Option<WidgetAction> {
+        let id = self.id?;
+        let root_id = AccessibilityId::from(id);
+        if request.target == root_id && request.action == AccessibilityAction::Focus {
+            return Some(WidgetAction::Control(ControlAction::FocusRequested { id }));
+        }
+        let card =
+            self.input.cards.iter().find(|card| root_id.child(card.key.0) == request.target)?;
+        match request.action {
+            AccessibilityAction::Activate => {
+                Some(WidgetAction::VirtualCardList(VirtualCardListAction::Activated(card.key)))
+            }
+            _ => None,
+        }
+    }
+
     fn on_event(&mut self, event: &Event, ctx: &mut EventCtx) -> Option<WidgetAction> {
+        if self.id.is_some() && !self.focused && matches!(event, Event::KeyDown(..)) {
+            return None;
+        }
         let action = match event {
             Event::MouseMove { px, py } => {
                 if self.hit(*px, *py) {
@@ -325,6 +420,44 @@ mod tests {
         let mut measure = NoopMeasure;
         let mut context = LayoutCtx { ui_measure: None, measure: &mut measure, theme: &theme, dpi };
         widget.set_rect(rect, &mut context);
+    }
+
+    #[test]
+    fn accessibility_exposes_visible_cards_and_activation_action() {
+        let id = crate::WidgetId(70);
+        let mut widget = VirtualCardListWidget::new().with_id(id);
+        widget.set_accessibility_label(Some("笔记卡片".into()));
+        let mut selected = card(2);
+        selected.selection = CardSelection::Selected;
+        widget.set_input(VirtualCardListInput {
+            cards: vec![card(1), selected],
+            scroll_offset_px: 0.0,
+        });
+        layout(&mut widget, Rect::new(0.0, 0.0, 360.0, 220.0), 1.0);
+        let theme = crate::theme::test_theme();
+        let mut event_context = EventCtx { theme: &theme, dpi: 1.0, cursor_hint: None };
+        assert_eq!(
+            widget.on_event(&Event::KeyDown(KeyCode::Down, Modifiers::NONE), &mut event_context),
+            None
+        );
+        widget.set_keyboard_focus(Some(id));
+        let node = widget
+            .accessibility_node(&crate::core::AccessibilityContext::new(10.0, 20.0))
+            .expect("identified card list should expose semantics");
+
+        assert_eq!(node.role, crate::core::AccessibilityRole::List);
+        assert_eq!(node.name.as_deref(), Some("笔记卡片"));
+        assert!(node.state.focused);
+        assert_eq!(node.children.len(), 2);
+        assert_eq!(node.children[0].name.as_deref(), Some("Card 1"));
+        assert_eq!(node.children[1].state.selected, Some(true));
+        assert_eq!(
+            widget.on_accessibility_action(&crate::core::AccessibilityActionRequest::new(
+                node.children[0].id,
+                crate::core::AccessibilityAction::Activate,
+            )),
+            Some(WidgetAction::VirtualCardList(VirtualCardListAction::Activated(CardKey(1))))
+        );
     }
 
     #[test]

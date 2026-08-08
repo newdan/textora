@@ -4,8 +4,11 @@ mod layout;
 
 use std::any::Any;
 
+use crate::core::widget::{ControlAction, WidgetId};
 use crate::core::{
-    DrawCmd, Event, EventCtx, KeyCode, LayoutCtx, MouseButton, PaintCtx, Rect, Widget, WidgetAction,
+    AccessibilityAction, AccessibilityActionRequest, AccessibilityContext, AccessibilityId,
+    AccessibilityNode, AccessibilityRole, DrawCmd, Event, EventCtx, KeyCode, LayoutCtx,
+    MouseButton, PaintCtx, Rect, Widget, WidgetAction,
 };
 use crate::widgets::icon::draw_icon;
 
@@ -64,11 +67,14 @@ pub enum TreeListAction {
 
 /// 分层树列表组件。
 pub struct TreeListWidget {
+    id: Option<WidgetId>,
     rect: Rect,
     input: TreeListInput,
     layout: TreeListLayout,
     selected_key: Option<TreeRowKey>,
     hovered_key: Option<TreeRowKey>,
+    focused: bool,
+    accessibility_label: Option<String>,
 }
 
 impl Default for TreeListWidget {
@@ -80,12 +86,24 @@ impl Default for TreeListWidget {
 impl TreeListWidget {
     pub fn new() -> Self {
         Self {
+            id: None,
             rect: Rect::ZERO,
             input: TreeListInput::default(),
             layout: TreeListLayout::default(),
             selected_key: None,
             hovered_key: None,
+            focused: false,
+            accessibility_label: None,
         }
+    }
+
+    pub fn with_id(mut self, id: WidgetId) -> Self {
+        self.id = Some(id);
+        self
+    }
+
+    pub fn set_accessibility_label(&mut self, label: Option<String>) {
+        self.accessibility_label = label;
     }
 
     /// 覆盖当前帧展示输入，并丢弃已不存在行的悬停状态。
@@ -264,7 +282,80 @@ impl Widget for TreeListWidget {
         self.rect.contains(px, py)
     }
 
+    fn id(&self) -> Option<WidgetId> {
+        self.id
+    }
+
+    fn is_focusable(&self) -> bool {
+        self.id.is_some()
+    }
+
+    fn set_keyboard_focus(&mut self, focused_id: Option<WidgetId>) {
+        self.focused = self.id.is_some_and(|id| focused_id == Some(id));
+    }
+
+    fn accessibility_node(&self, ctx: &AccessibilityContext) -> Option<AccessibilityNode> {
+        let id = self.id?;
+        if self.rect.w <= 0.0 || self.rect.h <= 0.0 {
+            return None;
+        }
+        let root_id = AccessibilityId::from(id);
+        let mut root =
+            AccessibilityNode::new(root_id, AccessibilityRole::Tree, ctx.screen_bounds(self.rect))
+                .with_name(self.accessibility_label.as_deref().unwrap_or("树列表"))
+                .with_focused(self.focused)
+                .with_action(AccessibilityAction::Focus);
+        for (row, row_layout) in self.input.rows.iter().zip(&self.layout.rows) {
+            if row_layout.row_rect.bottom() <= self.rect.top()
+                || row_layout.row_rect.top() >= self.rect.bottom()
+            {
+                continue;
+            }
+            let mut child = AccessibilityNode::new(
+                root_id.child(row.key.0),
+                AccessibilityRole::TreeItem,
+                ctx.screen_bounds(row_layout.row_rect),
+            )
+            .with_name(row.label.clone())
+            .with_selected(row.selection == TreeRowSelection::Selected)
+            .with_action(AccessibilityAction::Activate);
+            if row.expansion != TreeRowExpansion::Leaf {
+                child = child
+                    .with_expanded(row.expansion == TreeRowExpansion::Expanded)
+                    .with_action(AccessibilityAction::Toggle);
+            }
+            root.children.push(child);
+        }
+        Some(root)
+    }
+
+    fn on_accessibility_action(
+        &mut self,
+        request: &AccessibilityActionRequest,
+    ) -> Option<WidgetAction> {
+        let id = self.id?;
+        let root_id = AccessibilityId::from(id);
+        if request.target == root_id && request.action == AccessibilityAction::Focus {
+            return Some(WidgetAction::Control(ControlAction::FocusRequested { id }));
+        }
+        let row = self.input.rows.iter().find(|row| root_id.child(row.key.0) == request.target)?;
+        let key = row.key;
+        match request.action {
+            AccessibilityAction::Activate => {
+                self.select_row(key);
+                Some(WidgetAction::TreeList(TreeListAction::Selected(key)))
+            }
+            AccessibilityAction::Toggle if row.expansion != TreeRowExpansion::Leaf => {
+                Some(WidgetAction::TreeList(TreeListAction::ExpansionToggled(key)))
+            }
+            _ => None,
+        }
+    }
+
     fn on_event(&mut self, event: &Event, ctx: &mut EventCtx) -> Option<WidgetAction> {
+        if self.id.is_some() && !self.focused && matches!(event, Event::KeyDown(..)) {
+            return None;
+        }
         let action = match event {
             Event::MouseMove { px, py } => {
                 if self.hit(*px, *py) {
@@ -373,6 +464,47 @@ mod tests {
 
     fn event_context(theme: &crate::Theme) -> EventCtx<'_> {
         EventCtx { theme, dpi: 1.0, cursor_hint: None }
+    }
+
+    #[test]
+    fn accessibility_exposes_tree_rows_and_expansion_action() {
+        let id = crate::WidgetId(70);
+        let mut widget = TreeListWidget::new().with_id(id);
+        widget.set_accessibility_label(Some("工作区文件".into()));
+        let mut expanded = row(1, 0, TreeRowExpansion::Expanded);
+        expanded.selection = TreeRowSelection::Selected;
+        widget.set_input(TreeListInput {
+            rows: vec![expanded, row(2, 1, TreeRowExpansion::Leaf)],
+            scroll_offset_px: 0.0,
+        });
+        layout(&mut widget, Rect::new(0.0, 0.0, 240.0, 80.0), 1.0);
+        let theme = crate::theme::test_theme();
+        assert_eq!(
+            widget.on_event(
+                &Event::KeyDown(KeyCode::Down, Modifiers::NONE),
+                &mut event_context(&theme),
+            ),
+            None
+        );
+        widget.set_keyboard_focus(Some(id));
+        let node = widget
+            .accessibility_node(&crate::core::AccessibilityContext::new(10.0, 20.0))
+            .expect("identified tree should expose semantics");
+
+        assert_eq!(node.role, crate::core::AccessibilityRole::Tree);
+        assert_eq!(node.name.as_deref(), Some("工作区文件"));
+        assert!(node.state.focused);
+        assert_eq!(node.children.len(), 2);
+        assert_eq!(node.children[0].role, crate::core::AccessibilityRole::TreeItem);
+        assert_eq!(node.children[0].state.selected, Some(true));
+        assert_eq!(node.children[0].state.expanded, Some(true));
+        assert_eq!(
+            widget.on_accessibility_action(&crate::core::AccessibilityActionRequest::new(
+                node.children[0].id,
+                crate::core::AccessibilityAction::Toggle,
+            )),
+            Some(WidgetAction::TreeList(TreeListAction::ExpansionToggled(TreeRowKey(1))))
+        );
     }
 
     #[test]
