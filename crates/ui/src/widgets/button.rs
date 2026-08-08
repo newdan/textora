@@ -212,6 +212,9 @@ impl Widget for Button {
                     None
                 }
             }
+            Event::PointerLeave => {
+                std::mem::take(&mut self.hovered).then_some(WidgetAction::Consumed)
+            }
             Event::MouseDown { px, py, button: MouseButton::Left } => {
                 if !self.enabled {
                     return None;
@@ -241,6 +244,11 @@ impl Widget for Button {
                     Some(WidgetAction::Consumed)
                 }
             }
+            Event::InteractionCancel => {
+                let interaction_changed =
+                    std::mem::take(&mut self.hovered) | std::mem::take(&mut self.pressed);
+                interaction_changed.then_some(WidgetAction::Consumed)
+            }
             Event::KeyDown(key, modifiers)
                 if self.enabled
                     && self.focused
@@ -254,6 +262,10 @@ impl Widget for Button {
             }
             _ => None,
         }
+    }
+
+    fn is_capturing(&self) -> bool {
+        self.pressed
     }
 
     fn as_any(&self) -> &dyn Any {
@@ -615,6 +627,7 @@ mod tests {
         assert_eq!(mouse_down(&mut button, 20.0, 10.0), Some(WidgetAction::Consumed));
 
         button.set_enabled(false);
+        assert!(!button.is_capturing());
         button.set_enabled(true);
 
         let theme = crate::theme::test_theme();
@@ -623,6 +636,36 @@ mod tests {
             button.on_event(&Event::KeyDown(KeyCode::Enter, Modifiers::NONE), &mut event_ctx),
             None
         );
+        assert_eq!(mouse_up(&mut button, 20.0, 10.0), None);
+    }
+
+    #[test]
+    fn button_leave_preserves_press_and_cancel_is_idempotent() {
+        let id = WidgetId(22);
+        let mut button = make_button(id);
+        button.set_keyboard_focus(Some(id));
+        let theme = crate::theme::test_theme();
+        let mut event_ctx = EventCtx { cursor_hint: None, theme: &theme, dpi: 1.0 };
+
+        assert_eq!(
+            button.on_event(&Event::MouseMove { px: 20.0, py: 10.0 }, &mut event_ctx),
+            Some(WidgetAction::Consumed)
+        );
+        assert_eq!(mouse_down(&mut button, 20.0, 10.0), Some(WidgetAction::Consumed));
+        assert!(button.is_capturing());
+        assert_eq!(
+            button.on_event(&Event::PointerLeave, &mut event_ctx),
+            Some(WidgetAction::Consumed)
+        );
+        assert!(!button.hovered);
+        assert!(button.is_capturing());
+
+        assert_eq!(
+            button.on_event(&Event::InteractionCancel, &mut event_ctx),
+            Some(WidgetAction::Consumed)
+        );
+        assert!(!button.is_capturing());
+        assert_eq!(button.on_event(&Event::InteractionCancel, &mut event_ctx), None);
         assert_eq!(mouse_up(&mut button, 20.0, 10.0), None);
     }
 

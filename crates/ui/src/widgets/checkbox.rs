@@ -210,6 +210,9 @@ impl Widget for Checkbox {
                 }
                 None
             }
+            Event::PointerLeave => {
+                std::mem::take(&mut self.hovered).then_some(WidgetAction::Consumed)
+            }
             Event::MouseDown { px, py, button: MouseButton::Left } => {
                 let inside = self.hit(*px, *py);
                 self.hovered = inside;
@@ -239,6 +242,11 @@ impl Widget for Checkbox {
                 }
                 Some(self.toggle_action())
             }
+            Event::InteractionCancel => {
+                let interaction_changed =
+                    std::mem::take(&mut self.hovered) | std::mem::take(&mut self.pressed);
+                interaction_changed.then_some(WidgetAction::Consumed)
+            }
             Event::KeyDown(KeyCode::Char(' '), modifiers)
                 if self.focused && *modifiers == crate::core::Modifiers::NONE =>
             {
@@ -246,6 +254,10 @@ impl Widget for Checkbox {
             }
             _ => None,
         }
+    }
+
+    fn is_capturing(&self) -> bool {
+        self.pressed
     }
 
     fn as_any(&self) -> &dyn Any {
@@ -395,6 +407,7 @@ mod tests {
 
         assert!(!checkbox.is_enabled());
         assert!(!checkbox.is_focusable());
+        assert!(!checkbox.is_capturing());
         assert_eq!(key_space(&mut checkbox), None);
         assert_eq!(mouse_up(&mut checkbox), None);
 
@@ -410,5 +423,37 @@ mod tests {
             None
         );
         assert_eq!(ctx.cursor_hint, None);
+    }
+
+    #[test]
+    fn checkbox_leave_preserves_press_and_cancel_is_idempotent() {
+        let id = WidgetId(27);
+        let mut checkbox = focused_checkbox(id, false);
+        let mut ctx = event_ctx();
+
+        assert_eq!(
+            checkbox.on_event(
+                &Event::MouseMove {
+                    px: CHECKBOX_SIZE_LOGICAL * 0.5,
+                    py: CHECKBOX_SIZE_LOGICAL * 0.5,
+                },
+                &mut ctx,
+            ),
+            Some(WidgetAction::Consumed)
+        );
+        assert_eq!(mouse_down(&mut checkbox, true), Some(WidgetAction::Consumed));
+        assert!(checkbox.is_capturing());
+        assert_eq!(checkbox.on_event(&Event::PointerLeave, &mut ctx), Some(WidgetAction::Consumed));
+        assert!(!checkbox.hovered);
+        assert!(checkbox.is_capturing());
+
+        assert_eq!(
+            checkbox.on_event(&Event::InteractionCancel, &mut ctx),
+            Some(WidgetAction::Consumed)
+        );
+        assert!(!checkbox.is_capturing());
+        assert!(!checkbox.checked());
+        assert_eq!(checkbox.on_event(&Event::InteractionCancel, &mut ctx), None);
+        assert_eq!(mouse_up(&mut checkbox), None);
     }
 }

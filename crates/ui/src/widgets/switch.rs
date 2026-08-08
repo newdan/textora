@@ -214,6 +214,9 @@ impl Widget for Switch {
                 }
                 None
             }
+            Event::PointerLeave => {
+                std::mem::take(&mut self.hovered).then_some(WidgetAction::Consumed)
+            }
             Event::MouseDown { px, py, button: MouseButton::Left } => {
                 let inside = self.hit(*px, *py);
                 self.hovered = inside;
@@ -243,6 +246,11 @@ impl Widget for Switch {
                 }
                 Some(self.toggle_action())
             }
+            Event::InteractionCancel => {
+                let interaction_changed =
+                    std::mem::take(&mut self.hovered) | std::mem::take(&mut self.pressed);
+                interaction_changed.then_some(WidgetAction::Consumed)
+            }
             Event::KeyDown(KeyCode::Char(' '), modifiers)
                 if self.focused && *modifiers == crate::core::Modifiers::NONE =>
             {
@@ -250,6 +258,10 @@ impl Widget for Switch {
             }
             _ => None,
         }
+    }
+
+    fn is_capturing(&self) -> bool {
+        self.pressed
     }
 
     fn as_any(&self) -> &dyn Any {
@@ -454,11 +466,38 @@ mod tests {
 
         assert!(!switch.is_enabled());
         assert!(!switch.is_focusable());
+        assert!(!switch.is_capturing());
         assert_eq!(key_space(&mut switch), None);
         assert_eq!(mouse_up(&mut switch, 18.0, 10.0), None);
 
         let mut ctx = event_ctx();
         assert_eq!(switch.on_event(&Event::MouseMove { px: 18.0, py: 10.0 }, &mut ctx), None);
         assert_eq!(ctx.cursor_hint, None);
+    }
+
+    #[test]
+    fn switch_leave_preserves_press_and_cancel_is_idempotent() {
+        let id = WidgetId(28);
+        let mut switch = focused_switch(id, false);
+        let mut ctx = event_ctx();
+
+        assert_eq!(
+            switch.on_event(&Event::MouseMove { px: 18.0, py: 10.0 }, &mut ctx),
+            Some(WidgetAction::Consumed)
+        );
+        assert_eq!(mouse_down(&mut switch, 18.0, 10.0), Some(WidgetAction::Consumed));
+        assert!(switch.is_capturing());
+        assert_eq!(switch.on_event(&Event::PointerLeave, &mut ctx), Some(WidgetAction::Consumed));
+        assert!(!switch.hovered);
+        assert!(switch.is_capturing());
+
+        assert_eq!(
+            switch.on_event(&Event::InteractionCancel, &mut ctx),
+            Some(WidgetAction::Consumed)
+        );
+        assert!(!switch.is_capturing());
+        assert!(!switch.checked());
+        assert_eq!(switch.on_event(&Event::InteractionCancel, &mut ctx), None);
+        assert_eq!(mouse_up(&mut switch, 18.0, 10.0), None);
     }
 }
