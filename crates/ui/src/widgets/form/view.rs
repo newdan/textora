@@ -482,11 +482,7 @@ impl Widget for FormView {
                 Some(WidgetAction::Consumed)
             }
             Event::KeyDown(KeyCode::Tab, modifiers) => self.cycle_focus(*modifiers),
-            Event::KeyDown(..)
-            | Event::ImePreedit { .. }
-            | Event::ImeCommit(..)
-            | Event::ImeEnable
-            | Event::ImeDisable => self
+            _ => self
                 .focused_section_index()
                 .and_then(|section_index| self.dispatch_to_section(section_index, event, ctx)),
         }

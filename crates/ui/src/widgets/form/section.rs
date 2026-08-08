@@ -372,11 +372,7 @@ impl Widget for FormSection {
             Event::Wheel { px, py, .. } => self
                 .row_index_at(*px, *py)
                 .and_then(|row_index| self.dispatch_to_row(row_index, event, ctx)),
-            Event::KeyDown(..)
-            | Event::ImePreedit { .. }
-            | Event::ImeCommit(..)
-            | Event::ImeEnable
-            | Event::ImeDisable => self
+            _ => self
                 .focused_row_index()
                 .and_then(|row_index| self.dispatch_to_row(row_index, event, ctx)),
         }

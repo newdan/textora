@@ -350,11 +350,7 @@ impl Widget for FormRow {
                 let target = self.hit_target(*px, *py)?;
                 self.dispatch_to_target(target, event, ctx)
             }
-            Event::KeyDown(..)
-            | Event::ImePreedit { .. }
-            | Event::ImeCommit(..)
-            | Event::ImeEnable
-            | Event::ImeDisable => self
+            _ => self
                 .control_has_focus()
                 .then_some(())
                 .and_then(|_| self.dispatch_to_control(event, ctx)),
