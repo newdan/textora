@@ -235,9 +235,21 @@ fn create_configured_note(
                     initial_contents,
                     &absolute_path,
                 )?;
-                catalog.create_active_note(&note, request.encryption).map_err(|source| {
-                    NoteCommandError::CatalogAfterFileWrite { relative_path, source }
-                })?;
+                catalog
+                    .create_active_note(
+                        &note,
+                        request.encryption,
+                        match request.kind {
+                            DocumentKind::Markdown | DocumentKind::Mindmap => {
+                                crate::TitleInitialization::AwaitingFirstCommit
+                            }
+                            DocumentKind::Text => crate::TitleInitialization::Independent,
+                        },
+                    )
+                    .map_err(|source| NoteCommandError::CatalogAfterFileWrite {
+                        relative_path,
+                        source,
+                    })?;
                 return Ok(NoteCommandResult { note, previous_relative_path: None });
             }
             Err(source) if source.kind() == std::io::ErrorKind::AlreadyExists => continue,
@@ -482,6 +494,16 @@ mod create {
             "#"
         );
         assert_eq!(catalog.active_notes().expect("created notes should be indexed").len(), 2);
+        for note in [&markdown.note, &mindmap.note] {
+            assert_eq!(
+                catalog
+                    .note_editor_metadata(note.note_id)
+                    .expect("created metadata should query")
+                    .expect("created metadata should exist")
+                    .title_initialization,
+                crate::TitleInitialization::AwaitingFirstCommit
+            );
+        }
     }
 
     #[test]

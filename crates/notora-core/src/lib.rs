@@ -29,7 +29,7 @@ pub use catalog::{
 pub use domain::{
     DocumentIdentity, DocumentKind, DocumentOrigin, ExternalFileId, NavigationScope,
     NoteEditorMetadata, NoteEncryption, NoteId, NoteLifecycle, NoteSummary, TagId, TagSummary,
-    WorkspaceId,
+    TitleInitialization, WorkspaceId,
 };
 pub use file_monitor::{WorkspaceFileBatch, WorkspaceFileMonitor, WorkspaceFileMonitorError};
 pub use note_command::{

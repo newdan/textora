@@ -17,12 +17,12 @@ pub struct DiscoveredNote {
 }
 
 impl DiscoveredNote {
-    fn into_catalog_note(self, note_id: NoteId, starred: bool) -> CatalogNote {
+    fn into_catalog_note(self, note_id: NoteId, starred: bool, title: String) -> CatalogNote {
         CatalogNote {
             note_id,
             relative_path: self.relative_path,
             kind: self.kind,
-            title: self.title,
+            title,
             excerpt: self.excerpt,
             modified_at: self.modified_at,
             file_size: self.file_size,
@@ -100,9 +100,11 @@ pub(crate) fn reconcile_notes(
             unmatched_discovered.push(discovered_note);
             continue;
         };
-        changes.push(ReconciliationChange::Updated(
-            discovered_note.into_catalog_note(existing_note.note_id, existing_note.starred),
-        ));
+        changes.push(ReconciliationChange::Updated(discovered_note.into_catalog_note(
+            existing_note.note_id,
+            existing_note.starred,
+            existing_note.title,
+        )));
     }
 
     let mut existing_by_hash = HashMap::<Vec<u8>, Vec<CatalogNote>>::new();
@@ -121,12 +123,20 @@ pub(crate) fn reconcile_notes(
         match unique_match {
             Some(existing_note) => changes.push(ReconciliationChange::Moved {
                 from: existing_note.relative_path.clone(),
-                note: discovered_note
-                    .into_catalog_note(existing_note.note_id, existing_note.starred),
+                note: discovered_note.into_catalog_note(
+                    existing_note.note_id,
+                    existing_note.starred,
+                    existing_note.title,
+                ),
             }),
-            None => changes.push(ReconciliationChange::Added(
-                discovered_note.into_catalog_note(NoteId::generate(), false),
-            )),
+            None => {
+                let title = discovered_note.title.clone();
+                changes.push(ReconciliationChange::Added(discovered_note.into_catalog_note(
+                    NoteId::generate(),
+                    false,
+                    title,
+                )))
+            }
         }
     }
 

@@ -432,6 +432,44 @@ mod tests {
     }
 
     #[test]
+    fn rescanning_changed_markdown_preserves_the_existing_notora_title() {
+        let directory = tempfile::tempdir().expect("workspace test directory should be created");
+        let note_path = directory.path().join("note.md");
+        fs::write(&note_path, "# Initial H1\n\nBody").expect("fixture should be written");
+        let workspace =
+            Workspace::open_or_initialize(directory.path()).expect("workspace should initialize");
+        let catalog = Catalog::open(&workspace.metadata_directory().join("catalog.sqlite3"))
+            .expect("catalog should initialize");
+        scan_workspace(&workspace, &catalog).expect("initial scan should complete");
+        let note_id = catalog.active_notes().expect("note should load")[0].note_id;
+        catalog
+            .update_note_title(note_id, "Independent Notora Title")
+            .expect("metadata title should update");
+
+        fs::write(&note_path, "# Changed H1\n\nChanged body")
+            .expect("changed fixture should be written");
+        scan_workspace(&workspace, &catalog).expect("changed scan should complete");
+
+        assert_eq!(
+            catalog
+                .active_note(note_id)
+                .expect("note lookup should succeed")
+                .expect("note should remain active")
+                .title,
+            "Independent Notora Title"
+        );
+        let indexed_title: String = catalog
+            .connection()
+            .query_row(
+                "SELECT title FROM note_search WHERE note_id = ?1",
+                [note_id.to_string()],
+                |row| row.get(0),
+            )
+            .expect("search title should remain indexed");
+        assert_eq!(indexed_title, "Independent Notora Title");
+    }
+
+    #[test]
     fn missing_note_requires_two_complete_scans_before_catalog_removal() {
         let directory = tempfile::tempdir().expect("workspace test directory should be created");
         let note_path = directory.path().join("temporarily-missing.md");

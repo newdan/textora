@@ -293,7 +293,7 @@ impl NotoraState {
             }
             NotoraAction::OpenNewDocumentMenu => self.open_new_document_menu(),
             NotoraAction::CreateRequested(kind) => self.request_note_creation(kind),
-            NotoraAction::TitleTextChanged(title) => self.request_title_update(title),
+            NotoraAction::TitleTextChanged(_) => vec![NotoraEffect::Redraw],
             NotoraAction::TitleCommitRequested(title) => self.request_title_commit(title),
             NotoraAction::ToggleSourceViewRequested => {
                 self.layout.focus_target = FocusTarget::Editor;
@@ -867,6 +867,7 @@ mod metadata_actions {
             created_at: SystemTime::UNIX_EPOCH,
             modified_at: SystemTime::UNIX_EPOCH,
             encryption: NoteEncryption::Unencrypted,
+            title_initialization: notora_core::TitleInitialization::Independent,
         };
 
         state.reduce(NotoraAction::ActiveEditorMetadataLoaded {
@@ -912,6 +913,7 @@ mod metadata_actions {
                 created_at: SystemTime::UNIX_EPOCH,
                 modified_at: SystemTime::UNIX_EPOCH,
                 encryption: NoteEncryption::Unencrypted,
+                title_initialization: notora_core::TitleInitialization::Independent,
             },
             selection_generation: state.library.selected_document_generation,
         });
@@ -939,6 +941,7 @@ mod metadata_actions {
                 created_at: SystemTime::UNIX_EPOCH,
                 modified_at: SystemTime::UNIX_EPOCH,
                 encryption: NoteEncryption::Unencrypted,
+                title_initialization: notora_core::TitleInitialization::Independent,
             },
             tags: Vec::new(),
         });
@@ -1208,7 +1211,7 @@ mod tests {
     }
 
     #[test]
-    fn title_text_changes_update_the_note_without_leaving_title_focus() {
+    fn title_text_changes_remain_a_local_draft_until_commit() {
         let note_id = NoteId::generate();
         let mut state = NotoraState::default();
         state.library.selected_card = Some(DocumentIdentity::Note(note_id));
@@ -1216,7 +1219,7 @@ mod tests {
 
         assert_eq!(
             state.reduce(NotoraAction::TitleTextChanged("项目路线图".to_owned())),
-            vec![NotoraEffect::CommitTitle("项目路线图".to_owned()), NotoraEffect::Redraw]
+            vec![NotoraEffect::Redraw]
         );
         assert_eq!(state.layout.focus_target, FocusTarget::EditorTitle);
     }

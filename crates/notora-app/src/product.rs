@@ -64,6 +64,7 @@ pub enum NotoraProductEvent {
         note_id: notora_core::NoteId,
         metadata: notora_core::NoteEditorMetadata,
         tags: Vec<notora_core::TagSummary>,
+        outcome: crate::action::MetadataMutationOutcome,
     },
     MetadataMutationFailed {
         workspace_id: WorkspaceId,

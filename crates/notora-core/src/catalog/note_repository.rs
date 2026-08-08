@@ -4,7 +4,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use rusqlite::{OptionalExtension, Row, params};
 use uuid::Uuid;
 
-use crate::domain::NoteEncryption;
+use crate::domain::{NoteEncryption, TitleInitialization};
 use crate::{DocumentKind, NoteId};
 
 use super::{Catalog, CatalogError};
@@ -49,6 +49,7 @@ impl Catalog {
         &self,
         note: &CatalogNote,
         encryption: NoteEncryption,
+        title_initialization: TitleInitialization,
     ) -> Result<(), CatalogError> {
         let modified_nanoseconds = system_time_to_nanoseconds(note.modified_at)?;
         let file_size =
@@ -79,6 +80,14 @@ impl Catalog {
                 ],
             )
             .map_err(|source| CatalogError::sql("created note insert", source))?;
+        if title_initialization == TitleInitialization::AwaitingFirstCommit {
+            transaction
+                .execute(
+                    "INSERT INTO note_title_initializations (note_id) VALUES (?1)",
+                    [note.note_id.to_string()],
+                )
+                .map_err(|source| CatalogError::sql("title initialization state insert", source))?;
+        }
         transaction
             .commit()
             .map_err(|source| CatalogError::sql("note creation transaction commit", source))?;
@@ -103,7 +112,6 @@ impl Catalog {
                 ON CONFLICT(note_id) DO UPDATE SET
                     relative_path = excluded.relative_path,
                     kind = excluded.kind,
-                    title = excluded.title,
                     excerpt = excluded.excerpt,
                     modified_ns = excluded.modified_ns,
                     file_size = excluded.file_size,
@@ -168,7 +176,9 @@ impl Catalog {
     ) -> Result<Option<NoteEditorMetadata>, CatalogError> {
         self.connection()
             .query_row(
-                "SELECT note_id, created_ns, modified_ns, encryption
+                "SELECT note_id, created_ns, modified_ns, encryption,
+                        EXISTS(SELECT 1 FROM note_title_initializations initialization
+                               WHERE initialization.note_id = notes.note_id)
                  FROM notes WHERE note_id = ?1",
                 [note_id.to_string()],
                 editor_metadata_from_row,
@@ -177,6 +187,48 @@ impl Catalog {
             .map_err(|source| CatalogError::sql("note editor metadata query", source))?
             .map(NoteEditorMetadata::try_from)
             .transpose()
+    }
+
+    /// 更新已经独立的 Notora 标题，不触碰正文。
+    pub fn update_note_title(&self, note_id: NoteId, title: &str) -> Result<(), CatalogError> {
+        let transaction = self
+            .connection()
+            .unchecked_transaction()
+            .map_err(|source| CatalogError::sql("note title transaction start", source))?;
+        update_stored_note_title(&transaction, note_id, title)?;
+        transaction
+            .commit()
+            .map_err(|source| CatalogError::sql("note title transaction commit", source))
+    }
+
+    /// 原子竞争一次性标题初始化；返回 `true` 表示本次提交获胜。
+    pub fn complete_title_initialization(
+        &self,
+        note_id: NoteId,
+        title: Option<&str>,
+    ) -> Result<bool, CatalogError> {
+        let transaction = self.connection().unchecked_transaction().map_err(|source| {
+            CatalogError::sql("title initialization transaction start", source)
+        })?;
+        let removed_rows = transaction
+            .execute(
+                "DELETE FROM note_title_initializations WHERE note_id = ?1",
+                [note_id.to_string()],
+            )
+            .map_err(|source| CatalogError::sql("title initialization claim", source))?;
+        if removed_rows == 0 {
+            transaction
+                .commit()
+                .map_err(|source| CatalogError::sql("title initialization no-op commit", source))?;
+            return Ok(false);
+        }
+        if let Some(title) = title {
+            update_stored_note_title(&transaction, note_id, title)?;
+        }
+        transaction.commit().map_err(|source| {
+            CatalogError::sql("title initialization transaction commit", source)
+        })?;
+        Ok(true)
     }
 
     /// 在文件系统移动成功后更新活动笔记的相对路径，保持其 `NoteId` 不变。
@@ -472,6 +524,7 @@ struct StoredEditorMetadata {
     created_nanoseconds: i64,
     modified_nanoseconds: i64,
     encryption: i64,
+    title_initialization_pending: bool,
 }
 
 impl TryFrom<StoredEditorMetadata> for NoteEditorMetadata {
@@ -494,7 +547,12 @@ impl TryFrom<StoredEditorMetadata> for NoteEditorMetadata {
             })?;
         let modified_at = nanoseconds_to_system_time(stored_metadata.modified_nanoseconds)?;
         let encryption = note_encryption_from_database(stored_metadata.encryption)?;
-        Ok(Self { note_id, created_at, modified_at, encryption })
+        let title_initialization = if stored_metadata.title_initialization_pending {
+            TitleInitialization::AwaitingFirstCommit
+        } else {
+            TitleInitialization::Independent
+        };
+        Ok(Self { note_id, created_at, modified_at, encryption, title_initialization })
     }
 }
 
@@ -504,7 +562,34 @@ fn editor_metadata_from_row(row: &Row<'_>) -> rusqlite::Result<StoredEditorMetad
         created_nanoseconds: row.get(1)?,
         modified_nanoseconds: row.get(2)?,
         encryption: row.get(3)?,
+        title_initialization_pending: row.get(4)?,
     })
+}
+
+fn update_stored_note_title(
+    transaction: &rusqlite::Transaction<'_>,
+    note_id: NoteId,
+    title: &str,
+) -> Result<(), CatalogError> {
+    let updated_rows = transaction
+        .execute(
+            "UPDATE notes SET title = ?1 WHERE note_id = ?2 AND lifecycle = ?3",
+            params![title, note_id.to_string(), ACTIVE_NOTE_LIFECYCLE],
+        )
+        .map_err(|source| CatalogError::sql("note title update", source))?;
+    if updated_rows != 1 {
+        return Err(CatalogError::InvalidStoredValue {
+            column: "active_note_id",
+            value: note_id.to_string(),
+        });
+    }
+    transaction
+        .execute(
+            "UPDATE note_search SET title = ?1 WHERE note_id = ?2",
+            params![title, note_id.to_string()],
+        )
+        .map_err(|source| CatalogError::sql("note title search refresh", source))?;
+    Ok(())
 }
 
 #[derive(Debug)]
@@ -652,7 +737,7 @@ mod tests {
     use std::time::{Duration, UNIX_EPOCH};
 
     use super::{CatalogNote, note_encryption_from_database};
-    use crate::domain::{NoteEditorMetadata, NoteEncryption};
+    use crate::domain::{NoteEditorMetadata, NoteEncryption, TitleInitialization};
     use crate::{Catalog, DocumentKind, NoteId};
 
     fn catalog_note(note_id: NoteId, relative_path: &str, title: &str) -> CatalogNote {
@@ -688,7 +773,83 @@ mod tests {
 
         assert_eq!(
             catalog.active_notes().expect("active notes should load"),
-            vec![CatalogNote { starred: true, ..catalog_note(note_id, "renamed.md", "Renamed") }]
+            vec![CatalogNote { starred: true, ..catalog_note(note_id, "renamed.md", "First") }]
+        );
+    }
+
+    #[test]
+    fn title_initialization_is_explicit_and_completes_with_the_first_title_commit() {
+        let directory = tempfile::tempdir().expect("catalog test directory should be created");
+        let catalog = Catalog::open(&directory.path().join("catalog.sqlite3"))
+            .expect("catalog should initialize");
+        let note_id = NoteId::generate();
+        catalog
+            .create_active_note(
+                &catalog_note(note_id, "new.md", "未命名 1"),
+                NoteEncryption::Unencrypted,
+                TitleInitialization::AwaitingFirstCommit,
+            )
+            .expect("new note should be created in title initialization state");
+
+        assert_eq!(
+            catalog
+                .note_editor_metadata(note_id)
+                .expect("metadata should query")
+                .expect("metadata should exist")
+                .title_initialization,
+            TitleInitialization::AwaitingFirstCommit
+        );
+
+        catalog
+            .complete_title_initialization(note_id, Some("项目路线图"))
+            .expect("first title commit should complete initialization");
+
+        let note = catalog
+            .active_note(note_id)
+            .expect("note lookup should succeed")
+            .expect("note should remain active");
+        assert_eq!(note.title, "项目路线图");
+        assert_eq!(
+            catalog
+                .note_editor_metadata(note_id)
+                .expect("metadata should query")
+                .expect("metadata should exist")
+                .title_initialization,
+            TitleInitialization::Independent
+        );
+    }
+
+    #[test]
+    fn later_initialization_claim_cannot_overwrite_the_first_winner() {
+        let directory = tempfile::tempdir().expect("catalog test directory should be created");
+        let catalog = Catalog::open(&directory.path().join("catalog.sqlite3"))
+            .expect("catalog should initialize");
+        let note_id = NoteId::generate();
+        catalog
+            .create_active_note(
+                &catalog_note(note_id, "race.md", "未命名 1"),
+                NoteEncryption::Unencrypted,
+                TitleInitialization::AwaitingFirstCommit,
+            )
+            .expect("new note should await its first title commit");
+
+        assert!(
+            catalog
+                .complete_title_initialization(note_id, Some("正文先提交"))
+                .expect("first claim should succeed")
+        );
+        assert!(
+            !catalog
+                .complete_title_initialization(note_id, Some("标题栏后提交"))
+                .expect("later claim should be a successful no-op")
+        );
+        assert_eq!(
+            catalog
+                .active_note(note_id)
+                .expect("note lookup should succeed")
+                .expect("note should remain active")
+                .title,
+            "正文先提交"
         );
     }
 
@@ -729,6 +890,7 @@ mod tests {
                 created_at: UNIX_EPOCH + Duration::from_secs(1),
                 modified_at: UNIX_EPOCH + Duration::from_secs(1),
                 encryption: NoteEncryption::Unencrypted,
+                title_initialization: TitleInitialization::Independent,
             }
         );
     }

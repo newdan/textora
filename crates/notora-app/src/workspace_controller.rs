@@ -645,20 +645,32 @@ fn execute_metadata_mutation_in_worker(
     let note_id = match &mutation {
         MetadataMutation::ToggleStar { note_id }
         | MetadataMutation::AttachTagByName { note_id, .. }
-        | MetadataMutation::DetachTag { note_id, .. } => *note_id,
+        | MetadataMutation::DetachTag { note_id, .. }
+        | MetadataMutation::SetTitle { note_id, .. }
+        | MetadataMutation::CompleteTitleInitializationFromHeader { note_id, .. }
+        | MetadataMutation::CompleteTitleInitializationFromDocument { note_id, .. } => *note_id,
     };
     let mutation_result = match &mutation {
-        MetadataMutation::ToggleStar { note_id } => {
-            catalog.toggle_note_starred(*note_id).map(|_| ())
-        }
-        MetadataMutation::AttachTagByName { note_id, display_name } => {
-            catalog.attach_tag_by_name(*note_id, display_name).map(|_| ())
-        }
-        MetadataMutation::DetachTag { note_id, tag_id } => {
-            catalog.detach_tag(*note_id, *tag_id).map(|_| ())
-        }
+        MetadataMutation::ToggleStar { note_id } => catalog
+            .toggle_note_starred(*note_id)
+            .map(|_| crate::action::MetadataMutationOutcome::Applied),
+        MetadataMutation::AttachTagByName { note_id, display_name } => catalog
+            .attach_tag_by_name(*note_id, display_name)
+            .map(|_| crate::action::MetadataMutationOutcome::Applied),
+        MetadataMutation::DetachTag { note_id, tag_id } => catalog
+            .detach_tag(*note_id, *tag_id)
+            .map(|_| crate::action::MetadataMutationOutcome::Applied),
+        MetadataMutation::SetTitle { note_id, title } => catalog
+            .update_note_title(*note_id, title)
+            .map(|()| crate::action::MetadataMutationOutcome::Applied),
+        MetadataMutation::CompleteTitleInitializationFromHeader { note_id, title } => catalog
+            .complete_title_initialization(*note_id, Some(title))
+            .map(title_initialization_outcome),
+        MetadataMutation::CompleteTitleInitializationFromDocument { note_id, title } => catalog
+            .complete_title_initialization(*note_id, title.as_deref())
+            .map(title_initialization_outcome),
     };
-    let result = mutation_result.and_then(|()| {
+    let result = mutation_result.and_then(|outcome| {
         let metadata = catalog.note_editor_metadata(note_id)?.ok_or(
             notora_core::CatalogError::InvalidStoredValue {
                 column: "note_id",
@@ -666,10 +678,10 @@ fn execute_metadata_mutation_in_worker(
             },
         )?;
         let tags = catalog.tags_for_note(note_id)?;
-        Ok((note_id, metadata, tags))
+        Ok((note_id, metadata, tags, outcome))
     });
     match result {
-        Ok((note_id, metadata, tags)) => {
+        Ok((note_id, metadata, tags, outcome)) => {
             let _ = event_sender.send(NotoraProductEvent::MetadataMutationCompleted {
                 workspace_id,
                 workspace_generation,
@@ -677,6 +689,7 @@ fn execute_metadata_mutation_in_worker(
                 note_id,
                 metadata,
                 tags,
+                outcome,
             });
         }
         Err(error) => {
@@ -687,6 +700,14 @@ fn execute_metadata_mutation_in_worker(
                 message: error.to_string(),
             });
         }
+    }
+}
+
+fn title_initialization_outcome(won: bool) -> crate::action::MetadataMutationOutcome {
+    if won {
+        crate::action::MetadataMutationOutcome::TitleInitializationWon
+    } else {
+        crate::action::MetadataMutationOutcome::TitleInitializationLost
     }
 }
 
@@ -1340,6 +1361,7 @@ mod tests {
                             note_id: mutation_note_id,
                             display_name,
                         },
+                        ..
                     } if *workspace_id == active_workspace.descriptor.workspace_id
                         && *workspace_generation == active_workspace.generation
                         && *completed_note_id == note_id

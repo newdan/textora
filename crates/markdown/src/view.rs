@@ -2478,18 +2478,6 @@ pub struct MarkdownEditorView {
     source: String,
     cached_source_hash: u64,
     cached_generation: u32,
-    hide_first_h1: bool,
-}
-
-fn remove_first_top_level_h1(doc: &mut MarkdownDoc) {
-    let Some(index) = doc
-        .blocks
-        .iter()
-        .position(|block| matches!(block.kind, crate::builder::BlockKind::Heading { level: 1 }))
-    else {
-        return;
-    };
-    doc.blocks.remove(index);
 }
 
 impl Default for MarkdownEditorView {
@@ -2502,19 +2490,7 @@ impl MarkdownEditorView {
     pub fn new() -> Self {
         let mut engine = PreviewEngine::new();
         engine.set_edit_source(Some(String::new()));
-        Self {
-            engine,
-            source: String::new(),
-            cached_source_hash: 0,
-            cached_generation: 0,
-            hide_first_h1: false,
-        }
-    }
-
-    pub fn new_with_external_title() -> Self {
-        let mut view = Self::new();
-        view.hide_first_h1 = true;
-        view
+        Self { engine, source: String::new(), cached_source_hash: 0, cached_generation: 0 }
     }
 
     pub fn set_source(&mut self, text: String, generation: u32) {
@@ -2680,11 +2656,7 @@ impl ViewPlugin for MarkdownEditorView {
             &style,
             |s| {
                 let parsed = crate::parser::parse_markdown(source);
-                let mut doc = crate::builder::MarkdownDoc::build(&parsed, s);
-                if self.hide_first_h1 {
-                    remove_first_top_level_h1(&mut doc);
-                }
-                doc
+                crate::builder::MarkdownDoc::build(&parsed, s)
             },
             Some(shaper),
             &string_doc,
@@ -2809,7 +2781,7 @@ impl PluginFactory for MarkdownEditorViewFactory {
     }
 }
 
-/// Notora 使用的 Markdown 工厂：首个 H1 由产品头部承载，正文不重复显示。
+/// Notora 使用的 Markdown 工厂；正文 H1 与产品元数据标题彼此独立。
 pub struct NotoraMarkdownEditorViewFactory;
 
 impl PluginFactory for NotoraMarkdownEditorViewFactory {
@@ -2822,7 +2794,7 @@ impl PluginFactory for NotoraMarkdownEditorViewFactory {
     }
 
     fn create(&self) -> Box<dyn ViewPlugin> {
-        Box::new(MarkdownEditorView::new_with_external_title())
+        Box::new(MarkdownEditorView::new())
     }
 }
 
@@ -3024,17 +2996,17 @@ mod wysiwyg_tests {
     }
 
     #[test]
-    fn notora_markdown_editor_hides_only_the_first_h1_and_preserves_body_projections() {
+    fn notora_markdown_editor_keeps_the_first_h1_after_titles_become_independent() {
         let source = "# 页面标题\n\n正文内容\n\n# 正文章节";
         let document = StubDoc::new(source);
-        let mut view = MarkdownEditorView::new_with_external_title();
+        let mut view = MarkdownEditorView::new();
         view.set_source(source.to_owned(), 1);
 
         render_editor_once(&mut view, &document);
 
         let rendered_text =
             view.engine().flat_lines().iter().map(|line| line.text.as_str()).collect::<Vec<_>>();
-        assert!(!rendered_text.iter().any(|line| line.contains("页面标题")));
+        assert!(rendered_text.iter().any(|line| line.contains("页面标题")));
         assert!(rendered_text.iter().any(|line| line.contains("正文内容")));
         assert!(rendered_text.iter().any(|line| line.contains("正文章节")));
         assert!(
@@ -3045,7 +3017,7 @@ mod wysiwyg_tests {
                     CursorAffinity::Downstream
                 )
                 .is_some(),
-            "body source bytes must remain mapped after hiding the title"
+            "body source bytes must remain mapped while showing the independent H1"
         );
     }
 

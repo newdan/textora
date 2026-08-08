@@ -76,6 +76,16 @@ pub enum MetadataMutation {
     ToggleStar { note_id: NoteId },
     AttachTagByName { note_id: NoteId, display_name: String },
     DetachTag { note_id: NoteId, tag_id: TagId },
+    SetTitle { note_id: NoteId, title: String },
+    CompleteTitleInitializationFromHeader { note_id: NoteId, title: String },
+    CompleteTitleInitializationFromDocument { note_id: NoteId, title: Option<String> },
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum MetadataMutationOutcome {
+    Applied,
+    TitleInitializationWon,
+    TitleInitializationLost,
 }
 
 /// 只针对工作区 NoteId 的回收站操作；外部文件没有可表达的变体。

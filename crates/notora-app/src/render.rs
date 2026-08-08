@@ -3539,6 +3539,7 @@ mod tests {
                 created_at: SystemTime::UNIX_EPOCH,
                 modified_at: SystemTime::UNIX_EPOCH,
                 encryption: notora_core::NoteEncryption::Unencrypted,
+                title_initialization: notora_core::TitleInitialization::Independent,
             },
             tags: vec![notora_core::TagSummary {
                 tag_id, display_name: "产品/Notora".to_owned()

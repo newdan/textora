@@ -2,7 +2,7 @@ use rusqlite::{Connection, Transaction};
 
 use super::{CatalogError, CatalogError::UnsupportedSchema};
 
-pub const CATALOG_SCHEMA_VERSION: u32 = 4;
+pub const CATALOG_SCHEMA_VERSION: u32 = 5;
 
 const INITIAL_SCHEMA: &str = r#"
 CREATE TABLE notes (
@@ -61,6 +61,12 @@ const MISSING_FILE_CONFIRMATION_SCHEMA: &str = r#"
 ALTER TABLE notes
 ADD COLUMN missing_scan_count INTEGER NOT NULL DEFAULT 0
 CHECK (missing_scan_count >= 0);
+"#;
+
+const TITLE_INITIALIZATION_SCHEMA: &str = r#"
+CREATE TABLE note_title_initializations (
+    note_id TEXT PRIMARY KEY NOT NULL REFERENCES notes(note_id) ON DELETE CASCADE
+);
 "#;
 
 const FTS5_TRIGRAM_CAPABILITY_PROBE: &str = "CREATE VIRTUAL TABLE temp.notora_fts5_trigram_probe USING fts5(contents, tokenize = 'trigram');";
@@ -131,6 +137,16 @@ fn apply_pending_migrations(
 
     if schema_version == 3 {
         apply_editor_metadata_migration(transaction)?;
+        transaction
+            .pragma_update(None, "user_version", 4_u32)
+            .map_err(|source| CatalogError::sql("schema version write", source))?;
+        schema_version = 4;
+    }
+
+    if schema_version == 4 {
+        transaction
+            .execute_batch(TITLE_INITIALIZATION_SCHEMA)
+            .map_err(|source| CatalogError::sql("title initialization migration", source))?;
         transaction
             .pragma_update(None, "user_version", CATALOG_SCHEMA_VERSION)
             .map_err(|source| CatalogError::sql("schema version write", source))?;
@@ -302,6 +318,27 @@ mod tests {
             )
             .expect("editor metadata should be readable");
         assert_eq!(editor_metadata, (123, 0));
+    }
+
+    #[test]
+    fn version_four_catalog_adds_an_empty_pending_title_initialization_table() {
+        let mut connection = Connection::open_in_memory().expect("in-memory catalog should open");
+        migrate(&mut connection).expect("current schema should initialize");
+        connection
+            .execute(
+                "INSERT INTO notes (
+                    note_id, relative_path, kind, title, excerpt, created_ns, modified_ns,
+                    file_size, content_hash, encryption, lifecycle, missing_scan_count
+                ) VALUES ('legacy', 'legacy.md', 2, 'Legacy', '', 1, 1, 0, X'', 0, 0, 0)",
+                [],
+            )
+            .expect("legacy note fixture should insert");
+
+        let pending_count: i64 = connection
+            .query_row("SELECT COUNT(*) FROM note_title_initializations", [], |row| row.get(0))
+            .expect("pending initialization table should be queryable");
+
+        assert_eq!(pending_count, 0, "historical notes must remain independent");
     }
 
     #[test]

@@ -217,6 +217,7 @@ pub struct NotoraApp {
     workspace_directory_chooser: WorkspaceDirectoryChooser,
     document_registry: DocumentRegistry,
     autosave: AutoSaveScheduler,
+    save_failure_messages: HashMap<appkit_core::workspace::types::TabId, String>,
     pending_external_save_as: HashMap<appkit_core::workspace::types::TabId, PendingExternalSaveAs>,
     pending_external_documents: HashMap<notora_core::ExternalFileId, LoadedDocument>,
     pending_conflict_retries: HashMap<appkit_core::workspace::types::TabId, PendingConflictRetry>,
@@ -325,6 +326,7 @@ impl NotoraApp {
                 crate::autosave::SystemAutoSaveClock,
                 auto_save_delay,
             ),
+            save_failure_messages: HashMap::new(),
             pending_external_save_as: HashMap::new(),
             pending_external_documents: HashMap::new(),
             pending_conflict_retries: HashMap::new(),
@@ -438,6 +440,7 @@ impl NotoraApp {
         }
         if !matches!(result, WorkspaceCommandResult::Unchanged) {
             self.autosave.clear();
+            self.save_failure_messages.clear();
             self.pending_external_save_as.clear();
             self.pending_conflict_retries.clear();
             self.pending_trash_moves.clear();
@@ -694,6 +697,8 @@ impl NotoraApp {
                 &completion.result,
                 Err(appkit_core::document::DocumentSaveError::ConcurrentModification)
             );
+            let failure_message =
+                completion.result.as_ref().err().map(std::string::ToString::to_string);
             let conflict_identity = concurrent_modification
                 .then(|| self.document_registry.identity_for(request.tab_id))
                 .flatten();
@@ -721,6 +726,7 @@ impl NotoraApp {
             self.apply_editor_outcome(outcome);
             self.complete_pending_external_save_as(request, save_succeeded, saved_path);
             if save_succeeded {
+                self.save_failure_messages.remove(&request.tab_id);
                 self.autosave.on_save_completed(request);
                 self.request_catalog_reindex_after_note_save(request.tab_id);
                 if let Some(pending_trash_move) = pending_trash_move {
@@ -753,7 +759,11 @@ impl NotoraApp {
                     });
                 }
             } else {
-                self.autosave.on_save_failed(request);
+                if let Some(message) = failure_message {
+                    self.record_autosave_failure(request, message);
+                } else {
+                    self.autosave.on_save_failed(request);
+                }
                 self.cancel_pending_trash_move(request, TRASH_SAVE_FAILURE_MESSAGE);
                 self.cancel_pending_note_move(request, MOVE_SAVE_FAILURE_MESSAGE);
                 if let Some(identity) = conflict_identity {
@@ -960,6 +970,7 @@ impl NotoraApp {
                     note_id,
                     metadata,
                     tags,
+                    outcome,
                     ..
                 } => {
                     remove_pending_metadata_mutation(
@@ -970,6 +981,7 @@ impl NotoraApp {
                     else {
                         continue;
                     };
+                    self.apply_title_initialization_outcome(&mutation, outcome, note_id);
                     if self.state.library.selected_card != Some(DocumentIdentity::Note(note_id))
                         || self.state.library.selected_document_generation != selection_generation
                     {
@@ -1184,9 +1196,9 @@ impl NotoraApp {
             && focus_target == crate::FocusTarget::EditorTitle
             && matches!(event, ui::Event::KeyDown(ui::KeyCode::Tab, _))
         {
-            let forward_to_editor = self.prepare_active_mindmap_root_for_title_tab();
+            self.commit_title_before_focus();
             self.dispatch_action(NotoraAction::FocusRequested(crate::FocusTarget::Editor));
-            return (!forward_to_editor, None);
+            return (true, None);
         }
         let route = self.shell.route_event_with_overlay(
             event,
@@ -1208,42 +1220,13 @@ impl NotoraApp {
         (route.consumed, cursor_hint)
     }
 
-    fn prepare_active_mindmap_root_for_title_tab(&mut self) -> bool {
-        let Some(tab_id) = self.editor_runtime.active_tab_id() else {
-            return false;
-        };
-        let Some(tab) = self.editor_runtime.tab_session(tab_id) else {
-            return false;
-        };
-        if tab.plugin_name() != ui::plugin::PLUGIN_MINDMAP {
-            return false;
+    fn commit_title_before_focus(&mut self) {
+        if !matches!(self.state.library.selected_card, Some(DocumentIdentity::Note(_))) {
+            return;
         }
-        let Some(snapshot) = self.editor_runtime.document_text_snapshot(tab_id) else {
-            return false;
-        };
-        let Ok(tree) = textora_markdown::mmf::parser::parse(&snapshot.text) else {
-            return false;
-        };
-        let editor_title = self.shell.editor_title_text().to_owned();
-        let root_title = if editor_title.trim().is_empty() && !tree.root.title.is_empty() {
-            tree.root.title.clone()
-        } else {
-            editor_title
-        };
-        self.dispatch_action(NotoraAction::TitleCommitRequested(root_title));
-
-        let Some(snapshot) = self.editor_runtime.document_text_snapshot(tab_id) else {
-            return false;
-        };
-        let Ok(tree) = textora_markdown::mmf::parser::parse(&snapshot.text) else {
-            return false;
-        };
-        let Some(tab) = self.editor_runtime.tab_session_mut(tab_id) else {
-            return false;
-        };
-        tab.document.cursor_mut().selection_anchor = None;
-        tab.document.cursor_move_to_offset(tree.root.title_byte_range.end);
-        true
+        self.dispatch_action(NotoraAction::TitleCommitRequested(
+            self.shell.editor_title_text().to_owned(),
+        ));
     }
 
     fn set_window_cursor(&self, cursor_icon: winit::window::CursorIcon) {
@@ -1281,8 +1264,11 @@ impl NotoraApp {
             model.editor_chrome = crate::editor_pane::EditorPaneInput::default();
             return;
         };
-        model.editor_chrome.header.save_status_text =
-            Self::editor_save_status(self.autosave.state(tab_id), summary.dirty);
+        model.editor_chrome.header.save_status_text = Self::editor_save_status(
+            self.autosave.state(tab_id),
+            summary.dirty,
+            self.save_failure_messages.get(&tab_id).map(String::as_str),
+        );
         model.editor_chrome.header.compact = layout.editor_header_rect.h / layout.dpi
             < crate::shell::layout::EDITOR_COMPACT_HEIGHT_THRESHOLD_LOGICAL;
         if let Some(plugin_name) =
@@ -1305,20 +1291,6 @@ impl NotoraApp {
                 );
             }
         }
-        if model.editor_chrome.mode != crate::editor_pane::EditorPaneMode::WorkspaceNote {
-            return;
-        }
-        let Some(path) = summary.path.as_deref() else {
-            return;
-        };
-        let Some(kind) = DocumentKind::from_path(path) else {
-            return;
-        };
-        let Some(snapshot) = self.editor_runtime.document_text_snapshot(tab_id) else {
-            return;
-        };
-        model.editor_chrome.header.title =
-            editor_title_from_source(&model.editor_chrome.header.title, kind, &snapshot.text);
     }
 
     fn render_frame(
@@ -1375,10 +1347,16 @@ impl NotoraApp {
         Ok(editor_surface)
     }
 
-    fn editor_save_status(state: Option<AutoSaveState>, dirty: bool) -> String {
+    fn editor_save_status(
+        state: Option<AutoSaveState>,
+        dirty: bool,
+        failure_message: Option<&str>,
+    ) -> String {
         match state {
             Some(AutoSaveState::Saving { .. }) => SAVE_STATUS_SAVING.to_owned(),
-            Some(AutoSaveState::Failed { .. }) => SAVE_STATUS_FAILED.to_owned(),
+            Some(AutoSaveState::Failed { .. }) => failure_message
+                .map(|message| format!("{SAVE_STATUS_FAILED}：{message}"))
+                .unwrap_or_else(|| SAVE_STATUS_FAILED.to_owned()),
             Some(AutoSaveState::Scheduled { .. }) => SAVE_STATUS_PENDING.to_owned(),
             Some(AutoSaveState::Idle) | None if dirty => SAVE_STATUS_UNSAVED.to_owned(),
             Some(AutoSaveState::Idle) | None => SAVE_STATUS_SAVED.to_owned(),
@@ -1532,6 +1510,7 @@ impl NotoraApp {
             .collect::<Vec<_>>();
         for candidate in self.runtime_lru.select_evictions(&self.document_registry, &runtime_tabs) {
             self.autosave.cancel(candidate.tab_id);
+            self.save_failure_messages.remove(&candidate.tab_id);
             let _ = self.editor_runtime.close_for_product(candidate.tab_id);
             self.document_registry.remove_tab(candidate.tab_id);
         }
@@ -1597,18 +1576,20 @@ impl NotoraApp {
                 self.document_registry.touch_tab(*tab_id);
             }
             EditorNotification::ContentChanged { tab_id, content_revision } => {
+                self.save_failure_messages.remove(tab_id);
                 self.promote_preview_for_tab(*tab_id);
                 if let Some(origin) = self.document_origin_for_tab(*tab_id) {
                     self.autosave.on_content_changed(&origin, *tab_id, *content_revision);
                 }
             }
-            EditorNotification::SaveCompleted { tab_id, .. } => {
+            EditorNotification::SaveCompleted { tab_id, content_revision } => {
                 if let Some(identity) = self.document_registry.identity_for(*tab_id) {
                     self.dispatch_action(NotoraAction::ActiveEditorSaved {
                         identity,
                         saved_at: SystemTime::now(),
                     });
                 }
+                self.submit_document_title_initialization(*tab_id, *content_revision);
             }
             EditorNotification::ActiveDocumentChanged { tab_id: None }
             | EditorNotification::PathChanged { .. }
@@ -1621,30 +1602,38 @@ impl NotoraApp {
     fn submit_autosave(&mut self, request: AutoSaveRequest) {
         let Some(summary) = self.editor_runtime.document_summary(request.tab_id) else {
             self.autosave.cancel(request.tab_id);
+            self.save_failure_messages.remove(&request.tab_id);
             self.cancel_pending_trash_move(request, TRASH_SAVE_FAILURE_MESSAGE);
             self.cancel_pending_note_move(request, MOVE_SAVE_FAILURE_MESSAGE);
             return;
         };
         if !summary.dirty || summary.content_revision != request.content_revision {
-            self.autosave.on_save_failed(request);
+            self.record_autosave_failure(request, "保存请求对应的内容版本已经过期".to_owned());
             self.cancel_pending_trash_move(request, TRASH_SAVE_FAILURE_MESSAGE);
             self.cancel_pending_note_move(request, MOVE_SAVE_STALE_MESSAGE);
             return;
         }
         let prepared = match self.editor_runtime.prepare_save(request.tab_id) {
             Ok(prepared) => prepared,
-            Err(_) => {
-                self.autosave.on_save_failed(request);
+            Err(error) => {
+                self.record_autosave_failure(request, error.to_string());
                 self.cancel_pending_trash_move(request, TRASH_SAVE_FAILURE_MESSAGE);
                 self.cancel_pending_note_move(request, MOVE_SAVE_FAILURE_MESSAGE);
                 return;
             }
         };
-        if self.submit_prepared_save(prepared).is_err() {
-            self.autosave.on_save_failed(request);
+        if let Err(message) = self.submit_prepared_save(prepared) {
+            self.record_autosave_failure(request, message);
             self.cancel_pending_trash_move(request, TRASH_SAVE_FAILURE_MESSAGE);
             self.cancel_pending_note_move(request, MOVE_SAVE_FAILURE_MESSAGE);
         }
+    }
+
+    fn record_autosave_failure(&mut self, request: AutoSaveRequest, message: String) {
+        self.save_failure_messages.insert(request.tab_id, message);
+        self.autosave.on_save_failed(request);
+        self.needs_redraw = true;
+        self.editor_runtime.request_redraw();
     }
 
     fn pending_trash_move_has_current_saved_document(
@@ -1913,27 +1902,124 @@ impl NotoraApp {
             ));
             return;
         }
+        let DocumentIdentity::Note(note_id) = identity else {
+            return;
+        };
+        let normalized_title = normalize_notora_title(&title);
+        let title_initialization = self
+            .state
+            .library
+            .active_editor_metadata
+            .as_ref()
+            .filter(|metadata| metadata.identity == identity)
+            .map(|metadata| metadata.metadata.title_initialization)
+            .unwrap_or(notora_core::TitleInitialization::Independent);
+        let mutation = match title_initialization {
+            notora_core::TitleInitialization::AwaitingFirstCommit => {
+                crate::action::MetadataMutation::CompleteTitleInitializationFromHeader {
+                    note_id,
+                    title: normalized_title,
+                }
+            }
+            notora_core::TitleInitialization::Independent => {
+                crate::action::MetadataMutation::SetTitle { note_id, title: normalized_title }
+            }
+        };
+        self.execute_metadata_mutation(mutation);
+    }
+
+    fn submit_document_title_initialization(
+        &mut self,
+        tab_id: appkit_core::workspace::types::TabId,
+        saved_content_revision: u64,
+    ) {
+        let Some(DocumentIdentity::Note(note_id)) = self.document_registry.identity_for(tab_id)
+        else {
+            return;
+        };
+        let initialization = self
+            .state
+            .library
+            .active_editor_metadata
+            .as_ref()
+            .filter(|metadata| metadata.identity == DocumentIdentity::Note(note_id))
+            .map(|metadata| metadata.metadata.title_initialization);
+        if initialization != Some(notora_core::TitleInitialization::AwaitingFirstCommit) {
+            return;
+        }
+        let Some(summary) = self.editor_runtime.document_summary(tab_id) else {
+            return;
+        };
+        let Some(path) = summary.path.as_deref() else {
+            return;
+        };
+        let Some(kind @ (DocumentKind::Markdown | DocumentKind::Mindmap)) =
+            DocumentKind::from_path(path)
+        else {
+            return;
+        };
         let Some(snapshot) = self.editor_runtime.document_text_snapshot(tab_id) else {
-            self.dispatch_action(NotoraAction::NoteCommandFailed(
-                "无法读取当前笔记正文".to_owned(),
-            ));
+            return;
+        };
+        if snapshot.content_revision != saved_content_revision {
+            return;
+        }
+        let title = initial_title_from_document(kind, &snapshot.text);
+        self.execute_metadata_mutation(
+            crate::action::MetadataMutation::CompleteTitleInitializationFromDocument {
+                note_id,
+                title,
+            },
+        );
+    }
+
+    fn apply_title_initialization_outcome(
+        &mut self,
+        mutation: &crate::action::MetadataMutation,
+        outcome: crate::action::MetadataMutationOutcome,
+        note_id: notora_core::NoteId,
+    ) {
+        match (mutation, outcome) {
+            (
+                crate::action::MetadataMutation::CompleteTitleInitializationFromHeader {
+                    title,
+                    ..
+                },
+                crate::action::MetadataMutationOutcome::TitleInitializationWon,
+            ) => self.seed_document_title(note_id, title),
+            (
+                crate::action::MetadataMutation::CompleteTitleInitializationFromHeader {
+                    title,
+                    ..
+                },
+                crate::action::MetadataMutationOutcome::TitleInitializationLost,
+            ) => self.execute_metadata_mutation(crate::action::MetadataMutation::SetTitle {
+                note_id,
+                title: title.clone(),
+            }),
+            _ => {}
+        }
+    }
+
+    fn seed_document_title(&mut self, note_id: notora_core::NoteId, title: &str) {
+        let identity = DocumentIdentity::Note(note_id);
+        let Some(tab_id) = self.document_registry.tab_for(identity) else {
+            return;
+        };
+        let Some(snapshot) = self.editor_runtime.document_text_snapshot(tab_id) else {
             return;
         };
         let Some(path) =
             self.editor_runtime.document_summary(tab_id).and_then(|summary| summary.path)
         else {
-            self.dispatch_action(NotoraAction::NoteCommandFailed(
-                "当前笔记没有可识别的文档类型".to_owned(),
-            ));
             return;
         };
-        let Some(kind) = DocumentKind::from_path(&path) else {
-            self.dispatch_action(NotoraAction::NoteCommandFailed(
-                "当前笔记没有可识别的文档类型".to_owned(),
-            ));
+        let Some(kind @ (DocumentKind::Markdown | DocumentKind::Mindmap)) =
+            DocumentKind::from_path(&path)
+        else {
             return;
         };
-        let projected_source = replace_document_title(kind, &snapshot.text, &title);
+        let projected_source = replace_document_title(kind, &snapshot.text, title);
         let Some((range, replacement)) =
             single_range_replacement(&snapshot.text, &projected_source)
         else {
@@ -1946,10 +2032,29 @@ impl NotoraApp {
             replacement,
         };
         match self.editor_runtime.replace_document_text(request) {
-            Ok(outcome) => self.apply_editor_outcome(outcome),
+            Ok(editor_outcome) => {
+                self.apply_editor_outcome(editor_outcome);
+                if kind == DocumentKind::Mindmap {
+                    self.move_mindmap_cursor_to_root_end(tab_id);
+                }
+            }
             Err(error) => self
                 .dispatch_action(NotoraAction::NoteCommandFailed(title_edit_error_message(error))),
         }
+    }
+
+    fn move_mindmap_cursor_to_root_end(&mut self, tab_id: appkit_core::workspace::types::TabId) {
+        let Some(snapshot) = self.editor_runtime.document_text_snapshot(tab_id) else {
+            return;
+        };
+        let Ok(tree) = textora_markdown::mmf::parser::parse(&snapshot.text) else {
+            return;
+        };
+        let Some(tab) = self.editor_runtime.tab_session_mut(tab_id) else {
+            return;
+        };
+        tab.document.cursor_mut().selection_anchor = None;
+        tab.document.cursor_move_to_offset(tree.root.title_byte_range.end);
     }
 }
 
@@ -2003,12 +2108,22 @@ fn title_edit_error_message(error: DocumentTextEditError) -> String {
     }
 }
 
-fn editor_title_from_source(current_title: &str, kind: DocumentKind, source: &str) -> String {
-    let projected_title = document_title_projection(kind, source).title;
-    if projected_title.is_empty() {
-        return current_title.to_owned();
+fn normalize_notora_title(title: &str) -> String {
+    let trimmed_title = title.trim();
+    if trimmed_title.is_empty() {
+        return "无标题".to_owned();
     }
-    projected_title
+    trimmed_title.to_owned()
+}
+
+fn initial_title_from_document(kind: DocumentKind, source: &str) -> Option<String> {
+    let candidate = match kind {
+        DocumentKind::Markdown => document_title_projection(kind, source).title,
+        DocumentKind::Mindmap => textora_markdown::mmf::parser::parse(source).ok()?.root.title,
+        DocumentKind::Text => return None,
+    };
+    let trimmed_candidate = candidate.trim();
+    (!trimmed_candidate.is_empty()).then(|| trimmed_candidate.to_owned())
 }
 
 fn submit_shell_frame(
@@ -2163,26 +2278,41 @@ mod session_restore_tests {
         assert_eq!(
             NotoraApp::editor_save_status(
                 Some(AutoSaveState::Saving { content_revision: 3 }),
-                true
+                true,
+                None,
             ),
             "保存中"
         );
         assert_eq!(
             NotoraApp::editor_save_status(
                 Some(AutoSaveState::Failed { content_revision: 3 }),
-                true
+                true,
+                None,
             ),
             "保存失败"
         );
         assert_eq!(
             NotoraApp::editor_save_status(
                 Some(AutoSaveState::Scheduled { deadline, content_revision: 3 }),
-                true
+                true,
+                None,
             ),
             "待保存"
         );
-        assert_eq!(NotoraApp::editor_save_status(None, true), "未保存");
-        assert_eq!(NotoraApp::editor_save_status(None, false), "已保存");
+        assert_eq!(NotoraApp::editor_save_status(None, true, None), "未保存");
+        assert_eq!(NotoraApp::editor_save_status(None, false, None), "已保存");
+    }
+
+    #[test]
+    fn editor_save_status_includes_the_failure_reason() {
+        assert_eq!(
+            NotoraApp::editor_save_status(
+                Some(AutoSaveState::Failed { content_revision: 3 }),
+                true,
+                Some("file is read-only"),
+            ),
+            "保存失败：file is read-only"
+        );
     }
 }
 
@@ -2452,7 +2582,15 @@ fn metadata_mutation_note_id(mutation: &crate::action::MetadataMutation) -> noto
     match mutation {
         crate::action::MetadataMutation::ToggleStar { note_id }
         | crate::action::MetadataMutation::AttachTagByName { note_id, .. }
-        | crate::action::MetadataMutation::DetachTag { note_id, .. } => *note_id,
+        | crate::action::MetadataMutation::DetachTag { note_id, .. }
+        | crate::action::MetadataMutation::SetTitle { note_id, .. }
+        | crate::action::MetadataMutation::CompleteTitleInitializationFromHeader {
+            note_id, ..
+        }
+        | crate::action::MetadataMutation::CompleteTitleInitializationFromDocument {
+            note_id,
+            ..
+        } => *note_id,
     }
 }
 
@@ -2730,6 +2868,7 @@ impl NotoraApp {
             return;
         };
         self.autosave.cancel(tab_id);
+        self.save_failure_messages.remove(&tab_id);
         let _ = self.editor_runtime.close_for_product(tab_id);
         self.document_registry.remove_tab(tab_id);
         if self.state.library.selected_card == Some(identity) {
@@ -3107,6 +3246,7 @@ impl NotoraApp {
         };
         if self.editor_runtime.replace_document(tab_id, prepared.document) {
             self.autosave.cancel(tab_id);
+            self.save_failure_messages.remove(&tab_id);
             self.dispatch_action(NotoraAction::SaveConflictResolved { identity });
         }
     }
@@ -3171,18 +3311,20 @@ mod tests {
 
     use super::{
         FontSystemPreparation, NotoraApp, PendingNoteMove, PendingTrashMove,
-        SettingsPersistenceState, StartupTrace, editor_title_from_source,
-        register_pending_metadata_mutation, remove_pending_metadata_mutation,
-        rename_file_name_for_destination, resolve_pointer_cursor, workspace_relative_directory,
+        SettingsPersistenceState, StartupTrace, initial_title_from_document,
+        normalize_notora_title, register_pending_metadata_mutation,
+        remove_pending_metadata_mutation, rename_file_name_for_destination, resolve_pointer_cursor,
+        workspace_relative_directory,
     };
     use crate::action::{MetadataMutation, NotoraAction};
-    use crate::autosave::AutoSaveState;
+    use crate::autosave::{AutoSaveRequest, AutoSaveState};
     use crate::editor_adapter::LoadedDocument;
     use crate::state::CardPageState;
     use crate::{
         CompactContent, ExternalFileSession, FocusTarget, NotoraPaths, OverlayState,
         WorkspaceCommand, WorkspaceRootState,
     };
+    use appkit_shell::editor_runtime::{DocumentTextReplacement, EditorNotification};
     use notora_core::{DocumentIdentity, DocumentKind, NavigationScope, WorkspaceId};
 
     #[test]
@@ -3204,11 +3346,67 @@ mod tests {
         NotoraApp::with_paths(paths).expect("notora app should construct without a window")
     }
 
+    fn drain_until_document_text(
+        app: &mut NotoraApp,
+        tab_id: appkit_core::workspace::types::TabId,
+        expected_text: &str,
+        deadline: Instant,
+    ) {
+        loop {
+            app.drain_product_events();
+            let text = app
+                .editor_runtime
+                .document_text_snapshot(tab_id)
+                .expect("document text should remain available")
+                .text;
+            if text == expected_text {
+                return;
+            }
+            assert!(Instant::now() < deadline, "document text should reach {expected_text:?}");
+            thread::sleep(Duration::from_millis(10));
+        }
+    }
+
     #[test]
-    fn editor_title_keeps_catalog_title_when_source_has_no_title_projection() {
+    fn notora_title_normalization_does_not_depend_on_document_source() {
+        assert_eq!(normalize_notora_title("  项目路线图  "), "项目路线图");
+        assert_eq!(normalize_notora_title("   "), "无标题");
+    }
+
+    #[test]
+    fn autosave_failure_retains_the_diagnostic_for_the_editor_header() {
+        let mut app = app();
+        let tab_id = appkit_core::workspace::types::TabIdAllocator::new().allocate();
+        let request = AutoSaveRequest { tab_id, content_revision: 7 };
+        let origin = notora_core::DocumentOrigin::Note {
+            workspace_id: notora_core::WorkspaceId::generate(),
+            note_id: notora_core::NoteId::generate(),
+            relative_path: "diagram.mmap.md".into(),
+        };
+        app.autosave.request_immediate_save(&origin, tab_id, request.content_revision);
+        assert_eq!(app.autosave.take_due_saves(), vec![request]);
+
+        app.record_autosave_failure(request, "file is read-only".to_owned());
+
         assert_eq!(
-            editor_title_from_source("项目路线图", DocumentKind::Markdown, "正文内容\n"),
-            "项目路线图"
+            app.autosave.state(tab_id),
+            Some(AutoSaveState::Failed { content_revision: request.content_revision })
+        );
+        assert_eq!(
+            app.save_failure_messages.get(&tab_id).map(String::as_str),
+            Some("file is read-only")
+        );
+    }
+
+    #[test]
+    fn initial_document_title_supports_markdown_h1_and_compact_mmap_root_syntax() {
+        assert_eq!(
+            initial_title_from_document(DocumentKind::Markdown, "# Markdown Title\n"),
+            Some("Markdown Title".to_owned())
+        );
+        assert_eq!(
+            initial_title_from_document(DocumentKind::Mindmap, "#Mindmap Root\n##Child\n"),
+            Some("Mindmap Root".to_owned())
         );
     }
 
@@ -3791,12 +3989,126 @@ mod tests {
 
         app.dispatch_action(NotoraAction::TitleCommitRequested("项目路线图".to_owned()));
 
+        while app
+            .editor_runtime
+            .document_text_snapshot(tab_id)
+            .expect("created note text should remain available")
+            .text
+            .is_empty()
+        {
+            app.drain_product_events();
+            assert!(Instant::now() < deadline, "title initialization should complete");
+            thread::sleep(Duration::from_millis(10));
+        }
+
         let snapshot = app
             .editor_runtime
             .document_text_snapshot(tab_id)
             .expect("created note text should remain available");
         assert_eq!(snapshot.text, "# 项目路线图\n\n");
         assert!(snapshot.content_revision > 0);
+
+        app.dispatch_action(NotoraAction::TitleCommitRequested("独立的 Notora 标题".to_owned()));
+        let second_deadline = Instant::now() + Duration::from_secs(2);
+        while app
+            .pending_metadata_mutations
+            .iter()
+            .any(|mutation| matches!(mutation, MetadataMutation::SetTitle { .. }))
+        {
+            app.drain_product_events();
+            assert!(Instant::now() < second_deadline, "independent title should persist");
+            thread::sleep(Duration::from_millis(10));
+        }
+        assert_eq!(
+            app.editor_runtime
+                .document_text_snapshot(tab_id)
+                .expect("independent body should remain available")
+                .text,
+            "# 项目路线图\n\n"
+        );
+    }
+
+    #[test]
+    fn first_saved_markdown_h1_initializes_the_title_and_then_becomes_independent() {
+        let workspace_directory =
+            tempfile::tempdir().expect("workspace test directory should be created");
+        let mut app = app();
+        app.execute_workspace_command(WorkspaceCommand::OpenExisting {
+            root: workspace_directory.path().to_path_buf(),
+        })
+        .expect("workspace should open");
+        app.dispatch_action(NotoraAction::CreateRequested(DocumentKind::Markdown));
+        let deadline = Instant::now() + Duration::from_secs(2);
+        let (note_id, tab_id) = loop {
+            app.drain_product_events();
+            if let Some(DocumentIdentity::Note(note_id)) = app.state().library.selected_card
+                && let Some(tab_id) = app.document_tab_for(DocumentIdentity::Note(note_id))
+                && app.state().library.active_editor_metadata.is_some()
+            {
+                break (note_id, tab_id);
+            }
+            assert!(Instant::now() < deadline, "created note should finish loading");
+            thread::sleep(Duration::from_millis(10));
+        };
+        let snapshot =
+            app.editor_runtime.document_text_snapshot(tab_id).expect("created source should exist");
+        let outcome = app
+            .editor_runtime
+            .replace_document_text(DocumentTextReplacement {
+                tab_id,
+                content_revision: snapshot.content_revision,
+                range: 0..snapshot.text.len(),
+                replacement: "# 正文优先\n\n正文".to_owned(),
+            })
+            .expect("body fixture edit should apply");
+        app.apply_editor_outcome(outcome);
+        let content_revision = app
+            .editor_runtime
+            .document_text_snapshot(tab_id)
+            .expect("edited source should exist")
+            .content_revision;
+        app.handle_editor_notification(&EditorNotification::SaveCompleted {
+            tab_id,
+            content_revision,
+        });
+
+        while app.pending_metadata_mutations.iter().any(|mutation| {
+            matches!(mutation, MetadataMutation::CompleteTitleInitializationFromDocument { .. })
+        }) {
+            app.drain_product_events();
+            assert!(Instant::now() < deadline, "document initialization should persist");
+            thread::sleep(Duration::from_millis(10));
+        }
+        let catalog =
+            notora_core::Catalog::open(&workspace_directory.path().join(".notora/catalog.sqlite3"))
+                .expect("catalog should reopen for verification");
+        assert_eq!(
+            catalog
+                .active_note(note_id)
+                .expect("note lookup should succeed")
+                .expect("note should remain active")
+                .title,
+            "正文优先"
+        );
+
+        app.dispatch_action(NotoraAction::TitleCommitRequested("后改的 Notora 标题".to_owned()));
+        let second_deadline = Instant::now() + Duration::from_secs(2);
+        while app
+            .pending_metadata_mutations
+            .iter()
+            .any(|mutation| matches!(mutation, MetadataMutation::SetTitle { .. }))
+        {
+            app.drain_product_events();
+            assert!(Instant::now() < second_deadline, "independent title should persist");
+            thread::sleep(Duration::from_millis(10));
+        }
+        assert_eq!(
+            app.editor_runtime
+                .document_text_snapshot(tab_id)
+                .expect("independent body should remain available")
+                .text,
+            "# 正文优先\n\n正文"
+        );
     }
 
     #[test]
@@ -3830,6 +4142,18 @@ mod tests {
         );
 
         app.dispatch_action(NotoraAction::TitleCommitRequested("项目路线图".to_owned()));
+
+        while app
+            .editor_runtime
+            .document_text_snapshot(tab_id)
+            .expect("created mmap source should remain available")
+            .text
+            == "#"
+        {
+            app.drain_product_events();
+            assert!(Instant::now() < deadline, "mmap title initialization should complete");
+            thread::sleep(Duration::from_millis(10));
+        }
 
         let snapshot = app
             .editor_runtime
@@ -3932,7 +4256,8 @@ mod tests {
         assert!(app.shell.editor_title_text().is_empty());
 
         let tab_event = ui::Event::KeyDown(ui::KeyCode::Tab, ui::core::Modifiers::NONE);
-        assert!(!app.route_product_event(&tab_event));
+        assert!(app.route_product_event(&tab_event));
+        drain_until_document_text(&mut app, tab_id, "# 无标题", deadline);
         assert_eq!(
             app.editor_runtime
                 .tab_session(tab_id)
@@ -3975,14 +4300,14 @@ mod tests {
             thread::sleep(Duration::from_millis(10));
         };
         app.render().expect("created mmap should render its title editor");
-        app.dispatch_action(NotoraAction::TitleTextChanged("项目路线图".to_owned()));
+        assert!(app.route_product_event(&ui::Event::ImeCommit("项目路线图".to_owned())));
         assert_eq!(app.state().layout.focus_target, FocusTarget::EditorTitle);
-        assert!(app.shell.editor_title_text().is_empty());
+        assert_eq!(app.shell.editor_title_text(), "项目路线图");
 
         let tab_event = ui::Event::KeyDown(ui::KeyCode::Tab, ui::core::Modifiers::NONE);
-        if !app.route_product_event(&tab_event) {
-            app.handle_editor_key_input(ui::KeyCode::Tab, ui::core::Modifiers::NONE);
-        }
+        assert!(app.route_product_event(&tab_event));
+        drain_until_document_text(&mut app, tab_id, "# 项目路线图", deadline);
+        app.handle_editor_key_input(ui::KeyCode::Tab, ui::core::Modifiers::NONE);
 
         let snapshot = app
             .editor_runtime
@@ -4032,12 +4357,11 @@ mod tests {
             thread::sleep(Duration::from_millis(10));
         };
         app.render().expect("created markdown should render its title editor");
-        app.dispatch_action(NotoraAction::TitleTextChanged("项目记录".to_owned()));
+        assert!(app.route_product_event(&ui::Event::ImeCommit("项目记录".to_owned())));
 
         let tab_event = ui::Event::KeyDown(ui::KeyCode::Tab, ui::core::Modifiers::NONE);
-        if !app.route_product_event(&tab_event) {
-            app.handle_editor_key_input(ui::KeyCode::Tab, ui::core::Modifiers::NONE);
-        }
+        assert!(app.route_product_event(&tab_event));
+        drain_until_document_text(&mut app, tab_id, "# 项目记录\n\n", deadline);
 
         let snapshot = app
             .editor_runtime
@@ -4069,7 +4393,8 @@ mod tests {
             assert!(Instant::now() < deadline, "created mmap should have an editor tab");
             thread::sleep(Duration::from_millis(10));
         };
-        app.dispatch_action(NotoraAction::TitleTextChanged("项目路线图".to_owned()));
+        app.dispatch_action(NotoraAction::TitleCommitRequested("项目路线图".to_owned()));
+        drain_until_document_text(&mut app, tab_id, "# 项目路线图", deadline);
         app.dispatch_action(NotoraAction::ToggleSourceViewRequested);
         assert_eq!(app.state().layout.focus_target, FocusTarget::Editor);
         assert_eq!(
@@ -4159,7 +4484,7 @@ mod tests {
     }
 
     #[test]
-    fn title_text_change_updates_the_active_note_before_explicit_commit() {
+    fn title_text_change_does_not_update_the_active_note_before_explicit_commit() {
         let workspace_directory =
             tempfile::tempdir().expect("workspace test directory should be created");
         let mut app = app();
@@ -4193,7 +4518,7 @@ mod tests {
             .editor_runtime
             .document_text_snapshot(tab_id)
             .expect("created note text should remain available");
-        assert_eq!(snapshot.text, "# 项目路线图\n\n");
+        assert_eq!(snapshot.text, "");
         assert_eq!(app.state().layout.focus_target, FocusTarget::EditorTitle);
     }
 

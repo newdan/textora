@@ -115,6 +115,13 @@ pub enum NoteEncryption {
     Encrypted,
 }
 
+/// Notora 标题与正文标题槽位之间的一次性初始化状态。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum TitleInitialization {
+    AwaitingFirstCommit,
+    Independent,
+}
+
 /// 编辑区头部读取的持久化 metadata，不混入扫描器的派生记录。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct NoteEditorMetadata {
@@ -122,6 +129,7 @@ pub struct NoteEditorMetadata {
     pub created_at: SystemTime,
     pub modified_at: SystemTime,
     pub encryption: NoteEncryption,
+    pub title_initialization: TitleInitialization,
 }
 
 impl DocumentKind {
