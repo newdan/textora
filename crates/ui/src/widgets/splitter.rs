@@ -2,8 +2,10 @@
 
 use std::any::Any;
 
+use crate::core::widget::ControlAction;
 use crate::core::{
-    Event, EventCtx, KeyCode, LayoutCtx, MouseButton, PaintCtx, Rect, Widget, WidgetAction,
+    Event, EventCtx, KeyCode, LayoutCtx, Modifiers, MouseButton, PaintCtx, Rect, Widget,
+    WidgetAction, WidgetId,
 };
 
 /// 分隔条可拖动的逻辑位置输入。
@@ -36,13 +38,16 @@ pub enum SplitterAction {
 
 /// 键盘调整分隔条时的逻辑像素步长。
 pub const SPLITTER_KEYBOARD_STEP_LOGICAL: f32 = 8.0;
+const SPLITTER_FOCUS_RING_WIDTH_LOGICAL: f32 = 2.0;
 
 /// 纵向分隔条组件，位置值始终以逻辑像素报告。
 pub struct SplitterWidget {
+    id: Option<WidgetId>,
     rect: Rect,
     input: SplitterInput,
     dpi: f32,
     hovered: bool,
+    focused: bool,
     drag_start_px: Option<f32>,
     drag_start_logical_position: f32,
     current_logical_position: f32,
@@ -57,14 +62,20 @@ impl Default for SplitterWidget {
 impl SplitterWidget {
     pub fn new() -> Self {
         Self {
+            id: None,
             rect: Rect::ZERO,
             input: SplitterInput::default(),
             dpi: 1.0,
             hovered: false,
+            focused: false,
             drag_start_px: None,
             drag_start_logical_position: 0.0,
             current_logical_position: 0.0,
         }
+    }
+
+    pub fn with_id(id: WidgetId) -> Self {
+        Self { id: Some(id), ..Self::new() }
     }
 
     pub fn set_input(&mut self, input: SplitterInput) {
@@ -74,6 +85,7 @@ impl SplitterWidget {
         }
         if !input.enabled {
             self.hovered = false;
+            self.focused = false;
             self.drag_start_px = None;
         }
     }
@@ -131,10 +143,30 @@ impl Widget for SplitterWidget {
         let thickness = if self.is_capturing() || self.hovered { 2.0 * ctx.dpi } else { ctx.dpi };
         let x = self.rect.x + (self.rect.w - thickness) * 0.5;
         ctx.list.fill(Rect::new(x, self.rect.y, thickness, self.rect.h), color);
+        if self.focused && self.input.enabled {
+            ctx.list.stroke_rounded(
+                self.rect,
+                ctx.theme.settings_theme().focus_ring,
+                0.0,
+                SPLITTER_FOCUS_RING_WIDTH_LOGICAL * ctx.dpi,
+            );
+        }
     }
 
     fn hit(&self, px: f32, py: f32) -> bool {
         self.rect.contains(px, py)
+    }
+
+    fn id(&self) -> Option<WidgetId> {
+        self.id
+    }
+
+    fn is_focusable(&self) -> bool {
+        self.input.enabled && self.id.is_some()
+    }
+
+    fn set_keyboard_focus(&mut self, focused_id: Option<WidgetId>) {
+        self.focused = self.input.enabled && self.id.is_some_and(|id| focused_id == Some(id));
     }
 
     fn on_event(&mut self, event: &Event, ctx: &mut EventCtx) -> Option<WidgetAction> {
@@ -158,30 +190,51 @@ impl Widget for SplitterWidget {
             return None;
         }
 
+        if let Event::MouseDown { px, py, button: MouseButton::Left } = event
+            && self.hit(*px, *py)
+        {
+            self.drag_start_px = Some(*px);
+            self.drag_start_logical_position = self.current_logical_position;
+            ctx.cursor_hint = Some(winit::window::CursorIcon::EwResize);
+            if let Some(id) = self.id
+                && !self.focused
+            {
+                return Some(WidgetAction::Control(ControlAction::FocusRequested { id }));
+            }
+            return Some(WidgetAction::Splitter(SplitterAction::DragStarted));
+        }
+
         let action = match event {
             Event::MouseMove { px, .. } => self.update_drag_position(*px),
-            Event::MouseDown { px, py, button: MouseButton::Left } if self.hit(*px, *py) => {
-                self.drag_start_px = Some(*px);
-                self.drag_start_logical_position = self.current_logical_position;
-                Some(SplitterAction::DragStarted)
-            }
             Event::MouseUp { px, button: MouseButton::Left, .. } if self.is_capturing() => {
                 let _ = self.update_drag_position(*px);
                 self.drag_start_px = None;
                 Some(SplitterAction::DragEnded(self.current_logical_position))
             }
-            Event::KeyDown(KeyCode::Left, _) => {
+            Event::KeyDown(KeyCode::Left, modifiers)
+                if self.focused && *modifiers == Modifiers::NONE =>
+            {
                 self.adjust_with_keyboard(-SPLITTER_KEYBOARD_STEP_LOGICAL)
             }
-            Event::KeyDown(KeyCode::Right, _) => {
+            Event::KeyDown(KeyCode::Right, modifiers)
+                if self.focused && *modifiers == Modifiers::NONE =>
+            {
                 self.adjust_with_keyboard(SPLITTER_KEYBOARD_STEP_LOGICAL)
             }
-            Event::KeyDown(KeyCode::Home, _) => self.adjust_with_keyboard(
-                self.input.minimum_logical_position - self.current_logical_position,
-            ),
-            Event::KeyDown(KeyCode::End, _) => self.adjust_with_keyboard(
-                self.input.maximum_logical_position - self.current_logical_position,
-            ),
+            Event::KeyDown(KeyCode::Home, modifiers)
+                if self.focused && *modifiers == Modifiers::NONE =>
+            {
+                self.adjust_with_keyboard(
+                    self.input.minimum_logical_position - self.current_logical_position,
+                )
+            }
+            Event::KeyDown(KeyCode::End, modifiers)
+                if self.focused && *modifiers == Modifiers::NONE =>
+            {
+                self.adjust_with_keyboard(
+                    self.input.maximum_logical_position - self.current_logical_position,
+                )
+            }
             _ => None,
         }?;
         if self.is_capturing() || self.hovered {
@@ -202,7 +255,7 @@ impl Widget for SplitterWidget {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::core::{EventCtx, LayoutCtx, Modifiers, NoopMeasure};
+    use crate::core::{DrawCmd, DrawList, EventCtx, LayoutCtx, Modifiers, NoopMeasure};
 
     fn layout(widget: &mut SplitterWidget, dpi: f32) {
         let theme = crate::theme::test_theme();
@@ -262,9 +315,23 @@ mod tests {
 
     #[test]
     fn position_is_clamped_and_keyboard_adjustable() {
-        let mut widget = widget();
+        let splitter_id = crate::WidgetId(31);
+        let mut widget = SplitterWidget::with_id(splitter_id);
+        widget.set_input(SplitterInput {
+            logical_position: 200.0,
+            minimum_logical_position: 180.0,
+            maximum_logical_position: 320.0,
+            enabled: true,
+        });
+        layout(&mut widget, 2.0);
         let theme = crate::theme::test_theme();
         let mut context = event_context(&theme);
+
+        assert_eq!(
+            widget.on_event(&Event::KeyDown(KeyCode::Home, Modifiers::NONE), &mut context),
+            None
+        );
+        widget.set_keyboard_focus(Some(splitter_id));
 
         assert_eq!(
             widget.on_event(&Event::KeyDown(KeyCode::Home, Modifiers::NONE), &mut context),
@@ -278,6 +345,91 @@ mod tests {
             widget.on_event(&Event::KeyDown(KeyCode::End, Modifiers::NONE), &mut context),
             Some(WidgetAction::Splitter(SplitterAction::LogicalPositionChanged(320.0)))
         );
+    }
+
+    #[test]
+    fn default_splitter_is_pointer_only() {
+        let mut widget = widget();
+        let original_position = widget.logical_position();
+        let theme = crate::theme::test_theme();
+        let mut context = event_context(&theme);
+        let mut focusable_ids = Vec::new();
+
+        widget.collect_focusable_ids(&mut focusable_ids);
+        assert!(focusable_ids.is_empty());
+        assert_eq!(
+            widget.on_event(&Event::KeyDown(KeyCode::Right, Modifiers::NONE), &mut context),
+            None
+        );
+        assert_eq!(widget.logical_position(), original_position);
+    }
+
+    #[test]
+    fn disabled_focusable_splitter_leaves_focus_chain_and_rejects_keyboard() {
+        let splitter_id = crate::WidgetId(32);
+        let mut widget = SplitterWidget::with_id(splitter_id);
+        widget.set_input(SplitterInput {
+            logical_position: 200.0,
+            minimum_logical_position: 180.0,
+            maximum_logical_position: 320.0,
+            enabled: true,
+        });
+        layout(&mut widget, 2.0);
+        widget.set_keyboard_focus(Some(splitter_id));
+        widget.set_input(SplitterInput { enabled: false, ..widget.input });
+
+        let mut focusable_ids = Vec::new();
+        widget.collect_focusable_ids(&mut focusable_ids);
+        assert!(focusable_ids.is_empty());
+
+        let theme = crate::theme::test_theme();
+        let mut context = event_context(&theme);
+        assert_eq!(
+            widget.on_event(&Event::KeyDown(KeyCode::Right, Modifiers::NONE), &mut context),
+            None
+        );
+    }
+
+    #[test]
+    fn focusable_splitter_requests_focus_on_pointer_down() {
+        let splitter_id = WidgetId(33);
+        let mut widget = SplitterWidget::with_id(splitter_id);
+        widget.set_input(SplitterInput {
+            logical_position: 200.0,
+            minimum_logical_position: 180.0,
+            maximum_logical_position: 320.0,
+            enabled: true,
+        });
+        layout(&mut widget, 2.0);
+        let theme = crate::theme::test_theme();
+        let mut context = event_context(&theme);
+
+        assert_eq!(
+            widget.on_event(
+                &Event::MouseDown { px: 102.0, py: 20.0, button: MouseButton::Left },
+                &mut context,
+            ),
+            Some(WidgetAction::Control(ControlAction::FocusRequested { id: splitter_id }))
+        );
+        assert!(widget.is_capturing());
+    }
+
+    #[test]
+    fn focused_splitter_paints_a_distinct_focus_outline() {
+        let splitter_id = WidgetId(34);
+        let mut widget = SplitterWidget::with_id(splitter_id);
+        widget.set_input(SplitterInput { enabled: true, ..SplitterInput::default() });
+        layout(&mut widget, 2.0);
+        widget.set_keyboard_focus(Some(splitter_id));
+        let theme = crate::theme::test_theme();
+        let mut draw_list = DrawList::new();
+        let mut paint_context = PaintCtx::new(&mut draw_list, &theme, 2.0);
+
+        widget.paint(&mut paint_context);
+
+        assert!(draw_list.cmds.iter().any(
+            |command| matches!(command, DrawCmd::StrokeRect { rect, .. } if *rect == widget.rect)
+        ));
     }
 
     #[test]

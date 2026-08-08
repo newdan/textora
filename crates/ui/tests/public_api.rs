@@ -10,6 +10,7 @@ use ui::scrollbar::{ScrollbarAction, ScrollbarInput, ScrollbarWidget};
 use ui::settings::{Settings, UiMetrics};
 use ui::settings_view::SettingsView;
 use ui::sidebar::{SidebarAction, SidebarSettingsInput, SidebarWidget, SidebarWidgetInput};
+use ui::splitter::SplitterWidget;
 use ui::switch::Switch;
 use ui::tab_bar::{TabBarAction, TabBarWidget, TabBarWidgetInput, TabInfo};
 use ui::theme::{ThemeLoadError, ThemeRegistry, ThemeSource};
@@ -140,4 +141,15 @@ fn toggle_controls_expose_synchronized_state_api() {
     switch.set_enabled(false);
     assert!(!switch.checked());
     assert!(!switch.is_enabled());
+}
+
+#[test]
+fn splitter_focus_is_an_explicit_public_capability() {
+    let id = ui::WidgetId(103);
+    let pointer_only = SplitterWidget::new();
+    assert_eq!(pointer_only.id(), None);
+
+    let focusable = SplitterWidget::with_id(id);
+    assert_eq!(focusable.id(), Some(id));
+    assert!(focusable.is_focusable());
 }
