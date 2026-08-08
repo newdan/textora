@@ -1,3 +1,4 @@
+pub mod accessibility;
 pub mod dock;
 pub mod geom;
 pub mod measure;
@@ -7,6 +8,11 @@ pub mod text_layout;
 pub mod text_util;
 pub mod widget;
 
+pub use accessibility::{
+    AccessibilityAction, AccessibilityActionRequest, AccessibilityContext, AccessibilityId,
+    AccessibilityNode, AccessibilityRole, AccessibilityState, AccessibilityTree,
+    AccessibilityValidationError,
+};
 pub use dock::{Dock, DockChild, Side};
 pub use geom::{Rect, Screen};
 pub use measure::{NoopMeasure, TextMeasure};

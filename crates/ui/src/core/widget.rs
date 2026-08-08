@@ -3,6 +3,9 @@
 
 use std::any::Any;
 
+use crate::core::accessibility::{
+    AccessibilityActionRequest, AccessibilityContext, AccessibilityNode,
+};
 use crate::core::geom::Rect;
 use crate::core::measure::TextMeasure;
 use crate::core::overlay::OverlayAction;
@@ -379,6 +382,30 @@ pub trait Widget: Any {
 
     fn set_keyboard_focus(&mut self, _focused_id: Option<WidgetId>) {}
 
+    /// 返回以屏幕物理像素描述的语义子树。默认 widget 不产生节点。
+    fn accessibility_node(&self, _ctx: &AccessibilityContext) -> Option<AccessibilityNode> {
+        None
+    }
+
+    /// 收集当前 widget 暴露的语义子树；容器可覆盖此方法递归收集视觉子节点。
+    fn collect_accessibility_nodes(
+        &self,
+        ctx: &AccessibilityContext,
+        output: &mut Vec<AccessibilityNode>,
+    ) {
+        if let Some(node) = self.accessibility_node(ctx) {
+            output.push(node);
+        }
+    }
+
+    /// 处理辅助技术动作，并复用现有的 typed `WidgetAction` 业务通道。
+    fn on_accessibility_action(
+        &mut self,
+        _request: &AccessibilityActionRequest,
+    ) -> Option<WidgetAction> {
+        None
+    }
+
     /// 处理输入事件，返回可选的 action（上行给 app 层）。
     fn on_event(&mut self, _ev: &Event, _ctx: &mut EventCtx) -> Option<WidgetAction> {
         None
@@ -503,6 +530,23 @@ mod tests {
         let mut ctx = EventCtx { cursor_hint: None, theme: &theme, dpi: 1.0 };
         let ev = Event::MouseMove { px: 0.0, py: 0.0 };
         assert!(w.on_event(&ev, &mut ctx).is_none());
+    }
+
+    #[test]
+    fn default_accessibility_contract_is_empty_and_inert() {
+        let mut widget = TestWidget::new();
+        let accessibility_context = AccessibilityContext::default();
+        let mut nodes = Vec::new();
+        widget.collect_accessibility_nodes(&accessibility_context, &mut nodes);
+
+        assert!(nodes.is_empty());
+        assert_eq!(
+            widget.on_accessibility_action(&AccessibilityActionRequest::new(
+                crate::core::AccessibilityId(1),
+                crate::core::AccessibilityAction::Activate,
+            )),
+            None
+        );
     }
 
     #[test]
