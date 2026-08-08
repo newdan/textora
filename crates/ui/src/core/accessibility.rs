@@ -51,6 +51,12 @@ pub enum AccessibilityRole {
     Separator,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AccessibilityOrientation {
+    Horizontal,
+    Vertical,
+}
+
 /// 节点向辅助技术公布的动作集合。
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum AccessibilityAction {
@@ -101,6 +107,10 @@ pub struct AccessibilityNode {
     pub name: Option<String>,
     pub description: Option<String>,
     pub value: Option<String>,
+    pub numeric_value: Option<f64>,
+    pub numeric_minimum: Option<f64>,
+    pub numeric_maximum: Option<f64>,
+    pub orientation: Option<AccessibilityOrientation>,
     pub state: AccessibilityState,
     pub actions: Vec<AccessibilityAction>,
     pub labelled_by: Vec<AccessibilityId>,
@@ -117,6 +127,10 @@ impl AccessibilityNode {
             name: None,
             description: None,
             value: None,
+            numeric_value: None,
+            numeric_minimum: None,
+            numeric_maximum: None,
+            orientation: None,
             state: AccessibilityState::default(),
             actions: Vec::new(),
             labelled_by: Vec::new(),
@@ -137,6 +151,18 @@ impl AccessibilityNode {
 
     pub fn with_value(mut self, value: impl Into<String>) -> Self {
         self.value = Some(value.into());
+        self
+    }
+
+    pub fn with_numeric_value(mut self, value: f64, minimum: f64, maximum: f64) -> Self {
+        self.numeric_value = Some(value);
+        self.numeric_minimum = Some(minimum);
+        self.numeric_maximum = Some(maximum);
+        self
+    }
+
+    pub fn with_orientation(mut self, orientation: AccessibilityOrientation) -> Self {
+        self.orientation = Some(orientation);
         self
     }
 
@@ -233,6 +259,9 @@ pub enum AccessibilityValidationError {
     FocusTargetNotFocused(AccessibilityId),
     OrphanedFocusedNode(AccessibilityId),
     SensitiveValueExposed(AccessibilityId),
+    InvalidNumericValue(AccessibilityId),
+    MissingNumericValue(AccessibilityId),
+    MissingOrientation(AccessibilityId),
 }
 
 /// 一次平台更新所需的完整语义树和唯一焦点。
@@ -295,6 +324,20 @@ impl AccessibilityTree {
         if node.state.sensitive && node.value.is_some() {
             errors.push(AccessibilityValidationError::SensitiveValueExposed(node.id));
         }
+        if !valid_numeric_value(node) {
+            errors.push(AccessibilityValidationError::InvalidNumericValue(node.id));
+        }
+        if matches!(node.role, AccessibilityRole::Slider | AccessibilityRole::ScrollBar) {
+            if node.numeric_value.is_none()
+                && node.numeric_minimum.is_none()
+                && node.numeric_maximum.is_none()
+            {
+                errors.push(AccessibilityValidationError::MissingNumericValue(node.id));
+            }
+            if node.orientation.is_none() {
+                errors.push(AccessibilityValidationError::MissingOrientation(node.id));
+            }
+        }
         for child in &node.children {
             Self::validate_node(child, ids, focused_ids, errors);
         }
@@ -308,6 +351,20 @@ fn valid_bounds(bounds: Rect) -> bool {
         && bounds.h.is_finite()
         && bounds.w > 0.0
         && bounds.h > 0.0
+}
+
+fn valid_numeric_value(node: &AccessibilityNode) -> bool {
+    match (node.numeric_value, node.numeric_minimum, node.numeric_maximum) {
+        (None, None, None) => true,
+        (Some(value), Some(minimum), Some(maximum)) => {
+            value.is_finite()
+                && minimum.is_finite()
+                && maximum.is_finite()
+                && minimum <= value
+                && value <= maximum
+        }
+        _ => false,
+    }
 }
 
 #[cfg(test)]
@@ -410,6 +467,47 @@ mod tests {
         assert_eq!(
             AccessibilityTree::new(root, None).validate(),
             Err(vec![AccessibilityValidationError::SensitiveValueExposed(AccessibilityId(1))])
+        );
+    }
+
+    #[test]
+    fn tree_rejects_incomplete_or_out_of_range_numeric_values() {
+        let root =
+            named_button(1, Rect::new(0.0, 0.0, 20.0, 20.0)).with_numeric_value(12.0, 0.0, 10.0);
+
+        assert_eq!(
+            AccessibilityTree::new(root, None).validate(),
+            Err(vec![AccessibilityValidationError::InvalidNumericValue(AccessibilityId(1))])
+        );
+    }
+
+    #[test]
+    fn tree_requires_orientation_for_slider_semantics() {
+        let root = AccessibilityNode::new(
+            AccessibilityId(1),
+            AccessibilityRole::Slider,
+            Rect::new(0.0, 0.0, 20.0, 100.0),
+        )
+        .with_numeric_value(5.0, 0.0, 10.0);
+
+        assert_eq!(
+            AccessibilityTree::new(root, None).validate(),
+            Err(vec![AccessibilityValidationError::MissingOrientation(AccessibilityId(1))])
+        );
+    }
+
+    #[test]
+    fn tree_requires_numeric_value_for_scrollbar_semantics() {
+        let root = AccessibilityNode::new(
+            AccessibilityId(1),
+            AccessibilityRole::ScrollBar,
+            Rect::new(0.0, 0.0, 20.0, 100.0),
+        )
+        .with_orientation(AccessibilityOrientation::Vertical);
+
+        assert_eq!(
+            AccessibilityTree::new(root, None).validate(),
+            Err(vec![AccessibilityValidationError::MissingNumericValue(AccessibilityId(1))])
         );
     }
 }

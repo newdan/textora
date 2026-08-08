@@ -10,8 +10,8 @@ pub mod widget;
 
 pub use accessibility::{
     AccessibilityAction, AccessibilityActionRequest, AccessibilityContext, AccessibilityId,
-    AccessibilityNode, AccessibilityRole, AccessibilityState, AccessibilityTree,
-    AccessibilityValidationError,
+    AccessibilityNode, AccessibilityOrientation, AccessibilityRole, AccessibilityState,
+    AccessibilityTree, AccessibilityValidationError,
 };
 pub use dock::{Dock, DockChild, Side};
 pub use geom::{Rect, Screen};
