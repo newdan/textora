@@ -518,7 +518,6 @@ impl SidebarState {
                         self.hover_enter_at = Some(Instant::now());
                     }
                 } else {
-                    self.hover_enter_at.is_some();
                     self.hover_enter_at = None;
                     self.suppress_hover_enter = false;
                 }
@@ -527,13 +526,11 @@ impl SidebarState {
                 let sidebar_w = cfg.width;
                 let in_sidebar = px >= 0.0 && px <= sidebar_w && px < screen_w;
                 if !in_sidebar {
-                    self.hover_leave_at.is_none();
                     self.hovered_button = SidebarHoverButton::None;
                     if self.hover_leave_at.is_none() {
                         self.hover_leave_at = Some(Instant::now());
                     }
                 } else {
-                    self.hover_leave_at.is_some();
                     self.hover_leave_at = None;
                 }
             }

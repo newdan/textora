@@ -11,7 +11,6 @@
 #![allow(clippy::type_complexity)]
 #![allow(clippy::empty_line_after_doc_comments)]
 #![allow(clippy::doc_lazy_continuation)]
-#![allow(unused_must_use)]
 
 pub mod canvas;
 pub mod constants;
