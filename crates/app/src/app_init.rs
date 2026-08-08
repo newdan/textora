@@ -350,8 +350,13 @@ impl App {
                     let vp_w = screen_w
                         - metrics.scrollbar_reserve
                         - self.editor_left_margin(dv.line_count());
-                    let expected_hash =
-                        crate::content_hash::content_hash(aoff, alen as u32, vp_w, font_size);
+                    let anchor_bytes = dv.doc_line_bytes(anchor_doc).unwrap_or_default();
+                    let expected_hash = crate::content_hash::content_hash(
+                        anchor_bytes.as_ref(),
+                        aoff,
+                        vp_w,
+                        font_size,
+                    );
                     let is_placeholder = entry.visual_breaks.is_empty()
                         || (entry.visual_breaks.len() == 1
                             && entry.visual_breaks[0].pixel_width == 0.0
@@ -449,8 +454,12 @@ impl App {
                         }
                     }
                     let vl = breaks.len().max(1) as u16;
-                    let hash =
-                        crate::content_hash::content_hash(*off, *len, viewport_width, font_size);
+                    let hash = crate::content_hash::content_hash(
+                        line_str.as_bytes(),
+                        *off,
+                        viewport_width,
+                        font_size,
+                    );
                     pre_entries.insert(
                         *dl,
                         crate::snap_tree::DisplayLineEntry {
@@ -478,9 +487,10 @@ impl App {
                     } else {
                         let len = dv.line_byte_length(i).unwrap_or(0);
                         let off = dv.line_byte_offset(i).unwrap_or(0);
+                        let line_bytes = dv.doc_line_bytes(i).unwrap_or_default();
                         let hash = crate::content_hash::content_hash(
+                            line_bytes.as_ref(),
                             off,
-                            len as u32,
                             viewport_width,
                             font_size,
                         );

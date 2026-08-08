@@ -27,6 +27,17 @@ pub struct ReshapeRequest {
     pub dv_idx: usize,
 }
 
+impl ReshapeRequest {
+    fn content_hash(&self) -> u64 {
+        content_hash::content_hash(
+            self.line_bytes.as_ref(),
+            self.byte_offset,
+            self.viewport_width,
+            self.font_size,
+        )
+    }
+}
+
 /// Worker 返回的 reshape 结果。
 #[derive(Debug)]
 pub struct ReshapeResult {
@@ -152,12 +163,7 @@ fn process_with_shaper(shaper: &mut shaping::Shaper, req: &ReshapeRequest) -> Di
     };
 
     if line_str.is_empty() {
-        let content_hash = content_hash::content_hash(
-            req.byte_offset,
-            req.byte_length,
-            req.viewport_width,
-            req.font_size,
-        );
+        let content_hash = req.content_hash();
         return DisplayLineEntry::placeholder(0, bytes.len() as u32, content_hash, 1);
     }
 
@@ -182,12 +188,7 @@ fn process_with_shaper(shaper: &mut shaping::Shaper, req: &ReshapeRequest) -> Di
     }
 
     let visual_line_count = breaks.len().max(1) as u16;
-    let content_hash = content_hash::content_hash(
-        req.byte_offset,
-        req.byte_length,
-        req.viewport_width,
-        req.font_size,
-    );
+    let content_hash = req.content_hash();
 
     DisplayLineEntry {
         visual_line_count,
@@ -207,12 +208,7 @@ fn process_fallback(req: &ReshapeRequest) -> DisplayLineEntry {
     let ascii_w = req.font_size * 0.6;
     let cjk_w = req.font_size;
     if ascii_w <= 0.0 {
-        let content_hash = content_hash::content_hash(
-            req.byte_offset,
-            req.byte_length,
-            req.viewport_width,
-            req.font_size,
-        );
+        let content_hash = req.content_hash();
         return DisplayLineEntry::placeholder(0, bytes.len() as u32, content_hash, 1);
     }
 
@@ -221,12 +217,7 @@ fn process_fallback(req: &ReshapeRequest) -> DisplayLineEntry {
         Err(e) => std::str::from_utf8(&bytes[..e.valid_up_to()]).unwrap_or(""),
     };
     if line_str.is_empty() {
-        let content_hash = content_hash::content_hash(
-            req.byte_offset,
-            req.byte_length,
-            req.viewport_width,
-            req.font_size,
-        );
+        let content_hash = req.content_hash();
         return DisplayLineEntry::placeholder(0, bytes.len() as u32, content_hash, 1);
     }
 
@@ -264,12 +255,7 @@ fn process_fallback(req: &ReshapeRequest) -> DisplayLineEntry {
     }
 
     if char_infos.is_empty() {
-        let content_hash = content_hash::content_hash(
-            req.byte_offset,
-            req.byte_length,
-            req.viewport_width,
-            req.font_size,
-        );
+        let content_hash = req.content_hash();
         return DisplayLineEntry::placeholder(0, bytes.len() as u32, content_hash, 1);
     }
 
@@ -390,12 +376,7 @@ fn process_fallback(req: &ReshapeRequest) -> DisplayLineEntry {
     }
 
     let visual_line_count = breaks.len().max(1) as u16;
-    let content_hash = content_hash::content_hash(
-        req.byte_offset,
-        req.byte_length,
-        req.viewport_width,
-        req.font_size,
-    );
+    let content_hash = req.content_hash();
 
     DisplayLineEntry {
         visual_line_count,
@@ -442,6 +423,25 @@ mod tests {
         };
         let entry = process_fallback(&req);
         assert_eq!(entry.visual_line_count, 1);
+    }
+
+    #[test]
+    fn fallback_entries_do_not_share_hash_for_equal_length_different_content() {
+        let build_request = |line: &str| ReshapeRequest {
+            generation: 1,
+            doc_line: 0,
+            line_bytes: Arc::from(line.as_bytes()),
+            viewport_width: 800.0,
+            font_size: 14.0,
+            max_line_bytes: 0,
+            dv_idx: 0,
+            byte_offset: 0,
+            byte_length: line.len() as u32,
+        };
+        let ascii_entry = process_fallback(&build_request("# tokens"));
+        let cjk_entry = process_fallback(&build_request("# 企业"));
+
+        assert_ne!(ascii_entry.content_hash, cjk_entry.content_hash);
     }
 
     fn recv_one(worker: &ReshapeWorker, timeout: std::time::Duration) -> ReshapeResult {
