@@ -65,20 +65,21 @@ pub struct SidebarWidget {
 }
 
 fn make_style_from_theme(theme: &crate::theme::Theme) -> ListStyle {
+    let application = theme.application_theme();
     ListStyle {
         row_h_logical: crate::constants::ROW_HEIGHT,
         item_w_logical: 0.0,
-        pad_x_logical: 12.0,
+        pad_x_logical: theme.control_metrics().horizontal_padding_logical,
         pad_y_logical: 0.0,
         font_size_logical: 13.0,
         bg: [0.0, 0.0, 0.0, 0.0], // 透明：sidebar 主背景已铺好
-        item_active_bg: theme.palette.sidebar_active_bg,
-        item_hover_bg: theme.palette.sidebar_hover_bg,
-        item_fg: theme.palette.text_muted,
-        item_active_fg: theme.palette.accent,
-        item_hover_fg: theme.palette.text_main,
-        item_accent: theme.palette.accent,
-        separator: theme.palette.border_strong,
+        item_active_bg: application.navigation_selected_surface,
+        item_hover_bg: application.navigation_hover_surface,
+        item_fg: application.text_secondary,
+        item_active_fg: application.accent,
+        item_hover_fg: application.text_primary,
+        item_accent: application.accent,
+        separator: application.strong_border,
         indicator_color: theme.editor.foreground,
     }
 }

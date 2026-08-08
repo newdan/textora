@@ -26,13 +26,10 @@ const PIN_BAR_MARGIN_LOGICAL: f32 = 6.0;
 /// 关闭按钮尺寸（逻辑像素）
 const CLOSE_BTN_SIZE_LOGICAL: f32 = 12.0;
 
-/// 关闭按钮命中区域额外扩展（逻辑像素）
-const CLOSE_BTN_HIT_PAD_LOGICAL: f32 = 6.0;
 /// 关闭按钮与 label 文字之间的间距（逻辑像素）
 const CLOSE_BTN_LABEL_GAP_LOGICAL: f32 = 2.0;
 /// extra_label 预留宽度（逻辑像素）
 const EXTRA_LABEL_WIDTH_LOGICAL: f32 = 40.0;
-const LIST_FOCUS_RING_WIDTH_LOGICAL: f32 = 2.0;
 
 /// 行类型修饰：影响视觉与命中。
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Default)]
@@ -82,6 +79,29 @@ pub struct ListStyle {
     pub item_accent: [f32; 4],
     pub separator: [f32; 4],
     pub indicator_color: [f32; 4],
+}
+
+impl ListStyle {
+    pub fn from_theme(theme: &crate::theme::Theme) -> Self {
+        let metrics = theme.control_metrics();
+        let application = theme.application_theme();
+        Self {
+            row_h_logical: metrics.control_height_logical,
+            item_w_logical: crate::constants::SIDEBAR_MIN_WIDTH,
+            pad_x_logical: metrics.horizontal_padding_logical,
+            pad_y_logical: 0.0,
+            font_size_logical: metrics.font_size_logical,
+            bg: application.navigation_surface,
+            item_active_bg: application.navigation_selected_surface,
+            item_hover_bg: application.navigation_hover_surface,
+            item_fg: application.text_primary,
+            item_active_fg: application.navigation_selected_text,
+            item_hover_fg: application.text_primary,
+            item_accent: application.accent,
+            separator: application.divider,
+            indicator_color: application.warning,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -339,7 +359,8 @@ impl ListWidget {
         // Close button 位于行右侧
         let btn_x = row_rect.x + row_rect.w - pad_x - btn_size;
         let btn_y = row_rect.y + (row_rect.h - btn_size) * 0.5;
-        let hit_pad = CLOSE_BTN_HIT_PAD_LOGICAL * dpi;
+        let minimum_hit_target = crate::theme::ControlMetrics::default().minimum_hit_target_logical;
+        let hit_pad = ((minimum_hit_target - CLOSE_BTN_SIZE_LOGICAL) * 0.5).max(0.0) * dpi;
         let btn_rect = Rect::new(
             btn_x - hit_pad,
             btn_y - hit_pad,
@@ -424,6 +445,7 @@ impl Widget for ListWidget {
         ctx.list.cmds.push(DrawCmd::PushClip(clip_rect));
 
         let dpi = ctx.dpi;
+        let metrics = ctx.theme.control_metrics();
         let pad_x = self.style.pad_x_logical * dpi;
         let font_size = self.style.font_size_logical * dpi;
 
@@ -496,8 +518,8 @@ impl Widget for ListWidget {
                             ctx.list.stroke_rounded(
                                 row_rect,
                                 ctx.theme.settings_theme().focus_ring,
-                                dpi,
-                                LIST_FOCUS_RING_WIDTH_LOGICAL * dpi,
+                                metrics.compact_corner_radius_logical * dpi,
+                                metrics.focus_ring_width_logical * dpi,
                             );
                         }
                     }
@@ -505,7 +527,7 @@ impl Widget for ListWidget {
                     // Pin bar
                     if item.pinned {
                         let bar_len = PIN_BAR_WIDTH_LOGICAL * dpi;
-                        let bar_pad = 8.0 * dpi;
+                        let bar_pad = metrics.content_spacing_logical * dpi;
                         let mut bar_color = self.style.item_accent;
                         bar_color[3] *= alpha;
                         match self.orientation {
@@ -549,7 +571,7 @@ impl Widget for ListWidget {
                     fg[3] *= alpha;
                     let left_offset = self.pinned_left_offset(item, dpi);
                     let icon_extra = if item.icon.is_some() {
-                        (self.style.font_size_logical + 4.0) * dpi
+                        (self.style.font_size_logical + metrics.compact_spacing_logical) * dpi
                     } else {
                         0.0
                     };
@@ -615,7 +637,13 @@ impl Widget for ListWidget {
                     // Close button on hovered closeable items
                     if item.closeable && is_hovered {
                         let btn_size = CLOSE_BTN_SIZE_LOGICAL * dpi;
-                        let close_fg = [0.4, 0.4, 0.4, alpha * 0.9];
+                        let application = ctx.theme.application_theme();
+                        let mut close_fg = if self.close_hovered {
+                            application.text_primary
+                        } else {
+                            application.text_secondary
+                        };
+                        close_fg[3] *= alpha;
                         if let Some(ref mut shaper) = ctx.shaper {
                             ctx.list.text_shaped(
                                 row_rect.x + row_rect.w - pad_x - btn_size * 0.5,
@@ -840,6 +868,79 @@ mod tests {
         w.set_items(items);
         w.set_rect(rect, &mut layout);
         w
+    }
+
+    #[test]
+    fn standard_list_style_uses_shared_metrics_and_semantic_colors() {
+        for theme in [
+            crate::theme::Theme::resolve_builtin(
+                crate::settings::ThemeMode::Light,
+                winit::window::Theme::Light,
+            ),
+            crate::theme::Theme::resolve_builtin(
+                crate::settings::ThemeMode::Dark,
+                winit::window::Theme::Dark,
+            ),
+        ] {
+            let metrics = theme.control_metrics();
+            let application = theme.application_theme();
+            let style = ListStyle::from_theme(&theme);
+
+            assert_eq!(style.row_h_logical, metrics.control_height_logical);
+            assert_eq!(style.pad_x_logical, metrics.horizontal_padding_logical);
+            assert_eq!(style.font_size_logical, metrics.font_size_logical);
+            assert_eq!(style.item_fg, application.text_primary);
+            assert_eq!(style.item_hover_bg, application.navigation_hover_surface);
+        }
+    }
+
+    #[test]
+    fn close_icon_uses_semantic_colors_at_two_times_dpi() {
+        for theme in [
+            crate::theme::Theme::resolve_builtin(
+                crate::settings::ThemeMode::Light,
+                winit::window::Theme::Light,
+            ),
+            crate::theme::Theme::resolve_builtin(
+                crate::settings::ThemeMode::Dark,
+                winit::window::Theme::Dark,
+            ),
+        ] {
+            let application = theme.application_theme();
+            assert_eq!(painted_close_icon_color(&theme, false), application.text_secondary);
+            assert_eq!(painted_close_icon_color(&theme, true), application.text_primary);
+        }
+    }
+
+    fn painted_close_icon_color(theme: &Theme, close_hovered: bool) -> [f32; 4] {
+        let mut widget = ListWidget::new(ListStyle::from_theme(theme), Orientation::Vertical);
+        widget.set_items(vec![item("Document")]);
+        widget.hovered_index = Some(0);
+        widget.close_hovered = close_hovered;
+
+        let mut measure = NoopMeasure;
+        let mut layout = LayoutCtx { ui_measure: None, measure: &mut measure, theme, dpi: 2.0 };
+        widget.set_rect(Rect::new(0.0, 0.0, 440.0, 80.0), &mut layout);
+
+        let mut draw_list = DrawList::new();
+        let mut shaper = shaping::Shaper::new().expect("test shaper should initialize");
+        widget.paint(&mut PaintCtx {
+            global_alpha: 1.0,
+            list: &mut draw_list,
+            theme,
+            dpi: 2.0,
+            offset: (0.0, 0.0),
+            shaper: Some(&mut shaper),
+        });
+
+        draw_list
+            .cmds
+            .iter()
+            .find_map(|command| match command {
+                DrawCmd::TextLayout { layout, color, .. } if layout.text == "x" => Some(*color),
+                _ => None,
+            })
+            .expect("hovered closeable row should paint a close icon")
     }
 
     fn item(label: &str) -> ListItem {
