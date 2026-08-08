@@ -41,6 +41,7 @@ use crate::render::{EditorPaneState, NotoraRenderModel, NotoraShell};
 use crate::runtime_lru::{RuntimeLru, RuntimeTabState};
 use crate::search_controller::SearchController;
 use crate::shell::layout::{ShellLayout, ShellLayoutInput};
+use crate::state::normalize_notora_title;
 use crate::{
     NotoraPaths, NotoraPathsError, NotoraState, WorkspaceCommand, WorkspaceCommandResult,
     WorkspaceController, WorkspaceControllerError, WorkspaceRootState,
@@ -470,6 +471,9 @@ impl NotoraApp {
     }
 
     pub fn dispatch_action(&mut self, action: NotoraAction) {
+        if self.action_will_leave_title_focus(&action) {
+            self.commit_title_before_focus();
+        }
         let should_persist_session = action_requires_session_persistence(&action);
         let committed_without_workspace = match &action {
             NotoraAction::SearchTextChanged(query) => {
@@ -491,6 +495,23 @@ impl NotoraApp {
         if should_persist_session {
             self.schedule_session_persistence();
         }
+    }
+
+    fn action_will_leave_title_focus(&self, action: &NotoraAction) -> bool {
+        if self.state.layout.focus_target != crate::FocusTarget::EditorTitle
+            || matches!(
+                action,
+                NotoraAction::TitleTextChanged(_) | NotoraAction::TitleCommitRequested(_)
+            )
+        {
+            return false;
+        }
+
+        let selected_document = self.state.library.selected_card;
+        let mut next_state = self.state.clone();
+        let _ = next_state.reduce(action.clone());
+        next_state.layout.focus_target != crate::FocusTarget::EditorTitle
+            || next_state.library.selected_card != selected_document
     }
 
     fn synchronize_product_focus(&mut self) {
@@ -2106,14 +2127,6 @@ fn title_edit_error_message(error: DocumentTextEditError) -> String {
         DocumentTextEditError::InvalidByteRange { .. } => "标题范围无效，请重新提交".to_owned(),
         DocumentTextEditError::ReadOnly { .. } => "当前笔记不可编辑".to_owned(),
     }
-}
-
-fn normalize_notora_title(title: &str) -> String {
-    let trimmed_title = title.trim();
-    if trimmed_title.is_empty() {
-        return "无标题".to_owned();
-    }
-    trimmed_title.to_owned()
 }
 
 fn initial_title_from_document(kind: DocumentKind, source: &str) -> Option<String> {
@@ -4026,6 +4039,40 @@ mod tests {
                 .text,
             "# 项目路线图\n\n"
         );
+    }
+
+    #[test]
+    fn leaving_title_focus_commits_the_current_draft() {
+        let workspace_directory =
+            tempfile::tempdir().expect("workspace test directory should be created");
+        let mut app = app();
+        app.execute_workspace_command(WorkspaceCommand::OpenExisting {
+            root: workspace_directory.path().to_path_buf(),
+        })
+        .expect("workspace should open");
+
+        app.dispatch_action(NotoraAction::CreateRequested(DocumentKind::Markdown));
+        let deadline = Instant::now() + Duration::from_secs(2);
+        let tab_id = loop {
+            app.drain_product_events();
+            if let Some(identity) = app.state().library.selected_card
+                && let Some(tab_id) = app.document_tab_for(identity)
+            {
+                break tab_id;
+            }
+            assert!(Instant::now() < deadline, "created note should have an editor tab");
+            thread::sleep(Duration::from_millis(10));
+        };
+        app.render().expect("created note should render its title editor");
+
+        assert!(app.route_product_event(&ui::Event::ImeCommit("项目路线图".to_owned())));
+        assert_eq!(app.shell.editor_title_text(), "项目路线图");
+
+        app.dispatch_action(NotoraAction::FocusRequested(FocusTarget::Editor));
+
+        drain_until_document_text(&mut app, tab_id, "# 项目路线图\n\n", deadline);
+        app.render().expect("committed title should render");
+        assert_eq!(app.shell.editor_title_text(), "项目路线图");
     }
 
     #[test]

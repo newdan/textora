@@ -12,6 +12,14 @@ use crate::action::{
 use crate::effect_executor::ExternalOpenRequest;
 use crate::external_files::ExternalFileSessions;
 
+pub(crate) fn normalize_notora_title(title: &str) -> String {
+    let trimmed_title = title.trim();
+    if trimmed_title.is_empty() {
+        return "无标题".to_owned();
+    }
+    trimmed_title.to_owned()
+}
+
 /// 当前键盘输入应交给的唯一目标。
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum FocusTarget {
@@ -90,6 +98,7 @@ pub struct LibraryState {
     pub card_page: CardPageState,
     pub card_scroll_offset_px: f32,
     pub selected_card: Option<DocumentIdentity>,
+    pub pending_title_commit: Option<PendingTitleCommit>,
     pub selected_document_generation: u64,
     pub active_editor_metadata: Option<ActiveEditorMetadata>,
     pub last_command_error: Option<String>,
@@ -106,6 +115,7 @@ impl Default for LibraryState {
             card_page: CardPageState::Idle,
             card_scroll_offset_px: 0.0,
             selected_card: None,
+            pending_title_commit: None,
             selected_document_generation: 0,
             active_editor_metadata: None,
             last_command_error: None,
@@ -113,6 +123,12 @@ impl Default for LibraryState {
             navigation_tree: NavigationTreeState::default(),
         }
     }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PendingTitleCommit {
+    pub identity: DocumentIdentity,
+    pub title: String,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -343,6 +359,7 @@ impl NotoraState {
                 self.request_card_query(CardQuery::from(self.library.navigation_scope.clone()))
             }
             NotoraAction::MetadataMutationFailed(message) => {
+                self.library.pending_title_commit = None;
                 self.library.last_command_error = Some(message);
                 vec![NotoraEffect::Redraw]
             }
@@ -537,6 +554,11 @@ impl NotoraState {
         {
             return vec![NotoraEffect::Redraw];
         }
+        let Some(identity) = self.library.selected_card else {
+            return vec![NotoraEffect::Redraw];
+        };
+        self.library.pending_title_commit =
+            Some(PendingTitleCommit { identity, title: normalize_notora_title(&title) });
         self.library.last_command_error = None;
         vec![NotoraEffect::CommitTitle(title), NotoraEffect::Redraw]
     }
@@ -706,7 +728,29 @@ impl NotoraState {
             }
             _ => return Vec::new(),
         }
+        self.clear_confirmed_title_commit();
         vec![NotoraEffect::Redraw]
+    }
+
+    fn clear_confirmed_title_commit(&mut self) {
+        let Some(pending_title) = self.library.pending_title_commit.as_ref() else {
+            return;
+        };
+        let DocumentIdentity::Note(note_id) = pending_title.identity else {
+            return;
+        };
+        let cards = match &self.library.card_page {
+            CardPageState::Ready { cards, .. }
+            | CardPageState::LoadingNextPage { cards, .. }
+            | CardPageState::Refreshing { cards, .. }
+            | CardPageState::Failed { cards, .. } => cards,
+            CardPageState::Idle
+            | CardPageState::LoadingInitial { .. }
+            | CardPageState::Empty { .. } => return,
+        };
+        if cards.iter().any(|card| card.note_id == note_id && card.title == pending_title.title) {
+            self.library.pending_title_commit = None;
+        }
     }
 
     fn apply_card_query_failure(&mut self, query: CardQuery, message: String) -> Vec<NotoraEffect> {
@@ -1194,6 +1238,14 @@ mod tests {
             vec![NotoraEffect::CommitTitle("项目路线图".to_owned()), NotoraEffect::Redraw]
         );
         assert_eq!(state.layout.focus_target, FocusTarget::Editor);
+        assert_eq!(
+            state
+                .library
+                .pending_title_commit
+                .as_ref()
+                .map(|pending_title| (pending_title.identity, pending_title.title.as_str())),
+            Some((DocumentIdentity::Note(note_id), "项目路线图"))
+        );
 
         state.library.navigation_scope = NavigationScope::Trash;
         assert_eq!(
@@ -1208,6 +1260,26 @@ mod tests {
             state.reduce(NotoraAction::TitleCommitRequested("外部文件".to_owned())),
             vec![NotoraEffect::Redraw]
         );
+    }
+
+    #[test]
+    fn refreshed_catalog_title_confirms_the_pending_title_commit() {
+        let note_id = NoteId::generate();
+        let query = CardQuery::from(NavigationScope::WorkspaceRoot);
+        let mut state = NotoraState::default();
+        state.library.selected_card = Some(DocumentIdentity::Note(note_id));
+
+        let _ = state.reduce(NotoraAction::TitleCommitRequested("  项目路线图  ".to_owned()));
+        state.library.card_page = CardPageState::LoadingInitial { query: query.clone() };
+        let _ = state.reduce(NotoraAction::CardQueryCompleted {
+            query,
+            page: CatalogCardPage {
+                cards: vec![card(note_id, "项目路线图", 1)],
+                next_cursor: None,
+            },
+        });
+
+        assert_eq!(state.library.pending_title_commit, None);
     }
 
     #[test]

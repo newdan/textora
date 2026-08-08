@@ -343,11 +343,18 @@ fn editor_pane_input(state: &NotoraState, cards: &[RenderCard]) -> EditorPaneInp
         DocumentIdentity::Note(note_id) => format!("note:{note_id}"),
         DocumentIdentity::ExternalFile(file_id) => format!("external:{file_id}"),
     };
-    let title = selected_card.map(|card| card.title.clone()).unwrap_or_else(|| match mode {
-        EditorPaneMode::TrashNote => "回收站笔记".to_owned(),
-        EditorPaneMode::WorkspaceNote => "无标题".to_owned(),
-        EditorPaneMode::ExternalFile | EditorPaneMode::Empty => "未命名".to_owned(),
-    });
+    let title = state
+        .library
+        .pending_title_commit
+        .as_ref()
+        .filter(|pending_title| pending_title.identity == identity)
+        .map(|pending_title| pending_title.title.clone())
+        .or_else(|| selected_card.map(|card| card.title.clone()))
+        .unwrap_or_else(|| match mode {
+            EditorPaneMode::TrashNote => "回收站笔记".to_owned(),
+            EditorPaneMode::WorkspaceNote => "无标题".to_owned(),
+            EditorPaneMode::ExternalFile | EditorPaneMode::Empty => "未命名".to_owned(),
+        });
     let starred = selected_card.is_some_and(|card| card.tag_summary.starts_with('★'));
     let tags = selected_card
         .map(|card| {
