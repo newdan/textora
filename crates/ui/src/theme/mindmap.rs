@@ -645,7 +645,10 @@ fn build_warm_night_scheme() -> MindmapColorScheme {
     }
 }
 
-#[allow(clippy::too_many_arguments)]
+#[allow(
+    clippy::too_many_arguments,
+    reason = "built-in scheme construction maps each documented semantic color explicitly"
+)]
 fn build_dark_scheme(
     id: &'static str,
     display_name: &'static str,

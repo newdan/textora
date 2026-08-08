@@ -255,7 +255,10 @@ impl ThemeRegistry {
     }
 }
 
-#[allow(clippy::too_many_arguments)]
+#[allow(
+    clippy::too_many_arguments,
+    reason = "recursive theme resolution carries explicit graph state for cycle diagnostics"
+)]
 fn resolve_theme(
     id: &str,
     parsed: &BTreeMap<String, ParsedTheme>,

@@ -356,7 +356,10 @@ impl MindmapStylePanelWidget {
         self.paint_branch_node(ctx, lower_leaf, option, 3);
     }
 
-    #[allow(clippy::too_many_arguments)]
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "connector preview receives five precomputed node rectangles from layout"
+    )]
     fn paint_tree_connectors(
         &self,
         ctx: &mut PaintCtx,
