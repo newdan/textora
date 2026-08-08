@@ -7,7 +7,6 @@ use crate::core::{
     PaintCtx, Rect, Widget, WidgetAction,
 };
 
-const CHECKBOX_SIZE_LOGICAL: f32 = 20.0;
 const CHECKBOX_BORDER_WIDTH_LOGICAL: f32 = 1.0;
 const CHECK_ICON_INSET_LOGICAL: f32 = 5.0;
 const CHECK_MARK_START_RATIO: [f32; 2] = [0.14, 0.52];
@@ -318,6 +317,8 @@ impl Widget for Checkbox {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    const CHECKBOX_SIZE_LOGICAL: f32 = 20.0;
 
     use crate::core::measure::NoopMeasure;
     use crate::core::widget::{LayoutCtx, Modifiers};

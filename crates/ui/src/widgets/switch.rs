@@ -72,10 +72,6 @@ impl Switch {
         WidgetAction::Control(ControlAction::Toggled { id: self.id, checked: self.checked })
     }
 
-    fn track_rect(&self) -> Rect {
-        self.track_rect_with_dpi(1.0)
-    }
-
     fn track_rect_with_dpi(&self, dpi: f32) -> Rect {
         let width = (SWITCH_WIDTH_LOGICAL * dpi).min(self.rect.w);
         let height = (SWITCH_HEIGHT_LOGICAL * dpi).min(self.rect.h);
@@ -481,7 +477,7 @@ mod tests {
         let mut switch = Switch::new(WidgetId(99), false);
         switch.set_rect(Rect::new(0.0, 0.0, 220.0, 32.0), &mut layout);
 
-        assert_eq!(switch.track_rect(), Rect::new(184.0, 6.0, 36.0, 20.0));
+        assert_eq!(switch.track_rect_with_dpi(1.0), Rect::new(184.0, 6.0, 36.0, 20.0));
     }
 
     #[test]
