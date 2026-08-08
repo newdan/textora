@@ -386,11 +386,7 @@ impl Widget for ModalFrame {
                 self.dispatch_to_target(target, event, ctx)
             }
             Event::MouseDown { .. } => None,
-            Event::KeyDown(..)
-            | Event::ImePreedit { .. }
-            | Event::ImeCommit(..)
-            | Event::ImeEnable
-            | Event::ImeDisable => self.dispatch_to_content(event, ctx),
+            _ => self.dispatch_to_content(event, ctx),
         }
     }
 
