@@ -165,6 +165,14 @@ impl ScrollbarState {
         self.interaction = ScrollbarInteraction::Hovered;
         true
     }
+
+    fn cancel_interaction(&mut self) -> bool {
+        if matches!(self.interaction, ScrollbarInteraction::Idle) {
+            return false;
+        }
+        self.interaction = ScrollbarInteraction::Idle;
+        true
+    }
 }
 
 // ── Action ─────────────────────────────────────────────────────────
@@ -377,6 +385,13 @@ impl Widget for ScrollbarWidget {
                 }
                 None
             }
+            Event::PointerLeave => {
+                if self.state.is_dragging() || !self.state.is_hovered() {
+                    return None;
+                }
+                self.state.set_hovered(false);
+                Some(WidgetAction::Scrollbar(ScrollbarAction::HoverChanged(false)))
+            }
             Event::MouseDown { px, py, button: MouseButton::Left } => {
                 // Only handle clicks within the scrollbar's bounds
                 if !self.pointer_in_bar(*px, *py) {
@@ -408,6 +423,9 @@ impl Widget for ScrollbarWidget {
                 } else {
                     None
                 }
+            }
+            Event::InteractionCancel => {
+                self.state.cancel_interaction().then_some(WidgetAction::Consumed)
             }
             _ => None,
         }
@@ -597,6 +615,39 @@ mod tests {
         let a = w.on_event(&Event::MouseMove { px: -1188.0, py: -32.0 }, &mut ec);
         let a = a.unwrap();
         assert_eq!(a, WidgetAction::Scrollbar(ScrollbarAction::HoverChanged(false)));
+    }
+
+    #[test]
+    fn lifecycle_leave_preserves_drag_and_cancel_is_idempotent() {
+        let mut widget = make_widget(Rect::new(1188.0, 32.0, 12.0, 744.0), 1.0, 100.0, 200, 0.0);
+        let theme = test_theme();
+        let mut event_ctx = EventCtx { cursor_hint: None, theme: &theme, dpi: 1.0 };
+
+        assert_eq!(
+            widget.on_event(&Event::MouseMove { px: 6.0, py: 68.0 }, &mut event_ctx),
+            Some(WidgetAction::Scrollbar(ScrollbarAction::HoverChanged(true)))
+        );
+        assert_eq!(
+            widget.on_event(
+                &Event::MouseDown { px: 6.0, py: 68.0, button: MouseButton::Left },
+                &mut event_ctx,
+            ),
+            Some(WidgetAction::Scrollbar(ScrollbarAction::StartDrag))
+        );
+        assert_eq!(widget.on_event(&Event::PointerLeave, &mut event_ctx), None);
+        assert!(widget.is_capturing());
+
+        assert_eq!(
+            widget.on_event(&Event::InteractionCancel, &mut event_ctx),
+            Some(WidgetAction::Consumed)
+        );
+        assert!(!widget.is_capturing());
+        assert!(!widget.active());
+        assert_eq!(widget.on_event(&Event::InteractionCancel, &mut event_ctx), None);
+        assert_eq!(
+            widget.on_event(&Event::MouseMove { px: 6.0, py: 468.0 }, &mut event_ctx),
+            Some(WidgetAction::Scrollbar(ScrollbarAction::HoverChanged(true)))
+        );
     }
 
     #[test]

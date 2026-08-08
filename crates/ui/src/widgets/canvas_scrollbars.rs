@@ -144,6 +144,7 @@ impl CanvasScrollbarsWidget {
             Some(WidgetAction::Scrollbar(action)) => {
                 Some(WidgetAction::CanvasScrollbars(CanvasScrollbarsAction { axis, action }))
             }
+            Some(WidgetAction::Consumed) => Some(WidgetAction::Consumed),
             Some(_) | None => None,
         }
     }
@@ -193,6 +194,28 @@ impl Widget for CanvasScrollbarsWidget {
     fn on_event(&mut self, event: &Event, ctx: &mut EventCtx) -> Option<WidgetAction> {
         let forwards_to_horizontal = self.forwards_to_horizontal();
         let forwards_to_vertical = self.forwards_to_vertical();
+
+        if matches!(event, Event::PointerLeave | Event::InteractionCancel) {
+            let horizontal_action = forwards_to_horizontal.then(|| {
+                Self::forward_event(
+                    &mut self.horizontal,
+                    CanvasAxis::Horizontal,
+                    self.layout.horizontal,
+                    event,
+                    ctx,
+                )
+            });
+            let vertical_action = forwards_to_vertical.then(|| {
+                Self::forward_event(
+                    &mut self.vertical,
+                    CanvasAxis::Vertical,
+                    self.layout.vertical,
+                    event,
+                    ctx,
+                )
+            });
+            return horizontal_action.flatten().or_else(|| vertical_action.flatten());
+        }
 
         if matches!(event, Event::MouseMove { .. }) {
             let horizontal_action = forwards_to_horizontal.then(|| {
@@ -269,6 +292,13 @@ mod tests {
 
     fn canvas_rect() -> Rect {
         Rect::new(0.0, 0.0, 800.0, 600.0)
+    }
+
+    fn paint_fill_count(widget: &CanvasScrollbarsWidget, theme: &crate::Theme) -> usize {
+        let mut draw_list = DrawList::new();
+        let mut paint_ctx = PaintCtx::new(&mut draw_list, theme, 1.0);
+        widget.paint(&mut paint_ctx);
+        draw_list.cmds.iter().filter(|command| matches!(command, DrawCmd::FillRect { .. })).count()
     }
 
     #[test]
@@ -368,5 +398,45 @@ mod tests {
             }))
         );
         assert!(!widget.is_capturing());
+    }
+
+    #[test]
+    fn lifecycle_events_reach_both_axes_and_cancel_capture_once() {
+        let theme = test_theme();
+        let mut measure = NoopMeasure;
+        let mut layout_ctx =
+            LayoutCtx { measure: &mut measure, ui_measure: None, theme: &theme, dpi: 1.0 };
+        let mut event_ctx = crate::core::EventCtx { cursor_hint: None, theme: &theme, dpi: 1.0 };
+        let mut widget = CanvasScrollbarsWidget::new();
+        widget.set_input(CanvasScrollbarsInput {
+            horizontal: Some(overflowing_input()),
+            vertical: Some(overflowing_input()),
+        });
+        widget.set_rect(canvas_rect(), &mut layout_ctx);
+
+        let _ = widget.on_event(&Event::MouseMove { px: 795.0, py: 40.0 }, &mut event_ctx);
+        let _ = widget.on_event(
+            &Event::MouseDown { px: 40.0, py: 590.0, button: MouseButton::Left },
+            &mut event_ctx,
+        );
+        assert!(widget.horizontal.is_capturing());
+        assert_eq!(paint_fill_count(&widget, &theme), 4);
+
+        assert_eq!(
+            widget.on_event(&Event::PointerLeave, &mut event_ctx),
+            Some(WidgetAction::CanvasScrollbars(CanvasScrollbarsAction {
+                axis: CanvasAxis::Vertical,
+                action: ScrollbarAction::HoverChanged(false),
+            }))
+        );
+        assert!(widget.horizontal.is_capturing());
+        assert_eq!(paint_fill_count(&widget, &theme), 3);
+        assert_eq!(
+            widget.on_event(&Event::InteractionCancel, &mut event_ctx),
+            Some(WidgetAction::Consumed)
+        );
+        assert!(!widget.is_capturing());
+        assert_eq!(paint_fill_count(&widget, &theme), 2);
+        assert_eq!(widget.on_event(&Event::InteractionCancel, &mut event_ctx), None);
     }
 }

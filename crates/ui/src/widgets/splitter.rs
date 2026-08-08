@@ -174,6 +174,16 @@ impl Widget for SplitterWidget {
             return None;
         }
 
+        if matches!(event, Event::PointerLeave) {
+            return std::mem::take(&mut self.hovered).then_some(WidgetAction::Consumed);
+        }
+
+        if matches!(event, Event::InteractionCancel) {
+            let interaction_changed =
+                std::mem::take(&mut self.hovered) | self.drag_start_px.take().is_some();
+            return interaction_changed.then_some(WidgetAction::Consumed);
+        }
+
         if let Event::MouseMove { px, py } = event
             && !self.is_capturing()
         {
@@ -442,5 +452,60 @@ mod tests {
             widget.on_event(&Event::MouseMove { px: 102.0, py: 20.0 }, &mut context),
             Some(WidgetAction::Consumed)
         );
+    }
+
+    #[test]
+    fn splitter_leave_preserves_drag_and_cancel_is_idempotent() {
+        let mut widget = widget();
+        let theme = crate::theme::test_theme();
+        let mut context = event_context(&theme);
+
+        assert_eq!(
+            widget.on_event(&Event::MouseMove { px: 102.0, py: 20.0 }, &mut context),
+            Some(WidgetAction::Consumed)
+        );
+        assert_eq!(
+            widget.on_event(
+                &Event::MouseDown { px: 102.0, py: 20.0, button: MouseButton::Left },
+                &mut context,
+            ),
+            Some(WidgetAction::Splitter(SplitterAction::DragStarted))
+        );
+        assert_eq!(
+            widget.on_event(&Event::PointerLeave, &mut context),
+            Some(WidgetAction::Consumed)
+        );
+        assert!(widget.is_capturing());
+
+        assert_eq!(
+            widget.on_event(&Event::InteractionCancel, &mut context),
+            Some(WidgetAction::Consumed)
+        );
+        assert!(!widget.is_capturing());
+        assert_eq!(widget.on_event(&Event::InteractionCancel, &mut context), None);
+        assert_eq!(widget.on_event(&Event::MouseMove { px: 152.0, py: 20.0 }, &mut context), None);
+        assert_eq!(
+            widget.on_event(
+                &Event::MouseUp { px: 152.0, py: 20.0, button: MouseButton::Left },
+                &mut context,
+            ),
+            None
+        );
+    }
+
+    #[test]
+    fn disabling_splitter_during_drag_releases_capture() {
+        let mut widget = widget();
+        let theme = crate::theme::test_theme();
+        let mut context = event_context(&theme);
+        let _ = widget.on_event(
+            &Event::MouseDown { px: 102.0, py: 20.0, button: MouseButton::Left },
+            &mut context,
+        );
+
+        widget.set_input(SplitterInput { enabled: false, ..widget.input });
+
+        assert!(!widget.is_capturing());
+        assert_eq!(widget.on_event(&Event::InteractionCancel, &mut context), None);
     }
 }
