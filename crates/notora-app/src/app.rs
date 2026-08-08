@@ -3842,6 +3842,64 @@ mod tests {
     }
 
     #[test]
+    fn tab_after_typing_into_an_empty_mindmap_root_creates_a_child() {
+        let workspace_directory =
+            tempfile::tempdir().expect("workspace test directory should be created");
+        let mut app = app();
+        app.execute_workspace_command(WorkspaceCommand::OpenExisting {
+            root: workspace_directory.path().to_path_buf(),
+        })
+        .expect("workspace should open");
+
+        app.dispatch_action(NotoraAction::CreateRequested(DocumentKind::Mindmap));
+        let deadline = Instant::now() + Duration::from_secs(2);
+        let tab_id = loop {
+            app.drain_product_events();
+            if let Some(identity) = app.state().library.selected_card
+                && let Some(tab_id) = app.document_tab_for(identity)
+            {
+                break tab_id;
+            }
+            assert!(Instant::now() < deadline, "created mmap should have an editor tab");
+            thread::sleep(Duration::from_millis(10));
+        };
+        app.render().expect("created mmap should render its empty root");
+        app.dispatch_action(NotoraAction::FocusRequested(FocusTarget::Editor));
+        let Some(tab) = app.editor_runtime.tab_session_mut(tab_id) else {
+            panic!("created mmap should keep its runtime session");
+        };
+        tab.document.cursor_mut().selection_anchor = Some(0);
+        tab.document.cursor_move_to_offset(1);
+
+        app.commit_editor_text("kk".to_owned());
+        assert_eq!(
+            app.editor_runtime
+                .document_text_snapshot(tab_id)
+                .expect("typed mmap root should remain available")
+                .text,
+            "#kk"
+        );
+
+        let mapped_tab = appkit_shell::window_input::winit_key_to_keycode(
+            &winit::keyboard::Key::Named(winit::keyboard::NamedKey::Tab),
+            Some("\t"),
+        )
+        .expect("native Tab should map to an editor key");
+        let tab_event = ui::Event::KeyDown(mapped_tab, ui::core::Modifiers::NONE);
+        if !app.route_product_event(&tab_event) {
+            app.handle_editor_key_input(mapped_tab, ui::core::Modifiers::NONE);
+        }
+
+        assert_eq!(
+            app.editor_runtime
+                .document_text_snapshot(tab_id)
+                .expect("indented mmap root should remain available")
+                .text,
+            "#kk\n##\n"
+        );
+    }
+
+    #[test]
     fn tab_from_an_untitled_new_mindmap_root_creates_a_child_without_spaces() {
         let workspace_directory =
             tempfile::tempdir().expect("workspace test directory should be created");

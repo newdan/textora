@@ -52,6 +52,29 @@ use crate::reshape_worker::{ReshapeRequest, ReshapeResult, ReshapeWorker};
 use crate::tab_runtime::TabRuntimeStore;
 use crate::workspace::Workspace;
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ClipboardCommand {
+    Copy,
+    Cut,
+    Paste,
+}
+
+fn clipboard_command_for_key(
+    key: ui::KeyCode,
+    modifiers: ui::core::Modifiers,
+) -> Option<ClipboardCommand> {
+    if !(modifiers.cmd || modifiers.ctrl) {
+        return None;
+    }
+
+    match key {
+        ui::KeyCode::Char('c' | 'C') => Some(ClipboardCommand::Copy),
+        ui::KeyCode::Char('x' | 'X') => Some(ClipboardCommand::Cut),
+        ui::KeyCode::Char('v' | 'V') => Some(ClipboardCommand::Paste),
+        _ => None,
+    }
+}
+
 const CURSOR_BLINK_INTERVAL_MS: u64 = 500;
 const CURSOR_BLINK_WAKE_TOLERANCE_MS: u64 = 5;
 
@@ -728,6 +751,10 @@ impl EditorRuntime {
             return EditorOutcome::default();
         }
 
+        if let Some(clipboard_command) = clipboard_command_for_key(key, modifiers) {
+            return self.handle_clipboard_command(clipboard_command);
+        }
+
         let command = modifiers.cmd || modifiers.ctrl;
         if command {
             match key {
@@ -776,6 +803,42 @@ impl EditorRuntime {
         intent.map_or_else(EditorOutcome::default, |intent| {
             self.model_session.edit_active_document(intent, self.editor_line_height())
         })
+    }
+
+    fn handle_clipboard_command(&mut self, command: ClipboardCommand) -> EditorOutcome {
+        match command {
+            ClipboardCommand::Copy => {
+                if let Some(text) = self.model_session.active_selected_text() {
+                    let _ = crate::clipboard::try_write_text(&text);
+                }
+                EditorOutcome::default()
+            }
+            ClipboardCommand::Cut => {
+                let Some(text) = self.model_session.active_selected_text() else {
+                    return EditorOutcome::default();
+                };
+                if !crate::clipboard::try_write_text(&text) {
+                    return EditorOutcome::default();
+                }
+                self.model_session.edit_active_document(
+                    ui::plugin::EditIntent::DeleteBackward,
+                    self.editor_line_height(),
+                )
+            }
+            ClipboardCommand::Paste => {
+                let Some(text) = crate::clipboard::try_read_text() else {
+                    return EditorOutcome::default();
+                };
+                let normalized_text = text.replace("\r\n", "\n").replace('\r', "\n");
+                if normalized_text.is_empty() {
+                    return EditorOutcome::default();
+                }
+                self.model_session.edit_active_document(
+                    ui::plugin::EditIntent::InsertText(normalized_text),
+                    self.editor_line_height(),
+                )
+            }
+        }
     }
 
     pub fn execute_semantic_edit(
@@ -1889,5 +1952,24 @@ mod tests {
 
         assert_eq!(outcome, EditorOutcome::default());
         assert_eq!(runtime.workspace_snapshot().tabs[0].content_lines, vec!["clean"]);
+    }
+
+    #[test]
+    fn command_modifier_clipboard_keys_are_recognized_by_editor_runtime() {
+        let command_modifiers = ui::core::Modifiers { cmd: true, ..ui::core::Modifiers::NONE };
+        let control_modifiers = ui::core::Modifiers { ctrl: true, ..ui::core::Modifiers::NONE };
+
+        assert_eq!(
+            clipboard_command_for_key(ui::KeyCode::Char('c'), command_modifiers),
+            Some(ClipboardCommand::Copy)
+        );
+        assert_eq!(
+            clipboard_command_for_key(ui::KeyCode::Char('x'), command_modifiers),
+            Some(ClipboardCommand::Cut)
+        );
+        assert_eq!(
+            clipboard_command_for_key(ui::KeyCode::Char('v'), control_modifiers),
+            Some(ClipboardCommand::Paste)
+        );
     }
 }

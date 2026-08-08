@@ -22,13 +22,17 @@ pub fn ui_modifiers(state: ModifiersState) -> Modifiers {
 
 /// Converts a winit logical key and event text into a UI key code.
 ///
-/// Prefers event text to preserve keyboard-layout and Shift combinations, then
-/// falls back to the logical key for character and named control keys.
+/// Preserves named Tab as a semantic command. Other keys prefer event text for
+/// keyboard-layout and Shift combinations, then fall back to the logical key.
 pub fn winit_key_to_keycode(logical_key: &Key, text: Option<&str>) -> Option<KeyCode> {
+    if matches!(logical_key, Key::Named(NamedKey::Tab)) {
+        return Some(KeyCode::Tab);
+    }
+
     if let Some(text) = text
         && !text.is_empty()
         && let Some(character) = text.chars().next()
-        && (!character.is_control() || character == '\t')
+        && !character.is_control()
     {
         return Some(KeyCode::Char(character));
     }
@@ -135,6 +139,14 @@ mod tests {
         assert_eq!(
             winit_key_to_keycode(&Key::Named(NamedKey::Escape), None),
             Some(KeyCode::Escape)
+        );
+    }
+
+    #[test]
+    fn keycode_maps_named_tab_to_semantic_tab_despite_event_text() {
+        assert_eq!(
+            winit_key_to_keycode(&Key::Named(NamedKey::Tab), Some("\t")),
+            Some(KeyCode::Tab)
         );
     }
 

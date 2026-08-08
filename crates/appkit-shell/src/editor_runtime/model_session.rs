@@ -107,6 +107,13 @@ impl ModelSession {
         self.workspace.active_tab_id()
     }
 
+    pub(crate) fn active_selected_text(&self) -> Option<String> {
+        self.workspace
+            .active_entry()?
+            .extract_selected_text()
+            .map(|bytes| String::from_utf8_lossy(&bytes).into_owned())
+    }
+
     pub(crate) fn tab_index(&self, tab_id: TabId) -> Option<usize> {
         self.workspace.index_of(tab_id)
     }

@@ -2049,11 +2049,10 @@ mod tests {
     }
 
     #[test]
-    fn keycode_tab_not_filtered() {
-        // Tab is a control char but should pass through
+    fn keycode_named_tab_prefers_semantic_key_over_event_text() {
         assert_eq!(
             winit_key_to_keycode(&Key::Named(NamedKey::Tab), Some("\t")),
-            Some(KeyCode::Char('\t'))
+            Some(KeyCode::Tab)
         );
     }
 
