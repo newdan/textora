@@ -3,7 +3,11 @@
 
 use crate::core::text_layout::UiTextLayout;
 use crate::core::widget::{ControlAction, WidgetId};
-use crate::core::{Event, EventCtx, LayoutCtx, MouseButton, PaintCtx, Rect, Widget, WidgetAction};
+use crate::core::{
+    AccessibilityAction, AccessibilityActionRequest, AccessibilityContext, AccessibilityId,
+    AccessibilityNode, AccessibilityRole, Event, EventCtx, LayoutCtx, MouseButton, PaintCtx, Rect,
+    Widget, WidgetAction,
+};
 use crate::widgets::icon::draw_icon;
 use std::any::Any;
 use std::sync::Arc;
@@ -33,6 +37,7 @@ pub struct Button {
     icon: Option<String>,
     icon_size_logical: f32,
     text: Option<String>,
+    accessibility_label: Option<String>,
     style: ButtonStyle,
     hovered: bool,
     enabled: bool,
@@ -49,6 +54,7 @@ impl Button {
             icon: None,
             icon_size_logical: crate::constants::BUTTON_SIZE,
             text: None,
+            accessibility_label: None,
             style,
             hovered: false,
             enabled: true,
@@ -63,6 +69,9 @@ impl Button {
     }
     pub fn set_text(&mut self, text: Option<String>) {
         self.text = text;
+    }
+    pub fn set_accessibility_label(&mut self, label: Option<String>) {
+        self.accessibility_label = label;
     }
     pub fn set_selected(&mut self, selected: bool) {
         self.selected = selected;
@@ -198,6 +207,44 @@ impl Widget for Button {
         self.focused = self.enabled && focused_id == Some(self.id);
     }
 
+    fn accessibility_node(&self, ctx: &AccessibilityContext) -> Option<AccessibilityNode> {
+        let mut node = AccessibilityNode::new(
+            AccessibilityId::from(self.id),
+            AccessibilityRole::Button,
+            ctx.screen_bounds(self.rect),
+        )
+        .with_disabled(!self.enabled)
+        .with_focused(self.focused)
+        .with_selected(self.selected);
+        if let Some(name) = self.accessibility_label.as_ref().or(self.text.as_ref()) {
+            node = node.with_name(name.clone());
+        }
+        if self.enabled {
+            node = node
+                .with_action(AccessibilityAction::Focus)
+                .with_action(AccessibilityAction::Activate);
+        }
+        Some(node)
+    }
+
+    fn on_accessibility_action(
+        &mut self,
+        request: &AccessibilityActionRequest,
+    ) -> Option<WidgetAction> {
+        if !self.enabled || request.target != AccessibilityId::from(self.id) {
+            return None;
+        }
+        match request.action {
+            AccessibilityAction::Focus => {
+                Some(WidgetAction::Control(ControlAction::FocusRequested { id: self.id }))
+            }
+            AccessibilityAction::Activate => {
+                Some(WidgetAction::Control(ControlAction::Activated { id: self.id }))
+            }
+            _ => None,
+        }
+    }
+
     fn on_event(&mut self, ev: &Event, ctx: &mut EventCtx) -> Option<WidgetAction> {
         match ev {
             Event::MouseMove { px, py } => {
@@ -324,6 +371,39 @@ mod tests {
         let theme = crate::theme::test_theme();
         let mut event_ctx = EventCtx { cursor_hint: None, theme: &theme, dpi: 1.0 };
         button.on_event(&Event::MouseUp { px, py, button: MouseButton::Left }, &mut event_ctx)
+    }
+
+    #[test]
+    fn accessibility_exposes_button_semantics_and_reuses_control_actions() {
+        let id = WidgetId(90);
+        let mut button = make_button_with_rect(id, Rect::new(5.0, 6.0, 100.0, 28.0));
+        button.set_text(Some("保存".into()));
+        button.set_selected(true);
+        button.set_keyboard_focus(Some(id));
+        let context = crate::core::AccessibilityContext::new(10.0, 20.0);
+        let node = button.accessibility_node(&context).expect("button should expose semantics");
+
+        assert_eq!(node.id, crate::core::AccessibilityId::from(id));
+        assert_eq!(node.role, crate::core::AccessibilityRole::Button);
+        assert_eq!(node.name.as_deref(), Some("保存"));
+        assert_eq!(node.bounds, Rect::new(15.0, 26.0, 100.0, 28.0));
+        assert!(node.state.focused);
+        assert_eq!(node.state.selected, Some(true));
+        assert!(node.actions.contains(&crate::core::AccessibilityAction::Focus));
+        assert!(node.actions.contains(&crate::core::AccessibilityAction::Activate));
+        assert_eq!(
+            button.on_accessibility_action(&crate::core::AccessibilityActionRequest::new(
+                node.id,
+                crate::core::AccessibilityAction::Activate,
+            )),
+            Some(WidgetAction::Control(ControlAction::Activated { id }))
+        );
+
+        button.set_enabled(false);
+        let disabled_node =
+            button.accessibility_node(&context).expect("disabled button remains discoverable");
+        assert!(disabled_node.state.disabled);
+        assert!(disabled_node.actions.is_empty());
     }
 
     #[test]

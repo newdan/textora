@@ -2,7 +2,9 @@ use std::any::Any;
 
 use crate::core::widget::{ControlAction, WidgetId};
 use crate::core::{
-    Event, EventCtx, KeyCode, LayoutCtx, MouseButton, PaintCtx, Rect, Widget, WidgetAction,
+    AccessibilityAction, AccessibilityActionRequest, AccessibilityContext, AccessibilityId,
+    AccessibilityNode, AccessibilityRole, Event, EventCtx, KeyCode, LayoutCtx, MouseButton,
+    PaintCtx, Rect, Widget, WidgetAction,
 };
 
 const CHECKBOX_SIZE_LOGICAL: f32 = 20.0;
@@ -26,6 +28,7 @@ pub struct Checkbox {
     focused: bool,
     hovered: bool,
     pressed: bool,
+    accessibility_label: Option<String>,
 }
 
 impl Checkbox {
@@ -38,6 +41,7 @@ impl Checkbox {
             focused: false,
             hovered: false,
             pressed: false,
+            accessibility_label: None,
         }
     }
 
@@ -60,6 +64,10 @@ impl Checkbox {
             self.hovered = false;
             self.pressed = false;
         }
+    }
+
+    pub fn set_accessibility_label(&mut self, label: Option<String>) {
+        self.accessibility_label = label;
     }
 
     fn toggle_action(&mut self) -> WidgetAction {
@@ -191,6 +199,44 @@ impl Widget for Checkbox {
 
     fn set_keyboard_focus(&mut self, focused_id: Option<WidgetId>) {
         self.focused = self.enabled && focused_id == Some(self.id);
+    }
+
+    fn accessibility_node(&self, ctx: &AccessibilityContext) -> Option<AccessibilityNode> {
+        let mut node = AccessibilityNode::new(
+            AccessibilityId::from(self.id),
+            AccessibilityRole::CheckBox,
+            ctx.screen_bounds(self.rect),
+        )
+        .with_disabled(!self.enabled)
+        .with_focused(self.focused)
+        .with_checked(self.checked);
+        if let Some(label) = &self.accessibility_label {
+            node = node.with_name(label.clone());
+        }
+        if self.enabled {
+            node = node
+                .with_action(AccessibilityAction::Focus)
+                .with_action(AccessibilityAction::Toggle);
+        }
+        Some(node)
+    }
+
+    fn on_accessibility_action(
+        &mut self,
+        request: &AccessibilityActionRequest,
+    ) -> Option<WidgetAction> {
+        if !self.enabled || request.target != AccessibilityId::from(self.id) {
+            return None;
+        }
+        match request.action {
+            AccessibilityAction::Focus => {
+                Some(WidgetAction::Control(ControlAction::FocusRequested { id: self.id }))
+            }
+            AccessibilityAction::Activate | AccessibilityAction::Toggle => {
+                Some(self.toggle_action())
+            }
+            _ => None,
+        }
     }
 
     fn on_event(&mut self, ev: &Event, ctx: &mut EventCtx) -> Option<WidgetAction> {
@@ -342,6 +388,36 @@ mod tests {
         let mut paint_ctx = PaintCtx::new(&mut draw_list, &theme, 1.0);
         checkbox.paint(&mut paint_ctx);
         draw_list
+    }
+
+    #[test]
+    fn accessibility_exposes_checkbox_state_and_toggles_through_typed_action() {
+        let id = WidgetId(90);
+        let mut checkbox = focused_checkbox(id, false);
+        checkbox.set_accessibility_label(Some("显示行号".into()));
+        let context = crate::core::AccessibilityContext::new(4.0, 8.0);
+        let node = checkbox.accessibility_node(&context).expect("checkbox should expose semantics");
+
+        assert_eq!(node.role, crate::core::AccessibilityRole::CheckBox);
+        assert_eq!(node.name.as_deref(), Some("显示行号"));
+        assert_eq!(node.bounds, Rect::new(4.0, 8.0, 20.0, 20.0));
+        assert!(node.state.focused);
+        assert_eq!(node.state.checked, Some(false));
+        assert!(node.actions.contains(&crate::core::AccessibilityAction::Toggle));
+        assert_eq!(
+            checkbox.on_accessibility_action(&crate::core::AccessibilityActionRequest::new(
+                node.id,
+                crate::core::AccessibilityAction::Toggle,
+            )),
+            Some(WidgetAction::Control(ControlAction::Toggled { id, checked: true }))
+        );
+        assert!(checkbox.checked());
+
+        checkbox.set_enabled(false);
+        let disabled_node =
+            checkbox.accessibility_node(&context).expect("disabled checkbox remains discoverable");
+        assert!(disabled_node.state.disabled);
+        assert!(disabled_node.actions.is_empty());
     }
 
     fn is_checkbox_outline(cmd: &DrawCmd) -> bool {
