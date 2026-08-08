@@ -2,6 +2,7 @@
 //! auto-positioning relative to a target rect.
 
 use crate::core::geom::Rect;
+use crate::core::text_layout::wrap_text_to_lines;
 use crate::core::text_util::estimate_text_width_px;
 use crate::core::widget::{Event, EventCtx, LayoutCtx, PaintCtx, Widget, WidgetAction};
 use crate::core::{AccessibilityContext, AccessibilityId, AccessibilityNode, AccessibilityRole};
@@ -21,6 +22,9 @@ const GAP: f32 = 4.0;
 const CORNER_RADIUS: f32 = 4.0;
 /// Baseline offset multiplier for text vertical centering.
 const BASELINE_SHIFT: f32 = 0.8;
+const LINE_HEIGHT_RATIO: f32 = 1.25;
+const MAX_WIDTH_LOGICAL: f32 = 320.0;
+const SCREEN_MARGIN_LOGICAL: f32 = 8.0;
 
 /// A tooltip hint from a widget: label text + target rectangle
 /// in widget-local coordinates.
@@ -34,8 +38,24 @@ pub struct TooltipHint {
 /// paint draws a dark rounded pill with white text.
 pub struct TooltipWidget {
     label: String,
+    display_lines: Vec<String>,
     /// Local-space rect for the tooltip pill (origin at 0,0).
     rect: Rect,
+    line_height: f32,
+}
+
+struct TooltipLayoutMetrics {
+    font_size: f32,
+    pad_x: f32,
+    pad_y: f32,
+    gap: f32,
+    line_height: f32,
+    screen_w: f32,
+    screen_h: f32,
+    margin_x: f32,
+    margin_y: f32,
+    max_width: f32,
+    available_height: f32,
 }
 
 impl TooltipWidget {
@@ -48,62 +68,93 @@ impl TooltipWidget {
     /// 3. Side with more horizontal space (if both vertical positions overflow)
     /// Horizontal clamping ensures tooltip stays within `[0, screen_w]`.
     pub fn new(hint: &TooltipHint, dpi: f32, screen_w: f32, screen_h: f32) -> (Self, Rect) {
-        let font_size = FONT_SIZE * dpi;
-        let pad_x = PAD_X * dpi;
-        let pad_y = PAD_Y * dpi;
-        let gap = GAP * dpi;
-
-        let text_width = estimate_text_width_px(&hint.label, font_size);
-        let tooltip_w = text_width + pad_x * 2.0;
-        let tooltip_h = font_size + pad_y * 2.0;
-
-        let target = &hint.target_rect;
-
-        // Vertical positioning: prefer below, flip above, then side fallback
-        let below_y = target.y + target.h + gap;
-        let above_y = target.y - tooltip_h - gap;
-        let below_fits = below_y + tooltip_h <= screen_h;
-        let above_fits = above_y >= 0.0;
-
-        let (x, y) = if below_fits {
-            // Below target (preferred)
-            let x = Self::clamp_x(target, tooltip_w, screen_w);
-            (x, below_y)
-        } else if above_fits {
-            // Above target
-            let x = Self::clamp_x(target, tooltip_w, screen_w);
-            (x, above_y)
-        } else {
-            // Side fallback: pick side with more space
-            let space_left = target.x;
-            let space_right = screen_w - (target.x + target.w);
-            if space_right >= space_left {
-                // Right side
-                let x = (target.x + target.w + gap).min(screen_w - tooltip_w);
-                let y = Self::clamp_y(target, tooltip_h, screen_h);
-                (x, y)
-            } else {
-                // Left side
-                let x = (target.x - tooltip_w - gap).max(0.0);
-                let y = Self::clamp_y(target, tooltip_h, screen_h);
-                (x, y)
-            }
+        let Some(metrics) = TooltipLayoutMetrics::new(dpi, screen_w, screen_h) else {
+            return Self::empty(hint, dpi);
         };
+        let (display_lines, tooltip_w, tooltip_h) = Self::wrap_content(hint, &metrics);
+        if display_lines.is_empty() {
+            return Self::empty(hint, dpi);
+        }
+        let layout_rect = Self::position(hint.target_rect, tooltip_w, tooltip_h, &metrics);
 
-        let widget =
-            Self { label: hint.label.clone(), rect: Rect::new(0.0, 0.0, tooltip_w, tooltip_h) };
-        let layout_rect = Rect::new(x, y, tooltip_w, tooltip_h);
+        let widget = Self {
+            label: hint.label.clone(),
+            display_lines,
+            rect: Rect::new(0.0, 0.0, tooltip_w, tooltip_h),
+            line_height: metrics.line_height,
+        };
         (widget, layout_rect)
+    }
+
+    fn empty(hint: &TooltipHint, dpi: f32) -> (Self, Rect) {
+        let dpi = normalized_dpi(dpi);
+        (
+            Self {
+                label: hint.label.clone(),
+                display_lines: Vec::new(),
+                rect: Rect::ZERO,
+                line_height: FONT_SIZE * dpi * LINE_HEIGHT_RATIO,
+            },
+            Rect::ZERO,
+        )
+    }
+
+    fn wrap_content(hint: &TooltipHint, metrics: &TooltipLayoutMetrics) -> (Vec<String>, f32, f32) {
+        let content_max_width = (metrics.max_width - metrics.pad_x * 2.0).max(0.0);
+        let max_lines = (((metrics.available_height - metrics.pad_y * 2.0).max(0.0)
+            / metrics.line_height)
+            .floor() as usize)
+            .max(1);
+        let lines = wrap_text_to_lines(&hint.label, content_max_width, max_lines, |text| {
+            estimate_text_width_px(text, metrics.font_size)
+        });
+        let text_width = lines
+            .iter()
+            .map(|line| estimate_text_width_px(line, metrics.font_size))
+            .fold(0.0, f32::max);
+        let width = (text_width + metrics.pad_x * 2.0).min(metrics.max_width);
+        let height = (metrics.line_height * lines.len() as f32 + metrics.pad_y * 2.0)
+            .min(metrics.available_height);
+        (lines, width, height)
+    }
+
+    fn position(
+        target: Rect,
+        tooltip_w: f32,
+        tooltip_h: f32,
+        metrics: &TooltipLayoutMetrics,
+    ) -> Rect {
+        let target = normalized_rect(target);
+        let below_y = target.bottom() + metrics.gap;
+        let above_y = target.y - tooltip_h - metrics.gap;
+        if below_y + tooltip_h <= metrics.screen_h - metrics.margin_y {
+            let x = Self::clamp_x(&target, tooltip_w, metrics.screen_w, metrics.margin_x);
+            return Rect::new(x, below_y, tooltip_w, tooltip_h);
+        }
+        if above_y >= metrics.margin_y {
+            let x = Self::clamp_x(&target, tooltip_w, metrics.screen_w, metrics.margin_x);
+            return Rect::new(x, above_y, tooltip_w, tooltip_h);
+        }
+
+        let left_space = target.x - metrics.margin_x;
+        let right_space = metrics.screen_w - target.right();
+        let x = if right_space >= left_space {
+            (target.right() + metrics.gap).min(metrics.screen_w - metrics.margin_x - tooltip_w)
+        } else {
+            (target.x - tooltip_w - metrics.gap).max(metrics.margin_x)
+        };
+        let y = Self::clamp_y(&target, tooltip_h, metrics.screen_h, metrics.margin_y);
+        Rect::new(x, y, tooltip_w, tooltip_h)
     }
 
     /// Clamp x so tooltip is horizontally centered on target but within screen.
     /// Falls back to right-aligning with target when near screen edge.
-    fn clamp_x(target: &Rect, tooltip_w: f32, screen_w: f32) -> f32 {
+    fn clamp_x(target: &Rect, tooltip_w: f32, screen_w: f32, margin: f32) -> f32 {
         // Try centering on target
         let raw = target.x + (target.w - tooltip_w) / 2.0;
-        let clamped = raw.max(0.0).min(screen_w - tooltip_w);
+        let clamped = raw.max(margin).min(screen_w - margin - tooltip_w);
         // If centering pushes right edge past target right + margin, pin to target right
-        let right_limit = (target.x + target.w - tooltip_w).max(0.0);
+        let right_limit = (target.x + target.w - tooltip_w).max(margin);
         if clamped + tooltip_w > target.x + target.w + GAP {
             right_limit.min(clamped)
         } else {
@@ -112,10 +163,56 @@ impl TooltipWidget {
     }
 
     /// Clamp y so tooltip is vertically centered on target but within screen.
-    fn clamp_y(target: &Rect, tooltip_h: f32, screen_h: f32) -> f32 {
+    fn clamp_y(target: &Rect, tooltip_h: f32, screen_h: f32, margin: f32) -> f32 {
         let raw = target.y + (target.h - tooltip_h) / 2.0;
-        raw.max(0.0).min(screen_h - tooltip_h)
+        raw.max(margin).min(screen_h - margin - tooltip_h)
     }
+}
+
+impl TooltipLayoutMetrics {
+    fn new(dpi: f32, screen_w: f32, screen_h: f32) -> Option<Self> {
+        let dpi = normalized_dpi(dpi);
+        let screen_w = finite_non_negative(screen_w);
+        let screen_h = finite_non_negative(screen_h);
+        if screen_w == 0.0 || screen_h == 0.0 {
+            return None;
+        }
+        let margin_x = (SCREEN_MARGIN_LOGICAL * dpi).min(screen_w * 0.5);
+        let margin_y = (SCREEN_MARGIN_LOGICAL * dpi).min(screen_h * 0.5);
+        let available_width = (screen_w - margin_x * 2.0).max(0.0);
+        let available_height = (screen_h - margin_y * 2.0).max(0.0);
+        let max_width = (MAX_WIDTH_LOGICAL * dpi).min(available_width);
+        (max_width > 0.0 && available_height > 0.0).then_some(Self {
+            font_size: FONT_SIZE * dpi,
+            pad_x: PAD_X * dpi,
+            pad_y: PAD_Y * dpi,
+            gap: GAP * dpi,
+            line_height: FONT_SIZE * dpi * LINE_HEIGHT_RATIO,
+            screen_w,
+            screen_h,
+            margin_x,
+            margin_y,
+            max_width,
+            available_height,
+        })
+    }
+}
+
+fn normalized_dpi(dpi: f32) -> f32 {
+    if dpi.is_finite() && dpi > 0.0 { dpi } else { 1.0 }
+}
+
+fn normalized_rect(rect: Rect) -> Rect {
+    Rect::new(
+        finite_non_negative(rect.x),
+        finite_non_negative(rect.y),
+        finite_non_negative(rect.w),
+        finite_non_negative(rect.h),
+    )
+}
+
+fn finite_non_negative(value: f32) -> f32 {
+    if value.is_finite() { value.max(0.0) } else { 0.0 }
 }
 
 impl Widget for TooltipWidget {
@@ -136,7 +233,7 @@ impl Widget for TooltipWidget {
     }
 
     fn paint(&self, ctx: &mut PaintCtx) {
-        if self.label.is_empty() {
+        if self.label.is_empty() || self.display_lines.is_empty() {
             return;
         }
 
@@ -154,16 +251,19 @@ impl Widget for TooltipWidget {
         let font_size = FONT_SIZE * ctx.dpi;
         let pad_y = PAD_Y * ctx.dpi;
         let text_x = r.x + PAD_X * ctx.dpi;
-        let text_y = r.y + pad_y + font_size * BASELINE_SHIFT;
+        let first_baseline = r.y + pad_y + font_size * BASELINE_SHIFT;
         if let Some(ref mut shaper) = ctx.shaper {
-            ctx.list.text_shaped(
-                text_x,
-                text_y,
-                font_size,
-                theme.palette.text_inverse,
-                &self.label,
-                shaper,
-            );
+            for (line_index, line) in self.display_lines.iter().enumerate() {
+                let text_y = first_baseline + line_index as f32 * self.line_height;
+                ctx.list.text_shaped(
+                    text_x,
+                    text_y,
+                    font_size,
+                    theme.palette.text_inverse,
+                    line,
+                    shaper,
+                );
+            }
         }
     }
 
@@ -257,7 +357,12 @@ mod tests {
     #[test]
     fn paint_empty_label_emits_nothing() {
         let theme = test_theme();
-        let widget = TooltipWidget { label: String::new(), rect: Rect::new(0.0, 0.0, 100.0, 30.0) };
+        let widget = TooltipWidget {
+            label: String::new(),
+            display_lines: Vec::new(),
+            rect: Rect::new(0.0, 0.0, 100.0, 30.0),
+            line_height: FONT_SIZE * LINE_HEIGHT_RATIO,
+        };
         let mut list = DrawList::new();
         let mut ctx = PaintCtx {
             list: &mut list,
@@ -294,5 +399,31 @@ mod tests {
         assert_eq!(node.bounds.y, 200.0);
         assert!(node.actions.is_empty());
         assert!(!widget.is_focusable());
+    }
+
+    #[test]
+    fn long_multilingual_tooltip_is_wrapped_and_bounded_at_high_dpi() {
+        let hint = make_hint(
+            "A very long tooltip with English words、中文说明和 emoji 👨‍👩‍👧‍👦 that must stay visible",
+            Rect::new(580.0, 320.0, 20.0, 20.0),
+        );
+        let (widget, layout) = TooltipWidget::new(&hint, 2.0, 600.0, 360.0);
+
+        assert!(widget.display_lines.len() > 1);
+        assert!(layout.x.is_finite() && layout.y.is_finite());
+        assert!(layout.x >= 0.0 && layout.y >= 0.0);
+        assert!(layout.right() <= 600.0);
+        assert!(layout.bottom() <= 360.0);
+    }
+
+    #[test]
+    fn tooltip_is_safe_when_screen_is_smaller_than_one_line_or_zero_sized() {
+        let hint = make_hint("无法完整显示的提示", Rect::new(f32::NAN, f32::INFINITY, 4.0, 4.0));
+        let (_, tiny_layout) = TooltipWidget::new(&hint, 2.0, 30.0, 10.0);
+        let (_, zero_layout) = TooltipWidget::new(&hint, 1.0, 0.0, 0.0);
+
+        assert!(tiny_layout.x.is_finite() && tiny_layout.y.is_finite());
+        assert!(tiny_layout.w <= 30.0 && tiny_layout.h <= 10.0);
+        assert_eq!(zero_layout, Rect::ZERO);
     }
 }

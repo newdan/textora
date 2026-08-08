@@ -2,12 +2,105 @@
 //! Widget 在内容变化时构建，paint 时通过 DrawCmd::TextLayout 传递到 app 层。
 
 use std::sync::atomic::{AtomicU64, Ordering};
+use unicode_segmentation::UnicodeSegmentation;
 
 /// Shear factor for italic glyphs — applied in vertex stage to avoid cosmic-text synthetic italic.
 pub const ITALIC_SHEAR: f32 = 0.10;
 
 /// 全局自增 ID，用于 RenderCache key
 static NEXT_LAYOUT_ID: AtomicU64 = AtomicU64::new(1);
+
+/// 按 Unicode 词边界优先换行，单个词过宽时退化到 grapheme 边界。
+/// 当内容超过 `max_lines` 时，最后一行以不越界的省略号收尾。
+pub fn wrap_text_to_lines(
+    text: &str,
+    max_width: f32,
+    max_lines: usize,
+    measure_width: impl Fn(&str) -> f32,
+) -> Vec<String> {
+    if text.is_empty() || !max_width.is_finite() || max_width <= 0.0 || max_lines == 0 {
+        return Vec::new();
+    }
+
+    let mut lines: Vec<String> = Vec::new();
+    for paragraph in text.split('\n') {
+        wrap_paragraph(paragraph, max_width, &measure_width, &mut lines);
+    }
+
+    let truncated = lines.len() > max_lines;
+    lines.truncate(max_lines);
+    if truncated && let Some(last_line) = lines.last_mut() {
+        append_fitting_ellipsis(last_line, max_width, &measure_width);
+    }
+    lines
+}
+
+fn wrap_paragraph(
+    paragraph: &str,
+    max_width: f32,
+    measure_width: &impl Fn(&str) -> f32,
+    lines: &mut Vec<String>,
+) {
+    if paragraph.is_empty() {
+        lines.push(String::new());
+        return;
+    }
+
+    let mut current_line = String::new();
+    for word_boundary in paragraph.split_word_bounds() {
+        let boundary =
+            if current_line.is_empty() { word_boundary.trim_start() } else { word_boundary };
+        if boundary.is_empty() {
+            continue;
+        }
+        let candidate = format!("{current_line}{boundary}");
+        if measure_width(&candidate) <= max_width {
+            current_line = candidate;
+            continue;
+        }
+        if !current_line.is_empty() {
+            lines.push(current_line.trim_end().to_owned());
+            current_line.clear();
+        }
+        append_graphemes(boundary.trim_start(), max_width, measure_width, lines, &mut current_line);
+    }
+    if !current_line.is_empty() {
+        lines.push(current_line.trim_end().to_owned());
+    }
+}
+
+fn append_graphemes(
+    text: &str,
+    max_width: f32,
+    measure_width: &impl Fn(&str) -> f32,
+    lines: &mut Vec<String>,
+    current_line: &mut String,
+) {
+    for grapheme in text.graphemes(true) {
+        let candidate = format!("{current_line}{grapheme}");
+        if current_line.is_empty() || measure_width(&candidate) <= max_width {
+            current_line.push_str(grapheme);
+            continue;
+        }
+        lines.push(std::mem::take(current_line));
+        current_line.push_str(grapheme);
+    }
+}
+
+fn append_fitting_ellipsis(
+    line: &mut String,
+    max_width: f32,
+    measure_width: &impl Fn(&str) -> f32,
+) {
+    const ELLIPSIS: &str = "…";
+    while !line.is_empty() && measure_width(&format!("{line}{ELLIPSIS}")) > max_width {
+        let Some((last_grapheme_byte, _)) = line.grapheme_indices(true).next_back() else { break };
+        line.truncate(last_grapheme_byte);
+    }
+    if measure_width(ELLIPSIS) <= max_width {
+        line.push_str(ELLIPSIS);
+    }
+}
 
 /// 预 shape 的文本布局数据（纯 harfbuzz 产出，无 atlas）。
 /// 在 crates/ui 定义，app 层消费。
@@ -111,6 +204,7 @@ impl UiTextLayout {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use unicode_segmentation::UnicodeSegmentation;
 
     fn with_shaper(f: impl FnOnce(&mut shaping::Shaper)) {
         let mut shaper = shaping::Shaper::new().expect("failed to create shaper");
@@ -258,5 +352,29 @@ mod tests {
             assert_eq!(tl.id, cloned.id);
             assert_eq!(tl.text, cloned.text);
         });
+    }
+
+    #[test]
+    fn wrapping_prefers_word_boundaries_and_truncates_on_graphemes() {
+        let measure = |text: &str| text.graphemes(true).count() as f32;
+
+        assert_eq!(
+            wrap_text_to_lines("alpha beta gamma", 10.0, 3, measure),
+            vec!["alpha beta", "gamma"]
+        );
+        let truncated = wrap_text_to_lines("一二三四五六七八九", 3.0, 2, measure);
+        assert_eq!(truncated.len(), 2);
+        assert!(truncated[1].ends_with('…'));
+        assert!(truncated.iter().all(|line| measure(line) <= 3.0));
+    }
+
+    #[test]
+    fn wrapping_never_splits_an_emoji_grapheme() {
+        let family = "👨‍👩‍👧‍👦";
+        let text = format!("{family}{family}");
+        let lines =
+            wrap_text_to_lines(&text, 1.0, 2, |candidate| candidate.graphemes(true).count() as f32);
+
+        assert_eq!(lines, vec![family, family]);
     }
 }
