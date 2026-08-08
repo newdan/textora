@@ -3,7 +3,10 @@ use std::borrow::Cow;
 
 use ui::button::{Button, ButtonStyle};
 use ui::core::widget::{ControlAction, SensitiveText, TextPayload, WidgetId};
-use ui::core::{Event, EventCtx, LayoutCtx, PaintCtx, Rect, Widget, WidgetAction};
+use ui::core::{
+    AccessibilityActionRequest, AccessibilityContext, AccessibilityNode, Event, EventCtx,
+    LayoutCtx, PaintCtx, Rect, Widget, WidgetAction,
+};
 use ui::form::{FormRow, FormRowStyle, FormSection, FormSectionStyle, FormView};
 use ui::inline_group::{CrossAlignment, InlineChild, InlineGroup};
 use ui::label::{Label, LabelForeground, LabelStyle};
@@ -787,6 +790,25 @@ impl Widget for SyncSettingsPage {
         self.form.set_keyboard_focus(focused_id);
     }
 
+    fn collect_accessibility_nodes(
+        &self,
+        context: &AccessibilityContext,
+        output: &mut Vec<AccessibilityNode>,
+    ) {
+        self.form.collect_accessibility_nodes(context, output);
+    }
+
+    fn on_accessibility_action(
+        &mut self,
+        request: &AccessibilityActionRequest,
+    ) -> Option<WidgetAction> {
+        let action = self.form.on_accessibility_action(request)?;
+        match action {
+            WidgetAction::Control(control_action) => self.handle_control_action(control_action),
+            other => Some(other),
+        }
+    }
+
     fn on_event(&mut self, event: &Event, ctx: &mut EventCtx) -> Option<WidgetAction> {
         let action = self.form.on_event(event, ctx)?;
         match action {
@@ -1065,6 +1087,31 @@ mod tests {
         let page = SyncSettingsPage::new(SyncSettingsInput::default());
         assert_eq!(page.input().connection, SyncConnectionView::NotConfigured);
         assert!(!page.input().has_api_key);
+    }
+
+    #[test]
+    fn sync_page_exposes_sensitive_field_without_value_and_routes_set_value() {
+        let mut page = laid_out_page(SyncSettingsInput::default());
+        let mut nodes = Vec::new();
+        page.collect_accessibility_nodes(
+            &ui::core::AccessibilityContext::new(10.0, 20.0),
+            &mut nodes,
+        );
+        let api_key_id = ui::core::AccessibilityId::from(API_KEY_ID);
+        let api_key = semantic_node_with_id(&nodes, api_key_id)
+            .expect("API key field must be exposed through the sync page");
+
+        assert_eq!(api_key.role, ui::core::AccessibilityRole::TextField);
+        assert!(api_key.state.sensitive);
+        assert_eq!(api_key.value, None);
+        assert_eq!(
+            page.on_accessibility_action(&ui::core::AccessibilityActionRequest::set_value(
+                api_key_id,
+                TextPayload::Sensitive(SensitiveText::new("voiceover-secret".to_owned())),
+            )),
+            Some(WidgetAction::Consumed)
+        );
+        assert_eq!(page.api_key_draft_for_test(), Some("voiceover-secret"));
     }
 
     #[test]
@@ -1415,6 +1462,18 @@ mod tests {
 
     fn laid_out_page(input: SyncSettingsInput) -> SyncSettingsPage {
         laid_out_page_at_width(520.0, 260.0, input)
+    }
+
+    fn semantic_node_with_id(
+        nodes: &[ui::core::AccessibilityNode],
+        id: ui::core::AccessibilityId,
+    ) -> Option<&ui::core::AccessibilityNode> {
+        nodes.iter().find_map(|node| {
+            if node.id == id {
+                return Some(node);
+            }
+            semantic_node_with_id(&node.children, id)
+        })
     }
 
     fn laid_out_page_at_width(
