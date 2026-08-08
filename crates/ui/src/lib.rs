@@ -3,7 +3,6 @@
 //! Provides rendering primitives and widget components.
 //! Depends on core, render, shaping, stdext — no app-layer types.
 
-#![allow(clippy::too_many_arguments)]
 #![allow(deprecated)]
 #![allow(clippy::overly_complex_bool_expr)]
 #![allow(clippy::empty_line_after_doc_comments)]
