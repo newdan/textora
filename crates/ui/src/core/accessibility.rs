@@ -7,6 +7,9 @@ use std::collections::HashSet;
 use crate::core::geom::Rect;
 use crate::core::widget::{TextPayload, WidgetId};
 
+const FNV1A_64_OFFSET_BASIS: u64 = 0xcbf2_9ce4_8422_2325;
+const FNV1A_64_PRIME: u64 = 0x0000_0100_0000_01b3;
+
 /// 可访问性树中的稳定节点标识。
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct AccessibilityId(pub u64);
@@ -18,6 +21,14 @@ impl AccessibilityId {
         mixed = (mixed ^ (mixed >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
         mixed = (mixed ^ (mixed >> 27)).wrapping_mul(0x94d0_49bb_1331_11eb);
         Self(mixed ^ (mixed >> 31))
+    }
+
+    /// 根据稳定业务键生成与顺序无关的子节点标识。
+    pub fn named_child(self, key: &str) -> Self {
+        let key_hash = key.as_bytes().iter().fold(FNV1A_64_OFFSET_BASIS, |hash, byte| {
+            (hash ^ u64::from(*byte)).wrapping_mul(FNV1A_64_PRIME)
+        });
+        self.child(key_hash)
     }
 }
 
@@ -381,6 +392,15 @@ mod tests {
     #[test]
     fn widget_identity_maps_to_stable_accessibility_identity() {
         assert_eq!(AccessibilityId::from(WidgetId(42)), AccessibilityId(42));
+    }
+
+    #[test]
+    fn named_child_identity_is_deterministic_and_key_specific() {
+        let root = AccessibilityId(42);
+
+        assert_eq!(root.named_child("undo"), root.named_child("undo"));
+        assert_ne!(root.named_child("undo"), root.named_child("redo"));
+        assert_ne!(root.named_child("undo"), AccessibilityId(42));
     }
 
     #[test]
