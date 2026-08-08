@@ -79,7 +79,7 @@ impl TagEditorWidget {
 
     pub fn set_input(&mut self, input: TagEditorInput) {
         if !input.enabled {
-            self.clear_preedit();
+            self.cancel_transient_interaction();
         }
         self.input = input;
     }
@@ -124,6 +124,9 @@ impl TagEditorWidget {
     }
 
     pub fn event_action(&mut self, event: &Event, dpi: f32) -> Option<TagEditorAction> {
+        if self.handle_lifecycle_event(event).is_some() {
+            return None;
+        }
         if !self.input.enabled {
             return None;
         }
@@ -224,6 +227,22 @@ impl TagEditorWidget {
     fn clear_preedit(&mut self) {
         self.preedit_text.clear();
         self.preedit_cursor = None;
+    }
+
+    fn cancel_transient_interaction(&mut self) -> bool {
+        let interaction_changed = std::mem::take(&mut self.editing)
+            | !self.preedit_text.is_empty()
+            | self.preedit_cursor.take().is_some();
+        self.preedit_text.clear();
+        interaction_changed
+    }
+
+    fn handle_lifecycle_event(&mut self, event: &Event) -> Option<bool> {
+        match event {
+            Event::PointerLeave => Some(false),
+            Event::InteractionCancel => Some(self.cancel_transient_interaction()),
+            _ => None,
+        }
     }
 
     fn preedit_cursor_byte(&self) -> usize {
@@ -381,6 +400,9 @@ impl Widget for TagEditorWidget {
     }
 
     fn on_event(&mut self, event: &Event, ctx: &mut EventCtx) -> Option<WidgetAction> {
+        if let Some(interaction_changed) = self.handle_lifecycle_event(event) {
+            return interaction_changed.then_some(WidgetAction::Consumed);
+        }
         if is_ime_event(event) {
             if !self.input.enabled || !self.editing {
                 return None;
@@ -587,6 +609,53 @@ mod tests {
         assert!(draw_list.cmds.iter().all(
             |command| !matches!(command, crate::core::paint::DrawCmd::TextLayout { layout, .. } if layout.text == "拼")
         ));
+    }
+
+    #[test]
+    fn tag_editor_cancel_clears_editing_and_preedit_without_losing_draft() {
+        let mut editor = TagEditorWidget::new();
+        editor.set_input(TagEditorInput {
+            enabled: true,
+            pending_text: "已提交".to_owned(),
+            ..input()
+        });
+        editor.set_editing(true);
+        layout_editor(&mut editor);
+
+        let theme = crate::theme::test_theme();
+        let mut context = EventCtx { theme: &theme, dpi: 1.0, cursor_hint: None };
+        assert_eq!(
+            editor.on_event(
+                &Event::ImePreedit { text: "未完成".to_owned(), cursor: Some((0, 6)) },
+                &mut context,
+            ),
+            Some(WidgetAction::Consumed)
+        );
+        assert_eq!(editor.on_event(&Event::PointerLeave, &mut context), None);
+        assert!(editor.ime_cursor_rect().is_some());
+
+        assert_eq!(
+            editor.on_event(&Event::InteractionCancel, &mut context),
+            Some(WidgetAction::Consumed)
+        );
+        assert_eq!(editor.pending_text(), "已提交");
+        assert_eq!(editor.ime_cursor_rect(), None);
+        assert_eq!(editor.on_event(&Event::InteractionCancel, &mut context), None);
+    }
+
+    #[test]
+    fn disabling_tag_editor_ends_active_editing() {
+        let mut editor = TagEditorWidget::new();
+        editor.set_input(TagEditorInput { enabled: true, ..input() });
+        editor.set_editing(true);
+        layout_editor(&mut editor);
+        assert!(editor.ime_cursor_rect().is_some());
+
+        editor.set_input(TagEditorInput { enabled: false, ..input() });
+
+        assert_eq!(editor.ime_cursor_rect(), None);
+        editor.set_input(TagEditorInput { enabled: true, ..input() });
+        assert_eq!(editor.ime_cursor_rect(), None);
     }
 
     #[test]

@@ -749,6 +749,14 @@ impl TextBox {
         }
     }
 
+    pub(super) fn cancel_transient_interaction(&mut self) -> bool {
+        let interaction_changed = std::mem::take(&mut self.dragging)
+            | !self.preedit.is_empty()
+            | self.preedit_cursor.take().is_some();
+        self.preedit.clear();
+        interaction_changed
+    }
+
     /// Receive an IME event from the parent widget.
     pub fn on_ime(&mut self, ev: &TextBoxIme) {
         self.handle_ime_event(ev);
@@ -1113,6 +1121,9 @@ impl Widget for TextBox {
                     None
                 }
             }
+            Event::InteractionCancel => {
+                self.cancel_transient_interaction().then_some(WidgetAction::Consumed)
+            }
             _ => None,
         }
     }
@@ -1177,6 +1188,49 @@ mod tests {
         let theme = crate::theme::test_theme();
         let mut event_ctx = EventCtx { cursor_hint: None, theme: &theme, dpi: 1.0 };
         text_box.on_event(&Event::KeyDown(key_code, modifiers), &mut event_ctx)
+    }
+
+    #[test]
+    fn pointer_leave_preserves_text_drag_and_cancel_clears_drag_and_preedit() {
+        let mut text_box = laid_out_widget(TextBox::new());
+        text_box.set_text("hello");
+        let theme = crate::theme::test_theme();
+        let mut event_context = EventCtx { cursor_hint: None, theme: &theme, dpi: 1.0 };
+
+        assert!(
+            text_box
+                .on_event(
+                    &Event::MouseDown { px: 10.0, py: 14.0, button: MouseButton::Left },
+                    &mut event_context,
+                )
+                .is_some()
+        );
+        assert_eq!(
+            text_box.on_event(
+                &Event::ImePreedit { text: "未完成".to_owned(), cursor: Some((0, 6)) },
+                &mut event_context,
+            ),
+            Some(WidgetAction::Consumed)
+        );
+
+        assert_eq!(text_box.on_event(&Event::PointerLeave, &mut event_context), None);
+        assert!(text_box.is_capturing());
+        assert!(text_box.has_preedit());
+
+        assert_eq!(
+            text_box.on_event(&Event::InteractionCancel, &mut event_context),
+            Some(WidgetAction::Consumed)
+        );
+        assert!(!text_box.is_capturing());
+        assert!(!text_box.has_preedit());
+        assert_eq!(text_box.on_event(&Event::InteractionCancel, &mut event_context), None);
+        assert_eq!(
+            text_box.on_event(
+                &Event::MouseUp { px: 10.0, py: 14.0, button: MouseButton::Left },
+                &mut event_context,
+            ),
+            None
+        );
     }
 
     #[test]
