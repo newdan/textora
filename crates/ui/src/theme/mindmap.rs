@@ -419,7 +419,10 @@ impl<'a> MindmapRenderTheme<'a> {
 /// (id, 显示名, 画布背景, 连接线, 主色, 分支调色板)
 /// 主色需满足白字对比度 ≥ 4.2（根节点填充、深度节点文字共用）；
 /// 分支色与背景对比度 ≥ 3.0，保证连接线与分支染色清晰可辨。
-const SCHEME_PALETTES: [(&str, &str, &str, &str, &str, [&str; 6]); 10] = [
+type SchemePalette =
+    (&'static str, &'static str, &'static str, &'static str, &'static str, [&'static str; 6]);
+
+const SCHEME_PALETTES: [SchemePalette; 10] = [
     (
         "paper",
         "素纸",
@@ -504,7 +507,19 @@ const SCHEME_PALETTES: [(&str, &str, &str, &str, &str, [&str; 6]); 10] = [
 
 /// (id, 显示名, 画布背景, 卡片填充, 连接线, 卡片文字, 主色, 根节点文字, 分支调色板)
 /// 根节点文字与主色对比度 ≥ 4.5；主色与卡片文字在卡片填充上对比度 ≥ 4.5。
-const DARK_SCHEME_PALETTES: [(&str, &str, &str, &str, &str, &str, &str, &str, [&str; 6]); 5] = [
+type DarkSchemePalette = (
+    &'static str,
+    &'static str,
+    &'static str,
+    &'static str,
+    &'static str,
+    &'static str,
+    &'static str,
+    &'static str,
+    [&'static str; 6],
+);
+
+const DARK_SCHEME_PALETTES: [DarkSchemePalette; 5] = [
     (
         "ocean-night",
         "夜航",

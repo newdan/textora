@@ -17,11 +17,14 @@ pub enum Side {
     Right,
 }
 
+/// Resolves a docked child's physical thickness from the active theme and DPI.
+pub type DockThickness = Box<dyn Fn(&Theme, f32) -> f32>;
+
 /// Dock 子项：一个 widget + 吸边方向 + 厚度回调 + 可见性。
 pub struct DockChild {
     pub widget: Box<dyn Widget>,
     pub side: Side,
-    pub thickness: Box<dyn Fn(&Theme, f32) -> f32>,
+    pub thickness: DockThickness,
     pub visible: bool,
     /// 布局阶段计算的绝对坐标矩形。paint 和事件分发使用它做坐标变换。
     pub layout_rect: Rect,
