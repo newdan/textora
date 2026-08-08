@@ -2,7 +2,10 @@ use std::any::Any;
 use std::borrow::Cow;
 
 use crate::core::widget::{ControlAction, TextPayload, WidgetId};
-use crate::core::{Event, EventCtx, LayoutCtx, PaintCtx, Rect, Widget, WidgetAction};
+use crate::core::{
+    AccessibilityActionRequest, AccessibilityContext, AccessibilityNode, Event, EventCtx,
+    LayoutCtx, PaintCtx, Rect, Widget, WidgetAction,
+};
 use crate::theme::SettingsTheme;
 use crate::widgets::button::{Button, ButtonStyle};
 use crate::widgets::form::{FormRow, FormRowStyle, FormSection, FormSectionStyle, FormView};
@@ -881,6 +884,65 @@ impl Widget for SettingsView {
         self.set_focused_control(focused_id);
     }
 
+    fn collect_accessibility_nodes(
+        &self,
+        context: &AccessibilityContext,
+        output: &mut Vec<AccessibilityNode>,
+    ) {
+        if self.category_navigation_visible {
+            for ((_, button), rect) in self.category_buttons.iter().zip(&self.category_rects) {
+                if rect.w > 0.0 && rect.h > 0.0 {
+                    button.collect_accessibility_nodes(&context.offset_by(rect.x, rect.y), output);
+                }
+            }
+        }
+        if self.form_rect.w > 0.0 && self.form_rect.h > 0.0 {
+            self.form.collect_accessibility_nodes(
+                &context.offset_by(self.form_rect.x, self.form_rect.y),
+                output,
+            );
+        }
+        if let Some(banner) = &self.persistence_banner
+            && self.persistence_banner_rect.w > 0.0
+            && self.persistence_banner_rect.h > 0.0
+        {
+            banner.collect_accessibility_nodes(
+                &context.offset_by(self.persistence_banner_rect.x, self.persistence_banner_rect.y),
+                output,
+            );
+        }
+    }
+
+    fn on_accessibility_action(
+        &mut self,
+        request: &AccessibilityActionRequest,
+    ) -> Option<WidgetAction> {
+        if self.category_navigation_visible {
+            for index in 0..self.category_buttons.len() {
+                let action = self.category_buttons[index].1.on_accessibility_action(request);
+                if let Some(action) = action {
+                    return match action {
+                        WidgetAction::Control(control_action) => {
+                            self.handle_control_action(control_action)
+                        }
+                        other => Some(other),
+                    };
+                }
+            }
+        }
+        if let Some(action) = self.form.on_accessibility_action(request) {
+            return match action {
+                WidgetAction::Control(control_action) => self.handle_control_action(control_action),
+                other => Some(other),
+            };
+        }
+        let action = self.persistence_banner.as_mut()?.on_accessibility_action(request)?;
+        match action {
+            WidgetAction::Control(control_action) => self.handle_control_action(control_action),
+            other => Some(other),
+        }
+    }
+
     fn on_event(&mut self, event: &Event, ctx: &mut EventCtx) -> Option<WidgetAction> {
         if matches!(event, Event::PointerLeave | Event::InteractionCancel) {
             return self.dispatch_interaction_lifecycle(event, ctx);
@@ -1185,6 +1247,18 @@ mod tests {
         view.on_event(&event, &mut ctx)
     }
 
+    fn semantic_node_with_id(
+        nodes: &[crate::core::AccessibilityNode],
+        id: crate::core::AccessibilityId,
+    ) -> Option<&crate::core::AccessibilityNode> {
+        nodes.iter().find_map(|node| {
+            if node.id == id {
+                return Some(node);
+            }
+            semantic_node_with_id(&node.children, id)
+        })
+    }
+
     fn ime_text_allocation(event: &Event) -> *const u8 {
         match event {
             Event::ImePreedit { text, .. } | Event::ImeCommit(text) => text.as_ptr(),
@@ -1215,6 +1289,49 @@ mod tests {
             .is_none()
         );
         assert!(view.has_validation_error());
+    }
+
+    #[test]
+    fn settings_semantics_reach_nested_fields_and_reuse_category_actions() {
+        let theme = crate::theme::test_theme();
+        let mut view = settings_fixture(SettingsCategory::Appearance);
+        layout_settings_view(&mut view, &theme, Rect::new(0.0, 0.0, 900.0, 600.0));
+        let mut nodes = Vec::new();
+        view.collect_accessibility_nodes(
+            &crate::core::AccessibilityContext::new(20.0, 30.0),
+            &mut nodes,
+        );
+
+        let font_size_id = crate::core::AccessibilityId::from(FONT_SIZE_ID);
+        let font_size = semantic_node_with_id(&nodes, font_size_id)
+            .expect("nested font-size field must be exposed");
+        assert_eq!(font_size.role, crate::core::AccessibilityRole::TextField);
+        let [label_id] = font_size.labelled_by.as_slice() else {
+            panic!("font-size field must reference its row label");
+        };
+        assert_eq!(
+            semantic_node_with_id(&nodes, *label_id).and_then(|label| label.name.as_deref()),
+            Some("字号")
+        );
+        assert!(font_size.bounds.x >= 20.0);
+        assert!(font_size.bounds.y >= 30.0);
+
+        let editor_category_id = crate::core::AccessibilityId::from(EDITOR_CATEGORY_ID);
+        let mut root = crate::core::AccessibilityNode::new(
+            crate::core::AccessibilityId(0x7365_7474_696e_6773),
+            crate::core::AccessibilityRole::Group,
+            Rect::new(20.0, 30.0, 900.0, 600.0),
+        );
+        root.children = nodes;
+        assert_eq!(crate::core::AccessibilityTree::new(root, None).validate(), Ok(()));
+        assert_eq!(
+            view.on_accessibility_action(&crate::core::AccessibilityActionRequest::new(
+                editor_category_id,
+                crate::core::AccessibilityAction::Activate,
+            )),
+            Some(WidgetAction::Consumed)
+        );
+        assert_eq!(view.active_category(), SettingsCategory::Editor);
     }
 
     #[test]

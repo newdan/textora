@@ -3,7 +3,8 @@ use std::borrow::Cow;
 
 use crate::core::widget::ControlAction;
 use crate::core::{
-    Event, EventCtx, KeyCode, LayoutCtx, Modifiers, PaintCtx, Rect, Widget, WidgetAction, WidgetId,
+    AccessibilityActionRequest, AccessibilityContext, AccessibilityNode, Event, EventCtx, KeyCode,
+    LayoutCtx, Modifiers, PaintCtx, Rect, Widget, WidgetAction, WidgetId,
 };
 use crate::widgets::form::section::FormSection;
 use crate::widgets::scrollbar::{
@@ -192,6 +193,17 @@ impl FormView {
     fn section_draw_rect(&self, section_index: usize) -> Option<Rect> {
         let rect = *self.section_rects.get(section_index)?;
         Some(Rect::new(rect.x, rect.y - self.scroll_offset, rect.w, rect.h))
+    }
+
+    fn visible_section_rect(&self, section_rect: Rect) -> Option<Rect> {
+        let left = section_rect.x.max(0.0);
+        let top = section_rect.y.max(0.0);
+        let right = section_rect.right().min(self.rect.w);
+        let bottom = section_rect.bottom().min(self.rect.h);
+        if right <= left || bottom <= top {
+            return None;
+        }
+        Some(Rect::new(left - section_rect.x, top - section_rect.y, right - left, bottom - top))
     }
 
     fn local_event<'a>(event: &'a Event, child_rect: Rect) -> Cow<'a, Event> {
@@ -401,6 +413,40 @@ impl Widget for FormView {
         for section in &mut self.sections {
             section.set_keyboard_focus(focused_id);
         }
+    }
+
+    fn collect_accessibility_nodes(
+        &self,
+        context: &AccessibilityContext,
+        output: &mut Vec<AccessibilityNode>,
+    ) {
+        for (section_index, section) in self.sections.iter().enumerate() {
+            let Some(section_rect) = self.section_draw_rect(section_index) else { continue };
+            let Some(visible_rect) = self.visible_section_rect(section_rect) else { continue };
+            section.collect_accessibility_nodes_in_viewport(
+                &context.offset_by(section_rect.x, section_rect.y),
+                visible_rect,
+                output,
+            );
+        }
+        if self.scrollbar_rect.w > 0.0 && self.scrollbar_rect.h > 0.0 {
+            self.scrollbar.collect_accessibility_nodes(
+                &context.offset_by(self.scrollbar_rect.x, self.scrollbar_rect.y),
+                output,
+            );
+        }
+    }
+
+    fn on_accessibility_action(
+        &mut self,
+        request: &AccessibilityActionRequest,
+    ) -> Option<WidgetAction> {
+        if let Some(action) =
+            self.sections.iter_mut().find_map(|section| section.on_accessibility_action(request))
+        {
+            return Some(action);
+        }
+        self.scrollbar.on_accessibility_action(request)
     }
 
     fn on_event(&mut self, event: &Event, ctx: &mut EventCtx) -> Option<WidgetAction> {

@@ -2,7 +2,8 @@ use std::any::Any;
 use std::borrow::Cow;
 
 use crate::core::{
-    DrawCmd, Event, EventCtx, LayoutCtx, PaintCtx, Rect, Widget, WidgetAction, WidgetId,
+    AccessibilityActionRequest, AccessibilityContext, AccessibilityNode, DrawCmd, Event, EventCtx,
+    LayoutCtx, PaintCtx, Rect, Widget, WidgetAction, WidgetId,
 };
 use crate::widgets::form::row::FormRow;
 use crate::widgets::label::Label;
@@ -171,6 +172,38 @@ impl FormSection {
         }
     }
 
+    pub(crate) fn collect_accessibility_nodes_in_viewport(
+        &self,
+        context: &AccessibilityContext,
+        visible_rect: Rect,
+        output: &mut Vec<AccessibilityNode>,
+    ) {
+        if visible_rect.w <= 0.0 || visible_rect.h <= 0.0 {
+            return;
+        }
+
+        if Self::rects_intersect(self.title_rect, visible_rect) {
+            self.title.collect_accessibility_nodes(
+                &context.offset_by(self.title_rect.x, self.title_rect.y),
+                output,
+            );
+        }
+        if let (Some(description), Some(description_rect)) =
+            (&self.description, self.description_rect)
+            && Self::rects_intersect(description_rect, visible_rect)
+        {
+            description.collect_accessibility_nodes(
+                &context.offset_by(description_rect.x, description_rect.y),
+                output,
+            );
+        }
+        for (row, row_rect) in self.rows.iter().zip(&self.row_rects) {
+            if Self::rects_intersect(*row_rect, visible_rect) {
+                row.collect_accessibility_nodes(&context.offset_by(row_rect.x, row_rect.y), output);
+            }
+        }
+    }
+
     fn local_event<'a>(event: &'a Event, child_rect: Rect) -> Cow<'a, Event> {
         crate::core::dock::Dock::to_local(event, child_rect.x, child_rect.y)
     }
@@ -323,6 +356,13 @@ impl Widget for FormSection {
         for row in &mut self.rows {
             row.set_keyboard_focus(focused_id);
         }
+    }
+
+    fn on_accessibility_action(
+        &mut self,
+        request: &AccessibilityActionRequest,
+    ) -> Option<WidgetAction> {
+        self.rows.iter_mut().find_map(|row| row.on_accessibility_action(request))
     }
 
     fn is_capturing(&self) -> bool {
