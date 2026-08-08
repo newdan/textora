@@ -49,7 +49,32 @@ pub struct PopupMenuItem {
     pub label: String,
     pub is_active: bool,
     pub is_separator: bool,
+    pub enabled: bool,
     pub action: PopupMenuAction,
+}
+
+impl PopupMenuItem {
+    pub fn action(label: impl Into<String>, action: PopupMenuAction) -> Self {
+        Self { label: label.into(), is_active: false, is_separator: false, enabled: true, action }
+    }
+
+    pub fn separator(action: PopupMenuAction) -> Self {
+        Self { label: String::new(), is_active: false, is_separator: true, enabled: false, action }
+    }
+
+    pub fn with_active(mut self, is_active: bool) -> Self {
+        self.is_active = is_active;
+        self
+    }
+
+    pub fn with_enabled(mut self, enabled: bool) -> Self {
+        self.enabled = enabled;
+        self
+    }
+
+    pub(crate) fn is_selectable(&self) -> bool {
+        self.enabled && !self.is_separator
+    }
 }
 
 /// Overflow 菜单入口数据（px，供 overflow_px 使用）。
@@ -100,11 +125,12 @@ impl PopupMenu {
         let items: Vec<PopupMenuItem> = entries
             .iter()
             .take(max_items)
-            .map(|e| PopupMenuItem {
-                label: truncate_title_by_width(&e.title, menu_max_text_w, menu_font_size),
-                is_active: e.tab_index == active_index,
-                is_separator: false,
-                action: PopupMenuAction::SwitchTab(e.tab_index),
+            .map(|e| {
+                PopupMenuItem::action(
+                    truncate_title_by_width(&e.title, menu_max_text_w, menu_font_size),
+                    PopupMenuAction::SwitchTab(e.tab_index),
+                )
+                .with_active(e.tab_index == active_index)
             })
             .collect();
 
@@ -156,57 +182,34 @@ impl PopupMenu {
 
         let pin_label = if is_pinned { "取消固定" } else { "固定标签" };
         let items = vec![
-            PopupMenuItem {
-                label: "关闭".into(),
-                is_active: false,
-                is_separator: false,
-                action: PopupMenuAction::Context { action: ContextMenuAction::Close, tab_index },
-            },
-            PopupMenuItem {
-                label: "关闭其他".into(),
-                is_active: false,
-                is_separator: false,
-                action: PopupMenuAction::Context {
-                    action: ContextMenuAction::CloseOthers,
-                    tab_index,
-                },
-            },
-            PopupMenuItem {
-                label: "关闭右侧".into(),
-                is_active: false,
-                is_separator: false,
-                action: PopupMenuAction::Context {
-                    action: ContextMenuAction::CloseRight,
-                    tab_index,
-                },
-            },
-            PopupMenuItem {
-                label: "全部关闭".into(),
-                is_active: false,
-                is_separator: false,
-                action: PopupMenuAction::Context { action: ContextMenuAction::CloseAll, tab_index },
-            },
-            PopupMenuItem {
-                label: "".into(),
-                is_active: false,
-                is_separator: true,
-                action: PopupMenuAction::Context { action: ContextMenuAction::CloseAll, tab_index },
-            },
-            PopupMenuItem {
-                label: "复制路径".into(),
-                is_active: false,
-                is_separator: false,
-                action: PopupMenuAction::Context { action: ContextMenuAction::CopyPath, tab_index },
-            },
-            PopupMenuItem {
-                label: pin_label.into(),
-                is_active: false,
-                is_separator: false,
-                action: PopupMenuAction::Context {
-                    action: ContextMenuAction::TogglePin,
-                    tab_index,
-                },
-            },
+            PopupMenuItem::action(
+                "关闭",
+                PopupMenuAction::Context { action: ContextMenuAction::Close, tab_index },
+            ),
+            PopupMenuItem::action(
+                "关闭其他",
+                PopupMenuAction::Context { action: ContextMenuAction::CloseOthers, tab_index },
+            ),
+            PopupMenuItem::action(
+                "关闭右侧",
+                PopupMenuAction::Context { action: ContextMenuAction::CloseRight, tab_index },
+            ),
+            PopupMenuItem::action(
+                "全部关闭",
+                PopupMenuAction::Context { action: ContextMenuAction::CloseAll, tab_index },
+            ),
+            PopupMenuItem::separator(PopupMenuAction::Context {
+                action: ContextMenuAction::CloseAll,
+                tab_index,
+            }),
+            PopupMenuItem::action(
+                "复制路径",
+                PopupMenuAction::Context { action: ContextMenuAction::CopyPath, tab_index },
+            ),
+            PopupMenuItem::action(
+                pin_label,
+                PopupMenuAction::Context { action: ContextMenuAction::TogglePin, tab_index },
+            ),
         ];
 
         let menu_left = (px - menu_w * 0.5).max(0.0).min(sw - menu_w);
@@ -242,7 +245,7 @@ impl PopupMenu {
     /// Hit-test in px coordinates.
     pub fn hit_test_px(&self, px: f32, py: f32) -> Option<&PopupMenuAction> {
         for (i, rect) in self.item_rects.iter().enumerate() {
-            if rect.contains(px, py) && !self.items[i].is_separator {
+            if rect.contains(px, py) && self.items[i].is_selectable() {
                 return Some(&self.items[i].action);
             }
         }
@@ -280,7 +283,7 @@ impl PopupMenu {
             }
 
             // Hover highlight (rounded)
-            if Some(i) == hovered {
+            if item.enabled && Some(i) == hovered {
                 let hr = r.shrink(1.0 * dpi, 1.0 * dpi, 1.0 * dpi, 1.0 * dpi);
                 if hr.w > 0.0 && hr.h > 0.0 {
                     ctx.list.fill_rounded(hr, ctx.theme.palette.sidebar_hover_bg, radius);
@@ -299,7 +302,11 @@ impl PopupMenu {
                         check_x,
                         y_baseline,
                         font_size,
-                        ctx.theme.palette.text_main,
+                        if item.enabled {
+                            ctx.theme.palette.text_main
+                        } else {
+                            ctx.theme.palette.text_muted
+                        },
                         "\u{2713}",
                         shaper,
                     );
@@ -309,7 +316,11 @@ impl PopupMenu {
                         label_x,
                         y_baseline,
                         font_size,
-                        ctx.theme.palette.text_main,
+                        if item.enabled {
+                            ctx.theme.palette.text_main
+                        } else {
+                            ctx.theme.palette.text_muted
+                        },
                         &item.label,
                         shaper,
                     );
@@ -328,12 +339,44 @@ impl PopupMenu {
                         pad_x,
                         y_baseline,
                         font_size,
-                        ctx.theme.palette.text_main,
+                        if item.enabled {
+                            ctx.theme.palette.text_main
+                        } else {
+                            ctx.theme.palette.text_muted
+                        },
                         &item.label,
                         shaper,
                     );
                 };
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn disabled_items_and_separators_are_not_hit_test_targets() {
+        let menu = PopupMenu {
+            items: vec![
+                PopupMenuItem::action("可用", PopupMenuAction::ToggleLineNumbers),
+                PopupMenuItem::action("禁用", PopupMenuAction::ToggleWordWrap).with_enabled(false),
+                PopupMenuItem::separator(PopupMenuAction::ToggleStatusBar),
+            ],
+            item_rects: vec![
+                Rect::new(0.0, 0.0, 100.0, 20.0),
+                Rect::new(0.0, 20.0, 100.0, 20.0),
+                Rect::new(0.0, 40.0, 100.0, 8.0),
+            ],
+            menu_rect: Rect::new(0.0, 0.0, 100.0, 48.0),
+            screen_size: (100.0, 100.0),
+            show_checkmarks: false,
+        };
+
+        assert_eq!(menu.hit_test_px(10.0, 10.0), Some(&PopupMenuAction::ToggleLineNumbers));
+        assert_eq!(menu.hit_test_px(10.0, 30.0), None);
+        assert_eq!(menu.hit_test_px(10.0, 44.0), None);
     }
 }

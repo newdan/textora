@@ -68,7 +68,7 @@ impl SidebarState {
                 .item_rects
                 .iter()
                 .enumerate()
-                .find(|(i, r)| r.contains(px, py) && !menu.items[*i].is_separator)
+                .find(|(i, r)| r.contains(px, py) && menu.items[*i].is_selectable())
                 .map(|(i, _)| i);
         }
     }
@@ -256,78 +256,27 @@ impl SidebarState {
         let theme_mode = input.theme_mode;
         let current_mode = input.view_mode;
         let items = vec![
-            PopupMenuItem {
-                label: "显示行号".into(),
-                is_active: show_line_numbers,
-                is_separator: false,
-                action: PMA::ToggleLineNumbers,
-            },
-            PopupMenuItem {
-                label: "自动换行".into(),
-                is_active: word_wrap,
-                is_separator: false,
-                action: PMA::ToggleWordWrap,
-            },
-            PopupMenuItem {
-                label: "显示状态栏".into(),
-                is_active: show_status_bar,
-                is_separator: false,
-                action: PMA::ToggleStatusBar,
-            },
-            PopupMenuItem {
-                label: "".into(),
-                is_active: false,
-                is_separator: true,
-                action: PMA::SetViewMode(ViewMode::Sidebar), // unused for separator
-            },
-            PopupMenuItem {
-                label: "跟随系统".into(),
-                is_active: theme_mode == crate::settings::ThemeMode::System,
-                is_separator: false,
-                action: PMA::SetThemeMode(crate::settings::ThemeMode::System),
-            },
-            PopupMenuItem {
-                label: "深色模式".into(),
-                is_active: theme_mode == crate::settings::ThemeMode::Dark,
-                is_separator: false,
-                action: PMA::SetThemeMode(crate::settings::ThemeMode::Dark),
-            },
-            PopupMenuItem {
-                label: "浅色模式".into(),
-                is_active: theme_mode == crate::settings::ThemeMode::Light,
-                is_separator: false,
-                action: PMA::SetThemeMode(crate::settings::ThemeMode::Light),
-            },
-            PopupMenuItem {
-                label: "".into(),
-                is_active: false,
-                is_separator: true,
-                action: PMA::SetViewMode(ViewMode::Sidebar), // unused for separator
-            },
-            PopupMenuItem {
-                label: "Sidebar 模式".into(),
-                is_active: current_mode == ViewMode::Sidebar,
-                is_separator: false,
-                action: PMA::SetViewMode(ViewMode::Sidebar),
-            },
-            PopupMenuItem {
-                label: "Tabs 模式".into(),
-                is_active: current_mode == ViewMode::Tabs,
-                is_separator: false,
-                action: PMA::SetViewMode(ViewMode::Tabs),
-            },
-            PopupMenuItem {
-                label: "".into(),
-                is_active: false,
-                is_separator: true,
-                action: PMA::SetViewMode(ViewMode::Sidebar), // unused for separator
-            },
-            PopupMenuItem {
-                label: "打开Settings".into(),
-                is_active: false,
-                is_separator: false,
-                action: PMA::OpenSettingsFile,
-            },
+            PopupMenuItem::action("显示行号", PMA::ToggleLineNumbers)
+                .with_active(show_line_numbers),
+            PopupMenuItem::action("自动换行", PMA::ToggleWordWrap).with_active(word_wrap),
+            PopupMenuItem::action("显示状态栏", PMA::ToggleStatusBar).with_active(show_status_bar),
+            PopupMenuItem::separator(PMA::SetViewMode(ViewMode::Sidebar)),
+            PopupMenuItem::action(
+                "跟随系统",
+                PMA::SetThemeMode(crate::settings::ThemeMode::System),
+            )
+            .with_active(theme_mode == crate::settings::ThemeMode::System),
+            PopupMenuItem::action("深色模式", PMA::SetThemeMode(crate::settings::ThemeMode::Dark))
+                .with_active(theme_mode == crate::settings::ThemeMode::Dark),
+            PopupMenuItem::action("浅色模式", PMA::SetThemeMode(crate::settings::ThemeMode::Light))
+                .with_active(theme_mode == crate::settings::ThemeMode::Light),
+            PopupMenuItem::separator(PMA::SetViewMode(ViewMode::Sidebar)),
+            PopupMenuItem::action("Sidebar 模式", PMA::SetViewMode(ViewMode::Sidebar))
+                .with_active(current_mode == ViewMode::Sidebar),
+            PopupMenuItem::action("Tabs 模式", PMA::SetViewMode(ViewMode::Tabs))
+                .with_active(current_mode == ViewMode::Tabs),
+            PopupMenuItem::separator(PMA::SetViewMode(ViewMode::Sidebar)),
+            PopupMenuItem::action("打开Settings", PMA::OpenSettingsFile),
         ];
 
         let menu_left = anchor_x.min(screen_w - menu_w).max(0.0);

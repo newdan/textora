@@ -20,24 +20,9 @@ pub fn build_new_document_menu(
     let anchor_x = split_button_rect.x + split_button_rect.w / 2.0 - menu_w / 2.0;
     let anchor_y = split_button_rect.bottom() + 2.0 * dpi;
     let items = vec![
-        PopupMenuItem {
-            label: "新建 TXT".into(),
-            is_active: false,
-            is_separator: false,
-            action: PMA::NewDocument(NewDocumentKind::Text),
-        },
-        PopupMenuItem {
-            label: "新建 MMAP".into(),
-            is_active: false,
-            is_separator: false,
-            action: PMA::NewDocument(NewDocumentKind::Mindmap),
-        },
-        PopupMenuItem {
-            label: "新建 MD".into(),
-            is_active: false,
-            is_separator: false,
-            action: PMA::NewDocument(NewDocumentKind::Markdown),
-        },
+        PopupMenuItem::action("新建 TXT", PMA::NewDocument(NewDocumentKind::Text)),
+        PopupMenuItem::action("新建 MMAP", PMA::NewDocument(NewDocumentKind::Mindmap)),
+        PopupMenuItem::action("新建 MD", PMA::NewDocument(NewDocumentKind::Markdown)),
     ];
 
     let menu_left = anchor_x.min(screen_w - menu_w).max(0.0);
@@ -96,78 +81,23 @@ pub fn build_settings_menu(
         (screen_w * 0.025, screen_h * 0.65)
     };
     let items = vec![
-        PopupMenuItem {
-            label: "显示行号".into(),
-            is_active: show_line_numbers,
-            is_separator: false,
-            action: PMA::ToggleLineNumbers,
-        },
-        PopupMenuItem {
-            label: "自动换行".into(),
-            is_active: word_wrap,
-            is_separator: false,
-            action: PMA::ToggleWordWrap,
-        },
-        PopupMenuItem {
-            label: "显示状态栏".into(),
-            is_active: show_status_bar,
-            is_separator: false,
-            action: PMA::ToggleStatusBar,
-        },
-        PopupMenuItem {
-            label: "".into(),
-            is_active: false,
-            is_separator: true,
-            action: PMA::SetViewMode(ViewMode::Sidebar),
-        },
-        PopupMenuItem {
-            label: "跟随系统".into(),
-            is_active: theme_mode == crate::settings::ThemeMode::System,
-            is_separator: false,
-            action: PMA::SetThemeMode(crate::settings::ThemeMode::System),
-        },
-        PopupMenuItem {
-            label: "深色模式".into(),
-            is_active: theme_mode == crate::settings::ThemeMode::Dark,
-            is_separator: false,
-            action: PMA::SetThemeMode(crate::settings::ThemeMode::Dark),
-        },
-        PopupMenuItem {
-            label: "浅色模式".into(),
-            is_active: theme_mode == crate::settings::ThemeMode::Light,
-            is_separator: false,
-            action: PMA::SetThemeMode(crate::settings::ThemeMode::Light),
-        },
-        PopupMenuItem {
-            label: "".into(),
-            is_active: false,
-            is_separator: true,
-            action: PMA::SetViewMode(ViewMode::Sidebar),
-        },
-        PopupMenuItem {
-            label: "Sidebar 模式".into(),
-            is_active: current_mode == ViewMode::Sidebar,
-            is_separator: false,
-            action: PMA::SetViewMode(ViewMode::Sidebar),
-        },
-        PopupMenuItem {
-            label: "Tabs 模式".into(),
-            is_active: current_mode == ViewMode::Tabs,
-            is_separator: false,
-            action: PMA::SetViewMode(ViewMode::Tabs),
-        },
-        PopupMenuItem {
-            label: "".into(),
-            is_active: false,
-            is_separator: true,
-            action: PMA::SetViewMode(ViewMode::Sidebar),
-        },
-        PopupMenuItem {
-            label: "打开Settings".into(),
-            is_active: false,
-            is_separator: false,
-            action: PMA::OpenSettingsFile,
-        },
+        PopupMenuItem::action("显示行号", PMA::ToggleLineNumbers).with_active(show_line_numbers),
+        PopupMenuItem::action("自动换行", PMA::ToggleWordWrap).with_active(word_wrap),
+        PopupMenuItem::action("显示状态栏", PMA::ToggleStatusBar).with_active(show_status_bar),
+        PopupMenuItem::separator(PMA::SetViewMode(ViewMode::Sidebar)),
+        PopupMenuItem::action("跟随系统", PMA::SetThemeMode(crate::settings::ThemeMode::System))
+            .with_active(theme_mode == crate::settings::ThemeMode::System),
+        PopupMenuItem::action("深色模式", PMA::SetThemeMode(crate::settings::ThemeMode::Dark))
+            .with_active(theme_mode == crate::settings::ThemeMode::Dark),
+        PopupMenuItem::action("浅色模式", PMA::SetThemeMode(crate::settings::ThemeMode::Light))
+            .with_active(theme_mode == crate::settings::ThemeMode::Light),
+        PopupMenuItem::separator(PMA::SetViewMode(ViewMode::Sidebar)),
+        PopupMenuItem::action("Sidebar 模式", PMA::SetViewMode(ViewMode::Sidebar))
+            .with_active(current_mode == ViewMode::Sidebar),
+        PopupMenuItem::action("Tabs 模式", PMA::SetViewMode(ViewMode::Tabs))
+            .with_active(current_mode == ViewMode::Tabs),
+        PopupMenuItem::separator(PMA::SetViewMode(ViewMode::Sidebar)),
+        PopupMenuItem::action("打开Settings", PMA::OpenSettingsFile),
     ];
     let menu_left = anchor_x.min(screen_w - menu_w).max(0.0);
     let menu_right = menu_left + menu_w;
