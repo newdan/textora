@@ -207,6 +207,10 @@ pub fn clamp_tab_scroll(offset: f32, max_scroll: f32) -> f32 {
 }
 
 /// Compute tab bar layout from document list.
+#[allow(
+    clippy::too_many_arguments,
+    reason = "tab layout keeps navigation, viewport, scroll, and shaping inputs explicit"
+)]
 pub fn layout_tabs(
     tab_infos: &[TabInfo],
     _active_index: usize,

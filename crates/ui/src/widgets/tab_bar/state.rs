@@ -404,6 +404,10 @@ fn draw_tab_bg(
 }
 
 /// Draw tab content: pin indicator, close button, separators, dirty mark, text label.
+#[allow(
+    clippy::too_many_arguments,
+    reason = "tab paint helper receives already-derived geometry and semantic colors"
+)]
 fn draw_tab_content(
     dl: &mut DrawList,
     entry: &super::layout::TabEntry,
