@@ -4,7 +4,9 @@ use std::any::Any;
 
 use crate::core::widget::{ControlAction, WidgetId};
 use crate::core::{
-    Event, EventCtx, KeyCode, LayoutCtx, MouseButton, PaintCtx, Rect, Widget, WidgetAction,
+    AccessibilityAction, AccessibilityActionRequest, AccessibilityContext, AccessibilityId,
+    AccessibilityNode, AccessibilityRole, Event, EventCtx, KeyCode, LayoutCtx, Modifiers,
+    MouseButton, PaintCtx, Rect, Widget, WidgetAction,
 };
 use crate::widgets::icon::draw_icon;
 
@@ -44,6 +46,7 @@ pub struct SplitButtonWidget {
     menu_open: bool,
     hovered_region: Option<SplitButtonRegion>,
     pressed_region: Option<SplitButtonRegion>,
+    focused: bool,
 }
 
 impl Default for SplitButtonWidget {
@@ -65,6 +68,7 @@ impl SplitButtonWidget {
             menu_open: false,
             hovered_region: None,
             pressed_region: None,
+            focused: false,
         }
     }
 
@@ -73,6 +77,7 @@ impl SplitButtonWidget {
         if !self.input.enabled {
             self.hovered_region = None;
             self.pressed_region = None;
+            self.focused = false;
         }
     }
 
@@ -219,12 +224,93 @@ impl Widget for SplitButtonWidget {
         self.rect.contains(px, py)
     }
 
+    fn id(&self) -> Option<WidgetId> {
+        (self.main_action_id != WidgetId(0)).then_some(self.main_action_id)
+    }
+
+    fn is_focusable(&self) -> bool {
+        self.input.enabled && self.id().is_some()
+    }
+
+    fn set_keyboard_focus(&mut self, focused_id: Option<WidgetId>) {
+        self.focused = self.input.enabled && focused_id == self.id();
+    }
+
+    fn accessibility_node(&self, ctx: &AccessibilityContext) -> Option<AccessibilityNode> {
+        let main_id = self.id()?;
+        if self.rect.w <= 0.0 || self.rect.h <= 0.0 {
+            return None;
+        }
+        let root_id = AccessibilityId::from(main_id).named_child("split-button");
+        let mut main = AccessibilityNode::new(
+            AccessibilityId::from(main_id),
+            AccessibilityRole::Button,
+            ctx.screen_bounds(self.main_rect),
+        )
+        .with_name(self.input.label.clone())
+        .with_disabled(!self.input.enabled)
+        .with_focused(self.focused);
+        let mut menu = AccessibilityNode::new(
+            AccessibilityId::from(self.menu_action_id),
+            AccessibilityRole::Button,
+            ctx.screen_bounds(self.menu_rect),
+        )
+        .with_name(format!("{} 菜单", self.input.label))
+        .with_disabled(!self.input.enabled)
+        .with_expanded(self.menu_open);
+        if self.input.enabled {
+            main = main
+                .with_action(AccessibilityAction::Focus)
+                .with_action(AccessibilityAction::Activate);
+            menu = menu.with_action(AccessibilityAction::Activate);
+        }
+        Some(
+            AccessibilityNode::new(root_id, AccessibilityRole::Group, ctx.screen_bounds(self.rect))
+                .with_name(self.input.label.clone())
+                .with_child(main)
+                .with_child(menu),
+        )
+    }
+
+    fn on_accessibility_action(
+        &mut self,
+        request: &AccessibilityActionRequest,
+    ) -> Option<WidgetAction> {
+        if !self.input.enabled {
+            return None;
+        }
+        if request.target == AccessibilityId::from(self.main_action_id) {
+            return match request.action {
+                AccessibilityAction::Focus => {
+                    Some(WidgetAction::Control(ControlAction::FocusRequested {
+                        id: self.main_action_id,
+                    }))
+                }
+                AccessibilityAction::Activate => {
+                    Some(WidgetAction::Control(ControlAction::Activated {
+                        id: self.main_action_id,
+                    }))
+                }
+                _ => None,
+            };
+        }
+        (request.target == AccessibilityId::from(self.menu_action_id)
+            && request.action == AccessibilityAction::Activate)
+            .then_some(WidgetAction::Control(ControlAction::Activated { id: self.menu_action_id }))
+    }
+
     fn on_event(&mut self, event: &Event, ctx: &mut EventCtx) -> Option<WidgetAction> {
         if !self.input.enabled {
             return None;
         }
 
         match event {
+            Event::PointerLeave => self.hovered_region.take().map(|_| WidgetAction::Consumed),
+            Event::InteractionCancel => {
+                let interaction_changed =
+                    self.hovered_region.take().is_some() | self.pressed_region.take().is_some();
+                interaction_changed.then_some(WidgetAction::Consumed)
+            }
             Event::MouseMove { px, py } => {
                 let next_hovered_region = self.region_at(*px, *py);
                 let hover_changed = self.hovered_region != next_hovered_region;
@@ -238,7 +324,8 @@ impl Widget for SplitButtonWidget {
             Event::MouseDown { px, py, button: MouseButton::Left } => {
                 self.pressed_region = self.region_at(*px, *py);
                 self.hovered_region = self.pressed_region;
-                self.pressed_region.map(|_| WidgetAction::Consumed)
+                self.pressed_region?;
+                Some(WidgetAction::Consumed)
             }
             Event::MouseUp { px, py, button: MouseButton::Left } => {
                 let pressed_region = self.pressed_region.take()?;
@@ -252,10 +339,14 @@ impl Widget for SplitButtonWidget {
                     Some(WidgetAction::Consumed)
                 }
             }
-            Event::KeyDown(KeyCode::Enter, _) => {
+            Event::KeyDown(KeyCode::Enter, modifiers)
+                if self.focused && *modifiers == Modifiers::NONE =>
+            {
                 Some(WidgetAction::Control(ControlAction::Activated { id: self.main_action_id }))
             }
-            Event::KeyDown(KeyCode::Down, _) => {
+            Event::KeyDown(KeyCode::Down, modifiers)
+                if self.focused && *modifiers == Modifiers::NONE =>
+            {
                 Some(WidgetAction::Control(ControlAction::Activated { id: self.menu_action_id }))
             }
             _ => None,
@@ -289,11 +380,76 @@ mod tests {
         widget.set_action_ids(WidgetId(41), WidgetId(42));
         widget.set_input(SplitButtonInput { label: "New note".to_owned(), enabled: true });
         layout(&mut widget, Rect::new(10.0, 20.0, 160.0, 32.0), 1.0);
+        widget.set_keyboard_focus(Some(WidgetId(41)));
         widget
     }
 
     fn event_context(theme: &crate::Theme) -> EventCtx<'_> {
         EventCtx { theme, dpi: 1.0, cursor_hint: None }
+    }
+
+    #[test]
+    fn accessibility_exposes_two_button_regions_and_requires_keyboard_focus() {
+        let mut widget = widget();
+        widget.set_menu_open(true);
+        widget.set_keyboard_focus(None);
+        let theme = crate::theme::test_theme();
+        let mut context = event_context(&theme);
+
+        assert_eq!(
+            widget.on_event(&Event::KeyDown(KeyCode::Enter, Modifiers::NONE), &mut context),
+            None
+        );
+        widget.set_keyboard_focus(Some(WidgetId(41)));
+        let node = widget
+            .accessibility_node(&crate::core::AccessibilityContext::new(100.0, 200.0))
+            .expect("split button should expose semantics");
+
+        assert_eq!(node.role, crate::core::AccessibilityRole::Group);
+        assert_eq!(node.children.len(), 2);
+        assert_eq!(node.children[0].name.as_deref(), Some("New note"));
+        assert!(node.children[0].state.focused);
+        assert_eq!(node.children[1].name.as_deref(), Some("New note 菜单"));
+        assert_eq!(node.children[1].state.expanded, Some(true));
+        assert_eq!(node.children[0].bounds, Rect::new(110.0, 220.0, 132.0, 32.0));
+        assert_eq!(
+            widget.on_accessibility_action(&crate::core::AccessibilityActionRequest::new(
+                node.children[1].id,
+                crate::core::AccessibilityAction::Activate,
+            )),
+            Some(WidgetAction::Control(ControlAction::Activated { id: WidgetId(42) }))
+        );
+    }
+
+    #[test]
+    fn split_button_leave_preserves_press_and_cancel_clears_it() {
+        let mut widget = widget();
+        let theme = crate::theme::test_theme();
+        let mut context = event_context(&theme);
+
+        assert_eq!(
+            widget.on_event(&Event::MouseMove { px: 20.0, py: 30.0 }, &mut context),
+            Some(WidgetAction::Consumed)
+        );
+        assert_eq!(
+            widget.on_event(
+                &Event::MouseDown { px: 20.0, py: 30.0, button: MouseButton::Left },
+                &mut context,
+            ),
+            Some(WidgetAction::Consumed)
+        );
+        assert!(widget.is_capturing());
+        assert_eq!(
+            widget.on_event(&Event::PointerLeave, &mut context),
+            Some(WidgetAction::Consumed)
+        );
+        assert!(widget.is_capturing());
+        assert_eq!(
+            widget.on_event(&Event::InteractionCancel, &mut context),
+            Some(WidgetAction::Consumed)
+        );
+        assert!(!widget.is_capturing());
+        assert_eq!(widget.on_event(&Event::InteractionCancel, &mut context), None);
     }
 
     #[test]

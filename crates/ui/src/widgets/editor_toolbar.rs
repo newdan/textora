@@ -1,7 +1,11 @@
 //! 编辑器通用菜单栏；文档类型命令集合由产品层注入。
 
 use crate::core::widget::{ControlAction, TextPayload, WidgetId};
-use crate::core::{Event, EventCtx, LayoutCtx, PaintCtx, Rect, Widget, WidgetAction};
+use crate::core::{
+    AccessibilityAction, AccessibilityActionRequest, AccessibilityContext, AccessibilityId,
+    AccessibilityNode, AccessibilityRole, Event, EventCtx, LayoutCtx, PaintCtx, Rect, Widget,
+    WidgetAction,
+};
 use crate::widgets::icon::draw_icon;
 use std::any::Any;
 
@@ -11,6 +15,7 @@ const TOOLBAR_HORIZONTAL_PADDING_LOGICAL: f32 = 16.0;
 const TOOLBAR_ICON_SIZE_LOGICAL: f32 = 16.0;
 const TOOLBAR_FONT_SIZE_LOGICAL: f32 = 12.0;
 const TOOLBAR_CORNER_RADIUS_LOGICAL: f32 = 5.0;
+const EDITOR_TOOLBAR_ACCESSIBILITY_ID: AccessibilityId = AccessibilityId(0x6564_6974_746f_6f6c);
 
 pub const EDITOR_TOOLBAR_COMMAND_ID: WidgetId = WidgetId(10_301);
 pub const EDITOR_TOOLBAR_OVERFLOW_ID: WidgetId = WidgetId(10_302);
@@ -48,6 +53,7 @@ pub struct EditorToolbarWidget {
     rect: Rect,
     hovered_command_key: Option<String>,
     overflow_hovered: bool,
+    dpi: f32,
 }
 
 impl EditorToolbarWidget {
@@ -57,6 +63,7 @@ impl EditorToolbarWidget {
             rect: Rect::ZERO,
             hovered_command_key: None,
             overflow_hovered: false,
+            dpi: 1.0,
         }
     }
 
@@ -153,8 +160,9 @@ impl Default for EditorToolbarWidget {
 }
 
 impl Widget for EditorToolbarWidget {
-    fn set_rect(&mut self, rect: Rect, _ctx: &mut LayoutCtx) {
+    fn set_rect(&mut self, rect: Rect, ctx: &mut LayoutCtx) {
         self.rect = Rect::new(0.0, 0.0, rect.w, rect.h);
+        self.dpi = ctx.dpi;
     }
 
     fn paint(&self, ctx: &mut PaintCtx) {
@@ -231,8 +239,86 @@ impl Widget for EditorToolbarWidget {
         self.rect.contains(px, py)
     }
 
+    fn accessibility_node(&self, ctx: &AccessibilityContext) -> Option<AccessibilityNode> {
+        if self.rect.w <= 0.0 || self.rect.h <= 0.0 {
+            return None;
+        }
+        let (visible, overflow) = self.visible_command_keys(self.rect.w / self.dpi);
+        let commands = self.commands();
+        let mut left = self.rect.x + TOOLBAR_HORIZONTAL_PADDING_LOGICAL * self.dpi;
+        let mut root = AccessibilityNode::new(
+            EDITOR_TOOLBAR_ACCESSIBILITY_ID,
+            AccessibilityRole::Toolbar,
+            ctx.screen_bounds(self.rect),
+        )
+        .with_name("编辑器工具栏");
+        for key in visible {
+            let Some(command) = commands.iter().find(|command| command.command_key == key) else {
+                continue;
+            };
+            let width = self.command_width(command) * self.dpi;
+            let mut child = AccessibilityNode::new(
+                EDITOR_TOOLBAR_ACCESSIBILITY_ID.named_child(&command.command_key),
+                AccessibilityRole::Button,
+                ctx.screen_bounds(Rect::new(left, self.rect.y, width, self.rect.h)),
+            )
+            .with_name(command.label.clone())
+            .with_disabled(!command.enabled);
+            if command.enabled {
+                child = child.with_action(AccessibilityAction::Activate);
+            }
+            root.children.push(child);
+            left += width + TOOLBAR_COMMAND_GAP_LOGICAL * self.dpi;
+        }
+        if !overflow.is_empty() {
+            root.children.push(
+                AccessibilityNode::new(
+                    EDITOR_TOOLBAR_ACCESSIBILITY_ID.named_child("overflow"),
+                    AccessibilityRole::Button,
+                    ctx.screen_bounds(self.overflow_rect(self.dpi)),
+                )
+                .with_name("更多命令")
+                .with_expanded(self.input.overflow_open)
+                .with_action(AccessibilityAction::Activate),
+            );
+        }
+        Some(root)
+    }
+
+    fn on_accessibility_action(
+        &mut self,
+        request: &AccessibilityActionRequest,
+    ) -> Option<WidgetAction> {
+        if request.action != AccessibilityAction::Activate {
+            return None;
+        }
+        let (visible, overflow) = self.visible_command_keys(self.rect.w / self.dpi);
+        if !overflow.is_empty()
+            && request.target == EDITOR_TOOLBAR_ACCESSIBILITY_ID.named_child("overflow")
+        {
+            return Some(WidgetAction::Control(ControlAction::Activated {
+                id: EDITOR_TOOLBAR_OVERFLOW_ID,
+            }));
+        }
+        let command = self.commands().into_iter().find(|command| {
+            command.enabled
+                && visible.contains(&command.command_key)
+                && request.target
+                    == EDITOR_TOOLBAR_ACCESSIBILITY_ID.named_child(&command.command_key)
+        })?;
+        Some(WidgetAction::Control(ControlAction::TextCommitted {
+            id: EDITOR_TOOLBAR_COMMAND_ID,
+            value: TextPayload::Plain(command.command_key),
+        }))
+    }
+
     fn on_event(&mut self, event: &Event, ctx: &mut EventCtx) -> Option<WidgetAction> {
         match event {
+            Event::PointerLeave | Event::InteractionCancel => {
+                let hover_changed = self.hovered_command_key.take().is_some()
+                    | std::mem::take(&mut self.overflow_hovered);
+                hover_changed.then_some(WidgetAction::Consumed)
+            }
             Event::KeyDown(crate::core::KeyCode::Escape, _) if self.input.overflow_open => {
                 Some(WidgetAction::Control(ControlAction::Activated {
                     id: EDITOR_TOOLBAR_DISMISS_ID,
@@ -345,6 +431,38 @@ mod tests {
     }
 
     #[test]
+    fn accessibility_exposes_visible_commands_disabled_state_and_overflow_action() {
+        let mut toolbar = toolbar();
+        toolbar.input.groups[0].commands[0].enabled = false;
+        toolbar.input.overflow_open = true;
+        let theme = crate::theme::test_theme();
+        let mut measure = crate::core::NoopMeasure;
+        let mut layout =
+            LayoutCtx { ui_measure: None, measure: &mut measure, theme: &theme, dpi: 1.0 };
+        toolbar.set_rect(Rect::new(0.0, 0.0, 80.0, 40.0), &mut layout);
+        let node = toolbar
+            .accessibility_node(&crate::core::AccessibilityContext::new(10.0, 20.0))
+            .expect("toolbar should expose semantics");
+
+        assert_eq!(node.role, crate::core::AccessibilityRole::Toolbar);
+        assert_eq!(node.children.len(), 2);
+        assert_eq!(node.children[0].name.as_deref(), Some("撤销"));
+        assert!(node.children[0].state.disabled);
+        assert!(node.children[0].actions.is_empty());
+        assert_eq!(node.children[1].name.as_deref(), Some("更多命令"));
+        assert_eq!(node.children[1].state.expanded, Some(true));
+        assert_eq!(
+            toolbar.on_accessibility_action(&crate::core::AccessibilityActionRequest::new(
+                node.children[1].id,
+                crate::core::AccessibilityAction::Activate,
+            )),
+            Some(WidgetAction::Control(ControlAction::Activated {
+                id: EDITOR_TOOLBAR_OVERFLOW_ID,
+            }))
+        );
+    }
+
+    #[test]
     fn narrow_toolbar_moves_low_priority_commands_to_overflow_without_changing_keys() {
         let toolbar = toolbar();
         assert_eq!(
@@ -395,5 +513,25 @@ mod tests {
             Some(WidgetAction::Consumed)
         );
         assert_eq!(toolbar.hovered_command_key, None);
+    }
+
+    #[test]
+    fn toolbar_lifecycle_clears_hover_state_idempotently() {
+        let mut toolbar = toolbar();
+        toolbar.rect = Rect::new(0.0, 0.0, 320.0, 40.0);
+        let theme = crate::theme::test_theme();
+        let mut context = EventCtx { theme: &theme, dpi: 1.0, cursor_hint: None };
+
+        assert_eq!(
+            toolbar.on_event(&Event::MouseMove { px: 20.0, py: 20.0 }, &mut context),
+            Some(WidgetAction::Consumed)
+        );
+        assert_eq!(
+            toolbar.on_event(&Event::PointerLeave, &mut context),
+            Some(WidgetAction::Consumed)
+        );
+        assert_eq!(toolbar.hovered_command_key, None);
+        assert!(!toolbar.overflow_hovered);
+        assert_eq!(toolbar.on_event(&Event::InteractionCancel, &mut context), None);
     }
 }

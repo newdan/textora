@@ -8,8 +8,14 @@ use crate::core::geom::Rect;
 use crate::core::widget::{
     Event, EventCtx, KeyCode, LayoutCtx, MouseButton, PaintCtx, Widget, WidgetAction,
 };
+use crate::core::{
+    AccessibilityAction, AccessibilityActionRequest, AccessibilityContext, AccessibilityId,
+    AccessibilityNode, AccessibilityRole,
+};
 use std::any::Any;
 use winit::window::CursorIcon;
+
+const POPUP_MENU_ACCESSIBILITY_ID: AccessibilityId = AccessibilityId(0x706f_7075_706d_656e);
 
 /// 弹出菜单的操作结果（上行给 app 层）。
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -114,6 +120,57 @@ impl Widget for PopupMenuWidget {
         self.rect.contains(px, py)
     }
 
+    fn accessibility_node(&self, ctx: &AccessibilityContext) -> Option<AccessibilityNode> {
+        if self.rect.w <= 0.0 || self.rect.h <= 0.0 {
+            return None;
+        }
+        let mut root = AccessibilityNode::new(
+            POPUP_MENU_ACCESSIBILITY_ID,
+            AccessibilityRole::Menu,
+            ctx.screen_bounds(self.rect),
+        )
+        .with_name("弹出菜单");
+        for (index, (item, item_rect)) in
+            self.menu.items.iter().zip(&self.menu.item_rects).enumerate()
+        {
+            let role = if item.is_separator {
+                AccessibilityRole::Separator
+            } else {
+                AccessibilityRole::MenuItem
+            };
+            let mut child = AccessibilityNode::new(
+                POPUP_MENU_ACCESSIBILITY_ID.child(index as u64 + 1),
+                role,
+                ctx.screen_bounds(*item_rect),
+            )
+            .with_disabled(!item.enabled)
+            .with_selected(item.is_active)
+            .with_focused(self.highlighted == Some(index));
+            if !item.label.is_empty() {
+                child = child.with_name(item.label.clone());
+            }
+            if item.is_selectable() {
+                child = child.with_action(AccessibilityAction::Activate);
+            }
+            root.children.push(child);
+        }
+        Some(root)
+    }
+
+    fn on_accessibility_action(
+        &mut self,
+        request: &AccessibilityActionRequest,
+    ) -> Option<WidgetAction> {
+        if request.action != AccessibilityAction::Activate {
+            return None;
+        }
+        let index = (0..self.menu.items.len())
+            .find(|index| POPUP_MENU_ACCESSIBILITY_ID.child(*index as u64 + 1) == request.target)?;
+        let item = self.menu.items.get(index)?;
+        item.is_selectable()
+            .then(|| WidgetAction::Popup(PopupOutcome::Selected(item.action.clone())))
+    }
+
     fn on_event(&mut self, ev: &Event, ctx: &mut EventCtx) -> Option<WidgetAction> {
         match ev {
             Event::MouseMove { px, py } => {
@@ -211,6 +268,34 @@ mod tests {
         let theme = crate::theme::test_theme();
         let mut ctx = EventCtx { cursor_hint: None, theme: &theme, dpi: 1.0 };
         widget.on_event(&Event::KeyDown(key, Modifiers::NONE), &mut ctx)
+    }
+
+    #[test]
+    fn accessibility_exposes_menu_items_disabled_state_and_selected_action() {
+        let menu = menu_from_items(vec![
+            PopupMenuItem::action("禁用", PopupMenuAction::ToggleLineNumbers).with_enabled(false),
+            PopupMenuItem::action("自动换行", PopupMenuAction::ToggleWordWrap).with_active(true),
+        ]);
+        let mut widget = PopupMenuWidget::new(menu);
+        let node = widget
+            .accessibility_node(&crate::core::AccessibilityContext::new(10.0, 20.0))
+            .expect("popup menu should expose semantics");
+
+        assert_eq!(node.role, crate::core::AccessibilityRole::Menu);
+        assert_eq!(node.children.len(), 2);
+        assert!(node.children[0].state.disabled);
+        assert!(node.children[0].actions.is_empty());
+        assert_eq!(node.children[1].name.as_deref(), Some("自动换行"));
+        assert_eq!(node.children[1].state.selected, Some(true));
+        assert!(node.children[1].state.focused);
+        assert_eq!(node.children[1].bounds, Rect::new(10.0, 40.0, 120.0, 20.0));
+        assert_eq!(
+            widget.on_accessibility_action(&crate::core::AccessibilityActionRequest::new(
+                node.children[1].id,
+                crate::core::AccessibilityAction::Activate,
+            )),
+            Some(WidgetAction::Popup(PopupOutcome::Selected(PopupMenuAction::ToggleWordWrap)))
+        );
     }
 
     // ── PopupMenu 类型测试（从旧 popup_menu.rs 合并）──
