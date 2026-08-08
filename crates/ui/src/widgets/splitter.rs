@@ -4,8 +4,9 @@ use std::any::Any;
 
 use crate::core::widget::ControlAction;
 use crate::core::{
-    Event, EventCtx, KeyCode, LayoutCtx, Modifiers, MouseButton, PaintCtx, Rect, Widget,
-    WidgetAction, WidgetId,
+    AccessibilityAction, AccessibilityActionRequest, AccessibilityContext, AccessibilityId,
+    AccessibilityNode, AccessibilityOrientation, AccessibilityRole, Event, EventCtx, KeyCode,
+    LayoutCtx, Modifiers, MouseButton, PaintCtx, Rect, Widget, WidgetAction, WidgetId,
 };
 
 /// 分隔条可拖动的逻辑位置输入。
@@ -51,6 +52,7 @@ pub struct SplitterWidget {
     drag_start_px: Option<f32>,
     drag_start_logical_position: f32,
     current_logical_position: f32,
+    accessibility_label: Option<String>,
 }
 
 impl Default for SplitterWidget {
@@ -71,6 +73,7 @@ impl SplitterWidget {
             drag_start_px: None,
             drag_start_logical_position: 0.0,
             current_logical_position: 0.0,
+            accessibility_label: None,
         }
     }
 
@@ -92,6 +95,10 @@ impl SplitterWidget {
 
     pub fn logical_position(&self) -> f32 {
         self.current_logical_position
+    }
+
+    pub fn set_accessibility_label(&mut self, label: Option<String>) {
+        self.accessibility_label = label;
     }
 
     fn clamp_logical_position(&self, logical_position: f32) -> f32 {
@@ -167,6 +174,55 @@ impl Widget for SplitterWidget {
 
     fn set_keyboard_focus(&mut self, focused_id: Option<WidgetId>) {
         self.focused = self.input.enabled && self.id.is_some_and(|id| focused_id == Some(id));
+    }
+
+    fn accessibility_node(&self, ctx: &AccessibilityContext) -> Option<AccessibilityNode> {
+        let id = self.id?;
+        let mut node = AccessibilityNode::new(
+            AccessibilityId::from(id),
+            AccessibilityRole::Slider,
+            ctx.screen_bounds(self.rect),
+        )
+        .with_disabled(!self.input.enabled)
+        .with_focused(self.focused)
+        .with_numeric_value(
+            self.current_logical_position as f64,
+            self.input.minimum_logical_position as f64,
+            self.input.maximum_logical_position.max(self.input.minimum_logical_position) as f64,
+        )
+        .with_orientation(AccessibilityOrientation::Horizontal);
+        if let Some(label) = &self.accessibility_label {
+            node = node.with_name(label.clone());
+        }
+        if self.input.enabled {
+            node = node
+                .with_action(AccessibilityAction::Focus)
+                .with_action(AccessibilityAction::Increment)
+                .with_action(AccessibilityAction::Decrement);
+        }
+        Some(node)
+    }
+
+    fn on_accessibility_action(
+        &mut self,
+        request: &AccessibilityActionRequest,
+    ) -> Option<WidgetAction> {
+        let id = self.id?;
+        if !self.input.enabled || request.target != AccessibilityId::from(id) {
+            return None;
+        }
+        match request.action {
+            AccessibilityAction::Focus => {
+                Some(WidgetAction::Control(ControlAction::FocusRequested { id }))
+            }
+            AccessibilityAction::Increment => self
+                .adjust_with_keyboard(SPLITTER_KEYBOARD_STEP_LOGICAL)
+                .map(WidgetAction::Splitter),
+            AccessibilityAction::Decrement => self
+                .adjust_with_keyboard(-SPLITTER_KEYBOARD_STEP_LOGICAL)
+                .map(WidgetAction::Splitter),
+            _ => None,
+        }
     }
 
     fn on_event(&mut self, event: &Event, ctx: &mut EventCtx) -> Option<WidgetAction> {
@@ -288,6 +344,39 @@ mod tests {
 
     fn event_context(theme: &crate::Theme) -> EventCtx<'_> {
         EventCtx { theme, dpi: 2.0, cursor_hint: None }
+    }
+
+    #[test]
+    fn accessibility_exposes_splitter_range_and_increment_action() {
+        let id = WidgetId(70);
+        let mut widget = SplitterWidget::with_id(id);
+        widget.set_accessibility_label(Some("侧栏宽度".into()));
+        widget.set_input(SplitterInput {
+            logical_position: 200.0,
+            minimum_logical_position: 180.0,
+            maximum_logical_position: 320.0,
+            enabled: true,
+        });
+        layout(&mut widget, 2.0);
+        widget.set_keyboard_focus(Some(id));
+        let node = widget
+            .accessibility_node(&crate::core::AccessibilityContext::new(10.0, 20.0))
+            .expect("identified splitter should expose semantics");
+
+        assert_eq!(node.role, crate::core::AccessibilityRole::Slider);
+        assert_eq!(node.name.as_deref(), Some("侧栏宽度"));
+        assert_eq!(node.numeric_value, Some(200.0));
+        assert_eq!(node.numeric_minimum, Some(180.0));
+        assert_eq!(node.numeric_maximum, Some(320.0));
+        assert_eq!(node.orientation, Some(crate::core::AccessibilityOrientation::Horizontal));
+        assert!(node.state.focused);
+        assert_eq!(
+            widget.on_accessibility_action(&crate::core::AccessibilityActionRequest::new(
+                node.id,
+                crate::core::AccessibilityAction::Increment,
+            )),
+            Some(WidgetAction::Splitter(SplitterAction::LogicalPositionChanged(208.0)))
+        );
     }
 
     #[test]

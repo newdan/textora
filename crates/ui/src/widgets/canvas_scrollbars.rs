@@ -3,7 +3,10 @@
 use std::any::Any;
 
 use crate::canvas::CanvasAxis;
-use crate::core::{Event, EventCtx, LayoutCtx, PaintCtx, Rect, Widget, WidgetAction};
+use crate::core::{
+    AccessibilityActionRequest, AccessibilityContext, AccessibilityId, AccessibilityNode,
+    AccessibilityRole, Event, EventCtx, LayoutCtx, PaintCtx, Rect, Widget, WidgetAction,
+};
 use crate::widgets::scrollbar::{
     SCROLLBAR_RESERVE_PX, ScrollbarAction, ScrollbarInput, ScrollbarWidget,
 };
@@ -72,6 +75,7 @@ pub struct CanvasScrollbarsWidget {
     input: CanvasScrollbarsInput,
     horizontal: ScrollbarWidget,
     vertical: ScrollbarWidget,
+    accessibility_id: Option<AccessibilityId>,
 }
 
 impl Default for CanvasScrollbarsWidget {
@@ -88,6 +92,7 @@ impl CanvasScrollbarsWidget {
             input: CanvasScrollbarsInput::default(),
             horizontal: ScrollbarWidget::horizontal(),
             vertical: ScrollbarWidget::vertical(),
+            accessibility_id: None,
         }
     }
 
@@ -100,6 +105,14 @@ impl CanvasScrollbarsWidget {
         if let Some(vertical) = input.vertical {
             self.vertical.set_input(vertical);
         }
+    }
+
+    pub fn set_accessibility_id(&mut self, id: Option<AccessibilityId>) {
+        self.accessibility_id = id;
+        self.horizontal.set_accessibility_id(id.map(|root_id| root_id.child(1)));
+        self.vertical.set_accessibility_id(id.map(|root_id| root_id.child(2)));
+        self.horizontal.set_accessibility_label(Some("画布水平滚动".into()));
+        self.vertical.set_accessibility_label(Some("画布垂直滚动".into()));
     }
 
     fn refresh_layout(&mut self, ctx: &mut LayoutCtx) {
@@ -189,6 +202,56 @@ impl Widget for CanvasScrollbarsWidget {
 
     fn is_capturing(&self) -> bool {
         self.horizontal.is_capturing() || self.vertical.is_capturing()
+    }
+
+    fn accessibility_node(&self, ctx: &AccessibilityContext) -> Option<AccessibilityNode> {
+        let id = self.accessibility_id?;
+        let horizontal_context = ctx.offset_by(self.layout.horizontal.x, self.layout.horizontal.y);
+        let vertical_context = ctx.offset_by(self.layout.vertical.x, self.layout.vertical.y);
+        let mut children = Vec::new();
+        if self.input.horizontal.is_some()
+            && let Some(node) = self.horizontal.accessibility_node(&horizontal_context)
+        {
+            children.push(node);
+        }
+        if self.input.vertical.is_some()
+            && let Some(node) = self.vertical.accessibility_node(&vertical_context)
+        {
+            children.push(node);
+        }
+        if children.is_empty() {
+            return None;
+        }
+        let mut root =
+            AccessibilityNode::new(id, AccessibilityRole::Group, ctx.screen_bounds(self.rect))
+                .with_name("画布滚动条");
+        root.children = children;
+        Some(root)
+    }
+
+    fn on_accessibility_action(
+        &mut self,
+        request: &AccessibilityActionRequest,
+    ) -> Option<WidgetAction> {
+        if self.input.horizontal.is_some()
+            && let Some(WidgetAction::Scrollbar(action)) =
+                self.horizontal.on_accessibility_action(request)
+        {
+            return Some(WidgetAction::CanvasScrollbars(CanvasScrollbarsAction {
+                axis: CanvasAxis::Horizontal,
+                action,
+            }));
+        }
+        if self.input.vertical.is_some()
+            && let Some(WidgetAction::Scrollbar(action)) =
+                self.vertical.on_accessibility_action(request)
+        {
+            return Some(WidgetAction::CanvasScrollbars(CanvasScrollbarsAction {
+                axis: CanvasAxis::Vertical,
+                action,
+            }));
+        }
+        None
     }
 
     fn on_event(&mut self, event: &Event, ctx: &mut EventCtx) -> Option<WidgetAction> {
@@ -299,6 +362,50 @@ mod tests {
         let mut paint_ctx = PaintCtx::new(&mut draw_list, theme, 1.0);
         widget.paint(&mut paint_ctx);
         draw_list.cmds.iter().filter(|command| matches!(command, DrawCmd::FillRect { .. })).count()
+    }
+
+    #[test]
+    fn accessibility_builds_visible_axis_subtree_and_preserves_axis_action() {
+        let root_id = crate::core::AccessibilityId(70);
+        let theme = test_theme();
+        let mut measure = NoopMeasure;
+        let mut layout_ctx =
+            LayoutCtx { measure: &mut measure, ui_measure: None, theme: &theme, dpi: 1.0 };
+        let mut widget = CanvasScrollbarsWidget::new();
+        widget.set_accessibility_id(Some(root_id));
+        widget.set_input(CanvasScrollbarsInput {
+            horizontal: Some(overflowing_input()),
+            vertical: Some(overflowing_input()),
+        });
+        widget.set_rect(canvas_rect(), &mut layout_ctx);
+        let node = widget
+            .accessibility_node(&crate::core::AccessibilityContext::new(10.0, 20.0))
+            .expect("visible canvas scrollbars should expose semantics");
+
+        assert_eq!(node.id, root_id);
+        assert_eq!(node.role, crate::core::AccessibilityRole::Group);
+        assert_eq!(node.children.len(), 2);
+        assert_eq!(
+            node.children[0].orientation,
+            Some(crate::core::AccessibilityOrientation::Horizontal)
+        );
+        assert_eq!(
+            node.children[1].orientation,
+            Some(crate::core::AccessibilityOrientation::Vertical)
+        );
+        assert_eq!(node.children[0].bounds.y, 606.0);
+        assert_eq!(node.children[1].bounds.x, 796.0);
+        assert_eq!(
+            widget.on_accessibility_action(&crate::core::AccessibilityActionRequest::new(
+                node.children[0].id,
+                crate::core::AccessibilityAction::Increment,
+            )),
+            Some(WidgetAction::CanvasScrollbars(CanvasScrollbarsAction {
+                axis: CanvasAxis::Horizontal,
+                action: ScrollbarAction::PageDown,
+            }))
+        );
+        assert_eq!(crate::core::AccessibilityTree::new(node, None).validate(), Ok(()));
     }
 
     #[test]
