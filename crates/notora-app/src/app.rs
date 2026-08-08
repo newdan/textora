@@ -499,6 +499,7 @@ impl NotoraApp {
 
     fn action_will_leave_title_focus(&self, action: &NotoraAction) -> bool {
         if self.state.layout.focus_target != crate::FocusTarget::EditorTitle
+            || self.state.library.title_draft.is_none()
             || matches!(
                 action,
                 NotoraAction::TitleTextChanged(_) | NotoraAction::TitleCommitRequested(_)

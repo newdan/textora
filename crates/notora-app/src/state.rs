@@ -98,6 +98,7 @@ pub struct LibraryState {
     pub card_page: CardPageState,
     pub card_scroll_offset_px: f32,
     pub selected_card: Option<DocumentIdentity>,
+    pub title_draft: Option<String>,
     pub pending_title_commit: Option<PendingTitleCommit>,
     pub selected_document_generation: u64,
     pub active_editor_metadata: Option<ActiveEditorMetadata>,
@@ -115,6 +116,7 @@ impl Default for LibraryState {
             card_page: CardPageState::Idle,
             card_scroll_offset_px: 0.0,
             selected_card: None,
+            title_draft: None,
             pending_title_commit: None,
             selected_document_generation: 0,
             active_editor_metadata: None,
@@ -309,7 +311,10 @@ impl NotoraState {
             }
             NotoraAction::OpenNewDocumentMenu => self.open_new_document_menu(),
             NotoraAction::CreateRequested(kind) => self.request_note_creation(kind),
-            NotoraAction::TitleTextChanged(_) => vec![NotoraEffect::Redraw],
+            NotoraAction::TitleTextChanged(title) => {
+                self.library.title_draft = Some(title);
+                vec![NotoraEffect::Redraw]
+            }
             NotoraAction::TitleCommitRequested(title) => self.request_title_commit(title),
             NotoraAction::ToggleSourceViewRequested => {
                 self.layout.focus_target = FocusTarget::Editor;
@@ -559,6 +564,7 @@ impl NotoraState {
         };
         self.library.pending_title_commit =
             Some(PendingTitleCommit { identity, title: normalize_notora_title(&title) });
+        self.library.title_draft = None;
         self.library.last_command_error = None;
         vec![NotoraEffect::CommitTitle(title), NotoraEffect::Redraw]
     }
@@ -784,6 +790,7 @@ impl NotoraState {
 
     fn select_document(&mut self, identity: DocumentIdentity) -> DocumentLoadRequest {
         self.library.selected_card = Some(identity);
+        self.library.title_draft = None;
         self.library.selected_document_generation =
             self.library.selected_document_generation.wrapping_add(1);
         self.library.active_editor_metadata = None;
