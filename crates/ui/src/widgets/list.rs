@@ -700,6 +700,17 @@ impl Widget for ListWidget {
                     None
                 }
             }
+            Event::PointerLeave => {
+                let hover_changed =
+                    self.hovered_index.take().is_some() | std::mem::take(&mut self.close_hovered);
+                hover_changed.then_some(WidgetAction::Consumed)
+            }
+            Event::InteractionCancel => {
+                let interaction_changed = self.hovered_index.take().is_some()
+                    | std::mem::take(&mut self.close_hovered)
+                    | self.press_target.take().is_some();
+                interaction_changed.then_some(WidgetAction::Consumed)
+            }
             Event::KeyDown(key, modifiers) => self.handle_keyboard_event(*key, *modifiers),
             _ => None,
         }
@@ -896,6 +907,43 @@ mod tests {
                 &mut ctx,
             ),
             Some(WidgetAction::Consumed)
+        );
+    }
+
+    #[test]
+    fn list_leave_preserves_press_and_cancel_is_idempotent() {
+        let mut widget = make_list(vec![item("a"), item("b")], Rect::new(0.0, 0.0, 220.0, 100.0));
+        let theme = crate::theme::test_theme();
+        let mut ctx = EventCtx { cursor_hint: None, theme: &theme, dpi: 1.0 };
+
+        assert_eq!(
+            widget.on_event(&Event::MouseMove { px: 100.0, py: 16.0 }, &mut ctx),
+            Some(WidgetAction::Consumed)
+        );
+        assert_eq!(
+            widget.on_event(
+                &Event::MouseDown { px: 100.0, py: 16.0, button: MouseButton::Left },
+                &mut ctx,
+            ),
+            Some(WidgetAction::Consumed)
+        );
+        assert_eq!(widget.on_event(&Event::PointerLeave, &mut ctx), Some(WidgetAction::Consumed));
+        assert_eq!(widget.hovered_index(), None);
+        assert!(!widget.close_hovered);
+        assert!(widget.is_capturing());
+
+        assert_eq!(
+            widget.on_event(&Event::InteractionCancel, &mut ctx),
+            Some(WidgetAction::Consumed)
+        );
+        assert!(!widget.is_capturing());
+        assert_eq!(widget.on_event(&Event::InteractionCancel, &mut ctx), None);
+        assert_eq!(
+            widget.on_event(
+                &Event::MouseUp { px: 100.0, py: 16.0, button: MouseButton::Left },
+                &mut ctx,
+            ),
+            None
         );
     }
 

@@ -2564,6 +2564,31 @@ mod tests {
     }
 
     #[test]
+    fn tooltip_owner_clears_timer_and_overlay_on_leave_or_cancel() {
+        let theme = test_theme();
+        let mut harness = bare_shell();
+        let hint =
+            TooltipHint { label: "提示".into(), target_rect: Rect::new(10.0, 10.0, 20.0, 20.0) };
+
+        for event in [Event::PointerLeave, Event::InteractionCancel] {
+            harness.shell.tooltip_timer = Some(TooltipTimer {
+                hint: hint.clone(),
+                target_screen_rect: hint.target_rect,
+                start: Instant::now(),
+            });
+            harness.shell.tooltip_overlay = Some(OverlayChild {
+                widget: noop_widget(),
+                layout_rect: Rect::new(10.0, 30.0, 50.0, 20.0),
+            });
+
+            let _ = harness.shell.dispatch(&event, &mut event_ctx(&theme));
+
+            assert!(!harness.shell.has_tooltip_timer());
+            assert!(harness.shell.tooltip_overlay.is_none());
+        }
+    }
+
+    #[test]
     fn shell_layout_uses_metrics_dpi() {
         let inputs = ShellInputs {
             tabs_visible: false,

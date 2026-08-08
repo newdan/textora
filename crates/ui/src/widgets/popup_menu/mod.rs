@@ -135,6 +135,9 @@ impl Widget for PopupMenuWidget {
                 };
                 None
             }
+            Event::PointerLeave | Event::InteractionCancel => {
+                self.hovered.take().map(|_| WidgetAction::Consumed)
+            }
             Event::MouseDown { px, py, button: MouseButton::Left } => {
                 if let Some(action) = self.menu.hit_test_px(*px, *py) {
                     Some(WidgetAction::Popup(PopupOutcome::Selected(action.clone())))
@@ -498,6 +501,35 @@ mod tests {
                 &mut ctx,
             ),
             Some(WidgetAction::Consumed)
+        );
+    }
+
+    #[test]
+    fn popup_lifecycle_clears_pointer_hover_without_losing_keyboard_highlight() {
+        let menu = menu_from_items(vec![
+            PopupMenuItem::action("第一个", PopupMenuAction::ToggleLineNumbers),
+            PopupMenuItem::action("第二个", PopupMenuAction::ToggleWordWrap),
+        ]);
+        let mut widget = PopupMenuWidget::new(menu);
+        let theme = crate::theme::test_theme();
+        let mut ctx = EventCtx { cursor_hint: None, theme: &theme, dpi: 1.0 };
+
+        assert_eq!(widget.on_event(&Event::MouseMove { px: 10.0, py: 30.0 }, &mut ctx), None);
+        assert_eq!(widget.hovered, Some(1));
+        assert_eq!(widget.highlighted_index(), Some(0));
+        assert_eq!(widget.on_event(&Event::PointerLeave, &mut ctx), Some(WidgetAction::Consumed));
+        assert_eq!(widget.hovered, None);
+        assert_eq!(widget.highlighted_index(), Some(0));
+
+        let _ = widget.on_event(&Event::MouseMove { px: 10.0, py: 30.0 }, &mut ctx);
+        assert_eq!(
+            widget.on_event(&Event::InteractionCancel, &mut ctx),
+            Some(WidgetAction::Consumed)
+        );
+        assert_eq!(widget.on_event(&Event::InteractionCancel, &mut ctx), None);
+        assert_eq!(
+            key_result(&mut widget, KeyCode::Enter),
+            Some(WidgetAction::Popup(PopupOutcome::Selected(PopupMenuAction::ToggleLineNumbers)))
         );
     }
 
