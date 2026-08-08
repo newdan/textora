@@ -142,6 +142,10 @@ impl Dock {
     /// sidebar resize 中），所有鼠标事件优先派给该 widget，跳过 hit test。
     /// 这保证拖动中光标移出 widget 矩形仍能继续接收 MouseMove / MouseUp。
     pub fn dispatch(&mut self, ev: &Event, ctx: &mut EventCtx) -> Option<WidgetAction> {
+        if matches!(ev, Event::PointerLeave | Event::InteractionCancel) {
+            return self.broadcast_lifecycle_event(ev, ctx);
+        }
+
         let is_mouse = matches!(
             ev,
             Event::MouseMove { .. }
@@ -237,6 +241,27 @@ impl Dock {
         self.fill.on_event(ev, ctx)
     }
 
+    fn broadcast_lifecycle_event(
+        &mut self,
+        event: &Event,
+        ctx: &mut EventCtx,
+    ) -> Option<WidgetAction> {
+        let mut first_action = None;
+        for child in self.children.iter_mut().rev() {
+            if !child.visible {
+                continue;
+            }
+            let local_event = Self::to_local(event, child.layout_rect.x, child.layout_rect.y);
+            if let Some(action) = child.widget.on_event(&local_event, ctx)
+                && first_action.is_none()
+            {
+                first_action = Some(action);
+            }
+        }
+        let fill_action = self.fill.on_event(event, ctx);
+        first_action.or(fill_action)
+    }
+
     /// 将鼠标事件坐标从绝对坐标系转为子 widget 的相对坐标系。
     pub fn to_local<'a>(event: &'a Event, dx: f32, dy: f32) -> Cow<'a, Event> {
         match event {
@@ -253,6 +278,8 @@ impl Dock {
                 Cow::Owned(Event::Wheel { dx: *wheel_dx, dy: *wheel_dy, px: px - dx, py: py - dy })
             }
             Event::KeyDown(..)
+            | Event::PointerLeave
+            | Event::InteractionCancel
             | Event::ImePreedit { .. }
             | Event::ImeCommit(..)
             | Event::ImeEnable
@@ -267,6 +294,8 @@ mod tests {
     use crate::core::measure::NoopMeasure;
     use crate::core::paint::DrawCmd;
     use crate::core::paint::DrawList;
+    use std::cell::RefCell;
+    use std::rc::Rc;
 
     /// 最小测试 widget：记录 set_rect 参数
     struct StubWidget {
@@ -318,6 +347,105 @@ mod tests {
         };
 
         assert_eq!(local_allocation, original_allocation);
+    }
+
+    #[test]
+    fn lifecycle_events_are_broadcast_and_cancel_does_not_depend_on_hit_testing() {
+        #[derive(Default)]
+        struct LifecycleCounts {
+            pointer_leave: usize,
+            interaction_cancel: usize,
+            mouse_move: usize,
+        }
+
+        struct LifecycleProbe {
+            rect: Rect,
+            counts: Rc<RefCell<LifecycleCounts>>,
+            capturing: bool,
+        }
+
+        impl Widget for LifecycleProbe {
+            fn set_rect(&mut self, rect: Rect, _ctx: &mut LayoutCtx) {
+                self.rect = rect;
+            }
+
+            fn paint(&self, _ctx: &mut PaintCtx) {}
+
+            fn hit(&self, px: f32, py: f32) -> bool {
+                self.rect.contains(px, py)
+            }
+
+            fn on_event(&mut self, event: &Event, _ctx: &mut EventCtx) -> Option<WidgetAction> {
+                let mut counts = self.counts.borrow_mut();
+                match event {
+                    Event::PointerLeave => counts.pointer_leave += 1,
+                    Event::InteractionCancel => counts.interaction_cancel += 1,
+                    Event::MouseMove { .. } => counts.mouse_move += 1,
+                    _ => {}
+                }
+                None
+            }
+
+            fn is_capturing(&self) -> bool {
+                self.capturing
+            }
+
+            fn as_any_mut(&mut self) -> &mut dyn std::any::Any {
+                self
+            }
+        }
+
+        let fill_counts = Rc::new(RefCell::new(LifecycleCounts::default()));
+        let visible_counts = Rc::new(RefCell::new(LifecycleCounts::default()));
+        let hidden_counts = Rc::new(RefCell::new(LifecycleCounts::default()));
+        let mut dock = Dock::new(Box::new(LifecycleProbe {
+            rect: Rect::ZERO,
+            counts: fill_counts.clone(),
+            capturing: false,
+        }));
+        dock.children.push(DockChild {
+            widget: Box::new(LifecycleProbe {
+                rect: Rect::ZERO,
+                counts: visible_counts.clone(),
+                capturing: true,
+            }),
+            side: Side::Top,
+            thickness: Box::new(|_, _| 40.0),
+            visible: true,
+            layout_rect: Rect::ZERO,
+        });
+        dock.children.push(DockChild {
+            widget: Box::new(LifecycleProbe {
+                rect: Rect::ZERO,
+                counts: hidden_counts.clone(),
+                capturing: false,
+            }),
+            side: Side::Bottom,
+            thickness: Box::new(|_, _| 40.0),
+            visible: false,
+            layout_rect: Rect::ZERO,
+        });
+        let theme = dummy_theme();
+        let mut measure = NoopMeasure;
+        let mut layout_ctx =
+            LayoutCtx { ui_measure: None, measure: &mut measure, theme: &theme, dpi: 1.0 };
+        dock.layout(Rect::new(0.0, 0.0, 800.0, 600.0), &mut layout_ctx);
+        let mut event_ctx = EventCtx { cursor_hint: None, theme: &theme, dpi: 1.0 };
+
+        dock.dispatch(&Event::PointerLeave, &mut event_ctx);
+        dock.dispatch(&Event::MouseMove { px: 700.0, py: 500.0 }, &mut event_ctx);
+        dock.dispatch(&Event::InteractionCancel, &mut event_ctx);
+
+        let visible = visible_counts.borrow();
+        assert_eq!(visible.pointer_leave, 1);
+        assert_eq!(visible.mouse_move, 1, "pointer leave must not terminate capture");
+        assert_eq!(visible.interaction_cancel, 1);
+        let fill = fill_counts.borrow();
+        assert_eq!(fill.pointer_leave, 1);
+        assert_eq!(fill.interaction_cancel, 1);
+        let hidden = hidden_counts.borrow();
+        assert_eq!(hidden.pointer_leave, 0);
+        assert_eq!(hidden.interaction_cancel, 0);
     }
 
     #[test]

@@ -160,12 +160,14 @@ impl InlineGroup {
             Event::MouseMove { px, py } => {
                 Event::MouseMove { px: px - child_rect.x, py: py - child_rect.y }
             }
+            Event::PointerLeave => Event::PointerLeave,
             Event::MouseDown { px, py, button } => {
                 Event::MouseDown { px: px - child_rect.x, py: py - child_rect.y, button: *button }
             }
             Event::MouseUp { px, py, button } => {
                 Event::MouseUp { px: px - child_rect.x, py: py - child_rect.y, button: *button }
             }
+            Event::InteractionCancel => Event::InteractionCancel,
             Event::Wheel { dx, dy, px, py } => {
                 Event::Wheel { dx: *dx, dy: *dy, px: px - child_rect.x, py: py - child_rect.y }
             }
@@ -215,6 +217,18 @@ impl InlineGroup {
         }
 
         self.dispatch_to_child(previous_hover_index, event, ctx)
+    }
+
+    fn broadcast_to_children(&mut self, event: &Event, ctx: &mut EventCtx) -> Option<WidgetAction> {
+        let mut first_action = None;
+        for child_index in (0..self.children.len()).rev() {
+            if let Some(action) = self.dispatch_to_child(child_index, event, ctx)
+                && first_action.is_none()
+            {
+                first_action = Some(action);
+            }
+        }
+        first_action
     }
 }
 
@@ -325,9 +339,18 @@ impl Widget for InlineGroup {
 
                 previous_hover_action
             }
+            Event::PointerLeave => {
+                let hover_target_index = self.hover_target_index.take()?;
+                self.dispatch_to_child(hover_target_index, ev, ctx)
+            }
             Event::MouseUp { .. } => {
                 let child_index = self.pointer_target_index.take()?;
                 self.dispatch_to_child(child_index, ev, ctx)
+            }
+            Event::InteractionCancel => {
+                self.pointer_target_index = None;
+                self.hover_target_index = None;
+                self.broadcast_to_children(ev, ctx)
             }
             Event::Wheel { px, py, .. } => {
                 let child_index = self.hit_child_index(*px, *py)?;
@@ -342,6 +365,11 @@ impl Widget for InlineGroup {
                 self.dispatch_to_child(child_index, ev, ctx)
             }
         }
+    }
+
+    fn is_capturing(&self) -> bool {
+        self.pointer_target_index.is_some()
+            || self.children.iter().any(|child| child.widget.is_capturing())
     }
 
     fn as_any(&self) -> &dyn Any {
@@ -367,6 +395,8 @@ mod tests {
         MouseDown { px: f32, py: f32 },
         MouseUp { px: f32, py: f32 },
         MouseMove { px: f32, py: f32 },
+        PointerLeave,
+        InteractionCancel,
         KeyDown(KeyCode),
         ImeCommit(String),
         ImePreedit(String),
@@ -461,6 +491,12 @@ mod tests {
                     if self.consume_mouse_move {
                         return Some(WidgetAction::Consumed);
                     }
+                }
+                Event::PointerLeave => {
+                    self.events.push(LoggedEvent::PointerLeave);
+                }
+                Event::InteractionCancel => {
+                    self.events.push(LoggedEvent::InteractionCancel);
                 }
                 Event::KeyDown(key, _modifiers) => {
                     self.events.push(LoggedEvent::KeyDown(*key));
@@ -782,6 +818,57 @@ mod tests {
             ]
         );
         assert_eq!(second.events, vec![LoggedEvent::MouseMove { px: 8.0, py: 10.0 }]);
+    }
+
+    #[test]
+    fn inline_group_leave_preserves_press_and_cancel_clears_all_transient_ownership() {
+        let mut group = fixture_group(
+            vec![
+                InlineChild::fixed(
+                    Box::new(TrackingWidget::new(None, false, [1.0, 0.0, 0.0, 1.0])),
+                    40.0,
+                ),
+                InlineChild::fixed(
+                    Box::new(TrackingWidget::new(None, false, [0.0, 1.0, 0.0, 1.0])),
+                    40.0,
+                ),
+            ],
+            8.0,
+        );
+        let app_theme = theme();
+        let mut measure = NoopMeasure;
+        let mut layout_ctx = layout_ctx(&app_theme, &mut measure, 1.0);
+        group.set_rect(Rect::new(0.0, 0.0, 88.0, 20.0), &mut layout_ctx);
+        let mut event_ctx = event_ctx(&app_theme, 1.0);
+
+        group.on_event(&Event::MouseMove { px: 10.0, py: 10.0 }, &mut event_ctx);
+        group.on_event(
+            &Event::MouseDown { px: 10.0, py: 10.0, button: MouseButton::Left },
+            &mut event_ctx,
+        );
+        group.on_event(&Event::PointerLeave, &mut event_ctx);
+
+        assert!(group.is_capturing(), "pointer leave must preserve the pressed child owner");
+        assert_eq!(group.pointer_target_index, Some(0));
+        assert_eq!(group.hover_target_index, None);
+
+        group.on_event(&Event::InteractionCancel, &mut event_ctx);
+
+        assert!(!group.is_capturing());
+        assert_eq!(group.pointer_target_index, None);
+        assert_eq!(group.hover_target_index, None);
+        let first = downcast_tracking_widget(group.children[0].widget.as_ref());
+        let second = downcast_tracking_widget(group.children[1].widget.as_ref());
+        assert_eq!(
+            first.events,
+            vec![
+                LoggedEvent::MouseMove { px: 10.0, py: 10.0 },
+                LoggedEvent::MouseDown { px: 10.0, py: 10.0 },
+                LoggedEvent::PointerLeave,
+                LoggedEvent::InteractionCancel,
+            ]
+        );
+        assert_eq!(second.events, vec![LoggedEvent::InteractionCancel]);
     }
 
     #[test]

@@ -150,8 +150,10 @@ pub struct EventCtx<'a> {
 #[derive(Clone, PartialEq)]
 pub enum Event {
     MouseMove { px: f32, py: f32 },
+    PointerLeave,
     MouseDown { px: f32, py: f32, button: MouseButton },
     MouseUp { px: f32, py: f32, button: MouseButton },
+    InteractionCancel,
     Wheel { dx: f32, dy: f32, px: f32, py: f32 },
     KeyDown(KeyCode, Modifiers),
     ImePreedit { text: String, cursor: Option<(usize, usize)> },
@@ -166,6 +168,7 @@ impl std::fmt::Debug for Event {
             Self::MouseMove { px, py } => {
                 formatter.debug_struct("MouseMove").field("px", px).field("py", py).finish()
             }
+            Self::PointerLeave => formatter.write_str("PointerLeave"),
             Self::MouseDown { px, py, button } => formatter
                 .debug_struct("MouseDown")
                 .field("px", px)
@@ -178,6 +181,7 @@ impl std::fmt::Debug for Event {
                 .field("py", py)
                 .field("button", button)
                 .finish(),
+            Self::InteractionCancel => formatter.write_str("InteractionCancel"),
             Self::Wheel { dx, dy, px, py } => formatter
                 .debug_struct("Wheel")
                 .field("dx", dx)
@@ -206,7 +210,15 @@ impl zeroize::Zeroize for Event {
             Self::ImePreedit { text, .. } | Self::ImeCommit(text) => {
                 zeroize::Zeroize::zeroize(text);
             }
-            _ => {}
+            Self::MouseMove { .. }
+            | Self::PointerLeave
+            | Self::MouseDown { .. }
+            | Self::MouseUp { .. }
+            | Self::InteractionCancel
+            | Self::Wheel { .. }
+            | Self::KeyDown(..)
+            | Self::ImeEnable
+            | Self::ImeDisable => {}
         }
     }
 }
@@ -491,6 +503,12 @@ mod tests {
         let mut ctx = EventCtx { cursor_hint: None, theme: &theme, dpi: 1.0 };
         let ev = Event::MouseMove { px: 0.0, py: 0.0 };
         assert!(w.on_event(&ev, &mut ctx).is_none());
+    }
+
+    #[test]
+    fn lifecycle_events_have_stable_debug_names() {
+        assert_eq!(format!("{:?}", Event::PointerLeave), "PointerLeave");
+        assert_eq!(format!("{:?}", Event::InteractionCancel), "InteractionCancel");
     }
 
     #[test]
