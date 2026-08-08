@@ -2,6 +2,7 @@
 //!
 //! 从"外部 crate"视角（integration test）导入，确保 re-export 正确。
 
+use ui::checkbox::Checkbox;
 use ui::core::{Event, Rect, Widget};
 use ui::gutter::RenderContext;
 use ui::render_geom::AdvanceCacheEntry;
@@ -9,6 +10,7 @@ use ui::scrollbar::{ScrollbarAction, ScrollbarInput, ScrollbarWidget};
 use ui::settings::{Settings, UiMetrics};
 use ui::settings_view::SettingsView;
 use ui::sidebar::{SidebarAction, SidebarSettingsInput, SidebarWidget, SidebarWidgetInput};
+use ui::switch::Switch;
 use ui::tab_bar::{TabBarAction, TabBarWidget, TabBarWidgetInput, TabInfo};
 use ui::theme::{ThemeLoadError, ThemeRegistry, ThemeSource};
 use ui::viewport::{LineMap, ScrollAnchor};
@@ -119,4 +121,23 @@ fn domain_module_types_are_publicly_accessible() {
 
     // viewport::LineMap (trait bound check)
     let _ = assert_line_map::<PublicLineMapFixture>;
+}
+
+#[test]
+fn toggle_controls_expose_synchronized_state_api() {
+    let mut checkbox = Checkbox::new(ui::WidgetId(101), false);
+    assert!(!checkbox.checked());
+    assert!(checkbox.is_enabled());
+    checkbox.set_checked(true);
+    checkbox.set_enabled(false);
+    assert!(checkbox.checked());
+    assert!(!checkbox.is_enabled());
+
+    let mut switch = Switch::new(ui::WidgetId(102), true);
+    assert!(switch.checked());
+    assert!(switch.is_enabled());
+    switch.set_checked(false);
+    switch.set_enabled(false);
+    assert!(!switch.checked());
+    assert!(!switch.is_enabled());
 }

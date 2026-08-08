@@ -41,6 +41,27 @@ impl Checkbox {
         }
     }
 
+    pub fn checked(&self) -> bool {
+        self.checked
+    }
+
+    pub fn set_checked(&mut self, checked: bool) {
+        self.checked = checked;
+    }
+
+    pub fn is_enabled(&self) -> bool {
+        self.enabled
+    }
+
+    pub fn set_enabled(&mut self, enabled: bool) {
+        self.enabled = enabled;
+        if !enabled {
+            self.focused = false;
+            self.hovered = false;
+            self.pressed = false;
+        }
+    }
+
     fn toggle_action(&mut self) -> WidgetAction {
         self.checked = !self.checked;
         WidgetAction::Control(ControlAction::Toggled { id: self.id, checked: self.checked })
@@ -169,10 +190,14 @@ impl Widget for Checkbox {
     }
 
     fn set_keyboard_focus(&mut self, focused_id: Option<WidgetId>) {
-        self.focused = focused_id == Some(self.id);
+        self.focused = self.enabled && focused_id == Some(self.id);
     }
 
     fn on_event(&mut self, ev: &Event, ctx: &mut EventCtx) -> Option<WidgetAction> {
+        if !self.enabled {
+            return None;
+        }
+
         match ev {
             Event::MouseMove { px, py } => {
                 let inside = self.hit(*px, *py);
@@ -188,7 +213,7 @@ impl Widget for Checkbox {
             Event::MouseDown { px, py, button: MouseButton::Left } => {
                 let inside = self.hit(*px, *py);
                 self.hovered = inside;
-                if !self.enabled || !inside {
+                if !inside {
                     self.pressed = false;
                     return None;
                 }
@@ -207,10 +232,6 @@ impl Widget for Checkbox {
                 if inside {
                     ctx.cursor_hint = Some(winit::window::CursorIcon::Pointer);
                 }
-                if !self.enabled {
-                    self.pressed = false;
-                    return None;
-                }
                 let was_pressed = self.pressed;
                 self.pressed = false;
                 if !was_pressed || !inside {
@@ -219,7 +240,7 @@ impl Widget for Checkbox {
                 Some(self.toggle_action())
             }
             Event::KeyDown(KeyCode::Char(' '), modifiers)
-                if self.enabled && self.focused && *modifiers == crate::core::Modifiers::NONE =>
+                if self.focused && *modifiers == crate::core::Modifiers::NONE =>
             {
                 Some(self.toggle_action())
             }
@@ -349,5 +370,45 @@ mod tests {
             draw_list.cmds.iter().any(|cmd| matches!(cmd, DrawCmd::FillTriangle { .. })),
             "checked checkbox should emit triangle commands for check mark"
         );
+    }
+
+    #[test]
+    fn checkbox_external_state_sync_is_silent_and_idempotent() {
+        let mut checkbox = focused_checkbox(WidgetId(25), false);
+
+        assert!(!checkbox.checked());
+        checkbox.set_checked(true);
+        checkbox.set_checked(true);
+
+        assert!(checkbox.checked());
+        assert_toggle(key_space(&mut checkbox), WidgetId(25), false);
+        checkbox.set_checked(false);
+        assert!(!checkbox.checked());
+    }
+
+    #[test]
+    fn disabled_checkbox_clears_interaction_and_rejects_all_input() {
+        let id = WidgetId(26);
+        let mut checkbox = focused_checkbox(id, false);
+        assert_eq!(mouse_down(&mut checkbox, true), Some(WidgetAction::Consumed));
+        checkbox.set_enabled(false);
+
+        assert!(!checkbox.is_enabled());
+        assert!(!checkbox.is_focusable());
+        assert_eq!(key_space(&mut checkbox), None);
+        assert_eq!(mouse_up(&mut checkbox), None);
+
+        let mut ctx = event_ctx();
+        assert_eq!(
+            checkbox.on_event(
+                &Event::MouseMove {
+                    px: CHECKBOX_SIZE_LOGICAL * 0.5,
+                    py: CHECKBOX_SIZE_LOGICAL * 0.5,
+                },
+                &mut ctx,
+            ),
+            None
+        );
+        assert_eq!(ctx.cursor_hint, None);
     }
 }

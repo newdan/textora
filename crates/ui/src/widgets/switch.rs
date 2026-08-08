@@ -40,6 +40,27 @@ impl Switch {
         }
     }
 
+    pub fn checked(&self) -> bool {
+        self.checked
+    }
+
+    pub fn set_checked(&mut self, checked: bool) {
+        self.checked = checked;
+    }
+
+    pub fn is_enabled(&self) -> bool {
+        self.enabled
+    }
+
+    pub fn set_enabled(&mut self, enabled: bool) {
+        self.enabled = enabled;
+        if !enabled {
+            self.focused = false;
+            self.hovered = false;
+            self.pressed = false;
+        }
+    }
+
     fn toggle_action(&mut self) -> WidgetAction {
         self.checked = !self.checked;
         WidgetAction::Control(ControlAction::Toggled { id: self.id, checked: self.checked })
@@ -173,10 +194,14 @@ impl Widget for Switch {
     }
 
     fn set_keyboard_focus(&mut self, focused_id: Option<WidgetId>) {
-        self.focused = focused_id == Some(self.id);
+        self.focused = self.enabled && focused_id == Some(self.id);
     }
 
     fn on_event(&mut self, ev: &Event, ctx: &mut EventCtx) -> Option<WidgetAction> {
+        if !self.enabled {
+            return None;
+        }
+
         match ev {
             Event::MouseMove { px, py } => {
                 let inside = self.hit(*px, *py);
@@ -192,7 +217,7 @@ impl Widget for Switch {
             Event::MouseDown { px, py, button: MouseButton::Left } => {
                 let inside = self.hit(*px, *py);
                 self.hovered = inside;
-                if !self.enabled || !inside {
+                if !inside {
                     self.pressed = false;
                     return None;
                 }
@@ -211,10 +236,6 @@ impl Widget for Switch {
                 if inside {
                     ctx.cursor_hint = Some(winit::window::CursorIcon::Pointer);
                 }
-                if !self.enabled {
-                    self.pressed = false;
-                    return None;
-                }
                 let was_pressed = self.pressed;
                 self.pressed = false;
                 if !was_pressed || !inside {
@@ -223,7 +244,7 @@ impl Widget for Switch {
                 Some(self.toggle_action())
             }
             Event::KeyDown(KeyCode::Char(' '), modifiers)
-                if self.enabled && self.focused && *modifiers == crate::core::Modifiers::NONE =>
+                if self.focused && *modifiers == crate::core::Modifiers::NONE =>
             {
                 Some(self.toggle_action())
             }
@@ -408,5 +429,36 @@ mod tests {
         let thumb_color = switch.thumb_color(&paint_ctx);
         assert!(thumb_color[0] >= 0.95 && thumb_color[1] >= 0.95 && thumb_color[2] >= 0.95);
         assert_eq!(switch.border_color(&paint_ctx), light_theme.palette.accent);
+    }
+
+    #[test]
+    fn switch_external_state_sync_is_silent_and_idempotent() {
+        let mut switch = focused_switch(WidgetId(26), false);
+
+        assert!(!switch.checked());
+        switch.set_checked(true);
+        switch.set_checked(true);
+
+        assert!(switch.checked());
+        assert_toggle(key_space(&mut switch), WidgetId(26), false);
+        switch.set_checked(false);
+        assert!(!switch.checked());
+    }
+
+    #[test]
+    fn disabled_switch_clears_interaction_and_rejects_all_input() {
+        let id = WidgetId(27);
+        let mut switch = focused_switch(id, false);
+        assert_eq!(mouse_down(&mut switch, 18.0, 10.0), Some(WidgetAction::Consumed));
+        switch.set_enabled(false);
+
+        assert!(!switch.is_enabled());
+        assert!(!switch.is_focusable());
+        assert_eq!(key_space(&mut switch), None);
+        assert_eq!(mouse_up(&mut switch, 18.0, 10.0), None);
+
+        let mut ctx = event_ctx();
+        assert_eq!(switch.on_event(&Event::MouseMove { px: 18.0, py: 10.0 }, &mut ctx), None);
+        assert_eq!(ctx.cursor_hint, None);
     }
 }
