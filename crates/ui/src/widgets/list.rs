@@ -744,9 +744,7 @@ impl Widget for ListWidget {
                     .hit_close_btn(*px, *py, ctx.dpi)
                     .map(ListPressTarget::CloseButton)
                     .or_else(|| self.hit_row(*px, *py, ctx.dpi).map(ListPressTarget::Row));
-                if self.press_target.is_none() {
-                    return None;
-                }
+                self.press_target?;
                 if let Some(id) = self.id
                     && !self.focused
                 {
