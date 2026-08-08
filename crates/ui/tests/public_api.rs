@@ -5,6 +5,7 @@
 use ui::checkbox::Checkbox;
 use ui::core::{Event, Rect, Widget};
 use ui::gutter::RenderContext;
+use ui::list::{ListStyle, ListWidget, Orientation};
 use ui::render_geom::AdvanceCacheEntry;
 use ui::scrollbar::{ScrollbarAction, ScrollbarInput, ScrollbarWidget};
 use ui::settings::{Settings, UiMetrics};
@@ -152,4 +153,30 @@ fn splitter_focus_is_an_explicit_public_capability() {
     let focusable = SplitterWidget::with_id(id);
     assert_eq!(focusable.id(), Some(id));
     assert!(focusable.is_focusable());
+}
+
+#[test]
+fn list_focus_is_an_explicit_public_capability() {
+    let style = ListStyle {
+        row_h_logical: 24.0,
+        item_w_logical: 120.0,
+        pad_x_logical: 8.0,
+        pad_y_logical: 4.0,
+        font_size_logical: 13.0,
+        bg: [0.0; 4],
+        item_active_bg: [0.0; 4],
+        item_hover_bg: [0.0; 4],
+        item_fg: [0.0; 4],
+        item_active_fg: [0.0; 4],
+        item_hover_fg: [0.0; 4],
+        item_accent: [0.0; 4],
+        separator: [0.0; 4],
+        indicator_color: [0.0; 4],
+    };
+    let id = ui::WidgetId(104);
+    let list = ListWidget::new(style, Orientation::Vertical).with_id(id);
+
+    assert_eq!(list.id(), Some(id));
+    assert!(list.is_focusable());
+    assert_eq!(list.focused_index(), None);
 }

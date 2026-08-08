@@ -5,8 +5,10 @@
 
 use crate::core::measure::TextMeasure;
 use crate::core::text_util::truncate_title_precise;
+use crate::core::widget::ControlAction;
 use crate::core::{
-    DrawCmd, Event, EventCtx, LayoutCtx, MouseButton, PaintCtx, Rect, Widget, WidgetAction,
+    DrawCmd, Event, EventCtx, KeyCode, LayoutCtx, Modifiers, MouseButton, PaintCtx, Rect, Widget,
+    WidgetAction, WidgetId,
 };
 
 /// Layout direction for the list.
@@ -29,6 +31,7 @@ const CLOSE_BTN_HIT_PAD_LOGICAL: f32 = 6.0;
 const CLOSE_BTN_LABEL_GAP_LOGICAL: f32 = 2.0;
 /// extra_label 预留宽度（逻辑像素）
 const EXTRA_LABEL_WIDTH_LOGICAL: f32 = 40.0;
+const LIST_FOCUS_RING_WIDTH_LOGICAL: f32 = 2.0;
 
 /// 行类型修饰：影响视觉与命中。
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Default)]
@@ -99,12 +102,15 @@ enum ListPressTarget {
 }
 
 pub struct ListWidget {
+    id: Option<WidgetId>,
     rect: Rect,
     items: Vec<ListItem>,
     active_index: Option<usize>,
     hovered_index: Option<usize>,
     close_hovered: bool,
     press_target: Option<ListPressTarget>,
+    focused: bool,
+    focused_index: Option<usize>,
     style: ListStyle,
     scroll_offset: f32,
     orientation: Orientation,
@@ -115,18 +121,26 @@ pub struct ListWidget {
 impl ListWidget {
     pub fn new(style: ListStyle, orientation: Orientation) -> Self {
         Self {
+            id: None,
             rect: Rect::ZERO,
             items: Vec::new(),
             active_index: None,
             hovered_index: None,
             close_hovered: false,
             press_target: None,
+            focused: false,
+            focused_index: None,
             style,
             scroll_offset: 0.0,
             orientation,
             truncated_labels: Vec::new(),
             truncated_label_widths: Vec::new(),
         }
+    }
+
+    pub fn with_id(mut self, id: WidgetId) -> Self {
+        self.id = Some(id);
+        self
     }
 
     pub fn set_scroll_offset(&mut self, off: f32) {
@@ -142,6 +156,7 @@ impl ListWidget {
         }) {
             self.press_target = None;
         }
+        self.normalize_focused_index(false);
     }
     pub fn set_active(&mut self, idx: Option<usize>) {
         self.active_index = idx;
@@ -160,6 +175,89 @@ impl ListWidget {
     }
     pub fn set_hovered_index(&mut self, idx: Option<usize>) {
         self.hovered_index = idx;
+    }
+
+    pub fn focused_index(&self) -> Option<usize> {
+        self.focused_index
+    }
+
+    fn is_selectable(&self, index: usize) -> bool {
+        self.items.get(index).is_some_and(|item| item.kind == ListItemKind::Normal)
+    }
+
+    fn first_selectable_index(&self) -> Option<usize> {
+        self.items.iter().position(|item| item.kind == ListItemKind::Normal)
+    }
+
+    fn last_selectable_index(&self) -> Option<usize> {
+        self.items.iter().rposition(|item| item.kind == ListItemKind::Normal)
+    }
+
+    fn normalize_focused_index(&mut self, prefer_active: bool) {
+        if prefer_active
+            && let Some(active_index) = self.active_index.filter(|index| self.is_selectable(*index))
+        {
+            self.focused_index = Some(active_index);
+            return;
+        }
+        if self.focused_index.is_some_and(|index| self.is_selectable(index)) {
+            return;
+        }
+        self.focused_index = self.first_selectable_index();
+    }
+
+    fn move_focused_index(&mut self, forward: bool) {
+        self.normalize_focused_index(false);
+        let Some(current_index) = self.focused_index else {
+            return;
+        };
+        self.focused_index = if forward {
+            ((current_index + 1)..self.items.len())
+                .find(|index| self.is_selectable(*index))
+                .or(Some(current_index))
+        } else {
+            (0..current_index)
+                .rev()
+                .find(|index| self.is_selectable(*index))
+                .or(Some(current_index))
+        };
+    }
+
+    fn handle_keyboard_event(
+        &mut self,
+        key: KeyCode,
+        modifiers: Modifiers,
+    ) -> Option<WidgetAction> {
+        if !self.focused || modifiers != Modifiers::NONE {
+            return None;
+        }
+        let move_forward = match (self.orientation, key) {
+            (Orientation::Vertical, KeyCode::Down) | (Orientation::Horizontal, KeyCode::Right) => {
+                Some(true)
+            }
+            (Orientation::Vertical, KeyCode::Up) | (Orientation::Horizontal, KeyCode::Left) => {
+                Some(false)
+            }
+            _ => None,
+        };
+        if let Some(forward) = move_forward {
+            self.move_focused_index(forward);
+            return Some(WidgetAction::Consumed);
+        }
+        match key {
+            KeyCode::Home => {
+                self.focused_index = self.first_selectable_index();
+                Some(WidgetAction::Consumed)
+            }
+            KeyCode::End => {
+                self.focused_index = self.last_selectable_index();
+                Some(WidgetAction::Consumed)
+            }
+            KeyCode::Enter | KeyCode::Char(' ') => {
+                self.focused_index.map(|index| WidgetAction::List(ListAction::Selected(index)))
+            }
+            _ => None,
+        }
     }
 
     /// pinned item 左侧竖线占用的总宽度（0 表示非 pinned 或 Horizontal 模式）
@@ -372,7 +470,8 @@ impl Widget for ListWidget {
                 }
                 ListItemKind::Header | ListItemKind::Normal => {
                     let is_active = item.is_active || Some(i) == self.active_index;
-                    let is_hovered = Some(i) == self.hovered_index;
+                    let is_keyboard_focused = self.focused && Some(i) == self.focused_index;
+                    let is_hovered = Some(i) == self.hovered_index || is_keyboard_focused;
 
                     if matches!(item.kind, ListItemKind::Normal) {
                         if is_active {
@@ -383,6 +482,14 @@ impl Widget for ListWidget {
                             let mut color = self.style.item_hover_bg;
                             color[3] *= alpha;
                             ctx.list.fill_menu_hover(row_rect, color, dpi);
+                        }
+                        if is_keyboard_focused {
+                            ctx.list.stroke_rounded(
+                                row_rect,
+                                ctx.theme.settings_theme().focus_ring,
+                                dpi,
+                                LIST_FOCUS_RING_WIDTH_LOGICAL * dpi,
+                            );
                         }
                     }
 
@@ -521,6 +628,21 @@ impl Widget for ListWidget {
         self.rect.contains(px, py)
     }
 
+    fn id(&self) -> Option<WidgetId> {
+        self.id
+    }
+
+    fn is_focusable(&self) -> bool {
+        self.id.is_some()
+    }
+
+    fn set_keyboard_focus(&mut self, focused_id: Option<WidgetId>) {
+        self.focused = self.id.is_some_and(|id| focused_id == Some(id));
+        if self.focused {
+            self.normalize_focused_index(true);
+        }
+    }
+
     fn on_event(&mut self, ev: &Event, ctx: &mut EventCtx) -> Option<WidgetAction> {
         match ev {
             Event::MouseDown { px, py, button: MouseButton::Left } => {
@@ -528,7 +650,15 @@ impl Widget for ListWidget {
                     .hit_close_btn(*px, *py, ctx.dpi)
                     .map(ListPressTarget::CloseButton)
                     .or_else(|| self.hit_row(*px, *py, ctx.dpi).map(ListPressTarget::Row));
-                self.press_target.map(|_| WidgetAction::Consumed)
+                if self.press_target.is_none() {
+                    return None;
+                }
+                if let Some(id) = self.id
+                    && !self.focused
+                {
+                    return Some(WidgetAction::Control(ControlAction::FocusRequested { id }));
+                }
+                Some(WidgetAction::Consumed)
             }
             Event::MouseDown { px, py, button: MouseButton::Right } => {
                 self.hit_row(*px, *py, ctx.dpi).map(|index| {
@@ -570,6 +700,7 @@ impl Widget for ListWidget {
                     None
                 }
             }
+            Event::KeyDown(key, modifiers) => self.handle_keyboard_event(*key, *modifiers),
             _ => None,
         }
     }
@@ -791,6 +922,136 @@ mod tests {
                 &mut ctx,
             ),
             Some(WidgetAction::List(ListAction::CloseRequested(0)))
+        );
+    }
+
+    #[test]
+    fn focusable_vertical_list_skips_non_selectable_rows_and_activates_focused_row() {
+        let list_id = crate::WidgetId(41);
+        let mut w = ListWidget::new(style(), Orientation::Vertical).with_id(list_id);
+        w.set_items(vec![
+            ListItem { label: "Header".into(), kind: ListItemKind::Header, ..ListItem::default() },
+            item("a"),
+            ListItem { kind: ListItemKind::Separator, ..ListItem::default() },
+            item("b"),
+        ]);
+        let theme = crate::theme::test_theme();
+        let mut measure = NoopMeasure;
+        w.set_rect(Rect::new(0.0, 0.0, 220.0, 120.0), &mut layout_ctx(&theme, &mut measure));
+        let mut focusable_ids = Vec::new();
+        w.collect_focusable_ids(&mut focusable_ids);
+        assert_eq!(focusable_ids, vec![list_id]);
+
+        let mut ctx = EventCtx { cursor_hint: None, theme: &theme, dpi: 1.0 };
+        assert_eq!(
+            w.on_event(
+                &Event::KeyDown(crate::KeyCode::Down, crate::core::Modifiers::NONE),
+                &mut ctx
+            ),
+            None
+        );
+        w.set_keyboard_focus(Some(list_id));
+        assert_eq!(w.focused_index(), Some(1));
+        assert_eq!(
+            w.on_event(
+                &Event::KeyDown(crate::KeyCode::Down, crate::core::Modifiers::NONE),
+                &mut ctx
+            ),
+            Some(WidgetAction::Consumed)
+        );
+        assert_eq!(w.focused_index(), Some(3));
+        assert_eq!(
+            w.on_event(
+                &Event::KeyDown(crate::KeyCode::Enter, crate::core::Modifiers::NONE),
+                &mut ctx
+            ),
+            Some(WidgetAction::List(ListAction::Selected(3)))
+        );
+        assert_eq!(
+            w.on_event(
+                &Event::KeyDown(crate::KeyCode::Char(' '), crate::core::Modifiers::NONE),
+                &mut ctx,
+            ),
+            Some(WidgetAction::List(ListAction::Selected(3)))
+        );
+    }
+
+    #[test]
+    fn horizontal_list_uses_left_right_and_home_end() {
+        let list_id = crate::WidgetId(42);
+        let mut w = ListWidget::new(style(), Orientation::Horizontal).with_id(list_id);
+        w.set_items(vec![item("a"), item("b"), item("c")]);
+        w.set_keyboard_focus(Some(list_id));
+        let theme = crate::theme::test_theme();
+        let mut ctx = EventCtx { cursor_hint: None, theme: &theme, dpi: 1.0 };
+
+        assert_eq!(w.focused_index(), Some(0));
+        assert_eq!(
+            w.on_event(
+                &Event::KeyDown(crate::KeyCode::Right, crate::core::Modifiers::NONE),
+                &mut ctx
+            ),
+            Some(WidgetAction::Consumed)
+        );
+        assert_eq!(w.focused_index(), Some(1));
+        let _ = w
+            .on_event(&Event::KeyDown(crate::KeyCode::End, crate::core::Modifiers::NONE), &mut ctx);
+        assert_eq!(w.focused_index(), Some(2));
+        let _ = w.on_event(
+            &Event::KeyDown(crate::KeyCode::Home, crate::core::Modifiers::NONE),
+            &mut ctx,
+        );
+        assert_eq!(w.focused_index(), Some(0));
+        let _ = w.on_event(
+            &Event::KeyDown(crate::KeyCode::Left, crate::core::Modifiers::NONE),
+            &mut ctx,
+        );
+        assert_eq!(w.focused_index(), Some(0));
+    }
+
+    #[test]
+    fn focused_row_is_normalized_when_items_change() {
+        let list_id = crate::WidgetId(43);
+        let mut w = ListWidget::new(style(), Orientation::Vertical).with_id(list_id);
+        w.set_items(vec![item("a"), item("b"), item("c")]);
+        w.set_active(Some(1));
+        w.set_keyboard_focus(Some(list_id));
+        assert_eq!(w.focused_index(), Some(1));
+
+        w.set_items(vec![
+            item("replacement"),
+            ListItem { kind: ListItemKind::Header, ..ListItem::default() },
+        ]);
+
+        assert_eq!(w.focused_index(), Some(0));
+    }
+
+    #[test]
+    fn pointer_press_on_focusable_list_requests_focus_and_keeps_release_selection() {
+        let list_id = crate::WidgetId(44);
+        let mut w = ListWidget::new(style(), Orientation::Vertical).with_id(list_id);
+        w.set_items(vec![item("a")]);
+        let theme = crate::theme::test_theme();
+        let mut measure = NoopMeasure;
+        w.set_rect(Rect::new(0.0, 0.0, 220.0, 40.0), &mut layout_ctx(&theme, &mut measure));
+        let mut ctx = EventCtx { cursor_hint: None, theme: &theme, dpi: 1.0 };
+
+        assert_eq!(
+            w.on_event(
+                &Event::MouseDown { px: 100.0, py: 16.0, button: MouseButton::Left },
+                &mut ctx,
+            ),
+            Some(WidgetAction::Control(crate::core::widget::ControlAction::FocusRequested {
+                id: list_id,
+            }))
+        );
+        w.set_keyboard_focus(Some(list_id));
+        assert_eq!(
+            w.on_event(
+                &Event::MouseUp { px: 100.0, py: 16.0, button: MouseButton::Left },
+                &mut ctx,
+            ),
+            Some(WidgetAction::List(ListAction::Selected(0)))
         );
     }
 
