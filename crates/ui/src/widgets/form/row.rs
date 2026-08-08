@@ -1,7 +1,10 @@
 use std::any::Any;
 use std::borrow::Cow;
 
-use crate::core::{Event, EventCtx, LayoutCtx, PaintCtx, Rect, Widget, WidgetAction, WidgetId};
+use crate::core::{
+    AccessibilityActionRequest, AccessibilityContext, AccessibilityId, AccessibilityNode,
+    AccessibilityRole, Event, EventCtx, LayoutCtx, PaintCtx, Rect, Widget, WidgetAction, WidgetId,
+};
 use crate::widgets::label::Label;
 use crate::widgets::text_box::TextBox;
 
@@ -63,15 +66,31 @@ pub struct FormRow {
     focused_id: Option<WidgetId>,
     pointer_target: Option<FormRowChildTarget>,
     hover_target: Option<FormRowChildTarget>,
+    accessibility_id: Option<AccessibilityId>,
+    label_accessibility_id: Option<AccessibilityId>,
+    description_accessibility_id: Option<AccessibilityId>,
 }
 
 impl FormRow {
     pub fn new(
-        label: Label,
-        description: Option<Label>,
+        mut label: Label,
+        mut description: Option<Label>,
         control: Box<dyn Widget>,
         style: FormRowStyle,
     ) -> Self {
+        let mut focusable_ids = Vec::new();
+        control.collect_focusable_ids(&mut focusable_ids);
+        let control_id = control.id().or_else(|| focusable_ids.first().copied());
+        let accessibility_id =
+            control_id.map(AccessibilityId::from).map(|id| id.named_child("form-row"));
+        let label_accessibility_id = accessibility_id.map(|id| id.named_child("label"));
+        let description_accessibility_id =
+            description.as_ref().and(accessibility_id.map(|id| id.named_child("description")));
+        label.set_accessibility_id(label_accessibility_id);
+        if let Some(description) = description.as_mut() {
+            description.set_accessibility_id(description_accessibility_id);
+        }
+
         Self {
             rect: Rect::ZERO,
             label,
@@ -85,6 +104,9 @@ impl FormRow {
             focused_id: None,
             pointer_target: None,
             hover_target: None,
+            accessibility_id,
+            label_accessibility_id,
+            description_accessibility_id,
         }
     }
 
@@ -300,6 +322,51 @@ impl Widget for FormRow {
         self.control.set_keyboard_focus(focused_id);
     }
 
+    fn accessibility_node(&self, ctx: &AccessibilityContext) -> Option<AccessibilityNode> {
+        let id = self.accessibility_id?;
+        let mut control_nodes = Vec::new();
+        self.control.collect_accessibility_nodes(
+            &ctx.offset_by(self.control_rect.x, self.control_rect.y),
+            &mut control_nodes,
+        );
+        if control_nodes.is_empty() {
+            return None;
+        }
+
+        for control_node in &mut control_nodes {
+            if let Some(label_id) = self.label_accessibility_id {
+                control_node.labelled_by.push(label_id);
+            }
+            if let Some(description_id) = self.description_accessibility_id {
+                control_node.described_by.push(description_id);
+            }
+        }
+
+        let mut node =
+            AccessibilityNode::new(id, AccessibilityRole::Group, ctx.screen_bounds(self.rect));
+        if let Some(label_node) =
+            self.label.accessibility_node(&ctx.offset_by(self.label_rect.x, self.label_rect.y))
+        {
+            node.children.push(label_node);
+        }
+        if let (Some(description), Some(description_rect)) =
+            (&self.description, self.description_rect)
+            && let Some(description_node) = description
+                .accessibility_node(&ctx.offset_by(description_rect.x, description_rect.y))
+        {
+            node.children.push(description_node);
+        }
+        node.children.extend(control_nodes);
+        Some(node)
+    }
+
+    fn on_accessibility_action(
+        &mut self,
+        request: &AccessibilityActionRequest,
+    ) -> Option<WidgetAction> {
+        self.control.on_accessibility_action(request)
+    }
+
     fn on_event(&mut self, event: &Event, ctx: &mut EventCtx) -> Option<WidgetAction> {
         if matches!(event, Event::PointerLeave) {
             let hover_changed = self.hover_target.take().is_some();
@@ -395,6 +462,10 @@ mod tests {
 
     use crate::core::measure::NoopMeasure;
     use crate::core::widget::{ControlAction, KeyCode, Modifiers, MouseButton};
+    use crate::core::{
+        AccessibilityAction, AccessibilityActionRequest, AccessibilityContext, AccessibilityId,
+        AccessibilityRole, AccessibilityTree,
+    };
     use crate::theme::Theme;
     use crate::widgets::checkbox::Checkbox;
     use crate::widgets::label::{LabelForeground, LabelStyle};
@@ -496,6 +567,45 @@ mod tests {
 
     fn fixture_label(text: &str) -> Label {
         Label::new(text, LabelStyle::default())
+    }
+
+    #[test]
+    fn form_row_associates_label_and_description_with_control_semantics() {
+        let control_id = WidgetId(901);
+        let mut row = FormRow::new(
+            fixture_label("自动保存"),
+            Some(fixture_label("离开编辑器后保存变更")),
+            Box::new(Checkbox::new(control_id, false)),
+            FormRowStyle::default(),
+        );
+        layout(&mut row, 800.0, 72.0);
+
+        let node = row
+            .accessibility_node(&AccessibilityContext::new(10.0, 20.0))
+            .expect("identified form control should expose a semantic row");
+
+        assert_eq!(node.role, AccessibilityRole::Group);
+        assert_eq!(node.children.len(), 3);
+        let label_node = &node.children[0];
+        let description_node = &node.children[1];
+        let control_node = &node.children[2];
+        assert_eq!(label_node.role, AccessibilityRole::StaticText);
+        assert_eq!(description_node.role, AccessibilityRole::StaticText);
+        assert_eq!(control_node.role, AccessibilityRole::CheckBox);
+        assert_eq!(control_node.labelled_by, [label_node.id]);
+        assert_eq!(control_node.described_by, [description_node.id]);
+        assert_eq!(label_node.bounds.x, 10.0 + row.label_rect().x);
+        assert_eq!(description_node.bounds.y, 20.0 + row.description_rect().unwrap().y);
+        assert_eq!(control_node.bounds.x, 10.0 + row.control_rect().x);
+        assert_eq!(AccessibilityTree::new(node, None).validate(), Ok(()));
+
+        assert_eq!(
+            row.on_accessibility_action(&AccessibilityActionRequest::new(
+                AccessibilityId::from(control_id),
+                AccessibilityAction::Toggle,
+            )),
+            Some(WidgetAction::Control(ControlAction::Toggled { id: control_id, checked: true }))
+        );
     }
 
     fn fixture_description(text: &str) -> Label {

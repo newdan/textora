@@ -4,6 +4,7 @@
 
 use crate::core::geom::Rect;
 use crate::core::widget::{Event, EventCtx, LayoutCtx, PaintCtx, Widget, WidgetAction};
+use crate::core::{AccessibilityActionRequest, AccessibilityContext, AccessibilityNode};
 use crate::theme::Theme;
 use std::borrow::Cow;
 
@@ -45,10 +46,13 @@ impl Dock {
 
         for child in self.children.iter_mut() {
             if !child.visible {
+                child.layout_rect = Rect::ZERO;
+                child.widget.set_rect(Rect::ZERO, ctx);
                 continue;
             }
             let t = (child.thickness)(ctx.theme, ctx.dpi);
             if t <= 0.0 {
+                child.layout_rect = Rect::ZERO;
                 child.widget.set_rect(Rect::ZERO, ctx);
                 continue;
             }
@@ -58,6 +62,7 @@ impl Dock {
                 Side::Left | Side::Right => remaining.w,
             });
             if t_clamped <= 0.0 {
+                child.layout_rect = Rect::ZERO;
                 child.widget.set_rect(Rect::ZERO, ctx);
                 continue;
             }
@@ -114,11 +119,43 @@ impl Dock {
                 }
             };
             child.layout_rect = child_rect;
-            child.widget.set_rect(child_rect, ctx);
+            child.widget.set_rect(Rect::new(0.0, 0.0, child_rect.w, child_rect.h), ctx);
         }
 
         self.fill_rect = remaining;
         self.fill.set_rect(remaining, ctx);
+    }
+
+    /// 按实际绘制层级收集语义节点：fill 在底层，chrome 子项依次覆盖其上。
+    pub fn collect_accessibility_nodes(
+        &self,
+        ctx: &AccessibilityContext,
+        output: &mut Vec<AccessibilityNode>,
+    ) {
+        self.fill.collect_accessibility_nodes(ctx, output);
+        for child in &self.children {
+            if !child.visible || child.layout_rect.w <= 0.0 || child.layout_rect.h <= 0.0 {
+                continue;
+            }
+            let child_context = ctx.offset_by(child.layout_rect.x, child.layout_rect.y);
+            child.widget.collect_accessibility_nodes(&child_context, output);
+        }
+    }
+
+    /// 将辅助技术动作交给对应子树；视觉上层优先。
+    pub fn dispatch_accessibility_action(
+        &mut self,
+        request: &AccessibilityActionRequest,
+    ) -> Option<WidgetAction> {
+        for child in self.children.iter_mut().rev() {
+            if !child.visible {
+                continue;
+            }
+            if let Some(action) = child.widget.on_accessibility_action(request) {
+                return Some(action);
+            }
+        }
+        self.fill.on_accessibility_action(request)
     }
 
     /// 绘制：先 fill，再按 children 顺序绘制 chrome（chrome 在 fill 之上）。
@@ -294,6 +331,9 @@ mod tests {
     use crate::core::measure::NoopMeasure;
     use crate::core::paint::DrawCmd;
     use crate::core::paint::DrawList;
+    use crate::core::{
+        AccessibilityContext, AccessibilityId, AccessibilityNode, AccessibilityRole,
+    };
     use std::cell::RefCell;
     use std::rc::Rc;
 
@@ -330,6 +370,76 @@ mod tests {
 
     fn dummy_theme() -> Theme {
         crate::theme::test_theme()
+    }
+
+    struct SemanticWidget {
+        id: AccessibilityId,
+        rect: Rect,
+    }
+
+    impl SemanticWidget {
+        fn new(id: u64) -> Self {
+            Self { id: AccessibilityId(id), rect: Rect::ZERO }
+        }
+    }
+
+    impl Widget for SemanticWidget {
+        fn set_rect(&mut self, rect: Rect, _ctx: &mut LayoutCtx) {
+            self.rect = rect;
+        }
+
+        fn paint(&self, _ctx: &mut PaintCtx) {}
+
+        fn hit(&self, px: f32, py: f32) -> bool {
+            self.rect.contains(px, py)
+        }
+
+        fn accessibility_node(&self, ctx: &AccessibilityContext) -> Option<AccessibilityNode> {
+            Some(AccessibilityNode::new(
+                self.id,
+                AccessibilityRole::Group,
+                ctx.screen_bounds(self.rect),
+            ))
+        }
+
+        fn as_any_mut(&mut self) -> &mut dyn std::any::Any {
+            self
+        }
+    }
+
+    #[test]
+    fn dock_collects_visible_semantics_in_visual_order_without_double_offset() {
+        let mut dock = Dock::new(Box::new(SemanticWidget::new(10)));
+        dock.children.push(DockChild {
+            widget: Box::new(SemanticWidget::new(11)),
+            side: Side::Top,
+            thickness: Box::new(|_, _| 40.0),
+            visible: true,
+            layout_rect: Rect::ZERO,
+        });
+        dock.children.push(DockChild {
+            widget: Box::new(SemanticWidget::new(12)),
+            side: Side::Bottom,
+            thickness: Box::new(|_, _| 20.0),
+            visible: false,
+            layout_rect: Rect::ZERO,
+        });
+
+        let theme = dummy_theme();
+        let mut measure = NoopMeasure;
+        let mut layout_ctx =
+            LayoutCtx { ui_measure: None, measure: &mut measure, theme: &theme, dpi: 1.0 };
+        dock.layout(Rect::new(0.0, 0.0, 800.0, 600.0), &mut layout_ctx);
+
+        let mut nodes = Vec::new();
+        dock.collect_accessibility_nodes(&AccessibilityContext::new(10.0, 20.0), &mut nodes);
+
+        assert_eq!(
+            nodes.iter().map(|node| node.id).collect::<Vec<_>>(),
+            [AccessibilityId(10), AccessibilityId(11),]
+        );
+        assert_eq!(nodes[0].bounds, Rect::new(10.0, 60.0, 800.0, 560.0));
+        assert_eq!(nodes[1].bounds, Rect::new(10.0, 20.0, 800.0, 40.0));
     }
 
     #[test]
@@ -474,7 +584,7 @@ mod tests {
 
         assert!(dock.children[0].widget.hit(0.0, 0.0), "top child");
         let bottom_widget = &dock.children[1].widget;
-        assert!(bottom_widget.hit(0.0, 576.0), "bottom child at y=576");
+        assert!(bottom_widget.hit(0.0, 0.0), "bottom child uses local coordinates");
         assert!(dock.fill.hit(0.0, 32.0), "fill starts at y=32");
         assert!(!dock.fill.hit(0.0, 31.0), "fill should not start above y=32");
         assert!(dock.fill.hit(0.0, 575.0), "fill ends before y=576");
@@ -554,8 +664,8 @@ mod tests {
 
         // Top child gets full 400
         assert!(dock.children[0].widget.hit(0.0, 399.0));
-        // Bottom child gets clamped to 200: y = 600-200 = 400
-        assert!(dock.children[1].widget.hit(0.0, 400.0));
+        // Bottom child gets clamped to 200 and uses local coordinates.
+        assert!(dock.children[1].widget.hit(0.0, 0.0));
         // Fill gets ZERO (no space left)
         assert!(!dock.fill.hit(0.0, 0.0));
     }
