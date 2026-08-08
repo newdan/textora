@@ -130,6 +130,10 @@ impl DrawList {
 
     /// Shape text with explicit font family, weight, and style.
     /// Returns the actual shaped width (in pixels) so callers can advance cursors precisely.
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "draw command boundary keeps font and placement attributes explicit"
+    )]
     pub fn text_shaped_with_font(
         &mut self,
         x: f32,

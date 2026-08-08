@@ -109,6 +109,10 @@ impl<'a> PaintCtx<'a> {
 
     /// Shape and emit text with explicit font family, weight, and style.
     /// No-op when shaper is None.
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "paint context forwards explicit font and placement attributes to DrawList"
+    )]
     pub fn text_with_font(
         &mut self,
         x: f32,
