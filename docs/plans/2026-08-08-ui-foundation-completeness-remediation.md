@@ -112,13 +112,13 @@
 
 **步骤：**
 
-- [ ] 先增加失败测试：Button 可被 `collect_focusable_ids` 收集；
-- [ ] 增加失败测试：未聚焦时 Enter/Space 不激活，聚焦后两者均激活；
-- [ ] 增加失败测试：鼠标按下请求焦点，但仍保留 press/release 激活语义；
-- [ ] 为 Button 增加 `focused` 状态、焦点环绘制和 disabled 时的状态清理；
-- [ ] 让 ModalFrame 的关闭按钮进入 modal 焦点顺序，并能通过 Enter/Space 关闭；
-- [ ] 让 SettingsView 的分类按钮和表单内分段按钮使用同一焦点请求协议；
-- [ ] 验证设置页分段按钮及 modal 关闭按钮没有鼠标行为回归。
+- [x] 先增加失败测试：Button 可被 `collect_focusable_ids` 收集；
+- [x] 增加失败测试：未聚焦时 Enter/Space 不激活，聚焦后两者均激活；
+- [x] 增加失败测试：鼠标按下请求焦点，但仍保留 press/release 激活语义；
+- [x] 为 Button 增加 `focused` 状态、焦点环绘制和 disabled 时的状态清理；
+- [x] 让 ModalFrame 的关闭按钮进入 modal 焦点顺序，并能通过 Enter/Space 关闭；
+- [x] 让 SettingsView 的分类按钮和表单内分段按钮使用同一焦点请求协议；
+- [x] 验证设置页分段按钮及 modal 关闭按钮没有鼠标行为回归。
 
 **定向验证：**
 
@@ -138,12 +138,12 @@ cargo test -p textora-ui widgets::modal_frame
 
 **步骤：**
 
-- [ ] 先增加外部 crate 视角的 API 编译测试；
-- [ ] 增加 `checked()`、`set_checked()`、`is_enabled()`、`set_enabled()`；
-- [ ] `set_enabled(false)` 必须清除 hover、pressed 和 focus；
-- [ ] 外部 `set_checked` 不产生用户 action；
-- [ ] 用户 toggle 后返回新值，随后同值同步不得反向翻转；
-- [ ] disabled 控件不进入焦点链、不请求焦点、不响应键盘或鼠标。
+- [x] 先增加外部 crate 视角的 API 编译测试；
+- [x] 增加 `checked()`、`set_checked()`、`is_enabled()`、`set_enabled()`；
+- [x] `set_enabled(false)` 必须清除 hover、pressed 和 focus；
+- [x] 外部 `set_checked` 不产生用户 action；
+- [x] 用户 toggle 后返回新值，随后同值同步不得反向翻转；
+- [x] disabled 控件不进入焦点链、不请求焦点、不响应键盘或鼠标。
 
 **定向验证：**
 
@@ -162,12 +162,12 @@ cargo test -p textora-ui --test public_api
 
 **步骤：**
 
-- [ ] 先增加失败测试：默认 Splitter 保持 pointer-only；
-- [ ] 增加 `with_id` 或等价的显式可聚焦构造方式；
-- [ ] 仅带 ID 且 enabled 的 Splitter 进入焦点链；
-- [ ] Left/Right/Home/End 仅在聚焦时生效；
-- [ ] 增加焦点环或明确的 focused 视觉，不复用 hover 状态；
-- [ ] 验证当前未配置 ID 的产品 splitter 不再响应误路由键盘。
+- [x] 先增加失败测试：默认 Splitter 保持 pointer-only；
+- [x] 增加 `with_id` 或等价的显式可聚焦构造方式；
+- [x] 仅带 ID 且 enabled 的 Splitter 进入焦点链；
+- [x] Left/Right/Home/End 仅在聚焦时生效；
+- [x] 增加焦点环或明确的 focused 视觉，不复用 hover 状态；
+- [x] 验证当前未配置 ID 的产品 splitter 不再响应误路由键盘。
 
 ---
 
@@ -183,12 +183,12 @@ cargo test -p textora-ui --test public_api
 
 **步骤：**
 
-- [ ] 先增加失败测试：普通行 press/release 返回 `ListAction::Selected(index)`；
-- [ ] 增加 press row 状态，释放到其他行或列表外时取消选择；
-- [ ] close button 与 row selection 互斥，一次点击只能产生一个 action；
-- [ ] Separator/Header 永远不能进入 press 或 selection；
-- [ ] Sidebar 改为翻译 `WidgetAction::List`，删除对 `hit_row` 的业务性直接调用；
-- [ ] 保留 hover、close、固定标签和滚动偏移的现有行为。
+- [x] 先增加失败测试：普通行 press/release 返回 `ListAction::Selected(index)`；
+- [x] 增加 press row 状态，释放到其他行或列表外时取消选择；
+- [x] close button 与 row selection 互斥，一次点击只能产生一个 action；
+- [x] Separator/Header 永远不能进入 press 或 selection；
+- [x] Sidebar 改为翻译 `WidgetAction::List`，删除对 `hit_row` 的业务性直接调用；
+- [x] 保留 hover、close、固定标签和滚动偏移的现有行为。
 
 **定向验证：**
 
@@ -206,11 +206,11 @@ cargo test -p textora-ui widgets::sidebar
 
 **步骤：**
 
-- [ ] 为 List 增加可选 ID 和 focused row；
-- [ ] Up/Down 或 Left/Right 按 orientation 移动焦点，跳过 Header/Separator；
-- [ ] Home/End 移到首尾可选项，Enter/Space 产生 Selected；
-- [ ] 输入列表变化后，以稳定规则保留或规范化 focused row；
-- [ ] 无 ID 的视觉列表保持 pointer-only，避免破坏现有组合控件。
+- [x] 为 List 增加可选 ID 和 focused row；
+- [x] Up/Down 或 Left/Right 按 orientation 移动焦点，跳过 Header/Separator；
+- [x] Home/End 移到首尾可选项，Enter/Space 产生 Selected；
+- [x] 输入列表变化后，以稳定规则保留或规范化 focused row；
+- [x] 无 ID 的视觉列表保持 pointer-only，避免破坏现有组合控件。
 
 #### Task 2.3：PopupMenu 键盘与 disabled 状态
 
@@ -222,13 +222,13 @@ cargo test -p textora-ui widgets::sidebar
 
 **步骤：**
 
-- [ ] 为 `PopupMenuItem` 增加 enabled 状态，并以构造 helper 避免调用方重复字段；
-- [ ] 菜单打开时选择首个 enabled 非分隔项，或保留显式初始项；
-- [ ] Up/Down/Home/End 跳过 disabled 与 separator；
-- [ ] Enter/Space 选择，Escape 关闭；disabled 项的鼠标和键盘均不产生 action；
-- [ ] popup 打开期间消费未识别键盘事件，禁止下穿底层焦点；
-- [ ] UiShell 在 popup 打开/关闭时保存并恢复焦点所有权；
-- [ ] 增加全 disabled、首尾分隔、单项和超长菜单测试。
+- [x] 为 `PopupMenuItem` 增加 enabled 状态，并以构造 helper 避免调用方重复字段；
+- [x] 菜单打开时选择首个 enabled 非分隔项，或保留显式初始项；
+- [x] Up/Down/Home/End 跳过 disabled 与 separator；
+- [x] Enter/Space 选择，Escape 关闭；disabled 项的鼠标和键盘均不产生 action；
+- [x] popup 打开期间消费未识别键盘事件，禁止下穿底层焦点；
+- [x] UiShell 在 popup 打开/关闭时保存并恢复焦点所有权；
+- [x] 增加全 disabled、首尾分隔、单项和超长菜单测试。
 
 ---
 
@@ -244,21 +244,21 @@ cargo test -p textora-ui widgets::sidebar
 
 **步骤：**
 
-- [ ] 先为 hover 残留和捕获残留增加失败测试；
-- [ ] 增加产品无关的 `PointerLeave` 与 `InteractionCancel` 事件；
-- [ ] `PointerLeave` 广播给可见 hover owner，但不结束合法的 pointer capture；
-- [ ] `InteractionCancel` 必须结束所有 pressed/dragging/capturing 状态；
-- [ ] Dock 和 InlineGroup 只负责传播，不创建控件特定 action；
-- [ ] 更新 `Event::Debug`、zeroize 和坐标变换的穷尽匹配。
+- [x] 先为 hover 残留和捕获残留增加失败测试；
+- [x] 增加产品无关的 `PointerLeave` 与 `InteractionCancel` 事件；
+- [x] `PointerLeave` 广播给可见 hover owner，但不结束合法的 pointer capture；
+- [x] `InteractionCancel` 必须结束所有 pressed/dragging/capturing 状态；
+- [x] Dock 和 InlineGroup 只负责传播，不创建控件特定 action；
+- [x] 更新 `Event::Debug`、zeroize 和坐标变换的穷尽匹配。
 
 #### Task 3.2：叶子控件清理瞬态状态
 
 本任务按每组最多 3 个文件继续拆分：
 
-- [ ] 组 A：Button、Checkbox、Switch；
-- [ ] 组 B：Scrollbar、Splitter、CanvasScrollbars；
-- [ ] 组 C：List、PopupMenu、Tooltip owner；
-- [ ] 组 D：TextBox、TagEditor、SearchBar。
+- [x] 组 A：Button、Checkbox、Switch；
+- [x] 组 B：Scrollbar、Splitter、CanvasScrollbars；
+- [x] 组 C：List、PopupMenu、Tooltip owner；
+- [x] 组 D：TextBox、TagEditor、SearchBar。
 
 每组都必须先覆盖：hover leave、press 后 cancel、drag 后 cancel、disabled during capture，以及重复 cancel 的幂等性。
 
@@ -272,12 +272,12 @@ cargo test -p textora-ui widgets::sidebar
 
 **步骤：**
 
-- [ ] `WindowEvent::CursorLeft` 转为 `PointerLeave`；
-- [ ] `WindowEvent::Focused(false)` 转为 `InteractionCancel`；
-- [ ] UiShell 将 cancel 发送给 overlay、canvas scrollbar、dock 和当前捕获 owner；
-- [ ] 失焦时清除 tooltip timer/overlay 与系统 cursor hint；
-- [ ] 增加 Button press、Scrollbar drag、Splitter drag 和 modal press 的窗口失焦回归测试；
-- [ ] 确认 editor runtime 与产品 UI 的 cancel 各自执行一次，不重复产生业务 action。
+- [x] `WindowEvent::CursorLeft` 转为 `PointerLeave`；
+- [x] `WindowEvent::Focused(false)` 转为 `InteractionCancel`；
+- [x] UiShell 将 cancel 发送给 overlay、canvas scrollbar、dock 和当前捕获 owner；
+- [x] 失焦时清除 tooltip timer/overlay 与系统 cursor hint；
+- [x] 增加 Button press、Scrollbar drag、Splitter drag 和 modal press 的窗口失焦回归测试；
+- [x] 确认 editor runtime 与产品 UI 的 cancel 各自执行一次，不重复产生业务 action。
 
 ---
 
@@ -362,21 +362,21 @@ cargo test -p textora-ui widgets::sidebar
 
 **步骤：**
 
-- [ ] 先增加文本宽于窗口、窗口小于 tooltip 最小高度的失败测试；
-- [ ] 为 Tooltip 定义最大逻辑宽度和屏幕 margin；
-- [ ] 支持按 grapheme/词边界换行，无法换行时安全截断；
-- [ ] 宽高始终限制在屏幕有效区域，x/y 不得为负或非有限值；
-- [ ] 中英文、emoji、高 DPI 和零尺寸屏幕输入均有覆盖。
+- [x] 先增加文本宽于窗口、窗口小于 tooltip 最小高度的失败测试；
+- [x] 为 Tooltip 定义最大逻辑宽度和屏幕 margin；
+- [x] 支持按 grapheme/词边界换行，无法换行时安全截断；
+- [x] 宽高始终限制在屏幕有效区域，x/y 不得为负或非有限值；
+- [x] 中英文、emoji、高 DPI 和零尺寸屏幕输入均有覆盖。
 
 #### Task 5.2：基础控件尺寸与视觉 token 收敛
 
 本任务先写一份 token 映射表，再按最多 3 个文件一组迁移：
 
-- [ ] 明确 control height、hit target、corner radius、focus ring、spacing、font size 的语义 token；
-- [ ] Button/List 的外部 style 允许覆盖，但默认值必须来自主题/共享 token；
-- [ ] Checkbox/Switch 中固定白色和 hover blend 迁移为语义主题色；
-- [ ] List close icon 的硬编码灰色迁移到主题；
-- [ ] 不在一次提交中全局机械替换；每组迁移都做 light/dark 和 DPI 绘制命令测试。
+- [x] 明确 control height、hit target、corner radius、focus ring、spacing、font size 的语义 token；
+- [x] Button/List 的外部 style 允许覆盖，但默认值必须来自主题/共享 token；
+- [x] Checkbox/Switch 中固定白色和 hover blend 迁移为语义主题色；
+- [x] List close icon 的硬编码灰色迁移到主题；
+- [x] 不在一次提交中全局机械替换；每组迁移都做 light/dark 和 DPI 绘制命令测试。
 
 #### Task 5.3：公共 API 契约测试
 
@@ -388,10 +388,10 @@ cargo test -p textora-ui widgets::sidebar
 
 **步骤：**
 
-- [ ] 从外部 crate 视角构造全部基础控件和输入类型；
-- [ ] 验证 Widget、action、状态同步和 accessibility 类型的稳定根级路径；
-- [ ] 保持 `widgets` 实现模块私有，继续只暴露语义模块；
-- [ ] 增加禁止 UI 依赖 app 产品类型和平台可访问性实现类型的边界测试。
+- [x] 从外部 crate 视角构造全部基础控件和输入类型；
+- [x] 验证 Widget、action、状态同步和 accessibility 类型的稳定根级路径；
+- [x] 保持 `widgets` 实现模块私有，继续只暴露语义模块；
+- [x] 增加禁止 UI 依赖 app 产品类型和平台可访问性实现类型的边界测试。
 
 ---
 
@@ -401,11 +401,11 @@ cargo test -p textora-ui widgets::sidebar
 
 按 lint 类型逐项处理，不允许一次性删除后堆积无关修改：
 
-- [ ] 优先移除 `allow(unused_must_use)`，修复所有被丢弃的 Result/action；
-- [ ] 移除 `allow(dead_code)`，删除死代码或把真正的公共能力纳入契约测试；
-- [ ] 移除 `allow(unused_mut)`；
-- [ ] 将确有理由的复杂类型、参数数量抑制下沉到最小作用域并写明原因；
-- [ ] 禁止新增 crate 级 blanket allow。
+- [x] 优先移除 `allow(unused_must_use)`，修复所有被丢弃的 Result/action；
+- [x] 移除 `allow(dead_code)`，删除死代码或把真正的公共能力纳入契约测试；
+- [x] 移除 `allow(unused_mut)`；
+- [x] 将确有理由的复杂类型、参数数量抑制下沉到最小作用域并写明原因；
+- [x] 禁止新增 crate 级 blanket allow。
 
 #### Task 6.2：最终回归矩阵
 
@@ -455,6 +455,14 @@ cargo check --workspace --all-targets
 - [ ] 超长中英文 Tooltip 在 1x/2x DPI 和窄窗口内完整受限；
 - [ ] macOS VoiceOver 能读取 Button、Switch、Checkbox、TextBox、List、Menu 和 Dialog 的名称、状态与焦点；
 - [ ] 关闭 modal 后键盘焦点和可访问性焦点都恢复到打开前的控件。
+
+**2026-08-09 自动化验收记录：**
+
+- `cargo fmt --all -- --check`、`cargo test -p textora-ui`、`cargo test -p textora-appkit-shell`、`cargo test -p textora-app --lib`、`cargo check --workspace --all-targets` 全部通过；
+- `./scripts/verify.sh` 在允许绑定本机回环端口的环境完整通过，包含架构边界、格式、全工作区 Clippy `-D warnings`、全工作区测试和文档测试；
+- 沙箱内首次运行仅有 `textora-sync` 的 12 个 mock server 用例因回环端口监听被系统拒绝；相同门禁在非沙箱环境通过，确认不是代码回归；
+- PointerLeave/InteractionCancel、PopupMenu disabled 与输入封闭、Tooltip 中英文/emoji/高 DPI/零尺寸边界、modal 焦点恢复均有自动化回归覆盖；
+- macOS 真实 AX 回归结果见 Phase 4 平台验收记录。上方更宽的真实窗口操作清单仍按实际完成情况单独勾选，不以自动化结果替代。
 
 ## 7. 完成定义
 
