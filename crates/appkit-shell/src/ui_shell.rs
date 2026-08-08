@@ -70,6 +70,7 @@ struct TooltipTimer {
 pub enum KeyboardFocusTarget {
     Editor,
     Widget(ui::core::widget::WidgetId),
+    Overlay,
 }
 
 enum OverlayDispatchOutcome {
@@ -643,6 +644,9 @@ impl UiShell {
         let focus = match self.keyboard_focus {
             KeyboardFocusTarget::Widget(id) => id,
             KeyboardFocusTarget::Editor => return None,
+            KeyboardFocusTarget::Overlay => {
+                return self.dispatch_focused_overlay_event(&overlay_event, theme, dpi);
+            }
         };
         let ev = Event::KeyDown(key, modifiers);
         let mut ctx = EventCtx { cursor_hint: None, theme, dpi };
@@ -727,11 +731,14 @@ impl UiShell {
 
         // Search bar keyboard focus: auto-focus on first open, clear on close.
         // Subsequent focus changes are driven by mouse/key events (Phase 3).
-        if inputs.search_visible && !search_was_visible {
-            self.keyboard_focus = KeyboardFocusTarget::Widget(ui::core::widget::ids::SEARCH_BAR);
-        }
-        if !inputs.search_visible && search_was_visible {
-            self.keyboard_focus = KeyboardFocusTarget::Editor;
+        if self.overlays.is_empty() {
+            if inputs.search_visible && !search_was_visible {
+                self.keyboard_focus =
+                    KeyboardFocusTarget::Widget(ui::core::widget::ids::SEARCH_BAR);
+            }
+            if !inputs.search_visible && search_was_visible {
+                self.keyboard_focus = KeyboardFocusTarget::Editor;
+            }
         }
 
         // Step 3: Layout
@@ -1103,14 +1110,16 @@ impl UiShell {
         dismiss_policy: DismissPolicy,
     ) {
         let layout_rect = layout.resolve(self.current_screen_rect(), self.last_dpi);
+        let restore_focus = self.keyboard_focus;
         self.overlays.push(OverlayEntry {
             widget,
             layout,
             layout_rect,
             input_policy,
             dismiss_policy,
-            restore_focus: self.keyboard_focus,
+            restore_focus,
         });
+        self.keyboard_focus = KeyboardFocusTarget::Overlay;
         self.tooltip_overlay = None;
         self.tooltip_timer = None;
     }
@@ -1278,6 +1287,9 @@ impl UiShell {
         let focus = match self.keyboard_focus {
             KeyboardFocusTarget::Widget(id) => id,
             KeyboardFocusTarget::Editor => return None,
+            KeyboardFocusTarget::Overlay => {
+                return self.dispatch_focused_overlay_event(&ev, theme, dpi);
+            }
         };
         let mut ctx = ui::core::EventCtx { theme, dpi, cursor_hint: None };
         for child in &mut self.dock.children {
@@ -1304,6 +1316,28 @@ impl UiShell {
             OverlayDispatchOutcome::SilentConsumed => Some(WidgetAction::Consumed),
             OverlayDispatchOutcome::Action(action) => Some(action),
         }
+    }
+
+    fn dispatch_focused_overlay_event(
+        &mut self,
+        ev: &Event,
+        theme: &Theme,
+        dpi: f32,
+    ) -> Option<WidgetAction> {
+        let overlay = self.overlays.last_mut()?;
+        let mut ctx = EventCtx { cursor_hint: None, theme, dpi };
+        let outcome = match overlay.input_policy {
+            OverlayInputPolicy::Modal => Self::dispatch_modal_overlay_event(overlay, ev, &mut ctx),
+            OverlayInputPolicy::PassThrough => {
+                Self::dispatch_pass_through_overlay_event(overlay, ev, &mut ctx)
+            }
+        };
+        Some(match outcome {
+            OverlayDispatchOutcome::Action(action) => action,
+            OverlayDispatchOutcome::NotHandled | OverlayDispatchOutcome::SilentConsumed => {
+                WidgetAction::Consumed
+            }
+        })
     }
 
     fn dispatch_modal_overlay_event(
@@ -1692,6 +1726,47 @@ mod tests {
                         if *color == theme.application_theme().modal_scrim
                 )
             }));
+        }
+    }
+
+    mod overlay_focus_tests {
+        use super::*;
+
+        #[test]
+        fn popup_overlay_owns_keyboard_focus_and_restores_previous_target() {
+            let theme = test_theme();
+            let mut harness =
+                shell_with_focus(KeyboardFocusTarget::Widget(ui::core::widget::ids::SEARCH_BAR));
+            let menu = ui::popup_menu::PopupMenu::context_px(
+                0,
+                (100.0, 100.0),
+                (1200.0, 800.0),
+                false,
+                1.0,
+            );
+            let layout_rect = menu.menu_rect;
+            harness.shell.push_overlay_with_policy(
+                Box::new(ui::popup_menu::PopupMenuWidget::new(menu)),
+                OverlayLayout::Fixed(layout_rect),
+                OverlayInputPolicy::PassThrough,
+                DismissPolicy::ExplicitOnly,
+            );
+
+            assert_eq!(harness.shell.keyboard_focus(), KeyboardFocusTarget::Overlay);
+            assert!(matches!(
+                harness.shell.forward_key(KeyCode::Enter, Modifiers::NONE, &theme, 1.0),
+                Some(WidgetAction::Popup(ui::popup_menu::PopupOutcome::Selected(_)))
+            ));
+            assert_eq!(
+                harness.shell.forward_key(KeyCode::Tab, Modifiers::NONE, &theme, 1.0),
+                Some(WidgetAction::Consumed)
+            );
+
+            let _ = harness.shell.pop_overlay();
+            assert_eq!(
+                harness.shell.keyboard_focus(),
+                KeyboardFocusTarget::Widget(ui::core::widget::ids::SEARCH_BAR)
+            );
         }
     }
 
