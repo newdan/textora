@@ -46,8 +46,12 @@ pub use settings::{Settings, ThemeMode, UiMetrics};
 pub use theme::Theme;
 
 // 骨架（Phase 1）
+pub use core::widget::ControlAction;
 pub use core::{
-    DismissPolicy, Dock, DockChild, DrawCmd, DrawList, Event, EventCtx, KeyCode, LayoutCtx,
-    MouseButton, NoopMeasure, OverlayAction, OverlayInputPolicy, OverlayLayout, PaintCtx, Rect,
-    Screen, Side, TextMeasure, Widget, WidgetId,
+    AccessibilityAction, AccessibilityActionRequest, AccessibilityContext, AccessibilityId,
+    AccessibilityNode, AccessibilityOrientation, AccessibilityRole, AccessibilityState,
+    AccessibilityTree, AccessibilityValidationError, DismissPolicy, Dock, DockChild, DrawCmd,
+    DrawList, Event, EventCtx, KeyCode, LayoutCtx, Modifiers, MouseButton, NoopMeasure,
+    OverlayAction, OverlayInputPolicy, OverlayLayout, PaintCtx, Rect, Screen, Side, TextMeasure,
+    Widget, WidgetAction, WidgetId,
 };

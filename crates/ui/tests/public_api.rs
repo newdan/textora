@@ -2,20 +2,30 @@
 //!
 //! 从"外部 crate"视角（integration test）导入，确保 re-export 正确。
 
+use ui::button::{Button, ButtonStyle};
 use ui::checkbox::Checkbox;
 use ui::core::{Event, Rect, Widget};
 use ui::gutter::RenderContext;
-use ui::list::{ListStyle, ListWidget, Orientation};
+use ui::label::{Label, LabelStyle};
+use ui::list::{ListItem, ListStyle, ListWidget, Orientation};
+use ui::popup_menu::{PopupMenu, PopupMenuAction, PopupMenuItem, PopupMenuWidget};
 use ui::render_geom::AdvanceCacheEntry;
 use ui::scrollbar::{ScrollbarAction, ScrollbarInput, ScrollbarWidget};
 use ui::settings::{Settings, UiMetrics};
 use ui::settings_view::SettingsView;
 use ui::sidebar::{SidebarAction, SidebarSettingsInput, SidebarWidget, SidebarWidgetInput};
-use ui::splitter::SplitterWidget;
+use ui::splitter::{SplitterInput, SplitterWidget};
 use ui::switch::Switch;
 use ui::tab_bar::{TabBarAction, TabBarWidget, TabBarWidgetInput, TabInfo};
+use ui::text_box::TextBox;
 use ui::theme::{ThemeLoadError, ThemeRegistry, ThemeSource};
+use ui::tooltip::{TooltipHint, TooltipWidget};
 use ui::viewport::{LineMap, ScrollAnchor};
+use ui::{
+    AccessibilityAction, AccessibilityActionRequest, AccessibilityContext, AccessibilityId,
+    AccessibilityNode, AccessibilityOrientation, AccessibilityRole, AccessibilityState,
+    AccessibilityTree, AccessibilityValidationError, ControlAction, Modifiers, WidgetAction,
+};
 
 fn assert_widget<T: Widget>() {}
 fn assert_debug<T: std::fmt::Debug>() {}
@@ -179,4 +189,70 @@ fn list_focus_is_an_explicit_public_capability() {
     assert_eq!(list.id(), Some(id));
     assert!(list.is_focusable());
     assert_eq!(list.focused_index(), None);
+}
+
+#[test]
+fn foundational_controls_and_inputs_construct_from_semantic_public_paths() {
+    let theme = ui::Theme::resolve_builtin(ui::ThemeMode::Light, winit::window::Theme::Light);
+    let button = Button::new(ui::WidgetId(201), ButtonStyle::from_theme(&theme));
+    let label = Label::new("Status", LabelStyle::default());
+    let text_box = TextBox::with_id(ui::WidgetId(202));
+    let checkbox = Checkbox::new(ui::WidgetId(203), false);
+    let switch = Switch::new(ui::WidgetId(204), true);
+    let list = ListWidget::new(ListStyle::from_theme(&theme), Orientation::Vertical)
+        .with_id(ui::WidgetId(205));
+    let splitter = SplitterWidget::with_id(ui::WidgetId(206));
+    let scrollbar = ScrollbarWidget::new();
+    let popup = PopupMenuWidget::new(PopupMenu {
+        items: vec![PopupMenuItem::action("Open", PopupMenuAction::OpenSettingsFile)],
+        item_rects: vec![Rect::new(0.0, 0.0, 120.0, 32.0)],
+        menu_rect: Rect::new(0.0, 0.0, 120.0, 32.0),
+        screen_size: (800.0, 600.0),
+        show_checkmarks: false,
+    });
+    let (tooltip, _) = TooltipWidget::new(
+        &TooltipHint {
+            label: "Description".into(),
+            target_rect: Rect::new(10.0, 10.0, 20.0, 20.0),
+        },
+        1.0,
+        800.0,
+        600.0,
+    );
+
+    assert_widget::<Button>();
+    assert_widget::<Label>();
+    assert_widget::<TextBox>();
+    assert_widget::<Checkbox>();
+    assert_widget::<Switch>();
+    assert_widget::<ListWidget>();
+    assert_widget::<SplitterWidget>();
+    assert_widget::<ScrollbarWidget>();
+    assert_widget::<PopupMenuWidget>();
+    assert_widget::<TooltipWidget>();
+    let _controls =
+        (button, label, text_box, checkbox, switch, list, splitter, scrollbar, popup, tooltip);
+    let _inputs = (ListItem::default(), SplitterInput::default(), ScrollbarInput::default());
+}
+
+#[test]
+fn interaction_and_accessibility_protocols_have_stable_root_paths() {
+    let id = AccessibilityId(301);
+    let request = AccessibilityActionRequest::new(id, AccessibilityAction::Focus);
+    let context = AccessibilityContext::new(4.0, 8.0);
+    let node = AccessibilityNode::new(
+        id,
+        AccessibilityRole::Button,
+        context.screen_bounds(Rect::new(0.0, 0.0, 20.0, 20.0)),
+    );
+
+    assert_eq!(request.target, id);
+    assert_eq!(node.role, AccessibilityRole::Button);
+    assert_public_type::<AccessibilityOrientation>();
+    assert_public_type::<AccessibilityState>();
+    assert_public_type::<AccessibilityTree>();
+    assert_public_type::<AccessibilityValidationError>();
+    assert_public_type::<ControlAction>();
+    assert_public_type::<Modifiers>();
+    assert_public_type::<WidgetAction>();
 }

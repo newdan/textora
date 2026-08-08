@@ -114,6 +114,17 @@ fn ui_has_no_app_types_or_production_filesystem_access() {
 }
 
 #[test]
+fn ui_has_no_platform_accessibility_implementation_dependency() {
+    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let source = joined_sources_stripped(&root.join("src"));
+    let manifest = fs::read_to_string(root.join("Cargo.toml")).unwrap();
+    for forbidden in ["accesskit", "NSAccessibility", "UIAutomation", "atk::"] {
+        assert!(!source.contains(forbidden), "ui source depends on platform type {forbidden}");
+        assert!(!manifest.contains(forbidden), "ui manifest depends on platform type {forbidden}");
+    }
+}
+
+#[test]
 fn theme_registry_does_not_log_or_load_lazily() {
     let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     let registry = fs::read_to_string(root.join("src/theme_registry.rs")).unwrap();
