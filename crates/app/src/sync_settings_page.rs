@@ -169,6 +169,25 @@ impl Widget for StackedConnectionActions {
 
     fn on_event(&mut self, event: &Event, ctx: &mut EventCtx) -> Option<WidgetAction> {
         match event {
+            Event::PointerLeave => {
+                let hover_index = self.hover_index.take();
+                let action =
+                    hover_index.and_then(|index| self.dispatch_to_button(index, event, ctx));
+                action.or_else(|| hover_index.map(|_| WidgetAction::Consumed))
+            }
+            Event::InteractionCancel => {
+                let container_changed =
+                    self.pointer_index.take().is_some() | self.hover_index.take().is_some();
+                let mut first_action = None;
+                for index in 0..self.buttons.len() {
+                    if let Some(action) = self.dispatch_to_button(index, event, ctx)
+                        && first_action.is_none()
+                    {
+                        first_action = Some(action);
+                    }
+                }
+                first_action.or_else(|| container_changed.then_some(WidgetAction::Consumed))
+            }
             Event::MouseDown { px, py, .. } => {
                 let index = self.button_index_at(*px, *py)?;
                 self.pointer_index = Some(index);
@@ -1306,6 +1325,58 @@ mod tests {
             stacked_action_backgrounds(&actions),
             [settings_theme.control_surface; 2],
             "鼠标移出纵向按钮组后应清除全部 hover",
+        );
+    }
+
+    #[test]
+    fn stacked_connection_actions_cancel_pressed_button_without_activation() {
+        let theme = ui::theme::test_theme();
+        let settings_theme = theme.settings_theme();
+        let mut measure = ui::core::measure::NoopMeasure;
+        let mut layout =
+            LayoutCtx { measure: &mut measure, ui_measure: None, theme: &theme, dpi: 1.0 };
+        let mut actions = StackedConnectionActions::new(
+            action_button(TEST_CONNECTION_ID, "测试连接", true, settings_theme),
+            action_button(CONFIGURE_CONNECTION_ID, "保存连接", true, settings_theme),
+        );
+        actions.set_rect(Rect::new(0.0, 0.0, 160.0, 80.0), &mut layout);
+        let mut event_ctx = EventCtx { theme: &theme, dpi: 1.0, cursor_hint: None };
+        let first_button = actions.button_rects[0];
+        let pointer =
+            (first_button.x + first_button.w * 0.5, first_button.y + first_button.h * 0.5);
+
+        assert!(
+            actions
+                .on_event(
+                    &Event::MouseDown {
+                        px: pointer.0,
+                        py: pointer.1,
+                        button: ui::core::MouseButton::Left,
+                    },
+                    &mut event_ctx,
+                )
+                .is_some()
+        );
+        assert!(actions.is_capturing());
+        let _ = actions.on_event(&Event::PointerLeave, &mut event_ctx);
+        assert!(actions.is_capturing());
+
+        assert_eq!(
+            actions.on_event(&Event::InteractionCancel, &mut event_ctx),
+            Some(WidgetAction::Consumed)
+        );
+        assert!(!actions.is_capturing());
+        assert_eq!(actions.on_event(&Event::InteractionCancel, &mut event_ctx), None);
+        assert_eq!(
+            actions.on_event(
+                &Event::MouseUp {
+                    px: pointer.0,
+                    py: pointer.1,
+                    button: ui::core::MouseButton::Left,
+                },
+                &mut event_ctx,
+            ),
+            None
         );
     }
 
