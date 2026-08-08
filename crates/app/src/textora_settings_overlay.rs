@@ -235,6 +235,32 @@ impl TextoraSettingsOverlay {
             .or(previous_hover_action)
     }
 
+    fn dispatch_interaction_lifecycle(
+        &mut self,
+        event: &Event,
+        ctx: &mut EventCtx,
+    ) -> Option<WidgetAction> {
+        let container_changed = if matches!(event, Event::InteractionCancel) {
+            self.category_pointer_index.take().is_some() | self.hover_target.take().is_some()
+        } else {
+            self.hover_target.take().is_some()
+        };
+        let mut first_action = None;
+        for category_index in 0..self.category_buttons.len() {
+            if let Some(action) = self.dispatch_category_event(category_index, event, ctx)
+                && first_action.is_none()
+            {
+                first_action = Some(action);
+            }
+        }
+        if let Some(action) = self.dispatch_active_page_event(event, ctx)
+            && first_action.is_none()
+        {
+            first_action = Some(action);
+        }
+        first_action.or_else(|| container_changed.then_some(WidgetAction::Consumed))
+    }
+
     fn layout_category_buttons(&mut self, ctx: &mut LayoutCtx) {
         self.category_rects.clear();
         let mut category_y = SETTINGS_SIDEBAR_TOP_INSET_LOGICAL * ctx.dpi;
@@ -358,6 +384,10 @@ impl Widget for TextoraSettingsOverlay {
     }
 
     fn on_event(&mut self, event: &Event, ctx: &mut EventCtx) -> Option<WidgetAction> {
+        if matches!(event, Event::PointerLeave | Event::InteractionCancel) {
+            return self.dispatch_interaction_lifecycle(event, ctx);
+        }
+
         if self.active_page_is_capturing()
             && matches!(event, Event::MouseMove { .. } | Event::MouseUp { .. })
         {
@@ -558,6 +588,43 @@ mod tests {
             Some(WidgetAction::Settings(SettingsViewAction::SetThemeMode(ThemeMode::System,))),
         );
         assert_eq!(overlay.take_pending_sync_action(), None);
+    }
+
+    #[test]
+    fn product_category_press_is_cleared_by_interaction_cancel() {
+        let mut overlay = laid_out_overlay(SettingsPersistenceView::Saved);
+        let editor_rect = overlay.category_rects[1];
+        let pointer = (editor_rect.x + editor_rect.w * 0.5, editor_rect.y + editor_rect.h * 0.5);
+        let theme = ui::theme::test_theme();
+        let mut event_ctx = EventCtx { theme: &theme, dpi: 1.0, cursor_hint: None };
+
+        assert!(
+            overlay
+                .on_event(
+                    &Event::MouseDown { px: pointer.0, py: pointer.1, button: MouseButton::Left },
+                    &mut event_ctx,
+                )
+                .is_some()
+        );
+        assert!(overlay.is_capturing());
+
+        overlay.on_event(&Event::PointerLeave, &mut event_ctx);
+        assert!(overlay.is_capturing());
+
+        assert_eq!(
+            overlay.on_event(&Event::InteractionCancel, &mut event_ctx),
+            Some(WidgetAction::Consumed)
+        );
+        assert!(!overlay.is_capturing());
+        assert_eq!(overlay.on_event(&Event::InteractionCancel, &mut event_ctx), None);
+        assert_eq!(
+            overlay.on_event(
+                &Event::MouseUp { px: pointer.0, py: pointer.1, button: MouseButton::Left },
+                &mut event_ctx,
+            ),
+            None
+        );
+        assert_eq!(overlay.active_category, ProductSettingsCategory::Appearance);
     }
 
     fn settings_input(persistence: SettingsPersistenceView) -> SettingsViewInput {

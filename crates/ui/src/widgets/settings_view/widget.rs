@@ -691,6 +691,37 @@ impl SettingsView {
             SettingsHoverTarget::PersistenceBanner => self.dispatch_banner_event(event, ctx),
         }
     }
+
+    fn dispatch_interaction_lifecycle(
+        &mut self,
+        event: &Event,
+        ctx: &mut EventCtx,
+    ) -> Option<WidgetAction> {
+        let container_changed = if matches!(event, Event::InteractionCancel) {
+            self.category_pointer_index.take().is_some() | self.hover_target.take().is_some()
+        } else {
+            self.hover_target.take().is_some()
+        };
+        let mut first_action = None;
+        for category_index in 0..self.category_buttons.len() {
+            if let Some(action) = self.dispatch_category_event(category_index, event, ctx)
+                && first_action.is_none()
+            {
+                first_action = Some(action);
+            }
+        }
+        if let Some(action) = self.dispatch_active_page_event(event, ctx)
+            && first_action.is_none()
+        {
+            first_action = Some(action);
+        }
+        if let Some(action) = self.dispatch_banner_event(event, ctx)
+            && first_action.is_none()
+        {
+            first_action = Some(action);
+        }
+        first_action.or_else(|| container_changed.then_some(WidgetAction::Consumed))
+    }
 }
 
 impl Widget for SettingsView {
@@ -851,6 +882,10 @@ impl Widget for SettingsView {
     }
 
     fn on_event(&mut self, event: &Event, ctx: &mut EventCtx) -> Option<WidgetAction> {
+        if matches!(event, Event::PointerLeave | Event::InteractionCancel) {
+            return self.dispatch_interaction_lifecycle(event, ctx);
+        }
+
         if matches!(event, Event::KeyDown(..)) {
             if let Some(index) = self.category_buttons.iter().position(|(_, button)| {
                 button.id() == self.focused_id && self.category_navigation_visible
@@ -1279,6 +1314,50 @@ mod tests {
 
         assert_eq!(view.active_category(), SettingsCategory::Editor);
         assert_eq!(view.form.focused_id(), Some(WORD_WRAP_ID));
+    }
+
+    #[test]
+    fn category_press_survives_pointer_leave_and_is_cleared_by_interaction_cancel() {
+        let mut view = settings_fixture(SettingsCategory::Appearance);
+        let theme = crate::theme::test_theme();
+        layout_settings_view(&mut view, &theme, Rect::new(0.0, 0.0, 720.0, 480.0));
+        let editor_rect = view.category_rects[1];
+        let pointer = (editor_rect.x + editor_rect.w * 0.5, editor_rect.y + editor_rect.h * 0.5);
+
+        assert!(
+            dispatch_settings_event(
+                &mut view,
+                Event::MouseDown {
+                    px: pointer.0,
+                    py: pointer.1,
+                    button: crate::core::widget::MouseButton::Left,
+                },
+            )
+            .is_some()
+        );
+        assert!(view.is_capturing());
+
+        dispatch_settings_event(&mut view, Event::PointerLeave);
+        assert!(view.is_capturing());
+
+        assert_eq!(
+            dispatch_settings_event(&mut view, Event::InteractionCancel),
+            Some(WidgetAction::Consumed)
+        );
+        assert!(!view.is_capturing());
+        assert_eq!(dispatch_settings_event(&mut view, Event::InteractionCancel), None);
+        assert_eq!(
+            dispatch_settings_event(
+                &mut view,
+                Event::MouseUp {
+                    px: pointer.0,
+                    py: pointer.1,
+                    button: crate::core::widget::MouseButton::Left,
+                },
+            ),
+            None
+        );
+        assert_eq!(view.active_category(), SettingsCategory::Appearance);
     }
 
     fn click_category_button(view: &mut SettingsView, category_index: usize) {
