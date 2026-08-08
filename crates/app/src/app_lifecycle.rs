@@ -387,6 +387,7 @@ impl App {
                 false
             }
             AppEvent::SaveResultsReady => self.drain_save_results(),
+            AppEvent::Accessibility(_) => false,
         }
     }
 

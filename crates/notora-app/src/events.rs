@@ -90,6 +90,7 @@ impl ApplicationHandler<ShellEvent> for NotoraApp {
             ShellEvent::StartBackgroundServices
             | ShellEvent::ReshapeResultsReady
             | ShellEvent::FileSafetyResultsReady => self.request_window_redraw(),
+            ShellEvent::Accessibility(_) => {}
         }
     }
 
