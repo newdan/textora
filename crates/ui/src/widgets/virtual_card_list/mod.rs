@@ -4,8 +4,6 @@ mod layout;
 
 use std::any::Any;
 
-use crate::core::text_layout::wrap_text_to_lines;
-use crate::core::text_util::estimate_text_width_px;
 use crate::core::widget::{ControlAction, WidgetId};
 use crate::core::{
     AccessibilityAction, AccessibilityActionRequest, AccessibilityContext, AccessibilityId,
@@ -16,7 +14,7 @@ use crate::widgets::icon::draw_icon;
 
 pub use layout::{CardGeometry, VirtualCardListLayout};
 
-use self::layout::build_virtual_card_layout;
+use self::layout::{build_virtual_card_layout, card_text_lines};
 
 /// 仅在单帧 UI 输入中有效的卡片键。
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
@@ -186,7 +184,7 @@ impl Widget for VirtualCardListWidget {
     fn set_rect(&mut self, rect: Rect, ctx: &mut LayoutCtx) {
         self.rect = rect;
         self.layout = build_virtual_card_layout(
-            self.input.cards.len(),
+            &self.input.cards,
             rect,
             self.input.scroll_offset_px,
             ctx.dpi,
@@ -404,17 +402,6 @@ fn has_unique_keys(cards: &[CardInput]) -> bool {
     cards.iter().all(|card| keys.insert(card.key))
 }
 
-fn card_text_lines(
-    text: &str,
-    max_width_px: f32,
-    font_size_px: f32,
-    max_lines: usize,
-) -> Vec<String> {
-    wrap_text_to_lines(text, max_width_px, max_lines, |candidate| {
-        estimate_text_width_px(candidate, font_size_px)
-    })
-}
-
 #[allow(
     clippy::too_many_arguments,
     reason = "card text painting keeps its geometry and typography constraints explicit"
@@ -442,10 +429,14 @@ mod tests {
 
     #[test]
     fn long_card_title_and_excerpt_wrap_within_their_visible_rows() {
-        let geometry = build_virtual_card_layout(1, Rect::new(0.0, 0.0, 180.0, 500.0), 0.0, 1.0)
-            .card_geometry(0);
         let title = "这是一个需要在卡片中自动换行显示的很长标题";
         let excerpt = "正文摘要也应该根据卡片宽度自动折行，避免文字越过卡片边界。";
+        let mut input = card(1);
+        input.title = title.to_owned();
+        input.excerpt = excerpt.to_owned();
+        let geometry =
+            build_virtual_card_layout(&[input], Rect::new(0.0, 0.0, 180.0, 500.0), 0.0, 1.0)
+                .card_geometry(0);
 
         let title_lines = card_text_lines(
             title,
@@ -544,6 +535,29 @@ mod tests {
         assert!(widget.layout().visible_range.start > 0);
         assert!(widget.layout().visible_range.len() < 20);
         assert_eq!(widget.layout().card_count, 10_000);
+    }
+
+    #[test]
+    fn card_height_grows_only_for_visible_content() {
+        let mut empty_excerpt = card(1);
+        empty_excerpt.excerpt.clear();
+        let single_line_excerpt = card(2);
+        let mut two_line_excerpt = card(3);
+        two_line_excerpt.excerpt =
+            "这是一段需要换行的摘要，用来验证卡片高度会随实际内容增长。".to_owned();
+        let mut widget = VirtualCardListWidget::new();
+        widget.set_input(VirtualCardListInput {
+            cards: vec![empty_excerpt, single_line_excerpt, two_line_excerpt],
+            scroll_offset_px: 0.0,
+        });
+        layout(&mut widget, Rect::new(0.0, 0.0, 180.0, 500.0), 1.0);
+
+        let empty_height = widget.layout().card_geometry(0).card_rect.h;
+        let single_line_height = widget.layout().card_geometry(1).card_rect.h;
+        let two_line_height = widget.layout().card_geometry(2).card_rect.h;
+
+        assert!(empty_height < single_line_height);
+        assert!(single_line_height < two_line_height);
     }
 
     #[test]
