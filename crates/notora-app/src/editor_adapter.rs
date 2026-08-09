@@ -6,7 +6,7 @@ use std::path::{Path, PathBuf};
 use appkit_shell::editor_plugin::EditorPluginFactory;
 use appkit_shell::editor_runtime::EditorRuntime;
 use appkit_shell::prepared_tab::PreparedTab;
-use appkit_shell::tab_runtime::TabRuntime;
+use appkit_shell::tab_runtime::{DocumentEditingAccess, TabRuntime};
 use appkit_shell::view_route::{ViewPathMatcher, ViewRouteError, ViewRouteRule, ViewRouteTable};
 use notora_core::DocumentKind;
 use ui::plugin::{PLUGIN_EDITOR, PLUGIN_MARKDOWN_EDITOR, PLUGIN_MINDMAP};
@@ -76,6 +76,14 @@ pub(crate) fn prepare_loaded_document(
     runtime: &EditorRuntime,
     loaded: LoadedDocument,
 ) -> Result<PreparedTab, DocumentPreparationError> {
+    prepare_loaded_document_with_access(runtime, loaded, DocumentEditingAccess::Editable)
+}
+
+pub(crate) fn prepare_loaded_document_with_access(
+    runtime: &EditorRuntime,
+    loaded: LoadedDocument,
+    editing_access: DocumentEditingAccess,
+) -> Result<PreparedTab, DocumentPreparationError> {
     let mut text_buffer = core::buffer::TextBuffer::new(false)
         .map_err(|error| DocumentPreparationError::Buffer { message: error.to_string() })?;
     text_buffer.write_raw(loaded.contents.as_bytes());
@@ -83,7 +91,9 @@ pub(crate) fn prepare_loaded_document(
     document.file_path = Some(loaded.path.clone());
     document.disk_revision = loaded.disk_revision;
     document.set_language_from_path(&loaded.path);
-    Ok(PreparedTab::new(document, TabRuntime::new(runtime.create_plugin_for_path(&loaded.path))))
+    let mut tab_runtime = TabRuntime::new(runtime.create_plugin_for_path(&loaded.path));
+    tab_runtime.set_editing_access(editing_access);
+    Ok(PreparedTab::new(document, tab_runtime))
 }
 
 /// 在主线程构造没有磁盘路径的临时外部文档；插件只由类型对应的虚拟文件名选择。

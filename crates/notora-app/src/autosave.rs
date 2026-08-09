@@ -151,6 +151,16 @@ where
         }
     }
 
+    /// 保存请求准备提交前已被新内容替代时，重新等待当前 revision 的空闲窗口。
+    pub fn on_save_superseded(&mut self, request: AutoSaveRequest, current_content_revision: u64) {
+        if self.state(request.tab_id)
+            != Some(AutoSaveState::Saving { content_revision: request.content_revision })
+        {
+            return;
+        }
+        self.schedule(request.tab_id, current_content_revision, self.idle_delay);
+    }
+
     /// 只允许重试当前失败的笔记 revision；已被新编辑替代的失败不会覆盖新 deadline。
     pub fn retry_failed_save(&mut self, tab_id: TabId) -> bool {
         let Some(AutoSaveState::Failed { content_revision }) = self.state(tab_id) else {
@@ -342,6 +352,26 @@ mod tests {
             scheduler.state(tab_id),
             Some(AutoSaveState::Scheduled { content_revision: 6, .. })
         ));
+    }
+
+    #[test]
+    fn superseded_save_waits_for_the_current_revision_idle_window() {
+        let clock = ManualClock::new();
+        let mut scheduler = AutoSaveScheduler::with_clock(clock);
+        let tab_id = TabIdAllocator::new().allocate();
+
+        scheduler.request_immediate_save(&note_origin(), tab_id, 5);
+        let stale_request =
+            scheduler.take_due_saves().pop().expect("stale save should become in-flight");
+        scheduler.on_save_superseded(stale_request, 6);
+
+        assert_eq!(
+            scheduler.state(tab_id),
+            Some(AutoSaveState::Scheduled {
+                deadline: scheduler.clock.now() + AUTO_SAVE_IDLE_DELAY,
+                content_revision: 6,
+            })
+        );
     }
 
     #[test]

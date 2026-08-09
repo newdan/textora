@@ -10,6 +10,13 @@ use crate::mindmap_style_panel::MindmapStylePanelSession;
 const UNMEASURED_VISIBLE_ROWS: usize = 0;
 const UNMEASURED_VIEWPORT_HEIGHT: f64 = 0.0;
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum DocumentEditingAccess {
+    #[default]
+    Editable,
+    ReadOnly,
+}
+
 pub struct TabRuntime {
     pub plugin: Box<dyn ViewPlugin>,
     pub(crate) cached_toggle_source: Option<Box<dyn ViewPlugin>>,
@@ -18,6 +25,7 @@ pub struct TabRuntime {
     pub presentation: DocumentPresentation,
     pub canvas_viewport: CanvasViewportSession,
     pub(crate) mindmap_style_panel: MindmapStylePanelSession,
+    editing_access: DocumentEditingAccess,
 }
 
 impl TabRuntime {
@@ -33,6 +41,7 @@ impl TabRuntime {
             ),
             canvas_viewport: CanvasViewportSession::default(),
             mindmap_style_panel: MindmapStylePanelSession::Closed,
+            editing_access: DocumentEditingAccess::Editable,
         }
     }
 
@@ -41,6 +50,14 @@ impl TabRuntime {
         presentation: DocumentPresentation,
     ) -> Self {
         Self { presentation, ..Self::new(plugin) }
+    }
+
+    pub fn editing_access(&self) -> DocumentEditingAccess {
+        self.editing_access
+    }
+
+    pub fn set_editing_access(&mut self, editing_access: DocumentEditingAccess) {
+        self.editing_access = editing_access;
     }
 }
 

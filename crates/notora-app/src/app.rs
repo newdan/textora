@@ -9,8 +9,8 @@ use std::time::{Duration, Instant, SystemTime};
 
 use appkit_shell::editor_runtime::{
     DocumentTextEditError, DocumentTextReplacement, EditorNotification, EditorOutcome,
-    EditorRuntime, EditorRuntimeConfig, EditorRuntimeError, OpenDisposition, RenderError,
-    RenderResources,
+    EditorRuntime, EditorRuntimeConfig, EditorRuntimeError, EditorSurfacePaint, OpenDisposition,
+    RenderError, RenderResources,
 };
 use appkit_shell::render_state::{GpuState, TextState};
 use appkit_shell::{ProductHost, ProductWakeHandle, ShellEffect, ShellEvent};
@@ -27,7 +27,7 @@ use crate::dirty_snapshot::{collect_dirty_snapshots, write_dirty_snapshot};
 use crate::document_registry::DocumentRegistry;
 use crate::editor_adapter::{
     LoadedDocument, build_editor_plugins, load_document, prepare_loaded_document,
-    prepare_untitled_document,
+    prepare_loaded_document_with_access, prepare_untitled_document,
 };
 use crate::effect_executor::{
     EffectExecutor, ExternalOpenRequest, ManualSaveRequest, NotoraEffectService,
@@ -530,20 +530,39 @@ impl NotoraApp {
 
     fn synchronize_product_focus(&mut self) {
         let focus_target = self.state.layout.focus_target;
-        self.editor_runtime
-            .set_active_cursor_paint_enabled(focus_target == crate::FocusTarget::Editor);
+        self.editor_runtime.set_active_cursor_paint_enabled(
+            focus_target == crate::FocusTarget::Editor && self.active_editor_matches_selection(),
+        );
         self.shell.synchronize_focus(focus_target, Instant::now());
     }
 
-    pub fn update_editor_preedit(&mut self, text: String, cursor: Option<(usize, usize)>) -> bool {
-        let context =
+    fn active_editor_matches_selection(&self) -> bool {
+        let Some(selected_identity) = self.state.library.selected_card else {
+            return false;
+        };
+        let Some(active_tab_id) = self.editor_runtime.active_tab_id() else {
+            return false;
+        };
+        self.document_registry.identity_for(active_tab_id) == Some(selected_identity)
+    }
+
+    fn editor_input_context(&self) -> appkit_shell::editor_runtime::EditorInputContext {
+        let mut context =
             events::editor_input_context(&self.state, self.shell_layout(), self.window_focused);
+        if !self.active_editor_matches_selection() {
+            context.focus = appkit_shell::editor_runtime::EditorFocus::Inactive;
+            context.modal_blocked = true;
+        }
+        context
+    }
+
+    pub fn update_editor_preedit(&mut self, text: String, cursor: Option<(usize, usize)>) -> bool {
+        let context = self.editor_input_context();
         self.editor_runtime.update_preedit(context, text, cursor)
     }
 
     pub(crate) fn commit_editor_text(&mut self, text: String) {
-        let context =
-            events::editor_input_context(&self.state, self.shell_layout(), self.window_focused);
+        let context = self.editor_input_context();
         let outcome = self.editor_runtime.commit_text(context, text);
         self.apply_editor_outcome(outcome);
     }
@@ -553,15 +572,13 @@ impl NotoraApp {
         key: ui::KeyCode,
         modifiers: ui::core::Modifiers,
     ) {
-        let context =
-            events::editor_input_context(&self.state, self.shell_layout(), self.window_focused);
+        let context = self.editor_input_context();
         let outcome = self.editor_runtime.handle_key_input(context, key, modifiers);
         self.apply_editor_outcome(outcome);
     }
 
     pub(crate) fn scroll_editor(&mut self, px: f32, py: f32, pixels: f32) {
-        let context =
-            events::editor_input_context(&self.state, self.shell_layout(), self.window_focused);
+        let context = self.editor_input_context();
         let outcome = self.editor_runtime.scroll_editor(context, (px, py), pixels);
         self.apply_editor_outcome(outcome);
     }
@@ -572,8 +589,7 @@ impl NotoraApp {
         py: f32,
         action: appkit_shell::canvas_viewport::CanvasViewportAction,
     ) -> bool {
-        let context =
-            events::editor_input_context(&self.state, self.shell_layout(), self.window_focused);
+        let context = self.editor_input_context();
         if context.modal_blocked || !context.editor_rect.contains(px, py) {
             return false;
         }
@@ -716,7 +732,9 @@ impl NotoraApp {
     fn editor_cursor_blink_phase(
         &self,
     ) -> Option<appkit_shell::editor_runtime::EditorCursorBlinkPhase> {
-        if self.state.layout.focus_target != crate::FocusTarget::Editor {
+        if self.state.layout.focus_target != crate::FocusTarget::Editor
+            || !self.active_editor_matches_selection()
+        {
             return None;
         }
         self.editor_runtime.active_cursor_blink_phase()
@@ -839,19 +857,16 @@ impl NotoraApp {
     pub(crate) fn route_pointer_event(&mut self, event: &ui::Event) -> bool {
         let (product_consumed, product_cursor) = self.route_product_event_with_feedback(event);
         let pointer_move = matches!(event, ui::Event::MouseMove { .. });
-        let editor_cursor = if pointer_move
-            || !product_consumed
-            || self.editor_pointer_is_captured()
-        {
-            let context =
-                events::editor_input_context(&self.state, self.shell_layout(), self.window_focused);
-            let outcome = self.editor_runtime.handle_pointer_event(context, event);
-            let cursor_icon = outcome.cursor_icon;
-            self.apply_editor_outcome(outcome.editor);
-            cursor_icon
-        } else {
-            None
-        };
+        let editor_cursor =
+            if pointer_move || !product_consumed || self.editor_pointer_is_captured() {
+                let context = self.editor_input_context();
+                let outcome = self.editor_runtime.handle_pointer_event(context, event);
+                let cursor_icon = outcome.cursor_icon;
+                self.apply_editor_outcome(outcome.editor);
+                cursor_icon
+            } else {
+                None
+            };
         if pointer_move || product_cursor.is_some() || editor_cursor.is_some() {
             self.set_window_cursor(resolve_pointer_cursor(product_cursor, editor_cursor));
         }
@@ -1368,12 +1383,10 @@ impl NotoraApp {
         let mut model =
             NotoraRenderModel::from_state_and_settings(&self.state, &self.product_settings);
         model.settings_overlay.persistence = self.settings_persistence.to_view();
-        model.editor_pane = if self.editor_runtime.active_tab_id().is_some() {
-            EditorPaneState::Active
-        } else {
-            EditorPaneState::Empty
-        };
-        if let Some(tab_id) = self.editor_runtime.active_tab_id() {
+        let editor_is_active = self.active_editor_matches_selection();
+        model.editor_pane =
+            if editor_is_active { EditorPaneState::Active } else { EditorPaneState::Empty };
+        if editor_is_active && let Some(tab_id) = self.editor_runtime.active_tab_id() {
             self.update_editor_render_model(&mut model, tab_id, layout);
         } else {
             model.editor_chrome = crate::editor_pane::EditorPaneInput::default();
@@ -1381,12 +1394,17 @@ impl NotoraApp {
         let mut render_resources = self.editor_runtime.take_render_resources();
         let mut frame = self.editor_runtime.begin_frame()?;
         self.shell.render(&mut frame, layout, &model)?;
-        let editor_surface = self.editor_runtime.paint_active_editor(
-            &mut frame,
-            &mut render_resources,
-            layout.editor_body_rect,
-        )?;
-        let canvas_scrollbars_input = (self.state.layout.overlay == crate::OverlayState::None)
+        let editor_surface = if editor_is_active {
+            self.editor_runtime.paint_active_editor(
+                &mut frame,
+                &mut render_resources,
+                layout.editor_body_rect,
+            )?
+        } else {
+            EditorSurfacePaint::Empty
+        };
+        let canvas_scrollbars_input = (editor_is_active
+            && self.state.layout.overlay == crate::OverlayState::None)
             .then(|| self.editor_runtime.active_canvas_scrollbars_input())
             .flatten();
         frame.with_layout_context(|context| {
@@ -1502,7 +1520,17 @@ impl NotoraApp {
             self.apply_editor_outcome(outcome);
             return;
         }
-        let prepared = match prepare_loaded_document(&self.editor_runtime, document) {
+        let editing_access =
+            if self.state.library.navigation_scope == notora_core::NavigationScope::Trash {
+                appkit_shell::tab_runtime::DocumentEditingAccess::ReadOnly
+            } else {
+                appkit_shell::tab_runtime::DocumentEditingAccess::Editable
+            };
+        let prepared = match prepare_loaded_document_with_access(
+            &self.editor_runtime,
+            document,
+            editing_access,
+        ) {
             Ok(prepared) => prepared,
             Err(error) => {
                 self.dispatch_action(NotoraAction::NoteCommandFailed(error.to_string()));
@@ -1736,11 +1764,15 @@ impl NotoraApp {
             self.cancel_pending_title_update(request, TITLE_SAVE_FAILURE_MESSAGE);
             return;
         };
-        if !summary.dirty || summary.content_revision != request.content_revision {
-            self.record_autosave_failure(request, "保存请求对应的内容版本已经过期".to_owned());
-            self.cancel_pending_trash_move(request, TRASH_SAVE_FAILURE_MESSAGE);
+        if summary.content_revision != request.content_revision {
+            self.handle_superseded_autosave(request, summary.content_revision, summary.dirty);
+            self.cancel_pending_trash_move(request, TRASH_SAVE_STALE_MESSAGE);
             self.cancel_pending_note_move(request, MOVE_SAVE_STALE_MESSAGE);
             self.reschedule_pending_title_update(request.tab_id);
+            return;
+        }
+        if !summary.dirty {
+            self.finish_redundant_autosave(request);
             return;
         }
         let prepared = match self.editor_runtime.prepare_save(request.tab_id) {
@@ -1758,6 +1790,50 @@ impl NotoraApp {
             self.cancel_pending_trash_move(request, TRASH_SAVE_FAILURE_MESSAGE);
             self.cancel_pending_note_move(request, MOVE_SAVE_FAILURE_MESSAGE);
             self.cancel_pending_title_update(request, TITLE_SAVE_FAILURE_MESSAGE);
+        }
+    }
+
+    fn handle_superseded_autosave(
+        &mut self,
+        request: AutoSaveRequest,
+        current_content_revision: u64,
+        current_dirty: bool,
+    ) {
+        self.save_failure_messages.remove(&request.tab_id);
+        if current_dirty {
+            self.autosave.on_save_superseded(request, current_content_revision);
+        } else {
+            self.autosave.cancel(request.tab_id);
+        }
+        self.needs_redraw = true;
+        self.editor_runtime.request_redraw();
+    }
+
+    fn finish_redundant_autosave(&mut self, request: AutoSaveRequest) {
+        self.autosave.cancel(request.tab_id);
+        self.save_failure_messages.remove(&request.tab_id);
+        self.needs_redraw = true;
+        self.editor_runtime.request_redraw();
+
+        if let Some(pending_trash_move) = self
+            .pending_trash_moves
+            .get(&request.tab_id)
+            .copied()
+            .filter(|pending| pending.content_revision == request.content_revision)
+        {
+            self.pending_trash_moves.remove(&request.tab_id);
+            self.execute_trash_operation(crate::action::TrashOperation::MoveToTrash {
+                note_id: pending_trash_move.note_id,
+            });
+        }
+        if let Some(pending_note_move) = self
+            .pending_note_moves
+            .get(&request.tab_id)
+            .cloned()
+            .filter(|pending| pending.content_revision == request.content_revision)
+        {
+            self.pending_note_moves.remove(&request.tab_id);
+            self.submit_note_command(NoteCommand::Move(pending_note_move.request));
         }
     }
 
@@ -2662,7 +2738,13 @@ impl NotoraEffectService for NotoraApp {
             self.apply_editor_outcome(outcome);
             return;
         }
-        if let Err(error) = self.workspace_controller.prepare_document(request) {
+        let preparation =
+            if self.state.library.navigation_scope == notora_core::NavigationScope::Trash {
+                self.workspace_controller.prepare_trashed_document(request)
+            } else {
+                self.workspace_controller.prepare_document(request)
+            };
+        if let Err(error) = preparation {
             self.dispatch_action(NotoraAction::NoteCommandFailed(error.to_string()));
         }
     }
@@ -3055,10 +3137,18 @@ impl NotoraApp {
     }
 
     fn complete_trash_operation(&mut self, operation: crate::action::TrashOperation) {
-        let crate::action::TrashOperation::MoveToTrash { note_id } = operation else {
-            return;
-        };
-        let identity = DocumentIdentity::Note(note_id);
+        match operation {
+            crate::action::TrashOperation::MoveToTrash { note_id }
+            | crate::action::TrashOperation::Restore { note_id }
+            | crate::action::TrashOperation::RestoreWithRenamedPath { note_id }
+            | crate::action::TrashOperation::PermanentlyDelete { note_id } => {
+                self.close_document_runtime(DocumentIdentity::Note(note_id));
+            }
+            crate::action::TrashOperation::Empty => self.close_read_only_note_runtimes(),
+        }
+    }
+
+    fn close_document_runtime(&mut self, identity: DocumentIdentity) {
         let Some(tab_id) = self.document_registry.tab_for(identity) else {
             return;
         };
@@ -3066,8 +3156,38 @@ impl NotoraApp {
         self.save_failure_messages.remove(&tab_id);
         let _ = self.editor_runtime.close_for_product(tab_id);
         self.document_registry.remove_tab(tab_id);
-        if self.state.library.selected_card == Some(identity) {
-            self.state.library.selected_card = None;
+        if self.state.library.selected_card == Some(identity)
+            && self.state.library.navigation_scope != notora_core::NavigationScope::Trash
+        {
+            self.state.invalidate_document_selection();
+        }
+    }
+
+    fn close_read_only_note_runtimes(&mut self) {
+        let read_only_tabs = self
+            .editor_runtime
+            .workspace_snapshot()
+            .tabs
+            .into_iter()
+            .filter(|tab| {
+                self.editor_runtime.tab_session(tab.tab_id).is_some_and(|session| {
+                    session.editing_access()
+                        == appkit_shell::tab_runtime::DocumentEditingAccess::ReadOnly
+                })
+            })
+            .filter_map(|tab| {
+                matches!(
+                    self.document_registry.identity_for(tab.tab_id),
+                    Some(DocumentIdentity::Note(_))
+                )
+                .then_some(tab.tab_id)
+            })
+            .collect::<Vec<_>>();
+        for tab_id in read_only_tabs {
+            self.autosave.cancel(tab_id);
+            self.save_failure_messages.remove(&tab_id);
+            let _ = self.editor_runtime.close_for_product(tab_id);
+            self.document_registry.remove_tab(tab_id);
         }
     }
 
@@ -3498,7 +3618,9 @@ mod tests {
         CompactContent, ExternalFileSession, FocusTarget, NotoraPaths, OverlayState,
         WorkspaceCommand, WorkspaceRootState,
     };
-    use appkit_shell::editor_runtime::{DocumentTextReplacement, EditorNotification};
+    use appkit_shell::editor_runtime::{
+        DocumentTextReplacement, EditorFocus, EditorInputContext, EditorNotification,
+    };
     use notora_core::{DocumentIdentity, DocumentKind, NavigationScope, WorkspaceId};
 
     #[test]
@@ -3518,6 +3640,51 @@ mod tests {
         let paths = NotoraPaths::from_config_directory(directory.keep().join("notora"))
             .expect("test should create isolated product paths");
         NotoraApp::with_paths(paths).expect("notora app should construct without a window")
+    }
+
+    fn install_registered_note(
+        app: &mut NotoraApp,
+        path: &str,
+        contents: &str,
+    ) -> (DocumentIdentity, appkit_core::workspace::types::TabId) {
+        let identity = DocumentIdentity::Note(notora_core::NoteId::generate());
+        let prepared = crate::editor_adapter::prepare_loaded_document(
+            &app.editor_runtime,
+            LoadedDocument {
+                path: std::path::PathBuf::from(path),
+                contents: contents.to_owned(),
+                disk_revision: None,
+            },
+        )
+        .expect("registered note fixture should prepare");
+        let _ = app.editor_runtime.install_prepared_tab(
+            prepared,
+            None,
+            appkit_shell::editor_runtime::OpenDisposition::Persistent,
+        );
+        let tab_id = app
+            .editor_runtime
+            .active_tab_id()
+            .expect("registered note fixture should become active");
+        let _ = app.document_registry.register(identity, tab_id);
+        app.state.library.selected_card = Some(identity);
+        (identity, tab_id)
+    }
+
+    fn active_editor_input_context() -> EditorInputContext {
+        EditorInputContext {
+            editor_rect: ui::Rect::new(0.0, 0.0, 640.0, 480.0),
+            focus: EditorFocus::Active,
+            modal_blocked: false,
+        }
+    }
+
+    fn note_origin(relative_path: &str) -> notora_core::DocumentOrigin {
+        notora_core::DocumentOrigin::Note {
+            workspace_id: notora_core::WorkspaceId::generate(),
+            note_id: notora_core::NoteId::generate(),
+            relative_path: relative_path.into(),
+        }
     }
 
     fn drain_until_document_text(
@@ -3570,6 +3737,83 @@ mod tests {
             app.save_failure_messages.get(&tab_id).map(String::as_str),
             Some("file is read-only")
         );
+    }
+
+    #[test]
+    fn autosave_request_for_a_clean_document_finishes_without_a_failure() {
+        let directory = tempfile::tempdir().expect("save fixture directory should exist");
+        let path = directory.path().join("clean.md");
+        let mut app = app();
+        let (_, tab_id) = install_registered_note(
+            &mut app,
+            path.to_str().expect("fixture path should be valid UTF-8"),
+            "原始正文",
+        );
+        let edit_outcome =
+            app.editor_runtime.commit_text(active_editor_input_context(), "已保存修改".to_owned());
+        app.apply_editor_outcome(edit_outcome);
+        let edited_summary = app
+            .editor_runtime
+            .document_summary(tab_id)
+            .expect("edited note should remain available");
+        app.autosave.request_immediate_save(
+            &note_origin("clean.md"),
+            tab_id,
+            edited_summary.content_revision,
+        );
+        let request =
+            app.autosave.take_due_saves().pop().expect("edited revision request should become due");
+        let prepared =
+            app.editor_runtime.prepare_save(tab_id).expect("edited note should prepare a save");
+        let save_outcome = app
+            .editor_runtime
+            .apply_save_completion(appkit_shell::editor_runtime::execute_prepared_save(prepared));
+        app.apply_editor_outcome(save_outcome);
+        let clean_summary = app
+            .editor_runtime
+            .document_summary(tab_id)
+            .expect("registered note should remain available");
+        assert!(!clean_summary.dirty);
+
+        app.submit_autosave(request);
+
+        assert_eq!(app.autosave.state(tab_id), None);
+        assert_eq!(app.save_failure_messages.get(&tab_id), None);
+    }
+
+    #[test]
+    fn stale_autosave_request_is_replaced_by_the_current_dirty_revision() {
+        let mut app = app();
+        let (_, tab_id) = install_registered_note(&mut app, "stale.md", "原始正文");
+        let first_edit =
+            app.editor_runtime.commit_text(active_editor_input_context(), "第一次修改".to_owned());
+        app.apply_editor_outcome(first_edit);
+        let first_revision = app
+            .editor_runtime
+            .document_summary(tab_id)
+            .expect("edited note should remain available")
+            .content_revision;
+        app.autosave.request_immediate_save(&note_origin("stale.md"), tab_id, first_revision);
+        let stale_request =
+            app.autosave.take_due_saves().pop().expect("first revision request should become due");
+        let second_edit =
+            app.editor_runtime.commit_text(active_editor_input_context(), "第二次修改".to_owned());
+        app.apply_editor_outcome(second_edit);
+        let current_revision = app
+            .editor_runtime
+            .document_summary(tab_id)
+            .expect("twice-edited note should remain available")
+            .content_revision;
+        assert_ne!(current_revision, stale_request.content_revision);
+
+        app.submit_autosave(stale_request);
+
+        assert!(matches!(
+            app.autosave.state(tab_id),
+            Some(AutoSaveState::Scheduled { content_revision, .. })
+                if content_revision == current_revision
+        ));
+        assert_eq!(app.save_failure_messages.get(&tab_id), None);
     }
 
     #[test]
@@ -3657,11 +3901,26 @@ mod tests {
         assert!(!app.update_editor_preedit("拼".to_owned(), Some((0, 1))));
 
         app.dispatch_action(NotoraAction::FocusRequested(FocusTarget::Editor));
+        assert!(!app.update_editor_preedit("拼".to_owned(), Some((0, 1))));
+
+        let _ = install_registered_note(&mut app, "ime.md", "");
         assert!(app.update_editor_preedit("拼".to_owned(), Some((0, 1))));
 
         app.dispatch_action(NotoraAction::OpenSettings);
         assert_eq!(app.state().layout.overlay, OverlayState::Settings);
         assert!(!app.update_editor_preedit("音".to_owned(), Some((0, 1))));
+    }
+
+    #[test]
+    fn navigation_change_detaches_the_visible_editor_from_the_previous_runtime_tab() {
+        let mut app = app();
+        let _ = install_registered_note(&mut app, "previous.md", "旧正文");
+
+        assert!(app.active_editor_matches_selection());
+
+        app.dispatch_action(NotoraAction::NavigationSelected(NavigationScope::Trash));
+
+        assert!(!app.active_editor_matches_selection());
     }
 
     #[test]
@@ -3682,20 +3941,7 @@ mod tests {
     #[test]
     fn focused_markdown_document_schedules_cursor_blink() {
         let mut app = app();
-        let prepared = crate::editor_adapter::prepare_loaded_document(
-            &app.editor_runtime,
-            LoadedDocument {
-                path: std::path::PathBuf::from("caret.md"),
-                contents: "正文内容".to_owned(),
-                disk_revision: None,
-            },
-        )
-        .expect("Markdown fixture should prepare");
-        app.editor_runtime.install_prepared_tab(
-            prepared,
-            None,
-            appkit_shell::editor_runtime::OpenDisposition::Persistent,
-        );
+        let _ = install_registered_note(&mut app, "caret.md", "正文内容");
         app.dispatch_action(NotoraAction::FocusRequested(FocusTarget::Editor));
 
         assert!(app.next_deadline().is_some());
@@ -4015,6 +4261,7 @@ mod tests {
     #[test]
     fn search_ime_commit_is_consumed_before_it_can_reach_the_editor_runtime() {
         let mut app = app();
+        let _ = install_registered_note(&mut app, "search.md", "搜索正文");
         app.dispatch_action(NotoraAction::FocusRequested(FocusTarget::Editor));
         assert!(app.update_editor_preedit("document".to_owned(), Some((0, 8))));
         app.render().expect("headless shell frame should render");
@@ -5197,6 +5444,105 @@ mod tests {
         assert_eq!(app.state().library.selected_card, None);
         assert_eq!(app.editor_runtime_tab_count(), 0);
         assert_eq!(app.state().library.last_command_error, None);
+    }
+
+    #[test]
+    fn selecting_a_trashed_note_loads_a_read_only_runtime_document() {
+        let workspace_directory = tempfile::tempdir().expect("workspace fixture should be created");
+        let mut app = app();
+        app.execute_workspace_command(WorkspaceCommand::OpenExisting {
+            root: workspace_directory.path().to_path_buf(),
+        })
+        .expect("workspace should open");
+        app.dispatch_action(NotoraAction::CreateRequested(notora_core::DocumentKind::Markdown));
+
+        let deadline = Instant::now() + Duration::from_secs(2);
+        let note_id = loop {
+            app.drain_product_events();
+            if let Some(DocumentIdentity::Note(note_id)) = app.state().library.selected_card
+                && app.document_tab_for(DocumentIdentity::Note(note_id)).is_some()
+            {
+                break note_id;
+            }
+            assert!(Instant::now() < deadline, "created note should install a preview tab");
+            thread::sleep(Duration::from_millis(10));
+        };
+        let identity = DocumentIdentity::Note(note_id);
+        app.dispatch_action(NotoraAction::TrashOperationRequested(
+            crate::action::TrashOperation::MoveToTrash { note_id },
+        ));
+        loop {
+            app.drain_product_events();
+            if app.document_tab_for(identity).is_none() {
+                break;
+            }
+            assert!(Instant::now() < deadline, "trash move should close the editable tab");
+            thread::sleep(Duration::from_millis(10));
+        }
+
+        app.dispatch_action(NotoraAction::NavigationSelected(NavigationScope::Trash));
+        loop {
+            app.drain_product_events();
+            if matches!(
+                &app.state().library.card_page,
+                CardPageState::Ready { cards, .. }
+                    if cards.iter().any(|card| card.note_id == note_id)
+            ) {
+                break;
+            }
+            assert!(Instant::now() < deadline, "trash card should load promptly");
+            thread::sleep(Duration::from_millis(10));
+        }
+        app.dispatch_action(NotoraAction::CardSelected(identity));
+        let tab_id = loop {
+            app.drain_product_events();
+            if let Some(tab_id) = app.document_tab_for(identity) {
+                break tab_id;
+            }
+            assert!(Instant::now() < deadline, "trash document should install promptly");
+            thread::sleep(Duration::from_millis(10));
+        };
+        let before = app
+            .editor_runtime
+            .document_text_snapshot(tab_id)
+            .expect("trash document text should be available");
+
+        assert!(
+            !app.editor_runtime
+                .workspace_snapshot()
+                .tabs
+                .iter()
+                .find(|tab| tab.tab_id == tab_id)
+                .expect("trash runtime tab should exist")
+                .allows_editing
+        );
+        app.dispatch_action(NotoraAction::FocusRequested(FocusTarget::Editor));
+        app.commit_editor_text("禁止写入".to_owned());
+        assert_eq!(
+            app.editor_runtime
+                .document_text_snapshot(tab_id)
+                .expect("trash document text should remain available")
+                .text,
+            before.text
+        );
+
+        app.dispatch_action(NotoraAction::TrashOperationRequested(
+            crate::action::TrashOperation::Restore { note_id },
+        ));
+        loop {
+            app.drain_product_events();
+            if app.document_tab_for(identity).is_none()
+                && app.state().library.selected_card.is_none()
+                && workspace_directory.path().join("无标题.md").is_file()
+            {
+                break;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "restore should close the read-only tab and clear its selection"
+            );
+            thread::sleep(Duration::from_millis(10));
+        }
     }
 
     #[test]

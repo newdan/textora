@@ -25,7 +25,18 @@ fn binary_title_and_three_pane_editor_rect_are_product_specific() {
 
 #[test]
 fn non_editor_focus_and_modal_block_document_ime() {
+    let directory = tempfile::tempdir().expect("external fixture directory should exist");
+    let path = directory.path().join("ime.md");
+    std::fs::write(&path, "# 输入法").expect("external fixture should be written");
     let mut app = app();
+    app.receive_system_open_paths(vec![path]);
+    let deadline = Instant::now() + Duration::from_secs(2);
+    while app.editor_runtime_tab_count() == 0 {
+        app.drain_product_events();
+        assert!(Instant::now() < deadline, "external preview should install promptly");
+        thread::sleep(Duration::from_millis(10));
+    }
+
     app.dispatch_action(NotoraAction::FocusRequested(FocusTarget::Editor));
     assert!(app.update_editor_preedit("编辑器".to_owned(), Some((0, 3))));
 
