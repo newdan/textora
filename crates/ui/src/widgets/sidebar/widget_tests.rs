@@ -349,13 +349,12 @@ mod tests {
                 &Event::MouseDown { px: 100.0, py: cy, button: MouseButton::Left },
                 &mut ctx,
             ),
-            Some(WidgetAction::Consumed)
+            Some(WidgetAction::Sidebar(SidebarAction::SwitchTab(0)))
         );
-        let action = w
-            .on_event(&Event::MouseUp { px: 100.0, py: cy, button: MouseButton::Left }, &mut ctx)
-            .unwrap();
-        let typed = action;
-        assert!(matches!(typed, WidgetAction::Sidebar(SidebarAction::SwitchTab(0))));
+        assert_eq!(
+            w.on_event(&Event::MouseUp { px: 100.0, py: cy, button: MouseButton::Left }, &mut ctx,),
+            None
+        );
     }
 
     #[test]

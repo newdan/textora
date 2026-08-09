@@ -1558,15 +1558,16 @@ mod tests {
         // Click at y=180 (within item 1 range)
         let pressed_actions =
             handle_mouse_input_left(&mut app, ElementState::Pressed, 110.0, 180.0);
-        assert!(!pressed_actions.iter().any(|action| matches!(action, AppAction::SwitchTab(_))));
+        assert!(
+            pressed_actions.iter().any(|action| matches!(action, AppAction::SwitchTab(_))),
+            "Sidebar document selection must switch on mouse press, matching the tab bar"
+        );
 
         let actions = handle_mouse_input_left(&mut app, ElementState::Released, 110.0, 180.0);
 
-        let has_switch_tab = actions.iter().any(|a| matches!(a, AppAction::SwitchTab(_)));
         assert!(
-            has_switch_tab,
-            "Clicking sidebar item should produce SwitchTab action, got {} actions",
-            actions.len()
+            !actions.iter().any(|action| matches!(action, AppAction::SwitchTab(_))),
+            "Mouse release must not emit a duplicate sidebar tab switch"
         );
     }
 

@@ -206,23 +206,24 @@ impl SidebarWidget {
         self.state.on_key(key, &mut self.cfg)
     }
 
+    fn workspace_index(&self, sorted_index: usize) -> usize {
+        self.tab_index_map.get(sorted_index).copied().unwrap_or(sorted_index)
+    }
+
     fn translate_list_action(&self, action: WidgetAction) -> Option<WidgetAction> {
         let WidgetAction::List(action) = action else {
             return Some(action);
         };
-        let workspace_index = |sorted_index: usize| {
-            self.tab_index_map.get(sorted_index).copied().unwrap_or(sorted_index)
-        };
         match action {
             ListAction::Selected(index) => {
-                Some(WidgetAction::Sidebar(SidebarAction::SwitchTab(workspace_index(index))))
+                Some(WidgetAction::Sidebar(SidebarAction::SwitchTab(self.workspace_index(index))))
             }
             ListAction::CloseRequested(index) => {
-                Some(WidgetAction::Sidebar(SidebarAction::CloseTab(workspace_index(index))))
+                Some(WidgetAction::Sidebar(SidebarAction::CloseTab(self.workspace_index(index))))
             }
             ListAction::ContextRequested { index, anchor_px } => {
                 Some(WidgetAction::Sidebar(SidebarAction::ContextMenuPx {
-                    tab_index: workspace_index(index),
+                    tab_index: self.workspace_index(index),
                     anchor_px,
                     screen_size: (self.screen_w, self.screen_h),
                 }))
@@ -621,10 +622,16 @@ impl Widget for SidebarWidget {
                     return Some(WidgetAction::Sidebar(action));
                 }
 
-                if self.state.current_layout().is_some()
-                    && let Some(action) = self.list.on_event(ev, ctx)
-                {
-                    return self.translate_list_action(action);
+                if self.state.current_layout().is_some() {
+                    if self.list.hit_close_btn(px, py, ctx.dpi).is_some() {
+                        let action = self.list.on_event(ev, ctx)?;
+                        return self.translate_list_action(action);
+                    }
+                    if let Some(sorted_index) = self.list.hit_row(px, py, ctx.dpi) {
+                        return Some(WidgetAction::Sidebar(SidebarAction::SwitchTab(
+                            self.workspace_index(sorted_index),
+                        )));
+                    }
                 }
 
                 None
