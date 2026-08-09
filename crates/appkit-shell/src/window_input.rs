@@ -49,6 +49,7 @@ pub fn winit_key_to_keycode(logical_key: &Key, text: Option<&str>) -> Option<Key
         Key::Named(NamedKey::Backspace) => Some(KeyCode::Backspace),
         Key::Named(NamedKey::Delete) => Some(KeyCode::Delete),
         Key::Named(NamedKey::Tab) => Some(KeyCode::Tab),
+        Key::Named(NamedKey::Space) => Some(KeyCode::Char(' ')),
         Key::Named(NamedKey::ArrowUp) => Some(KeyCode::Up),
         Key::Named(NamedKey::ArrowDown) => Some(KeyCode::Down),
         Key::Named(NamedKey::ArrowLeft) => Some(KeyCode::Left),
@@ -147,6 +148,14 @@ mod tests {
         assert_eq!(
             winit_key_to_keycode(&Key::Named(NamedKey::Tab), Some("\t")),
             Some(KeyCode::Tab)
+        );
+    }
+
+    #[test]
+    fn keycode_maps_named_space_without_event_text() {
+        assert_eq!(
+            winit_key_to_keycode(&Key::Named(NamedKey::Space), None),
+            Some(KeyCode::Char(' '))
         );
     }
 
