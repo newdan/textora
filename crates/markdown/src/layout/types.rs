@@ -283,6 +283,14 @@ impl<S: BlockSource> LazyLayout<S> {
             self.collect_source_only_empty_line_projections();
         self.projected_empty_lines = projected_empty_lines;
         self.hidden_block_separators = hidden_block_separators;
+        if let Some(projected_content_bottom) = self
+            .projected_empty_lines
+            .iter()
+            .map(|line| line.y_top + line.height)
+            .max_by(f32::total_cmp)
+        {
+            self.total_height = self.total_height.max(projected_content_bottom);
+        }
 
         let _ = self.publish_flat_line_projection_index();
     }
@@ -1894,6 +1902,33 @@ mod tests {
         assert!(lazy.precise.iter().all(|p| !*p), "all blocks start as estimated");
         assert!(lazy.y_delta.iter().all(|&d| d == 0.0), "y_delta starts at zero");
         assert!(lazy.total_height > 0.0);
+    }
+
+    #[test]
+    fn trailing_empty_source_lines_are_included_in_total_height() {
+        let source = "paragraph\n\n\n";
+        let (source, document) = make_doc(source);
+        let style = default_style();
+        let document_view = core::document::StringDocView::new(source);
+        let mut layout = LazyLayout::new(document, &style, 400.0, &document_view);
+        layout.set_edit_source(Some(source.to_string()));
+        layout.reserve_extra_blank_source_lines(style.line_height, style.paragraph_spacing);
+        layout.ensure_all_blocks(&style, 400.0, None, None, &document_view);
+        layout.build_flat_lines(&document_view);
+
+        let trailing_empty_bottom = layout
+            .projected_empty_lines
+            .iter()
+            .map(|line| line.y_top + line.height)
+            .max_by(f32::total_cmp)
+            .expect("fixture must project trailing empty source lines");
+
+        assert!(
+            layout.total_height >= trailing_empty_bottom,
+            "total height {} must include trailing empty-line bottom {}",
+            layout.total_height,
+            trailing_empty_bottom,
+        );
     }
 
     #[test]

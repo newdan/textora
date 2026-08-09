@@ -3122,6 +3122,26 @@ mod wysiwyg_tests {
         assert_eq!(line.boundaries, vec![SourceAnchor::downstream(trailing_empty)]);
     }
 
+    #[test]
+    fn wysiwyg_can_scroll_to_trailing_empty_source_lines() {
+        use ui::plugin::{PluginMessage, ViewPlugin};
+
+        let source = "paragraph\n\n\n";
+        let viewport_height = 48.0;
+        let mut document = StubDoc::new(source);
+        let mut view = MarkdownEditorView::new();
+        view.set_source(source.to_string(), 1);
+        render_editor_with_offset_y(&mut view, &document, viewport_height, 0.0);
+
+        let did_scroll = view.handle_message(
+            PluginMessage::Scroll { delta: 100.0, viewport_h: viewport_height },
+            &mut document,
+        );
+
+        assert!(did_scroll, "trailing empty source lines must extend the scrollable range");
+        assert!(view.engine().scroll_y > 0.0, "scroll position must advance past the text block");
+    }
+
     fn click_point_for_visible_text(
         engine: &PreviewEngine<MarkdownDoc>,
         needle: &str,
