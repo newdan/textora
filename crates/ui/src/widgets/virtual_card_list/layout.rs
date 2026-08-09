@@ -2,7 +2,7 @@ use std::ops::Range;
 
 use crate::core::Rect;
 
-pub const CARD_HEIGHT_LOGICAL: f32 = 96.0;
+pub const CARD_HEIGHT_LOGICAL: f32 = 136.0;
 pub const CARD_VERTICAL_GAP_LOGICAL: f32 = 8.0;
 pub const CARD_HORIZONTAL_PADDING_LOGICAL: f32 = 14.0;
 pub const CARD_VERTICAL_PADDING_LOGICAL: f32 = 12.0;
@@ -11,9 +11,15 @@ pub const CARD_ICON_GAP_LOGICAL: f32 = 6.0;
 pub const CARD_TITLE_FONT_SIZE_LOGICAL: f32 = 15.0;
 pub const CARD_EXCERPT_FONT_SIZE_LOGICAL: f32 = 13.0;
 pub const CARD_METADATA_FONT_SIZE_LOGICAL: f32 = 12.0;
+pub const CARD_TITLE_LINE_HEIGHT_LOGICAL: f32 = 20.0;
+pub const CARD_EXCERPT_LINE_HEIGHT_LOGICAL: f32 = 18.0;
+pub const CARD_TITLE_MAX_LINES: usize = 2;
+pub const CARD_EXCERPT_MAX_LINES: usize = 2;
 pub const CARD_CORNER_RADIUS_LOGICAL: f32 = 8.0;
 pub const CARD_METADATA_GAP_LOGICAL: f32 = 12.0;
 pub const VIRTUAL_CARD_OVERSCAN_COUNT: usize = 2;
+
+const CARD_TEXT_SECTION_GAP_LOGICAL: f32 = 6.0;
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct CardGeometry {
@@ -64,7 +70,11 @@ impl VirtualCardListLayout {
         let excerpt_font_size = CARD_EXCERPT_FONT_SIZE_LOGICAL * self.dpi;
         let metadata_font_size = CARD_METADATA_FONT_SIZE_LOGICAL * self.dpi;
         let title_y = card_rect.y + vertical_padding;
-        let excerpt_y = title_y + title_font_size + 8.0 * self.dpi;
+        let title_line_height = CARD_TITLE_LINE_HEIGHT_LOGICAL * self.dpi;
+        let excerpt_line_height = CARD_EXCERPT_LINE_HEIGHT_LOGICAL * self.dpi;
+        let title_height = title_line_height * CARD_TITLE_MAX_LINES as f32;
+        let excerpt_height = excerpt_line_height * CARD_EXCERPT_MAX_LINES as f32;
+        let excerpt_y = title_y + title_height + CARD_TEXT_SECTION_GAP_LOGICAL * self.dpi;
         let metadata_y = card_rect.bottom() - vertical_padding - metadata_font_size;
         let text_right = card_rect.right() - horizontal_padding;
         let secondary_text_x = card_rect.x + horizontal_padding;
@@ -75,18 +85,13 @@ impl VirtualCardListLayout {
         CardGeometry {
             card_rect,
             icon_rect,
-            title_rect: Rect::new(
-                title_x,
-                title_y,
-                (text_right - title_x).max(0.0),
-                title_font_size,
-            ),
+            title_rect: Rect::new(title_x, title_y, (text_right - title_x).max(0.0), title_height),
             title_baseline: title_y + title_font_size * 0.8,
             excerpt_rect: Rect::new(
                 secondary_text_x,
                 excerpt_y,
                 (text_right - secondary_text_x).max(0.0),
-                excerpt_font_size,
+                excerpt_height,
             ),
             excerpt_baseline: excerpt_y + excerpt_font_size * 0.8,
             metadata_rect,
@@ -148,9 +153,19 @@ mod tests {
     }
 
     #[test]
-    fn card_height_keeps_the_three_text_rows_compact() {
+    fn card_height_provides_two_rows_for_title_and_excerpt() {
         let layout = build_virtual_card_layout(1, Rect::new(0.0, 0.0, 300.0, 500.0), 0.0, 1.0);
+        let geometry = layout.card_geometry(0);
 
-        assert_eq!(layout.card_geometry(0).card_rect.h, 96.0);
+        assert_eq!(geometry.card_rect.h, CARD_HEIGHT_LOGICAL);
+        assert_eq!(
+            geometry.title_rect.h,
+            CARD_TITLE_LINE_HEIGHT_LOGICAL * CARD_TITLE_MAX_LINES as f32
+        );
+        assert_eq!(
+            geometry.excerpt_rect.h,
+            CARD_EXCERPT_LINE_HEIGHT_LOGICAL * CARD_EXCERPT_MAX_LINES as f32
+        );
+        assert!(geometry.excerpt_rect.bottom() < geometry.metadata_rect.top());
     }
 }

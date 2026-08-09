@@ -4,6 +4,8 @@ mod layout;
 
 use std::any::Any;
 
+use crate::core::text_layout::wrap_text_to_lines;
+use crate::core::text_util::estimate_text_width_px;
 use crate::core::widget::{ControlAction, WidgetId};
 use crate::core::{
     AccessibilityAction, AccessibilityActionRequest, AccessibilityContext, AccessibilityId,
@@ -238,19 +240,23 @@ impl Widget for VirtualCardListWidget {
             } else {
                 ctx.theme.palette.text_main
             };
-            ctx.text(
-                geometry.title_rect.x,
-                geometry.title_baseline,
-                layout::CARD_TITLE_FONT_SIZE_LOGICAL * ctx.dpi,
-                title_color,
+            paint_card_text(
+                ctx,
                 &card.title,
+                geometry.title_rect,
+                layout::CARD_TITLE_FONT_SIZE_LOGICAL * ctx.dpi,
+                layout::CARD_TITLE_LINE_HEIGHT_LOGICAL * ctx.dpi,
+                layout::CARD_TITLE_MAX_LINES,
+                title_color,
             );
-            ctx.text(
-                geometry.excerpt_rect.x,
-                geometry.excerpt_baseline,
-                layout::CARD_EXCERPT_FONT_SIZE_LOGICAL * ctx.dpi,
-                ctx.theme.palette.text_muted,
+            paint_card_text(
+                ctx,
                 &card.excerpt,
+                geometry.excerpt_rect,
+                layout::CARD_EXCERPT_FONT_SIZE_LOGICAL * ctx.dpi,
+                layout::CARD_EXCERPT_LINE_HEIGHT_LOGICAL * ctx.dpi,
+                layout::CARD_EXCERPT_MAX_LINES,
+                ctx.theme.palette.text_muted,
             );
             ctx.text(
                 geometry.metadata_rect.x,
@@ -398,10 +404,67 @@ fn has_unique_keys(cards: &[CardInput]) -> bool {
     cards.iter().all(|card| keys.insert(card.key))
 }
 
+fn card_text_lines(
+    text: &str,
+    max_width_px: f32,
+    font_size_px: f32,
+    max_lines: usize,
+) -> Vec<String> {
+    wrap_text_to_lines(text, max_width_px, max_lines, |candidate| {
+        estimate_text_width_px(candidate, font_size_px)
+    })
+}
+
+#[allow(
+    clippy::too_many_arguments,
+    reason = "card text painting keeps its geometry and typography constraints explicit"
+)]
+fn paint_card_text(
+    ctx: &mut PaintCtx<'_>,
+    text: &str,
+    rect: Rect,
+    font_size_px: f32,
+    line_height_px: f32,
+    max_lines: usize,
+    color: [f32; 4],
+) {
+    let lines = card_text_lines(text, rect.w, font_size_px, max_lines);
+    for (line_index, line) in lines.iter().enumerate() {
+        let baseline = rect.y + font_size_px * 0.8 + line_index as f32 * line_height_px;
+        ctx.text(rect.x, baseline, font_size_px, color, line);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::core::{EventCtx, LayoutCtx, Modifiers, NoopMeasure};
+
+    #[test]
+    fn long_card_title_and_excerpt_wrap_within_their_visible_rows() {
+        let geometry = build_virtual_card_layout(1, Rect::new(0.0, 0.0, 180.0, 500.0), 0.0, 1.0)
+            .card_geometry(0);
+        let title = "这是一个需要在卡片中自动换行显示的很长标题";
+        let excerpt = "正文摘要也应该根据卡片宽度自动折行，避免文字越过卡片边界。";
+
+        let title_lines = card_text_lines(
+            title,
+            geometry.title_rect.w,
+            layout::CARD_TITLE_FONT_SIZE_LOGICAL,
+            layout::CARD_TITLE_MAX_LINES,
+        );
+        let excerpt_lines = card_text_lines(
+            excerpt,
+            geometry.excerpt_rect.w,
+            layout::CARD_EXCERPT_FONT_SIZE_LOGICAL,
+            layout::CARD_EXCERPT_MAX_LINES,
+        );
+
+        assert_eq!(title_lines.len(), layout::CARD_TITLE_MAX_LINES);
+        assert_eq!(excerpt_lines.len(), layout::CARD_EXCERPT_MAX_LINES);
+        assert!(title_lines.last().is_some_and(|line| line.ends_with('…')));
+        assert!(excerpt_lines.last().is_some_and(|line| line.ends_with('…')));
+    }
 
     fn card(key: u64) -> CardInput {
         CardInput {
