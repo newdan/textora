@@ -8,6 +8,11 @@ use crate::tab_session::TabSession;
 
 const PLUGIN_CONTENT_PADDING_LOGICAL: f32 = 24.0;
 
+fn editor_viewport_dimensions(editor_height_px: f32, line_height_px: f32) -> (usize, f64) {
+    let viewport_height = (editor_height_px / line_height_px).max(1.0);
+    (viewport_height.floor() as usize, viewport_height as f64)
+}
+
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum EditorSurfacePaint {
     #[default]
@@ -174,8 +179,9 @@ fn paint_text_editor(
     let line_count = tab.document.line_count();
     let gutter_width = settings.gutter_width(line_count) * metrics.dpi;
     let left_margin = editor_rect.x + metrics.content_left_margin.max(gutter_width);
-    let visible_rows = (editor_rect.h / metrics.line_height).ceil().max(1.0) as usize;
-    tab.resize_presentation(visible_rows, editor_rect.h as f64);
+    let (visible_rows, viewport_height) =
+        editor_viewport_dimensions(editor_rect.h, metrics.line_height);
+    tab.resize_presentation(visible_rows, viewport_height);
 
     let context = ui::gutter::RenderContext {
         theme,
@@ -280,4 +286,21 @@ pub(super) fn plugin_bounds(editor_rect: ui::Rect, dpi: f32, is_canvas: bool) ->
         (editor_rect.w - padding * 2.0).max(1.0),
         (editor_rect.h - padding * 2.0).max(1.0),
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::editor_viewport_dimensions;
+
+    #[test]
+    fn partial_bottom_row_is_not_counted_as_fully_visible() {
+        const LINE_HEIGHT_PX: f32 = 20.0;
+        const EDITOR_HEIGHT_PX: f32 = LINE_HEIGHT_PX * 10.5;
+
+        let (visible_rows, viewport_height) =
+            editor_viewport_dimensions(EDITOR_HEIGHT_PX, LINE_HEIGHT_PX);
+
+        assert_eq!(visible_rows, 10);
+        assert_eq!(viewport_height, 10.5);
+    }
 }
