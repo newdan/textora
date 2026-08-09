@@ -1,4 +1,5 @@
 use std::collections::{HashMap, VecDeque};
+use std::num::NonZeroUsize;
 
 use appkit_core::workspace::types::TabId;
 use appkit_shell::editor_runtime::{
@@ -153,20 +154,65 @@ pub(super) struct PendingTitleUpdate {
 
 /// editor、文档注册表与全部文档级 pending workflow 的唯一所有者。
 pub(super) struct DocumentRuntime {
+    #[cfg(not(test))]
+    runtime_lru: RuntimeLru,
+    #[cfg(test)]
     pub(super) runtime_lru: RuntimeLru,
+    #[cfg(not(test))]
+    document_registry: DocumentRegistry,
+    #[cfg(test)]
     pub(super) document_registry: DocumentRegistry,
+    #[cfg(not(test))]
+    autosave: AutoSaveScheduler<SystemAutoSaveClock>,
+    #[cfg(test)]
     pub(super) autosave: AutoSaveScheduler<SystemAutoSaveClock>,
+    #[cfg(not(test))]
+    save_failure_messages: HashMap<TabId, String>,
+    #[cfg(test)]
     pub(super) save_failure_messages: HashMap<TabId, String>,
+    #[cfg(not(test))]
+    pending_external_save_as: HashMap<TabId, PendingExternalSaveAs>,
+    #[cfg(test)]
     pub(super) pending_external_save_as: HashMap<TabId, PendingExternalSaveAs>,
+    #[cfg(not(test))]
+    pending_external_documents: HashMap<ExternalFileId, LoadedDocument>,
+    #[cfg(test)]
     pub(super) pending_external_documents: HashMap<ExternalFileId, LoadedDocument>,
+    #[cfg(not(test))]
+    pending_conflict_retries: HashMap<TabId, PendingConflictRetry>,
+    #[cfg(test)]
     pub(super) pending_conflict_retries: HashMap<TabId, PendingConflictRetry>,
+    #[cfg(not(test))]
+    pending_trash_moves: HashMap<TabId, PendingTrashMove>,
+    #[cfg(test)]
     pub(super) pending_trash_moves: HashMap<TabId, PendingTrashMove>,
+    #[cfg(not(test))]
+    pending_note_moves: HashMap<TabId, PendingNoteMove>,
+    #[cfg(test)]
     pub(super) pending_note_moves: HashMap<TabId, PendingNoteMove>,
+    #[cfg(not(test))]
+    pending_title_updates: HashMap<TabId, PendingTitleUpdate>,
+    #[cfg(test)]
     pub(super) pending_title_updates: HashMap<TabId, PendingTitleUpdate>,
+    #[cfg(not(test))]
+    pending_title_seeds: HashMap<NoteId, String>,
+    #[cfg(test)]
     pub(super) pending_title_seeds: HashMap<NoteId, String>,
+    #[cfg(not(test))]
+    pending_metadata_generations: HashMap<NoteId, VecDeque<u64>>,
+    #[cfg(test)]
     pub(super) pending_metadata_generations: HashMap<NoteId, VecDeque<u64>>,
+    #[cfg(not(test))]
+    pending_metadata_mutations: Vec<MetadataMutation>,
+    #[cfg(test)]
     pub(super) pending_metadata_mutations: Vec<MetadataMutation>,
+    #[cfg(not(test))]
+    catalog_reconciliation_pending: bool,
+    #[cfg(test)]
     pub(super) catalog_reconciliation_pending: bool,
+    #[cfg(not(test))]
+    editor_runtime: EditorRuntime,
+    #[cfg(test)]
     pub(super) editor_runtime: EditorRuntime,
 }
 
@@ -193,6 +239,75 @@ impl DocumentRuntime {
             catalog_reconciliation_pending: false,
             editor_runtime,
         }
+    }
+
+    pub(super) fn editor(&self) -> &EditorRuntime {
+        &self.editor_runtime
+    }
+
+    pub(super) fn editor_mut(&mut self) -> &mut EditorRuntime {
+        &mut self.editor_runtime
+    }
+
+    pub(super) fn tab_for(&self, identity: DocumentIdentity) -> Option<TabId> {
+        self.document_registry.tab_for(identity)
+    }
+
+    pub(super) fn identity_for(&self, tab_id: TabId) -> Option<DocumentIdentity> {
+        self.document_registry.identity_for(tab_id)
+    }
+
+    pub(super) fn touch_tab(&mut self, tab_id: TabId) {
+        self.document_registry.touch_tab(tab_id);
+    }
+
+    pub(super) fn remove_tab(&mut self, tab_id: TabId) {
+        self.document_registry.remove_tab(tab_id);
+    }
+
+    pub(super) fn take_due_autosaves(&mut self) -> Vec<AutoSaveRequest> {
+        self.autosave.take_due_saves()
+    }
+
+    pub(super) fn next_autosave_deadline(&self) -> Option<std::time::Instant> {
+        self.autosave.next_deadline()
+    }
+
+    pub(super) fn autosave_state(&self, tab_id: TabId) -> Option<crate::autosave::AutoSaveState> {
+        self.autosave.state(tab_id)
+    }
+
+    pub(super) fn save_failure_message(&self, tab_id: TabId) -> Option<&str> {
+        self.save_failure_messages.get(&tab_id).map(String::as_str)
+    }
+
+    pub(super) fn clear_save_failure(&mut self, tab_id: TabId) {
+        self.save_failure_messages.remove(&tab_id);
+    }
+
+    pub(super) fn schedule_autosave(
+        &mut self,
+        origin: &notora_core::DocumentOrigin,
+        tab_id: TabId,
+        content_revision: u64,
+    ) {
+        self.autosave.on_content_changed(origin, tab_id, content_revision);
+    }
+
+    pub(super) fn cancel_autosave(&mut self, tab_id: TabId) {
+        self.autosave.cancel(tab_id);
+    }
+
+    pub(super) fn has_in_flight_save(&self) -> bool {
+        self.autosave.has_in_flight_save()
+    }
+
+    pub(super) fn set_runtime_tab_limit(&mut self, runtime_tab_limit: NonZeroUsize) {
+        self.runtime_lru = RuntimeLru::new(runtime_tab_limit);
+    }
+
+    pub(super) fn set_autosave_idle_delay(&mut self, idle_delay: std::time::Duration) {
+        self.autosave.set_idle_delay(idle_delay);
     }
 
     pub(super) fn reset_workspace_state(&mut self) {

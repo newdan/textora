@@ -73,3 +73,18 @@ fn workspace_stores_document_models_without_doc_item_runtime_fallback() {
         "workspace must not retain a runtime fallback store"
     );
 }
+
+#[test]
+fn textora_uses_the_shared_action_pump_and_single_product_inbox() {
+    let app_source = include_str!("app.rs");
+    let dispatch_source = include_str!("app_dispatch.rs");
+    let product_source = include_str!("textora_product.rs");
+
+    assert!(app_source.contains("action_pump: EventPump<crate::actions::AppAction>"));
+    assert!(dispatch_source.contains("self.action_pump.start_draining()"));
+    assert!(product_source.contains("ProductEventInbox<ProductEvent>"));
+    assert_eq!(product_source.matches("ProductEventInbox<").count(), 1);
+    assert!(product_source.contains("OpenDocumentsRequested(Vec<PathBuf>)"));
+    assert!(!product_source.contains("std::sync::mpsc"));
+    assert!(!product_source.contains("open_document_receiver"));
+}

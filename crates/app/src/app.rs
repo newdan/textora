@@ -4,7 +4,7 @@ use std::time::{Duration, Instant};
 
 use appkit_shell::accessibility_adapter::PlatformAccessibilityAdapter;
 use appkit_shell::editor_runtime::EditorRuntime;
-use appkit_shell::{ProductHost, ProductWakeHandle};
+use appkit_shell::{EventPump, ProductHost, ProductWakeHandle};
 
 use crate::file_history::FileHistory;
 use crate::mouse::MouseState;
@@ -69,6 +69,7 @@ pub struct App {
     pub(crate) active_theme_pair: ui::theme::ActiveThemePair,
     pub(crate) theme_load_report: crate::theme_loader::ThemeLoadReport,
     pub(crate) product: crate::textora_product::TextoraProduct,
+    pub(crate) action_pump: EventPump<crate::actions::AppAction>,
     pub(crate) editor_runtime: EditorRuntime,
     pub(crate) accessibility_adapter: Option<PlatformAccessibilityAdapter>,
     pub(crate) popup_tab_id_snapshot: Vec<appkit_core::workspace::types::TabId>,
@@ -407,6 +408,8 @@ mod product_ownership_boundary_tests {
 mod open_document_sender_tests {
     use std::path::PathBuf;
 
+    use appkit_shell::ProductHost;
+
     use super::App;
 
     #[test]
@@ -417,6 +420,7 @@ mod open_document_sender_tests {
         app.open_document_sender()
             .send(open_document_paths.clone())
             .expect("new application owns the product open-document receiver");
+        ProductHost::drain_product_events(&mut app.product);
 
         assert_eq!(app.product.drain_open_documents(), open_document_paths);
     }

@@ -1,9 +1,9 @@
 use std::time::Instant;
 
+use appkit_shell::{DrainStart, EventPump};
 use notora_core::WorkspaceId;
 
 use crate::action::{NotoraAction, NotoraEffect};
-use crate::event_pump::{DrainStart, EventPump};
 use crate::external_files::{CanonicalExternalPath, ExternalFileSession, SaveExternalFileAs};
 use crate::search_controller::{SearchController, SearchGeneration, SearchRequest};
 use crate::{NotoraState, WorkspaceRootState};
@@ -17,6 +17,9 @@ pub(super) struct ActionReduction {
 
 /// `NotoraState`、Action FIFO 与搜索去抖状态的唯一所有者。
 pub(super) struct ActionRuntime {
+    #[cfg(not(test))]
+    state: NotoraState,
+    #[cfg(test)]
     pub(super) state: NotoraState,
     event_pump: EventPump<NotoraAction>,
     search_controller: SearchController,
@@ -110,6 +113,21 @@ impl ActionRuntime {
         self.state.library.last_command_error = Some(message);
     }
 
+    pub(super) fn set_responsive_mode(&mut self, mode: crate::ResponsiveLayoutMode) {
+        self.state.layout.responsive_mode = mode;
+    }
+
+    pub(super) fn invalidate_document_selection(&mut self) {
+        self.state.invalidate_document_selection();
+    }
+
+    pub(super) fn restore_expanded_directories(
+        &mut self,
+        directories: impl IntoIterator<Item = std::path::PathBuf>,
+    ) {
+        self.state.library.navigation_tree.expanded_directories.extend(directories);
+    }
+
     pub(super) fn apply_external_save_as(
         &mut self,
         external_file_id: notora_core::ExternalFileId,
@@ -158,7 +176,7 @@ mod tests {
     fn reducer_follow_up_actions_stay_behind_the_current_action_effects() {
         let mut runtime = ActionRuntime::new(crate::NotoraState::default());
         runtime.enqueue(NotoraAction::SearchTextChanged("queued".to_owned()));
-        assert_eq!(runtime.start_draining(), crate::event_pump::DrainStart::Started);
+        assert_eq!(runtime.start_draining(), appkit_shell::DrainStart::Started);
 
         let action = runtime.next_action().expect("queued action should be available");
         let reduction = runtime.reduce(action, Instant::now(), false);

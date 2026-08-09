@@ -1,7 +1,7 @@
-use std::fmt;
-use std::sync::{Arc, Mutex, mpsc};
-
-use appkit_shell::{ProductHost, ProductWakeHandle, ShellEffect};
+use appkit_shell::{
+    ProductEventInbox, ProductEventSender, ProductHost, ProductWakeHandle, ShellEffect,
+    product_event_channel,
+};
 use notora_core::note_command::NoteCommandResult;
 use notora_core::{CatalogCardPage, ScanCompletion, WorkspaceId};
 
@@ -16,60 +16,51 @@ pub struct WorkspaceNoteRelocation {
     pub tags: Vec<notora_core::TagSummary>,
 }
 
-/// 后台服务只能经 notora 自有 channel 发送的 payload。
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub enum NotoraProductEvent {
+pub struct WorkspaceEventScope {
+    pub workspace_id: WorkspaceId,
+    pub generation: u64,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct WorkspaceCompletionEnvelope {
+    pub scope: WorkspaceEventScope,
+    pub completion: WorkspaceCompletion,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum WorkspaceCompletion {
     CardQueryCompleted {
-        workspace_id: WorkspaceId,
-        workspace_generation: u64,
         query: crate::action::CardQuery,
         page: CatalogCardPage,
     },
     CardQueryFailed {
-        workspace_id: WorkspaceId,
-        workspace_generation: u64,
         query: crate::action::CardQuery,
         message: String,
     },
     NavigationTreeLoaded {
-        workspace_id: WorkspaceId,
-        workspace_generation: u64,
         tree: notora_core::CatalogNavigationTree,
     },
     NavigationTreeFailed {
-        workspace_id: WorkspaceId,
-        workspace_generation: u64,
         message: String,
     },
     WorkspaceScanCompleted {
-        workspace_id: WorkspaceId,
-        workspace_generation: u64,
         completion: ScanCompletion,
     },
     WorkspaceChanged {
-        workspace_id: WorkspaceId,
-        workspace_generation: u64,
         changed_paths: Vec<std::path::PathBuf>,
         note_relocations: Vec<WorkspaceNoteRelocation>,
     },
     WorkspaceIndexFailed {
-        workspace_id: WorkspaceId,
-        workspace_generation: u64,
         message: String,
     },
     NoteCommandCompleted {
-        workspace_id: WorkspaceId,
-        workspace_generation: u64,
         result: NoteCommandResult,
     },
     NoteCommandFailed {
-        workspace_id: WorkspaceId,
-        workspace_generation: u64,
         message: String,
     },
     MetadataMutationCompleted {
-        workspace_id: WorkspaceId,
-        workspace_generation: u64,
         mutation: crate::action::MetadataMutation,
         note_id: notora_core::NoteId,
         metadata: notora_core::NoteEditorMetadata,
@@ -77,56 +68,42 @@ pub enum NotoraProductEvent {
         outcome: crate::action::MetadataMutationOutcome,
     },
     MetadataMutationFailed {
-        workspace_id: WorkspaceId,
-        workspace_generation: u64,
         mutation: crate::action::MetadataMutation,
         message: String,
     },
     CatalogBackupCompleted {
-        workspace_id: WorkspaceId,
-        workspace_generation: u64,
         backup_path: std::path::PathBuf,
     },
     CatalogBackupFailed {
-        workspace_id: WorkspaceId,
-        workspace_generation: u64,
         message: String,
     },
     CatalogRecoveryNotified {
-        workspace_id: WorkspaceId,
-        workspace_generation: u64,
         message: String,
     },
     TrashOperationCompleted {
-        workspace_id: WorkspaceId,
-        workspace_generation: u64,
         operation: crate::action::TrashOperation,
     },
     TrashOperationFailed {
-        workspace_id: WorkspaceId,
-        workspace_generation: u64,
         failure: crate::action::TrashOperationFailure,
     },
     DocumentLoaded {
-        workspace_id: WorkspaceId,
-        workspace_generation: u64,
         request: DocumentLoadRequest,
         document: crate::editor_adapter::LoadedDocument,
         metadata: notora_core::NoteEditorMetadata,
         tags: Vec<notora_core::TagSummary>,
     },
     DocumentLoadFailed {
-        workspace_id: WorkspaceId,
-        workspace_generation: u64,
         request: DocumentLoadRequest,
         message: String,
     },
     ConflictCopyCompleted {
-        workspace_id: WorkspaceId,
-        workspace_generation: u64,
         identity: notora_core::DocumentIdentity,
         result: Result<(), String>,
     },
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum DocumentCompletion {
     ExternalFileOpenCompleted {
         canonical_path: crate::external_files::CanonicalExternalPath,
         document: crate::editor_adapter::LoadedDocument,
@@ -170,42 +147,45 @@ pub enum NotoraProductEvent {
         identity: notora_core::DocumentIdentity,
         message: String,
     },
-    SettingsPersistenceCompleted {
-        result: Result<(), String>,
-    },
-    SessionPersistenceFailed {
-        message: String,
-    },
 }
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum PersistenceCompletion {
+    SettingsPersistenceCompleted { result: Result<(), String> },
+    SessionPersistenceFailed { message: String },
+}
+
+/// 后台服务只能经 notora 自有 channel 发送的 payload。
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum NotoraProductEvent {
+    Workspace(WorkspaceCompletionEnvelope),
+    Document(DocumentCompletion),
+    Persistence(PersistenceCompletion),
+}
+
+pub type NotoraProductEventSender = ProductEventSender<NotoraProductEvent>;
 
 #[derive(Clone)]
-pub struct NotoraProductEventSender {
-    sender: mpsc::Sender<NotoraProductEvent>,
-    wake_handle: Arc<Mutex<Option<ProductWakeHandle>>>,
+pub struct WorkspaceEventSender {
+    sender: NotoraProductEventSender,
+    scope: WorkspaceEventScope,
 }
 
-impl NotoraProductEventSender {
-    pub fn send(&self, event: NotoraProductEvent) -> Result<(), ProductEventSendError> {
-        self.sender.send(event).map_err(|_| ProductEventSendError)?;
-        if let Some(wake_handle) =
-            self.wake_handle.lock().map_err(|_| ProductEventSendError)?.as_ref()
-        {
-            wake_handle.wake().map_err(|_| ProductEventSendError)?;
-        }
-        Ok(())
+impl WorkspaceEventSender {
+    pub fn new(sender: NotoraProductEventSender, scope: WorkspaceEventScope) -> Self {
+        Self { sender, scope }
+    }
+
+    pub fn send(
+        &self,
+        completion: WorkspaceCompletion,
+    ) -> Result<(), appkit_shell::ProductEventSendError> {
+        self.sender.send(NotoraProductEvent::Workspace(WorkspaceCompletionEnvelope {
+            scope: self.scope.clone(),
+            completion,
+        }))
     }
 }
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct ProductEventSendError;
-
-impl fmt::Display for ProductEventSendError {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.write_str("notora product event receiver is unavailable")
-    }
-}
-
-impl std::error::Error for ProductEventSendError {}
 
 /// 由产品持有、并在退出时有序停止的后台服务。
 pub trait ProductServiceShutdown {
@@ -215,10 +195,9 @@ pub trait ProductServiceShutdown {
 /// 产品服务宿主。shell 只看到唤醒和聚合后的 ShellEffect。
 pub struct NotoraProduct {
     event_sender: NotoraProductEventSender,
-    event_receiver: mpsc::Receiver<NotoraProductEvent>,
-    wake_handle: Arc<Mutex<Option<ProductWakeHandle>>>,
+    event_inbox: ProductEventInbox<NotoraProductEvent>,
     active_workspace: Option<(WorkspaceId, u64)>,
-    workspace_events: Vec<NotoraProductEvent>,
+    pending_events: Vec<NotoraProductEvent>,
     service_shutdown_handles: Vec<Box<dyn ProductServiceShutdown>>,
     services_started: bool,
     shutdown: bool,
@@ -226,17 +205,12 @@ pub struct NotoraProduct {
 
 impl NotoraProduct {
     pub fn new() -> Self {
-        let (event_sender, event_receiver) = mpsc::channel();
-        let wake_handle = Arc::new(Mutex::new(None));
+        let (event_sender, event_inbox) = product_event_channel();
         Self {
-            event_sender: NotoraProductEventSender {
-                sender: event_sender,
-                wake_handle: Arc::clone(&wake_handle),
-            },
-            event_receiver,
-            wake_handle,
+            event_sender,
+            event_inbox,
             active_workspace: None,
-            workspace_events: Vec::new(),
+            pending_events: Vec::new(),
             service_shutdown_handles: Vec::new(),
             services_started: false,
             shutdown: false,
@@ -255,9 +229,9 @@ impl NotoraProduct {
         self.active_workspace = None;
     }
 
-    /// 取出当前活动工作区产生的后台更新；旧 generation 已在 drain 时丢弃。
-    pub fn take_workspace_events(&mut self) -> Vec<NotoraProductEvent> {
-        std::mem::take(&mut self.workspace_events)
+    /// 取出已完成的后台事件；过期工作区事件已在 drain 时丢弃。
+    pub fn take_events(&mut self) -> Vec<NotoraProductEvent> {
+        std::mem::take(&mut self.pending_events)
     }
 
     pub fn register_service_shutdown(
@@ -273,82 +247,10 @@ impl NotoraProduct {
 
     fn event_matches_active_workspace(&self, event: &NotoraProductEvent) -> bool {
         let event_workspace = match event {
-            NotoraProductEvent::ExternalFileOpenCompleted { .. }
-            | NotoraProductEvent::ExternalFileOpenFailed { .. }
-            | NotoraProductEvent::ExternalDocumentLoaded { .. }
-            | NotoraProductEvent::ExternalDocumentLoadFailed { .. }
-            | NotoraProductEvent::ExternalSaveAsCanonicalized { .. }
-            | NotoraProductEvent::ConflictReloadCompleted { .. }
-            | NotoraProductEvent::ConflictReloadFailed { .. }
-            | NotoraProductEvent::ConflictRetryRevisionCaptured { .. }
-            | NotoraProductEvent::ConflictRetryRevisionFailed { .. }
-            | NotoraProductEvent::SettingsPersistenceCompleted { .. }
-            | NotoraProductEvent::SessionPersistenceFailed { .. } => return true,
-            NotoraProductEvent::CardQueryCompleted {
-                workspace_id, workspace_generation, ..
+            NotoraProductEvent::Workspace(event) => {
+                (event.scope.workspace_id, event.scope.generation)
             }
-            | NotoraProductEvent::CardQueryFailed { workspace_id, workspace_generation, .. }
-            | NotoraProductEvent::NavigationTreeLoaded {
-                workspace_id, workspace_generation, ..
-            }
-            | NotoraProductEvent::NavigationTreeFailed {
-                workspace_id, workspace_generation, ..
-            }
-            | NotoraProductEvent::WorkspaceScanCompleted {
-                workspace_id,
-                workspace_generation,
-                ..
-            }
-            | NotoraProductEvent::WorkspaceChanged { workspace_id, workspace_generation, .. }
-            | NotoraProductEvent::WorkspaceIndexFailed {
-                workspace_id, workspace_generation, ..
-            }
-            | NotoraProductEvent::NoteCommandCompleted {
-                workspace_id, workspace_generation, ..
-            }
-            | NotoraProductEvent::NoteCommandFailed {
-                workspace_id, workspace_generation, ..
-            }
-            | NotoraProductEvent::MetadataMutationCompleted {
-                workspace_id,
-                workspace_generation,
-                ..
-            }
-            | NotoraProductEvent::MetadataMutationFailed {
-                workspace_id,
-                workspace_generation,
-                ..
-            }
-            | NotoraProductEvent::CatalogBackupCompleted {
-                workspace_id,
-                workspace_generation,
-                ..
-            }
-            | NotoraProductEvent::CatalogBackupFailed {
-                workspace_id, workspace_generation, ..
-            }
-            | NotoraProductEvent::CatalogRecoveryNotified {
-                workspace_id,
-                workspace_generation,
-                ..
-            }
-            | NotoraProductEvent::TrashOperationCompleted {
-                workspace_id,
-                workspace_generation,
-                ..
-            }
-            | NotoraProductEvent::TrashOperationFailed {
-                workspace_id, workspace_generation, ..
-            }
-            | NotoraProductEvent::DocumentLoaded { workspace_id, workspace_generation, .. }
-            | NotoraProductEvent::DocumentLoadFailed {
-                workspace_id, workspace_generation, ..
-            }
-            | NotoraProductEvent::ConflictCopyCompleted {
-                workspace_id,
-                workspace_generation,
-                ..
-            } => (*workspace_id, *workspace_generation),
+            NotoraProductEvent::Document(_) | NotoraProductEvent::Persistence(_) => return true,
         };
         self.active_workspace == Some(event_workspace)
     }
@@ -365,17 +267,15 @@ impl ProductHost for NotoraProduct {
         if self.services_started || self.shutdown {
             return;
         }
-        if let Ok(mut stored_wake_handle) = self.wake_handle.lock() {
-            *stored_wake_handle = Some(wake);
-            self.services_started = true;
-        }
+        let _ = self.event_inbox.register_wake_handle(wake);
+        self.services_started = true;
     }
 
     fn drain_product_events(&mut self) -> ShellEffect {
         let mut effect = ShellEffect::NONE;
-        while let Ok(event) = self.event_receiver.try_recv() {
+        for event in self.event_inbox.drain() {
             if self.event_matches_active_workspace(&event) {
-                self.workspace_events.push(event);
+                self.pending_events.push(event);
                 effect = effect.merge(ShellEffect::REDRAW);
             }
         }
@@ -391,9 +291,6 @@ impl ProductHost for NotoraProduct {
             service.shutdown();
         }
         self.service_shutdown_handles.clear();
-        if let Ok(mut stored_wake_handle) = self.wake_handle.lock() {
-            *stored_wake_handle = None;
-        }
     }
 }
 
@@ -406,7 +303,10 @@ mod tests {
 
     use notora_core::WorkspaceId;
 
-    use super::{NotoraProduct, NotoraProductEvent, ProductServiceShutdown};
+    use super::{
+        NotoraProduct, NotoraProductEvent, ProductServiceShutdown, WorkspaceCompletion,
+        WorkspaceEventScope, WorkspaceEventSender,
+    };
     use crate::action::DocumentLoadRequest;
 
     struct ShutdownRecorder {
@@ -429,23 +329,24 @@ mod tests {
         let mut product = NotoraProduct::new();
         let active_workspace_id = WorkspaceId::generate();
         product.set_active_workspace(active_workspace_id, 4);
-        let sender = product.event_sender();
-        sender
-            .send(NotoraProductEvent::CardQueryCompleted {
-                workspace_id: active_workspace_id,
-                workspace_generation: 3,
-                query: crate::action::CardQuery::from(notora_core::NavigationScope::WorkspaceRoot),
-                page: notora_core::CatalogCardPage { cards: vec![], next_cursor: None },
-            })
-            .expect("product receiver should be alive");
-        sender
-            .send(NotoraProductEvent::WorkspaceChanged {
-                workspace_id: active_workspace_id,
-                workspace_generation: 4,
-                changed_paths: vec![],
-                note_relocations: vec![],
-            })
-            .expect("product receiver should be alive");
+        WorkspaceEventSender::new(
+            product.event_sender(),
+            WorkspaceEventScope { workspace_id: active_workspace_id, generation: 3 },
+        )
+        .send(WorkspaceCompletion::CardQueryCompleted {
+            query: crate::action::CardQuery::from(notora_core::NavigationScope::WorkspaceRoot),
+            page: notora_core::CatalogCardPage { cards: vec![], next_cursor: None },
+        })
+        .expect("product receiver should be alive");
+        WorkspaceEventSender::new(
+            product.event_sender(),
+            WorkspaceEventScope { workspace_id: active_workspace_id, generation: 4 },
+        )
+        .send(WorkspaceCompletion::WorkspaceChanged {
+            changed_paths: vec![],
+            note_relocations: vec![],
+        })
+        .expect("product receiver should be alive");
 
         assert_eq!(product.drain_product_events(), ShellEffect::REDRAW);
         assert_eq!(product.drain_product_events(), ShellEffect::NONE);
@@ -455,15 +356,15 @@ mod tests {
     fn drain_discards_events_from_another_workspace_with_the_same_generation() {
         let mut product = NotoraProduct::new();
         product.set_active_workspace(WorkspaceId::generate(), 4);
-        let sender = product.event_sender();
-        sender
-            .send(NotoraProductEvent::WorkspaceChanged {
-                workspace_id: WorkspaceId::generate(),
-                workspace_generation: 4,
-                changed_paths: vec![],
-                note_relocations: vec![],
-            })
-            .expect("product receiver should be alive");
+        WorkspaceEventSender::new(
+            product.event_sender(),
+            WorkspaceEventScope { workspace_id: WorkspaceId::generate(), generation: 4 },
+        )
+        .send(WorkspaceCompletion::WorkspaceChanged {
+            changed_paths: vec![],
+            note_relocations: vec![],
+        })
+        .expect("product receiver should be alive");
 
         assert_eq!(product.drain_product_events(), ShellEffect::NONE);
     }
@@ -474,36 +375,44 @@ mod tests {
         let workspace_id = WorkspaceId::generate();
         let identity = notora_core::DocumentIdentity::Note(notora_core::NoteId::generate());
         product.set_active_workspace(workspace_id, 9);
-        product
-            .event_sender()
-            .send(NotoraProductEvent::DocumentLoadFailed {
-                workspace_id,
-                workspace_generation: 9,
-                request: DocumentLoadRequest { identity, selection_generation: 2 },
-                message: "fixture read failed".to_owned(),
-            })
-            .expect("product receiver should be alive");
+        WorkspaceEventSender::new(
+            product.event_sender(),
+            WorkspaceEventScope { workspace_id, generation: 9 },
+        )
+        .send(WorkspaceCompletion::DocumentLoadFailed {
+            request: DocumentLoadRequest { identity, selection_generation: 2 },
+            message: "fixture read failed".to_owned(),
+        })
+        .expect("product receiver should be alive");
 
         assert_eq!(product.drain_product_events(), ShellEffect::REDRAW);
         assert!(matches!(
-            product.take_workspace_events().as_slice(),
-            [NotoraProductEvent::DocumentLoadFailed {
-                workspace_id: event_workspace_id,
-                workspace_generation: 9,
-                request: DocumentLoadRequest { identity: event_identity, selection_generation: 2 },
-                ..
-            }] if *event_workspace_id == workspace_id && *event_identity == identity
+            product.take_events().as_slice(),
+            [NotoraProductEvent::Workspace(event)]
+                if event.scope.workspace_id == workspace_id
+                    && event.scope.generation == 9
+                    && matches!(
+                        event.completion,
+                        WorkspaceCompletion::DocumentLoadFailed {
+                            request: DocumentLoadRequest {
+                                identity: event_identity,
+                                selection_generation: 2,
+                            },
+                            ..
+                        } if event_identity == identity
+                    )
         ));
     }
 
     #[test]
     fn sender_reports_a_disconnected_receiver() {
-        let sender = NotoraProduct::new().event_sender();
+        let sender = WorkspaceEventSender::new(
+            NotoraProduct::new().event_sender(),
+            WorkspaceEventScope { workspace_id: WorkspaceId::generate(), generation: 1 },
+        );
         assert!(
             sender
-                .send(NotoraProductEvent::WorkspaceChanged {
-                    workspace_id: WorkspaceId::generate(),
-                    workspace_generation: 1,
+                .send(WorkspaceCompletion::WorkspaceChanged {
                     changed_paths: vec![],
                     note_relocations: vec![],
                 })

@@ -61,10 +61,25 @@ impl StartupTrace {
 
 /// shell、主题、字体准备与 GPU frame 提交的唯一所有者。
 pub(super) struct FrameRuntime {
+    #[cfg(not(test))]
+    shell: NotoraShell,
+    #[cfg(test)]
     pub(super) shell: NotoraShell,
+    #[cfg(not(test))]
+    settings: ui::Settings,
+    #[cfg(test)]
     pub(super) settings: ui::Settings,
+    #[cfg(not(test))]
+    theme: ui::Theme,
+    #[cfg(test)]
     pub(super) theme: ui::Theme,
+    #[cfg(not(test))]
+    startup_trace: Option<StartupTrace>,
+    #[cfg(test)]
     pub(super) startup_trace: Option<StartupTrace>,
+    #[cfg(not(test))]
+    font_system_preparation: FontSystemPreparation,
+    #[cfg(test)]
     pub(super) font_system_preparation: FontSystemPreparation,
 }
 
@@ -91,6 +106,56 @@ impl FrameRuntime {
             startup_trace,
             font_system_preparation: FontSystemPreparation::Deferred,
         }
+    }
+
+    pub(super) fn record_startup_stage(&self, label: &str, started_at: Instant) {
+        if let Some(trace) = &self.startup_trace {
+            trace.record_stage(label, started_at);
+        }
+    }
+
+    pub(super) fn record_application_constructed(&self) {
+        if let Some(trace) = &self.startup_trace {
+            trace.record_stage("application_constructed", trace.started_at);
+        }
+    }
+
+    pub(super) fn synchronize_focus(&mut self, target: crate::FocusTarget, now: Instant) {
+        self.shell.synchronize_focus(target, now);
+    }
+
+    pub(super) fn advance_text_cursor_blink(&mut self, now: Instant) -> bool {
+        self.shell.advance_text_cursor_blink(now)
+    }
+
+    pub(super) fn next_text_cursor_blink_at(&self) -> Option<Instant> {
+        self.shell.next_text_cursor_blink_at()
+    }
+
+    pub(super) fn theme(&self) -> &ui::Theme {
+        &self.theme
+    }
+
+    pub(super) fn settings(&self) -> &ui::Settings {
+        &self.settings
+    }
+
+    pub(super) fn apply_product_settings(&mut self, product_settings: &ProductSettings) {
+        product_settings.apply_to_ui(&mut self.settings);
+    }
+
+    pub(super) fn route_product_event(
+        &mut self,
+        event: &ui::Event,
+        focus_target: crate::FocusTarget,
+        overlay: crate::OverlayState,
+        dpi: f32,
+    ) -> crate::render::NotoraEventRoute {
+        self.shell.route_event_with_overlay(event, focus_target, overlay, &self.theme, dpi)
+    }
+
+    pub(super) fn editor_title_text(&self) -> &str {
+        self.shell.editor_title_text()
     }
 
     pub(super) fn start_font_system_preparation(&mut self, config_directory: &Path) {
@@ -152,17 +217,17 @@ impl FrameRuntime {
         model.editor_pane =
             if input.editor_is_active { EditorPaneState::Active } else { EditorPaneState::Empty };
         if input.editor_is_active
-            && let Some(tab_id) = document_runtime.editor_runtime.active_tab_id()
+            && let Some(tab_id) = document_runtime.editor().active_tab_id()
         {
             Self::update_editor_render_model(document_runtime, &mut model, tab_id, input.layout);
         } else {
             model.editor_chrome = crate::editor_pane::EditorPaneInput::default();
         }
-        let mut render_resources = document_runtime.editor_runtime.take_render_resources();
-        let mut frame = document_runtime.editor_runtime.begin_frame()?;
+        let mut render_resources = document_runtime.editor_mut().take_render_resources();
+        let mut frame = document_runtime.editor_mut().begin_frame()?;
         self.shell.render(&mut frame, input.layout, &model)?;
         let editor_surface = if input.editor_is_active {
-            document_runtime.editor_runtime.paint_active_editor(
+            document_runtime.editor_mut().paint_active_editor(
                 &mut frame,
                 &mut render_resources,
                 input.layout.editor_body_rect,
@@ -172,7 +237,7 @@ impl FrameRuntime {
         };
         let canvas_scrollbars_input = (input.editor_is_active
             && input.state.layout.overlay == crate::OverlayState::None)
-            .then(|| document_runtime.editor_runtime.active_canvas_scrollbars_input())
+            .then(|| document_runtime.editor().active_canvas_scrollbars_input())
             .flatten();
         frame.with_layout_context(|context| {
             self.shell.set_canvas_scrollbars_input(
@@ -194,8 +259,8 @@ impl FrameRuntime {
             self.theme.application_theme().editor_surface,
         );
         let _ = frame.present()?;
-        document_runtime.editor_runtime.restore_render_resources(render_resources);
-        document_runtime.editor_runtime.mark_frame_presented();
+        document_runtime.editor_mut().restore_render_resources(render_resources);
+        document_runtime.editor_mut().mark_frame_presented();
         Ok(editor_surface)
     }
 
@@ -207,13 +272,13 @@ impl FrameRuntime {
     ) {
         let ime_rect = self.shell.focused_text_input_ime_cursor_rect().or_else(|| {
             (state.layout.focus_target == crate::FocusTarget::Editor).then(|| {
-                document_runtime.editor_runtime.active_editor_ime_cursor_rect(layout.editor_rect)
+                document_runtime.editor().active_editor_ime_cursor_rect(layout.editor_rect)
             })?
         });
         let Some(ime_rect) = ime_rect else {
             return;
         };
-        let Some(window) = document_runtime.editor_runtime.window() else {
+        let Some(window) = document_runtime.editor().window() else {
             return;
         };
         window.set_ime_cursor_area(
@@ -244,26 +309,26 @@ impl FrameRuntime {
         tab_id: appkit_core::workspace::types::TabId,
         layout: ShellLayout,
     ) {
-        let Some(summary) = document_runtime.editor_runtime.document_summary(tab_id) else {
+        let Some(summary) = document_runtime.editor().document_summary(tab_id) else {
             model.editor_chrome = crate::editor_pane::EditorPaneInput::default();
             return;
         };
         model.editor_chrome.header.save_status_text = Self::editor_save_status(
-            document_runtime.autosave.state(tab_id),
+            document_runtime.autosave_state(tab_id),
             summary.dirty,
-            document_runtime.save_failure_messages.get(&tab_id).map(String::as_str),
+            document_runtime.save_failure_message(tab_id),
         );
         model.editor_chrome.header.compact = layout.editor_header_rect.h / layout.dpi
             < crate::shell::layout::EDITOR_COMPACT_HEIGHT_THRESHOLD_LOGICAL;
         if let Some(plugin_name) =
-            document_runtime.editor_runtime.tab_session(tab_id).map(|tab| tab.plugin_name())
+            document_runtime.editor().tab_session(tab_id).map(|tab| tab.plugin_name())
         {
             model.editor_chrome.toolbar = crate::render::editor_toolbar_input_for_plugin(
                 model.editor_chrome.mode,
                 plugin_name,
             );
-            if document_runtime.editor_runtime.toggle_target().is_some() {
-                let showing_source = document_runtime.editor_runtime.active_is_toggled(plugin_name);
+            if document_runtime.editor().toggle_target().is_some() {
+                let showing_source = document_runtime.editor().active_is_toggled(plugin_name);
                 crate::render::add_source_toggle_command(
                     &mut model.editor_chrome.toolbar,
                     showing_source,

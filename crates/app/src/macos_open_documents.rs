@@ -7,8 +7,6 @@ use objc2::sel;
 use objc2_app_kit::NSApplication;
 use objc2_foundation::{MainThreadMarker, NSArray, NSURL};
 
-use appkit_shell::ProductWakeHandle;
-
 use crate::textora_product::OpenDocumentSender;
 
 const DELEGATE_SUBCLASS_NAME: &CStr = c"TextoraOpenDocumentApplicationDelegate";
@@ -16,7 +14,6 @@ static OPEN_DOCUMENT_BRIDGE: OnceLock<OpenDocumentBridge> = OnceLock::new();
 
 struct OpenDocumentBridge {
     open_document_sender: OpenDocumentSender,
-    product_wake: ProductWakeHandle,
 }
 
 fn paths_from_urls(urls: &NSArray<NSURL>) -> Vec<PathBuf> {
@@ -33,20 +30,9 @@ fn paths_from_urls(urls: &NSArray<NSURL>) -> Vec<PathBuf> {
         .collect()
 }
 
-fn dispatch_open_document_paths<Wake, WakeError>(
-    open_document_sender: &OpenDocumentSender,
-    paths: Vec<PathBuf>,
-    send_wake: Wake,
-) where
-    Wake: FnOnce() -> Result<(), WakeError>,
-{
+fn dispatch_open_document_paths(open_document_sender: &OpenDocumentSender, paths: Vec<PathBuf>) {
     if open_document_sender.send(paths).is_err() {
         eprintln!("[macos] open-document product inbox is unavailable");
-        return;
-    }
-
-    if send_wake().is_err() {
-        eprintln!("[macos] open-document event loop is unavailable");
     }
 }
 
@@ -65,9 +51,7 @@ unsafe extern "C-unwind" fn application_open_urls(
             eprintln!("[macos] open-document bridge is not installed");
             return;
         };
-        dispatch_open_document_paths(&bridge.open_document_sender, paths, || {
-            bridge.product_wake.wake()
-        });
+        dispatch_open_document_paths(&bridge.open_document_sender, paths);
     }));
     if result.is_err() {
         eprintln!("[macos] panic while handling application:openURLs:");
@@ -93,16 +77,14 @@ fn delegate_subclass(parent: &AnyClass) -> Result<&'static AnyClass, String> {
 }
 
 pub(crate) fn configure_macos_open_document_bridge(
-    product_wake: ProductWakeHandle,
     open_document_sender: OpenDocumentSender,
 ) -> Result<(), String> {
     OPEN_DOCUMENT_BRIDGE
-        .set(OpenDocumentBridge { open_document_sender, product_wake })
+        .set(OpenDocumentBridge { open_document_sender })
         .map_err(|_| "open-document bridge is already installed".to_owned())
 }
 
 pub fn install_macos_open_document_handler(
-    product_wake: ProductWakeHandle,
     open_document_sender: OpenDocumentSender,
 ) -> Result<(), String> {
     let main_thread = MainThreadMarker::new()
@@ -116,7 +98,7 @@ pub fn install_macos_open_document_handler(
     if subclass.instance_size() != parent.instance_size() {
         return Err("open-document delegate changes instance size".to_owned());
     }
-    configure_macos_open_document_bridge(product_wake, open_document_sender)?;
+    configure_macos_open_document_bridge(open_document_sender)?;
     let previous = unsafe { AnyObject::set_class(delegate_object, subclass) };
     if previous != parent {
         return Err("application delegate changed during installation".to_owned());
@@ -128,6 +110,7 @@ pub fn install_macos_open_document_handler(
 mod tests {
     use super::{dispatch_open_document_paths, paths_from_urls};
     use crate::textora_product::TextoraProduct;
+    use appkit_shell::ProductHost;
     use objc2_foundation::{NSArray, NSString, NSURL};
     use std::path::PathBuf;
 
@@ -142,22 +125,18 @@ mod tests {
     }
 
     #[test]
-    fn dispatched_open_documents_enter_product_inbox_before_one_wake() {
+    fn dispatched_open_documents_enter_the_typed_product_inbox() {
         let mut product = TextoraProduct::new();
-        let mut wake_count = 0;
         let paths = vec![PathBuf::from("/tmp/first.md"), PathBuf::from("/tmp/second.md")];
 
-        dispatch_open_document_paths(&product.open_document_sender(), paths.clone(), || {
-            wake_count += 1;
-            Ok::<_, ()>(())
-        });
+        dispatch_open_document_paths(&product.open_document_sender(), paths.clone());
+        ProductHost::drain_product_events(&mut product);
 
-        assert_eq!(wake_count, 1);
         assert_eq!(product.drain_open_documents(), paths);
     }
 
     #[test]
-    fn open_document_bridge_keeps_only_typed_product_wake_handle() {
+    fn open_document_bridge_keeps_only_the_typed_product_sender() {
         let source = include_str!("macos_open_documents.rs");
         let bridge_start =
             source.find("struct OpenDocumentBridge").expect("open-document bridge must exist");
@@ -168,7 +147,8 @@ mod tests {
         let bridge = &source[bridge_start..bridge_end];
         let raw_event_loop_proxy = ["EventLoop", "Proxy<AppEvent>"].concat();
 
-        assert!(bridge.contains("ProductWakeHandle"));
+        assert!(bridge.contains("OpenDocumentSender"));
+        assert!(!bridge.contains("ProductWakeHandle"));
         assert!(
             !bridge.contains(&raw_event_loop_proxy),
             "open-document bridge must not retain the raw event-loop proxy"

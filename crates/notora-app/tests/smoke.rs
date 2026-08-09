@@ -48,8 +48,18 @@ fn notora_app_remains_a_thin_composition_root() {
 fn runtime_state_is_owned_by_named_components() {
     let runtime_source = include_str!("../src/runtime.rs");
     let document_runtime_source = include_str!("../src/runtime/document_runtime.rs");
+    let document_command_executor_source =
+        include_str!("../src/runtime/document_command_executor.rs");
+    let notora_effect_executor_source = include_str!("../src/runtime/notora_effect_executor.rs");
     let frame_runtime_source = include_str!("../src/runtime/frame_runtime.rs");
+    let action_runtime_source = include_str!("../src/runtime/action_runtime.rs");
+    let persistence_runtime_source = include_str!("../src/runtime/persistence_runtime.rs");
     let product_coordinator_source = include_str!("../src/app/product_event_coordinator.rs");
+    let document_interpreter_source = include_str!("../src/app/document_completion_interpreter.rs");
+    let persistence_interpreter_source =
+        include_str!("../src/app/persistence_completion_interpreter.rs");
+    let workspace_interpreter_source =
+        include_str!("../src/app/workspace_completion_interpreter.rs");
     let deadline_coordinator_source = include_str!("../src/app/deadline_coordinator.rs");
     let effect_executor_source = include_str!("../src/effect_executor.rs");
     let runtime_fields_start = runtime_source
@@ -75,13 +85,56 @@ fn runtime_state_is_owned_by_named_components() {
     assert!(document_runtime_source.contains("pending_conflict_retries:"));
     assert!(document_runtime_source.contains("pending_metadata_mutations:"));
     assert!(!product_coordinator_source.contains("NotoraRuntime"));
+    assert!(!document_interpreter_source.contains("NotoraRuntime"));
+    assert!(!persistence_interpreter_source.contains("NotoraRuntime"));
+    assert!(!workspace_interpreter_source.contains("NotoraRuntime"));
+    assert!(!document_command_executor_source.contains("NotoraRuntime"));
+    assert!(!notora_effect_executor_source.contains("NotoraRuntime"));
     assert!(!deadline_coordinator_source.contains("NotoraRuntime"));
+    assert!(!runtime_source.contains("fn apply_product_event"));
+    assert!(!runtime_source.contains("DocumentCommand::"));
+    assert!(!runtime_source.contains("NotoraEffect::"));
     assert!(!runtime_source.contains("impl NotoraEffectService for NotoraRuntime"));
     assert!(!runtime_source.contains("impl ShellEffectTarget for NotoraRuntime"));
     assert!(!runtime_source.contains("wgpu::RenderPassDescriptor"));
     assert!(!runtime_source.contains("create_buffer(&wgpu::BufferDescriptor"));
     assert!(!frame_runtime_source.contains("&mut NotoraState"));
     assert!(!effect_executor_source.contains("dispatch_action"));
+    for private_state in [
+        "#[cfg(not(test))]\n    state: NotoraState",
+        "#[cfg(not(test))]\n    editor_runtime: EditorRuntime",
+        "#[cfg(not(test))]\n    shell: NotoraShell",
+        "#[cfg(not(test))]\n    product_settings: ProductSettings",
+    ] {
+        assert!(
+            action_runtime_source.contains(private_state)
+                || document_runtime_source.contains(private_state)
+                || frame_runtime_source.contains(private_state)
+                || persistence_runtime_source.contains(private_state),
+            "production component state should remain private: {private_state}"
+        );
+    }
+}
+
+#[test]
+fn product_events_use_the_shared_runtime_and_domain_completions() {
+    let product_source = include_str!("../src/product.rs");
+    let action_runtime_source = include_str!("../src/runtime/action_runtime.rs");
+    let coordinator_source = include_str!("../src/app/product_event_coordinator.rs");
+
+    assert!(product_source.contains("ProductEventInbox<NotoraProductEvent>"));
+    assert!(product_source.contains("Workspace(WorkspaceCompletionEnvelope)"));
+    assert!(product_source.contains("Document(DocumentCompletion)"));
+    assert!(product_source.contains("Persistence(PersistenceCompletion)"));
+    assert!(!product_source.contains("std::sync::mpsc"));
+    assert!(action_runtime_source.contains("use appkit_shell::{DrainStart, EventPump}"));
+    assert!(coordinator_source.contains("trait WorkspaceCompletionTarget"));
+    assert!(coordinator_source.contains("trait DocumentCompletionTarget"));
+    assert!(coordinator_source.contains("trait PersistenceCompletionTarget"));
+    assert!(!coordinator_source.contains("WorkspaceCompletion::"));
+    assert!(!coordinator_source.contains("DocumentCompletion::"));
+    assert!(!coordinator_source.contains("PersistenceCompletion::"));
+    assert!(!std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/event_pump.rs").exists());
 }
 
 #[test]
@@ -180,7 +233,7 @@ fn shutdown_flushes_state_before_stopping_background_workers() {
         .find("ProductHost::shutdown(&mut self.product)")
         .expect("shutdown should stop product services");
     let stop_editor = shutdown_source
-        .find("self.document_runtime.editor_runtime.shutdown()")
+        .find("self.document_runtime.editor_mut().shutdown()")
         .expect("shutdown should stop the editor runtime");
 
     assert!(finish_saves < flush_catalog);

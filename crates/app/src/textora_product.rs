@@ -1,8 +1,9 @@
-use std::fmt;
 use std::path::PathBuf;
-use std::sync::mpsc;
 
-use appkit_shell::{ProductHost, ProductWakeHandle, ShellEffect};
+use appkit_shell::{
+    ProductEventInbox, ProductEventSender as SharedProductEventSender, ProductHost,
+    ProductWakeHandle, ShellEffect, product_event_channel,
+};
 
 use crate::native_menu::NativeMenu;
 use crate::sync_controller::SyncController;
@@ -10,11 +11,12 @@ use crate::sync_controller::SyncController;
 enum ProductEvent {
     RecentFilesLoaded(Vec<PathBuf>),
     SyncResultsReady,
+    OpenDocumentsRequested(Vec<PathBuf>),
 }
 
 #[derive(Clone)]
 pub(crate) struct ProductEventSender {
-    sender: mpsc::Sender<ProductEvent>,
+    sender: SharedProductEventSender<ProductEvent>,
 }
 
 impl ProductEventSender {
@@ -22,68 +24,47 @@ impl ProductEventSender {
         &self,
         recent_paths: Vec<PathBuf>,
     ) -> Result<(), ProductEventSendError> {
-        self.sender
-            .send(ProductEvent::RecentFilesLoaded(recent_paths))
-            .map_err(|_| ProductEventSendError)
+        self.sender.send(ProductEvent::RecentFilesLoaded(recent_paths))
     }
 
     pub(crate) fn send_sync_results_ready(&self) -> Result<(), ProductEventSendError> {
-        self.sender.send(ProductEvent::SyncResultsReady).map_err(|_| ProductEventSendError)
+        self.sender.send(ProductEvent::SyncResultsReady)
     }
 }
 
 #[derive(Clone)]
 pub struct OpenDocumentSender {
-    sender: mpsc::Sender<Vec<PathBuf>>,
+    sender: SharedProductEventSender<ProductEvent>,
 }
 
 impl OpenDocumentSender {
     pub(crate) fn send(&self, paths: Vec<PathBuf>) -> Result<(), ProductEventSendError> {
-        self.sender.send(paths).map_err(|_| ProductEventSendError)
+        self.sender.send(ProductEvent::OpenDocumentsRequested(paths))
     }
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) struct ProductEventSendError;
-
-impl fmt::Display for ProductEventSendError {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.write_str("product event receiver is unavailable")
-    }
-}
-
-impl std::error::Error for ProductEventSendError {}
-
-fn enqueue_sync_completion_and_wake(
-    event_sender: &ProductEventSender,
-    wake: impl FnOnce(),
-) -> Result<(), ProductEventSendError> {
-    event_sender.send_sync_results_ready()?;
-    wake();
-    Ok(())
-}
+pub(crate) type ProductEventSendError = appkit_shell::ProductEventSendError;
 
 pub(crate) struct TextoraProduct {
     sync_controller: Option<SyncController>,
     native_menu: Option<NativeMenu>,
     event_sender: ProductEventSender,
-    event_receiver: mpsc::Receiver<ProductEvent>,
+    event_inbox: ProductEventInbox<ProductEvent>,
     open_document_sender: OpenDocumentSender,
-    open_document_receiver: mpsc::Receiver<Vec<PathBuf>>,
+    pending_open_document_paths: Vec<PathBuf>,
 }
 
 impl TextoraProduct {
     pub(crate) fn new() -> Self {
-        let (event_sender, event_receiver) = mpsc::channel();
-        let (open_document_sender, open_document_receiver) = mpsc::channel();
+        let (event_sender, event_inbox) = product_event_channel();
 
         Self {
             sync_controller: None,
             native_menu: None,
-            event_sender: ProductEventSender { sender: event_sender },
-            event_receiver,
-            open_document_sender: OpenDocumentSender { sender: open_document_sender },
-            open_document_receiver,
+            event_sender: ProductEventSender { sender: event_sender.clone() },
+            event_inbox,
+            open_document_sender: OpenDocumentSender { sender: event_sender },
+            pending_open_document_paths: Vec::new(),
         }
     }
 
@@ -96,7 +77,7 @@ impl TextoraProduct {
     }
 
     pub(crate) fn drain_open_documents(&mut self) -> Vec<PathBuf> {
-        self.open_document_receiver.try_iter().flatten().collect()
+        std::mem::take(&mut self.pending_open_document_paths)
     }
 
     pub(crate) fn sync_controller(&self) -> Option<&SyncController> {
@@ -130,18 +111,17 @@ impl ProductHost for TextoraProduct {
             return;
         }
 
+        let _ = self.event_inbox.register_wake_handle(wake);
         let event_sender = self.event_sender();
         self.set_sync_controller(SyncController::new_default(move || {
-            let _ = enqueue_sync_completion_and_wake(&event_sender, || {
-                let _ = wake.wake();
-            });
+            let _ = event_sender.send_sync_results_ready();
         }));
     }
 
     fn drain_product_events(&mut self) -> ShellEffect {
         let mut effect = ShellEffect::NONE;
 
-        while let Ok(event) = self.event_receiver.try_recv() {
+        for event in self.event_inbox.drain() {
             match event {
                 ProductEvent::RecentFilesLoaded(recent_paths) => {
                     self.set_native_menu(NativeMenu::build(&recent_paths));
@@ -151,6 +131,9 @@ impl ProductHost for TextoraProduct {
                         controller.drain_background();
                     }
                     effect = effect.merge(ShellEffect::REDRAW);
+                }
+                ProductEvent::OpenDocumentsRequested(paths) => {
+                    self.pending_open_document_paths.extend(paths);
                 }
             }
         }
@@ -167,12 +150,11 @@ impl ProductHost for TextoraProduct {
 
 #[cfg(test)]
 mod tests {
-    use std::cell::Cell;
     use std::path::PathBuf;
 
     use appkit_shell::{ProductHost, ShellEffect};
 
-    use super::{TextoraProduct, enqueue_sync_completion_and_wake};
+    use super::TextoraProduct;
 
     #[test]
     fn open_document_inbox_preserves_path_order() {
@@ -181,6 +163,7 @@ mod tests {
             .open_document_sender()
             .send(vec![PathBuf::from("/tmp/a.md"), PathBuf::from("/tmp/b.txt")])
             .expect("product receiver is alive");
+        ProductHost::drain_product_events(&mut product);
 
         assert_eq!(
             product.drain_open_documents(),
@@ -194,21 +177,5 @@ mod tests {
         product.event_sender().send_sync_results_ready().expect("product receiver is alive");
 
         assert_eq!(product.drain_product_events(), ShellEffect::REDRAW);
-    }
-
-    #[test]
-    fn sync_completion_is_enqueued_before_exactly_one_wake() {
-        let mut product = TextoraProduct::new();
-        let event_sender = product.event_sender();
-        let wake_count = Cell::new(0);
-
-        enqueue_sync_completion_and_wake(&event_sender, || {
-            wake_count.set(wake_count.get() + 1);
-            assert_eq!(product.drain_product_events(), ShellEffect::REDRAW);
-        })
-        .expect("product receiver is alive");
-
-        assert_eq!(wake_count.get(), 1);
-        assert_eq!(product.drain_product_events(), ShellEffect::NONE);
     }
 }

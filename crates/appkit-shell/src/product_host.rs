@@ -1,17 +1,30 @@
+use std::sync::Arc;
+
 use crate::{ShellEffect, ShellEvent};
 
 #[derive(Clone)]
 pub struct ProductWakeHandle {
-    event_loop_proxy: winit::event_loop::EventLoopProxy<ShellEvent>,
+    wake: Arc<dyn Fn() -> Result<(), WakeError> + Send + Sync>,
 }
 
 impl ProductWakeHandle {
     pub fn new(event_loop_proxy: winit::event_loop::EventLoopProxy<ShellEvent>) -> Self {
-        Self { event_loop_proxy }
+        Self {
+            wake: Arc::new(move || {
+                event_loop_proxy.send_event(ShellEvent::ProductWake).map_err(|_| WakeError)
+            }),
+        }
     }
 
     pub fn wake(&self) -> Result<(), WakeError> {
-        self.event_loop_proxy.send_event(ShellEvent::ProductWake).map_err(|_| WakeError)
+        (self.wake)()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn from_callback(
+        wake: impl Fn() -> Result<(), WakeError> + Send + Sync + 'static,
+    ) -> Self {
+        Self { wake: Arc::new(wake) }
     }
 }
 

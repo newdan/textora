@@ -28,6 +28,7 @@ pub mod editor_host;
 pub mod editor_plugin;
 pub mod editor_runtime;
 pub mod event;
+mod event_runtime;
 pub mod frame_cache;
 pub mod gpu;
 pub mod input_mapper;
@@ -52,6 +53,10 @@ pub mod window_input;
 pub mod workspace;
 
 pub use event::{ShellEffect, ShellEffectStep, ShellEvent};
+pub use event_runtime::{
+    DrainStart, EventPump, ProductEventInbox, ProductEventSendError, ProductEventSender,
+    ProductWakeRegistrationError, product_event_channel,
+};
 pub use product_host::{ProductHost, ProductWakeHandle, WakeError};
 
 #[cfg(test)]
@@ -70,6 +75,22 @@ mod architecture_boundary_tests {
                 .lines()
                 .any(|line| { line.trim_start().starts_with(&format!("{app_dependency} =")) })
         );
+    }
+
+    #[test]
+    fn shared_event_runtime_has_no_product_or_domain_dependencies() {
+        let source = include_str!("event_runtime.rs");
+        let textora_product = ["Textora", "Product"].concat();
+        for forbidden in [
+            "Notora",
+            textora_product.as_str(),
+            "NotoraAction",
+            "AppAction",
+            "WorkspaceId",
+            "DocumentIdentity",
+        ] {
+            assert!(!source.contains(forbidden), "shared event runtime contains {forbidden}");
+        }
     }
 
     #[test]

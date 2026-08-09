@@ -4,7 +4,7 @@ use std::path::PathBuf;
 use std::sync::mpsc;
 use std::thread;
 
-use crate::product::{NotoraProductEvent, NotoraProductEventSender};
+use crate::product::{NotoraProductEvent, NotoraProductEventSender, PersistenceCompletion};
 
 enum PersistenceCommand {
     SaveSettings { path: PathBuf, settings: crate::settings::ProductSettings },
@@ -84,14 +84,17 @@ fn run_persistence_worker(
             PersistenceCommand::SaveSettings { path, settings } => {
                 let result = crate::settings::save_product_settings(&path, &settings)
                     .map_err(|error| format!("could not persist product settings: {error}"));
-                let _ =
-                    event_sender.send(NotoraProductEvent::SettingsPersistenceCompleted { result });
+                let _ = event_sender.send(NotoraProductEvent::Persistence(
+                    PersistenceCompletion::SettingsPersistenceCompleted { result },
+                ));
             }
             PersistenceCommand::SaveSession { path, session } => {
                 if let Err(error) = crate::session::save_product_session(&path, &session) {
-                    let _ = event_sender.send(NotoraProductEvent::SessionPersistenceFailed {
-                        message: format!("could not persist product session: {error}"),
-                    });
+                    let _ = event_sender.send(NotoraProductEvent::Persistence(
+                        PersistenceCompletion::SessionPersistenceFailed {
+                            message: format!("could not persist product session: {error}"),
+                        },
+                    ));
                 }
             }
             PersistenceCommand::Shutdown => return,
@@ -126,11 +129,15 @@ mod tests {
 
         assert_eq!(crate::settings::load_product_settings(&settings_path).settings, latest);
         assert_eq!(product.drain_product_events(), appkit_shell::ShellEffect::REDRAW);
-        let completion_events = product.take_workspace_events();
+        let completion_events = product.take_events();
         assert_eq!(completion_events.len(), 2);
         assert!(completion_events.iter().all(|event| matches!(
             event,
-            crate::product::NotoraProductEvent::SettingsPersistenceCompleted { result: Ok(()) }
+            crate::product::NotoraProductEvent::Persistence(
+                crate::product::PersistenceCompletion::SettingsPersistenceCompleted {
+                    result: Ok(())
+                }
+            )
         )));
     }
 }

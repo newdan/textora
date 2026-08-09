@@ -9,6 +9,7 @@ use crate::dispatch::chrome::{ChromeDispatchAction, SettingsDispatchAction, TabS
 use crate::dispatch::viewport::ViewportDispatchAction;
 use crate::sync_settings_types::SyncSettingsAction;
 use appkit_core::workspace::types::TabId;
+use appkit_shell::DrainStart;
 use textora_sync::{DeviceId, LoopbackEndpoint, RemoteDeviceSpec, StaticSyncAddress};
 
 const PREVIEW_TOP_PAD_LOGICAL: f32 = 16.0;
@@ -142,9 +143,16 @@ impl App {
         action: AppAction,
         event_loop: &winit::event_loop::ActiveEventLoop,
     ) {
-        let effect = self.reduce_action(action, Some(event_loop));
-        self.apply_effect(effect);
-        self.update_ime_cursor_area();
+        self.action_pump.enqueue(action);
+        if self.action_pump.start_draining() == DrainStart::AlreadyDraining {
+            return;
+        }
+        while let Some(action) = self.action_pump.next_action() {
+            let effect = self.reduce_action(action, Some(event_loop));
+            self.apply_effect(effect);
+            self.update_ime_cursor_area();
+        }
+        self.action_pump.finish_draining();
     }
 
     /// Pure routing: match on `AppAction`, return the aggregated `AppEffect`

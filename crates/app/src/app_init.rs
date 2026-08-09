@@ -275,6 +275,7 @@ impl App {
             active_theme_pair,
             theme_load_report,
             product: crate::textora_product::TextoraProduct::new(),
+            action_pump: appkit_shell::EventPump::default(),
             editor_runtime,
             accessibility_adapter: None,
             popup_tab_id_snapshot: Vec::new(),

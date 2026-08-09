@@ -92,7 +92,6 @@ fn load_recent_file_paths(
 }
 
 fn spawn_recent_file_loader(
-    send_wake: impl FnOnce(AppEvent) -> bool + Send + 'static,
     product_event_sender: ProductEventSender,
     file_history: crate::file_history::FileHistory,
     workspace_root: Option<PathBuf>,
@@ -101,10 +100,6 @@ fn spawn_recent_file_loader(
         let recent_paths = load_recent_file_paths(&file_history, workspace_root.as_deref());
         if product_event_sender.send_recent_files_loaded(recent_paths).is_err() {
             eprintln!("[startup] recent file loader could not reach product inbox");
-            return;
-        }
-        if !send_wake(AppEvent::ProductWake) {
-            eprintln!("[startup] recent file loader could not reach event loop");
         }
     });
 }
@@ -368,10 +363,10 @@ impl App {
                 false
             }
             AppEvent::ProductWake => {
-                let open_document_paths = self.product.drain_open_documents();
-                self.handle_open_file_requests(open_document_paths);
                 let effect = ProductHost::drain_product_events(&mut self.product);
                 self.apply_effect(effect);
+                let open_document_paths = self.product.drain_open_documents();
+                self.handle_open_file_requests(open_document_paths);
                 false
             }
             AppEvent::FileSafetyResultsReady => {
@@ -461,12 +456,7 @@ impl App {
                 summaries.iter().filter_map(|summary| summary.path.as_deref()).collect();
             let workspace_root = compute_workspace_root(&paths);
             self.set_native_menu(NativeMenu::build_loading());
-            let Some(event_loop_proxy) = self.event_loop_proxy.clone() else {
-                eprintln!("[startup] recent file loader unavailable: event loop proxy missing");
-                return;
-            };
             spawn_recent_file_loader(
-                move |event| event_loop_proxy.send_event(event).is_ok(),
                 self.product.event_sender(),
                 self.file_history.clone(),
                 workspace_root,
@@ -2188,8 +2178,7 @@ mod tests {
     }
 
     #[test]
-    fn recent_file_loader_queues_paths_and_emits_product_wake() {
-        use std::sync::mpsc;
+    fn recent_file_loader_queues_paths_in_the_product_inbox() {
         use std::time::Duration;
 
         use appkit_shell::ProductHost;
@@ -2211,22 +2200,13 @@ mod tests {
             scroll_anchor_offset: 0.0,
         });
         let mut product = crate::textora_product::TextoraProduct::new();
-        let (wake_sender, wake_receiver) = mpsc::channel();
-
-        spawn_recent_file_loader(
-            move |event| wake_sender.send(event).is_ok(),
-            product.event_sender(),
-            history,
-            Some(workspace),
-        );
-
-        let event = wake_receiver
-            .recv_timeout(Duration::from_secs(1))
-            .expect("recent file loader should wake the app");
-        assert!(matches!(event, AppEvent::ProductWake));
-
-        ProductHost::drain_product_events(&mut product);
-        assert!(product.native_menu().is_some());
+        spawn_recent_file_loader(product.event_sender(), history, Some(workspace));
+        let deadline = std::time::Instant::now() + Duration::from_secs(1);
+        while product.native_menu().is_none() && std::time::Instant::now() < deadline {
+            ProductHost::drain_product_events(&mut product);
+            std::thread::yield_now();
+        }
+        assert!(product.native_menu().is_some(), "recent file loader should reach product inbox");
     }
 
     #[test]

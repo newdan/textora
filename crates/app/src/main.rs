@@ -4,8 +4,6 @@ compile_error!(
     "The Edit+ application (NoteR binary) currently supports macOS only; library crates remain portable."
 );
 
-#[cfg(target_os = "macos")]
-use appkit_shell::ProductWakeHandle;
 use textora_app::{App, AppEvent, headless_init, parse_args};
 use winit::event_loop::EventLoop;
 
@@ -41,10 +39,8 @@ fn main() {
 
     let event_loop_proxy = event_loop.create_proxy();
     #[cfg(target_os = "macos")]
-    if let Err(error) = textora_app::install_macos_open_document_handler(
-        ProductWakeHandle::new(event_loop_proxy.clone()),
-        app.open_document_sender(),
-    ) {
+    if let Err(error) = textora_app::install_macos_open_document_handler(app.open_document_sender())
+    {
         eprintln!("failed to install macOS open-document handler: {error}");
         std::process::exit(1);
     }

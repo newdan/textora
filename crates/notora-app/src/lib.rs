@@ -11,7 +11,6 @@ pub mod document_registry;
 mod editor_adapter;
 pub mod editor_pane;
 pub mod effect_executor;
-mod event_pump;
 pub mod events;
 pub mod external_files;
 mod index_worker;

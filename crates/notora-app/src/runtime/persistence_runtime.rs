@@ -32,12 +32,30 @@ impl SettingsPersistenceState {
 
 /// settings、session 与 catalog backup 调度状态的唯一所有者。
 pub(super) struct PersistenceRuntime {
+    #[cfg(not(test))]
+    product_settings: ProductSettings,
+    #[cfg(test)]
     pub(super) product_settings: ProductSettings,
+    #[cfg(not(test))]
+    pending_session: Option<ProductSession>,
+    #[cfg(test)]
     pub(super) pending_session: Option<ProductSession>,
+    #[cfg(not(test))]
+    settings_state: SettingsPersistenceState,
+    #[cfg(test)]
     pub(super) settings_state: SettingsPersistenceState,
     last_enqueued_settings: Option<ProductSettings>,
+    #[cfg(not(test))]
+    session_persist_at: Option<Instant>,
+    #[cfg(test)]
     pub(super) session_persist_at: Option<Instant>,
+    #[cfg(not(test))]
+    catalog_backup_at: Option<Instant>,
+    #[cfg(test)]
     pub(super) catalog_backup_at: Option<Instant>,
+    #[cfg(not(test))]
+    worker: PersistenceWorker,
+    #[cfg(test)]
     pub(super) worker: PersistenceWorker,
 }
 
@@ -56,6 +74,31 @@ impl PersistenceRuntime {
             catalog_backup_at: None,
             worker,
         }
+    }
+
+    pub(super) fn product_settings(&self) -> &ProductSettings {
+        &self.product_settings
+    }
+
+    pub(super) fn persistence_view(
+        &self,
+    ) -> crate::settings_overlay::NotoraSettingsPersistenceView {
+        self.settings_state.to_view()
+    }
+
+    pub(super) fn take_pending_session(&mut self) -> Option<ProductSession> {
+        self.pending_session.take()
+    }
+
+    pub(super) fn has_pending_session(&self) -> bool {
+        self.pending_session.is_some()
+    }
+
+    pub(super) fn pending_window_geometry(&self) -> crate::session::WindowGeometry {
+        self.pending_session
+            .as_ref()
+            .map(|session| session.window_geometry.clone())
+            .unwrap_or_default()
     }
 
     pub(super) fn schedule_session_persistence(&mut self, now: Instant) {
@@ -183,7 +226,7 @@ mod tests {
         runtime.shutdown();
         let _ = product.drain_product_events();
 
-        assert_eq!(product.take_workspace_events().len(), 1);
+        assert_eq!(product.take_events().len(), 1);
         ProductHost::shutdown(&mut product);
     }
 }

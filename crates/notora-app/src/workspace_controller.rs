@@ -16,7 +16,8 @@ use notora_core::{
 use crate::action::{CardQuery, DocumentLoadRequest, MetadataMutation, TrashOperation};
 use crate::index_worker::{IndexWorker, IndexWorkerCommand, WorkspaceDocumentSource};
 use crate::product::{
-    NotoraProduct, NotoraProductEvent, NotoraProductEventSender, WorkspaceNoteRelocation,
+    NotoraProduct, NotoraProductEventSender, WorkspaceCompletion, WorkspaceEventScope,
+    WorkspaceEventSender, WorkspaceNoteRelocation,
 };
 
 const CATALOG_FILE_NAME: &str = "catalog.sqlite3";
@@ -349,7 +350,10 @@ impl WorkspaceSession {
         event_sender: NotoraProductEventSender,
     ) -> Result<Self, WorkspaceControllerError> {
         let descriptor = workspace.descriptor();
-        let indexer_descriptor = descriptor.clone();
+        let event_sender = WorkspaceEventSender::new(
+            event_sender,
+            WorkspaceEventScope { workspace_id: descriptor.workspace_id, generation },
+        );
         let (file_monitor, file_batches) =
             WorkspaceFileMonitor::start(workspace.root().to_path_buf())
                 .map_err(WorkspaceControllerError::FileMonitor)?;
@@ -359,8 +363,6 @@ impl WorkspaceSession {
                 catalog_path,
                 catalog_backups_directory,
                 migration_backup_retention,
-                indexer_descriptor,
-                generation,
                 file_batches,
                 command_receiver,
                 event_sender,
@@ -390,11 +392,9 @@ fn run_indexer(
     catalog_path: PathBuf,
     catalog_backups_directory: Option<PathBuf>,
     migration_backup_retention: notora_core::BackupRetention,
-    descriptor: WorkspaceDescriptor,
-    generation: u64,
     file_batches: mpsc::Receiver<WorkspaceFileBatch>,
     command_receiver: mpsc::Receiver<IndexWorkerCommand>,
-    event_sender: NotoraProductEventSender,
+    event_sender: WorkspaceEventSender,
 ) {
     if let Some(backup_directory) = &catalog_backups_directory
         && Catalog::migration_required(&catalog_path).unwrap_or(false)
@@ -404,9 +404,7 @@ fn run_indexer(
             migration_backup_retention,
         )
     {
-        let _ = event_sender.send(NotoraProductEvent::WorkspaceIndexFailed {
-            workspace_id: descriptor.workspace_id,
-            workspace_generation: generation,
+        let _ = event_sender.send(WorkspaceCompletion::WorkspaceIndexFailed {
             message: format!("迁移前备份工作区目录索引失败：{error}"),
         });
         return;
@@ -429,25 +427,17 @@ fn run_indexer(
             .map_err(|error| error.to_string()),
     };
     let Ok((catalog, recovery_notice)) = catalog_result else {
-        let _ = event_sender.send(NotoraProductEvent::WorkspaceIndexFailed {
-            workspace_id: descriptor.workspace_id,
-            workspace_generation: generation,
+        let _ = event_sender.send(WorkspaceCompletion::WorkspaceIndexFailed {
             message: "索引线程无法访问工作区目录索引".to_owned(),
         });
         return;
     };
     if let Some(message) = recovery_notice {
-        let _ = event_sender.send(NotoraProductEvent::CatalogRecoveryNotified {
-            workspace_id: descriptor.workspace_id,
-            workspace_generation: generation,
-            message,
-        });
+        let _ = event_sender.send(WorkspaceCompletion::CatalogRecoveryNotified { message });
     }
     match notora_core::recover_note_path_operations(&workspace, &catalog) {
         Ok(report) if report.committed_operations > 0 || report.rolled_back_operations > 0 => {
-            let _ = event_sender.send(NotoraProductEvent::CatalogRecoveryNotified {
-                workspace_id: descriptor.workspace_id,
-                workspace_generation: generation,
+            let _ = event_sender.send(WorkspaceCompletion::CatalogRecoveryNotified {
                 message: format!(
                     "已恢复未完成的文件改名：确认 {} 项，回滚 {} 项",
                     report.committed_operations, report.rolled_back_operations
@@ -456,53 +446,34 @@ fn run_indexer(
         }
         Ok(_) => {}
         Err(error) => {
-            let _ = event_sender.send(NotoraProductEvent::WorkspaceIndexFailed {
-                workspace_id: descriptor.workspace_id,
-                workspace_generation: generation,
+            let _ = event_sender.send(WorkspaceCompletion::WorkspaceIndexFailed {
                 message: format!("工作区存在未完成的文件改名，需要先恢复：{error}"),
             });
             return;
         }
     }
-    index_workspace(&workspace, &catalog, descriptor.workspace_id, generation, &event_sender);
+    index_workspace(&workspace, &catalog, &event_sender);
     let mut pending_presence_confirmation_paths = BTreeSet::new();
     let mut presence_confirmation_due_at = None;
     loop {
         while let Ok(command) = command_receiver.try_recv() {
-            execute_workspace_command(
-                &workspace,
-                &catalog,
-                descriptor.workspace_id,
-                generation,
-                command,
-                &event_sender,
-            );
+            execute_workspace_command(&workspace, &catalog, command, &event_sender);
         }
         match file_batches.recv_timeout(WORKSPACE_WORKER_IDLE_WAIT) {
             Ok(batch) => {
                 pending_presence_confirmation_paths.extend(batch.relative_paths.iter().cloned());
                 presence_confirmation_due_at =
                     Some(Instant::now() + WATCHER_PRESENCE_CONFIRMATION_DELAY);
-                let note_relocations = index_workspace_file_batch(
-                    &workspace,
-                    &catalog,
-                    descriptor.workspace_id,
-                    generation,
-                    &batch,
-                    &event_sender,
-                );
-                let _ = event_sender.send(NotoraProductEvent::WorkspaceChanged {
-                    workspace_id: descriptor.workspace_id,
-                    workspace_generation: generation,
+                let note_relocations =
+                    index_workspace_file_batch(&workspace, &catalog, &batch, &event_sender);
+                let _ = event_sender.send(WorkspaceCompletion::WorkspaceChanged {
                     changed_paths: batch.relative_paths,
                     note_relocations,
                 });
             }
             Err(mpsc::RecvTimeoutError::Timeout) => {}
             Err(mpsc::RecvTimeoutError::Disconnected) => {
-                let _ = event_sender.send(NotoraProductEvent::WorkspaceIndexFailed {
-                    workspace_id: descriptor.workspace_id,
-                    workspace_generation: generation,
+                let _ = event_sender.send(WorkspaceCompletion::WorkspaceIndexFailed {
                     message: "工作区文件监视器已断开，自动同步已停止".to_owned(),
                 });
                 return;
@@ -513,14 +484,7 @@ fn run_indexer(
                 .into_iter()
                 .collect::<Vec<_>>();
             presence_confirmation_due_at = None;
-            index_workspace_paths(
-                &workspace,
-                &catalog,
-                descriptor.workspace_id,
-                generation,
-                &relative_paths,
-                &event_sender,
-            );
+            index_workspace_paths(&workspace, &catalog, &relative_paths, &event_sender);
         }
     }
 }
@@ -528,27 +492,19 @@ fn run_indexer(
 fn execute_workspace_command(
     workspace: &Workspace,
     catalog: &Catalog,
-    workspace_id: notora_core::WorkspaceId,
-    workspace_generation: u64,
     command: IndexWorkerCommand,
-    event_sender: &NotoraProductEventSender,
+    event_sender: &WorkspaceEventSender,
 ) {
     match command {
         IndexWorkerCommand::QueryCards(query) => {
             match catalog.query_catalog_cards(&query.scope, query.cursor.as_ref(), query.page_size)
             {
                 Ok(page) => {
-                    let _ = event_sender.send(NotoraProductEvent::CardQueryCompleted {
-                        workspace_id,
-                        workspace_generation,
-                        query,
-                        page,
-                    });
+                    let _ =
+                        event_sender.send(WorkspaceCompletion::CardQueryCompleted { query, page });
                 }
                 Err(error) => {
-                    let _ = event_sender.send(NotoraProductEvent::CardQueryFailed {
-                        workspace_id,
-                        workspace_generation,
+                    let _ = event_sender.send(WorkspaceCompletion::CardQueryFailed {
                         query,
                         message: error.to_string(),
                     });
@@ -557,52 +513,27 @@ fn execute_workspace_command(
         }
         IndexWorkerCommand::QueryNavigationTree => match catalog.navigation_tree() {
             Ok(tree) => {
-                let _ = event_sender.send(NotoraProductEvent::NavigationTreeLoaded {
-                    workspace_id,
-                    workspace_generation,
-                    tree,
-                });
+                let _ = event_sender.send(WorkspaceCompletion::NavigationTreeLoaded { tree });
             }
             Err(error) => {
-                let _ = event_sender.send(NotoraProductEvent::NavigationTreeFailed {
-                    workspace_id,
-                    workspace_generation,
-                    message: error.to_string(),
-                });
+                let _ = event_sender
+                    .send(WorkspaceCompletion::NavigationTreeFailed { message: error.to_string() });
             }
         },
         IndexWorkerCommand::ExecuteNoteCommand(command) => {
-            execute_note_command_in_worker(
-                workspace,
-                catalog,
-                workspace_id,
-                workspace_generation,
-                command,
-                event_sender,
-            );
+            execute_note_command_in_worker(workspace, catalog, command, event_sender);
         }
         IndexWorkerCommand::ExecuteMetadataMutation(mutation) => {
-            execute_metadata_mutation_in_worker(
-                catalog,
-                workspace_id,
-                workspace_generation,
-                mutation,
-                event_sender,
-            );
+            execute_metadata_mutation_in_worker(catalog, mutation, event_sender);
         }
         IndexWorkerCommand::CreateCatalogBackup { directory, retention } => {
             match notora_core::create_catalog_backup(catalog, &directory, retention) {
                 Ok(backup_path) => {
-                    let _ = event_sender.send(NotoraProductEvent::CatalogBackupCompleted {
-                        workspace_id,
-                        workspace_generation,
-                        backup_path,
-                    });
+                    let _ = event_sender
+                        .send(WorkspaceCompletion::CatalogBackupCompleted { backup_path });
                 }
                 Err(error) => {
-                    let _ = event_sender.send(NotoraProductEvent::CatalogBackupFailed {
-                        workspace_id,
-                        workspace_generation,
+                    let _ = event_sender.send(WorkspaceCompletion::CatalogBackupFailed {
                         message: error.to_string(),
                     });
                 }
@@ -627,18 +558,9 @@ fn execute_workspace_command(
             };
             match result {
                 Ok(()) => {
-                    let _ = event_sender.send(NotoraProductEvent::TrashOperationCompleted {
-                        workspace_id,
-                        workspace_generation,
-                        operation,
-                    });
-                    index_workspace(
-                        workspace,
-                        catalog,
-                        workspace_id,
-                        workspace_generation,
-                        event_sender,
-                    );
+                    let _ = event_sender
+                        .send(WorkspaceCompletion::TrashOperationCompleted { operation });
+                    index_workspace(workspace, catalog, event_sender);
                 }
                 Err(error) => {
                     let failure = match (&operation, &error) {
@@ -650,37 +572,24 @@ fn execute_workspace_command(
                         },
                         _ => crate::action::TrashOperationFailure::Message(error.to_string()),
                     };
-                    let _ = event_sender.send(NotoraProductEvent::TrashOperationFailed {
-                        workspace_id,
-                        workspace_generation,
-                        failure,
-                    });
+                    let _ =
+                        event_sender.send(WorkspaceCompletion::TrashOperationFailed { failure });
                 }
             }
         }
         IndexWorkerCommand::PrepareDocument { request, source } => {
-            prepare_document_in_worker(
-                workspace,
-                catalog,
-                workspace_id,
-                workspace_generation,
-                request,
-                source,
-                event_sender,
-            );
+            prepare_document_in_worker(workspace, catalog, request, source, event_sender);
         }
         IndexWorkerCommand::ReindexCatalog => {
-            index_workspace(workspace, catalog, workspace_id, workspace_generation, event_sender);
+            index_workspace(workspace, catalog, event_sender);
         }
     }
 }
 
 fn execute_metadata_mutation_in_worker(
     catalog: &Catalog,
-    workspace_id: notora_core::WorkspaceId,
-    workspace_generation: u64,
     mutation: MetadataMutation,
-    event_sender: &NotoraProductEventSender,
+    event_sender: &WorkspaceEventSender,
 ) {
     let note_id = match &mutation {
         MetadataMutation::ToggleStar { note_id }
@@ -722,9 +631,7 @@ fn execute_metadata_mutation_in_worker(
     });
     match result {
         Ok((note_id, metadata, tags, outcome)) => {
-            let _ = event_sender.send(NotoraProductEvent::MetadataMutationCompleted {
-                workspace_id,
-                workspace_generation,
+            let _ = event_sender.send(WorkspaceCompletion::MetadataMutationCompleted {
                 mutation,
                 note_id,
                 metadata,
@@ -733,9 +640,7 @@ fn execute_metadata_mutation_in_worker(
             });
         }
         Err(error) => {
-            let _ = event_sender.send(NotoraProductEvent::MetadataMutationFailed {
-                workspace_id,
-                workspace_generation,
+            let _ = event_sender.send(WorkspaceCompletion::MetadataMutationFailed {
                 mutation,
                 message: error.to_string(),
             });
@@ -754,26 +659,17 @@ fn title_initialization_outcome(won: bool) -> crate::action::MetadataMutationOut
 fn execute_note_command_in_worker(
     workspace: &Workspace,
     catalog: &Catalog,
-    workspace_id: notora_core::WorkspaceId,
-    workspace_generation: u64,
     command: NoteCommand,
-    event_sender: &NotoraProductEventSender,
+    event_sender: &WorkspaceEventSender,
 ) {
     match execute_note_command(workspace, catalog, command) {
         Ok(result) => {
-            let _ = event_sender.send(NotoraProductEvent::NoteCommandCompleted {
-                workspace_id,
-                workspace_generation,
-                result,
-            });
-            index_workspace(workspace, catalog, workspace_id, workspace_generation, event_sender);
+            let _ = event_sender.send(WorkspaceCompletion::NoteCommandCompleted { result });
+            index_workspace(workspace, catalog, event_sender);
         }
         Err(error) => {
-            let _ = event_sender.send(NotoraProductEvent::NoteCommandFailed {
-                workspace_id,
-                workspace_generation,
-                message: error.to_string(),
-            });
+            let _ = event_sender
+                .send(WorkspaceCompletion::NoteCommandFailed { message: error.to_string() });
         }
     }
 }
@@ -781,11 +677,9 @@ fn execute_note_command_in_worker(
 fn prepare_document_in_worker(
     workspace: &Workspace,
     catalog: &Catalog,
-    workspace_id: notora_core::WorkspaceId,
-    workspace_generation: u64,
     request: DocumentLoadRequest,
     source: WorkspaceDocumentSource,
-    event_sender: &NotoraProductEventSender,
+    event_sender: &WorkspaceEventSender,
 ) {
     let result = (|| {
         let DocumentIdentity::Note(note_id) = request.identity else {
@@ -817,9 +711,7 @@ fn prepare_document_in_worker(
     })();
     match result {
         Ok((document, metadata, tags)) => {
-            let _ = event_sender.send(NotoraProductEvent::DocumentLoaded {
-                workspace_id,
-                workspace_generation,
+            let _ = event_sender.send(WorkspaceCompletion::DocumentLoaded {
                 request,
                 document,
                 metadata,
@@ -827,37 +719,19 @@ fn prepare_document_in_worker(
             });
         }
         Err(message) => {
-            let _ = event_sender.send(NotoraProductEvent::DocumentLoadFailed {
-                workspace_id,
-                workspace_generation,
-                request,
-                message,
-            });
+            let _ = event_sender.send(WorkspaceCompletion::DocumentLoadFailed { request, message });
         }
     }
 }
 
-fn index_workspace(
-    workspace: &Workspace,
-    catalog: &Catalog,
-    workspace_id: notora_core::WorkspaceId,
-    workspace_generation: u64,
-    event_sender: &NotoraProductEventSender,
-) {
+fn index_workspace(workspace: &Workspace, catalog: &Catalog, event_sender: &WorkspaceEventSender) {
     match scan_workspace(workspace, catalog) {
         Ok(completion) => {
-            let _ = event_sender.send(NotoraProductEvent::WorkspaceScanCompleted {
-                workspace_id,
-                workspace_generation,
-                completion,
-            });
+            let _ = event_sender.send(WorkspaceCompletion::WorkspaceScanCompleted { completion });
         }
         Err(error) => {
-            let _ = event_sender.send(NotoraProductEvent::WorkspaceIndexFailed {
-                workspace_id,
-                workspace_generation,
-                message: error.to_string(),
-            });
+            let _ = event_sender
+                .send(WorkspaceCompletion::WorkspaceIndexFailed { message: error.to_string() });
         }
     }
 }
@@ -865,25 +739,16 @@ fn index_workspace(
 fn index_workspace_paths(
     workspace: &Workspace,
     catalog: &Catalog,
-    workspace_id: notora_core::WorkspaceId,
-    workspace_generation: u64,
     relative_paths: &[PathBuf],
-    event_sender: &NotoraProductEventSender,
+    event_sender: &WorkspaceEventSender,
 ) {
     match scan_workspace_paths(workspace, catalog, relative_paths) {
         Ok(completion) => {
-            let _ = event_sender.send(NotoraProductEvent::WorkspaceScanCompleted {
-                workspace_id,
-                workspace_generation,
-                completion,
-            });
+            let _ = event_sender.send(WorkspaceCompletion::WorkspaceScanCompleted { completion });
         }
         Err(error) => {
-            let _ = event_sender.send(NotoraProductEvent::WorkspaceIndexFailed {
-                workspace_id,
-                workspace_generation,
-                message: error.to_string(),
-            });
+            let _ = event_sender
+                .send(WorkspaceCompletion::WorkspaceIndexFailed { message: error.to_string() });
         }
     }
 }
@@ -891,10 +756,8 @@ fn index_workspace_paths(
 fn index_workspace_file_batch(
     workspace: &Workspace,
     catalog: &Catalog,
-    workspace_id: notora_core::WorkspaceId,
-    workspace_generation: u64,
     batch: &WorkspaceFileBatch,
-    event_sender: &NotoraProductEventSender,
+    event_sender: &WorkspaceEventSender,
 ) -> Vec<WorkspaceNoteRelocation> {
     let previous_paths_by_note_id = match catalog.active_notes() {
         Ok(notes) => notes
@@ -902,27 +765,18 @@ fn index_workspace_file_batch(
             .map(|note| (note.note_id, note.relative_path))
             .collect::<std::collections::HashMap<_, _>>(),
         Err(error) => {
-            let _ = event_sender.send(NotoraProductEvent::WorkspaceIndexFailed {
-                workspace_id,
-                workspace_generation,
-                message: error.to_string(),
-            });
+            let _ = event_sender
+                .send(WorkspaceCompletion::WorkspaceIndexFailed { message: error.to_string() });
             return Vec::new();
         }
     };
     match scan_workspace_file_batch(workspace, catalog, batch) {
         Ok(completion) => {
-            let _ = event_sender.send(NotoraProductEvent::WorkspaceScanCompleted {
-                workspace_id,
-                workspace_generation,
-                completion,
-            });
+            let _ = event_sender.send(WorkspaceCompletion::WorkspaceScanCompleted { completion });
             match collect_note_relocations(catalog, &previous_paths_by_note_id) {
                 Ok(relocations) => relocations,
                 Err(error) => {
-                    let _ = event_sender.send(NotoraProductEvent::WorkspaceIndexFailed {
-                        workspace_id,
-                        workspace_generation,
+                    let _ = event_sender.send(WorkspaceCompletion::WorkspaceIndexFailed {
                         message: error.to_string(),
                     });
                     Vec::new()
@@ -930,11 +784,8 @@ fn index_workspace_file_batch(
             }
         }
         Err(error) => {
-            let _ = event_sender.send(NotoraProductEvent::WorkspaceIndexFailed {
-                workspace_id,
-                workspace_generation,
-                message: error.to_string(),
-            });
+            let _ = event_sender
+                .send(WorkspaceCompletion::WorkspaceIndexFailed { message: error.to_string() });
             Vec::new()
         }
     }
@@ -976,13 +827,31 @@ mod tests {
     use appkit_shell::ProductHost;
 
     use super::{
-        CATALOG_FILE_NAME, Catalog, Workspace, WorkspaceCommand, WorkspaceCommandResult,
-        WorkspaceController, WorkspaceControllerError, default_migration_backup_retention,
-        run_indexer, scan_workspace,
+        ActiveWorkspace, CATALOG_FILE_NAME, Catalog, Workspace, WorkspaceCommand,
+        WorkspaceCommandResult, WorkspaceController, WorkspaceControllerError,
+        default_migration_backup_retention, run_indexer, scan_workspace,
     };
     use crate::action::{CardQuery, DocumentLoadRequest};
-    use crate::product::{NotoraProduct, NotoraProductEvent};
+    use crate::product::{
+        NotoraProduct, NotoraProductEvent, WorkspaceCompletion, WorkspaceEventScope,
+        WorkspaceEventSender,
+    };
     use notora_core::DocumentIdentity;
+
+    fn active_completion<'a>(
+        event: &'a NotoraProductEvent,
+        active_workspace: &ActiveWorkspace,
+    ) -> Option<&'a WorkspaceCompletion> {
+        let NotoraProductEvent::Workspace(event) = event else {
+            return None;
+        };
+        if event.scope.workspace_id != active_workspace.descriptor.workspace_id
+            || event.scope.generation != active_workspace.generation
+        {
+            return None;
+        }
+        Some(&event.completion)
+    }
 
     #[test]
     fn cancelled_selection_keeps_the_current_workspace_unchanged() {
@@ -1081,36 +950,46 @@ mod tests {
         else {
             panic!("second workspace should activate");
         };
-        sender
-            .send(NotoraProductEvent::WorkspaceChanged {
+        WorkspaceEventSender::new(
+            sender.clone(),
+            WorkspaceEventScope {
                 workspace_id: first_workspace.descriptor.workspace_id,
-                workspace_generation: first_workspace.generation,
-                changed_paths: vec!["late.md".into()],
-                note_relocations: vec![],
-            })
-            .expect("product receiver should stay available");
-        sender
-            .send(NotoraProductEvent::WorkspaceChanged {
+                generation: first_workspace.generation,
+            },
+        )
+        .send(WorkspaceCompletion::WorkspaceChanged {
+            changed_paths: vec!["late.md".into()],
+            note_relocations: vec![],
+        })
+        .expect("product receiver should stay available");
+        WorkspaceEventSender::new(
+            sender,
+            WorkspaceEventScope {
                 workspace_id: second_workspace.descriptor.workspace_id,
-                workspace_generation: second_workspace.generation,
-                changed_paths: vec!["current.md".into()],
-                note_relocations: vec![],
-            })
-            .expect("product receiver should stay available");
+                generation: second_workspace.generation,
+            },
+        )
+        .send(WorkspaceCompletion::WorkspaceChanged {
+            changed_paths: vec!["current.md".into()],
+            note_relocations: vec![],
+        })
+        .expect("product receiver should stay available");
 
         let _ = product.drain_product_events();
-        let events = product.take_workspace_events();
+        let events = product.take_events();
         assert!(events.iter().any(|event| matches!(
             event,
-            NotoraProductEvent::WorkspaceChanged { workspace_id, workspace_generation, .. }
-                if *workspace_id == second_workspace.descriptor.workspace_id
-                    && *workspace_generation == second_workspace.generation
+            NotoraProductEvent::Workspace(event)
+                if event.scope.workspace_id == second_workspace.descriptor.workspace_id
+                    && event.scope.generation == second_workspace.generation
+                    && matches!(event.completion, WorkspaceCompletion::WorkspaceChanged { .. })
         )));
         assert!(!events.iter().any(|event| matches!(
             event,
-            NotoraProductEvent::WorkspaceChanged { workspace_id, workspace_generation, .. }
-                if *workspace_id == first_workspace.descriptor.workspace_id
-                    && *workspace_generation == first_workspace.generation
+            NotoraProductEvent::Workspace(event)
+                if event.scope.workspace_id == first_workspace.descriptor.workspace_id
+                    && event.scope.generation == first_workspace.generation
+                    && matches!(event.completion, WorkspaceCompletion::WorkspaceChanged { .. })
         )));
     }
 
@@ -1133,24 +1012,26 @@ mod tests {
             catalog_path,
             None,
             default_migration_backup_retention(),
-            descriptor.clone(),
-            1,
             file_batches,
             command_receiver,
-            product.event_sender(),
+            WorkspaceEventSender::new(
+                product.event_sender(),
+                WorkspaceEventScope { workspace_id: descriptor.workspace_id, generation: 1 },
+            ),
         );
 
         let _ = product.drain_product_events();
-        assert!(product.take_workspace_events().iter().any(|event| {
+        assert!(product.take_events().iter().any(|event| {
             matches!(
                 event,
-                NotoraProductEvent::WorkspaceIndexFailed {
-                    workspace_id,
-                    workspace_generation,
-                    message,
-                } if *workspace_id == descriptor.workspace_id
-                    && *workspace_generation == 1
-                    && message.contains("文件监视器已断开")
+                NotoraProductEvent::Workspace(event)
+                    if event.scope.workspace_id == descriptor.workspace_id
+                        && event.scope.generation == 1
+                        && matches!(
+                            &event.completion,
+                            WorkspaceCompletion::WorkspaceIndexFailed { message }
+                                if message.contains("文件监视器已断开")
+                        )
             )
         }));
     }
@@ -1189,24 +1070,26 @@ mod tests {
             catalog_path,
             Some(workspace_backups),
             default_migration_backup_retention(),
-            descriptor.clone(),
-            1,
             file_batches,
             command_receiver,
-            product.event_sender(),
+            WorkspaceEventSender::new(
+                product.event_sender(),
+                WorkspaceEventScope { workspace_id: descriptor.workspace_id, generation: 1 },
+            ),
         );
 
         let _ = product.drain_product_events();
-        assert!(product.take_workspace_events().iter().any(|event| {
+        assert!(product.take_events().iter().any(|event| {
             matches!(
                 event,
-                NotoraProductEvent::CatalogRecoveryNotified {
-                    workspace_id,
-                    workspace_generation,
-                    message,
-                } if *workspace_id == descriptor.workspace_id
-                    && *workspace_generation == 1
-                    && message.contains("元数据已从")
+                NotoraProductEvent::Workspace(event)
+                    if event.scope.workspace_id == descriptor.workspace_id
+                        && event.scope.generation == 1
+                        && matches!(
+                            &event.completion,
+                            WorkspaceCompletion::CatalogRecoveryNotified { message }
+                                if message.contains("元数据已从")
+                        )
             )
         }));
     }
@@ -1226,7 +1109,6 @@ mod tests {
         product.set_active_workspace(descriptor.workspace_id, 1);
         let event_sender = product.event_sender();
         let worker = thread::spawn({
-            let descriptor = descriptor.clone();
             let catalog_path = catalog_path.clone();
             move || {
                 run_indexer(
@@ -1234,11 +1116,15 @@ mod tests {
                     catalog_path,
                     None,
                     default_migration_backup_retention(),
-                    descriptor,
-                    1,
                     file_batches,
                     command_receiver,
-                    event_sender,
+                    WorkspaceEventSender::new(
+                        event_sender,
+                        WorkspaceEventScope {
+                            workspace_id: descriptor.workspace_id,
+                            generation: 1,
+                        },
+                    ),
                 )
             }
         });
@@ -1248,9 +1134,13 @@ mod tests {
         while completed_scans < 1 {
             let _ = product.drain_product_events();
             completed_scans += product
-                .take_workspace_events()
+                .take_events()
                 .into_iter()
-                .filter(|event| matches!(event, NotoraProductEvent::WorkspaceScanCompleted { .. }))
+                .filter(|event| matches!(
+                    event,
+                    NotoraProductEvent::Workspace(event)
+                        if matches!(event.completion, WorkspaceCompletion::WorkspaceScanCompleted { .. })
+                ))
                 .count();
             assert!(Instant::now() < deadline, "initial scan should complete promptly");
             thread::sleep(Duration::from_millis(10));
@@ -1266,9 +1156,13 @@ mod tests {
         while completed_scans < 3 {
             let _ = product.drain_product_events();
             completed_scans += product
-                .take_workspace_events()
+                .take_events()
                 .into_iter()
-                .filter(|event| matches!(event, NotoraProductEvent::WorkspaceScanCompleted { .. }))
+                .filter(|event| matches!(
+                    event,
+                    NotoraProductEvent::Workspace(event)
+                        if matches!(event.completion, WorkspaceCompletion::WorkspaceScanCompleted { .. })
+                ))
                 .count();
             assert!(
                 Instant::now() < deadline,
@@ -1310,18 +1204,15 @@ mod tests {
         let deadline = Instant::now() + Duration::from_secs(2);
         loop {
             let _ = product.drain_product_events();
-            let events = product.take_workspace_events();
+            let events = product.take_events();
             if events.iter().any(|event| {
-                matches!(
-                    event,
-                    NotoraProductEvent::NoteCommandCompleted {
-                        workspace_id,
-                        workspace_generation,
-                        result,
-                    } if *workspace_id == active_workspace.descriptor.workspace_id
-                        && *workspace_generation == active_workspace.generation
-                        && result.note.relative_path == std::path::Path::new("无标题.md")
-                )
+                active_completion(event, &active_workspace).is_some_and(|completion| {
+                    matches!(
+                        completion,
+                        WorkspaceCompletion::NoteCommandCompleted { result }
+                            if result.note.relative_path == std::path::Path::new("无标题.md")
+                    )
+                })
             }) {
                 break;
             }
@@ -1350,20 +1241,15 @@ mod tests {
         let deadline = Instant::now() + Duration::from_secs(2);
         loop {
             let _ = product.drain_product_events();
-            let events = product.take_workspace_events();
+            let events = product.take_events();
             if events.iter().any(|event| {
-                matches!(
-                    event,
-                    NotoraProductEvent::CardQueryCompleted {
-                        workspace_id,
-                        workspace_generation,
-                        query: completed_query,
-                        page,
-                    } if *workspace_id == active_workspace.descriptor.workspace_id
-                        && *workspace_generation == active_workspace.generation
-                        && completed_query == &query
-                        && page.cards.is_empty()
-                )
+                active_completion(event, &active_workspace).is_some_and(|completion| {
+                    matches!(
+                        completion,
+                        WorkspaceCompletion::CardQueryCompleted { query: completed_query, page }
+                            if completed_query == &query && page.cards.is_empty()
+                    )
+                })
             }) {
                 break;
             }
@@ -1414,23 +1300,21 @@ mod tests {
         let deadline = Instant::now() + Duration::from_secs(2);
         loop {
             let _ = product.drain_product_events();
-            let events = product.take_workspace_events();
+            let events = product.take_events();
             if events.iter().any(|event| {
-                matches!(
-                    event,
-                    NotoraProductEvent::DocumentLoaded {
-                        workspace_id,
-                        workspace_generation,
-                        request: completed_request,
-                        metadata,
-                        tags,
-                        ..
-                    } if *workspace_id == active_workspace.descriptor.workspace_id
-                        && *workspace_generation == active_workspace.generation
-                        && *completed_request == request
-                        && metadata.note_id == note_id
-                        && tags.iter().any(|tag| tag.tag_id == formal_tag_id)
-                )
+                active_completion(event, &active_workspace).is_some_and(|completion| {
+                    matches!(
+                        completion,
+                        WorkspaceCompletion::DocumentLoaded {
+                            request: completed_request,
+                            metadata,
+                            tags,
+                            ..
+                        } if *completed_request == request
+                            && metadata.note_id == note_id
+                            && tags.iter().any(|tag| tag.tag_id == formal_tag_id)
+                    )
+                })
             }) {
                 break;
             }
@@ -1484,22 +1368,20 @@ mod tests {
         let deadline = Instant::now() + Duration::from_secs(2);
         loop {
             let _ = product.drain_product_events();
-            let events = product.take_workspace_events();
+            let events = product.take_events();
             if events.iter().any(|event| {
-                matches!(
-                    event,
-                    NotoraProductEvent::DocumentLoaded {
-                        workspace_id,
-                        workspace_generation,
-                        request: completed_request,
-                        document,
-                        ..
-                    } if *workspace_id == active_workspace.descriptor.workspace_id
-                        && *workspace_generation == active_workspace.generation
-                        && *completed_request == request
-                        && document.contents == "# 已删除\n\n回收站正文"
-                        && document.path.starts_with(&canonical_trash_root)
-                )
+                active_completion(event, &active_workspace).is_some_and(|completion| {
+                    matches!(
+                        completion,
+                        WorkspaceCompletion::DocumentLoaded {
+                            request: completed_request,
+                            document,
+                            ..
+                        } if *completed_request == request
+                            && document.contents == "# 已删除\n\n回收站正文"
+                            && document.path.starts_with(&canonical_trash_root)
+                    )
+                })
             }) {
                 break;
             }
@@ -1548,31 +1430,29 @@ mod tests {
         let deadline = Instant::now() + Duration::from_secs(2);
         loop {
             let _ = product.drain_product_events();
-            let events = product.take_workspace_events();
+            let events = product.take_events();
             if events.iter().any(|event| {
-                matches!(
-                    event,
-                    NotoraProductEvent::MetadataMutationCompleted {
-                        workspace_id,
-                        workspace_generation,
-                        note_id: completed_note_id,
-                        metadata,
-                        tags,
-                        mutation: crate::action::MetadataMutation::AttachTagByName {
-                            note_id: mutation_note_id,
-                            display_name,
-                        },
-                        ..
-                    } if *workspace_id == active_workspace.descriptor.workspace_id
-                        && *workspace_generation == active_workspace.generation
-                        && *completed_note_id == note_id
-                        && metadata.note_id == note_id
-                        && metadata.encryption == notora_core::NoteEncryption::Unencrypted
-                        && *mutation_note_id == note_id
-                        && display_name == "产品/Notora"
-                        && tags.len() == 1
-                        && tags[0].display_name == "产品/Notora"
-                )
+                active_completion(event, &active_workspace).is_some_and(|completion| {
+                    matches!(
+                        completion,
+                        WorkspaceCompletion::MetadataMutationCompleted {
+                            note_id: completed_note_id,
+                            metadata,
+                            tags,
+                            mutation: crate::action::MetadataMutation::AttachTagByName {
+                                note_id: mutation_note_id,
+                                display_name,
+                            },
+                            ..
+                        } if *completed_note_id == note_id
+                            && metadata.note_id == note_id
+                            && metadata.encryption == notora_core::NoteEncryption::Unencrypted
+                            && *mutation_note_id == note_id
+                            && display_name == "产品/Notora"
+                            && tags.len() == 1
+                            && tags[0].display_name == "产品/Notora"
+                    )
+                })
             }) {
                 break;
             }
@@ -1613,18 +1493,15 @@ mod tests {
         let deadline = Instant::now() + Duration::from_secs(2);
         loop {
             let _ = product.drain_product_events();
-            let events = product.take_workspace_events();
+            let events = product.take_events();
             if events.iter().any(|event| {
-                matches!(
-                    event,
-                    NotoraProductEvent::CatalogBackupCompleted {
-                        workspace_id,
-                        workspace_generation,
-                        backup_path,
-                    } if *workspace_id == active_workspace.descriptor.workspace_id
-                        && *workspace_generation == active_workspace.generation
-                        && backup_path.is_file()
-                )
+                active_completion(event, &active_workspace).is_some_and(|completion| {
+                    matches!(
+                        completion,
+                        WorkspaceCompletion::CatalogBackupCompleted { backup_path }
+                            if backup_path.is_file()
+                    )
+                })
             }) {
                 break;
             }
@@ -1747,18 +1624,15 @@ mod tests {
         let deadline = Instant::now() + Duration::from_secs(2);
         loop {
             let _ = product.drain_product_events();
-            let events = product.take_workspace_events();
+            let events = product.take_events();
             if events.iter().any(|event| {
-                matches!(
-                    event,
-                    NotoraProductEvent::CatalogRecoveryNotified {
-                        workspace_id,
-                        workspace_generation,
-                        message,
-                    } if *workspace_id == active_workspace.descriptor.workspace_id
-                        && *workspace_generation == active_workspace.generation
-                        && message.contains("元数据可能已丢失")
-                )
+                active_completion(event, &active_workspace).is_some_and(|completion| {
+                    matches!(
+                        completion,
+                        WorkspaceCompletion::CatalogRecoveryNotified { message }
+                            if message.contains("元数据可能已丢失")
+                    )
+                })
             }) {
                 break;
             }
@@ -1794,19 +1668,15 @@ mod tests {
         let deadline = Instant::now() + Duration::from_secs(2);
         let note_id = loop {
             let _ = product.drain_product_events();
-            let events = product.take_workspace_events();
-            if let Some(note_id) = events.into_iter().find_map(|event| match event {
-                NotoraProductEvent::NoteCommandCompleted {
-                    workspace_id,
-                    workspace_generation,
-                    result,
-                } if workspace_id == active_workspace.descriptor.workspace_id
-                    && workspace_generation == active_workspace.generation =>
-                {
-                    Some(result.note.note_id)
-                }
-                _ => None,
-            }) {
+            let events = product.take_events();
+            if let Some(note_id) =
+                events.iter().find_map(|event| match active_completion(event, &active_workspace) {
+                    Some(WorkspaceCompletion::NoteCommandCompleted { result }) => {
+                        Some(result.note.note_id)
+                    }
+                    _ => None,
+                })
+            {
                 break note_id;
             }
             assert!(Instant::now() < deadline, "note creation completion should arrive promptly");
@@ -1818,18 +1688,18 @@ mod tests {
 
         loop {
             let _ = product.drain_product_events();
-            let events = product.take_workspace_events();
+            let events = product.take_events();
             if events.iter().any(|event| {
-                matches!(
-                    event,
-                    NotoraProductEvent::TrashOperationCompleted {
-                        workspace_id,
-                        workspace_generation,
-                        operation: crate::action::TrashOperation::MoveToTrash { note_id: completed_note_id },
-                    } if *workspace_id == active_workspace.descriptor.workspace_id
-                        && *workspace_generation == active_workspace.generation
-                        && *completed_note_id == note_id
-                )
+                active_completion(event, &active_workspace).is_some_and(|completion| {
+                    matches!(
+                        completion,
+                        WorkspaceCompletion::TrashOperationCompleted {
+                            operation: crate::action::TrashOperation::MoveToTrash {
+                                note_id: completed_note_id,
+                            },
+                        } if *completed_note_id == note_id
+                    )
+                })
             }) {
                 break;
             }
