@@ -1264,7 +1264,12 @@ impl NotoraApp {
     }
 
     fn update_focused_text_input_ime_cursor_area(&self) {
-        let Some(ime_rect) = self.shell.focused_text_input_ime_cursor_rect() else {
+        let ime_rect = self.shell.focused_text_input_ime_cursor_rect().or_else(|| {
+            (self.state.layout.focus_target == crate::FocusTarget::Editor).then(|| {
+                self.editor_runtime.active_editor_ime_cursor_rect(self.shell_layout().editor_rect)
+            })?
+        });
+        let Some(ime_rect) = ime_rect else {
             return;
         };
         let Some(window) = self.editor_runtime.window() else {

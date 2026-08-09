@@ -718,6 +718,18 @@ impl EditorRuntime {
         self.active_cursor_paint_enabled
     }
 
+    /// 返回活动编辑器光标的窗口坐标矩形，供产品层定位系统 IME 候选窗。
+    pub fn active_editor_ime_cursor_rect(&self, editor_rect: ui::Rect) -> Option<ui::Rect> {
+        let tab_id = self.active_tab_id()?;
+        let tab = self.tab_session(tab_id)?;
+        let cursor_byte = tab.document.cursor_offset().to_usize();
+        let (cursor_x, cursor_y, cursor_width, cursor_height) =
+            tab.query_cursor_screen_rect(cursor_byte)?;
+        let bounds =
+            editor_painter::plugin_bounds(editor_rect, self.scale_factor() as f32, tab.is_canvas());
+        Some(ui::Rect::new(bounds.x + cursor_x, bounds.y + cursor_y, cursor_width, cursor_height))
+    }
+
     pub fn request_redraw(&mut self) {
         self.render_session.request_redraw();
     }
@@ -1816,6 +1828,25 @@ mod tests {
         assert_eq!(scroll_y.get(), 72.0);
         assert!(outcome.shell_effect.redraw);
         assert!(!outcome.shell_effect.reshape);
+    }
+
+    #[test]
+    fn active_editor_ime_cursor_rect_translates_plugin_coordinates_to_window_space() {
+        let mut runtime = runtime_with_clean_tab();
+        let tab_id = runtime.active_tab_id().expect("test runtime should have an active tab");
+        runtime.tab_session_mut(tab_id).expect("active tab should have a runtime").replace_plugin(
+            Box::new(WysiwygInputProbePlugin {
+                scroll_y: Rc::new(Cell::new(0.0)),
+                hit_test_count: Rc::new(Cell::new(0)),
+            }),
+        );
+        let editor_rect = ui::Rect::new(100.0, 200.0, 640.0, 480.0);
+
+        let ime_rect = runtime
+            .active_editor_ime_cursor_rect(editor_rect)
+            .expect("active editor cursor should provide an IME candidate anchor");
+
+        assert_eq!(ime_rect, ui::Rect::new(148.0, 236.0, 2.0, 18.0));
     }
 
     #[test]
