@@ -1141,6 +1141,15 @@ impl NotoraShell {
         });
     }
 
+    fn synchronize_new_document_menu(&mut self, menu: ui::popup_menu::PopupMenu) {
+        let menu_size_changed = self.new_document_menu_rect.w != menu.menu_rect.w
+            || self.new_document_menu_rect.h != menu.menu_rect.h;
+        self.new_document_menu_rect = menu.menu_rect;
+        if self.new_document_menu.is_none() || menu_size_changed {
+            self.new_document_menu = Some(PopupMenuWidget::new(menu));
+        }
+    }
+
     pub fn render(
         &mut self,
         frame: &mut EditorFrame,
@@ -1204,8 +1213,7 @@ impl NotoraShell {
                 (layout.overlay_rect.right(), layout.overlay_rect.bottom()),
                 &metrics,
             );
-            self.new_document_menu_rect = menu.menu_rect;
-            self.new_document_menu = Some(PopupMenuWidget::new(menu));
+            self.synchronize_new_document_menu(menu);
         } else {
             self.new_document_menu_rect = Rect::ZERO;
             self.new_document_menu = None;
@@ -3167,6 +3175,61 @@ mod tests {
 
         assert_eq!(labels, vec!["新建 TXT", "新建 MMAP", "新建 MD"]);
         assert!(menu.menu_rect.y > button_rect.bottom());
+    }
+
+    #[test]
+    fn new_document_menu_hover_survives_the_following_render_synchronization() {
+        use ui::core::paint::{DrawCmd, DrawList};
+
+        fn build_menu() -> ui::popup_menu::PopupMenu {
+            let settings = ui::settings::Settings::new();
+            let metrics = ui::settings::UiMetrics::from_settings(&settings, 1.0);
+            ui::sidebar::build_new_document_menu(
+                Rect::new(300.0, 20.0, 128.0, 28.0),
+                (800.0, 600.0),
+                &metrics,
+            )
+        }
+
+        fn paints_second_item_hover(shell: &NotoraShell, theme: &ui::Theme) -> bool {
+            let menu = shell.new_document_menu.as_ref().expect("new document menu should exist");
+            let expected_rect = menu.menu().item_rects[1].shrink(1.0, 1.0, 1.0, 1.0);
+            let mut draw_list = DrawList::new();
+            let mut paint_context = ui::PaintCtx::new(&mut draw_list, theme, 1.0);
+            menu.paint(&mut paint_context);
+            draw_list.cmds.iter().any(|command| {
+                matches!(
+                    command,
+                    DrawCmd::FillRect { rect, color, .. }
+                        if *rect == expected_rect && *color == theme.palette.sidebar_hover_bg
+                )
+            })
+        }
+
+        let mut shell = NotoraShell::new();
+        let theme = ui::theme::test_theme();
+        shell.synchronize_new_document_menu(build_menu());
+        let menu_rect = shell.new_document_menu_rect;
+        let second_item_rect = shell
+            .new_document_menu
+            .as_ref()
+            .expect("new document menu should exist")
+            .menu()
+            .item_rects[1];
+        let mut event_context = EventCtx { theme: &theme, dpi: 1.0, cursor_hint: None };
+
+        shell.route_new_document_menu_event(
+            &Event::MouseMove {
+                px: menu_rect.x + second_item_rect.x + second_item_rect.w * 0.5,
+                py: menu_rect.y + second_item_rect.y + second_item_rect.h * 0.5,
+            },
+            &mut event_context,
+        );
+        assert!(paints_second_item_hover(&shell, &theme));
+
+        shell.synchronize_new_document_menu(build_menu());
+
+        assert!(paints_second_item_hover(&shell, &theme));
     }
 
     #[test]
