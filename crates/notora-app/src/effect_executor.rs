@@ -1,16 +1,11 @@
-//! notora effect executor boundary.
+//! notora reducer effect 的顺序执行协议。
+
+use std::path::PathBuf;
 
 use appkit_core::workspace::types::TabId;
 use appkit_shell::ShellEffect;
-use std::path::PathBuf;
 
-use crate::action::{
-    CardQuery, DocumentLoadRequest, MetadataMutation, NoteCreationTarget, NotoraEffect,
-    SaveConflictRequest, TrashOperation,
-};
-use crate::settings_overlay::ProductSettingsUpdate;
-use notora_core::DocumentKind;
-use notora_core::note_command::NoteCommand;
+use crate::action::{NotoraAction, NotoraEffect};
 
 /// 外部打开来源最终统一为同一个 effect；路径来源不应拥有单独的验证逻辑。
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -27,310 +22,88 @@ pub enum ManualSaveRequest {
     UntitledExternalFile { tab_id: TabId, external_file_id: notora_core::ExternalFileId },
 }
 
-/// 产品层外部能力的唯一入口。实现者可调度 worker、dialog、catalog 或 runtime。
-pub trait NotoraEffectService {
-    fn query_cards(&mut self, query: CardQuery);
-    fn request_note_creation(&mut self, kind: DocumentKind, target: NoteCreationTarget);
-    fn execute_note_command(&mut self, _command: NoteCommand) {}
-    fn commit_title(&mut self, _title: String) {}
-    fn toggle_editor_view(&mut self) {}
-    fn execute_semantic_edit(&mut self, _command: ui::plugin::SemanticEditCommand) {}
-    fn execute_metadata_mutation(&mut self, _mutation: MetadataMutation) {}
-    fn execute_trash_operation(&mut self, _operation: TrashOperation) {}
-    fn choose_note_move_directory(&mut self, _note_id: notora_core::NoteId) {}
-    fn prepare_document(&mut self, request: DocumentLoadRequest);
-    fn promote_active_preview(&mut self) {}
-    fn choose_workspace_root(&mut self) {}
-    fn open_external_files(&mut self, _request: ExternalOpenRequest) {}
-    fn create_untitled_external(&mut self, _kind: DocumentKind) {}
-    fn save_document_manually(&mut self, _request: ManualSaveRequest) {}
-    fn resolve_save_conflict(&mut self, _request: SaveConflictRequest) {}
-    fn apply_product_settings_update(&mut self, _update: ProductSettingsUpdate) {}
-
-    fn persist_product_settings(&mut self) {}
-    fn persist_layout(&mut self);
+/// 一个 reducer effect 完成后交还 ActionRuntime 的显式结果。
+#[derive(Debug, Default, PartialEq)]
+pub(crate) struct EffectExecution {
+    pub(crate) shell_effect: ShellEffect,
+    pub(crate) follow_up_actions: Vec<NotoraAction>,
 }
 
-/// 将纯 reducer effect 交给唯一的外部操作边界。
-pub struct EffectExecutor;
+impl EffectExecution {
+    fn new(shell_effect: ShellEffect, follow_up_actions: Vec<NotoraAction>) -> Self {
+        Self { shell_effect, follow_up_actions }
+    }
+}
+
+/// 保留 reducer effect 的声明顺序，并把业务执行与 follow-up 入队分开。
+pub(crate) struct EffectExecutor;
 
 impl EffectExecutor {
-    pub fn execute(service: &mut impl NotoraEffectService, effect: NotoraEffect) -> ShellEffect {
-        match effect {
-            NotoraEffect::QueryCards(query) => {
-                service.query_cards(query);
-                ShellEffect::NONE
-            }
-            NotoraEffect::RequestNoteCreation { kind, target } => {
-                service.request_note_creation(kind, target);
-                ShellEffect::NONE
-            }
-            NotoraEffect::ExecuteNoteCommand(command) => {
-                service.execute_note_command(command);
-                ShellEffect::NONE
-            }
-            NotoraEffect::CommitTitle(title) => {
-                service.commit_title(title);
-                ShellEffect::NONE
-            }
-            NotoraEffect::ToggleEditorView => {
-                service.toggle_editor_view();
-                ShellEffect::REDRAW
-            }
-            NotoraEffect::ExecuteSemanticEdit(command) => {
-                service.execute_semantic_edit(command);
-                ShellEffect::NONE
-            }
-            NotoraEffect::ExecuteMetadataMutation(mutation) => {
-                service.execute_metadata_mutation(mutation);
-                ShellEffect::NONE
-            }
-            NotoraEffect::ExecuteTrashOperation(operation) => {
-                service.execute_trash_operation(operation);
-                ShellEffect::NONE
-            }
-            NotoraEffect::ChooseNoteMoveDirectory(note_id) => {
-                service.choose_note_move_directory(note_id);
-                ShellEffect::NONE
-            }
-            NotoraEffect::PrepareDocument(request) => {
-                service.prepare_document(request);
-                ShellEffect::NONE
-            }
-            NotoraEffect::PromoteActivePreview => {
-                service.promote_active_preview();
-                ShellEffect::NONE
-            }
-            NotoraEffect::ChooseWorkspaceRoot => {
-                service.choose_workspace_root();
-                ShellEffect::NONE
-            }
-            NotoraEffect::OpenExternalFiles(request) => {
-                service.open_external_files(request);
-                ShellEffect::NONE
-            }
-            NotoraEffect::CreateUntitledExternal(kind) => {
-                service.create_untitled_external(kind);
-                ShellEffect::NONE
-            }
-            NotoraEffect::ResolveSaveConflict(request) => {
-                service.resolve_save_conflict(request);
-                ShellEffect::NONE
-            }
-            NotoraEffect::ApplyProductSettingsUpdate(update) => {
-                service.apply_product_settings_update(update);
-                ShellEffect::PERSIST_SETTINGS
-            }
-            NotoraEffect::PersistProductSettings => {
-                service.persist_product_settings();
-                ShellEffect::PERSIST_SETTINGS
-            }
-            NotoraEffect::PersistLayout => {
-                service.persist_layout();
-                ShellEffect::PERSIST_SETTINGS
-            }
-            NotoraEffect::Redraw => ShellEffect::REDRAW,
+    pub(crate) fn execute(
+        effect: NotoraEffect,
+        execute_operation: impl FnOnce(NotoraEffect) -> Vec<NotoraAction>,
+    ) -> EffectExecution {
+        if matches!(effect, NotoraEffect::Redraw) {
+            return EffectExecution::new(ShellEffect::REDRAW, Vec::new());
         }
-    }
-
-    /// 统一进入产品保存边界；reducer、窗口事件和 widget 不直接调用 runtime 保存 API。
-    pub fn save_document_manually(
-        service: &mut impl NotoraEffectService,
-        request: ManualSaveRequest,
-    ) {
-        service.save_document_manually(request);
+        let shell_effect = if matches!(effect, NotoraEffect::ToggleEditorView) {
+            ShellEffect::REDRAW
+        } else {
+            ShellEffect::NONE
+        };
+        let follow_up_actions = execute_operation(effect);
+        EffectExecution::new(shell_effect, follow_up_actions)
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{EffectExecutor, ManualSaveRequest, NotoraEffectService};
-    use crate::action::{
-        CardQuery, DocumentLoadRequest, MetadataMutation, NoteCreationTarget, NotoraEffect,
-    };
-    use notora_core::note_command::NoteCommand;
-    use notora_core::{DocumentIdentity, DocumentKind, ExternalFileId, NavigationScope};
+    use crate::action::{CardQuery, NotoraAction, NotoraEffect};
+    use notora_core::NavigationScope;
 
-    #[derive(Default)]
-    struct Recorder {
-        card_query_count: usize,
-        note_creation_request: Option<(DocumentKind, NoteCreationTarget)>,
-        prepared_document: Option<DocumentLoadRequest>,
-        executed_note_command_count: usize,
-        title_commit: Option<String>,
-        editor_view_toggle_count: usize,
-        metadata_mutation: Option<MetadataMutation>,
-        promoted_preview_count: usize,
-        workspace_root_selection_count: usize,
-        manual_save_request: Option<ManualSaveRequest>,
-        product_settings_persistence_count: usize,
-    }
+    use super::EffectExecutor;
 
-    impl NotoraEffectService for Recorder {
-        fn query_cards(&mut self, _query: CardQuery) {
-            self.card_query_count += 1;
-        }
+    #[test]
+    fn executor_routes_a_typed_operation_and_returns_its_follow_up_actions() {
+        let expected_query = CardQuery::from(NavigationScope::Starred);
+        let execution =
+            EffectExecutor::execute(NotoraEffect::QueryCards(expected_query.clone()), |effect| {
+                match effect {
+                    NotoraEffect::QueryCards(query) => {
+                        assert_eq!(query, expected_query);
+                        vec![NotoraAction::CardQueryFailed { query, message: "offline".to_owned() }]
+                    }
+                    _ => panic!("executor should preserve the typed effect"),
+                }
+            });
 
-        fn request_note_creation(&mut self, kind: DocumentKind, target: NoteCreationTarget) {
-            self.note_creation_request = Some((kind, target));
-        }
-
-        fn execute_note_command(&mut self, _command: NoteCommand) {
-            self.executed_note_command_count += 1;
-        }
-
-        fn commit_title(&mut self, title: String) {
-            self.title_commit = Some(title);
-        }
-
-        fn toggle_editor_view(&mut self) {
-            self.editor_view_toggle_count += 1;
-        }
-
-        fn execute_metadata_mutation(&mut self, mutation: MetadataMutation) {
-            self.metadata_mutation = Some(mutation);
-        }
-
-        fn prepare_document(&mut self, request: DocumentLoadRequest) {
-            self.prepared_document = Some(request);
-        }
-
-        fn promote_active_preview(&mut self) {
-            self.promoted_preview_count += 1;
-        }
-
-        fn choose_workspace_root(&mut self) {
-            self.workspace_root_selection_count += 1;
-        }
-
-        fn persist_product_settings(&mut self) {
-            self.product_settings_persistence_count += 1;
-        }
-
-        fn persist_layout(&mut self) {}
-
-        fn save_document_manually(&mut self, request: ManualSaveRequest) {
-            self.manual_save_request = Some(request);
-        }
+        assert_eq!(execution.shell_effect, appkit_shell::ShellEffect::NONE);
+        assert!(matches!(
+            execution.follow_up_actions.as_slice(),
+            [NotoraAction::CardQueryFailed { message, .. }] if message == "offline"
+        ));
     }
 
     #[test]
-    fn executor_routes_only_typed_effects_to_the_service_boundary() {
-        let mut recorder = Recorder::default();
-        assert_eq!(
-            EffectExecutor::execute(
-                &mut recorder,
-                NotoraEffect::QueryCards(CardQuery::from(NavigationScope::Starred)),
-            ),
-            appkit_shell::ShellEffect::NONE
-        );
-        let identity = DocumentIdentity::ExternalFile(ExternalFileId::generate());
-        let request = DocumentLoadRequest { identity, selection_generation: 3 };
-        let _ = EffectExecutor::execute(&mut recorder, NotoraEffect::PrepareDocument(request));
+    fn redraw_is_a_shell_only_effect() {
+        let execution = EffectExecutor::execute(NotoraEffect::Redraw, |_| {
+            panic!("redraw should not invoke a product operation")
+        });
 
-        assert_eq!(recorder.card_query_count, 1);
-        assert_eq!(recorder.prepared_document, Some(request));
-        let _ = EffectExecutor::execute(&mut recorder, NotoraEffect::PromoteActivePreview);
-        assert_eq!(recorder.promoted_preview_count, 1);
-        let _ = EffectExecutor::execute(&mut recorder, NotoraEffect::ChooseWorkspaceRoot);
-        assert_eq!(recorder.workspace_root_selection_count, 1);
+        assert_eq!(execution.shell_effect, appkit_shell::ShellEffect::REDRAW);
+        assert!(execution.follow_up_actions.is_empty());
     }
 
     #[test]
-    fn executor_routes_product_settings_persistence_through_the_service_boundary() {
-        let mut recorder = Recorder::default();
+    fn editor_view_toggle_keeps_its_redraw_effect() {
+        let mut toggled = false;
+        let execution = EffectExecutor::execute(NotoraEffect::ToggleEditorView, |effect| {
+            assert!(matches!(effect, NotoraEffect::ToggleEditorView));
+            toggled = true;
+            Vec::new()
+        });
 
-        assert_eq!(
-            EffectExecutor::execute(&mut recorder, NotoraEffect::PersistProductSettings),
-            appkit_shell::ShellEffect::PERSIST_SETTINGS
-        );
-        assert_eq!(recorder.product_settings_persistence_count, 1);
-    }
-
-    #[test]
-    fn executor_routes_note_commands_without_exposing_file_io_to_the_reducer() {
-        let mut recorder = Recorder::default();
-        let command = notora_core::note_command::NoteCommand::CreateConfigured(
-            notora_core::note_command::ConfiguredCreateNoteRequest {
-                kind: DocumentKind::Markdown,
-                target_directory: None,
-                encryption: notora_core::NoteEncryption::Unencrypted,
-            },
-        );
-
-        assert_eq!(
-            EffectExecutor::execute(&mut recorder, NotoraEffect::ExecuteNoteCommand(command)),
-            appkit_shell::ShellEffect::NONE
-        );
-        assert_eq!(recorder.executed_note_command_count, 1);
-    }
-
-    #[test]
-    fn executor_routes_title_commits_through_the_runtime_service_boundary() {
-        let mut recorder = Recorder::default();
-
-        assert_eq!(
-            EffectExecutor::execute(
-                &mut recorder,
-                NotoraEffect::CommitTitle("新的标题".to_owned()),
-            ),
-            appkit_shell::ShellEffect::NONE
-        );
-        assert_eq!(recorder.title_commit, Some("新的标题".to_owned()));
-    }
-
-    #[test]
-    fn executor_toggles_the_editor_view_and_requests_redraw() {
-        let mut recorder = Recorder::default();
-
-        assert_eq!(
-            EffectExecutor::execute(&mut recorder, NotoraEffect::ToggleEditorView),
-            appkit_shell::ShellEffect::REDRAW
-        );
-        assert_eq!(recorder.editor_view_toggle_count, 1);
-    }
-
-    #[test]
-    fn executor_routes_note_creation_through_the_workspace_aware_service_boundary() {
-        let mut recorder = Recorder::default();
-        let target = NoteCreationTarget { directory: None };
-
-        assert_eq!(
-            EffectExecutor::execute(
-                &mut recorder,
-                NotoraEffect::RequestNoteCreation {
-                    kind: DocumentKind::Markdown,
-                    target: target.clone(),
-                },
-            ),
-            appkit_shell::ShellEffect::NONE
-        );
-        assert_eq!(recorder.note_creation_request, Some((DocumentKind::Markdown, target)));
-    }
-
-    #[test]
-    fn executor_routes_metadata_mutations_through_the_typed_service_boundary() {
-        let mut recorder = Recorder::default();
-        let mutation = MetadataMutation::ToggleStar { note_id: notora_core::NoteId::generate() };
-
-        assert_eq!(
-            EffectExecutor::execute(
-                &mut recorder,
-                NotoraEffect::ExecuteMetadataMutation(mutation.clone())
-            ),
-            appkit_shell::ShellEffect::NONE
-        );
-        assert_eq!(recorder.metadata_mutation, Some(mutation));
-    }
-
-    #[test]
-    fn manual_save_is_routed_through_the_effect_service_boundary() {
-        let mut recorder = Recorder::default();
-        let tab_id = appkit_core::workspace::types::TabIdAllocator::new().allocate();
-        let request = ManualSaveRequest::ExistingExternalFile { tab_id };
-
-        EffectExecutor::save_document_manually(&mut recorder, request);
-
-        assert_eq!(recorder.manual_save_request, Some(request));
+        assert!(toggled);
+        assert_eq!(execution.shell_effect, appkit_shell::ShellEffect::REDRAW);
     }
 }
