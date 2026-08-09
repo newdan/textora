@@ -103,7 +103,7 @@ fn source_line_at_byte_call_count() -> usize {
 type RenderedLineRef<'a> = (usize, &'a crate::layout::FlatLine);
 type SurroundingRenderedLines<'a> = (Option<RenderedLineRef<'a>>, Option<RenderedLineRef<'a>>);
 
-struct EmptySourceLinePreeditRenderData<'a> {
+struct StandalonePreeditRenderData<'a> {
     text: &'a str,
     cursor: Option<(usize, usize)>,
     x: f32,
@@ -274,7 +274,7 @@ pub struct PreviewEngine<S: BlockSource = MarkdownDoc> {
     /// Whether the cursor blink phase is currently visible (controlled by app).
     pub cursor_visible: bool,
     /// Actual shaped advance from an editable empty line's start to the IME caret.
-    empty_preedit_cursor_advance: Option<f32>,
+    standalone_preedit_cursor_advance: Option<f32>,
 }
 
 impl Default for PreviewEngine {
@@ -315,7 +315,7 @@ impl<S: BlockSource> PreviewEngine<S> {
             source_line_map: None,
             source_generation: 0,
             cursor_visible: true,
-            empty_preedit_cursor_advance: None,
+            standalone_preedit_cursor_advance: None,
         }
     }
 
@@ -325,7 +325,7 @@ impl<S: BlockSource> PreviewEngine<S> {
         self.sel.clear();
         self.cached_dl = None;
         self.cached_vertices = None;
-        self.empty_preedit_cursor_advance = None;
+        self.standalone_preedit_cursor_advance = None;
     }
 
     /// Mark only the cursor position as changed — no full rebuild needed.
@@ -345,7 +345,7 @@ impl<S: BlockSource> PreviewEngine<S> {
         }
         self.cached_dl = None;
         self.cached_vertices = None;
-        self.empty_preedit_cursor_advance = None;
+        self.standalone_preedit_cursor_advance = None;
     }
 
     /// 设置 IME preedit 文本。**严格保证不改动 `edit_ctx.cursor_byte`**（方案
@@ -373,7 +373,7 @@ impl<S: BlockSource> PreviewEngine<S> {
         }
         self.cached_dl = None;
         self.cached_vertices = None;
-        self.empty_preedit_cursor_advance = None;
+        self.standalone_preedit_cursor_advance = None;
     }
 
     // ── Heading collection ──
@@ -919,7 +919,7 @@ impl<S: BlockSource> PreviewEngine<S> {
         }
         self.cached_dl = None;
         self.cached_vertices = None;
-        self.empty_preedit_cursor_advance = None;
+        self.standalone_preedit_cursor_advance = None;
     }
 
     // ── Search ──
@@ -1184,7 +1184,16 @@ impl<S: BlockSource> PreviewEngine<S> {
         let virtual_position = lazy
             .source_projection_index
             .as_ref()?
-            .virtual_position_for_source(ctx.cursor_byte, preedit_cursor_grapheme)?;
+            .virtual_position_for_source(ctx.cursor_byte, preedit_cursor_grapheme);
+        let Some(virtual_position) = virtual_position else {
+            let (x, y, width, height) = self.cursor_screen_pos_for_byte(ctx.cursor_byte)?;
+            return Some((
+                x + self.standalone_preedit_cursor_advance.unwrap_or_default(),
+                y,
+                width,
+                height,
+            ));
+        };
         let flat_idx = lazy.flat_line_idx_for_projection(virtual_position.flat_line_idx)?;
         let fl = lazy.flat_lines.get(flat_idx)?;
         let x = fl.rect.x
@@ -1209,29 +1218,47 @@ impl<S: BlockSource> PreviewEngine<S> {
         let cursor_height = font_size.min(line_height);
         let cursor_grapheme = preedit_cursor_grapheme_index(preedit_text, preedit_cursor);
         let fallback_advance = cursor_grapheme as f32 * font_size * 0.3;
-        let cursor_x = x + self.empty_preedit_cursor_advance.unwrap_or(fallback_advance);
+        let cursor_x = x + self.standalone_preedit_cursor_advance.unwrap_or(fallback_advance);
         let baseline_y = line_top + cursor_height;
         let cursor_y = baseline_y - cursor_height * WYSIWYG_CURSOR_ASCENT_RATIO - self.scroll_y;
         Some((cursor_x, cursor_y, 2.0, cursor_height))
     }
 
-    fn empty_source_line_preedit_render_data(
-        &self,
-    ) -> Option<EmptySourceLinePreeditRenderData<'_>> {
+    fn standalone_preedit_render_data(&self) -> Option<StandalonePreeditRenderData<'_>> {
         let ctx = self.edit_ctx.as_ref()?;
         let preedit_text = ctx.preedit_text.as_deref().filter(|text| !text.is_empty())?;
         let lazy = self.lazy.as_ref()?;
         let source = self.edit_source.as_deref()?;
         let source_line = source_line_at_byte(source, ctx.cursor_byte)?;
-        if !source_line.is_empty()
-            || self.empty_source_line_role(source_line, lazy, source)
-                == EmptySourceLineRole::HiddenBlockSeparator
+        if !source_line.is_empty() {
+            let preedit_cursor_grapheme =
+                preedit_cursor_grapheme_index(preedit_text, ctx.preedit_cursor);
+            if lazy
+                .source_projection_index
+                .as_ref()?
+                .virtual_position_for_source(ctx.cursor_byte, preedit_cursor_grapheme)
+                .is_some()
+            {
+                return None;
+            }
+            let (x, cursor_y, _, cursor_height) =
+                self.cursor_screen_pos_for_byte(ctx.cursor_byte)?;
+            return Some(StandalonePreeditRenderData {
+                text: preedit_text,
+                cursor: ctx.preedit_cursor,
+                x,
+                baseline_y: cursor_y + cursor_height * WYSIWYG_CURSOR_ASCENT_RATIO,
+                font_size: cursor_height,
+            });
+        }
+        if self.empty_source_line_role(source_line, lazy, source)
+            == EmptySourceLineRole::HiddenBlockSeparator
         {
             return None;
         }
 
         let (x, line_top, font_size, _) = self.empty_source_line_metrics(source_line, lazy, source);
-        Some(EmptySourceLinePreeditRenderData {
+        Some(StandalonePreeditRenderData {
             text: preedit_text,
             cursor: ctx.preedit_cursor,
             x,
@@ -1240,8 +1267,8 @@ impl<S: BlockSource> PreviewEngine<S> {
         })
     }
 
-    fn set_empty_preedit_cursor_advance(&mut self, advance: f32) {
-        self.empty_preedit_cursor_advance = Some(advance);
+    fn set_standalone_preedit_cursor_advance(&mut self, advance: f32) {
+        self.standalone_preedit_cursor_advance = Some(advance);
     }
 
     fn empty_source_line_cursor_screen_pos(
@@ -2676,7 +2703,7 @@ impl ViewPlugin for MarkdownEditorView {
                 });
             println!("[md render] {} us", _dur);
         }
-        if let Some(preedit) = self.engine.empty_source_line_preedit_render_data() {
+        if let Some(preedit) = self.engine.standalone_preedit_render_data() {
             let preedit_text = preedit.text.to_owned();
             let preedit_cursor = preedit.cursor;
             let preedit_x = preedit.x;
@@ -2693,7 +2720,7 @@ impl ViewPlugin for MarkdownEditorView {
                 shaper,
             )
             .map_or(0.0, |layout| layout.shaped.width);
-            self.engine.set_empty_preedit_cursor_advance(cursor_advance);
+            self.engine.set_standalone_preedit_cursor_advance(cursor_advance);
             dl.text_shaped(
                 bounds.x + preedit_x,
                 bounds.y + preedit_baseline_y,
@@ -5811,6 +5838,39 @@ C608-01 武昌职业第01组：计划 68，历史低线较低，是表里最像�
         });
 
         assert!(preedit_is_rendered, "preedit text must render on a trailing empty source line");
+    }
+
+    #[test]
+    fn editor_renders_preedit_after_trailing_space() {
+        use ui::plugin::{PluginMessage, ViewPlugin};
+
+        let source = "hello ";
+        let mut doc = StubDoc::new(source);
+        let mut view = MarkdownEditorView::new();
+        view.set_source(source.into(), 1);
+        render_editor_once(&mut view, &doc);
+
+        view.handle_message(PluginMessage::SetCursorByte(source.len()), &mut doc);
+        view.handle_message(
+            PluginMessage::SetPreedit { text: "拼音".into(), cursor: Some((6, 6)) },
+            &mut doc,
+        );
+
+        let draw_list = render_editor_draw_list(&mut view, &doc);
+        let rendered_text = draw_list
+            .cmds
+            .iter()
+            .filter_map(|command| match command {
+                ui::core::paint::DrawCmd::TextLayout { layout, .. } => Some(layout.text.as_str()),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        let preedit_is_rendered = rendered_text.iter().any(|text| text.contains("拼音"));
+
+        assert!(
+            preedit_is_rendered,
+            "preedit text must render after a trailing source space; rendered={rendered_text:?}"
+        );
     }
 
     #[test]
