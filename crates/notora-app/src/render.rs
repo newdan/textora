@@ -777,15 +777,17 @@ fn new_note_control_state(
     workspace_root: WorkspaceRootState,
 ) -> NewNoteControlState {
     match scope {
-        NavigationScope::Search { .. } | NavigationScope::Trash => NewNoteControlState::Hidden,
-        NavigationScope::WorkspaceRoot
-        | NavigationScope::Directory { .. }
+        NavigationScope::Search { .. }
         | NavigationScope::Starred
+        | NavigationScope::Trash
         | NavigationScope::Tag { .. }
-        | NavigationScope::ExternalFiles => match workspace_root {
-            WorkspaceRootState::Missing => NewNoteControlState::Disabled,
-            WorkspaceRootState::Active => NewNoteControlState::Enabled,
-        },
+        | NavigationScope::ExternalFiles => NewNoteControlState::Hidden,
+        NavigationScope::WorkspaceRoot | NavigationScope::Directory { .. } => {
+            match workspace_root {
+                WorkspaceRootState::Missing => NewNoteControlState::Disabled,
+                WorkspaceRootState::Active => NewNoteControlState::Enabled,
+            }
+        }
     }
 }
 
@@ -2628,10 +2630,14 @@ mod tests {
     }
 
     #[test]
-    fn new_note_control_is_hidden_for_search_and_trash() {
-        for scope in
-            [NavigationScope::Search { query: "roadmap".to_owned() }, NavigationScope::Trash]
-        {
+    fn new_note_control_is_hidden_for_non_creation_scopes() {
+        for scope in [
+            NavigationScope::Search { query: "roadmap".to_owned() },
+            NavigationScope::Starred,
+            NavigationScope::Trash,
+            NavigationScope::Tag { tag_id: notora_core::TagId::generate() },
+            NavigationScope::ExternalFiles,
+        ] {
             let mut state = NotoraState::default();
             state.library.navigation_scope = scope;
 
