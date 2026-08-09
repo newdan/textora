@@ -1662,10 +1662,14 @@ impl NotoraApp {
             self.cancel_pending_note_move(request, MOVE_SAVE_FAILURE_MESSAGE);
             return;
         };
-        if !summary.dirty || summary.content_revision != request.content_revision {
-            self.record_autosave_failure(request, "保存请求对应的内容版本已经过期".to_owned());
-            self.cancel_pending_trash_move(request, TRASH_SAVE_FAILURE_MESSAGE);
+        if summary.content_revision != request.content_revision {
+            self.handle_superseded_autosave(request, summary.content_revision, summary.dirty);
+            self.cancel_pending_trash_move(request, TRASH_SAVE_STALE_MESSAGE);
             self.cancel_pending_note_move(request, MOVE_SAVE_STALE_MESSAGE);
+            return;
+        }
+        if !summary.dirty {
+            self.finish_redundant_autosave(request);
             return;
         }
         let prepared = match self.editor_runtime.prepare_save(request.tab_id) {
@@ -1681,6 +1685,50 @@ impl NotoraApp {
             self.record_autosave_failure(request, message);
             self.cancel_pending_trash_move(request, TRASH_SAVE_FAILURE_MESSAGE);
             self.cancel_pending_note_move(request, MOVE_SAVE_FAILURE_MESSAGE);
+        }
+    }
+
+    fn handle_superseded_autosave(
+        &mut self,
+        request: AutoSaveRequest,
+        current_content_revision: u64,
+        current_dirty: bool,
+    ) {
+        self.save_failure_messages.remove(&request.tab_id);
+        if current_dirty {
+            self.autosave.on_save_superseded(request, current_content_revision);
+        } else {
+            self.autosave.cancel(request.tab_id);
+        }
+        self.needs_redraw = true;
+        self.editor_runtime.request_redraw();
+    }
+
+    fn finish_redundant_autosave(&mut self, request: AutoSaveRequest) {
+        self.autosave.cancel(request.tab_id);
+        self.save_failure_messages.remove(&request.tab_id);
+        self.needs_redraw = true;
+        self.editor_runtime.request_redraw();
+
+        if let Some(pending_trash_move) = self
+            .pending_trash_moves
+            .get(&request.tab_id)
+            .copied()
+            .filter(|pending| pending.content_revision == request.content_revision)
+        {
+            self.pending_trash_moves.remove(&request.tab_id);
+            self.execute_trash_operation(crate::action::TrashOperation::MoveToTrash {
+                note_id: pending_trash_move.note_id,
+            });
+        }
+        if let Some(pending_note_move) = self
+            .pending_note_moves
+            .get(&request.tab_id)
+            .cloned()
+            .filter(|pending| pending.content_revision == request.content_revision)
+        {
+            self.pending_note_moves.remove(&request.tab_id);
+            self.submit_note_command(NoteCommand::Move(pending_note_move.request));
         }
     }
 
@@ -3415,7 +3463,9 @@ mod tests {
         CompactContent, ExternalFileSession, FocusTarget, NotoraPaths, OverlayState,
         WorkspaceCommand, WorkspaceRootState,
     };
-    use appkit_shell::editor_runtime::{DocumentTextReplacement, EditorNotification};
+    use appkit_shell::editor_runtime::{
+        DocumentTextReplacement, EditorFocus, EditorInputContext, EditorNotification,
+    };
     use notora_core::{DocumentIdentity, DocumentKind, NavigationScope, WorkspaceId};
 
     #[test]
@@ -3464,6 +3514,22 @@ mod tests {
         let _ = app.document_registry.register(identity, tab_id);
         app.state.library.selected_card = Some(identity);
         (identity, tab_id)
+    }
+
+    fn active_editor_input_context() -> EditorInputContext {
+        EditorInputContext {
+            editor_rect: ui::Rect::new(0.0, 0.0, 640.0, 480.0),
+            focus: EditorFocus::Active,
+            modal_blocked: false,
+        }
+    }
+
+    fn note_origin(relative_path: &str) -> notora_core::DocumentOrigin {
+        notora_core::DocumentOrigin::Note {
+            workspace_id: notora_core::WorkspaceId::generate(),
+            note_id: notora_core::NoteId::generate(),
+            relative_path: relative_path.into(),
+        }
     }
 
     fn drain_until_document_text(
@@ -3516,6 +3582,83 @@ mod tests {
             app.save_failure_messages.get(&tab_id).map(String::as_str),
             Some("file is read-only")
         );
+    }
+
+    #[test]
+    fn autosave_request_for_a_clean_document_finishes_without_a_failure() {
+        let directory = tempfile::tempdir().expect("save fixture directory should exist");
+        let path = directory.path().join("clean.md");
+        let mut app = app();
+        let (_, tab_id) = install_registered_note(
+            &mut app,
+            path.to_str().expect("fixture path should be valid UTF-8"),
+            "原始正文",
+        );
+        let edit_outcome =
+            app.editor_runtime.commit_text(active_editor_input_context(), "已保存修改".to_owned());
+        app.apply_editor_outcome(edit_outcome);
+        let edited_summary = app
+            .editor_runtime
+            .document_summary(tab_id)
+            .expect("edited note should remain available");
+        app.autosave.request_immediate_save(
+            &note_origin("clean.md"),
+            tab_id,
+            edited_summary.content_revision,
+        );
+        let request =
+            app.autosave.take_due_saves().pop().expect("edited revision request should become due");
+        let prepared =
+            app.editor_runtime.prepare_save(tab_id).expect("edited note should prepare a save");
+        let save_outcome = app
+            .editor_runtime
+            .apply_save_completion(appkit_shell::editor_runtime::execute_prepared_save(prepared));
+        app.apply_editor_outcome(save_outcome);
+        let clean_summary = app
+            .editor_runtime
+            .document_summary(tab_id)
+            .expect("registered note should remain available");
+        assert!(!clean_summary.dirty);
+
+        app.submit_autosave(request);
+
+        assert_eq!(app.autosave.state(tab_id), None);
+        assert_eq!(app.save_failure_messages.get(&tab_id), None);
+    }
+
+    #[test]
+    fn stale_autosave_request_is_replaced_by_the_current_dirty_revision() {
+        let mut app = app();
+        let (_, tab_id) = install_registered_note(&mut app, "stale.md", "原始正文");
+        let first_edit =
+            app.editor_runtime.commit_text(active_editor_input_context(), "第一次修改".to_owned());
+        app.apply_editor_outcome(first_edit);
+        let first_revision = app
+            .editor_runtime
+            .document_summary(tab_id)
+            .expect("edited note should remain available")
+            .content_revision;
+        app.autosave.request_immediate_save(&note_origin("stale.md"), tab_id, first_revision);
+        let stale_request =
+            app.autosave.take_due_saves().pop().expect("first revision request should become due");
+        let second_edit =
+            app.editor_runtime.commit_text(active_editor_input_context(), "第二次修改".to_owned());
+        app.apply_editor_outcome(second_edit);
+        let current_revision = app
+            .editor_runtime
+            .document_summary(tab_id)
+            .expect("twice-edited note should remain available")
+            .content_revision;
+        assert_ne!(current_revision, stale_request.content_revision);
+
+        app.submit_autosave(stale_request);
+
+        assert!(matches!(
+            app.autosave.state(tab_id),
+            Some(AutoSaveState::Scheduled { content_revision, .. })
+                if content_revision == current_revision
+        ));
+        assert_eq!(app.save_failure_messages.get(&tab_id), None);
     }
 
     #[test]
