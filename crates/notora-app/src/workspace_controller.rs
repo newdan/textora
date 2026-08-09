@@ -14,7 +14,7 @@ use notora_core::{
 };
 
 use crate::action::{CardQuery, DocumentLoadRequest, MetadataMutation, TrashOperation};
-use crate::index_worker::{IndexWorker, IndexWorkerCommand};
+use crate::index_worker::{IndexWorker, IndexWorkerCommand, WorkspaceDocumentSource};
 use crate::product::{NotoraProduct, NotoraProductEvent, NotoraProductEventSender};
 
 const CATALOG_FILE_NAME: &str = "catalog.sqlite3";
@@ -198,11 +198,26 @@ impl WorkspaceController {
         &self,
         request: DocumentLoadRequest,
     ) -> Result<(), WorkspaceControllerError> {
+        self.prepare_workspace_document(request, WorkspaceDocumentSource::ActiveNote)
+    }
+
+    pub fn prepare_trashed_document(
+        &self,
+        request: DocumentLoadRequest,
+    ) -> Result<(), WorkspaceControllerError> {
+        self.prepare_workspace_document(request, WorkspaceDocumentSource::TrashedNote)
+    }
+
+    fn prepare_workspace_document(
+        &self,
+        request: DocumentLoadRequest,
+        source: WorkspaceDocumentSource,
+    ) -> Result<(), WorkspaceControllerError> {
         let session =
             self.active_session.as_ref().ok_or(WorkspaceControllerError::NoActiveWorkspace)?;
         session
             .indexer
-            .send(IndexWorkerCommand::PrepareDocument(request))
+            .send(IndexWorkerCommand::PrepareDocument { request, source })
             .map_err(|_| WorkspaceControllerError::CommandWorkerDisconnected)
     }
 
@@ -619,13 +634,14 @@ fn execute_workspace_command(
                 }
             }
         }
-        IndexWorkerCommand::PrepareDocument(request) => {
+        IndexWorkerCommand::PrepareDocument { request, source } => {
             prepare_document_in_worker(
                 workspace,
                 catalog,
                 workspace_id,
                 workspace_generation,
                 request,
+                source,
                 event_sender,
             );
         }
@@ -744,28 +760,37 @@ fn prepare_document_in_worker(
     workspace_id: notora_core::WorkspaceId,
     workspace_generation: u64,
     request: DocumentLoadRequest,
+    source: WorkspaceDocumentSource,
     event_sender: &NotoraProductEventSender,
 ) {
-    let result = match request.identity {
-        DocumentIdentity::Note(note_id) => catalog
-            .active_note(note_id)
-            .map_err(|error| error.to_string())
-            .and_then(|note| note.ok_or_else(|| format!("活动笔记 {note_id} 已不存在")))
-            .and_then(|note| {
-                let metadata = catalog
-                    .note_editor_metadata(note_id)
-                    .map_err(|error| error.to_string())?
-                    .ok_or_else(|| format!("活动笔记 {note_id} 缺少编辑区 metadata"))?;
-                let tags = catalog.tags_for_note(note_id).map_err(|error| error.to_string())?;
-                let path = workspace
-                    .resolve_relative_path(&note.relative_path)
-                    .map_err(|error| error.to_string())?;
-                let document = crate::editor_adapter::load_document(&path)
-                    .map_err(|error| error.to_string())?;
-                Ok((document, metadata, tags))
-            }),
-        DocumentIdentity::ExternalFile(_) => Err("外部文档必须由外部文件会话加载".to_owned()),
-    };
+    let result = (|| {
+        let DocumentIdentity::Note(note_id) = request.identity else {
+            return Err("外部文档必须由外部文件会话加载".to_owned());
+        };
+        let path = match source {
+            WorkspaceDocumentSource::ActiveNote => catalog
+                .active_note(note_id)
+                .map_err(|error| error.to_string())?
+                .ok_or_else(|| format!("活动笔记 {note_id} 已不存在"))
+                .and_then(|note| {
+                    workspace
+                        .resolve_relative_path(&note.relative_path)
+                        .map_err(|error| error.to_string())
+                }),
+            WorkspaceDocumentSource::TrashedNote => {
+                notora_core::trash::resolve_trashed_note_path(workspace, catalog, note_id)
+                    .map_err(|error| error.to_string())
+            }
+        }?;
+        let metadata = catalog
+            .note_editor_metadata(note_id)
+            .map_err(|error| error.to_string())?
+            .ok_or_else(|| format!("笔记 {note_id} 缺少编辑区 metadata"))?;
+        let tags = catalog.tags_for_note(note_id).map_err(|error| error.to_string())?;
+        let document =
+            crate::editor_adapter::load_document(&path).map_err(|error| error.to_string())?;
+        Ok((document, metadata, tags))
+    })();
     match result {
         Ok((document, metadata, tags)) => {
             let _ = event_sender.send(NotoraProductEvent::DocumentLoaded {
@@ -1303,6 +1328,75 @@ mod tests {
                 break;
             }
             assert!(Instant::now() < deadline, "document metadata should arrive promptly");
+            thread::sleep(Duration::from_millis(10));
+        }
+    }
+
+    #[test]
+    fn trashed_document_load_reads_the_controlled_trash_file() {
+        let directory = tempfile::tempdir().expect("workspace test directory should be created");
+        std::fs::write(directory.path().join("trashed.md"), "# 已删除\n\n回收站正文")
+            .expect("workspace note should be written");
+        let workspace = Workspace::open_or_initialize(directory.path())
+            .expect("workspace metadata should initialize");
+        let catalog_path = workspace.metadata_directory().join(CATALOG_FILE_NAME);
+        let catalog = Catalog::open(&catalog_path).expect("workspace catalog should open");
+        scan_workspace(&workspace, &catalog).expect("workspace note should be indexed");
+        let note_id = catalog
+            .active_notes()
+            .expect("active notes should load")
+            .first()
+            .expect("indexed note should exist")
+            .note_id;
+        notora_core::move_to_trash(&workspace, &catalog, note_id)
+            .expect("fixture note should move to trash");
+        drop(catalog);
+        drop(workspace);
+
+        let mut controller = WorkspaceController::default();
+        let mut product = NotoraProduct::new();
+        let WorkspaceCommandResult::Opened(active_workspace) = controller
+            .execute(
+                WorkspaceCommand::OpenExisting { root: directory.path().to_path_buf() },
+                &mut product,
+            )
+            .expect("workspace should open")
+        else {
+            panic!("open command should activate the workspace");
+        };
+        let request = DocumentLoadRequest {
+            identity: DocumentIdentity::Note(note_id),
+            selection_generation: 9,
+        };
+        controller
+            .prepare_trashed_document(request)
+            .expect("worker should accept trashed document loading");
+        let canonical_trash_root = std::fs::canonicalize(directory.path().join(".notora/trash"))
+            .expect("trash fixture root should canonicalize");
+
+        let deadline = Instant::now() + Duration::from_secs(2);
+        loop {
+            let _ = product.drain_product_events();
+            let events = product.take_workspace_events();
+            if events.iter().any(|event| {
+                matches!(
+                    event,
+                    NotoraProductEvent::DocumentLoaded {
+                        workspace_id,
+                        workspace_generation,
+                        request: completed_request,
+                        document,
+                        ..
+                    } if *workspace_id == active_workspace.descriptor.workspace_id
+                        && *workspace_generation == active_workspace.generation
+                        && *completed_request == request
+                        && document.contents == "# 已删除\n\n回收站正文"
+                        && document.path.starts_with(&canonical_trash_root)
+                )
+            }) {
+                break;
+            }
+            assert!(Instant::now() < deadline, "trashed document should load promptly");
             thread::sleep(Duration::from_millis(10));
         }
     }

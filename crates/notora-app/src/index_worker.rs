@@ -11,6 +11,12 @@ use crate::action::{CardQuery, DocumentLoadRequest, MetadataMutation, TrashOpera
 const INDEX_WORKER_THREAD_NAME: &str = "notora-workspace-indexer";
 
 /// 只能由后台 catalog owner 执行的索引相关命令。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum WorkspaceDocumentSource {
+    ActiveNote,
+    TrashedNote,
+}
+
 pub(crate) enum IndexWorkerCommand {
     QueryCards(CardQuery),
     QueryNavigationTree,
@@ -18,7 +24,7 @@ pub(crate) enum IndexWorkerCommand {
     ExecuteMetadataMutation(MetadataMutation),
     CreateCatalogBackup { directory: PathBuf, retention: notora_core::BackupRetention },
     ExecuteTrashOperation(TrashOperation),
-    PrepareDocument(DocumentLoadRequest),
+    PrepareDocument { request: DocumentLoadRequest, source: WorkspaceDocumentSource },
     ReindexCatalog,
 }
 

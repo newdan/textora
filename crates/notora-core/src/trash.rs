@@ -114,6 +114,19 @@ pub fn restore_from_trash_with_renamed_path(
     restore_from_trash_to_relative_path(workspace, catalog, note_id, Some(restored_relative_path))
 }
 
+/// 解析一篇回收站笔记的受控绝对路径，供只读加载使用。
+pub fn resolve_trashed_note_path(
+    workspace: &Workspace,
+    catalog: &Catalog,
+    note_id: NoteId,
+) -> Result<PathBuf, TrashError> {
+    let entry = catalog
+        .trash_entry(note_id)
+        .map_err(TrashError::Catalog)?
+        .ok_or(TrashError::MissingTrashEntry { note_id })?;
+    resolve_controlled_trash_path(workspace, &entry.trash_relative_path)
+}
+
 fn restore_from_trash_to_relative_path(
     workspace: &Workspace,
     catalog: &Catalog,
@@ -291,6 +304,11 @@ mod tests {
             super::move_to_trash(&workspace, &catalog, note_id).expect("note should move to trash");
         assert!(!note_path.exists());
         assert!(workspace.root().join(&trashed.trash_relative_path).is_file());
+        assert_eq!(
+            super::resolve_trashed_note_path(&workspace, &catalog, note_id)
+                .expect("trashed note path should resolve"),
+            workspace.root().join(&trashed.trash_relative_path)
+        );
         assert_eq!(
             catalog.tags_for_note(note_id).expect("metadata should remain"),
             vec![tag.clone()]

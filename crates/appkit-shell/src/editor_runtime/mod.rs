@@ -1784,6 +1784,27 @@ mod tests {
     }
 
     #[test]
+    fn committed_text_cannot_mutate_a_read_only_runtime_tab() {
+        let mut runtime = runtime_with_clean_tab();
+        let tab_id = runtime.active_tab_id().expect("test runtime should have an active tab");
+        runtime
+            .tab_session_mut(tab_id)
+            .expect("active tab should exist")
+            .runtime
+            .set_editing_access(crate::tab_runtime::DocumentEditingAccess::ReadOnly);
+        let context = EditorInputContext {
+            editor_rect: ui::Rect::new(0.0, 0.0, 640.0, 480.0),
+            focus: EditorFocus::Active,
+            modal_blocked: false,
+        };
+
+        let outcome = runtime.commit_text(context, "中".to_owned());
+
+        assert_eq!(runtime.workspace_snapshot().tabs[0].content_lines, vec!["clean"]);
+        assert!(outcome.notifications.is_empty());
+    }
+
+    #[test]
     fn custom_editor_pointer_press_places_the_document_caret() {
         let mut runtime = runtime_with_clean_tab();
         let tab_id = runtime.active_tab_id().expect("test runtime should have an active tab");

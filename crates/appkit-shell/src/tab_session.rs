@@ -163,7 +163,12 @@ impl<'a> TabSession<'a> {
     }
 
     pub fn allows_editing(&self) -> bool {
-        self.runtime.plugin.allows_editing()
+        self.runtime.editing_access() == crate::tab_runtime::DocumentEditingAccess::Editable
+            && self.runtime.plugin.allows_editing()
+    }
+
+    pub fn editing_access(&self) -> crate::tab_runtime::DocumentEditingAccess {
+        self.runtime.editing_access()
     }
 
     pub fn handles_own_rendering(&self) -> bool {
@@ -549,6 +554,10 @@ impl<'a> TabSessionMut<'a> {
 
     pub fn plugin_name(&self) -> &str {
         self.runtime.plugin.name()
+    }
+
+    pub fn allows_editing(&self) -> bool {
+        self.as_ref().allows_editing()
     }
 
     pub fn is_canvas(&self) -> bool {

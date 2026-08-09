@@ -277,6 +277,9 @@ impl ModelSession {
         let Some(previous_summary) = self.document_summary(tab_id) else {
             return EditorOutcome::default();
         };
+        if !self.tab_session(tab_id).is_some_and(|tab| tab.allows_editing()) {
+            return EditorOutcome::default();
+        }
         let Some(request) = self.edit_request(tab_id, intent) else {
             return EditorOutcome::default();
         };
@@ -286,6 +289,9 @@ impl ModelSession {
         let Some(mut tab) = self.tab_session_mut(tab_id) else {
             return EditorOutcome::default();
         };
+        if !tab.allows_editing() {
+            return EditorOutcome::default();
+        }
         if !apply_edit_plan(tab.document, plan) {
             return EditorOutcome::default();
         }
@@ -322,6 +328,9 @@ impl ModelSession {
         let Some(mut tab) = self.tab_session_mut(tab_id) else {
             return EditorOutcome::default();
         };
+        if !tab.allows_editing() {
+            return EditorOutcome::default();
+        }
         if !apply_edit_plan(tab.document, ui::plugin::EditPlan::Apply(transaction)) {
             return EditorOutcome::default();
         }
@@ -426,6 +435,9 @@ impl ModelSession {
         let Some(mut tab) = self.tab_session_mut(tab_id) else {
             return EditorOutcome::default();
         };
+        if !tab.allows_editing() {
+            return EditorOutcome::default();
+        }
         if redo {
             tab.document.redo();
         } else {
@@ -486,6 +498,9 @@ impl ModelSession {
         let Some(previous_summary) = self.document_summary(tab_id) else {
             return (SemanticEditResult::NoChange, EditorOutcome::default());
         };
+        if !self.tab_session(tab_id).is_some_and(|tab| tab.allows_editing()) {
+            return (SemanticEditResult::NoChange, EditorOutcome::default());
+        }
         if matches!(
             command,
             ui::plugin::SemanticEditCommand::Undo | ui::plugin::SemanticEditCommand::Redo
@@ -567,6 +582,9 @@ impl ModelSession {
         let Some(mut tab) = self.tab_session_mut(tab_id) else {
             return (SemanticEditResult::NoChange, EditorOutcome::default());
         };
+        if !tab.allows_editing() {
+            return (SemanticEditResult::NoChange, EditorOutcome::default());
+        }
         if !apply_edit_plan(tab.document, plan) {
             return (SemanticEditResult::NoChange, EditorOutcome::default());
         }

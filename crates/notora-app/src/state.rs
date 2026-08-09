@@ -298,8 +298,8 @@ impl NotoraState {
                 vec![NotoraEffect::OpenExternalFiles(ExternalOpenRequest::Paths(paths))]
             }
             NotoraAction::ExternalFileOpened(identity) => {
+                self.transition_navigation_scope(NavigationScope::ExternalFiles);
                 let request = self.select_document(identity);
-                self.library.navigation_scope = NavigationScope::ExternalFiles;
                 self.layout.focus_target = FocusTarget::CardList;
                 vec![NotoraEffect::PrepareDocument(request), NotoraEffect::Redraw]
             }
@@ -417,6 +417,9 @@ impl NotoraState {
             }
             NotoraAction::TrashOperationCompleted => {
                 self.library.last_command_error = None;
+                if self.library.navigation_scope == NavigationScope::Trash {
+                    self.invalidate_document_selection();
+                }
                 self.request_card_query(CardQuery::from(self.library.navigation_scope.clone()))
             }
             NotoraAction::TrashOperationFailed(failure) => match failure {
@@ -482,7 +485,7 @@ impl NotoraState {
             self.library.search_scope_before_search = None;
             self.library.search_text.clear();
         }
-        self.library.navigation_scope = scope.clone();
+        self.transition_navigation_scope(scope.clone());
         self.layout.focus_target = FocusTarget::NavigationTree;
         self.layout.compact_navigation = CompactNavigation::Hidden;
         self.layout.compact_content = CompactContent::CardList;
@@ -504,7 +507,7 @@ impl NotoraState {
                 .search_scope_before_search
                 .take()
                 .unwrap_or(NavigationScope::WorkspaceRoot);
-            self.library.navigation_scope = scope.clone();
+            self.transition_navigation_scope(scope.clone());
             self.layout.focus_target = FocusTarget::NavigationTree;
             return self.request_card_query(CardQuery::from(scope));
         }
@@ -515,11 +518,27 @@ impl NotoraState {
             self.library.search_scope_before_search = Some(self.library.navigation_scope.clone());
         }
         let scope = NavigationScope::Search { query };
-        self.library.navigation_scope = scope.clone();
+        self.transition_navigation_scope(scope.clone());
         self.layout.focus_target = FocusTarget::NavigationSearch;
         let mut card_query = CardQuery::from(scope);
         card_query.search_generation = search_generation;
         self.request_card_query(card_query)
+    }
+
+    fn transition_navigation_scope(&mut self, scope: NavigationScope) {
+        if self.library.navigation_scope == scope {
+            return;
+        }
+        self.library.navigation_scope = scope;
+        self.invalidate_document_selection();
+    }
+
+    pub(crate) fn invalidate_document_selection(&mut self) {
+        self.library.selected_card = None;
+        self.library.title_draft = None;
+        self.library.active_editor_metadata = None;
+        self.library.selected_document_generation =
+            self.library.selected_document_generation.wrapping_add(1);
     }
 
     fn open_new_document_menu(&mut self) -> Vec<NotoraEffect> {
@@ -1191,14 +1210,14 @@ mod tests {
     use std::time::{Duration, Instant, SystemTime};
 
     use super::{
-        CardPageState, CompactContent, CompactNavigation, FocusTarget, LibraryState, NotoraState,
-        OverlayState, WorkspaceRootState,
+        ActiveEditorMetadata, CardPageState, CompactContent, CompactNavigation, FocusTarget,
+        LibraryState, NotoraState, OverlayState, WorkspaceRootState,
     };
     use crate::action::{CardQuery, NotoraAction, NotoraEffect};
     use crate::search_controller::{SEARCH_DEBOUNCE_DELAY, SearchController};
     use notora_core::{
         CatalogCard, CatalogCardCursor, CatalogCardPage, DocumentIdentity, DocumentKind,
-        NavigationScope, NoteId, TagId,
+        NavigationScope, NoteEditorMetadata, NoteId, TagId,
     };
 
     fn card(note_id: NoteId, title: &str, modified_nanoseconds: i64) -> CatalogCard {
@@ -1380,6 +1399,43 @@ mod tests {
             state.reduce(NotoraAction::NavigationSelected(NavigationScope::ExternalFiles)),
             vec![NotoraEffect::Redraw]
         );
+    }
+
+    #[test]
+    fn changing_navigation_scope_invalidates_the_previous_card_selection() {
+        let mut state = NotoraState::default();
+        let note_id = NoteId::generate();
+        let request = state.select_document(DocumentIdentity::Note(note_id));
+        state.library.active_editor_metadata = Some(ActiveEditorMetadata {
+            identity: request.identity,
+            selection_generation: request.selection_generation,
+            metadata: NoteEditorMetadata {
+                note_id,
+                created_at: SystemTime::UNIX_EPOCH,
+                modified_at: SystemTime::UNIX_EPOCH,
+                encryption: notora_core::NoteEncryption::Unencrypted,
+                title_initialization: notora_core::TitleInitialization::Independent,
+            },
+            tags: Vec::new(),
+        });
+
+        let _ = state.reduce(NotoraAction::NavigationSelected(NavigationScope::Trash));
+
+        assert_eq!(state.library.selected_card, None);
+        assert_eq!(state.library.active_editor_metadata, None);
+        assert_eq!(state.library.selected_document_generation, 2);
+    }
+
+    #[test]
+    fn reselecting_the_current_navigation_scope_preserves_the_active_selection() {
+        let mut state = NotoraState::default();
+        let identity = DocumentIdentity::Note(NoteId::generate());
+        let _ = state.select_document(identity);
+
+        let _ = state.reduce(NotoraAction::NavigationSelected(NavigationScope::WorkspaceRoot));
+
+        assert_eq!(state.library.selected_card, Some(identity));
+        assert_eq!(state.library.selected_document_generation, 1);
     }
 
     #[test]
