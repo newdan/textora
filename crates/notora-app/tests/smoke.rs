@@ -13,14 +13,75 @@ fn app() -> NotoraApp {
 #[test]
 fn binary_title_and_three_pane_editor_rect_are_product_specific() {
     let manifest = include_str!("../Cargo.toml");
-    let app_source = include_str!("../src/app.rs");
+    let runtime_source = include_str!("../src/runtime.rs");
     let layout = app().shell_layout();
 
     assert!(manifest.contains("name = \"notora\""));
-    assert!(app_source.contains("with_title(\"notora\")"));
+    assert!(runtime_source.contains("with_title(\"notora\")"));
     assert!(layout.editor_rect.x > 0.0);
     assert!(layout.navigation_rect.right() <= layout.editor_rect.x);
     assert!(layout.card_list_rect.right() <= layout.editor_rect.x);
+}
+
+#[test]
+fn notora_app_remains_a_thin_composition_root() {
+    let app_source = include_str!("../src/app.rs");
+    let events_source = include_str!("../src/events.rs");
+    let adapter_start = events_source
+        .find("impl ApplicationHandler<ShellEvent> for NotoraApp")
+        .expect("NotoraApp should remain the winit adapter");
+    let runtime_start = events_source[adapter_start..]
+        .find("impl NotoraRuntime")
+        .map(|offset| adapter_start + offset)
+        .expect("event implementation should belong to NotoraRuntime");
+    let application_handler = &events_source[adapter_start..runtime_start];
+
+    assert!(app_source.contains("runtime: NotoraRuntime"));
+    assert!(!app_source.contains("NotoraProductEvent"));
+    assert!(!app_source.contains("impl NotoraEffectService"));
+    assert!(!application_handler.contains("match event"));
+    assert!(!application_handler.contains("WindowEvent::"));
+    assert_eq!(application_handler.matches("runtime_mut()").count(), 4);
+}
+
+#[test]
+fn runtime_state_is_owned_by_named_components() {
+    let runtime_source = include_str!("../src/runtime.rs");
+    let document_runtime_source = include_str!("../src/runtime/document_runtime.rs");
+    let frame_runtime_source = include_str!("../src/runtime/frame_runtime.rs");
+    let product_coordinator_source = include_str!("../src/app/product_event_coordinator.rs");
+    let deadline_coordinator_source = include_str!("../src/app/deadline_coordinator.rs");
+    let effect_executor_source = include_str!("../src/effect_executor.rs");
+    let runtime_fields_start = runtime_source
+        .find("pub(crate) struct NotoraRuntime")
+        .expect("runtime struct should exist");
+    let runtime_fields_end = runtime_source[runtime_fields_start..]
+        .find("\n}\n\nimpl NotoraRuntime")
+        .map(|offset| runtime_fields_start + offset)
+        .expect("runtime fields should end before its implementation");
+    let runtime_fields = &runtime_source[runtime_fields_start..runtime_fields_end];
+
+    for component in [
+        "action_runtime: ActionRuntime",
+        "document_runtime: DocumentRuntime",
+        "persistence_runtime: PersistenceRuntime",
+        "frame_runtime: FrameRuntime",
+        "window_runtime: WindowRuntime",
+    ] {
+        assert!(runtime_fields.contains(component), "runtime should own {component}");
+    }
+    assert!(!runtime_fields.contains("pending_"));
+    assert!(!runtime_fields.contains("HashMap<"));
+    assert!(document_runtime_source.contains("pending_conflict_retries:"));
+    assert!(document_runtime_source.contains("pending_metadata_mutations:"));
+    assert!(!product_coordinator_source.contains("NotoraRuntime"));
+    assert!(!deadline_coordinator_source.contains("NotoraRuntime"));
+    assert!(!runtime_source.contains("impl NotoraEffectService for NotoraRuntime"));
+    assert!(!runtime_source.contains("impl ShellEffectTarget for NotoraRuntime"));
+    assert!(!runtime_source.contains("wgpu::RenderPassDescriptor"));
+    assert!(!runtime_source.contains("create_buffer(&wgpu::BufferDescriptor"));
+    assert!(!frame_runtime_source.contains("&mut NotoraState"));
+    assert!(!effect_executor_source.contains("dispatch_action"));
 }
 
 #[test]
@@ -70,15 +131,15 @@ fn modal_new_document_menu_and_tooltip_are_painted_after_the_editor() {
 
 #[test]
 fn session_restore_is_scheduled_only_after_the_first_presented_frame() {
-    let app_source = include_str!("../src/app.rs");
+    let runtime_source = include_str!("../src/runtime.rs");
     let events_source = include_str!("../src/events.rs");
-    let resume_start = app_source.find("pub(crate) fn resume").expect("resume should exist");
-    let resume_end = app_source[resume_start..]
+    let resume_start = runtime_source.find("pub(crate) fn resume").expect("resume should exist");
+    let resume_end = runtime_source[resume_start..]
         .find("pub(crate) fn resize_window")
         .map(|offset| resume_start + offset)
         .expect("resume should end before resize_window");
 
-    assert!(!app_source[resume_start..resume_end].contains("restore_pending_session"));
+    assert!(!runtime_source[resume_start..resume_end].contains("restore_pending_session"));
     let redraw_start =
         events_source.find("WindowEvent::RedrawRequested").expect("redraw handling should exist");
     let redraw_source = &events_source[redraw_start..];
@@ -87,6 +148,47 @@ fn session_restore_is_scheduled_only_after_the_first_presented_frame() {
         .find("self.restore_session_after_first_frame()")
         .expect("redraw should schedule session restore");
     assert!(render_position < restore_position);
+}
+
+#[test]
+fn shutdown_flushes_state_before_stopping_background_workers() {
+    let runtime_source = include_str!("../src/runtime.rs");
+    let shutdown_start =
+        runtime_source.find("pub(crate) fn shutdown").expect("runtime shutdown should exist");
+    let shutdown_end = runtime_source[shutdown_start..]
+        .find("fn finish_saves_and_snapshot_dirty_documents")
+        .map(|offset| shutdown_start + offset)
+        .expect("shutdown should end before its save helper");
+    let shutdown_source = &runtime_source[shutdown_start..shutdown_end];
+
+    let finish_saves = shutdown_source
+        .find("self.finish_saves_and_snapshot_dirty_documents()")
+        .expect("shutdown should settle saves before stopping workers");
+    let flush_catalog = shutdown_source
+        .find("self.flush_pending_catalog_backup()")
+        .expect("shutdown should flush the catalog backup");
+    let save_session = shutdown_source
+        .find(".save_session(")
+        .expect("shutdown should enqueue the final session snapshot");
+    let save_settings = shutdown_source
+        .find(".save_settings(")
+        .expect("shutdown should enqueue the final settings snapshot");
+    let stop_persistence = shutdown_source
+        .find("self.persistence_runtime.shutdown()")
+        .expect("shutdown should stop the persistence worker");
+    let stop_product = shutdown_source
+        .find("ProductHost::shutdown(&mut self.product)")
+        .expect("shutdown should stop product services");
+    let stop_editor = shutdown_source
+        .find("self.document_runtime.editor_runtime.shutdown()")
+        .expect("shutdown should stop the editor runtime");
+
+    assert!(finish_saves < flush_catalog);
+    assert!(flush_catalog < save_session);
+    assert!(save_session < save_settings);
+    assert!(save_settings < stop_persistence);
+    assert!(stop_persistence < stop_product);
+    assert!(stop_product < stop_editor);
 }
 
 #[test]

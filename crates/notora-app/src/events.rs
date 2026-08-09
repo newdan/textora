@@ -16,6 +16,7 @@ use winit::window::WindowId;
 
 use crate::NotoraApp;
 use crate::action::NotoraAction;
+use crate::runtime::NotoraRuntime;
 use crate::{FocusTarget, NotoraState, OverlayState, shell::layout::ShellLayout};
 use ui::core::Modifiers;
 
@@ -74,13 +75,36 @@ pub fn editor_input_context(
 
 impl ApplicationHandler<ShellEvent> for NotoraApp {
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
+        self.runtime_mut().handle_resumed(event_loop);
+    }
+
+    fn user_event(&mut self, event_loop: &ActiveEventLoop, event: ShellEvent) {
+        self.runtime_mut().handle_user_event(event_loop, event);
+    }
+
+    fn window_event(
+        &mut self,
+        event_loop: &ActiveEventLoop,
+        window_id: WindowId,
+        event: WindowEvent,
+    ) {
+        self.runtime_mut().handle_window_event(event_loop, window_id, event);
+    }
+
+    fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
+        self.runtime_mut().handle_about_to_wait(event_loop);
+    }
+}
+
+impl NotoraRuntime {
+    fn handle_resumed(&mut self, event_loop: &ActiveEventLoop) {
         if let Err(error) = self.resume(event_loop) {
             eprintln!("notora window initialization failed: {error}");
             event_loop.exit();
         }
     }
 
-    fn user_event(&mut self, _event_loop: &ActiveEventLoop, event: ShellEvent) {
+    fn handle_user_event(&mut self, _event_loop: &ActiveEventLoop, event: ShellEvent) {
         match event {
             ShellEvent::ProductWake => self.drain_product_events(),
             ShellEvent::SaveResultsReady => {
@@ -94,7 +118,7 @@ impl ApplicationHandler<ShellEvent> for NotoraApp {
         }
     }
 
-    fn window_event(
+    fn handle_window_event(
         &mut self,
         event_loop: &ActiveEventLoop,
         _window_id: WindowId,
@@ -204,11 +228,8 @@ impl ApplicationHandler<ShellEvent> for NotoraApp {
         }
     }
 
-    fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
-        self.process_due_autosaves();
-        self.process_due_searches();
-        self.process_due_session_persistence();
-        self.process_due_catalog_backups();
+    fn handle_about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
+        self.process_due_scheduled_work();
         if self.take_redraw_request() {
             self.request_window_redraw();
         }
@@ -218,7 +239,7 @@ impl ApplicationHandler<ShellEvent> for NotoraApp {
     }
 }
 
-impl NotoraApp {
+impl NotoraRuntime {
     pub(crate) fn handle_key_input(&mut self, key_code: ui::KeyCode, modifiers: Modifiers) {
         let key_event = ui::Event::KeyDown(key_code, modifiers);
         if key_code == ui::KeyCode::Escape {
