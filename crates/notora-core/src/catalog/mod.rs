@@ -12,7 +12,9 @@ use rusqlite::Connection;
 pub use card_repository::{CatalogCard, CatalogCardCursor, CatalogCardPage};
 pub use metadata_repository::{CatalogNavigationTree, TagWithActiveNoteCount};
 pub use migration::CATALOG_SCHEMA_VERSION;
-pub use note_repository::{CatalogNote, TrashEntry};
+pub use note_repository::{
+    CatalogNote, NotePathOperation, NotePathOperationKind, NotePathOperationState, TrashEntry,
+};
 pub use search_repository::SearchIndexEntry;
 
 /// 已完成基础迁移的工作区 catalog 连接。

@@ -1577,7 +1577,10 @@ version = "0.1.0"
 dependencies = [
  "blake3",
  "notify",
+ "percent-encoding",
+ "pulldown-cmark",
  "rusqlite",
+ "rustix 1.1.4",
  "serde",
  "tempfile",
  "toml",

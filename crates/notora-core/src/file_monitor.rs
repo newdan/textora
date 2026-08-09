@@ -4,7 +4,8 @@ use std::sync::mpsc;
 use std::thread::{self, JoinHandle};
 use std::time::Duration;
 
-use notify::{Config, RecommendedWatcher, RecursiveMode, Watcher};
+use notify::event::{ModifyKind, RenameMode};
+use notify::{Config, Event, EventKind, RecommendedWatcher, RecursiveMode, Watcher};
 
 use crate::WORKSPACE_METADATA_DIRECTORY_NAME;
 
@@ -15,6 +16,15 @@ const MACOS_RESOURCE_FORK_PREFIX: &str = "._";
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WorkspaceFileBatch {
     pub relative_paths: Vec<PathBuf>,
+    pub changes: Vec<WorkspaceFileChange>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum WorkspaceFileChange {
+    Renamed { from: PathBuf, to: PathBuf, tracker: Option<u64> },
+    Created(PathBuf),
+    Modified(PathBuf),
+    Removed(PathBuf),
 }
 
 pub struct WorkspaceFileMonitor {
@@ -118,13 +128,13 @@ fn run_event_batch_loop(
     result_sender: &mpsc::Sender<WorkspaceFileBatch>,
     debounce: Duration,
 ) {
-    let mut pending_paths = Vec::new();
+    let mut pending_events = Vec::new();
     loop {
         match command_receiver.recv_timeout(debounce) {
             Ok(MonitorCommand::Shutdown) | Err(mpsc::RecvTimeoutError::Disconnected) => return,
             Err(mpsc::RecvTimeoutError::Timeout) => {
-                drain_events(event_receiver, &mut pending_paths);
-                if !send_batch(root, result_sender, &mut pending_paths) {
+                drain_events(event_receiver, &mut pending_events);
+                if !send_batch(root, result_sender, &mut pending_events) {
                     return;
                 }
             }
@@ -134,25 +144,149 @@ fn run_event_batch_loop(
 
 fn drain_events(
     event_receiver: &mpsc::Receiver<notify::Result<notify::Event>>,
-    pending_paths: &mut Vec<PathBuf>,
+    pending_events: &mut Vec<Event>,
 ) {
     while let Ok(Ok(event)) = event_receiver.try_recv() {
-        pending_paths.extend(event.paths);
+        pending_events.push(event);
     }
 }
 
 fn send_batch(
     root: &Path,
     sender: &mpsc::Sender<WorkspaceFileBatch>,
-    pending_paths: &mut Vec<PathBuf>,
+    pending_events: &mut Vec<Event>,
 ) -> bool {
-    let relative_paths = filter_relative_paths(root, std::mem::take(pending_paths));
+    let changes = normalize_changes(root, std::mem::take(pending_events));
+    let relative_paths = changes
+        .iter()
+        .flat_map(change_paths)
+        .cloned()
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect::<Vec<_>>();
     if relative_paths.is_empty() {
         return true;
     }
-    sender.send(WorkspaceFileBatch { relative_paths }).is_ok()
+    sender.send(WorkspaceFileBatch { relative_paths, changes }).is_ok()
 }
 
+fn normalize_changes(root: &Path, events: Vec<Event>) -> Vec<WorkspaceFileChange> {
+    let mut changes = Vec::new();
+    let mut rename_sources = Vec::new();
+    let mut rename_targets = Vec::new();
+    for event in events {
+        let tracker = event.attrs.tracker().and_then(|value| u64::try_from(value).ok());
+        match event.kind {
+            EventKind::Modify(ModifyKind::Name(RenameMode::Both | RenameMode::Any))
+                if event.paths.len() == 2 =>
+            {
+                let from = relative_path(root, &event.paths[0]);
+                let to = relative_path(root, &event.paths[1]);
+                if let (Some(from), Some(to)) = (from, to) {
+                    push_unique_change(
+                        &mut changes,
+                        WorkspaceFileChange::Renamed { from, to, tracker },
+                    );
+                }
+            }
+            EventKind::Modify(ModifyKind::Name(RenameMode::From)) => {
+                rename_sources.extend(
+                    event
+                        .paths
+                        .into_iter()
+                        .filter_map(|path| relative_path(root, &path).map(|path| (path, tracker))),
+                );
+            }
+            EventKind::Modify(ModifyKind::Name(RenameMode::To)) => {
+                rename_targets.extend(
+                    event
+                        .paths
+                        .into_iter()
+                        .filter_map(|path| relative_path(root, &path).map(|path| (path, tracker))),
+                );
+            }
+            EventKind::Create(_) => {
+                push_paths_as_changes(root, event.paths, &mut changes, WorkspaceFileChange::Created)
+            }
+            EventKind::Remove(_) => {
+                push_paths_as_changes(root, event.paths, &mut changes, WorkspaceFileChange::Removed)
+            }
+            EventKind::Access(_) => {}
+            _ => push_paths_as_changes(
+                root,
+                event.paths,
+                &mut changes,
+                WorkspaceFileChange::Modified,
+            ),
+        }
+    }
+    pair_split_renames(&mut changes, rename_sources, rename_targets);
+    changes
+}
+
+fn pair_split_renames(
+    changes: &mut Vec<WorkspaceFileChange>,
+    mut sources: Vec<(PathBuf, Option<u64>)>,
+    mut targets: Vec<(PathBuf, Option<u64>)>,
+) {
+    let mut source_index = 0;
+    while source_index < sources.len() {
+        let tracker = sources[source_index].1;
+        let matching_target = tracker
+            .and_then(|tracker| targets.iter().position(|target| target.1 == Some(tracker)))
+            .or_else(|| (sources.len() == 1 && targets.len() == 1).then_some(0));
+        let Some(target_index) = matching_target else {
+            source_index += 1;
+            continue;
+        };
+        let (from, source_tracker) = sources.remove(source_index);
+        let (to, target_tracker) = targets.remove(target_index);
+        push_unique_change(
+            changes,
+            WorkspaceFileChange::Renamed { from, to, tracker: source_tracker.or(target_tracker) },
+        );
+    }
+    for (path, _) in sources {
+        push_unique_change(changes, WorkspaceFileChange::Removed(path));
+    }
+    for (path, _) in targets {
+        push_unique_change(changes, WorkspaceFileChange::Created(path));
+    }
+}
+
+fn push_paths_as_changes(
+    root: &Path,
+    paths: Vec<PathBuf>,
+    changes: &mut Vec<WorkspaceFileChange>,
+    make_change: impl Fn(PathBuf) -> WorkspaceFileChange,
+) {
+    for path in paths {
+        if let Some(relative_path) = relative_path(root, &path) {
+            push_unique_change(changes, make_change(relative_path));
+        }
+    }
+}
+
+fn push_unique_change(changes: &mut Vec<WorkspaceFileChange>, change: WorkspaceFileChange) {
+    if !changes.contains(&change) {
+        changes.push(change);
+    }
+}
+
+fn change_paths(change: &WorkspaceFileChange) -> Vec<&PathBuf> {
+    match change {
+        WorkspaceFileChange::Renamed { from, to, .. } => vec![from, to],
+        WorkspaceFileChange::Created(path)
+        | WorkspaceFileChange::Modified(path)
+        | WorkspaceFileChange::Removed(path) => vec![path],
+    }
+}
+
+fn relative_path(root: &Path, path: &Path) -> Option<PathBuf> {
+    path.strip_prefix(root).ok().map(Path::to_path_buf).filter(|path| !should_ignore(path))
+}
+
+#[cfg(test)]
 fn filter_relative_paths(root: &Path, paths: impl IntoIterator<Item = PathBuf>) -> Vec<PathBuf> {
     paths
         .into_iter()
@@ -173,6 +307,7 @@ fn should_ignore(relative_path: &Path) -> bool {
     relative_path.file_name().and_then(|name| name.to_str()).is_none_or(|file_name| {
         file_name == MACOS_FINDER_METADATA_FILE_NAME
             || file_name.starts_with(MACOS_RESOURCE_FORK_PREFIX)
+            || file_name.starts_with(crate::workspace::NOTE_RELOCATION_TEMPORARY_FILE_PREFIX)
             || is_atomic_write_temporary_file(file_name)
     })
 }
@@ -204,7 +339,7 @@ mod tests {
     use notify::event::{ModifyKind, RenameMode};
     use notify::{Event, EventKind};
 
-    use super::{MonitorCommand, filter_relative_paths, run_event_batch_loop};
+    use super::{MonitorCommand, WorkspaceFileChange, filter_relative_paths, run_event_batch_loop};
 
     #[test]
     fn filter_ignores_metadata_and_deduplicates_paths() {
@@ -250,6 +385,14 @@ mod tests {
         assert_eq!(
             batch.relative_paths,
             vec![PathBuf::from("after.md"), PathBuf::from("before.md")]
+        );
+        assert_eq!(
+            batch.changes,
+            vec![WorkspaceFileChange::Renamed {
+                from: "before.md".into(),
+                to: "after.md".into(),
+                tracker: None,
+            }]
         );
         command_sender.send(MonitorCommand::Shutdown).expect("worker should accept shutdown");
         worker.join().expect("injected event worker should stop cleanly");

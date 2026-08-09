@@ -3,7 +3,8 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use crate::catalog::SearchIndexEntry;
-use crate::reconciliation::reconcile_notes;
+use crate::file_monitor::{WorkspaceFileBatch, WorkspaceFileChange};
+use crate::reconciliation::reconcile_notes_with_renames;
 use crate::{
     Catalog, CatalogError, CatalogNote, DiscoveredNote, DocumentKind, ReconciliationChange,
     ReconciliationError, WORKSPACE_METADATA_DIRECTORY_NAME, Workspace, parse_note_text_summary,
@@ -77,6 +78,7 @@ pub fn scan_workspace(
         &mut completion,
         existing_notes_by_path.into_values().collect(),
         discovered_files,
+        &[],
     )?;
     Ok(completion)
 }
@@ -86,6 +88,34 @@ pub fn scan_workspace_paths(
     workspace: &Workspace,
     catalog: &Catalog,
     relative_paths: &[PathBuf],
+) -> Result<ScanCompletion, ScanError> {
+    scan_workspace_paths_with_renames(workspace, catalog, relative_paths, &[])
+}
+
+/// 扫描 watcher 批次，并优先使用文件系统提供的明确重命名关系保持 NoteId。
+pub fn scan_workspace_file_batch(
+    workspace: &Workspace,
+    catalog: &Catalog,
+    batch: &WorkspaceFileBatch,
+) -> Result<ScanCompletion, ScanError> {
+    let rename_hints = batch
+        .changes
+        .iter()
+        .filter_map(|change| match change {
+            WorkspaceFileChange::Renamed { from, to, .. } => Some((from.clone(), to.clone())),
+            WorkspaceFileChange::Created(_)
+            | WorkspaceFileChange::Modified(_)
+            | WorkspaceFileChange::Removed(_) => None,
+        })
+        .collect::<Vec<_>>();
+    scan_workspace_paths_with_renames(workspace, catalog, &batch.relative_paths, &rename_hints)
+}
+
+fn scan_workspace_paths_with_renames(
+    workspace: &Workspace,
+    catalog: &Catalog,
+    relative_paths: &[PathBuf],
+    rename_hints: &[(PathBuf, PathBuf)],
 ) -> Result<ScanCompletion, ScanError> {
     let existing_notes = catalog.active_notes().map_err(ScanError::Catalog)?;
     let existing_notes_by_path = existing_notes
@@ -139,6 +169,7 @@ pub fn scan_workspace_paths(
         &mut completion,
         affected_notes_by_path.into_values().collect(),
         discovered_files,
+        rename_hints,
     )?;
     Ok(completion)
 }
@@ -163,10 +194,14 @@ fn apply_scan_results(
     completion: &mut ScanCompletion,
     existing_notes: Vec<CatalogNote>,
     discovered_files: Vec<DiscoveredFile>,
+    rename_hints: &[(PathBuf, PathBuf)],
 ) -> Result<(), ScanError> {
-    let plan =
-        reconcile_notes(existing_notes, discovered_files.iter().map(|file| file.note.clone()))
-            .map_err(ScanError::Reconciliation)?;
+    let plan = reconcile_notes_with_renames(
+        existing_notes,
+        discovered_files.iter().map(|file| file.note.clone()),
+        rename_hints,
+    )
+    .map_err(ScanError::Reconciliation)?;
     let changed_bodies_by_path = discovered_files
         .into_iter()
         .filter_map(|file| file.body.map(|body| (file.note.relative_path, body)))
@@ -184,11 +219,28 @@ fn apply_scan_results(
                 catalog.upsert_active_note(&note).map_err(ScanError::Catalog)?;
                 search_entries.push(search_entry(catalog, &note, body.clone())?);
             }
-            ReconciliationChange::Added(note) | ReconciliationChange::Moved { note, .. } => {
+            ReconciliationChange::Added(note) => {
                 present_note_ids.push(note.note_id);
                 let Some(body) = changed_bodies_by_path.get(&note.relative_path) else {
                     continue;
                 };
+                catalog.upsert_active_note(&note).map_err(ScanError::Catalog)?;
+                search_entries.push(search_entry(catalog, &note, body.clone())?);
+            }
+            ReconciliationChange::Moved { from, note } => {
+                present_note_ids.push(note.note_id);
+                let Some(body) = changed_bodies_by_path.get(&note.relative_path) else {
+                    continue;
+                };
+                let external_title = (from.file_name() != note.relative_path.file_name())
+                    .then_some(note.title.as_str());
+                catalog
+                    .apply_external_note_relocation(
+                        note.note_id,
+                        &note.relative_path,
+                        external_title,
+                    )
+                    .map_err(ScanError::Catalog)?;
                 catalog.upsert_active_note(&note).map_err(ScanError::Catalog)?;
                 search_entries.push(search_entry(catalog, &note, body.clone())?);
             }
@@ -347,7 +399,7 @@ fn scan_file(
     let note = DiscoveredNote {
         relative_path: relative_path.clone(),
         kind,
-        title: summary.title,
+        title: file_stem.to_owned(),
         excerpt: summary.excerpt,
         modified_at,
         file_size: metadata.len(),
@@ -539,6 +591,37 @@ mod tests {
             1
         );
         assert!(catalog.active_notes().expect("catalog notes should remain").len() == 2);
+    }
+
+    #[test]
+    fn finder_rename_preserves_note_id_and_uses_the_new_stem_as_literal_title() {
+        let directory = tempfile::tempdir().expect("workspace test directory should be created");
+        let old_path = directory.path().join("old.md");
+        let new_path = directory.path().join("New (2).md");
+        fs::write(&old_path, "same body").expect("rename fixture should be written");
+        let workspace =
+            Workspace::open_or_initialize(directory.path()).expect("workspace should initialize");
+        let catalog = Catalog::open(&workspace.metadata_directory().join("catalog.sqlite3"))
+            .expect("catalog should initialize");
+        scan_workspace(&workspace, &catalog).expect("initial scan should complete");
+        let original = catalog.active_notes().expect("original note should load").remove(0);
+
+        fs::rename(&old_path, &new_path).expect("Finder rename fixture should move");
+        scan_workspace_paths(&workspace, &catalog, &["old.md".into(), "New (2).md".into()])
+            .expect("rename scan should complete");
+
+        let renamed = catalog.active_notes().expect("renamed note should load").remove(0);
+        assert_eq!(renamed.note_id, original.note_id);
+        assert_eq!(renamed.relative_path, std::path::PathBuf::from("New (2).md"));
+        assert_eq!(renamed.title, "New (2)");
+        assert_eq!(
+            catalog
+                .note_file_name_metadata(renamed.note_id)
+                .expect("renamed metadata should query")
+                .expect("renamed metadata should exist")
+                .title_revision,
+            1
+        );
     }
 
     #[test]

@@ -37,7 +37,6 @@ pub trait NotoraEffectService {
     fn execute_semantic_edit(&mut self, _command: ui::plugin::SemanticEditCommand) {}
     fn execute_metadata_mutation(&mut self, _mutation: MetadataMutation) {}
     fn execute_trash_operation(&mut self, _operation: TrashOperation) {}
-    fn choose_note_rename_destination(&mut self, _note_id: notora_core::NoteId) {}
     fn choose_note_move_directory(&mut self, _note_id: notora_core::NoteId) {}
     fn prepare_document(&mut self, request: DocumentLoadRequest);
     fn promote_active_preview(&mut self) {}
@@ -88,10 +87,6 @@ impl EffectExecutor {
             }
             NotoraEffect::ExecuteTrashOperation(operation) => {
                 service.execute_trash_operation(operation);
-                ShellEffect::NONE
-            }
-            NotoraEffect::ChooseNoteRenameDestination(note_id) => {
-                service.choose_note_rename_destination(note_id);
                 ShellEffect::NONE
             }
             NotoraEffect::ChooseNoteMoveDirectory(note_id) => {

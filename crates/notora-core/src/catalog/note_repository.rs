@@ -4,7 +4,9 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use rusqlite::{OptionalExtension, Row, params};
 use uuid::Uuid;
 
-use crate::domain::{NoteEncryption, TitleInitialization};
+use crate::domain::{
+    NoteEncryption, NoteFileNameBinding, NoteFileNameMetadata, TitleInitialization,
+};
 use crate::{DocumentKind, NoteId};
 
 use super::{Catalog, CatalogError};
@@ -17,6 +19,17 @@ const TRASHED_NOTE_LIFECYCLE: i64 = 1;
 const MISSING_SCAN_CONFIRMATION_COUNT: i64 = 2;
 const NOTE_ENCRYPTION_UNENCRYPTED: i64 = 0;
 const NOTE_ENCRYPTION_ENCRYPTED: i64 = 1;
+const FILE_NAME_BINDING_LEGACY_UNMANAGED: i64 = 0;
+const FILE_NAME_BINDING_TITLE_BOUND: i64 = 1;
+const FILE_NAME_BINDING_OPAQUE: i64 = 2;
+const PATH_OPERATION_KIND_TITLE_RENAME: i64 = 0;
+const PATH_OPERATION_KIND_DIRECTORY_MOVE: i64 = 1;
+const PATH_OPERATION_KIND_EXTERNAL_RENAME: i64 = 2;
+const PATH_OPERATION_KIND_MIGRATION: i64 = 3;
+const PATH_OPERATION_STATE_PREPARED: i64 = 0;
+const PATH_OPERATION_STATE_MOVED: i64 = 1;
+const PATH_OPERATION_STATE_COMMITTED: i64 = 2;
+const PATH_OPERATION_STATE_ROLLED_BACK: i64 = 3;
 
 /// 已由扫描器读取并准备写入 catalog 的活动笔记记录。
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -43,7 +56,358 @@ pub struct TrashEntry {
     pub deleted_at: SystemTime,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NotePathOperationKind {
+    TitleRename,
+    DirectoryMove,
+    ExternalRename,
+    Migration,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NotePathOperationState {
+    Prepared,
+    Moved,
+    Committed,
+    RolledBack,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NotePathOperation {
+    pub operation_id: Uuid,
+    pub note_id: NoteId,
+    pub kind: NotePathOperationKind,
+    pub source_relative_path: PathBuf,
+    pub target_relative_path: PathBuf,
+    pub expected_title_revision: u64,
+    pub state: NotePathOperationState,
+}
+
 impl Catalog {
+    /// 接受已经在 Finder 中发生的路径变化，并在 basename 改变时反向更新普通笔记标题。
+    pub fn apply_external_note_relocation(
+        &self,
+        note_id: NoteId,
+        relative_path: &Path,
+        external_title: Option<&str>,
+    ) -> Result<(), CatalogError> {
+        let transaction = self.connection().unchecked_transaction().map_err(|source| {
+            CatalogError::sql("external note relocation transaction start", source)
+        })?;
+        let binding: i64 = transaction
+            .query_row(
+                "SELECT file_name_binding FROM notes WHERE note_id = ?1 AND lifecycle = ?2",
+                params![note_id.to_string(), ACTIVE_NOTE_LIFECYCLE],
+                |row| row.get(0),
+            )
+            .map_err(|source| CatalogError::sql("external note relocation binding read", source))?;
+        let title_may_change = binding != FILE_NAME_BINDING_OPAQUE;
+        if let Some(title) = external_title.filter(|_| title_may_change) {
+            transaction
+                .execute(
+                    "UPDATE notes
+                     SET relative_path = ?1,
+                         title = ?2,
+                         file_name_binding = ?3,
+                         file_name_disambiguator = 1,
+                         title_revision = title_revision + 1,
+                         missing_scan_count = 0
+                     WHERE note_id = ?4 AND lifecycle = ?5",
+                    params![
+                        relative_path.to_string_lossy(),
+                        title,
+                        FILE_NAME_BINDING_TITLE_BOUND,
+                        note_id.to_string(),
+                        ACTIVE_NOTE_LIFECYCLE,
+                    ],
+                )
+                .map_err(|source| CatalogError::sql("external note relocation update", source))?;
+            transaction
+                .execute(
+                    "UPDATE note_search SET title = ?1, relative_path = ?2 WHERE note_id = ?3",
+                    params![title, relative_path.to_string_lossy(), note_id.to_string()],
+                )
+                .map_err(|source| {
+                    CatalogError::sql("external note relocation search refresh", source)
+                })?;
+        } else {
+            transaction
+                .execute(
+                    "UPDATE notes SET relative_path = ?1, missing_scan_count = 0
+                     WHERE note_id = ?2 AND lifecycle = ?3",
+                    params![
+                        relative_path.to_string_lossy(),
+                        note_id.to_string(),
+                        ACTIVE_NOTE_LIFECYCLE,
+                    ],
+                )
+                .map_err(|source| CatalogError::sql("external note move update", source))?;
+            transaction
+                .execute(
+                    "UPDATE note_search SET relative_path = ?1 WHERE note_id = ?2",
+                    params![relative_path.to_string_lossy(), note_id.to_string()],
+                )
+                .map_err(|source| CatalogError::sql("external note move search refresh", source))?;
+        }
+        transaction.commit().map_err(|source| {
+            CatalogError::sql("external note relocation transaction commit", source)
+        })
+    }
+
+    /// 原子提交不允许泄漏到路径的标题；`None` 表示 revision 已过期。
+    pub fn commit_title_metadata(
+        &self,
+        note_id: NoteId,
+        expected_title_revision: u64,
+        title: &str,
+    ) -> Result<Option<u64>, CatalogError> {
+        let expected_revision = i64::try_from(expected_title_revision).map_err(|_| {
+            CatalogError::InvalidStoredValue {
+                column: "title_revision",
+                value: expected_title_revision.to_string(),
+            }
+        })?;
+        let next_title_revision = expected_title_revision.checked_add(1).ok_or_else(|| {
+            CatalogError::InvalidStoredValue {
+                column: "title_revision",
+                value: expected_title_revision.to_string(),
+            }
+        })?;
+        let next_revision =
+            i64::try_from(next_title_revision).map_err(|_| CatalogError::InvalidStoredValue {
+                column: "title_revision",
+                value: next_title_revision.to_string(),
+            })?;
+        let transaction = self
+            .connection()
+            .unchecked_transaction()
+            .map_err(|source| CatalogError::sql("title metadata transaction start", source))?;
+        let updated_rows = transaction
+            .execute(
+                "UPDATE notes SET title = ?1, title_revision = ?2
+                 WHERE note_id = ?3 AND lifecycle = ?4 AND title_revision = ?5",
+                params![
+                    title,
+                    next_revision,
+                    note_id.to_string(),
+                    ACTIVE_NOTE_LIFECYCLE,
+                    expected_revision,
+                ],
+            )
+            .map_err(|source| CatalogError::sql("title metadata note update", source))?;
+        if updated_rows != 1 {
+            return Ok(None);
+        }
+        transaction
+            .execute(
+                "UPDATE note_search SET title = ?1 WHERE note_id = ?2",
+                params![title, note_id.to_string()],
+            )
+            .map_err(|source| CatalogError::sql("title metadata search refresh", source))?;
+        transaction
+            .commit()
+            .map_err(|source| CatalogError::sql("title metadata transaction commit", source))?;
+        Ok(Some(next_title_revision))
+    }
+
+    /// 原子提交标题派生路径；`None` 表示调用方的 title revision 已过期。
+    pub fn commit_title_bound_path(
+        &self,
+        note_id: NoteId,
+        expected_title_revision: u64,
+        title: &str,
+        relative_path: &Path,
+        disambiguator: u32,
+    ) -> Result<Option<u64>, CatalogError> {
+        if disambiguator == 0 {
+            return Err(CatalogError::InvalidStoredValue {
+                column: "file_name_disambiguator",
+                value: disambiguator.to_string(),
+            });
+        }
+        let expected_revision = i64::try_from(expected_title_revision).map_err(|_| {
+            CatalogError::InvalidStoredValue {
+                column: "title_revision",
+                value: expected_title_revision.to_string(),
+            }
+        })?;
+        let next_title_revision = expected_title_revision.checked_add(1).ok_or_else(|| {
+            CatalogError::InvalidStoredValue {
+                column: "title_revision",
+                value: expected_title_revision.to_string(),
+            }
+        })?;
+        let next_revision =
+            i64::try_from(next_title_revision).map_err(|_| CatalogError::InvalidStoredValue {
+                column: "title_revision",
+                value: next_title_revision.to_string(),
+            })?;
+        let transaction = self
+            .connection()
+            .unchecked_transaction()
+            .map_err(|source| CatalogError::sql("title path commit transaction start", source))?;
+        let actual_revision: Option<i64> = transaction
+            .query_row(
+                "SELECT title_revision FROM notes WHERE note_id = ?1 AND lifecycle = ?2",
+                params![note_id.to_string(), ACTIVE_NOTE_LIFECYCLE],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(|source| CatalogError::sql("title revision read", source))?;
+        let Some(actual_revision) = actual_revision else {
+            return Err(CatalogError::InvalidStoredValue {
+                column: "active_note_id",
+                value: note_id.to_string(),
+            });
+        };
+        if actual_revision != expected_revision {
+            return Ok(None);
+        }
+
+        let updated_rows = transaction
+            .execute(
+                "UPDATE notes
+                 SET title = ?1,
+                     relative_path = ?2,
+                     file_name_binding = ?3,
+                     file_name_disambiguator = ?4,
+                     title_revision = ?5
+                 WHERE note_id = ?6 AND lifecycle = ?7 AND title_revision = ?8",
+                params![
+                    title,
+                    relative_path.to_string_lossy(),
+                    FILE_NAME_BINDING_TITLE_BOUND,
+                    i64::from(disambiguator),
+                    next_revision,
+                    note_id.to_string(),
+                    ACTIVE_NOTE_LIFECYCLE,
+                    expected_revision,
+                ],
+            )
+            .map_err(|source| CatalogError::sql("title path note update", source))?;
+        if updated_rows != 1 {
+            return Ok(None);
+        }
+        transaction
+            .execute(
+                "UPDATE note_search SET title = ?1, relative_path = ?2 WHERE note_id = ?3",
+                params![title, relative_path.to_string_lossy(), note_id.to_string()],
+            )
+            .map_err(|source| CatalogError::sql("title path search refresh", source))?;
+        transaction
+            .commit()
+            .map_err(|source| CatalogError::sql("title path commit transaction commit", source))?;
+        Ok(Some(next_title_revision))
+    }
+
+    pub fn prepare_note_path_operation(
+        &self,
+        operation: &NotePathOperation,
+    ) -> Result<(), CatalogError> {
+        if operation.state != NotePathOperationState::Prepared {
+            return Err(CatalogError::InvalidStoredValue {
+                column: "note_path_operation_state",
+                value: format!("{:?}", operation.state),
+            });
+        }
+        let expected_title_revision =
+            i64::try_from(operation.expected_title_revision).map_err(|_| {
+                CatalogError::InvalidStoredValue {
+                    column: "expected_title_revision",
+                    value: operation.expected_title_revision.to_string(),
+                }
+            })?;
+        self.connection()
+            .execute(
+                "INSERT INTO note_path_operations (
+                    operation_id, note_id, kind, source_relative_path, target_relative_path,
+                    expected_title_revision, state
+                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+                params![
+                    operation.operation_id.to_string(),
+                    operation.note_id.to_string(),
+                    note_path_operation_kind_to_database(operation.kind),
+                    operation.source_relative_path.to_string_lossy(),
+                    operation.target_relative_path.to_string_lossy(),
+                    expected_title_revision,
+                    note_path_operation_state_to_database(operation.state),
+                ],
+            )
+            .map_err(|source| CatalogError::sql("note path operation preparation", source))?;
+        Ok(())
+    }
+
+    pub fn update_note_path_operation_state(
+        &self,
+        operation_id: Uuid,
+        state: NotePathOperationState,
+    ) -> Result<(), CatalogError> {
+        let updated_rows = self
+            .connection()
+            .execute(
+                "UPDATE note_path_operations SET state = ?1 WHERE operation_id = ?2",
+                params![note_path_operation_state_to_database(state), operation_id.to_string()],
+            )
+            .map_err(|source| CatalogError::sql("note path operation state update", source))?;
+        if updated_rows == 1 {
+            return Ok(());
+        }
+        Err(CatalogError::InvalidStoredValue {
+            column: "operation_id",
+            value: operation_id.to_string(),
+        })
+    }
+
+    pub fn unfinished_note_path_operations(&self) -> Result<Vec<NotePathOperation>, CatalogError> {
+        let mut statement = self
+            .connection()
+            .prepare(
+                "SELECT operation_id, note_id, kind, source_relative_path, target_relative_path,
+                        expected_title_revision, state
+                 FROM note_path_operations
+                 WHERE state IN (?1, ?2)
+                 ORDER BY rowid ASC",
+            )
+            .map_err(|source| {
+                CatalogError::sql("unfinished note path operations query preparation", source)
+            })?;
+        let operations = statement
+            .query_map(
+                params![PATH_OPERATION_STATE_PREPARED, PATH_OPERATION_STATE_MOVED],
+                stored_note_path_operation_from_row,
+            )
+            .map_err(|source| CatalogError::sql("unfinished note path operations query", source))?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|source| {
+                CatalogError::sql("unfinished note path operations row read", source)
+            })?;
+        operations.into_iter().map(NotePathOperation::try_from).collect()
+    }
+
+    pub fn note_file_name_metadata(
+        &self,
+        note_id: NoteId,
+    ) -> Result<Option<NoteFileNameMetadata>, CatalogError> {
+        self.connection()
+            .query_row(
+                "SELECT note_id, file_name_binding, file_name_disambiguator, title_revision
+                 FROM notes WHERE note_id = ?1",
+                [note_id.to_string()],
+                |row| {
+                    Ok(StoredFileNameMetadata {
+                        note_id: row.get(0)?,
+                        binding: row.get(1)?,
+                        disambiguator: row.get(2)?,
+                        title_revision: row.get(3)?,
+                    })
+                },
+            )
+            .optional()
+            .map_err(|source| CatalogError::sql("note file name metadata query", source))?
+            .map(NoteFileNameMetadata::try_from)
+            .transpose()
+    }
+
     /// 原子插入由新建命令产生的笔记；正式标签由正文外的 metadata 流程维护。
     pub fn create_active_note(
         &self,
@@ -64,8 +428,10 @@ impl Catalog {
         transaction
             .execute(
                 "INSERT INTO notes (
-                    note_id, relative_path, kind, title, excerpt, created_ns, modified_ns, file_size, content_hash, encryption, lifecycle
-                ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?6, ?7, ?8, ?9, ?10)",
+                    note_id, relative_path, kind, title, excerpt, created_ns, modified_ns,
+                    file_size, content_hash, encryption, lifecycle, file_name_binding,
+                    file_name_disambiguator, title_revision
+                ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?6, ?7, ?8, ?9, ?10, ?11, 1, 0)",
                 params![
                     note.note_id.to_string(),
                     note.relative_path.to_string_lossy(),
@@ -77,6 +443,7 @@ impl Catalog {
                     note.content_hash,
                     note_encryption_to_database(encryption),
                     ACTIVE_NOTE_LIFECYCLE,
+                    file_name_binding_for_encryption(encryption),
                 ],
             )
             .map_err(|source| CatalogError::sql("created note insert", source))?;
@@ -107,8 +474,10 @@ impl Catalog {
         self.connection()
             .execute(
                 "INSERT INTO notes (
-                    note_id, relative_path, kind, title, excerpt, created_ns, modified_ns, file_size, content_hash, encryption, lifecycle
-                ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?6, ?7, ?8, ?9, ?10)
+                    note_id, relative_path, kind, title, excerpt, created_ns, modified_ns,
+                    file_size, content_hash, encryption, lifecycle, file_name_binding,
+                    file_name_disambiguator, title_revision
+                ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?6, ?7, ?8, ?9, ?10, ?11, 1, 0)
                 ON CONFLICT(note_id) DO UPDATE SET
                     relative_path = excluded.relative_path,
                     kind = excluded.kind,
@@ -128,6 +497,7 @@ impl Catalog {
                     note.content_hash,
                     NOTE_ENCRYPTION_UNENCRYPTED,
                     ACTIVE_NOTE_LIFECYCLE,
+                    FILE_NAME_BINDING_TITLE_BOUND,
                 ],
             )
             .map_err(|source| CatalogError::sql("note upsert", source))?;
@@ -178,7 +548,8 @@ impl Catalog {
             .query_row(
                 "SELECT note_id, created_ns, modified_ns, encryption,
                         EXISTS(SELECT 1 FROM note_title_initializations initialization
-                               WHERE initialization.note_id = notes.note_id)
+                               WHERE initialization.note_id = notes.note_id),
+                        file_name_binding, file_name_disambiguator, title_revision
                  FROM notes WHERE note_id = ?1",
                 [note_id.to_string()],
                 editor_metadata_from_row,
@@ -518,6 +889,153 @@ fn note_encryption_to_database(encryption: NoteEncryption) -> i64 {
     }
 }
 
+fn file_name_binding_for_encryption(encryption: NoteEncryption) -> i64 {
+    match encryption {
+        NoteEncryption::Unencrypted => FILE_NAME_BINDING_TITLE_BOUND,
+        NoteEncryption::Encrypted => FILE_NAME_BINDING_OPAQUE,
+    }
+}
+
+fn note_path_operation_kind_to_database(kind: NotePathOperationKind) -> i64 {
+    match kind {
+        NotePathOperationKind::TitleRename => PATH_OPERATION_KIND_TITLE_RENAME,
+        NotePathOperationKind::DirectoryMove => PATH_OPERATION_KIND_DIRECTORY_MOVE,
+        NotePathOperationKind::ExternalRename => PATH_OPERATION_KIND_EXTERNAL_RENAME,
+        NotePathOperationKind::Migration => PATH_OPERATION_KIND_MIGRATION,
+    }
+}
+
+fn note_path_operation_state_to_database(state: NotePathOperationState) -> i64 {
+    match state {
+        NotePathOperationState::Prepared => PATH_OPERATION_STATE_PREPARED,
+        NotePathOperationState::Moved => PATH_OPERATION_STATE_MOVED,
+        NotePathOperationState::Committed => PATH_OPERATION_STATE_COMMITTED,
+        NotePathOperationState::RolledBack => PATH_OPERATION_STATE_ROLLED_BACK,
+    }
+}
+
+#[derive(Debug)]
+struct StoredNotePathOperation {
+    operation_id: String,
+    note_id: String,
+    kind: i64,
+    source_relative_path: String,
+    target_relative_path: String,
+    expected_title_revision: i64,
+    state: i64,
+}
+
+impl TryFrom<StoredNotePathOperation> for NotePathOperation {
+    type Error = CatalogError;
+
+    fn try_from(stored: StoredNotePathOperation) -> Result<Self, Self::Error> {
+        let operation_id = Uuid::parse_str(&stored.operation_id).map_err(|_| {
+            CatalogError::InvalidStoredValue { column: "operation_id", value: stored.operation_id }
+        })?;
+        let note_id = Uuid::parse_str(&stored.note_id).map(NoteId::from).map_err(|_| {
+            CatalogError::InvalidStoredValue { column: "note_id", value: stored.note_id }
+        })?;
+        let kind = match stored.kind {
+            PATH_OPERATION_KIND_TITLE_RENAME => NotePathOperationKind::TitleRename,
+            PATH_OPERATION_KIND_DIRECTORY_MOVE => NotePathOperationKind::DirectoryMove,
+            PATH_OPERATION_KIND_EXTERNAL_RENAME => NotePathOperationKind::ExternalRename,
+            PATH_OPERATION_KIND_MIGRATION => NotePathOperationKind::Migration,
+            _ => {
+                return Err(CatalogError::InvalidStoredValue {
+                    column: "note_path_operation_kind",
+                    value: stored.kind.to_string(),
+                });
+            }
+        };
+        let expected_title_revision =
+            u64::try_from(stored.expected_title_revision).map_err(|_| {
+                CatalogError::InvalidStoredValue {
+                    column: "expected_title_revision",
+                    value: stored.expected_title_revision.to_string(),
+                }
+            })?;
+        let state = match stored.state {
+            PATH_OPERATION_STATE_PREPARED => NotePathOperationState::Prepared,
+            PATH_OPERATION_STATE_MOVED => NotePathOperationState::Moved,
+            PATH_OPERATION_STATE_COMMITTED => NotePathOperationState::Committed,
+            PATH_OPERATION_STATE_ROLLED_BACK => NotePathOperationState::RolledBack,
+            _ => {
+                return Err(CatalogError::InvalidStoredValue {
+                    column: "note_path_operation_state",
+                    value: stored.state.to_string(),
+                });
+            }
+        };
+        Ok(Self {
+            operation_id,
+            note_id,
+            kind,
+            source_relative_path: stored.source_relative_path.into(),
+            target_relative_path: stored.target_relative_path.into(),
+            expected_title_revision,
+            state,
+        })
+    }
+}
+
+fn stored_note_path_operation_from_row(row: &Row<'_>) -> rusqlite::Result<StoredNotePathOperation> {
+    Ok(StoredNotePathOperation {
+        operation_id: row.get(0)?,
+        note_id: row.get(1)?,
+        kind: row.get(2)?,
+        source_relative_path: row.get(3)?,
+        target_relative_path: row.get(4)?,
+        expected_title_revision: row.get(5)?,
+        state: row.get(6)?,
+    })
+}
+
+#[derive(Debug)]
+struct StoredFileNameMetadata {
+    note_id: String,
+    binding: i64,
+    disambiguator: i64,
+    title_revision: i64,
+}
+
+impl TryFrom<StoredFileNameMetadata> for NoteFileNameMetadata {
+    type Error = CatalogError;
+
+    fn try_from(stored: StoredFileNameMetadata) -> Result<Self, Self::Error> {
+        let note_id = Uuid::parse_str(&stored.note_id).map(NoteId::from).map_err(|_| {
+            CatalogError::InvalidStoredValue { column: "note_id", value: stored.note_id }
+        })?;
+        let disambiguator =
+            u32::try_from(stored.disambiguator).map_err(|_| CatalogError::InvalidStoredValue {
+                column: "file_name_disambiguator",
+                value: stored.disambiguator.to_string(),
+            })?;
+        if disambiguator == 0 {
+            return Err(CatalogError::InvalidStoredValue {
+                column: "file_name_disambiguator",
+                value: stored.disambiguator.to_string(),
+            });
+        }
+        let binding = match stored.binding {
+            FILE_NAME_BINDING_LEGACY_UNMANAGED => NoteFileNameBinding::LegacyUnmanaged,
+            FILE_NAME_BINDING_TITLE_BOUND => NoteFileNameBinding::TitleBound { disambiguator },
+            FILE_NAME_BINDING_OPAQUE => NoteFileNameBinding::Opaque,
+            _ => {
+                return Err(CatalogError::InvalidStoredValue {
+                    column: "file_name_binding",
+                    value: stored.binding.to_string(),
+                });
+            }
+        };
+        let title_revision =
+            u64::try_from(stored.title_revision).map_err(|_| CatalogError::InvalidStoredValue {
+                column: "title_revision",
+                value: stored.title_revision.to_string(),
+            })?;
+        Ok(Self { note_id, binding, title_revision })
+    }
+}
+
 #[derive(Debug)]
 struct StoredEditorMetadata {
     note_id: String,
@@ -525,6 +1043,9 @@ struct StoredEditorMetadata {
     modified_nanoseconds: i64,
     encryption: i64,
     title_initialization_pending: bool,
+    file_name_binding: i64,
+    file_name_disambiguator: i64,
+    title_revision: i64,
 }
 
 impl TryFrom<StoredEditorMetadata> for NoteEditorMetadata {
@@ -552,7 +1073,25 @@ impl TryFrom<StoredEditorMetadata> for NoteEditorMetadata {
         } else {
             TitleInitialization::Independent
         };
-        Ok(Self { note_id, created_at, modified_at, encryption, title_initialization })
+        let file_name_binding = note_file_name_binding_from_database(
+            stored_metadata.file_name_binding,
+            stored_metadata.file_name_disambiguator,
+        )?;
+        let title_revision = u64::try_from(stored_metadata.title_revision).map_err(|_| {
+            CatalogError::InvalidStoredValue {
+                column: "title_revision",
+                value: stored_metadata.title_revision.to_string(),
+            }
+        })?;
+        Ok(Self {
+            note_id,
+            created_at,
+            modified_at,
+            encryption,
+            title_initialization,
+            file_name_binding,
+            title_revision,
+        })
     }
 }
 
@@ -563,6 +1102,9 @@ fn editor_metadata_from_row(row: &Row<'_>) -> rusqlite::Result<StoredEditorMetad
         modified_nanoseconds: row.get(2)?,
         encryption: row.get(3)?,
         title_initialization_pending: row.get(4)?,
+        file_name_binding: row.get(5)?,
+        file_name_disambiguator: row.get(6)?,
+        title_revision: row.get(7)?,
     })
 }
 
@@ -710,6 +1252,32 @@ fn note_encryption_from_database(value: i64) -> Result<NoteEncryption, CatalogEr
     }
 }
 
+fn note_file_name_binding_from_database(
+    binding: i64,
+    disambiguator: i64,
+) -> Result<NoteFileNameBinding, CatalogError> {
+    let disambiguator =
+        u32::try_from(disambiguator).map_err(|_| CatalogError::InvalidStoredValue {
+            column: "file_name_disambiguator",
+            value: disambiguator.to_string(),
+        })?;
+    if disambiguator == 0 {
+        return Err(CatalogError::InvalidStoredValue {
+            column: "file_name_disambiguator",
+            value: disambiguator.to_string(),
+        });
+    }
+    match binding {
+        FILE_NAME_BINDING_LEGACY_UNMANAGED => Ok(NoteFileNameBinding::LegacyUnmanaged),
+        FILE_NAME_BINDING_TITLE_BOUND => Ok(NoteFileNameBinding::TitleBound { disambiguator }),
+        FILE_NAME_BINDING_OPAQUE => Ok(NoteFileNameBinding::Opaque),
+        _ => Err(CatalogError::InvalidStoredValue {
+            column: "file_name_binding",
+            value: binding.to_string(),
+        }),
+    }
+}
+
 fn system_time_to_nanoseconds(value: SystemTime) -> Result<i64, CatalogError> {
     let duration =
         value.duration_since(UNIX_EPOCH).map_err(|_| CatalogError::InvalidStoredValue {
@@ -737,7 +1305,10 @@ mod tests {
     use std::time::{Duration, UNIX_EPOCH};
 
     use super::{CatalogNote, note_encryption_from_database};
-    use crate::domain::{NoteEditorMetadata, NoteEncryption, TitleInitialization};
+    use crate::domain::{
+        NoteEditorMetadata, NoteEncryption, NoteFileNameBinding, NoteFileNameMetadata,
+        TitleInitialization,
+    };
     use crate::{Catalog, DocumentKind, NoteId};
 
     fn catalog_note(note_id: NoteId, relative_path: &str, title: &str) -> CatalogNote {
@@ -891,6 +1462,8 @@ mod tests {
                 modified_at: UNIX_EPOCH + Duration::from_secs(1),
                 encryption: NoteEncryption::Unencrypted,
                 title_initialization: TitleInitialization::Independent,
+                file_name_binding: NoteFileNameBinding::TitleBound { disambiguator: 1 },
+                title_revision: 0,
             }
         );
     }
@@ -901,5 +1474,246 @@ mod tests {
             note_encryption_from_database(9),
             Err(crate::CatalogError::InvalidStoredValue { column: "encryption", .. })
         ));
+    }
+
+    #[test]
+    fn new_scanned_and_configured_notes_persist_file_name_binding_metadata() {
+        let directory = tempfile::tempdir().expect("catalog test directory should be created");
+        let catalog = Catalog::open(&directory.path().join("catalog.sqlite3"))
+            .expect("catalog should initialize");
+        let scanned_note_id = NoteId::generate();
+        let configured_note_id = NoteId::generate();
+        let encrypted_note_id = NoteId::generate();
+        catalog
+            .upsert_active_note(&catalog_note(scanned_note_id, "imported.md", "imported"))
+            .expect("scanned note should insert");
+        catalog
+            .create_active_note(
+                &catalog_note(configured_note_id, "无标题.md", "无标题"),
+                NoteEncryption::Unencrypted,
+                TitleInitialization::AwaitingFirstCommit,
+            )
+            .expect("configured note should insert");
+        catalog
+            .create_active_note(
+                &catalog_note(encrypted_note_id, "opaque.bin", "secret"),
+                NoteEncryption::Encrypted,
+                TitleInitialization::Independent,
+            )
+            .expect("encrypted fixture should insert");
+
+        for note_id in [scanned_note_id, configured_note_id] {
+            assert_eq!(
+                catalog.note_file_name_metadata(note_id).expect("file name metadata should query"),
+                Some(NoteFileNameMetadata {
+                    note_id,
+                    binding: NoteFileNameBinding::TitleBound { disambiguator: 1 },
+                    title_revision: 0,
+                })
+            );
+        }
+        assert_eq!(
+            catalog
+                .note_file_name_metadata(encrypted_note_id)
+                .expect("encrypted file name metadata should query"),
+            Some(NoteFileNameMetadata {
+                note_id: encrypted_note_id,
+                binding: NoteFileNameBinding::Opaque,
+                title_revision: 0,
+            })
+        );
+    }
+
+    #[test]
+    fn path_operation_states_round_trip_and_finished_operations_leave_the_pending_list() {
+        let directory = tempfile::tempdir().expect("catalog test directory should be created");
+        let catalog = Catalog::open(&directory.path().join("catalog.sqlite3"))
+            .expect("catalog should initialize");
+        let note_id = NoteId::generate();
+        catalog
+            .upsert_active_note(&catalog_note(note_id, "old.md", "Old"))
+            .expect("operation note fixture should insert");
+        let operation = super::NotePathOperation {
+            operation_id: uuid::Uuid::new_v4(),
+            note_id,
+            kind: super::NotePathOperationKind::TitleRename,
+            source_relative_path: "old.md".into(),
+            target_relative_path: "new.md".into(),
+            expected_title_revision: 0,
+            state: super::NotePathOperationState::Prepared,
+        };
+
+        catalog.prepare_note_path_operation(&operation).expect("path operation should be prepared");
+        assert_eq!(
+            catalog.unfinished_note_path_operations().expect("prepared operations should query"),
+            vec![operation.clone()]
+        );
+
+        catalog
+            .update_note_path_operation_state(
+                operation.operation_id,
+                super::NotePathOperationState::Moved,
+            )
+            .expect("path operation should become moved");
+        assert_eq!(
+            catalog.unfinished_note_path_operations().expect("moved operations should query")[0]
+                .state,
+            super::NotePathOperationState::Moved
+        );
+
+        catalog
+            .update_note_path_operation_state(
+                operation.operation_id,
+                super::NotePathOperationState::Committed,
+            )
+            .expect("path operation should become committed");
+        assert!(
+            catalog
+                .unfinished_note_path_operations()
+                .expect("finished operations should query")
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn only_one_unfinished_path_operation_can_claim_a_note_or_target() {
+        let directory = tempfile::tempdir().expect("catalog test directory should be created");
+        let catalog = Catalog::open(&directory.path().join("catalog.sqlite3"))
+            .expect("catalog should initialize");
+        let first_note_id = NoteId::generate();
+        let second_note_id = NoteId::generate();
+        for (note_id, path) in [(first_note_id, "first.md"), (second_note_id, "second.md")] {
+            catalog
+                .upsert_active_note(&catalog_note(note_id, path, path))
+                .expect("operation note fixture should insert");
+        }
+        let operation = |note_id, source: &str| super::NotePathOperation {
+            operation_id: uuid::Uuid::new_v4(),
+            note_id,
+            kind: super::NotePathOperationKind::DirectoryMove,
+            source_relative_path: source.into(),
+            target_relative_path: "shared.md".into(),
+            expected_title_revision: 0,
+            state: super::NotePathOperationState::Prepared,
+        };
+
+        catalog
+            .prepare_note_path_operation(&operation(first_note_id, "first.md"))
+            .expect("first operation should prepare");
+        assert!(
+            catalog.prepare_note_path_operation(&operation(first_note_id, "first.md")).is_err()
+        );
+        assert!(
+            catalog.prepare_note_path_operation(&operation(second_note_id, "second.md")).is_err()
+        );
+    }
+
+    #[test]
+    fn title_path_commit_updates_note_naming_metadata_and_search_in_one_transaction() {
+        let directory = tempfile::tempdir().expect("catalog test directory should be created");
+        let catalog = Catalog::open(&directory.path().join("catalog.sqlite3"))
+            .expect("catalog should initialize");
+        let note_id = NoteId::generate();
+        catalog
+            .upsert_active_note(&catalog_note(note_id, "old.md", "Old"))
+            .expect("title update note fixture should insert");
+        catalog
+            .index_note_batch(&[crate::catalog::SearchIndexEntry {
+                note_id,
+                title: "Old".to_owned(),
+                relative_path: "old.md".into(),
+                body: "body remains".to_owned(),
+                tags: vec!["tag remains".to_owned()],
+            }])
+            .expect("search fixture should index");
+
+        assert_eq!(
+            catalog
+                .commit_title_bound_path(note_id, 0, "New", std::path::Path::new("New (2).md"), 2)
+                .expect("title path should commit"),
+            Some(1)
+        );
+        let note = catalog
+            .active_note(note_id)
+            .expect("updated note should query")
+            .expect("updated note should exist");
+        assert_eq!(note.title, "New");
+        assert_eq!(note.relative_path, std::path::PathBuf::from("New (2).md"));
+        assert_eq!(
+            catalog
+                .note_file_name_metadata(note_id)
+                .expect("updated naming metadata should query")
+                .expect("updated naming metadata should exist"),
+            NoteFileNameMetadata {
+                note_id,
+                binding: NoteFileNameBinding::TitleBound { disambiguator: 2 },
+                title_revision: 1,
+            }
+        );
+        let indexed: (String, String, String, String) = catalog
+            .connection()
+            .query_row(
+                "SELECT title, relative_path, body, tags FROM note_search WHERE note_id = ?1",
+                [note_id.to_string()],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            )
+            .expect("updated search row should query");
+        assert_eq!(
+            indexed,
+            (
+                "New".to_owned(),
+                "New (2).md".to_owned(),
+                "body remains".to_owned(),
+                "tag remains".to_owned(),
+            )
+        );
+    }
+
+    #[test]
+    fn stale_revision_and_path_conflict_leave_title_path_and_revision_unchanged() {
+        let directory = tempfile::tempdir().expect("catalog test directory should be created");
+        let catalog = Catalog::open(&directory.path().join("catalog.sqlite3"))
+            .expect("catalog should initialize");
+        let note_id = NoteId::generate();
+        let occupied_note_id = NoteId::generate();
+        catalog
+            .upsert_active_note(&catalog_note(note_id, "old.md", "Old"))
+            .expect("title update note fixture should insert");
+        catalog
+            .upsert_active_note(&catalog_note(occupied_note_id, "occupied.md", "Occupied"))
+            .expect("occupied path fixture should insert");
+
+        assert_eq!(
+            catalog
+                .commit_title_bound_path(note_id, 9, "Stale", std::path::Path::new("stale.md"), 1)
+                .expect("stale revision should be a typed no-op"),
+            None
+        );
+        assert!(
+            catalog
+                .commit_title_bound_path(
+                    note_id,
+                    0,
+                    "Partial",
+                    std::path::Path::new("occupied.md"),
+                    1,
+                )
+                .is_err()
+        );
+
+        let note = catalog
+            .active_note(note_id)
+            .expect("unchanged note should query")
+            .expect("unchanged note should exist");
+        assert_eq!(note.title, "Old");
+        assert_eq!(note.relative_path, std::path::PathBuf::from("old.md"));
+        assert_eq!(
+            catalog
+                .note_file_name_metadata(note_id)
+                .expect("unchanged naming metadata should query")
+                .expect("unchanged naming metadata should exist")
+                .title_revision,
+            0
+        );
     }
 }

@@ -48,7 +48,19 @@ pub struct ReconciliationPlan {
 #[derive(Debug)]
 pub enum ReconciliationError {
     Catalog(CatalogError),
-    DuplicateDiscoveredPath { path: PathBuf },
+    DuplicateDiscoveredPath {
+        path: PathBuf,
+    },
+    RenameTargetAlreadyTracked {
+        from: PathBuf,
+        to: PathBuf,
+    },
+    RenameChangesDocumentKind {
+        from: PathBuf,
+        to: PathBuf,
+        from_kind: DocumentKind,
+        to_kind: DocumentKind,
+    },
 }
 
 impl std::fmt::Display for ReconciliationError {
@@ -58,6 +70,18 @@ impl std::fmt::Display for ReconciliationError {
             Self::DuplicateDiscoveredPath { path } => {
                 write!(formatter, "scanner produced duplicate relative path: {}", path.display())
             }
+            Self::RenameTargetAlreadyTracked { from, to } => write!(
+                formatter,
+                "external rename from {} would overwrite the tracked note at {}",
+                from.display(),
+                to.display()
+            ),
+            Self::RenameChangesDocumentKind { from, to, from_kind, to_kind } => write!(
+                formatter,
+                "external rename from {} ({from_kind:?}) to {} ({to_kind:?}) changes document kind",
+                from.display(),
+                to.display()
+            ),
         }
     }
 }
@@ -66,7 +90,9 @@ impl std::error::Error for ReconciliationError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
             Self::Catalog(source) => Some(source),
-            Self::DuplicateDiscoveredPath { .. } => None,
+            Self::DuplicateDiscoveredPath { .. }
+            | Self::RenameTargetAlreadyTracked { .. }
+            | Self::RenameChangesDocumentKind { .. } => None,
         }
     }
 }
@@ -87,7 +113,16 @@ pub(crate) fn reconcile_notes(
     existing_notes: Vec<CatalogNote>,
     discovered_notes: impl IntoIterator<Item = DiscoveredNote>,
 ) -> Result<ReconciliationPlan, ReconciliationError> {
+    reconcile_notes_with_renames(existing_notes, discovered_notes, &[])
+}
+
+pub(crate) fn reconcile_notes_with_renames(
+    existing_notes: Vec<CatalogNote>,
+    discovered_notes: impl IntoIterator<Item = DiscoveredNote>,
+    rename_hints: &[(PathBuf, PathBuf)],
+) -> Result<ReconciliationPlan, ReconciliationError> {
     let discovered_notes = collect_discovered_notes(discovered_notes)?;
+    validate_rename_hints(&existing_notes, &discovered_notes, rename_hints)?;
     let mut existing_by_path = existing_notes
         .into_iter()
         .map(|note| (note.relative_path.clone(), note))
@@ -107,12 +142,38 @@ pub(crate) fn reconcile_notes(
         )));
     }
 
+    let renamed_from_by_to =
+        rename_hints.iter().map(|(from, to)| (to, from)).collect::<HashMap<_, _>>();
+    let mut still_unmatched_discovered = Vec::new();
+    for discovered_note in unmatched_discovered {
+        let Some(from) = renamed_from_by_to.get(&discovered_note.relative_path) else {
+            still_unmatched_discovered.push(discovered_note);
+            continue;
+        };
+        let Some(existing_note) = existing_by_path.remove(*from) else {
+            still_unmatched_discovered.push(discovered_note);
+            continue;
+        };
+        let basename_changed =
+            existing_note.relative_path.file_name() != discovered_note.relative_path.file_name();
+        let title =
+            if basename_changed { discovered_note.title.clone() } else { existing_note.title };
+        changes.push(ReconciliationChange::Moved {
+            from: existing_note.relative_path.clone(),
+            note: discovered_note.into_catalog_note(
+                existing_note.note_id,
+                existing_note.starred,
+                title,
+            ),
+        });
+    }
+
     let mut existing_by_hash = HashMap::<Vec<u8>, Vec<CatalogNote>>::new();
     for existing_note in existing_by_path.into_values() {
         existing_by_hash.entry(existing_note.content_hash.clone()).or_default().push(existing_note);
     }
 
-    for discovered_note in unmatched_discovered {
+    for discovered_note in still_unmatched_discovered {
         let has_unique_hash_match = existing_by_hash
             .get(&discovered_note.content_hash)
             .is_some_and(|candidates| candidates.len() == 1);
@@ -121,14 +182,23 @@ pub(crate) fn reconcile_notes(
             .flatten()
             .and_then(|mut candidates| candidates.pop());
         match unique_match {
-            Some(existing_note) => changes.push(ReconciliationChange::Moved {
-                from: existing_note.relative_path.clone(),
-                note: discovered_note.into_catalog_note(
-                    existing_note.note_id,
-                    existing_note.starred,
-                    existing_note.title,
-                ),
-            }),
+            Some(existing_note) => {
+                let basename_changed = existing_note.relative_path.file_name()
+                    != discovered_note.relative_path.file_name();
+                let title = if basename_changed {
+                    discovered_note.title.clone()
+                } else {
+                    existing_note.title
+                };
+                changes.push(ReconciliationChange::Moved {
+                    from: existing_note.relative_path.clone(),
+                    note: discovered_note.into_catalog_note(
+                        existing_note.note_id,
+                        existing_note.starred,
+                        title,
+                    ),
+                });
+            }
             None => {
                 let title = discovered_note.title.clone();
                 changes.push(ReconciliationChange::Added(discovered_note.into_catalog_note(
@@ -144,6 +214,40 @@ pub(crate) fn reconcile_notes(
         changes.extend(missing_notes.into_iter().map(ReconciliationChange::Missing));
     }
     Ok(ReconciliationPlan { changes })
+}
+
+fn validate_rename_hints(
+    existing_notes: &[CatalogNote],
+    discovered_notes: &[DiscoveredNote],
+    rename_hints: &[(PathBuf, PathBuf)],
+) -> Result<(), ReconciliationError> {
+    let existing_by_path =
+        existing_notes.iter().map(|note| (&note.relative_path, note)).collect::<HashMap<_, _>>();
+    let discovered_by_path =
+        discovered_notes.iter().map(|note| (&note.relative_path, note)).collect::<HashMap<_, _>>();
+    for (from, to) in rename_hints {
+        let Some(source_note) = existing_by_path.get(from) else {
+            continue;
+        };
+        if from != to && existing_by_path.contains_key(to) {
+            return Err(ReconciliationError::RenameTargetAlreadyTracked {
+                from: from.clone(),
+                to: to.clone(),
+            });
+        }
+        let Some(target_note) = discovered_by_path.get(to) else {
+            continue;
+        };
+        if source_note.kind != target_note.kind {
+            return Err(ReconciliationError::RenameChangesDocumentKind {
+                from: from.clone(),
+                to: to.clone(),
+                from_kind: source_note.kind,
+                to_kind: target_note.kind,
+            });
+        }
+    }
+    Ok(())
 }
 
 fn collect_discovered_notes(
@@ -166,7 +270,9 @@ fn collect_discovered_notes(
 mod tests {
     use std::time::{Duration, UNIX_EPOCH};
 
-    use super::{DiscoveredNote, ReconciliationChange, reconcile_notes};
+    use super::{
+        DiscoveredNote, ReconciliationChange, reconcile_notes, reconcile_notes_with_renames,
+    };
     use crate::{CatalogNote, DocumentKind, NoteId};
 
     fn discovered(relative_path: &str, hash_byte: u8) -> DiscoveredNote {
@@ -207,6 +313,22 @@ mod tests {
                 if from == std::path::Path::new("old.md")
                     && note.note_id == note_id
                     && note.starred
+                    && note.title == "new.md"
+        ));
+    }
+
+    #[test]
+    fn directory_only_move_preserves_the_existing_notora_title() {
+        let note_id = NoteId::generate();
+        let mut old = existing(note_id, "old/note.md", 1);
+        old.title = "Independent title".to_owned();
+        let plan = reconcile_notes(vec![old], [discovered("new/note.md", 1)])
+            .expect("directory move should reconcile");
+
+        assert!(matches!(
+            plan.changes.as_slice(),
+            [ReconciliationChange::Moved { note, .. }]
+                if note.title == "Independent title"
         ));
     }
 
@@ -228,5 +350,66 @@ mod tests {
                 .count(),
             2
         );
+    }
+
+    #[test]
+    fn explicit_rename_preserves_identity_when_content_hash_is_ambiguous() {
+        let renamed_id = NoteId::generate();
+        let unchanged_id = NoteId::generate();
+        let plan = reconcile_notes_with_renames(
+            vec![existing(renamed_id, "first.md", 1), existing(unchanged_id, "second.md", 1)],
+            [discovered("renamed.md", 1), discovered("second.md", 1)],
+            &[("first.md".into(), "renamed.md".into())],
+        )
+        .expect("explicit rename should reconcile");
+
+        assert!(plan.changes.iter().any(|change| matches!(
+            change,
+            ReconciliationChange::Moved { from, note }
+                if from == std::path::Path::new("first.md")
+                    && note.relative_path == std::path::Path::new("renamed.md")
+                    && note.note_id == renamed_id
+        )));
+        assert!(plan.changes.iter().any(|change| matches!(
+            change,
+            ReconciliationChange::Updated(note) if note.note_id == unchanged_id
+        )));
+    }
+
+    #[test]
+    fn explicit_rename_cannot_overwrite_another_tracked_note_identity() {
+        let result = reconcile_notes_with_renames(
+            vec![
+                existing(NoteId::generate(), "source.md", 1),
+                existing(NoteId::generate(), "target.md", 2),
+            ],
+            [discovered("target.md", 1)],
+            &[("source.md".into(), "target.md".into())],
+        );
+
+        assert!(matches!(
+            result,
+            Err(super::ReconciliationError::RenameTargetAlreadyTracked { from, to })
+                if from == std::path::Path::new("source.md")
+                    && to == std::path::Path::new("target.md")
+        ));
+    }
+
+    #[test]
+    fn explicit_rename_cannot_change_the_document_kind_of_a_note_identity() {
+        let result = reconcile_notes_with_renames(
+            vec![existing(NoteId::generate(), "source.md", 1)],
+            [DiscoveredNote { kind: DocumentKind::Text, ..discovered("source.txt", 1) }],
+            &[("source.md".into(), "source.txt".into())],
+        );
+
+        assert!(matches!(
+            result,
+            Err(super::ReconciliationError::RenameChangesDocumentKind {
+                from_kind: DocumentKind::Markdown,
+                to_kind: DocumentKind::Text,
+                ..
+            })
+        ));
     }
 }

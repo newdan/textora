@@ -115,6 +115,25 @@ pub enum NoteEncryption {
     Encrypted,
 }
 
+/// 笔记标题与实体文件名之间的持久化约束。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum NoteFileNameBinding {
+    /// schema 升级后的既有普通笔记；用户确认迁移前不自动改名。
+    LegacyUnmanaged,
+    /// 普通工作区笔记；数字只表示 Notora 分配的目录内消歧编号。
+    TitleBound { disambiguator: u32 },
+    /// 加密笔记；实体名不得包含标题语义。
+    Opaque,
+}
+
+/// 标题改名命令读取的持久化命名状态。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NoteFileNameMetadata {
+    pub note_id: NoteId,
+    pub binding: NoteFileNameBinding,
+    pub title_revision: u64,
+}
+
 /// Notora 标题与正文标题槽位之间的一次性初始化状态。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum TitleInitialization {
@@ -130,6 +149,8 @@ pub struct NoteEditorMetadata {
     pub modified_at: SystemTime,
     pub encryption: NoteEncryption,
     pub title_initialization: TitleInitialization,
+    pub file_name_binding: NoteFileNameBinding,
+    pub title_revision: u64,
 }
 
 impl DocumentKind {

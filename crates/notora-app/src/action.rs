@@ -2,9 +2,7 @@
 
 use std::path::PathBuf;
 
-use notora_core::note_command::{
-    MoveNoteRequest, NoteCommand, NoteCommandResult, RenameNoteRequest,
-};
+use notora_core::note_command::{MoveNoteRequest, NoteCommand, NoteCommandResult};
 use notora_core::{
     DocumentIdentity, DocumentKind, NavigationScope, NoteEditorMetadata, NoteId, TagId, TagSummary,
 };
@@ -155,12 +153,7 @@ pub enum NotoraAction {
     TitleCommitRequested(String),
     ToggleSourceViewRequested,
     SemanticEditRequested(ui::plugin::SemanticEditCommand),
-    RenameDialogRequested(notora_core::NoteId),
     MoveDialogRequested(notora_core::NoteId),
-    RenameRequested {
-        note_id: notora_core::NoteId,
-        new_file_name: PathBuf,
-    },
     MoveRequested {
         note_id: notora_core::NoteId,
         target_directory: PathBuf,
@@ -211,7 +204,6 @@ pub enum NotoraEffect {
     ExecuteSemanticEdit(ui::plugin::SemanticEditCommand),
     ExecuteMetadataMutation(MetadataMutation),
     ExecuteTrashOperation(TrashOperation),
-    ChooseNoteRenameDestination(notora_core::NoteId),
     ChooseNoteMoveDirectory(notora_core::NoteId),
     PrepareDocument(DocumentLoadRequest),
     PromoteActivePreview,
@@ -223,10 +215,6 @@ pub enum NotoraEffect {
     PersistProductSettings,
     PersistLayout,
     Redraw,
-}
-
-pub fn rename_note_command(note_id: notora_core::NoteId, new_file_name: PathBuf) -> NoteCommand {
-    NoteCommand::Rename(RenameNoteRequest { note_id, new_file_name })
 }
 
 pub fn move_note_command(note_id: notora_core::NoteId, target_directory: PathBuf) -> NoteCommand {

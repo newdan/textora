@@ -11,6 +11,8 @@ pub mod backup;
 pub mod catalog;
 pub mod domain;
 pub mod file_monitor;
+pub mod file_name;
+pub mod markdown_links;
 pub mod note_command;
 pub mod reconciliation;
 pub mod scan;
@@ -24,23 +26,38 @@ pub use backup::{
 };
 pub use catalog::{
     Catalog, CatalogCard, CatalogCardCursor, CatalogCardPage, CatalogError, CatalogNavigationTree,
-    CatalogNote, CatalogOpenOutcome, CatalogRecoveryError, TagWithActiveNoteCount, TrashEntry,
+    CatalogNote, CatalogOpenOutcome, CatalogRecoveryError, NotePathOperation,
+    NotePathOperationKind, NotePathOperationState, TagWithActiveNoteCount, TrashEntry,
 };
 pub use domain::{
     DocumentIdentity, DocumentKind, DocumentOrigin, ExternalFileId, NavigationScope,
-    NoteEditorMetadata, NoteEncryption, NoteId, NoteLifecycle, NoteSummary, TagId, TagSummary,
-    TitleInitialization, WorkspaceId,
+    NoteEditorMetadata, NoteEncryption, NoteFileNameBinding, NoteFileNameMetadata, NoteId,
+    NoteLifecycle, NoteSummary, TagId, TagSummary, TitleInitialization, WorkspaceId,
 };
-pub use file_monitor::{WorkspaceFileBatch, WorkspaceFileMonitor, WorkspaceFileMonitorError};
+pub use file_monitor::{
+    WorkspaceFileBatch, WorkspaceFileChange, WorkspaceFileMonitor, WorkspaceFileMonitorError,
+};
+pub use file_name::{
+    AllocatedTitleBoundFileName, DEFAULT_NOTE_TITLE, MAX_AUTOMATIC_NAME_DISAMBIGUATOR,
+    MAX_NOTE_FILE_STEM_GRAPHEMES, allocate_title_bound_file_name, document_file_extension,
+    file_name_collision_key, normalize_title_file_stem, title_bound_file_name,
+};
+pub use markdown_links::{
+    MarkdownPathReference, MarkdownPathReferenceKind, extract_markdown_path_references,
+};
 pub use note_command::{
     ConfiguredCreateNoteRequest, CreateNoteResult, NoteCommand, NoteCommandError,
-    execute_note_command,
+    NoteCommandOutcome, NotePathRecoveryError, NotePathRecoveryReport, UpdateNoteTitleRequest,
+    execute_note_command, recover_note_path_operations,
 };
 pub use reconciliation::{
     DiscoveredNote, ReconciliationChange, ReconciliationError, ReconciliationPlan,
     reconcile_catalog,
 };
-pub use scan::{ScanCompletion, ScanError, ScanFailure, scan_workspace, scan_workspace_paths};
+pub use scan::{
+    ScanCompletion, ScanError, ScanFailure, scan_workspace, scan_workspace_file_batch,
+    scan_workspace_paths,
+};
 pub use summary_parser::{
     DocumentTitleProjection, MAX_EXCERPT_GRAPHEMES, NoteTextSummary, document_title_projection,
     parse_note_text_summary, replace_document_title,

@@ -10,12 +10,14 @@ use notora_core::note_command::NoteCommand;
 use notora_core::{
     Catalog, DocumentIdentity, Workspace, WorkspaceDescriptor, WorkspaceError, WorkspaceFileBatch,
     WorkspaceFileMonitor, WorkspaceFileMonitorError, execute_note_command, scan_workspace,
-    scan_workspace_paths,
+    scan_workspace_file_batch, scan_workspace_paths,
 };
 
 use crate::action::{CardQuery, DocumentLoadRequest, MetadataMutation, TrashOperation};
 use crate::index_worker::{IndexWorker, IndexWorkerCommand};
-use crate::product::{NotoraProduct, NotoraProductEvent, NotoraProductEventSender};
+use crate::product::{
+    NotoraProduct, NotoraProductEvent, NotoraProductEventSender, WorkspaceNoteRelocation,
+};
 
 const CATALOG_FILE_NAME: &str = "catalog.sqlite3";
 const DEFAULT_MIGRATION_BACKUP_RETAINED_COUNT: usize = 8;
@@ -426,6 +428,27 @@ fn run_indexer(
             message,
         });
     }
+    match notora_core::recover_note_path_operations(&workspace, &catalog) {
+        Ok(report) if report.committed_operations > 0 || report.rolled_back_operations > 0 => {
+            let _ = event_sender.send(NotoraProductEvent::CatalogRecoveryNotified {
+                workspace_id: descriptor.workspace_id,
+                workspace_generation: generation,
+                message: format!(
+                    "已恢复未完成的文件改名：确认 {} 项，回滚 {} 项",
+                    report.committed_operations, report.rolled_back_operations
+                ),
+            });
+        }
+        Ok(_) => {}
+        Err(error) => {
+            let _ = event_sender.send(NotoraProductEvent::WorkspaceIndexFailed {
+                workspace_id: descriptor.workspace_id,
+                workspace_generation: generation,
+                message: format!("工作区存在未完成的文件改名，需要先恢复：{error}"),
+            });
+            return;
+        }
+    }
     index_workspace(&workspace, &catalog, descriptor.workspace_id, generation, &event_sender);
     let mut pending_presence_confirmation_paths = BTreeSet::new();
     let mut presence_confirmation_due_at = None;
@@ -445,18 +468,19 @@ fn run_indexer(
                 pending_presence_confirmation_paths.extend(batch.relative_paths.iter().cloned());
                 presence_confirmation_due_at =
                     Some(Instant::now() + WATCHER_PRESENCE_CONFIRMATION_DELAY);
-                index_workspace_paths(
+                let note_relocations = index_workspace_file_batch(
                     &workspace,
                     &catalog,
                     descriptor.workspace_id,
                     generation,
-                    &batch.relative_paths,
+                    &batch,
                     &event_sender,
                 );
                 let _ = event_sender.send(NotoraProductEvent::WorkspaceChanged {
                     workspace_id: descriptor.workspace_id,
                     workspace_generation: generation,
                     changed_paths: batch.relative_paths,
+                    note_relocations,
                 });
             }
             Err(mpsc::RecvTimeoutError::Timeout) => {}
@@ -839,6 +863,84 @@ fn index_workspace_paths(
     }
 }
 
+fn index_workspace_file_batch(
+    workspace: &Workspace,
+    catalog: &Catalog,
+    workspace_id: notora_core::WorkspaceId,
+    workspace_generation: u64,
+    batch: &WorkspaceFileBatch,
+    event_sender: &NotoraProductEventSender,
+) -> Vec<WorkspaceNoteRelocation> {
+    let previous_paths_by_note_id = match catalog.active_notes() {
+        Ok(notes) => notes
+            .into_iter()
+            .map(|note| (note.note_id, note.relative_path))
+            .collect::<std::collections::HashMap<_, _>>(),
+        Err(error) => {
+            let _ = event_sender.send(NotoraProductEvent::WorkspaceIndexFailed {
+                workspace_id,
+                workspace_generation,
+                message: error.to_string(),
+            });
+            return Vec::new();
+        }
+    };
+    match scan_workspace_file_batch(workspace, catalog, batch) {
+        Ok(completion) => {
+            let _ = event_sender.send(NotoraProductEvent::WorkspaceScanCompleted {
+                workspace_id,
+                workspace_generation,
+                completion,
+            });
+            match collect_note_relocations(catalog, &previous_paths_by_note_id) {
+                Ok(relocations) => relocations,
+                Err(error) => {
+                    let _ = event_sender.send(NotoraProductEvent::WorkspaceIndexFailed {
+                        workspace_id,
+                        workspace_generation,
+                        message: error.to_string(),
+                    });
+                    Vec::new()
+                }
+            }
+        }
+        Err(error) => {
+            let _ = event_sender.send(NotoraProductEvent::WorkspaceIndexFailed {
+                workspace_id,
+                workspace_generation,
+                message: error.to_string(),
+            });
+            Vec::new()
+        }
+    }
+}
+
+fn collect_note_relocations(
+    catalog: &Catalog,
+    previous_paths_by_note_id: &std::collections::HashMap<notora_core::NoteId, PathBuf>,
+) -> Result<Vec<WorkspaceNoteRelocation>, notora_core::CatalogError> {
+    let mut relocations = Vec::new();
+    for note in catalog.active_notes()? {
+        let Some(previous_path) = previous_paths_by_note_id.get(&note.note_id) else {
+            continue;
+        };
+        if *previous_path == note.relative_path {
+            continue;
+        }
+        let Some(metadata) = catalog.note_editor_metadata(note.note_id)? else {
+            continue;
+        };
+        relocations.push(WorkspaceNoteRelocation {
+            note_id: note.note_id,
+            from: previous_path.clone(),
+            to: note.relative_path,
+            metadata,
+            tags: catalog.tags_for_note(note.note_id)?,
+        });
+    }
+    Ok(relocations)
+}
+
 #[cfg(test)]
 mod tests {
     use std::fs;
@@ -959,6 +1061,7 @@ mod tests {
                 workspace_id: first_workspace.descriptor.workspace_id,
                 workspace_generation: first_workspace.generation,
                 changed_paths: vec!["late.md".into()],
+                note_relocations: vec![],
             })
             .expect("product receiver should stay available");
         sender
@@ -966,6 +1069,7 @@ mod tests {
                 workspace_id: second_workspace.descriptor.workspace_id,
                 workspace_generation: second_workspace.generation,
                 changed_paths: vec!["current.md".into()],
+                note_relocations: vec![],
             })
             .expect("product receiver should stay available");
 
@@ -1128,7 +1232,10 @@ mod tests {
         }
         fs::remove_file(&note_path).expect("fixture note should be removed");
         file_batch_sender
-            .send(notora_core::WorkspaceFileBatch { relative_paths: vec!["removed.md".into()] })
+            .send(notora_core::WorkspaceFileBatch {
+                relative_paths: vec!["removed.md".into()],
+                changes: vec![notora_core::WorkspaceFileChange::Removed("removed.md".into())],
+            })
             .expect("watcher batch should reach the indexer");
 
         while completed_scans < 3 {
@@ -1188,7 +1295,7 @@ mod tests {
                         result,
                     } if *workspace_id == active_workspace.descriptor.workspace_id
                         && *workspace_generation == active_workspace.generation
-                        && result.note.relative_path == std::path::Path::new("未命名 1.md")
+                        && result.note.relative_path == std::path::Path::new("无标题.md")
                 )
             }) {
                 break;
@@ -1635,6 +1742,6 @@ mod tests {
             assert!(Instant::now() < deadline, "trash completion should arrive promptly");
             thread::sleep(Duration::from_millis(10));
         }
-        assert!(!directory.path().join("未命名 1.md").exists());
+        assert!(!directory.path().join("无标题.md").exists());
     }
 }

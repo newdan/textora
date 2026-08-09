@@ -7,6 +7,15 @@ use notora_core::{CatalogCardPage, ScanCompletion, WorkspaceId};
 
 use crate::action::DocumentLoadRequest;
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct WorkspaceNoteRelocation {
+    pub note_id: notora_core::NoteId,
+    pub from: std::path::PathBuf,
+    pub to: std::path::PathBuf,
+    pub metadata: notora_core::NoteEditorMetadata,
+    pub tags: Vec<notora_core::TagSummary>,
+}
+
 /// 后台服务只能经 notora 自有 channel 发送的 payload。
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum NotoraProductEvent {
@@ -41,6 +50,7 @@ pub enum NotoraProductEvent {
         workspace_id: WorkspaceId,
         workspace_generation: u64,
         changed_paths: Vec<std::path::PathBuf>,
+        note_relocations: Vec<WorkspaceNoteRelocation>,
     },
     WorkspaceIndexFailed {
         workspace_id: WorkspaceId,
@@ -433,6 +443,7 @@ mod tests {
                 workspace_id: active_workspace_id,
                 workspace_generation: 4,
                 changed_paths: vec![],
+                note_relocations: vec![],
             })
             .expect("product receiver should be alive");
 
@@ -450,6 +461,7 @@ mod tests {
                 workspace_id: WorkspaceId::generate(),
                 workspace_generation: 4,
                 changed_paths: vec![],
+                note_relocations: vec![],
             })
             .expect("product receiver should be alive");
 
@@ -493,6 +505,7 @@ mod tests {
                     workspace_id: WorkspaceId::generate(),
                     workspace_generation: 1,
                     changed_paths: vec![],
+                    note_relocations: vec![],
                 })
                 .is_err()
         );

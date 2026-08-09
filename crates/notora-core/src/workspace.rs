@@ -11,6 +11,80 @@ use crate::WorkspaceId;
 pub const WORKSPACE_METADATA_DIRECTORY_NAME: &str = ".notora";
 pub const WORKSPACE_MANIFEST_FILE_NAME: &str = "workspace.toml";
 pub const WORKSPACE_MANIFEST_SCHEMA_VERSION: u32 = 1;
+pub const NOTE_RELOCATION_TEMPORARY_FILE_PREFIX: &str = ".notora-relocation-";
+
+static NOTE_RELOCATION_TEMPORARY_SEQUENCE: AtomicU64 = AtomicU64::new(0);
+
+/// 以不覆盖目标的语义移动普通笔记文件。
+pub fn move_file_no_replace(source: &Path, target: &Path) -> Result<(), std::io::Error> {
+    if requires_case_only_two_hop(source, target) {
+        return move_file_case_only(source, target);
+    }
+    platform_move_file_no_replace(source, target)
+}
+
+fn requires_case_only_two_hop(source: &Path, target: &Path) -> bool {
+    source != target
+        && source.parent() == target.parent()
+        && source.file_name().zip(target.file_name()).is_some_and(|(source_name, target_name)| {
+            crate::file_name_collision_key(&source_name.to_string_lossy())
+                == crate::file_name_collision_key(&target_name.to_string_lossy())
+        })
+}
+
+fn move_file_case_only(source: &Path, target: &Path) -> Result<(), std::io::Error> {
+    let parent = source.parent().ok_or_else(|| {
+        std::io::Error::new(std::io::ErrorKind::InvalidInput, "source has no parent directory")
+    })?;
+    loop {
+        let sequence = NOTE_RELOCATION_TEMPORARY_SEQUENCE.fetch_add(1, Ordering::Relaxed);
+        let temporary_path = parent.join(format!(
+            "{NOTE_RELOCATION_TEMPORARY_FILE_PREFIX}{}-{sequence}.tmp",
+            std::process::id()
+        ));
+        match platform_move_file_no_replace(source, &temporary_path) {
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(error) => return Err(error),
+            Ok(()) => {
+                if let Err(target_error) = platform_move_file_no_replace(&temporary_path, target) {
+                    return match platform_move_file_no_replace(&temporary_path, source) {
+                        Ok(()) => Err(target_error),
+                        Err(rollback_error) => Err(rollback_error),
+                    };
+                }
+                return Ok(());
+            }
+        }
+    }
+}
+
+#[cfg(any(target_vendor = "apple", target_os = "linux", target_os = "redox"))]
+fn platform_move_file_no_replace(source: &Path, target: &Path) -> Result<(), std::io::Error> {
+    rustix::fs::renameat_with(
+        rustix::fs::CWD,
+        source,
+        rustix::fs::CWD,
+        target,
+        rustix::fs::RenameFlags::NOREPLACE,
+    )
+    .map_err(std::io::Error::from)
+}
+
+#[cfg(target_os = "windows")]
+fn platform_move_file_no_replace(source: &Path, target: &Path) -> Result<(), std::io::Error> {
+    fs::rename(source, target)
+}
+
+#[cfg(not(any(
+    target_vendor = "apple",
+    target_os = "linux",
+    target_os = "redox",
+    target_os = "windows"
+)))]
+fn platform_move_file_no_replace(source: &Path, target: &Path) -> Result<(), std::io::Error> {
+    fs::hard_link(source, target)?;
+    fs::remove_file(source)
+}
 
 static MANIFEST_TEMPORARY_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
@@ -308,7 +382,44 @@ mod tests {
 
     use super::{
         WORKSPACE_MANIFEST_FILE_NAME, WORKSPACE_METADATA_DIRECTORY_NAME, Workspace, WorkspaceError,
+        move_file_no_replace,
     };
+
+    #[test]
+    fn no_replace_move_never_overwrites_an_existing_target() {
+        let directory = tempfile::tempdir().expect("move test directory should be created");
+        let source = directory.path().join("source.md");
+        let target = directory.path().join("target.md");
+        fs::write(&source, "source").expect("source fixture should be written");
+        fs::write(&target, "target").expect("target fixture should be written");
+
+        assert!(move_file_no_replace(&source, &target).is_err());
+        assert_eq!(fs::read_to_string(&source).expect("source should remain"), "source");
+        assert_eq!(fs::read_to_string(&target).expect("target should remain"), "target");
+    }
+
+    #[test]
+    fn no_replace_move_supports_case_only_file_name_changes() {
+        let directory = tempfile::tempdir().expect("move test directory should be created");
+        let source = directory.path().join("Plan.md");
+        let target = directory.path().join("plan.md");
+        fs::write(&source, "content").expect("source fixture should be written");
+
+        move_file_no_replace(&source, &target).expect("case-only move should succeed");
+
+        assert_eq!(fs::read_to_string(&target).expect("target should be readable"), "content");
+        let file_names = fs::read_dir(directory.path())
+            .expect("test directory should be readable")
+            .map(|entry| {
+                entry
+                    .expect("directory entry should be readable")
+                    .file_name()
+                    .to_string_lossy()
+                    .into_owned()
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(file_names, vec!["plan.md"]);
+    }
 
     #[test]
     fn initialization_persists_a_stable_workspace_identity() {

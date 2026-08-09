@@ -2,7 +2,7 @@ use rusqlite::{Connection, Transaction};
 
 use super::{CatalogError, CatalogError::UnsupportedSchema};
 
-pub const CATALOG_SCHEMA_VERSION: u32 = 5;
+pub const CATALOG_SCHEMA_VERSION: u32 = 7;
 
 const INITIAL_SCHEMA: &str = r#"
 CREATE TABLE notes (
@@ -17,7 +17,10 @@ CREATE TABLE notes (
     content_hash BLOB NOT NULL,
     starred INTEGER NOT NULL DEFAULT 0 CHECK (starred IN (0, 1)),
     encryption INTEGER NOT NULL DEFAULT 0 CHECK (encryption IN (0, 1)),
-    lifecycle INTEGER NOT NULL DEFAULT 0 CHECK (lifecycle IN (0, 1))
+    lifecycle INTEGER NOT NULL DEFAULT 0 CHECK (lifecycle IN (0, 1)),
+    file_name_binding INTEGER NOT NULL DEFAULT 1 CHECK (file_name_binding IN (0, 1, 2)),
+    file_name_disambiguator INTEGER NOT NULL DEFAULT 1 CHECK (file_name_disambiguator > 0),
+    title_revision INTEGER NOT NULL DEFAULT 0 CHECK (title_revision >= 0)
 );
 
 CREATE INDEX notes_active_path_index ON notes(lifecycle, relative_path);
@@ -67,6 +70,27 @@ const TITLE_INITIALIZATION_SCHEMA: &str = r#"
 CREATE TABLE note_title_initializations (
     note_id TEXT PRIMARY KEY NOT NULL REFERENCES notes(note_id) ON DELETE CASCADE
 );
+"#;
+
+const NOTE_PATH_OPERATIONS_SCHEMA: &str = r#"
+CREATE TABLE note_path_operations (
+    operation_id TEXT PRIMARY KEY NOT NULL,
+    note_id TEXT NOT NULL REFERENCES notes(note_id) ON DELETE CASCADE,
+    kind INTEGER NOT NULL CHECK (kind IN (0, 1, 2, 3)),
+    source_relative_path TEXT NOT NULL,
+    target_relative_path TEXT NOT NULL,
+    expected_title_revision INTEGER NOT NULL CHECK (expected_title_revision >= 0),
+    state INTEGER NOT NULL CHECK (state IN (0, 1, 2, 3))
+);
+
+CREATE UNIQUE INDEX note_path_operations_pending_note
+ON note_path_operations(note_id) WHERE state IN (0, 1);
+
+CREATE UNIQUE INDEX note_path_operations_pending_source
+ON note_path_operations(source_relative_path) WHERE state IN (0, 1);
+
+CREATE UNIQUE INDEX note_path_operations_pending_target
+ON note_path_operations(target_relative_path) WHERE state IN (0, 1);
 "#;
 
 const FTS5_TRIGRAM_CAPABILITY_PROBE: &str = "CREATE VIRTUAL TABLE temp.notora_fts5_trigram_probe USING fts5(contents, tokenize = 'trigram');";
@@ -148,12 +172,64 @@ fn apply_pending_migrations(
             .execute_batch(TITLE_INITIALIZATION_SCHEMA)
             .map_err(|source| CatalogError::sql("title initialization migration", source))?;
         transaction
+            .pragma_update(None, "user_version", 5_u32)
+            .map_err(|source| CatalogError::sql("schema version write", source))?;
+        schema_version = 5;
+    }
+
+    if schema_version == 5 {
+        apply_file_name_metadata_migration(transaction)?;
+        transaction
+            .pragma_update(None, "user_version", 6_u32)
+            .map_err(|source| CatalogError::sql("schema version write", source))?;
+        schema_version = 6;
+    }
+
+    if schema_version == 6 {
+        transaction
+            .execute_batch(NOTE_PATH_OPERATIONS_SCHEMA)
+            .map_err(|source| CatalogError::sql("note path operations migration", source))?;
+        transaction
             .pragma_update(None, "user_version", CATALOG_SCHEMA_VERSION)
             .map_err(|source| CatalogError::sql("schema version write", source))?;
         return Ok(());
     }
 
     Err(UnsupportedSchema { found: schema_version })
+}
+
+fn apply_file_name_metadata_migration(transaction: &Transaction<'_>) -> Result<(), CatalogError> {
+    if !table_has_column(transaction, "notes", "file_name_binding")? {
+        transaction
+            .execute_batch(
+                "ALTER TABLE notes
+                 ADD COLUMN file_name_binding INTEGER NOT NULL DEFAULT 0
+                 CHECK (file_name_binding IN (0, 1, 2));",
+            )
+            .map_err(|source| CatalogError::sql("file name binding migration", source))?;
+    }
+    if !table_has_column(transaction, "notes", "file_name_disambiguator")? {
+        transaction
+            .execute_batch(
+                "ALTER TABLE notes
+                 ADD COLUMN file_name_disambiguator INTEGER NOT NULL DEFAULT 1
+                 CHECK (file_name_disambiguator > 0);",
+            )
+            .map_err(|source| CatalogError::sql("file name disambiguator migration", source))?;
+    }
+    if !table_has_column(transaction, "notes", "title_revision")? {
+        transaction
+            .execute_batch(
+                "ALTER TABLE notes
+                 ADD COLUMN title_revision INTEGER NOT NULL DEFAULT 0
+                 CHECK (title_revision >= 0);",
+            )
+            .map_err(|source| CatalogError::sql("title revision migration", source))?;
+    }
+    transaction
+        .execute("UPDATE notes SET file_name_binding = 2 WHERE encryption = 1", [])
+        .map_err(|source| CatalogError::sql("opaque file name binding backfill", source))?;
+    Ok(())
 }
 
 fn apply_editor_metadata_migration(transaction: &Transaction<'_>) -> Result<(), CatalogError> {
@@ -339,6 +415,92 @@ mod tests {
             .expect("pending initialization table should be queryable");
 
         assert_eq!(pending_count, 0, "historical notes must remain independent");
+    }
+
+    #[test]
+    fn version_five_catalog_backfills_legacy_and_opaque_file_name_bindings() {
+        let mut connection = Connection::open_in_memory().expect("in-memory catalog should open");
+        connection
+            .execute_batch(
+                "CREATE TABLE notes (
+                    note_id TEXT PRIMARY KEY NOT NULL,
+                    relative_path TEXT NOT NULL UNIQUE,
+                    kind INTEGER NOT NULL,
+                    title TEXT NOT NULL,
+                    excerpt TEXT NOT NULL,
+                    created_ns INTEGER NOT NULL,
+                    modified_ns INTEGER NOT NULL,
+                    file_size INTEGER NOT NULL,
+                    content_hash BLOB NOT NULL,
+                    starred INTEGER NOT NULL DEFAULT 0,
+                    encryption INTEGER NOT NULL DEFAULT 0,
+                    lifecycle INTEGER NOT NULL DEFAULT 0,
+                    missing_scan_count INTEGER NOT NULL DEFAULT 0
+                );",
+            )
+            .expect("version five schema fixture should initialize");
+        connection
+            .execute(
+                "INSERT INTO notes (
+                    note_id, relative_path, kind, title, excerpt, created_ns, modified_ns,
+                    file_size, content_hash, encryption, lifecycle, missing_scan_count
+                ) VALUES
+                    ('plain', 'plain.md', 2, 'Plain', '', 1, 1, 0, X'', 0, 0, 0),
+                    ('secret', 'opaque.bin', 2, '', '', 1, 1, 0, X'', 1, 0, 0)",
+                [],
+            )
+            .expect("legacy notes should insert");
+        connection
+            .pragma_update(None, "user_version", 5_u32)
+            .expect("version five fixture should be marked");
+
+        migrate(&mut connection).expect("file name metadata migration should succeed");
+
+        let plain: (i64, i64, i64) = connection
+            .query_row(
+                "SELECT file_name_binding, file_name_disambiguator, title_revision
+                 FROM notes WHERE note_id = 'plain'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .expect("plain metadata should be readable");
+        let secret: (i64, i64, i64) = connection
+            .query_row(
+                "SELECT file_name_binding, file_name_disambiguator, title_revision
+                 FROM notes WHERE note_id = 'secret'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .expect("opaque metadata should be readable");
+        assert_eq!(plain, (0, 1, 0));
+        assert_eq!(secret, (2, 1, 0));
+
+        for statement in [
+            "UPDATE notes SET file_name_binding = 9 WHERE note_id = 'plain'",
+            "UPDATE notes SET file_name_disambiguator = 0 WHERE note_id = 'plain'",
+            "UPDATE notes SET title_revision = -1 WHERE note_id = 'plain'",
+        ] {
+            assert!(connection.execute(statement, []).is_err());
+        }
+    }
+
+    #[test]
+    fn version_six_catalog_adds_recoverable_note_path_operations() {
+        let mut connection = Connection::open_in_memory().expect("in-memory catalog should open");
+        migrate(&mut connection).expect("current schema fixture should initialize");
+
+        let table_exists: bool = connection
+            .query_row(
+                "SELECT EXISTS(
+                    SELECT 1 FROM sqlite_master
+                    WHERE type = 'table' AND name = 'note_path_operations'
+                )",
+                [],
+                |row| row.get(0),
+            )
+            .expect("path operation table should be queryable");
+
+        assert!(table_exists);
     }
 
     #[test]

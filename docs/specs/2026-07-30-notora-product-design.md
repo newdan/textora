@@ -34,6 +34,7 @@ notora 是基于 textora 编辑框架开发的桌面笔记 App。
 | 笔记保存 | 编辑停止后自动保存 |
 | 外部文件保存 | 手动保存 |
 | 笔记内容 | 普通 `.txt/.md/.mmap.md` 文件是内容源 |
+| 标题与文件名 | 普通工作区笔记双向同步；加密笔记保持不含语义的实体名 |
 | 星标和标签 | notora metadata，不修改正文/front matter |
 | 回收站 | 工作区内部可恢复回收站 |
 | 编辑状态 | 复用 `EditorRuntime`、`Workspace`、`TabId` 和插件 runtime |
@@ -477,7 +478,7 @@ pub struct NavigationRowInput {
 - TXT 初始内容为空；
 - MD 初始内容为空；
 - MMAP.MD 初始内容为 `#`，光标位于其后；
-- 使用语义化的唯一名称，如 `未命名 1.md`；
+- 使用由初始标题派生的唯一名称，如 `无标题.md`、`无标题 (2).md`；
 - 不覆盖已有同名文件。
 
 ### 9.3 卡片内容
@@ -491,11 +492,11 @@ pub struct NavigationRowInput {
 - 星标状态；
 - 可选标签摘要。
 
-标题解析：
+首次发现文件的标题初始化：
 
-- Markdown/Mindmap：首个一级标题，否则文件 stem；
-- TXT：首个非空行，否则文件 stem；
-- 空文档：文件 stem。
+- Finder 拷入、外部工具创建或首次扫描发现的文件，一律以实际文件 stem 初始化 Notora 标题；
+- 不使用 Markdown H1、Mindmap 根节点或 TXT 第一行立即反向重排用户已有路径；
+- 初始化后正文标题结构与 Notora 标题独立；用户随后在标题栏提交新标题时再同步文件名。
 
 简介解析：
 
@@ -713,10 +714,14 @@ enum NotoraProductEvent {
 - 递归监听工作区；
 - 忽略 `.notora/`、notora 原子保存临时文件和系统垃圾文件；
 - 200ms debounce 合并路径；
-- rename 尽量使用平台事件配对；
+- 保留并配对平台 `From`、`To`、`Both` 与 tracker rename 语义；
 - 无法配对时通过 file identity/content hash 识别移动；
-- 找不到稳定匹配时按删除 + 新增处理，并保留可诊断日志；
+- 找不到稳定匹配时进入可诊断的歧义状态，不静默生成新 `NoteId` 或删除旧身份；
 - notora 自己保存产生的事件仍可进入一致性检查，但不能重复建立编辑冲突。
+
+对普通工作区笔记，确认是 Finder 外部 rename 后：basename 改变时以新 stem 按字面更新
+Notora 标题，只有目录改变时标题保持不变；Notora 自己触发的标题改名通过持久化 operation
+识别，重复编号不得被回写进标题。加密笔记不从文件名反推标题。
 
 ## 16. 搜索流程
 
@@ -857,12 +862,12 @@ IME preedit 不触发保存；IME commit 产生正常内容变更后才调度。
 
 ## 21. 文件操作一致性
 
-创建、重命名、移动和回收采用领域命令：
+创建、标题更新、移动和回收采用领域命令：
 
 ```rust
 pub enum NoteCommand {
     Create(CreateNoteRequest),
-    Rename(RenameNoteRequest),
+    UpdateTitle(UpdateNoteTitleRequest),
     Move(MoveNoteRequest),
     MoveToTrash(NoteId),
     Restore(RestoreNoteRequest),
@@ -882,6 +887,10 @@ UI 不直接调用 `std::fs`。
 3. catalog transaction；
 4. 失败补偿；
 5. 启动 reconciliation 修复中断状态。
+
+普通工作区笔记的 `UpdateTitle` 同时提交标题 revision、相对路径、重复编号与 FTS。文件名由
+规范化标题和固定文档类型派生；冲突从 `(2)` 起分配且不主动压缩已有编号。标准 Markdown
+相对引用必须使用 parser offset 建立精确索引并安全重写；无法完整重写时阻止静默改名。
 
 ## 22. 产品动作与 effect
 

@@ -7,7 +7,7 @@ use notora_core::{
 
 use crate::action::{
     CardQuery, ConflictResolution, DocumentLoadRequest, NoteCreationTarget, NotoraAction,
-    NotoraEffect, SaveConflictRequest, move_note_command, rename_note_command,
+    NotoraEffect, SaveConflictRequest, move_note_command,
 };
 use crate::effect_executor::ExternalOpenRequest;
 use crate::external_files::ExternalFileSessions;
@@ -324,18 +324,8 @@ impl NotoraState {
                 self.layout.focus_target = FocusTarget::Editor;
                 vec![NotoraEffect::ExecuteSemanticEdit(command), NotoraEffect::Redraw]
             }
-            NotoraAction::RenameDialogRequested(note_id) => {
-                vec![NotoraEffect::ChooseNoteRenameDestination(note_id), NotoraEffect::Redraw]
-            }
             NotoraAction::MoveDialogRequested(note_id) => {
                 vec![NotoraEffect::ChooseNoteMoveDirectory(note_id), NotoraEffect::Redraw]
-            }
-            NotoraAction::RenameRequested { note_id, new_file_name } => {
-                self.library.last_command_error = None;
-                vec![
-                    NotoraEffect::ExecuteNoteCommand(rename_note_command(note_id, new_file_name)),
-                    NotoraEffect::Redraw,
-                ]
             }
             NotoraAction::NoteCommandCompleted(result) => {
                 self.apply_note_command_completion(result)
@@ -600,11 +590,23 @@ impl NotoraState {
         &mut self,
         result: notora_core::note_command::NoteCommandResult,
     ) -> Vec<NotoraEffect> {
-        let created_note = result.previous_relative_path.is_none();
         let identity = DocumentIdentity::Note(result.note.note_id);
+        if result.outcome == notora_core::note_command::NoteCommandOutcome::TitleUpdated {
+            if let Some(active_metadata) = self
+                .library
+                .active_editor_metadata
+                .as_mut()
+                .filter(|metadata| metadata.identity == identity)
+            {
+                active_metadata.metadata.title_revision =
+                    active_metadata.metadata.title_revision.saturating_add(1);
+            }
+            self.library.last_command_error = None;
+            return self.request_card_query(CardQuery::from(self.library.navigation_scope.clone()));
+        }
         let request = self.select_document(identity);
         self.library.last_command_error = None;
-        if created_note {
+        if result.outcome == notora_core::note_command::NoteCommandOutcome::Created {
             self.layout.focus_target = FocusTarget::EditorTitle;
             self.layout.compact_content = CompactContent::Editor;
         } else {
@@ -919,6 +921,8 @@ mod metadata_actions {
             modified_at: SystemTime::UNIX_EPOCH,
             encryption: NoteEncryption::Unencrypted,
             title_initialization: notora_core::TitleInitialization::Independent,
+            file_name_binding: notora_core::NoteFileNameBinding::TitleBound { disambiguator: 1 },
+            title_revision: 0,
         };
 
         state.reduce(NotoraAction::ActiveEditorMetadataLoaded {
@@ -965,6 +969,10 @@ mod metadata_actions {
                 modified_at: SystemTime::UNIX_EPOCH,
                 encryption: NoteEncryption::Unencrypted,
                 title_initialization: notora_core::TitleInitialization::Independent,
+                file_name_binding: notora_core::NoteFileNameBinding::TitleBound {
+                    disambiguator: 1,
+                },
+                title_revision: 0,
             },
             selection_generation: state.library.selected_document_generation,
         });
@@ -993,6 +1001,10 @@ mod metadata_actions {
                 modified_at: SystemTime::UNIX_EPOCH,
                 encryption: NoteEncryption::Unencrypted,
                 title_initialization: notora_core::TitleInitialization::Independent,
+                file_name_binding: notora_core::NoteFileNameBinding::TitleBound {
+                    disambiguator: 1,
+                },
+                title_revision: 0,
             },
             tags: Vec::new(),
         });
@@ -1423,9 +1435,9 @@ mod tests {
         let result = notora_core::note_command::NoteCommandResult {
             note: notora_core::CatalogNote {
                 note_id,
-                relative_path: "未命名 1.md".into(),
+                relative_path: "无标题.md".into(),
                 kind: DocumentKind::Markdown,
-                title: "未命名 1".to_owned(),
+                title: "无标题".to_owned(),
                 excerpt: String::new(),
                 modified_at: SystemTime::UNIX_EPOCH,
                 file_size: 0,
@@ -1433,6 +1445,7 @@ mod tests {
                 starred: false,
             },
             previous_relative_path: None,
+            outcome: notora_core::note_command::NoteCommandOutcome::Created,
         };
 
         let effects = state.reduce(NotoraAction::NoteCommandCompleted(result));
@@ -1444,14 +1457,10 @@ mod tests {
     }
 
     #[test]
-    fn rename_and_move_dialog_entries_stay_behind_typed_effects() {
+    fn move_dialog_entry_stays_behind_a_typed_effect() {
         let mut state = NotoraState::default();
         let note_id = NoteId::generate();
 
-        assert_eq!(
-            state.reduce(NotoraAction::RenameDialogRequested(note_id)),
-            vec![NotoraEffect::ChooseNoteRenameDestination(note_id), NotoraEffect::Redraw]
-        );
         assert_eq!(
             state.reduce(NotoraAction::MoveDialogRequested(note_id)),
             vec![NotoraEffect::ChooseNoteMoveDirectory(note_id), NotoraEffect::Redraw]
