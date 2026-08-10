@@ -84,6 +84,14 @@ impl MindmapRenderProjection<'_> {
         }
     }
 
+    fn editing_node_index(&self) -> Option<usize> {
+        match self.focus {
+            MindmapFocus::TitleEditing { node_index, .. }
+            | MindmapFocus::TitleTextSelected { node_index, .. } => Some(node_index),
+            MindmapFocus::None | MindmapFocus::NodeSelected { .. } => None,
+        }
+    }
+
     pub(crate) fn caret(&self) -> Option<(usize, usize)> {
         self.caret
     }
@@ -226,6 +234,7 @@ pub fn render_cards(
         viewport,
         None,
         None,
+        None,
     );
 }
 
@@ -251,6 +260,7 @@ fn render_cards_with_hover(
     viewport: CanvasViewportSnapshot,
     hit_map: Option<&HitMap>,
     pointer: Option<CanvasPoint>,
+    editing_node_index: Option<usize>,
 ) {
     let pointer = pointer.map(|point| viewport.screen_to_content(point));
     for &i in visible_node_indices {
@@ -267,16 +277,18 @@ fn render_cards_with_hover(
                 .find(|control| control.source_node_index == ln.source_node_index)
                 .map(|control| control.bounds)
         });
-        let hovered = pointer_hits_node_or_control(layout_rect(ln), control_bounds, pointer);
-        let fill = if hovered {
+        let uses_hover_visuals =
+            pointer_hits_node_or_control(layout_rect(ln), control_bounds, pointer)
+                || editing_node_index == Some(ln.source_node_index);
+        let fill = if uses_hover_visuals {
             with_alpha(style.fill, opacity * HOVER_FILL_ALPHA_MULTIPLIER)
         } else {
             with_alpha(style.fill, opacity)
         };
-        // hover 边框跟随节点自身样式色（分支节点即分支色），靠加粗边框与提亮填充反馈
+        // hover/编辑边框跟随节点自身样式色（分支节点即分支色），靠加粗边框与提亮填充反馈
         let border = style.border;
         let border_width =
-            if hovered { HOVERED_CARD_BORDER_WIDTH } else { DEFAULT_CARD_BORDER_WIDTH };
+            if uses_hover_visuals { HOVERED_CARD_BORDER_WIDTH } else { DEFAULT_CARD_BORDER_WIDTH };
 
         dl.fill_rounded(rect, fill, constants.card_radius * viewport.zoom);
         dl.stroke_rounded(
@@ -1229,6 +1241,7 @@ pub(crate) fn render_cards_and_connectors(
         viewport,
         hit_map,
         projection.canvas_pointer,
+        projection.editing_node_index(),
     );
     if let Some(hit_map) = hit_map {
         render_controls(
@@ -1584,6 +1597,7 @@ mod tests {
             viewport,
             None,
             Some(CanvasPoint::new(50.0, 40.0)),
+            None,
         );
         let hovered_border_width =
             hovered_draw_list.cmds.iter().find_map(|command| match command {
@@ -1595,6 +1609,49 @@ mod tests {
             hovered_border_width.expect("hovered card border")
                 > default_border_width.expect("default card border")
         );
+    }
+
+    #[test]
+    fn title_editing_card_uses_hover_visuals_without_pointer_hover() {
+        let constants = LayoutConstants::default();
+        let theme = Theme::from_definition(&ThemeDefinition::default_dark());
+        let layout = single_node_layout();
+        let node = Node { title: "Branch".into(), ..empty_node(1) };
+        let nodes = vec![&node];
+        let viewport =
+            test_viewport(Rect::new(0.0, 0.0, 400.0, 200.0), Rect::new(0.0, 0.0, 400.0, 200.0));
+        let mut projection = plain_projection(["Branch"]);
+        projection.focus = MindmapFocus::TitleEditing { node_index: 0, cursor_byte: 0 };
+        let mut draw_list = DrawList::new();
+        let mut shaper = shaping::Shaper::new().expect("test shaper should initialize");
+
+        let render_theme = render_theme(&theme);
+        render_cards_and_connectors(
+            &mut draw_list,
+            &layout,
+            viewport,
+            &render_theme,
+            &constants,
+            &mut shaper,
+            &nodes,
+            None,
+            &projection,
+            None,
+        );
+
+        assert!(draw_list.cmds.iter().any(|command| matches!(
+            command,
+            DrawCmd::StrokeRect { line_width, .. }
+                if (*line_width - HOVERED_CARD_BORDER_WIDTH).abs() < f32::EPSILON
+        )));
+        assert!(draw_list.cmds.iter().any(|command| matches!(
+            command,
+            DrawCmd::FillRect { color, .. }
+                if *color == with_alpha(
+                    theme.mindmap.node.root.fill,
+                    HOVER_FILL_ALPHA_MULTIPLIER,
+                )
+        )));
     }
 
     #[test]
