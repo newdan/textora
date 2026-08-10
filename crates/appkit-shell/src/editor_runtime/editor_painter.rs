@@ -238,6 +238,10 @@ fn paint_text_editor(
         tab_view.sub_line_pixel_offset(metrics.line_height),
         None,
     ));
+    let cursor_scroll_changed = tab.ensure_cursor_visual_row_visible(metrics.line_height);
+    if cursor_scroll_changed {
+        runtime.request_redraw();
+    }
     vertices
 }
 

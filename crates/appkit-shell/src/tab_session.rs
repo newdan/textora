@@ -852,6 +852,27 @@ impl<'a> TabSessionMut<'a> {
         self.refresh_scroll_metrics(line_height);
     }
 
+    pub(crate) fn ensure_cursor_visual_row_visible(&mut self, line_height: f32) -> bool {
+        const PIXEL_COMPARISON_TOLERANCE: f32 = 0.01;
+
+        let Some(cursor_visual_row) = self.cursor_visual_line() else {
+            return false;
+        };
+        let cursor_bottom_px = (cursor_visual_row + 1) as f32 * line_height
+            + self.display().viewport.sub_line_pixel_offset(line_height);
+        let viewport_bottom_px = self.display().viewport.viewport_height as f32 * line_height;
+        let overflow_px = cursor_bottom_px - viewport_bottom_px;
+        if overflow_px <= PIXEL_COMPARISON_TOLERANCE {
+            return false;
+        }
+
+        let display_map = self.display_map_clone();
+        self.cursor_render_state_mut().click_hint = None;
+        self.display_mut().viewport.scroll_pixels(overflow_px, &display_map, line_height);
+        self.refresh_scroll_metrics(line_height);
+        true
+    }
+
     pub fn page_up(&mut self, line_height: f32) {
         self.move_page(-1.0, line_height);
     }
@@ -1119,6 +1140,35 @@ mod tests {
             assert_eq!(cache.len(), 2);
             assert!(session.runtime.presentation.display.advance_cache.is_empty());
         }
+    }
+
+    #[test]
+    fn cursor_on_wrapped_row_below_viewport_scrolls_into_view() {
+        const LINE_HEIGHT_PX: f32 = 20.0;
+        const VISIBLE_ROWS: usize = 10;
+        const VIEWPORT_HEIGHT_ROWS: f64 = 10.5;
+        const CURSOR_VISUAL_ROW: usize = 10;
+        const WRAPPED_ROW_COUNT: u16 = 11;
+
+        let id = TabIdAllocator::new().allocate();
+        let mut document = document(&"word ".repeat(80));
+        document.cursor_move_to_offset(document.buffer_len());
+        let mut runtime = TabRuntime::new(Box::new(EditorPlugin::new()));
+        runtime.presentation.display.viewport.resize(VISIBLE_ROWS, VIEWPORT_HEIGHT_ROWS);
+        runtime.presentation.display.display_map.set_entries(vec![
+            crate::snap_tree::DisplayLineEntry::placeholder(
+                0,
+                document.buffer_len() as u32,
+                0,
+                WRAPPED_ROW_COUNT,
+            ),
+        ]);
+        runtime.presentation.cursor_render_state.cursor_visual_line = Some(CURSOR_VISUAL_ROW);
+
+        let mut session = TabSessionMut::new(id, &mut document, &mut runtime);
+        session.ensure_cursor_visual_row_visible(LINE_HEIGHT_PX);
+
+        assert_eq!(session.scroll_top(), 0.5);
     }
 
     #[test]
