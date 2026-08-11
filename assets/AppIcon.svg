@@ -1,0 +1,40 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024" fill="none">
+  <title>Notebook App Icon</title>
+  <desc>A warm, minimal notebook icon with a cyan hard cover, deep teal spine, white page layers and an orange back cover.</desc>
+
+  <defs>
+    <linearGradient id="cover" x1="526" y1="108" x2="526" y2="866" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#7AD8E9"/>
+      <stop offset="1" stop-color="#43B2CC"/>
+    </linearGradient>
+
+    <linearGradient id="spine" x1="194" y1="88" x2="194" y2="889" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#0B7D9D"/>
+      <stop offset="1" stop-color="#05617F"/>
+    </linearGradient>
+
+    <linearGradient id="edge" x1="548" y1="829" x2="548" y2="936" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#FFFFFF"/>
+      <stop offset="1" stop-color="#D5DADC"/>
+    </linearGradient>
+  </defs>
+
+  <g transform="translate(81.92 51.2) scale(.84 .9)">
+    <!-- Orange back cover, peeking out at the right and bottom -->
+    <path d="M153 133C153 95 184 64 222 64H854C904 64 944 104 944 154V876C944 925 904 965 855 965H215C181 965 153 937 153 903V133Z" fill="#B85A05"/>
+
+    <!-- White page block -->
+    <path d="M147 121C147 83 178 52 216 52H828C876 52 915 91 915 139V858C915 908 875 948 825 948H213C177 948 147 918 147 882V121Z" fill="url(#edge)"/>
+    <path d="M168 123C168 96 190 74 217 74H817C856 74 887 105 887 144V840C887 883 852 918 809 918H216C190 918 168 896 168 870V123Z" fill="#FFFFFF"/>
+
+    <!-- Cyan front hard cover -->
+    <path d="M115 104C115 66 146 35 184 35H793C848 35 893 80 893 135V805C893 860 848 905 793 905H184C146 905 115 874 115 836V104Z" fill="url(#cover)"/>
+    <!-- Deep teal book spine -->
+    <path d="M115 104C115 66 146 35 184 35H255V905H184C146 905 115 874 115 836V104Z" fill="url(#spine)"/>
+
+    <!-- Three simple cover lines -->
+    <rect x="400" y="317" width="360" height="44" rx="22" fill="#087794"/>
+    <rect x="400" y="446" width="360" height="44" rx="22" fill="#087794"/>
+    <rect x="400" y="575" width="360" height="44" rx="22" fill="#087794"/>
+  </g>
+</svg>
