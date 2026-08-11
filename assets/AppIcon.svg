@@ -32,9 +32,10 @@
     <!-- Deep teal book spine -->
     <path d="M115 104C115 66 146 35 184 35H255V905H184C146 905 115 874 115 836V104Z" fill="url(#spine)"/>
 
-    <!-- Three simple cover lines -->
-    <rect x="400" y="317" width="360" height="44" rx="22" fill="#087794"/>
-    <rect x="400" y="446" width="360" height="44" rx="22" fill="#087794"/>
-    <rect x="400" y="575" width="360" height="44" rx="22" fill="#087794"/>
+    <!-- Four simple cover lines -->
+    <rect x="370" y="250" width="390" height="44" rx="22" fill="#087794"/>
+    <rect x="370" y="395" width="390" height="44" rx="22" fill="#087794"/>
+    <rect x="370" y="535" width="390" height="44" rx="22" fill="#087794"/>
+    <rect x="370" y="680" width="390" height="44" rx="22" fill="#087794"/>
   </g>
 </svg>
