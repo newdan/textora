@@ -988,24 +988,31 @@ impl NotoraShell {
     }
 
     pub(crate) fn synchronize_focus(&mut self, focus_target: FocusTarget, now: Instant) {
-        self.editor_pane.set_tag_focus(focus_target == FocusTarget::EditorTag);
-        let focused_text_input =
-            if focus_target == FocusTarget::EditorTag && self.editor_pane.tag_editor_is_active() {
-                Some(FocusTarget::EditorTag)
-            } else {
-                match focus_target {
-                    FocusTarget::NavigationSearch | FocusTarget::EditorTitle => Some(focus_target),
-                    _ => None,
-                }
-            };
+        let editor_focused_id = match focus_target {
+            FocusTarget::EditorTitle => Some(ui::editor_header::EDITOR_HEADER_TITLE_ID),
+            FocusTarget::EditorTag => Some(ui::tag_editor::TAG_EDITOR_INPUT_ID),
+            _ => None,
+        };
+        self.editor_pane.set_keyboard_focus(editor_focused_id);
+        let focused_text_input = if focus_target == FocusTarget::EditorTag
+            && self.editor_pane.tag_editor_has_keyboard_focus()
+        {
+            Some(FocusTarget::EditorTag)
+        } else {
+            match focus_target {
+                FocusTarget::NavigationSearch | FocusTarget::EditorTitle => Some(focus_target),
+                _ => None,
+            }
+        };
         if self.focused_text_input != focused_text_input {
             self.focused_text_input = focused_text_input;
             self.text_cursor_visible = true;
             self.next_text_cursor_blink_at =
                 focused_text_input.map(|_| now + TEXT_CURSOR_BLINK_INTERVAL);
         }
-        self.search_box.set_focus(focus_target == FocusTarget::NavigationSearch);
-        self.editor_pane.set_title_focus(focus_target == FocusTarget::EditorTitle);
+        self.search_box.set_keyboard_focus(
+            (focus_target == FocusTarget::NavigationSearch).then_some(GLOBAL_SEARCH_BOX_ID),
+        );
         self.apply_text_cursor_visibility();
     }
 
@@ -2875,7 +2882,7 @@ mod tests {
         assert!(ime_rect.y >= 48.0);
 
         shell.synchronize_focus(FocusTarget::NavigationTree, Instant::now());
-        assert!(!shell.editor_pane.tag_editor_is_active());
+        assert!(!shell.editor_pane.tag_editor_has_keyboard_focus());
         assert!(shell.focused_text_input_ime_cursor_rect().is_none());
     }
 

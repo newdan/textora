@@ -3,7 +3,7 @@
 //! 这里把产品层的文档状态映射成通用 UI widget 输入，并集中管理头部、属性
 //! 弹层和编辑器菜单的命中顺序。正文 runtime 不属于这个组合器。
 
-use ui::core::widget::{ControlAction, TextPayload, WidgetAction};
+use ui::core::widget::{ControlAction, TextPayload, WidgetAction, WidgetId};
 use ui::editor_header::{EditorHeaderInput, EditorHeaderWidget};
 use ui::editor_toolbar::{EditorToolbarInput, EditorToolbarWidget};
 use ui::location_picker::{LocationPickerInput, LocationPickerWidget};
@@ -99,7 +99,6 @@ pub struct EditorPaneChrome {
     workspace_rect: Rect,
     tag_rect: Rect,
     location_rect: Rect,
-    tag_editor_active: bool,
 }
 
 impl EditorPaneChrome {
@@ -115,17 +114,16 @@ impl EditorPaneChrome {
             workspace_rect: Rect::ZERO,
             tag_rect: Rect::ZERO,
             location_rect: Rect::ZERO,
-            tag_editor_active: false,
         }
     }
 
     pub fn set_input(&mut self, input: EditorPaneInput) {
         let mut effective_input = input.effective();
         let preserve_tag_draft = self.input.document_key == effective_input.document_key
-            && self.tag_editor_active
+            && self.tag_editor.has_keyboard_focus()
             && effective_input.tags.enabled;
         if self.input.document_key != effective_input.document_key {
-            self.tag_editor_active = false;
+            self.tag_editor.set_keyboard_focus(None);
         }
         if preserve_tag_draft {
             effective_input.tags.pending_text = self.tag_editor.pending_text().to_owned();
@@ -135,10 +133,9 @@ impl EditorPaneChrome {
         self.header.set_input(self.input.header.clone());
         self.location_picker.set_input(self.input.location.clone());
         self.tag_editor.set_input(self.input.tags.clone());
-        self.tag_editor.set_editing(self.tag_editor_active);
         self.toolbar.set_input(self.input.toolbar.clone());
         if !self.input.should_render_chrome() {
-            self.tag_editor_active = false;
+            self.set_keyboard_focus(None);
         }
     }
 
@@ -152,7 +149,6 @@ impl EditorPaneChrome {
         self.input.tags.compact = compact;
         self.header.set_input(self.input.header.clone());
         self.tag_editor.set_input(self.input.tags.clone());
-        self.tag_editor.set_editing(self.tag_editor_active);
         self.workspace_rect =
             workspace_rect(rects.header, context, workspace_label(&self.input.location).as_deref());
         self.tag_rect =
@@ -165,32 +161,16 @@ impl EditorPaneChrome {
     }
 
     pub fn has_open_property_popup(&self) -> bool {
-        self.input.location.open || self.input.tags.suggestions_open
+        self.input.location.open || self.tag_editor.suggestions_open()
     }
 
     pub fn has_open_popup(&self) -> bool {
         self.has_open_property_popup() || self.input.toolbar.overflow_open
     }
 
-    pub fn set_title_focus(&mut self, focused: bool) {
-        if focused {
-            self.set_tag_focus(false);
-        }
-        let focused_id = focused.then_some(ui::editor_header::EDITOR_HEADER_TITLE_ID);
+    pub fn set_keyboard_focus(&mut self, focused_id: Option<WidgetId>) {
         self.header.set_keyboard_focus(focused_id);
-    }
-
-    pub fn set_tag_focus(&mut self, focused: bool) {
-        if focused && self.input.tags.enabled {
-            self.tag_editor_active = true;
-            self.tag_editor.set_editing(true);
-            return;
-        }
-        self.input.tags.pending_text = self.tag_editor.pending_text().to_owned();
-        self.tag_editor_active = false;
-        self.input.tags.suggestions_open = false;
-        self.tag_editor.set_input(self.input.tags.clone());
-        self.tag_editor.set_editing(false);
+        self.tag_editor.set_keyboard_focus(focused_id);
     }
 
     pub fn set_title_blink_visible(&mut self, visible: bool) {
@@ -218,8 +198,8 @@ impl EditorPaneChrome {
         self.tag_editor.set_blink_visible(visible);
     }
 
-    pub fn tag_editor_is_active(&self) -> bool {
-        self.tag_editor_active
+    pub fn tag_editor_has_keyboard_focus(&self) -> bool {
+        self.tag_editor.has_keyboard_focus()
     }
 
     pub fn route_event(
@@ -239,29 +219,22 @@ impl EditorPaneChrome {
             }
         }
 
-        if self.input.tags.suggestions_open || self.tag_editor_active {
+        if self.tag_editor.suggestions_open() || self.tag_editor.has_keyboard_focus() {
             let local_event = translate_event(event, self.tag_rect.x, self.tag_rect.y);
             if let Some(action) = self.tag_editor.on_event(&local_event, context) {
                 let dismissed = is_tag_dismiss_action(&action);
-                self.close_tag_after_action(&action);
                 if !dismissed {
                     return Some(action);
                 }
             }
-            if self.tag_editor_active || self.input.tags.suggestions_open {
+            if self.tag_editor.has_keyboard_focus() || self.tag_editor.suggestions_open() {
                 return Some(WidgetAction::Consumed);
             }
         } else if event_is_inside(event, self.tag_rect) {
-            self.tag_editor_active = true;
-            self.tag_editor.set_editing(true);
             let local_event = translate_event(event, self.tag_rect.x, self.tag_rect.y);
             if let Some(action) = self.tag_editor.on_event(&local_event, context) {
-                self.close_tag_after_action(&action);
                 return Some(action);
             }
-            return Some(WidgetAction::Control(ControlAction::FocusRequested {
-                id: ui::tag_editor::TAG_EDITOR_INPUT_ID,
-            }));
         }
 
         if event_is_inside(event, self.document_header_rect)
@@ -335,19 +308,6 @@ impl EditorPaneChrome {
                 }
             }
             _ => {}
-        }
-    }
-
-    fn close_tag_after_action(&mut self, action: &WidgetAction) {
-        let WidgetAction::Control(ControlAction::Activated { id }) = action else {
-            return;
-        };
-        if *id == ui::tag_editor::TAG_EDITOR_CANCEL_ID
-            || *id == ui::tag_editor::TAG_EDITOR_DISMISS_ID
-        {
-            self.tag_editor_active = false;
-            self.input.tags.suggestions_open = false;
-            self.tag_editor.set_editing(false);
         }
     }
 }
@@ -639,6 +599,45 @@ mod tests {
     }
 
     #[test]
+    fn tag_row_activates_on_click_but_not_hover() {
+        let mut chrome = EditorPaneChrome::new();
+        chrome.set_input(input(EditorPaneMode::WorkspaceNote));
+        let theme = ui::theme::test_theme();
+        let mut measure = ui::NoopMeasure;
+        let mut layout_context =
+            ui::LayoutCtx { ui_measure: None, measure: &mut measure, theme: &theme, dpi: 1.0 };
+        chrome.set_rects(
+            EditorPaneRects {
+                header: Rect::new(100.0, 20.0, 640.0, 128.0),
+                toolbar: Rect::new(100.0, 148.0, 640.0, 40.0),
+                body: Rect::new(100.0, 188.0, 640.0, 400.0),
+            },
+            &mut layout_context,
+        );
+        let mut event_context = ui::EventCtx { theme: &theme, dpi: 1.0, cursor_hint: None };
+        let hover =
+            ui::Event::MouseMove { px: chrome.tag_rect.x + 1.0, py: chrome.tag_rect.y + 1.0 };
+
+        assert_eq!(chrome.route_event(&hover, &mut event_context), None);
+        assert!(!chrome.tag_editor_has_keyboard_focus());
+
+        let click = ui::Event::MouseDown {
+            px: chrome.tag_rect.x + 1.0,
+            py: chrome.tag_rect.y + 1.0,
+            button: ui::MouseButton::Left,
+        };
+        assert_eq!(
+            chrome.route_event(&click, &mut event_context),
+            Some(WidgetAction::Control(ControlAction::FocusRequested {
+                id: ui::tag_editor::TAG_EDITOR_INPUT_ID,
+            }))
+        );
+        assert!(!chrome.tag_editor_has_keyboard_focus());
+        chrome.set_keyboard_focus(Some(ui::tag_editor::TAG_EDITOR_INPUT_ID));
+        assert!(chrome.tag_editor_has_keyboard_focus());
+    }
+
+    #[test]
     fn closing_a_location_popup_removes_its_next_event_hit_target() {
         let mut pane_input = input(EditorPaneMode::WorkspaceNote);
         pane_input.location.open = true;
@@ -739,8 +738,7 @@ mod tests {
         let mut chrome = EditorPaneChrome::new();
         let pane_input = input(EditorPaneMode::WorkspaceNote);
         chrome.set_input(pane_input.clone());
-        chrome.tag_editor_active = true;
-        chrome.tag_editor.set_editing(true);
+        chrome.set_keyboard_focus(Some(ui::tag_editor::TAG_EDITOR_INPUT_ID));
         let theme = ui::theme::test_theme();
         let mut event_context = ui::EventCtx { theme: &theme, dpi: 1.0, cursor_hint: None };
 
@@ -760,7 +758,7 @@ mod tests {
     fn dismissing_the_tag_editor_does_not_consume_the_body_click() {
         let mut chrome = EditorPaneChrome::new();
         chrome.set_input(input(EditorPaneMode::WorkspaceNote));
-        chrome.tag_editor_active = true;
+        chrome.set_keyboard_focus(Some(ui::tag_editor::TAG_EDITOR_INPUT_ID));
         let theme = ui::theme::test_theme();
         let mut measure = ui::NoopMeasure;
         let mut layout_context =
@@ -778,20 +776,20 @@ mod tests {
             ui::Event::MouseDown { px: 320.0, py: 240.0, button: ui::MouseButton::Left };
 
         assert_eq!(chrome.route_event(&body_click, &mut event_context), None);
-        assert!(!chrome.tag_editor_active);
+        assert!(!chrome.tag_editor_has_keyboard_focus());
     }
 
     #[test]
     fn switching_document_keys_clears_pending_tag_input_state() {
         let mut chrome = EditorPaneChrome::new();
         chrome.set_input(input(EditorPaneMode::WorkspaceNote));
-        chrome.tag_editor_active = true;
+        chrome.set_keyboard_focus(Some(ui::tag_editor::TAG_EDITOR_INPUT_ID));
 
         let mut next_input = input(EditorPaneMode::WorkspaceNote);
         next_input.document_key = "next-document".to_owned();
         chrome.set_input(next_input);
 
-        assert!(!chrome.tag_editor_active);
+        assert!(!chrome.tag_editor_has_keyboard_focus());
     }
 
     #[test]
@@ -799,10 +797,10 @@ mod tests {
         let mut chrome = EditorPaneChrome::new();
         chrome.set_input(input(EditorPaneMode::WorkspaceNote));
 
-        chrome.set_title_focus(true);
+        chrome.set_keyboard_focus(Some(ui::editor_header::EDITOR_HEADER_TITLE_ID));
         assert!(chrome.header.title_is_focused());
 
-        chrome.set_title_focus(false);
+        chrome.set_keyboard_focus(None);
         assert!(!chrome.header.title_is_focused());
     }
 
@@ -810,20 +808,19 @@ mod tests {
     fn moving_focus_to_the_title_clears_the_active_tag_editor() {
         let mut chrome = EditorPaneChrome::new();
         chrome.set_input(input(EditorPaneMode::WorkspaceNote));
-        chrome.tag_editor_active = true;
-        chrome.tag_editor.set_editing(true);
+        chrome.set_keyboard_focus(Some(ui::tag_editor::TAG_EDITOR_INPUT_ID));
 
-        chrome.set_title_focus(true);
+        chrome.set_keyboard_focus(Some(ui::editor_header::EDITOR_HEADER_TITLE_ID));
 
         assert!(chrome.header.title_is_focused());
-        assert!(!chrome.tag_editor_is_active());
+        assert!(!chrome.tag_editor_has_keyboard_focus());
     }
 
     #[test]
     fn leaving_tag_focus_preserves_the_unsubmitted_draft() {
         let mut chrome = EditorPaneChrome::new();
         chrome.set_input(input(EditorPaneMode::WorkspaceNote));
-        chrome.set_tag_focus(true);
+        chrome.set_keyboard_focus(Some(ui::tag_editor::TAG_EDITOR_INPUT_ID));
         let theme = ui::theme::test_theme();
         let mut event_context = ui::EventCtx { theme: &theme, dpi: 1.0, cursor_hint: None };
 
@@ -835,8 +832,8 @@ mod tests {
             Some(WidgetAction::Consumed)
         );
 
-        chrome.set_tag_focus(false);
-        chrome.set_tag_focus(true);
+        chrome.set_keyboard_focus(None);
+        chrome.set_keyboard_focus(Some(ui::tag_editor::TAG_EDITOR_INPUT_ID));
 
         assert_eq!(chrome.tag_editor.pending_text(), "x");
     }
@@ -845,7 +842,7 @@ mod tests {
     fn title_ime_cursor_rect_is_translated_to_window_coordinates() {
         let mut chrome = EditorPaneChrome::new();
         chrome.set_input(input(EditorPaneMode::WorkspaceNote));
-        chrome.set_title_focus(true);
+        chrome.set_keyboard_focus(Some(ui::editor_header::EDITOR_HEADER_TITLE_ID));
         let theme = ui::theme::test_theme();
         let mut measure = ui::NoopMeasure;
         let mut layout_context =
@@ -899,7 +896,7 @@ mod tests {
             },
             &mut layout_context,
         );
-        chrome.set_title_focus(true);
+        chrome.set_keyboard_focus(Some(ui::editor_header::EDITOR_HEADER_TITLE_ID));
         let caret_rect = chrome
             .focused_ime_cursor_rect()
             .expect("focused title should expose its first grapheme boundary");
@@ -955,7 +952,7 @@ mod tests {
             },
             &mut layout_context,
         );
-        chrome.set_title_focus(true);
+        chrome.set_keyboard_focus(Some(ui::editor_header::EDITOR_HEADER_TITLE_ID));
 
         chrome.set_title_blink_visible(true);
         let mut visible_draw_list = DrawList::new();
