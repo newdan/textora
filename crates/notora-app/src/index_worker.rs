@@ -21,6 +21,7 @@ pub(crate) enum IndexWorkerCommand {
     QueryCards(CardQuery),
     QueryNavigationTree,
     ExecuteNoteCommand(NoteCommand),
+    ExecuteDirectoryCommand(notora_core::WorkspaceDirectoryCommand),
     ExecuteMetadataMutation(MetadataMutation),
     CreateCatalogBackup { directory: PathBuf, retention: notora_core::BackupRetention },
     ExecuteTrashOperation(TrashOperation),

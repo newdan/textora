@@ -60,6 +60,12 @@ pub enum WorkspaceCompletion {
     NoteCommandFailed {
         message: String,
     },
+    DirectoryCommandCompleted {
+        result: notora_core::WorkspaceDirectoryCommandResult,
+    },
+    DirectoryCommandFailed {
+        message: String,
+    },
     MetadataMutationCompleted {
         mutation: crate::action::MetadataMutation,
         note_id: notora_core::NoteId,

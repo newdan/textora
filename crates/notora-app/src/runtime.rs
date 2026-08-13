@@ -24,6 +24,8 @@ mod product_event_coordinator;
 mod window_runtime;
 #[path = "app/workspace_completion_interpreter.rs"]
 mod workspace_completion_interpreter;
+#[path = "runtime/workspace_transition_runtime.rs"]
+mod workspace_transition_runtime;
 
 use std::num::NonZeroUsize;
 use std::sync::mpsc;
@@ -42,7 +44,7 @@ use winit::window::WindowAttributes;
 
 use crate::action::{
     CardQuery, ConflictResolution, DocumentLoadRequest, NoteCreationTarget, NotoraAction,
-    SaveConflictRequest,
+    SaveConflictRequest, WorkspaceTransitionRequest,
 };
 use crate::autosave::{AutoSaveRequest, AutoSaveScheduler};
 use crate::dirty_snapshot::{collect_dirty_snapshots, write_dirty_snapshot};
@@ -84,6 +86,7 @@ use self::product_event_coordinator::{
     ProductActionTarget, ProductEventCoordinator, WorkspaceCompletionTarget,
 };
 use self::window_runtime::WindowRuntime;
+use self::workspace_transition_runtime::WorkspaceTransitionRuntime;
 
 const PRODUCT_WINDOW_TITLE: &str = "notora";
 const SHUTDOWN_SAVE_DRAIN_TIMEOUT: Duration = Duration::from_secs(2);
@@ -101,6 +104,39 @@ fn resolve_pointer_cursor(
 
 fn choose_workspace_directory() -> Option<std::path::PathBuf> {
     rfd::FileDialog::new().set_title("设置工作区根目录").pick_folder()
+}
+
+fn validate_workspace_transition_target(
+    request: &WorkspaceTransitionRequest,
+) -> Result<(), String> {
+    let root = request.root();
+    match request {
+        WorkspaceTransitionRequest::OpenExisting { .. } => {
+            let metadata = std::fs::metadata(root)
+                .map_err(|error| format!("无法读取工作区目录 {}：{error}", root.display()))?;
+            if !metadata.is_dir() {
+                return Err(format!("工作区路径不是目录：{}", root.display()));
+            }
+        }
+        WorkspaceTransitionRequest::Create { .. } => {
+            match std::fs::symlink_metadata(root) {
+                Ok(_) => return Err(format!("新工作区路径已存在：{}", root.display())),
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(error) => {
+                    return Err(format!("无法检查新工作区路径 {}：{error}", root.display()));
+                }
+            }
+            let Some(parent) = root.parent() else {
+                return Err("新工作区路径缺少父目录".to_owned());
+            };
+            let parent_metadata = std::fs::metadata(parent)
+                .map_err(|error| format!("无法读取新工作区父目录 {}：{error}", parent.display()))?;
+            if !parent_metadata.is_dir() {
+                return Err(format!("新工作区父路径不是目录：{}", parent.display()));
+            }
+        }
+    }
+    Ok(())
 }
 
 /// notora 应用初始化失败。
@@ -145,6 +181,7 @@ pub(crate) struct NotoraRuntime {
     product: NotoraProduct,
     workspace_controller: WorkspaceController,
     workspace_directory_chooser: WorkspaceDirectoryChooser,
+    workspace_transition_runtime: WorkspaceTransitionRuntime,
     window_runtime: WindowRuntime,
 }
 
@@ -244,6 +281,7 @@ impl NotoraRuntime {
                 migration_backup_retention,
             ),
             workspace_directory_chooser: Box::new(choose_workspace_directory),
+            workspace_transition_runtime: WorkspaceTransitionRuntime::default(),
             window_runtime: WindowRuntime::new(),
         };
         app.synchronize_product_focus();
@@ -348,8 +386,11 @@ impl NotoraRuntime {
         let result = self.workspace_controller.execute(command, &mut self.product)?;
         match &result {
             WorkspaceCommandResult::Opened(workspace) => {
-                self.action_runtime
-                    .set_active_workspace(workspace.descriptor.workspace_id, workspace.generation);
+                self.action_runtime.set_active_workspace(
+                    workspace.descriptor.workspace_id,
+                    workspace.generation,
+                    workspace.descriptor.root.clone(),
+                );
             }
             WorkspaceCommandResult::Closed { .. } => {
                 self.action_runtime.clear_active_workspace();
@@ -364,6 +405,118 @@ impl NotoraRuntime {
         }
         self.window_runtime.schedule_redraw();
         Ok(result)
+    }
+
+    fn prepare_workspace_transition(&mut self, request: WorkspaceTransitionRequest) {
+        if self.workspace_transition_runtime.is_active() {
+            self.dispatch_action(NotoraAction::WorkspaceTransitionFailed(
+                "已有工作区切换正在进行".to_owned(),
+            ));
+            return;
+        }
+        if let Err(message) = validate_workspace_transition_target(&request) {
+            self.dispatch_action(NotoraAction::WorkspaceTransitionFailed(message));
+            return;
+        }
+
+        let candidates = self.document_runtime.workspace_note_save_candidates();
+        if !self.workspace_transition_runtime.begin(request, &candidates) {
+            self.dispatch_action(NotoraAction::WorkspaceTransitionFailed(
+                "已有工作区切换正在进行".to_owned(),
+            ));
+            return;
+        }
+
+        for candidate in candidates {
+            let Some(origin) = self.document_origin_for_tab(candidate.tab_id) else {
+                self.fail_workspace_transition("工作区未切换：无法确定待保存笔记的来源".to_owned());
+                return;
+            };
+            self.document_runtime.request_immediate_workspace_note_save(&origin, candidate);
+        }
+        self.process_due_autosaves();
+        self.reconcile_workspace_transition_saves();
+    }
+
+    fn reconcile_workspace_transition_saves(&mut self) {
+        if !self.workspace_transition_runtime.is_active() {
+            return;
+        }
+        let candidates = self.workspace_transition_runtime.save_candidates();
+        let mut saved_tabs = Vec::new();
+        for candidate in candidates {
+            if let Some(message) = self.document_runtime.save_failure_message(candidate.tab_id) {
+                self.fail_workspace_transition(format!("工作区未切换：笔记保存失败：{message}"));
+                return;
+            }
+            let Some((content_revision, dirty)) =
+                self.document_runtime.workspace_note_revision(candidate.tab_id)
+            else {
+                self.fail_workspace_transition(
+                    "工作区未切换：待保存笔记在切换前已不可用".to_owned(),
+                );
+                return;
+            };
+            if content_revision != candidate.content_revision {
+                self.fail_workspace_transition(
+                    "工作区未切换：笔记在保存完成前又发生了变化".to_owned(),
+                );
+                return;
+            }
+            if !dirty && self.document_runtime.workspace_note_is_saved_at(candidate) {
+                saved_tabs.push(candidate.tab_id);
+            }
+        }
+
+        self.workspace_transition_runtime.complete_saves(saved_tabs);
+        let Some(request) = self.workspace_transition_runtime.take_ready_request() else {
+            return;
+        };
+        self.apply_workspace_transition(request);
+    }
+
+    fn apply_workspace_transition(&mut self, request: WorkspaceTransitionRequest) {
+        self.dispatch_action(NotoraAction::WorkspaceTransitionApplying);
+        let command = match &request {
+            WorkspaceTransitionRequest::Create { root } => {
+                WorkspaceCommand::Create { root: root.clone() }
+            }
+            WorkspaceTransitionRequest::OpenExisting { root } => {
+                WorkspaceCommand::OpenExisting { root: root.clone() }
+            }
+        };
+        let result = self.workspace_controller.execute(command, &mut self.product);
+        match result {
+            Ok(WorkspaceCommandResult::Opened(workspace)) => {
+                self.document_runtime.close_workspace_note_tabs();
+                self.action_runtime.set_active_workspace(
+                    workspace.descriptor.workspace_id,
+                    workspace.generation,
+                    workspace.descriptor.root.clone(),
+                );
+                self.request_navigation_tree();
+                self.dispatch_action(NotoraAction::WorkspaceTransitionCompleted);
+                self.schedule_session_persistence();
+                self.window_runtime.schedule_redraw();
+            }
+            Ok(WorkspaceCommandResult::Unchanged | WorkspaceCommandResult::Closed { .. }) => {
+                self.fail_workspace_transition("工作区未切换：目标工作区没有成功激活".to_owned());
+            }
+            Err(error) => {
+                let mut message = format!("工作区未切换：{error}");
+                if matches!(request, WorkspaceTransitionRequest::Create { .. })
+                    && request.root().exists()
+                {
+                    message.push_str("；新目录可能已创建，但初始化未完成，可检查后重试");
+                }
+                self.fail_workspace_transition(message);
+            }
+        }
+    }
+
+    fn fail_workspace_transition(&mut self, message: String) {
+        self.workspace_transition_runtime.cancel();
+        self.dispatch_action(NotoraAction::WorkspaceTransitionFailed(message));
     }
 
     pub fn shell_layout(&self) -> ShellLayout {
@@ -1084,6 +1237,7 @@ impl NotoraRuntime {
         }
         self.apply_shell_effect(outcome.shell_effect);
         self.window_runtime.merge_redraw_request(outcome.needs_redraw);
+        self.reconcile_workspace_transition_saves();
     }
 
     fn apply_editor_outcome(&mut self, outcome: EditorOutcome) {
@@ -1091,6 +1245,7 @@ impl NotoraRuntime {
             self.handle_editor_notification(notification);
         }
         self.apply_shell_effect(outcome.shell_effect);
+        self.reconcile_workspace_transition_saves();
     }
 
     fn selection_matches(&self, request: DocumentLoadRequest) -> bool {
@@ -1397,6 +1552,21 @@ impl NotoraEffectTarget for NotoraRuntime {
 
     fn execute_note_command(&mut self, command: NoteCommand) {
         NotoraRuntime::execute_note_command(self, command);
+    }
+
+    fn execute_directory_command(&mut self, command: notora_core::WorkspaceDirectoryCommand) {
+        NotoraRuntime::execute_directory_command(self, command);
+    }
+
+    fn choose_workspace_creation_location(&mut self) -> Vec<NotoraAction> {
+        (self.workspace_directory_chooser)()
+            .map(NotoraAction::WorkspaceCreationLocationSelected)
+            .into_iter()
+            .collect()
+    }
+
+    fn prepare_workspace_transition(&mut self, request: WorkspaceTransitionRequest) {
+        NotoraRuntime::prepare_workspace_transition(self, request);
     }
 
     fn commit_title(&mut self, title: String) {
@@ -1897,6 +2067,12 @@ impl NotoraRuntime {
         self.submit_note_command(command);
     }
 
+    fn execute_directory_command(&mut self, command: notora_core::WorkspaceDirectoryCommand) {
+        if let Err(error) = self.workspace_controller.execute_directory_command(command) {
+            self.dispatch_action(NotoraAction::DirectoryCreationFailed(error.to_string()));
+        }
+    }
+
     fn commit_title(&mut self, title: String) {
         self.commit_active_note_title(title);
     }
@@ -2141,19 +2317,8 @@ impl NotoraRuntime {
         let Some(root) = (self.workspace_directory_chooser)() else {
             return false;
         };
-        if let Err(error) = self.execute_workspace_command(WorkspaceCommand::OpenExisting { root })
-        {
-            self.dispatch_action(NotoraAction::NoteCommandFailed(error.to_string()));
-            return false;
-        }
-        if self.workspace_controller.active_workspace().is_none() {
-            self.dispatch_action(NotoraAction::NoteCommandFailed(
-                "选择的目录未能激活为工作区".to_owned(),
-            ));
-            return false;
-        }
-        self.dispatch_action(NotoraAction::NavigationSelected(
-            notora_core::NavigationScope::WorkspaceRoot,
+        self.dispatch_action(NotoraAction::WorkspaceTransitionConfirmed(
+            WorkspaceTransitionRequest::OpenExisting { root },
         ));
         true
     }
@@ -2750,7 +2915,7 @@ mod tests {
         NotoraRuntime, SettingsPersistenceState, StartupTrace, resolve_pointer_cursor,
         workspace_relative_directory,
     };
-    use crate::action::{MetadataMutation, NotoraAction};
+    use crate::action::{MetadataMutation, NotoraAction, WorkspaceTransitionRequest};
     use crate::autosave::{AutoSaveRequest, AutoSaveState};
     use crate::editor_adapter::LoadedDocument;
     use crate::state::{CardPageState, normalize_notora_title};
@@ -2818,6 +2983,318 @@ mod tests {
             focus: EditorFocus::Active,
             modal_blocked: false,
         }
+    }
+
+    fn install_registered_external(
+        app: &mut NotoraRuntime,
+        path: &std::path::Path,
+    ) -> (DocumentIdentity, appkit_core::workspace::types::TabId) {
+        let identity = DocumentIdentity::ExternalFile(notora_core::ExternalFileId::generate());
+        let prepared = crate::editor_adapter::prepare_loaded_document(
+            &app.document_runtime.editor_runtime,
+            LoadedDocument {
+                path: path.to_path_buf(),
+                contents: "外部正文".to_owned(),
+                disk_revision: None,
+            },
+        )
+        .expect("external fixture should prepare");
+        let _ = app.document_runtime.editor_runtime.install_prepared_tab(
+            prepared,
+            None,
+            appkit_shell::editor_runtime::OpenDisposition::Persistent,
+        );
+        let tab_id = app
+            .document_runtime
+            .editor_runtime
+            .active_tab_id()
+            .expect("external fixture should become active");
+        let _ = app.document_runtime.document_registry.register(identity, tab_id);
+        (identity, tab_id)
+    }
+
+    fn install_registered_untitled_external(
+        app: &mut NotoraRuntime,
+    ) -> (DocumentIdentity, appkit_core::workspace::types::TabId) {
+        let identity = app.action_runtime.create_untitled_external(DocumentKind::Markdown);
+        app.dispatch_action(NotoraAction::ExternalFileOpened(identity));
+        let tab_id =
+            app.document_tab_for(identity).expect("untitled external fixture should install a tab");
+        (identity, tab_id)
+    }
+
+    #[test]
+    fn workspace_transition_aborts_when_a_dirty_note_cannot_be_saved() {
+        let old_workspace = tempfile::tempdir().expect("old workspace should exist");
+        let target_workspace = tempfile::tempdir().expect("target workspace should exist");
+        let note_path = std::fs::canonicalize(old_workspace.path())
+            .expect("old workspace path should canonicalize")
+            .join("draft.md");
+        let mut app = app();
+        app.execute_workspace_command(WorkspaceCommand::OpenExisting {
+            root: old_workspace.path().to_path_buf(),
+        })
+        .expect("old workspace should open");
+        let (_, note_tab) = install_registered_note(
+            &mut app,
+            note_path.to_str().expect("fixture path should be UTF-8"),
+            "原始正文",
+        );
+        let edit_outcome = app
+            .document_runtime
+            .editor_runtime
+            .commit_text(active_editor_input_context(), "未保存修改".to_owned());
+        app.apply_editor_outcome(edit_outcome);
+
+        app.dispatch_action(NotoraAction::WorkspaceTransitionConfirmed(
+            WorkspaceTransitionRequest::OpenExisting {
+                root: target_workspace.path().to_path_buf(),
+            },
+        ));
+
+        assert_eq!(
+            app.workspace_controller
+                .active_workspace()
+                .expect("old workspace should remain active")
+                .descriptor
+                .root,
+            std::fs::canonicalize(old_workspace.path())
+                .expect("old workspace path should canonicalize")
+        );
+        assert!(app.document_runtime.editor_runtime.document_summary(note_tab).is_some());
+        assert!(app.state().library.last_command_error.as_deref().is_some_and(|message| {
+            message.contains("工作区未切换") && message.contains("保存失败")
+        }));
+        assert!(
+            app.document_runtime
+                .editor_runtime
+                .document_summary(note_tab)
+                .is_some_and(|summary| summary.dirty)
+        );
+    }
+
+    #[test]
+    fn workspace_transition_start_failure_preserves_the_old_workspace_and_note_tabs() {
+        let old_workspace = tempfile::tempdir().expect("old workspace should exist");
+        let target_workspace = tempfile::tempdir().expect("target workspace should exist");
+        std::fs::create_dir(target_workspace.path().join(".notora"))
+            .expect("target metadata directory should exist");
+        std::fs::write(
+            target_workspace.path().join(".notora/workspace.toml"),
+            "not valid workspace metadata",
+        )
+        .expect("corrupt workspace fixture should be written");
+        let mut app = app();
+        app.execute_workspace_command(WorkspaceCommand::OpenExisting {
+            root: old_workspace.path().to_path_buf(),
+        })
+        .expect("old workspace should open");
+        let (note_identity, _) = install_registered_note(
+            &mut app,
+            old_workspace.path().join("kept.md").to_str().expect("fixture path should be UTF-8"),
+            "保留正文",
+        );
+
+        app.dispatch_action(NotoraAction::WorkspaceTransitionConfirmed(
+            WorkspaceTransitionRequest::OpenExisting {
+                root: target_workspace.path().to_path_buf(),
+            },
+        ));
+
+        assert_eq!(
+            app.workspace_controller
+                .active_workspace()
+                .expect("old workspace should remain active")
+                .descriptor
+                .root,
+            std::fs::canonicalize(old_workspace.path())
+                .expect("old workspace path should canonicalize")
+        );
+        assert!(app.document_tab_for(note_identity).is_some());
+    }
+
+    #[test]
+    fn successful_workspace_transition_closes_notes_and_keeps_external_tabs() {
+        let old_workspace = tempfile::tempdir().expect("old workspace should exist");
+        let target_workspace = tempfile::tempdir().expect("target workspace should exist");
+        let external_directory = tempfile::tempdir().expect("external directory should exist");
+        let mut app = app();
+        app.execute_workspace_command(WorkspaceCommand::OpenExisting {
+            root: old_workspace.path().to_path_buf(),
+        })
+        .expect("old workspace should open");
+        let (note_identity, _) = install_registered_note(
+            &mut app,
+            old_workspace.path().join("old.md").to_str().expect("fixture path should be UTF-8"),
+            "旧工作区正文",
+        );
+        let (external_identity, external_tab) =
+            install_registered_external(&mut app, &external_directory.path().join("outside.md"));
+        let (untitled_identity, untitled_tab) = install_registered_untitled_external(&mut app);
+
+        app.dispatch_action(NotoraAction::WorkspaceTransitionConfirmed(
+            WorkspaceTransitionRequest::OpenExisting {
+                root: target_workspace.path().to_path_buf(),
+            },
+        ));
+
+        assert_eq!(
+            app.workspace_controller
+                .active_workspace()
+                .expect("target workspace should become active")
+                .descriptor
+                .root,
+            std::fs::canonicalize(target_workspace.path())
+                .expect("target workspace path should canonicalize")
+        );
+        assert!(app.document_tab_for(note_identity).is_none());
+        assert_eq!(app.document_tab_for(external_identity), Some(external_tab));
+        assert_eq!(app.document_tab_for(untitled_identity), Some(untitled_tab));
+        assert_eq!(app.editor_runtime_tab_count(), 2);
+        assert_eq!(app.state().library.navigation_scope, NavigationScope::WorkspaceRoot);
+    }
+
+    #[test]
+    fn workspace_transition_waits_for_a_successful_dirty_note_save_before_switching() {
+        let old_workspace = tempfile::tempdir().expect("old workspace should exist");
+        let target_workspace = tempfile::tempdir().expect("target workspace should exist");
+        let note_path = std::fs::canonicalize(old_workspace.path())
+            .expect("old workspace path should canonicalize")
+            .join("saved-before-switch.md");
+        let mut app = app();
+        app.execute_workspace_command(WorkspaceCommand::OpenExisting {
+            root: old_workspace.path().to_path_buf(),
+        })
+        .expect("old workspace should open");
+        let (note_identity, note_tab) = install_registered_note(
+            &mut app,
+            note_path.to_str().expect("fixture path should be UTF-8"),
+            "原始正文",
+        );
+        let edit_outcome = app
+            .document_runtime
+            .editor_runtime
+            .commit_text(active_editor_input_context(), "切换前保存的正文".to_owned());
+        app.apply_editor_outcome(edit_outcome);
+        let request = WorkspaceTransitionRequest::OpenExisting {
+            root: target_workspace.path().to_path_buf(),
+        };
+        let candidates = app.document_runtime.workspace_note_save_candidates();
+        assert_eq!(candidates.len(), 1);
+        app.action_runtime.state.workspace_transition =
+            crate::state::WorkspaceTransitionState::AwaitingDirtySaves { request: request.clone() };
+        assert!(app.workspace_transition_runtime.begin(request, &candidates));
+        let origin = app
+            .document_origin_for_tab(note_tab)
+            .expect("dirty note should retain its old workspace origin");
+        app.document_runtime.request_immediate_workspace_note_save(&origin, candidates[0]);
+        let save_requests = app.document_runtime.take_due_autosaves();
+        assert_eq!(save_requests.len(), 1);
+        let prepared = app
+            .document_runtime
+            .editor_runtime
+            .prepare_save(save_requests[0].tab_id)
+            .expect("dirty note should produce a save snapshot");
+        let completion = appkit_shell::editor_runtime::execute_prepared_save(prepared);
+        assert!(completion.result.is_ok());
+        let save_outcome = app.document_runtime.editor_runtime.apply_save_completion(completion);
+
+        app.apply_editor_outcome(save_outcome);
+
+        assert_eq!(
+            std::fs::read_to_string(&note_path).expect("dirty note should be persisted"),
+            "原始正文切换前保存的正文"
+        );
+        assert_eq!(
+            app.workspace_controller
+                .active_workspace()
+                .expect("target workspace should become active")
+                .descriptor
+                .root,
+            std::fs::canonicalize(target_workspace.path())
+                .expect("target workspace path should canonicalize")
+        );
+        assert!(app.document_tab_for(note_identity).is_none());
+    }
+
+    #[test]
+    fn new_workspace_form_creates_only_the_requested_leaf_directory() {
+        let parent = tempfile::tempdir().expect("workspace parent should exist");
+        let target = parent.path().join("研究笔记");
+        let mut app = app();
+
+        app.dispatch_action(NotoraAction::OpenWorkspaceCreationRequested);
+        app.dispatch_action(NotoraAction::WorkspaceCreationNameChanged("研究笔记".to_owned()));
+        app.dispatch_action(NotoraAction::WorkspaceCreationLocationSelected(
+            parent.path().to_path_buf(),
+        ));
+        app.dispatch_action(NotoraAction::WorkspaceCreationCommitRequested);
+
+        assert!(target.is_dir());
+        assert!(target.join(".notora/workspace.toml").is_file());
+        assert_eq!(
+            app.workspace_controller
+                .active_workspace()
+                .expect("created workspace should become active")
+                .descriptor
+                .root,
+            std::fs::canonicalize(&target).expect("created workspace should canonicalize")
+        );
+    }
+
+    #[test]
+    fn existing_create_target_reports_conflict_and_preserves_the_active_workspace() {
+        let old_workspace = tempfile::tempdir().expect("old workspace should exist");
+        let parent = tempfile::tempdir().expect("workspace parent should exist");
+        let existing_target = parent.path().join("已存在");
+        std::fs::create_dir(&existing_target).expect("conflict target should exist");
+        let mut app = app();
+        app.execute_workspace_command(WorkspaceCommand::OpenExisting {
+            root: old_workspace.path().to_path_buf(),
+        })
+        .expect("old workspace should open");
+
+        app.dispatch_action(NotoraAction::OpenWorkspaceCreationRequested);
+        app.dispatch_action(NotoraAction::WorkspaceCreationNameChanged("已存在".to_owned()));
+        app.dispatch_action(NotoraAction::WorkspaceCreationLocationSelected(
+            parent.path().to_path_buf(),
+        ));
+        app.dispatch_action(NotoraAction::WorkspaceCreationCommitRequested);
+
+        assert_eq!(
+            app.workspace_controller
+                .active_workspace()
+                .expect("old workspace should remain active")
+                .descriptor
+                .root,
+            std::fs::canonicalize(old_workspace.path()).expect("old workspace should canonicalize")
+        );
+        assert!(
+            app.state()
+                .library
+                .last_command_error
+                .as_deref()
+                .is_some_and(|message| message.contains("已存在"))
+        );
+        assert!(!existing_target.join(".notora").exists());
+    }
+
+    #[test]
+    fn cancelling_open_workspace_selection_preserves_the_current_workspace() {
+        let old_workspace = tempfile::tempdir().expect("old workspace should exist");
+        let mut app = app();
+        app.execute_workspace_command(WorkspaceCommand::OpenExisting {
+            root: old_workspace.path().to_path_buf(),
+        })
+        .expect("old workspace should open");
+        let before =
+            app.workspace_controller.active_workspace().expect("old workspace should be active");
+        app.workspace_directory_chooser = Box::new(|| None);
+
+        app.dispatch_action(NotoraAction::WorkspaceRootSelectionRequested);
+
+        assert_eq!(app.workspace_controller.active_workspace(), Some(before));
+        assert_eq!(app.state().workspace_transition, crate::state::WorkspaceTransitionState::Idle);
     }
 
     fn note_origin(relative_path: &str) -> notora_core::DocumentOrigin {

@@ -8,9 +8,10 @@ use std::time::{Duration, Instant};
 
 use notora_core::note_command::NoteCommand;
 use notora_core::{
-    Catalog, DocumentIdentity, Workspace, WorkspaceDescriptor, WorkspaceError, WorkspaceFileBatch,
-    WorkspaceFileMonitor, WorkspaceFileMonitorError, execute_note_command, scan_workspace,
-    scan_workspace_file_batch, scan_workspace_paths,
+    Catalog, CatalogNavigationTree, DocumentIdentity, Workspace, WorkspaceDescriptor,
+    WorkspaceError, WorkspaceFileBatch, WorkspaceFileMonitor, WorkspaceFileMonitorError,
+    execute_note_command, scan_workspace, scan_workspace_directories, scan_workspace_file_batch,
+    scan_workspace_paths,
 };
 
 use crate::action::{CardQuery, DocumentLoadRequest, MetadataMutation, TrashOperation};
@@ -60,6 +61,7 @@ pub enum WorkspaceControllerError {
     Workspace(WorkspaceError),
     FileMonitor(WorkspaceFileMonitorError),
     IndexerThreadUnavailable,
+    IndexerStartup { message: String },
     NoActiveWorkspace,
     CommandWorkerDisconnected,
 }
@@ -75,6 +77,9 @@ impl std::fmt::Display for WorkspaceControllerError {
                 write!(formatter, "无法监视工作区文件：{source}")
             }
             Self::IndexerThreadUnavailable => formatter.write_str("无法启动工作区索引线程"),
+            Self::IndexerStartup { message } => {
+                write!(formatter, "工作区索引线程启动失败：{message}")
+            }
             Self::NoActiveWorkspace => formatter.write_str("当前没有活动工作区"),
             Self::CommandWorkerDisconnected => formatter.write_str("工作区命令线程不可用"),
         }
@@ -88,6 +93,7 @@ impl std::error::Error for WorkspaceControllerError {
             Self::Workspace(source) => Some(source),
             Self::FileMonitor(source) => Some(source),
             Self::IndexerThreadUnavailable
+            | Self::IndexerStartup { .. }
             | Self::NoActiveWorkspace
             | Self::CommandWorkerDisconnected => None,
         }
@@ -130,7 +136,7 @@ impl WorkspaceController {
             WorkspaceCommand::SelectionCancelled => Ok(WorkspaceCommandResult::Unchanged),
             WorkspaceCommand::OpenExisting { root } => self.open_existing(root, product),
             WorkspaceCommand::Create { root } => {
-                fs::create_dir_all(&root).map_err(|source| {
+                fs::create_dir(&root).map_err(|source| {
                     WorkspaceControllerError::CreateDirectory { path: root.clone(), source }
                 })?;
                 self.open_existing(root, product)
@@ -153,6 +159,19 @@ impl WorkspaceController {
         session
             .indexer
             .send(IndexWorkerCommand::ExecuteNoteCommand(command))
+            .map_err(|_| WorkspaceControllerError::CommandWorkerDisconnected)
+    }
+
+    /// 将目录变更交由活动工作区的后台 worker 执行。
+    pub fn execute_directory_command(
+        &self,
+        command: notora_core::WorkspaceDirectoryCommand,
+    ) -> Result<(), WorkspaceControllerError> {
+        let session =
+            self.active_session.as_ref().ok_or(WorkspaceControllerError::NoActiveWorkspace)?;
+        session
+            .indexer
+            .send(IndexWorkerCommand::ExecuteDirectoryCommand(command))
             .map_err(|_| WorkspaceControllerError::CommandWorkerDisconnected)
     }
 
@@ -261,7 +280,7 @@ impl WorkspaceController {
         let workspace =
             Workspace::open_or_initialize(&root).map_err(WorkspaceControllerError::Workspace)?;
         let catalog_path = workspace.metadata_directory().join(CATALOG_FILE_NAME);
-        let generation = self.advance_generation();
+        let generation = self.next_generation.wrapping_add(1);
         let descriptor = workspace.descriptor();
         let catalog_backups_directory = self
             .catalog_backups_directory
@@ -277,6 +296,7 @@ impl WorkspaceController {
             event_sender,
         )?;
         self.close_active_session();
+        self.next_generation = generation;
         product.set_active_workspace(descriptor.workspace_id, generation);
         self.active_session = Some(session);
         let active_workspace = self
@@ -354,11 +374,12 @@ impl WorkspaceSession {
             event_sender,
             WorkspaceEventScope { workspace_id: descriptor.workspace_id, generation },
         );
-        let (file_monitor, file_batches) =
+        let (mut file_monitor, file_batches) =
             WorkspaceFileMonitor::start(workspace.root().to_path_buf())
                 .map_err(WorkspaceControllerError::FileMonitor)?;
-        let indexer = IndexWorker::start(move |command_receiver| {
-            run_indexer(
+        let (startup_sender, startup_receiver) = mpsc::channel();
+        let mut indexer = IndexWorker::start(move |command_receiver| {
+            run_indexer_with_startup(
                 workspace,
                 catalog_path,
                 catalog_backups_directory,
@@ -366,9 +387,25 @@ impl WorkspaceSession {
                 file_batches,
                 command_receiver,
                 event_sender,
+                Some(startup_sender),
             )
         })
         .map_err(|_| WorkspaceControllerError::IndexerThreadUnavailable)?;
+        match startup_receiver.recv() {
+            Ok(Ok(())) => {}
+            Ok(Err(message)) => {
+                file_monitor.shutdown();
+                indexer.shutdown();
+                return Err(WorkspaceControllerError::IndexerStartup { message });
+            }
+            Err(_) => {
+                file_monitor.shutdown();
+                indexer.shutdown();
+                return Err(WorkspaceControllerError::IndexerStartup {
+                    message: "索引线程在完成启动前意外退出".to_owned(),
+                });
+            }
+        }
         Ok(Self {
             active_workspace: ActiveWorkspace { descriptor, generation },
             file_monitor,
@@ -387,6 +424,7 @@ impl WorkspaceSession {
 }
 
 #[allow(clippy::too_many_arguments)]
+#[cfg(test)]
 fn run_indexer(
     workspace: Workspace,
     catalog_path: PathBuf,
@@ -396,6 +434,29 @@ fn run_indexer(
     command_receiver: mpsc::Receiver<IndexWorkerCommand>,
     event_sender: WorkspaceEventSender,
 ) {
+    run_indexer_with_startup(
+        workspace,
+        catalog_path,
+        catalog_backups_directory,
+        migration_backup_retention,
+        file_batches,
+        command_receiver,
+        event_sender,
+        None,
+    );
+}
+
+#[allow(clippy::too_many_arguments)]
+fn run_indexer_with_startup(
+    workspace: Workspace,
+    catalog_path: PathBuf,
+    catalog_backups_directory: Option<PathBuf>,
+    migration_backup_retention: notora_core::BackupRetention,
+    file_batches: mpsc::Receiver<WorkspaceFileBatch>,
+    command_receiver: mpsc::Receiver<IndexWorkerCommand>,
+    event_sender: WorkspaceEventSender,
+    mut startup_sender: Option<mpsc::Sender<Result<(), String>>>,
+) {
     if let Some(backup_directory) = &catalog_backups_directory
         && Catalog::migration_required(&catalog_path).unwrap_or(false)
         && let Err(error) = notora_core::create_catalog_backup_from_path(
@@ -404,9 +465,11 @@ fn run_indexer(
             migration_backup_retention,
         )
     {
-        let _ = event_sender.send(WorkspaceCompletion::WorkspaceIndexFailed {
-            message: format!("迁移前备份工作区目录索引失败：{error}"),
-        });
+        report_indexer_startup_failure(
+            &event_sender,
+            &mut startup_sender,
+            format!("迁移前备份工作区目录索引失败：{error}"),
+        );
         return;
     }
     let catalog_result = match catalog_backups_directory {
@@ -426,11 +489,16 @@ fn run_indexer(
             .map(|catalog| (catalog, None))
             .map_err(|error| error.to_string()),
     };
-    let Ok((catalog, recovery_notice)) = catalog_result else {
-        let _ = event_sender.send(WorkspaceCompletion::WorkspaceIndexFailed {
-            message: "索引线程无法访问工作区目录索引".to_owned(),
-        });
-        return;
+    let (catalog, recovery_notice) = match catalog_result {
+        Ok(result) => result,
+        Err(error) => {
+            report_indexer_startup_failure(
+                &event_sender,
+                &mut startup_sender,
+                format!("索引线程无法访问工作区目录索引：{error}"),
+            );
+            return;
+        }
     };
     if let Some(message) = recovery_notice {
         let _ = event_sender.send(WorkspaceCompletion::CatalogRecoveryNotified { message });
@@ -446,11 +514,16 @@ fn run_indexer(
         }
         Ok(_) => {}
         Err(error) => {
-            let _ = event_sender.send(WorkspaceCompletion::WorkspaceIndexFailed {
-                message: format!("工作区存在未完成的文件改名，需要先恢复：{error}"),
-            });
+            report_indexer_startup_failure(
+                &event_sender,
+                &mut startup_sender,
+                format!("工作区存在未完成的文件改名，需要先恢复：{error}"),
+            );
             return;
         }
+    }
+    if let Some(sender) = startup_sender.take() {
+        let _ = sender.send(Ok(()));
     }
     index_workspace(&workspace, &catalog, &event_sender);
     let mut pending_presence_confirmation_paths = BTreeSet::new();
@@ -466,6 +539,7 @@ fn run_indexer(
                     Some(Instant::now() + WATCHER_PRESENCE_CONFIRMATION_DELAY);
                 let note_relocations =
                     index_workspace_file_batch(&workspace, &catalog, &batch, &event_sender);
+                send_navigation_tree(&workspace, &catalog, &event_sender);
                 let _ = event_sender.send(WorkspaceCompletion::WorkspaceChanged {
                     changed_paths: batch.relative_paths,
                     note_relocations,
@@ -487,6 +561,17 @@ fn run_indexer(
             index_workspace_paths(&workspace, &catalog, &relative_paths, &event_sender);
         }
     }
+}
+
+fn report_indexer_startup_failure(
+    event_sender: &WorkspaceEventSender,
+    startup_sender: &mut Option<mpsc::Sender<Result<(), String>>>,
+    message: String,
+) {
+    if let Some(sender) = startup_sender.take() {
+        let _ = sender.send(Err(message.clone()));
+    }
+    let _ = event_sender.send(WorkspaceCompletion::WorkspaceIndexFailed { message });
 }
 
 fn execute_workspace_command(
@@ -511,17 +596,14 @@ fn execute_workspace_command(
                 }
             }
         }
-        IndexWorkerCommand::QueryNavigationTree => match catalog.navigation_tree() {
-            Ok(tree) => {
-                let _ = event_sender.send(WorkspaceCompletion::NavigationTreeLoaded { tree });
-            }
-            Err(error) => {
-                let _ = event_sender
-                    .send(WorkspaceCompletion::NavigationTreeFailed { message: error.to_string() });
-            }
-        },
+        IndexWorkerCommand::QueryNavigationTree => {
+            send_navigation_tree(workspace, catalog, event_sender);
+        }
         IndexWorkerCommand::ExecuteNoteCommand(command) => {
             execute_note_command_in_worker(workspace, catalog, command, event_sender);
+        }
+        IndexWorkerCommand::ExecuteDirectoryCommand(command) => {
+            execute_directory_command_in_worker(workspace, catalog, command, event_sender);
         }
         IndexWorkerCommand::ExecuteMetadataMutation(mutation) => {
             execute_metadata_mutation_in_worker(catalog, mutation, event_sender);
@@ -582,6 +664,30 @@ fn execute_workspace_command(
         }
         IndexWorkerCommand::ReindexCatalog => {
             index_workspace(workspace, catalog, event_sender);
+        }
+    }
+}
+
+fn navigation_tree_from_sources(
+    workspace: &Workspace,
+    catalog: &Catalog,
+) -> Result<CatalogNavigationTree, String> {
+    let directories = scan_workspace_directories(workspace).map_err(|error| error.to_string())?;
+    let tags = catalog.tags_with_active_note_counts().map_err(|error| error.to_string())?;
+    Ok(CatalogNavigationTree { directories, tags })
+}
+
+fn send_navigation_tree(
+    workspace: &Workspace,
+    catalog: &Catalog,
+    event_sender: &WorkspaceEventSender,
+) {
+    match navigation_tree_from_sources(workspace, catalog) {
+        Ok(tree) => {
+            let _ = event_sender.send(WorkspaceCompletion::NavigationTreeLoaded { tree });
+        }
+        Err(message) => {
+            let _ = event_sender.send(WorkspaceCompletion::NavigationTreeFailed { message });
         }
     }
 }
@@ -670,6 +776,24 @@ fn execute_note_command_in_worker(
         Err(error) => {
             let _ = event_sender
                 .send(WorkspaceCompletion::NoteCommandFailed { message: error.to_string() });
+        }
+    }
+}
+
+fn execute_directory_command_in_worker(
+    workspace: &Workspace,
+    catalog: &Catalog,
+    command: notora_core::WorkspaceDirectoryCommand,
+    event_sender: &WorkspaceEventSender,
+) {
+    match notora_core::execute_workspace_directory_command(workspace, command) {
+        Ok(result) => {
+            let _ = event_sender.send(WorkspaceCompletion::DirectoryCommandCompleted { result });
+            send_navigation_tree(workspace, catalog, event_sender);
+        }
+        Err(error) => {
+            let _ = event_sender
+                .send(WorkspaceCompletion::DirectoryCommandFailed { message: error.to_string() });
         }
     }
 }
@@ -820,6 +944,7 @@ fn collect_note_relocations(
 #[cfg(test)]
 mod tests {
     use std::fs;
+    use std::path::PathBuf;
     use std::sync::mpsc;
     use std::thread;
     use std::time::{Duration, Instant};
@@ -890,6 +1015,111 @@ mod tests {
             WorkspaceCommandResult::Closed { generation: 2 }
         );
         assert_eq!(controller.active_workspace(), None);
+    }
+
+    #[test]
+    fn create_rejects_an_existing_target_without_opening_it() {
+        let directory = tempfile::tempdir().expect("workspace test directory should be created");
+        let existing_root = directory.path().join("existing");
+        fs::create_dir(&existing_root).expect("existing target should be created");
+        let mut controller = WorkspaceController::default();
+        let mut product = NotoraProduct::new();
+
+        assert!(matches!(
+            controller.execute(
+                WorkspaceCommand::Create { root: existing_root.clone() },
+                &mut product,
+            ),
+            Err(WorkspaceControllerError::CreateDirectory { path, source })
+                if path == existing_root && source.kind() == std::io::ErrorKind::AlreadyExists
+        ));
+        assert_eq!(controller.active_workspace(), None);
+        assert!(!existing_root.join(".notora").exists());
+    }
+
+    #[test]
+    fn failed_replacement_does_not_advance_generation_or_close_the_active_session() {
+        let first_directory =
+            tempfile::tempdir().expect("first workspace test directory should be created");
+        let corrupt_directory =
+            tempfile::tempdir().expect("corrupt workspace test directory should be created");
+        fs::create_dir(corrupt_directory.path().join(".notora"))
+            .expect("metadata directory should be created");
+        fs::write(corrupt_directory.path().join(".notora/workspace.toml"), "not valid toml")
+            .expect("corrupt manifest should be written");
+        let second_directory =
+            tempfile::tempdir().expect("second workspace test directory should be created");
+        let mut controller = WorkspaceController::default();
+        let mut product = NotoraProduct::new();
+        let WorkspaceCommandResult::Opened(first_workspace) = controller
+            .execute(
+                WorkspaceCommand::OpenExisting { root: first_directory.path().to_path_buf() },
+                &mut product,
+            )
+            .expect("first workspace should open")
+        else {
+            panic!("first workspace should become active");
+        };
+
+        assert!(
+            controller
+                .execute(
+                    WorkspaceCommand::OpenExisting { root: corrupt_directory.path().to_path_buf() },
+                    &mut product,
+                )
+                .is_err()
+        );
+        assert_eq!(controller.active_workspace(), Some(first_workspace.clone()));
+
+        let WorkspaceCommandResult::Opened(second_workspace) = controller
+            .execute(
+                WorkspaceCommand::OpenExisting { root: second_directory.path().to_path_buf() },
+                &mut product,
+            )
+            .expect("second valid workspace should open")
+        else {
+            panic!("second workspace should become active");
+        };
+        assert_eq!(second_workspace.generation, first_workspace.generation + 1);
+    }
+
+    #[test]
+    fn indexer_catalog_startup_failure_does_not_replace_the_active_session() {
+        let active_directory =
+            tempfile::tempdir().expect("active workspace directory should exist");
+        let target_directory =
+            tempfile::tempdir().expect("target workspace directory should exist");
+        let target_workspace = notora_core::Workspace::open_or_initialize(target_directory.path())
+            .expect("target workspace metadata should initialize");
+        let target_catalog_path = target_workspace.metadata_directory().join(CATALOG_FILE_NAME);
+        let target_catalog = rusqlite::Connection::open(&target_catalog_path)
+            .expect("target catalog fixture should open");
+        target_catalog
+            .pragma_update(None, "user_version", 9_999_i64)
+            .expect("future catalog version should be written");
+        drop(target_catalog);
+        drop(target_workspace);
+        let mut controller = WorkspaceController::default();
+        let mut product = NotoraProduct::new();
+        let WorkspaceCommandResult::Opened(active_workspace) = controller
+            .execute(
+                WorkspaceCommand::OpenExisting { root: active_directory.path().to_path_buf() },
+                &mut product,
+            )
+            .expect("active workspace should open")
+        else {
+            panic!("active workspace should become active");
+        };
+
+        assert!(
+            controller
+                .execute(
+                    WorkspaceCommand::OpenExisting { root: target_directory.path().to_path_buf() },
+                    &mut product,
+                )
+                .is_err()
+        );
+        assert_eq!(controller.active_workspace(), Some(active_workspace));
     }
 
     #[test]
@@ -1174,6 +1404,90 @@ mod tests {
         worker.join().expect("indexer should stop after its file channel closes");
         let catalog = Catalog::open(&catalog_path).expect("catalog should reopen after indexing");
         assert!(catalog.active_notes().expect("active notes should query").is_empty());
+    }
+
+    #[test]
+    fn watcher_batch_refreshes_navigation_after_an_external_directory_change() {
+        let directory = tempfile::tempdir().expect("workspace test directory should be created");
+        let workspace = notora_core::Workspace::open_or_initialize(directory.path())
+            .expect("workspace metadata should be initialized");
+        let descriptor = workspace.descriptor();
+        let catalog_path = workspace.metadata_directory().join(CATALOG_FILE_NAME);
+        let (file_batch_sender, file_batches) = mpsc::channel();
+        let (_command_sender, command_receiver) = mpsc::channel();
+        let mut product = NotoraProduct::new();
+        product.set_active_workspace(descriptor.workspace_id, 1);
+        let event_sender = product.event_sender();
+        let worker = thread::spawn(move || {
+            run_indexer(
+                workspace,
+                catalog_path,
+                None,
+                default_migration_backup_retention(),
+                file_batches,
+                command_receiver,
+                WorkspaceEventSender::new(
+                    event_sender,
+                    WorkspaceEventScope { workspace_id: descriptor.workspace_id, generation: 1 },
+                ),
+            )
+        });
+
+        let deadline = Instant::now() + Duration::from_secs(2);
+        loop {
+            let _ = product.drain_product_events();
+            if product.take_events().iter().any(|event| {
+                matches!(
+                    event,
+                    NotoraProductEvent::Workspace(event)
+                        if matches!(
+                            event.completion,
+                            WorkspaceCompletion::WorkspaceScanCompleted { .. }
+                        )
+                )
+            }) {
+                break;
+            }
+            assert!(Instant::now() < deadline, "initial scan should complete promptly");
+            thread::sleep(Duration::from_millis(10));
+        }
+
+        let external_directory = PathBuf::from("external-empty");
+        fs::create_dir(directory.path().join(&external_directory))
+            .expect("external directory fixture should be created");
+        file_batch_sender
+            .send(notora_core::WorkspaceFileBatch {
+                relative_paths: vec![external_directory.clone()],
+                changes: vec![notora_core::WorkspaceFileChange::Created(
+                    external_directory.clone(),
+                )],
+            })
+            .expect("watcher batch should reach the indexer");
+
+        loop {
+            let _ = product.drain_product_events();
+            if product.take_events().iter().any(|event| {
+                matches!(
+                    event,
+                    NotoraProductEvent::Workspace(event)
+                        if matches!(
+                            &event.completion,
+                            WorkspaceCompletion::NavigationTreeLoaded { tree }
+                                if tree.directories.contains(&external_directory)
+                        )
+                )
+            }) {
+                break;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "external directory change should refresh the navigation tree"
+            );
+            thread::sleep(Duration::from_millis(10));
+        }
+
+        drop(file_batch_sender);
+        worker.join().expect("indexer should stop after its file channel closes");
     }
 
     #[test]
@@ -1508,6 +1822,101 @@ mod tests {
             assert!(Instant::now() < deadline, "catalog backup completion should arrive promptly");
             thread::sleep(Duration::from_millis(10));
         }
+    }
+
+    #[test]
+    fn navigation_tree_uses_filesystem_directories_even_when_they_are_empty() {
+        let workspace_directory =
+            tempfile::tempdir().expect("workspace test directory should be created");
+        fs::create_dir(workspace_directory.path().join("empty"))
+            .expect("empty directory should be created");
+        fs::create_dir_all(workspace_directory.path().join("docs/plans"))
+            .expect("nested empty directory should be created");
+        let mut controller = WorkspaceController::default();
+        let mut product = NotoraProduct::new();
+        let WorkspaceCommandResult::Opened(active_workspace) = controller
+            .execute(
+                WorkspaceCommand::OpenExisting { root: workspace_directory.path().to_path_buf() },
+                &mut product,
+            )
+            .expect("workspace should open")
+        else {
+            panic!("open command should activate the workspace");
+        };
+
+        controller.query_navigation_tree().expect("navigation query should reach the worker");
+
+        let deadline = Instant::now() + Duration::from_secs(2);
+        loop {
+            let _ = product.drain_product_events();
+            let events = product.take_events();
+            let loaded_directories = events.iter().find_map(|event| {
+                let WorkspaceCompletion::NavigationTreeLoaded { tree } =
+                    active_completion(event, &active_workspace)?
+                else {
+                    return None;
+                };
+                Some(tree.directories.clone())
+            });
+            if let Some(directories) = loaded_directories {
+                assert_eq!(
+                    directories,
+                    vec![
+                        PathBuf::from("docs"),
+                        PathBuf::from("docs/plans"),
+                        PathBuf::from("empty"),
+                    ]
+                );
+                break;
+            }
+            assert!(Instant::now() < deadline, "navigation tree should load promptly");
+            thread::sleep(Duration::from_millis(10));
+        }
+    }
+
+    #[test]
+    fn active_workspace_worker_creates_directory_and_refreshes_navigation() {
+        let workspace_directory =
+            tempfile::tempdir().expect("workspace test directory should be created");
+        let mut controller = WorkspaceController::default();
+        let mut product = NotoraProduct::new();
+        let WorkspaceCommandResult::Opened(active_workspace) = controller
+            .execute(
+                WorkspaceCommand::OpenExisting { root: workspace_directory.path().to_path_buf() },
+                &mut product,
+            )
+            .expect("workspace should open")
+        else {
+            panic!("open command should activate the workspace");
+        };
+
+        controller
+            .execute_directory_command(notora_core::WorkspaceDirectoryCommand::Create {
+                parent_relative_path: PathBuf::new(),
+                name: "notes".to_owned(),
+            })
+            .expect("directory command should reach the worker");
+
+        let deadline = Instant::now() + Duration::from_secs(2);
+        let mut completed = false;
+        let mut refreshed = false;
+        while !completed || !refreshed {
+            let _ = product.drain_product_events();
+            for event in product.take_events() {
+                match active_completion(&event, &active_workspace) {
+                    Some(WorkspaceCompletion::DirectoryCommandCompleted { result }) => {
+                        completed = result.relative_path == std::path::Path::new("notes");
+                    }
+                    Some(WorkspaceCompletion::NavigationTreeLoaded { tree }) => {
+                        refreshed = tree.directories.contains(&PathBuf::from("notes"));
+                    }
+                    _ => {}
+                }
+            }
+            assert!(Instant::now() < deadline, "directory completion should arrive promptly");
+            thread::sleep(Duration::from_millis(10));
+        }
+        assert!(workspace_directory.path().join("notes").is_dir());
     }
 
     #[test]

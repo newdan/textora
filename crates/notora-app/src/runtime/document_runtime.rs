@@ -46,6 +46,12 @@ pub(super) struct TitleCommitContext {
     pub(super) metadata: Option<NoteEditorMetadata>,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) struct WorkspaceNoteSaveCandidate {
+    pub(super) tab_id: TabId,
+    pub(super) content_revision: u64,
+}
+
 #[derive(Default)]
 pub(super) struct DocumentOutcome {
     pub(super) actions: Vec<crate::action::NotoraAction>,
@@ -283,6 +289,67 @@ impl DocumentRuntime {
 
     pub(super) fn clear_save_failure(&mut self, tab_id: TabId) {
         self.save_failure_messages.remove(&tab_id);
+    }
+
+    pub(super) fn workspace_note_save_candidates(&self) -> Vec<WorkspaceNoteSaveCandidate> {
+        self.document_registry
+            .documents_by_least_recently_used()
+            .into_iter()
+            .filter(|document| matches!(document.identity, DocumentIdentity::Note(_)))
+            .filter_map(|document| {
+                let summary = self.editor_runtime.document_summary(document.tab_id)?;
+                summary.dirty.then_some(WorkspaceNoteSaveCandidate {
+                    tab_id: document.tab_id,
+                    content_revision: summary.content_revision,
+                })
+            })
+            .collect()
+    }
+
+    pub(super) fn request_immediate_workspace_note_save(
+        &mut self,
+        origin: &notora_core::DocumentOrigin,
+        candidate: WorkspaceNoteSaveCandidate,
+    ) {
+        self.autosave.request_immediate_save(origin, candidate.tab_id, candidate.content_revision);
+    }
+
+    pub(super) fn workspace_note_is_saved_at(&self, candidate: WorkspaceNoteSaveCandidate) -> bool {
+        self.editor_runtime.document_summary(candidate.tab_id).is_some_and(|summary| {
+            !summary.dirty && summary.content_revision == candidate.content_revision
+        })
+    }
+
+    pub(super) fn workspace_note_revision(&self, tab_id: TabId) -> Option<(u64, bool)> {
+        self.editor_runtime
+            .document_summary(tab_id)
+            .map(|summary| (summary.content_revision, summary.dirty))
+    }
+
+    /// 成功切换后只清理旧工作区笔记；外部文件及其保存流程必须继续存活。
+    pub(super) fn close_workspace_note_tabs(&mut self) {
+        let note_tabs = self
+            .document_registry
+            .documents_by_least_recently_used()
+            .into_iter()
+            .filter_map(|document| {
+                matches!(document.identity, DocumentIdentity::Note(_)).then_some(document.tab_id)
+            })
+            .collect::<Vec<_>>();
+        for tab_id in note_tabs {
+            self.autosave.cancel(tab_id);
+            self.save_failure_messages.remove(&tab_id);
+            self.pending_conflict_retries.remove(&tab_id);
+            self.pending_trash_moves.remove(&tab_id);
+            self.pending_note_moves.remove(&tab_id);
+            self.pending_title_updates.remove(&tab_id);
+            let _ = self.editor_runtime.close_for_product(tab_id);
+            self.document_registry.remove_tab(tab_id);
+        }
+        self.pending_title_seeds.clear();
+        self.pending_metadata_generations.clear();
+        self.pending_metadata_mutations.clear();
+        self.catalog_reconciliation_pending = false;
     }
 
     pub(super) fn schedule_autosave(
