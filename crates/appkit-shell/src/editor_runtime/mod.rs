@@ -78,6 +78,30 @@ fn clipboard_command_for_key(
 const CURSOR_BLINK_INTERVAL_MS: u64 = 500;
 const CURSOR_BLINK_WAKE_TOLERANCE_MS: u64 = 5;
 
+fn editor_scrollbar_input(
+    viewport_extent: f32,
+    total_extent: f32,
+    scroll_position: f32,
+) -> Option<ui::scrollbar::ScrollbarInput> {
+    if !viewport_extent.is_finite()
+        || !total_extent.is_finite()
+        || !scroll_position.is_finite()
+        || viewport_extent <= 0.0
+        || total_extent <= viewport_extent
+    {
+        return None;
+    }
+    Some(ui::scrollbar::ScrollbarInput {
+        viewport_height_px: f64::from(viewport_extent),
+        total_display_rows: total_extent.ceil() as usize,
+        scroll_top_rows: f64::from(scroll_position.max(0.0)),
+    })
+}
+
+fn redraw_editor_outcome() -> EditorOutcome {
+    EditorOutcome { shell_effect: crate::event::ShellEffect::REDRAW, ..EditorOutcome::default() }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct EditorCursorBlinkPhase {
     pub visible: bool,
@@ -870,7 +894,7 @@ impl EditorRuntime {
         position: (f32, f32),
         pixels: f32,
     ) -> EditorOutcome {
-        if !self.input_session.pointer_allowed(context, position) {
+        if context.modal_blocked || !context.editor_rect.contains(position.0, position.1) {
             return EditorOutcome::default();
         }
         let plugin_viewport_height =
@@ -892,20 +916,133 @@ impl EditorRuntime {
         tab.runtime.canvas_viewport.snapshot()
     }
 
-    /// 将活动画布的二维滚动范围转换为产品壳可直接渲染的纯 UI 输入。
-    pub fn active_canvas_scrollbars_input(
+    /// 将活动编辑器的滚动范围转换为产品壳可直接渲染的覆盖式滚动条输入。
+    pub fn active_editor_scrollbars_input(
         &self,
+        editor_rect: ui::Rect,
     ) -> Option<ui::canvas_scrollbars::CanvasScrollbarsInput> {
         let tab_id = self.active_tab_id()?;
         let tab = self.tab_session(tab_id)?;
-        if !tab.is_canvas() || !tab.has_canvas_viewport_snapshot() {
-            return None;
+        if tab.is_canvas() {
+            if !tab.has_canvas_viewport_snapshot() {
+                return None;
+            }
+            let input = tab.runtime.canvas_viewport.scrollbars_input();
+            return Some(ui::canvas_scrollbars::CanvasScrollbarsInput {
+                horizontal: input.horizontal,
+                vertical: input.vertical,
+            });
         }
-        let input = tab.runtime.canvas_viewport.scrollbars_input();
-        Some(ui::canvas_scrollbars::CanvasScrollbarsInput {
-            horizontal: input.horizontal,
-            vertical: input.vertical,
+
+        let vertical = if tab.handles_own_rendering() {
+            let viewport_height =
+                editor_painter::plugin_bounds(editor_rect, self.scale_factor() as f32, false).h;
+            editor_scrollbar_input(viewport_height, tab.content_height(), tab.scroll_y())
+        } else {
+            editor_scrollbar_input(
+                tab.viewport_height() as f32,
+                tab.total_display_rows() as f32,
+                tab.scroll_top() as f32,
+            )
+        };
+        vertical.map(|vertical| ui::canvas_scrollbars::CanvasScrollbarsInput {
+            horizontal: None,
+            vertical: Some(vertical),
         })
+    }
+
+    /// 把产品壳滚动条动作归约到活动编辑器；画布与普通文档共享同一入口。
+    pub fn apply_active_scrollbar_action(
+        &mut self,
+        action: ui::canvas_scrollbars::CanvasScrollbarsAction,
+        editor_rect: ui::Rect,
+    ) -> EditorOutcome {
+        let Some(tab_id) = self.active_tab_id() else {
+            return EditorOutcome::default();
+        };
+        let is_canvas = self.tab_session(tab_id).is_some_and(|tab| tab.is_canvas());
+        if is_canvas {
+            return self.apply_canvas_scrollbar_action(action);
+        }
+        self.apply_document_scrollbar_action(tab_id, action, editor_rect)
+    }
+
+    fn apply_canvas_scrollbar_action(
+        &mut self,
+        action: ui::canvas_scrollbars::CanvasScrollbarsAction,
+    ) -> EditorOutcome {
+        use crate::canvas_viewport::CanvasViewportAction;
+        use ui::scrollbar::ScrollbarAction;
+
+        let viewport_action = match action.action {
+            ScrollbarAction::DragTo(position) => CanvasViewportAction::SetAxisPosition {
+                axis: action.axis,
+                position: position as f32,
+            },
+            ScrollbarAction::PageUp => {
+                CanvasViewportAction::Page { axis: action.axis, direction: -1.0 }
+            }
+            ScrollbarAction::PageDown => {
+                CanvasViewportAction::Page { axis: action.axis, direction: 1.0 }
+            }
+            ScrollbarAction::StartDrag
+            | ScrollbarAction::EndDrag
+            | ScrollbarAction::HoverChanged(_) => return redraw_editor_outcome(),
+        };
+        self.apply_active_canvas_viewport_action(viewport_action)
+    }
+
+    fn apply_document_scrollbar_action(
+        &mut self,
+        tab_id: appkit_core::workspace::types::TabId,
+        action: ui::canvas_scrollbars::CanvasScrollbarsAction,
+        editor_rect: ui::Rect,
+    ) -> EditorOutcome {
+        use ui::canvas::CanvasAxis;
+        use ui::scrollbar::ScrollbarAction;
+
+        if action.axis != CanvasAxis::Vertical {
+            return EditorOutcome::default();
+        }
+
+        let line_height = self.editor_line_height();
+        let plugin_viewport_height =
+            editor_painter::plugin_bounds(editor_rect, self.scale_factor() as f32, false).h;
+        let Some(mut tab) = self.tab_session_mut(tab_id) else {
+            return EditorOutcome::default();
+        };
+        let handles_own_rendering = tab.runtime.plugin.handles_own_rendering();
+        match action.action {
+            ScrollbarAction::DragTo(position) if handles_own_rendering => {
+                tab.send_message(ui::plugin::PluginMessage::SetScrollY(position as f32));
+            }
+            ScrollbarAction::PageUp if handles_own_rendering => {
+                tab.send_message(ui::plugin::PluginMessage::Scroll {
+                    delta: -plugin_viewport_height,
+                    viewport_h: plugin_viewport_height,
+                });
+            }
+            ScrollbarAction::PageDown if handles_own_rendering => {
+                tab.send_message(ui::plugin::PluginMessage::Scroll {
+                    delta: plugin_viewport_height,
+                    viewport_h: plugin_viewport_height,
+                });
+            }
+            ScrollbarAction::DragTo(position) => tab.set_scroll_top_rows(position, line_height),
+            ScrollbarAction::PageUp => tab.scroll_viewport_by_pages(-1.0, line_height),
+            ScrollbarAction::PageDown => tab.scroll_viewport_by_pages(1.0, line_height),
+            ScrollbarAction::StartDrag
+            | ScrollbarAction::EndDrag
+            | ScrollbarAction::HoverChanged(_) => return redraw_editor_outcome(),
+        }
+        EditorOutcome {
+            shell_effect: if handles_own_rendering {
+                crate::event::ShellEffect::REDRAW
+            } else {
+                crate::event::ShellEffect::RESHAPE
+            },
+            ..EditorOutcome::default()
+        }
     }
 
     /// 把产品输入归约为活动画布视口动作；普通文档保持无副作用。
@@ -1506,7 +1643,7 @@ mod tests {
             .active_canvas_viewport_snapshot()
             .expect("prepared canvas should expose a viewport snapshot");
         let scrollbars = runtime
-            .active_canvas_scrollbars_input()
+            .active_editor_scrollbars_input(ui::Rect::new(200.0, 80.0, 1_000.0, 800.0))
             .expect("overflowing canvas should expose scrollbar input");
 
         assert!(scrollbars.horizontal.is_some());
@@ -2008,6 +2145,63 @@ mod tests {
 
         assert_eq!(outcome, EditorOutcome::default());
         assert_eq!(runtime.workspace_snapshot().tabs[0].content_lines, vec!["clean"]);
+    }
+
+    #[test]
+    fn editor_wheel_scroll_is_allowed_without_keyboard_focus() {
+        let mut runtime = runtime_with_clean_tab();
+        let editor_rect = ui::Rect::new(0.0, 0.0, 640.0, 480.0);
+        let focused_context =
+            EditorInputContext { editor_rect, focus: EditorFocus::Active, modal_blocked: false };
+        let long_document = (0..100).map(|line| format!("line {line}\n")).collect();
+        let _ = runtime.commit_text(focused_context, long_document);
+        let tab_id = runtime.active_tab_id().expect("test tab should be active");
+        runtime
+            .tab_session_mut(tab_id)
+            .expect("test tab should exist")
+            .resize_presentation(10, 10.0);
+        let unfocused_context =
+            EditorInputContext { focus: EditorFocus::Inactive, ..focused_context };
+
+        let outcome = runtime.scroll_editor(unfocused_context, (320.0, 240.0), 80.0);
+        let scroll_top = runtime.tab_session(tab_id).expect("test tab should exist").scroll_top();
+
+        assert!(outcome.shell_effect.redraw);
+        assert!(scroll_top > 0.0, "hovered editor should scroll without keyboard focus");
+    }
+
+    #[test]
+    fn overflowing_text_editor_exposes_vertical_scrollbar_and_applies_drag() {
+        let mut runtime = runtime_with_clean_tab();
+        let editor_rect = ui::Rect::new(0.0, 0.0, 640.0, 480.0);
+        let focused_context =
+            EditorInputContext { editor_rect, focus: EditorFocus::Active, modal_blocked: false };
+        let long_document = (0..100).map(|line| format!("line {line}\n")).collect();
+        let _ = runtime.commit_text(focused_context, long_document);
+        let tab_id = runtime.active_tab_id().expect("test tab should be active");
+        runtime
+            .tab_session_mut(tab_id)
+            .expect("test tab should exist")
+            .resize_presentation(10, 10.0);
+
+        let scrollbars = runtime
+            .active_editor_scrollbars_input(editor_rect)
+            .expect("overflowing text editor should expose scrollbar input");
+
+        assert!(scrollbars.horizontal.is_none());
+        assert!(scrollbars.vertical.is_some());
+
+        let outcome = runtime.apply_active_scrollbar_action(
+            ui::canvas_scrollbars::CanvasScrollbarsAction {
+                axis: ui::canvas::CanvasAxis::Vertical,
+                action: ui::scrollbar::ScrollbarAction::DragTo(20.0),
+            },
+            editor_rect,
+        );
+        let scroll_top = runtime.tab_session(tab_id).expect("test tab should exist").scroll_top();
+
+        assert!(outcome.shell_effect.reshape);
+        assert!((scroll_top - 20.0).abs() < 0.01, "scroll_top={scroll_top}");
     }
 
     #[test]

@@ -235,13 +235,17 @@ impl FrameRuntime {
         } else {
             EditorSurfacePaint::Empty
         };
-        let canvas_scrollbars_input = (input.editor_is_active
+        let editor_scrollbars_input = (input.editor_is_active
             && input.state.layout.overlay == crate::OverlayState::None)
-            .then(|| document_runtime.editor().active_canvas_scrollbars_input())
+            .then(|| {
+                document_runtime
+                    .editor()
+                    .active_editor_scrollbars_input(input.layout.editor_body_rect)
+            })
             .flatten();
         frame.with_layout_context(|context| {
             self.shell.set_canvas_scrollbars_input(
-                canvas_scrollbars_input,
+                editor_scrollbars_input,
                 input.layout.editor_body_rect,
                 context,
             );

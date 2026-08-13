@@ -510,35 +510,13 @@ impl NotoraRuntime {
         applied
     }
 
-    fn handle_canvas_scrollbar_action(
+    fn handle_editor_scrollbar_action(
         &mut self,
         action: ui::canvas_scrollbars::CanvasScrollbarsAction,
     ) {
-        use appkit_shell::canvas_viewport::CanvasViewportAction;
-        use ui::scrollbar::ScrollbarAction;
-
-        let viewport_action = match action.action {
-            ScrollbarAction::DragTo(position) => CanvasViewportAction::SetAxisPosition {
-                axis: action.axis,
-                position: position as f32,
-            },
-            ScrollbarAction::PageUp => {
-                CanvasViewportAction::Page { axis: action.axis, direction: -1.0 }
-            }
-            ScrollbarAction::PageDown => {
-                CanvasViewportAction::Page { axis: action.axis, direction: 1.0 }
-            }
-            ScrollbarAction::StartDrag
-            | ScrollbarAction::EndDrag
-            | ScrollbarAction::HoverChanged(_) => {
-                if self.document_runtime.editor_mut().active_canvas_viewport_snapshot().is_some() {
-                    self.apply_shell_effect(ShellEffect::REDRAW);
-                }
-                return;
-            }
-        };
+        let editor_rect = self.shell_layout().editor_body_rect;
         let outcome =
-            self.document_runtime.editor_mut().apply_active_canvas_viewport_action(viewport_action);
+            self.document_runtime.editor_mut().apply_active_scrollbar_action(action, editor_rect);
         self.apply_editor_outcome(outcome);
     }
 
@@ -835,7 +813,7 @@ impl NotoraRuntime {
             self.apply_shell_effect(ShellEffect::REDRAW);
         }
         if let Some(action) = route.canvas_scrollbar_action {
-            self.handle_canvas_scrollbar_action(action);
+            self.handle_editor_scrollbar_action(action);
         }
         for action in route.actions {
             self.dispatch_action(action);
