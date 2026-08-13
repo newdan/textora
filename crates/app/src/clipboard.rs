@@ -1,26 +1,29 @@
-use arboard::Clipboard;
-use std::sync::Mutex;
-use std::sync::OnceLock;
-
-static CLIPBOARD: OnceLock<Mutex<Option<Clipboard>>> = OnceLock::new();
-
-fn get_clipboard() -> std::sync::MutexGuard<'static, Option<Clipboard>> {
-    let mut lock = CLIPBOARD.get_or_init(|| Mutex::new(Clipboard::new().ok())).lock().unwrap();
-
-    // If clipboard failed to initialize previously, try again
-    if lock.is_none() {
-        *lock = Clipboard::new().ok();
-    }
-
-    lock
-}
+use appkit_shell::SystemClipboard;
+use ui::core::Clipboard;
 
 pub fn copy_to_clipboard(text: &str) -> bool {
-    let mut cb = get_clipboard();
-    if let Some(clipboard) = cb.as_mut() { clipboard.set_text(text).is_ok() } else { false }
+    SystemClipboard.write_text(text)
 }
 
 pub fn paste_from_clipboard() -> Option<String> {
-    let mut cb = get_clipboard();
-    if let Some(clipboard) = cb.as_mut() { clipboard.get_text().ok() } else { None }
+    SystemClipboard.read_text()
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn platform_clipboard_implementation_is_owned_only_by_the_shared_shell() {
+        let app_manifest = include_str!("../Cargo.toml");
+        let app_sources = [
+            include_str!("commands.rs"),
+            include_str!("dispatch/editor.rs"),
+            include_str!("document_view/selection.rs"),
+            include_str!("workspace_product.rs"),
+        ];
+        let shell_clipboard_source = include_str!("../../appkit-shell/src/clipboard.rs");
+
+        assert!(!app_manifest.lines().any(|line| line.trim_start().starts_with("arboard")));
+        assert!(app_sources.iter().all(|source| !source.contains("arboard::")));
+        assert!(shell_clipboard_source.contains("arboard::Clipboard"));
+    }
 }

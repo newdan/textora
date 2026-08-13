@@ -33,7 +33,6 @@ serde = { workspace = true }
 toml = "0.5"
 bytemuck = { version = "1", features = ["derive"] }
 hashlink.workspace = true
-arboard.workspace = true
 rfd = { version = "0.15", default-features = false }
 similar = "2"
 blake3 = "1"

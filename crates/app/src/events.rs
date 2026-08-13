@@ -136,7 +136,7 @@ pub(crate) fn handle_scroll(_app: &App, delta: MouseScrollDelta) -> Vec<AppActio
 /// event and it should not fall through to the editor.
 fn dispatch_mouse(app: &mut App, ev: Event) -> (Vec<AppAction>, bool, Option<CursorIcon>) {
     let metrics = app.ui_metrics();
-    let mut ctx = EventCtx { cursor_hint: None, theme: &app.current_theme, dpi: metrics.dpi };
+    let mut ctx = EventCtx::new(&app.current_theme, metrics.dpi);
     let mut actions = Vec::new();
 
     let widget_action = app.ui_shell.dispatch(&ev, &mut ctx);
@@ -169,7 +169,7 @@ fn dispatch_mouse(app: &mut App, ev: Event) -> (Vec<AppAction>, bool, Option<Cur
 
 fn dispatch_lifecycle_to_ui(app: &mut App, event: Event) {
     let metrics = app.ui_metrics();
-    let mut context = EventCtx { cursor_hint: None, theme: &app.current_theme, dpi: metrics.dpi };
+    let mut context = EventCtx::new(&app.current_theme, metrics.dpi);
     let _ = app.ui_shell.dispatch(&event, &mut context);
 }
 
@@ -1476,8 +1476,7 @@ mod tests {
         app.ui_shell.push_overlay(overlay_widget, overlay_rect);
 
         // Dispatch a MouseMove in the sidebar area
-        let mut ctx =
-            ui::core::widget::EventCtx { cursor_hint: None, theme: &app.current_theme, dpi: 1.0 };
+        let mut ctx = ui::core::widget::EventCtx::new(&app.current_theme, 1.0);
         let result = app
             .ui_shell
             .dispatch(&ui::core::widget::Event::MouseMove { px: 50.0, py: 400.0 }, &mut ctx);

@@ -698,7 +698,7 @@ impl SyncSettingsPage {
     #[cfg(test)]
     fn scroll_for_test(&mut self, delta: f32) {
         let theme = ui::theme::test_theme();
-        let mut ctx = EventCtx { theme: &theme, dpi: 1.0, cursor_hint: None };
+        let mut ctx = EventCtx::new(&theme, 1.0);
         let _ =
             self.form.on_event(&Event::Wheel { dx: 0.0, dy: -delta, px: 0.0, py: 0.0 }, &mut ctx);
     }
@@ -1335,7 +1335,7 @@ mod tests {
             action_button(CONFIGURE_CONNECTION_ID, "保存连接", true, settings_theme),
         );
         actions.set_rect(Rect::new(0.0, 0.0, 160.0, 80.0), &mut layout);
-        let mut event_ctx = EventCtx { theme: &theme, dpi: 1.0, cursor_hint: None };
+        let mut event_ctx = EventCtx::new(&theme, 1.0);
 
         let first_button = actions.button_rects[0];
         let second_button = actions.button_rects[1];
@@ -1387,7 +1387,7 @@ mod tests {
             action_button(CONFIGURE_CONNECTION_ID, "保存连接", true, settings_theme),
         );
         actions.set_rect(Rect::new(0.0, 0.0, 160.0, 80.0), &mut layout);
-        let mut event_ctx = EventCtx { theme: &theme, dpi: 1.0, cursor_hint: None };
+        let mut event_ctx = EventCtx::new(&theme, 1.0);
         let first_button = actions.button_rects[0];
         let pointer =
             (first_button.x + first_button.w * 0.5, first_button.y + first_button.h * 0.5);

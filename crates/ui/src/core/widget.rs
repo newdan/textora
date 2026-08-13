@@ -141,6 +141,16 @@ impl<'a> PaintCtx<'a> {
     }
 }
 
+pub trait Clipboard {
+    fn read_text(&mut self) -> Option<String>;
+    fn write_text(&mut self, text: &str) -> bool;
+}
+
+enum ClipboardAccess<'a> {
+    Unavailable,
+    Available(&'a mut dyn Clipboard),
+}
+
 /// 事件上下文：widget 在 `on_event` 阶段使用。
 pub struct EventCtx<'a> {
     pub theme: &'a Theme,
@@ -151,6 +161,31 @@ pub struct EventCtx<'a> {
     /// 则必须设置此字段以告知外层 handler 正确的光标。否则光标将停留在上一个值。
     /// 事件消费但不设 cursor_hint 会触发安全兜底（回退到 Default 箭头光标）。
     pub cursor_hint: Option<winit::window::CursorIcon>,
+    clipboard: ClipboardAccess<'a>,
+}
+
+impl<'a> EventCtx<'a> {
+    pub fn new(theme: &'a Theme, dpi: f32) -> Self {
+        Self { theme, dpi, cursor_hint: None, clipboard: ClipboardAccess::Unavailable }
+    }
+
+    pub fn with_clipboard(theme: &'a Theme, dpi: f32, clipboard: &'a mut dyn Clipboard) -> Self {
+        Self { theme, dpi, cursor_hint: None, clipboard: ClipboardAccess::Available(clipboard) }
+    }
+
+    pub fn read_clipboard_text(&mut self) -> Option<String> {
+        match &mut self.clipboard {
+            ClipboardAccess::Unavailable => None,
+            ClipboardAccess::Available(clipboard) => clipboard.read_text(),
+        }
+    }
+
+    pub fn write_clipboard_text(&mut self, text: &str) -> bool {
+        match &mut self.clipboard {
+            ClipboardAccess::Unavailable => false,
+            ClipboardAccess::Available(clipboard) => clipboard.write_text(text),
+        }
+    }
 }
 
 /// 输入事件
@@ -531,7 +566,7 @@ mod tests {
     fn default_on_event_returns_none() {
         let mut w = TestWidget::new();
         let theme = dummy_theme();
-        let mut ctx = EventCtx { cursor_hint: None, theme: &theme, dpi: 1.0 };
+        let mut ctx = EventCtx::new(&theme, 1.0);
         let ev = Event::MouseMove { px: 0.0, py: 0.0 };
         assert!(w.on_event(&ev, &mut ctx).is_none());
     }

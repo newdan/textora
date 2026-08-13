@@ -8,6 +8,8 @@ use crate::document_view::DocumentView;
 use crate::edit_transaction::DocumentModelMut;
 use crate::input::EditCommand;
 use appkit_core::document::DocumentModel;
+use appkit_shell::SystemClipboard;
+use ui::core::Clipboard;
 use ui::render_geom::AdvanceCacheEntry;
 
 /// Execute an editor command on the document view.
@@ -147,6 +149,25 @@ pub(crate) fn execute_edit_command_v2_with_presentation(
     cursor_render_state: &mut crate::cursor_motion::CursorRenderState,
     page_step_rows: usize,
 ) -> EditOutcome {
+    let mut clipboard = SystemClipboard;
+    execute_edit_command_v2_with_presentation_and_clipboard(
+        cmd,
+        dv,
+        advance_cache,
+        cursor_render_state,
+        page_step_rows,
+        &mut clipboard,
+    )
+}
+
+fn execute_edit_command_v2_with_presentation_and_clipboard(
+    cmd: &EditCommand,
+    dv: &mut impl DocumentModelMut,
+    advance_cache: &[AdvanceCacheEntry],
+    cursor_render_state: &mut crate::cursor_motion::CursorRenderState,
+    page_step_rows: usize,
+    clipboard: &mut dyn Clipboard,
+) -> EditOutcome {
     let dv = dv.document_model_mut();
     let old_line_count = dv.line_count();
     let _cursor_line_before = dv.cursor_line();
@@ -170,6 +191,7 @@ pub(crate) fn execute_edit_command_v2_with_presentation(
         advance_cache,
         cursor_render_state,
         page_step_rows,
+        clipboard,
     );
 
     let new_line_count = dv.line_count();
@@ -190,7 +212,8 @@ pub(crate) fn execute_edit_command_v2_with_presentation(
             | EditCommand::PageUp
             | EditCommand::PageDown
             | EditCommand::ExtendToLineStart
-            | EditCommand::ExtendToLineEnd => None,
+            | EditCommand::ExtendToLineEnd
+            | EditCommand::Copy => None,
             _ => {
                 let lines_deleted = old_line_count.saturating_sub(new_line_count);
                 let end = max_line + 1 + lines_deleted;
@@ -206,6 +229,7 @@ pub(crate) fn execute_edit_command(
     dv: &mut DocumentView,
     advance_cache: &[AdvanceCacheEntry],
 ) -> bool {
+    let mut clipboard = SystemClipboard;
     let mut presentation = dv.take_presentation();
     let page_step_rows = presentation.display.viewport.visible_rows.saturating_sub(1).max(1);
     let executed = execute_edit_command_with_presentation(
@@ -214,6 +238,7 @@ pub(crate) fn execute_edit_command(
         advance_cache,
         &mut presentation.cursor_render_state,
         page_step_rows,
+        &mut clipboard,
     );
     dv.restore_presentation(presentation);
     executed
@@ -225,6 +250,7 @@ fn execute_edit_command_with_presentation(
     advance_cache: &[AdvanceCacheEntry],
     cursor_render_state: &mut crate::cursor_motion::CursorRenderState,
     page_step_rows: usize,
+    clipboard: &mut dyn Clipboard,
 ) -> bool {
     // Save and reset the Home toggle state before handling the command.
     let was_home = dv.cursor().last_command_was_home;
@@ -537,18 +563,9 @@ fn execute_edit_command_with_presentation(
             true
         }
 
-        EditCommand::Copy => {
-            copy_selection_to_clipboard(dv);
-            true
-        }
-        EditCommand::Cut => {
-            cut_selection_to_clipboard(dv);
-            true
-        }
-        EditCommand::Paste => {
-            paste_from_clipboard(dv);
-            true
-        }
+        EditCommand::Copy => copy_selection_to_clipboard(dv, clipboard),
+        EditCommand::Cut => cut_selection_to_clipboard(dv, clipboard),
+        EditCommand::Paste => paste_from_clipboard(dv, clipboard),
         // Commands that need external state (event_loop)
         // ── Save (handled at App level, not in execute_edit_command) ──
         EditCommand::Save | EditCommand::SaveAs => false,
@@ -569,25 +586,25 @@ fn execute_edit_command_with_presentation(
     }
 }
 
-fn copy_selection_to_clipboard(document: &DocumentModel) -> bool {
+fn copy_selection_to_clipboard(document: &DocumentModel, clipboard: &mut dyn Clipboard) -> bool {
     let Some(bytes) = document.extract_selected_text() else {
         return false;
     };
     if bytes.is_empty() {
         return false;
     }
-    crate::clipboard::copy_to_clipboard(&String::from_utf8_lossy(&bytes))
+    clipboard.write_text(&String::from_utf8_lossy(&bytes))
 }
 
-fn cut_selection_to_clipboard(document: &mut DocumentModel) -> bool {
-    if !copy_selection_to_clipboard(document) {
+fn cut_selection_to_clipboard(document: &mut DocumentModel, clipboard: &mut dyn Clipboard) -> bool {
+    if !copy_selection_to_clipboard(document, clipboard) {
         return false;
     }
     document.delete_selection()
 }
 
-fn paste_from_clipboard(document: &mut DocumentModel) -> bool {
-    let Some(text) = crate::clipboard::paste_from_clipboard() else {
+fn paste_from_clipboard(document: &mut DocumentModel, clipboard: &mut dyn Clipboard) -> bool {
+    let Some(text) = clipboard.read_text() else {
         return false;
     };
     let normalized = crate::document_view::normalize_paste_text(text.as_bytes());
@@ -604,6 +621,44 @@ mod command_tests {
     use super::*;
     use crate::line_index::LineIndex;
     use core::types::ByteIndex;
+
+    struct TestClipboard {
+        text: Option<String>,
+        writes_succeed: bool,
+    }
+
+    impl Clipboard for TestClipboard {
+        fn read_text(&mut self) -> Option<String> {
+            self.text.clone()
+        }
+
+        fn write_text(&mut self, text: &str) -> bool {
+            if !self.writes_succeed {
+                return false;
+            }
+            self.text = Some(text.to_owned());
+            true
+        }
+    }
+
+    fn execute_with_clipboard(
+        command: &EditCommand,
+        document: &mut DocumentView,
+        clipboard: &mut dyn Clipboard,
+    ) -> EditOutcome {
+        let mut presentation = document.take_presentation();
+        let page_step_rows = presentation.display.viewport.visible_rows.saturating_sub(1).max(1);
+        let outcome = execute_edit_command_v2_with_presentation_and_clipboard(
+            command,
+            document,
+            &[],
+            &mut presentation.cursor_render_state,
+            page_step_rows,
+            clipboard,
+        );
+        document.restore_presentation(presentation);
+        outcome
+    }
 
     const TEST_LINE_HEIGHT: f32 = 24.27;
 
@@ -1035,24 +1090,54 @@ mod command_tests {
     }
 
     #[test]
-    fn cut_returns_true() {
+    fn cut_without_a_selection_is_not_reported_as_executed() {
         let mut dv = make_dv("hello");
-        // Cut with no selection still returns true (handled)
-        assert!(execute_edit_command(&EditCommand::Cut, &mut dv, &[]));
+        assert!(!execute_edit_command(&EditCommand::Cut, &mut dv, &[]));
     }
 
     #[test]
-    fn copy_returns_true() {
+    fn copy_without_a_selection_is_not_reported_as_executed() {
         let mut dv = make_dv("hello");
-        // Copy with no selection still returns true (handled)
-        assert!(execute_edit_command(&EditCommand::Copy, &mut dv, &[]));
+        assert!(!execute_edit_command(&EditCommand::Copy, &mut dv, &[]));
     }
 
     #[test]
-    fn paste_returns_true() {
+    fn paste_without_clipboard_text_is_not_reported_as_executed() {
         let mut dv = make_dv("hello");
-        // Paste (may fail silently if clipboard is empty) still returns true
-        assert!(execute_edit_command(&EditCommand::Paste, &mut dv, &[]));
+        let mut clipboard = TestClipboard { text: None, writes_succeed: true };
+
+        let outcome = execute_with_clipboard(&EditCommand::Paste, &mut dv, &mut clipboard);
+
+        assert!(!outcome.executed);
+        assert_eq!(outcome.dirty_lines, None);
+        assert_eq!(dv.buffer_len(), 5);
+    }
+
+    #[test]
+    fn successful_copy_is_executed_without_dirty_document_lines() {
+        let mut dv = make_dv("hello");
+        dv.select_all();
+        let mut clipboard = TestClipboard { text: None, writes_succeed: true };
+
+        let outcome = execute_with_clipboard(&EditCommand::Copy, &mut dv, &mut clipboard);
+
+        assert!(outcome.executed);
+        assert_eq!(outcome.dirty_lines, None);
+        assert_eq!(clipboard.text.as_deref(), Some("hello"));
+        assert_eq!(dv.buffer_len(), 5);
+    }
+
+    #[test]
+    fn failed_cut_preserves_the_document_and_is_not_reported_as_executed() {
+        let mut dv = make_dv("hello");
+        dv.select_all();
+        let mut clipboard = TestClipboard { text: None, writes_succeed: false };
+
+        let outcome = execute_with_clipboard(&EditCommand::Cut, &mut dv, &mut clipboard);
+
+        assert!(!outcome.executed);
+        assert_eq!(outcome.dirty_lines, None);
+        assert_eq!(dv.extract_selected_text().as_deref(), Some(b"hello".as_slice()));
     }
 
     // ── Edge cases ───────────────────────────────────────────────────

@@ -118,28 +118,6 @@ impl SearchBarWidget {
         w
     }
 
-    pub fn set_clipboard_callbacks(
-        &mut self,
-        on_copy: std::rc::Rc<dyn Fn(String)>,
-        on_cut: std::rc::Rc<dyn Fn(String)>,
-        on_paste: std::rc::Rc<dyn Fn() -> String>,
-    ) {
-        let cp1 = on_copy.clone();
-        let cp2 = on_copy;
-        let ct1 = on_cut.clone();
-        let ct2 = on_cut;
-        let pt1 = on_paste.clone();
-        let pt2 = on_paste;
-
-        self.find_box.on_copy = Some(Box::new(move |s| cp1(s)));
-        self.find_box.on_cut = Some(Box::new(move |s| ct1(s)));
-        self.find_box.on_paste = Some(Box::new(move || pt1()));
-
-        self.replace_box.on_copy = Some(Box::new(move |s| cp2(s)));
-        self.replace_box.on_cut = Some(Box::new(move |s| ct2(s)));
-        self.replace_box.on_paste = Some(Box::new(move || pt2()));
-    }
-
     /// Get the close button rect (for testing / tooltip integration).
     pub fn close_btn_rect(&self) -> Rect {
         self.close_btn_rect.get()
@@ -1119,9 +1097,26 @@ impl SearchBarWidget {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::core::Clipboard;
     use crate::core::measure::NoopMeasure;
     use crate::core::paint::DrawList;
     use crate::theme::test_theme;
+
+    #[derive(Default)]
+    struct TestClipboard {
+        text: Option<String>,
+    }
+
+    impl Clipboard for TestClipboard {
+        fn read_text(&mut self) -> Option<String> {
+            self.text.clone()
+        }
+
+        fn write_text(&mut self, text: &str) -> bool {
+            self.text = Some(text.to_owned());
+            true
+        }
+    }
 
     fn setup_search_bar(query: &str) -> SearchBarWidget {
         let mut w = SearchBarWidget::new();
@@ -1198,7 +1193,7 @@ mod tests {
 
         let mut w = setup_search_bar("hello");
         let theme = test_theme();
-        let mut ctx = EventCtx { cursor_hint: None, theme: &theme, dpi: 1.0 };
+        let mut ctx = EventCtx::new(&theme, 1.0);
         let cmd = Modifiers { cmd: true, ..Modifiers::NONE };
 
         let action = w.on_event(&Event::KeyDown(KeyCode::Char('a'), cmd), &mut ctx);
@@ -1212,7 +1207,7 @@ mod tests {
 
         let mut search_bar = setup_search_bar("hello");
         let theme = test_theme();
-        let mut event_context = EventCtx { cursor_hint: None, theme: &theme, dpi: 1.0 };
+        let mut event_context = EventCtx::new(&theme, 1.0);
         let find_rect = search_bar.find_box.rect();
 
         assert!(
@@ -1244,7 +1239,7 @@ mod tests {
     fn search_bar_leave_clears_hover_and_cancel_ends_child_interaction() {
         let mut search_bar = setup_search_bar("hello");
         let theme = test_theme();
-        let mut event_context = EventCtx { cursor_hint: None, theme: &theme, dpi: 1.0 };
+        let mut event_context = EventCtx::new(&theme, 1.0);
         let close_rect = search_bar.close_btn_rect();
         let find_rect = search_bar.find_box.rect();
 
@@ -1293,7 +1288,7 @@ mod tests {
     fn hiding_search_bar_releases_child_capture_and_preedit() {
         let mut search_bar = setup_search_bar("hello");
         let theme = test_theme();
-        let mut event_context = EventCtx { cursor_hint: None, theme: &theme, dpi: 1.0 };
+        let mut event_context = EventCtx::new(&theme, 1.0);
         let find_rect = search_bar.find_box.rect();
         let _ = search_bar.on_event(
             &Event::MouseDown {
@@ -1325,27 +1320,19 @@ mod tests {
         use crate::core::EventCtx;
         use crate::core::widget::{Event, KeyCode, Modifiers};
         use crate::theme::test_theme;
-        use std::cell::Cell;
-        use std::rc::Rc;
-
         let mut w = setup_search_bar("hello");
         w.find_box.select_all();
 
-        let copied = Rc::new(Cell::new(String::new()));
-        let c = copied.clone();
-        w.set_clipboard_callbacks(
-            Rc::new(move |s| c.set(s)),
-            Rc::new(|_| {}),
-            Rc::new(String::new),
-        );
-
         let theme = test_theme();
-        let mut ctx = EventCtx { cursor_hint: None, theme: &theme, dpi: 1.0 };
+        let mut clipboard = TestClipboard::default();
         let cmd = Modifiers { cmd: true, ..Modifiers::NONE };
 
-        let action = w.on_event(&Event::KeyDown(KeyCode::Char('c'), cmd), &mut ctx);
-        assert_eq!(action, Some(WidgetAction::Consumed));
-        assert_eq!(copied.take(), "hello");
+        {
+            let mut ctx = EventCtx::with_clipboard(&theme, 1.0, &mut clipboard);
+            let action = w.on_event(&Event::KeyDown(KeyCode::Char('c'), cmd), &mut ctx);
+            assert_eq!(action, Some(WidgetAction::Consumed));
+        }
+        assert_eq!(clipboard.text.as_deref(), Some("hello"));
     }
 
     #[test]
@@ -1353,17 +1340,11 @@ mod tests {
         use crate::core::EventCtx;
         use crate::core::widget::{Event, KeyCode, Modifiers};
         use crate::theme::test_theme;
-        use std::rc::Rc;
-
         let mut w = setup_search_bar("");
-        w.set_clipboard_callbacks(
-            Rc::new(|_| {}),
-            Rc::new(|_| {}),
-            Rc::new(|| "pasted".to_string()),
-        );
 
         let theme = test_theme();
-        let mut ctx = EventCtx { cursor_hint: None, theme: &theme, dpi: 1.0 };
+        let mut clipboard = TestClipboard { text: Some("pasted".to_owned()) };
+        let mut ctx = EventCtx::with_clipboard(&theme, 1.0, &mut clipboard);
         let cmd = Modifiers { cmd: true, ..Modifiers::NONE };
 
         w.on_event(&Event::KeyDown(KeyCode::Char('v'), cmd), &mut ctx);
@@ -1380,7 +1361,7 @@ mod tests {
         w.find_box.select_all();
 
         let theme = test_theme();
-        let mut ctx = EventCtx { cursor_hint: None, theme: &theme, dpi: 1.0 };
+        let mut ctx = EventCtx::new(&theme, 1.0);
 
         w.on_event(&Event::KeyDown(KeyCode::Delete, Modifiers::NONE), &mut ctx);
         assert_eq!(w.find_box.text(), "");
@@ -1392,9 +1373,6 @@ mod tests {
         use crate::core::EventCtx;
         use crate::core::widget::{Event, KeyCode, Modifiers};
         use crate::theme::test_theme;
-        use std::cell::Cell;
-        use std::rc::Rc;
-
         let mut w = setup_search_bar("find");
         w.set_input(SearchBarSnapshot {
             query: "find".into(),
@@ -1406,20 +1384,15 @@ mod tests {
         });
         w.replace_box.select_all();
 
-        let copied = Rc::new(Cell::new(String::new()));
-        let c = copied.clone();
-        w.set_clipboard_callbacks(
-            Rc::new(move |s| c.set(s)),
-            Rc::new(|_| {}),
-            Rc::new(String::new),
-        );
-
         let theme = test_theme();
-        let mut ctx = EventCtx { cursor_hint: None, theme: &theme, dpi: 1.0 };
+        let mut clipboard = TestClipboard::default();
         let cmd = Modifiers { cmd: true, ..Modifiers::NONE };
 
-        w.on_event(&Event::KeyDown(KeyCode::Char('c'), cmd), &mut ctx);
-        assert_eq!(copied.take(), "repl");
+        {
+            let mut ctx = EventCtx::with_clipboard(&theme, 1.0, &mut clipboard);
+            w.on_event(&Event::KeyDown(KeyCode::Char('c'), cmd), &mut ctx);
+        }
+        assert_eq!(clipboard.text.as_deref(), Some("repl"));
     }
 
     #[test]
@@ -1439,7 +1412,7 @@ mod tests {
         });
 
         let theme = test_theme();
-        let mut ctx = EventCtx { cursor_hint: None, theme: &theme, dpi: 1.0 };
+        let mut ctx = EventCtx::new(&theme, 1.0);
 
         assert_eq!(
             w.on_event(&Event::KeyDown(KeyCode::Escape, Modifiers::NONE), &mut ctx),
@@ -1455,7 +1428,7 @@ mod tests {
 
         let mut w = setup_search_bar("find");
         let theme = test_theme();
-        let mut ctx = EventCtx { cursor_hint: None, theme: &theme, dpi: 1.0 };
+        let mut ctx = EventCtx::new(&theme, 1.0);
 
         assert_eq!(
             w.on_event(&Event::KeyDown(KeyCode::Escape, Modifiers::NONE), &mut ctx),
@@ -1471,7 +1444,7 @@ mod tests {
 
         let mut w = setup_search_bar("");
         let theme = test_theme();
-        let mut ctx = EventCtx { cursor_hint: None, theme: &theme, dpi: 1.0 };
+        let mut ctx = EventCtx::new(&theme, 1.0);
 
         assert_eq!(
             w.on_event(&Event::KeyDown(KeyCode::Char('x'), Modifiers::NONE), &mut ctx),

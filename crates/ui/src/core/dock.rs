@@ -543,7 +543,7 @@ mod tests {
         let mut layout_ctx =
             LayoutCtx { ui_measure: None, measure: &mut measure, theme: &theme, dpi: 1.0 };
         dock.layout(Rect::new(0.0, 0.0, 800.0, 600.0), &mut layout_ctx);
-        let mut event_ctx = EventCtx { cursor_hint: None, theme: &theme, dpi: 1.0 };
+        let mut event_ctx = EventCtx::new(&theme, 1.0);
 
         dock.dispatch(&Event::PointerLeave, &mut event_ctx);
         dock.dispatch(&Event::MouseMove { px: 700.0, py: 500.0 }, &mut event_ctx);
@@ -730,7 +730,7 @@ mod tests {
             LayoutCtx { ui_measure: None, measure: &mut measure, theme: &theme, dpi: 1.0 };
         dock.layout(Rect::new(0.0, 0.0, 800.0, 600.0), &mut lctx);
 
-        let mut ectx = EventCtx { cursor_hint: None, theme: &theme, dpi: 1.0 };
+        let mut ectx = EventCtx::new(&theme, 1.0);
 
         let result = dock.dispatch(
             &Event::MouseDown {
@@ -885,7 +885,7 @@ mod tests {
         dock.layout(Rect::new(0.0, 0.0, 800.0, 600.0), &mut lctx);
 
         // child rect: x=784, y=0, w=16, h=600 — 光标在 x=100 远离 child rect
-        let mut ectx = EventCtx { cursor_hint: None, theme: &theme, dpi: 1.0 };
+        let mut ectx = EventCtx::new(&theme, 1.0);
         let result = dock.dispatch(&Event::MouseMove { px: 100.0, py: 300.0 }, &mut ectx);
         assert_eq!(
             result,
@@ -949,7 +949,7 @@ mod tests {
             LayoutCtx { ui_measure: None, measure: &mut measure, theme: &theme, dpi: 1.0 };
         dock.layout(Rect::new(0.0, 0.0, 800.0, 600.0), &mut lctx);
 
-        let mut ectx = EventCtx { cursor_hint: None, theme: &theme, dpi: 1.0 };
+        let mut ectx = EventCtx::new(&theme, 1.0);
 
         let result = dock.dispatch(
             &Event::KeyDown(
@@ -1019,7 +1019,7 @@ mod tests {
         dock.layout(Rect::new(0.0, 0.0, 800.0, 600.0), &mut lctx);
 
         // Mouse in hw1 area: both should receive event, hw1 hovered=true, hw2 hovered=false
-        let mut ectx = EventCtx { cursor_hint: None, theme: &theme, dpi: 1.0 };
+        let mut ectx = EventCtx::new(&theme, 1.0);
         dock.dispatch(&Event::MouseMove { px: 100.0, py: 100.0 }, &mut ectx);
 
         // Check hovered state via as_any_mut downcast (one at a time)
@@ -1090,7 +1090,7 @@ mod tests {
         dock.layout(Rect::new(0.0, 0.0, 800.0, 600.0), &mut lctx);
 
         // Mouse outside child → non-hit, hovered changes from true → false
-        let mut ectx = EventCtx { cursor_hint: None, theme: &theme, dpi: 1.0 };
+        let mut ectx = EventCtx::new(&theme, 1.0);
         let result = dock.dispatch(&Event::MouseMove { px: 300.0, py: 300.0 }, &mut ectx);
 
         // Child is not hit, but its HoverChanged(false) action should be returned

@@ -340,10 +340,7 @@ fn clipboard_lossy_copy_does_not_modify_document() {
 #[test]
 #[ignore]
 fn clipboard_copy_system_lossy_with_invalid_utf8() {
-    let Ok(mut clipboard) = arboard::Clipboard::new() else {
-        eprintln!("Skipping: no display server");
-        return;
-    };
+    use ui::core::Clipboard;
 
     let dv = &mut DocumentView::new(vec!["".to_string()], 10, 10.0);
     dv.insert_at_cursor(b"hello");
@@ -354,7 +351,7 @@ fn clipboard_copy_system_lossy_with_invalid_utf8() {
     let ok = dv.copy_selection_to_clipboard();
     assert!(ok, "copy should succeed even with invalid UTF-8");
 
-    if let Ok(clip_text) = clipboard.get_text() {
+    if let Some(clip_text) = appkit_shell::SystemClipboard.read_text() {
         assert!(clip_text.contains("hello"), "valid prefix");
         assert!(clip_text.contains("world"), "valid suffix");
     }
@@ -388,32 +385,31 @@ fn selection_across_multiline() {
 #[test]
 #[ignore]
 fn clipboard_roundtrip_utf8() {
+    use ui::core::Clipboard;
+
     // Test clipboard set/get with various UTF-8 content
     // This test requires a display server; skip if clipboard unavailable
-    let Ok(mut clipboard) = arboard::Clipboard::new() else {
-        eprintln!("Skipping clipboard_roundtrip_utf8: no display server");
-        return;
-    };
+    let mut clipboard = appkit_shell::SystemClipboard;
 
     // Test with ASCII
-    clipboard.set_text("hello world".to_string()).unwrap();
-    let got = clipboard.get_text().unwrap();
+    assert!(clipboard.write_text("hello world"));
+    let got = clipboard.read_text().expect("written clipboard text should remain readable");
     assert_eq!(got, "hello world");
 
     // Test with CJK
-    clipboard.set_text("你好世界".to_string()).unwrap();
-    let got = clipboard.get_text().unwrap();
+    assert!(clipboard.write_text("你好世界"));
+    let got = clipboard.read_text().expect("written clipboard text should remain readable");
     assert_eq!(got, "你好世界");
 
     // Test with emoji
-    clipboard.set_text("🌍🌏🌎".to_string()).unwrap();
-    let got = clipboard.get_text().unwrap();
+    assert!(clipboard.write_text("🌍🌏🌎"));
+    let got = clipboard.read_text().expect("written clipboard text should remain readable");
     assert_eq!(got, "🌍🌏🌎");
 
     // Test with mixed content
     let mixed = "Hello 你好 🌍\nNew line\ttab";
-    clipboard.set_text(mixed.to_string()).unwrap();
-    let got = clipboard.get_text().unwrap();
+    assert!(clipboard.write_text(mixed));
+    let got = clipboard.read_text().expect("written clipboard text should remain readable");
     assert_eq!(got, mixed);
 }
 

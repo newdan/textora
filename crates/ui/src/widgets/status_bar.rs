@@ -435,7 +435,7 @@ mod tests {
     fn on_event_returns_none() {
         let mut w = StatusBarWidget::new();
         let t = test_theme();
-        let mut ctx = EventCtx { cursor_hint: None, theme: &t, dpi: 1.0 };
+        let mut ctx = EventCtx::new(&t, 1.0);
         let result = w.on_event(&Event::MouseMove { px: 100.0, py: 12.0 }, &mut ctx);
         assert!(result.is_none());
     }

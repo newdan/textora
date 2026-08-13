@@ -99,10 +99,7 @@ pub(crate) fn copy_document_path(document: &DocumentModel) {
         return;
     };
     let text = path.to_string_lossy().into_owned();
-    let _ = (|| {
-        let mut clipboard = arboard::Clipboard::new().map_err(|_| ())?;
-        clipboard.set_text(text).map_err(|_| ())
-    })();
+    crate::clipboard::copy_to_clipboard(&text);
 }
 
 #[cfg(test)]

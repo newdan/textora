@@ -350,11 +350,8 @@ mod tests {
             .run_normal_canvas_frame(&mut shaper)
             .expect("常规帧必须在单一调度入口中准备、布局并渲染画布");
         let editor_rect = app.ui_shell.editor_rect();
-        let mut event_context = ui::core::widget::EventCtx {
-            cursor_hint: None,
-            theme: &app.current_theme,
-            dpi: app.ui_metrics().dpi,
-        };
+        let mut event_context =
+            ui::core::widget::EventCtx::new(&app.current_theme, app.ui_metrics().dpi);
         let action = app.ui_shell.dispatch(
             &ui::core::widget::Event::MouseDown {
                 px: editor_rect.x + editor_rect.w * 0.5,

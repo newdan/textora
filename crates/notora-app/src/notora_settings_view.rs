@@ -916,6 +916,19 @@ mod tests {
     use ui::core::paint::{DrawCmd, DrawList};
     use ui::core::widget::MouseButton;
 
+    struct TestClipboard(String);
+
+    impl ui::core::Clipboard for TestClipboard {
+        fn read_text(&mut self) -> Option<String> {
+            Some(self.0.clone())
+        }
+
+        fn write_text(&mut self, text: &str) -> bool {
+            self.0 = text.to_owned();
+            true
+        }
+    }
+
     fn laid_out_view() -> NotoraSettingsView {
         laid_out_view_with_input(SettingsOverlayInput::default())
     }
@@ -928,6 +941,39 @@ mod tests {
         let mut view = NotoraSettingsView::new(input);
         view.set_rect(Rect::new(0.0, 0.0, 720.0, 560.0), &mut context);
         view
+    }
+
+    #[test]
+    fn settings_text_fields_receive_clipboard_shortcuts_after_form_rebuild() {
+        let theme = ui::theme::test_theme();
+        let mut measure = NoopMeasure;
+        let mut layout_context =
+            LayoutCtx { ui_measure: None, measure: &mut measure, theme: &theme, dpi: 1.0 };
+        let mut view = NotoraSettingsView::new(SettingsOverlayInput::default());
+        view.active_category = NotoraSettingsCategory::Editor;
+        view.form_needs_layout = true;
+        view.set_rect(Rect::new(0.0, 0.0, 720.0, 560.0), &mut layout_context);
+        view.focused_id = Some(FONT_FAMILY_ID);
+        view.form.set_keyboard_focus(Some(FONT_FAMILY_ID));
+        let mut clipboard = TestClipboard("JetBrains Mono".to_owned());
+        let mut event_context = EventCtx::with_clipboard(&theme, 1.0, &mut clipboard);
+        let command = ui::core::Modifiers { cmd: true, ..ui::core::Modifiers::NONE };
+
+        let _ =
+            view.route_event(&Event::KeyDown(ui::KeyCode::Char('a'), command), &mut event_context);
+        let _ =
+            view.route_event(&Event::KeyDown(ui::KeyCode::Char('v'), command), &mut event_context);
+        let commit = view.route_event(
+            &Event::KeyDown(ui::KeyCode::Enter, ui::core::Modifiers::NONE),
+            &mut event_context,
+        );
+
+        assert_eq!(
+            commit,
+            Some(SettingsOverlayAction::Update(ProductSettingsUpdate::FontFamily(
+                "JetBrains Mono".to_owned(),
+            )))
+        );
     }
 
     #[test]
@@ -984,7 +1030,7 @@ mod tests {
         let category_rect = view.category_rects[3];
         let click_x = category_rect.x + category_rect.w * 0.5;
         let click_y = category_rect.y + category_rect.h * 0.5;
-        let mut context = EventCtx { theme: &theme, dpi: 1.0, cursor_hint: None };
+        let mut context = EventCtx::new(&theme, 1.0);
 
         let _ = view.route_event(
             &Event::MouseDown { px: click_x, py: click_y, button: MouseButton::Left },
@@ -1031,7 +1077,7 @@ mod tests {
         let retry_rect = view.retry_button_rect();
         let click_x = retry_rect.x + retry_rect.w * 0.5;
         let click_y = retry_rect.y + retry_rect.h * 0.5;
-        let mut context = EventCtx { theme: &theme, dpi: 1.0, cursor_hint: None };
+        let mut context = EventCtx::new(&theme, 1.0);
         let _ = view.route_event(
             &Event::MouseDown { px: click_x, py: click_y, button: MouseButton::Left },
             &mut context,

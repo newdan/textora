@@ -651,7 +651,8 @@ impl UiShell {
             }
         };
         let ev = Event::KeyDown(key, modifiers);
-        let mut ctx = EventCtx { cursor_hint: None, theme, dpi };
+        let mut clipboard = crate::SystemClipboard;
+        let mut ctx = EventCtx::with_clipboard(theme, dpi, &mut clipboard);
         for child in &mut self.dock.children {
             if child.widget.id() == Some(focus) {
                 return child.widget.on_event(&ev, &mut ctx);
@@ -910,11 +911,6 @@ impl UiShell {
             if let Some(ref input) = self.search_input {
                 sw.set_input(input.clone());
             }
-
-            let on_copy = std::rc::Rc::new(crate::clipboard::write_text);
-            let on_cut = on_copy.clone();
-            let on_paste = std::rc::Rc::new(crate::clipboard::read_text);
-            sw.set_clipboard_callbacks(on_copy, on_cut, on_paste);
 
             self.dock.children.push(DockChild {
                 widget: Box::new(sw),
@@ -1379,7 +1375,7 @@ impl UiShell {
                 return self.dispatch_focused_overlay_event(&ev, theme, dpi);
             }
         };
-        let mut ctx = ui::core::EventCtx { theme, dpi, cursor_hint: None };
+        let mut ctx = ui::core::EventCtx::new(theme, dpi);
         for child in &mut self.dock.children {
             if child.widget.id() == Some(focus) {
                 return child.widget.on_event(&ev, &mut ctx);
@@ -1398,7 +1394,8 @@ impl UiShell {
         if overlay.input_policy != OverlayInputPolicy::Modal {
             return None;
         }
-        let mut ctx = EventCtx { cursor_hint: None, theme, dpi };
+        let mut clipboard = crate::SystemClipboard;
+        let mut ctx = EventCtx::with_clipboard(theme, dpi, &mut clipboard);
         match Self::dispatch_modal_overlay_event(overlay, ev, &mut ctx) {
             OverlayDispatchOutcome::NotHandled => None,
             OverlayDispatchOutcome::SilentConsumed => Some(WidgetAction::Consumed),
@@ -1413,7 +1410,8 @@ impl UiShell {
         dpi: f32,
     ) -> Option<WidgetAction> {
         let overlay = self.overlays.last_mut()?;
-        let mut ctx = EventCtx { cursor_hint: None, theme, dpi };
+        let mut clipboard = crate::SystemClipboard;
+        let mut ctx = EventCtx::with_clipboard(theme, dpi, &mut clipboard);
         let outcome = match overlay.input_policy {
             OverlayInputPolicy::Modal => Self::dispatch_modal_overlay_event(overlay, ev, &mut ctx),
             OverlayInputPolicy::PassThrough => {
@@ -1942,7 +1940,7 @@ mod tests {
     }
 
     fn event_ctx<'a>(theme: &'a Theme) -> EventCtx<'a> {
-        EventCtx { cursor_hint: None, theme, dpi: 1.0 }
+        EventCtx::new(theme, 1.0)
     }
 
     fn modal_probe_events() -> Vec<Event> {
@@ -2175,7 +2173,7 @@ mod tests {
         let editor_rect = shell.editor_rect();
         assert_eq!(editor_rect, editor_rect_before, "覆盖滚动条不得压缩编辑区");
 
-        let mut event_ctx = EventCtx { cursor_hint: None, theme: &theme, dpi: 1.0 };
+        let mut event_ctx = EventCtx::new(&theme, 1.0);
         let start = shell.dispatch(
             &Event::MouseDown {
                 px: editor_rect.x + 40.0,
@@ -2209,7 +2207,7 @@ mod tests {
         let mut measure = NoopMeasure;
         let mut layout_ctx =
             LayoutCtx { ui_measure: None, measure: &mut measure, theme: &theme, dpi: 1.0 };
-        let mut event_ctx = EventCtx { cursor_hint: None, theme: &theme, dpi: 1.0 };
+        let mut event_ctx = EventCtx::new(&theme, 1.0);
         let mut shell = UiShell::new();
 
         let button_style = ui::button::ButtonStyle {
@@ -2573,7 +2571,7 @@ mod tests {
         };
         shell.update_frame(Screen::new(1200.0, 800.0), &theme, &mut m, &inputs);
 
-        let mut ectx = EventCtx { cursor_hint: None, theme: &theme, dpi: 1.0 };
+        let mut ectx = EventCtx::new(&theme, 1.0);
         let result = shell.dispatch(&Event::MouseMove { px: 50.0, py: 50.0 }, &mut ectx);
         assert!(result.is_none());
     }
@@ -2923,7 +2921,7 @@ mod tests {
             sidebar_settings: Default::default(),
         };
         shell.update_frame(Screen::new(1200.0, 800.0), &theme, &mut m, &inputs);
-        let mut ectx = EventCtx { cursor_hint: None, theme: &theme, dpi: 1.0 };
+        let mut ectx = EventCtx::new(&theme, 1.0);
         let _ = shell.dispatch(&Event::MouseMove { px: 50.0, py: 4.0 }, &mut ectx);
         assert!(!shell.has_tooltip_timer(), "No tooltip when not over a button");
     }
@@ -2972,7 +2970,7 @@ mod tests {
         if let Some(r) = close_rect
             && r.w > 0.0
         {
-            let mut ectx = EventCtx { cursor_hint: None, theme: &theme, dpi: 1.0 };
+            let mut ectx = EventCtx::new(&theme, 1.0);
             let _ = shell.dispatch(
                 &Event::MouseMove { px: r.x + r.w / 2.0, py: r.y + r.h / 2.0 },
                 &mut ectx,
@@ -3160,7 +3158,7 @@ mod tests {
         };
         shell.update_frame(Screen::new(1200.0, 800.0), &theme, &mut m, &inputs);
         // First create a tooltip timer by hovering
-        let mut ectx = EventCtx { cursor_hint: None, theme: &theme, dpi: 1.0 };
+        let mut ectx = EventCtx::new(&theme, 1.0);
         let _ = shell.dispatch(&Event::MouseMove { px: 50.0, py: 4.0 }, &mut ectx);
         // Then click — should dismiss tooltip
         let _ = shell.dispatch(

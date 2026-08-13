@@ -467,7 +467,7 @@ mod tests {
         let mut header = EditorHeaderWidget::new();
         header.set_input(input());
         let theme = crate::theme::test_theme();
-        let mut event_context = EventCtx { theme: &theme, dpi: 1.0, cursor_hint: None };
+        let mut event_context = EventCtx::new(&theme, 1.0);
 
         header.set_keyboard_focus(Some(EDITOR_HEADER_TITLE_ID));
         let _ = header.handle_event(
@@ -489,7 +489,7 @@ mod tests {
         header.set_input(input());
         header.set_keyboard_focus(Some(EDITOR_HEADER_TITLE_ID));
         let theme = crate::theme::test_theme();
-        let mut event_context = EventCtx { theme: &theme, dpi: 1.0, cursor_hint: None };
+        let mut event_context = EventCtx::new(&theme, 1.0);
 
         for key_code in [KeyCode::Left, KeyCode::Right, KeyCode::Up, KeyCode::Down] {
             assert_eq!(
@@ -509,7 +509,7 @@ mod tests {
         header.set_input(input());
         header.set_keyboard_focus(Some(EDITOR_HEADER_TITLE_ID));
         let theme = crate::theme::test_theme();
-        let mut event_context = EventCtx { theme: &theme, dpi: 1.0, cursor_hint: None };
+        let mut event_context = EventCtx::new(&theme, 1.0);
 
         let commit = header.handle_event(
             &Event::KeyDown(KeyCode::Enter, crate::core::Modifiers::NONE),
@@ -560,7 +560,7 @@ mod tests {
         let mut layout_context =
             LayoutCtx { ui_measure: None, measure: &mut measure, theme: &theme, dpi: 1.0 };
         header.set_rect(Rect::new(0.0, 0.0, 640.0, 128.0), &mut layout_context);
-        let mut event_context = EventCtx { theme: &theme, dpi: 1.0, cursor_hint: None };
+        let mut event_context = EventCtx::new(&theme, 1.0);
         let title_rect = header.title_box.rect();
 
         assert_eq!(
@@ -627,7 +627,7 @@ mod tests {
         let mut layout_context =
             LayoutCtx { ui_measure: None, measure: &mut measure, theme: &theme, dpi: 1.0 };
         header.set_rect(Rect::new(0.0, 0.0, 640.0, 128.0), &mut layout_context);
-        let mut event_context = EventCtx { theme: &theme, dpi: 1.0, cursor_hint: None };
+        let mut event_context = EventCtx::new(&theme, 1.0);
 
         let _ = header.handle_event(
             &Event::ImePreedit { text: "拼音".to_owned(), cursor: Some((0, 6)) },
@@ -719,7 +719,7 @@ mod tests {
         let mut layout_context =
             LayoutCtx { ui_measure: None, measure: &mut measure, theme: &theme, dpi: 1.0 };
         header.set_rect(Rect::new(0.0, 0.0, 640.0, 56.0), &mut layout_context);
-        let mut event_context = EventCtx { theme: &theme, dpi: 1.0, cursor_hint: None };
+        let mut event_context = EventCtx::new(&theme, 1.0);
 
         assert_eq!(
             header.handle_event(

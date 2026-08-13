@@ -461,10 +461,28 @@ fn translate_event(event: &Event, offset_x: f32, offset_y: f32) -> Event {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::cell::RefCell;
+    use std::rc::Rc;
     use ui::editor_header::{EditorHeaderInput, EncryptionStatusInput};
     use ui::editor_toolbar::EditorToolbarInput;
     use ui::location_picker::LocationPickerInput;
     use ui::tag_editor::TagEditorInput;
+
+    struct TestClipboard {
+        pasted_text: String,
+        written_text: Rc<RefCell<Vec<String>>>,
+    }
+
+    impl ui::core::Clipboard for TestClipboard {
+        fn read_text(&mut self) -> Option<String> {
+            Some(self.pasted_text.clone())
+        }
+
+        fn write_text(&mut self, text: &str) -> bool {
+            self.written_text.borrow_mut().push(text.to_owned());
+            true
+        }
+    }
 
     #[test]
     fn lifecycle_events_remain_unchanged_when_translated_to_child_coordinates() {
@@ -545,7 +563,7 @@ mod tests {
         let mut chrome = EditorPaneChrome::new();
         chrome.set_input(input(EditorPaneMode::Empty));
         let theme = ui::theme::test_theme();
-        let mut event_context = ui::EventCtx { theme: &theme, dpi: 1.0, cursor_hint: None };
+        let mut event_context = ui::EventCtx::new(&theme, 1.0);
 
         assert!(!chrome.has_open_property_popup());
         assert_eq!(
@@ -586,7 +604,7 @@ mod tests {
             },
             &mut layout_context,
         );
-        let mut event_context = ui::EventCtx { theme: &theme, dpi: 1.0, cursor_hint: None };
+        let mut event_context = ui::EventCtx::new(&theme, 1.0);
 
         assert_eq!(
             chrome.route_event(&ui::Event::MouseMove { px: 120.0, py: 168.0 }, &mut event_context,),
@@ -614,7 +632,7 @@ mod tests {
             },
             &mut layout_context,
         );
-        let mut event_context = ui::EventCtx { theme: &theme, dpi: 1.0, cursor_hint: None };
+        let mut event_context = ui::EventCtx::new(&theme, 1.0);
         let hover =
             ui::Event::MouseMove { px: chrome.tag_rect.x + 1.0, py: chrome.tag_rect.y + 1.0 };
 
@@ -655,7 +673,7 @@ mod tests {
             },
             &mut layout_context,
         );
-        let mut event_context = ui::EventCtx { theme: &theme, dpi: 1.0, cursor_hint: None };
+        let mut event_context = ui::EventCtx::new(&theme, 1.0);
         let outside_click =
             ui::Event::MouseDown { px: 900.0, py: 500.0, button: ui::MouseButton::Left };
 
@@ -740,7 +758,7 @@ mod tests {
         chrome.set_input(pane_input.clone());
         chrome.set_keyboard_focus(Some(ui::tag_editor::TAG_EDITOR_INPUT_ID));
         let theme = ui::theme::test_theme();
-        let mut event_context = ui::EventCtx { theme: &theme, dpi: 1.0, cursor_hint: None };
+        let mut event_context = ui::EventCtx::new(&theme, 1.0);
 
         assert_eq!(
             chrome.route_event(
@@ -771,7 +789,7 @@ mod tests {
             },
             &mut layout_context,
         );
-        let mut event_context = ui::EventCtx { theme: &theme, dpi: 1.0, cursor_hint: None };
+        let mut event_context = ui::EventCtx::new(&theme, 1.0);
         let body_click =
             ui::Event::MouseDown { px: 320.0, py: 240.0, button: ui::MouseButton::Left };
 
@@ -805,6 +823,50 @@ mod tests {
     }
 
     #[test]
+    fn title_and_tag_receive_copy_cut_and_paste_shortcuts() {
+        let written_text = Rc::new(RefCell::new(Vec::new()));
+        let mut clipboard = TestClipboard {
+            pasted_text: "已粘贴".to_owned(),
+            written_text: Rc::clone(&written_text),
+        };
+        let mut chrome = EditorPaneChrome::new();
+        chrome.set_input(input(EditorPaneMode::WorkspaceNote));
+        chrome.set_keyboard_focus(Some(ui::editor_header::EDITOR_HEADER_TITLE_ID));
+        let theme = ui::theme::test_theme();
+        let mut event_context = ui::EventCtx::with_clipboard(&theme, 1.0, &mut clipboard);
+        let command = ui::core::Modifiers { cmd: true, ..ui::core::Modifiers::NONE };
+
+        let _ = chrome
+            .route_event(&ui::Event::KeyDown(ui::KeyCode::Char('a'), command), &mut event_context);
+        let _ = chrome
+            .route_event(&ui::Event::KeyDown(ui::KeyCode::Char('c'), command), &mut event_context);
+        let paste_action = chrome
+            .route_event(&ui::Event::KeyDown(ui::KeyCode::Char('v'), command), &mut event_context);
+
+        assert_eq!(written_text.borrow().as_slice(), ["路线图"]);
+        assert_eq!(chrome.title_text(), "已粘贴");
+        assert!(matches!(
+            paste_action,
+            Some(WidgetAction::Control(ControlAction::TextEdited {
+                id: ui::editor_header::EDITOR_HEADER_TITLE_ID,
+                value: TextPayload::Plain(title),
+            })) if title == "已粘贴"
+        ));
+
+        let _ = chrome
+            .route_event(&ui::Event::KeyDown(ui::KeyCode::Char('a'), command), &mut event_context);
+        let _ = chrome
+            .route_event(&ui::Event::KeyDown(ui::KeyCode::Char('x'), command), &mut event_context);
+        assert_eq!(written_text.borrow().as_slice(), ["路线图", "已粘贴"]);
+        assert_eq!(chrome.title_text(), "");
+
+        chrome.set_keyboard_focus(Some(ui::tag_editor::TAG_EDITOR_INPUT_ID));
+        let _ = chrome
+            .route_event(&ui::Event::KeyDown(ui::KeyCode::Char('v'), command), &mut event_context);
+        assert_eq!(chrome.tag_editor.pending_text(), "已粘贴");
+    }
+
+    #[test]
     fn moving_focus_to_the_title_clears_the_active_tag_editor() {
         let mut chrome = EditorPaneChrome::new();
         chrome.set_input(input(EditorPaneMode::WorkspaceNote));
@@ -822,7 +884,7 @@ mod tests {
         chrome.set_input(input(EditorPaneMode::WorkspaceNote));
         chrome.set_keyboard_focus(Some(ui::tag_editor::TAG_EDITOR_INPUT_ID));
         let theme = ui::theme::test_theme();
-        let mut event_context = ui::EventCtx { theme: &theme, dpi: 1.0, cursor_hint: None };
+        let mut event_context = ui::EventCtx::new(&theme, 1.0);
 
         assert_eq!(
             chrome.route_event(
@@ -901,7 +963,7 @@ mod tests {
             .focused_ime_cursor_rect()
             .expect("focused title should expose its first grapheme boundary");
         let pointer_y = caret_rect.y + caret_rect.h * 0.5;
-        let mut event_context = ui::EventCtx { theme: &theme, dpi: 1.0, cursor_hint: None };
+        let mut event_context = ui::EventCtx::new(&theme, 1.0);
 
         assert!(
             chrome

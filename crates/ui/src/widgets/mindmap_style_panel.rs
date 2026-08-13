@@ -768,7 +768,7 @@ mod tests {
         let mut widget = laid_out_panel(MindmapThemeSelection::InvalidMetadata);
         let card = widget.card_rects_for_test()[0];
         let theme = crate::theme::test_theme();
-        let mut event_ctx = EventCtx { cursor_hint: None, theme: &theme, dpi: 1.0 };
+        let mut event_ctx = EventCtx::new(&theme, 1.0);
         let action = widget.on_event(
             &Event::MouseDown {
                 px: card.x + card.w * 0.5,
@@ -786,7 +786,7 @@ mod tests {
         let tide_index = widget.option_index_for_test("tide").expect("tide card");
         let card = widget.card_rects_for_test()[tide_index];
         let theme = crate::theme::test_theme();
-        let mut event_ctx = EventCtx { cursor_hint: None, theme: &theme, dpi: 1.0 };
+        let mut event_ctx = EventCtx::new(&theme, 1.0);
         assert_eq!(
             widget.on_event(
                 &Event::MouseDown {
@@ -806,7 +806,7 @@ mod tests {
     fn arrow_keys_move_focus_and_enter_selects() {
         let mut widget = laid_out_panel(MindmapThemeSelection::Default);
         let theme = crate::theme::test_theme();
-        let mut event_ctx = EventCtx { cursor_hint: None, theme: &theme, dpi: 1.0 };
+        let mut event_ctx = EventCtx::new(&theme, 1.0);
         widget.on_event(&Event::KeyDown(KeyCode::Right, Modifiers::NONE), &mut event_ctx);
         widget.on_event(&Event::KeyDown(KeyCode::Down, Modifiers::NONE), &mut event_ctx);
         assert_eq!(
@@ -829,7 +829,7 @@ mod tests {
 
         for (theme_id, key_code) in boundary_cases {
             let mut widget = laid_out_panel(MindmapThemeSelection::Selected(theme_id.to_owned()));
-            let mut event_ctx = EventCtx { cursor_hint: None, theme: &theme, dpi: 1.0 };
+            let mut event_ctx = EventCtx::new(&theme, 1.0);
             widget.on_event(&Event::KeyDown(key_code, Modifiers::NONE), &mut event_ctx);
 
             assert_eq!(
@@ -881,7 +881,7 @@ mod tests {
     fn escape_emits_close_action() {
         let mut widget = laid_out_panel(MindmapThemeSelection::Default);
         let theme = crate::theme::test_theme();
-        let mut event_ctx = EventCtx { cursor_hint: None, theme: &theme, dpi: 1.0 };
+        let mut event_ctx = EventCtx::new(&theme, 1.0);
         assert_eq!(
             widget.on_event(&Event::KeyDown(KeyCode::Escape, Modifiers::NONE), &mut event_ctx),
             Some(WidgetAction::MindmapStylePanel(MindmapStylePanelAction::Close))
@@ -929,7 +929,7 @@ mod tests {
     fn first_input_places_keyboard_focus_on_selected_scheme() {
         let mut widget = laid_out_panel(MindmapThemeSelection::Selected("tide".into()));
         let theme = crate::theme::test_theme();
-        let mut event_ctx = EventCtx { cursor_hint: None, theme: &theme, dpi: 1.0 };
+        let mut event_ctx = EventCtx::new(&theme, 1.0);
 
         assert_eq!(
             widget.on_event(&Event::KeyDown(KeyCode::Enter, Modifiers::NONE), &mut event_ctx),
@@ -948,7 +948,7 @@ mod tests {
             .tooltip_at(first_card.x + first_card.w * 0.5, first_card.y + first_card.h * 0.5)
             .expect("scheme card must expose its display name");
         let theme = crate::theme::test_theme();
-        let mut event_ctx = EventCtx { cursor_hint: None, theme: &theme, dpi: 1.0 };
+        let mut event_ctx = EventCtx::new(&theme, 1.0);
 
         assert_eq!(hint.label, "素纸");
         assert_eq!(
@@ -970,7 +970,7 @@ mod tests {
         let tide_index = widget.option_index_for_test("tide").expect("tide card");
         let tide_card = widget.card_rects_for_test()[tide_index];
         let theme = crate::theme::test_theme();
-        let mut event_ctx = EventCtx { cursor_hint: None, theme: &theme, dpi: 1.0 };
+        let mut event_ctx = EventCtx::new(&theme, 1.0);
 
         assert_eq!(
             widget.on_event(
@@ -993,7 +993,7 @@ mod tests {
     fn wheel_scrolls_the_card_grid_within_limits() {
         let mut widget = laid_out_panel(MindmapThemeSelection::Default);
         let theme = crate::theme::test_theme();
-        let mut event_ctx = EventCtx { cursor_hint: None, theme: &theme, dpi: 1.0 };
+        let mut event_ctx = EventCtx::new(&theme, 1.0);
 
         let wheel_down = Event::Wheel { dx: 0.0, dy: -120.0, px: 10.0, py: 400.0 };
         assert_eq!(widget.on_event(&wheel_down, &mut event_ctx), Some(WidgetAction::Consumed));
@@ -1008,7 +1008,7 @@ mod tests {
     fn end_key_scrolls_the_last_card_into_view() {
         let mut widget = laid_out_panel(MindmapThemeSelection::Default);
         let theme = crate::theme::test_theme();
-        let mut event_ctx = EventCtx { cursor_hint: None, theme: &theme, dpi: 1.0 };
+        let mut event_ctx = EventCtx::new(&theme, 1.0);
 
         widget.on_event(&Event::KeyDown(KeyCode::End, Modifiers::NONE), &mut event_ctx);
 
@@ -1022,7 +1022,7 @@ mod tests {
     fn scrolled_away_card_is_not_hit_at_its_layout_position() {
         let mut widget = laid_out_panel(MindmapThemeSelection::Default);
         let theme = crate::theme::test_theme();
-        let mut event_ctx = EventCtx { cursor_hint: None, theme: &theme, dpi: 1.0 };
+        let mut event_ctx = EventCtx::new(&theme, 1.0);
         widget.on_event(&Event::KeyDown(KeyCode::End, Modifiers::NONE), &mut event_ctx);
 
         let first_card = widget.card_rects_for_test()[0];

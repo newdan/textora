@@ -536,7 +536,7 @@ mod tests {
     }
 
     fn event_ctx<'a>(theme: &'a Theme, dpi: f32) -> EventCtx<'a> {
-        EventCtx { cursor_hint: None, theme, dpi }
+        EventCtx::new(theme, dpi)
     }
 
     fn downcast_tracking_widget(widget: &dyn Widget) -> &TrackingWidget {
