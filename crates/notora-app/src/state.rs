@@ -320,6 +320,12 @@ impl NotoraState {
                 self.layout.focus_target = FocusTarget::Editor;
                 vec![NotoraEffect::ToggleEditorView]
             }
+            NotoraAction::ToggleMindmapStylePanelRequested => {
+                vec![NotoraEffect::ToggleMindmapStylePanel, NotoraEffect::Redraw]
+            }
+            NotoraAction::MindmapStylePanel(action) => {
+                vec![NotoraEffect::DispatchMindmapStylePanel(action), NotoraEffect::Redraw]
+            }
             NotoraAction::SemanticEditRequested(command) => {
                 self.layout.focus_target = FocusTarget::Editor;
                 vec![NotoraEffect::ExecuteSemanticEdit(command), NotoraEffect::Redraw]

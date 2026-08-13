@@ -9,6 +9,9 @@ use ui::canvas_scrollbars::{
 use ui::core::WidgetAction;
 use ui::core::widget::{ControlAction, TextPayload, WidgetId};
 use ui::icon::draw_icon;
+use ui::mindmap_style_panel::{
+    MindmapStylePanelInput, MindmapStylePanelWidget, PANEL_WIDTH_LOGICAL,
+};
 use ui::popup_menu::{PopupMenuAction, PopupMenuWidget, PopupOutcome};
 use ui::sidebar::NewDocumentKind;
 use ui::split_button::{SplitButtonInput, SplitButtonWidget};
@@ -153,6 +156,7 @@ pub struct NotoraRenderModel {
     pub editor_location_actions: HashMap<String, NotoraAction>,
     pub editor_tag_actions: HashMap<String, NotoraAction>,
     pub editor_command_actions: HashMap<String, NotoraAction>,
+    pub mindmap_style_panel: Option<MindmapStylePanelInput>,
     pub editor_pane: EditorPaneState,
 }
 
@@ -322,6 +326,7 @@ impl NotoraRenderModel {
             editor_location_actions,
             editor_tag_actions,
             editor_command_actions,
+            mindmap_style_panel: None,
             editor_pane: EditorPaneState::Empty,
         }
     }
@@ -681,6 +686,7 @@ fn mindmap_toolbar_input() -> ui::editor_toolbar::EditorToolbarInput {
     toolbar_input(&[
         ("undo", "撤销", 0),
         ("redo", "重做", 0),
+        ("mindmap_style", "主题", 0),
         ("promote", "提升层级", 3),
         ("demote", "降低层级", 4),
     ])
@@ -728,7 +734,10 @@ fn editor_command_actions() -> HashMap<String, NotoraAction> {
     ]
     .into_iter()
     .map(|(key, command)| (key.to_owned(), NotoraAction::SemanticEditRequested(command)))
-    .chain(std::iter::once(("toggle_source".to_owned(), NotoraAction::ToggleSourceViewRequested)))
+    .chain([
+        ("toggle_source".to_owned(), NotoraAction::ToggleSourceViewRequested),
+        ("mindmap_style".to_owned(), NotoraAction::ToggleMindmapStylePanelRequested),
+    ])
     .collect()
 }
 
@@ -893,6 +902,9 @@ pub struct NotoraShell {
     editor_location_actions: HashMap<String, NotoraAction>,
     editor_tag_actions: HashMap<String, NotoraAction>,
     editor_command_actions: HashMap<String, NotoraAction>,
+    mindmap_style_panel: MindmapStylePanelWidget,
+    mindmap_style_panel_open: bool,
+    mindmap_style_panel_rect: Rect,
     settings_overlay: SettingsOverlay,
     settings_overlay_open: bool,
     navigation_actions: HashMap<TreeRowKey, NotoraAction>,
@@ -957,6 +969,9 @@ impl NotoraShell {
             editor_location_actions: HashMap::new(),
             editor_tag_actions: HashMap::new(),
             editor_command_actions: HashMap::new(),
+            mindmap_style_panel: MindmapStylePanelWidget::new(),
+            mindmap_style_panel_open: false,
+            mindmap_style_panel_rect: Rect::ZERO,
             settings_overlay: SettingsOverlay::new(),
             settings_overlay_open: false,
             navigation_actions: HashMap::new(),
@@ -1136,6 +1151,13 @@ impl NotoraShell {
         self.editor_location_actions.clone_from(&model.editor_location_actions);
         self.editor_tag_actions.clone_from(&model.editor_tag_actions);
         self.editor_command_actions.clone_from(&model.editor_command_actions);
+        self.mindmap_style_panel_open = model.mindmap_style_panel.is_some();
+        if let Some(input) = model.mindmap_style_panel.as_ref() {
+            self.mindmap_style_panel.set_input(input.clone());
+        }
+        self.mindmap_style_panel.set_keyboard_focus(
+            self.mindmap_style_panel_open.then_some(ui::core::widget::ids::MINDMAP_STYLE_PANEL),
+        );
         self.card_empty_state.set_input(model.card_empty_state.clone());
         self.card_empty_state_visible = model.cards.is_empty();
         self.editor_empty_state.set_input(StatusStateInput {
@@ -1188,6 +1210,18 @@ impl NotoraShell {
         self.navigation_tree_rect = tree_rect;
         self.search_rect = search_rect;
         self.editor_rect = layout.editor_rect;
+        let mindmap_panel_width =
+            (PANEL_WIDTH_LOGICAL * dpi).min(layout.editor_body_rect.w.max(0.0));
+        self.mindmap_style_panel_rect = if self.mindmap_style_panel_open {
+            Rect::new(
+                layout.editor_body_rect.right() - mindmap_panel_width,
+                layout.editor_body_rect.y,
+                mindmap_panel_width,
+                layout.editor_body_rect.h,
+            )
+        } else {
+            Rect::ZERO
+        };
         frame.with_layout_context(|context| {
             self.editor_pane.set_rects(
                 EditorPaneRects {
@@ -1197,6 +1231,7 @@ impl NotoraShell {
                 },
                 context,
             );
+            self.mindmap_style_panel.set_rect(local_rect(self.mindmap_style_panel_rect), context);
         });
         self.settings_rect = settings_rect;
         let card_header = card_header_layout(
@@ -1373,6 +1408,13 @@ impl NotoraShell {
             EditorPaneState::Active => frame.paint_editor(layout.editor_body_rect)?,
         }
         frame.with_paint_context(|context| self.editor_pane.paint_overlay(context));
+        if self.mindmap_style_panel_open {
+            frame.with_paint_context(|context| {
+                paint_at(context, self.mindmap_style_panel_rect, |context| {
+                    self.mindmap_style_panel.paint(context)
+                });
+            });
+        }
         if layout.responsive_mode != ResponsiveLayoutMode::ThreePane
             && layout.navigation_rect != Rect::ZERO
         {
@@ -1478,6 +1520,9 @@ impl NotoraShell {
                 id: ui::editor_toolbar::EDITOR_TOOLBAR_COMMAND_ID,
                 value: TextPayload::Plain(command_key),
             }) => self.editor_command_actions.get(command_key).cloned(),
+            WidgetAction::MindmapStylePanel(action) => {
+                Some(NotoraAction::MindmapStylePanel(action.clone()))
+            }
             WidgetAction::Control(ControlAction::TextEdited {
                 id: ui::editor_header::EDITOR_HEADER_TITLE_ID,
                 value,
@@ -1616,6 +1661,9 @@ impl NotoraShell {
         {
             return route;
         }
+        if let Some(route) = self.route_mindmap_style_panel_event(event, event_context) {
+            return route;
+        }
         if self.editor_pane.has_open_popup() {
             return self.route_editor_popup_event(event, event_context);
         }
@@ -1690,6 +1738,29 @@ impl NotoraShell {
         let widget_action = self.editor_pane.route_event(event, event_context);
         let action = widget_action.as_ref().and_then(|action| self.translate_widget_action(action));
         NotoraEventRoute::consumed(action)
+    }
+
+    fn route_mindmap_style_panel_event(
+        &mut self,
+        event: &Event,
+        event_context: &mut EventCtx,
+    ) -> Option<NotoraEventRoute> {
+        if !self.mindmap_style_panel_open {
+            return None;
+        }
+        let local_event = translate_event(
+            event,
+            self.mindmap_style_panel_rect.x,
+            self.mindmap_style_panel_rect.y,
+        );
+        let widget_action = self.mindmap_style_panel.on_event(&local_event, event_context);
+        let action = widget_action.as_ref().and_then(|action| self.translate_widget_action(action));
+        let pointer_inside = event_pointer_position(event)
+            .is_some_and(|(px, py)| self.mindmap_style_panel_rect.contains(px, py));
+        if widget_action.is_some() || event_is_keyboard(event) || pointer_inside {
+            return Some(NotoraEventRoute::consumed(action));
+        }
+        None
     }
 
     fn route_keyboard_or_ime_event(
@@ -3578,7 +3649,13 @@ mod tests {
                 EditorPaneMode::WorkspaceNote,
                 ui::plugin::PLUGIN_MINDMAP,
             )),
-            vec!["undo".to_owned(), "redo".to_owned(), "promote".to_owned(), "demote".to_owned()]
+            vec![
+                "undo".to_owned(),
+                "redo".to_owned(),
+                "mindmap_style".to_owned(),
+                "promote".to_owned(),
+                "demote".to_owned(),
+            ]
         );
         let mut compact_toolbar = editor_toolbar_input_for_plugin(
             EditorPaneMode::WorkspaceNote,
@@ -3683,6 +3760,21 @@ mod tests {
                 id: ui::editor_header::EDITOR_HEADER_TITLE_ID,
             })),
             Some(NotoraAction::FocusRequested(FocusTarget::EditorTitle))
+        );
+        assert_eq!(
+            shell.translate_widget_action(&WidgetAction::Control(ControlAction::TextCommitted {
+                id: ui::editor_toolbar::EDITOR_TOOLBAR_COMMAND_ID,
+                value: TextPayload::Plain("mindmap_style".to_owned()),
+            })),
+            Some(NotoraAction::ToggleMindmapStylePanelRequested)
+        );
+        assert_eq!(
+            shell.translate_widget_action(&WidgetAction::MindmapStylePanel(
+                ui::core::widget::MindmapStylePanelAction::SelectTheme("tide".to_owned()),
+            )),
+            Some(NotoraAction::MindmapStylePanel(
+                ui::core::widget::MindmapStylePanelAction::SelectTheme("tide".to_owned()),
+            ))
         );
         assert_eq!(
             shell.translate_widget_action(&WidgetAction::Control(ControlAction::TextEdited {

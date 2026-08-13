@@ -15,6 +15,8 @@ pub(super) trait NotoraEffectTarget {
     fn execute_note_command(&mut self, command: notora_core::note_command::NoteCommand);
     fn commit_title(&mut self, title: String);
     fn toggle_editor_view(&mut self);
+    fn toggle_mindmap_style_panel(&mut self);
+    fn dispatch_mindmap_style_panel(&mut self, action: ui::core::widget::MindmapStylePanelAction);
     fn execute_semantic_edit(&mut self, command: ui::plugin::SemanticEditCommand);
     fn execute_metadata_mutation(&mut self, mutation: MetadataMutation) -> Vec<NotoraAction>;
     fn execute_trash_operation(&mut self, operation: TrashOperation);
@@ -55,6 +57,14 @@ impl NotoraEffectExecutor {
             }
             NotoraEffect::ToggleEditorView => {
                 target.toggle_editor_view();
+                Vec::new()
+            }
+            NotoraEffect::ToggleMindmapStylePanel => {
+                target.toggle_mindmap_style_panel();
+                Vec::new()
+            }
+            NotoraEffect::DispatchMindmapStylePanel(action) => {
+                target.dispatch_mindmap_style_panel(action);
                 Vec::new()
             }
             NotoraEffect::ExecuteSemanticEdit(command) => {

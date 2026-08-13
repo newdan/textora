@@ -572,6 +572,52 @@ impl ModelSession {
         )
     }
 
+    pub(crate) fn apply_active_mindmap_theme(
+        &mut self,
+        theme_id: String,
+        line_height: f32,
+    ) -> EditorOutcome {
+        let Some(tab_id) = self.active_tab_id() else {
+            return EditorOutcome::default();
+        };
+        let Some(previous_summary) = self.document_summary(tab_id) else {
+            return EditorOutcome::default();
+        };
+        let plan = {
+            let Some(tab) = self.tab_session(tab_id) else {
+                return EditorOutcome::default();
+            };
+            if tab.plugin_name() != ui::plugin::PLUGIN_MINDMAP || !tab.allows_editing() {
+                return EditorOutcome::default();
+            }
+            let source_generation = tab.document.generation();
+            match tab
+                .query(ui::plugin::PluginQuery::PlanMindmapTheme { theme_id, source_generation })
+            {
+                ui::plugin::PluginResponse::EditPlan(plan) => Some(plan),
+                _ => None,
+            }
+        };
+        let Some(plan) = plan else {
+            return EditorOutcome::default();
+        };
+        let Some(mut tab) = self.tab_session_mut(tab_id) else {
+            return EditorOutcome::default();
+        };
+        if !apply_edit_plan(tab.document, plan) {
+            return EditorOutcome::default();
+        }
+        refresh_presentation_after_edit(&mut tab, line_height);
+        synchronize_plugin_source(&mut tab);
+        edit_outcome(
+            tab_id,
+            previous_summary.content_revision,
+            previous_summary.dirty,
+            tab.document.content_revision(),
+            tab.document.dirty,
+        )
+    }
+
     fn apply_semantic_edit_plan(
         &mut self,
         tab_id: TabId,
@@ -1050,6 +1096,12 @@ fn refresh_presentation_after_edit(tab: &mut TabSessionMut<'_>, line_height: f32
     tab.ensure_cursor_visible(line_height);
 }
 
+fn synchronize_plugin_source(tab: &mut TabSessionMut<'_>) {
+    let source = tab.document.full_text();
+    let generation = tab.document.generation();
+    let _ = tab.send_message(ui::plugin::PluginMessage::UpdateSource { text: source, generation });
+}
+
 fn edit_outcome(
     tab_id: TabId,
     previous_content_revision: u64,
@@ -1078,7 +1130,7 @@ mod tests {
 
     use appkit_core::document::DocumentModel;
     use core::buffer::TextBuffer;
-    use ui::plugin::{PLUGIN_EDITOR, SemanticEditCommand};
+    use ui::plugin::{PLUGIN_EDITOR, PLUGIN_MINDMAP, SemanticEditCommand};
 
     use super::*;
     use crate::editor_plugin::EditorPluginFactory;
@@ -1106,6 +1158,44 @@ mod tests {
 
     struct SourceSyncProbePlugin {
         sources: Rc<RefCell<Vec<(String, u32)>>>,
+    }
+
+    struct MindmapThemeProbePlugin;
+
+    impl ui::plugin::ViewPlugin for MindmapThemeProbePlugin {
+        fn name(&self) -> &str {
+            PLUGIN_MINDMAP
+        }
+
+        fn render(
+            &mut self,
+            _document: &dyn core::document::DocView,
+            _bounds: ui::Rect,
+            _theme: &ui::Theme,
+            _shaper: &mut shaping::Shaper,
+            _dpi_scale: f32,
+        ) -> ui::DrawList {
+            ui::DrawList::new()
+        }
+
+        fn query(
+            &self,
+            query: ui::plugin::PluginQuery,
+            _document: &dyn core::document::DocView,
+        ) -> ui::plugin::PluginResponse {
+            let ui::plugin::PluginQuery::PlanMindmapTheme { theme_id, source_generation } = query
+            else {
+                return ui::plugin::PluginResponse::None;
+            };
+            ui::plugin::PluginResponse::EditPlan(ui::plugin::EditPlan::Apply(
+                ui::plugin::EditTransaction::replace(
+                    source_generation,
+                    0..0,
+                    format!("theme={theme_id}\n"),
+                    0,
+                ),
+            ))
+        }
     }
 
     impl ui::plugin::ViewPlugin for SourceSyncProbePlugin {
@@ -1312,5 +1402,28 @@ mod tests {
             session.document_text_snapshot(tab_id).expect("installed tab should remain available");
         assert_eq!(after.text, before.text);
         assert_eq!(after.content_revision, before.content_revision);
+    }
+
+    #[test]
+    fn active_mindmap_theme_applies_the_plugin_plan_and_reports_content_change() {
+        let mut session = model_session();
+        let prepared = PreparedTab::new(
+            prepared_text("root").document,
+            TabRuntime::new(Box::new(MindmapThemeProbePlugin)),
+        );
+        let _ = session.install_prepared_tab(prepared, None, OpenDisposition::Persistent);
+
+        let outcome = session.apply_active_mindmap_theme("tide".to_owned(), 20.0);
+        let tab_id = session.active_tab_id().expect("mindmap tab should remain active");
+
+        assert_eq!(
+            session.document_text_snapshot(tab_id).expect("mindmap snapshot should exist").text,
+            "theme=tide\nroot"
+        );
+        assert!(outcome.notifications.iter().any(|notification| matches!(
+            notification,
+            EditorNotification::ContentChanged { tab_id: changed_tab_id, .. }
+                if *changed_tab_id == tab_id
+        )));
     }
 }

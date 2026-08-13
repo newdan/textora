@@ -152,6 +152,8 @@ pub enum NotoraAction {
     TitleTextChanged(String),
     TitleCommitRequested(String),
     ToggleSourceViewRequested,
+    ToggleMindmapStylePanelRequested,
+    MindmapStylePanel(ui::core::widget::MindmapStylePanelAction),
     SemanticEditRequested(ui::plugin::SemanticEditCommand),
     MoveDialogRequested(notora_core::NoteId),
     MoveRequested {
@@ -201,6 +203,8 @@ pub enum NotoraEffect {
     ExecuteNoteCommand(NoteCommand),
     CommitTitle(String),
     ToggleEditorView,
+    ToggleMindmapStylePanel,
+    DispatchMindmapStylePanel(ui::core::widget::MindmapStylePanelAction),
     ExecuteSemanticEdit(ui::plugin::SemanticEditCommand),
     ExecuteMetadataMutation(MetadataMutation),
     ExecuteTrashOperation(TrashOperation),

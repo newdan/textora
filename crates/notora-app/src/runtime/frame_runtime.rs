@@ -339,6 +339,18 @@ impl FrameRuntime {
                     &mut model.editor_chrome.toolbar,
                 );
             }
+            if plugin_name == ui::plugin::PLUGIN_MINDMAP
+                && let Some(tab) = document_runtime.editor().tab_session(tab_id)
+            {
+                let panel = tab.mindmap_style_panel();
+                if panel.is_visible() {
+                    model.mindmap_style_panel =
+                        Some(ui::mindmap_style_panel::MindmapStylePanelInput::from_selection(
+                            tab.mindmap_theme_selection(),
+                            panel.presets_expanded(),
+                        ));
+                }
+            }
         }
     }
 }

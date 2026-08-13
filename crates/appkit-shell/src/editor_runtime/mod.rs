@@ -860,6 +860,10 @@ impl EditorRuntime {
         self.model_session.execute_semantic_edit(command, self.editor_line_height())
     }
 
+    pub fn apply_active_mindmap_theme(&mut self, theme_id: String) -> EditorOutcome {
+        self.model_session.apply_active_mindmap_theme(theme_id, self.editor_line_height())
+    }
+
     pub fn scroll_editor(
         &mut self,
         context: EditorInputContext,

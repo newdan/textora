@@ -394,6 +394,8 @@ fn toolbar_icon(command_key: &str) -> Option<&'static str> {
         "quote" => Some("quote"),
         "code_block" => Some("square-code"),
         "link" => Some("link"),
+        "toggle_source" => Some("eye"),
+        "mindmap_style" => Some("palette"),
         "promote" => Some("outdent"),
         "demote" => Some("indent"),
         "delete" => Some("trash-2"),
@@ -493,6 +495,12 @@ mod tests {
         for command in toolbar.commands() {
             assert_eq!(toolbar.command_width(&command), 32.0, "{}", command.command_key);
         }
+    }
+
+    #[test]
+    fn view_and_mindmap_style_commands_use_icons() {
+        assert_eq!(toolbar_icon("toggle_source"), Some("eye"));
+        assert_eq!(toolbar_icon("mindmap_style"), Some("palette"));
     }
 
     #[test]

@@ -1429,6 +1429,14 @@ impl NotoraEffectTarget for NotoraRuntime {
         NotoraRuntime::toggle_editor_view(self);
     }
 
+    fn toggle_mindmap_style_panel(&mut self) {
+        NotoraRuntime::toggle_mindmap_style_panel(self);
+    }
+
+    fn dispatch_mindmap_style_panel(&mut self, action: ui::core::widget::MindmapStylePanelAction) {
+        NotoraRuntime::dispatch_mindmap_style_panel(self, action);
+    }
+
     fn execute_semantic_edit(&mut self, command: ui::plugin::SemanticEditCommand) {
         NotoraRuntime::execute_semantic_edit(self, command);
     }
@@ -1917,6 +1925,48 @@ impl NotoraRuntime {
 
     fn toggle_editor_view(&mut self) {
         self.document_runtime.editor_mut().switch_active_plugin();
+    }
+
+    fn toggle_mindmap_style_panel(&mut self) {
+        let editor = self.document_runtime.editor_mut();
+        let Some(tab_id) = editor.active_tab_id() else {
+            return;
+        };
+        let Some(mut tab) = editor.tab_session_mut(tab_id) else {
+            return;
+        };
+        if tab.plugin_name() == ui::plugin::PLUGIN_MINDMAP {
+            tab.toggle_mindmap_style_panel();
+        }
+    }
+
+    fn dispatch_mindmap_style_panel(&mut self, action: ui::core::widget::MindmapStylePanelAction) {
+        use ui::core::widget::MindmapStylePanelAction;
+
+        match action {
+            MindmapStylePanelAction::SelectTheme(theme_id) => {
+                let outcome =
+                    self.document_runtime.editor_mut().apply_active_mindmap_theme(theme_id);
+                self.apply_editor_outcome(outcome);
+            }
+            MindmapStylePanelAction::Close | MindmapStylePanelAction::TogglePresets => {
+                let editor = self.document_runtime.editor_mut();
+                let Some(tab_id) = editor.active_tab_id() else {
+                    return;
+                };
+                let Some(mut tab) = editor.tab_session_mut(tab_id) else {
+                    return;
+                };
+                if tab.plugin_name() != ui::plugin::PLUGIN_MINDMAP {
+                    return;
+                }
+                match action {
+                    MindmapStylePanelAction::Close => tab.close_mindmap_style_panel(),
+                    MindmapStylePanelAction::TogglePresets => tab.toggle_mindmap_style_presets(),
+                    MindmapStylePanelAction::SelectTheme(_) => unreachable!(),
+                }
+            }
+        }
     }
 
     fn execute_semantic_edit(&mut self, command: ui::plugin::SemanticEditCommand) {
@@ -4157,6 +4207,63 @@ mod tests {
                 visual_plugin
             );
         }
+    }
+
+    #[test]
+    fn mindmap_style_actions_open_the_panel_and_write_theme_metadata() {
+        let workspace_directory =
+            tempfile::tempdir().expect("workspace test directory should be created");
+        let mut app = app();
+        app.execute_workspace_command(WorkspaceCommand::OpenExisting {
+            root: workspace_directory.path().to_path_buf(),
+        })
+        .expect("workspace should open");
+        app.dispatch_action(NotoraAction::CreateRequested(DocumentKind::Mindmap));
+        let deadline = Instant::now() + Duration::from_secs(2);
+        let tab_id = loop {
+            app.drain_product_events();
+            if let Some(identity) = app.action_runtime.state().library.selected_card
+                && let Some(tab_id) = app.document_tab_for(identity)
+            {
+                break tab_id;
+            }
+            assert!(Instant::now() < deadline, "created mmap should have an editor tab");
+            thread::sleep(Duration::from_millis(10));
+        };
+
+        app.dispatch_action(NotoraAction::ToggleMindmapStylePanelRequested);
+        app.render().expect("open mmap style panel should render");
+        assert!(
+            app.document_runtime
+                .editor_runtime
+                .tab_session(tab_id)
+                .expect("mmap runtime session should exist")
+                .mindmap_style_panel()
+                .is_visible()
+        );
+
+        app.dispatch_action(NotoraAction::MindmapStylePanel(
+            ui::core::widget::MindmapStylePanelAction::SelectTheme("tide".to_owned()),
+        ));
+        app.render().expect("selected mmap theme should render");
+        let snapshot = app
+            .document_runtime
+            .editor_runtime
+            .document_text_snapshot(tab_id)
+            .expect("themed mmap source should exist");
+        assert!(snapshot.text.contains("theme = \"tide\""));
+
+        app.dispatch_action(NotoraAction::MindmapStylePanel(
+            ui::core::widget::MindmapStylePanelAction::Close,
+        ));
+        assert!(
+            !app.document_runtime
+                .editor_runtime
+                .tab_session(tab_id)
+                .expect("mmap runtime session should remain available")
+                .mindmap_style_panel()
+                .is_visible()
+        );
     }
 
     #[test]
