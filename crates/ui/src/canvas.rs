@@ -46,7 +46,7 @@ impl CanvasViewportConfig {
     pub const DEFAULT: Self = Self {
         base_content_padding: BASE_CONTENT_PADDING_LOGICAL,
         min_screen_padding: MIN_SCREEN_PADDING_LOGICAL,
-        min_initial_fit_zoom: MIN_INITIAL_FIT_ZOOM,
+        min_initial_fit_zoom: DEFAULT_CANVAS_ZOOM,
     };
 
     pub fn for_dpi(dpi_scale: f32) -> Self {
@@ -70,7 +70,7 @@ impl CanvasViewportConfig {
             ),
             min_initial_fit_zoom: finite_positive_or(
                 self.min_initial_fit_zoom,
-                MIN_INITIAL_FIT_ZOOM,
+                DEFAULT_CANVAS_ZOOM,
             )
             .clamp(MIN_INITIAL_FIT_ZOOM, DEFAULT_CANVAS_ZOOM),
         }
@@ -330,11 +330,27 @@ mod tests {
     }
 
     #[test]
-    fn initial_fit_stops_at_readable_floor() {
+    fn initial_view_opens_large_content_at_actual_size() {
         let snapshot = resolve_viewport(CanvasViewportInput::initial(
             Rect::new(0.0, 0.0, 320.0, 240.0),
             Rect::new(0.0, 0.0, 2_000.0, 1_200.0),
             CanvasViewportConfig::for_dpi(1.0),
+        ));
+
+        assert_eq!(snapshot.zoom, DEFAULT_CANVAS_ZOOM);
+        assert!(snapshot.max_scroll.x > 0.0 && snapshot.max_scroll.y > 0.0);
+    }
+
+    #[test]
+    fn initial_fit_stops_at_readable_floor() {
+        let config = CanvasViewportConfig {
+            min_initial_fit_zoom: MIN_INITIAL_FIT_ZOOM,
+            ..CanvasViewportConfig::for_dpi(1.0)
+        };
+        let snapshot = resolve_viewport(CanvasViewportInput::initial(
+            Rect::new(0.0, 0.0, 320.0, 240.0),
+            Rect::new(0.0, 0.0, 2_000.0, 1_200.0),
+            config,
         ));
         assert_eq!(snapshot.zoom, 0.40);
         assert!(snapshot.max_scroll.x > 0.0 && snapshot.max_scroll.y > 0.0);
