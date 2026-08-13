@@ -819,7 +819,7 @@ mod tests {
     }
 
     fn event_context(theme: &crate::Theme) -> EventCtx<'_> {
-        EventCtx { theme, dpi: 1.0, cursor_hint: None }
+        EventCtx::new(theme, 1.0)
     }
 
     #[test]

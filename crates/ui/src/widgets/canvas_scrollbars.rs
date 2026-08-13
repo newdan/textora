@@ -471,7 +471,7 @@ mod tests {
         let mut measure = NoopMeasure;
         let mut layout_ctx =
             LayoutCtx { measure: &mut measure, ui_measure: None, theme: &theme, dpi: 1.0 };
-        let mut event_ctx = crate::core::EventCtx { cursor_hint: None, theme: &theme, dpi: 1.0 };
+        let mut event_ctx = crate::core::EventCtx::new(&theme, 1.0);
         let mut widget = CanvasScrollbarsWidget::new();
         widget.set_input(CanvasScrollbarsInput {
             horizontal: Some(overflowing_input()),
@@ -513,7 +513,7 @@ mod tests {
         let mut measure = NoopMeasure;
         let mut layout_ctx =
             LayoutCtx { measure: &mut measure, ui_measure: None, theme: &theme, dpi: 1.0 };
-        let mut event_ctx = crate::core::EventCtx { cursor_hint: None, theme: &theme, dpi: 1.0 };
+        let mut event_ctx = crate::core::EventCtx::new(&theme, 1.0);
         let mut widget = CanvasScrollbarsWidget::new();
         widget.set_input(CanvasScrollbarsInput {
             horizontal: Some(overflowing_input()),

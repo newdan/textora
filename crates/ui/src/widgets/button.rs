@@ -390,13 +390,13 @@ mod tests {
 
     fn mouse_down(button: &mut Button, px: f32, py: f32) -> Option<WidgetAction> {
         let theme = crate::theme::test_theme();
-        let mut event_ctx = EventCtx { cursor_hint: None, theme: &theme, dpi: 1.0 };
+        let mut event_ctx = EventCtx::new(&theme, 1.0);
         button.on_event(&Event::MouseDown { px, py, button: MouseButton::Left }, &mut event_ctx)
     }
 
     fn mouse_up(button: &mut Button, px: f32, py: f32) -> Option<WidgetAction> {
         let theme = crate::theme::test_theme();
-        let mut event_ctx = EventCtx { cursor_hint: None, theme: &theme, dpi: 1.0 };
+        let mut event_ctx = EventCtx::new(&theme, 1.0);
         button.on_event(&Event::MouseUp { px, py, button: MouseButton::Left }, &mut event_ctx)
     }
 
@@ -536,7 +536,7 @@ mod tests {
         let mut b = make_button(WidgetId(3));
         b.set_text(Some("X".into()));
         // Force hovered state
-        let mut ec = EventCtx { cursor_hint: None, theme: &theme, dpi: 1.0 };
+        let mut ec = EventCtx::new(&theme, 1.0);
         b.on_event(&Event::MouseMove { px: 50.0, py: 14.0 }, &mut ec);
         let mut dl = DrawList::new();
         let mut shaper = shaping::Shaper::new().unwrap();
@@ -606,7 +606,7 @@ mod tests {
     fn mouse_move_updates_hovered() {
         let theme = crate::theme::test_theme();
         let mut b = make_button(WidgetId(10));
-        let mut ec = EventCtx { cursor_hint: None, theme: &theme, dpi: 1.0 };
+        let mut ec = EventCtx::new(&theme, 1.0);
         let r = b.on_event(&Event::MouseMove { px: 50.0, py: 14.0 }, &mut ec);
         assert!(r.is_some()); // Consumed on hover state change
         assert!(matches!(r.unwrap(), WidgetAction::Consumed));
@@ -656,7 +656,7 @@ mod tests {
     fn mousedown_right_button_no_action() {
         let theme = crate::theme::test_theme();
         let mut b = make_button(WidgetId(13));
-        let mut ec = EventCtx { cursor_hint: None, theme: &theme, dpi: 1.0 };
+        let mut ec = EventCtx::new(&theme, 1.0);
         b.on_event(&Event::MouseMove { px: 50.0, py: 14.0 }, &mut ec);
         let result = b.on_event(
             &Event::MouseDown { px: 50.0, py: 14.0, button: MouseButton::Right },
@@ -669,7 +669,7 @@ mod tests {
     fn mouseup_event_ignored() {
         let theme = crate::theme::test_theme();
         let mut b = make_button(WidgetId(14));
-        let mut ec = EventCtx { cursor_hint: None, theme: &theme, dpi: 1.0 };
+        let mut ec = EventCtx::new(&theme, 1.0);
         let result =
             b.on_event(&Event::MouseUp { px: 50.0, py: 14.0, button: MouseButton::Left }, &mut ec);
         assert!(result.is_none(), "MouseUp should be ignored");
@@ -679,7 +679,7 @@ mod tests {
     fn hover_exit_clears_hovered() {
         let theme = crate::theme::test_theme();
         let mut b = make_button(WidgetId(15));
-        let mut ec = EventCtx { cursor_hint: None, theme: &theme, dpi: 1.0 };
+        let mut ec = EventCtx::new(&theme, 1.0);
         // Enter
         b.on_event(&Event::MouseMove { px: 50.0, py: 14.0 }, &mut ec);
         assert!(b.hovered);
@@ -718,7 +718,7 @@ mod tests {
         let id = WidgetId(18);
         let mut button = make_button(id);
         let theme = crate::theme::test_theme();
-        let mut event_ctx = EventCtx { cursor_hint: None, theme: &theme, dpi: 1.0 };
+        let mut event_ctx = EventCtx::new(&theme, 1.0);
 
         for key in [KeyCode::Enter, KeyCode::Char(' ')] {
             assert_eq!(
@@ -763,7 +763,7 @@ mod tests {
         button.set_enabled(true);
 
         let theme = crate::theme::test_theme();
-        let mut event_ctx = EventCtx { cursor_hint: None, theme: &theme, dpi: 1.0 };
+        let mut event_ctx = EventCtx::new(&theme, 1.0);
         assert_eq!(
             button.on_event(&Event::KeyDown(KeyCode::Enter, Modifiers::NONE), &mut event_ctx),
             None
@@ -777,7 +777,7 @@ mod tests {
         let mut button = make_button(id);
         button.set_keyboard_focus(Some(id));
         let theme = crate::theme::test_theme();
-        let mut event_ctx = EventCtx { cursor_hint: None, theme: &theme, dpi: 1.0 };
+        let mut event_ctx = EventCtx::new(&theme, 1.0);
 
         assert_eq!(
             button.on_event(&Event::MouseMove { px: 20.0, py: 10.0 }, &mut event_ctx),

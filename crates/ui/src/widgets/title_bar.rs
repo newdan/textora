@@ -527,7 +527,7 @@ mod tests {
         });
         let rect = widget.mindmap_style_rect_for_test();
         let theme = test_theme();
-        let mut event_ctx = EventCtx { cursor_hint: None, theme: &theme, dpi: 1.0 };
+        let mut event_ctx = EventCtx::new(&theme, 1.0);
 
         assert_eq!(
             widget.on_event(
@@ -756,7 +756,7 @@ mod tests {
         let mut lc = LayoutCtx { ui_measure: None, measure: &mut m, theme: &t, dpi: 1.0 };
         w.set_rect(Rect::new(0.0, 0.0, 1200.0, 36.0), &mut lc);
 
-        let mut ctx = EventCtx { cursor_hint: None, theme: &t, dpi: 1.0 };
+        let mut ctx = EventCtx::new(&t, 1.0);
         let result = w.on_event(&Event::MouseMove { px: 600.0, py: 18.0 }, &mut ctx);
         assert!(result.is_some());
         assert!(matches!(result.unwrap(), WidgetAction::Consumed));
@@ -782,7 +782,7 @@ mod tests {
         let mut lc = LayoutCtx { ui_measure: None, measure: &mut m, theme: &t, dpi: 1.0 };
         w.set_rect(Rect::new(0.0, 0.0, 1200.0, 36.0), &mut lc);
 
-        let mut ctx = EventCtx { cursor_hint: None, theme: &t, dpi: 1.0 };
+        let mut ctx = EventCtx::new(&t, 1.0);
         let result = w.on_event(&Event::MouseMove { px: 600.0, py: 50.0 }, &mut ctx);
         assert!(result.is_none());
         assert!(ctx.cursor_hint.is_none());
@@ -807,7 +807,7 @@ mod tests {
         let mut lc = LayoutCtx { ui_measure: None, measure: &mut m, theme: &t, dpi: 1.0 };
         w.set_rect(Rect::new(0.0, 0.0, 1200.0, 36.0), &mut lc);
 
-        let mut ctx = EventCtx { cursor_hint: None, theme: &t, dpi: 1.0 };
+        let mut ctx = EventCtx::new(&t, 1.0);
         let result = w.on_event(
             &Event::MouseDown { px: 100.0, py: 18.0, button: MouseButton::Left },
             &mut ctx,
@@ -836,7 +836,7 @@ mod tests {
         let mut lc = LayoutCtx { ui_measure: None, measure: &mut m, theme: &t, dpi: 1.0 };
         w.set_rect(Rect::new(0.0, 0.0, 1200.0, 36.0), &mut lc);
 
-        let mut ctx = EventCtx { cursor_hint: None, theme: &t, dpi: 1.0 };
+        let mut ctx = EventCtx::new(&t, 1.0);
         let result = w
             .on_event(&Event::MouseUp { px: 100.0, py: 18.0, button: MouseButton::Left }, &mut ctx);
         assert!(result.is_some());
@@ -862,7 +862,7 @@ mod tests {
         let mut lc = LayoutCtx { ui_measure: None, measure: &mut m, theme: &t, dpi: 1.0 };
         w.set_rect(Rect::new(0.0, 0.0, 1200.0, 36.0), &mut lc);
 
-        let mut ctx = EventCtx { cursor_hint: None, theme: &t, dpi: 1.0 };
+        let mut ctx = EventCtx::new(&t, 1.0);
         let result =
             w.on_event(&Event::Wheel { px: 600.0, py: 18.0, dx: 0.0, dy: -120.0 }, &mut ctx);
         assert!(result.is_some());
@@ -888,7 +888,7 @@ mod tests {
         let mut lc = LayoutCtx { ui_measure: None, measure: &mut m, theme: &t, dpi: 1.0 };
         w.set_rect(Rect::new(0.0, 0.0, 1200.0, 36.0), &mut lc);
 
-        let mut ctx = EventCtx { cursor_hint: None, theme: &t, dpi: 1.0 };
+        let mut ctx = EventCtx::new(&t, 1.0);
         let result = w.on_event(&Event::KeyDown(KeyCode::Char('a'), Modifiers::NONE), &mut ctx);
         assert!(result.is_none());
     }
@@ -1008,7 +1008,7 @@ mod tests {
         let mut lc = LayoutCtx { ui_measure: None, measure: &mut m, theme: &t, dpi: 1.0 };
         w.set_rect(Rect::new(0.0, 0.0, 1200.0, 36.0), &mut lc);
 
-        let mut ctx = EventCtx { cursor_hint: None, theme: &t, dpi: 1.0 };
+        let mut ctx = EventCtx::new(&t, 1.0);
         let cx = w.toggle_rect.x + w.toggle_rect.w * 0.5;
         let cy = w.toggle_rect.y + w.toggle_rect.h * 0.5;
         let result =
@@ -1036,7 +1036,7 @@ mod tests {
         let mut lc = LayoutCtx { ui_measure: None, measure: &mut m, theme: &t, dpi: 1.0 };
         w.set_rect(Rect::new(0.0, 0.0, 1200.0, 36.0), &mut lc);
 
-        let mut ctx = EventCtx { cursor_hint: None, theme: &t, dpi: 1.0 };
+        let mut ctx = EventCtx::new(&t, 1.0);
         let cx = w.toggle_rect.x + w.toggle_rect.w * 0.5;
         let cy = w.toggle_rect.y + w.toggle_rect.h * 0.5;
         let result =
@@ -1064,7 +1064,7 @@ mod tests {
         let mut lc = LayoutCtx { ui_measure: None, measure: &mut m, theme: &t, dpi: 1.0 };
         w.set_rect(Rect::new(0.0, 0.0, 1200.0, 36.0), &mut lc);
 
-        let mut ctx = EventCtx { cursor_hint: None, theme: &t, dpi: 1.0 };
+        let mut ctx = EventCtx::new(&t, 1.0);
         let result = w.on_event(
             &Event::MouseDown { px: 10.0, py: 18.0, button: MouseButton::Left },
             &mut ctx,
@@ -1092,7 +1092,7 @@ mod tests {
         let mut lc = LayoutCtx { ui_measure: None, measure: &mut m, theme: &t, dpi: 1.0 };
         w.set_rect(Rect::new(0.0, 0.0, 1200.0, 36.0), &mut lc);
 
-        let mut ctx = EventCtx { cursor_hint: None, theme: &t, dpi: 1.0 };
+        let mut ctx = EventCtx::new(&t, 1.0);
         let cx = w.toggle_rect.x + w.toggle_rect.w * 0.5;
         let cy = w.toggle_rect.y + w.toggle_rect.h * 0.5;
         let result = w.on_event(&Event::MouseMove { px: cx, py: cy }, &mut ctx);

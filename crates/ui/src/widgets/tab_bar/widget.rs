@@ -258,7 +258,7 @@ mod tests {
     fn mouse_move_on_tab_returns_hover_tab_some() {
         let mut w = setup_widget(3);
         let t = crate::theme::test_theme();
-        let mut ctx = EventCtx { cursor_hint: None, theme: &t, dpi: 1.0 };
+        let mut ctx = EventCtx::new(&t, 1.0);
         // First tab should be near the left edge
         let result = w.on_event(&Event::MouseMove { px: 30.0, py: 10.0 }, &mut ctx);
         match result {
@@ -273,7 +273,7 @@ mod tests {
     fn mouse_move_outside_tabs_returns_hover_tab_none() {
         let mut w = setup_widget(1);
         let t = crate::theme::test_theme();
-        let mut ctx = EventCtx { cursor_hint: None, theme: &t, dpi: 1.0 };
+        let mut ctx = EventCtx::new(&t, 1.0);
         // Far right beyond any tab
         let result = w.on_event(&Event::MouseMove { px: 750.0, py: 10.0 }, &mut ctx);
         match result {
@@ -286,7 +286,7 @@ mod tests {
     fn mouse_move_no_longer_returns_switch_tab() {
         let mut w = setup_widget(3);
         let t = crate::theme::test_theme();
-        let mut ctx = EventCtx { cursor_hint: None, theme: &t, dpi: 1.0 };
+        let mut ctx = EventCtx::new(&t, 1.0);
         let result = w.on_event(&Event::MouseMove { px: 30.0, py: 10.0 }, &mut ctx);
         assert!(
             !matches!(result, Some(WidgetAction::TabBar(TabBarAction::SwitchTab(_)))),
@@ -298,7 +298,7 @@ mod tests {
     fn mouse_down_still_returns_switch_tab() {
         let mut w = setup_widget(3);
         let t = crate::theme::test_theme();
-        let mut ctx = EventCtx { cursor_hint: None, theme: &t, dpi: 1.0 };
+        let mut ctx = EventCtx::new(&t, 1.0);
         let result = w.on_event(
             &Event::MouseDown { px: 30.0, py: 10.0, button: MouseButton::Left },
             &mut ctx,

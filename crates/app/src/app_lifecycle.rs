@@ -264,7 +264,7 @@ fn route_modal_wheel_input(
         return None;
     }
 
-    let mut ctx = ui::core::widget::EventCtx { theme, dpi, cursor_hint: None };
+    let mut ctx = ui::core::widget::EventCtx::new(theme, dpi);
     ui_shell.dispatch(&event, &mut ctx).map(|action| modal_input_route(&action))
 }
 

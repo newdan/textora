@@ -1764,7 +1764,8 @@ impl NotoraShell {
         theme: &ui::Theme,
         dpi: f32,
     ) -> NotoraEventRoute {
-        let mut event_context = EventCtx { theme, dpi, cursor_hint: None };
+        let mut clipboard = appkit_shell::SystemClipboard;
+        let mut event_context = EventCtx::with_clipboard(theme, dpi, &mut clipboard);
         self.synchronize_focus(focus_target, Instant::now());
         let mut route =
             self.route_event_with_context(event, focus_target, None, &mut event_context);
@@ -1780,7 +1781,8 @@ impl NotoraShell {
         theme: &ui::Theme,
         dpi: f32,
     ) -> NotoraEventRoute {
-        let mut event_context = EventCtx { theme, dpi, cursor_hint: None };
+        let mut clipboard = appkit_shell::SystemClipboard;
+        let mut event_context = EventCtx::with_clipboard(theme, dpi, &mut clipboard);
         self.synchronize_focus(focus_target, Instant::now());
         let mut route =
             self.route_event_with_context(event, focus_target, Some(overlay), &mut event_context);
@@ -2881,6 +2883,19 @@ fn card_list_title(scope: &NavigationScope) -> &'static str {
 mod tests {
     use super::*;
 
+    struct TestClipboard(String);
+
+    impl ui::core::Clipboard for TestClipboard {
+        fn read_text(&mut self) -> Option<String> {
+            Some(self.0.clone())
+        }
+
+        fn write_text(&mut self, text: &str) -> bool {
+            self.0 = text.to_owned();
+            true
+        }
+    }
+
     #[test]
     fn lifecycle_events_have_no_pointer_position_and_survive_coordinate_translation() {
         for event in [Event::PointerLeave, Event::InteractionCancel] {
@@ -3115,6 +3130,49 @@ mod tests {
         assert!(draw_list.cmds.iter().any(|command| {
             matches!(command, DrawCmd::FillRect { radius, .. } if *radius == 0.0)
         }));
+    }
+
+    #[test]
+    fn notora_shell_routes_context_clipboard_to_search_and_editor_chrome() {
+        let mut shell = NotoraShell::new();
+        let theme = ui::theme::test_theme();
+        let mut clipboard = TestClipboard("剪贴板内容".to_owned());
+        let mut event_context = EventCtx::with_clipboard(&theme, 1.0, &mut clipboard);
+        let command = ui::core::Modifiers { cmd: true, ..ui::core::Modifiers::NONE };
+
+        shell.synchronize_focus(FocusTarget::NavigationSearch, Instant::now());
+        let search_route = shell.route_event_with_context(
+            &Event::KeyDown(ui::KeyCode::Char('v'), command),
+            FocusTarget::NavigationSearch,
+            None,
+            &mut event_context,
+        );
+        assert_eq!(
+            search_route.actions,
+            vec![NotoraAction::SearchTextChanged("剪贴板内容".to_owned())]
+        );
+
+        shell.editor_pane.set_input(EditorPaneInput {
+            mode: EditorPaneMode::WorkspaceNote,
+            header: ui::editor_header::EditorHeaderInput {
+                title: "旧标题".to_owned(),
+                title_editable: true,
+                ..ui::editor_header::EditorHeaderInput::default()
+            },
+            ..EditorPaneInput::default()
+        });
+        shell.synchronize_focus(FocusTarget::EditorTitle, Instant::now());
+        let title_route = shell.route_event_with_context(
+            &Event::KeyDown(ui::KeyCode::Char('v'), command),
+            FocusTarget::EditorTitle,
+            None,
+            &mut event_context,
+        );
+        assert_eq!(shell.editor_title_text(), "剪贴板内容旧标题");
+        assert_eq!(
+            title_route.actions,
+            vec![NotoraAction::TitleTextChanged("剪贴板内容旧标题".to_owned())]
+        );
     }
 
     #[test]
@@ -3524,7 +3582,7 @@ mod tests {
             .expect("new document menu should exist")
             .menu()
             .item_rects[1];
-        let mut event_context = EventCtx { theme: &theme, dpi: 1.0, cursor_hint: None };
+        let mut event_context = EventCtx::new(&theme, 1.0);
 
         shell.route_new_document_menu_event(
             &Event::MouseMove {

@@ -481,7 +481,7 @@ mod tests {
         });
         layout_editor(&mut editor);
         let theme = crate::theme::test_theme();
-        let mut context = EventCtx { theme: &theme, dpi: 1.0, cursor_hint: None };
+        let mut context = EventCtx::new(&theme, 1.0);
 
         assert_eq!(editor.on_event(&Event::MouseMove { px: 40.0, py: 12.0 }, &mut context), None);
         assert_eq!(editor.ime_cursor_rect(), None);
@@ -508,7 +508,7 @@ mod tests {
         editor.set_input(input());
         editor.set_keyboard_focus(Some(TAG_EDITOR_INPUT_ID));
         let theme = crate::theme::test_theme();
-        let mut context = EventCtx { theme: &theme, dpi: 1.0, cursor_hint: None };
+        let mut context = EventCtx::new(&theme, 1.0);
 
         assert_eq!(
             editor.on_event(&Event::KeyDown(KeyCode::Escape, Modifiers::NONE), &mut context),
@@ -531,7 +531,7 @@ mod tests {
         editor.set_input(input());
         editor.set_keyboard_focus(Some(TAG_EDITOR_INPUT_ID));
         let theme = crate::theme::test_theme();
-        let mut context = EventCtx { theme: &theme, dpi: 1.0, cursor_hint: None };
+        let mut context = EventCtx::new(&theme, 1.0);
 
         let _ = editor.on_event(&Event::KeyDown(KeyCode::Char('x'), Modifiers::NONE), &mut context);
         assert_eq!(
@@ -569,7 +569,7 @@ mod tests {
         editor.set_input(TagEditorInput { enabled: true, ..input() });
 
         let theme = crate::theme::test_theme();
-        let mut context = EventCtx { theme: &theme, dpi: 1.0, cursor_hint: None };
+        let mut context = EventCtx::new(&theme, 1.0);
         assert_eq!(
             editor.on_event(&Event::ImeCommit("未聚焦".to_owned()), &mut context),
             None,
@@ -592,7 +592,7 @@ mod tests {
         editor.set_input(TagEditorInput { enabled: true, ..input() });
 
         let theme = crate::theme::test_theme();
-        let mut context = EventCtx { theme: &theme, dpi: 1.0, cursor_hint: None };
+        let mut context = EventCtx::new(&theme, 1.0);
         assert_eq!(editor.on_event(&Event::ImeEnable, &mut context), None);
         assert_eq!(editor.on_event(&Event::ImeDisable, &mut context), None);
 
@@ -627,7 +627,7 @@ mod tests {
         layout_editor(&mut editor);
 
         let theme = crate::theme::test_theme();
-        let mut context = EventCtx { theme: &theme, dpi: 1.0, cursor_hint: None };
+        let mut context = EventCtx::new(&theme, 1.0);
         assert_eq!(
             editor.on_event(
                 &Event::ImePreedit { text: "未完成".to_owned(), cursor: Some((0, 6)) },
@@ -681,7 +681,7 @@ mod tests {
         assert!(committed_rect.h > 0.0);
 
         let theme = crate::theme::test_theme();
-        let mut context = EventCtx { theme: &theme, dpi: 1.0, cursor_hint: None };
+        let mut context = EventCtx::new(&theme, 1.0);
         let _ = editor.on_event(
             &Event::ImePreedit { text: "拼音".to_owned(), cursor: Some((0, 6)) },
             &mut context,
@@ -701,7 +701,7 @@ mod tests {
         editor.set_keyboard_focus(Some(TAG_EDITOR_INPUT_ID));
 
         let theme = crate::theme::test_theme();
-        let mut context = EventCtx { theme: &theme, dpi: 1.0, cursor_hint: None };
+        let mut context = EventCtx::new(&theme, 1.0);
         assert_eq!(
             editor.on_event(
                 &Event::ImePreedit { text: "拼音".to_owned(), cursor: Some((0, 6)) },
@@ -736,7 +736,7 @@ mod tests {
         editor.set_keyboard_focus(Some(TAG_EDITOR_INPUT_ID));
 
         let theme = crate::theme::test_theme();
-        let mut context = EventCtx { theme: &theme, dpi: 1.0, cursor_hint: None };
+        let mut context = EventCtx::new(&theme, 1.0);
         assert_eq!(
             editor.on_event(&Event::ImeCommit("已提交".to_owned()), &mut context),
             Some(WidgetAction::Consumed)

@@ -19,6 +19,6 @@ pub use measure::{NoopMeasure, TextMeasure};
 pub use overlay::{DismissPolicy, OverlayAction, OverlayInputPolicy, OverlayLayout};
 pub use paint::{DrawCmd, DrawList};
 pub use widget::{
-    Event, EventCtx, KeyCode, LayoutCtx, Modifiers, MouseButton, PaintCtx, Widget, WidgetAction,
-    WidgetId,
+    Clipboard, Event, EventCtx, KeyCode, LayoutCtx, Modifiers, MouseButton, PaintCtx, Widget,
+    WidgetAction, WidgetId,
 };

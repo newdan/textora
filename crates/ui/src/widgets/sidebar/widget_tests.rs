@@ -183,7 +183,7 @@ mod tests {
         let mut lc = LayoutCtx { ui_measure: None, measure: &mut m, theme: &t, dpi: 1.0 };
         w.set_rect(Rect::new(0.0, 0.0, 220.0, 800.0), &mut lc);
 
-        let mut ctx = EventCtx { cursor_hint: None, theme: &t, dpi: 1.0 };
+        let mut ctx = EventCtx::new(&t, 1.0);
         let main = w.current_layout().expect("layout must exist").new_btn_rect;
         assert_eq!(
             click_new_document_region(&mut w, main, &mut ctx),
@@ -197,7 +197,7 @@ mod tests {
         let theme = test_theme();
         layout_new_document_widget(&mut widget, &theme);
         let dropdown = widget.current_layout().expect("layout must exist").new_menu_btn_rect;
-        let mut event_ctx = EventCtx { cursor_hint: None, theme: &theme, dpi: 1.0 };
+        let mut event_ctx = EventCtx::new(&theme, 1.0);
 
         let action = click_new_document_region(&mut widget, dropdown, &mut event_ctx);
 
@@ -222,7 +222,7 @@ mod tests {
         let theme = test_theme();
         layout_new_document_widget(&mut widget, &theme);
         let dropdown = widget.current_layout().expect("layout must exist").new_menu_btn_rect;
-        let mut event_ctx = EventCtx { cursor_hint: None, theme: &theme, dpi: 1.0 };
+        let mut event_ctx = EventCtx::new(&theme, 1.0);
         let _ = click_new_document_region(&mut widget, dropdown, &mut event_ctx);
         let mut draw_list = DrawList::new();
 
@@ -246,7 +246,7 @@ mod tests {
         let main = widget.current_layout().expect("layout must exist").new_btn_rect;
         let px = main.x + main.w * 0.5;
         let py = main.y + main.h * 0.5;
-        let mut event_ctx = EventCtx { cursor_hint: None, theme: &theme, dpi: 1.0 };
+        let mut event_ctx = EventCtx::new(&theme, 1.0);
 
         assert_eq!(
             widget
@@ -282,7 +282,7 @@ mod tests {
         let theme = test_theme();
         layout_new_document_widget(&mut widget, &theme);
         let dropdown = widget.current_layout().expect("layout must exist").new_menu_btn_rect;
-        let mut event_ctx = EventCtx { cursor_hint: None, theme: &theme, dpi: 1.0 };
+        let mut event_ctx = EventCtx::new(&theme, 1.0);
 
         let _ = click_new_document_region(&mut widget, dropdown, &mut event_ctx);
         let menu = widget.open_menu().expect("dropdown click must open menu").clone();
@@ -306,7 +306,7 @@ mod tests {
         let theme = test_theme();
         layout_new_document_widget(&mut widget, &theme);
         let dropdown = widget.current_layout().expect("layout must exist").new_menu_btn_rect;
-        let mut event_ctx = EventCtx { cursor_hint: None, theme: &theme, dpi: 1.0 };
+        let mut event_ctx = EventCtx::new(&theme, 1.0);
 
         let _ = click_new_document_region(&mut widget, dropdown, &mut event_ctx);
         assert!(widget.open_menu().is_some());
@@ -343,7 +343,7 @@ mod tests {
         let list_clip = w.current_layout().unwrap().list_clip;
         let cy = list_clip.y + 12.0; // 第一行中点附近
 
-        let mut ctx = EventCtx { cursor_hint: None, theme: &t, dpi: 1.0 };
+        let mut ctx = EventCtx::new(&t, 1.0);
         assert_eq!(
             w.on_event(
                 &Event::MouseDown { px: 100.0, py: cy, button: MouseButton::Left },
@@ -380,7 +380,7 @@ mod tests {
 
         let dpi = 1.0;
         let settings_y = 800.0 - 28.0 * dpi + 10.0;
-        let mut ctx = EventCtx { cursor_hint: None, theme: &t, dpi: 1.0 };
+        let mut ctx = EventCtx::new(&t, 1.0);
         let ev = Event::MouseDown { px: 110.0, py: settings_y, button: MouseButton::Left };
         let action = w.on_event(&ev, &mut ctx);
         assert!(action.is_some());
@@ -819,7 +819,7 @@ mod tests {
         let list_clip = w.current_layout().unwrap().list_clip;
         let cy = list_clip.y + 12.0;
 
-        let mut ctx = EventCtx { cursor_hint: None, theme: &t, dpi: 1.0 };
+        let mut ctx = EventCtx::new(&t, 1.0);
         let action = w
             .on_event(&Event::MouseDown { px: 100.0, py: cy, button: MouseButton::Right }, &mut ctx)
             .unwrap();
@@ -865,7 +865,7 @@ mod tests {
         assert!(w.open_menu().is_some());
 
         // Click outside menu area → should dismiss
-        let mut ctx = EventCtx { cursor_hint: None, theme: &t, dpi: 1.0 };
+        let mut ctx = EventCtx::new(&t, 1.0);
         let result = w.on_event(
             &Event::MouseDown { px: 1000.0, py: 500.0, button: MouseButton::Left },
             &mut ctx,
@@ -900,7 +900,7 @@ mod tests {
         w.set_rect(Rect::new(0.0, 0.0, 220.0, 600.0), &mut lc);
 
         // MouseDown on hamburger (top-left area of the sidebar header)
-        let mut ec = EventCtx { cursor_hint: None, theme: &t, dpi: 1.0 };
+        let mut ec = EventCtx::new(&t, 1.0);
         let action = w
             .on_event(&Event::MouseDown { px: 16.0, py: 16.0, button: MouseButton::Left }, &mut ec);
         // Should emit a SidebarAction (TogglePin or similar) that toggles visibility
@@ -949,7 +949,7 @@ mod tests {
         assert!(w.hit_test_px(210.0, 590.0).is_some() || true, "Layout computed");
 
         // Click on the settings button area (bottom of sidebar)
-        let mut ec = EventCtx { cursor_hint: None, theme: &t, dpi: 1.0 };
+        let mut ec = EventCtx::new(&t, 1.0);
         let action = w.on_event(
             &Event::MouseDown { px: 110.0, py: 590.0, button: MouseButton::Left },
             &mut ec,
@@ -992,7 +992,7 @@ mod tests {
         w.set_rect(Rect::new(0.0, 0.0, 220.0, 600.0), &mut lc);
 
         // new_btn_rect center at dpi=1.0: (6 + 208/2=110, 34+14=48)
-        let mut ec = EventCtx { cursor_hint: None, theme: &t, dpi: 1.0 };
+        let mut ec = EventCtx::new(&t, 1.0);
         let main = w.current_layout().expect("layout must exist").new_btn_rect;
         let action = click_new_document_region(&mut w, main, &mut ec);
         assert!(action.is_some(), "new_btn click should produce an action");
@@ -1076,7 +1076,7 @@ mod tests {
         // Hover over the first list item to make close button visible
         let hover_x = row_rect.x + row_rect.w * 0.5;
         let hover_y = row_rect.y + row_rect.h * 0.5;
-        let mut ec = EventCtx { cursor_hint: None, theme: &t, dpi: 1.0 };
+        let mut ec = EventCtx::new(&t, 1.0);
         let _ = w.on_event(&Event::MouseMove { px: hover_x, py: hover_y }, &mut ec);
 
         // Verify the list's hovered_index was set
@@ -1157,7 +1157,7 @@ mod tests {
         let row1 = w.list.item_rect(1, dpi);
         let hover_x = row1.x + row1.w * 0.5;
         let hover_y = row1.y + row1.h * 0.5;
-        let mut ec = EventCtx { cursor_hint: None, theme: &t, dpi: 1.0 };
+        let mut ec = EventCtx::new(&t, 1.0);
         let _ = w.on_event(&Event::MouseMove { px: hover_x, py: hover_y }, &mut ec);
         assert_eq!(w.list.hovered_index(), Some(1));
 

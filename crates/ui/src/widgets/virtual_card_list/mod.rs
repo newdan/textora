@@ -489,7 +489,7 @@ mod tests {
         });
         layout(&mut widget, Rect::new(0.0, 0.0, 360.0, 220.0), 1.0);
         let theme = crate::theme::test_theme();
-        let mut event_context = EventCtx { theme: &theme, dpi: 1.0, cursor_hint: None };
+        let mut event_context = EventCtx::new(&theme, 1.0);
         assert_eq!(
             widget.on_event(&Event::KeyDown(KeyCode::Down, Modifiers::NONE), &mut event_context),
             None
@@ -599,7 +599,7 @@ mod tests {
         layout(&mut widget, Rect::new(0.0, 0.0, 360.0, 500.0), 1.0);
         let card_rect = widget.layout().card_geometry(1).card_rect;
         let theme = crate::theme::test_theme();
-        let mut context = EventCtx { theme: &theme, dpi: 1.0, cursor_hint: None };
+        let mut context = EventCtx::new(&theme, 1.0);
 
         assert_eq!(
             widget.on_event(

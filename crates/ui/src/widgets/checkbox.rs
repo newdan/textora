@@ -342,7 +342,7 @@ mod tests {
 
     fn event_ctx() -> EventCtx<'static> {
         let theme = Box::leak(Box::new(crate::theme::test_theme()));
-        EventCtx { cursor_hint: None, theme, dpi: 1.0 }
+        EventCtx::new(theme, 1.0)
     }
 
     fn key_space(checkbox: &mut Checkbox) -> Option<WidgetAction> {

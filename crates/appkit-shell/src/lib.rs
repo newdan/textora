@@ -43,6 +43,7 @@ pub mod render_pipeline;
 pub mod render_state;
 pub mod reshape_worker;
 pub mod smooth_scroll;
+pub use clipboard::SystemClipboard;
 pub mod snap_tree;
 pub mod tab_runtime;
 pub mod tab_session;

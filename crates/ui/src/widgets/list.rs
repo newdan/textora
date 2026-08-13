@@ -1048,7 +1048,7 @@ mod tests {
         let mut w =
             make_list(vec![item("a"), item("b"), item("c")], Rect::new(0.0, 0.0, 220.0, 100.0));
         let theme = crate::theme::test_theme();
-        let mut ctx = EventCtx { cursor_hint: None, theme: &theme, dpi: 1.0 };
+        let mut ctx = EventCtx::new(&theme, 1.0);
         // 第二行：top = 4 + 24 = 28；中线 40
         assert_eq!(
             w.on_event(
@@ -1073,7 +1073,7 @@ mod tests {
         let mut w =
             make_list(vec![item("a"), item("b"), item("c")], Rect::new(0.0, 0.0, 220.0, 100.0));
         let theme = crate::theme::test_theme();
-        let mut ctx = EventCtx { cursor_hint: None, theme: &theme, dpi: 1.0 };
+        let mut ctx = EventCtx::new(&theme, 1.0);
 
         assert_eq!(
             w.on_event(
@@ -1110,7 +1110,7 @@ mod tests {
     fn list_leave_preserves_press_and_cancel_is_idempotent() {
         let mut widget = make_list(vec![item("a"), item("b")], Rect::new(0.0, 0.0, 220.0, 100.0));
         let theme = crate::theme::test_theme();
-        let mut ctx = EventCtx { cursor_hint: None, theme: &theme, dpi: 1.0 };
+        let mut ctx = EventCtx::new(&theme, 1.0);
 
         assert_eq!(
             widget.on_event(&Event::MouseMove { px: 100.0, py: 16.0 }, &mut ctx),
@@ -1147,7 +1147,7 @@ mod tests {
     fn close_press_release_emits_only_close_action() {
         let mut w = make_list(vec![item("a")], Rect::new(0.0, 0.0, 220.0, 40.0));
         let theme = crate::theme::test_theme();
-        let mut ctx = EventCtx { cursor_hint: None, theme: &theme, dpi: 1.0 };
+        let mut ctx = EventCtx::new(&theme, 1.0);
         let row_rect = w.item_rect(0, 1.0);
         let close_x = row_rect.right() - style().pad_x_logical - CLOSE_BTN_SIZE_LOGICAL * 0.5;
         let close_y = row_rect.y + row_rect.h * 0.5;
@@ -1186,7 +1186,7 @@ mod tests {
         w.collect_focusable_ids(&mut focusable_ids);
         assert_eq!(focusable_ids, vec![list_id]);
 
-        let mut ctx = EventCtx { cursor_hint: None, theme: &theme, dpi: 1.0 };
+        let mut ctx = EventCtx::new(&theme, 1.0);
         assert_eq!(
             w.on_event(
                 &Event::KeyDown(crate::KeyCode::Down, crate::core::Modifiers::NONE),
@@ -1227,7 +1227,7 @@ mod tests {
         w.set_items(vec![item("a"), item("b"), item("c")]);
         w.set_keyboard_focus(Some(list_id));
         let theme = crate::theme::test_theme();
-        let mut ctx = EventCtx { cursor_hint: None, theme: &theme, dpi: 1.0 };
+        let mut ctx = EventCtx::new(&theme, 1.0);
 
         assert_eq!(w.focused_index(), Some(0));
         assert_eq!(
@@ -1278,7 +1278,7 @@ mod tests {
         let theme = crate::theme::test_theme();
         let mut measure = NoopMeasure;
         w.set_rect(Rect::new(0.0, 0.0, 220.0, 40.0), &mut layout_ctx(&theme, &mut measure));
-        let mut ctx = EventCtx { cursor_hint: None, theme: &theme, dpi: 1.0 };
+        let mut ctx = EventCtx::new(&theme, 1.0);
 
         assert_eq!(
             w.on_event(
@@ -1319,7 +1319,7 @@ mod tests {
             Rect::new(0.0, 0.0, 220.0, 100.0),
         );
         let theme = crate::theme::test_theme();
-        let mut ctx = EventCtx { cursor_hint: None, theme: &theme, dpi: 1.0 };
+        let mut ctx = EventCtx::new(&theme, 1.0);
         // Separator 行中线: pad_y(4) + row_h(24) + row_h/2 = 4+24+12 = 40
         let action = w.on_event(
             &Event::MouseDown { px: 100.0, py: 40.0, button: MouseButton::Left },
@@ -1347,7 +1347,7 @@ mod tests {
             Rect::new(0.0, 0.0, 220.0, 100.0),
         );
         let theme = crate::theme::test_theme();
-        let mut ctx = EventCtx { cursor_hint: None, theme: &theme, dpi: 1.0 };
+        let mut ctx = EventCtx::new(&theme, 1.0);
         // Header 行中线: pad_y(4) + row_h/2 = 4+12 = 16
         let action = w.on_event(
             &Event::MouseDown { px: 100.0, py: 16.0, button: MouseButton::Left },

@@ -655,7 +655,7 @@ mod tests {
         // 阶段 D：hover 时 track 显示
         let mut w = make_widget(Rect::new(1188.0, 32.0, 12.0, 744.0), 1.0, 100.0, 200, 0.0);
         let t = test_theme();
-        let mut ec = EventCtx { cursor_hint: None, theme: &t, dpi: 1.0 };
+        let mut ec = EventCtx::new(&t, 1.0);
         w.on_event(&Event::MouseMove { px: 6.0, py: 368.0 }, &mut ec);
 
         let mut dl = DrawList::new();
@@ -701,7 +701,7 @@ mod tests {
     fn hover_enter_emits_hover_changed() {
         let mut w = make_widget(Rect::new(1188.0, 32.0, 12.0, 744.0), 1.0, 100.0, 200, 0.0);
         let t = test_theme();
-        let mut ec = EventCtx { cursor_hint: None, theme: &t, dpi: 1.0 };
+        let mut ec = EventCtx::new(&t, 1.0);
         let a = w.on_event(&Event::MouseMove { px: 6.0, py: 368.0 }, &mut ec);
         let a = a.unwrap();
         assert_eq!(a, WidgetAction::Scrollbar(ScrollbarAction::HoverChanged(true)));
@@ -711,7 +711,7 @@ mod tests {
     fn hover_leave_emits_hover_changed_false() {
         let mut w = make_widget(Rect::new(1188.0, 32.0, 12.0, 744.0), 1.0, 100.0, 200, 0.0);
         let t = test_theme();
-        let mut ec = EventCtx { cursor_hint: None, theme: &t, dpi: 1.0 };
+        let mut ec = EventCtx::new(&t, 1.0);
         // First hover in
         w.on_event(&Event::MouseMove { px: 6.0, py: 368.0 }, &mut ec);
         // Then hover out
@@ -724,7 +724,7 @@ mod tests {
     fn lifecycle_leave_preserves_drag_and_cancel_is_idempotent() {
         let mut widget = make_widget(Rect::new(1188.0, 32.0, 12.0, 744.0), 1.0, 100.0, 200, 0.0);
         let theme = test_theme();
-        let mut event_ctx = EventCtx { cursor_hint: None, theme: &theme, dpi: 1.0 };
+        let mut event_ctx = EventCtx::new(&theme, 1.0);
 
         assert_eq!(
             widget.on_event(&Event::MouseMove { px: 6.0, py: 68.0 }, &mut event_ctx),
@@ -757,7 +757,7 @@ mod tests {
     fn no_hover_change_on_same_state() {
         let mut w = make_widget(Rect::new(1188.0, 32.0, 12.0, 744.0), 1.0, 100.0, 200, 0.0);
         let t = test_theme();
-        let mut ec = EventCtx { cursor_hint: None, theme: &t, dpi: 1.0 };
+        let mut ec = EventCtx::new(&t, 1.0);
         // First hover in
         w.on_event(&Event::MouseMove { px: 6.0, py: 368.0 }, &mut ec);
         // Same position again
@@ -772,7 +772,7 @@ mod tests {
         // scroll down so thumb is in middle
         let mut w = make_widget(Rect::new(1188.0, 32.0, 12.0, 744.0), 1.0, 100.0, 200, 50.0);
         let t = test_theme();
-        let mut ec = EventCtx { cursor_hint: None, theme: &t, dpi: 1.0 };
+        let mut ec = EventCtx::new(&t, 1.0);
         let a =
             w.on_event(&Event::MouseDown { px: 6.0, py: 2.0, button: MouseButton::Left }, &mut ec);
         let a = a.unwrap();
@@ -784,7 +784,7 @@ mod tests {
         let mut w = make_widget(Rect::new(1188.0, 32.0, 12.0, 744.0), 1.0, 100.0, 400, 0.0);
         // thumb is near top (small ratio), so most of track is "below"
         let t = test_theme();
-        let mut ec = EventCtx { cursor_hint: None, theme: &t, dpi: 1.0 };
+        let mut ec = EventCtx::new(&t, 1.0);
         let a = w
             .on_event(&Event::MouseDown { px: 6.0, py: 668.0, button: MouseButton::Left }, &mut ec);
         let a = a.unwrap();
@@ -796,7 +796,7 @@ mod tests {
         let mut w = make_widget(Rect::new(1188.0, 32.0, 12.0, 744.0), 1.0, 100.0, 200, 0.0);
         // thumb_y = 32
         let t = test_theme();
-        let mut ec = EventCtx { cursor_hint: None, theme: &t, dpi: 1.0 };
+        let mut ec = EventCtx::new(&t, 1.0);
         let a =
             w.on_event(&Event::MouseDown { px: 6.0, py: 68.0, button: MouseButton::Left }, &mut ec);
         let a = a.unwrap();
@@ -808,7 +808,7 @@ mod tests {
     fn click_no_thumb_returns_none() {
         let mut w = make_widget(Rect::new(1188.0, 32.0, 12.0, 744.0), 1.0, 200.0, 100, 0.0);
         let t = test_theme();
-        let mut ec = EventCtx { cursor_hint: None, theme: &t, dpi: 1.0 };
+        let mut ec = EventCtx::new(&t, 1.0);
         let a = w
             .on_event(&Event::MouseDown { px: 6.0, py: 368.0, button: MouseButton::Left }, &mut ec);
         assert!(a.is_none());
@@ -820,7 +820,7 @@ mod tests {
     fn drag_produces_drag_to() {
         let mut w = make_widget(Rect::new(1188.0, 32.0, 12.0, 744.0), 1.0, 100.0, 200, 0.0);
         let t = test_theme();
-        let mut ec = EventCtx { cursor_hint: None, theme: &t, dpi: 1.0 };
+        let mut ec = EventCtx::new(&t, 1.0);
         // Start drag
         w.on_event(&Event::MouseDown { px: 6.0, py: 68.0, button: MouseButton::Left }, &mut ec);
         // Move mouse down
@@ -838,7 +838,7 @@ mod tests {
     fn mouse_up_ends_drag() {
         let mut w = make_widget(Rect::new(1188.0, 32.0, 12.0, 744.0), 1.0, 100.0, 200, 0.0);
         let t = test_theme();
-        let mut ec = EventCtx { cursor_hint: None, theme: &t, dpi: 1.0 };
+        let mut ec = EventCtx::new(&t, 1.0);
         w.on_event(&Event::MouseDown { px: 6.0, py: 68.0, button: MouseButton::Left }, &mut ec);
         assert!(w.is_dragging());
         let a =
@@ -852,7 +852,7 @@ mod tests {
     fn vertical_mouse_up_outside_track_keeps_hovered_after_drag() {
         let mut widget = make_widget(Rect::new(1188.0, 32.0, 12.0, 744.0), 1.0, 100.0, 200, 0.0);
         let theme = test_theme();
-        let mut event_ctx = EventCtx { cursor_hint: None, theme: &theme, dpi: 1.0 };
+        let mut event_ctx = EventCtx::new(&theme, 1.0);
 
         let start = widget
             .on_event(
@@ -918,7 +918,7 @@ mod tests {
         // 阶段 C：dragging 中 is_capturing()==true，dock 据此优先派事件
         let mut w = make_widget(Rect::new(1188.0, 32.0, 12.0, 744.0), 1.0, 100.0, 200, 0.0);
         let t = test_theme();
-        let mut ec = EventCtx { cursor_hint: None, theme: &t, dpi: 1.0 };
+        let mut ec = EventCtx::new(&t, 1.0);
         assert!(!w.is_capturing(), "idle 时不捕获");
         w.on_event(&Event::MouseDown { px: 6.0, py: 68.0, button: MouseButton::Left }, &mut ec);
         assert!(w.is_capturing(), "拖拽中应捕获");
@@ -931,7 +931,7 @@ mod tests {
         // Bug 1.4: Full drag flow through scrollbar widget
         let mut w = make_widget(Rect::new(1188.0, 32.0, 12.0, 744.0), 1.0, 100.0, 200, 0.0);
         let t = test_theme();
-        let mut ec = EventCtx { cursor_hint: None, theme: &t, dpi: 1.0 };
+        let mut ec = EventCtx::new(&t, 1.0);
 
         // Phase 1: Start drag by clicking on thumb
         let a =
@@ -1051,7 +1051,7 @@ mod tests {
         let mut layout_ctx =
             LayoutCtx { ui_measure: None, measure: &mut measure, theme: &theme, dpi: 1.0 };
         widget.set_rect(Rect::new(0.0, 0.0, 400.0, 14.0), &mut layout_ctx);
-        let mut event_ctx = EventCtx { cursor_hint: None, theme: &theme, dpi: 1.0 };
+        let mut event_ctx = EventCtx::new(&theme, 1.0);
 
         let start = widget
             .on_event(

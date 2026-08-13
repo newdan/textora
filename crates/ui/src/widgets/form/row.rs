@@ -555,7 +555,7 @@ mod tests {
     }
 
     fn event_ctx<'a>(theme: &'a Theme) -> EventCtx<'a> {
-        EventCtx { cursor_hint: None, theme, dpi: 1.0 }
+        EventCtx::new(theme, 1.0)
     }
 
     fn layout(row: &mut FormRow, width: f32, height: f32) {

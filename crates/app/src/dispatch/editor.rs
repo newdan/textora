@@ -5,7 +5,6 @@ use crate::commands::EditOutcome;
 use crate::input::EditCommand;
 use crate::ui_shell::KeyboardFocusTarget;
 use appkit_shell::editor_runtime::{EditorNotification, EditorOutcome};
-use arboard::Clipboard;
 use winit::event_loop::ActiveEventLoop;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -200,9 +199,8 @@ impl App {
                     if let Some(tab) = self.active_tab_session()
                         && let text = tab.selected_text()
                         && !text.is_empty()
-                        && let Ok(mut clipboard) = Clipboard::new()
                     {
-                        let _ = clipboard.set_text(text);
+                        crate::clipboard::copy_to_clipboard(&text);
                     }
                     return effect;
                 }

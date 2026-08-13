@@ -1,5 +1,5 @@
 //! TextBox — single-line text input component.
-//! Manages text state, cursor, selection, IME preedit, and clipboard callbacks.
+//! Manages text state, cursor, selection, IME preedit, and clipboard shortcuts.
 
 use crate::core::widget::{ControlAction, SensitiveText, TextPayload, WidgetId};
 use crate::core::{
@@ -64,9 +64,6 @@ impl Drop for TextBoxIme {
         zeroize::Zeroize::zeroize(self);
     }
 }
-
-pub type ClipboardGetCb = Box<dyn Fn() -> String>;
-pub type ClipboardSetCb = Box<dyn Fn(String)>;
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum EchoMode {
@@ -204,9 +201,6 @@ pub struct TextBox {
     leading_content_inset_logical: f32,
     fixed_size_logical: Option<(f32, f32)>,
 
-    pub on_copy: Option<ClipboardSetCb>,
-    pub on_cut: Option<ClipboardSetCb>,
-    pub on_paste: Option<ClipboardGetCb>,
     pub max_len_bytes: usize,
     committed_payload: Option<TextPayload>,
 }
@@ -242,9 +236,6 @@ impl TextBox {
             text_pad: 0.0,
             leading_content_inset_logical: 4.0,
             fixed_size_logical: None,
-            on_copy: None,
-            on_cut: None,
-            on_paste: None,
             max_len_bytes: usize::MAX,
             committed_payload: None,
         }
@@ -513,15 +504,18 @@ impl TextBox {
         self.text.payload()
     }
 
-    /// Process a key event. Returns true if the event was consumed.
-    pub fn on_key(&mut self, kc: KeyCode, modifiers: Modifiers) -> bool {
-        self.handle_key_down(kc, modifiers).0
+    #[cfg(test)]
+    fn on_key(&mut self, key_code: KeyCode, modifiers: Modifiers) -> bool {
+        let theme = crate::theme::test_theme();
+        let mut event_context = EventCtx::new(&theme, 1.0);
+        self.handle_key_down(key_code, modifiers, &mut event_context).0
     }
 
     fn handle_key_down(
         &mut self,
         kc: KeyCode,
         modifiers: Modifiers,
+        event_context: &mut EventCtx<'_>,
     ) -> (bool, Option<ControlAction>) {
         match kc {
             KeyCode::Char(c) => {
@@ -532,55 +526,32 @@ impl TextBox {
                             return (true, None);
                         }
                         'c' | 'C' => {
-                            if self.echo_mode == EchoMode::Plain
-                                && let Some(text) = self.selection_text()
-                                && let Some(ref callback) = self.on_copy
-                            {
-                                callback(text.to_string());
+                            if let Some(selected_text) = self.selection_text().map(str::to_owned) {
+                                event_context.write_clipboard_text(&selected_text);
                             }
                             return (true, None);
                         }
                         'x' | 'X' => {
                             let previous_text = self.text.clone();
-                            if self.echo_mode == EchoMode::Plain
-                                && let Some(text) = self.selection_text()
-                                && let Some(ref callback) = self.on_cut
-                            {
-                                callback(text.to_string());
+                            if self.echo_mode == EchoMode::Masked {
+                                self.delete_selection();
+                                return (true, self.edited_action_if_text_changed(&previous_text));
                             }
-                            self.delete_selection();
+                            let clipboard_write_succeeded = self
+                                .selection_text()
+                                .map(str::to_owned)
+                                .is_some_and(|selected_text| {
+                                    event_context.write_clipboard_text(&selected_text)
+                                });
+                            if clipboard_write_succeeded {
+                                self.delete_selection();
+                            }
                             return (true, self.edited_action_if_text_changed(&previous_text));
                         }
                         'v' | 'V' => {
                             let previous_text = self.text.clone();
-                            if let Some(ref cb) = self.on_paste {
-                                let pasted = match self.echo_mode {
-                                    EchoMode::Plain => TextStorage::Plain(cb()),
-                                    EchoMode::Masked => {
-                                        TextStorage::Sensitive(SensitiveText::new(cb()))
-                                    }
-                                };
-                                if !pasted.is_empty() {
-                                    self.delete_selection();
-                                    let mut to_insert = pasted.as_str();
-                                    if self.text.len() + to_insert.len() > self.max_len_bytes {
-                                        let allowed =
-                                            self.max_len_bytes.saturating_sub(self.text.len());
-                                        if allowed > 0 {
-                                            let cutoff = Self::clamp_to_grapheme_boundary(
-                                                to_insert, allowed,
-                                            );
-                                            to_insert = &to_insert[..cutoff];
-                                        } else {
-                                            to_insert = "";
-                                        }
-                                    }
-                                    if !to_insert.is_empty() {
-                                        let pos = self.cursor_byte;
-                                        self.text.insert_str(pos, to_insert);
-                                        self.cursor_byte += to_insert.len();
-                                    }
-                                }
+                            if let Some(pasted_text) = event_context.read_clipboard_text() {
+                                self.insert_clipboard_text(pasted_text);
                             }
                             return (true, self.edited_action_if_text_changed(&previous_text));
                         }
@@ -704,6 +675,55 @@ impl TextBox {
             KeyCode::Up | KeyCode::Down | KeyCode::PageUp | KeyCode::PageDown => (true, None),
             _ => (false, None),
         }
+    }
+
+    fn insert_clipboard_text(&mut self, clipboard_text: String) -> bool {
+        let normalized_text = Self::normalize_single_line_text(&clipboard_text);
+        let selection_byte_count =
+            self.selection.map(|(anchor, cursor)| anchor.abs_diff(cursor)).unwrap_or_default();
+        let retained_byte_count = self.text.len().saturating_sub(selection_byte_count);
+        let available_byte_count = self.max_len_bytes.saturating_sub(retained_byte_count);
+        let accepted_byte_count = if normalized_text.len() <= available_byte_count {
+            normalized_text.len()
+        } else {
+            Self::clamp_to_grapheme_boundary(&normalized_text, available_byte_count)
+        };
+        if accepted_byte_count == 0 {
+            return false;
+        }
+
+        let clipboard_storage = match self.echo_mode {
+            EchoMode::Plain => TextStorage::Plain(normalized_text),
+            EchoMode::Masked => TextStorage::Sensitive(SensitiveText::new(normalized_text)),
+        };
+        let accepted_text = &clipboard_storage.as_str()[..accepted_byte_count];
+        self.delete_selection();
+        let insertion_byte = self.cursor_byte;
+        self.text.insert_str(insertion_byte, accepted_text);
+        self.cursor_byte += accepted_text.len();
+        true
+    }
+
+    fn normalize_single_line_text(text: &str) -> String {
+        if !text.contains(['\r', '\n']) {
+            return text.to_owned();
+        }
+
+        let mut normalized_text = String::with_capacity(text.len());
+        let mut characters = text.chars().peekable();
+        while let Some(character) = characters.next() {
+            match character {
+                '\r' => {
+                    if characters.peek() == Some(&'\n') {
+                        characters.next();
+                    }
+                    normalized_text.push(' ');
+                }
+                '\n' => normalized_text.push(' '),
+                _ => normalized_text.push(character),
+            }
+        }
+        normalized_text
     }
 
     /// Mouse down: position cursor, clear selection, begin drag.
@@ -1143,10 +1163,10 @@ impl Widget for TextBox {
         }
     }
 
-    fn on_event(&mut self, ev: &Event, _ctx: &mut EventCtx) -> Option<WidgetAction> {
+    fn on_event(&mut self, ev: &Event, ctx: &mut EventCtx) -> Option<WidgetAction> {
         match ev {
             Event::KeyDown(key_code, modifiers) => {
-                let (consumed, action) = self.handle_key_down(*key_code, *modifiers);
+                let (consumed, action) = self.handle_key_down(*key_code, *modifiers, ctx);
                 action
                     .map(WidgetAction::Control)
                     .or_else(|| consumed.then_some(WidgetAction::Consumed))
@@ -1208,7 +1228,37 @@ impl Widget for TextBox {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::core::Clipboard;
     use crate::core::widget::{ControlAction, Event, EventCtx, Widget, WidgetAction, WidgetId};
+    use std::cell::RefCell;
+    use std::rc::Rc;
+
+    struct TestClipboard {
+        text: Rc<RefCell<Option<String>>>,
+    }
+
+    impl Clipboard for TestClipboard {
+        fn read_text(&mut self) -> Option<String> {
+            self.text.borrow().clone()
+        }
+
+        fn write_text(&mut self, text: &str) -> bool {
+            self.text.replace(Some(text.to_owned()));
+            true
+        }
+    }
+
+    struct RejectingClipboard;
+
+    impl Clipboard for RejectingClipboard {
+        fn read_text(&mut self) -> Option<String> {
+            None
+        }
+
+        fn write_text(&mut self, _text: &str) -> bool {
+            false
+        }
+    }
 
     fn paint_laid_out(tb: &mut TextBox) -> crate::core::paint::DrawList {
         use crate::core::measure::NoopMeasure;
@@ -1254,7 +1304,7 @@ mod tests {
         modifiers: Modifiers,
     ) -> Option<WidgetAction> {
         let theme = crate::theme::test_theme();
-        let mut event_ctx = EventCtx { cursor_hint: None, theme: &theme, dpi: 1.0 };
+        let mut event_ctx = EventCtx::new(&theme, 1.0);
         text_box.on_event(&Event::KeyDown(key_code, modifiers), &mut event_ctx)
     }
 
@@ -1312,7 +1362,7 @@ mod tests {
         let mut text_box = laid_out_widget(TextBox::new());
         text_box.set_text("hello");
         let theme = crate::theme::test_theme();
-        let mut event_context = EventCtx { cursor_hint: None, theme: &theme, dpi: 1.0 };
+        let mut event_context = EventCtx::new(&theme, 1.0);
 
         assert!(
             text_box
@@ -1927,10 +1977,100 @@ mod tests {
         text_box.on_ime(&TextBoxIme::Commit("e\u{301}".into()));
         assert_eq!(text_box.text(), "");
 
-        text_box.on_paste = Some(Box::new(|| "e\u{301}".into()));
+        let clipboard_text = Rc::new(RefCell::new(Some("e\u{301}".to_owned())));
+        let mut clipboard = TestClipboard { text: clipboard_text };
         let command = Modifiers { cmd: true, ..Modifiers::NONE };
-        text_box.on_key(KeyCode::Char('v'), command);
+        let theme = crate::theme::test_theme();
+        let mut event_context = EventCtx::with_clipboard(&theme, 1.0, &mut clipboard);
+        text_box.on_event(&Event::KeyDown(KeyCode::Char('v'), command), &mut event_context);
         assert_eq!(text_box.text(), "");
+    }
+
+    #[test]
+    fn clipboard_paste_normalizes_line_breaks_for_single_line_input() {
+        let clipboard_text =
+            Rc::new(RefCell::new(Some("第一行\r\n第二行\n第三行\r第四行".to_owned())));
+        let mut clipboard = TestClipboard { text: clipboard_text };
+        let mut text_box = laid_out_widget(TextBox::with_id(WidgetId(46)));
+        let theme = crate::theme::test_theme();
+        let mut event_context = EventCtx::with_clipboard(&theme, 1.0, &mut clipboard);
+        let command = Modifiers { cmd: true, ..Modifiers::NONE };
+
+        let action =
+            text_box.on_event(&Event::KeyDown(KeyCode::Char('v'), command), &mut event_context);
+
+        assert!(matches!(action, Some(WidgetAction::Control(ControlAction::TextEdited { .. }))));
+        assert_eq!(text_box.text(), "第一行 第二行 第三行 第四行");
+    }
+
+    #[test]
+    fn rejected_grapheme_paste_preserves_the_replaced_selection() {
+        let clipboard_text = Rc::new(RefCell::new(Some("e\u{301}".to_owned())));
+        let mut clipboard = TestClipboard { text: clipboard_text };
+        let mut text_box = laid_out_widget(TextBox::with_id(WidgetId(47)));
+        text_box.set_max_len_bytes(1);
+        text_box.set_text("a");
+        text_box.select_all();
+        let theme = crate::theme::test_theme();
+        let mut event_context = EventCtx::with_clipboard(&theme, 1.0, &mut clipboard);
+        let command = Modifiers { cmd: true, ..Modifiers::NONE };
+
+        let action =
+            text_box.on_event(&Event::KeyDown(KeyCode::Char('v'), command), &mut event_context);
+
+        assert_eq!(action, Some(WidgetAction::Consumed));
+        assert_eq!(text_box.text(), "a");
+        assert_eq!(text_box.selection_text(), Some("a"));
+    }
+
+    #[test]
+    fn widget_event_uses_context_clipboard_without_component_configuration() {
+        let clipboard_text = Rc::new(RefCell::new(Some("粘贴内容".to_owned())));
+        let mut clipboard = TestClipboard { text: Rc::clone(&clipboard_text) };
+        let mut text_box = laid_out_widget(TextBox::with_id(WidgetId(44)));
+        text_box.set_text("原文");
+        text_box.select_all();
+        let theme = crate::theme::test_theme();
+        let mut event_context = EventCtx::with_clipboard(&theme, 1.0, &mut clipboard);
+        let command = Modifiers { cmd: true, ..Modifiers::NONE };
+
+        let paste =
+            text_box.on_event(&Event::KeyDown(KeyCode::Char('v'), command), &mut event_context);
+        assert!(matches!(
+            paste,
+            Some(WidgetAction::Control(ControlAction::TextEdited {
+                value: TextPayload::Plain(text),
+                ..
+            })) if text == "粘贴内容"
+        ));
+
+        text_box.select_all();
+        let _ = text_box.on_event(&Event::KeyDown(KeyCode::Char('c'), command), &mut event_context);
+        assert_eq!(clipboard_text.borrow().as_deref(), Some("粘贴内容"));
+
+        text_box.select_all();
+        let cut =
+            text_box.on_event(&Event::KeyDown(KeyCode::Char('x'), command), &mut event_context);
+        assert!(matches!(cut, Some(WidgetAction::Control(ControlAction::TextEdited { .. }))));
+        assert_eq!(text_box.text(), "");
+    }
+
+    #[test]
+    fn cut_preserves_selection_when_clipboard_write_fails() {
+        let mut clipboard = RejectingClipboard;
+        let mut text_box = laid_out_widget(TextBox::with_id(WidgetId(45)));
+        text_box.set_text("不能丢失");
+        text_box.select_all();
+        let theme = crate::theme::test_theme();
+        let mut event_context = EventCtx::with_clipboard(&theme, 1.0, &mut clipboard);
+        let command = Modifiers { cmd: true, ..Modifiers::NONE };
+
+        let action =
+            text_box.on_event(&Event::KeyDown(KeyCode::Char('x'), command), &mut event_context);
+
+        assert_eq!(action, Some(WidgetAction::Consumed));
+        assert_eq!(text_box.text(), "不能丢失");
+        assert_eq!(text_box.selection_text(), Some("不能丢失"));
     }
 
     #[test]
@@ -1949,26 +2089,29 @@ mod tests {
 
     #[test]
     fn masked_copy_and_cut_never_send_plaintext_to_clipboard() {
-        use std::cell::RefCell;
-        use std::rc::Rc;
-
-        let copied_values = Rc::new(RefCell::new(Vec::new()));
-        let copied_values_for_callback = Rc::clone(&copied_values);
+        let clipboard_text = Rc::new(RefCell::new(None));
+        let mut clipboard = TestClipboard { text: Rc::clone(&clipboard_text) };
         let mut text_box = TextBox::new();
         text_box.set_echo_mode(EchoMode::Masked);
         text_box.set_text("clipboard-secret");
         text_box.select_all();
-        text_box.on_copy = Some(Box::new(move |value| {
-            copied_values_for_callback.borrow_mut().push(value);
-        }));
 
         let command = Modifiers { cmd: true, ..Modifiers::NONE };
-        assert!(text_box.on_key(KeyCode::Char('c'), command));
-        assert!(copied_values.borrow().is_empty());
+        let theme = crate::theme::test_theme();
+        let mut event_context = EventCtx::with_clipboard(&theme, 1.0, &mut clipboard);
+        assert!(
+            text_box
+                .on_event(&Event::KeyDown(KeyCode::Char('c'), command), &mut event_context)
+                .is_some()
+        );
+        assert!(clipboard_text.borrow().is_none());
 
-        text_box.on_cut = text_box.on_copy.take();
-        assert!(text_box.on_key(KeyCode::Char('x'), command));
-        assert!(copied_values.borrow().is_empty());
+        assert!(
+            text_box
+                .on_event(&Event::KeyDown(KeyCode::Char('x'), command), &mut event_context)
+                .is_some()
+        );
+        assert!(clipboard_text.borrow().is_none());
         assert_eq!(text_box.text(), "");
     }
 
@@ -2018,10 +2161,11 @@ mod tests {
 
         masked.set_text("");
         masked.cursor_byte = 0;
-        masked.on_paste = Some(Box::new(|| String::from("paste")));
         let paste_modifiers = Modifiers { cmd: true, ..Modifiers::NONE };
+        let clipboard_text = Rc::new(RefCell::new(Some(String::from("paste"))));
+        let mut clipboard = TestClipboard { text: clipboard_text };
         let theme = crate::theme::test_theme();
-        let mut event_ctx = EventCtx { cursor_hint: None, theme: &theme, dpi: 1.0 };
+        let mut event_ctx = EventCtx::with_clipboard(&theme, 1.0, &mut clipboard);
         assert!(matches!(
             masked.on_event(&Event::KeyDown(KeyCode::Char('v'), paste_modifiers), &mut event_ctx),
             Some(WidgetAction::Control(ControlAction::TextEdited {

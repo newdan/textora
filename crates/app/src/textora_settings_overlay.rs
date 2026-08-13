@@ -684,7 +684,7 @@ mod tests {
         let editor_rect = overlay.category_rects[1];
         let pointer = (editor_rect.x + editor_rect.w * 0.5, editor_rect.y + editor_rect.h * 0.5);
         let theme = ui::theme::test_theme();
-        let mut event_ctx = EventCtx { theme: &theme, dpi: 1.0, cursor_hint: None };
+        let mut event_ctx = EventCtx::new(&theme, 1.0);
 
         assert!(
             overlay
@@ -774,7 +774,7 @@ mod tests {
         click_y: f32,
     ) -> Option<WidgetAction> {
         let theme = ui::theme::test_theme();
-        let mut event_ctx = EventCtx { theme: &theme, dpi: 1.0, cursor_hint: None };
+        let mut event_ctx = EventCtx::new(&theme, 1.0);
         overlay.on_event(
             &Event::MouseDown { px: click_x, py: click_y, button: MouseButton::Left },
             &mut event_ctx,

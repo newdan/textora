@@ -266,7 +266,7 @@ mod tests {
 
     fn key_result(widget: &mut PopupMenuWidget, key: KeyCode) -> Option<WidgetAction> {
         let theme = crate::theme::test_theme();
-        let mut ctx = EventCtx { cursor_hint: None, theme: &theme, dpi: 1.0 };
+        let mut ctx = EventCtx::new(&theme, 1.0);
         widget.on_event(&Event::KeyDown(key, Modifiers::NONE), &mut ctx)
     }
 
@@ -419,7 +419,7 @@ mod tests {
         let menu = PopupMenu::context_px(0, (100.0, 100.0), (1200.0, 800.0), false, 1.0);
         let mut widget = PopupMenuWidget::new(menu);
         let theme = crate::theme::test_theme();
-        let mut ctx = EventCtx { cursor_hint: None, theme: &theme, dpi: 1.0 };
+        let mut ctx = EventCtx::new(&theme, 1.0);
         let result = widget.on_event(&Event::KeyDown(KeyCode::Escape, Modifiers::NONE), &mut ctx);
         assert!(result.is_some());
         assert!(matches!(result.unwrap(), WidgetAction::Popup(PopupOutcome::Dismiss)));
@@ -431,7 +431,7 @@ mod tests {
         let menu = PopupMenu::context_px(0, (400.0, 200.0), (1200.0, 800.0), false, 1.0);
         let mut widget = PopupMenuWidget::new(menu);
         let theme = crate::theme::test_theme();
-        let mut ctx = EventCtx { cursor_hint: None, theme: &theme, dpi: 1.0 };
+        let mut ctx = EventCtx::new(&theme, 1.0);
         let result = widget.on_event(
             &Event::MouseDown { px: -10.0, py: -10.0, button: MouseButton::Left },
             &mut ctx,
@@ -446,7 +446,7 @@ mod tests {
         let menu = PopupMenu::context_px(0, (400.0, 200.0), (1200.0, 800.0), false, 1.0);
         let mut widget = PopupMenuWidget::new(menu);
         let theme = crate::theme::test_theme();
-        let mut ctx = EventCtx { cursor_hint: None, theme: &theme, dpi: 1.0 };
+        let mut ctx = EventCtx::new(&theme, 1.0);
         let r = widget.menu.item_rects[0];
         let cx = r.x + r.w * 0.5;
         let cy = r.y + r.h * 0.5;
@@ -462,7 +462,7 @@ mod tests {
         let menu = PopupMenu::context_px(0, (400.0, 200.0), (1200.0, 800.0), false, 1.0);
         let mut widget = PopupMenuWidget::new(menu);
         let theme = crate::theme::test_theme();
-        let mut ctx = EventCtx { cursor_hint: None, theme: &theme, dpi: 1.0 };
+        let mut ctx = EventCtx::new(&theme, 1.0);
         let r = widget.menu.item_rects[0];
         let cx = r.x + r.w * 0.5;
         let cy = r.y + r.h * 0.5;
@@ -576,7 +576,7 @@ mod tests {
         ]);
         let mut widget = PopupMenuWidget::new(menu);
         let theme = crate::theme::test_theme();
-        let mut ctx = EventCtx { cursor_hint: None, theme: &theme, dpi: 1.0 };
+        let mut ctx = EventCtx::new(&theme, 1.0);
 
         assert_eq!(widget.on_event(&Event::MouseMove { px: 10.0, py: 10.0 }, &mut ctx), None);
         assert_eq!(widget.hovered, None);
@@ -597,7 +597,7 @@ mod tests {
         ]);
         let mut widget = PopupMenuWidget::new(menu);
         let theme = crate::theme::test_theme();
-        let mut ctx = EventCtx { cursor_hint: None, theme: &theme, dpi: 1.0 };
+        let mut ctx = EventCtx::new(&theme, 1.0);
 
         assert_eq!(widget.on_event(&Event::MouseMove { px: 10.0, py: 30.0 }, &mut ctx), None);
         assert_eq!(widget.hovered, Some(1));

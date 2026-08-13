@@ -508,7 +508,7 @@ mod tests {
         let mut toolbar = toolbar();
         toolbar.rect = Rect::new(0.0, 0.0, 320.0, 40.0);
         let theme = crate::theme::test_theme();
-        let mut context = EventCtx { theme: &theme, dpi: 1.0, cursor_hint: None };
+        let mut context = EventCtx::new(&theme, 1.0);
 
         assert_eq!(
             toolbar.on_event(&Event::MouseMove { px: 20.0, py: 20.0 }, &mut context),
@@ -528,7 +528,7 @@ mod tests {
         let mut toolbar = toolbar();
         toolbar.rect = Rect::new(0.0, 0.0, 320.0, 40.0);
         let theme = crate::theme::test_theme();
-        let mut context = EventCtx { theme: &theme, dpi: 1.0, cursor_hint: None };
+        let mut context = EventCtx::new(&theme, 1.0);
 
         assert_eq!(
             toolbar.on_event(&Event::MouseMove { px: 20.0, py: 20.0 }, &mut context),

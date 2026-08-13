@@ -625,7 +625,7 @@ mod tests {
 
     fn click_close(modal: &mut ModalFrame) -> Option<WidgetAction> {
         let theme = crate::theme::test_theme();
-        let mut ctx = EventCtx { cursor_hint: None, theme: &theme, dpi: 1.0 };
+        let mut ctx = EventCtx::new(&theme, 1.0);
         modal.on_event(
             &Event::MouseDown { px: 294.0, py: 14.0, button: MouseButton::Left },
             &mut ctx,
@@ -635,7 +635,7 @@ mod tests {
 
     fn key_escape(modal: &mut ModalFrame) -> Option<WidgetAction> {
         let theme = crate::theme::test_theme();
-        let mut ctx = EventCtx { cursor_hint: None, theme: &theme, dpi: 1.0 };
+        let mut ctx = EventCtx::new(&theme, 1.0);
         modal.on_event(&Event::KeyDown(KeyCode::Escape, Modifiers::NONE), &mut ctx)
     }
 
@@ -674,7 +674,7 @@ mod tests {
 
         modal.set_keyboard_focus(Some(MODAL_FRAME_CLOSE_BUTTON_ID));
         let theme = crate::theme::test_theme();
-        let mut ctx = EventCtx { cursor_hint: None, theme: &theme, dpi: 1.0 };
+        let mut ctx = EventCtx::new(&theme, 1.0);
         for key in [KeyCode::Enter, KeyCode::Char(' ')] {
             assert_eq!(
                 modal.on_event(&Event::KeyDown(key, Modifiers::NONE), &mut ctx),
@@ -693,7 +693,7 @@ mod tests {
         child.next_action = Some(WidgetAction::Consumed);
 
         let theme = crate::theme::test_theme();
-        let mut ctx = EventCtx { cursor_hint: None, theme: &theme, dpi: 1.0 };
+        let mut ctx = EventCtx::new(&theme, 1.0);
         let action = modal.on_event(
             &Event::MouseDown { px: 20.0, py: 60.0, button: MouseButton::Left },
             &mut ctx,
@@ -723,7 +723,7 @@ mod tests {
     fn modal_frame_reports_capture_and_releases_pressed_content_after_mouse_up_outside_frame() {
         let mut modal = fixture_modal();
         let theme = crate::theme::test_theme();
-        let mut ctx = EventCtx { cursor_hint: None, theme: &theme, dpi: 1.0 };
+        let mut ctx = EventCtx::new(&theme, 1.0);
         let down_px = modal.content_rect.x + 18.0;
         let down_py = modal.content_rect.y + 10.0;
         let outside_px = modal.rect.w + 24.0;
@@ -778,7 +778,7 @@ mod tests {
     fn modal_leave_preserves_close_press_and_cancel_clears_all_pointer_state() {
         let mut modal = fixture_modal();
         let theme = crate::theme::test_theme();
-        let mut ctx = EventCtx { cursor_hint: None, theme: &theme, dpi: 1.0 };
+        let mut ctx = EventCtx::new(&theme, 1.0);
         let close_px = modal.close_button_rect.x + modal.close_button_rect.w * 0.5;
         let close_py = modal.close_button_rect.y + modal.close_button_rect.h * 0.5;
 
@@ -824,7 +824,7 @@ mod tests {
                 .with_mouse_move_cursor(CursorIcon::Crosshair),
         ));
         let theme = crate::theme::test_theme();
-        let mut ctx = EventCtx { cursor_hint: None, theme: &theme, dpi: 1.0 };
+        let mut ctx = EventCtx::new(&theme, 1.0);
         let move_px = modal.close_button_rect.x + modal.close_button_rect.w * 0.5;
         let move_py = modal.close_button_rect.y + modal.close_button_rect.h * 0.5;
 
@@ -851,7 +851,7 @@ mod tests {
                 .with_mouse_move_cursor(CursorIcon::Crosshair),
         ));
         let theme = crate::theme::test_theme();
-        let mut first_ctx = EventCtx { cursor_hint: None, theme: &theme, dpi: 1.0 };
+        let mut first_ctx = EventCtx::new(&theme, 1.0);
         let content_px = modal.content_rect.x + 12.0;
         let content_py = modal.content_rect.y + 8.0;
         let close_px = modal.close_button_rect.x + modal.close_button_rect.w * 0.5;
@@ -863,7 +863,7 @@ mod tests {
         );
         assert_eq!(first_ctx.cursor_hint, Some(CursorIcon::Crosshair));
 
-        let mut second_ctx = EventCtx { cursor_hint: None, theme: &theme, dpi: 1.0 };
+        let mut second_ctx = EventCtx::new(&theme, 1.0);
         assert_eq!(
             modal.on_event(&Event::MouseMove { px: close_px, py: close_py }, &mut second_ctx),
             Some(WidgetAction::Consumed)
@@ -897,13 +897,13 @@ mod tests {
         let header_gap_px = modal.title_rect.x + 8.0;
         let header_gap_py = modal.header_rect.y + modal.header_rect.h * 0.5;
 
-        let mut first_ctx = EventCtx { cursor_hint: None, theme: &theme, dpi: 1.0 };
+        let mut first_ctx = EventCtx::new(&theme, 1.0);
         assert_eq!(
             modal.on_event(&Event::MouseMove { px: content_px, py: content_py }, &mut first_ctx),
             Some(WidgetAction::Consumed)
         );
 
-        let mut second_ctx = EventCtx { cursor_hint: None, theme: &theme, dpi: 1.0 };
+        let mut second_ctx = EventCtx::new(&theme, 1.0);
         assert_eq!(
             modal.on_event(
                 &Event::MouseMove { px: header_gap_px, py: header_gap_py },
@@ -913,7 +913,7 @@ mod tests {
         );
         assert_eq!(second_ctx.cursor_hint, None);
 
-        let mut third_ctx = EventCtx { cursor_hint: None, theme: &theme, dpi: 1.0 };
+        let mut third_ctx = EventCtx::new(&theme, 1.0);
         assert_eq!(
             modal.on_event(
                 &Event::MouseMove { px: header_gap_px, py: header_gap_py },

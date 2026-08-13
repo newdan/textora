@@ -550,7 +550,7 @@ mod tests {
         let mut w = make_widget(vec![("H1", 1), ("H2", 2)]);
         w.rect = Rect::new(0.0, 0.0, 200.0, 400.0);
         let theme = crate::theme::test_theme();
-        let mut ctx = EventCtx { cursor_hint: None, theme: &theme, dpi: 1.0 };
+        let mut ctx = EventCtx::new(&theme, 1.0);
         let action = w.on_event(
             &Event::MouseDown { px: 50.0, py: 5.0, button: crate::core::widget::MouseButton::Left },
             &mut ctx,
@@ -563,7 +563,7 @@ mod tests {
         let mut w = make_widget(vec![("H1", 1)]);
         w.rect = Rect::new(0.0, 0.0, 200.0, 400.0);
         let theme = crate::theme::test_theme();
-        let mut ctx = EventCtx { cursor_hint: None, theme: &theme, dpi: 1.0 };
+        let mut ctx = EventCtx::new(&theme, 1.0);
         let action = w.on_event(
             &Event::MouseDown {
                 px: 999.0,
@@ -580,7 +580,7 @@ mod tests {
         let mut w = make_widget(vec![("H1", 1), ("H2", 2)]);
         w.rect = Rect::new(0.0, 0.0, 200.0, 400.0);
         let theme = crate::theme::test_theme();
-        let mut ctx = EventCtx { cursor_hint: None, theme: &theme, dpi: 1.0 };
+        let mut ctx = EventCtx::new(&theme, 1.0);
         w.on_event(&Event::MouseMove { px: 50.0, py: 5.0 }, &mut ctx);
         assert_eq!(w.hovered_index, Some(0));
     }

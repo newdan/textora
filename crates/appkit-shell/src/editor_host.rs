@@ -96,7 +96,7 @@ mod tests {
     fn on_event_returns_none() {
         let mut w = EditorHostWidget::new();
         let t = theme();
-        let mut ec = EventCtx { cursor_hint: None, theme: &t, dpi: 1.0 };
+        let mut ec = EventCtx::new(&t, 1.0);
         assert!(w.on_event(&Event::MouseMove { px: 0., py: 0. }, &mut ec).is_none());
     }
 }

@@ -1243,7 +1243,7 @@ mod tests {
 
     fn dispatch_settings_event(view: &mut SettingsView, event: Event) -> Option<WidgetAction> {
         let theme = crate::theme::test_theme();
-        let mut ctx = EventCtx { theme: &theme, dpi: 1.0, cursor_hint: None };
+        let mut ctx = EventCtx::new(&theme, 1.0);
         view.on_event(&event, &mut ctx)
     }
 
@@ -1663,7 +1663,7 @@ mod tests {
             let click_x = text_box_rect.x + text_box_rect.w * 0.5;
             let click_y = text_box_rect.y + text_box_rect.h * 0.5;
             let mouse_button = crate::core::widget::MouseButton::Left;
-            let mut ctx = EventCtx { theme: &theme, dpi, cursor_hint: None };
+            let mut ctx = EventCtx::new(&theme, dpi);
             let _ = view.on_event(
                 &Event::MouseDown { px: click_x, py: click_y, button: mouse_button },
                 &mut ctx,
@@ -1738,7 +1738,7 @@ mod tests {
         assert!(focusable_ids.contains(&THEME_DARK_ID));
 
         view.set_keyboard_focus(Some(THEME_DARK_ID));
-        let mut ctx = EventCtx { cursor_hint: None, theme: &theme, dpi: 1.0 };
+        let mut ctx = EventCtx::new(&theme, 1.0);
         assert_eq!(
             view.on_event(&Event::KeyDown(KeyCode::Enter, Modifiers::NONE), &mut ctx),
             Some(WidgetAction::Settings(SettingsViewAction::SetThemeMode(ThemeMode::Dark)))
