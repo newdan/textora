@@ -138,6 +138,23 @@ impl TextStorage {
             Self::Sensitive(value) => TextPayload::Sensitive(value.clone()),
         }
     }
+
+    fn into_single_line(self) -> Self {
+        if !self.as_str().contains(['\r', '\n']) {
+            return self;
+        }
+
+        match self {
+            Self::Plain(value) => {
+                let mut normalized = String::with_capacity(value.len());
+                TextBox::push_single_line_text(&value, &mut normalized);
+                Self::Plain(normalized)
+            }
+            Self::Sensitive(value) => Self::Sensitive(value.rewrite(|source, normalized| {
+                TextBox::push_single_line_text(source, normalized);
+            })),
+        }
+    }
 }
 
 impl std::fmt::Debug for TextStorage {
@@ -550,7 +567,15 @@ impl TextBox {
                         }
                         'v' | 'V' => {
                             let previous_text = self.text.clone();
-                            if let Some(pasted_text) = event_context.read_clipboard_text() {
+                            let pasted_text = match self.echo_mode {
+                                EchoMode::Plain => {
+                                    event_context.read_clipboard_text().map(TextStorage::Plain)
+                                }
+                                EchoMode::Masked => event_context
+                                    .read_sensitive_clipboard_text()
+                                    .map(TextStorage::Sensitive),
+                            };
+                            if let Some(pasted_text) = pasted_text {
                                 self.insert_clipboard_text(pasted_text);
                             }
                             return (true, self.edited_action_if_text_changed(&previous_text));
@@ -677,8 +702,8 @@ impl TextBox {
         }
     }
 
-    fn insert_clipboard_text(&mut self, clipboard_text: String) -> bool {
-        let normalized_text = Self::normalize_single_line_text(&clipboard_text);
+    fn insert_clipboard_text(&mut self, clipboard_text: TextStorage) -> bool {
+        let normalized_text = clipboard_text.into_single_line();
         let selection_byte_count =
             self.selection.map(|(anchor, cursor)| anchor.abs_diff(cursor)).unwrap_or_default();
         let retained_byte_count = self.text.len().saturating_sub(selection_byte_count);
@@ -692,11 +717,7 @@ impl TextBox {
             return false;
         }
 
-        let clipboard_storage = match self.echo_mode {
-            EchoMode::Plain => TextStorage::Plain(normalized_text),
-            EchoMode::Masked => TextStorage::Sensitive(SensitiveText::new(normalized_text)),
-        };
-        let accepted_text = &clipboard_storage.as_str()[..accepted_byte_count];
+        let accepted_text = &normalized_text.as_str()[..accepted_byte_count];
         self.delete_selection();
         let insertion_byte = self.cursor_byte;
         self.text.insert_str(insertion_byte, accepted_text);
@@ -704,12 +725,7 @@ impl TextBox {
         true
     }
 
-    fn normalize_single_line_text(text: &str) -> String {
-        if !text.contains(['\r', '\n']) {
-            return text.to_owned();
-        }
-
-        let mut normalized_text = String::with_capacity(text.len());
+    fn push_single_line_text(text: &str, normalized_text: &mut String) {
         let mut characters = text.chars().peekable();
         while let Some(character) = characters.next() {
             match character {
@@ -723,7 +739,6 @@ impl TextBox {
                 _ => normalized_text.push(character),
             }
         }
-        normalized_text
     }
 
     /// Mouse down: position cursor, clear selection, begin drag.
