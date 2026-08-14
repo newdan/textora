@@ -70,7 +70,6 @@ impl EditorRuntime {
             return Ok(EditorSurfacePaint::Empty);
         };
         frame.paint_editor(editor_rect)?;
-        self.painted_editor_bounds = Some(editor_rect);
         if editor_rect.w == 0.0 || editor_rect.h == 0.0 {
             return Ok(EditorSurfacePaint::Document { vertex_count: 0 });
         }

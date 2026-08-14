@@ -38,7 +38,6 @@ fn editor_input_context(app: &App) -> EditorInputContext {
         matches!(app.ui_shell.keyboard_focus(), crate::ui_shell::KeyboardFocusTarget::Editor)
             && app.editor_runtime.window_focused();
     EditorInputContext {
-        editor_rect: app.ui_shell.editor_rect(),
         focus: if editor_focus { EditorFocus::Active } else { EditorFocus::Inactive },
         modal_blocked: app.ui_shell.active_overlay_is_modal(),
     }

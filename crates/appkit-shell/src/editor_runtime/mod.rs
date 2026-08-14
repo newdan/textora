@@ -41,7 +41,9 @@ pub enum SemanticEditResult {
 
 use crate::tab_runtime::TabRuntime;
 use crate::tab_session::{TabSession, TabSessionMut};
+use std::cell::Cell;
 use std::path::{Path, PathBuf};
+use std::rc::Rc;
 use std::sync::{Arc, Mutex};
 
 use winit::event_loop::ActiveEventLoop;
@@ -78,6 +80,8 @@ fn clipboard_command_for_key(
 const CURSOR_BLINK_INTERVAL_MS: u64 = 500;
 const CURSOR_BLINK_WAKE_TOLERANCE_MS: u64 = 5;
 const IME_ANCHOR_WIDTH_PX: f32 = 2.0;
+
+type PaintedEditorBounds = Rc<Cell<Option<ui::Rect>>>;
 
 fn editor_scrollbar_input(
     viewport_extent: f32,
@@ -130,7 +134,7 @@ pub struct EditorRuntime {
     theme: ui::Theme,
     active_cursor_paint_enabled: bool,
     plain_text_preedit_advance_px: f32,
-    painted_editor_bounds: Option<ui::Rect>,
+    painted_editor_bounds: PaintedEditorBounds,
     ui_shaper: Option<Arc<Mutex<shaping::Shaper>>>,
     _snapshots_directory: PathBuf,
 }
@@ -155,7 +159,7 @@ impl EditorRuntime {
             theme: initial_theme,
             active_cursor_paint_enabled: true,
             plain_text_preedit_advance_px: 0.0,
-            painted_editor_bounds: None,
+            painted_editor_bounds: Rc::new(Cell::new(None)),
             ui_shaper: None,
             _snapshots_directory: snapshots_directory,
         })
@@ -613,10 +617,15 @@ impl EditorRuntime {
     }
 
     pub fn begin_frame(&mut self) -> Result<EditorFrame, RenderError> {
-        self.painted_editor_bounds = None;
+        self.painted_editor_bounds.set(None);
         let theme = self.theme.clone();
         let dpi = self.render_session.scale_factor() as f32;
-        Ok(EditorFrame::new_for_backend(theme, dpi, self.ui_shaper.clone()))
+        Ok(EditorFrame::new_for_backend(
+            theme,
+            dpi,
+            self.ui_shaper.clone(),
+            Rc::clone(&self.painted_editor_bounds),
+        ))
     }
 
     pub fn update_theme(&mut self, theme: ui::Theme) {
@@ -750,7 +759,7 @@ impl EditorRuntime {
 
     /// 返回活动编辑器光标的窗口坐标矩形，供产品层定位系统 IME 候选窗。
     pub fn active_editor_ime_cursor_rect(&self) -> Option<ui::Rect> {
-        let editor_bounds = self.painted_editor_bounds?;
+        let editor_bounds = self.painted_editor_bounds()?;
         let tab_id = self.active_tab_id()?;
         let tab = self.tab_session(tab_id)?;
         if tab.handles_own_rendering() {
@@ -920,11 +929,14 @@ impl EditorRuntime {
         position: (f32, f32),
         pixels: f32,
     ) -> EditorOutcome {
-        if context.modal_blocked || !context.editor_rect.contains(position.0, position.1) {
+        if !self.editor_hit_test_allowed(context, position) {
             return EditorOutcome::default();
         }
+        let Some(editor_bounds) = self.painted_editor_bounds() else {
+            return EditorOutcome::default();
+        };
         let plugin_viewport_height =
-            editor_painter::plugin_bounds(context.editor_rect, self.scale_factor() as f32, false).h;
+            editor_painter::plugin_bounds(editor_bounds, self.scale_factor() as f32, false).h;
         self.model_session.scroll_active_document(
             pixels,
             plugin_viewport_height,
@@ -945,8 +957,8 @@ impl EditorRuntime {
     /// 将活动编辑器的滚动范围转换为产品壳可直接渲染的覆盖式滚动条输入。
     pub fn active_editor_scrollbars_input(
         &self,
-        editor_rect: ui::Rect,
     ) -> Option<ui::canvas_scrollbars::CanvasScrollbarsInput> {
+        let editor_bounds = self.painted_editor_bounds()?;
         let tab_id = self.active_tab_id()?;
         let tab = self.tab_session(tab_id)?;
         if tab.is_canvas() {
@@ -962,7 +974,7 @@ impl EditorRuntime {
 
         let vertical = if tab.handles_own_rendering() {
             let viewport_height =
-                editor_painter::plugin_bounds(editor_rect, self.scale_factor() as f32, false).h;
+                editor_painter::plugin_bounds(editor_bounds, self.scale_factor() as f32, false).h;
             editor_scrollbar_input(viewport_height, tab.content_height(), tab.scroll_y())
         } else {
             editor_scrollbar_input(
@@ -981,8 +993,10 @@ impl EditorRuntime {
     pub fn apply_active_scrollbar_action(
         &mut self,
         action: ui::canvas_scrollbars::CanvasScrollbarsAction,
-        editor_rect: ui::Rect,
     ) -> EditorOutcome {
+        let Some(editor_bounds) = self.painted_editor_bounds() else {
+            return EditorOutcome::default();
+        };
         let Some(tab_id) = self.active_tab_id() else {
             return EditorOutcome::default();
         };
@@ -990,7 +1004,7 @@ impl EditorRuntime {
         if is_canvas {
             return self.apply_canvas_scrollbar_action(action);
         }
-        self.apply_document_scrollbar_action(tab_id, action, editor_rect)
+        self.apply_document_scrollbar_action(tab_id, action, editor_bounds)
     }
 
     fn apply_canvas_scrollbar_action(
@@ -1092,8 +1106,26 @@ impl EditorRuntime {
         }
     }
 
+    pub fn editor_hit_test_allowed(
+        &self,
+        context: EditorInputContext,
+        position: (f32, f32),
+    ) -> bool {
+        !context.modal_blocked
+            && self
+                .painted_editor_bounds()
+                .is_some_and(|bounds| bounds.contains(position.0, position.1))
+    }
+
     pub fn pointer_input_allowed(&self, context: EditorInputContext, position: (f32, f32)) -> bool {
-        self.input_session.pointer_allowed(context, position)
+        let pointer_inside_editor = self
+            .painted_editor_bounds()
+            .is_some_and(|bounds| bounds.contains(position.0, position.1));
+        self.input_session.pointer_allowed(context, pointer_inside_editor)
+    }
+
+    fn painted_editor_bounds(&self) -> Option<ui::Rect> {
+        self.painted_editor_bounds.get()
     }
 
     fn editor_line_height(&self) -> f32 {
@@ -1643,6 +1675,11 @@ mod tests {
         runtime
     }
 
+    fn paint_editor_surface(runtime: &mut EditorRuntime, editor_bounds: ui::Rect) {
+        let mut frame = runtime.begin_frame().expect("headless editor frame should begin");
+        frame.paint_editor(editor_bounds).expect("finite editor bounds should paint");
+    }
+
     fn runtime_with_prepared_canvas() -> EditorRuntime {
         let mut runtime = runtime_with_clean_tab();
         let tab_id = runtime.active_tab_id().expect("test canvas tab should be active");
@@ -1665,11 +1702,13 @@ mod tests {
     #[test]
     fn active_canvas_exposes_scrollbars_and_applies_viewport_actions() {
         let mut runtime = runtime_with_prepared_canvas();
+        assert_eq!(runtime.active_editor_scrollbars_input(), None);
+        paint_editor_surface(&mut runtime, ui::Rect::new(200.0, 80.0, 1_000.0, 800.0));
         let before = runtime
             .active_canvas_viewport_snapshot()
             .expect("prepared canvas should expose a viewport snapshot");
         let scrollbars = runtime
-            .active_editor_scrollbars_input(ui::Rect::new(200.0, 80.0, 1_000.0, 800.0))
+            .active_editor_scrollbars_input()
             .expect("overflowing canvas should expose scrollbar input");
 
         assert!(scrollbars.horizontal.is_some());
@@ -1699,11 +1738,8 @@ mod tests {
             .expect("test canvas drag tab should exist")
             .runtime
             .plugin = Box::new(CanvasDragProbePlugin { phases: phases.clone() });
-        let context = EditorInputContext {
-            editor_rect: ui::Rect::new(100.0, 50.0, 800.0, 600.0),
-            focus: EditorFocus::Active,
-            modal_blocked: false,
-        };
+        let context = EditorInputContext { focus: EditorFocus::Active, modal_blocked: false };
+        paint_editor_surface(&mut runtime, ui::Rect::new(100.0, 50.0, 800.0, 600.0));
 
         let hover_outcome =
             runtime.handle_pointer_event(context, &ui::Event::MouseMove { px: 300.0, py: 240.0 });
@@ -1757,11 +1793,8 @@ mod tests {
             planned_ranges: planned_ranges.clone(),
             pointer_positions: Rc::new(RefCell::new(Vec::new())),
         });
-        let context = EditorInputContext {
-            editor_rect: ui::Rect::new(100.0, 50.0, 800.0, 600.0),
-            focus: EditorFocus::Active,
-            modal_blocked: false,
-        };
+        let context = EditorInputContext { focus: EditorFocus::Active, modal_blocked: false };
+        paint_editor_surface(&mut runtime, ui::Rect::new(100.0, 50.0, 800.0, 600.0));
 
         let outcome = runtime.handle_pointer_event(
             context,
@@ -1792,11 +1825,8 @@ mod tests {
             planned_ranges: Rc::new(RefCell::new(Vec::new())),
             pointer_positions: pointer_positions.clone(),
         });
-        let context = EditorInputContext {
-            editor_rect: ui::Rect::new(100.0, 50.0, 800.0, 600.0),
-            focus: EditorFocus::Inactive,
-            modal_blocked: false,
-        };
+        let context = EditorInputContext { focus: EditorFocus::Inactive, modal_blocked: false };
+        paint_editor_surface(&mut runtime, ui::Rect::new(100.0, 50.0, 800.0, 600.0));
         let hovered_point = ui::canvas::CanvasPoint::new(300.0, 240.0);
 
         let hover_outcome = runtime.handle_pointer_event(
@@ -1929,11 +1959,7 @@ mod tests {
     fn committed_text_mutates_the_active_document_and_reports_content_change() {
         let mut runtime = runtime_with_clean_tab();
         let tab_id = runtime.active_tab_id().expect("test runtime should have an active tab");
-        let context = EditorInputContext {
-            editor_rect: ui::Rect::new(0.0, 0.0, 640.0, 480.0),
-            focus: EditorFocus::Active,
-            modal_blocked: false,
-        };
+        let context = EditorInputContext { focus: EditorFocus::Active, modal_blocked: false };
 
         let outcome = runtime.commit_text(context, "中".to_owned());
 
@@ -1959,16 +1985,27 @@ mod tests {
             .expect("active tab should exist")
             .runtime
             .set_editing_access(crate::tab_runtime::DocumentEditingAccess::ReadOnly);
-        let context = EditorInputContext {
-            editor_rect: ui::Rect::new(0.0, 0.0, 640.0, 480.0),
-            focus: EditorFocus::Active,
-            modal_blocked: false,
-        };
+        let context = EditorInputContext { focus: EditorFocus::Active, modal_blocked: false };
 
         let outcome = runtime.commit_text(context, "中".to_owned());
 
         assert_eq!(runtime.workspace_snapshot().tabs[0].content_lines, vec!["clean"]);
         assert!(outcome.notifications.is_empty());
+    }
+
+    #[test]
+    fn pointer_hit_testing_uses_only_the_current_frames_editor_bounds() {
+        let mut runtime = runtime_with_clean_tab();
+        let context = EditorInputContext { focus: EditorFocus::Active, modal_blocked: false };
+        let editor_bounds = ui::Rect::new(100.0, 200.0, 640.0, 480.0);
+
+        assert!(!runtime.pointer_input_allowed(context, (180.0, 260.0)));
+        paint_editor_surface(&mut runtime, editor_bounds);
+        assert!(runtime.pointer_input_allowed(context, (180.0, 260.0)));
+        assert!(!runtime.pointer_input_allowed(context, (80.0, 260.0)));
+
+        let _next_frame = runtime.begin_frame().expect("next headless frame should begin");
+        assert!(!runtime.pointer_input_allowed(context, (180.0, 260.0)));
     }
 
     #[test]
@@ -1979,11 +2016,8 @@ mod tests {
             .tab_session_mut(tab_id)
             .expect("active tab should have a runtime")
             .replace_plugin(Box::new(PointerProbePlugin));
-        let context = EditorInputContext {
-            editor_rect: ui::Rect::new(100.0, 200.0, 640.0, 480.0),
-            focus: EditorFocus::Active,
-            modal_blocked: false,
-        };
+        let context = EditorInputContext { focus: EditorFocus::Active, modal_blocked: false };
+        paint_editor_surface(&mut runtime, ui::Rect::new(100.0, 200.0, 640.0, 480.0));
 
         let outcome = runtime.handle_pointer_event(
             context,
@@ -2005,11 +2039,8 @@ mod tests {
                 hit_test_count: Rc::new(Cell::new(0)),
             }),
         );
-        let context = EditorInputContext {
-            editor_rect: ui::Rect::new(100.0, 200.0, 640.0, 480.0),
-            focus: EditorFocus::Active,
-            modal_blocked: false,
-        };
+        let context = EditorInputContext { focus: EditorFocus::Active, modal_blocked: false };
+        paint_editor_surface(&mut runtime, ui::Rect::new(100.0, 200.0, 640.0, 480.0));
 
         let outcome = runtime.scroll_editor(context, (180.0, 260.0), 72.0);
 
@@ -2099,11 +2130,8 @@ mod tests {
                 hit_test_count: hit_test_count.clone(),
             }),
         );
-        let context = EditorInputContext {
-            editor_rect: ui::Rect::new(100.0, 200.0, 640.0, 480.0),
-            focus: EditorFocus::Active,
-            modal_blocked: false,
-        };
+        let context = EditorInputContext { focus: EditorFocus::Active, modal_blocked: false };
+        paint_editor_surface(&mut runtime, ui::Rect::new(100.0, 200.0, 640.0, 480.0));
 
         runtime.handle_pointer_event(
             context,
@@ -2128,11 +2156,8 @@ mod tests {
             vl_grapheme_start: 0,
             clusters: vec![(1, 180.0, 0), (2, 220.0, 1), (3, 260.0, 2)],
         }];
-        let context = EditorInputContext {
-            editor_rect: ui::Rect::new(100.0, 200.0, 640.0, 480.0),
-            focus: EditorFocus::Active,
-            modal_blocked: false,
-        };
+        let context = EditorInputContext { focus: EditorFocus::Active, modal_blocked: false };
+        paint_editor_surface(&mut runtime, ui::Rect::new(100.0, 200.0, 640.0, 480.0));
 
         runtime.handle_pointer_event(
             context,
@@ -2189,11 +2214,7 @@ mod tests {
         assert!(matches!(invalid_error, DocumentTextEditError::InvalidByteRange { .. }));
 
         let undo_outcome = runtime.handle_key_input(
-            EditorInputContext {
-                editor_rect: ui::Rect::new(0.0, 0.0, 640.0, 480.0),
-                focus: EditorFocus::Active,
-                modal_blocked: false,
-            },
+            EditorInputContext { focus: EditorFocus::Active, modal_blocked: false },
             ui::KeyCode::Char('z'),
             ui::core::Modifiers { cmd: true, ..ui::core::Modifiers::NONE },
         );
@@ -2211,11 +2232,7 @@ mod tests {
     #[test]
     fn editor_key_input_is_rejected_without_editor_focus() {
         let mut runtime = runtime_with_clean_tab();
-        let context = EditorInputContext {
-            editor_rect: ui::Rect::new(0.0, 0.0, 640.0, 480.0),
-            focus: EditorFocus::Inactive,
-            modal_blocked: false,
-        };
+        let context = EditorInputContext { focus: EditorFocus::Inactive, modal_blocked: false };
 
         let outcome =
             runtime.handle_key_input(context, ui::KeyCode::Backspace, ui::core::Modifiers::NONE);
@@ -2229,7 +2246,7 @@ mod tests {
         let mut runtime = runtime_with_clean_tab();
         let editor_rect = ui::Rect::new(0.0, 0.0, 640.0, 480.0);
         let focused_context =
-            EditorInputContext { editor_rect, focus: EditorFocus::Active, modal_blocked: false };
+            EditorInputContext { focus: EditorFocus::Active, modal_blocked: false };
         let long_document = (0..100).map(|line| format!("line {line}\n")).collect();
         let _ = runtime.commit_text(focused_context, long_document);
         let tab_id = runtime.active_tab_id().expect("test tab should be active");
@@ -2239,6 +2256,7 @@ mod tests {
             .resize_presentation(10, 10.0);
         let unfocused_context =
             EditorInputContext { focus: EditorFocus::Inactive, ..focused_context };
+        paint_editor_surface(&mut runtime, editor_rect);
 
         let outcome = runtime.scroll_editor(unfocused_context, (320.0, 240.0), 80.0);
         let scroll_top = runtime.tab_session(tab_id).expect("test tab should exist").scroll_top();
@@ -2252,7 +2270,7 @@ mod tests {
         let mut runtime = runtime_with_clean_tab();
         let editor_rect = ui::Rect::new(0.0, 0.0, 640.0, 480.0);
         let focused_context =
-            EditorInputContext { editor_rect, focus: EditorFocus::Active, modal_blocked: false };
+            EditorInputContext { focus: EditorFocus::Active, modal_blocked: false };
         let long_document = (0..100).map(|line| format!("line {line}\n")).collect();
         let _ = runtime.commit_text(focused_context, long_document);
         let tab_id = runtime.active_tab_id().expect("test tab should be active");
@@ -2260,21 +2278,33 @@ mod tests {
             .tab_session_mut(tab_id)
             .expect("test tab should exist")
             .resize_presentation(10, 10.0);
+        assert_eq!(runtime.active_editor_scrollbars_input(), None);
+        let scroll_top_before_ignored_action =
+            runtime.tab_session(tab_id).expect("test tab should exist").scroll_top();
+        let ignored_outcome =
+            runtime.apply_active_scrollbar_action(ui::canvas_scrollbars::CanvasScrollbarsAction {
+                axis: ui::canvas::CanvasAxis::Vertical,
+                action: ui::scrollbar::ScrollbarAction::DragTo(20.0),
+            });
+        assert_eq!(ignored_outcome, EditorOutcome::default());
+        assert_eq!(
+            runtime.tab_session(tab_id).expect("test tab should exist").scroll_top(),
+            scroll_top_before_ignored_action
+        );
+        paint_editor_surface(&mut runtime, editor_rect);
 
         let scrollbars = runtime
-            .active_editor_scrollbars_input(editor_rect)
+            .active_editor_scrollbars_input()
             .expect("overflowing text editor should expose scrollbar input");
 
         assert!(scrollbars.horizontal.is_none());
         assert!(scrollbars.vertical.is_some());
 
-        let outcome = runtime.apply_active_scrollbar_action(
-            ui::canvas_scrollbars::CanvasScrollbarsAction {
+        let outcome =
+            runtime.apply_active_scrollbar_action(ui::canvas_scrollbars::CanvasScrollbarsAction {
                 axis: ui::canvas::CanvasAxis::Vertical,
                 action: ui::scrollbar::ScrollbarAction::DragTo(20.0),
-            },
-            editor_rect,
-        );
+            });
         let scroll_top = runtime.tab_session(tab_id).expect("test tab should exist").scroll_top();
 
         assert!(outcome.shell_effect.reshape);

@@ -17,7 +17,7 @@ use winit::window::WindowId;
 use crate::NotoraApp;
 use crate::action::NotoraAction;
 use crate::runtime::NotoraRuntime;
-use crate::{FocusTarget, NotoraState, OverlayState, shell::layout::ShellLayout};
+use crate::{FocusTarget, NotoraState, OverlayState};
 use ui::core::Modifiers;
 
 fn canvas_wheel_action(
@@ -60,14 +60,9 @@ fn canvas_pinch_action(
 }
 
 /// 根据产品焦点和 overlay 状态构造 runtime 输入上下文。
-pub fn editor_input_context(
-    state: &NotoraState,
-    layout: ShellLayout,
-    window_focused: bool,
-) -> EditorInputContext {
+pub fn editor_input_context(state: &NotoraState, window_focused: bool) -> EditorInputContext {
     let editor_is_focused = state.layout.focus_target == FocusTarget::Editor && window_focused;
     EditorInputContext {
-        editor_rect: layout.editor_body_rect,
         focus: if editor_is_focused { EditorFocus::Active } else { EditorFocus::Inactive },
         modal_blocked: state.layout.overlay != OverlayState::None,
     }
@@ -337,57 +332,23 @@ mod tests {
         should_forward_input_to_editor,
     };
     use crate::action::NotoraAction;
-    use crate::{FocusTarget, NotoraState, OverlayState, shell::layout::ShellLayoutInput};
-
-    fn layout() -> crate::shell::layout::ShellLayout {
-        crate::shell::layout::ShellLayout::compute(ShellLayoutInput {
-            window_width_px: 1_200.0,
-            window_height_px: 800.0,
-            dpi: 1.0,
-            navigation_width_logical: 220.0,
-            card_list_width_logical: 340.0,
-            compact_content: crate::CompactContent::CardList,
-            compact_navigation: crate::CompactNavigation::Hidden,
-        })
-    }
+    use crate::{FocusTarget, NotoraState, OverlayState};
 
     #[test]
     fn only_an_active_editor_without_a_modal_can_receive_document_input() {
         let mut state = NotoraState::default();
         state.layout.focus_target = FocusTarget::Editor;
-        let active_context = editor_input_context(&state, layout(), true);
+        let active_context = editor_input_context(&state, true);
         assert_eq!(active_context.focus, EditorFocus::Active);
         assert!(!active_context.modal_blocked);
-        assert_eq!(active_context.editor_rect, layout().editor_body_rect);
 
         state.layout.overlay = OverlayState::Settings;
-        let modal_context = editor_input_context(&state, layout(), true);
+        let modal_context = editor_input_context(&state, true);
         assert!(modal_context.modal_blocked);
 
         state.layout.overlay = OverlayState::None;
-        let unfocused_context = editor_input_context(&state, layout(), false);
+        let unfocused_context = editor_input_context(&state, false);
         assert_eq!(unfocused_context.focus, EditorFocus::Inactive);
-    }
-
-    #[test]
-    fn editor_chrome_does_not_enter_runtime_document_input_region() {
-        let mut state = NotoraState::default();
-        state.layout.focus_target = FocusTarget::Editor;
-        let shell_layout = layout();
-        let context = editor_input_context(&state, shell_layout, true);
-
-        assert!(!context.editor_rect.contains(
-            shell_layout.editor_header_rect.x + shell_layout.editor_header_rect.w * 0.5,
-            shell_layout.editor_header_rect.y + shell_layout.editor_header_rect.h * 0.5,
-        ));
-        assert!(!context.editor_rect.contains(
-            shell_layout.editor_toolbar_rect.x + shell_layout.editor_toolbar_rect.w * 0.5,
-            shell_layout.editor_toolbar_rect.y + shell_layout.editor_toolbar_rect.h * 0.5,
-        ));
-        assert!(context.editor_rect.contains(
-            shell_layout.editor_body_rect.x + shell_layout.editor_body_rect.w * 0.5,
-            shell_layout.editor_body_rect.y + shell_layout.editor_body_rect.h * 0.5,
-        ));
     }
 
     #[test]

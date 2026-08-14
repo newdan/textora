@@ -19,8 +19,18 @@ impl EditorRuntime {
         let Some((position, phase)) = pointer_event(event) else {
             return EditorPointerOutcome::default();
         };
+        let Some(editor_bounds) = self.painted_editor_bounds() else {
+            if phase == PointerPhase::Release {
+                self.end_pointer_capture();
+            }
+            let editor =
+                self.clear_active_canvas_pointer().then(redraw_outcome).unwrap_or_default();
+            return EditorPointerOutcome::from_editor(editor, None);
+        };
         let canvas_pointer_outcome = match phase {
-            PointerPhase::Move if self.update_active_canvas_pointer(context, position) => {
+            PointerPhase::Move
+                if self.update_active_canvas_pointer(context, editor_bounds, position) =>
+            {
                 redraw_outcome()
             }
             PointerPhase::Press | PointerPhase::Move | PointerPhase::Release => {
@@ -29,19 +39,19 @@ impl EditorRuntime {
         };
         let editor = match phase {
             PointerPhase::Press if self.pointer_input_allowed(context, position) => {
-                if let Some(outcome) = self.activate_canvas_control(context.editor_rect, position) {
-                    let cursor_icon = self.pointer_cursor_icon(context, position);
+                if let Some(outcome) = self.activate_canvas_control(editor_bounds, position) {
+                    let cursor_icon = self.pointer_cursor_icon(context, editor_bounds, position);
                     return EditorPointerOutcome::from_editor(outcome, cursor_icon);
                 }
-                if self.begin_canvas_source_drag(context, position) {
-                    let cursor_icon = self.pointer_cursor_icon(context, position);
+                if self.begin_canvas_source_drag(context, editor_bounds, position) {
+                    let cursor_icon = self.pointer_cursor_icon(context, editor_bounds, position);
                     return EditorPointerOutcome::from_editor(redraw_outcome(), cursor_icon);
                 }
                 if !self.begin_text_selection(context)
-                    || !self.place_pointer_selection(context.editor_rect, position, false)
+                    || !self.place_pointer_selection(editor_bounds, position, false)
                 {
                     self.end_pointer_capture();
-                    let cursor_icon = self.pointer_cursor_icon(context, position);
+                    let cursor_icon = self.pointer_cursor_icon(context, editor_bounds, position);
                     return EditorPointerOutcome::from_editor(
                         EditorOutcome::default(),
                         cursor_icon,
@@ -54,20 +64,20 @@ impl EditorRuntime {
                     && self.pointer_input_allowed(context, position) =>
             {
                 canvas_pointer_outcome
-                    .merge(self.update_canvas_source_drag(context.editor_rect, position))
+                    .merge(self.update_canvas_source_drag(editor_bounds, position))
             }
             PointerPhase::Move
                 if self.pointer_capture() == MouseCapture::TextSelection
                     && self.pointer_input_allowed(context, position) =>
             {
                 let selection_outcome = self
-                    .place_pointer_selection(context.editor_rect, position, true)
+                    .place_pointer_selection(editor_bounds, position, true)
                     .then(redraw_outcome)
                     .unwrap_or_default();
                 canvas_pointer_outcome.merge(selection_outcome)
             }
             PointerPhase::Release if self.pointer_capture() == MouseCapture::CanvasDrag => {
-                self.finish_canvas_source_drag(context.editor_rect, position)
+                self.finish_canvas_source_drag(editor_bounds, position)
             }
             PointerPhase::Release if self.pointer_capture() != MouseCapture::None => {
                 self.end_pointer_capture();
@@ -77,18 +87,19 @@ impl EditorRuntime {
             PointerPhase::Move => canvas_pointer_outcome,
             PointerPhase::Press | PointerPhase::Release => EditorOutcome::default(),
         };
-        let cursor_icon = self.pointer_cursor_icon(context, position);
+        let cursor_icon = self.pointer_cursor_icon(context, editor_bounds, position);
         EditorPointerOutcome::from_editor(editor, cursor_icon)
     }
 
     fn pointer_cursor_icon(
         &self,
         context: EditorInputContext,
+        editor_bounds: ui::Rect,
         position: (f32, f32),
     ) -> Option<winit::window::CursorIcon> {
         if context.modal_blocked
             || (self.pointer_capture() == MouseCapture::None
-                && !context.editor_rect.contains(position.0, position.1))
+                && !editor_bounds.contains(position.0, position.1))
         {
             return None;
         }
@@ -110,8 +121,7 @@ impl EditorRuntime {
         }
 
         let dpi = self.scale_factor() as f32;
-        let bounds =
-            super::editor_painter::plugin_bounds(context.editor_rect, dpi, tab.is_canvas());
+        let bounds = super::editor_painter::plugin_bounds(editor_bounds, dpi, tab.is_canvas());
         let target = tab.hit_test_edit_target(position.0, position.1, bounds.x, bounds.y);
         Some(match target {
             Some(Some(EditHitTarget::TextCaret { .. })) => winit::window::CursorIcon::Text,
@@ -126,11 +136,12 @@ impl EditorRuntime {
     fn update_active_canvas_pointer(
         &mut self,
         context: EditorInputContext,
+        editor_bounds: ui::Rect,
         position: (f32, f32),
     ) -> bool {
         let pointer_is_visible = !context.modal_blocked
             && (self.pointer_capture() != MouseCapture::None
-                || context.editor_rect.contains(position.0, position.1));
+                || editor_bounds.contains(position.0, position.1));
         let pointer =
             pointer_is_visible.then(|| ui::canvas::CanvasPoint::new(position.0, position.1));
         self.set_active_canvas_pointer(pointer)
@@ -186,6 +197,7 @@ impl EditorRuntime {
     fn begin_canvas_source_drag(
         &mut self,
         context: EditorInputContext,
+        editor_bounds: ui::Rect,
         position: (f32, f32),
     ) -> bool {
         let Some(tab_id) = self.active_tab_id() else {
@@ -199,7 +211,7 @@ impl EditorRuntime {
             if !tab.is_canvas() || !tab.runtime.plugin.handles_own_rendering() {
                 return false;
             }
-            let bounds = super::editor_painter::plugin_bounds(context.editor_rect, dpi, true);
+            let bounds = super::editor_painter::plugin_bounds(editor_bounds, dpi, true);
             let Some(Some(EditHitTarget::SourceObject { source_range })) =
                 tab.hit_test_edit_target(position.0, position.1, bounds.x, bounds.y)
             else {

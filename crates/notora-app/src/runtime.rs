@@ -456,7 +456,6 @@ impl NotoraRuntime {
     fn editor_input_context(&self) -> appkit_shell::editor_runtime::EditorInputContext {
         let mut context = events::editor_input_context(
             self.action_runtime.state(),
-            self.shell_layout(),
             self.window_runtime.is_focused(),
         );
         if !self.active_editor_matches_selection() {
@@ -500,7 +499,7 @@ impl NotoraRuntime {
         action: appkit_shell::canvas_viewport::CanvasViewportAction,
     ) -> bool {
         let context = self.editor_input_context();
-        if context.modal_blocked || !context.editor_rect.contains(px, py) {
+        if !self.document_runtime.editor().editor_hit_test_allowed(context, (px, py)) {
             return false;
         }
         let outcome =
@@ -514,9 +513,7 @@ impl NotoraRuntime {
         &mut self,
         action: ui::canvas_scrollbars::CanvasScrollbarsAction,
     ) {
-        let editor_rect = self.shell_layout().editor_body_rect;
-        let outcome =
-            self.document_runtime.editor_mut().apply_active_scrollbar_action(action, editor_rect);
+        let outcome = self.document_runtime.editor_mut().apply_active_scrollbar_action(action);
         self.apply_editor_outcome(outcome);
     }
 
@@ -2809,11 +2806,7 @@ mod tests {
     }
 
     fn active_editor_input_context() -> EditorInputContext {
-        EditorInputContext {
-            editor_rect: ui::Rect::new(0.0, 0.0, 640.0, 480.0),
-            focus: EditorFocus::Active,
-            modal_blocked: false,
-        }
+        EditorInputContext { focus: EditorFocus::Active, modal_blocked: false }
     }
 
     fn note_origin(relative_path: &str) -> notora_core::DocumentOrigin {

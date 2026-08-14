@@ -1,6 +1,6 @@
 //! 产品 chrome 与编辑器共享的单帧借用 API。
 
-use crate::editor_runtime::EditorOutcome;
+use crate::editor_runtime::{EditorOutcome, PaintedEditorBounds};
 use render::GlyphVertex;
 use std::sync::{Arc, Mutex};
 
@@ -38,6 +38,7 @@ pub struct EditorFrame {
     dpi: f32,
     ui_shaper: Option<Arc<Mutex<shaping::Shaper>>>,
     editor_vertices: Vec<GlyphVertex>,
+    painted_editor_bounds: PaintedEditorBounds,
 }
 
 impl EditorFrame {
@@ -45,6 +46,7 @@ impl EditorFrame {
         theme: ui::Theme,
         dpi: f32,
         ui_shaper: Option<Arc<Mutex<shaping::Shaper>>>,
+        painted_editor_bounds: PaintedEditorBounds,
     ) -> Self {
         Self {
             product_underlay: ui::DrawList::new(),
@@ -55,6 +57,7 @@ impl EditorFrame {
             dpi,
             ui_shaper,
             editor_vertices: Vec::new(),
+            painted_editor_bounds,
         }
     }
 
@@ -123,6 +126,7 @@ impl EditorFrame {
         if editor_rect.w == 0.0 || editor_rect.h == 0.0 {
             return Ok(None);
         }
+        self.painted_editor_bounds.set(Some(editor_rect));
         let mut result = None;
         let theme = &self.theme;
         let dpi = self.dpi;
@@ -155,6 +159,7 @@ impl EditorFrame {
         if editor_rect.w == 0.0 || editor_rect.h == 0.0 {
             return Ok(());
         }
+        self.painted_editor_bounds.set(Some(editor_rect));
         self.editor_vertices.extend(vertices);
         Ok(())
     }
@@ -226,15 +231,25 @@ fn is_valid_rect(rect: ui::Rect) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::cell::Cell;
+    use std::rc::Rc;
 
     fn theme() -> ui::Theme {
         ui::Theme::from_definition(&ui::theme::ThemeDefinition::default_dark())
     }
 
+    fn frame(
+        theme: ui::Theme,
+        dpi: f32,
+        ui_shaper: Option<Arc<Mutex<shaping::Shaper>>>,
+    ) -> EditorFrame {
+        EditorFrame::new_for_backend(theme, dpi, ui_shaper, Rc::new(Cell::new(None)))
+    }
+
     #[test]
     fn layout_and_paint_contexts_are_only_borrowed_inside_callbacks() {
         let theme = theme();
-        let mut frame = EditorFrame::new_for_backend(theme, 2.0, None);
+        let mut frame = frame(theme, 2.0, None);
 
         let layout_dpi = frame.with_layout_context(|context| context.dpi);
         let paint_dpi = frame.with_paint_context(|context| {
@@ -251,8 +266,7 @@ mod tests {
     fn product_text_is_shaped_into_the_frame_draw_list() {
         let theme = theme();
         let shaper = shaping::Shaper::new().expect("system fonts should create a UI shaper");
-        let mut frame =
-            EditorFrame::new_for_backend(theme, 1.0, Some(Arc::new(Mutex::new(shaper))));
+        let mut frame = frame(theme, 1.0, Some(Arc::new(Mutex::new(shaper))));
 
         frame.with_paint_context(|context| {
             context.text(12.0, 24.0, 14.0, [1.0; 4], "Workspace");
@@ -273,8 +287,7 @@ mod tests {
     fn product_layout_context_measures_text_with_the_frame_shaper() {
         let theme = theme();
         let shaper = shaping::Shaper::new().expect("system fonts should create a UI shaper");
-        let mut frame =
-            EditorFrame::new_for_backend(theme, 1.0, Some(Arc::new(Mutex::new(shaper))));
+        let mut frame = frame(theme, 1.0, Some(Arc::new(Mutex::new(shaper))));
 
         let measured_width =
             frame.with_layout_context(|context| context.measure.measure("标题预编辑", 24.0));
@@ -285,7 +298,7 @@ mod tests {
     #[test]
     fn product_editor_and_overlay_layers_compose_in_one_frame() {
         let theme = theme();
-        let mut frame = EditorFrame::new_for_backend(theme, 1.0, None);
+        let mut frame = frame(theme, 1.0, None);
 
         frame.with_paint_context(|context| {
             context.list.fill(ui::Rect::new(0.0, 0.0, 10.0, 10.0), [0.0; 4]);
@@ -302,7 +315,7 @@ mod tests {
     #[test]
     fn invalid_or_zero_editor_rects_are_safe() {
         let theme = theme();
-        let mut frame = EditorFrame::new_for_backend(theme, 1.0, None);
+        let mut frame = frame(theme, 1.0, None);
 
         assert_eq!(
             frame.paint_editor(ui::Rect::new(-1.0, 0.0, 10.0, 10.0)),
@@ -315,7 +328,7 @@ mod tests {
     #[test]
     fn editor_vertices_are_submitted_before_product_chrome() {
         let theme = theme();
-        let mut frame = EditorFrame::new_for_backend(theme, 1.0, None);
+        let mut frame = frame(theme, 1.0, None);
         frame.with_paint_context(|context| {
             context.list.fill(ui::Rect::new(10.0, 10.0, 5.0, 5.0), [1.0; 4]);
         });
@@ -340,9 +353,23 @@ mod tests {
     }
 
     #[test]
+    fn editor_vertex_submission_records_the_runtime_input_bounds() {
+        let painted_editor_bounds = Rc::new(Cell::new(None));
+        let mut frame =
+            EditorFrame::new_for_backend(theme(), 1.0, None, Rc::clone(&painted_editor_bounds));
+        let editor_bounds = ui::Rect::new(20.0, 30.0, 800.0, 600.0);
+
+        frame
+            .paint_editor_vertices(editor_bounds, std::iter::empty())
+            .expect("finite editor bounds should accept an empty vertex submission");
+
+        assert_eq!(painted_editor_bounds.get(), Some(editor_bounds));
+    }
+
+    #[test]
     fn explicit_editor_layer_is_between_product_underlay_and_overlay() {
         let theme = theme();
-        let mut frame = EditorFrame::new_for_backend(theme, 1.0, None);
+        let mut frame = frame(theme, 1.0, None);
         let underlay_color = [0.1, 0.2, 0.3, 1.0];
         let editor_color = [0.4, 0.5, 0.6, 1.0];
         let overlay_color = [0.7, 0.8, 0.9, 1.0];

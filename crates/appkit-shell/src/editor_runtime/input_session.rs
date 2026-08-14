@@ -48,13 +48,12 @@ impl EditorInputSession {
     pub(crate) fn pointer_allowed(
         &self,
         context: EditorInputContext,
-        position: (f32, f32),
+        pointer_inside_editor: bool,
     ) -> bool {
         if context.focus != EditorFocus::Active || context.modal_blocked {
             return false;
         }
-        self.pointer_capture != MouseCapture::None
-            || context.editor_rect.contains(position.0, position.1)
+        self.pointer_capture != MouseCapture::None || pointer_inside_editor
     }
 
     pub(crate) fn start_text_selection(&mut self, context: EditorInputContext) -> bool {
@@ -181,11 +180,7 @@ mod tests {
     use super::*;
 
     fn active_context() -> EditorInputContext {
-        EditorInputContext {
-            editor_rect: ui::Rect::new(32.0, 48.0, 640.0, 480.0),
-            focus: EditorFocus::Active,
-            modal_blocked: false,
-        }
+        EditorInputContext { focus: EditorFocus::Active, modal_blocked: false }
     }
 
     #[test]
@@ -204,20 +199,20 @@ mod tests {
         let session = EditorInputSession::new();
         let context = EditorInputContext { modal_blocked: true, ..active_context() };
 
-        assert!(!session.pointer_allowed(context, (40.0, 56.0)));
-        assert!(!session.pointer_allowed(context, (4.0, 5.0)));
+        assert!(!session.pointer_allowed(context, true));
+        assert!(!session.pointer_allowed(context, false));
     }
 
     #[test]
-    fn capture_keeps_pointer_route_alive_outside_editor_rect() {
+    fn capture_keeps_pointer_route_alive_outside_editor_bounds() {
         let mut session = EditorInputSession::new();
         let context = active_context();
 
         assert!(session.start_text_selection(context));
         assert_eq!(session.pointer_capture(), MouseCapture::TextSelection);
-        assert!(session.pointer_allowed(context, (4.0, 5.0)));
+        assert!(session.pointer_allowed(context, false));
         session.end_pointer_capture();
-        assert!(!session.pointer_allowed(context, (4.0, 5.0)));
+        assert!(!session.pointer_allowed(context, false));
     }
 
     #[test]

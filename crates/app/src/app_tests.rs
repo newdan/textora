@@ -6,12 +6,8 @@ use core::types::UniCharOffset;
 use ui::layout::compute_visual_lines;
 use ui::viewport::Viewport;
 
-fn editor_input_context_for_test(app: &App) -> EditorInputContext {
-    EditorInputContext {
-        editor_rect: app.ui_shell.editor_rect(),
-        focus: EditorFocus::Active,
-        modal_blocked: false,
-    }
+fn editor_input_context_for_test() -> EditorInputContext {
+    EditorInputContext { focus: EditorFocus::Active, modal_blocked: false }
 }
 
 fn set_editor_preedit_for_test(
@@ -19,7 +15,7 @@ fn set_editor_preedit_for_test(
     text: impl Into<String>,
     cursor: Option<(usize, usize)>,
 ) {
-    let context = editor_input_context_for_test(app);
+    let context = editor_input_context_for_test();
     assert!(app.editor_runtime.update_preedit(context, text.into(), cursor));
 }
 

@@ -75,11 +75,7 @@ fn fake_product_completes_nonzero_frame_save_and_late_close_lifecycle() {
     document.insert_at_cursor(b" + edit");
 
     let mut runtime = runtime();
-    let editor_context = EditorInputContext {
-        editor_rect: ui::Rect::new(72.0, 96.0, 640.0, 420.0),
-        focus: EditorFocus::Active,
-        modal_blocked: false,
-    };
+    let editor_context = EditorInputContext { focus: EditorFocus::Active, modal_blocked: false };
     let inactive_context = EditorInputContext { focus: EditorFocus::Inactive, ..editor_context };
     assert!(!runtime.keyboard_input_allowed(inactive_context));
     assert!(!runtime.update_preedit(inactive_context, "拼".to_owned(), Some((0, 3))));

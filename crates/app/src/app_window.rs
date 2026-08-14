@@ -801,12 +801,8 @@ mod ime_preedit_tests {
     use super::App;
     use appkit_shell::editor_runtime::{EditorFocus, EditorInputContext};
 
-    fn editor_input_context(app: &App) -> EditorInputContext {
-        EditorInputContext {
-            editor_rect: app.ui_shell.editor_rect(),
-            focus: EditorFocus::Active,
-            modal_blocked: false,
-        }
+    fn editor_input_context() -> EditorInputContext {
+        EditorInputContext { focus: EditorFocus::Active, modal_blocked: false }
     }
 
     #[test]
@@ -821,10 +817,10 @@ mod ime_preedit_tests {
     fn test_preedit_text_cleared_on_disable() {
         let mut app = App::new(None);
         // Simulate Preedit
-        let context = editor_input_context(&app);
+        let context = editor_input_context();
         assert!(app.editor_runtime.update_preedit(context, "ni".to_string(), Some((0, 2))));
         // Simulate Disabled (IME off) — should clear
-        let context = editor_input_context(&app);
+        let context = editor_input_context();
         assert!(app.editor_runtime.update_preedit(context, String::new(), None));
         let (text, cursor) = app.editor_runtime.preedit();
         assert!(text.is_empty());
@@ -834,7 +830,7 @@ mod ime_preedit_tests {
     #[test]
     fn test_preedit_stores_composing_text() {
         let mut app = App::new(None);
-        let context = editor_input_context(&app);
+        let context = editor_input_context();
         assert!(app.editor_runtime.update_preedit(context, "nihao".to_string(), Some((5, 5))));
         let (text, cursor) = app.editor_runtime.preedit();
         assert_eq!(text, "nihao");
@@ -845,7 +841,7 @@ mod ime_preedit_tests {
     fn test_preedit_empty_string_with_cursor() {
         let mut app = App::new(None);
         // winit sends Preedit("", None) when composition is empty
-        let context = editor_input_context(&app);
+        let context = editor_input_context();
         assert!(app.editor_runtime.update_preedit(context, String::new(), None));
         let (text, cursor) = app.editor_runtime.preedit();
         assert!(text.is_empty());
@@ -856,7 +852,7 @@ mod ime_preedit_tests {
     fn test_preedit_cursor_range() {
         let mut app = App::new(None);
         // Cursor highlighting bytes 1..3 in a 5-byte string
-        let context = editor_input_context(&app);
+        let context = editor_input_context();
         assert!(app.editor_runtime.update_preedit(context, "abcde".to_string(), Some((1, 3))));
         let (_, cursor) = app.editor_runtime.preedit();
         assert_eq!(cursor, Some((1, 3)));

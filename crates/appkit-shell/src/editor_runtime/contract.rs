@@ -36,7 +36,6 @@ pub enum EditorFocus {
 /// 一次窗口事件的编辑器输入上下文。
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct EditorInputContext {
-    pub editor_rect: ui::Rect,
     pub focus: EditorFocus,
     pub modal_blocked: bool,
 }
@@ -228,15 +227,10 @@ mod tests {
 
     #[test]
     fn input_context_distinguishes_focus_and_modal_gate() {
-        let context = EditorInputContext {
-            editor_rect: ui::Rect::new(17.0, 23.0, 640.0, 480.0),
-            focus: EditorFocus::Active,
-            modal_blocked: true,
-        };
+        let context = EditorInputContext { focus: EditorFocus::Active, modal_blocked: true };
 
         assert_eq!(context.focus, EditorFocus::Active);
         assert!(context.modal_blocked);
-        assert_eq!(context.editor_rect.x, 17.0);
     }
 
     #[test]
