@@ -453,7 +453,7 @@ impl Widget for TreeListWidget {
                 );
             }
 
-            if is_hovered || is_selected {
+            if is_hovered {
                 for (action, action_rect) in
                     row.trailing_actions.iter().zip(&row_layout.action_rects)
                 {
@@ -1037,6 +1037,51 @@ mod tests {
                 .any(|command| matches!(command, DrawCmd::PushClip(rect) if *rect == label_rect))
         );
         assert!(label_rect.right() <= widget.layout().rows[0].action_rects[0].left());
+    }
+
+    #[test]
+    fn selected_row_trailing_action_is_painted_only_while_hovered() {
+        let mut widget = TreeListWidget::new();
+        let mut input_row = row(1, 0, TreeRowExpansion::Leaf);
+        input_row.icon = None;
+        input_row.selection = TreeRowSelection::Selected;
+        input_row.trailing_actions = vec![action(9, true)];
+        widget.set_input(TreeListInput {
+            rows: vec![input_row],
+            editor: None,
+            scroll_offset_px: 0.0,
+        });
+        layout(&mut widget, Rect::new(0.0, 0.0, 240.0, 80.0), 1.0);
+        let theme = crate::theme::test_theme();
+
+        let paint_triangle_count = |widget: &TreeListWidget| {
+            let mut draw_list = crate::core::DrawList::new();
+            let mut shaper = shaping::Shaper::new().expect("test shaper should initialize");
+            let mut paint_context = PaintCtx {
+                list: &mut draw_list,
+                theme: &theme,
+                dpi: 1.0,
+                offset: (0.0, 0.0),
+                global_alpha: 1.0,
+                shaper: Some(&mut shaper),
+            };
+            widget.paint(&mut paint_context);
+            draw_list
+                .cmds
+                .iter()
+                .filter(|command| matches!(command, DrawCmd::FillTriangle { .. }))
+                .count()
+        };
+
+        assert_eq!(paint_triangle_count(&widget), 0);
+
+        let row_rect = widget.layout().rows[0].row_rect;
+        widget.on_event(
+            &Event::MouseMove { px: row_rect.x + 1.0, py: row_rect.y + 1.0 },
+            &mut event_context(&theme),
+        );
+
+        assert!(paint_triangle_count(&widget) > 0);
     }
 
     #[test]
