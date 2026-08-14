@@ -338,6 +338,30 @@ struct IconSvg {
 const DATA_PLUS: IconSvg =
     IconSvg { paths: &["M5 12h14", "M12 5v14"], circles: &[], stroke_width: 2.0 };
 
+const DATA_FOLDER: IconSvg = IconSvg {
+    paths: &[
+        "M20 20a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-7.9a2 2 0 0 1-1.69-.9L9.6 3.9A2 2 0 0 0 7.93 3H4a2 2 0 0 0-2 2v13a2 2 0 0 0 2 2Z",
+    ],
+    circles: &[],
+    stroke_width: 2.0,
+};
+
+const DATA_FOLDER_PLUS: IconSvg = IconSvg {
+    paths: &[
+        "M12 10v6",
+        "M9 13h6",
+        "M20 20a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-7.9a2 2 0 0 1-1.69-.9L9.6 3.9A2 2 0 0 0 7.93 3H4a2 2 0 0 0-2 2v13a2 2 0 0 0 2 2Z",
+    ],
+    circles: &[],
+    stroke_width: 2.0,
+};
+
+const DATA_WORKSPACE_PLUS: IconSvg = IconSvg {
+    paths: &["M4 7h16v14H4z", "M8 7V3h8v4", "M12 11v6", "M9 14h6"],
+    circles: &[],
+    stroke_width: 2.0,
+};
+
 const DATA_FOLDER_OPEN: IconSvg = IconSvg {
     paths: &[
         "m6 14 1.5-2.9A2 2 0 0 1 9.24 10H20a2 2 0 0 1 1.94 2.5l-1.54 6a2 2 0 0 1-1.95 1.5H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h3.9a2 2 0 0 1 1.69.9l.81 1.2a2 2 0 0 0 1.67.9H18a2 2 0 0 1 2 2v2",
@@ -590,6 +614,9 @@ const DATA_ELLIPSIS: IconSvg = IconSvg {
 fn icon_svg(name: &str) -> Option<&'static IconSvg> {
     match name {
         "plus" => Some(&DATA_PLUS),
+        "folder" => Some(&DATA_FOLDER),
+        "folder-plus" => Some(&DATA_FOLDER_PLUS),
+        "workspace-plus" => Some(&DATA_WORKSPACE_PLUS),
         "folder-open" => Some(&DATA_FOLDER_OPEN),
         "star" => Some(&DATA_STAR),
         "trash-2" => Some(&DATA_TRASH_2),

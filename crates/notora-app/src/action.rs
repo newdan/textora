@@ -103,6 +103,21 @@ pub enum TrashOperationFailure {
     Message(String),
 }
 
+/// 新建与打开工作区共用的安全转换请求。
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum WorkspaceTransitionRequest {
+    Create { root: PathBuf },
+    OpenExisting { root: PathBuf },
+}
+
+impl WorkspaceTransitionRequest {
+    pub fn root(&self) -> &std::path::Path {
+        match self {
+            Self::Create { root } | Self::OpenExisting { root } => root,
+        }
+    }
+}
+
 /// 产品层的类型化用户动作。
 #[derive(Clone, Debug, PartialEq)]
 pub enum NotoraAction {
@@ -124,7 +139,27 @@ pub enum NotoraAction {
     NavigationTreeFailed(String),
     CatalogReindexed,
     CatalogRecoveryNotified(String),
+    WorkspaceRootExpansionToggled,
     NavigationExpansionToggled(PathBuf),
+    BeginDirectoryCreation {
+        parent_relative_path: PathBuf,
+    },
+    DirectoryCreationTextChanged(String),
+    DirectoryCreationCommitRequested,
+    DirectoryCreationCancelled,
+    DirectoryCreationCompleted {
+        relative_path: PathBuf,
+    },
+    DirectoryCreationFailed(String),
+    OpenWorkspaceCreationRequested,
+    WorkspaceCreationNameChanged(String),
+    WorkspaceCreationLocationRequested,
+    WorkspaceCreationLocationSelected(PathBuf),
+    WorkspaceCreationCommitRequested,
+    WorkspaceTransitionConfirmed(WorkspaceTransitionRequest),
+    WorkspaceTransitionApplying,
+    WorkspaceTransitionCompleted,
+    WorkspaceTransitionFailed(String),
     CardListScrolled {
         offset_px: f32,
         near_end: bool,
@@ -201,6 +236,9 @@ pub enum NotoraEffect {
     QueryCards(CardQuery),
     RequestNoteCreation { kind: DocumentKind, target: NoteCreationTarget },
     ExecuteNoteCommand(NoteCommand),
+    ExecuteDirectoryCommand(notora_core::WorkspaceDirectoryCommand),
+    ChooseWorkspaceCreationLocation,
+    PrepareWorkspaceTransition(WorkspaceTransitionRequest),
     CommitTitle(String),
     ToggleEditorView,
     ToggleMindmapStylePanel,

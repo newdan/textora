@@ -19,6 +19,8 @@ pub mod scan;
 pub mod summary_parser;
 pub mod trash;
 pub mod workspace;
+pub mod workspace_directory;
+pub mod workspace_tree;
 
 pub use backup::{
     BackupRetention, CatalogBackupError, create_catalog_backup, create_catalog_backup_from_path,
@@ -70,3 +72,8 @@ pub use workspace::{
     WORKSPACE_METADATA_DIRECTORY_NAME, Workspace, WorkspaceDescriptor, WorkspaceError,
     WorkspaceManifest,
 };
+pub use workspace_directory::{
+    WorkspaceDirectoryCommand, WorkspaceDirectoryCommandError, WorkspaceDirectoryCommandResult,
+    execute_workspace_directory_command, validate_workspace_directory_name,
+};
+pub use workspace_tree::{WorkspaceDirectoryScanError, scan_workspace_directories};

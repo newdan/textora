@@ -19,8 +19,8 @@ use ui::splitter::{SplitterAction, SplitterInput, SplitterWidget};
 use ui::status_state::{StatusStateInput, StatusStateKind, StatusStateWidget};
 use ui::text_box::TextBox;
 use ui::tree_list::{
-    TreeListAction, TreeListInput, TreeListWidget, TreeRowExpansion, TreeRowInput, TreeRowKey,
-    TreeRowSelection,
+    TreeListAction, TreeListInput, TreeListWidget, TreeRowActionInput, TreeRowActionKey,
+    TreeRowEditorInput, TreeRowExpansion, TreeRowInput, TreeRowKey, TreeRowSelection,
 };
 use ui::virtual_card_list::{
     CardInput, CardKey, CardSelection, VirtualCardListAction, VirtualCardListInput,
@@ -31,10 +31,13 @@ use ui::{Event, EventCtx, Rect, Widget};
 use crate::action::{ConflictResolution, MetadataMutation, NotoraAction, TrashOperation};
 use crate::editor_pane::{EditorPaneChrome, EditorPaneInput, EditorPaneMode, EditorPaneRects};
 use crate::external_files::ExternalFileSession;
+use crate::new_workspace_dialog::{
+    NewWorkspaceDialog, NewWorkspaceDialogAction, NewWorkspaceDialogInput,
+};
 use crate::settings::ProductSettings;
 use crate::settings_overlay::{SettingsOverlay, SettingsOverlayAction, SettingsOverlayInput};
 use crate::shell::layout::ShellLayout;
-use crate::state::CardPageState;
+use crate::state::{CardPageState, DirectoryCreationState, WorkspaceCreationState};
 use crate::{
     FocusTarget, NotoraState, OverlayState, Pane, ResponsiveLayoutMode, WorkspaceRootState,
 };
@@ -76,6 +79,11 @@ const TRASH_NAVIGATION_KEY: u64 = 3;
 const EXTERNAL_FILES_NAVIGATION_KEY: u64 = 4;
 const DIRECTORY_NAVIGATION_KEY_START: u64 = 100;
 const TAG_NAVIGATION_KEY_START: u64 = 10_000;
+const NEW_WORKSPACE_ACTION_KEY: TreeRowActionKey = TreeRowActionKey(1);
+const OPEN_WORKSPACE_ACTION_KEY: TreeRowActionKey = TreeRowActionKey(2);
+const NEW_DIRECTORY_ACTION_KEY: TreeRowActionKey = TreeRowActionKey(3);
+const DIRECTORY_EDITOR_KEY: TreeRowKey = TreeRowKey(u64::MAX - 1);
+const NAVIGATION_TREE_ID: WidgetId = WidgetId(9_005);
 const EDITOR_ROOT_DIRECTORY_ROW_KEY: &str = "root";
 const EDITOR_TAG_SUGGESTION_KEY_PREFIX: &str = "suggestion:";
 
@@ -137,7 +145,9 @@ pub struct NotoraRenderModel {
     pub search_query: String,
     pub navigation_rows: Vec<TreeRowInput>,
     pub navigation_actions: HashMap<TreeRowKey, NotoraAction>,
+    pub navigation_trailing_actions: HashMap<(TreeRowKey, TreeRowActionKey), NotoraAction>,
     pub navigation_expansion_paths: HashMap<TreeRowKey, std::path::PathBuf>,
+    pub navigation_editor: Option<TreeRowEditorInput>,
     pub cards: Vec<RenderCard>,
     pub selected_card: Option<DocumentIdentity>,
     pub card_scroll_offset_px: f32,
@@ -145,6 +155,7 @@ pub struct NotoraRenderModel {
     pub card_empty_state: StatusStateInput,
     pub show_settings_overlay: bool,
     pub settings_overlay: SettingsOverlayInput,
+    pub new_workspace_dialog: Option<NewWorkspaceDialogInput>,
     pub confirmation: Option<ConfirmationOverlayInput>,
     pub show_new_document_menu: bool,
     pub show_tooltip: bool,
@@ -179,19 +190,51 @@ impl NotoraRenderModel {
         let selected_scope = &state.library.navigation_scope;
         let mut navigation_rows = Vec::new();
         let mut navigation_actions = HashMap::new();
+        let mut navigation_trailing_actions = HashMap::new();
         let mut navigation_expansion_paths = HashMap::new();
-        push_navigation_row(
+        let mut directory_row_keys = HashMap::new();
+        let workspace_has_directories = state.workspace_root == WorkspaceRootState::Active
+            && !state.library.navigation_tree.directories.is_empty();
+        push_workspace_navigation_row(
             &mut navigation_rows,
             &mut navigation_actions,
-            WORKSPACE_NAVIGATION_KEY,
-            "工作区".to_owned(),
-            "folder-open",
-            0,
-            None,
-            NavigationScope::WorkspaceRoot,
             selected_scope,
+            workspace_has_directories,
+            state.library.navigation_tree.workspace_root_expanded,
+            state.workspace_root_path.as_deref(),
         );
+        let workspace_row_key = TreeRowKey(WORKSPACE_NAVIGATION_KEY);
+        directory_row_keys.insert(std::path::PathBuf::new(), workspace_row_key);
+        let workspace_row = navigation_rows
+            .last_mut()
+            .expect("workspace row was inserted immediately before its actions");
+        workspace_row.trailing_actions.extend([
+            new_workspace_action(),
+            open_workspace_action(),
+            new_directory_action(state.workspace_root == WorkspaceRootState::Active),
+        ]);
+        navigation_trailing_actions.insert(
+            (workspace_row_key, NEW_WORKSPACE_ACTION_KEY),
+            NotoraAction::OpenWorkspaceCreationRequested,
+        );
+        navigation_trailing_actions.insert(
+            (workspace_row_key, OPEN_WORKSPACE_ACTION_KEY),
+            NotoraAction::WorkspaceRootSelectionRequested,
+        );
+        if state.workspace_root == WorkspaceRootState::Active {
+            navigation_trailing_actions.insert(
+                (workspace_row_key, NEW_DIRECTORY_ACTION_KEY),
+                NotoraAction::BeginDirectoryCreation {
+                    parent_relative_path: std::path::PathBuf::new(),
+                },
+            );
+        }
         for (index, directory) in state.library.navigation_tree.directories.iter().enumerate() {
+            if state.workspace_root != WorkspaceRootState::Active
+                || !state.library.navigation_tree.workspace_root_expanded
+            {
+                continue;
+            }
             if !directory_is_visible(directory, &state.library.navigation_tree.expanded_directories)
             {
                 continue;
@@ -201,8 +244,9 @@ impl NotoraRenderModel {
                 .file_name()
                 .map(|name| name.to_string_lossy().to_string())
                 .unwrap_or_else(|| directory.to_string_lossy().to_string());
-            let depth = directory.components().count().saturating_sub(1);
+            let depth = directory.components().count();
             let row_key = TreeRowKey(key);
+            directory_row_keys.insert(directory.clone(), row_key);
             navigation_expansion_paths.insert(row_key, directory.clone());
             push_navigation_directory_row(
                 &mut navigation_rows,
@@ -217,7 +261,28 @@ impl NotoraRenderModel {
                 directory_has_children(directory, &state.library.navigation_tree.directories),
                 state.library.navigation_tree.expanded_directories.contains(directory),
             );
+            navigation_rows
+                .last_mut()
+                .expect("directory row was inserted immediately before its actions")
+                .trailing_actions
+                .push(new_directory_action(true));
+            navigation_trailing_actions.insert(
+                (row_key, NEW_DIRECTORY_ACTION_KEY),
+                NotoraAction::BeginDirectoryCreation { parent_relative_path: directory.clone() },
+            );
         }
+        let navigation_editor = match &state.directory_creation {
+            DirectoryCreationState::Editing { parent_relative_path, draft_name } => {
+                directory_row_keys.get(parent_relative_path).map(|parent_key| TreeRowEditorInput {
+                    key: DIRECTORY_EDITOR_KEY,
+                    parent_key: *parent_key,
+                    depth: parent_relative_path.components().count() + 1,
+                    value: draft_name.clone(),
+                    placeholder: "新目录名称".to_owned(),
+                })
+            }
+            DirectoryCreationState::Inactive | DirectoryCreationState::Submitting { .. } => None,
+        };
         push_navigation_row(
             &mut navigation_rows,
             &mut navigation_actions,
@@ -296,7 +361,9 @@ impl NotoraRenderModel {
             search_query,
             navigation_rows,
             navigation_actions,
+            navigation_trailing_actions,
             navigation_expansion_paths,
+            navigation_editor,
             cards,
             selected_card: state.library.selected_card,
             card_scroll_offset_px: state.library.card_scroll_offset_px,
@@ -304,6 +371,16 @@ impl NotoraRenderModel {
             card_empty_state: card_empty_state_input(state),
             show_settings_overlay: state.layout.overlay == OverlayState::Settings,
             settings_overlay: SettingsOverlayInput::from_product_settings(product_settings),
+            new_workspace_dialog: match &state.workspace_creation {
+                WorkspaceCreationState::Editing { name, parent_directory } => {
+                    Some(NewWorkspaceDialogInput {
+                        name: name.clone(),
+                        parent_directory: parent_directory.clone(),
+                        error_message: state.library.last_command_error.clone(),
+                    })
+                }
+                WorkspaceCreationState::Inactive => None,
+            },
             confirmation: confirmation_overlay_input(state.layout.overlay),
             show_new_document_menu: state.layout.overlay == OverlayState::NewDocumentMenu,
             show_tooltip: false,
@@ -907,7 +984,11 @@ pub struct NotoraShell {
     mindmap_style_panel_rect: Rect,
     settings_overlay: SettingsOverlay,
     settings_overlay_open: bool,
+    new_workspace_dialog: Option<NewWorkspaceDialog>,
+    new_workspace_dialog_input: NewWorkspaceDialogInput,
+    new_workspace_dialog_open: bool,
     navigation_actions: HashMap<TreeRowKey, NotoraAction>,
+    navigation_trailing_actions: HashMap<(TreeRowKey, TreeRowActionKey), NotoraAction>,
     navigation_expansion_paths: HashMap<TreeRowKey, std::path::PathBuf>,
     card_identities: HashMap<CardKey, DocumentIdentity>,
     card_keys: HashMap<DocumentIdentity, CardKey>,
@@ -952,7 +1033,7 @@ impl NotoraShell {
         new_note_button.set_icon(Some("plus".to_owned()));
         Self {
             search_box,
-            navigation_tree: TreeListWidget::new(),
+            navigation_tree: TreeListWidget::new().with_id(NAVIGATION_TREE_ID),
             card_list: VirtualCardListWidget::new(),
             card_empty_state: StatusStateWidget::new(),
             card_empty_state_visible: false,
@@ -974,7 +1055,11 @@ impl NotoraShell {
             mindmap_style_panel_rect: Rect::ZERO,
             settings_overlay: SettingsOverlay::new(),
             settings_overlay_open: false,
+            new_workspace_dialog: None,
+            new_workspace_dialog_input: NewWorkspaceDialogInput::default(),
+            new_workspace_dialog_open: false,
             navigation_actions: HashMap::new(),
+            navigation_trailing_actions: HashMap::new(),
             navigation_expansion_paths: HashMap::new(),
             card_identities: HashMap::new(),
             card_keys: HashMap::new(),
@@ -1016,6 +1101,12 @@ impl NotoraShell {
         } else {
             match focus_target {
                 FocusTarget::NavigationSearch | FocusTarget::EditorTitle => Some(focus_target),
+                FocusTarget::NavigationTree if self.navigation_tree.input().editor.is_some() => {
+                    Some(FocusTarget::NavigationTree)
+                }
+                FocusTarget::Overlay if self.new_workspace_dialog_open => {
+                    Some(FocusTarget::Overlay)
+                }
                 _ => None,
             }
         };
@@ -1027,6 +1118,9 @@ impl NotoraShell {
         }
         self.search_box.set_keyboard_focus(
             (focus_target == FocusTarget::NavigationSearch).then_some(GLOBAL_SEARCH_BOX_ID),
+        );
+        self.navigation_tree.set_keyboard_focus(
+            (focus_target == FocusTarget::NavigationTree).then_some(NAVIGATION_TREE_ID),
         );
         self.apply_text_cursor_visibility();
     }
@@ -1077,10 +1171,11 @@ impl NotoraShell {
             FocusTarget::EditorTitle | FocusTarget::EditorTag => {
                 self.editor_pane.focused_ime_cursor_rect()
             }
-            FocusTarget::NavigationTree
-            | FocusTarget::CardList
-            | FocusTarget::Editor
-            | FocusTarget::Overlay => None,
+            FocusTarget::NavigationTree => self.navigation_tree.ime_cursor_rect(),
+            FocusTarget::Overlay => {
+                self.new_workspace_dialog.as_ref().and_then(NewWorkspaceDialog::ime_cursor_rect)
+            }
+            FocusTarget::CardList | FocusTarget::Editor => None,
         }
     }
 
@@ -1096,12 +1191,14 @@ impl NotoraShell {
 
     fn apply_text_cursor_visibility(&mut self) {
         self.search_box.set_blink(self.text_cursor_visible);
+        self.navigation_tree.set_editor_blink(self.text_cursor_visible);
         self.editor_pane.set_title_blink_visible(self.text_cursor_visible);
         self.editor_pane.set_tag_blink_visible(self.text_cursor_visible);
     }
 
     pub fn update_model(&mut self, model: &NotoraRenderModel) {
         self.navigation_actions.clone_from(&model.navigation_actions);
+        self.navigation_trailing_actions.clone_from(&model.navigation_trailing_actions);
         self.navigation_expansion_paths.clone_from(&model.navigation_expansion_paths);
         self.card_identities.clear();
         let cards = model
@@ -1127,6 +1224,7 @@ impl NotoraShell {
             .collect();
         self.navigation_tree.set_input(TreeListInput {
             rows: model.navigation_rows.clone(),
+            editor: model.navigation_editor.clone(),
             scroll_offset_px: 0.0,
         });
         self.card_list.set_input(VirtualCardListInput {
@@ -1141,6 +1239,8 @@ impl NotoraShell {
         self.new_note_button.set_menu_open(model.show_new_document_menu);
         self.settings_overlay.set_input(model.settings_overlay.clone());
         self.settings_overlay_open = model.show_settings_overlay;
+        self.new_workspace_dialog_input = model.new_workspace_dialog.clone().unwrap_or_default();
+        self.new_workspace_dialog_open = model.new_workspace_dialog.is_some();
         self.confirmation_action =
             model.confirmation.as_ref().map(|input| input.confirm_action.clone());
         self.new_document_menu_open = model.show_new_document_menu;
@@ -1337,6 +1437,15 @@ impl NotoraShell {
             if model.show_settings_overlay {
                 self.settings_overlay.set_rect(layout.overlay_rect, context);
             }
+            if self.new_workspace_dialog_open {
+                let dialog = self
+                    .new_workspace_dialog
+                    .get_or_insert_with(|| NewWorkspaceDialog::new(context.theme));
+                dialog.set_input(self.new_workspace_dialog_input.clone(), true);
+                dialog.set_rect(layout.overlay_rect, context);
+            } else if let Some(dialog) = self.new_workspace_dialog.as_mut() {
+                dialog.set_input(NewWorkspaceDialogInput::default(), false);
+            }
         });
         frame.with_underlay_paint_context(|context| {
             let application_theme = context.theme.application_theme();
@@ -1433,6 +1542,18 @@ impl NotoraShell {
                     0.0,
                 );
                 self.settings_overlay.paint(context);
+            });
+        }
+        if self.new_workspace_dialog_open
+            && let Some(dialog) = self.new_workspace_dialog.as_ref()
+        {
+            frame.with_paint_context(|context| {
+                context.list.fill_rounded(
+                    layout.overlay_rect,
+                    context.theme.application_theme().modal_scrim,
+                    0.0,
+                );
+                dialog.paint(context);
             });
         }
         if let Some(confirmation) = &model.confirmation {
@@ -1562,7 +1683,24 @@ impl NotoraShell {
                 .navigation_expansion_paths
                 .get(key)
                 .cloned()
-                .map(NotoraAction::NavigationExpansionToggled),
+                .map(NotoraAction::NavigationExpansionToggled)
+                .or_else(|| {
+                    (*key == TreeRowKey(WORKSPACE_NAVIGATION_KEY))
+                        .then_some(NotoraAction::WorkspaceRootExpansionToggled)
+                }),
+            WidgetAction::TreeList(TreeListAction::TrailingActionActivated {
+                row_key,
+                action_key,
+            }) => self.navigation_trailing_actions.get(&(*row_key, *action_key)).cloned(),
+            WidgetAction::TreeList(TreeListAction::EditorTextChanged { value, .. }) => {
+                Some(NotoraAction::DirectoryCreationTextChanged(value.clone()))
+            }
+            WidgetAction::TreeList(TreeListAction::EditorCommitRequested { .. }) => {
+                Some(NotoraAction::DirectoryCreationCommitRequested)
+            }
+            WidgetAction::TreeList(TreeListAction::EditorCancelled { .. }) => {
+                Some(NotoraAction::DirectoryCreationCancelled)
+            }
             WidgetAction::VirtualCardList(VirtualCardListAction::Selected(key)) => {
                 self.card_identities.get(key).copied().map(NotoraAction::CardSelected)
             }
@@ -1693,6 +1831,16 @@ impl NotoraShell {
                 .settings_overlay
                 .route_event(event, event_context)
                 .map(settings_overlay_action_to_notora_action);
+            return Some(NotoraEventRoute::consumed(action));
+        }
+        if self.new_workspace_dialog_open
+            && product_overlay.is_none_or(|overlay| overlay == OverlayState::NewWorkspace)
+        {
+            let action = self
+                .new_workspace_dialog
+                .as_mut()
+                .and_then(|dialog| dialog.route_event(event, event_context))
+                .map(new_workspace_dialog_action_to_notora_action);
             return Some(NotoraEventRoute::consumed(action));
         }
         if self.save_conflict_actions.is_some()
@@ -1890,6 +2038,9 @@ impl NotoraShell {
             OverlayState::None => true,
             OverlayState::Settings => self.settings_overlay_open,
             OverlayState::NewDocumentMenu => self.new_document_menu_open,
+            OverlayState::NewWorkspace => {
+                self.new_workspace_dialog_open && self.new_workspace_dialog.is_some()
+            }
             OverlayState::TrashPermanentDeletionConfirmation { .. }
             | OverlayState::TrashRestoreConflictConfirmation { .. } => {
                 self.confirmation_action.is_some()
@@ -2353,6 +2504,49 @@ fn settings_overlay_action_to_notora_action(action: SettingsOverlayAction) -> No
     }
 }
 
+fn new_workspace_dialog_action_to_notora_action(action: NewWorkspaceDialogAction) -> NotoraAction {
+    match action {
+        NewWorkspaceDialogAction::NameChanged(name) => {
+            NotoraAction::WorkspaceCreationNameChanged(name)
+        }
+        NewWorkspaceDialogAction::ChooseLocation => {
+            NotoraAction::WorkspaceCreationLocationRequested
+        }
+        NewWorkspaceDialogAction::Create => NotoraAction::WorkspaceCreationCommitRequested,
+        NewWorkspaceDialogAction::Cancel => NotoraAction::OverlayDismissed,
+    }
+}
+
+fn new_directory_action(enabled: bool) -> TreeRowActionInput {
+    TreeRowActionInput {
+        key: NEW_DIRECTORY_ACTION_KEY,
+        icon: "folder-plus".to_owned(),
+        tooltip: "新建目录".to_owned(),
+        accessibility_label: "在此目录中新建目录".to_owned(),
+        enabled,
+    }
+}
+
+fn new_workspace_action() -> TreeRowActionInput {
+    TreeRowActionInput {
+        key: NEW_WORKSPACE_ACTION_KEY,
+        icon: "workspace-plus".to_owned(),
+        tooltip: "新建工作区".to_owned(),
+        accessibility_label: "新建工作区".to_owned(),
+        enabled: true,
+    }
+}
+
+fn open_workspace_action() -> TreeRowActionInput {
+    TreeRowActionInput {
+        key: OPEN_WORKSPACE_ACTION_KEY,
+        icon: "folder-open".to_owned(),
+        tooltip: "打开工作区".to_owned(),
+        accessibility_label: "打开工作区".to_owned(),
+        enabled: true,
+    }
+}
+
 fn confirmation_overlay_input(overlay: OverlayState) -> Option<ConfirmationOverlayInput> {
     match overlay {
         OverlayState::TrashPermanentDeletionConfirmation { operation } => {
@@ -2383,6 +2577,7 @@ fn confirmation_overlay_input(overlay: OverlayState) -> Option<ConfirmationOverl
         OverlayState::None
         | OverlayState::Settings
         | OverlayState::NewDocumentMenu
+        | OverlayState::NewWorkspace
         | OverlayState::SaveConflict => None,
     }
 }
@@ -2413,6 +2608,39 @@ fn push_navigation_row(
             TreeRowSelection::Unselected
         },
         badge,
+        tooltip: None,
+        trailing_actions: Vec::new(),
+    });
+}
+
+fn push_workspace_navigation_row(
+    rows: &mut Vec<TreeRowInput>,
+    actions: &mut HashMap<TreeRowKey, NotoraAction>,
+    selected_scope: &NavigationScope,
+    has_directories: bool,
+    expanded: bool,
+    workspace_root: Option<&std::path::Path>,
+) {
+    let row_key = TreeRowKey(WORKSPACE_NAVIGATION_KEY);
+    actions.insert(row_key, NotoraAction::NavigationSelected(NavigationScope::WorkspaceRoot));
+    rows.push(TreeRowInput {
+        key: row_key,
+        label: "工作区".to_owned(),
+        icon: Some("folder-open".to_owned()),
+        depth: 0,
+        expansion: match (has_directories, expanded) {
+            (false, _) => TreeRowExpansion::Leaf,
+            (true, true) => TreeRowExpansion::Expanded,
+            (true, false) => TreeRowExpansion::Collapsed,
+        },
+        selection: if *selected_scope == NavigationScope::WorkspaceRoot {
+            TreeRowSelection::Selected
+        } else {
+            TreeRowSelection::Unselected
+        },
+        badge: None,
+        tooltip: workspace_root.map(|root| root.display().to_string()),
+        trailing_actions: Vec::new(),
     });
 }
 
@@ -2448,6 +2676,8 @@ fn push_navigation_directory_row(
             TreeRowSelection::Unselected
         },
         badge,
+        tooltip: None,
+        trailing_actions: Vec::new(),
     });
 }
 
@@ -3418,7 +3648,8 @@ mod tests {
     #[test]
     fn dynamic_navigation_rows_keep_domain_values_out_of_the_ui_widget_keys() {
         let tag_id = notora_core::TagId::generate();
-        let mut state = NotoraState::default();
+        let mut state =
+            NotoraState { workspace_root: WorkspaceRootState::Active, ..NotoraState::default() };
         state.library.navigation_tree.directories = vec!["plans".into(), "plans/q3".into()];
         state.library.navigation_tree.expanded_directories.insert("plans".into());
         state.library.navigation_tree.tags = vec![notora_core::TagWithActiveNoteCount {
@@ -3430,13 +3661,100 @@ mod tests {
         let model = NotoraRenderModel::from_state(&state);
         assert_eq!(model.navigation_rows.len(), 7);
         assert_eq!(model.navigation_rows[1].label, "plans");
-        assert_eq!(model.navigation_rows[2].depth, 1);
+        assert_eq!(model.navigation_rows[1].depth, 1);
+        assert_eq!(model.navigation_rows[2].depth, 2);
         assert_eq!(model.navigation_rows[4].badge, Some(2));
         assert!(matches!(
             model.navigation_actions.get(&model.navigation_rows[4].key),
             Some(NotoraAction::NavigationSelected(NavigationScope::Tag { tag_id: selected_tag_id }))
                 if *selected_tag_id == tag_id
         ));
+    }
+
+    #[test]
+    fn workspace_root_is_the_expandable_parent_of_directory_rows() {
+        let mut state =
+            NotoraState { workspace_root: WorkspaceRootState::Active, ..NotoraState::default() };
+        state.workspace_root_path = Some("/tmp/notora-workspace".into());
+        state.library.navigation_tree.directories = vec!["docs".into(), "docs/plans".into()];
+        state.library.navigation_tree.expanded_directories.insert("docs".into());
+
+        let expanded_model = NotoraRenderModel::from_state(&state);
+        assert_eq!(expanded_model.navigation_rows[0].label, "工作区");
+        assert_eq!(
+            expanded_model.navigation_rows[0].tooltip.as_deref(),
+            Some("/tmp/notora-workspace")
+        );
+        assert_eq!(expanded_model.navigation_rows[0].depth, 0);
+        assert_eq!(expanded_model.navigation_rows[0].expansion, TreeRowExpansion::Expanded);
+        assert_eq!(expanded_model.navigation_rows[1].depth, 1);
+        assert_eq!(expanded_model.navigation_rows[2].depth, 2);
+
+        state.library.navigation_tree.workspace_root_expanded = false;
+        let collapsed_model = NotoraRenderModel::from_state(&state);
+        assert_eq!(collapsed_model.navigation_rows[0].expansion, TreeRowExpansion::Collapsed);
+        assert!(collapsed_model.navigation_rows.iter().all(|row| row.depth == 0));
+    }
+
+    #[test]
+    fn directory_rows_expose_typed_creation_actions_and_inline_editor_input() {
+        let mut state =
+            NotoraState { workspace_root: WorkspaceRootState::Active, ..NotoraState::default() };
+        state.library.navigation_tree.directories = vec!["docs".into()];
+        state.directory_creation = DirectoryCreationState::Editing {
+            parent_relative_path: "docs".into(),
+            draft_name: "plans".to_owned(),
+        };
+
+        let model = NotoraRenderModel::from_state(&state);
+        let root_row = &model.navigation_rows[0];
+        let directory_row = &model.navigation_rows[1];
+
+        assert_eq!(root_row.trailing_actions.len(), 3);
+        assert_eq!(root_row.trailing_actions[0].key, NEW_WORKSPACE_ACTION_KEY);
+        assert_eq!(root_row.trailing_actions[1].key, OPEN_WORKSPACE_ACTION_KEY);
+        assert_eq!(root_row.trailing_actions[2].key, NEW_DIRECTORY_ACTION_KEY);
+        assert_eq!(directory_row.trailing_actions.len(), 1);
+        assert_eq!(directory_row.trailing_actions[0].key, NEW_DIRECTORY_ACTION_KEY);
+        assert_eq!(
+            model.navigation_trailing_actions.get(&(directory_row.key, NEW_DIRECTORY_ACTION_KEY)),
+            Some(&NotoraAction::BeginDirectoryCreation { parent_relative_path: "docs".into() })
+        );
+        assert_eq!(
+            model.navigation_editor,
+            Some(TreeRowEditorInput {
+                key: DIRECTORY_EDITOR_KEY,
+                parent_key: directory_row.key,
+                depth: 2,
+                value: "plans".to_owned(),
+                placeholder: "新目录名称".to_owned(),
+            })
+        );
+    }
+
+    #[test]
+    fn missing_workspace_keeps_the_root_directory_action_disabled() {
+        let model = NotoraRenderModel::from_state(&NotoraState::default());
+        let root_row = &model.navigation_rows[0];
+
+        assert_eq!(root_row.label, "工作区");
+        assert_eq!(root_row.trailing_actions.len(), 3);
+        assert!(root_row.trailing_actions[0].enabled);
+        assert!(root_row.trailing_actions[1].enabled);
+        assert!(!root_row.trailing_actions[2].enabled);
+        assert_eq!(
+            model.navigation_trailing_actions.get(&(root_row.key, NEW_WORKSPACE_ACTION_KEY)),
+            Some(&NotoraAction::OpenWorkspaceCreationRequested)
+        );
+        assert_eq!(
+            model.navigation_trailing_actions.get(&(root_row.key, OPEN_WORKSPACE_ACTION_KEY)),
+            Some(&NotoraAction::WorkspaceRootSelectionRequested)
+        );
+        assert!(
+            !model
+                .navigation_trailing_actions
+                .contains_key(&(root_row.key, NEW_DIRECTORY_ACTION_KEY))
+        );
     }
 
     #[test]
@@ -3467,6 +3785,49 @@ mod tests {
                 value: TextPayload::Plain("roadmap".to_owned()),
             })),
             Some(NotoraAction::SearchTextChanged("roadmap".to_owned()))
+        );
+    }
+
+    #[test]
+    fn tree_widget_directory_events_map_to_product_actions() {
+        let mut shell = NotoraShell::new();
+        shell.navigation_trailing_actions.insert(
+            (TreeRowKey(7), NEW_DIRECTORY_ACTION_KEY),
+            NotoraAction::BeginDirectoryCreation { parent_relative_path: "docs".into() },
+        );
+
+        assert_eq!(
+            shell.translate_widget_action(&WidgetAction::TreeList(
+                TreeListAction::TrailingActionActivated {
+                    row_key: TreeRowKey(7),
+                    action_key: NEW_DIRECTORY_ACTION_KEY,
+                }
+            )),
+            Some(NotoraAction::BeginDirectoryCreation { parent_relative_path: "docs".into() })
+        );
+        assert_eq!(
+            shell.translate_widget_action(&WidgetAction::TreeList(
+                TreeListAction::EditorTextChanged {
+                    key: DIRECTORY_EDITOR_KEY,
+                    value: "plans".to_owned(),
+                }
+            )),
+            Some(NotoraAction::DirectoryCreationTextChanged("plans".to_owned()))
+        );
+        assert_eq!(
+            shell.translate_widget_action(&WidgetAction::TreeList(
+                TreeListAction::EditorCommitRequested {
+                    key: DIRECTORY_EDITOR_KEY,
+                    value: "plans".to_owned(),
+                }
+            )),
+            Some(NotoraAction::DirectoryCreationCommitRequested)
+        );
+        assert_eq!(
+            shell.translate_widget_action(&WidgetAction::TreeList(
+                TreeListAction::EditorCancelled { key: DIRECTORY_EDITOR_KEY }
+            )),
+            Some(NotoraAction::DirectoryCreationCancelled)
         );
     }
 

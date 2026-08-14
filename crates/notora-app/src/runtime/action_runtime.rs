@@ -87,13 +87,16 @@ impl ActionRuntime {
         &mut self,
         workspace_id: WorkspaceId,
         workspace_generation: u64,
+        workspace_root: std::path::PathBuf,
     ) {
-        self.state.workspace_root = WorkspaceRootState::Active;
+        self.state.activate_workspace();
+        self.state.workspace_root_path = Some(workspace_root);
         self.search_controller.set_active_workspace(workspace_id, workspace_generation);
     }
 
     pub(super) fn clear_active_workspace(&mut self) {
         self.state.workspace_root = WorkspaceRootState::Missing;
+        self.state.workspace_root_path = None;
         self.search_controller.clear_active_workspace();
     }
 

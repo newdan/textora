@@ -23,6 +23,14 @@ impl WorkspaceCompletionInterpreter {
             WorkspaceCompletion::NoteCommandFailed { message } => {
                 target.dispatch_action(NotoraAction::NoteCommandFailed(message));
             }
+            WorkspaceCompletion::DirectoryCommandCompleted { result } => {
+                target.dispatch_action(NotoraAction::DirectoryCreationCompleted {
+                    relative_path: result.relative_path,
+                });
+            }
+            WorkspaceCompletion::DirectoryCommandFailed { message } => {
+                target.dispatch_action(NotoraAction::DirectoryCreationFailed(message));
+            }
             WorkspaceCompletion::MetadataMutationCompleted {
                 mutation,
                 note_id,

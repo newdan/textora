@@ -14,6 +14,7 @@ pub mod effect_executor;
 pub mod events;
 pub mod external_files;
 mod index_worker;
+mod new_workspace_dialog;
 mod notora_settings_view;
 mod paths;
 mod persistence_worker;

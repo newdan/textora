@@ -7,7 +7,7 @@ use notora_core::{
 
 use crate::action::{
     CardQuery, ConflictResolution, DocumentLoadRequest, NoteCreationTarget, NotoraAction,
-    NotoraEffect, SaveConflictRequest, move_note_command,
+    NotoraEffect, SaveConflictRequest, WorkspaceTransitionRequest, move_note_command,
 };
 use crate::effect_executor::ExternalOpenRequest;
 use crate::external_files::ExternalFileSessions;
@@ -40,6 +40,7 @@ pub enum OverlayState {
     None,
     Settings,
     NewDocumentMenu,
+    NewWorkspace,
     TrashPermanentDeletionConfirmation {
         operation: crate::action::TrashOperation,
     },
@@ -87,6 +88,43 @@ pub enum WorkspaceRootState {
     #[default]
     Missing,
     Active,
+}
+
+/// 同一时刻唯一的目录创建草稿或在途命令。
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub enum DirectoryCreationState {
+    #[default]
+    Inactive,
+    Editing {
+        parent_relative_path: std::path::PathBuf,
+        draft_name: String,
+    },
+    Submitting {
+        parent_relative_path: std::path::PathBuf,
+        directory_name: String,
+    },
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub enum WorkspaceCreationState {
+    #[default]
+    Inactive,
+    Editing {
+        name: String,
+        parent_directory: Option<std::path::PathBuf>,
+    },
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub enum WorkspaceTransitionState {
+    #[default]
+    Idle,
+    AwaitingDirtySaves {
+        request: WorkspaceTransitionRequest,
+    },
+    Applying {
+        request: WorkspaceTransitionRequest,
+    },
 }
 
 /// 只包含产品导航、选择和卡片查询状态；编辑会话保留在 EditorRuntime。
@@ -142,11 +180,23 @@ pub struct ActiveEditorMetadata {
 }
 
 /// 左栏的数据快照，由 app 接收 worker DTO 后存入；render 不读 catalog。
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct NavigationTreeState {
     pub directories: Vec<std::path::PathBuf>,
     pub tags: Vec<TagWithActiveNoteCount>,
+    pub workspace_root_expanded: bool,
     pub expanded_directories: BTreeSet<std::path::PathBuf>,
+}
+
+impl Default for NavigationTreeState {
+    fn default() -> Self {
+        Self {
+            directories: Vec::new(),
+            tags: Vec::new(),
+            workspace_root_expanded: true,
+            expanded_directories: BTreeSet::new(),
+        }
+    }
 }
 
 /// 中栏数据加载状态；任何时刻只表示一种结果，避免 loading/failed bool 组合。
@@ -220,12 +270,27 @@ impl Default for LayoutState {
 pub struct NotoraState {
     pub library: LibraryState,
     pub workspace_root: WorkspaceRootState,
+    pub directory_creation: DirectoryCreationState,
+    pub workspace_creation: WorkspaceCreationState,
+    pub workspace_transition: WorkspaceTransitionState,
+    pub workspace_root_path: Option<std::path::PathBuf>,
     /// 外部 session 不属于 catalog、搜索、星标、标签或 Trash 的任何一项。
     pub external_files: ExternalFileSessions,
     pub layout: LayoutState,
 }
 
 impl NotoraState {
+    pub(crate) fn activate_workspace(&mut self) {
+        self.library = LibraryState::default();
+        self.workspace_root = WorkspaceRootState::Active;
+        self.directory_creation = DirectoryCreationState::Inactive;
+        self.workspace_creation = WorkspaceCreationState::Inactive;
+        self.layout.overlay = OverlayState::None;
+        self.layout.focus_target = FocusTarget::NavigationTree;
+        self.layout.compact_navigation = CompactNavigation::Hidden;
+        self.layout.compact_content = CompactContent::CardList;
+    }
+
     pub fn reduce(&mut self, action: NotoraAction) -> Vec<NotoraEffect> {
         match action {
             NotoraAction::NavigationSelected(scope) => self.select_navigation_scope(scope),
@@ -250,8 +315,94 @@ impl NotoraState {
                 self.library.last_command_error = Some(message);
                 vec![NotoraEffect::Redraw]
             }
+            NotoraAction::WorkspaceRootExpansionToggled => {
+                self.library.navigation_tree.workspace_root_expanded =
+                    !self.library.navigation_tree.workspace_root_expanded;
+                vec![NotoraEffect::Redraw]
+            }
             NotoraAction::NavigationExpansionToggled(relative_path) => {
                 self.toggle_navigation_expansion(relative_path)
+            }
+            NotoraAction::BeginDirectoryCreation { parent_relative_path } => {
+                self.begin_directory_creation(parent_relative_path)
+            }
+            NotoraAction::DirectoryCreationTextChanged(draft_name) => {
+                self.update_directory_creation_text(draft_name)
+            }
+            NotoraAction::DirectoryCreationCommitRequested => self.commit_directory_creation(),
+            NotoraAction::DirectoryCreationCancelled => {
+                self.directory_creation = DirectoryCreationState::Inactive;
+                self.library.last_command_error = None;
+                vec![NotoraEffect::Redraw]
+            }
+            NotoraAction::DirectoryCreationCompleted { relative_path } => {
+                self.complete_directory_creation(relative_path)
+            }
+            NotoraAction::DirectoryCreationFailed(message) => self.fail_directory_creation(message),
+            NotoraAction::OpenWorkspaceCreationRequested => {
+                if self.workspace_transition != WorkspaceTransitionState::Idle {
+                    return vec![NotoraEffect::Redraw];
+                }
+                self.workspace_creation =
+                    WorkspaceCreationState::Editing { name: String::new(), parent_directory: None };
+                self.library.last_command_error = None;
+                self.layout.overlay = OverlayState::NewWorkspace;
+                self.layout.focus_target = FocusTarget::Overlay;
+                vec![NotoraEffect::Redraw]
+            }
+            NotoraAction::WorkspaceCreationNameChanged(name) => {
+                if let WorkspaceCreationState::Editing { name: current_name, .. } =
+                    &mut self.workspace_creation
+                {
+                    *current_name = name;
+                    self.library.last_command_error = None;
+                }
+                vec![NotoraEffect::Redraw]
+            }
+            NotoraAction::WorkspaceCreationLocationRequested => {
+                if !matches!(self.workspace_creation, WorkspaceCreationState::Editing { .. }) {
+                    return vec![NotoraEffect::Redraw];
+                }
+                vec![NotoraEffect::ChooseWorkspaceCreationLocation, NotoraEffect::Redraw]
+            }
+            NotoraAction::WorkspaceCreationLocationSelected(parent_directory) => {
+                if let WorkspaceCreationState::Editing {
+                    parent_directory: current_parent, ..
+                } = &mut self.workspace_creation
+                {
+                    *current_parent = Some(parent_directory);
+                    self.library.last_command_error = None;
+                }
+                vec![NotoraEffect::Redraw]
+            }
+            NotoraAction::WorkspaceCreationCommitRequested => self.commit_workspace_creation(),
+            NotoraAction::WorkspaceTransitionConfirmed(request) => {
+                if self.workspace_transition != WorkspaceTransitionState::Idle {
+                    return vec![NotoraEffect::Redraw];
+                }
+                self.library.last_command_error = None;
+                self.workspace_transition =
+                    WorkspaceTransitionState::AwaitingDirtySaves { request: request.clone() };
+                vec![NotoraEffect::PrepareWorkspaceTransition(request), NotoraEffect::Redraw]
+            }
+            NotoraAction::WorkspaceTransitionApplying => {
+                let WorkspaceTransitionState::AwaitingDirtySaves { request } =
+                    &self.workspace_transition
+                else {
+                    return vec![NotoraEffect::Redraw];
+                };
+                self.workspace_transition =
+                    WorkspaceTransitionState::Applying { request: request.clone() };
+                vec![NotoraEffect::Redraw]
+            }
+            NotoraAction::WorkspaceTransitionCompleted => {
+                self.workspace_transition = WorkspaceTransitionState::Idle;
+                vec![NotoraEffect::Redraw]
+            }
+            NotoraAction::WorkspaceTransitionFailed(message) => {
+                self.workspace_transition = WorkspaceTransitionState::Idle;
+                self.library.last_command_error = Some(message);
+                vec![NotoraEffect::Redraw]
             }
             NotoraAction::CardListScrolled { offset_px, near_end } => {
                 self.library.card_scroll_offset_px = offset_px;
@@ -307,6 +458,9 @@ impl NotoraState {
                 vec![NotoraEffect::PromoteActivePreview, NotoraEffect::Redraw]
             }
             NotoraAction::WorkspaceRootSelectionRequested => {
+                if self.workspace_transition != WorkspaceTransitionState::Idle {
+                    return vec![NotoraEffect::Redraw];
+                }
                 vec![NotoraEffect::ChooseWorkspaceRoot, NotoraEffect::Redraw]
             }
             NotoraAction::OpenNewDocumentMenu => self.open_new_document_menu(),
@@ -670,6 +824,7 @@ impl NotoraState {
 
     fn apply_navigation_tree(&mut self, tree: CatalogNavigationTree) -> Vec<NotoraEffect> {
         self.library.navigation_tree = NavigationTreeState {
+            workspace_root_expanded: self.library.navigation_tree.workspace_root_expanded,
             expanded_directories: self
                 .library
                 .navigation_tree
@@ -710,6 +865,134 @@ impl NotoraState {
             self.library.navigation_tree.expanded_directories.insert(relative_path);
         }
         vec![NotoraEffect::Redraw]
+    }
+
+    fn begin_directory_creation(
+        &mut self,
+        parent_relative_path: std::path::PathBuf,
+    ) -> Vec<NotoraEffect> {
+        let parent_is_valid = parent_relative_path.as_os_str().is_empty()
+            || self.library.navigation_tree.directories.contains(&parent_relative_path);
+        if self.workspace_root == WorkspaceRootState::Missing || !parent_is_valid {
+            return vec![NotoraEffect::Redraw];
+        }
+        self.library.last_command_error = None;
+        self.library.navigation_tree.workspace_root_expanded = true;
+        if !parent_relative_path.as_os_str().is_empty() {
+            self.library.navigation_tree.expanded_directories.insert(parent_relative_path.clone());
+        }
+        self.directory_creation =
+            DirectoryCreationState::Editing { parent_relative_path, draft_name: String::new() };
+        self.layout.focus_target = FocusTarget::NavigationTree;
+        vec![NotoraEffect::Redraw]
+    }
+
+    fn update_directory_creation_text(&mut self, draft_name: String) -> Vec<NotoraEffect> {
+        let DirectoryCreationState::Editing { parent_relative_path, .. } = &self.directory_creation
+        else {
+            return vec![NotoraEffect::Redraw];
+        };
+        self.directory_creation = DirectoryCreationState::Editing {
+            parent_relative_path: parent_relative_path.clone(),
+            draft_name,
+        };
+        self.library.last_command_error = None;
+        vec![NotoraEffect::Redraw]
+    }
+
+    fn commit_directory_creation(&mut self) -> Vec<NotoraEffect> {
+        let DirectoryCreationState::Editing { parent_relative_path, draft_name } =
+            &self.directory_creation
+        else {
+            return vec![NotoraEffect::Redraw];
+        };
+        let directory_name = draft_name.trim().to_owned();
+        if directory_name.is_empty() {
+            self.directory_creation = DirectoryCreationState::Inactive;
+            return vec![NotoraEffect::Redraw];
+        }
+        let parent_relative_path = parent_relative_path.clone();
+        self.directory_creation = DirectoryCreationState::Submitting {
+            parent_relative_path: parent_relative_path.clone(),
+            directory_name: directory_name.clone(),
+        };
+        vec![
+            NotoraEffect::ExecuteDirectoryCommand(notora_core::WorkspaceDirectoryCommand::Create {
+                parent_relative_path,
+                name: directory_name,
+            }),
+            NotoraEffect::Redraw,
+        ]
+    }
+
+    fn complete_directory_creation(
+        &mut self,
+        relative_path: std::path::PathBuf,
+    ) -> Vec<NotoraEffect> {
+        let DirectoryCreationState::Submitting { parent_relative_path, .. } =
+            &self.directory_creation
+        else {
+            return vec![NotoraEffect::Redraw];
+        };
+        if relative_path.parent().unwrap_or_else(|| std::path::Path::new(""))
+            != parent_relative_path
+        {
+            return vec![NotoraEffect::Redraw];
+        }
+        let parent_relative_path = parent_relative_path.clone();
+        self.directory_creation = DirectoryCreationState::Inactive;
+        self.library.last_command_error = None;
+        self.library.navigation_tree.workspace_root_expanded = true;
+        if !parent_relative_path.as_os_str().is_empty() {
+            self.library.navigation_tree.expanded_directories.insert(parent_relative_path);
+        }
+        if !self.library.navigation_tree.directories.contains(&relative_path) {
+            self.library.navigation_tree.directories.push(relative_path.clone());
+            self.library.navigation_tree.directories.sort();
+        }
+        self.select_navigation_scope(NavigationScope::Directory { relative_path })
+    }
+
+    fn fail_directory_creation(&mut self, message: String) -> Vec<NotoraEffect> {
+        let DirectoryCreationState::Submitting { parent_relative_path, directory_name } =
+            &self.directory_creation
+        else {
+            return vec![NotoraEffect::Redraw];
+        };
+        self.directory_creation = DirectoryCreationState::Editing {
+            parent_relative_path: parent_relative_path.clone(),
+            draft_name: directory_name.clone(),
+        };
+        self.library.last_command_error = Some(message);
+        self.layout.focus_target = FocusTarget::NavigationTree;
+        vec![NotoraEffect::Redraw]
+    }
+
+    fn commit_workspace_creation(&mut self) -> Vec<NotoraEffect> {
+        let WorkspaceCreationState::Editing { name, parent_directory } = &self.workspace_creation
+        else {
+            return vec![NotoraEffect::Redraw];
+        };
+        let workspace_name = match notora_core::validate_workspace_directory_name(name) {
+            Ok(workspace_name) => workspace_name,
+            Err(error) => {
+                self.library.last_command_error = Some(error.to_string());
+                return vec![NotoraEffect::Redraw];
+            }
+        };
+        let Some(parent_directory) = parent_directory.clone() else {
+            self.library.last_command_error = Some("请先选择工作区保存位置".to_owned());
+            return vec![NotoraEffect::Redraw];
+        };
+        let request =
+            WorkspaceTransitionRequest::Create { root: parent_directory.join(workspace_name) };
+        self.workspace_creation = WorkspaceCreationState::Inactive;
+        self.workspace_transition =
+            WorkspaceTransitionState::AwaitingDirtySaves { request: request.clone() };
+        self.layout.overlay = OverlayState::None;
+        self.layout.focus_target = FocusTarget::NavigationTree;
+        self.library.last_command_error = None;
+        vec![NotoraEffect::PrepareWorkspaceTransition(request), NotoraEffect::Redraw]
     }
 
     fn request_next_card_page(&mut self) -> Vec<NotoraEffect> {
@@ -892,10 +1175,12 @@ impl NotoraState {
             OverlayState::None
             | OverlayState::Settings
             | OverlayState::NewDocumentMenu
+            | OverlayState::NewWorkspace
             | OverlayState::TrashPermanentDeletionConfirmation { .. }
             | OverlayState::TrashRestoreConflictConfirmation { .. } => {}
         }
         self.layout.overlay = OverlayState::None;
+        self.workspace_creation = WorkspaceCreationState::Inactive;
         self.layout.focus_target =
             if restore_editor_focus { FocusTarget::Editor } else { FocusTarget::NavigationTree };
         vec![NotoraEffect::Redraw]
@@ -926,7 +1211,10 @@ mod metadata_actions {
         NoteEditorMetadata, NoteEncryption, NoteId, TagId,
     };
 
-    use super::{ActiveEditorMetadata, CardPageState, NotoraState};
+    use super::{
+        ActiveEditorMetadata, CardPageState, DirectoryCreationState, NotoraState,
+        WorkspaceRootState, WorkspaceTransitionState,
+    };
     use crate::action::{CardQuery, MetadataMutation, NotoraAction, NotoraEffect};
 
     #[test]
@@ -1140,6 +1428,137 @@ mod metadata_actions {
             ]
         );
         assert_eq!(state.library.navigation_scope, NavigationScope::WorkspaceRoot);
+    }
+
+    #[test]
+    fn workspace_root_expansion_is_independent_from_directory_paths() {
+        let mut state = NotoraState::default();
+
+        assert!(state.library.navigation_tree.workspace_root_expanded);
+        assert_eq!(
+            state.reduce(NotoraAction::WorkspaceRootExpansionToggled),
+            vec![NotoraEffect::Redraw]
+        );
+        assert!(!state.library.navigation_tree.workspace_root_expanded);
+        assert!(state.library.navigation_tree.expanded_directories.is_empty());
+    }
+
+    #[test]
+    fn directory_creation_uses_one_typed_state_machine_and_restores_failed_drafts() {
+        let mut state =
+            NotoraState { workspace_root: WorkspaceRootState::Active, ..NotoraState::default() };
+        state.library.navigation_tree.directories = vec!["docs".into()];
+
+        assert_eq!(
+            state.reduce(NotoraAction::BeginDirectoryCreation {
+                parent_relative_path: "docs".into(),
+            }),
+            vec![NotoraEffect::Redraw]
+        );
+        assert_eq!(
+            state.directory_creation,
+            DirectoryCreationState::Editing {
+                parent_relative_path: "docs".into(),
+                draft_name: String::new(),
+            }
+        );
+        assert!(
+            state
+                .library
+                .navigation_tree
+                .expanded_directories
+                .contains(std::path::Path::new("docs"))
+        );
+
+        state.reduce(NotoraAction::DirectoryCreationTextChanged(" plans ".to_owned()));
+        assert_eq!(
+            state.reduce(NotoraAction::DirectoryCreationCommitRequested),
+            vec![
+                NotoraEffect::ExecuteDirectoryCommand(
+                    notora_core::WorkspaceDirectoryCommand::Create {
+                        parent_relative_path: "docs".into(),
+                        name: "plans".to_owned(),
+                    },
+                ),
+                NotoraEffect::Redraw,
+            ]
+        );
+        assert_eq!(
+            state.directory_creation,
+            DirectoryCreationState::Submitting {
+                parent_relative_path: "docs".into(),
+                directory_name: "plans".to_owned(),
+            }
+        );
+
+        assert_eq!(
+            state.reduce(NotoraAction::DirectoryCreationFailed("目标已存在".to_owned())),
+            vec![NotoraEffect::Redraw]
+        );
+        assert_eq!(
+            state.directory_creation,
+            DirectoryCreationState::Editing {
+                parent_relative_path: "docs".into(),
+                draft_name: "plans".to_owned(),
+            }
+        );
+        assert_eq!(state.library.last_command_error.as_deref(), Some("目标已存在"));
+    }
+
+    #[test]
+    fn completed_directory_creation_expands_parent_and_selects_the_new_directory() {
+        let mut state =
+            NotoraState { workspace_root: WorkspaceRootState::Active, ..NotoraState::default() };
+        state.library.navigation_tree.directories = vec!["docs".into()];
+        state.reduce(NotoraAction::BeginDirectoryCreation { parent_relative_path: "docs".into() });
+        state.reduce(NotoraAction::DirectoryCreationTextChanged("plans".to_owned()));
+        state.reduce(NotoraAction::DirectoryCreationCommitRequested);
+
+        let effects = state.reduce(NotoraAction::DirectoryCreationCompleted {
+            relative_path: "docs/plans".into(),
+        });
+
+        assert_eq!(state.directory_creation, DirectoryCreationState::Inactive);
+        assert!(state.library.navigation_tree.directories.contains(&"docs/plans".into()));
+        assert_eq!(
+            state.library.navigation_scope,
+            NavigationScope::Directory { relative_path: "docs/plans".into() }
+        );
+        assert!(matches!(
+            effects.as_slice(),
+            [NotoraEffect::QueryCards(query), NotoraEffect::Redraw]
+                if query.scope == NavigationScope::Directory {
+                    relative_path: "docs/plans".into()
+                }
+        ));
+    }
+
+    #[test]
+    fn workspace_transition_state_tracks_save_barrier_apply_and_failure() {
+        let mut state = NotoraState::default();
+        let request = crate::action::WorkspaceTransitionRequest::OpenExisting {
+            root: "/workspace/two".into(),
+        };
+
+        assert_eq!(
+            state.reduce(NotoraAction::WorkspaceTransitionConfirmed(request.clone())),
+            vec![NotoraEffect::PrepareWorkspaceTransition(request.clone()), NotoraEffect::Redraw,]
+        );
+        assert_eq!(
+            state.workspace_transition,
+            WorkspaceTransitionState::AwaitingDirtySaves { request: request.clone() }
+        );
+        assert_eq!(
+            state.reduce(NotoraAction::WorkspaceTransitionApplying),
+            vec![NotoraEffect::Redraw]
+        );
+        assert_eq!(state.workspace_transition, WorkspaceTransitionState::Applying { request });
+        assert_eq!(
+            state.reduce(NotoraAction::WorkspaceTransitionFailed("保存失败".to_owned())),
+            vec![NotoraEffect::Redraw]
+        );
+        assert_eq!(state.workspace_transition, WorkspaceTransitionState::Idle);
+        assert_eq!(state.library.last_command_error.as_deref(), Some("保存失败"));
     }
 }
 
@@ -1843,5 +2262,48 @@ mod tests {
         });
 
         assert_eq!(state.library.card_page, CardPageState::Empty { query });
+    }
+
+    #[test]
+    fn new_workspace_form_builds_a_create_transition_from_name_and_location() {
+        let mut state = NotoraState::default();
+
+        assert_eq!(
+            state.reduce(NotoraAction::OpenWorkspaceCreationRequested),
+            vec![NotoraEffect::Redraw]
+        );
+        assert_eq!(state.layout.overlay, OverlayState::NewWorkspace);
+        let _ = state.reduce(NotoraAction::WorkspaceCreationNameChanged("我的工作区".to_owned()));
+        let _ = state.reduce(NotoraAction::WorkspaceCreationLocationSelected("/tmp".into()));
+
+        let effects = state.reduce(NotoraAction::WorkspaceCreationCommitRequested);
+
+        assert_eq!(
+            effects,
+            vec![
+                NotoraEffect::PrepareWorkspaceTransition(
+                    crate::action::WorkspaceTransitionRequest::Create {
+                        root: "/tmp/我的工作区".into(),
+                    },
+                ),
+                NotoraEffect::Redraw,
+            ]
+        );
+        assert_eq!(state.layout.overlay, OverlayState::None);
+    }
+
+    #[test]
+    fn invalid_workspace_name_keeps_the_form_open_without_starting_a_transition() {
+        let mut state = NotoraState::default();
+        let _ = state.reduce(NotoraAction::OpenWorkspaceCreationRequested);
+        let _ = state.reduce(NotoraAction::WorkspaceCreationNameChanged("a/b".to_owned()));
+        let _ = state.reduce(NotoraAction::WorkspaceCreationLocationSelected("/tmp".into()));
+
+        assert_eq!(
+            state.reduce(NotoraAction::WorkspaceCreationCommitRequested),
+            vec![NotoraEffect::Redraw]
+        );
+        assert_eq!(state.layout.overlay, OverlayState::NewWorkspace);
+        assert!(state.library.last_command_error.is_some());
     }
 }

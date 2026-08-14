@@ -1,6 +1,6 @@
 use crate::action::{
     CardQuery, DocumentLoadRequest, MetadataMutation, NoteCreationTarget, NotoraAction,
-    NotoraEffect, SaveConflictRequest, TrashOperation,
+    NotoraEffect, SaveConflictRequest, TrashOperation, WorkspaceTransitionRequest,
 };
 use crate::effect_executor::ExternalOpenRequest;
 
@@ -13,6 +13,9 @@ pub(super) trait NotoraEffectTarget {
         target: NoteCreationTarget,
     ) -> Vec<NotoraAction>;
     fn execute_note_command(&mut self, command: notora_core::note_command::NoteCommand);
+    fn execute_directory_command(&mut self, command: notora_core::WorkspaceDirectoryCommand);
+    fn choose_workspace_creation_location(&mut self) -> Vec<NotoraAction>;
+    fn prepare_workspace_transition(&mut self, request: WorkspaceTransitionRequest);
     fn commit_title(&mut self, title: String);
     fn toggle_editor_view(&mut self);
     fn toggle_mindmap_style_panel(&mut self);
@@ -49,6 +52,17 @@ impl NotoraEffectExecutor {
             }
             NotoraEffect::ExecuteNoteCommand(command) => {
                 target.execute_note_command(command);
+                Vec::new()
+            }
+            NotoraEffect::ExecuteDirectoryCommand(command) => {
+                target.execute_directory_command(command);
+                Vec::new()
+            }
+            NotoraEffect::ChooseWorkspaceCreationLocation => {
+                target.choose_workspace_creation_location()
+            }
+            NotoraEffect::PrepareWorkspaceTransition(request) => {
+                target.prepare_workspace_transition(request);
                 Vec::new()
             }
             NotoraEffect::CommitTitle(title) => {
