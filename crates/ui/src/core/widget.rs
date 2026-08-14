@@ -180,6 +180,10 @@ impl<'a> EventCtx<'a> {
         }
     }
 
+    pub fn read_sensitive_clipboard_text(&mut self) -> Option<SensitiveText> {
+        self.read_clipboard_text().map(SensitiveText::new)
+    }
+
     pub fn write_clipboard_text(&mut self, text: &str) -> bool {
         match &mut self.clipboard {
             ClipboardAccess::Unavailable => false,
@@ -303,6 +307,12 @@ impl SensitiveText {
 
         zeroize::Zeroize::zeroize(&mut self.0);
         self.0 = updated;
+    }
+
+    pub(crate) fn rewrite(self, rewrite: impl FnOnce(&str, &mut String)) -> Self {
+        let mut updated = zeroize::Zeroizing::new(String::with_capacity(self.0.len()));
+        rewrite(self.expose(), &mut updated);
+        Self(updated)
     }
 }
 
@@ -480,6 +490,23 @@ mod tests {
     use crate::core::paint::DrawCmd;
     use std::collections::HashMap;
 
+    struct OwnershipTrackingClipboard {
+        text: Option<String>,
+        returned_allocation: Option<usize>,
+    }
+
+    impl Clipboard for OwnershipTrackingClipboard {
+        fn read_text(&mut self) -> Option<String> {
+            let text = self.text.take()?;
+            self.returned_allocation = Some(text.as_ptr() as usize);
+            Some(text)
+        }
+
+        fn write_text(&mut self, _text: &str) -> bool {
+            false
+        }
+    }
+
     /// 最小测试 widget：记录 set_rect 参数，paint 输出固定 fill。
     struct TestWidget {
         pub rect: Rect,
@@ -655,6 +682,26 @@ mod tests {
         let secret = SensitiveText::new("never-print-me".into());
         assert_eq!(format!("{secret:?}"), "SensitiveText(<redacted>)");
         assert!(!format!("{:?}", TextPayload::Sensitive(secret)).contains("never-print-me"));
+    }
+
+    #[test]
+    fn sensitive_clipboard_read_transfers_the_original_allocation_without_copying() {
+        let theme = dummy_theme();
+        let mut clipboard = OwnershipTrackingClipboard {
+            text: Some(String::from("clipboard-api-key")),
+            returned_allocation: None,
+        };
+        let sensitive_text = {
+            let mut context = EventCtx::with_clipboard(&theme, 1.0, &mut clipboard);
+            context
+                .read_sensitive_clipboard_text()
+                .expect("test clipboard should return sensitive text")
+        };
+
+        assert_eq!(
+            sensitive_text.expose().as_ptr() as usize,
+            clipboard.returned_allocation.expect("clipboard should record its returned allocation")
+        );
     }
 
     #[test]

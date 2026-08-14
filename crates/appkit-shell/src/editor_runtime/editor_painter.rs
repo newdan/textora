@@ -8,6 +8,43 @@ use crate::tab_session::TabSession;
 
 const PLUGIN_CONTENT_PADDING_LOGICAL: f32 = 24.0;
 
+fn measure_preedit_advance_px(
+    shaper: &mut shaping::Shaper,
+    preedit_text: &str,
+    font_size: f32,
+) -> f32 {
+    if preedit_text.is_empty() {
+        return 0.0;
+    }
+
+    let previous_font_size = shaper.font_size();
+    shaper.set_font_size(font_size);
+    let advance = shaper
+        .shape(preedit_text)
+        .map(|shaped| shaped.clusters.iter().map(|cluster| cluster.advance.max(1.0)).sum())
+        .unwrap_or(0.0);
+    shaper.set_font_size(previous_font_size);
+    advance
+}
+
+fn plain_text_preedit_origin(
+    preedit_text: &str,
+    cursor_visual_line: Option<usize>,
+    cursor_x_px: f32,
+    editor_top_px: f32,
+    line_height_px: f32,
+    sub_line_offset_px: f32,
+) -> Option<(f32, f32)> {
+    if preedit_text.is_empty() {
+        return None;
+    }
+
+    let cursor_visual_line = cursor_visual_line?;
+    let cursor_y_px =
+        editor_top_px + cursor_visual_line as f32 * line_height_px + sub_line_offset_px;
+    Some((cursor_x_px, cursor_y_px))
+}
+
 fn editor_viewport_dimensions(editor_height_px: f32, line_height_px: f32) -> (usize, f64) {
     let viewport_height = (editor_height_px / line_height_px).max(1.0);
     (viewport_height.floor() as usize, viewport_height as f64)
@@ -33,6 +70,7 @@ impl EditorRuntime {
             return Ok(EditorSurfacePaint::Empty);
         };
         frame.paint_editor(editor_rect)?;
+        self.painted_editor_bounds = Some(editor_rect);
         if editor_rect.w == 0.0 || editor_rect.h == 0.0 {
             return Ok(EditorSurfacePaint::Document { vertex_count: 0 });
         }
@@ -46,6 +84,7 @@ impl EditorRuntime {
         let handles_own_rendering =
             self.tab_session(tab_id).is_some_and(|tab| tab.handles_own_rendering());
         let mut vertices = if handles_own_rendering {
+            self.plain_text_preedit_advance_px = 0.0;
             paint_plugin_editor(
                 self,
                 tab_id,
@@ -170,9 +209,14 @@ fn paint_text_editor(
     settings: &ui::settings::Settings,
     metrics: &ui::settings::UiMetrics,
 ) -> Vec<GlyphVertex> {
+    runtime.plain_text_preedit_advance_px = 0.0;
     let (Some(text), Some(gpu)) = (resources.text.as_mut(), resources.gpu.as_ref()) else {
         return Vec::new();
     };
+    let (preedit_text, _) = runtime.preedit();
+    let preedit_advance_px =
+        measure_preedit_advance_px(&mut text.shaper, &preedit_text, metrics.font_size);
+    runtime.plain_text_preedit_advance_px = preedit_advance_px;
     let Some(mut tab) = runtime.tab_session_mut(tab_id) else {
         return Vec::new();
     };
@@ -191,8 +235,8 @@ fn paint_text_editor(
         tab_bar_height: editor_rect.y,
         is_active_tab: true,
         gutter_width,
-        preedit_advance_px: 0.0,
-        preedit_cursor_col: 0,
+        preedit_advance_px,
+        preedit_cursor_col: tab.document.cursor_column(),
     };
     let mut advance_cache = tab.take_advance_cache();
     let mut presentation = tab.take_presentation();
@@ -226,11 +270,32 @@ fn paint_text_editor(
         theme,
         editor_rect.y,
     ));
+    let preedit_origin = plain_text_preedit_origin(
+        &preedit_text,
+        tab_view.cursor_visual_line(),
+        tab_view.cursor_pixel_x(),
+        editor_rect.y,
+        metrics.line_height,
+        tab_view.sub_line_pixel_offset(metrics.line_height),
+    );
+    if let Some((preedit_x, preedit_y)) = preedit_origin {
+        vertices.extend(crate::render_pipeline::preedit_text_vertices(
+            metrics,
+            &preedit_text,
+            preedit_x,
+            preedit_y,
+            text,
+            gpu,
+            screen.w,
+            screen.h,
+            theme.editor.foreground,
+        ));
+    }
     vertices.extend(ui::decorations::cursor_vertices(
         theme,
         tab_view.cursor_visual_line(),
         editor_rect.y,
-        tab_view.cursor_pixel_x(),
+        tab_view.cursor_pixel_x() + preedit_advance_px,
         tab_view.cursor_blink_instant(),
         metrics,
         screen.w,
@@ -294,7 +359,7 @@ pub(super) fn plugin_bounds(editor_rect: ui::Rect, dpi: f32, is_canvas: bool) ->
 
 #[cfg(test)]
 mod tests {
-    use super::editor_viewport_dimensions;
+    use super::{editor_viewport_dimensions, plain_text_preedit_origin};
 
     #[test]
     fn partial_bottom_row_is_not_counted_as_fully_visible() {
@@ -306,5 +371,36 @@ mod tests {
 
         assert_eq!(visible_rows, 10);
         assert_eq!(viewport_height, 10.5);
+    }
+
+    #[test]
+    fn non_empty_plain_text_preedit_starts_at_the_painted_document_caret() {
+        const EDITOR_TOP_PX: f32 = 120.0;
+        const CURSOR_X_PX: f32 = 248.0;
+        const LINE_HEIGHT_PX: f32 = 24.0;
+        const SUB_LINE_OFFSET_PX: f32 = -6.0;
+
+        let origin = plain_text_preedit_origin(
+            "拼音",
+            Some(3),
+            CURSOR_X_PX,
+            EDITOR_TOP_PX,
+            LINE_HEIGHT_PX,
+            SUB_LINE_OFFSET_PX,
+        )
+        .expect("active preedit on a visible caret must produce a paint origin");
+
+        assert_eq!(origin, (CURSOR_X_PX, 186.0));
+        assert_eq!(
+            plain_text_preedit_origin(
+                "",
+                Some(3),
+                CURSOR_X_PX,
+                EDITOR_TOP_PX,
+                LINE_HEIGHT_PX,
+                SUB_LINE_OFFSET_PX,
+            ),
+            None
+        );
     }
 }

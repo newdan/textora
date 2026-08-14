@@ -2300,7 +2300,7 @@ fn render_cards(state: &NotoraState) -> Vec<RenderCard> {
     if state.library.navigation_scope == NavigationScope::ExternalFiles {
         return state.external_files.sessions().iter().map(render_external_file_card).collect();
     }
-    match &state.library.card_page {
+    let mut cards = match &state.library.card_page {
         CardPageState::Ready { cards, .. }
         | CardPageState::LoadingNextPage { cards, .. }
         | CardPageState::Refreshing { cards, .. }
@@ -2308,7 +2308,25 @@ fn render_cards(state: &NotoraState) -> Vec<RenderCard> {
         CardPageState::Idle
         | CardPageState::LoadingInitial { .. }
         | CardPageState::Empty { .. } => Vec::new(),
+    };
+    let Some(selected_identity) = state.library.selected_card else {
+        return cards;
+    };
+    let selected_title = state.library.title_draft.as_ref().or_else(|| {
+        state
+            .library
+            .pending_title_commit
+            .as_ref()
+            .filter(|pending_title| pending_title.identity == selected_identity)
+            .map(|pending_title| &pending_title.title)
+    });
+    let Some(selected_title) = selected_title else {
+        return cards;
+    };
+    if let Some(selected_card) = cards.iter_mut().find(|card| card.identity == selected_identity) {
+        selected_card.title.clone_from(selected_title);
     }
+    cards
 }
 
 fn render_catalog_card(card: &notora_core::CatalogCard) -> RenderCard {
@@ -3909,6 +3927,38 @@ mod tests {
 
         shell.update_model(&model);
         assert_eq!(shell.card_list.input().cards[0].key, first_key);
+    }
+
+    #[test]
+    fn title_edit_updates_the_selected_middle_pane_card_before_catalog_refresh() {
+        let note_id = NoteId::generate();
+        let identity = DocumentIdentity::Note(note_id);
+        let mut state = NotoraState::default();
+        state.library.selected_card = Some(identity);
+        state.library.card_page = CardPageState::Ready {
+            query: CardQuery::from(NavigationScope::WorkspaceRoot),
+            cards: vec![CatalogCard {
+                note_id,
+                relative_path: "notes/old-title.md".into(),
+                kind: DocumentKind::Markdown,
+                title: "旧标题".to_owned(),
+                excerpt: "正文摘要".to_owned(),
+                modified_nanoseconds: 42,
+                starred: false,
+                tags: Vec::new(),
+            }],
+            next_cursor: None,
+        };
+
+        let _ = state.reduce(NotoraAction::TitleTextChanged("编辑中的标题".to_owned()));
+
+        let editing_model = NotoraRenderModel::from_state(&state);
+        assert_eq!(editing_model.cards[0].title, "编辑中的标题");
+
+        let _ = state.reduce(NotoraAction::TitleCommitRequested("新标题".to_owned()));
+
+        let pending_model = NotoraRenderModel::from_state(&state);
+        assert_eq!(pending_model.cards[0].title, "新标题");
     }
 
     #[test]

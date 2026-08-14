@@ -997,12 +997,8 @@ impl NotoraRuntime {
 
     pub(crate) fn render(&mut self) -> Result<(), RenderError> {
         let _ = self.render_frame()?;
-        let layout = self.shell_layout();
-        self.frame_runtime.update_focused_ime_cursor_area(
-            &self.document_runtime,
-            self.action_runtime.state(),
-            layout,
-        );
+        self.frame_runtime
+            .update_focused_ime_cursor_area(&self.document_runtime, self.action_runtime.state());
         Ok(())
     }
 

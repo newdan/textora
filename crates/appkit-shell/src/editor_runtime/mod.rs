@@ -77,6 +77,7 @@ fn clipboard_command_for_key(
 
 const CURSOR_BLINK_INTERVAL_MS: u64 = 500;
 const CURSOR_BLINK_WAKE_TOLERANCE_MS: u64 = 5;
+const IME_ANCHOR_WIDTH_PX: f32 = 2.0;
 
 fn editor_scrollbar_input(
     viewport_extent: f32,
@@ -128,6 +129,8 @@ pub struct EditorRuntime {
     settings: ui::settings::Settings,
     theme: ui::Theme,
     active_cursor_paint_enabled: bool,
+    plain_text_preedit_advance_px: f32,
+    painted_editor_bounds: Option<ui::Rect>,
     ui_shaper: Option<Arc<Mutex<shaping::Shaper>>>,
     _snapshots_directory: PathBuf,
 }
@@ -151,6 +154,8 @@ impl EditorRuntime {
             settings: initial_settings,
             theme: initial_theme,
             active_cursor_paint_enabled: true,
+            plain_text_preedit_advance_px: 0.0,
+            painted_editor_bounds: None,
             ui_shaper: None,
             _snapshots_directory: snapshots_directory,
         })
@@ -608,6 +613,7 @@ impl EditorRuntime {
     }
 
     pub fn begin_frame(&mut self) -> Result<EditorFrame, RenderError> {
+        self.painted_editor_bounds = None;
         let theme = self.theme.clone();
         let dpi = self.render_session.scale_factor() as f32;
         Ok(EditorFrame::new_for_backend(theme, dpi, self.ui_shaper.clone()))
@@ -743,15 +749,35 @@ impl EditorRuntime {
     }
 
     /// 返回活动编辑器光标的窗口坐标矩形，供产品层定位系统 IME 候选窗。
-    pub fn active_editor_ime_cursor_rect(&self, editor_rect: ui::Rect) -> Option<ui::Rect> {
+    pub fn active_editor_ime_cursor_rect(&self) -> Option<ui::Rect> {
+        let editor_bounds = self.painted_editor_bounds?;
         let tab_id = self.active_tab_id()?;
         let tab = self.tab_session(tab_id)?;
-        let cursor_byte = tab.document.cursor_offset().to_usize();
-        let (cursor_x, cursor_y, cursor_width, cursor_height) =
-            tab.query_cursor_screen_rect(cursor_byte)?;
-        let bounds =
-            editor_painter::plugin_bounds(editor_rect, self.scale_factor() as f32, tab.is_canvas());
-        Some(ui::Rect::new(bounds.x + cursor_x, bounds.y + cursor_y, cursor_width, cursor_height))
+        if tab.handles_own_rendering() {
+            let cursor_byte = tab.document.cursor_offset().to_usize();
+            let (cursor_x, cursor_y, cursor_width, cursor_height) =
+                tab.query_cursor_screen_rect(cursor_byte)?;
+            let bounds = editor_painter::plugin_bounds(
+                editor_bounds,
+                self.scale_factor() as f32,
+                tab.is_canvas(),
+            );
+            return Some(ui::Rect::new(
+                bounds.x + cursor_x,
+                bounds.y + cursor_y,
+                cursor_width,
+                cursor_height,
+            ));
+        }
+
+        let metrics =
+            ui::settings::UiMetrics::from_settings(&self.settings, self.scale_factor() as f32);
+        let cursor_visual_line = tab.cursor_visual_line()?;
+        let cursor_x = tab.cursor_pixel_x() + self.plain_text_preedit_advance_px;
+        let cursor_y = editor_bounds.y
+            + cursor_visual_line as f32 * metrics.line_height
+            + tab.sub_line_pixel_offset(metrics.line_height);
+        Some(ui::Rect::new(cursor_x, cursor_y, IME_ANCHOR_WIDTH_PX, metrics.line_height))
     }
 
     pub fn request_redraw(&mut self) {
@@ -2003,12 +2029,63 @@ mod tests {
             }),
         );
         let editor_rect = ui::Rect::new(100.0, 200.0, 640.0, 480.0);
+        let mut resources = runtime.take_render_resources();
+        let mut frame = runtime.begin_frame().expect("headless frame should begin");
+        runtime
+            .paint_active_editor(&mut frame, &mut resources, editor_rect)
+            .expect("headless plugin frame should record its painted bounds");
 
         let ime_rect = runtime
-            .active_editor_ime_cursor_rect(editor_rect)
+            .active_editor_ime_cursor_rect()
             .expect("active editor cursor should provide an IME candidate anchor");
 
         assert_eq!(ime_rect, ui::Rect::new(148.0, 236.0, 2.0, 18.0));
+
+        let _next_frame = runtime.begin_frame().expect("next headless frame should begin");
+        assert_eq!(runtime.active_editor_ime_cursor_rect(), None);
+    }
+
+    #[test]
+    fn active_plain_text_editor_exposes_its_painted_caret_as_an_ime_anchor() {
+        const CURSOR_X_PX: f32 = 286.0;
+        const CURSOR_VISUAL_ROW: usize = 4;
+        const SUB_LINE_OFFSET_ROWS: f32 = 0.25;
+        const PREEDIT_ADVANCE_PX: f32 = 42.0;
+
+        let mut runtime = runtime_with_clean_tab();
+        let tab_id = runtime.active_tab_id().expect("test runtime should have an active tab");
+        {
+            let mut tab = runtime
+                .tab_session_mut(tab_id)
+                .expect("active plain-text tab should have a runtime");
+            tab.cursor_render_state_mut().cursor_pixel_x = CURSOR_X_PX;
+            tab.cursor_render_state_mut().cursor_visual_line = Some(CURSOR_VISUAL_ROW);
+            tab.display_mut().viewport.scroll_anchor.pixel_offset = SUB_LINE_OFFSET_ROWS;
+        }
+        let editor_rect = ui::Rect::new(100.0, 200.0, 640.0, 480.0);
+        let metrics = ui::settings::UiMetrics::from_settings(&runtime.settings, 1.0);
+        let sub_line_offset_px = runtime
+            .tab_session(tab_id)
+            .expect("active plain-text tab should remain available")
+            .sub_line_pixel_offset(metrics.line_height);
+        let mut resources = runtime.take_render_resources();
+        let mut frame = runtime.begin_frame().expect("headless frame should begin");
+        runtime
+            .paint_active_editor(&mut frame, &mut resources, editor_rect)
+            .expect("headless plain-text frame should record its painted bounds");
+        runtime.plain_text_preedit_advance_px = PREEDIT_ADVANCE_PX;
+
+        let ime_rect = runtime
+            .active_editor_ime_cursor_rect()
+            .expect("plain-text caret should provide an IME candidate anchor");
+
+        assert_eq!(ime_rect.x, CURSOR_X_PX + PREEDIT_ADVANCE_PX);
+        assert_eq!(
+            ime_rect.y,
+            editor_rect.y + CURSOR_VISUAL_ROW as f32 * metrics.line_height + sub_line_offset_px
+        );
+        assert_eq!(ime_rect.w, 2.0);
+        assert_eq!(ime_rect.h, metrics.line_height);
     }
 
     #[test]

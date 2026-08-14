@@ -272,12 +272,10 @@ impl FrameRuntime {
         &self,
         document_runtime: &DocumentRuntime,
         state: &NotoraState,
-        layout: ShellLayout,
     ) {
         let ime_rect = self.shell.focused_text_input_ime_cursor_rect().or_else(|| {
-            (state.layout.focus_target == crate::FocusTarget::Editor).then(|| {
-                document_runtime.editor().active_editor_ime_cursor_rect(layout.editor_rect)
-            })?
+            (state.layout.focus_target == crate::FocusTarget::Editor)
+                .then(|| document_runtime.editor().active_editor_ime_cursor_rect())?
         });
         let Some(ime_rect) = ime_rect else {
             return;
