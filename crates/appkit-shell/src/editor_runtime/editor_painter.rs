@@ -209,10 +209,19 @@ fn paint_text_editor(
     metrics: &ui::settings::UiMetrics,
 ) -> Vec<GlyphVertex> {
     runtime.plain_text_preedit_advance_px = 0.0;
+    let (preedit_text, _) = runtime.preedit();
+    let (visible_rows, viewport_height) =
+        editor_viewport_dimensions(editor_rect.h, metrics.line_height);
+    {
+        let Some(mut tab) = runtime.tab_session_mut(tab_id) else {
+            return Vec::new();
+        };
+        tab.resize_and_refresh_presentation(visible_rows, viewport_height, metrics.line_height);
+    }
+
     let (Some(text), Some(gpu)) = (resources.text.as_mut(), resources.gpu.as_ref()) else {
         return Vec::new();
     };
-    let (preedit_text, _) = runtime.preedit();
     let preedit_advance_px =
         measure_preedit_advance_px(&mut text.shaper, &preedit_text, metrics.font_size);
     runtime.plain_text_preedit_advance_px = preedit_advance_px;
@@ -222,9 +231,6 @@ fn paint_text_editor(
     let line_count = tab.document.line_count();
     let gutter_width = settings.gutter_width(line_count) * metrics.dpi;
     let left_margin = editor_rect.x + metrics.content_left_margin.max(gutter_width);
-    let (visible_rows, viewport_height) =
-        editor_viewport_dimensions(editor_rect.h, metrics.line_height);
-    tab.resize_presentation(visible_rows, viewport_height);
 
     let context = ui::gutter::RenderContext {
         theme,

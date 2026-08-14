@@ -826,6 +826,16 @@ impl<'a> TabSessionMut<'a> {
         self.derive_scroll_top(line_height);
     }
 
+    pub fn resize_and_refresh_presentation(
+        &mut self,
+        visible_rows: usize,
+        viewport_height: f64,
+        line_height: f32,
+    ) {
+        self.display_mut().viewport.resize(visible_rows, viewport_height);
+        self.refresh_scroll_metrics(line_height);
+    }
+
     pub fn resize_presentation(&mut self, visible_rows: usize, viewport_height: f64) {
         self.display_mut().viewport.resize(visible_rows, viewport_height);
     }

@@ -1935,6 +1935,34 @@ mod tests {
     }
 
     #[test]
+    fn first_plain_text_frame_without_render_resources_uses_the_editor_viewport() {
+        let mut runtime = runtime_with_clean_tab();
+        let focused_context =
+            EditorInputContext { focus: EditorFocus::Active, modal_blocked: false };
+        let _ = runtime.commit_text(focused_context, "\nsecond line".to_owned());
+        let editor_rect = ui::Rect::new(240.0, 32.0, 640.0, 480.0);
+        let mut resources = runtime.take_render_resources();
+        assert!(resources.text.is_none());
+        assert!(resources.gpu.is_none());
+        let mut frame = runtime.begin_frame().expect("headless frame should begin");
+
+        runtime
+            .paint_active_editor(&mut frame, &mut resources, editor_rect)
+            .expect("plain-text editor should measure its viewport before resources are ready");
+
+        let tab_id = runtime.active_tab_id().expect("first TXT tab should stay active");
+        let tab = runtime.tab_session(tab_id).expect("first TXT tab should remain available");
+        assert!(tab.viewport_height() > 2.0);
+        assert_eq!(tab.scroll_top(), 0.0, "resizing must clamp the startup scroll anchor");
+        assert_eq!(
+            runtime.active_editor_scrollbars_input(),
+            None,
+            "a short first TXT document must not expose a transient scrollbar"
+        );
+        runtime.restore_render_resources(resources);
+    }
+
+    #[test]
     fn closing_a_tab_invalidates_late_reshape_results() {
         let mut runtime = runtime_with_clean_tab();
         let tab_id = runtime.active_tab_id().expect("test runtime should have an active tab");
