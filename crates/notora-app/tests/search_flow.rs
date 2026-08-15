@@ -64,6 +64,7 @@ fn searches_and_virtualizes_a_ten_thousand_note_library() {
             icon: Some("file-text".to_owned()),
             tag_summary: "#计划".to_owned(),
             selection: CardSelection::Unselected,
+            closable: false,
         })
         .collect();
     let mut widget = VirtualCardListWidget::new();

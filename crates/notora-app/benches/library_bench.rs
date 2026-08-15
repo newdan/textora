@@ -138,6 +138,7 @@ fn benchmark_virtual_card_layout(criterion: &mut Criterion) {
             icon: Some("file-text".to_owned()),
             tag_summary: "#plan".to_owned(),
             selection: CardSelection::Unselected,
+            closable: false,
         })
         .collect::<Vec<_>>();
     let theme = ui::theme::test_theme();

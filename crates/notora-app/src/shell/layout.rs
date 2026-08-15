@@ -32,7 +32,7 @@ pub struct ShellLayoutInput {
     pub compact_navigation: CompactNavigation,
 }
 
-/// 一帧 shell 的独立区域。overlay、menu 与 tooltip 位于 editor 之后绘制。
+/// 一帧 shell 的独立区域。overlay 与 menu 位于 editor 之后绘制。
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct ShellLayout {
     pub responsive_mode: ResponsiveLayoutMode,
@@ -47,7 +47,6 @@ pub struct ShellLayout {
     pub editor_body_rect: Rect,
     pub overlay_rect: Rect,
     pub menu_rect: Rect,
-    pub tooltip_rect: Rect,
     pub navigation_width_logical: f32,
     pub card_list_width_logical: f32,
 }
@@ -132,7 +131,6 @@ impl ShellLayout {
             editor_body_rect,
             overlay_rect: window_rect,
             menu_rect: Rect::ZERO,
-            tooltip_rect: Rect::ZERO,
             navigation_width_logical,
             card_list_width_logical: card_width_px / dpi,
         }
@@ -173,7 +171,6 @@ impl ShellLayout {
             editor_body_rect,
             overlay_rect: window_rect,
             menu_rect: Rect::ZERO,
-            tooltip_rect: Rect::ZERO,
             navigation_width_logical: DEFAULT_NAVIGATION_WIDTH_LOGICAL,
             card_list_width_logical: requested_card_width_logical,
         }
@@ -205,7 +202,6 @@ impl ShellLayout {
             editor_body_rect,
             overlay_rect: window_rect,
             menu_rect: Rect::ZERO,
-            tooltip_rect: Rect::ZERO,
             navigation_width_logical: DEFAULT_NAVIGATION_WIDTH_LOGICAL,
             card_list_width_logical: requested_card_width_logical.min(window_rect.w / dpi),
         }

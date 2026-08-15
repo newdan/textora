@@ -1526,8 +1526,25 @@ fn action_requires_session_persistence(action: &NotoraAction) -> bool {
             | NotoraAction::CompactNavigationRequested
             | NotoraAction::CompactBackRequested
             | NotoraAction::ExternalFileOpened(_)
+            | NotoraAction::ExternalFileCloseCompleted(_)
+            | NotoraAction::ExternalFilesClearCompleted { .. }
             | NotoraAction::SplitterDragged { .. }
     )
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ExternalFileCloseBlocker {
+    UnsavedChanges,
+    PinnedTab,
+}
+
+impl ExternalFileCloseBlocker {
+    fn message(self) -> &'static str {
+        match self {
+            Self::UnsavedChanges => "文件仍有未保存修改，请先保存后再关闭",
+            Self::PinnedTab => "文件标签页已固定，请先取消固定",
+        }
+    }
 }
 
 impl NotoraEffectTarget for NotoraRuntime {
@@ -1615,6 +1632,17 @@ impl NotoraEffectTarget for NotoraRuntime {
 
     fn create_untitled_external(&mut self, kind: DocumentKind) -> Vec<NotoraAction> {
         NotoraRuntime::create_untitled_external(self, kind)
+    }
+
+    fn close_external_file(
+        &mut self,
+        external_file_id: notora_core::ExternalFileId,
+    ) -> Vec<NotoraAction> {
+        NotoraRuntime::close_external_file(self, external_file_id)
+    }
+
+    fn close_all_external_files(&mut self) -> Vec<NotoraAction> {
+        NotoraRuntime::close_all_external_files(self)
     }
 
     fn resolve_save_conflict(&mut self, request: SaveConflictRequest) {
@@ -2050,6 +2078,59 @@ impl NotoraRuntime {
 
     fn choose_workspace_root(&mut self) {
         self.select_workspace_root();
+    }
+
+    fn close_external_file(
+        &mut self,
+        external_file_id: notora_core::ExternalFileId,
+    ) -> Vec<NotoraAction> {
+        match self.try_close_external_file(external_file_id) {
+            Ok(()) => vec![NotoraAction::ExternalFileCloseCompleted(external_file_id)],
+            Err(blocker) => {
+                vec![NotoraAction::ExternalFileCloseFailed(blocker.message().to_owned())]
+            }
+        }
+    }
+
+    fn close_all_external_files(&mut self) -> Vec<NotoraAction> {
+        let external_file_ids = self
+            .action_runtime
+            .state()
+            .external_files
+            .sessions()
+            .iter()
+            .map(crate::external_files::ExternalFileSession::external_file_id)
+            .collect::<Vec<_>>();
+        let mut closed_external_file_ids = Vec::with_capacity(external_file_ids.len());
+        let mut blocked_count = 0;
+        for external_file_id in external_file_ids {
+            match self.try_close_external_file(external_file_id) {
+                Ok(()) => closed_external_file_ids.push(external_file_id),
+                Err(_) => blocked_count += 1,
+            }
+        }
+        vec![NotoraAction::ExternalFilesClearCompleted { closed_external_file_ids, blocked_count }]
+    }
+
+    fn try_close_external_file(
+        &mut self,
+        external_file_id: notora_core::ExternalFileId,
+    ) -> Result<(), ExternalFileCloseBlocker> {
+        let identity = DocumentIdentity::ExternalFile(external_file_id);
+        let Some(tab_id) = self.document_runtime.tab_for(identity) else {
+            return Ok(());
+        };
+        match self.document_runtime.editor().close_decision(tab_id) {
+            Some(appkit_shell::workspace::CloseTabDecision::NeedsSavePrompt) => {
+                return Err(ExternalFileCloseBlocker::UnsavedChanges);
+            }
+            Some(appkit_shell::workspace::CloseTabDecision::Pinned) => {
+                return Err(ExternalFileCloseBlocker::PinnedTab);
+            }
+            Some(appkit_shell::workspace::CloseTabDecision::CanClose) | None => {}
+        }
+        self.close_document_runtime(identity);
+        Ok(())
     }
 
     fn execute_note_command(&mut self, command: notora_core::note_command::NoteCommand) {
@@ -5535,6 +5616,100 @@ mod tests {
         assert!(app.document_tab_for(identity).is_some());
         assert_eq!(app.action_runtime.state().external_files.sessions().len(), 1);
         assert_eq!(app.action_runtime.state().library.last_command_error, None);
+    }
+
+    #[test]
+    fn closing_a_clean_external_file_removes_its_card_record_and_runtime_tab() {
+        let directory = tempfile::tempdir().expect("external file fixture directory should exist");
+        let path = directory.path().join("close-clean.md");
+        std::fs::write(&path, "# Clean").expect("external file fixture should be written");
+        let mut app = app();
+        app.receive_system_open_paths(vec![path]);
+        let deadline = Instant::now() + Duration::from_secs(2);
+        let external_file_id = loop {
+            app.drain_product_events();
+            if let Some(DocumentIdentity::ExternalFile(external_file_id)) =
+                app.action_runtime.state().library.selected_card
+                && app.document_tab_for(DocumentIdentity::ExternalFile(external_file_id)).is_some()
+            {
+                break external_file_id;
+            }
+            assert!(Instant::now() < deadline, "external preview should install promptly");
+            thread::sleep(Duration::from_millis(10));
+        };
+
+        app.dispatch_action(NotoraAction::ExternalFileCloseRequested(external_file_id));
+
+        assert!(app.action_runtime.state().external_files.session(external_file_id).is_none());
+        assert!(app.document_tab_for(DocumentIdentity::ExternalFile(external_file_id)).is_none());
+        assert_eq!(app.action_runtime.state().library.selected_card, None);
+    }
+
+    #[test]
+    fn closing_a_dirty_untitled_file_keeps_its_record_and_runtime_tab() {
+        let mut app = app();
+        let (identity, tab_id) = install_registered_untitled_external(&mut app);
+        let DocumentIdentity::ExternalFile(external_file_id) = identity else {
+            panic!("untitled external fixture must have an external identity");
+        };
+        let edit_outcome = app
+            .document_runtime
+            .editor_runtime
+            .commit_text(active_editor_input_context(), "未保存修改".to_owned());
+        app.apply_editor_outcome(edit_outcome);
+
+        app.dispatch_action(NotoraAction::ExternalFileCloseRequested(external_file_id));
+
+        assert!(app.action_runtime.state().external_files.session(external_file_id).is_some());
+        assert_eq!(app.document_tab_for(identity), Some(tab_id));
+        assert_eq!(
+            app.action_runtime.state().library.last_command_error.as_deref(),
+            Some("文件仍有未保存修改，请先保存后再关闭")
+        );
+    }
+
+    #[test]
+    fn clearing_external_files_closes_clean_records_and_keeps_dirty_records() {
+        let directory = tempfile::tempdir().expect("external file fixture directory should exist");
+        let path = directory.path().join("clear-clean.md");
+        std::fs::write(&path, "# Clean").expect("external file fixture should be written");
+        let mut app = app();
+        app.receive_system_open_paths(vec![path]);
+        let deadline = Instant::now() + Duration::from_secs(2);
+        let clean_external_file_id = loop {
+            app.drain_product_events();
+            if let Some(DocumentIdentity::ExternalFile(external_file_id)) =
+                app.action_runtime.state().library.selected_card
+                && app.document_tab_for(DocumentIdentity::ExternalFile(external_file_id)).is_some()
+            {
+                break external_file_id;
+            }
+            assert!(Instant::now() < deadline, "external preview should install promptly");
+            thread::sleep(Duration::from_millis(10));
+        };
+        let (dirty_identity, dirty_tab_id) = install_registered_untitled_external(&mut app);
+        let DocumentIdentity::ExternalFile(dirty_external_file_id) = dirty_identity else {
+            panic!("untitled external fixture must have an external identity");
+        };
+        let edit_outcome = app
+            .document_runtime
+            .editor_runtime
+            .commit_text(active_editor_input_context(), "未保存修改".to_owned());
+        app.apply_editor_outcome(edit_outcome);
+
+        app.dispatch_action(NotoraAction::ExternalFilesClearRequested);
+
+        assert!(
+            app.action_runtime.state().external_files.session(clean_external_file_id).is_none()
+        );
+        assert!(
+            app.action_runtime.state().external_files.session(dirty_external_file_id).is_some()
+        );
+        assert_eq!(app.document_tab_for(dirty_identity), Some(dirty_tab_id));
+        assert_eq!(
+            app.action_runtime.state().library.last_command_error.as_deref(),
+            Some("有 1 个文件未清空：请先保存未保存内容或取消固定")
+        );
     }
 
     #[test]

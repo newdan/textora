@@ -454,6 +454,55 @@ impl NotoraState {
                 self.layout.focus_target = FocusTarget::CardList;
                 vec![NotoraEffect::PrepareDocument(request), NotoraEffect::Redraw]
             }
+            NotoraAction::ExternalFileCloseRequested(external_file_id) => {
+                if self.external_files.session(external_file_id).is_none() {
+                    return vec![NotoraEffect::Redraw];
+                }
+                self.library.last_command_error = None;
+                vec![NotoraEffect::CloseExternalFile(external_file_id), NotoraEffect::Redraw]
+            }
+            NotoraAction::ExternalFileCloseCompleted(external_file_id) => {
+                let identity = DocumentIdentity::ExternalFile(external_file_id);
+                let _ = self.external_files.remove(external_file_id);
+                if self.library.selected_card == Some(identity) {
+                    self.invalidate_document_selection();
+                }
+                self.library.last_command_error = None;
+                vec![NotoraEffect::Redraw]
+            }
+            NotoraAction::ExternalFileCloseFailed(message) => {
+                self.library.last_command_error = Some(message);
+                vec![NotoraEffect::Redraw]
+            }
+            NotoraAction::ExternalFilesClearRequested => {
+                if self.external_files.sessions().is_empty() {
+                    return vec![NotoraEffect::Redraw];
+                }
+                self.library.last_command_error = None;
+                vec![NotoraEffect::CloseAllExternalFiles, NotoraEffect::Redraw]
+            }
+            NotoraAction::ExternalFilesClearCompleted {
+                closed_external_file_ids,
+                blocked_count,
+            } => {
+                let selected_external_file_id =
+                    self.library.selected_card.and_then(|identity| match identity {
+                        DocumentIdentity::ExternalFile(external_file_id) => Some(external_file_id),
+                        DocumentIdentity::Note(_) => None,
+                    });
+                let selected_record_was_closed = selected_external_file_id
+                    .is_some_and(|selected| closed_external_file_ids.contains(&selected));
+                for external_file_id in closed_external_file_ids {
+                    let _ = self.external_files.remove(external_file_id);
+                }
+                if selected_record_was_closed {
+                    self.invalidate_document_selection();
+                }
+                self.library.last_command_error = (blocked_count > 0).then(|| {
+                    format!("有 {blocked_count} 个文件未清空：请先保存未保存内容或取消固定")
+                });
+                vec![NotoraEffect::Redraw]
+            }
             NotoraAction::PromotePreviewRequested => {
                 vec![NotoraEffect::PromoteActivePreview, NotoraEffect::Redraw]
             }
@@ -1722,6 +1771,81 @@ mod tests {
         assert_eq!(
             state.reduce(NotoraAction::TitleCommitRequested("外部文件".to_owned())),
             vec![NotoraEffect::Redraw]
+        );
+    }
+
+    #[test]
+    fn external_file_record_is_removed_only_after_runtime_close_completes() {
+        let mut state = NotoraState::default();
+        state.library.navigation_scope = NavigationScope::ExternalFiles;
+        let identity = state.external_files.create_untitled(DocumentKind::Markdown);
+        let DocumentIdentity::ExternalFile(external_file_id) = identity else {
+            panic!("an external session must have an external identity");
+        };
+        state.library.selected_card = Some(identity);
+
+        assert_eq!(
+            state.reduce(NotoraAction::ExternalFileCloseRequested(external_file_id)),
+            vec![NotoraEffect::CloseExternalFile(external_file_id), NotoraEffect::Redraw]
+        );
+        assert!(state.external_files.session(external_file_id).is_some());
+
+        assert_eq!(
+            state.reduce(NotoraAction::ExternalFileCloseCompleted(external_file_id)),
+            vec![NotoraEffect::Redraw]
+        );
+        assert!(state.external_files.session(external_file_id).is_none());
+        assert_eq!(state.library.selected_card, None);
+    }
+
+    #[test]
+    fn failed_external_file_close_keeps_the_record_and_reports_the_reason() {
+        let mut state = NotoraState::default();
+        let identity = state.external_files.create_untitled(DocumentKind::Text);
+        let DocumentIdentity::ExternalFile(external_file_id) = identity else {
+            panic!("an external session must have an external identity");
+        };
+
+        let effects =
+            state.reduce(NotoraAction::ExternalFileCloseFailed("文件仍有未保存修改".to_owned()));
+
+        assert_eq!(effects, vec![NotoraEffect::Redraw]);
+        assert!(state.external_files.session(external_file_id).is_some());
+        assert_eq!(state.library.last_command_error.as_deref(), Some("文件仍有未保存修改"));
+    }
+
+    #[test]
+    fn clearing_external_files_removes_completed_records_and_keeps_blocked_records() {
+        let mut state = NotoraState::default();
+        state.library.navigation_scope = NavigationScope::ExternalFiles;
+        let closed_identity = state.external_files.create_untitled(DocumentKind::Markdown);
+        let blocked_identity = state.external_files.create_untitled(DocumentKind::Text);
+        let DocumentIdentity::ExternalFile(closed_external_file_id) = closed_identity else {
+            panic!("external fixture must have an external identity");
+        };
+        let DocumentIdentity::ExternalFile(blocked_external_file_id) = blocked_identity else {
+            panic!("external fixture must have an external identity");
+        };
+        state.library.selected_card = Some(closed_identity);
+
+        assert_eq!(
+            state.reduce(NotoraAction::ExternalFilesClearRequested),
+            vec![NotoraEffect::CloseAllExternalFiles, NotoraEffect::Redraw]
+        );
+        assert_eq!(
+            state.reduce(NotoraAction::ExternalFilesClearCompleted {
+                closed_external_file_ids: vec![closed_external_file_id],
+                blocked_count: 1,
+            }),
+            vec![NotoraEffect::Redraw]
+        );
+
+        assert!(state.external_files.session(closed_external_file_id).is_none());
+        assert!(state.external_files.session(blocked_external_file_id).is_some());
+        assert_eq!(state.library.selected_card, None);
+        assert_eq!(
+            state.library.last_command_error.as_deref(),
+            Some("有 1 个文件未清空：请先保存未保存内容或取消固定")
         );
     }
 

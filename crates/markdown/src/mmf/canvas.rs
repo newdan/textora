@@ -802,6 +802,9 @@ pub(crate) fn render_text(
     projection: &MindmapRenderProjection<'_>,
     viewport: CanvasViewportSnapshot,
 ) {
+    let font_family = shaper.font_family().map(str::to_owned);
+    let font_weight = shaper.font_weight();
+    let font_style = shaper.font_style();
     for &i in visible_node_indices {
         let ln = &layout.nodes[i];
         let Some(node) = nodes.get(ln.source_node_index) else {
@@ -824,12 +827,16 @@ pub(crate) fn render_text(
         let baseline_y = text_origin.y + font_size;
 
         if !title.is_empty() {
-            dl.text_shaped(
+            dl.text_shaped_with_font(
                 text_origin.x,
                 baseline_y,
                 font_size,
                 with_alpha(color, opacity),
                 title,
+                font_family.clone(),
+                font_weight,
+                font_style,
+                false,
                 shaper,
             );
         }

@@ -18,6 +18,7 @@ use ui::split_button::{SplitButtonInput, SplitButtonWidget};
 use ui::splitter::{SplitterAction, SplitterInput, SplitterWidget};
 use ui::status_state::{StatusStateInput, StatusStateKind, StatusStateWidget};
 use ui::text_box::TextBox;
+use ui::tooltip::{TooltipHint, TooltipWidget};
 use ui::tree_list::{
     TreeListAction, TreeListInput, TreeListWidget, TreeRowActionInput, TreeRowActionKey,
     TreeRowEditorInput, TreeRowExpansion, TreeRowInput, TreeRowKey, TreeRowSelection,
@@ -96,6 +97,7 @@ pub struct RenderCard {
     pub timestamp: String,
     pub icon: Option<String>,
     pub tag_summary: String,
+    pub closable: bool,
 }
 
 /// 产品层计算好的工具栏动作；widget 不保存 NoteId、TagId 或导航范围。
@@ -158,7 +160,6 @@ pub struct NotoraRenderModel {
     pub new_workspace_dialog: Option<NewWorkspaceDialogInput>,
     pub confirmation: Option<ConfirmationOverlayInput>,
     pub show_new_document_menu: bool,
-    pub show_tooltip: bool,
     pub new_note_control: NewNoteControlState,
     pub note_toolbar: Vec<NoteToolbarButtonInput>,
     pub save_conflict: Option<SaveConflictOverlayInput>,
@@ -346,6 +347,8 @@ impl NotoraRenderModel {
             DocumentIdentity::ExternalFile(_) => None,
         });
         let editor_chrome = editor_pane_input(state, &cards);
+        let external_files_present =
+            *selected_scope == NavigationScope::ExternalFiles && !cards.is_empty();
         let (editor_location_actions, editor_tag_actions) = editor_action_maps(state);
         let mut editor_command_actions = editor_command_actions();
         if let Some(note_id) = editor_note_id
@@ -383,9 +386,12 @@ impl NotoraRenderModel {
             },
             confirmation: confirmation_overlay_input(state.layout.overlay),
             show_new_document_menu: state.layout.overlay == OverlayState::NewDocumentMenu,
-            show_tooltip: false,
             new_note_control: new_note_control_state(selected_scope, state.workspace_root),
-            note_toolbar: note_toolbar_buttons(selected_scope, selected_note_id),
+            note_toolbar: note_toolbar_buttons(
+                selected_scope,
+                selected_note_id,
+                external_files_present,
+            ),
             save_conflict: state.library.save_conflict.map(|conflict| SaveConflictOverlayInput {
                 identity: conflict.identity,
                 content_revision: conflict.content_revision,
@@ -821,12 +827,20 @@ fn editor_command_actions() -> HashMap<String, NotoraAction> {
 fn note_toolbar_buttons(
     scope: &NavigationScope,
     selected_note_id: Option<NoteId>,
+    external_files_present: bool,
 ) -> Vec<NoteToolbarButtonInput> {
     if *scope == NavigationScope::ExternalFiles {
-        return vec![NoteToolbarButtonInput {
+        let mut buttons = vec![NoteToolbarButtonInput {
             label: "打开".to_owned(),
             action: NotoraAction::OpenExternalFileDialogRequested,
         }];
+        if external_files_present {
+            buttons.push(NoteToolbarButtonInput {
+                label: "清空".to_owned(),
+                action: NotoraAction::ExternalFilesClearRequested,
+            });
+        }
+        return buttons;
     }
     if matches!(scope, NavigationScope::Search { .. }) {
         return vec![NoteToolbarButtonInput {
@@ -963,6 +977,7 @@ impl NotoraEventRoute {
 pub struct NotoraShell {
     search_box: TextBox,
     navigation_tree: TreeListWidget,
+    active_tooltip: Option<TooltipHint>,
     card_list: VirtualCardListWidget,
     card_empty_state: StatusStateWidget,
     card_empty_state_visible: bool,
@@ -1034,6 +1049,7 @@ impl NotoraShell {
         Self {
             search_box,
             navigation_tree: TreeListWidget::new().with_id(NAVIGATION_TREE_ID),
+            active_tooltip: None,
             card_list: VirtualCardListWidget::new(),
             card_empty_state: StatusStateWidget::new(),
             card_empty_state_visible: false,
@@ -1219,6 +1235,7 @@ impl NotoraShell {
                     } else {
                         CardSelection::Unselected
                     },
+                    closable: card.closable,
                 }
             })
             .collect();
@@ -1602,13 +1619,16 @@ impl NotoraShell {
                 paint_at(context, self.new_document_menu_rect, |context| menu.paint(context));
             });
         }
-        if model.show_tooltip {
+        let product_overlay_visible = model.show_settings_overlay
+            || model.new_workspace_dialog.is_some()
+            || model.confirmation.is_some()
+            || model.save_conflict.is_some()
+            || model.show_new_document_menu;
+        if !product_overlay_visible && let Some(hint) = self.active_tooltip.as_ref() {
+            let (tooltip, tooltip_rect) =
+                TooltipWidget::new(hint, layout.dpi, layout.overlay_rect.w, layout.overlay_rect.h);
             frame.with_paint_context(|context| {
-                context.list.fill_rounded(
-                    layout.tooltip_rect,
-                    context.theme.application_theme().overlay_surface,
-                    4.0 * context.dpi,
-                );
+                paint_at(context, tooltip_rect, |context| tooltip.paint(context));
             });
         }
         Ok(())
@@ -1707,6 +1727,14 @@ impl NotoraShell {
             WidgetAction::VirtualCardList(VirtualCardListAction::Activated(key)) => {
                 self.card_identities.get(key).copied().map(NotoraAction::CardActivated)
             }
+            WidgetAction::VirtualCardList(VirtualCardListAction::CloseRequested(key)) => {
+                self.card_identities.get(key).and_then(|identity| match identity {
+                    DocumentIdentity::ExternalFile(external_file_id) => {
+                        Some(NotoraAction::ExternalFileCloseRequested(*external_file_id))
+                    }
+                    DocumentIdentity::Note(_) => None,
+                })
+            }
             WidgetAction::VirtualCardList(VirtualCardListAction::ScrollOffsetChanged(
                 offset_px,
             )) => {
@@ -1769,6 +1797,8 @@ impl NotoraShell {
         self.synchronize_focus(focus_target, Instant::now());
         let mut route =
             self.route_event_with_context(event, focus_target, None, &mut event_context);
+        let tooltip_changed = self.synchronize_tooltip(event, None);
+        route.consumed |= tooltip_changed;
         route.cursor_hint = event_context.cursor_hint;
         route
     }
@@ -1786,6 +1816,8 @@ impl NotoraShell {
         self.synchronize_focus(focus_target, Instant::now());
         let mut route =
             self.route_event_with_context(event, focus_target, Some(overlay), &mut event_context);
+        let tooltip_changed = self.synchronize_tooltip(event, Some(overlay));
+        route.consumed |= tooltip_changed;
         route.cursor_hint = event_context.cursor_hint;
         route
     }
@@ -1811,6 +1843,53 @@ impl NotoraShell {
             return self.route_keyboard_or_ime_event(event, focus_target, event_context);
         }
         self.route_pointer_event(event, focus_target, event_context)
+    }
+
+    fn synchronize_tooltip(
+        &mut self,
+        event: &Event,
+        product_overlay: Option<OverlayState>,
+    ) -> bool {
+        let next_tooltip = if product_overlay.is_some_and(|overlay| overlay != OverlayState::None) {
+            None
+        } else {
+            match event {
+                Event::MouseMove { px, py } => self.tooltip_at(*px, *py),
+                Event::MouseDown { .. }
+                | Event::PointerLeave
+                | Event::InteractionCancel
+                | Event::Wheel { .. } => None,
+                Event::MouseUp { .. }
+                | Event::KeyDown(..)
+                | Event::ImePreedit { .. }
+                | Event::ImeCommit(_)
+                | Event::ImeEnable
+                | Event::ImeDisable => return false,
+            }
+        };
+        if self.active_tooltip == next_tooltip {
+            return false;
+        }
+        self.active_tooltip = next_tooltip;
+        true
+    }
+
+    fn tooltip_at(&self, px: f32, py: f32) -> Option<TooltipHint> {
+        if self.editor_pane.has_open_popup() {
+            return None;
+        }
+        if self.mindmap_style_panel_open && self.mindmap_style_panel_rect.contains(px, py) {
+            let hint = self.mindmap_style_panel.tooltip_at(
+                px - self.mindmap_style_panel_rect.x,
+                py - self.mindmap_style_panel_rect.y,
+            )?;
+            return Some(offset_tooltip_hint(hint, self.mindmap_style_panel_rect));
+        }
+        self.new_note_button
+            .tooltip_at(px, py)
+            .or_else(|| self.navigation_tree.tooltip_at(px, py))
+            .or_else(|| self.card_list.tooltip_at(px, py))
+            .or_else(|| self.editor_pane.tooltip_at(px, py))
     }
 
     fn route_product_overlay_event(
@@ -2342,6 +2421,7 @@ fn render_catalog_card(card: &notora_core::CatalogCard) -> RenderCard {
         timestamp: format_modified_timestamp(card.modified_nanoseconds),
         icon: Some(document_icon(card.kind).to_owned()),
         tag_summary: summary_parts.join(" "),
+        closable: false,
     }
 }
 
@@ -2364,6 +2444,7 @@ fn render_external_file_card(session: &ExternalFileSession) -> RenderCard {
                 .to_owned(),
             ),
             tag_summary: String::new(),
+            closable: true,
         },
         ExternalFileSession::Untitled { kind, .. } => RenderCard {
             identity: session.identity(),
@@ -2372,6 +2453,7 @@ fn render_external_file_card(session: &ExternalFileSession) -> RenderCard {
             timestamp: "外部文件".to_owned(),
             icon: Some(document_icon(*kind).to_owned()),
             tag_summary: String::new(),
+            closable: true,
         },
         ExternalFileSession::Missing { last_known_path, .. } => RenderCard {
             identity: session.identity(),
@@ -2384,6 +2466,7 @@ fn render_external_file_card(session: &ExternalFileSession) -> RenderCard {
             timestamp: "已丢失".to_owned(),
             icon: Some("file".to_owned()),
             tag_summary: String::new(),
+            closable: true,
         },
     }
 }
@@ -2854,6 +2937,12 @@ fn local_rect(rect: Rect) -> Rect {
     Rect::new(0.0, 0.0, rect.w, rect.h)
 }
 
+fn offset_tooltip_hint(mut hint: TooltipHint, offset: Rect) -> TooltipHint {
+    hint.target_rect.x += offset.x;
+    hint.target_rect.y += offset.y;
+    hint
+}
+
 fn paint_at(context: &mut ui::PaintCtx<'_>, rect: Rect, paint: impl FnOnce(&mut ui::PaintCtx<'_>)) {
     let saved_offset = context.list.offset;
     context.list.offset = (saved_offset.0 + rect.x, saved_offset.1 + rect.y);
@@ -3097,6 +3186,29 @@ mod tests {
                 label: "打开".to_owned(),
                 action: NotoraAction::OpenExternalFileDialogRequested,
             }]
+        );
+    }
+
+    #[test]
+    fn files_toolbar_exposes_clear_all_when_external_records_exist() {
+        let mut state = NotoraState::default();
+        state.library.navigation_scope = NavigationScope::ExternalFiles;
+        let _ = state.external_files.create_untitled(DocumentKind::Markdown);
+
+        let model = NotoraRenderModel::from_state(&state);
+
+        assert_eq!(
+            model.note_toolbar,
+            vec![
+                NoteToolbarButtonInput {
+                    label: "打开".to_owned(),
+                    action: NotoraAction::OpenExternalFileDialogRequested,
+                },
+                NoteToolbarButtonInput {
+                    label: "清空".to_owned(),
+                    action: NotoraAction::ExternalFilesClearRequested,
+                },
+            ]
         );
     }
 
@@ -3697,6 +3809,151 @@ mod tests {
     }
 
     #[test]
+    fn hovering_workspace_actions_exposes_their_tooltips_in_the_product_shell() {
+        let mut state =
+            NotoraState { workspace_root: WorkspaceRootState::Active, ..NotoraState::default() };
+        state.library.navigation_tree.directories = vec!["docs".into()];
+        let model = NotoraRenderModel::from_state(&state);
+        let mut shell = NotoraShell::new();
+        shell.update_model(&model);
+
+        let theme = ui::theme::test_theme();
+        let mut measure = ui::NoopMeasure;
+        let mut layout_context =
+            ui::LayoutCtx { ui_measure: None, measure: &mut measure, theme: &theme, dpi: 1.0 };
+        let tree_rect = Rect::new(12.0, 52.0, 240.0, 240.0);
+        shell.navigation_tree_rect = tree_rect;
+        shell.navigation_tree.set_rect(tree_rect, &mut layout_context);
+        for expected_label in ["新建工作区", "打开工作区", "新建目录"] {
+            let pointer_position = (tree_rect.x as usize..tree_rect.right() as usize)
+                .flat_map(|px| {
+                    (tree_rect.y as usize..tree_rect.bottom() as usize)
+                        .map(move |py| (px as f32, py as f32))
+                })
+                .find(|(px, py)| {
+                    shell
+                        .navigation_tree
+                        .tooltip_at(*px, *py)
+                        .is_some_and(|hint| hint.label == expected_label)
+                })
+                .expect("workspace action should have a tooltip target");
+
+            shell.route_event(
+                &Event::MouseMove { px: pointer_position.0, py: pointer_position.1 },
+                FocusTarget::Editor,
+                &theme,
+                1.0,
+            );
+
+            assert_eq!(
+                shell.active_tooltip.as_ref().map(|hint| hint.label.as_str()),
+                Some(expected_label)
+            );
+        }
+
+        shell.route_event(
+            &Event::MouseMove { px: tree_rect.x, py: tree_rect.bottom() - 1.0 },
+            FocusTarget::Editor,
+            &theme,
+            1.0,
+        );
+        assert_eq!(shell.active_tooltip, None);
+    }
+
+    #[test]
+    fn hovering_a_closable_card_exposes_its_tooltip_in_the_product_shell() {
+        let mut shell = NotoraShell::new();
+        shell.card_list.set_input(VirtualCardListInput {
+            cards: vec![CardInput {
+                key: CardKey(7),
+                title: "outside.md".to_owned(),
+                excerpt: String::new(),
+                timestamp: "外部文件".to_owned(),
+                icon: Some("file-text".to_owned()),
+                tag_summary: String::new(),
+                selection: CardSelection::Unselected,
+                closable: true,
+            }],
+            scroll_offset_px: 0.0,
+        });
+        let theme = ui::theme::test_theme();
+        let mut measure = ui::NoopMeasure;
+        let mut layout_context =
+            ui::LayoutCtx { ui_measure: None, measure: &mut measure, theme: &theme, dpi: 1.0 };
+        shell.card_content_rect = Rect::new(240.0, 60.0, 320.0, 400.0);
+        shell.card_list.set_rect(shell.card_content_rect, &mut layout_context);
+        let close_rect = shell.card_list.layout().card_geometry(0).close_rect;
+        let (px, py) = (close_rect.x + close_rect.w * 0.5, close_rect.y + close_rect.h * 0.5);
+
+        shell.route_event(&Event::MouseMove { px, py }, FocusTarget::Editor, &theme, 1.0);
+
+        assert_eq!(
+            shell.active_tooltip.as_ref().map(|hint| hint.label.as_str()),
+            Some("关闭 outside.md")
+        );
+    }
+
+    #[test]
+    fn product_shell_collects_editor_header_and_split_button_tooltips() {
+        let mut shell = NotoraShell::new();
+        shell.editor_pane.set_input(EditorPaneInput {
+            mode: EditorPaneMode::WorkspaceNote,
+            header: ui::editor_header::EditorHeaderInput {
+                title: "路线图".to_owned(),
+                star_enabled: true,
+                ..ui::editor_header::EditorHeaderInput::default()
+            },
+            ..EditorPaneInput::default()
+        });
+        shell
+            .new_note_button
+            .set_input(SplitButtonInput { label: "新建笔记".to_owned(), enabled: true });
+        let theme = ui::theme::test_theme();
+        let mut measure = ui::NoopMeasure;
+        let mut layout_context =
+            ui::LayoutCtx { ui_measure: None, measure: &mut measure, theme: &theme, dpi: 1.0 };
+        shell.editor_rect = Rect::new(200.0, 0.0, 640.0, 600.0);
+        shell.editor_pane.set_rects(
+            EditorPaneRects {
+                header: Rect::new(200.0, 0.0, 640.0, 108.0),
+                toolbar: Rect::new(200.0, 108.0, 640.0, 40.0),
+                body: Rect::new(200.0, 148.0, 640.0, 452.0),
+            },
+            &mut layout_context,
+        );
+        shell.new_note_button.set_rect(Rect::new(40.0, 20.0, 128.0, 28.0), &mut layout_context);
+
+        let star_pointer = (200..840)
+            .flat_map(|px| (0..108).map(move |py| (px as f32, py as f32)))
+            .find(|(px, py)| {
+                shell.editor_pane.tooltip_at(*px, *py).is_some_and(|hint| hint.label == "添加星标")
+            })
+            .expect("editor star action should have a tooltip target");
+        shell.route_event(
+            &Event::MouseMove { px: star_pointer.0, py: star_pointer.1 },
+            FocusTarget::Editor,
+            &theme,
+            1.0,
+        );
+        assert_eq!(shell.active_tooltip.as_ref().map(|hint| hint.label.as_str()), Some("添加星标"));
+
+        let menu_rect = shell.new_note_button.menu_rect();
+        shell.route_event(
+            &Event::MouseMove {
+                px: menu_rect.x + menu_rect.w * 0.5,
+                py: menu_rect.y + menu_rect.h * 0.5,
+            },
+            FocusTarget::Editor,
+            &theme,
+            1.0,
+        );
+        assert_eq!(
+            shell.active_tooltip.as_ref().map(|hint| hint.label.as_str()),
+            Some("更多新建笔记选项")
+        );
+    }
+
+    #[test]
     fn directory_rows_expose_typed_creation_actions_and_inline_editor_input() {
         let mut state =
             NotoraState { workspace_root: WorkspaceRootState::Active, ..NotoraState::default() };
@@ -3912,6 +4169,7 @@ mod tests {
         let first_key = shell.card_list.input().cards[0].key;
         assert_eq!(shell.card_list.input().scroll_offset_px, 36.0);
         assert_eq!(shell.card_list.input().cards[0].selection, CardSelection::Selected);
+        assert!(!shell.card_list.input().cards[0].closable);
         assert_eq!(
             shell.translate_widget_action(&WidgetAction::VirtualCardList(
                 VirtualCardListAction::Selected(first_key),
@@ -3927,6 +4185,29 @@ mod tests {
 
         shell.update_model(&model);
         assert_eq!(shell.card_list.input().cards[0].key, first_key);
+    }
+
+    #[test]
+    fn external_file_cards_expose_close_actions_without_leaking_domain_state_to_ui() {
+        let mut state = NotoraState::default();
+        state.library.navigation_scope = NavigationScope::ExternalFiles;
+        let identity = state.external_files.create_untitled(DocumentKind::Markdown);
+        let DocumentIdentity::ExternalFile(external_file_id) = identity else {
+            panic!("external card fixture must have an external identity");
+        };
+        let model = NotoraRenderModel::from_state(&state);
+        let mut shell = NotoraShell::new();
+
+        shell.update_model(&model);
+
+        let card = &shell.card_list.input().cards[0];
+        assert!(card.closable);
+        assert_eq!(
+            shell.translate_widget_action(&WidgetAction::VirtualCardList(
+                VirtualCardListAction::CloseRequested(card.key),
+            )),
+            Some(NotoraAction::ExternalFileCloseRequested(external_file_id))
+        );
     }
 
     #[test]
@@ -3995,6 +4276,7 @@ mod tests {
                 icon: None,
                 tag_summary: String::new(),
                 selection: CardSelection::Unselected,
+                closable: false,
             }],
             scroll_offset_px: 0.0,
         });
@@ -4019,14 +4301,17 @@ mod tests {
     #[test]
     fn workspace_note_toolbar_has_no_note_level_commands() {
         let note_id = NoteId::generate();
-        assert!(note_toolbar_buttons(&NavigationScope::WorkspaceRoot, Some(note_id)).is_empty());
+        assert!(
+            note_toolbar_buttons(&NavigationScope::WorkspaceRoot, Some(note_id), false).is_empty()
+        );
     }
 
     #[test]
     fn tag_scope_has_no_manual_tag_mutation_toolbar_actions() {
         let tag_id = notora_core::TagId::generate();
         let note_id = NoteId::generate();
-        let tag_buttons = note_toolbar_buttons(&NavigationScope::Tag { tag_id }, Some(note_id));
+        let tag_buttons =
+            note_toolbar_buttons(&NavigationScope::Tag { tag_id }, Some(note_id), false);
         assert!(tag_buttons.is_empty());
     }
 
@@ -4064,6 +4349,7 @@ mod tests {
                 timestamp: String::new(),
                 icon: None,
                 tag_summary: "★ #产品/Notora".to_owned(),
+                closable: false,
             }],
         );
         assert_eq!(note_input.mode, EditorPaneMode::WorkspaceNote);

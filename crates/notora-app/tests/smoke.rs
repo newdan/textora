@@ -175,7 +175,7 @@ fn modal_new_document_menu_and_tooltip_are_painted_after_the_editor() {
         .find("if let Some(menu) = self.new_document_menu.as_ref()")
         .expect("shell should paint the new document menu after the editor");
     let tooltip_position = overlay_source
-        .find("if model.show_tooltip")
+        .find("self.active_tooltip.as_ref()")
         .expect("shell should paint a tooltip layer after the editor");
 
     assert!(modal_position < new_document_menu_position);

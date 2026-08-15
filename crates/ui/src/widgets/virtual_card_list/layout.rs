@@ -21,9 +21,11 @@ pub const CARD_EXCERPT_MAX_LINES: usize = 2;
 pub const CARD_CORNER_RADIUS_LOGICAL: f32 = 8.0;
 pub const CARD_METADATA_GAP_LOGICAL: f32 = 12.0;
 pub const VIRTUAL_CARD_OVERSCAN_COUNT: usize = 2;
+pub const CARD_CLOSE_BUTTON_SIZE_LOGICAL: f32 = 24.0;
 
 const CARD_TEXT_SECTION_GAP_LOGICAL: f32 = 6.0;
 const CARD_CONTENT_METADATA_GAP_LOGICAL: f32 = 12.0;
+const CARD_TITLE_CLOSE_GAP_LOGICAL: f32 = 6.0;
 
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 struct CardPlacement {
@@ -31,6 +33,7 @@ struct CardPlacement {
     height_px: f32,
     title_line_count: usize,
     excerpt_line_count: usize,
+    closable: bool,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -40,6 +43,7 @@ pub struct CardGeometry {
     pub icon_rect: Rect,
     pub title_rect: Rect,
     pub title_baseline: f32,
+    pub close_rect: Rect,
     pub excerpt_rect: Rect,
     pub excerpt_baseline: f32,
     pub metadata_rect: Rect,
@@ -78,6 +82,17 @@ impl VirtualCardListLayout {
             icon_size,
         );
         let title_x = icon_rect.right() + CARD_ICON_GAP_LOGICAL * self.dpi;
+        let close_button_size = CARD_CLOSE_BUTTON_SIZE_LOGICAL * self.dpi;
+        let close_rect = if placement.closable {
+            Rect::new(
+                card_rect.right() - horizontal_padding - close_button_size,
+                card_rect.y + vertical_padding - (close_button_size - icon_size) * 0.5,
+                close_button_size,
+                close_button_size,
+            )
+        } else {
+            Rect::ZERO
+        };
         let title_font_size = CARD_TITLE_FONT_SIZE_LOGICAL * self.dpi;
         let excerpt_font_size = CARD_EXCERPT_FONT_SIZE_LOGICAL * self.dpi;
         let metadata_font_size = CARD_METADATA_FONT_SIZE_LOGICAL * self.dpi;
@@ -92,9 +107,14 @@ impl VirtualCardListLayout {
                 * CARD_TEXT_SECTION_GAP_LOGICAL
                 * self.dpi;
         let metadata_y = card_rect.bottom() - vertical_padding - metadata_font_size;
-        let text_right = card_rect.right() - horizontal_padding;
+        let text_right = if placement.closable {
+            close_rect.x - CARD_TITLE_CLOSE_GAP_LOGICAL * self.dpi
+        } else {
+            card_rect.right() - horizontal_padding
+        };
+        let secondary_text_right = card_rect.right() - horizontal_padding;
         let secondary_text_x = card_rect.x + horizontal_padding;
-        let metadata_width = (text_right - secondary_text_x) * 0.42;
+        let metadata_width = (secondary_text_right - secondary_text_x) * 0.42;
         let metadata_rect =
             Rect::new(secondary_text_x, metadata_y, metadata_width.max(0.0), metadata_font_size);
 
@@ -103,10 +123,11 @@ impl VirtualCardListLayout {
             icon_rect,
             title_rect: Rect::new(title_x, title_y, (text_right - title_x).max(0.0), title_height),
             title_baseline: title_y + title_font_size * 0.8,
+            close_rect,
             excerpt_rect: Rect::new(
                 secondary_text_x,
                 excerpt_y,
-                (text_right - secondary_text_x).max(0.0),
+                (secondary_text_right - secondary_text_x).max(0.0),
                 excerpt_height,
             ),
             excerpt_baseline: excerpt_y + excerpt_font_size * 0.8,
@@ -115,7 +136,9 @@ impl VirtualCardListLayout {
             tag_rect: Rect::new(
                 metadata_rect.right() + CARD_METADATA_GAP_LOGICAL * self.dpi,
                 metadata_y,
-                (text_right - metadata_rect.right() - CARD_METADATA_GAP_LOGICAL * self.dpi)
+                (secondary_text_right
+                    - metadata_rect.right()
+                    - CARD_METADATA_GAP_LOGICAL * self.dpi)
                     .max(0.0),
                 metadata_font_size,
             ),
@@ -189,6 +212,7 @@ fn build_card_placements(cards: &[CardInput], card_width_px: f32, dpi: f32) -> V
                 height_px,
                 title_line_count,
                 excerpt_line_count,
+                closable: card.closable,
             };
             next_card_top_px += height_px + card_gap_px;
             placement
@@ -258,6 +282,7 @@ mod tests {
             icon: None,
             tag_summary: String::new(),
             selection: super::super::CardSelection::Unselected,
+            closable: false,
         }
     }
 }

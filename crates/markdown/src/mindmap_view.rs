@@ -3196,6 +3196,43 @@ mod tests {
     }
 
     #[test]
+    fn title_caret_geometry_uses_the_same_font_as_the_drawn_text() {
+        let title = "iiiiiiii";
+        let source = format!("# {title}\n");
+        let (mut view, mut doc) = view_with_source(&source);
+        let title_end = view.ready_tree().root.title_byte_range.end;
+        view.handle_message(PluginMessage::SetCursorByte(title_end), &mut doc);
+        let mut shaper = Shaper::new().expect("test shaper should initialize");
+        shaper.set_font_family(Some("monospace"));
+        let theme = Theme::from_definition(&ThemeDefinition::default_dark());
+        let draw_list =
+            view.render(&doc, Rect::new(0.0, 0.0, 1200.0, 800.0), &theme, &mut shaper, 1.0);
+
+        let geometry = &view.ready_hit_map().nodes[0];
+        let caret_x = screen_point(
+            &view,
+            *geometry.grapheme_edges.last().expect("title must have an end edge"),
+            geometry.title_rect.y,
+        )
+        .x;
+        let drawn_text_end = draw_list
+            .cmds
+            .iter()
+            .find_map(|command| match command {
+                DrawCmd::TextLayout { layout, x, .. } if layout.text == title => {
+                    Some(*x + layout.shaped.width)
+                }
+                _ => None,
+            })
+            .expect("title text must be drawn");
+
+        assert!(
+            (caret_x - drawn_text_end).abs() < 0.01,
+            "caret and title must share shaping metrics: caret={caret_x}, text_end={drawn_text_end}"
+        );
+    }
+
+    #[test]
     fn selected_title_preedit_projects_a_caret_and_local_candidate_position() {
         let (mut view, mut doc) = view_with_source("# Root\n## Child\n");
         let title_start = view.ready_tree().root.children[0].title_byte_range.start;

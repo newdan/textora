@@ -9,6 +9,7 @@ use crate::core::{
     MouseButton, PaintCtx, Rect, Widget, WidgetAction,
 };
 use crate::widgets::icon::draw_icon;
+use crate::widgets::tooltip::TooltipHint;
 
 /// 菜单区域的固定逻辑宽度。
 pub const SPLIT_BUTTON_MENU_WIDTH_LOGICAL: f32 = 28.0;
@@ -357,6 +358,13 @@ impl Widget for SplitButtonWidget {
         self.pressed_region.is_some()
     }
 
+    fn tooltip_at(&self, px: f32, py: f32) -> Option<TooltipHint> {
+        self.menu_rect.contains(px, py).then(|| TooltipHint {
+            label: format!("更多{}选项", self.input.label),
+            target_rect: self.menu_rect,
+        })
+    }
+
     fn as_any_mut(&mut self) -> &mut dyn Any {
         self
     }
@@ -418,6 +426,28 @@ mod tests {
                 crate::core::AccessibilityAction::Activate,
             )),
             Some(WidgetAction::Control(ControlAction::Activated { id: WidgetId(42) }))
+        );
+    }
+
+    #[test]
+    fn menu_region_exposes_a_tooltip_without_repeating_the_visible_main_label() {
+        let widget = widget();
+        let menu_rect = widget.menu_rect();
+
+        assert_eq!(
+            widget
+                .tooltip_at(menu_rect.x + menu_rect.w * 0.5, menu_rect.y + menu_rect.h * 0.5,)
+                .map(|hint| hint.label),
+            Some("更多New note选项".to_owned())
+        );
+        assert_eq!(
+            widget
+                .tooltip_at(
+                    widget.main_rect().x + widget.main_rect().w * 0.5,
+                    widget.main_rect().y + widget.main_rect().h * 0.5,
+                )
+                .map(|hint| hint.label),
+            None
         );
     }
 

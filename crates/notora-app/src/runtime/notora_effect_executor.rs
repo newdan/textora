@@ -29,6 +29,11 @@ pub(super) trait NotoraEffectTarget {
     fn choose_workspace_root(&mut self);
     fn open_external_files(&mut self, request: ExternalOpenRequest);
     fn create_untitled_external(&mut self, kind: notora_core::DocumentKind) -> Vec<NotoraAction>;
+    fn close_external_file(
+        &mut self,
+        external_file_id: notora_core::ExternalFileId,
+    ) -> Vec<NotoraAction>;
+    fn close_all_external_files(&mut self) -> Vec<NotoraAction>;
     fn resolve_save_conflict(&mut self, request: SaveConflictRequest);
     fn apply_product_settings_update(
         &mut self,
@@ -109,6 +114,10 @@ impl NotoraEffectExecutor {
                 Vec::new()
             }
             NotoraEffect::CreateUntitledExternal(kind) => target.create_untitled_external(kind),
+            NotoraEffect::CloseExternalFile(external_file_id) => {
+                target.close_external_file(external_file_id)
+            }
+            NotoraEffect::CloseAllExternalFiles => target.close_all_external_files(),
             NotoraEffect::ResolveSaveConflict(request) => {
                 target.resolve_save_conflict(request);
                 Vec::new()

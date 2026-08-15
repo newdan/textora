@@ -11,6 +11,7 @@ use crate::core::{
     MouseButton, PaintCtx, Rect, Widget, WidgetAction,
 };
 use crate::widgets::icon::draw_icon;
+use crate::widgets::tooltip::TooltipHint;
 
 pub use layout::{CardGeometry, VirtualCardListLayout};
 
@@ -38,6 +39,7 @@ pub struct CardInput {
     pub icon: Option<String>,
     pub tag_summary: String,
     pub selection: CardSelection,
+    pub closable: bool,
 }
 
 /// 虚拟列表每帧输入。选择和滚动状态分别由调用方维护。
@@ -54,6 +56,7 @@ pub enum VirtualCardListAction {
     Activated(CardKey),
     ScrollOffsetChanged(f32),
     HoverChanged(Option<CardKey>),
+    CloseRequested(CardKey),
 }
 
 /// 仅布局可见卡片范围的纵向列表组件。
@@ -144,6 +147,19 @@ impl VirtualCardListWidget {
             .visible_range
             .clone()
             .find(|index| self.layout.card_geometry(*index).card_rect.contains(px, py))
+    }
+
+    fn close_button_at(&self, px: f32, py: f32) -> Option<CardKey> {
+        if !self.rect.contains(px, py) {
+            return None;
+        }
+        self.layout.visible_range.clone().find_map(|index| {
+            let card = self.input.cards.get(index)?;
+            (card.closable
+                && self.hovered_key == Some(card.key)
+                && self.layout.card_geometry(index).close_rect.contains(px, py))
+            .then_some(card.key)
+        })
     }
 
     fn update_hover(&mut self, px: f32, py: f32) -> Option<VirtualCardListAction> {
@@ -272,6 +288,18 @@ impl Widget for VirtualCardListWidget {
                     &card.tag_summary,
                 );
             }
+            if card.closable && is_hovered {
+                let close_rect = geometry.close_rect;
+                let close_icon_size = layout::CARD_ICON_SIZE_LOGICAL * ctx.dpi;
+                draw_icon(
+                    ctx.list,
+                    "x",
+                    close_rect.x + (close_rect.w - close_icon_size) * 0.5,
+                    close_rect.y + (close_rect.h - close_icon_size) * 0.5,
+                    close_icon_size,
+                    ctx.theme.palette.text_muted,
+                );
+            }
         }
         ctx.list.cmds.push(DrawCmd::PopClip);
     }
@@ -330,6 +358,17 @@ impl Widget for VirtualCardListWidget {
             if !description.is_empty() {
                 child = child.with_description(description);
             }
+            if card.closable {
+                child.children.push(
+                    AccessibilityNode::new(
+                        root_id.child(card.key.0).child(1),
+                        AccessibilityRole::Button,
+                        ctx.screen_bounds(geometry.close_rect),
+                    )
+                    .with_name(format!("关闭 {}", card.title))
+                    .with_action(AccessibilityAction::Activate),
+                );
+            }
             root.children.push(child);
         }
         Some(root)
@@ -343,6 +382,16 @@ impl Widget for VirtualCardListWidget {
         let root_id = AccessibilityId::from(id);
         if request.target == root_id && request.action == AccessibilityAction::Focus {
             return Some(WidgetAction::Control(ControlAction::FocusRequested { id }));
+        }
+        if request.action == AccessibilityAction::Activate
+            && let Some(card) =
+                self.input.cards.iter().find(|card| {
+                    card.closable && request.target == root_id.child(card.key.0).child(1)
+                })
+        {
+            return Some(WidgetAction::VirtualCardList(VirtualCardListAction::CloseRequested(
+                card.key,
+            )));
         }
         let card =
             self.input.cards.iter().find(|card| root_id.child(card.key.0) == request.target)?;
@@ -366,9 +415,13 @@ impl Widget for VirtualCardListWidget {
                 self.update_hover(*px, *py)
             }
             Event::MouseDown { px, py, button: MouseButton::Left } => self
-                .card_at(*px, *py)
-                .and_then(|index| self.input.cards.get(index))
-                .map(|card| VirtualCardListAction::Selected(card.key)),
+                .close_button_at(*px, *py)
+                .map(VirtualCardListAction::CloseRequested)
+                .or_else(|| {
+                    self.card_at(*px, *py)
+                        .and_then(|index| self.input.cards.get(index))
+                        .map(|card| VirtualCardListAction::Selected(card.key))
+                }),
             Event::Wheel { dy, px, py, .. } if self.hit(*px, *py) => {
                 let next_offset =
                     (self.input.scroll_offset_px - *dy).clamp(0.0, self.max_scroll_offset());
@@ -390,6 +443,16 @@ impl Widget for VirtualCardListWidget {
             self.select_card(key);
         }
         Some(WidgetAction::VirtualCardList(action))
+    }
+
+    fn tooltip_at(&self, px: f32, py: f32) -> Option<TooltipHint> {
+        let card_key = self.close_button_at(px, py)?;
+        let card = self.input.cards.iter().find(|card| card.key == card_key)?;
+        let card_index = self.input.cards.iter().position(|card| card.key == card_key)?;
+        Some(TooltipHint {
+            label: format!("关闭 {}", card.title),
+            target_rect: self.layout.card_geometry(card_index).close_rect,
+        })
     }
 
     fn as_any_mut(&mut self) -> &mut dyn Any {
@@ -466,6 +529,7 @@ mod tests {
             icon: Some("file-text".to_owned()),
             tag_summary: "#work".to_owned(),
             selection: CardSelection::Unselected,
+            closable: false,
         }
     }
 
@@ -619,6 +683,61 @@ mod tests {
         assert_eq!(
             widget.on_event(&Event::KeyDown(KeyCode::Enter, Modifiers::NONE), &mut context),
             Some(WidgetAction::VirtualCardList(VirtualCardListAction::Activated(CardKey(1))))
+        );
+    }
+
+    #[test]
+    fn close_button_emits_its_card_key_without_selecting_the_card() {
+        let mut widget = VirtualCardListWidget::new();
+        let mut closable_card = card(2);
+        closable_card.closable = true;
+        widget.set_input(VirtualCardListInput {
+            cards: vec![card(1), closable_card],
+            scroll_offset_px: 0.0,
+        });
+        layout(&mut widget, Rect::new(0.0, 0.0, 360.0, 500.0), 1.0);
+        let close_rect = widget.layout().card_geometry(1).close_rect;
+        let theme = crate::theme::test_theme();
+        let mut context = EventCtx::new(&theme, 1.0);
+        let close_x = close_rect.x + close_rect.w * 0.5;
+        let close_y = close_rect.y + close_rect.h * 0.5;
+
+        assert_eq!(widget.close_button_at(close_x, close_y), None);
+        assert_eq!(
+            widget.on_event(&Event::MouseMove { px: close_x, py: close_y }, &mut context),
+            Some(WidgetAction::VirtualCardList(VirtualCardListAction::HoverChanged(Some(
+                CardKey(2),
+            ))))
+        );
+
+        assert_eq!(
+            widget.on_event(
+                &Event::MouseDown { px: close_x, py: close_y, button: MouseButton::Left },
+                &mut context,
+            ),
+            Some(WidgetAction::VirtualCardList(VirtualCardListAction::CloseRequested(CardKey(2)),))
+        );
+        assert_eq!(widget.selected_key(), None);
+    }
+
+    #[test]
+    fn close_button_exposes_the_card_title_in_its_tooltip() {
+        let mut widget = VirtualCardListWidget::new();
+        let mut closable_card = card(2);
+        closable_card.closable = true;
+        widget
+            .set_input(VirtualCardListInput { cards: vec![closable_card], scroll_offset_px: 0.0 });
+        layout(&mut widget, Rect::new(0.0, 0.0, 360.0, 500.0), 1.0);
+        let close_rect = widget.layout().card_geometry(0).close_rect;
+        let theme = crate::theme::test_theme();
+        let mut context = EventCtx::new(&theme, 1.0);
+        let close_x = close_rect.x + close_rect.w * 0.5;
+        let close_y = close_rect.y + close_rect.h * 0.5;
+        let _ = widget.on_event(&Event::MouseMove { px: close_x, py: close_y }, &mut context);
+
+        assert_eq!(
+            widget.tooltip_at(close_x, close_y).map(|hint| hint.label),
+            Some("关闭 Card 2".to_owned())
         );
     }
 }

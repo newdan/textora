@@ -7,6 +7,7 @@ use crate::core::{
     WidgetAction,
 };
 use crate::widgets::icon::draw_icon;
+use crate::widgets::tooltip::TooltipHint;
 use std::any::Any;
 
 const TOOLBAR_COMMAND_SIZE_LOGICAL: f32 = 32.0;
@@ -119,13 +120,21 @@ impl EditorToolbarWidget {
 
     fn command_key_at(&self, px: f32, py: f32, dpi: f32) -> Option<String> {
         let (visible, _) = self.visible_command_keys(self.rect.w / dpi);
+        visible.into_iter().find(|command_key| {
+            self.command_rect(command_key, dpi).is_some_and(|rect| rect.contains(px, py))
+        })
+    }
+
+    fn command_rect(&self, requested_key: &str, dpi: f32) -> Option<Rect> {
+        let (visible, _) = self.visible_command_keys(self.rect.w / dpi);
         let commands = self.commands();
         let mut left = self.rect.x + TOOLBAR_HORIZONTAL_PADDING_LOGICAL * dpi;
         for key in visible {
             let command = commands.iter().find(|command| command.command_key == key)?;
             let width = self.command_width(command) * dpi;
-            if Rect::new(left, self.rect.y, width, self.rect.h).contains(px, py) {
-                return Some(key);
+            let command_rect = Rect::new(left, self.rect.y, width, self.rect.h);
+            if key == requested_key {
+                return Some(command_rect);
             }
             left += width + TOOLBAR_COMMAND_GAP_LOGICAL * dpi;
         }
@@ -361,6 +370,20 @@ impl Widget for EditorToolbarWidget {
         }
     }
 
+    fn tooltip_at(&self, px: f32, py: f32) -> Option<TooltipHint> {
+        if let Some(command_key) = self.command_key_at(px, py, self.dpi) {
+            let command = self.commands().into_iter().find(|command| {
+                command.command_key == command_key && toolbar_icon(&command.command_key).is_some()
+            })?;
+            let target_rect = self.command_rect(&command_key, self.dpi)?;
+            return Some(TooltipHint { label: command.label, target_rect });
+        }
+        let overflow_rect = self.overflow_rect(self.dpi);
+        overflow_rect
+            .contains(px, py)
+            .then_some(TooltipHint { label: "更多命令".to_owned(), target_rect: overflow_rect })
+    }
+
     fn as_any(&self) -> &dyn Any {
         self
     }
@@ -470,6 +493,28 @@ mod tests {
         assert_eq!(
             toolbar.visible_command_keys(48.0),
             (vec!["undo".to_owned()], vec!["link".to_owned()])
+        );
+    }
+
+    #[test]
+    fn icon_commands_and_overflow_expose_tooltips() {
+        let mut toolbar = toolbar();
+        let theme = crate::theme::test_theme();
+        let mut measure = crate::core::NoopMeasure;
+        let mut layout =
+            LayoutCtx { ui_measure: None, measure: &mut measure, theme: &theme, dpi: 1.0 };
+        toolbar.set_rect(Rect::new(0.0, 0.0, 80.0, 40.0), &mut layout);
+
+        assert_eq!(toolbar.tooltip_at(20.0, 20.0).map(|hint| hint.label), Some("撤销".to_owned()));
+        let overflow_rect = toolbar.overflow_rect(1.0);
+        assert_eq!(
+            toolbar
+                .tooltip_at(
+                    overflow_rect.x + overflow_rect.w * 0.5,
+                    overflow_rect.y + overflow_rect.h * 0.5,
+                )
+                .map(|hint| hint.label),
+            Some("更多命令".to_owned())
         );
     }
 

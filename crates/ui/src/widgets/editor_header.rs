@@ -7,6 +7,7 @@ use crate::core::{
 };
 use crate::widgets::icon::draw_icon;
 use crate::widgets::text_box::{TextBox, TextBoxChrome};
+use crate::widgets::tooltip::TooltipHint;
 use std::any::Any;
 
 const HEADER_HORIZONTAL_PADDING_LOGICAL: f32 = 16.0;
@@ -328,6 +329,31 @@ impl Widget for EditorHeaderWidget {
         self.handle_widget_event(event, context)
     }
 
+    fn tooltip_at(&self, px: f32, py: f32) -> Option<TooltipHint> {
+        if self.input.star_enabled && self.star_rect.contains(px, py) {
+            let label = if self.input.starred { "取消星标" } else { "添加星标" };
+            return Some(TooltipHint { label: label.to_owned(), target_rect: self.star_rect });
+        }
+        if self.input.delete_visible && self.delete_rect.contains(px, py) {
+            return Some(TooltipHint {
+                label: "移到回收站".to_owned(),
+                target_rect: self.delete_rect,
+            });
+        }
+        if self.encryption_rect.contains(px, py) {
+            let label = match self.input.encryption {
+                EncryptionStatusInput::Encrypted => "已加密",
+                EncryptionStatusInput::Unencrypted => "未加密",
+                EncryptionStatusInput::Hidden => return None,
+            };
+            return Some(TooltipHint {
+                label: label.to_owned(),
+                target_rect: self.encryption_rect,
+            });
+        }
+        None
+    }
+
     fn as_any(&self) -> &dyn Any {
         self
     }
@@ -546,6 +572,53 @@ mod tests {
                 &mut event_context,
             ),
             Some(ControlAction::Activated { id: EDITOR_HEADER_DELETE_ID })
+        );
+    }
+
+    #[test]
+    fn icon_actions_expose_state_aware_tooltips() {
+        let mut header = EditorHeaderWidget::new();
+        header.set_input(input());
+        let theme = crate::theme::test_theme();
+        let mut measure = HeaderMeasure;
+        let mut layout_context =
+            LayoutCtx { ui_measure: None, measure: &mut measure, theme: &theme, dpi: 1.0 };
+        header.set_rect(Rect::new(0.0, 0.0, 640.0, 128.0), &mut layout_context);
+
+        for (rect, expected_label) in [
+            (header.star_rect, "添加星标"),
+            (header.delete_rect, "移到回收站"),
+            (header.encryption_rect, "未加密"),
+        ] {
+            assert_eq!(
+                header
+                    .tooltip_at(rect.x + rect.w * 0.5, rect.y + rect.h * 0.5)
+                    .map(|hint| hint.label),
+                Some(expected_label.to_owned())
+            );
+        }
+
+        let mut starred_input = input();
+        starred_input.starred = true;
+        starred_input.encryption = EncryptionStatusInput::Encrypted;
+        header.set_input(starred_input);
+        assert_eq!(
+            header
+                .tooltip_at(
+                    header.star_rect.x + header.star_rect.w * 0.5,
+                    header.star_rect.y + header.star_rect.h * 0.5,
+                )
+                .map(|hint| hint.label),
+            Some("取消星标".to_owned())
+        );
+        assert_eq!(
+            header
+                .tooltip_at(
+                    header.encryption_rect.x + header.encryption_rect.w * 0.5,
+                    header.encryption_rect.y + header.encryption_rect.h * 0.5,
+                )
+                .map(|hint| hint.label),
+            Some("已加密".to_owned())
         );
     }
 

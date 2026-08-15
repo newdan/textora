@@ -4,7 +4,8 @@ use std::path::PathBuf;
 
 use notora_core::note_command::{MoveNoteRequest, NoteCommand, NoteCommandResult};
 use notora_core::{
-    DocumentIdentity, DocumentKind, NavigationScope, NoteEditorMetadata, NoteId, TagId, TagSummary,
+    DocumentIdentity, DocumentKind, ExternalFileId, NavigationScope, NoteEditorMetadata, NoteId,
+    TagId, TagSummary,
 };
 
 use crate::search_controller::SearchGeneration;
@@ -180,6 +181,14 @@ pub enum NotoraAction {
     OpenExternalFileDialogRequested,
     ExternalPathsReceived(Vec<PathBuf>),
     ExternalFileOpened(DocumentIdentity),
+    ExternalFileCloseRequested(ExternalFileId),
+    ExternalFileCloseCompleted(ExternalFileId),
+    ExternalFileCloseFailed(String),
+    ExternalFilesClearRequested,
+    ExternalFilesClearCompleted {
+        closed_external_file_ids: Vec<ExternalFileId>,
+        blocked_count: usize,
+    },
     PromotePreviewRequested,
     WorkspaceRootSelectionRequested,
     OpenNewDocumentMenu,
@@ -252,6 +261,8 @@ pub enum NotoraEffect {
     ChooseWorkspaceRoot,
     OpenExternalFiles(crate::effect_executor::ExternalOpenRequest),
     CreateUntitledExternal(DocumentKind),
+    CloseExternalFile(ExternalFileId),
+    CloseAllExternalFiles,
     ResolveSaveConflict(SaveConflictRequest),
     ApplyProductSettingsUpdate(ProductSettingsUpdate),
     PersistProductSettings,

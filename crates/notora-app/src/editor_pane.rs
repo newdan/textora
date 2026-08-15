@@ -8,6 +8,7 @@ use ui::editor_header::{EditorHeaderInput, EditorHeaderWidget};
 use ui::editor_toolbar::{EditorToolbarInput, EditorToolbarWidget};
 use ui::location_picker::{LocationPickerInput, LocationPickerWidget};
 use ui::tag_editor::{TagEditorInput, TagEditorWidget};
+use ui::tooltip::TooltipHint;
 use ui::{Event, EventCtx, LayoutCtx, PaintCtx, Rect, Widget};
 
 const EDITOR_PANE_TAG_ROW_HEIGHT_LOGICAL: f32 = 28.0;
@@ -285,6 +286,24 @@ impl EditorPaneChrome {
         }
     }
 
+    pub fn tooltip_at(&self, px: f32, py: f32) -> Option<TooltipHint> {
+        if !self.input.should_render_chrome() || self.has_open_popup() {
+            return None;
+        }
+        if self.document_header_rect.contains(px, py) {
+            let hint = self
+                .header
+                .tooltip_at(px - self.document_header_rect.x, py - self.document_header_rect.y)?;
+            return Some(translate_tooltip_hint(hint, self.document_header_rect));
+        }
+        if self.rects.toolbar.contains(px, py) {
+            let hint =
+                self.toolbar.tooltip_at(px - self.rects.toolbar.x, py - self.rects.toolbar.y)?;
+            return Some(translate_tooltip_hint(hint, self.rects.toolbar));
+        }
+        None
+    }
+
     fn close_location_after_action(&mut self, action: &WidgetAction) {
         let WidgetAction::Control(control) = action else {
             return;
@@ -320,6 +339,12 @@ impl Default for EditorPaneChrome {
 
 fn local_rect(rect: Rect) -> Rect {
     Rect::new(0.0, 0.0, rect.w, rect.h)
+}
+
+fn translate_tooltip_hint(mut hint: TooltipHint, offset: Rect) -> TooltipHint {
+    hint.target_rect.x += offset.x;
+    hint.target_rect.y += offset.y;
+    hint
 }
 
 fn document_header_rect(header: Rect, dpi: f32) -> Rect {
@@ -614,6 +639,56 @@ mod tests {
             chrome.route_event(&ui::Event::MouseMove { px: 120.0, py: 240.0 }, &mut event_context,),
             Some(WidgetAction::Consumed)
         );
+    }
+
+    #[test]
+    fn nested_icon_tooltips_are_translated_to_window_coordinates() {
+        let mut pane_input = input(EditorPaneMode::WorkspaceNote);
+        pane_input.toolbar = EditorToolbarInput {
+            groups: vec![ui::editor_toolbar::EditorToolbarGroupInput {
+                label: "编辑".to_owned(),
+                commands: vec![ui::editor_toolbar::EditorToolbarCommandInput {
+                    command_key: "undo".to_owned(),
+                    label: "撤销".to_owned(),
+                    enabled: true,
+                    overflow_priority: 0,
+                }],
+            }],
+            overflow_open: false,
+        };
+        let mut chrome = EditorPaneChrome::new();
+        chrome.set_input(pane_input);
+        let theme = ui::theme::test_theme();
+        let mut measure = ui::NoopMeasure;
+        let mut layout_context =
+            ui::LayoutCtx { ui_measure: None, measure: &mut measure, theme: &theme, dpi: 1.0 };
+        chrome.set_rects(
+            EditorPaneRects {
+                header: Rect::new(100.0, 20.0, 640.0, 128.0),
+                toolbar: Rect::new(100.0, 148.0, 640.0, 40.0),
+                body: Rect::new(100.0, 188.0, 640.0, 400.0),
+            },
+            &mut layout_context,
+        );
+
+        let star_hint = (chrome.document_header_rect.x as usize
+            ..chrome.document_header_rect.right() as usize)
+            .flat_map(|px| {
+                (chrome.document_header_rect.y as usize
+                    ..chrome.document_header_rect.bottom() as usize)
+                    .map(move |py| (px as f32, py as f32))
+            })
+            .find_map(|(px, py)| chrome.tooltip_at(px, py).filter(|hint| hint.label == "取消星标"))
+            .expect("star action should expose a tooltip through the pane boundary");
+        assert_eq!(star_hint.label, "取消星标");
+        assert!(star_hint.target_rect.x >= chrome.document_header_rect.x);
+        assert!(star_hint.target_rect.right() <= chrome.document_header_rect.right());
+
+        let toolbar_hint = chrome
+            .tooltip_at(chrome.rects.toolbar.x + 20.0, chrome.rects.toolbar.y + 20.0)
+            .expect("toolbar command should expose a tooltip through the pane boundary");
+        assert_eq!(toolbar_hint.label, "撤销");
+        assert_eq!(toolbar_hint.target_rect.x, chrome.rects.toolbar.x + 16.0);
     }
 
     #[test]
