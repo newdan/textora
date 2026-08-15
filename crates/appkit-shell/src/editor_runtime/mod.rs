@@ -1963,6 +1963,38 @@ mod tests {
     }
 
     #[test]
+    fn second_loaded_plain_text_tab_exposes_overflow_before_render_resources_are_ready() {
+        let mut runtime = runtime_with_clean_tab();
+        let source = (0..100).map(|line| format!("line {line}\n")).collect::<String>();
+        let mut text_buffer = TextBuffer::new(false).expect("second TXT buffer should be writable");
+        text_buffer.write_raw(source.as_bytes());
+        runtime.install_prepared_tab(
+            PreparedTab::new(
+                DocumentModel::new(text_buffer),
+                TabRuntime::new(EditorPluginFactory.create()),
+            ),
+            None,
+            OpenDisposition::Persistent,
+        );
+        let editor_rect = ui::Rect::new(240.0, 32.0, 640.0, 480.0);
+        let mut resources = runtime.take_render_resources();
+        assert!(resources.text.is_none());
+        assert!(resources.gpu.is_none());
+        let mut frame = runtime.begin_frame().expect("second TXT frame should begin");
+
+        runtime
+            .paint_active_editor(&mut frame, &mut resources, editor_rect)
+            .expect("second TXT should synchronize its viewport without render resources");
+
+        let scrollbar = runtime
+            .active_editor_scrollbars_input()
+            .and_then(|input| input.vertical)
+            .expect("overflowing second TXT document should expose a vertical scrollbar");
+        assert_eq!(scrollbar.total_display_rows, 101);
+        runtime.restore_render_resources(resources);
+    }
+
+    #[test]
     fn closing_a_tab_invalidates_late_reshape_results() {
         let mut runtime = runtime_with_clean_tab();
         let tab_id = runtime.active_tab_id().expect("test runtime should have an active tab");

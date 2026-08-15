@@ -838,8 +838,8 @@ dirty = false
             .expect("restored active runtime should exist");
         let restored_session =
             TabSession::new(restored_active_id, restored_document, restored_runtime);
-        assert_eq!(restored_session.scroll_anchor_state().doc_line, 0);
-        assert_eq!(restored_session.scroll_anchor_state().pixel_offset, 0.0);
+        assert_eq!(restored_session.scroll_anchor_state().doc_line, 1);
+        assert_eq!(restored_session.scroll_anchor_state().pixel_offset, 3.5);
     }
 
     #[test]

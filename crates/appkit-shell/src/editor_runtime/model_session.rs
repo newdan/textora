@@ -9,7 +9,7 @@ use crate::editor_runtime::{
     EditorDocumentSummary, EditorNotification, EditorOutcome, EditorTabSnapshot,
     EditorWorkspaceSnapshot, OpenDisposition, SemanticEditResult,
 };
-use crate::prepared_tab::PreparedTab;
+use crate::prepared_tab::{PreparedTab, placeholder_display_entries};
 use crate::tab_runtime::{TabRuntime, TabRuntimeStore};
 use crate::tab_session::{TabSession, TabSessionMut};
 use crate::view_route::ViewRouteTable;
@@ -1082,14 +1082,8 @@ fn apply_edit_selection(
 }
 
 fn refresh_presentation_after_edit(tab: &mut TabSessionMut<'_>, line_height: f32) {
-    let entries = (0..tab.document.line_count())
-        .map(|document_line| {
-            let byte_offset = tab.document.line_byte_offset(document_line).unwrap_or(0);
-            let byte_length = tab.document.line_byte_length(document_line).unwrap_or(0) as u32;
-            crate::snap_tree::DisplayLineEntry::placeholder(byte_offset, byte_length, 0, 1)
-        })
-        .collect();
-    tab.display_mut().display_map.set_entries(entries);
+    let placeholder_entries = placeholder_display_entries(tab.document);
+    tab.display_mut().display_map.set_entries(placeholder_entries);
     tab.invalidate_render_cache_all();
     tab.cursor_render_state_mut().click_hint = None;
     tab.cursor_render_state_mut().cursor_blink_instant = std::time::Instant::now();
