@@ -574,13 +574,9 @@ impl MindmapView {
                 anchor_range = Some(anchor_node.subtree_source_range.clone());
                 target = Some(candidate_target);
                 canvas.is_valid = true;
-                if let Some(insertion_line) = insertion_line(
-                    layout,
-                    tree,
-                    anchor_index,
-                    candidate_target,
-                    self.constants.sibling_gap,
-                ) {
+                if let Some(insertion_line) =
+                    insertion_line(layout, tree, anchor_index, candidate_target, &self.constants)
+                {
                     canvas.insertion_line = Some(insertion_line);
                 }
             }
@@ -1047,11 +1043,18 @@ fn insertion_line(
     tree: &Tree,
     anchor_index: usize,
     target: mmf::edit::MoveSubtreeTarget,
-    sibling_gap: f32,
+    constants: &LayoutConstants,
 ) -> Option<((f32, f32), (f32, f32))> {
     let anchor = layout_node_for_source(layout, anchor_index)?;
     let sibling_indices = find_siblings(tree, anchor_index)?;
     let sibling_position = sibling_indices.iter().position(|index| *index == anchor_index)?;
+    let sibling_gap = find_parent(tree, anchor_index)
+        .and_then(|parent| {
+            collect_nodes_dfs(&tree.root).iter().position(|node| std::ptr::eq(*node, parent))
+        })
+        .and_then(|parent_index| layout_node_for_source(layout, parent_index))
+        .map(|parent| constants.sibling_gap_for_parent_depth(parent.depth))
+        .unwrap_or(constants.sibling_gap);
     let y = match target {
         mmf::edit::MoveSubtreeTarget::BeforeSibling | mmf::edit::MoveSubtreeTarget::BeforeChild => {
             sibling_position
@@ -2140,10 +2143,18 @@ mod tests {
             source_geometry.title_rect.x - ONE_PIXEL_BEFORE_TITLE_LEFT_EDGE - source_card.x;
         let anchor = view.ready_hit_map().nodes[3].card_rect;
         let pointer_x = anchor.x + anchor.w + source_press_x;
-        let expected_insertion_y = anchor.y + anchor.h + view.constants.sibling_gap * 0.5;
+        let expected_insertion_y =
+            anchor.y + anchor.h + view.constants.sibling_gap_for_parent_depth(0) * 0.5;
 
         let response = view.handle_canvas_drag(
-            drag_request(&view, CanvasDragPhase::Update, source_range, pointer_x, 120.0, 1),
+            drag_request(
+                &view,
+                CanvasDragPhase::Update,
+                source_range,
+                pointer_x,
+                anchor.y + anchor.h * 0.75,
+                1,
+            ),
             &doc,
         );
         assert!(matches!(response, CanvasDragResponse::Preview(preview)

@@ -9,6 +9,7 @@ use ui::core::geom::Rect;
 
 const MIN_CARD_WIDTH: f32 = 60.0;
 const MAX_CONTROL_HIT_SIZE_DP: f32 = 36.0;
+const ROOT_BRANCH_GAP_MULTIPLIER: f32 = 2.0;
 pub const EXPANDED_CONTROL_RIGHT_OFFSET_DP: f32 = 8.0;
 
 pub const EMPTY_TITLE_PLACEHOLDER: &str = "输入主题";
@@ -60,6 +61,15 @@ impl LayoutConstants {
 
     pub fn child_gap_for_parent_depth(&self, parent_depth: u8) -> f32 {
         if parent_depth == 0 { self.root_child_gap } else { self.nested_child_gap }
+    }
+
+    /// 根节点的直接子树是独立分组，保留更宽的垂直空白以便拖拽重排。
+    pub fn sibling_gap_for_parent_depth(&self, parent_depth: u8) -> f32 {
+        if parent_depth == 0 {
+            self.sibling_gap * ROOT_BRANCH_GAP_MULTIPLIER
+        } else {
+            self.sibling_gap
+        }
     }
 
     /// 深度越界钳制到最后一档，空数组回退 1.0。
@@ -181,7 +191,7 @@ fn subtree_height(
         children_h += subtree_height(child, child_source_index, depth + 1, constants);
         child_source_index += subtree_node_count(child);
     }
-    children_h += (node.children.len() - 1) as f32 * constants.sibling_gap;
+    children_h += (node.children.len() - 1) as f32 * constants.sibling_gap_for_parent_depth(depth);
     children_h.max(constants.card_height_for_depth(depth))
 }
 
@@ -238,7 +248,8 @@ fn assign_positions(
         children_total_height += subtree_height(child, child_source_index, depth + 1, constants);
         child_source_index += subtree_node_count(child);
     }
-    children_total_height += node.children.len().saturating_sub(1) as f32 * constants.sibling_gap;
+    let sibling_gap = constants.sibling_gap_for_parent_depth(depth);
+    children_total_height += node.children.len().saturating_sub(1) as f32 * sibling_gap;
 
     let mut cursor = y_offset + (sub_h - children_total_height) / 2.0;
     let mut child_source_index = source_node_index + 1;
@@ -261,7 +272,7 @@ fn assign_positions(
             card_widths_by_depth,
             out,
         );
-        cursor += child_h + constants.sibling_gap;
+        cursor += child_h + sibling_gap;
     }
 
     child_source_index
@@ -737,6 +748,36 @@ mod tests {
             "siblings should be stacked, child1.y={}, child2.y={}",
             child1_y,
             child2_y
+        );
+    }
+
+    #[test]
+    fn root_branch_groups_have_more_drag_space_than_nested_siblings() {
+        let tree = parser::parse(
+            "# Root\n## First group\n### First child\n### Second child\n## Second group\n### Third child\n",
+        )
+        .expect("fixture must be valid MMF");
+        let constants = LayoutConstants::default();
+        let mut shaper = Shaper::new().expect("test shaper should initialize");
+        let layout = compute_layout(&tree, &mut shaper, &constants, None);
+
+        let first_child = &layout.nodes[2];
+        let second_child = &layout.nodes[3];
+        let first_group_bottom = layout.nodes[1..4]
+            .iter()
+            .map(|node| node.y + node.h)
+            .max_by(f32::total_cmp)
+            .expect("first group must contain visible nodes");
+        let second_group_top = layout.nodes[4..6]
+            .iter()
+            .map(|node| node.y)
+            .min_by(f32::total_cmp)
+            .expect("second group must contain visible nodes");
+
+        assert_eq!(second_child.y - (first_child.y + first_child.h), constants.sibling_gap);
+        assert_eq!(
+            second_group_top - first_group_bottom,
+            constants.sibling_gap_for_parent_depth(0)
         );
     }
 
