@@ -250,25 +250,41 @@ fn emit_block_break(source: &str, current_byte: usize) -> EditAugmentation {
 
 fn backspace_empty_source_line(source: &str, current_byte: usize) -> Option<EditAugmentation> {
     let (line_start, _, line_end) = locate_source_line_bounds(source, current_byte)?;
-    if line_start != line_end {
+    if line_start != source_line_content_end(source, line_end) {
         return None;
     }
 
-    let previous_line_end = previous_non_empty_line_end(source, current_byte)?;
-    let delete_range = if current_byte >= source.len() {
-        previous_line_end..current_byte
-    } else if source.as_bytes().get(current_byte) == Some(&b'\n') {
-        current_byte..current_byte + 1
+    let previous_line_end = previous_non_empty_line_end(source, current_byte);
+    let (delete_range, cursor_byte_after) = if current_byte >= source.len() {
+        let previous_newline_width = newline_sequence_width_before(source, current_byte)?;
+        if contiguous_newline_count_before(source, current_byte) > BLOCK_BOUNDARY_NEWLINE_COUNT {
+            let range = current_byte - previous_newline_width..current_byte;
+            let cursor = range.start;
+            (range, cursor)
+        } else {
+            (previous_line_end..current_byte, previous_line_end)
+        }
     } else {
-        current_byte.checked_sub(1)?..current_byte
+        let newline_width = newline_sequence_width_at(source, line_start)?;
+        (line_start..line_start + newline_width, previous_line_end)
     };
     let aug = EditAugmentation {
         insert_text: Some(String::new()),
         replace_range: Some(delete_range),
-        cursor_byte_after: previous_line_end,
+        cursor_byte_after,
     };
     debug_assert_augmentation(&aug, source);
     Some(aug)
+}
+
+fn contiguous_newline_count_before(source: &str, byte: usize) -> usize {
+    let mut newline_count = 0;
+    let mut run_start = byte.min(source.len());
+    while let Some(newline_width) = newline_sequence_width_before(source, run_start) {
+        run_start -= newline_width;
+        newline_count += 1;
+    }
+    newline_count
 }
 
 fn backspace_paragraph_boundary(source: &str, current_byte: usize) -> Option<EditAugmentation> {
@@ -312,20 +328,12 @@ fn backspace_paragraph_boundary(source: &str, current_byte: usize) -> Option<Edi
     Some(aug)
 }
 
-fn previous_non_empty_line_end(source: &str, current_byte: usize) -> Option<usize> {
-    let bytes = source.as_bytes();
-    let mut line_end = current_byte.min(source.len());
-    while line_end > 0 {
-        let line_start = bytes[..line_end]
-            .iter()
-            .rposition(|&source_byte| source_byte == b'\n')
-            .map_or(0, |newline_index| newline_index + 1);
-        if line_start < line_end {
-            return Some(line_end);
-        }
-        line_end = line_start.checked_sub(1)?;
+fn previous_non_empty_line_end(source: &str, current_byte: usize) -> usize {
+    let mut previous_line_end = current_byte.min(source.len());
+    while let Some(newline_width) = newline_sequence_width_before(source, previous_line_end) {
+        previous_line_end -= newline_width;
     }
-    Some(0)
+    previous_line_end
 }
 
 /// 用于 list / blockquote 的"续 marker"：插入 `"\n{indent}{marker}"`。
@@ -390,8 +398,8 @@ fn enter_context_augmentation(
         EnterContext::Heading { level: _, at_end } => {
             heading_enter_augmentation(source, current_byte, at_end)
         }
-        EnterContext::ListItem { indent, bullet, empty, at_end: _ } => {
-            list_item_enter_augmentation(source, current_byte, &indent, bullet, empty)
+        EnterContext::ListItem { indent, continuation_marker, empty, at_end: _ } => {
+            list_item_enter_augmentation(source, current_byte, &indent, &continuation_marker, empty)
         }
         EnterContext::BlockQuoteLine { continuation_prefix, empty } => {
             blockquote_enter_augmentation(source, current_byte, &continuation_prefix, empty)
@@ -442,19 +450,13 @@ fn list_item_enter_augmentation(
     source: &str,
     current_byte: usize,
     indent: &str,
-    bullet: ListBullet,
+    continuation_marker: &str,
     empty: bool,
 ) -> Option<EditAugmentation> {
     if empty {
         return emit_remove_current_line(source, current_byte);
     }
-    let marker = match bullet {
-        ListBullet::Bullet => String::from("- "),
-        ListBullet::Ordered(n) => format!("{}. ", n + 1),
-        ListBullet::TaskList(false) => String::from("- [ ] "),
-        ListBullet::TaskList(true) => String::from("- [x] "),
-    };
-    Some(emit_marker_break(source, current_byte, indent, &marker))
+    Some(emit_marker_break(source, current_byte, indent, continuation_marker))
 }
 
 fn blockquote_enter_augmentation(
@@ -482,7 +484,7 @@ pub enum EnterContext {
     TopLevelParagraphEnd,
     ParagraphInterior,
     Heading { level: u8, at_end: bool },
-    ListItem { indent: String, bullet: ListBullet, empty: bool, at_end: bool },
+    ListItem { indent: String, continuation_marker: String, empty: bool, at_end: bool },
     BlockQuoteLine { continuation_prefix: String, empty: bool },
     CodeBlock,
     TableCell { next_cell_start: Option<usize> },
@@ -494,7 +496,7 @@ struct ItemFrame {
     start: usize,
     marker_end: usize,
     indent: String,
-    bullet: ListBullet,
+    continuation_marker: String,
     saw_content: bool,
 }
 
@@ -547,7 +549,12 @@ pub fn classify_enter_context(source: &str, current_byte: usize) -> EnterContext
                         start: range.start,
                         marker_end,
                         indent,
-                        bullet,
+                        continuation_marker: list_continuation_marker(
+                            source,
+                            range.start,
+                            marker_end,
+                            bullet,
+                        ),
                         saw_content: false,
                     });
                 } else {
@@ -555,7 +562,7 @@ pub fn classify_enter_context(source: &str, current_byte: usize) -> EnterContext
                         start: range.start,
                         marker_end: range.start,
                         indent,
-                        bullet: ListBullet::Bullet,
+                        continuation_marker: String::from("- "),
                         saw_content: false,
                     });
                 }
@@ -572,7 +579,7 @@ pub fn classify_enter_context(source: &str, current_byte: usize) -> EnterContext
                     let at_end = current_byte == end;
                     return EnterContext::ListItem {
                         indent: frame.indent,
-                        bullet: frame.bullet,
+                        continuation_marker: frame.continuation_marker,
                         empty,
                         at_end,
                     };
@@ -734,25 +741,70 @@ fn get_marker_delete_range(source: &str, current_byte: usize) -> Option<std::ops
     let trimmed = prefix.trim_start_matches(' ');
 
     let is_match = match trimmed {
-        _ if trimmed.starts_with('>') => trimmed.chars().all(|c| c == '>' || c == ' '),
+        _ if trimmed.starts_with('>') => {
+            trimmed.chars().all(|character| matches!(character, '>' | ' ' | '\t'))
+        }
         _ if trimmed.starts_with('#') => {
             let hashes = trimmed.chars().take_while(|&c| c == '#').count();
-            hashes <= 6 && hashes > 0 && &trimmed[hashes..] == " "
+            hashes <= 6 && hashes > 0 && is_single_marker_separator(&trimmed[hashes..])
         }
         _ if trimmed.starts_with('-') || trimmed.starts_with('*') || trimmed.starts_with('+') => {
-            let rest = &trimmed[1..];
-            rest == " " || rest == " [ ] " || rest == " [x] " || rest == " [X] "
+            unordered_marker_suffix_is_complete(&trimmed[1..])
         }
         _ => {
             let digits = trimmed.chars().take_while(|c| c.is_ascii_digit()).count();
             digits > 0 && {
                 let rest = &trimmed[digits..];
-                rest == ". " || rest == ") "
+                rest.strip_prefix(['.', ')']).is_some_and(is_single_marker_separator)
             }
         }
     };
 
     if is_match { Some(line_start..current_byte) } else { None }
+}
+
+fn is_single_marker_separator(text: &str) -> bool {
+    matches!(text.as_bytes(), [b' '] | [b'\t'])
+}
+
+fn unordered_marker_suffix_is_complete(suffix: &str) -> bool {
+    let Some((&separator, after_separator)) = suffix.as_bytes().split_first() else {
+        return false;
+    };
+    if !matches!(separator, b' ' | b'\t') {
+        return false;
+    }
+    if after_separator.is_empty() {
+        return true;
+    }
+
+    let task_suffix = std::str::from_utf8(after_separator)
+        .expect("a suffix sliced from valid UTF-8 source must remain valid UTF-8");
+    ["[ ]", "[x]", "[X]"].into_iter().any(|task_marker| {
+        task_suffix
+            .strip_prefix(task_marker)
+            .is_some_and(|trailing| trailing.is_empty() || is_single_marker_separator(trailing))
+    })
+}
+
+fn list_continuation_marker(
+    source: &str,
+    marker_start: usize,
+    marker_end: usize,
+    bullet: ListBullet,
+) -> String {
+    let source_marker = &source[marker_start..marker_end];
+    match bullet {
+        ListBullet::Bullet => source_marker.to_owned(),
+        ListBullet::Ordered(number) => {
+            let suffix_start = source_marker.bytes().take_while(u8::is_ascii_digit).count();
+            format!("{}{}", number + 1, &source_marker[suffix_start..])
+        }
+        ListBullet::TaskList(false) => source_marker.to_owned(),
+        ListBullet::TaskList(true) => {
+            source_marker.replacen("[x]", "[ ]", 1).replacen("[X]", "[ ]", 1)
+        }
+    }
 }
 
 fn locate_source_line_bounds(source: &str, byte: usize) -> Option<(usize, usize, usize)> {
@@ -975,6 +1027,64 @@ mod tests {
     }
 
     #[test]
+    fn backspace_after_repeated_trailing_enter_removes_only_latest_empty_line() {
+        let source = "first";
+        let first_enter = augment_edit(source, source.len(), AugmentKind::Enter)
+            .expect("first Enter should create a trailing paragraph");
+        let after_first_enter = apply_augmentation_at(source, source.len(), &first_enter);
+        let second_enter =
+            augment_edit(&after_first_enter, first_enter.cursor_byte_after, AugmentKind::Enter)
+                .expect("second Enter should add one trailing empty line");
+        let after_second_enter =
+            apply_augmentation_at(&after_first_enter, first_enter.cursor_byte_after, &second_enter);
+
+        let backspace = augment_edit(
+            &after_second_enter,
+            second_enter.cursor_byte_after,
+            AugmentKind::Backspace,
+        )
+        .expect("Backspace should remove the latest trailing empty line");
+        let restored =
+            apply_augmentation_at(&after_second_enter, second_enter.cursor_byte_after, &backspace);
+
+        assert_eq!(restored, after_first_enter);
+        assert_eq!(backspace.cursor_byte_after, first_enter.cursor_byte_after);
+    }
+
+    #[test]
+    fn list_enter_preserves_marker_style_and_resets_completed_tasks() {
+        let cases = [
+            ("* item", "\n* "),
+            ("+ item", "\n+ "),
+            ("7) item", "\n8) "),
+            ("-\titem", "\n-\t"),
+            ("- [x] done", "\n- [ ] "),
+        ];
+
+        for (source, expected_insert) in cases {
+            let augmentation = augment_edit(source, source.len(), AugmentKind::Enter)
+                .unwrap_or_else(|| panic!("Enter should continue list item {source:?}"));
+
+            assert_eq!(
+                augmentation.insert_text.as_deref(),
+                Some(expected_insert),
+                "continuation marker mismatch for {source:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn backspace_removes_markers_that_use_tab_separators() {
+        for source in ["-\t", ">\t", "1.\t"] {
+            let augmentation = augment_edit(source, source.len(), AugmentKind::Backspace)
+                .unwrap_or_else(|| panic!("Backspace should remove marker {source:?}"));
+
+            assert_eq!(augmentation.replace_range, Some(0..source.len()));
+            assert_eq!(augmentation.cursor_byte_after, 0);
+        }
+    }
+
+    #[test]
     fn backspace_at_soft_line_start_removes_single_source_newline() {
         let source = "first line\nsecond line";
         let current_byte = "first line\n".len();
@@ -999,6 +1109,20 @@ mod tests {
 
         assert_eq!(edited_source, "firstsecond");
         assert_eq!(augmentation.replace_range, Some("first".len()..current_byte));
+        assert_eq!(augmentation.cursor_byte_after, "first".len());
+    }
+
+    #[test]
+    fn backspace_on_crlf_empty_line_removes_complete_newline_sequence() {
+        let source = "first\r\n\r\nsecond";
+        let current_byte = "first\r\n".len();
+
+        let augmentation = augment_edit(source, current_byte, AugmentKind::Backspace)
+            .expect("Backspace on a CRLF empty line should use the empty-line edit");
+        let edited_source = apply_augmentation_at(source, current_byte, &augmentation);
+
+        assert_eq!(edited_source, "first\r\nsecond");
+        assert_eq!(augmentation.replace_range, Some(current_byte..current_byte + 2));
         assert_eq!(augmentation.cursor_byte_after, "first".len());
     }
 

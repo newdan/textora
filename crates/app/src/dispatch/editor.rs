@@ -692,6 +692,7 @@ impl App {
         intent: ui::plugin::EditIntent,
         _event_loop: Option<&ActiveEventLoop>,
     ) -> AppEffect {
+        self.editor_runtime.set_preferred_x(None);
         let mut effect = AppEffect::NONE;
         let Some(tab_id) = self.active_tab_id() else {
             return effect;
@@ -848,6 +849,29 @@ mod edit_tests {
             &mut dv,
         );
         assert!(outcome.edit_outcome.executed, "InsertChar should execute");
+    }
+
+    #[test]
+    fn wysiwyg_text_edit_clears_vertical_navigation_preferred_x() {
+        use crate::dispatch::wysiwyg::semantic_test_support::{
+            SemanticPluginState, app_with_semantic_plugin,
+        };
+        use std::cell::RefCell;
+        use std::rc::Rc;
+
+        let state = Rc::new(RefCell::new(SemanticPluginState::default()));
+        let mut app = app_with_semantic_plugin("hello", state);
+        app.editor_runtime.set_preferred_x(Some(120.0));
+
+        let effect =
+            app.dispatch_transactional_edit_for_test(EditCommand::InsertText(String::from("x")));
+
+        assert!(effect.redraw, "text edit should redraw the WYSIWYG editor");
+        assert_eq!(
+            app.editor_runtime.preferred_x(),
+            None,
+            "editing must discard the horizontal column captured by earlier vertical movement"
+        );
     }
 
     #[test]
