@@ -6,6 +6,8 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use notora_core::{DocumentKind, NavigationScope, NoteId, TagId, WorkspaceId};
 use serde::{Deserialize, Serialize};
 
+use crate::NavigationPaneVisibility;
+
 const SESSION_SCHEMA_VERSION: u32 = 1;
 const LEGACY_SESSION_SCHEMA_VERSION: u32 = 0;
 const MINIMUM_WINDOW_WIDTH_PX: f32 = 320.0;
@@ -98,6 +100,7 @@ pub struct ProductSession {
     pub expanded_directories: Vec<PathBuf>,
     pub navigation_width_logical: f32,
     pub card_list_width_logical: f32,
+    pub navigation_pane_visibility: NavigationPaneVisibility,
     pub last_document: Option<SavedDocument>,
     pub window_geometry: WindowGeometry,
 }
@@ -113,6 +116,7 @@ impl Default for ProductSession {
             expanded_directories: Vec::new(),
             navigation_width_logical: 220.0,
             card_list_width_logical: 340.0,
+            navigation_pane_visibility: NavigationPaneVisibility::Expanded,
             last_document: None,
             window_geometry: WindowGeometry::default(),
         }
@@ -280,6 +284,7 @@ mod tests {
         ProductSession, SavedDocument, SavedNavigationScope, WindowGeometry, load_product_session,
         save_product_session,
     };
+    use crate::NavigationPaneVisibility;
 
     #[test]
     fn session_round_trip_filters_missing_external_files_and_sanitizes_geometry() {
@@ -293,6 +298,7 @@ mod tests {
             last_navigation_scope: SavedNavigationScope::Starred,
             last_document: Some(SavedDocument::Note { note_id }),
             expanded_directories: vec![PathBuf::from("plans"), PathBuf::from("plans/q3")],
+            navigation_pane_visibility: NavigationPaneVisibility::Collapsed,
             window_geometry: WindowGeometry {
                 x_px: f32::NAN,
                 y_px: 0.0,
@@ -307,6 +313,7 @@ mod tests {
         assert_eq!(loaded.session.external_paths, vec![external_path]);
         assert_eq!(loaded.session.last_navigation_scope, SavedNavigationScope::Starred);
         assert_eq!(loaded.session.last_document, Some(SavedDocument::Note { note_id }));
+        assert_eq!(loaded.session.navigation_pane_visibility, NavigationPaneVisibility::Collapsed);
         assert_eq!(
             loaded.session.expanded_directories,
             vec![PathBuf::from("plans"), PathBuf::from("plans/q3")]

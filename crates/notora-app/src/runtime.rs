@@ -239,6 +239,7 @@ impl NotoraRuntime {
         let mut state = NotoraState::default();
         state.layout.navigation_width_logical = loaded_session.session.navigation_width_logical;
         state.layout.card_list_width_logical = loaded_session.session.card_list_width_logical;
+        state.layout.navigation_pane_visibility = loaded_session.session.navigation_pane_visibility;
         state.library.last_command_error =
             loaded_product_settings.diagnostic.or(loaded_session.diagnostic);
         let runtime_tab_limit = NonZeroUsize::new(product_settings.interface.runtime_tab_limit)
@@ -528,6 +529,11 @@ impl NotoraRuntime {
             dpi,
             navigation_width_logical: self.action_runtime.state().layout.navigation_width_logical,
             card_list_width_logical: self.action_runtime.state().layout.card_list_width_logical,
+            navigation_pane_visibility: self
+                .action_runtime
+                .state()
+                .layout
+                .navigation_pane_visibility,
             compact_content: self.action_runtime.state().layout.compact_content,
             compact_navigation: self.action_runtime.state().layout.compact_navigation,
         })
@@ -1524,6 +1530,7 @@ fn action_requires_session_persistence(action: &NotoraAction) -> bool {
             | NotoraAction::CardActivated(_)
             | NotoraAction::NoteCommandCompleted(_)
             | NotoraAction::CompactNavigationRequested
+            | NotoraAction::NavigationPaneVisibilityToggled
             | NotoraAction::CompactBackRequested
             | NotoraAction::ExternalFileOpened(_)
             | NotoraAction::ExternalFileCloseCompleted(_)
@@ -2493,6 +2500,11 @@ impl NotoraRuntime {
                 .collect(),
             navigation_width_logical: self.action_runtime.state().layout.navigation_width_logical,
             card_list_width_logical: self.action_runtime.state().layout.card_list_width_logical,
+            navigation_pane_visibility: self
+                .action_runtime
+                .state()
+                .layout
+                .navigation_pane_visibility,
             window_geometry: self.capture_window_geometry(),
             ..crate::session::ProductSession::default()
         }

@@ -49,8 +49,9 @@ pub use settings::{
     SettingsError, WorkspaceSettings, load_product_settings, save_product_settings,
 };
 pub use state::{
-    CompactContent, CompactNavigation, FocusTarget, LayoutState, LibraryState, NavigationTreeState,
-    NotoraState, OverlayState, Pane, ResponsiveLayoutMode, WorkspaceRootState,
+    CompactContent, CompactNavigation, FocusTarget, LayoutState, LibraryState,
+    NavigationPaneVisibility, NavigationTreeState, NotoraState, OverlayState, Pane,
+    ResponsiveLayoutMode, WorkspaceRootState,
 };
 pub use workspace_controller::{
     ActiveWorkspace, WorkspaceCommand, WorkspaceCommandResult, WorkspaceController,

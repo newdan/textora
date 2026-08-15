@@ -67,6 +67,8 @@ const SIDEBAR_LABEL_FONT_SIZE_LOGICAL: f32 = 15.0;
 const CARD_LOAD_MORE_THRESHOLD_LOGICAL: f32 = 160.0;
 const COMPACT_NAVIGATION_BUTTON_WIDTH_LOGICAL: f32 = 72.0;
 const COMPACT_BACK_BUTTON_WIDTH_LOGICAL: f32 = 64.0;
+const NAVIGATION_COLLAPSE_BUTTON_SIZE_LOGICAL: f32 = 28.0;
+const NAVIGATION_COLLAPSE_BUTTON_GAP_LOGICAL: f32 = 6.0;
 const CONFIRMATION_PANEL_WIDTH_LOGICAL: f32 = 360.0;
 const CONFIRMATION_PANEL_HEIGHT_LOGICAL: f32 = 160.0;
 const CONFIRMATION_BUTTON_WIDTH_LOGICAL: f32 = 88.0;
@@ -1017,6 +1019,8 @@ pub struct NotoraShell {
     new_document_menu_open: bool,
     note_toolbar_buttons: Vec<RenderedToolbarButton>,
     compact_navigation_rect: Rect,
+    navigation_collapse_rect: Rect,
+    navigation_expand_rect: Rect,
     compact_back_rect: Rect,
     confirmation_panel_rect: Rect,
     confirmation_confirm_rect: Rect,
@@ -1089,6 +1093,8 @@ impl NotoraShell {
             new_document_menu_open: false,
             note_toolbar_buttons: Vec::new(),
             compact_navigation_rect: Rect::ZERO,
+            navigation_collapse_rect: Rect::ZERO,
+            navigation_expand_rect: Rect::ZERO,
             compact_back_rect: Rect::ZERO,
             confirmation_panel_rect: Rect::ZERO,
             confirmation_confirm_rect: Rect::ZERO,
@@ -1305,10 +1311,17 @@ impl NotoraShell {
         self.update_model(model);
         let dpi = layout.dpi;
         let padding = SHELL_PADDING_LOGICAL * dpi;
+        self.navigation_collapse_rect = navigation_collapse_button_rect(layout, dpi, padding);
+        self.navigation_expand_rect = navigation_expand_button_rect(layout, dpi, padding);
+        let search_right = if self.navigation_collapse_rect == Rect::ZERO {
+            layout.navigation_rect.right() - padding
+        } else {
+            self.navigation_collapse_rect.x - NAVIGATION_COLLAPSE_BUTTON_GAP_LOGICAL * dpi
+        };
         let search_rect = Rect::new(
             layout.navigation_rect.x + padding,
             layout.navigation_rect.y + padding,
-            (layout.navigation_rect.w - padding * 2.0).max(0.0),
+            (search_right - layout.navigation_rect.x - padding).max(0.0),
             SEARCH_BAR_HEIGHT_LOGICAL * dpi,
         );
         let search_icon_area_width = SEARCH_ICON_AREA_WIDTH_LOGICAL * dpi;
@@ -1484,6 +1497,9 @@ impl NotoraShell {
             self.navigation_splitter.paint(context);
             self.card_list_splitter.paint(context);
             self.new_note_button.paint(context);
+            if self.navigation_collapse_rect != Rect::ZERO {
+                paint_navigation_collapse_button(context, self.navigation_collapse_rect);
+            }
             let settings_icon_size = SIDEBAR_ICON_SIZE_LOGICAL * context.dpi;
             let settings_horizontal_inset = SHELL_PADDING_LOGICAL * context.dpi;
             draw_icon(
@@ -1515,6 +1531,9 @@ impl NotoraShell {
             );
             if self.compact_navigation_rect != Rect::ZERO {
                 paint_note_tool_button(context, self.compact_navigation_rect, "笔记库");
+            }
+            if self.navigation_expand_rect != Rect::ZERO {
+                paint_note_tool_button(context, self.navigation_expand_rect, "笔记库");
             }
             for button in &self.note_toolbar_buttons {
                 paint_note_tool_button(context, button.rect, &button.label);
@@ -1887,6 +1906,18 @@ impl NotoraShell {
         }
         self.new_note_button
             .tooltip_at(px, py)
+            .or_else(|| {
+                self.navigation_collapse_rect.contains(px, py).then(|| TooltipHint {
+                    label: "收起笔记库".to_owned(),
+                    target_rect: self.navigation_collapse_rect,
+                })
+            })
+            .or_else(|| {
+                self.navigation_expand_rect.contains(px, py).then(|| TooltipHint {
+                    label: "展开笔记库".to_owned(),
+                    target_rect: self.navigation_expand_rect,
+                })
+            })
             .or_else(|| self.navigation_tree.tooltip_at(px, py))
             .or_else(|| self.card_list.tooltip_at(px, py))
             .or_else(|| self.editor_pane.tooltip_at(px, py))
@@ -2059,9 +2090,13 @@ impl NotoraShell {
         event: &Event,
         event_context: &mut EventCtx,
     ) -> Option<NotoraEventRoute> {
-        if let Some(action) =
-            compact_layout_action(event, self.compact_navigation_rect, self.compact_back_rect)
-        {
+        if let Some(action) = shell_layout_action(
+            event,
+            self.compact_navigation_rect,
+            self.navigation_collapse_rect,
+            self.navigation_expand_rect,
+            self.compact_back_rect,
+        ) {
             return Some(NotoraEventRoute::consumed(Some(action)));
         }
         if let Some(route) = self.route_canvas_scrollbars_event(event, event_context) {
@@ -2791,6 +2826,20 @@ fn paint_note_tool_button(context: &mut ui::PaintCtx<'_>, rect: Rect, label: &st
     );
 }
 
+fn paint_navigation_collapse_button(context: &mut ui::PaintCtx<'_>, rect: Rect) {
+    let application_theme = context.theme.application_theme();
+    context.list.fill_rounded(rect, application_theme.overlay_surface, 4.0 * context.dpi);
+    let icon_size = SIDEBAR_ICON_SIZE_LOGICAL * context.dpi;
+    draw_icon(
+        context.list,
+        "chevron-left",
+        rect.x + (rect.w - icon_size) * 0.5,
+        rect.y + (rect.h - icon_size) * 0.5,
+        icon_size,
+        application_theme.text_secondary,
+    );
+}
+
 fn layout_note_toolbar(
     card_list_rect: Rect,
     padding: f32,
@@ -2838,9 +2887,11 @@ fn note_toolbar_action(event: &Event, buttons: &[RenderedToolbarButton]) -> Opti
     buttons.iter().find(|button| button.rect.contains(*px, *py)).map(|button| button.action.clone())
 }
 
-fn compact_layout_action(
+fn shell_layout_action(
     event: &Event,
     compact_navigation_rect: Rect,
+    navigation_collapse_rect: Rect,
+    navigation_expand_rect: Rect,
     compact_back_rect: Rect,
 ) -> Option<NotoraAction> {
     let Event::MouseDown { px, py, button: ui::core::MouseButton::Left } = event else {
@@ -2849,7 +2900,39 @@ fn compact_layout_action(
     if compact_navigation_rect.contains(*px, *py) {
         return Some(NotoraAction::CompactNavigationRequested);
     }
+    if navigation_collapse_rect.contains(*px, *py) || navigation_expand_rect.contains(*px, *py) {
+        return Some(NotoraAction::NavigationPaneVisibilityToggled);
+    }
     compact_back_rect.contains(*px, *py).then_some(NotoraAction::CompactBackRequested)
+}
+
+fn navigation_collapse_button_rect(layout: ShellLayout, dpi: f32, padding: f32) -> Rect {
+    if layout.responsive_mode != ResponsiveLayoutMode::ThreePane
+        || layout.navigation_rect == Rect::ZERO
+    {
+        return Rect::ZERO;
+    }
+    let button_size = NAVIGATION_COLLAPSE_BUTTON_SIZE_LOGICAL * dpi;
+    Rect::new(
+        layout.navigation_rect.right() - padding - button_size,
+        layout.navigation_rect.y + padding + (SEARCH_BAR_HEIGHT_LOGICAL * dpi - button_size) * 0.5,
+        button_size,
+        button_size,
+    )
+}
+
+fn navigation_expand_button_rect(layout: ShellLayout, dpi: f32, padding: f32) -> Rect {
+    if layout.responsive_mode != ResponsiveLayoutMode::ThreePane
+        || layout.navigation_rect != Rect::ZERO
+    {
+        return Rect::ZERO;
+    }
+    Rect::new(
+        layout.card_list_rect.x + padding,
+        layout.card_list_rect.y + 8.0 * dpi,
+        COMPACT_NAVIGATION_BUTTON_WIDTH_LOGICAL * dpi,
+        NOTE_TOOL_BUTTON_HEIGHT_LOGICAL * dpi,
+    )
 }
 
 fn new_document_menu_action(action: &WidgetAction) -> Option<NotoraAction> {
@@ -3503,6 +3586,24 @@ mod tests {
 
         assert!(route.consumed);
         assert!(route.actions.is_empty());
+    }
+
+    #[test]
+    fn navigation_pane_controls_dispatch_the_same_visibility_toggle() {
+        let collapse_rect = Rect::new(180.0, 12.0, 28.0, 28.0);
+        let expand_rect = Rect::new(12.0, 8.0, 72.0, 28.0);
+
+        for (px, py) in [(194.0, 26.0), (48.0, 22.0)] {
+            let action = shell_layout_action(
+                &Event::MouseDown { px, py, button: ui::MouseButton::Left },
+                Rect::ZERO,
+                collapse_rect,
+                expand_rect,
+                Rect::ZERO,
+            );
+
+            assert_eq!(action, Some(NotoraAction::NavigationPaneVisibilityToggled));
+        }
     }
 
     #[test]

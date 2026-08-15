@@ -1,6 +1,6 @@
 use ui::Rect;
 
-use crate::{CompactContent, CompactNavigation, ResponsiveLayoutMode};
+use crate::{CompactContent, CompactNavigation, NavigationPaneVisibility, ResponsiveLayoutMode};
 
 pub const DEFAULT_NAVIGATION_WIDTH_LOGICAL: f32 = 220.0;
 pub const DEFAULT_CARD_LIST_WIDTH_LOGICAL: f32 = 340.0;
@@ -28,6 +28,7 @@ pub struct ShellLayoutInput {
     pub dpi: f32,
     pub navigation_width_logical: f32,
     pub card_list_width_logical: f32,
+    pub navigation_pane_visibility: NavigationPaneVisibility,
     pub compact_content: CompactContent,
     pub compact_navigation: CompactNavigation,
 }
@@ -75,6 +76,7 @@ impl ShellLayout {
                 navigation_width_logical,
                 requested_card_width_logical,
                 splitter_width_px,
+                input.navigation_pane_visibility,
             );
         }
         if window_rect.w >= (requested_card_width_logical + MINIMUM_EDITOR_WIDTH_LOGICAL) * dpi {
@@ -101,12 +103,25 @@ impl ShellLayout {
         navigation_width_logical: f32,
         requested_card_width_logical: f32,
         splitter_width_px: f32,
+        navigation_pane_visibility: NavigationPaneVisibility,
     ) -> Self {
-        let navigation_width_px = navigation_width_logical * dpi;
+        let navigation_width_px = match navigation_pane_visibility {
+            NavigationPaneVisibility::Expanded => navigation_width_logical * dpi,
+            NavigationPaneVisibility::Collapsed => 0.0,
+        };
         let card_width_px = requested_card_width_logical * dpi;
-        let navigation_rect = Rect::new(0.0, 0.0, navigation_width_px, window_rect.h);
-        let navigation_splitter_rect =
-            centered_splitter_rect(navigation_rect.right(), window_rect.h, splitter_width_px);
+        let navigation_rect = match navigation_pane_visibility {
+            NavigationPaneVisibility::Expanded => {
+                Rect::new(0.0, 0.0, navigation_width_px, window_rect.h)
+            }
+            NavigationPaneVisibility::Collapsed => Rect::ZERO,
+        };
+        let navigation_splitter_rect = match navigation_pane_visibility {
+            NavigationPaneVisibility::Expanded => {
+                centered_splitter_rect(navigation_rect.right(), window_rect.h, splitter_width_px)
+            }
+            NavigationPaneVisibility::Collapsed => Rect::ZERO,
+        };
         let card_list_rect = Rect::new(navigation_rect.right(), 0.0, card_width_px, window_rect.h);
         let card_list_splitter_rect =
             centered_splitter_rect(card_list_rect.right(), window_rect.h, splitter_width_px);
@@ -262,6 +277,7 @@ mod tests {
             dpi,
             navigation_width_logical: DEFAULT_NAVIGATION_WIDTH_LOGICAL,
             card_list_width_logical: DEFAULT_CARD_LIST_WIDTH_LOGICAL,
+            navigation_pane_visibility: NavigationPaneVisibility::Expanded,
             compact_content: CompactContent::CardList,
             compact_navigation: CompactNavigation::Hidden,
         }
@@ -353,6 +369,21 @@ mod tests {
         assert_eq!(layout.card_list_rect.w, DEFAULT_CARD_LIST_WIDTH_LOGICAL * 2.0);
         assert_eq!(layout.navigation_width_logical, DEFAULT_NAVIGATION_WIDTH_LOGICAL);
         assert_editor_chrome_is_partitioned(layout);
+    }
+
+    #[test]
+    fn collapsed_navigation_releases_its_width_and_disables_its_splitter() {
+        let mut layout_input = input(880.0, 1.0);
+        layout_input.navigation_pane_visibility = NavigationPaneVisibility::Collapsed;
+
+        let layout = ShellLayout::compute(layout_input);
+
+        assert_eq!(layout.responsive_mode, ResponsiveLayoutMode::ThreePane);
+        assert_eq!(layout.navigation_rect, Rect::ZERO);
+        assert_eq!(layout.navigation_splitter_rect, Rect::ZERO);
+        assert_eq!(layout.card_list_rect.x, 0.0);
+        assert_eq!(layout.editor_rect.w, 540.0);
+        assert_eq!(layout.navigation_width_logical, DEFAULT_NAVIGATION_WIDTH_LOGICAL);
     }
 
     #[test]

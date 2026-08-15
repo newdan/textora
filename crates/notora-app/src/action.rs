@@ -177,6 +177,7 @@ pub enum NotoraAction {
         saved_at: std::time::SystemTime,
     },
     CompactNavigationRequested,
+    NavigationPaneVisibilityToggled,
     CompactBackRequested,
     OpenExternalFileDialogRequested,
     ExternalPathsReceived(Vec<PathBuf>),

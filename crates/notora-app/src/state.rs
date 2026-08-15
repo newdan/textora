@@ -4,6 +4,7 @@ use notora_core::{
     CatalogCard, CatalogCardCursor, CatalogNavigationTree, DocumentIdentity, DocumentKind,
     NavigationScope, NoteEditorMetadata, TagSummary, TagWithActiveNoteCount,
 };
+use serde::{Deserialize, Serialize};
 
 use crate::action::{
     CardQuery, ConflictResolution, DocumentLoadRequest, NoteCreationTarget, NotoraAction,
@@ -73,6 +74,15 @@ pub enum CompactNavigation {
     #[default]
     Hidden,
     Visible,
+}
+
+/// 宽屏三栏模式下左侧导航栏的可见状态。
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum NavigationPaneVisibility {
+    #[default]
+    Expanded,
+    Collapsed,
 }
 
 /// 分隔条影响的相邻 pane。
@@ -244,6 +254,7 @@ pub struct SaveConflict {
 pub struct LayoutState {
     pub navigation_width_logical: f32,
     pub card_list_width_logical: f32,
+    pub navigation_pane_visibility: NavigationPaneVisibility,
     pub responsive_mode: ResponsiveLayoutMode,
     pub compact_content: CompactContent,
     pub compact_navigation: CompactNavigation,
@@ -256,6 +267,7 @@ impl Default for LayoutState {
         Self {
             navigation_width_logical: 220.0,
             card_list_width_logical: 340.0,
+            navigation_pane_visibility: NavigationPaneVisibility::Expanded,
             responsive_mode: ResponsiveLayoutMode::ThreePane,
             compact_content: CompactContent::CardList,
             compact_navigation: CompactNavigation::Hidden,
@@ -435,6 +447,18 @@ impl NotoraState {
                 self.layout.compact_navigation = CompactNavigation::Visible;
                 self.layout.focus_target = FocusTarget::NavigationTree;
                 vec![NotoraEffect::Redraw]
+            }
+            NotoraAction::NavigationPaneVisibilityToggled => {
+                self.layout.navigation_pane_visibility =
+                    match self.layout.navigation_pane_visibility {
+                        NavigationPaneVisibility::Expanded => NavigationPaneVisibility::Collapsed,
+                        NavigationPaneVisibility::Collapsed => NavigationPaneVisibility::Expanded,
+                    };
+                self.layout.focus_target = match self.layout.navigation_pane_visibility {
+                    NavigationPaneVisibility::Expanded => FocusTarget::NavigationTree,
+                    NavigationPaneVisibility::Collapsed => FocusTarget::CardList,
+                };
+                vec![NotoraEffect::PersistLayout, NotoraEffect::Redraw]
             }
             NotoraAction::CompactBackRequested => {
                 self.layout.compact_content = CompactContent::CardList;
@@ -1697,7 +1721,7 @@ mod tests {
 
     use super::{
         ActiveEditorMetadata, CardPageState, CompactContent, CompactNavigation, FocusTarget,
-        LibraryState, NotoraState, OverlayState, WorkspaceRootState,
+        LibraryState, NavigationPaneVisibility, NotoraState, OverlayState, WorkspaceRootState,
     };
     use crate::action::{CardQuery, NotoraAction, NotoraEffect};
     use crate::search_controller::{SEARCH_DEBOUNCE_DELAY, SearchController};
@@ -2282,6 +2306,26 @@ mod tests {
         let _ = state.reduce(NotoraAction::CompactBackRequested);
         assert_eq!(state.layout.compact_content, CompactContent::CardList);
         assert_eq!(state.layout.compact_navigation, CompactNavigation::Hidden);
+    }
+
+    #[test]
+    fn navigation_pane_toggle_preserves_width_and_moves_focus_to_visible_content() {
+        let mut state = NotoraState::default();
+        state.layout.navigation_width_logical = 268.0;
+        state.layout.focus_target = FocusTarget::NavigationSearch;
+
+        let collapse_effects = state.reduce(NotoraAction::NavigationPaneVisibilityToggled);
+
+        assert_eq!(state.layout.navigation_pane_visibility, NavigationPaneVisibility::Collapsed);
+        assert_eq!(state.layout.navigation_width_logical, 268.0);
+        assert_eq!(state.layout.focus_target, FocusTarget::CardList);
+        assert_eq!(collapse_effects, vec![NotoraEffect::PersistLayout, NotoraEffect::Redraw]);
+
+        let _ = state.reduce(NotoraAction::NavigationPaneVisibilityToggled);
+
+        assert_eq!(state.layout.navigation_pane_visibility, NavigationPaneVisibility::Expanded);
+        assert_eq!(state.layout.navigation_width_logical, 268.0);
+        assert_eq!(state.layout.focus_target, FocusTarget::NavigationTree);
     }
 
     #[test]
