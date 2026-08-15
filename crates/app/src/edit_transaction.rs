@@ -138,7 +138,9 @@ pub fn default_edit_plan(request: &EditRequest, doc: &impl DocumentModelRef) -> 
     let doc = doc.document_model();
     match &request.intent {
         EditIntent::InsertText(text) => replace_selection_or_cursor(request, text.clone()),
-        EditIntent::InsertParagraphBreak => replace_selection_or_cursor(request, "\n".into()),
+        EditIntent::InsertParagraphBreak => {
+            replace_selection_or_cursor(request, default_newline_text(doc))
+        }
         EditIntent::DeleteBackward => delete_selection_or_adjacent_grapheme(request, doc, -1),
         EditIntent::DeleteForward => delete_selection_or_adjacent_grapheme(request, doc, 1),
         EditIntent::Indent => replace_selection_or_cursor(request, default_indent_text(doc)),
@@ -187,6 +189,10 @@ fn delete_selection_or_adjacent_grapheme(
 
 fn default_indent_text(doc: &DocumentModel) -> String {
     if doc.tb.indent_with_tabs() { "\t".into() } else { " ".repeat(doc.tb.tab_size() as usize) }
+}
+
+fn default_newline_text(doc: &DocumentModel) -> String {
+    if doc.tb.is_crlf() { "\r\n".into() } else { "\n".into() }
 }
 
 fn default_outdent_plan(_request: &EditRequest, _doc: &DocumentModel) -> EditPlan {
@@ -602,6 +608,20 @@ mod tests {
                 2,
             ))
         );
+    }
+
+    #[test]
+    fn default_paragraph_break_in_crlf_document_uses_crlf_sequence() {
+        let mut doc = document_from_text("firstsecond");
+        doc.tb.set_crlf(true);
+        doc.cursor_move_to_offset("first".len());
+        let request = build_edit_request(&doc, EditIntent::InsertParagraphBreak);
+
+        let plan = default_edit_plan(&request, &doc);
+        execute_edit_plan(plan, &mut doc, &[]).expect("CRLF paragraph break should be valid");
+
+        assert_eq!(doc.full_text(), "first\r\nsecond");
+        assert_eq!(doc.cursor_offset().to_usize(), "first\r\n".len());
     }
 
     #[test]

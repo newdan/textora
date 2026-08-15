@@ -17,6 +17,11 @@ use crate::builder::ListBullet;
 use ui::plugin::{AugmentKind, EditAugmentation};
 use unicode_segmentation::UnicodeSegmentation;
 
+const LF_SEQUENCE: &str = "\n";
+const CRLF_SEQUENCE: &str = "\r\n";
+const BLOCK_BOUNDARY_NEWLINE_COUNT: usize = 2;
+const MAX_LEADING_BLOCK_INDENT: usize = 3;
+
 // ─── 入口 ──────────────────────────────────────────────────────────────────
 
 /// 根据当前光标位置和键类型，计算一个 markdown 感知的编辑增强。
@@ -67,7 +72,7 @@ fn backspace_last_interblock_paragraph_grapheme(
     }
 
     let (line_start, _, line_end) = locate_source_line_bounds(source, current_byte)?;
-    let content_end = source[..line_end].strip_suffix('\r').map_or(line_end, |_| line_end - 1);
+    let content_end = source_line_content_end(source, line_end);
     if current_byte != content_end
         || UnicodeSegmentation::graphemes(&source[line_start..content_end], true).count() != 1
         || !has_two_newline_sequences_before(source, line_start)
@@ -116,6 +121,32 @@ fn newline_sequence_width_at(source: &str, byte: usize) -> Option<usize> {
     suffix.starts_with(b"\n").then_some(1)
 }
 
+fn preferred_newline_sequence(source: &str, current_byte: usize) -> &'static str {
+    let bytes = source.as_bytes();
+    let cursor = current_byte.min(bytes.len());
+    let prefix = &bytes[..cursor];
+    let suffix = &bytes[cursor..];
+
+    if suffix.starts_with(CRLF_SEQUENCE.as_bytes())
+        || prefix.ends_with(CRLF_SEQUENCE.as_bytes())
+        || (prefix.ends_with(b"\r") && suffix.starts_with(b"\n"))
+    {
+        return CRLF_SEQUENCE;
+    }
+    if suffix.starts_with(LF_SEQUENCE.as_bytes()) || prefix.ends_with(LF_SEQUENCE.as_bytes()) {
+        return LF_SEQUENCE;
+    }
+
+    let Some(first_line_feed) = bytes.iter().position(|source_byte| *source_byte == b'\n') else {
+        return LF_SEQUENCE;
+    };
+    if first_line_feed > 0 && bytes[first_line_feed - 1] == b'\r' {
+        CRLF_SEQUENCE
+    } else {
+        LF_SEQUENCE
+    }
+}
+
 fn augment_insert_text(source: &str, current_byte: usize, text: &str) -> Option<EditAugmentation> {
     let context = classify_enter_context(source, current_byte);
     if !matches!(context, EnterContext::EmptyBlockSeparatorLine) {
@@ -123,35 +154,46 @@ fn augment_insert_text(source: &str, current_byte: usize, text: &str) -> Option<
     }
     // 在"块间空行 run"里输入字符：把插入点周围的换行修剪为两侧各恰好 2 个
     // （保持前后块间距不变），中间放入 text；如触及文档边界则不再强补换行。
-    let bytes = source.as_bytes();
     let mut start = current_byte;
-    while start > 0 && bytes[start - 1] == b'\n' {
-        start -= 1;
+    let mut left_newline_count = 0;
+    while let Some(width) = newline_sequence_width_before(source, start) {
+        start -= width;
+        left_newline_count += 1;
     }
     let mut end = current_byte;
-    while end < bytes.len() && bytes[end] == b'\n' {
-        end += 1;
+    let mut right_newline_count = 0;
+    while let Some(width) = newline_sequence_width_at(source, end) {
+        end += width;
+        right_newline_count += 1;
     }
 
     let at_start = start == 0;
-    let at_end = end == bytes.len();
-    let left_newlines = current_byte - start;
-    let right_newlines = end - current_byte;
+    let at_end = end == source.len();
 
-    let needed_left = if at_start { left_newlines } else { left_newlines.max(2) };
-    let needed_right = if at_end { right_newlines } else { right_newlines.max(2) };
+    let needed_left = if at_start {
+        left_newline_count
+    } else {
+        left_newline_count.max(BLOCK_BOUNDARY_NEWLINE_COUNT)
+    };
+    let needed_right = if at_end {
+        right_newline_count
+    } else {
+        right_newline_count.max(BLOCK_BOUNDARY_NEWLINE_COUNT)
+    };
     if needed_left == 0 && needed_right == 0 {
         return None;
     }
 
-    let mut insert = String::new();
+    let newline = preferred_newline_sequence(source, current_byte);
+    let mut insert =
+        String::with_capacity((needed_left + needed_right) * newline.len() + text.len());
     for _ in 0..needed_left {
-        insert.push('\n');
+        insert.push_str(newline);
     }
     insert.push_str(text);
     let cursor_after = start + insert.len();
     for _ in 0..needed_right {
-        insert.push('\n');
+        insert.push_str(newline);
     }
 
     let aug = EditAugmentation {
@@ -167,7 +209,7 @@ fn augment_insert_text(source: &str, current_byte: usize, text: &str) -> Option<
 
 /// 在当前位置插入单个 `\n`。用于块间空行 run 里"加空行"的语义（Typora 风格）。
 fn emit_source_newline(source: &str, current_byte: usize) -> EditAugmentation {
-    let insertion = String::from("\n");
+    let insertion = String::from(preferred_newline_sequence(source, current_byte));
     let aug = EditAugmentation {
         cursor_byte_after: current_byte + insertion.len(),
         insert_text: Some(insertion),
@@ -184,17 +226,21 @@ fn emit_source_newline(source: &str, current_byte: usize) -> EditAugmentation {
 ///   或文档末尾，插入 `"\n"` 补一个空源码行；否则仍插入 `"\n\n"`。
 ///   两种情况下光标都固定跳到 `current_byte + 2`（下一段应有的位置）。
 fn emit_block_break(source: &str, current_byte: usize) -> EditAugmentation {
-    let touches_next_newline = source.as_bytes().get(current_byte) == Some(&b'\n');
+    let newline = preferred_newline_sequence(source, current_byte);
+    let next_newline_width = newline_sequence_width_at(source, current_byte);
+    let touches_next_newline = next_newline_width.is_some();
+    let next_newline_end = current_byte + next_newline_width.unwrap_or(0);
     let next_is_blank_separator =
-        touches_next_newline && source.as_bytes().get(current_byte + 1) == Some(&b'\n');
-    let insertion =
-        if touches_next_newline && (current_byte + 1 == source.len() || next_is_blank_separator) {
-            String::from("\n")
+        touches_next_newline && newline_sequence_width_at(source, next_newline_end).is_some();
+    let insertion_count =
+        if touches_next_newline && (next_newline_end == source.len() || next_is_blank_separator) {
+            1
         } else {
-            String::from("\n\n")
+            BLOCK_BOUNDARY_NEWLINE_COUNT
         };
+    let insertion = newline.repeat(insertion_count);
     let aug = EditAugmentation {
-        cursor_byte_after: current_byte + b"\n\n".len(),
+        cursor_byte_after: current_byte + newline.len() * BLOCK_BOUNDARY_NEWLINE_COUNT,
         insert_text: Some(insertion),
         ..Default::default()
     };
@@ -289,7 +335,8 @@ fn emit_marker_break(
     indent: &str,
     marker: &str,
 ) -> EditAugmentation {
-    let insertion = format!("\n{indent}{marker}");
+    let newline = preferred_newline_sequence(source, current_byte);
+    let insertion = format!("{newline}{indent}{marker}");
     let cursor_after = current_byte + insertion.len();
     let aug = EditAugmentation {
         insert_text: Some(insertion),
@@ -303,9 +350,10 @@ fn emit_marker_break(
 /// 删除当前源码行（含 range）。用于 list/blockquote 空 item 的"退出"。
 fn emit_remove_current_line(source: &str, current_byte: usize) -> Option<EditAugmentation> {
     let (start, _, line_end) = locate_source_line_bounds(source, current_byte)?;
+    let content_end = source_line_content_end(source, line_end);
     let aug = EditAugmentation {
         insert_text: Some(String::new()),
-        replace_range: Some(start..line_end),
+        replace_range: Some(start..content_end),
         cursor_byte_after: start,
     };
     debug_assert_augmentation(&aug, source);
@@ -345,8 +393,8 @@ fn enter_context_augmentation(
         EnterContext::ListItem { indent, bullet, empty, at_end: _ } => {
             list_item_enter_augmentation(source, current_byte, &indent, bullet, empty)
         }
-        EnterContext::BlockQuoteLine { empty } => {
-            blockquote_enter_augmentation(source, current_byte, empty)
+        EnterContext::BlockQuoteLine { continuation_prefix, empty } => {
+            blockquote_enter_augmentation(source, current_byte, &continuation_prefix, empty)
         }
         EnterContext::TableCell { next_cell_start } => Some(EditAugmentation {
             insert_text: Some(String::new()),
@@ -362,7 +410,7 @@ fn paragraph_enter_augmentation(source: &str, current_byte: usize) -> EditAugmen
     // 段尾/段中：Typora 语义 = 切两半（`\n\n`）；跨已有 `\n` 时用
     // emit_block_break 保留光标下方的原源码行。
     if cursor_touches_source_newline(source, current_byte) {
-        if source.as_bytes().get(current_byte) == Some(&b'\n') {
+        if newline_sequence_width_at(source, current_byte).is_some() {
             return emit_block_break(source, current_byte);
         }
         return emit_source_newline(source, current_byte);
@@ -380,7 +428,7 @@ fn heading_enter_augmentation(
     }
 
     // Heading 中间：在当前光标处分割标题，后半段成为普通段落。
-    let insertion = String::from("\n");
+    let insertion = String::from(preferred_newline_sequence(source, current_byte));
     let aug = EditAugmentation {
         insert_text: Some(insertion.clone()),
         replace_range: Some(current_byte..current_byte),
@@ -412,20 +460,18 @@ fn list_item_enter_augmentation(
 fn blockquote_enter_augmentation(
     source: &str,
     current_byte: usize,
+    continuation_prefix: &str,
     empty: bool,
 ) -> Option<EditAugmentation> {
     if empty {
         return emit_remove_current_line(source, current_byte);
     }
-    Some(emit_marker_break(source, current_byte, "", "> "))
+    Some(emit_marker_break(source, current_byte, "", continuation_prefix))
 }
 
 fn cursor_touches_source_newline(source: &str, current_byte: usize) -> bool {
-    let bytes = source.as_bytes();
-    bytes.get(current_byte) == Some(&b'\n')
-        || current_byte
-            .checked_sub(1)
-            .is_some_and(|previous_byte| bytes.get(previous_byte) == Some(&b'\n'))
+    newline_sequence_width_at(source, current_byte).is_some()
+        || newline_sequence_width_before(source, current_byte).is_some()
 }
 
 // ─── 分类器 ────────────────────────────────────────────────────────────────
@@ -437,7 +483,7 @@ pub enum EnterContext {
     ParagraphInterior,
     Heading { level: u8, at_end: bool },
     ListItem { indent: String, bullet: ListBullet, empty: bool, at_end: bool },
-    BlockQuoteLine { empty: bool },
+    BlockQuoteLine { continuation_prefix: String, empty: bool },
     CodeBlock,
     TableCell { next_cell_start: Option<usize> },
     EmptyBlockSeparatorLine,
@@ -636,12 +682,17 @@ pub fn classify_enter_context(source: &str, current_byte: usize) -> EnterContext
         }
     }
 
-    if let Some((_, content_start, line_end)) = locate_blockquote_line(source, current_byte)
+    if let Some((line_start, content_start, line_end)) =
+        locate_blockquote_line(source, current_byte)
+        && let content_end = source_line_content_end(source, line_end)
         && current_byte >= content_start
-        && current_byte <= line_end
+        && current_byte <= content_end
     {
-        let empty = content_start == line_end;
-        return EnterContext::BlockQuoteLine { empty };
+        let empty = content_start == content_end;
+        return EnterContext::BlockQuoteLine {
+            continuation_prefix: source[line_start..content_start].to_owned(),
+            empty,
+        };
     }
 
     if source_line_is_empty(source, current_byte) {
@@ -655,7 +706,11 @@ fn source_line_is_empty(source: &str, byte: usize) -> bool {
     let Some((start, _, end)) = locate_source_line_bounds(source, byte) else {
         return false;
     };
-    start == end
+    start == source_line_content_end(source, end)
+}
+
+fn source_line_content_end(source: &str, line_end: usize) -> usize {
+    source[..line_end].strip_suffix('\r').map_or(line_end, |_| line_end - 1)
 }
 
 fn content_end_without_trailing_newline(source: &str, range: std::ops::Range<usize>) -> usize {
@@ -762,12 +817,21 @@ pub(crate) fn list_item_indent(source: &str, marker_start: usize) -> String {
 fn locate_blockquote_line(source: &str, byte: usize) -> Option<(usize, usize, usize)> {
     let (line_start, _, line_end) = locate_source_line_bounds(source, byte)?;
     let bytes = source.as_bytes();
-    if bytes.get(line_start) != Some(&b'>') {
+    let leading_spaces =
+        bytes[line_start..line_end].iter().take_while(|source_byte| **source_byte == b' ').count();
+    if leading_spaces > MAX_LEADING_BLOCK_INDENT {
         return None;
     }
-    let content_start =
-        if bytes.get(line_start + 1) == Some(&b' ') { line_start + 2 } else { line_start + 1 };
-    Some((line_start, content_start, line_end))
+    let mut content_start = line_start + leading_spaces;
+    let mut marker_count = 0;
+    while bytes.get(content_start) == Some(&b'>') {
+        marker_count += 1;
+        content_start += 1;
+        if matches!(bytes.get(content_start), Some(b' ' | b'\t')) {
+            content_start += 1;
+        }
+    }
+    (marker_count > 0).then_some((line_start, content_start, line_end))
 }
 
 #[cfg(test)]
@@ -811,6 +875,20 @@ mod tests {
         assert_eq!(augmentation.insert_text.as_deref(), Some("\n\n"));
         assert_eq!(augmentation.cursor_byte_after, current_byte + 2);
         assert_eq!(edited_source, "first line\n\n\nsecond line");
+    }
+
+    #[test]
+    fn paragraph_enter_before_crlf_soft_break_preserves_crlf_line_endings() {
+        let source = "first line\r\nsecond line";
+        let current_byte = "first line".len();
+
+        let augmentation = augment_edit(source, current_byte, AugmentKind::Enter)
+            .expect("paragraph Enter should split before a CRLF soft break");
+        let edited_source = apply_augmentation_at(source, current_byte, &augmentation);
+
+        assert_eq!(augmentation.insert_text.as_deref(), Some("\r\n\r\n"));
+        assert_eq!(augmentation.cursor_byte_after, current_byte + 4);
+        assert_eq!(edited_source, "first line\r\n\r\n\r\nsecond line");
     }
 
     #[test]
@@ -922,6 +1000,85 @@ mod tests {
         assert_eq!(edited_source, "firstsecond");
         assert_eq!(augmentation.replace_range, Some("first".len()..current_byte));
         assert_eq!(augmentation.cursor_byte_after, "first".len());
+    }
+
+    #[test]
+    fn insert_text_in_crlf_empty_separator_preserves_block_boundaries() {
+        let source = "first\r\n\r\nsecond";
+        let current_byte = "first\r\n".len();
+
+        let augmentation =
+            augment_edit(source, current_byte, AugmentKind::InsertText(String::from("中")))
+                .expect("typing on a CRLF separator line should create an editable paragraph");
+        let edited_source = apply_augmentation_at(source, current_byte, &augmentation);
+
+        assert_eq!(edited_source, "first\r\n\r\n中\r\n\r\nsecond");
+        assert_eq!(augmentation.cursor_byte_after, "first\r\n\r\n中".len());
+    }
+
+    #[test]
+    fn list_enter_in_crlf_document_continues_with_crlf() {
+        let source = "- first\r\n- second";
+        let current_byte = "- first".len();
+
+        let augmentation = augment_edit(source, current_byte, AugmentKind::Enter)
+            .expect("list Enter should continue the current CRLF list item");
+        let edited_source = apply_augmentation_at(source, current_byte, &augmentation);
+
+        assert_eq!(augmentation.insert_text.as_deref(), Some("\r\n- "));
+        assert_eq!(edited_source, "- first\r\n- \r\n- second");
+    }
+
+    #[test]
+    fn empty_list_enter_in_crlf_document_preserves_following_newline() {
+        let source = "- \r\nnext";
+        let current_byte = "- ".len();
+
+        let augmentation = augment_edit(source, current_byte, AugmentKind::Enter)
+            .expect("Enter should exit an empty CRLF list item");
+        let edited_source = apply_augmentation_at(source, current_byte, &augmentation);
+
+        assert_eq!(edited_source, "\r\nnext");
+        assert_eq!(augmentation.cursor_byte_after, 0);
+    }
+
+    #[test]
+    fn empty_blockquote_enter_in_crlf_document_exits_quote() {
+        let source = "> \r\nnext";
+        let current_byte = "> ".len();
+
+        let augmentation = augment_edit(source, current_byte, AugmentKind::Enter)
+            .expect("Enter should exit an empty CRLF blockquote line");
+        let edited_source = apply_augmentation_at(source, current_byte, &augmentation);
+
+        assert_eq!(edited_source, "\r\nnext");
+        assert_eq!(augmentation.cursor_byte_after, 0);
+    }
+
+    #[test]
+    fn indented_blockquote_enter_preserves_indent_and_marker() {
+        let source = "  > quote";
+        let current_byte = source.len();
+
+        let augmentation = augment_edit(source, current_byte, AugmentKind::Enter)
+            .expect("Enter should continue a blockquote indented by up to three spaces");
+        let edited_source = apply_augmentation_at(source, current_byte, &augmentation);
+
+        assert_eq!(augmentation.insert_text.as_deref(), Some("\n  > "));
+        assert_eq!(edited_source, "  > quote\n  > ");
+    }
+
+    #[test]
+    fn nested_blockquote_enter_preserves_complete_marker_prefix() {
+        let source = "> > quote";
+        let current_byte = source.len();
+
+        let augmentation = augment_edit(source, current_byte, AugmentKind::Enter)
+            .expect("Enter should continue every active blockquote level");
+        let edited_source = apply_augmentation_at(source, current_byte, &augmentation);
+
+        assert_eq!(augmentation.insert_text.as_deref(), Some("\n> > "));
+        assert_eq!(edited_source, "> > quote\n> > ");
     }
 
     #[test]
