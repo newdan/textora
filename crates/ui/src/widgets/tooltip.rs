@@ -259,7 +259,7 @@ impl Widget for TooltipWidget {
                     text_x,
                     text_y,
                     font_size,
-                    theme.palette.text_inverse,
+                    theme.application_theme().text_primary,
                     line,
                     shaper,
                 );
@@ -289,7 +289,7 @@ impl Widget for TooltipWidget {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::core::paint::DrawList;
+    use crate::core::paint::{DrawCmd, DrawList};
     use crate::theme::test_theme;
 
     fn make_hint(label: &str, target: Rect) -> TooltipHint {
@@ -374,6 +374,31 @@ mod tests {
         };
         widget.paint(&mut ctx);
         assert!(list.cmds.is_empty(), "empty label should produce no draw commands");
+    }
+
+    #[test]
+    fn paint_uses_the_elevated_surface_foreground_for_readable_text() {
+        let theme = test_theme();
+        let hint = make_hint("新建目录", Rect::new(20.0, 20.0, 24.0, 24.0));
+        let (widget, _) = TooltipWidget::new(&hint, 1.0, 800.0, 600.0);
+        let mut list = DrawList::new();
+        let mut shaper = shaping::Shaper::new().expect("tooltip paint test shaper should exist");
+        let mut context = PaintCtx {
+            list: &mut list,
+            theme: &theme,
+            dpi: 1.0,
+            offset: (0.0, 0.0),
+            global_alpha: 1.0,
+            shaper: Some(&mut shaper),
+        };
+
+        widget.paint(&mut context);
+
+        let text_color = list.cmds.iter().find_map(|command| match command {
+            DrawCmd::TextLayout { color, .. } => Some(*color),
+            _ => None,
+        });
+        assert_eq!(text_color, Some(theme.application_theme().text_primary));
     }
 
     #[test]

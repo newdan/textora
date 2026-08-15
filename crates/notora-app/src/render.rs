@@ -67,7 +67,7 @@ const SIDEBAR_LABEL_FONT_SIZE_LOGICAL: f32 = 15.0;
 const CARD_LOAD_MORE_THRESHOLD_LOGICAL: f32 = 160.0;
 const COMPACT_NAVIGATION_BUTTON_WIDTH_LOGICAL: f32 = 72.0;
 const COMPACT_BACK_BUTTON_WIDTH_LOGICAL: f32 = 64.0;
-const NAVIGATION_COLLAPSE_BUTTON_SIZE_LOGICAL: f32 = 28.0;
+const NAVIGATION_VISIBILITY_BUTTON_SIZE_LOGICAL: f32 = 28.0;
 const NAVIGATION_COLLAPSE_BUTTON_GAP_LOGICAL: f32 = 6.0;
 const CONFIRMATION_PANEL_WIDTH_LOGICAL: f32 = 360.0;
 const CONFIRMATION_PANEL_HEIGHT_LOGICAL: f32 = 160.0;
@@ -1498,7 +1498,11 @@ impl NotoraShell {
             self.card_list_splitter.paint(context);
             self.new_note_button.paint(context);
             if self.navigation_collapse_rect != Rect::ZERO {
-                paint_navigation_collapse_button(context, self.navigation_collapse_rect);
+                paint_navigation_visibility_button(
+                    context,
+                    self.navigation_collapse_rect,
+                    "chevron-left",
+                );
             }
             let settings_icon_size = SIDEBAR_ICON_SIZE_LOGICAL * context.dpi;
             let settings_horizontal_inset = SHELL_PADDING_LOGICAL * context.dpi;
@@ -1533,7 +1537,11 @@ impl NotoraShell {
                 paint_note_tool_button(context, self.compact_navigation_rect, "笔记库");
             }
             if self.navigation_expand_rect != Rect::ZERO {
-                paint_note_tool_button(context, self.navigation_expand_rect, "笔记库");
+                paint_navigation_visibility_button(
+                    context,
+                    self.navigation_expand_rect,
+                    "chevron-right",
+                );
             }
             for button in &self.note_toolbar_buttons {
                 paint_note_tool_button(context, button.rect, &button.label);
@@ -2826,13 +2834,13 @@ fn paint_note_tool_button(context: &mut ui::PaintCtx<'_>, rect: Rect, label: &st
     );
 }
 
-fn paint_navigation_collapse_button(context: &mut ui::PaintCtx<'_>, rect: Rect) {
+fn paint_navigation_visibility_button(context: &mut ui::PaintCtx<'_>, rect: Rect, icon_name: &str) {
     let application_theme = context.theme.application_theme();
     context.list.fill_rounded(rect, application_theme.overlay_surface, 4.0 * context.dpi);
     let icon_size = SIDEBAR_ICON_SIZE_LOGICAL * context.dpi;
     draw_icon(
         context.list,
-        "chevron-left",
+        icon_name,
         rect.x + (rect.w - icon_size) * 0.5,
         rect.y + (rect.h - icon_size) * 0.5,
         icon_size,
@@ -2912,7 +2920,7 @@ fn navigation_collapse_button_rect(layout: ShellLayout, dpi: f32, padding: f32) 
     {
         return Rect::ZERO;
     }
-    let button_size = NAVIGATION_COLLAPSE_BUTTON_SIZE_LOGICAL * dpi;
+    let button_size = NAVIGATION_VISIBILITY_BUTTON_SIZE_LOGICAL * dpi;
     Rect::new(
         layout.navigation_rect.right() - padding - button_size,
         layout.navigation_rect.y + padding + (SEARCH_BAR_HEIGHT_LOGICAL * dpi - button_size) * 0.5,
@@ -2930,8 +2938,8 @@ fn navigation_expand_button_rect(layout: ShellLayout, dpi: f32, padding: f32) ->
     Rect::new(
         layout.card_list_rect.x + padding,
         layout.card_list_rect.y + 8.0 * dpi,
-        COMPACT_NAVIGATION_BUTTON_WIDTH_LOGICAL * dpi,
-        NOTE_TOOL_BUTTON_HEIGHT_LOGICAL * dpi,
+        NAVIGATION_VISIBILITY_BUTTON_SIZE_LOGICAL * dpi,
+        NAVIGATION_VISIBILITY_BUTTON_SIZE_LOGICAL * dpi,
     )
 }
 
@@ -3591,9 +3599,9 @@ mod tests {
     #[test]
     fn navigation_pane_controls_dispatch_the_same_visibility_toggle() {
         let collapse_rect = Rect::new(180.0, 12.0, 28.0, 28.0);
-        let expand_rect = Rect::new(12.0, 8.0, 72.0, 28.0);
+        let expand_rect = Rect::new(12.0, 8.0, 28.0, 28.0);
 
-        for (px, py) in [(194.0, 26.0), (48.0, 22.0)] {
+        for (px, py) in [(194.0, 26.0), (26.0, 22.0)] {
             let action = shell_layout_action(
                 &Event::MouseDown { px, py, button: ui::MouseButton::Left },
                 Rect::ZERO,
