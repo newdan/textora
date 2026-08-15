@@ -128,6 +128,7 @@ pub enum NewNoteControlState {
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 struct CardHeaderLayout {
+    title_x: f32,
     title_baseline_y: f32,
     control_top_y: f32,
     content_top_y: f32,
@@ -1370,6 +1371,7 @@ impl NotoraShell {
             &model.card_list_title,
             model.new_note_control,
             model.note_toolbar.len(),
+            self.navigation_expand_rect,
         );
         let new_note_rect = new_note_button_rect(
             layout.card_list_rect,
@@ -1527,7 +1529,7 @@ impl NotoraShell {
                 "设置",
             );
             context.text(
-                layout.card_list_rect.x + padding,
+                card_header.title_x,
                 card_header.title_baseline_y,
                 CARD_HEADER_TITLE_FONT_SIZE_LOGICAL * context.dpi,
                 application_theme.text_primary,
@@ -2966,9 +2968,17 @@ fn card_header_layout(
     title: &str,
     new_note_state: NewNoteControlState,
     toolbar_button_count: usize,
+    leading_control_rect: Rect,
 ) -> CardHeaderLayout {
     let padding = SHELL_PADDING_LOGICAL * dpi;
     let gap = NOTE_TOOL_BUTTON_GAP_LOGICAL * dpi;
+    let default_title_x = card_list_rect.x + padding;
+    let title_x = if leading_control_rect == Rect::ZERO {
+        default_title_x
+    } else {
+        (leading_control_rect.right() + gap).max(default_title_x)
+    };
+    let leading_control_inset = title_x - default_title_x;
     let title_width = ui::core::text_util::estimate_text_width_px(
         title,
         CARD_HEADER_TITLE_FONT_SIZE_LOGICAL * dpi,
@@ -2984,7 +2994,7 @@ fn card_header_layout(
     let control_group_gap = if toolbar_width > 0.0 && new_note_width > 0.0 { gap } else { 0.0 };
     let controls_width = toolbar_width + control_group_gap + new_note_width;
     let title_control_gap = if controls_width > 0.0 { gap } else { 0.0 };
-    let inner_width = (card_list_rect.w - padding * 2.0).max(0.0);
+    let inner_width = (card_list_rect.w - padding * 2.0 - leading_control_inset).max(0.0);
     let wraps = title_width + title_control_gap + controls_width > inner_width;
     let control_top_logical = if wraps {
         CARD_HEADER_WRAPPED_CONTROL_TOP_LOGICAL
@@ -2998,6 +3008,7 @@ fn card_header_layout(
     };
 
     CardHeaderLayout {
+        title_x,
         title_baseline_y: card_list_rect.y + CARD_HEADER_TITLE_BASELINE_LOGICAL * dpi,
         control_top_y: card_list_rect.y + control_top_logical * dpi,
         content_top_y: card_list_rect.y + content_top_logical * dpi,
@@ -3232,6 +3243,7 @@ mod tests {
             "一个很长的中栏标题",
             NewNoteControlState::Enabled,
             1,
+            Rect::ZERO,
         );
         let new_note_rect = new_note_button_rect(
             card_list_rect,
@@ -3262,6 +3274,22 @@ mod tests {
                 || first_button.y >= title_bottom
         );
         assert!(header.content_top_y >= first_button.bottom());
+    }
+
+    #[test]
+    fn collapsed_navigation_keeps_card_header_title_clear_of_expand_button() {
+        let card_list_rect = Rect::new(0.0, 0.0, 340.0, 600.0);
+        let expand_rect = Rect::new(12.0, 8.0, 28.0, 28.0);
+        let header = card_header_layout(
+            card_list_rect,
+            1.0,
+            "笔记区",
+            NewNoteControlState::Enabled,
+            0,
+            expand_rect,
+        );
+
+        assert!(header.title_x >= expand_rect.right() + NOTE_TOOL_BUTTON_GAP_LOGICAL);
     }
 
     #[test]
