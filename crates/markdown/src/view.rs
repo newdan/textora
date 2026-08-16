@@ -2627,10 +2627,43 @@ fn augmentation_edit_plan(
     ))
 }
 
+/// 把基于"选区已删除"虚拟源码计算的增强映射回真实文档的单条替换。
+///
+/// 虚拟源码 = 真实源码删除 `selection` 后的文本，删除点（= `selection.start`）
+/// 即增强计算的光标位置。偏移映射规则：虚拟偏移 `v < selection.start` 时真实
+/// 偏移相同，否则 `v + 选区长度`；range 起点位于删除点左侧时保持不变，因此
+/// 映射后的 range 恰好覆盖整个选区。
+/// `cursor_byte_after` 是增强后文本的坐标——真实替换与虚拟替换产生的最终
+/// 文本是同一字符串，无需映射。
+///
+/// 仅当增强的 `replace_range` 覆盖删除点时映射成立（Enter 的各增强均满足）；
+/// 否则返回 `UseDefault` 回落默认计划。
+fn selection_augmentation_edit_plan(
+    request: &ui::plugin::EditRequest,
+    selection: &std::ops::Range<usize>,
+    augmentation: ui::plugin::EditAugmentation,
+) -> ui::plugin::EditPlan {
+    let virtual_range = augmentation.replace_range.unwrap_or(selection.start..selection.start);
+    if virtual_range.start > selection.start || virtual_range.end < selection.start {
+        return ui::plugin::EditPlan::UseDefault;
+    }
+    let deleted_len = selection.end - selection.start;
+    let range_start = virtual_range.start;
+    let range_end = virtual_range.end + deleted_len;
+    ui::plugin::EditPlan::Apply(ui::plugin::EditTransaction::replace(
+        request.source_generation,
+        range_start..range_end,
+        augmentation.insert_text.unwrap_or_default(),
+        augmentation.cursor_byte_after,
+    ))
+}
+
 impl ui::plugin::EditPolicy for MarkdownEditorView {
     fn plan_edit(&self, request: &ui::plugin::EditRequest) -> ui::plugin::EditPlan {
-        if request.selection.is_some() {
-            return ui::plugin::EditPlan::UseDefault;
+        // 零宽选区视为无选区。
+        let selection = request.selection.as_ref().filter(|range| range.start < range.end);
+        if let Some(selection) = selection {
+            return self.plan_selection_edit(request, selection);
         }
         let Some(kind) = request_augment_kind(&request.intent) else {
             return ui::plugin::EditPlan::UseDefault;
@@ -2640,6 +2673,38 @@ impl ui::plugin::EditPolicy for MarkdownEditorView {
             .map_or(ui::plugin::EditPlan::UseDefault, |augmentation| {
                 augmentation_edit_plan(request, augmentation)
             })
+    }
+}
+
+impl MarkdownEditorView {
+    /// 带选区编辑的计划：仅回车做块级增强（删选区 + 删除点上下文增强），
+    /// 其余 intent 维持默认计划（替换/删除选区）。
+    fn plan_selection_edit(
+        &self,
+        request: &ui::plugin::EditRequest,
+        selection: &std::ops::Range<usize>,
+    ) -> ui::plugin::EditPlan {
+        if !matches!(request.intent, ui::plugin::EditIntent::InsertParagraphBreak) {
+            return ui::plugin::EditPlan::UseDefault;
+        }
+        // 选区越界或落在非字符边界时无法构造虚拟源码，交回默认计划
+        // （默认计划产出的非法事务会在执行侧被校验拒绝，而不是在此 panic）。
+        if selection.end > self.source.len()
+            || !self.source.is_char_boundary(selection.start)
+            || !self.source.is_char_boundary(selection.end)
+        {
+            return ui::plugin::EditPlan::UseDefault;
+        }
+        let mut source_after_delete = self.source.clone();
+        source_after_delete.replace_range(selection.clone(), "");
+        let Some(augmentation) = crate::augmenter::augment_edit(
+            &source_after_delete,
+            selection.start,
+            ui::plugin::AugmentKind::Enter,
+        ) else {
+            return ui::plugin::EditPlan::UseDefault;
+        };
+        selection_augmentation_edit_plan(request, selection, augmentation)
     }
 }
 
@@ -8389,5 +8454,120 @@ mod tests {
             "Bounded binary searches should strictly limit source_line_at_byte fallback calls (was {})",
             source_line_at_byte_call_count()
         );
+    }
+
+    fn selection_enter_plan(source: &str, selection: std::ops::Range<usize>) -> EditPlan {
+        let mut view = MarkdownEditorView::new();
+        view.set_source(source.into(), 1);
+        let request = EditRequest {
+            source_generation: 1,
+            cursor_byte: selection.end,
+            selection: Some(selection),
+            intent: EditIntent::InsertParagraphBreak,
+        };
+        view.plan_edit(&request)
+    }
+
+    /// 应用单条替换计划到源码，返回（最终文本, 光标落点）。
+    fn apply_single_replacement(source: &str, plan: &EditPlan) -> (String, usize) {
+        let EditPlan::Apply(transaction) = plan else {
+            panic!("expected a single Apply plan, got {plan:?}");
+        };
+        assert_eq!(transaction.replacements.len(), 1, "selection Enter must stay atomic");
+        let replacement = &transaction.replacements[0];
+        let mut edited = source.to_owned();
+        edited.replace_range(replacement.range.clone(), &replacement.text);
+        let EditSelection::Caret(cursor) = transaction.selection_after else {
+            panic!("selection Enter must end in a caret");
+        };
+        (edited, cursor)
+    }
+
+    #[test]
+    fn selection_enter_in_paragraph_splits_block_at_deletion_point() {
+        let source = "hello world";
+        let plan = selection_enter_plan(source, 2..8);
+
+        let (edited, cursor) = apply_single_replacement(source, &plan);
+        assert_eq!(edited, "he\n\nrld");
+        assert_eq!(cursor, 4, "光标应落在新块开头");
+    }
+
+    #[test]
+    fn selection_enter_across_paragraphs_uses_deletion_point_context() {
+        let source = "foo\n\nbar";
+        let plan = selection_enter_plan(source, 2..5);
+
+        let (edited, cursor) = apply_single_replacement(source, &plan);
+        assert_eq!(edited, "fo\n\nbar");
+        assert_eq!(cursor, 4);
+    }
+
+    #[test]
+    fn selection_enter_in_list_item_continues_marker() {
+        let source = "- hello world";
+        let plan = selection_enter_plan(source, 4..9);
+
+        let (edited, cursor) = apply_single_replacement(source, &plan);
+        assert_eq!(edited, "- he\n- orld");
+        assert_eq!(cursor, 7, "光标应落在续行 marker 之后");
+    }
+
+    #[test]
+    fn selection_enter_in_heading_middle_splits_heading() {
+        let source = "# hello world";
+        let plan = selection_enter_plan(source, 4..9);
+
+        let (edited, cursor) = apply_single_replacement(source, &plan);
+        assert_eq!(edited, "# he\norld");
+        assert_eq!(cursor, 5);
+    }
+
+    #[test]
+    fn selection_enter_leaving_empty_list_item_exits_list() {
+        let source = "- a";
+        let plan = selection_enter_plan(source, 2..3);
+
+        let (edited, cursor) = apply_single_replacement(source, &plan);
+        assert_eq!(edited, "");
+        assert_eq!(cursor, 0);
+    }
+
+    #[test]
+    fn selection_enter_in_code_block_falls_back_to_default() {
+        let source = "```\ncode\n```";
+        let plan = selection_enter_plan(source, 4..8);
+
+        assert_eq!(plan, EditPlan::UseDefault);
+    }
+
+    #[test]
+    fn zero_width_selection_is_treated_as_no_selection() {
+        let source = "hello world";
+        let mut view = MarkdownEditorView::new();
+        view.set_source(source.into(), 1);
+        let zero_width = EditRequest {
+            source_generation: 1,
+            cursor_byte: 4,
+            selection: Some(4..4),
+            intent: EditIntent::InsertParagraphBreak,
+        };
+        let no_selection = EditRequest { selection: None, ..zero_width.clone() };
+
+        assert_eq!(view.plan_edit(&zero_width), view.plan_edit(&no_selection));
+    }
+
+    #[test]
+    fn selection_backspace_still_falls_back_to_default() {
+        let mut view = MarkdownEditorView::new();
+        view.set_source("hello world".into(), 1);
+        let request = EditRequest {
+            source_generation: 1,
+            cursor_byte: 5,
+            selection: Some(2..5),
+            intent: EditIntent::DeleteBackward,
+        };
+
+        assert_eq!(view.plan_edit(&request), EditPlan::UseDefault);
     }
 }

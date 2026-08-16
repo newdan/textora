@@ -117,14 +117,9 @@ pub fn edit_intent_for_command(command: &EditCommand) -> Option<EditIntent> {
 
 pub fn build_edit_request(doc: &impl DocumentModelRef, intent: EditIntent) -> EditRequest {
     let doc = doc.document_model();
-    let selection = if doc.has_selection() {
-        let (start, end) = doc
-            .selection_range()
-            .unwrap_or((doc.cursor_offset().to_usize(), doc.cursor_offset().to_usize()));
-        Some(start..end)
-    } else {
-        None
-    };
+    // 零宽选区（anchor == cursor）视为无选区，与 appkit-shell 侧行为对齐。
+    let selection =
+        doc.selection_range().filter(|(start, end)| start < end).map(|(start, end)| start..end);
 
     EditRequest {
         source_generation: doc.generation(),
@@ -765,6 +760,28 @@ mod tests {
         assert_eq!(doc.cursor_offset().to_usize(), 2);
         assert!(!outcome.edit_outcome.executed);
         assert!(outcome.cursor_moved);
+    }
+
+    #[test]
+    fn build_edit_request_filters_zero_width_selection() {
+        let mut doc = document_from_text("abc");
+        doc.cursor_move_to_offset(2);
+        doc.cursor_mut().selection_anchor = Some(2);
+
+        let request = build_edit_request(&doc, EditIntent::InsertParagraphBreak);
+
+        assert_eq!(request.selection, None, "零宽选区必须视为无选区");
+    }
+
+    #[test]
+    fn build_edit_request_keeps_non_empty_selection() {
+        let mut doc = document_from_text("abc");
+        doc.cursor_move_to_offset(3);
+        doc.cursor_mut().selection_anchor = Some(1);
+
+        let request = build_edit_request(&doc, EditIntent::InsertParagraphBreak);
+
+        assert_eq!(request.selection, Some(1..3));
     }
 
     #[test]
