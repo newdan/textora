@@ -2,6 +2,7 @@ use crate::document_view::DocumentView;
 use crate::input::EditCommand;
 use appkit_core::document::DocumentModel;
 use appkit_core::edit::{TextEdit, apply_text_edit};
+use core::buffer::EditHistoryKind;
 use ui::plugin::{
     EditIntent, EditPlan, EditRequest, EditSelection, EditTransaction, TextReplacement,
 };
@@ -131,7 +132,7 @@ pub fn build_edit_request(doc: &impl DocumentModelRef, intent: EditIntent) -> Ed
 
 pub fn default_edit_plan(request: &EditRequest, doc: &impl DocumentModelRef) -> EditPlan {
     let doc = doc.document_model();
-    match &request.intent {
+    let plan = match &request.intent {
         EditIntent::InsertText(text) => replace_selection_or_cursor(request, text.clone()),
         EditIntent::InsertParagraphBreak => {
             replace_selection_or_cursor(request, default_newline_text(doc))
@@ -143,6 +144,27 @@ pub fn default_edit_plan(request: &EditRequest, doc: &impl DocumentModelRef) -> 
         EditIntent::PromoteObject | EditIntent::DemoteObject | EditIntent::SelectObject => {
             EditPlan::Consume
         }
+    };
+    tag_default_plan(plan, &request.intent)
+}
+
+/// Marks a resolved default plan with its undo coalescing kind, so the
+/// execution layer can tell it apart from plugin-augmented [`EditPlan::Apply`]
+/// transactions (which must always stay independent undo entries).
+fn tag_default_plan(plan: EditPlan, intent: &EditIntent) -> EditPlan {
+    let EditPlan::Apply(transaction) = plan else {
+        return plan;
+    };
+    EditPlan::ApplyDefault(transaction, default_history_kind(intent))
+}
+
+fn default_history_kind(intent: &EditIntent) -> EditHistoryKind {
+    match intent {
+        EditIntent::InsertText(_) | EditIntent::InsertParagraphBreak | EditIntent::Indent => {
+            EditHistoryKind::Insert
+        }
+        EditIntent::DeleteBackward | EditIntent::DeleteForward => EditHistoryKind::Delete,
+        _ => EditHistoryKind::Standalone,
     }
 }
 
@@ -329,8 +351,6 @@ pub fn execute_edit_plan(
     plan: EditPlan,
     doc: &mut impl DocumentModelMut,
 ) -> Result<TransactionalEditOutcome, EditTransactionError> {
-    use crate::commands::EditOutcome;
-
     let doc = doc.document_model_mut();
     let cursor_before = doc.cursor_offset().to_usize();
 
@@ -354,99 +374,121 @@ pub fn execute_edit_plan(
             ))
         }
         EditPlan::Apply(transaction) => {
-            let old_line_count = doc.line_count();
-            validate_source_generation(&transaction, doc)?;
-            validate_edit_transaction(doc.full_text().as_str(), &transaction)?;
-            let replacements = sorted_replacements(&transaction)?;
-            if replacements.is_empty() {
-                apply_selection(doc, transaction.selection_after);
-                return Ok(TransactionalEditOutcome::without_text_change(
-                    doc,
-                    doc.cursor_offset().to_usize() != cursor_before,
-                ));
-            }
-
-            if replacements.len() == 1 {
-                let replacement = replacements[0];
-                let core_outcome = apply_text_edit(
-                    doc,
-                    TextEdit {
-                        source_generation: transaction.source_generation,
-                        range: replacement.range.clone(),
-                        replacement: replacement.text.clone(),
-                    },
-                )
-                .map_err(map_core_edit_error)?;
-
-                assign_dirty_snapshot_id_if_needed(doc);
-                apply_selection(doc, transaction.selection_after);
-
-                let new_line_count = doc.line_count();
-                return Ok(TransactionalEditOutcome {
-                    edit_outcome: EditOutcome {
-                        executed: core_outcome.executed,
-                        dirty_lines: Some(
-                            core_outcome.dirty_line_start
-                                ..core_outcome.dirty_line_end.min(old_line_count),
-                        ),
-                        old_line_count,
-                        new_line_count,
-                    },
-                    cursor_moved: doc.cursor_offset().to_usize() != cursor_before,
-                    content_revision: doc.content_revision(),
-                    dirty: doc.dirty,
-                });
-            }
-
-            // Calculate minimum line to invalidate cache based on the change range
-            let start = replacements
-                .first()
-                .expect("non-empty replacements were checked before dirty-line calculation")
-                .range
-                .start;
-            let end = replacements
-                .last()
-                .expect("non-empty replacements were checked before dirty-line calculation")
-                .range
-                .end;
-            let min_line = match doc.line_index.offsets.binary_search(&start) {
-                Ok(i) => i,
-                Err(i) => i.saturating_sub(1),
-            };
-            let max_line = match doc.line_index.offsets.binary_search(&end) {
-                Ok(i) => i,
-                Err(i) => i.saturating_sub(1),
-            };
-
-            doc.tb.edit_begin_grouping();
-            for replacement in replacements.iter().rev() {
-                doc.tb.replace_range(replacement.range.clone(), replacement.text.as_bytes());
-            }
-            doc.tb.edit_end_grouping();
-            doc.line_index = appkit_core::line_index::LineIndex::rebuild_from(&doc.tb);
-            doc.mark_content_changed();
-            doc.dirty = doc.tb.is_dirty();
-            doc.sync_cursor_from_buffer();
-            apply_selection(doc, transaction.selection_after);
-
-            let new_line_count = doc.line_count();
-
-            let lines_deleted = old_line_count.saturating_sub(new_line_count);
-            let dirty_end = max_line + 1 + lines_deleted;
-            let dirty_lines = Some(min_line..dirty_end.min(old_line_count));
-            Ok(TransactionalEditOutcome {
-                edit_outcome: EditOutcome {
-                    executed: true,
-                    dirty_lines,
-                    old_line_count,
-                    new_line_count,
-                },
-                cursor_moved: doc.cursor_offset().to_usize() != cursor_before,
-                content_revision: doc.content_revision(),
-                dirty: doc.dirty,
-            })
+            execute_apply_transaction(doc, transaction, EditHistoryKind::Standalone, cursor_before)
+        }
+        EditPlan::ApplyDefault(transaction, history) => {
+            execute_apply_transaction(doc, transaction, history, cursor_before)
         }
     }
+}
+
+fn execute_apply_transaction(
+    doc: &mut DocumentModel,
+    transaction: EditTransaction,
+    history: EditHistoryKind,
+    cursor_before: usize,
+) -> Result<TransactionalEditOutcome, EditTransactionError> {
+    use crate::commands::EditOutcome;
+
+    let old_line_count = doc.line_count();
+    validate_source_generation(&transaction, doc)?;
+    validate_edit_transaction(doc.full_text().as_str(), &transaction)?;
+    let replacements = sorted_replacements(&transaction)?;
+    if replacements.is_empty() {
+        apply_selection(doc, transaction.selection_after);
+        return Ok(TransactionalEditOutcome::without_text_change(
+            doc,
+            doc.cursor_offset().to_usize() != cursor_before,
+        ));
+    }
+
+    if replacements.len() > 1 {
+        return execute_grouped_replacements(doc, &transaction, &replacements, cursor_before);
+    }
+
+    let replacement = replacements[0];
+    let core_outcome = apply_text_edit(
+        doc,
+        TextEdit {
+            source_generation: transaction.source_generation,
+            range: replacement.range.clone(),
+            replacement: replacement.text.clone(),
+            history,
+        },
+    )
+    .map_err(map_core_edit_error)?;
+
+    assign_dirty_snapshot_id_if_needed(doc);
+    apply_selection(doc, transaction.selection_after);
+
+    let new_line_count = doc.line_count();
+    Ok(TransactionalEditOutcome {
+        edit_outcome: EditOutcome {
+            executed: core_outcome.executed,
+            dirty_lines: Some(
+                core_outcome.dirty_line_start..core_outcome.dirty_line_end.min(old_line_count),
+            ),
+            old_line_count,
+            new_line_count,
+        },
+        cursor_moved: doc.cursor_offset().to_usize() != cursor_before,
+        content_revision: doc.content_revision(),
+        dirty: doc.dirty,
+    })
+}
+
+/// Applies a multi-replacement transaction as one atomic, standalone undo group.
+fn execute_grouped_replacements(
+    doc: &mut DocumentModel,
+    transaction: &EditTransaction,
+    replacements: &[&TextReplacement],
+    cursor_before: usize,
+) -> Result<TransactionalEditOutcome, EditTransactionError> {
+    use crate::commands::EditOutcome;
+
+    let old_line_count = doc.line_count();
+    // Calculate minimum line to invalidate cache based on the change range
+    let start = replacements
+        .first()
+        .expect("non-empty replacements were checked before dirty-line calculation")
+        .range
+        .start;
+    let end = replacements
+        .last()
+        .expect("non-empty replacements were checked before dirty-line calculation")
+        .range
+        .end;
+    let min_line = match doc.line_index.offsets.binary_search(&start) {
+        Ok(i) => i,
+        Err(i) => i.saturating_sub(1),
+    };
+    let max_line = match doc.line_index.offsets.binary_search(&end) {
+        Ok(i) => i,
+        Err(i) => i.saturating_sub(1),
+    };
+
+    doc.tb.edit_begin_grouping();
+    for replacement in replacements.iter().rev() {
+        doc.tb.replace_range(replacement.range.clone(), replacement.text.as_bytes());
+    }
+    doc.tb.edit_end_grouping();
+    doc.line_index = appkit_core::line_index::LineIndex::rebuild_from(&doc.tb);
+    doc.mark_content_changed();
+    doc.dirty = doc.tb.is_dirty();
+    doc.sync_cursor_from_buffer();
+    apply_selection(doc, transaction.selection_after.clone());
+
+    let new_line_count = doc.line_count();
+
+    let lines_deleted = old_line_count.saturating_sub(new_line_count);
+    let dirty_end = max_line + 1 + lines_deleted;
+    let dirty_lines = Some(min_line..dirty_end.min(old_line_count));
+    Ok(TransactionalEditOutcome {
+        edit_outcome: EditOutcome { executed: true, dirty_lines, old_line_count, new_line_count },
+        cursor_moved: doc.cursor_offset().to_usize() != cursor_before,
+        content_revision: doc.content_revision(),
+        dirty: doc.dirty,
+    })
 }
 
 fn apply_selection(doc: &mut DocumentModel, selection: EditSelection) {
@@ -577,12 +619,10 @@ mod tests {
 
         assert_eq!(
             plan,
-            EditPlan::Apply(EditTransaction::replace(
-                request.source_generation,
-                1..emoji_end,
-                String::new(),
-                1,
-            ))
+            EditPlan::ApplyDefault(
+                EditTransaction::replace(request.source_generation, 1..emoji_end, String::new(), 1,),
+                EditHistoryKind::Delete,
+            )
         );
     }
 
@@ -595,12 +635,10 @@ mod tests {
 
         assert_eq!(
             default_edit_plan(&request, &doc),
-            EditPlan::Apply(EditTransaction::replace(
-                request.source_generation,
-                2..5,
-                String::new(),
-                2,
-            ))
+            EditPlan::ApplyDefault(
+                EditTransaction::replace(request.source_generation, 2..5, String::new(), 2,),
+                EditHistoryKind::Delete,
+            )
         );
     }
 
@@ -770,6 +808,77 @@ mod tests {
         let request = build_edit_request(&doc, EditIntent::InsertParagraphBreak);
 
         assert_eq!(request.selection, Some(1..3));
+    }
+
+    fn execute_default_plan(doc: &mut DocumentModel, intent: EditIntent) {
+        let request = build_edit_request(&*doc, intent);
+        let plan = default_edit_plan(&request, &*doc);
+        execute_edit_plan(plan, doc).expect("default plan must execute");
+    }
+
+    #[test]
+    fn default_insert_text_plans_coalesce_into_single_undo_entry() {
+        let mut doc = document_from_text("");
+
+        for text in ["a", "b", "c"] {
+            execute_default_plan(&mut doc, EditIntent::InsertText(text.into()));
+        }
+
+        assert_eq!(doc.full_text(), "abc");
+        doc.undo();
+        assert_eq!(doc.full_text(), "", "one undo must revert the whole typing run");
+    }
+
+    #[test]
+    fn default_backspace_plans_coalesce_into_single_undo_entry() {
+        let mut doc = document_from_text("abc");
+        doc.cursor_move_to_offset(3);
+
+        for _ in 0..3 {
+            execute_default_plan(&mut doc, EditIntent::DeleteBackward);
+        }
+
+        assert_eq!(doc.full_text(), "");
+        doc.undo();
+        assert_eq!(doc.full_text(), "abc", "one undo must revert the whole backspace run");
+    }
+
+    #[test]
+    fn alternating_default_insert_and_delete_plans_split_undo_entries() {
+        let mut doc = document_from_text("");
+
+        execute_default_plan(&mut doc, EditIntent::InsertText("a".into()));
+        execute_default_plan(&mut doc, EditIntent::DeleteBackward);
+        execute_default_plan(&mut doc, EditIntent::InsertText("b".into()));
+
+        assert_eq!(doc.full_text(), "b");
+        doc.undo();
+        assert_eq!(doc.full_text(), "");
+        doc.undo();
+        assert_eq!(doc.full_text(), "a");
+        doc.undo();
+        assert_eq!(doc.full_text(), "");
+    }
+
+    #[test]
+    fn plugin_augmented_plan_stays_an_independent_undo_entry_between_typing_runs() {
+        let mut doc = document_from_text("");
+
+        execute_default_plan(&mut doc, EditIntent::InsertText("a".into()));
+        execute_default_plan(&mut doc, EditIntent::InsertText("b".into()));
+        // Plugin augmentation (e.g. smart punctuation) rewrites the just-typed text.
+        let augmented =
+            EditPlan::Apply(EditTransaction::replace(doc.generation(), 1..2, "*".into(), 2));
+        execute_edit_plan(augmented, &mut doc).expect("augmented plan must execute");
+        execute_default_plan(&mut doc, EditIntent::InsertText("c".into()));
+
+        assert_eq!(doc.full_text(), "a*c");
+        doc.undo();
+        assert_eq!(doc.full_text(), "a*", "typing after augmentation must be its own entry");
+        doc.undo();
+        assert_eq!(doc.full_text(), "ab", "one undo must precisely revert the augmentation");
+        doc.undo();
+        assert_eq!(doc.full_text(), "", "typing before augmentation was a single entry");
     }
 
     #[test]

@@ -992,15 +992,19 @@ fn default_edit_plan(
         | EditIntent::DemoteObject
         | EditIntent::SelectObject => return EditPlan::Consume,
     };
+    let history = match &request.intent {
+        EditIntent::InsertText(_) | EditIntent::InsertParagraphBreak | EditIntent::Indent => {
+            core::buffer::EditHistoryKind::Insert
+        }
+        _ => core::buffer::EditHistoryKind::Delete,
+    };
     if let Some(text) = replacement {
         let range = request.selection.clone().unwrap_or(request.cursor_byte..request.cursor_byte);
         let cursor_after = range.start + text.len();
-        return EditPlan::Apply(EditTransaction::replace(
-            request.source_generation,
-            range,
-            text,
-            cursor_after,
-        ));
+        return EditPlan::ApplyDefault(
+            EditTransaction::replace(request.source_generation, range, text, cursor_after),
+            history,
+        );
     }
 
     let range = request.selection.clone().unwrap_or_else(|| {
@@ -1011,12 +1015,15 @@ fn default_edit_plan(
             .to_usize();
         target.min(request.cursor_byte)..target.max(request.cursor_byte)
     });
-    EditPlan::Apply(EditTransaction::replace(
-        request.source_generation,
-        range.clone(),
-        String::new(),
-        range.start,
-    ))
+    EditPlan::ApplyDefault(
+        EditTransaction::replace(
+            request.source_generation,
+            range.clone(),
+            String::new(),
+            range.start,
+        ),
+        history,
+    )
 }
 
 fn apply_edit_plan(
@@ -1036,37 +1043,52 @@ fn apply_edit_plan(
         }
         EditPlan::SetSelection(selection) => apply_edit_selection(document, selection),
         EditPlan::Apply(transaction) => {
-            if transaction.source_generation != document.generation() {
-                return false;
-            }
-            let mut replacements = transaction.replacements;
-            replacements.sort_by_key(|replacement| replacement.range.start);
-            if replacements.windows(2).any(|pair| pair[0].range.end > pair[1].range.start)
-                || replacements.iter().any(|replacement| {
-                    replacement.range.start > replacement.range.end
-                        || replacement.range.end > document.buffer_len()
-                        || !valid_document_boundary(document, replacement.range.start)
-                        || !valid_document_boundary(document, replacement.range.end)
-                })
-            {
-                return false;
-            }
-            if replacements.is_empty() {
-                return apply_edit_selection(document, transaction.selection_after);
-            }
-
-            document.tb.edit_begin_grouping();
-            for replacement in replacements.iter().rev() {
-                document.tb.replace_range(replacement.range.clone(), replacement.text.as_bytes());
-            }
-            document.tb.edit_end_grouping();
-            document.line_index = appkit_core::line_index::LineIndex::rebuild_from(&document.tb);
-            document.mark_content_changed();
-            document.dirty = document.tb.is_dirty();
-            document.sync_cursor_from_buffer();
-            apply_edit_selection(document, transaction.selection_after)
+            apply_edit_transaction(document, transaction, core::buffer::EditHistoryKind::Standalone)
+        }
+        EditPlan::ApplyDefault(transaction, history) => {
+            apply_edit_transaction(document, transaction, history)
         }
     }
+}
+
+fn apply_edit_transaction(
+    document: &mut appkit_core::document::DocumentModel,
+    transaction: ui::plugin::EditTransaction,
+    history: core::buffer::EditHistoryKind,
+) -> bool {
+    if transaction.source_generation != document.generation() {
+        return false;
+    }
+    let mut replacements = transaction.replacements;
+    replacements.sort_by_key(|replacement| replacement.range.start);
+    if replacements.windows(2).any(|pair| pair[0].range.end > pair[1].range.start)
+        || replacements.iter().any(|replacement| {
+            replacement.range.start > replacement.range.end
+                || replacement.range.end > document.buffer_len()
+                || !valid_document_boundary(document, replacement.range.start)
+                || !valid_document_boundary(document, replacement.range.end)
+        })
+    {
+        return false;
+    }
+    if replacements.is_empty() {
+        return apply_edit_selection(document, transaction.selection_after);
+    }
+
+    document.tb.edit_begin_grouping();
+    for replacement in replacements.iter().rev() {
+        document.tb.replace_range_with_history(
+            replacement.range.clone(),
+            replacement.text.as_bytes(),
+            history,
+        );
+    }
+    document.tb.edit_end_grouping();
+    document.line_index = appkit_core::line_index::LineIndex::rebuild_from(&document.tb);
+    document.mark_content_changed();
+    document.dirty = document.tb.is_dirty();
+    document.sync_cursor_from_buffer();
+    apply_edit_selection(document, transaction.selection_after)
 }
 
 fn valid_document_boundary(document: &appkit_core::document::DocumentModel, byte: usize) -> bool {
@@ -1526,7 +1548,7 @@ mod tests {
 
         let plan = default_edit_plan(&request, &document);
 
-        let ui::plugin::EditPlan::Apply(transaction) = plan else {
+        let ui::plugin::EditPlan::ApplyDefault(transaction, _) = plan else {
             panic!("paragraph break should plan a text replacement");
         };
         assert_eq!(transaction.replacements.len(), 1);
@@ -1546,7 +1568,7 @@ mod tests {
 
         let plan = default_edit_plan(&request, &document);
 
-        let ui::plugin::EditPlan::Apply(transaction) = plan else {
+        let ui::plugin::EditPlan::ApplyDefault(transaction, _) = plan else {
             panic!("paragraph break should plan a text replacement");
         };
         assert_eq!(transaction.replacements.len(), 1);

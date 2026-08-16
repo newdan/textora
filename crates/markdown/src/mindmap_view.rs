@@ -1475,7 +1475,10 @@ impl ViewPlugin for MindmapView {
                     request.source_generation,
                 ) {
                     EditPlan::Apply(transaction) => CanvasDragResponse::Apply(transaction),
-                    EditPlan::UseDefault
+                    // `ApplyDefault` is only produced by the app's default plan
+                    // resolver and never by `plan_move_subtree`.
+                    EditPlan::ApplyDefault(..)
+                    | EditPlan::UseDefault
                     | EditPlan::SetSelection(_)
                     | EditPlan::MoveCursor(_)
                     | EditPlan::Consume => CanvasDragResponse::Ignore,

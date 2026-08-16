@@ -89,6 +89,7 @@ pub struct TextBuffer {
     pub(crate) undo_stack: VecDeque<SemiRefCell<HistoryEntry>>,
     pub(crate) redo_stack: VecDeque<SemiRefCell<HistoryEntry>>,
     pub(crate) last_history_type: HistoryType,
+    pub(crate) edit_merge_anchor: Option<EditMergeAnchor>,
     pub(crate) last_save_generation: u32,
 
     pub(crate) active_edit_group: Option<ActiveEditGroupInfo>,
@@ -136,6 +137,7 @@ impl TextBuffer {
             undo_stack: Default::default(),
             redo_stack: Default::default(),
             last_history_type: HistoryType::Other,
+            edit_merge_anchor: None,
             last_save_generation: 0,
 
             active_edit_group: None,
@@ -196,6 +198,7 @@ impl TextBuffer {
             undo_stack: Default::default(),
             redo_stack: Default::default(),
             last_history_type: HistoryType::Other,
+            edit_merge_anchor: None,
             last_save_generation: 0,
             active_edit_group: None,
             active_edit_line_info: None,
@@ -536,6 +539,7 @@ impl TextBuffer {
         self.undo_stack.clear();
         self.redo_stack.clear();
         self.last_history_type = HistoryType::Other;
+        self.edit_merge_anchor = None;
         self.cursor = Default::default();
         self.set_selection(None);
         self.mark_as_clean();

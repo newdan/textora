@@ -28,6 +28,77 @@ pub(crate) enum HistoryType {
     Delete,
 }
 
+/// How a `replace_range` edit participates in undo history coalescing.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub enum EditHistoryKind {
+    /// Always forms its own undo entry and breaks any ongoing coalescing
+    /// (plugin-augmented operations, find-and-replace, ...).
+    Standalone,
+    /// Text insertion that coalesces with an immediately adjacent insertion,
+    /// matching source-mode continuous-typing undo granularity.
+    Insert,
+    /// Text deletion that coalesces with an immediately adjacent deletion,
+    /// matching source-mode continuous-backspace undo granularity.
+    Delete,
+}
+
+impl From<EditHistoryKind> for HistoryType {
+    fn from(kind: EditHistoryKind) -> Self {
+        match kind {
+            EditHistoryKind::Standalone => HistoryType::Other,
+            EditHistoryKind::Insert => HistoryType::Write,
+            EditHistoryKind::Delete => HistoryType::Delete,
+        }
+    }
+}
+
+/// Tracks where the last coalescible edit joined the buffer, so a continuation
+/// edit of the same kind can extend the same undo entry. Unlike
+/// `last_history_type`, this survives caret-sync `set_cursor` calls and is
+/// validated by byte adjacency, so unrelated cursor movement cannot corrupt a
+/// merged entry.
+#[derive(Copy, Clone, Eq, PartialEq)]
+pub(crate) struct EditMergeAnchor {
+    pub kind: EditHistoryKind,
+    pub offset: usize,
+}
+
+impl EditMergeAnchor {
+    /// The anchor left behind by an edit of `kind`, if follow-up edits may join it.
+    pub(crate) fn after_edit(
+        kind: EditHistoryKind,
+        range: &std::ops::Range<usize>,
+        replacement: &[u8],
+    ) -> Option<Self> {
+        match kind {
+            EditHistoryKind::Insert => Some(Self { kind, offset: range.start + replacement.len() }),
+            EditHistoryKind::Delete if replacement.is_empty() => {
+                Some(Self { kind, offset: range.start })
+            }
+            _ => None,
+        }
+    }
+
+    /// Whether an edit of `kind` continues the run this anchor tracks.
+    pub(crate) fn continues(
+        &self,
+        kind: EditHistoryKind,
+        range: &std::ops::Range<usize>,
+        replacement: &[u8],
+    ) -> bool {
+        if self.kind != kind {
+            return false;
+        }
+        match kind {
+            EditHistoryKind::Insert => range.is_empty() && range.start == self.offset,
+            EditHistoryKind::Delete => {
+                replacement.is_empty() && (range.start == self.offset || range.end == self.offset)
+            }
+            EditHistoryKind::Standalone => false,
+        }
+    }
+}
+
 /// An undo/redo entry.
 pub(crate) struct HistoryEntry {
     /// cursor position before the change was made.

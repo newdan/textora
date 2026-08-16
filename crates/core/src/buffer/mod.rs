@@ -11,5 +11,6 @@ pub mod simd_search;
 pub mod text_buffer;
 
 pub use gap_buffer::GapBuffer;
+pub use history::EditHistoryKind;
 pub use navigation::{word_backward, word_forward, word_select};
 pub use text_buffer::TextBuffer;

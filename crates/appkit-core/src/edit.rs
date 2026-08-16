@@ -1,6 +1,7 @@
 use std::ops::Range;
 
 use crate::document::DocumentModel;
+use core::buffer::EditHistoryKind;
 use core::types::ByteIndex;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -8,6 +9,7 @@ pub struct TextEdit {
     pub source_generation: u32,
     pub range: Range<usize>,
     pub replacement: String,
+    pub history: EditHistoryKind,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -46,7 +48,11 @@ pub fn apply_text_edit(
     };
 
     model.tb.edit_begin_grouping();
-    model.tb.replace_range(edit.range.clone(), edit.replacement.as_bytes());
+    model.tb.replace_range_with_history(
+        edit.range.clone(),
+        edit.replacement.as_bytes(),
+        edit.history,
+    );
     model.tb.edit_end_grouping();
 
     model.line_index = crate::line_index::LineIndex::rebuild_from(&model.tb);
@@ -134,6 +140,7 @@ fn full_text(text_buffer: &core::buffer::TextBuffer) -> String {
 mod tests {
     use super::{EditError, TextEdit, apply_text_edit};
     use crate::document::DocumentModel;
+    use core::buffer::EditHistoryKind;
     use core::buffer::TextBuffer;
 
     fn model_from_text(text: &str) -> DocumentModel {
@@ -152,7 +159,12 @@ mod tests {
 
         let outcome = apply_text_edit(
             &mut model,
-            TextEdit { source_generation, range: 5..11, replacement: "\n\nnext".into() },
+            TextEdit {
+                source_generation,
+                range: 5..11,
+                replacement: "\n\nnext".into(),
+                history: EditHistoryKind::Standalone,
+            },
         )
         .expect("valid edit should succeed");
 
@@ -171,7 +183,12 @@ mod tests {
 
         let error = apply_text_edit(
             &mut model,
-            TextEdit { source_generation: stale_generation, range: 1..2, replacement: "Z".into() },
+            TextEdit {
+                source_generation: stale_generation,
+                range: 1..2,
+                replacement: "Z".into(),
+                history: EditHistoryKind::Standalone,
+            },
         )
         .expect_err("stale generation should fail");
 
@@ -185,7 +202,12 @@ mod tests {
 
         let error = apply_text_edit(
             &mut model,
-            TextEdit { source_generation, range: 1..3, replacement: "Q".into() },
+            TextEdit {
+                source_generation,
+                range: 1..3,
+                replacement: "Q".into(),
+                history: EditHistoryKind::Standalone,
+            },
         )
         .expect_err("grapheme-splitting edit should fail");
 

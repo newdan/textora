@@ -1,4 +1,7 @@
-use crate::buffer::history::{ActiveEditGroupInfo, HistoryEntry, HistoryType, TextBufferSelection};
+use crate::buffer::history::{
+    ActiveEditGroupInfo, EditHistoryKind, EditMergeAnchor, HistoryEntry, HistoryType,
+    TextBufferSelection,
+};
 use crate::buffer::text_buffer::{CursorMovement, MoveLineDirection, TextBuffer};
 use crate::cell::SemiRefCell;
 use crate::helpers::CoordType;
@@ -511,6 +514,10 @@ impl TextBuffer {
             return;
         }
 
+        // Any edit outside `replace_range_with_history` invalidates the coalescing anchor.
+        // (`replace_range_with_history` re-establishes it after `edit_end`.)
+        self.edit_merge_anchor = None;
+
         let cursor_before = self.cursor;
         self.set_cursor_internal(cursor);
 
@@ -620,7 +627,15 @@ impl TextBuffer {
                 .back_mut()
                 .expect("an active edit always has an undo entry")
                 .borrow_mut();
-            self.buffer.extract_raw(start_offset..end_offset, &mut undo.deleted, usize::MAX);
+            // If this edit joins a coalesced entry at an earlier position
+            // (continued backspace), prepend the deleted portion, mirroring `edit_delete`.
+            let out_off = if start.logical_pos < undo.cursor {
+                undo.cursor = start.logical_pos;
+                0
+            } else {
+                usize::MAX
+            };
+            self.buffer.extract_raw(start_offset..end_offset, &mut undo.deleted, out_off);
             undo.added.extend_from_slice(replacement);
         }
 
@@ -693,6 +708,7 @@ impl TextBuffer {
     }
 
     fn undo_redo(&mut self, undo: bool) {
+        self.edit_merge_anchor = None;
         let buffer_generation = self.buffer.generation();
         let mut entry_buffer_generation = None;
         let mut damage_start = CoordType::MAX;
@@ -816,6 +832,20 @@ impl TextBuffer {
 
     /// Replace a byte range with new content. Used by find-and-replace.
     pub fn replace_range(&mut self, range: std::ops::Range<usize>, replacement: &[u8]) {
+        self.replace_range_with_history(range, replacement, EditHistoryKind::Standalone);
+    }
+
+    /// Replace a byte range with new content, recording undo history per `kind`.
+    ///
+    /// `Insert`/`Delete` edits coalesce with an immediately adjacent edit of the
+    /// same kind (continuous typing / backspace runs), matching source-mode undo
+    /// granularity. `Standalone` edits always form their own undo entry.
+    pub fn replace_range_with_history(
+        &mut self,
+        range: std::ops::Range<usize>,
+        replacement: &[u8],
+        kind: EditHistoryKind,
+    ) {
         if range.is_empty() && replacement.is_empty() {
             return;
         }
@@ -824,15 +854,41 @@ impl TextBuffer {
         // Move end cursor to end of range for deletion
         let end = self.cursor_move_to_byte_internal(start, ByteIndex(range.end));
 
-        self.edit_begin(HistoryType::Other, start);
+        let coalesce = self
+            .edit_merge_anchor
+            .is_some_and(|anchor| anchor.continues(kind, &range, replacement));
+        // Force `edit_begin` to either join the anchored entry or start a fresh one:
+        // caret syncs between edits reset `last_history_type`, so the adjacency-checked
+        // anchor is the source of truth for coalescing.
+        self.last_history_type = if coalesce { kind.into() } else { HistoryType::Other };
+        self.edit_begin(kind.into(), start);
         self.edit_replace(start, end, replacement);
         self.edit_end();
+
+        self.edit_merge_anchor = EditMergeAnchor::after_edit(kind, &range, replacement);
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn buffer_with_text(text: &str) -> TextBuffer {
+        let mut buffer = TextBuffer::new(false).expect("test buffer must be created");
+        buffer.set_crlf(false);
+        buffer.set_insert_final_newline(false);
+        buffer.write_raw(text.as_bytes());
+        buffer.mark_as_clean();
+        // Treat the initial content like a freshly loaded document: no undo history.
+        buffer.undo_stack.clear();
+        buffer
+    }
+
+    fn buffer_text(buffer: &mut TextBuffer) -> String {
+        let mut text = String::new();
+        buffer.save_as_string(&mut text);
+        text
+    }
 
     #[test]
     fn replace_range_with_nonempty_replacement_increments_generation_once_and_undoes_once() {
@@ -849,5 +905,108 @@ mod tests {
         let mut restored_text = String::new();
         buffer.save_as_string(&mut restored_text);
         assert_eq!(restored_text, "hello world");
+    }
+
+    #[test]
+    fn insert_history_coalesces_adjacent_typing_into_one_undo_entry() {
+        let mut buffer = buffer_with_text("");
+
+        for (index, ch) in b"abc".iter().enumerate() {
+            // The WYSIWYG caret sync between transactions resets `last_history_type`;
+            // coalescing must still apply to adjacent typing.
+            buffer.cursor_move_to_byte(ByteIndex(index));
+            buffer.replace_range_with_history(index..index, &[*ch], EditHistoryKind::Insert);
+        }
+
+        assert_eq!(buffer_text(&mut buffer), "abc");
+        assert_eq!(buffer.undo_stack.len(), 1, "adjacent typing must coalesce");
+        buffer.undo();
+        assert_eq!(buffer_text(&mut buffer), "");
+    }
+
+    #[test]
+    fn delete_history_coalesces_adjacent_backspaces_into_one_undo_entry() {
+        let mut buffer = buffer_with_text("abc");
+
+        for start in (0..3).rev() {
+            buffer.cursor_move_to_byte(ByteIndex(start + 1));
+            buffer.replace_range_with_history(start..start + 1, b"", EditHistoryKind::Delete);
+        }
+
+        assert_eq!(buffer_text(&mut buffer), "");
+        assert_eq!(buffer.undo_stack.len(), 1, "adjacent backspaces must coalesce");
+        buffer.undo();
+        assert_eq!(buffer_text(&mut buffer), "abc");
+    }
+
+    #[test]
+    fn delete_history_coalesces_adjacent_forward_deletes_into_one_undo_entry() {
+        let mut buffer = buffer_with_text("abc");
+
+        for _ in 0..3 {
+            buffer.cursor_move_to_byte(ByteIndex(0));
+            buffer.replace_range_with_history(0..1, b"", EditHistoryKind::Delete);
+        }
+
+        assert_eq!(buffer_text(&mut buffer), "");
+        assert_eq!(buffer.undo_stack.len(), 1, "adjacent forward deletes must coalesce");
+        buffer.undo();
+        assert_eq!(buffer_text(&mut buffer), "abc");
+    }
+
+    #[test]
+    fn alternating_insert_and_delete_history_splits_undo_entries() {
+        let mut buffer = buffer_with_text("");
+
+        buffer.replace_range_with_history(0..0, b"a", EditHistoryKind::Insert);
+        buffer.cursor_move_to_byte(ByteIndex(1));
+        buffer.replace_range_with_history(0..1, b"", EditHistoryKind::Delete);
+        buffer.cursor_move_to_byte(ByteIndex(0));
+        buffer.replace_range_with_history(0..0, b"b", EditHistoryKind::Insert);
+
+        assert_eq!(buffer_text(&mut buffer), "b");
+        assert_eq!(buffer.undo_stack.len(), 3, "type changes must split undo entries");
+        buffer.undo();
+        assert_eq!(buffer_text(&mut buffer), "");
+        buffer.undo();
+        assert_eq!(buffer_text(&mut buffer), "a");
+        buffer.undo();
+        assert_eq!(buffer_text(&mut buffer), "");
+    }
+
+    #[test]
+    fn standalone_replacement_breaks_insert_coalescing() {
+        let mut buffer = buffer_with_text("");
+
+        buffer.replace_range_with_history(0..0, b"a", EditHistoryKind::Insert);
+        buffer.cursor_move_to_byte(ByteIndex(1));
+        buffer.replace_range(1..1, b"-");
+        buffer.cursor_move_to_byte(ByteIndex(2));
+        buffer.replace_range_with_history(2..2, b"b", EditHistoryKind::Insert);
+
+        assert_eq!(buffer_text(&mut buffer), "a-b");
+        assert_eq!(buffer.undo_stack.len(), 3, "standalone edits must never coalesce");
+        buffer.undo();
+        assert_eq!(buffer_text(&mut buffer), "a-");
+        buffer.undo();
+        assert_eq!(buffer_text(&mut buffer), "a");
+        buffer.undo();
+        assert_eq!(buffer_text(&mut buffer), "");
+    }
+
+    #[test]
+    fn insert_history_does_not_coalesce_after_caret_moves_elsewhere() {
+        let mut buffer = buffer_with_text("xy");
+
+        buffer.replace_range_with_history(0..0, b"a", EditHistoryKind::Insert);
+        buffer.cursor_move_to_byte(ByteIndex(3));
+        buffer.replace_range_with_history(3..3, b"b", EditHistoryKind::Insert);
+
+        assert_eq!(buffer_text(&mut buffer), "axyb");
+        assert_eq!(buffer.undo_stack.len(), 2, "non-adjacent typing must not coalesce");
+        buffer.undo();
+        assert_eq!(buffer_text(&mut buffer), "axy");
+        buffer.undo();
+        assert_eq!(buffer_text(&mut buffer), "xy");
     }
 }

@@ -5,6 +5,7 @@
 
 use std::path::Path;
 
+use core::buffer::EditHistoryKind;
 use core::document::{DocView, DocViewMut};
 use shaping::Shaper;
 
@@ -451,6 +452,10 @@ pub struct CursorUpdate {
 pub enum EditPlan {
     UseDefault,
     Apply(EditTransaction),
+    /// Resolved default-plan transaction. Unlike plugin-provided [`EditPlan::Apply`],
+    /// it may coalesce with adjacent default edits per its [`EditHistoryKind`]
+    /// (continuous typing / backspace runs share one undo entry).
+    ApplyDefault(EditTransaction, EditHistoryKind),
     SetSelection(EditSelection),
     MoveCursor(CursorUpdate),
     Consume,
