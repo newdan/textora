@@ -63,6 +63,14 @@ pub struct RenderedLineLayout {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
+struct BlankLineLayout {
+    role: SourceLineRole,
+    y_top: f32,
+    height: f32,
+    is_rendered: bool,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) struct ProjectedEmptyLine {
     pub owner: ProjectionOwnerId,
     pub source_byte: usize,
@@ -159,22 +167,36 @@ impl SourceLineMap {
             let line = &self.lines[line_idx];
 
             // Advance rendered_idx past segments that cannot overlap this line.
-            while rendered_idx < rendered_lines.len()
-                && rendered_lines[rendered_idx].source_range.end <= line.start
-            {
+            // 空行自带的渲染投影（代码块/metadata 块内部空行，通常为零宽）锚定在
+            // 行区间内，必须留给空行分类识别，不能在此跳过。
+            while rendered_idx < rendered_lines.len() {
+                let rendered = &rendered_lines[rendered_idx];
+                if rendered.source_range.end > line.start
+                    || Self::owns_rendered_line(rendered, line)
+                {
+                    break;
+                }
                 rendered_idx += 1;
             }
 
             if line.is_empty() {
                 if let Some(run_pos) = self.empty_runs[line_idx] {
-                    let has_next_block = rendered_idx < rendered_lines.len();
-
-                    if prev_had_block && has_next_block && run_pos.index_in_run == 0 {
-                        role = SourceLineRole::HiddenBlockSeparator;
-                        line_h = paragraph_spacing;
-                    } else {
-                        role = SourceLineRole::EditableEmpty;
-                        line_h = line_height;
+                    let blank = Self::classify_blank_line(
+                        line,
+                        run_pos,
+                        rendered_lines.get(rendered_idx),
+                        prev_had_block,
+                        current_y,
+                        line_height,
+                        paragraph_spacing,
+                    );
+                    role = blank.role;
+                    line_y = blank.y_top;
+                    line_h = blank.height;
+                    is_rendered = blank.is_rendered;
+                    if blank.is_rendered {
+                        prev_had_block = true;
+                        rendered_idx += 1;
                     }
                 }
             } else {
@@ -206,6 +228,51 @@ impl SourceLineMap {
             } else {
                 current_y = line_y + line_h;
             }
+        }
+    }
+
+    /// 空行自带的渲染投影：投影起点落在该空行的源码区间内
+    ///（代码块/metadata 块会为内部空行生成渲染行，通常为零宽投影）。
+    fn owns_rendered_line(rendered: &RenderedLineLayout, line: &SourceLineEntry) -> bool {
+        line.is_empty()
+            && rendered.source_range.start >= line.start
+            && rendered.source_range.start <= line.end
+    }
+
+    /// 空行分类：块内部空行按渲染行处理；块间 run 首行折叠为隐藏分隔；
+    /// 其余为可编辑空行。
+    fn classify_blank_line(
+        line: &SourceLineEntry,
+        run_pos: EmptyRunPosition,
+        next_rendered: Option<&RenderedLineLayout>,
+        prev_had_block: bool,
+        current_y: f32,
+        line_height: f32,
+        paragraph_spacing: f32,
+    ) -> BlankLineLayout {
+        if let Some(rendered) = next_rendered.filter(|r| Self::owns_rendered_line(r, line)) {
+            return BlankLineLayout {
+                role: SourceLineRole::Other,
+                y_top: rendered.y_top,
+                height: rendered.height,
+                is_rendered: true,
+            };
+        }
+
+        if prev_had_block && next_rendered.is_some() && run_pos.index_in_run == 0 {
+            return BlankLineLayout {
+                role: SourceLineRole::HiddenBlockSeparator,
+                y_top: current_y,
+                height: paragraph_spacing,
+                is_rendered: false,
+            };
+        }
+
+        BlankLineLayout {
+            role: SourceLineRole::EditableEmpty,
+            y_top: current_y,
+            height: line_height,
+            is_rendered: false,
         }
     }
 
@@ -413,6 +480,25 @@ mod tests {
                 "editable empty-line mismatch for {source:?}"
             );
         }
+    }
+
+    #[test]
+    fn blank_line_with_own_rendered_projection_is_not_hidden_separator() {
+        // active 代码块/metadata 块会为内部空行生成专属渲染行（零宽投影），
+        // 这类空行属于块内容，不得折叠为块间分隔。
+        let source = "a\n\nb";
+        let rendered = vec![
+            RenderedLineLayout { source_range: 0..1, y_top: 0.0, height: 24.0 },
+            RenderedLineLayout { source_range: 2..2, y_top: 24.0, height: 24.0 },
+            RenderedLineLayout { source_range: 3..4, y_top: 48.0, height: 24.0 },
+        ];
+        let mut map = SourceLineMap::from_source(source);
+        map.attach_layout(&rendered, 24.0, 12.0);
+
+        let blank = map.line_at_index(1).expect("blank line");
+        assert_ne!(blank.role, SourceLineRole::HiddenBlockSeparator);
+        assert_eq!(blank.y_top, 24.0);
+        assert_eq!(map.hidden_block_separators().count(), 0);
     }
 
     #[test]

@@ -1312,6 +1312,11 @@ impl<S: BlockSource> PreviewEngine<S> {
             return (x, empty_line.y_top, font_size, line_height);
         }
 
+        // 块内部空行自带渲染行：直接使用该渲染行几何，保证光标落在看到的空行上。
+        if let Some(own_line) = self.own_rendered_line(source_line, lazy) {
+            return (own_line.rect.x, own_line.rect.y, own_line.font_size, own_line.rect.h);
+        }
+
         let (previous_line, next_line) = self.surrounding_rendered_lines(source_line, lazy);
 
         if let (Some(previous), Some(next)) = (previous_line, next_line)
@@ -1383,6 +1388,21 @@ impl<S: BlockSource> PreviewEngine<S> {
         }
 
         (0.0, self.rendered_body_font_size, self.rendered_line_height)
+    }
+
+    /// 空源码行自身的渲染行（代码块/metadata 块会为内部空行生成投影）。
+    /// 判定依据：投影的源码范围完整落在该空行的源码区间内。
+    fn own_rendered_line<'a>(
+        &self,
+        source_line: SourceLineAtByte,
+        lazy: &'a LazyLayout<S>,
+    ) -> Option<&'a crate::layout::FlatLine> {
+        lazy.flat_lines.iter().find(|flat_line| {
+            flat_line.source_projection.as_ref().is_some_and(|projection| {
+                projection.source_extent.start >= source_line.start
+                    && projection.source_extent.end <= source_line.end
+            })
+        })
     }
 
     fn surrounding_rendered_lines<'a>(
@@ -1864,6 +1884,10 @@ impl<S: BlockSource> PreviewEngine<S> {
         _source: &str,
     ) -> EmptySourceLineRole {
         if !source_line.is_empty() {
+            return EmptySourceLineRole::EditableLine;
+        }
+        // 块内部空行（代码块/metadata 块）自带渲染投影，属于块内容而非块间分隔。
+        if self.own_rendered_line(source_line, lazy).is_some() {
             return EmptySourceLineRole::EditableLine;
         }
         let (previous_line, next_line) = self.surrounding_rendered_lines(source_line, lazy);
@@ -7031,6 +7055,194 @@ viebcoding 用过吗?
             "End on an empty source line should stay on that line"
         );
     }
+
+    #[test]
+    fn cursor_on_blank_line_inside_code_block_stays_on_that_line() {
+        use ui::plugin::{PluginMessage, ViewPlugin};
+
+        let source = "```rust\nfn a() {}\n\nfn b() {}\n```\n";
+        let mut doc = StubDoc::new(source);
+        let mut view = MarkdownEditorView::new();
+        view.set_source(doc.text.clone(), 1);
+
+        let blank_line_start = source.find("\n\n").expect("fixture has blank line") + 1;
+        view.handle_message(PluginMessage::SetCursorByte(blank_line_start), &mut doc);
+        render_editor_once(&mut view, &doc);
+
+        let (cursor_x, cursor_y, cursor_width, cursor_height) = view
+            .engine()
+            .cursor_screen_pos()
+            .expect("blank line inside a code block should have a cursor rect");
+        let hit = view.engine().hit_test_byte(
+            cursor_x + cursor_width * 0.5,
+            cursor_y + cursor_height * 0.5,
+            0.0,
+            0.0,
+        );
+
+        assert_eq!(
+            hit,
+            Some(blank_line_start),
+            "cursor on the blank line inside a code block must map back to that line's byte"
+        );
+    }
+
+    #[test]
+    fn visual_move_down_passes_through_blank_line_inside_active_fenced_code_block() {
+        use ui::plugin::{MoveDirection, PluginMessage, ViewPlugin};
+
+        let source = "```rust\nfn a() {}\n\nfn b() {}\n```\n";
+        let mut doc = StubDoc::new(source);
+        let mut view = MarkdownEditorView::new();
+        view.set_source(doc.text.clone(), 1);
+
+        let first_code_line_start = source.find("fn a() {}").expect("fixture has first code line");
+        let blank_line_start = source.find("\n\n").expect("fixture has blank line") + 1;
+        let second_code_line_start =
+            source.find("fn b() {}").expect("fixture has second code line");
+        view.handle_message(PluginMessage::SetCursorByte(first_code_line_start), &mut doc);
+        render_editor_once(&mut view, &doc);
+
+        assert_eq!(
+            view.engine().visual_move(first_code_line_start, MoveDirection::Down, None),
+            Some(blank_line_start),
+            "Down from a code line should land on the blank line inside the same code block"
+        );
+        assert_eq!(
+            view.engine().visual_move(blank_line_start, MoveDirection::Down, None),
+            Some(second_code_line_start),
+            "Down from the blank line inside a code block should reach the next code line"
+        );
+    }
+
+    #[test]
+    fn visual_move_up_passes_through_blank_line_inside_active_fenced_code_block() {
+        use ui::plugin::{MoveDirection, PluginMessage, ViewPlugin};
+
+        let source = "```rust\nfn a() {}\n\nfn b() {}\n```\n";
+        let mut doc = StubDoc::new(source);
+        let mut view = MarkdownEditorView::new();
+        view.set_source(doc.text.clone(), 1);
+
+        let first_code_line_start = source.find("fn a() {}").expect("fixture has first code line");
+        let blank_line_start = source.find("\n\n").expect("fixture has blank line") + 1;
+        let second_code_line_start =
+            source.find("fn b() {}").expect("fixture has second code line");
+        view.handle_message(PluginMessage::SetCursorByte(second_code_line_start), &mut doc);
+        render_editor_once(&mut view, &doc);
+
+        assert_eq!(
+            view.engine().visual_move(second_code_line_start, MoveDirection::Up, None),
+            Some(blank_line_start),
+            "Up from a code line should land on the blank line inside the same code block"
+        );
+        assert_eq!(
+            view.engine().visual_move(blank_line_start, MoveDirection::Up, None),
+            Some(first_code_line_start),
+            "Up from the blank line inside a code block should reach the previous code line"
+        );
+    }
+
+    #[test]
+    fn visual_move_passes_through_blank_line_inside_active_indented_code_block() {
+        use ui::plugin::{MoveDirection, PluginMessage, ViewPlugin};
+
+        let source = "intro\n\n    first\n\n    second\n";
+        let mut doc = StubDoc::new(source);
+        let mut view = MarkdownEditorView::new();
+        view.set_source(doc.text.clone(), 1);
+
+        // 缩进代码块的块范围从首个文本字节开始（不含首行缩进）。
+        let first_code_line_start = source.find("first").expect("fixture has first code line");
+        let blank_line_start =
+            source.find("first\n\n").expect("fixture has blank line") + "first\n".len();
+        let second_code_line_start =
+            source.find("    second").expect("fixture has second code line");
+        view.handle_message(PluginMessage::SetCursorByte(first_code_line_start), &mut doc);
+        render_editor_once(&mut view, &doc);
+
+        assert_eq!(
+            view.engine().visual_move(first_code_line_start, MoveDirection::Down, None),
+            Some(blank_line_start),
+            "Down should land on the blank line inside the same indented code block"
+        );
+        assert_eq!(
+            view.engine().visual_move(blank_line_start, MoveDirection::Down, None),
+            Some(second_code_line_start),
+            "Down from the blank line should reach the next indented code line"
+        );
+        assert_eq!(
+            view.engine().visual_move(blank_line_start, MoveDirection::Up, None),
+            Some(first_code_line_start),
+            "Up from the blank line should reach the previous indented code line"
+        );
+    }
+
+    #[test]
+    fn visual_move_passes_through_blank_line_inside_crlf_code_block() {
+        use ui::plugin::{MoveDirection, PluginMessage, ViewPlugin};
+
+        let source = "```\r\nalpha\r\n\r\nbeta\r\n```\r\n";
+        let mut doc = StubDoc::new(source);
+        let mut view = MarkdownEditorView::new();
+        view.set_source(doc.text.clone(), 1);
+
+        let first_code_line_start = source.find("alpha").expect("fixture has first code line");
+        let blank_line_start =
+            source.find("\r\n\r\n").expect("fixture has blank line") + "\r\n".len();
+        let second_code_line_start = source.find("beta").expect("fixture has second code line");
+        view.handle_message(PluginMessage::SetCursorByte(first_code_line_start), &mut doc);
+        render_editor_once(&mut view, &doc);
+
+        assert_eq!(
+            view.engine().visual_move(first_code_line_start, MoveDirection::Down, None),
+            Some(blank_line_start),
+            "Down should land on the blank line inside the same CRLF code block"
+        );
+        assert_eq!(
+            view.engine().visual_move(blank_line_start, MoveDirection::Down, None),
+            Some(second_code_line_start),
+            "Down from the CRLF blank line should reach the next code line"
+        );
+        assert_eq!(
+            view.engine().visual_move(blank_line_start, MoveDirection::Up, None),
+            Some(first_code_line_start),
+            "Up from the CRLF blank line should reach the previous code line"
+        );
+    }
+
+    #[test]
+    fn visual_move_passes_through_blank_line_inside_metadata_block() {
+        use ui::plugin::{MoveDirection, PluginMessage, ViewPlugin};
+
+        let source = "---\ntitle: a\n\ndesc: b\n---\nbody\n";
+        let mut doc = StubDoc::new(source);
+        let mut view = MarkdownEditorView::new();
+        view.set_source(doc.text.clone(), 1);
+
+        let first_line_start = source.find("title: a").expect("fixture has first metadata line");
+        let blank_line_start = source.find("\n\n").expect("fixture has blank line") + 1;
+        let second_line_start = source.find("desc: b").expect("fixture has second metadata line");
+        view.handle_message(PluginMessage::SetCursorByte(first_line_start), &mut doc);
+        render_editor_once(&mut view, &doc);
+
+        assert_eq!(
+            view.engine().visual_move(first_line_start, MoveDirection::Down, None),
+            Some(blank_line_start),
+            "Down should land on the blank line inside the same metadata block"
+        );
+        assert_eq!(
+            view.engine().visual_move(blank_line_start, MoveDirection::Down, None),
+            Some(second_line_start),
+            "Down from the blank line should reach the next metadata line"
+        );
+        assert_eq!(
+            view.engine().visual_move(blank_line_start, MoveDirection::Up, None),
+            Some(first_line_start),
+            "Up from the blank line should reach the previous metadata line"
+        );
+    }
+
     #[test]
     fn wysiwyg_cursor_y_aligns_to_text_baseline() {
         let mut doc = StubDoc::new("hello markdown");
