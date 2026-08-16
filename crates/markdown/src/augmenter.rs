@@ -511,6 +511,12 @@ fn classify_heading_hit(
     start: usize,
     range: &std::ops::Range<usize>,
 ) -> EnterContext {
+    // pulldown-cmark 对 ATX 与 setext 标题都发 `Tag::Heading`，但下面的
+    // `hash_prefix` 计算只适用于 ATX；setext（`Title\n===`）必须排除，
+    // 否则回车/退格会按 `# ` 前缀语义破坏标题。
+    if !heading_source_is_atx(source, start) {
+        return EnterContext::Other;
+    }
     let end = content_end_without_trailing_newline(source, start..range.end);
     let hash_prefix = level as usize + 1; // "# " / "## " / ...
     let content_start = start.saturating_add(hash_prefix);
@@ -520,6 +526,23 @@ fn classify_heading_hit(
     } else {
         EnterContext::Other
     }
+}
+
+/// 标题 range 起始处的源码必须是合法的 ATX marker：至多 3 个前导空格，
+/// 1-6 个 `#`，后跟空格/制表符/行尾。
+fn heading_source_is_atx(source: &str, heading_start: usize) -> bool {
+    let bytes = source.as_bytes();
+    let mut marker_probe = heading_start;
+    let mut leading_spaces = 0;
+    while bytes.get(marker_probe) == Some(&b' ') && leading_spaces < MAX_LEADING_BLOCK_INDENT {
+        marker_probe += 1;
+        leading_spaces += 1;
+    }
+    let hash_count = bytes[marker_probe..].iter().take_while(|&&byte| byte == b'#').count();
+    if !(1..=6).contains(&hash_count) {
+        return false;
+    }
+    matches!(bytes.get(marker_probe + hash_count), None | Some(b' ' | b'\t' | b'\r' | b'\n'))
 }
 
 pub fn classify_enter_context(source: &str, current_byte: usize) -> EnterContext {
@@ -1217,6 +1240,42 @@ mod tests {
                 "generic paragraph joining must not consume a {source:?} boundary"
             );
         }
+    }
+
+    #[test]
+    fn pulldown_cmark_emits_heading_event_for_setext_heading() {
+        use pulldown_cmark::{Event, Parser, Tag};
+
+        let source = "Title\n===\n";
+        let heading_ranges: Vec<std::ops::Range<usize>> =
+            Parser::new_ext(source, pulldown_cmark::Options::all())
+                .into_offset_iter()
+                .filter_map(|(event, range)| {
+                    matches!(event, Event::Start(Tag::Heading { .. })).then_some(range)
+                })
+                .collect();
+
+        assert_eq!(heading_ranges.len(), 1, "setext heading must surface as a heading event");
+        let heading_range = &heading_ranges[0];
+        assert!(
+            !source[heading_range.start..].starts_with('#'),
+            "setext heading source does not start with an ATX marker: {:?}",
+            &source[heading_range.clone()]
+        );
+    }
+
+    #[test]
+    fn setext_heading_is_not_classified_as_atx_heading() {
+        let source = "Title\n===";
+
+        assert!(
+            matches!(classify_enter_context(source, "Title".len()), EnterContext::Other),
+            "setext title text must not use ATX heading semantics"
+        );
+        assert!(
+            matches!(classify_enter_context(source, source.len()), EnterContext::Other),
+            "setext underline must not use ATX heading semantics"
+        );
     }
 
     #[test]
