@@ -951,6 +951,10 @@ impl ModelSession {
     }
 }
 
+fn default_newline_text(document: &appkit_core::document::DocumentModel) -> String {
+    if document.tb.is_crlf() { "\r\n".to_owned() } else { "\n".to_owned() }
+}
+
 fn default_edit_plan(
     request: &ui::plugin::EditRequest,
     document: &appkit_core::document::DocumentModel,
@@ -959,7 +963,7 @@ fn default_edit_plan(
 
     let replacement = match &request.intent {
         EditIntent::InsertText(text) => Some(text.clone()),
-        EditIntent::InsertParagraphBreak => Some("\n".to_owned()),
+        EditIntent::InsertParagraphBreak => Some(default_newline_text(document)),
         EditIntent::Indent => Some(if document.tb.indent_with_tabs() {
             "\t".to_owned()
         } else {
@@ -1148,6 +1152,14 @@ mod tests {
             DocumentModel::new(text_buffer),
             TabRuntime::new(EditorPluginFactory.create()),
         )
+    }
+
+    fn prepared_crlf_document(text: &str) -> DocumentModel {
+        let mut text_buffer =
+            TextBuffer::new(false).expect("model session test requires a writable text buffer");
+        text_buffer.write_raw(text.as_bytes());
+        text_buffer.set_crlf(true);
+        DocumentModel::new(text_buffer)
     }
 
     struct SourceSyncProbePlugin {
@@ -1419,5 +1431,44 @@ mod tests {
             EditorNotification::ContentChanged { tab_id: changed_tab_id, .. }
                 if *changed_tab_id == tab_id
         )));
+    }
+
+    #[test]
+    fn default_plan_breaks_paragraph_with_crlf_in_crlf_documents() {
+        let document = prepared_crlf_document("alpha\r\nbeta");
+        let request = ui::plugin::EditRequest {
+            source_generation: document.generation(),
+            cursor_byte: 0,
+            selection: None,
+            intent: ui::plugin::EditIntent::InsertParagraphBreak,
+        };
+
+        let plan = default_edit_plan(&request, &document);
+
+        let ui::plugin::EditPlan::Apply(transaction) = plan else {
+            panic!("paragraph break should plan a text replacement");
+        };
+        assert_eq!(transaction.replacements.len(), 1);
+        assert_eq!(transaction.replacements[0].text, "\r\n");
+    }
+
+    #[test]
+    fn default_plan_breaks_paragraph_with_lf_in_lf_documents() {
+        let prepared = prepared_text("alpha\nbeta");
+        let document = prepared.document;
+        let request = ui::plugin::EditRequest {
+            source_generation: document.generation(),
+            cursor_byte: 0,
+            selection: None,
+            intent: ui::plugin::EditIntent::InsertParagraphBreak,
+        };
+
+        let plan = default_edit_plan(&request, &document);
+
+        let ui::plugin::EditPlan::Apply(transaction) = plan else {
+            panic!("paragraph break should plan a text replacement");
+        };
+        assert_eq!(transaction.replacements.len(), 1);
+        assert_eq!(transaction.replacements[0].text, "\n");
     }
 }
