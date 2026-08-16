@@ -555,11 +555,10 @@ mod tests {
             doc_line * self.vl
         }
         fn map_display_to_doc(&self, display_row: usize) -> usize {
-            if self.vl == 0 {
-                0
-            } else {
-                display_row.saturating_sub(display_row % self.vl) / self.vl
-            }
+            display_row
+                .saturating_sub(display_row % self.vl.max(1))
+                .checked_div(self.vl)
+                .unwrap_or(0)
         }
         fn visual_line_count(&self, _doc_line: usize) -> u16 {
             self.vl as u16
