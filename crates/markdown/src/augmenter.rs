@@ -323,8 +323,39 @@ fn backspace_paragraph_boundary(source: &str, current_byte: usize) -> Option<Edi
             debug_assert_augmentation(&aug, source);
             Some(aug)
         }
+        EnterContext::BlockQuoteLine { continuation_prefix, .. } => Some(
+            merge_into_preceding_block(source, boundary_start, current_byte, &continuation_prefix),
+        ),
+        EnterContext::ListItem { indent, continuation_marker, .. } => {
+            // 并入为同一 item 的延续行：缩进 = item 前导空白 + marker 宽度的空格，
+            // 对齐 item 的内容列。marker 均为 ASCII，但按 char 计宽更严谨。
+            let marker_column_width = continuation_marker.chars().count();
+            let content_padding = format!("{indent}{}", " ".repeat(marker_column_width));
+            Some(merge_into_preceding_block(source, boundary_start, current_byte, &content_padding))
+        }
         _ => guard_unmergeable_leaf_boundary(source, boundary_start, current_byte),
     }
+}
+
+/// 段首退格并入引用块/列表项：删除块间空行分隔，为并入行补显式行首前缀
+/// （引用的 `> ` marker，或列表延续行的内容列缩进），避免产生无 marker 的
+/// 脆弱 lazy continuation 中间态。单条 augmentation 保证一次 undo 完整还原。
+fn merge_into_preceding_block(
+    source: &str,
+    boundary_start: usize,
+    current_byte: usize,
+    line_prefix: &str,
+) -> EditAugmentation {
+    let newline = preferred_newline_sequence(source, current_byte);
+    let insert_text = format!("{newline}{line_prefix}");
+    let cursor_byte_after = boundary_start + insert_text.len();
+    let aug = EditAugmentation {
+        insert_text: Some(insert_text),
+        replace_range: Some(boundary_start..current_byte),
+        cursor_byte_after,
+    };
+    debug_assert_augmentation(&aug, source);
+    aug
 }
 
 /// 段首退格且前块为代码块/分隔线/setext 标题等不可安全合并的叶块时：
@@ -616,21 +647,25 @@ pub fn classify_enter_context(source: &str, current_byte: usize) -> EnterContext
                 }
             }
             Event::End(TagEnd::Item) => {
-                if let Some(frame) = item_stack.pop()
-                    && frame.marker_end > frame.start
-                    && current_byte >= frame.marker_end
-                    && current_byte <= range.end
-                {
+                if let Some(frame) = item_stack.pop() {
+                    // item range 含尾部换行 run（块间空行分隔也算在内）；
+                    // 命中测试用去尾换行的内容末尾，否则紧随其后的顶层块首字节
+                    // 会被误判为仍属于该 item。
                     let end =
                         content_end_without_trailing_newline(source, frame.marker_end..range.end);
-                    let empty = !frame.saw_content;
-                    let at_end = current_byte == end;
-                    return EnterContext::ListItem {
-                        indent: frame.indent,
-                        continuation_marker: frame.continuation_marker,
-                        empty,
-                        at_end,
-                    };
+                    if frame.marker_end > frame.start
+                        && current_byte >= frame.marker_end
+                        && current_byte <= end
+                    {
+                        let empty = !frame.saw_content;
+                        let at_end = current_byte == end;
+                        return EnterContext::ListItem {
+                            indent: frame.indent,
+                            continuation_marker: frame.continuation_marker,
+                            empty,
+                            at_end,
+                        };
+                    }
                 }
             }
             Event::Start(Tag::BlockQuote(_)) => {
@@ -1259,7 +1294,8 @@ mod tests {
 
     #[test]
     fn backspace_after_non_text_block_uses_existing_specialized_or_fallback_behavior() {
-        let cases = ["---\n\nparagraph", "- item\n\nparagraph", "```\ncode\n```\n\nparagraph"];
+        // 列表边界已由显式并入测试覆盖（M4），此处只保留仍回退默认计划的叶块。
+        let cases = ["---\n\nparagraph", "```\ncode\n```\n\nparagraph"];
 
         for source in cases {
             let current_byte = source.find("paragraph").expect("fixture must contain a paragraph");
@@ -1356,6 +1392,79 @@ mod tests {
                 augment_edit(source, current_byte, AugmentKind::Backspace).is_none(),
                 "removing one newline of a blank separator before a leaf block is safe: {source:?}"
             );
+        }
+    }
+
+    #[test]
+    fn backspace_at_paragraph_start_after_blockquote_merges_with_explicit_marker() {
+        let cases = [
+            ("> quote\n\nparagraph", "> quote\n> paragraph", "> quote\n> "),
+            ("> > quote\n\nparagraph", "> > quote\n> > paragraph", "> > quote\n> > "),
+            ("  > quote\n\nparagraph", "  > quote\n  > paragraph", "  > quote\n  > "),
+        ];
+
+        for (source, expected_source, expected_cursor_prefix) in cases {
+            let current_byte = source.find("paragraph").expect("fixture must contain a paragraph");
+            let augmentation = augment_edit(source, current_byte, AugmentKind::Backspace)
+                .unwrap_or_else(|| {
+                    panic!("blockquote boundary in {source:?} must merge with an explicit marker")
+                });
+            let edited_source = apply_augmentation_at(source, current_byte, &augmentation);
+
+            assert_eq!(edited_source, expected_source, "merge mismatch for {source:?}");
+            assert_eq!(
+                augmentation.cursor_byte_after,
+                expected_cursor_prefix.len(),
+                "cursor must land before the merged paragraph content for {source:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn backspace_at_paragraph_start_after_list_item_merges_as_continuation_line() {
+        let cases = [
+            ("- item\n\nparagraph", "- item\n  paragraph", "- item\n  "),
+            ("1. item\n\nparagraph", "1. item\n   paragraph", "1. item\n   "),
+            ("- [x] done\n\nparagraph", "- [x] done\n      paragraph", "- [x] done\n      "),
+            (
+                "- outer\n  - inner\n\nparagraph",
+                "- outer\n  - inner\n    paragraph",
+                "- outer\n  - inner\n    ",
+            ),
+        ];
+
+        for (source, expected_source, expected_cursor_prefix) in cases {
+            let current_byte = source.find("paragraph").expect("fixture must contain a paragraph");
+            let augmentation = augment_edit(source, current_byte, AugmentKind::Backspace)
+                .unwrap_or_else(|| {
+                    panic!("list boundary in {source:?} must merge as a continuation line")
+                });
+            let edited_source = apply_augmentation_at(source, current_byte, &augmentation);
+
+            assert_eq!(edited_source, expected_source, "merge mismatch for {source:?}");
+            assert_eq!(
+                augmentation.cursor_byte_after,
+                expected_cursor_prefix.len(),
+                "cursor must land at the content column for {source:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn backspace_merging_into_blockquote_or_list_preserves_crlf_line_endings() {
+        let cases = [
+            ("> quote\r\n\r\nparagraph", "> quote\r\n> paragraph", "> quote\r\n> "),
+            ("- item\r\n\r\nparagraph", "- item\r\n  paragraph", "- item\r\n  "),
+        ];
+
+        for (source, expected_source, expected_cursor_prefix) in cases {
+            let current_byte = source.find("paragraph").expect("fixture must contain a paragraph");
+            let augmentation = augment_edit(source, current_byte, AugmentKind::Backspace)
+                .unwrap_or_else(|| panic!("CRLF boundary in {source:?} must merge explicitly"));
+            let edited_source = apply_augmentation_at(source, current_byte, &augmentation);
+
+            assert_eq!(edited_source, expected_source, "merge mismatch for {source:?}");
+            assert_eq!(augmentation.cursor_byte_after, expected_cursor_prefix.len());
         }
     }
 
