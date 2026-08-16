@@ -7,54 +7,30 @@ use crate::ui_shell::KeyboardFocusTarget;
 use appkit_shell::editor_runtime::{EditorNotification, EditorOutcome};
 use winit::event_loop::ActiveEventLoop;
 
-#[derive(Clone, Debug, PartialEq, Eq)]
-enum WysiwygCommandRoute {
-    Navigation,
-    AugmentedEnter,
-    AugmentedBackspace,
-    AugmentedInsertText(String),
-}
-
-fn wysiwyg_route_for_command(cmd: &EditCommand) -> Option<WysiwygCommandRoute> {
-    match cmd {
-        EditCommand::MoveLeft
-        | EditCommand::MoveRight
-        | EditCommand::MoveUp
-        | EditCommand::MoveDown
-        | EditCommand::MoveToLineStart
-        | EditCommand::MoveToLineEnd
-        | EditCommand::MoveToDocStart
-        | EditCommand::MoveToDocEnd
-        | EditCommand::ExtendLeft
-        | EditCommand::ExtendRight
-        | EditCommand::ExtendUp
-        | EditCommand::ExtendDown
-        | EditCommand::ExtendToLineStart
-        | EditCommand::ExtendToLineEnd
-        | EditCommand::ExtendToDocStart
-        | EditCommand::ExtendToDocEnd
-        | EditCommand::PageUp
-        | EditCommand::PageDown => Some(WysiwygCommandRoute::Navigation),
-        EditCommand::InsertNewline => Some(WysiwygCommandRoute::AugmentedEnter),
-        EditCommand::Backspace => Some(WysiwygCommandRoute::AugmentedBackspace),
-        EditCommand::InsertChar(s) | EditCommand::InsertText(s) => {
-            Some(WysiwygCommandRoute::AugmentedInsertText(s.clone()))
-        }
-        EditCommand::MoveWordLeft | EditCommand::MoveWordRight => None,
-        _ => None,
-    }
-}
-
-fn command_should_replace_selection(cmd: &EditCommand) -> bool {
+/// Visual-navigation commands are routed to the WYSIWYG plugin so it can
+/// resolve the target from its own layout. Text-editing commands never reach
+/// this predicate: they are handled earlier by the transactional edit path.
+fn is_wysiwyg_navigation_command(cmd: &EditCommand) -> bool {
     matches!(
         cmd,
-        EditCommand::InsertChar(_)
-            | EditCommand::InsertText(_)
-            | EditCommand::InsertNewline
-            | EditCommand::Backspace
-            | EditCommand::DeleteForward
-            | EditCommand::Paste
-            | EditCommand::Tab
+        EditCommand::MoveLeft
+            | EditCommand::MoveRight
+            | EditCommand::MoveUp
+            | EditCommand::MoveDown
+            | EditCommand::MoveToLineStart
+            | EditCommand::MoveToLineEnd
+            | EditCommand::MoveToDocStart
+            | EditCommand::MoveToDocEnd
+            | EditCommand::ExtendLeft
+            | EditCommand::ExtendRight
+            | EditCommand::ExtendUp
+            | EditCommand::ExtendDown
+            | EditCommand::ExtendToLineStart
+            | EditCommand::ExtendToLineEnd
+            | EditCommand::ExtendToDocStart
+            | EditCommand::ExtendToDocEnd
+            | EditCommand::PageUp
+            | EditCommand::PageDown
     )
 }
 
@@ -306,33 +282,15 @@ impl App {
             }
         }
 
-        if self.active_allows_editing() && !self.editor_runtime.wysiwyg_recursing() {
+        if self.active_allows_editing() {
             self.sync_plugin_state();
 
             if let Some(intent) = crate::edit_transaction::edit_intent_for_command(&cmd) {
                 return self.dispatch_transactional_edit(intent, Some(event_loop));
             }
 
-            if self.active_handles_own_rendering() {
-                match wysiwyg_route_for_command(&cmd) {
-                    Some(WysiwygCommandRoute::Navigation) => {
-                        return self.dispatch_wysiwyg_navigation(&cmd);
-                    }
-                    Some(WysiwygCommandRoute::AugmentedEnter) => {
-                        return self.dispatch_wysiwyg_augmented_enter(event_loop);
-                    }
-                    Some(WysiwygCommandRoute::AugmentedBackspace) => {
-                        return self.dispatch_wysiwyg_augmented_backspace(event_loop);
-                    }
-                    Some(WysiwygCommandRoute::AugmentedInsertText(text)) => {
-                        return self.dispatch_wysiwyg_augmented_insert_text(
-                            text,
-                            cmd.clone(),
-                            event_loop,
-                        );
-                    }
-                    None => {}
-                }
+            if self.active_handles_own_rendering() && is_wysiwyg_navigation_command(&cmd) {
+                return self.dispatch_wysiwyg_navigation(&cmd);
             }
         }
 
@@ -721,10 +679,8 @@ impl App {
         let Some(mut tab) = self.active_tab_session_mut() else {
             return effect;
         };
-        let ac = tab.take_advance_cache();
         let outcome_result =
-            crate::edit_transaction::execute_edit_plan(resolved_plan, tab.document, &ac);
-        tab.restore_advance_cache(ac);
+            crate::edit_transaction::execute_edit_plan(resolved_plan, tab.document);
 
         let mut current_content_revision = previous_content_revision;
         let mut current_dirty = previous_dirty;
@@ -837,7 +793,7 @@ mod edit_tests {
         let request = crate::edit_transaction::build_edit_request(document, intent);
         let plan = crate::edit_transaction::default_edit_plan(&request, document);
 
-        crate::edit_transaction::execute_edit_plan(plan, document, &[])
+        crate::edit_transaction::execute_edit_plan(plan, document)
             .expect("default transaction plan must execute for supported editor test commands")
     }
 
@@ -936,35 +892,21 @@ mod edit_tests {
     }
 
     #[test]
-    fn wysiwyg_route_maps_arrow_keys_to_navigation() {
-        assert_eq!(
-            wysiwyg_route_for_command(&EditCommand::MoveRight),
-            Some(WysiwygCommandRoute::Navigation)
-        );
-        assert_eq!(
-            wysiwyg_route_for_command(&EditCommand::MoveDown),
-            Some(WysiwygCommandRoute::Navigation)
-        );
+    fn wysiwyg_navigation_predicate_covers_visual_movement() {
+        assert!(is_wysiwyg_navigation_command(&EditCommand::MoveRight));
+        assert!(is_wysiwyg_navigation_command(&EditCommand::MoveDown));
+        assert!(is_wysiwyg_navigation_command(&EditCommand::PageUp));
+        assert!(is_wysiwyg_navigation_command(&EditCommand::ExtendToDocEnd));
     }
 
     #[test]
-    fn wysiwyg_route_maps_edit_hooks() {
-        assert_eq!(
-            wysiwyg_route_for_command(&EditCommand::InsertNewline),
-            Some(WysiwygCommandRoute::AugmentedEnter)
-        );
-        assert_eq!(
-            wysiwyg_route_for_command(&EditCommand::Backspace),
-            Some(WysiwygCommandRoute::AugmentedBackspace)
-        );
-        assert_eq!(
-            wysiwyg_route_for_command(&EditCommand::InsertChar("x".into())),
-            Some(WysiwygCommandRoute::AugmentedInsertText("x".into()))
-        );
-        assert_eq!(
-            wysiwyg_route_for_command(&EditCommand::InsertText("中".into())),
-            Some(WysiwygCommandRoute::AugmentedInsertText("中".into()))
-        );
+    fn wysiwyg_navigation_predicate_rejects_edits_and_word_navigation() {
+        assert!(!is_wysiwyg_navigation_command(&EditCommand::MoveWordLeft));
+        assert!(!is_wysiwyg_navigation_command(&EditCommand::MoveWordRight));
+        assert!(!is_wysiwyg_navigation_command(&EditCommand::InsertNewline));
+        assert!(!is_wysiwyg_navigation_command(&EditCommand::Backspace));
+        assert!(!is_wysiwyg_navigation_command(&EditCommand::InsertChar("x".into())));
+        assert!(!is_wysiwyg_navigation_command(&EditCommand::InsertText("中".into())));
     }
 
     #[test]
@@ -992,11 +934,5 @@ mod edit_tests {
 
         assert_eq!(app.dispatch_keyboard_tab_switch(&EditCommand::NextTab), AppEffect::NONE);
         assert_eq!(app.dispatch_keyboard_tab_switch(&EditCommand::PrevTab), AppEffect::NONE);
-    }
-
-    #[test]
-    fn wysiwyg_route_leaves_word_navigation_on_standard_path() {
-        assert_eq!(wysiwyg_route_for_command(&EditCommand::MoveWordLeft), None);
-        assert_eq!(wysiwyg_route_for_command(&EditCommand::MoveWordRight), None);
     }
 }

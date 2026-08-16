@@ -1182,14 +1182,6 @@ impl EditorRuntime {
         self.input_session.preferred_x()
     }
 
-    pub fn set_wysiwyg_recursing(&mut self, recursing: bool) {
-        self.input_session.set_wysiwyg_recursing(recursing);
-    }
-
-    pub fn wysiwyg_recursing(&self) -> bool {
-        self.input_session.wysiwyg_recursing()
-    }
-
     pub fn focus_lost(&mut self) {
         let canvas_pointer_changed = self.clear_active_canvas_pointer();
         self.input_session.focus_lost();

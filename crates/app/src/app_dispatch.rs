@@ -345,7 +345,7 @@ impl App {
                 return AppEffect::NONE;
             };
 
-            crate::edit_transaction::execute_edit_plan(plan, session.document, &[])
+            crate::edit_transaction::execute_edit_plan(plan, session.document)
                 .map(|outcome| outcome.edit_outcome.executed)
                 .unwrap_or(false)
         };

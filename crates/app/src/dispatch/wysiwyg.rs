@@ -1,13 +1,14 @@
-//! WYSIWYG edit dispatch — intercept → augment → relay.
+//! WYSIWYG dispatch — visual navigation and plugin cursor synchronization.
 //!
-//! When the active plugin is a WYSIWYG editor (`handles_own_rendering() == true`), the
-//! dispatch path in [`super::editor`] routes visual-navigation, smart-enter,
-//! and smart-backspace commands here so they can query the plugin before the
-//! standard edit pipeline executes.
+//! When the active plugin is a WYSIWYG editor (`handles_own_rendering() == true`),
+//! the dispatch path in [`super::editor`] routes visual-navigation commands here
+//! so the plugin can resolve movement targets from its own layout.
 //!
-//! **Core invariant:** text-modifying commands MUST flow through
-//! `execute_edit_command_v2` (via recursive `dispatch_edit_command`) to
-//! produce the `Outcome` that drives `advance_cache` invalidation.
+//! Text-editing commands never reach this module: `dispatch_edit_command`
+//! converts them to an [`ui::plugin::EditIntent`] up front and executes them
+//! through the transactional edit pipeline (`crate::edit_transaction`), which
+//! validates source generation, grapheme boundaries, and selection collapse
+//! before applying one atomic transaction.
 
 use crate::app::App;
 use crate::app_effect::AppEffect;
@@ -17,63 +18,7 @@ use crate::input::EditCommand;
 use crate::tab_session::{TabSession, TabSessionMut};
 use appkit_core::document::DocumentModel;
 use core::types::ByteIndex;
-use std::sync::OnceLock;
-use ui::plugin::{AugmentKind, EditAugmentation, EditHitTarget, MoveDirection, PluginMessage};
-use winit::event_loop::ActiveEventLoop;
-
-const WYSIWYG_CURSOR_LOG_ENV: &str = "EDIT_PLUS_WYSIWYG_CURSOR_LOG";
-
-fn wysiwyg_cursor_logging_enabled() -> bool {
-    static ENABLED: OnceLock<bool> = OnceLock::new();
-    *ENABLED.get_or_init(|| {
-        std::env::var(WYSIWYG_CURSOR_LOG_ENV).is_ok_and(|value| {
-            !matches!(value.as_str(), "" | "0" | "false" | "FALSE" | "off" | "OFF")
-        })
-    })
-}
-
-fn log_wysiwyg_cursor_state(label: &str, dv: &DocumentModel) {
-    if !wysiwyg_cursor_logging_enabled() {
-        return;
-    }
-
-    eprintln!(
-        "[wysiwyg:cursor] {label} cursor={} selection_anchor={:?} selection_range={:?} buffer_len={}",
-        dv.cursor_offset().to_usize(),
-        dv.cursor().selection_anchor,
-        dv.selection_range(),
-        dv.buffer_len()
-    );
-}
-
-fn log_wysiwyg_augmentation(
-    kind: &AugmentKind,
-    current_byte: usize,
-    aug: Option<&EditAugmentation>,
-) {
-    if !wysiwyg_cursor_logging_enabled() {
-        return;
-    }
-
-    match aug {
-        Some(augmented) => eprintln!(
-            "[wysiwyg:augment] kind={kind:?} current={} replace_range={:?} insert_len={:?} cursor_after={}",
-            current_byte,
-            augmented.replace_range,
-            augmented.insert_text.as_ref().map(|text| text.len()),
-            augmented.cursor_byte_after
-        ),
-        None => {
-            eprintln!("[wysiwyg:augment] kind={kind:?} current={} augmentation=None", current_byte)
-        }
-    }
-}
-
-fn log_wysiwyg_effect(label: &str, effect: AppEffect) {
-    if wysiwyg_cursor_logging_enabled() {
-        eprintln!("[wysiwyg:effect] {label} {effect:?}");
-    }
-}
+use ui::plugin::{EditHitTarget, MoveDirection, PluginMessage};
 
 fn wysiwyg_cursor_x(tab: &TabSession<'_>, byte: usize) -> Option<f32> {
     tab.query_cursor_screen_rect(byte).map(|(x, _y, _w, _h)| x)
@@ -263,7 +208,7 @@ impl App {
 }
 
 // ────────────────────────────────────────────────────────────────────────────
-// Smart Enter / Backspace — augment → recurse
+// Cursor / selection synchronization helpers
 // ────────────────────────────────────────────────────────────────────────────
 
 pub(crate) fn set_wysiwyg_cursor_and_selection(
@@ -339,190 +284,6 @@ pub(crate) fn apply_edit_hit_target(tab: &mut TabSessionMut<'_>, target: EditHit
     tab.send_message(PluginMessage::SetCursorByte(cursor_byte));
     if clears_edit_focus {
         tab.send_message(PluginMessage::ClearEditFocus);
-    }
-}
-
-fn dispatch_wysiwyg_command(
-    app: &mut App,
-    command: EditCommand,
-    event_loop: Option<&ActiveEventLoop>,
-) -> AppEffect {
-    match event_loop {
-        Some(event_loop) => app.dispatch_edit_command(command, event_loop),
-        None => {
-            let Some(tab) = app.active_tab_session_mut() else {
-                return AppEffect::NONE;
-            };
-            let mut tab = tab;
-            let mut presentation = tab.take_presentation();
-            let page_step_rows =
-                presentation.display.viewport.visible_rows.saturating_sub(1).max(1);
-            let outcome = crate::commands::execute_edit_command_v2_with_presentation(
-                &command,
-                tab.document,
-                &[],
-                &mut presentation.cursor_render_state,
-                page_step_rows,
-            );
-            tab.restore_presentation(presentation);
-            if outcome.dirty_lines.is_some() { AppEffect::REDRAW } else { AppEffect::NONE }
-        }
-    }
-}
-
-/// Applies the text-editing part of a WYSIWYG augmentation as a single atomic
-/// [`EditCommand::ReplaceRange`] (方案 2026-07-06 阶段 3b).
-///
-/// - `replace_range = Some(range) + insert_text = Some(text)`：合并到一次
-///   ReplaceRange { range, text }。
-/// - `replace_range = None + insert_text = Some(text)`：等价于 ReplaceRange
-///   { range: cursor..cursor, text }。
-/// - `replace_range = Some(range) + insert_text = Some("")`：ReplaceRange
-///   { range, text: "" } → 纯删除。
-/// - `replace_range = None + insert_text = None`：无源码变化（仅光标跳转，如
-///   TableCell 场景），跳过命令派发。
-/// - 其他情况（None/None with fallback）：走 fallback 命令。
-fn execute_augmentation_text_change(
-    app: &mut App,
-    augmented: &EditAugmentation,
-    fallback: EditCommand,
-    current_byte: usize,
-    event_loop: Option<&ActiveEventLoop>,
-) -> AppEffect {
-    let result = AppEffect::NONE;
-    match (augmented.replace_range.as_ref(), augmented.insert_text.as_ref()) {
-        (None, None) => result.merge(dispatch_wysiwyg_command(app, fallback, event_loop)),
-        (None, Some(text)) if text.is_empty() => result,
-        (range_opt, Some(text)) => {
-            let range = range_opt.cloned().unwrap_or(current_byte..current_byte);
-            result.merge(dispatch_wysiwyg_command(
-                app,
-                EditCommand::ReplaceRange { range, text: text.clone() },
-                event_loop,
-            ))
-        }
-        (Some(range), None) => result.merge(dispatch_wysiwyg_command(
-            app,
-            EditCommand::ReplaceRange { range: range.clone(), text: String::new() },
-            event_loop,
-        )),
-    }
-}
-
-fn cursor_changed_after_augmentation(dv: &DocumentModel, cursor_byte_after: usize) -> bool {
-    dv.cursor_offset().to_usize() != cursor_byte_after
-}
-
-impl App {
-    fn dispatch_wysiwyg_augmented_edit(
-        &mut self,
-        event_loop: Option<&ActiveEventLoop>,
-        kind: AugmentKind,
-        fallback: EditCommand,
-    ) -> AppEffect {
-        let current_byte = match self.active_tab_session() {
-            Some(tab) => tab.document.cursor_offset().to_usize(),
-            None => return dispatch_wysiwyg_command(self, fallback, event_loop),
-        };
-
-        let aug = self.wysiwyg_query_augment(current_byte, kind.clone());
-        log_wysiwyg_augmentation(&kind, current_byte, aug.as_ref());
-        self.editor_runtime.set_wysiwyg_recursing(true);
-        let mut result = AppEffect::NONE;
-
-        if let Some(augmented) = aug {
-            result = result.merge(execute_augmentation_text_change(
-                self,
-                &augmented,
-                fallback,
-                current_byte,
-                event_loop,
-            ));
-            log_wysiwyg_effect("augment.after_text_change", result);
-
-            if let Some(tab) = self.active_tab_session_mut()
-                && cursor_changed_after_augmentation(tab.document, augmented.cursor_byte_after)
-            {
-                tab.document.cursor_move_to_offset(augmented.cursor_byte_after);
-                tab.document.cursor_mut().selection_anchor = None;
-                result = result.merge(AppEffect::REDRAW);
-            }
-            if let Some(tab) = self.active_tab_session() {
-                log_wysiwyg_cursor_state("augment.before_sync", tab.document);
-            }
-        } else {
-            result = result.merge(dispatch_wysiwyg_command(self, fallback, event_loop));
-            log_wysiwyg_effect("augment.fallback", result);
-        }
-
-        self.editor_runtime.set_wysiwyg_recursing(false);
-        self.sync_plugin_state();
-        if let Some(tab) = self.active_tab_session() {
-            log_wysiwyg_cursor_state("augment.after_sync", tab.document);
-        }
-        result
-    }
-
-    /// Smart Enter for WYSIWYG: query the plugin for an edit augmentation and
-    /// fall back to the standard newline command when none is available.
-    pub(crate) fn dispatch_wysiwyg_augmented_enter(
-        &mut self,
-        event_loop: &ActiveEventLoop,
-    ) -> AppEffect {
-        self.dispatch_wysiwyg_augmented_edit(
-            Some(event_loop),
-            AugmentKind::Enter,
-            EditCommand::InsertNewline,
-        )
-    }
-
-    /// Smart Backspace for WYSIWYG: query the plugin for an edit augmentation
-    /// and fall back to the standard backspace command when none is available.
-    pub(crate) fn dispatch_wysiwyg_augmented_backspace(
-        &mut self,
-        event_loop: &ActiveEventLoop,
-    ) -> AppEffect {
-        self.dispatch_wysiwyg_augmented_edit(
-            Some(event_loop),
-            AugmentKind::Backspace,
-            EditCommand::Backspace,
-        )
-    }
-
-    /// Smart InsertText for WYSIWYG: query the plugin for an edit augmentation
-    /// and fall back to the standard insert command when none is available.
-    pub(crate) fn dispatch_wysiwyg_augmented_insert_text(
-        &mut self,
-        text: String,
-        fallback: EditCommand,
-        event_loop: &ActiveEventLoop,
-    ) -> AppEffect {
-        self.dispatch_wysiwyg_augmented_edit(
-            Some(event_loop),
-            AugmentKind::InsertText(text),
-            fallback,
-        )
-    }
-
-    /// Shared helper: query the active WYSIWYG plugin for an edit augmentation.
-    fn wysiwyg_query_augment(
-        &self,
-        current_byte: usize,
-        kind: AugmentKind,
-    ) -> Option<EditAugmentation> {
-        let tab = self.active_tab_session()?;
-        tab.augment_edit(current_byte, kind)
-    }
-}
-
-#[cfg(test)]
-impl App {
-    pub(crate) fn dispatch_wysiwyg_augmented_enter_for_test(&mut self) -> AppEffect {
-        self.dispatch_wysiwyg_augmented_edit(None, AugmentKind::Enter, EditCommand::InsertNewline)
-    }
-
-    pub(crate) fn dispatch_wysiwyg_augmented_backspace_for_test(&mut self) -> AppEffect {
-        self.dispatch_wysiwyg_augmented_edit(None, AugmentKind::Backspace, EditCommand::Backspace)
     }
 }
 
@@ -672,8 +433,6 @@ mod tests {
     use crate::document_view::DocumentView;
     use crate::input::EditCommand;
 
-    use ui::plugin::AugmentKind;
-
     #[test]
     fn replace_range_empty_moves_insert_point_without_selecting_text() {
         let mut doc = DocumentView::new(vec!["# hello world".to_string()], 80, 10.0);
@@ -709,11 +468,7 @@ mod tests {
         app.switch_workspace_for_test(0);
         app.sync_plugin_state();
 
-        let effect = app.dispatch_wysiwyg_augmented_edit(
-            None,
-            AugmentKind::InsertText("中".into()),
-            EditCommand::InsertText("中".into()),
-        );
+        let effect = app.dispatch_transactional_edit_for_test(EditCommand::InsertText("中".into()));
 
         let doc = &app.active_tab_session().expect("active entry").document;
         assert!(effect.redraw, "WYSIWYG content must redraw after augmented text input");
@@ -721,13 +476,13 @@ mod tests {
         assert_eq!(doc.cursor_offset().to_usize(), "para1\n\n中".len());
     }
 
-    /// 阶段 3b 护栏：augment 派发后不能留下 selection anchor。
+    /// 护栏：事务路径执行插件增强计划后不能留下 selection anchor。
     /// 老代码依赖 position_document_for_wysiwyg_replace_range 展开 anchor，
     /// 然后期望 InsertText 覆盖它；有边界情况 anchor 会被保留下来。
-    /// ReplaceRange 是原子命令，且尾部显式清空 anchor。
+    /// 事务计划是原子替换，且尾部显式清空 anchor。
     #[test]
     #[cfg(feature = "markdown")]
-    fn augment_dispatch_leaves_no_selection_after_replace_range() {
+    fn transactional_augmented_edit_leaves_no_selection_anchor() {
         let mut app = App::new(None);
         let mut doc =
             DocumentView::new("para1\n\npara2".split('\n').map(str::to_string).collect(), 80, 10.0);
@@ -736,11 +491,7 @@ mod tests {
         app.switch_workspace_for_test(0);
         app.sync_plugin_state();
 
-        app.dispatch_wysiwyg_augmented_edit(
-            None,
-            AugmentKind::InsertText("中".into()),
-            EditCommand::InsertText("中".into()),
-        );
+        app.dispatch_transactional_edit_for_test(EditCommand::InsertText("中".into()));
 
         let doc = &app.active_tab_session().expect("active entry").document;
         assert!(

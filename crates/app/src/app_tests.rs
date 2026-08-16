@@ -3784,7 +3784,7 @@ fn wysiwyg_paragraph_end_enter_then_typing_inserts_at_new_paragraph_start() {
     app.sync_plugin_state();
     render_active_wysiwyg_plugin_for_test(&mut app);
 
-    let enter_effect = app.dispatch_wysiwyg_augmented_enter_for_test();
+    let enter_effect = app.dispatch_transactional_edit_for_test(EditCommand::InsertNewline);
     assert!(enter_effect.redraw, "paragraph-end Enter should redraw WYSIWYG content");
     app.sync_plugin_state();
     render_active_wysiwyg_plugin_for_test(&mut app);
@@ -3816,7 +3816,7 @@ fn wysiwyg_paragraph_end_before_existing_newline_typing_stays_in_new_paragraph()
     app.sync_plugin_state();
     render_active_wysiwyg_plugin_for_test(&mut app);
 
-    let enter_effect = app.dispatch_wysiwyg_augmented_enter_for_test();
+    let enter_effect = app.dispatch_transactional_edit_for_test(EditCommand::InsertNewline);
     assert!(enter_effect.redraw, "paragraph-end Enter should redraw WYSIWYG content");
     app.sync_plugin_state();
     render_active_wysiwyg_plugin_for_test(&mut app);
@@ -3848,7 +3848,7 @@ fn wysiwyg_paragraph_end_enter_then_typing_keeps_following_line_below() {
     app.sync_plugin_state();
     render_active_wysiwyg_plugin_for_test(&mut app);
 
-    let enter_effect = app.dispatch_wysiwyg_augmented_enter_for_test();
+    let enter_effect = app.dispatch_transactional_edit_for_test(EditCommand::InsertNewline);
     assert!(enter_effect.redraw, "paragraph-end Enter should redraw WYSIWYG content");
     app.sync_plugin_state();
     render_active_wysiwyg_plugin_for_test(&mut app);

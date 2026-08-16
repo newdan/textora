@@ -15,7 +15,6 @@ pub(crate) struct EditorInputSession {
     preedit_text: String,
     preedit_cursor: Option<(usize, usize)>,
     preferred_x: Option<f32>,
-    wysiwyg_recursing: bool,
     cursor_blink_started_at: Instant,
 }
 
@@ -28,7 +27,6 @@ impl EditorInputSession {
             preedit_text: String::new(),
             preedit_cursor: None,
             preferred_x: None,
-            wysiwyg_recursing: false,
             cursor_blink_started_at: Instant::now(),
         }
     }
@@ -111,14 +109,6 @@ impl EditorInputSession {
         self.preferred_x
     }
 
-    pub(crate) fn set_wysiwyg_recursing(&mut self, recursing: bool) {
-        self.wysiwyg_recursing = recursing;
-    }
-
-    pub(crate) fn wysiwyg_recursing(&self) -> bool {
-        self.wysiwyg_recursing
-    }
-
     pub(crate) fn update_preedit(
         &mut self,
         context: EditorInputContext,
@@ -165,7 +155,6 @@ impl EditorInputSession {
         self.canvas_drag_session = None;
         self.clear_preedit();
         self.preferred_x = None;
-        self.wysiwyg_recursing = false;
     }
 }
 
@@ -216,19 +205,17 @@ mod tests {
     }
 
     #[test]
-    fn focus_loss_clears_capture_preedit_and_wysiwyg_state() {
+    fn focus_loss_clears_capture_preedit_and_preferred_x() {
         let mut session = EditorInputSession::new();
         let context = active_context();
 
         assert!(session.start_canvas_drag(context));
         assert!(session.update_preedit(context, "拼音".to_owned(), Some((0, 2))));
         session.set_preferred_x(Some(120.0));
-        session.set_wysiwyg_recursing(true);
         session.focus_lost();
 
         assert_eq!(session.pointer_capture(), MouseCapture::None);
         assert!(session.preedit().0.is_empty());
         assert!(session.preferred_x().is_none());
-        assert!(!session.wysiwyg_recursing());
     }
 }

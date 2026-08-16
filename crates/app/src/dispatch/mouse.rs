@@ -193,11 +193,8 @@ impl App {
                         });
                         if let Some(EditPlan::Apply(transaction)) = plan {
                             if let Some(tab) = self.active_tab_session_mut() {
-                                let _ = execute_edit_plan(
-                                    EditPlan::Apply(transaction),
-                                    tab.document,
-                                    &[],
-                                );
+                                let _ =
+                                    execute_edit_plan(EditPlan::Apply(transaction), tab.document);
                             }
                             self.sync_plugin_state();
                         }
@@ -458,7 +455,7 @@ impl App {
 
     fn apply_canvas_drag_transaction(&mut self, transaction: EditTransaction) -> AppEffect {
         if let Some(tab) = self.active_tab_session_mut() {
-            let _ = execute_edit_plan(EditPlan::Apply(transaction), tab.document, &[]);
+            let _ = execute_edit_plan(EditPlan::Apply(transaction), tab.document);
         }
         self.sync_plugin_state();
         AppEffect::REDRAW

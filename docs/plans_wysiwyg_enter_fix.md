@@ -1,5 +1,14 @@
 # WYSIWYG Enter 键行为修复方案
 
+> **⚠️ 已过期（2026-08-16）**：本文描述的 `dispatch_wysiwyg_augmented_enter` /
+> `augment_edit` 递归派发路径已拆除。当前实现中，所有文本编辑命令在
+> `crates/app/src/dispatch/editor.rs` 的 `dispatch_edit_command` 里统一经
+> `edit_intent_for_command` 转换为 `EditIntent`，走事务管线
+> `crates/app/src/edit_transaction.rs`（`plan_edit` → `execute_edit_plan`），
+> markdown 插件的增强逻辑在 `MarkdownEditorView::plan_edit`
+> （`crates/markdown/src/view.rs`）内完成。`dispatch/wysiwyg.rs` 只保留视觉
+> 导航派发。本文仅作历史背景参考。
+
 > 目标：修掉两个可复现 bug — (1) 段末回车后光标处出现"很大"的空行，输入后又缩回；(2) 段间空行处回车只加空隙，不生成新段。
 
 ## 一、Bug 复现与根因

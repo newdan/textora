@@ -320,7 +320,7 @@ pub(crate) fn execute_text_replacement(
         replacement.text.clone(),
         cursor_after,
     );
-    execute_edit_plan(EditPlan::Apply(transaction), doc, &[])
+    execute_edit_plan(EditPlan::Apply(transaction), doc)
         .map(|outcome| outcome.edit_outcome.executed)
         .unwrap_or(false)
 }
@@ -328,7 +328,6 @@ pub(crate) fn execute_text_replacement(
 pub fn execute_edit_plan(
     plan: EditPlan,
     doc: &mut impl DocumentModelMut,
-    _advance_cache: &[ui::render_geom::AdvanceCacheEntry],
 ) -> Result<TransactionalEditOutcome, EditTransactionError> {
     use crate::commands::EditOutcome;
 
@@ -517,7 +516,7 @@ mod tests {
             selection_after: EditSelection::Caret(20),
         });
 
-        execute_edit_plan(plan, &mut doc, &[]).expect("valid grouped transaction");
+        execute_edit_plan(plan, &mut doc).expect("valid grouped transaction");
         assert_eq!(doc.full_text(), "# Root\n### Child\n#### Leaf\n");
 
         doc.undo();
@@ -538,7 +537,7 @@ mod tests {
         });
 
         assert!(matches!(
-            execute_edit_plan(plan, &mut doc, &[]),
+            execute_edit_plan(plan, &mut doc),
             Err(EditTransactionError::OverlappingRanges { first_end: 4, second_start: 3 })
         ));
         assert_eq!(doc.full_text(), "abcdef");
@@ -551,7 +550,7 @@ mod tests {
         let plan = EditPlan::Apply(EditTransaction::replace(stale_generation, 1..2, "Z".into(), 2));
 
         assert!(matches!(
-            execute_edit_plan(plan, &mut doc, &[]),
+            execute_edit_plan(plan, &mut doc),
             Err(EditTransactionError::StaleGeneration { .. })
         ));
         assert_eq!(doc.full_text(), "abc");
@@ -561,7 +560,7 @@ mod tests {
     fn set_selection_changes_focus_without_creating_text_edit() {
         let mut doc = document_from_text("abcdef");
         let plan = EditPlan::SetSelection(EditSelection::Range { anchor: 1, cursor: 5 });
-        let outcome = execute_edit_plan(plan, &mut doc, &[]).expect("valid selection update");
+        let outcome = execute_edit_plan(plan, &mut doc).expect("valid selection update");
         assert_eq!(doc.selection_range(), Some((1, 5)));
         assert!(!outcome.edit_outcome.executed);
     }
@@ -613,7 +612,7 @@ mod tests {
         let request = build_edit_request(&doc, EditIntent::InsertParagraphBreak);
 
         let plan = default_edit_plan(&request, &doc);
-        execute_edit_plan(plan, &mut doc, &[]).expect("CRLF paragraph break should be valid");
+        execute_edit_plan(plan, &mut doc).expect("CRLF paragraph break should be valid");
 
         assert_eq!(doc.full_text(), "first\r\nsecond");
         assert_eq!(doc.cursor_offset().to_usize(), "first\r\n".len());
@@ -632,8 +631,8 @@ mod tests {
             let plan = default_edit_plan(&request, &doc);
             assert_eq!(plan, EditPlan::Consume);
 
-            let outcome = execute_edit_plan(plan, &mut doc, &[])
-                .expect("consuming structural intent is valid");
+            let outcome =
+                execute_edit_plan(plan, &mut doc).expect("consuming structural intent is valid");
             assert!(!outcome.edit_outcome.executed);
             assert_eq!(doc.full_text(), source_before);
             assert_eq!(doc.generation(), generation_before);
@@ -661,7 +660,7 @@ mod tests {
             7,
         ));
 
-        let outcome = execute_edit_plan(plan, &mut doc, &[]).expect("valid transaction");
+        let outcome = execute_edit_plan(plan, &mut doc).expect("valid transaction");
 
         assert_eq!(doc.full_text(), "hello\n\nnext");
         assert_eq!(doc.cursor_offset().to_usize(), 7);
@@ -678,7 +677,7 @@ mod tests {
         let generation_before = doc.generation();
         let plan = apply(generation_before, 5..11, "next", 9);
 
-        execute_edit_plan(plan, &mut doc, &[]).expect("transaction must be valid");
+        execute_edit_plan(plan, &mut doc).expect("transaction must be valid");
 
         assert_eq!(doc.full_text(), "hellonext");
         assert_eq!(doc.generation(), generation_before + 1);
@@ -727,20 +726,12 @@ mod tests {
     fn move_cursor_rejects_out_of_bounds_and_non_grapheme_positions() {
         let mut doc = document_from_text("e\u{301}x");
         assert!(
-            execute_edit_plan(
-                EditPlan::MoveCursor(CursorUpdate { cursor_after: 99 }),
-                &mut doc,
-                &[],
-            )
-            .is_err()
+            execute_edit_plan(EditPlan::MoveCursor(CursorUpdate { cursor_after: 99 }), &mut doc,)
+                .is_err()
         );
         assert!(
-            execute_edit_plan(
-                EditPlan::MoveCursor(CursorUpdate { cursor_after: 1 }),
-                &mut doc,
-                &[],
-            )
-            .is_err()
+            execute_edit_plan(EditPlan::MoveCursor(CursorUpdate { cursor_after: 1 }), &mut doc,)
+                .is_err()
         );
     }
 
@@ -749,12 +740,9 @@ mod tests {
         let mut doc = document_from_text("abc");
         let generation_before = doc.generation();
 
-        let outcome = execute_edit_plan(
-            EditPlan::MoveCursor(CursorUpdate { cursor_after: 2 }),
-            &mut doc,
-            &[],
-        )
-        .expect("cursor update is valid");
+        let outcome =
+            execute_edit_plan(EditPlan::MoveCursor(CursorUpdate { cursor_after: 2 }), &mut doc)
+                .expect("cursor update is valid");
 
         assert_eq!(doc.generation(), generation_before);
         assert_eq!(doc.cursor_offset().to_usize(), 2);
