@@ -283,6 +283,7 @@ impl ModelSession {
         let Some(request) = self.edit_request(tab_id, intent) else {
             return EditorOutcome::default();
         };
+        self.synchronize_plugin_source_if_stale(tab_id);
         let Some(plan) = self.resolve_edit_plan(tab_id, &request) else {
             return EditorOutcome::default();
         };
@@ -444,6 +445,7 @@ impl ModelSession {
             tab.document.undo();
         }
         refresh_presentation_after_edit(&mut tab, line_height);
+        synchronize_plugin_source(&mut tab);
         edit_outcome(
             tab_id,
             previous_summary.content_revision,
@@ -949,6 +951,21 @@ impl ModelSession {
             generation: source_generation,
         });
     }
+
+    fn synchronize_plugin_source_if_stale(&mut self, tab_id: TabId) {
+        let Some(mut tab) = self.tab_session_mut(tab_id) else {
+            return;
+        };
+        let source_generation = tab.document.generation();
+        if !tab.needs_source_update(source_generation) {
+            return;
+        }
+        let source = tab.document.full_text();
+        let _ = tab.send_message(ui::plugin::PluginMessage::UpdateSource {
+            text: source,
+            generation: source_generation,
+        });
+    }
 }
 
 fn default_newline_text(document: &appkit_core::document::DocumentModel) -> String {
@@ -1233,6 +1250,70 @@ mod tests {
         }
     }
 
+    struct PlanSyncProbePlugin {
+        sources: Rc<RefCell<Vec<(String, u32)>>>,
+        plan_source_states: Rc<RefCell<Vec<bool>>>,
+    }
+
+    impl PlanSyncProbePlugin {
+        fn synced_generation(&self) -> Option<u32> {
+            self.sources.borrow().last().map(|(_, generation)| *generation)
+        }
+    }
+
+    impl ui::plugin::EditPolicy for PlanSyncProbePlugin {
+        fn plan_edit(&self, request: &ui::plugin::EditRequest) -> ui::plugin::EditPlan {
+            self.plan_source_states
+                .borrow_mut()
+                .push(self.synced_generation() == Some(request.source_generation));
+            ui::plugin::EditPlan::UseDefault
+        }
+    }
+
+    impl ui::plugin::ViewPlugin for PlanSyncProbePlugin {
+        fn name(&self) -> &str {
+            "plan-sync-probe"
+        }
+
+        fn render(
+            &mut self,
+            _document: &dyn core::document::DocView,
+            _bounds: ui::Rect,
+            _theme: &ui::Theme,
+            _shaper: &mut shaping::Shaper,
+            _dpi_scale: f32,
+        ) -> ui::DrawList {
+            ui::DrawList::new()
+        }
+
+        fn edit_policy(&self) -> &dyn ui::plugin::EditPolicy {
+            self
+        }
+
+        fn query(
+            &self,
+            query: ui::plugin::PluginQuery,
+            _document: &dyn core::document::DocView,
+        ) -> ui::plugin::PluginResponse {
+            let ui::plugin::PluginQuery::NeedsSourceUpdate(generation) = query else {
+                return ui::plugin::PluginResponse::None;
+            };
+            ui::plugin::PluginResponse::Bool(self.synced_generation() != Some(generation))
+        }
+
+        fn handle_message(
+            &mut self,
+            message: ui::plugin::PluginMessage,
+            _document: &mut dyn core::document::DocViewMut,
+        ) -> bool {
+            let ui::plugin::PluginMessage::UpdateSource { text, generation } = message else {
+                return false;
+            };
+            self.sources.borrow_mut().push((text, generation));
+            true
+        }
+    }
+
     #[test]
     fn install_synchronizes_plugin_source_before_the_first_paint() {
         let mut session = model_session();
@@ -1470,5 +1551,82 @@ mod tests {
         };
         assert_eq!(transaction.replacements.len(), 1);
         assert_eq!(transaction.replacements[0].text, "\n");
+    }
+
+    #[test]
+    fn undo_synchronizes_plugin_source_without_waiting_for_a_paint() {
+        let mut session = model_session();
+        let sources = Rc::new(RefCell::new(Vec::new()));
+        let prepared = PreparedTab::new(
+            prepared_text("ab").document,
+            TabRuntime::new(Box::new(SourceSyncProbePlugin { sources: Rc::clone(&sources) })),
+        );
+        let effect = session.install_prepared_tab(prepared, None, OpenDisposition::Persistent);
+        let tab_id = match effect {
+            WorkspaceEffect::Activated(tab_id) => tab_id,
+            _ => panic!("undo sync tab should activate"),
+        };
+        let outcome =
+            session.edit_active_document(ui::plugin::EditIntent::InsertText("c".to_owned()), 20.0);
+        assert!(
+            outcome.notifications.iter().any(|notification| matches!(
+                notification,
+                EditorNotification::ContentChanged { .. }
+            ))
+        );
+        sources.borrow_mut().clear();
+
+        let _ = session.undo_or_redo_active_document(false, 20.0);
+
+        let generation = session
+            .workspace
+            .entry_by_id(tab_id)
+            .expect("undo sync tab should remain installed")
+            .generation();
+        assert_eq!(sources.borrow().as_slice(), &[("ab".to_owned(), generation)]);
+    }
+
+    #[test]
+    fn edit_planning_synchronizes_stale_plugin_source_before_planning() {
+        let mut session = model_session();
+        let sources = Rc::new(RefCell::new(Vec::new()));
+        let plan_source_states = Rc::new(RefCell::new(Vec::new()));
+        let prepared = PreparedTab::new(
+            prepared_text("ab").document,
+            TabRuntime::new(Box::new(PlanSyncProbePlugin {
+                sources: Rc::clone(&sources),
+                plan_source_states: Rc::clone(&plan_source_states),
+            })),
+        );
+        let effect = session.install_prepared_tab(prepared, None, OpenDisposition::Persistent);
+        let tab_id = match effect {
+            WorkspaceEffect::Activated(tab_id) => tab_id,
+            _ => panic!("plan sync tab should activate"),
+        };
+        // Simulate an out-of-band mutation (e.g. undo) that left the plugin
+        // source cache stale relative to the document generation.
+        {
+            let index =
+                session.workspace.index_of(tab_id).expect("plan sync tab should be indexed");
+            let document =
+                session.workspace.entry_mut(index).expect("plan sync tab should remain installed");
+            document.tb.replace_range(0..0, b"z");
+            document.line_index = appkit_core::line_index::LineIndex::rebuild_from(&document.tb);
+            document.mark_content_changed();
+        }
+
+        let outcome =
+            session.edit_active_document(ui::plugin::EditIntent::InsertText("y".to_owned()), 20.0);
+
+        assert!(
+            outcome.notifications.iter().any(|notification| matches!(
+                notification,
+                EditorNotification::ContentChanged { .. }
+            ))
+        );
+        assert_eq!(plan_source_states.borrow().as_slice(), &[true]);
+        let synced_texts: Vec<String> =
+            sources.borrow().iter().map(|(text, _)| text.clone()).collect();
+        assert_eq!(synced_texts, ["ab", "zab", "zyab"]);
     }
 }
