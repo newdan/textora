@@ -1500,4 +1500,58 @@ mod tests {
         assert_eq!(result, "first\r\n\r\n\r\nsecond");
         assert_eq!(augmentation.cursor_byte_after, "first\r\n\r\n".len());
     }
+
+    #[test]
+    fn enter_on_blank_line_between_loose_list_items_inserts_plain_newline() {
+        // 松散列表 item 的 range 含块间空行；命中测试用去尾换行的 content_end，
+        // 因此空行不再属于前一 item，Enter 只加宽块间距而非续 `- ` marker。
+        let source = "- a\n\n- b";
+        let current_byte = "- a\n".len();
+
+        assert!(
+            matches!(
+                classify_enter_context(source, current_byte),
+                EnterContext::EmptyBlockSeparatorLine
+            ),
+            "blank separator line must not be classified as part of the preceding list item"
+        );
+        assert!(
+            matches!(classify_enter_context(source, "- a".len()), EnterContext::ListItem { .. }),
+            "the item content end must still continue the list marker"
+        );
+
+        let augmentation = augment_edit(source, current_byte, AugmentKind::Enter)
+            .expect("Enter on a blank separator line should emit a plain newline");
+        let edited_source = apply_augmentation_at(source, current_byte, &augmentation);
+
+        assert_eq!(augmentation.insert_text.as_deref(), Some("\n"));
+        assert_eq!(augmentation.replace_range, None);
+        assert_eq!(augmentation.cursor_byte_after, current_byte + 1);
+        assert_eq!(edited_source, "- a\n\n\n- b");
+    }
+
+    #[test]
+    fn enter_on_blank_line_after_code_block_inserts_plain_newline() {
+        // 代码块 range 的结尾换行统一按去尾换行归一化；其后的空行是块分隔行，
+        // Enter 只加宽块间距，不落入 CodeBlock（无增强）语义。
+        let source = "```\ncode\n```\n\npara";
+        let current_byte = "```\ncode\n```\n".len();
+
+        assert!(
+            matches!(
+                classify_enter_context(source, current_byte),
+                EnterContext::EmptyBlockSeparatorLine
+            ),
+            "blank line after a code block must not be classified as CodeBlock"
+        );
+
+        let augmentation = augment_edit(source, current_byte, AugmentKind::Enter)
+            .expect("Enter on a blank separator line should emit a plain newline");
+        let edited_source = apply_augmentation_at(source, current_byte, &augmentation);
+
+        assert_eq!(augmentation.insert_text.as_deref(), Some("\n"));
+        assert_eq!(augmentation.replace_range, None);
+        assert_eq!(augmentation.cursor_byte_after, current_byte + 1);
+        assert_eq!(edited_source, "```\ncode\n```\n\n\npara");
+    }
 }
