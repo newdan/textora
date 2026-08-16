@@ -1947,6 +1947,8 @@ struct RecordingWysiwygState {
     /// Preconfigured response for CursorScreenPos queries (x, y, w, h).
     cursor_rect: Option<(f32, f32, f32, f32)>,
     cursor_rect_by_byte: Vec<(usize, (f32, f32, f32, f32))>,
+    /// Scroll messages observed by the recording plugin (delta, viewport_h).
+    scroll_messages: Vec<(f32, f32)>,
     /// Preconfigured response for SelectionRange queries (source byte range).
     selection_range: Option<(usize, usize)>,
     edit_plan: ui::plugin::EditPlan,
@@ -1970,6 +1972,7 @@ impl Default for RecordingWysiwygState {
             visual_move_query: None,
             cursor_rect: None,
             cursor_rect_by_byte: vec![],
+            scroll_messages: vec![],
             selection_range: None,
             edit_plan: ui::plugin::EditPlan::Consume,
             recorded_edit_requests: vec![],
@@ -2093,6 +2096,10 @@ impl ui::plugin::ViewPlugin for RecordingWysiwygPlugin {
             }
             ui::plugin::PluginMessage::SetSelCursorByte(byte) => {
                 self.state.borrow_mut().sel_cursor_byte = byte;
+                true
+            }
+            ui::plugin::PluginMessage::Scroll { delta, viewport_h } => {
+                self.state.borrow_mut().scroll_messages.push((delta, viewport_h));
                 true
             }
             ui::plugin::PluginMessage::SetPreedit { text, cursor } => {
@@ -4129,6 +4136,136 @@ fn wysiwyg_vertical_navigation_preserves_starting_target_x_across_short_line() {
         state.borrow().visual_move_query,
         Some((short_line_byte, ui::plugin::MoveDirection::Down, Some(ANCHOR_X))),
         "subsequent vertical moves should keep the original column, not the short-line landing x"
+    );
+}
+
+#[test]
+fn wysiwyg_move_down_scrolls_to_reveal_cursor_below_viewport() {
+    const CURSOR_X: f32 = 10.0;
+    const CURSOR_WIDTH: f32 = 2.0;
+    const CURSOR_HEIGHT: f32 = 16.0;
+
+    let content = "first line\nsecond line\nthird line";
+    let second_line_byte = content.find("second").expect("fixture should contain the second line");
+    let state = std::rc::Rc::new(std::cell::RefCell::new(RecordingWysiwygState {
+        visual_move_result: Some(second_line_byte),
+        ..Default::default()
+    }));
+    let mut app = App::new(None);
+    let doc = DocumentView::new(vec![content.to_string()], 80, 10.0);
+    app.push_entry_for_test(doc, Box::new(RecordingWysiwygPlugin::new(state.clone())));
+    app.switch_workspace_for_test(0);
+
+    // Cursor lands with its top exactly at the viewport bottom edge: fully off-screen.
+    let viewport_h = app.plugin_viewport_h();
+    state.borrow_mut().cursor_rect_by_byte =
+        vec![(second_line_byte, (CURSOR_X, viewport_h, CURSOR_WIDTH, CURSOR_HEIGHT))];
+
+    let effect = app.dispatch_wysiwyg_navigation(&EditCommand::MoveDown);
+
+    assert!(effect.redraw, "vertical move should redraw WYSIWYG content");
+    assert_eq!(
+        state.borrow().scroll_messages,
+        vec![(CURSOR_HEIGHT, viewport_h)],
+        "cursor below the viewport should scroll down by the minimal overflow delta"
+    );
+}
+
+#[test]
+fn wysiwyg_move_up_scrolls_to_reveal_cursor_above_viewport() {
+    const ABOVE_TOP_Y: f32 = -24.0;
+    const CURSOR_X: f32 = 10.0;
+    const CURSOR_WIDTH: f32 = 2.0;
+    const CURSOR_HEIGHT: f32 = 16.0;
+
+    let content = "first line\nsecond line\nthird line";
+    let first_line_byte = 0;
+    let state = std::rc::Rc::new(std::cell::RefCell::new(RecordingWysiwygState {
+        visual_move_result: Some(first_line_byte),
+        ..Default::default()
+    }));
+    let mut app = App::new(None);
+    let mut doc = DocumentView::new(vec![content.to_string()], 80, 10.0);
+    doc.cursor_move_to_offset(content.find("second").expect("fixture should contain second line"));
+    app.push_entry_for_test(doc, Box::new(RecordingWysiwygPlugin::new(state.clone())));
+    app.switch_workspace_for_test(0);
+
+    // Cursor lands partially above the viewport top edge.
+    let viewport_h = app.plugin_viewport_h();
+    state.borrow_mut().cursor_rect_by_byte =
+        vec![(first_line_byte, (CURSOR_X, ABOVE_TOP_Y, CURSOR_WIDTH, CURSOR_HEIGHT))];
+
+    let effect = app.dispatch_wysiwyg_navigation(&EditCommand::MoveUp);
+
+    assert!(effect.redraw, "vertical move should redraw WYSIWYG content");
+    assert_eq!(
+        state.borrow().scroll_messages,
+        vec![(ABOVE_TOP_Y, viewport_h)],
+        "cursor above the viewport should scroll up by the negative cursor y"
+    );
+}
+
+#[test]
+fn wysiwyg_move_down_does_not_scroll_when_cursor_already_visible() {
+    const VISIBLE_Y: f32 = 8.0;
+    const CURSOR_X: f32 = 10.0;
+    const CURSOR_WIDTH: f32 = 2.0;
+    const CURSOR_HEIGHT: f32 = 16.0;
+
+    let content = "first line\nsecond line\nthird line";
+    let second_line_byte = content.find("second").expect("fixture should contain the second line");
+    let state = std::rc::Rc::new(std::cell::RefCell::new(RecordingWysiwygState {
+        visual_move_result: Some(second_line_byte),
+        cursor_rect: Some((CURSOR_X, VISIBLE_Y, CURSOR_WIDTH, CURSOR_HEIGHT)),
+        ..Default::default()
+    }));
+    let mut app = App::new(None);
+    let doc = DocumentView::new(vec![content.to_string()], 80, 10.0);
+    app.push_entry_for_test(doc, Box::new(RecordingWysiwygPlugin::new(state.clone())));
+    app.switch_workspace_for_test(0);
+
+    let effect = app.dispatch_wysiwyg_navigation(&EditCommand::MoveDown);
+
+    assert!(effect.redraw, "vertical move should redraw WYSIWYG content");
+    assert!(
+        state.borrow().scroll_messages.is_empty(),
+        "cursor already inside the viewport must not scroll (no jitter)"
+    );
+}
+
+#[test]
+fn wysiwyg_extend_down_scrolls_to_reveal_cursor_below_viewport() {
+    const CURSOR_X: f32 = 10.0;
+    const CURSOR_WIDTH: f32 = 2.0;
+    const CURSOR_HEIGHT: f32 = 16.0;
+
+    let content = "first line\nsecond line\nthird line";
+    let second_line_byte = content.find("second").expect("fixture should contain the second line");
+    let state = std::rc::Rc::new(std::cell::RefCell::new(RecordingWysiwygState {
+        visual_move_result: Some(second_line_byte),
+        ..Default::default()
+    }));
+    let mut app = App::new(None);
+    let doc = DocumentView::new(vec![content.to_string()], 80, 10.0);
+    app.push_entry_for_test(doc, Box::new(RecordingWysiwygPlugin::new(state.clone())));
+    app.switch_workspace_for_test(0);
+
+    let viewport_h = app.plugin_viewport_h();
+    state.borrow_mut().cursor_rect_by_byte =
+        vec![(second_line_byte, (CURSOR_X, viewport_h, CURSOR_WIDTH, CURSOR_HEIGHT))];
+
+    let effect = app.dispatch_wysiwyg_navigation(&EditCommand::ExtendDown);
+
+    assert!(effect.redraw, "vertical selection extension should redraw WYSIWYG content");
+    assert_eq!(
+        state.borrow().scroll_messages,
+        vec![(CURSOR_HEIGHT, viewport_h)],
+        "extend-down past the viewport bottom should scroll by the minimal overflow delta"
+    );
+    assert_eq!(
+        state.borrow().sel_anchor_byte,
+        Some(0),
+        "extend-down must keep the selection anchor at the original cursor"
     );
 }
 

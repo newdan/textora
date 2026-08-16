@@ -167,11 +167,40 @@ impl App {
 
         if vertical_navigation {
             self.editor_runtime.set_preferred_x(vertical_anchor_x);
+            self.ensure_wysiwyg_cursor_visible();
         } else {
             self.editor_runtime.set_preferred_x(None);
         }
 
         AppEffect::REDRAW
+    }
+
+    /// Scroll the plugin viewport by the minimal delta that reveals the cursor
+    /// after vertical navigation. No-op when the cursor is already inside the
+    /// viewport (avoids scroll jitter).
+    fn ensure_wysiwyg_cursor_visible(&mut self) {
+        let viewport_h = self.plugin_viewport_h();
+        let Some(delta) = self.wysiwyg_cursor_visibility_delta(viewport_h) else {
+            return;
+        };
+        let Some(mut tab) = self.active_tab_session_mut() else {
+            return;
+        };
+        tab.send_message(PluginMessage::Scroll { delta, viewport_h });
+    }
+
+    /// Minimal signed scroll delta needed to bring the cursor into the plugin
+    /// viewport; `None` when the cursor is already visible or its on-screen
+    /// geometry is unavailable.
+    fn wysiwyg_cursor_visibility_delta(&self, viewport_h: f32) -> Option<f32> {
+        let tab = self.active_tab_session()?;
+        let cursor_byte = tab.document.cursor_offset().to_usize();
+        let (_x, cursor_y, _w, cursor_h) = tab.query_cursor_screen_rect(cursor_byte)?;
+        if cursor_y < 0.0 {
+            return Some(cursor_y);
+        }
+        let overflow_below = cursor_y + cursor_h - viewport_h;
+        (overflow_below > 0.0).then_some(overflow_below)
     }
 
     /// Move cursor to byte offset 0 (document start).
