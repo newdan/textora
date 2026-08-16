@@ -310,19 +310,44 @@ fn backspace_paragraph_boundary(source: &str, current_byte: usize) -> Option<Edi
     if boundary_start == current_byte {
         return None;
     }
-    if !matches!(
-        classify_enter_context(source, boundary_start),
+
+    match classify_enter_context(source, boundary_start) {
         EnterContext::TopLevelParagraphEnd
-            | EnterContext::ParagraphInterior
-            | EnterContext::Heading { .. }
-    ) {
+        | EnterContext::ParagraphInterior
+        | EnterContext::Heading { .. } => {
+            let aug = EditAugmentation {
+                insert_text: Some(String::new()),
+                replace_range: Some(boundary_start..current_byte),
+                cursor_byte_after: boundary_start,
+            };
+            debug_assert_augmentation(&aug, source);
+            Some(aug)
+        }
+        _ => guard_unmergeable_leaf_boundary(source, boundary_start, current_byte),
+    }
+}
+
+/// 段首退格且前块为代码块/分隔线/setext 标题等不可安全合并的叶块时：
+/// - 边界含空行（≥2 个换行序列）：默认计划只删一个换行，段落上移到叶块下一行，
+///   结构保持合法，交回默认计划（返回 `None`）；
+/// - 边界只剩单个换行：再删会把段落并到叶块所在行（` ```para `、`---para`、
+///   `Title\n===para`），必须拦截。返回一个空操作 augmentation——
+///   `insert_text` 为空、无 `replace_range`、光标不动——`view.rs` 的
+///   `augmentation_edit_plan` 会把它映射为 `EditPlan::Consume`，
+///   阻止默认的逐 grapheme 删除。
+fn guard_unmergeable_leaf_boundary(
+    source: &str,
+    boundary_start: usize,
+    current_byte: usize,
+) -> Option<EditAugmentation> {
+    debug_assert!(boundary_start < current_byte);
+    if contiguous_newline_count_before(source, current_byte) > 1 {
         return None;
     }
-
     let aug = EditAugmentation {
         insert_text: Some(String::new()),
-        replace_range: Some(boundary_start..current_byte),
-        cursor_byte_after: boundary_start,
+        replace_range: None,
+        cursor_byte_after: current_byte,
     };
     debug_assert_augmentation(&aug, source);
     Some(aug)
@@ -657,11 +682,15 @@ pub fn classify_enter_context(source: &str, current_byte: usize) -> EnterContext
                 code_block_range = Some(range.clone());
             }
             Event::End(TagEnd::CodeBlock) => {
-                if let Some(cb_range) = code_block_range.take()
-                    && current_byte >= cb_range.start
-                    && current_byte <= range.end
-                {
-                    return EnterContext::CodeBlock;
+                if let Some(cb_range) = code_block_range.take() {
+                    // pulldown-cmark 对缩进代码块的 range 包含结尾换行
+                    // （fenced 则不包含）；用去尾换行的 content_end 统一两种边界，
+                    // 否则紧邻的下一块首字节会被误判为 CodeBlock。
+                    let end =
+                        content_end_without_trailing_newline(source, cb_range.start..range.end);
+                    if current_byte >= cb_range.start && current_byte <= end {
+                        return EnterContext::CodeBlock;
+                    }
                 }
             }
             Event::Start(Tag::Table(_)) => {
@@ -1276,6 +1305,58 @@ mod tests {
             matches!(classify_enter_context(source, source.len()), EnterContext::Other),
             "setext underline must not use ATX heading semantics"
         );
+    }
+
+    #[test]
+    fn backspace_merging_paragraph_into_unmergeable_leaf_block_is_noop() {
+        let cases = [
+            "```\ncode\n```\nparagraph",
+            "    code\nparagraph",
+            "---\nparagraph",
+            "Title\n===\nparagraph",
+        ];
+
+        for source in cases {
+            let current_byte = source.find("paragraph").expect("fixture must contain a paragraph");
+            let augmentation = augment_edit(source, current_byte, AugmentKind::Backspace)
+                .unwrap_or_else(|| {
+                    panic!("leaf-block boundary in {source:?} must be guarded, not fall back")
+                });
+            let edited_source = apply_augmentation_at(source, current_byte, &augmentation);
+
+            assert_eq!(edited_source, source, "guarded backspace must not change {source:?}");
+            assert_eq!(
+                augmentation.cursor_byte_after, current_byte,
+                "guarded backspace must keep the cursor in {source:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn backspace_guard_for_leaf_block_boundary_preserves_crlf_source() {
+        let source = "```\r\ncode\r\n```\r\nparagraph";
+        let current_byte = source.find("paragraph").expect("fixture must contain a paragraph");
+
+        let augmentation = augment_edit(source, current_byte, AugmentKind::Backspace)
+            .expect("CRLF leaf-block boundary must be guarded");
+        let edited_source = apply_augmentation_at(source, current_byte, &augmentation);
+
+        assert_eq!(edited_source, source);
+        assert_eq!(augmentation.cursor_byte_after, current_byte);
+    }
+
+    #[test]
+    fn backspace_across_blank_line_before_leaf_block_keeps_default_fallback() {
+        let cases = ["```\ncode\n```\n\nparagraph", "    code\n\nparagraph", "---\n\nparagraph"];
+
+        for source in cases {
+            let current_byte = source.find("paragraph").expect("fixture must contain a paragraph");
+
+            assert!(
+                augment_edit(source, current_byte, AugmentKind::Backspace).is_none(),
+                "removing one newline of a blank separator before a leaf block is safe: {source:?}"
+            );
+        }
     }
 
     #[test]
