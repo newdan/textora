@@ -137,7 +137,27 @@
 - 垂直移动：代码块内空行（H1，零覆盖）、ExtendUp/Down 文档首尾（L3）、跨字号块落点、引用块缩进 goal-x、穿越 `---`、CRLF/空文档/preedit 场景。
 - 端到端断层：app 层用 mock plugin，markdown 层直调 engine；真实 `MarkdownEditorView` + dispatch 的垂直移动/选区同步无集成测试。app 层现有三个 Enter 测试测的是死路径（M8）。
 
-## 五、修复优先级建议
+## 六、修复状态（2026-08-17，分支 wysiwyg-edit-fixes）
+
+| 发现 | 修复 commit | 说明 |
+|------|-------------|------|
+| H1 代码块内空行垂直移动卡死 | `802c789` | 空行自带渲染投影即非隐藏分隔；分类/投影两侧同步修，含 CRLF/metadata 测试 |
+| M2 段首退格破坏叶块 | `69ea736` | 不可合并叶块边界退格变为消费型无操作（EditPlan::Consume） |
+| M3 Setext 被当 ATX | `32e108f` | `classify_heading_hit` 校验 ATX marker，否则归 Other；含 pulldown 行为探针测试 |
+| M4 引用/列表懒延续并入 | `468278e` | 并入行补显式 `> ` / 列表延续缩进，光标落在内容前 |
+| M1 带选区回车 | `27ec52d` | 删选区 + 删除点块级增强，单条原子替换 |
+| L1 零宽选区 | `27ec52d` | `build_edit_request` 过滤空选区，与 appkit-shell 对齐 |
+| M5 appkit-shell CRLF 回车 | `2bd3786` | 默认计划按 `is_crlf()` 返回 `\r\n`/`\n` |
+| M6 undo 后源码同步 | `47ab335` | 规划前按需同步 + undo/redo 后即时同步 |
+| M7 垂直移动不滚动 | `9c5c6d0` | 复用 `PluginMessage::Scroll`，最小位移、无抖动 |
+| M8 死派发路径 | `f12cfb8` | 删除不可达链路（−429 行），3 个 Enter 测试迁到生产事务路径 |
+| M9 undo 粒度 | `ea323d8` | `EditPlan::ApplyDefault` 携带 history kind，连续输入/退格合并为单条 undo |
+
+未修复（低严重度/存疑项，见上文 L2–L12）：IME preedit 放行 Enter/Backspace（L2，需真机验证）、ExtendUp/Down 文档首尾不扩展（L3）等，维持原状待后续评估。
+
+合并前锁定测试：`4659c65`（T2 range 归一化带来的 Enter 分类变化回归锁定）。最终全分支审查结论：With fixes → 该修复已完成。
+
+## 修复优先级建议（原文，已执行完毕）
 
 1. **H1**（代码块内空行垂直移动卡死）——常见内容 + 功能卡死，先写复现测试再修分类判据。
 2. **M2 / M3 / M4**（段首退格破坏叶块 / Setext / 懒延续）——同源：为 fallback 加叶块护栏，`classify_heading_hit` 排除 Setext。
