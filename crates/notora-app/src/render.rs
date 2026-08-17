@@ -418,18 +418,25 @@ impl NotoraRenderModel {
     }
 }
 
-fn editor_pane_input(state: &NotoraState, cards: &[RenderCard]) -> EditorPaneInput {
+pub(crate) fn selected_editor_pane_mode(state: &NotoraState) -> EditorPaneMode {
     let Some(identity) = state.library.selected_card else {
-        return EditorPaneInput::default();
+        return EditorPaneMode::Empty;
     };
-    let selected_card = cards.iter().find(|card| card.identity == identity);
-    let mode = match identity {
+    match identity {
         DocumentIdentity::ExternalFile(_) => EditorPaneMode::ExternalFile,
         DocumentIdentity::Note(_) if state.library.navigation_scope == NavigationScope::Trash => {
             EditorPaneMode::TrashNote
         }
         DocumentIdentity::Note(_) => EditorPaneMode::WorkspaceNote,
+    }
+}
+
+fn editor_pane_input(state: &NotoraState, cards: &[RenderCard]) -> EditorPaneInput {
+    let Some(identity) = state.library.selected_card else {
+        return EditorPaneInput::default();
     };
+    let selected_card = cards.iter().find(|card| card.identity == identity);
+    let mode = selected_editor_pane_mode(state);
     let document_key = match identity {
         DocumentIdentity::Note(note_id) => format!("note:{note_id}"),
         DocumentIdentity::ExternalFile(file_id) => format!("external:{file_id}"),

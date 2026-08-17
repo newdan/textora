@@ -6,7 +6,10 @@ use ui::plugin::PluginMessage;
 use super::{EditorFrame, EditorRuntime, RenderError, RenderResources};
 use crate::tab_session::TabSession;
 
-const PLUGIN_CONTENT_PADDING_LOGICAL: f32 = 24.0;
+const PLUGIN_CONTENT_HORIZONTAL_PADDING_LOGICAL: f32 = 24.0;
+/// 顶部内边距刻意收窄：工具条本身已提供视觉间隔，过大留白会显得编辑区与工具条脱节。
+const PLUGIN_CONTENT_TOP_PADDING_LOGICAL: f32 = 8.0;
+const PLUGIN_CONTENT_BOTTOM_PADDING_LOGICAL: f32 = 24.0;
 
 fn measure_preedit_advance_px(
     shaper: &mut shaping::Shaper,
@@ -353,12 +356,14 @@ pub(super) fn plugin_bounds(editor_rect: ui::Rect, dpi: f32, is_canvas: bool) ->
     if is_canvas {
         return editor_rect;
     }
-    let padding = PLUGIN_CONTENT_PADDING_LOGICAL * dpi;
+    let horizontal_padding = PLUGIN_CONTENT_HORIZONTAL_PADDING_LOGICAL * dpi;
+    let top_padding = PLUGIN_CONTENT_TOP_PADDING_LOGICAL * dpi;
+    let bottom_padding = PLUGIN_CONTENT_BOTTOM_PADDING_LOGICAL * dpi;
     ui::Rect::new(
-        editor_rect.x + padding,
-        editor_rect.y + padding,
-        (editor_rect.w - padding * 2.0).max(1.0),
-        (editor_rect.h - padding * 2.0).max(1.0),
+        editor_rect.x + horizontal_padding,
+        editor_rect.y + top_padding,
+        (editor_rect.w - horizontal_padding * 2.0).max(1.0),
+        (editor_rect.h - top_padding - bottom_padding).max(1.0),
     )
 }
 

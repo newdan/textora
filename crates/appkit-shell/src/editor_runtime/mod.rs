@@ -2122,7 +2122,7 @@ mod tests {
             .active_editor_ime_cursor_rect()
             .expect("active editor cursor should provide an IME candidate anchor");
 
-        assert_eq!(ime_rect, ui::Rect::new(148.0, 236.0, 2.0, 18.0));
+        assert_eq!(ime_rect, ui::Rect::new(148.0, 220.0, 2.0, 18.0));
 
         let _next_frame = runtime.begin_frame().expect("next headless frame should begin");
         assert_eq!(runtime.active_editor_ime_cursor_rect(), None);

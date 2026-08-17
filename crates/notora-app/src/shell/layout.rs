@@ -13,6 +13,8 @@ pub const MINIMUM_EDITOR_WIDTH_LOGICAL: f32 = 300.0;
 pub const SPLITTER_WIDTH_LOGICAL: f32 = 8.0;
 pub const EDITOR_HEADER_HEIGHT_LOGICAL: f32 = 108.0;
 pub const EDITOR_COMPACT_HEADER_HEIGHT_LOGICAL: f32 = 100.0;
+/// 头部底部的属性行（所属工作区 + 标签）高度；仅工作区笔记展示该行。
+pub const EDITOR_HEADER_PROPERTY_ROW_HEIGHT_LOGICAL: f32 = 28.0;
 pub const EDITOR_TOOLBAR_HEIGHT_LOGICAL: f32 = 40.0;
 pub const EDITOR_COMPACT_HEIGHT_THRESHOLD_LOGICAL: f32 = 480.0;
 pub const MINIMUM_WINDOW_WIDTH_LOGICAL: f32 = DEFAULT_NAVIGATION_WIDTH_LOGICAL
@@ -31,6 +33,8 @@ pub struct ShellLayoutInput {
     pub navigation_pane_visibility: NavigationPaneVisibility,
     pub compact_content: CompactContent,
     pub compact_navigation: CompactNavigation,
+    /// 头部属性行（所属工作区 + 标签）是否展示；不展示时头部收回该行高度。
+    pub editor_property_row_visible: bool,
 }
 
 /// 一帧 shell 的独立区域。overlay 与 menu 位于 editor 之后绘制。
@@ -77,6 +81,7 @@ impl ShellLayout {
                 requested_card_width_logical,
                 splitter_width_px,
                 input.navigation_pane_visibility,
+                input.editor_property_row_visible,
             );
         }
         if window_rect.w >= (requested_card_width_logical + MINIMUM_EDITOR_WIDTH_LOGICAL) * dpi {
@@ -86,6 +91,7 @@ impl ShellLayout {
                 requested_card_width_logical,
                 splitter_width_px,
                 input.compact_navigation,
+                input.editor_property_row_visible,
             );
         }
         Self::editor_overlay(
@@ -94,6 +100,7 @@ impl ShellLayout {
             requested_card_width_logical,
             input.compact_content,
             input.compact_navigation,
+            input.editor_property_row_visible,
         )
     }
 
@@ -104,6 +111,7 @@ impl ShellLayout {
         requested_card_width_logical: f32,
         splitter_width_px: f32,
         navigation_pane_visibility: NavigationPaneVisibility,
+        editor_property_row_visible: bool,
     ) -> Self {
         let navigation_width_px = match navigation_pane_visibility {
             NavigationPaneVisibility::Expanded => navigation_width_logical * dpi,
@@ -132,7 +140,7 @@ impl ShellLayout {
             window_rect.h,
         );
         let (editor_header_rect, editor_toolbar_rect, editor_body_rect) =
-            editor_chrome_rects(editor_rect, dpi);
+            editor_chrome_rects(editor_rect, dpi, editor_property_row_visible);
         Self {
             responsive_mode: ResponsiveLayoutMode::ThreePane,
             dpi,
@@ -157,6 +165,7 @@ impl ShellLayout {
         requested_card_width_logical: f32,
         splitter_width_px: f32,
         compact_navigation: CompactNavigation,
+        editor_property_row_visible: bool,
     ) -> Self {
         let card_width_px = requested_card_width_logical * dpi;
         let card_list_rect = Rect::new(0.0, 0.0, card_width_px, window_rect.h);
@@ -172,7 +181,7 @@ impl ShellLayout {
             window_rect.h,
         );
         let (editor_header_rect, editor_toolbar_rect, editor_body_rect) =
-            editor_chrome_rects(editor_rect, dpi);
+            editor_chrome_rects(editor_rect, dpi, editor_property_row_visible);
         Self {
             responsive_mode: ResponsiveLayoutMode::NavigationOverlay,
             dpi,
@@ -197,13 +206,14 @@ impl ShellLayout {
         requested_card_width_logical: f32,
         compact_content: CompactContent,
         compact_navigation: CompactNavigation,
+        editor_property_row_visible: bool,
     ) -> Self {
         let (card_list_rect, editor_rect) = match compact_content {
             CompactContent::CardList => (window_rect, Rect::ZERO),
             CompactContent::Editor => (Rect::ZERO, window_rect),
         };
         let (editor_header_rect, editor_toolbar_rect, editor_body_rect) =
-            editor_chrome_rects(editor_rect, dpi);
+            editor_chrome_rects(editor_rect, dpi, editor_property_row_visible);
         Self {
             responsive_mode: ResponsiveLayoutMode::EditorOverlay,
             dpi,
@@ -227,18 +237,25 @@ fn centered_splitter_rect(boundary_x: f32, height: f32, hit_width: f32) -> Rect 
     Rect::new(boundary_x - hit_width * 0.5, 0.0, hit_width, height)
 }
 
-fn editor_chrome_rects(editor_rect: Rect, dpi: f32) -> (Rect, Rect, Rect) {
+fn editor_chrome_rects(
+    editor_rect: Rect,
+    dpi: f32,
+    property_row_visible: bool,
+) -> (Rect, Rect, Rect) {
     if editor_rect.w <= 0.0 || editor_rect.h <= 0.0 {
         return (Rect::ZERO, Rect::ZERO, Rect::ZERO);
     }
 
     let available_height_logical = editor_rect.h / dpi;
-    let header_height_logical =
+    let mut header_height_logical =
         if available_height_logical < EDITOR_COMPACT_HEIGHT_THRESHOLD_LOGICAL {
             EDITOR_COMPACT_HEADER_HEIGHT_LOGICAL
         } else {
             EDITOR_HEADER_HEIGHT_LOGICAL
         };
+    if !property_row_visible {
+        header_height_logical -= EDITOR_HEADER_PROPERTY_ROW_HEIGHT_LOGICAL;
+    }
     let header_height_px = (header_height_logical * dpi).min(editor_rect.h);
     let remaining_after_header = (editor_rect.h - header_height_px).max(0.0);
     let toolbar_height_px = (EDITOR_TOOLBAR_HEIGHT_LOGICAL * dpi).min(remaining_after_header);
@@ -280,6 +297,7 @@ mod tests {
             navigation_pane_visibility: NavigationPaneVisibility::Expanded,
             compact_content: CompactContent::CardList,
             compact_navigation: CompactNavigation::Hidden,
+            editor_property_row_visible: true,
         }
     }
 
@@ -422,6 +440,19 @@ mod tests {
 
         assert_editor_chrome_is_partitioned(layout);
         assert!(layout.editor_body_rect.h >= 0.0);
+    }
+
+    #[test]
+    fn hidden_editor_property_row_reclaims_its_height_from_the_header() {
+        let mut layout_input = input(880.0, 1.0);
+        layout_input.editor_property_row_visible = false;
+        let layout = ShellLayout::compute(layout_input);
+
+        assert_eq!(
+            layout.editor_header_rect.h,
+            EDITOR_HEADER_HEIGHT_LOGICAL - EDITOR_HEADER_PROPERTY_ROW_HEIGHT_LOGICAL
+        );
+        assert_editor_chrome_is_partitioned(layout);
     }
 
     #[test]

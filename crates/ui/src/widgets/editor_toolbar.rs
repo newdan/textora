@@ -242,6 +242,16 @@ impl Widget for EditorToolbarWidget {
                 ctx.theme.palette.text_muted,
             );
         }
+        let divider_thickness = ctx.dpi.max(1.0);
+        ctx.list.fill(
+            Rect::new(
+                self.rect.x,
+                self.rect.bottom() - divider_thickness,
+                self.rect.w,
+                divider_thickness,
+            ),
+            ctx.theme.palette.border_subtle,
+        );
     }
 
     fn hit(&self, px: f32, py: f32) -> bool {

@@ -536,6 +536,10 @@ impl NotoraRuntime {
                 .navigation_pane_visibility,
             compact_content: self.action_runtime.state().layout.compact_content,
             compact_navigation: self.action_runtime.state().layout.compact_navigation,
+            editor_property_row_visible: crate::render::selected_editor_pane_mode(
+                self.action_runtime.state(),
+            )
+            .shows_property_row(),
         })
     }
 

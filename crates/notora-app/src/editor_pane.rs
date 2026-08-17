@@ -11,7 +11,8 @@ use ui::tag_editor::{TagEditorInput, TagEditorWidget};
 use ui::tooltip::TooltipHint;
 use ui::{Event, EventCtx, LayoutCtx, PaintCtx, Rect, Widget};
 
-const EDITOR_PANE_TAG_ROW_HEIGHT_LOGICAL: f32 = 28.0;
+const EDITOR_PANE_TAG_ROW_HEIGHT_LOGICAL: f32 =
+    crate::shell::layout::EDITOR_HEADER_PROPERTY_ROW_HEIGHT_LOGICAL;
 const EDITOR_PANE_TAG_HORIZONTAL_INSET_LOGICAL: f32 = 16.0;
 const EDITOR_PANE_PROPERTY_ROW_GAP_LOGICAL: f32 = 12.0;
 const EDITOR_PANE_PROPERTY_FONT_SIZE_LOGICAL: f32 = 12.0;
@@ -31,6 +32,14 @@ pub enum EditorPaneMode {
     WorkspaceNote,
     ExternalFile,
     TrashNote,
+}
+
+impl EditorPaneMode {
+    /// 属性行（所属工作区 + 标签）仅工作区笔记展示；与 render 层构造
+    /// `EditorPaneInput` 的规则一致，布局层据此收回该行高度。
+    pub fn shows_property_row(self) -> bool {
+        matches!(self, EditorPaneMode::WorkspaceNote)
+    }
 }
 
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -142,7 +151,8 @@ impl EditorPaneChrome {
 
     pub fn set_rects(&mut self, rects: EditorPaneRects, context: &mut LayoutCtx<'_>) {
         self.rects = rects;
-        self.document_header_rect = document_header_rect(rects.header, context.dpi);
+        self.document_header_rect =
+            document_header_rect(rects.header, context.dpi, self.input.mode.shows_property_row());
         let compact = rects.header.w / context.dpi <= EDITOR_PANE_COMPACT_HEADER_WIDTH_LOGICAL
             || self.document_header_rect.h / context.dpi
                 <= EDITOR_PANE_COMPACT_DOCUMENT_HEADER_HEIGHT_LOGICAL;
@@ -347,9 +357,13 @@ fn translate_tooltip_hint(mut hint: TooltipHint, offset: Rect) -> TooltipHint {
     hint
 }
 
-fn document_header_rect(header: Rect, dpi: f32) -> Rect {
-    let tag_row_height = (EDITOR_PANE_TAG_ROW_HEIGHT_LOGICAL * dpi).min(header.h);
-    Rect::new(header.x, header.y, header.w, (header.h - tag_row_height).max(0.0))
+fn document_header_rect(header: Rect, dpi: f32, property_row_visible: bool) -> Rect {
+    let property_row_height = if property_row_visible {
+        (EDITOR_PANE_TAG_ROW_HEIGHT_LOGICAL * dpi).min(header.h)
+    } else {
+        0.0
+    };
+    Rect::new(header.x, header.y, header.w, (header.h - property_row_height).max(0.0))
 }
 
 fn workspace_label(location: &LocationPickerInput) -> Option<String> {
@@ -581,6 +595,46 @@ mod tests {
         };
 
         assert_eq!(workspace_label(&location).as_deref(), Some("所属工作区：textora"));
+    }
+
+    #[test]
+    fn hidden_property_row_leaves_the_document_header_at_full_height() {
+        let theme = ui::theme::test_theme();
+
+        let mut external_chrome = EditorPaneChrome::new();
+        external_chrome.set_input(input(EditorPaneMode::ExternalFile));
+        let mut measure = ui::NoopMeasure;
+        let mut layout_context =
+            ui::LayoutCtx { ui_measure: None, measure: &mut measure, theme: &theme, dpi: 1.0 };
+        external_chrome.set_rects(
+            EditorPaneRects {
+                header: Rect::new(0.0, 0.0, 640.0, 80.0),
+                toolbar: Rect::new(0.0, 80.0, 640.0, 40.0),
+                body: Rect::new(0.0, 120.0, 640.0, 400.0),
+            },
+            &mut layout_context,
+        );
+
+        assert_eq!(external_chrome.document_header_rect.h, 80.0);
+        assert_eq!(external_chrome.workspace_rect, Rect::ZERO);
+        assert_eq!(external_chrome.tag_rect, Rect::ZERO);
+
+        let mut note_chrome = EditorPaneChrome::new();
+        note_chrome.set_input(input(EditorPaneMode::WorkspaceNote));
+        let mut measure = ui::NoopMeasure;
+        let mut layout_context =
+            ui::LayoutCtx { ui_measure: None, measure: &mut measure, theme: &theme, dpi: 1.0 };
+        note_chrome.set_rects(
+            EditorPaneRects {
+                header: Rect::new(0.0, 0.0, 640.0, 108.0),
+                toolbar: Rect::new(0.0, 108.0, 640.0, 40.0),
+                body: Rect::new(0.0, 148.0, 640.0, 400.0),
+            },
+            &mut layout_context,
+        );
+
+        assert_eq!(note_chrome.document_header_rect.h, 80.0);
+        assert!(note_chrome.tag_rect.h > 0.0);
     }
 
     #[test]
