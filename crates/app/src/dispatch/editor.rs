@@ -7,6 +7,42 @@ use crate::ui_shell::KeyboardFocusTarget;
 use appkit_shell::editor_runtime::{EditorNotification, EditorOutcome};
 use winit::event_loop::ActiveEventLoop;
 
+/// Caret-moving commands that must split any ongoing undo coalescing run.
+/// Includes selection extension and jumps (SelectAll, navigation history):
+/// anything that repositions the caret without editing text. Editing commands
+/// never reach this predicate: they are handled earlier by the transactional
+/// edit path.
+fn is_cursor_navigation_command(cmd: &EditCommand) -> bool {
+    matches!(
+        cmd,
+        EditCommand::MoveLeft
+            | EditCommand::MoveRight
+            | EditCommand::MoveUp
+            | EditCommand::MoveDown
+            | EditCommand::MoveWordLeft
+            | EditCommand::MoveWordRight
+            | EditCommand::MoveToLineStart
+            | EditCommand::MoveToLineEnd
+            | EditCommand::MoveToDocStart
+            | EditCommand::MoveToDocEnd
+            | EditCommand::PageUp
+            | EditCommand::PageDown
+            | EditCommand::ExtendLeft
+            | EditCommand::ExtendRight
+            | EditCommand::ExtendUp
+            | EditCommand::ExtendDown
+            | EditCommand::ExtendWordLeft
+            | EditCommand::ExtendWordRight
+            | EditCommand::ExtendToLineStart
+            | EditCommand::ExtendToLineEnd
+            | EditCommand::ExtendToDocStart
+            | EditCommand::ExtendToDocEnd
+            | EditCommand::SelectAll
+            | EditCommand::NavigateBack
+            | EditCommand::NavigateForward
+    )
+}
+
 /// Visual-navigation commands are routed to the WYSIWYG plugin so it can
 /// resolve the target from its own layout. Text-editing commands never reach
 /// this predicate: they are handled earlier by the transactional edit path.
@@ -115,6 +151,18 @@ impl App {
             self.dispatch_tab_switch(id)
         } else {
             AppEffect::NONE
+        }
+    }
+
+    /// Splits the active document's undo coalescing run when `cmd` is a
+    /// user-driven caret move, so typing after navigation starts a fresh undo
+    /// entry even if the caret returns to the byte where the last edit ended.
+    pub(crate) fn break_edit_merge_for_navigation(&mut self, cmd: &EditCommand) {
+        if !is_cursor_navigation_command(cmd) {
+            return;
+        }
+        if let Some(tab) = self.active_tab_session_mut() {
+            tab.document.break_edit_merge();
         }
     }
 
@@ -288,6 +336,10 @@ impl App {
             if let Some(intent) = crate::edit_transaction::edit_intent_for_command(&cmd) {
                 return self.dispatch_transactional_edit(intent, Some(event_loop));
             }
+
+            // User-driven caret movement splits the undo coalescing run before
+            // the move is routed to source mode, WYSIWYG mode, or paging.
+            self.break_edit_merge_for_navigation(&cmd);
 
             if self.active_handles_own_rendering() && is_wysiwyg_navigation_command(&cmd) {
                 return self.dispatch_wysiwyg_navigation(&cmd);
@@ -907,6 +959,104 @@ mod edit_tests {
         assert!(!is_wysiwyg_navigation_command(&EditCommand::Backspace));
         assert!(!is_wysiwyg_navigation_command(&EditCommand::InsertChar("x".into())));
         assert!(!is_wysiwyg_navigation_command(&EditCommand::InsertText("中".into())));
+    }
+
+    #[test]
+    fn cursor_navigation_predicate_covers_caret_moving_commands() {
+        for command in [
+            EditCommand::MoveLeft,
+            EditCommand::MoveRight,
+            EditCommand::MoveUp,
+            EditCommand::MoveDown,
+            EditCommand::MoveWordLeft,
+            EditCommand::MoveWordRight,
+            EditCommand::MoveToLineStart,
+            EditCommand::MoveToLineEnd,
+            EditCommand::MoveToDocStart,
+            EditCommand::MoveToDocEnd,
+            EditCommand::PageUp,
+            EditCommand::PageDown,
+            EditCommand::ExtendLeft,
+            EditCommand::ExtendRight,
+            EditCommand::ExtendUp,
+            EditCommand::ExtendDown,
+            EditCommand::ExtendWordLeft,
+            EditCommand::ExtendWordRight,
+            EditCommand::ExtendToLineStart,
+            EditCommand::ExtendToLineEnd,
+            EditCommand::ExtendToDocStart,
+            EditCommand::ExtendToDocEnd,
+            EditCommand::SelectAll,
+            EditCommand::NavigateBack,
+            EditCommand::NavigateForward,
+        ] {
+            assert!(is_cursor_navigation_command(&command), "{command:?} must break edit merge");
+        }
+    }
+
+    #[test]
+    fn cursor_navigation_predicate_rejects_editing_and_panel_commands() {
+        for command in [
+            EditCommand::InsertChar("x".into()),
+            EditCommand::InsertText("中".into()),
+            EditCommand::InsertNewline,
+            EditCommand::Backspace,
+            EditCommand::DeleteForward,
+            EditCommand::Tab,
+            EditCommand::Undo,
+            EditCommand::Redo,
+            EditCommand::Cut,
+            EditCommand::Copy,
+            EditCommand::Paste,
+            EditCommand::Find,
+            EditCommand::Escape,
+        ] {
+            assert!(
+                !is_cursor_navigation_command(&command),
+                "{command:?} must not break edit merge"
+            );
+        }
+    }
+
+    #[test]
+    fn cursor_navigation_between_typing_splits_undo_entries() {
+        use crate::plugins::editor::EditorPlugin;
+
+        let mut app = App::new(None);
+        let dv = DocumentView::new(vec![String::new()], 40, 40.0);
+        app.push_entry_for_test(dv, Box::new(EditorPlugin::new()));
+        app.switch_workspace_for_test(0);
+
+        app.dispatch_transactional_edit_for_test(EditCommand::InsertText("a".into()));
+        // The caret leaves and returns to the exact byte where typing ended.
+        app.break_edit_merge_for_navigation(&EditCommand::MoveLeft);
+        {
+            let Some(tab) = app.active_tab_session_mut() else {
+                panic!("source editor tab should be active");
+            };
+            tab.document.cursor_move_left();
+        }
+        app.break_edit_merge_for_navigation(&EditCommand::MoveRight);
+        {
+            let Some(tab) = app.active_tab_session_mut() else {
+                panic!("source editor tab should be active");
+            };
+            tab.document.cursor_move_right();
+        }
+        app.dispatch_transactional_edit_for_test(EditCommand::InsertText("b".into()));
+
+        let Some(tab) = app.active_tab_session_mut() else {
+            panic!("source editor tab should be active");
+        };
+        assert_eq!(tab.document.full_text(), "ab");
+        tab.document.undo();
+        assert_eq!(
+            tab.document.full_text(),
+            "a",
+            "first undo must only remove the text typed after navigating"
+        );
+        tab.document.undo();
+        assert_eq!(tab.document.full_text(), "");
     }
 
     #[test]

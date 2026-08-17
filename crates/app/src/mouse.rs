@@ -222,6 +222,11 @@ pub(crate) fn handle_mouse_input_with_cursor_state(
     if state.is_pressed() {
         mouse.is_down = true;
 
+        // A pointer press is user-driven caret movement: split any ongoing
+        // undo coalescing run even if the click lands back on the byte where
+        // the last edit ended.
+        dv.break_edit_merge();
+
         // Double/triple click detection (within 500ms and 5 pixels distance)
         let now = Instant::now();
         let elapsed = now.duration_since(mouse.last_click_time);
@@ -304,6 +309,59 @@ mod tests {
 
     fn make_dv(content: &str) -> DocumentView {
         DocumentView::new(content.lines().map(|s| s.to_string()).collect(), 10, 10.0)
+    }
+
+    fn type_default_text(dv: &mut DocumentView, text: &str) {
+        let intent = ui::plugin::EditIntent::InsertText(text.to_owned());
+        let request = crate::edit_transaction::build_edit_request(&dv.model, intent);
+        let plan = crate::edit_transaction::default_edit_plan(&request, &dv.model);
+        crate::edit_transaction::execute_edit_plan(plan, &mut dv.model)
+            .expect("typing must execute in the mouse coalescing test");
+    }
+
+    fn click(dv: &mut DocumentView, mouse: &mut MouseState, px: f32, offset: UniCharOffset) {
+        let modifiers = winit::keyboard::ModifiersState::empty();
+        for state in [winit::event::ElementState::Pressed, winit::event::ElementState::Released] {
+            handle_mouse_input(state, px, 10.0, mouse, dv, modifiers, Some((offset, 0, 0)));
+        }
+    }
+
+    #[test]
+    fn mouse_click_away_and_back_splits_typing_undo_run() {
+        let mut dv = make_dv("");
+        let mut mouse = MouseState::new();
+
+        type_default_text(&mut dv, "a");
+        assert_eq!(dv.full_text(), "a");
+
+        // The caret leaves (click at line start) and returns to the exact byte
+        // where typing ended (click at line end). A user click must split the
+        // undo run even though the caret is back on the last edit's byte.
+        click(&mut dv, &mut mouse, 200.0, UniCharOffset(0));
+        click(&mut dv, &mut mouse, 10.0, UniCharOffset(1));
+        type_default_text(&mut dv, "b");
+
+        assert_eq!(dv.full_text(), "ab");
+        dv.undo();
+        assert_eq!(
+            dv.full_text(),
+            "a",
+            "first undo must only remove the text typed after clicking"
+        );
+        dv.undo();
+        assert_eq!(dv.full_text(), "");
+    }
+
+    #[test]
+    fn typing_without_mouse_clicks_coalesces_into_one_undo_entry() {
+        let mut dv = make_dv("");
+
+        type_default_text(&mut dv, "a");
+        type_default_text(&mut dv, "b");
+
+        assert_eq!(dv.full_text(), "ab");
+        dv.undo();
+        assert_eq!(dv.full_text(), "", "one undo must revert the whole typing run");
     }
 
     #[test]

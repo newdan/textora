@@ -707,6 +707,18 @@ impl TextBuffer {
         self.undo_redo(false);
     }
 
+    /// Breaks any ongoing undo coalescing run, so the next `Insert`/`Delete`
+    /// edit starts a fresh undo entry even when it is byte-adjacent to the
+    /// last one.
+    ///
+    /// The buffer itself cannot tell a post-transaction caret sync apart from
+    /// user-driven caret movement (both arrive as `cursor_move_to_byte`), so
+    /// callers that know a caret move came from the user (keyboard
+    /// navigation, mouse clicks, search jumps) must call this explicitly.
+    pub fn break_edit_merge(&mut self) {
+        self.edit_merge_anchor = None;
+    }
+
     fn undo_redo(&mut self, undo: bool) {
         self.edit_merge_anchor = None;
         let buffer_generation = self.buffer.generation();
@@ -1008,5 +1020,26 @@ mod tests {
         assert_eq!(buffer_text(&mut buffer), "axy");
         buffer.undo();
         assert_eq!(buffer_text(&mut buffer), "xy");
+    }
+
+    #[test]
+    fn break_edit_merge_starts_a_new_undo_entry_at_the_same_byte() {
+        let mut buffer = buffer_with_text("");
+
+        buffer.replace_range_with_history(0..0, b"a", EditHistoryKind::Insert);
+        // The post-transaction caret sync must keep the anchor alive ...
+        buffer.cursor_move_to_byte(ByteIndex(1));
+        // ... but explicit user navigation away and back splits the run, even
+        // though the caret returns to the exact byte where the last edit ended.
+        buffer.break_edit_merge();
+        buffer.cursor_move_to_byte(ByteIndex(1));
+        buffer.replace_range_with_history(1..1, b"b", EditHistoryKind::Insert);
+
+        assert_eq!(buffer_text(&mut buffer), "ab");
+        assert_eq!(buffer.undo_stack.len(), 2, "user navigation must split the typing run");
+        buffer.undo();
+        assert_eq!(buffer_text(&mut buffer), "a");
+        buffer.undo();
+        assert_eq!(buffer_text(&mut buffer), "");
     }
 }

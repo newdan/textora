@@ -154,6 +154,12 @@ impl App {
                 self.mouse.last_click_pos = (px, py);
 
                 self.sync_plugin_state();
+                // Pointer-driven caret placement splits any ongoing undo
+                // coalescing run, even if the click lands back on the byte
+                // where the last edit ended.
+                if let Some(tab) = self.active_tab_session_mut() {
+                    tab.document.break_edit_merge();
+                }
                 match self.query_plugin_edit_hit_target(px, py) {
                     Some(Some(EditHitTarget::TextCaret { byte_offset, selection_scope })) => {
                         self.mouse.wysiwyg_selection_scope = selection_scope;

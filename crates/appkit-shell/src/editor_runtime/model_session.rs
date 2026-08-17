@@ -400,6 +400,9 @@ impl ModelSession {
             (ui::KeyCode::PageDown, false, _, _) => tab.page_down(line_height),
             _ => return EditorOutcome::default(),
         }
+        // Keyboard navigation is user-driven caret movement: split any ongoing
+        // undo coalescing run so the next edit starts a fresh undo entry.
+        tab.document.break_edit_merge();
         tab.cursor_render_state_mut().cursor_blink_instant = std::time::Instant::now();
         tab.ensure_cursor_visible(line_height);
         EditorOutcome {
@@ -1643,6 +1646,62 @@ mod tests {
         assert_eq!(document.full_text(), "\n", "first undo must only remove the typed text");
         document.undo();
         assert_eq!(document.full_text(), "", "second undo must only remove the break");
+    }
+
+    fn active_document_text(session: &ModelSession, tab_id: TabId) -> String {
+        session
+            .document_text_snapshot(tab_id)
+            .expect("installed tab should expose a text snapshot")
+            .text
+    }
+
+    #[test]
+    fn typing_without_navigation_coalesces_into_one_undo_entry() {
+        let mut session = model_session();
+        let effect =
+            session.install_prepared_tab(prepared_text(""), None, OpenDisposition::Persistent);
+        let tab_id = match effect {
+            WorkspaceEffect::Activated(tab_id) => tab_id,
+            _ => panic!("coalescing tab should activate"),
+        };
+
+        session.edit_active_document(ui::plugin::EditIntent::InsertText("a".to_owned()), 20.0);
+        session.edit_active_document(ui::plugin::EditIntent::InsertText("b".to_owned()), 20.0);
+
+        assert_eq!(active_document_text(&session, tab_id), "ab");
+        session.undo_or_redo_active_document(false, 20.0);
+        assert_eq!(
+            active_document_text(&session, tab_id),
+            "",
+            "one undo must revert the whole typing run"
+        );
+    }
+
+    #[test]
+    fn keyboard_navigation_between_typing_splits_undo_entries() {
+        let mut session = model_session();
+        let effect =
+            session.install_prepared_tab(prepared_text(""), None, OpenDisposition::Persistent);
+        let tab_id = match effect {
+            WorkspaceEffect::Activated(tab_id) => tab_id,
+            _ => panic!("navigation tab should activate"),
+        };
+
+        session.edit_active_document(ui::plugin::EditIntent::InsertText("a".to_owned()), 20.0);
+        // The caret leaves and returns to the exact byte where typing ended.
+        session.navigate_active_document(ui::KeyCode::Left, ui::core::Modifiers::NONE, 20.0);
+        session.navigate_active_document(ui::KeyCode::Right, ui::core::Modifiers::NONE, 20.0);
+        session.edit_active_document(ui::plugin::EditIntent::InsertText("b".to_owned()), 20.0);
+
+        assert_eq!(active_document_text(&session, tab_id), "ab");
+        session.undo_or_redo_active_document(false, 20.0);
+        assert_eq!(
+            active_document_text(&session, tab_id),
+            "a",
+            "first undo must only remove the text typed after navigating"
+        );
+        session.undo_or_redo_active_document(false, 20.0);
+        assert_eq!(active_document_text(&session, tab_id), "");
     }
 
     #[test]

@@ -568,6 +568,14 @@ impl DocumentModel {
         self.sync_after_edit();
     }
 
+    /// Breaks any ongoing undo coalescing run. Must be called on user-driven
+    /// caret movement (keyboard navigation, mouse clicks, search jumps) so
+    /// typing after the move starts a fresh undo entry; never called from
+    /// post-transaction caret syncs, which are part of the edit itself.
+    pub fn break_edit_merge(&mut self) {
+        self.tb.break_edit_merge();
+    }
+
     pub fn indent_column_offset(&self) -> usize {
         let line = self.cursor_line();
         let line_start = self.line_byte_offset(line).unwrap_or(self.cursor.offset.to_usize());

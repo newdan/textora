@@ -218,6 +218,9 @@ impl EditorRuntime {
                 return false;
             };
             let source_generation = tab.document.generation();
+            // Pressing a source object moves the caret: split any ongoing
+            // undo coalescing run.
+            tab.document.break_edit_merge();
             tab.document.cursor_mut().selection_anchor = Some(source_range.start);
             tab.document.set_cursor_offset_synced(source_range.end);
             (source_range, source_generation)
@@ -335,6 +338,12 @@ impl EditorRuntime {
         let Some(tab_id) = self.active_tab_id() else {
             return false;
         };
+        // A pointer gesture is user-driven caret movement: split any ongoing
+        // undo coalescing run even if the caret lands back on the byte where
+        // the last edit ended.
+        if let Some(tab) = self.tab_session_mut(tab_id) {
+            tab.document.break_edit_merge();
+        }
         let dpi = self.scale_factor() as f32;
         let settings = self.settings.clone();
         let metrics = ui::settings::UiMetrics::from_settings(&settings, dpi);

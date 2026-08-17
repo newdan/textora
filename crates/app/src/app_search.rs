@@ -59,6 +59,9 @@ impl App {
         if let Some(mut tab) = self.active_tab_session_mut()
             && let Some(range) = tab.search_state().active_match()
         {
+            // Jumping to a match is user-driven caret movement: split any
+            // ongoing undo coalescing run.
+            tab.document.break_edit_merge();
             tab.document.set_cursor_offset_synced(range.start);
             tab.document.cursor_mut().selection_anchor = Some(range.start);
             tab.document.set_cursor_offset_synced(range.end);
