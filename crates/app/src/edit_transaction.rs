@@ -160,9 +160,7 @@ fn tag_default_plan(plan: EditPlan, intent: &EditIntent) -> EditPlan {
 
 fn default_history_kind(intent: &EditIntent) -> EditHistoryKind {
     match intent {
-        EditIntent::InsertText(_) | EditIntent::InsertParagraphBreak | EditIntent::Indent => {
-            EditHistoryKind::Insert
-        }
+        EditIntent::InsertText(_) => EditHistoryKind::Insert,
         EditIntent::DeleteBackward | EditIntent::DeleteForward => EditHistoryKind::Delete,
         _ => EditHistoryKind::Standalone,
     }
@@ -841,6 +839,38 @@ mod tests {
         assert_eq!(doc.full_text(), "");
         doc.undo();
         assert_eq!(doc.full_text(), "abc", "one undo must revert the whole backspace run");
+    }
+
+    #[test]
+    fn default_paragraph_break_does_not_coalesce_with_surrounding_typing() {
+        let mut doc = document_from_text("");
+
+        execute_default_plan(&mut doc, EditIntent::InsertText("a".into()));
+        execute_default_plan(&mut doc, EditIntent::InsertParagraphBreak);
+        execute_default_plan(&mut doc, EditIntent::InsertText("b".into()));
+
+        assert_eq!(doc.full_text(), "a\nb");
+        doc.undo();
+        assert_eq!(doc.full_text(), "a\n", "first undo must only remove the typed character");
+        doc.undo();
+        assert_eq!(doc.full_text(), "a", "second undo must only remove the paragraph break");
+        doc.undo();
+        assert_eq!(doc.full_text(), "");
+    }
+
+    #[test]
+    fn default_indent_does_not_coalesce_with_following_typing() {
+        let mut doc = document_from_text("");
+
+        execute_default_plan(&mut doc, EditIntent::Indent);
+        let indented = doc.full_text();
+        execute_default_plan(&mut doc, EditIntent::InsertText("x".into()));
+
+        assert_eq!(doc.full_text(), format!("{indented}x"));
+        doc.undo();
+        assert_eq!(doc.full_text(), indented, "first undo must only remove the typed text");
+        doc.undo();
+        assert_eq!(doc.full_text(), "", "second undo must only remove the indent");
     }
 
     #[test]

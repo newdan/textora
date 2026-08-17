@@ -993,10 +993,11 @@ fn default_edit_plan(
         | EditIntent::SelectObject => return EditPlan::Consume,
     };
     let history = match &request.intent {
-        EditIntent::InsertText(_) | EditIntent::InsertParagraphBreak | EditIntent::Indent => {
-            core::buffer::EditHistoryKind::Insert
+        EditIntent::InsertText(_) => core::buffer::EditHistoryKind::Insert,
+        EditIntent::DeleteBackward | EditIntent::DeleteForward => {
+            core::buffer::EditHistoryKind::Delete
         }
-        _ => core::buffer::EditHistoryKind::Delete,
+        _ => core::buffer::EditHistoryKind::Standalone,
     };
     if let Some(text) = replacement {
         let range = request.selection.clone().unwrap_or(request.cursor_byte..request.cursor_byte);
@@ -1573,6 +1574,75 @@ mod tests {
         };
         assert_eq!(transaction.replacements.len(), 1);
         assert_eq!(transaction.replacements[0].text, "\n");
+    }
+
+    fn default_plan_history_kind(
+        document: &DocumentModel,
+        intent: ui::plugin::EditIntent,
+    ) -> core::buffer::EditHistoryKind {
+        let request = ui::plugin::EditRequest {
+            source_generation: document.generation(),
+            cursor_byte: document.cursor_offset().to_usize(),
+            selection: None,
+            intent,
+        };
+        let ui::plugin::EditPlan::ApplyDefault(_, history) = default_edit_plan(&request, document)
+        else {
+            panic!("default plan should apply a transaction with a history kind");
+        };
+        history
+    }
+
+    #[test]
+    fn default_plan_marks_paragraph_break_and_indent_as_standalone_history() {
+        let document = prepared_text("").document;
+
+        assert_eq!(
+            default_plan_history_kind(&document, ui::plugin::EditIntent::InsertParagraphBreak),
+            core::buffer::EditHistoryKind::Standalone,
+            "a paragraph break must never join a typing run"
+        );
+        assert_eq!(
+            default_plan_history_kind(&document, ui::plugin::EditIntent::Indent),
+            core::buffer::EditHistoryKind::Standalone,
+            "an indent must never join a typing run"
+        );
+        assert_eq!(
+            default_plan_history_kind(
+                &document,
+                ui::plugin::EditIntent::InsertText("x".to_owned())
+            ),
+            core::buffer::EditHistoryKind::Insert,
+            "plain typing keeps coalescing"
+        );
+    }
+
+    #[test]
+    fn default_paragraph_break_and_typing_undo_separately() {
+        let mut document = prepared_text("").document;
+
+        let break_request = ui::plugin::EditRequest {
+            source_generation: document.generation(),
+            cursor_byte: document.cursor_offset().to_usize(),
+            selection: None,
+            intent: ui::plugin::EditIntent::InsertParagraphBreak,
+        };
+        let break_plan = default_edit_plan(&break_request, &document);
+        assert!(apply_edit_plan(&mut document, break_plan), "paragraph break should apply");
+        let type_request = ui::plugin::EditRequest {
+            source_generation: document.generation(),
+            cursor_byte: document.cursor_offset().to_usize(),
+            selection: None,
+            intent: ui::plugin::EditIntent::InsertText("x".to_owned()),
+        };
+        let type_plan = default_edit_plan(&type_request, &document);
+        assert!(apply_edit_plan(&mut document, type_plan), "typing should apply");
+
+        assert_eq!(document.full_text(), "\nx");
+        document.undo();
+        assert_eq!(document.full_text(), "\n", "first undo must only remove the typed text");
+        document.undo();
+        assert_eq!(document.full_text(), "", "second undo must only remove the break");
     }
 
     #[test]
