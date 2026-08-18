@@ -20,8 +20,8 @@ const PAD_Y: f32 = 3.0;
 const GAP: f32 = 4.0;
 /// Corner radius of the tooltip pill.
 const CORNER_RADIUS: f32 = 4.0;
-/// Baseline offset multiplier for text vertical centering.
-const BASELINE_SHIFT: f32 = 0.8;
+/// Baseline offset multiplier from the line center for text vertical centering.
+const BASELINE_CENTER_SHIFT: f32 = 0.35;
 const LINE_HEIGHT_RATIO: f32 = 1.25;
 const MAX_WIDTH_LOGICAL: f32 = 320.0;
 const SCREEN_MARGIN_LOGICAL: f32 = 8.0;
@@ -247,11 +247,13 @@ impl Widget for TooltipWidget {
         // Draw border
         ctx.list.stroke_rounded(r, theme.palette.border_strong, radius, 1.0);
 
-        // Draw text with baseline shift for vertical centering
+        // Center the complete text block before positioning each line's baseline.
         let font_size = FONT_SIZE * ctx.dpi;
-        let pad_y = PAD_Y * ctx.dpi;
         let text_x = r.x + PAD_X * ctx.dpi;
-        let first_baseline = r.y + pad_y + font_size * BASELINE_SHIFT;
+        let text_block_height = self.line_height * self.display_lines.len() as f32;
+        let text_block_top = r.y + (r.h - text_block_height).max(0.0) * 0.5;
+        let first_baseline =
+            text_block_top + self.line_height * 0.5 + font_size * BASELINE_CENTER_SHIFT;
         if let Some(ref mut shaper) = ctx.shaper {
             for (line_index, line) in self.display_lines.iter().enumerate() {
                 let text_y = first_baseline + line_index as f32 * self.line_height;
@@ -399,6 +401,36 @@ mod tests {
             _ => None,
         });
         assert_eq!(text_color, Some(theme.application_theme().text_primary));
+    }
+
+    #[test]
+    fn paint_centers_single_line_text_in_tooltip_pill() {
+        let theme = test_theme();
+        let hint = make_hint("保存", Rect::new(20.0, 20.0, 24.0, 24.0));
+        let (widget, _) = TooltipWidget::new(&hint, 1.0, 800.0, 600.0);
+        let mut list = DrawList::new();
+        let mut shaper = shaping::Shaper::new().expect("tooltip baseline test shaper should exist");
+        let mut context = PaintCtx {
+            list: &mut list,
+            theme: &theme,
+            dpi: 1.0,
+            offset: (0.0, 0.0),
+            global_alpha: 1.0,
+            shaper: Some(&mut shaper),
+        };
+
+        widget.paint(&mut context);
+
+        let actual_baseline = list.cmds.iter().find_map(|command| match command {
+            DrawCmd::TextLayout { y_baseline, .. } => Some(*y_baseline),
+            _ => None,
+        });
+        let expected_baseline = widget.rect.y + widget.rect.h * 0.5 + FONT_SIZE * 0.35;
+        let actual_baseline = actual_baseline.expect("tooltip should emit a text draw command");
+        assert!(
+            (actual_baseline - expected_baseline).abs() < 0.01,
+            "tooltip text baseline should be vertically centered, got {actual_baseline}, expected {expected_baseline}"
+        );
     }
 
     #[test]

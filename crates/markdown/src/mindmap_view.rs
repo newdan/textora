@@ -3247,6 +3247,50 @@ mod tests {
     }
 
     #[test]
+    fn root_title_editing_caret_follows_the_blink_visibility_phase() {
+        let source = "# Root\n## Child\n";
+        let (mut view, mut doc) = view_with_source(source);
+        let root_title_end = view.ready_tree().root.title_byte_range.end;
+        view.handle_message(PluginMessage::SetCursorByte(root_title_end), &mut doc);
+        let visible_draw_list = render_test_draw_list(&mut view, &doc);
+        let root_geometry = &view.ready_hit_map().nodes[0];
+        let caret_x = *root_geometry
+            .grapheme_edges
+            .last()
+            .expect("root title must expose its final grapheme edge");
+        let expected_caret_rect = screen_rect(
+            &view,
+            Rect::new(
+                caret_x - mmf::canvas::CARET_WIDTH * 0.5,
+                root_geometry.title_rect.y,
+                mmf::canvas::CARET_WIDTH,
+                root_geometry.title_rect.h,
+            ),
+        );
+        let caret_color =
+            ui::theme::find_mindmap_color_scheme(ui::theme::DEFAULT_MINDMAP_COLOR_SCHEME_ID)
+                .expect("default scheme is registered")
+                .node
+                .root
+                .text;
+
+        assert!(visible_draw_list.cmds.iter().any(|command| matches!(
+            command,
+            DrawCmd::FillRect { rect, color, .. }
+                if *rect == expected_caret_rect && *color == caret_color
+        )));
+
+        view.handle_message(PluginMessage::SetCursorVisible(false), &mut doc);
+        let hidden_draw_list = render_test_draw_list(&mut view, &doc);
+
+        assert!(!hidden_draw_list.cmds.iter().any(|command| matches!(
+            command,
+            DrawCmd::FillRect { rect, color, .. }
+                if *rect == expected_caret_rect && *color == caret_color
+        )));
+    }
+
+    #[test]
     fn selected_title_preedit_projects_a_caret_and_local_candidate_position() {
         let (mut view, mut doc) = view_with_source("# Root\n## Child\n");
         let title_start = view.ready_tree().root.children[0].title_byte_range.start;

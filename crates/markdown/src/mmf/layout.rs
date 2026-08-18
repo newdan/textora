@@ -9,7 +9,8 @@ use ui::core::geom::Rect;
 
 const MIN_CARD_WIDTH: f32 = 60.0;
 const MAX_CONTROL_HIT_SIZE_DP: f32 = 36.0;
-const ROOT_BRANCH_GAP_MULTIPLIER: f32 = 2.0;
+const FIRST_LEVEL_BRANCH_GAP_MULTIPLIER: f32 = 3.0;
+const SECOND_LEVEL_BRANCH_GAP_MULTIPLIER: f32 = 2.0;
 pub const EXPANDED_CONTROL_RIGHT_OFFSET_DP: f32 = 8.0;
 
 pub const EMPTY_TITLE_PLACEHOLDER: &str = "输入主题";
@@ -63,12 +64,12 @@ impl LayoutConstants {
         if parent_depth == 0 { self.root_child_gap } else { self.nested_child_gap }
     }
 
-    /// 根节点的直接子树是独立分组，保留更宽的垂直空白以便拖拽重排。
+    /// 浅层子树是独立分组，按层级保留更宽的垂直空白以便拖拽重排。
     pub fn sibling_gap_for_parent_depth(&self, parent_depth: u8) -> f32 {
-        if parent_depth == 0 {
-            self.sibling_gap * ROOT_BRANCH_GAP_MULTIPLIER
-        } else {
-            self.sibling_gap
+        match parent_depth {
+            0 => self.sibling_gap * FIRST_LEVEL_BRANCH_GAP_MULTIPLIER,
+            1 => self.sibling_gap * SECOND_LEVEL_BRANCH_GAP_MULTIPLIER,
+            _ => self.sibling_gap,
         }
     }
 
@@ -752,12 +753,12 @@ mod tests {
     }
 
     #[test]
-    fn root_branch_groups_have_more_drag_space_than_nested_siblings() {
+    fn shallow_branch_groups_have_level_specific_drag_space() {
         let tree = parser::parse(
             "# Root\n## First group\n### First child\n### Second child\n## Second group\n### Third child\n",
         )
         .expect("fixture must be valid MMF");
-        let constants = LayoutConstants::default();
+        let constants = LayoutConstants { sibling_gap: 8.0, ..LayoutConstants::default() };
         let mut shaper = Shaper::new().expect("test shaper should initialize");
         let layout = compute_layout(&tree, &mut shaper, &constants, None);
 
@@ -774,11 +775,17 @@ mod tests {
             .min_by(f32::total_cmp)
             .expect("second group must contain visible nodes");
 
-        assert_eq!(second_child.y - (first_child.y + first_child.h), constants.sibling_gap);
+        assert_eq!(
+            second_child.y - (first_child.y + first_child.h),
+            constants.sibling_gap_for_parent_depth(1)
+        );
         assert_eq!(
             second_group_top - first_group_bottom,
             constants.sibling_gap_for_parent_depth(0)
         );
+        assert_eq!(constants.sibling_gap_for_parent_depth(0), 24.0);
+        assert_eq!(constants.sibling_gap_for_parent_depth(1), 16.0);
+        assert_eq!(constants.sibling_gap_for_parent_depth(2), 8.0);
     }
 
     #[test]

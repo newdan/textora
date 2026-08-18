@@ -1151,8 +1151,10 @@ fn render_preedit_underline(
 
 fn render_caret(
     dl: &mut DrawList,
+    layout: &LayoutTree,
     hit_map: &HitMap,
     theme: &MindmapRenderTheme<'_>,
+    nodes: &[&Node],
     projection: &MindmapRenderProjection<'_>,
     viewport: CanvasViewportSnapshot,
 ) {
@@ -1163,6 +1165,13 @@ fn render_caret(
         return;
     };
     let Some(geometry) = hit_geometry_for_source(hit_map, node_index) else {
+        return;
+    };
+    let Some(layout_node) = layout.nodes.iter().find(|node| node.source_node_index == node_index)
+    else {
+        return;
+    };
+    let Some(node) = nodes.get(node_index) else {
         return;
     };
     let edge_index = grapheme_edge_at_or_before(&geometry.grapheme_byte_offsets, byte_offset);
@@ -1176,7 +1185,7 @@ fn render_caret(
             CARET_WIDTH,
             geometry.title_rect.h,
         )),
-        theme.canvas.focus_ring,
+        get_node_style(node, layout_node, theme).text,
     );
 }
 
@@ -1274,7 +1283,7 @@ pub(crate) fn render_cards_and_connectors(
     render_text(dl, layout, &visible, theme, constants, shaper, nodes, projection, viewport);
     if let Some(hit_map) = hit_map {
         render_preedit_underline(dl, hit_map, theme, projection, viewport);
-        render_caret(dl, hit_map, theme, projection, viewport);
+        render_caret(dl, layout, hit_map, theme, nodes, projection, viewport);
     }
 }
 
