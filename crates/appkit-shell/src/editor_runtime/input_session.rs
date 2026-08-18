@@ -1,11 +1,20 @@
 //! 编辑器输入门与会话状态。
 
-use std::time::Instant;
-
 use crate::editor_runtime::{EditorFocus, EditorInputContext};
 use crate::mouse_state::{CanvasDragSession, MouseCapture};
 
-const CURSOR_BLINK_PERIOD_MS: u64 = 500;
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum PreeditUpdate {
+    Rejected,
+    Unchanged,
+    Changed,
+}
+
+impl PreeditUpdate {
+    pub(crate) fn accepted(self) -> bool {
+        !matches!(self, Self::Rejected)
+    }
+}
 
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct EditorInputSession {
@@ -15,7 +24,6 @@ pub(crate) struct EditorInputSession {
     preedit_text: String,
     preedit_cursor: Option<(usize, usize)>,
     preferred_x: Option<f32>,
-    cursor_blink_started_at: Instant,
 }
 
 impl EditorInputSession {
@@ -27,7 +35,6 @@ impl EditorInputSession {
             preedit_text: String::new(),
             preedit_cursor: None,
             preferred_x: None,
-            cursor_blink_started_at: Instant::now(),
         }
     }
 
@@ -60,7 +67,6 @@ impl EditorInputSession {
         }
         self.canvas_drag_session = None;
         self.pointer_capture = MouseCapture::TextSelection;
-        self.reset_cursor_blink();
         true
     }
 
@@ -114,15 +120,17 @@ impl EditorInputSession {
         context: EditorInputContext,
         text: String,
         cursor: Option<(usize, usize)>,
-    ) -> bool {
+    ) -> PreeditUpdate {
         if !self.keyboard_allowed(context) {
             self.clear_preedit();
-            return false;
+            return PreeditUpdate::Rejected;
+        }
+        if self.preedit_text == text && self.preedit_cursor == cursor {
+            return PreeditUpdate::Unchanged;
         }
         self.preedit_text = text;
         self.preedit_cursor = cursor;
-        self.reset_cursor_blink();
-        true
+        PreeditUpdate::Changed
     }
 
     pub(crate) fn clear_preedit(&mut self) {
@@ -132,22 +140,6 @@ impl EditorInputSession {
 
     pub(crate) fn preedit(&self) -> (&str, Option<(usize, usize)>) {
         (&self.preedit_text, self.preedit_cursor)
-    }
-
-    pub(crate) fn reset_cursor_blink(&mut self) {
-        self.cursor_blink_started_at = Instant::now();
-    }
-
-    pub(crate) fn cursor_blink_deadline(&self) -> Instant {
-        let elapsed_ms = self.cursor_blink_started_at.elapsed().as_millis() as u64;
-        let period_ms = CURSOR_BLINK_PERIOD_MS;
-        let phase_in_period = elapsed_ms % (period_ms * 2);
-        let next_transition_ms = if phase_in_period < period_ms {
-            period_ms - phase_in_period
-        } else {
-            period_ms * 2 - phase_in_period
-        };
-        Instant::now() + std::time::Duration::from_millis(next_transition_ms + 5)
     }
 
     pub(crate) fn focus_lost(&mut self) {
@@ -179,7 +171,10 @@ mod tests {
 
         assert!(!session.keyboard_allowed(context));
         assert!(!session.start_text_selection(context));
-        assert!(!session.update_preedit(context, "拼".to_owned(), Some((0, 3))));
+        assert_eq!(
+            session.update_preedit(context, "拼".to_owned(), Some((0, 3))),
+            PreeditUpdate::Rejected
+        );
         assert!(session.preedit().0.is_empty());
     }
 
@@ -210,7 +205,10 @@ mod tests {
         let context = active_context();
 
         assert!(session.start_canvas_drag(context));
-        assert!(session.update_preedit(context, "拼音".to_owned(), Some((0, 2))));
+        assert_eq!(
+            session.update_preedit(context, "拼音".to_owned(), Some((0, 2))),
+            PreeditUpdate::Changed
+        );
         session.set_preferred_x(Some(120.0));
         session.focus_lost();
 

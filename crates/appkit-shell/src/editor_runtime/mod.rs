@@ -1166,7 +1166,16 @@ impl EditorRuntime {
         text: String,
         cursor: Option<(usize, usize)>,
     ) -> bool {
-        self.input_session.update_preedit(context, text, cursor)
+        let update = self.input_session.update_preedit(context, text, cursor);
+        if update == input_session::PreeditUpdate::Changed {
+            if let Some(tab_id) = self.active_tab_id()
+                && let Some(mut tab) = self.tab_session_mut(tab_id)
+            {
+                tab.cursor_render_state_mut().cursor_blink_instant = std::time::Instant::now();
+            }
+            self.render_session.request_redraw();
+        }
+        update.accepted()
     }
 
     pub fn preedit(&self) -> (String, Option<(usize, usize)>) {
@@ -1888,6 +1897,41 @@ mod tests {
                 + std::time::Duration::from_millis(
                     CURSOR_BLINK_INTERVAL_MS * 2 + CURSOR_BLINK_WAKE_TOLERANCE_MS,
                 )
+        );
+    }
+
+    #[test]
+    fn changed_preedit_immediately_requests_redraw_and_restarts_active_cursor_blink() {
+        let mut runtime = runtime_with_clean_tab();
+        let tab_id = runtime.active_tab_id().expect("test runtime should have an active tab");
+        let stale_blink_started_at =
+            std::time::Instant::now() - std::time::Duration::from_millis(750);
+        runtime
+            .tab_session_mut(tab_id)
+            .expect("active tab should have a runtime")
+            .cursor_render_state_mut()
+            .cursor_blink_instant = stale_blink_started_at;
+        let _ = runtime.take_redraw_request();
+        let context = EditorInputContext { focus: EditorFocus::Active, modal_blocked: false };
+
+        assert!(runtime.update_preedit(context, "拼音".to_owned(), Some((0, 6))));
+
+        assert!(runtime.take_redraw_request());
+        let restarted_blink_started_at = runtime
+            .tab_session(tab_id)
+            .expect("active tab should remain available")
+            .cursor_blink_instant();
+        assert!(restarted_blink_started_at > stale_blink_started_at);
+        assert!(runtime.active_cursor_blink_phase().expect("active cursor should blink").visible);
+
+        assert!(runtime.update_preedit(context, "拼音".to_owned(), Some((0, 6))));
+        assert!(!runtime.take_redraw_request());
+        assert_eq!(
+            runtime
+                .tab_session(tab_id)
+                .expect("active tab should remain available")
+                .cursor_blink_instant(),
+            restarted_blink_started_at
         );
     }
 
