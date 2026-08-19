@@ -9,6 +9,7 @@
 pub(crate) mod ascii_diagram;
 pub mod block;
 pub mod context;
+pub(crate) mod reconcile;
 pub mod shaping;
 pub mod source_line_map;
 pub mod types;

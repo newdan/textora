@@ -14,6 +14,8 @@
 //! 4. `emit_*` 三原语内部用 `debug_assert!` 强制以上约束
 
 use crate::builder::ListBullet;
+#[cfg(test)]
+use std::cell::Cell;
 use ui::plugin::{AugmentKind, EditAugmentation};
 use unicode_segmentation::UnicodeSegmentation;
 
@@ -23,6 +25,11 @@ const BLOCK_BOUNDARY_NEWLINE_COUNT: usize = 2;
 const MAX_LEADING_BLOCK_INDENT: usize = 3;
 /// CommonMark 空格形式硬换行所需的最少行尾空格数。
 const HARD_BREAK_MIN_SPACES: usize = 2;
+
+#[cfg(test)]
+thread_local! {
+    static CLASSIFY_PARSE_COUNT: Cell<usize> = const { Cell::new(0) };
+}
 
 // ─── 入口 ──────────────────────────────────────────────────────────────────
 
@@ -69,14 +76,16 @@ fn backspace_last_interblock_paragraph_grapheme(
     source: &str,
     current_byte: usize,
 ) -> Option<EditAugmentation> {
+    let (line_start, _, line_end) = locate_source_line_bounds(source, current_byte)?;
+    let content_end = source_line_content_end(source, line_end);
+    if current_byte != content_end {
+        return None;
+    }
     if !matches!(classify_enter_context(source, current_byte), EnterContext::TopLevelParagraphEnd) {
         return None;
     }
 
-    let (line_start, _, line_end) = locate_source_line_bounds(source, current_byte)?;
-    let content_end = source_line_content_end(source, line_end);
-    if current_byte != content_end
-        || UnicodeSegmentation::graphemes(&source[line_start..content_end], true).count() != 1
+    if UnicodeSegmentation::graphemes(&source[line_start..content_end], true).count() != 1
         || !has_two_newline_sequences_before(source, line_start)
         || !has_two_newline_sequences_after(source, content_end)
     {
@@ -195,6 +204,11 @@ fn preferred_newline_sequence(source: &str, current_byte: usize) -> &'static str
 }
 
 fn augment_insert_text(source: &str, current_byte: usize, text: &str) -> Option<EditAugmentation> {
+    let (line_start, _, line_end) = locate_source_line_bounds(source, current_byte)?;
+    let content_end = source_line_content_end(source, line_end);
+    if source[line_start..content_end].chars().any(|character| !character.is_whitespace()) {
+        return None;
+    }
     let context = classify_enter_context(source, current_byte);
     if !matches!(context, EnterContext::EmptyBlockSeparatorLine) {
         return None;
@@ -734,6 +748,9 @@ fn heading_source_is_atx(source: &str, heading_start: usize) -> bool {
 pub fn classify_enter_context(source: &str, current_byte: usize) -> EnterContext {
     use pulldown_cmark::{CodeBlockKind, Event, Parser, Tag, TagEnd};
 
+    #[cfg(test)]
+    CLASSIFY_PARSE_COUNT.with(|parse_count| parse_count.set(parse_count.get() + 1));
+
     let mark_item_content_seen = |stack: &mut Vec<ItemFrame>| {
         if let Some(frame) = stack.last_mut() {
             frame.saw_content = true;
@@ -1191,6 +1208,14 @@ fn locate_blockquote_line(source: &str, byte: usize) -> Option<(usize, usize, us
 mod tests {
     use super::*;
 
+    fn reset_classify_parse_count() {
+        CLASSIFY_PARSE_COUNT.with(|parse_count| parse_count.set(0));
+    }
+
+    fn classify_parse_count() -> usize {
+        CLASSIFY_PARSE_COUNT.with(Cell::get)
+    }
+
     fn apply_augmentation_at(
         source: &str,
         current_byte: usize,
@@ -1202,6 +1227,54 @@ mod tests {
         edited_source
             .replace_range(replacement_range, augmentation.insert_text.as_deref().unwrap_or(""));
         edited_source
+    }
+
+    #[test]
+    fn regular_text_insertion_skips_document_classification_parse() {
+        reset_classify_parse_count();
+        let source = "first paragraph\n\nsecond paragraph";
+
+        let augmentation =
+            augment_edit(source, "first".len(), AugmentKind::InsertText(String::from("x")));
+
+        assert!(augmentation.is_none());
+        assert_eq!(classify_parse_count(), 0);
+    }
+
+    #[test]
+    fn regular_mid_line_backspace_skips_document_classification_parse() {
+        reset_classify_parse_count();
+        let source = "first paragraph\n\nsecond paragraph";
+
+        let augmentation = augment_edit(source, "first".len(), AugmentKind::Backspace);
+
+        assert!(augmentation.is_none());
+        assert_eq!(classify_parse_count(), 0);
+    }
+
+    #[test]
+    fn classification_guards_allow_special_edit_candidates() {
+        reset_classify_parse_count();
+        let separator_source = "first\n\nsecond";
+        let separator_byte = "first\n".len();
+
+        let insertion = augment_edit(
+            separator_source,
+            separator_byte,
+            AugmentKind::InsertText(String::from("x")),
+        );
+
+        assert!(insertion.is_some());
+        assert_eq!(classify_parse_count(), 1);
+
+        reset_classify_parse_count();
+        let interblock_source = "first\n\n中\n\nsecond";
+        let paragraph_end = "first\n\n中".len();
+
+        let backspace = augment_edit(interblock_source, paragraph_end, AugmentKind::Backspace);
+
+        assert!(backspace.is_some());
+        assert_eq!(classify_parse_count(), 1);
     }
 
     #[test]

@@ -2315,7 +2315,7 @@ impl NotoraRuntime {
     fn open_external_files(&mut self, request: ExternalOpenRequest) {
         let paths = match request {
             ExternalOpenRequest::ShowFileDialog => rfd::FileDialog::new()
-                .add_filter("文本文档", &["txt", "md"])
+                .add_filter("文本文档", notora_core::EXTERNAL_TEXT_FILE_EXTENSIONS)
                 .pick_files()
                 .unwrap_or_default(),
             ExternalOpenRequest::Paths(paths) => paths,
@@ -4126,7 +4126,7 @@ mod tests {
     }
 
     #[test]
-    fn title_commit_updates_the_active_workspace_note_through_editor_runtime() {
+    fn new_markdown_title_commit_renames_the_note_without_modifying_the_body() {
         let workspace_directory =
             tempfile::tempdir().expect("workspace test directory should be created");
         let mut app = app();
@@ -4156,27 +4156,6 @@ mod tests {
 
         app.dispatch_action(NotoraAction::TitleCommitRequested("项目路线图".to_owned()));
 
-        while app
-            .document_runtime
-            .editor_runtime
-            .document_text_snapshot(tab_id)
-            .expect("created note text should remain available")
-            .text
-            .is_empty()
-        {
-            app.drain_runtime_save_completions();
-            app.drain_product_events();
-            assert!(Instant::now() < deadline, "title initialization should complete");
-            thread::sleep(Duration::from_millis(10));
-        }
-
-        let snapshot = app
-            .document_runtime
-            .editor_runtime
-            .document_text_snapshot(tab_id)
-            .expect("created note text should remain available");
-        assert_eq!(snapshot.text, "# 项目路线图\n\n");
-        assert!(snapshot.content_revision > 0);
         while !workspace_directory.path().join("项目路线图.md").is_file()
             || app
                 .state()
@@ -4191,16 +4170,13 @@ mod tests {
             thread::sleep(Duration::from_millis(10));
         }
 
-        let prepared = app
+        let snapshot = app
             .document_runtime
             .editor_runtime
-            .prepare_save(tab_id)
-            .expect("seeded title body should prepare for save");
-        let completion = appkit_shell::editor_runtime::execute_prepared_save(prepared);
-        assert!(completion.result.is_ok(), "seeded body should save: {:?}", completion.result);
-        let outcome = app.document_runtime.editor_runtime.apply_save_completion(completion);
-        app.apply_editor_outcome(outcome);
-        app.document_runtime.autosave.cancel(tab_id);
+            .document_text_snapshot(tab_id)
+            .expect("created note text should remain available");
+        assert_eq!(snapshot.text, "");
+        assert_eq!(snapshot.content_revision, 0);
 
         app.dispatch_action(NotoraAction::TitleCommitRequested("独立的 Notora 标题".to_owned()));
         let second_deadline = Instant::now() + Duration::from_secs(2);
@@ -4231,7 +4207,7 @@ mod tests {
                 .document_text_snapshot(tab_id)
                 .expect("independent body should remain available")
                 .text,
-            "# 项目路线图\n\n"
+            ""
         );
     }
 
@@ -4264,9 +4240,21 @@ mod tests {
 
         app.dispatch_action(NotoraAction::FocusRequested(FocusTarget::Editor));
 
-        drain_until_document_text(&mut app, tab_id, "# 项目路线图\n\n", deadline);
+        while !workspace_directory.path().join("项目路线图.md").is_file() {
+            app.drain_product_events();
+            assert!(Instant::now() < deadline, "title commit should rename the markdown file");
+            thread::sleep(Duration::from_millis(10));
+        }
         app.render().expect("committed title should render");
         assert_eq!(app.frame_runtime.shell.editor_title_text(), "项目路线图");
+        assert_eq!(
+            app.document_runtime
+                .editor_runtime
+                .document_text_snapshot(tab_id)
+                .expect("created markdown source should remain available")
+                .text,
+            ""
+        );
     }
 
     #[test]
@@ -4595,7 +4583,7 @@ mod tests {
     }
 
     #[test]
-    fn tab_from_a_new_markdown_title_focuses_the_body_without_indenting_the_heading() {
+    fn tab_from_a_new_markdown_title_focuses_the_empty_body_without_seeding_a_heading() {
         let workspace_directory =
             tempfile::tempdir().expect("workspace test directory should be created");
         let mut app = app();
@@ -4621,14 +4609,18 @@ mod tests {
 
         let tab_event = ui::Event::KeyDown(ui::KeyCode::Tab, ui::core::Modifiers::NONE);
         assert!(app.route_product_event(&tab_event));
-        drain_until_document_text(&mut app, tab_id, "# 项目记录\n\n", deadline);
+        while !workspace_directory.path().join("项目记录.md").is_file() {
+            app.drain_product_events();
+            assert!(Instant::now() < deadline, "title commit should rename the markdown file");
+            thread::sleep(Duration::from_millis(10));
+        }
 
         let snapshot = app
             .document_runtime
             .editor_runtime
             .document_text_snapshot(tab_id)
             .expect("created markdown source should remain available");
-        assert_eq!(snapshot.text, "# 项目记录\n\n");
+        assert_eq!(snapshot.text, "");
         assert_eq!(app.action_runtime.state().layout.focus_target, FocusTarget::Editor);
     }
 

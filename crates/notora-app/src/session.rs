@@ -191,7 +191,7 @@ pub fn save_product_session(path: &Path, session: &ProductSession) -> Result<(),
 }
 
 fn is_restorable_external_path(path: &Path) -> bool {
-    path.is_file() && DocumentKind::from_path(path).is_some()
+    path.is_file() && DocumentKind::from_external_path(path).is_some()
 }
 
 fn normalize_session(mut session: ProductSession) -> ProductSession {
@@ -290,11 +290,17 @@ mod tests {
     fn session_round_trip_filters_missing_external_files_and_sanitizes_geometry() {
         let directory = tempfile::tempdir().expect("session test directory should exist");
         let external_path = directory.path().join("external.md");
+        let common_text_path = directory.path().join("settings.json");
         std::fs::write(&external_path, "# External").expect("fixture external file should write");
+        std::fs::write(&common_text_path, "{}").expect("common text fixture should write");
         let path = directory.path().join("session.toml");
         let note_id = notora_core::NoteId::generate();
         let session = ProductSession {
-            external_paths: vec![external_path.clone(), directory.path().join("missing.md")],
+            external_paths: vec![
+                external_path.clone(),
+                common_text_path.clone(),
+                directory.path().join("missing.md"),
+            ],
             last_navigation_scope: SavedNavigationScope::Starred,
             last_document: Some(SavedDocument::Note { note_id }),
             expanded_directories: vec![PathBuf::from("plans"), PathBuf::from("plans/q3")],
@@ -310,7 +316,7 @@ mod tests {
         save_product_session(&path, &session).expect("session should save atomically");
         let loaded = load_product_session(&path);
         assert_eq!(loaded.diagnostic, None);
-        assert_eq!(loaded.session.external_paths, vec![external_path]);
+        assert_eq!(loaded.session.external_paths, vec![external_path, common_text_path]);
         assert_eq!(loaded.session.last_navigation_scope, SavedNavigationScope::Starred);
         assert_eq!(loaded.session.last_document, Some(SavedDocument::Note { note_id }));
         assert_eq!(loaded.session.navigation_pane_visibility, NavigationPaneVisibility::Collapsed);

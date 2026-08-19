@@ -49,6 +49,13 @@ const HIT_TEST_SNAP_MAX_LINE_HEIGHTS: f32 = 3.0;
 const PERF_LOG_ENV: &str = "EDIT_PLUS_PERF_LOG";
 const PERF_LOG_THRESHOLD_US_ENV: &str = "EDIT_PLUS_PERF_LOG_THRESHOLD_US";
 const DEFAULT_PERF_LOG_THRESHOLD_US: u128 = 1_000;
+const DISABLE_INCREMENTAL_LAYOUT_REUSE_ENV: &str =
+    "TEXTORA_DISABLE_INCREMENTAL_MARKDOWN_LAYOUT_REUSE";
+
+fn incremental_layout_reuse_enabled() -> bool {
+    static ENABLED: OnceLock<bool> = OnceLock::new();
+    *ENABLED.get_or_init(|| std::env::var_os(DISABLE_INCREMENTAL_LAYOUT_REUSE_ENV).is_none())
+}
 
 fn perf_logging_enabled() -> bool {
     static ENABLED: OnceLock<bool> = OnceLock::new();
@@ -455,12 +462,21 @@ impl<S: BlockSource> PreviewEngine<S> {
     ) {
         self.paragraph_spacing = style.paragraph_spacing;
         let selection_range = self.byte_selection_range().map(|(start, end)| start..end);
+        let previous_layout = (incremental_layout_reuse_enabled()
+            && matches!(self.dirty, EngineDirty::SourceChanged)
+            && style_hash_quick(style) == self.cached_style_hash
+            && viewport_w == self.cached_viewport_w)
+            .then(|| self.lazy.take())
+            .flatten();
         let mut lazy = LazyLayout::new(doc, style, viewport_w, doc_view);
         lazy.set_source_generation(self.source_generation);
         lazy.set_edit_source(self.edit_source.clone());
         lazy.set_edit_ctx(self.edit_ctx.clone());
         lazy.set_selection_range(selection_range);
         lazy.reserve_extra_blank_source_lines(style.line_height, style.paragraph_spacing);
+        if let Some(previous_layout) = previous_layout {
+            lazy.reuse_unchanged_blocks_from(previous_layout);
+        }
         if full_layout {
             // Editing mode: materialize all blocks with full shaping.
             lazy.ensure_all_blocks(style, viewport_w, shaper, Some(highlighter), doc_view);
