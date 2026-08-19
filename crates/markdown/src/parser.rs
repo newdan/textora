@@ -67,16 +67,20 @@ pub struct ParsedMarkdown {
     pub event_ranges: Vec<Range<usize>>,
 }
 
-/// Parse markdown text into an owned event list.
-pub fn parse_markdown(src: &str) -> ParsedMarkdown {
+/// 渲染与编辑分类共用的 Markdown 解析选项。
+pub(crate) fn markdown_options() -> Options {
     let mut opts = Options::empty();
     opts.insert(Options::ENABLE_TABLES);
     opts.insert(Options::ENABLE_STRIKETHROUGH);
     opts.insert(Options::ENABLE_TASKLISTS);
     opts.insert(Options::ENABLE_HEADING_ATTRIBUTES);
     opts.insert(Options::ENABLE_YAML_STYLE_METADATA_BLOCKS);
+    opts
+}
 
-    let parser = Parser::new_ext(src, opts);
+/// Parse markdown text into an owned event list.
+pub fn parse_markdown(src: &str) -> ParsedMarkdown {
+    let parser = Parser::new_ext(src, markdown_options());
     let mut events = Vec::new();
     let mut event_ranges = Vec::new();
 

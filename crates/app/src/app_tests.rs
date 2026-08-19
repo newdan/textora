@@ -2162,7 +2162,7 @@ fn markdown_empty_list_enter_uses_structural_edit_policy() {
 #[cfg(feature = "markdown")]
 fn markdown_table_enter_keeps_moved_cursor_visible() {
     let source = "| a |\n|---|\n| b |";
-    let expected_cursor = source.find("| b |").expect("table target row must exist") + "|".len();
+    let expected_cursor = source.find('b').expect("table target content must exist");
     let mut app = App::new(None);
     let mut doc = DocumentView::new(source.lines().map(str::to_owned).collect(), 1, 1.0);
     doc.cursor_move_to_offset(source.find('a').expect("source table cell must exist"));

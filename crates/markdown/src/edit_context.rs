@@ -104,7 +104,8 @@ fn collect_context_frames(source: &str, cursor: usize) -> ContextFrames {
     use pulldown_cmark::{Event, Parser, Tag};
 
     let mut frames = ContextFrames::default();
-    for (event, range) in Parser::new_ext(source, pulldown_cmark::Options::all()).into_offset_iter()
+    for (event, range) in
+        Parser::new_ext(source, crate::parser::markdown_options()).into_offset_iter()
     {
         if !range_contains_cursor(&range, cursor) {
             continue;
@@ -270,7 +271,8 @@ fn table_cell_context(source: &str, cursor: usize) -> Option<(Range<usize>, Opti
     use pulldown_cmark::{Event, Parser, Tag, TagEnd};
 
     let mut rows: Vec<Vec<Range<usize>>> = Vec::new();
-    for (event, range) in Parser::new_ext(source, pulldown_cmark::Options::all()).into_offset_iter()
+    for (event, range) in
+        Parser::new_ext(source, crate::parser::markdown_options()).into_offset_iter()
     {
         match event {
             Event::Start(Tag::TableHead) | Event::Start(Tag::TableRow) => rows.push(Vec::new()),
@@ -294,21 +296,13 @@ fn table_cell_context(source: &str, cursor: usize) -> Option<(Range<usize>, Opti
                 let next_row_same_column = rows
                     .get(row_index + 1)
                     .and_then(|next_row| next_row.get(column_index))
-                    .map(|cell| table_cell_content_start(source, cell));
+                    .map(|cell| crate::augmenter::table_cell_content_start(source, cell));
                 return Some((cell_range.clone(), next_row_same_column));
             }
         }
     }
 
     None
-}
-
-fn table_cell_content_start(source: &str, cell_range: &Range<usize>) -> usize {
-    let leading_non_content = source[cell_range.clone()]
-        .bytes()
-        .take_while(|byte| matches!(*byte, b' ' | b'\t' | b'\r' | b'\n' | b'|'))
-        .count();
-    cell_range.start + leading_non_content
 }
 
 pub struct MarkdownEditContext {

@@ -21,6 +21,8 @@ const LF_SEQUENCE: &str = "\n";
 const CRLF_SEQUENCE: &str = "\r\n";
 const BLOCK_BOUNDARY_NEWLINE_COUNT: usize = 2;
 const MAX_LEADING_BLOCK_INDENT: usize = 3;
+/// CommonMark 空格形式硬换行所需的最少行尾空格数。
+const HARD_BREAK_MIN_SPACES: usize = 2;
 
 // ─── 入口 ──────────────────────────────────────────────────────────────────
 
@@ -119,6 +121,51 @@ fn newline_sequence_width_at(source: &str, byte: usize) -> Option<usize> {
         return Some(2);
     }
     suffix.starts_with(b"\n").then_some(1)
+}
+
+/// 返回紧邻 `content_end` 结束的 Markdown 硬换行标记范围。
+///
+/// 空格形式消耗全部行尾空格。反斜杠形式按奇偶性解释，奇数个连续反斜杠中的
+/// 最后一个是硬换行标记，前面的偶数个是转义后的正文。
+fn hard_break_marker_ending_at(source: &str, content_end: usize) -> Option<std::ops::Range<usize>> {
+    let prefix = source.as_bytes().get(..content_end)?;
+    let trailing_backslash_count =
+        prefix.iter().rev().take_while(|source_byte| **source_byte == b'\\').count();
+    if !trailing_backslash_count.is_multiple_of(2) {
+        return Some(content_end - 1..content_end);
+    }
+
+    let trailing_space_count =
+        prefix.iter().rev().take_while(|source_byte| **source_byte == b' ').count();
+    (trailing_space_count >= HARD_BREAK_MIN_SPACES)
+        .then_some(content_end - trailing_space_count..content_end)
+}
+
+/// 光标位于硬换行源码标记之前时，返回应升级为块边界的完整源码范围。
+///
+/// 对奇数个连续反斜杠只替换最后一个标记及换行，保留前面的转义反斜杠。
+fn hard_break_boundary_after(source: &str, current_byte: usize) -> Option<std::ops::Range<usize>> {
+    let suffix = source.as_bytes().get(current_byte..)?;
+    let trailing_backslash_count =
+        suffix.iter().take_while(|source_byte| **source_byte == b'\\').count();
+    if trailing_backslash_count > 0 {
+        if trailing_backslash_count.is_multiple_of(2) {
+            return None;
+        }
+        let marker_start = current_byte + trailing_backslash_count - 1;
+        let newline_start = marker_start + 1;
+        let newline_width = newline_sequence_width_at(source, newline_start)?;
+        return Some(marker_start..newline_start + newline_width);
+    }
+
+    let trailing_space_count =
+        suffix.iter().take_while(|source_byte| **source_byte == b' ').count();
+    if trailing_space_count < HARD_BREAK_MIN_SPACES {
+        return None;
+    }
+    let newline_start = current_byte + trailing_space_count;
+    let newline_width = newline_sequence_width_at(source, newline_start)?;
+    Some(current_byte..newline_start + newline_width)
 }
 
 fn preferred_newline_sequence(source: &str, current_byte: usize) -> &'static str {
@@ -248,6 +295,27 @@ fn emit_block_break(source: &str, current_byte: usize) -> EditAugmentation {
     aug
 }
 
+/// 用一个块边界替换现有硬换行源码，光标落在新块起点。
+fn emit_block_break_replacing(source: &str, replaced: std::ops::Range<usize>) -> EditAugmentation {
+    let newline = preferred_newline_sequence(source, replaced.start);
+    let insertion = newline.repeat(BLOCK_BOUNDARY_NEWLINE_COUNT);
+    let aug = EditAugmentation {
+        cursor_byte_after: replaced.start + insertion.len(),
+        replace_range: Some(replaced),
+        insert_text: Some(insertion),
+    };
+    debug_assert_augmentation(&aug, source);
+    aug
+}
+
+/// 与 [`emit_block_break`] 相同，但插入点由上下文指定而不是使用原光标。
+fn emit_block_break_at(source: &str, insert_at: usize) -> EditAugmentation {
+    let mut aug = emit_block_break(source, insert_at);
+    aug.replace_range = Some(insert_at..insert_at);
+    debug_assert_augmentation(&aug, source);
+    aug
+}
+
 fn backspace_empty_source_line(source: &str, current_byte: usize) -> Option<EditAugmentation> {
     let (line_start, _, line_end) = locate_source_line_bounds(source, current_byte)?;
     if line_start != source_line_content_end(source, line_end) {
@@ -315,10 +383,12 @@ fn backspace_paragraph_boundary(source: &str, current_byte: usize) -> Option<Edi
         EnterContext::TopLevelParagraphEnd
         | EnterContext::ParagraphInterior
         | EnterContext::Heading { .. } => {
+            let delete_start = hard_break_marker_ending_at(source, boundary_start)
+                .map_or(boundary_start, |marker| marker.start);
             let aug = EditAugmentation {
                 insert_text: Some(String::new()),
-                replace_range: Some(boundary_start..current_byte),
-                cursor_byte_after: boundary_start,
+                replace_range: Some(delete_start..current_byte),
+                cursor_byte_after: delete_start,
             };
             debug_assert_augmentation(&aug, source);
             Some(aug)
@@ -454,6 +524,9 @@ fn enter_context_augmentation(
         EnterContext::Heading { level: _, at_end } => {
             heading_enter_augmentation(source, current_byte, at_end)
         }
+        EnterContext::SetextHeading { underline_end } => {
+            Some(setext_heading_enter_augmentation(source, underline_end))
+        }
         EnterContext::ListItem { indent, continuation_marker, empty, at_end: _ } => {
             list_item_enter_augmentation(source, current_byte, &indent, &continuation_marker, empty)
         }
@@ -466,11 +539,18 @@ fn enter_context_augmentation(
             cursor_byte_after: next_cell_start.unwrap_or(current_byte),
         }),
         EnterContext::EmptyBlockSeparatorLine => Some(emit_source_newline(source, current_byte)),
+        EnterContext::IndentedCodeBlock { continuation_prefix } => {
+            Some(indented_code_block_enter_augmentation(source, current_byte, &continuation_prefix))
+        }
         EnterContext::CodeBlock | EnterContext::Other => None,
     }
 }
 
 fn paragraph_enter_augmentation(source: &str, current_byte: usize) -> EditAugmentation {
+    if let Some(boundary) = hard_break_boundary_after(source, current_byte) {
+        return emit_block_break_replacing(source, boundary);
+    }
+
     // 段尾/段中：Typora 语义 = 切两半（`\n\n`）；跨已有 `\n` 时用
     // emit_block_break 保留光标下方的原源码行。
     if cursor_touches_source_newline(source, current_byte) {
@@ -500,6 +580,28 @@ fn heading_enter_augmentation(
     };
     debug_assert_augmentation(&aug, source);
     Some(aug)
+}
+
+/// Setext 标题内的无选区 Enter：保留标题源码，在下划线之后建立块边界。
+fn setext_heading_enter_augmentation(source: &str, underline_end: usize) -> EditAugmentation {
+    emit_block_break_at(source, underline_end)
+}
+
+/// 缩进代码块内 Enter：插入换行并续上分类阶段确定的代码内容前缀。
+fn indented_code_block_enter_augmentation(
+    source: &str,
+    current_byte: usize,
+    continuation_prefix: &str,
+) -> EditAugmentation {
+    let newline = preferred_newline_sequence(source, current_byte);
+    let insertion = format!("{newline}{continuation_prefix}");
+    let aug = EditAugmentation {
+        cursor_byte_after: current_byte + insertion.len(),
+        insert_text: Some(insertion),
+        ..Default::default()
+    };
+    debug_assert_augmentation(&aug, source);
+    aug
 }
 
 fn list_item_enter_augmentation(
@@ -539,11 +641,32 @@ fn cursor_touches_source_newline(source: &str, current_byte: usize) -> bool {
 pub enum EnterContext {
     TopLevelParagraphEnd,
     ParagraphInterior,
-    Heading { level: u8, at_end: bool },
-    ListItem { indent: String, continuation_marker: String, empty: bool, at_end: bool },
-    BlockQuoteLine { continuation_prefix: String, empty: bool },
+    Heading {
+        level: u8,
+        at_end: bool,
+    },
+    /// Setext 标题；`underline_end` 不含下划线后的源码换行。
+    SetextHeading {
+        underline_end: usize,
+    },
+    ListItem {
+        indent: String,
+        continuation_marker: String,
+        empty: bool,
+        at_end: bool,
+    },
+    BlockQuoteLine {
+        continuation_prefix: String,
+        empty: bool,
+    },
     CodeBlock,
-    TableCell { next_cell_start: Option<usize> },
+    /// 缩进代码块及 Enter 后新行应继承的源码前缀。
+    IndentedCodeBlock {
+        continuation_prefix: String,
+    },
+    TableCell {
+        next_cell_start: Option<usize>,
+    },
     EmptyBlockSeparatorLine,
     Other,
 }
@@ -560,6 +683,11 @@ struct TableFrame {
     cell_ranges: Vec<Vec<std::ops::Range<usize>>>,
 }
 
+struct CodeBlockFrame {
+    range: std::ops::Range<usize>,
+    is_indented: bool,
+}
+
 fn classify_heading_hit(
     source: &str,
     current_byte: usize,
@@ -567,13 +695,15 @@ fn classify_heading_hit(
     start: usize,
     range: &std::ops::Range<usize>,
 ) -> EnterContext {
-    // pulldown-cmark 对 ATX 与 setext 标题都发 `Tag::Heading`，但下面的
-    // `hash_prefix` 计算只适用于 ATX；setext（`Title\n===`）必须排除，
-    // 否则回车/退格会按 `# ` 前缀语义破坏标题。
+    // pulldown-cmark 对 ATX 与 setext 标题都发 `Tag::Heading`；两种源码形态必须
+    // 分流，否则 setext 会被错误套用 `# ` 前缀语义。
+    let end = content_end_without_trailing_newline(source, start..range.end);
     if !heading_source_is_atx(source, start) {
+        if current_byte >= start && current_byte <= end {
+            return EnterContext::SetextHeading { underline_end: end };
+        }
         return EnterContext::Other;
     }
-    let end = content_end_without_trailing_newline(source, start..range.end);
     let hash_prefix = level as usize + 1; // "# " / "## " / ...
     let content_start = start.saturating_add(hash_prefix);
     let at_end = current_byte == end;
@@ -602,7 +732,7 @@ fn heading_source_is_atx(source: &str, heading_start: usize) -> bool {
 }
 
 pub fn classify_enter_context(source: &str, current_byte: usize) -> EnterContext {
-    use pulldown_cmark::{Event, Parser, Tag, TagEnd};
+    use pulldown_cmark::{CodeBlockKind, Event, Parser, Tag, TagEnd};
 
     let mark_item_content_seen = |stack: &mut Vec<ItemFrame>| {
         if let Some(frame) = stack.last_mut() {
@@ -610,13 +740,13 @@ pub fn classify_enter_context(source: &str, current_byte: usize) -> EnterContext
         }
     };
 
-    let parser = Parser::new_ext(source, pulldown_cmark::Options::all());
+    let parser = Parser::new_ext(source, crate::parser::markdown_options());
     let mut item_stack: Vec<ItemFrame> = Vec::new();
     let mut table: Option<TableFrame> = None;
     let mut heading_level: Option<u8> = None;
     let mut heading_start: Option<usize> = None;
     let mut paragraph_start: Option<(usize, usize, usize)> = None;
-    let mut code_block_range: Option<std::ops::Range<usize>> = None;
+    let mut code_block: Option<CodeBlockFrame> = None;
     let mut blockquote_depth: usize = 0;
 
     for (event, range) in parser.into_offset_iter() {
@@ -712,18 +842,29 @@ pub fn classify_enter_context(source: &str, current_byte: usize) -> EnterContext
                     return EnterContext::ParagraphInterior;
                 }
             }
-            Event::Start(Tag::CodeBlock(_)) => {
+            Event::Start(Tag::CodeBlock(kind)) => {
                 mark_item_content_seen(&mut item_stack);
-                code_block_range = Some(range.clone());
+                code_block = Some(CodeBlockFrame {
+                    range: range.clone(),
+                    is_indented: matches!(kind, CodeBlockKind::Indented),
+                });
             }
             Event::End(TagEnd::CodeBlock) => {
-                if let Some(cb_range) = code_block_range.take() {
+                if let Some(frame) = code_block.take() {
                     // pulldown-cmark 对缩进代码块的 range 包含结尾换行
                     // （fenced 则不包含）；用去尾换行的 content_end 统一两种边界，
                     // 否则紧邻的下一块首字节会被误判为 CodeBlock。
-                    let end =
-                        content_end_without_trailing_newline(source, cb_range.start..range.end);
-                    if current_byte >= cb_range.start && current_byte <= end {
+                    let block_range = frame.range.start..range.end;
+                    let end = content_end_without_trailing_newline(source, block_range.clone());
+                    if current_byte >= frame.range.start && current_byte <= end {
+                        if frame.is_indented {
+                            let continuation_prefix = indented_code_continuation_prefix(
+                                source,
+                                current_byte,
+                                &block_range,
+                            );
+                            return EnterContext::IndentedCodeBlock { continuation_prefix };
+                        }
                         return EnterContext::CodeBlock;
                     }
                 }
@@ -769,7 +910,7 @@ pub fn classify_enter_context(source: &str, current_byte: usize) -> EnterContext
                         .cell_ranges
                         .get(row_idx + 1)
                         .and_then(|next_row| next_row.get(col_idx))
-                        .map(|r| r.start);
+                        .map(|next_cell| table_cell_content_start(source, next_cell));
                     return EnterContext::TableCell { next_cell_start };
                 }
             }
@@ -815,6 +956,79 @@ fn content_end_without_trailing_newline(source: &str, range: std::ops::Range<usi
         end -= 1;
     }
     end
+}
+
+fn line_indent_and_content(source: &str, line_start: usize, line_end: usize) -> (&str, bool) {
+    let content_end = source_line_content_end(source, line_end);
+    let indent_width = source[line_start..content_end]
+        .bytes()
+        .take_while(|source_byte| matches!(*source_byte, b' ' | b'\t'))
+        .count();
+    let indent_end = line_start + indent_width;
+    (&source[line_start..indent_end], indent_end < content_end)
+}
+
+/// 计算缩进代码块续行前缀。空白行从同一块最近的非空行继承缩进。
+fn indented_code_continuation_prefix(
+    source: &str,
+    current_byte: usize,
+    block_range: &std::ops::Range<usize>,
+) -> String {
+    let Some((line_start, _, line_end)) = locate_source_line_bounds(source, current_byte) else {
+        return String::new();
+    };
+    let (current_indent, current_has_content) =
+        line_indent_and_content(source, line_start, line_end);
+    if current_has_content {
+        return current_indent.to_owned();
+    }
+
+    let mut previous_line_start = line_start;
+    while let Some(newline_width) = newline_sequence_width_before(source, previous_line_start) {
+        let previous_line_end = previous_line_start - newline_width;
+        if previous_line_end <= block_range.start {
+            break;
+        }
+        let candidate_start = source[..previous_line_end]
+            .bytes()
+            .rposition(|source_byte| source_byte == b'\n')
+            .map_or(0, |newline| newline + 1);
+        let (candidate_indent, candidate_has_content) =
+            line_indent_and_content(source, candidate_start, previous_line_end);
+        if candidate_has_content {
+            return candidate_indent.to_owned();
+        }
+        previous_line_start = candidate_start;
+    }
+
+    let mut next_line_start = line_end + newline_sequence_width_at(source, line_end).unwrap_or(0);
+    while next_line_start < block_range.end && next_line_start < source.len() {
+        let next_line_end = source[next_line_start..]
+            .bytes()
+            .position(|source_byte| source_byte == b'\n')
+            .map_or(source.len(), |newline| next_line_start + newline);
+        let (candidate_indent, candidate_has_content) =
+            line_indent_and_content(source, next_line_start, next_line_end);
+        if candidate_has_content {
+            return candidate_indent.to_owned();
+        }
+        let newline_width = newline_sequence_width_at(source, next_line_end).unwrap_or(0);
+        if newline_width == 0 {
+            break;
+        }
+        next_line_start = next_line_end + newline_width;
+    }
+
+    current_indent.to_owned()
+}
+
+/// 单元格正文起点；空单元格落在单元格源码范围末端。
+pub(crate) fn table_cell_content_start(source: &str, cell_range: &std::ops::Range<usize>) -> usize {
+    let leading_non_content = source[cell_range.clone()]
+        .bytes()
+        .take_while(|source_byte| matches!(*source_byte, b' ' | b'\t' | b'\r' | b'\n' | b'|'))
+        .count();
+    cell_range.start + leading_non_content
 }
 
 // ─── 光标位置附近的源码切分 ───────────────────────────────────────────────
@@ -1031,6 +1245,70 @@ mod tests {
     }
 
     #[test]
+    fn enter_at_double_space_hard_break_promotes_it_to_a_block_boundary() {
+        let source = "first  \nsecond";
+        let current_byte = "first".len();
+
+        let augmentation = augment_edit(source, current_byte, AugmentKind::Enter)
+            .expect("Enter at a hard break should split the paragraph in two");
+        let edited_source = apply_augmentation_at(source, current_byte, &augmentation);
+
+        assert_eq!(edited_source, "first\n\nsecond");
+        assert_eq!(augmentation.cursor_byte_after, "first\n\n".len());
+    }
+
+    #[test]
+    fn enter_at_backslash_hard_break_promotes_it_to_a_block_boundary() {
+        let source = "first\\\nsecond";
+        let current_byte = "first".len();
+
+        let augmentation = augment_edit(source, current_byte, AugmentKind::Enter)
+            .expect("Enter at a hard break should split the paragraph in two");
+        let edited_source = apply_augmentation_at(source, current_byte, &augmentation);
+
+        assert_eq!(edited_source, "first\n\nsecond");
+        assert_eq!(augmentation.cursor_byte_after, "first\n\n".len());
+    }
+
+    #[test]
+    fn enter_at_odd_backslash_hard_break_preserves_escaped_backslashes() {
+        let source = "first\\\\\\\nsecond";
+        let current_byte = "first".len();
+
+        let augmentation = augment_edit(source, current_byte, AugmentKind::Enter)
+            .expect("Enter should consume only the final unescaped backslash");
+        let edited_source = apply_augmentation_at(source, current_byte, &augmentation);
+
+        assert_eq!(edited_source, "first\\\\\n\nsecond");
+        assert_eq!(augmentation.cursor_byte_after, "first\\\\\n\n".len());
+    }
+
+    #[test]
+    fn enter_at_crlf_hard_break_keeps_crlf_line_endings() {
+        let source = "first  \r\nsecond";
+        let current_byte = "first".len();
+
+        let augmentation = augment_edit(source, current_byte, AugmentKind::Enter)
+            .expect("Enter at a CRLF hard break should split the paragraph in two");
+        let edited_source = apply_augmentation_at(source, current_byte, &augmentation);
+
+        assert_eq!(edited_source, "first\r\n\r\nsecond");
+        assert_eq!(augmentation.cursor_byte_after, "first\r\n\r\n".len());
+    }
+
+    #[test]
+    fn enter_before_even_backslashes_keeps_soft_break_semantics() {
+        let source = "first\\\\\nsecond";
+        let current_byte = "first".len();
+
+        let augmentation = augment_edit(source, current_byte, AugmentKind::Enter)
+            .expect("Enter before escaped backslashes should use paragraph splitting");
+        let edited_source = apply_augmentation_at(source, current_byte, &augmentation);
+
+        assert_eq!(edited_source, "first\n\n\\\\\nsecond");
+    }
+
+    #[test]
     fn heading_enter_before_single_newline_creates_editable_empty_paragraph() {
         let source = "# Heading\nparagraph";
         let current_byte = "# Heading".len();
@@ -1186,6 +1464,72 @@ mod tests {
     }
 
     #[test]
+    fn backspace_after_backslash_hard_break_removes_the_marker() {
+        let source = "first\\\nsecond";
+        let current_byte = "first\\\n".len();
+
+        let augmentation = augment_edit(source, current_byte, AugmentKind::Backspace)
+            .expect("Backspace after a backslash hard break should join both visual lines");
+        let edited_source = apply_augmentation_at(source, current_byte, &augmentation);
+
+        assert_eq!(edited_source, "firstsecond");
+        assert_eq!(augmentation.cursor_byte_after, "first".len());
+    }
+
+    #[test]
+    fn backspace_after_double_space_hard_break_removes_the_marker() {
+        let source = "first  \nsecond";
+        let current_byte = "first  \n".len();
+
+        let augmentation = augment_edit(source, current_byte, AugmentKind::Backspace)
+            .expect("Backspace after a double-space hard break should join both visual lines");
+        let edited_source = apply_augmentation_at(source, current_byte, &augmentation);
+
+        assert_eq!(edited_source, "firstsecond");
+        assert_eq!(augmentation.cursor_byte_after, "first".len());
+    }
+
+    #[test]
+    fn backspace_after_crlf_hard_break_removes_the_complete_boundary() {
+        let source = "first  \r\nsecond";
+        let current_byte = "first  \r\n".len();
+
+        let augmentation = augment_edit(source, current_byte, AugmentKind::Backspace)
+            .expect("Backspace after a CRLF hard break should join both visual lines");
+        let edited_source = apply_augmentation_at(source, current_byte, &augmentation);
+
+        assert_eq!(edited_source, "firstsecond");
+        assert_eq!(augmentation.cursor_byte_after, "first".len());
+    }
+
+    #[test]
+    fn backspace_after_odd_backslash_hard_break_preserves_escaped_backslashes() {
+        let source = "first\\\\\\\nsecond";
+        let current_byte = "first\\\\\\\n".len();
+
+        let augmentation = augment_edit(source, current_byte, AugmentKind::Backspace)
+            .expect("Backspace should remove only the final unescaped backslash");
+        let edited_source = apply_augmentation_at(source, current_byte, &augmentation);
+
+        assert_eq!(edited_source, "first\\\\second");
+        assert_eq!(augmentation.cursor_byte_after, "first\\\\".len());
+    }
+
+    #[test]
+    fn backspace_keeps_non_hard_break_trailing_characters() {
+        let cases = [("first \nsecond", "first second"), ("first\\\\\nsecond", "first\\\\second")];
+
+        for (source, expected_source) in cases {
+            let current_byte = source.find("second").expect("fixture must contain second");
+            let augmentation = augment_edit(source, current_byte, AugmentKind::Backspace)
+                .expect("Backspace at a soft line start should join both visual lines");
+            let edited_source = apply_augmentation_at(source, current_byte, &augmentation);
+
+            assert_eq!(edited_source, expected_source);
+        }
+    }
+
+    #[test]
     fn backspace_at_crlf_paragraph_start_removes_complete_boundary() {
         let source = "first\r\n\r\nsecond";
         let current_byte = "first\r\n\r\n".len();
@@ -1330,16 +1674,162 @@ mod tests {
     }
 
     #[test]
-    fn setext_heading_is_not_classified_as_atx_heading() {
+    fn setext_heading_is_classified_as_setext_not_atx() {
         let source = "Title\n===";
+        let underline_end = source.len();
 
         assert!(
-            matches!(classify_enter_context(source, "Title".len()), EnterContext::Other),
+            matches!(
+                classify_enter_context(source, "Title".len()),
+                EnterContext::SetextHeading { underline_end: end } if end == underline_end
+            ),
             "setext title text must not use ATX heading semantics"
         );
         assert!(
-            matches!(classify_enter_context(source, source.len()), EnterContext::Other),
+            matches!(
+                classify_enter_context(source, source.len()),
+                EnterContext::SetextHeading { underline_end: end } if end == underline_end
+            ),
             "setext underline must not use ATX heading semantics"
+        );
+    }
+
+    #[test]
+    fn setext_heading_enter_creates_editable_paragraph_after_the_underline() {
+        let source = "Title\n=====\npara";
+        let current_byte = "Title".len();
+
+        let augmentation = augment_edit(source, current_byte, AugmentKind::Enter)
+            .expect("Enter inside a setext heading must preserve the heading source");
+        let edited_source = apply_augmentation_at(source, current_byte, &augmentation);
+
+        assert_eq!(edited_source, "Title\n=====\n\n\npara");
+        assert_eq!(augmentation.cursor_byte_after, "Title\n=====\n\n".len());
+    }
+
+    #[test]
+    fn setext_heading_enter_from_the_underline_line_appends_after_it() {
+        let source = "Title\n-----\npara";
+        let current_byte = "Title\n-----".len();
+
+        let augmentation = augment_edit(source, current_byte, AugmentKind::Enter)
+            .expect("Enter on a setext underline must preserve the heading source");
+        let edited_source = apply_augmentation_at(source, current_byte, &augmentation);
+
+        assert_eq!(edited_source, "Title\n-----\n\n\npara");
+        assert_eq!(augmentation.cursor_byte_after, "Title\n-----\n\n".len());
+    }
+
+    #[test]
+    fn setext_heading_enter_at_document_end_appends_one_newline() {
+        let source = "Title\n=====\n";
+        let current_byte = "Title".len();
+
+        let augmentation = augment_edit(source, current_byte, AugmentKind::Enter)
+            .expect("Enter inside a trailing setext heading must preserve the heading source");
+        let edited_source = apply_augmentation_at(source, current_byte, &augmentation);
+
+        assert_eq!(edited_source, "Title\n=====\n\n");
+        assert_eq!(augmentation.cursor_byte_after, edited_source.len());
+    }
+
+    #[test]
+    fn definition_list_is_classified_the_way_the_renderer_lays_it_out() {
+        let source = "term\n: definition";
+
+        assert!(
+            matches!(
+                classify_enter_context(source, source.len()),
+                EnterContext::TopLevelParagraphEnd
+            ),
+            "editing classifier and renderer must share parser options"
+        );
+    }
+
+    #[test]
+    fn indented_code_block_enter_continues_the_current_line_indent() {
+        let source = "    let x = 1;";
+        let current_byte = source.len();
+
+        let augmentation = augment_edit(source, current_byte, AugmentKind::Enter)
+            .expect("Enter inside an indented code block should continue the indent");
+        let edited_source = apply_augmentation_at(source, current_byte, &augmentation);
+
+        assert_eq!(augmentation.insert_text.as_deref(), Some("\n    "));
+        assert_eq!(edited_source, "    let x = 1;\n    ");
+        assert_eq!(augmentation.cursor_byte_after, edited_source.len());
+    }
+
+    #[test]
+    fn indented_code_block_enter_preserves_tab_indent() {
+        let source = "\tlet x = 1;";
+        let current_byte = source.len();
+
+        let augmentation = augment_edit(source, current_byte, AugmentKind::Enter)
+            .expect("Enter inside a tab-indented code block should continue the indent");
+
+        assert_eq!(augmentation.insert_text.as_deref(), Some("\n\t"));
+    }
+
+    #[test]
+    fn indented_code_block_blank_line_inherits_nearest_code_indent() {
+        let source = "    first\n\n    second";
+        let current_byte = "    first\n".len();
+
+        let augmentation = augment_edit(source, current_byte, AugmentKind::Enter)
+            .expect("Enter on an internal blank code line should inherit code indentation");
+        let after_enter = apply_augmentation_at(source, current_byte, &augmentation);
+
+        assert_eq!(augmentation.insert_text.as_deref(), Some("\n    "));
+        assert!(
+            augment_edit(
+                &after_enter,
+                augmentation.cursor_byte_after,
+                AugmentKind::InsertText(String::from("y")),
+            )
+            .is_none(),
+            "typing after Enter on a blank code line must stay in the code block"
+        );
+    }
+
+    #[test]
+    fn fenced_code_block_enter_still_uses_the_default_plan() {
+        let source = "```\nlet x = 1;\n```";
+        let current_byte = "```\nlet x = 1;".len();
+
+        assert!(
+            augment_edit(source, current_byte, AugmentKind::Enter).is_none(),
+            "fenced code blocks keep using the default single-newline plan"
+        );
+    }
+
+    #[test]
+    fn table_enter_moves_to_the_next_cell_content_start() {
+        let source = "| a |\n|---|\n| b |";
+        let current_byte = source.find('a').expect("fixture must contain the first cell");
+
+        let augmentation = augment_edit(source, current_byte, AugmentKind::Enter)
+            .expect("Enter inside a table cell should move to the cell below");
+
+        assert_eq!(augmentation.replace_range, None);
+        assert_eq!(augmentation.insert_text.as_deref(), Some(""));
+        assert_eq!(
+            augmentation.cursor_byte_after,
+            source.rfind('b').expect("fixture must contain the cell below")
+        );
+    }
+
+    #[test]
+    fn table_enter_into_an_empty_cell_stops_at_the_cell_end() {
+        let source = "| a |\n|---|\n|   |";
+        let current_byte = source.find('a').expect("fixture must contain the first cell");
+
+        let augmentation = augment_edit(source, current_byte, AugmentKind::Enter)
+            .expect("Enter inside a table cell should move to the cell below");
+
+        assert_eq!(
+            augmentation.cursor_byte_after,
+            source.rfind('|').expect("fixture must contain a closing pipe")
         );
     }
 
