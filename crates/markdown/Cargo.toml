@@ -17,3 +17,10 @@ regex = "1"
 toml.workspace = true
 unicode-segmentation.workspace = true
 unicode-width.workspace = true
+
+[dev-dependencies]
+criterion.workspace = true
+
+[[bench]]
+name = "editing_perf"
+harness = false

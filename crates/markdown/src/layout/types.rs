@@ -9,6 +9,7 @@ use std::sync::Arc;
 use ui::core::geom::Rect;
 
 use super::block::{layout_block, layout_doc_with_shaper};
+use super::reconcile::BlockReconcilePlan;
 use super::shaping::populate_style_segments;
 use super::source_line_map::{HiddenBlockSeparator, RenderedLineLayout, SourceLineMap};
 use super::{BlockSource, apply_deltas, flatten_blocks, heading_spacing_scale};
@@ -119,6 +120,8 @@ pub struct LazyLayout<S: BlockSource> {
     pub precise: Vec<bool>,
     /// Flattened lines in reading order, for selection indexing.
     pub flat_lines: Vec<FlatLine>,
+    /// Reconciled uncorrected flat-line groups waiting for their next publication.
+    reconciled_flat_lines: Vec<Option<Vec<FlatLine>>>,
     /// Lightweight source projections retained after shaped blocks are evicted.
     retained_block_projections: Vec<Vec<RetainedVisualLineProjection>>,
     /// Canonical generation-safe mapping between source anchors and visual positions.
@@ -254,7 +257,6 @@ impl<S: BlockSource> LazyLayout<S> {
                 Some(b) => b,
                 None => continue,
             };
-            let y_delta = self.y_delta.get(bi).copied().unwrap_or(0.0);
             let doc_bi = self.laid_to_doc.get(bi).copied().unwrap_or(0);
 
             while current_doc_bi < doc_bi {
@@ -263,6 +265,22 @@ impl<S: BlockSource> LazyLayout<S> {
                         b.line_count() + Self::count_all_descendant_lines(&b.children);
                 }
                 current_doc_bi += 1;
+            }
+
+            let y_delta = self.y_delta.get(bi).copied().unwrap_or(0.0);
+            if let Some(mut reconciled_lines) =
+                self.reconciled_flat_lines.get_mut(bi).and_then(Option::take)
+            {
+                for line in &mut reconciled_lines {
+                    line.flat_idx = flat_idx;
+                    line.rect.y += y_delta;
+                    if let Some(projection) = &mut line.source_projection {
+                        projection.flat_line_idx = flat_idx;
+                    }
+                    flat_idx += 1;
+                }
+                lines.append(&mut reconciled_lines);
+                continue;
             }
 
             let doc_block = self.source.blocks().get(doc_bi);
@@ -1001,6 +1019,178 @@ pub struct StyleSegment {
     pub style: crate::builder::InlineStyle,
 }
 
+fn laid_indices_by_document_block(
+    document_block_count: usize,
+    laid_to_doc: &[usize],
+) -> Vec<Vec<usize>> {
+    let mut laid_indices = vec![Vec::new(); document_block_count];
+    for (laid_index, &document_block_index) in laid_to_doc.iter().enumerate() {
+        if let Some(block_indices) = laid_indices.get_mut(document_block_index) {
+            block_indices.push(laid_index);
+        }
+    }
+    laid_indices
+}
+
+fn take_flat_line_groups<S: BlockSource>(layout: &mut LazyLayout<S>) -> Vec<Option<Vec<FlatLine>>> {
+    let laid_out_count = layout.laid_out.len();
+    let mut flat_line_groups: Vec<Option<Vec<FlatLine>>> =
+        std::iter::repeat_with(|| None).take(laid_out_count).collect();
+    let published_range = if layout.viewport_range.is_empty() {
+        0..laid_out_count
+    } else {
+        layout.viewport_range.clone()
+    };
+    let mut published_lines = std::mem::take(&mut layout.flat_lines).into_iter();
+
+    for laid_index in published_range {
+        let Some(block) = layout.laid_out.get(laid_index).and_then(Option::as_ref) else {
+            continue;
+        };
+        let expected_line_count = flat_line_count(block);
+        let mut block_lines = Vec::with_capacity(expected_line_count);
+        for _ in 0..expected_line_count {
+            let Some(line) = published_lines.next() else {
+                return std::iter::repeat_with(|| None).take(laid_out_count).collect();
+            };
+            block_lines.push(line);
+        }
+        flat_line_groups[laid_index] = Some(block_lines);
+    }
+
+    if published_lines.next().is_some() {
+        return std::iter::repeat_with(|| None).take(laid_out_count).collect();
+    }
+    flat_line_groups
+}
+
+fn flat_line_count(block: &LaidOutBlock) -> usize {
+    match &block.kind {
+        LaidOutBlockKind::Text { lines }
+        | LaidOutBlockKind::CodeBlock { lines, .. }
+        | LaidOutBlockKind::MetadataBlock { lines } => lines.len(),
+        LaidOutBlockKind::BlockQuote { blocks } => blocks.iter().map(flat_line_count).sum(),
+        LaidOutBlockKind::ListItem { blocks, lines, .. } => {
+            lines.len() + blocks.iter().map(flat_line_count).sum::<usize>()
+        }
+        LaidOutBlockKind::Table { header, rows, .. } => {
+            let header_line_count = header.iter().map(Vec::len).sum::<usize>();
+            let body_line_count =
+                rows.iter().flat_map(|row| row.iter()).map(Vec::len).sum::<usize>();
+            header_line_count + body_line_count
+        }
+        LaidOutBlockKind::HorizontalRule => 1,
+    }
+}
+
+fn block_tree_contains_code_block(block: &crate::builder::BlockNode) -> bool {
+    matches!(block.kind, crate::builder::BlockKind::CodeBlock { .. })
+        || block.children.iter().any(block_tree_contains_code_block)
+}
+
+fn block_contains_source_byte(block: &crate::builder::BlockNode, source_byte: usize) -> bool {
+    block.block_range.start <= source_byte && source_byte <= block.block_range.end
+}
+
+fn ranges_intersect_block(source_range: &Range<usize>, block: &crate::builder::BlockNode) -> bool {
+    source_range.start < block.block_range.end && block.block_range.start < source_range.end
+}
+
+fn signed_offset(current: usize, previous: usize) -> Option<isize> {
+    if current >= previous {
+        isize::try_from(current - previous).ok()
+    } else {
+        isize::try_from(previous - current).ok()?.checked_neg()
+    }
+}
+
+fn shift_source_byte(source_byte: usize, source_byte_delta: isize) -> usize {
+    source_byte.checked_add_signed(source_byte_delta).expect(
+        "an unchanged block's source anchors must remain valid after block-start translation",
+    )
+}
+
+fn shift_source_range(source_range: &mut Range<usize>, source_byte_delta: isize) {
+    source_range.start = shift_source_byte(source_range.start, source_byte_delta);
+    source_range.end = shift_source_byte(source_range.end, source_byte_delta);
+}
+
+fn shift_projection_source(projection: &mut VisualLineProjection, source_byte_delta: isize) {
+    projection.owner = match projection.owner {
+        ProjectionOwnerId::Block { block_start, logical_line } => ProjectionOwnerId::Block {
+            block_start: shift_source_byte(block_start, source_byte_delta),
+            logical_line,
+        },
+        ProjectionOwnerId::TableCell { table_start, row, column, logical_line } => {
+            ProjectionOwnerId::TableCell {
+                table_start: shift_source_byte(table_start, source_byte_delta),
+                row,
+                column,
+                logical_line,
+            }
+        }
+        ProjectionOwnerId::EmptyLine { source_byte } => ProjectionOwnerId::EmptyLine {
+            source_byte: shift_source_byte(source_byte, source_byte_delta),
+        },
+    };
+    for boundary in &mut projection.boundaries {
+        boundary.byte = shift_source_byte(boundary.byte, source_byte_delta);
+    }
+    shift_source_range(&mut projection.source_extent, source_byte_delta);
+    for collapsed_boundary in &mut projection.collapsed {
+        shift_source_range(&mut collapsed_boundary.source_range, source_byte_delta);
+    }
+}
+
+fn shift_laid_out_line(line: &mut LaidOutLine, source_byte_delta: isize, y_delta: f32) {
+    line.rect.y += y_delta;
+    for style in &mut line.styles {
+        shift_source_range(&mut style.source_range, source_byte_delta);
+    }
+    if let Some(projection) = &mut line.source_projection {
+        shift_projection_source(projection, source_byte_delta);
+    }
+}
+
+fn shift_laid_out_lines(lines: &mut [LaidOutLine], source_byte_delta: isize, y_delta: f32) {
+    for line in lines {
+        shift_laid_out_line(line, source_byte_delta, y_delta);
+    }
+}
+
+fn shift_laid_out_block(block: &mut LaidOutBlock, source_byte_delta: isize, y_delta: f32) {
+    block.rect.y += y_delta;
+    match &mut block.kind {
+        LaidOutBlockKind::Text { lines }
+        | LaidOutBlockKind::CodeBlock { lines, .. }
+        | LaidOutBlockKind::MetadataBlock { lines } => {
+            shift_laid_out_lines(lines, source_byte_delta, y_delta);
+        }
+        LaidOutBlockKind::BlockQuote { blocks } => {
+            for nested_block in blocks {
+                shift_laid_out_block(nested_block, source_byte_delta, y_delta);
+            }
+        }
+        LaidOutBlockKind::ListItem { blocks, lines, .. } => {
+            shift_laid_out_lines(lines, source_byte_delta, y_delta);
+            for nested_block in blocks {
+                shift_laid_out_block(nested_block, source_byte_delta, y_delta);
+            }
+        }
+        LaidOutBlockKind::Table { header, rows, .. } => {
+            for cell_lines in header {
+                shift_laid_out_lines(cell_lines, source_byte_delta, y_delta);
+            }
+            for row in rows {
+                for cell_lines in row {
+                    shift_laid_out_lines(cell_lines, source_byte_delta, y_delta);
+                }
+            }
+        }
+        LaidOutBlockKind::HorizontalRule => {}
+    }
+}
+
 // ===== Second impl block for LazyLayout =====
 
 impl<S: BlockSource> LazyLayout<S> {
@@ -1035,6 +1225,7 @@ impl<S: BlockSource> LazyLayout<S> {
             laid_out: vec![None; n],
             precise: vec![false; n],
             flat_lines: Vec::new(),
+            reconciled_flat_lines: std::iter::repeat_with(|| None).take(n).collect(),
             retained_block_projections: vec![Vec::new(); n],
             source_projection_index: None,
             source_projection_error: None,
@@ -1054,6 +1245,110 @@ impl<S: BlockSource> LazyLayout<S> {
             selection_range: None,
             ascii_diagrams: super::ascii_diagram::AsciiDiagramRegistry::default(),
         }
+    }
+
+    pub(crate) fn reuse_unchanged_blocks_from(&mut self, mut previous: Self) -> usize {
+        let Some(previous_source_text) = previous.source_text.as_deref() else {
+            return 0;
+        };
+        let Some(current_source_text) = self.source_text.as_deref() else {
+            return 0;
+        };
+        let reconcile_plan = BlockReconcilePlan::between(
+            previous.source.blocks(),
+            previous_source_text,
+            self.source.blocks(),
+            current_source_text,
+        );
+        let previous_laid_indices =
+            laid_indices_by_document_block(previous.source.blocks().len(), &previous.laid_to_doc);
+        let mut previous_flat_line_groups = take_flat_line_groups(&mut previous);
+        let mut current_block_ordinals = vec![0usize; self.source.blocks().len()];
+        let mut reused_block_count = 0usize;
+
+        for current_laid_index in 0..self.laid_to_doc.len() {
+            let current_doc_index = self.laid_to_doc[current_laid_index];
+            let Some(previous_doc_index) =
+                reconcile_plan.old_index_for_unchanged_new_block(current_doc_index)
+            else {
+                continue;
+            };
+            let current_ordinal = current_block_ordinals[current_doc_index];
+            current_block_ordinals[current_doc_index] += 1;
+            let Some(&previous_laid_index) = previous_laid_indices
+                .get(previous_doc_index)
+                .and_then(|indices| indices.get(current_ordinal))
+            else {
+                continue;
+            };
+            if previous.precise.get(previous_laid_index).copied().unwrap_or(false) {
+                continue;
+            }
+            let Some(current_source_block) = self.source.blocks().get(current_doc_index) else {
+                continue;
+            };
+            let Some(previous_source_block) = previous.source.blocks().get(previous_doc_index)
+            else {
+                continue;
+            };
+            let current_cursor_intersects = self.edit_ctx.as_ref().is_some_and(|edit_context| {
+                block_contains_source_byte(current_source_block, edit_context.cursor_byte)
+            });
+            let previous_cursor_intersects =
+                previous.edit_ctx.as_ref().is_some_and(|edit_context| {
+                    block_contains_source_byte(previous_source_block, edit_context.cursor_byte)
+                });
+            let current_selection_intersects = self
+                .selection_range
+                .as_ref()
+                .is_some_and(|selection| ranges_intersect_block(selection, current_source_block));
+            let previous_selection_intersects = previous
+                .selection_range
+                .as_ref()
+                .is_some_and(|selection| ranges_intersect_block(selection, previous_source_block));
+            if current_cursor_intersects
+                || previous_cursor_intersects
+                || current_selection_intersects
+                || previous_selection_intersects
+            {
+                continue;
+            }
+            if block_tree_contains_code_block(current_source_block) {
+                continue;
+            }
+            let Some(source_byte_delta) = signed_offset(
+                current_source_block.block_range.start,
+                previous_source_block.block_range.start,
+            ) else {
+                continue;
+            };
+            let Some(mut reused_block) =
+                previous.laid_out.get_mut(previous_laid_index).and_then(Option::take)
+            else {
+                continue;
+            };
+            let y_delta = self.estimated_positions[current_laid_index]
+                - previous.estimated_positions[previous_laid_index];
+            shift_laid_out_block(&mut reused_block, source_byte_delta, y_delta);
+            if let Some(mut reused_flat_lines) =
+                previous_flat_line_groups.get_mut(previous_laid_index).and_then(Option::take)
+            {
+                let previous_y_correction =
+                    previous.y_delta.get(previous_laid_index).copied().unwrap_or(0.0);
+                for line in &mut reused_flat_lines {
+                    line.rect.y += y_delta - previous_y_correction;
+                    if let Some(projection) = &mut line.source_projection {
+                        shift_projection_source(projection, source_byte_delta);
+                    }
+                }
+                self.reconciled_flat_lines[current_laid_index] = Some(reused_flat_lines);
+            }
+            self.retain_block_projections(current_laid_index, &reused_block);
+            self.laid_out[current_laid_index] = Some(reused_block);
+            reused_block_count += 1;
+        }
+
+        reused_block_count
     }
 
     /// Set the full source text for WYSIWYG span expansion.
@@ -1552,7 +1847,9 @@ impl<S: BlockSource> LazyLayout<S> {
         }
 
         self.viewport_range = full_range;
-        let _ = self.rebuild_source_projection_index();
+        if !self.flat_lines.is_empty() {
+            let _ = self.rebuild_source_projection_index();
+        }
     }
 
     /// Ensure y_delta and precise arrays are at least as long as estimated_heights.
@@ -1570,6 +1867,9 @@ impl<S: BlockSource> LazyLayout<S> {
         }
         if self.retained_block_projections.len() < n {
             self.retained_block_projections.resize_with(n, Vec::new);
+        }
+        if self.reconciled_flat_lines.len() < n {
+            self.reconciled_flat_lines.resize_with(n, || None);
         }
     }
 
@@ -1824,6 +2124,185 @@ mod tests {
     fn make_doc(md: &str) -> (&str, MarkdownDoc) {
         let parsed = parse_markdown(md);
         (md, MarkdownDoc::build(&parsed, &default_style()))
+    }
+
+    fn build_editing_layout(
+        source: &str,
+        cursor_byte: usize,
+        source_generation: u32,
+    ) -> LazyLayout<MarkdownDoc> {
+        let style = default_style();
+        let (_, document) = make_doc(source);
+        let document_view = core::document::StringDocView::new(source);
+        let mut layout = LazyLayout::new(document, &style, 400.0, &document_view);
+        layout.set_source_generation(source_generation);
+        layout.set_edit_source(Some(source.to_owned()));
+        layout.set_edit_ctx(Some(crate::edit::EditContext {
+            cursor_byte,
+            preedit_text: None,
+            preedit_cursor: None,
+        }));
+        layout.reserve_extra_blank_source_lines(style.line_height, style.paragraph_spacing);
+        layout.ensure_all_blocks(&style, 400.0, None, None, &document_view);
+        layout.build_flat_lines(&document_view);
+        layout
+    }
+
+    fn assert_flat_layout_equivalent(
+        actual: &LazyLayout<MarkdownDoc>,
+        expected: &LazyLayout<MarkdownDoc>,
+        source: &str,
+    ) {
+        assert_eq!(actual.total_height, expected.total_height);
+        assert_eq!(actual.flat_lines.len(), expected.flat_lines.len());
+        for (actual_line, expected_line) in actual.flat_lines.iter().zip(&expected.flat_lines) {
+            assert_eq!(actual_line.flat_idx, expected_line.flat_idx);
+            assert_eq!(actual_line.rect, expected_line.rect);
+            assert_eq!(actual_line.text, expected_line.text);
+            assert_eq!(actual_line.font_size, expected_line.font_size);
+            assert_eq!(actual_line.source_projection, expected_line.source_projection);
+        }
+
+        let actual_projection_index = actual
+            .source_projection_index
+            .as_ref()
+            .expect("the reconciled editing layout publishes a projection index");
+        let expected_projection_index = expected
+            .source_projection_index
+            .as_ref()
+            .expect("the full editing layout publishes a projection index");
+        assert_eq!(
+            actual_projection_index.visual_lines(),
+            expected_projection_index.visual_lines()
+        );
+        for source_byte in (0..=source.len()).filter(|byte| source.is_char_boundary(*byte)) {
+            for affinity in [CursorAffinity::Upstream, CursorAffinity::Downstream] {
+                let actual_position = actual_projection_index
+                    .visual_position_for_source(source_byte, affinity)
+                    .map(|position| (position.flat_line_idx, position.grapheme_pos));
+                let expected_position = expected_projection_index
+                    .visual_position_for_source(source_byte, affinity)
+                    .map(|position| (position.flat_line_idx, position.grapheme_pos));
+                assert_eq!(actual_position, expected_position, "source byte {source_byte}");
+            }
+        }
+    }
+
+    fn reconcile_editing_layout(
+        previous: LazyLayout<MarkdownDoc>,
+        source: &str,
+        cursor_byte: usize,
+        source_generation: u32,
+    ) -> (LazyLayout<MarkdownDoc>, usize) {
+        let style = default_style();
+        let (_, document) = make_doc(source);
+        let document_view = core::document::StringDocView::new(source);
+        let mut layout = LazyLayout::new(document, &style, 400.0, &document_view);
+        layout.set_source_generation(source_generation);
+        layout.set_edit_source(Some(source.to_owned()));
+        layout.set_edit_ctx(Some(crate::edit::EditContext {
+            cursor_byte,
+            preedit_text: None,
+            preedit_cursor: None,
+        }));
+        layout.reserve_extra_blank_source_lines(style.line_height, style.paragraph_spacing);
+        let reused_block_count = layout.reuse_unchanged_blocks_from(previous);
+        layout.ensure_all_blocks(&style, 400.0, None, None, &document_view);
+        layout.build_flat_lines(&document_view);
+        (layout, reused_block_count)
+    }
+
+    #[test]
+    fn reconciled_layout_reuses_prefix_and_shifted_suffix_equivalently() {
+        let old_source = "# Title\n\nalpha\n\nomega 👩‍💻";
+        let new_source = "# Title\n\nalpha changed\n\nomega 👩‍💻";
+        let previous = build_editing_layout(
+            old_source,
+            old_source.find("alpha").expect("the old fixture contains the edited paragraph"),
+            1,
+        );
+        let changed_cursor =
+            new_source.find("changed").expect("the new fixture contains the inserted text");
+        let expected = build_editing_layout(new_source, changed_cursor, 2);
+        let style = default_style();
+        let (_, new_document) = make_doc(new_source);
+        let document_view = core::document::StringDocView::new(new_source);
+        let mut reconciled = LazyLayout::new(new_document, &style, 400.0, &document_view);
+        reconciled.set_source_generation(2);
+        reconciled.set_edit_source(Some(new_source.to_owned()));
+        reconciled.set_edit_ctx(Some(crate::edit::EditContext {
+            cursor_byte: changed_cursor,
+            preedit_text: None,
+            preedit_cursor: None,
+        }));
+        reconciled.reserve_extra_blank_source_lines(style.line_height, style.paragraph_spacing);
+
+        let reused_block_count = reconciled.reuse_unchanged_blocks_from(previous);
+
+        assert_eq!(reused_block_count, 2);
+        assert!(reconciled.laid_out[0].is_some());
+        assert!(reconciled.laid_out[1].is_none());
+        assert!(reconciled.laid_out[2].is_some());
+        assert_eq!(
+            reconciled
+                .reconciled_flat_lines
+                .iter()
+                .filter_map(Option::as_ref)
+                .map(Vec::len)
+                .sum::<usize>(),
+            2
+        );
+
+        reconciled.ensure_all_blocks(&style, 400.0, None, None, &document_view);
+        reconciled.build_flat_lines(&document_view);
+
+        assert_flat_layout_equivalent(&reconciled, &expected, new_source);
+    }
+
+    #[test]
+    fn reconciled_edit_sequence_matches_full_layout_and_projection_index() {
+        let initial_source = "# Title\n\nalpha 👩‍💻\n\n- item\n\n```rust\ncode\n```\n\n尾声";
+        let initial_cursor = initial_source
+            .find("alpha")
+            .expect("the initial fixture contains the edited paragraph");
+        let mut reconciled = build_editing_layout(initial_source, initial_cursor, 1);
+        let edit_sequence = [
+            ("# Title\n\nalpha! 👩‍💻\n\n- item\n\n```rust\ncode\n```\n\n尾声", "alpha!"),
+            (
+                "# Title\n\nalpha! 👩‍💻\n\ninserted\n\n- item\n\n```rust\ncode\n```\n\n尾声",
+                "inserted",
+            ),
+            ("# Title\n\nalpha! 👩‍💻\n\ninserted\n\n```rust\ncode\n```\n\n尾声", "inserted"),
+            (
+                "# Title\n\nalpha! 👩‍💻\n\ninserted\n\n- first\n- second\n\n```rust\ncode\n```\n\n尾声",
+                "second",
+            ),
+            (
+                "# Title\n\nalpha! 👩‍💻\n\ninserted\n\n- first\n- second\n\n```rust\ncode edited\n```\n\n尾声",
+                "code edited",
+            ),
+            (
+                "# Title\n\nalpha! 👩‍💻\n\n- first\n- second\n\n```rust\ncode edited\n```\n\n尾声",
+                "alpha!",
+            ),
+        ];
+
+        for (edit_index, (source, cursor_needle)) in edit_sequence.iter().enumerate() {
+            let cursor_byte =
+                source.find(cursor_needle).expect("every edit fixture contains its cursor needle");
+            let source_generation = u32::try_from(edit_index + 2)
+                .expect("the bounded edit sequence generation fits in u32");
+            let expected = build_editing_layout(source, cursor_byte, source_generation);
+            let (next_reconciled, reused_block_count) =
+                reconcile_editing_layout(reconciled, source, cursor_byte, source_generation);
+
+            assert!(
+                reused_block_count > 0,
+                "edit {edit_index} should preserve at least one surrounding block"
+            );
+            assert_flat_layout_equivalent(&next_reconciled, &expected, source);
+            reconciled = next_reconciled;
+        }
     }
 
     #[test]

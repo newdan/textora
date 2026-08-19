@@ -866,14 +866,12 @@ fn estimated_visual_line_ranges(
     }
     let char_w = font_size * 0.55;
     let graphemes_per_line = (max_w / char_w).max(1.0) as usize;
-    let grapheme_count = crate::grapheme_map::grapheme_count(text);
+    let visual_grapheme_bytes = crate::grapheme_map::grapheme_byte_boundaries(text);
+    let grapheme_count = visual_grapheme_bytes.len().saturating_sub(1);
     let mut ranges = Vec::with_capacity(grapheme_count.div_ceil(graphemes_per_line));
     for grapheme_start in (0..grapheme_count).step_by(graphemes_per_line) {
         let grapheme_end = (grapheme_start + graphemes_per_line).min(grapheme_count);
-        ranges.push(
-            crate::grapheme_map::byte_at_grapheme_index(text, grapheme_start)
-                ..crate::grapheme_map::byte_at_grapheme_index(text, grapheme_end),
-        );
+        ranges.push(visual_grapheme_bytes[grapheme_start]..visual_grapheme_bytes[grapheme_end]);
     }
     ranges
 }
@@ -913,6 +911,8 @@ pub(crate) fn layout_text_block(
                 ctx.available_width(),
                 font_size,
             );
+            let visual_grapheme_bytes =
+                crate::grapheme_map::grapheme_byte_boundaries(&source_projection.text);
             for (i, visual_range) in estimated_ranges.into_iter().enumerate() {
                 let text = if i == 0 { raw.to_string() } else { String::new() };
                 laid_out_lines.push(LaidOutLine {
@@ -940,7 +940,7 @@ pub(crate) fn layout_text_block(
                     highlight_spans: vec![],
                     source_projection: Some(
                         source_projection
-                            .slice_visual_line(i, visual_range)
+                            .slice_visual_line_indexed(&visual_grapheme_bytes, i, visual_range)
                             .expect("estimated wrapped lines must preserve source projections"),
                     ),
                 });
@@ -1022,6 +1022,7 @@ pub(crate) fn layout_text_block(
             );
         }
         let wrapped = ctx.wrap_text(&projected.text, font_size, font_weight);
+        let visual_grapheme_bytes = crate::grapheme_map::grapheme_byte_boundaries(&projected.text);
 
         let shaped_input = ctx.last_wrap_shaped.first().and_then(|s| s.as_ref());
         let font_family_str = ctx.style.body_font_family.first().map(|s| s.as_str());
@@ -1058,7 +1059,7 @@ pub(crate) fn layout_text_block(
                 None
             };
             let source_projection = projected
-                .slice_visual_line(0, seg_start..seg_end)
+                .slice_visual_line_indexed(&visual_grapheme_bytes, 0, seg_start..seg_end)
                 .expect("wrapped visual lines must end at projection grapheme boundaries");
             laid_out_lines.push(LaidOutLine {
                 text: w.text.clone(),
@@ -1493,6 +1494,7 @@ fn layout_line_with_styles(
 ) -> Vec<LaidOutLine> {
     let mut result = Vec::new();
     let mut ly = y_start;
+    let visual_grapheme_bytes = crate::grapheme_map::grapheme_byte_boundaries(&projected.text);
     for w in wrapped {
         let seg_start = w.byte_start;
         let seg_end = w.byte_end;
@@ -1512,7 +1514,7 @@ fn layout_line_with_styles(
             });
         }
         let source_projection = projected
-            .slice_visual_line(0, seg_start..seg_end)
+            .slice_visual_line_indexed(&visual_grapheme_bytes, 0, seg_start..seg_end)
             .expect("wrapped visual lines must end at projection grapheme boundaries");
         // Shaping deferred to render phase (only visible lines)
         result.push(LaidOutLine {

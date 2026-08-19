@@ -2841,6 +2841,7 @@ dependencies = [
 name = "textora-markdown"
 version = "0.0.0"
 dependencies = [
+ "criterion",
  "pulldown-cmark",
  "regex",
  "stdext",

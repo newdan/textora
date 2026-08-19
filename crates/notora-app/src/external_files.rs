@@ -41,7 +41,7 @@ pub fn validate_external_text_file(
 ) -> Result<ValidatedExternalTextFile, ExternalFileOpenError> {
     let canonical_path =
         CanonicalExternalPath::canonicalize(path).map_err(ExternalFileOpenError::Path)?;
-    let kind = DocumentKind::from_path(canonical_path.as_path()).ok_or_else(|| {
+    let kind = DocumentKind::from_external_path(canonical_path.as_path()).ok_or_else(|| {
         ExternalFileOpenError::UnsupportedKind { path: canonical_path.as_path().to_path_buf() }
     })?;
     let bytes = std::fs::read(canonical_path.as_path()).map_err(|source| {
@@ -74,7 +74,7 @@ impl std::fmt::Display for ExternalFileOpenError {
             Self::Path(error) => error.fmt(formatter),
             Self::UnsupportedKind { path } => write!(
                 formatter,
-                "unsupported external file type for {}; expected .txt, .md, or .mmap.md",
+                "unsupported external file type for {}; expected a common UTF-8 text format",
                 path.display()
             ),
             Self::Read { path, source } => {
@@ -519,5 +519,19 @@ mod tests {
             validate_external_text_file(&invalid_utf8_path),
             Err(ExternalFileOpenError::InvalidUtf8 { .. })
         ));
+    }
+
+    #[test]
+    fn validation_accepts_common_utf8_text_formats() {
+        let directory = tempfile::tempdir().expect("external validation directory should exist");
+        for file_name in ["settings.json", "notes.yaml", "Cargo.toml", "records.csv", "main.rs"] {
+            let path = directory.path().join(file_name);
+            fs::write(&path, "text content").expect("text fixture should be written");
+
+            let validated = validate_external_text_file(&path)
+                .expect("common UTF-8 text format should be accepted");
+
+            assert_eq!(validated.kind, DocumentKind::Text);
+        }
     }
 }

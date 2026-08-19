@@ -65,6 +65,11 @@
 				<string>public.plain-text</string>
 				<string>public.text</string>
 			</array>
+			<key>CFBundleTypeExtensions</key>
+			<array>
+				<string>txt</string>
+				<string>text</string>
+			</array>
 		</dict>
 		<dict>
 			<key>CFBundleTypeName</key>
@@ -96,6 +101,11 @@
 			<array>
 				<string>public.json</string>
 			</array>
+			<key>CFBundleTypeExtensions</key>
+			<array>
+				<string>json</string>
+				<string>jsonc</string>
+			</array>
 		</dict>
 		<dict>
 			<key>CFBundleTypeName</key>
@@ -107,6 +117,10 @@
 			<key>LSItemContentTypes</key>
 			<array>
 				<string>public.xml</string>
+			</array>
+			<key>CFBundleTypeExtensions</key>
+			<array>
+				<string>xml</string>
 			</array>
 		</dict>
 		<dict>
@@ -138,7 +152,7 @@
 			<key>CFBundleTypeName</key>
 			<string>Source Code</string>
 			<key>CFBundleTypeRole</key>
-			<string>Viewer</string>
+			<string>Editor</string>
 			<key>LSHandlerRank</key>
 			<string>Alternate</string>
 			<key>CFBundleTypeExtensions</key>
@@ -146,22 +160,34 @@
 				<string>rs</string>
 				<string>py</string>
 				<string>js</string>
+				<string>mjs</string>
+				<string>cjs</string>
 				<string>ts</string>
 				<string>jsx</string>
 				<string>tsx</string>
 				<string>c</string>
 				<string>h</string>
+				<string>cc</string>
 				<string>cpp</string>
+				<string>cxx</string>
 				<string>hpp</string>
 				<string>go</string>
 				<string>java</string>
+				<string>kt</string>
+				<string>kts</string>
 				<string>rb</string>
+				<string>php</string>
 				<string>sh</string>
 				<string>bash</string>
 				<string>zsh</string>
+				<string>fish</string>
 				<string>swift</string>
 				<string>css</string>
+				<string>scss</string>
+				<string>sass</string>
+				<string>less</string>
 				<string>html</string>
+				<string>htm</string>
 				<string>sql</string>
 				<string>lua</string>
 				<string>vim</string>
@@ -193,6 +219,11 @@
 			<key>LSItemContentTypes</key>
 			<array>
 				<string>public.comma-separated-values-text</string>
+			</array>
+			<key>CFBundleTypeExtensions</key>
+			<array>
+				<string>csv</string>
+				<string>tsv</string>
 			</array>
 		</dict>
 		<dict>

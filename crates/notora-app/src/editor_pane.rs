@@ -40,6 +40,12 @@ impl EditorPaneMode {
     pub fn shows_property_row(self) -> bool {
         matches!(self, EditorPaneMode::WorkspaceNote)
     }
+
+    /// 外部文件的编辑界面只保留工具条与正文，不展示标题/时间/保存状态头部；
+    /// 布局层据此将头部高度归零。
+    pub fn shows_header(self) -> bool {
+        !matches!(self, EditorPaneMode::ExternalFile)
+    }
 }
 
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -248,8 +254,9 @@ impl EditorPaneChrome {
             }
         }
 
-        if event_is_inside(event, self.document_header_rect)
-            || (self.header.title_is_focused() && event_is_keyboard(event))
+        if self.input.mode.shows_header()
+            && (event_is_inside(event, self.document_header_rect)
+                || (self.header.title_is_focused() && event_is_keyboard(event)))
         {
             let local_event =
                 translate_event(event, self.document_header_rect.x, self.document_header_rect.y);
@@ -271,7 +278,9 @@ impl EditorPaneChrome {
         if !self.input.should_render_chrome() {
             return;
         }
-        paint_at(context, self.document_header_rect, |context| self.header.paint(context));
+        if self.input.mode.shows_header() {
+            paint_at(context, self.document_header_rect, |context| self.header.paint(context));
+        }
         if let Some(label) = workspace_label(&self.input.location) {
             let baseline = self.workspace_rect.y
                 + self.workspace_rect.h * 0.5
@@ -300,7 +309,7 @@ impl EditorPaneChrome {
         if !self.input.should_render_chrome() || self.has_open_popup() {
             return None;
         }
-        if self.document_header_rect.contains(px, py) {
+        if self.input.mode.shows_header() && self.document_header_rect.contains(px, py) {
             let hint = self
                 .header
                 .tooltip_at(px - self.document_header_rect.x, py - self.document_header_rect.y)?;
@@ -567,12 +576,14 @@ mod tests {
 
         let note = input(EditorPaneMode::WorkspaceNote).effective();
         assert!(note.should_render_chrome());
+        assert!(note.mode.shows_header());
         assert!(note.header.title_editable);
         assert!(note.header.star_enabled);
         assert!(note.tags.enabled);
 
         let external = input(EditorPaneMode::ExternalFile).effective();
         assert!(external.should_render_chrome());
+        assert!(!external.mode.shows_header());
         assert!(!external.header.title_editable);
         assert!(!external.header.star_enabled);
         assert_eq!(external.header.encryption, EncryptionStatusInput::Hidden);
@@ -582,6 +593,7 @@ mod tests {
 
         let trash = input(EditorPaneMode::TrashNote).effective();
         assert!(trash.should_render_chrome());
+        assert!(trash.mode.shows_header());
         assert!(!trash.header.title_editable);
         assert!(!trash.header.star_enabled);
         assert!(!trash.tags.enabled);

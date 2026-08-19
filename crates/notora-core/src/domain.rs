@@ -4,6 +4,68 @@ use std::time::SystemTime;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
+/// 可由 Notora 作为外部 UTF-8 文档打开的常见文本扩展名。
+pub const EXTERNAL_TEXT_FILE_EXTENSIONS: &[&str] = &[
+    "txt",
+    "text",
+    "md",
+    "markdown",
+    "mdown",
+    "mkd",
+    "json",
+    "jsonc",
+    "xml",
+    "yaml",
+    "yml",
+    "toml",
+    "csv",
+    "tsv",
+    "log",
+    "ini",
+    "cfg",
+    "conf",
+    "env",
+    "properties",
+    "srt",
+    "vtt",
+    "rs",
+    "py",
+    "js",
+    "mjs",
+    "cjs",
+    "ts",
+    "jsx",
+    "tsx",
+    "c",
+    "h",
+    "cc",
+    "cpp",
+    "cxx",
+    "hpp",
+    "go",
+    "java",
+    "kt",
+    "kts",
+    "rb",
+    "php",
+    "sh",
+    "bash",
+    "zsh",
+    "fish",
+    "swift",
+    "css",
+    "scss",
+    "sass",
+    "less",
+    "html",
+    "htm",
+    "sql",
+    "lua",
+    "vim",
+];
+
+const MARKDOWN_FILE_EXTENSIONS: &[&str] = &["md", "markdown", "mdown", "mkd"];
+
 /// 稳定的工作区身份。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(transparent)]
@@ -169,6 +231,29 @@ impl DocumentKind {
             _ => None,
         }
     }
+
+    /// 识别可作为独立编辑会话打开的常见 UTF-8 文本文档。
+    ///
+    /// 此范围不会影响工作区扫描；工作区笔记仍只接受原生的 `.txt`、`.md` 与
+    /// `.mmap.md` 格式。
+    pub fn from_external_path(path: &Path) -> Option<Self> {
+        let file_name = path.file_name()?.to_str()?;
+        if file_name.to_ascii_lowercase().ends_with(".mmap.md") {
+            return Some(Self::Mindmap);
+        }
+
+        let extension = path.extension()?.to_str()?;
+        if MARKDOWN_FILE_EXTENSIONS
+            .iter()
+            .any(|candidate| extension.eq_ignore_ascii_case(candidate))
+        {
+            return Some(Self::Markdown);
+        }
+        EXTERNAL_TEXT_FILE_EXTENSIONS
+            .iter()
+            .any(|candidate| extension.eq_ignore_ascii_case(candidate))
+            .then_some(Self::Text)
+    }
 }
 
 /// 编辑文档的磁盘来源，决定保存策略。
@@ -259,6 +344,37 @@ mod tests {
         assert_eq!(DocumentKind::from_path(Path::new("notes.md")), Some(DocumentKind::Markdown));
         assert_eq!(DocumentKind::from_path(Path::new("draft.txt")), Some(DocumentKind::Text));
         assert_eq!(DocumentKind::from_path(Path::new("asset.png")), None);
+    }
+
+    #[test]
+    fn external_text_extensions_map_to_editable_document_kinds() {
+        for path in [
+            "notes.markdown",
+            "settings.json",
+            "settings.yaml",
+            "Cargo.toml",
+            "records.csv",
+            "application.log",
+            "main.rs",
+            "index.html",
+            "captions.srt",
+        ] {
+            assert!(
+                DocumentKind::from_external_path(Path::new(path)).is_some(),
+                "{path} should be recognized as an external text document"
+            );
+        }
+        assert_eq!(
+            DocumentKind::from_external_path(Path::new("NOTES.MD")),
+            Some(DocumentKind::Markdown)
+        );
+        assert_eq!(DocumentKind::from_external_path(Path::new("asset.png")), None);
+    }
+
+    #[test]
+    fn workspace_document_recognition_remains_limited_to_native_note_formats() {
+        assert_eq!(DocumentKind::from_path(Path::new("settings.json")), None);
+        assert_eq!(DocumentKind::from_path(Path::new("main.rs")), None);
     }
 
     #[test]

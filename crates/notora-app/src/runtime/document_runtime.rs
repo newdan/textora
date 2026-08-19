@@ -1191,10 +1191,13 @@ impl DocumentRuntime {
         let Some(title) = self.pending_title_seeds.remove(&result.note.note_id) else {
             return DocumentOutcome::default();
         };
-        self.seed_document_title(result.note.note_id, &title)
+        if result.note.kind != DocumentKind::Mindmap {
+            return DocumentOutcome::default();
+        }
+        self.seed_mindmap_root_title(result.note.note_id, &title)
     }
 
-    fn seed_document_title(&mut self, note_id: NoteId, title: &str) -> DocumentOutcome {
+    fn seed_mindmap_root_title(&mut self, note_id: NoteId, title: &str) -> DocumentOutcome {
         let identity = DocumentIdentity::Note(note_id);
         let Some(tab_id) = self.document_registry.tab_for(identity) else {
             return DocumentOutcome::default();
@@ -1207,12 +1210,10 @@ impl DocumentRuntime {
         else {
             return DocumentOutcome::default();
         };
-        let Some(kind @ (DocumentKind::Markdown | DocumentKind::Mindmap)) =
-            DocumentKind::from_path(&path)
-        else {
+        if DocumentKind::from_path(&path) != Some(DocumentKind::Mindmap) {
             return DocumentOutcome::default();
-        };
-        let projected_source = replace_document_title(kind, &snapshot.text, title);
+        }
+        let projected_source = replace_document_title(DocumentKind::Mindmap, &snapshot.text, title);
         let Some((range, replacement)) =
             single_range_replacement(&snapshot.text, &projected_source)
         else {
@@ -1228,9 +1229,7 @@ impl DocumentRuntime {
             Ok(editor_outcome) => {
                 let mut outcome = DocumentOutcome::default();
                 outcome.absorb_editor_outcome(editor_outcome);
-                if kind == DocumentKind::Mindmap {
-                    self.move_mindmap_cursor_to_root_end(tab_id);
-                }
+                self.move_mindmap_cursor_to_root_end(tab_id);
                 outcome
             }
             Err(error) => DocumentOutcome::failure(title_edit_error_message(error)),

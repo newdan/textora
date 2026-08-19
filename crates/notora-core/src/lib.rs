@@ -32,9 +32,9 @@ pub use catalog::{
     NotePathOperationKind, NotePathOperationState, TagWithActiveNoteCount, TrashEntry,
 };
 pub use domain::{
-    DocumentIdentity, DocumentKind, DocumentOrigin, ExternalFileId, NavigationScope,
-    NoteEditorMetadata, NoteEncryption, NoteFileNameBinding, NoteFileNameMetadata, NoteId,
-    NoteLifecycle, NoteSummary, TagId, TagSummary, TitleInitialization, WorkspaceId,
+    DocumentIdentity, DocumentKind, DocumentOrigin, EXTERNAL_TEXT_FILE_EXTENSIONS, ExternalFileId,
+    NavigationScope, NoteEditorMetadata, NoteEncryption, NoteFileNameBinding, NoteFileNameMetadata,
+    NoteId, NoteLifecycle, NoteSummary, TagId, TagSummary, TitleInitialization, WorkspaceId,
 };
 pub use file_monitor::{
     WorkspaceFileBatch, WorkspaceFileChange, WorkspaceFileMonitor, WorkspaceFileMonitorError,

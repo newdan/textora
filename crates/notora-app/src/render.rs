@@ -2491,7 +2491,8 @@ fn render_external_file_card(session: &ExternalFileSession) -> RenderCard {
             timestamp: "外部文件".to_owned(),
             icon: Some(
                 document_icon(
-                    DocumentKind::from_path(canonical_path.as_path()).unwrap_or(DocumentKind::Text),
+                    DocumentKind::from_external_path(canonical_path.as_path())
+                        .unwrap_or(DocumentKind::Text),
                 )
                 .to_owned(),
             ),

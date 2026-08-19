@@ -216,6 +216,17 @@ impl ProjectedText {
         visual_byte_range: Range<usize>,
     ) -> Result<crate::layout::types::VisualLineProjection, crate::projection::ProjectionError>
     {
+        let visual_grapheme_bytes = crate::grapheme_map::grapheme_byte_boundaries(&self.text);
+        self.slice_visual_line_indexed(&visual_grapheme_bytes, flat_line_idx, visual_byte_range)
+    }
+
+    pub(crate) fn slice_visual_line_indexed(
+        &self,
+        visual_grapheme_bytes: &[usize],
+        flat_line_idx: usize,
+        visual_byte_range: Range<usize>,
+    ) -> Result<crate::layout::types::VisualLineProjection, crate::projection::ProjectionError>
+    {
         if visual_byte_range.start > visual_byte_range.end
             || visual_byte_range.end > self.text.len()
             || !self.text.is_char_boundary(visual_byte_range.start)
@@ -225,11 +236,17 @@ impl ProjectedText {
                 byte: visual_byte_range.start,
             });
         }
+        if visual_grapheme_bytes.len() != self.boundaries.len() {
+            return Err(crate::projection::ProjectionError::BoundaryCountMismatch {
+                expected: self.boundaries.len(),
+                actual: visual_grapheme_bytes.len(),
+            });
+        }
 
         let start_grapheme =
-            crate::grapheme_map::grapheme_index_at_byte(&self.text, visual_byte_range.start);
+            grapheme_index_at_visual_byte(visual_grapheme_bytes, visual_byte_range.start);
         let end_grapheme =
-            crate::grapheme_map::grapheme_index_at_byte(&self.text, visual_byte_range.end);
+            grapheme_index_at_visual_byte(visual_grapheme_bytes, visual_byte_range.end);
         let boundaries = self.boundaries[start_grapheme..=end_grapheme].to_vec();
         let mut source_extent = boundaries
             .first()
@@ -249,12 +266,12 @@ impl ProjectedText {
                 continue;
             }
 
-            let upstream_grapheme = crate::grapheme_map::grapheme_index_at_byte(
-                &self.text,
+            let upstream_grapheme = grapheme_index_at_visual_byte(
+                visual_grapheme_bytes,
                 span.visual_range.start.max(visual_byte_range.start),
             ) - start_grapheme;
-            let downstream_grapheme = crate::grapheme_map::grapheme_index_at_byte(
-                &self.text,
+            let downstream_grapheme = grapheme_index_at_visual_byte(
+                visual_grapheme_bytes,
                 span.visual_range.end.min(visual_byte_range.end),
             ) - start_grapheme;
             source_extent.start = source_extent.start.min(span.source_range.start);
@@ -276,6 +293,13 @@ impl ProjectedText {
             source_extent,
             collapsed,
         })
+    }
+}
+
+fn grapheme_index_at_visual_byte(visual_grapheme_bytes: &[usize], visual_byte: usize) -> usize {
+    match visual_grapheme_bytes.binary_search(&visual_byte) {
+        Ok(index) => index,
+        Err(insertion_index) => insertion_index.saturating_sub(1),
     }
 }
 
@@ -508,6 +532,8 @@ pub fn materialize_text(
 mod tests {
     use super::*;
     use crate::builder::InlineStyle;
+    use crate::layout::types::{CollapsedBoundary, VisualLineProjection};
+    use crate::projection::{ProjectionError, ProjectionOwnerId, TextProjectionBuilder};
 
     fn make_span(
         start: usize,
@@ -517,6 +543,111 @@ mod tests {
         style: InlineStyle,
     ) -> StyleSpan {
         StyleSpan { start, len, style, source_range: source_start..source_end }
+    }
+
+    fn slice_visual_line_linear_reference(
+        projected: &ProjectedText,
+        flat_line_idx: usize,
+        visual_byte_range: Range<usize>,
+    ) -> Result<VisualLineProjection, ProjectionError> {
+        if visual_byte_range.start > visual_byte_range.end
+            || visual_byte_range.end > projected.text.len()
+            || !projected.text.is_char_boundary(visual_byte_range.start)
+            || !projected.text.is_char_boundary(visual_byte_range.end)
+        {
+            return Err(ProjectionError::InvalidSourceBoundary { byte: visual_byte_range.start });
+        }
+
+        let start_grapheme =
+            crate::grapheme_map::grapheme_index_at_byte(&projected.text, visual_byte_range.start);
+        let end_grapheme =
+            crate::grapheme_map::grapheme_index_at_byte(&projected.text, visual_byte_range.end);
+        let boundaries = projected.boundaries[start_grapheme..=end_grapheme].to_vec();
+        let mut source_extent = boundaries
+            .first()
+            .expect("a projected visual line always has a sentinel boundary")
+            .byte
+            ..boundaries
+                .last()
+                .expect("a projected visual line always has a sentinel boundary")
+                .byte;
+        let mut collapsed = Vec::new();
+
+        for span in &projected.spans {
+            let collapsed_outside_visual_line = span.visual_range.end < visual_byte_range.start
+                || span.visual_range.start > visual_byte_range.end;
+            if !matches!(span.kind, ProjectionSpanKind::Collapsed) || collapsed_outside_visual_line
+            {
+                continue;
+            }
+
+            let upstream_grapheme = crate::grapheme_map::grapheme_index_at_byte(
+                &projected.text,
+                span.visual_range.start.max(visual_byte_range.start),
+            ) - start_grapheme;
+            let downstream_grapheme = crate::grapheme_map::grapheme_index_at_byte(
+                &projected.text,
+                span.visual_range.end.min(visual_byte_range.end),
+            ) - start_grapheme;
+            source_extent.start = source_extent.start.min(span.source_range.start);
+            source_extent.end = source_extent.end.max(span.source_range.end);
+            collapsed.push(CollapsedBoundary {
+                source_range: span.source_range.clone(),
+                upstream_grapheme,
+                downstream_grapheme,
+            });
+        }
+
+        Ok(VisualLineProjection {
+            flat_line_idx,
+            owner: ProjectionOwnerId::Block {
+                block_start: projected.source_extent().start,
+                logical_line: flat_line_idx,
+            },
+            boundaries,
+            source_extent,
+            collapsed,
+        })
+    }
+
+    #[test]
+    fn indexed_visual_line_slice_matches_linear_unicode_reference() {
+        let unicode_segments = ["e\u{0301}", "👩‍💻", "❤\u{fe0f}", "中文"];
+        let mut builder = TextProjectionBuilder::default();
+        let mut source_byte = 0usize;
+
+        for (segment_index, segment) in unicode_segments.iter().enumerate() {
+            if segment_index > 0 {
+                builder.push_soft_break(source_byte..source_byte + 1);
+                source_byte += 1;
+            }
+            let source_end = source_byte + segment.len();
+            builder.push_direct(segment, source_byte..source_end);
+            source_byte = source_end;
+        }
+
+        let projected = builder.finish(source_byte);
+        let visual_grapheme_bytes = crate::grapheme_map::grapheme_byte_boundaries(&projected.text);
+        let character_boundaries: Vec<usize> = (0..=projected.text.len())
+            .filter(|byte| projected.text.is_char_boundary(*byte))
+            .collect();
+
+        for &visual_start in &character_boundaries {
+            for &visual_end in character_boundaries.iter().filter(|&&byte| byte >= visual_start) {
+                let visual_range = visual_start..visual_end;
+                let linear =
+                    slice_visual_line_linear_reference(&projected, 7, visual_range.clone());
+                let indexed = projected.slice_visual_line_indexed(
+                    &visual_grapheme_bytes,
+                    7,
+                    visual_range.clone(),
+                );
+                assert_eq!(
+                    indexed, linear,
+                    "indexed projection diverged for visual range {visual_range:?}"
+                );
+            }
+        }
     }
 
     #[test]
