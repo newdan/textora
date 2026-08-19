@@ -10,6 +10,10 @@ const TAG_EDITOR_HORIZONTAL_PADDING_LOGICAL: f32 = 8.0;
 const TAG_EDITOR_FONT_SIZE_LOGICAL: f32 = 12.0;
 const TAG_EDITOR_LABEL: &str = "标签：";
 const TAG_EDITOR_ADD_PROMPT: &str = "添加标签";
+const TAG_EDITOR_REMOVE_GLYPH: &str = "×";
+const TAG_EDITOR_REMOVE_LEADING_SPACE: &str = " ";
+const TAG_EDITOR_CHIP_TRAILING_SPACE: &str = "  ";
+const TAG_EDITOR_REMOVE_HIT_PADDING_LOGICAL: f32 = 3.0;
 const TAG_EDITOR_ASCII_TEXT_WIDTH_RATIO: f32 = 0.55;
 const TAG_EDITOR_WIDE_TEXT_WIDTH_RATIO: f32 = 1.0;
 
@@ -48,6 +52,13 @@ pub struct TagEditorWidget {
     input: TagEditorInput,
     rect: Rect,
     text_box: TextBox,
+    remove_targets: Vec<TagRemoveTarget>,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+struct TagRemoveTarget {
+    chip_key: String,
+    rect: Rect,
 }
 
 impl TagEditorWidget {
@@ -57,10 +68,18 @@ impl TagEditorWidget {
         text_box.set_font_size_logical(TAG_EDITOR_FONT_SIZE_LOGICAL);
         text_box.set_leading_content_inset_logical(0.0);
         text_box.set_placeholder(TAG_EDITOR_ADD_PROMPT);
-        Self { input: TagEditorInput::default(), rect: Rect::ZERO, text_box }
+        Self {
+            input: TagEditorInput::default(),
+            rect: Rect::ZERO,
+            text_box,
+            remove_targets: Vec::new(),
+        }
     }
 
     pub fn set_input(&mut self, input: TagEditorInput) {
+        if self.input.chips != input.chips || self.input.compact != input.compact {
+            self.remove_targets.clear();
+        }
         if !input.enabled {
             self.set_keyboard_focus(None);
         }
@@ -111,8 +130,25 @@ impl TagEditorWidget {
             self.visible_chip_counts(if self.input.compact { 2 } else { self.input.chips.len() }).0;
         let mut text_box_x = self.rect.x + TAG_EDITOR_HORIZONTAL_PADDING_LOGICAL * context.dpi;
         text_box_x += measure.measure(TAG_EDITOR_LABEL, font_size);
+        self.remove_targets.clear();
         for chip in self.input.chips.iter().take(visible_count) {
-            text_box_x += measure.measure(&format!("{}  ", chip.label), font_size);
+            text_box_x += measure.measure(&chip.label, font_size);
+            if chip.removable {
+                text_box_x += measure.measure(TAG_EDITOR_REMOVE_LEADING_SPACE, font_size);
+                let remove_glyph_width = measure.measure(TAG_EDITOR_REMOVE_GLYPH, font_size);
+                let hit_padding = TAG_EDITOR_REMOVE_HIT_PADDING_LOGICAL * context.dpi;
+                self.remove_targets.push(TagRemoveTarget {
+                    chip_key: chip.chip_key.clone(),
+                    rect: Rect::new(
+                        text_box_x - hit_padding,
+                        self.rect.y,
+                        remove_glyph_width + hit_padding * 2.0,
+                        self.rect.h,
+                    ),
+                });
+                text_box_x += remove_glyph_width;
+            }
+            text_box_x += measure.measure(TAG_EDITOR_CHIP_TRAILING_SPACE, font_size);
         }
         if self.input.chips.len() > visible_count {
             text_box_x +=
@@ -258,6 +294,14 @@ impl TagEditorWidget {
         {
             return Some(action);
         }
+        if let Some(remove_target) =
+            self.remove_targets.iter().find(|target| target.rect.contains(px, py))
+        {
+            return Some(WidgetAction::Control(ControlAction::TextCommitted {
+                id: TAG_EDITOR_REMOVE_ID,
+                value: TextPayload::Plain(remove_target.chip_key.clone()),
+            }));
+        }
         if self.rect.contains(px, py) {
             return self.focus_text_box_from_row_click(px, py, context);
         }
@@ -322,7 +366,17 @@ impl Widget for TagEditorWidget {
             TAG_EDITOR_LABEL,
         );
         for chip in self.input.chips.iter().take(visible_count) {
-            let label = format!("{}  ", chip.label);
+            let label = if chip.removable {
+                format!(
+                    "{}{}{}{}",
+                    chip.label,
+                    TAG_EDITOR_REMOVE_LEADING_SPACE,
+                    TAG_EDITOR_REMOVE_GLYPH,
+                    TAG_EDITOR_CHIP_TRAILING_SPACE
+                )
+            } else {
+                format!("{}{}", chip.label, TAG_EDITOR_CHIP_TRAILING_SPACE)
+            };
             x += paint_text_and_measure(ctx, x, baseline, ctx.theme.palette.text_muted, &label);
         }
         if hidden_count > 0 {
@@ -523,6 +577,39 @@ mod tests {
             }))
         );
         assert_eq!(editor.visible_chip_counts(1), (1, 1));
+    }
+
+    #[test]
+    fn clicking_a_removable_chip_close_control_requests_that_exact_chip_removal() {
+        let mut editor = TagEditorWidget::new();
+        editor.set_input(TagEditorInput { suggestions_open: false, ..input() });
+        layout_editor(&mut editor);
+        let theme = crate::theme::test_theme();
+        let mut context = EventCtx::new(&theme, 1.0);
+        let remove_rect = editor
+            .remove_targets
+            .first()
+            .expect("the first removable chip should expose a close control")
+            .rect;
+        let draw_list = paint_editor(&editor);
+        assert!(draw_list.cmds.iter().any(
+            |command| matches!(command, crate::core::paint::DrawCmd::TextLayout { layout, .. } if layout.text.contains(TAG_EDITOR_REMOVE_GLYPH))
+        ));
+
+        assert_eq!(
+            editor.on_event(
+                &Event::MouseDown {
+                    px: remove_rect.x + remove_rect.w * 0.5,
+                    py: remove_rect.y + remove_rect.h * 0.5,
+                    button: MouseButton::Left,
+                },
+                &mut context,
+            ),
+            Some(WidgetAction::Control(ControlAction::TextCommitted {
+                id: TAG_EDITOR_REMOVE_ID,
+                value: TextPayload::Plain("product".to_owned()),
+            }))
+        );
     }
 
     #[test]
