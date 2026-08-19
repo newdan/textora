@@ -523,6 +523,8 @@ impl NotoraRuntime {
     pub fn shell_layout(&self) -> ShellLayout {
         let dpi = self.document_runtime.editor().scale_factor() as f32;
         let (window_width_px, window_height_px) = self.window_runtime.size();
+        let editor_pane_mode =
+            crate::render::selected_editor_pane_mode(self.action_runtime.state());
         ShellLayout::compute(ShellLayoutInput {
             window_width_px,
             window_height_px,
@@ -536,10 +538,8 @@ impl NotoraRuntime {
                 .navigation_pane_visibility,
             compact_content: self.action_runtime.state().layout.compact_content,
             compact_navigation: self.action_runtime.state().layout.compact_navigation,
-            editor_property_row_visible: crate::render::selected_editor_pane_mode(
-                self.action_runtime.state(),
-            )
-            .shows_property_row(),
+            editor_property_row_visible: editor_pane_mode.shows_property_row(),
+            editor_header_visible: editor_pane_mode.shows_header(),
         })
     }
 

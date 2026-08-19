@@ -35,6 +35,8 @@ pub struct ShellLayoutInput {
     pub compact_navigation: CompactNavigation,
     /// 头部属性行（所属工作区 + 标签）是否展示；不展示时头部收回该行高度。
     pub editor_property_row_visible: bool,
+    /// 编辑器头部（标题/时间/保存状态）是否展示；外部文件只保留工具条与正文。
+    pub editor_header_visible: bool,
 }
 
 /// 一帧 shell 的独立区域。overlay 与 menu 位于 editor 之后绘制。
@@ -82,6 +84,7 @@ impl ShellLayout {
                 splitter_width_px,
                 input.navigation_pane_visibility,
                 input.editor_property_row_visible,
+                input.editor_header_visible,
             );
         }
         if window_rect.w >= (requested_card_width_logical + MINIMUM_EDITOR_WIDTH_LOGICAL) * dpi {
@@ -92,6 +95,7 @@ impl ShellLayout {
                 splitter_width_px,
                 input.compact_navigation,
                 input.editor_property_row_visible,
+                input.editor_header_visible,
             );
         }
         Self::editor_overlay(
@@ -101,6 +105,7 @@ impl ShellLayout {
             input.compact_content,
             input.compact_navigation,
             input.editor_property_row_visible,
+            input.editor_header_visible,
         )
     }
 
@@ -112,6 +117,7 @@ impl ShellLayout {
         splitter_width_px: f32,
         navigation_pane_visibility: NavigationPaneVisibility,
         editor_property_row_visible: bool,
+        editor_header_visible: bool,
     ) -> Self {
         let navigation_width_px = match navigation_pane_visibility {
             NavigationPaneVisibility::Expanded => navigation_width_logical * dpi,
@@ -139,8 +145,12 @@ impl ShellLayout {
             (window_rect.right() - card_list_rect.right()).max(0.0),
             window_rect.h,
         );
-        let (editor_header_rect, editor_toolbar_rect, editor_body_rect) =
-            editor_chrome_rects(editor_rect, dpi, editor_property_row_visible);
+        let (editor_header_rect, editor_toolbar_rect, editor_body_rect) = editor_chrome_rects(
+            editor_rect,
+            dpi,
+            editor_property_row_visible,
+            editor_header_visible,
+        );
         Self {
             responsive_mode: ResponsiveLayoutMode::ThreePane,
             dpi,
@@ -166,6 +176,7 @@ impl ShellLayout {
         splitter_width_px: f32,
         compact_navigation: CompactNavigation,
         editor_property_row_visible: bool,
+        editor_header_visible: bool,
     ) -> Self {
         let card_width_px = requested_card_width_logical * dpi;
         let card_list_rect = Rect::new(0.0, 0.0, card_width_px, window_rect.h);
@@ -180,8 +191,12 @@ impl ShellLayout {
             (window_rect.right() - card_list_rect.right()).max(0.0),
             window_rect.h,
         );
-        let (editor_header_rect, editor_toolbar_rect, editor_body_rect) =
-            editor_chrome_rects(editor_rect, dpi, editor_property_row_visible);
+        let (editor_header_rect, editor_toolbar_rect, editor_body_rect) = editor_chrome_rects(
+            editor_rect,
+            dpi,
+            editor_property_row_visible,
+            editor_header_visible,
+        );
         Self {
             responsive_mode: ResponsiveLayoutMode::NavigationOverlay,
             dpi,
@@ -207,13 +222,18 @@ impl ShellLayout {
         compact_content: CompactContent,
         compact_navigation: CompactNavigation,
         editor_property_row_visible: bool,
+        editor_header_visible: bool,
     ) -> Self {
         let (card_list_rect, editor_rect) = match compact_content {
             CompactContent::CardList => (window_rect, Rect::ZERO),
             CompactContent::Editor => (Rect::ZERO, window_rect),
         };
-        let (editor_header_rect, editor_toolbar_rect, editor_body_rect) =
-            editor_chrome_rects(editor_rect, dpi, editor_property_row_visible);
+        let (editor_header_rect, editor_toolbar_rect, editor_body_rect) = editor_chrome_rects(
+            editor_rect,
+            dpi,
+            editor_property_row_visible,
+            editor_header_visible,
+        );
         Self {
             responsive_mode: ResponsiveLayoutMode::EditorOverlay,
             dpi,
@@ -241,19 +261,21 @@ fn editor_chrome_rects(
     editor_rect: Rect,
     dpi: f32,
     property_row_visible: bool,
+    header_visible: bool,
 ) -> (Rect, Rect, Rect) {
     if editor_rect.w <= 0.0 || editor_rect.h <= 0.0 {
         return (Rect::ZERO, Rect::ZERO, Rect::ZERO);
     }
 
     let available_height_logical = editor_rect.h / dpi;
-    let mut header_height_logical =
-        if available_height_logical < EDITOR_COMPACT_HEIGHT_THRESHOLD_LOGICAL {
-            EDITOR_COMPACT_HEADER_HEIGHT_LOGICAL
-        } else {
-            EDITOR_HEADER_HEIGHT_LOGICAL
-        };
-    if !property_row_visible {
+    let mut header_height_logical = if !header_visible {
+        0.0
+    } else if available_height_logical < EDITOR_COMPACT_HEIGHT_THRESHOLD_LOGICAL {
+        EDITOR_COMPACT_HEADER_HEIGHT_LOGICAL
+    } else {
+        EDITOR_HEADER_HEIGHT_LOGICAL
+    };
+    if header_visible && !property_row_visible {
         header_height_logical -= EDITOR_HEADER_PROPERTY_ROW_HEIGHT_LOGICAL;
     }
     let header_height_px = (header_height_logical * dpi).min(editor_rect.h);
@@ -298,6 +320,7 @@ mod tests {
             compact_content: CompactContent::CardList,
             compact_navigation: CompactNavigation::Hidden,
             editor_property_row_visible: true,
+            editor_header_visible: true,
         }
     }
 
@@ -452,6 +475,18 @@ mod tests {
             layout.editor_header_rect.h,
             EDITOR_HEADER_HEIGHT_LOGICAL - EDITOR_HEADER_PROPERTY_ROW_HEIGHT_LOGICAL
         );
+        assert_editor_chrome_is_partitioned(layout);
+    }
+
+    #[test]
+    fn hidden_editor_header_gives_the_toolbar_the_editor_top_edge() {
+        let mut layout_input = input(880.0, 1.0);
+        layout_input.editor_header_visible = false;
+        let layout = ShellLayout::compute(layout_input);
+
+        assert_eq!(layout.editor_header_rect.h, 0.0);
+        assert_eq!(layout.editor_toolbar_rect.y, layout.editor_rect.y);
+        assert_eq!(layout.editor_toolbar_rect.h, EDITOR_TOOLBAR_HEIGHT_LOGICAL);
         assert_editor_chrome_is_partitioned(layout);
     }
 
