@@ -9,6 +9,7 @@
 //!   The handler then translates the resulting `WidgetAction` into `AppAction`s.
 
 use winit::event::{ElementState, MouseScrollDelta};
+use winit::keyboard::{KeyCode as WinitKeyCode, ModifiersState, PhysicalKey};
 use winit::window::CursorIcon;
 
 use crate::actions::AppAction;
@@ -52,6 +53,42 @@ fn mmap_cursor_icon(app: &mut App, px: f32, py: f32) -> Option<CursorIcon> {
 
 // ── Keyboard ──────────────────────────────────────────────────────────────
 
+fn markdown_semantic_shortcut(
+    physical_key: PhysicalKey,
+    modifiers: ModifiersState,
+) -> Option<ui::plugin::SemanticEditCommand> {
+    use ui::plugin::SemanticEditCommand;
+
+    if !(modifiers.super_key() || modifiers.control_key()) {
+        return None;
+    }
+
+    let PhysicalKey::Code(key_code) = physical_key else {
+        return None;
+    };
+    let shift = modifiers.shift_key();
+    let alt = modifiers.alt_key();
+    match (key_code, shift, alt) {
+        (WinitKeyCode::KeyB, false, false) => Some(SemanticEditCommand::ToggleBold),
+        (WinitKeyCode::KeyI, false, false) => Some(SemanticEditCommand::ToggleItalic),
+        (WinitKeyCode::KeyK, false, false) => Some(SemanticEditCommand::InsertLink),
+        (WinitKeyCode::KeyE, false, false) => Some(SemanticEditCommand::ToggleInlineCode),
+        (WinitKeyCode::KeyX, true, false) => Some(SemanticEditCommand::ToggleStrikethrough),
+        (WinitKeyCode::Digit7, true, false) => Some(SemanticEditCommand::OrderedList),
+        (WinitKeyCode::Digit8, true, false) => Some(SemanticEditCommand::UnorderedList),
+        (WinitKeyCode::Digit9, true, false) => Some(SemanticEditCommand::Quote),
+        (WinitKeyCode::Digit1, false, true) => Some(SemanticEditCommand::SetHeadingLevel(1)),
+        (WinitKeyCode::Digit2, false, true) => Some(SemanticEditCommand::SetHeadingLevel(2)),
+        (WinitKeyCode::Digit3, false, true) => Some(SemanticEditCommand::SetHeadingLevel(3)),
+        (WinitKeyCode::Digit4, false, true) => Some(SemanticEditCommand::SetHeadingLevel(4)),
+        (WinitKeyCode::Digit5, false, true) => Some(SemanticEditCommand::SetHeadingLevel(5)),
+        (WinitKeyCode::Digit6, false, true) => Some(SemanticEditCommand::SetHeadingLevel(6)),
+        (WinitKeyCode::KeyT, false, true) => Some(SemanticEditCommand::TaskList),
+        (WinitKeyCode::KeyC, false, true) => Some(SemanticEditCommand::CodeBlock),
+        _ => None,
+    }
+}
+
 /// Handle keyboard input events.
 pub(crate) fn handle_keyboard(app: &mut App, event: &winit::event::KeyEvent) -> Vec<AppAction> {
     let mut actions = Vec::new();
@@ -82,6 +119,18 @@ pub(crate) fn handle_keyboard(app: &mut App, event: &winit::event::KeyEvent) -> 
             actions.push(AppAction::ExecuteAppCommands(vec![AppCommand::Edit(command)]));
         }
         return actions;
+    }
+
+    let markdown_editor_is_focused = app.active_plugin_name()
+        == Some(ui::plugin::PLUGIN_MARKDOWN_EDITOR)
+        && app.active_allows_editing()
+        && app.ui_shell.keyboard_focus() == crate::ui_shell::KeyboardFocusTarget::Editor;
+    if markdown_editor_is_focused
+        && let Some(command) = markdown_semantic_shortcut(event.physical_key, input_modifiers)
+    {
+        let effect = app.dispatch_semantic_edit(command);
+        app.apply_effect(effect);
+        return Vec::new();
     }
 
     let mapped_intent = key_code.as_ref().and_then(|key_code| {
@@ -778,6 +827,67 @@ mod tests {
     use std::rc::Rc;
     use ui::plugin::{EditHitTarget, PluginQuery, PluginResponse, ViewPlugin};
     use winit::window::CursorIcon;
+
+    #[test]
+    fn markdown_semantic_shortcuts_cover_common_inline_and_block_commands() {
+        use ui::plugin::SemanticEditCommand;
+        use winit::keyboard::{KeyCode, ModifiersState, PhysicalKey};
+
+        let primary = ModifiersState::SUPER;
+        let primary_shift = primary | ModifiersState::SHIFT;
+        let primary_alt = primary | ModifiersState::ALT;
+        let cases = [
+            (KeyCode::KeyB, primary, SemanticEditCommand::ToggleBold),
+            (KeyCode::KeyI, primary, SemanticEditCommand::ToggleItalic),
+            (KeyCode::KeyK, primary, SemanticEditCommand::InsertLink),
+            (KeyCode::KeyE, primary, SemanticEditCommand::ToggleInlineCode),
+            (KeyCode::KeyX, primary_shift, SemanticEditCommand::ToggleStrikethrough),
+            (KeyCode::Digit7, primary_shift, SemanticEditCommand::OrderedList),
+            (KeyCode::Digit8, primary_shift, SemanticEditCommand::UnorderedList),
+            (KeyCode::Digit9, primary_shift, SemanticEditCommand::Quote),
+            (KeyCode::Digit1, primary_alt, SemanticEditCommand::SetHeadingLevel(1)),
+            (KeyCode::Digit6, primary_alt, SemanticEditCommand::SetHeadingLevel(6)),
+            (KeyCode::KeyT, primary_alt, SemanticEditCommand::TaskList),
+            (KeyCode::KeyC, primary_alt, SemanticEditCommand::CodeBlock),
+        ];
+
+        for (key_code, modifiers, expected) in cases {
+            assert_eq!(
+                markdown_semantic_shortcut(PhysicalKey::Code(key_code), modifiers),
+                Some(expected),
+                "unexpected mapping for {modifiers:?}+{key_code:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn markdown_semantic_shortcuts_support_control_and_reject_near_misses() {
+        use ui::plugin::SemanticEditCommand;
+        use winit::keyboard::{KeyCode, ModifiersState, PhysicalKey};
+
+        assert_eq!(
+            markdown_semantic_shortcut(PhysicalKey::Code(KeyCode::KeyB), ModifiersState::CONTROL),
+            Some(SemanticEditCommand::ToggleBold)
+        );
+        assert_eq!(
+            markdown_semantic_shortcut(PhysicalKey::Code(KeyCode::KeyB), ModifiersState::empty()),
+            None
+        );
+        assert_eq!(
+            markdown_semantic_shortcut(
+                PhysicalKey::Code(KeyCode::KeyB),
+                ModifiersState::SUPER | ModifiersState::SHIFT
+            ),
+            None
+        );
+        assert_eq!(
+            markdown_semantic_shortcut(
+                PhysicalKey::Code(KeyCode::KeyI),
+                ModifiersState::SUPER | ModifiersState::ALT
+            ),
+            None
+        );
+    }
 
     fn open_untitled_fixture(app: &mut App) {
         let dimensions = ViewportDimensions { visible_rows: 22, viewport_height: 22.0 };

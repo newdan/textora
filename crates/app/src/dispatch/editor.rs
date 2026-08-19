@@ -132,6 +132,21 @@ fn apply_editor_dirty_notifications(
 }
 
 impl App {
+    pub(crate) fn dispatch_semantic_edit(
+        &mut self,
+        command: ui::plugin::SemanticEditCommand,
+    ) -> AppEffect {
+        self.editor_runtime.set_preferred_x(None);
+        self.sync_plugin_state();
+
+        let (_result, outcome) = self.editor_runtime.execute_semantic_edit(command);
+        let current_dirty = self.active_tab_session().is_some_and(|tab| tab.document.dirty);
+        apply_editor_dirty_notifications(self, &outcome.notifications, current_dirty);
+        self.sync_plugin_state();
+
+        outcome.shell_effect
+    }
+
     fn dispatch_keyboard_tab_switch(&mut self, command: &EditCommand) -> AppEffect {
         let index = match command {
             EditCommand::NextTab if !self.editor_is_empty() => {
@@ -880,6 +895,27 @@ mod edit_tests {
             None,
             "editing must discard the horizontal column captured by earlier vertical movement"
         );
+    }
+
+    #[test]
+    #[cfg(feature = "markdown")]
+    fn markdown_semantic_edit_wraps_the_selection_in_one_transaction() {
+        let mut app = App::new(None);
+        let mut document = DocumentView::new(vec!["hello".to_owned()], 40, 40.0);
+        document.cursor_move_to_offset("hello".len());
+        document.cursor_mut().selection_anchor = Some(0);
+        app.push_entry_for_test(
+            document,
+            Box::new(textora_markdown::view::MarkdownEditorView::new()),
+        );
+        app.switch_workspace_for_test(0);
+
+        let effect = app.dispatch_semantic_edit(ui::plugin::SemanticEditCommand::ToggleBold);
+
+        let tab = app.active_tab_session().expect("Markdown tab should remain active");
+        assert_eq!(tab.full_text(), "**hello**");
+        assert!(tab.document.dirty);
+        assert!(effect.redraw);
     }
 
     #[test]
