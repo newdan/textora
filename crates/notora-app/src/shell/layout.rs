@@ -39,6 +39,12 @@ pub struct ShellLayoutInput {
     pub editor_header_visible: bool,
 }
 
+#[derive(Clone, Copy)]
+struct EditorChromeVisibility {
+    property_row: bool,
+    header: bool,
+}
+
 /// 一帧 shell 的独立区域。overlay 与 menu 位于 editor 之后绘制。
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct ShellLayout {
@@ -74,6 +80,10 @@ impl ShellLayout {
             + requested_card_width_logical
             + MINIMUM_EDITOR_WIDTH_LOGICAL)
             * dpi;
+        let editor_chrome_visibility = EditorChromeVisibility {
+            property_row: input.editor_property_row_visible,
+            header: input.editor_header_visible,
+        };
 
         if window_rect.w >= minimum_three_pane_width_px {
             return Self::three_pane(
@@ -83,8 +93,7 @@ impl ShellLayout {
                 requested_card_width_logical,
                 splitter_width_px,
                 input.navigation_pane_visibility,
-                input.editor_property_row_visible,
-                input.editor_header_visible,
+                editor_chrome_visibility,
             );
         }
         if window_rect.w >= (requested_card_width_logical + MINIMUM_EDITOR_WIDTH_LOGICAL) * dpi {
@@ -94,8 +103,7 @@ impl ShellLayout {
                 requested_card_width_logical,
                 splitter_width_px,
                 input.compact_navigation,
-                input.editor_property_row_visible,
-                input.editor_header_visible,
+                editor_chrome_visibility,
             );
         }
         Self::editor_overlay(
@@ -104,8 +112,7 @@ impl ShellLayout {
             requested_card_width_logical,
             input.compact_content,
             input.compact_navigation,
-            input.editor_property_row_visible,
-            input.editor_header_visible,
+            editor_chrome_visibility,
         )
     }
 
@@ -116,8 +123,7 @@ impl ShellLayout {
         requested_card_width_logical: f32,
         splitter_width_px: f32,
         navigation_pane_visibility: NavigationPaneVisibility,
-        editor_property_row_visible: bool,
-        editor_header_visible: bool,
+        editor_chrome_visibility: EditorChromeVisibility,
     ) -> Self {
         let navigation_width_px = match navigation_pane_visibility {
             NavigationPaneVisibility::Expanded => navigation_width_logical * dpi,
@@ -145,12 +151,8 @@ impl ShellLayout {
             (window_rect.right() - card_list_rect.right()).max(0.0),
             window_rect.h,
         );
-        let (editor_header_rect, editor_toolbar_rect, editor_body_rect) = editor_chrome_rects(
-            editor_rect,
-            dpi,
-            editor_property_row_visible,
-            editor_header_visible,
-        );
+        let (editor_header_rect, editor_toolbar_rect, editor_body_rect) =
+            editor_chrome_rects(editor_rect, dpi, editor_chrome_visibility);
         Self {
             responsive_mode: ResponsiveLayoutMode::ThreePane,
             dpi,
@@ -175,8 +177,7 @@ impl ShellLayout {
         requested_card_width_logical: f32,
         splitter_width_px: f32,
         compact_navigation: CompactNavigation,
-        editor_property_row_visible: bool,
-        editor_header_visible: bool,
+        editor_chrome_visibility: EditorChromeVisibility,
     ) -> Self {
         let card_width_px = requested_card_width_logical * dpi;
         let card_list_rect = Rect::new(0.0, 0.0, card_width_px, window_rect.h);
@@ -191,12 +192,8 @@ impl ShellLayout {
             (window_rect.right() - card_list_rect.right()).max(0.0),
             window_rect.h,
         );
-        let (editor_header_rect, editor_toolbar_rect, editor_body_rect) = editor_chrome_rects(
-            editor_rect,
-            dpi,
-            editor_property_row_visible,
-            editor_header_visible,
-        );
+        let (editor_header_rect, editor_toolbar_rect, editor_body_rect) =
+            editor_chrome_rects(editor_rect, dpi, editor_chrome_visibility);
         Self {
             responsive_mode: ResponsiveLayoutMode::NavigationOverlay,
             dpi,
@@ -221,19 +218,14 @@ impl ShellLayout {
         requested_card_width_logical: f32,
         compact_content: CompactContent,
         compact_navigation: CompactNavigation,
-        editor_property_row_visible: bool,
-        editor_header_visible: bool,
+        editor_chrome_visibility: EditorChromeVisibility,
     ) -> Self {
         let (card_list_rect, editor_rect) = match compact_content {
             CompactContent::CardList => (window_rect, Rect::ZERO),
             CompactContent::Editor => (Rect::ZERO, window_rect),
         };
-        let (editor_header_rect, editor_toolbar_rect, editor_body_rect) = editor_chrome_rects(
-            editor_rect,
-            dpi,
-            editor_property_row_visible,
-            editor_header_visible,
-        );
+        let (editor_header_rect, editor_toolbar_rect, editor_body_rect) =
+            editor_chrome_rects(editor_rect, dpi, editor_chrome_visibility);
         Self {
             responsive_mode: ResponsiveLayoutMode::EditorOverlay,
             dpi,
@@ -260,22 +252,21 @@ fn centered_splitter_rect(boundary_x: f32, height: f32, hit_width: f32) -> Rect 
 fn editor_chrome_rects(
     editor_rect: Rect,
     dpi: f32,
-    property_row_visible: bool,
-    header_visible: bool,
+    visibility: EditorChromeVisibility,
 ) -> (Rect, Rect, Rect) {
     if editor_rect.w <= 0.0 || editor_rect.h <= 0.0 {
         return (Rect::ZERO, Rect::ZERO, Rect::ZERO);
     }
 
     let available_height_logical = editor_rect.h / dpi;
-    let mut header_height_logical = if !header_visible {
+    let mut header_height_logical = if !visibility.header {
         0.0
     } else if available_height_logical < EDITOR_COMPACT_HEIGHT_THRESHOLD_LOGICAL {
         EDITOR_COMPACT_HEADER_HEIGHT_LOGICAL
     } else {
         EDITOR_HEADER_HEIGHT_LOGICAL
     };
-    if header_visible && !property_row_visible {
+    if visibility.header && !visibility.property_row {
         header_height_logical -= EDITOR_HEADER_PROPERTY_ROW_HEIGHT_LOGICAL;
     }
     let header_height_px = (header_height_logical * dpi).min(editor_rect.h);
