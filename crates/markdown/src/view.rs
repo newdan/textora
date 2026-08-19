@@ -24,6 +24,7 @@ use stdext::arena::scratch_arena;
 use ui::Theme;
 use ui::core::paint::DrawList;
 use ui::plugin::{PluginFactory, PluginMessage, PluginQuery, PluginResponse, ViewPlugin};
+use unicode_segmentation::UnicodeSegmentation;
 
 // ===== Syntax highlighter =====
 
@@ -49,6 +50,105 @@ const HIT_TEST_SNAP_MAX_LINE_HEIGHTS: f32 = 3.0;
 const PERF_LOG_ENV: &str = "EDIT_PLUS_PERF_LOG";
 const PERF_LOG_THRESHOLD_US_ENV: &str = "EDIT_PLUS_PERF_LOG_THRESHOLD_US";
 const DEFAULT_PERF_LOG_THRESHOLD_US: u128 = 1_000;
+const ASCII_METRIC_COUNT: usize = 128;
+const DEFAULT_ASCII_ADVANCE_RATIO: f32 = 0.55;
+const DEFAULT_CJK_ADVANCE_RATIO: f32 = 1.0;
+const TAB_SPACE_COUNT: f32 = 4.0;
+
+#[derive(Clone)]
+struct NavigationFontMetrics {
+    ascii_advance_ratios: [f32; ASCII_METRIC_COUNT],
+    cjk_advance_ratio: f32,
+    fallback_advance_ratio: f32,
+}
+
+impl Default for NavigationFontMetrics {
+    fn default() -> Self {
+        Self {
+            ascii_advance_ratios: [DEFAULT_ASCII_ADVANCE_RATIO; ASCII_METRIC_COUNT],
+            cjk_advance_ratio: DEFAULT_CJK_ADVANCE_RATIO,
+            fallback_advance_ratio: DEFAULT_CJK_ADVANCE_RATIO,
+        }
+    }
+}
+
+impl NavigationFontMetrics {
+    fn measure(shaper: &mut shaping::Shaper, font_size: f32, font_family: Option<&str>) -> Self {
+        let old_size = shaper.font_size();
+        let old_weight = shaper.font_weight();
+        let old_style = shaper.font_style();
+        let old_family = shaper.font_family().map(str::to_owned);
+        let font_size = font_size.max(f32::EPSILON);
+        shaper.set_font_size(font_size);
+        shaper.set_font_weight(shaping::Weight::NORMAL);
+        shaper.set_font_style(shaping::Style::Normal);
+        shaper.set_font_family(font_family);
+
+        let mut metrics = Self::default();
+        for byte in 0x20u8..0x7f {
+            let mut encoded = [0; 4];
+            let grapheme = char::from(byte).encode_utf8(&mut encoded);
+            metrics.ascii_advance_ratios[byte as usize] = shaper
+                .grapheme_advance(grapheme)
+                .unwrap_or(font_size * DEFAULT_ASCII_ADVANCE_RATIO)
+                / font_size;
+        }
+        metrics.ascii_advance_ratios[b'\t' as usize] =
+            metrics.ascii_advance_ratios[b' ' as usize] * TAB_SPACE_COUNT;
+        metrics.cjk_advance_ratio =
+            shaper.grapheme_advance("中").unwrap_or(font_size * DEFAULT_CJK_ADVANCE_RATIO)
+                / font_size;
+        metrics.fallback_advance_ratio =
+            shaper.grapheme_advance("�").unwrap_or(font_size * metrics.cjk_advance_ratio)
+                / font_size;
+
+        shaper.set_font_size(old_size);
+        shaper.set_font_weight(old_weight);
+        shaper.set_font_style(old_style);
+        shaper.set_font_family(old_family.as_deref());
+        metrics
+    }
+
+    fn grapheme_advance(&self, grapheme: &str, font_size: f32) -> f32 {
+        if grapheme.is_ascii() {
+            return grapheme
+                .bytes()
+                .map(|byte| self.ascii_advance_ratios[byte as usize] * font_size)
+                .sum();
+        }
+        let Some(first_character) = grapheme.chars().next() else {
+            return 0.0;
+        };
+        if first_character.is_ascii() {
+            return self.ascii_advance_ratios[first_character as usize] * font_size;
+        }
+        let ratio = if crate::layout::is_cjk_or_fullwidth(first_character) {
+            self.cjk_advance_ratio
+        } else {
+            self.fallback_advance_ratio
+        };
+        ratio * font_size
+    }
+
+    fn grapheme_x(&self, text: &str, grapheme_position: usize, font_size: f32) -> f32 {
+        UnicodeSegmentation::graphemes(text, true)
+            .take(grapheme_position)
+            .map(|grapheme| self.grapheme_advance(grapheme, font_size))
+            .sum()
+    }
+
+    fn grapheme_at_x(&self, text: &str, relative_x: f32, font_size: f32) -> usize {
+        let mut cumulative_x = 0.0;
+        for (grapheme_index, grapheme) in UnicodeSegmentation::graphemes(text, true).enumerate() {
+            let advance = self.grapheme_advance(grapheme, font_size);
+            if relative_x < cumulative_x + advance * 0.5 {
+                return grapheme_index;
+            }
+            cumulative_x += advance;
+        }
+        crate::grapheme_map::grapheme_count(text)
+    }
+}
 
 fn perf_logging_enabled() -> bool {
     static ENABLED: OnceLock<bool> = OnceLock::new();
@@ -260,6 +360,9 @@ pub struct PreviewEngine<S: BlockSource = MarkdownDoc> {
     pub base_line_height: f32,
     rendered_body_font_size: f32,
     rendered_line_height: f32,
+    body_navigation_font_metrics: NavigationFontMetrics,
+    code_navigation_font_metrics: NavigationFontMetrics,
+    navigation_metrics_style_hash: u64,
     pub paragraph_spacing: f32,
     pub toc_max_depth: u8,
 
@@ -308,6 +411,9 @@ impl<S: BlockSource> PreviewEngine<S> {
             base_line_height: 24.0,
             rendered_body_font_size: 15.0,
             rendered_line_height: 24.0,
+            body_navigation_font_metrics: NavigationFontMetrics::default(),
+            code_navigation_font_metrics: NavigationFontMetrics::default(),
+            navigation_metrics_style_hash: 0,
             paragraph_spacing: 12.0,
             toc_max_depth: 3,
             edit_ctx: None,
@@ -592,6 +698,21 @@ impl<S: BlockSource> PreviewEngine<S> {
         self.rendered_line_height = style.line_height;
         let style_hash = style_hash_quick(style);
         let highlighter = AppCodeHighlighter { theme };
+        if style_hash != self.navigation_metrics_style_hash
+            && let Some(active_shaper) = shaper.as_deref_mut()
+        {
+            self.body_navigation_font_metrics = NavigationFontMetrics::measure(
+                active_shaper,
+                style.body_font_size,
+                style.body_font_family.first().map(String::as_str),
+            );
+            self.code_navigation_font_metrics = NavigationFontMetrics::measure(
+                active_shaper,
+                style.code_font_size,
+                style.code_font_family.as_deref(),
+            );
+            self.navigation_metrics_style_hash = style_hash;
+        }
 
         // If cursor moved but no shaper available, escalate to full rebuild
         // so that needs_rebuild / rebuild_layout (below) will handle it.
@@ -1051,6 +1172,39 @@ impl<S: BlockSource> PreviewEngine<S> {
     pub fn cursor_screen_pos(&self) -> Option<(f32, f32, f32, f32)> {
         let ctx = self.edit_ctx.as_ref()?;
         self.cursor_screen_pos_for_byte(ctx.cursor_byte)
+    }
+
+    fn grapheme_x_for_line(&self, line: &crate::layout::FlatLine, grapheme_position: usize) -> f32 {
+        if line.shaped.is_some() {
+            return crate::layout::grapheme_x(line, grapheme_position);
+        }
+        self.navigation_font_metrics_for_line(line).grapheme_x(
+            &line.text,
+            grapheme_position,
+            line.font_size,
+        )
+    }
+
+    fn grapheme_at_x_for_line(&self, line: &crate::layout::FlatLine, relative_x: f32) -> usize {
+        if line.shaped.is_some() {
+            return crate::layout::grapheme_at_x(line, relative_x);
+        }
+        self.navigation_font_metrics_for_line(line).grapheme_at_x(
+            &line.text,
+            relative_x,
+            line.font_size,
+        )
+    }
+
+    fn navigation_font_metrics_for_line(
+        &self,
+        line: &crate::layout::FlatLine,
+    ) -> &NavigationFontMetrics {
+        if line.is_code {
+            &self.code_navigation_font_metrics
+        } else {
+            &self.body_navigation_font_metrics
+        }
     }
 
     fn cursor_screen_pos_for_byte(&self, cursor_byte: usize) -> Option<(f32, f32, f32, f32)> {
@@ -1773,14 +1927,10 @@ impl<S: BlockSource> PreviewEngine<S> {
     ) -> Option<usize> {
         let current_position =
             self.projection_position_for_vertical_move(lazy, index, current_byte)?;
-        let screen_x = target_x.unwrap_or_else(|| {
-            self.projection_screen_x(lazy, current_position)
-                .expect("canonical projection positions must have rendered or empty-line geometry")
-        });
         let target_visual_line_idx = match direction {
             ui::plugin::MoveDirection::Up => {
                 let Some(target) = current_position.flat_line_idx.checked_sub(1) else {
-                    return Some(current_byte);
+                    return Some(0);
                 };
                 target
             }
@@ -1789,11 +1939,15 @@ impl<S: BlockSource> PreviewEngine<S> {
                     return Some(current_byte);
                 };
                 if target >= index.visual_lines().len() {
-                    return Some(current_byte);
+                    return self.edit_source.as_deref().map(str::len);
                 }
                 target
             }
             _ => return None,
+        };
+        let screen_x = match target_x {
+            Some(screen_x) => screen_x,
+            None => self.projection_screen_x(lazy, current_position)?,
         };
         let target_grapheme =
             self.projection_grapheme_at_screen_x(lazy, target_visual_line_idx, screen_x)?;
@@ -1835,10 +1989,14 @@ impl<S: BlockSource> PreviewEngine<S> {
     fn projection_screen_x(&self, lazy: &LazyLayout<S>, position: VisualPosition) -> Option<f32> {
         if let Some(flat_line_idx) = lazy.flat_line_idx_for_projection(position.flat_line_idx) {
             let line = lazy.flat_lines.get(flat_line_idx)?;
-            return Some(line.rect.x + crate::layout::grapheme_x(line, position.grapheme_pos));
+            return Some(line.rect.x + self.grapheme_x_for_line(line, position.grapheme_pos));
         }
 
-        lazy.projected_empty_line_for_projection(position.flat_line_idx).map(|_| 0.0)
+        let empty_line = lazy.projected_empty_line_for_projection(position.flat_line_idx)?;
+        let source = self.edit_source.as_deref()?;
+        let source_line = source_line_at_byte(source, empty_line.source_byte)?;
+        let (x, _, _) = self.empty_source_line_typography(source_line, lazy);
+        Some(x)
     }
 
     fn projection_grapheme_at_screen_x(
@@ -1849,7 +2007,7 @@ impl<S: BlockSource> PreviewEngine<S> {
     ) -> Option<usize> {
         if let Some(flat_line_idx) = lazy.flat_line_idx_for_projection(visual_line_idx) {
             let line = lazy.flat_lines.get(flat_line_idx)?;
-            return Some(crate::layout::grapheme_at_x(line, screen_x - line.rect.x));
+            return Some(self.grapheme_at_x_for_line(line, screen_x - line.rect.x));
         }
 
         lazy.projected_empty_line_for_projection(visual_line_idx).map(|_| 0)
@@ -2644,18 +2802,33 @@ fn selection_augmentation_edit_plan(
     augmentation: ui::plugin::EditAugmentation,
 ) -> ui::plugin::EditPlan {
     let virtual_range = augmentation.replace_range.unwrap_or(selection.start..selection.start);
-    if virtual_range.start > selection.start || virtual_range.end < selection.start {
-        return ui::plugin::EditPlan::UseDefault;
-    }
     let deleted_len = selection.end - selection.start;
-    let range_start = virtual_range.start;
-    let range_end = virtual_range.end + deleted_len;
-    ui::plugin::EditPlan::Apply(ui::plugin::EditTransaction::replace(
-        request.source_generation,
-        range_start..range_end,
-        augmentation.insert_text.unwrap_or_default(),
-        augmentation.cursor_byte_after,
-    ))
+    let replacement_text = augmentation.insert_text.unwrap_or_default();
+
+    if virtual_range.start <= selection.start && virtual_range.end >= selection.start {
+        return ui::plugin::EditPlan::Apply(ui::plugin::EditTransaction::replace(
+            request.source_generation,
+            virtual_range.start..virtual_range.end + deleted_len,
+            replacement_text,
+            augmentation.cursor_byte_after,
+        ));
+    }
+
+    let mapped_range = if virtual_range.end < selection.start {
+        virtual_range
+    } else if virtual_range.start > selection.start {
+        virtual_range.start + deleted_len..virtual_range.end + deleted_len
+    } else {
+        return ui::plugin::EditPlan::UseDefault;
+    };
+    ui::plugin::EditPlan::Apply(ui::plugin::EditTransaction {
+        source_generation: request.source_generation,
+        replacements: vec![
+            ui::plugin::TextReplacement { range: selection.clone(), text: String::new() },
+            ui::plugin::TextReplacement { range: mapped_range, text: replacement_text },
+        ],
+        selection_after: ui::plugin::EditSelection::Caret(augmentation.cursor_byte_after),
+    })
 }
 
 impl ui::plugin::EditPolicy for MarkdownEditorView {
@@ -5194,6 +5367,78 @@ C608-01 武昌职业第01组：计划 68，历史低线较低，是表里最像�
     }
 
     #[test]
+    fn visual_move_at_outer_visual_rows_reaches_document_boundaries() {
+        let source = "hello\nworld";
+        let view = make_view(source);
+
+        assert_eq!(view.engine().visual_move(3, MoveDirection::Up, None), Some(0));
+        assert_eq!(
+            view.engine().visual_move(source.len() - 2, MoveDirection::Down, None),
+            Some(source.len())
+        );
+    }
+
+    #[test]
+    fn projected_empty_line_screen_x_preserves_surrounding_indent() {
+        let source = "> quoted\n\n";
+        let view = make_view(source);
+        let position = view
+            .engine()
+            .projection_index()
+            .visual_position_for_source(source.len(), CursorAffinity::Downstream)
+            .expect("trailing empty line should have a projection position");
+        let previous_line_x =
+            view.engine().flat_lines().last().expect("quoted paragraph should render").rect.x;
+
+        assert!(previous_line_x > 0.0, "fixture must provide a non-zero indentation");
+        let lazy = view.engine().lazy.as_ref().expect("view should retain lazy layout state");
+        assert_eq!(view.engine().projection_screen_x(lazy, position), Some(previous_line_x));
+    }
+
+    #[test]
+    fn unshaped_navigation_preserves_proportional_font_advances() {
+        let mut view = make_projected_view("Wi");
+        view.engine_mut().lazy.as_mut().expect("projected view should retain layout").flat_lines
+            [0]
+        .shaped = None;
+        let line = &view.engine().flat_lines()[0];
+        let after_w = view.engine().grapheme_x_for_line(line, 1);
+        let after_i = view.engine().grapheme_x_for_line(line, 2);
+        let wide_advance = after_w;
+        let narrow_advance = after_i - after_w;
+
+        assert!(
+            wide_advance > narrow_advance * 1.5,
+            "unshaped navigation must retain proportional advances: W={wide_advance}, i={narrow_advance}"
+        );
+    }
+
+    #[test]
+    fn unshaped_code_navigation_preserves_monospace_advances() {
+        let source = "```\nWi\n```";
+        let mut view = make_projected_view(source);
+        let code_line_index = view
+            .engine()
+            .flat_lines()
+            .iter()
+            .position(|line| line.text == "Wi")
+            .expect("code content line should render");
+        view.engine_mut().lazy.as_mut().expect("projected view should retain layout").flat_lines
+            [code_line_index]
+            .shaped = None;
+        let line = &view.engine().flat_lines()[code_line_index];
+        let after_w = view.engine().grapheme_x_for_line(line, 1);
+        let after_i = view.engine().grapheme_x_for_line(line, 2);
+        let wide_advance = after_w;
+        let narrow_advance = after_i - after_w;
+
+        assert!(
+            (wide_advance - narrow_advance).abs() < wide_advance * 0.15,
+            "unshaped code navigation must retain monospace advances: W={wide_advance}, i={narrow_advance}"
+        );
+    }
+
+    #[test]
     fn visual_move_line_start_and_end() {
         let v = make_view("- list item");
         // byte 2 is 'l' (first char of "list item")
@@ -5784,6 +6029,37 @@ C608-01 武昌职业第01组：计划 68，历史低线较低，是表里最像�
             "preedit cursor at byte 1 should stay before end cursor; preedit={}, end={}",
             preedit_rect.x,
             end_rect.x
+        );
+    }
+
+    #[test]
+    fn editor_multiline_preedit_cursor_uses_the_virtual_second_line() {
+        use ui::plugin::{PluginMessage, ViewPlugin};
+
+        let source = "hello world";
+        let mut doc = StubDoc::new(source);
+        let mut view = MarkdownEditorView::new();
+        view.set_source(source.into(), 1);
+        render_editor_once(&mut view, &doc);
+
+        view.handle_message(PluginMessage::SetCursorByte(5), &mut doc);
+        let base_rect =
+            editor_cursor_rect_from_draw_list(&render_editor_draw_list(&mut view, &doc));
+
+        let preedit = "中\n文";
+        view.handle_message(
+            PluginMessage::SetPreedit {
+                text: preedit.into(),
+                cursor: Some((preedit.len(), preedit.len())),
+            },
+            &mut doc,
+        );
+        let preedit_rect =
+            editor_cursor_rect_from_draw_list(&render_editor_draw_list(&mut view, &doc));
+
+        assert!(
+            preedit_rect.y > base_rect.y + base_rect.h * 0.5,
+            "multiline preedit caret must move to its virtual second line: base={base_rect:?}, preedit={preedit_rect:?}"
         );
     }
 
@@ -7872,7 +8148,7 @@ viebcoding 用过吗?
             view.engine().cursor_screen_pos().expect("cursor rect should resolve");
 
         let expected_grapheme =
-            crate::layout::grapheme_at_x(target_line, cursor_x - target_line.rect.x);
+            view.engine().grapheme_at_x_for_line(target_line, cursor_x - target_line.rect.x);
         let expected_byte = view
             .engine()
             .byte_from_flat_line_and_visual_grapheme(target_flat_idx, expected_grapheme)
@@ -8521,6 +8797,26 @@ mod tests {
         let (edited, cursor) = apply_single_replacement(source, &plan);
         assert_eq!(edited, "# he\norld");
         assert_eq!(cursor, 5);
+    }
+
+    #[test]
+    fn selection_enter_in_setext_heading_preserves_heading_and_creates_block_after_underline() {
+        let source = "Title\n===\nafter";
+        let plan = selection_enter_plan(source, 1..4);
+        let EditPlan::Apply(transaction) = plan else {
+            panic!("Setext selection Enter must produce one atomic transaction");
+        };
+
+        assert_eq!(transaction.replacements.len(), 2);
+        let mut edited = source.to_owned();
+        let mut replacements = transaction.replacements.clone();
+        replacements.sort_by_key(|replacement| replacement.range.start);
+        for replacement in replacements.iter().rev() {
+            edited.replace_range(replacement.range.clone(), &replacement.text);
+        }
+
+        assert_eq!(edited, "Te\n===\n\n\nafter");
+        assert_eq!(transaction.selection_after, EditSelection::Caret("Te\n===\n\n".len()));
     }
 
     #[test]

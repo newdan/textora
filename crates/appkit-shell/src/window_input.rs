@@ -73,9 +73,27 @@ pub fn scroll_delta_pixels(delta: &MouseScrollDelta, line_height: f32) -> (f32, 
     }
 }
 
-/// Allows non-character commands to continue while an IME preedit is active.
+/// Allows navigation and non-editing commands while an IME preedit is active.
 pub fn command_allowed_during_preedit(preedit_text: &str, command: &EditCommand) -> bool {
-    preedit_text.is_empty() || !matches!(command, EditCommand::InsertChar(_))
+    preedit_text.is_empty() || !command_mutates_document(command)
+}
+
+fn command_mutates_document(command: &EditCommand) -> bool {
+    matches!(
+        command,
+        EditCommand::InsertChar(_)
+            | EditCommand::InsertText(_)
+            | EditCommand::InsertNewline
+            | EditCommand::Backspace
+            | EditCommand::DeleteForward
+            | EditCommand::DeleteRange(_)
+            | EditCommand::ReplaceRange { .. }
+            | EditCommand::Cut
+            | EditCommand::Paste
+            | EditCommand::Undo
+            | EditCommand::Redo
+            | EditCommand::Tab
+    )
 }
 
 #[cfg(test)]
@@ -113,9 +131,26 @@ mod tests {
     }
 
     #[test]
-    fn blocks_only_character_insertion_during_preedit() {
-        assert!(!command_allowed_during_preedit("拼", &EditCommand::InsertChar("a".into())));
+    fn blocks_document_mutations_during_preedit() {
+        let mutating_commands = [
+            EditCommand::InsertChar("a".into()),
+            EditCommand::InsertText("text".into()),
+            EditCommand::InsertNewline,
+            EditCommand::Backspace,
+            EditCommand::DeleteForward,
+            EditCommand::Tab,
+            EditCommand::Cut,
+            EditCommand::Paste,
+            EditCommand::Undo,
+            EditCommand::Redo,
+        ];
+
+        for command in mutating_commands {
+            assert!(!command_allowed_during_preedit("拼", &command), "{command:?}");
+        }
+
         assert!(command_allowed_during_preedit("拼", &EditCommand::MoveLeft));
+        assert!(command_allowed_during_preedit("拼", &EditCommand::ExtendRight));
         assert!(command_allowed_during_preedit("", &EditCommand::InsertChar("a".into())));
     }
 

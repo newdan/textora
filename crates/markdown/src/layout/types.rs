@@ -695,6 +695,7 @@ impl<S: BlockSource> LazyLayout<S> {
             rect: Rect::new(line.rect.x, line.rect.y + y_correction, line.rect.w, line.rect.h),
             text: line.text.clone(),
             font_size: line.font_size,
+            is_code: line.is_code,
             shaped,
             requires_source_projection: true,
             source_projection: line.source_projection.as_ref().map(|projection| {
@@ -792,6 +793,7 @@ impl<S: BlockSource> LazyLayout<S> {
                     ),
                     text: String::new(),
                     font_size: 14.0, // Non-zero so the cursor is visible
+                    is_code: false,
                     shaped: None,
                     requires_source_projection: false,
                     source_projection: None,
@@ -950,6 +952,8 @@ pub struct FlatLine {
     pub text: String,
     /// Font size in pixels. 0.0 for non-text elements (e.g., HorizontalRule).
     pub font_size: f32,
+    /// Whether this line uses the configured code font family.
+    pub is_code: bool,
     pub shaped: Option<shaping::ShapedRun>,
     /// Whether this rendered line is editable source content and must retain a projection.
     pub(crate) requires_source_projection: bool,

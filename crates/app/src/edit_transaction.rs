@@ -193,6 +193,9 @@ fn delete_selection_or_adjacent_grapheme(
         } else {
             (request.cursor_byte, target)
         };
+        if start == end {
+            return EditPlan::Consume;
+        }
         EditPlan::Apply(EditTransaction::replace(
             request.source_generation,
             start..end,
@@ -622,6 +625,18 @@ mod tests {
                 EditHistoryKind::Delete,
             )
         );
+    }
+
+    #[test]
+    fn default_delete_at_document_boundary_is_consumed_without_transaction() {
+        let mut doc = document_from_text("abc");
+        doc.cursor_move_to_offset(0);
+        let backward_request = build_edit_request(&doc, EditIntent::DeleteBackward);
+        assert_eq!(default_edit_plan(&backward_request, &doc), EditPlan::Consume);
+
+        doc.cursor_move_to_offset(doc.full_text().len());
+        let forward_request = build_edit_request(&doc, EditIntent::DeleteForward);
+        assert_eq!(default_edit_plan(&forward_request, &doc), EditPlan::Consume);
     }
 
     #[test]

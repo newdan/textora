@@ -625,7 +625,6 @@ impl App {
                         // Reset WYSIWYG preferred x so the next vertical move
                         // doesn't anchor to a stale position
                         self.editor_runtime.set_preferred_x(None);
-                        self.editor_runtime.set_preferred_x(None);
                     }
                 }
             }

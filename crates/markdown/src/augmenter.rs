@@ -23,6 +23,7 @@ const BLOCK_BOUNDARY_NEWLINE_COUNT: usize = 2;
 const MAX_LEADING_BLOCK_INDENT: usize = 3;
 /// CommonMark 空格形式硬换行所需的最少行尾空格数。
 const HARD_BREAK_MIN_SPACES: usize = 2;
+const TASK_LIST_CONTENT_SEPARATOR: char = ' ';
 
 // ─── 入口 ──────────────────────────────────────────────────────────────────
 
@@ -51,6 +52,9 @@ fn augment_backspace(source: &str, current_byte: usize) -> Option<EditAugmentati
     if let Some(aug) = backspace_empty_source_line(source, current_byte) {
         return Some(aug);
     }
+    if let Some(aug) = backspace_at_atx_heading_marker_start(source, current_byte) {
+        return Some(aug);
+    }
     if let Some(aug) = backspace_paragraph_boundary(source, current_byte) {
         return Some(aug);
     }
@@ -63,6 +67,36 @@ fn augment_backspace(source: &str, current_byte: usize) -> Option<EditAugmentati
         replace_range: Some(range.clone()),
         cursor_byte_after: range.start,
     })
+}
+
+fn backspace_at_atx_heading_marker_start(
+    source: &str,
+    current_byte: usize,
+) -> Option<EditAugmentation> {
+    let (line_start, _, line_end) = locate_source_line_bounds(source, current_byte)?;
+    let line_content_end = source_line_content_end(source, line_end);
+    let line = source.as_bytes().get(line_start..line_content_end)?;
+    let leading_spaces =
+        line.iter().take(MAX_LEADING_BLOCK_INDENT).take_while(|&&byte| byte == b' ').count();
+    let marker_start = line_start + leading_spaces;
+    if current_byte != marker_start {
+        return None;
+    }
+
+    let marker_width = line[leading_spaces..].iter().take_while(|&&byte| byte == b'#').count();
+    if !(1..=6).contains(&marker_width)
+        || !matches!(line.get(leading_spaces + marker_width), None | Some(b' ' | b'\t'))
+    {
+        return None;
+    }
+
+    let augmentation = EditAugmentation {
+        insert_text: Some(String::new()),
+        replace_range: None,
+        cursor_byte_after: current_byte,
+    };
+    debug_assert_augmentation(&augmentation, source);
+    Some(augmentation)
 }
 
 fn backspace_last_interblock_paragraph_grapheme(
@@ -1101,9 +1135,16 @@ fn list_continuation_marker(
             let suffix_start = source_marker.bytes().take_while(u8::is_ascii_digit).count();
             format!("{}{}", number + 1, &source_marker[suffix_start..])
         }
-        ListBullet::TaskList(false) => source_marker.to_owned(),
-        ListBullet::TaskList(true) => {
-            source_marker.replacen("[x]", "[ ]", 1).replacen("[X]", "[ ]", 1)
+        ListBullet::TaskList(checked) => {
+            let mut continuation_marker = if checked {
+                source_marker.replacen("[x]", "[ ]", 1).replacen("[X]", "[ ]", 1)
+            } else {
+                source_marker.to_owned()
+            };
+            if !matches!(continuation_marker.as_bytes().last(), Some(b' ' | b'\t')) {
+                continuation_marker.push(TASK_LIST_CONTENT_SEPARATOR);
+            }
+            continuation_marker
         }
     }
 }
@@ -1214,6 +1255,22 @@ mod tests {
         assert_eq!(parse_list_marker("7)\titem", 0), Some((ListBullet::Ordered(7), 3)));
         assert_eq!(parse_list_marker("- [ ] item", 0), Some((ListBullet::TaskList(false), 6)));
         assert_eq!(parse_list_marker("1234567890. item", 0), None);
+    }
+
+    #[test]
+    fn list_enter_normalizes_task_markers_without_a_content_separator() {
+        let cases = ["- [ ]todo", "- [x]done", "- [X]done"];
+
+        for source in cases {
+            let augmentation = augment_edit(source, source.len(), AugmentKind::Enter)
+                .expect("Enter should continue a task list item");
+
+            assert_eq!(
+                augmentation.insert_text.as_deref(),
+                Some("\n- [ ] "),
+                "continued task marker must remain valid for {source:?}"
+            );
+        }
     }
 
     #[test]
@@ -1360,6 +1417,19 @@ mod tests {
     }
 
     #[test]
+    fn backspace_at_atx_heading_marker_start_is_consumed() {
+        let source = "previous\n# Heading";
+        let marker_start = "previous\n".len();
+
+        let augmentation = augment_edit(source, marker_start, AugmentKind::Backspace)
+            .expect("heading marker start must guard the preceding source boundary");
+
+        assert_eq!(augmentation.insert_text.as_deref(), Some(""));
+        assert_eq!(augmentation.replace_range, None);
+        assert_eq!(augmentation.cursor_byte_after, marker_start);
+    }
+
+    #[test]
     fn enter_then_backspace_restores_plain_paragraph_and_heading_cases() {
         let cases = [
             ("hello world", "hello ".len()),
@@ -1424,6 +1494,7 @@ mod tests {
             ("7) item", "\n8) "),
             ("-\titem", "\n-\t"),
             ("- [x] done", "\n- [ ] "),
+            ("- [ ]\ttodo", "\n- [ ]\t"),
         ];
 
         for (source, expected_insert) in cases {

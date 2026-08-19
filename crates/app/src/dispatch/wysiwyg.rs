@@ -99,19 +99,26 @@ impl App {
         };
 
         // Phase 2: apply cursor + notify plugin with snapped byte (mutable borrow).
-        let Some(mut tab) = self.active_tab_session_mut() else {
-            return AppEffect::NONE;
+        let cursor_after = {
+            let Some(mut tab) = self.active_tab_session_mut() else {
+                return AppEffect::NONE;
+            };
+            if let Some(target) = semantic_target {
+                apply_edit_hit_target(&mut tab, target);
+            } else if let Some(new_byte) = visual_target {
+                set_wysiwyg_cursor_and_selection(&mut tab, new_byte, selection_anchor);
+            } else {
+                return AppEffect::NONE;
+            }
+            tab.document.cursor_offset().to_usize()
         };
-        if let Some(target) = semantic_target {
-            apply_edit_hit_target(&mut tab, target);
-        } else if let Some(new_byte) = visual_target {
-            set_wysiwyg_cursor_and_selection(&mut tab, new_byte, selection_anchor);
-        } else {
-            return AppEffect::NONE;
-        }
 
         if vertical_navigation {
-            self.editor_runtime.set_preferred_x(vertical_anchor_x);
+            let resolved_anchor_x = vertical_anchor_x.or_else(|| {
+                self.active_tab_session()
+                    .and_then(|active_tab| wysiwyg_cursor_x(&active_tab, cursor_after))
+            });
+            self.editor_runtime.set_preferred_x(resolved_anchor_x);
             self.ensure_wysiwyg_cursor_visible();
         } else {
             self.editor_runtime.set_preferred_x(None);
@@ -316,6 +323,7 @@ pub(crate) mod semantic_test_support {
         pub(crate) hit_target_response: SemanticQueryResponse,
         pub(crate) visual_move_result: Option<usize>,
         pub(crate) hit_test_byte_result: Option<usize>,
+        pub(crate) cursor_screen_positions: Vec<(usize, f32)>,
         pub(crate) queried_operations: Vec<&'static str>,
         pub(crate) sync_messages: Vec<RecordedSyncMessage>,
     }
@@ -383,6 +391,14 @@ pub(crate) mod semantic_test_support {
                 PluginQuery::HitTestByte { .. } => {
                     state.queried_operations.push("hit_byte");
                     PluginResponse::BytePosition(state.hit_test_byte_result)
+                }
+                PluginQuery::CursorScreenPos(byte) => {
+                    let rect = state
+                        .cursor_screen_positions
+                        .iter()
+                        .find(|(position_byte, _)| *position_byte == byte)
+                        .map(|(_, x)| (*x, 0.0, 2.0, 16.0));
+                    PluginResponse::CursorScreenRect(rect)
                 }
                 PluginQuery::ContentHeight => PluginResponse::Float(1_000.0),
                 _ => PluginResponse::None,
@@ -617,5 +633,30 @@ mod semantic_target_tests {
             RecordedSyncMessage::Anchor(None),
             RecordedSyncMessage::SelectionCursor(None),
         ]));
+    }
+
+    #[test]
+    fn first_vertical_move_seeds_preferred_x_from_resolved_target_geometry() {
+        use crate::dispatch::wysiwyg::semantic_test_support::{
+            SemanticPluginState, SemanticQueryResponse, app_with_semantic_plugin,
+        };
+        use std::cell::RefCell;
+        use std::rc::Rc;
+
+        const TARGET_BYTE: usize = 4;
+        const TARGET_X: f32 = 72.0;
+
+        let state = Rc::new(RefCell::new(SemanticPluginState {
+            move_target_response: SemanticQueryResponse::Target(None),
+            visual_move_result: Some(TARGET_BYTE),
+            cursor_screen_positions: vec![(TARGET_BYTE, TARGET_X)],
+            ..SemanticPluginState::default()
+        }));
+        let mut app = app_with_semantic_plugin("abcdef", state);
+
+        let effect = app.dispatch_wysiwyg_navigation(&EditCommand::MoveDown);
+
+        assert_eq!(effect, AppEffect::REDRAW);
+        assert_eq!(app.editor_runtime.preferred_x(), Some(TARGET_X));
     }
 }

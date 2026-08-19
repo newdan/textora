@@ -1,5 +1,10 @@
 # WYSIWYG Cursor Path Convergence Implementation Plan
 
+> **实施修订（2026-08-19）**：连续垂直移动必须优先保留移动前播种的
+> `preferred_x`，不能在每次落点后用短行的 snapped cursor x 覆盖。仅当首次
+> 移动前无法取得 cursor rect 时，才在移动完成后用实际落点补播种。下文 Step 2
+> 中“每次移动后查询 snapped_byte 更新 preferred_x”的原始要求已被此规则取代。
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use `superpowers:subagent-driven-development` (recommended) or `superpowers:executing-plans` to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** 将 Markdown WYSIWYG 编辑中的 cursor、selection、plugin sync 收敛到少数明确入口，消除“视觉光标在 A，真实编辑落点在 B”的复发路径。

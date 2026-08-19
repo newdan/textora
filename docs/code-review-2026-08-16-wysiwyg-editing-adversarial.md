@@ -152,8 +152,19 @@
 | M7 垂直移动不滚动 | `9c5c6d0` | 复用 `PluginMessage::Scroll`，最小位移、无抖动 |
 | M8 死派发路径 | `f12cfb8` | 删除不可达链路（−429 行），3 个 Enter 测试迁到生产事务路径 |
 | M9 undo 粒度 | `ea323d8` | `EditPlan::ApplyDefault` 携带 history kind，连续输入/退格合并为单条 undo |
+| L2 IME preedit 输入穿透 | 2026-08-19 工作区修复 | 文档修改命令全部阻断，且守卫前移到插件 EditIntent 映射之前 |
+| L3 垂直选区首尾 | 2026-08-19 工作区修复 | 首/末视觉行分别返回文档起点/终点，覆盖非边界列 |
+| L4 投影坐标 panic | 2026-08-19 工作区修复 | 移除 `expect`，缺失几何时安全返回 `None` |
+| L5 空行 goal-x | 2026-08-19 工作区修复 | 复用相邻渲染行 typography x，保留引用/列表缩进 |
+| L6 无分隔 task marker | 2026-08-19 工作区修复 | 续项统一补内容空格，保留已有空格或 tab |
+| L7 边界删除空事务 | 2026-08-19 工作区修复 | BOF Backspace / EOF Delete 直接 `Consume` |
+| L8 未 shaping 行列误差 | 2026-08-19 工作区修复 | 缓存真实字体 advance，未 shaping 行不再把比例字体按统一 `0.55em` 处理 |
+| L9 首次 goal-x 未播种 | 2026-08-19 工作区修复 | 移动前无 rect 时，从实际落点几何补播种 |
+| L10 松散列表空行 Enter | 2026-08-19 测试排除 | pulldown range 归一化后分类为普通空行，回归测试锁定不插空 item |
+| L11 多行 preedit 行归属 | 2026-08-19 测试排除 | 真实视图测试确认 caret 落在虚拟第二行，现有 ordinal 投影正确 |
+| L12 ATX marker 起点退格 | 2026-08-19 工作区修复 | marker 起点增加消费型护栏，阻止与上一段拼接 |
 
-未修复（低严重度/存疑项，见上文 L2–L12）：IME preedit 放行 Enter/Backspace（L2，需真机验证）、ExtendUp/Down 文档首尾不扩展（L3）等，维持原状待后续评估。
+至此，本报告列出的 H1、M1–M9、L1–L12 均已修复，或通过针对性回归测试排除旧审查中的存疑场景。
 
 合并前锁定测试：`4659c65`（T2 range 归一化带来的 Enter 分类变化回归锁定）。最终全分支审查结论：With fixes → 该修复已完成。
 

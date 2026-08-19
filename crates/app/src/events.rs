@@ -58,8 +58,8 @@ pub(crate) fn handle_keyboard(app: &mut App, event: &winit::event::KeyEvent) -> 
 
     // ── IME 互斥守卫 ────────────────────────────────────────────
     // macOS + winit 0.30 会同时派发 Ime::Preedit 和 KeyboardInput。
-    // IME composition 期间禁止 InsertChar 走 KeyboardInput 路径，
-    // 让 Ime::Commit 作为字符插入的唯一入口，避免双插入。
+    // IME composition 期间禁止文档修改走 KeyboardInput 路径，
+    // 让 Ime::Commit 作为输入提交的唯一入口，避免双插入或提前删除。
     //
     // 条件 1：平台明确标记此键已被 IME 消费。
     if is_ime_process_key(&event.logical_key) {
@@ -70,6 +70,20 @@ pub(crate) fn handle_keyboard(app: &mut App, event: &winit::event::KeyEvent) -> 
         crate::app_lifecycle::winit_key_to_keycode(&event.logical_key, event.text.as_deref());
     let input_modifiers = app.editor_runtime.input_modifiers();
     let modifiers = ui_modifiers(input_modifiers);
+
+    // 条件 2：当前正处于 IME composition（preedit_text 非空）。
+    // 必须先于插件快捷键映射检查，否则 Enter / Backspace 会通过
+    // EditIntent 直接修改文档。导航与非编辑快捷键仍可继续执行。
+    let (preedit_text, _) = app.editor_runtime.preedit();
+    if !preedit_text.is_empty() {
+        if let Some(command) = key_to_command(&event.logical_key, input_modifiers)
+            && command_allowed_during_preedit(&preedit_text, &command)
+        {
+            actions.push(AppAction::ExecuteAppCommands(vec![AppCommand::Edit(command)]));
+        }
+        return actions;
+    }
+
     let mapped_intent = key_code.as_ref().and_then(|key_code| {
         app.active_tab_session().and_then(|tab| tab.map_key_intent(key_code, &modifiers))
     });
@@ -77,18 +91,6 @@ pub(crate) fn handle_keyboard(app: &mut App, event: &winit::event::KeyEvent) -> 
         let effect = app.dispatch_transactional_edit(intent, None);
         app.apply_effect(effect);
         return Vec::new();
-    }
-
-    // 条件 2：当前正处于 IME composition（preedit_text 非空）。
-    // 保留导航 / 快捷键命令，跳过 InsertChar。
-    let (preedit_text, _) = app.editor_runtime.preedit();
-    if !preedit_text.is_empty() {
-        if let Some(cmd) = key_to_command(&event.logical_key, input_modifiers)
-            && command_allowed_during_preedit(&preedit_text, &cmd)
-        {
-            actions.push(AppAction::ExecuteAppCommands(vec![AppCommand::Edit(cmd)]));
-        }
-        return actions;
     }
 
     let key_text = event.logical_key.to_text();

@@ -328,6 +328,7 @@ mod tests {
             rect: Rect::new(0.0, 0.0, 200.0, 20.0),
             text: text.to_string(),
             font_size: 14.0,
+            is_code: false,
             shaped: None,
             requires_source_projection: false,
             source_projection: None,
@@ -385,6 +386,7 @@ mod tests {
             rect: Rect::new(0.0, 0.0, 200.0, 20.0),
             text: "x".to_string(),
             font_size: 14.0,
+            is_code: false,
             shaped: None,
             requires_source_projection: true,
             source_projection: Some(VisualLineProjection {
