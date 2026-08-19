@@ -80,6 +80,7 @@ const WORKSPACE_NAVIGATION_KEY: u64 = 1;
 const STARRED_NAVIGATION_KEY: u64 = 2;
 const TRASH_NAVIGATION_KEY: u64 = 3;
 const EXTERNAL_FILES_NAVIGATION_KEY: u64 = 4;
+const TAG_ROOT_NAVIGATION_KEY: u64 = 5;
 const DIRECTORY_NAVIGATION_KEY_START: u64 = 100;
 const TAG_NAVIGATION_KEY_START: u64 = 10_000;
 const NEW_WORKSPACE_ACTION_KEY: TreeRowActionKey = TreeRowActionKey(1);
@@ -298,19 +299,33 @@ impl NotoraRenderModel {
             NavigationScope::Starred,
             selected_scope,
         );
-        for (index, tag) in state.library.navigation_tree.tags.iter().enumerate() {
-            let key = TAG_NAVIGATION_KEY_START + index as u64;
-            push_navigation_row(
-                &mut navigation_rows,
-                &mut navigation_actions,
-                key,
-                tag.display_name.clone(),
-                "tag",
-                0,
-                u32::try_from(tag.active_note_count).ok(),
-                NavigationScope::Tag { tag_id: tag.tag_id },
-                selected_scope,
-            );
+        let visible_tags = state
+            .library
+            .navigation_tree
+            .tags
+            .iter()
+            .filter(|tag| tag.active_note_count > 0)
+            .collect::<Vec<_>>();
+        push_tag_root_navigation_row(
+            &mut navigation_rows,
+            !visible_tags.is_empty(),
+            state.library.navigation_tree.tag_root_expanded,
+        );
+        if state.library.navigation_tree.tag_root_expanded {
+            for (index, tag) in visible_tags.into_iter().enumerate() {
+                let key = TAG_NAVIGATION_KEY_START + index as u64;
+                push_navigation_row(
+                    &mut navigation_rows,
+                    &mut navigation_actions,
+                    key,
+                    tag.display_name.clone(),
+                    "tag",
+                    1,
+                    u32::try_from(tag.active_note_count).ok(),
+                    NavigationScope::Tag { tag_id: tag.tag_id },
+                    selected_scope,
+                );
+            }
         }
         push_navigation_row(
             &mut navigation_rows,
@@ -1743,6 +1758,10 @@ impl NotoraShell {
                 .or_else(|| {
                     (*key == TreeRowKey(WORKSPACE_NAVIGATION_KEY))
                         .then_some(NotoraAction::WorkspaceRootExpansionToggled)
+                })
+                .or_else(|| {
+                    (*key == TreeRowKey(TAG_ROOT_NAVIGATION_KEY))
+                        .then_some(NotoraAction::TagRootExpansionToggled)
                 }),
             WidgetAction::TreeList(TreeListAction::TrailingActionActivated {
                 row_key,
@@ -2780,6 +2799,24 @@ fn push_workspace_navigation_row(
     });
 }
 
+fn push_tag_root_navigation_row(rows: &mut Vec<TreeRowInput>, has_tags: bool, expanded: bool) {
+    rows.push(TreeRowInput {
+        key: TreeRowKey(TAG_ROOT_NAVIGATION_KEY),
+        label: "标签".to_owned(),
+        icon: Some("list-tree".to_owned()),
+        depth: 0,
+        expansion: match (has_tags, expanded) {
+            (false, _) => TreeRowExpansion::Leaf,
+            (true, true) => TreeRowExpansion::Expanded,
+            (true, false) => TreeRowExpansion::Collapsed,
+        },
+        selection: TreeRowSelection::Unselected,
+        badge: None,
+        tooltip: None,
+        trailing_actions: Vec::new(),
+    });
+}
+
 #[allow(clippy::too_many_arguments)]
 fn push_navigation_directory_row(
     rows: &mut Vec<TreeRowInput>,
@@ -3128,12 +3165,13 @@ mod tests {
     #[test]
     fn builds_a_static_render_model() {
         let model = NotoraRenderModel::from_state(&NotoraState::default());
-        assert_eq!(model.navigation_rows.len(), 4);
+        assert_eq!(model.navigation_rows.len(), 5);
         assert_eq!(model.navigation_rows[0].icon.as_deref(), Some("folder-open"));
         assert_eq!(model.navigation_rows[0].label, "工作区");
         assert_eq!(model.navigation_rows[1].label, "星标");
-        assert_eq!(model.navigation_rows[2].label, "回收站");
-        assert_eq!(model.navigation_rows[3].label, "文件");
+        assert_eq!(model.navigation_rows[2].label, "标签");
+        assert_eq!(model.navigation_rows[3].label, "回收站");
+        assert_eq!(model.navigation_rows[4].label, "文件");
         assert_eq!(model.card_list_title, "工作区");
         assert!(model.cards.is_empty());
     }
@@ -3905,24 +3943,37 @@ mod tests {
     #[test]
     fn dynamic_navigation_rows_keep_domain_values_out_of_the_ui_widget_keys() {
         let tag_id = notora_core::TagId::generate();
+        let unused_tag_id = notora_core::TagId::generate();
         let mut state =
             NotoraState { workspace_root: WorkspaceRootState::Active, ..NotoraState::default() };
         state.library.navigation_tree.directories = vec!["plans".into(), "plans/q3".into()];
         state.library.navigation_tree.expanded_directories.insert("plans".into());
-        state.library.navigation_tree.tags = vec![notora_core::TagWithActiveNoteCount {
-            tag_id,
-            display_name: "Plan".to_owned(),
-            active_note_count: 2,
-        }];
+        state.library.navigation_tree.tag_root_expanded = true;
+        state.library.navigation_tree.tags = vec![
+            notora_core::TagWithActiveNoteCount {
+                tag_id,
+                display_name: "Plan".to_owned(),
+                active_note_count: 2,
+            },
+            notora_core::TagWithActiveNoteCount {
+                tag_id: unused_tag_id,
+                display_name: "Unused".to_owned(),
+                active_note_count: 0,
+            },
+        ];
 
         let model = NotoraRenderModel::from_state(&state);
-        assert_eq!(model.navigation_rows.len(), 7);
+        assert_eq!(model.navigation_rows.len(), 8);
         assert_eq!(model.navigation_rows[1].label, "plans");
         assert_eq!(model.navigation_rows[1].depth, 1);
         assert_eq!(model.navigation_rows[2].depth, 2);
-        assert_eq!(model.navigation_rows[4].badge, Some(2));
+        assert_eq!(model.navigation_rows[4].label, "标签");
+        assert_eq!(model.navigation_rows[4].expansion, TreeRowExpansion::Expanded);
+        assert_eq!(model.navigation_rows[5].depth, 1);
+        assert_eq!(model.navigation_rows[5].badge, Some(2));
+        assert!(model.navigation_rows.iter().all(|row| row.label != "Unused"));
         assert!(matches!(
-            model.navigation_actions.get(&model.navigation_rows[4].key),
+            model.navigation_actions.get(&model.navigation_rows[5].key),
             Some(NotoraAction::NavigationSelected(NavigationScope::Tag { tag_id: selected_tag_id }))
                 if *selected_tag_id == tag_id
         ));

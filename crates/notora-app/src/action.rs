@@ -141,6 +141,7 @@ pub enum NotoraAction {
     CatalogReindexed,
     CatalogRecoveryNotified(String),
     WorkspaceRootExpansionToggled,
+    TagRootExpansionToggled,
     NavigationExpansionToggled(PathBuf),
     BeginDirectoryCreation {
         parent_relative_path: PathBuf,

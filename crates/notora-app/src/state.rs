@@ -195,6 +195,7 @@ pub struct NavigationTreeState {
     pub directories: Vec<std::path::PathBuf>,
     pub tags: Vec<TagWithActiveNoteCount>,
     pub workspace_root_expanded: bool,
+    pub tag_root_expanded: bool,
     pub expanded_directories: BTreeSet<std::path::PathBuf>,
 }
 
@@ -204,6 +205,7 @@ impl Default for NavigationTreeState {
             directories: Vec::new(),
             tags: Vec::new(),
             workspace_root_expanded: true,
+            tag_root_expanded: false,
             expanded_directories: BTreeSet::new(),
         }
     }
@@ -330,6 +332,11 @@ impl NotoraState {
             NotoraAction::WorkspaceRootExpansionToggled => {
                 self.library.navigation_tree.workspace_root_expanded =
                     !self.library.navigation_tree.workspace_root_expanded;
+                vec![NotoraEffect::Redraw]
+            }
+            NotoraAction::TagRootExpansionToggled => {
+                self.library.navigation_tree.tag_root_expanded =
+                    !self.library.navigation_tree.tag_root_expanded;
                 vec![NotoraEffect::Redraw]
             }
             NotoraAction::NavigationExpansionToggled(relative_path) => {
@@ -898,6 +905,7 @@ impl NotoraState {
     fn apply_navigation_tree(&mut self, tree: CatalogNavigationTree) -> Vec<NotoraEffect> {
         self.library.navigation_tree = NavigationTreeState {
             workspace_root_expanded: self.library.navigation_tree.workspace_root_expanded,
+            tag_root_expanded: self.library.navigation_tree.tag_root_expanded,
             expanded_directories: self
                 .library
                 .navigation_tree
@@ -916,9 +924,12 @@ impl NotoraState {
                 .directories
                 .iter()
                 .any(|directory| directory == relative_path),
-            NavigationScope::Tag { tag_id } => {
-                self.library.navigation_tree.tags.iter().any(|tag| tag.tag_id == *tag_id)
-            }
+            NavigationScope::Tag { tag_id } => self
+                .library
+                .navigation_tree
+                .tags
+                .iter()
+                .any(|tag| tag.tag_id == *tag_id && tag.active_note_count > 0),
             _ => true,
         };
         if scope_is_valid {
@@ -1504,6 +1515,29 @@ mod metadata_actions {
     }
 
     #[test]
+    fn navigation_falls_back_when_the_selected_tag_has_no_active_notes() {
+        let tag_id = TagId::generate();
+        let mut state = NotoraState::default();
+        state.library.navigation_scope = NavigationScope::Tag { tag_id };
+
+        assert_eq!(
+            state.reduce(NotoraAction::NavigationTreeLoaded(CatalogNavigationTree {
+                directories: Vec::new(),
+                tags: vec![notora_core::TagWithActiveNoteCount {
+                    tag_id,
+                    display_name: "Unused".to_owned(),
+                    active_note_count: 0,
+                }],
+            })),
+            vec![
+                NotoraEffect::QueryCards(NavigationScope::WorkspaceRoot.into()),
+                NotoraEffect::Redraw,
+            ]
+        );
+        assert_eq!(state.library.navigation_scope, NavigationScope::WorkspaceRoot);
+    }
+
+    #[test]
     fn workspace_root_expansion_is_independent_from_directory_paths() {
         let mut state = NotoraState::default();
 
@@ -1514,6 +1548,16 @@ mod metadata_actions {
         );
         assert!(!state.library.navigation_tree.workspace_root_expanded);
         assert!(state.library.navigation_tree.expanded_directories.is_empty());
+    }
+
+    #[test]
+    fn tag_root_expansion_is_independent_from_workspace_navigation() {
+        let mut state = NotoraState::default();
+
+        assert!(!state.library.navigation_tree.tag_root_expanded);
+        assert_eq!(state.reduce(NotoraAction::TagRootExpansionToggled), vec![NotoraEffect::Redraw]);
+        assert!(state.library.navigation_tree.tag_root_expanded);
+        assert!(state.library.navigation_tree.workspace_root_expanded);
     }
 
     #[test]
