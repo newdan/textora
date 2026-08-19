@@ -378,6 +378,14 @@ const DATA_STAR: IconSvg = IconSvg {
     stroke_width: 2.0,
 };
 
+const DATA_TAG: IconSvg = IconSvg {
+    paths: &[
+        "M20.59 13.41 11 3.83V3H4v7h.83l9.58 9.59a2 2 0 0 0 2.82 0l3.36-3.36a2 2 0 0 0 0-2.82z",
+    ],
+    circles: &[(7.5, 7.5, 1.0)],
+    stroke_width: 2.0,
+};
+
 const DATA_TRASH_2: IconSvg = IconSvg {
     paths: &[
         "M3 6h18",
@@ -619,6 +627,7 @@ fn icon_svg(name: &str) -> Option<&'static IconSvg> {
         "workspace-plus" => Some(&DATA_WORKSPACE_PLUS),
         "folder-open" => Some(&DATA_FOLDER_OPEN),
         "star" => Some(&DATA_STAR),
+        "tag" => Some(&DATA_TAG),
         "trash-2" => Some(&DATA_TRASH_2),
         "file" => Some(&DATA_FILE),
         "file-text" => Some(&DATA_FILE_TEXT),
@@ -809,6 +818,7 @@ mod tests {
             "eye",
             "eye-off",
             "star",
+            "tag",
             "trash-2",
             "file",
             "file-text",
