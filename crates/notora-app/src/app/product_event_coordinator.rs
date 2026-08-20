@@ -3,7 +3,7 @@ use appkit_shell::{ProductHost, ShellEffect};
 use crate::action::{DocumentLoadRequest, MetadataMutation, MetadataMutationOutcome, NotoraAction};
 use crate::editor_adapter::LoadedDocument;
 use crate::external_files::CanonicalExternalPath;
-use crate::product::{NotoraProduct, NotoraProductEvent};
+use crate::product::{NotoraProduct, NotoraProductEvent, WorkspaceBootstrapCompletion};
 
 use super::document_completion_interpreter::DocumentCompletionInterpreter;
 use super::persistence_completion_interpreter::PersistenceCompletionInterpreter;
@@ -89,14 +89,24 @@ pub(super) trait PersistenceCompletionTarget: ProductActionTarget {
     fn record_settings_persistence_result(&mut self, result: Result<(), String>);
 }
 
+pub(super) trait WorkspaceBootstrapTarget {
+    fn complete_workspace_bootstrap(&mut self, completion: WorkspaceBootstrapCompletion);
+}
+
 /// 顶层协调器仅要求三个分域协议的交集，不暴露具体组合根类型。
 pub(super) trait ProductEventTarget:
-    WorkspaceCompletionTarget + DocumentCompletionTarget + PersistenceCompletionTarget
+    WorkspaceBootstrapTarget
+    + WorkspaceCompletionTarget
+    + DocumentCompletionTarget
+    + PersistenceCompletionTarget
 {
 }
 
 impl<T> ProductEventTarget for T where
-    T: WorkspaceCompletionTarget + DocumentCompletionTarget + PersistenceCompletionTarget
+    T: WorkspaceBootstrapTarget
+        + WorkspaceCompletionTarget
+        + DocumentCompletionTarget
+        + PersistenceCompletionTarget
 {
 }
 
@@ -117,6 +127,9 @@ impl ProductEventCoordinator {
 
     pub(super) fn apply<T: ProductEventTarget>(target: &mut T, event: NotoraProductEvent) {
         match event {
+            NotoraProductEvent::WorkspaceBootstrap(completion) => {
+                target.complete_workspace_bootstrap(completion);
+            }
             NotoraProductEvent::Workspace(event) => {
                 WorkspaceCompletionInterpreter::apply(target, event.completion);
             }

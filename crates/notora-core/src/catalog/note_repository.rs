@@ -1,7 +1,8 @@
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use rusqlite::{OptionalExtension, Row, params};
+use rusqlite::{Connection, OptionalExtension, Row, Transaction, params};
 use uuid::Uuid;
 
 use crate::domain::{
@@ -9,7 +10,8 @@ use crate::domain::{
 };
 use crate::{DocumentKind, NoteId};
 
-use super::{Catalog, CatalogError};
+use super::search_repository::{ensure_unique_note_ids, replace_search_index_entry};
+use super::{Catalog, CatalogError, SearchIndexEntry};
 
 const DOCUMENT_KIND_TEXT: i64 = 1;
 const DOCUMENT_KIND_MARKDOWN: i64 = 2;
@@ -465,43 +467,69 @@ impl Catalog {
     ///
     /// 星标属于用户 metadata，扫描更新不得覆盖它。
     pub fn upsert_active_note(&self, note: &CatalogNote) -> Result<(), CatalogError> {
-        let modified_nanoseconds = system_time_to_nanoseconds(note.modified_at)?;
-        let file_size =
-            i64::try_from(note.file_size).map_err(|_| CatalogError::InvalidStoredValue {
-                column: "file_size",
-                value: note.file_size.to_string(),
-            })?;
-        self.connection()
-            .execute(
-                "INSERT INTO notes (
-                    note_id, relative_path, kind, title, excerpt, created_ns, modified_ns,
-                    file_size, content_hash, encryption, lifecycle, file_name_binding,
-                    file_name_disambiguator, title_revision
-                ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?6, ?7, ?8, ?9, ?10, ?11, 1, 0)
-                ON CONFLICT(note_id) DO UPDATE SET
-                    relative_path = excluded.relative_path,
-                    kind = excluded.kind,
-                    excerpt = excluded.excerpt,
-                    modified_ns = excluded.modified_ns,
-                    file_size = excluded.file_size,
-                    content_hash = excluded.content_hash,
-                    missing_scan_count = 0",
-                params![
-                    note.note_id.to_string(),
-                    note.relative_path.to_string_lossy(),
-                    document_kind_to_database(note.kind),
-                    note.title,
-                    note.excerpt,
-                    modified_nanoseconds,
-                    file_size,
-                    note.content_hash,
-                    NOTE_ENCRYPTION_UNENCRYPTED,
-                    ACTIVE_NOTE_LIFECYCLE,
-                    FILE_NAME_BINDING_TITLE_BOUND,
-                ],
+        upsert_active_note_on(self.connection(), note)
+    }
+
+    /// 一次性读取活动笔记的标签展示名，供扫描批次构造搜索索引。
+    pub(crate) fn active_note_tag_names(
+        &self,
+    ) -> Result<HashMap<NoteId, Vec<String>>, CatalogError> {
+        let mut statement = self
+            .connection()
+            .prepare(
+                "SELECT nt.note_id, t.display_name
+                 FROM note_tags AS nt
+                 JOIN notes AS n ON n.note_id = nt.note_id
+                 JOIN tags AS t ON t.tag_id = nt.tag_id
+                 WHERE n.lifecycle = ?1
+                 ORDER BY nt.note_id ASC, t.normalized_name ASC",
             )
-            .map_err(|source| CatalogError::sql("note upsert", source))?;
-        Ok(())
+            .map_err(|source| CatalogError::sql("active note tag snapshot preparation", source))?;
+        let rows = statement
+            .query_map([ACTIVE_NOTE_LIFECYCLE], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+            })
+            .map_err(|source| CatalogError::sql("active note tag snapshot", source))?;
+        let mut tag_names_by_note_id = HashMap::new();
+        for row in rows {
+            let (stored_note_id, display_name) =
+                row.map_err(|source| CatalogError::sql("active note tag snapshot row", source))?;
+            let note_id = Uuid::parse_str(&stored_note_id).map(NoteId::from).map_err(|_| {
+                CatalogError::InvalidStoredValue {
+                    column: "note_tags.note_id",
+                    value: stored_note_id,
+                }
+            })?;
+            tag_names_by_note_id.entry(note_id).or_insert_with(Vec::new).push(display_name);
+        }
+        Ok(tag_names_by_note_id)
+    }
+
+    /// 原子提交一次扫描产生的派生 catalog 变更。
+    pub(crate) fn apply_scan_reconciliation(
+        &self,
+        notes: &[CatalogNote],
+        present_note_ids: &[NoteId],
+        missing_note_ids: &[NoteId],
+        search_entries: &[SearchIndexEntry],
+    ) -> Result<usize, CatalogError> {
+        ensure_unique_note_ids(search_entries)?;
+        let transaction = self
+            .connection()
+            .unchecked_transaction()
+            .map_err(|source| CatalogError::sql("scan reconciliation transaction start", source))?;
+        for note in notes {
+            upsert_active_note_on(&transaction, note)?;
+        }
+        let removed_count =
+            reconcile_active_note_presence_on(&transaction, present_note_ids, missing_note_ids)?;
+        for entry in search_entries {
+            replace_search_index_entry(&transaction, entry)?;
+        }
+        transaction.commit().map_err(|source| {
+            CatalogError::sql("scan reconciliation transaction commit", source)
+        })?;
+        Ok(removed_count)
     }
 
     pub fn active_notes(&self) -> Result<Vec<CatalogNote>, CatalogError> {
@@ -640,63 +668,8 @@ impl Catalog {
         let transaction = self.connection().unchecked_transaction().map_err(|source| {
             CatalogError::sql("missing note confirmation transaction start", source)
         })?;
-        for note_id in present_note_ids {
-            transaction
-                .execute(
-                    "UPDATE notes
-                     SET missing_scan_count = 0
-                     WHERE note_id = ?1 AND lifecycle = ?2 AND missing_scan_count > 0",
-                    params![note_id.to_string(), ACTIVE_NOTE_LIFECYCLE],
-                )
-                .map_err(|source| CatalogError::sql("missing note confirmation reset", source))?;
-        }
-
-        let mut removed_count = 0;
-        for note_id in missing_note_ids {
-            let note_id = note_id.to_string();
-            let updated_rows = transaction
-                .execute(
-                    "UPDATE notes
-                     SET missing_scan_count = missing_scan_count + 1
-                     WHERE note_id = ?1 AND lifecycle = ?2",
-                    params![note_id, ACTIVE_NOTE_LIFECYCLE],
-                )
-                .map_err(|source| CatalogError::sql("missing note confirmation update", source))?;
-            if updated_rows == 0 {
-                continue;
-            }
-            let confirmation_count: i64 = transaction
-                .query_row(
-                    "SELECT missing_scan_count FROM notes WHERE note_id = ?1",
-                    [&note_id],
-                    |row| row.get(0),
-                )
-                .map_err(|source| CatalogError::sql("missing note confirmation read", source))?;
-            if confirmation_count < MISSING_SCAN_CONFIRMATION_COUNT {
-                continue;
-            }
-            transaction
-                .execute("DELETE FROM note_search WHERE note_id = ?1", [&note_id])
-                .map_err(|source| CatalogError::sql("confirmed missing search cleanup", source))?;
-            transaction
-                .execute(
-                    "DELETE FROM notes WHERE note_id = ?1 AND lifecycle = ?2",
-                    params![note_id, ACTIVE_NOTE_LIFECYCLE],
-                )
-                .map_err(|source| CatalogError::sql("confirmed missing note cleanup", source))?;
-            removed_count += 1;
-        }
-        if removed_count > 0 {
-            transaction
-                .execute(
-                    "DELETE FROM tags
-                     WHERE NOT EXISTS (
-                         SELECT 1 FROM note_tags WHERE note_tags.tag_id = tags.tag_id
-                     )",
-                    [],
-                )
-                .map_err(|source| CatalogError::sql("orphaned tag cleanup", source))?;
-        }
+        let removed_count =
+            reconcile_active_note_presence_on(&transaction, present_note_ids, missing_note_ids)?;
         transaction.commit().map_err(|source| {
             CatalogError::sql("missing note confirmation transaction commit", source)
         })?;
@@ -880,6 +853,109 @@ impl Catalog {
             .map_err(|source| CatalogError::sql("permanent deletion transaction commit", source))?;
         Ok(entry)
     }
+}
+
+fn upsert_active_note_on(connection: &Connection, note: &CatalogNote) -> Result<(), CatalogError> {
+    let modified_nanoseconds = system_time_to_nanoseconds(note.modified_at)?;
+    let file_size = i64::try_from(note.file_size).map_err(|_| {
+        CatalogError::InvalidStoredValue { column: "file_size", value: note.file_size.to_string() }
+    })?;
+    connection
+        .execute(
+            "INSERT INTO notes (
+                note_id, relative_path, kind, title, excerpt, created_ns, modified_ns,
+                file_size, content_hash, encryption, lifecycle, file_name_binding,
+                file_name_disambiguator, title_revision
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?6, ?7, ?8, ?9, ?10, ?11, 1, 0)
+            ON CONFLICT(note_id) DO UPDATE SET
+                relative_path = excluded.relative_path,
+                kind = excluded.kind,
+                excerpt = excluded.excerpt,
+                modified_ns = excluded.modified_ns,
+                file_size = excluded.file_size,
+                content_hash = excluded.content_hash,
+                missing_scan_count = 0",
+            params![
+                note.note_id.to_string(),
+                note.relative_path.to_string_lossy(),
+                document_kind_to_database(note.kind),
+                note.title,
+                note.excerpt,
+                modified_nanoseconds,
+                file_size,
+                note.content_hash,
+                NOTE_ENCRYPTION_UNENCRYPTED,
+                ACTIVE_NOTE_LIFECYCLE,
+                FILE_NAME_BINDING_TITLE_BOUND,
+            ],
+        )
+        .map_err(|source| CatalogError::sql("note upsert", source))?;
+    Ok(())
+}
+
+fn reconcile_active_note_presence_on(
+    transaction: &Transaction<'_>,
+    present_note_ids: &[NoteId],
+    missing_note_ids: &[NoteId],
+) -> Result<usize, CatalogError> {
+    for note_id in present_note_ids {
+        transaction
+            .execute(
+                "UPDATE notes
+                 SET missing_scan_count = 0
+                 WHERE note_id = ?1 AND lifecycle = ?2 AND missing_scan_count > 0",
+                params![note_id.to_string(), ACTIVE_NOTE_LIFECYCLE],
+            )
+            .map_err(|source| CatalogError::sql("missing note confirmation reset", source))?;
+    }
+
+    let mut removed_count = 0;
+    for note_id in missing_note_ids {
+        let note_id = note_id.to_string();
+        let updated_rows = transaction
+            .execute(
+                "UPDATE notes
+                 SET missing_scan_count = missing_scan_count + 1
+                 WHERE note_id = ?1 AND lifecycle = ?2",
+                params![note_id, ACTIVE_NOTE_LIFECYCLE],
+            )
+            .map_err(|source| CatalogError::sql("missing note confirmation update", source))?;
+        if updated_rows == 0 {
+            continue;
+        }
+        let confirmation_count: i64 = transaction
+            .query_row(
+                "SELECT missing_scan_count FROM notes WHERE note_id = ?1",
+                [&note_id],
+                |row| row.get(0),
+            )
+            .map_err(|source| CatalogError::sql("missing note confirmation read", source))?;
+        if confirmation_count < MISSING_SCAN_CONFIRMATION_COUNT {
+            continue;
+        }
+        transaction
+            .execute("DELETE FROM note_search WHERE note_id = ?1", [&note_id])
+            .map_err(|source| CatalogError::sql("confirmed missing search cleanup", source))?;
+        transaction
+            .execute(
+                "DELETE FROM notes WHERE note_id = ?1 AND lifecycle = ?2",
+                params![note_id, ACTIVE_NOTE_LIFECYCLE],
+            )
+            .map_err(|source| CatalogError::sql("confirmed missing note cleanup", source))?;
+        removed_count += 1;
+    }
+    if removed_count > 0 {
+        transaction
+            .execute(
+                "DELETE FROM tags
+                 WHERE NOT EXISTS (
+                     SELECT 1 FROM note_tags WHERE note_tags.tag_id = tags.tag_id
+                 )",
+                [],
+            )
+            .map_err(|source| CatalogError::sql("orphaned tag cleanup", source))?;
+    }
+    Ok(removed_count)
 }
 
 fn note_encryption_to_database(encryption: NoteEncryption) -> i64 {
@@ -1346,6 +1422,25 @@ mod tests {
             catalog.active_notes().expect("active notes should load"),
             vec![CatalogNote { starred: true, ..catalog_note(note_id, "renamed.md", "First") }]
         );
+    }
+
+    #[test]
+    fn scan_reconciliation_rolls_back_all_notes_when_one_note_is_invalid() {
+        let directory = tempfile::tempdir().expect("catalog test directory should be created");
+        let catalog = Catalog::open(&directory.path().join("catalog.sqlite3"))
+            .expect("catalog should initialize");
+        let valid_note = catalog_note(NoteId::generate(), "valid.md", "Valid");
+        let invalid_note = CatalogNote {
+            note_id: NoteId::generate(),
+            relative_path: "invalid.md".into(),
+            file_size: u64::MAX,
+            ..valid_note.clone()
+        };
+
+        let result = catalog.apply_scan_reconciliation(&[valid_note, invalid_note], &[], &[], &[]);
+
+        assert!(result.is_err());
+        assert!(catalog.active_notes().expect("active notes should load").is_empty());
     }
 
     #[test]

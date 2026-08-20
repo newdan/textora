@@ -196,6 +196,7 @@ fn apply_scan_results(
     discovered_files: Vec<DiscoveredFile>,
     rename_hints: &[(PathBuf, PathBuf)],
 ) -> Result<(), ScanError> {
+    let mut tag_names_by_note_id = catalog.active_note_tag_names().map_err(ScanError::Catalog)?;
     let plan = reconcile_notes_with_renames(
         existing_notes,
         discovered_files.iter().map(|file| file.note.clone()),
@@ -208,6 +209,7 @@ fn apply_scan_results(
         .collect::<HashMap<_, _>>();
     let mut missing_note_ids = Vec::new();
     let mut present_note_ids = Vec::new();
+    let mut notes_to_upsert = Vec::new();
     let mut search_entries = Vec::new();
     for change in plan.changes {
         match change {
@@ -216,16 +218,24 @@ fn apply_scan_results(
                 let Some(body) = changed_bodies_by_path.get(&note.relative_path) else {
                     continue;
                 };
-                catalog.upsert_active_note(&note).map_err(ScanError::Catalog)?;
-                search_entries.push(search_entry(catalog, &note, body.clone())?);
+                search_entries.push(search_entry(
+                    &note,
+                    body.clone(),
+                    tag_names_by_note_id.remove(&note.note_id).unwrap_or_default(),
+                ));
+                notes_to_upsert.push(note);
             }
             ReconciliationChange::Added(note) => {
                 present_note_ids.push(note.note_id);
                 let Some(body) = changed_bodies_by_path.get(&note.relative_path) else {
                     continue;
                 };
-                catalog.upsert_active_note(&note).map_err(ScanError::Catalog)?;
-                search_entries.push(search_entry(catalog, &note, body.clone())?);
+                search_entries.push(search_entry(
+                    &note,
+                    body.clone(),
+                    tag_names_by_note_id.remove(&note.note_id).unwrap_or_default(),
+                ));
+                notes_to_upsert.push(note);
             }
             ReconciliationChange::Moved { from, note } => {
                 present_note_ids.push(note.note_id);
@@ -241,18 +251,30 @@ fn apply_scan_results(
                         external_title,
                     )
                     .map_err(ScanError::Catalog)?;
-                catalog.upsert_active_note(&note).map_err(ScanError::Catalog)?;
-                search_entries.push(search_entry(catalog, &note, body.clone())?);
+                search_entries.push(search_entry(
+                    &note,
+                    body.clone(),
+                    tag_names_by_note_id.remove(&note.note_id).unwrap_or_default(),
+                ));
+                notes_to_upsert.push(note);
             }
             ReconciliationChange::Missing(note) => missing_note_ids.push(note.note_id),
         }
     }
-    if completion.failures.is_empty() {
-        catalog
-            .reconcile_active_note_presence(&present_note_ids, &missing_note_ids)
-            .map_err(ScanError::Catalog)?;
-    }
-    catalog.index_note_batch(&search_entries).map_err(ScanError::Catalog)?;
+    let (confirmed_present_note_ids, confirmed_missing_note_ids) = if completion.failures.is_empty()
+    {
+        (present_note_ids.as_slice(), missing_note_ids.as_slice())
+    } else {
+        (&[][..], &[][..])
+    };
+    catalog
+        .apply_scan_reconciliation(
+            &notes_to_upsert,
+            confirmed_present_note_ids,
+            confirmed_missing_note_ids,
+            &search_entries,
+        )
+        .map_err(ScanError::Catalog)?;
     completion.indexed_files = search_entries.len();
     Ok(())
 }
@@ -262,24 +284,14 @@ struct DiscoveredFile {
     body: Option<String>,
 }
 
-fn search_entry(
-    catalog: &Catalog,
-    note: &CatalogNote,
-    body: String,
-) -> Result<SearchIndexEntry, ScanError> {
-    let tags = catalog
-        .tags_for_note(note.note_id)
-        .map_err(ScanError::Catalog)?
-        .into_iter()
-        .map(|tag| tag.display_name)
-        .collect();
-    Ok(SearchIndexEntry {
+fn search_entry(note: &CatalogNote, body: String, tags: Vec<String>) -> SearchIndexEntry {
+    SearchIndexEntry {
         note_id: note.note_id,
         title: note.title.clone(),
         relative_path: note.relative_path.clone(),
         body,
         tags,
-    })
+    }
 }
 
 fn scan_directory(

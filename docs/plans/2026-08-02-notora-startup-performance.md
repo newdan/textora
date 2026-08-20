@@ -78,3 +78,108 @@ cargo bench -p textora-shaping --bench font_cache_bench -- --noplot
 ## 后续方向
 
 当前 warm 路径的剩余主要成本是 winit/native window 固定初始化，以及约 18ms 的 window/surface/text 资源和约 6ms 的首帧绘制。若继续追求低于 60ms 的首帧，需要把“窗口背景帧”和“完整文本资源帧”拆成显式启动状态机；这会改变可感知启动行为，应作为独立架构阶段设计和验证。
+
+## 2026-08-20 第二阶段：从首帧扩展到可用性
+
+### 新基线
+
+在当前 release 二进制上重新采样。构建后第一次启动的
+`first_frame_visible` 为 172.13ms；随后三个独立进程样本为 74.16ms、77.93ms 和
+76.72ms，中位数 76.72ms。随后样本的中位阶段分布为：
+
+| 阶段 | 耗时 |
+|---|---:|
+| 应用构造 | 0.29ms |
+| winit/macOS 激活并覆盖后台字体、GPU 准备 | 51.71ms |
+| window、surface 与文本 GPU 资源 | 19.61ms |
+| 首帧布局、上传与 present | 5.01ms |
+
+字体 cache hit 为 2.75ms，cache miss 为 25.03ms；两者都已被现有并行路径覆盖，
+不再作为第二阶段优化重点。
+
+现有 `first_frame_visible` 只证明空壳帧已经提交。首帧返回后，
+`restore_session_after_first_frame` 会在 UI 线程同步等待文件监视器注册、catalog
+打开/恢复和索引 worker 启动。因此第二阶段把验收目标扩展为：
+
+1. `first_frame_visible` 不回退；
+2. 首帧后 UI 线程不等待工作区 I/O 或后台线程握手；
+3. 输出 `workspace_session_ready`、`session_restore_finished` 和
+   `last_document_rendered` 等可用性里程碑；
+4. 大资料库首次入库使用批量事务，避免逐笔记 autocommit 和标签 N+1 查询。
+
+### 分阶段实施
+
+#### 阶段 A：可用性插桩
+
+- 保留 `StartupTrace` 的单调时钟所有权；
+- 在 session 恢复开始、工作区 session 就绪、恢复请求全部派发和最后文档首次绘制时
+  记录一次性里程碑；
+- 默认关闭日志，不改变生产启动行为。
+
+#### 阶段 B：异步工作区 bootstrap
+
+- `WorkspaceController` 新增异步 prepare/install 协议；prepare worker 独占
+  `WorkspaceSession` 构造所需的 watcher、catalog 与 indexer 初始化；
+- 完成消息携带 generation，UI 线程只安装仍属于当前恢复请求的结果；
+- session 恢复期间展示加载状态，取消或新请求使旧完成结果失效；
+- 工作区启动失败不得替换现有活动 session，也不得阻塞事件循环。
+
+每个实现子阶段最多修改三个生产文件。先增加能证明 UI 入口立即返回、过期完成结果被
+丢弃的测试，再迁移正式恢复路径。
+
+#### 阶段 C：批量 catalog reconciliation
+
+- 将扫描产生的 note upsert、presence reconciliation 和搜索索引提交收敛到显式批次；
+- 一个扫描批次只开启并提交一次外层 SQLite transaction；
+- 一次性读取相关笔记标签，禁止每个变更笔记单独查询；
+- 新增“空 catalog 首次导入 10k 笔记”基准，现有
+  `workspace_scan_10k` 继续覆盖稳定态。
+
+当前稳定态 10k 全量扫描为 57.44ms。现有 benchmark 的 fixture 准备（创建 10k 文件并
+首次建库）约 27 秒；该值包含文件创建，不能直接作为首次扫描耗时，但足以证明需要独立
+首次导入基准和批量事务改造。
+
+#### 阶段 D：基于数据的剩余优化
+
+- 细分 `window_gpu_text_ready` 为 window、prepared GPU join、surface、pipeline、atlas
+  和 shaper；只有确认冷样本主要消耗后，才评估 pipeline cache 或延迟 atlas；
+- catalog 正常打开路径评估 `PRAGMA integrity_check` 的大库成本，再决定是否使用
+  `quick_check`、非正常退出标记或后台完整检查；
+- 不以降低 MSAA、移除恢复校验或牺牲元数据安全换取未经验证的启动数字。
+
+### 最终验证
+
+1. 定向单元和集成测试；
+2. `cargo fmt --check` 与相关 crate 编译；
+3. release GUI 至少五次 A/B，分别报告首帧与工作区可用中位数；
+4. 10k 稳定态扫描及首次导入基准；
+5. 跨模块阶段完成后执行 `./scripts/verify.sh`。
+
+### 第二阶段实施结果
+
+会话工作区恢复现由后台 worker 完成 watcher、catalog 和 indexer 的准备，主线程只安装
+仍匹配当前 generation 的 session。五次 release GUI 样本如下：
+
+| 里程碑 | 五次样本中位数 |
+|---|---:|
+| `first_frame_visible` | 88.22ms |
+| `workspace_session_ready` | 91.99ms |
+| `session_restore_finished` | 92.01ms |
+| `restored_document_rendered` | 124.64ms |
+| 首帧后的 workspace bootstrap 阶段 | 3.63ms |
+
+本轮首帧中位数高于实施前不同时间采集的三次样本 76.72ms，但代码中的异步工作区恢复在
+首帧提交之后才启动；本轮 `window_gpu_text_ready` 阶段中位数 20.44ms，也与此前
+19.61ms 接近。增量主要出现在 winit/macOS 激活等待，不能归因为本轮改动，也不能把两组
+非受控样本当作严格 A/B。新增里程碑使后续可以独立跟踪首帧、工作区可用和恢复文档可见。
+
+首次扫描现在一次读取活动笔记标签，并在一个 SQLite transaction 中提交 note upsert、
+缺失确认和 FTS 更新。空 catalog 首次导入 10k 笔记的新基准中位估计为 5.49s；稳定态
+10k 全量扫描为 56.15ms，相比此前 57.44ms 无回退。首次导入原先只有约 27s 的复合
+fixture 数据，混入了文件创建和其他 benchmark fixture 准备，不能作为严格 before；因此
+保留新的独立基准作为后续回归基线，不虚构百分比收益。
+
+10k catalog 的完整 `Catalog::open` 为 40.41ms，其中 `PRAGMA integrity_check` 为
+36.47ms，`quick_check` 为 28.10ms。较弱检查只节省约 8.4ms，而 catalog 打开已经移出
+首帧/UI 线程，因此保留完整检查。`window_gpu_text_ready` 也没有显示新的显著热点，本阶段
+不引入 pipeline cache、延迟 atlas 或降低校验强度等风险更高的改动。

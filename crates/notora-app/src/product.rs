@@ -161,9 +161,15 @@ pub enum PersistenceCompletion {
     SessionPersistenceFailed { message: String },
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct WorkspaceBootstrapCompletion {
+    pub generation: u64,
+}
+
 /// 后台服务只能经 notora 自有 channel 发送的 payload。
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum NotoraProductEvent {
+    WorkspaceBootstrap(WorkspaceBootstrapCompletion),
     Workspace(WorkspaceCompletionEnvelope),
     Document(DocumentCompletion),
     Persistence(PersistenceCompletion),
@@ -256,7 +262,9 @@ impl NotoraProduct {
             NotoraProductEvent::Workspace(event) => {
                 (event.scope.workspace_id, event.scope.generation)
             }
-            NotoraProductEvent::Document(_) | NotoraProductEvent::Persistence(_) => return true,
+            NotoraProductEvent::WorkspaceBootstrap(_)
+            | NotoraProductEvent::Document(_)
+            | NotoraProductEvent::Persistence(_) => return true,
         };
         self.active_workspace == Some(event_workspace)
     }
@@ -310,8 +318,8 @@ mod tests {
     use notora_core::WorkspaceId;
 
     use super::{
-        NotoraProduct, NotoraProductEvent, ProductServiceShutdown, WorkspaceCompletion,
-        WorkspaceEventScope, WorkspaceEventSender,
+        NotoraProduct, NotoraProductEvent, ProductServiceShutdown, WorkspaceBootstrapCompletion,
+        WorkspaceCompletion, WorkspaceEventScope, WorkspaceEventSender,
     };
     use crate::action::DocumentLoadRequest;
 
@@ -328,6 +336,21 @@ mod tests {
     #[test]
     fn creates_a_product_event_host() {
         let _product = NotoraProduct::new();
+    }
+
+    #[test]
+    fn workspace_bootstrap_completion_is_not_filtered_before_activation() {
+        let mut product = NotoraProduct::new();
+        let completion = WorkspaceBootstrapCompletion { generation: 7 };
+
+        product
+            .event_sender()
+            .send(NotoraProductEvent::WorkspaceBootstrap(completion))
+            .expect("bootstrap worker should enqueue its completion");
+        let effect = ProductHost::drain_product_events(&mut product);
+
+        assert_eq!(effect, ShellEffect::REDRAW);
+        assert_eq!(product.take_events(), vec![NotoraProductEvent::WorkspaceBootstrap(completion)]);
     }
 
     #[test]

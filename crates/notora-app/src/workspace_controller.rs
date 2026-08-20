@@ -4,6 +4,7 @@ use std::collections::BTreeSet;
 use std::fs;
 use std::path::PathBuf;
 use std::sync::mpsc;
+use std::thread;
 use std::time::{Duration, Instant};
 
 use notora_core::note_command::NoteCommand;
@@ -17,8 +18,8 @@ use notora_core::{
 use crate::action::{CardQuery, DocumentLoadRequest, MetadataMutation, TrashOperation};
 use crate::index_worker::{IndexWorker, IndexWorkerCommand, WorkspaceDocumentSource};
 use crate::product::{
-    NotoraProduct, NotoraProductEventSender, WorkspaceCompletion, WorkspaceEventScope,
-    WorkspaceEventSender, WorkspaceNoteRelocation,
+    NotoraProduct, NotoraProductEvent, NotoraProductEventSender, WorkspaceBootstrapCompletion,
+    WorkspaceCompletion, WorkspaceEventScope, WorkspaceEventSender, WorkspaceNoteRelocation,
 };
 
 const CATALOG_FILE_NAME: &str = "catalog.sqlite3";
@@ -60,6 +61,8 @@ pub enum WorkspaceControllerError {
     CreateDirectory { path: PathBuf, source: std::io::Error },
     Workspace(WorkspaceError),
     FileMonitor(WorkspaceFileMonitorError),
+    BootstrapThreadUnavailable,
+    BootstrapWorkerDisconnected,
     IndexerThreadUnavailable,
     IndexerStartup { message: String },
     NoActiveWorkspace,
@@ -76,6 +79,8 @@ impl std::fmt::Display for WorkspaceControllerError {
             Self::FileMonitor(source) => {
                 write!(formatter, "无法监视工作区文件：{source}")
             }
+            Self::BootstrapThreadUnavailable => formatter.write_str("无法启动工作区准备线程"),
+            Self::BootstrapWorkerDisconnected => formatter.write_str("工作区准备线程未返回结果"),
             Self::IndexerThreadUnavailable => formatter.write_str("无法启动工作区索引线程"),
             Self::IndexerStartup { message } => {
                 write!(formatter, "工作区索引线程启动失败：{message}")
@@ -92,7 +97,9 @@ impl std::error::Error for WorkspaceControllerError {
             Self::CreateDirectory { source, .. } => Some(source),
             Self::Workspace(source) => Some(source),
             Self::FileMonitor(source) => Some(source),
-            Self::IndexerThreadUnavailable
+            Self::BootstrapThreadUnavailable
+            | Self::BootstrapWorkerDisconnected
+            | Self::IndexerThreadUnavailable
             | Self::IndexerStartup { .. }
             | Self::NoActiveWorkspace
             | Self::CommandWorkerDisconnected => None,
@@ -104,8 +111,14 @@ impl std::error::Error for WorkspaceControllerError {
 pub struct WorkspaceController {
     next_generation: u64,
     active_session: Option<WorkspaceSession>,
+    pending_preparation: Option<PendingWorkspacePreparation>,
     catalog_backups_directory: Option<PathBuf>,
     migration_backup_retention: notora_core::BackupRetention,
+}
+
+struct PendingWorkspacePreparation {
+    generation: u64,
+    result_receiver: mpsc::Receiver<Result<WorkspaceSession, WorkspaceControllerError>>,
 }
 
 impl WorkspaceController {
@@ -123,15 +136,20 @@ impl WorkspaceController {
         Self {
             next_generation: 0,
             active_session: None,
+            pending_preparation: None,
             catalog_backups_directory: Some(catalog_backups_directory),
             migration_backup_retention,
         }
     }
+
     pub fn execute(
         &mut self,
         command: WorkspaceCommand,
         product: &mut NotoraProduct,
     ) -> Result<WorkspaceCommandResult, WorkspaceControllerError> {
+        if !matches!(command, WorkspaceCommand::SelectionCancelled) {
+            self.pending_preparation = None;
+        }
         match command {
             WorkspaceCommand::SelectionCancelled => Ok(WorkspaceCommandResult::Unchanged),
             WorkspaceCommand::OpenExisting { root } => self.open_existing(root, product),
@@ -143,6 +161,66 @@ impl WorkspaceController {
             }
             WorkspaceCommand::Close => Ok(self.close(product)),
         }
+    }
+
+    /// 在后台准备恢复用工作区；调用线程只创建 worker，不等待 watcher 或 catalog。
+    pub fn begin_open_existing(
+        &mut self,
+        root: PathBuf,
+        product: &NotoraProduct,
+    ) -> Result<u64, WorkspaceControllerError> {
+        self.pending_preparation = None;
+        let generation = self.advance_generation();
+        let catalog_backups_directory = self.catalog_backups_directory.clone();
+        let migration_backup_retention = self.migration_backup_retention;
+        let event_sender = product.event_sender();
+        let completion_sender = event_sender.clone();
+        let (result_sender, result_receiver) = mpsc::channel();
+        thread::Builder::new()
+            .name("notora-workspace-bootstrap".to_owned())
+            .spawn(move || {
+                let result = prepare_workspace_session(
+                    root,
+                    catalog_backups_directory,
+                    migration_backup_retention,
+                    generation,
+                    event_sender,
+                );
+                let _ = result_sender.send(result);
+                let _ = completion_sender.send(NotoraProductEvent::WorkspaceBootstrap(
+                    WorkspaceBootstrapCompletion { generation },
+                ));
+            })
+            .map_err(|_| WorkspaceControllerError::BootstrapThreadUnavailable)?;
+        self.pending_preparation =
+            Some(PendingWorkspacePreparation { generation, result_receiver });
+        Ok(generation)
+    }
+
+    /// 安装已经准备完成且仍属于当前 generation 的工作区；永不等待 worker。
+    pub fn complete_open_existing(
+        &mut self,
+        generation: u64,
+        product: &mut NotoraProduct,
+    ) -> Result<Option<WorkspaceCommandResult>, WorkspaceControllerError> {
+        let Some(pending) = self.pending_preparation.take() else {
+            return Ok(None);
+        };
+        if pending.generation != generation {
+            self.pending_preparation = Some(pending);
+            return Ok(None);
+        }
+        let session = match pending.result_receiver.try_recv() {
+            Ok(result) => result?,
+            Err(mpsc::TryRecvError::Empty) => {
+                self.pending_preparation = Some(pending);
+                return Ok(None);
+            }
+            Err(mpsc::TryRecvError::Disconnected) => {
+                return Err(WorkspaceControllerError::BootstrapWorkerDisconnected);
+            }
+        };
+        Ok(Some(self.install_session(session, product)))
     }
 
     pub fn active_workspace(&self) -> Option<ActiveWorkspace> {
@@ -277,32 +355,31 @@ impl WorkspaceController {
         root: PathBuf,
         product: &mut NotoraProduct,
     ) -> Result<WorkspaceCommandResult, WorkspaceControllerError> {
-        let workspace =
-            Workspace::open_or_initialize(&root).map_err(WorkspaceControllerError::Workspace)?;
-        let catalog_path = workspace.metadata_directory().join(CATALOG_FILE_NAME);
         let generation = self.next_generation.wrapping_add(1);
-        let descriptor = workspace.descriptor();
-        let catalog_backups_directory = self
-            .catalog_backups_directory
-            .as_ref()
-            .map(|directory| directory.join(descriptor.workspace_id.to_string()));
-        let event_sender = product.event_sender();
-        let session = WorkspaceSession::start(
-            workspace,
-            catalog_path,
-            catalog_backups_directory,
+        let session = prepare_workspace_session(
+            root,
+            self.catalog_backups_directory.clone(),
             self.migration_backup_retention,
             generation,
-            event_sender,
+            product.event_sender(),
         )?;
-        self.close_active_session();
         self.next_generation = generation;
-        product.set_active_workspace(descriptor.workspace_id, generation);
+        Ok(self.install_session(session, product))
+    }
+
+    fn install_session(
+        &mut self,
+        session: WorkspaceSession,
+        product: &mut NotoraProduct,
+    ) -> WorkspaceCommandResult {
+        let active_workspace = session.active_workspace();
+        self.close_active_session();
+        product.set_active_workspace(
+            active_workspace.descriptor.workspace_id,
+            active_workspace.generation,
+        );
         self.active_session = Some(session);
-        let active_workspace = self
-            .active_workspace()
-            .expect("an installed workspace session must expose an active workspace");
-        Ok(WorkspaceCommandResult::Opened(active_workspace))
+        WorkspaceCommandResult::Opened(active_workspace)
     }
 
     fn close(&mut self, product: &mut NotoraProduct) -> WorkspaceCommandResult {
@@ -337,10 +414,34 @@ impl Default for WorkspaceController {
         Self {
             next_generation: 0,
             active_session: None,
+            pending_preparation: None,
             catalog_backups_directory: None,
             migration_backup_retention: default_migration_backup_retention(),
         }
     }
+}
+
+fn prepare_workspace_session(
+    root: PathBuf,
+    catalog_backups_directory: Option<PathBuf>,
+    migration_backup_retention: notora_core::BackupRetention,
+    generation: u64,
+    event_sender: NotoraProductEventSender,
+) -> Result<WorkspaceSession, WorkspaceControllerError> {
+    let workspace =
+        Workspace::open_or_initialize(&root).map_err(WorkspaceControllerError::Workspace)?;
+    let catalog_path = workspace.metadata_directory().join(CATALOG_FILE_NAME);
+    let descriptor = workspace.descriptor();
+    let workspace_catalog_backups_directory = catalog_backups_directory
+        .map(|directory| directory.join(descriptor.workspace_id.to_string()));
+    WorkspaceSession::start(
+        workspace,
+        catalog_path,
+        workspace_catalog_backups_directory,
+        migration_backup_retention,
+        generation,
+        event_sender,
+    )
 }
 
 fn default_migration_backup_retention() -> notora_core::BackupRetention {
@@ -958,8 +1059,8 @@ mod tests {
     };
     use crate::action::{CardQuery, DocumentLoadRequest};
     use crate::product::{
-        NotoraProduct, NotoraProductEvent, WorkspaceCompletion, WorkspaceEventScope,
-        WorkspaceEventSender,
+        NotoraProduct, NotoraProductEvent, WorkspaceBootstrapCompletion, WorkspaceCompletion,
+        WorkspaceEventScope, WorkspaceEventSender,
     };
     use notora_core::DocumentIdentity;
 
@@ -978,6 +1079,23 @@ mod tests {
         Some(&event.completion)
     }
 
+    fn wait_for_bootstrap_completion(product: &mut NotoraProduct) -> WorkspaceBootstrapCompletion {
+        let deadline = Instant::now() + Duration::from_secs(2);
+        loop {
+            let _ = ProductHost::drain_product_events(product);
+            if let Some(completion) = product.take_events().into_iter().find_map(|event| {
+                let NotoraProductEvent::WorkspaceBootstrap(completion) = event else {
+                    return None;
+                };
+                Some(completion)
+            }) {
+                return completion;
+            }
+            assert!(Instant::now() < deadline, "workspace bootstrap should complete promptly");
+            thread::yield_now();
+        }
+    }
+
     #[test]
     fn cancelled_selection_keeps_the_current_workspace_unchanged() {
         let mut controller = WorkspaceController::default();
@@ -990,6 +1108,30 @@ mod tests {
             WorkspaceCommandResult::Unchanged
         );
         assert_eq!(controller.active_workspace(), None);
+    }
+
+    #[test]
+    fn background_workspace_preparation_installs_only_after_completion() {
+        let directory = tempfile::tempdir().expect("workspace test directory should be created");
+        let mut controller = WorkspaceController::default();
+        let mut product = NotoraProduct::new();
+
+        let generation = controller
+            .begin_open_existing(directory.path().to_path_buf(), &product)
+            .expect("background workspace preparation should start");
+
+        assert_eq!(controller.active_workspace(), None);
+        let completion = wait_for_bootstrap_completion(&mut product);
+        assert_eq!(completion.generation, generation);
+        let result = controller
+            .complete_open_existing(completion.generation, &mut product)
+            .expect("prepared workspace should install")
+            .expect("matching completion should produce a command result");
+        let WorkspaceCommandResult::Opened(active_workspace) = result else {
+            panic!("bootstrap completion should open the prepared workspace");
+        };
+        assert_eq!(active_workspace.generation, generation);
+        assert_eq!(controller.active_workspace(), Some(active_workspace));
     }
 
     #[test]
