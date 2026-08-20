@@ -37,8 +37,13 @@ pub struct EditorFrame {
     theme: ui::Theme,
     dpi: f32,
     ui_shaper: Option<Arc<Mutex<shaping::Shaper>>>,
-    editor_vertices: Vec<GlyphVertex>,
+    editor_vertex_batches: Vec<EditorVertexBatch>,
     painted_editor_bounds: PaintedEditorBounds,
+}
+
+struct EditorVertexBatch {
+    bounds: ui::Rect,
+    vertices: Vec<GlyphVertex>,
 }
 
 impl EditorFrame {
@@ -56,7 +61,7 @@ impl EditorFrame {
             theme,
             dpi,
             ui_shaper,
-            editor_vertices: Vec::new(),
+            editor_vertex_batches: Vec::new(),
             painted_editor_bounds,
         }
     }
@@ -160,7 +165,8 @@ impl EditorFrame {
             return Ok(());
         }
         self.painted_editor_bounds.set(Some(editor_rect));
-        self.editor_vertices.extend(vertices);
+        let vertices = vertices.into_iter().collect();
+        self.editor_vertex_batches.push(EditorVertexBatch { bounds: editor_rect, vertices });
         Ok(())
     }
 
@@ -177,7 +183,14 @@ impl EditorFrame {
             resources.gpu.as_ref(),
             vertices,
         );
-        vertices.append(&mut self.editor_vertices);
+        for batch in self.editor_vertex_batches.drain(..) {
+            crate::paint_backend::append_clipped_triangles(
+                vertices,
+                &batch.vertices,
+                batch.bounds,
+                &screen,
+            );
+        }
         crate::paint_backend::drain_into(
             std::mem::take(&mut self.editor_draw_list),
             screen,
@@ -244,6 +257,14 @@ mod tests {
         ui_shaper: Option<Arc<Mutex<shaping::Shaper>>>,
     ) -> EditorFrame {
         EditorFrame::new_for_backend(theme, dpi, ui_shaper, Rc::new(Cell::new(None)))
+    }
+
+    fn editor_triangle(color: [f32; 4]) -> [GlyphVertex; 3] {
+        [
+            GlyphVertex { position: [0.25, 0.5], tex_coords: [0.0, 0.0], color },
+            GlyphVertex { position: [0.3, 0.4], tex_coords: [1.0, 0.0], color },
+            GlyphVertex { position: [0.2, 0.4], tex_coords: [0.0, 1.0], color },
+        ]
     }
 
     #[test]
@@ -333,10 +354,7 @@ mod tests {
             context.list.fill(ui::Rect::new(10.0, 10.0, 5.0, 5.0), [1.0; 4]);
         });
         frame
-            .paint_editor_vertices(
-                ui::Rect::new(20.0, 20.0, 80.0, 60.0),
-                [GlyphVertex { position: [0.25, 0.5], tex_coords: [0.0, 0.0], color: [0.0; 4] }],
-            )
+            .paint_editor_vertices(ui::Rect::new(20.0, 20.0, 80.0, 60.0), editor_triangle([0.0; 4]))
             .expect("finite editor rect should accept editor vertices");
 
         let mut resources = RenderResources {
@@ -348,7 +366,7 @@ mod tests {
         frame.drain_into(ui::Screen::new(100.0, 100.0), &mut resources, &mut vertices);
 
         assert_eq!(vertices.first().expect("editor vertex must be retained").position, [0.25, 0.5]);
-        assert_eq!(vertices.len(), 7, "one editor vertex plus one product quad");
+        assert_eq!(vertices.len(), 9, "one editor triangle plus one product quad");
         frame.present().expect("frame should be consumed once");
     }
 
@@ -364,6 +382,36 @@ mod tests {
             .expect("finite editor bounds should accept an empty vertex submission");
 
         assert_eq!(painted_editor_bounds.get(), Some(editor_bounds));
+    }
+
+    #[test]
+    fn editor_vertices_are_clipped_to_the_product_owned_editor_bounds() {
+        let mut frame = frame(theme(), 1.0, None);
+        let editor_bounds = ui::Rect::new(20.0, 20.0, 60.0, 60.0);
+        let crossing_top_edge = [
+            GlyphVertex { position: [-0.5, 0.8], tex_coords: [0.0, 0.0], color: [1.0; 4] },
+            GlyphVertex { position: [0.5, 0.4], tex_coords: [1.0, 0.0], color: [1.0; 4] },
+            GlyphVertex { position: [-0.5, 0.4], tex_coords: [0.0, 1.0], color: [1.0; 4] },
+        ];
+        frame
+            .paint_editor_vertices(editor_bounds, crossing_top_edge)
+            .expect("finite editor bounds should clip crossing vertices");
+
+        let mut resources = RenderResources {
+            text: None,
+            gpu: None,
+            frame_cache: crate::frame_cache::FrameCache::new(),
+        };
+        let screen = ui::Screen::new(100.0, 100.0);
+        let clip_top_ndc = screen.rect_to_ndc(editor_bounds)[2];
+        let mut vertices = Vec::new();
+        frame.drain_into(screen, &mut resources, &mut vertices);
+
+        assert!(!vertices.is_empty());
+        assert!(
+            vertices.iter().all(|vertex| vertex.position[1] <= clip_top_ndc),
+            "editor vertices must not invade product chrome above the editor bounds"
+        );
     }
 
     #[test]
@@ -383,11 +431,7 @@ mod tests {
         frame
             .paint_editor_vertices(
                 ui::Rect::new(20.0, 20.0, 80.0, 60.0),
-                [GlyphVertex {
-                    position: [0.25, 0.5],
-                    tex_coords: [0.0, 0.0],
-                    color: editor_color,
-                }],
+                editor_triangle(editor_color),
             )
             .expect("editor layer should accept vertices");
         frame.with_paint_context(|context| {
@@ -402,9 +446,9 @@ mod tests {
         let mut vertices = Vec::new();
         frame.drain_into(ui::Screen::new(100.0, 100.0), &mut resources, &mut vertices);
 
-        assert_eq!(vertices.len(), 13, "two product quads should surround one editor vertex");
+        assert_eq!(vertices.len(), 15, "two product quads should surround one editor triangle");
         assert_eq!(vertices[0].color, underlay_color);
         assert_eq!(vertices[6].color, editor_color);
-        assert_eq!(vertices[7].color, overlay_color);
+        assert_eq!(vertices[9].color, overlay_color);
     }
 }
