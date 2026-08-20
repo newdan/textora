@@ -9,10 +9,9 @@ use super::CardInput;
 pub const CARD_VERTICAL_GAP_LOGICAL: f32 = 8.0;
 pub const CARD_HORIZONTAL_PADDING_LOGICAL: f32 = 14.0;
 pub const CARD_VERTICAL_PADDING_LOGICAL: f32 = 12.0;
-pub const CARD_ICON_TILE_SIZE_LOGICAL: f32 = 24.0;
+pub const CARD_ICON_SLOT_SIZE_LOGICAL: f32 = 24.0;
 pub const CARD_ICON_GLYPH_SIZE_LOGICAL: f32 = 14.0;
 pub const CARD_ICON_GAP_LOGICAL: f32 = 8.0;
-pub const CARD_ICON_TILE_RADIUS_LOGICAL: f32 = 6.0;
 pub const CARD_TITLE_FONT_SIZE_LOGICAL: f32 = 15.0;
 pub const CARD_EXCERPT_FONT_SIZE_LOGICAL: f32 = 13.0;
 pub const CARD_METADATA_FONT_SIZE_LOGICAL: f32 = 12.0;
@@ -77,7 +76,7 @@ impl VirtualCardListLayout {
         );
         let horizontal_padding = CARD_HORIZONTAL_PADDING_LOGICAL * self.dpi;
         let vertical_padding = CARD_VERTICAL_PADDING_LOGICAL * self.dpi;
-        let icon_size = CARD_ICON_TILE_SIZE_LOGICAL * self.dpi;
+        let icon_size = CARD_ICON_SLOT_SIZE_LOGICAL * self.dpi;
         let title_line_height = CARD_TITLE_LINE_HEIGHT_LOGICAL * self.dpi;
         let icon_rect = Rect::new(
             card_rect.x + horizontal_padding,
@@ -184,7 +183,7 @@ fn build_card_placements(cards: &[CardInput], card_width_px: f32, dpi: f32) -> V
     let horizontal_padding = CARD_HORIZONTAL_PADDING_LOGICAL * dpi;
     let title_width_px = (card_width_px
         - horizontal_padding * 2.0
-        - CARD_ICON_TILE_SIZE_LOGICAL * dpi
+        - CARD_ICON_SLOT_SIZE_LOGICAL * dpi
         - CARD_ICON_GAP_LOGICAL * dpi)
         .max(0.0);
     let excerpt_width_px = (card_width_px - horizontal_padding * 2.0).max(0.0);
@@ -277,7 +276,7 @@ mod tests {
     }
 
     #[test]
-    fn card_title_reserves_a_compact_icon_tile() {
+    fn card_title_reserves_a_compact_icon_slot() {
         let cards = vec![card("")];
         let layout =
             build_virtual_card_layout(&cards, Rect::new(20.0, 30.0, 300.0, 500.0), 0.0, 1.0);
@@ -295,7 +294,6 @@ mod tests {
             excerpt: excerpt.to_owned(),
             timestamp: "刚刚".to_owned(),
             icon: None,
-            icon_tone: super::super::CardIconTone::Neutral,
             tag_summary: String::new(),
             selection: super::super::CardSelection::Unselected,
             closable: false,

@@ -29,16 +29,6 @@ pub enum CardSelection {
     Selected,
 }
 
-/// 卡片图标的通用色调。组件负责根据明暗主题解析实际颜色。
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub enum CardIconTone {
-    #[default]
-    Neutral,
-    Warm,
-    Cool,
-    Violet,
-}
-
 /// 一张卡片的纯展示输入。字符串均由调用方预先准备。
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct CardInput {
@@ -47,7 +37,6 @@ pub struct CardInput {
     pub excerpt: String,
     pub timestamp: String,
     pub icon: Option<String>,
-    pub icon_tone: CardIconTone,
     pub tag_summary: String,
     pub selection: CardSelection,
     pub closable: bool,
@@ -251,13 +240,6 @@ impl Widget for VirtualCardListWidget {
             );
 
             if let Some(icon) = &card.icon {
-                let (tile_color, glyph_color) =
-                    card_icon_colors(ctx.theme, card.icon_tone, background, is_selected);
-                ctx.list.fill_rounded(
-                    geometry.icon_rect,
-                    tile_color,
-                    layout::CARD_ICON_TILE_RADIUS_LOGICAL * ctx.dpi,
-                );
                 let glyph_size = layout::CARD_ICON_GLYPH_SIZE_LOGICAL * ctx.dpi;
                 draw_icon(
                     ctx.list,
@@ -265,7 +247,7 @@ impl Widget for VirtualCardListWidget {
                     geometry.icon_rect.x + (geometry.icon_rect.w - glyph_size) * 0.5,
                     geometry.icon_rect.y + (geometry.icon_rect.h - glyph_size) * 0.5,
                     glyph_size,
-                    glyph_color,
+                    ctx.theme.palette.text_muted,
                 );
             }
             let title_color = if is_selected {
@@ -484,66 +466,6 @@ fn has_unique_keys(cards: &[CardInput]) -> bool {
     cards.iter().all(|card| keys.insert(card.key))
 }
 
-const ICON_TILE_BLEND: f32 = 0.14;
-const SELECTED_ICON_TILE_BLEND: f32 = 0.22;
-const SELECTED_ICON_FOREGROUND_BLEND: f32 = 0.08;
-
-const DARK_WARM_ICON_SRGB: [f32; 4] = [0.8863, 0.6549, 0.4353, 1.0];
-const LIGHT_WARM_ICON_SRGB: [f32; 4] = [0.6314, 0.3608, 0.1333, 1.0];
-const DARK_COOL_ICON_SRGB: [f32; 4] = [0.4824, 0.6980, 0.9412, 1.0];
-const LIGHT_COOL_ICON_SRGB: [f32; 4] = [0.2078, 0.4353, 0.6863, 1.0];
-const DARK_VIOLET_ICON_SRGB: [f32; 4] = [0.7255, 0.6314, 0.9216, 1.0];
-const LIGHT_VIOLET_ICON_SRGB: [f32; 4] = [0.4627, 0.3333, 0.6667, 1.0];
-
-fn card_icon_colors(
-    theme: &crate::theme::Theme,
-    tone: CardIconTone,
-    card_background: [f32; 4],
-    is_selected: bool,
-) -> ([f32; 4], [f32; 4]) {
-    let tone_color = match tone {
-        CardIconTone::Neutral => theme.palette.text_muted,
-        CardIconTone::Warm => {
-            themed_icon_color(theme.is_dark, DARK_WARM_ICON_SRGB, LIGHT_WARM_ICON_SRGB)
-        }
-        CardIconTone::Cool => {
-            themed_icon_color(theme.is_dark, DARK_COOL_ICON_SRGB, LIGHT_COOL_ICON_SRGB)
-        }
-        CardIconTone::Violet => {
-            themed_icon_color(theme.is_dark, DARK_VIOLET_ICON_SRGB, LIGHT_VIOLET_ICON_SRGB)
-        }
-    };
-    let tile_blend = if is_selected { SELECTED_ICON_TILE_BLEND } else { ICON_TILE_BLEND };
-    let tile_color = blend_color(card_background, tone_color, tile_blend);
-    let glyph_color = if is_selected {
-        blend_color(tone_color, theme.palette.text_main, SELECTED_ICON_FOREGROUND_BLEND)
-    } else {
-        tone_color
-    };
-    (tile_color, glyph_color)
-}
-
-fn themed_icon_color(is_dark: bool, dark_srgb: [f32; 4], light_srgb: [f32; 4]) -> [f32; 4] {
-    linearize_srgb(if is_dark { dark_srgb } else { light_srgb })
-}
-
-fn linearize_srgb(mut color: [f32; 4]) -> [f32; 4] {
-    const DISPLAY_GAMMA: f32 = 2.2;
-    for channel in &mut color[..3] {
-        *channel = channel.powf(DISPLAY_GAMMA);
-    }
-    color
-}
-
-fn blend_color(base: [f32; 4], target: [f32; 4], factor: f32) -> [f32; 4] {
-    [
-        base[0] + (target[0] - base[0]) * factor,
-        base[1] + (target[1] - base[1]) * factor,
-        base[2] + (target[2] - base[2]) * factor,
-        base[3] + (target[3] - base[3]) * factor,
-    ]
-}
-
 #[allow(
     clippy::too_many_arguments,
     reason = "card text painting keeps its geometry and typography constraints explicit"
@@ -606,7 +528,6 @@ mod tests {
             excerpt: "Precomputed excerpt".to_owned(),
             timestamp: "Just now".to_owned(),
             icon: Some("file-text".to_owned()),
-            icon_tone: CardIconTone::Neutral,
             tag_summary: "#work".to_owned(),
             selection: CardSelection::Unselected,
             closable: false,
@@ -668,11 +589,12 @@ mod tests {
     }
 
     #[test]
-    fn card_icon_paints_a_tinted_rounded_tile() {
+    fn card_icon_uses_muted_foreground_without_a_tile() {
         let mut widget = VirtualCardListWidget::new();
-        let mut tinted_card = card(1);
-        tinted_card.icon_tone = CardIconTone::Cool;
-        widget.set_input(VirtualCardListInput { cards: vec![tinted_card], scroll_offset_px: 0.0 });
+        let mut selected_card = card(1);
+        selected_card.selection = CardSelection::Selected;
+        widget
+            .set_input(VirtualCardListInput { cards: vec![selected_card], scroll_offset_px: 0.0 });
         layout(&mut widget, Rect::new(0.0, 0.0, 360.0, 220.0), 1.0);
         let icon_rect = widget.layout().card_geometry(0).icon_rect;
         let theme = crate::theme::test_theme();
@@ -681,31 +603,15 @@ mod tests {
 
         widget.paint(&mut paint_context);
 
-        assert!(draw_list.cmds.iter().any(|command| {
-            matches!(
-                command,
-                DrawCmd::FillRect { rect, color, radius }
-                    if *rect == icon_rect
-                        && *color != theme.palette.bg_surface
-                        && *radius == layout::CARD_ICON_TILE_RADIUS_LOGICAL
-            )
-        }));
-    }
-
-    #[test]
-    fn icon_tones_remain_distinct_in_light_and_dark_themes() {
-        let light_theme =
-            crate::theme::Theme::from_definition(&crate::theme::ThemeDefinition::default_light());
-        for theme in [crate::theme::test_theme(), light_theme] {
-            let card_background = theme.palette.bg_surface;
-            let warm = card_icon_colors(&theme, CardIconTone::Warm, card_background, false).1;
-            let cool = card_icon_colors(&theme, CardIconTone::Cool, card_background, false).1;
-            let violet = card_icon_colors(&theme, CardIconTone::Violet, card_background, false).1;
-
-            assert_ne!(warm, cool);
-            assert_ne!(cool, violet);
-            assert_ne!(violet, warm);
-        }
+        assert!(!draw_list.cmds.iter().any(
+            |command| matches!(command, DrawCmd::FillRect { rect, .. } if *rect == icon_rect)
+        ));
+        let icon_colors = draw_list.cmds.iter().filter_map(|command| match command {
+            DrawCmd::FillTriangle { color, .. } => Some(*color),
+            _ => None,
+        });
+        assert!(icon_colors.clone().next().is_some());
+        assert!(icon_colors.into_iter().all(|color| color == theme.palette.text_muted));
     }
 
     #[test]

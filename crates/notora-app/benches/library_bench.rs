@@ -11,7 +11,7 @@ use notora_core::{
 use rusqlite::Connection;
 use ui::core::Widget;
 use ui::virtual_card_list::{
-    CardIconTone, CardInput, CardKey, CardSelection, VirtualCardListInput, VirtualCardListWidget,
+    CardInput, CardKey, CardSelection, VirtualCardListInput, VirtualCardListWidget,
 };
 use ui::{LayoutCtx, NoopMeasure, Rect};
 
@@ -182,7 +182,6 @@ fn benchmark_virtual_card_layout(criterion: &mut Criterion) {
             excerpt: "Precomputed excerpt".to_owned(),
             timestamp: "Modified".to_owned(),
             icon: Some("file-text".to_owned()),
-            icon_tone: CardIconTone::Neutral,
             tag_summary: "#plan".to_owned(),
             selection: CardSelection::Unselected,
             closable: false,
