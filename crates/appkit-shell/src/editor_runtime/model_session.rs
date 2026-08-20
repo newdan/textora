@@ -404,7 +404,11 @@ impl ModelSession {
         // undo coalescing run so the next edit starts a fresh undo entry.
         tab.document.break_edit_merge();
         tab.cursor_render_state_mut().cursor_blink_instant = std::time::Instant::now();
-        tab.ensure_cursor_visible(line_height);
+        if tab.handles_own_rendering() {
+            tab.invalidate_cursor_visibility();
+        } else {
+            tab.ensure_cursor_visible(line_height);
+        }
         EditorOutcome {
             shell_effect: crate::event::ShellEffect::REDRAW,
             ..EditorOutcome::default()
@@ -1134,7 +1138,11 @@ fn refresh_presentation_after_edit(tab: &mut TabSessionMut<'_>, line_height: f32
     tab.invalidate_render_cache_all();
     tab.cursor_render_state_mut().click_hint = None;
     tab.cursor_render_state_mut().cursor_blink_instant = std::time::Instant::now();
-    tab.ensure_cursor_visible(line_height);
+    if tab.handles_own_rendering() {
+        tab.invalidate_cursor_visibility();
+    } else {
+        tab.ensure_cursor_visible(line_height);
+    }
 }
 
 fn synchronize_plugin_source(tab: &mut TabSessionMut<'_>) {

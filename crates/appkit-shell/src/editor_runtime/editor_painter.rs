@@ -135,7 +135,11 @@ fn paint_plugin_editor(
         return Vec::new();
     };
 
+    let preedit_active = !preedit.0.is_empty();
     synchronize_plugin_document(&mut tab, preedit);
+    if preedit_active {
+        tab.invalidate_cursor_visibility();
+    }
     tab.send_message(PluginMessage::SetRenderSettings {
         font_size: metrics.font_size / metrics.dpi,
         line_height: metrics.line_height / metrics.dpi,
@@ -155,7 +159,7 @@ fn paint_plugin_editor(
                 tab.render_canvas_plugin(&snapshot, theme, &mut text.shaper, metrics.dpi)
             })
     } else {
-        tab.render_plugin(bounds, theme, &mut text.shaper, metrics.dpi)
+        render_plugin_with_visible_cursor(&mut tab, bounds, theme, &mut text.shaper, metrics.dpi)
     };
     let tab_view = TabSession::new(tab.id, tab.document, tab.runtime);
     if tab_view.has_selection() {
@@ -177,6 +181,58 @@ fn paint_plugin_editor(
         );
     }
     crate::paint_backend::drain(draw_list, screen, Some(text), Some(gpu))
+}
+
+fn render_plugin_with_visible_cursor(
+    tab: &mut crate::tab_session::TabSessionMut<'_>,
+    bounds: ui::Rect,
+    theme: &ui::Theme,
+    shaper: &mut shaping::Shaper,
+    dpi: f32,
+) -> ui::DrawList {
+    let mut draw_list = tab.render_plugin(bounds, theme, shaper, dpi);
+    let cursor_offset = tab.document.cursor().offset;
+    if cursor_offset == tab.last_cursor_offset() {
+        return draw_list;
+    }
+    tab.set_last_cursor_offset(cursor_offset);
+
+    let cursor_byte = cursor_offset.to_usize();
+    let cursor_rect = TabSession::new(tab.id, &*tab.document, &*tab.runtime)
+        .query_cursor_screen_rect(cursor_byte);
+    let scroll_delta = cursor_rect.and_then(|(_, cursor_y, _, cursor_height)| {
+        plugin_cursor_visibility_scroll_delta(cursor_y, cursor_height, bounds.h)
+    });
+    let Some(scroll_delta) = scroll_delta else {
+        return draw_list;
+    };
+    if !tab.send_message(PluginMessage::Scroll { delta: scroll_delta, viewport_h: bounds.h }) {
+        return draw_list;
+    }
+
+    draw_list = tab.render_plugin(bounds, theme, shaper, dpi);
+    draw_list
+}
+
+fn plugin_cursor_visibility_scroll_delta(
+    cursor_y: f32,
+    cursor_height: f32,
+    viewport_height: f32,
+) -> Option<f32> {
+    if !cursor_y.is_finite()
+        || !cursor_height.is_finite()
+        || !viewport_height.is_finite()
+        || cursor_height < 0.0
+        || viewport_height <= 0.0
+    {
+        return None;
+    }
+    if cursor_y < 0.0 {
+        return Some(cursor_y);
+    }
+
+    let overflow_below = cursor_y + cursor_height - viewport_height;
+    (overflow_below > 0.0).then_some(overflow_below)
 }
 
 fn synchronize_plugin_document(
@@ -369,7 +425,10 @@ pub(super) fn plugin_bounds(editor_rect: ui::Rect, dpi: f32, is_canvas: bool) ->
 
 #[cfg(test)]
 mod tests {
-    use super::{editor_viewport_dimensions, plain_text_preedit_origin};
+    use super::{
+        editor_viewport_dimensions, plain_text_preedit_origin,
+        plugin_cursor_visibility_scroll_delta,
+    };
 
     #[test]
     fn partial_bottom_row_is_not_counted_as_fully_visible() {
@@ -381,6 +440,32 @@ mod tests {
 
         assert_eq!(visible_rows, 10);
         assert_eq!(viewport_height, 10.5);
+    }
+
+    #[test]
+    fn plugin_cursor_below_the_short_viewport_requests_minimal_scroll() {
+        const VIEWPORT_HEIGHT_PX: f32 = 90.0;
+        const CURSOR_TOP_PX: f32 = 82.0;
+        const CURSOR_HEIGHT_PX: f32 = 30.0;
+
+        assert_eq!(
+            plugin_cursor_visibility_scroll_delta(
+                CURSOR_TOP_PX,
+                CURSOR_HEIGHT_PX,
+                VIEWPORT_HEIGHT_PX,
+            ),
+            Some(22.0),
+        );
+    }
+
+    #[test]
+    fn visible_plugin_cursor_does_not_request_scroll() {
+        assert_eq!(plugin_cursor_visibility_scroll_delta(24.0, 30.0, 90.0), None);
+    }
+
+    #[test]
+    fn plugin_cursor_above_the_viewport_requests_minimal_scroll() {
+        assert_eq!(plugin_cursor_visibility_scroll_delta(-12.0, 30.0, 90.0), Some(-12.0));
     }
 
     #[test]

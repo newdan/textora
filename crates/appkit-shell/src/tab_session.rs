@@ -560,6 +560,10 @@ impl<'a> TabSessionMut<'a> {
         self.as_ref().allows_editing()
     }
 
+    pub fn handles_own_rendering(&self) -> bool {
+        self.as_ref().handles_own_rendering()
+    }
+
     pub fn is_canvas(&self) -> bool {
         self.runtime.plugin.is_canvas()
     }
@@ -737,6 +741,10 @@ impl<'a> TabSessionMut<'a> {
 
     pub fn set_last_cursor_offset(&mut self, offset: core::types::ByteIndex) {
         self.cursor_render_state_mut().last_cursor_offset = offset;
+    }
+
+    pub(crate) fn invalidate_cursor_visibility(&mut self) {
+        self.set_last_cursor_offset(core::types::ByteIndex::MAX);
     }
 
     pub fn scroll_anchor_doc_line(&self) -> usize {
