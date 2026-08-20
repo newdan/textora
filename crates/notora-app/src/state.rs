@@ -1677,7 +1677,12 @@ impl NotoraState {
     }
 
     fn select_document(&mut self, identity: DocumentIdentity) -> DocumentLoadRequest {
+        let encrypted_unlock_was_active =
+            !matches!(&self.encrypted_note_unlock, EncryptedNoteUnlockState::Inactive);
         self.encrypted_note_unlock = EncryptedNoteUnlockState::Inactive;
+        if encrypted_unlock_was_active && self.layout.overlay == OverlayState::EncryptedNoteDialog {
+            self.layout.overlay = OverlayState::None;
+        }
         self.library.selected_card = Some(identity);
         self.library.title_draft = None;
         self.library.selected_document_generation =
@@ -2810,7 +2815,7 @@ mod tests {
     }
 
     #[test]
-    fn encrypted_note_unlock_keeps_generation_and_clears_password_on_cancel() {
+    fn encrypted_note_unlock_closes_cleanly_on_cancel_or_document_selection() {
         use ui::core::widget::SensitiveText;
 
         let note_id = NoteId::generate();
@@ -2842,6 +2847,12 @@ mod tests {
         let _ = state.reduce(NotoraAction::EncryptedNotePasswordChanged(SensitiveText::new(
             "unlock-password".to_owned(),
         )));
+        let mut switched_state = state.clone();
+        let other_identity = DocumentIdentity::Note(NoteId::generate());
+        let _ = switched_state.reduce(NotoraAction::CardSelected(other_identity));
+        assert_eq!(switched_state.encrypted_note_unlock, EncryptedNoteUnlockState::Inactive);
+        assert_eq!(switched_state.layout.overlay, OverlayState::None);
+
         let effects = state.reduce(NotoraAction::EncryptedNoteDialogSubmitRequested);
         assert!(matches!(
             effects.as_slice(),

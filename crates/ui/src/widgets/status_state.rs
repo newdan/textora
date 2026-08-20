@@ -9,6 +9,8 @@ use crate::core::{
 };
 use crate::widgets::icon::draw_icon;
 
+const STATUS_ICON_TITLE_GAP: f32 = 12.0;
+
 /// 状态的视觉种类，不包含产品错误类型。
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum StatusStateKind {
@@ -111,7 +113,7 @@ impl Widget for StatusStateWidget {
                 ctx.list,
                 icon,
                 center_x - icon_size * 0.5,
-                title_y - icon_size - 12.0 * ctx.dpi,
+                title_y - title_font_size - icon_size - STATUS_ICON_TITLE_GAP * ctx.dpi,
                 icon_size,
                 ctx.theme.palette.text_muted,
             );
@@ -277,6 +279,54 @@ mod tests {
                 })
                 .all(|text_x| text_x >= status_rect.x)
         );
+    }
+
+    #[test]
+    fn icon_keeps_visual_gap_above_title() {
+        let mut widget = StatusStateWidget::new();
+        widget.set_input(StatusStateInput {
+            kind: StatusStateKind::Empty,
+            title: "请选择笔记".to_owned(),
+            description: "编辑器将在此处显示。".to_owned(),
+            icon: Some("file-text".to_owned()),
+            ..StatusStateInput::default()
+        });
+        layout(&mut widget, Rect::new(0.0, 0.0, 320.0, 240.0), 1.0);
+        let theme = crate::theme::test_theme();
+        let mut draw_list = DrawList::new();
+        let mut shaper = shaping::Shaper::new().expect("test shaper should initialize");
+        let mut paint_context = PaintCtx {
+            list: &mut draw_list,
+            theme: &theme,
+            dpi: 1.0,
+            offset: (0.0, 0.0),
+            global_alpha: 1.0,
+            shaper: Some(&mut shaper),
+        };
+
+        widget.paint(&mut paint_context);
+
+        let icon_bottom = draw_list
+            .cmds
+            .iter()
+            .filter_map(|command| match command {
+                DrawCmd::FillTriangle { p0, p1, p2, .. } => Some(p0[1].max(p1[1]).max(p2[1])),
+                _ => None,
+            })
+            .reduce(f32::max)
+            .expect("file-text icon should emit triangles");
+        let title_top = draw_list
+            .cmds
+            .iter()
+            .find_map(|command| match command {
+                DrawCmd::TextLayout { layout, y_baseline, .. } if layout.text == "请选择笔记" => {
+                    Some(y_baseline - layout.font_size)
+                }
+                _ => None,
+            })
+            .expect("title should emit a text layout");
+
+        assert!(title_top - icon_bottom >= STATUS_ICON_TITLE_GAP);
     }
 
     #[test]
