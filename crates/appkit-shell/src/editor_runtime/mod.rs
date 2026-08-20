@@ -23,7 +23,8 @@ pub use contract::{
     EditorWorkspaceSnapshot, OpenDisposition,
 };
 pub use document_save::{
-    PreparedDocumentSave, SaveCompletion, SavePrepareError, execute_prepared_save,
+    PreparedDocumentSave, SaveCompletion, SavePayloadTransform, SavePrepareError,
+    execute_prepared_save, execute_prepared_save_with_transform,
 };
 pub use editor_frame::{EditorFrame, RenderError, RenderResources};
 pub use editor_painter::EditorSurfacePaint;
@@ -557,6 +558,15 @@ impl EditorRuntime {
         wake: impl Fn() + Send + Sync + 'static,
     ) -> Result<(), String> {
         self.save_session.submit(prepared, wake)
+    }
+
+    pub fn submit_save_with_transform(
+        &mut self,
+        prepared: PreparedDocumentSave,
+        transform: SavePayloadTransform,
+        wake: impl Fn() + Send + Sync + 'static,
+    ) -> Result<(), String> {
+        self.save_session.submit_with_transform(prepared, Some(transform), wake)
     }
 
     pub fn drain_save_completions(&mut self) -> Vec<SaveCompletion> {

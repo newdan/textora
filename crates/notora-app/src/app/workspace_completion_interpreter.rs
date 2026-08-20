@@ -18,7 +18,8 @@ impl WorkspaceCompletionInterpreter {
             WorkspaceCompletion::NoteCommandCompleted { result } => {
                 target.synchronize_open_note_path(&result);
                 target.complete_pending_title_seed(&result);
-                target.dispatch_action(NotoraAction::NoteCommandCompleted(result));
+                target.dispatch_action(NotoraAction::NoteCommandCompleted(result.clone()));
+                target.install_created_encrypted_note(&result);
             }
             WorkspaceCompletion::NoteCommandFailed { message } => {
                 target.dispatch_action(NotoraAction::NoteCommandFailed(message));
@@ -101,6 +102,40 @@ impl WorkspaceCompletionInterpreter {
                     tags,
                 });
             }
+            WorkspaceCompletion::EncryptedDocumentUnlockRequired {
+                request,
+                title,
+                metadata,
+                tags,
+            } if target.selection_matches(request) => {
+                target.dispatch_action(NotoraAction::EncryptedNoteUnlockRequired {
+                    request,
+                    title,
+                    metadata,
+                    tags,
+                });
+            }
+            WorkspaceCompletion::EncryptedDocumentUnlockRequired { .. } => {}
+            WorkspaceCompletion::EncryptedDocumentUnlocked { unlocked }
+                if target.accepts_encrypted_unlock(unlocked.request, unlocked.generation) =>
+            {
+                target.install_unlocked_workspace_document(unlocked);
+                target.dispatch_action(NotoraAction::OverlayDismissed);
+                target.dispatch_action(NotoraAction::FocusRequested(
+                    crate::state::FocusTarget::Editor,
+                ));
+            }
+            WorkspaceCompletion::EncryptedDocumentUnlocked { .. } => {}
+            WorkspaceCompletion::EncryptedDocumentUnlockFailed { request, generation, message }
+                if target.accepts_encrypted_unlock(request, generation) =>
+            {
+                target.dispatch_action(NotoraAction::NoteCommandFailed(if message.is_empty() {
+                    "密码错误或文件已损坏".to_owned()
+                } else {
+                    message
+                }));
+            }
+            WorkspaceCompletion::EncryptedDocumentUnlockFailed { .. } => {}
             WorkspaceCompletion::DocumentLoadFailed { request, message }
                 if target.selection_matches(request) =>
             {

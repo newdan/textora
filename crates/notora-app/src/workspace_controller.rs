@@ -230,6 +230,29 @@ impl WorkspaceController {
         self.prepare_workspace_document(request, WorkspaceDocumentSource::TrashedNote)
     }
 
+    pub fn unlock_encrypted_document(
+        &self,
+        unlock_request: crate::action::EncryptedNoteUnlockRequest,
+        trashed: bool,
+    ) -> Result<(), WorkspaceControllerError> {
+        let session =
+            self.active_session.as_ref().ok_or(WorkspaceControllerError::NoActiveWorkspace)?;
+        let source = if trashed {
+            WorkspaceDocumentSource::TrashedNote
+        } else {
+            WorkspaceDocumentSource::ActiveNote
+        };
+        session
+            .indexer
+            .send(IndexWorkerCommand::UnlockEncryptedDocument {
+                request: unlock_request.request,
+                password: unlock_request.password,
+                generation: unlock_request.generation,
+                source,
+            })
+            .map_err(|_| WorkspaceControllerError::CommandWorkerDisconnected)
+    }
+
     fn prepare_workspace_document(
         &self,
         request: DocumentLoadRequest,
@@ -662,6 +685,17 @@ fn execute_workspace_command(
         IndexWorkerCommand::PrepareDocument { request, source } => {
             prepare_document_in_worker(workspace, catalog, request, source, event_sender);
         }
+        IndexWorkerCommand::UnlockEncryptedDocument { request, password, generation, source } => {
+            unlock_encrypted_document_in_worker(
+                workspace,
+                catalog,
+                request,
+                &password,
+                generation,
+                source,
+                event_sender,
+            )
+        }
         IndexWorkerCommand::ReindexCatalog => {
             index_workspace(workspace, catalog, event_sender);
         }
@@ -809,32 +843,28 @@ fn prepare_document_in_worker(
         let DocumentIdentity::Note(note_id) = request.identity else {
             return Err("外部文档必须由外部文件会话加载".to_owned());
         };
-        let path = match source {
-            WorkspaceDocumentSource::ActiveNote => catalog
-                .active_note(note_id)
-                .map_err(|error| error.to_string())?
-                .ok_or_else(|| format!("活动笔记 {note_id} 已不存在"))
-                .and_then(|note| {
-                    workspace
-                        .resolve_relative_path(&note.relative_path)
-                        .map_err(|error| error.to_string())
-                }),
-            WorkspaceDocumentSource::TrashedNote => {
-                notora_core::trash::resolve_trashed_note_path(workspace, catalog, note_id)
-                    .map_err(|error| error.to_string())
-            }
-        }?;
+        let path = resolve_workspace_document_path(workspace, catalog, note_id, source)?;
         let metadata = catalog
             .note_editor_metadata(note_id)
             .map_err(|error| error.to_string())?
             .ok_or_else(|| format!("笔记 {note_id} 缺少编辑区 metadata"))?;
         let tags = catalog.tags_for_note(note_id).map_err(|error| error.to_string())?;
+        if metadata.encryption == notora_core::NoteEncryption::Encrypted {
+            let serialized = std::fs::read(&path).map_err(|error| error.to_string())?;
+            textora_encryption::inspect_encrypted_markdown(&serialized)
+                .map_err(|error| error.to_string())?;
+            let title = path
+                .file_stem()
+                .map(|stem| stem.to_string_lossy().into_owned())
+                .ok_or_else(|| "加密笔记路径缺少文件名".to_owned())?;
+            return Ok((None, Some(title), metadata, tags));
+        }
         let document =
             crate::editor_adapter::load_document(&path).map_err(|error| error.to_string())?;
-        Ok((document, metadata, tags))
+        Ok((Some(document), None, metadata, tags))
     })();
     match result {
-        Ok((document, metadata, tags)) => {
+        Ok((Some(document), None, metadata, tags)) => {
             let _ = event_sender.send(WorkspaceCompletion::DocumentLoaded {
                 request,
                 document,
@@ -842,8 +872,85 @@ fn prepare_document_in_worker(
                 tags,
             });
         }
+        Ok((None, Some(title), metadata, tags)) => {
+            let _ = event_sender.send(WorkspaceCompletion::EncryptedDocumentUnlockRequired {
+                request,
+                title,
+                metadata,
+                tags,
+            });
+        }
+        Ok(_) => {
+            let _ = event_sender.send(WorkspaceCompletion::DocumentLoadFailed {
+                request,
+                message: "文档加载结果不完整".to_owned(),
+            });
+        }
         Err(message) => {
             let _ = event_sender.send(WorkspaceCompletion::DocumentLoadFailed { request, message });
+        }
+    }
+}
+
+fn unlock_encrypted_document_in_worker(
+    workspace: &Workspace,
+    catalog: &Catalog,
+    request: DocumentLoadRequest,
+    password: &textora_encryption::EncryptionPassword,
+    generation: u64,
+    source: WorkspaceDocumentSource,
+    event_sender: &WorkspaceEventSender,
+) {
+    let result = (|| {
+        let DocumentIdentity::Note(note_id) = request.identity else {
+            return Err("外部文档不能作为工作区加密笔记解锁".to_owned());
+        };
+        let path = resolve_workspace_document_path(workspace, catalog, note_id, source)?;
+        let serialized = std::fs::read(&path).map_err(|error| error.to_string())?;
+        let disk_revision =
+            appkit_core::file_safety::capture_revision(&path).map_err(|error| error.to_string())?;
+        let unlocked = textora_encryption::unlock_encrypted_markdown(&serialized, password)
+            .map_err(|_| "密码错误或文件已损坏".to_owned())?;
+        let (contents, session) = unlocked.into_parts();
+        Ok(crate::product::UnlockedWorkspaceDocument {
+            request,
+            generation,
+            document: crate::editor_adapter::LoadedDocument {
+                path,
+                contents,
+                disk_revision: Some(disk_revision),
+            },
+            session: std::sync::Arc::new(session),
+        })
+    })();
+    let completion = match result {
+        Ok(unlocked) => WorkspaceCompletion::EncryptedDocumentUnlocked { unlocked },
+        Err(message) => {
+            WorkspaceCompletion::EncryptedDocumentUnlockFailed { request, generation, message }
+        }
+    };
+    let _ = event_sender.send(completion);
+}
+
+fn resolve_workspace_document_path(
+    workspace: &Workspace,
+    catalog: &Catalog,
+    note_id: notora_core::NoteId,
+    source: WorkspaceDocumentSource,
+) -> Result<std::path::PathBuf, String> {
+    match source {
+        WorkspaceDocumentSource::ActiveNote => catalog
+            .active_note(note_id)
+            .map_err(|error| error.to_string())?
+            .ok_or_else(|| format!("活动笔记 {note_id} 已不存在"))
+            .and_then(|note| {
+                workspace
+                    .resolve_relative_path(&note.relative_path)
+                    .map_err(|error| error.to_string())
+            }),
+        WorkspaceDocumentSource::TrashedNote => {
+            notora_core::trash::resolve_trashed_note_path(workspace, catalog, note_id)
+                .map_err(|error| error.to_string())
         }
     }
 }
@@ -1510,7 +1617,7 @@ mod tests {
                 notora_core::note_command::ConfiguredCreateNoteRequest {
                     kind: notora_core::DocumentKind::Markdown,
                     target_directory: None,
-                    encryption: notora_core::NoteEncryption::Unencrypted,
+                    storage: notora_core::CreateNoteStorage::Unencrypted,
                 },
             ))
             .expect("active workspace should accept the note command");
@@ -2069,7 +2176,7 @@ mod tests {
                 notora_core::note_command::ConfiguredCreateNoteRequest {
                     kind: notora_core::DocumentKind::Markdown,
                     target_directory: None,
-                    encryption: notora_core::NoteEncryption::Unencrypted,
+                    storage: notora_core::CreateNoteStorage::Unencrypted,
                 },
             ))
             .expect("worker should create a note");

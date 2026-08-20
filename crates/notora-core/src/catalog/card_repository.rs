@@ -3,7 +3,7 @@ use std::path::PathBuf;
 use rusqlite::{Row, ToSql, params_from_iter};
 use uuid::Uuid;
 
-use crate::{DocumentKind, NavigationScope, NoteId};
+use crate::{DocumentKind, NavigationScope, NoteEncryption, NoteId};
 
 use super::{Catalog, CatalogError};
 
@@ -17,6 +17,7 @@ pub struct CatalogCard {
     pub note_id: NoteId,
     pub relative_path: PathBuf,
     pub kind: DocumentKind,
+    pub encryption: NoteEncryption,
     pub title: String,
     pub excerpt: String,
     pub modified_nanoseconds: i64,
@@ -58,7 +59,7 @@ impl Catalog {
         let query = CatalogCardQuery::from_scope(scope)?;
         let mut parameters = query.parameters;
         let mut sql = format!(
-            "SELECT n.note_id, n.relative_path, n.kind, n.title, n.excerpt, n.modified_ns, n.starred\n{}\nWHERE {}",
+            "SELECT n.note_id, n.relative_path, n.kind, n.encryption, n.title, n.excerpt, n.modified_ns, n.starred\n{}\nWHERE {}",
             query.source, query.predicate
         );
         append_cursor_predicate(&mut sql, &mut parameters, cursor);
@@ -156,7 +157,7 @@ impl Catalog {
         let mut statement = self
             .connection()
             .prepare(
-                "SELECT note_id, relative_path, kind, title, excerpt, modified_ns, starred
+                "SELECT note_id, relative_path, kind, encryption, title, excerpt, modified_ns, starred
                  FROM notes WHERE note_id = ?1 AND lifecycle = ?2",
             )
             .map_err(|source| CatalogError::sql("search card lookup preparation", source))?;
@@ -272,6 +273,7 @@ struct StoredCatalogCard {
     note_id: String,
     relative_path: String,
     kind: i64,
+    encryption: i64,
     title: String,
     excerpt: String,
     modified_nanoseconds: i64,
@@ -306,10 +308,21 @@ impl TryFrom<StoredCatalogCard> for CatalogCard {
                 });
             }
         };
+        let encryption = match stored_card.encryption {
+            0 => NoteEncryption::Unencrypted,
+            1 => NoteEncryption::Encrypted,
+            value => {
+                return Err(CatalogError::InvalidStoredValue {
+                    column: "encryption",
+                    value: value.to_string(),
+                });
+            }
+        };
         Ok(Self {
             note_id,
             relative_path: stored_card.relative_path.into(),
             kind,
+            encryption,
             title: stored_card.title,
             excerpt: stored_card.excerpt,
             modified_nanoseconds: stored_card.modified_nanoseconds,
@@ -334,10 +347,11 @@ fn catalog_card_from_row(row: &Row<'_>) -> rusqlite::Result<StoredCatalogCard> {
         note_id: row.get(0)?,
         relative_path: row.get(1)?,
         kind: row.get(2)?,
-        title: row.get(3)?,
-        excerpt: row.get(4)?,
-        modified_nanoseconds: row.get(5)?,
-        starred: row.get(6)?,
+        encryption: row.get(3)?,
+        title: row.get(4)?,
+        excerpt: row.get(5)?,
+        modified_nanoseconds: row.get(6)?,
+        starred: row.get(7)?,
     })
 }
 

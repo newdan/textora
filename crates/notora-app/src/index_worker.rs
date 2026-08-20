@@ -23,9 +23,21 @@ pub(crate) enum IndexWorkerCommand {
     ExecuteNoteCommand(NoteCommand),
     ExecuteDirectoryCommand(notora_core::WorkspaceDirectoryCommand),
     ExecuteMetadataMutation(MetadataMutation),
-    CreateCatalogBackup { directory: PathBuf, retention: notora_core::BackupRetention },
+    CreateCatalogBackup {
+        directory: PathBuf,
+        retention: notora_core::BackupRetention,
+    },
     ExecuteTrashOperation(TrashOperation),
-    PrepareDocument { request: DocumentLoadRequest, source: WorkspaceDocumentSource },
+    PrepareDocument {
+        request: DocumentLoadRequest,
+        source: WorkspaceDocumentSource,
+    },
+    UnlockEncryptedDocument {
+        request: DocumentLoadRequest,
+        password: std::sync::Arc<textora_encryption::EncryptionPassword>,
+        generation: u64,
+        source: WorkspaceDocumentSource,
+    },
     ReindexCatalog,
 }
 

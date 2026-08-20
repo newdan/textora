@@ -6,8 +6,9 @@ use crate::catalog::SearchIndexEntry;
 use crate::file_monitor::{WorkspaceFileBatch, WorkspaceFileChange};
 use crate::reconciliation::reconcile_notes_with_renames;
 use crate::{
-    Catalog, CatalogError, CatalogNote, DiscoveredNote, DocumentKind, ReconciliationChange,
-    ReconciliationError, WORKSPACE_METADATA_DIRECTORY_NAME, Workspace, parse_note_text_summary,
+    Catalog, CatalogError, CatalogNote, DiscoveredNote, DocumentKind, NoteEncryption,
+    ReconciliationChange, ReconciliationError, WORKSPACE_METADATA_DIRECTORY_NAME, Workspace,
+    parse_note_text_summary,
 };
 
 const MACOS_FINDER_METADATA_FILE_NAME: &str = ".DS_Store";
@@ -61,6 +62,8 @@ pub fn scan_workspace(
 ) -> Result<ScanCompletion, ScanError> {
     let mut completion = ScanCompletion::default();
     let existing_notes = catalog.active_notes().map_err(ScanError::Catalog)?;
+    let existing_encryption_by_path =
+        existing_encryption_by_path(catalog, &existing_notes).map_err(ScanError::Catalog)?;
     let existing_notes_by_path = existing_notes
         .into_iter()
         .map(|note| (note.relative_path.clone(), note))
@@ -70,6 +73,7 @@ pub fn scan_workspace(
         workspace,
         workspace.root(),
         &existing_notes_by_path,
+        &existing_encryption_by_path,
         &mut discovered_files,
         &mut completion,
     );
@@ -118,6 +122,8 @@ fn scan_workspace_paths_with_renames(
     rename_hints: &[(PathBuf, PathBuf)],
 ) -> Result<ScanCompletion, ScanError> {
     let existing_notes = catalog.active_notes().map_err(ScanError::Catalog)?;
+    let existing_encryption_by_path =
+        existing_encryption_by_path(catalog, &existing_notes).map_err(ScanError::Catalog)?;
     let existing_notes_by_path = existing_notes
         .iter()
         .cloned()
@@ -145,6 +151,7 @@ fn scan_workspace_paths_with_renames(
                 workspace,
                 &path,
                 &existing_notes_by_path,
+                &existing_encryption_by_path,
                 &mut discovered_files,
                 &mut completion,
             );
@@ -153,6 +160,7 @@ fn scan_workspace_paths_with_renames(
                 workspace,
                 &path,
                 &existing_notes_by_path,
+                &existing_encryption_by_path,
                 &mut discovered_files,
                 &mut completion,
             );
@@ -211,23 +219,30 @@ fn apply_scan_results(
     let mut search_entries = Vec::new();
     for change in plan.changes {
         match change {
-            ReconciliationChange::Updated(note) => {
+            ReconciliationChange::Updated(reconciled) => {
+                let note = reconciled.note;
                 present_note_ids.push(note.note_id);
                 let Some(body) = changed_bodies_by_path.get(&note.relative_path) else {
                     continue;
                 };
-                catalog.upsert_active_note(&note).map_err(ScanError::Catalog)?;
+                catalog
+                    .upsert_discovered_note(&note, reconciled.encryption)
+                    .map_err(ScanError::Catalog)?;
                 search_entries.push(search_entry(catalog, &note, body.clone())?);
             }
-            ReconciliationChange::Added(note) => {
+            ReconciliationChange::Added(reconciled) => {
+                let note = reconciled.note;
                 present_note_ids.push(note.note_id);
                 let Some(body) = changed_bodies_by_path.get(&note.relative_path) else {
                     continue;
                 };
-                catalog.upsert_active_note(&note).map_err(ScanError::Catalog)?;
+                catalog
+                    .upsert_discovered_note(&note, reconciled.encryption)
+                    .map_err(ScanError::Catalog)?;
                 search_entries.push(search_entry(catalog, &note, body.clone())?);
             }
-            ReconciliationChange::Moved { from, note } => {
+            ReconciliationChange::Moved { from, reconciled } => {
+                let note = reconciled.note;
                 present_note_ids.push(note.note_id);
                 let Some(body) = changed_bodies_by_path.get(&note.relative_path) else {
                     continue;
@@ -241,7 +256,9 @@ fn apply_scan_results(
                         external_title,
                     )
                     .map_err(ScanError::Catalog)?;
-                catalog.upsert_active_note(&note).map_err(ScanError::Catalog)?;
+                catalog
+                    .upsert_discovered_note(&note, reconciled.encryption)
+                    .map_err(ScanError::Catalog)?;
                 search_entries.push(search_entry(catalog, &note, body.clone())?);
             }
             ReconciliationChange::Missing(note) => missing_note_ids.push(note.note_id),
@@ -286,6 +303,7 @@ fn scan_directory(
     workspace: &Workspace,
     directory: &Path,
     existing_notes_by_path: &HashMap<PathBuf, CatalogNote>,
+    existing_encryption_by_path: &HashMap<PathBuf, NoteEncryption>,
     discovered_files: &mut Vec<DiscoveredFile>,
     completion: &mut ScanCompletion,
 ) {
@@ -318,11 +336,25 @@ fn scan_directory(
             continue;
         }
         if file_type.is_dir() {
-            scan_directory(workspace, &path, existing_notes_by_path, discovered_files, completion);
+            scan_directory(
+                workspace,
+                &path,
+                existing_notes_by_path,
+                existing_encryption_by_path,
+                discovered_files,
+                completion,
+            );
             continue;
         }
         if file_type.is_file() {
-            scan_file(workspace, &path, existing_notes_by_path, discovered_files, completion);
+            scan_file(
+                workspace,
+                &path,
+                existing_notes_by_path,
+                existing_encryption_by_path,
+                discovered_files,
+                completion,
+            );
         }
     }
 }
@@ -331,6 +363,7 @@ fn scan_file(
     workspace: &Workspace,
     path: &Path,
     existing_notes_by_path: &HashMap<PathBuf, CatalogNote>,
+    existing_encryption_by_path: &HashMap<PathBuf, NoteEncryption>,
     discovered_files: &mut Vec<DiscoveredFile>,
     completion: &mut ScanCompletion,
 ) {
@@ -362,27 +395,8 @@ fn scan_file(
             return;
         }
     };
-    if let Some(existing_note) = existing_notes_by_path.get(&relative_path)
-        && existing_note.kind == kind
-        && existing_note.modified_at == modified_at
-        && existing_note.file_size == metadata.len()
-    {
-        discovered_files.push(DiscoveredFile {
-            note: DiscoveredNote {
-                relative_path,
-                kind,
-                title: existing_note.title.clone(),
-                excerpt: existing_note.excerpt.clone(),
-                modified_at,
-                file_size: metadata.len(),
-                content_hash: existing_note.content_hash.clone(),
-            },
-            body: None,
-        });
-        return;
-    }
-    let contents = match fs::read_to_string(path) {
-        Ok(contents) => contents,
+    let serialized = match fs::read(path) {
+        Ok(serialized) => serialized,
         Err(source) => {
             push_io_failure(workspace, path, source, completion);
             return;
@@ -395,17 +409,87 @@ fn scan_file(
         });
         return;
     };
-    let summary = parse_note_text_summary(kind, file_stem, &contents);
+    let known_encryption = existing_encryption_by_path.get(&relative_path).copied();
+    let encryption = match classify_note_encryption(kind, known_encryption, &serialized) {
+        Ok(encryption) => encryption,
+        Err(error) => {
+            completion.failures.push(ScanFailure { relative_path, message: error.to_string() });
+            return;
+        }
+    };
+    let content_hash = blake3::hash(&serialized).as_bytes().to_vec();
+    let (excerpt, searchable_body) = match encryption {
+        NoteEncryption::Encrypted => (String::new(), String::new()),
+        NoteEncryption::Unencrypted => {
+            let contents = match String::from_utf8(serialized) {
+                Ok(contents) => contents,
+                Err(_) => {
+                    completion.failures.push(ScanFailure {
+                        relative_path,
+                        message: "supported note file is not valid UTF-8".to_owned(),
+                    });
+                    return;
+                }
+            };
+            let summary = parse_note_text_summary(kind, file_stem, &contents);
+            (summary.excerpt, contents)
+        }
+    };
+    let is_unchanged = existing_notes_by_path.get(&relative_path).is_some_and(|existing_note| {
+        existing_note.kind == kind
+            && existing_note.content_hash == content_hash
+            && known_encryption == Some(encryption)
+    });
     let note = DiscoveredNote {
         relative_path: relative_path.clone(),
         kind,
         title: file_stem.to_owned(),
-        excerpt: summary.excerpt,
+        excerpt,
         modified_at,
         file_size: metadata.len(),
-        content_hash: blake3::hash(contents.as_bytes()).as_bytes().to_vec(),
+        content_hash,
+        encryption,
     };
-    discovered_files.push(DiscoveredFile { note, body: Some(contents) });
+    let body = (!is_unchanged).then_some(searchable_body);
+    discovered_files.push(DiscoveredFile { note, body });
+}
+
+fn classify_note_encryption(
+    kind: DocumentKind,
+    known_encryption: Option<NoteEncryption>,
+    serialized: &[u8],
+) -> Result<NoteEncryption, textora_encryption::EncryptionError> {
+    if kind != DocumentKind::Markdown {
+        return Ok(NoteEncryption::Unencrypted);
+    }
+    if known_encryption == Some(NoteEncryption::Encrypted) {
+        textora_encryption::inspect_encrypted_markdown(serialized)?;
+        return Ok(NoteEncryption::Encrypted);
+    }
+    match textora_encryption::inspect_encrypted_markdown(serialized) {
+        Ok(_) => Ok(NoteEncryption::Encrypted),
+        Err(textora_encryption::EncryptionError::NotEncryptedDocument) => {
+            Ok(NoteEncryption::Unencrypted)
+        }
+        Err(error) => Err(error),
+    }
+}
+
+fn existing_encryption_by_path(
+    catalog: &Catalog,
+    existing_notes: &[CatalogNote],
+) -> Result<HashMap<PathBuf, NoteEncryption>, CatalogError> {
+    let mut encryption_by_path = HashMap::with_capacity(existing_notes.len());
+    for note in existing_notes {
+        let metadata = catalog.note_editor_metadata(note.note_id)?.ok_or_else(|| {
+            CatalogError::InvalidStoredValue {
+                column: "note_editor_metadata",
+                value: note.note_id.to_string(),
+            }
+        })?;
+        encryption_by_path.insert(note.relative_path.clone(), metadata.encryption);
+    }
+    Ok(encryption_by_path)
 }
 
 fn should_ignore(path: &Path) -> bool {
@@ -441,7 +525,7 @@ mod tests {
     use std::fs;
 
     use super::{scan_workspace, scan_workspace_paths};
-    use crate::{Catalog, DocumentKind, Workspace};
+    use crate::{Catalog, DocumentKind, NoteEncryption, NoteFileNameBinding, Workspace};
 
     #[test]
     fn scan_indexes_supported_notes_and_preserves_existing_note_ids() {
@@ -481,6 +565,124 @@ mod tests {
                 .iter()
                 .any(|search_match| search_match.note_id == first_notes[1].note_id)
         );
+    }
+
+    #[test]
+    fn scan_rebuilds_encrypted_metadata_without_indexing_plaintext() {
+        let directory = tempfile::tempdir().expect("workspace test directory should be created");
+        let secret_marker = "private-search-marker";
+        fs::write(directory.path().join("Visible Title.md"), encrypted_markdown(secret_marker))
+            .expect("encrypted fixture should be written");
+        let workspace =
+            Workspace::open_or_initialize(directory.path()).expect("workspace should initialize");
+        let catalog = Catalog::open(&workspace.metadata_directory().join("catalog.sqlite3"))
+            .expect("catalog should initialize");
+
+        let completion = scan_workspace(&workspace, &catalog).expect("scan should complete");
+        let note = catalog.active_notes().expect("scanned note should load").remove(0);
+        let metadata = catalog
+            .note_editor_metadata(note.note_id)
+            .expect("encrypted metadata should query")
+            .expect("encrypted metadata should exist");
+
+        assert!(completion.failures.is_empty());
+        assert_eq!(note.title, "Visible Title");
+        assert_eq!(note.excerpt, "");
+        assert_eq!(metadata.encryption, NoteEncryption::Encrypted);
+        assert_eq!(
+            metadata.file_name_binding,
+            NoteFileNameBinding::TitleBound { disambiguator: 1 }
+        );
+        assert_eq!(
+            catalog
+                .search_active_notes("Visible Title", 10)
+                .expect("encrypted title should be searchable")
+                .len(),
+            1
+        );
+        assert!(
+            catalog
+                .search_active_notes(secret_marker, 10)
+                .expect("encrypted plaintext search should complete")
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn damaged_known_encrypted_file_is_not_downgraded_to_plain_markdown() {
+        let directory = tempfile::tempdir().expect("workspace test directory should be created");
+        let note_path = directory.path().join("Encrypted.md");
+        fs::write(&note_path, encrypted_markdown("authenticated body"))
+            .expect("encrypted fixture should be written");
+        let workspace =
+            Workspace::open_or_initialize(directory.path()).expect("workspace should initialize");
+        let catalog = Catalog::open(&workspace.metadata_directory().join("catalog.sqlite3"))
+            .expect("catalog should initialize");
+        scan_workspace(&workspace, &catalog).expect("initial scan should complete");
+        let note_id = catalog.active_notes().expect("encrypted note should load")[0].note_id;
+        let mut tampered = fs::read(&note_path).expect("encrypted fixture should be readable");
+        let wrapped_key_start = tampered
+            .windows(b"wrapped-key=".len())
+            .position(|window| window == b"wrapped-key=")
+            .map(|index| index + b"wrapped-key=".len())
+            .expect("encrypted fixture should contain a wrapped key");
+        tampered[wrapped_key_start] = b'=';
+        fs::write(&note_path, tampered).expect("tampered fixture should be written");
+
+        let completion = scan_workspace(&workspace, &catalog).expect("damaged scan should finish");
+        let metadata = catalog
+            .note_editor_metadata(note_id)
+            .expect("existing metadata should query")
+            .expect("existing encrypted note should be preserved");
+
+        assert_eq!(completion.failures.len(), 1);
+        assert_eq!(completion.indexed_files, 0);
+        assert_eq!(metadata.encryption, NoteEncryption::Encrypted);
+        assert!(catalog.active_note(note_id).expect("note should query").is_some());
+    }
+
+    #[test]
+    fn replacing_plain_markdown_with_encrypted_content_clears_the_old_fts_body() {
+        let directory = tempfile::tempdir().expect("workspace test directory should be created");
+        let note_path = directory.path().join("Replaced.md");
+        let old_marker = "old-plaintext-marker";
+        let encrypted_marker = "new-encrypted-marker";
+        fs::write(&note_path, format!("# Before\n\n{old_marker}"))
+            .expect("plain fixture should be written");
+        let workspace =
+            Workspace::open_or_initialize(directory.path()).expect("workspace should initialize");
+        let catalog = Catalog::open(&workspace.metadata_directory().join("catalog.sqlite3"))
+            .expect("catalog should initialize");
+        scan_workspace(&workspace, &catalog).expect("plain scan should complete");
+        assert_eq!(
+            catalog
+                .search_active_notes(old_marker, 10)
+                .expect("plain body should be searchable")
+                .len(),
+            1
+        );
+
+        fs::write(&note_path, encrypted_markdown(encrypted_marker))
+            .expect("encrypted replacement should be written");
+        scan_workspace(&workspace, &catalog).expect("encrypted replacement scan should complete");
+        let note_id = catalog.active_notes().expect("replacement note should load")[0].note_id;
+
+        assert_eq!(
+            catalog
+                .note_editor_metadata(note_id)
+                .expect("replacement metadata should query")
+                .expect("replacement metadata should exist")
+                .encryption,
+            NoteEncryption::Encrypted
+        );
+        for marker in [old_marker, encrypted_marker] {
+            assert!(
+                catalog
+                    .search_active_notes(marker, 10)
+                    .expect("encrypted body search should complete")
+                    .is_empty()
+            );
+        }
     }
 
     #[test]
@@ -787,5 +989,17 @@ mod tests {
 
         assert_eq!(moved_note.note_id, original_note.note_id);
         assert_eq!(moved_note.relative_path, std::path::Path::new("moved.md"));
+    }
+
+    fn encrypted_markdown(plaintext: &str) -> Vec<u8> {
+        textora_encryption::create_encrypted_markdown(&encryption_password(), plaintext.as_bytes())
+            .expect("encrypted fixture should be created")
+            .into_parts()
+            .0
+    }
+
+    fn encryption_password() -> textora_encryption::EncryptionPassword {
+        textora_encryption::EncryptionPassword::new("test-password".to_owned())
+            .expect("test password should satisfy policy")
     }
 }

@@ -2,7 +2,7 @@ use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::time::SystemTime;
 
-use crate::{Catalog, CatalogError, CatalogNote, DocumentKind, NoteId};
+use crate::{Catalog, CatalogError, CatalogNote, DocumentKind, NoteEncryption, NoteId};
 
 /// 由扫描器或 watcher 规范化后的文件系统笔记记录。
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -14,29 +14,39 @@ pub struct DiscoveredNote {
     pub modified_at: SystemTime,
     pub file_size: u64,
     pub content_hash: Vec<u8>,
+    pub encryption: NoteEncryption,
 }
 
 impl DiscoveredNote {
-    fn into_catalog_note(self, note_id: NoteId, starred: bool, title: String) -> CatalogNote {
-        CatalogNote {
-            note_id,
-            relative_path: self.relative_path,
-            kind: self.kind,
-            title,
-            excerpt: self.excerpt,
-            modified_at: self.modified_at,
-            file_size: self.file_size,
-            content_hash: self.content_hash,
-            starred,
+    fn into_reconciled_note(self, note_id: NoteId, starred: bool, title: String) -> ReconciledNote {
+        ReconciledNote {
+            note: CatalogNote {
+                note_id,
+                relative_path: self.relative_path,
+                kind: self.kind,
+                title,
+                excerpt: self.excerpt,
+                modified_at: self.modified_at,
+                file_size: self.file_size,
+                content_hash: self.content_hash,
+                starred,
+            },
+            encryption: self.encryption,
         }
     }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReconciledNote {
+    pub note: CatalogNote,
+    pub encryption: NoteEncryption,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ReconciliationChange {
-    Updated(CatalogNote),
-    Moved { from: PathBuf, note: CatalogNote },
-    Added(CatalogNote),
+    Updated(ReconciledNote),
+    Moved { from: PathBuf, reconciled: ReconciledNote },
+    Added(ReconciledNote),
     Missing(CatalogNote),
 }
 
@@ -135,7 +145,7 @@ pub(crate) fn reconcile_notes_with_renames(
             unmatched_discovered.push(discovered_note);
             continue;
         };
-        changes.push(ReconciliationChange::Updated(discovered_note.into_catalog_note(
+        changes.push(ReconciliationChange::Updated(discovered_note.into_reconciled_note(
             existing_note.note_id,
             existing_note.starred,
             existing_note.title,
@@ -160,7 +170,7 @@ pub(crate) fn reconcile_notes_with_renames(
             if basename_changed { discovered_note.title.clone() } else { existing_note.title };
         changes.push(ReconciliationChange::Moved {
             from: existing_note.relative_path.clone(),
-            note: discovered_note.into_catalog_note(
+            reconciled: discovered_note.into_reconciled_note(
                 existing_note.note_id,
                 existing_note.starred,
                 title,
@@ -192,7 +202,7 @@ pub(crate) fn reconcile_notes_with_renames(
                 };
                 changes.push(ReconciliationChange::Moved {
                     from: existing_note.relative_path.clone(),
-                    note: discovered_note.into_catalog_note(
+                    reconciled: discovered_note.into_reconciled_note(
                         existing_note.note_id,
                         existing_note.starred,
                         title,
@@ -201,7 +211,7 @@ pub(crate) fn reconcile_notes_with_renames(
             }
             None => {
                 let title = discovered_note.title.clone();
-                changes.push(ReconciliationChange::Added(discovered_note.into_catalog_note(
+                changes.push(ReconciliationChange::Added(discovered_note.into_reconciled_note(
                     NoteId::generate(),
                     false,
                     title,
@@ -273,7 +283,7 @@ mod tests {
     use super::{
         DiscoveredNote, ReconciliationChange, reconcile_notes, reconcile_notes_with_renames,
     };
-    use crate::{CatalogNote, DocumentKind, NoteId};
+    use crate::{CatalogNote, DocumentKind, NoteEncryption, NoteId};
 
     fn discovered(relative_path: &str, hash_byte: u8) -> DiscoveredNote {
         DiscoveredNote {
@@ -284,6 +294,7 @@ mod tests {
             modified_at: UNIX_EPOCH + Duration::from_secs(1),
             file_size: 1,
             content_hash: vec![hash_byte],
+            encryption: NoteEncryption::Unencrypted,
         }
     }
 
@@ -309,11 +320,11 @@ mod tests {
 
         assert!(matches!(
             plan.changes.as_slice(),
-            [ReconciliationChange::Moved { from, note }]
+            [ReconciliationChange::Moved { from, reconciled }]
                 if from == std::path::Path::new("old.md")
-                    && note.note_id == note_id
-                    && note.starred
-                    && note.title == "new.md"
+                    && reconciled.note.note_id == note_id
+                    && reconciled.note.starred
+                    && reconciled.note.title == "new.md"
         ));
     }
 
@@ -327,8 +338,8 @@ mod tests {
 
         assert!(matches!(
             plan.changes.as_slice(),
-            [ReconciliationChange::Moved { note, .. }]
-                if note.title == "Independent title"
+            [ReconciliationChange::Moved { reconciled, .. }]
+                if reconciled.note.title == "Independent title"
         ));
     }
 
@@ -365,14 +376,15 @@ mod tests {
 
         assert!(plan.changes.iter().any(|change| matches!(
             change,
-            ReconciliationChange::Moved { from, note }
+            ReconciliationChange::Moved { from, reconciled }
                 if from == std::path::Path::new("first.md")
-                    && note.relative_path == std::path::Path::new("renamed.md")
-                    && note.note_id == renamed_id
+                    && reconciled.note.relative_path == std::path::Path::new("renamed.md")
+                    && reconciled.note.note_id == renamed_id
         )));
         assert!(plan.changes.iter().any(|change| matches!(
             change,
-            ReconciliationChange::Updated(note) if note.note_id == unchanged_id
+            ReconciliationChange::Updated(reconciled)
+                if reconciled.note.note_id == unchanged_id
         )));
     }
 

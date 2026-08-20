@@ -46,6 +46,9 @@ fn typed_untitled_spec(kind: NewDocumentKind) -> TypedUntitledSpec {
             initial_text: "",
             initial_cursor_byte: 0,
         },
+        NewDocumentKind::EncryptedMarkdown => {
+            unreachable!("generic app rejects encrypted creation before document preparation")
+        }
     }
 }
 

@@ -184,7 +184,7 @@ pub enum NoteFileNameBinding {
     LegacyUnmanaged,
     /// 普通工作区笔记；数字只表示 Notora 分配的目录内消歧编号。
     TitleBound { disambiguator: u32 },
-    /// 加密笔记；实体名不得包含标题语义。
+    /// 旧加密原型的随机实体名；新建加密 Markdown 不再使用。
     Opaque,
 }
 

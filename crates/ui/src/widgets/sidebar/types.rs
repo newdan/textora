@@ -60,6 +60,7 @@ pub enum NewDocumentKind {
     Text,
     Mindmap,
     Markdown,
+    EncryptedMarkdown,
 }
 
 #[derive(Debug, Clone, PartialEq)]

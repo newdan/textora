@@ -157,6 +157,9 @@ impl App {
             ui::sidebar::NewDocumentKind::Text => ui::plugin::PLUGIN_EDITOR,
             ui::sidebar::NewDocumentKind::Mindmap => ui::plugin::PLUGIN_MINDMAP,
             ui::sidebar::NewDocumentKind::Markdown => ui::plugin::PLUGIN_MARKDOWN_EDITOR,
+            ui::sidebar::NewDocumentKind::EncryptedMarkdown => {
+                unreachable!("generic app rejects encrypted creation before tab preparation")
+            }
         };
         let plugin = self.editor_runtime.create_plugin_by_name(plugin_name);
         crate::workspace_tab_factory::prepare_typed_untitled_with_plugin(kind, viewport, plugin)

@@ -5,10 +5,12 @@ use notora_core::{
     NavigationScope, NoteEditorMetadata, TagSummary, TagWithActiveNoteCount,
 };
 use serde::{Deserialize, Serialize};
+use ui::core::widget::SensitiveText;
 
 use crate::action::{
-    CardQuery, ConflictResolution, DocumentLoadRequest, NoteCreationTarget, NotoraAction,
-    NotoraEffect, SaveConflictRequest, WorkspaceTransitionRequest, move_note_command,
+    CardQuery, ConflictResolution, DocumentLoadRequest, EncryptedNoteUnlockRequest,
+    NoteCreationTarget, NotoraAction, NotoraEffect, SaveConflictRequest,
+    WorkspaceTransitionRequest, move_note_command,
 };
 use crate::effect_executor::ExternalOpenRequest;
 use crate::external_files::ExternalFileSessions;
@@ -41,6 +43,7 @@ pub enum OverlayState {
     None,
     Settings,
     NewDocumentMenu,
+    EncryptedNoteDialog,
     NewWorkspace,
     TrashPermanentDeletionConfirmation {
         operation: crate::action::TrashOperation,
@@ -134,6 +137,68 @@ pub enum WorkspaceTransitionState {
     },
     Applying {
         request: WorkspaceTransitionRequest,
+    },
+}
+
+/// 加密笔记创建中的唯一敏感草稿；离开弹窗时整体销毁。
+#[derive(Clone, Debug, Default, PartialEq)]
+pub enum EncryptedNoteCreationState {
+    #[default]
+    Inactive,
+    Editing {
+        target: NoteCreationTarget,
+        password: SensitiveText,
+        confirmation: SensitiveText,
+        error_message: Option<String>,
+        failure_generation: u64,
+        next_generation: u64,
+    },
+    Submitting {
+        target: NoteCreationTarget,
+        generation: u64,
+    },
+}
+
+#[derive(Clone, Debug, Default, PartialEq)]
+pub enum EncryptedNoteUnlockState {
+    #[default]
+    Inactive,
+    Editing {
+        request: DocumentLoadRequest,
+        title: String,
+        metadata: NoteEditorMetadata,
+        tags: Vec<TagSummary>,
+        password: SensitiveText,
+        error_message: Option<String>,
+        failure_generation: u64,
+        next_generation: u64,
+    },
+    Submitting {
+        request: DocumentLoadRequest,
+        title: String,
+        metadata: NoteEditorMetadata,
+        tags: Vec<TagSummary>,
+        generation: u64,
+    },
+}
+
+#[derive(Clone, Debug, Default, PartialEq)]
+pub enum EncryptedConflictCopyState {
+    #[default]
+    Inactive,
+    Editing {
+        identity: DocumentIdentity,
+        target_path: std::path::PathBuf,
+        password: SensitiveText,
+        confirmation: SensitiveText,
+        error_message: Option<String>,
+        failure_generation: u64,
+        next_generation: u64,
+    },
+    Submitting {
+        identity: DocumentIdentity,
+        target_path: std::path::PathBuf,
+        generation: u64,
     },
 }
 
@@ -286,6 +351,9 @@ pub struct NotoraState {
     pub workspace_root: WorkspaceRootState,
     pub directory_creation: DirectoryCreationState,
     pub workspace_creation: WorkspaceCreationState,
+    pub encrypted_note_creation: EncryptedNoteCreationState,
+    pub encrypted_note_unlock: EncryptedNoteUnlockState,
+    pub encrypted_conflict_copy: EncryptedConflictCopyState,
     pub workspace_transition: WorkspaceTransitionState,
     pub workspace_root_path: Option<std::path::PathBuf>,
     /// 外部 session 不属于 catalog、搜索、星标、标签或 Trash 的任何一项。
@@ -299,6 +367,9 @@ impl NotoraState {
         self.workspace_root = WorkspaceRootState::Active;
         self.directory_creation = DirectoryCreationState::Inactive;
         self.workspace_creation = WorkspaceCreationState::Inactive;
+        self.encrypted_note_creation = EncryptedNoteCreationState::Inactive;
+        self.encrypted_note_unlock = EncryptedNoteUnlockState::Inactive;
+        self.encrypted_conflict_copy = EncryptedConflictCopyState::Inactive;
         self.layout.overlay = OverlayState::None;
         self.layout.focus_target = FocusTarget::NavigationTree;
         self.layout.compact_navigation = CompactNavigation::Hidden;
@@ -545,6 +616,20 @@ impl NotoraState {
             }
             NotoraAction::OpenNewDocumentMenu => self.open_new_document_menu(),
             NotoraAction::CreateRequested(kind) => self.request_note_creation(kind),
+            NotoraAction::BeginEncryptedNoteCreation => self.begin_encrypted_note_creation(),
+            NotoraAction::EncryptedNotePasswordChanged(password) => {
+                self.update_encrypted_note_password(password)
+            }
+            NotoraAction::EncryptedNoteConfirmationChanged(confirmation) => {
+                self.update_encrypted_note_confirmation(confirmation)
+            }
+            NotoraAction::EncryptedNoteDialogSubmitRequested => self.submit_encrypted_note_dialog(),
+            NotoraAction::EncryptedNoteUnlockRequired { request, title, metadata, tags } => {
+                self.require_encrypted_note_unlock(request, title, metadata, tags)
+            }
+            NotoraAction::EncryptedConflictCopyRequired { identity, target_path } => {
+                self.require_encrypted_conflict_copy(identity, target_path)
+            }
             NotoraAction::TitleTextChanged(title) => {
                 self.library.title_draft = Some(title);
                 vec![NotoraEffect::Redraw]
@@ -571,6 +656,15 @@ impl NotoraState {
                 self.apply_note_command_completion(result)
             }
             NotoraAction::NoteCommandFailed(message) => {
+                if self.fail_encrypted_note_creation(message.clone()) {
+                    return vec![NotoraEffect::Redraw];
+                }
+                if self.fail_encrypted_note_unlock(message.clone()) {
+                    return vec![NotoraEffect::Redraw];
+                }
+                if self.fail_encrypted_conflict_copy(message.clone()) {
+                    return vec![NotoraEffect::Redraw];
+                }
                 self.library.last_command_error = Some(message);
                 vec![NotoraEffect::Redraw]
             }
@@ -676,6 +770,7 @@ impl NotoraState {
             NotoraAction::SaveConflictResolved { identity } => {
                 if self.library.save_conflict.map(|conflict| conflict.identity) == Some(identity) {
                     self.library.save_conflict = None;
+                    self.encrypted_conflict_copy = EncryptedConflictCopyState::Inactive;
                     self.layout.overlay = OverlayState::None;
                     self.layout.focus_target = FocusTarget::Editor;
                 }
@@ -801,6 +896,393 @@ impl NotoraState {
         vec![NotoraEffect::RequestNoteCreation { kind, target }, NotoraEffect::Redraw]
     }
 
+    fn begin_encrypted_note_creation(&mut self) -> Vec<NotoraEffect> {
+        if self.workspace_root == WorkspaceRootState::Missing
+            || self.library.navigation_scope == NavigationScope::ExternalFiles
+        {
+            return vec![NotoraEffect::Redraw];
+        }
+        let Some(target) = creation_target(&self.library.navigation_scope) else {
+            return vec![NotoraEffect::Redraw];
+        };
+        self.library.last_command_error = None;
+        self.encrypted_note_creation = EncryptedNoteCreationState::Editing {
+            target,
+            password: SensitiveText::new(String::new()),
+            confirmation: SensitiveText::new(String::new()),
+            error_message: None,
+            failure_generation: 0,
+            next_generation: 1,
+        };
+        self.layout.overlay = OverlayState::EncryptedNoteDialog;
+        self.layout.focus_target = FocusTarget::Overlay;
+        vec![NotoraEffect::Redraw]
+    }
+
+    fn update_encrypted_note_password(&mut self, password: SensitiveText) -> Vec<NotoraEffect> {
+        if let EncryptedNoteCreationState::Editing {
+            password: current_password,
+            error_message,
+            ..
+        } = &mut self.encrypted_note_creation
+        {
+            *current_password = password;
+            *error_message = None;
+            return vec![NotoraEffect::Redraw];
+        }
+        if let EncryptedNoteUnlockState::Editing {
+            password: current_password, error_message, ..
+        } = &mut self.encrypted_note_unlock
+        {
+            *current_password = password;
+            *error_message = None;
+            return vec![NotoraEffect::Redraw];
+        }
+        if let EncryptedConflictCopyState::Editing {
+            password: current_password,
+            error_message,
+            ..
+        } = &mut self.encrypted_conflict_copy
+        {
+            *current_password = password;
+            *error_message = None;
+        }
+        vec![NotoraEffect::Redraw]
+    }
+
+    fn update_encrypted_note_confirmation(
+        &mut self,
+        confirmation: SensitiveText,
+    ) -> Vec<NotoraEffect> {
+        if let EncryptedNoteCreationState::Editing {
+            confirmation: current_confirmation,
+            error_message,
+            ..
+        } = &mut self.encrypted_note_creation
+        {
+            *current_confirmation = confirmation;
+            *error_message = None;
+            return vec![NotoraEffect::Redraw];
+        }
+        if let EncryptedConflictCopyState::Editing {
+            confirmation: current_confirmation,
+            error_message,
+            ..
+        } = &mut self.encrypted_conflict_copy
+        {
+            *current_confirmation = confirmation;
+            *error_message = None;
+        }
+        vec![NotoraEffect::Redraw]
+    }
+
+    fn submit_encrypted_note_creation(&mut self) -> Vec<NotoraEffect> {
+        let EncryptedNoteCreationState::Editing {
+            target,
+            password,
+            confirmation,
+            failure_generation,
+            next_generation,
+            ..
+        } = std::mem::take(&mut self.encrypted_note_creation)
+        else {
+            return vec![NotoraEffect::Redraw];
+        };
+        let validation_error = if password.expose().chars().count() < 8 {
+            Some("密码至少需要 8 个字符".to_owned())
+        } else if password != confirmation {
+            Some("两次输入的密码不一致".to_owned())
+        } else {
+            None
+        };
+        if let Some(error_message) = validation_error {
+            self.encrypted_note_creation = EncryptedNoteCreationState::Editing {
+                target,
+                password,
+                confirmation,
+                error_message: Some(error_message),
+                failure_generation,
+                next_generation,
+            };
+            return vec![NotoraEffect::Redraw];
+        }
+        let encryption_password =
+            match textora_encryption::EncryptionPassword::new(password.expose().to_owned()) {
+                Ok(password) => password,
+                Err(error) => {
+                    self.encrypted_note_creation = EncryptedNoteCreationState::Editing {
+                        target,
+                        password,
+                        confirmation,
+                        error_message: Some(error.to_string()),
+                        failure_generation,
+                        next_generation,
+                    };
+                    return vec![NotoraEffect::Redraw];
+                }
+            };
+        self.encrypted_note_creation = EncryptedNoteCreationState::Submitting {
+            target: target.clone(),
+            generation: next_generation,
+        };
+        vec![
+            NotoraEffect::ExecuteNoteCommand(
+                notora_core::note_command::NoteCommand::CreateConfigured(
+                    notora_core::ConfiguredCreateNoteRequest {
+                        kind: DocumentKind::Markdown,
+                        target_directory: target.directory,
+                        storage: notora_core::CreateNoteStorage::encrypted(encryption_password),
+                    },
+                ),
+            ),
+            NotoraEffect::Redraw,
+        ]
+    }
+
+    fn fail_encrypted_note_creation(&mut self, message: String) -> bool {
+        let EncryptedNoteCreationState::Submitting { target, generation } =
+            std::mem::take(&mut self.encrypted_note_creation)
+        else {
+            return false;
+        };
+        self.encrypted_note_creation = EncryptedNoteCreationState::Editing {
+            target,
+            password: SensitiveText::new(String::new()),
+            confirmation: SensitiveText::new(String::new()),
+            error_message: Some(message),
+            failure_generation: generation,
+            next_generation: generation.wrapping_add(1),
+        };
+        true
+    }
+
+    fn fail_encrypted_note_unlock(&mut self, message: String) -> bool {
+        let EncryptedNoteUnlockState::Submitting { request, title, metadata, tags, generation } =
+            std::mem::take(&mut self.encrypted_note_unlock)
+        else {
+            return false;
+        };
+        self.encrypted_note_unlock = EncryptedNoteUnlockState::Editing {
+            request,
+            title,
+            metadata,
+            tags,
+            password: SensitiveText::new(String::new()),
+            error_message: Some(message),
+            failure_generation: generation,
+            next_generation: generation.wrapping_add(1),
+        };
+        true
+    }
+
+    fn fail_encrypted_conflict_copy(&mut self, message: String) -> bool {
+        let EncryptedConflictCopyState::Submitting { identity, target_path, generation } =
+            std::mem::take(&mut self.encrypted_conflict_copy)
+        else {
+            return false;
+        };
+        self.encrypted_conflict_copy = EncryptedConflictCopyState::Editing {
+            identity,
+            target_path,
+            password: SensitiveText::new(String::new()),
+            confirmation: SensitiveText::new(String::new()),
+            error_message: Some(message),
+            failure_generation: generation,
+            next_generation: generation.wrapping_add(1),
+        };
+        true
+    }
+
+    fn submit_encrypted_note_dialog(&mut self) -> Vec<NotoraEffect> {
+        if matches!(self.encrypted_note_creation, EncryptedNoteCreationState::Editing { .. }) {
+            return self.submit_encrypted_note_creation();
+        }
+        if matches!(self.encrypted_conflict_copy, EncryptedConflictCopyState::Editing { .. }) {
+            return self.submit_encrypted_conflict_copy();
+        }
+        self.submit_encrypted_note_unlock()
+    }
+
+    fn require_encrypted_conflict_copy(
+        &mut self,
+        identity: DocumentIdentity,
+        target_path: std::path::PathBuf,
+    ) -> Vec<NotoraEffect> {
+        if self.library.save_conflict.map(|conflict| conflict.identity) != Some(identity) {
+            return vec![NotoraEffect::Redraw];
+        }
+        self.encrypted_conflict_copy = EncryptedConflictCopyState::Editing {
+            identity,
+            target_path,
+            password: SensitiveText::new(String::new()),
+            confirmation: SensitiveText::new(String::new()),
+            error_message: None,
+            failure_generation: 0,
+            next_generation: 1,
+        };
+        self.layout.overlay = OverlayState::EncryptedNoteDialog;
+        self.layout.focus_target = FocusTarget::Overlay;
+        vec![NotoraEffect::Redraw]
+    }
+
+    fn submit_encrypted_conflict_copy(&mut self) -> Vec<NotoraEffect> {
+        let EncryptedConflictCopyState::Editing {
+            identity,
+            target_path,
+            password,
+            confirmation,
+            failure_generation,
+            next_generation,
+            ..
+        } = std::mem::take(&mut self.encrypted_conflict_copy)
+        else {
+            return vec![NotoraEffect::Redraw];
+        };
+        let validation_error = validate_password_confirmation(&password, &confirmation);
+        let Ok(encryption_password) =
+            textora_encryption::EncryptionPassword::new(password.expose().to_owned())
+        else {
+            return self.restore_invalid_conflict_copy(EncryptedConflictCopyState::Editing {
+                identity,
+                target_path,
+                password,
+                confirmation,
+                error_message: Some(
+                    validation_error.unwrap_or_else(|| "密码不符合要求".to_owned()),
+                ),
+                failure_generation,
+                next_generation,
+            });
+        };
+        if let Some(message) = validation_error {
+            return self.restore_invalid_conflict_copy(EncryptedConflictCopyState::Editing {
+                identity,
+                target_path,
+                password,
+                confirmation,
+                error_message: Some(message),
+                failure_generation,
+                next_generation,
+            });
+        }
+        self.encrypted_conflict_copy = EncryptedConflictCopyState::Submitting {
+            identity,
+            target_path: target_path.clone(),
+            generation: next_generation,
+        };
+        vec![
+            NotoraEffect::SaveEncryptedConflictCopy(crate::action::EncryptedConflictCopyRequest {
+                identity,
+                target_path,
+                password: std::sync::Arc::new(encryption_password),
+                generation: next_generation,
+            }),
+            NotoraEffect::Redraw,
+        ]
+    }
+
+    fn restore_invalid_conflict_copy(
+        &mut self,
+        editing: EncryptedConflictCopyState,
+    ) -> Vec<NotoraEffect> {
+        self.encrypted_conflict_copy = editing;
+        vec![NotoraEffect::Redraw]
+    }
+
+    fn require_encrypted_note_unlock(
+        &mut self,
+        request: DocumentLoadRequest,
+        title: String,
+        metadata: NoteEditorMetadata,
+        tags: Vec<TagSummary>,
+    ) -> Vec<NotoraEffect> {
+        if self.library.selected_card != Some(request.identity)
+            || self.library.selected_document_generation != request.selection_generation
+        {
+            return vec![NotoraEffect::Redraw];
+        }
+        self.library.active_editor_metadata = Some(ActiveEditorMetadata {
+            identity: request.identity,
+            selection_generation: request.selection_generation,
+            metadata: metadata.clone(),
+            tags: tags.clone(),
+        });
+        self.encrypted_note_unlock = EncryptedNoteUnlockState::Editing {
+            request,
+            title,
+            metadata,
+            tags,
+            password: SensitiveText::new(String::new()),
+            error_message: None,
+            failure_generation: 0,
+            next_generation: 1,
+        };
+        self.layout.overlay = OverlayState::EncryptedNoteDialog;
+        self.layout.focus_target = FocusTarget::Overlay;
+        vec![NotoraEffect::Redraw]
+    }
+
+    fn submit_encrypted_note_unlock(&mut self) -> Vec<NotoraEffect> {
+        let EncryptedNoteUnlockState::Editing {
+            request,
+            title,
+            metadata,
+            tags,
+            password,
+            failure_generation,
+            next_generation,
+            ..
+        } = std::mem::take(&mut self.encrypted_note_unlock)
+        else {
+            return vec![NotoraEffect::Redraw];
+        };
+        if password.expose().chars().count() < 8 {
+            self.encrypted_note_unlock = EncryptedNoteUnlockState::Editing {
+                request,
+                title,
+                metadata,
+                tags,
+                password,
+                error_message: Some("密码至少需要 8 个字符".to_owned()),
+                failure_generation,
+                next_generation,
+            };
+            return vec![NotoraEffect::Redraw];
+        }
+        let encryption_password =
+            match textora_encryption::EncryptionPassword::new(password.expose().to_owned()) {
+                Ok(password) => password,
+                Err(error) => {
+                    self.encrypted_note_unlock = EncryptedNoteUnlockState::Editing {
+                        request,
+                        title,
+                        metadata,
+                        tags,
+                        password,
+                        error_message: Some(error.to_string()),
+                        failure_generation,
+                        next_generation,
+                    };
+                    return vec![NotoraEffect::Redraw];
+                }
+            };
+        self.encrypted_note_unlock = EncryptedNoteUnlockState::Submitting {
+            request,
+            title,
+            metadata,
+            tags,
+            generation: next_generation,
+        };
+        vec![
+            NotoraEffect::UnlockEncryptedNote(EncryptedNoteUnlockRequest {
+                request,
+                password: std::sync::Arc::new(encryption_password),
+                generation: next_generation,
+            }),
+            NotoraEffect::Redraw,
+        ]
+    }
+
     fn request_title_update(&mut self, title: String) -> Vec<NotoraEffect> {
         if self.library.navigation_scope == NavigationScope::ExternalFiles
             || self.library.navigation_scope == NavigationScope::Trash
@@ -850,6 +1332,12 @@ impl NotoraState {
         result: notora_core::note_command::NoteCommandResult,
     ) -> Vec<NotoraEffect> {
         let identity = DocumentIdentity::Note(result.note.note_id);
+        let created_encrypted_note = result.outcome
+            == notora_core::note_command::NoteCommandOutcome::Created
+            && matches!(
+                result.created_access.as_ref(),
+                Some(notora_core::CreatedNoteAccess::Encrypted { .. })
+            );
         if result.outcome == notora_core::note_command::NoteCommandOutcome::TitleUpdated {
             if let Some(active_metadata) = self
                 .library
@@ -864,6 +1352,10 @@ impl NotoraState {
             return self.request_card_query(CardQuery::from(self.library.navigation_scope.clone()));
         }
         let request = self.select_document(identity);
+        if created_encrypted_note {
+            self.encrypted_note_creation = EncryptedNoteCreationState::Inactive;
+            self.layout.overlay = OverlayState::None;
+        }
         self.library.last_command_error = None;
         if result.outcome == notora_core::note_command::NoteCommandOutcome::Created {
             self.layout.focus_target = FocusTarget::EditorTitle;
@@ -873,7 +1365,9 @@ impl NotoraState {
         }
         let scope = self.library.navigation_scope.clone();
         let mut effects = self.request_card_query(CardQuery::from(scope));
-        effects.insert(1, NotoraEffect::PrepareDocument(request));
+        if !created_encrypted_note {
+            effects.insert(1, NotoraEffect::PrepareDocument(request));
+        }
         effects
     }
 
@@ -1183,6 +1677,7 @@ impl NotoraState {
     }
 
     fn select_document(&mut self, identity: DocumentIdentity) -> DocumentLoadRequest {
+        self.encrypted_note_unlock = EncryptedNoteUnlockState::Inactive;
         self.library.selected_card = Some(identity);
         self.library.title_draft = None;
         self.library.selected_document_generation =
@@ -1259,12 +1754,16 @@ impl NotoraState {
             OverlayState::None
             | OverlayState::Settings
             | OverlayState::NewDocumentMenu
+            | OverlayState::EncryptedNoteDialog
             | OverlayState::NewWorkspace
             | OverlayState::TrashPermanentDeletionConfirmation { .. }
             | OverlayState::TrashRestoreConflictConfirmation { .. } => {}
         }
         self.layout.overlay = OverlayState::None;
         self.workspace_creation = WorkspaceCreationState::Inactive;
+        self.encrypted_note_creation = EncryptedNoteCreationState::Inactive;
+        self.encrypted_note_unlock = EncryptedNoteUnlockState::Inactive;
+        self.encrypted_conflict_copy = EncryptedConflictCopyState::Inactive;
         self.layout.focus_target =
             if restore_editor_focus { FocusTarget::Editor } else { FocusTarget::NavigationTree };
         vec![NotoraEffect::Redraw]
@@ -1462,6 +1961,7 @@ mod metadata_actions {
                 note_id,
                 relative_path: "项目路线图.md".into(),
                 kind: DocumentKind::Markdown,
+                encryption: notora_core::NoteEncryption::Unencrypted,
                 title: "项目路线图".to_owned(),
                 excerpt: "第三季度计划".to_owned(),
                 modified_nanoseconds: 42,
@@ -1759,15 +2259,27 @@ fn creation_target(scope: &NavigationScope) -> Option<NoteCreationTarget> {
     }
 }
 
+fn validate_password_confirmation(
+    password: &SensitiveText,
+    confirmation: &SensitiveText,
+) -> Option<String> {
+    if password.expose().chars().count() < 8 {
+        return Some("密码至少需要 8 个字符".to_owned());
+    }
+    (password != confirmation).then(|| "两次输入的密码不一致".to_owned())
+}
+
 #[cfg(test)]
 mod tests {
     use std::time::{Duration, Instant, SystemTime};
 
     use super::{
-        ActiveEditorMetadata, CardPageState, CompactContent, CompactNavigation, FocusTarget,
-        LibraryState, NavigationPaneVisibility, NotoraState, OverlayState, WorkspaceRootState,
+        ActiveEditorMetadata, CardPageState, CompactContent, CompactNavigation,
+        EncryptedConflictCopyState, EncryptedNoteCreationState, EncryptedNoteUnlockState,
+        FocusTarget, LibraryState, NavigationPaneVisibility, NotoraState, OverlayState,
+        WorkspaceRootState,
     };
-    use crate::action::{CardQuery, NotoraAction, NotoraEffect};
+    use crate::action::{CardQuery, DocumentLoadRequest, NotoraAction, NotoraEffect};
     use crate::search_controller::{SEARCH_DEBOUNCE_DELAY, SearchController};
     use notora_core::{
         CatalogCard, CatalogCardCursor, CatalogCardPage, DocumentIdentity, DocumentKind,
@@ -1779,6 +2291,7 @@ mod tests {
             note_id,
             relative_path: format!("notes/{title}.md").into(),
             kind: DocumentKind::Markdown,
+            encryption: notora_core::NoteEncryption::Unencrypted,
             title: title.to_owned(),
             excerpt: format!("{title} excerpt"),
             modified_nanoseconds,
@@ -2123,6 +2636,7 @@ mod tests {
             },
             previous_relative_path: None,
             outcome: notora_core::note_command::NoteCommandOutcome::Created,
+            created_access: Some(notora_core::CreatedNoteAccess::Unencrypted),
         };
 
         let effects = state.reduce(NotoraAction::NoteCommandCompleted(result));
@@ -2175,6 +2689,177 @@ mod tests {
         assert_eq!(state.reduce(NotoraAction::OpenNewDocumentMenu), vec![NotoraEffect::Redraw]);
         assert_eq!(state.layout.overlay, OverlayState::NewDocumentMenu);
         assert_eq!(state.layout.focus_target, FocusTarget::Overlay);
+    }
+
+    #[test]
+    fn encrypted_note_creation_validates_and_clears_sensitive_draft() {
+        use ui::core::widget::SensitiveText;
+
+        let mut state = state_with_active_workspace();
+        let _ = state.reduce(NotoraAction::OpenNewDocumentMenu);
+        let _ = state.reduce(NotoraAction::BeginEncryptedNoteCreation);
+
+        assert_eq!(state.layout.overlay, OverlayState::EncryptedNoteDialog);
+        let _ = state.reduce(NotoraAction::EncryptedNotePasswordChanged(SensitiveText::new(
+            "valid-password".to_owned(),
+        )));
+        let _ = state.reduce(NotoraAction::EncryptedNoteConfirmationChanged(SensitiveText::new(
+            "different-password".to_owned(),
+        )));
+        assert_eq!(
+            state.reduce(NotoraAction::EncryptedNoteDialogSubmitRequested),
+            vec![NotoraEffect::Redraw]
+        );
+        assert!(matches!(
+            &state.encrypted_note_creation,
+            EncryptedNoteCreationState::Editing { error_message: Some(message), .. }
+                if message == "两次输入的密码不一致"
+        ));
+
+        let _ = state.reduce(NotoraAction::OverlayDismissed);
+
+        assert_eq!(state.encrypted_note_creation, EncryptedNoteCreationState::Inactive);
+        assert_eq!(state.layout.overlay, OverlayState::None);
+    }
+
+    #[test]
+    fn encrypted_note_creation_prevents_duplicate_submission() {
+        use ui::core::widget::SensitiveText;
+
+        let mut state = state_with_active_workspace();
+        let _ = state.reduce(NotoraAction::BeginEncryptedNoteCreation);
+        let _ = state.reduce(NotoraAction::EncryptedNotePasswordChanged(SensitiveText::new(
+            "valid-password".to_owned(),
+        )));
+        let _ = state.reduce(NotoraAction::EncryptedNoteConfirmationChanged(SensitiveText::new(
+            "valid-password".to_owned(),
+        )));
+
+        let effects = state.reduce(NotoraAction::EncryptedNoteDialogSubmitRequested);
+        assert!(matches!(
+            effects.as_slice(),
+            [NotoraEffect::ExecuteNoteCommand(
+                notora_core::note_command::NoteCommand::CreateConfigured(request)
+            ), NotoraEffect::Redraw]
+                if request.kind == DocumentKind::Markdown
+                    && matches!(request.storage, notora_core::CreateNoteStorage::Encrypted { .. })
+        ));
+        assert!(matches!(
+            state.encrypted_note_creation,
+            EncryptedNoteCreationState::Submitting { generation: 1, .. }
+        ));
+        assert_eq!(
+            state.reduce(NotoraAction::EncryptedNoteDialogSubmitRequested),
+            vec![NotoraEffect::Redraw]
+        );
+    }
+
+    #[test]
+    fn encrypted_note_creation_effect_debug_redacts_password() {
+        use ui::core::widget::SensitiveText;
+
+        let mut state = state_with_active_workspace();
+        let _ = state.reduce(NotoraAction::BeginEncryptedNoteCreation);
+        let _ = state.reduce(NotoraAction::EncryptedNotePasswordChanged(SensitiveText::new(
+            "debug-secret-password".to_owned(),
+        )));
+        let _ = state.reduce(NotoraAction::EncryptedNoteConfirmationChanged(SensitiveText::new(
+            "debug-secret-password".to_owned(),
+        )));
+
+        let effects = state.reduce(NotoraAction::EncryptedNoteDialogSubmitRequested);
+        let rendered = format!("{effects:?}");
+
+        assert!(!rendered.contains("debug-secret-password"));
+        assert!(rendered.contains("<redacted>"));
+    }
+
+    #[test]
+    fn encrypted_conflict_copy_requires_confirmation_and_redacts_its_effect() {
+        use ui::core::widget::SensitiveText;
+
+        let identity = DocumentIdentity::Note(NoteId::generate());
+        let target_path = std::path::PathBuf::from("冲突副本.md");
+        let mut state = state_with_active_workspace();
+        let _ = state.reduce(NotoraAction::SaveConflictDetected { identity, content_revision: 9 });
+        let _ = state.reduce(NotoraAction::EncryptedConflictCopyRequired {
+            identity,
+            target_path: target_path.clone(),
+        });
+        let _ = state.reduce(NotoraAction::EncryptedNotePasswordChanged(SensitiveText::new(
+            "conflict-copy-password".to_owned(),
+        )));
+        let _ = state.reduce(NotoraAction::EncryptedNoteConfirmationChanged(SensitiveText::new(
+            "conflict-copy-password".to_owned(),
+        )));
+
+        let effects = state.reduce(NotoraAction::EncryptedNoteDialogSubmitRequested);
+
+        assert!(matches!(
+            effects.as_slice(),
+            [NotoraEffect::SaveEncryptedConflictCopy(request), NotoraEffect::Redraw]
+                if request.identity == identity
+                    && request.target_path == target_path
+                    && request.generation == 1
+        ));
+        assert!(!format!("{effects:?}").contains("conflict-copy-password"));
+        assert!(matches!(
+            state.encrypted_conflict_copy,
+            EncryptedConflictCopyState::Submitting { generation: 1, .. }
+        ));
+    }
+
+    #[test]
+    fn encrypted_note_unlock_keeps_generation_and_clears_password_on_cancel() {
+        use ui::core::widget::SensitiveText;
+
+        let note_id = NoteId::generate();
+        let request = DocumentLoadRequest {
+            identity: DocumentIdentity::Note(note_id),
+            selection_generation: 4,
+        };
+        let mut state = state_with_active_workspace();
+        state.library.selected_card = Some(request.identity);
+        state.library.selected_document_generation = request.selection_generation;
+
+        let _ = state.reduce(NotoraAction::EncryptedNoteUnlockRequired {
+            request,
+            title: "秘密笔记".to_owned(),
+            metadata: NoteEditorMetadata {
+                note_id,
+                created_at: SystemTime::UNIX_EPOCH,
+                modified_at: SystemTime::UNIX_EPOCH,
+                encryption: notora_core::NoteEncryption::Encrypted,
+                title_initialization: notora_core::TitleInitialization::Independent,
+                file_name_binding: notora_core::NoteFileNameBinding::TitleBound {
+                    disambiguator: 1,
+                },
+                title_revision: 0,
+            },
+            tags: Vec::new(),
+        });
+        assert_eq!(state.layout.overlay, OverlayState::EncryptedNoteDialog);
+        let _ = state.reduce(NotoraAction::EncryptedNotePasswordChanged(SensitiveText::new(
+            "unlock-password".to_owned(),
+        )));
+        let effects = state.reduce(NotoraAction::EncryptedNoteDialogSubmitRequested);
+        assert!(matches!(
+            effects.as_slice(),
+            [NotoraEffect::UnlockEncryptedNote(unlock_request), NotoraEffect::Redraw]
+                if unlock_request.request == request && unlock_request.generation == 1
+        ));
+        assert!(matches!(
+            state.encrypted_note_unlock,
+            EncryptedNoteUnlockState::Submitting {
+                request: pending_request,
+                generation: 1,
+                ..
+            } if pending_request == request
+        ));
+
+        let _ = state.reduce(NotoraAction::OverlayDismissed);
+
+        assert_eq!(state.encrypted_note_unlock, EncryptedNoteUnlockState::Inactive);
     }
 
     #[test]

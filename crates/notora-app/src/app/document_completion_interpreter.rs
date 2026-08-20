@@ -50,6 +50,11 @@ impl DocumentCompletionInterpreter {
                     target.dispatch_action(NotoraAction::NoteCommandFailed(message));
                 }
             }
+            DocumentCompletion::ConflictReloadRequiresUnlock { identity, tab_id } => {
+                if target.active_save_conflict_identity() == Some(identity) {
+                    target.relock_conflicted_document(identity, tab_id);
+                }
+            }
             DocumentCompletion::ConflictRetryRevisionCaptured {
                 identity,
                 tab_id,

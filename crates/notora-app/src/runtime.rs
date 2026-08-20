@@ -65,8 +65,10 @@ use crate::{
     NotoraPaths, NotoraPathsError, NotoraState, WorkspaceCommand, WorkspaceCommandResult,
     WorkspaceController, WorkspaceControllerError,
 };
-use notora_core::note_command::{ConfiguredCreateNoteRequest, MoveNoteRequest, NoteCommand};
-use notora_core::{DocumentIdentity, DocumentKind, NoteEncryption};
+use notora_core::note_command::{
+    ConfiguredCreateNoteRequest, CreateNoteStorage, MoveNoteRequest, NoteCommand,
+};
+use notora_core::{DocumentIdentity, DocumentKind};
 
 use self::action_runtime::{ActionRuntime, ExternalSaveAsApplication};
 use self::deadline_coordinator::{DeadlineCoordinator, DeadlineSnapshot};
@@ -1067,7 +1069,10 @@ impl NotoraRuntime {
     }
 
     fn write_dirty_snapshots_in_background(&self) {
-        let plans = collect_dirty_snapshots(&self.document_runtime.editor().workspace_snapshot());
+        let plans = collect_dirty_snapshots(
+            &self.document_runtime.editor().workspace_snapshot(),
+            self.document_runtime.encrypted_note_tabs(),
+        );
         if plans.is_empty() {
             return;
         }
@@ -1100,6 +1105,46 @@ impl NotoraRuntime {
     fn install_loaded_preview(&mut self, request: DocumentLoadRequest, document: LoadedDocument) {
         let selection = self.document_selection();
         let outcome = self.document_runtime.install_loaded_preview(request, document, selection);
+        self.apply_document_outcome(outcome);
+    }
+
+    fn install_created_encrypted_note(
+        &mut self,
+        result: &notora_core::note_command::NoteCommandResult,
+    ) {
+        let Some(notora_core::CreatedNoteAccess::Encrypted { session }) =
+            result.created_access.as_ref()
+        else {
+            return;
+        };
+        let Some(workspace) = self.workspace_controller.active_workspace() else {
+            self.dispatch_action(NotoraAction::NoteCommandFailed(
+                "加密笔记已创建，但工作区已经关闭".to_owned(),
+            ));
+            return;
+        };
+        let identity = DocumentIdentity::Note(result.note.note_id);
+        let path = workspace.descriptor.root.join(&result.note.relative_path);
+        let disk_revision = match appkit_core::file_safety::capture_revision(&path) {
+            Ok(revision) => revision,
+            Err(error) => {
+                self.dispatch_action(NotoraAction::NoteCommandFailed(format!(
+                    "加密笔记已创建，但无法读取磁盘状态：{error}"
+                )));
+                return;
+            }
+        };
+        let request = DocumentLoadRequest {
+            identity,
+            selection_generation: self.action_runtime.state().library.selected_document_generation,
+        };
+        let selection = self.document_selection();
+        let outcome = self.document_runtime.install_created_encrypted_note(
+            request,
+            LoadedDocument { path, contents: String::new(), disk_revision: Some(disk_revision) },
+            std::sync::Arc::clone(session),
+            selection,
+        );
         self.apply_document_outcome(outcome);
     }
 
@@ -1629,6 +1674,31 @@ impl NotoraEffectTarget for NotoraRuntime {
         NotoraRuntime::prepare_document(self, request)
     }
 
+    fn unlock_encrypted_note(
+        &mut self,
+        request: crate::action::EncryptedNoteUnlockRequest,
+    ) -> Vec<NotoraAction> {
+        let trashed = self.action_runtime.state().library.navigation_scope
+            == notora_core::NavigationScope::Trash;
+        self.workspace_controller
+            .unlock_encrypted_document(request, trashed)
+            .err()
+            .map_or_else(Vec::new, |error| vec![NotoraAction::NoteCommandFailed(error.to_string())])
+    }
+
+    fn save_encrypted_conflict_copy(
+        &mut self,
+        request: crate::action::EncryptedConflictCopyRequest,
+    ) -> Vec<NotoraAction> {
+        let outcome = self.document_runtime.prepare_encrypted_conflict_copy(
+            request.identity,
+            request.target_path,
+            request.password,
+        );
+        self.apply_document_outcome(outcome);
+        Vec::new()
+    }
+
     fn promote_active_preview(&mut self) {
         NotoraRuntime::promote_active_preview(self);
     }
@@ -1784,8 +1854,9 @@ impl DocumentCommandTarget for NotoraRuntime {
         &mut self,
         identity: DocumentIdentity,
         prepared: appkit_shell::editor_runtime::PreparedDocumentSave,
+        transform: Option<appkit_shell::editor_runtime::SavePayloadTransform>,
     ) {
-        self.start_conflict_copy(identity, prepared);
+        self.start_conflict_copy(identity, prepared, transform);
     }
 
     fn reload_conflict(
@@ -1794,8 +1865,9 @@ impl DocumentCommandTarget for NotoraRuntime {
         tab_id: appkit_core::workspace::types::TabId,
         content_revision: u64,
         path: std::path::PathBuf,
+        session: Option<std::sync::Arc<textora_encryption::UnlockedNoteSession>>,
     ) {
-        self.start_conflict_reload(identity, tab_id, content_revision, path);
+        self.start_conflict_reload(identity, tab_id, content_revision, path, session);
     }
 
     fn read_external_files(&mut self, requests: Vec<(std::path::PathBuf, bool)>) {
@@ -1818,6 +1890,39 @@ impl ProductActionTarget for NotoraRuntime {
 }
 
 impl WorkspaceCompletionTarget for NotoraRuntime {
+    fn accepts_encrypted_unlock(&self, request: DocumentLoadRequest, generation: u64) -> bool {
+        self.selection_matches(request)
+            && matches!(
+                self.action_runtime.state().encrypted_note_unlock,
+                crate::state::EncryptedNoteUnlockState::Submitting {
+                    request: pending_request,
+                    generation: pending_generation,
+                    ..
+                } if pending_request == request && pending_generation == generation
+            )
+    }
+
+    fn install_unlocked_workspace_document(
+        &mut self,
+        unlocked: crate::product::UnlockedWorkspaceDocument,
+    ) {
+        let selection = self.document_selection();
+        let outcome = self.document_runtime.install_created_encrypted_note(
+            unlocked.request,
+            unlocked.document,
+            unlocked.session,
+            selection,
+        );
+        self.apply_document_outcome(outcome);
+    }
+
+    fn install_created_encrypted_note(
+        &mut self,
+        result: &notora_core::note_command::NoteCommandResult,
+    ) {
+        NotoraRuntime::install_created_encrypted_note(self, result);
+    }
+
     fn synchronize_open_note_path(
         &mut self,
         result: &notora_core::note_command::NoteCommandResult,
@@ -1935,6 +2040,14 @@ impl DocumentCompletionTarget for NotoraRuntime {
         document: LoadedDocument,
     ) {
         NotoraRuntime::complete_conflict_reload(self, identity, tab_id, content_revision, document);
+    }
+
+    fn relock_conflicted_document(
+        &mut self,
+        identity: DocumentIdentity,
+        tab_id: appkit_core::workspace::types::TabId,
+    ) {
+        NotoraRuntime::relock_conflicted_document(self, identity, tab_id);
     }
 
     fn active_save_conflict_identity(&self) -> Option<DocumentIdentity> {
@@ -2082,7 +2195,7 @@ impl NotoraRuntime {
         self.submit_note_command(NoteCommand::CreateConfigured(ConfiguredCreateNoteRequest {
             kind,
             target_directory: target.directory,
-            encryption: NoteEncryption::Unencrypted,
+            storage: CreateNoteStorage::Unencrypted,
         }));
         Vec::new()
     }
@@ -2246,6 +2359,19 @@ impl NotoraRuntime {
         };
         let outcome = self.document_runtime.prepare_trash_operation(operation, origin);
         self.apply_document_outcome(outcome);
+    }
+
+    fn relock_conflicted_document(
+        &mut self,
+        identity: DocumentIdentity,
+        tab_id: appkit_core::workspace::types::TabId,
+    ) {
+        if self.document_runtime.tab_for(identity) != Some(tab_id) {
+            return;
+        }
+        self.close_document_runtime(identity);
+        self.dispatch_action(NotoraAction::SaveConflictResolved { identity });
+        self.dispatch_action(NotoraAction::CardSelected(identity));
     }
 
     fn submit_trash_operation(&mut self, operation: crate::action::TrashOperation) {
@@ -2758,6 +2884,13 @@ impl NotoraRuntime {
         else {
             return;
         };
+        if self.document_runtime.is_encrypted_note(identity) {
+            self.dispatch_action(NotoraAction::EncryptedConflictCopyRequired {
+                identity,
+                target_path: path,
+            });
+            return;
+        }
         let outcome = self.document_runtime.prepare_conflict_copy(identity, path);
         self.apply_document_outcome(outcome);
     }
@@ -2766,6 +2899,7 @@ impl NotoraRuntime {
         &mut self,
         identity: DocumentIdentity,
         prepared: appkit_shell::editor_runtime::PreparedDocumentSave,
+        transform: Option<appkit_shell::editor_runtime::SavePayloadTransform>,
     ) {
         let Some(workspace) = self.workspace_controller.active_workspace() else {
             self.dispatch_action(NotoraAction::NoteCommandFailed(
@@ -2783,10 +2917,15 @@ impl NotoraRuntime {
         if thread::Builder::new()
             .name("notora-conflict-copy".to_owned())
             .spawn(move || {
-                let result = appkit_shell::editor_runtime::execute_prepared_save(prepared)
-                    .result
-                    .map(|_| ())
-                    .map_err(|error| error.to_string());
+                let completion = match transform {
+                    Some(transform) => {
+                        appkit_shell::editor_runtime::execute_prepared_save_with_transform(
+                            prepared, transform,
+                        )
+                    }
+                    None => appkit_shell::editor_runtime::execute_prepared_save(prepared),
+                };
+                let result = completion.result.map(|_| ()).map_err(|error| error.to_string());
                 let _ =
                     sender.send(WorkspaceCompletion::ConflictCopyCompleted { identity, result });
             })
@@ -2809,11 +2948,12 @@ impl NotoraRuntime {
         tab_id: appkit_core::workspace::types::TabId,
         content_revision: u64,
         path: std::path::PathBuf,
+        session: Option<std::sync::Arc<textora_encryption::UnlockedNoteSession>>,
     ) {
         let sender = self.product.event_sender();
         if thread::Builder::new()
             .name("notora-conflict-reload".to_owned())
-            .spawn(move || match load_document(&path) {
+            .spawn(move || match load_conflicted_document(&path, session.as_deref()) {
                 Ok(document) => {
                     let _ = sender.send(NotoraProductEvent::Document(
                         DocumentCompletion::ConflictReloadCompleted {
@@ -2824,12 +2964,14 @@ impl NotoraRuntime {
                         },
                     ));
                 }
-                Err(error) => {
+                Err(ConflictReloadError::RequiresUnlock) => {
                     let _ = sender.send(NotoraProductEvent::Document(
-                        DocumentCompletion::ConflictReloadFailed {
-                            identity,
-                            message: error.to_string(),
-                        },
+                        DocumentCompletion::ConflictReloadRequiresUnlock { identity, tab_id },
+                    ));
+                }
+                Err(ConflictReloadError::Message(message)) => {
+                    let _ = sender.send(NotoraProductEvent::Document(
+                        DocumentCompletion::ConflictReloadFailed { identity, message },
                     ));
                 }
             })
@@ -2992,6 +3134,37 @@ fn build_editor_runtime(
     .map_err(NotoraAppError::Runtime)
 }
 
+fn load_conflicted_document(
+    path: &std::path::Path,
+    session: Option<&textora_encryption::UnlockedNoteSession>,
+) -> Result<LoadedDocument, ConflictReloadError> {
+    let Some(session) = session else {
+        return load_document(path)
+            .map_err(|error| ConflictReloadError::Message(error.to_string()));
+    };
+    let serialized =
+        std::fs::read(path).map_err(|error| ConflictReloadError::Message(error.to_string()))?;
+    let contents = match textora_encryption::decrypt_markdown_with_session(&serialized, session) {
+        Ok(contents) => contents,
+        Err(textora_encryption::EncryptionError::SessionMismatch) => {
+            return Err(ConflictReloadError::RequiresUnlock);
+        }
+        Err(_) => {
+            return Err(ConflictReloadError::Message(
+                "加密文件内容已损坏，无法重新加载".to_owned(),
+            ));
+        }
+    };
+    let disk_revision = appkit_core::file_safety::capture_revision(path)
+        .map_err(|error| ConflictReloadError::Message(error.to_string()))?;
+    Ok(LoadedDocument { path: path.to_path_buf(), contents, disk_revision: Some(disk_revision) })
+}
+
+enum ConflictReloadError {
+    RequiresUnlock,
+    Message(String),
+}
+
 #[cfg(test)]
 mod tests {
     use std::thread;
@@ -3067,8 +3240,463 @@ mod tests {
         (identity, tab_id)
     }
 
+    fn regular_files_below(root: &std::path::Path) -> Vec<std::path::PathBuf> {
+        let mut pending_directories = vec![root.to_path_buf()];
+        let mut files = Vec::new();
+        while let Some(directory) = pending_directories.pop() {
+            let Ok(entries) = std::fs::read_dir(directory) else {
+                continue;
+            };
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if path.is_dir() {
+                    pending_directories.push(path);
+                } else if path.is_file() {
+                    files.push(path);
+                }
+            }
+        }
+        files
+    }
+
+    #[test]
+    fn encrypted_creation_installs_empty_editor_with_unlocked_session() {
+        use ui::core::widget::SensitiveText;
+
+        let workspace = tempfile::tempdir().expect("workspace fixture should exist");
+        let mut app = app();
+        app.execute_workspace_command(WorkspaceCommand::OpenExisting {
+            root: workspace.path().to_path_buf(),
+        })
+        .expect("workspace should open");
+        app.dispatch_action(NotoraAction::BeginEncryptedNoteCreation);
+        for action in [
+            NotoraAction::EncryptedNotePasswordChanged(SensitiveText::new(
+                "runtime-test-password".to_owned(),
+            )),
+            NotoraAction::EncryptedNoteConfirmationChanged(SensitiveText::new(
+                "runtime-test-password".to_owned(),
+            )),
+            NotoraAction::EncryptedNoteDialogSubmitRequested,
+        ] {
+            app.dispatch_action(action);
+        }
+
+        let deadline = Instant::now() + Duration::from_secs(3);
+        let (identity, tab_id) = loop {
+            app.drain_product_events();
+            if let Some(identity) = app.action_runtime.state().library.selected_card
+                && let Some(tab_id) = app.document_runtime.tab_for(identity)
+            {
+                break (identity, tab_id);
+            }
+            assert!(Instant::now() < deadline, "encrypted creation should finish promptly");
+            std::thread::sleep(Duration::from_millis(10));
+        };
+
+        assert!(matches!(identity, DocumentIdentity::Note(_)));
+        assert!(app.document_runtime.unlocked_note_session(tab_id).is_some());
+        assert_eq!(
+            app.document_runtime
+                .editor_runtime
+                .document_text_snapshot(tab_id)
+                .expect("created editor should expose a snapshot")
+                .text,
+            ""
+        );
+        let serialized = std::fs::read(workspace.path().join("无标题.md"))
+            .expect("created encrypted file should be readable");
+        textora_encryption::inspect_encrypted_markdown(&serialized)
+            .expect("created file should be a strict encrypted envelope");
+    }
+
+    #[test]
+    fn encrypted_note_requires_password_after_runtime_restart() {
+        use ui::core::widget::SensitiveText;
+
+        let workspace = tempfile::tempdir().expect("workspace fixture should exist");
+        let mut creating_app = app();
+        creating_app
+            .execute_workspace_command(WorkspaceCommand::OpenExisting {
+                root: workspace.path().to_path_buf(),
+            })
+            .expect("workspace should open for creation");
+        creating_app.dispatch_action(NotoraAction::BeginEncryptedNoteCreation);
+        for action in [
+            NotoraAction::EncryptedNotePasswordChanged(SensitiveText::new(
+                "restart-test-password".to_owned(),
+            )),
+            NotoraAction::EncryptedNoteConfirmationChanged(SensitiveText::new(
+                "restart-test-password".to_owned(),
+            )),
+            NotoraAction::EncryptedNoteDialogSubmitRequested,
+        ] {
+            creating_app.dispatch_action(action);
+        }
+        let deadline = Instant::now() + Duration::from_secs(3);
+        let identity = loop {
+            creating_app.drain_product_events();
+            if let Some(identity) = creating_app.action_runtime.state().library.selected_card
+                && creating_app.document_runtime.tab_for(identity).is_some()
+            {
+                break identity;
+            }
+            assert!(Instant::now() < deadline, "encrypted creation should finish promptly");
+            std::thread::sleep(Duration::from_millis(10));
+        };
+        creating_app
+            .execute_workspace_command(WorkspaceCommand::Close)
+            .expect("first runtime should close its workspace");
+        drop(creating_app);
+
+        let mut reopening_app = app();
+        reopening_app
+            .execute_workspace_command(WorkspaceCommand::OpenExisting {
+                root: workspace.path().to_path_buf(),
+            })
+            .expect("workspace should reopen");
+        reopening_app.dispatch_action(NotoraAction::CardSelected(identity));
+        let deadline = Instant::now() + Duration::from_secs(3);
+        loop {
+            reopening_app.drain_product_events();
+            if matches!(
+                reopening_app.action_runtime.state().encrypted_note_unlock,
+                crate::state::EncryptedNoteUnlockState::Editing { .. }
+            ) {
+                break;
+            }
+            assert!(Instant::now() < deadline, "encrypted note should request an unlock password");
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert!(reopening_app.document_runtime.tab_for(identity).is_none());
+
+        reopening_app.dispatch_action(NotoraAction::EncryptedNotePasswordChanged(
+            SensitiveText::new("incorrect-password".to_owned()),
+        ));
+        reopening_app.dispatch_action(NotoraAction::EncryptedNoteDialogSubmitRequested);
+        let deadline = Instant::now() + Duration::from_secs(3);
+        loop {
+            reopening_app.drain_product_events();
+            if matches!(
+                &reopening_app.action_runtime.state().encrypted_note_unlock,
+                crate::state::EncryptedNoteUnlockState::Editing {
+                    error_message: Some(message),
+                    ..
+                } if message == "密码错误或文件已损坏"
+            ) {
+                break;
+            }
+            assert!(Instant::now() < deadline, "wrong password should return a stable failure");
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert!(reopening_app.document_runtime.tab_for(identity).is_none());
+
+        reopening_app.dispatch_action(NotoraAction::EncryptedNotePasswordChanged(
+            SensitiveText::new("restart-test-password".to_owned()),
+        ));
+        reopening_app.dispatch_action(NotoraAction::EncryptedNoteDialogSubmitRequested);
+        let deadline = Instant::now() + Duration::from_secs(3);
+        let tab_id = loop {
+            reopening_app.drain_product_events();
+            if let Some(tab_id) = reopening_app.document_runtime.tab_for(identity) {
+                break tab_id;
+            }
+            assert!(Instant::now() < deadline, "correct password should unlock the note");
+            std::thread::sleep(Duration::from_millis(10));
+        };
+        assert!(reopening_app.document_runtime.unlocked_note_session(tab_id).is_some());
+        assert_eq!(
+            reopening_app
+                .document_runtime
+                .editor_runtime
+                .document_text_snapshot(tab_id)
+                .expect("unlocked editor should expose plaintext")
+                .text,
+            ""
+        );
+    }
+
     fn active_editor_input_context() -> EditorInputContext {
         EditorInputContext { focus: EditorFocus::Active, modal_blocked: false }
+    }
+
+    fn create_encrypted_note_for_test(
+        app: &mut NotoraRuntime,
+        workspace_root: &std::path::Path,
+        password: &str,
+    ) -> (DocumentIdentity, appkit_core::workspace::types::TabId) {
+        use ui::core::widget::SensitiveText;
+
+        app.execute_workspace_command(WorkspaceCommand::OpenExisting {
+            root: workspace_root.to_path_buf(),
+        })
+        .expect("workspace should open for encrypted-note test");
+        app.dispatch_action(NotoraAction::BeginEncryptedNoteCreation);
+        for action in [
+            NotoraAction::EncryptedNotePasswordChanged(SensitiveText::new(password.to_owned())),
+            NotoraAction::EncryptedNoteConfirmationChanged(SensitiveText::new(password.to_owned())),
+            NotoraAction::EncryptedNoteDialogSubmitRequested,
+        ] {
+            app.dispatch_action(action);
+        }
+        let deadline = Instant::now() + Duration::from_secs(3);
+        loop {
+            app.drain_product_events();
+            if let Some(identity) = app.action_runtime.state().library.selected_card
+                && let Some(tab_id) = app.document_runtime.tab_for(identity)
+            {
+                return (identity, tab_id);
+            }
+            assert!(Instant::now() < deadline, "encrypted creation should finish promptly");
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    }
+
+    #[test]
+    fn encrypted_save_transforms_plaintext_and_requires_session() {
+        let workspace = tempfile::tempdir().expect("workspace fixture should exist");
+        let mut app = app();
+        let (_identity, tab_id) =
+            create_encrypted_note_for_test(&mut app, workspace.path(), "save-test-password");
+        let original_envelope = std::fs::read(workspace.path().join("无标题.md"))
+            .expect("original encrypted envelope should be readable");
+        let edit_outcome = app
+            .document_runtime
+            .editor_runtime
+            .commit_text(active_editor_input_context(), "sensitive-save-marker".to_owned());
+        app.apply_editor_outcome(edit_outcome);
+        let prepared = app
+            .document_runtime
+            .editor_runtime
+            .prepare_save(tab_id)
+            .expect("dirty encrypted note should prepare a plaintext snapshot");
+        let transform = app
+            .document_runtime
+            .save_payload_transform(tab_id)
+            .expect("unlocked note should select an encryption transform")
+            .expect("encrypted tab should never use identity transform");
+        let completion =
+            appkit_shell::editor_runtime::execute_prepared_save_with_transform(prepared, transform);
+        assert!(completion.result.is_ok());
+        let _ = app.document_runtime.editor_runtime.apply_save_completion(completion);
+
+        let saved_envelope = std::fs::read(workspace.path().join("无标题.md"))
+            .expect("saved encrypted envelope should be readable");
+        assert_ne!(saved_envelope, original_envelope, "each save must use a fresh nonce");
+        assert!(
+            !saved_envelope
+                .windows("sensitive-save-marker".len())
+                .any(|window| { window == "sensitive-save-marker".as_bytes() })
+        );
+        let password = textora_encryption::EncryptionPassword::new("save-test-password".to_owned())
+            .expect("test password should satisfy policy");
+        assert_eq!(
+            textora_encryption::unlock_encrypted_markdown(&saved_envelope, &password)
+                .expect("saved envelope should authenticate")
+                .plaintext(),
+            "sensitive-save-marker"
+        );
+
+        app.document_runtime.remove_unlocked_note_session_for_test(tab_id);
+        assert!(matches!(
+            app.document_runtime.save_payload_transform(tab_id),
+            Err(message) if message == "加密笔记缺少解锁会话，保存已取消"
+        ));
+    }
+
+    #[test]
+    fn encrypted_note_plaintext_and_password_never_reach_workspace_catalog_or_snapshots() {
+        const PLAINTEXT_MARKER: &str = "encrypted-leakage-marker-7e654a";
+        const PASSWORD_MARKER: &str = "leakage-test-password";
+
+        let workspace = tempfile::tempdir().expect("workspace fixture should exist");
+        let mut app = app();
+        let (_identity, tab_id) =
+            create_encrypted_note_for_test(&mut app, workspace.path(), PASSWORD_MARKER);
+        let edit_outcome = app
+            .document_runtime
+            .editor_runtime
+            .commit_text(active_editor_input_context(), PLAINTEXT_MARKER.to_owned());
+        app.apply_editor_outcome(edit_outcome);
+
+        app.write_dirty_snapshots_in_background();
+        assert!(regular_files_below(&app.paths.snapshots_directory).is_empty());
+
+        let prepared = app
+            .document_runtime
+            .editor_runtime
+            .prepare_save(tab_id)
+            .expect("dirty encrypted note should prepare for save");
+        let transform = app
+            .document_runtime
+            .save_payload_transform(tab_id)
+            .expect("encrypted save transform should resolve")
+            .expect("encrypted note should require a transform");
+        let completion =
+            appkit_shell::editor_runtime::execute_prepared_save_with_transform(prepared, transform);
+        assert!(completion.result.is_ok());
+        let _ = app.document_runtime.editor_runtime.apply_save_completion(completion);
+        app.request_catalog_reindex_after_note_save(tab_id);
+        for _ in 0..50 {
+            app.drain_product_events();
+            std::thread::sleep(Duration::from_millis(10));
+        }
+
+        for root in [workspace.path(), app.paths.config_directory.as_path()] {
+            for path in regular_files_below(root) {
+                let bytes = std::fs::read(&path).expect("acceptance artifact should be readable");
+                assert!(
+                    !bytes
+                        .windows(PLAINTEXT_MARKER.len())
+                        .any(|window| { window == PLAINTEXT_MARKER.as_bytes() }),
+                    "plaintext leaked into {}",
+                    path.display()
+                );
+                assert!(
+                    !bytes
+                        .windows(PASSWORD_MARKER.len())
+                        .any(|window| { window == PASSWORD_MARKER.as_bytes() }),
+                    "password leaked into {}",
+                    path.display()
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn encrypted_conflict_copy_uses_a_new_document_identity_and_never_writes_plaintext() {
+        use ui::core::widget::SensitiveText;
+
+        let workspace = tempfile::tempdir().expect("workspace fixture should exist");
+        let mut app = app();
+        let (identity, _tab_id) =
+            create_encrypted_note_for_test(&mut app, workspace.path(), "original-password");
+        let edit_outcome = app
+            .document_runtime
+            .editor_runtime
+            .commit_text(active_editor_input_context(), "conflict-copy-marker".to_owned());
+        app.apply_editor_outcome(edit_outcome);
+        let original_envelope = std::fs::read(workspace.path().join("无标题.md"))
+            .expect("original envelope should be readable");
+        let target_path = workspace.path().join("加密冲突副本.md");
+        app.dispatch_action(NotoraAction::SaveConflictDetected { identity, content_revision: 1 });
+        app.dispatch_action(NotoraAction::EncryptedConflictCopyRequired {
+            identity,
+            target_path: target_path.clone(),
+        });
+        for action in [
+            NotoraAction::EncryptedNotePasswordChanged(SensitiveText::new(
+                "conflict-copy-password".to_owned(),
+            )),
+            NotoraAction::EncryptedNoteConfirmationChanged(SensitiveText::new(
+                "conflict-copy-password".to_owned(),
+            )),
+            NotoraAction::EncryptedNoteDialogSubmitRequested,
+        ] {
+            app.dispatch_action(action);
+        }
+
+        let deadline = Instant::now() + Duration::from_secs(3);
+        while !target_path.is_file() {
+            app.drain_product_events();
+            assert!(Instant::now() < deadline, "encrypted conflict copy should finish promptly");
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        app.drain_product_events();
+
+        let copied_envelope =
+            std::fs::read(&target_path).expect("encrypted conflict copy should be readable");
+        assert!(
+            !copied_envelope
+                .windows("conflict-copy-marker".len())
+                .any(|window| { window == "conflict-copy-marker".as_bytes() })
+        );
+        let original_header = textora_encryption::inspect_encrypted_markdown(&original_envelope)
+            .expect("original should remain a valid envelope");
+        let copied_header = textora_encryption::inspect_encrypted_markdown(&copied_envelope)
+            .expect("copy should be a valid envelope");
+        assert_ne!(original_header.document_id, copied_header.document_id);
+        let password =
+            textora_encryption::EncryptionPassword::new("conflict-copy-password".to_owned())
+                .expect("copy password should satisfy policy");
+        assert_eq!(
+            textora_encryption::unlock_encrypted_markdown(&copied_envelope, &password)
+                .expect("copy should unlock with its supplied password")
+                .plaintext(),
+            "conflict-copy-marker"
+        );
+    }
+
+    #[test]
+    fn encrypted_conflict_reload_relocks_when_the_external_document_identity_changes() {
+        use ui::core::widget::SensitiveText;
+
+        let workspace = tempfile::tempdir().expect("workspace fixture should exist");
+        let mut app = app();
+        let (identity, original_tab_id) =
+            create_encrypted_note_for_test(&mut app, workspace.path(), "original-password");
+        let edit_outcome = app
+            .document_runtime
+            .editor_runtime
+            .commit_text(active_editor_input_context(), "local-unsaved-text".to_owned());
+        app.apply_editor_outcome(edit_outcome);
+        let replacement_password =
+            textora_encryption::EncryptionPassword::new("replacement-password".to_owned())
+                .expect("replacement password should satisfy policy");
+        let replacement =
+            textora_encryption::create_encrypted_markdown(&replacement_password, b"replacement")
+                .expect("replacement envelope should be created")
+                .into_parts()
+                .0;
+        std::fs::write(workspace.path().join("无标题.md"), replacement)
+            .expect("external replacement should be written");
+        let content_revision = app
+            .document_runtime
+            .editor_runtime
+            .document_summary(original_tab_id)
+            .expect("encrypted tab should have a summary")
+            .content_revision;
+        app.dispatch_action(NotoraAction::SaveConflictDetected { identity, content_revision });
+        app.dispatch_action(NotoraAction::SaveConflictResolutionRequested(
+            crate::action::ConflictResolution::ReloadFromDisk,
+        ));
+
+        let deadline = Instant::now() + Duration::from_secs(3);
+        loop {
+            app.drain_product_events();
+            if matches!(
+                app.action_runtime.state().encrypted_note_unlock,
+                crate::state::EncryptedNoteUnlockState::Editing { .. }
+            ) {
+                break;
+            }
+            assert!(Instant::now() < deadline, "replacement should require a fresh unlock");
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert!(app.document_runtime.tab_for(identity).is_none());
+        assert!(app.document_runtime.unlocked_note_session(original_tab_id).is_none());
+
+        app.dispatch_action(NotoraAction::EncryptedNotePasswordChanged(SensitiveText::new(
+            "replacement-password".to_owned(),
+        )));
+        app.dispatch_action(NotoraAction::EncryptedNoteDialogSubmitRequested);
+        let reopened_tab_id = loop {
+            app.drain_product_events();
+            if let Some(tab_id) = app.document_runtime.tab_for(identity) {
+                break tab_id;
+            }
+            assert!(Instant::now() < deadline, "replacement password should unlock the new file");
+            std::thread::sleep(Duration::from_millis(10));
+        };
+        assert_ne!(reopened_tab_id, original_tab_id);
+        assert_eq!(
+            app.document_runtime
+                .editor_runtime
+                .document_text_snapshot(reopened_tab_id)
+                .expect("reopened replacement should expose plaintext")
+                .text,
+            "replacement"
+        );
     }
 
     fn install_registered_external(

@@ -257,7 +257,7 @@ impl SidebarState {
         let split_button_rect =
             self.layout.as_ref().map(|layout| layout.new_menu_btn_rect).unwrap_or(Rect::ZERO);
         self.open_menu =
-            Some(build_new_document_menu(split_button_rect, (screen_w, screen_h), metrics));
+            Some(build_new_document_menu(split_button_rect, (screen_w, screen_h), metrics, false));
         self.menu_hovered_index = None;
     }
 

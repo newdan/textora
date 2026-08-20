@@ -25,6 +25,18 @@ pub(super) trait NotoraEffectTarget {
     fn execute_trash_operation(&mut self, operation: TrashOperation);
     fn choose_note_move_directory(&mut self, note_id: notora_core::NoteId) -> Vec<NotoraAction>;
     fn prepare_document(&mut self, request: DocumentLoadRequest) -> Vec<NotoraAction>;
+    fn unlock_encrypted_note(
+        &mut self,
+        _request: crate::action::EncryptedNoteUnlockRequest,
+    ) -> Vec<NotoraAction> {
+        vec![NotoraAction::NoteCommandFailed("加密笔记解锁服务尚未就绪".to_owned())]
+    }
+    fn save_encrypted_conflict_copy(
+        &mut self,
+        _request: crate::action::EncryptedConflictCopyRequest,
+    ) -> Vec<NotoraAction> {
+        vec![NotoraAction::NoteCommandFailed("加密冲突副本服务尚未就绪".to_owned())]
+    }
     fn promote_active_preview(&mut self);
     fn choose_workspace_root(&mut self);
     fn open_external_files(&mut self, request: ExternalOpenRequest);
@@ -101,6 +113,10 @@ impl NotoraEffectExecutor {
                 target.choose_note_move_directory(note_id)
             }
             NotoraEffect::PrepareDocument(request) => target.prepare_document(request),
+            NotoraEffect::UnlockEncryptedNote(request) => target.unlock_encrypted_note(request),
+            NotoraEffect::SaveEncryptedConflictCopy(request) => {
+                target.save_encrypted_conflict_copy(request)
+            }
             NotoraEffect::PromoteActivePreview => {
                 target.promote_active_preview();
                 Vec::new()

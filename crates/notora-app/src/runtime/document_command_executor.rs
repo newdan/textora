@@ -57,6 +57,7 @@ pub(super) trait DocumentCommandTarget {
         &mut self,
         identity: notora_core::DocumentIdentity,
         prepared: appkit_shell::editor_runtime::PreparedDocumentSave,
+        transform: Option<appkit_shell::editor_runtime::SavePayloadTransform>,
     );
     fn reload_conflict(
         &mut self,
@@ -64,6 +65,7 @@ pub(super) trait DocumentCommandTarget {
         tab_id: TabId,
         content_revision: u64,
         path: std::path::PathBuf,
+        session: Option<std::sync::Arc<textora_encryption::UnlockedNoteSession>>,
     );
     fn read_external_files(&mut self, requests: Vec<(std::path::PathBuf, bool)>);
     fn load_external_document(
@@ -132,11 +134,17 @@ impl DocumentCommandExecutor {
                 let outcome = target.begin_conflict_retry(request, pending);
                 target.apply_document_outcome(outcome);
             }
-            DocumentCommand::SaveConflictCopy { identity, prepared } => {
-                target.save_conflict_copy(identity, prepared);
+            DocumentCommand::SaveConflictCopy { identity, prepared, transform } => {
+                target.save_conflict_copy(identity, prepared, transform);
             }
-            DocumentCommand::ReloadConflict { identity, tab_id, content_revision, path } => {
-                target.reload_conflict(identity, tab_id, content_revision, path);
+            DocumentCommand::ReloadConflict {
+                identity,
+                tab_id,
+                content_revision,
+                path,
+                session,
+            } => {
+                target.reload_conflict(identity, tab_id, content_revision, path, session);
             }
             DocumentCommand::ReadExternalFiles(requests) => target.read_external_files(requests),
             DocumentCommand::LoadExternalDocument { request, canonical_path } => {

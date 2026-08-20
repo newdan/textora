@@ -48,9 +48,10 @@ pub use markdown_links::{
     MarkdownPathReference, MarkdownPathReferenceKind, extract_markdown_path_references,
 };
 pub use note_command::{
-    ConfiguredCreateNoteRequest, CreateNoteResult, NoteCommand, NoteCommandError,
-    NoteCommandOutcome, NotePathRecoveryError, NotePathRecoveryReport, UpdateNoteTitleRequest,
-    execute_note_command, recover_note_path_operations,
+    ConfiguredCreateNoteRequest, CreateNoteResult, CreateNoteStorage, CreatedNoteAccess,
+    NoteCommand, NoteCommandError, NoteCommandOutcome, NotePathRecoveryError,
+    NotePathRecoveryReport, UpdateNoteTitleRequest, execute_note_command,
+    recover_note_path_operations,
 };
 pub use reconciliation::{
     DiscoveredNote, ReconciliationChange, ReconciliationError, ReconciliationPlan,

@@ -32,11 +32,15 @@ pub enum RecoverableDirtySnapshot {
 }
 
 /// 根据 runtime 的只读快照生成写入计划；干净 tab 不产生快照。
-pub fn collect_dirty_snapshots(workspace: &EditorWorkspaceSnapshot) -> Vec<DirtySnapshotPlan> {
+pub fn collect_dirty_snapshots(
+    workspace: &EditorWorkspaceSnapshot,
+    excluded_tabs: &std::collections::HashSet<TabId>,
+) -> Vec<DirtySnapshotPlan> {
     workspace
         .tabs
         .iter()
         .filter(|tab| tab.dirty)
+        .filter(|tab| !excluded_tabs.contains(&tab.tab_id))
         .map(|tab| DirtySnapshotPlan {
             tab_id: tab.tab_id,
             filename: tab
@@ -149,7 +153,7 @@ mod tests {
         };
         let directory = tempfile::tempdir().expect("snapshot test directory should exist");
 
-        let plans = collect_dirty_snapshots(&workspace);
+        let plans = collect_dirty_snapshots(&workspace, &std::collections::HashSet::new());
         assert_eq!(plans.len(), 1);
         assert_eq!(plans[0].tab_id, dirty_tab);
         let path = write_dirty_snapshot(directory.path(), &plans[0])
@@ -169,7 +173,7 @@ mod tests {
         let workspace =
             EditorWorkspaceSnapshot { active_index: 0, tabs: vec![tab_snapshot(tab_id, true)] };
         let directory = tempfile::tempdir().expect("snapshot test directory should exist");
-        let plan = collect_dirty_snapshots(&workspace)
+        let plan = collect_dirty_snapshots(&workspace, &std::collections::HashSet::new())
             .pop()
             .expect("dirty tab should create a snapshot plan");
         let _ = write_dirty_snapshot(directory.path(), &plan)
@@ -183,5 +187,22 @@ mod tests {
             [RecoverableDirtySnapshot::Ready { content_lines, .. }]
                 if content_lines == &vec!["local change".to_owned()]
         ));
+    }
+
+    #[test]
+    fn encrypted_dirty_tabs_are_excluded_before_plans_exist() {
+        let mut tabs = TabIdAllocator::new();
+        let encrypted_tab = tabs.allocate();
+        let ordinary_tab = tabs.allocate();
+        let workspace = EditorWorkspaceSnapshot {
+            active_index: 0,
+            tabs: vec![tab_snapshot(encrypted_tab, true), tab_snapshot(ordinary_tab, true)],
+        };
+        let excluded_tabs = std::collections::HashSet::from([encrypted_tab]);
+
+        let plans = collect_dirty_snapshots(&workspace, &excluded_tabs);
+
+        assert_eq!(plans.len(), 1);
+        assert_eq!(plans[0].tab_id, ordinary_tab);
     }
 }

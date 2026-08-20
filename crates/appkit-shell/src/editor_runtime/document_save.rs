@@ -8,6 +8,29 @@ use appkit_core::document::DocumentSaveError;
 use appkit_core::file_safety::DiskRevision;
 use appkit_core::workspace::types::TabId;
 
+type PayloadTransform = dyn Fn(&[u8]) -> Result<Vec<u8>, String> + Send + Sync + 'static;
+
+#[derive(Clone)]
+pub struct SavePayloadTransform(std::sync::Arc<PayloadTransform>);
+
+impl SavePayloadTransform {
+    pub fn new(
+        transform: impl Fn(&[u8]) -> Result<Vec<u8>, String> + Send + Sync + 'static,
+    ) -> Self {
+        Self(std::sync::Arc::new(transform))
+    }
+
+    fn apply(&self, plaintext: &[u8]) -> Result<Vec<u8>, String> {
+        (self.0)(plaintext)
+    }
+}
+
+impl std::fmt::Debug for SavePayloadTransform {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("SavePayloadTransform(<opaque>)")
+    }
+}
+
 /// 可脱离 runtime 在 worker 中执行的保存快照。
 #[derive(Debug, PartialEq, Eq)]
 pub struct PreparedDocumentSave {
@@ -65,11 +88,23 @@ impl SaveSession {
         prepared: PreparedDocumentSave,
         wake: impl Fn() + Send + Sync + 'static,
     ) -> Result<(), String> {
+        self.submit_with_transform(prepared, None, wake)
+    }
+
+    pub(crate) fn submit_with_transform(
+        &self,
+        prepared: PreparedDocumentSave,
+        transform: Option<SavePayloadTransform>,
+        wake: impl Fn() + Send + Sync + 'static,
+    ) -> Result<(), String> {
         let sender = self.sender.clone();
         thread::Builder::new()
             .name("textora-save".to_owned())
             .spawn(move || {
-                let completion = execute_prepared_save(prepared);
+                let completion = match transform {
+                    Some(transform) => execute_prepared_save_with_transform(prepared, transform),
+                    None => execute_prepared_save(prepared),
+                };
                 if sender.send(completion).is_ok() {
                     wake();
                 }
@@ -85,6 +120,34 @@ impl SaveSession {
 
 /// 在产品 worker/thread pool 中执行不可变保存快照。
 pub fn execute_prepared_save(prepared: PreparedDocumentSave) -> SaveCompletion {
+    execute_serialized_save(prepared, None)
+}
+
+pub fn execute_prepared_save_with_transform(
+    prepared: PreparedDocumentSave,
+    transform: SavePayloadTransform,
+) -> SaveCompletion {
+    execute_serialized_save(prepared, Some(transform))
+}
+
+fn execute_serialized_save(
+    mut prepared: PreparedDocumentSave,
+    transform: Option<SavePayloadTransform>,
+) -> SaveCompletion {
+    if let Some(transform) = transform {
+        prepared.serialized_contents = match transform.apply(&prepared.serialized_contents) {
+            Ok(contents) => contents,
+            Err(message) => {
+                return SaveCompletion {
+                    tab_id: prepared.tab_id,
+                    content_revision: prepared.content_revision,
+                    result: Err(DocumentSaveError::Io {
+                        message: format!("payload transform failed: {message}"),
+                    }),
+                };
+            }
+        };
+    }
     let result = appkit_core::file_safety::save_serialized_if_unchanged(
         &prepared.path,
         prepared.expected_disk_revision.as_ref(),
@@ -209,6 +272,36 @@ mod tests {
 
         assert!(matches!(completion.result, Err(DocumentSaveError::ConcurrentModification)));
         assert_eq!(fs::read_to_string(path).expect("external file should remain"), "external");
+    }
+
+    #[test]
+    fn worker_transforms_payload_before_writing() {
+        let directory = TestDirectory::new("transform");
+        let path = directory.path().join("notes.md");
+        fs::write(&path, "old").expect("transform baseline should be written");
+        let baseline = capture_revision(&path).expect("transform baseline should capture");
+        let prepared = PreparedDocumentSave {
+            tab_id: tab_id(),
+            path: path.clone(),
+            serialized_contents: b"plaintext".to_vec(),
+            expected_disk_revision: Some(baseline),
+            content_revision: 5,
+        };
+
+        let completion = execute_prepared_save_with_transform(
+            prepared,
+            SavePayloadTransform::new(|plaintext| {
+                let mut transformed = b"wrapped:".to_vec();
+                transformed.extend_from_slice(plaintext);
+                Ok(transformed)
+            }),
+        );
+
+        completion.result.expect("payload transform should save");
+        assert_eq!(
+            fs::read(path).expect("transformed file should be readable"),
+            b"wrapped:plaintext"
+        );
     }
 
     #[test]

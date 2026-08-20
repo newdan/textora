@@ -28,6 +28,25 @@ pub struct WorkspaceCompletionEnvelope {
     pub completion: WorkspaceCompletion,
 }
 
+#[derive(Clone, Debug)]
+pub struct UnlockedWorkspaceDocument {
+    pub request: crate::action::DocumentLoadRequest,
+    pub generation: u64,
+    pub document: crate::editor_adapter::LoadedDocument,
+    pub session: std::sync::Arc<textora_encryption::UnlockedNoteSession>,
+}
+
+impl PartialEq for UnlockedWorkspaceDocument {
+    fn eq(&self, other: &Self) -> bool {
+        self.request == other.request
+            && self.generation == other.generation
+            && self.document == other.document
+            && std::sync::Arc::ptr_eq(&self.session, &other.session)
+    }
+}
+
+impl Eq for UnlockedWorkspaceDocument {}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum WorkspaceCompletion {
     CardQueryCompleted {
@@ -98,6 +117,20 @@ pub enum WorkspaceCompletion {
         metadata: notora_core::NoteEditorMetadata,
         tags: Vec<notora_core::TagSummary>,
     },
+    EncryptedDocumentUnlockRequired {
+        request: DocumentLoadRequest,
+        title: String,
+        metadata: notora_core::NoteEditorMetadata,
+        tags: Vec<notora_core::TagSummary>,
+    },
+    EncryptedDocumentUnlocked {
+        unlocked: UnlockedWorkspaceDocument,
+    },
+    EncryptedDocumentUnlockFailed {
+        request: DocumentLoadRequest,
+        generation: u64,
+        message: String,
+    },
     DocumentLoadFailed {
         request: DocumentLoadRequest,
         message: String,
@@ -141,6 +174,10 @@ pub enum DocumentCompletion {
     ConflictReloadFailed {
         identity: notora_core::DocumentIdentity,
         message: String,
+    },
+    ConflictReloadRequiresUnlock {
+        identity: notora_core::DocumentIdentity,
+        tab_id: appkit_core::workspace::types::TabId,
     },
     ConflictRetryRevisionCaptured {
         identity: notora_core::DocumentIdentity,

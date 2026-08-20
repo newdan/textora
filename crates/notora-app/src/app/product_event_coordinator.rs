@@ -20,6 +20,18 @@ pub(super) trait LoadedDocumentTarget: ProductActionTarget {
 
 /// Workspace 完成事件解释器所需的窄能力集合。
 pub(super) trait WorkspaceCompletionTarget: LoadedDocumentTarget {
+    fn accepts_encrypted_unlock(&self, request: DocumentLoadRequest, _generation: u64) -> bool {
+        self.selection_matches(request)
+    }
+    fn install_unlocked_workspace_document(
+        &mut self,
+        _unlocked: crate::product::UnlockedWorkspaceDocument,
+    ) {
+    }
+    fn install_created_encrypted_note(
+        &mut self,
+        result: &notora_core::note_command::NoteCommandResult,
+    );
     fn synchronize_open_note_path(&mut self, result: &notora_core::note_command::NoteCommandResult);
     fn complete_pending_title_seed(
         &mut self,
@@ -74,6 +86,15 @@ pub(super) trait DocumentCompletionTarget: LoadedDocumentTarget {
         content_revision: u64,
         document: LoadedDocument,
     );
+    fn relock_conflicted_document(
+        &mut self,
+        identity: notora_core::DocumentIdentity,
+        _tab_id: appkit_core::workspace::types::TabId,
+    ) {
+        self.dispatch_action(NotoraAction::NoteCommandFailed(format!(
+            "加密文件已被替换，需要重新解锁：{identity:?}"
+        )));
+    }
     fn active_save_conflict_identity(&self) -> Option<notora_core::DocumentIdentity>;
     fn complete_conflict_retry_revision_capture(
         &mut self,

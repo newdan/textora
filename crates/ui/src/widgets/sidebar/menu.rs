@@ -12,6 +12,7 @@ pub fn build_new_document_menu(
     split_button_rect: Rect,
     screen_size: (f32, f32),
     metrics: &crate::settings::UiMetrics,
+    include_encrypted_markdown: bool,
 ) -> PopupMenu {
     let (screen_w, screen_h) = screen_size;
     let dpi = metrics.dpi;
@@ -19,11 +20,17 @@ pub fn build_new_document_menu(
     let menu_w = 200.0 * dpi;
     let anchor_x = split_button_rect.x + split_button_rect.w / 2.0 - menu_w / 2.0;
     let anchor_y = split_button_rect.bottom() + 2.0 * dpi;
-    let items = vec![
+    let mut items = vec![
         PopupMenuItem::action("新建 TXT", PMA::NewDocument(NewDocumentKind::Text)),
         PopupMenuItem::action("新建 MMAP", PMA::NewDocument(NewDocumentKind::Mindmap)),
         PopupMenuItem::action("新建 MD", PMA::NewDocument(NewDocumentKind::Markdown)),
     ];
+    if include_encrypted_markdown {
+        items.push(PopupMenuItem::action(
+            "加密笔记",
+            PMA::NewDocument(NewDocumentKind::EncryptedMarkdown),
+        ));
+    }
 
     let menu_left = anchor_x.min(screen_w - menu_w).max(0.0);
     let menu_right = menu_left + menu_w;
@@ -177,13 +184,17 @@ mod tests {
         let metrics = crate::settings::UiMetrics::from_settings(&settings, 1.0);
         let anchor = Rect::new(12.0, 40.0, 196.0, 28.0);
 
-        let menu = build_new_document_menu(anchor, (800.0, 600.0), &metrics);
+        let menu = build_new_document_menu(anchor, (800.0, 600.0), &metrics, true);
 
         let labels: Vec<&str> = menu.items.iter().map(|item| item.label.as_str()).collect();
-        assert_eq!(labels, vec!["新建 TXT", "新建 MMAP", "新建 MD"]);
+        assert_eq!(labels, vec!["新建 TXT", "新建 MMAP", "新建 MD", "加密笔记"]);
         assert!(matches!(menu.items[0].action, PMA::NewDocument(NewDocumentKind::Text)));
         assert!(matches!(menu.items[1].action, PMA::NewDocument(NewDocumentKind::Mindmap)));
         assert!(matches!(menu.items[2].action, PMA::NewDocument(NewDocumentKind::Markdown)));
+        assert!(matches!(
+            menu.items[3].action,
+            PMA::NewDocument(NewDocumentKind::EncryptedMarkdown)
+        ));
     }
 
     #[test]
@@ -192,7 +203,7 @@ mod tests {
         let metrics = crate::settings::UiMetrics::from_settings(&settings, 1.0);
         let anchor = Rect::new(12.0, 560.0, 196.0, 28.0);
 
-        let menu = build_new_document_menu(anchor, (800.0, 600.0), &metrics);
+        let menu = build_new_document_menu(anchor, (800.0, 600.0), &metrics, true);
 
         assert!(menu.menu_rect.bottom() <= 600.0);
         assert!(menu.menu_rect.y < anchor.y);

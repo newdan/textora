@@ -29,6 +29,7 @@ rfd = { version = "0.15", default-features = false }
 serde.workspace = true
 shaping.workspace = true
 textora-markdown = { path = "../markdown" }
+textora-encryption = { path = "../encryption" }
 toml.workspace = true
 ui.workspace = true
 wgpu.workspace = true

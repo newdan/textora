@@ -53,6 +53,61 @@ pub struct DocumentLoadRequest {
     pub selection_generation: u64,
 }
 
+#[derive(Clone)]
+pub struct EncryptedNoteUnlockRequest {
+    pub request: DocumentLoadRequest,
+    pub password: std::sync::Arc<textora_encryption::EncryptionPassword>,
+    pub generation: u64,
+}
+
+#[derive(Clone)]
+pub struct EncryptedConflictCopyRequest {
+    pub identity: DocumentIdentity,
+    pub target_path: PathBuf,
+    pub password: std::sync::Arc<textora_encryption::EncryptionPassword>,
+    pub generation: u64,
+}
+
+impl std::fmt::Debug for EncryptedConflictCopyRequest {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("EncryptedConflictCopyRequest")
+            .field("identity", &self.identity)
+            .field("target_path", &self.target_path)
+            .field("password", &"<redacted>")
+            .field("generation", &self.generation)
+            .finish()
+    }
+}
+
+impl PartialEq for EncryptedConflictCopyRequest {
+    fn eq(&self, other: &Self) -> bool {
+        self.identity == other.identity
+            && self.target_path == other.target_path
+            && self.generation == other.generation
+            && std::sync::Arc::ptr_eq(&self.password, &other.password)
+    }
+}
+
+impl std::fmt::Debug for EncryptedNoteUnlockRequest {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("EncryptedNoteUnlockRequest")
+            .field("request", &self.request)
+            .field("password", &"<redacted>")
+            .field("generation", &self.generation)
+            .finish()
+    }
+}
+
+impl PartialEq for EncryptedNoteUnlockRequest {
+    fn eq(&self, other: &Self) -> bool {
+        self.request == other.request
+            && self.generation == other.generation
+            && std::sync::Arc::ptr_eq(&self.password, &other.password)
+    }
+}
+
 /// 外部修改与本地 dirty 内容冲突后的显式用户决策。
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ConflictResolution {
@@ -195,6 +250,20 @@ pub enum NotoraAction {
     WorkspaceRootSelectionRequested,
     OpenNewDocumentMenu,
     CreateRequested(DocumentKind),
+    BeginEncryptedNoteCreation,
+    EncryptedNotePasswordChanged(ui::core::widget::SensitiveText),
+    EncryptedNoteConfirmationChanged(ui::core::widget::SensitiveText),
+    EncryptedNoteDialogSubmitRequested,
+    EncryptedNoteUnlockRequired {
+        request: DocumentLoadRequest,
+        title: String,
+        metadata: NoteEditorMetadata,
+        tags: Vec<TagSummary>,
+    },
+    EncryptedConflictCopyRequired {
+        identity: DocumentIdentity,
+        target_path: PathBuf,
+    },
     TitleTextChanged(String),
     TitleCommitRequested(String),
     ToggleSourceViewRequested,
@@ -259,6 +328,8 @@ pub enum NotoraEffect {
     ExecuteTrashOperation(TrashOperation),
     ChooseNoteMoveDirectory(notora_core::NoteId),
     PrepareDocument(DocumentLoadRequest),
+    UnlockEncryptedNote(EncryptedNoteUnlockRequest),
+    SaveEncryptedConflictCopy(EncryptedConflictCopyRequest),
     PromoteActivePreview,
     ChooseWorkspaceRoot,
     OpenExternalFiles(crate::effect_executor::ExternalOpenRequest),

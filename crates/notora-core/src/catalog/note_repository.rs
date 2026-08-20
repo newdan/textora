@@ -443,7 +443,7 @@ impl Catalog {
                     note.content_hash,
                     note_encryption_to_database(encryption),
                     ACTIVE_NOTE_LIFECYCLE,
-                    file_name_binding_for_encryption(encryption),
+                    FILE_NAME_BINDING_TITLE_BOUND,
                 ],
             )
             .map_err(|source| CatalogError::sql("created note insert", source))?;
@@ -465,6 +465,22 @@ impl Catalog {
     ///
     /// 星标属于用户 metadata，扫描更新不得覆盖它。
     pub fn upsert_active_note(&self, note: &CatalogNote) -> Result<(), CatalogError> {
+        self.upsert_active_note_with_encryption(note, NoteEncryption::Unencrypted)
+    }
+
+    pub(crate) fn upsert_discovered_note(
+        &self,
+        note: &CatalogNote,
+        encryption: NoteEncryption,
+    ) -> Result<(), CatalogError> {
+        self.upsert_active_note_with_encryption(note, encryption)
+    }
+
+    fn upsert_active_note_with_encryption(
+        &self,
+        note: &CatalogNote,
+        encryption: NoteEncryption,
+    ) -> Result<(), CatalogError> {
         let modified_nanoseconds = system_time_to_nanoseconds(note.modified_at)?;
         let file_size =
             i64::try_from(note.file_size).map_err(|_| CatalogError::InvalidStoredValue {
@@ -485,6 +501,8 @@ impl Catalog {
                     modified_ns = excluded.modified_ns,
                     file_size = excluded.file_size,
                     content_hash = excluded.content_hash,
+                    encryption = excluded.encryption,
+                    file_name_binding = excluded.file_name_binding,
                     missing_scan_count = 0",
                 params![
                     note.note_id.to_string(),
@@ -495,7 +513,7 @@ impl Catalog {
                     modified_nanoseconds,
                     file_size,
                     note.content_hash,
-                    NOTE_ENCRYPTION_UNENCRYPTED,
+                    note_encryption_to_database(encryption),
                     ACTIVE_NOTE_LIFECYCLE,
                     FILE_NAME_BINDING_TITLE_BOUND,
                 ],
@@ -886,13 +904,6 @@ fn note_encryption_to_database(encryption: NoteEncryption) -> i64 {
     match encryption {
         NoteEncryption::Unencrypted => NOTE_ENCRYPTION_UNENCRYPTED,
         NoteEncryption::Encrypted => NOTE_ENCRYPTION_ENCRYPTED,
-    }
-}
-
-fn file_name_binding_for_encryption(encryption: NoteEncryption) -> i64 {
-    match encryption {
-        NoteEncryption::Unencrypted => FILE_NAME_BINDING_TITLE_BOUND,
-        NoteEncryption::Encrypted => FILE_NAME_BINDING_OPAQUE,
     }
 }
 
@@ -1496,7 +1507,7 @@ mod tests {
             .expect("configured note should insert");
         catalog
             .create_active_note(
-                &catalog_note(encrypted_note_id, "opaque.bin", "secret"),
+                &catalog_note(encrypted_note_id, "secret.md", "secret"),
                 NoteEncryption::Encrypted,
                 TitleInitialization::Independent,
             )
@@ -1518,7 +1529,7 @@ mod tests {
                 .expect("encrypted file name metadata should query"),
             Some(NoteFileNameMetadata {
                 note_id: encrypted_note_id,
-                binding: NoteFileNameBinding::Opaque,
+                binding: NoteFileNameBinding::TitleBound { disambiguator: 1 },
                 title_revision: 0,
             })
         );

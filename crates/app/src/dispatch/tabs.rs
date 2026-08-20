@@ -201,6 +201,9 @@ impl App {
         &mut self,
         kind: ui::sidebar::NewDocumentKind,
     ) -> AppEffect {
+        if kind == ui::sidebar::NewDocumentKind::EncryptedMarkdown {
+            return AppEffect::NONE;
+        }
         let viewport = self.viewport_dimensions(self.screen_height());
         let ProductPreparedTab { prepared, suggested_file_name } =
             self.prepare_typed_editor_untitled(kind, viewport);
@@ -831,6 +834,17 @@ mod tests {
             app.active_tab_session().expect("active runtime").plugin_name(),
             ui::plugin::PLUGIN_MARKDOWN_EDITOR
         );
+    }
+
+    #[test]
+    fn generic_app_does_not_create_plaintext_for_encrypted_kind() {
+        let mut app = App::new(None);
+        let original_tab_id = app.active_tab_id();
+
+        let effect = app.new_typed_untitled_doc(ui::sidebar::NewDocumentKind::EncryptedMarkdown);
+
+        assert_eq!(effect, AppEffect::NONE);
+        assert_eq!(app.active_tab_id(), original_tab_id);
     }
 
     #[test]

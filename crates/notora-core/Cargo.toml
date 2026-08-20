@@ -18,6 +18,7 @@ pulldown-cmark = { version = "0.13.0", default-features = false }
 serde.workspace = true
 rusqlite.workspace = true
 rustix = { version = "1", features = ["fs"] }
+textora-encryption = { path = "../encryption" }
 toml.workspace = true
 unicode-segmentation.workspace = true
 unicode-normalization.workspace = true

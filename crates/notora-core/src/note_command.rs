@@ -3,6 +3,7 @@
 use std::fs::{self, OpenOptions};
 use std::io::Write;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use crate::catalog::{NotePathOperation, NotePathOperationKind, NotePathOperationState};
 use crate::workspace::move_file_no_replace;
@@ -12,12 +13,62 @@ use crate::{
     normalize_title_file_stem, parse_note_text_summary,
 };
 
+/// 创建时已经具备全部执行条件的互斥存储方式。
+#[derive(Clone)]
+pub enum CreateNoteStorage {
+    Unencrypted,
+    Encrypted { password: Arc<textora_encryption::EncryptionPassword> },
+}
+
+impl CreateNoteStorage {
+    pub fn encrypted(password: textora_encryption::EncryptionPassword) -> Self {
+        Self::Encrypted { password: Arc::new(password) }
+    }
+
+    pub fn encryption(&self) -> NoteEncryption {
+        match self {
+            Self::Unencrypted => NoteEncryption::Unencrypted,
+            Self::Encrypted { .. } => NoteEncryption::Encrypted,
+        }
+    }
+
+    pub fn password(&self) -> Option<&textora_encryption::EncryptionPassword> {
+        match self {
+            Self::Unencrypted => None,
+            Self::Encrypted { password } => Some(password),
+        }
+    }
+}
+
+impl std::fmt::Debug for CreateNoteStorage {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Unencrypted => formatter.write_str("Unencrypted"),
+            Self::Encrypted { .. } => formatter.write_str("Encrypted { password: <redacted> }"),
+        }
+    }
+}
+
+impl PartialEq for CreateNoteStorage {
+    fn eq(&self, other: &Self) -> bool {
+        match (self, other) {
+            (Self::Unencrypted, Self::Unencrypted) => true,
+            (Self::Encrypted { password: left }, Self::Encrypted { password: right }) => {
+                Arc::ptr_eq(left, right)
+            }
+            _ => false,
+        }
+    }
+}
+
+impl Eq for CreateNoteStorage {}
+
 /// 已显式确定文档类型、位置与持久化属性的新建请求。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ConfiguredCreateNoteRequest {
     pub kind: DocumentKind,
     pub target_directory: Option<PathBuf>,
-    pub encryption: NoteEncryption,
+    pub storage: CreateNoteStorage,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -49,12 +100,45 @@ pub enum NoteCommandOutcome {
     Moved,
 }
 
+/// 创建结果携带的运行时访问状态；密钥字节不会因结果克隆而复制。
+#[derive(Clone)]
+pub enum CreatedNoteAccess {
+    Unencrypted,
+    Encrypted { session: Arc<textora_encryption::UnlockedNoteSession> },
+}
+
+impl std::fmt::Debug for CreatedNoteAccess {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Unencrypted => formatter.write_str("Unencrypted"),
+            Self::Encrypted { session } => {
+                formatter.debug_struct("Encrypted").field("session", session).finish()
+            }
+        }
+    }
+}
+
+impl PartialEq for CreatedNoteAccess {
+    fn eq(&self, other: &Self) -> bool {
+        match (self, other) {
+            (Self::Unencrypted, Self::Unencrypted) => true,
+            (Self::Encrypted { session: left }, Self::Encrypted { session: right }) => {
+                Arc::ptr_eq(left, right)
+            }
+            _ => false,
+        }
+    }
+}
+
+impl Eq for CreatedNoteAccess {}
+
 /// 成功执行文件命令后的稳定笔记状态。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct NoteCommandResult {
     pub note: CatalogNote,
     pub previous_relative_path: Option<PathBuf>,
     pub outcome: NoteCommandOutcome,
+    pub created_access: Option<CreatedNoteAccess>,
 }
 
 /// 兼容仅含新建命令时的公开返回类型；后续命令共用相同结果结构。
@@ -177,7 +261,10 @@ pub enum NoteCommandError {
         target_relative_path: PathBuf,
         source_relative_paths: Vec<PathBuf>,
     },
-    EncryptionUnavailable,
+    Encryption {
+        source: textora_encryption::EncryptionError,
+    },
+    EncryptedStorageRequiresMarkdown,
 }
 
 impl std::fmt::Display for NoteCommandError {
@@ -248,11 +335,11 @@ impl std::fmt::Display for NoteCommandError {
                         .join(", ")
                 )
             }
-            Self::EncryptionUnavailable => {
-                write!(
-                    formatter,
-                    "encrypted note creation is unavailable before the encryption engine is installed"
-                )
+            Self::Encryption { source } => {
+                write!(formatter, "encrypted note creation failed: {source}")
+            }
+            Self::EncryptedStorageRequiresMarkdown => {
+                formatter.write_str("encrypted note storage requires Markdown")
             }
         }
     }
@@ -269,6 +356,7 @@ impl std::error::Error for NoteCommandError {
             | Self::MarkdownReferenceRead { source, .. } => Some(source),
             Self::CatalogAfterFileWrite { source, .. } => Some(source),
             Self::CatalogAfterFileMove { source, .. } => Some(source.as_ref()),
+            Self::Encryption { source } => Some(source),
             Self::TargetDirectoryMissing { .. }
             | Self::TargetDirectoryNotDirectory { .. }
             | Self::NoteNotFound { .. }
@@ -276,7 +364,7 @@ impl std::error::Error for NoteCommandError {
             | Self::AutomaticNameExhausted { .. }
             | Self::StaleTitleRevision { .. }
             | Self::MarkdownLinksWouldBreak { .. }
-            | Self::EncryptionUnavailable => None,
+            | Self::EncryptedStorageRequiresMarkdown => None,
         }
     }
 }
@@ -533,6 +621,7 @@ fn commit_title_without_relocation(
         note,
         previous_relative_path: None,
         outcome: NoteCommandOutcome::TitleUpdated,
+        created_access: None,
     })
 }
 
@@ -560,6 +649,7 @@ fn commit_title_bound_without_relocation(
         note,
         previous_relative_path: None,
         outcome: NoteCommandOutcome::TitleUpdated,
+        created_access: None,
     })
 }
 
@@ -638,6 +728,7 @@ fn relocate_title_bound_note(
         note,
         previous_relative_path: Some(source_relative_path),
         outcome: NoteCommandOutcome::TitleUpdated,
+        created_access: None,
     })
 }
 
@@ -691,12 +782,9 @@ fn create_configured_note(
     catalog: &Catalog,
     request: ConfiguredCreateNoteRequest,
 ) -> Result<NoteCommandResult, NoteCommandError> {
-    if request.encryption != NoteEncryption::Unencrypted {
-        return Err(NoteCommandError::EncryptionUnavailable);
-    }
     let target_directory =
         resolve_target_directory(workspace, request.target_directory.as_deref())?;
-    let initial_contents = initial_contents(request.kind);
+    let prepared_contents = prepare_note_contents(request.kind, request.storage)?;
     loop {
         let catalog_relative_paths = catalog
             .active_notes()
@@ -725,34 +813,32 @@ fn create_configured_note(
         let relative_path = target_directory.relative_path.join(&file_name);
         let absolute_path =
             workspace.resolve_relative_path(&relative_path).map_err(NoteCommandError::Workspace)?;
-        match create_note_file(&absolute_path, initial_contents) {
+        match create_note_file(&absolute_path, prepared_contents.serialized()) {
             Ok(()) => {
                 let note = created_catalog_note(
                     request.kind,
                     relative_path.clone(),
                     DEFAULT_NOTE_TITLE,
-                    initial_contents,
+                    &prepared_contents,
                     &absolute_path,
                 )?;
-                catalog
-                    .create_active_note(
-                        &note,
-                        request.encryption,
-                        match request.kind {
-                            DocumentKind::Markdown | DocumentKind::Mindmap => {
-                                crate::TitleInitialization::AwaitingFirstCommit
-                            }
-                            DocumentKind::Text => crate::TitleInitialization::Independent,
-                        },
-                    )
-                    .map_err(|source| NoteCommandError::CatalogAfterFileWrite {
+                if let Err(source) = catalog.create_active_note(
+                    &note,
+                    prepared_contents.encryption(),
+                    prepared_contents.title_initialization(request.kind),
+                ) {
+                    return Err(catalog_creation_error(
+                        &absolute_path,
                         relative_path,
+                        &prepared_contents,
                         source,
-                    })?;
+                    ));
+                }
                 return Ok(NoteCommandResult {
                     note,
                     previous_relative_path: None,
                     outcome: NoteCommandOutcome::Created,
+                    created_access: Some(prepared_contents.created_access()),
                 });
             }
             Err(source) if source.kind() == std::io::ErrorKind::AlreadyExists => continue,
@@ -797,6 +883,7 @@ fn relocate_note(
             note,
             previous_relative_path: None,
             outcome: NoteCommandOutcome::Moved,
+            created_access: None,
         });
     }
     let source_path = workspace
@@ -820,6 +907,7 @@ fn relocate_note(
         note,
         previous_relative_path: Some(source_relative_path),
         outcome: NoteCommandOutcome::Moved,
+        created_access: None,
     })
 }
 
@@ -858,35 +946,131 @@ fn initial_contents(kind: DocumentKind) -> &'static str {
     }
 }
 
-fn create_note_file(path: &Path, contents: &str) -> Result<(), std::io::Error> {
+fn create_note_file(path: &Path, contents: &[u8]) -> Result<(), std::io::Error> {
     let mut file = OpenOptions::new().write(true).create_new(true).open(path)?;
-    file.write_all(contents.as_bytes())?;
+    file.write_all(contents)?;
     file.sync_all()
+}
+
+enum PreparedNoteContents {
+    Unencrypted { plaintext: &'static str },
+    Encrypted { serialized: Vec<u8>, session: Arc<textora_encryption::UnlockedNoteSession> },
+}
+
+impl PreparedNoteContents {
+    fn serialized(&self) -> &[u8] {
+        match self {
+            Self::Unencrypted { plaintext } => plaintext.as_bytes(),
+            Self::Encrypted { serialized, .. } => serialized,
+        }
+    }
+
+    fn encryption(&self) -> NoteEncryption {
+        match self {
+            Self::Unencrypted { .. } => NoteEncryption::Unencrypted,
+            Self::Encrypted { .. } => NoteEncryption::Encrypted,
+        }
+    }
+
+    fn title_initialization(&self, kind: DocumentKind) -> crate::TitleInitialization {
+        match self {
+            Self::Encrypted { .. } => crate::TitleInitialization::Independent,
+            Self::Unencrypted { .. } if kind == DocumentKind::Text => {
+                crate::TitleInitialization::Independent
+            }
+            Self::Unencrypted { .. } => crate::TitleInitialization::AwaitingFirstCommit,
+        }
+    }
+
+    fn created_access(&self) -> CreatedNoteAccess {
+        match self {
+            Self::Unencrypted { .. } => CreatedNoteAccess::Unencrypted,
+            Self::Encrypted { session, .. } => {
+                CreatedNoteAccess::Encrypted { session: Arc::clone(session) }
+            }
+        }
+    }
+}
+
+fn prepare_note_contents(
+    kind: DocumentKind,
+    storage: CreateNoteStorage,
+) -> Result<PreparedNoteContents, NoteCommandError> {
+    match storage {
+        CreateNoteStorage::Unencrypted => {
+            Ok(PreparedNoteContents::Unencrypted { plaintext: initial_contents(kind) })
+        }
+        CreateNoteStorage::Encrypted { password } => {
+            if kind != DocumentKind::Markdown {
+                return Err(NoteCommandError::EncryptedStorageRequiresMarkdown);
+            }
+            let created = textora_encryption::create_encrypted_markdown(
+                password.as_ref(),
+                initial_contents(kind).as_bytes(),
+            )
+            .map_err(|source| NoteCommandError::Encryption { source })?;
+            let (serialized, session) = created.into_parts();
+            Ok(PreparedNoteContents::Encrypted { serialized, session: Arc::new(session) })
+        }
+    }
+}
+
+fn catalog_creation_error(
+    absolute_path: &Path,
+    relative_path: PathBuf,
+    contents: &PreparedNoteContents,
+    source: CatalogError,
+) -> NoteCommandError {
+    let PreparedNoteContents::Encrypted { session, .. } = contents else {
+        return NoteCommandError::CatalogAfterFileWrite { relative_path, source };
+    };
+    if remove_matching_encrypted_file(absolute_path, session.document_id()).is_ok() {
+        return NoteCommandError::Catalog { source };
+    }
+    NoteCommandError::CatalogAfterFileWrite { relative_path, source }
+}
+
+fn remove_matching_encrypted_file(path: &Path, document_id: uuid::Uuid) -> std::io::Result<()> {
+    let serialized = fs::read(path)?;
+    let header = textora_encryption::inspect_encrypted_markdown(&serialized)
+        .map_err(std::io::Error::other)?;
+    if header.document_id != document_id {
+        return Err(std::io::Error::other(
+            "encrypted creation rollback identity no longer matches",
+        ));
+    }
+    fs::remove_file(path)
 }
 
 fn created_catalog_note(
     kind: DocumentKind,
     relative_path: PathBuf,
     title: &str,
-    contents: &str,
+    contents: &PreparedNoteContents,
     absolute_path: &Path,
 ) -> Result<CatalogNote, NoteCommandError> {
     let metadata = fs::metadata(absolute_path).map_err(|source| {
         NoteCommandError::FileMetadata { path: absolute_path.to_path_buf(), source }
     })?;
-    let summary = parse_note_text_summary(kind, title, contents);
+    let (stored_title, excerpt) = match contents {
+        PreparedNoteContents::Unencrypted { plaintext } => {
+            let summary = parse_note_text_summary(kind, title, plaintext);
+            (summary.title, summary.excerpt)
+        }
+        PreparedNoteContents::Encrypted { .. } => (title.to_owned(), String::new()),
+    };
     Ok(CatalogNote {
         note_id: NoteId::generate(),
         relative_path,
         kind,
-        title: summary.title,
-        excerpt: summary.excerpt,
+        title: stored_title,
+        excerpt,
         modified_at: metadata.modified().map_err(|source| NoteCommandError::FileMetadata {
             path: absolute_path.to_path_buf(),
             source,
         })?,
         file_size: metadata.len(),
-        content_hash: blake3::hash(contents.as_bytes()).as_bytes().to_vec(),
+        content_hash: blake3::hash(contents.serialized()).as_bytes().to_vec(),
         starred: false,
     })
 }
@@ -897,10 +1081,11 @@ mod create {
     use std::sync::{Arc, Barrier};
     use std::thread;
 
-    use crate::domain::NoteEncryption;
     use crate::{Catalog, DocumentKind, Workspace};
 
-    use super::{ConfiguredCreateNoteRequest, NoteCommand, execute_note_command};
+    use super::{
+        ConfiguredCreateNoteRequest, CreateNoteStorage, NoteCommand, execute_note_command,
+    };
 
     #[test]
     fn create_places_each_kind_in_the_requested_workspace_directory() {
@@ -917,7 +1102,7 @@ mod create {
             NoteCommand::CreateConfigured(ConfiguredCreateNoteRequest {
                 kind: DocumentKind::Markdown,
                 target_directory: None,
-                encryption: NoteEncryption::Unencrypted,
+                storage: CreateNoteStorage::Unencrypted,
             }),
         )
         .expect("markdown note should be created");
@@ -927,7 +1112,7 @@ mod create {
             NoteCommand::CreateConfigured(ConfiguredCreateNoteRequest {
                 kind: DocumentKind::Mindmap,
                 target_directory: Some("nested".into()),
-                encryption: NoteEncryption::Unencrypted,
+                storage: CreateNoteStorage::Unencrypted,
             }),
         )
         .expect("mindmap note should be created");
@@ -981,7 +1166,7 @@ mod create {
                         NoteCommand::CreateConfigured(ConfiguredCreateNoteRequest {
                             kind: DocumentKind::Markdown,
                             target_directory: None,
-                            encryption: NoteEncryption::Unencrypted,
+                            storage: CreateNoteStorage::Unencrypted,
                         }),
                     )
                     .expect("concurrent note creation should choose a free name")
@@ -1013,7 +1198,7 @@ mod create {
                 NoteCommand::CreateConfigured(ConfiguredCreateNoteRequest {
                     kind: DocumentKind::Markdown,
                     target_directory: Some(".notora".into()),
-                    encryption: NoteEncryption::Unencrypted,
+                    storage: CreateNoteStorage::Unencrypted,
                 }),
             )
             .is_err()
@@ -1021,7 +1206,52 @@ mod create {
     }
 
     #[test]
-    fn configured_creation_rejects_encryption_until_the_real_engine_is_available() {
+    fn encrypted_creation_writes_ciphertext_and_returns_an_unlocked_session() {
+        let directory = tempfile::tempdir().expect("workspace test directory should be created");
+        let workspace =
+            Workspace::open_or_initialize(directory.path()).expect("workspace should initialize");
+        let catalog = Catalog::open(&workspace.metadata_directory().join("catalog.sqlite3"))
+            .expect("catalog should initialize");
+        let request = ConfiguredCreateNoteRequest {
+            kind: DocumentKind::Markdown,
+            target_directory: None,
+            storage: CreateNoteStorage::encrypted(encryption_password()),
+        };
+        assert!(!format!("{request:?}").contains("test-password"));
+
+        let result =
+            execute_note_command(&workspace, &catalog, NoteCommand::CreateConfigured(request))
+                .expect("encrypted note should be created");
+        let note_path = directory.path().join(&result.note.relative_path);
+        let serialized = fs::read(&note_path).expect("encrypted note should be readable");
+        let header = textora_encryption::inspect_encrypted_markdown(&serialized)
+            .expect("created file should be an encrypted envelope");
+        let unlocked =
+            textora_encryption::unlock_encrypted_markdown(&serialized, &encryption_password())
+                .expect("created note should unlock with its password");
+        let metadata = catalog
+            .note_editor_metadata(result.note.note_id)
+            .expect("created metadata should query")
+            .expect("created metadata should exist");
+
+        assert_eq!(result.note.relative_path, std::path::PathBuf::from("无标题.md"));
+        assert_eq!(result.note.excerpt, "");
+        assert_eq!(unlocked.plaintext(), "");
+        assert_eq!(metadata.encryption, crate::NoteEncryption::Encrypted);
+        assert_eq!(metadata.title_initialization, crate::TitleInitialization::Independent);
+        assert_eq!(
+            metadata.file_name_binding,
+            crate::NoteFileNameBinding::TitleBound { disambiguator: 1 }
+        );
+        assert!(matches!(
+            result.created_access,
+            Some(super::CreatedNoteAccess::Encrypted { session })
+                if session.document_id() == header.document_id
+        ));
+    }
+
+    #[test]
+    fn encrypted_storage_rejects_non_markdown_without_creating_a_file() {
         let directory = tempfile::tempdir().expect("workspace test directory should be created");
         let workspace =
             Workspace::open_or_initialize(directory.path()).expect("workspace should initialize");
@@ -1032,13 +1262,47 @@ mod create {
             &workspace,
             &catalog,
             NoteCommand::CreateConfigured(ConfiguredCreateNoteRequest {
-                kind: DocumentKind::Markdown,
+                kind: DocumentKind::Text,
                 target_directory: None,
-                encryption: NoteEncryption::Encrypted,
+                storage: CreateNoteStorage::encrypted(encryption_password()),
             }),
         );
 
-        assert!(matches!(result, Err(super::NoteCommandError::EncryptionUnavailable)));
+        assert!(matches!(result, Err(super::NoteCommandError::EncryptedStorageRequiresMarkdown)));
+        assert!(!directory.path().join("无标题.txt").exists());
+    }
+
+    #[test]
+    fn encrypted_creation_removes_its_file_when_catalog_insert_fails() {
+        let directory = tempfile::tempdir().expect("workspace test directory should be created");
+        let workspace =
+            Workspace::open_or_initialize(directory.path()).expect("workspace should initialize");
+        let catalog_path = workspace.metadata_directory().join("catalog.sqlite3");
+        let catalog = Catalog::open(&catalog_path).expect("catalog should initialize");
+        let trigger_connection =
+            rusqlite::Connection::open(&catalog_path).expect("trigger connection should open");
+        trigger_connection
+            .execute_batch(
+                "CREATE TRIGGER reject_encrypted_creation
+                 BEFORE INSERT ON notes
+                 BEGIN
+                     SELECT RAISE(ABORT, 'injected catalog failure');
+                 END;",
+            )
+            .expect("catalog failure trigger should install");
+        drop(trigger_connection);
+
+        let result = execute_note_command(
+            &workspace,
+            &catalog,
+            NoteCommand::CreateConfigured(ConfiguredCreateNoteRequest {
+                kind: DocumentKind::Markdown,
+                target_directory: None,
+                storage: CreateNoteStorage::encrypted(encryption_password()),
+            }),
+        );
+
+        assert!(matches!(result, Err(super::NoteCommandError::Catalog { .. })));
         assert!(!directory.path().join("无标题.md").exists());
         assert!(catalog.active_notes().expect("catalog should remain readable").is_empty());
     }
@@ -1053,7 +1317,7 @@ mod create {
         let request = ConfiguredCreateNoteRequest {
             kind: DocumentKind::Markdown,
             target_directory: None,
-            encryption: NoteEncryption::Unencrypted,
+            storage: CreateNoteStorage::Unencrypted,
         };
         let first = execute_note_command(
             &workspace,
@@ -1070,16 +1334,23 @@ mod create {
 
         assert_eq!(second.note.relative_path, std::path::PathBuf::from("无标题 (2).md"));
     }
+
+    fn encryption_password() -> textora_encryption::EncryptionPassword {
+        textora_encryption::EncryptionPassword::new("test-password".to_owned())
+            .expect("test password should satisfy policy")
+    }
 }
 
 #[cfg(test)]
 mod move_note {
     use std::fs;
 
-    use crate::domain::NoteEncryption;
     use crate::{Catalog, DocumentKind, Workspace};
 
-    use super::{ConfiguredCreateNoteRequest, MoveNoteRequest, NoteCommand, execute_note_command};
+    use super::{
+        ConfiguredCreateNoteRequest, CreateNoteStorage, MoveNoteRequest, NoteCommand,
+        execute_note_command,
+    };
 
     #[test]
     fn move_keeps_the_note_id_and_updates_its_relative_path() {
@@ -1096,7 +1367,7 @@ mod move_note {
             NoteCommand::CreateConfigured(ConfiguredCreateNoteRequest {
                 kind: DocumentKind::Mindmap,
                 target_directory: None,
-                encryption: NoteEncryption::Unencrypted,
+                storage: CreateNoteStorage::Unencrypted,
             }),
         )
         .expect("note fixture should be created");
@@ -1133,7 +1404,7 @@ mod move_note {
             NoteCommand::CreateConfigured(ConfiguredCreateNoteRequest {
                 kind: DocumentKind::Text,
                 target_directory: None,
-                encryption: NoteEncryption::Unencrypted,
+                storage: CreateNoteStorage::Unencrypted,
             }),
         )
         .expect("note fixture should be created");
@@ -1164,11 +1435,11 @@ mod move_note {
 mod update_title {
     use std::fs;
 
-    use crate::domain::NoteEncryption;
     use crate::{Catalog, DocumentKind, Workspace};
 
     use super::{
-        ConfiguredCreateNoteRequest, NoteCommand, UpdateNoteTitleRequest, execute_note_command,
+        ConfiguredCreateNoteRequest, CreateNoteStorage, NoteCommand, UpdateNoteTitleRequest,
+        execute_note_command,
     };
 
     fn create_markdown(workspace: &Workspace, catalog: &Catalog) -> super::NoteCommandResult {
@@ -1178,7 +1449,7 @@ mod update_title {
             NoteCommand::CreateConfigured(ConfiguredCreateNoteRequest {
                 kind: DocumentKind::Markdown,
                 target_directory: None,
-                encryption: NoteEncryption::Unencrypted,
+                storage: CreateNoteStorage::Unencrypted,
             }),
         )
         .expect("markdown fixture should be created")
@@ -1345,11 +1616,11 @@ mod path_recovery {
     use std::fs;
 
     use crate::catalog::{NotePathOperation, NotePathOperationKind, NotePathOperationState};
-    use crate::{Catalog, DocumentKind, NoteEncryption, Workspace};
+    use crate::{Catalog, DocumentKind, Workspace};
 
     use super::{
-        ConfiguredCreateNoteRequest, NoteCommand, NotePathRecoveryError, execute_note_command,
-        recover_note_path_operations,
+        ConfiguredCreateNoteRequest, CreateNoteStorage, NoteCommand, NotePathRecoveryError,
+        execute_note_command, recover_note_path_operations,
     };
 
     fn create_markdown(workspace: &Workspace, catalog: &Catalog) -> super::NoteCommandResult {
@@ -1359,7 +1630,7 @@ mod path_recovery {
             NoteCommand::CreateConfigured(ConfiguredCreateNoteRequest {
                 kind: DocumentKind::Markdown,
                 target_directory: None,
-                encryption: NoteEncryption::Unencrypted,
+                storage: CreateNoteStorage::Unencrypted,
             }),
         )
         .expect("recovery fixture should be created")

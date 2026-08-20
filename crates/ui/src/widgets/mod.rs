@@ -23,6 +23,7 @@ pub mod canvas_scrollbars;
 pub mod checkbox;
 pub mod editor_header;
 pub mod editor_toolbar;
+pub mod encrypted_note_dialog;
 pub mod form;
 pub mod icon;
 pub mod inline_group;

@@ -1,5 +1,6 @@
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::num::NonZeroUsize;
+use std::sync::Arc;
 
 use appkit_core::workspace::types::TabId;
 use appkit_shell::editor_runtime::{
@@ -100,12 +101,14 @@ pub(super) enum DocumentCommand {
     SaveConflictCopy {
         identity: DocumentIdentity,
         prepared: PreparedDocumentSave,
+        transform: Option<appkit_shell::editor_runtime::SavePayloadTransform>,
     },
     ReloadConflict {
         identity: DocumentIdentity,
         tab_id: TabId,
         content_revision: u64,
         path: std::path::PathBuf,
+        session: Option<Arc<textora_encryption::UnlockedNoteSession>>,
     },
     ReadExternalFiles(Vec<(std::path::PathBuf, bool)>),
     LoadExternalDocument {
@@ -168,6 +171,8 @@ pub(super) struct DocumentRuntime {
     document_registry: DocumentRegistry,
     #[cfg(test)]
     pub(super) document_registry: DocumentRegistry,
+    unlocked_note_sessions: HashMap<TabId, Arc<textora_encryption::UnlockedNoteSession>>,
+    encrypted_note_tabs: HashSet<TabId>,
     #[cfg(not(test))]
     autosave: AutoSaveScheduler<SystemAutoSaveClock>,
     #[cfg(test)]
@@ -231,6 +236,8 @@ impl DocumentRuntime {
         Self {
             runtime_lru,
             document_registry: DocumentRegistry::default(),
+            unlocked_note_sessions: HashMap::new(),
+            encrypted_note_tabs: HashSet::new(),
             autosave,
             save_failure_messages: HashMap::new(),
             pending_external_save_as: HashMap::new(),
@@ -268,6 +275,19 @@ impl DocumentRuntime {
     }
 
     pub(super) fn remove_tab(&mut self, tab_id: TabId) {
+        self.unregister_tab(tab_id);
+    }
+
+    pub(super) fn unlocked_note_session(
+        &self,
+        tab_id: TabId,
+    ) -> Option<Arc<textora_encryption::UnlockedNoteSession>> {
+        self.unlocked_note_sessions.get(&tab_id).cloned()
+    }
+
+    fn unregister_tab(&mut self, tab_id: TabId) {
+        self.unlocked_note_sessions.remove(&tab_id);
+        self.encrypted_note_tabs.remove(&tab_id);
         self.document_registry.remove_tab(tab_id);
     }
 
@@ -344,11 +364,13 @@ impl DocumentRuntime {
             self.pending_note_moves.remove(&tab_id);
             self.pending_title_updates.remove(&tab_id);
             let _ = self.editor_runtime.close_for_product(tab_id);
-            self.document_registry.remove_tab(tab_id);
+            self.unregister_tab(tab_id);
         }
         self.pending_title_seeds.clear();
         self.pending_metadata_generations.clear();
         self.pending_metadata_mutations.clear();
+        self.unlocked_note_sessions.clear();
+        self.encrypted_note_tabs.clear();
         self.catalog_reconciliation_pending = false;
     }
 
@@ -388,6 +410,8 @@ impl DocumentRuntime {
         self.pending_title_seeds.clear();
         self.pending_metadata_generations.clear();
         self.pending_metadata_mutations.clear();
+        self.unlocked_note_sessions.clear();
+        self.encrypted_note_tabs.clear();
         self.catalog_reconciliation_pending = false;
     }
 
@@ -580,6 +604,24 @@ impl DocumentRuntime {
         self.install_prepared_preview(request, prepared, None, selection)
     }
 
+    pub(super) fn install_created_encrypted_note(
+        &mut self,
+        request: crate::action::DocumentLoadRequest,
+        document: LoadedDocument,
+        session: Arc<textora_encryption::UnlockedNoteSession>,
+        selection: DocumentSelection,
+    ) -> DocumentOutcome {
+        let outcome = self.install_loaded_preview(request, document, selection);
+        if Self::selection_matches(request, selection)
+            && let Some(tab_id) = self.document_registry.tab_for(request.identity)
+        {
+            self.encrypted_note_tabs.insert(tab_id);
+            self.unlocked_note_sessions.insert(tab_id, session);
+            debug_assert!(self.unlocked_note_session(tab_id).is_some());
+        }
+        outcome
+    }
+
     pub(super) fn install_prepared_preview(
         &mut self,
         request: crate::action::DocumentLoadRequest,
@@ -606,7 +648,7 @@ impl DocumentRuntime {
             return DocumentOutcome::failure("编辑器运行时未激活已安装的预览".to_owned());
         };
         if let Some(replaced_preview) = replaced_preview {
-            self.document_registry.remove_tab(replaced_preview);
+            self.unregister_tab(replaced_preview);
         }
         let _ = self.document_registry.register_preview(request.identity, tab_id);
         let mut outcome = DocumentOutcome::default();
@@ -987,12 +1029,58 @@ impl DocumentRuntime {
         let Some(tab_id) = self.document_registry.tab_for(identity) else {
             return DocumentOutcome::default();
         };
+        if self.encrypted_note_tabs.contains(&tab_id) {
+            return DocumentOutcome::failure(
+                "加密笔记不能导出明文冲突副本；请重新加载或重试加密保存".to_owned(),
+            );
+        }
         let prepared = match self.editor_runtime.prepare_save_as(tab_id, &path) {
             Ok(prepared) => prepared,
             Err(error) => return DocumentOutcome::failure(error.to_string()),
         };
         DocumentOutcome {
-            commands: vec![DocumentCommand::SaveConflictCopy { identity, prepared }],
+            commands: vec![DocumentCommand::SaveConflictCopy {
+                identity,
+                prepared,
+                transform: None,
+            }],
+            ..DocumentOutcome::default()
+        }
+    }
+
+    pub(super) fn is_encrypted_note(&self, identity: DocumentIdentity) -> bool {
+        self.document_registry
+            .tab_for(identity)
+            .is_some_and(|tab_id| self.encrypted_note_tabs.contains(&tab_id))
+    }
+
+    pub(super) fn prepare_encrypted_conflict_copy(
+        &mut self,
+        identity: DocumentIdentity,
+        path: std::path::PathBuf,
+        password: Arc<textora_encryption::EncryptionPassword>,
+    ) -> DocumentOutcome {
+        let Some(tab_id) = self.document_registry.tab_for(identity) else {
+            return DocumentOutcome::default();
+        };
+        if !self.encrypted_note_tabs.contains(&tab_id) {
+            return DocumentOutcome::failure("当前文档不是加密笔记".to_owned());
+        }
+        let prepared = match self.editor_runtime.prepare_save_as(tab_id, &path) {
+            Ok(prepared) => prepared,
+            Err(error) => return DocumentOutcome::failure(error.to_string()),
+        };
+        let transform = appkit_shell::editor_runtime::SavePayloadTransform::new(move |plaintext| {
+            textora_encryption::create_encrypted_markdown(&password, plaintext)
+                .map(|created| created.into_parts().0)
+                .map_err(|error| error.to_string())
+        });
+        DocumentOutcome {
+            commands: vec![DocumentCommand::SaveConflictCopy {
+                identity,
+                prepared,
+                transform: Some(transform),
+            }],
             ..DocumentOutcome::default()
         }
     }
@@ -1013,6 +1101,7 @@ impl DocumentRuntime {
                 tab_id,
                 content_revision: summary.content_revision,
                 path,
+                session: self.unlocked_note_sessions.get(&tab_id).cloned(),
             }],
             ..DocumentOutcome::default()
         }
@@ -1556,9 +1645,43 @@ impl DocumentRuntime {
         event_loop_proxy: Option<EventLoopProxy<ShellEvent>>,
     ) -> Result<(), String> {
         let proxy = event_loop_proxy.ok_or_else(|| "事件循环启动前保存线程不可用".to_owned())?;
-        self.editor_runtime.submit_save(prepared, move || {
+        let transform = self.save_payload_transform(prepared.tab_id)?;
+        let wake = move || {
             let _ = proxy.send_event(ShellEvent::SaveResultsReady);
-        })
+        };
+        match transform {
+            Some(transform) => {
+                self.editor_runtime.submit_save_with_transform(prepared, transform, wake)
+            }
+            None => self.editor_runtime.submit_save(prepared, wake),
+        }
+    }
+
+    pub(super) fn save_payload_transform(
+        &self,
+        tab_id: TabId,
+    ) -> Result<Option<appkit_shell::editor_runtime::SavePayloadTransform>, String> {
+        if !self.encrypted_note_tabs.contains(&tab_id) {
+            return Ok(None);
+        }
+        let session = self
+            .unlocked_note_sessions
+            .get(&tab_id)
+            .cloned()
+            .ok_or_else(|| "加密笔记缺少解锁会话，保存已取消".to_owned())?;
+        Ok(Some(appkit_shell::editor_runtime::SavePayloadTransform::new(move |plaintext| {
+            textora_encryption::encrypt_markdown_with_session(&session, plaintext)
+                .map_err(|error| error.to_string())
+        })))
+    }
+
+    pub(super) fn encrypted_note_tabs(&self) -> &HashSet<TabId> {
+        &self.encrypted_note_tabs
+    }
+
+    #[cfg(test)]
+    pub(super) fn remove_unlocked_note_session_for_test(&mut self, tab_id: TabId) {
+        self.unlocked_note_sessions.remove(&tab_id);
     }
 
     pub(super) fn evict_excess_runtime_tabs(&mut self) {
@@ -1585,7 +1708,7 @@ impl DocumentRuntime {
             self.autosave.cancel(candidate.tab_id);
             self.save_failure_messages.remove(&candidate.tab_id);
             let _ = self.editor_runtime.close_for_product(candidate.tab_id);
-            self.document_registry.remove_tab(candidate.tab_id);
+            self.unregister_tab(candidate.tab_id);
         }
     }
 }

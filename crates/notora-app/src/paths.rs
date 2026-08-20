@@ -1,5 +1,7 @@
 use std::path::PathBuf;
 
+const CONFIG_DIRECTORY_ENVIRONMENT_VARIABLE: &str = "NOTORA_CONFIG_DIRECTORY";
+
 /// notora 专属的产品路径，不复用其他产品的配置目录。
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct NotoraPaths {
@@ -13,6 +15,7 @@ pub struct NotoraPaths {
 #[derive(Debug)]
 pub enum NotoraPathsError {
     MissingPlatformConfigDirectory,
+    RelativeConfiguredDirectory { path: PathBuf },
     CreateDirectory { path: PathBuf, source: std::io::Error },
 }
 
@@ -22,6 +25,11 @@ impl std::fmt::Display for NotoraPathsError {
             Self::MissingPlatformConfigDirectory => {
                 formatter.write_str("platform configuration directory is unavailable")
             }
+            Self::RelativeConfiguredDirectory { path } => write!(
+                formatter,
+                "{CONFIG_DIRECTORY_ENVIRONMENT_VARIABLE} must be an absolute path: {}",
+                path.display()
+            ),
             Self::CreateDirectory { path, source } => {
                 write!(formatter, "could not create notora directory {}: {source}", path.display())
             }
@@ -33,6 +41,7 @@ impl std::error::Error for NotoraPathsError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
             Self::MissingPlatformConfigDirectory => None,
+            Self::RelativeConfiguredDirectory { .. } => None,
             Self::CreateDirectory { source, .. } => Some(source),
         }
     }
@@ -40,6 +49,16 @@ impl std::error::Error for NotoraPathsError {
 
 impl NotoraPaths {
     pub fn from_platform_directory() -> Result<Self, NotoraPathsError> {
+        if let Some(configured_directory) =
+            std::env::var_os(CONFIG_DIRECTORY_ENVIRONMENT_VARIABLE).map(PathBuf::from)
+        {
+            if !configured_directory.is_absolute() {
+                return Err(NotoraPathsError::RelativeConfiguredDirectory {
+                    path: configured_directory,
+                });
+            }
+            return Self::from_config_directory(configured_directory);
+        }
         let platform_config_directory =
             dirs::config_dir().ok_or(NotoraPathsError::MissingPlatformConfigDirectory)?;
         Self::from_config_directory(platform_config_directory.join("notora"))
@@ -74,6 +93,8 @@ impl NotoraPaths {
 
 #[cfg(test)]
 mod tests {
+    use std::path::PathBuf;
+
     use super::{NotoraPaths, NotoraPathsError};
 
     #[test]
@@ -107,5 +128,17 @@ mod tests {
             error,
             NotoraPathsError::CreateDirectory { path, .. } if path == occupied_path
         ));
+    }
+
+    #[test]
+    fn relative_environment_directory_has_a_stable_diagnostic() {
+        let error = NotoraPathsError::RelativeConfiguredDirectory {
+            path: PathBuf::from("relative/notora"),
+        };
+
+        assert_eq!(
+            error.to_string(),
+            "NOTORA_CONFIG_DIRECTORY must be an absolute path: relative/notora"
+        );
     }
 }
