@@ -78,9 +78,12 @@ impl VirtualCardListLayout {
         let vertical_padding = CARD_VERTICAL_PADDING_LOGICAL * self.dpi;
         let icon_size = CARD_ICON_SLOT_SIZE_LOGICAL * self.dpi;
         let title_line_height = CARD_TITLE_LINE_HEIGHT_LOGICAL * self.dpi;
+        let title_font_size = CARD_TITLE_FONT_SIZE_LOGICAL * self.dpi;
+        let title_y = card_rect.y + vertical_padding;
+        let title_glyph_center_y = title_y + title_font_size * 0.5;
         let icon_rect = Rect::new(
             card_rect.x + horizontal_padding,
-            card_rect.y + vertical_padding - (icon_size - title_line_height) * 0.5,
+            title_glyph_center_y - icon_size * 0.5,
             icon_size,
             icon_size,
         );
@@ -96,10 +99,8 @@ impl VirtualCardListLayout {
         } else {
             Rect::ZERO
         };
-        let title_font_size = CARD_TITLE_FONT_SIZE_LOGICAL * self.dpi;
         let excerpt_font_size = CARD_EXCERPT_FONT_SIZE_LOGICAL * self.dpi;
         let metadata_font_size = CARD_METADATA_FONT_SIZE_LOGICAL * self.dpi;
-        let title_y = card_rect.y + vertical_padding;
         let excerpt_line_height = CARD_EXCERPT_LINE_HEIGHT_LOGICAL * self.dpi;
         let title_height = title_line_height * placement.title_line_count as f32;
         let excerpt_height = excerpt_line_height * placement.excerpt_line_count as f32;
@@ -285,6 +286,18 @@ mod tests {
         assert_eq!(geometry.icon_rect.w, 24.0);
         assert_eq!(geometry.icon_rect.h, 24.0);
         assert_eq!(geometry.title_rect.x, geometry.icon_rect.right() + 8.0);
+    }
+
+    #[test]
+    fn card_icon_is_vertically_centered_with_title_glyphs() {
+        let cards = vec![card("")];
+        let layout =
+            build_virtual_card_layout(&cards, Rect::new(20.0, 30.0, 300.0, 500.0), 0.0, 1.0);
+        let geometry = layout.card_geometry(0);
+        let icon_center_y = geometry.icon_rect.y + geometry.icon_rect.h * 0.5;
+        let title_glyph_center_y = geometry.title_rect.y + CARD_TITLE_FONT_SIZE_LOGICAL * 0.5;
+
+        assert_eq!(icon_center_y, title_glyph_center_y);
     }
 
     fn card(excerpt: &str) -> CardInput {
