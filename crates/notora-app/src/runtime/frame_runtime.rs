@@ -1,3 +1,4 @@
+use std::collections::HashSet;
 use std::path::Path;
 use std::thread;
 use std::time::{Duration, Instant};
@@ -25,7 +26,17 @@ const SAVE_STATUS_FAILED: &str = "保存失败";
 #[derive(Debug)]
 pub(super) struct StartupTrace {
     pub(super) started_at: Instant,
-    first_frame_reported: bool,
+    reported_milestones: HashSet<StartupMilestone>,
+    restored_document_expected: bool,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub(super) enum StartupMilestone {
+    FirstFrameVisible,
+    SessionRestoreStarted,
+    WorkspaceSessionReady,
+    SessionRestoreFinished,
+    RestoredDocumentRendered,
 }
 
 pub(super) enum FontSystemPreparation {
@@ -39,7 +50,11 @@ impl StartupTrace {
     }
 
     pub(super) fn started_now() -> Self {
-        Self { started_at: Instant::now(), first_frame_reported: false }
+        Self {
+            started_at: Instant::now(),
+            reported_milestones: HashSet::new(),
+            restored_document_expected: false,
+        }
     }
 
     pub(super) fn record_stage(&self, label: &str, stage_started_at: Instant) {
@@ -51,11 +66,14 @@ impl StartupTrace {
     }
 
     pub(super) fn take_first_frame_elapsed(&mut self) -> Option<Duration> {
-        if self.first_frame_reported {
-            return None;
-        }
-        self.first_frame_reported = true;
-        Some(self.started_at.elapsed())
+        self.take_milestone_elapsed(StartupMilestone::FirstFrameVisible)
+    }
+
+    pub(super) fn take_milestone_elapsed(
+        &mut self,
+        milestone: StartupMilestone,
+    ) -> Option<Duration> {
+        self.reported_milestones.insert(milestone).then(|| self.started_at.elapsed())
     }
 }
 
@@ -200,6 +218,81 @@ impl FrameRuntime {
             return;
         };
         eprintln!("[startup] first_frame_visible total={:.2}ms", elapsed.as_secs_f64() * 1_000.0,);
+    }
+
+    pub(super) fn record_session_restore_started(&mut self) {
+        self.record_startup_milestone(StartupMilestone::SessionRestoreStarted);
+    }
+
+    pub(super) fn record_workspace_session_ready(&mut self, stage_started_at: Instant) {
+        self.record_startup_stage_milestone(
+            StartupMilestone::WorkspaceSessionReady,
+            stage_started_at,
+        );
+    }
+
+    pub(super) fn record_session_restore_finished(&mut self, stage_started_at: Instant) {
+        self.record_startup_stage_milestone(
+            StartupMilestone::SessionRestoreFinished,
+            stage_started_at,
+        );
+    }
+
+    pub(super) fn expect_restored_document_frame(&mut self, expected: bool) {
+        if let Some(trace) = self.startup_trace.as_mut() {
+            trace.restored_document_expected = expected;
+        }
+    }
+
+    pub(super) fn record_restored_document_rendered(&mut self) {
+        let Some(trace) = self.startup_trace.as_mut() else {
+            return;
+        };
+        if !trace.restored_document_expected {
+            return;
+        }
+        let Some(elapsed) =
+            trace.take_milestone_elapsed(StartupMilestone::RestoredDocumentRendered)
+        else {
+            return;
+        };
+        eprintln!(
+            "[startup] restored_document_rendered total={:.2}ms",
+            elapsed.as_secs_f64() * 1_000.0,
+        );
+    }
+
+    fn record_startup_milestone(&mut self, milestone: StartupMilestone) {
+        let Some(trace) = self.startup_trace.as_mut() else {
+            return;
+        };
+        let Some(elapsed) = trace.take_milestone_elapsed(milestone) else {
+            return;
+        };
+        eprintln!(
+            "[startup] {} total={:.2}ms",
+            startup_milestone_label(milestone),
+            elapsed.as_secs_f64() * 1_000.0,
+        );
+    }
+
+    fn record_startup_stage_milestone(
+        &mut self,
+        milestone: StartupMilestone,
+        stage_started_at: Instant,
+    ) {
+        let Some(trace) = self.startup_trace.as_mut() else {
+            return;
+        };
+        let Some(elapsed) = trace.take_milestone_elapsed(milestone) else {
+            return;
+        };
+        eprintln!(
+            "[startup] {} stage={:.2}ms total={:.2}ms",
+            startup_milestone_label(milestone),
+            stage_started_at.elapsed().as_secs_f64() * 1_000.0,
+            elapsed.as_secs_f64() * 1_000.0,
+        );
     }
 
     pub(super) fn rebuild_theme(&mut self, mode: ui::ThemeMode, appearance: winit::window::Theme) {
@@ -350,6 +443,16 @@ impl FrameRuntime {
                 }
             }
         }
+    }
+}
+
+fn startup_milestone_label(milestone: StartupMilestone) -> &'static str {
+    match milestone {
+        StartupMilestone::FirstFrameVisible => "first_frame_visible",
+        StartupMilestone::SessionRestoreStarted => "session_restore_started",
+        StartupMilestone::WorkspaceSessionReady => "workspace_session_ready",
+        StartupMilestone::SessionRestoreFinished => "session_restore_finished",
+        StartupMilestone::RestoredDocumentRendered => "restored_document_rendered",
     }
 }
 

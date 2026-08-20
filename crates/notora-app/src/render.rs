@@ -2599,9 +2599,9 @@ fn render_external_file_card(session: &ExternalFileSession) -> RenderCard {
 
 fn document_icon(kind: DocumentKind) -> &'static str {
     match kind {
-        DocumentKind::Text => "file-text",
-        DocumentKind::Markdown => "code",
-        DocumentKind::Mindmap => "list-tree",
+        DocumentKind::Text => "notebook-text",
+        DocumentKind::Markdown => "file-code-corner",
+        DocumentKind::Mindmap => "workflow",
     }
 }
 
@@ -3399,9 +3399,9 @@ mod tests {
 
     #[test]
     fn document_kinds_use_icons_registered_by_the_ui_renderer() {
-        assert_eq!(document_icon(DocumentKind::Text), "file-text");
-        assert_eq!(document_icon(DocumentKind::Markdown), "code");
-        assert_eq!(document_icon(DocumentKind::Mindmap), "list-tree");
+        assert_eq!(document_icon(DocumentKind::Text), "notebook-text");
+        assert_eq!(document_icon(DocumentKind::Markdown), "file-code-corner");
+        assert_eq!(document_icon(DocumentKind::Mindmap), "workflow");
     }
 
     #[test]

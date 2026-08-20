@@ -240,12 +240,13 @@ impl Widget for VirtualCardListWidget {
             );
 
             if let Some(icon) = &card.icon {
+                let glyph_size = layout::CARD_ICON_GLYPH_SIZE_LOGICAL * ctx.dpi;
                 draw_icon(
                     ctx.list,
                     icon,
-                    geometry.icon_rect.x,
-                    geometry.icon_rect.y,
-                    geometry.icon_rect.w,
+                    geometry.icon_rect.x + (geometry.icon_rect.w - glyph_size) * 0.5,
+                    geometry.icon_rect.y + (geometry.icon_rect.h - glyph_size) * 0.5,
+                    glyph_size,
                     ctx.theme.palette.text_muted,
                 );
             }
@@ -290,7 +291,7 @@ impl Widget for VirtualCardListWidget {
             }
             if card.closable && is_hovered {
                 let close_rect = geometry.close_rect;
-                let close_icon_size = layout::CARD_ICON_SIZE_LOGICAL * ctx.dpi;
+                let close_icon_size = layout::CARD_CLOSE_ICON_SIZE_LOGICAL * ctx.dpi;
                 draw_icon(
                     ctx.list,
                     "x",
@@ -585,6 +586,32 @@ mod tests {
 
         assert_eq!(widget.layout().visible_range, 0..0);
         assert_eq!(widget.layout().content_height_px, 0.0);
+    }
+
+    #[test]
+    fn card_icon_uses_muted_foreground_without_a_tile() {
+        let mut widget = VirtualCardListWidget::new();
+        let mut selected_card = card(1);
+        selected_card.selection = CardSelection::Selected;
+        widget
+            .set_input(VirtualCardListInput { cards: vec![selected_card], scroll_offset_px: 0.0 });
+        layout(&mut widget, Rect::new(0.0, 0.0, 360.0, 220.0), 1.0);
+        let icon_rect = widget.layout().card_geometry(0).icon_rect;
+        let theme = crate::theme::test_theme();
+        let mut draw_list = crate::core::paint::DrawList::new();
+        let mut paint_context = crate::core::PaintCtx::new(&mut draw_list, &theme, 1.0);
+
+        widget.paint(&mut paint_context);
+
+        assert!(!draw_list.cmds.iter().any(
+            |command| matches!(command, DrawCmd::FillRect { rect, .. } if *rect == icon_rect)
+        ));
+        let icon_colors = draw_list.cmds.iter().filter_map(|command| match command {
+            DrawCmd::FillTriangle { color, .. } => Some(*color),
+            _ => None,
+        });
+        assert!(icon_colors.clone().next().is_some());
+        assert!(icon_colors.into_iter().all(|color| color == theme.palette.text_muted));
     }
 
     #[test]

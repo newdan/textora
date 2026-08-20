@@ -20,6 +20,8 @@ mod persistence_completion_interpreter;
 mod persistence_runtime;
 #[path = "app/product_event_coordinator.rs"]
 mod product_event_coordinator;
+#[path = "runtime/session_restore_runtime.rs"]
+mod session_restore_runtime;
 #[path = "runtime/window_runtime.rs"]
 mod window_runtime;
 #[path = "app/workspace_completion_interpreter.rs"]
@@ -85,8 +87,10 @@ use self::persistence_runtime::PersistenceRuntime;
 use self::persistence_runtime::SettingsPersistenceState;
 use self::product_event_coordinator::{
     DocumentCompletionTarget, LoadedDocumentTarget, PersistenceCompletionTarget,
-    ProductActionTarget, ProductEventCoordinator, WorkspaceCompletionTarget,
+    ProductActionTarget, ProductEventCoordinator, WorkspaceBootstrapTarget,
+    WorkspaceCompletionTarget,
 };
+use self::session_restore_runtime::{SessionRestore, SessionRestoreRuntime};
 use self::window_runtime::WindowRuntime;
 use self::workspace_transition_runtime::WorkspaceTransitionRuntime;
 
@@ -178,6 +182,7 @@ pub(crate) struct NotoraRuntime {
     action_runtime: ActionRuntime,
     paths: NotoraPaths,
     persistence_runtime: PersistenceRuntime,
+    session_restore_runtime: SessionRestoreRuntime,
     document_runtime: DocumentRuntime,
     frame_runtime: FrameRuntime,
     product: NotoraProduct,
@@ -269,6 +274,7 @@ impl NotoraRuntime {
                 loaded_session.session,
                 persistence_worker,
             ),
+            session_restore_runtime: SessionRestoreRuntime::default(),
             document_runtime: DocumentRuntime::new(
                 RuntimeLru::new(runtime_tab_limit),
                 AutoSaveScheduler::with_clock_and_idle_delay(
@@ -386,8 +392,16 @@ impl NotoraRuntime {
         &mut self,
         command: WorkspaceCommand,
     ) -> Result<WorkspaceCommandResult, WorkspaceControllerError> {
+        if !matches!(command, WorkspaceCommand::SelectionCancelled) {
+            self.session_restore_runtime.cancel();
+        }
         let result = self.workspace_controller.execute(command, &mut self.product)?;
-        match &result {
+        self.apply_workspace_command_result(&result);
+        Ok(result)
+    }
+
+    fn apply_workspace_command_result(&mut self, result: &WorkspaceCommandResult) {
+        match result {
             WorkspaceCommandResult::Opened(workspace) => {
                 self.action_runtime.set_active_workspace(
                     workspace.descriptor.workspace_id,
@@ -407,7 +421,6 @@ impl NotoraRuntime {
             self.request_navigation_tree();
         }
         self.window_runtime.schedule_redraw();
-        Ok(result)
     }
 
     fn prepare_workspace_transition(&mut self, request: WorkspaceTransitionRequest) {
@@ -1025,7 +1038,11 @@ impl NotoraRuntime {
             window_height_px,
             editor_is_active,
         };
-        self.frame_runtime.render_frame(&mut self.document_runtime, input)
+        let rendered_frame = self.frame_runtime.render_frame(&mut self.document_runtime, input);
+        if rendered_frame.is_ok() && editor_is_active {
+            self.frame_runtime.record_restored_document_rendered();
+        }
+        rendered_frame
     }
 
     #[cfg(test)]
@@ -1889,6 +1906,15 @@ impl ProductActionTarget for NotoraRuntime {
     }
 }
 
+impl WorkspaceBootstrapTarget for NotoraRuntime {
+    fn complete_workspace_bootstrap(
+        &mut self,
+        completion: crate::product::WorkspaceBootstrapCompletion,
+    ) {
+        self.complete_session_workspace_restore(completion);
+    }
+}
+
 impl WorkspaceCompletionTarget for NotoraRuntime {
     fn accepts_encrypted_unlock(&self, request: DocumentLoadRequest, generation: u64) -> bool {
         self.selection_matches(request)
@@ -2664,28 +2690,95 @@ impl NotoraRuntime {
         let Some(session) = self.persistence_runtime.take_pending_session() else {
             return;
         };
+        let restore_started_at = Instant::now();
+        self.frame_runtime.record_session_restore_started();
+        self.frame_runtime.expect_restored_document_frame(session.last_document.is_some());
         self.window_runtime
             .restore_size(session.window_geometry.width_px, session.window_geometry.height_px);
-        let workspace_restored = match session.workspace_root {
-            Some(root) if root.is_dir() => match self
-                .execute_workspace_command(WorkspaceCommand::OpenExisting { root })
-            {
-                Ok(WorkspaceCommandResult::Opened(workspace))
-                    if session
-                        .workspace_id
-                        .is_none_or(|saved_id| saved_id == workspace.descriptor.workspace_id) =>
+        let Some(root) = session.workspace_root.clone().filter(|root| root.is_dir()) else {
+            self.finish_session_restore(session, false, restore_started_at);
+            return;
+        };
+        let workspace_started_at = Instant::now();
+        match self.workspace_controller.begin_open_existing(root, &self.product) {
+            Ok(workspace_generation) => {
+                self.session_restore_runtime.start(SessionRestore {
+                    session,
+                    workspace_generation,
+                    restore_started_at,
+                    workspace_started_at,
+                });
+            }
+            Err(error) => {
+                self.action_runtime.record_command_error(error.to_string());
+                self.finish_session_restore(session, false, restore_started_at);
+            }
+        }
+    }
+
+    fn complete_session_workspace_restore(
+        &mut self,
+        completion: crate::product::WorkspaceBootstrapCompletion,
+    ) {
+        let Some(pending_restore) = self.session_restore_runtime.take() else {
+            return;
+        };
+        if pending_restore.workspace_generation != completion.generation {
+            self.session_restore_runtime.start(pending_restore);
+            return;
+        }
+        let completion_result = self
+            .workspace_controller
+            .complete_open_existing(completion.generation, &mut self.product);
+        let workspace_restored = match completion_result {
+            Ok(Some(result @ WorkspaceCommandResult::Opened(_))) => {
+                let WorkspaceCommandResult::Opened(workspace) = &result else {
+                    unreachable!("the match arm only accepts opened workspaces");
+                };
+                if pending_restore
+                    .session
+                    .workspace_id
+                    .is_some_and(|saved_id| saved_id != workspace.descriptor.workspace_id)
                 {
+                    if let Ok(closed) = self
+                        .workspace_controller
+                        .execute(WorkspaceCommand::Close, &mut self.product)
+                    {
+                        self.apply_workspace_command_result(&closed);
+                    }
+                    false
+                } else {
+                    self.apply_workspace_command_result(&result);
+                    self.frame_runtime
+                        .record_workspace_session_ready(pending_restore.workspace_started_at);
                     true
                 }
-                Ok(WorkspaceCommandResult::Opened(_)) => {
-                    let _ = self.execute_workspace_command(WorkspaceCommand::Close);
-                    false
-                }
-                Ok(WorkspaceCommandResult::Unchanged | WorkspaceCommandResult::Closed { .. })
-                | Err(_) => false,
-            },
-            Some(_) | None => false,
+            }
+            Ok(Some(WorkspaceCommandResult::Unchanged | WorkspaceCommandResult::Closed { .. })) => {
+                false
+            }
+            Ok(None) => {
+                self.session_restore_runtime.start(pending_restore);
+                return;
+            }
+            Err(error) => {
+                self.action_runtime.record_command_error(error.to_string());
+                false
+            }
         };
+        self.finish_session_restore(
+            pending_restore.session,
+            workspace_restored,
+            pending_restore.restore_started_at,
+        );
+    }
+
+    fn finish_session_restore(
+        &mut self,
+        session: crate::session::ProductSession,
+        workspace_restored: bool,
+        restore_started_at: Instant,
+    ) {
         if !workspace_restored && session.workspace_id.is_some() {
             self.action_runtime
                 .record_command_error("上次使用的工作区不可用，或与保存的标识不再匹配".to_owned());
@@ -2717,6 +2810,8 @@ impl NotoraRuntime {
             Some(crate::session::SavedDocument::ExternalPath { .. }) => {}
             Some(crate::session::SavedDocument::Note { .. }) | None => {}
         }
+        self.frame_runtime.record_session_restore_finished(restore_started_at);
+        self.window_runtime.schedule_redraw();
     }
 
     pub(crate) fn restore_session_after_first_frame(&mut self) {
@@ -2724,7 +2819,6 @@ impl NotoraRuntime {
             return;
         }
         self.restore_pending_session();
-        self.window_runtime.schedule_redraw();
     }
 
     fn request_navigation_tree(&mut self) {
@@ -3167,13 +3261,14 @@ enum ConflictReloadError {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::{Mutex, MutexGuard};
     use std::thread;
     use std::time::{Duration, Instant};
 
     use super::document_runtime::{
         PendingNoteMove, PendingTitleUpdate, PendingTrashMove, initial_title_from_document,
     };
-    use super::frame_runtime::FontSystemPreparation;
+    use super::frame_runtime::{FontSystemPreparation, StartupMilestone};
     use super::{
         NotoraRuntime, SettingsPersistenceState, StartupTrace, resolve_pointer_cursor,
         workspace_relative_directory,
@@ -3208,6 +3303,23 @@ mod tests {
         let paths = NotoraPaths::from_config_directory(directory.keep().join("notora"))
             .expect("test should create isolated product paths");
         NotoraRuntime::with_paths(paths).expect("notora app should construct without a window")
+    }
+
+    fn encryption_runtime_test_guard() -> MutexGuard<'static, ()> {
+        static ENCRYPTION_RUNTIME_TEST_LOCK: Mutex<()> = Mutex::new(());
+
+        ENCRYPTION_RUNTIME_TEST_LOCK
+            .lock()
+            .expect("an encryption runtime test must not poison the shared test lock")
+    }
+
+    fn finish_pending_session_restore(app: &mut NotoraRuntime) {
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while app.session_restore_runtime.is_active() {
+            app.drain_product_events();
+            assert!(Instant::now() < deadline, "session restore should complete promptly");
+            thread::yield_now();
+        }
     }
 
     fn install_registered_note(
@@ -3263,6 +3375,7 @@ mod tests {
     fn encrypted_creation_installs_empty_editor_with_unlocked_session() {
         use ui::core::widget::SensitiveText;
 
+        let _encryption_test_guard = encryption_runtime_test_guard();
         let workspace = tempfile::tempdir().expect("workspace fixture should exist");
         let mut app = app();
         app.execute_workspace_command(WorkspaceCommand::OpenExisting {
@@ -3314,6 +3427,7 @@ mod tests {
     fn encrypted_note_requires_password_after_runtime_restart() {
         use ui::core::widget::SensitiveText;
 
+        let _encryption_test_guard = encryption_runtime_test_guard();
         let workspace = tempfile::tempdir().expect("workspace fixture should exist");
         let mut creating_app = app();
         creating_app
@@ -3454,6 +3568,7 @@ mod tests {
 
     #[test]
     fn encrypted_save_transforms_plaintext_and_requires_session() {
+        let _encryption_test_guard = encryption_runtime_test_guard();
         let workspace = tempfile::tempdir().expect("workspace fixture should exist");
         let mut app = app();
         let (_identity, tab_id) =
@@ -3509,6 +3624,7 @@ mod tests {
         const PLAINTEXT_MARKER: &str = "encrypted-leakage-marker-7e654a";
         const PASSWORD_MARKER: &str = "leakage-test-password";
 
+        let _encryption_test_guard = encryption_runtime_test_guard();
         let workspace = tempfile::tempdir().expect("workspace fixture should exist");
         let mut app = app();
         let (_identity, tab_id) =
@@ -3567,6 +3683,7 @@ mod tests {
     fn encrypted_conflict_copy_uses_a_new_document_identity_and_never_writes_plaintext() {
         use ui::core::widget::SensitiveText;
 
+        let _encryption_test_guard = encryption_runtime_test_guard();
         let workspace = tempfile::tempdir().expect("workspace fixture should exist");
         let mut app = app();
         let (identity, _tab_id) =
@@ -3631,6 +3748,7 @@ mod tests {
     fn encrypted_conflict_reload_relocks_when_the_external_document_identity_changes() {
         use ui::core::widget::SensitiveText;
 
+        let _encryption_test_guard = encryption_runtime_test_guard();
         let workspace = tempfile::tempdir().expect("workspace fixture should exist");
         let mut app = app();
         let (identity, original_tab_id) =
@@ -4228,6 +4346,21 @@ mod tests {
     }
 
     #[test]
+    fn startup_trace_reports_each_usability_milestone_once() {
+        let mut trace = StartupTrace::started_now();
+
+        for milestone in [
+            StartupMilestone::SessionRestoreStarted,
+            StartupMilestone::WorkspaceSessionReady,
+            StartupMilestone::SessionRestoreFinished,
+            StartupMilestone::RestoredDocumentRendered,
+        ] {
+            assert!(trace.take_milestone_elapsed(milestone).is_some());
+            assert!(trace.take_milestone_elapsed(milestone).is_none());
+        }
+    }
+
+    #[test]
     fn background_font_preparation_returns_to_the_deferred_state_after_join() {
         let directory = tempfile::tempdir().expect("test should create a temporary directory");
         let paths = NotoraPaths::from_config_directory(directory.path().join("notora"))
@@ -4517,6 +4650,9 @@ mod tests {
 
         app.restore_pending_session();
 
+        assert_eq!(app.workspace_controller.active_workspace(), None);
+        assert!(app.session_restore_runtime.is_active());
+        finish_pending_session_restore(&mut app);
         assert_eq!(app.workspace_controller.active_workspace(), None);
         assert!(
             app.action_runtime

@@ -13,7 +13,10 @@ cargo fmt --all -- --check
 echo "Running clippy (warnings as errors)..."
 cargo clippy --workspace --all-targets -- -D warnings
 
-echo "Running tests..."
-cargo test --workspace
+echo "Running notora-app tests with deterministic resource usage..."
+cargo test -p notora-app -- --test-threads=1
+
+echo "Running workspace tests except notora-app..."
+cargo test --workspace --exclude notora-app
 
 echo "All checks passed! Baseline is trusted."

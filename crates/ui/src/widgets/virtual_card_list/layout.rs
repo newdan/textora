@@ -9,8 +9,9 @@ use super::CardInput;
 pub const CARD_VERTICAL_GAP_LOGICAL: f32 = 8.0;
 pub const CARD_HORIZONTAL_PADDING_LOGICAL: f32 = 14.0;
 pub const CARD_VERTICAL_PADDING_LOGICAL: f32 = 12.0;
-pub const CARD_ICON_SIZE_LOGICAL: f32 = 16.0;
-pub const CARD_ICON_GAP_LOGICAL: f32 = 6.0;
+pub const CARD_ICON_SLOT_SIZE_LOGICAL: f32 = 24.0;
+pub const CARD_ICON_GLYPH_SIZE_LOGICAL: f32 = 14.0;
+pub const CARD_ICON_GAP_LOGICAL: f32 = 8.0;
 pub const CARD_TITLE_FONT_SIZE_LOGICAL: f32 = 15.0;
 pub const CARD_EXCERPT_FONT_SIZE_LOGICAL: f32 = 13.0;
 pub const CARD_METADATA_FONT_SIZE_LOGICAL: f32 = 12.0;
@@ -22,6 +23,7 @@ pub const CARD_CORNER_RADIUS_LOGICAL: f32 = 8.0;
 pub const CARD_METADATA_GAP_LOGICAL: f32 = 12.0;
 pub const VIRTUAL_CARD_OVERSCAN_COUNT: usize = 2;
 pub const CARD_CLOSE_BUTTON_SIZE_LOGICAL: f32 = 24.0;
+pub const CARD_CLOSE_ICON_SIZE_LOGICAL: f32 = 16.0;
 
 const CARD_TEXT_SECTION_GAP_LOGICAL: f32 = 6.0;
 const CARD_CONTENT_METADATA_GAP_LOGICAL: f32 = 12.0;
@@ -74,10 +76,11 @@ impl VirtualCardListLayout {
         );
         let horizontal_padding = CARD_HORIZONTAL_PADDING_LOGICAL * self.dpi;
         let vertical_padding = CARD_VERTICAL_PADDING_LOGICAL * self.dpi;
-        let icon_size = CARD_ICON_SIZE_LOGICAL * self.dpi;
+        let icon_size = CARD_ICON_SLOT_SIZE_LOGICAL * self.dpi;
+        let title_line_height = CARD_TITLE_LINE_HEIGHT_LOGICAL * self.dpi;
         let icon_rect = Rect::new(
             card_rect.x + horizontal_padding,
-            card_rect.y + vertical_padding,
+            card_rect.y + vertical_padding - (icon_size - title_line_height) * 0.5,
             icon_size,
             icon_size,
         );
@@ -97,7 +100,6 @@ impl VirtualCardListLayout {
         let excerpt_font_size = CARD_EXCERPT_FONT_SIZE_LOGICAL * self.dpi;
         let metadata_font_size = CARD_METADATA_FONT_SIZE_LOGICAL * self.dpi;
         let title_y = card_rect.y + vertical_padding;
-        let title_line_height = CARD_TITLE_LINE_HEIGHT_LOGICAL * self.dpi;
         let excerpt_line_height = CARD_EXCERPT_LINE_HEIGHT_LOGICAL * self.dpi;
         let title_height = title_line_height * placement.title_line_count as f32;
         let excerpt_height = excerpt_line_height * placement.excerpt_line_count as f32;
@@ -181,7 +183,7 @@ fn build_card_placements(cards: &[CardInput], card_width_px: f32, dpi: f32) -> V
     let horizontal_padding = CARD_HORIZONTAL_PADDING_LOGICAL * dpi;
     let title_width_px = (card_width_px
         - horizontal_padding * 2.0
-        - CARD_ICON_SIZE_LOGICAL * dpi
+        - CARD_ICON_SLOT_SIZE_LOGICAL * dpi
         - CARD_ICON_GAP_LOGICAL * dpi)
         .max(0.0);
     let excerpt_width_px = (card_width_px - horizontal_padding * 2.0).max(0.0);
@@ -271,6 +273,18 @@ mod tests {
         assert_eq!(geometry.title_rect.h, CARD_TITLE_LINE_HEIGHT_LOGICAL);
         assert_eq!(geometry.excerpt_rect.h, CARD_EXCERPT_LINE_HEIGHT_LOGICAL);
         assert!(geometry.excerpt_rect.bottom() < geometry.metadata_rect.top());
+    }
+
+    #[test]
+    fn card_title_reserves_a_compact_icon_slot() {
+        let cards = vec![card("")];
+        let layout =
+            build_virtual_card_layout(&cards, Rect::new(20.0, 30.0, 300.0, 500.0), 0.0, 1.0);
+        let geometry = layout.card_geometry(0);
+
+        assert_eq!(geometry.icon_rect.w, 24.0);
+        assert_eq!(geometry.icon_rect.h, 24.0);
+        assert_eq!(geometry.title_rect.x, geometry.icon_rect.right() + 8.0);
     }
 
     fn card(excerpt: &str) -> CardInput {

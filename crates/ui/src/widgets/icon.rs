@@ -416,6 +416,32 @@ const DATA_FILE_TEXT: IconSvg = IconSvg {
     stroke_width: 2.0,
 };
 
+const DATA_FILE_CODE_CORNER: IconSvg = IconSvg {
+    paths: &[
+        "M4 12.15V4a2 2 0 0 1 2-2h8a2.4 2.4 0 0 1 1.706.706l3.588 3.588A2.4 2.4 0 0 1 20 8v12a2 2 0 0 1-2 2h-3.35",
+        "M14 2v5a1 1 0 0 0 1 1h5",
+        "m5 16-3 3 3 3",
+        "m9 22 3-3-3-3",
+    ],
+    circles: &[],
+    stroke_width: 2.0,
+};
+
+const DATA_NOTEBOOK_TEXT: IconSvg = IconSvg {
+    paths: &[
+        "M2 6h4",
+        "M2 10h4",
+        "M2 14h4",
+        "M2 18h4",
+        "M6 2h12a2 2 0 0 1 2 2v16a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2",
+        "M9.5 8h5",
+        "M9.5 12H16",
+        "M9.5 16H14",
+    ],
+    circles: &[],
+    stroke_width: 2.0,
+};
+
 const DATA_NOTEBOOK_PEN: IconSvg = IconSvg {
     paths: &[
         "M13.4 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-7.4",
@@ -501,6 +527,16 @@ const DATA_LIST: IconSvg = IconSvg {
 const DATA_LIST_TREE: IconSvg = IconSvg {
     paths: &["M9 3v18", "M9 6h11", "M9 12h11", "M9 18h11"],
     circles: &[(4.0, 6.0, 2.0), (4.0, 12.0, 2.0), (4.0, 18.0, 2.0)],
+    stroke_width: 2.0,
+};
+
+const DATA_WORKFLOW: IconSvg = IconSvg {
+    paths: &[
+        "M5 3h4a2 2 0 0 1 2 2v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2",
+        "M7 11v4a2 2 0 0 0 2 2h4",
+        "M15 13h4a2 2 0 0 1 2 2v4a2 2 0 0 1-2 2h-4a2 2 0 0 1-2-2v-4a2 2 0 0 1 2-2",
+    ],
+    circles: &[],
     stroke_width: 2.0,
 };
 
@@ -631,6 +667,8 @@ fn icon_svg(name: &str) -> Option<&'static IconSvg> {
         "trash-2" => Some(&DATA_TRASH_2),
         "file" => Some(&DATA_FILE),
         "file-text" => Some(&DATA_FILE_TEXT),
+        "file-code-corner" => Some(&DATA_FILE_CODE_CORNER),
+        "notebook-text" => Some(&DATA_NOTEBOOK_TEXT),
         "notebook-pen" => Some(&DATA_NOTEBOOK_PEN),
         "settings" => Some(&DATA_SETTINGS),
         "search" => Some(&DATA_SEARCH),
@@ -643,6 +681,7 @@ fn icon_svg(name: &str) -> Option<&'static IconSvg> {
         "replace" => Some(&DATA_REPLACE),
         "list" => Some(&DATA_LIST),
         "list-tree" => Some(&DATA_LIST_TREE),
+        "workflow" => Some(&DATA_WORKFLOW),
         "palette" => Some(&DATA_PALETTE),
         "undo-2" => Some(&DATA_UNDO_2),
         "redo-2" => Some(&DATA_REDO_2),
@@ -822,7 +861,10 @@ mod tests {
             "trash-2",
             "file",
             "file-text",
+            "file-code-corner",
+            "notebook-text",
             "notebook-pen",
+            "workflow",
             "undo-2",
             "redo-2",
             "heading",

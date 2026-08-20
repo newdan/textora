@@ -357,7 +357,7 @@ fn escape_like_pattern(value: &str) -> String {
     value.replace('\\', "\\\\").replace('%', "\\%").replace('_', "\\_")
 }
 
-fn ensure_unique_note_ids(entries: &[SearchIndexEntry]) -> Result<(), CatalogError> {
+pub(super) fn ensure_unique_note_ids(entries: &[SearchIndexEntry]) -> Result<(), CatalogError> {
     let mut note_ids = HashSet::with_capacity(entries.len());
     for entry in entries {
         if note_ids.insert(entry.note_id) {
@@ -372,7 +372,7 @@ fn ensure_unique_note_ids(entries: &[SearchIndexEntry]) -> Result<(), CatalogErr
     Ok(())
 }
 
-fn replace_search_index_entry(
+pub(super) fn replace_search_index_entry(
     transaction: &Transaction<'_>,
     entry: &SearchIndexEntry,
 ) -> Result<(), CatalogError> {
