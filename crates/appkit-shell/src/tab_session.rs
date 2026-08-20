@@ -865,6 +865,12 @@ impl<'a> TabSessionMut<'a> {
     pub(crate) fn ensure_cursor_visual_row_visible(&mut self, line_height: f32) -> bool {
         const PIXEL_COMPARISON_TOLERANCE: f32 = 0.01;
 
+        let cursor_offset = self.document.cursor().offset;
+        if cursor_offset == self.last_cursor_offset() {
+            return false;
+        }
+        self.set_last_cursor_offset(cursor_offset);
+
         let Some(cursor_visual_row) = self.cursor_visual_line() else {
             return false;
         };
@@ -1179,6 +1185,38 @@ mod tests {
         session.ensure_cursor_visual_row_visible(LINE_HEIGHT_PX);
 
         assert_eq!(session.scroll_top(), 0.5);
+    }
+
+    #[test]
+    fn stationary_cursor_below_viewport_does_not_override_manual_scroll() {
+        const LINE_HEIGHT_PX: f32 = 20.0;
+        const VISIBLE_ROWS: usize = 10;
+        const VIEWPORT_HEIGHT_ROWS: f64 = 10.5;
+        const CURSOR_VISUAL_ROW: usize = 10;
+        const WRAPPED_ROW_COUNT: u16 = 11;
+
+        let id = TabIdAllocator::new().allocate();
+        let mut document = document(&"word ".repeat(80));
+        document.cursor_move_to_offset(document.buffer_len());
+        let cursor_offset = document.cursor().offset;
+        let mut runtime = TabRuntime::new(Box::new(EditorPlugin::new()));
+        runtime.presentation.display.viewport.resize(VISIBLE_ROWS, VIEWPORT_HEIGHT_ROWS);
+        runtime.presentation.display.display_map.set_entries(vec![
+            crate::snap_tree::DisplayLineEntry::placeholder(
+                0,
+                document.buffer_len() as u32,
+                0,
+                WRAPPED_ROW_COUNT,
+            ),
+        ]);
+        runtime.presentation.cursor_render_state.cursor_visual_line = Some(CURSOR_VISUAL_ROW);
+        runtime.presentation.cursor_render_state.last_cursor_offset = cursor_offset;
+
+        let mut session = TabSessionMut::new(id, &mut document, &mut runtime);
+        let scroll_changed = session.ensure_cursor_visual_row_visible(LINE_HEIGHT_PX);
+
+        assert!(!scroll_changed, "未移动的光标不能覆盖用户滚动");
+        assert_eq!(session.scroll_top(), 0.0);
     }
 
     #[test]
