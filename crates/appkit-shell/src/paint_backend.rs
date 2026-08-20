@@ -473,7 +473,7 @@ fn append_rounded_with_clip(
     append_clipped_triangles(vertices, &tessellated, clip, screen);
 }
 
-fn append_clipped_triangles(
+pub(crate) fn append_clipped_triangles(
     vertices: &mut Vec<GlyphVertex>,
     tessellated: &[GlyphVertex],
     clip: Rect,
