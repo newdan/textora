@@ -4,7 +4,7 @@ use notora_core::catalog::SearchIndexEntry;
 use notora_core::{Catalog, CatalogNote, DocumentKind, NavigationScope, NoteId};
 use ui::core::Widget;
 use ui::virtual_card_list::{
-    CardInput, CardKey, CardSelection, VirtualCardListInput, VirtualCardListWidget,
+    CardIconTone, CardInput, CardKey, CardSelection, VirtualCardListInput, VirtualCardListWidget,
 };
 use ui::{LayoutCtx, NoopMeasure, Rect};
 
@@ -62,6 +62,7 @@ fn searches_and_virtualizes_a_ten_thousand_note_library() {
             excerpt: "预计算摘要".to_owned(),
             timestamp: "Modified".to_owned(),
             icon: Some("file-text".to_owned()),
+            icon_tone: CardIconTone::Neutral,
             tag_summary: "#计划".to_owned(),
             selection: CardSelection::Unselected,
             closable: false,

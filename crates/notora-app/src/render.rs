@@ -24,7 +24,7 @@ use ui::tree_list::{
     TreeRowEditorInput, TreeRowExpansion, TreeRowInput, TreeRowKey, TreeRowSelection,
 };
 use ui::virtual_card_list::{
-    CardInput, CardKey, CardSelection, VirtualCardListAction, VirtualCardListInput,
+    CardIconTone, CardInput, CardKey, CardSelection, VirtualCardListAction, VirtualCardListInput,
     VirtualCardListWidget,
 };
 use ui::{Event, EventCtx, Rect, Widget};
@@ -99,6 +99,7 @@ pub struct RenderCard {
     pub excerpt: String,
     pub timestamp: String,
     pub icon: Option<String>,
+    pub icon_tone: CardIconTone,
     pub tag_summary: String,
     pub closable: bool,
 }
@@ -1254,6 +1255,7 @@ impl NotoraShell {
                     excerpt: card.excerpt.clone(),
                     timestamp: card.timestamp.clone(),
                     icon: card.icon.clone(),
+                    icon_tone: card.icon_tone,
                     tag_summary: card.tag_summary.clone(),
                     selection: if model.selected_card == Some(card.identity) {
                         CardSelection::Selected
@@ -2472,6 +2474,7 @@ fn render_cards(state: &NotoraState) -> Vec<RenderCard> {
 }
 
 fn render_catalog_card(card: &notora_core::CatalogCard) -> RenderCard {
+    let icon = document_icon(card.kind);
     let mut summary_parts = Vec::with_capacity(card.tags.len() + usize::from(card.starred));
     if card.starred {
         summary_parts.push("★".to_owned());
@@ -2482,7 +2485,8 @@ fn render_catalog_card(card: &notora_core::CatalogCard) -> RenderCard {
         title: card.title.clone(),
         excerpt: card.excerpt.clone(),
         timestamp: format_modified_timestamp(card.modified_nanoseconds),
-        icon: Some(document_icon(card.kind).to_owned()),
+        icon: Some(icon.name.to_owned()),
+        icon_tone: icon.tone,
         tag_summary: summary_parts.join(" "),
         closable: false,
     }
@@ -2490,35 +2494,40 @@ fn render_catalog_card(card: &notora_core::CatalogCard) -> RenderCard {
 
 fn render_external_file_card(session: &ExternalFileSession) -> RenderCard {
     match session {
-        ExternalFileSession::Existing { canonical_path, .. } => RenderCard {
-            identity: session.identity(),
-            title: canonical_path
-                .as_path()
-                .file_name()
-                .and_then(|name| name.to_str())
-                .unwrap_or("未命名")
-                .to_owned(),
-            excerpt: canonical_path.as_path().display().to_string(),
-            timestamp: "外部文件".to_owned(),
-            icon: Some(
-                document_icon(
-                    DocumentKind::from_external_path(canonical_path.as_path())
-                        .unwrap_or(DocumentKind::Text),
-                )
-                .to_owned(),
-            ),
-            tag_summary: String::new(),
-            closable: true,
-        },
-        ExternalFileSession::Untitled { kind, .. } => RenderCard {
-            identity: session.identity(),
-            title: "未命名".to_owned(),
-            excerpt: "尚未保存的外部文件".to_owned(),
-            timestamp: "外部文件".to_owned(),
-            icon: Some(document_icon(*kind).to_owned()),
-            tag_summary: String::new(),
-            closable: true,
-        },
+        ExternalFileSession::Existing { canonical_path, .. } => {
+            let icon = document_icon(
+                DocumentKind::from_external_path(canonical_path.as_path())
+                    .unwrap_or(DocumentKind::Text),
+            );
+            RenderCard {
+                identity: session.identity(),
+                title: canonical_path
+                    .as_path()
+                    .file_name()
+                    .and_then(|name| name.to_str())
+                    .unwrap_or("未命名")
+                    .to_owned(),
+                excerpt: canonical_path.as_path().display().to_string(),
+                timestamp: "外部文件".to_owned(),
+                icon: Some(icon.name.to_owned()),
+                icon_tone: icon.tone,
+                tag_summary: String::new(),
+                closable: true,
+            }
+        }
+        ExternalFileSession::Untitled { kind, .. } => {
+            let icon = document_icon(*kind);
+            RenderCard {
+                identity: session.identity(),
+                title: "未命名".to_owned(),
+                excerpt: "尚未保存的外部文件".to_owned(),
+                timestamp: "外部文件".to_owned(),
+                icon: Some(icon.name.to_owned()),
+                icon_tone: icon.tone,
+                tag_summary: String::new(),
+                closable: true,
+            }
+        }
         ExternalFileSession::Missing { last_known_path, .. } => RenderCard {
             identity: session.identity(),
             title: last_known_path
@@ -2529,17 +2538,26 @@ fn render_external_file_card(session: &ExternalFileSession) -> RenderCard {
             excerpt: last_known_path.display().to_string(),
             timestamp: "已丢失".to_owned(),
             icon: Some("file".to_owned()),
+            icon_tone: CardIconTone::Neutral,
             tag_summary: String::new(),
             closable: true,
         },
     }
 }
 
-fn document_icon(kind: DocumentKind) -> &'static str {
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct DocumentIcon {
+    name: &'static str,
+    tone: CardIconTone,
+}
+
+fn document_icon(kind: DocumentKind) -> DocumentIcon {
     match kind {
-        DocumentKind::Text => "file-text",
-        DocumentKind::Markdown => "code",
-        DocumentKind::Mindmap => "list-tree",
+        DocumentKind::Text => DocumentIcon { name: "notebook-text", tone: CardIconTone::Warm },
+        DocumentKind::Markdown => {
+            DocumentIcon { name: "file-code-corner", tone: CardIconTone::Cool }
+        }
+        DocumentKind::Mindmap => DocumentIcon { name: "workflow", tone: CardIconTone::Violet },
     }
 }
 
@@ -3203,9 +3221,18 @@ mod tests {
 
     #[test]
     fn document_kinds_use_icons_registered_by_the_ui_renderer() {
-        assert_eq!(document_icon(DocumentKind::Text), "file-text");
-        assert_eq!(document_icon(DocumentKind::Markdown), "code");
-        assert_eq!(document_icon(DocumentKind::Mindmap), "list-tree");
+        assert_eq!(
+            document_icon(DocumentKind::Text),
+            DocumentIcon { name: "notebook-text", tone: CardIconTone::Warm }
+        );
+        assert_eq!(
+            document_icon(DocumentKind::Markdown),
+            DocumentIcon { name: "file-code-corner", tone: CardIconTone::Cool }
+        );
+        assert_eq!(
+            document_icon(DocumentKind::Mindmap),
+            DocumentIcon { name: "workflow", tone: CardIconTone::Violet }
+        );
     }
 
     #[test]
@@ -4064,6 +4091,7 @@ mod tests {
                 excerpt: String::new(),
                 timestamp: "外部文件".to_owned(),
                 icon: Some("file-text".to_owned()),
+                icon_tone: CardIconTone::Neutral,
                 tag_summary: String::new(),
                 selection: CardSelection::Unselected,
                 closable: true,
@@ -4468,6 +4496,7 @@ mod tests {
                 excerpt: String::new(),
                 timestamp: String::new(),
                 icon: None,
+                icon_tone: CardIconTone::Neutral,
                 tag_summary: String::new(),
                 selection: CardSelection::Unselected,
                 closable: false,
@@ -4542,6 +4571,7 @@ mod tests {
                 excerpt: String::new(),
                 timestamp: String::new(),
                 icon: None,
+                icon_tone: CardIconTone::Neutral,
                 tag_summary: "★ #产品/Notora".to_owned(),
                 closable: false,
             }],
