@@ -96,10 +96,6 @@ const DIRECTORY_EDITOR_KEY: TreeRowKey = TreeRowKey(u64::MAX - 1);
 const NAVIGATION_TREE_ID: WidgetId = WidgetId(9_005);
 const EDITOR_ROOT_DIRECTORY_ROW_KEY: &str = "root";
 const EDITOR_TAG_SUGGESTION_KEY_PREFIX: &str = "suggestion:";
-const EDITOR_EMPTY_TITLE: &str = "请选择笔记";
-const EDITOR_EMPTY_DESCRIPTION: &str = "编辑器将在此处显示。";
-const EDITOR_LOADING_TITLE: &str = "正在加载笔记";
-const EDITOR_LOADING_DESCRIPTION: &str = "文档准备完成后将在此处显示。";
 
 /// UI 之前的产品展示卡片；保持领域身份，避免将 app 状态泄漏给 ui crate。
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -191,7 +187,6 @@ pub struct NotoraRenderModel {
 pub enum EditorPaneState {
     #[default]
     Empty,
-    Loading,
     Active,
 }
 
@@ -442,11 +437,7 @@ impl NotoraRenderModel {
             editor_tag_actions,
             editor_command_actions,
             mindmap_style_panel: None,
-            editor_pane: if state.library.selected_card.is_some() {
-                EditorPaneState::Loading
-            } else {
-                EditorPaneState::Empty
-            },
+            editor_pane: EditorPaneState::Empty,
         }
     }
 }
@@ -1339,7 +1330,14 @@ impl NotoraShell {
         );
         self.card_empty_state.set_input(model.card_empty_state.clone());
         self.card_empty_state_visible = model.cards.is_empty();
-        self.editor_empty_state.set_input(editor_status_state_input(model.editor_pane));
+        self.editor_empty_state.set_input(StatusStateInput {
+            kind: StatusStateKind::Empty,
+            title: "请选择笔记".to_owned(),
+            description: "编辑器将在此处显示。".to_owned(),
+            icon: Some("file-text".to_owned()),
+            action_label: None,
+            action_id: None,
+        });
     }
 
     fn synchronize_new_document_menu(&mut self, menu: ui::popup_menu::PopupMenu) {
@@ -1613,7 +1611,7 @@ impl NotoraShell {
             }
         });
         match model.editor_pane {
-            EditorPaneState::Empty | EditorPaneState::Loading => {
+            EditorPaneState::Empty => {
                 frame.paint_editor_with(layout.editor_body_rect, |context| {
                     self.editor_empty_state.paint(context)
                 })?;
@@ -2504,28 +2502,6 @@ impl NotoraShell {
         self.next_card_key = self.next_card_key.wrapping_add(1).max(1);
         self.card_keys.insert(identity, key);
         key
-    }
-}
-
-fn editor_status_state_input(editor_pane: EditorPaneState) -> StatusStateInput {
-    let (kind, title, description) = match editor_pane {
-        EditorPaneState::Empty => {
-            (StatusStateKind::Empty, EDITOR_EMPTY_TITLE, EDITOR_EMPTY_DESCRIPTION)
-        }
-        EditorPaneState::Loading => {
-            (StatusStateKind::Loading, EDITOR_LOADING_TITLE, EDITOR_LOADING_DESCRIPTION)
-        }
-        EditorPaneState::Active => {
-            (StatusStateKind::Empty, EDITOR_EMPTY_TITLE, EDITOR_EMPTY_DESCRIPTION)
-        }
-    };
-    StatusStateInput {
-        kind,
-        title: title.to_owned(),
-        description: description.to_owned(),
-        icon: Some("file-text".to_owned()),
-        action_label: None,
-        action_id: None,
     }
 }
 
@@ -4819,19 +4795,6 @@ mod tests {
             ui::editor_header::EncryptionStatusInput::Hidden
         );
         assert!(!external_input.location.open);
-    }
-
-    #[test]
-    fn selected_document_uses_loading_state_until_its_editor_tab_is_active() {
-        let mut state = NotoraState::default();
-        state.library.selected_card = Some(DocumentIdentity::Note(notora_core::NoteId::generate()));
-
-        let model = NotoraRenderModel::from_state(&state);
-
-        assert_eq!(model.editor_pane, EditorPaneState::Loading);
-        let loading_state = editor_status_state_input(model.editor_pane);
-        assert_eq!(loading_state.kind, StatusStateKind::Loading);
-        assert_eq!(loading_state.title, EDITOR_LOADING_TITLE);
     }
 
     #[test]

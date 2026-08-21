@@ -504,7 +504,7 @@ impl NotoraState {
             NotoraAction::CardSelected(identity) => {
                 let request = self.select_document(identity);
                 self.layout.focus_target = FocusTarget::CardList;
-                self.layout.compact_content = CompactContent::Editor;
+                self.layout.compact_content = CompactContent::CardList;
                 vec![NotoraEffect::PrepareDocument(request), NotoraEffect::Redraw]
             }
             NotoraAction::CardActivated(identity) => {
@@ -2934,16 +2934,6 @@ mod tests {
             vec![NotoraEffect::PromoteActivePreview, NotoraEffect::Redraw]
         );
         assert_eq!(state.layout.focus_target, FocusTarget::Editor);
-    }
-
-    #[test]
-    fn selecting_a_card_opens_the_editor_in_compact_layout() {
-        let mut state = NotoraState::default();
-        let identity = notora_core::DocumentIdentity::Note(notora_core::NoteId::generate());
-
-        let _ = state.reduce(NotoraAction::CardSelected(identity));
-
-        assert_eq!(state.layout.compact_content, CompactContent::Editor);
     }
 
     #[test]

@@ -270,6 +270,29 @@ impl DocumentRuntime {
         self.document_registry.identity_for(tab_id)
     }
 
+    pub(super) fn activate_registered_document(
+        &mut self,
+        identity: DocumentIdentity,
+    ) -> Option<EditorOutcome> {
+        let tab_id = self.document_registry.tab_for(identity)?;
+        let auto_close_candidate =
+            self.document_registry.preview_tab().filter(|preview_tab_id| *preview_tab_id != tab_id);
+        let outcome = self.editor_runtime.activate(tab_id);
+
+        if let Some(preview_tab_id) = auto_close_candidate
+            && self.editor_runtime.document_summary(preview_tab_id).is_none()
+        {
+            self.unregister_tab(preview_tab_id);
+        }
+        if self.editor_runtime.active_tab_id() != Some(tab_id) {
+            self.unregister_tab(tab_id);
+            return None;
+        }
+
+        self.document_registry.touch_tab(tab_id);
+        Some(outcome)
+    }
+
     pub(super) fn touch_tab(&mut self, tab_id: TabId) {
         self.document_registry.touch_tab(tab_id);
     }
@@ -587,10 +610,9 @@ impl DocumentRuntime {
         if !Self::selection_matches(request, selection) {
             return DocumentOutcome::default();
         }
-        if let Some(tab_id) = self.document_registry.tab_for(request.identity) {
-            self.document_registry.touch_tab(tab_id);
+        if let Some(editor_outcome) = self.activate_registered_document(request.identity) {
             let mut outcome = DocumentOutcome::default();
-            outcome.absorb_editor_outcome(self.editor_runtime.activate(tab_id));
+            outcome.absorb_editor_outcome(editor_outcome);
             return outcome;
         }
         let prepared = match prepare_loaded_document_with_access(
@@ -632,10 +654,9 @@ impl DocumentRuntime {
         if !Self::selection_matches(request, selection) {
             return DocumentOutcome::default();
         }
-        if let Some(tab_id) = self.document_registry.tab_for(request.identity) {
-            self.document_registry.touch_tab(tab_id);
+        if let Some(editor_outcome) = self.activate_registered_document(request.identity) {
             let mut outcome = DocumentOutcome::default();
-            outcome.absorb_editor_outcome(self.editor_runtime.activate(tab_id));
+            outcome.absorb_editor_outcome(editor_outcome);
             return outcome;
         }
         let replaced_preview = self.document_registry.preview_tab();

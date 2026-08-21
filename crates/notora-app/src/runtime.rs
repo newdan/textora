@@ -2442,9 +2442,7 @@ impl NotoraRuntime {
             self.prepare_external_document(request, external_file_id);
             return Vec::new();
         }
-        if let Some(tab_id) = self.document_runtime.tab_for(identity) {
-            self.document_runtime.touch_tab(tab_id);
-            let outcome = self.document_runtime.editor_mut().activate(tab_id);
+        if let Some(outcome) = self.document_runtime.activate_registered_document(identity) {
             self.apply_editor_outcome(outcome);
             return Vec::new();
         }
@@ -3273,7 +3271,9 @@ mod tests {
         NotoraRuntime, SettingsPersistenceState, StartupTrace, resolve_pointer_cursor,
         workspace_relative_directory,
     };
-    use crate::action::{MetadataMutation, NotoraAction, WorkspaceTransitionRequest};
+    use crate::action::{
+        DocumentLoadRequest, MetadataMutation, NotoraAction, WorkspaceTransitionRequest,
+    };
     use crate::autosave::{AutoSaveRequest, AutoSaveState};
     use crate::editor_adapter::LoadedDocument;
     use crate::state::{CardPageState, normalize_notora_title};
@@ -4423,6 +4423,45 @@ mod tests {
         app.dispatch_action(NotoraAction::NavigationSelected(NavigationScope::Trash));
 
         assert!(!app.active_editor_matches_selection());
+    }
+
+    #[test]
+    fn switching_away_from_a_preview_removes_its_document_mapping() {
+        let mut app = app();
+        let (persistent_identity, persistent_tab_id) =
+            install_registered_note(&mut app, "persistent.md", "常驻正文");
+        let preview_identity = DocumentIdentity::Note(notora_core::NoteId::generate());
+        app.action_runtime.state.library.selected_card = Some(preview_identity);
+        app.action_runtime.state.library.selected_document_generation += 1;
+        let preview_request = DocumentLoadRequest {
+            identity: preview_identity,
+            selection_generation: app.action_runtime.state().library.selected_document_generation,
+        };
+
+        app.install_loaded_preview(
+            preview_request,
+            LoadedDocument {
+                path: "preview.md".into(),
+                contents: "预览正文".to_owned(),
+                disk_revision: None,
+            },
+        );
+        let preview_tab_id = app
+            .document_runtime
+            .tab_for(preview_identity)
+            .expect("preview note should be registered");
+        assert_ne!(preview_tab_id, persistent_tab_id);
+
+        app.action_runtime.state.library.selected_card = Some(persistent_identity);
+        app.action_runtime.state.library.selected_document_generation += 1;
+        let actions = app.prepare_document(DocumentLoadRequest {
+            identity: persistent_identity,
+            selection_generation: app.action_runtime.state().library.selected_document_generation,
+        });
+
+        assert!(actions.is_empty());
+        assert_eq!(app.document_runtime.editor().active_tab_id(), Some(persistent_tab_id));
+        assert_eq!(app.document_runtime.tab_for(preview_identity), None);
     }
 
     #[test]
