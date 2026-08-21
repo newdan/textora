@@ -313,7 +313,12 @@ impl NotoraRenderModel {
             .iter()
             .filter(|tag| tag.active_note_count > 0)
             .collect::<Vec<_>>();
-        push_tag_root_navigation_row(&mut navigation_rows, &mut navigation_actions);
+        push_tag_root_navigation_row(
+            &mut navigation_rows,
+            &mut navigation_actions,
+            !visible_tags.is_empty(),
+            state.library.navigation_tree.tag_root_expanded,
+        );
         if state.library.navigation_tree.tag_root_expanded {
             for (index, tag) in visible_tags.into_iter().enumerate() {
                 let key = TAG_NAVIGATION_KEY_START + index as u64;
@@ -1799,6 +1804,10 @@ impl NotoraShell {
                 .or_else(|| {
                     (*key == TreeRowKey(WORKSPACE_NAVIGATION_KEY))
                         .then_some(NotoraAction::WorkspaceRootExpansionToggled)
+                })
+                .or_else(|| {
+                    (*key == TreeRowKey(TAG_ROOT_NAVIGATION_KEY))
+                        .then_some(NotoraAction::TagRootExpansionToggled)
                 }),
             WidgetAction::TreeList(TreeListAction::TrailingActionActivated {
                 row_key,
@@ -2987,6 +2996,8 @@ fn push_workspace_navigation_row(
 fn push_tag_root_navigation_row(
     rows: &mut Vec<TreeRowInput>,
     actions: &mut HashMap<TreeRowKey, NotoraAction>,
+    has_tags: bool,
+    expanded: bool,
 ) {
     let row_key = TreeRowKey(TAG_ROOT_NAVIGATION_KEY);
     actions.insert(row_key, NotoraAction::TagRootExpansionToggled);
@@ -2995,7 +3006,11 @@ fn push_tag_root_navigation_row(
         label: "标签".to_owned(),
         icon: Some("tag".to_owned()),
         depth: 0,
-        expansion: TreeRowExpansion::Leaf,
+        expansion: match (has_tags, expanded) {
+            (false, _) => TreeRowExpansion::Leaf,
+            (true, true) => TreeRowExpansion::Expanded,
+            (true, false) => TreeRowExpansion::Collapsed,
+        },
         selection: TreeRowSelection::Unselected,
         badge: None,
         tooltip: None,
@@ -4167,7 +4182,7 @@ mod tests {
         assert_eq!(model.navigation_rows[2].depth, 2);
         assert_eq!(model.navigation_rows[4].label, "标签");
         assert_eq!(model.navigation_rows[4].icon.as_deref(), Some("tag"));
-        assert_eq!(model.navigation_rows[4].expansion, TreeRowExpansion::Leaf);
+        assert_eq!(model.navigation_rows[4].expansion, TreeRowExpansion::Expanded);
         assert_eq!(
             model.navigation_actions.get(&model.navigation_rows[4].key),
             Some(&NotoraAction::TagRootExpansionToggled)
@@ -4428,6 +4443,12 @@ mod tests {
                 TreeRowKey(1),
             ))),
             Some(NotoraAction::NavigationSelected(NavigationScope::WorkspaceRoot))
+        );
+        assert_eq!(
+            shell.translate_widget_action(&WidgetAction::TreeList(
+                TreeListAction::ExpansionToggled(TreeRowKey(TAG_ROOT_NAVIGATION_KEY)),
+            )),
+            Some(NotoraAction::TagRootExpansionToggled)
         );
         assert_eq!(
             shell.translate_widget_action(&WidgetAction::Control(

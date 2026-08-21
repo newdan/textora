@@ -1,10 +1,13 @@
 use std::ops::Range;
 
+use pulldown_cmark::{Event, HeadingLevel, Options, Parser, Tag, TagEnd};
 use unicode_segmentation::UnicodeSegmentation;
 
 use crate::DocumentKind;
 
 pub const MAX_EXCERPT_GRAPHEMES: usize = 160;
+
+const DIRECT_HEADING_SEPARATOR: &str = " · ";
 
 /// 由后台索引器预计算、供卡片显示的文本摘要。
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -77,7 +80,11 @@ pub fn parse_note_text_summary(
         .and_then(|index| title_from_line(kind, lines[index]))
         .filter(|title| !title.is_empty())
         .unwrap_or_else(|| file_stem.to_owned());
-    let excerpt = first_excerpt(&lines, title_line_index, kind);
+    let excerpt = match kind {
+        DocumentKind::Text => text_excerpt(&lines, title_line_index),
+        DocumentKind::Markdown => markdown_excerpt(contents),
+        DocumentKind::Mindmap => mindmap_excerpt(contents),
+    };
 
     NoteTextSummary { title, excerpt }
 }
@@ -99,18 +106,19 @@ fn title_from_line(kind: DocumentKind, line: &str) -> Option<String> {
     }
 }
 
-fn first_excerpt(lines: &[&str], title_line_index: Option<usize>, kind: DocumentKind) -> String {
-    lines
+fn text_excerpt(lines: &[&str], title_line_index: Option<usize>) -> String {
+    let Some(first_body_line_index) = title_line_index.map(|index| index + 1) else {
+        return String::new();
+    };
+    let paragraph = lines
         .iter()
-        .enumerate()
-        .filter(|(index, _)| Some(*index) != title_line_index)
-        .map(|(_, line)| match kind {
-            DocumentKind::Text => line.trim().to_owned(),
-            DocumentKind::Markdown | DocumentKind::Mindmap => normalize_markdown_excerpt(line),
-        })
-        .find(|line| !line.is_empty())
-        .map(|line| truncate_graphemes(&line, MAX_EXCERPT_GRAPHEMES))
-        .unwrap_or_default()
+        .skip(first_body_line_index)
+        .skip_while(|line| line.trim().is_empty())
+        .take_while(|line| !line.trim().is_empty())
+        .copied()
+        .collect::<Vec<_>>()
+        .join(" ");
+    finalize_excerpt(&paragraph)
 }
 
 fn level_one_heading(line: &str) -> Option<&str> {
@@ -118,26 +126,218 @@ fn level_one_heading(line: &str) -> Option<&str> {
     (!heading.is_empty()).then_some(heading)
 }
 
-fn normalize_markdown_excerpt(line: &str) -> String {
-    let trimmed = line.trim();
-    if trimmed.is_empty() || is_markdown_heading(trimmed) {
-        return String::new();
-    }
-
-    let without_quote = trimmed.strip_prefix(">").map_or(trimmed, str::trim_start);
-    let without_list_marker = without_quote
-        .strip_prefix("- ")
-        .or_else(|| without_quote.strip_prefix("* "))
-        .map_or(without_quote, str::trim_start);
-    without_list_marker
-        .trim_matches(|character| matches!(character, '`' | '*' | '_'))
-        .trim()
-        .to_owned()
+fn markdown_excerpt(contents: &str) -> String {
+    let projection = project_markdown_excerpt(contents);
+    let selected_excerpt = projection
+        .first_visible_block
+        .unwrap_or_else(|| projection.direct_headings.join(DIRECT_HEADING_SEPARATOR));
+    finalize_excerpt(&selected_excerpt)
 }
 
-fn is_markdown_heading(line: &str) -> bool {
-    let marker_count = line.chars().take_while(|character| *character == '#').count();
-    marker_count > 0 && line.chars().nth(marker_count) == Some(' ')
+fn mindmap_excerpt(contents: &str) -> String {
+    let projection = project_markdown_excerpt(contents);
+    let selected_excerpt = projection
+        .root_visible_block
+        .unwrap_or_else(|| projection.direct_headings.join(DIRECT_HEADING_SEPARATOR));
+    finalize_excerpt(&selected_excerpt)
+}
+
+#[derive(Debug, Default, PartialEq, Eq)]
+struct MarkdownExcerptProjection {
+    first_visible_block: Option<String>,
+    root_visible_block: Option<String>,
+    direct_headings: Vec<String>,
+}
+
+#[derive(Debug, Default, PartialEq, Eq)]
+struct VisibleBlockBuffer {
+    source: String,
+    belongs_to_mindmap_root: bool,
+}
+
+#[derive(Debug, Default, PartialEq, Eq)]
+struct MarkdownExcerptParserState {
+    ignored_block_depth: usize,
+    image_depth: usize,
+    current_heading: Option<HeadingLevel>,
+    heading_source: String,
+    visible_block: Option<VisibleBlockBuffer>,
+    mindmap_root_section_open: bool,
+}
+
+fn project_markdown_excerpt(contents: &str) -> MarkdownExcerptProjection {
+    let mut projection = MarkdownExcerptProjection::default();
+    let mut parser_state = MarkdownExcerptParserState::default();
+
+    for event in Parser::new_ext(contents, excerpt_markdown_options()) {
+        match event {
+            Event::Start(tag) => handle_markdown_tag_start(tag, &mut parser_state, &mut projection),
+            Event::End(tag_end) => {
+                handle_markdown_tag_end(tag_end, &mut parser_state, &mut projection)
+            }
+            Event::Text(text) | Event::Code(text) => {
+                append_visible_text(&text, &mut parser_state);
+            }
+            Event::SoftBreak | Event::HardBreak => append_visible_text(" ", &mut parser_state),
+            Event::Html(_)
+            | Event::InlineHtml(_)
+            | Event::FootnoteReference(_)
+            | Event::TaskListMarker(_)
+            | Event::InlineMath(_)
+            | Event::DisplayMath(_)
+            | Event::Rule => {}
+        }
+    }
+    complete_visible_block(&mut parser_state, &mut projection);
+    projection
+}
+
+fn excerpt_markdown_options() -> Options {
+    Options::ENABLE_TABLES
+        | Options::ENABLE_STRIKETHROUGH
+        | Options::ENABLE_TASKLISTS
+        | Options::ENABLE_HEADING_ATTRIBUTES
+        | Options::ENABLE_YAML_STYLE_METADATA_BLOCKS
+}
+
+fn handle_markdown_tag_start(
+    tag: Tag<'_>,
+    parser_state: &mut MarkdownExcerptParserState,
+    projection: &mut MarkdownExcerptProjection,
+) {
+    match tag {
+        Tag::CodeBlock(_) | Tag::MetadataBlock(_) | Tag::Table(_) | Tag::FootnoteDefinition(_) => {
+            parser_state.ignored_block_depth += 1;
+        }
+        Tag::Image { .. } => parser_state.image_depth += 1,
+        Tag::Heading { level, .. } => {
+            complete_visible_block(parser_state, projection);
+            if level != HeadingLevel::H1 {
+                parser_state.mindmap_root_section_open = false;
+            }
+            parser_state.current_heading = Some(level);
+            parser_state.heading_source.clear();
+        }
+        Tag::Paragraph | Tag::Item => start_visible_block(parser_state),
+        Tag::BlockQuote(_)
+        | Tag::List(_)
+        | Tag::TableHead
+        | Tag::TableRow
+        | Tag::TableCell
+        | Tag::Emphasis
+        | Tag::Strong
+        | Tag::Strikethrough
+        | Tag::Link { .. }
+        | Tag::HtmlBlock
+        | Tag::DefinitionList
+        | Tag::DefinitionListTitle
+        | Tag::DefinitionListDefinition
+        | Tag::Superscript
+        | Tag::Subscript => {}
+    }
+}
+
+fn handle_markdown_tag_end(
+    tag_end: TagEnd,
+    parser_state: &mut MarkdownExcerptParserState,
+    projection: &mut MarkdownExcerptProjection,
+) {
+    match tag_end {
+        TagEnd::CodeBlock
+        | TagEnd::MetadataBlock(_)
+        | TagEnd::Table
+        | TagEnd::FootnoteDefinition => {
+            parser_state.ignored_block_depth = parser_state.ignored_block_depth.saturating_sub(1);
+        }
+        TagEnd::Image => parser_state.image_depth = parser_state.image_depth.saturating_sub(1),
+        TagEnd::Heading(level) => complete_heading(level, parser_state, projection),
+        TagEnd::Paragraph | TagEnd::Item => complete_visible_block(parser_state, projection),
+        TagEnd::BlockQuote(_)
+        | TagEnd::List(_)
+        | TagEnd::TableHead
+        | TagEnd::TableRow
+        | TagEnd::TableCell
+        | TagEnd::Emphasis
+        | TagEnd::Strong
+        | TagEnd::Strikethrough
+        | TagEnd::Link
+        | TagEnd::HtmlBlock
+        | TagEnd::DefinitionList
+        | TagEnd::DefinitionListTitle
+        | TagEnd::DefinitionListDefinition
+        | TagEnd::Superscript
+        | TagEnd::Subscript => {}
+    }
+}
+
+fn start_visible_block(parser_state: &mut MarkdownExcerptParserState) {
+    if parser_state.ignored_block_depth > 0
+        || parser_state.current_heading.is_some()
+        || parser_state.visible_block.is_some()
+    {
+        return;
+    }
+    parser_state.visible_block = Some(VisibleBlockBuffer {
+        source: String::new(),
+        belongs_to_mindmap_root: parser_state.mindmap_root_section_open,
+    });
+}
+
+fn append_visible_text(fragment: &str, parser_state: &mut MarkdownExcerptParserState) {
+    if parser_state.ignored_block_depth > 0 || parser_state.image_depth > 0 {
+        return;
+    }
+    if parser_state.current_heading.is_some() {
+        parser_state.heading_source.push_str(fragment);
+        return;
+    }
+    if let Some(visible_block) = &mut parser_state.visible_block {
+        visible_block.source.push_str(fragment);
+    }
+}
+
+fn complete_heading(
+    level: HeadingLevel,
+    parser_state: &mut MarkdownExcerptParserState,
+    projection: &mut MarkdownExcerptProjection,
+) {
+    let heading = normalize_visible_text(&parser_state.heading_source);
+    if level == HeadingLevel::H2 && !heading.is_empty() {
+        projection.direct_headings.push(heading);
+    }
+    if level == HeadingLevel::H1 {
+        parser_state.mindmap_root_section_open = true;
+    }
+    parser_state.current_heading = None;
+    parser_state.heading_source.clear();
+}
+
+fn complete_visible_block(
+    parser_state: &mut MarkdownExcerptParserState,
+    projection: &mut MarkdownExcerptProjection,
+) {
+    let Some(visible_block) = parser_state.visible_block.take() else {
+        return;
+    };
+    let visible_text = normalize_visible_text(&visible_block.source);
+    if visible_text.is_empty() {
+        return;
+    }
+    if projection.first_visible_block.is_none() {
+        projection.first_visible_block = Some(visible_text.clone());
+    }
+    if visible_block.belongs_to_mindmap_root && projection.root_visible_block.is_none() {
+        projection.root_visible_block = Some(visible_text);
+    }
+}
+
+fn finalize_excerpt(source: &str) -> String {
+    let normalized = normalize_visible_text(source);
+    truncate_graphemes(&normalized, MAX_EXCERPT_GRAPHEMES)
+}
+
+fn normalize_visible_text(source: &str) -> String {
+    source.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
 fn truncate_graphemes(value: &str, maximum_graphemes: usize) -> String {
@@ -228,12 +428,122 @@ mod tests {
     }
 
     #[test]
+    fn markdown_extracts_visible_prose_instead_of_source_markers() {
+        let summary = parse_note_text_summary(
+            DocumentKind::Markdown,
+            "fallback",
+            r#"---
+tags: [design]
+---
+# 设计文档
+
+![架构图](architecture.png)
+
+```rust
+let source_marker = "must not leak";
+```
+
+第一段包含 **重点**、[链接](https://example.com) 和 `inline code`。
+"#,
+        );
+
+        assert_eq!(summary.excerpt, "第一段包含 重点、链接 和 inline code。");
+    }
+
+    #[test]
+    fn markdown_task_list_uses_task_text_without_checkbox_marker() {
+        let summary = parse_note_text_summary(
+            DocumentKind::Markdown,
+            "fallback",
+            "# Tasks\n\n- [x] 完成索引重构\n- [ ] 补充性能测试\n",
+        );
+
+        assert_eq!(summary.excerpt, "完成索引重构");
+    }
+
+    #[test]
+    fn markdown_outline_falls_back_to_direct_section_titles() {
+        let summary = parse_note_text_summary(
+            DocumentKind::Markdown,
+            "fallback",
+            "# 产品设计\n\n## 需求分析\n\n### 边界情况\n\n## 发布计划\n",
+        );
+
+        assert_eq!(summary.excerpt, "需求分析 · 发布计划");
+    }
+
+    #[test]
     fn text_uses_first_nonempty_line_as_title() {
         let summary =
             parse_note_text_summary(DocumentKind::Text, "fallback", "\n\nFirst line\nSecond line");
 
         assert_eq!(summary.title, "First line");
         assert_eq!(summary.excerpt, "Second line");
+    }
+
+    #[test]
+    fn text_excerpt_joins_the_first_body_paragraph() {
+        let summary = parse_note_text_summary(
+            DocumentKind::Text,
+            "fallback",
+            "\n周会记录\n\n今天讨论了搜索体验，\n以及索引性能的后续安排。\n\n下一段不应进入摘要。",
+        );
+
+        assert_eq!(summary.title, "周会记录");
+        assert_eq!(summary.excerpt, "今天讨论了搜索体验， 以及索引性能的后续安排。");
+    }
+
+    #[test]
+    fn mindmap_prefers_root_note_over_branch_titles() {
+        let summary = parse_note_text_summary(
+            DocumentKind::Mindmap,
+            "fallback",
+            r#"```toml mindmap
+theme = "dawn"
+```
+
+# 产品规划
+
+这是根节点的 **整体说明**。
+
+## 需求分析
+
+子节点备注不应抢占根备注。
+
+## 发布计划
+"#,
+        );
+
+        assert_eq!(summary.title, "产品规划");
+        assert_eq!(summary.excerpt, "这是根节点的 整体说明。");
+    }
+
+    #[test]
+    fn mindmap_without_root_note_joins_direct_branch_titles() {
+        let summary = parse_note_text_summary(
+            DocumentKind::Mindmap,
+            "fallback",
+            r#"```toml mindmap
+theme = "dawn"
+```
+
+# 产品规划
+
+## 需求分析
+
+```toml node
+priority = "P1"
+```
+
+子节点备注不是根备注。
+
+### 边界情况
+
+## 发布计划
+"#,
+        );
+
+        assert_eq!(summary.excerpt, "需求分析 · 发布计划");
     }
 
     #[test]

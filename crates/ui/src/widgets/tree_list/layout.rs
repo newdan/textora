@@ -1,6 +1,6 @@
 use crate::core::Rect;
 
-use super::{TreeRowEditorInput, TreeRowExpansion, TreeRowInput};
+use super::{TreeRowEditorInput, TreeRowInput};
 
 pub const TREE_ROW_HEIGHT_LOGICAL: f32 = 28.0;
 pub const TREE_ROW_FONT_SIZE_LOGICAL: f32 = 13.0;
@@ -81,9 +81,7 @@ pub(super) fn build_tree_layout(
                 expander_size,
                 expander_size,
             );
-            if row.expansion != TreeRowExpansion::Leaf {
-                cursor_x += expander_size + icon_gap;
-            }
+            cursor_x += expander_size + icon_gap;
 
             let icon_rect = row.icon.as_ref().map(|_| {
                 let icon_rect = Rect::new(
@@ -143,8 +141,9 @@ pub(super) fn build_tree_layout(
             });
             let label_right =
                 badge_rect.map(|badge| badge.x - badge_padding).unwrap_or(trailing_content_left);
+            let label_left = cursor_x.min(label_right);
             let label_rect =
-                Rect::new(cursor_x, row_rect.y, (label_right - cursor_x).max(0.0), row_height);
+                Rect::new(label_left, row_rect.y, (label_right - label_left).max(0.0), row_height);
 
             TreeRowLayout {
                 row_rect,
@@ -217,7 +216,7 @@ mod tests {
     }
 
     #[test]
-    fn leaf_icon_does_not_reserve_an_empty_expander_slot() {
+    fn leaf_icon_reserves_an_empty_expander_slot_for_sibling_alignment() {
         let mut leaf = row(0);
         leaf.icon = Some("file".to_owned());
         let list_rect = Rect::new(12.0, 20.0, 180.0, 100.0);
@@ -226,7 +225,10 @@ mod tests {
 
         assert_eq!(
             layout.rows[0].icon_rect.expect("leaf icon should have layout").x,
-            list_rect.x + TREE_ROW_HORIZONTAL_PADDING_LOGICAL
+            list_rect.x
+                + TREE_ROW_HORIZONTAL_PADDING_LOGICAL
+                + TREE_EXPANDER_SIZE_LOGICAL
+                + TREE_ICON_GAP_LOGICAL
         );
     }
 
