@@ -307,8 +307,9 @@ impl FrameRuntime {
         let mut model =
             NotoraRenderModel::from_state_and_settings(input.state, input.product_settings);
         model.settings_overlay.persistence = input.persistence_view;
-        model.editor_pane =
-            if input.editor_is_active { EditorPaneState::Active } else { EditorPaneState::Empty };
+        if input.editor_is_active {
+            model.editor_pane = EditorPaneState::Active;
+        }
         if input.editor_is_active
             && let Some(tab_id) = document_runtime.editor().active_tab_id()
         {
