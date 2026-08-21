@@ -124,10 +124,14 @@ impl ActionRuntime {
         self.state.invalidate_document_selection();
     }
 
-    pub(super) fn restore_expanded_directories(
+    pub(super) fn restore_navigation_expansion(
         &mut self,
+        workspace_root_expanded: bool,
+        tag_root_expanded: bool,
         directories: impl IntoIterator<Item = std::path::PathBuf>,
     ) {
+        self.state.library.navigation_tree.workspace_root_expanded = workspace_root_expanded;
+        self.state.library.navigation_tree.tag_root_expanded = tag_root_expanded;
         self.state.library.navigation_tree.expanded_directories.extend(directories);
     }
 
@@ -189,5 +193,19 @@ mod tests {
 
         assert!(matches!(runtime.next_action(), Some(NotoraAction::SearchCommitted { .. })));
         runtime.finish_draining();
+    }
+
+    #[test]
+    fn navigation_expansion_restore_applies_root_and_directory_states_together() {
+        let mut runtime = ActionRuntime::new(crate::NotoraState::default());
+
+        runtime.restore_navigation_expansion(false, true, [std::path::PathBuf::from("plans")]);
+
+        assert!(!runtime.state().library.navigation_tree.workspace_root_expanded);
+        assert!(runtime.state().library.navigation_tree.tag_root_expanded);
+        assert_eq!(
+            runtime.state().library.navigation_tree.expanded_directories,
+            [std::path::PathBuf::from("plans")].into_iter().collect()
+        );
     }
 }

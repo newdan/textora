@@ -1591,6 +1591,8 @@ fn action_requires_session_persistence(action: &NotoraAction) -> bool {
     matches!(
         action,
         NotoraAction::NavigationSelected(_)
+            | NotoraAction::WorkspaceRootExpansionToggled
+            | NotoraAction::TagRootExpansionToggled
             | NotoraAction::NavigationExpansionToggled(_)
             | NotoraAction::CardSelected(_)
             | NotoraAction::CardActivated(_)
@@ -2150,6 +2152,8 @@ mod session_restore_tests {
         assert!(action_requires_session_persistence(&NotoraAction::NavigationSelected(
             notora_core::NavigationScope::Starred
         )));
+        assert!(action_requires_session_persistence(&NotoraAction::WorkspaceRootExpansionToggled));
+        assert!(action_requires_session_persistence(&NotoraAction::TagRootExpansionToggled));
         assert!(action_requires_session_persistence(&NotoraAction::CardSelected(
             notora_core::DocumentIdentity::Note(notora_core::NoteId::generate())
         )));
@@ -2643,6 +2647,18 @@ impl NotoraRuntime {
             external_paths,
             last_navigation_scope: (&self.action_runtime.state().library.navigation_scope).into(),
             last_document,
+            workspace_root_expanded: self
+                .action_runtime
+                .state()
+                .library
+                .navigation_tree
+                .workspace_root_expanded,
+            tag_root_expanded: self
+                .action_runtime
+                .state()
+                .library
+                .navigation_tree
+                .tag_root_expanded,
             expanded_directories: self
                 .action_runtime
                 .state()
@@ -2788,7 +2804,11 @@ impl NotoraRuntime {
         };
         self.restore_external_paths(session.external_paths, saved_external_path);
         if workspace_restored {
-            self.action_runtime.restore_expanded_directories(session.expanded_directories);
+            self.action_runtime.restore_navigation_expansion(
+                session.workspace_root_expanded,
+                session.tag_root_expanded,
+                session.expanded_directories,
+            );
             self.dispatch_action(NotoraAction::NavigationSelected(
                 session.last_navigation_scope.into(),
             ));
@@ -4767,6 +4787,18 @@ mod tests {
         assert_eq!(geometry.y_px, crate::session::WindowGeometry::default().y_px);
         assert_eq!(geometry.width_px, 1_024.0);
         assert_eq!(geometry.height_px, 768.0);
+    }
+
+    #[test]
+    fn session_capture_includes_navigation_root_expansion_states() {
+        let mut app = app();
+        app.dispatch_action(NotoraAction::WorkspaceRootExpansionToggled);
+        app.dispatch_action(NotoraAction::TagRootExpansionToggled);
+
+        let session = app.capture_product_session();
+
+        assert!(!session.workspace_root_expanded);
+        assert!(session.tag_root_expanded);
     }
 
     #[test]

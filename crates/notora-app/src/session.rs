@@ -97,6 +97,8 @@ pub struct ProductSession {
     pub workspace_id: Option<WorkspaceId>,
     pub external_paths: Vec<PathBuf>,
     pub last_navigation_scope: SavedNavigationScope,
+    pub workspace_root_expanded: bool,
+    pub tag_root_expanded: bool,
     pub expanded_directories: Vec<PathBuf>,
     pub navigation_width_logical: f32,
     pub card_list_width_logical: f32,
@@ -113,6 +115,8 @@ impl Default for ProductSession {
             workspace_id: None,
             external_paths: Vec::new(),
             last_navigation_scope: SavedNavigationScope::WorkspaceRoot,
+            workspace_root_expanded: true,
+            tag_root_expanded: false,
             expanded_directories: Vec::new(),
             navigation_width_logical: 220.0,
             card_list_width_logical: 340.0,
@@ -302,6 +306,8 @@ mod tests {
                 directory.path().join("missing.md"),
             ],
             last_navigation_scope: SavedNavigationScope::Starred,
+            workspace_root_expanded: false,
+            tag_root_expanded: true,
             last_document: Some(SavedDocument::Note { note_id }),
             expanded_directories: vec![PathBuf::from("plans"), PathBuf::from("plans/q3")],
             navigation_pane_visibility: NavigationPaneVisibility::Collapsed,
@@ -318,6 +324,8 @@ mod tests {
         assert_eq!(loaded.diagnostic, None);
         assert_eq!(loaded.session.external_paths, vec![external_path, common_text_path]);
         assert_eq!(loaded.session.last_navigation_scope, SavedNavigationScope::Starred);
+        assert!(!loaded.session.workspace_root_expanded);
+        assert!(loaded.session.tag_root_expanded);
         assert_eq!(loaded.session.last_document, Some(SavedDocument::Note { note_id }));
         assert_eq!(loaded.session.navigation_pane_visibility, NavigationPaneVisibility::Collapsed);
         assert_eq!(
@@ -357,6 +365,8 @@ mod tests {
         let loaded = load_product_session(&path);
         assert_eq!(loaded.diagnostic, None);
         assert_eq!(loaded.session.schema_version, super::SESSION_SCHEMA_VERSION);
+        assert!(loaded.session.workspace_root_expanded);
+        assert!(!loaded.session.tag_root_expanded);
         assert_eq!(
             loaded.session.navigation_width_logical,
             crate::shell::layout::MAXIMUM_NAVIGATION_WIDTH_LOGICAL
