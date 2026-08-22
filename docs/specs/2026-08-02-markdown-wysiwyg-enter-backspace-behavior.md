@@ -25,6 +25,15 @@ WYSIWYG 编辑视图把 Enter 解释为“新段落”，而不是源码编辑�
 | ATX 标题末尾 | `# title|` | `# title\n\n|` | 离开标题并创建普通空段 |
 | 标题与下一块仅一个换行 | `# title|\nnext` | `# title\n\n|\nnext` | 必须补两个换行，不能把光标送入 `next` |
 | 标题与下一块已有块分隔 | `# title|\n\nnext` | `# title\n\n|\nnext` | 只补一个换行，形成一个可编辑空段 |
+| 段内单空格前 | `left| right` | `left\n\n|right` | 吃掉那一个空格 |
+| 段内单空格后 | `left |right` | `left\n\n|right` | 同上 |
+| 列表硬换行边界 | `- first\|\n  second` | `- first\n- |second` | 不残留硬换行反斜杠或续行缩进 |
+| 列表懒延续换行 | `- item|\npara` | `- item\n- |para` | 替换该换行，不插入额外空行 |
+| 引用硬换行边界 | `> first\|\n> second` | `> first\n> |second` | 不残留硬换行反斜杠或重复引用 marker |
+| 引用懒延续换行 | `> first|\nsecond` | `> first\n> |second` | 后行补显式 `>` |
+| 表格非末行 | 格内 | 源码不变，光标到下一行同列 | 保持既有跳格行为 |
+| 表格末行有内容 | `| b |` 内 | 表末多一行 `|  |` | 列数与当前行相同 |
+| 表格空表体末行 | 空格内 | 删除该行，表后写入 `\n\n|` | 不删除表头 |
 
 ## Backspace 行为矩阵
 
@@ -37,6 +46,9 @@ WYSIWYG 编辑视图把 Enter 解释为“新段落”，而不是源码编辑�
 | 普通软换行后的行首 | `left\n|right` | `left|right` | 删除一个源码换行 |
 | 标题后的普通段首 | `# title\n\n|paragraph` | `# title|paragraph` | 删除完整块边界，将段落并入标题 |
 | 标题 marker 后 | `### |title` | `|title` | 优先去掉标题样式，不触发跨块合并 |
+| 列表硬换行下行首 | `- first\\\n  |second` | `- first|second` | 先于 marker 删除 |
+| 引用硬换行下行首 | `> first\\\n> |second` | `> first|second` | 先于去掉 `>` |
+| 硬换行跨新列表项 | `- first\\\n- |second` | 不合并两项 | 交给既有 marker 或默认路径 |
 
 CRLF 文档中的一个逻辑换行是完整的 `\r\n` 序列。Backspace 删除块边界时必须按逻辑换行删除，不能留下孤立的 `\r`。
 
@@ -59,7 +71,10 @@ CRLF 文档中的一个逻辑换行是完整的 `\r\n` 序列。Backspace 删除
 4. Backspace 在非空普通段落的物理行首，应删除紧邻光标前的完整换行 run。
 5. 空行 Backspace、段首 Backspace、单字符删除和 marker 删除必须按此优先级分派，避免 marker 行被误并入上一块。
 6. Enter/Backspace 的核心段落与 ATX 标题场景应满足可逆性测试；已有软换行的规范化场景只要求视觉语义正确，不要求逐字节恢复原始换行形式。
+7. 在单个 ASCII 空格边界拆段时，Enter 会消费该空格；后续 Backspace 只合并块边界，不恢复已消费的空格。
+8. 列表和引用必须复用段落的硬换行识别规则，包括反斜杠奇偶性、至少两个行尾空格以及 LF/CRLF 边界。
+9. 表格末行 Enter 必须产生源码变更：有内容时按当前列数新增空行，空表体行时删除该行并退出表格。
 
 ## 当前范围
 
-本文固定普通段落、ATX 标题、块间空段及其 Backspace 行为。列表、任务列表、引用和表格继续使用既有专用结构编辑策略；Shift+Enter、Setext 标题源码重写和代码块内部换行不在本次修改范围内。
+本文固定普通段落、ATX 标题、Setext 标题无选区行为、列表项、任务列表项、引用行、表格单元格、块间空段及其 Backspace 行为。Shift+Enter、HTML `<br>`、列表项内新开段落和 Setext 标题源码重写不在本次修改范围内；代码块继续使用其既有专用策略。

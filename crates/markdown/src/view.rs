@@ -8670,7 +8670,7 @@ mod tests {
     fn table_cell_empty_insertion() {
         let src = "| A |\n|---|";
         let ctx = test_enter_context(src, 3);
-        if let EnterContext::TableCell { next_cell_start } = ctx {
+        if let EnterContext::TableCell { next_cell_start, .. } = ctx {
             assert_eq!(next_cell_start, None);
         } else {
             panic!("Expected TableCell");

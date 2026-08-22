@@ -62,6 +62,9 @@ fn augment_backspace(source: &str, current_byte: usize) -> Option<EditAugmentati
     if let Some(aug) = backspace_at_atx_heading_marker_start(source, current_byte) {
         return Some(aug);
     }
+    if let Some(aug) = backspace_join_hard_break_line(source, current_byte) {
+        return Some(aug);
+    }
     if let Some(aug) = backspace_paragraph_boundary(source, current_byte) {
         return Some(aug);
     }
@@ -510,6 +513,50 @@ fn previous_non_empty_line_end(source: &str, current_byte: usize) -> usize {
     previous_line_end
 }
 
+fn backspace_join_hard_break_line(source: &str, current_byte: usize) -> Option<EditAugmentation> {
+    let (line_start, _, _) = locate_source_line_bounds(source, current_byte)?;
+    if !continuation_prefix_is_joinable(source.get(line_start..current_byte)?)
+        || line_starts_new_sibling_block(source, line_start)
+    {
+        return None;
+    }
+
+    let newline_width = newline_sequence_width_before(source, line_start)?;
+    let previous_content_end = line_start - newline_width;
+    let marker = hard_break_marker_ending_at(source, previous_content_end)?;
+    let aug = EditAugmentation {
+        insert_text: Some(String::new()),
+        replace_range: Some(marker.start..current_byte),
+        cursor_byte_after: marker.start,
+    };
+    debug_assert_augmentation(&aug, source);
+    Some(aug)
+}
+
+fn continuation_prefix_is_joinable(prefix: &str) -> bool {
+    prefix.bytes().all(|byte| matches!(byte, b' ' | b'\t' | b'>'))
+}
+
+fn line_starts_new_sibling_block(source: &str, line_start: usize) -> bool {
+    let bytes = source.as_bytes();
+    let mut marker_start = line_start;
+    let mut leading_space_count = 0;
+    while bytes.get(marker_start) == Some(&b' ') && leading_space_count < MAX_LEADING_BLOCK_INDENT {
+        marker_start += 1;
+        leading_space_count += 1;
+    }
+
+    if parse_list_marker(source, marker_start).is_some()
+        || heading_source_is_atx(source, line_start)
+    {
+        return true;
+    }
+
+    source.get(marker_start..).is_some_and(|line_suffix| {
+        ["```", "~~~", "***", "---", "___"].iter().any(|marker| line_suffix.starts_with(marker))
+    })
+}
+
 /// 用于 list / blockquote 的"续 marker"：插入 `"\n{indent}{marker}"`。
 fn emit_marker_break(
     source: &str,
@@ -524,6 +571,23 @@ fn emit_marker_break(
         insert_text: Some(insertion),
         cursor_byte_after: cursor_after,
         ..Default::default()
+    };
+    debug_assert_augmentation(&aug, source);
+    aug
+}
+
+fn emit_marker_break_replacing(
+    source: &str,
+    replaced: std::ops::Range<usize>,
+    indent: &str,
+    marker: &str,
+) -> EditAugmentation {
+    let newline = preferred_newline_sequence(source, replaced.start);
+    let insertion = format!("{newline}{indent}{marker}");
+    let aug = EditAugmentation {
+        cursor_byte_after: replaced.start + insertion.len(),
+        replace_range: Some(replaced),
+        insert_text: Some(insertion),
     };
     debug_assert_augmentation(&aug, source);
     aug
@@ -581,11 +645,25 @@ fn enter_context_augmentation(
         EnterContext::BlockQuoteLine { continuation_prefix, empty } => {
             blockquote_enter_augmentation(source, current_byte, &continuation_prefix, empty)
         }
-        EnterContext::TableCell { next_cell_start } => Some(EditAugmentation {
-            insert_text: Some(String::new()),
-            replace_range: None,
-            cursor_byte_after: next_cell_start.unwrap_or(current_byte),
-        }),
+        EnterContext::TableCell {
+            next_cell_start,
+            column_count,
+            row_is_empty,
+            is_header_row,
+            row_line_end,
+        } => {
+            if let Some(next_cell_start) = next_cell_start {
+                Some(EditAugmentation {
+                    insert_text: Some(String::new()),
+                    replace_range: None,
+                    cursor_byte_after: next_cell_start,
+                })
+            } else if row_is_empty && !is_header_row {
+                table_exit_empty_row_augmentation(source, row_line_end)
+            } else {
+                Some(table_insert_row_augmentation(source, row_line_end, column_count))
+            }
+        }
         EnterContext::EmptyBlockSeparatorLine => Some(emit_source_newline(source, current_byte)),
         EnterContext::IndentedCodeBlock { continuation_prefix } => {
             Some(indented_code_block_enter_augmentation(source, current_byte, &continuation_prefix))
@@ -607,6 +685,9 @@ fn paragraph_enter_augmentation(source: &str, current_byte: usize) -> EditAugmen
         }
         return emit_source_newline(source, current_byte);
     }
+    if let Some(space_range) = adjacent_split_space_range(source, current_byte) {
+        return emit_block_break_replacing(source, space_range);
+    }
     emit_block_break(source, current_byte)
 }
 
@@ -621,10 +702,12 @@ fn heading_enter_augmentation(
 
     // Heading 中间：在当前光标处分割标题，后半段成为普通段落。
     let insertion = String::from(preferred_newline_sequence(source, current_byte));
+    let replace_range =
+        adjacent_split_space_range(source, current_byte).unwrap_or(current_byte..current_byte);
     let aug = EditAugmentation {
         insert_text: Some(insertion.clone()),
-        replace_range: Some(current_byte..current_byte),
-        cursor_byte_after: current_byte + insertion.len(),
+        cursor_byte_after: replace_range.start + insertion.len(),
+        replace_range: Some(replace_range),
     };
     debug_assert_augmentation(&aug, source);
     Some(aug)
@@ -662,6 +745,32 @@ fn list_item_enter_augmentation(
     if empty {
         return emit_remove_current_line(source, current_byte);
     }
+
+    if let Some(boundary) = hard_break_boundary_after(source, current_byte) {
+        let continuation_content_prefix =
+            format!("{indent}{}", " ".repeat(continuation_marker.chars().count()));
+        let replaced = extend_range_over_prefix(source, boundary, &continuation_content_prefix);
+        return Some(emit_marker_break_replacing(source, replaced, indent, continuation_marker));
+    }
+
+    if let Some(newline_width) = newline_sequence_width_at(source, current_byte) {
+        let next_line_start = current_byte + newline_width;
+        if !next_source_line_has_list_marker(source, next_line_start) {
+            return Some(emit_marker_break_replacing(
+                source,
+                current_byte..next_line_start,
+                indent,
+                continuation_marker,
+            ));
+        }
+    }
+
+    if newline_sequence_width_before(source, current_byte).is_some()
+        && !next_source_line_has_list_marker(source, current_byte)
+    {
+        return Some(emit_inline_marker(source, current_byte, indent, continuation_marker));
+    }
+
     Some(emit_marker_break(source, current_byte, indent, continuation_marker))
 }
 
@@ -674,7 +783,98 @@ fn blockquote_enter_augmentation(
     if empty {
         return emit_remove_current_line(source, current_byte);
     }
+
+    if let Some(boundary) = hard_break_boundary_after(source, current_byte) {
+        let replaced = extend_range_over_prefix(source, boundary, continuation_prefix);
+        return Some(emit_marker_break_replacing(source, replaced, "", continuation_prefix));
+    }
+
+    if let Some(newline_width) = newline_sequence_width_at(source, current_byte) {
+        let next_line_start = current_byte + newline_width;
+        if !next_source_line_has_blockquote_marker(source, next_line_start) {
+            return Some(emit_marker_break_replacing(
+                source,
+                current_byte..next_line_start,
+                "",
+                continuation_prefix,
+            ));
+        }
+    }
+
+    if newline_sequence_width_before(source, current_byte).is_some()
+        && !next_source_line_has_blockquote_marker(source, current_byte)
+    {
+        return Some(emit_inline_marker(source, current_byte, "", continuation_prefix));
+    }
+
     Some(emit_marker_break(source, current_byte, "", continuation_prefix))
+}
+
+fn extend_range_over_prefix(
+    source: &str,
+    mut range: std::ops::Range<usize>,
+    prefix: &str,
+) -> std::ops::Range<usize> {
+    if source.get(range.end..).is_some_and(|suffix| suffix.starts_with(prefix)) {
+        range.end += prefix.len();
+    }
+    range
+}
+
+fn emit_inline_marker(
+    source: &str,
+    current_byte: usize,
+    indent: &str,
+    marker: &str,
+) -> EditAugmentation {
+    let insertion = format!("{indent}{marker}");
+    let aug = EditAugmentation {
+        cursor_byte_after: current_byte + insertion.len(),
+        replace_range: Some(current_byte..current_byte),
+        insert_text: Some(insertion),
+    };
+    debug_assert_augmentation(&aug, source);
+    aug
+}
+
+fn next_source_line_marker_start(source: &str, line_start: usize) -> Option<usize> {
+    let bytes = source.as_bytes();
+    let mut marker_start = line_start;
+    let mut leading_space_count = 0;
+    while bytes.get(marker_start) == Some(&b' ') && leading_space_count < MAX_LEADING_BLOCK_INDENT {
+        marker_start += 1;
+        leading_space_count += 1;
+    }
+    (marker_start <= source.len()).then_some(marker_start)
+}
+
+fn next_source_line_has_list_marker(source: &str, line_start: usize) -> bool {
+    next_source_line_marker_start(source, line_start)
+        .is_some_and(|marker_start| parse_list_marker(source, marker_start).is_some())
+}
+
+fn next_source_line_has_blockquote_marker(source: &str, line_start: usize) -> bool {
+    next_source_line_marker_start(source, line_start)
+        .is_some_and(|marker_start| source.as_bytes().get(marker_start) == Some(&b'>'))
+}
+
+fn adjacent_split_space_range(source: &str, current_byte: usize) -> Option<std::ops::Range<usize>> {
+    let bytes = source.as_bytes();
+    if current_byte > 0 && bytes.get(current_byte - 1) == Some(&b' ') {
+        if (current_byte >= 2 && bytes.get(current_byte - 2) == Some(&b' '))
+            || bytes.get(current_byte) == Some(&b' ')
+        {
+            return None;
+        }
+        return Some(current_byte - 1..current_byte);
+    }
+    if bytes.get(current_byte) == Some(&b' ') {
+        if bytes.get(current_byte + 1) == Some(&b' ') {
+            return None;
+        }
+        return Some(current_byte..current_byte + 1);
+    }
+    None
 }
 
 fn cursor_touches_source_newline(source: &str, current_byte: usize) -> bool {
@@ -714,6 +914,10 @@ pub enum EnterContext {
     },
     TableCell {
         next_cell_start: Option<usize>,
+        column_count: usize,
+        row_is_empty: bool,
+        is_header_row: bool,
+        row_line_end: usize,
     },
     EmptyBlockSeparatorLine,
     Other,
@@ -729,6 +933,7 @@ struct ItemFrame {
 
 struct TableFrame {
     cell_ranges: Vec<Vec<std::ops::Range<usize>>>,
+    table_end: usize,
 }
 
 struct CodeBlockFrame {
@@ -922,7 +1127,7 @@ pub fn classify_enter_context(source: &str, current_byte: usize) -> EnterContext
             }
             Event::Start(Tag::Table(_)) => {
                 mark_item_content_seen(&mut item_stack);
-                table = Some(TableFrame { cell_ranges: Vec::new() });
+                table = Some(TableFrame { cell_ranges: Vec::new(), table_end: range.end });
             }
             Event::Start(Tag::TableHead) | Event::Start(Tag::TableRow) => {
                 if let Some(t) = table.as_mut() {
@@ -944,6 +1149,11 @@ pub fn classify_enter_context(source: &str, current_byte: usize) -> EnterContext
                     cell.end = range.end;
                 }
             }
+            Event::End(TagEnd::Table) => {
+                if let Some(table_frame) = table.as_mut() {
+                    table_frame.table_end = range.end;
+                }
+            }
             Event::Text(text) | Event::Code(text) | Event::Html(text) | Event::InlineHtml(text)
                 if !text.is_empty() =>
             {
@@ -962,7 +1172,33 @@ pub fn classify_enter_context(source: &str, current_byte: usize) -> EnterContext
                         .get(row_idx + 1)
                         .and_then(|next_row| next_row.get(col_idx))
                         .map(|next_cell| table_cell_content_start(source, next_cell));
-                    return EnterContext::TableCell { next_cell_start };
+                    let column_count = row.len();
+                    let row_is_empty = row.iter().all(|row_cell| {
+                        source[row_cell.clone()]
+                            .bytes()
+                            .all(|byte| matches!(byte, b' ' | b'\t' | b'|' | b'\r' | b'\n'))
+                    });
+                    let is_header_row = row_idx == 0;
+                    let last_cell_end = row.last().map_or(cell.end, |last_cell| last_cell.end);
+                    let last_row_content_end = content_end_without_trailing_newline(
+                        source,
+                        0..t.table_end.max(last_cell_end),
+                    );
+                    let row_probe = if next_cell_start.is_none() {
+                        last_row_content_end.saturating_sub(1)
+                    } else {
+                        last_cell_end.saturating_sub(1)
+                    };
+                    let row_line_end = locate_source_line_bounds(source, row_probe)
+                        .map(|(_, _, line_end)| source_line_content_end(source, line_end))
+                        .unwrap_or(last_cell_end);
+                    return EnterContext::TableCell {
+                        next_cell_start,
+                        column_count,
+                        row_is_empty,
+                        is_header_row,
+                        row_line_end,
+                    };
                 }
             }
         }
@@ -1080,6 +1316,50 @@ pub(crate) fn table_cell_content_start(source: &str, cell_range: &std::ops::Rang
         .take_while(|source_byte| matches!(*source_byte, b' ' | b'\t' | b'\r' | b'\n' | b'|'))
         .count();
     cell_range.start + leading_non_content
+}
+
+fn table_insert_row_augmentation(
+    source: &str,
+    row_line_end: usize,
+    column_count: usize,
+) -> EditAugmentation {
+    let newline = preferred_newline_sequence(source, row_line_end);
+    let mut row_source = "|  ".repeat(column_count);
+    row_source.push('|');
+
+    let (insert_at, insertion, first_cell_content_offset) =
+        if let Some(newline_width) = newline_sequence_width_at(source, row_line_end) {
+            (row_line_end + newline_width, row_source, 2)
+        } else {
+            let insertion = format!("{newline}{row_source}");
+            (row_line_end, insertion, newline.len() + 2)
+        };
+    let aug = EditAugmentation {
+        cursor_byte_after: insert_at + first_cell_content_offset,
+        replace_range: Some(insert_at..insert_at),
+        insert_text: Some(insertion),
+    };
+    debug_assert_augmentation(&aug, source);
+    aug
+}
+
+fn table_exit_empty_row_augmentation(
+    source: &str,
+    row_line_end: usize,
+) -> Option<EditAugmentation> {
+    let row_probe = row_line_end.saturating_sub(1);
+    let (row_start, _, _) = locate_source_line_bounds(source, row_probe)?;
+    let preceding_newline_width = newline_sequence_width_before(source, row_start)?;
+    let replace_start = row_start - preceding_newline_width;
+    let newline = preferred_newline_sequence(source, replace_start);
+    let insertion = newline.repeat(BLOCK_BOUNDARY_NEWLINE_COUNT);
+    let aug = EditAugmentation {
+        cursor_byte_after: replace_start + insertion.len(),
+        replace_range: Some(replace_start..row_line_end),
+        insert_text: Some(insertion),
+    };
+    debug_assert_augmentation(&aug, source);
+    Some(aug)
 }
 
 // ─── 光标位置附近的源码切分 ───────────────────────────────────────────────
@@ -1453,7 +1733,7 @@ mod tests {
     }
 
     #[test]
-    fn backspace_at_start_of_split_paragraph_restores_original_paragraph() {
+    fn backspace_at_start_of_space_split_paragraph_does_not_restore_consumed_space() {
         let original_source = "hello world";
         let split_byte = "hello ".len();
         let enter_augmentation = augment_edit(original_source, split_byte, AugmentKind::Enter)
@@ -1472,8 +1752,8 @@ mod tests {
             &backspace_augmentation,
         );
 
-        assert_eq!(restored_source, original_source);
-        assert_eq!(backspace_augmentation.cursor_byte_after, split_byte);
+        assert_eq!(restored_source, "helloworld");
+        assert_eq!(backspace_augmentation.cursor_byte_after, "hello".len());
     }
 
     #[test]
@@ -1505,7 +1785,6 @@ mod tests {
     #[test]
     fn enter_then_backspace_restores_plain_paragraph_and_heading_cases() {
         let cases = [
-            ("hello world", "hello ".len()),
             ("hello", "hello".len()),
             ("# hello world", "# he".len()),
             ("# Heading", "# Heading".len()),
@@ -2187,5 +2466,301 @@ mod tests {
         assert_eq!(augmentation.replace_range, None);
         assert_eq!(augmentation.cursor_byte_after, current_byte + 1);
         assert_eq!(edited_source, "```\ncode\n```\n\n\npara");
+    }
+
+    #[test]
+    fn list_enter_at_backslash_hard_break_promotes_it_to_a_new_item() {
+        let source = "- first\\\n  second";
+        let current_byte = "- first".len();
+
+        let augmentation = augment_edit(source, current_byte, AugmentKind::Enter)
+            .expect("Enter at a list hard break should split into two items");
+        let edited_source = apply_augmentation_at(source, current_byte, &augmentation);
+
+        assert_eq!(edited_source, "- first\n- second");
+        assert_eq!(augmentation.cursor_byte_after, "- first\n- ".len());
+    }
+
+    #[test]
+    fn list_enter_at_odd_backslash_hard_break_preserves_escaped_backslashes() {
+        let source = "- first\\\\\\\n  second";
+        let current_byte = "- first".len();
+
+        let augmentation = augment_edit(source, current_byte, AugmentKind::Enter)
+            .expect("Enter at an odd backslash run should keep escaped backslashes");
+        let edited_source = apply_augmentation_at(source, current_byte, &augmentation);
+
+        assert_eq!(edited_source, "- first\\\\\n- second");
+    }
+
+    #[test]
+    fn list_enter_at_double_space_hard_break_promotes_it_to_a_new_item() {
+        let source = "- first  \n  second";
+        let current_byte = "- first".len();
+
+        let augmentation = augment_edit(source, current_byte, AugmentKind::Enter)
+            .expect("Enter at a double-space list hard break should split into two items");
+        let edited_source = apply_augmentation_at(source, current_byte, &augmentation);
+
+        assert_eq!(edited_source, "- first\n- second");
+    }
+
+    #[test]
+    fn quote_enter_at_backslash_hard_break_promotes_it_to_an_explicit_line() {
+        let source = "> first\\\n> second";
+        let current_byte = "> first".len();
+
+        let augmentation = augment_edit(source, current_byte, AugmentKind::Enter)
+            .expect("Enter at a quote hard break should continue with an explicit marker");
+        let edited_source = apply_augmentation_at(source, current_byte, &augmentation);
+
+        assert_eq!(edited_source, "> first\n> second");
+        assert_eq!(augmentation.cursor_byte_after, "> first\n> ".len());
+    }
+
+    #[test]
+    fn quote_enter_at_crlf_hard_break_keeps_crlf_line_endings() {
+        let source = "> first\\\r\n> second";
+        let current_byte = "> first".len();
+
+        let augmentation = augment_edit(source, current_byte, AugmentKind::Enter)
+            .expect("Enter at a CRLF quote hard break should keep CRLF");
+        let edited_source = apply_augmentation_at(source, current_byte, &augmentation);
+
+        assert_eq!(edited_source, "> first\r\n> second");
+    }
+
+    #[test]
+    fn list_enter_before_even_backslashes_does_not_treat_them_as_hard_break() {
+        let source = "- first\\\\\n  second";
+        let current_byte = "- first".len();
+
+        let augmentation = augment_edit(source, current_byte, AugmentKind::Enter)
+            .expect("even backslashes are not a hard break");
+        let edited_source = apply_augmentation_at(source, current_byte, &augmentation);
+
+        assert_ne!(edited_source, "- first\n- second");
+        assert!(edited_source.contains('\\'), "escaped backslashes must remain: {edited_source:?}");
+    }
+
+    #[test]
+    fn list_backspace_after_backslash_hard_break_joins_visual_lines() {
+        let source = "- first\\\n  second";
+        let current_byte = source.find("second").expect("fixture contains second");
+
+        let augmentation = augment_edit(source, current_byte, AugmentKind::Backspace)
+            .expect("Backspace after a list hard break should join both visual lines");
+        let edited_source = apply_augmentation_at(source, current_byte, &augmentation);
+
+        assert_eq!(edited_source, "- firstsecond");
+        assert_eq!(augmentation.cursor_byte_after, "- first".len());
+    }
+
+    #[test]
+    fn list_backspace_after_double_space_hard_break_joins_visual_lines() {
+        let source = "- first  \n  second";
+        let current_byte = source.find("second").expect("fixture contains second");
+
+        let augmentation = augment_edit(source, current_byte, AugmentKind::Backspace)
+            .expect("Backspace after a double-space list hard break should join both visual lines");
+        let edited_source = apply_augmentation_at(source, current_byte, &augmentation);
+
+        assert_eq!(edited_source, "- firstsecond");
+    }
+
+    #[test]
+    fn quote_backspace_after_backslash_hard_break_joins_visual_lines() {
+        let source = "> first\\\n> second";
+        let current_byte = source.find("second").expect("fixture contains second");
+
+        let augmentation = augment_edit(source, current_byte, AugmentKind::Backspace)
+            .expect("Backspace after a quote hard break should join both visual lines");
+        let edited_source = apply_augmentation_at(source, current_byte, &augmentation);
+
+        assert_eq!(edited_source, "> firstsecond");
+        assert_eq!(augmentation.cursor_byte_after, "> first".len());
+    }
+
+    #[test]
+    fn quote_backspace_after_crlf_hard_break_removes_the_complete_boundary() {
+        let source = "> first\\\r\n> second";
+        let current_byte = source.find("second").expect("fixture contains second");
+
+        let augmentation = augment_edit(source, current_byte, AugmentKind::Backspace)
+            .expect("CRLF quote hard break backspace should drop the whole boundary");
+        let edited_source = apply_augmentation_at(source, current_byte, &augmentation);
+
+        assert_eq!(edited_source, "> firstsecond");
+    }
+
+    #[test]
+    fn backspace_does_not_join_hard_break_across_a_new_list_item() {
+        let source = "- first\\\n- second";
+        let current_byte = source.find("second").expect("fixture contains second");
+
+        let augmentation = augment_edit(source, current_byte, AugmentKind::Backspace);
+        let edited_source = augmentation
+            .as_ref()
+            .map(|aug| apply_augmentation_at(source, current_byte, aug))
+            .unwrap_or_else(|| source.to_owned());
+
+        assert_ne!(
+            edited_source, "- firstsecond",
+            "a following sibling item must not be glued onto the previous item"
+        );
+    }
+
+    #[test]
+    fn list_enter_at_lazy_continuation_newline_becomes_a_new_item() {
+        let source = "- item\npara";
+        let current_byte = "- item".len();
+
+        let augmentation = augment_edit(source, current_byte, AugmentKind::Enter)
+            .expect("Enter on a lazy continuation newline should start a new item");
+        let edited_source = apply_augmentation_at(source, current_byte, &augmentation);
+
+        assert_eq!(edited_source, "- item\n- para");
+        assert_eq!(augmentation.cursor_byte_after, "- item\n- ".len());
+    }
+
+    #[test]
+    fn list_enter_after_lazy_continuation_newline_prefixes_the_following_line() {
+        let source = "- item\npara";
+        let current_byte = "- item\n".len();
+
+        let augmentation = augment_edit(source, current_byte, AugmentKind::Enter)
+            .expect("Enter after a lazy continuation newline should mark the following line");
+        let edited_source = apply_augmentation_at(source, current_byte, &augmentation);
+
+        assert_eq!(edited_source, "- item\n- para");
+        assert_eq!(augmentation.cursor_byte_after, "- item\n- ".len());
+    }
+
+    #[test]
+    fn quote_enter_at_lazy_continuation_newline_inserts_an_explicit_marker() {
+        let source = "> first\nsecond";
+        let current_byte = "> first".len();
+
+        let augmentation = augment_edit(source, current_byte, AugmentKind::Enter)
+            .expect("Enter on a lazy quote newline should add an explicit marker");
+        let edited_source = apply_augmentation_at(source, current_byte, &augmentation);
+
+        assert_eq!(edited_source, "> first\n> second");
+        assert_eq!(augmentation.cursor_byte_after, "> first\n> ".len());
+    }
+
+    #[test]
+    fn quote_enter_between_explicit_lines_still_inserts_a_quote_line() {
+        let source = "> first\n> second";
+        let current_byte = "> first".len();
+
+        let augmentation = augment_edit(source, current_byte, AugmentKind::Enter)
+            .expect("Enter between explicit quote lines should insert a quoted line");
+        let edited_source = apply_augmentation_at(source, current_byte, &augmentation);
+
+        assert_eq!(edited_source, "> first\n> \n> second");
+        assert_eq!(augmentation.cursor_byte_after, "> first\n> ".len());
+    }
+
+    #[test]
+    fn paragraph_enter_before_a_single_space_does_not_leave_a_leading_space() {
+        let source = "left right";
+        let current_byte = "left".len();
+
+        let augmentation = augment_edit(source, current_byte, AugmentKind::Enter)
+            .expect("paragraph Enter should split at the word boundary");
+        let edited_source = apply_augmentation_at(source, current_byte, &augmentation);
+
+        assert_eq!(edited_source, "left\n\nright");
+        assert_eq!(augmentation.cursor_byte_after, "left\n\n".len());
+    }
+
+    #[test]
+    fn paragraph_enter_after_a_single_space_does_not_leave_a_trailing_space() {
+        let source = "left right";
+        let current_byte = "left ".len();
+
+        let augmentation = augment_edit(source, current_byte, AugmentKind::Enter)
+            .expect("paragraph Enter should split at the word boundary");
+        let edited_source = apply_augmentation_at(source, current_byte, &augmentation);
+
+        assert_eq!(edited_source, "left\n\nright");
+    }
+
+    #[test]
+    fn heading_enter_before_a_single_space_does_not_leave_a_leading_space() {
+        let source = "# left right";
+        let current_byte = "# left".len();
+
+        let augmentation = augment_edit(source, current_byte, AugmentKind::Enter)
+            .expect("heading interior Enter should split at the word boundary");
+        let edited_source = apply_augmentation_at(source, current_byte, &augmentation);
+
+        assert_eq!(edited_source, "# left\nright");
+    }
+
+    #[test]
+    fn paragraph_enter_in_the_middle_of_a_word_keeps_letters_together() {
+        let source = "left right";
+        let current_byte = "le".len();
+
+        let augmentation = augment_edit(source, current_byte, AugmentKind::Enter)
+            .expect("mid-word Enter should keep the split letters");
+        let edited_source = apply_augmentation_at(source, current_byte, &augmentation);
+
+        assert_eq!(edited_source, "le\n\nft right");
+    }
+
+    #[test]
+    fn table_enter_on_the_last_row_appends_a_new_row() {
+        let source = "| a |\n|---|\n| b |";
+        let current_byte = source.rfind('b').expect("fixture contains the body cell");
+
+        let augmentation = augment_edit(source, current_byte, AugmentKind::Enter)
+            .expect("Enter on the last table row should insert a new row");
+        let edited_source = apply_augmentation_at(source, current_byte, &augmentation);
+
+        assert_eq!(edited_source, "| a |\n|---|\n| b |\n|  |");
+        assert_eq!(
+            augmentation.cursor_byte_after,
+            edited_source.rfind("|  |").expect("new row starts with an empty cell") + 2
+        );
+    }
+
+    #[test]
+    fn table_enter_on_a_multi_column_last_row_copies_column_count() {
+        let source = "| a | b |\n|---|---|\n| c | d |";
+        let current_byte = source.rfind('c').expect("fixture contains the first body cell");
+
+        let augmentation = augment_edit(source, current_byte, AugmentKind::Enter)
+            .expect("Enter on the last table row should copy the column count");
+        let edited_source = apply_augmentation_at(source, current_byte, &augmentation);
+
+        assert_eq!(edited_source, "| a | b |\n|---|---|\n| c | d |\n|  |  |");
+    }
+
+    #[test]
+    fn table_enter_on_an_empty_last_body_row_exits_the_table() {
+        let source = "| a |\n|---|\n|  |";
+        let current_byte = source.rfind('|').expect("fixture contains the last pipe") - 1;
+
+        let augmentation = augment_edit(source, current_byte, AugmentKind::Enter)
+            .expect("Enter on an empty last body row should leave the table");
+        let edited_source = apply_augmentation_at(source, current_byte, &augmentation);
+
+        assert_eq!(edited_source, "| a |\n|---|\n\n");
+        assert_eq!(augmentation.cursor_byte_after, edited_source.len());
+    }
+
+    #[test]
+    fn table_enter_on_the_header_without_a_body_appends_a_body_row() {
+        let source = "| a |\n|---|";
+        let current_byte = source.find('a').expect("fixture contains the header cell");
+
+        let augmentation = augment_edit(source, current_byte, AugmentKind::Enter)
+            .expect("Enter on a header with no body should create a body row");
+        let edited_source = apply_augmentation_at(source, current_byte, &augmentation);
+
+        assert_eq!(edited_source, "| a |\n|---|\n|  |");
     }
 }
