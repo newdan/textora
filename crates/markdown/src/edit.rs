@@ -173,6 +173,7 @@ pub(crate) fn materialize_projected_line(
 
     if let Some(cursor_span) =
         edit_ctx.and_then(|ctx| spans.iter().find(|span| cursor_in_span(span, ctx.cursor_byte)))
+        && let Some(expansion) = inline_expansion(base, cursor_span, source)
     {
         let start_grapheme =
             crate::grapheme_map::grapheme_index_at_byte(&projected.text, cursor_span.start);
@@ -181,10 +182,16 @@ pub(crate) fn materialize_projected_line(
             cursor_span.start + cursor_span.len,
         );
         projected = projected.replace_graphemes_with_direct(
-            start_grapheme,
             end_grapheme,
-            &source[cursor_span.source_range.clone()],
-            cursor_span.source_range.clone(),
+            end_grapheme,
+            &source[expansion.suffix.clone()],
+            expansion.suffix,
+        );
+        projected = projected.replace_graphemes_with_direct(
+            start_grapheme,
+            start_grapheme,
+            &source[expansion.prefix.clone()],
+            expansion.prefix,
         );
     }
 
@@ -207,6 +214,89 @@ pub(crate) fn materialize_projected_line(
         .position(|anchor| anchor.byte >= ctx.cursor_byte)
         .unwrap_or_else(|| projected.grapheme_count());
     projected.insert_virtual(insertion_grapheme, preedit_text, ctx.cursor_byte)
+}
+
+#[derive(Clone, Debug)]
+struct InlineExpansion {
+    prefix: Range<usize>,
+    content: Range<usize>,
+    suffix: Range<usize>,
+}
+
+fn inline_expansion(
+    base: &ProjectedText,
+    span: &StyleSpan,
+    source: &str,
+) -> Option<InlineExpansion> {
+    let start_grapheme = crate::grapheme_map::grapheme_index_at_byte(&base.text, span.start);
+    let end_grapheme =
+        crate::grapheme_map::grapheme_index_at_byte(&base.text, span.start + span.len);
+    let content_start = base.boundaries.get(start_grapheme)?.byte;
+    let projected_content_end = base.boundaries.get(end_grapheme)?.byte;
+    let content_end = if projected_content_end == span.source_range.end {
+        inferred_inline_suffix_start(&span.style, &source[span.source_range.clone()])
+            .map_or(projected_content_end, |relative_start| {
+                span.source_range.start + relative_start
+            })
+    } else {
+        projected_content_end
+    };
+
+    if span.source_range.start > content_start
+        || content_start > content_end
+        || content_end > span.source_range.end
+        || span.source_range.end > source.len()
+        || !source.is_char_boundary(span.source_range.start)
+        || !source.is_char_boundary(content_start)
+        || !source.is_char_boundary(content_end)
+        || !source.is_char_boundary(span.source_range.end)
+    {
+        return None;
+    }
+
+    Some(InlineExpansion {
+        prefix: span.source_range.start..content_start,
+        content: content_start..content_end,
+        suffix: content_end..span.source_range.end,
+    })
+}
+
+fn inferred_inline_suffix_start(style: &InlineStyle, span_source: &str) -> Option<usize> {
+    match style {
+        InlineStyle::Bold => span_source
+            .ends_with("**")
+            .then(|| span_source.len() - 2)
+            .or_else(|| span_source.ends_with("__").then(|| span_source.len() - 2)),
+        InlineStyle::Italic => span_source
+            .ends_with('*')
+            .then(|| span_source.len() - 1)
+            .or_else(|| span_source.ends_with('_').then(|| span_source.len() - 1)),
+        InlineStyle::Strikethrough => span_source.ends_with("~~").then(|| span_source.len() - 2),
+        InlineStyle::InlineCode => span_source.ends_with('`').then(|| span_source.len() - 1),
+        InlineStyle::Link { .. } => {
+            if span_source.starts_with('<') && span_source.ends_with('>') {
+                return Some(span_source.len() - 1);
+            }
+            span_source
+                .find("](")
+                .or_else(|| span_source.find("]["))
+                .or_else(|| span_source.rfind(']'))
+        }
+        InlineStyle::SourceMarker => None,
+    }
+}
+
+pub(crate) fn materialized_spans_for_projected_line(
+    base: &ProjectedText,
+    spans: &[StyleSpan],
+    source: &str,
+    edit_ctx: Option<&EditContext>,
+) -> Vec<MaterializedSpan> {
+    let projected = materialize_projected_line(base, spans, source, edit_ctx, None);
+    let preedit_visual_range = projected.spans.iter().find_map(|span| {
+        matches!(span.kind, ProjectionSpanKind::Virtual { .. }).then(|| span.visual_range.clone())
+    });
+    materialized_spans(base, spans, source, edit_ctx, preedit_visual_range)
 }
 
 impl ProjectedText {
@@ -347,6 +437,7 @@ fn push_char_anchors(anchors: &mut Vec<SourceAnchor>, text: &str, source_start: 
 }
 
 fn materialized_spans(
+    base: &ProjectedText,
     spans: &[StyleSpan],
     source: &str,
     edit_ctx: Option<&EditContext>,
@@ -373,84 +464,46 @@ fn materialized_spans(
             continue;
         }
 
-        let expanded = &source[span.source_range.clone()];
-        let (prefix_len, suffix_len) = materialized_marker_len(&span.style, expanded);
-        let marker_len = prefix_len + suffix_len;
-        if expanded.len() < marker_len {
+        let Some(expansion) = inline_expansion(base, span, source) else {
             output.push(MaterializedSpan {
                 start: materialized_start,
-                len: expanded.len(),
+                len: span.len,
                 style: span.style.clone(),
                 source_range: span.source_range.clone(),
             });
-        } else {
-            push_non_empty_materialized_span(
-                &mut output,
-                materialized_start,
-                prefix_len,
-                InlineStyle::SourceMarker,
-                span.source_range.start..span.source_range.start + prefix_len,
-            );
-            let content_end = expanded.len() - suffix_len;
-            push_non_empty_materialized_span(
-                &mut output,
-                materialized_start + prefix_len,
-                content_end - prefix_len,
-                span.style.clone(),
-                span.source_range.start + prefix_len..span.source_range.start + content_end,
-            );
-            push_non_empty_materialized_span(
-                &mut output,
-                materialized_start + content_end,
-                suffix_len,
-                InlineStyle::SourceMarker,
-                span.source_range.start + content_end..span.source_range.end,
-            );
-        }
-        visual_delta += expanded.len() as isize - span.len as isize;
+            continue;
+        };
+
+        let prefix_len = expansion.prefix.len();
+        let suffix_len = expansion.suffix.len();
+        push_non_empty_materialized_span(
+            &mut output,
+            materialized_start,
+            prefix_len,
+            InlineStyle::SourceMarker,
+            expansion.prefix,
+        );
+        push_non_empty_materialized_span(
+            &mut output,
+            materialized_start + prefix_len,
+            span.len,
+            span.style.clone(),
+            expansion.content,
+        );
+        push_non_empty_materialized_span(
+            &mut output,
+            materialized_start + prefix_len + span.len,
+            suffix_len,
+            InlineStyle::SourceMarker,
+            expansion.suffix,
+        );
+        visual_delta += (prefix_len + suffix_len) as isize;
     }
 
     if let Some(preedit_visual_range) = preedit_visual_range {
         shift_materialized_spans_for_preedit(&mut output, preedit_visual_range);
     }
     output
-}
-
-/// Returns only the Markdown delimiters physically retained in a style's
-/// source slice. A physical-line projection can crop a multiline style: its
-/// continuation then contains the closing delimiter but not the opening one.
-///
-/// The old fixed-length calculation treated the first content bytes as an
-/// opening delimiter in that case (for example, `second**` became `se` +
-/// `cond` + `**`). Inspecting the sliced source makes the cropped boundary
-/// explicit to materialization.
-fn materialized_marker_len(style: &InlineStyle, expanded: &str) -> (usize, usize) {
-    let (prefix_len, suffix_len) = span_marker_len(style);
-    let has_prefix = source_starts_with_style_marker(style, expanded);
-    let has_suffix = source_ends_with_style_marker(style, expanded);
-
-    (if has_prefix { prefix_len } else { 0 }, if has_suffix { suffix_len } else { 0 })
-}
-
-fn source_starts_with_style_marker(style: &InlineStyle, source: &str) -> bool {
-    match style {
-        InlineStyle::Bold => source.starts_with("**") || source.starts_with("__"),
-        InlineStyle::Italic => source.starts_with('*') || source.starts_with('_'),
-        InlineStyle::Strikethrough => source.starts_with("~~"),
-        InlineStyle::InlineCode => source.starts_with('`'),
-        InlineStyle::Link { .. } => source.starts_with('['),
-        InlineStyle::SourceMarker => false,
-    }
-}
-
-fn source_ends_with_style_marker(style: &InlineStyle, source: &str) -> bool {
-    match style {
-        InlineStyle::Bold => source.ends_with("**") || source.ends_with("__"),
-        InlineStyle::Italic => source.ends_with('*') || source.ends_with('_'),
-        InlineStyle::Strikethrough => source.ends_with("~~"),
-        InlineStyle::InlineCode => source.ends_with('`'),
-        InlineStyle::Link { .. } | InlineStyle::SourceMarker => false,
-    }
 }
 
 fn push_non_empty_materialized_span(
@@ -509,7 +562,7 @@ pub(crate) fn materialize_line_with_source_context(
 
     MaterializedLine {
         text: projected.text,
-        spans: materialized_spans(spans, source, edit_ctx, preedit_visual_range),
+        spans: materialized_spans(&base, spans, source, edit_ctx, preedit_visual_range),
         visual_grapheme_to_source_byte: projected
             .boundaries
             .iter()
@@ -761,6 +814,43 @@ mod tests {
         assert_eq!(line.visual_grapheme_to_source_byte(6), Some(6));
         assert_eq!(line.visual_grapheme_to_source_byte(8), Some(8));
         assert_eq!(line.source_byte_to_visual_grapheme(10), Some(10));
+    }
+
+    #[test]
+    fn materialized_multiline_bold_keeps_softbreak_collapsed() {
+        let source = "**first\n  second**";
+        let second_start = source.find("second").expect("fixture contains continuation text");
+        let mut projection_builder = TextProjectionBuilder::default();
+        projection_builder.push_direct("first", 2..7);
+        projection_builder.push_soft_break(7..8);
+        projection_builder.push_direct("second", second_start..second_start + "second".len());
+        let base = projection_builder.finish(source.len() - 2);
+        let spans = vec![make_span(0, "first second".len(), 0, source.len(), InlineStyle::Bold)];
+        let ctx =
+            EditContext { cursor_byte: second_start, preedit_text: None, preedit_cursor: None };
+
+        let projected = materialize_projected_line(&base, &spans, source, Some(&ctx), None);
+        let materialized_spans =
+            materialized_spans_for_projected_line(&base, &spans, source, Some(&ctx));
+
+        assert_eq!(projected.text, "**first second**");
+        assert!(projected.spans.iter().any(|span| {
+            matches!(span.kind, ProjectionSpanKind::Collapsed)
+                && span.source_range.start == 7
+                && span.source_range.end == second_start
+        }));
+        assert_eq!(
+            materialized_spans
+                .iter()
+                .map(|span| (&projected.text[span.start..span.start + span.len], &span.style))
+                .collect::<Vec<_>>(),
+            vec![
+                ("**", &InlineStyle::SourceMarker),
+                ("first second", &InlineStyle::Bold),
+                ("**", &InlineStyle::SourceMarker),
+            ]
+        );
+        projected.validate(source).expect("materialized projection must remain valid");
     }
 
     #[test]

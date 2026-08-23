@@ -903,15 +903,16 @@ impl MarkdownDoc {
                     builder.text_style_stack.pop();
                 }
                 MarkdownEvent::InlineHtml(html) => {
-                    // Render HTML as plain text (first version)
-                    builder.push_text(html);
-                }
-                MarkdownEvent::SoftBreak { next_line_has_explicit_blockquote_marker } => {
-                    if *next_line_has_explicit_blockquote_marker && builder.is_inside_blockquote() {
+                    if inline_html_is_break(html) {
                         builder.flush_line_into_current_block();
                     } else {
-                        builder.push_soft_break(builder.current_event_range.clone());
+                        // Other inline HTML remains literal text until the renderer has a
+                        // dedicated, sanitized HTML representation.
+                        builder.push_text(html);
                     }
+                }
+                MarkdownEvent::SoftBreak => {
+                    builder.push_soft_break(builder.current_event_range.clone());
                 }
                 MarkdownEvent::HardBreak => {
                     builder.flush_line_into_current_block();
@@ -1048,6 +1049,10 @@ impl MarkdownDoc {
 
         Self { blocks }
     }
+}
+
+fn inline_html_is_break(html: &str) -> bool {
+    matches!(html.trim().to_ascii_lowercase().as_str(), "<br>" | "<br/>" | "<br />")
 }
 
 /// Convert TextStyleMod to InlineStyle (if applicable for rendering).
@@ -1339,32 +1344,37 @@ mod tests {
     }
 
     #[test]
-    fn builder_preserves_blockquote_softbreak_source_jump() {
+    fn builder_collapses_explicit_blockquote_softbreak_and_preserves_source_jump() {
         let source = "> first\n> second";
         let parsed = crate::parser::parse_markdown(source);
         let style = crate::test_utils::default_style();
         let doc = MarkdownDoc::build(&parsed, &style);
         let paragraph = &doc.blocks[0].children[0];
-        assert_eq!(paragraph.projected_lines.len(), 2);
-        assert_eq!(paragraph.projected_lines[0].text, "first");
-        assert_eq!(paragraph.projected_lines[1].text, "second");
+        assert_eq!(paragraph.projected_lines.len(), 1);
+        assert_eq!(paragraph.projected_lines[0].text, "first second");
         assert_eq!(
-            paragraph.projected_lines[0].boundaries.last().expect("first line boundary").byte,
-            source.find('\n').expect("fixture must contain newline")
+            paragraph.projected_lines[0].boundaries.last().expect("collapsed line boundary").byte,
+            source.len()
         );
+        assert!(paragraph.projected_lines[0].boundaries.iter().any(|boundary| {
+            boundary.byte == source.find("second").expect("fixture must contain second")
+        }));
+        assert!(paragraph.projected_lines[0].boundaries.iter().any(|boundary| {
+            boundary.byte == source.find('\n').expect("fixture must contain newline")
+        }));
         assert_eq!(
-            paragraph.projected_lines[1].boundaries.first().expect("second line boundary").byte,
-            source.find("second").expect("fixture must contain second")
+            paragraph.projected_lines[0].source_extent().end,
+            source.find("second").expect("fixture must contain second") + "second".len()
         );
     }
 
     #[test]
-    fn builder_preserves_each_explicit_blockquote_source_line() {
+    fn builder_collapses_each_explicit_blockquote_softbreak() {
         let source = "> 日期：2026-07-20\n> 状态：待评审\n> 目标：加载 Wiki";
         let doc = MarkdownDoc::build(&parse_markdown(source), &default_style());
         let paragraph = &doc.blocks[0].children[0];
 
-        assert_eq!(paragraph.text_lines, ["日期：2026-07-20", "状态：待评审", "目标：加载 Wiki"]);
+        assert_eq!(paragraph.text_lines, ["日期：2026-07-20 状态：待评审 目标：加载 Wiki"]);
     }
 
     #[test]
@@ -1382,6 +1392,28 @@ mod tests {
         let doc = MarkdownDoc::build(&parse_markdown(source), &default_style());
 
         assert_eq!(doc.blocks[0].text_lines, ["first", "second"]);
+    }
+
+    #[test]
+    fn builder_renders_inline_html_break_as_a_hard_break() {
+        for html_break in ["<br>", "<br/>", "<br />"] {
+            let source = format!("# first{html_break}second");
+            let doc = MarkdownDoc::build(&parse_markdown(&source), &default_style());
+
+            assert_eq!(
+                doc.blocks[0].text_lines,
+                ["first", "second"],
+                "inline HTML break {html_break:?} must create two visual lines"
+            );
+        }
+    }
+
+    #[test]
+    fn builder_keeps_non_break_inline_html_as_literal_text() {
+        let source = "# first<span>second</span>";
+        let doc = MarkdownDoc::build(&parse_markdown(source), &default_style());
+
+        assert_eq!(doc.blocks[0].text_lines, ["first<span>second</span>"]);
     }
 
     #[test]

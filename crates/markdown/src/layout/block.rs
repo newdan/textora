@@ -366,19 +366,18 @@ pub(crate) fn layout_block(block: &BlockNode, ctx: &mut LayoutCtx) {
                 } else {
                     raw_line.projected.clone()
                 };
-                let materialized = if let Some(source_text) = ctx.source_text {
-                    crate::edit::materialize_line_with_source_context(
-                        &raw_line.projected.text,
+                let materialized_spans = if let Some(source_text) = ctx.source_text {
+                    crate::edit::materialized_spans_for_projected_line(
+                        &raw_line.projected,
                         line_styles,
                         source_text,
                         ctx.edit_ctx,
-                        source_context,
                     )
                 } else {
                     crate::edit::materialize_line(&raw_line.projected.text, line_styles, "", None)
+                        .spans
                 };
-                let mut materialized_styles: Vec<StyleSpan> = materialized
-                    .spans
+                let mut materialized_styles: Vec<StyleSpan> = materialized_spans
                     .iter()
                     .map(|span| StyleSpan {
                         start: span.start,
@@ -655,14 +654,7 @@ fn list_item_text_lines_for_layout(block: &BlockNode, ctx: &LayoutCtx<'_>) -> Li
         return ListItemTextLines { lines: Vec::new() };
     }
 
-    let restores_physical_lines = ctx.edit_ctx.is_some_and(|edit_ctx| {
-        block.block_range.start <= edit_ctx.cursor_byte
-            && edit_ctx.cursor_byte <= block.block_range.end
-            && !cursor_in_nested_list_item(block, edit_ctx.cursor_byte)
-    });
-    ListItemTextLines {
-        lines: split_list_item_source_lines(block, ctx.doc, restores_physical_lines),
-    }
+    ListItemTextLines { lines: list_item_projected_lines(block, ctx.doc) }
 }
 
 fn cursor_in_nested_list_item(block: &BlockNode, cursor_byte: usize) -> bool {
@@ -726,10 +718,9 @@ fn source_line_len(block: &BlockNode, line_idx: usize, line_text: &str) -> usize
     if line_idx == 0 { content_len + crate::edit::block_marker_len(block) } else { content_len }
 }
 
-fn split_list_item_source_lines(
+fn list_item_projected_lines(
     block: &BlockNode,
     doc: &dyn core::document::DocView,
-    restores_physical_lines: bool,
 ) -> Vec<LayoutTextLine> {
     let projected_lines = if block.projected_lines.is_empty() {
         block
@@ -751,28 +742,21 @@ fn split_list_item_source_lines(
     projected_lines
         .into_iter()
         .enumerate()
-        .flat_map(|(line_idx, line_projection)| {
-            let visual_ranges_and_projections = if restores_physical_lines {
-                line_projection.split_collapsed_source_lines()
-            } else {
-                vec![(0..line_projection.text.len(), line_projection.clone())]
-            };
-            let style_projection = line_projection;
-            visual_ranges_and_projections.into_iter().map(move |(visual_range, projected)| {
-                let source_extent = projected.source_extent();
-                LayoutTextLine {
-                    styles: styles_for_projected_visual_range(
-                        block.text_styles.get(line_idx).map(Vec::as_slice).unwrap_or(&[]),
-                        visual_range,
-                        &style_projection,
-                    ),
-                    source_context: Some(SourceLineContext {
-                        text_start: source_extent.start,
-                        range: source_extent,
-                    }),
-                    projected,
-                }
-            })
+        .map(|(line_idx, projected)| {
+            let source_extent = projected.source_extent();
+            let visual_range = 0..projected.text.len();
+            LayoutTextLine {
+                styles: styles_for_projected_visual_range(
+                    block.text_styles.get(line_idx).map(Vec::as_slice).unwrap_or(&[]),
+                    visual_range,
+                    &projected,
+                ),
+                source_context: Some(SourceLineContext {
+                    text_start: source_extent.start,
+                    range: source_extent,
+                }),
+                projected,
+            }
         })
         .collect()
 }
@@ -966,7 +950,7 @@ pub(crate) fn layout_text_block(
                 source_context.as_ref(),
             )
         } else {
-            base_projection
+            base_projection.clone()
         };
         if let Some(source_text) = ctx.source_text {
             append_trailing_whitespace_projection(&mut projected, source_text);
@@ -983,19 +967,17 @@ pub(crate) fn layout_text_block(
                     .expect("an active marker must have a derived source range"),
             );
         }
-        let materialized = if let Some(source_text) = ctx.source_text {
-            crate::edit::materialize_line_with_source_context(
-                raw,
+        let materialized_spans = if let Some(source_text) = ctx.source_text {
+            crate::edit::materialized_spans_for_projected_line(
+                &base_projection,
                 line_styles,
                 source_text,
                 ctx.edit_ctx,
-                source_context.as_ref(),
             )
         } else {
-            crate::edit::materialize_line(raw, line_styles, "", None)
+            crate::edit::materialize_line(raw, line_styles, "", None).spans
         };
-        let mut materialized_styles: Vec<StyleSpan> = materialized
-            .spans
+        let mut materialized_styles: Vec<StyleSpan> = materialized_spans
             .iter()
             .map(|span| StyleSpan {
                 start: span.start,
@@ -1882,7 +1864,7 @@ mod tests {
     }
 
     #[test]
-    fn multiline_list_item_projection_skips_continuation_indent() {
+    fn multiline_list_item_projection_collapses_continuation_indent() {
         let source = "- first line\n  continuation line";
         let continuation = source.find("continuation").expect("fixture contains continuation");
         let lazy = layout_with_cursor_and_width(source, continuation, 400.0);
@@ -1897,8 +1879,8 @@ mod tests {
             .expect("fixture must have a laid-out list item");
         assert_eq!(
             list_lines.iter().map(|line| line.text.as_str()).collect::<Vec<_>>(),
-            ["- first line", "continuation line"],
-            "collapsed softbreak must restore independent physical list lines"
+            ["- first line continuation line"],
+            "a list softbreak must remain in one logical line"
         );
         let marker_projection =
             list_lines[0].source_projection.as_ref().expect("marker projection");
@@ -1909,15 +1891,11 @@ mod tests {
         let continuation_boundary = marker_projection
             .collapsed
             .first()
-            .expect("the first physical line must retain the collapsed softbreak");
-        let line_end = marker_projection.boundaries.len() - 1;
-        assert_eq!(
-            continuation_boundary.upstream_grapheme, line_end,
-            "the collapsed softbreak must start at the physical line end"
-        );
-        assert_eq!(
-            continuation_boundary.downstream_grapheme, line_end,
-            "the collapsed softbreak must end at the physical line end"
+            .expect("the logical line must retain the collapsed softbreak");
+        assert!(
+            continuation_boundary.source_range.start < continuation
+                && continuation_boundary.source_range.end <= continuation,
+            "collapsed source range must cover the newline and continuation indent"
         );
         let line = lazy
             .laid_out
@@ -1951,7 +1929,7 @@ mod tests {
     }
 
     #[test]
-    fn nested_list_continuation_retains_physical_lines_and_collapsed_indent() {
+    fn nested_list_continuation_stays_logical_and_retains_collapsed_indent() {
         let source = "- outer\n  - **first\n    second**";
         let first = source.find("first").expect("fixture contains first line text");
         let second = source.find("second").expect("fixture contains continuation text");
@@ -1966,27 +1944,28 @@ mod tests {
 
         assert_eq!(
             nested_lines.len(),
-            2,
-            "nested lists must retain a non-empty visual line for each physical continuation"
+            1,
+            "nested-list softbreaks must stay in one logical line, got {:?}",
+            nested_lines.iter().map(|line| line.text.as_str()).collect::<Vec<_>>()
         );
         assert!(
             nested_lines
                 .iter()
                 .all(|line| !line.text.is_empty() && line.source_projection.is_some()),
-            "each nested-list continuation line must keep its own source projection"
+            "the nested-list logical line must keep its source projection"
         );
 
         let first_line = nested_lines
             .iter()
             .find(|line| line.text.contains("first"))
-            .expect("the first nested list line must be present");
+            .expect("the nested list line must be present");
         let collapsed = first_line
             .source_projection
             .as_ref()
-            .expect("the first nested list line needs a projection")
+            .expect("the nested list line needs a projection")
             .collapsed
             .first()
-            .expect("the first nested list line must retain its collapsed continuation");
+            .expect("the nested list line must retain its collapsed continuation");
 
         assert!(
             collapsed.source_range.start <= continuation_newline
@@ -2001,7 +1980,7 @@ mod tests {
     }
 
     #[test]
-    fn styled_list_continuation_does_not_reinsert_preceding_source_line() {
+    fn styled_list_continuation_retains_collapsed_source_boundary() {
         let source = "- **first\n  second**";
         let second = source.find("second").expect("fixture contains continuation text");
         let lazy = layout_with_cursor_and_width(source, second, 400.0);
@@ -2019,9 +1998,10 @@ mod tests {
             .find(|line| line.text.contains("second"))
             .expect("continuation must have a laid-out line");
 
-        assert!(
-            !continuation.text.contains("first"),
-            "materializing a continuation style must not reinsert the preceding source line"
+        assert_eq!(
+            list_lines.iter().map(|line| line.text.as_str()).collect::<Vec<_>>(),
+            ["- **first second**"],
+            "active inline markers must preserve the collapsed logical line"
         );
         assert!(
             continuation
@@ -2033,15 +2013,19 @@ mod tests {
                 .any(|anchor| anchor.byte == second),
             "continuation projection must retain the continuation source anchor"
         );
-        assert_eq!(
-            continuation
-                .source_projection
-                .as_ref()
-                .expect("continuation projection")
-                .source_extent
-                .start,
-            second,
-            "continuation projection must not retain the preceding style source range"
+        let continuation_projection =
+            continuation.source_projection.as_ref().expect("continuation projection");
+        assert!(
+            continuation_projection.source_extent.start <= second,
+            "continuation projection must cover its collapsed source boundary"
+        );
+        assert!(
+            continuation_projection
+                .collapsed
+                .iter()
+                .any(|collapsed| collapsed.source_range.start < second
+                    && collapsed.source_range.end <= second),
+            "continuation projection must retain the newline and indentation mapping"
         );
         let bold = continuation
             .styles
@@ -2050,15 +2034,18 @@ mod tests {
             .expect("continuation text must retain its bold style");
         assert_eq!(
             &continuation.text[bold.start..bold.start + bold.len],
-            "second",
-            "the complete continuation text must remain bold"
+            "first second",
+            "the complete projected text must remain bold"
         );
-        assert!(
-            continuation.styles.iter().all(|span| {
-                !matches!(span.style, crate::builder::InlineStyle::SourceMarker)
-                    || &continuation.text[span.start..span.start + span.len] == "**"
-            }),
-            "a cropped continuation must not mistake text for an opening Markdown marker"
+        assert_eq!(
+            continuation
+                .styles
+                .iter()
+                .filter(|span| matches!(span.style, crate::builder::InlineStyle::SourceMarker))
+                .map(|span| &continuation.text[span.start..span.start + span.len])
+                .collect::<Vec<_>>(),
+            ["- ", "**", "**"],
+            "materialization must classify the list and inline delimiters as source markers"
         );
     }
 

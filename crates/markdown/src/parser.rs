@@ -11,7 +11,7 @@ pub enum MarkdownEvent {
     Text(String),
     Code(String),
     InlineHtml(String),
-    SoftBreak { next_line_has_explicit_blockquote_marker: bool },
+    SoftBreak,
     HardBreak,
     Rule,
     TaskListMarker(bool),
@@ -112,10 +112,7 @@ pub fn parse_markdown(src: &str) -> ParsedMarkdown {
             }
             Event::SoftBreak => {
                 event_ranges.push(range.clone());
-                events.push(MarkdownEvent::SoftBreak {
-                    next_line_has_explicit_blockquote_marker:
-                        next_line_has_explicit_blockquote_marker(src, &range),
-                });
+                events.push(MarkdownEvent::SoftBreak);
             }
             Event::HardBreak => {
                 event_ranges.push(range.clone());
@@ -138,14 +135,6 @@ pub fn parse_markdown(src: &str) -> ParsedMarkdown {
     detect_list_properties(&mut events, src, &event_ranges);
 
     ParsedMarkdown { events, event_ranges }
-}
-
-fn next_line_has_explicit_blockquote_marker(src: &str, softbreak_range: &Range<usize>) -> bool {
-    let Some(newline_offset) = src[softbreak_range.start..].find('\n') else {
-        return false;
-    };
-    let next_line_start = softbreak_range.start + newline_offset + 1;
-    matches!(src[next_line_start..].trim_start_matches([' ', '\t']).chars().next(), Some('>'))
 }
 
 fn convert_tag(tag: Tag<'_>) -> Option<MarkdownTag> {
@@ -302,27 +291,12 @@ mod tests {
     }
 
     #[test]
-    fn parse_softbreak_tracks_the_next_explicit_blockquote_marker() {
-        let parsed = parse_markdown("> first\n> second");
+    fn parse_softbreak_is_independent_of_blockquote_marker_spelling() {
+        for source in ["> first\n> second", "> first\nsecond"] {
+            let parsed = parse_markdown(source);
 
-        assert!(parsed.events.iter().any(|event| {
-            matches!(
-                event,
-                MarkdownEvent::SoftBreak { next_line_has_explicit_blockquote_marker: true }
-            )
-        }));
-    }
-
-    #[test]
-    fn parse_softbreak_keeps_a_lazy_blockquote_continuation_unmarked() {
-        let parsed = parse_markdown("> first\nsecond");
-
-        assert!(parsed.events.iter().any(|event| {
-            matches!(
-                event,
-                MarkdownEvent::SoftBreak { next_line_has_explicit_blockquote_marker: false }
-            )
-        }));
+            assert!(parsed.events.iter().any(|event| matches!(event, MarkdownEvent::SoftBreak)));
+        }
     }
 
     #[test]

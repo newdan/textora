@@ -2871,6 +2871,12 @@ impl ui::plugin::EditPolicy for MarkdownEditorView {
         if let Some(selection) = selection {
             return self.plan_selection_edit(request, selection);
         }
+        if matches!(request.intent, ui::plugin::EditIntent::DeleteForward) {
+            return crate::augmenter::augment_delete_forward(&self.source, request.cursor_byte)
+                .map_or(ui::plugin::EditPlan::UseDefault, |augmentation| {
+                    augmentation_edit_plan(request, augmentation)
+                });
+        }
         let Some(kind) = request_augment_kind(&request.intent) else {
             return ui::plugin::EditPlan::UseDefault;
         };
@@ -8044,7 +8050,7 @@ viebcoding 用过吗?
     }
 
     #[test]
-    fn active_list_with_lazy_continuation_lines_does_not_duplicate_flat_lines() {
+    fn active_list_collapses_lazy_continuation_softbreaks() {
         use ui::plugin::{PluginMessage, ViewPlugin};
 
         let source = "- 前 3-5 个：好学校好专业冲一下\n长沙航空、南京信息、江苏海事、成都航空、西安航空、重庆航天这类，有湖北计划就放前面。\n中间 5-8 个：本省或相邻省份务实型军士院校\n湖北交通、武汉船舶、长江工程、湖南汽车、湖南国防、张家界航空、江西航空等。";
@@ -8059,20 +8065,18 @@ viebcoding 用过吗?
         let flat_texts =
             view.engine().flat_lines().iter().map(|line| line.text.as_str()).collect::<Vec<_>>();
 
-        assert_eq!(
-            flat_texts.len(),
-            4,
-            "list lazy continuation should produce one flat line per source line, got {flat_texts:?}"
+        let rendered_text = flat_texts.join("");
+        assert!(
+            rendered_text.contains("好学校好专业冲一下 长沙航空"),
+            "first source newline must collapse to a space, got {flat_texts:?}"
         );
-        assert_eq!(flat_texts[0], "- 前 3-5 个：好学校好专业冲一下");
-        assert_eq!(
-            flat_texts[1],
-            "长沙航空、南京信息、江苏海事、成都航空、西安航空、重庆航天这类，有湖北计划就放前面。"
+        assert!(
+            rendered_text.contains("放前面。 中间 5-8 个"),
+            "second source newline must collapse to a space, got {flat_texts:?}"
         );
-        assert_eq!(flat_texts[2], "中间 5-8 个：本省或相邻省份务实型军士院校");
-        assert_eq!(
-            flat_texts[3],
-            "湖北交通、武汉船舶、长江工程、湖南汽车、湖南国防、张家界航空、江西航空等。"
+        assert!(
+            rendered_text.contains("务实型军士院校 湖北交通"),
+            "third source newline must collapse to a space, got {flat_texts:?}"
         );
     }
 
@@ -8096,33 +8100,33 @@ viebcoding 用过吗?
     }
 
     #[test]
-    fn active_list_down_moves_to_next_lazy_continuation_source_line() {
+    fn active_list_down_follows_visual_wrap_before_physical_softbreak() {
         use ui::plugin::{MoveDirection, PluginMessage, ViewPlugin};
 
-        let source = "- 前 3-5 个：好学校好专业冲一下\n长沙航空、南京信息、江苏海事、成都航空、西安航空、重庆航天这类，有湖北计划就放前面。\n中间 5-8 个：本省或相邻省份务实型军士院校\n湖北交通、武汉船舶、长江工程、湖南汽车、湖南国防、张家界航空、江西航空等。";
+        let source = "- alpha beta gamma delta epsilon zeta eta theta iota kappa lambda\ncontinuation sentence";
         let mut doc = StubDoc::new(source);
         let mut view = MarkdownEditorView::new();
         view.set_source(doc.text.clone(), 1);
 
-        let current_byte = source.find("好学校").expect("fixture should contain first line text");
+        let current_byte = source.find("alpha").expect("fixture should contain first line text");
         view.handle_message(PluginMessage::SetCursorByte(current_byte), &mut doc);
-        render_editor_once(&mut view, &doc);
+        render_editor_narrow(&mut view, &doc, 170.0);
 
-        let next_line_start = source.find("长沙航空").expect("fixture should contain second line");
-        let third_line_start = source.find("中间").expect("fixture should contain third line");
+        let continuation_start =
+            source.find("continuation").expect("fixture should contain continuation text");
         let moved = view
             .engine()
             .visual_move(current_byte, MoveDirection::Down, None)
-            .expect("Down from first list line should return a byte");
+            .expect("Down from the first wrapped row should return a byte");
 
         assert!(
-            (next_line_start..third_line_start).contains(&moved),
-            "Down should move into the second source line byte range {next_line_start}..{third_line_start}, got {moved}"
+            current_byte < moved && moved < continuation_start,
+            "Down must follow the next visual row before the physical softbreak at {continuation_start}, got {moved}"
         );
     }
 
     #[test]
-    fn active_styled_list_lazy_continuation_preserves_source_lines() {
+    fn active_styled_list_collapses_lazy_continuation_softbreak() {
         use ui::plugin::{MoveDirection, PluginMessage, ViewPlugin};
 
         let source = "- 前 **好学校** 好专业冲一下\n长沙航空、南京 **信息**、江苏海事这类，有湖北计划就放前面。";
@@ -8139,8 +8143,7 @@ viebcoding 用过吗?
         assert_eq!(
             flat_texts,
             vec![
-                "- 前 好学校 好专业冲一下",
-                "长沙航空、南京 信息、江苏海事这类，有湖北计划就放前面。"
+                "- 前 好学校 好专业冲一下 长沙航空、南京 信息、江苏海事这类，有湖北计划就放前面。"
             ]
         );
 
@@ -8740,6 +8743,23 @@ mod tests {
 
         let (edited_source, _) = apply_single_replacement(source, &view.plan_edit(&request));
         assert_eq!(edited_source, "left \\\n right");
+    }
+
+    #[test]
+    fn markdown_edit_policy_deletes_complete_inline_html_break_forward() {
+        let mut view = MarkdownEditorView::new();
+        let source = "# left<br>right";
+        view.set_source(source.into(), 1);
+        let request = EditRequest {
+            source_generation: 1,
+            cursor_byte: "# left".len(),
+            selection: None,
+            intent: EditIntent::DeleteForward,
+        };
+
+        let (edited_source, cursor) = apply_single_replacement(source, &view.plan_edit(&request));
+        assert_eq!(edited_source, "# leftright");
+        assert_eq!(cursor, "# left".len());
     }
 
     #[test]
