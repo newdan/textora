@@ -987,7 +987,9 @@ fn default_edit_plan(
 
     let replacement = match &request.intent {
         EditIntent::InsertText(text) => Some(text.clone()),
-        EditIntent::InsertParagraphBreak => Some(default_newline_text(document)),
+        EditIntent::InsertParagraphBreak | EditIntent::InsertLineBreak => {
+            Some(default_newline_text(document))
+        }
         EditIntent::Indent => Some(if document.tb.indent_with_tabs() {
             "\t".to_owned()
         } else {
@@ -1585,6 +1587,24 @@ mod tests {
         };
         assert_eq!(transaction.replacements.len(), 1);
         assert_eq!(transaction.replacements[0].text, "\n");
+    }
+
+    #[test]
+    fn default_line_break_falls_back_to_the_native_document_newline() {
+        let document = prepared_crlf_document("alpha\r\nbeta");
+        let request = ui::plugin::EditRequest {
+            source_generation: document.generation(),
+            cursor_byte: 0,
+            selection: None,
+            intent: ui::plugin::EditIntent::InsertLineBreak,
+        };
+
+        let ui::plugin::EditPlan::ApplyDefault(transaction, _) =
+            default_edit_plan(&request, &document)
+        else {
+            panic!("line break should use the default newline outside Markdown WYSIWYG");
+        };
+        assert_eq!(transaction.replacements[0].text, "\r\n");
     }
 
     fn default_plan_history_kind(

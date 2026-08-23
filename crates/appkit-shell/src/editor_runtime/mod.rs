@@ -857,6 +857,7 @@ impl EditorRuntime {
         }
 
         let intent = match key {
+            ui::KeyCode::Enter if modifiers.shift => Some(ui::plugin::EditIntent::InsertLineBreak),
             ui::KeyCode::Enter => Some(ui::plugin::EditIntent::InsertParagraphBreak),
             ui::KeyCode::Backspace => Some(ui::plugin::EditIntent::DeleteBackward),
             ui::KeyCode::Delete => Some(ui::plugin::EditIntent::DeleteForward),
@@ -2345,6 +2346,20 @@ mod tests {
 
         assert_eq!(outcome, EditorOutcome::default());
         assert_eq!(runtime.workspace_snapshot().tabs[0].content_lines, vec!["clean"]);
+    }
+
+    #[test]
+    fn shift_enter_falls_back_to_a_plain_newline_for_text_documents() {
+        let mut runtime = runtime_with_clean_tab();
+        let context = EditorInputContext { focus: EditorFocus::Active, modal_blocked: false };
+
+        runtime.handle_key_input(
+            context,
+            ui::KeyCode::Enter,
+            ui::core::Modifiers { shift: true, ..ui::core::Modifiers::NONE },
+        );
+
+        assert_eq!(runtime.workspace_snapshot().tabs[0].content_lines, vec!["clean", ""]);
     }
 
     #[test]

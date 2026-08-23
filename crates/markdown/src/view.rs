@@ -2764,12 +2764,28 @@ impl ui::plugin::EditAugmenter for MarkdownEditorView {
     }
 }
 
+impl ui::plugin::KeyIntentMapper for MarkdownEditorView {
+    fn map_key(
+        &self,
+        key: &ui::KeyCode,
+        modifiers: &ui::core::Modifiers,
+    ) -> Option<ui::plugin::EditIntent> {
+        let is_unmodified_shift_enter = matches!(key, ui::KeyCode::Enter)
+            && modifiers.shift
+            && !modifiers.cmd
+            && !modifiers.ctrl
+            && !modifiers.alt;
+        is_unmodified_shift_enter.then_some(ui::plugin::EditIntent::InsertLineBreak)
+    }
+}
+
 fn request_augment_kind(intent: &ui::plugin::EditIntent) -> Option<ui::plugin::AugmentKind> {
     match intent {
         ui::plugin::EditIntent::InsertText(text) => {
             Some(ui::plugin::AugmentKind::InsertText(text.clone()))
         }
         ui::plugin::EditIntent::InsertParagraphBreak => Some(ui::plugin::AugmentKind::Enter),
+        ui::plugin::EditIntent::InsertLineBreak => Some(ui::plugin::AugmentKind::LineBreak),
         ui::plugin::EditIntent::DeleteBackward => Some(ui::plugin::AugmentKind::Backspace),
         ui::plugin::EditIntent::Indent => Some(ui::plugin::AugmentKind::Tab),
         ui::plugin::EditIntent::DeleteForward
@@ -2874,7 +2890,10 @@ impl MarkdownEditorView {
         request: &ui::plugin::EditRequest,
         selection: &std::ops::Range<usize>,
     ) -> ui::plugin::EditPlan {
-        if !matches!(request.intent, ui::plugin::EditIntent::InsertParagraphBreak) {
+        if !matches!(
+            request.intent,
+            ui::plugin::EditIntent::InsertParagraphBreak | ui::plugin::EditIntent::InsertLineBreak
+        ) {
             return ui::plugin::EditPlan::UseDefault;
         }
         // 选区越界或落在非字符边界时无法构造虚拟源码，交回默认计划
@@ -2887,11 +2906,13 @@ impl MarkdownEditorView {
         }
         let mut source_after_delete = self.source.clone();
         source_after_delete.replace_range(selection.clone(), "");
-        let Some(augmentation) = crate::augmenter::augment_edit(
-            &source_after_delete,
-            selection.start,
-            ui::plugin::AugmentKind::Enter,
-        ) else {
+        let kind = match request.intent {
+            ui::plugin::EditIntent::InsertLineBreak => ui::plugin::AugmentKind::LineBreak,
+            _ => ui::plugin::AugmentKind::Enter,
+        };
+        let Some(augmentation) =
+            crate::augmenter::augment_edit(&source_after_delete, selection.start, kind)
+        else {
             return ui::plugin::EditPlan::UseDefault;
         };
         selection_augmentation_edit_plan(request, selection, augmentation)
@@ -2909,6 +2930,10 @@ impl ViewPlugin for MarkdownEditorView {
 
     fn edit_policy(&self) -> &dyn ui::plugin::EditPolicy {
         self
+    }
+
+    fn key_intent_mapper(&self) -> Option<&dyn ui::plugin::KeyIntentMapper> {
+        Some(self)
     }
 
     fn name(&self) -> &str {
@@ -8659,7 +8684,7 @@ mod tests {
     use super::*;
     use ui::plugin::{
         EditAugmentation, EditIntent, EditPlan, EditPolicy, EditRequest, EditSelection,
-        EditTransaction, TextReplacement,
+        EditTransaction, KeyIntentMapper, TextReplacement,
     };
 
     fn test_enter_context(source: &str, byte: usize) -> EnterContext {
@@ -8690,6 +8715,31 @@ mod tests {
         };
 
         assert!(matches!(view.plan_edit(&request), EditPlan::MoveCursor(_)));
+    }
+
+    #[test]
+    fn markdown_key_mapper_distinguishes_shift_enter_from_plain_enter() {
+        let view = MarkdownEditorView::new();
+        let shift = ui::core::Modifiers { shift: true, ..ui::core::Modifiers::NONE };
+
+        assert_eq!(view.map_key(&ui::KeyCode::Enter, &shift), Some(EditIntent::InsertLineBreak));
+        assert_eq!(view.map_key(&ui::KeyCode::Enter, &ui::core::Modifiers::NONE), None);
+    }
+
+    #[test]
+    fn markdown_edit_policy_applies_line_break_after_deleting_selection() {
+        let mut view = MarkdownEditorView::new();
+        let source = "left selected right";
+        view.set_source(source.into(), 1);
+        let request = EditRequest {
+            source_generation: 1,
+            cursor_byte: "left selected".len(),
+            selection: Some("left ".len().."left selected".len()),
+            intent: EditIntent::InsertLineBreak,
+        };
+
+        let (edited_source, _) = apply_single_replacement(source, &view.plan_edit(&request));
+        assert_eq!(edited_source, "left \\\n right");
     }
 
     #[test]

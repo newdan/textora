@@ -44,10 +44,52 @@ pub fn augment_edit(
 ) -> Option<EditAugmentation> {
     match kind {
         AugmentKind::Enter => augment_enter(source, current_byte),
+        AugmentKind::LineBreak => Some(augment_line_break(source, current_byte)),
         AugmentKind::Backspace => augment_backspace(source, current_byte),
         AugmentKind::Tab => None,
         AugmentKind::InsertText(ref text) => augment_insert_text(source, current_byte, text),
     }
+}
+
+fn augment_line_break(source: &str, current_byte: usize) -> EditAugmentation {
+    let split_at = reversible_split_point(source, current_byte);
+    let context = classify_enter_context(source, current_byte);
+    let continuation_prefix = match &context {
+        EnterContext::ListItem { indent, continuation_marker, .. } => {
+            format!("{indent}{}", " ".repeat(continuation_marker.chars().count()))
+        }
+        EnterContext::BlockQuoteLine { continuation_prefix, .. }
+        | EnterContext::IndentedCodeBlock { continuation_prefix } => continuation_prefix.clone(),
+        EnterContext::Heading { .. }
+        | EnterContext::SetextHeading { .. }
+        | EnterContext::TableCell { .. } => {
+            return emit_inline_html_break(source, current_byte);
+        }
+        EnterContext::CodeBlock => return emit_source_newline(source, current_byte),
+        EnterContext::TopLevelParagraphEnd
+        | EnterContext::ParagraphInterior
+        | EnterContext::EmptyBlockSeparatorLine
+        | EnterContext::Other => String::new(),
+    };
+    let newline = preferred_newline_sequence(source, split_at);
+    let insertion = format!("\\{newline}{continuation_prefix}");
+    let augmentation = EditAugmentation {
+        cursor_byte_after: split_at + insertion.len(),
+        replace_range: Some(split_at..split_at),
+        insert_text: Some(insertion),
+    };
+    preserve_inline_elements_at_split(source, split_at, augmentation)
+}
+
+fn emit_inline_html_break(source: &str, current_byte: usize) -> EditAugmentation {
+    const INLINE_HTML_BREAK: &str = "<br>";
+    let augmentation = EditAugmentation {
+        cursor_byte_after: current_byte + INLINE_HTML_BREAK.len(),
+        replace_range: Some(current_byte..current_byte),
+        insert_text: Some(INLINE_HTML_BREAK.to_owned()),
+    };
+    debug_assert_augmentation(&augmentation, source);
+    augmentation
 }
 
 fn augment_enter(source: &str, current_byte: usize) -> Option<EditAugmentation> {
@@ -515,7 +557,8 @@ fn previous_non_empty_line_end(source: &str, current_byte: usize) -> usize {
 
 fn backspace_join_hard_break_line(source: &str, current_byte: usize) -> Option<EditAugmentation> {
     let (line_start, _, _) = locate_source_line_bounds(source, current_byte)?;
-    if !continuation_prefix_is_joinable(source.get(line_start..current_byte)?)
+    let continuation_prefix = source.get(line_start..current_byte)?;
+    if !continuation_prefix_is_joinable(continuation_prefix)
         || line_starts_new_sibling_block(source, line_start)
     {
         return None;
@@ -524,6 +567,13 @@ fn backspace_join_hard_break_line(source: &str, current_byte: usize) -> Option<E
     let newline_width = newline_sequence_width_before(source, line_start)?;
     let previous_content_end = line_start - newline_width;
     let marker = hard_break_marker_ending_at(source, previous_content_end)?;
+    if !continuation_prefix_matches_previous_container(source, line_start, continuation_prefix) {
+        return Some(EditAugmentation {
+            insert_text: Some(String::new()),
+            replace_range: Some(current_byte..current_byte),
+            cursor_byte_after: current_byte,
+        });
+    }
     let aug = EditAugmentation {
         insert_text: Some(String::new()),
         replace_range: Some(marker.start..current_byte),
@@ -531,6 +581,51 @@ fn backspace_join_hard_break_line(source: &str, current_byte: usize) -> Option<E
     };
     debug_assert_augmentation(&aug, source);
     Some(aug)
+}
+
+fn continuation_prefix_matches_previous_container(
+    source: &str,
+    line_start: usize,
+    continuation_prefix: &str,
+) -> bool {
+    if continuation_prefix.is_empty() {
+        return true;
+    }
+
+    let Some(newline_width) = newline_sequence_width_before(source, line_start) else {
+        return false;
+    };
+    let previous_line_end = line_start - newline_width;
+    let previous_line_start = source[..previous_line_end]
+        .bytes()
+        .rposition(|source_byte| source_byte == b'\n')
+        .map_or(0, |newline| newline + 1);
+    let previous_content_start =
+        container_content_start_on_line(source, previous_line_start, previous_line_end);
+    canonical_container_prefix(source, previous_content_start) == continuation_prefix
+}
+
+fn container_content_start_on_line(source: &str, line_start: usize, line_end: usize) -> usize {
+    let bytes = source.as_bytes();
+    let mut probe = line_start;
+    while probe < line_end && matches!(bytes.get(probe), Some(b' ' | b'\t')) {
+        probe += 1;
+    }
+
+    loop {
+        if let Some((_, content_start)) = parse_list_marker(source, probe)
+            && content_start <= line_end
+        {
+            probe = content_start;
+        } else if bytes.get(probe) == Some(&b'>') {
+            probe += 1;
+            if matches!(bytes.get(probe), Some(b' ' | b'\t')) {
+                probe += 1;
+            }
+        } else {
+            return probe;
+        }
+    }
 }
 
 fn continuation_prefix_is_joinable(prefix: &str) -> bool {
@@ -576,6 +671,17 @@ fn emit_marker_break(
     aug
 }
 
+fn emit_marker_break_at(
+    source: &str,
+    current_byte: usize,
+    indent: &str,
+    marker: &str,
+) -> EditAugmentation {
+    let mut augmentation = emit_marker_break(source, current_byte, indent, marker);
+    augmentation.replace_range = Some(current_byte..current_byte);
+    augmentation
+}
+
 fn emit_marker_break_replacing(
     source: &str,
     replaced: std::ops::Range<usize>,
@@ -593,14 +699,18 @@ fn emit_marker_break_replacing(
     aug
 }
 
-/// 删除当前源码行（含 range）。用于 list/blockquote 空 item 的"退出"。
-fn emit_remove_current_line(source: &str, current_byte: usize) -> Option<EditAugmentation> {
+/// 将当前源码行替换为父容器前缀。空前缀表示退出顶层容器。
+fn emit_replace_current_line(
+    source: &str,
+    current_byte: usize,
+    parent_prefix: &str,
+) -> Option<EditAugmentation> {
     let (start, _, line_end) = locate_source_line_bounds(source, current_byte)?;
     let content_end = source_line_content_end(source, line_end);
     let aug = EditAugmentation {
-        insert_text: Some(String::new()),
+        insert_text: Some(parent_prefix.to_owned()),
         replace_range: Some(start..content_end),
-        cursor_byte_after: start,
+        cursor_byte_after: start + parent_prefix.len(),
     };
     debug_assert_augmentation(&aug, source);
     Some(aug)
@@ -633,17 +743,23 @@ fn enter_context_augmentation(
         EnterContext::TopLevelParagraphEnd | EnterContext::ParagraphInterior => {
             Some(paragraph_enter_augmentation(source, current_byte))
         }
-        EnterContext::Heading { level: _, at_end } => {
-            heading_enter_augmentation(source, current_byte, at_end)
+        EnterContext::Heading { level: _, at_end, continuation_prefix } => {
+            heading_enter_augmentation(source, current_byte, at_end, &continuation_prefix)
         }
-        EnterContext::SetextHeading { underline_end } => {
-            Some(setext_heading_enter_augmentation(source, underline_end))
+        EnterContext::SetextHeading { underline_end, continuation_prefix } => {
+            Some(setext_heading_enter_augmentation(source, underline_end, &continuation_prefix))
         }
         EnterContext::ListItem { indent, continuation_marker, empty, at_end: _ } => {
             list_item_enter_augmentation(source, current_byte, &indent, &continuation_marker, empty)
         }
-        EnterContext::BlockQuoteLine { continuation_prefix, empty } => {
-            blockquote_enter_augmentation(source, current_byte, &continuation_prefix, empty)
+        EnterContext::BlockQuoteLine { continuation_prefix, empty_parent_prefix, empty } => {
+            blockquote_enter_augmentation(
+                source,
+                current_byte,
+                &continuation_prefix,
+                &empty_parent_prefix,
+                empty,
+            )
         }
         EnterContext::TableCell {
             next_cell_start,
@@ -651,6 +767,7 @@ fn enter_context_augmentation(
             row_is_empty,
             is_header_row,
             row_line_end,
+            container_prefix,
         } => {
             if let Some(next_cell_start) = next_cell_start {
                 Some(EditAugmentation {
@@ -659,9 +776,14 @@ fn enter_context_augmentation(
                     cursor_byte_after: next_cell_start,
                 })
             } else if row_is_empty && !is_header_row {
-                table_exit_empty_row_augmentation(source, row_line_end)
+                table_exit_empty_row_augmentation(source, row_line_end, &container_prefix)
             } else {
-                Some(table_insert_row_augmentation(source, row_line_end, column_count))
+                Some(table_insert_row_augmentation(
+                    source,
+                    row_line_end,
+                    column_count,
+                    &container_prefix,
+                ))
             }
         }
         EnterContext::EmptyBlockSeparatorLine => Some(emit_source_newline(source, current_byte)),
@@ -685,37 +807,68 @@ fn paragraph_enter_augmentation(source: &str, current_byte: usize) -> EditAugmen
         }
         return emit_source_newline(source, current_byte);
     }
-    if let Some(space_range) = adjacent_split_space_range(source, current_byte) {
-        return emit_block_break_replacing(source, space_range);
-    }
-    emit_block_break(source, current_byte)
+    let split_at = reversible_split_point(source, current_byte);
+    let augmentation = if split_at == current_byte {
+        emit_block_break(source, current_byte)
+    } else {
+        emit_block_break_at(source, split_at)
+    };
+    preserve_inline_elements_at_split(source, split_at, augmentation)
 }
 
 fn heading_enter_augmentation(
     source: &str,
     current_byte: usize,
     at_end: bool,
+    continuation_prefix: &str,
 ) -> Option<EditAugmentation> {
     if at_end {
+        if !continuation_prefix.is_empty() {
+            return Some(emit_container_line_break(source, current_byte, continuation_prefix));
+        }
         return Some(emit_block_break(source, current_byte));
     }
 
     // Heading 中间：在当前光标处分割标题，后半段成为普通段落。
-    let insertion = String::from(preferred_newline_sequence(source, current_byte));
-    let replace_range =
-        adjacent_split_space_range(source, current_byte).unwrap_or(current_byte..current_byte);
+    let split_at = reversible_split_point(source, current_byte);
+    let insertion =
+        format!("{}{}", preferred_newline_sequence(source, split_at), continuation_prefix);
     let aug = EditAugmentation {
         insert_text: Some(insertion.clone()),
-        cursor_byte_after: replace_range.start + insertion.len(),
-        replace_range: Some(replace_range),
+        cursor_byte_after: split_at + insertion.len(),
+        replace_range: Some(split_at..split_at),
     };
     debug_assert_augmentation(&aug, source);
-    Some(aug)
+    Some(preserve_inline_elements_at_split(source, split_at, aug))
+}
+
+fn emit_container_line_break(
+    source: &str,
+    current_byte: usize,
+    continuation_prefix: &str,
+) -> EditAugmentation {
+    let insertion =
+        format!("{}{}", preferred_newline_sequence(source, current_byte), continuation_prefix);
+    let augmentation = EditAugmentation {
+        cursor_byte_after: current_byte + insertion.len(),
+        replace_range: Some(current_byte..current_byte),
+        insert_text: Some(insertion),
+    };
+    debug_assert_augmentation(&augmentation, source);
+    augmentation
 }
 
 /// Setext 标题内的无选区 Enter：保留标题源码，在下划线之后建立块边界。
-fn setext_heading_enter_augmentation(source: &str, underline_end: usize) -> EditAugmentation {
-    emit_block_break_at(source, underline_end)
+fn setext_heading_enter_augmentation(
+    source: &str,
+    underline_end: usize,
+    continuation_prefix: &str,
+) -> EditAugmentation {
+    if continuation_prefix.is_empty() {
+        emit_block_break_at(source, underline_end)
+    } else {
+        emit_container_line_break(source, underline_end, continuation_prefix)
+    }
 }
 
 /// 缩进代码块内 Enter：插入换行并续上分类阶段确定的代码内容前缀。
@@ -743,22 +896,29 @@ fn list_item_enter_augmentation(
     empty: bool,
 ) -> Option<EditAugmentation> {
     if empty {
-        return emit_remove_current_line(source, current_byte);
+        return emit_replace_current_line(source, current_byte, indent);
     }
 
+    let continuation_content_prefix =
+        format!("{indent}{}", " ".repeat(continuation_marker.chars().count()));
+
     if let Some(boundary) = hard_break_boundary_after(source, current_byte) {
-        let continuation_content_prefix =
-            format!("{indent}{}", " ".repeat(continuation_marker.chars().count()));
-        let replaced = extend_range_over_prefix(source, boundary, &continuation_content_prefix);
+        let replaced =
+            extend_range_over_prefix_or_indent(source, boundary, &continuation_content_prefix);
         return Some(emit_marker_break_replacing(source, replaced, indent, continuation_marker));
     }
 
     if let Some(newline_width) = newline_sequence_width_at(source, current_byte) {
         let next_line_start = current_byte + newline_width;
         if !next_source_line_has_list_marker(source, next_line_start) {
-            return Some(emit_marker_break_replacing(
+            let replaced = extend_range_over_prefix_or_indent(
                 source,
                 current_byte..next_line_start,
+                &continuation_content_prefix,
+            );
+            return Some(emit_marker_break_replacing(
+                source,
+                replaced,
                 indent,
                 continuation_marker,
             ));
@@ -768,46 +928,69 @@ fn list_item_enter_augmentation(
     if newline_sequence_width_before(source, current_byte).is_some()
         && !next_source_line_has_list_marker(source, current_byte)
     {
-        return Some(emit_inline_marker(source, current_byte, indent, continuation_marker));
+        let replaced = extend_range_over_prefix_or_indent(
+            source,
+            current_byte..current_byte,
+            &continuation_content_prefix,
+        );
+        return Some(emit_inline_marker_replacing(source, replaced, indent, continuation_marker));
     }
 
-    Some(emit_marker_break(source, current_byte, indent, continuation_marker))
+    let split_at = reversible_split_point(source, current_byte);
+    let augmentation = if split_at == current_byte {
+        emit_marker_break(source, current_byte, indent, continuation_marker)
+    } else {
+        emit_marker_break_at(source, split_at, indent, continuation_marker)
+    };
+    Some(preserve_inline_elements_at_split(source, split_at, augmentation))
 }
 
 fn blockquote_enter_augmentation(
     source: &str,
     current_byte: usize,
     continuation_prefix: &str,
+    empty_parent_prefix: &str,
     empty: bool,
 ) -> Option<EditAugmentation> {
     if empty {
-        return emit_remove_current_line(source, current_byte);
+        return emit_replace_current_line(source, current_byte, empty_parent_prefix);
     }
 
     if let Some(boundary) = hard_break_boundary_after(source, current_byte) {
-        let replaced = extend_range_over_prefix(source, boundary, continuation_prefix);
+        let replaced = extend_range_over_prefix_or_indent(source, boundary, continuation_prefix);
         return Some(emit_marker_break_replacing(source, replaced, "", continuation_prefix));
     }
 
     if let Some(newline_width) = newline_sequence_width_at(source, current_byte) {
         let next_line_start = current_byte + newline_width;
         if !next_source_line_has_blockquote_marker(source, next_line_start) {
-            return Some(emit_marker_break_replacing(
+            let replaced = extend_range_over_prefix_or_indent(
                 source,
                 current_byte..next_line_start,
-                "",
                 continuation_prefix,
-            ));
+            );
+            return Some(emit_marker_break_replacing(source, replaced, "", continuation_prefix));
         }
     }
 
     if newline_sequence_width_before(source, current_byte).is_some()
         && !next_source_line_has_blockquote_marker(source, current_byte)
     {
-        return Some(emit_inline_marker(source, current_byte, "", continuation_prefix));
+        let replaced = extend_range_over_prefix_or_indent(
+            source,
+            current_byte..current_byte,
+            continuation_prefix,
+        );
+        return Some(emit_inline_marker_replacing(source, replaced, "", continuation_prefix));
     }
 
-    Some(emit_marker_break(source, current_byte, "", continuation_prefix))
+    let split_at = reversible_split_point(source, current_byte);
+    let augmentation = if split_at == current_byte {
+        emit_marker_break(source, current_byte, "", continuation_prefix)
+    } else {
+        emit_marker_break_at(source, split_at, "", continuation_prefix)
+    };
+    Some(preserve_inline_elements_at_split(source, split_at, augmentation))
 }
 
 fn extend_range_over_prefix(
@@ -821,20 +1004,37 @@ fn extend_range_over_prefix(
     range
 }
 
-fn emit_inline_marker(
+fn extend_range_over_prefix_or_indent(
     source: &str,
-    current_byte: usize,
+    range: std::ops::Range<usize>,
+    prefix: &str,
+) -> std::ops::Range<usize> {
+    let extended = extend_range_over_prefix(source, range.clone(), prefix);
+    if extended.end > range.end {
+        return extended;
+    }
+
+    let indentation_width = source[range.end..]
+        .bytes()
+        .take_while(|source_byte| matches!(*source_byte, b' ' | b'\t'))
+        .count();
+    range.start..range.end + indentation_width
+}
+
+fn emit_inline_marker_replacing(
+    source: &str,
+    replace_range: std::ops::Range<usize>,
     indent: &str,
     marker: &str,
 ) -> EditAugmentation {
     let insertion = format!("{indent}{marker}");
-    let aug = EditAugmentation {
-        cursor_byte_after: current_byte + insertion.len(),
-        replace_range: Some(current_byte..current_byte),
+    let augmentation = EditAugmentation {
+        cursor_byte_after: replace_range.start + insertion.len(),
+        replace_range: Some(replace_range),
         insert_text: Some(insertion),
     };
-    debug_assert_augmentation(&aug, source);
-    aug
+    debug_assert_augmentation(&augmentation, source);
+    augmentation
 }
 
 fn next_source_line_marker_start(source: &str, line_start: usize) -> Option<usize> {
@@ -858,23 +1058,134 @@ fn next_source_line_has_blockquote_marker(source: &str, line_start: usize) -> bo
         .is_some_and(|marker_start| source.as_bytes().get(marker_start) == Some(&b'>'))
 }
 
-fn adjacent_split_space_range(source: &str, current_byte: usize) -> Option<std::ops::Range<usize>> {
+fn reversible_split_point(source: &str, current_byte: usize) -> usize {
     let bytes = source.as_bytes();
-    if current_byte > 0 && bytes.get(current_byte - 1) == Some(&b' ') {
-        if (current_byte >= 2 && bytes.get(current_byte - 2) == Some(&b' '))
-            || bytes.get(current_byte) == Some(&b' ')
-        {
-            return None;
-        }
-        return Some(current_byte - 1..current_byte);
-    }
     if bytes.get(current_byte) == Some(&b' ') {
-        if bytes.get(current_byte + 1) == Some(&b' ') {
-            return None;
+        let belongs_to_space_run = current_byte > 0 && bytes.get(current_byte - 1) == Some(&b' ')
+            || bytes.get(current_byte + 1) == Some(&b' ');
+        if !belongs_to_space_run {
+            return current_byte + 1;
         }
-        return Some(current_byte..current_byte + 1);
     }
-    None
+    current_byte
+}
+
+#[derive(Debug)]
+struct InlineFrameDraft {
+    source_range: std::ops::Range<usize>,
+    content_start: Option<usize>,
+    content_end: usize,
+}
+
+#[derive(Debug)]
+struct InlineSplitFrame<'a> {
+    opening: &'a str,
+    closing: &'a str,
+}
+
+fn preserve_inline_elements_at_split(
+    source: &str,
+    split_at: usize,
+    mut augmentation: EditAugmentation,
+) -> EditAugmentation {
+    let frames = inline_split_frames(source, split_at);
+    if frames.is_empty() {
+        return augmentation;
+    }
+
+    let closing_len = frames.iter().map(|frame| frame.closing.len()).sum::<usize>();
+    let opening_len = frames.iter().map(|frame| frame.opening.len()).sum::<usize>();
+    let original_insertion = augmentation.insert_text.take().unwrap_or_default();
+    let mut insertion = String::with_capacity(closing_len + original_insertion.len() + opening_len);
+    for frame in &frames {
+        insertion.push_str(frame.closing);
+    }
+    insertion.push_str(&original_insertion);
+    for frame in frames.iter().rev() {
+        insertion.push_str(frame.opening);
+    }
+
+    augmentation.insert_text = Some(insertion);
+    augmentation.cursor_byte_after += closing_len + opening_len;
+    debug_assert_augmentation(&augmentation, source);
+    augmentation
+}
+
+fn inline_split_frames(source: &str, split_at: usize) -> Vec<InlineSplitFrame<'_>> {
+    use pulldown_cmark::{Event, Parser, Tag, TagEnd};
+
+    let mut drafts = Vec::<InlineFrameDraft>::new();
+    let mut completed = Vec::new();
+    for (event, source_range) in
+        Parser::new_ext(source, crate::parser::markdown_options()).into_offset_iter()
+    {
+        match event {
+            Event::Start(Tag::Emphasis | Tag::Strong | Tag::Strikethrough | Tag::Link { .. }) => {
+                drafts.push(InlineFrameDraft { source_range, content_start: None, content_end: 0 })
+            }
+            Event::Text(_) | Event::InlineHtml(_) | Event::Html(_) => {
+                record_inline_content(&mut drafts, &source_range);
+            }
+            Event::Code(code) => {
+                record_inline_content(&mut drafts, &source_range);
+                if let Some(frame) = inline_code_split_frame(source, source_range, &code, split_at)
+                {
+                    completed.push(frame);
+                }
+            }
+            Event::End(
+                TagEnd::Emphasis | TagEnd::Strong | TagEnd::Strikethrough | TagEnd::Link,
+            ) => {
+                let Some(draft) = drafts.pop() else {
+                    continue;
+                };
+                let Some(content_start) = draft.content_start else {
+                    continue;
+                };
+                if split_at < content_start || split_at > draft.content_end {
+                    continue;
+                }
+                let Some(opening) = source.get(draft.source_range.start..content_start) else {
+                    continue;
+                };
+                let Some(closing) = source.get(draft.content_end..draft.source_range.end) else {
+                    continue;
+                };
+                if !opening.is_empty() && !closing.is_empty() {
+                    completed.push(InlineSplitFrame { opening, closing });
+                }
+            }
+            _ => {}
+        }
+    }
+    completed
+}
+
+fn record_inline_content(drafts: &mut [InlineFrameDraft], source_range: &std::ops::Range<usize>) {
+    for draft in drafts {
+        draft.content_start = Some(
+            draft.content_start.map_or(source_range.start, |start| start.min(source_range.start)),
+        );
+        draft.content_end = draft.content_end.max(source_range.end);
+    }
+}
+
+fn inline_code_split_frame<'a>(
+    source: &'a str,
+    source_range: std::ops::Range<usize>,
+    code: &str,
+    split_at: usize,
+) -> Option<InlineSplitFrame<'a>> {
+    let code_source = source.get(source_range.clone())?;
+    let content_offset = code_source.find(code)?;
+    let content_start = source_range.start + content_offset;
+    let content_end = content_start + code.len();
+    if split_at < content_start || split_at > content_end {
+        return None;
+    }
+    let opening = source.get(source_range.start..content_start)?;
+    let closing = source.get(content_end..source_range.end)?;
+    (!opening.is_empty() && !closing.is_empty()).then_some(InlineSplitFrame { opening, closing })
 }
 
 fn cursor_touches_source_newline(source: &str, current_byte: usize) -> bool {
@@ -892,10 +1203,12 @@ pub enum EnterContext {
     Heading {
         level: u8,
         at_end: bool,
+        continuation_prefix: String,
     },
     /// Setext 标题；`underline_end` 不含下划线后的源码换行。
     SetextHeading {
         underline_end: usize,
+        continuation_prefix: String,
     },
     ListItem {
         indent: String,
@@ -905,6 +1218,7 @@ pub enum EnterContext {
     },
     BlockQuoteLine {
         continuation_prefix: String,
+        empty_parent_prefix: String,
         empty: bool,
     },
     CodeBlock,
@@ -918,6 +1232,7 @@ pub enum EnterContext {
         row_is_empty: bool,
         is_header_row: bool,
         row_line_end: usize,
+        container_prefix: String,
     },
     EmptyBlockSeparatorLine,
     Other,
@@ -934,6 +1249,7 @@ struct ItemFrame {
 struct TableFrame {
     cell_ranges: Vec<Vec<std::ops::Range<usize>>>,
     table_end: usize,
+    container_prefix: String,
 }
 
 struct CodeBlockFrame {
@@ -953,7 +1269,10 @@ fn classify_heading_hit(
     let end = content_end_without_trailing_newline(source, start..range.end);
     if !heading_source_is_atx(source, start) {
         if current_byte >= start && current_byte <= end {
-            return EnterContext::SetextHeading { underline_end: end };
+            return EnterContext::SetextHeading {
+                underline_end: end,
+                continuation_prefix: canonical_container_prefix(source, start),
+            };
         }
         return EnterContext::Other;
     }
@@ -961,7 +1280,11 @@ fn classify_heading_hit(
     let content_start = start.saturating_add(hash_prefix);
     let at_end = current_byte == end;
     if current_byte >= content_start && current_byte <= end {
-        EnterContext::Heading { level, at_end }
+        EnterContext::Heading {
+            level,
+            at_end,
+            continuation_prefix: canonical_container_prefix(source, start),
+        }
     } else {
         EnterContext::Other
     }
@@ -1004,6 +1327,7 @@ pub fn classify_enter_context(source: &str, current_byte: usize) -> EnterContext
     let mut paragraph_start: Option<(usize, usize, usize)> = None;
     let mut code_block: Option<CodeBlockFrame> = None;
     let mut blockquote_depth: usize = 0;
+    let mut matched_list_item: Option<EnterContext> = None;
 
     for (event, range) in parser.into_offset_iter() {
         match event {
@@ -1045,12 +1369,14 @@ pub fn classify_enter_context(source: &str, current_byte: usize) -> EnterContext
                     {
                         let empty = !frame.saw_content;
                         let at_end = current_byte == end;
-                        return EnterContext::ListItem {
-                            indent: frame.indent,
-                            continuation_marker: frame.continuation_marker,
-                            empty,
-                            at_end,
-                        };
+                        if matched_list_item.is_none() {
+                            matched_list_item = Some(EnterContext::ListItem {
+                                indent: frame.indent,
+                                continuation_marker: frame.continuation_marker,
+                                empty,
+                                at_end,
+                            });
+                        }
                     }
                 }
             }
@@ -1127,7 +1453,11 @@ pub fn classify_enter_context(source: &str, current_byte: usize) -> EnterContext
             }
             Event::Start(Tag::Table(_)) => {
                 mark_item_content_seen(&mut item_stack);
-                table = Some(TableFrame { cell_ranges: Vec::new(), table_end: range.end });
+                table = Some(TableFrame {
+                    cell_ranges: Vec::new(),
+                    table_end: range.end,
+                    container_prefix: canonical_container_prefix(source, range.start),
+                });
             }
             Event::Start(Tag::TableHead) | Event::Start(Tag::TableRow) => {
                 if let Some(t) = table.as_mut() {
@@ -1198,13 +1528,14 @@ pub fn classify_enter_context(source: &str, current_byte: usize) -> EnterContext
                         row_is_empty,
                         is_header_row,
                         row_line_end,
+                        container_prefix: t.container_prefix.clone(),
                     };
                 }
             }
         }
     }
 
-    if let Some((line_start, content_start, line_end)) =
+    if let Some((_line_start, content_start, line_end)) =
         locate_blockquote_line(source, current_byte)
         && let content_end = source_line_content_end(source, line_end)
         && current_byte >= content_start
@@ -1212,9 +1543,14 @@ pub fn classify_enter_context(source: &str, current_byte: usize) -> EnterContext
     {
         let empty = content_start == content_end;
         return EnterContext::BlockQuoteLine {
-            continuation_prefix: source[line_start..content_start].to_owned(),
+            continuation_prefix: canonical_container_prefix(source, content_start),
+            empty_parent_prefix: blockquote_parent_prefix(source, content_start),
             empty,
         };
+    }
+
+    if let Some(list_item) = matched_list_item {
+        return list_item;
     }
 
     if source_line_is_empty(source, current_byte) {
@@ -1322,17 +1658,19 @@ fn table_insert_row_augmentation(
     source: &str,
     row_line_end: usize,
     column_count: usize,
+    container_prefix: &str,
 ) -> EditAugmentation {
     let newline = preferred_newline_sequence(source, row_line_end);
-    let mut row_source = "|  ".repeat(column_count);
+    let mut row_source = String::from(container_prefix);
+    row_source.push_str(&"|  ".repeat(column_count));
     row_source.push('|');
 
     let (insert_at, insertion, first_cell_content_offset) =
         if let Some(newline_width) = newline_sequence_width_at(source, row_line_end) {
-            (row_line_end + newline_width, row_source, 2)
+            (row_line_end + newline_width, row_source, container_prefix.len() + 2)
         } else {
             let insertion = format!("{newline}{row_source}");
-            (row_line_end, insertion, newline.len() + 2)
+            (row_line_end, insertion, newline.len() + container_prefix.len() + 2)
         };
     let aug = EditAugmentation {
         cursor_byte_after: insert_at + first_cell_content_offset,
@@ -1346,13 +1684,18 @@ fn table_insert_row_augmentation(
 fn table_exit_empty_row_augmentation(
     source: &str,
     row_line_end: usize,
+    container_prefix: &str,
 ) -> Option<EditAugmentation> {
     let row_probe = row_line_end.saturating_sub(1);
     let (row_start, _, _) = locate_source_line_bounds(source, row_probe)?;
     let preceding_newline_width = newline_sequence_width_before(source, row_start)?;
     let replace_start = row_start - preceding_newline_width;
     let newline = preferred_newline_sequence(source, replace_start);
-    let insertion = newline.repeat(BLOCK_BOUNDARY_NEWLINE_COUNT);
+    let insertion = if container_prefix.is_empty() {
+        newline.repeat(BLOCK_BOUNDARY_NEWLINE_COUNT)
+    } else {
+        format!("{newline}{container_prefix}")
+    };
     let aug = EditAugmentation {
         cursor_byte_after: replace_start + insertion.len(),
         replace_range: Some(replace_start..row_line_end),
@@ -1505,6 +1848,48 @@ pub(crate) fn list_item_indent(source: &str, marker_start: usize) -> String {
     source[line_start..marker_start].to_string()
 }
 
+/// 返回叶块所在行的容器续行前缀。
+///
+/// 引用 marker 原样保留；列表 marker 改写为等宽空格，使新行留在原列表项内，
+/// 而不会意外创建同级列表项。该表示可组合处理 `> - `、`- > ` 等嵌套路径。
+fn canonical_container_prefix(source: &str, leaf_start: usize) -> String {
+    let Some((line_start, _, line_end)) = locate_source_line_bounds(source, leaf_start) else {
+        return String::new();
+    };
+    let prefix_end = leaf_start.min(line_end);
+    let mut prefix = String::with_capacity(prefix_end.saturating_sub(line_start));
+    let mut probe = line_start;
+
+    while probe < prefix_end {
+        if let Some((_, content_start)) = parse_list_marker(source, probe)
+            && content_start <= prefix_end
+        {
+            prefix.extend(std::iter::repeat_n(' ', content_start - probe));
+            probe = content_start;
+            continue;
+        }
+
+        let Some(character) = source[probe..prefix_end].chars().next() else {
+            break;
+        };
+        prefix.push(character);
+        probe += character.len_utf8();
+    }
+
+    prefix
+}
+
+fn blockquote_parent_prefix(source: &str, content_start: usize) -> String {
+    let Some((line_start, _, _)) = locate_source_line_bounds(source, content_start) else {
+        return String::new();
+    };
+    let structural_prefix = &source[line_start..content_start];
+    let Some(last_quote_offset) = structural_prefix.rfind('>') else {
+        return String::new();
+    };
+    structural_prefix[..last_quote_offset].to_owned()
+}
+
 fn locate_blockquote_line(source: &str, byte: usize) -> Option<(usize, usize, usize)> {
     let (line_start, _, line_end) = locate_source_line_bounds(source, byte)?;
     let bytes = source.as_bytes();
@@ -1514,15 +1899,30 @@ fn locate_blockquote_line(source: &str, byte: usize) -> Option<(usize, usize, us
         return None;
     }
     let mut content_start = line_start + leading_spaces;
-    let mut marker_count = 0;
-    while bytes.get(content_start) == Some(&b'>') {
-        marker_count += 1;
-        content_start += 1;
-        if matches!(bytes.get(content_start), Some(b' ' | b'\t')) {
-            content_start += 1;
+    let mut innermost_marker_is_quote = false;
+
+    loop {
+        if let Some((_, list_content_start)) = parse_list_marker(source, content_start)
+            && list_content_start <= line_end
+        {
+            innermost_marker_is_quote = false;
+            content_start = list_content_start;
+            continue;
         }
+
+        if bytes.get(content_start) == Some(&b'>') {
+            innermost_marker_is_quote = true;
+            content_start += 1;
+            if matches!(bytes.get(content_start), Some(b' ' | b'\t')) {
+                content_start += 1;
+            }
+            continue;
+        }
+
+        break;
     }
-    (marker_count > 0).then_some((line_start, content_start, line_end))
+
+    innermost_marker_is_quote.then_some((line_start, content_start, line_end))
 }
 
 #[cfg(test)]
@@ -1733,7 +2133,7 @@ mod tests {
     }
 
     #[test]
-    fn backspace_at_start_of_space_split_paragraph_does_not_restore_consumed_space() {
+    fn backspace_at_start_of_space_split_paragraph_restores_original_space() {
         let original_source = "hello world";
         let split_byte = "hello ".len();
         let enter_augmentation = augment_edit(original_source, split_byte, AugmentKind::Enter)
@@ -1752,8 +2152,8 @@ mod tests {
             &backspace_augmentation,
         );
 
-        assert_eq!(restored_source, "helloworld");
-        assert_eq!(backspace_augmentation.cursor_byte_after, "hello".len());
+        assert_eq!(restored_source, original_source);
+        assert_eq!(backspace_augmentation.cursor_byte_after, split_byte);
     }
 
     #[test]
@@ -2104,14 +2504,14 @@ mod tests {
         assert!(
             matches!(
                 classify_enter_context(source, "Title".len()),
-                EnterContext::SetextHeading { underline_end: end } if end == underline_end
+                EnterContext::SetextHeading { underline_end: end, .. } if end == underline_end
             ),
             "setext title text must not use ATX heading semantics"
         );
         assert!(
             matches!(
                 classify_enter_context(source, source.len()),
-                EnterContext::SetextHeading { underline_end: end } if end == underline_end
+                EnterContext::SetextHeading { underline_end: end, .. } if end == underline_end
             ),
             "setext underline must not use ATX heading semantics"
         );
@@ -2611,6 +3011,34 @@ mod tests {
     }
 
     #[test]
+    fn backspace_does_not_strip_a_new_nested_container_after_a_hard_break() {
+        for source in ["plain\\\n> quote", "- item\\\n  > quote"] {
+            let current_byte = source.find("quote").expect("fixture contains quote content");
+            let augmentation = augment_edit(source, current_byte, AugmentKind::Backspace);
+            let edited_source = augmentation
+                .as_ref()
+                .map(|augmentation| apply_augmentation_at(source, current_byte, augmentation))
+                .unwrap_or_else(|| source.to_owned());
+
+            assert!(
+                edited_source.contains('>'),
+                "Backspace must not erase a structurally new quote marker in {source:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn backspace_joins_a_hard_break_when_the_nested_container_path_matches() {
+        let source = "- > first\\\n  > second";
+        let current_byte = source.find("second").expect("fixture contains continuation content");
+
+        let augmentation = augment_edit(source, current_byte, AugmentKind::Backspace)
+            .expect("matching nested container paths should be joinable");
+
+        assert_eq!(apply_augmentation_at(source, current_byte, &augmentation), "- > firstsecond");
+    }
+
+    #[test]
     fn list_enter_at_lazy_continuation_newline_becomes_a_new_item() {
         let source = "- item\npara";
         let current_byte = "- item".len();
@@ -2663,7 +3091,7 @@ mod tests {
     }
 
     #[test]
-    fn paragraph_enter_before_a_single_space_does_not_leave_a_leading_space() {
+    fn paragraph_enter_before_a_single_space_preserves_a_reversible_separator() {
         let source = "left right";
         let current_byte = "left".len();
 
@@ -2671,12 +3099,12 @@ mod tests {
             .expect("paragraph Enter should split at the word boundary");
         let edited_source = apply_augmentation_at(source, current_byte, &augmentation);
 
-        assert_eq!(edited_source, "left\n\nright");
-        assert_eq!(augmentation.cursor_byte_after, "left\n\n".len());
+        assert_eq!(edited_source, "left \n\nright");
+        assert_eq!(augmentation.cursor_byte_after, "left \n\n".len());
     }
 
     #[test]
-    fn paragraph_enter_after_a_single_space_does_not_leave_a_trailing_space() {
+    fn paragraph_enter_after_a_single_space_preserves_a_reversible_separator() {
         let source = "left right";
         let current_byte = "left ".len();
 
@@ -2684,11 +3112,11 @@ mod tests {
             .expect("paragraph Enter should split at the word boundary");
         let edited_source = apply_augmentation_at(source, current_byte, &augmentation);
 
-        assert_eq!(edited_source, "left\n\nright");
+        assert_eq!(edited_source, "left \n\nright");
     }
 
     #[test]
-    fn heading_enter_before_a_single_space_does_not_leave_a_leading_space() {
+    fn heading_enter_before_a_single_space_preserves_a_reversible_separator() {
         let source = "# left right";
         let current_byte = "# left".len();
 
@@ -2696,7 +3124,56 @@ mod tests {
             .expect("heading interior Enter should split at the word boundary");
         let edited_source = apply_augmentation_at(source, current_byte, &augmentation);
 
-        assert_eq!(edited_source, "# left\nright");
+        assert_eq!(edited_source, "# left \nright");
+    }
+
+    #[test]
+    fn paragraph_enter_inside_bold_closes_and_reopens_the_inline_element() {
+        let source = "**left right**";
+        let current_byte = "**left".len();
+
+        let augmentation = augment_edit(source, current_byte, AugmentKind::Enter)
+            .expect("Enter inside bold text should preserve both styled fragments");
+        let edited_source = apply_augmentation_at(source, current_byte, &augmentation);
+
+        assert_eq!(edited_source, "**left **\n\n**right**");
+        assert_eq!(augmentation.cursor_byte_after, "**left **\n\n**".len());
+    }
+
+    #[test]
+    fn paragraph_enter_inside_nested_inline_elements_preserves_marker_order() {
+        let source = "**left *nested text* right**";
+        let current_byte = "**left *nested".len();
+
+        let augmentation = augment_edit(source, current_byte, AugmentKind::Enter)
+            .expect("Enter inside nested inline styles should close and reopen every frame");
+        let edited_source = apply_augmentation_at(source, current_byte, &augmentation);
+
+        assert_eq!(edited_source, "**left *nested ***\n\n***text* right**");
+    }
+
+    #[test]
+    fn paragraph_enter_inside_link_duplicates_the_link_wrapper() {
+        let source = "[left right](https://example.com)";
+        let current_byte = "[left".len();
+
+        let augmentation = augment_edit(source, current_byte, AugmentKind::Enter)
+            .expect("Enter inside link text should preserve a valid link on both sides");
+        let edited_source = apply_augmentation_at(source, current_byte, &augmentation);
+
+        assert_eq!(edited_source, "[left ](https://example.com)\n\n[right](https://example.com)");
+    }
+
+    #[test]
+    fn paragraph_enter_inside_inline_code_duplicates_the_code_delimiters() {
+        let source = "before `code text` after";
+        let current_byte = "before `code".len();
+
+        let augmentation = augment_edit(source, current_byte, AugmentKind::Enter)
+            .expect("Enter inside inline code should keep two valid code spans");
+        let edited_source = apply_augmentation_at(source, current_byte, &augmentation);
+
+        assert_eq!(edited_source, "before `code `\n\n`text` after");
     }
 
     #[test]
@@ -2762,5 +3239,195 @@ mod tests {
         let edited_source = apply_augmentation_at(source, current_byte, &augmentation);
 
         assert_eq!(edited_source, "| a |\n|---|\n|  |");
+    }
+
+    #[test]
+    fn list_enter_at_indented_lazy_continuation_consumes_the_old_indent() {
+        let source = "- item\n  continuation";
+        let current_byte = "- item".len();
+
+        let augmentation = augment_edit(source, current_byte, AugmentKind::Enter)
+            .expect("Enter should turn the continuation into a sibling item");
+        let edited_source = apply_augmentation_at(source, current_byte, &augmentation);
+
+        assert_eq!(edited_source, "- item\n- continuation");
+    }
+
+    #[test]
+    fn blockquote_enter_at_indented_lazy_continuation_consumes_the_old_indent() {
+        let source = "> first\n  second";
+        let current_byte = "> first".len();
+
+        let augmentation = augment_edit(source, current_byte, AugmentKind::Enter)
+            .expect("Enter should make the lazy quote continuation explicit");
+        let edited_source = apply_augmentation_at(source, current_byte, &augmentation);
+
+        assert_eq!(edited_source, "> first\n> second");
+    }
+
+    #[test]
+    fn heading_enter_inside_blockquote_preserves_the_quote_container() {
+        let source = "> # left right";
+        let current_byte = "> # left".len();
+
+        let augmentation = augment_edit(source, current_byte, AugmentKind::Enter)
+            .expect("heading Enter should create a paragraph inside the quote");
+        let edited_source = apply_augmentation_at(source, current_byte, &augmentation);
+
+        assert_eq!(edited_source, "> # left \n> right");
+    }
+
+    #[test]
+    fn heading_enter_inside_list_preserves_the_list_item_container() {
+        let source = "- # left right";
+        let current_byte = "- # left".len();
+
+        let augmentation = augment_edit(source, current_byte, AugmentKind::Enter)
+            .expect("heading Enter should create a paragraph inside the item");
+        let edited_source = apply_augmentation_at(source, current_byte, &augmentation);
+
+        assert_eq!(edited_source, "- # left \n  right");
+    }
+
+    #[test]
+    fn blockquote_inside_list_takes_precedence_over_the_outer_item() {
+        let source = "- > left right";
+        let current_byte = "- > left".len();
+
+        let augmentation = augment_edit(source, current_byte, AugmentKind::Enter)
+            .expect("the inner quote should own Enter");
+        let edited_source = apply_augmentation_at(source, current_byte, &augmentation);
+
+        assert_eq!(edited_source, "- > left \n  > right");
+    }
+
+    #[test]
+    fn table_row_insert_inside_blockquote_preserves_the_quote_prefix() {
+        let source = "> | a |\n> |---|\n> | b |";
+        let current_byte = source.rfind('b').expect("fixture contains body cell");
+
+        let augmentation = augment_edit(source, current_byte, AugmentKind::Enter)
+            .expect("Enter should append a quoted table row");
+        let edited_source = apply_augmentation_at(source, current_byte, &augmentation);
+
+        assert_eq!(edited_source, "> | a |\n> |---|\n> | b |\n> |  |");
+    }
+
+    #[test]
+    fn table_inside_list_takes_precedence_and_preserves_item_indent() {
+        let source = "- table\n\n  | a |\n  |---|\n  | b |";
+        let current_byte = source.rfind('b').expect("fixture contains body cell");
+
+        let augmentation = augment_edit(source, current_byte, AugmentKind::Enter)
+            .expect("the nested table should own Enter");
+        let edited_source = apply_augmentation_at(source, current_byte, &augmentation);
+
+        assert_eq!(edited_source, "- table\n\n  | a |\n  |---|\n  | b |\n  |  |");
+    }
+
+    #[test]
+    fn line_break_preserves_the_word_separator_and_is_backspace_reversible() {
+        let source = "left right";
+        let split_byte = "left".len();
+
+        let line_break = augment_edit(source, split_byte, AugmentKind::LineBreak)
+            .expect("Shift+Enter should create a Markdown hard break");
+        let source_with_break = apply_augmentation_at(source, split_byte, &line_break);
+        assert_eq!(source_with_break, "left \\\nright");
+
+        let backspace =
+            augment_edit(&source_with_break, line_break.cursor_byte_after, AugmentKind::Backspace)
+                .expect("Backspace at the hard-break continuation should restore the source");
+        assert_eq!(
+            apply_augmentation_at(&source_with_break, line_break.cursor_byte_after, &backspace),
+            source
+        );
+    }
+
+    #[test]
+    fn line_break_preserves_crlf_and_inline_element_boundaries() {
+        let source = "**left right**\r\nnext";
+        let current_byte = "**left".len();
+
+        let augmentation = augment_edit(source, current_byte, AugmentKind::LineBreak)
+            .expect("Shift+Enter should preserve styled fragments and CRLF");
+        let edited_source = apply_augmentation_at(source, current_byte, &augmentation);
+
+        assert_eq!(edited_source, "**left **\\\r\n**right**\r\nnext");
+    }
+
+    #[test]
+    fn line_break_preserves_list_and_quote_container_paths() {
+        let list_source = "- left right";
+        let list_cursor = "- left".len();
+        let list_augmentation = augment_edit(list_source, list_cursor, AugmentKind::LineBreak)
+            .expect("Shift+Enter should stay inside the list item");
+        assert_eq!(
+            apply_augmentation_at(list_source, list_cursor, &list_augmentation),
+            "- left \\\n  right"
+        );
+
+        let quote_source = "- > left right";
+        let quote_cursor = "- > left".len();
+        let quote_augmentation = augment_edit(quote_source, quote_cursor, AugmentKind::LineBreak)
+            .expect("Shift+Enter should stay inside the nested quote");
+        assert_eq!(
+            apply_augmentation_at(quote_source, quote_cursor, &quote_augmentation),
+            "- > left \\\n  > right"
+        );
+    }
+
+    #[test]
+    fn line_break_uses_inline_html_where_a_physical_line_would_end_the_leaf() {
+        for (source, current_byte) in [
+            ("# left right", "# left".len()),
+            ("| a |\n|---|\n| left right |", "| a |\n|---|\n| left".len()),
+        ] {
+            let augmentation = augment_edit(source, current_byte, AugmentKind::LineBreak)
+                .expect("Shift+Enter should preserve the heading or table-cell leaf");
+            let edited_source = apply_augmentation_at(source, current_byte, &augmentation);
+            assert_eq!(&edited_source[current_byte..current_byte + 4], "<br>");
+        }
+    }
+
+    #[test]
+    fn enter_on_an_empty_nested_container_exits_exactly_one_level() {
+        for (source, expected_source) in [("- > ", "- "), ("> - ", "> "), ("> > ", "> ")] {
+            let augmentation = augment_edit(source, source.len(), AugmentKind::Enter)
+                .expect("Enter should exit the innermost empty container");
+            let edited_source = apply_augmentation_at(source, source.len(), &augmentation);
+
+            assert_eq!(edited_source, expected_source, "wrong exit level for {source:?}");
+            assert_eq!(augmentation.cursor_byte_after, expected_source.len());
+        }
+    }
+
+    #[test]
+    fn setext_heading_enter_preserves_outer_container_path() {
+        for (source, expected_source) in [
+            ("> Title\n> =====", "> Title\n> =====\n> "),
+            ("- Title\n  =====", "- Title\n  =====\n  "),
+        ] {
+            let current_byte =
+                source.find("Title").expect("fixture contains title") + "Title".len();
+            let augmentation = augment_edit(source, current_byte, AugmentKind::Enter)
+                .expect("Enter should append a paragraph inside the same container");
+
+            assert_eq!(apply_augmentation_at(source, current_byte, &augmentation), expected_source);
+        }
+    }
+
+    #[test]
+    fn table_empty_row_exit_preserves_outer_container_path() {
+        for (source, expected_source) in [
+            ("> | a |\n> |---|\n> |  |", "> | a |\n> |---|\n> "),
+            ("- table\n\n  | a |\n  |---|\n  |  |", "- table\n\n  | a |\n  |---|\n  "),
+        ] {
+            let current_byte = source.rfind('|').expect("fixture contains empty row") - 1;
+            let augmentation = augment_edit(source, current_byte, AugmentKind::Enter)
+                .expect("Enter should leave the table but keep its parent container");
+
+            assert_eq!(apply_augmentation_at(source, current_byte, &augmentation), expected_source);
+        }
     }
 }

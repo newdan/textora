@@ -103,6 +103,7 @@ pub enum EditHitTarget {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AugmentKind {
     Enter,
+    LineBreak,
     Backspace,
     Tab,
     InsertText(String),
@@ -392,6 +393,7 @@ pub enum SemanticEditPlan {
 pub enum EditIntent {
     InsertText(String),
     InsertParagraphBreak,
+    InsertLineBreak,
     DeleteBackward,
     DeleteForward,
     Indent,

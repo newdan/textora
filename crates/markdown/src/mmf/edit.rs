@@ -41,6 +41,7 @@ pub fn plan_mindmap_edit(tree: &Tree, source: &str, request: &EditRequest) -> Ed
                 plan_new_sibling(source, request, node)
             }
         }
+        EditIntent::InsertLineBreak => EditPlan::Consume,
         EditIntent::Indent => plan_new_child(source, request, node),
         EditIntent::Outdent | EditIntent::PromoteObject => {
             if node_index == 0 {

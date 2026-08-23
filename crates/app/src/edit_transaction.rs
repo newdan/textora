@@ -134,7 +134,7 @@ pub fn default_edit_plan(request: &EditRequest, doc: &impl DocumentModelRef) -> 
     let doc = doc.document_model();
     let plan = match &request.intent {
         EditIntent::InsertText(text) => replace_selection_or_cursor(request, text.clone()),
-        EditIntent::InsertParagraphBreak => {
+        EditIntent::InsertParagraphBreak | EditIntent::InsertLineBreak => {
             replace_selection_or_cursor(request, default_newline_text(doc))
         }
         EditIntent::DeleteBackward => delete_selection_or_adjacent_grapheme(request, doc, -1),
