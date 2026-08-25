@@ -313,6 +313,7 @@ fn render_block_with_offset(
                         );
                     }
                 }
+                ListBullet::Ordered(_) if list_item_uses_source_marker(lines) => {}
                 ListBullet::Ordered(n) => {
                     let label = format!("{}.", n);
                     if let Some(ref mut s) = shaper {
@@ -501,6 +502,14 @@ fn render_block_with_offset(
             });
         }
     }
+}
+
+fn list_item_uses_source_marker(lines: &[LaidOutLine]) -> bool {
+    lines.first().is_some_and(|line| {
+        line.styles
+            .iter()
+            .any(|style| style.start == 0 && matches!(style.style, InlineStyle::SourceMarker))
+    })
 }
 
 fn code_cell_width(shaper: &mut shaping::Shaper, font_size: f32, family: Option<&str>) -> f32 {

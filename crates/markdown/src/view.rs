@@ -5600,6 +5600,17 @@ C608-01 武昌职业第01组：计划 68，历史低线较低，是表里最像�
         <MarkdownEditorView as ViewPlugin>::render(view, doc, bounds, &theme, &mut shaper, 1.0)
     }
 
+    fn rendered_text_commands(draw_list: &DrawList) -> Vec<&str> {
+        draw_list
+            .cmds
+            .iter()
+            .filter_map(|command| match command {
+                ui::core::paint::DrawCmd::TextLayout { layout, .. } => Some(layout.text.as_str()),
+                _ => None,
+            })
+            .collect()
+    }
+
     fn render_editor_draw_list_with_dpi(
         view: &mut MarkdownEditorView,
         doc: &StubDoc,
@@ -7088,6 +7099,43 @@ C608-01 武昌职业第01组：计划 68，历史低线较低，是表里最像�
         };
         let joined = lines.into_iter().map(|l| l.text).collect::<Vec<_>>().join("\n");
         assert!(joined.contains("- [x] "), "checked task marker must be visible, got: {joined:?}");
+    }
+
+    #[test]
+    fn activating_ordered_list_replaces_preview_number_with_source_marker() {
+        use ui::plugin::{PluginMessage, ViewPlugin};
+
+        let source = "# Title\n\n1. item";
+        let item_cursor = source.find("item").expect("fixture must contain list item text");
+        let mut document = StubDoc::new(source);
+        let mut view = MarkdownEditorView::new();
+        view.set_source(document.text.clone(), 1);
+        view.handle_message(PluginMessage::SetCursorByte(2), &mut document);
+
+        let preview_draw_list = render_editor_draw_list(&mut view, &document);
+        let preview_text = rendered_text_commands(&preview_draw_list);
+        assert!(
+            preview_text.contains(&"1."),
+            "inactive ordered list must retain its preview number"
+        );
+        assert!(
+            !preview_text.contains(&"1. "),
+            "inactive ordered list must fold its source marker"
+        );
+
+        view.handle_message(PluginMessage::SetCursorByte(item_cursor), &mut document);
+
+        let draw_list = render_editor_draw_list(&mut view, &document);
+        let rendered_text = rendered_text_commands(&draw_list);
+
+        assert!(
+            rendered_text.contains(&"1. "),
+            "active ordered list must render its source marker"
+        );
+        assert!(
+            !rendered_text.contains(&"1."),
+            "active ordered list must stop rendering its preview number, got {rendered_text:?}"
+        );
     }
 
     /// HitTestByte returns None for a click far outside all content.
