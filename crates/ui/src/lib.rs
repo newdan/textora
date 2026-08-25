@@ -44,8 +44,9 @@ pub use core::widget::ControlAction;
 pub use core::{
     AccessibilityAction, AccessibilityActionRequest, AccessibilityContext, AccessibilityId,
     AccessibilityNode, AccessibilityOrientation, AccessibilityRole, AccessibilityState,
-    AccessibilityTree, AccessibilityValidationError, DismissPolicy, Dock, DockChild, DrawCmd,
-    DrawList, Event, EventCtx, KeyCode, LayoutCtx, Modifiers, MouseButton, NoopMeasure,
-    OverlayAction, OverlayInputPolicy, OverlayLayout, PaintCtx, Rect, Screen, Side, TextMeasure,
-    Widget, WidgetAction, WidgetId,
+    AccessibilityTree, AccessibilityValidationError, ChildEventDispatch, ChildEventRoute,
+    ChildEventRouter, DismissPolicy, Dock, DockChild, DrawCmd, DrawList, Event, EventCtx,
+    FocusDirection, KeyCode, LayoutCtx, Modifiers, MouseButton, NoopMeasure, OverlayAction,
+    OverlayInputPolicy, OverlayLayout, PaintCtx, Rect, Screen, Side, TextMeasure, Widget,
+    WidgetAction, WidgetId, dispatch_child_event_route, next_focus_target,
 };

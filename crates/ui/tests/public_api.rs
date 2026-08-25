@@ -24,7 +24,8 @@ use ui::viewport::{LineMap, ScrollAnchor};
 use ui::{
     AccessibilityAction, AccessibilityActionRequest, AccessibilityContext, AccessibilityId,
     AccessibilityNode, AccessibilityOrientation, AccessibilityRole, AccessibilityState,
-    AccessibilityTree, AccessibilityValidationError, ControlAction, Modifiers, WidgetAction,
+    AccessibilityTree, AccessibilityValidationError, ChildEventRouter, ControlAction,
+    FocusDirection, Modifiers, WidgetAction, next_focus_target,
 };
 
 fn assert_widget<T: Widget>() {}
@@ -118,6 +119,20 @@ fn semantic_public_modules_compile_for_external_consumers() {
     // action enum 路径验证
     let _actions: (Option<TabBarAction>, Option<SidebarAction>, Option<ScrollbarAction>) =
         (None, None, None);
+}
+
+#[test]
+fn child_event_router_is_a_stable_public_container_capability() {
+    let first = ui::WidgetId(301);
+    let second = ui::WidgetId(302);
+    let mut router = ChildEventRouter::default();
+    router.set_focused_target(Some(first));
+
+    assert_eq!(
+        next_focus_target(router.focused_target(), &[first, second], FocusDirection::Forward),
+        Some(second)
+    );
+    assert_eq!(router.cycle_focus(&[first, second], FocusDirection::Forward), Some(second));
 }
 
 #[test]

@@ -339,6 +339,8 @@ impl TextBox {
             if !focused {
                 self.selection = None;
                 self.dragging = false;
+                self.preedit.clear();
+                self.preedit_cursor = None;
             }
         }
     }
@@ -801,6 +803,9 @@ impl TextBox {
 
     /// Receive an IME event from the parent widget.
     pub fn on_ime(&mut self, ev: &TextBoxIme) {
+        if !self.focused {
+            return;
+        }
         self.handle_ime_event(ev);
     }
 
@@ -1179,6 +1184,18 @@ impl Widget for TextBox {
     }
 
     fn on_event(&mut self, ev: &Event, ctx: &mut EventCtx) -> Option<WidgetAction> {
+        if !self.focused
+            && matches!(
+                ev,
+                Event::KeyDown(..)
+                    | Event::ImePreedit { .. }
+                    | Event::ImeCommit(..)
+                    | Event::ImeEnable
+                    | Event::ImeDisable
+            )
+        {
+            return None;
+        }
         match ev {
             Event::KeyDown(key_code, modifiers) => {
                 let (consumed, action) = self.handle_key_down(*key_code, *modifiers, ctx);
@@ -1320,7 +1337,34 @@ mod tests {
     ) -> Option<WidgetAction> {
         let theme = crate::theme::test_theme();
         let mut event_ctx = EventCtx::new(&theme, 1.0);
+        text_box.set_focus(true);
         text_box.on_event(&Event::KeyDown(key_code, modifiers), &mut event_ctx)
+    }
+
+    #[test]
+    fn unfocused_text_box_rejects_keyboard_and_ime_input() {
+        let mut text_box = laid_out_widget(TextBox::with_id(WidgetId(29)));
+        let theme = crate::theme::test_theme();
+        let mut event_context = EventCtx::new(&theme, 1.0);
+
+        assert_eq!(
+            text_box.on_event(
+                &Event::KeyDown(KeyCode::Char('x'), Modifiers::NONE),
+                &mut event_context,
+            ),
+            None
+        );
+        assert_eq!(
+            text_box.on_event(
+                &Event::ImePreedit { text: "ni".into(), cursor: Some((2, 2)) },
+                &mut event_context
+            ),
+            None
+        );
+        assert_eq!(text_box.on_event(&Event::ImeCommit("你好".into()), &mut event_context), None);
+        text_box.on_ime(&TextBoxIme::Commit("仍不应写入".into()));
+        assert_eq!(text_box.text(), "");
+        assert!(!text_box.has_preedit());
     }
 
     #[test]
@@ -1387,6 +1431,7 @@ mod tests {
                 )
                 .is_some()
         );
+        text_box.set_focus(true);
         assert_eq!(
             text_box.on_event(
                 &Event::ImePreedit { text: "未完成".to_owned(), cursor: Some((0, 6)) },
@@ -1828,13 +1873,16 @@ mod tests {
         tb.set_focus(true);
         tb.set_text("hello");
         tb.selection = Some((0, 3));
+        tb.on_ime(&TextBoxIme::Preedit { text: "ni".into(), cursor: Some((2, 2)) });
         tb.set_focus(false);
         assert!(tb.selection.is_none());
+        assert!(!tb.has_preedit());
     }
 
     #[test]
     fn ime_preedit_updates_state() {
         let mut tb = TextBox::new();
+        tb.set_focus(true);
         tb.on_ime(&TextBoxIme::Preedit { text: "ni".into(), cursor: Some((2, 2)) });
         assert!(tb.has_preedit());
         assert_eq!(tb.preedit, "ni");
@@ -1843,6 +1891,7 @@ mod tests {
     #[test]
     fn ime_commit_inserts_text() {
         let mut tb = TextBox::new();
+        tb.set_focus(true);
         tb.on_ime(&TextBoxIme::Preedit { text: "ni".into(), cursor: Some((2, 2)) });
         tb.on_ime(&TextBoxIme::Commit("你好".into()));
         assert!(!tb.has_preedit());
@@ -1988,6 +2037,7 @@ mod tests {
     fn byte_limit_does_not_insert_partial_grapheme_from_ime_or_clipboard() {
         let mut text_box = TextBox::new();
         text_box.set_max_len_bytes(1);
+        text_box.set_focus(true);
 
         text_box.on_ime(&TextBoxIme::Commit("e\u{301}".into()));
         assert_eq!(text_box.text(), "");
@@ -2007,6 +2057,7 @@ mod tests {
             Rc::new(RefCell::new(Some("第一行\r\n第二行\n第三行\r第四行".to_owned())));
         let mut clipboard = TestClipboard { text: clipboard_text };
         let mut text_box = laid_out_widget(TextBox::with_id(WidgetId(46)));
+        text_box.set_focus(true);
         let theme = crate::theme::test_theme();
         let mut event_context = EventCtx::with_clipboard(&theme, 1.0, &mut clipboard);
         let command = Modifiers { cmd: true, ..Modifiers::NONE };
@@ -2025,6 +2076,7 @@ mod tests {
         let mut text_box = laid_out_widget(TextBox::with_id(WidgetId(47)));
         text_box.set_max_len_bytes(1);
         text_box.set_text("a");
+        text_box.set_focus(true);
         text_box.select_all();
         let theme = crate::theme::test_theme();
         let mut event_context = EventCtx::with_clipboard(&theme, 1.0, &mut clipboard);
@@ -2044,6 +2096,7 @@ mod tests {
         let mut clipboard = TestClipboard { text: Rc::clone(&clipboard_text) };
         let mut text_box = laid_out_widget(TextBox::with_id(WidgetId(44)));
         text_box.set_text("原文");
+        text_box.set_focus(true);
         text_box.select_all();
         let theme = crate::theme::test_theme();
         let mut event_context = EventCtx::with_clipboard(&theme, 1.0, &mut clipboard);
@@ -2075,6 +2128,7 @@ mod tests {
         let mut clipboard = RejectingClipboard;
         let mut text_box = laid_out_widget(TextBox::with_id(WidgetId(45)));
         text_box.set_text("不能丢失");
+        text_box.set_focus(true);
         text_box.select_all();
         let theme = crate::theme::test_theme();
         let mut event_context = EventCtx::with_clipboard(&theme, 1.0, &mut clipboard);
@@ -2093,6 +2147,7 @@ mod tests {
         let mut text_box = TextBox::new();
         text_box.set_echo_mode(EchoMode::Masked);
         text_box.set_text("stored-api-key");
+        text_box.set_focus(true);
         text_box
             .on_ime(&TextBoxIme::Preedit { text: "preedit-secret".into(), cursor: Some((0, 14)) });
 
@@ -2109,6 +2164,7 @@ mod tests {
         let mut text_box = TextBox::new();
         text_box.set_echo_mode(EchoMode::Masked);
         text_box.set_text("clipboard-secret");
+        text_box.set_focus(true);
         text_box.select_all();
 
         let command = Modifiers { cmd: true, ..Modifiers::NONE };
@@ -2225,6 +2281,7 @@ mod tests {
         let mut tb = TextBox::new();
         tb.set_echo_mode(EchoMode::Masked);
         tb.set_text("secret");
+        tb.set_focus(true);
         tb.cursor_byte = tb.text.len();
         tb.on_ime(&TextBoxIme::Preedit { text: "ni".into(), cursor: Some((0, 1)) });
 
@@ -2308,6 +2365,7 @@ mod tests {
 
         let mut tb = TextBox::new();
         tb.set_text("hello ");
+        tb.set_focus(true);
         tb.cursor_byte = 6;
         tb.rect = Rect::new(0.0, 0.0, 200.0, 28.0);
         tb.on_ime(&TextBoxIme::Preedit { text: "世界".into(), cursor: Some((0, 6)) });

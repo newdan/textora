@@ -3,7 +3,8 @@ use std::borrow::Cow;
 
 use crate::core::{
     AccessibilityActionRequest, AccessibilityContext, AccessibilityId, AccessibilityNode,
-    AccessibilityRole, Event, EventCtx, LayoutCtx, PaintCtx, Rect, Widget, WidgetAction, WidgetId,
+    AccessibilityRole, ChildEventRouter, Event, EventCtx, LayoutCtx, PaintCtx, Rect, Widget,
+    WidgetAction, WidgetId, dispatch_child_event_route,
 };
 use crate::widgets::label::Label;
 use crate::widgets::text_box::TextBox;
@@ -53,6 +54,10 @@ enum FormRowChildTarget {
     Control,
 }
 
+impl FormRowChildTarget {
+    const ALL: [Self; 3] = [Self::Label, Self::Description, Self::Control];
+}
+
 pub struct FormRow {
     rect: Rect,
     label: Label,
@@ -63,9 +68,7 @@ pub struct FormRow {
     label_rect: Rect,
     description_rect: Option<Rect>,
     control_rect: Rect,
-    focused_id: Option<WidgetId>,
-    pointer_target: Option<FormRowChildTarget>,
-    hover_target: Option<FormRowChildTarget>,
+    event_router: ChildEventRouter<FormRowChildTarget>,
     accessibility_id: Option<AccessibilityId>,
     label_accessibility_id: Option<AccessibilityId>,
     description_accessibility_id: Option<AccessibilityId>,
@@ -101,9 +104,7 @@ impl FormRow {
             label_rect: Rect::ZERO,
             description_rect: None,
             control_rect: Rect::ZERO,
-            focused_id: None,
-            pointer_target: None,
-            hover_target: None,
+            event_router: ChildEventRouter::default(),
             accessibility_id,
             label_accessibility_id,
             description_accessibility_id,
@@ -194,13 +195,25 @@ impl FormRow {
     }
 
     fn control_has_focus(&self) -> bool {
-        let Some(focused_id) = self.focused_id else {
-            return false;
-        };
+        self.event_router.focused_target() == Some(FormRowChildTarget::Control)
+    }
 
-        let mut ids = Vec::new();
-        self.control.collect_focusable_ids(&mut ids);
-        ids.into_iter().any(|id| id == focused_id)
+    fn dispatch_route(
+        &mut self,
+        route: crate::core::ChildEventRoute<FormRowChildTarget>,
+        event: &Event,
+        ctx: &mut EventCtx,
+    ) -> Option<WidgetAction> {
+        let dispatch = dispatch_child_event_route(
+            route,
+            event,
+            FormRowChildTarget::ALL,
+            ctx,
+            |target, event, ctx| self.dispatch_to_target(target, event, ctx),
+        );
+        dispatch.action.or_else(|| {
+            (dispatch.broadcast && dispatch.state_changed).then_some(WidgetAction::Consumed)
+        })
     }
 
     fn assign_label_block(&mut self, block: Rect, gap_px: f32, ctx: &mut LayoutCtx) {
@@ -318,7 +331,11 @@ impl Widget for FormRow {
     }
 
     fn set_keyboard_focus(&mut self, focused_id: Option<WidgetId>) {
-        self.focused_id = focused_id;
+        let mut focusable_ids = Vec::new();
+        self.control.collect_focusable_ids(&mut focusable_ids);
+        let focused_target =
+            focused_id.filter(|id| focusable_ids.contains(id)).map(|_| FormRowChildTarget::Control);
+        self.event_router.set_focused_target(focused_target);
         self.control.set_keyboard_focus(focused_id);
     }
 
@@ -368,83 +385,28 @@ impl Widget for FormRow {
     }
 
     fn on_event(&mut self, event: &Event, ctx: &mut EventCtx) -> Option<WidgetAction> {
-        if matches!(event, Event::PointerLeave) {
-            let hover_changed = self.hover_target.take().is_some();
-            return self
-                .dispatch_to_control(event, ctx)
-                .or_else(|| hover_changed.then_some(WidgetAction::Consumed));
-        }
-
-        if matches!(event, Event::InteractionCancel) {
-            let container_changed =
-                self.pointer_target.take().is_some() | self.hover_target.take().is_some();
-            return self
-                .dispatch_to_control(event, ctx)
-                .or_else(|| container_changed.then_some(WidgetAction::Consumed));
-        }
-
         if self.control.is_capturing()
             && matches!(
                 event,
                 Event::MouseMove { .. } | Event::MouseUp { .. } | Event::Wheel { .. }
             )
+            && !self.event_router.is_capturing()
         {
-            let action = self.dispatch_to_control(event, ctx);
-            if matches!(event, Event::MouseUp { .. }) {
-                self.pointer_target = None;
-            }
-            return action;
+            self.event_router.set_pointer_capture_target(Some(FormRowChildTarget::Control));
         }
-
-        match event {
-            Event::MouseDown { px, py, .. } => {
-                let target = self.hit_target(*px, *py)?;
-                self.pointer_target = Some(target);
-                self.hover_target = Some(target);
-                self.dispatch_to_target(target, event, ctx)
-            }
-            Event::MouseMove { px, py } => {
-                if let Some(target) = self.pointer_target {
-                    return self.dispatch_to_target(target, event, ctx);
-                }
-
-                let next_hover_target = self.hit_target(*px, *py);
-                let previous_hover_target = self.hover_target;
-                let previous_hover_action = if previous_hover_target != next_hover_target {
-                    previous_hover_target.and_then(|target| {
-                        let saved_cursor_hint = ctx.cursor_hint;
-                        let action = self.dispatch_to_target(target, event, ctx);
-                        ctx.cursor_hint = saved_cursor_hint;
-                        action
-                    })
-                } else {
-                    None
-                };
-                self.hover_target = next_hover_target;
-
-                if let Some(target) = next_hover_target {
-                    return self.dispatch_to_target(target, event, ctx).or(previous_hover_action);
-                }
-
-                previous_hover_action
-            }
-            Event::MouseUp { .. } => {
-                let target = self.pointer_target.take()?;
-                self.dispatch_to_target(target, event, ctx)
-            }
-            Event::Wheel { px, py, .. } => {
-                let target = self.hit_target(*px, *py)?;
-                self.dispatch_to_target(target, event, ctx)
-            }
-            _ => self
-                .control_has_focus()
-                .then_some(())
-                .and_then(|_| self.dispatch_to_control(event, ctx)),
-        }
+        let hit_target = match event {
+            Event::MouseDown { px, py, .. }
+            | Event::MouseMove { px, py }
+            | Event::MouseUp { px, py, .. }
+            | Event::Wheel { px, py, .. } => self.hit_target(*px, *py),
+            _ => None,
+        };
+        let route = self.event_router.route_event(event, hit_target);
+        self.dispatch_route(route, event, ctx)
     }
 
     fn is_capturing(&self) -> bool {
-        self.pointer_target.is_some() || self.control.is_capturing()
+        self.event_router.is_capturing() || self.control.is_capturing()
     }
 
     fn as_any(&self) -> &dyn Any {

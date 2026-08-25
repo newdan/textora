@@ -3,7 +3,10 @@
 use crate::WidgetAction;
 use crate::button::{Button, ButtonStyle};
 use crate::core::widget::{ControlAction, SensitiveText, TextPayload, WidgetId};
-use crate::core::{Event, EventCtx, KeyCode, LayoutCtx, MouseButton, PaintCtx, Rect, Widget};
+use crate::core::{
+    ChildEventRouter, Event, EventCtx, FocusDirection, KeyCode, LayoutCtx, MouseButton, PaintCtx,
+    Rect, Widget, dispatch_child_event_route,
+};
 use crate::text_box::TextBox;
 
 const PASSWORD_INPUT_ID: WidgetId = WidgetId(9_200);
@@ -17,6 +20,37 @@ const PANEL_MARGIN_LOGICAL: f32 = 24.0;
 const FIELD_HEIGHT_LOGICAL: f32 = 34.0;
 const BUTTON_WIDTH_LOGICAL: f32 = 92.0;
 const BUTTON_GAP_LOGICAL: f32 = 8.0;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum DialogControl {
+    Password,
+    Confirmation,
+    Submit,
+    Cancel,
+}
+
+impl DialogControl {
+    const ALL: [Self; 4] = [Self::Password, Self::Confirmation, Self::Submit, Self::Cancel];
+
+    fn widget_id(self) -> WidgetId {
+        match self {
+            Self::Password => PASSWORD_INPUT_ID,
+            Self::Confirmation => CONFIRMATION_INPUT_ID,
+            Self::Submit => SUBMIT_BUTTON_ID,
+            Self::Cancel => CANCEL_BUTTON_ID,
+        }
+    }
+
+    fn from_widget_id(id: WidgetId) -> Option<Self> {
+        match id {
+            PASSWORD_INPUT_ID => Some(Self::Password),
+            CONFIRMATION_INPUT_ID => Some(Self::Confirmation),
+            SUBMIT_BUTTON_ID => Some(Self::Submit),
+            CANCEL_BUTTON_ID => Some(Self::Cancel),
+            _ => None,
+        }
+    }
+}
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum EncryptedNoteDialogMode {
@@ -114,6 +148,7 @@ pub struct EncryptedNoteDialog {
     panel_rect: Rect,
     open: bool,
     observed_failure_generation: u64,
+    event_router: ChildEventRouter<DialogControl>,
 }
 
 impl EncryptedNoteDialog {
@@ -132,6 +167,7 @@ impl EncryptedNoteDialog {
             panel_rect: Rect::ZERO,
             open: false,
             observed_failure_generation: 0,
+            event_router: ChildEventRouter::default(),
         }
     }
 
@@ -149,16 +185,21 @@ impl EncryptedNoteDialog {
 
         let should_focus_password =
             (open && !self.open) || input.failure_generation != self.observed_failure_generation;
-        if should_focus_password {
-            self.password_input.set_focus(true);
-            self.password_input.select_all();
-            self.confirmation_input.set_focus(false);
-        } else if !open {
-            self.password_input.set_focus(false);
-            self.confirmation_input.set_focus(false);
-        }
-        self.observed_failure_generation = input.failure_generation;
         self.input = input;
+        if should_focus_password {
+            self.set_focused_control(Some(DialogControl::Password));
+            self.password_input.select_all();
+        } else if !open {
+            self.set_focused_control(None);
+            self.event_router.clear_interactions();
+        } else if self
+            .event_router
+            .focused_target()
+            .is_some_and(|control| !self.focusable_controls().contains(&control))
+        {
+            self.set_focused_control(Some(DialogControl::Password));
+        }
+        self.observed_failure_generation = self.input.failure_generation;
         self.open = open;
     }
 
@@ -294,29 +335,30 @@ impl EncryptedNoteDialog {
         {
             return Some(EncryptedNoteDialogAction::Cancel);
         }
-        if let Some(action) = self.password_input.on_event(event, context)
-            && let Some(mapped) = self.map_text_action(action)
-        {
-            return Some(mapped);
+        if matches!(
+            event,
+            Event::MouseDown { button: MouseButton::Right | MouseButton::Middle, .. }
+                | Event::MouseUp { button: MouseButton::Right | MouseButton::Middle, .. }
+                | Event::Wheel { .. }
+        ) {
+            return None;
         }
-        if self.input.mode.requires_confirmation()
-            && let Some(action) = self.confirmation_input.on_event(event, context)
-            && let Some(mapped) = self.map_text_action(action)
-        {
-            return Some(mapped);
-        }
-        for (button, action) in [
-            (&mut self.submit_button, EncryptedNoteDialogAction::Submit),
-            (&mut self.cancel_button, EncryptedNoteDialogAction::Cancel),
-        ] {
-            if matches!(
-                button.on_event(event, context),
-                Some(WidgetAction::Control(ControlAction::Activated { .. }))
-            ) {
-                return Some(action);
+        match event {
+            Event::KeyDown(KeyCode::Tab, modifiers) => {
+                self.cycle_focus(modifiers.shift);
+                None
+            }
+            _ => {
+                let hit_target = match event {
+                    Event::MouseDown { px, py, .. }
+                    | Event::MouseMove { px, py }
+                    | Event::MouseUp { px, py, .. } => self.control_at(*px, *py),
+                    _ => None,
+                };
+                let route = self.event_router.route_event(event, hit_target);
+                self.dispatch_route(route, event, context)
             }
         }
-        None
     }
 
     pub fn ime_cursor_rect(&self) -> Option<Rect> {
@@ -326,7 +368,41 @@ impl EncryptedNoteDialog {
         self.confirmation_input.is_focused().then(|| self.confirmation_input.ime_cursor_rect())
     }
 
-    fn map_text_action(&mut self, action: WidgetAction) -> Option<EncryptedNoteDialogAction> {
+    fn dispatch_to_control(
+        &mut self,
+        control: DialogControl,
+        event: &Event,
+        context: &mut EventCtx<'_>,
+    ) -> Option<EncryptedNoteDialogAction> {
+        let action = match control {
+            DialogControl::Password => self.password_input.on_event(event, context),
+            DialogControl::Confirmation => self.confirmation_input.on_event(event, context),
+            DialogControl::Submit => self.submit_button.on_event(event, context),
+            DialogControl::Cancel => self.cancel_button.on_event(event, context),
+        }?;
+        self.map_control_action(action)
+    }
+
+    fn dispatch_route(
+        &mut self,
+        route: crate::core::ChildEventRoute<DialogControl>,
+        event: &Event,
+        context: &mut EventCtx<'_>,
+    ) -> Option<EncryptedNoteDialogAction> {
+        let dispatch = dispatch_child_event_route(
+            route,
+            event,
+            DialogControl::ALL,
+            context,
+            |control, event, context| self.dispatch_to_control(control, event, context),
+        );
+        if dispatch.broadcast {
+            return None;
+        }
+        dispatch.action
+    }
+
+    fn map_control_action(&mut self, action: WidgetAction) -> Option<EncryptedNoteDialogAction> {
         match action {
             WidgetAction::Control(ControlAction::TextEdited {
                 id: PASSWORD_INPUT_ID,
@@ -340,26 +416,66 @@ impl EncryptedNoteDialog {
                 id: PASSWORD_INPUT_ID,
                 value: TextPayload::Sensitive(_),
             }) if self.input.mode.requires_confirmation() => {
-                self.password_input.set_focus(false);
-                self.confirmation_input.set_focus(true);
+                self.set_focused_control(Some(DialogControl::Confirmation));
                 None
             }
             WidgetAction::Control(ControlAction::TextCommitted {
                 id: PASSWORD_INPUT_ID | CONFIRMATION_INPUT_ID,
                 value: TextPayload::Sensitive(_),
             }) if self.input.can_submit() => Some(EncryptedNoteDialogAction::Submit),
-            WidgetAction::Control(ControlAction::FocusRequested { id: PASSWORD_INPUT_ID }) => {
-                self.password_input.set_focus(true);
-                self.confirmation_input.set_focus(false);
+            WidgetAction::Control(ControlAction::FocusRequested { id }) => {
+                self.set_focused_control(DialogControl::from_widget_id(id));
                 None
             }
-            WidgetAction::Control(ControlAction::FocusRequested { id: CONFIRMATION_INPUT_ID }) => {
-                self.password_input.set_focus(false);
-                self.confirmation_input.set_focus(true);
-                None
+            WidgetAction::Control(ControlAction::Activated { id: SUBMIT_BUTTON_ID }) => {
+                Some(EncryptedNoteDialogAction::Submit)
+            }
+            WidgetAction::Control(ControlAction::Activated { id: CANCEL_BUTTON_ID }) => {
+                Some(EncryptedNoteDialogAction::Cancel)
             }
             _ => None,
         }
+    }
+
+    fn set_focused_control(&mut self, focused_control: Option<DialogControl>) {
+        let focused_id = focused_control.map(DialogControl::widget_id);
+        self.password_input.set_keyboard_focus(focused_id);
+        self.confirmation_input.set_keyboard_focus(focused_id);
+        self.submit_button.set_keyboard_focus(focused_id);
+        self.cancel_button.set_keyboard_focus(focused_id);
+        self.event_router.set_focused_target(focused_control);
+    }
+
+    fn focusable_controls(&self) -> Vec<DialogControl> {
+        let mut controls = vec![DialogControl::Password];
+        if self.input.mode.requires_confirmation() {
+            controls.push(DialogControl::Confirmation);
+        }
+        if self.input.can_submit() {
+            controls.push(DialogControl::Submit);
+        }
+        controls.push(DialogControl::Cancel);
+        controls
+    }
+
+    fn cycle_focus(&mut self, backwards: bool) {
+        let controls = self.focusable_controls();
+        let direction = if backwards { FocusDirection::Backward } else { FocusDirection::Forward };
+        let focused_control = self.event_router.cycle_focus(&controls, direction);
+        self.set_focused_control(focused_control);
+    }
+
+    fn control_at(&self, px: f32, py: f32) -> Option<DialogControl> {
+        if self.password_input.hit(px, py) {
+            return Some(DialogControl::Password);
+        }
+        if self.input.mode.requires_confirmation() && self.confirmation_input.hit(px, py) {
+            return Some(DialogControl::Confirmation);
+        }
+        if self.submit_button.hit(px, py) {
+            return Some(DialogControl::Submit);
+        }
+        self.cancel_button.hit(px, py).then_some(DialogControl::Cancel)
     }
 }
 
@@ -382,11 +498,188 @@ fn labeled_button(id: WidgetId, label: &str, style: ButtonStyle) -> Button {
 #[cfg(test)]
 mod tests {
     use super::{
-        CONFIRMATION_INPUT_ID, EncryptedNoteDialog, EncryptedNoteDialogAction,
+        CONFIRMATION_INPUT_ID, DialogControl, EncryptedNoteDialog, EncryptedNoteDialogAction,
         EncryptedNoteDialogInput, EncryptedNoteDialogMode, PASSWORD_INPUT_ID,
     };
     use crate::WidgetAction;
-    use crate::core::widget::{ControlAction, SensitiveText, TextPayload};
+    use crate::core::Rect;
+    use crate::core::measure::NoopMeasure;
+    use crate::core::widget::{
+        ControlAction, Event, EventCtx, KeyCode, LayoutCtx, Modifiers, MouseButton, SensitiveText,
+        TextPayload,
+    };
+
+    fn layout_dialog(dialog: &mut EncryptedNoteDialog, theme: &crate::Theme) {
+        let mut measure = NoopMeasure;
+        let mut layout_context =
+            LayoutCtx { measure: &mut measure, ui_measure: None, theme, dpi: 1.0 };
+        dialog.set_rect(Rect::new(0.0, 0.0, 800.0, 600.0), &mut layout_context);
+    }
+
+    fn focus_confirmation(dialog: &mut EncryptedNoteDialog, theme: &crate::Theme) {
+        let confirmation_rect = dialog.confirmation_input.rect();
+        let mut event_context = EventCtx::new(theme, 1.0);
+        let action = dialog.route_event(
+            &Event::MouseDown {
+                px: confirmation_rect.x + 1.0,
+                py: confirmation_rect.y + 1.0,
+                button: MouseButton::Left,
+            },
+            &mut event_context,
+        );
+
+        assert_eq!(action, None);
+        assert!(!dialog.password_input.is_focused());
+        assert!(dialog.confirmation_input.is_focused());
+    }
+
+    #[test]
+    fn focused_confirmation_is_the_only_keyboard_and_ime_target() {
+        let theme = crate::theme::test_theme();
+        let mut dialog = EncryptedNoteDialog::new(&theme);
+        dialog.set_input(EncryptedNoteDialogInput::create(), true);
+        layout_dialog(&mut dialog, &theme);
+        focus_confirmation(&mut dialog, &theme);
+        let mut event_context = EventCtx::new(&theme, 1.0);
+
+        assert!(matches!(
+            dialog.route_event(
+                &Event::KeyDown(KeyCode::Char('x'), Modifiers::NONE),
+                &mut event_context,
+            ),
+            Some(EncryptedNoteDialogAction::ConfirmationChanged(value))
+                if value.expose() == "x"
+        ));
+        assert_eq!(dialog.password_input.text(), "");
+
+        assert!(matches!(
+            dialog.route_event(&Event::ImeCommit("密".into()), &mut event_context),
+            Some(EncryptedNoteDialogAction::ConfirmationChanged(value))
+                if value.expose() == "x密"
+        ));
+        assert_eq!(dialog.password_input.text(), "");
+    }
+
+    #[test]
+    fn password_enter_transfers_the_only_focus_to_confirmation() {
+        let theme = crate::theme::test_theme();
+        let mut dialog = EncryptedNoteDialog::new(&theme);
+        dialog.set_input(EncryptedNoteDialogInput::create(), true);
+        layout_dialog(&mut dialog, &theme);
+        let mut event_context = EventCtx::new(&theme, 1.0);
+
+        assert!(matches!(
+            dialog.route_event(
+                &Event::KeyDown(KeyCode::Char('p'), Modifiers::NONE),
+                &mut event_context,
+            ),
+            Some(EncryptedNoteDialogAction::PasswordChanged(value)) if value.expose() == "p"
+        ));
+        assert_eq!(
+            dialog
+                .route_event(&Event::KeyDown(KeyCode::Enter, Modifiers::NONE), &mut event_context,),
+            None
+        );
+        assert_eq!(dialog.event_router.focused_target(), Some(DialogControl::Confirmation));
+        assert!(!dialog.password_input.is_focused());
+        assert!(dialog.confirmation_input.is_focused());
+    }
+
+    #[test]
+    fn tab_cycles_only_through_visible_and_enabled_controls() {
+        let theme = crate::theme::test_theme();
+        let mut dialog = EncryptedNoteDialog::new(&theme);
+        dialog.set_input(EncryptedNoteDialogInput::create(), true);
+        let mut event_context = EventCtx::new(&theme, 1.0);
+
+        let _ =
+            dialog.route_event(&Event::KeyDown(KeyCode::Tab, Modifiers::NONE), &mut event_context);
+        assert_eq!(dialog.event_router.focused_target(), Some(DialogControl::Confirmation));
+
+        let _ =
+            dialog.route_event(&Event::KeyDown(KeyCode::Tab, Modifiers::NONE), &mut event_context);
+        assert_eq!(dialog.event_router.focused_target(), Some(DialogControl::Cancel));
+
+        let backwards = Modifiers { shift: true, ..Modifiers::NONE };
+        let _ = dialog.route_event(&Event::KeyDown(KeyCode::Tab, backwards), &mut event_context);
+        assert_eq!(dialog.event_router.focused_target(), Some(DialogControl::Confirmation));
+    }
+
+    #[test]
+    fn unlock_mode_skips_confirmation_and_can_activate_submit_from_keyboard() {
+        let theme = crate::theme::test_theme();
+        let mut dialog = EncryptedNoteDialog::new(&theme);
+        let mut input = EncryptedNoteDialogInput::unlock("私密笔记".to_owned());
+        input.password = SensitiveText::new("valid-password".to_owned());
+        dialog.set_input(input, true);
+        let mut event_context = EventCtx::new(&theme, 1.0);
+
+        let _ =
+            dialog.route_event(&Event::KeyDown(KeyCode::Tab, Modifiers::NONE), &mut event_context);
+        assert_eq!(dialog.event_router.focused_target(), Some(DialogControl::Submit));
+        assert_eq!(
+            dialog
+                .route_event(&Event::KeyDown(KeyCode::Enter, Modifiers::NONE), &mut event_context,),
+            Some(EncryptedNoteDialogAction::Submit)
+        );
+    }
+
+    #[test]
+    fn submit_button_keeps_pointer_capture_between_press_and_release() {
+        let theme = crate::theme::test_theme();
+        let mut dialog = EncryptedNoteDialog::new(&theme);
+        let mut input = EncryptedNoteDialogInput::create();
+        input.password = SensitiveText::new("valid-password".to_owned());
+        input.confirmation = Some(SensitiveText::new("valid-password".to_owned()));
+        dialog.set_input(input, true);
+        layout_dialog(&mut dialog, &theme);
+        let submit_rect = dialog.submit_button.rect();
+        let pointer_x = submit_rect.x + 1.0;
+        let pointer_y = submit_rect.y + 1.0;
+        let mut event_context = EventCtx::new(&theme, 1.0);
+
+        assert_eq!(
+            dialog.route_event(
+                &Event::MouseDown { px: pointer_x, py: pointer_y, button: MouseButton::Left },
+                &mut event_context,
+            ),
+            None
+        );
+        assert_eq!(dialog.event_router.focused_target(), Some(DialogControl::Submit));
+        assert_eq!(dialog.event_router.pointer_capture_target(), Some(DialogControl::Submit));
+
+        assert_eq!(
+            dialog.route_event(
+                &Event::MouseUp { px: pointer_x, py: pointer_y, button: MouseButton::Left },
+                &mut event_context,
+            ),
+            Some(EncryptedNoteDialogAction::Submit)
+        );
+        assert_eq!(dialog.event_router.pointer_capture_target(), None);
+    }
+
+    #[test]
+    fn reopening_mode_change_and_failure_restore_password_focus() {
+        let theme = crate::theme::test_theme();
+        let mut dialog = EncryptedNoteDialog::new(&theme);
+        dialog.set_input(EncryptedNoteDialogInput::create(), true);
+        layout_dialog(&mut dialog, &theme);
+        focus_confirmation(&mut dialog, &theme);
+
+        dialog.set_input(EncryptedNoteDialogInput::unlock("私密笔记".to_owned()), true);
+        assert_eq!(dialog.event_router.focused_target(), Some(DialogControl::Password));
+
+        dialog.set_input(EncryptedNoteDialogInput::create(), false);
+        assert_eq!(dialog.event_router.focused_target(), None);
+        dialog.set_input(EncryptedNoteDialogInput::create(), true);
+        assert_eq!(dialog.event_router.focused_target(), Some(DialogControl::Password));
+
+        focus_confirmation(&mut dialog, &theme);
+        let mut failed_input = EncryptedNoteDialogInput::create();
+        failed_input.failure_generation = 1;
+        dialog.set_input(failed_input, true);
+        assert_eq!(dialog.event_router.focused_target(), Some(DialogControl::Password));
+    }
 
     #[test]
     fn sensitive_input_debug_output_is_redacted() {
@@ -405,12 +698,12 @@ mod tests {
         let theme = crate::theme::test_theme();
         let mut dialog = EncryptedNoteDialog::new(&theme);
         let password_action =
-            dialog.map_text_action(WidgetAction::Control(ControlAction::TextEdited {
+            dialog.map_control_action(WidgetAction::Control(ControlAction::TextEdited {
                 id: PASSWORD_INPUT_ID,
                 value: TextPayload::Sensitive(SensitiveText::new("password-value".to_owned())),
             }));
         let confirmation_action =
-            dialog.map_text_action(WidgetAction::Control(ControlAction::TextEdited {
+            dialog.map_control_action(WidgetAction::Control(ControlAction::TextEdited {
                 id: CONFIRMATION_INPUT_ID,
                 value: TextPayload::Sensitive(SensitiveText::new("confirmation-value".to_owned())),
             }));

@@ -3,8 +3,8 @@ use std::borrow::Cow;
 
 use crate::core::widget::{ControlAction, TextPayload, WidgetId};
 use crate::core::{
-    AccessibilityActionRequest, AccessibilityContext, AccessibilityNode, Event, EventCtx,
-    LayoutCtx, PaintCtx, Rect, Widget, WidgetAction,
+    AccessibilityActionRequest, AccessibilityContext, AccessibilityNode, ChildEventRouter, Event,
+    EventCtx, LayoutCtx, PaintCtx, Rect, Widget, WidgetAction, dispatch_child_event_route,
 };
 use crate::theme::SettingsTheme;
 use crate::widgets::button::{Button, ButtonStyle};
@@ -88,7 +88,7 @@ struct FieldValidation {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum SettingsHoverTarget {
+enum SettingsChildTarget {
     Category(usize),
     Content,
     PersistenceBanner,
@@ -102,8 +102,7 @@ pub struct SettingsView {
     category_navigation_visible: bool,
     category_buttons: Vec<(SettingsCategory, Button)>,
     category_rects: Vec<Rect>,
-    category_pointer_index: Option<usize>,
-    hover_target: Option<SettingsHoverTarget>,
+    event_router: ChildEventRouter<SettingsChildTarget>,
     form: FormView,
     form_rect: Rect,
     form_needs_layout: bool,
@@ -127,8 +126,7 @@ impl SettingsView {
             category_navigation_visible: true,
             category_buttons: Vec::new(),
             category_rects: Vec::new(),
-            category_pointer_index: None,
-            hover_target: None,
+            event_router: ChildEventRouter::default(),
             form: FormView::new(crate::widgets::form::FormViewStyle::default()),
             form_rect: Rect::ZERO,
             form_needs_layout: true,
@@ -166,9 +164,9 @@ impl SettingsView {
             return;
         }
         self.category_rects.clear();
-        self.category_pointer_index = None;
-        if matches!(self.hover_target, Some(SettingsHoverTarget::Category(_))) {
-            self.hover_target = None;
+        self.event_router.clear_interactions();
+        if matches!(self.event_router.focused_target(), Some(SettingsChildTarget::Category(_))) {
+            self.set_focused_control(None);
         }
     }
 
@@ -269,7 +267,7 @@ impl SettingsView {
             self.focused_id = focusable_ids.first().copied();
             self.focus_first_form_field_after_layout = false;
         }
-        self.form.set_keyboard_focus(self.focused_id);
+        self.set_focused_control(self.focused_id);
         self.form_needs_layout = false;
     }
 
@@ -465,6 +463,8 @@ impl SettingsView {
 
     fn set_focused_control(&mut self, focused_id: Option<WidgetId>) {
         self.focused_id = focused_id;
+        let focused_target = focused_id.and_then(|id| self.child_target_for_focus(id));
+        self.event_router.set_focused_target(focused_target);
         for (_, button) in &mut self.category_buttons {
             button.set_keyboard_focus(focused_id);
         }
@@ -472,6 +472,22 @@ impl SettingsView {
         if let Some(banner) = self.persistence_banner.as_mut() {
             banner.set_keyboard_focus(focused_id);
         }
+    }
+
+    fn child_target_for_focus(&self, focused_id: WidgetId) -> Option<SettingsChildTarget> {
+        if self.category_navigation_visible
+            && let Some(index) =
+                self.category_buttons.iter().position(|(_, button)| button.id() == Some(focused_id))
+        {
+            return Some(SettingsChildTarget::Category(index));
+        }
+        if focused_id == RETRY_PERSISTENCE_ID && self.persistence_banner.is_some() {
+            return Some(SettingsChildTarget::PersistenceBanner);
+        }
+
+        let mut form_focusable_ids = Vec::new();
+        self.form.collect_focusable_ids(&mut form_focusable_ids);
+        form_focusable_ids.contains(&focused_id).then_some(SettingsChildTarget::Content)
     }
 
     fn handle_category_action(&mut self, action: ControlAction) -> Option<WidgetAction> {
@@ -488,7 +504,7 @@ impl SettingsView {
     fn activate_category(&mut self, category: SettingsCategory) {
         self.active_category = category;
         self.sync_category_selection();
-        self.focused_id = None;
+        self.set_focused_control(None);
         self.focus_first_form_field_after_layout = true;
         self.form_needs_layout = true;
     }
@@ -672,58 +688,53 @@ impl SettingsView {
         }
     }
 
-    fn hover_target_at(&self, px: f32, py: f32) -> Option<SettingsHoverTarget> {
+    fn child_target_at(&self, px: f32, py: f32) -> Option<SettingsChildTarget> {
         if self.persistence_banner_rect.contains(px, py) && self.persistence_banner.is_some() {
-            return Some(SettingsHoverTarget::PersistenceBanner);
+            return Some(SettingsChildTarget::PersistenceBanner);
         }
         if let Some(index) = self.category_index_at(px, py) {
-            return Some(SettingsHoverTarget::Category(index));
+            return Some(SettingsChildTarget::Category(index));
         }
-        self.form_rect.contains(px, py).then_some(SettingsHoverTarget::Content)
+        self.form_rect.contains(px, py).then_some(SettingsChildTarget::Content)
     }
 
-    fn dispatch_to_hover_target(
+    fn dispatch_to_child_target(
         &mut self,
-        target: SettingsHoverTarget,
+        target: SettingsChildTarget,
         event: &Event,
         ctx: &mut EventCtx,
     ) -> Option<WidgetAction> {
         match target {
-            SettingsHoverTarget::Category(index) => self.dispatch_category_event(index, event, ctx),
-            SettingsHoverTarget::Content => self.dispatch_active_page_event(event, ctx),
-            SettingsHoverTarget::PersistenceBanner => self.dispatch_banner_event(event, ctx),
+            SettingsChildTarget::Category(index) => self.dispatch_category_event(index, event, ctx),
+            SettingsChildTarget::Content => self.dispatch_active_page_event(event, ctx),
+            SettingsChildTarget::PersistenceBanner => self.dispatch_banner_event(event, ctx),
         }
     }
 
-    fn dispatch_interaction_lifecycle(
+    fn dispatch_route(
         &mut self,
+        route: crate::core::ChildEventRoute<SettingsChildTarget>,
         event: &Event,
         ctx: &mut EventCtx,
     ) -> Option<WidgetAction> {
-        let container_changed = if matches!(event, Event::InteractionCancel) {
-            self.category_pointer_index.take().is_some() | self.hover_target.take().is_some()
-        } else {
-            self.hover_target.take().is_some()
-        };
-        let mut first_action = None;
-        for category_index in 0..self.category_buttons.len() {
-            if let Some(action) = self.dispatch_category_event(category_index, event, ctx)
-                && first_action.is_none()
-            {
-                first_action = Some(action);
-            }
-        }
-        if let Some(action) = self.dispatch_active_page_event(event, ctx)
-            && first_action.is_none()
-        {
-            first_action = Some(action);
-        }
-        if let Some(action) = self.dispatch_banner_event(event, ctx)
-            && first_action.is_none()
-        {
-            first_action = Some(action);
-        }
-        first_action.or_else(|| container_changed.then_some(WidgetAction::Consumed))
+        let mut broadcast_targets = Vec::with_capacity(self.category_buttons.len() + 2);
+        broadcast_targets
+            .extend((0..self.category_buttons.len()).map(SettingsChildTarget::Category));
+        broadcast_targets.push(SettingsChildTarget::Content);
+        broadcast_targets.push(SettingsChildTarget::PersistenceBanner);
+        let dispatch = dispatch_child_event_route(
+            route,
+            event,
+            broadcast_targets,
+            ctx,
+            |target, event, ctx| self.dispatch_to_child_target(target, event, ctx),
+        );
+        dispatch.action.or_else(|| {
+            let interaction_changed = dispatch.state_changed
+                && (dispatch.broadcast
+                    || matches!(event, Event::MouseMove { .. } | Event::PointerLeave));
+            interaction_changed.then_some(WidgetAction::Consumed)
+        })
     }
 }
 
@@ -944,77 +955,39 @@ impl Widget for SettingsView {
     }
 
     fn on_event(&mut self, event: &Event, ctx: &mut EventCtx) -> Option<WidgetAction> {
-        if matches!(event, Event::PointerLeave | Event::InteractionCancel) {
-            return self.dispatch_interaction_lifecycle(event, ctx);
-        }
-
-        if matches!(event, Event::KeyDown(..)) {
-            if let Some(index) = self.category_buttons.iter().position(|(_, button)| {
-                button.id() == self.focused_id && self.category_navigation_visible
-            }) {
-                return self.dispatch_category_event(index, event, ctx);
-            }
-            if self.focused_id == Some(RETRY_PERSISTENCE_ID) && self.persistence_banner.is_some() {
-                return self.dispatch_banner_event(event, ctx);
-            }
-        }
-
         if self.persistence_banner.as_ref().is_some_and(Widget::is_capturing)
-            && matches!(event, Event::MouseMove { .. } | Event::MouseUp { .. })
+            && matches!(
+                event,
+                Event::MouseMove { .. } | Event::MouseUp { .. } | Event::Wheel { .. }
+            )
+            && !self.event_router.is_capturing()
         {
-            return self.dispatch_banner_event(event, ctx);
+            self.event_router
+                .set_pointer_capture_target(Some(SettingsChildTarget::PersistenceBanner));
         }
-
-        if let Some(index) = self.category_pointer_index
-            && matches!(event, Event::MouseMove { .. } | Event::MouseUp { .. })
+        if self.form.is_capturing()
+            && matches!(
+                event,
+                Event::MouseMove { .. } | Event::MouseUp { .. } | Event::Wheel { .. }
+            )
+            && !self.event_router.is_capturing()
         {
-            let action = self.dispatch_category_event(index, event, ctx);
-            if matches!(event, Event::MouseUp { .. }) {
-                self.category_pointer_index = None;
-            }
-            return action;
+            self.event_router.set_pointer_capture_target(Some(SettingsChildTarget::Content));
         }
 
-        match event {
-            Event::MouseDown { px, py, .. } => {
-                if self.persistence_banner_rect.contains(*px, *py) {
-                    return self.dispatch_banner_event(event, ctx);
-                }
-                if let Some(index) = self.category_index_at(*px, *py) {
-                    self.category_pointer_index = Some(index);
-                    return self.dispatch_category_event(index, event, ctx);
-                }
-                self.dispatch_active_page_event(event, ctx)
-            }
-            Event::MouseMove { px, py } => {
-                let next_hover_target = self.hover_target_at(*px, *py);
-                let previous_hover_action = if self.hover_target != next_hover_target {
-                    self.hover_target.and_then(|target| {
-                        let saved_cursor_hint = ctx.cursor_hint;
-                        let action = self.dispatch_to_hover_target(target, event, ctx);
-                        ctx.cursor_hint = saved_cursor_hint;
-                        action
-                    })
-                } else {
-                    None
-                };
-                self.hover_target = next_hover_target;
-
-                if let Some(target) = next_hover_target {
-                    return self
-                        .dispatch_to_hover_target(target, event, ctx)
-                        .or(previous_hover_action);
-                }
-
-                previous_hover_action
-            }
-            Event::MouseUp { .. } => self.dispatch_active_page_event(event, ctx),
-            _ => self.dispatch_active_page_event(event, ctx),
-        }
+        let hit_target = match event {
+            Event::MouseDown { px, py, .. }
+            | Event::MouseMove { px, py }
+            | Event::MouseUp { px, py, .. }
+            | Event::Wheel { px, py, .. } => self.child_target_at(*px, *py),
+            _ => None,
+        };
+        let route = self.event_router.route_event(event, hit_target);
+        self.dispatch_route(route, event, ctx)
     }
 
     fn is_capturing(&self) -> bool {
-        self.category_pointer_index.is_some()
+        self.event_router.is_capturing()
             || self.form.is_capturing()
             || self.persistence_banner.as_ref().is_some_and(Widget::is_capturing)
     }

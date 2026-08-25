@@ -3,8 +3,9 @@ use std::borrow::Cow;
 
 use crate::core::widget::ControlAction;
 use crate::core::{
-    AccessibilityActionRequest, AccessibilityContext, AccessibilityNode, Event, EventCtx, KeyCode,
-    LayoutCtx, Modifiers, PaintCtx, Rect, Widget, WidgetAction, WidgetId,
+    AccessibilityActionRequest, AccessibilityContext, AccessibilityNode, ChildEventRouter, Event,
+    EventCtx, FocusDirection, KeyCode, LayoutCtx, Modifiers, PaintCtx, Rect, Widget, WidgetAction,
+    WidgetId, dispatch_child_event_route, next_focus_target,
 };
 use crate::widgets::form::section::FormSection;
 use crate::widgets::scrollbar::{
@@ -33,8 +34,7 @@ pub struct FormView {
     focused_id: Option<WidgetId>,
     style: FormViewStyle,
     section_rects: Vec<Rect>,
-    pointer_section_index: Option<usize>,
-    hover_section_index: Option<usize>,
+    event_router: ChildEventRouter<usize>,
     scrollbar: ScrollbarWidget,
     scrollbar_rect: Rect,
 }
@@ -49,8 +49,7 @@ impl FormView {
             focused_id: None,
             style,
             section_rects: Vec::new(),
-            pointer_section_index: None,
-            hover_section_index: None,
+            event_router: ChildEventRouter::default(),
             scrollbar: ScrollbarWidget::vertical(),
             scrollbar_rect: Rect::ZERO,
         }
@@ -58,8 +57,7 @@ impl FormView {
 
     pub fn set_sections(&mut self, sections: Vec<FormSection>, ctx: &mut LayoutCtx) {
         self.sections = sections;
-        self.pointer_section_index = None;
-        self.hover_section_index = None;
+        self.event_router.clear_interactions();
         self.reset_scroll();
         self.layout_sections(ctx);
     }
@@ -72,8 +70,7 @@ impl FormView {
         let previous_scroll = self.scroll_offset;
         let previous_focus = self.focused_id;
         self.sections = sections;
-        self.pointer_section_index = None;
-        self.hover_section_index = None;
+        self.event_router.clear_interactions();
         self.layout_sections(ctx);
         let _ = self.set_scroll_offset(previous_scroll);
         self.set_keyboard_focus(previous_focus);
@@ -218,11 +215,14 @@ impl FormView {
     }
 
     fn focused_section_index(&self) -> Option<usize> {
-        let focused_id = self.focused_id?;
+        self.event_router.focused_target()
+    }
+
+    fn section_index_for_focus(&self, focused_id: WidgetId) -> Option<usize> {
         self.sections.iter().position(|section| {
             let mut ids = Vec::new();
             section.collect_focusable_ids(&mut ids);
-            ids.into_iter().any(|id| id == focused_id)
+            ids.contains(&focused_id)
         })
     }
 
@@ -277,14 +277,6 @@ impl FormView {
         Some(WidgetAction::Consumed)
     }
 
-    fn clear_hover_section(&mut self, event: &Event, ctx: &mut EventCtx) -> Option<WidgetAction> {
-        let section_index = self.hover_section_index.take()?;
-        let saved_cursor_hint = ctx.cursor_hint;
-        let action = self.dispatch_to_section(section_index, event, ctx);
-        ctx.cursor_hint = saved_cursor_hint;
-        action
-    }
-
     fn intersection_rect(first: Rect, second: Rect) -> Option<Rect> {
         let x = first.x.max(second.x);
         let y = first.y.max(second.y);
@@ -323,27 +315,32 @@ impl FormView {
 
     fn cycle_focus(&mut self, modifiers: Modifiers) -> Option<WidgetAction> {
         let focusable_ids = self.visible_focusable_ids();
-        if focusable_ids.is_empty() {
-            return None;
-        }
-
-        let next_index = match self.focused_id.and_then(|focused_id| {
-            focusable_ids.iter().position(|candidate_id| *candidate_id == focused_id)
-        }) {
-            Some(current_index) if modifiers.shift => {
-                if current_index == 0 {
-                    focusable_ids.len() - 1
-                } else {
-                    current_index - 1
-                }
-            }
-            Some(current_index) => (current_index + 1) % focusable_ids.len(),
-            None if modifiers.shift => focusable_ids.len() - 1,
-            None => 0,
-        };
-        let next_id = focusable_ids[next_index];
+        let direction =
+            if modifiers.shift { FocusDirection::Backward } else { FocusDirection::Forward };
+        let next_id = next_focus_target(self.focused_id, &focusable_ids, direction)?;
         self.set_keyboard_focus(Some(next_id));
         Some(WidgetAction::Control(ControlAction::FocusRequested { id: next_id }))
+    }
+
+    fn dispatch_route(
+        &mut self,
+        route: crate::core::ChildEventRoute<usize>,
+        event: &Event,
+        ctx: &mut EventCtx,
+    ) -> Option<WidgetAction> {
+        let dispatch = dispatch_child_event_route(
+            route,
+            event,
+            0..self.sections.len(),
+            ctx,
+            |section_index, event, ctx| self.dispatch_to_section(section_index, event, ctx),
+        );
+        dispatch.action.or_else(|| {
+            let interaction_changed = dispatch.state_changed
+                && (dispatch.broadcast
+                    || matches!(event, Event::MouseMove { .. } | Event::PointerLeave));
+            interaction_changed.then_some(WidgetAction::Consumed)
+        })
     }
 }
 
@@ -397,7 +394,7 @@ impl Widget for FormView {
     }
 
     fn is_capturing(&self) -> bool {
-        self.pointer_section_index.is_some()
+        self.event_router.is_capturing()
             || self.scrollbar.is_dragging()
             || self.capturing_section_index().is_some()
     }
@@ -410,6 +407,8 @@ impl Widget for FormView {
 
     fn set_keyboard_focus(&mut self, focused_id: Option<WidgetId>) {
         self.focused_id = focused_id;
+        let focused_section = focused_id.and_then(|id| self.section_index_for_focus(id));
+        self.event_router.set_focused_target(focused_section);
         for section in &mut self.sections {
             section.set_keyboard_focus(focused_id);
         }
@@ -451,21 +450,9 @@ impl Widget for FormView {
 
     fn on_event(&mut self, event: &Event, ctx: &mut EventCtx) -> Option<WidgetAction> {
         if matches!(event, Event::PointerLeave | Event::InteractionCancel) {
-            let container_changed = if matches!(event, Event::InteractionCancel) {
-                self.pointer_section_index.take().is_some()
-                    | self.hover_section_index.take().is_some()
-            } else {
-                self.hover_section_index.take().is_some()
-            };
-            let mut first_action = self.dispatch_scrollbar_event(event, ctx);
-            for section_index in 0..self.sections.len() {
-                if let Some(action) = self.dispatch_to_section(section_index, event, ctx)
-                    && first_action.is_none()
-                {
-                    first_action = Some(action);
-                }
-            }
-            return first_action.or_else(|| container_changed.then_some(WidgetAction::Consumed));
+            let scrollbar_action = self.dispatch_scrollbar_event(event, ctx);
+            let route = self.event_router.route_event(event, None);
+            return self.dispatch_route(route, event, ctx).or(scrollbar_action);
         }
 
         if self.scrollbar.is_dragging()
@@ -479,12 +466,9 @@ impl Widget for FormView {
                 event,
                 Event::MouseMove { .. } | Event::MouseUp { .. } | Event::Wheel { .. }
             )
+            && !self.event_router.is_capturing()
         {
-            let action = self.dispatch_to_section(section_index, event, ctx);
-            if matches!(event, Event::MouseUp { .. }) {
-                self.pointer_section_index = None;
-            }
-            return action;
+            self.event_router.set_pointer_capture_target(Some(section_index));
         }
 
         match event {
@@ -492,57 +476,31 @@ impl Widget for FormView {
                 if self.scrollbar_rect.contains(*px, *py) {
                     return self.dispatch_scrollbar_event(event, ctx);
                 }
-                let section_index = self.section_index_at(*px, *py)?;
-                self.pointer_section_index = Some(section_index);
-                self.dispatch_to_section(section_index, event, ctx)
+                let hit_target = self.section_index_at(*px, *py);
+                let route = self.event_router.route_event(event, hit_target);
+                self.dispatch_route(route, event, ctx)
             }
             Event::MouseMove { px, py } => {
                 let scrollbar_action = self.dispatch_scrollbar_event(event, ctx);
-                if self.scrollbar_rect.contains(*px, *py) {
-                    let hover_section_action = self.clear_hover_section(event, ctx);
-                    return scrollbar_action
-                        .or(hover_section_action)
-                        .or(Some(WidgetAction::Consumed));
-                }
-
-                if let Some(section_index) = self.pointer_section_index {
-                    return self
-                        .dispatch_to_section(section_index, event, ctx)
-                        .or(scrollbar_action);
-                }
-
-                let next_hover_section_index = self.section_index_at(*px, *py);
-                let previous_hover_action = if self.hover_section_index != next_hover_section_index
-                {
-                    self.hover_section_index.and_then(|section_index| {
-                        let saved_cursor_hint = ctx.cursor_hint;
-                        let action = self.dispatch_to_section(section_index, event, ctx);
-                        ctx.cursor_hint = saved_cursor_hint;
-                        action
-                    })
-                } else {
+                let hit_target = if self.scrollbar_rect.contains(*px, *py) {
                     None
+                } else {
+                    self.section_index_at(*px, *py)
                 };
-                self.hover_section_index = next_hover_section_index;
-
-                if let Some(section_index) = next_hover_section_index {
-                    return self
-                        .dispatch_to_section(section_index, event, ctx)
-                        .or(previous_hover_action)
-                        .or(scrollbar_action);
-                }
-
-                previous_hover_action.or(scrollbar_action)
+                let route = self.event_router.route_event(event, hit_target);
+                self.dispatch_route(route, event, ctx).or(scrollbar_action).or_else(|| {
+                    self.scrollbar_rect.contains(*px, *py).then_some(WidgetAction::Consumed)
+                })
             }
-            Event::MouseUp { .. } => {
-                let section_index = self.pointer_section_index.take()?;
-                self.dispatch_to_section(section_index, event, ctx)
+            Event::MouseUp { px, py, .. } => {
+                let hit_target = self.section_index_at(*px, *py);
+                let route = self.event_router.route_event(event, hit_target);
+                self.dispatch_route(route, event, ctx)
             }
             Event::Wheel { dy, px, py, .. } => {
-                if let Some(action) = self
-                    .section_index_at(*px, *py)
-                    .and_then(|section_index| self.dispatch_to_section(section_index, event, ctx))
-                {
+                let hit_target = self.section_index_at(*px, *py);
+                let route = self.event_router.route_event(event, hit_target);
+                if let Some(action) = self.dispatch_route(route, event, ctx) {
                     return Some(action);
                 }
                 if !self.rect.contains(*px, *py) {
@@ -552,9 +510,10 @@ impl Widget for FormView {
                 Some(WidgetAction::Consumed)
             }
             Event::KeyDown(KeyCode::Tab, modifiers) => self.cycle_focus(*modifiers),
-            _ => self
-                .focused_section_index()
-                .and_then(|section_index| self.dispatch_to_section(section_index, event, ctx)),
+            _ => {
+                let route = self.event_router.route_event(event, None);
+                self.dispatch_route(route, event, ctx)
+            }
         }
     }
 
@@ -824,11 +783,11 @@ mod tests {
         let mut ctx = event_ctx(&theme);
 
         view.on_event(&Event::MouseMove { px: 200.0, py: 40.0 }, &mut ctx);
-        assert_eq!(view.hover_section_index, Some(0));
+        assert_eq!(view.event_router.hovered_target(), Some(0));
 
         view.on_event(&Event::MouseMove { px: 715.0, py: 40.0 }, &mut ctx);
 
-        assert_eq!(view.hover_section_index, None);
+        assert_eq!(view.event_router.hovered_target(), None);
     }
 
     #[test]

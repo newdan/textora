@@ -1,4 +1,5 @@
 pub mod accessibility;
+pub mod child_event_router;
 pub mod dock;
 pub mod geom;
 pub mod measure;
@@ -12,6 +13,10 @@ pub use accessibility::{
     AccessibilityAction, AccessibilityActionRequest, AccessibilityContext, AccessibilityId,
     AccessibilityNode, AccessibilityOrientation, AccessibilityRole, AccessibilityState,
     AccessibilityTree, AccessibilityValidationError,
+};
+pub use child_event_router::{
+    ChildEventDispatch, ChildEventRoute, ChildEventRouter, FocusDirection,
+    dispatch_child_event_route, next_focus_target,
 };
 pub use dock::{Dock, DockChild, Side};
 pub use geom::{Rect, Screen};

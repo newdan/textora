@@ -2,8 +2,8 @@ use crate::constants::{BAR_HEIGHT, BODY_FONT_SIZE, CLOSE_BTN_SIZE, H_PADDING, SM
 use crate::core::widget::{ControlAction, WidgetId};
 use crate::core::{
     AccessibilityActionRequest, AccessibilityContext, AccessibilityId, AccessibilityNode,
-    AccessibilityRole, Event, EventCtx, KeyCode, LayoutCtx, MouseButton, PaintCtx, Rect, Widget,
-    WidgetAction,
+    AccessibilityRole, ChildEventRouter, Event, EventCtx, KeyCode, LayoutCtx, MouseButton,
+    PaintCtx, Rect, Widget, WidgetAction, dispatch_child_event_route,
 };
 use crate::theme::SettingsTheme;
 use crate::widgets::button::{Button, ButtonStyle};
@@ -21,9 +21,13 @@ const MODAL_FRAME_CLOSE_BUTTON_ID: WidgetId = WidgetId(0x6d6f_6461_6c5f_636c);
 const MODAL_FRAME_ACCESSIBILITY_ID: AccessibilityId = AccessibilityId(0x6d6f_6461_6c5f_726f);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum PointerTarget {
+enum ModalChildTarget {
     CloseButton,
     Content,
+}
+
+impl ModalChildTarget {
+    const ALL: [Self; 2] = [Self::CloseButton, Self::Content];
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -64,9 +68,7 @@ pub struct ModalFrame {
     close_button: Button,
     content: Box<dyn Widget>,
     style: ModalFrameStyle,
-    focused_id: Option<WidgetId>,
-    pointer_target: Option<PointerTarget>,
-    hover_target: Option<PointerTarget>,
+    event_router: ChildEventRouter<ModalChildTarget>,
 }
 
 impl ModalFrame {
@@ -91,6 +93,8 @@ impl ModalFrame {
         title.set_accessibility_id(Some(MODAL_FRAME_ACCESSIBILITY_ID.named_child("title")));
         let mut close_button = Self::build_close_button(&style, None);
         close_button.set_accessibility_label(Some(format!("关闭 {title_text}")));
+        let mut event_router = ChildEventRouter::default();
+        event_router.set_focused_target(Some(ModalChildTarget::Content));
 
         Self {
             rect: Rect::ZERO,
@@ -103,9 +107,7 @@ impl ModalFrame {
             close_button,
             content,
             style,
-            focused_id: None,
-            pointer_target: None,
-            hover_target: None,
+            event_router,
         }
     }
 
@@ -174,21 +176,34 @@ impl ModalFrame {
             {
                 Some(WidgetAction::Overlay(crate::OverlayAction::DismissRequested))
             }
+            WidgetAction::Control(ControlAction::FocusRequested {
+                id: MODAL_FRAME_CLOSE_BUTTON_ID,
+            }) => {
+                self.set_keyboard_focus(Some(MODAL_FRAME_CLOSE_BUTTON_ID));
+                Some(action)
+            }
             _ => Some(action),
         }
     }
 
     fn dispatch_to_content(&mut self, event: &Event, ctx: &mut EventCtx) -> Option<WidgetAction> {
         let local_event = Self::local_event(event, self.content_rect);
-        self.content.on_event(&local_event, ctx)
+        let action = self.content.on_event(&local_event, ctx)?;
+        match action {
+            WidgetAction::Control(ControlAction::FocusRequested { id }) => {
+                self.set_keyboard_focus(Some(id));
+                Some(WidgetAction::Control(ControlAction::FocusRequested { id }))
+            }
+            other => Some(other),
+        }
     }
 
-    fn pointer_target_at(&self, px: f32, py: f32) -> Option<PointerTarget> {
+    fn child_target_at(&self, px: f32, py: f32) -> Option<ModalChildTarget> {
         if self.close_button_rect.contains(px, py) {
-            return Some(PointerTarget::CloseButton);
+            return Some(ModalChildTarget::CloseButton);
         }
         if self.content_rect.contains(px, py) {
-            return Some(PointerTarget::Content);
+            return Some(ModalChildTarget::Content);
         }
         None
     }
@@ -199,49 +214,44 @@ impl ModalFrame {
 
     fn dispatch_to_target(
         &mut self,
-        target: PointerTarget,
+        target: ModalChildTarget,
         event: &Event,
         ctx: &mut EventCtx,
     ) -> Option<WidgetAction> {
         match target {
-            PointerTarget::CloseButton => self.dispatch_to_close_button(event, ctx),
-            PointerTarget::Content => self.dispatch_to_content(event, ctx),
+            ModalChildTarget::CloseButton => self.dispatch_to_close_button(event, ctx),
+            ModalChildTarget::Content => self.dispatch_to_content(event, ctx),
         }
     }
 
-    fn dispatch_to_target_preserving_cursor_hint(
+    fn dispatch_route(
         &mut self,
-        target: PointerTarget,
+        route: crate::core::ChildEventRoute<ModalChildTarget>,
         event: &Event,
         ctx: &mut EventCtx,
     ) -> Option<WidgetAction> {
-        let saved_cursor_hint = ctx.cursor_hint;
-        let action = self.dispatch_to_target(target, event, ctx);
-        ctx.cursor_hint = saved_cursor_hint;
-        action
+        let dispatch = dispatch_child_event_route(
+            route,
+            event,
+            ModalChildTarget::ALL,
+            ctx,
+            |target, event, ctx| self.dispatch_to_target(target, event, ctx),
+        );
+        dispatch.action.or_else(|| {
+            let interaction_changed = dispatch.state_changed
+                && (dispatch.broadcast
+                    || matches!(event, Event::MouseMove { .. } | Event::PointerLeave));
+            interaction_changed.then_some(WidgetAction::Consumed)
+        })
     }
 
-    fn update_hover_target(
-        &mut self,
-        next_target: Option<PointerTarget>,
-        event: &Event,
-        ctx: &mut EventCtx,
-    ) -> Option<WidgetAction> {
-        let previous_target = self.hover_target;
-        let previous_hover_action = if previous_target != next_target {
-            previous_target.and_then(|target| {
-                self.dispatch_to_target_preserving_cursor_hint(target, event, ctx)
-            })
-        } else {
-            None
-        };
-        self.hover_target = next_target;
-
-        if let Some(target) = next_target {
-            return self.dispatch_to_target(target, event, ctx).or(previous_hover_action);
+    fn child_target_for_focus(&self, focused_id: WidgetId) -> Option<ModalChildTarget> {
+        if focused_id == MODAL_FRAME_CLOSE_BUTTON_ID {
+            return Some(ModalChildTarget::CloseButton);
         }
-
-        previous_hover_action
+        let mut content_focusable_ids = Vec::new();
+        self.content.collect_focusable_ids(&mut content_focusable_ids);
+        content_focusable_ids.contains(&focused_id).then_some(ModalChildTarget::Content)
     }
 }
 
@@ -336,7 +346,7 @@ impl Widget for ModalFrame {
     }
 
     fn is_capturing(&self) -> bool {
-        self.pointer_target.is_some() || self.content_is_capturing()
+        self.event_router.is_capturing() || self.content_is_capturing()
     }
 
     fn collect_focusable_ids(&self, output: &mut Vec<WidgetId>) {
@@ -345,7 +355,8 @@ impl Widget for ModalFrame {
     }
 
     fn set_keyboard_focus(&mut self, focused_id: Option<WidgetId>) {
-        self.focused_id = focused_id;
+        let focused_target = focused_id.and_then(|id| self.child_target_for_focus(id));
+        self.event_router.set_focused_target(focused_target);
         self.close_button.set_keyboard_focus(focused_id);
         self.content.set_keyboard_focus(focused_id);
     }
@@ -398,63 +409,36 @@ impl Widget for ModalFrame {
         if matches!(event, Event::KeyDown(KeyCode::Escape, _)) {
             return Some(WidgetAction::Overlay(crate::OverlayAction::DismissRequested));
         }
-
-        if matches!(event, Event::KeyDown(..))
-            && self.focused_id == Some(MODAL_FRAME_CLOSE_BUTTON_ID)
+        if matches!(
+            event,
+            Event::MouseDown { button: MouseButton::Right | MouseButton::Middle, .. }
+        ) {
+            return None;
+        }
+        if self.content_is_capturing()
+            && matches!(
+                event,
+                Event::MouseMove { .. } | Event::MouseUp { .. } | Event::Wheel { .. }
+            )
+            && !self.event_router.is_capturing()
         {
-            return self.dispatch_to_close_button(event, ctx);
+            self.event_router.set_pointer_capture_target(Some(ModalChildTarget::Content));
         }
 
-        match event {
-            Event::PointerLeave => {
-                let hover_target = self.hover_target.take();
-                let action =
-                    hover_target.and_then(|target| self.dispatch_to_target(target, event, ctx));
-                action.or_else(|| hover_target.map(|_| WidgetAction::Consumed))
-            }
-            Event::InteractionCancel => {
-                let container_changed =
-                    self.pointer_target.take().is_some() | self.hover_target.take().is_some();
-                let close_action = self.dispatch_to_close_button(event, ctx);
-                let content_action = self.dispatch_to_content(event, ctx);
-                close_action
-                    .or(content_action)
-                    .or_else(|| container_changed.then_some(WidgetAction::Consumed))
-            }
-            Event::MouseDown { px, py, button: MouseButton::Left } => {
-                let target = self.pointer_target_at(*px, *py)?;
-                self.pointer_target = Some(target);
-                self.hover_target = Some(target);
-                self.dispatch_to_target(target, event, ctx)
-            }
-            Event::MouseMove { px, py } => {
-                if let Some(target) = self.pointer_target {
-                    return self.dispatch_to_target(target, event, ctx);
-                }
-                if self.content_is_capturing() {
-                    return self.dispatch_to_content(event, ctx);
-                }
-
-                self.update_hover_target(self.pointer_target_at(*px, *py), event, ctx)
-            }
-            Event::MouseUp { px, py, .. } => {
-                if self.pointer_target.is_none() && self.content_is_capturing() {
-                    return self.dispatch_to_content(event, ctx);
-                }
-                let target = self.pointer_target.take()?;
-                self.hover_target = self.pointer_target_at(*px, *py);
-                self.dispatch_to_target(target, event, ctx)
-            }
-            Event::Wheel { px, py, .. } => {
-                if self.content_is_capturing() {
-                    return self.dispatch_to_content(event, ctx);
-                }
-                let target = self.pointer_target_at(*px, *py)?;
-                self.dispatch_to_target(target, event, ctx)
-            }
-            Event::MouseDown { .. } => None,
-            _ => self.dispatch_to_content(event, ctx),
+        let hit_target = match event {
+            Event::MouseDown { px, py, .. }
+            | Event::MouseMove { px, py }
+            | Event::MouseUp { px, py, .. }
+            | Event::Wheel { px, py, .. } => self.child_target_at(*px, *py),
+            _ => None,
+        };
+        if matches!(event, Event::MouseDown { button: MouseButton::Left, .. })
+            && let Some(target) = hit_target
+        {
+            self.event_router.set_focused_target(Some(target));
         }
+        let route = self.event_router.route_event(event, hit_target);
+        self.dispatch_route(route, event, ctx)
     }
 
     fn as_any(&self) -> &dyn Any {
@@ -684,6 +668,27 @@ mod tests {
     }
 
     #[test]
+    fn modal_frame_routes_keyboard_and_ime_to_the_content_focus_scope_by_default() {
+        let mut modal = fixture_modal();
+        let theme = crate::theme::test_theme();
+        let mut ctx = EventCtx::new(&theme, 1.0);
+
+        assert_eq!(
+            modal.on_event(&Event::KeyDown(KeyCode::Char('x'), Modifiers::NONE), &mut ctx),
+            None
+        );
+        assert_eq!(modal.on_event(&Event::ImeCommit("输入".to_owned()), &mut ctx), None);
+
+        assert_eq!(
+            stub_content(&mut modal).events,
+            vec![
+                Event::KeyDown(KeyCode::Char('x'), Modifiers::NONE),
+                Event::ImeCommit("输入".to_owned()),
+            ]
+        );
+    }
+
+    #[test]
     fn modal_frame_passes_child_actions_through_without_rewriting() {
         let mut modal = fixture_modal();
         let child = modal
@@ -844,7 +849,7 @@ mod tests {
     }
 
     #[test]
-    fn modal_frame_sends_outside_move_before_switching_hover_to_close_button() {
+    fn modal_frame_sends_pointer_leave_before_switching_hover_to_close_button() {
         let mut modal = fixture_modal_with_content(Box::new(
             StubContent::default()
                 .consuming_mouse_move()
@@ -875,10 +880,7 @@ mod tests {
                 px: content_px - modal.content_rect.x,
                 py: content_py - modal.content_rect.y,
             },
-            Event::MouseMove {
-                px: close_px - modal.content_rect.x,
-                py: close_py - modal.content_rect.y,
-            },
+            Event::PointerLeave,
         ];
         let child = stub_content(&mut modal);
         assert_eq!(child.events, expected_events);
@@ -927,10 +929,7 @@ mod tests {
                 px: content_px - modal.content_rect.x,
                 py: content_py - modal.content_rect.y,
             },
-            Event::MouseMove {
-                px: header_gap_px - modal.content_rect.x,
-                py: header_gap_py - modal.content_rect.y,
-            },
+            Event::PointerLeave,
         ];
         let child = stub_content(&mut modal);
         assert_eq!(child.events, expected_events);

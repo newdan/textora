@@ -1,6 +1,9 @@
 use std::any::Any;
 
-use crate::core::{Event, EventCtx, LayoutCtx, PaintCtx, Rect, Widget, WidgetAction, WidgetId};
+use crate::core::{
+    ChildEventRouter, Event, EventCtx, LayoutCtx, PaintCtx, Rect, Widget, WidgetAction, WidgetId,
+    dispatch_child_event_route,
+};
 
 const DEFAULT_GAP_LOGICAL: f32 = 8.0;
 
@@ -77,9 +80,7 @@ pub struct InlineGroup {
     gap_logical: f32,
     main_alignment: MainAlignment,
     alignment: CrossAlignment,
-    focused_id: Option<WidgetId>,
-    pointer_target_index: Option<usize>,
-    hover_target_index: Option<usize>,
+    event_router: ChildEventRouter<usize>,
 }
 
 impl InlineGroup {
@@ -90,9 +91,7 @@ impl InlineGroup {
             gap_logical: DEFAULT_GAP_LOGICAL,
             main_alignment: MainAlignment::Start,
             alignment: CrossAlignment::Stretch,
-            focused_id: None,
-            pointer_target_index: None,
-            hover_target_index: None,
+            event_router: ChildEventRouter::default(),
         }
     }
 
@@ -189,9 +188,12 @@ impl InlineGroup {
             .find_map(|(index, child)| child.rect.contains(px, py).then_some(index))
     }
 
-    fn focused_child_index(&self) -> Option<usize> {
-        let focused_id = self.focused_id?;
-        self.children.iter().position(|child| child.widget.id().is_some_and(|id| id == focused_id))
+    fn child_index_for_focus(&self, focused_id: WidgetId) -> Option<usize> {
+        self.children.iter().position(|child| {
+            let mut focusable_ids = Vec::new();
+            child.widget.collect_focusable_ids(&mut focusable_ids);
+            focusable_ids.contains(&focused_id)
+        })
     }
 
     fn dispatch_to_child(
@@ -203,32 +205,6 @@ impl InlineGroup {
         let child_rect = self.children[child_index].rect;
         let local_event = self.child_local_event(event, child_rect);
         self.children[child_index].widget.on_event(&local_event, ctx)
-    }
-
-    fn dispatch_outside_move_to_previous_hover(
-        &mut self,
-        next_hover_index: Option<usize>,
-        event: &Event,
-        ctx: &mut EventCtx,
-    ) -> Option<WidgetAction> {
-        let previous_hover_index = self.hover_target_index?;
-        if Some(previous_hover_index) == next_hover_index {
-            return None;
-        }
-
-        self.dispatch_to_child(previous_hover_index, event, ctx)
-    }
-
-    fn broadcast_to_children(&mut self, event: &Event, ctx: &mut EventCtx) -> Option<WidgetAction> {
-        let mut first_action = None;
-        for child_index in (0..self.children.len()).rev() {
-            if let Some(action) = self.dispatch_to_child(child_index, event, ctx)
-                && first_action.is_none()
-            {
-                first_action = Some(action);
-            }
-        }
-        first_action
     }
 }
 
@@ -309,66 +285,34 @@ impl Widget for InlineGroup {
     }
 
     fn set_keyboard_focus(&mut self, focused_id: Option<WidgetId>) {
-        self.focused_id = focused_id;
+        let focused_child = focused_id.and_then(|id| self.child_index_for_focus(id));
+        self.event_router.set_focused_target(focused_child);
         for child in &mut self.children {
             child.widget.set_keyboard_focus(focused_id);
         }
     }
 
     fn on_event(&mut self, ev: &Event, ctx: &mut EventCtx) -> Option<WidgetAction> {
-        match ev {
-            Event::MouseDown { px, py, .. } => {
-                let child_index = self.hit_child_index(*px, *py)?;
-                self.pointer_target_index = Some(child_index);
-                self.hover_target_index = Some(child_index);
-                self.dispatch_to_child(child_index, ev, ctx)
-            }
-            Event::MouseMove { px, py } => {
-                if let Some(child_index) = self.pointer_target_index {
-                    return self.dispatch_to_child(child_index, ev, ctx);
-                }
-
-                let next_hover_index = self.hit_child_index(*px, *py);
-                let previous_hover_action =
-                    self.dispatch_outside_move_to_previous_hover(next_hover_index, ev, ctx);
-                self.hover_target_index = next_hover_index;
-
-                if let Some(child_index) = next_hover_index {
-                    return self.dispatch_to_child(child_index, ev, ctx).or(previous_hover_action);
-                }
-
-                previous_hover_action
-            }
-            Event::PointerLeave => {
-                let hover_target_index = self.hover_target_index.take()?;
-                self.dispatch_to_child(hover_target_index, ev, ctx)
-            }
-            Event::MouseUp { .. } => {
-                let child_index = self.pointer_target_index.take()?;
-                self.dispatch_to_child(child_index, ev, ctx)
-            }
-            Event::InteractionCancel => {
-                self.pointer_target_index = None;
-                self.hover_target_index = None;
-                self.broadcast_to_children(ev, ctx)
-            }
-            Event::Wheel { px, py, .. } => {
-                let child_index = self.hit_child_index(*px, *py)?;
-                self.dispatch_to_child(child_index, ev, ctx)
-            }
-            Event::KeyDown(..)
-            | Event::ImePreedit { .. }
-            | Event::ImeCommit(..)
-            | Event::ImeEnable
-            | Event::ImeDisable => {
-                let child_index = self.focused_child_index()?;
-                self.dispatch_to_child(child_index, ev, ctx)
-            }
-        }
+        let hit_target = match ev {
+            Event::MouseDown { px, py, .. }
+            | Event::MouseMove { px, py }
+            | Event::MouseUp { px, py, .. }
+            | Event::Wheel { px, py, .. } => self.hit_child_index(*px, *py),
+            _ => None,
+        };
+        let route = self.event_router.route_event(ev, hit_target);
+        let broadcast_targets = (0..self.children.len()).rev();
+        let dispatch =
+            dispatch_child_event_route(route, ev, broadcast_targets, ctx, |target, event, ctx| {
+                self.dispatch_to_child(target, event, ctx)
+            });
+        dispatch.action.or_else(|| {
+            (dispatch.broadcast && dispatch.state_changed).then_some(WidgetAction::Consumed)
+        })
     }
 
     fn is_capturing(&self) -> bool {
-        self.pointer_target_index.is_some()
+        self.event_router.is_capturing()
             || self.children.iter().any(|child| child.widget.is_capturing())
     }
 
@@ -812,10 +756,7 @@ mod tests {
         let second = downcast_tracking_widget(group.children[1].widget.as_ref());
         assert_eq!(
             first.events,
-            vec![
-                LoggedEvent::MouseMove { px: 10.0, py: 10.0 },
-                LoggedEvent::MouseMove { px: 56.0, py: 10.0 },
-            ]
+            vec![LoggedEvent::MouseMove { px: 10.0, py: 10.0 }, LoggedEvent::PointerLeave]
         );
         assert_eq!(second.events, vec![LoggedEvent::MouseMove { px: 8.0, py: 10.0 }]);
     }
@@ -849,14 +790,14 @@ mod tests {
         group.on_event(&Event::PointerLeave, &mut event_ctx);
 
         assert!(group.is_capturing(), "pointer leave must preserve the pressed child owner");
-        assert_eq!(group.pointer_target_index, Some(0));
-        assert_eq!(group.hover_target_index, None);
+        assert_eq!(group.event_router.pointer_capture_target(), Some(0));
+        assert_eq!(group.event_router.hovered_target(), None);
 
         group.on_event(&Event::InteractionCancel, &mut event_ctx);
 
         assert!(!group.is_capturing());
-        assert_eq!(group.pointer_target_index, None);
-        assert_eq!(group.hover_target_index, None);
+        assert_eq!(group.event_router.pointer_capture_target(), None);
+        assert_eq!(group.event_router.hovered_target(), None);
         let first = downcast_tracking_widget(group.children[0].widget.as_ref());
         let second = downcast_tracking_widget(group.children[1].widget.as_ref());
         assert_eq!(

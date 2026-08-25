@@ -456,6 +456,9 @@ pub trait Widget: Any {
     }
 
     /// 处理输入事件，返回可选的 action（上行给 app 层）。
+    ///
+    /// 复合控件必须把键盘与 IME 事件只派发给唯一的键盘焦点目标；指针事件按命中目标或
+    /// 指针捕获目标派发。具体控件仍应拒绝不符合自身焦点状态的键盘与 IME 事件。
     fn on_event(&mut self, _ev: &Event, _ctx: &mut EventCtx) -> Option<WidgetAction> {
         None
     }

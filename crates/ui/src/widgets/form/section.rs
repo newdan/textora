@@ -2,8 +2,9 @@ use std::any::Any;
 use std::borrow::Cow;
 
 use crate::core::{
-    AccessibilityActionRequest, AccessibilityContext, AccessibilityNode, DrawCmd, Event, EventCtx,
-    LayoutCtx, PaintCtx, Rect, Widget, WidgetAction, WidgetId,
+    AccessibilityActionRequest, AccessibilityContext, AccessibilityNode, ChildEventRouter, DrawCmd,
+    Event, EventCtx, LayoutCtx, PaintCtx, Rect, Widget, WidgetAction, WidgetId,
+    dispatch_child_event_route,
 };
 use crate::widgets::form::row::FormRow;
 use crate::widgets::label::Label;
@@ -52,9 +53,7 @@ pub struct FormSection {
     description_rect: Option<Rect>,
     content_rect: Rect,
     row_rects: Vec<Rect>,
-    focused_id: Option<WidgetId>,
-    pointer_row_index: Option<usize>,
-    hover_row_index: Option<usize>,
+    event_router: ChildEventRouter<usize>,
 }
 
 impl FormSection {
@@ -74,9 +73,7 @@ impl FormSection {
             description_rect: None,
             content_rect: Rect::ZERO,
             row_rects: Vec::new(),
-            focused_id: None,
-            pointer_row_index: None,
-            hover_row_index: None,
+            event_router: ChildEventRouter::default(),
         }
     }
 
@@ -213,11 +210,14 @@ impl FormSection {
     }
 
     fn focused_row_index(&self) -> Option<usize> {
-        let focused_id = self.focused_id?;
+        self.event_router.focused_target()
+    }
+
+    fn row_index_for_focus(&self, focused_id: WidgetId) -> Option<usize> {
         self.rows.iter().position(|row| {
             let mut ids = Vec::new();
             row.collect_focusable_ids(&mut ids);
-            ids.into_iter().any(|id| id == focused_id)
+            ids.contains(&focused_id)
         })
     }
 
@@ -234,6 +234,24 @@ impl FormSection {
         let row_rect = *self.row_rects.get(row_index)?;
         let local_event = Self::local_event(event, row_rect);
         self.rows.get_mut(row_index)?.on_event(&local_event, ctx)
+    }
+
+    fn dispatch_route(
+        &mut self,
+        route: crate::core::ChildEventRoute<usize>,
+        event: &Event,
+        ctx: &mut EventCtx,
+    ) -> Option<WidgetAction> {
+        let dispatch = dispatch_child_event_route(
+            route,
+            event,
+            0..self.rows.len(),
+            ctx,
+            |row_index, event, ctx| self.dispatch_to_row(row_index, event, ctx),
+        );
+        dispatch.action.or_else(|| {
+            (dispatch.broadcast && dispatch.state_changed).then_some(WidgetAction::Consumed)
+        })
     }
 }
 
@@ -352,7 +370,8 @@ impl Widget for FormSection {
     }
 
     fn set_keyboard_focus(&mut self, focused_id: Option<WidgetId>) {
-        self.focused_id = focused_id;
+        let focused_row = focused_id.and_then(|id| self.row_index_for_focus(id));
+        self.event_router.set_focused_target(focused_row);
         for row in &mut self.rows {
             row.set_keyboard_focus(focused_id);
         }
@@ -366,81 +385,28 @@ impl Widget for FormSection {
     }
 
     fn is_capturing(&self) -> bool {
-        self.pointer_row_index.is_some() || self.capturing_row_index().is_some()
+        self.event_router.is_capturing() || self.capturing_row_index().is_some()
     }
 
     fn on_event(&mut self, event: &Event, ctx: &mut EventCtx) -> Option<WidgetAction> {
-        if matches!(event, Event::PointerLeave | Event::InteractionCancel) {
-            let container_changed = if matches!(event, Event::InteractionCancel) {
-                self.pointer_row_index.take().is_some() | self.hover_row_index.take().is_some()
-            } else {
-                self.hover_row_index.take().is_some()
-            };
-            let mut first_action = None;
-            for row_index in 0..self.rows.len() {
-                if let Some(action) = self.dispatch_to_row(row_index, event, ctx)
-                    && first_action.is_none()
-                {
-                    first_action = Some(action);
-                }
-            }
-            return first_action.or_else(|| container_changed.then_some(WidgetAction::Consumed));
-        }
-
         if let Some(row_index) = self.capturing_row_index()
             && matches!(
                 event,
                 Event::MouseMove { .. } | Event::MouseUp { .. } | Event::Wheel { .. }
             )
+            && !self.event_router.is_capturing()
         {
-            let action = self.dispatch_to_row(row_index, event, ctx);
-            if matches!(event, Event::MouseUp { .. }) {
-                self.pointer_row_index = None;
-            }
-            return action;
+            self.event_router.set_pointer_capture_target(Some(row_index));
         }
-
-        match event {
-            Event::MouseDown { px, py, .. } => {
-                let row_index = self.row_index_at(*px, *py)?;
-                self.pointer_row_index = Some(row_index);
-                self.dispatch_to_row(row_index, event, ctx)
-            }
-            Event::MouseMove { px, py } => {
-                if let Some(row_index) = self.pointer_row_index {
-                    return self.dispatch_to_row(row_index, event, ctx);
-                }
-
-                let next_hover_row_index = self.row_index_at(*px, *py);
-                let previous_hover_action = if self.hover_row_index != next_hover_row_index {
-                    self.hover_row_index.and_then(|row_index| {
-                        let saved_cursor_hint = ctx.cursor_hint;
-                        let action = self.dispatch_to_row(row_index, event, ctx);
-                        ctx.cursor_hint = saved_cursor_hint;
-                        action
-                    })
-                } else {
-                    None
-                };
-                self.hover_row_index = next_hover_row_index;
-
-                if let Some(row_index) = next_hover_row_index {
-                    return self.dispatch_to_row(row_index, event, ctx).or(previous_hover_action);
-                }
-
-                previous_hover_action
-            }
-            Event::MouseUp { .. } => {
-                let row_index = self.pointer_row_index.take()?;
-                self.dispatch_to_row(row_index, event, ctx)
-            }
-            Event::Wheel { px, py, .. } => self
-                .row_index_at(*px, *py)
-                .and_then(|row_index| self.dispatch_to_row(row_index, event, ctx)),
-            _ => self
-                .focused_row_index()
-                .and_then(|row_index| self.dispatch_to_row(row_index, event, ctx)),
-        }
+        let hit_target = match event {
+            Event::MouseDown { px, py, .. }
+            | Event::MouseMove { px, py }
+            | Event::MouseUp { px, py, .. }
+            | Event::Wheel { px, py, .. } => self.row_index_at(*px, *py),
+            _ => None,
+        };
+        let route = self.event_router.route_event(event, hit_target);
+        self.dispatch_route(route, event, ctx)
     }
 
     fn as_any(&self) -> &dyn Any {
