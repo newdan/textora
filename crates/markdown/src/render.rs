@@ -21,6 +21,8 @@ const SOURCE_MARKER_FADE_RATIO: f32 = 0.55;
 const INLINE_CODE_BACKGROUND_HEIGHT_RATIO: f32 = 1.3;
 const INLINE_CODE_BACKGROUND_RADIUS_RATIO: f32 = 0.35;
 const INLINE_CODE_BACKGROUND_HORIZONTAL_PADDING_RATIO: f32 = 0.25;
+const STRIKETHROUGH_THICKNESS_RATIO: f32 = 1.0 / 15.0;
+const MIN_STRIKETHROUGH_THICKNESS: f32 = 1.0;
 
 /// Render a laid-out markdown document into a DrawList.
 ///
@@ -943,7 +945,15 @@ fn render_line_with_offset(
                     dl.fill(Rect::new(cursor_x, ly + font_size + 2.0, w, 1.0), color);
                 }
                 if is_strikethrough(&span.style) {
-                    dl.fill(Rect::new(cursor_x, ly + font_size * 0.55, w, 1.0), color);
+                    dl.fill(
+                        Rect::new(
+                            cursor_x,
+                            ly + font_size * 0.55,
+                            w,
+                            strikethrough_thickness(font_size),
+                        ),
+                        color,
+                    );
                 }
                 cursor_x += w;
             }
@@ -1061,7 +1071,10 @@ fn render_line_with_offset(
                 dl.fill(Rect::new(x, ly + font_size + 2.0, seg_w, 1.0), color);
             }
             if is_strikethrough(&seg.style) {
-                dl.fill(Rect::new(x, ly + font_size * 0.55, seg_w, 1.0), color);
+                dl.fill(
+                    Rect::new(x, ly + font_size * 0.55, seg_w, strikethrough_thickness(font_size)),
+                    color,
+                );
             }
         }
         last_end = seg_end;
@@ -1216,6 +1229,10 @@ fn is_underlined(inline: &InlineStyle) -> bool {
 
 fn is_strikethrough(inline: &InlineStyle) -> bool {
     matches!(inline, InlineStyle::Strikethrough)
+}
+
+fn strikethrough_thickness(font_size: f32) -> f32 {
+    (font_size * STRIKETHROUGH_THICKNESS_RATIO).max(MIN_STRIKETHROUGH_THICKNESS)
 }
 
 /// Map an inline style to (font_weight, font_style).
@@ -2666,6 +2683,35 @@ Day -29          Day -7           Day -1    Today    Day +1
         assert!(!code_texts.is_empty(), "should render inline code text");
         // code_color should differ from link_color (sanity check)
         assert_ne!(code_texts[0], style.link_color, "inline code should not use link color");
+    }
+
+    #[test]
+    fn render_strikethrough_thickness_scales_with_high_dpi_font_size() {
+        let markdown = "~~deleted~~";
+        let parsed = parse_markdown(markdown);
+        let mut style = default_style();
+        style.body_font_size *= 2.0;
+        let doc = MarkdownDoc::build(&parsed, &style);
+        let laid_out =
+            layout_doc(&doc.blocks, &style, 800.0, &core::document::StringDocView::new(markdown));
+        let mut draw_list = DrawList::new();
+        let mut shaper = shaping::Shaper::new().expect("render test requires a text shaper");
+        render_doc(&laid_out, &style, &mut draw_list, 0.0, 600.0, Some(&mut shaper));
+
+        let strikethrough = draw_list
+            .cmds
+            .iter()
+            .find_map(|command| match command {
+                DrawCmd::FillRect { rect, color, .. }
+                    if *color == style.text_color && rect.w > rect.h =>
+                {
+                    Some(*rect)
+                }
+                _ => None,
+            })
+            .expect("strikethrough should render as a text-colored rectangle");
+
+        assert_eq!(strikethrough.h, 2.0, "2x DPI should produce a 2px strikethrough");
     }
 
     #[test]
