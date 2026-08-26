@@ -351,6 +351,28 @@ mod integration_tests {
     }
 
     #[test]
+    fn e2e_ordered_list_preview_normalizes_a_non_one_source_start() {
+        let source = "”\n\n2. 拆分容易合并难,框架要有决策权\n3. 质量保障的屁股问题\n4. 业务类型? toC or  toB,如AP 多维表\n5. 组件的边界会变强, 存在一些跨业务协调的事情,需要考虑\n6. 普遍缺用户运营的人,这个是统建还是各业务自己搞\n\n“";
+        let draw_list = render_markdown(source, &default_style(), 800.0, 800.0, 0.0);
+        let rendered_numbers = draw_list
+            .cmds
+            .iter()
+            .filter_map(|command| match command {
+                ui::core::DrawCmd::TextLayout { layout, .. } => layout
+                    .text
+                    .strip_suffix('.')
+                    .filter(|digits| {
+                        !digits.is_empty() && digits.bytes().all(|byte| byte.is_ascii_digit())
+                    })
+                    .map(|_| layout.text.as_str()),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+
+        assert_eq!(rendered_numbers, ["1.", "2.", "3.", "4.", "5."]);
+    }
+
+    #[test]
     fn e2e_ordered_list_long_items_with_style() {
         // Regression: long ordered list items with bold/inline-code/CJK should
         // get sequential numbers (not all "1."). Verifies builder numbering

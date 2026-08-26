@@ -499,6 +499,8 @@ struct ListStackEntry {
     blank_line_before: bool,
 }
 
+const ORDERED_LIST_PREVIEW_START: u64 = 1;
+
 // ===== MarkdownBuilder =====
 
 struct MarkdownBuilder {
@@ -687,7 +689,8 @@ impl MarkdownBuilder {
     }
 
     fn push_list(&mut self, start: Option<u64>, tight: bool, blank_line_before: bool) {
-        self.list_stack.push(ListStackEntry { bullet_index: start, tight, blank_line_before });
+        let bullet_index = start.map(|_| ORDERED_LIST_PREVIEW_START);
+        self.list_stack.push(ListStackEntry { bullet_index, tight, blank_line_before });
     }
 
     fn pop_list(&mut self) {
@@ -1315,6 +1318,22 @@ mod tests {
             count
         }
         assert_eq!(count_items(&doc.blocks), 3);
+    }
+
+    #[test]
+    fn build_ordered_list_normalizes_non_one_source_start_for_preview() {
+        let parsed = parse_markdown("4. one\n5. two\n6. three");
+        let doc = MarkdownDoc::build(&parsed, &default_style());
+        let rendered_numbers = doc
+            .blocks
+            .iter()
+            .filter_map(|block| match block.kind {
+                BlockKind::ListItem { bullet: ListBullet::Ordered(number), .. } => Some(number),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+
+        assert_eq!(rendered_numbers, [1, 2, 3]);
     }
 
     #[test]
