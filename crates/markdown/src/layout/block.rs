@@ -345,7 +345,7 @@ pub(crate) fn layout_block(block: &BlockNode, ctx: &mut LayoutCtx) {
                 {
                     None
                 } else {
-                    crate::edit::active_block_marker(block, edit_ctx.cursor_byte)
+                    active_list_item_marker(block, ctx.source_text, edit_ctx.cursor_byte)
                 };
             }
             for (line_idx, raw_line) in raw_text_lines.lines.iter().enumerate() {
@@ -562,6 +562,41 @@ pub(crate) fn layout_block(block: &BlockNode, ctx: &mut LayoutCtx) {
             ctx.last_trailing_spacing = ctx.style.paragraph_spacing;
         }
     }
+}
+
+fn active_list_item_marker(
+    block: &BlockNode,
+    source: Option<&str>,
+    cursor_byte: usize,
+) -> Option<crate::edit::ActiveBlockMarker> {
+    let computed_marker = crate::edit::active_block_marker(block, cursor_byte)?;
+    if !matches!(
+        block.kind,
+        BlockKind::ListItem { bullet: crate::builder::ListBullet::Ordered(_), .. }
+    ) {
+        return Some(computed_marker);
+    }
+
+    source.and_then(|source| ordered_source_marker(block, source)).or(Some(computed_marker))
+}
+
+fn ordered_source_marker(
+    block: &BlockNode,
+    source: &str,
+) -> Option<crate::edit::ActiveBlockMarker> {
+    let mut marker_start = block.block_range.start;
+    while matches!(source.as_bytes().get(marker_start), Some(b' ' | b'\t')) {
+        marker_start += 1;
+    }
+    let (bullet, content_start) = crate::augmenter::parse_list_marker(source, marker_start)?;
+    if !matches!(bullet, crate::builder::ListBullet::Ordered(_)) {
+        return None;
+    }
+
+    Some(crate::edit::ActiveBlockMarker {
+        marker_text: source.get(marker_start..content_start)?.to_owned(),
+        marker_source_range: marker_start..content_start,
+    })
 }
 
 fn code_block_is_active(block: &BlockNode, edit_ctx: Option<&crate::edit::EditContext>) -> bool {

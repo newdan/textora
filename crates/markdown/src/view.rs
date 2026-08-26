@@ -7138,6 +7138,39 @@ C608-01 武昌职业第01组：计划 68，历史低线较低，是表里最像�
         );
     }
 
+    #[test]
+    fn removing_middle_ordered_marker_recomputes_the_following_preview_number() {
+        use ui::plugin::{PluginMessage, ViewPlugin};
+
+        let initial_source = "1. first\n2. second\n3. third";
+        let mut document = StubDoc::new(initial_source);
+        let mut view = MarkdownEditorView::new();
+        view.set_source(document.text.clone(), 1);
+        let initial_cursor =
+            initial_source.find("second").expect("fixture must contain the middle item");
+        view.handle_message(PluginMessage::SetCursorByte(initial_cursor), &mut document);
+        render_editor_once(&mut view, &document);
+
+        let updated_source = "1. first\nsecond\n3. third";
+        document = StubDoc::new(updated_source);
+        view.set_source(document.text.clone(), 2);
+        let updated_cursor =
+            updated_source.find("second").expect("fixture must contain the former middle item");
+        view.handle_message(PluginMessage::SetCursorByte(updated_cursor), &mut document);
+
+        let draw_list = render_editor_draw_list(&mut view, &document);
+        let rendered_text = rendered_text_commands(&draw_list);
+
+        assert!(
+            rendered_text.contains(&"2."),
+            "following item must be renumbered after removing the middle marker: {rendered_text:?}"
+        );
+        assert!(
+            !rendered_text.contains(&"3."),
+            "stale source number must not replace the recomputed preview number: {rendered_text:?}"
+        );
+    }
+
     /// HitTestByte returns None for a click far outside all content.
     #[test]
     fn hit_test_byte_returns_none_far_outside_content() {

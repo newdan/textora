@@ -3698,6 +3698,42 @@ mod tests {
         );
     }
 
+    #[test]
+    fn activating_ordered_list_materializes_only_the_current_source_number() {
+        let source = "1. first\n7. second\n4. third";
+        let cursor = source.find("second").expect("fixture must contain the active item");
+        let layout = layout_with_cursor(source, cursor);
+        let rendered_lines =
+            layout.flat_lines.iter().map(|line| line.text.as_str()).collect::<Vec<_>>();
+
+        assert_eq!(rendered_lines, ["first", "7. second", "third"]);
+    }
+
+    #[test]
+    fn moving_cursor_into_ordered_list_invalidates_only_the_current_item() {
+        let source = "1. first\n7. second\n4. third";
+        let cursor = source.find("second").expect("fixture must contain the active item");
+        let style = default_style();
+        let parsed = crate::parser::parse_markdown(source);
+        let document = crate::builder::MarkdownDoc::build(&parsed, &style);
+        let document_view = core::document::StringDocView::new(source);
+        let mut layout = LazyLayout::from_doc(document, &style, 400.0, &document_view);
+        layout.set_edit_source(Some(source.to_owned()));
+        layout.set_edit_ctx(Some(crate::edit::EditContext {
+            cursor_byte: cursor,
+            preedit_text: None,
+            preedit_cursor: None,
+        }));
+
+        layout.invalidate_lines_for_source_bytes([cursor]);
+        layout.ensure_all_blocks(&style, 400.0, None, None, &document_view);
+        layout.build_flat_lines(&document_view);
+
+        let rendered_lines =
+            layout.flat_lines.iter().map(|line| line.text.as_str()).collect::<Vec<_>>();
+        assert_eq!(rendered_lines, ["first", "7. second", "third"]);
+    }
+
     // ===== y-stability: marker prepend must not shift subsequent blocks =====
 
     /// Build two LazyLayouts of the same markdown, one with cursor outside the
