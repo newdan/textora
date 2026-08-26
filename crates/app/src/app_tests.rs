@@ -2160,6 +2160,44 @@ fn markdown_empty_list_enter_uses_structural_edit_policy() {
 
 #[test]
 #[cfg(feature = "markdown")]
+fn markdown_enter_then_backspace_removes_generated_item_before_horizontal_rule() {
+    let source = "”\n\n1.  啊伺服电机\n2.  卡到付件al\n3.  阿斯卡打开\n\n\n---\n\n“";
+    let third_item_end =
+        source.find("3.  阿斯卡打开").expect("fixture must contain the third ordered item")
+            + "3.  阿斯卡打开".len();
+    let mut app = App::new(None);
+    let mut document = DocumentView::new(source.split('\n').map(str::to_owned).collect(), 80, 10.0);
+    document.cursor_move_to_offset(third_item_end);
+    app.push_entry_for_test(document, Box::new(textora_markdown::view::MarkdownEditorView::new()));
+    app.switch_workspace_for_test(0);
+    app.sync_plugin_state();
+    render_active_wysiwyg_plugin_for_test(&mut app);
+
+    app.dispatch_transactional_edit_for_test(EditCommand::InsertNewline);
+    app.sync_plugin_state();
+    render_active_wysiwyg_plugin_for_test(&mut app);
+
+    let generated_item_source =
+        "”\n\n1.  啊伺服电机\n2.  卡到付件al\n3.  阿斯卡打开\n4.  \n\n---\n\n“";
+    let generated_item_end =
+        generated_item_source.find("4.  ").expect("generated source must contain fourth item") + 4;
+    {
+        let tab = app.active_tab_session().expect("active Markdown tab");
+        assert_eq!(tab.full_text(), generated_item_source);
+        assert_eq!(tab.document.cursor_offset().to_usize(), generated_item_end);
+        assert_eq!(tab.document.selection_range(), None);
+    }
+
+    app.dispatch_transactional_edit_for_test(EditCommand::Backspace);
+
+    assert_eq!(
+        active_document_text(&app),
+        "”\n\n1.  啊伺服电机\n2.  卡到付件al\n3.  阿斯卡打开\n\n\n---\n\n“"
+    );
+}
+
+#[test]
+#[cfg(feature = "markdown")]
 fn markdown_table_enter_keeps_moved_cursor_visible() {
     let source = "| a |\n|---|\n| b |";
     let expected_cursor = source.find('b').expect("table target content must exist");

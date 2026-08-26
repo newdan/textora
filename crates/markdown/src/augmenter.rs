@@ -2077,7 +2077,7 @@ fn get_marker_delete_range(source: &str, current_byte: usize) -> Option<std::ops
         }
         _ if trimmed.starts_with('#') => {
             let hashes = trimmed.chars().take_while(|&c| c == '#').count();
-            hashes <= 6 && hashes > 0 && is_single_marker_separator(&trimmed[hashes..])
+            hashes <= 6 && hashes > 0 && marker_separator_is_complete(&trimmed[hashes..])
         }
         _ if trimmed.starts_with('-') || trimmed.starts_with('*') || trimmed.starts_with('+') => {
             unordered_marker_suffix_is_complete(&trimmed[1..])
@@ -2086,7 +2086,7 @@ fn get_marker_delete_range(source: &str, current_byte: usize) -> Option<std::ops
             let digits = trimmed.chars().take_while(|c| c.is_ascii_digit()).count();
             digits > 0 && {
                 let rest = &trimmed[digits..];
-                rest.strip_prefix(['.', ')']).is_some_and(is_single_marker_separator)
+                rest.strip_prefix(['.', ')']).is_some_and(marker_separator_is_complete)
             }
         }
     };
@@ -2094,8 +2094,8 @@ fn get_marker_delete_range(source: &str, current_byte: usize) -> Option<std::ops
     if is_match { Some(line_start..current_byte) } else { None }
 }
 
-fn is_single_marker_separator(text: &str) -> bool {
-    matches!(text.as_bytes(), [b' '] | [b'\t'])
+fn marker_separator_is_complete(text: &str) -> bool {
+    !text.is_empty() && text.bytes().all(|byte| matches!(byte, b' ' | b'\t'))
 }
 
 fn unordered_marker_suffix_is_complete(suffix: &str) -> bool {
@@ -2658,8 +2658,8 @@ mod tests {
     }
 
     #[test]
-    fn backspace_removes_markers_that_use_tab_separators() {
-        for source in ["-\t", ">\t", "1.\t"] {
+    fn backspace_removes_markers_that_use_whitespace_separators() {
+        for source in ["-\t", ">\t", "1.\t", "1.  ", "1. \t"] {
             let augmentation = augment_edit(source, source.len(), AugmentKind::Backspace)
                 .unwrap_or_else(|| panic!("Backspace should remove marker {source:?}"));
 
