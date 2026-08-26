@@ -410,9 +410,22 @@ pub(crate) fn layout_block(block: &BlockNode, ctx: &mut LayoutCtx) {
                         },
                     );
                 }
+                let active_ordered_marker = (line_idx == 0
+                    && matches!(bullet, crate::builder::ListBullet::Ordered(_)))
+                .then(|| ctx.active_block_marker.as_ref())
+                .flatten();
+                let marker_len = active_ordered_marker.map(|marker| marker.marker_text.len());
+                let estimated_marker_width = active_ordered_marker.map_or(0.0, |marker| {
+                    marker.marker_text.chars().count() as f32 * font_size * 0.55
+                });
                 let wrapped = ctx.wrap_text(&projected.text, font_size, Weight::NORMAL);
-                let x = ctx.indent + ctx.style.list_indent;
-                let w = ctx.available_width() - ctx.style.list_indent;
+                let marker_width = marker_len
+                    .and_then(|marker_len| shaped_prefix_width(&ctx.last_wrap_shaped, marker_len))
+                    .unwrap_or(estimated_marker_width);
+                let content_x = ctx.indent + ctx.style.list_indent;
+                let x = (content_x - marker_width).max(ctx.indent);
+                let reclaimed_width = content_x - x;
+                let w = ctx.available_width() - ctx.style.list_indent + reclaimed_width;
                 let laid = layout_line_with_styles(
                     &materialized_styles,
                     &wrapped,
@@ -562,6 +575,21 @@ pub(crate) fn layout_block(block: &BlockNode, ctx: &mut LayoutCtx) {
             ctx.last_trailing_spacing = ctx.style.paragraph_spacing;
         }
     }
+}
+
+fn shaped_prefix_width(
+    shaped_lines: &[Option<shaping::ShapedRun>],
+    prefix_byte_end: usize,
+) -> Option<f32> {
+    let shaped = shaped_lines.first()?.as_ref()?;
+    Some(
+        shaped
+            .clusters
+            .iter()
+            .take_while(|cluster| cluster.byte_range.start < prefix_byte_end)
+            .map(|cluster| cluster.advance)
+            .sum(),
+    )
 }
 
 fn active_list_item_marker(

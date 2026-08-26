@@ -8084,6 +8084,7 @@ viebcoding 用过吗?
             .iter()
             .find(|line| line.text == "item")
             .expect("ordered list item should render folded content");
+        let folded_content_x = folded_line.rect.x;
         let clicked_byte = source.find("item").expect("fixture should contain item") + 1;
         let folded_x = folded_line.rect.x + crate::layout::grapheme_x(folded_line, 1);
         let folded_y = folded_line.rect.y + folded_line.rect.h * 0.5;
@@ -8102,9 +8103,11 @@ viebcoding 用过吗?
             .iter()
             .find(|line| line.text == "1. item")
             .expect("ordered list item should render expanded marker");
+        let expanded_content_x =
+            expanded_line.rect.x + crate::layout::grapheme_x(expanded_line, "1. ".len());
         assert!(
-            expanded_line.rect.x > 0.0,
-            "ordered list content should preserve list indent after marker expands"
+            (expanded_content_x - folded_content_x).abs() < 0.01,
+            "ordered list body must keep its x position when source marker expands: folded={folded_content_x}, expanded={expanded_content_x}"
         );
 
         let (x, y, _w, h) = view.engine().cursor_screen_pos().expect("cursor should resolve");
