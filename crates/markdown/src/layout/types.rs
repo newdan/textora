@@ -8,7 +8,7 @@ use std::ops::Range;
 use std::sync::Arc;
 use ui::core::geom::Rect;
 
-use super::block::{layout_block, layout_doc_with_shaper};
+use super::block::{active_ordered_list_range, layout_block, layout_doc_with_shaper};
 use super::reconcile::BlockReconcilePlan;
 use super::shaping::populate_style_segments;
 use super::source_line_map::{HiddenBlockSeparator, RenderedLineLayout, SourceLineMap};
@@ -159,6 +159,8 @@ pub struct LazyLayout<S: BlockSource> {
         std::collections::BTreeMap<usize, super::source_line_map::ProjectedEmptyLine>,
     /// WYSIWYG edit context; None means pure preview (no cursor span expansion).
     edit_ctx: Option<crate::edit::EditContext>,
+    /// Cached deepest ordered-list group containing the edit cursor.
+    active_ordered_list_range: Option<Range<usize>>,
     /// Non-empty source selection range used for block-level editing fallbacks.
     selection_range: Option<std::ops::Range<usize>>,
     /// Crate-private rendering sidecar for ASCII diagram grid metadata.
@@ -1242,6 +1244,7 @@ impl<S: BlockSource> LazyLayout<S> {
             projection_flat_line_indices: Vec::new(),
             projected_empty_line_geometry: std::collections::BTreeMap::new(),
             edit_ctx: None,
+            active_ordered_list_range: None,
             selection_range: None,
             ascii_diagrams: super::ascii_diagram::AsciiDiagramRegistry::default(),
         }
@@ -1265,6 +1268,8 @@ impl<S: BlockSource> LazyLayout<S> {
         let mut previous_flat_line_groups = take_flat_line_groups(&mut previous);
         let mut current_block_ordinals = vec![0usize; self.source.blocks().len()];
         let mut reused_block_count = 0usize;
+        let current_active_ordered_range = self.active_ordered_list_range.clone();
+        let previous_active_ordered_range = previous.active_ordered_list_range.clone();
 
         for current_laid_index in 0..self.laid_to_doc.len() {
             let current_doc_index = self.laid_to_doc[current_laid_index];
@@ -1293,11 +1298,15 @@ impl<S: BlockSource> LazyLayout<S> {
             };
             let current_cursor_intersects = self.edit_ctx.as_ref().is_some_and(|edit_context| {
                 block_contains_source_byte(current_source_block, edit_context.cursor_byte)
-            });
+            }) || current_active_ordered_range
+                .as_ref()
+                .is_some_and(|range| ranges_intersect_block(range, current_source_block));
             let previous_cursor_intersects =
                 previous.edit_ctx.as_ref().is_some_and(|edit_context| {
                     block_contains_source_byte(previous_source_block, edit_context.cursor_byte)
-                });
+                }) || previous_active_ordered_range
+                    .as_ref()
+                    .is_some_and(|range| ranges_intersect_block(range, previous_source_block));
             let current_selection_intersects = self
                 .selection_range
                 .as_ref()
@@ -1426,6 +1435,9 @@ impl<S: BlockSource> LazyLayout<S> {
 
     /// Set the WYSIWYG edit context (cursor position for span expansion).
     pub fn set_edit_ctx(&mut self, edit_ctx: Option<crate::edit::EditContext>) {
+        self.active_ordered_list_range = edit_ctx.as_ref().and_then(|edit_context| {
+            active_ordered_list_range(self.source.blocks(), edit_context.cursor_byte)
+        });
         self.edit_ctx = edit_ctx;
     }
 
@@ -1479,14 +1491,19 @@ impl<S: BlockSource> LazyLayout<S> {
         bytes: impl IntoIterator<Item = usize>,
         should_invalidate: impl Fn(&Self, usize) -> bool,
     ) {
+        let source_bytes = bytes.into_iter().collect::<Vec<_>>();
+        let active_ordered_ranges = source_bytes
+            .iter()
+            .filter_map(|source_byte| active_ordered_list_range(self.source.blocks(), *source_byte))
+            .collect::<Vec<_>>();
         // Phase 1: collect the unique block line bases for each byte position.
         let mut bases: Vec<usize> = Vec::new();
-        for byte in bytes {
+        for byte in source_bytes {
             if let Some((block_line_base, _line_idx)) = self.find_block_line_at_byte(byte) {
                 bases.push(block_line_base);
             }
         }
-        if bases.is_empty() {
+        if bases.is_empty() && active_ordered_ranges.is_empty() {
             return;
         }
         bases.sort();
@@ -1500,7 +1517,10 @@ impl<S: BlockSource> LazyLayout<S> {
                 continue;
             }
             let before = Self::count_block_lines_before(blocks, &blocks[doc_idx]);
-            if bases.contains(&before) {
+            let belongs_to_active_ordered_group = active_ordered_ranges
+                .iter()
+                .any(|range| ranges_intersect_block(range, &blocks[doc_idx]));
+            if bases.contains(&before) || belongs_to_active_ordered_group {
                 if !should_invalidate(self, laid_idx) {
                     continue;
                 }
@@ -1622,6 +1642,7 @@ impl<S: BlockSource> LazyLayout<S> {
                 self.source_text.as_deref(),
                 self.edit_ctx.as_ref(),
             );
+            ctx.active_ordered_list_range = self.active_ordered_list_range.clone();
             ctx.selection_range = self.selection_range.as_ref();
             ctx.ascii_diagrams.set_selection_range(self.selection_range.clone());
             ctx.y = base_y;
@@ -1759,6 +1780,7 @@ impl<S: BlockSource> LazyLayout<S> {
                 self.source_text.as_deref(),
                 self.edit_ctx.as_ref(),
             );
+            ctx.active_ordered_list_range = self.active_ordered_list_range.clone();
             ctx.selection_range = self.selection_range.as_ref();
             ctx.ascii_diagrams.set_selection_range(self.selection_range.clone());
             ctx.y = self.estimated_positions[i];
@@ -2035,6 +2057,7 @@ impl<S: BlockSource> LazyLayout<S> {
             self.source_text.as_deref(),
             self.edit_ctx.as_ref(),
         );
+        ctx.active_ordered_list_range = self.active_ordered_list_range.clone();
         ctx.selection_range = self.selection_range.as_ref();
         ctx.ascii_diagrams.set_selection_range(self.selection_range.clone());
         ctx.y = base_y;
@@ -3696,6 +3719,42 @@ mod tests {
             "ordered list should start with '3. ', got: {:?}",
             first_text
         );
+    }
+
+    #[test]
+    fn activating_ordered_list_materializes_every_source_number_in_the_group() {
+        let source = "1. first\n7. second\n4. third";
+        let cursor = source.find("second").expect("fixture must contain the active item");
+        let layout = layout_with_cursor(source, cursor);
+        let rendered_lines =
+            layout.flat_lines.iter().map(|line| line.text.as_str()).collect::<Vec<_>>();
+
+        assert_eq!(rendered_lines, ["1. first", "7. second", "4. third"]);
+    }
+
+    #[test]
+    fn moving_cursor_into_ordered_list_invalidates_every_item_in_the_group() {
+        let source = "1. first\n7. second\n4. third";
+        let cursor = source.find("second").expect("fixture must contain the active item");
+        let style = default_style();
+        let parsed = crate::parser::parse_markdown(source);
+        let document = crate::builder::MarkdownDoc::build(&parsed, &style);
+        let document_view = core::document::StringDocView::new(source);
+        let mut layout = LazyLayout::from_doc(document, &style, 400.0, &document_view);
+        layout.set_edit_source(Some(source.to_owned()));
+        layout.set_edit_ctx(Some(crate::edit::EditContext {
+            cursor_byte: cursor,
+            preedit_text: None,
+            preedit_cursor: None,
+        }));
+
+        layout.invalidate_lines_for_source_bytes([cursor]);
+        layout.ensure_all_blocks(&style, 400.0, None, None, &document_view);
+        layout.build_flat_lines(&document_view);
+
+        let rendered_lines =
+            layout.flat_lines.iter().map(|line| line.text.as_str()).collect::<Vec<_>>();
+        assert_eq!(rendered_lines, ["1. first", "7. second", "4. third"]);
     }
 
     // ===== y-stability: marker prepend must not shift subsequent blocks =====

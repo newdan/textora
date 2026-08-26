@@ -339,8 +339,14 @@ pub(crate) fn layout_block(block: &BlockNode, ctx: &mut LayoutCtx) {
             // Lay out item's own text as LaidOutLine (bullet offset)
             let mut item_lines = Vec::new();
             let raw_text_lines = list_item_text_lines_for_layout(block, ctx);
-            // Detect active block marker: cursor in list item's source range.
-            if let Some(edit_ctx) = ctx.edit_ctx {
+            let ordered_group_is_active = matches!(bullet, crate::builder::ListBullet::Ordered(_))
+                && ctx.active_ordered_list_range.as_ref().is_some_and(|range| {
+                    range.start <= block.block_range.start && block.block_range.end <= range.end
+                });
+            if ordered_group_is_active {
+                ctx.active_block_marker =
+                    ctx.source_text.and_then(|source| ordered_source_marker(block, source));
+            } else if let Some(edit_ctx) = ctx.edit_ctx {
                 ctx.active_block_marker = if cursor_in_nested_list_item(block, edit_ctx.cursor_byte)
                 {
                     None
@@ -562,6 +568,65 @@ pub(crate) fn layout_block(block: &BlockNode, ctx: &mut LayoutCtx) {
             ctx.last_trailing_spacing = ctx.style.paragraph_spacing;
         }
     }
+}
+
+/// Finds the deepest contiguous ordered-list group containing `cursor_byte`.
+/// Nested groups take precedence over an enclosing list item.
+pub(crate) fn active_ordered_list_range(
+    blocks: &[BlockNode],
+    cursor_byte: usize,
+) -> Option<std::ops::Range<usize>> {
+    for block in blocks {
+        if block_contains_byte(block, cursor_byte)
+            && let Some(range) = active_ordered_list_range(&block.children, cursor_byte)
+        {
+            return Some(range);
+        }
+    }
+
+    let active_index = blocks.iter().position(|block| {
+        matches!(
+            block.kind,
+            BlockKind::ListItem { bullet: crate::builder::ListBullet::Ordered(_), .. }
+        ) && block_contains_byte(block, cursor_byte)
+    })?;
+    let mut first_index = active_index;
+    while first_index > 0 && ordered_list_item(&blocks[first_index - 1]) {
+        first_index -= 1;
+    }
+    let mut last_index = active_index;
+    while last_index + 1 < blocks.len() && ordered_list_item(&blocks[last_index + 1]) {
+        last_index += 1;
+    }
+
+    Some(blocks[first_index].block_range.start..blocks[last_index].block_range.end)
+}
+
+fn ordered_list_item(block: &BlockNode) -> bool {
+    matches!(block.kind, BlockKind::ListItem { bullet: crate::builder::ListBullet::Ordered(_), .. })
+}
+
+fn block_contains_byte(block: &BlockNode, source_byte: usize) -> bool {
+    block.block_range.start <= source_byte && source_byte <= block.block_range.end
+}
+
+fn ordered_source_marker(
+    block: &BlockNode,
+    source: &str,
+) -> Option<crate::edit::ActiveBlockMarker> {
+    let mut marker_start = block.block_range.start;
+    while matches!(source.as_bytes().get(marker_start), Some(b' ' | b'\t')) {
+        marker_start += 1;
+    }
+    let (bullet, content_start) = crate::augmenter::parse_list_marker(source, marker_start)?;
+    if !matches!(bullet, crate::builder::ListBullet::Ordered(_)) {
+        return None;
+    }
+
+    Some(crate::edit::ActiveBlockMarker {
+        marker_text: source.get(marker_start..content_start)?.to_owned(),
+        marker_source_range: marker_start..content_start,
+    })
 }
 
 fn code_block_is_active(block: &BlockNode, edit_ctx: Option<&crate::edit::EditContext>) -> bool {
