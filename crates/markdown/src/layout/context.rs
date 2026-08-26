@@ -316,9 +316,6 @@ pub struct LayoutCtx<'a> {
     /// Active block marker when cursor is in a heading/list/blockquote source range.
     /// Set by the block handler before layout, cleared after.
     pub(crate) active_block_marker: Option<crate::edit::ActiveBlockMarker>,
-    /// Source range of the active contiguous ordered-list group.
-    /// Every item in this range materializes its original source marker.
-    pub(crate) active_ordered_list_range: Option<std::ops::Range<usize>>,
 }
 
 impl<'a> LayoutCtx<'a> {
@@ -382,7 +379,6 @@ impl<'a> LayoutCtx<'a> {
             selection_range: None,
             ascii_diagrams: super::ascii_diagram::AsciiDiagramRegistry::default(),
             active_block_marker: None,
-            active_ordered_list_range: None,
         }
     }
 
