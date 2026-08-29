@@ -2,6 +2,7 @@
 //! 所有 UI 组件实现此 trait；app 层通过上下文体注入依赖。
 
 use std::any::Any;
+use std::time::{Duration, Instant};
 
 use crate::core::accessibility::{
     AccessibilityActionRequest, AccessibilityContext, AccessibilityNode,
@@ -35,6 +36,61 @@ pub enum MouseButton {
     Left,
     Right,
     Middle,
+}
+
+const MULTI_CLICK_MAXIMUM_INTERVAL: Duration = Duration::from_millis(500);
+const MULTI_CLICK_MAXIMUM_DISTANCE_PX_SQUARED: f32 = 25.0;
+
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub enum PointerClickKind {
+    Single,
+    Double,
+    Triple,
+}
+
+impl PointerClickKind {
+    fn next(self) -> Self {
+        match self {
+            Self::Single => Self::Double,
+            Self::Double | Self::Triple => Self::Triple,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
+struct RecordedPointerClick {
+    pressed_at: Instant,
+    position: (f32, f32),
+    kind: PointerClickKind,
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct PointerClickTracker {
+    previous: Option<RecordedPointerClick>,
+}
+
+impl PointerClickTracker {
+    pub fn record_press(&mut self, position: (f32, f32)) -> PointerClickKind {
+        self.record_press_at(Instant::now(), position)
+    }
+
+    fn record_press_at(&mut self, pressed_at: Instant, position: (f32, f32)) -> PointerClickKind {
+        let kind = self.previous.filter(|previous| {
+            let horizontal_distance = position.0 - previous.position.0;
+            let vertical_distance = position.1 - previous.position.1;
+            let distance_squared =
+                horizontal_distance * horizontal_distance + vertical_distance * vertical_distance;
+            pressed_at.duration_since(previous.pressed_at) <= MULTI_CLICK_MAXIMUM_INTERVAL
+                && distance_squared <= MULTI_CLICK_MAXIMUM_DISTANCE_PX_SQUARED
+        });
+        let kind = kind.map_or(PointerClickKind::Single, |previous| previous.kind.next());
+        self.previous = Some(RecordedPointerClick { pressed_at, position, kind });
+        kind
+    }
+
+    pub fn reset(&mut self) {
+        self.previous = None;
+    }
 }
 
 /// 键盘按键（最小集合，按需扩展）
@@ -492,6 +548,26 @@ mod tests {
     use crate::core::measure::NoopMeasure;
     use crate::core::paint::DrawCmd;
     use std::collections::HashMap;
+
+    #[test]
+    fn pointer_click_tracker_requires_both_time_and_spatial_proximity() {
+        let start = Instant::now();
+        let mut tracker = PointerClickTracker::default();
+
+        assert_eq!(tracker.record_press_at(start, (10.0, 20.0)), PointerClickKind::Single);
+        assert_eq!(
+            tracker.record_press_at(start + Duration::from_millis(100), (13.0, 24.0)),
+            PointerClickKind::Double
+        );
+        assert_eq!(
+            tracker.record_press_at(start + Duration::from_millis(200), (40.0, 40.0)),
+            PointerClickKind::Single
+        );
+        assert_eq!(
+            tracker.record_press_at(start + Duration::from_millis(800), (40.0, 40.0)),
+            PointerClickKind::Single
+        );
+    }
 
     struct OwnershipTrackingClipboard {
         text: Option<String>,

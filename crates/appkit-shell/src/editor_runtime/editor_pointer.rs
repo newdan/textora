@@ -1,5 +1,6 @@
 //! 产品无关的编辑器指针命中与选择会话。
 
+use ui::core::widget::PointerClickKind;
 use ui::plugin::EditHitTarget;
 use ui::plugin::{CanvasDragPhase, CanvasDragRequest, CanvasDragResponse};
 
@@ -40,16 +41,21 @@ impl EditorRuntime {
         let editor = match phase {
             PointerPhase::Press if self.pointer_input_allowed(context, position) => {
                 if let Some(outcome) = self.activate_canvas_control(editor_bounds, position) {
+                    self.pointer_click_tracker.reset();
                     let cursor_icon = self.pointer_cursor_icon(context, editor_bounds, position);
                     return EditorPointerOutcome::from_editor(outcome, cursor_icon);
                 }
                 if self.begin_canvas_source_drag(context, editor_bounds, position) {
+                    self.pointer_click_tracker.reset();
                     let cursor_icon = self.pointer_cursor_icon(context, editor_bounds, position);
                     return EditorPointerOutcome::from_editor(redraw_outcome(), cursor_icon);
                 }
+                let click_kind = self.pointer_click_tracker.record_press(position);
+                let extend = self.input_modifiers().shift_key();
                 if !self.begin_text_selection(context)
-                    || !self.place_pointer_selection(editor_bounds, position, false)
+                    || !self.place_pointer_selection(editor_bounds, position, extend, click_kind)
                 {
+                    self.pointer_click_tracker.reset();
                     self.end_pointer_capture();
                     let cursor_icon = self.pointer_cursor_icon(context, editor_bounds, position);
                     return EditorPointerOutcome::from_editor(
@@ -71,7 +77,12 @@ impl EditorRuntime {
                     && self.pointer_input_allowed(context, position) =>
             {
                 let selection_outcome = self
-                    .place_pointer_selection(editor_bounds, position, true)
+                    .place_pointer_selection(
+                        editor_bounds,
+                        position,
+                        true,
+                        PointerClickKind::Single,
+                    )
                     .then(redraw_outcome)
                     .unwrap_or_default();
                 canvas_pointer_outcome.merge(selection_outcome)
@@ -85,7 +96,11 @@ impl EditorRuntime {
                 redraw_outcome()
             }
             PointerPhase::Move => canvas_pointer_outcome,
-            PointerPhase::Press | PointerPhase::Release => EditorOutcome::default(),
+            PointerPhase::Press => {
+                self.pointer_click_tracker.reset();
+                EditorOutcome::default()
+            }
+            PointerPhase::Release => EditorOutcome::default(),
         };
         let cursor_icon = self.pointer_cursor_icon(context, editor_bounds, position);
         EditorPointerOutcome::from_editor(editor, cursor_icon)
@@ -334,6 +349,7 @@ impl EditorRuntime {
         editor_rect: ui::Rect,
         position: (f32, f32),
         extend: bool,
+        click_kind: PointerClickKind,
     ) -> bool {
         let Some(tab_id) = self.active_tab_id() else {
             return false;
@@ -350,14 +366,21 @@ impl EditorRuntime {
         let handles_own_rendering =
             self.tab_session(tab_id).is_some_and(|tab| tab.runtime.plugin.handles_own_rendering());
         if handles_own_rendering {
-            return self.place_plugin_pointer_selection(tab_id, editor_rect, position, dpi, extend);
+            return self.place_plugin_pointer_selection(
+                tab_id,
+                editor_rect,
+                position,
+                dpi,
+                extend,
+                click_kind,
+            );
         }
         let Some(mut tab) = self.tab_session_mut(tab_id) else {
             return false;
         };
         let byte_offset = hit_test_text_byte(&tab, editor_rect, position, &settings, &metrics)
             .unwrap_or_else(|| tab.document.buffer_len());
-        place_text_caret(&mut tab, byte_offset, extend);
+        place_text_pointer_selection(&mut tab, byte_offset, extend, click_kind);
         true
     }
 
@@ -368,6 +391,7 @@ impl EditorRuntime {
         position: (f32, f32),
         dpi: f32,
         extend: bool,
+        click_kind: PointerClickKind,
     ) -> bool {
         let bounds = {
             let Some(tab) = self.tab_session(tab_id) else {
@@ -386,7 +410,9 @@ impl EditorRuntime {
                 let Some(mut tab) = self.tab_session_mut(tab_id) else {
                     return false;
                 };
-                place_text_caret(&mut tab, byte_offset, extend);
+                place_text_pointer_selection(&mut tab, byte_offset, extend, click_kind);
+                let cursor_byte = tab.document.cursor_offset().to_usize();
+                tab.send_message(ui::plugin::PluginMessage::SetCursorByte(cursor_byte));
                 true
             }
             Some(Some(EditHitTarget::SourceObject { source_range })) if !extend => {
@@ -407,7 +433,7 @@ impl EditorRuntime {
             }
             Some(Some(EditHitTarget::CanvasControl { .. })) | Some(None) => false,
             Some(Some(EditHitTarget::SourceObject { .. } | EditHitTarget::ClearFocus)) => false,
-            None => self.place_plugin_byte_selection(tab_id, bounds, position, extend),
+            None => self.place_plugin_byte_selection(tab_id, bounds, position, extend, click_kind),
         }
     }
 
@@ -417,6 +443,7 @@ impl EditorRuntime {
         bounds: ui::Rect,
         position: (f32, f32),
         extend: bool,
+        click_kind: PointerClickKind,
     ) -> bool {
         let candidate = {
             let Some(tab) = self.tab_session(tab_id) else {
@@ -455,14 +482,12 @@ impl EditorRuntime {
             tab.hit_test_byte(expanded_position.0, expanded_position.1, bounds.x, bounds.y)
                 .unwrap_or(snapped_candidate)
         };
-        if final_byte != snapped_candidate {
-            let Some(mut tab) = self.tab_session_mut(tab_id) else {
-                return false;
-            };
-            place_text_caret(&mut tab, final_byte, false);
-            let snapped_final = tab.document.cursor_offset().to_usize();
-            tab.send_message(ui::plugin::PluginMessage::SetCursorByte(snapped_final));
-        }
+        let Some(mut tab) = self.tab_session_mut(tab_id) else {
+            return false;
+        };
+        place_text_pointer_selection(&mut tab, final_byte, extend, click_kind);
+        let snapped_final = tab.document.cursor_offset().to_usize();
+        tab.send_message(ui::plugin::PluginMessage::SetCursorByte(snapped_final));
         self.input_session.set_preferred_x(None);
         true
     }
@@ -537,6 +562,60 @@ fn place_text_caret(tab: &mut TabSessionMut<'_>, byte_offset: usize, extend: boo
     }
     tab.document.set_cursor_offset_synced(byte_offset);
     tab.cursor_render_state_mut().cursor_blink_instant = std::time::Instant::now();
+}
+
+fn place_text_pointer_selection(
+    tab: &mut TabSessionMut<'_>,
+    byte_offset: usize,
+    extend: bool,
+    click_kind: PointerClickKind,
+) {
+    let byte_offset = byte_offset.min(tab.document.buffer_len());
+    if extend {
+        tab.document.ensure_selection_active();
+    }
+    match click_kind {
+        PointerClickKind::Single => place_text_caret(tab, byte_offset, extend),
+        PointerClickKind::Double => {
+            let (selection_start, selection_end) = tab.document.word_select_at(byte_offset);
+            place_text_range_selection(tab, selection_start, selection_end, extend, byte_offset);
+        }
+        PointerClickKind::Triple => {
+            tab.document.set_cursor_offset_synced(byte_offset);
+            let document_line = tab.document.cursor_line();
+            let selection_start = tab.document.line_byte_offset(document_line).unwrap_or(0);
+            let selection_end = tab
+                .document
+                .line_byte_offset(document_line + 1)
+                .unwrap_or_else(|| tab.document.buffer_len());
+            place_text_range_selection(tab, selection_start, selection_end, extend, byte_offset);
+        }
+    }
+    tab.cursor_render_state_mut().cursor_blink_instant = std::time::Instant::now();
+}
+
+fn place_text_range_selection(
+    tab: &mut TabSessionMut<'_>,
+    selection_start: usize,
+    selection_end: usize,
+    extend: bool,
+    hit_byte: usize,
+) {
+    if !extend {
+        tab.document.cursor_mut().selection_anchor = Some(selection_start);
+        tab.document.set_cursor_offset_synced(selection_end);
+        return;
+    }
+    let anchor = tab
+        .document
+        .cursor()
+        .selection_anchor
+        .unwrap_or_else(|| tab.document.cursor_offset().to_usize());
+    if hit_byte >= anchor {
+        tab.document.set_cursor_offset_synced(selection_end);
+    } else {
+        tab.document.set_cursor_offset_synced(selection_start);
+    }
 }
 
 fn hit_test_text_byte(

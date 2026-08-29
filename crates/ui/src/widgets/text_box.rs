@@ -1,7 +1,9 @@
 //! TextBox — single-line text input component.
 //! Manages text state, cursor, selection, IME preedit, and clipboard shortcuts.
 
-use crate::core::widget::{ControlAction, SensitiveText, TextPayload, WidgetId};
+use crate::core::widget::{
+    ControlAction, PointerClickKind, PointerClickTracker, SensitiveText, TextPayload, WidgetId,
+};
 use crate::core::{
     AccessibilityAction, AccessibilityActionRequest, AccessibilityContext, AccessibilityId,
     AccessibilityNode, AccessibilityRole, Event, EventCtx, KeyCode, LayoutCtx, Modifiers,
@@ -29,6 +31,13 @@ pub enum TextBoxIme {
     Commit(String),
     Enabled,
     Disabled,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum MouseDragSelection {
+    Grapheme { anchor: usize },
+    Word { start: usize, end: usize },
+    EntireLine,
 }
 
 impl std::fmt::Debug for TextBoxIme {
@@ -206,6 +215,8 @@ pub struct TextBox {
 
     // Mouse drag
     dragging: bool,
+    mouse_drag_selection: Option<MouseDragSelection>,
+    pointer_click_tracker: PointerClickTracker,
 
     // Layout cache
     cursor_x: f32,
@@ -246,6 +257,8 @@ impl TextBox {
             chrome: TextBoxChrome::Framed,
             font_size_logical: DEFAULT_FONT_SIZE_LOGICAL,
             dragging: false,
+            mouse_drag_selection: None,
+            pointer_click_tracker: PointerClickTracker::default(),
             cursor_x: 0.0,
             preedit_width: 0.0,
             preedit_cursor_x: 0.0,
@@ -339,6 +352,8 @@ impl TextBox {
             if !focused {
                 self.selection = None;
                 self.dragging = false;
+                self.mouse_drag_selection = None;
+                self.pointer_click_tracker.reset();
                 self.preedit.clear();
                 self.preedit_cursor = None;
             }
@@ -748,10 +763,64 @@ impl TextBox {
         if !self.rect.contains(px, py) {
             return false;
         }
-        self.selection = None;
+        let click_kind = self.pointer_click_tracker.record_press((px, py));
         self.dragging = true;
         self.cursor_byte = self.nearest_grapheme_byte_at_x(px);
+        match click_kind {
+            PointerClickKind::Single => {
+                self.selection = None;
+                self.mouse_drag_selection =
+                    Some(MouseDragSelection::Grapheme { anchor: self.cursor_byte });
+            }
+            PointerClickKind::Double => {
+                let (start, end) = self.pointer_word_range(self.cursor_byte);
+                self.selection = Some((start, end));
+                self.cursor_byte = end;
+                self.mouse_drag_selection = Some(MouseDragSelection::Word { start, end });
+            }
+            PointerClickKind::Triple => {
+                self.select_all();
+                self.mouse_drag_selection = Some(MouseDragSelection::EntireLine);
+            }
+        }
         true
+    }
+
+    fn pointer_word_range(&self, byte_offset: usize) -> (usize, usize) {
+        if self.text.is_empty() {
+            return (0, 0);
+        }
+        let clamped_offset = Self::clamp_to_grapheme_boundary(&self.text, byte_offset);
+        let probe_start = if clamped_offset == self.text.len() {
+            Self::prev_grapheme_boundary(&self.text, clamped_offset)
+        } else {
+            clamped_offset
+        };
+        let probe_end = Self::next_grapheme_boundary(&self.text, probe_start);
+        let selects_word = Self::is_word_grapheme(&self.text[probe_start..probe_end]);
+
+        let mut start = probe_start;
+        while start > 0 {
+            let previous = Self::prev_grapheme_boundary(&self.text, start);
+            if Self::is_word_grapheme(&self.text[previous..start]) != selects_word {
+                break;
+            }
+            start = previous;
+        }
+
+        let mut end = probe_end;
+        while end < self.text.len() {
+            let next = Self::next_grapheme_boundary(&self.text, end);
+            if Self::is_word_grapheme(&self.text[end..next]) != selects_word {
+                break;
+            }
+            end = next;
+        }
+        (start, end)
+    }
+
+    fn is_word_grapheme(grapheme: &str) -> bool {
+        grapheme.chars().any(|character| character.is_alphanumeric() || character == '_')
     }
 
     fn nearest_grapheme_byte_at_x(&self, px: f32) -> usize {
@@ -780,14 +849,31 @@ impl TextBox {
         if !self.dragging {
             return;
         }
-        let anchor = self.selection.map_or(self.cursor_byte, |(anchor, _)| anchor);
-        self.cursor_byte = self.nearest_grapheme_byte_at_x(px);
-        self.selection = Some((anchor, self.cursor_byte));
+        let hit_byte = self.nearest_grapheme_byte_at_x(px);
+        match self.mouse_drag_selection {
+            Some(MouseDragSelection::Grapheme { anchor }) => {
+                self.cursor_byte = hit_byte;
+                self.selection = Some((anchor, self.cursor_byte));
+            }
+            Some(MouseDragSelection::Word { start, end }) => {
+                let (hit_start, hit_end) = self.pointer_word_range(hit_byte);
+                if hit_byte >= start {
+                    self.selection = Some((start, hit_end));
+                    self.cursor_byte = hit_end;
+                } else {
+                    self.selection = Some((end, hit_start));
+                    self.cursor_byte = hit_start;
+                }
+            }
+            Some(MouseDragSelection::EntireLine) => self.select_all(),
+            None => {}
+        }
     }
 
     /// Mouse up: end drag.
     pub fn on_mouse_up(&mut self) {
         self.dragging = false;
+        self.mouse_drag_selection = None;
         if matches!(self.selection, Some((anchor, cursor)) if anchor == cursor) {
             self.selection = None;
         }
@@ -798,6 +884,8 @@ impl TextBox {
             | !self.preedit.is_empty()
             | self.preedit_cursor.take().is_some();
         self.preedit.clear();
+        self.mouse_drag_selection = None;
+        self.pointer_click_tracker.reset();
         interaction_changed
     }
 
@@ -1680,6 +1768,46 @@ mod tests {
 
         assert_eq!(text_box.selection_text(), Some("e\u{301}中"));
         assert_eq!(text_box.cursor_byte(), "ae\u{301}中".len());
+    }
+
+    #[test]
+    fn double_click_selects_the_word_at_the_pointer() {
+        struct FixedAdvanceMeasure;
+
+        impl crate::core::measure::TextMeasure for FixedAdvanceMeasure {
+            fn measure(&mut self, text: &str, _font_size: f32) -> f32 {
+                text.graphemes(true).count() as f32 * 10.0
+            }
+        }
+
+        let mut text_box = TextBox::new();
+        text_box.set_text("hello world");
+        let theme = crate::theme::test_theme();
+        let mut measure = FixedAdvanceMeasure;
+        let mut layout_context =
+            LayoutCtx { measure: &mut measure, ui_measure: None, theme: &theme, dpi: 1.0 };
+        text_box.layout(Rect::new(0.0, 0.0, 200.0, 28.0), &mut layout_context);
+        let word_x = text_box.rect.x + text_box.text_pad + 80.0;
+
+        assert!(text_box.on_mouse_down(word_x, 14.0));
+        text_box.on_mouse_up();
+        assert!(text_box.on_mouse_down(word_x, 14.0));
+
+        assert_eq!(text_box.selection_text(), Some("world"));
+    }
+
+    #[test]
+    fn triple_click_selects_all_single_line_text() {
+        let mut text_box = laid_out_widget(TextBox::new());
+        text_box.set_text("hello world");
+        let pointer_x = text_box.rect.x + text_box.text_pad;
+
+        for _ in 0..3 {
+            assert!(text_box.on_mouse_down(pointer_x, 14.0));
+            text_box.on_mouse_up();
+        }
+
+        assert_eq!(text_box.selection_text(), Some("hello world"));
     }
 
     #[test]
