@@ -139,4 +139,4 @@ M1(带选区回车)、M2(不可合并叶块守卫)、M3(Setext 分流)、M4(懒�
 | P3 | 删除 edit_context.rs 死代码 | Stage C | 已修 |
 | P12 | spec 更新/SourceLineMap 死 role 清理 | Stage C | 已修 |
 | P6 | 每键全量 reparse 性能 | — | 不在本轮,另立项 |
-| P8 | 空行几何全面收敛 | — | 本轮只修 P4 相关不一致 |
+| P8 | 空行几何全面收敛 | — | 已修(间距规则收敛至 `layout/context.rs` 单一事实源;顺带修复列表组收尾 bump 在增量重排中重复应用的预存 bug) |

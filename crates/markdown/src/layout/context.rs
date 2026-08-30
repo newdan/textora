@@ -272,6 +272,63 @@ pub(crate) enum LastBlockKind {
     ListItem,
 }
 
+/// 块型的 trailing 间距 —— 块间距规则的单一事实源。
+/// `layout_block` 每块排完后、增量重排路径恢复上一块上下文、以及 debug
+/// 间距展示都取这里的值；新增/调整间距规则只需改此函数。
+pub(crate) fn trailing_spacing_for(
+    kind: LastBlockKind,
+    style: &crate::style::MarkdownStyle,
+) -> f32 {
+    match kind {
+        LastBlockKind::Paragraph
+        | LastBlockKind::CodeBlock
+        | LastBlockKind::BlockQuote
+        | LastBlockKind::TableWrapper
+        | LastBlockKind::MetadataBlock => style.paragraph_spacing,
+        LastBlockKind::Heading => style.heading_spacing_bottom,
+        LastBlockKind::ListItem => style.list_item_spacing,
+        LastBlockKind::HorizontalRule => style.rule_spacing,
+    }
+}
+
+/// 标题顶端间距(margin collapsing):首块减半;前块已是标题则不再叠加;
+/// 否则只补超出前块 trailing 的部分。`layout_block` 的 Heading 分支、
+/// 单块重排预扣与 debug 间距展示共用此公式。
+pub(crate) fn heading_top_spacing(
+    style: &crate::style::MarkdownStyle,
+    level: u8,
+    is_first_block: bool,
+    prev_was_heading: bool,
+    prev_trailing_spacing: f32,
+) -> f32 {
+    if prev_was_heading {
+        return 0.0;
+    }
+    let desired_top = style.heading_spacing_top * super::heading_spacing_scale(level);
+    if is_first_block { desired_top * 0.5 } else { (desired_top - prev_trailing_spacing).max(0.0) }
+}
+
+/// 由上一块的布局产物重建间距上下文块型:Text 需借文档块类型区分标题与
+/// 段落(active 的 HR 也排成 Text,按段落处理,与 layout_block 的 HR
+/// active 分支一致)。
+pub(crate) fn spacing_kind_of_laid_block(
+    laid_kind: &LaidOutBlockKind,
+    doc_kind: Option<&crate::builder::BlockKind>,
+) -> LastBlockKind {
+    match laid_kind {
+        LaidOutBlockKind::Text { .. } => match doc_kind {
+            Some(crate::builder::BlockKind::Heading { .. }) => LastBlockKind::Heading,
+            _ => LastBlockKind::Paragraph,
+        },
+        LaidOutBlockKind::ListItem { .. } => LastBlockKind::ListItem,
+        LaidOutBlockKind::CodeBlock { .. } => LastBlockKind::CodeBlock,
+        LaidOutBlockKind::BlockQuote { .. } => LastBlockKind::BlockQuote,
+        LaidOutBlockKind::HorizontalRule => LastBlockKind::HorizontalRule,
+        LaidOutBlockKind::Table { .. } => LastBlockKind::TableWrapper,
+        LaidOutBlockKind::MetadataBlock { .. } => LastBlockKind::MetadataBlock,
+    }
+}
+
 pub struct LayoutCtx<'a> {
     pub(crate) doc: &'a dyn core::document::DocView,
     pub(crate) style: &'a crate::style::MarkdownStyle,
@@ -384,6 +441,68 @@ impl<'a> LayoutCtx<'a> {
 
     pub(crate) fn available_width(&self) -> f32 {
         (self.viewport_w - self.indent).max(20.0)
+    }
+
+    /// 块排完后记录间距上下文,返回本块的 trailing 间距(调用方据此推进
+    /// `ctx.y`;HR 等已把间距烘进块高的块型不再推进)。
+    pub(crate) fn finish_block_spacing(&mut self, kind: LastBlockKind) -> f32 {
+        let trailing = trailing_spacing_for(kind, self.style);
+        self.last_trailing_spacing = trailing;
+        self.last_block_kind = Some(kind);
+        self.last_block_was_heading = kind == LastBlockKind::Heading;
+        self.last_block_was_list = kind == LastBlockKind::ListItem;
+        self.block_count += 1;
+        trailing
+    }
+
+    /// 单块重排前恢复上一块的间距上下文(trailing 取间距规则单一事实源,
+    /// 与 layout_block 排完该块后的状态逐项一致)。
+    pub(crate) fn restore_spacing_context(&mut self, kind: LastBlockKind) {
+        self.last_block_kind = Some(kind);
+        self.last_trailing_spacing = trailing_spacing_for(kind, self.style);
+        self.last_block_was_heading = kind == LastBlockKind::Heading;
+        self.last_block_was_list = kind == LastBlockKind::ListItem;
+    }
+
+    /// 标题 margin collapsing 预扣:layout_block 的 Heading 分支会把同一
+    /// 数值加回 `ctx.y`,预扣使单块重排与全文布局落点一致。
+    pub(crate) fn presubtract_heading_top_spacing(&mut self, src_kind: &crate::builder::BlockKind) {
+        let crate::builder::BlockKind::Heading { level } = src_kind else {
+            return;
+        };
+        self.y -= heading_top_spacing(
+            self.style,
+            *level,
+            self.block_count == 0,
+            self.last_block_was_heading,
+            self.last_trailing_spacing,
+        );
+    }
+
+    /// 单块重排前预扣全部入口间距:estimated_positions 已包含 layout_block
+    /// 入口的间距调整(列表组收尾 bump、tight 列表缩减、标题顶端 margin
+    /// collapsing),而 layout_block 会再应用一次;此处预先反向扣除以抵消,
+    /// 保证重排落点与全文布局一致。guard 与 trailing 变化镜像 layout_block
+    /// 入口及 ListItem 分支,二者必须同步修改。
+    pub(crate) fn presubtract_entry_spacing(&mut self, src_kind: &crate::builder::BlockKind) {
+        // 列表组收尾 bump(镜像 layout_block 入口)
+        if self.last_block_was_list
+            && !matches!(src_kind, crate::builder::BlockKind::ListItem { .. })
+        {
+            self.y -= self.style.list_group_spacing - self.style.list_item_spacing;
+            self.last_trailing_spacing = self.style.list_group_spacing;
+        }
+        // tight 列表紧跟段落的缩减(镜像 layout_block ListItem 分支的 guard)
+        if let crate::builder::BlockKind::ListItem { tight, blank_line_before, .. } = src_kind
+            && *tight
+            && !*blank_line_before
+            && !self.last_block_was_list
+            && self.last_block_kind == Some(LastBlockKind::Paragraph)
+            && self.last_trailing_spacing > self.style.list_item_spacing
+        {
+            self.y += self.last_trailing_spacing - self.style.list_item_spacing;
+        }
+        self.presubtract_heading_top_spacing(src_kind);
     }
 
     pub(crate) fn push_block(&mut self, kind: LaidOutBlockKind, h: f32) {

@@ -1284,18 +1284,14 @@ fn estimate_text_width(text: &str, font_size: f32) -> f32 {
     w
 }
 
-fn heading_spacing_scale(level: u8) -> f32 {
-    if level <= 1 {
-        1.0
-    } else if level <= 3 {
-        0.8
-    } else {
-        0.65
-    }
-}
-
 /// Debug visualization: draw colored rectangles showing top/bottom spacing of each block.
 /// Each element type gets a unique color. Top spacing = solid, bottom spacing = semi-transparent.
+///
+/// 间距取值与 `layout_block` 主逻辑共用单一事实源
+/// (`layout::context::trailing_spacing_for` / `heading_top_spacing`);HR 的上下
+/// 间距已烘进块高,底部色带不重复绘制,但 expected 计算仍按模型 trailing 计。
+/// 标题识别在此处只能按字号启发式(无文档块类型可用),与主逻辑的类型判定
+/// 可能存在出入,仅用于调试展示。
 pub fn render_debug_spacing(
     doc: &LaidOutDoc,
     style: &MarkdownStyle,
@@ -1375,6 +1371,9 @@ pub fn render_debug_spacing(
     let mut prev_bottom: Option<f32> = None;
     let mut prev_trailing: f32 = 0.0;
     let mut prev_was_heading: bool = false;
+    // 前一块已烘进块高的底部间距(HR):expected 计算需扣除,避免与
+    // rect 内的间距重复计数。
+    let mut prev_baked_below: f32 = 0.0;
 
     for i in start..doc.blocks.len() {
         let block = &doc.blocks[i];
@@ -1387,59 +1386,94 @@ pub fn render_debug_spacing(
         let x = r.x + offset_x;
         let y = real_y - scroll_y + offset_y;
 
-        let (top_color, bottom_color, current_leading, bottom_spacing, label, is_heading) =
-            match &block.kind {
-                Text { lines } => {
-                    if is_heading_text(lines, style) {
-                        let level = detect_heading_level(lines, style);
-                        let scale = heading_spacing_scale(level);
-                        let (h_top, h_bot) = heading_colors(level);
-                        let desired_top = style.heading_spacing_top * scale;
-                        let leading = if prev_bottom.is_none() {
-                            desired_top * 0.5
-                        } else if prev_was_heading {
-                            (desired_top - prev_trailing).max(0.0)
-                        } else {
-                            desired_top
-                        };
-                        (
-                            h_top,
-                            h_bot,
-                            leading,
-                            style.heading_spacing_bottom,
-                            format!("H{}", level),
-                            true,
-                        )
-                    } else {
-                        (
-                            PARA_TOP,
-                            PARA_BOT,
-                            0.0,
-                            style.paragraph_spacing,
-                            "Para".to_string(),
-                            false,
-                        )
-                    }
+        let (top_color, bottom_color, spacing_kind, heading_level, label) = match &block.kind {
+            Text { lines } => {
+                if is_heading_text(lines, style) {
+                    let level = detect_heading_level(lines, style);
+                    let (h_top, h_bot) = heading_colors(level);
+                    (
+                        h_top,
+                        h_bot,
+                        crate::layout::context::LastBlockKind::Heading,
+                        Some(level),
+                        format!("H{level}"),
+                    )
+                } else {
+                    (
+                        PARA_TOP,
+                        PARA_BOT,
+                        crate::layout::context::LastBlockKind::Paragraph,
+                        None,
+                        "Para".to_string(),
+                    )
                 }
-                CodeBlock { .. } => {
-                    (CODE_TOP, CODE_BOT, 0.0, style.paragraph_spacing, "Code".to_string(), false)
-                }
-                BlockQuote { .. } => {
-                    (QUOTE_TOP, QUOTE_BOT, 0.0, style.paragraph_spacing, "Quote".to_string(), false)
-                }
-                ListItem { .. } => {
-                    (LIST_TOP, LIST_BOT, 0.0, style.list_item_spacing, "List".to_string(), false)
-                }
-                Table { .. } => {
-                    (TABLE_TOP, TABLE_BOT, 0.0, style.paragraph_spacing, "Table".to_string(), false)
-                }
-                HorizontalRule => (RULE_TOP, RULE_BOT, 0.0, 0.0, "HR".to_string(), false),
-                MetadataBlock { .. } => {
-                    (META_TOP, META_BOT, 0.0, style.paragraph_spacing, "Meta".to_string(), false)
-                }
-            };
+            }
+            CodeBlock { .. } => (
+                CODE_TOP,
+                CODE_BOT,
+                crate::layout::context::LastBlockKind::CodeBlock,
+                None,
+                "Code".to_string(),
+            ),
+            BlockQuote { .. } => (
+                QUOTE_TOP,
+                QUOTE_BOT,
+                crate::layout::context::LastBlockKind::BlockQuote,
+                None,
+                "Quote".to_string(),
+            ),
+            ListItem { .. } => (
+                LIST_TOP,
+                LIST_BOT,
+                crate::layout::context::LastBlockKind::ListItem,
+                None,
+                "List".to_string(),
+            ),
+            Table { .. } => (
+                TABLE_TOP,
+                TABLE_BOT,
+                crate::layout::context::LastBlockKind::TableWrapper,
+                None,
+                "Table".to_string(),
+            ),
+            HorizontalRule => (
+                RULE_TOP,
+                RULE_BOT,
+                crate::layout::context::LastBlockKind::HorizontalRule,
+                None,
+                "HR".to_string(),
+            ),
+            MetadataBlock { .. } => (
+                META_TOP,
+                META_BOT,
+                crate::layout::context::LastBlockKind::MetadataBlock,
+                None,
+                "Meta".to_string(),
+            ),
+        };
 
-        let expected_top = prev_trailing + current_leading;
+        // 间距数值与 layout_block 主逻辑同源:标题顶端走 margin collapsing
+        // 公式,trailing 按块型查表;HR 的 trailing 已烘进块高(prev_baked_below),
+        // expected 需扣除,底部色带也不重复绘制。
+        let current_leading = heading_level.map_or(0.0, |level| {
+            crate::layout::context::heading_top_spacing(
+                style,
+                level,
+                prev_bottom.is_none(),
+                prev_was_heading,
+                prev_trailing,
+            )
+        });
+        let model_trailing = crate::layout::context::trailing_spacing_for(spacing_kind, style);
+        let bottom_spacing =
+            if spacing_kind == crate::layout::context::LastBlockKind::HorizontalRule {
+                0.0
+            } else {
+                model_trailing
+            };
+        let is_heading = spacing_kind == crate::layout::context::LastBlockKind::Heading;
+
+        let expected_top = prev_trailing + current_leading - prev_baked_below;
         let actual_top = if let Some(prev_b) = prev_bottom { (y - prev_b).max(0.0) } else { y };
 
         let top_spacing = actual_top;
@@ -1465,8 +1499,14 @@ pub fn render_debug_spacing(
         dl.stroke(Rect::new(x, y, r.w, r.h), [1.0, 1.0, 1.0, 0.15], 0.5);
 
         prev_bottom = Some(y + r.h);
-        prev_trailing = bottom_spacing;
+        prev_trailing = model_trailing;
         prev_was_heading = is_heading;
+        prev_baked_below = if spacing_kind == crate::layout::context::LastBlockKind::HorizontalRule
+        {
+            model_trailing
+        } else {
+            0.0
+        };
     }
 }
 

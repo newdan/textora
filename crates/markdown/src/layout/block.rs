@@ -3,7 +3,6 @@
 use shaping::{Shaper, Weight};
 
 use super::context::LayoutCtx;
-use super::heading_spacing_scale;
 use super::types::{LaidOutBlock, LaidOutBlockKind, LaidOutLine};
 use crate::builder::{BlockKind, BlockNode, BlockSource, StyleSpan};
 use crate::edit::SourceLineContext;
@@ -119,30 +118,21 @@ pub(crate) fn layout_block(block: &BlockNode, ctx: &mut LayoutCtx) {
         BlockKind::Paragraph => {
             let font_size = ctx.font_size_override.unwrap_or(ctx.style.body_font_size);
             layout_text_block(block, ctx, font_size, ctx.style.text_color, Weight::NORMAL);
-            ctx.last_block_was_heading = false;
-            ctx.last_block_was_list = false;
-            ctx.block_count += 1;
-            ctx.last_block_kind = Some(super::context::LastBlockKind::Paragraph);
-            ctx.y += ctx.style.paragraph_spacing;
-            ctx.last_trailing_spacing = ctx.style.paragraph_spacing;
+            let trailing = ctx.finish_block_spacing(super::context::LastBlockKind::Paragraph);
+            ctx.y += trailing;
         }
         BlockKind::Heading { level } => {
             let idx = (*level as usize).saturating_sub(1).min(5);
             let font_size = ctx.style.heading_font_sizes[idx];
             // Heading top spacing: scale by level, collapse with previous trailing.
             // H1 keeps full, H2-H3 80%, H4-H6 65%.
-            let level_scale = heading_spacing_scale(*level);
-            if !ctx.last_block_was_heading {
-                let desired_top = ctx.style.heading_spacing_top * level_scale;
-                let extra = if ctx.block_count == 0 {
-                    // First block: halve the top spacing
-                    desired_top * 0.5
-                } else {
-                    // Margin collapsing: only add the excess over previous trailing
-                    (desired_top - ctx.last_trailing_spacing).max(0.0)
-                };
-                ctx.y += extra;
-            }
+            ctx.y += super::context::heading_top_spacing(
+                ctx.style,
+                *level,
+                ctx.block_count == 0,
+                ctx.last_block_was_heading,
+                ctx.last_trailing_spacing,
+            );
             // Detect active block marker: cursor in heading's source range.
             if let Some(edit_ctx) = ctx.edit_ctx {
                 ctx.active_block_marker =
@@ -150,12 +140,8 @@ pub(crate) fn layout_block(block: &BlockNode, ctx: &mut LayoutCtx) {
             }
             layout_text_block(block, ctx, font_size, ctx.style.heading_color, Weight::SEMIBOLD);
             ctx.active_block_marker = None;
-            ctx.y += ctx.style.heading_spacing_bottom;
-            ctx.last_block_was_heading = true;
-            ctx.last_block_was_list = false;
-            ctx.last_block_kind = Some(super::context::LastBlockKind::Heading);
-            ctx.last_trailing_spacing = ctx.style.heading_spacing_bottom;
-            ctx.block_count += 1;
+            let trailing = ctx.finish_block_spacing(super::context::LastBlockKind::Heading);
+            ctx.y += trailing;
         }
         BlockKind::CodeBlock { language } => {
             let active = code_block_is_active(block, ctx.edit_ctx);
@@ -257,12 +243,8 @@ pub(crate) fn layout_block(block: &BlockNode, ctx: &mut LayoutCtx) {
                 LaidOutBlockKind::CodeBlock { lines: laid_out_lines, language: language.clone() },
                 total_h,
             );
-            ctx.last_block_was_heading = false;
-            ctx.last_block_was_list = false;
-            ctx.last_block_kind = Some(super::context::LastBlockKind::CodeBlock);
-            ctx.block_count += 1;
-            ctx.y += ctx.style.paragraph_spacing;
-            ctx.last_trailing_spacing = ctx.style.paragraph_spacing;
+            let trailing = ctx.finish_block_spacing(super::context::LastBlockKind::CodeBlock);
+            ctx.y += trailing;
         }
         BlockKind::BlockQuote => {
             let saved_indent = ctx.indent;
@@ -309,12 +291,8 @@ pub(crate) fn layout_block(block: &BlockNode, ctx: &mut LayoutCtx) {
             ctx.font_size_override = saved_font_size_override;
 
             ctx.push_block(LaidOutBlockKind::BlockQuote { blocks: sub_blocks }, content_h);
-            ctx.y += ctx.style.paragraph_spacing; // spacing after blockquote
-            ctx.last_block_was_heading = false;
-            ctx.last_block_was_list = false;
-            ctx.block_count += 1;
-            ctx.last_block_kind = Some(super::context::LastBlockKind::BlockQuote);
-            ctx.last_trailing_spacing = ctx.style.paragraph_spacing;
+            let trailing = ctx.finish_block_spacing(super::context::LastBlockKind::BlockQuote);
+            ctx.y += trailing; // spacing after blockquote
         }
         BlockKind::ListItem { bullet, tight, blank_line_before } => {
             // For tight lists immediately following a paragraph (no blank line),
@@ -485,21 +463,13 @@ pub(crate) fn layout_block(block: &BlockNode, ctx: &mut LayoutCtx) {
             );
             // Uniform inter-item spacing: added after every list item,
             // so all items have the same rect.h (content-only, no spacing baked in).
-            ctx.y += ctx.style.list_item_spacing;
-            ctx.last_block_was_heading = false;
-            ctx.last_block_was_list = true;
-            ctx.block_count += 1;
-            ctx.last_block_kind = Some(super::context::LastBlockKind::ListItem);
-            ctx.last_trailing_spacing = ctx.style.list_item_spacing;
+            let trailing = ctx.finish_block_spacing(super::context::LastBlockKind::ListItem);
+            ctx.y += trailing;
         }
         BlockKind::TableWrapper { columns, alignments: _ } => {
             layout_table(block, ctx, *columns);
-            ctx.last_block_was_heading = false;
-            ctx.last_block_was_list = false;
-            ctx.block_count += 1;
-            ctx.last_block_kind = Some(super::context::LastBlockKind::TableWrapper);
-            ctx.y += ctx.style.paragraph_spacing;
-            ctx.last_trailing_spacing = ctx.style.paragraph_spacing;
+            let trailing = ctx.finish_block_spacing(super::context::LastBlockKind::TableWrapper);
+            ctx.y += trailing;
         }
         BlockKind::TableRow_ | BlockKind::TableCell_ { .. } => {
             for child in &block.children {
@@ -521,22 +491,15 @@ pub(crate) fn layout_block(block: &BlockNode, ctx: &mut LayoutCtx) {
                     0.55, // SOURCE_MARKER_FADE_RATIO
                 );
                 layout_text_block(block, ctx, font_size, color, Weight::NORMAL);
-                ctx.last_block_was_heading = false;
-                ctx.last_block_was_list = false;
-                ctx.block_count += 1;
-                ctx.last_block_kind = Some(super::context::LastBlockKind::Paragraph);
-                ctx.y += ctx.style.paragraph_spacing;
-                ctx.last_trailing_spacing = ctx.style.paragraph_spacing;
+                let trailing = ctx.finish_block_spacing(super::context::LastBlockKind::Paragraph);
+                ctx.y += trailing;
             } else {
                 ctx.push_block(
                     LaidOutBlockKind::HorizontalRule,
                     ctx.style.rule_spacing + ctx.style.rule_thickness + ctx.style.rule_spacing,
                 );
-                ctx.last_block_was_heading = false;
-                ctx.last_block_was_list = false;
-                ctx.block_count += 1;
-                ctx.last_block_kind = Some(super::context::LastBlockKind::HorizontalRule);
-                ctx.last_trailing_spacing = ctx.style.rule_spacing;
+                // HR 的上下间距已烘进块高,此处只记录间距上下文,不再推进 ctx.y。
+                ctx.finish_block_spacing(super::context::LastBlockKind::HorizontalRule);
             }
         }
         BlockKind::MetadataBlock => {
@@ -577,12 +540,8 @@ pub(crate) fn layout_block(block: &BlockNode, ctx: &mut LayoutCtx) {
             }
 
             ctx.push_block(LaidOutBlockKind::MetadataBlock { lines: laid_out_lines }, total_h);
-            ctx.last_block_was_heading = false;
-            ctx.last_block_was_list = false;
-            ctx.block_count += 1;
-            ctx.last_block_kind = Some(super::context::LastBlockKind::MetadataBlock);
-            ctx.y += ctx.style.paragraph_spacing;
-            ctx.last_trailing_spacing = ctx.style.paragraph_spacing;
+            let trailing = ctx.finish_block_spacing(super::context::LastBlockKind::MetadataBlock);
+            ctx.y += trailing;
         }
     }
 }

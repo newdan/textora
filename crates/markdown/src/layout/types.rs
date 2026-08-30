@@ -12,7 +12,7 @@ use super::block::{layout_block, layout_doc_with_shaper};
 use super::reconcile::BlockReconcilePlan;
 use super::shaping::populate_style_segments;
 use super::source_line_map::{HiddenBlockSeparator, RenderedLineLayout, SourceLineMap};
-use super::{BlockSource, apply_deltas, flatten_blocks, heading_spacing_scale};
+use super::{BlockSource, apply_deltas, flatten_blocks};
 
 /// Ratio of viewport height used as buffer above and below for lazy materialization.
 const VIEWPORT_BUFFER_RATIO: f32 = 0.5;
@@ -1616,57 +1616,23 @@ impl<S: BlockSource> LazyLayout<S> {
             ctx.indent = 0.0;
             ctx.block_count = i;
 
-            // Restore spacing context from previous block (same logic as precise_block_at).
+            // Restore spacing context from previous block (same logic as layout_block).
             if i > 0
                 && let Some(prev_laid) = &self.laid_out[i - 1]
             {
-                match &prev_laid.kind {
-                    LaidOutBlockKind::Text { .. } => {
-                        let prev_doc_idx = self.laid_to_doc[i - 1];
-                        if prev_doc_idx < self.source.blocks().len() {
-                            if matches!(
-                                self.source.blocks()[prev_doc_idx].kind,
-                                crate::builder::BlockKind::Heading { .. }
-                            ) {
-                                ctx.last_block_was_heading = true;
-                                ctx.last_trailing_spacing = style.heading_spacing_bottom;
-                            } else {
-                                ctx.last_trailing_spacing = style.paragraph_spacing;
-                            }
-                        }
-                    }
-                    LaidOutBlockKind::ListItem { .. } => {
-                        ctx.last_block_was_list = true;
-                        ctx.last_trailing_spacing = style.list_item_spacing;
-                    }
-                    LaidOutBlockKind::CodeBlock { .. } => {
-                        ctx.last_trailing_spacing = style.paragraph_spacing;
-                    }
-                    LaidOutBlockKind::BlockQuote { .. } => {
-                        ctx.last_trailing_spacing = style.paragraph_spacing;
-                    }
-                    LaidOutBlockKind::HorizontalRule => {
-                        ctx.last_trailing_spacing = style.rule_spacing;
-                    }
-                    LaidOutBlockKind::Table { .. } | LaidOutBlockKind::MetadataBlock { .. } => {
-                        ctx.last_trailing_spacing = style.paragraph_spacing;
-                    }
-                }
+                let prev_doc_kind = self
+                    .laid_to_doc
+                    .get(i - 1)
+                    .and_then(|&prev_doc_idx| self.source.blocks().get(prev_doc_idx))
+                    .map(|block| &block.kind);
+                ctx.restore_spacing_context(super::context::spacing_kind_of_laid_block(
+                    &prev_laid.kind,
+                    prev_doc_kind,
+                ));
             }
 
-            // Adjust for heading margin collapsing (same as precise_block_at).
-            if let crate::builder::BlockKind::Heading { level } = &src_block.kind
-                && !ctx.last_block_was_heading
-            {
-                let level_scale = heading_spacing_scale(*level);
-                let desired_top = ctx.style.heading_spacing_top * level_scale;
-                let extra = if ctx.block_count == 0 {
-                    desired_top * 0.5
-                } else {
-                    (desired_top - ctx.last_trailing_spacing).max(0.0)
-                };
-                ctx.y -= extra;
-            }
+            // Adjust for heading margin collapsing (same as layout_block).
+            ctx.presubtract_entry_spacing(&src_block.kind);
 
             layout_block(src_block, &mut ctx);
             self.ascii_diagrams.extend(std::mem::take(&mut ctx.ascii_diagrams));
@@ -1763,56 +1729,22 @@ impl<S: BlockSource> LazyLayout<S> {
             ctx.y = self.estimated_positions[i];
             ctx.block_count = i;
 
-            // Restore spacing context (same as ensure_visible).
+            // Restore spacing context (same as layout_block).
             if i > 0
                 && let Some(prev_laid) = &self.laid_out[i - 1]
             {
-                match &prev_laid.kind {
-                    LaidOutBlockKind::Text { .. } => {
-                        let prev_doc_idx = self.laid_to_doc[i - 1];
-                        if prev_doc_idx < self.source.blocks().len() {
-                            if matches!(
-                                self.source.blocks()[prev_doc_idx].kind,
-                                crate::builder::BlockKind::Heading { .. }
-                            ) {
-                                ctx.last_block_was_heading = true;
-                                ctx.last_trailing_spacing = style.heading_spacing_bottom;
-                            } else {
-                                ctx.last_trailing_spacing = style.paragraph_spacing;
-                            }
-                        }
-                    }
-                    LaidOutBlockKind::ListItem { .. } => {
-                        ctx.last_block_was_list = true;
-                        ctx.last_trailing_spacing = style.list_item_spacing;
-                    }
-                    LaidOutBlockKind::CodeBlock { .. } => {
-                        ctx.last_trailing_spacing = style.paragraph_spacing;
-                    }
-                    LaidOutBlockKind::BlockQuote { .. } => {
-                        ctx.last_trailing_spacing = style.paragraph_spacing;
-                    }
-                    LaidOutBlockKind::HorizontalRule => {
-                        ctx.last_trailing_spacing = style.rule_spacing;
-                    }
-                    LaidOutBlockKind::Table { .. } | LaidOutBlockKind::MetadataBlock { .. } => {
-                        ctx.last_trailing_spacing = style.paragraph_spacing;
-                    }
-                }
+                let prev_doc_kind = self
+                    .laid_to_doc
+                    .get(i - 1)
+                    .and_then(|&prev_doc_idx| self.source.blocks().get(prev_doc_idx))
+                    .map(|block| &block.kind);
+                ctx.restore_spacing_context(super::context::spacing_kind_of_laid_block(
+                    &prev_laid.kind,
+                    prev_doc_kind,
+                ));
             }
 
-            if let crate::builder::BlockKind::Heading { level } = &src_block.kind
-                && !ctx.last_block_was_heading
-            {
-                let level_scale = heading_spacing_scale(*level);
-                let desired_top = ctx.style.heading_spacing_top * level_scale;
-                let extra = if ctx.block_count == 0 {
-                    desired_top * 0.5
-                } else {
-                    (desired_top - ctx.last_trailing_spacing).max(0.0)
-                };
-                ctx.y -= extra;
-            }
+            ctx.presubtract_entry_spacing(&src_block.kind);
 
             let base_y = self.estimated_positions[i];
             let old_height = self.estimated_heights[i];
@@ -1995,9 +1927,8 @@ impl<S: BlockSource> LazyLayout<S> {
     /// 一个文档块展开为多个 LaidOutBlock（根 Container，或意外到达顶层的
     /// TableRow_/TableCell_）时的整组重排：一次 layout_block 的全部输出按序
     /// 写入该组各槽位，避免只取首个输出而静默丢弃/复制后续块。
-    /// 返回各槽位的高度 delta。间距上下文（last_trailing_spacing 等）按估计
-    /// 布局的口径近似恢复——该路径在当前 parser 输出下不可达，仅为消除
-    /// 单块重排的静默丢弃而存在。
+    /// 返回各槽位的高度 delta。该路径在当前 parser 输出下不可达，仅为消除
+    /// 单块重排的静默丢弃而存在;间距上下文按 layout_block 主逻辑恢复。
     fn relayout_multi_output_group(
         &mut self,
         laid_idx: usize,
@@ -2029,6 +1960,21 @@ impl<S: BlockSource> LazyLayout<S> {
         ctx.y = base_y;
         ctx.indent = 0.0;
         ctx.block_count = group_start;
+        // 恢复上一块的间距上下文(与 layout_block 主逻辑一致)。
+        if group_start > 0
+            && let Some(prev_laid) = &self.laid_out[group_start - 1]
+        {
+            let prev_doc_kind = self
+                .laid_to_doc
+                .get(group_start - 1)
+                .and_then(|&prev_doc_idx| self.source.blocks().get(prev_doc_idx))
+                .map(|block| &block.kind);
+            ctx.restore_spacing_context(super::context::spacing_kind_of_laid_block(
+                &prev_laid.kind,
+                prev_doc_kind,
+            ));
+        }
+        ctx.presubtract_entry_spacing(&src_block.kind);
         layout_block(src_block, &mut ctx);
         self.ascii_diagrams.extend(std::mem::take(&mut ctx.ascii_diagrams));
         let outputs = std::mem::take(&mut ctx.output);
@@ -2118,55 +2064,21 @@ impl<S: BlockSource> LazyLayout<S> {
         ctx.y = base_y;
         ctx.indent = estimated_indent;
         ctx.block_count = 1;
-        // Restore context for spacing decisions.
+        // Restore context for spacing decisions (same logic as layout_block).
         if idx > 0
             && let Some(prev_laid) = &self.laid_out[idx - 1]
         {
-            match &prev_laid.kind {
-                LaidOutBlockKind::Text { .. } => {
-                    let prev_doc_idx = self.laid_to_doc[idx - 1];
-                    if prev_doc_idx < self.source.blocks().len() {
-                        if matches!(
-                            self.source.blocks()[prev_doc_idx].kind,
-                            crate::builder::BlockKind::Heading { .. }
-                        ) {
-                            ctx.last_block_was_heading = true;
-                            ctx.last_trailing_spacing = style.heading_spacing_bottom;
-                        } else {
-                            ctx.last_trailing_spacing = style.paragraph_spacing;
-                        }
-                    }
-                }
-                LaidOutBlockKind::ListItem { .. } => {
-                    ctx.last_block_was_list = true;
-                    ctx.last_trailing_spacing = style.list_item_spacing;
-                }
-                LaidOutBlockKind::CodeBlock { .. } => {
-                    ctx.last_trailing_spacing = style.paragraph_spacing;
-                }
-                LaidOutBlockKind::BlockQuote { .. } => {
-                    ctx.last_trailing_spacing = style.paragraph_spacing;
-                }
-                LaidOutBlockKind::HorizontalRule => {
-                    ctx.last_trailing_spacing = style.rule_spacing;
-                }
-                LaidOutBlockKind::Table { .. } | LaidOutBlockKind::MetadataBlock { .. } => {
-                    ctx.last_trailing_spacing = style.paragraph_spacing;
-                }
-            }
+            let prev_doc_kind = self
+                .laid_to_doc
+                .get(idx - 1)
+                .and_then(|&prev_doc_idx| self.source.blocks().get(prev_doc_idx))
+                .map(|block| &block.kind);
+            ctx.restore_spacing_context(super::context::spacing_kind_of_laid_block(
+                &prev_laid.kind,
+                prev_doc_kind,
+            ));
         }
-        if let crate::builder::BlockKind::Heading { level } = &src_block.kind
-            && !ctx.last_block_was_heading
-        {
-            let level_scale = heading_spacing_scale(*level);
-            let desired_top = ctx.style.heading_spacing_top * level_scale;
-            let extra = if ctx.block_count == 0 {
-                desired_top * 0.5
-            } else {
-                (desired_top - ctx.last_trailing_spacing).max(0.0)
-            };
-            ctx.y -= extra;
-        }
+        ctx.presubtract_entry_spacing(&src_block.kind);
         layout_block(src_block, &mut ctx);
         self.ascii_diagrams.extend(std::mem::take(&mut ctx.ascii_diagrams));
         if let Some(mut new_block) = ctx.output.into_iter().next() {
@@ -2962,6 +2874,53 @@ mod tests {
         assert_eq!(layout.laid_out.len(), 2);
         assert_eq!(laid_text(&layout, 0), "alpha");
         assert_eq!(laid_text(&layout, 1), "omega");
+    }
+
+    #[test]
+    fn incremental_relayout_matches_one_shot_block_positions() {
+        // 间距上下文恢复 + 入口预扣必须与 layout_block 主逻辑逐项一致:
+        // 逐块重排(ensure_all_blocks)的最终落点必须与一次性全文布局相同。
+        // 覆盖列表组收尾 bump、tight 缩减、标题 margin collapsing 等入口调整。
+        let fixtures = [
+            "para\n- a\n- b",
+            "- a\n- b\n\npara",
+            "para\n\n- a\n\n# H",
+            "# H\n\npara\n- x",
+            "- a\n\n# H\n\npara",
+            "para\n\n---\n\n# H\n\ntail",
+            "# A\n# B\n\n> q\n\n```\ncode\n```\n\nend",
+        ];
+        for md in fixtures {
+            let style = default_style();
+            let (src, doc) = make_doc(md);
+            let doc_view = core::document::StringDocView::new(src);
+            let oneshot = crate::layout::block::layout_doc(doc.blocks(), &style, 400.0, &doc_view);
+
+            let (_, lazy_doc) = make_doc(md);
+            let mut lazy = LazyLayout::new(lazy_doc, &style, 400.0, &doc_view);
+            lazy.ensure_all_blocks(&style, 400.0, None, None, &doc_view);
+
+            assert_eq!(
+                lazy.laid_out.len(),
+                oneshot.blocks.len(),
+                "block count mismatch for {md:?}"
+            );
+            for (idx, oneshot_block) in oneshot.blocks.iter().enumerate() {
+                let laid = lazy.laid_out[idx].as_ref().expect("block must be materialized");
+                let final_y = laid.rect.y + lazy.y_delta.get(idx).copied().unwrap_or(0.0);
+                assert!(
+                    (final_y - oneshot_block.rect.y).abs() < 0.01,
+                    "block {idx} y mismatch for {md:?}: incremental {final_y} vs one-shot {}",
+                    oneshot_block.rect.y
+                );
+            }
+            assert!(
+                (lazy.total_height - oneshot.total_height).abs() < 0.01,
+                "total height mismatch for {md:?}: incremental {} vs one-shot {}",
+                lazy.total_height,
+                oneshot.total_height
+            );
+        }
     }
 
     #[test]
