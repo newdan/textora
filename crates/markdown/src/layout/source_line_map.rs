@@ -27,11 +27,6 @@ pub struct EmptyRunPosition {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SourceLineRole {
     Paragraph,
-    Heading,
-    ListItem,
-    BlockQuote,
-    CodeBlock,
-    TableCell,
     EditableEmpty,
     HiddenBlockSeparator,
     Other,
@@ -126,30 +121,16 @@ impl SourceLineMap {
         if byte <= candidate.end { Some(candidate) } else { None }
     }
 
-    pub fn is_hidden_block_separator(&self, index: usize) -> bool {
-        matches!(
-            self.empty_runs.get(index).and_then(|slot| slot.as_ref()),
-            Some(pos) if pos.index_in_run == 0
-        )
-    }
-
-    pub fn is_editable_empty(&self, index: usize) -> bool {
-        matches!(
-            self.empty_runs.get(index).and_then(|slot| slot.as_ref()),
-            Some(pos) if pos.index_in_run >= 1
-        )
-    }
-
     pub fn empty_run_position(&self, index: usize) -> Option<EmptyRunPosition> {
         self.empty_runs.get(index).copied().flatten()
     }
 
-    pub fn attach_layout(
-        &mut self,
-        rendered_lines: &[RenderedLineLayout],
-        line_height: f32,
-        paragraph_spacing: f32,
-    ) {
+    /// 排布渲染行，为空行分类并赋予视觉坐标。
+    ///
+    /// 隐藏分隔行的高度取**真实块间 gap**（下一块首个渲染行顶边 − 前内容底边，
+    /// 减去 run 内可编辑空行的高度），与 `reserve_extra_blank_source_lines` 的
+    /// 追加公式 `(N-1)*line_height` 互为镜像：间距本身由布局真实 gap 提供。
+    pub fn attach_layout(&mut self, rendered_lines: &[RenderedLineLayout], line_height: f32) {
         if self.lines.is_empty() {
             return;
         }
@@ -188,7 +169,6 @@ impl SourceLineMap {
                         prev_had_block,
                         current_y,
                         line_height,
-                        paragraph_spacing,
                     );
                     role = blank.role;
                     line_y = blank.y_top;
@@ -215,7 +195,7 @@ impl SourceLineMap {
                     prev_had_block = true;
                     line_y = first.y_top;
                     line_h = (last.y_top + last.height - line_y).max(first.height);
-                    role = SourceLineRole::Paragraph; // Just a dummy for now unless we do full parsing
+                    role = SourceLineRole::Paragraph; // 非空渲染行不做块类型细分，统一标记为 Paragraph
                 }
             }
 
@@ -248,7 +228,6 @@ impl SourceLineMap {
         prev_had_block: bool,
         current_y: f32,
         line_height: f32,
-        paragraph_spacing: f32,
     ) -> BlankLineLayout {
         if let Some(rendered) = next_rendered.filter(|r| Self::owns_rendered_line(r, line)) {
             return BlankLineLayout {
@@ -259,11 +238,17 @@ impl SourceLineMap {
             };
         }
 
-        if prev_had_block && next_rendered.is_some() && run_pos.index_in_run == 0 {
+        if prev_had_block
+            && let Some(next) = next_rendered
+            && run_pos.index_in_run == 0
+        {
+            // 隐藏分隔行消费真实块间间距：gap 减去 run 内其余可编辑空行的高度。
+            let real_gap = next.y_top - current_y;
+            let editable_in_run = run_pos.run_length.saturating_sub(1) as f32;
             return BlankLineLayout {
                 role: SourceLineRole::HiddenBlockSeparator,
                 y_top: current_y,
-                height: paragraph_spacing,
+                height: (real_gap - editable_in_run * line_height).max(0.0),
                 is_rendered: false,
             };
         }
@@ -276,12 +261,14 @@ impl SourceLineMap {
         }
     }
 
+    /// 块前应额外保留的空行高度：首块前的每个空行各占一行；非首块前的
+    /// 空行 run 首行折叠为隐藏分隔（其高度由真实块间 gap 提供，见
+    /// [`Self::attach_layout`]），只为其余可编辑空行追加 `(N-1)*line_height`。
     pub fn extra_height_before_block(
         &self,
         block_start: usize,
         is_first_block: bool,
         line_height: f32,
-        paragraph_spacing: f32,
     ) -> f32 {
         let Some(block_line) = self.line_at_byte(block_start) else { return 0.0 };
         let empty_before =
@@ -289,25 +276,8 @@ impl SourceLineMap {
         if is_first_block {
             empty_before as f32 * line_height
         } else {
-            let editable_empty_lines = empty_before.saturating_sub(1);
-            if editable_empty_lines == 0 {
-                return 0.0;
-            }
-            editable_empty_lines as f32 * line_height + paragraph_spacing
+            empty_before.saturating_sub(1) as f32 * line_height
         }
-    }
-
-    pub fn trailing_editable_height(&self) -> f32 {
-        self.lines.iter().rev().take_while(|l| l.is_empty()).map(|l| l.height).sum()
-    }
-
-    pub fn previous_non_empty(&self, current_index: usize) -> Option<SourceLineEntry> {
-        let start = current_index.checked_sub(1)?;
-        (0..=start).rev().map(|i| self.lines[i]).find(|line| !line.is_empty())
-    }
-
-    pub fn next_non_empty(&self, current_index: usize) -> Option<SourceLineEntry> {
-        self.lines.get(current_index + 1..)?.iter().copied().find(|line| !line.is_empty())
     }
 
     pub fn empty_lines_in_byte_range(
@@ -424,19 +394,22 @@ mod tests {
     fn trailing_empty_lines_are_all_editable_and_extend_content_height() {
         let source = "heading\n\n\n";
         let mut map = SourceLineMap::from_source(source);
-        map.attach_layout(&single_rendered_line_layout(0..7, 0.0, 24.0), 24.0, 12.0);
+        map.attach_layout(&single_rendered_line_layout(0..7, 0.0, 24.0), 24.0);
 
         assert_eq!(map.line_at_index(1).expect("line 1").role, SourceLineRole::EditableEmpty);
         assert_eq!(map.line_at_index(2).expect("line 2").role, SourceLineRole::EditableEmpty);
         assert_eq!(map.line_at_index(3).expect("line 3").role, SourceLineRole::EditableEmpty);
-        assert_eq!(map.trailing_editable_height(), 72.0);
+        // 每个尾随空行各占一行高，合计延伸内容高度 3 * line_height。
+        assert_eq!(map.line_at_index(1).expect("line 1").height, 24.0);
+        assert_eq!(map.line_at_index(2).expect("line 2").height, 24.0);
+        assert_eq!(map.line_at_index(3).expect("line 3").height, 24.0);
     }
 
     #[test]
     fn inter_block_run_has_one_hidden_separator_then_editable_lines() {
         let source = "a\n\n\n\nb";
         let mut map = SourceLineMap::from_source(source);
-        map.attach_layout(&two_rendered_line_layout(), 24.0, 12.0);
+        map.attach_layout(&two_rendered_line_layout(), 24.0);
 
         assert_eq!(
             map.line_at_index(1).expect("separator").role,
@@ -461,7 +434,7 @@ mod tests {
                 },
             ];
             let mut map = SourceLineMap::from_source(source);
-            map.attach_layout(&rendered_lines, 24.0, 12.0);
+            map.attach_layout(&rendered_lines, 24.0);
 
             let hidden_separators = map
                 .lines()
@@ -493,7 +466,7 @@ mod tests {
             RenderedLineLayout { source_range: 3..4, y_top: 48.0, height: 24.0 },
         ];
         let mut map = SourceLineMap::from_source(source);
-        map.attach_layout(&rendered, 24.0, 12.0);
+        map.attach_layout(&rendered, 24.0);
 
         let blank = map.line_at_index(1).expect("blank line");
         assert_ne!(blank.role, SourceLineRole::HiddenBlockSeparator);
@@ -510,10 +483,49 @@ mod tests {
             RenderedLineLayout { source_range: 8..10, y_top: 48.0, height: 24.0 },
             RenderedLineLayout { source_range: 12..16, y_top: 84.0, height: 24.0 },
         ];
-        map.attach_layout(&rendered, 24.0, 12.0);
+        map.attach_layout(&rendered, 24.0);
 
         assert_eq!(map.line_at_index(0).expect("wrapped line").height, 72.0);
         assert_eq!(map.line_at_index(1).expect("separator").y_top, 72.0);
+    }
+
+    #[test]
+    fn hidden_separator_height_uses_real_inter_block_gap() {
+        // 标题后跟 2 个空行：真实块间 gap = heading 底部间距(10.8) + 一个可编辑空行高(24)。
+        // 隐藏分隔行应只消费真实间距，可编辑空行必须恰好落在下一块顶边之上，
+        // 而不是按 paragraph_spacing(12) 假设导致与段落文字重叠。
+        let source = "# T\n\n\npara";
+        let line_height = 24.0;
+        let heading_bottom = 24.0;
+        let real_spacing = 10.8;
+        let para_top = heading_bottom + real_spacing + line_height;
+        let rendered = vec![
+            RenderedLineLayout { source_range: 0..2, y_top: 0.0, height: 24.0 },
+            RenderedLineLayout { source_range: 6..10, y_top: para_top, height: 24.0 },
+        ];
+        let mut map = SourceLineMap::from_source(source);
+        map.attach_layout(&rendered, line_height);
+
+        let separator = map.line_at_index(1).expect("separator line");
+        assert_eq!(separator.role, SourceLineRole::HiddenBlockSeparator);
+        assert!(
+            (separator.height - real_spacing).abs() < 0.001,
+            "separator height {} must equal the real inter-block spacing {real_spacing}",
+            separator.height
+        );
+
+        let editable = map.line_at_index(2).expect("editable line");
+        assert_eq!(editable.role, SourceLineRole::EditableEmpty);
+        assert!(
+            (editable.y_top - (heading_bottom + real_spacing)).abs() < 0.001,
+            "editable line y {} must start right below the real spacing",
+            editable.y_top
+        );
+        assert!(
+            (editable.y_top + editable.height - para_top).abs() < 0.001,
+            "editable line bottom {} must meet the next block top {para_top}",
+            editable.y_top + editable.height
+        );
     }
 
     #[test]
@@ -523,7 +535,7 @@ mod tests {
             RenderedLineLayout { source_range: 0..2, y_top: 0.0, height: 24.0 },
             RenderedLineLayout { source_range: 2..3, y_top: 24.0, height: 24.0 },
         ];
-        map.attach_layout(&rendered, 24.0, 12.0);
+        map.attach_layout(&rendered, 24.0);
 
         assert_eq!(map.line_at_index(1).expect("second line").y_top, 24.0);
     }

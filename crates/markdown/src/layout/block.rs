@@ -285,6 +285,7 @@ pub(crate) fn layout_block(block: &BlockNode, ctx: &mut LayoutCtx) {
                     crate::edit::active_block_marker(block, edit_ctx.cursor_byte);
             }
             for child in &block.children {
+                reserve_nested_blank_source_lines(ctx, child);
                 layout_block(child, ctx);
             }
             ctx.active_block_marker = None;
@@ -412,7 +413,7 @@ pub(crate) fn layout_block(block: &BlockNode, ctx: &mut LayoutCtx) {
                 }
                 let active_ordered_marker = (line_idx == 0
                     && matches!(bullet, crate::builder::ListBullet::Ordered(_)))
-                .then(|| ctx.active_block_marker.as_ref())
+                .then_some(ctx.active_block_marker.as_ref())
                 .flatten();
                 let marker_len = active_ordered_marker.map(|marker| marker.marker_text.len());
                 let estimated_marker_width = active_ordered_marker.map_or(0.0, |marker| {
@@ -450,7 +451,16 @@ pub(crate) fn layout_block(block: &BlockNode, ctx: &mut LayoutCtx) {
             ctx.indent += ctx.style.list_indent;
             ctx.list_depth = current_depth + 1;
             let saved_output = std::mem::take(&mut ctx.output);
-            for child in &block.children {
+            for (child_index, child) in block.children.iter().enumerate() {
+                // 项文本与子块（loose list 的子段落）之间保留 paragraph_spacing
+                // 级别的间距；嵌套子列表保持紧凑。与顶层块间间距同一视觉规范。
+                if child_index == 0
+                    && !item_lines.is_empty()
+                    && !matches!(child.kind, BlockKind::ListItem { .. })
+                {
+                    ctx.y += ctx.style.paragraph_spacing;
+                }
+                reserve_nested_blank_source_lines(ctx, child);
                 layout_block(child, ctx);
             }
             let sub_blocks: Vec<LaidOutBlock> = ctx.output.drain(..).collect();
@@ -575,6 +585,38 @@ pub(crate) fn layout_block(block: &BlockNode, ctx: &mut LayoutCtx) {
             ctx.last_trailing_spacing = ctx.style.paragraph_spacing;
         }
     }
+}
+
+/// 嵌套子块前的源空行补偿：解析器会从块树中丢弃空行，此处为子块前
+/// 空行 run 中除隐藏分隔行外的可编辑空行追加 `(N-1)*line_height`，
+/// 与 `LazyLayout::reserve_extra_blank_source_lines` 对顶层块的公式一致。
+/// 仅在编辑模式（有 source_text）下生效；估计/预览阶段无源文本可参照。
+fn reserve_nested_blank_source_lines(ctx: &mut LayoutCtx, child: &BlockNode) {
+    let Some(source_text) = ctx.source_text else {
+        return;
+    };
+    let blank_lines = count_preceding_blank_source_lines(source_text, child.block_range.start);
+    ctx.y += blank_lines.saturating_sub(1) as f32 * ctx.style.line_height;
+}
+
+/// 统计紧贴 `byte` 所在源码行之前的连续空行数。
+fn count_preceding_blank_source_lines(source: &str, byte: usize) -> usize {
+    let byte = byte.min(source.len());
+    let mut line_start = source[..byte].rfind('\n').map_or(0, |idx| idx + 1);
+    let mut count = 0;
+    while line_start > 0 {
+        let prev_line_end = line_start - 1;
+        if source.as_bytes()[prev_line_end] != b'\n' {
+            break;
+        }
+        let prev_line_start = source[..prev_line_end].rfind('\n').map_or(0, |idx| idx + 1);
+        if !source[prev_line_start..prev_line_end].trim().is_empty() {
+            break;
+        }
+        count += 1;
+        line_start = prev_line_start;
+    }
+    count
 }
 
 fn shaped_prefix_width(
@@ -1596,6 +1638,53 @@ mod tests {
     fn make_doc(md: &str) -> (&str, MarkdownDoc) {
         let parsed = parse_markdown(md);
         (md, MarkdownDoc::build(&parsed, &default_style()))
+    }
+
+    #[test]
+    fn list_item_text_and_child_paragraph_have_paragraph_spacing() {
+        // 手工构造“项文本 + 子段落”的 loose 项：当前 parser 会把 loose 项的
+        // 段落全部归入 children，该形状只可能由其他 BlockSource 产生；一旦出现，
+        // 项文本与子块之间必须有 paragraph_spacing，而不是零间距粘连。
+        let style = default_style();
+        let (_, child_doc) = make_doc("child");
+        let child =
+            child_doc.blocks.into_iter().next().expect("fixture must produce a paragraph block");
+        let item = BlockNode {
+            kind: BlockKind::ListItem {
+                bullet: crate::builder::ListBullet::Bullet,
+                tight: false,
+                blank_line_before: false,
+            },
+            children: vec![child],
+            text_lines: vec!["a".to_string()],
+            projected_lines: vec![],
+            text_styles: vec![vec![]],
+            source_range: crate::builder::BlockSource::Continuous(0..2),
+            block_range: 0..2,
+            code_line_source_starts: None,
+        };
+        let doc_view = core::document::StringDocView::new("a");
+        let mut ctx = LayoutCtx::new(&doc_view, &style, 400.0, None, None, None, None);
+
+        layout_block(&item, &mut ctx);
+
+        let Some(item_block) = ctx.output.into_iter().next() else {
+            panic!("list item must produce a laid-out block");
+        };
+        let LaidOutBlockKind::ListItem { lines, blocks, .. } = &item_block.kind else {
+            panic!("laid-out block must be a list item");
+        };
+        let text_bottom = lines
+            .last()
+            .map(|line| line.rect.y + line.rect.h)
+            .expect("fixture item must lay out its own text");
+        let child_top = blocks.first().expect("fixture item must contain the child").rect.y;
+        assert!(
+            (child_top - text_bottom - style.paragraph_spacing).abs() < 0.01,
+            "gap between item text and child block {} must equal paragraph_spacing ({})",
+            child_top - text_bottom,
+            style.paragraph_spacing
+        );
     }
 
     fn find_line_in_block<'a>(block: &'a LaidOutBlock, needle: &str) -> Option<&'a LaidOutLine> {

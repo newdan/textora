@@ -777,10 +777,11 @@ impl<S: BlockSource> PreviewEngine<S> {
                     // 与 full_flat_lines 分支共享同一路径，避免长文档下光标一次移动
                     // 就把全部块都 reshape 一遍。
                     if full_layout || full_flat_lines {
-                        lazy.invalidate_visible_lines_for_source_bytes(
+                        // 光标块无论是否在渲染窗口内都必须失效：屏外块保持
+                        // precise 会让 active marker 永久残留（P7）。失效本身
+                        // 只清标记，重排仍由 refresh_precise_range 限定在可见范围。
+                        lazy.invalidate_lines_for_source_bytes(
                             old_byte.into_iter().chain(std::iter::once(new_byte)),
-                            self.scroll_y,
-                            viewport_h,
                         );
                         lazy.ensure_all_blocks(style, viewport_w, None, None, doc_view);
                         lazy.refresh_precise_range(
@@ -4607,7 +4608,9 @@ mod wysiwyg_tests {
     }
 
     #[test]
-    fn editable_empty_line_between_paragraphs_keeps_spacing_on_both_sides() {
+    fn editable_empty_line_between_paragraphs_consumes_real_gap_once() {
+        // 空行 run 的追加量 = (N-1)*line_height，块间距只由真实 gap 提供一份，
+        // 不再对 para→para 特判双份 paragraph_spacing。
         let source = "first\n\n\nsecond";
         let second_start = source.find("second").expect("fixture should contain second paragraph");
         let view = make_editor_view_with_cursor(source, second_start);
@@ -4615,12 +4618,53 @@ mod wysiwyg_tests {
         let second_y = flat_line_y_for_source_byte(&view, second_start)
             .expect("second paragraph should render");
         let actual_gap = second_y - (first_line.rect.y + first_line.rect.h);
-        let expected_gap = view.engine().paragraph_spacing * 2.0 + view.engine().base_line_height;
+        let expected_gap = view.engine().paragraph_spacing + view.engine().base_line_height;
 
         assert!(
             (actual_gap - expected_gap).abs() < 1.0,
-            "an editable blank paragraph needs paragraph spacing on both sides: \
+            "an editable blank paragraph consumes exactly one paragraph spacing from the real gap: \
              actual={actual_gap}, expected={expected_gap}"
+        );
+    }
+
+    #[test]
+    fn cursor_leaving_offscreen_heading_clears_active_marker_when_scrolled_back() {
+        use ui::plugin::PluginMessage;
+
+        let filler =
+            (0..40).map(|i| format!("filler paragraph {i}")).collect::<Vec<_>>().join("\n\n");
+        let source = format!("# Title\n\n{filler}\n\nlast paragraph");
+        let last_byte = source.find("last paragraph").expect("fixture has a last paragraph");
+        let mut doc = StubDoc::new(&source);
+        let mut view = MarkdownEditorView::new();
+        view.set_source(source.clone(), 1);
+        view.handle_message(PluginMessage::SetCursorByte(2), &mut doc);
+        render_editor_once(&mut view, &doc);
+
+        fn heading_text(view: &MarkdownEditorView) -> String {
+            view.engine()
+                .flat_lines()
+                .iter()
+                .find(|line| line.text.contains("Title"))
+                .map(|line| line.text.clone())
+                .expect("heading flat line must exist")
+        }
+        assert_eq!(heading_text(&view), "# Title", "cursor inside heading shows the marker");
+
+        // 滚到文档底部，再把光标移到最后一段：标题块已在渲染窗口外。
+        let bottom_scroll = (view.engine.content_height - 600.0).max(0.0);
+        assert!(bottom_scroll > 0.0, "fixture document must exceed one viewport");
+        view.engine.scroll_y = bottom_scroll;
+        view.handle_message(PluginMessage::SetCursorByte(last_byte), &mut doc);
+        render_editor_once(&mut view, &doc);
+
+        // 滚回顶部：标题必须按非 active 重排，不得残留 `# ` 标记。
+        view.engine.scroll_y = 0.0;
+        render_editor_once(&mut view, &doc);
+        assert_eq!(
+            heading_text(&view),
+            "Title",
+            "cursor left the offscreen heading; its active marker must not persist"
         );
     }
 

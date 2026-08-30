@@ -86,11 +86,18 @@ pub(crate) fn heading_spacing_scale(level: u8) -> f32 {
 /// Flatten a list of block nodes by recursively expanding Container blocks.
 /// This produces a 1:1 correspondence with the output of layout_doc.
 /// Count how many laid-out blocks a Container's children will produce.
+///
+/// 展开规则必须镜像 `layout_block` 的输出基数：Container 与到达顶层的
+/// TableRow_/TableCell_ 都会把子块直接排进输出流。
 pub(crate) fn count_laid_out_blocks(blocks: &[crate::builder::BlockNode]) -> usize {
     let mut count = 0;
     for block in blocks {
         match block.kind {
-            crate::builder::BlockKind::Container => count += count_laid_out_blocks(&block.children),
+            crate::builder::BlockKind::Container
+            | crate::builder::BlockKind::TableRow_
+            | crate::builder::BlockKind::TableCell_ { .. } => {
+                count += count_laid_out_blocks(&block.children);
+            }
             _ => count += 1,
         }
     }
@@ -101,7 +108,9 @@ pub(crate) fn flatten_blocks(blocks: &[crate::builder::BlockNode]) -> Vec<usize>
     let mut result = Vec::new();
     for (i, block) in blocks.iter().enumerate() {
         match block.kind {
-            crate::builder::BlockKind::Container => {
+            crate::builder::BlockKind::Container
+            | crate::builder::BlockKind::TableRow_
+            | crate::builder::BlockKind::TableCell_ { .. } => {
                 let n = count_laid_out_blocks(&block.children);
                 result.extend(std::iter::repeat_n(i, n));
             }

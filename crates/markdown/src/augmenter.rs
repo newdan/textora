@@ -1,4 +1,4 @@
-//! Markdown 感知的编辑增强（Enter / Backspace / InsertText）。
+//! Markdown 感知的编辑增强（Enter / Backspace / Delete / InsertText）。
 //!
 //! 方案 2026-07-06 阶段 2b/2c：把原本散落在 `view.rs` 里的
 //! - `classify_enter_context` 分类器
@@ -23,6 +23,8 @@ const LF_SEQUENCE: &str = "\n";
 const CRLF_SEQUENCE: &str = "\r\n";
 const BLOCK_BOUNDARY_NEWLINE_COUNT: usize = 2;
 const MAX_LEADING_BLOCK_INDENT: usize = 3;
+/// CommonMark 代码围栏(``` 或 ~~~)的最少字符数。
+const MIN_FENCE_MARKER_LENGTH: usize = 3;
 /// CommonMark 空格形式硬换行所需的最少行尾空格数。
 const HARD_BREAK_MIN_SPACES: usize = 2;
 const TASK_LIST_CONTENT_SEPARATOR: char = ' ';
@@ -67,7 +69,10 @@ fn augment_line_break(source: &str, current_byte: usize) -> EditAugmentation {
         | EnterContext::TableCell { .. } => {
             return emit_inline_html_break(source, current_byte);
         }
-        EnterContext::CodeBlock | EnterContext::EmptyBlockSeparatorLine | EnterContext::Other => {
+        EnterContext::CodeBlock
+        | EnterContext::CodeBlockFenceLine { .. }
+        | EnterContext::EmptyBlockSeparatorLine
+        | EnterContext::Other => {
             return emit_source_newline(source, current_byte);
         }
         EnterContext::TopLevelParagraphEnd | EnterContext::ParagraphInterior => String::new(),
@@ -134,6 +139,7 @@ pub(crate) fn augment_delete_forward(
 ) -> Option<EditAugmentation> {
     delete_forward_remove_inline_html_break(source, current_byte)
         .or_else(|| delete_forward_join_reopened_inline_elements(source, current_byte))
+        .or_else(|| delete_forward_block_boundary(source, current_byte))
 }
 
 fn delete_forward_remove_inline_html_break(
@@ -220,6 +226,110 @@ fn delete_forward_join_reopened_inline_elements(
     };
     debug_assert_augmentation(&augmentation, source);
     Some(augmentation)
+}
+
+/// Delete(前向删除)的块边界护栏,与 Backspace 侧的
+/// [`backspace_paragraph_boundary`] 对称。
+///
+/// 光标位于非空源码行内容末尾、紧邻换行 run 时:
+/// - 下一物理行自成独立块(ATX/围栏/HR/列表 marker/setext 下划线/引用/表格行),
+///   默认逐字符删除会把两行并线、破坏结构(如段落成 setext 标题)——
+///   返回消费型空操作(不删任何字节);
+/// - 当前块为围栏/缩进代码块时,只有下一行是闭合围栏才拦截,
+///   普通代码行允许默认删除;
+/// - 段落/标题末尾且下一行是普通段落文本:删除整个换行 run,合并两段
+///   (与段首 Backspace 删整个边界对称)。
+fn delete_forward_block_boundary(source: &str, current_byte: usize) -> Option<EditAugmentation> {
+    let (line_start, _, line_end) = locate_source_line_bounds(source, current_byte)?;
+    if line_start == current_byte || current_byte != source_line_content_end(source, line_end) {
+        return None;
+    }
+    // 行尾硬换行标记属于段内结构,留给默认逐字符删除。
+    if hard_break_marker_ending_at(source, current_byte).is_some() {
+        return None;
+    }
+    let first_newline_width = newline_sequence_width_at(source, current_byte)?;
+    let mut newline_run_end = current_byte + first_newline_width;
+    while let Some(newline_width) = newline_sequence_width_at(source, newline_run_end) {
+        newline_run_end += newline_width;
+    }
+    if newline_run_end >= source.len() {
+        return None;
+    }
+
+    let consume_boundary = || {
+        let augmentation = EditAugmentation {
+            insert_text: Some(String::new()),
+            replace_range: None,
+            cursor_byte_after: current_byte,
+        };
+        debug_assert_augmentation(&augmentation, source);
+        Some(augmentation)
+    };
+
+    match classify_enter_context(source, current_byte) {
+        EnterContext::CodeBlock => {
+            // 代码体内只有闭合围栏行需要保护;其余代码行交给默认删除。
+            if line_starts_code_fence(source, newline_run_end) {
+                return consume_boundary();
+            }
+            None
+        }
+        EnterContext::CodeBlockFenceLine { .. } => {
+            // 围栏行与相邻行并线必然破坏围栏;仅在边界恰好一个换行序列时拦截,
+            // 有空行兜底(≥2 个换行)时默认删除一个仍保持结构合法。
+            if newline_run_end == current_byte + first_newline_width {
+                return consume_boundary();
+            }
+            None
+        }
+        EnterContext::TopLevelParagraphEnd
+        | EnterContext::ParagraphInterior
+        | EnterContext::Heading { .. } => {
+            if line_starts_independent_block(source, newline_run_end) {
+                return consume_boundary();
+            }
+            let augmentation = EditAugmentation {
+                insert_text: Some(String::new()),
+                replace_range: Some(current_byte..newline_run_end),
+                cursor_byte_after: current_byte,
+            };
+            debug_assert_augmentation(&augmentation, source);
+            Some(augmentation)
+        }
+        _ => {
+            if line_starts_independent_block(source, newline_run_end) {
+                return consume_boundary();
+            }
+            None
+        }
+    }
+}
+
+/// Delete 侧判定:下一物理行是否自成独立块,默认前向删除并线后会破坏结构。
+/// 在 [`line_starts_new_sibling_block`] 基础上补充 setext H1 下划线(`===`)、
+/// 引用行(`>`)与表格行(`|`);后两者可被前一块合法中断,因此不并入
+/// `line_starts_new_sibling_block`,避免影响 Backspace 侧既有行为。
+fn line_starts_independent_block(source: &str, line_start: usize) -> bool {
+    if line_starts_new_sibling_block(source, line_start) {
+        return true;
+    }
+    let Some(marker_start) = next_source_line_marker_start(source, line_start) else {
+        return false;
+    };
+    let Some(&marker_byte) = source.as_bytes().get(marker_start) else {
+        return false;
+    };
+    matches!(marker_byte, b'>' | b'|') || source[marker_start..].starts_with("===")
+}
+
+/// 该行(允许至多 3 个前导空格)是否以代码围栏 ``` 或 ~~~ 开头。
+fn line_starts_code_fence(source: &str, line_start: usize) -> bool {
+    next_source_line_marker_start(source, line_start).is_some_and(|marker_start| {
+        source
+            .get(marker_start..)
+            .is_some_and(|suffix| suffix.starts_with("```") || suffix.starts_with("~~~"))
+    })
 }
 
 fn backspace_remove_inline_html_break(
@@ -1024,6 +1134,9 @@ fn enter_context_augmentation(
         EnterContext::LiteralBlockLine { continuation_prefix } => {
             Some(emit_literal_source_newline(source, current_byte, &continuation_prefix))
         }
+        EnterContext::CodeBlockFenceLine { is_opening, line_content_end } => {
+            Some(fence_line_enter_augmentation(source, line_content_end, is_opening))
+        }
         EnterContext::CodeBlock | EnterContext::Other => None,
     }
 }
@@ -1117,6 +1230,27 @@ fn indented_code_block_enter_augmentation(
         cursor_byte_after: current_byte + insertion.len(),
         insert_text: Some(insertion),
         ..Default::default()
+    };
+    debug_assert_augmentation(&aug, source);
+    aug
+}
+
+/// 围栏代码块围栏行 Enter(光标可在围栏行任意位置,插入点恒为该行行尾):
+/// - 开头围栏行(含 info string):行尾插入单个换行,光标进入代码体第一行;
+/// - 闭合围栏行:行尾建立块边界,光标落到围栏外的新空段(退出代码块)。
+fn fence_line_enter_augmentation(
+    source: &str,
+    line_content_end: usize,
+    is_opening: bool,
+) -> EditAugmentation {
+    if !is_opening {
+        return emit_block_break_at(source, line_content_end);
+    }
+    let newline = preferred_newline_sequence(source, line_content_end);
+    let aug = EditAugmentation {
+        cursor_byte_after: line_content_end + newline.len(),
+        replace_range: Some(line_content_end..line_content_end),
+        insert_text: Some(newline.to_owned()),
     };
     debug_assert_augmentation(&aug, source);
     aug
@@ -1534,6 +1668,12 @@ pub enum EnterContext {
         empty: bool,
     },
     CodeBlock,
+    /// 围栏代码块的围栏行(开头或闭合);`line_content_end` 是该围栏行的
+    /// 源码内容末尾(不含换行)。
+    CodeBlockFenceLine {
+        is_opening: bool,
+        line_content_end: usize,
+    },
     /// 缩进代码块及 Enter 后新行应继承的源码前缀。
     IndentedCodeBlock {
         continuation_prefix: String,
@@ -1593,8 +1733,20 @@ fn classify_heading_hit(
         }
         return EnterContext::Other;
     }
-    let hash_prefix = level as usize + 1; // "# " / "## " / ...
-    let content_start = start.saturating_add(hash_prefix);
+    // 内容起点按实际源码扫描:至多 3 个前导空格 + `#` 序列 + 任意空白(空格/Tab),
+    // 不能假定 `#` 后恰好一个空格(`#  Title`、`#\tTitle` 会落空在空白内)。
+    let bytes = source.as_bytes();
+    let mut probe = start;
+    let mut leading_spaces = 0;
+    while bytes.get(probe) == Some(&b' ') && leading_spaces < MAX_LEADING_BLOCK_INDENT {
+        probe += 1;
+        leading_spaces += 1;
+    }
+    probe += bytes[probe..].iter().take_while(|&&byte| byte == b'#').count();
+    while matches!(bytes.get(probe), Some(b' ' | b'\t')) {
+        probe += 1;
+    }
+    let content_start = probe.min(end);
     let at_end = current_byte == end;
     if current_byte >= content_start && current_byte <= end {
         EnterContext::Heading {
@@ -1624,6 +1776,94 @@ fn heading_source_is_atx(source: &str, heading_start: usize) -> bool {
     matches!(bytes.get(marker_probe + hash_count), None | Some(b' ' | b'\t' | b'\r' | b'\n'))
 }
 
+/// 光标位于围栏代码块的围栏行时返回对应上下文,否则返回 `None`。
+///
+/// 开头围栏行 = 块起始所在源码行;闭合围栏行 = 块内容末尾所在行,且必须
+/// 确实是合法闭合围栏(未闭合、延伸到 EOF 的代码块没有闭合围栏行)。
+fn classify_fence_line_hit(
+    source: &str,
+    current_byte: usize,
+    block_start: usize,
+    block_content_end: usize,
+) -> Option<EnterContext> {
+    let (opening_line_start, _, opening_line_end) = locate_source_line_bounds(source, block_start)?;
+    let opening_content_end = source_line_content_end(source, opening_line_end);
+    let (fence_char, opening_fence_len) =
+        opening_fence_signature(source, opening_line_start, opening_content_end)?;
+    if current_byte >= opening_line_start && current_byte <= opening_content_end {
+        return Some(EnterContext::CodeBlockFenceLine {
+            is_opening: true,
+            line_content_end: opening_content_end,
+        });
+    }
+
+    let (closing_line_start, _, closing_line_end) =
+        locate_source_line_bounds(source, block_content_end)?;
+    if closing_line_start == opening_line_start {
+        return None;
+    }
+    let closing_content_end = source_line_content_end(source, closing_line_end);
+    if !line_is_closing_fence(
+        source,
+        closing_line_start,
+        closing_content_end,
+        fence_char,
+        opening_fence_len,
+    ) {
+        return None;
+    }
+    if current_byte >= closing_line_start && current_byte <= closing_content_end {
+        return Some(EnterContext::CodeBlockFenceLine {
+            is_opening: false,
+            line_content_end: closing_content_end,
+        });
+    }
+    None
+}
+
+/// 扫描开头围栏行,返回(围栏字符, 围栏长度)。非法围栏返回 `None`。
+fn opening_fence_signature(
+    source: &str,
+    line_start: usize,
+    content_end: usize,
+) -> Option<(u8, usize)> {
+    let bytes = source.as_bytes();
+    let mut fence_start = line_start;
+    let mut leading_spaces = 0;
+    while bytes.get(fence_start) == Some(&b' ') && leading_spaces < MAX_LEADING_BLOCK_INDENT {
+        fence_start += 1;
+        leading_spaces += 1;
+    }
+    let fence_char = *bytes.get(fence_start).filter(|byte| matches!(byte, b'`' | b'~'))?;
+    let fence_len =
+        bytes[fence_start..content_end].iter().take_while(|&&byte| byte == fence_char).count();
+    (fence_len >= MIN_FENCE_MARKER_LENGTH).then_some((fence_char, fence_len))
+}
+
+/// 该行是否为合法闭合围栏:至多 3 个前导空格,≥ 开头围栏长度的相同围栏字符,
+/// 其余位置只允许空白。未闭合代码块的末行(代码内容)不会通过此检查。
+fn line_is_closing_fence(
+    source: &str,
+    line_start: usize,
+    content_end: usize,
+    fence_char: u8,
+    opening_fence_len: usize,
+) -> bool {
+    let bytes = source.as_bytes();
+    let mut fence_start = line_start;
+    let mut leading_spaces = 0;
+    while bytes.get(fence_start) == Some(&b' ') && leading_spaces < MAX_LEADING_BLOCK_INDENT {
+        fence_start += 1;
+        leading_spaces += 1;
+    }
+    let fence_len =
+        bytes[fence_start..content_end].iter().take_while(|&&byte| byte == fence_char).count();
+    if fence_len < opening_fence_len {
+        return false;
+    }
+    bytes[fence_start + fence_len..content_end].iter().all(|byte| matches!(byte, b' ' | b'\t'))
+}
+
 pub fn classify_enter_context(source: &str, current_byte: usize) -> EnterContext {
     use pulldown_cmark::{CodeBlockKind, Event, Parser, Tag, TagEnd};
 
@@ -1650,6 +1890,9 @@ pub fn classify_enter_context(source: &str, current_byte: usize) -> EnterContext
     for (event, range) in parser.into_offset_iter() {
         match event {
             Event::Start(Tag::Item) => {
+                // 子 item 本身也是父 item 的内容:只挂子列表的父 item 不算空,
+                // 否则父行回车会走"空 item 退出"删掉 marker、把子列表提升为顶层。
+                mark_item_content_seen(&mut item_stack);
                 let indent = list_item_indent(source, range.start);
                 if let Some((bullet, marker_end)) = parse_list_marker(source, range.start) {
                     item_stack.push(ItemFrame {
@@ -1684,13 +1927,26 @@ pub fn classify_enter_context(source: &str, current_byte: usize) -> EnterContext
                     // 会被误判为仍属于该 item。
                     let end =
                         content_end_without_trailing_newline(source, frame.marker_end..range.end);
+                    // 光标在 marker 内部(`-| item`)时按内容起点处理,而不是落到
+                    // Other 产生 `-\n item` 这样的懒延续残留。
                     if frame.marker_end > frame.start
-                        && current_byte >= frame.marker_end
+                        && current_byte > frame.start
                         && current_byte <= end
                     {
-                        let empty = !frame.saw_content;
+                        // 光标所在行为纯空白(如嵌套空 item 退出后的残留缩进行)时,
+                        // 即使 item 其他行有内容也按空 item 处理:回车应继续退出,
+                        // 而不是在空白行下意外创建同级 item。
+                        let blank_line_width = blank_source_line_width(source, current_byte);
+                        let empty = !frame.saw_content || blank_line_width.is_some();
+                        // 残留空白行可能同时落在多级 item 的 range 内;选择缩进严格
+                        // 窄于该行空白宽度的最深帧——帧缩进与行内容等宽时原地替换
+                        // 是不动点,无法真正"退一层"。
+                        let frame_is_exit_target = match blank_line_width {
+                            Some(width) => frame.indent.len() < width,
+                            None => true,
+                        };
                         let at_end = current_byte == end;
-                        if matched_list_item.is_none() {
+                        if frame_is_exit_target && matched_list_item.is_none() {
                             matched_list_item = Some(EnterContext::ListItem {
                                 indent: frame.indent,
                                 continuation_marker: frame.continuation_marker,
@@ -1769,16 +2025,21 @@ pub fn classify_enter_context(source: &str, current_byte: usize) -> EnterContext
                             );
                             return EnterContext::IndentedCodeBlock { continuation_prefix };
                         }
+                        if let Some(fence_context) =
+                            classify_fence_line_hit(source, current_byte, frame.range.start, end)
+                        {
+                            return fence_context;
+                        }
                         return EnterContext::CodeBlock;
                     }
                 }
             }
-            Event::Start(Tag::MetadataBlock(_)) => {
-                if current_byte >= range.start && current_byte <= range.end {
-                    matched_literal_block = Some(EnterContext::LiteralBlockLine {
-                        continuation_prefix: literal_line_continuation_prefix(source, current_byte),
-                    });
-                }
+            Event::Start(Tag::MetadataBlock(_))
+                if current_byte >= range.start && current_byte <= range.end =>
+            {
+                matched_literal_block = Some(EnterContext::LiteralBlockLine {
+                    continuation_prefix: literal_line_continuation_prefix(source, current_byte),
+                });
             }
             Event::Start(Tag::Table(_)) => {
                 mark_item_content_seen(&mut item_stack);
@@ -1921,6 +2182,14 @@ fn source_line_is_empty(source: &str, byte: usize) -> bool {
         return false;
     };
     start == source_line_content_end(source, end)
+}
+
+/// 光标所在行为纯空白行(去 `\r` 后仅含空格/Tab)时返回其空白宽度,否则返回 `None`。
+fn blank_source_line_width(source: &str, byte: usize) -> Option<usize> {
+    let (start, _, end) = locate_source_line_bounds(source, byte)?;
+    let content_end = source_line_content_end(source, end);
+    let is_blank = source[start..content_end].bytes().all(|byte| matches!(byte, b' ' | b'\t'));
+    is_blank.then_some(content_end - start)
 }
 
 fn source_line_content_end(source: &str, line_end: usize) -> usize {
@@ -4011,5 +4280,240 @@ mod tests {
 
             assert_eq!(apply_augmentation_at(source, current_byte, &augmentation), expected_source);
         }
+    }
+
+    #[test]
+    fn delete_forward_before_a_sibling_block_line_is_consumed() {
+        // 段末 Delete 若会把下一行并上来自成 setext 标题/破坏 ATX/围栏/列表/引用,
+        // 必须拦截为消费型空操作(不删任何字节)。
+        for (source, cursor) in [
+            ("文字\n\n---", "文字".len()),
+            ("文字\r\n\r\n---", "文字".len()),
+            ("文字\n\n===", "文字".len()),
+            ("文字\n\n# 标题", "文字".len()),
+            ("文字\n\n```", "文字".len()),
+            ("文字\n\n- item", "文字".len()),
+            ("文字\n\n> 引用", "文字".len()),
+            ("- a\n\n- b", "- a".len()),
+            ("| a |\n|---|---|\n| b |", "| a |".len()),
+        ] {
+            let augmentation = augment_delete_forward(source, cursor)
+                .unwrap_or_else(|| panic!("DeleteForward at {source:?} must be guarded"));
+            let edited_source = apply_augmentation_at(source, cursor, &augmentation);
+
+            assert_eq!(edited_source, source, "DeleteForward must not alter {source:?}");
+            assert_eq!(augmentation.cursor_byte_after, cursor);
+        }
+    }
+
+    #[test]
+    fn delete_forward_at_paragraph_end_merges_the_following_paragraph() {
+        for (source, cursor, expected_source) in [
+            ("a\n\nb", 1, "ab"),
+            ("a\r\n\r\nb", 1, "ab"),
+            ("first\nsecond", "first".len(), "firstsecond"),
+            ("# 标题\n\n正文", "# 标题".len(), "# 标题正文"),
+        ] {
+            let augmentation = augment_delete_forward(source, cursor)
+                .unwrap_or_else(|| panic!("DeleteForward should merge paragraphs in {source:?}"));
+            let edited_source = apply_augmentation_at(source, cursor, &augmentation);
+
+            assert_eq!(edited_source, expected_source, "wrong merge result for {source:?}");
+            assert_eq!(augmentation.cursor_byte_after, cursor);
+        }
+    }
+
+    #[test]
+    fn delete_forward_inside_code_block_body_falls_back_to_default() {
+        // 代码体内的下一行只是代码文本(即使以 `#` 开头),不做块边界拦截。
+        let source = "```\nlet a\n# b\n```";
+        let cursor = "```\nlet a".len();
+
+        assert!(augment_delete_forward(source, cursor).is_none());
+    }
+
+    #[test]
+    fn delete_forward_before_code_block_closing_fence_is_consumed() {
+        let source = "```\ncode\n```\n\npara";
+        let cursor = "```\ncode".len();
+
+        let augmentation = augment_delete_forward(source, cursor)
+            .expect("DeleteForward must not merge the closing fence into code");
+        let edited_source = apply_augmentation_at(source, cursor, &augmentation);
+
+        assert_eq!(edited_source, source);
+        assert_eq!(augmentation.cursor_byte_after, cursor);
+    }
+
+    #[test]
+    fn delete_forward_after_hard_break_marker_keeps_default_behaviour() {
+        // 行尾硬换行标记属于段内结构,Delete 仍逐字符削弱标记。
+        let source = "first  \n\nsecond";
+        let cursor = "first".len();
+
+        assert!(augment_delete_forward(source, cursor).is_none());
+    }
+
+    #[test]
+    fn enter_on_opening_fence_line_moves_cursor_into_code_body() {
+        // 开头围栏行(含 info string)任意位置回车:在该行行尾插入单个换行,
+        // 光标进入代码体第一行,围栏本身保持完整。
+        for (source, cursor) in [
+            ("```rust\ncode\n```", 0),
+            ("```rust\ncode\n```", 5),
+            ("```rust\ncode\n```", "```rust".len()),
+            ("~~~\ncode\n~~~", "~~~".len()),
+            // 未闭合围栏(代码块延伸到 EOF)只有开头围栏行情形。
+            ("```rust\ncode", 5),
+        ] {
+            let fence_line_end = source.find('\n').unwrap_or(source.len());
+            let augmentation = augment_edit(source, cursor, AugmentKind::Enter)
+                .unwrap_or_else(|| panic!("Enter on opening fence line of {source:?}"));
+            let edited_source = apply_augmentation_at(source, cursor, &augmentation);
+            let mut expected_source = source.to_owned();
+            expected_source.insert(fence_line_end, '\n');
+
+            assert_eq!(edited_source, expected_source, "wrong opening fence enter for {source:?}");
+            assert_eq!(augmentation.cursor_byte_after, fence_line_end + 1);
+        }
+    }
+
+    #[test]
+    fn enter_on_closing_fence_line_exits_code_block() {
+        // 闭合围栏行任意位置回车:在闭合围栏行尾建立块边界,光标落到新空段。
+        for (source, cursor, expected_source) in [
+            ("```\ncode\n```", 9, "```\ncode\n```\n\n"),
+            ("```\ncode\n```", "```\ncode\n```".len(), "```\ncode\n```\n\n"),
+            ("~~~\ncode\n~~~", 11, "~~~\ncode\n~~~\n\n"),
+            ("```\ncode\n```\npara", 9, "```\ncode\n```\n\n\npara"),
+        ] {
+            let augmentation = augment_edit(source, cursor, AugmentKind::Enter)
+                .unwrap_or_else(|| panic!("Enter on closing fence line of {source:?}"));
+            let edited_source = apply_augmentation_at(source, cursor, &augmentation);
+
+            assert_eq!(edited_source, expected_source, "wrong closing fence enter for {source:?}");
+            assert_eq!(augmentation.cursor_byte_after, "```\ncode\n```\n\n".len());
+        }
+    }
+
+    #[test]
+    fn enter_inside_code_block_body_keeps_default_newline() {
+        // 代码体内部(含形似短围栏的代码行)回车仍回落默认裸换行。
+        for (source, cursor) in [
+            ("```\ncode\n```", 6),
+            ("````\n```\n````", 7),
+            ("````\ncode\n```", "````\ncode\n```".len()),
+        ] {
+            assert!(
+                augment_edit(source, cursor, AugmentKind::Enter).is_none(),
+                "code body Enter must stay default for {source:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn delete_forward_after_closing_fence_line_is_consumed_at_tight_boundary() {
+        // 闭合围栏行尾紧贴下一段(单个换行)时 Delete 必须拦截;
+        // 有空行兜底(≥2 个换行)时交回默认删除。
+        let tight_source = "```\ncode\n```\npara";
+        let tight_cursor = "```\ncode\n```".len();
+        let augmentation = augment_delete_forward(tight_source, tight_cursor)
+            .expect("DeleteForward must not merge a paragraph into the closing fence");
+
+        assert_eq!(apply_augmentation_at(tight_source, tight_cursor, &augmentation), tight_source);
+        assert_eq!(augmentation.cursor_byte_after, tight_cursor);
+
+        let spaced_source = "```\ncode\n```\n\npara";
+        assert!(augment_delete_forward(spaced_source, tight_cursor).is_none());
+    }
+
+    #[test]
+    fn list_item_hosting_only_a_nested_list_is_not_empty() {
+        // `- ` 下只挂子列表时父 item 不算空:父行回车不得删掉 `- ` 把子列表提升为顶层。
+        let source = "- \n  - x";
+        let cursor = "- ".len();
+
+        let context = classify_enter_context(source, cursor);
+        let EnterContext::ListItem { empty, .. } = context else {
+            panic!("expected ListItem context, got {context:?}");
+        };
+        assert!(!empty, "parent item hosting a nested list must not be empty");
+
+        let augmentation = augment_edit(source, cursor, AugmentKind::Enter)
+            .expect("Enter on the parent line should produce an augmentation");
+        let edited_source = apply_augmentation_at(source, cursor, &augmentation);
+        assert!(
+            edited_source.starts_with("- \n"),
+            "parent marker must survive Enter, got {edited_source:?}"
+        );
+    }
+
+    #[test]
+    fn enter_on_empty_nested_list_item_exits_one_level_at_a_time() {
+        // 嵌套空 item 回车退一层(行替换为父级前缀);残留行再回车继续退出,
+        // 最终落在干净的空行,而不是意外创建同级 item。
+        // 注意:空嵌套 item 必须跟在非空嵌套 item 之后,否则 `- ` 会被
+        // pulldown-cmark 解析成上一行文本的 setext 下划线。
+        let source = "- a\n  - b\n    - c\n    - ";
+        let mut current_source = source.to_owned();
+        let mut cursor = current_source.len();
+        for expected_source in
+            ["- a\n  - b\n    - c\n    ", "- a\n  - b\n    - c\n  ", "- a\n  - b\n    - c\n"]
+        {
+            let augmentation = augment_edit(&current_source, cursor, AugmentKind::Enter)
+                .expect("Enter should exit one list level");
+            current_source = apply_augmentation_at(&current_source, cursor, &augmentation);
+            cursor = augmentation.cursor_byte_after;
+
+            assert_eq!(current_source, expected_source);
+            assert_eq!(cursor, expected_source.len());
+        }
+    }
+
+    #[test]
+    fn enter_inside_list_marker_behaves_like_enter_at_content_start() {
+        // 光标在 marker 内部(`-| item`)回车 = 在内容起点回车,
+        // 不得产出 `-\n item` 这样的懒延续残留。
+        for (source, cursor, expected_source, expected_cursor) in [
+            ("- item", "-".len(), "- \n- item", "- \n- ".len()),
+            ("1. item", "1.".len(), "1. \n2. item", "1. \n2. ".len()),
+        ] {
+            let augmentation =
+                augment_edit(source, cursor, AugmentKind::Enter).unwrap_or_else(|| {
+                    panic!("Enter inside the marker of {source:?} should continue the list")
+                });
+            let edited_source = apply_augmentation_at(source, cursor, &augmentation);
+
+            assert_eq!(
+                edited_source, expected_source,
+                "wrong marker-interior enter for {source:?}"
+            );
+            assert_eq!(augmentation.cursor_byte_after, expected_cursor);
+        }
+    }
+
+    #[test]
+    fn heading_content_start_scans_actual_whitespace_after_hashes() {
+        // `#` 后的多余空白不属于标题内容:光标落在空白内时 Enter 回落默认。
+        for (source, cursor) in [("#  Title", 2), ("#\t\tTitle", 2), ("##   Title", 3)] {
+            assert!(
+                augment_edit(source, cursor, AugmentKind::Enter).is_none(),
+                "Enter inside heading marker whitespace must stay default for {source:?}"
+            );
+        }
+
+        // 内容区回车行为不变:切分标题。
+        let source = "#  Title";
+        let cursor = "#  ".len();
+        let augmentation = augment_edit(source, cursor, AugmentKind::Enter)
+            .expect("Enter at heading content start should split the heading");
+        assert_eq!(apply_augmentation_at(source, cursor, &augmentation), "#  \nTitle");
+
+        // 空标题(`#` 后无空白)行尾回车 = 退出到新段落。
+        let empty_heading = "#";
+        let augmentation = augment_edit(empty_heading, 1, AugmentKind::Enter)
+            .expect("Enter on an empty heading should create a paragraph break");
+        assert_eq!(apply_augmentation_at(empty_heading, 1, &augmentation), "#\n\n");
+        assert_eq!(augmentation.cursor_byte_after, 3);
     }
 }

@@ -336,11 +336,7 @@ impl<S: BlockSource> LazyLayout<S> {
             })
             .collect::<Vec<_>>();
         let mut source_line_map = SourceLineMap::from_source(source_text);
-        source_line_map.attach_layout(
-            &rendered_lines,
-            self.source_line_height,
-            self.hidden_separator_height,
-        );
+        source_line_map.attach_layout(&rendered_lines, self.source_line_height);
 
         let mut projected_empty_lines = source_line_map.projected_empty_lines().collect::<Vec<_>>();
         for empty_line in &mut projected_empty_lines {
@@ -1019,6 +1015,17 @@ pub struct StyleSegment {
     pub style: crate::builder::InlineStyle,
 }
 
+/// 该文档块是否展开为多个 LaidOutBlock（与 flatten_blocks 的展开规则一致）：
+/// 单块重排路径遇到这类块时必须整组处理，不能只取首个输出。
+fn expands_into_multiple_laid_out_blocks(block: &crate::builder::BlockNode) -> bool {
+    matches!(
+        block.kind,
+        crate::builder::BlockKind::Container
+            | crate::builder::BlockKind::TableRow_
+            | crate::builder::BlockKind::TableCell_ { .. }
+    )
+}
+
 fn laid_indices_by_document_block(
     document_block_count: usize,
     laid_to_doc: &[usize],
@@ -1214,7 +1221,16 @@ impl<S: BlockSource> LazyLayout<S> {
         let estimated_positions: Vec<f32> = laid_out_est.blocks.iter().map(|b| b.rect.y).collect();
         let total_height = laid_out_est.total_height;
         let laid_to_doc = flatten_blocks(source.blocks());
-        assert_eq!(laid_to_doc.len(), n, "flatten_blocks / layout_doc mismatch");
+        // flatten_blocks 镜像 layout_block 的输出基数（Container 与顶层
+        // TableRow_/TableCell_ 均按子块展开），两者必须一致。若未来新增块类型
+        // 打破该不变量，退化为不可映射（所有槽位跳过物化，渲染为空），
+        // 绝不 panic、也不把输出静默错位到错误的文档块。
+        let laid_to_doc = if laid_to_doc.len() == n {
+            laid_to_doc
+        } else {
+            debug_assert!(false, "flatten_blocks / layout_doc mismatch");
+            vec![usize::MAX; n]
+        };
 
         Self {
             source,
@@ -1380,8 +1396,7 @@ impl<S: BlockSource> LazyLayout<S> {
         if let Some(first_block) = self.laid_to_doc.first().and_then(|doc_idx| blocks.get(*doc_idx))
         {
             let first_start = first_block.block_range.start.min(source_text.len());
-            let leading_height =
-                map.extra_height_before_block(first_start, true, line_height, paragraph_spacing);
+            let leading_height = map.extra_height_before_block(first_start, true, line_height);
             if leading_height > 0.0 {
                 for y_delta in &mut self.y_delta {
                     *y_delta += leading_height;
@@ -1395,6 +1410,10 @@ impl<S: BlockSource> LazyLayout<S> {
         }
 
         // ── Inter-block blank lines ──
+        // 追加量 = (N-1)*line_height：空行 run 首行的间距由真实块间 gap 提供
+        // （见 SourceLineMap::attach_layout），此处不再按块类型特判。
+        // 嵌套块（列表项/引用块子块）间的空行补偿在 layout_block 内完成，
+        // 与此处共用同一公式。
         let mut gap_deltas = Vec::new();
         for laid_idx in 1..self.laid_to_doc.len() {
             let current_doc_idx = self.laid_to_doc[laid_idx];
@@ -1402,19 +1421,11 @@ impl<S: BlockSource> LazyLayout<S> {
             if previous_doc_idx == current_doc_idx {
                 continue;
             }
-            let previous_is_paragraph = blocks
-                .get(previous_doc_idx)
-                .is_some_and(|block| matches!(block.kind, crate::builder::BlockKind::Paragraph));
             let Some(current_block) = blocks.get(current_doc_idx) else {
                 continue;
             };
-            let current_is_paragraph =
-                matches!(current_block.kind, crate::builder::BlockKind::Paragraph);
-            let trailing_spacing =
-                if previous_is_paragraph && current_is_paragraph { paragraph_spacing } else { 0.0 };
             let current_start = current_block.block_range.start.min(source_text.len());
-            let extra_height =
-                map.extra_height_before_block(current_start, false, line_height, trailing_spacing);
+            let extra_height = map.extra_height_before_block(current_start, false, line_height);
             if extra_height > 0.0 {
                 gap_deltas.push((laid_idx - 1, extra_height));
                 self.total_height += extra_height;
@@ -1450,35 +1461,9 @@ impl<S: BlockSource> LazyLayout<S> {
 
     /// Invalidate laid-out blocks whose source text contains any of the given bytes.
     /// Used after cursor movement to only relayout affected blocks (span expansion).
+    /// 含旧/新光标字节的块必须无条件失效——即使它在渲染窗口外，否则其
+    /// active marker 会在光标离开后永久残留（失效只清标记，不会立即重排屏外块）。
     pub fn invalidate_lines_for_source_bytes(&mut self, bytes: impl IntoIterator<Item = usize>) {
-        self.invalidate_lines_for_source_bytes_matching(bytes, |_, _| true);
-    }
-
-    /// Invalidate source-byte blocks only when they intersect the current render window.
-    /// Offscreen cursor movement should not re-materialize distant blocks because edit
-    /// context can change folded Markdown markers and soft-wrap snapshots.
-    pub fn invalidate_visible_lines_for_source_bytes(
-        &mut self,
-        bytes: impl IntoIterator<Item = usize>,
-        scroll_y: f32,
-        viewport_h: f32,
-    ) {
-        let buffer = viewport_h * VIEWPORT_BUFFER_RATIO;
-        let range_start = (scroll_y - buffer).max(0.0);
-        let range_end = scroll_y + viewport_h + buffer;
-        self.invalidate_lines_for_source_bytes_matching(bytes, |layout, laid_idx| {
-            let block_top = layout.estimated_positions[laid_idx]
-                + layout.y_delta.get(laid_idx).copied().unwrap_or(0.0);
-            let block_bottom = block_top + layout.estimated_heights[laid_idx];
-            block_bottom >= range_start && block_top <= range_end
-        });
-    }
-
-    fn invalidate_lines_for_source_bytes_matching(
-        &mut self,
-        bytes: impl IntoIterator<Item = usize>,
-        should_invalidate: impl Fn(&Self, usize) -> bool,
-    ) {
         // Phase 1: collect the unique block line bases for each byte position.
         let mut bases: Vec<usize> = Vec::new();
         for byte in bytes {
@@ -1501,9 +1486,6 @@ impl<S: BlockSource> LazyLayout<S> {
             }
             let before = Self::count_block_lines_before(blocks, &blocks[doc_idx]);
             if bases.contains(&before) {
-                if !should_invalidate(self, laid_idx) {
-                    continue;
-                }
                 invalidated_indices.push(laid_idx);
             }
         }
@@ -1611,6 +1593,12 @@ impl<S: BlockSource> LazyLayout<S> {
                 _ => continue,
             };
             let src_block = &self.source.blocks()[doc_idx];
+            if expands_into_multiple_laid_out_blocks(src_block) {
+                let group_deltas =
+                    self.relayout_multi_output_group(i, style, Some(shaper), highlighter, doc);
+                deltas.extend(group_deltas);
+                continue;
+            }
 
             let base_y = self.estimated_positions[i];
             let mut ctx = super::context::LayoutCtx::new(
@@ -1750,6 +1738,17 @@ impl<S: BlockSource> LazyLayout<S> {
                 _ => continue,
             };
             let src_block = &self.source.blocks()[doc_idx];
+            if expands_into_multiple_laid_out_blocks(src_block) {
+                let group_deltas = self.relayout_multi_output_group(
+                    i,
+                    style,
+                    shaper.as_deref_mut(),
+                    highlighter,
+                    doc,
+                );
+                deltas.extend(group_deltas);
+                continue;
+            }
             let mut ctx = super::context::LayoutCtx::new(
                 doc,
                 style,
@@ -1993,6 +1992,74 @@ impl<S: BlockSource> LazyLayout<S> {
         deltas
     }
 
+    /// 一个文档块展开为多个 LaidOutBlock（根 Container，或意外到达顶层的
+    /// TableRow_/TableCell_）时的整组重排：一次 layout_block 的全部输出按序
+    /// 写入该组各槽位，避免只取首个输出而静默丢弃/复制后续块。
+    /// 返回各槽位的高度 delta。间距上下文（last_trailing_spacing 等）按估计
+    /// 布局的口径近似恢复——该路径在当前 parser 输出下不可达，仅为消除
+    /// 单块重排的静默丢弃而存在。
+    fn relayout_multi_output_group(
+        &mut self,
+        laid_idx: usize,
+        style: &MarkdownStyle,
+        mut shaper: Option<&mut shaping::Shaper>,
+        highlighter: Option<&dyn crate::builder::CodeHighlighter>,
+        doc: &dyn core::document::DocView,
+    ) -> Vec<(usize, f32)> {
+        let Some(doc_idx) = self.laid_to_doc.get(laid_idx).copied() else {
+            return Vec::new();
+        };
+        let Some(src_block) = self.source.blocks().get(doc_idx) else {
+            return Vec::new();
+        };
+        let ordinal = self.laid_to_doc[..laid_idx].iter().filter(|&&d| d == doc_idx).count();
+        let group_start = laid_idx - ordinal;
+        let base_y = self.estimated_positions[group_start];
+        let mut ctx = super::context::LayoutCtx::new(
+            doc,
+            style,
+            self.cached_viewport_w,
+            shaper.as_deref_mut(),
+            highlighter,
+            self.source_text.as_deref(),
+            self.edit_ctx.as_ref(),
+        );
+        ctx.selection_range = self.selection_range.as_ref();
+        ctx.ascii_diagrams.set_selection_range(self.selection_range.clone());
+        ctx.y = base_y;
+        ctx.indent = 0.0;
+        ctx.block_count = group_start;
+        layout_block(src_block, &mut ctx);
+        self.ascii_diagrams.extend(std::mem::take(&mut ctx.ascii_diagrams));
+        let outputs = std::mem::take(&mut ctx.output);
+
+        // ctx 不再使用，释放其对 shaper 的借用。
+        let has_shaper = shaper.is_some();
+        let mut deltas = Vec::new();
+        for (offset, mut new_block) in outputs.into_iter().enumerate() {
+            let slot = group_start + offset;
+            if slot >= self.estimated_heights.len() {
+                break;
+            }
+            if let Some(ref mut s) = shaper {
+                populate_style_segments(&mut new_block, s, style);
+            }
+            let old_bottom = self.estimated_positions[slot] + self.estimated_heights[slot];
+            let new_bottom = new_block.rect.y + new_block.rect.h;
+            let delta = new_bottom - old_bottom;
+            self.estimated_heights[slot] = new_bottom - self.estimated_positions[slot];
+            self.discard_ascii_diagrams_for_laid_index(slot);
+            self.retain_block_projections(slot, &new_block);
+            self.laid_out[slot] = Some(new_block);
+            self.precise[slot] = has_shaper;
+            if delta.abs() > 0.5 {
+                deltas.push((slot, delta));
+            }
+            self.total_height += delta;
+        }
+        deltas
+    }
+
     /// Re-precision-layout a single block with full HarfBuzz shaping.
     /// Returns the height delta. Caller should propagate y_delta if needed.
     /// After calling this, `flat_lines` may be stale — call `build_flat_lines()` if needed.
@@ -2010,6 +2077,17 @@ impl<S: BlockSource> LazyLayout<S> {
         }
         let doc_idx = self.laid_to_doc[idx];
         if doc_idx >= self.source.blocks().len() {
+            return 0.0;
+        }
+        if expands_into_multiple_laid_out_blocks(&self.source.blocks()[doc_idx]) {
+            // 多输出块整组重排；delta 已在组内按槽位计算，此处直接应用并重建
+            // flat lines，返回值保持 0 以免调用方重复应用。
+            let group_deltas =
+                self.relayout_multi_output_group(idx, style, Some(shaper), highlighter, doc);
+            if !group_deltas.is_empty() {
+                apply_deltas(&mut self.y_delta, &group_deltas);
+                self.build_flat_lines(doc);
+            }
             return 0.0;
         }
         // Use estimated_heights (slot height = spacing + content) rather than
@@ -2415,6 +2493,134 @@ mod tests {
     }
 
     #[test]
+    fn heading_blank_run_projects_editable_line_inside_real_gap() {
+        // `# T` 后跟 2 个空行：可编辑空行必须落在标题底部与段落顶边之间，
+        // 不得按 paragraph_spacing 假设而与段落文字重叠（heading_spacing_bottom 更小）。
+        let source = "# T\n\n\npara";
+        let style = default_style();
+        let layout = build_editing_layout(source, source.len(), 1);
+
+        let heading_line = layout
+            .flat_lines
+            .iter()
+            .find(|line| line.text.trim_end() == "T")
+            .expect("fixture must render the heading line");
+        let para_line = layout
+            .flat_lines
+            .iter()
+            .find(|line| line.text == "para")
+            .expect("fixture must render the paragraph line");
+        let heading_bottom = heading_line.rect.y + heading_line.rect.h;
+
+        assert_eq!(
+            layout.projected_empty_lines.len(),
+            1,
+            "run of two blank lines must project exactly one editable empty line"
+        );
+        let empty = layout.projected_empty_lines[0];
+        assert!(
+            empty.y_top >= heading_bottom - 0.01,
+            "editable empty line y {} must not overlap the heading (bottom {heading_bottom})",
+            empty.y_top
+        );
+        assert!(
+            empty.y_top + empty.height <= para_line.rect.y + 0.01,
+            "editable empty line bottom {} must not overlap the paragraph (top {})",
+            empty.y_top + empty.height,
+            para_line.rect.y
+        );
+        // 间距本身由真实 gap 提供：空行 run 额外占用恰好一个行高。
+        let gap = para_line.rect.y - heading_bottom;
+        let expected_gap = style.heading_spacing_bottom + style.line_height;
+        assert!(
+            (gap - expected_gap).abs() < 0.01,
+            "real gap {gap} must be heading_spacing_bottom + one line height ({expected_gap})"
+        );
+    }
+
+    #[test]
+    fn blank_run_between_paragraphs_reserves_only_editable_line_heights() {
+        // para→para 的 2 个空行：追加量 = (N-1)*line_height，间距只算一份真实
+        // paragraph_spacing，不再因块类型特判而多加一份。
+        let source = "a\n\n\nb";
+        let style = default_style();
+        let layout = build_editing_layout(source, source.len(), 1);
+
+        let a_line = layout.flat_lines.iter().find(|line| line.text == "a").expect("fixture has a");
+        let b_line = layout.flat_lines.iter().find(|line| line.text == "b").expect("fixture has b");
+        let gap = b_line.rect.y - (a_line.rect.y + a_line.rect.h);
+        let expected = style.paragraph_spacing + style.line_height;
+        assert!(
+            (gap - expected).abs() < 0.01,
+            "inter-block gap {gap} must equal paragraph_spacing + one line height ({expected})"
+        );
+
+        let empty = layout
+            .projected_empty_lines
+            .first()
+            .expect("fixture must project one editable empty line");
+        assert!(
+            (empty.y_top - (a_line.rect.y + a_line.rect.h + style.paragraph_spacing)).abs() < 0.01,
+            "editable empty line must sit right below the paragraph spacing, got y {}",
+            empty.y_top
+        );
+    }
+
+    #[test]
+    fn loose_list_item_reserves_blank_line_height_between_child_paragraphs() {
+        // `- a` 与项内子段落 `b` 之间有 2 个源空行：项内补偿 (N-1)*line_height，
+        // 子段落间距 = paragraph_spacing + line_height。
+        let source = "- a\n\n\n  b";
+        let style = default_style();
+        let layout = build_editing_layout(source, source.len(), 1);
+
+        let item_blocks = layout
+            .laid_out
+            .iter()
+            .flatten()
+            .find_map(|block| match &block.kind {
+                LaidOutBlockKind::ListItem { blocks, .. } if blocks.len() == 2 => Some(blocks),
+                _ => None,
+            })
+            .expect("fixture must produce a list item with two child paragraphs");
+        let first_bottom = item_blocks[0].rect.y + item_blocks[0].rect.h;
+        let second_top = item_blocks[1].rect.y;
+        let expected = style.paragraph_spacing + style.line_height;
+        assert!(
+            (second_top - first_bottom - expected).abs() < 0.01,
+            "child paragraph gap {} must equal paragraph_spacing + one line height ({expected})",
+            second_top - first_bottom
+        );
+    }
+
+    #[test]
+    fn editable_empty_line_inside_loose_list_stays_between_child_paragraphs() {
+        // 项内空行 run 的可编辑空行不得覆盖子段落文字。
+        let source = "- a\n\n\n  b";
+        let layout = build_editing_layout(source, source.len(), 1);
+
+        let a_line = layout.flat_lines.iter().find(|line| line.text == "a").expect("fixture has a");
+        let b_line = layout.flat_lines.iter().find(|line| line.text == "b").expect("fixture has b");
+        let a_bottom = a_line.rect.y + a_line.rect.h;
+
+        let empty = layout
+            .projected_empty_lines
+            .first()
+            .expect("fixture must project one editable empty line inside the list item");
+        assert!(
+            empty.y_top >= a_bottom - 0.01,
+            "editable empty line y {} must not overlap item text (bottom {a_bottom})",
+            empty.y_top
+        );
+        assert!(
+            empty.y_top + empty.height <= b_line.rect.y + 0.01,
+            "editable empty line bottom {} must not overlap child paragraph (top {})",
+            empty.y_top + empty.height,
+            b_line.rect.y
+        );
+    }
+
+    #[test]
     fn viewport_eviction_discards_ascii_diagram_sidecars_without_mismatching_same_first_row() {
         let filler = "filler line\n".repeat(100);
         let source =
@@ -2664,6 +2870,98 @@ mod tests {
         // Real Y equals rect.y
         let b0_y = lazy.laid_out[0].as_ref().unwrap().rect.y;
         assert!((lazy.laid_out[0].as_ref().unwrap().rect.y + lazy.y_delta[0] - b0_y).abs() < 0.01);
+    }
+
+    /// 合成的多输出文档块源：一个顶层块展开为多个 LaidOutBlock
+    /// （根 Container，或意外到达顶层的 TableRow_）。
+    struct MultiOutputDocSource {
+        blocks: Vec<crate::builder::BlockNode>,
+    }
+
+    impl BlockSource for MultiOutputDocSource {
+        fn blocks(&self) -> &[crate::builder::BlockNode] {
+            &self.blocks
+        }
+
+        fn headings(&self) -> &[crate::layout::HeadingEntry] {
+            &[]
+        }
+    }
+
+    fn multi_output_source(kind: crate::builder::BlockKind, md: &str) -> MultiOutputDocSource {
+        let parsed = parse_markdown(md);
+        let doc = MarkdownDoc::build(&parsed, &default_style());
+        let wrapper = crate::builder::BlockNode {
+            kind,
+            children: doc.blocks,
+            text_lines: vec![],
+            projected_lines: vec![],
+            text_styles: vec![],
+            source_range: crate::builder::BlockSource::Continuous(0..md.len()),
+            block_range: 0..md.len(),
+            code_line_source_starts: None,
+        };
+        MultiOutputDocSource { blocks: vec![wrapper] }
+    }
+
+    fn laid_text(layout: &LazyLayout<MultiOutputDocSource>, slot: usize) -> String {
+        let block = layout.laid_out[slot].as_ref().expect("slot must be materialized");
+        match &block.kind {
+            LaidOutBlockKind::Text { lines } => {
+                lines.iter().map(|line| line.text.as_str()).collect::<String>()
+            }
+            other => {
+                panic!("slot {slot} must be a text block, got {:?}", std::mem::discriminant(other))
+            }
+        }
+    }
+
+    #[test]
+    fn ensure_all_blocks_distributes_multi_output_doc_blocks() {
+        // 根 Container 的两个子段落必须分别落入两个槽位；
+        // 只取首个输出会把 slot 1 也填成 "alpha"（静默复制/丢弃）。
+        let style = default_style();
+        let md = "alpha\n\nomega";
+        let source = multi_output_source(crate::builder::BlockKind::Container, md);
+        let doc_view = core::document::StringDocView::new(md);
+        let mut layout = LazyLayout::new(source, &style, 400.0, &doc_view);
+        layout.ensure_all_blocks(&style, 400.0, None, None, &doc_view);
+
+        assert_eq!(layout.laid_out.len(), 2);
+        assert_eq!(laid_text(&layout, 0), "alpha");
+        assert_eq!(laid_text(&layout, 1), "omega");
+    }
+
+    #[test]
+    fn precise_block_at_distributes_multi_output_doc_blocks() {
+        let style = default_style();
+        let md = "alpha\n\nomega";
+        let source = multi_output_source(crate::builder::BlockKind::Container, md);
+        let doc_view = core::document::StringDocView::new(md);
+        let mut layout = LazyLayout::new(source, &style, 400.0, &doc_view);
+        let mut shaper = shaping::Shaper::new().expect("multi-output test needs a shaper");
+
+        layout.precise_block_at(0, &style, &mut shaper, None, &doc_view);
+
+        assert_eq!(laid_text(&layout, 0), "alpha");
+        assert_eq!(laid_text(&layout, 1), "omega");
+        assert!(layout.precise.iter().all(|&p| p), "both slots of the group become precise");
+    }
+
+    #[test]
+    fn top_level_table_row_expands_without_layout_mismatch() {
+        // flatten_blocks 必须镜像 layout_block 对顶层 TableRow_ 的子块展开，
+        // 否则 LazyLayout::new 的块数不变量被打破。
+        let style = default_style();
+        let md = "alpha\n\nomega";
+        let source = multi_output_source(crate::builder::BlockKind::TableRow_, md);
+        let doc_view = core::document::StringDocView::new(md);
+        let mut layout = LazyLayout::new(source, &style, 400.0, &doc_view);
+        layout.ensure_all_blocks(&style, 400.0, None, None, &doc_view);
+
+        assert_eq!(layout.laid_out.len(), 2);
+        assert_eq!(laid_text(&layout, 0), "alpha");
+        assert_eq!(laid_text(&layout, 1), "omega");
     }
 
     #[test]
