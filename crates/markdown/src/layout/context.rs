@@ -1,5 +1,7 @@
 //! Layout context and width estimation.
 
+use std::collections::HashSet;
+
 use core::unicode::{
     ucd_grapheme_cluster_joins, ucd_grapheme_cluster_joins_done, ucd_grapheme_cluster_lookup,
 };
@@ -373,6 +375,8 @@ pub struct LayoutCtx<'a> {
     /// Active block marker when cursor is in a heading/list/blockquote source range.
     /// Set by the block handler before layout, cleared after.
     pub(crate) active_block_marker: Option<crate::edit::ActiveBlockMarker>,
+    /// Physical source lines whose preceding blank run has already been reserved.
+    compensated_blank_run_line_starts: HashSet<usize>,
 }
 
 impl<'a> LayoutCtx<'a> {
@@ -436,7 +440,19 @@ impl<'a> LayoutCtx<'a> {
             selection_range: None,
             ascii_diagrams: super::ascii_diagram::AsciiDiagramRegistry::default(),
             active_block_marker: None,
+            compensated_blank_run_line_starts: HashSet::new(),
         }
+    }
+
+    pub(crate) fn reserve_blank_source_run(
+        &mut self,
+        following_line_start: usize,
+        blank_line_count: usize,
+    ) -> f32 {
+        if !self.compensated_blank_run_line_starts.insert(following_line_start) {
+            return 0.0;
+        }
+        blank_line_count.saturating_sub(1) as f32 * self.style.line_height
     }
 
     pub(crate) fn available_width(&self) -> f32 {

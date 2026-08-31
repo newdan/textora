@@ -1990,10 +1990,12 @@ impl<S: BlockSource> LazyLayout<S> {
             if let Some(ref mut s) = shaper {
                 populate_style_segments(&mut new_block, s, style);
             }
-            let old_bottom = self.estimated_positions[slot] + self.estimated_heights[slot];
-            let new_bottom = new_block.rect.y + new_block.rect.h;
-            let delta = new_bottom - old_bottom;
-            self.estimated_heights[slot] = new_bottom - self.estimated_positions[slot];
+            let normalized_y_delta = self.estimated_positions[slot] - new_block.rect.y;
+            shift_laid_out_block(&mut new_block, 0, normalized_y_delta);
+            let old_height = self.estimated_heights[slot];
+            let new_height = new_block.rect.h;
+            let delta = new_height - old_height;
+            self.estimated_heights[slot] = new_height;
             self.discard_ascii_diagrams_for_laid_index(slot);
             self.retain_block_projections(slot, &new_block);
             self.laid_out[slot] = Some(new_block);
@@ -2858,6 +2860,62 @@ mod tests {
         assert_eq!(laid_text(&layout, 0), "alpha");
         assert_eq!(laid_text(&layout, 1), "omega");
         assert!(layout.precise.iter().all(|&p| p), "both slots of the group become precise");
+    }
+
+    #[test]
+    fn precise_multi_output_group_propagates_each_height_delta_once() {
+        const VIEWPORT_WIDTH: f32 = 120.0;
+
+        let style = default_style();
+        let md = format!("{}\n\nomega", "wide ".repeat(40));
+        let source = multi_output_source(crate::builder::BlockKind::Container, &md);
+        let document_view = core::document::StringDocView::new(&md);
+        let mut layout = LazyLayout::new(source, &style, VIEWPORT_WIDTH, &document_view);
+        let estimated_first_height = layout.estimated_heights[0];
+        let mut shaper = shaping::Shaper::new().expect("multi-output test needs a shaper");
+
+        layout.precise_block_at(0, &style, &mut shaper, None, &document_view);
+
+        assert!(
+            (layout.estimated_heights[0] - estimated_first_height).abs() > 0.5,
+            "fixture must trigger a material first-slot height delta"
+        );
+
+        let reference_source = multi_output_source(crate::builder::BlockKind::Container, &md);
+        let mut reference_shaper =
+            shaping::Shaper::new().expect("multi-output reference layout needs a shaper");
+        let reference = layout_doc_with_shaper(
+            reference_source.blocks(),
+            &style,
+            VIEWPORT_WIDTH,
+            Some(&mut reference_shaper),
+            None,
+            &document_view,
+        );
+        let displayed_second_y =
+            layout.laid_out[1].as_ref().expect("second output must be materialized").rect.y
+                + layout.y_delta[1];
+
+        assert!(
+            (displayed_second_y - reference.blocks[1].rect.y).abs() < 0.01,
+            "second output y must match one-shot layout: lazy={displayed_second_y}, reference={}",
+            reference.blocks[1].rect.y
+        );
+        assert!(
+            (layout.total_height - reference.total_height).abs() < 0.01,
+            "total height must match one-shot layout: lazy={}, reference={}",
+            layout.total_height,
+            reference.total_height
+        );
+
+        let stable_second_y = displayed_second_y;
+        let stable_total_height = layout.total_height;
+        layout.precise_block_at(0, &style, &mut shaper, None, &document_view);
+        let repeated_second_y =
+            layout.laid_out[1].as_ref().expect("second output must remain materialized").rect.y
+                + layout.y_delta[1];
+        assert!((repeated_second_y - stable_second_y).abs() < 0.01);
+        assert!((layout.total_height - stable_total_height).abs() < 0.01);
     }
 
     #[test]

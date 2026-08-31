@@ -554,14 +554,22 @@ fn reserve_nested_blank_source_lines(ctx: &mut LayoutCtx, child: &BlockNode) {
     let Some(source_text) = ctx.source_text else {
         return;
     };
-    let blank_lines = count_preceding_blank_source_lines(source_text, child.block_range.start);
-    ctx.y += blank_lines.saturating_sub(1) as f32 * ctx.style.line_height;
+    let blank_run = preceding_blank_source_run(source_text, child.block_range.start);
+    ctx.y +=
+        ctx.reserve_blank_source_run(blank_run.following_line_start, blank_run.blank_line_count);
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct PrecedingBlankSourceRun {
+    following_line_start: usize,
+    blank_line_count: usize,
 }
 
 /// 统计紧贴 `byte` 所在源码行之前的连续空行数。
-fn count_preceding_blank_source_lines(source: &str, byte: usize) -> usize {
+fn preceding_blank_source_run(source: &str, byte: usize) -> PrecedingBlankSourceRun {
     let byte = byte.min(source.len());
     let mut line_start = source[..byte].rfind('\n').map_or(0, |idx| idx + 1);
+    let following_line_start = line_start;
     let mut count = 0;
     while line_start > 0 {
         let prev_line_end = line_start - 1;
@@ -569,13 +577,21 @@ fn count_preceding_blank_source_lines(source: &str, byte: usize) -> usize {
             break;
         }
         let prev_line_start = source[..prev_line_end].rfind('\n').map_or(0, |idx| idx + 1);
-        if !source[prev_line_start..prev_line_end].trim().is_empty() {
+        if !source_line_is_blank(&source[prev_line_start..prev_line_end]) {
             break;
         }
         count += 1;
         line_start = prev_line_start;
     }
-    count
+    PrecedingBlankSourceRun { following_line_start, blank_line_count: count }
+}
+
+fn source_line_is_blank(line: &str) -> bool {
+    let mut remaining = line.trim();
+    while let Some(after_marker) = remaining.strip_prefix('>') {
+        remaining = after_marker.trim_start();
+    }
+    remaining.is_empty()
 }
 
 fn shaped_prefix_width(
@@ -1667,6 +1683,65 @@ mod tests {
                 .find(|line| line.text.contains(needle)),
             LaidOutBlockKind::HorizontalRule => None,
         }
+    }
+
+    fn nested_line_displayed_y(source: &str, needle: &str) -> f32 {
+        let cursor_byte = source.find(needle).expect("fixture must contain the target line");
+        let layout = layout_with_cursor_and_width(source, cursor_byte, 400.0);
+        layout
+            .laid_out
+            .iter()
+            .enumerate()
+            .find_map(|(slot, block)| {
+                let line = find_line_in_block(block.as_ref()?, needle)?;
+                Some(line.rect.y + layout.y_delta[slot])
+            })
+            .expect("fixture must lay out the target line")
+    }
+
+    #[test]
+    fn nested_list_blockquote_blank_run_is_reserved_once() {
+        let style = default_style();
+        let fixtures = [("- a\n\n  > b", "- a\n\n\n  > b"), ("> a\n>\n> - b", "> a\n>\n>\n> - b")];
+
+        for (single_blank_source, double_blank_source) in fixtures {
+            let single_blank_y = nested_line_displayed_y(single_blank_source, "b");
+            let double_blank_y = nested_line_displayed_y(double_blank_source, "b");
+            assert!(
+                (double_blank_y - single_blank_y - style.line_height).abs() < 0.01,
+                "one additional editable blank line must move b by one line height for {double_blank_source:?}: single={single_blank_y}, double={double_blank_y}"
+            );
+        }
+    }
+
+    #[test]
+    fn separated_nested_blank_runs_are_each_reserved_once() {
+        let style = default_style();
+        let full_source = "> intro\n>\n>\n> - first\n>\n> separator\n>\n>\n> - second";
+        let first_run_shortened = "> intro\n>\n> - first\n>\n> separator\n>\n>\n> - second";
+        let second_run_shortened = "> intro\n>\n>\n> - first\n>\n> separator\n>\n> - second";
+        let parsed = parse_markdown(full_source);
+        let document = MarkdownDoc::build(&parsed, &style);
+
+        assert_eq!(document.blocks.len(), 1, "fixture must use one top-level LayoutCtx");
+        assert!(
+            matches!(document.blocks[0].kind, BlockKind::BlockQuote),
+            "fixture must keep both nested blank runs inside one top-level blockquote"
+        );
+
+        let full_first_y = nested_line_displayed_y(full_source, "first");
+        let shortened_first_y = nested_line_displayed_y(first_run_shortened, "first");
+        assert!(
+            (full_first_y - shortened_first_y - style.line_height).abs() < 0.01,
+            "the first nested blank run must reserve its editable line"
+        );
+
+        let full_second_y = nested_line_displayed_y(full_source, "second");
+        let shortened_second_y = nested_line_displayed_y(second_run_shortened, "second");
+        assert!(
+            (full_second_y - shortened_second_y - style.line_height).abs() < 0.01,
+            "the second nested blank run must reserve its editable line independently"
+        );
     }
 
     fn layout_with_cursor_and_width(
