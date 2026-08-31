@@ -4,6 +4,7 @@ use ui::core::widget::PointerClickKind;
 use ui::plugin::EditHitTarget;
 use ui::plugin::{CanvasDragPhase, CanvasDragRequest, CanvasDragResponse};
 
+use super::input_session::TextSelectionGranularity;
 use super::{EditorInputContext, EditorOutcome, EditorPointerOutcome, EditorRuntime, MouseCapture};
 use crate::event::ShellEffect;
 use crate::mouse_state::{CanvasDragEligibility, CanvasDragSession};
@@ -51,10 +52,19 @@ impl EditorRuntime {
                     return EditorPointerOutcome::from_editor(redraw_outcome(), cursor_icon);
                 }
                 let click_kind = self.pointer_click_tracker.record_press(position);
+                let granularity = selection_granularity(click_kind);
                 let extend = self.input_modifiers().shift_key();
-                if !self.begin_text_selection(context)
-                    || !self.place_pointer_selection(editor_bounds, position, extend, click_kind)
-                {
+                let selection_started =
+                    self.begin_text_selection_with_granularity(context, granularity);
+                let selection_placed = selection_started
+                    && self.place_pointer_selection(
+                        editor_bounds,
+                        position,
+                        extend,
+                        click_kind,
+                        None,
+                    );
+                if !selection_placed {
                     self.pointer_click_tracker.reset();
                     self.end_pointer_capture();
                     let cursor_icon = self.pointer_cursor_icon(context, editor_bounds, position);
@@ -62,6 +72,9 @@ impl EditorRuntime {
                         EditorOutcome::default(),
                         cursor_icon,
                     );
+                }
+                if let Some(initial_range) = self.current_text_selection_range() {
+                    self.set_initial_text_selection_range(initial_range);
                 }
                 redraw_outcome()
             }
@@ -76,12 +89,18 @@ impl EditorRuntime {
                 if self.pointer_capture() == MouseCapture::TextSelection
                     && self.pointer_input_allowed(context, position) =>
             {
+                let click_kind = self
+                    .text_selection_granularity()
+                    .map(pointer_click_kind)
+                    .unwrap_or(PointerClickKind::Single);
+                let initial_range = self.initial_text_selection_range();
                 let selection_outcome = self
                     .place_pointer_selection(
                         editor_bounds,
                         position,
                         true,
-                        PointerClickKind::Single,
+                        click_kind,
+                        initial_range.as_ref(),
                     )
                     .then(redraw_outcome)
                     .unwrap_or_default();
@@ -350,6 +369,7 @@ impl EditorRuntime {
         position: (f32, f32),
         extend: bool,
         click_kind: PointerClickKind,
+        initial_range: Option<&std::ops::Range<usize>>,
     ) -> bool {
         let Some(tab_id) = self.active_tab_id() else {
             return false;
@@ -373,6 +393,7 @@ impl EditorRuntime {
                 dpi,
                 extend,
                 click_kind,
+                initial_range,
             );
         }
         let Some(mut tab) = self.tab_session_mut(tab_id) else {
@@ -380,7 +401,7 @@ impl EditorRuntime {
         };
         let byte_offset = hit_test_text_byte(&tab, editor_rect, position, &settings, &metrics)
             .unwrap_or_else(|| tab.document.buffer_len());
-        place_text_pointer_selection(&mut tab, byte_offset, extend, click_kind);
+        place_text_pointer_selection(&mut tab, byte_offset, extend, click_kind, initial_range);
         true
     }
 
@@ -392,6 +413,7 @@ impl EditorRuntime {
         dpi: f32,
         extend: bool,
         click_kind: PointerClickKind,
+        initial_range: Option<&std::ops::Range<usize>>,
     ) -> bool {
         let bounds = {
             let Some(tab) = self.tab_session(tab_id) else {
@@ -410,7 +432,13 @@ impl EditorRuntime {
                 let Some(mut tab) = self.tab_session_mut(tab_id) else {
                     return false;
                 };
-                place_text_pointer_selection(&mut tab, byte_offset, extend, click_kind);
+                place_text_pointer_selection(
+                    &mut tab,
+                    byte_offset,
+                    extend,
+                    click_kind,
+                    initial_range,
+                );
                 let cursor_byte = tab.document.cursor_offset().to_usize();
                 tab.send_message(ui::plugin::PluginMessage::SetCursorByte(cursor_byte));
                 true
@@ -433,7 +461,14 @@ impl EditorRuntime {
             }
             Some(Some(EditHitTarget::CanvasControl { .. })) | Some(None) => false,
             Some(Some(EditHitTarget::SourceObject { .. } | EditHitTarget::ClearFocus)) => false,
-            None => self.place_plugin_byte_selection(tab_id, bounds, position, extend, click_kind),
+            None => self.place_plugin_byte_selection(
+                tab_id,
+                bounds,
+                position,
+                extend,
+                click_kind,
+                initial_range,
+            ),
         }
     }
 
@@ -444,6 +479,7 @@ impl EditorRuntime {
         position: (f32, f32),
         extend: bool,
         click_kind: PointerClickKind,
+        initial_range: Option<&std::ops::Range<usize>>,
     ) -> bool {
         let candidate = {
             let Some(tab) = self.tab_session(tab_id) else {
@@ -460,7 +496,11 @@ impl EditorRuntime {
             let Some(mut tab) = self.tab_session_mut(tab_id) else {
                 return false;
             };
-            place_text_caret(&mut tab, candidate, extend);
+            if extend {
+                place_text_pointer_selection(&mut tab, candidate, true, click_kind, initial_range);
+            } else {
+                place_text_caret(&mut tab, candidate, false);
+            }
             let snapped_candidate = tab.document.cursor_offset().to_usize();
             tab.send_message(ui::plugin::PluginMessage::SetCursorByte(snapped_candidate));
             snapped_candidate
@@ -485,7 +525,7 @@ impl EditorRuntime {
         let Some(mut tab) = self.tab_session_mut(tab_id) else {
             return false;
         };
-        place_text_pointer_selection(&mut tab, final_byte, extend, click_kind);
+        place_text_pointer_selection(&mut tab, final_byte, extend, click_kind, initial_range);
         let snapped_final = tab.document.cursor_offset().to_usize();
         tab.send_message(ui::plugin::PluginMessage::SetCursorByte(snapped_final));
         self.input_session.set_preferred_x(None);
@@ -522,6 +562,14 @@ impl EditorRuntime {
             tab.document.cursor_mut().selection_anchor = None;
         }
     }
+
+    fn current_text_selection_range(&self) -> Option<std::ops::Range<usize>> {
+        let tab_id = self.active_tab_id()?;
+        let tab = self.tab_session(tab_id)?;
+        let selection_anchor = tab.document.cursor().selection_anchor?;
+        let cursor_offset = tab.document.cursor_offset().to_usize();
+        Some(selection_anchor.min(cursor_offset)..selection_anchor.max(cursor_offset))
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -529,6 +577,22 @@ enum PointerPhase {
     Press,
     Move,
     Release,
+}
+
+fn selection_granularity(click_kind: PointerClickKind) -> TextSelectionGranularity {
+    match click_kind {
+        PointerClickKind::Single => TextSelectionGranularity::Grapheme,
+        PointerClickKind::Double => TextSelectionGranularity::Word,
+        PointerClickKind::Triple => TextSelectionGranularity::SourceLine,
+    }
+}
+
+fn pointer_click_kind(granularity: TextSelectionGranularity) -> PointerClickKind {
+    match granularity {
+        TextSelectionGranularity::Grapheme => PointerClickKind::Single,
+        TextSelectionGranularity::Word => PointerClickKind::Double,
+        TextSelectionGranularity::SourceLine => PointerClickKind::Triple,
+    }
 }
 
 fn pointer_event(event: &ui::Event) -> Option<((f32, f32), PointerPhase)> {
@@ -569,6 +633,7 @@ fn place_text_pointer_selection(
     byte_offset: usize,
     extend: bool,
     click_kind: PointerClickKind,
+    initial_range: Option<&std::ops::Range<usize>>,
 ) {
     let byte_offset = byte_offset.min(tab.document.buffer_len());
     if extend {
@@ -578,7 +643,14 @@ fn place_text_pointer_selection(
         PointerClickKind::Single => place_text_caret(tab, byte_offset, extend),
         PointerClickKind::Double => {
             let (selection_start, selection_end) = tab.document.word_select_at(byte_offset);
-            place_text_range_selection(tab, selection_start, selection_end, extend, byte_offset);
+            place_text_range_selection(
+                tab,
+                selection_start,
+                selection_end,
+                extend,
+                byte_offset,
+                initial_range,
+            );
         }
         PointerClickKind::Triple => {
             tab.document.set_cursor_offset_synced(byte_offset);
@@ -588,7 +660,14 @@ fn place_text_pointer_selection(
                 .document
                 .line_byte_offset(document_line + 1)
                 .unwrap_or_else(|| tab.document.buffer_len());
-            place_text_range_selection(tab, selection_start, selection_end, extend, byte_offset);
+            place_text_range_selection(
+                tab,
+                selection_start,
+                selection_end,
+                extend,
+                byte_offset,
+                initial_range,
+            );
         }
     }
     tab.cursor_render_state_mut().cursor_blink_instant = std::time::Instant::now();
@@ -600,10 +679,15 @@ fn place_text_range_selection(
     selection_end: usize,
     extend: bool,
     hit_byte: usize,
+    initial_range: Option<&std::ops::Range<usize>>,
 ) {
     if !extend {
         tab.document.cursor_mut().selection_anchor = Some(selection_start);
         tab.document.set_cursor_offset_synced(selection_end);
+        return;
+    }
+    if let Some(initial_range) = initial_range {
+        place_grouped_drag_selection(tab, selection_start..selection_end, initial_range);
         return;
     }
     let anchor = tab
@@ -616,6 +700,22 @@ fn place_text_range_selection(
     } else {
         tab.document.set_cursor_offset_synced(selection_start);
     }
+}
+
+fn place_grouped_drag_selection(
+    tab: &mut TabSessionMut<'_>,
+    current_range: std::ops::Range<usize>,
+    initial_range: &std::ops::Range<usize>,
+) {
+    let (selection_anchor, cursor_offset) = if current_range.end <= initial_range.start {
+        (initial_range.end, current_range.start)
+    } else if current_range.start >= initial_range.end {
+        (initial_range.start, current_range.end)
+    } else {
+        (initial_range.start, initial_range.end)
+    };
+    tab.document.cursor_mut().selection_anchor = Some(selection_anchor);
+    tab.document.set_cursor_offset_synced(cursor_offset);
 }
 
 fn hit_test_text_byte(

@@ -1,5 +1,7 @@
 //! 编辑器输入门与会话状态。
 
+use std::ops::Range;
+
 use crate::editor_runtime::{EditorFocus, EditorInputContext};
 use crate::mouse_state::{CanvasDragSession, MouseCapture};
 
@@ -8,6 +10,47 @@ pub(crate) enum PreeditUpdate {
     Rejected,
     Unchanged,
     Changed,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum TextSelectionGranularity {
+    Grapheme,
+    Word,
+    SourceLine,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum TextSelectionSession {
+    Grapheme,
+    AwaitingGroupedRange(TextSelectionGranularity),
+    Grouped { granularity: TextSelectionGranularity, initial_range: Range<usize> },
+}
+
+impl TextSelectionSession {
+    fn new(granularity: TextSelectionGranularity) -> Self {
+        match granularity {
+            TextSelectionGranularity::Grapheme => Self::Grapheme,
+            TextSelectionGranularity::Word | TextSelectionGranularity::SourceLine => {
+                Self::AwaitingGroupedRange(granularity)
+            }
+        }
+    }
+
+    fn granularity(&self) -> TextSelectionGranularity {
+        match self {
+            Self::Grapheme => TextSelectionGranularity::Grapheme,
+            Self::AwaitingGroupedRange(granularity) | Self::Grouped { granularity, .. } => {
+                *granularity
+            }
+        }
+    }
+
+    fn initial_range(&self) -> Option<Range<usize>> {
+        match self {
+            Self::Grouped { initial_range, .. } => Some(initial_range.clone()),
+            Self::Grapheme | Self::AwaitingGroupedRange(_) => None,
+        }
+    }
 }
 
 impl PreeditUpdate {
@@ -20,6 +63,7 @@ impl PreeditUpdate {
 pub(crate) struct EditorInputSession {
     modifiers: winit::keyboard::ModifiersState,
     pointer_capture: MouseCapture,
+    text_selection_session: Option<TextSelectionSession>,
     canvas_drag_session: Option<CanvasDragSession>,
     preedit_text: String,
     preedit_cursor: Option<(usize, usize)>,
@@ -31,6 +75,7 @@ impl EditorInputSession {
         Self {
             modifiers: winit::keyboard::ModifiersState::default(),
             pointer_capture: MouseCapture::None,
+            text_selection_session: None,
             canvas_drag_session: None,
             preedit_text: String::new(),
             preedit_cursor: None,
@@ -61,12 +106,17 @@ impl EditorInputSession {
         self.pointer_capture != MouseCapture::None || pointer_inside_editor
     }
 
-    pub(crate) fn start_text_selection(&mut self, context: EditorInputContext) -> bool {
+    pub(crate) fn start_text_selection(
+        &mut self,
+        context: EditorInputContext,
+        granularity: TextSelectionGranularity,
+    ) -> bool {
         if !self.keyboard_allowed(context) {
             return false;
         }
         self.canvas_drag_session = None;
         self.pointer_capture = MouseCapture::TextSelection;
+        self.text_selection_session = Some(TextSelectionSession::new(granularity));
         true
     }
 
@@ -75,6 +125,7 @@ impl EditorInputSession {
             return false;
         }
         self.pointer_capture = MouseCapture::CanvasDrag;
+        self.text_selection_session = None;
         true
     }
 
@@ -100,11 +151,36 @@ impl EditorInputSession {
 
     pub(crate) fn end_pointer_capture(&mut self) {
         self.pointer_capture = MouseCapture::None;
+        self.text_selection_session = None;
         self.canvas_drag_session = None;
     }
 
     pub(crate) fn pointer_capture(&self) -> MouseCapture {
         self.pointer_capture
+    }
+
+    pub(crate) fn text_selection_granularity(&self) -> Option<TextSelectionGranularity> {
+        if self.pointer_capture != MouseCapture::TextSelection {
+            return None;
+        }
+        self.text_selection_session.as_ref().map(TextSelectionSession::granularity)
+    }
+
+    pub(crate) fn set_initial_text_selection_range(&mut self, initial_range: Range<usize>) {
+        let Some(TextSelectionSession::AwaitingGroupedRange(granularity)) =
+            self.text_selection_session.as_ref()
+        else {
+            return;
+        };
+        self.text_selection_session =
+            Some(TextSelectionSession::Grouped { granularity: *granularity, initial_range });
+    }
+
+    pub(crate) fn initial_text_selection_range(&self) -> Option<Range<usize>> {
+        if self.pointer_capture != MouseCapture::TextSelection {
+            return None;
+        }
+        self.text_selection_session.as_ref().and_then(TextSelectionSession::initial_range)
     }
 
     pub(crate) fn set_preferred_x(&mut self, preferred_x: Option<f32>) {
@@ -144,6 +220,7 @@ impl EditorInputSession {
 
     pub(crate) fn focus_lost(&mut self) {
         self.pointer_capture = MouseCapture::None;
+        self.text_selection_session = None;
         self.canvas_drag_session = None;
         self.clear_preedit();
         self.preferred_x = None;
@@ -170,7 +247,7 @@ mod tests {
         let context = EditorInputContext { focus: EditorFocus::Inactive, ..active_context() };
 
         assert!(!session.keyboard_allowed(context));
-        assert!(!session.start_text_selection(context));
+        assert!(!session.start_text_selection(context, TextSelectionGranularity::Grapheme));
         assert_eq!(
             session.update_preedit(context, "拼".to_owned(), Some((0, 3))),
             PreeditUpdate::Rejected
@@ -192,7 +269,7 @@ mod tests {
         let mut session = EditorInputSession::new();
         let context = active_context();
 
-        assert!(session.start_text_selection(context));
+        assert!(session.start_text_selection(context, TextSelectionGranularity::Grapheme));
         assert_eq!(session.pointer_capture(), MouseCapture::TextSelection);
         assert!(session.pointer_allowed(context, false));
         session.end_pointer_capture();
@@ -215,5 +292,30 @@ mod tests {
         assert_eq!(session.pointer_capture(), MouseCapture::None);
         assert!(session.preedit().0.is_empty());
         assert!(session.preferred_x().is_none());
+    }
+
+    #[test]
+    fn text_selection_granularity_follows_pointer_capture_lifetime() {
+        let mut session = EditorInputSession::new();
+        let context = active_context();
+
+        assert!(session.start_text_selection(context, TextSelectionGranularity::Word));
+        assert_eq!(session.text_selection_granularity(), Some(TextSelectionGranularity::Word));
+        session.set_initial_text_selection_range(6..11);
+        assert_eq!(session.initial_text_selection_range(), Some(6..11));
+
+        session.end_pointer_capture();
+        assert_eq!(session.text_selection_granularity(), None);
+        assert_eq!(session.initial_text_selection_range(), None);
+
+        assert!(session.start_text_selection(context, TextSelectionGranularity::SourceLine));
+        assert_eq!(
+            session.text_selection_granularity(),
+            Some(TextSelectionGranularity::SourceLine)
+        );
+
+        session.focus_lost();
+        assert_eq!(session.text_selection_granularity(), None);
+        assert_eq!(session.initial_text_selection_range(), None);
     }
 }

@@ -741,6 +741,7 @@ impl EditorRuntime {
         let canvas_pointer_changed = !focused && self.clear_active_canvas_pointer();
         if !focused {
             self.pointer_click_tracker.reset();
+            self.input_session.focus_lost();
         }
         if self.render_session.window_focused() != focused || canvas_pointer_changed {
             self.render_session.request_redraw();
@@ -1153,7 +1154,35 @@ impl EditorRuntime {
     }
 
     pub fn begin_text_selection(&mut self, context: EditorInputContext) -> bool {
-        self.input_session.start_text_selection(context)
+        self.begin_text_selection_with_granularity(
+            context,
+            input_session::TextSelectionGranularity::Grapheme,
+        )
+    }
+
+    pub(crate) fn begin_text_selection_with_granularity(
+        &mut self,
+        context: EditorInputContext,
+        granularity: input_session::TextSelectionGranularity,
+    ) -> bool {
+        self.input_session.start_text_selection(context, granularity)
+    }
+
+    pub(crate) fn text_selection_granularity(
+        &self,
+    ) -> Option<input_session::TextSelectionGranularity> {
+        self.input_session.text_selection_granularity()
+    }
+
+    pub(crate) fn set_initial_text_selection_range(
+        &mut self,
+        initial_range: std::ops::Range<usize>,
+    ) {
+        self.input_session.set_initial_text_selection_range(initial_range);
+    }
+
+    pub(crate) fn initial_text_selection_range(&self) -> Option<std::ops::Range<usize>> {
+        self.input_session.initial_text_selection_range()
     }
 
     pub fn begin_canvas_drag(&mut self, context: EditorInputContext) -> bool {
@@ -1208,13 +1237,7 @@ impl EditorRuntime {
     }
 
     pub fn focus_lost(&mut self) {
-        let canvas_pointer_changed = self.clear_active_canvas_pointer();
-        self.pointer_click_tracker.reset();
-        self.input_session.focus_lost();
-        self.render_session.set_window_focused(false);
-        if canvas_pointer_changed {
-            self.render_session.request_redraw();
-        }
+        self.set_window_focus(false);
     }
 
     pub fn invalidate_reshape(&mut self) -> u64 {
@@ -1394,7 +1417,12 @@ mod tests {
     use std::rc::Rc;
     use ui::plugin::PluginFactory;
 
+    const POINTER_PROBE_MIDDLE_HIT_X_PX: f32 = 220.0;
+    const POINTER_PROBE_TRAILING_HIT_X_PX: f32 = 280.0;
+
     struct PointerProbePlugin;
+
+    struct ByteHitPointerProbePlugin;
 
     struct WysiwygInputProbePlugin {
         scroll_y: Rc<Cell<f32>>,
@@ -1584,12 +1612,16 @@ mod tests {
             _document: &dyn core::document::DocView,
         ) -> ui::plugin::PluginResponse {
             match query {
-                ui::plugin::PluginQuery::HitTestEditTarget { .. } => {
+                ui::plugin::PluginQuery::HitTestEditTarget { x, .. } => {
+                    let byte_offset = if x < POINTER_PROBE_MIDDLE_HIT_X_PX {
+                        2
+                    } else if x < POINTER_PROBE_TRAILING_HIT_X_PX {
+                        8
+                    } else {
+                        14
+                    };
                     ui::plugin::PluginResponse::EditHitTarget(Some(
-                        ui::plugin::EditHitTarget::TextCaret {
-                            byte_offset: 2,
-                            selection_scope: None,
-                        },
+                        ui::plugin::EditHitTarget::TextCaret { byte_offset, selection_scope: None },
                     ))
                 }
                 _ => ui::plugin::PluginResponse::None,
@@ -1601,6 +1633,49 @@ mod tests {
         }
 
         fn needs_cursor_blink_wakeup(&self) -> bool {
+            true
+        }
+    }
+
+    impl ui::plugin::ViewPlugin for ByteHitPointerProbePlugin {
+        fn name(&self) -> &str {
+            "byte-hit-pointer-probe"
+        }
+
+        fn render(
+            &mut self,
+            _document: &dyn core::document::DocView,
+            _bounds: ui::Rect,
+            _theme: &ui::Theme,
+            _shaper: &mut shaping::Shaper,
+            _dpi_scale: f32,
+        ) -> ui::DrawList {
+            ui::DrawList::new()
+        }
+
+        fn query(
+            &self,
+            query: ui::plugin::PluginQuery,
+            _document: &dyn core::document::DocView,
+        ) -> ui::plugin::PluginResponse {
+            match query {
+                ui::plugin::PluginQuery::HitTestByte { x, .. } => {
+                    let byte_offset = if x < POINTER_PROBE_MIDDLE_HIT_X_PX { 2 } else { 8 };
+                    ui::plugin::PluginResponse::BytePosition(Some(byte_offset))
+                }
+                _ => ui::plugin::PluginResponse::None,
+            }
+        }
+
+        fn handle_message(
+            &mut self,
+            message: ui::plugin::PluginMessage,
+            _document: &mut dyn core::document::DocViewMut,
+        ) -> bool {
+            matches!(message, ui::plugin::PluginMessage::SetCursorByte(_))
+        }
+
+        fn handles_own_rendering(&self) -> bool {
             true
         }
     }
@@ -1691,6 +1766,51 @@ mod tests {
             OpenDisposition::Persistent,
         );
         runtime
+    }
+
+    fn runtime_with_pointer_probe_text(text: &str) -> EditorRuntime {
+        let mut runtime = runtime_with_clean_tab();
+        let tab_id = runtime.active_tab_id().expect("test runtime should have an active tab");
+        let snapshot = runtime.document_text_snapshot(tab_id).expect("text snapshot should exist");
+        runtime
+            .replace_document_text(DocumentTextReplacement {
+                tab_id,
+                content_revision: snapshot.content_revision,
+                range: 0..snapshot.text.len(),
+                replacement: text.to_owned(),
+            })
+            .expect("test document replacement should succeed");
+        runtime
+            .tab_session_mut(tab_id)
+            .expect("active tab should have a runtime")
+            .replace_plugin(Box::new(PointerProbePlugin));
+        runtime
+    }
+
+    fn runtime_with_byte_hit_pointer_probe_text(text: &str) -> EditorRuntime {
+        let mut runtime = runtime_with_pointer_probe_text(text);
+        let tab_id = runtime.active_tab_id().expect("test runtime should have an active tab");
+        runtime
+            .tab_session_mut(tab_id)
+            .expect("active tab should have a runtime")
+            .replace_plugin(Box::new(ByteHitPointerProbePlugin));
+        runtime
+    }
+
+    fn install_plain_text_hit_test_lines(runtime: &mut EditorRuntime, line_count: usize) {
+        let tab_id = runtime.active_tab_id().expect("test runtime should have an active tab");
+        runtime
+            .tab_session_mut(tab_id)
+            .expect("active plain-text tab should have a runtime")
+            .display_mut()
+            .advance_cache = (0..line_count)
+            .map(|doc_line| ui::render_geom::AdvanceCacheEntry {
+                doc_line,
+                vl_byte_start: 0,
+                vl_grapheme_start: 0,
+                clusters: vec![(1, 180.0, 0), (2, 220.0, 1), (3, 260.0, 2)],
+            })
+            .collect();
     }
 
     fn paint_editor_surface(runtime: &mut EditorRuntime, editor_bounds: ui::Rect) {
@@ -2122,6 +2242,54 @@ mod tests {
     }
 
     #[test]
+    fn public_window_focus_loss_ends_text_selection_capture() {
+        let mut runtime = runtime_with_pointer_probe_text("hello world test");
+        let context = EditorInputContext { focus: EditorFocus::Active, modal_blocked: false };
+        let world_pointer = (240.0, 260.0);
+        paint_editor_surface(&mut runtime, ui::Rect::new(100.0, 200.0, 640.0, 480.0));
+        runtime.handle_pointer_event(
+            context,
+            &ui::Event::MouseDown {
+                px: world_pointer.0,
+                py: world_pointer.1,
+                button: ui::MouseButton::Left,
+            },
+        );
+        runtime.handle_pointer_event(
+            context,
+            &ui::Event::MouseUp {
+                px: world_pointer.0,
+                py: world_pointer.1,
+                button: ui::MouseButton::Left,
+            },
+        );
+        runtime.handle_pointer_event(
+            context,
+            &ui::Event::MouseDown {
+                px: world_pointer.0,
+                py: world_pointer.1,
+                button: ui::MouseButton::Left,
+            },
+        );
+        let _ = runtime.take_redraw_request();
+        assert_eq!(runtime.pointer_capture(), MouseCapture::TextSelection);
+        assert_eq!(
+            runtime.text_selection_granularity(),
+            Some(input_session::TextSelectionGranularity::Word)
+        );
+        assert_eq!(runtime.initial_text_selection_range(), Some(6..11));
+
+        runtime.set_window_focus(false);
+
+        assert_eq!(runtime.pointer_capture(), MouseCapture::None);
+        assert_eq!(runtime.text_selection_granularity(), None);
+        assert_eq!(runtime.initial_text_selection_range(), None);
+        assert!(runtime.take_redraw_request());
+        runtime.set_window_focus(false);
+        assert!(!runtime.take_redraw_request());
+    }
+
+    #[test]
     fn custom_editor_pointer_press_places_the_document_caret() {
         let mut runtime = runtime_with_clean_tab();
         let tab_id = runtime.active_tab_id().expect("test runtime should have an active tab");
@@ -2174,6 +2342,166 @@ mod tests {
     }
 
     #[test]
+    fn custom_editor_double_click_selection_survives_pointer_jitter() {
+        let mut runtime = runtime_with_clean_tab();
+        let tab_id = runtime.active_tab_id().expect("test runtime should have an active tab");
+        runtime
+            .tab_session_mut(tab_id)
+            .expect("active tab should have a runtime")
+            .replace_plugin(Box::new(PointerProbePlugin));
+        let context = EditorInputContext { focus: EditorFocus::Active, modal_blocked: false };
+        let pointer = (180.0, 260.0);
+        paint_editor_surface(&mut runtime, ui::Rect::new(100.0, 200.0, 640.0, 480.0));
+
+        runtime.handle_pointer_event(
+            context,
+            &ui::Event::MouseDown { px: pointer.0, py: pointer.1, button: ui::MouseButton::Left },
+        );
+        runtime.handle_pointer_event(
+            context,
+            &ui::Event::MouseUp { px: pointer.0, py: pointer.1, button: ui::MouseButton::Left },
+        );
+        runtime.handle_pointer_event(
+            context,
+            &ui::Event::MouseDown { px: pointer.0, py: pointer.1, button: ui::MouseButton::Left },
+        );
+        runtime.handle_pointer_event(
+            context,
+            &ui::Event::MouseMove { px: pointer.0 + 1.0, py: pointer.1 },
+        );
+
+        let snapshot = &runtime.workspace_snapshot().tabs[0];
+        assert_eq!(snapshot.selection_anchor, Some(0));
+        assert_eq!(snapshot.cursor_offset, 5);
+    }
+
+    #[test]
+    fn custom_editor_double_click_dragging_left_keeps_the_initial_word() {
+        let mut runtime = runtime_with_pointer_probe_text("hello world test");
+        let context = EditorInputContext { focus: EditorFocus::Active, modal_blocked: false };
+        let world_pointer = (240.0, 260.0);
+        let hello_pointer = (180.0, 260.0);
+        paint_editor_surface(&mut runtime, ui::Rect::new(100.0, 200.0, 640.0, 480.0));
+
+        runtime.handle_pointer_event(
+            context,
+            &ui::Event::MouseDown {
+                px: world_pointer.0,
+                py: world_pointer.1,
+                button: ui::MouseButton::Left,
+            },
+        );
+        runtime.handle_pointer_event(
+            context,
+            &ui::Event::MouseUp {
+                px: world_pointer.0,
+                py: world_pointer.1,
+                button: ui::MouseButton::Left,
+            },
+        );
+        runtime.handle_pointer_event(
+            context,
+            &ui::Event::MouseDown {
+                px: world_pointer.0,
+                py: world_pointer.1,
+                button: ui::MouseButton::Left,
+            },
+        );
+        runtime.handle_pointer_event(
+            context,
+            &ui::Event::MouseMove { px: hello_pointer.0, py: hello_pointer.1 },
+        );
+
+        let snapshot = &runtime.workspace_snapshot().tabs[0];
+        assert_eq!(snapshot.selection_anchor, Some(11));
+        assert_eq!(snapshot.cursor_offset, 0);
+    }
+
+    #[test]
+    fn custom_editor_double_click_dragging_right_extends_by_word() {
+        let mut runtime = runtime_with_pointer_probe_text("hello world test");
+        let context = EditorInputContext { focus: EditorFocus::Active, modal_blocked: false };
+        let world_pointer = (240.0, 260.0);
+        let test_pointer = (300.0, 260.0);
+        paint_editor_surface(&mut runtime, ui::Rect::new(100.0, 200.0, 640.0, 480.0));
+
+        runtime.handle_pointer_event(
+            context,
+            &ui::Event::MouseDown {
+                px: world_pointer.0,
+                py: world_pointer.1,
+                button: ui::MouseButton::Left,
+            },
+        );
+        runtime.handle_pointer_event(
+            context,
+            &ui::Event::MouseUp {
+                px: world_pointer.0,
+                py: world_pointer.1,
+                button: ui::MouseButton::Left,
+            },
+        );
+        runtime.handle_pointer_event(
+            context,
+            &ui::Event::MouseDown {
+                px: world_pointer.0,
+                py: world_pointer.1,
+                button: ui::MouseButton::Left,
+            },
+        );
+        runtime.handle_pointer_event(
+            context,
+            &ui::Event::MouseMove { px: test_pointer.0, py: test_pointer.1 },
+        );
+
+        let snapshot = &runtime.workspace_snapshot().tabs[0];
+        assert_eq!(snapshot.selection_anchor, Some(6));
+        assert_eq!(snapshot.cursor_offset, 16);
+    }
+
+    #[test]
+    fn byte_hit_editor_double_click_dragging_left_keeps_the_initial_word() {
+        let mut runtime = runtime_with_byte_hit_pointer_probe_text("hello world test");
+        let context = EditorInputContext { focus: EditorFocus::Active, modal_blocked: false };
+        let world_pointer = (240.0, 260.0);
+        let hello_pointer = (180.0, 260.0);
+        paint_editor_surface(&mut runtime, ui::Rect::new(100.0, 200.0, 640.0, 480.0));
+
+        runtime.handle_pointer_event(
+            context,
+            &ui::Event::MouseDown {
+                px: world_pointer.0,
+                py: world_pointer.1,
+                button: ui::MouseButton::Left,
+            },
+        );
+        runtime.handle_pointer_event(
+            context,
+            &ui::Event::MouseUp {
+                px: world_pointer.0,
+                py: world_pointer.1,
+                button: ui::MouseButton::Left,
+            },
+        );
+        runtime.handle_pointer_event(
+            context,
+            &ui::Event::MouseDown {
+                px: world_pointer.0,
+                py: world_pointer.1,
+                button: ui::MouseButton::Left,
+            },
+        );
+        runtime.handle_pointer_event(
+            context,
+            &ui::Event::MouseMove { px: hello_pointer.0, py: hello_pointer.1 },
+        );
+
+        let snapshot = &runtime.workspace_snapshot().tabs[0];
+        assert_eq!(snapshot.selection_anchor, Some(11));
+        assert_eq!(snapshot.cursor_offset, 0);
+    }
+
+    #[test]
     fn plain_text_editor_triple_click_selects_the_source_line() {
         let mut runtime = runtime_with_clean_tab();
         let tab_id = runtime.active_tab_id().expect("test runtime should have an active tab");
@@ -2209,6 +2537,139 @@ mod tests {
         let snapshot = &runtime.workspace_snapshot().tabs[0];
         assert_eq!(snapshot.selection_anchor, Some(0));
         assert_eq!(snapshot.cursor_offset, 5);
+    }
+
+    #[test]
+    fn plain_text_triple_click_drag_extends_by_source_line() {
+        let mut runtime = runtime_with_clean_tab();
+        let tab_id = runtime.active_tab_id().expect("test runtime should have an active tab");
+        let snapshot = runtime.document_text_snapshot(tab_id).expect("text snapshot should exist");
+        runtime
+            .replace_document_text(DocumentTextReplacement {
+                tab_id,
+                content_revision: snapshot.content_revision,
+                range: 0..snapshot.text.len(),
+                replacement: "alpha\nbeta".to_owned(),
+            })
+            .expect("test document replacement should succeed");
+        runtime
+            .tab_session_mut(tab_id)
+            .expect("active plain-text tab should have a runtime")
+            .display_mut()
+            .advance_cache = vec![
+            ui::render_geom::AdvanceCacheEntry {
+                doc_line: 0,
+                vl_byte_start: 0,
+                vl_grapheme_start: 0,
+                clusters: vec![(1, 180.0, 0), (2, 220.0, 1), (3, 260.0, 2)],
+            },
+            ui::render_geom::AdvanceCacheEntry {
+                doc_line: 1,
+                vl_byte_start: 0,
+                vl_grapheme_start: 0,
+                clusters: vec![(1, 180.0, 0), (2, 220.0, 1), (3, 260.0, 2)],
+            },
+        ];
+        let context = EditorInputContext { focus: EditorFocus::Active, modal_blocked: false };
+        let editor_bounds = ui::Rect::new(100.0, 200.0, 640.0, 480.0);
+        let first_line_pointer = (210.0, editor_bounds.y + 5.0);
+        let line_height =
+            ui::settings::UiMetrics::from_settings(&runtime.settings, 1.0).line_height;
+        let second_line_pointer = (210.0, first_line_pointer.1 + line_height);
+        paint_editor_surface(&mut runtime, editor_bounds);
+
+        for _ in 0..2 {
+            runtime.handle_pointer_event(
+                context,
+                &ui::Event::MouseDown {
+                    px: first_line_pointer.0,
+                    py: first_line_pointer.1,
+                    button: ui::MouseButton::Left,
+                },
+            );
+            runtime.handle_pointer_event(
+                context,
+                &ui::Event::MouseUp {
+                    px: first_line_pointer.0,
+                    py: first_line_pointer.1,
+                    button: ui::MouseButton::Left,
+                },
+            );
+        }
+        runtime.handle_pointer_event(
+            context,
+            &ui::Event::MouseDown {
+                px: first_line_pointer.0,
+                py: first_line_pointer.1,
+                button: ui::MouseButton::Left,
+            },
+        );
+        runtime.handle_pointer_event(
+            context,
+            &ui::Event::MouseMove { px: second_line_pointer.0, py: second_line_pointer.1 },
+        );
+
+        let snapshot = &runtime.workspace_snapshot().tabs[0];
+        assert_eq!(snapshot.selection_anchor, Some(0));
+        assert_eq!(snapshot.cursor_offset, 10);
+    }
+
+    #[test]
+    fn plain_text_triple_click_dragging_up_keeps_the_initial_source_line() {
+        let mut runtime = runtime_with_clean_tab();
+        let tab_id = runtime.active_tab_id().expect("test runtime should have an active tab");
+        let snapshot = runtime.document_text_snapshot(tab_id).expect("text snapshot should exist");
+        runtime
+            .replace_document_text(DocumentTextReplacement {
+                tab_id,
+                content_revision: snapshot.content_revision,
+                range: 0..snapshot.text.len(),
+                replacement: "alpha\nbeta\ngamma".to_owned(),
+            })
+            .expect("test document replacement should succeed");
+        install_plain_text_hit_test_lines(&mut runtime, 3);
+        let context = EditorInputContext { focus: EditorFocus::Active, modal_blocked: false };
+        let editor_bounds = ui::Rect::new(100.0, 200.0, 640.0, 480.0);
+        let line_height =
+            ui::settings::UiMetrics::from_settings(&runtime.settings, 1.0).line_height;
+        let first_line_pointer = (210.0, editor_bounds.y + 5.0);
+        let second_line_pointer = (210.0, first_line_pointer.1 + line_height);
+        paint_editor_surface(&mut runtime, editor_bounds);
+
+        for _ in 0..2 {
+            runtime.handle_pointer_event(
+                context,
+                &ui::Event::MouseDown {
+                    px: second_line_pointer.0,
+                    py: second_line_pointer.1,
+                    button: ui::MouseButton::Left,
+                },
+            );
+            runtime.handle_pointer_event(
+                context,
+                &ui::Event::MouseUp {
+                    px: second_line_pointer.0,
+                    py: second_line_pointer.1,
+                    button: ui::MouseButton::Left,
+                },
+            );
+        }
+        runtime.handle_pointer_event(
+            context,
+            &ui::Event::MouseDown {
+                px: second_line_pointer.0,
+                py: second_line_pointer.1,
+                button: ui::MouseButton::Left,
+            },
+        );
+        runtime.handle_pointer_event(
+            context,
+            &ui::Event::MouseMove { px: first_line_pointer.0, py: first_line_pointer.1 },
+        );
+
+        let snapshot = &runtime.workspace_snapshot().tabs[0];
+        assert_eq!(snapshot.selection_anchor, Some(11));
+        assert_eq!(snapshot.cursor_offset, 0);
     }
 
     #[test]
