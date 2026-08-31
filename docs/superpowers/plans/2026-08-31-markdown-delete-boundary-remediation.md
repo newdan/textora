@@ -108,3 +108,38 @@
 
     git add crates/markdown/src/augmenter.rs
     git commit -m "fix(markdown): match delete closing fences"
+
+## Task 4: 用绝对 Markdown 列统一容器边界
+
+**Files:**
+- Modify: crates/markdown/src/augmenter.rs
+
+- [ ] 先增加稳定失败用例，覆盖一个 Tab 同时跨越容器必需列并留下合法叶块缩进：
+
+    - `- item\n\n  ```\n  code\n\t```\n\npara`
+    - `- title\n\t=`
+    - `- para\n\t***`
+    - `> 12. ```\n>     code\n> \t\t````
+    - 对应 opener、blockquote/list 嵌套与 CRLF 变体
+
+- [ ] 增加纯列推进测试：空格、Tab stop、Tab 恰好命中目标列、Tab 跨过目标列 1–3
+  列，以及跨过 4 列后必须拒绝。
+
+- [ ] 引入语义化行位置类型，至少携带 byte offset、absolute column 与 container target
+  column。容器匹配返回该类型，禁止再用 `Option<usize>` 丢失 Tab 的虚拟余量。
+
+- [ ] Setext、thematic、fenced opener/closer 从同一语义位置开始校验；叶块自身缩进使用
+  `absolute_column - container_target_column`，并与后续物理空格共同限制为 0–3 列。
+
+- [ ] 删除被替代的 byte 等宽 prefix matcher，保持各生产函数低于职责检查线；无法复用的
+  fenced 二次 parser 扫描仅保留在单换行 CodeBlock Delete 冷路径。
+
+- [ ] 运行定向测试、augmenter 全模块、Clippy 与包检查：
+
+    cargo test -p textora-markdown --lib augmenter::tests
+    cargo clippy -p textora-markdown --all-targets -- -D warnings
+    cargo check -p textora-markdown
+    cargo fmt --all -- --check
+
+- [ ] 独立复审 pulldown-cmark 对照语料，确认合法结构全部 Consume，伪 marker 与空行路径
+  保持 UseDefault。

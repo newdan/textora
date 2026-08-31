@@ -94,6 +94,25 @@
 
 完成后先运行受影响 crate 的定向测试，再运行 `cargo fmt --all -- --check`、Clippy 和项目完整验证脚本 `./scripts/verify.sh`。
 
+## 已批准修订：列感知容器边界
+
+连续的 fenced 边界复核证明，单一 byte offset 无法表达一个 Tab 同时满足容器必需缩进、
+并留下 1–3 列叶块缩进的情况。因此 Delete 边界改为由 Setext、thematic break 和
+fenced closer 共用一套列感知物理行游标。
+
+- 游标同时记录源码 byte offset、绝对 Markdown 列和容器目标列。
+- Tab 推进到下一个 Markdown tab stop；若跨过容器目标列，超出的虚拟列继续作为叶块
+  缩进参与校验，不能被拒绝或丢弃。
+- 容器路径匹配返回语义化行位置，而不是裸 `usize`。
+- 叶块 marker 的总缩进包含 Tab 留下的虚拟列，合计仍只允许 0–3 列。
+- fenced opener 与 closer 使用同一种语义位置和缩进校验。
+- parser event 仍是 enclosing fenced block 的权威来源；物理行扫描只恢复 marker 前的
+  容器路径。
+- 公开 `EnterContext` 和编辑 API 保持不变。
+
+回归语料必须将编辑决策与 pulldown-cmark 结果对照，覆盖顶层、列表、引用及两者嵌套下
+的空格、Tab、混合缩进；同时保留过度缩进伪 marker 与 closer 前空代码行等反例。
+
 ## 架构约束
 
 - `ui` 只保留纯指针点击/粒度数据结构，不依赖 `DocumentView`、Workspace、Commands 或 Events。
