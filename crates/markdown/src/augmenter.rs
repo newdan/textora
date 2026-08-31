@@ -267,10 +267,14 @@ fn delete_forward_block_boundary(source: &str, current_byte: usize) -> Option<Ed
         Some(augmentation)
     };
 
-    match classify_enter_context(source, current_byte) {
+    let context = classify_enter_context(source, current_byte);
+    let container_path = delete_context_container_path(source, current_byte, &context);
+    match context {
         EnterContext::CodeBlock => {
             // 代码体内只有闭合围栏行需要保护;其余代码行交给默认删除。
-            if line_starts_code_fence(source, newline_run_end) {
+            if newline_run_end == current_byte + first_newline_width
+                && line_closes_enclosing_fenced_block(source, current_byte, newline_run_end)
+            {
                 return consume_boundary();
             }
             None
@@ -286,7 +290,7 @@ fn delete_forward_block_boundary(source: &str, current_byte: usize) -> Option<Ed
         EnterContext::TopLevelParagraphEnd
         | EnterContext::ParagraphInterior
         | EnterContext::Heading { .. } => {
-            if line_starts_independent_block(source, newline_run_end) {
+            if line_starts_independent_block(source, newline_run_end, &container_path) {
                 return consume_boundary();
             }
             let augmentation = EditAugmentation {
@@ -298,7 +302,7 @@ fn delete_forward_block_boundary(source: &str, current_byte: usize) -> Option<Ed
             Some(augmentation)
         }
         _ => {
-            if line_starts_independent_block(source, newline_run_end) {
+            if line_starts_independent_block(source, newline_run_end, &container_path) {
                 return consume_boundary();
             }
             None
@@ -306,30 +310,130 @@ fn delete_forward_block_boundary(source: &str, current_byte: usize) -> Option<Ed
     }
 }
 
-/// Delete 侧判定:下一物理行是否自成独立块,默认前向删除并线后会破坏结构。
-/// 在 [`line_starts_new_sibling_block`] 基础上补充 setext H1 下划线(`===`)、
-/// 引用行(`>`)与表格行(`|`);后两者可被前一块合法中断,因此不并入
-/// `line_starts_new_sibling_block`,避免影响 Backspace 侧既有行为。
-fn line_starts_independent_block(source: &str, line_start: usize) -> bool {
-    if line_starts_new_sibling_block(source, line_start) {
-        return true;
-    }
-    let Some(marker_start) = next_source_line_marker_start(source, line_start) else {
-        return false;
+fn delete_context_container_path(
+    source: &str,
+    current_byte: usize,
+    context: &EnterContext,
+) -> ContainerPath {
+    let prefix = match context {
+        EnterContext::Heading { continuation_prefix, .. }
+        | EnterContext::SetextHeading { continuation_prefix, .. }
+        | EnterContext::BlockQuoteLine { continuation_prefix, .. }
+        | EnterContext::IndentedCodeBlock { continuation_prefix }
+        | EnterContext::LiteralBlockLine { continuation_prefix } => continuation_prefix,
+        EnterContext::ListItem { content_prefix, .. } => content_prefix,
+        _ => "",
     };
-    let Some(&marker_byte) = source.as_bytes().get(marker_start) else {
-        return false;
+    let base_path = container_path(prefix);
+    let Some((line_start, _, _)) = locate_source_line_bounds(source, current_byte) else {
+        return base_path;
     };
-    matches!(marker_byte, b'>' | b'|') || source[marker_start..].starts_with("===")
+    source_container_path(source, line_start, current_byte, &base_path)
 }
 
-/// 该行(允许至多 3 个前导空格)是否以代码围栏 ``` 或 ~~~ 开头。
-fn line_starts_code_fence(source: &str, line_start: usize) -> bool {
-    next_source_line_marker_start(source, line_start).is_some_and(|marker_start| {
-        source
-            .get(marker_start..)
-            .is_some_and(|suffix| suffix.starts_with("```") || suffix.starts_with("~~~"))
-    })
+/// Delete 侧判定:下一物理行是否自成独立块,默认前向删除并线后会破坏结构。
+/// 在 [`line_starts_new_sibling_block`] 基础上补充 setext 下划线、
+/// 引用行(`>`)与表格行(`|`);后两者可被前一块合法中断,因此不并入
+/// `line_starts_new_sibling_block`,避免影响 Backspace 侧既有行为。
+fn line_starts_independent_block(
+    source: &str,
+    line_start: usize,
+    container_path: &ContainerPath,
+) -> bool {
+    let Some(marker_line) = block_marker_line(source, line_start, container_path)
+        .or_else(|| block_marker_line(source, line_start, &ContainerPath::default()))
+    else {
+        return false;
+    };
+    line_starts_new_sibling_marker(source, &marker_line)
+        || matches!(source.as_bytes().get(marker_line.marker_start), Some(b'>' | b'|'))
+        || content_is_setext_underline(marker_line.content)
+}
+
+struct BlockMarkerLine<'a> {
+    marker_start: usize,
+    content: &'a str,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct LineColumnPosition {
+    byte_offset: usize,
+    /// 候选物理行按 CommonMark tab stop 展开后的绝对列。
+    absolute_column: usize,
+    /// 当前容器路径要求到达的绝对列；两列之差是跨界 Tab 留给叶块的虚拟缩进。
+    container_target_column: usize,
+}
+
+impl LineColumnPosition {
+    fn at_line_start(line_start: usize) -> Self {
+        Self { byte_offset: line_start, absolute_column: 0, container_target_column: 0 }
+    }
+
+    fn at_byte(source: &str, line_start: usize, byte_offset: usize) -> Option<Self> {
+        let prefix = source.get(line_start..byte_offset)?;
+        let absolute_column = markdown_column_after(prefix, 0);
+        Some(Self { byte_offset, absolute_column, container_target_column: absolute_column })
+    }
+
+    fn leaf_indent_columns(self) -> Option<usize> {
+        self.absolute_column.checked_sub(self.container_target_column)
+    }
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+struct ContainerPath(Vec<ContainerSegment>);
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ContainerSegment {
+    BlockQuote,
+    IndentColumns(usize),
+}
+
+/// 先精确消费容器必需续行前缀，再定位至多 3 空格缩进的块 marker。
+fn block_marker_line<'a>(
+    source: &'a str,
+    line_start: usize,
+    container_path: &ContainerPath,
+) -> Option<BlockMarkerLine<'a>> {
+    let (actual_line_start, _, line_end) = locate_source_line_bounds(source, line_start)?;
+    if actual_line_start != line_start {
+        return None;
+    }
+    let bytes = source.as_bytes();
+    let content_end = source_line_content_end(source, line_end);
+    let container_position =
+        matching_container_position(source, line_start, content_end, container_path)?;
+    let marker_position =
+        marker_position_after_optional_indent(source, content_end, container_position)?;
+    let marker_start = marker_position.byte_offset;
+    let mut marker_end = content_end;
+    while marker_end > marker_start && matches!(bytes[marker_end - 1], b' ' | b'\t') {
+        marker_end -= 1;
+    }
+    Some(BlockMarkerLine { marker_start, content: source.get(marker_start..marker_end)? })
+}
+
+fn content_is_setext_underline(content: &str) -> bool {
+    let Some(marker) = content.as_bytes().first().copied() else {
+        return false;
+    };
+    matches!(marker, b'=' | b'-') && content.bytes().all(|byte| byte == marker)
+}
+
+fn content_is_thematic_break(content: &str) -> bool {
+    let mut marker = None;
+    let mut marker_count = 0;
+    for byte in content.bytes() {
+        if matches!(byte, b' ' | b'\t') {
+            continue;
+        }
+        if !matches!(byte, b'*' | b'-' | b'_') || marker.is_some_and(|marker| marker != byte) {
+            return false;
+        }
+        marker = Some(byte);
+        marker_count += 1;
+    }
+    marker_count >= 3
 }
 
 fn backspace_remove_inline_html_break(
@@ -963,23 +1067,16 @@ fn continuation_prefix_is_joinable(prefix: &str) -> bool {
 }
 
 fn line_starts_new_sibling_block(source: &str, line_start: usize) -> bool {
-    let bytes = source.as_bytes();
-    let mut marker_start = line_start;
-    let mut leading_space_count = 0;
-    while bytes.get(marker_start) == Some(&b' ') && leading_space_count < MAX_LEADING_BLOCK_INDENT {
-        marker_start += 1;
-        leading_space_count += 1;
-    }
+    block_marker_line(source, line_start, &ContainerPath::default())
+        .is_some_and(|marker_line| line_starts_new_sibling_marker(source, &marker_line))
+}
 
-    if parse_list_marker(source, marker_start).is_some()
-        || heading_source_is_atx(source, line_start)
-    {
-        return true;
-    }
-
-    source.get(marker_start..).is_some_and(|line_suffix| {
-        ["```", "~~~", "***", "---", "___"].iter().any(|marker| line_suffix.starts_with(marker))
-    })
+fn line_starts_new_sibling_marker(source: &str, marker_line: &BlockMarkerLine<'_>) -> bool {
+    parse_list_marker(source, marker_line.marker_start).is_some()
+        || heading_source_is_atx(source, marker_line.marker_start)
+        || content_is_thematic_break(marker_line.content)
+        || marker_line.content.starts_with("```")
+        || marker_line.content.starts_with("~~~")
 }
 
 /// 用于 list / blockquote 的"续 marker"：插入 `"\n{indent}{marker}"`。
@@ -1788,8 +1885,9 @@ fn classify_fence_line_hit(
 ) -> Option<EnterContext> {
     let (opening_line_start, _, opening_line_end) = locate_source_line_bounds(source, block_start)?;
     let opening_content_end = source_line_content_end(source, opening_line_end);
+    let opening_position = LineColumnPosition::at_byte(source, opening_line_start, block_start)?;
     let (fence_char, opening_fence_len) =
-        opening_fence_signature(source, opening_line_start, opening_content_end)?;
+        opening_fence_signature(source, opening_position, opening_content_end)?;
     if current_byte >= opening_line_start && current_byte <= opening_content_end {
         return Some(EnterContext::CodeBlockFenceLine {
             is_opening: true,
@@ -1803,9 +1901,10 @@ fn classify_fence_line_hit(
         return None;
     }
     let closing_content_end = source_line_content_end(source, closing_line_end);
+    let closing_position = LineColumnPosition::at_line_start(closing_line_start);
     if !line_is_closing_fence(
         source,
-        closing_line_start,
+        closing_position,
         closing_content_end,
         fence_char,
         opening_fence_len,
@@ -1821,19 +1920,392 @@ fn classify_fence_line_hit(
     None
 }
 
+#[derive(Clone, Debug)]
+struct FencedBoundaryFrame {
+    marker_start: usize,
+    opening_position: LineColumnPosition,
+    container_path: ContainerPath,
+}
+
+struct EnclosingFencedBoundary {
+    frame: FencedBoundaryFrame,
+    block_end: usize,
+}
+
+/// 该冷路径只在 CodeBlock 行尾 Delete 上触发。公开分类 API 不携带 parser frame，
+/// 因此这里独立解析一次以取得 opener 与容器栈，避免扩大 EnterContext 公共形状。
+fn line_closes_enclosing_fenced_block(
+    source: &str,
+    current_byte: usize,
+    candidate_line_start: usize,
+) -> bool {
+    let Some(boundary) = enclosing_fenced_boundary(source, current_byte) else {
+        return false;
+    };
+    candidate_line_closes_fenced_boundary(source, candidate_line_start, &boundary)
+}
+
+fn enclosing_fenced_boundary(source: &str, current_byte: usize) -> Option<EnclosingFencedBoundary> {
+    use pulldown_cmark::{CodeBlockKind, Event, Parser, Tag, TagEnd};
+
+    let parser = Parser::new_ext(source, crate::parser::markdown_options());
+    let mut item_container_paths = Vec::new();
+    let mut fenced_block = None;
+    for (event, range) in parser.into_offset_iter() {
+        match event {
+            Event::Start(Tag::Item) => {
+                let container_path = parse_list_marker(source, range.start)
+                    .map(|(_, content_start)| {
+                        container_path(&canonical_container_prefix(source, content_start))
+                    })
+                    .or_else(|| item_container_paths.last().cloned())
+                    .unwrap_or_default();
+                item_container_paths.push(container_path);
+            }
+            Event::End(TagEnd::Item) => {
+                item_container_paths.pop();
+            }
+            Event::Start(Tag::CodeBlock(CodeBlockKind::Fenced(_))) => {
+                fenced_block =
+                    fenced_boundary_frame(source, range.start, item_container_paths.last());
+            }
+            Event::Start(Tag::CodeBlock(CodeBlockKind::Indented)) => fenced_block = None,
+            Event::End(TagEnd::CodeBlock) => {
+                let Some(frame) = fenced_block.take() else {
+                    continue;
+                };
+                let content_end =
+                    content_end_without_trailing_newline(source, frame.marker_start..range.end);
+                if current_byte >= frame.marker_start && current_byte <= content_end {
+                    return Some(EnclosingFencedBoundary { frame, block_end: range.end });
+                }
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
+fn fenced_boundary_frame(
+    source: &str,
+    marker_start: usize,
+    item_container_path: Option<&ContainerPath>,
+) -> Option<FencedBoundaryFrame> {
+    let (opening_line_start, _, opening_line_end) =
+        locate_source_line_bounds(source, marker_start)?;
+    let opening_content_end = source_line_content_end(source, opening_line_end);
+    let base_path = item_container_path.cloned().unwrap_or_default();
+    let container_path =
+        source_container_path(source, opening_line_start, marker_start, &base_path);
+    let opening_position = matching_container_position(
+        source,
+        opening_line_start,
+        opening_content_end,
+        &container_path,
+    )
+    .or_else(|| LineColumnPosition::at_byte(source, opening_line_start, marker_start))?;
+    Some(FencedBoundaryFrame { marker_start, opening_position, container_path })
+}
+
+fn candidate_line_closes_fenced_boundary(
+    source: &str,
+    candidate_line_start: usize,
+    boundary: &EnclosingFencedBoundary,
+) -> bool {
+    let Some((_, _, opening_line_end)) =
+        locate_source_line_bounds(source, boundary.frame.marker_start)
+    else {
+        return false;
+    };
+    let opening_content_end = source_line_content_end(source, opening_line_end);
+    let Some((fence_char, opening_fence_len)) =
+        opening_fence_signature(source, boundary.frame.opening_position, opening_content_end)
+    else {
+        return false;
+    };
+    let Some((actual_line_start, _, candidate_line_end)) =
+        locate_source_line_bounds(source, candidate_line_start)
+    else {
+        return false;
+    };
+    if actual_line_start != candidate_line_start
+        || candidate_line_start < boundary.frame.marker_start
+    {
+        return false;
+    }
+    let candidate_content_end = source_line_content_end(source, candidate_line_end);
+    if candidate_content_end > boundary.block_end {
+        return false;
+    }
+    let Some(candidate_position) = matching_container_position(
+        source,
+        candidate_line_start,
+        candidate_content_end,
+        &boundary.frame.container_path,
+    ) else {
+        return false;
+    };
+    line_is_closing_fence(
+        source,
+        candidate_position,
+        candidate_content_end,
+        fence_char,
+        opening_fence_len,
+    )
+}
+
+fn container_path(prefix: &str) -> ContainerPath {
+    let bytes = prefix.as_bytes();
+    let mut segments = Vec::new();
+    let mut probe = 0;
+    let mut absolute_column = 0;
+    while probe < bytes.len() {
+        let whitespace_start = probe;
+        let whitespace_start_column = absolute_column;
+        while matches!(bytes.get(probe), Some(b' ' | b'\t')) {
+            absolute_column = if bytes[probe] == b'\t' {
+                next_markdown_tab_stop(absolute_column)
+            } else {
+                absolute_column + 1
+            };
+            probe += 1;
+        }
+        if whitespace_start < probe {
+            let width = absolute_column - whitespace_start_column;
+            let precedes_quote = bytes.get(probe) == Some(&b'>');
+            let is_optional_quote_indent = precedes_quote
+                && width <= MAX_LEADING_BLOCK_INDENT
+                && bytes[whitespace_start..probe].iter().all(|byte| *byte == b' ');
+            if !is_optional_quote_indent {
+                segments.push(ContainerSegment::IndentColumns(width));
+            }
+        }
+        if bytes.get(probe) != Some(&b'>') {
+            break;
+        }
+        segments.push(ContainerSegment::BlockQuote);
+        probe += 1;
+        absolute_column += 1;
+        if matches!(bytes.get(probe), Some(b' ' | b'\t')) {
+            absolute_column = if bytes[probe] == b'\t' {
+                next_markdown_tab_stop(absolute_column)
+            } else {
+                absolute_column + 1
+            };
+            probe += 1;
+        }
+    }
+    ContainerPath(segments)
+}
+
+fn source_container_path(
+    source: &str,
+    line_start: usize,
+    prefix_end: usize,
+    base_path: &ContainerPath,
+) -> ContainerPath {
+    if !base_path.0.is_empty()
+        && let Some(position) =
+            matching_container_position(source, line_start, prefix_end, base_path)
+    {
+        return append_source_block_quotes(source, prefix_end, base_path.clone(), position);
+    }
+    explicit_source_container_path(source, line_start, prefix_end)
+}
+
+fn append_source_block_quotes(
+    source: &str,
+    prefix_end: usize,
+    mut path: ContainerPath,
+    mut position: LineColumnPosition,
+) -> ContainerPath {
+    while position.byte_offset < prefix_end {
+        let Some(next_position) = match_block_quote_segment(source, prefix_end, position) else {
+            break;
+        };
+        if next_position.byte_offset <= position.byte_offset {
+            break;
+        }
+        path.0.push(ContainerSegment::BlockQuote);
+        position = next_position;
+    }
+    path
+}
+
+fn explicit_source_container_path(
+    source: &str,
+    line_start: usize,
+    prefix_end: usize,
+) -> ContainerPath {
+    let bytes = source.as_bytes();
+    let mut path = ContainerPath::default();
+    let mut position = LineColumnPosition::at_line_start(line_start);
+    while position.byte_offset < prefix_end {
+        let mut marker_probe = position.byte_offset;
+        let mut leading_spaces = 0;
+        while marker_probe < prefix_end
+            && bytes.get(marker_probe) == Some(&b' ')
+            && leading_spaces < MAX_LEADING_BLOCK_INDENT
+        {
+            marker_probe += 1;
+            leading_spaces += 1;
+        }
+
+        if let Some((_, content_start)) = parse_list_marker(source, marker_probe)
+            && content_start <= prefix_end
+            && let Some(content_position) =
+                LineColumnPosition::at_byte(source, line_start, content_start)
+            && let Some(required_columns) =
+                content_position.absolute_column.checked_sub(position.absolute_column)
+        {
+            path.0.push(ContainerSegment::IndentColumns(required_columns));
+            position = content_position;
+            continue;
+        }
+
+        let Some(next_position) = match_block_quote_segment(source, prefix_end, position) else {
+            break;
+        };
+        path.0.push(ContainerSegment::BlockQuote);
+        position = next_position;
+    }
+    path
+}
+
+fn matching_container_position(
+    source: &str,
+    line_start: usize,
+    line_end: usize,
+    path: &ContainerPath,
+) -> Option<LineColumnPosition> {
+    let mut position = LineColumnPosition::at_line_start(line_start);
+    for segment in &path.0 {
+        position = match *segment {
+            ContainerSegment::BlockQuote => match_block_quote_segment(source, line_end, position)?,
+            ContainerSegment::IndentColumns(required_width) => {
+                advance_container_columns(source, line_end, position, required_width)?
+            }
+        };
+    }
+    Some(position)
+}
+
+fn match_block_quote_segment(
+    source: &str,
+    line_end: usize,
+    mut position: LineColumnPosition,
+) -> Option<LineColumnPosition> {
+    let mut leading_spaces = position.leaf_indent_columns()?;
+    if leading_spaces > MAX_LEADING_BLOCK_INDENT {
+        return None;
+    }
+    // 上一容器段的跨界 Tab residual 等价于引用 marker 前的可选缩进；
+    // 从此处起它已属于容器路径，不能继续作为叶块缩进传播。
+    position.container_target_column = position.absolute_column;
+
+    let bytes = source.as_bytes();
+    while position.byte_offset < line_end
+        && bytes.get(position.byte_offset) == Some(&b' ')
+        && leading_spaces < MAX_LEADING_BLOCK_INDENT
+    {
+        position.byte_offset += 1;
+        position.absolute_column += 1;
+        position.container_target_column += 1;
+        leading_spaces += 1;
+    }
+    if bytes.get(position.byte_offset) != Some(&b'>') {
+        return None;
+    }
+    position.byte_offset += 1;
+    position.absolute_column += 1;
+    position.container_target_column += 1;
+
+    if position.byte_offset < line_end {
+        match bytes[position.byte_offset] {
+            b' ' => {
+                position.byte_offset += 1;
+                position.absolute_column += 1;
+                position.container_target_column += 1;
+            }
+            b'\t' => {
+                position.byte_offset += 1;
+                position.absolute_column = next_markdown_tab_stop(position.absolute_column);
+                position.container_target_column += 1;
+            }
+            _ => {}
+        }
+    }
+    Some(position)
+}
+
+fn advance_container_columns(
+    source: &str,
+    line_end: usize,
+    mut position: LineColumnPosition,
+    required_columns: usize,
+) -> Option<LineColumnPosition> {
+    position.container_target_column =
+        position.container_target_column.checked_add(required_columns)?;
+    // Tab 可以一次越过目标列；多出的 1-3 列由叶块缩进继续使用。
+    while position.absolute_column < position.container_target_column {
+        position = advance_whitespace_byte(source, line_end, position)?;
+    }
+    Some(position)
+}
+
+fn advance_whitespace_byte(
+    source: &str,
+    line_end: usize,
+    mut position: LineColumnPosition,
+) -> Option<LineColumnPosition> {
+    if position.byte_offset >= line_end {
+        return None;
+    }
+    match source.as_bytes()[position.byte_offset] {
+        b' ' => position.absolute_column += 1,
+        b'\t' => position.absolute_column = next_markdown_tab_stop(position.absolute_column),
+        _ => return None,
+    }
+    position.byte_offset += 1;
+    Some(position)
+}
+
+fn marker_position_after_optional_indent(
+    source: &str,
+    line_end: usize,
+    mut position: LineColumnPosition,
+) -> Option<LineColumnPosition> {
+    let mut leaf_indent_columns = position.leaf_indent_columns()?;
+    if leaf_indent_columns > MAX_LEADING_BLOCK_INDENT {
+        return None;
+    }
+    while position.byte_offset < line_end
+        && matches!(source.as_bytes()[position.byte_offset], b' ' | b'\t')
+    {
+        // 容器目标已经满足后才开始的 Tab 属于叶块，必须从叶块列重新展开为 4 列；
+        // 只有上面的 residual 才能表示同一 Tab 跨容器后留下的虚拟列。
+        leaf_indent_columns = if source.as_bytes()[position.byte_offset] == b'\t' {
+            next_markdown_tab_stop(leaf_indent_columns)
+        } else {
+            leaf_indent_columns + 1
+        };
+        position = advance_whitespace_byte(source, line_end, position)?;
+        if leaf_indent_columns > MAX_LEADING_BLOCK_INDENT {
+            return None;
+        }
+    }
+    Some(position)
+}
+
 /// 扫描开头围栏行,返回(围栏字符, 围栏长度)。非法围栏返回 `None`。
 fn opening_fence_signature(
     source: &str,
-    line_start: usize,
+    line_position: LineColumnPosition,
     content_end: usize,
 ) -> Option<(u8, usize)> {
     let bytes = source.as_bytes();
-    let mut fence_start = line_start;
-    let mut leading_spaces = 0;
-    while bytes.get(fence_start) == Some(&b' ') && leading_spaces < MAX_LEADING_BLOCK_INDENT {
-        fence_start += 1;
-        leading_spaces += 1;
-    }
+    let fence_start =
+        marker_position_after_optional_indent(source, content_end, line_position)?.byte_offset;
     let fence_char = *bytes.get(fence_start).filter(|byte| matches!(byte, b'`' | b'~'))?;
     let fence_len =
         bytes[fence_start..content_end].iter().take_while(|&&byte| byte == fence_char).count();
@@ -1844,18 +2316,18 @@ fn opening_fence_signature(
 /// 其余位置只允许空白。未闭合代码块的末行(代码内容)不会通过此检查。
 fn line_is_closing_fence(
     source: &str,
-    line_start: usize,
+    line_position: LineColumnPosition,
     content_end: usize,
     fence_char: u8,
     opening_fence_len: usize,
 ) -> bool {
     let bytes = source.as_bytes();
-    let mut fence_start = line_start;
-    let mut leading_spaces = 0;
-    while bytes.get(fence_start) == Some(&b' ') && leading_spaces < MAX_LEADING_BLOCK_INDENT {
-        fence_start += 1;
-        leading_spaces += 1;
-    }
+    let Some(fence_start) =
+        marker_position_after_optional_indent(source, content_end, line_position)
+            .map(|position| position.byte_offset)
+    else {
+        return false;
+    };
     let fence_len =
         bytes[fence_start..content_end].iter().take_while(|&&byte| byte == fence_char).count();
     if fence_len < opening_fence_len {
@@ -4307,6 +4779,63 @@ mod tests {
     }
 
     #[test]
+    fn line_column_position_preserves_only_container_tab_overshoot() {
+        for (required_columns, expected_residual) in [(4, 0), (3, 1), (2, 2), (1, 3)] {
+            let source = "\t=";
+            let path = ContainerPath(vec![ContainerSegment::IndentColumns(required_columns)]);
+            let container_position = matching_container_position(source, 0, source.len(), &path)
+                .expect("tab must reach the container target");
+            assert_eq!(container_position.leaf_indent_columns(), Some(expected_residual));
+            assert!(
+                marker_position_after_optional_indent(source, source.len(), container_position)
+                    .is_some(),
+                "container overshoot {expected_residual} must be a valid leaf indent"
+            );
+        }
+
+        let source = "\t=";
+        let root_position = LineColumnPosition::at_line_start(0);
+        assert!(
+            marker_position_after_optional_indent(source, source.len(), root_position).is_none(),
+            "a root-level tab is four leaf-indent columns"
+        );
+
+        let source = "  \t=";
+        let path = ContainerPath(vec![ContainerSegment::IndentColumns(2)]);
+        let exact_container_position = matching_container_position(source, 0, source.len(), &path)
+            .expect("spaces exactly reach the container target");
+        assert!(
+            marker_position_after_optional_indent(source, source.len(), exact_container_position)
+                .is_none(),
+            "a tab beginning after the container target is four leaf-indent columns"
+        );
+    }
+
+    #[test]
+    fn block_quote_segment_consumes_container_tab_residual_as_optional_indent() {
+        for (required_columns, explicit_spaces) in [(3, 2), (2, 1), (1, 0)] {
+            let source = format!("\t{}> marker", " ".repeat(explicit_spaces));
+            let path = ContainerPath(vec![
+                ContainerSegment::IndentColumns(required_columns),
+                ContainerSegment::BlockQuote,
+            ]);
+            let position = matching_container_position(&source, 0, source.len(), &path)
+                .unwrap_or_else(|| panic!("container path must match {source:?}"));
+
+            assert_eq!(source.as_bytes().get(position.byte_offset), Some(&b'm'));
+            assert_eq!(position.absolute_column, position.container_target_column);
+        }
+
+        let source = "\t  > marker";
+        let path =
+            ContainerPath(vec![ContainerSegment::IndentColumns(2), ContainerSegment::BlockQuote]);
+        assert!(
+            matching_container_position(source, 0, source.len(), &path).is_none(),
+            "two residual columns plus two physical spaces exceed quote optional indent"
+        );
+    }
+
+    #[test]
     fn delete_forward_at_paragraph_end_merges_the_following_paragraph() {
         for (source, cursor, expected_source) in [
             ("a\n\nb", 1, "ab"),
@@ -4343,6 +4872,273 @@ mod tests {
 
         assert_eq!(edited_source, source);
         assert_eq!(augmentation.cursor_byte_after, cursor);
+    }
+
+    #[test]
+    fn delete_forward_protects_short_setext_underlines() {
+        for source in ["title\n=", "title\n==", "title\n--"] {
+            let cursor = "title".len();
+            let augmentation = augment_delete_forward(source, cursor)
+                .unwrap_or_else(|| panic!("DeleteForward must protect {source:?}"));
+
+            assert_eq!(augmentation.replace_range, None, "must not merge {source:?}");
+            assert_eq!(apply_augmentation_at(source, cursor, &augmentation), source);
+        }
+    }
+
+    #[test]
+    fn delete_forward_allows_marker_like_paragraphs() {
+        for (source, expected_source) in [
+            ("first\n---not-a-rule", "first---not-a-rule"),
+            ("first\n===not-setext", "first===not-setext"),
+            ("first\n***plain", "first***plain"),
+        ] {
+            let cursor = "first".len();
+            let augmentation = augment_delete_forward(source, cursor)
+                .unwrap_or_else(|| panic!("DeleteForward must merge {source:?}"));
+
+            assert_eq!(augmentation.replace_range, Some(cursor..cursor + 1));
+            assert_eq!(apply_augmentation_at(source, cursor, &augmentation), expected_source);
+        }
+    }
+
+    #[test]
+    fn delete_forward_inside_fenced_code_only_protects_matching_closer() {
+        for source in
+            ["````\ncode\n```\n````", "~~~~\ncode\n```\n~~~~", "```\ncode\n```not-close\n```"]
+        {
+            let cursor = source.find("\ncode").expect("fixture contains code") + "\ncode".len();
+
+            assert!(
+                augment_delete_forward(source, cursor).is_none(),
+                "non-closing fence line must stay default for {source:?}"
+            );
+        }
+
+        let source = "```\ncode\n``` \t\npara";
+        let cursor = "```\ncode".len();
+        let augmentation = augment_delete_forward(source, cursor)
+            .expect("matching closing fence with trailing whitespace must be protected");
+
+        assert_eq!(augmentation.replace_range, None);
+        assert_eq!(apply_augmentation_at(source, cursor, &augmentation), source);
+    }
+
+    #[test]
+    fn delete_forward_inside_container_fenced_code_matches_the_real_closer() {
+        for source in [
+            "> ```\n> code\n>````\n> paragraph",
+            "> ```\n> code\n> ````\n> paragraph",
+            " > ```\n> code\n  >````\n> paragraph",
+            "- ```\n   code\n   ````\n\nparagraph",
+            "- ```\n  code\n     ````\n\nparagraph",
+            "- ```\n  code\n  ````\n\nparagraph",
+            "-\t```\n\tcode\n\t````\n\nparagraph",
+            "- item\n\n  ```\n  code\n     ````\n\nparagraph",
+            "- item\n\n  ```\n  code\n\t```\n\nparagraph",
+            "> 12. ```\n>     code\n> \t\t``` \n\nparagraph",
+        ] {
+            let cursor = source.find("code").expect("fixture contains code") + "code".len();
+            let augmentation = augment_delete_forward(source, cursor)
+                .unwrap_or_else(|| panic!("DeleteForward must protect {source:?}"));
+
+            assert_eq!(augmentation.replace_range, None);
+            assert_eq!(apply_augmentation_at(source, cursor, &augmentation), source);
+        }
+    }
+
+    #[test]
+    fn delete_forward_matches_list_quote_fences_across_tab_residual() {
+        for source in
+            ["- > ```\n  > code\n\t> ```\n", "- item\n\n\t> ```\n\t> code\n  > ```\n\nparagraph"]
+        {
+            let cursor = source.find("code").expect("fixture contains code") + "code".len();
+            let augmentation = augment_delete_forward(source, cursor)
+                .unwrap_or_else(|| panic!("DeleteForward must protect {source:?}"));
+
+            assert_eq!(augmentation.replace_range, None);
+            assert_eq!(apply_augmentation_at(source, cursor, &augmentation), source);
+        }
+    }
+
+    #[test]
+    fn delete_forward_inside_container_fenced_code_allows_pseudo_closers() {
+        for source in [
+            "> ```\n> code\n> ```not-close\n> ```",
+            "> ```\n> code\n```\nparagraph",
+            "- ```\n  code\n  ```not-close\n  ```",
+            "- ```\n  code\n```\nparagraph",
+        ] {
+            let cursor = source.find("code").expect("fixture contains code") + "code".len();
+
+            assert!(
+                augment_delete_forward(source, cursor).is_none(),
+                "pseudo closer must stay default for {source:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn delete_forward_inside_fenced_code_rejects_over_indented_pseudo_closers() {
+        for source in [
+            "```\ncode\n    ```\n```",
+            "```\ncode\n\t```\n```",
+            "> ```\n> code\n>     ```\n> ```",
+            "> ```\n> code\n> \t```\n> ```",
+            "- ```\n  code\n      ```\n  ```",
+            "- ```\n  code\n  \t```\n  ```",
+            "- item\n\n  ```\n  code\n      ```\n  ```",
+        ] {
+            let cursor = source.find("code").expect("fixture contains code") + "code".len();
+
+            assert!(
+                augment_delete_forward(source, cursor).is_none(),
+                "over-indented pseudo closer must stay default for {source:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn delete_forward_inside_code_before_blank_line_keeps_default() {
+        let source = "```\ncode\n\n```";
+        let cursor = "```\ncode".len();
+
+        assert!(
+            augment_delete_forward(source, cursor).is_none(),
+            "DeleteForward must remove only the first newline before a blank code line"
+        );
+    }
+
+    #[test]
+    fn fenced_code_start_range_points_to_the_opening_marker() {
+        use pulldown_cmark::{CodeBlockKind, Event, Parser, Tag};
+
+        for source in ["```\ncode\n```", "> ```\n> code\n> ```", "- ```\n  code\n  ```"] {
+            let marker_start = Parser::new_ext(source, crate::parser::markdown_options())
+                .into_offset_iter()
+                .find_map(|(event, range)| {
+                    matches!(event, Event::Start(Tag::CodeBlock(CodeBlockKind::Fenced(_))))
+                        .then_some(range.start)
+                })
+                .expect("fixture contains fenced code");
+
+            assert_eq!(marker_start, source.find("```").expect("fixture contains opener"));
+        }
+    }
+
+    #[test]
+    fn delete_forward_rejects_indented_code_as_thematic_break() {
+        for source in ["first\n\t***", "first\n    ***"] {
+            let cursor = "first".len();
+            let augmentation = augment_delete_forward(source, cursor)
+                .unwrap_or_else(|| panic!("DeleteForward must merge {source:?}"));
+
+            assert_eq!(augmentation.replace_range, Some(cursor..cursor + 1));
+            assert_eq!(
+                apply_augmentation_at(source, cursor, &augmentation),
+                source.replacen('\n', "", 1)
+            );
+        }
+    }
+
+    #[test]
+    fn delete_forward_accepts_valid_thematic_break_indentation() {
+        for source in ["first\n***", "first\n *\t*\t*", "first\n  ***", "first\n   ***"] {
+            let cursor = "first".len();
+            let augmentation = augment_delete_forward(source, cursor)
+                .unwrap_or_else(|| panic!("DeleteForward must protect {source:?}"));
+
+            assert_eq!(augmentation.replace_range, None);
+            assert_eq!(apply_augmentation_at(source, cursor, &augmentation), source);
+        }
+    }
+
+    #[test]
+    fn delete_forward_marker_boundaries_support_crlf() {
+        for source in ["title\r\n=", "title\r\n  ==\t", "first\r\n *\t*\t*"] {
+            let cursor = source.find("\r\n").expect("fixture contains CRLF");
+            let augmentation = augment_delete_forward(source, cursor)
+                .unwrap_or_else(|| panic!("DeleteForward must protect {source:?}"));
+
+            assert_eq!(augmentation.replace_range, None);
+        }
+
+        let source = "first\r\n===not-setext";
+        let cursor = "first".len();
+        let augmentation =
+            augment_delete_forward(source, cursor).expect("marker-like CRLF paragraph must merge");
+        assert_eq!(augmentation.replace_range, Some(cursor..cursor + 2));
+        assert_eq!(apply_augmentation_at(source, cursor, &augmentation), "first===not-setext");
+
+        let source = "````\r\ncode\r\n````` \t\r\nparagraph";
+        let cursor = source.find("code").expect("fixture contains code") + "code".len();
+        let augmentation = augment_delete_forward(source, cursor)
+            .expect("longer CRLF closing fence must be protected");
+        assert_eq!(augmentation.replace_range, None);
+    }
+
+    #[test]
+    fn delete_forward_protects_markers_after_wide_list_continuation() {
+        for source in ["123. title\n     =", "123. para\n     ***"] {
+            let cursor = source.find('\n').expect("fixture contains newline");
+            let augmentation = augment_delete_forward(source, cursor)
+                .unwrap_or_else(|| panic!("DeleteForward must protect {source:?}"));
+
+            assert_eq!(augmentation.replace_range, None);
+            assert_eq!(apply_augmentation_at(source, cursor, &augmentation), source);
+        }
+    }
+
+    #[test]
+    fn delete_forward_protects_markers_after_nested_container_continuation() {
+        for source in [
+            "123. > title\n     > =",
+            "123. > para\n     > ***",
+            "> 123. title\n>      =",
+            "> 123. para\n>      ***",
+            "- title\n\t=",
+            "- para\n\t***",
+            "> - title\n>\t=",
+        ] {
+            let cursor = source.find('\n').expect("fixture contains newline");
+            let augmentation = augment_delete_forward(source, cursor)
+                .unwrap_or_else(|| panic!("DeleteForward must protect {source:?}"));
+
+            assert_eq!(augmentation.replace_range, None);
+            assert_eq!(apply_augmentation_at(source, cursor, &augmentation), source);
+        }
+    }
+
+    #[test]
+    fn delete_forward_protects_list_quote_markers_across_tab_residual() {
+        for source in ["- > title\n\t> =", "- > para\n\t> ***"] {
+            let cursor = source.find('\n').expect("fixture contains newline");
+            let augmentation = augment_delete_forward(source, cursor)
+                .unwrap_or_else(|| panic!("DeleteForward must protect {source:?}"));
+
+            assert_eq!(augmentation.replace_range, None);
+            assert_eq!(apply_augmentation_at(source, cursor, &augmentation), source);
+        }
+    }
+
+    #[test]
+    fn delete_forward_rejects_over_indented_or_marker_like_container_lines() {
+        for source in [
+            "123. para\n         ***",
+            "123. para\n     \t***",
+            "123. para\n     ***plain",
+            "123. title\n     ===not-setext",
+            "123. > para\n     >     ***",
+            "123. > para\n     > \t***",
+        ] {
+            let cursor = source.find('\n').expect("fixture contains newline");
+            let augmentation = augment_delete_forward(source, cursor);
+
+            assert!(
+                augmentation.as_ref().is_none_or(|value| value.replace_range.is_some()),
+                "DeleteForward must not guard {source:?}"
+            );
+        }
     }
 
     #[test]
