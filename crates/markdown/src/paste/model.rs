@@ -172,13 +172,22 @@ impl VisibleSegmentCollector {
         }
     }
 
-    fn append_table_row(&mut self, row: &[Vec<RichInline>]) {
-        for (cell_index, cell) in row.iter().enumerate() {
-            if cell_index > 0 {
+    fn append_table_row(&mut self, row: &[Vec<RichInline>]) -> bool {
+        let mut wrote_visible_cell = false;
+
+        for cell in row {
+            if !inlines_have_visible_content(cell) {
+                continue;
+            }
+
+            if wrote_visible_cell {
                 self.flow_text.push('\t');
             }
             self.append_flow_inlines(cell);
+            wrote_visible_cell = true;
         }
+
+        wrote_visible_cell
     }
 
     fn append_code_block(&mut self, text: &str) {
@@ -203,12 +212,15 @@ impl VisibleSegmentCollector {
 impl RichBlock {
     fn has_visible_content(&self) -> bool {
         match self {
-            Self::Heading { content, .. } | Self::Paragraph(content) => !content.is_empty(),
+            Self::Heading { content, .. } | Self::Paragraph(content) => {
+                inlines_have_visible_content(content)
+            }
             Self::BlockQuote(blocks) => blocks.iter().any(Self::has_visible_content),
             Self::List { items, .. } => items.iter().flatten().any(Self::has_visible_content),
             Self::CodeBlock { .. } => true,
             Self::Table { header, rows } => {
-                !header.is_empty() || rows.iter().any(|row| !row.is_empty())
+                table_row_has_visible_content(header)
+                    || rows.iter().any(|row| table_row_has_visible_content(row))
             }
             Self::HorizontalRule => false,
         }
@@ -225,19 +237,35 @@ impl RichBlock {
             }
             Self::BlockQuote(blocks) => collector.append_blocks(blocks),
             Self::List { items, .. } => {
-                for (item_index, item) in items.iter().enumerate() {
-                    if item_index > 0 {
+                let mut has_visible_item = false;
+
+                for item in items {
+                    if !item.iter().any(Self::has_visible_content) {
+                        continue;
+                    }
+
+                    if has_visible_item {
                         collector.flow_text.push('\n');
                     }
                     collector.append_blocks(item);
+                    has_visible_item = true;
                 }
             }
             Self::CodeBlock { text, .. } => collector.append_code_block(text),
             Self::Table { header, rows } => {
-                collector.append_table_row(header);
+                let mut has_visible_row = collector.append_table_row(header);
+
                 for row in rows {
-                    collector.flow_text.push('\n');
+                    if !table_row_has_visible_content(row) {
+                        continue;
+                    }
+
+                    if has_visible_row {
+                        collector.flow_text.push('\n');
+                    }
+
                     collector.append_table_row(row);
+                    has_visible_row = true;
                 }
             }
             Self::HorizontalRule => {}
@@ -246,6 +274,18 @@ impl RichBlock {
 }
 
 impl RichInline {
+    fn has_visible_content(&self) -> bool {
+        match self {
+            Self::Text(text) | Self::InlineCode(text) => !text.is_empty(),
+            Self::Strong(children)
+            | Self::Emphasis(children)
+            | Self::Strikethrough(children)
+            | Self::Link { children, .. } => inlines_have_visible_content(children),
+            Self::RemoteImage { alt, .. } => !alt.is_empty(),
+            Self::LineBreak => true,
+        }
+    }
+
     fn append_visible_text(&self, output: &mut String) {
         match self {
             Self::Text(text) | Self::InlineCode(text) => output.push_str(text),
@@ -261,6 +301,14 @@ impl RichInline {
             Self::LineBreak => output.push('\n'),
         }
     }
+}
+
+fn inlines_have_visible_content(inlines: &[RichInline]) -> bool {
+    inlines.iter().any(RichInline::has_visible_content)
+}
+
+fn table_row_has_visible_content(row: &[Vec<RichInline>]) -> bool {
+    row.iter().any(|cell| inlines_have_visible_content(cell))
 }
 
 #[cfg(test)]
@@ -371,6 +419,56 @@ mod tests {
         assert_eq!(
             document.visible_segments(),
             vec![VisibleSegment::flow("quote\nfirst\nsecond\nname\tvalue\nanswer\t42\nafter")]
+        );
+    }
+
+    #[test]
+    fn visible_segments_skip_empty_table_header_before_first_row() {
+        let document = RichDocument::new(vec![RichBlock::Table {
+            header: vec![],
+            rows: vec![vec![vec![RichInline::Text("a".into())]]],
+        }]);
+
+        assert_eq!(document.visible_segments(), vec![VisibleSegment::flow("a")]);
+    }
+
+    #[test]
+    fn visible_segments_skip_empty_list_items_before_visible_items() {
+        let document = RichDocument::new(vec![RichBlock::List {
+            kind: super::ListKind::Unordered,
+            items: vec![
+                vec![],
+                vec![RichBlock::Paragraph(vec![RichInline::Text("a".into())])],
+                vec![],
+                vec![RichBlock::Paragraph(vec![RichInline::Text("b".into())])],
+            ],
+        }]);
+
+        assert_eq!(document.visible_segments(), vec![VisibleSegment::flow("a\nb")]);
+    }
+
+    #[test]
+    fn visible_segments_skip_empty_inlines_cells_and_nested_blocks() {
+        let document = RichDocument::new(vec![
+            RichBlock::Paragraph(vec![RichInline::Text("before".into())]),
+            RichBlock::Paragraph(vec![RichInline::Text(String::new())]),
+            RichBlock::BlockQuote(vec![RichBlock::Paragraph(vec![
+                RichInline::Text(String::new()),
+            ])]),
+            RichBlock::Table {
+                header: vec![
+                    vec![RichInline::Text(String::new())],
+                    vec![RichInline::Text("middle".into())],
+                    vec![RichInline::Text(String::new())],
+                ],
+                rows: vec![],
+            },
+            RichBlock::Paragraph(vec![RichInline::Text("after".into())]),
+        ]);
+
+        assert_eq!(
+            document.visible_segments(),
+            vec![VisibleSegment::flow("before\nmiddle\nafter")]
         );
     }
 }
