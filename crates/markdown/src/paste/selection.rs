@@ -333,6 +333,21 @@ mod tests {
     }
 
     #[test]
+    fn remote_image_without_alt_remains_semantic_html() {
+        let prepared = prepare_paste(PasteRepresentations {
+            markdown: None,
+            html: Some("<p>before<img src='https://example.com/a.png'>after</p>"),
+            rtf: None,
+            plain: Some("beforeafter"),
+            source_url: None,
+        });
+        assert_eq!(
+            prepared,
+            PreparedPaste::HtmlConverted("before![](https://example.com/a.png)after".into(),)
+        );
+    }
+
+    #[test]
     fn highlighted_markdown_source_uses_plain_text() {
         let prepared = prepare_paste(PasteRepresentations {
             markdown: None,

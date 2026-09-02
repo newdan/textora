@@ -1211,18 +1211,22 @@ fn document_semantic_markup(document: &RichDocument) -> SemanticMarkup {
 fn block_has_semantic_markup(block: &RichBlock) -> bool {
     match block {
         RichBlock::Paragraph(content) => inlines_have_effective_semantic(content),
-        RichBlock::Heading { content, .. } => inlines_have_visible_content(content),
-        RichBlock::BlockQuote(blocks) => blocks_have_visible_content(blocks),
+        RichBlock::Heading { content, .. } => inlines_have_semantic_content(content),
+        RichBlock::BlockQuote(blocks) => blocks_have_semantic_content(blocks),
         RichBlock::List { items, .. } => {
-            items.iter().any(|blocks| blocks_have_visible_content(blocks))
+            items.iter().any(|blocks| blocks_have_semantic_content(blocks))
         }
         RichBlock::CodeBlock { text, .. } => !text.is_empty(),
         RichBlock::Table { header, rows } => {
-            cells_have_visible_content(header)
-                || rows.iter().any(|row| cells_have_visible_content(row))
+            cells_have_semantic_content(header)
+                || rows.iter().any(|row| cells_have_semantic_content(row))
         }
         RichBlock::HorizontalRule => true,
     }
+}
+
+fn blocks_have_semantic_content(blocks: &[RichBlock]) -> bool {
+    blocks.iter().any(|block| block_has_visible_content(block) || block_has_semantic_markup(block))
 }
 
 fn blocks_have_visible_content(blocks: &[RichBlock]) -> bool {
@@ -1251,14 +1255,22 @@ fn cells_have_visible_content(cells: &[Vec<RichInline>]) -> bool {
     cells.iter().any(|content| inlines_have_visible_content(content))
 }
 
+fn cells_have_semantic_content(cells: &[Vec<RichInline>]) -> bool {
+    cells.iter().any(|content| inlines_have_semantic_content(content))
+}
+
+fn inlines_have_semantic_content(content: &[RichInline]) -> bool {
+    inlines_have_visible_content(content) || inlines_have_effective_semantic(content)
+}
+
 fn inlines_have_effective_semantic(content: &[RichInline]) -> bool {
     content.iter().enumerate().any(|(index, inline)| match inline {
         RichInline::Strong(children)
         | RichInline::Emphasis(children)
         | RichInline::Strikethrough(children)
-        | RichInline::Link { children, .. } => inlines_have_visible_content(children),
+        | RichInline::Link { children, .. } => inlines_have_semantic_content(children),
         RichInline::InlineCode(text) => !text.is_empty(),
-        RichInline::RemoteImage { alt, .. } => !alt.trim().is_empty(),
+        RichInline::RemoteImage { .. } => true,
         RichInline::LineBreak => {
             inlines_have_visible_content(&content[..index])
                 && inlines_have_visible_content(&content[index + 1..])
@@ -2016,6 +2028,21 @@ mod tests {
     }
 
     #[test]
+    fn remote_images_without_alt_propagate_semantics_through_containers() {
+        let fixtures = [
+            "<a href='https://example.com'><img src='https://example.com/a.png'></a>",
+            "<h2><img src='https://example.com/a.png'></h2>",
+            "<blockquote><img src='https://example.com/a.png'></blockquote>",
+            "<ul><li><img src='https://example.com/a.png'></li></ul>",
+            "<table><tr><td><img src='https://example.com/a.png'></td></tr></table>",
+        ];
+        for html in fixtures {
+            let conversion = parse_html(html, None).expect("remote image container fixture");
+            assert_eq!(conversion.semantic_markup, SemanticMarkup::Present, "{html}");
+        }
+    }
+
+    #[test]
     fn empty_semantic_nodes_do_not_mark_plain_visible_text_as_semantic() {
         let absent_fixtures = [
             "<strong></strong># source",
@@ -2023,8 +2050,6 @@ mod tests {
             "<s></s># source",
             "<a href='https://example.com'></a># source",
             "<a href='https://example.com'>   </a># source",
-            "<img src='https://example.com/a.png' alt=''># source",
-            "<img src='https://example.com/a.png' alt='   '># source",
             "<br># source",
         ];
         for html in absent_fixtures {
