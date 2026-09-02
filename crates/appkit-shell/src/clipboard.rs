@@ -1,17 +1,26 @@
 //! Shell-local system clipboard implementation.
 
-use clipboard_rs::{Clipboard, ContentFormat};
+use std::sync::Mutex;
+
+use clipboard_rs::{Clipboard, ClipboardContext, ContentFormat};
 
 const MARKDOWN_FORMAT_ALIASES: &[&str] =
     &["text/markdown", "public.markdown", "net.daringfireball.markdown"];
 const HTML_FORMAT_ALIASES: &[&str] = &["HTML Format", "public.html", "text/html"];
 const RTF_FORMAT_ALIASES: &[&str] = &["Rich Text Format", "public.rtf", "text/rtf"];
+const PLAIN_TEXT_FORMAT_ALIASES: &[&str] = &["text/plain;charset=utf-8", "text/plain"];
 const SOURCE_URL_FORMAT_ALIASES: &[&str] = &["public.url", "text/x-moz-url", "SourceURL"];
+const MOZILLA_SOURCE_URL_FORMAT: &str = "text/x-moz-url";
+const UTF16_LE_BOM: &[u8] = &[0xff, 0xfe];
+const UTF16_ASCII_PREFIX_PAIRS: usize = 3;
 const CF_HTML_START_FRAGMENT_MARKER: &str = "<!--StartFragment-->";
 const CF_HTML_END_FRAGMENT_MARKER: &str = "<!--EndFragment-->";
 const CF_HTML_START_FRAGMENT_HEADER: &str = "StartFragment:";
 const CF_HTML_END_FRAGMENT_HEADER: &str = "EndFragment:";
 const CF_HTML_SOURCE_URL_HEADER: &str = "SourceURL:";
+const STABLE_SNAPSHOT_OBSERVATION_LIMIT: usize = 4;
+
+static SYSTEM_CLIPBOARD_CONTEXT: Mutex<Option<ClipboardContext>> = Mutex::new(None);
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct ClipboardSnapshot {
@@ -35,9 +44,11 @@ impl DocumentClipboard for SystemClipboard {
     }
 
     fn read_snapshot(&mut self) -> Option<ClipboardSnapshot> {
-        let context = clipboard_rs::ClipboardContext::new().ok()?;
-        let representations = ClipboardContextRepresentations { context: &context };
-        snapshot_from(&representations)
+        with_system_clipboard(|context| {
+            let representations = ClipboardContextRepresentations { context };
+            snapshot_from(&representations)
+        })
+        .flatten()
     }
 }
 
@@ -52,15 +63,39 @@ impl ui::core::Clipboard for SystemClipboard {
 }
 
 pub(crate) fn try_write_text(text: &str) -> bool {
-    clipboard_rs::ClipboardContext::new()
-        .and_then(|clipboard| clipboard.set_text(text.to_owned()))
-        .is_ok()
+    with_system_clipboard(|clipboard| clipboard.set_text(text.to_owned()).is_ok()).unwrap_or(false)
 }
 
 pub(crate) fn try_read_text() -> Option<String> {
-    let context = clipboard_rs::ClipboardContext::new().ok()?;
-    let representations = ClipboardContextRepresentations { context: &context };
-    non_empty_string(representations.plain_text())
+    with_system_clipboard(|context| {
+        let representations = ClipboardContextRepresentations { context };
+        let available_formats = representations.available_formats();
+        plain_text_from(&representations, &available_formats)
+    })
+    .flatten()
+}
+
+fn with_system_clipboard<T>(operation: impl FnOnce(&ClipboardContext) -> T) -> Option<T> {
+    with_reusable_clipboard_context(&SYSTEM_CLIPBOARD_CONTEXT, ClipboardContext::new, operation)
+}
+
+fn with_reusable_clipboard_context<C, T, E>(
+    context_slot: &Mutex<Option<C>>,
+    initialize: impl FnOnce() -> Result<C, E>,
+    operation: impl FnOnce(&C) -> T,
+) -> Option<T> {
+    let mut context_guard = match context_slot.lock() {
+        Ok(context_guard) => context_guard,
+        Err(poisoned_context) => {
+            let context_guard = poisoned_context.into_inner();
+            context_slot.clear_poison();
+            context_guard
+        }
+    };
+    if context_guard.is_none() {
+        *context_guard = initialize().ok();
+    }
+    context_guard.as_ref().map(operation)
 }
 
 trait ClipboardRepresentations {
@@ -73,6 +108,12 @@ trait ClipboardRepresentations {
 
 struct ClipboardContextRepresentations<'a> {
     context: &'a clipboard_rs::ClipboardContext,
+}
+
+#[derive(PartialEq, Eq)]
+struct ClipboardObservation {
+    format_names: Vec<String>,
+    snapshot: Option<ClipboardSnapshot>,
 }
 
 impl ClipboardRepresentations for ClipboardContextRepresentations<'_> {
@@ -101,11 +142,35 @@ impl ClipboardRepresentations for ClipboardContextRepresentations<'_> {
 }
 
 fn snapshot_from(source: &impl ClipboardRepresentations) -> Option<ClipboardSnapshot> {
+    // clipboard-rs cannot lock the external owner. Two identical complete
+    // observations reject any change that is visible within the fixed budget.
+    let mut previous_observation = read_snapshot_observation(source);
+    for _ in 1..STABLE_SNAPSHOT_OBSERVATION_LIMIT {
+        let current_observation = read_snapshot_observation(source);
+        if current_observation == previous_observation {
+            return current_observation.snapshot;
+        }
+        previous_observation = current_observation;
+    }
+    None
+}
+
+fn read_snapshot_observation(source: &impl ClipboardRepresentations) -> ClipboardObservation {
     let available_formats = source.available_formats();
-    let markdown_text = custom_string(source, &available_formats, MARKDOWN_FORMAT_ALIASES);
-    let source_url =
-        custom_string(source, &available_formats, SOURCE_URL_FORMAT_ALIASES).and_then(first_line);
-    let raw_html = custom_string(source, &available_formats, HTML_FORMAT_ALIASES)
+    let snapshot = snapshot_from_available_formats(source, &available_formats);
+    let mut format_names = available_formats;
+    format_names.sort_unstable();
+    format_names.dedup();
+    ClipboardObservation { format_names, snapshot }
+}
+
+fn snapshot_from_available_formats(
+    source: &impl ClipboardRepresentations,
+    available_formats: &[String],
+) -> Option<ClipboardSnapshot> {
+    let markdown_text = custom_string(source, available_formats, MARKDOWN_FORMAT_ALIASES);
+    let source_url = source_url_from(source, available_formats);
+    let raw_html = custom_string(source, available_formats, HTML_FORMAT_ALIASES)
         .or_else(|| non_empty_string(source.html_text()));
     let html_source_url = raw_html.as_deref().and_then(extract_cf_html_source_url);
     let html_text = raw_html
@@ -114,9 +179,9 @@ fn snapshot_from(source: &impl ClipboardRepresentations) -> Option<ClipboardSnap
     let snapshot = ClipboardSnapshot {
         markdown_text,
         html_text,
-        rtf_bytes: custom_bytes(source, &available_formats, RTF_FORMAT_ALIASES)
+        rtf_bytes: custom_bytes(source, available_formats, RTF_FORMAT_ALIASES)
             .or_else(|| non_empty_bytes(source.rtf_bytes())),
-        plain_text: non_empty_string(source.plain_text()),
+        plain_text: plain_text_from(source, available_formats),
         source_url: source_url.or(html_source_url),
     };
 
@@ -137,10 +202,61 @@ fn custom_bytes(
     available_formats: &[String],
     aliases: &[&str],
 ) -> Option<Vec<u8>> {
-    let format = available_formats
-        .iter()
-        .find(|format| aliases.iter().any(|alias| format.eq_ignore_ascii_case(alias)))?;
+    let format = matching_format(available_formats, aliases)?;
     non_empty_bytes(source.custom_bytes(format))
+}
+
+fn matching_format<'a>(available_formats: &'a [String], aliases: &[&str]) -> Option<&'a str> {
+    aliases.iter().find_map(|alias| {
+        available_formats
+            .iter()
+            .find(|format| format.eq_ignore_ascii_case(alias))
+            .map(String::as_str)
+    })
+}
+
+fn plain_text_from(
+    source: &impl ClipboardRepresentations,
+    available_formats: &[String],
+) -> Option<String> {
+    custom_string(source, available_formats, PLAIN_TEXT_FORMAT_ALIASES)
+        .or_else(|| non_empty_string(source.plain_text()))
+}
+
+fn source_url_from(
+    source: &impl ClipboardRepresentations,
+    available_formats: &[String],
+) -> Option<String> {
+    let format = matching_format(available_formats, SOURCE_URL_FORMAT_ALIASES)?;
+    let bytes = non_empty_bytes(source.custom_bytes(format))?;
+    decode_source_url(format, bytes).and_then(first_line)
+}
+
+fn decode_source_url(format: &str, bytes: Vec<u8>) -> Option<String> {
+    if format.eq_ignore_ascii_case(MOZILLA_SOURCE_URL_FORMAT) && looks_like_utf16_le(&bytes) {
+        return decode_utf16_le(&bytes);
+    }
+    String::from_utf8(bytes).ok()
+}
+
+fn looks_like_utf16_le(bytes: &[u8]) -> bool {
+    if bytes.starts_with(UTF16_LE_BOM) {
+        return true;
+    }
+    let mut prefix_pairs = bytes.chunks_exact(2).take(UTF16_ASCII_PREFIX_PAIRS);
+    (0..UTF16_ASCII_PREFIX_PAIRS)
+        .all(|_| prefix_pairs.next().is_some_and(|pair| pair[0].is_ascii_graphic() && pair[1] == 0))
+}
+
+fn decode_utf16_le(bytes: &[u8]) -> Option<String> {
+    let encoded_text = bytes.strip_prefix(UTF16_LE_BOM).unwrap_or(bytes);
+    let mut code_unit_bytes = encoded_text.chunks_exact(2);
+    let code_units = code_unit_bytes
+        .by_ref()
+        .map(|pair| u16::from_le_bytes([pair[0], pair[1]]))
+        .collect::<Vec<_>>();
+    code_unit_bytes.remainder().is_empty().then_some(())?;
+    String::from_utf16(&code_units).ok()
 }
 
 fn non_empty_string(value: Option<String>) -> Option<String> {
@@ -152,7 +268,8 @@ fn non_empty_bytes(value: Option<Vec<u8>>) -> Option<Vec<u8>> {
 }
 
 fn first_line(value: String) -> Option<String> {
-    non_empty_string(value.lines().next().map(str::to_owned))
+    let text_before_terminator = value.split('\0').next()?;
+    non_empty_string(text_before_terminator.lines().next().map(str::to_owned))
 }
 
 fn snapshot_has_content(snapshot: &ClipboardSnapshot) -> bool {
@@ -198,9 +315,13 @@ fn extract_cf_html_source_url(html: &str) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
+    use std::cell::Cell;
     use std::collections::BTreeMap;
+    use std::sync::{Arc, Mutex};
 
-    use super::{ClipboardRepresentations, snapshot_from};
+    use super::{
+        ClipboardRepresentations, plain_text_from, snapshot_from, with_reusable_clipboard_context,
+    };
 
     #[derive(Default)]
     struct TestRepresentations {
@@ -236,6 +357,16 @@ mod tests {
         }
     }
 
+    fn utf16_le_fixture(value: &str) -> Vec<u8> {
+        value.encode_utf16().flat_map(u16::to_le_bytes).collect()
+    }
+
+    fn utf16_le_fixture_with_bom(value: &str) -> Vec<u8> {
+        let mut bytes = super::UTF16_LE_BOM.to_vec();
+        bytes.extend(utf16_le_fixture(value));
+        bytes
+    }
+
     impl ClipboardRepresentations for TestRepresentations {
         fn available_formats(&self) -> Vec<String> {
             self.custom_formats.keys().cloned().collect()
@@ -256,6 +387,287 @@ mod tests {
         fn custom_bytes(&self, format: &str) -> Option<Vec<u8>> {
             self.custom_formats.get(format).cloned()
         }
+    }
+
+    struct SwitchAfterMarkdownRead {
+        switched_to_second_copy: Cell<bool>,
+    }
+
+    impl ClipboardRepresentations for SwitchAfterMarkdownRead {
+        fn available_formats(&self) -> Vec<String> {
+            vec!["text/markdown".to_owned(), "text/html".to_owned()]
+        }
+
+        fn plain_text(&self) -> Option<String> {
+            Some("second".to_owned())
+        }
+
+        fn html_text(&self) -> Option<String> {
+            None
+        }
+
+        fn rtf_bytes(&self) -> Option<Vec<u8>> {
+            None
+        }
+
+        fn custom_bytes(&self, format: &str) -> Option<Vec<u8>> {
+            if format.eq_ignore_ascii_case("text/markdown")
+                && !self.switched_to_second_copy.replace(true)
+            {
+                return Some(b"first".to_vec());
+            }
+
+            match format.to_ascii_lowercase().as_str() {
+                "text/markdown" => Some(b"second".to_vec()),
+                "text/html" => Some(b"<p>second</p>".to_vec()),
+                _ => None,
+            }
+        }
+    }
+
+    struct AlternatingRepresentations {
+        observation_count: Cell<usize>,
+    }
+
+    impl ClipboardRepresentations for AlternatingRepresentations {
+        fn available_formats(&self) -> Vec<String> {
+            self.observation_count.set(self.observation_count.get() + 1);
+            vec!["text/markdown".to_owned()]
+        }
+
+        fn plain_text(&self) -> Option<String> {
+            None
+        }
+
+        fn html_text(&self) -> Option<String> {
+            None
+        }
+
+        fn rtf_bytes(&self) -> Option<Vec<u8>> {
+            None
+        }
+
+        fn custom_bytes(&self, format: &str) -> Option<Vec<u8>> {
+            format.eq_ignore_ascii_case("text/markdown").then(|| {
+                if self.observation_count.get().is_multiple_of(2) {
+                    b"second".to_vec()
+                } else {
+                    b"first".to_vec()
+                }
+            })
+        }
+    }
+
+    struct AlternatingFormatRepresentations {
+        observation_count: Cell<usize>,
+    }
+
+    impl ClipboardRepresentations for AlternatingFormatRepresentations {
+        fn available_formats(&self) -> Vec<String> {
+            self.observation_count.set(self.observation_count.get() + 1);
+            let changing_format = if self.observation_count.get().is_multiple_of(2) {
+                "application/x-second-copy"
+            } else {
+                "application/x-first-copy"
+            };
+            vec!["text/markdown".to_owned(), changing_format.to_owned()]
+        }
+
+        fn plain_text(&self) -> Option<String> {
+            None
+        }
+
+        fn html_text(&self) -> Option<String> {
+            None
+        }
+
+        fn rtf_bytes(&self) -> Option<Vec<u8>> {
+            None
+        }
+
+        fn custom_bytes(&self, format: &str) -> Option<Vec<u8>> {
+            format.eq_ignore_ascii_case("text/markdown").then(|| b"same".to_vec())
+        }
+    }
+
+    #[test]
+    fn reusable_context_initializes_once_across_operations() {
+        let context = Mutex::new(None);
+        let mut initialization_count = 0;
+
+        for expected_value in [1, 2, 3] {
+            let actual_value = with_reusable_clipboard_context(
+                &context,
+                || {
+                    initialization_count += 1;
+                    Ok::<_, ()>(41)
+                },
+                |value| value + expected_value,
+            );
+
+            assert_eq!(actual_value, Some(41 + expected_value));
+        }
+
+        assert_eq!(initialization_count, 1);
+    }
+
+    #[test]
+    fn reusable_context_retries_after_initialization_failure() {
+        let context = Mutex::new(None);
+
+        assert_eq!(
+            with_reusable_clipboard_context(&context, || Err::<usize, _>(()), |value| *value),
+            None
+        );
+        assert_eq!(
+            with_reusable_clipboard_context(&context, || Ok::<_, ()>(7), |value| *value),
+            Some(7)
+        );
+    }
+
+    #[test]
+    fn reusable_context_recovers_a_poisoned_mutex() {
+        let context = Arc::new(Mutex::new(Some(7)));
+        let panic_context = Arc::clone(&context);
+        let panic_result = std::thread::spawn(move || {
+            let _guard = panic_context.lock().expect("test mutex starts healthy");
+            panic!("poison the test mutex");
+        })
+        .join();
+        assert!(panic_result.is_err());
+
+        let value =
+            with_reusable_clipboard_context(context.as_ref(), || Ok::<_, ()>(9), |value| *value);
+
+        assert_eq!(value, Some(7));
+        assert!(!context.is_poisoned());
+    }
+
+    #[test]
+    fn stable_snapshot_discards_a_mixed_read_then_accepts_the_stable_copy() {
+        let source = SwitchAfterMarkdownRead { switched_to_second_copy: Cell::new(false) };
+
+        let snapshot = snapshot_from(&source).expect("the second copy becomes stable");
+
+        assert_eq!(snapshot.markdown_text.as_deref(), Some("second"));
+        assert_eq!(snapshot.html_text.as_deref(), Some("<p>second</p>"));
+        assert_eq!(snapshot.plain_text.as_deref(), Some("second"));
+    }
+
+    #[test]
+    fn stable_snapshot_rejects_a_clipboard_that_keeps_changing() {
+        let source = AlternatingRepresentations { observation_count: Cell::new(0) };
+
+        assert_eq!(snapshot_from(&source), None);
+        assert_eq!(source.observation_count.get(), super::STABLE_SNAPSHOT_OBSERVATION_LIMIT);
+    }
+
+    #[test]
+    fn stable_snapshot_rejects_changing_formats_even_when_fields_match() {
+        let source = AlternatingFormatRepresentations { observation_count: Cell::new(0) };
+
+        assert_eq!(snapshot_from(&source), None);
+    }
+
+    #[test]
+    fn snapshot_reads_plain_text_from_the_linux_utf8_mime_target() {
+        let source = TestRepresentations::new()
+            .with_format("text/plain;charset=UTF-8", b"mime plain".to_vec());
+
+        let snapshot = snapshot_from(&source).expect("plain MIME target contains content");
+
+        assert_eq!(snapshot.plain_text.as_deref(), Some("mime plain"));
+    }
+
+    #[test]
+    fn plain_only_reads_the_linux_mime_target_without_content_format_text() {
+        let source = TestRepresentations::new()
+            .with_format("text/plain;charset=UTF-8", b"mime plain".to_vec());
+        let formats = source.available_formats();
+
+        let plain_text = plain_text_from(&source, &formats);
+
+        assert_eq!(plain_text.as_deref(), Some("mime plain"));
+    }
+
+    #[test]
+    fn plain_text_prefers_the_utf8_mime_alias_over_generic_text_plain() {
+        let source = TestRepresentations::new()
+            .with_format("text/plain", b"generic".to_vec())
+            .with_format("text/plain;charset=utf-8", b"utf8-specific".to_vec());
+        let formats = source.available_formats();
+
+        let plain_text = plain_text_from(&source, &formats);
+
+        assert_eq!(plain_text.as_deref(), Some("utf8-specific"));
+    }
+
+    #[test]
+    fn invalid_plain_mime_utf8_falls_back_to_content_format_text() {
+        let source = TestRepresentations::new()
+            .with_format("text/plain;charset=utf-8", vec![0xff])
+            .with_plain("fallback");
+        let formats = source.available_formats();
+
+        let plain_text = plain_text_from(&source, &formats);
+
+        assert_eq!(plain_text.as_deref(), Some("fallback"));
+    }
+
+    #[test]
+    fn mozilla_source_url_decodes_utf16_le_with_bom_title_and_terminator() {
+        let source = TestRepresentations::new().with_format(
+            "text/x-moz-url",
+            utf16_le_fixture_with_bom("https://example.com/bom\r\nPage title\0"),
+        );
+
+        let snapshot = snapshot_from(&source).expect("UTF-16 Mozilla URL contains content");
+
+        assert_eq!(snapshot.source_url.as_deref(), Some("https://example.com/bom"));
+    }
+
+    #[test]
+    fn mozilla_source_url_decodes_utf16_le_without_bom() {
+        let source = TestRepresentations::new().with_format(
+            "TEXT/X-MOZ-URL",
+            utf16_le_fixture("https://example.com/no-bom\nPage title\0"),
+        );
+
+        let snapshot = snapshot_from(&source).expect("UTF-16 Mozilla URL contains content");
+
+        assert_eq!(snapshot.source_url.as_deref(), Some("https://example.com/no-bom"));
+    }
+
+    #[test]
+    fn utf8_mozilla_and_public_url_formats_remain_supported() {
+        for (format, bytes) in [
+            ("text/x-moz-url", b"https://example.com/moz\nTitle".as_slice()),
+            ("public.url", b"https://example.com/public".as_slice()),
+        ] {
+            let source = TestRepresentations::new().with_format(format, bytes.to_vec());
+
+            let snapshot = snapshot_from(&source).expect("UTF-8 source URL contains content");
+
+            let expected = if format == "public.url" {
+                "https://example.com/public"
+            } else {
+                "https://example.com/moz"
+            };
+            assert_eq!(snapshot.source_url.as_deref(), Some(expected));
+        }
+    }
+
+    #[test]
+    fn malformed_mozilla_utf16_does_not_override_cf_html_source_url() {
+        let cf_html = "SourceURL:https://example.com/from-html\r\n<!--StartFragment--><p>body</p><!--EndFragment-->";
+        let malformed_utf16 = vec![b'h', 0, b't', 0, b't', 0, b'p'];
+        let source = TestRepresentations::new()
+            .with_format("text/x-moz-url", malformed_utf16)
+            .with_format("HTML Format", cf_html.as_bytes().to_vec());
+
+        let snapshot = snapshot_from(&source).expect("CF_HTML contains valid content");
+
+        assert_eq!(snapshot.source_url.as_deref(), Some("https://example.com/from-html"));
     }
 
     #[test]
