@@ -578,6 +578,25 @@ mod tests {
         assert_eq!(write_markdown(&document), "link diagram");
     }
 
+    #[test]
+    fn mailto_links_are_written_while_mailto_images_remain_rejected() {
+        let document = RichDocument::new(vec![RichBlock::Paragraph(vec![
+            RichInline::Link {
+                destination: "mailto:a@example.com".into(),
+                title: None,
+                children: text("mail"),
+            },
+            RichInline::Text(" ".into()),
+            RichInline::RemoteImage {
+                destination: "mailto:image@example.com".into(),
+                title: None,
+                alt: "diagram".into(),
+            },
+        ])]);
+
+        assert_eq!(write_markdown(&document), "[mail](mailto:a@example.com) diagram");
+    }
+
     fn representative_document() -> RichDocument {
         RichDocument::new(vec![
             RichBlock::Heading { level: HeadingLevel::H2, content: text("Heading") },
@@ -1136,7 +1155,7 @@ fn write_link(
     context: InlineContext,
     text_state: &mut InlineTextState,
 ) -> InlineWriteOutcome {
-    if !is_safe_web_url(destination) {
+    if !is_safe_link_url(destination) {
         write_inlines_with_state(children, output, context, text_state);
         return InlineWriteOutcome::Preserved;
     }
@@ -1160,7 +1179,7 @@ fn write_remote_image(
     context: InlineContext,
     state: &mut InlineTextState,
 ) -> InlineWriteOutcome {
-    if !is_safe_web_url(destination) {
+    if !is_safe_remote_image_url(destination) {
         write_plain_text(alt, output, context, state);
         return InlineWriteOutcome::Preserved;
     }
@@ -1176,7 +1195,12 @@ fn write_remote_image(
     InlineWriteOutcome::Interrupted
 }
 
-fn is_safe_web_url(destination: &str) -> bool {
+fn is_safe_link_url(destination: &str) -> bool {
+    url::Url::parse(destination)
+        .is_ok_and(|url| matches!(url.scheme(), "http" | "https" | "mailto"))
+}
+
+fn is_safe_remote_image_url(destination: &str) -> bool {
     url::Url::parse(destination).is_ok_and(|url| matches!(url.scheme(), "http" | "https"))
 }
 

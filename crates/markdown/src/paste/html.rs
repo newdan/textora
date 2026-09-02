@@ -31,6 +31,58 @@ struct TableRowSource<'a> {
     group_semantics: Vec<InlineSemantic>,
 }
 
+struct CascadedStyleDeclaration {
+    property: SupportedStyleProperty,
+    value: String,
+    important: bool,
+}
+
+#[derive(Clone, Copy)]
+enum RawTextElement {
+    Script,
+    Style,
+    Textarea,
+    Title,
+    Xmp,
+    Iframe,
+    NoEmbed,
+    NoFrames,
+    Plaintext,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum TagQuote {
+    None,
+    Single,
+    Double,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum InlineFormattingTag {
+    Strong,
+    Bold,
+    Emphasis,
+    Italic,
+    Strikethrough,
+    Strike,
+    Delete,
+    Link,
+    Code,
+}
+
+#[derive(Clone, Copy)]
+struct OpenInlineFormatting {
+    tag: InlineFormattingTag,
+    paragraph_scope: Option<usize>,
+}
+
+#[derive(Default)]
+struct FragmentNormalizer {
+    current_paragraph_scope: Option<usize>,
+    next_paragraph_scope: usize,
+    open_formatting: Vec<OpenInlineFormatting>,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct HtmlConversion {
     pub document: RichDocument,
@@ -41,14 +93,12 @@ pub(crate) fn parse_html(
     html: &str,
     source_url: Option<&str>,
 ) -> Result<HtmlConversion, HtmlPasteError> {
-    let fragment = Html::parse_fragment(html);
+    let normalized_html = normalize_malformed_fragment(html)?;
+    let fragment = Html::parse_fragment(&normalized_html);
     let root = fragment.root_element();
     ensure_dom_depth_within_limit(*root)?;
     let base_url = source_url.and_then(|source| Url::parse(source).ok());
-    let mut blocks = parse_block_children(*root, base_url.as_ref());
-    if fragment.errors.iter().any(|error| error.as_ref() == "Unexpected open element") {
-        remove_reconstructed_inline_formatting(&mut blocks, html);
-    }
+    let blocks = parse_block_children(*root, base_url.as_ref());
     let document = RichDocument::new(blocks);
     let semantic_markup = document_semantic_markup(&document);
     Ok(HtmlConversion { document, semantic_markup })
@@ -72,6 +122,9 @@ fn parse_block_children(node: NodeRef<'_, Node>, base_url: Option<&Url>) -> Vec<
     let mut blocks = Vec::new();
     let mut inline_run = Vec::new();
     for child in node.children() {
+        if ElementRef::wrap(child).is_some_and(element_is_hidden) {
+            continue;
+        }
         if is_block_node(child) {
             flush_inline_run(&mut inline_run, &mut blocks, base_url);
             blocks.extend(parse_block_node(child, base_url));
@@ -113,10 +166,10 @@ fn parse_block_node(node: NodeRef<'_, Node>, base_url: Option<&Url>) -> Vec<Rich
         "h6" => heading(element, HeadingLevel::H6, base_url),
         "p" => paragraph_for_element(element, base_url),
         "blockquote" => vec![RichBlock::BlockQuote(parse_block_children(node, base_url))],
-        "ul" => vec![parse_list(element, ListKind::Unordered, base_url)],
-        "ol" => vec![parse_list(element, ordered_list_kind(element), base_url)],
+        "ul" => parse_list(element, ListKind::Unordered, base_url),
+        "ol" => parse_list(element, ordered_list_kind(element), base_url),
         "pre" => vec![parse_code_block(element)],
-        "table" => parse_table(element, base_url).into_iter().collect(),
+        "table" => parse_table(element, base_url),
         "hr" => vec![RichBlock::HorizontalRule],
         _ => parse_block_children(node, base_url),
     };
@@ -184,14 +237,39 @@ fn wrap_inline_semantics(
     if semantics.is_empty() {
         return children;
     }
+    let mut wrapped_siblings = Vec::with_capacity(children.len());
+    for child in children {
+        let wrapped = wrap_single_inline_semantics(semantics, child);
+        for inline in wrapped {
+            append_merging_semantic_sibling(&mut wrapped_siblings, inline);
+        }
+    }
+    wrapped_siblings
+}
+
+fn wrap_single_inline_semantics(
+    semantics: &[InlineSemantic],
+    child: RichInline,
+) -> Vec<RichInline> {
     let mut canonical_semantics = semantics.to_vec();
-    let unwrapped_children = peel_outer_inline_semantics(children, &mut canonical_semantics);
+    let unwrapped_children = peel_outer_inline_semantics(vec![child], &mut canonical_semantics);
     canonical_semantics.sort_by_key(semantic_order);
     canonical_semantics.dedup();
     canonical_semantics
         .iter()
         .rev()
         .fold(unwrapped_children, |nested, semantic| vec![wrap_inline(*semantic, nested)])
+}
+
+fn append_merging_semantic_sibling(siblings: &mut Vec<RichInline>, inline: RichInline) {
+    match (siblings.last_mut(), inline) {
+        (Some(RichInline::Strong(existing)), RichInline::Strong(mut children))
+        | (Some(RichInline::Emphasis(existing)), RichInline::Emphasis(mut children))
+        | (Some(RichInline::Strikethrough(existing)), RichInline::Strikethrough(mut children)) => {
+            existing.append(&mut children)
+        }
+        (_, inline) => siblings.push(inline),
+    }
 }
 
 fn peel_outer_inline_semantics(
@@ -263,17 +341,52 @@ fn parse_image(element: ElementRef<'_>, base_url: Option<&Url>) -> Vec<RichInlin
     (!alt.is_empty()).then_some(RichInline::Text(alt)).into_iter().collect()
 }
 
-fn parse_list(element: ElementRef<'_>, kind: ListKind, base_url: Option<&Url>) -> RichBlock {
-    let items = element
-        .children()
-        .filter_map(ElementRef::wrap)
-        .filter(|child| child.value().name() == "li" && !element_is_hidden(*child))
-        .map(|item| {
-            let blocks = parse_block_children(*item, base_url);
-            apply_element_semantics_to_blocks(item, blocks)
-        })
-        .collect();
-    RichBlock::List { kind, items }
+fn parse_list(element: ElementRef<'_>, kind: ListKind, base_url: Option<&Url>) -> Vec<RichBlock> {
+    let mut blocks = Vec::new();
+    let mut items = Vec::new();
+    let mut inline_run = Vec::new();
+    let mut emitted_items = 0_u64;
+    for child in element.children() {
+        if ElementRef::wrap(child).is_some_and(element_is_hidden) {
+            continue;
+        }
+        if ElementRef::wrap(child).is_some_and(|child| child.value().name() == "li") {
+            flush_inline_run(&mut inline_run, &mut blocks, base_url);
+            let item = ElementRef::wrap(child).expect("list item element was checked");
+            let item_blocks = parse_block_children(child, base_url);
+            items.push(apply_element_semantics_to_blocks(item, item_blocks));
+            continue;
+        }
+        flush_list_items(&mut items, &mut blocks, kind, &mut emitted_items);
+        if is_block_node(child) {
+            flush_inline_run(&mut inline_run, &mut blocks, base_url);
+            blocks.extend(parse_block_node(child, base_url));
+        } else {
+            inline_run.push(child);
+        }
+    }
+    flush_list_items(&mut items, &mut blocks, kind, &mut emitted_items);
+    flush_inline_run(&mut inline_run, &mut blocks, base_url);
+    blocks
+}
+
+fn flush_list_items(
+    items: &mut Vec<Vec<RichBlock>>,
+    blocks: &mut Vec<RichBlock>,
+    kind: ListKind,
+    emitted_items: &mut u64,
+) {
+    if items.is_empty() {
+        return;
+    }
+    let segment_kind = match kind {
+        ListKind::Unordered => ListKind::Unordered,
+        ListKind::Ordered { start } => {
+            ListKind::Ordered { start: start.saturating_add(*emitted_items) }
+        }
+    };
+    *emitted_items += items.len() as u64;
+    blocks.push(RichBlock::List { kind: segment_kind, items: std::mem::take(items) });
 }
 
 fn ordered_list_kind(element: ElementRef<'_>) -> ListKind {
@@ -286,7 +399,7 @@ fn parse_code_block(element: ElementRef<'_>) -> RichBlock {
         .child_elements()
         .find(|child| child.value().name() == "code" && !element_is_hidden(*child));
     let language = code.and_then(code_language);
-    let text = code.map_or_else(|| visible_text(*element), |code| visible_text(*code));
+    let text = visible_text(*element);
     RichBlock::CodeBlock { language, text }
 }
 
@@ -299,14 +412,48 @@ fn code_language(element: ElementRef<'_>) -> Option<String> {
     })
 }
 
-fn parse_table(element: ElementRef<'_>, base_url: Option<&Url>) -> Option<RichBlock> {
+fn parse_table(element: ElementRef<'_>, base_url: Option<&Url>) -> Vec<RichBlock> {
+    let (mut blocks, trailing_captions) = parse_table_captions(element, base_url);
     let table_rows = collect_table_rows(element);
     let mut parsed_rows = table_rows
         .into_iter()
         .map(|row| parse_table_row(row, base_url))
         .filter(|row| !row.is_empty());
-    let header = parsed_rows.next()?;
-    Some(RichBlock::Table { header, rows: parsed_rows.collect() })
+    let Some(header) = parsed_rows.next() else {
+        blocks.extend(trailing_captions);
+        return blocks;
+    };
+    blocks.push(RichBlock::Table { header, rows: parsed_rows.collect() });
+    blocks.extend(trailing_captions);
+    blocks
+}
+
+fn parse_table_captions(
+    element: ElementRef<'_>,
+    base_url: Option<&Url>,
+) -> (Vec<RichBlock>, Vec<RichBlock>) {
+    let mut leading = Vec::new();
+    let mut trailing = Vec::new();
+    let mut encountered_rows = false;
+    for child in element.child_elements() {
+        if element_is_hidden(child) {
+            continue;
+        }
+        match child.value().name() {
+            "tr" | "thead" | "tbody" | "tfoot" => encountered_rows = true,
+            "caption" => {
+                let caption_blocks = paragraph_for_element(child, base_url);
+                let caption_blocks = apply_element_semantics_to_blocks(child, caption_blocks);
+                if encountered_rows {
+                    trailing.extend(caption_blocks);
+                } else {
+                    leading.extend(caption_blocks);
+                }
+            }
+            _ => {}
+        }
+    }
+    (leading, trailing)
 }
 
 fn collect_table_rows(element: ElementRef<'_>) -> Vec<TableRowSource<'_>> {
@@ -337,8 +484,7 @@ fn parse_table_row(row: TableRowSource<'_>, base_url: Option<&Url>) -> Vec<Vec<R
         .child_elements()
         .filter(|cell| matches!(cell.value().name(), "th" | "td") && !element_is_hidden(*cell))
         .map(|cell| {
-            let mut content = parse_inline_children(*cell, base_url);
-            normalize_flow_content(&mut content);
+            let content = parse_table_cell_content(cell, base_url);
             let semantics = canonical_table_cell_semantics(
                 &row.group_semantics,
                 &row_semantics,
@@ -347,6 +493,46 @@ fn parse_table_row(row: TableRowSource<'_>, base_url: Option<&Url>) -> Vec<Vec<R
             wrap_inline_semantics(&semantics, content)
         })
         .collect()
+}
+
+fn parse_table_cell_content(element: ElementRef<'_>, base_url: Option<&Url>) -> Vec<RichInline> {
+    let blocks = parse_block_children(*element, base_url);
+    let mut content = Vec::new();
+    for block in blocks {
+        let block_content = table_block_content(block);
+        if block_content.is_empty() {
+            continue;
+        }
+        if !content.is_empty() {
+            content.push(RichInline::LineBreak);
+        }
+        content.extend(block_content);
+    }
+    content
+}
+
+fn table_block_content(block: RichBlock) -> Vec<RichInline> {
+    match block {
+        RichBlock::Heading { content, .. } | RichBlock::Paragraph(content) => content,
+        block => RichDocument::new(vec![block])
+            .visible_segments()
+            .into_iter()
+            .flat_map(|segment| visible_text_to_inlines(&segment.text))
+            .collect(),
+    }
+}
+
+fn visible_text_to_inlines(text: &str) -> Vec<RichInline> {
+    let mut inlines = Vec::new();
+    for (index, line) in text.lines().enumerate() {
+        if index > 0 {
+            inlines.push(RichInline::LineBreak);
+        }
+        if !line.is_empty() {
+            inlines.push(RichInline::Text(line.to_owned()));
+        }
+    }
+    inlines
 }
 
 fn canonical_table_cell_semantics(
@@ -414,8 +600,8 @@ fn inline_semantics(element: ElementRef<'_>) -> Vec<InlineSemantic> {
         "s" | "strike" | "del" => semantics.push(InlineSemantic::Strikethrough),
         _ => {}
     }
-    for (property, value) in own_style_declarations(element) {
-        let semantic = style_semantic(property, &value);
+    for declaration in own_style_declarations(element) {
+        let semantic = style_semantic(declaration.property, &declaration.value);
         if let Some(semantic) = semantic.filter(|candidate| !semantics.contains(candidate)) {
             semantics.push(semantic);
         }
@@ -475,27 +661,53 @@ fn element_is_hidden(element: ElementRef<'_>) -> bool {
     {
         return true;
     }
-    own_style_declarations(element).any(|(property, value)| {
+    own_style_declarations(element).into_iter().any(|declaration| {
         matches!(
-            (property, first_css_token(&value)),
+            (declaration.property, first_css_token(&declaration.value)),
             (SupportedStyleProperty::Display, "none")
                 | (SupportedStyleProperty::Visibility, "hidden")
         )
     })
 }
 
-fn own_style_declarations(
-    element: ElementRef<'_>,
-) -> impl Iterator<Item = (SupportedStyleProperty, String)> + '_ {
-    element.attr("style").into_iter().flat_map(|style| {
-        style.split(';').filter_map(|declaration| {
-            let (property, value) = declaration.split_once(':')?;
-            let property = supported_style_property(property.trim())?;
-            let value = value.trim().to_ascii_lowercase();
-            let value = value.strip_suffix("!important").unwrap_or(&value).trim().to_owned();
-            Some((property, value))
-        })
-    })
+fn own_style_declarations(element: ElementRef<'_>) -> Vec<CascadedStyleDeclaration> {
+    let Some(style) = element.attr("style") else {
+        return Vec::new();
+    };
+    let mut cascaded = Vec::<CascadedStyleDeclaration>::new();
+    for raw_declaration in style.split(';') {
+        let Some(declaration) = parse_style_declaration(raw_declaration) else {
+            continue;
+        };
+        if let Some(existing) =
+            cascaded.iter_mut().find(|current| current.property == declaration.property)
+        {
+            if !existing.important || declaration.important {
+                *existing = declaration;
+            }
+        } else {
+            cascaded.push(declaration);
+        }
+    }
+    cascaded
+}
+
+fn parse_style_declaration(raw: &str) -> Option<CascadedStyleDeclaration> {
+    let (property, value) = raw.split_once(':')?;
+    let property = supported_style_property(property.trim())?;
+    let lowercase_value = value.trim().to_ascii_lowercase();
+    let (value, important) = split_important_value(&lowercase_value);
+    Some(CascadedStyleDeclaration { property, value, important })
+}
+
+fn split_important_value(value: &str) -> (String, bool) {
+    let Some(marker_start) = value.rfind('!') else {
+        return (value.trim().to_owned(), false);
+    };
+    if !value[marker_start + 1..].trim().eq_ignore_ascii_case("important") {
+        return (value.trim().to_owned(), false);
+    }
+    (value[..marker_start].trim().to_owned(), true)
 }
 
 fn supported_style_property(property: &str) -> Option<SupportedStyleProperty> {
@@ -578,6 +790,8 @@ fn known_block_tag(name: &str) -> bool {
             | "section"
             | "table"
             | "ul"
+            | "xmp"
+            | "plaintext"
     )
 }
 
@@ -622,100 +836,255 @@ fn merge_adjacent_text(content: &mut Vec<RichInline>) {
     *content = merged;
 }
 
-fn remove_reconstructed_inline_formatting(blocks: &mut [RichBlock], html: &str) {
-    let source_paragraphs = source_paragraph_segments(html);
-    let paragraph_count =
-        blocks.iter().filter(|block| matches!(block, RichBlock::Paragraph(_))).count();
-    if paragraph_count != source_paragraphs.len() {
-        return;
-    }
-    let mut source_paragraph = source_paragraphs.iter();
-    for block in blocks {
-        let RichBlock::Paragraph(content) = block else {
+fn normalize_malformed_fragment(html: &str) -> Result<String, HtmlPasteError> {
+    let lowercase_html = html.to_ascii_lowercase();
+    let mut normalized = String::with_capacity(html.len());
+    let mut normalizer = FragmentNormalizer::default();
+    let mut cursor = 0;
+    while cursor < html.len() {
+        let Some(tag_start) = find_next_tag_start(html, cursor) else {
+            normalized.push_str(&html[cursor..]);
+            break;
+        };
+        normalized.push_str(&html[cursor..tag_start]);
+        if html[tag_start..].starts_with("<!--") {
+            cursor = copy_html_comment(html, tag_start, &mut normalized);
+            continue;
+        }
+        let Some(tag_end) = find_tag_end(html, tag_start) else {
+            normalized.push_str(&html[tag_start..]);
+            break;
+        };
+        let source_tag = &html[tag_start..=tag_end];
+        let Some((name, closing)) = source_tag_name(source_tag) else {
+            normalized.push_str(source_tag);
+            cursor = tag_end + 1;
             continue;
         };
-        let source = source_paragraph.next().expect("paragraph counts were checked");
-        remove_unmarked_single_semantic(content, source);
+        normalizer.prepare_for_tag(&name, closing, &mut normalized);
+        if !closing && raw_text_element(&name).is_some() {
+            cursor = copy_raw_text_element(
+                html,
+                &lowercase_html,
+                tag_start,
+                tag_end,
+                &name,
+                &mut normalized,
+            );
+            continue;
+        }
+        normalized.push_str(source_tag);
+        normalizer.record_formatting_tag(&name, closing)?;
+        cursor = tag_end + 1;
     }
+    Ok(normalized)
 }
 
-fn remove_unmarked_single_semantic(content: &mut Vec<RichInline>, source: &str) {
-    if content.len() != 1 {
-        return;
-    }
-    let Some(semantic) = inline_semantic_kind(&content[0]) else {
-        return;
-    };
-    if source_declares_semantic(source, semantic) {
-        return;
-    }
-    let styled_inline = content.pop().expect("one outer semantic inline was checked");
-    *content = styled_inline_children(styled_inline);
+fn find_next_tag_start(html: &str, cursor: usize) -> Option<usize> {
+    html[cursor..].find('<').map(|offset| cursor + offset)
 }
 
-fn inline_semantic_kind(inline: &RichInline) -> Option<InlineSemantic> {
-    match inline {
-        RichInline::Strong(_) => Some(InlineSemantic::Strong),
-        RichInline::Emphasis(_) => Some(InlineSemantic::Emphasis),
-        RichInline::Strikethrough(_) => Some(InlineSemantic::Strikethrough),
+fn copy_html_comment(html: &str, tag_start: usize, normalized: &mut String) -> usize {
+    let comment_end =
+        html[tag_start + 4..].find("-->").map_or(html.len(), |offset| tag_start + 4 + offset + 3);
+    normalized.push_str(&html[tag_start..comment_end]);
+    comment_end
+}
+
+fn find_tag_end(html: &str, tag_start: usize) -> Option<usize> {
+    let mut quote = TagQuote::None;
+    for (offset, byte) in html.as_bytes()[tag_start + 1..].iter().enumerate() {
+        quote = match (quote, byte) {
+            (TagQuote::None, b'\'') => TagQuote::Single,
+            (TagQuote::None, b'"') => TagQuote::Double,
+            (TagQuote::Single, b'\'') | (TagQuote::Double, b'"') => TagQuote::None,
+            (current, _) => current,
+        };
+        if quote == TagQuote::None && *byte == b'>' {
+            return Some(tag_start + 1 + offset);
+        }
+    }
+    None
+}
+
+fn tag_is_paragraph_boundary(name: &str) -> bool {
+    known_block_tag(name) || matches!(name, "li" | "dt" | "dd" | "caption" | "tr" | "th" | "td")
+}
+
+fn tag_starts_paragraph_scope(name: &str) -> bool {
+    matches!(name, "p" | "h1" | "h2" | "h3" | "h4" | "h5" | "h6")
+}
+
+fn source_tag_name(source: &str) -> Option<(String, bool)> {
+    let bytes = source.as_bytes();
+    let closing = bytes.get(1) == Some(&b'/');
+    let mut cursor = 1 + usize::from(closing);
+    if !bytes.get(cursor).is_some_and(u8::is_ascii_alphabetic) {
+        return None;
+    }
+    let name_start = cursor;
+    while bytes
+        .get(cursor)
+        .is_some_and(|byte| !byte.is_ascii_whitespace() && !matches!(byte, b'/' | b'>'))
+    {
+        cursor += 1;
+    }
+    (cursor > name_start).then(|| (source[name_start..cursor].to_ascii_lowercase(), closing))
+}
+
+fn raw_text_element(name: &str) -> Option<RawTextElement> {
+    match name {
+        "script" => Some(RawTextElement::Script),
+        "style" => Some(RawTextElement::Style),
+        "textarea" => Some(RawTextElement::Textarea),
+        "title" => Some(RawTextElement::Title),
+        "xmp" => Some(RawTextElement::Xmp),
+        "iframe" => Some(RawTextElement::Iframe),
+        "noembed" => Some(RawTextElement::NoEmbed),
+        "noframes" => Some(RawTextElement::NoFrames),
+        "plaintext" => Some(RawTextElement::Plaintext),
         _ => None,
     }
 }
 
-fn styled_inline_children(inline: RichInline) -> Vec<RichInline> {
-    match inline {
-        RichInline::Strong(children)
-        | RichInline::Emphasis(children)
-        | RichInline::Strikethrough(children) => children,
-        inline => vec![inline],
+fn copy_raw_text_element(
+    html: &str,
+    lowercase_html: &str,
+    tag_start: usize,
+    tag_end: usize,
+    name: &str,
+    normalized: &mut String,
+) -> usize {
+    let element = raw_text_element(name).expect("caller checked the raw-text element name");
+    let Some(closing_start) = find_raw_text_closing(lowercase_html, tag_end + 1, element) else {
+        normalized.push_str(&html[tag_start..]);
+        return html.len();
+    };
+    let Some(closing_end) = find_tag_end(html, closing_start) else {
+        normalized.push_str(&html[tag_start..]);
+        return html.len();
+    };
+    normalized.push_str(&html[tag_start..=closing_end]);
+    closing_end + 1
+}
+
+fn find_raw_text_closing(
+    lowercase_html: &str,
+    cursor: usize,
+    element: RawTextElement,
+) -> Option<usize> {
+    if matches!(element, RawTextElement::Plaintext) {
+        return None;
+    }
+    let closing_prefix = format!("</{}", element.name());
+    let mut search_start = cursor;
+    while let Some(offset) = lowercase_html[search_start..].find(&closing_prefix) {
+        let candidate = search_start + offset;
+        let boundary = lowercase_html.as_bytes().get(candidate + closing_prefix.len());
+        if boundary.is_some_and(|byte| byte.is_ascii_whitespace() || matches!(byte, b'>' | b'/')) {
+            return Some(candidate);
+        }
+        search_start = candidate + closing_prefix.len();
+    }
+    None
+}
+
+impl RawTextElement {
+    fn name(self) -> &'static str {
+        match self {
+            Self::Script => "script",
+            Self::Style => "style",
+            Self::Textarea => "textarea",
+            Self::Title => "title",
+            Self::Xmp => "xmp",
+            Self::Iframe => "iframe",
+            Self::NoEmbed => "noembed",
+            Self::NoFrames => "noframes",
+            Self::Plaintext => "plaintext",
+        }
     }
 }
 
-fn source_paragraph_segments(html: &str) -> Vec<String> {
-    let lowercase_html = html.to_ascii_lowercase();
-    let starts = lowercase_html
-        .match_indices("<p")
-        .filter(|(index, _)| is_tag_name_boundary(lowercase_html.as_bytes().get(index + 2)))
-        .map(|(index, _)| index)
-        .collect::<Vec<_>>();
-    starts
-        .iter()
-        .enumerate()
-        .map(|(position, start)| {
-            let end = starts.get(position + 1).copied().unwrap_or(lowercase_html.len());
-            lowercase_html[*start..end].to_owned()
-        })
-        .collect()
-}
+impl FragmentNormalizer {
+    fn prepare_for_tag(&mut self, name: &str, closing: bool, normalized: &mut String) {
+        if !tag_is_paragraph_boundary(name) {
+            return;
+        }
+        self.close_paragraph_formatting(normalized);
+        self.current_paragraph_scope = None;
+        if !closing && tag_starts_paragraph_scope(name) {
+            self.next_paragraph_scope += 1;
+            self.current_paragraph_scope = Some(self.next_paragraph_scope);
+        }
+    }
 
-fn is_tag_name_boundary(next_byte: Option<&u8>) -> bool {
-    next_byte.is_some_and(|byte| byte.is_ascii_whitespace() || matches!(byte, b'>' | b'/'))
-}
+    fn close_paragraph_formatting(&mut self, normalized: &mut String) {
+        let Some(scope) = self.current_paragraph_scope else {
+            return;
+        };
+        let mut closing_tags = Vec::new();
+        self.open_formatting.retain(|formatting| {
+            if formatting.paragraph_scope != Some(scope) {
+                return true;
+            }
+            closing_tags.push(formatting.tag);
+            false
+        });
+        for tag in closing_tags.into_iter().rev() {
+            normalized.push_str("</");
+            normalized.push_str(tag.name());
+            normalized.push('>');
+        }
+    }
 
-fn source_declares_semantic(source: &str, semantic: InlineSemantic) -> bool {
-    match semantic {
-        InlineSemantic::Strong => {
-            source_contains_start_tag(source, "strong")
-                || source_contains_start_tag(source, "b")
-                || source.contains("font-weight")
+    fn record_formatting_tag(&mut self, name: &str, closing: bool) -> Result<(), HtmlPasteError> {
+        let Some(tag) = InlineFormattingTag::from_name(name) else {
+            return Ok(());
+        };
+        if closing {
+            if let Some(index) = self.open_formatting.iter().rposition(|open| open.tag == tag) {
+                self.open_formatting.remove(index);
+            }
+        } else {
+            if self.open_formatting.len() >= MAX_HTML_NESTING_DEPTH {
+                return Err(HtmlPasteError::NestingDepthExceeded);
+            }
+            self.open_formatting
+                .push(OpenInlineFormatting { tag, paragraph_scope: self.current_paragraph_scope });
         }
-        InlineSemantic::Emphasis => {
-            source_contains_start_tag(source, "em")
-                || source_contains_start_tag(source, "i")
-                || source.contains("font-style")
-        }
-        InlineSemantic::Strikethrough => {
-            ["s", "strike", "del"].into_iter().any(|tag| source_contains_start_tag(source, tag))
-                || source.contains("text-decoration")
-        }
+        Ok(())
     }
 }
 
-fn source_contains_start_tag(source: &str, tag: &str) -> bool {
-    let prefix = format!("<{tag}");
-    source
-        .match_indices(&prefix)
-        .any(|(index, _)| is_tag_name_boundary(source.as_bytes().get(index + prefix.len())))
+impl InlineFormattingTag {
+    fn from_name(name: &str) -> Option<Self> {
+        match name {
+            "strong" => Some(Self::Strong),
+            "b" => Some(Self::Bold),
+            "em" => Some(Self::Emphasis),
+            "i" => Some(Self::Italic),
+            "s" => Some(Self::Strikethrough),
+            "strike" => Some(Self::Strike),
+            "del" => Some(Self::Delete),
+            "a" => Some(Self::Link),
+            "code" => Some(Self::Code),
+            _ => None,
+        }
+    }
+
+    fn name(self) -> &'static str {
+        match self {
+            Self::Strong => "strong",
+            Self::Bold => "b",
+            Self::Emphasis => "em",
+            Self::Italic => "i",
+            Self::Strikethrough => "s",
+            Self::Strike => "strike",
+            Self::Delete => "del",
+            Self::Link => "a",
+            Self::Code => "code",
+        }
+    }
 }
 
 fn inline_content_is_empty(content: &[RichInline]) -> bool {
@@ -733,23 +1102,82 @@ fn document_semantic_markup(document: &RichDocument) -> SemanticMarkup {
 
 fn block_has_semantic_markup(block: &RichBlock) -> bool {
     match block {
-        RichBlock::Paragraph(content) => content.iter().any(inline_has_semantic_markup),
-        RichBlock::BlockQuote(blocks) => !blocks.is_empty(),
-        RichBlock::Heading { .. }
-        | RichBlock::List { .. }
-        | RichBlock::CodeBlock { .. }
-        | RichBlock::Table { .. }
-        | RichBlock::HorizontalRule => true,
+        RichBlock::Paragraph(content) => inlines_have_effective_semantic(content),
+        RichBlock::Heading { content, .. } => inlines_have_visible_content(content),
+        RichBlock::BlockQuote(blocks) => blocks_have_visible_content(blocks),
+        RichBlock::List { items, .. } => {
+            items.iter().any(|blocks| blocks_have_visible_content(blocks))
+        }
+        RichBlock::CodeBlock { text, .. } => !text.is_empty(),
+        RichBlock::Table { header, rows } => {
+            cells_have_visible_content(header)
+                || rows.iter().any(|row| cells_have_visible_content(row))
+        }
+        RichBlock::HorizontalRule => true,
     }
 }
 
-fn inline_has_semantic_markup(inline: &RichInline) -> bool {
-    !matches!(inline, RichInline::Text(_))
+fn blocks_have_visible_content(blocks: &[RichBlock]) -> bool {
+    blocks.iter().any(block_has_visible_content)
+}
+
+fn block_has_visible_content(block: &RichBlock) -> bool {
+    match block {
+        RichBlock::Heading { content, .. } | RichBlock::Paragraph(content) => {
+            inlines_have_visible_content(content)
+        }
+        RichBlock::BlockQuote(blocks) => blocks_have_visible_content(blocks),
+        RichBlock::List { items, .. } => {
+            items.iter().any(|blocks| blocks_have_visible_content(blocks))
+        }
+        RichBlock::CodeBlock { text, .. } => !text.is_empty(),
+        RichBlock::Table { header, rows } => {
+            cells_have_visible_content(header)
+                || rows.iter().any(|row| cells_have_visible_content(row))
+        }
+        RichBlock::HorizontalRule => true,
+    }
+}
+
+fn cells_have_visible_content(cells: &[Vec<RichInline>]) -> bool {
+    cells.iter().any(|content| inlines_have_visible_content(content))
+}
+
+fn inlines_have_effective_semantic(content: &[RichInline]) -> bool {
+    content.iter().enumerate().any(|(index, inline)| match inline {
+        RichInline::Strong(children)
+        | RichInline::Emphasis(children)
+        | RichInline::Strikethrough(children)
+        | RichInline::Link { children, .. } => inlines_have_visible_content(children),
+        RichInline::InlineCode(text) => !text.is_empty(),
+        RichInline::RemoteImage { alt, .. } => !alt.trim().is_empty(),
+        RichInline::LineBreak => {
+            inlines_have_visible_content(&content[..index])
+                && inlines_have_visible_content(&content[index + 1..])
+        }
+        RichInline::Text(_) => false,
+    })
+}
+
+fn inlines_have_visible_content(content: &[RichInline]) -> bool {
+    content.iter().any(|inline| match inline {
+        RichInline::Text(text) => !text.trim().is_empty(),
+        RichInline::InlineCode(text) => !text.is_empty(),
+        RichInline::Strong(children)
+        | RichInline::Emphasis(children)
+        | RichInline::Strikethrough(children)
+        | RichInline::Link { children, .. } => inlines_have_visible_content(children),
+        RichInline::RemoteImage { alt, .. } => !alt.trim().is_empty(),
+        RichInline::LineBreak => false,
+    })
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{HtmlPasteError, MAX_HTML_NESTING_DEPTH, SemanticMarkup, parse_html};
+    use super::{
+        HtmlPasteError, MAX_HTML_NESTING_DEPTH, SemanticMarkup, normalize_malformed_fragment,
+        parse_html,
+    };
     use crate::paste::writer::write_markdown;
     use crate::paste::{RichBlock, RichInline};
 
@@ -874,6 +1302,30 @@ mod tests {
     }
 
     #[test]
+    fn list_preserves_non_item_children_in_reading_order() {
+        let conversion = parse_html(
+            "<ul>before<li>one</li><custom-box>middle</custom-box><li>two</li>after</ul>",
+            None,
+        )
+        .expect("mixed list children fixture");
+        assert_eq!(
+            write_markdown(&conversion.document),
+            "before\n\n- one\n\nmiddle\n\n- two\n\nafter"
+        );
+    }
+
+    #[test]
+    fn ordered_list_segments_saturate_start_without_panicking() {
+        let conversion =
+            parse_html("<ol start='18446744073709551615'><li>a</li>middle<li>b</li></ol>", None)
+                .expect("maximum ordered list start fixture");
+        assert_eq!(
+            write_markdown(&conversion.document),
+            "18446744073709551615. a\n\nmiddle\n\n18446744073709551615. b"
+        );
+    }
+
+    #[test]
     fn table_without_thead_uses_first_row_and_normalizes_irregular_width() {
         let conversion = parse_html(
             "<table><tr><td>H</td></tr><tr><td>A</td><td>B</td></tr><tr><td>C</td></tr></table>",
@@ -897,7 +1349,7 @@ mod tests {
         .expect("URL policy fixture");
         assert_eq!(
             write_markdown(&conversion.document),
-            "[web](https://example.com/a) mail relative unsafe ![remote](https://example.com/a.png)relative image"
+            "[web](https://example.com/a) [mail](mailto:a@example.com) relative unsafe ![remote](https://example.com/a.png)relative image"
         );
         let RichBlock::Paragraph(content) = &conversion.document.blocks()[0] else {
             panic!("URL fixture should remain one paragraph");
@@ -937,6 +1389,48 @@ mod tests {
     }
 
     #[test]
+    fn hidden_block_nodes_do_not_split_inline_runs() {
+        let fixtures = [
+            "a<div hidden>x</div>b",
+            "a<div aria-hidden='true'>x</div>b",
+            "a<div style='display:none'>x</div>b",
+            "a<div style='visibility:hidden'>x</div>b",
+            "a<script>x</script>b",
+        ];
+        for html in fixtures {
+            let conversion = parse_html(html, None).expect("hidden block boundary fixture");
+            assert_eq!(write_markdown(&conversion.document), "ab", "{html}");
+        }
+    }
+
+    #[test]
+    fn inline_style_cascade_respects_last_declaration_and_important() {
+        let visible = parse_html("<div style='display:none;display:block'>visible</div>", None)
+            .expect("later display wins");
+        assert_eq!(write_markdown(&visible.document), "visible");
+
+        let plain = parse_html("<span style='font-weight:700;font-weight:400'>plain</span>", None)
+            .expect("later font weight wins");
+        assert_eq!(write_markdown(&plain.document), "plain");
+        assert_eq!(plain.semantic_markup, SemanticMarkup::Absent);
+
+        let hidden =
+            parse_html("<div style='display:none!important;display:block'>secret</div>", None)
+                .expect("important display wins");
+        assert_eq!(write_markdown(&hidden.document), "");
+
+        let important_visible =
+            parse_html("<div style='display:none;display:block!important'>visible</div>", None)
+                .expect("later important display wins");
+        assert_eq!(write_markdown(&important_visible.document), "visible");
+
+        let spaced_important =
+            parse_html("<div style='display:none ! important;display:block'>secret</div>", None)
+                .expect("spaced important marker");
+        assert_eq!(write_markdown(&spaced_important.document), "");
+    }
+
+    #[test]
     fn unknown_wrapper_preserves_block_children() {
         let conversion = parse_html("<custom-box><h2>Title</h2><p>body</p></custom-box>", None)
             .expect("unknown wrapper fixture");
@@ -952,6 +1446,37 @@ mod tests {
         )
         .expect("code language fixture");
         assert_eq!(write_markdown(&conversion.document), "```rust\nfn main() {}\n```");
+    }
+
+    #[test]
+    fn pre_preserves_text_around_code_child_and_uses_its_language() {
+        let conversion =
+            parse_html(r#"<pre>before<code class="language-rust">inside</code>after</pre>"#, None)
+                .expect("mixed pre content fixture");
+        assert_eq!(write_markdown(&conversion.document), "```rust\nbeforeinsideafter\n```");
+    }
+
+    #[test]
+    fn table_preserves_caption_order_cell_blocks_and_ragged_rows() {
+        let conversion = parse_html(
+            "<table><caption>Caption</caption><tr><td><p>A</p><p>B</p></td><td>H2</td></tr><tr><td>C</td></tr></table>",
+            None,
+        )
+        .expect("caption and cell blocks fixture");
+        assert_eq!(
+            write_markdown(&conversion.document),
+            "Caption\n\n| A<br>B | H2 |\n| --- | --- |\n| C |  |"
+        );
+    }
+
+    #[test]
+    fn caption_after_rows_remains_after_the_table() {
+        let conversion = parse_html(
+            "<table><tr><td>H</td></tr><tr><td>A</td></tr><caption>After</caption></table>",
+            None,
+        )
+        .expect("trailing caption fixture");
+        assert_eq!(write_markdown(&conversion.document), "| H |\n| --- |\n| A |\n\nAfter");
     }
 
     #[test]
@@ -1045,6 +1570,23 @@ mod tests {
     }
 
     #[test]
+    fn inherited_semantics_deduplicate_across_mixed_siblings() {
+        let conversion = parse_html("<p><strong>a<strong>b</strong><em>c</em>d</strong></p>", None)
+            .expect("nested semantic siblings fixture");
+        let expected = vec![RichInline::Strong(vec![
+            RichInline::Text("a".into()),
+            RichInline::Text("b".into()),
+            RichInline::Emphasis(vec![RichInline::Text("c".into())]),
+            RichInline::Text("d".into()),
+        ])];
+        let RichBlock::Paragraph(content) = &conversion.document.blocks()[0] else {
+            panic!("fixture should convert to a paragraph");
+        };
+        assert_eq!(*content, expected);
+        assert_eq!(write_markdown(&conversion.document), "**ab*c*d**");
+    }
+
+    #[test]
     fn malformed_recovery_keeps_unrelated_legal_formatting() {
         let conversion = parse_html(
             "<p><strong>A</strong></p><p><strong>B</strong></p><p>one<strong>two<p>three",
@@ -1059,6 +1601,162 @@ mod tests {
         let conversion = parse_html("<p>one<strong>two<p>three<em>four", None)
             .expect("multi-child reconstructed wrapper fixture");
         assert_eq!(write_markdown(&conversion.document), "one**two**\n\nthree*four*");
+    }
+
+    #[test]
+    fn malformed_scanner_ignores_fake_paragraph_tags_in_non_tag_contexts() {
+        let conversion = parse_html(
+            r#"<!-- <p> --><div title="<p>"></div><script>const x = '<p>';</script>
+                <style>x::before { content: '<p>'; }</style><p title="<p>">one<strong>two<p>three"#,
+            None,
+        )
+        .expect("scanner deception fixture");
+        assert_eq!(write_markdown(&conversion.document), "one**two**\n\nthree");
+    }
+
+    #[test]
+    fn malformed_scanner_requires_raw_text_end_tag_boundary() {
+        let conversion = parse_html(
+            "<script>const x = '</scripture><p>';</script><p>one<strong>two<p>three",
+            None,
+        )
+        .expect("raw text closing prefix fixture");
+        assert_eq!(write_markdown(&conversion.document), "one**two**\n\nthree");
+    }
+
+    #[test]
+    fn malformed_scanner_does_not_treat_spaced_less_than_text_as_a_tag() {
+        let conversion =
+            parse_html("<p>one<strong>two< p>three", None).expect("spaced less-than text fixture");
+        assert_eq!(write_markdown(&conversion.document), "one**two< p>three**");
+
+        let dotted_name = parse_html("<p>one<strong>two<p.foo>three", None)
+            .expect("complete tag name boundary fixture");
+        assert_eq!(write_markdown(&dotted_name.document), "one**twothree**");
+    }
+
+    #[test]
+    fn formatting_start_tags_ignore_html_self_closing_flags() {
+        let conversion = parse_html("<p>one<strong/>two<p>three", None)
+            .expect("non-void self-closing flag fixture");
+        assert_eq!(write_markdown(&conversion.document), "one**two**\n\nthree");
+    }
+
+    #[test]
+    fn raw_text_block_boundaries_stop_paragraph_formatting_leaks() {
+        let xmp = parse_html("<p>one<strong>two<xmp>raw</xmp>three", None)
+            .expect("xmp paragraph boundary fixture");
+        assert_eq!(write_markdown(&xmp.document), "one**two**\n\nraw\n\nthree");
+
+        let plaintext = parse_html("<p>one<strong>two<plaintext>raw</plaintext><p>three", None)
+            .expect("plaintext consumes remaining source fixture");
+        assert_eq!(write_markdown(&plaintext.document), "one**two**\n\nraw</plaintext><p>three");
+    }
+
+    #[test]
+    fn formatting_normalizer_enforces_its_open_stack_limit() {
+        let html = format!("<p>{}", "<strong>".repeat(MAX_HTML_NESTING_DEPTH + 1));
+        assert_eq!(normalize_malformed_fragment(&html), Err(HtmlPasteError::NestingDepthExceeded));
+    }
+
+    #[test]
+    fn malformed_scanner_stops_semantics_at_paragraph_end() {
+        let conversion = parse_html(
+            "<p>one<strong>two<p>three</p><div hidden><strong>hidden</strong></div>",
+            None,
+        )
+        .expect("paragraph scope fixture");
+        assert_eq!(write_markdown(&conversion.document), "one**two**\n\nthree");
+    }
+
+    #[test]
+    fn malformed_recovery_visits_nested_quote_and_list_paragraphs() {
+        let quote = parse_html("<blockquote><p>one<strong>two<p>three</blockquote>", None)
+            .expect("nested quote malformed fixture");
+        assert_eq!(write_markdown(&quote.document), "> one**two**\n> \n> three");
+
+        let list = parse_html("<ul><li><p>one<strong>two<p>three</li></ul>", None)
+            .expect("nested list malformed fixture");
+        assert_eq!(write_markdown(&list.document), "- one**two**\n\n  three");
+    }
+
+    #[test]
+    fn malformed_recovery_skips_source_paragraphs_without_rich_blocks() {
+        let empty_prefix = parse_html("<p></p><p>one<strong>two<p>three", None)
+            .expect("empty source paragraph fixture");
+        assert_eq!(write_markdown(&empty_prefix.document), "one**two**\n\nthree");
+
+        let empty_suffix = parse_html("<p>one<strong>two<p>three</p><p></p>", None)
+            .expect("empty source paragraph suffix fixture");
+        assert_eq!(write_markdown(&empty_suffix.document), "one**two**\n\nthree");
+
+        let hidden_prefix = parse_html(
+            "<div hidden><p><strong>hidden</strong></p></div><p>one<strong>two<p>three",
+            None,
+        )
+        .expect("hidden source paragraph prefix fixture");
+        assert_eq!(write_markdown(&hidden_prefix.document), "one**two**\n\nthree");
+
+        let table_prefix = parse_html(
+            "<table><tr><td><p>cell</p></td></tr></table><p>one<strong>two<p>three",
+            None,
+        )
+        .expect("table cell paragraph fixture");
+        assert_eq!(
+            write_markdown(&table_prefix.document),
+            "| cell |\n| --- |\n\none**two**\n\nthree"
+        );
+    }
+
+    #[test]
+    fn malformed_recovery_ignores_hidden_and_table_paragraphs_after_visible_content() {
+        let hidden_suffix = parse_html(
+            "<p>one<strong>two<p>three</p><div hidden><p><strong>hidden</strong></p></div>",
+            None,
+        )
+        .expect("hidden suffix paragraph fixture");
+        assert_eq!(write_markdown(&hidden_suffix.document), "one**two**\n\nthree");
+
+        let table_suffix = parse_html(
+            "<p>one<strong>two<p>three</p><table><tr><td><p><strong>cell</strong></p></td></tr></table>",
+            None,
+        )
+        .expect("table suffix paragraph fixture");
+        assert_eq!(
+            write_markdown(&table_suffix.document),
+            "one**two**\n\nthree\n\n| **cell** |\n| --- |"
+        );
+    }
+
+    #[test]
+    fn legal_outer_formatting_can_span_multiple_blocks() {
+        let conversion = parse_html("<strong><p>A</p><p>B</p></strong>", None)
+            .expect("legal outer formatting fixture");
+        assert_eq!(write_markdown(&conversion.document), "**A**\n\n**B**");
+    }
+
+    #[test]
+    fn malformed_inline_formatting_closes_at_block_boundaries() {
+        let fixtures = [
+            ("<p>one<strong>two<div>three</div>", "one**two**\n\nthree"),
+            ("<p>one<strong>two<ul><li>three</li></ul>", "one**two**\n\n- three"),
+            (
+                "<p>one<strong>two<table><tr><td>three</td></tr></table>",
+                "one**two**\n\n| three |\n| --- |",
+            ),
+        ];
+        for (html, expected) in fixtures {
+            let conversion = parse_html(html, None).expect("malformed block boundary fixture");
+            assert_eq!(write_markdown(&conversion.document), expected, "{html}");
+        }
+    }
+
+    #[test]
+    fn malformed_recovery_preserves_legal_nested_formatting() {
+        let conversion =
+            parse_html("<p><strong>A<em>B</em></strong></p><p>one<strong>two<p>three", None)
+                .expect("legal prefix plus malformed tail");
+        assert_eq!(write_markdown(&conversion.document), "**A*B***\n\none**two**\n\nthree");
     }
 
     #[test]
@@ -1081,9 +1779,30 @@ mod tests {
             assert_eq!(conversion.semantic_markup, SemanticMarkup::Absent, "{html}");
         }
 
-        for html in ["<strong>bold</strong>", "<br>", "<hr>", "<ul><li>x</li></ul>"] {
+        for html in ["<strong>bold</strong>", "a<br>b", "<hr>", "<ul><li>x</li></ul>"] {
             let conversion = parse_html(html, None).expect("semantic fixture");
             assert_eq!(conversion.semantic_markup, SemanticMarkup::Present, "{html}");
         }
+    }
+
+    #[test]
+    fn empty_semantic_nodes_do_not_mark_plain_visible_text_as_semantic() {
+        let absent_fixtures = [
+            "<strong></strong># source",
+            "<em><strong></strong></em># source",
+            "<s></s># source",
+            "<a href='https://example.com'></a># source",
+            "<a href='https://example.com'>   </a># source",
+            "<img src='https://example.com/a.png' alt=''># source",
+            "<img src='https://example.com/a.png' alt='   '># source",
+            "<br># source",
+        ];
+        for html in absent_fixtures {
+            let conversion = parse_html(html, None).expect("empty semantic fixture");
+            assert_eq!(conversion.semantic_markup, SemanticMarkup::Absent, "{html}");
+        }
+
+        let effective_break = parse_html("a<br>b", None).expect("effective break fixture");
+        assert_eq!(effective_break.semantic_markup, SemanticMarkup::Present);
     }
 }
