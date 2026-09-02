@@ -220,7 +220,14 @@ enum GroupPosition {
 
 struct GroupFrame {
     state: RtfState,
-    position: GroupPosition,
+    role: GroupRole,
+}
+
+enum GroupRole {
+    Ordinary,
+    FieldInstruction { field_index: usize },
+    FieldResult { field_index: usize },
+    ListMarker { parent_destination: RtfDestination, marker: String },
 }
 
 struct FieldContext {
@@ -240,9 +247,10 @@ enum FieldClosure {
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum FieldProgress {
     Started,
-    Instruction,
+    InstructionOpen { depth: usize },
+    InstructionClosed,
+    ResultOpen { depth: usize },
     Ready,
-    ResultWithoutInstruction,
     AwaitingCompatibilityClose,
 }
 
@@ -270,7 +278,6 @@ struct RtfParser {
     group_position: GroupPosition,
     output: RichOutput,
     fields: Vec<FieldContext>,
-    list_marker: String,
     pending_unicode: PendingUnicode,
     fallback_bytes_remaining: usize,
     style_separator: StyleSeparator,
@@ -284,7 +291,6 @@ impl RtfParser {
             group_position: GroupPosition::Start,
             output: RichOutput::default(),
             fields: Vec::new(),
-            list_marker: String::new(),
             pending_unicode: PendingUnicode::None,
             fallback_bytes_remaining: 0,
             style_separator: StyleSeparator::None,
@@ -361,8 +367,7 @@ impl RtfParser {
         if self.group_frames.len() >= MAX_RTF_GROUP_DEPTH {
             return Err(RtfPasteError::GroupDepthExceeded);
         }
-        self.group_frames
-            .push(GroupFrame { state: self.state.clone(), position: self.group_position });
+        self.group_frames.push(GroupFrame { state: self.state.clone(), role: GroupRole::Ordinary });
         self.group_position = GroupPosition::Start;
         Ok(())
     }
@@ -381,36 +386,63 @@ impl RtfParser {
         }
         let closing_depth = self.group_frames.len();
         let parent = self.group_frames.pop().ok_or(RtfPasteError::UnmatchedGroupEnd)?;
-        self.finish_destination(parent.state.destination);
+        self.close_group_role(parent.role, closing_depth)?;
         self.state = parent.state;
-        self.group_position = parent.position;
+        self.group_position = GroupPosition::Content;
         self.fallback_bytes_remaining = 0;
         if self.fields.last().is_some_and(|field| {
             field.closure == FieldClosure::Group && field.owner_depth == closing_depth
         }) {
+            if !self.field_is_ready() {
+                return Err(RtfPasteError::UnclosedGroup);
+            }
             self.finish_field();
         }
         if let Some(field) = self.fields.last_mut()
             && field.closure == FieldClosure::Implicit
-            && field.progress == FieldProgress::Ready
             && field.owner_depth == closing_depth
         {
-            field.progress = FieldProgress::AwaitingCompatibilityClose;
+            if field.progress == FieldProgress::Ready {
+                field.progress = FieldProgress::AwaitingCompatibilityClose;
+            }
         }
         Ok(())
     }
 
-    fn finish_destination(&mut self, parent: RtfDestination) {
-        if self.state.destination == parent {
-            return;
+    fn close_group_role(
+        &mut self,
+        role: GroupRole,
+        closing_depth: usize,
+    ) -> Result<(), RtfPasteError> {
+        let (field_index, expected, next) = match role {
+            GroupRole::Ordinary => return Ok(()),
+            GroupRole::ListMarker { parent_destination, marker } => {
+                if parent_destination == RtfDestination::Normal {
+                    self.output.pending_list = list_kind(&marker);
+                }
+                return Ok(());
+            }
+            GroupRole::FieldInstruction { field_index } => (
+                field_index,
+                FieldProgress::InstructionOpen { depth: closing_depth },
+                FieldProgress::InstructionClosed,
+            ),
+            GroupRole::FieldResult { field_index } => (
+                field_index,
+                FieldProgress::ResultOpen { depth: closing_depth },
+                FieldProgress::Ready,
+            ),
+        };
+        let field = self.fields.get_mut(field_index).ok_or(RtfPasteError::UnclosedGroup)?;
+        if field.progress != expected {
+            return Err(RtfPasteError::UnclosedGroup);
         }
-        match self.state.destination {
-            RtfDestination::ListText => self.finish_list_marker(),
-            RtfDestination::Normal
-            | RtfDestination::FieldInstruction
-            | RtfDestination::FieldResult
-            | RtfDestination::Skip => {}
-        }
+        field.progress = next;
+        Ok(())
+    }
+
+    fn field_is_ready(&self) -> bool {
+        self.fields.last().is_some_and(|field| field.progress == FieldProgress::Ready)
     }
 
     fn finish_field(&mut self) {
@@ -427,11 +459,6 @@ impl RtfParser {
             None => field.result,
         };
         self.append_routed_inlines(inlines);
-    }
-
-    fn finish_list_marker(&mut self) {
-        let marker = std::mem::take(&mut self.list_marker);
-        self.output.pending_list = list_kind(&marker);
     }
 
     fn text(&mut self, bytes: &[u8]) -> Result<(), RtfPasteError> {
@@ -541,38 +568,67 @@ impl RtfParser {
     }
 
     fn destination(&mut self, destination: RtfDestination) -> Result<(), RtfPasteError> {
-        if matches!(destination, RtfDestination::FieldInstruction | RtfDestination::FieldResult)
-            && self.fields.is_empty()
-        {
-            self.fields.push(FieldContext::new(self.group_frames.len(), FieldClosure::Group));
-        }
-        self.state.destination = destination;
-        let destination_depth = self.group_frames.len();
         match destination {
-            RtfDestination::FieldInstruction => {
-                if let Some(field) = self.fields.last_mut() {
-                    field.instruction.clear();
-                    if destination_depth > field.owner_depth {
-                        field.progress = FieldProgress::Instruction;
-                    }
-                }
-            }
-            RtfDestination::FieldResult => {
-                if let Some(field) = self.fields.last_mut() {
-                    field.result.clear();
-                    field.progress = if destination_depth > field.owner_depth
-                        && field.progress == FieldProgress::Instruction
-                    {
-                        FieldProgress::Ready
-                    } else {
-                        FieldProgress::ResultWithoutInstruction
-                    };
-                }
-            }
-            RtfDestination::ListText => self.list_marker.clear(),
+            RtfDestination::FieldInstruction => self.open_field_instruction()?,
+            RtfDestination::FieldResult => self.open_field_result()?,
+            RtfDestination::ListText => self.open_list_marker()?,
             RtfDestination::Normal | RtfDestination::Skip => {}
         }
+        self.state.destination = destination;
         Ok(())
+    }
+
+    fn open_field_instruction(&mut self) -> Result<(), RtfPasteError> {
+        let depth = self.group_frames.len();
+        let field_index = self.fields.len().checked_sub(1).ok_or(RtfPasteError::UnclosedGroup)?;
+        let field = &self.fields[field_index];
+        if field.progress != FieldProgress::Started || depth <= field.owner_depth {
+            return Err(RtfPasteError::UnclosedGroup);
+        }
+        self.assign_group_role(GroupRole::FieldInstruction { field_index })?;
+        self.fields[field_index].instruction.clear();
+        self.fields[field_index].progress = FieldProgress::InstructionOpen { depth };
+        Ok(())
+    }
+
+    fn open_field_result(&mut self) -> Result<(), RtfPasteError> {
+        let depth = self.group_frames.len();
+        let field_index = self.fields.len().checked_sub(1).ok_or(RtfPasteError::UnclosedGroup)?;
+        let field = &self.fields[field_index];
+        if field.progress != FieldProgress::InstructionClosed || depth <= field.owner_depth {
+            return Err(RtfPasteError::UnclosedGroup);
+        }
+        self.assign_group_role(GroupRole::FieldResult { field_index })?;
+        self.fields[field_index].result.clear();
+        self.fields[field_index].progress = FieldProgress::ResultOpen { depth };
+        Ok(())
+    }
+
+    fn assign_group_role(&mut self, role: GroupRole) -> Result<(), RtfPasteError> {
+        let frame = self.group_frames.last_mut().ok_or(RtfPasteError::UnclosedGroup)?;
+        if !matches!(&frame.role, GroupRole::Ordinary) {
+            return Err(RtfPasteError::UnclosedGroup);
+        }
+        frame.role = role;
+        Ok(())
+    }
+
+    fn open_list_marker(&mut self) -> Result<(), RtfPasteError> {
+        self.assign_group_role(GroupRole::ListMarker {
+            parent_destination: self.state.destination,
+            marker: String::new(),
+        })
+    }
+
+    fn append_list_marker(&mut self, text: &str) {
+        if let Some(GroupRole::ListMarker { marker, .. }) =
+            self.group_frames.iter_mut().rev().find_map(|frame| match &mut frame.role {
+                role @ GroupRole::ListMarker { .. } => Some(role),
+                _ => None,
+            })
+        {
+            marker.push_str(text);
+        }
     }
 
     fn generic_ansi(&mut self) -> Result<(), RtfPasteError> {
@@ -640,7 +696,7 @@ impl RtfParser {
                     field.result.push(RichInline::LineBreak);
                 }
             }
-            RtfDestination::ListText => self.list_marker.push(' '),
+            RtfDestination::ListText => self.append_list_marker(" "),
             RtfDestination::Skip => {}
         }
         Ok(())
@@ -668,7 +724,7 @@ impl RtfParser {
                 }
             }
             RtfDestination::FieldResult => self.append_text("\t")?,
-            RtfDestination::ListText => self.list_marker.push('\t'),
+            RtfDestination::ListText => self.append_list_marker("\t"),
             RtfDestination::Skip => {}
         }
         Ok(())
@@ -725,7 +781,7 @@ impl RtfParser {
                     append_styled_text(&mut field.result, text, &self.state.inline_styles);
                 }
             }
-            RtfDestination::ListText => self.list_marker.push_str(text),
+            RtfDestination::ListText => self.append_list_marker(text),
             RtfDestination::Skip => {}
         }
         Ok(())
@@ -939,8 +995,11 @@ fn safe_hyperlink_destination(instruction: &str) -> Option<String> {
     }
     let argument = instruction[keyword_end..].trim_start();
     let destination = quoted_argument(argument)?;
+    if destination.chars().any(|character| character.is_ascii_control()) {
+        return None;
+    }
     let parsed = Url::parse(destination).ok()?;
-    matches!(parsed.scheme(), "http" | "https" | "mailto").then(|| destination.to_owned())
+    matches!(parsed.scheme(), "http" | "https" | "mailto").then(|| parsed.to_string())
 }
 
 fn quoted_argument(argument: &str) -> Option<&str> {
@@ -960,7 +1019,10 @@ fn list_kind(marker: &str) -> Option<ListKind> {
 
 #[cfg(test)]
 mod tests {
-    use super::{MAX_RTF_CONTROL_WORD_BYTES, MAX_RTF_GROUP_DEPTH, RtfPasteError, parse_rtf};
+    use super::{
+        MAX_RTF_CONTROL_WORD_BYTES, MAX_RTF_GROUP_DEPTH, RtfPasteError, parse_rtf,
+        safe_hyperlink_destination,
+    };
     use crate::paste::writer::write_markdown;
 
     #[test]
@@ -972,7 +1034,7 @@ mod tests {
         let document = parse_rtf(input).expect("supported RTF fixture");
         assert_eq!(
             write_markdown(&document),
-            "First **bold** *italic*\n\nUnicode 你好 [link](https://example.com)"
+            "First **bold** *italic*\n\nUnicode 你好 [link](https://example.com/)"
         );
     }
 
@@ -1118,15 +1180,58 @@ mod tests {
     }
 
     #[test]
+    fn hyperlink_destinations_are_canonical_and_control_free() {
+        assert_eq!(
+            safe_hyperlink_destination(r#"HYPERLINK "https://example.com/a b>c""#),
+            Some("https://example.com/a%20b%3Ec".into())
+        );
+        assert_eq!(
+            safe_hyperlink_destination(r#"HYPERLINK "mailto:user@example.com""#),
+            Some("mailto:user@example.com".into())
+        );
+        assert_eq!(safe_hyperlink_destination(r#"HYPERLINK "javascript:alert(1)""#), None);
+        for control in ['\0', '\t', '\n', '\r'] {
+            let instruction = format!("HYPERLINK \"https://example.com/a{control}b\"");
+            assert_eq!(safe_hyperlink_destination(&instruction), None);
+        }
+
+        let unicode = parse_rtf(
+            br#"{\rtf1{\field{\*\fldinst HYPERLINK "https://example.com/\u36335?\u24452?"}{\fldrslt unicode}}}"#,
+        )
+        .expect("Unicode destinations are represented canonically");
+        assert_eq!(write_markdown(&unicode), "[unicode](https://example.com/%E8%B7%AF%E5%BE%84)");
+
+        let controls = parse_rtf(
+            br#"{\rtf1{\field{\*\fldinst HYPERLINK "https://example.com/\tab>injected"}{\fldrslt tab}} {\field{\*\fldinst HYPERLINK "https://example.com/\par injected"}{\fldrslt paragraph}}}"#,
+        )
+        .expect("unsafe field instructions degrade to their visible labels");
+        assert_eq!(write_markdown(&controls), "tab paragraph");
+    }
+
+    #[test]
     fn field_group_whitespace_does_not_change_brace_validation() {
         let document = parse_rtf(
             br#"{\rtf1 { \field{\*\fldinst HYPERLINK "https://example.com"}{\fldrslt link}}}"#,
         )
         .expect("whitespace before a grouped field is harmless");
-        assert_eq!(write_markdown(&document), " [link](https://example.com)");
+        assert_eq!(write_markdown(&document), " [link](https://example.com/)");
         assert_eq!(parse_rtf(br"\field}"), Err(RtfPasteError::UnmatchedGroupEnd));
         assert_eq!(parse_rtf(br"x\field}"), Err(RtfPasteError::UnmatchedGroupEnd));
         assert_eq!(parse_rtf(br"{\rtf1 x\field}}"), Err(RtfPasteError::UnmatchedGroupEnd));
+    }
+
+    #[test]
+    fn completed_child_groups_advance_the_parent_group_position() {
+        for child in ["{}", r"{\pict ignored}", "{visible}"] {
+            let input = format!(
+                r#"{{{child}\field{{\*\fldinst HYPERLINK "https://example.com"}}{{\fldrslt link}}}}"#,
+            );
+            assert_eq!(
+                parse_rtf(input.as_bytes()),
+                Err(RtfPasteError::UnclosedGroup),
+                "child group must prevent grouped-field classification: {child}"
+            );
+        }
     }
 
     #[test]
@@ -1170,7 +1275,27 @@ mod tests {
             br#"{\rtf1{\field{\*\fldinst HYPERLINK "javascript:outer"}{\fldrslt outer {\field{\*\fldinst HYPERLINK "https://inner.example"}{\fldrslt inner}} tail}}}"#,
         )
         .expect("nested fields use independent contexts");
-        assert_eq!(write_markdown(&document), "outer [inner](https://inner.example) tail");
+        assert_eq!(write_markdown(&document), "outer [inner](https://inner.example/) tail");
+    }
+
+    #[test]
+    fn field_destinations_require_independent_closed_groups() {
+        let same_group =
+            br#"{\rtf1{\field{\*\fldinst HYPERLINK "https://example.com"\fldrslt bad}}}"#;
+        assert!(parse_rtf(same_group).is_err());
+
+        let wrong_order =
+            br#"{\rtf1{\field{\fldrslt bad}{\*\fldinst HYPERLINK "https://example.com"}}}"#;
+        assert!(parse_rtf(wrong_order).is_err());
+
+        let ungrouped = br#"{\rtf1{\field\fldinst HYPERLINK "https://example.com"\fldrslt bad}}"#;
+        assert!(parse_rtf(ungrouped).is_err());
+
+        let nested_instruction = parse_rtf(
+            br#"{\rtf1{\field{\*\fldinst HYPERLINK {"https://example.com/a"}}{\fldrslt link}}}"#,
+        )
+        .expect("nested ordinary groups stay inside the instruction group");
+        assert_eq!(write_markdown(&nested_instruction), "[link](https://example.com/a)");
     }
 
     #[test]
@@ -1179,7 +1304,7 @@ mod tests {
             br#"{\rtf1 before {\field{\*\fldinst HYPERLINK "https://example.com"\cell\row}{\fldrslt link}} after}"#,
         )
         .expect("field instructions are isolated from visible structure");
-        assert_eq!(write_markdown(&document), "before [link](https://example.com) after");
+        assert_eq!(write_markdown(&document), "before [link](https://example.com/) after");
     }
 
     #[test]
@@ -1195,6 +1320,27 @@ mod tests {
         let document = parse_rtf(br"{\rtf1{\pntext\'b7\tab}item\par{\pict ignored}after}")
             .expect("simple bullet and skipped picture are supported");
         assert_eq!(write_markdown(&document), "- item\n\nafter");
+    }
+
+    #[test]
+    fn nested_list_destinations_cannot_pollute_the_parent_context() {
+        let instruction = parse_rtf(
+            br#"{\rtf1{\field{\*\fldinst HYPERLINK "https://example.com"{\listtext 1.\tab}}{\fldrslt link}}}"#,
+        )
+        .expect("list markers in field instructions are isolated");
+        assert_eq!(write_markdown(&instruction), "[link](https://example.com/)");
+
+        let result = parse_rtf(
+            br#"{\rtf1{\field{\*\fldinst HYPERLINK "javascript:unsafe"}{\fldrslt before {\pntext 1.\tab}label}}}"#,
+        )
+        .expect("list markers in field results do not change the outer paragraph");
+        assert_eq!(write_markdown(&result), "before label");
+
+        let skipped = parse_rtf(
+            br#"{\rtf1{\pict{\listtext 1.\tab}ignored}{\*\unknown{\pntext 2.\tab}}plain}"#,
+        )
+        .expect("skipped destinations cannot emit list markers");
+        assert_eq!(write_markdown(&skipped), "plain");
     }
 
     #[test]
