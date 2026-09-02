@@ -30,6 +30,7 @@ pub enum MenuAction {
     Cut,
     Copy,
     Paste,
+    PastePlainText,
     SelectAll,
     Find,
     ToggleTabBar,
@@ -123,6 +124,7 @@ mod macos {
                     11 => MenuAction::Cut,
                     12 => MenuAction::Copy,
                     13 => MenuAction::Paste,
+                    29 => MenuAction::PastePlainText,
                     14 => MenuAction::SelectAll,
                     15 => MenuAction::Find,
                     16 => MenuAction::ToggleTabBar,
@@ -281,6 +283,7 @@ mod macos {
             m.addItem(&make_item("剪切", 11, "x", target, mtm));
             m.addItem(&make_item("复制", 12, "c", target, mtm));
             m.addItem(&make_item("粘贴", 13, "v", target, mtm));
+            m.addItem(&make_item("粘贴并匹配样式", 29, "V", target, mtm));
             m.addItem(&make_item("全选", 14, "a", target, mtm));
             m.addItem(&separator(mtm));
             m.addItem(&make_item("查找", 15, "f", target, mtm));

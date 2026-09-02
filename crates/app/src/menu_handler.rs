@@ -82,6 +82,7 @@ pub(crate) fn dispatch_menu_action(action: MenuAction) -> Vec<AppCommand> {
         MenuAction::Cut => vec![AppCommand::Edit(EditCommand::Cut)],
         MenuAction::Copy => vec![AppCommand::Edit(EditCommand::Copy)],
         MenuAction::Paste => vec![AppCommand::Edit(EditCommand::Paste)],
+        MenuAction::PastePlainText => vec![AppCommand::Edit(EditCommand::PastePlainText)],
         MenuAction::SelectAll => vec![AppCommand::Edit(EditCommand::SelectAll)],
         MenuAction::ZoomIn => vec![AppCommand::ZoomIn],
         MenuAction::ZoomOut => vec![AppCommand::ZoomOut],
@@ -95,5 +96,19 @@ pub(crate) fn dispatch_menu_action(action: MenuAction) -> Vec<AppCommand> {
         MenuAction::ToggleWordWrap => vec![AppCommand::ToggleWordWrap],
         MenuAction::SetViewModeSidebar => vec![AppCommand::SetViewModeSidebar],
         MenuAction::SetViewModeTabs => vec![AppCommand::SetViewModeTabs],
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{AppCommand, dispatch_menu_action};
+    use crate::input::EditCommand;
+    use crate::native_menu::MenuAction;
+
+    #[test]
+    fn paste_plain_text_menu_maps_to_edit_command() {
+        let commands = dispatch_menu_action(MenuAction::PastePlainText);
+        assert_eq!(commands.len(), 1);
+        assert!(matches!(&commands[0], AppCommand::Edit(EditCommand::PastePlainText)));
     }
 }
