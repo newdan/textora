@@ -13,6 +13,7 @@ pub mod edit;
 pub mod grapheme_map;
 pub mod layout;
 pub mod parser;
+pub mod paste;
 pub(crate) mod projection;
 pub mod render;
 pub mod search;
