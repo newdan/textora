@@ -319,4 +319,4 @@ Expected logs:
 - 显示服务器/兼容层（例如原生 X11、XWayland 或纯 Wayland）：
 - 矩阵执行日期与结果：
 
-X11 测试通过只能记录为 X11 成功，不能据此声明纯 Wayland 已通过。纯 Wayland 未实际执行矩阵时，结果必须明确记录为“未验证”。
+当前构建未启用 `clipboard-rs` 的原生 Wayland backend；Linux 剪贴板验收范围仅为原生 X11 或通过 XWayland 兼容层运行。X11/XWayland 测试通过不能据此声明纯 Wayland 可用；纯 Wayland 必须记录为“当前构建不支持，未验证”。
