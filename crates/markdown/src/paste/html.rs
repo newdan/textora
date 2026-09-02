@@ -2,7 +2,9 @@ use ego_tree::NodeRef;
 use scraper::{ElementRef, Html, Node};
 use url::Url;
 
-use super::{HeadingLevel, InlineSemantic, ListKind, RichBlock, RichDocument, RichInline};
+use super::{
+    HeadingLevel, InlineSemantic, ListKind, RichBlock, RichDocument, RichInline, VisibleSegment,
+};
 
 pub(crate) const MAX_HTML_NESTING_DEPTH: usize = 256;
 
@@ -71,16 +73,22 @@ enum InlineFormattingTag {
 }
 
 #[derive(Clone, Copy)]
-struct OpenInlineFormatting {
-    tag: InlineFormattingTag,
-    paragraph_scope: Option<usize>,
+enum SourceFormattingState {
+    Open { tag: InlineFormattingTag, paragraph_scope: Option<usize> },
+    SyntheticClosed { tag: InlineFormattingTag },
 }
 
 #[derive(Default)]
 struct FragmentNormalizer {
     current_paragraph_scope: Option<usize>,
     next_paragraph_scope: usize,
-    open_formatting: Vec<OpenInlineFormatting>,
+    source_formatting: Vec<SourceFormattingState>,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum SourceTagDisposition {
+    Emit,
+    Suppress,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -119,9 +127,16 @@ fn ensure_dom_depth_within_limit(root: NodeRef<'_, Node>) -> Result<(), HtmlPast
 }
 
 fn parse_block_children(node: NodeRef<'_, Node>, base_url: Option<&Url>) -> Vec<RichBlock> {
+    parse_block_nodes(node.children(), base_url)
+}
+
+fn parse_block_nodes<'a>(
+    nodes: impl IntoIterator<Item = NodeRef<'a, Node>>,
+    base_url: Option<&Url>,
+) -> Vec<RichBlock> {
     let mut blocks = Vec::new();
     let mut inline_run = Vec::new();
-    for child in node.children() {
+    for child in nodes {
         if ElementRef::wrap(child).is_some_and(element_is_hidden) {
             continue;
         }
@@ -344,30 +359,54 @@ fn parse_image(element: ElementRef<'_>, base_url: Option<&Url>) -> Vec<RichInlin
 fn parse_list(element: ElementRef<'_>, kind: ListKind, base_url: Option<&Url>) -> Vec<RichBlock> {
     let mut blocks = Vec::new();
     let mut items = Vec::new();
-    let mut inline_run = Vec::new();
+    let mut pending_non_items = Vec::new();
     let mut emitted_items = 0_u64;
     for child in element.children() {
         if ElementRef::wrap(child).is_some_and(element_is_hidden) {
             continue;
         }
         if ElementRef::wrap(child).is_some_and(|child| child.value().name() == "li") {
-            flush_inline_run(&mut inline_run, &mut blocks, base_url);
+            flush_list_non_items(
+                &mut pending_non_items,
+                &mut items,
+                &mut blocks,
+                kind,
+                &mut emitted_items,
+                base_url,
+            );
             let item = ElementRef::wrap(child).expect("list item element was checked");
             let item_blocks = parse_block_children(child, base_url);
             items.push(apply_element_semantics_to_blocks(item, item_blocks));
             continue;
         }
-        flush_list_items(&mut items, &mut blocks, kind, &mut emitted_items);
-        if is_block_node(child) {
-            flush_inline_run(&mut inline_run, &mut blocks, base_url);
-            blocks.extend(parse_block_node(child, base_url));
-        } else {
-            inline_run.push(child);
-        }
+        pending_non_items.push(child);
     }
+    flush_list_non_items(
+        &mut pending_non_items,
+        &mut items,
+        &mut blocks,
+        kind,
+        &mut emitted_items,
+        base_url,
+    );
     flush_list_items(&mut items, &mut blocks, kind, &mut emitted_items);
-    flush_inline_run(&mut inline_run, &mut blocks, base_url);
     blocks
+}
+
+fn flush_list_non_items<'a>(
+    pending: &mut Vec<NodeRef<'a, Node>>,
+    items: &mut Vec<Vec<RichBlock>>,
+    blocks: &mut Vec<RichBlock>,
+    kind: ListKind,
+    emitted_items: &mut u64,
+    base_url: Option<&Url>,
+) {
+    let mut non_item_blocks = parse_block_nodes(pending.drain(..), base_url);
+    if !blocks_have_visible_content(&non_item_blocks) {
+        return;
+    }
+    flush_list_items(items, blocks, kind, emitted_items);
+    blocks.append(&mut non_item_blocks);
 }
 
 fn flush_list_items(
@@ -514,17 +553,29 @@ fn parse_table_cell_content(element: ElementRef<'_>, base_url: Option<&Url>) -> 
 fn table_block_content(block: RichBlock) -> Vec<RichInline> {
     match block {
         RichBlock::Heading { content, .. } | RichBlock::Paragraph(content) => content,
-        block => RichDocument::new(vec![block])
-            .visible_segments()
-            .into_iter()
-            .flat_map(|segment| visible_text_to_inlines(&segment.text))
-            .collect(),
+        block => visible_segments_to_inlines(RichDocument::new(vec![block]).visible_segments()),
     }
+}
+
+fn visible_segments_to_inlines(segments: Vec<VisibleSegment>) -> Vec<RichInline> {
+    let mut inlines = Vec::new();
+    let mut wrote_segment = false;
+    for segment in segments {
+        if segment.text.is_empty() {
+            continue;
+        }
+        if wrote_segment {
+            inlines.push(RichInline::LineBreak);
+        }
+        inlines.extend(visible_text_to_inlines(&segment.text));
+        wrote_segment = true;
+    }
+    inlines
 }
 
 fn visible_text_to_inlines(text: &str) -> Vec<RichInline> {
     let mut inlines = Vec::new();
-    for (index, line) in text.lines().enumerate() {
+    for (index, line) in text.split('\n').enumerate() {
         if index > 0 {
             inlines.push(RichInline::LineBreak);
         }
@@ -873,8 +924,9 @@ fn normalize_malformed_fragment(html: &str) -> Result<String, HtmlPasteError> {
             );
             continue;
         }
-        normalized.push_str(source_tag);
-        normalizer.record_formatting_tag(&name, closing)?;
+        if normalizer.record_formatting_tag(&name, closing)? == SourceTagDisposition::Emit {
+            normalized.push_str(source_tag);
+        }
         cursor = tag_end + 1;
     }
     Ok(normalized)
@@ -885,10 +937,33 @@ fn find_next_tag_start(html: &str, cursor: usize) -> Option<usize> {
 }
 
 fn copy_html_comment(html: &str, tag_start: usize, normalized: &mut String) -> usize {
-    let comment_end =
-        html[tag_start + 4..].find("-->").map_or(html.len(), |offset| tag_start + 4 + offset + 3);
+    let comment_end = find_html_comment_end(html, tag_start);
     normalized.push_str(&html[tag_start..comment_end]);
     comment_end
+}
+
+fn find_html_comment_end(html: &str, tag_start: usize) -> usize {
+    const STANDARD_COMMENT_END: &[u8] = b"-->";
+    const BANG_COMMENT_END: &[u8] = b"--!>";
+    let bytes = html.as_bytes();
+    let content_start = tag_start + 4;
+    let content = &bytes[content_start..];
+    if content.starts_with(b">") {
+        return content_start + 1;
+    }
+    if content.starts_with(b"->") {
+        return content_start + 2;
+    }
+    for cursor in content_start..bytes.len() {
+        let remaining = &bytes[cursor..];
+        if remaining.starts_with(STANDARD_COMMENT_END) {
+            return cursor + STANDARD_COMMENT_END.len();
+        }
+        if remaining.starts_with(BANG_COMMENT_END) {
+            return cursor + BANG_COMMENT_END.len();
+        }
+    }
+    bytes.len()
 }
 
 fn find_tag_end(html: &str, tag_start: usize) -> Option<usize> {
@@ -1023,13 +1098,16 @@ impl FragmentNormalizer {
             return;
         };
         let mut closing_tags = Vec::new();
-        self.open_formatting.retain(|formatting| {
-            if formatting.paragraph_scope != Some(scope) {
-                return true;
+        for state in &mut self.source_formatting {
+            let SourceFormattingState::Open { tag, paragraph_scope } = *state else {
+                continue;
+            };
+            if paragraph_scope != Some(scope) {
+                continue;
             }
-            closing_tags.push(formatting.tag);
-            false
-        });
+            closing_tags.push(tag);
+            *state = SourceFormattingState::SyntheticClosed { tag };
+        }
         for tag in closing_tags.into_iter().rev() {
             normalized.push_str("</");
             normalized.push_str(tag.name());
@@ -1037,22 +1115,45 @@ impl FragmentNormalizer {
         }
     }
 
-    fn record_formatting_tag(&mut self, name: &str, closing: bool) -> Result<(), HtmlPasteError> {
+    fn record_formatting_tag(
+        &mut self,
+        name: &str,
+        closing: bool,
+    ) -> Result<SourceTagDisposition, HtmlPasteError> {
         let Some(tag) = InlineFormattingTag::from_name(name) else {
-            return Ok(());
+            return Ok(SourceTagDisposition::Emit);
         };
         if closing {
-            if let Some(index) = self.open_formatting.iter().rposition(|open| open.tag == tag) {
-                self.open_formatting.remove(index);
-            }
+            return Ok(self.close_source_formatting(tag));
         } else {
-            if self.open_formatting.len() >= MAX_HTML_NESTING_DEPTH {
+            if self.source_formatting.len() >= MAX_HTML_NESTING_DEPTH {
                 return Err(HtmlPasteError::NestingDepthExceeded);
             }
-            self.open_formatting
-                .push(OpenInlineFormatting { tag, paragraph_scope: self.current_paragraph_scope });
+            self.source_formatting.push(SourceFormattingState::Open {
+                tag,
+                paragraph_scope: self.current_paragraph_scope,
+            });
         }
-        Ok(())
+        Ok(SourceTagDisposition::Emit)
+    }
+
+    fn close_source_formatting(&mut self, tag: InlineFormattingTag) -> SourceTagDisposition {
+        let Some(index) = self.source_formatting.iter().rposition(|state| state.tag() == tag)
+        else {
+            return SourceTagDisposition::Emit;
+        };
+        match self.source_formatting.remove(index) {
+            SourceFormattingState::Open { .. } => SourceTagDisposition::Emit,
+            SourceFormattingState::SyntheticClosed { .. } => SourceTagDisposition::Suppress,
+        }
+    }
+}
+
+impl SourceFormattingState {
+    fn tag(self) -> InlineFormattingTag {
+        match self {
+            Self::Open { tag, .. } | Self::SyntheticClosed { tag } => tag,
+        }
     }
 }
 
@@ -1315,6 +1416,20 @@ mod tests {
     }
 
     #[test]
+    fn list_ignores_invisible_non_item_children_without_splitting_items() {
+        let conversion = parse_html(
+            "<ul>\n <li>one</li>\n <span hidden>secret</span>\n <li>two</li>\n</ul>",
+            None,
+        )
+        .expect("pretty-printed list fixture");
+        assert_eq!(write_markdown(&conversion.document), "- one\n- two");
+        assert!(matches!(
+            conversion.document.blocks(),
+            [RichBlock::List { items, .. }] if items.len() == 2
+        ));
+    }
+
+    #[test]
     fn ordered_list_segments_saturate_start_without_panicking() {
         let conversion =
             parse_html("<ol start='18446744073709551615'><li>a</li>middle<li>b</li></ol>", None)
@@ -1470,6 +1585,16 @@ mod tests {
     }
 
     #[test]
+    fn table_cell_preserves_nested_visible_segment_boundaries() {
+        let conversion = parse_html(
+            "<table><tr><td><blockquote><p>A</p><ul><li>L</li></ul><pre>B  \n  B2</pre><pre></pre><p>C</p></blockquote></td></tr></table>",
+            None,
+        )
+        .expect("nested table cell blocks fixture");
+        assert_eq!(write_markdown(&conversion.document), "| A<br>L<br>B  <br>  B2<br>C |\n| --- |");
+    }
+
+    #[test]
     fn caption_after_rows_remains_after_the_table() {
         let conversion = parse_html(
             "<table><tr><td>H</td></tr><tr><td>A</td></tr><caption>After</caption></table>",
@@ -1615,6 +1740,19 @@ mod tests {
     }
 
     #[test]
+    fn malformed_scanner_recognizes_html5_comment_end_variants() {
+        for html in [
+            "<!--><p>one<strong>two<p>three",
+            "<!---><p>one<strong>two<p>three",
+            "<!--x--!><p>one<strong>two<p>three",
+            "<!--x--><p>one<strong>two<p>three",
+        ] {
+            let conversion = parse_html(html, None).expect("HTML5 comment terminator fixture");
+            assert_eq!(write_markdown(&conversion.document), "one**two**\n\nthree", "{html}");
+        }
+    }
+
+    #[test]
     fn malformed_scanner_requires_raw_text_end_tag_boundary() {
         let conversion = parse_html(
             "<script>const x = '</scripture><p>';</script><p>one<strong>two<p>three",
@@ -1643,6 +1781,46 @@ mod tests {
     }
 
     #[test]
+    fn synthetic_closes_do_not_consume_same_named_outer_formatting() {
+        let conversion =
+            parse_html("<strong><p>A<strong>B<p>C</strong>D</p><p>E</p></strong>", None)
+                .expect("same-name outer and inner formatting fixture");
+        assert_eq!(write_markdown(&conversion.document), "**AB**\n\n**CD**\n\n**E**");
+
+        let three_levels = parse_html(
+            "<strong><p>A<strong>B<strong>C<p>D</strong>E</strong>F</p><p>G</p></strong>",
+            None,
+        )
+        .expect("three-level same-name formatting fixture");
+        assert_eq!(write_markdown(&three_levels.document), "**ABC**\n\n**DEF**\n\n**G**");
+    }
+
+    #[test]
+    fn synthetic_close_suppression_is_typed_and_preserves_unclosed_outer_formatting() {
+        let mixed = parse_html("<strong><p>A<em>B<p>C</em>D</p><p>E</p></strong>", None)
+            .expect("different-name synthetic close fixture");
+        assert_eq!(write_markdown(&mixed.document), "**A*B***\n\n**CD**\n\n**E**");
+
+        let unclosed_inner = parse_html("<strong><p>A<strong>B<p>C</p><p>D</p></strong>E", None)
+            .expect("unclosed inner formatting fixture");
+        assert_eq!(write_markdown(&unclosed_inner.document), "**AB**\n\n**C**\n\n**D**\n\n**E**");
+    }
+
+    #[test]
+    fn source_closes_match_the_most_recent_interleaved_formatting_state() {
+        let conversion = parse_html("<p>A<strong>B<p>C</p><p><strong>D</strong>E</p>", None)
+            .expect("interleaved pending and open formatting fixture");
+        assert_eq!(write_markdown(&conversion.document), "A**B**\n\nC\n\n**D**E");
+
+        let nested = parse_html(
+            "<p>A<strong>B<strong>C<p>D</p><p><strong>E<strong>F</strong>G</strong>H</p>",
+            None,
+        )
+        .expect("nested interleaved formatting fixture");
+        assert_eq!(write_markdown(&nested.document), "A**BC**\n\nD\n\n**EFG**H");
+    }
+
+    #[test]
     fn raw_text_block_boundaries_stop_paragraph_formatting_leaks() {
         let xmp = parse_html("<p>one<strong>two<xmp>raw</xmp>three", None)
             .expect("xmp paragraph boundary fixture");
@@ -1657,6 +1835,16 @@ mod tests {
     fn formatting_normalizer_enforces_its_open_stack_limit() {
         let html = format!("<p>{}", "<strong>".repeat(MAX_HTML_NESTING_DEPTH + 1));
         assert_eq!(normalize_malformed_fragment(&html), Err(HtmlPasteError::NestingDepthExceeded));
+
+        let combined_state = format!(
+            "<p>{}<p>{}",
+            "<strong>".repeat(MAX_HTML_NESTING_DEPTH / 2),
+            "<em>".repeat(MAX_HTML_NESTING_DEPTH / 2 + 1)
+        );
+        assert_eq!(
+            normalize_malformed_fragment(&combined_state),
+            Err(HtmlPasteError::NestingDepthExceeded)
+        );
     }
 
     #[test]
