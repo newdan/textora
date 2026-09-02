@@ -41,7 +41,6 @@ ui = { path = "./crates/ui", package = "textora-ui" }
 winit = { version = "0.30", default-features = false, features = ["rwh_06"] }
 wgpu = { git = "https://github.com/zed-industries/wgpu.git", rev = "357a0c56e0070480ad9daea5d2eaa83150b79e88", default-features = false, features = ["wgsl"] }
 criterion = { version = "0.5", features = ["html_reports"] }
-arboard = { version = "3", default-features = false }
 clipboard-rs = "0.3.5"
 objc2 = "0.6.4"
 serde = { version = "1", features = ["derive"] }
