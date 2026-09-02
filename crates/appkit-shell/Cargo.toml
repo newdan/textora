@@ -30,3 +30,4 @@ hashlink.workspace = true
 smallvec.workspace = true
 unicode_categories.workspace = true
 arboard.workspace = true
+clipboard-rs.workspace = true
