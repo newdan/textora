@@ -36,6 +36,7 @@ pub enum EditCommand {
     Cut,
     Copy,
     Paste,
+    PastePlainText,
 
     // ── Undo/Redo ──
     Undo,

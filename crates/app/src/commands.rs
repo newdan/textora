@@ -202,7 +202,10 @@ fn execute_edit_command_v2_with_presentation_and_clipboard(
     } else {
         let start = min_line.min(cursor_line_after);
         match cmd {
-            EditCommand::Paste | EditCommand::Undo | EditCommand::Redo => Some(0..old_line_count),
+            EditCommand::Paste
+            | EditCommand::PastePlainText
+            | EditCommand::Undo
+            | EditCommand::Redo => Some(0..old_line_count),
             EditCommand::MoveLeft
             | EditCommand::MoveRight
             | EditCommand::MoveUp
@@ -565,7 +568,7 @@ fn execute_edit_command_with_presentation(
 
         EditCommand::Copy => copy_selection_to_clipboard(dv, clipboard),
         EditCommand::Cut => cut_selection_to_clipboard(dv, clipboard),
-        EditCommand::Paste => paste_from_clipboard(dv, clipboard),
+        EditCommand::Paste | EditCommand::PastePlainText => paste_from_clipboard(dv, clipboard),
         // Commands that need external state (event_loop)
         // ── Save (handled at App level, not in execute_edit_command) ──
         EditCommand::Save | EditCommand::SaveAs => false,
@@ -1111,6 +1114,18 @@ mod command_tests {
         assert!(!outcome.executed);
         assert_eq!(outcome.dirty_lines, None);
         assert_eq!(dv.buffer_len(), 5);
+    }
+
+    #[test]
+    fn paste_plain_text_uses_the_plain_clipboard_compatibility_path() {
+        let mut dv = make_dv("styled");
+        dv.select_all();
+        let mut clipboard = TestClipboard { text: Some("plain".to_owned()), writes_succeed: true };
+
+        let outcome = execute_with_clipboard(&EditCommand::PastePlainText, &mut dv, &mut clipboard);
+
+        assert!(outcome.executed);
+        assert_eq!(dv.visible_lines_with_line_height(TEST_LINE_HEIGHT), vec!["plain"]);
     }
 
     #[test]
