@@ -42,6 +42,8 @@ winit = { version = "0.30", default-features = false, features = ["rwh_06"] }
 wgpu = { git = "https://github.com/zed-industries/wgpu.git", rev = "357a0c56e0070480ad9daea5d2eaa83150b79e88", default-features = false, features = ["wgsl"] }
 criterion = { version = "0.5", features = ["html_reports"] }
 clipboard-rs = "0.3.5"
+encoding_rs = "0.8"
+ego-tree = "0.11"
 objc2 = "0.6.4"
 serde = { version = "1", features = ["derive"] }
 toml = "0.5"
@@ -58,5 +60,7 @@ dirs = "6"
 notify = "8"
 rfd = { version = "0.15", default-features = false }
 rusqlite = { version = "0.37", features = ["backup", "bundled"] }
+scraper = "0.27.0"
 tempfile = "3"
+url = "2.5.8"
 uuid = { version = "1", features = ["serde", "v4"] }

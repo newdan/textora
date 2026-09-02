@@ -7,7 +7,10 @@ repository.workspace = true
 rust-version.workspace = true
 
 [dependencies]
+encoding_rs.workspace = true
+ego-tree.workspace = true
 pulldown-cmark = { version = "0.13.0", default-features = false }
+scraper.workspace = true
 ui.workspace = true
 shaping.workspace = true
 core.workspace = true
@@ -17,6 +20,7 @@ regex = "1"
 toml.workspace = true
 unicode-segmentation.workspace = true
 unicode-width.workspace = true
+url.workspace = true
 
 [dev-dependencies]
 criterion.workspace = true
