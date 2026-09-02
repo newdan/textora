@@ -1,6 +1,7 @@
 #[cfg(test)]
 mod tests {
     use super::write_markdown;
+    use crate::parser::MarkdownEvent;
     use crate::paste::{HeadingLevel, ListKind, RichBlock, RichDocument, RichInline};
 
     fn text(value: &str) -> Vec<RichInline> {
@@ -18,6 +19,43 @@ mod tests {
     }
 
     #[test]
+    fn plain_text_gfm_markers_reparse_as_text_instead_of_formatting_or_lists() {
+        let document = RichDocument::new(vec![
+            RichBlock::Paragraph(text("~~plain~~")),
+            RichBlock::Paragraph(text("1. item")),
+            RichBlock::Paragraph(text("  2. indented item")),
+        ]);
+        let markdown = write_markdown(&document);
+        let parsed = crate::parser::parse_markdown(&markdown);
+
+        assert_eq!(markdown, "\\~\\~plain\\~\\~\n\n1\\. item\n\n  2\\. indented item");
+        assert!(parsed.events.iter().all(|event| !matches!(
+            event,
+            MarkdownEvent::Start(
+                crate::parser::MarkdownTag::Strikethrough | crate::parser::MarkdownTag::List(..)
+            )
+        )));
+        let reparsed_text: String = parsed
+            .events
+            .iter()
+            .filter_map(|event| match event {
+                MarkdownEvent::Text(value) => Some(value.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(reparsed_text, "~~plain~~1. item2. indented item");
+    }
+
+    #[test]
+    fn plain_text_keeps_ordinary_non_structural_punctuation_unescaped() {
+        let document = RichDocument::new(vec![RichBlock::Paragraph(text(
+            "release 1.2 (stable) | C# and e-mail!",
+        ))]);
+
+        assert_eq!(write_markdown(&document), "release 1.2 (stable) | C# and e-mail!");
+    }
+
+    #[test]
     fn code_fence_is_longer_than_backticks_in_content() {
         let document = RichDocument::new(vec![RichBlock::CodeBlock {
             language: Some("rust".into()),
@@ -25,6 +63,34 @@ mod tests {
         }]);
 
         assert_eq!(write_markdown(&document), "````rust\nlet marker = ```;\n````");
+    }
+
+    #[test]
+    fn code_fence_omits_empty_and_unsafe_language_tags() {
+        for language in [Some(""), Some("rust\n# injected")] {
+            let document = RichDocument::new(vec![RichBlock::CodeBlock {
+                language: language.map(str::to_owned),
+                text: "let x = 1;".into(),
+            }]);
+
+            assert_eq!(write_markdown(&document), "```\nlet x = 1;\n```");
+        }
+    }
+
+    #[test]
+    fn writes_strikethrough_as_gfm_semantic_markup() {
+        let document =
+            RichDocument::new(vec![RichBlock::Paragraph(vec![RichInline::Strikethrough(text(
+                "gone",
+            ))])]);
+        let markdown = write_markdown(&document);
+        let parsed = crate::parser::parse_markdown(&markdown);
+
+        assert_eq!(markdown, "~~gone~~");
+        assert!(parsed.events.iter().any(|event| matches!(
+            event,
+            MarkdownEvent::Start(crate::parser::MarkdownTag::Strikethrough)
+        )));
     }
 
     #[test]
@@ -77,6 +143,30 @@ mod tests {
     }
 
     #[test]
+    fn top_level_separator_preserves_a_final_hard_break_without_three_newlines() {
+        let document = RichDocument::new(vec![
+            RichBlock::Paragraph(vec![RichInline::Text("before".into()), RichInline::LineBreak]),
+            RichBlock::Heading { level: HeadingLevel::H2, content: text("after") },
+        ]);
+        let markdown = write_markdown(&document);
+        let parsed = crate::parser::parse_markdown(&markdown);
+
+        assert_eq!(markdown, "before  \n## after");
+        assert!(!markdown.ends_with('\n'));
+        assert!(parsed.events.iter().any(|event| matches!(
+            event,
+            MarkdownEvent::Start(crate::parser::MarkdownTag::Heading { level: 2 })
+        )));
+    }
+
+    #[test]
+    fn final_text_line_break_does_not_leave_a_trailing_newline() {
+        let document = RichDocument::new(vec![RichBlock::Paragraph(text("before\n"))]);
+
+        assert_eq!(write_markdown(&document), "before");
+    }
+
+    #[test]
     fn writes_inline_code_links_and_remote_images_without_mutating_code_contents() {
         let document = RichDocument::new(vec![RichBlock::Paragraph(vec![
             RichInline::InlineCode("tick ` marker".into()),
@@ -98,6 +188,36 @@ mod tests {
             write_markdown(&document),
             "``tick ` marker`` [link](<https://example.com/a_(b)> \"a \\\"title\\\"\") ![diagram](https://example.com/image.png \"diagram\")"
         );
+    }
+
+    #[test]
+    fn inline_code_reparses_with_boundary_backticks_and_spaces_intact() {
+        for original in ["a`", "`", " leading", "trailing ", "  "] {
+            let document =
+                RichDocument::new(vec![RichBlock::Paragraph(vec![RichInline::InlineCode(
+                    original.into(),
+                )])]);
+            let markdown = write_markdown(&document);
+            let parsed_code: Vec<String> = crate::parser::parse_markdown(&markdown)
+                .events
+                .into_iter()
+                .filter_map(|event| match event {
+                    MarkdownEvent::Code(code) => Some(code),
+                    _ => None,
+                })
+                .collect();
+
+            assert_eq!(parsed_code, [original], "failed to preserve {original:?} in {markdown:?}");
+        }
+    }
+
+    #[test]
+    fn empty_inline_code_does_not_create_visible_markdown_text() {
+        let document = RichDocument::new(vec![RichBlock::Paragraph(vec![RichInline::InlineCode(
+            String::new(),
+        )])]);
+
+        assert_eq!(write_markdown(&document), "");
     }
 
     #[test]
@@ -123,6 +243,22 @@ mod tests {
         }]);
 
         assert_eq!(write_markdown(&document), "| A\\|B |\n| --- |\n| first<br>second |");
+    }
+
+    #[test]
+    fn table_preserves_ragged_rows_when_the_header_is_empty() {
+        let document = RichDocument::new(vec![RichBlock::Table {
+            header: Vec::new(),
+            rows: vec![vec![text("A"), Vec::new()], vec![text("B")], Vec::new()],
+        }]);
+
+        assert_eq!(
+            write_markdown(&document),
+            "|  |  |\n| --- | --- |\n| A |  |\n| B |  |\n|  |  |"
+        );
+        assert!(crate::parser::parse_markdown(&write_markdown(&document)).events.iter().any(
+            |event| matches!(event, MarkdownEvent::Start(crate::parser::MarkdownTag::Table(_)))
+        ));
     }
 
     #[test]
@@ -219,6 +355,7 @@ const TABLE_BORDER: &str = "| ";
 const TABLE_ROW_END: &str = " |";
 const TABLE_DELIMITER_CELL: &str = "---";
 const TABLE_LINE_BREAK: &str = "<br>";
+const MAXIMUM_LIST_MARKER_INDENTATION: usize = 3;
 
 #[derive(Clone, Copy)]
 struct NestingContext {
@@ -251,19 +388,33 @@ pub(crate) fn write_markdown(document: &RichDocument) -> String {
 
 fn write_blocks(blocks: &[RichBlock], output: &mut String, nesting: NestingContext) {
     let mut wrote_block = false;
+    let mut previous_block_ended_with_line_break = false;
 
     for block in blocks {
         let mut block_output = String::new();
         write_block(block, &mut block_output, nesting);
+        let block_ended_with_line_break = block_output.ends_with('\n');
+        trim_block_boundary_line_breaks(&mut block_output);
         if block_output.is_empty() {
             continue;
         }
 
         if wrote_block {
-            output.push_str(TOP_LEVEL_BLOCK_SEPARATOR);
+            output.push_str(if previous_block_ended_with_line_break {
+                "\n"
+            } else {
+                TOP_LEVEL_BLOCK_SEPARATOR
+            });
         }
         output.push_str(&block_output);
         wrote_block = true;
+        previous_block_ended_with_line_break = block_ended_with_line_break;
+    }
+}
+
+fn trim_block_boundary_line_breaks(output: &mut String) {
+    while output.ends_with('\n') {
+        output.pop();
     }
 }
 
@@ -393,21 +544,19 @@ fn list_item_marker(kind: ListKind, item_index: usize) -> String {
 }
 
 fn write_table(header: &[Vec<RichInline>], rows: &[Vec<Vec<RichInline>>], output: &mut String) {
-    if header.is_empty() {
+    let column_count =
+        rows.iter().fold(header.len(), |maximum_width, row| maximum_width.max(row.len()));
+    if column_count == 0 {
         return;
     }
 
-    write_table_row(header, output);
+    write_table_row_with_width(header, column_count, output);
     output.push('\n');
-    write_table_delimiter_row(header.len(), output);
+    write_table_delimiter_row(column_count, output);
     for row in rows {
         output.push('\n');
-        write_table_row_with_width(row, header.len(), output);
+        write_table_row_with_width(row, column_count, output);
     }
-}
-
-fn write_table_row(cells: &[Vec<RichInline>], output: &mut String) {
-    write_table_row_with_width(cells, cells.len(), output);
 }
 
 fn write_table_row_with_width(cells: &[Vec<RichInline>], width: usize, output: &mut String) {
@@ -503,23 +652,98 @@ fn write_styled_inlines(
 }
 
 fn write_plain_text(text: &str, output: &mut String, context: InlineContext) {
-    let mut characters = text.chars().peekable();
-    while let Some(character) = characters.next() {
+    let mut characters = text.char_indices().peekable();
+    let mut ordered_list_prefix_is_valid = output.is_empty() || output.ends_with('\n');
+    let mut leading_space_count = 0;
+    let mut ordered_list_number_length = 0;
+    let mut line_contains_only_whitespace = output.is_empty() || output.ends_with('\n');
+
+    while let Some((_, character)) = characters.next() {
         match character {
             '\r' => {
-                if matches!(characters.peek(), Some('\n')) {
+                if matches!(characters.peek(), Some((_, '\n'))) {
                     characters.next();
                 }
                 write_text_line_break(output, context);
+                ordered_list_prefix_is_valid = true;
+                leading_space_count = 0;
+                ordered_list_number_length = 0;
+                line_contains_only_whitespace = true;
             }
-            '\n' => write_text_line_break(output, context),
-            '\\' | '`' | '*' | '_' | '[' | ']' | '(' | ')' | '#' | '+' | '-' | '!' | '>' | '|' => {
+            '\n' => {
+                write_text_line_break(output, context);
+                ordered_list_prefix_is_valid = true;
+                leading_space_count = 0;
+                ordered_list_number_length = 0;
+                line_contains_only_whitespace = true;
+            }
+            '~' if matches!(characters.peek(), Some((_, '~'))) => {
+                characters.next();
+                output.push_str("\\~\\~");
+                ordered_list_prefix_is_valid = false;
+                line_contains_only_whitespace = false;
+            }
+            '.' if ordered_list_prefix_is_valid
+                && ordered_list_number_length > 0
+                && matches!(characters.peek(), Some((_, next)) if next.is_whitespace()) =>
+            {
+                output.push_str("\\.");
+                ordered_list_prefix_is_valid = false;
+                line_contains_only_whitespace = false;
+            }
+            '#' | '+' | '-' | '>' if line_contains_only_whitespace => {
                 output.push('\\');
                 output.push(character);
+                ordered_list_prefix_is_valid = false;
+                line_contains_only_whitespace = false;
             }
-            _ => output.push(character),
+            '|' if context.table_cell => {
+                output.push('\\');
+                output.push(character);
+                ordered_list_prefix_is_valid = false;
+                line_contains_only_whitespace = false;
+            }
+            '\\' | '`' | '*' | '_' | '[' | ']' => {
+                output.push('\\');
+                output.push(character);
+                ordered_list_prefix_is_valid = false;
+                line_contains_only_whitespace = false;
+            }
+            _ => {
+                output.push(character);
+                update_ordered_list_prefix(
+                    character,
+                    &mut ordered_list_prefix_is_valid,
+                    &mut leading_space_count,
+                    &mut ordered_list_number_length,
+                );
+                line_contains_only_whitespace &= character.is_whitespace();
+            }
         }
     }
+}
+
+fn update_ordered_list_prefix(
+    character: char,
+    ordered_list_prefix_is_valid: &mut bool,
+    leading_space_count: &mut usize,
+    ordered_list_number_length: &mut usize,
+) {
+    if !*ordered_list_prefix_is_valid {
+        return;
+    }
+
+    if character == ' ' && *ordered_list_number_length == 0 {
+        *leading_space_count += 1;
+        if *leading_space_count <= MAXIMUM_LIST_MARKER_INDENTATION {
+            return;
+        }
+    } else if character.is_ascii_digit() {
+        *ordered_list_number_length += 1;
+        return;
+    }
+
+    *ordered_list_prefix_is_valid = false;
 }
 
 fn write_text_line_break(output: &mut String, context: InlineContext) {
@@ -531,12 +755,33 @@ fn write_text_line_break(output: &mut String, context: InlineContext) {
 }
 
 fn write_inline_code(text: &str, output: &mut String) {
+    if text.is_empty() {
+        return;
+    }
+
     let delimiter_length =
         longest_backtick_run(text).saturating_add(1).max(INLINE_CODE_MINIMUM_DELIMITER_LENGTH);
     let delimiter = "`".repeat(delimiter_length);
+    let needs_boundary_padding = inline_code_needs_boundary_padding(text);
     output.push_str(&delimiter);
+    if needs_boundary_padding {
+        output.push(' ');
+    }
     output.push_str(text);
+    if needs_boundary_padding {
+        output.push(' ');
+    }
     output.push_str(&delimiter);
+}
+
+fn inline_code_needs_boundary_padding(text: &str) -> bool {
+    if text.is_empty() || text.chars().all(char::is_whitespace) {
+        return false;
+    }
+
+    let first_character = text.chars().next();
+    let last_character = text.chars().next_back();
+    matches!(first_character, Some('`' | ' ')) || matches!(last_character, Some('`' | ' '))
 }
 
 fn write_link(
