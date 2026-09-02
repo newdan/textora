@@ -171,7 +171,7 @@ pub fn key_to_command(key: &Key, mods: ModifiersState) -> Option<EditCommand> {
                     "c" => Some(EditCommand::Copy),
                     "x" => Some(EditCommand::Cut),
                     "v" | "V" if shift => Some(EditCommand::PastePlainText),
-                    "v" => Some(EditCommand::Paste),
+                    "v" | "V" => Some(EditCommand::Paste),
                     "f" if shift || alt => Some(EditCommand::FindReplace),
                     "f" => Some(EditCommand::Find),
                     "o" => Some(EditCommand::OpenFile),
@@ -205,7 +205,7 @@ pub fn key_to_command(key: &Key, mods: ModifiersState) -> Option<EditCommand> {
                 // Ctrl+key (terminal-style, mostly unused on macOS)
                 match c.as_str() {
                     "v" | "V" if shift => Some(EditCommand::PastePlainText),
-                    "v" => Some(EditCommand::Paste),
+                    "v" | "V" => Some(EditCommand::Paste),
                     "z" => Some(EditCommand::Undo),
                     "y" => Some(EditCommand::Redo),
                     "a" => Some(EditCommand::MoveToLineStart),
@@ -473,6 +473,12 @@ mod tests {
     }
 
     #[test]
+    fn cmd_uppercase_v_without_shift_pastes() {
+        let key = Key::Character("V".into());
+        assert_eq!(key_to_command(&key, cmd()), Some(EditCommand::Paste));
+    }
+
+    #[test]
     fn cmd_shift_v_pastes_plain_text() {
         let key = Key::Character("v".into());
         assert_eq!(key_to_command(&key, cmd_shift()), Some(EditCommand::PastePlainText));
@@ -487,6 +493,12 @@ mod tests {
     #[test]
     fn ctrl_v_pastes() {
         let key = Key::Character("v".into());
+        assert_eq!(key_to_command(&key, ctrl()), Some(EditCommand::Paste));
+    }
+
+    #[test]
+    fn ctrl_uppercase_v_without_shift_pastes() {
+        let key = Key::Character("V".into());
         assert_eq!(key_to_command(&key, ctrl()), Some(EditCommand::Paste));
     }
 
