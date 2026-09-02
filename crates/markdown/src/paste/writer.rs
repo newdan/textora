@@ -49,10 +49,10 @@ mod tests {
     #[test]
     fn plain_text_keeps_ordinary_non_structural_punctuation_unescaped() {
         let document = RichDocument::new(vec![RichBlock::Paragraph(text(
-            "release 1.2 (stable) | C# and e-mail!",
+            "release 1.2 (stable) | C# and e-mail",
         ))]);
 
-        assert_eq!(write_markdown(&document), "release 1.2 (stable) | C# and e-mail!");
+        assert_eq!(write_markdown(&document), "release 1.2 (stable) | C# and e-mail");
     }
 
     #[test]
@@ -151,7 +151,7 @@ mod tests {
         let markdown = write_markdown(&document);
         let parsed = crate::parser::parse_markdown(&markdown);
 
-        assert_eq!(markdown, "before  \n## after");
+        assert_eq!(markdown, "before  \n\n## after");
         assert!(!markdown.ends_with('\n'));
         assert!(parsed.events.iter().any(|event| matches!(
             event,
@@ -164,6 +164,148 @@ mod tests {
         let document = RichDocument::new(vec![RichBlock::Paragraph(text("before\n"))]);
 
         assert_eq!(write_markdown(&document), "before");
+    }
+
+    #[test]
+    fn top_level_paragraphs_always_keep_a_double_newline_boundary() {
+        let documents = [
+            (
+                RichDocument::new(vec![
+                    RichBlock::Paragraph(vec![
+                        RichInline::Text("first".into()),
+                        RichInline::LineBreak,
+                    ]),
+                    RichBlock::Paragraph(text("second")),
+                ]),
+                "first  \n\nsecond",
+            ),
+            (
+                RichDocument::new(vec![
+                    RichBlock::Paragraph(text("first\n")),
+                    RichBlock::Paragraph(text("second")),
+                ]),
+                "first\n\nsecond",
+            ),
+        ];
+
+        for (document, expected) in documents {
+            let markdown = write_markdown(&document);
+            let parsed = crate::parser::parse_markdown(&markdown);
+
+            assert_eq!(markdown, expected);
+            assert!(!markdown.ends_with('\n'));
+            assert_eq!(
+                parsed
+                    .events
+                    .iter()
+                    .filter(|event| matches!(
+                        event,
+                        MarkdownEvent::Start(crate::parser::MarkdownTag::Paragraph)
+                    ))
+                    .count(),
+                2
+            );
+        }
+    }
+
+    #[test]
+    fn split_text_ordered_list_marker_reparses_as_a_paragraph() {
+        let document = RichDocument::new(vec![RichBlock::Paragraph(vec![
+            RichInline::Text("1".into()),
+            RichInline::Text(". item".into()),
+        ])]);
+        let markdown = write_markdown(&document);
+        let parsed = crate::parser::parse_markdown(&markdown);
+
+        assert_eq!(markdown, "1\\. item");
+        assert!(parsed.events.iter().all(|event| !matches!(
+            event,
+            MarkdownEvent::Start(crate::parser::MarkdownTag::List(..))
+        )));
+    }
+
+    #[test]
+    fn split_text_heading_marker_reparses_as_a_paragraph() {
+        let document = RichDocument::new(vec![RichBlock::Paragraph(vec![
+            RichInline::Text("  ".into()),
+            RichInline::Text("# title".into()),
+        ])]);
+        let markdown = write_markdown(&document);
+        let parsed = crate::parser::parse_markdown(&markdown);
+
+        assert_eq!(markdown, "  \\# title");
+        assert!(parsed.events.iter().all(|event| !matches!(
+            event,
+            MarkdownEvent::Start(crate::parser::MarkdownTag::Heading { .. })
+        )));
+    }
+
+    #[test]
+    fn empty_inline_wrapper_breaks_line_prefix_structure() {
+        let document = RichDocument::new(vec![RichBlock::Paragraph(vec![
+            RichInline::Text("  ".into()),
+            RichInline::Strong(Vec::new()),
+            RichInline::Text("# title".into()),
+        ])]);
+        let markdown = write_markdown(&document);
+        let parsed = crate::parser::parse_markdown(&markdown);
+
+        assert_eq!(markdown, "  \\# title");
+        assert!(parsed.events.iter().all(|event| !matches!(
+            event,
+            MarkdownEvent::Start(crate::parser::MarkdownTag::Heading { .. })
+        )));
+    }
+
+    #[test]
+    fn split_text_strikethrough_marker_reparses_as_plain_text() {
+        let document = RichDocument::new(vec![RichBlock::Paragraph(vec![
+            RichInline::Text("~".into()),
+            RichInline::Text("~gone".into()),
+            RichInline::Text("~".into()),
+            RichInline::Text("~".into()),
+        ])]);
+        let markdown = write_markdown(&document);
+        let parsed = crate::parser::parse_markdown(&markdown);
+
+        assert_eq!(markdown, "\\~\\~gone\\~\\~");
+        assert!(parsed.events.iter().all(|event| !matches!(
+            event,
+            MarkdownEvent::Start(crate::parser::MarkdownTag::Strikethrough)
+        )));
+    }
+
+    #[test]
+    fn text_exclamation_before_link_does_not_become_an_image() {
+        let document = RichDocument::new(vec![RichBlock::Paragraph(vec![
+            RichInline::Text("!".into()),
+            RichInline::Link {
+                destination: "https://example.com".into(),
+                title: None,
+                children: text("link"),
+            },
+        ])]);
+        let markdown = write_markdown(&document);
+        let parsed = crate::parser::parse_markdown(&markdown);
+
+        assert_eq!(markdown, "\\![link](https://example.com)");
+        assert!(parsed.events.iter().all(|event| !matches!(
+            event,
+            MarkdownEvent::Start(crate::parser::MarkdownTag::Image { .. })
+        )));
+    }
+
+    #[test]
+    fn text_setext_underline_reparses_as_plain_text() {
+        let document = RichDocument::new(vec![RichBlock::Paragraph(text("title\n==="))]);
+        let markdown = write_markdown(&document);
+        let parsed = crate::parser::parse_markdown(&markdown);
+
+        assert_eq!(markdown, "title\n\\===");
+        assert!(parsed.events.iter().all(|event| !matches!(
+            event,
+            MarkdownEvent::Start(crate::parser::MarkdownTag::Heading { .. })
+        )));
     }
 
     #[test]
@@ -380,6 +522,71 @@ impl InlineContext {
     const TABLE_CELL: Self = Self { table_cell: true };
 }
 
+#[derive(Clone, Copy)]
+struct InlineTextState {
+    line: InlineLineState,
+}
+
+#[derive(Clone, Copy)]
+enum InlineLineState {
+    Start { indentation: usize },
+    OrderedListNumber { digit_count: usize },
+    Content,
+    StructuralBoundary,
+}
+
+impl InlineTextState {
+    fn from_output(output: &str) -> Self {
+        let line = if output.is_empty() || output.ends_with('\n') {
+            InlineLineState::Start { indentation: 0 }
+        } else {
+            InlineLineState::Content
+        };
+        Self { line }
+    }
+
+    fn is_line_structure_start(self) -> bool {
+        matches!(self.line, InlineLineState::Start { .. } | InlineLineState::StructuralBoundary)
+    }
+
+    fn starts_ordered_list_marker(self, character: char, next_character: Option<char>) -> bool {
+        matches!(
+            self.line,
+            InlineLineState::OrderedListNumber { digit_count } if digit_count > 0
+        ) && character == '.'
+            && next_character.is_some_and(char::is_whitespace)
+    }
+
+    fn advance_plain_text(&mut self, character: char) {
+        self.line = match self.line {
+            InlineLineState::Start { indentation }
+                if character == ' ' && indentation < MAXIMUM_LIST_MARKER_INDENTATION =>
+            {
+                InlineLineState::Start { indentation: indentation + 1 }
+            }
+            InlineLineState::Start { .. } if character.is_ascii_digit() => {
+                InlineLineState::OrderedListNumber { digit_count: 1 }
+            }
+            InlineLineState::OrderedListNumber { digit_count } if character.is_ascii_digit() => {
+                InlineLineState::OrderedListNumber { digit_count: digit_count + 1 }
+            }
+            _ => InlineLineState::Content,
+        };
+    }
+
+    fn reset_after_line_break(&mut self, context: InlineContext) {
+        self.line = if context.table_cell {
+            InlineLineState::StructuralBoundary
+        } else {
+            InlineLineState::Start { indentation: 0 }
+        };
+    }
+
+    fn break_structural_continuity(&mut self) {
+        self.line = InlineLineState::StructuralBoundary;
+    }
+}
+
 pub(crate) fn write_markdown(document: &RichDocument) -> String {
     let mut output = String::with_capacity(document.blocks().len().saturating_mul(32));
     write_blocks(document.blocks(), &mut output, NestingContext::TOP_LEVEL);
@@ -388,27 +595,20 @@ pub(crate) fn write_markdown(document: &RichDocument) -> String {
 
 fn write_blocks(blocks: &[RichBlock], output: &mut String, nesting: NestingContext) {
     let mut wrote_block = false;
-    let mut previous_block_ended_with_line_break = false;
 
     for block in blocks {
         let mut block_output = String::new();
         write_block(block, &mut block_output, nesting);
-        let block_ended_with_line_break = block_output.ends_with('\n');
         trim_block_boundary_line_breaks(&mut block_output);
         if block_output.is_empty() {
             continue;
         }
 
         if wrote_block {
-            output.push_str(if previous_block_ended_with_line_break {
-                "\n"
-            } else {
-                TOP_LEVEL_BLOCK_SEPARATOR
-            });
+            output.push_str(TOP_LEVEL_BLOCK_SEPARATOR);
         }
         output.push_str(&block_output);
         wrote_block = true;
-        previous_block_ended_with_line_break = block_ended_with_line_break;
     }
 }
 
@@ -609,28 +809,43 @@ fn is_safe_fence_language(language: &str) -> bool {
 }
 
 fn write_inlines(inlines: &[RichInline], output: &mut String, context: InlineContext) {
+    let mut text_state = InlineTextState::from_output(output);
+
     for inline in inlines {
         match inline {
-            RichInline::Text(text) => write_plain_text(text, output, context),
-            RichInline::Strong(children) => write_styled_inlines(children, "**", output, context),
-            RichInline::Emphasis(children) => write_styled_inlines(children, "*", output, context),
-            RichInline::Strikethrough(children) => {
-                write_styled_inlines(children, "~~", output, context)
+            RichInline::Text(text) => write_plain_text(text, output, context, &mut text_state),
+            RichInline::Strong(children) => {
+                write_styled_inlines(children, "**", output, context);
+                text_state.break_structural_continuity();
             }
-            RichInline::InlineCode(text) => write_inline_code(text, output),
+            RichInline::Emphasis(children) => {
+                write_styled_inlines(children, "*", output, context);
+                text_state.break_structural_continuity();
+            }
+            RichInline::Strikethrough(children) => {
+                write_styled_inlines(children, "~~", output, context);
+                text_state.break_structural_continuity();
+            }
+            RichInline::InlineCode(text) => {
+                write_inline_code(text, output);
+                text_state.break_structural_continuity();
+            }
             RichInline::Link { destination, title, children } => {
-                write_link(destination, title.as_deref(), children, output, context)
+                write_link(destination, title.as_deref(), children, output, context);
+                text_state.break_structural_continuity();
             }
             RichInline::RemoteImage { destination, title, alt } => {
-                write_remote_image(destination, title.as_deref(), alt, output, context)
+                write_remote_image(
+                    destination,
+                    title.as_deref(),
+                    alt,
+                    output,
+                    context,
+                    &mut text_state,
+                );
+                text_state.break_structural_continuity();
             }
-            RichInline::LineBreak => {
-                if context.table_cell {
-                    output.push_str(TABLE_LINE_BREAK);
-                } else {
-                    output.push_str(MARKDOWN_HARD_LINE_BREAK);
-                }
-            }
+            RichInline::LineBreak => write_explicit_line_break(output, context, &mut text_state),
         }
     }
 }
@@ -651,106 +866,83 @@ fn write_styled_inlines(
     output.push_str(marker);
 }
 
-fn write_plain_text(text: &str, output: &mut String, context: InlineContext) {
-    let mut characters = text.char_indices().peekable();
-    let mut ordered_list_prefix_is_valid = output.is_empty() || output.ends_with('\n');
-    let mut leading_space_count = 0;
-    let mut ordered_list_number_length = 0;
-    let mut line_contains_only_whitespace = output.is_empty() || output.ends_with('\n');
-
-    while let Some((_, character)) = characters.next() {
-        match character {
-            '\r' => {
-                if matches!(characters.peek(), Some((_, '\n'))) {
-                    characters.next();
-                }
-                write_text_line_break(output, context);
-                ordered_list_prefix_is_valid = true;
-                leading_space_count = 0;
-                ordered_list_number_length = 0;
-                line_contains_only_whitespace = true;
-            }
-            '\n' => {
-                write_text_line_break(output, context);
-                ordered_list_prefix_is_valid = true;
-                leading_space_count = 0;
-                ordered_list_number_length = 0;
-                line_contains_only_whitespace = true;
-            }
-            '~' if matches!(characters.peek(), Some((_, '~'))) => {
-                characters.next();
-                output.push_str("\\~\\~");
-                ordered_list_prefix_is_valid = false;
-                line_contains_only_whitespace = false;
-            }
-            '.' if ordered_list_prefix_is_valid
-                && ordered_list_number_length > 0
-                && matches!(characters.peek(), Some((_, next)) if next.is_whitespace()) =>
-            {
-                output.push_str("\\.");
-                ordered_list_prefix_is_valid = false;
-                line_contains_only_whitespace = false;
-            }
-            '#' | '+' | '-' | '>' if line_contains_only_whitespace => {
-                output.push('\\');
-                output.push(character);
-                ordered_list_prefix_is_valid = false;
-                line_contains_only_whitespace = false;
-            }
-            '|' if context.table_cell => {
-                output.push('\\');
-                output.push(character);
-                ordered_list_prefix_is_valid = false;
-                line_contains_only_whitespace = false;
-            }
-            '\\' | '`' | '*' | '_' | '[' | ']' => {
-                output.push('\\');
-                output.push(character);
-                ordered_list_prefix_is_valid = false;
-                line_contains_only_whitespace = false;
-            }
-            _ => {
-                output.push(character);
-                update_ordered_list_prefix(
-                    character,
-                    &mut ordered_list_prefix_is_valid,
-                    &mut leading_space_count,
-                    &mut ordered_list_number_length,
-                );
-                line_contains_only_whitespace &= character.is_whitespace();
-            }
-        }
-    }
-}
-
-fn update_ordered_list_prefix(
-    character: char,
-    ordered_list_prefix_is_valid: &mut bool,
-    leading_space_count: &mut usize,
-    ordered_list_number_length: &mut usize,
+fn write_plain_text(
+    text: &str,
+    output: &mut String,
+    context: InlineContext,
+    state: &mut InlineTextState,
 ) {
-    if !*ordered_list_prefix_is_valid {
-        return;
-    }
+    let mut characters = text.chars().peekable();
 
-    if character == ' ' && *ordered_list_number_length == 0 {
-        *leading_space_count += 1;
-        if *leading_space_count <= MAXIMUM_LIST_MARKER_INDENTATION {
-            return;
+    while let Some(character) = characters.next() {
+        if matches!(character, '\r' | '\n') {
+            consume_line_break(&mut characters, character);
+            write_source_line_break(output, context, state);
+            continue;
         }
-    } else if character.is_ascii_digit() {
-        *ordered_list_number_length += 1;
-        return;
-    }
 
-    *ordered_list_prefix_is_valid = false;
+        write_text_character(character, characters.peek().copied(), output, context, state);
+    }
 }
 
-fn write_text_line_break(output: &mut String, context: InlineContext) {
+fn consume_line_break(characters: &mut std::iter::Peekable<std::str::Chars<'_>>, character: char) {
+    if character == '\r' && matches!(characters.peek(), Some('\n')) {
+        characters.next();
+    }
+}
+
+fn write_source_line_break(
+    output: &mut String,
+    context: InlineContext,
+    state: &mut InlineTextState,
+) {
     if context.table_cell {
         output.push_str(TABLE_LINE_BREAK);
     } else {
         output.push('\n');
+    }
+    state.reset_after_line_break(context);
+}
+
+fn write_explicit_line_break(
+    output: &mut String,
+    context: InlineContext,
+    state: &mut InlineTextState,
+) {
+    if context.table_cell {
+        output.push_str(TABLE_LINE_BREAK);
+    } else {
+        output.push_str(MARKDOWN_HARD_LINE_BREAK);
+    }
+    state.reset_after_line_break(context);
+}
+
+fn write_text_character(
+    character: char,
+    next_character: Option<char>,
+    output: &mut String,
+    context: InlineContext,
+    state: &mut InlineTextState,
+) {
+    if should_escape_text_character(character, next_character, context, *state) {
+        output.push('\\');
+    }
+    output.push(character);
+    state.advance_plain_text(character);
+}
+
+fn should_escape_text_character(
+    character: char,
+    next_character: Option<char>,
+    context: InlineContext,
+    state: InlineTextState,
+) -> bool {
+    match character {
+        '\\' | '`' | '*' | '_' | '[' | ']' | '!' | '~' => true,
+        '|' => context.table_cell,
+        '.' => state.starts_ordered_list_marker(character, next_character),
+        '=' | '#' | '+' | '-' | '>' => state.is_line_structure_start(),
+        _ => false,
     }
 }
 
@@ -812,14 +1004,15 @@ fn write_remote_image(
     alt: &str,
     output: &mut String,
     context: InlineContext,
+    state: &mut InlineTextState,
 ) {
     if !is_safe_web_url(destination) {
-        write_plain_text(alt, output, context);
+        write_plain_text(alt, output, context, state);
         return;
     }
 
     output.push_str("![");
-    write_plain_text(alt, output, context);
+    write_plain_text(alt, output, context, state);
     output.push_str("](");
     write_destination(destination, output);
     write_title(title, output);
