@@ -23,7 +23,9 @@ use std::time::Instant;
 use stdext::arena::scratch_arena;
 use ui::Theme;
 use ui::core::paint::DrawList;
-use ui::plugin::{PluginFactory, PluginMessage, PluginQuery, PluginResponse, ViewPlugin};
+use ui::plugin::{
+    PastePreference, PluginFactory, PluginMessage, PluginQuery, PluginResponse, ViewPlugin,
+};
 use unicode_segmentation::UnicodeSegmentation;
 
 // ===== Syntax highlighter =====
@@ -2927,6 +2929,10 @@ impl MarkdownEditorView {
 }
 
 impl ViewPlugin for MarkdownEditorView {
+    fn paste_preference(&self) -> PastePreference {
+        PastePreference::SemanticMarkdown
+    }
+
     fn handles_own_rendering(&self) -> bool {
         true
     }
@@ -8926,8 +8932,14 @@ mod tests {
     use super::*;
     use ui::plugin::{
         EditAugmentation, EditIntent, EditPlan, EditPolicy, EditRequest, EditSelection,
-        EditTransaction, KeyIntentMapper, TextReplacement,
+        EditTransaction, KeyIntentMapper, PastePreference, TextReplacement, ViewPlugin,
     };
+
+    #[test]
+    fn markdown_editor_is_the_only_markdown_view_requesting_semantic_paste() {
+        assert_eq!(MarkdownEditorView::new().paste_preference(), PastePreference::SemanticMarkdown);
+        assert_eq!(MarkdownView::new().paste_preference(), PastePreference::PlainText);
+    }
 
     fn test_enter_context(source: &str, byte: usize) -> EnterContext {
         classify_enter_context(source, byte)

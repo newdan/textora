@@ -162,6 +162,10 @@ impl<'a> TabSession<'a> {
         self.runtime.plugin.name()
     }
 
+    pub fn paste_preference(&self) -> ui::plugin::PastePreference {
+        self.runtime.plugin.paste_preference()
+    }
+
     pub fn allows_editing(&self) -> bool {
         self.runtime.editing_access() == crate::tab_runtime::DocumentEditingAccess::Editable
             && self.runtime.plugin.allows_editing()
@@ -1053,7 +1057,7 @@ mod tests {
     use appkit_core::workspace::types::TabIdAllocator;
     use core::buffer::TextBuffer;
     use core::document::DocView;
-    use ui::plugin::{PluginQuery, PluginResponse, ViewPlugin};
+    use ui::plugin::{PastePreference, PluginQuery, PluginResponse, ViewPlugin};
 
     use crate::tab_runtime::TabRuntime;
 
@@ -1072,6 +1076,10 @@ mod tests {
     impl ViewPlugin for ScrollProbePlugin {
         fn name(&self) -> &str {
             "scroll-probe"
+        }
+
+        fn paste_preference(&self) -> PastePreference {
+            PastePreference::SemanticMarkdown
         }
 
         fn render(
@@ -1118,6 +1126,26 @@ mod tests {
         let session = TabSession::new(id, &document, &runtime);
 
         assert_eq!(session.query_float(PluginQuery::ScrollY), RUNTIME_SCROLL as f32);
+    }
+
+    #[test]
+    fn session_paste_preference_forwards_active_plugin() {
+        let id = TabIdAllocator::new().allocate();
+        let document = document("hello");
+        let runtime = TabRuntime::new(Box::new(ScrollProbePlugin));
+        let session = TabSession::new(id, &document, &runtime);
+
+        assert_eq!(session.paste_preference(), PastePreference::SemanticMarkdown);
+    }
+
+    #[test]
+    fn source_editor_session_keeps_plain_text_paste() {
+        let id = TabIdAllocator::new().allocate();
+        let document = document("hello");
+        let runtime = TabRuntime::new(Box::new(EditorPlugin::new()));
+        let session = TabSession::new(id, &document, &runtime);
+
+        assert_eq!(session.paste_preference(), PastePreference::PlainText);
     }
 
     #[test]

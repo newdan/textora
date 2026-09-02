@@ -521,6 +521,15 @@ impl EditPolicy for NoopEditPolicy {
 // ViewPlugin trait
 // ---------------------------------------------------------------------------
 
+/// Clipboard representation a view can safely accept from a smart paste.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PastePreference {
+    /// Insert the clipboard's plain text without interpreting semantic styling.
+    PlainText,
+    /// Convert semantic clipboard markup into Markdown before insertion.
+    SemanticMarkdown,
+}
+
 /// Trait implemented by pluggable view renderers.
 ///
 /// A plugin is responsible for rendering a document region and optionally
@@ -528,6 +537,11 @@ impl EditPolicy for NoopEditPolicy {
 pub trait ViewPlugin {
     /// Human-readable name (e.g. `"reader"`, `"editor"`).
     fn name(&self) -> &str;
+
+    /// Clipboard representation this view prefers for regular paste.
+    fn paste_preference(&self) -> PastePreference {
+        PastePreference::PlainText
+    }
 
     /// Render the visible portion of the document and return a draw list.
     fn render(
@@ -819,6 +833,13 @@ mod tests {
         ) -> DrawList {
             DrawList::new()
         }
+    }
+
+    #[test]
+    fn view_plugin_defaults_to_plain_text_paste() {
+        let plugin = StubPlugin { name: "plain-text" };
+
+        assert_eq!(plugin.paste_preference(), PastePreference::PlainText);
     }
 
     struct CanvasProtocolPlugin {
