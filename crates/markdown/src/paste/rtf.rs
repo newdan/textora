@@ -227,7 +227,12 @@ enum GroupRole {
     Ordinary,
     FieldInstruction { field_index: usize },
     FieldResult { field_index: usize },
-    ListMarker { parent_destination: RtfDestination, marker: String },
+    ListMarker { route: ListMarkerRoute, marker: String },
+}
+
+enum ListMarkerRoute {
+    Document,
+    Suppressed,
 }
 
 struct FieldContext {
@@ -416,8 +421,8 @@ impl RtfParser {
     ) -> Result<(), RtfPasteError> {
         let (field_index, expected, next) = match role {
             GroupRole::Ordinary => return Ok(()),
-            GroupRole::ListMarker { parent_destination, marker } => {
-                if parent_destination == RtfDestination::Normal {
+            GroupRole::ListMarker { route, marker } => {
+                if matches!(route, ListMarkerRoute::Document) {
                     self.output.pending_list = list_kind(&marker);
                 }
                 return Ok(());
@@ -614,10 +619,12 @@ impl RtfParser {
     }
 
     fn open_list_marker(&mut self) -> Result<(), RtfPasteError> {
-        self.assign_group_role(GroupRole::ListMarker {
-            parent_destination: self.state.destination,
-            marker: String::new(),
-        })
+        let route = if self.state.destination == RtfDestination::Normal && self.fields.is_empty() {
+            ListMarkerRoute::Document
+        } else {
+            ListMarkerRoute::Suppressed
+        };
+        self.assign_group_role(GroupRole::ListMarker { route, marker: String::new() })
     }
 
     fn append_list_marker(&mut self, text: &str) {
@@ -1341,6 +1348,33 @@ mod tests {
         )
         .expect("skipped destinations cannot emit list markers");
         assert_eq!(write_markdown(&skipped), "plain");
+    }
+
+    #[test]
+    fn field_container_sibling_list_markers_are_suppressed() {
+        for destination in ["listtext", "pntext"] {
+            let input = format!(
+                r#"{{\rtf1 before {{\field{{\{destination} 1.\tab}}{{\*\fldinst HYPERLINK "https://example.com"}}{{\fldrslt link}}}}\par after}}"#,
+            );
+            let document = parse_rtf(input.as_bytes())
+                .expect("field-container sibling markers are accepted but isolated");
+            assert_eq!(write_markdown(&document), "before [link](https://example.com/)\n\nafter");
+        }
+
+        let nested = parse_rtf(
+            br#"{\rtf1{\field{\*\fldinst HYPERLINK "javascript:outer"}{\fldrslt outer {\field{\pntext 1.\tab}{\*\fldinst HYPERLINK "javascript:inner"}{\fldrslt inner}} tail}}}"#,
+        )
+        .expect("nested field-container sibling markers remain field-local");
+        assert_eq!(write_markdown(&nested), "outer inner tail");
+    }
+
+    #[test]
+    fn document_list_marker_before_a_field_remains_effective() {
+        let document = parse_rtf(
+            br#"{\rtf1{\listtext 1.\tab}before {\field{\*\fldinst HYPERLINK "https://example.com"}{\fldrslt link}}\par after}"#,
+        )
+        .expect("a document list marker remains effective when followed by a field");
+        assert_eq!(write_markdown(&document), "1. before [link](https://example.com/)\n\nafter");
     }
 
     #[test]
