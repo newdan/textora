@@ -170,7 +170,7 @@ pub fn key_to_command(key: &Key, mods: ModifiersState) -> Option<EditCommand> {
                     "a" => Some(EditCommand::SelectAll),
                     "c" => Some(EditCommand::Copy),
                     "x" => Some(EditCommand::Cut),
-                    "v" if shift => Some(EditCommand::PastePlainText),
+                    "v" | "V" if shift => Some(EditCommand::PastePlainText),
                     "v" => Some(EditCommand::Paste),
                     "f" if shift || alt => Some(EditCommand::FindReplace),
                     "f" => Some(EditCommand::Find),
@@ -204,7 +204,7 @@ pub fn key_to_command(key: &Key, mods: ModifiersState) -> Option<EditCommand> {
             } else if ctrl {
                 // Ctrl+key (terminal-style, mostly unused on macOS)
                 match c.as_str() {
-                    "v" if shift => Some(EditCommand::PastePlainText),
+                    "v" | "V" if shift => Some(EditCommand::PastePlainText),
                     "v" => Some(EditCommand::Paste),
                     "z" => Some(EditCommand::Undo),
                     "y" => Some(EditCommand::Redo),
@@ -479,6 +479,12 @@ mod tests {
     }
 
     #[test]
+    fn cmd_shift_uppercase_v_pastes_plain_text() {
+        let key = Key::Character("V".into());
+        assert_eq!(key_to_command(&key, cmd_shift()), Some(EditCommand::PastePlainText));
+    }
+
+    #[test]
     fn ctrl_v_pastes() {
         let key = Key::Character("v".into());
         assert_eq!(key_to_command(&key, ctrl()), Some(EditCommand::Paste));
@@ -488,6 +494,20 @@ mod tests {
     fn ctrl_shift_v_pastes_plain_text() {
         let key = Key::Character("v".into());
         assert_eq!(key_to_command(&key, ctrl_shift()), Some(EditCommand::PastePlainText));
+    }
+
+    #[test]
+    fn ctrl_shift_uppercase_v_pastes_plain_text() {
+        let key = Key::Character("V".into());
+        assert_eq!(key_to_command(&key, ctrl_shift()), Some(EditCommand::PastePlainText));
+    }
+
+    #[test]
+    fn unmodified_v_preserves_character_case() {
+        for text in ["v", "V"] {
+            let key = Key::Character(text.into());
+            assert_eq!(key_to_command(&key, no_mods()), Some(EditCommand::InsertChar(text.into())));
+        }
     }
 
     #[test]

@@ -857,7 +857,13 @@ impl App {
             EditCommand::PastePlainText => crate::clipboard::PasteRequestKind::PlainText,
             _ => return AppEffect::NONE,
         };
-        let Some(preference) = self.active_tab_session().map(|tab| tab.paste_preference()) else {
+        if !self.active_allows_editing() {
+            return AppEffect::NONE;
+        }
+        let Some((preference, previous_content_revision)) = self
+            .active_tab_session()
+            .map(|tab| (tab.paste_preference(), tab.document.content_revision()))
+        else {
             return AppEffect::NONE;
         };
         let Some(text) =
@@ -874,7 +880,14 @@ impl App {
         if let Some(tab) = self.active_tab_session_mut() {
             tab.document.break_edit_merge();
         }
-        effect
+        if self
+            .active_tab_session()
+            .is_some_and(|tab| tab.document.content_revision() != previous_content_revision)
+        {
+            effect.merge(AppEffect::RESHAPE)
+        } else {
+            effect
+        }
     }
 
     #[cfg(test)]
@@ -922,6 +935,17 @@ mod edit_tests {
         app.push_entry_for_test(
             DocumentView::new(vec![text.into()], 40, 40.0),
             Box::new(crate::plugins::editor::EditorPlugin::new()),
+        );
+        app.switch_workspace_for_test(0);
+        app
+    }
+
+    #[cfg(feature = "markdown")]
+    fn app_with_read_only_markdown(text: &str) -> App {
+        let mut app = App::new(None);
+        app.push_entry_for_test(
+            DocumentView::new(vec![text.into()], 40, 40.0),
+            Box::new(textora_markdown::view::MarkdownView::new()),
         );
         app.switch_workspace_for_test(0);
         app
@@ -1117,6 +1141,57 @@ mod edit_tests {
         assert_eq!(active_text(&app), "plain\ntext");
         assert_eq!(clipboard.plain_reads, 1);
         assert_eq!(clipboard.snapshot_reads, 0);
+    }
+
+    #[test]
+    fn production_paste_routes_reshape_same_line_content_changes() {
+        for command in [EditCommand::Paste, EditCommand::PastePlainText] {
+            let mut app = app_with_text("before");
+            let mut clipboard = TestDocumentClipboard::with_plain(" after");
+
+            let effect = app
+                .dispatch_pre_navigation_edit_command_with_clipboard_for_test(
+                    &command,
+                    &mut clipboard,
+                )
+                .expect("paste must use the production pre-navigation route");
+
+            assert_eq!(active_text(&app), " afterbefore", "{command:?}");
+            assert!(effect.reshape, "{command:?}");
+        }
+    }
+
+    #[test]
+    fn production_paste_routes_do_not_reshape_without_content_change() {
+        for mut clipboard in [TestDocumentClipboard::empty(), TestDocumentClipboard::with_plain("")]
+        {
+            let mut app = app_with_text("unchanged");
+            let before = active_document_snapshot(&app);
+
+            let effect = app
+                .dispatch_pre_navigation_edit_command_with_clipboard_for_test(
+                    &EditCommand::Paste,
+                    &mut clipboard,
+                )
+                .expect("paste must use the production pre-navigation route");
+
+            assert_eq!(active_document_snapshot(&app), before);
+            assert!(!effect.reshape);
+        }
+    }
+
+    #[cfg(feature = "markdown")]
+    #[test]
+    fn read_only_document_paste_does_not_modify_or_request_reshape() {
+        let mut app = app_with_read_only_markdown("unchanged");
+        let before = active_document_snapshot(&app);
+        let mut clipboard = TestDocumentClipboard::with_plain(" changed");
+
+        let effect = app
+            .dispatch_document_paste_with_clipboard_for_test(&EditCommand::Paste, &mut clipboard);
+
+        assert_eq!(active_document_snapshot(&app), before);
+        assert!(!effect.reshape);
     }
 
     #[test]

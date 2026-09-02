@@ -702,7 +702,10 @@ fn resolve_destination(raw: &str, base_url: Option<&Url>) -> Option<Url> {
 }
 
 fn element_is_hidden(element: ElementRef<'_>) -> bool {
-    if matches!(element.value().name(), "script" | "style" | "template") {
+    if matches!(
+        element.value().name(),
+        "head" | "title" | "script" | "style" | "template" | "iframe" | "noembed" | "noframes"
+    ) {
         return true;
     }
     if element.attr("hidden").is_some()
@@ -912,6 +915,11 @@ fn normalize_malformed_fragment(html: &str) -> Result<String, HtmlPasteError> {
             cursor = tag_end + 1;
             continue;
         };
+        if name == "head" {
+            normalized.push_str(if closing { "</template>" } else { "<template>" });
+            cursor = tag_end + 1;
+            continue;
+        }
         normalizer.prepare_for_tag(&name, closing, &mut normalized);
         if !closing && raw_text_element(&name).is_some() {
             cursor = copy_raw_text_element(
@@ -1279,7 +1287,7 @@ mod tests {
         parse_html,
     };
     use crate::paste::writer::write_markdown;
-    use crate::paste::{RichBlock, RichInline};
+    use crate::paste::{PasteRepresentations, PreparedPaste, RichBlock, RichInline, prepare_paste};
 
     #[test]
     fn parses_browser_blocks_inline_styles_links_and_remote_images() {
@@ -1500,6 +1508,41 @@ mod tests {
         .expect("hidden content fixture");
         assert_eq!(write_markdown(&conversion.document), "shown kept");
         assert_eq!(conversion.semantic_markup, SemanticMarkup::Absent);
+    }
+
+    #[test]
+    fn hidden_title_does_not_leak_or_force_plain_text_fallback() {
+        let html = "<title>secret</title><strong>visible</strong>";
+        for plain in [None, Some("visible")] {
+            let prepared = prepare_paste(PasteRepresentations {
+                markdown: None,
+                html: Some(html),
+                rtf: None,
+                plain,
+                source_url: None,
+            });
+
+            assert_eq!(prepared, PreparedPaste::HtmlConverted("**visible**".into()));
+        }
+    }
+
+    #[test]
+    fn skips_html_non_rendered_subtrees() {
+        for tag in ["head", "title", "iframe", "noembed", "noframes"] {
+            let html = format!("<{tag}>secret</{tag}><strong>visible</strong>");
+            let conversion = parse_html(&html, None).expect("non-rendered subtree fixture");
+
+            assert_eq!(write_markdown(&conversion.document), "**visible**", "{tag}");
+        }
+    }
+
+    #[test]
+    fn raw_text_elements_with_visible_semantics_remain_visible() {
+        for html in ["<textarea>visible</textarea>", "<xmp>visible</xmp>", "<plaintext>visible"] {
+            let conversion = parse_html(html, None).expect("visible raw-text element fixture");
+
+            assert_eq!(write_markdown(&conversion.document), "visible", "{html}");
+        }
     }
 
     #[test]
