@@ -1193,12 +1193,11 @@ fn inline_content_is_empty(content: &[RichInline]) -> bool {
 }
 
 fn document_semantic_markup(document: &RichDocument) -> SemanticMarkup {
-    document
-        .blocks()
-        .iter()
-        .any(block_has_semantic_markup)
-        .then_some(SemanticMarkup::Present)
-        .unwrap_or(SemanticMarkup::Absent)
+    if document.blocks().iter().any(block_has_semantic_markup) {
+        SemanticMarkup::Present
+    } else {
+        SemanticMarkup::Absent
+    }
 }
 
 fn block_has_semantic_markup(block: &RichBlock) -> bool {

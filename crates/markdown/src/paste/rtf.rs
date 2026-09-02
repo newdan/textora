@@ -406,10 +406,9 @@ impl RtfParser {
         if let Some(field) = self.fields.last_mut()
             && field.closure == FieldClosure::Implicit
             && field.owner_depth == closing_depth
+            && field.progress == FieldProgress::Ready
         {
-            if field.progress == FieldProgress::Ready {
-                field.progress = FieldProgress::AwaitingCompatibilityClose;
-            }
+            field.progress = FieldProgress::AwaitingCompatibilityClose;
         }
         Ok(())
     }

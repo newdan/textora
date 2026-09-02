@@ -949,10 +949,10 @@ fn write_code_block(language: Option<&str>, text: &str, output: &mut String) {
         longest_backtick_run(text).saturating_add(1).max(FENCED_CODE_MINIMUM_DELIMITER_LENGTH);
     let delimiter = "`".repeat(delimiter_length);
     output.push_str(&delimiter);
-    if let Some(language) = language {
-        if is_safe_fence_language(language) {
-            output.push_str(language);
-        }
+    if let Some(language) = language
+        && is_safe_fence_language(language)
+    {
+        output.push_str(language);
     }
     output.push('\n');
     output.push_str(text);
