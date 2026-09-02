@@ -1,5 +1,6 @@
 use super::{
-    PasteFallbackReason, PasteRepresentations, PreparedPaste, RichDocument, VisibleTextMode,
+    PasteFallbackReason, PasteRepresentations, PreparedPaste, RichDocument, VisibleSegment,
+    VisibleTextMode,
     html::{SemanticMarkup, parse_html},
     rtf::parse_rtf,
     writer::write_markdown,
@@ -14,6 +15,19 @@ enum HtmlSelection {
 enum RichRepresentation {
     Html,
     Rtf,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum VisibleChunk {
+    Flow(String),
+    Preformatted(String),
+}
+
+#[derive(Clone, Copy)]
+enum PatternToken {
+    Literal(char),
+    WhitespaceOne,
+    WhitespaceStar,
 }
 
 pub fn prepare_paste(input: PasteRepresentations<'_>) -> PreparedPaste {
@@ -98,16 +112,29 @@ fn non_empty_text(text: Option<&str>) -> Option<&str> {
 }
 
 fn equivalent_visible_text(document: &RichDocument, plain: &str) -> bool {
-    let segments = document.visible_segments();
+    preformatted_segments_appear_in_order(document, plain)
+}
+
+fn segments_align_plain(segments: &[VisibleSegment], plain: &str) -> bool {
     let visible_text =
         segments.iter().map(|segment| segment.text.as_str()).collect::<Vec<_>>().join("\n");
+    if normalize_flow_text(&visible_text) != normalize_flow_text(plain) {
+        return false;
+    }
 
-    normalize_flow_text(&visible_text) == normalize_flow_text(plain)
-        && preformatted_segments_appear_in_order(document, plain)
+    let pattern = compile_visible_pattern(segments);
+    let normalized_plain = normalize_line_endings(plain);
+    let plain_without_bom = normalized_plain.strip_prefix('\u{feff}').unwrap_or(&normalized_plain);
+    pattern_matches_plain(&pattern, plain_without_bom)
 }
 
 fn normalize_flow_text(text: &str) -> String {
-    let without_bom = text.strip_prefix('\u{feff}').unwrap_or(text);
+    normalize_flow_fragment(text, true)
+}
+
+fn normalize_flow_fragment(text: &str, strip_leading_bom: bool) -> String {
+    let without_bom =
+        if strip_leading_bom { text.strip_prefix('\u{feff}').unwrap_or(text) } else { text };
     let normalized_endings = normalize_line_endings(without_bom);
     normalized_endings
         .chars()
@@ -123,29 +150,129 @@ fn normalize_line_endings(text: &str) -> String {
 }
 
 fn preformatted_segments_appear_in_order(document: &RichDocument, plain: &str) -> bool {
-    let normalized_plain = normalize_line_endings(plain);
-    let mut search_start = 0;
+    segments_align_plain(&document.visible_segments(), plain)
+}
 
-    for segment in document
-        .visible_segments()
-        .into_iter()
-        .filter(|segment| segment.mode == VisibleTextMode::Preformatted)
-    {
-        let expected = normalize_line_endings(&segment.text);
-        let Some(relative_start) = normalized_plain[search_start..].find(&expected) else {
-            return false;
-        };
-        search_start += relative_start + expected.len();
+fn merge_visible_segments(segments: &[VisibleSegment]) -> Vec<VisibleChunk> {
+    let mut chunks = Vec::with_capacity(segments.len().saturating_add(2));
+    for (index, segment) in segments.iter().enumerate() {
+        match segment.mode {
+            VisibleTextMode::Flow => append_flow_chunk(&mut chunks, &segment.text),
+            VisibleTextMode::Preformatted => {
+                append_preformatted_chunk(&mut chunks, &segment.text, index == 0);
+            }
+        }
     }
-    true
+    if !matches!(chunks.last(), Some(VisibleChunk::Flow(_))) {
+        chunks.push(VisibleChunk::Flow(String::new()));
+    }
+    for (index, chunk) in chunks.iter_mut().enumerate() {
+        if let VisibleChunk::Flow(flow) = chunk {
+            *flow = normalize_flow_fragment(flow, index == 0);
+        }
+    }
+    chunks
+}
+
+fn append_flow_chunk(chunks: &mut Vec<VisibleChunk>, text: &str) {
+    match chunks.last_mut() {
+        Some(VisibleChunk::Flow(flow)) => {
+            flow.push('\n');
+            flow.push_str(text);
+        }
+        _ => chunks.push(VisibleChunk::Flow(text.to_owned())),
+    }
+}
+
+fn append_preformatted_chunk(chunks: &mut Vec<VisibleChunk>, text: &str, strip_bom: bool) {
+    if !matches!(chunks.last(), Some(VisibleChunk::Flow(_))) {
+        chunks.push(VisibleChunk::Flow(String::new()));
+    }
+    let text = if strip_bom { text.strip_prefix('\u{feff}').unwrap_or(text) } else { text };
+    chunks.push(VisibleChunk::Preformatted(normalize_line_endings(text)));
+}
+
+fn compile_visible_pattern(segments: &[VisibleSegment]) -> Vec<PatternToken> {
+    let chunks = merge_visible_segments(segments);
+    let mut pattern = Vec::new();
+    for chunk in chunks {
+        match chunk {
+            VisibleChunk::Flow(flow) => append_flow_pattern(&mut pattern, &flow),
+            VisibleChunk::Preformatted(text) => {
+                pattern.extend(text.chars().map(PatternToken::Literal));
+            }
+        }
+    }
+    pattern
+}
+
+fn append_flow_pattern(pattern: &mut Vec<PatternToken>, flow: &str) {
+    pattern.push(PatternToken::WhitespaceStar);
+    for character in flow.chars() {
+        if character == ' ' {
+            pattern.push(PatternToken::WhitespaceOne);
+            pattern.push(PatternToken::WhitespaceStar);
+        } else {
+            pattern.push(PatternToken::Literal(character));
+        }
+    }
+    pattern.push(PatternToken::WhitespaceStar);
+}
+
+fn pattern_matches_plain(pattern: &[PatternToken], plain: &str) -> bool {
+    let mut active = vec![false; pattern.len() + 1];
+    let mut next = vec![false; pattern.len() + 1];
+    active[0] = true;
+    apply_epsilon_closure(pattern, &mut active);
+    for character in plain.chars() {
+        next.fill(false);
+        advance_pattern(pattern, &active, character, &mut next);
+        apply_epsilon_closure(pattern, &mut next);
+        if !next.iter().any(|state| *state) {
+            return false;
+        }
+        std::mem::swap(&mut active, &mut next);
+    }
+    active[pattern.len()]
+}
+
+fn advance_pattern(pattern: &[PatternToken], active: &[bool], character: char, next: &mut [bool]) {
+    for (index, token) in pattern.iter().enumerate() {
+        if !active[index] {
+            continue;
+        }
+        match token {
+            PatternToken::Literal(expected) if *expected == character => next[index + 1] = true,
+            PatternToken::WhitespaceOne if is_flow_whitespace(character) => {
+                next[index + 1] = true;
+            }
+            PatternToken::WhitespaceStar if is_flow_whitespace(character) => next[index] = true,
+            _ => {}
+        }
+    }
+}
+
+fn apply_epsilon_closure(pattern: &[PatternToken], active: &mut [bool]) {
+    for (index, token) in pattern.iter().enumerate() {
+        if active[index] && matches!(token, PatternToken::WhitespaceStar) {
+            active[index + 1] = true;
+        }
+    }
+}
+
+fn is_flow_whitespace(character: char) -> bool {
+    character == '\u{a0}' || character.is_whitespace()
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{equivalent_visible_text, preformatted_segments_appear_in_order, prepare_paste};
+    use super::{
+        equivalent_visible_text, preformatted_segments_appear_in_order, prepare_paste,
+        segments_align_plain,
+    };
     use crate::paste::{
         PasteFallbackReason, PasteRepresentations, PreparedPaste, RichBlock, RichDocument,
-        RichInline,
+        RichInline, VisibleSegment,
     };
 
     #[test]
@@ -277,6 +404,89 @@ mod tests {
         let document =
             RichDocument::new(vec![RichBlock::CodeBlock { language: None, text: "let  x".into() }]);
         assert!(!equivalent_visible_text(&document, "let x"));
+    }
+
+    #[test]
+    fn preformatted_text_cannot_match_a_later_flow_segment() {
+        let document = RichDocument::new(vec![
+            RichBlock::CodeBlock { language: None, text: "x  y".into() },
+            RichBlock::Paragraph(vec![RichInline::Text("x  y".into())]),
+        ]);
+
+        assert!(!equivalent_visible_text(&document, "x y\nx  y"));
+    }
+
+    #[test]
+    fn repeated_flow_and_preformatted_text_align_to_distinct_ranges() {
+        let segments = vec![VisibleSegment::flow("same"), VisibleSegment::preformatted("same")];
+
+        assert!(segments_align_plain(&segments, "same\nsame"));
+    }
+
+    #[test]
+    fn pre_flow_pre_alignment_tries_later_repeated_candidate() {
+        let segments = vec![
+            VisibleSegment::preformatted("x"),
+            VisibleSegment::flow("x"),
+            VisibleSegment::preformatted("x"),
+        ];
+
+        assert!(segments_align_plain(&segments, "x x x"));
+    }
+
+    #[test]
+    fn consecutive_flow_segments_merge_before_preformatted_alignment() {
+        let segments = vec![
+            VisibleSegment::flow("a"),
+            VisibleSegment::flow("b"),
+            VisibleSegment::preformatted("c"),
+        ];
+
+        assert!(segments_align_plain(&segments, "a\nb\nc"));
+    }
+
+    #[test]
+    fn empty_segments_and_outer_whitespace_are_aligned_without_losing_bom_rules() {
+        let empty_segments = vec![
+            VisibleSegment::flow(""),
+            VisibleSegment::preformatted(""),
+            VisibleSegment::flow(""),
+        ];
+        assert!(segments_align_plain(&empty_segments, "\u{feff}\r\n\t"));
+
+        let code = vec![VisibleSegment::preformatted("code")];
+        assert!(segments_align_plain(&code, "\u{feff} \ncode\r\n\t"));
+
+        let later_bom = vec![VisibleSegment::flow("a"), VisibleSegment::preformatted("b")];
+        assert!(!segments_align_plain(&later_bom, "a \u{feff} b"));
+    }
+
+    #[test]
+    fn flow_collapses_whitespace_while_preformatted_only_normalizes_line_endings() {
+        let segments = vec![VisibleSegment::flow("a  b"), VisibleSegment::preformatted("x\r\ny")];
+
+        assert!(segments_align_plain(&segments, "\u{feff} a b\r\nx\ny "));
+        assert!(!segments_align_plain(&segments, "a b\r\nx \ny"));
+    }
+
+    #[test]
+    fn repeated_empty_candidates_scale_with_streaming_alignment() {
+        let mut segments = Vec::new();
+        for _ in 0..1_000 {
+            segments.push(VisibleSegment::preformatted(""));
+            segments.push(VisibleSegment::flow(""));
+        }
+        segments.push(VisibleSegment::preformatted(" z "));
+
+        let plain = format!("{}z{}", "\t".repeat(2_000), "\t".repeat(2_000));
+        assert!(!segments_align_plain(&segments, &plain));
+    }
+
+    #[test]
+    fn many_sibling_preformatted_segments_do_not_grow_the_call_stack() {
+        let segments = (0..8_000).map(|_| VisibleSegment::preformatted("")).collect::<Vec<_>>();
+
+        assert!(segments_align_plain(&segments, ""));
     }
 
     #[test]
