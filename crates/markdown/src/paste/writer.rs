@@ -258,6 +258,136 @@ mod tests {
     }
 
     #[test]
+    fn zero_output_inline_forms_preserve_an_ordered_marker_prefix() {
+        let documents = [
+            (
+                RichDocument::new(vec![RichBlock::Paragraph(vec![
+                    RichInline::Text("1".into()),
+                    RichInline::Strong(Vec::new()),
+                    RichInline::Text(". item".into()),
+                ])]),
+                "1\\. item",
+            ),
+            (
+                RichDocument::new(vec![RichBlock::Paragraph(vec![
+                    RichInline::InlineCode(String::new()),
+                    RichInline::Text("1".into()),
+                    RichInline::InlineCode(String::new()),
+                    RichInline::Text(". item".into()),
+                ])]),
+                "1\\. item",
+            ),
+            (
+                RichDocument::new(vec![RichBlock::Paragraph(vec![
+                    RichInline::Link {
+                        destination: "javascript:alert(1)".into(),
+                        title: None,
+                        children: text("1"),
+                    },
+                    RichInline::Text(". item".into()),
+                ])]),
+                "1\\. item",
+            ),
+            (
+                RichDocument::new(vec![RichBlock::Paragraph(vec![
+                    RichInline::RemoteImage {
+                        destination: "file:///private/image.png".into(),
+                        title: None,
+                        alt: "1".into(),
+                    },
+                    RichInline::Text(". item".into()),
+                ])]),
+                "1\\. item",
+            ),
+        ];
+
+        for (document, expected) in documents {
+            let markdown = write_markdown(&document);
+            let parsed = crate::parser::parse_markdown(&markdown);
+
+            assert_eq!(markdown, expected);
+            assert!(parsed.events.iter().all(|event| !matches!(
+                event,
+                MarkdownEvent::Start(crate::parser::MarkdownTag::List(..))
+            )));
+        }
+    }
+
+    #[test]
+    fn nonempty_inline_forms_interrupt_an_ordered_marker_prefix() {
+        let documents = [
+            (RichInline::Strong(text("bold")), "1**bold**. item"),
+            (RichInline::Emphasis(text("italic")), "1*italic*. item"),
+            (RichInline::InlineCode("code".into()), "1`code`. item"),
+            (
+                RichInline::Link {
+                    destination: "https://example.com".into(),
+                    title: None,
+                    children: text("link"),
+                },
+                "1[link](https://example.com). item",
+            ),
+        ];
+
+        for (inline, expected) in documents {
+            let document = RichDocument::new(vec![RichBlock::Paragraph(vec![
+                RichInline::Text("1".into()),
+                inline,
+                RichInline::Text(". item".into()),
+            ])]);
+            let markdown = write_markdown(&document);
+            let parsed = crate::parser::parse_markdown(&markdown);
+
+            assert_eq!(markdown, expected);
+            assert!(parsed.events.iter().all(|event| !matches!(
+                event,
+                MarkdownEvent::Start(crate::parser::MarkdownTag::List(..))
+            )));
+        }
+    }
+
+    #[test]
+    fn ordered_parenthesis_markers_reparse_as_plain_text() {
+        let documents = [
+            (text("1) item"), "1\\) item", false),
+            (
+                vec![RichInline::Text("  1".into()), RichInline::Text(") item".into())],
+                "  1\\) item",
+                false,
+            ),
+            (
+                vec![
+                    RichInline::Text("   ".into()),
+                    RichInline::Text("1".into()),
+                    RichInline::Text(") item".into()),
+                ],
+                "   1\\) item",
+                false,
+            ),
+            (text("    1) item"), "    1) item", true),
+        ];
+
+        for (content, expected, expects_code_block) in documents {
+            let document = RichDocument::new(vec![RichBlock::Paragraph(content)]);
+            let markdown = write_markdown(&document);
+            let parsed = crate::parser::parse_markdown(&markdown);
+
+            assert_eq!(markdown, expected);
+            assert!(parsed.events.iter().all(|event| !matches!(
+                event,
+                MarkdownEvent::Start(crate::parser::MarkdownTag::List(..))
+            )));
+            assert_eq!(
+                parsed.events.iter().any(|event| matches!(
+                    event,
+                    MarkdownEvent::Start(crate::parser::MarkdownTag::CodeBlock { .. })
+                )),
+                expects_code_block
+            );
+        }
+    }
+
+    #[test]
     fn split_text_strikethrough_marker_reparses_as_plain_text() {
         let document = RichDocument::new(vec![RichBlock::Paragraph(vec![
             RichInline::Text("~".into()),
@@ -535,6 +665,18 @@ enum InlineLineState {
     StructuralBoundary,
 }
 
+#[derive(Clone, Copy)]
+enum InlineWriteOutcome {
+    Preserved,
+    Interrupted,
+}
+
+impl InlineWriteOutcome {
+    fn interrupts_text_continuity(self) -> bool {
+        matches!(self, Self::Interrupted)
+    }
+}
+
 impl InlineTextState {
     fn from_output(output: &str) -> Self {
         let line = if output.is_empty() || output.ends_with('\n') {
@@ -553,7 +695,7 @@ impl InlineTextState {
         matches!(
             self.line,
             InlineLineState::OrderedListNumber { digit_count } if digit_count > 0
-        ) && character == '.'
+        ) && matches!(character, '.' | ')')
             && next_character.is_some_and(char::is_whitespace)
     }
 
@@ -810,43 +952,51 @@ fn is_safe_fence_language(language: &str) -> bool {
 
 fn write_inlines(inlines: &[RichInline], output: &mut String, context: InlineContext) {
     let mut text_state = InlineTextState::from_output(output);
+    write_inlines_with_state(inlines, output, context, &mut text_state);
+}
 
+fn write_inlines_with_state(
+    inlines: &[RichInline],
+    output: &mut String,
+    context: InlineContext,
+    text_state: &mut InlineTextState,
+) {
     for inline in inlines {
-        match inline {
-            RichInline::Text(text) => write_plain_text(text, output, context, &mut text_state),
-            RichInline::Strong(children) => {
-                write_styled_inlines(children, "**", output, context);
-                text_state.break_structural_continuity();
-            }
-            RichInline::Emphasis(children) => {
-                write_styled_inlines(children, "*", output, context);
-                text_state.break_structural_continuity();
-            }
-            RichInline::Strikethrough(children) => {
-                write_styled_inlines(children, "~~", output, context);
-                text_state.break_structural_continuity();
-            }
-            RichInline::InlineCode(text) => {
-                write_inline_code(text, output);
-                text_state.break_structural_continuity();
-            }
-            RichInline::Link { destination, title, children } => {
-                write_link(destination, title.as_deref(), children, output, context);
-                text_state.break_structural_continuity();
-            }
-            RichInline::RemoteImage { destination, title, alt } => {
-                write_remote_image(
-                    destination,
-                    title.as_deref(),
-                    alt,
-                    output,
-                    context,
-                    &mut text_state,
-                );
-                text_state.break_structural_continuity();
-            }
-            RichInline::LineBreak => write_explicit_line_break(output, context, &mut text_state),
+        write_inline(inline, output, context, text_state);
+    }
+}
+
+fn write_inline(
+    inline: &RichInline,
+    output: &mut String,
+    context: InlineContext,
+    text_state: &mut InlineTextState,
+) {
+    let outcome = match inline {
+        RichInline::Text(text) => {
+            write_plain_text(text, output, context, text_state);
+            return;
         }
+        RichInline::Strong(children) => write_styled_inlines(children, "**", output, context),
+        RichInline::Emphasis(children) => write_styled_inlines(children, "*", output, context),
+        RichInline::Strikethrough(children) => {
+            write_styled_inlines(children, "~~", output, context)
+        }
+        RichInline::InlineCode(text) => write_inline_code(text, output),
+        RichInline::Link { destination, title, children } => {
+            write_link(destination, title.as_deref(), children, output, context, text_state)
+        }
+        RichInline::RemoteImage { destination, title, alt } => {
+            write_remote_image(destination, title.as_deref(), alt, output, context, text_state)
+        }
+        RichInline::LineBreak => {
+            write_explicit_line_break(output, context, text_state);
+            return;
+        }
+    };
+
+    if outcome.interrupts_text_continuity() {
+        text_state.break_structural_continuity();
     }
 }
 
@@ -855,15 +1005,16 @@ fn write_styled_inlines(
     marker: &str,
     output: &mut String,
     context: InlineContext,
-) {
+) -> InlineWriteOutcome {
     let mut child_output = String::new();
     write_inlines(children, &mut child_output, context);
     if child_output.is_empty() {
-        return;
+        return InlineWriteOutcome::Preserved;
     }
     output.push_str(marker);
     output.push_str(&child_output);
     output.push_str(marker);
+    InlineWriteOutcome::Interrupted
 }
 
 fn write_plain_text(
@@ -940,15 +1091,15 @@ fn should_escape_text_character(
     match character {
         '\\' | '`' | '*' | '_' | '[' | ']' | '!' | '~' => true,
         '|' => context.table_cell,
-        '.' => state.starts_ordered_list_marker(character, next_character),
+        '.' | ')' => state.starts_ordered_list_marker(character, next_character),
         '=' | '#' | '+' | '-' | '>' => state.is_line_structure_start(),
         _ => false,
     }
 }
 
-fn write_inline_code(text: &str, output: &mut String) {
+fn write_inline_code(text: &str, output: &mut String) -> InlineWriteOutcome {
     if text.is_empty() {
-        return;
+        return InlineWriteOutcome::Preserved;
     }
 
     let delimiter_length =
@@ -964,6 +1115,7 @@ fn write_inline_code(text: &str, output: &mut String) {
         output.push(' ');
     }
     output.push_str(&delimiter);
+    InlineWriteOutcome::Interrupted
 }
 
 fn inline_code_needs_boundary_padding(text: &str) -> bool {
@@ -982,10 +1134,11 @@ fn write_link(
     children: &[RichInline],
     output: &mut String,
     context: InlineContext,
-) {
+    text_state: &mut InlineTextState,
+) -> InlineWriteOutcome {
     if !is_safe_web_url(destination) {
-        write_inlines(children, output, context);
-        return;
+        write_inlines_with_state(children, output, context, text_state);
+        return InlineWriteOutcome::Preserved;
     }
 
     let mut label = String::new();
@@ -996,6 +1149,7 @@ fn write_link(
     write_destination(destination, output);
     write_title(title, output);
     output.push(')');
+    InlineWriteOutcome::Interrupted
 }
 
 fn write_remote_image(
@@ -1005,18 +1159,21 @@ fn write_remote_image(
     output: &mut String,
     context: InlineContext,
     state: &mut InlineTextState,
-) {
+) -> InlineWriteOutcome {
     if !is_safe_web_url(destination) {
         write_plain_text(alt, output, context, state);
-        return;
+        return InlineWriteOutcome::Preserved;
     }
 
+    let mut alt_output = String::new();
+    write_inlines(&[RichInline::Text(alt.into())], &mut alt_output, context);
     output.push_str("![");
-    write_plain_text(alt, output, context, state);
+    output.push_str(&alt_output);
     output.push_str("](");
     write_destination(destination, output);
     write_title(title, output);
     output.push(')');
+    InlineWriteOutcome::Interrupted
 }
 
 fn is_safe_web_url(destination: &str) -> bool {
