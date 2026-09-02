@@ -28,3 +28,7 @@ criterion.workspace = true
 [[bench]]
 name = "editing_perf"
 harness = false
+
+[[bench]]
+name = "paste_conversion"
+harness = false
