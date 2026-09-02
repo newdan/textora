@@ -452,7 +452,8 @@ impl<'a> LayoutCtx<'a> {
         if !self.compensated_blank_run_line_starts.insert(following_line_start) {
             return 0.0;
         }
-        blank_line_count.saturating_sub(1) as f32 * self.style.line_height
+        blank_line_count.saturating_sub(1) as f32
+            * (self.style.line_height + self.style.paragraph_spacing)
     }
 
     pub(crate) fn available_width(&self) -> f32 {

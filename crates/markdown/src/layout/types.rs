@@ -336,7 +336,11 @@ impl<S: BlockSource> LazyLayout<S> {
             })
             .collect::<Vec<_>>();
         let mut source_line_map = SourceLineMap::from_source(source_text);
-        source_line_map.attach_layout(&rendered_lines, self.source_line_height);
+        source_line_map.attach_layout(
+            &rendered_lines,
+            self.source_line_height,
+            self.hidden_separator_height,
+        );
 
         let mut projected_empty_lines = source_line_map.projected_empty_lines().collect::<Vec<_>>();
         for empty_line in &mut projected_empty_lines {
@@ -1396,7 +1400,8 @@ impl<S: BlockSource> LazyLayout<S> {
         if let Some(first_block) = self.laid_to_doc.first().and_then(|doc_idx| blocks.get(*doc_idx))
         {
             let first_start = first_block.block_range.start.min(source_text.len());
-            let leading_height = map.extra_height_before_block(first_start, true, line_height);
+            let leading_height =
+                map.extra_height_before_block(first_start, true, line_height, paragraph_spacing);
             if leading_height > 0.0 {
                 for y_delta in &mut self.y_delta {
                     *y_delta += leading_height;
@@ -1410,8 +1415,9 @@ impl<S: BlockSource> LazyLayout<S> {
         }
 
         // ── Inter-block blank lines ──
-        // 追加量 = (N-1)*line_height：空行 run 首行的间距由真实块间 gap 提供
-        // （见 SourceLineMap::attach_layout），此处不再按块类型特判。
+        // 追加量 = (N-1)*(line_height+paragraph_spacing)：空行 run 首行的
+        // 入向间距由真实块间 gap 提供，其余每行是可编辑空段落，拥有独立
+        // 行高和出向段落间距（见 SourceLineMap::attach_layout）。
         // 嵌套块（列表项/引用块子块）间的空行补偿在 layout_block 内完成，
         // 与此处共用同一公式。
         let mut gap_deltas = Vec::new();
@@ -1425,7 +1431,8 @@ impl<S: BlockSource> LazyLayout<S> {
                 continue;
             };
             let current_start = current_block.block_range.start.min(source_text.len());
-            let extra_height = map.extra_height_before_block(current_start, false, line_height);
+            let extra_height =
+                map.extra_height_before_block(current_start, false, line_height, paragraph_spacing);
             if extra_height > 0.0 {
                 gap_deltas.push((laid_idx - 1, extra_height));
                 self.total_height += extra_height;
@@ -2408,7 +2415,7 @@ mod tests {
 
     #[test]
     fn heading_blank_run_projects_editable_line_inside_real_gap() {
-        // `# T` 后跟 2 个空行：可编辑空行必须落在标题底部与段落顶边之间，
+        // `# T` 后跟 2 个空行：可编辑空段落必须落在标题与后续段落之间，
         // 不得按 paragraph_spacing 假设而与段落文字重叠（heading_spacing_bottom 更小）。
         let source = "# T\n\n\npara";
         let style = default_style();
@@ -2443,19 +2450,24 @@ mod tests {
             empty.y_top + empty.height,
             para_line.rect.y
         );
-        // 间距本身由真实 gap 提供：空行 run 额外占用恰好一个行高。
+        // 空段落拥有一行高和出向段落间距；入向间距仍沿用标题下间距。
         let gap = para_line.rect.y - heading_bottom;
-        let expected_gap = style.heading_spacing_bottom + style.line_height;
+        let expected_gap =
+            style.heading_spacing_bottom + style.line_height + style.paragraph_spacing;
         assert!(
             (gap - expected_gap).abs() < 0.01,
-            "real gap {gap} must be heading_spacing_bottom + one line height ({expected_gap})"
+            "real gap {gap} must contain heading spacing, empty line height and trailing spacing \
+             ({expected_gap})"
+        );
+        assert!(
+            (para_line.rect.y - (empty.y_top + empty.height) - style.paragraph_spacing).abs()
+                < 0.01
         );
     }
 
     #[test]
-    fn blank_run_between_paragraphs_reserves_only_editable_line_heights() {
-        // para→para 的 2 个空行：追加量 = (N-1)*line_height，间距只算一份真实
-        // paragraph_spacing，不再因块类型特判而多加一份。
+    fn blank_run_between_paragraphs_reserves_empty_paragraph_height_and_spacing() {
+        // para→空段落→para：空段落两侧各有一份 paragraph_spacing。
         let source = "a\n\n\nb";
         let style = default_style();
         let layout = build_editing_layout(source, source.len(), 1);
@@ -2463,10 +2475,11 @@ mod tests {
         let a_line = layout.flat_lines.iter().find(|line| line.text == "a").expect("fixture has a");
         let b_line = layout.flat_lines.iter().find(|line| line.text == "b").expect("fixture has b");
         let gap = b_line.rect.y - (a_line.rect.y + a_line.rect.h);
-        let expected = style.paragraph_spacing + style.line_height;
+        let expected = style.paragraph_spacing * 2.0 + style.line_height;
         assert!(
             (gap - expected).abs() < 0.01,
-            "inter-block gap {gap} must equal paragraph_spacing + one line height ({expected})"
+            "inter-block gap {gap} must contain spacing on both sides of the empty paragraph \
+             ({expected})"
         );
 
         let empty = layout
@@ -2478,12 +2491,15 @@ mod tests {
             "editable empty line must sit right below the paragraph spacing, got y {}",
             empty.y_top
         );
+        assert!(
+            (b_line.rect.y - (empty.y_top + empty.height) - style.paragraph_spacing).abs() < 0.01
+        );
     }
 
     #[test]
-    fn loose_list_item_reserves_blank_line_height_between_child_paragraphs() {
-        // `- a` 与项内子段落 `b` 之间有 2 个源空行：项内补偿 (N-1)*line_height，
-        // 子段落间距 = paragraph_spacing + line_height。
+    fn loose_list_item_reserves_empty_paragraph_height_and_spacing() {
+        // `- a` 与项内子段落 `b` 之间有一个可编辑空段落：前后各有一份
+        // paragraph_spacing，中间保留完整 line_height。
         let source = "- a\n\n\n  b";
         let style = default_style();
         let layout = build_editing_layout(source, source.len(), 1);
@@ -2499,18 +2515,20 @@ mod tests {
             .expect("fixture must produce a list item with two child paragraphs");
         let first_bottom = item_blocks[0].rect.y + item_blocks[0].rect.h;
         let second_top = item_blocks[1].rect.y;
-        let expected = style.paragraph_spacing + style.line_height;
+        let expected = style.paragraph_spacing * 2.0 + style.line_height;
         assert!(
             (second_top - first_bottom - expected).abs() < 0.01,
-            "child paragraph gap {} must equal paragraph_spacing + one line height ({expected})",
+            "child paragraph gap {} must contain spacing on both sides of the empty paragraph \
+             ({expected})",
             second_top - first_bottom
         );
     }
 
     #[test]
-    fn editable_empty_line_inside_loose_list_stays_between_child_paragraphs() {
-        // 项内空行 run 的可编辑空行不得覆盖子段落文字。
+    fn editable_empty_paragraph_inside_loose_list_keeps_both_boundaries() {
+        // 项内可编辑空段落不得覆盖文字，且上下各保留一份段落间距。
         let source = "- a\n\n\n  b";
+        let style = default_style();
         let layout = build_editing_layout(source, source.len(), 1);
 
         let a_line = layout.flat_lines.iter().find(|line| line.text == "a").expect("fixture has a");
@@ -2522,13 +2540,13 @@ mod tests {
             .first()
             .expect("fixture must project one editable empty line inside the list item");
         assert!(
-            empty.y_top >= a_bottom - 0.01,
-            "editable empty line y {} must not overlap item text (bottom {a_bottom})",
-            empty.y_top
+            (empty.y_top - a_bottom - style.paragraph_spacing).abs() < 0.01,
+            "editable empty paragraph must keep spacing above: y={}, item bottom={a_bottom}",
+            empty.y_top,
         );
         assert!(
-            empty.y_top + empty.height <= b_line.rect.y + 0.01,
-            "editable empty line bottom {} must not overlap child paragraph (top {})",
+            (b_line.rect.y - (empty.y_top + empty.height) - style.paragraph_spacing).abs() < 0.01,
+            "editable empty paragraph must keep spacing below: bottom={}, child top={}",
             empty.y_top + empty.height,
             b_line.rect.y
         );

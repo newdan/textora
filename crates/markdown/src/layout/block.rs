@@ -547,8 +547,9 @@ pub(crate) fn layout_block(block: &BlockNode, ctx: &mut LayoutCtx) {
 }
 
 /// 嵌套子块前的源空行补偿：解析器会从块树中丢弃空行，此处为子块前
-/// 空行 run 中除隐藏分隔行外的可编辑空行追加 `(N-1)*line_height`，
-/// 与 `LazyLayout::reserve_extra_blank_source_lines` 对顶层块的公式一致。
+/// 空行 run 中除隐藏分隔行外的每个可编辑空段落追加一行高和一份出向
+/// 段落间距，与 `LazyLayout::reserve_extra_blank_source_lines` 对顶层块的
+/// 公式一致。
 /// 仅在编辑模式（有 source_text）下生效；估计/预览阶段无源文本可参照。
 fn reserve_nested_blank_source_lines(ctx: &mut LayoutCtx, child: &BlockNode) {
     let Some(source_text) = ctx.source_text else {
@@ -1707,9 +1708,12 @@ mod tests {
         for (single_blank_source, double_blank_source) in fixtures {
             let single_blank_y = nested_line_displayed_y(single_blank_source, "b");
             let double_blank_y = nested_line_displayed_y(double_blank_source, "b");
+            let editable_paragraph_extent = style.line_height + style.paragraph_spacing;
             assert!(
-                (double_blank_y - single_blank_y - style.line_height).abs() < 0.01,
-                "one additional editable blank line must move b by one line height for {double_blank_source:?}: single={single_blank_y}, double={double_blank_y}"
+                (double_blank_y - single_blank_y - editable_paragraph_extent).abs() < 0.01,
+                "one additional editable blank paragraph must move b by its line height and \
+                 trailing spacing for {double_blank_source:?}: single={single_blank_y}, \
+                 double={double_blank_y}"
             );
         }
     }
@@ -1731,16 +1735,17 @@ mod tests {
 
         let full_first_y = nested_line_displayed_y(full_source, "first");
         let shortened_first_y = nested_line_displayed_y(first_run_shortened, "first");
+        let editable_paragraph_extent = style.line_height + style.paragraph_spacing;
         assert!(
-            (full_first_y - shortened_first_y - style.line_height).abs() < 0.01,
-            "the first nested blank run must reserve its editable line"
+            (full_first_y - shortened_first_y - editable_paragraph_extent).abs() < 0.01,
+            "the first nested blank run must reserve its editable paragraph"
         );
 
         let full_second_y = nested_line_displayed_y(full_source, "second");
         let shortened_second_y = nested_line_displayed_y(second_run_shortened, "second");
         assert!(
-            (full_second_y - shortened_second_y - style.line_height).abs() < 0.01,
-            "the second nested blank run must reserve its editable line independently"
+            (full_second_y - shortened_second_y - editable_paragraph_extent).abs() < 0.01,
+            "the second nested blank run must reserve its editable paragraph independently"
         );
     }
 

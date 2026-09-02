@@ -4608,9 +4608,8 @@ mod wysiwyg_tests {
     }
 
     #[test]
-    fn editable_empty_line_between_paragraphs_consumes_real_gap_once() {
-        // 空行 run 的追加量 = (N-1)*line_height，块间距只由真实 gap 提供一份，
-        // 不再对 para→para 特判双份 paragraph_spacing。
+    fn editable_empty_paragraph_between_paragraphs_keeps_both_boundaries() {
+        // 空段落拥有独立行高，且前后各保留一份 paragraph_spacing。
         let source = "first\n\n\nsecond";
         let second_start = source.find("second").expect("fixture should contain second paragraph");
         let view = make_editor_view_with_cursor(source, second_start);
@@ -4618,12 +4617,119 @@ mod wysiwyg_tests {
         let second_y = flat_line_y_for_source_byte(&view, second_start)
             .expect("second paragraph should render");
         let actual_gap = second_y - (first_line.rect.y + first_line.rect.h);
-        let expected_gap = view.engine().paragraph_spacing + view.engine().base_line_height;
+        let expected_gap = view.engine().paragraph_spacing * 2.0 + view.engine().base_line_height;
 
         assert!(
             (actual_gap - expected_gap).abs() < 1.0,
-            "an editable blank paragraph consumes exactly one paragraph spacing from the real gap: \
+            "an editable blank paragraph must keep spacing on both boundaries: \
              actual={actual_gap}, expected={expected_gap}"
+        );
+    }
+
+    #[test]
+    fn editable_empty_paragraphs_keep_spacing_on_both_sides() {
+        for (source, empty_paragraph_starts) in [
+            ("first\n\n\nsecond", vec!["first\n\n".len()]),
+            ("first\n\n\n\nsecond", vec!["first\n\n".len(), "first\n\n\n".len()]),
+        ] {
+            let mut doc = StubDoc::new(source);
+            let mut view = MarkdownEditorView::new();
+            view.set_source(source.to_owned(), 1);
+            render_editor_once(&mut view, &doc);
+
+            let first_line = view
+                .engine()
+                .flat_lines()
+                .iter()
+                .find(|line| line.text == "first")
+                .expect("first paragraph should render");
+            let mut previous_bottom = first_line.rect.y + first_line.rect.h;
+            let expected_spacing = view.engine().paragraph_spacing;
+            let expected_line_height = view.engine().base_line_height;
+
+            for empty_paragraph_start in empty_paragraph_starts {
+                view.handle_message(PluginMessage::SetCursorByte(empty_paragraph_start), &mut doc);
+                render_editor_once(&mut view, &doc);
+
+                let (_cursor_x, cursor_y, _cursor_width, cursor_height) = view
+                    .engine()
+                    .cursor_screen_pos()
+                    .expect("editable empty paragraph should expose a cursor rect");
+                let cursor_line_top = cursor_y + view.engine().scroll_y
+                    - cursor_height * (1.0 - WYSIWYG_CURSOR_ASCENT_RATIO);
+                let actual_spacing = cursor_line_top - previous_bottom;
+
+                assert!(
+                    (actual_spacing - expected_spacing).abs() < 1.0,
+                    "empty paragraph at byte {empty_paragraph_start} should keep spacing above: \
+                     actual={actual_spacing}, expected={expected_spacing}, source={source:?}"
+                );
+                previous_bottom = cursor_line_top + expected_line_height;
+            }
+
+            let second_line = view
+                .engine()
+                .flat_lines()
+                .iter()
+                .find(|line| line.text == "second")
+                .expect("second paragraph should render");
+            let actual_spacing = second_line.rect.y - previous_bottom;
+            assert!(
+                (actual_spacing - expected_spacing).abs() < 1.0,
+                "last empty paragraph should keep spacing below: actual={actual_spacing}, \
+                 expected={expected_spacing}, source={source:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn typing_into_editable_empty_paragraph_keeps_vertical_geometry_stable() {
+        let empty_source = "first\n\n\nsecond";
+        let empty_paragraph_start = "first\n\n".len();
+        let empty_view = make_editor_view_with_cursor(empty_source, empty_paragraph_start);
+        let (_cursor_x, cursor_y, _cursor_width, cursor_height) = empty_view
+            .engine()
+            .cursor_screen_pos()
+            .expect("editable empty paragraph should expose a cursor rect");
+        let empty_line_top = cursor_y + empty_view.engine().scroll_y
+            - cursor_height * (1.0 - WYSIWYG_CURSOR_ASCENT_RATIO);
+        let empty_second_y = empty_view
+            .engine()
+            .flat_lines()
+            .iter()
+            .find(|line| line.text == "second")
+            .expect("second paragraph should render")
+            .rect
+            .y;
+
+        let filled_source = "first\n\nx\n\nsecond";
+        let filled_view = make_editor_view_with_cursor(filled_source, "first\n\n".len());
+        let filled_line_y = filled_view
+            .engine()
+            .flat_lines()
+            .iter()
+            .find(|line| line.text == "x")
+            .expect("typed paragraph should render")
+            .rect
+            .y;
+        let filled_second_y = filled_view
+            .engine()
+            .flat_lines()
+            .iter()
+            .find(|line| line.text == "second")
+            .expect("second paragraph should render after typing")
+            .rect
+            .y;
+
+        assert!(
+            (empty_line_top - filled_line_y).abs() < 1.0,
+            "typing should not move the active paragraph: empty={empty_line_top}, \
+             filled={filled_line_y}"
+        );
+        assert!(
+            (empty_second_y - filled_second_y).abs() < 1.0,
+            "typing should not reflow the following paragraph vertically: empty={empty_second_y}, \
+             filled={filled_second_y}"
         );
     }
 
@@ -4669,7 +4775,7 @@ mod wysiwyg_tests {
     }
 
     #[test]
-    fn editable_empty_line_before_list_does_not_add_paragraph_spacing() {
+    fn editable_empty_paragraph_before_list_keeps_trailing_spacing() {
         let baseline_source = "first\n\n- item";
         let expanded_source = "first\n\n\n- item";
         let baseline_list_start =
@@ -4684,8 +4790,13 @@ mod wysiwyg_tests {
             .expect("list should render");
 
         assert!(
-            ((expanded_y - baseline_y) - baseline.engine().base_line_height).abs() < 1.0,
-            "a retained empty line before a list should add only its line height: \
+            ((expanded_y - baseline_y)
+                - baseline.engine().base_line_height
+                - baseline.engine().paragraph_spacing)
+                .abs()
+                < 1.0,
+            "an editable empty paragraph before a list should add its line height and trailing \
+             spacing: \
              baseline={baseline_y}, expanded={expanded_y}"
         );
     }
