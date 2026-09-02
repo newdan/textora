@@ -12,10 +12,14 @@ use crate::view_route::{ViewPathMatcher, ViewRouteRule, ViewRouteTable};
 use crate::workspace::Workspace;
 use appkit_shell::editor_runtime::{EditorRuntime, EditorRuntimeConfig, EditorRuntimeError};
 
+#[cfg(feature = "markdown")]
 const MINDMAP_ROUTE_PRIORITY: u16 = 400;
+#[cfg(feature = "markdown")]
 const MARKDOWN_ROUTE_PRIORITY: u16 = 300;
+#[cfg(feature = "markdown")]
 const MARKDOWN_LONG_EXTENSION_ROUTE_PRIORITY: u16 = 299;
 const TEXT_ROUTE_PRIORITY: u16 = 200;
+#[cfg(feature = "markdown")]
 const PLUGIN_MARKDOWN_VIEW: &str = "markdown_view";
 const FONT_PREPARATION_THREAD_NAME: &str = "textora-font-preparation";
 
@@ -51,7 +55,9 @@ fn register_plugin_factory(
 
 /// 构造 textora 产品的插件和路径路由；runtime 只接收这一步产出的 shared 配置。
 pub(crate) fn build_product_workspace() -> Workspace {
-    use ui::plugin::{PLUGIN_EDITOR, PLUGIN_MARKDOWN_EDITOR, PLUGIN_MINDMAP, PLUGIN_NOVEL_VIEW};
+    use ui::plugin::PLUGIN_EDITOR;
+    #[cfg(feature = "markdown")]
+    use ui::plugin::{PLUGIN_MARKDOWN_EDITOR, PLUGIN_MINDMAP, PLUGIN_NOVEL_VIEW};
 
     let mut registry = ui::plugin::PluginRegistry::new();
     let mut registered_plugin_ids = HashSet::new();
@@ -61,6 +67,7 @@ pub(crate) fn build_product_workspace() -> Workspace {
         PLUGIN_EDITOR,
         Box::new(crate::plugins::editor::EditorPluginFactory),
     );
+    #[cfg(feature = "markdown")]
     register_plugin_factory(
         &mut registry,
         &mut registered_plugin_ids,
@@ -81,6 +88,7 @@ pub(crate) fn build_product_workspace() -> Workspace {
         PLUGIN_MARKDOWN_VIEW,
         Box::new(textora_markdown::view::MarkdownViewFactory),
     );
+    #[cfg(feature = "markdown")]
     register_plugin_factory(
         &mut registry,
         &mut registered_plugin_ids,
@@ -88,36 +96,44 @@ pub(crate) fn build_product_workspace() -> Workspace {
         Box::new(textora_markdown::view::NovelViewFactory),
     );
 
-    let routes = ViewRouteTable::new(
-        vec![
-            ViewRouteRule {
-                matcher: ViewPathMatcher::FileNameSuffix(".mmap.md"),
-                default_plugin: PLUGIN_MINDMAP,
-                toggle_target: Some(PLUGIN_MARKDOWN_EDITOR),
-                priority: MINDMAP_ROUTE_PRIORITY,
-            },
-            ViewRouteRule {
-                matcher: ViewPathMatcher::Extension("md"),
-                default_plugin: PLUGIN_MARKDOWN_EDITOR,
-                toggle_target: Some(PLUGIN_EDITOR),
-                priority: MARKDOWN_ROUTE_PRIORITY,
-            },
-            ViewRouteRule {
-                matcher: ViewPathMatcher::Extension("markdown"),
-                default_plugin: PLUGIN_MARKDOWN_EDITOR,
-                toggle_target: Some(PLUGIN_EDITOR),
-                priority: MARKDOWN_LONG_EXTENSION_ROUTE_PRIORITY,
-            },
-            ViewRouteRule {
-                matcher: ViewPathMatcher::Extension("txt"),
-                default_plugin: PLUGIN_EDITOR,
-                toggle_target: Some(PLUGIN_NOVEL_VIEW),
-                priority: TEXT_ROUTE_PRIORITY,
-            },
-        ],
-        &registered_plugin_ids,
-    )
-    .expect("textora product routes must reference unique priorities and registered plugins");
+    let mut routes = Vec::new();
+    #[cfg(feature = "markdown")]
+    routes.extend([
+        ViewRouteRule {
+            matcher: ViewPathMatcher::FileNameSuffix(".mmap.md"),
+            default_plugin: PLUGIN_MINDMAP,
+            toggle_target: Some(PLUGIN_MARKDOWN_EDITOR),
+            priority: MINDMAP_ROUTE_PRIORITY,
+        },
+        ViewRouteRule {
+            matcher: ViewPathMatcher::Extension("md"),
+            default_plugin: PLUGIN_MARKDOWN_EDITOR,
+            toggle_target: Some(PLUGIN_EDITOR),
+            priority: MARKDOWN_ROUTE_PRIORITY,
+        },
+        ViewRouteRule {
+            matcher: ViewPathMatcher::Extension("markdown"),
+            default_plugin: PLUGIN_MARKDOWN_EDITOR,
+            toggle_target: Some(PLUGIN_EDITOR),
+            priority: MARKDOWN_LONG_EXTENSION_ROUTE_PRIORITY,
+        },
+        ViewRouteRule {
+            matcher: ViewPathMatcher::Extension("txt"),
+            default_plugin: PLUGIN_EDITOR,
+            toggle_target: Some(PLUGIN_NOVEL_VIEW),
+            priority: TEXT_ROUTE_PRIORITY,
+        },
+    ]);
+    #[cfg(not(feature = "markdown"))]
+    routes.push(ViewRouteRule {
+        matcher: ViewPathMatcher::Extension("txt"),
+        default_plugin: PLUGIN_EDITOR,
+        toggle_target: None,
+        priority: TEXT_ROUTE_PRIORITY,
+    });
+
+    let routes = ViewRouteTable::new(routes, &registered_plugin_ids)
+        .expect("textora product routes must reference unique priorities and registered plugins");
 
     Workspace::with_plugins(registry, routes)
 }
