@@ -90,6 +90,7 @@ fn command_mutates_document(command: &EditCommand) -> bool {
             | EditCommand::ReplaceRange { .. }
             | EditCommand::Cut
             | EditCommand::Paste
+            | EditCommand::PastePlainText
             | EditCommand::Undo
             | EditCommand::Redo
             | EditCommand::Tab
@@ -141,6 +142,7 @@ mod tests {
             EditCommand::Tab,
             EditCommand::Cut,
             EditCommand::Paste,
+            EditCommand::PastePlainText,
             EditCommand::Undo,
             EditCommand::Redo,
         ];

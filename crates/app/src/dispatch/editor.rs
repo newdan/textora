@@ -87,8 +87,14 @@ fn edit_requires_reshape(cmd: &EditCommand, outcome: &EditOutcome) -> bool {
         return true;
     }
 
-    if matches!(cmd, EditCommand::Paste | EditCommand::Undo | EditCommand::Redo | EditCommand::Cut)
-    {
+    if matches!(
+        cmd,
+        EditCommand::Paste
+            | EditCommand::PastePlainText
+            | EditCommand::Undo
+            | EditCommand::Redo
+            | EditCommand::Cut
+    ) {
         return true;
     }
 
@@ -977,6 +983,20 @@ mod edit_tests {
             execute_default_transaction_for_editor_test(&EditCommand::InsertNewline, &mut dv);
 
         assert!(edit_requires_reshape(&EditCommand::InsertNewline, &outcome.edit_outcome));
+    }
+
+    #[test]
+    fn both_paste_commands_require_reshape_without_line_count_change() {
+        let same_line_edit = EditOutcome {
+            executed: true,
+            dirty_lines: Some(0..1),
+            old_line_count: 1,
+            new_line_count: 1,
+        };
+
+        for command in [EditCommand::Paste, EditCommand::PastePlainText] {
+            assert!(edit_requires_reshape(&command, &same_line_edit), "{command:?}");
+        }
     }
 
     #[test]
