@@ -5,6 +5,7 @@ use crate::commands::EditOutcome;
 use crate::input::EditCommand;
 use crate::ui_shell::KeyboardFocusTarget;
 use appkit_shell::editor_runtime::{EditorNotification, EditorOutcome};
+use appkit_shell::{DocumentClipboard, SystemClipboard};
 use winit::event_loop::ActiveEventLoop;
 
 /// Caret-moving commands that must split any ongoing undo coalescing run.
@@ -354,8 +355,11 @@ impl App {
         if self.active_allows_editing() {
             self.sync_plugin_state();
 
-            if let Some(intent) = crate::edit_transaction::edit_intent_for_command(&cmd) {
-                return self.dispatch_transactional_edit(intent, Some(event_loop));
+            let mut clipboard = SystemClipboard;
+            if let Some(effect) =
+                self.dispatch_pre_navigation_edit_command(&cmd, &mut clipboard, Some(event_loop))
+            {
+                return effect;
             }
 
             // User-driven caret movement splits the undo coalescing run before
@@ -829,6 +833,68 @@ impl App {
         editor_outcome.shell_effect.merge(AppEffect::REDRAW)
     }
 
+    fn dispatch_pre_navigation_edit_command(
+        &mut self,
+        command: &EditCommand,
+        clipboard: &mut dyn DocumentClipboard,
+        event_loop: Option<&ActiveEventLoop>,
+    ) -> Option<AppEffect> {
+        if matches!(command, EditCommand::Paste | EditCommand::PastePlainText) {
+            return Some(self.dispatch_document_paste(command, clipboard, event_loop));
+        }
+        let intent = crate::edit_transaction::edit_intent_for_command(command)?;
+        Some(self.dispatch_transactional_edit(intent, event_loop))
+    }
+
+    fn dispatch_document_paste(
+        &mut self,
+        command: &EditCommand,
+        clipboard: &mut dyn DocumentClipboard,
+        event_loop: Option<&ActiveEventLoop>,
+    ) -> AppEffect {
+        let request_kind = match command {
+            EditCommand::Paste => crate::clipboard::PasteRequestKind::Smart,
+            EditCommand::PastePlainText => crate::clipboard::PasteRequestKind::PlainText,
+            _ => return AppEffect::NONE,
+        };
+        let Some(preference) = self.active_tab_session().map(|tab| tab.paste_preference()) else {
+            return AppEffect::NONE;
+        };
+        let Some(text) =
+            crate::clipboard::prepare_document_paste(clipboard, preference, request_kind)
+        else {
+            return AppEffect::NONE;
+        };
+
+        if let Some(tab) = self.active_tab_session_mut() {
+            tab.document.break_edit_merge();
+        }
+        let effect =
+            self.dispatch_transactional_edit(ui::plugin::EditIntent::InsertText(text), event_loop);
+        if let Some(tab) = self.active_tab_session_mut() {
+            tab.document.break_edit_merge();
+        }
+        effect
+    }
+
+    #[cfg(test)]
+    pub(crate) fn dispatch_document_paste_with_clipboard_for_test(
+        &mut self,
+        command: &EditCommand,
+        clipboard: &mut dyn DocumentClipboard,
+    ) -> AppEffect {
+        self.dispatch_document_paste(command, clipboard, None)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn dispatch_pre_navigation_edit_command_with_clipboard_for_test(
+        &mut self,
+        command: &EditCommand,
+        clipboard: &mut dyn DocumentClipboard,
+    ) -> Option<AppEffect> {
+        self.dispatch_pre_navigation_edit_command(command, clipboard, None)
+    }
+
     #[cfg(test)]
     pub(crate) fn dispatch_transactional_edit_for_test(
         &mut self,
@@ -847,8 +913,262 @@ mod edit_tests {
     use crate::app_dispatch::canvas_drag_test_support::{
         app_with_canvas_drag_tabs, cancel_request_count, document_texts, start_canvas_drag,
     };
+    use crate::clipboard::TestDocumentClipboard;
     use crate::document_view::DocumentView;
     use crate::input::EditCommand;
+
+    fn app_with_text(text: &str) -> App {
+        let mut app = App::new(None);
+        app.push_entry_for_test(
+            DocumentView::new(vec![text.into()], 40, 40.0),
+            Box::new(crate::plugins::editor::EditorPlugin::new()),
+        );
+        app.switch_workspace_for_test(0);
+        app
+    }
+
+    #[cfg(feature = "markdown")]
+    fn app_with_markdown_editor(text: &str) -> App {
+        let mut app = App::new(None);
+        app.push_entry_for_test(
+            DocumentView::new(vec![text.into()], 40, 40.0),
+            Box::new(textora_markdown::view::MarkdownEditorView::new()),
+        );
+        app.switch_workspace_for_test(0);
+        app
+    }
+
+    fn set_active_selection(app: &mut App, anchor: usize, cursor: usize) {
+        let tab = app.active_tab_session_mut().expect("active tab should exist");
+        tab.document.cursor_move_to_offset(cursor);
+        tab.document.cursor_mut().selection_anchor = Some(anchor);
+    }
+
+    fn active_text(app: &App) -> String {
+        app.active_tab_session().expect("active tab should exist").document.full_text()
+    }
+
+    fn active_cursor(app: &App) -> usize {
+        app.active_tab_session()
+            .expect("active tab should exist")
+            .document
+            .cursor_offset()
+            .to_usize()
+    }
+
+    fn active_selection(app: &App) -> Option<(usize, usize)> {
+        app.active_tab_session().expect("active tab should exist").document.selection_range()
+    }
+
+    fn dispatch_undo(app: &mut App) {
+        app.active_tab_session_mut().expect("active tab should exist").document.undo();
+    }
+
+    fn dispatch_redo(app: &mut App) {
+        app.active_tab_session_mut().expect("active tab should exist").document.redo();
+    }
+
+    #[derive(Debug, PartialEq, Eq)]
+    struct ActiveDocumentSnapshot {
+        text: String,
+        cursor: usize,
+        selection: Option<(usize, usize)>,
+        content_revision: u64,
+        dirty: bool,
+    }
+
+    fn active_document_snapshot(app: &App) -> ActiveDocumentSnapshot {
+        let tab = app.active_tab_session().expect("active tab should exist");
+        ActiveDocumentSnapshot {
+            text: tab.document.full_text(),
+            cursor: tab.document.cursor_offset().to_usize(),
+            selection: tab.document.selection_range(),
+            content_revision: tab.document.content_revision(),
+            dirty: tab.document.dirty,
+        }
+    }
+
+    fn active_content_revision(app: &App) -> u64 {
+        app.active_tab_session().expect("active tab should exist").document.content_revision()
+    }
+
+    fn select_all_active_text(app: &mut App) {
+        app.active_tab_session_mut().expect("active tab should exist").document.select_all();
+    }
+
+    #[test]
+    fn paste_is_an_independent_undo_entry_between_typing_runs() {
+        let mut app = app_with_text("");
+
+        app.dispatch_transactional_edit_for_test(EditCommand::InsertText("a".into()));
+        let mut clipboard = TestDocumentClipboard::with_plain("b");
+        app.dispatch_document_paste_with_clipboard_for_test(&EditCommand::Paste, &mut clipboard);
+        app.dispatch_transactional_edit_for_test(EditCommand::InsertText("c".into()));
+
+        assert_eq!(active_text(&app), "abc");
+        dispatch_undo(&mut app);
+        assert_eq!(active_text(&app), "ab");
+        dispatch_undo(&mut app);
+        assert_eq!(active_text(&app), "a");
+        dispatch_undo(&mut app);
+        assert_eq!(active_text(&app), "");
+    }
+
+    #[test]
+    fn source_editor_smart_paste_reads_only_plain_text() {
+        let mut app = app_with_text("");
+        let mut clipboard = TestDocumentClipboard::with_all_formats();
+
+        app.dispatch_document_paste_with_clipboard_for_test(&EditCommand::Paste, &mut clipboard);
+
+        assert_eq!(active_text(&app), "plain\ntext");
+        assert_eq!(clipboard.plain_reads, 1);
+        assert_eq!(clipboard.snapshot_reads, 0);
+    }
+
+    #[cfg(feature = "markdown")]
+    #[test]
+    fn markdown_editor_smart_paste_reads_snapshot_and_converts_html() {
+        let mut app = app_with_markdown_editor("");
+        let mut clipboard =
+            TestDocumentClipboard::with_html("<p><strong>rich</strong></p>", "rich");
+
+        app.dispatch_document_paste_with_clipboard_for_test(&EditCommand::Paste, &mut clipboard);
+
+        assert_eq!(active_text(&app), "**rich**");
+        assert_eq!(clipboard.plain_reads, 0);
+        assert_eq!(clipboard.snapshot_reads, 1);
+    }
+
+    #[cfg(feature = "markdown")]
+    #[test]
+    fn production_pre_navigation_route_intercepts_smart_paste() {
+        let mut app = app_with_markdown_editor("");
+        let mut clipboard =
+            TestDocumentClipboard::with_html("<p><strong>rich</strong></p>", "rich");
+
+        let effect = app
+            .dispatch_pre_navigation_edit_command_with_clipboard_for_test(
+                &EditCommand::Paste,
+                &mut clipboard,
+            )
+            .expect("smart paste must be intercepted before the legacy executor");
+
+        assert!(effect.redraw);
+        assert_eq!(active_text(&app), "**rich**");
+        assert_eq!(clipboard.plain_reads, 0);
+        assert_eq!(clipboard.snapshot_reads, 1);
+    }
+
+    #[test]
+    fn production_dispatch_routes_transactions_before_navigation_and_legacy_execution() {
+        let source = include_str!("editor.rs");
+        let dispatch_source = source
+            .split_once("pub(crate) fn dispatch_edit_command(")
+            .expect("production dispatch function must exist")
+            .1
+            .split_once("pub(crate) fn dispatch_transactional_edit(")
+            .expect("transaction dispatcher must follow production dispatch")
+            .0;
+        let route_position = dispatch_source
+            .find("self.dispatch_pre_navigation_edit_command(")
+            .expect("production dispatch must invoke the injectable pre-navigation route");
+        let navigation_position = dispatch_source
+            .find("self.break_edit_merge_for_navigation(&cmd);")
+            .expect("production dispatch must keep its navigation boundary");
+        let legacy_position = dispatch_source
+            .find("crate::commands::execute_edit_command_v2_with_presentation(")
+            .expect("production dispatch must keep its legacy fallback");
+
+        assert!(route_position < navigation_position);
+        assert!(route_position < legacy_position);
+    }
+
+    #[cfg(feature = "markdown")]
+    #[test]
+    fn forced_plain_paste_in_markdown_editor_reads_only_plain_text() {
+        let mut app = app_with_markdown_editor("");
+        let mut clipboard = TestDocumentClipboard::with_all_formats();
+
+        app.dispatch_document_paste_with_clipboard_for_test(
+            &EditCommand::PastePlainText,
+            &mut clipboard,
+        );
+
+        assert_eq!(active_text(&app), "plain\ntext");
+        assert_eq!(clipboard.plain_reads, 1);
+        assert_eq!(clipboard.snapshot_reads, 0);
+    }
+
+    #[cfg(feature = "markdown")]
+    #[test]
+    fn production_pre_navigation_route_intercepts_forced_plain_paste() {
+        let mut app = app_with_markdown_editor("");
+        let mut clipboard = TestDocumentClipboard::with_all_formats();
+
+        let effect = app
+            .dispatch_pre_navigation_edit_command_with_clipboard_for_test(
+                &EditCommand::PastePlainText,
+                &mut clipboard,
+            )
+            .expect("forced plain paste must be intercepted before the legacy executor");
+
+        assert!(effect.redraw);
+        assert_eq!(active_text(&app), "plain\ntext");
+        assert_eq!(clipboard.plain_reads, 1);
+        assert_eq!(clipboard.snapshot_reads, 0);
+    }
+
+    #[test]
+    fn paste_replaces_forward_and_backward_selection_once() {
+        for (anchor, cursor) in [(1, 4), (4, 1)] {
+            let mut app = app_with_text("hello");
+            set_active_selection(&mut app, anchor, cursor);
+            let mut clipboard = TestDocumentClipboard::with_plain("X");
+
+            app.dispatch_document_paste_with_clipboard_for_test(
+                &EditCommand::Paste,
+                &mut clipboard,
+            );
+
+            assert_eq!(active_text(&app), "hXo");
+            assert_eq!(active_selection(&app), None);
+            assert_eq!(active_cursor(&app), 2);
+        }
+    }
+
+    #[test]
+    fn failed_clipboard_read_preserves_selection_and_cursor() {
+        let mut app = app_with_text("hello");
+        set_active_selection(&mut app, 1, 4);
+        let before = active_document_snapshot(&app);
+        let mut clipboard = TestDocumentClipboard::empty();
+
+        app.dispatch_document_paste_with_clipboard_for_test(&EditCommand::Paste, &mut clipboard);
+
+        assert_eq!(active_document_snapshot(&app), before);
+        assert_eq!(clipboard.plain_reads, 1);
+        assert_eq!(clipboard.snapshot_reads, 0);
+    }
+
+    #[cfg(feature = "markdown")]
+    #[test]
+    fn text_mismatch_falls_back_and_undo_redo_remains_atomic() {
+        let mut app = app_with_markdown_editor("old");
+        select_all_active_text(&mut app);
+        let mut clipboard =
+            TestDocumentClipboard::with_html("<p><strong>different</strong></p>", "plain");
+
+        app.dispatch_document_paste_with_clipboard_for_test(&EditCommand::Paste, &mut clipboard);
+
+        assert_eq!(active_text(&app), "plain");
+        let revision_after_paste = active_content_revision(&app);
+        dispatch_undo(&mut app);
+        assert_eq!(active_text(&app), "old");
+        dispatch_redo(&mut app);
+        assert_eq!(active_text(&app), "plain");
+        assert!(active_content_revision(&app) > revision_after_paste);
+    }
 
     fn execute_default_transaction_for_editor_test(
         command: &EditCommand,
