@@ -3408,6 +3408,7 @@ dependencies = [
  "textora-shaping",
  "textora-ui",
  "unicode_categories",
+ "url",
  "wgpu",
  "winit",
 ]
