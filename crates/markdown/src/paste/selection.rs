@@ -30,6 +30,15 @@ enum PatternToken {
     WhitespaceStar,
 }
 
+#[derive(Clone, Copy)]
+struct StarBacktrack {
+    resume_pattern_index: usize,
+    next_plain_index: usize,
+}
+
+/// Bounds pathological glob backtracking; exhaustion conservatively rejects rich equivalence.
+const MAX_GLOB_MATCH_STEPS: usize = 1_000_000;
+
 pub fn prepare_paste(input: PasteRepresentations<'_>) -> PreparedPaste {
     if let Some(markdown) = non_empty_text(input.markdown) {
         return PreparedPaste::Markdown(markdown.to_owned());
@@ -118,14 +127,21 @@ fn equivalent_visible_text(document: &RichDocument, plain: &str) -> bool {
 fn segments_align_plain(segments: &[VisibleSegment], plain: &str) -> bool {
     let visible_text =
         segments.iter().map(|segment| segment.text.as_str()).collect::<Vec<_>>().join("\n");
-    if normalize_flow_text(&visible_text) != normalize_flow_text(plain) {
+    let strip_rich_bom =
+        segments.first().is_some_and(|segment| segment.mode == VisibleTextMode::Flow);
+    let normalized_visible = normalize_flow_fragment(&visible_text, strip_rich_bom);
+    if !plain_flow_normalization_matches(&normalized_visible, plain) {
         return false;
     }
 
     let pattern = compile_visible_pattern(segments);
     let normalized_plain = normalize_line_endings(plain);
-    let plain_without_bom = normalized_plain.strip_prefix('\u{feff}').unwrap_or(&normalized_plain);
-    pattern_matches_plain(&pattern, plain_without_bom)
+    pattern_matches_plain_with_optional_bom(&pattern, &normalized_plain)
+}
+
+fn plain_flow_normalization_matches(normalized_visible: &str, plain: &str) -> bool {
+    normalized_visible == normalize_flow_fragment(plain, false)
+        || normalized_visible == normalize_flow_text(plain)
 }
 
 fn normalize_flow_text(text: &str) -> String {
@@ -155,12 +171,10 @@ fn preformatted_segments_appear_in_order(document: &RichDocument, plain: &str) -
 
 fn merge_visible_segments(segments: &[VisibleSegment]) -> Vec<VisibleChunk> {
     let mut chunks = Vec::with_capacity(segments.len().saturating_add(2));
-    for (index, segment) in segments.iter().enumerate() {
+    for segment in segments {
         match segment.mode {
             VisibleTextMode::Flow => append_flow_chunk(&mut chunks, &segment.text),
-            VisibleTextMode::Preformatted => {
-                append_preformatted_chunk(&mut chunks, &segment.text, index == 0);
-            }
+            VisibleTextMode::Preformatted => append_preformatted_chunk(&mut chunks, &segment.text),
         }
     }
     if !matches!(chunks.last(), Some(VisibleChunk::Flow(_))) {
@@ -184,11 +198,10 @@ fn append_flow_chunk(chunks: &mut Vec<VisibleChunk>, text: &str) {
     }
 }
 
-fn append_preformatted_chunk(chunks: &mut Vec<VisibleChunk>, text: &str, strip_bom: bool) {
+fn append_preformatted_chunk(chunks: &mut Vec<VisibleChunk>, text: &str) {
     if !matches!(chunks.last(), Some(VisibleChunk::Flow(_))) {
         chunks.push(VisibleChunk::Flow(String::new()));
     }
-    let text = if strip_bom { text.strip_prefix('\u{feff}').unwrap_or(text) } else { text };
     chunks.push(VisibleChunk::Preformatted(normalize_line_endings(text)));
 }
 
@@ -220,43 +233,63 @@ fn append_flow_pattern(pattern: &mut Vec<PatternToken>, flow: &str) {
 }
 
 fn pattern_matches_plain(pattern: &[PatternToken], plain: &str) -> bool {
-    let mut active = vec![false; pattern.len() + 1];
-    let mut next = vec![false; pattern.len() + 1];
-    active[0] = true;
-    apply_epsilon_closure(pattern, &mut active);
-    for character in plain.chars() {
-        next.fill(false);
-        advance_pattern(pattern, &active, character, &mut next);
-        apply_epsilon_closure(pattern, &mut next);
-        if !next.iter().any(|state| *state) {
+    let plain = plain.chars().collect::<Vec<_>>();
+    let mut pattern_index = 0;
+    let mut plain_index = 0;
+    let mut last_star = None;
+    let mut match_steps = 0;
+    while plain_index < plain.len() {
+        if match_steps >= MAX_GLOB_MATCH_STEPS {
             return false;
         }
-        std::mem::swap(&mut active, &mut next);
-    }
-    active[pattern.len()]
-}
-
-fn advance_pattern(pattern: &[PatternToken], active: &[bool], character: char, next: &mut [bool]) {
-    for (index, token) in pattern.iter().enumerate() {
-        if !active[index] {
-            continue;
-        }
-        match token {
-            PatternToken::Literal(expected) if *expected == character => next[index + 1] = true,
-            PatternToken::WhitespaceOne if is_flow_whitespace(character) => {
-                next[index + 1] = true;
+        match_steps += 1;
+        match pattern.get(pattern_index) {
+            Some(PatternToken::WhitespaceStar) => {
+                last_star = Some(StarBacktrack {
+                    resume_pattern_index: pattern_index + 1,
+                    next_plain_index: plain_index,
+                });
+                pattern_index += 1;
             }
-            PatternToken::WhitespaceStar if is_flow_whitespace(character) => next[index] = true,
-            _ => {}
+            Some(token) if token_matches_plain(*token, plain[plain_index]) => {
+                pattern_index += 1;
+                plain_index += 1;
+            }
+            _ => {
+                let Some(indices) = retry_last_star(last_star, &plain) else {
+                    return false;
+                };
+                last_star = Some(indices);
+                pattern_index = indices.resume_pattern_index;
+                plain_index = indices.next_plain_index;
+            }
         }
     }
+    pattern[pattern_index..].iter().all(|token| matches!(token, PatternToken::WhitespaceStar))
 }
 
-fn apply_epsilon_closure(pattern: &[PatternToken], active: &mut [bool]) {
-    for (index, token) in pattern.iter().enumerate() {
-        if active[index] && matches!(token, PatternToken::WhitespaceStar) {
-            active[index + 1] = true;
-        }
+fn pattern_matches_plain_with_optional_bom(pattern: &[PatternToken], plain: &str) -> bool {
+    pattern_matches_plain(pattern, plain)
+        || plain
+            .strip_prefix('\u{feff}')
+            .is_some_and(|without_bom| pattern_matches_plain(pattern, without_bom))
+}
+
+fn retry_last_star(last_star: Option<StarBacktrack>, plain: &[char]) -> Option<StarBacktrack> {
+    let mut indices = last_star?;
+    if !plain.get(indices.next_plain_index).is_some_and(|character| is_flow_whitespace(*character))
+    {
+        return None;
+    }
+    indices.next_plain_index += 1;
+    Some(indices)
+}
+
+fn token_matches_plain(token: PatternToken, character: char) -> bool {
+    match token {
+        PatternToken::Literal(expected) => expected == character,
+        PatternToken::WhitespaceOne => is_flow_whitespace(character),
+        PatternToken::WhitespaceStar => false,
     }
 }
 
@@ -267,8 +300,8 @@ fn is_flow_whitespace(character: char) -> bool {
 #[cfg(test)]
 mod tests {
     use super::{
-        equivalent_visible_text, preformatted_segments_appear_in_order, prepare_paste,
-        segments_align_plain,
+        PatternToken, equivalent_visible_text, pattern_matches_plain,
+        preformatted_segments_appear_in_order, prepare_paste, segments_align_plain,
     };
     use crate::paste::{
         PasteFallbackReason, PasteRepresentations, PreparedPaste, RichBlock, RichDocument,
@@ -462,6 +495,18 @@ mod tests {
     }
 
     #[test]
+    fn preformatted_leading_bom_remains_literal_content() {
+        let segments = vec![VisibleSegment::preformatted("\u{feff}code")];
+
+        assert!(!segments_align_plain(&segments, "code"));
+        assert!(segments_align_plain(&segments, "\u{feff}code"));
+        assert!(segments_align_plain(&segments, "\u{feff}\u{feff}code"));
+
+        let flow = vec![VisibleSegment::flow("code")];
+        assert!(segments_align_plain(&flow, "\u{feff}code"));
+    }
+
+    #[test]
     fn flow_collapses_whitespace_while_preformatted_only_normalizes_line_endings() {
         let segments = vec![VisibleSegment::flow("a  b"), VisibleSegment::preformatted("x\r\ny")];
 
@@ -487,6 +532,120 @@ mod tests {
         let segments = (0..8_000).map(|_| VisibleSegment::preformatted("")).collect::<Vec<_>>();
 
         assert!(segments_align_plain(&segments, ""));
+    }
+
+    #[test]
+    fn long_ordinary_flow_matches_without_quadratic_pattern_scanning() {
+        let flow = "a".repeat(50_000);
+        let segments = vec![VisibleSegment::flow(&flow)];
+
+        assert!(segments_align_plain(&segments, &flow));
+    }
+
+    #[test]
+    fn restricted_glob_matches_reference_dynamic_programming() {
+        let patterns = exhaustive_patterns(4);
+        let plain_inputs = exhaustive_plain_inputs(4);
+        for pattern in &patterns {
+            for plain in &plain_inputs {
+                assert_eq!(
+                    pattern_matches_plain(pattern, plain),
+                    reference_pattern_matches_plain(pattern, plain),
+                    "pattern_len={}, plain={plain:?}",
+                    pattern.len(),
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn pathological_glob_budget_exhaustion_conservatively_rejects_equivalence() {
+        const EXACT_SPACES: usize = 2_000;
+        const PLAIN_SPACES: usize = 4_000;
+
+        let mut pattern = vec![PatternToken::WhitespaceStar];
+        pattern.extend(std::iter::repeat_n(PatternToken::Literal(' '), EXACT_SPACES));
+        pattern.push(PatternToken::Literal('x'));
+        let plain = format!("{}x", " ".repeat(PLAIN_SPACES));
+
+        assert!(reference_pattern_matches_plain(&pattern, &plain));
+        assert!(!pattern_matches_plain(&pattern, &plain));
+    }
+
+    fn exhaustive_patterns(max_length: usize) -> Vec<Vec<PatternToken>> {
+        let alphabet = [
+            PatternToken::Literal('a'),
+            PatternToken::Literal(' '),
+            PatternToken::Literal('\u{a0}'),
+            PatternToken::Literal('你'),
+            PatternToken::WhitespaceOne,
+            PatternToken::WhitespaceStar,
+        ];
+        exhaustive_sequences(&alphabet, max_length)
+    }
+
+    fn exhaustive_plain_inputs(max_length: usize) -> Vec<String> {
+        exhaustive_sequences(&['a', ' ', '\u{a0}', '\u{2003}', '你', 'b'], max_length)
+            .into_iter()
+            .map(|characters| characters.into_iter().collect())
+            .collect()
+    }
+
+    fn exhaustive_sequences<T: Copy>(alphabet: &[T], max_length: usize) -> Vec<Vec<T>> {
+        let mut sequences = vec![Vec::new()];
+        let mut frontier = vec![Vec::new()];
+        for _ in 0..max_length {
+            frontier = frontier
+                .iter()
+                .flat_map(|sequence| {
+                    alphabet.iter().map(|item| {
+                        let mut extended = sequence.clone();
+                        extended.push(*item);
+                        extended
+                    })
+                })
+                .collect::<Vec<_>>();
+            sequences.extend(frontier.iter().cloned());
+        }
+        sequences
+    }
+
+    fn reference_pattern_matches_plain(pattern: &[PatternToken], plain: &str) -> bool {
+        let characters = plain.chars().collect::<Vec<_>>();
+        let mut reachable = vec![vec![false; characters.len() + 1]; pattern.len() + 1];
+        reachable[0][0] = true;
+        for pattern_index in 0..pattern.len() {
+            for plain_index in 0..=characters.len() {
+                if !reachable[pattern_index][plain_index] {
+                    continue;
+                }
+                match pattern[pattern_index] {
+                    PatternToken::Literal(expected) => {
+                        if characters.get(plain_index) == Some(&expected) {
+                            reachable[pattern_index + 1][plain_index + 1] = true;
+                        }
+                    }
+                    PatternToken::WhitespaceOne => {
+                        if characters
+                            .get(plain_index)
+                            .is_some_and(|character| super::is_flow_whitespace(*character))
+                        {
+                            reachable[pattern_index + 1][plain_index + 1] = true;
+                        }
+                    }
+                    PatternToken::WhitespaceStar => {
+                        reachable[pattern_index + 1][plain_index] = true;
+                        if characters
+                            .get(plain_index)
+                            .is_some_and(|character| super::is_flow_whitespace(*character))
+                        {
+                            reachable[pattern_index][plain_index + 1] = true;
+                        }
+                    }
+                }
+            }
+        }
+        reachable[pattern.len()][characters.len()]
     }
 
     #[test]
