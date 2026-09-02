@@ -24,6 +24,7 @@ mod tests {
 
         assert!(!app_manifest.lines().any(|line| line.trim_start().starts_with("arboard")));
         assert!(app_sources.iter().all(|source| !source.contains("arboard::")));
-        assert!(shell_clipboard_source.contains("arboard::Clipboard"));
+        assert!(shell_clipboard_source.contains("clipboard_rs::ClipboardContext"));
+        assert!(!shell_clipboard_source.contains("arboard::"));
     }
 }
