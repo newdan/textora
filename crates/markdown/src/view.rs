@@ -1672,6 +1672,45 @@ impl<S: BlockSource> PreviewEngine<S> {
         (flat_line.rect.x + flat_line.rect.w).max(text_right) + trailing_space_advance
     }
 
+    fn flat_line_source_start(&self, flat_line: &crate::layout::FlatLine) -> Option<usize> {
+        if let Some(source_range) = &flat_line.atomic_source_range {
+            return Some(source_range.start);
+        }
+
+        self.byte_from_flat_line_and_visual_grapheme(flat_line.flat_idx, 0)
+    }
+
+    fn flat_line_source_end(&self, flat_line: &crate::layout::FlatLine) -> Option<usize> {
+        if let Some(source_range) = &flat_line.atomic_source_range {
+            return Some(source_range.end);
+        }
+
+        self.byte_from_flat_line_and_visual_grapheme(
+            flat_line.flat_idx,
+            crate::grapheme_map::grapheme_count(&flat_line.text),
+        )
+    }
+
+    fn source_byte_for_flat_line_hit(
+        &self,
+        flat_line: &crate::layout::FlatLine,
+        doc_x: f32,
+        doc_y: f32,
+    ) -> Option<usize> {
+        if let Some(source_range) = &flat_line.atomic_source_range {
+            let vertical_midpoint = flat_line.rect.y + flat_line.rect.h * 0.5;
+            return Some(if doc_y < vertical_midpoint {
+                source_range.start
+            } else {
+                source_range.end
+            });
+        }
+
+        let line_x = doc_x - flat_line.rect.x;
+        let visual_grapheme = crate::layout::grapheme_at_x(flat_line, line_x);
+        self.byte_from_flat_line_and_visual_grapheme(flat_line.flat_idx, visual_grapheme)
+    }
+
     /// 屏幕坐标 → 源码字节偏移。用于鼠标点击。
     /// 输入 y/offset_y 为插件渲染空间坐标；内部加回 scroll_y 以匹配
     /// flat_line 的文档绝对 y（与 render_line_with_offset 的投影互逆）。
@@ -1712,9 +1751,7 @@ impl<S: BlockSource> PreviewEngine<S> {
             });
 
         if let Some(flat_line) = flat_line {
-            let line_x = doc_x - flat_line.rect.x;
-            let char_offset = crate::layout::grapheme_at_x(flat_line, line_x);
-            return self.byte_from_flat_line_and_visual_grapheme(flat_line.flat_idx, char_offset);
+            return self.source_byte_for_flat_line_hit(flat_line, doc_x, doc_y);
         }
 
         if let Some(byte) = self.visible_empty_source_line_byte_at_doc_y(doc_y, lazy) {
@@ -1727,14 +1764,10 @@ impl<S: BlockSource> PreviewEngine<S> {
         if let (Some(above), Some(below)) = (above, below) {
             let above_bottom = above.rect.y + above.rect.h;
             let gap_mid_y = (above_bottom + below.rect.y) * 0.5;
-            let target = if doc_y < gap_mid_y { above } else { below };
             return if doc_y < gap_mid_y {
-                self.byte_from_flat_line_and_visual_grapheme(
-                    target.flat_idx,
-                    crate::grapheme_map::grapheme_count(&target.text),
-                )
+                self.flat_line_source_end(above)
             } else {
-                self.byte_from_flat_line_and_visual_grapheme(target.flat_idx, 0)
+                self.flat_line_source_start(below)
             };
         }
 
@@ -1745,10 +1778,7 @@ impl<S: BlockSource> PreviewEngine<S> {
             if gap > above.rect.h * HIT_TEST_SNAP_MAX_LINE_HEIGHTS {
                 return None; // far below content
             }
-            return self.byte_from_flat_line_and_visual_grapheme(
-                above.flat_idx,
-                crate::grapheme_map::grapheme_count(&above.text),
-            );
+            return self.flat_line_source_end(above);
         }
 
         // No line above — click above first line; snap to start of first line.
@@ -1757,7 +1787,7 @@ impl<S: BlockSource> PreviewEngine<S> {
             if gap > below.rect.h * HIT_TEST_SNAP_MAX_LINE_HEIGHTS {
                 return None; // far above content
             }
-            return self.byte_from_flat_line_and_visual_grapheme(below.flat_idx, 0);
+            return self.flat_line_source_start(below);
         }
 
         None
@@ -5530,6 +5560,128 @@ C608-01 武昌职业第01组：计划 68，历史低线较低，是表里最像�
             (eighth_start..=eighth_end).contains(&eighth_hit),
             "click on source line 8 mapped to byte {eighth_hit}, expected {eighth_start}..={eighth_end}"
         );
+    }
+
+    #[test]
+    fn horizontal_rule_and_its_leading_gap_map_to_marker_boundaries_at_each_dpi() {
+        let source = "国内用增,\n\n---\n\n后续";
+        let horizontal_rule_start = source.find("---").expect("fixture contains a rule");
+        let horizontal_rule_end = horizontal_rule_start + 3;
+
+        for dpi_scale in [1.0, 2.0] {
+            let document = StubDoc::new(source);
+            let mut view = MarkdownEditorView::new();
+            view.set_source(source.to_owned(), 1);
+            render_editor_viewport_with_dpi(&mut view, &document, 800.0, 600.0, dpi_scale);
+
+            let horizontal_rule = view
+                .engine()
+                .flat_lines()
+                .iter()
+                .find(|line| line.atomic_source_range.is_some())
+                .expect("fixture lays out an inactive horizontal rule");
+            let hit_x = horizontal_rule.rect.x + 1.0;
+            let leading_gap_y = horizontal_rule.rect.y - 1.0;
+            let upper_half_y = horizontal_rule.rect.y + horizontal_rule.rect.h * 0.25;
+            let lower_half_y = horizontal_rule.rect.y + horizontal_rule.rect.h * 0.75;
+
+            assert_eq!(
+                view.engine().hit_test_byte(hit_x, leading_gap_y, 0.0, 0.0),
+                Some(horizontal_rule_start),
+                "leading structural gap must snap to the rule start at {dpi_scale}x DPI"
+            );
+            assert_eq!(
+                view.engine().hit_test_byte(hit_x, upper_half_y, 0.0, 0.0),
+                Some(horizontal_rule_start),
+                "upper rule half must map to the marker start at {dpi_scale}x DPI"
+            );
+            assert_eq!(
+                view.engine().hit_test_byte(hit_x, lower_half_y, 0.0, 0.0),
+                Some(horizontal_rule_end),
+                "lower rule half must map to the marker end at {dpi_scale}x DPI"
+            );
+        }
+    }
+
+    #[test]
+    fn first_click_on_inactive_horizontal_rule_expands_its_marker() {
+        let source = "国内用增,\n\n---\n\n后续";
+        let document = StubDoc::new(source);
+        let mut view = MarkdownEditorView::new();
+        view.set_source(source.to_owned(), 1);
+        render_editor_once(&mut view, &document);
+
+        let horizontal_rule = view
+            .engine()
+            .flat_lines()
+            .iter()
+            .find(|line| line.atomic_source_range.is_some())
+            .expect("fixture lays out an inactive horizontal rule");
+        let hit = view
+            .engine()
+            .hit_test_byte(
+                horizontal_rule.rect.x + 1.0,
+                horizontal_rule.rect.y + horizontal_rule.rect.h * 0.25,
+                0.0,
+                0.0,
+            )
+            .expect("inactive horizontal rule must be clickable");
+
+        view.engine.handle_set_cursor_byte(hit);
+        render_editor_once(&mut view, &document);
+
+        assert!(
+            view.engine().flat_lines().iter().any(|line| line.text.contains("---")),
+            "clicking an inactive rule must expose its source marker for editing"
+        );
+    }
+
+    #[test]
+    fn removing_extra_blank_line_before_horizontal_rule_clears_reserved_height() {
+        let roomy_source = "国内用增,\n\n\n---";
+        let compact_source = "国内用增,\n\n---";
+        let mut document = StubDoc::new(roomy_source);
+        let mut view = MarkdownEditorView::new();
+        view.set_source(roomy_source.to_owned(), 1);
+        render_editor_once(&mut view, &document);
+        let roomy_rule_y = view
+            .engine()
+            .flat_lines()
+            .iter()
+            .find(|line| line.atomic_source_range.is_some())
+            .expect("roomy fixture lays out a horizontal rule")
+            .rect
+            .y;
+
+        document = StubDoc::new(compact_source);
+        view.set_source(compact_source.to_owned(), 2);
+        render_editor_once(&mut view, &document);
+        let updated_rule_y = view
+            .engine()
+            .flat_lines()
+            .iter()
+            .find(|line| line.atomic_source_range.is_some())
+            .expect("updated fixture lays out a horizontal rule")
+            .rect
+            .y;
+
+        let fresh_document = StubDoc::new(compact_source);
+        let mut fresh_view = MarkdownEditorView::new();
+        fresh_view.set_source(compact_source.to_owned(), 1);
+        render_editor_once(&mut fresh_view, &fresh_document);
+        let fresh_rule_y = fresh_view
+            .engine()
+            .flat_lines()
+            .iter()
+            .find(|line| line.atomic_source_range.is_some())
+            .expect("fresh fixture lays out a horizontal rule")
+            .rect
+            .y;
+
+        let editable_blank_line_extent =
+            view.engine().base_line_height + view.engine().paragraph_spacing;
+        assert!((updated_rule_y - fresh_rule_y).abs() < 0.01);
+        assert!((roomy_rule_y - updated_rule_y - editable_blank_line_extent).abs() < 0.01);
     }
 
     #[test]
