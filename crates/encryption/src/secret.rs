@@ -10,22 +10,22 @@ pub(crate) const KEY_NONCE_LENGTH: usize = 24;
 pub(crate) const SALT_LENGTH: usize = 16;
 pub(crate) const WRAPPED_KEY_LENGTH: usize = 48;
 
-const MINIMUM_PASSWORD_CHARACTERS: usize = 8;
-
 /// A non-serializable password that clears its allocation when dropped.
 pub struct EncryptionPassword {
     value: Zeroizing<String>,
 }
 
 impl EncryptionPassword {
+    pub const MINIMUM_CHARACTERS: usize = 6;
+
     pub fn new(value: String) -> Result<Self, PasswordPolicyError> {
         let character_count = value.chars().count();
         if character_count == 0 {
             return Err(PasswordPolicyError::Empty);
         }
-        if character_count < MINIMUM_PASSWORD_CHARACTERS {
+        if character_count < Self::MINIMUM_CHARACTERS {
             return Err(PasswordPolicyError::TooShort {
-                minimum_characters: MINIMUM_PASSWORD_CHARACTERS,
+                minimum_characters: Self::MINIMUM_CHARACTERS,
             });
         }
 
@@ -114,10 +114,11 @@ mod tests {
 
     #[test]
     fn password_policy_counts_unicode_characters() {
-        assert!(EncryptionPassword::new("八个字符密码成立".to_owned()).is_ok());
+        assert!(EncryptionPassword::new("六位密码可用".to_owned()).is_ok());
         assert_eq!(
-            EncryptionPassword::new("短密码".to_owned()).expect_err("short password must fail"),
-            PasswordPolicyError::TooShort { minimum_characters: 8 }
+            EncryptionPassword::new("五位密码短".to_owned())
+                .expect_err("five-character password must fail"),
+            PasswordPolicyError::TooShort { minimum_characters: 6 }
         );
         assert_eq!(
             EncryptionPassword::new(String::new()).expect_err("empty password must fail"),

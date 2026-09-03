@@ -154,7 +154,7 @@ pub struct EncryptedNoteDialog {
 impl EncryptedNoteDialog {
     pub fn new(theme: &crate::Theme) -> Self {
         let mut password_input = sensitive_text_box(PASSWORD_INPUT_ID, "密码");
-        password_input.set_placeholder("至少 8 个字符");
+        password_input.set_placeholder("至少 6 个字符");
         let mut confirmation_input = sensitive_text_box(CONFIRMATION_INPUT_ID, "确认密码");
         confirmation_input.set_placeholder("再次输入密码");
         let style = ButtonStyle::from_theme(theme);

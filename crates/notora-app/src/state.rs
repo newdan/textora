@@ -988,13 +988,7 @@ impl NotoraState {
         else {
             return vec![NotoraEffect::Redraw];
         };
-        let validation_error = if password.expose().chars().count() < 8 {
-            Some("密码至少需要 8 个字符".to_owned())
-        } else if password != confirmation {
-            Some("两次输入的密码不一致".to_owned())
-        } else {
-            None
-        };
+        let validation_error = validate_password_confirmation(&password, &confirmation);
         if let Some(error_message) = validation_error {
             self.encrypted_note_creation = EncryptedNoteCreationState::Editing {
                 target,
@@ -1236,14 +1230,14 @@ impl NotoraState {
         else {
             return vec![NotoraEffect::Redraw];
         };
-        if password.expose().chars().count() < 8 {
+        if let Some(error_message) = validate_password_minimum(&password) {
             self.encrypted_note_unlock = EncryptedNoteUnlockState::Editing {
                 request,
                 title,
                 metadata,
                 tags,
                 password,
-                error_message: Some("密码至少需要 8 个字符".to_owned()),
+                error_message: Some(error_message),
                 failure_generation,
                 next_generation,
             };
@@ -2268,10 +2262,16 @@ fn validate_password_confirmation(
     password: &SensitiveText,
     confirmation: &SensitiveText,
 ) -> Option<String> {
-    if password.expose().chars().count() < 8 {
-        return Some("密码至少需要 8 个字符".to_owned());
+    if let Some(error_message) = validate_password_minimum(password) {
+        return Some(error_message);
     }
     (password != confirmation).then(|| "两次输入的密码不一致".to_owned())
+}
+
+fn validate_password_minimum(password: &SensitiveText) -> Option<String> {
+    let minimum_characters = textora_encryption::EncryptionPassword::MINIMUM_CHARACTERS;
+    (password.expose().chars().count() < minimum_characters)
+        .then(|| format!("密码至少需要 {minimum_characters} 个字符"))
 }
 
 #[cfg(test)]
@@ -2728,16 +2728,40 @@ mod tests {
     }
 
     #[test]
+    fn encrypted_note_creation_rejects_five_character_password() {
+        use ui::core::widget::SensitiveText;
+
+        let mut state = state_with_active_workspace();
+        let _ = state.reduce(NotoraAction::BeginEncryptedNoteCreation);
+        let _ = state.reduce(NotoraAction::EncryptedNotePasswordChanged(SensitiveText::new(
+            "abc12".to_owned(),
+        )));
+        let _ = state.reduce(NotoraAction::EncryptedNoteConfirmationChanged(SensitiveText::new(
+            "abc12".to_owned(),
+        )));
+
+        assert_eq!(
+            state.reduce(NotoraAction::EncryptedNoteDialogSubmitRequested),
+            vec![NotoraEffect::Redraw]
+        );
+        assert!(matches!(
+            state.encrypted_note_creation,
+            EncryptedNoteCreationState::Editing { error_message: Some(message), .. }
+                if message == "密码至少需要 6 个字符"
+        ));
+    }
+
+    #[test]
     fn encrypted_note_creation_prevents_duplicate_submission() {
         use ui::core::widget::SensitiveText;
 
         let mut state = state_with_active_workspace();
         let _ = state.reduce(NotoraAction::BeginEncryptedNoteCreation);
         let _ = state.reduce(NotoraAction::EncryptedNotePasswordChanged(SensitiveText::new(
-            "valid-password".to_owned(),
+            "abc123".to_owned(),
         )));
         let _ = state.reduce(NotoraAction::EncryptedNoteConfirmationChanged(SensitiveText::new(
-            "valid-password".to_owned(),
+            "abc123".to_owned(),
         )));
 
         let effects = state.reduce(NotoraAction::EncryptedNoteDialogSubmitRequested);
@@ -2792,10 +2816,10 @@ mod tests {
             target_path: target_path.clone(),
         });
         let _ = state.reduce(NotoraAction::EncryptedNotePasswordChanged(SensitiveText::new(
-            "conflict-copy-password".to_owned(),
+            "abc123".to_owned(),
         )));
         let _ = state.reduce(NotoraAction::EncryptedNoteConfirmationChanged(SensitiveText::new(
-            "conflict-copy-password".to_owned(),
+            "abc123".to_owned(),
         )));
 
         let effects = state.reduce(NotoraAction::EncryptedNoteDialogSubmitRequested);
@@ -2807,10 +2831,39 @@ mod tests {
                     && request.target_path == target_path
                     && request.generation == 1
         ));
-        assert!(!format!("{effects:?}").contains("conflict-copy-password"));
+        assert!(!format!("{effects:?}").contains("abc123"));
         assert!(matches!(
             state.encrypted_conflict_copy,
             EncryptedConflictCopyState::Submitting { generation: 1, .. }
+        ));
+    }
+
+    #[test]
+    fn encrypted_conflict_copy_rejects_five_character_password() {
+        use ui::core::widget::SensitiveText;
+
+        let identity = DocumentIdentity::Note(NoteId::generate());
+        let mut state = state_with_active_workspace();
+        let _ = state.reduce(NotoraAction::SaveConflictDetected { identity, content_revision: 9 });
+        let _ = state.reduce(NotoraAction::EncryptedConflictCopyRequired {
+            identity,
+            target_path: "冲突副本.md".into(),
+        });
+        let _ = state.reduce(NotoraAction::EncryptedNotePasswordChanged(SensitiveText::new(
+            "abc12".to_owned(),
+        )));
+        let _ = state.reduce(NotoraAction::EncryptedNoteConfirmationChanged(SensitiveText::new(
+            "abc12".to_owned(),
+        )));
+
+        assert_eq!(
+            state.reduce(NotoraAction::EncryptedNoteDialogSubmitRequested),
+            vec![NotoraEffect::Redraw]
+        );
+        assert!(matches!(
+            state.encrypted_conflict_copy,
+            EncryptedConflictCopyState::Editing { error_message: Some(message), .. }
+                if message == "密码至少需要 6 个字符"
         ));
     }
 
@@ -2845,7 +2898,7 @@ mod tests {
         });
         assert_eq!(state.layout.overlay, OverlayState::EncryptedNoteDialog);
         let _ = state.reduce(NotoraAction::EncryptedNotePasswordChanged(SensitiveText::new(
-            "unlock-password".to_owned(),
+            "abc123".to_owned(),
         )));
         let mut switched_state = state.clone();
         let other_identity = DocumentIdentity::Note(NoteId::generate());
@@ -2871,6 +2924,49 @@ mod tests {
         let _ = state.reduce(NotoraAction::OverlayDismissed);
 
         assert_eq!(state.encrypted_note_unlock, EncryptedNoteUnlockState::Inactive);
+    }
+
+    #[test]
+    fn encrypted_note_unlock_rejects_five_character_password() {
+        use ui::core::widget::SensitiveText;
+
+        let note_id = NoteId::generate();
+        let request = DocumentLoadRequest {
+            identity: DocumentIdentity::Note(note_id),
+            selection_generation: 4,
+        };
+        let mut state = state_with_active_workspace();
+        state.library.selected_card = Some(request.identity);
+        state.library.selected_document_generation = request.selection_generation;
+        let _ = state.reduce(NotoraAction::EncryptedNoteUnlockRequired {
+            request,
+            title: "秘密笔记".to_owned(),
+            metadata: NoteEditorMetadata {
+                note_id,
+                created_at: SystemTime::UNIX_EPOCH,
+                modified_at: SystemTime::UNIX_EPOCH,
+                encryption: notora_core::NoteEncryption::Encrypted,
+                title_initialization: notora_core::TitleInitialization::Independent,
+                file_name_binding: notora_core::NoteFileNameBinding::TitleBound {
+                    disambiguator: 1,
+                },
+                title_revision: 0,
+            },
+            tags: Vec::new(),
+        });
+        let _ = state.reduce(NotoraAction::EncryptedNotePasswordChanged(SensitiveText::new(
+            "abc12".to_owned(),
+        )));
+
+        assert_eq!(
+            state.reduce(NotoraAction::EncryptedNoteDialogSubmitRequested),
+            vec![NotoraEffect::Redraw]
+        );
+        assert!(matches!(
+            state.encrypted_note_unlock,
+            EncryptedNoteUnlockState::Editing { error_message: Some(message), .. }
+                if message == "密码至少需要 6 个字符"
+        ));
     }
 
     #[test]
