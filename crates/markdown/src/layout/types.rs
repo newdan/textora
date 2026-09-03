@@ -284,7 +284,6 @@ impl<S: BlockSource> LazyLayout<S> {
             }
 
             let doc_block = self.source.blocks().get(doc_bi);
-            let doc_children = doc_block.map(|b| b.children.as_slice());
 
             Self::flatten_block_into(
                 block,
@@ -292,7 +291,8 @@ impl<S: BlockSource> LazyLayout<S> {
                 &mut lines,
                 &mut flat_idx,
                 current_line_base,
-                doc_children,
+                doc_block,
+                self.source_text.as_deref(),
             );
         }
         self.flat_lines = lines;
@@ -721,6 +721,7 @@ impl<S: BlockSource> LazyLayout<S> {
                 projection.flat_line_idx = *flat_idx;
                 projection
             }),
+            atomic_source_range: None,
         });
         *flat_idx += 1;
     }
@@ -728,15 +729,18 @@ impl<S: BlockSource> LazyLayout<S> {
     /// Recursively flatten a block's lines into the flat array.
     /// `block_line_base` is a unique flat index for this doc block
     /// (total text_lines of all preceding blocks in tree-walk order).
-    /// `doc_children` is the children slice of that doc block (for recursive descent).
+    /// `doc_block` is the source block corresponding to `block` (for source metadata and
+    /// recursive descent).
     fn flatten_block_into(
         block: &LaidOutBlock,
         y_correction: f32,
         flat: &mut Vec<FlatLine>,
         flat_idx: &mut usize,
         block_line_base: usize,
-        doc_children: Option<&[crate::builder::BlockNode]>,
+        doc_block: Option<&crate::builder::BlockNode>,
+        source_text: Option<&str>,
     ) {
+        let doc_children = doc_block.map(|block| block.children.as_slice());
         match &block.kind {
             LaidOutBlockKind::Text { lines: text_lines }
             | LaidOutBlockKind::CodeBlock { lines: text_lines, .. }
@@ -749,14 +753,14 @@ impl<S: BlockSource> LazyLayout<S> {
                 let mut child_offset = block_line_base;
                 for (i, sub) in sub_blocks.iter().enumerate() {
                     let child = doc_children.and_then(|c| c.get(i));
-                    let grandchildren = child.map(|c| c.children.as_slice());
                     Self::flatten_block_into(
                         sub,
                         y_correction,
                         flat,
                         flat_idx,
                         child_offset,
-                        grandchildren,
+                        child,
+                        source_text,
                     );
                     if let Some(c) = child {
                         child_offset +=
@@ -771,14 +775,14 @@ impl<S: BlockSource> LazyLayout<S> {
                 let mut child_offset = block_line_base + list_lines.len();
                 for (i, sub) in sub_blocks.iter().enumerate() {
                     let child = doc_children.and_then(|c| c.get(i));
-                    let grandchildren = child.map(|c| c.children.as_slice());
                     Self::flatten_block_into(
                         sub,
                         y_correction,
                         flat,
                         flat_idx,
                         child_offset,
-                        grandchildren,
+                        child,
+                        source_text,
                     );
                     if let Some(c) = child {
                         child_offset +=
@@ -815,10 +819,29 @@ impl<S: BlockSource> LazyLayout<S> {
                     shaped: None,
                     requires_source_projection: false,
                     source_projection: None,
+                    atomic_source_range: doc_block.and_then(|block| {
+                        Self::source_range_without_line_ending(&block.block_range, source_text)
+                    }),
                 });
                 *flat_idx += 1;
             }
         }
+    }
+
+    fn source_range_without_line_ending(
+        block_range: &Range<usize>,
+        source_text: Option<&str>,
+    ) -> Option<Range<usize>> {
+        let source_text = source_text?;
+        let start = block_range.start.min(source_text.len());
+        let mut end = block_range.end.min(source_text.len());
+        let source_bytes = source_text.as_bytes();
+
+        while end > start && matches!(source_bytes[end - 1], b'\n' | b'\r') {
+            end -= 1;
+        }
+
+        (start < end).then_some(start..end)
     }
 
     /// Count all text_lines in a subtree (used for offset calculation).
@@ -977,6 +1000,8 @@ pub struct FlatLine {
     pub(crate) requires_source_projection: bool,
     /// Source projection for this exact visual-line segment.
     pub(crate) source_projection: Option<VisualLineProjection>,
+    /// Source range owned by a non-text visual block such as a horizontal rule.
+    pub(crate) atomic_source_range: Option<Range<usize>>,
 }
 
 #[derive(Clone, Debug)]
@@ -2145,6 +2170,23 @@ mod tests {
         layout.ensure_all_blocks(&style, 400.0, None, None, &document_view);
         layout.build_flat_lines(&document_view);
         layout
+    }
+
+    #[test]
+    fn horizontal_rule_flat_line_retains_atomic_source_range() {
+        let source = "before\n\n---\n\nafter";
+        let horizontal_rule_start = source.find("---").expect("fixture contains a rule");
+        let layout = build_editing_layout(source, 0, 1);
+        let horizontal_rule = layout
+            .flat_lines
+            .iter()
+            .find(|line| line.text.is_empty() && line.source_projection.is_none())
+            .expect("fixture lays out a horizontal rule");
+
+        assert_eq!(
+            horizontal_rule.atomic_source_range,
+            Some(horizontal_rule_start..horizontal_rule_start + 3)
+        );
     }
 
     fn assert_flat_layout_equivalent(

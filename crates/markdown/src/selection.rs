@@ -332,6 +332,7 @@ mod tests {
             shaped: None,
             requires_source_projection: false,
             source_projection: None,
+            atomic_source_range: None,
         }
     }
 
@@ -396,6 +397,7 @@ mod tests {
                 source_extent: 4..5,
                 collapsed: Vec::new(),
             }),
+            atomic_source_range: None,
         }];
 
         let (_line_start, line_end) =
