@@ -4,7 +4,7 @@
 
 **Goal:** 让水平分割线、其上下内间距和相邻结构间距始终映射到合法源码边界，同时保持现有多空行视觉高度。
 
-**Architecture:** 布局层在 `FlatLine` 上保留原子块的 `BlockNode::block_range`，不伪造文字 grapheme 投影。视图层通过三个单一职责查询统一解析“行内点击、行首边界、行尾边界”，文本行继续走 `SourceProjectionIndex`，原子块直接使用显式源码范围。
+**Architecture:** 布局层从 `BlockNode::block_range` 提取不含行尾 CR/LF 的原子块源码范围并保存在 `FlatLine` 上，不伪造文字 grapheme 投影。视图层通过三个单一职责查询统一解析“行内点击、行首边界、行尾边界”，文本行继续走 `SourceProjectionIndex`，原子块直接使用显式源码范围。
 
 **Tech Stack:** Rust、textora-markdown、现有 `LazyLayout` / `SourceProjectionIndex` / `ViewPlugin` 测试工具。
 
@@ -27,8 +27,8 @@
 - Test: `crates/markdown/src/layout/types.rs`
 
 **Interfaces:**
-- Consumes: `BlockNode::block_range: Range<usize>` 与现有 `FlatLine` 扁平化流程。
-- Produces: `FlatLine::atomic_source_range: Option<Range<usize>>`，文本行恒为 `None`，水平分割线为其真实块范围。
+- Consumes: `BlockNode::block_range: Range<usize>`、当前源码与现有 `FlatLine` 扁平化流程。
+- Produces: `FlatLine::atomic_source_range: Option<Range<usize>>`，文本行恒为 `None`，水平分割线为其不含行尾换行的真实标记范围。
 
 - [ ] **Step 1: 写失败测试，证明水平分割线丢失源码范围**
 
@@ -78,10 +78,12 @@ pub(crate) atomic_source_range: Option<Range<usize>>,
 doc_block: Option<&crate::builder::BlockNode>,
 ```
 
-函数内部通过 `doc_block.map(|block| block.children.as_slice())` 读取子块；递归调用传入对应 `child`。水平分割线构造器设置：
+函数内部通过 `doc_block.map(|block| block.children.as_slice())` 读取子块；递归调用传入对应 `child`。水平分割线构造器从 `block_range` 裁掉末尾 `CR/LF` 后设置：
 
 ```rust
-atomic_source_range: doc_block.map(|block| block.block_range.clone()),
+atomic_source_range: doc_block.and_then(|block| {
+    Self::source_range_without_line_ending(&block.block_range, source_text)
+}),
 ```
 
 顶层调用直接传 `doc_block`。更新 `selection.rs` 中测试专用 `FlatLine` 字面量，全部设置 `atomic_source_range: None`。

@@ -32,7 +32,7 @@
 
 为原子视觉块增加显式源码范围，并统一所有命中路径：
 
-1. `FlatLine` 增加 `atomic_source_range: Option<Range<usize>>`；文本行保持 `None`，`HorizontalRule` 保存对应 `BlockNode::block_range`。
+1. `FlatLine` 增加 `atomic_source_range: Option<Range<usize>>`；文本行保持 `None`，`HorizontalRule` 从对应 `BlockNode::block_range` 提取不含行尾 CR/LF 的标记范围，避免范围终点落入下一源码行。
 2. 扁平化布局时显式传入当前 `BlockNode`，包括嵌套块，确保原子块不会靠视觉索引猜测源码位置。
 3. 点击原子块上半部返回范围起点，下半部返回范围终点；两者都位于水平分割线块范围内，下一帧会展开 `---` 源码。
 4. 普通文本行继续使用视觉 grapheme 投影，不改变文字点击精度。
