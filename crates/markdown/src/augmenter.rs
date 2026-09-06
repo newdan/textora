@@ -265,40 +265,46 @@ fn delete_forward_join_reopened_inline_elements(
 /// - 段落/标题末尾且下一行是普通段落文本:删除整个换行 run,合并两段
 ///   (与段首 Backspace 删整个边界对称)。
 fn delete_forward_block_boundary(source: &str, current_byte: usize) -> Option<EditAugmentation> {
-    let (line_start, _, line_end) = locate_source_line_bounds(source, current_byte)?;
-    if line_start == current_byte || current_byte != source_line_content_end(source, line_end) {
+    let boundary_end = text_block_source_end(source, current_byte)?;
+    let consume_boundary = || {
+        Some(EditAugmentation {
+            insert_text: Some(String::new()),
+            replace_range: None,
+            cursor_byte_after: current_byte,
+        })
+    };
+    if boundary_end == source.len() && current_byte != boundary_end {
+        return consume_boundary();
+    }
+    let context = classify_enter_context(source, boundary_end);
+    // ATX 标题尾部空白不产生段内硬换行。
+    if !matches!(context, EnterContext::Heading { .. })
+        && hard_break_marker_ending_at(source, boundary_end).is_some()
+    {
         return None;
     }
-    // 行尾硬换行标记属于段内结构,留给默认逐字符删除。
-    if hard_break_marker_ending_at(source, current_byte).is_some() {
-        return None;
-    }
-    let first_newline_width = newline_sequence_width_at(source, current_byte)?;
-    let mut newline_run_end = current_byte + first_newline_width;
+    let first_newline_width = newline_sequence_width_at(source, boundary_end)?;
+    let mut newline_run_end = boundary_end + first_newline_width;
     while let Some(newline_width) = newline_sequence_width_at(source, newline_run_end) {
         newline_run_end += newline_width;
+    }
+    if let Some(separator) = editable_paragraph_navigation::hidden_separator_range(
+        source,
+        boundary_end,
+        editable_paragraph_navigation::Boundary::End,
+    ) {
+        newline_run_end = separator.end;
     }
     if newline_run_end >= source.len() {
         return None;
     }
 
-    let consume_boundary = || {
-        let augmentation = EditAugmentation {
-            insert_text: Some(String::new()),
-            replace_range: None,
-            cursor_byte_after: current_byte,
-        };
-        debug_assert_augmentation(&augmentation, source);
-        Some(augmentation)
-    };
-
-    let context = classify_enter_context(source, current_byte);
-    let container_path = delete_context_container_path(source, current_byte, &context);
+    let container_path = delete_context_container_path(source, boundary_end, &context);
     match context {
         EnterContext::CodeBlock => {
             // 代码体内只有闭合围栏行需要保护;其余代码行交给默认删除。
-            if newline_run_end == current_byte + first_newline_width
-                && line_closes_enclosing_fenced_block(source, current_byte, newline_run_end)
+            if newline_run_end == boundary_end + first_newline_width
+                && line_closes_enclosing_fenced_block(source, boundary_end, newline_run_end)
             {
                 return consume_boundary();
             }
@@ -307,7 +313,7 @@ fn delete_forward_block_boundary(source: &str, current_byte: usize) -> Option<Ed
         EnterContext::CodeBlockFenceLine { .. } => {
             // 围栏行与相邻行并线必然破坏围栏;仅在边界恰好一个换行序列时拦截,
             // 有空行兜底(≥2 个换行)时默认删除一个仍保持结构合法。
-            if newline_run_end == current_byte + first_newline_width {
+            if newline_run_end == boundary_end + first_newline_width {
                 return consume_boundary();
             }
             None
@@ -319,10 +325,15 @@ fn delete_forward_block_boundary(source: &str, current_byte: usize) -> Option<Ed
             if line_starts_independent_block(source, newline_run_end, &container_path) {
                 return consume_boundary();
             }
+            let delete_start = if matches!(context, EnterContext::Heading { .. }) {
+                atx_heading_merge_end(source, boundary_end)
+            } else {
+                boundary_end
+            };
             let augmentation = EditAugmentation {
                 insert_text: Some(String::new()),
-                replace_range: Some(current_byte..newline_run_end),
-                cursor_byte_after: current_byte,
+                replace_range: Some(delete_start..newline_run_end),
+                cursor_byte_after: current_byte.min(delete_start),
             };
             debug_assert_augmentation(&augmentation, source);
             Some(augmentation)
@@ -334,6 +345,51 @@ fn delete_forward_block_boundary(source: &str, current_byte: usize) -> Option<Ed
             None
         }
     }
+}
+
+/// Resolve a visible text endpoint to the end of its complete source line.
+fn text_block_source_end(source: &str, current_byte: usize) -> Option<usize> {
+    let (line_start, _, line_end) = locate_source_line_bounds(source, current_byte)?;
+    let boundary_end = source_line_content_end(source, line_end);
+    if line_start == current_byte {
+        return None;
+    }
+    if current_byte != boundary_end {
+        if source.get(current_byte..boundary_end)?.chars().next().is_some_and(char::is_alphanumeric)
+        {
+            return None;
+        }
+        let document =
+            crate::builder::MarkdownDoc::build_structure(&crate::parser::parse_markdown(source));
+        if !editable_paragraph_navigation::has_text_boundary(
+            &document.blocks,
+            current_byte,
+            editable_paragraph_navigation::Boundary::End,
+        ) {
+            return None;
+        }
+    }
+    Some(boundary_end)
+}
+
+/// Remove only the optional ATX closing sequence when serializing a joined heading.
+fn atx_heading_merge_end(source: &str, line_end: usize) -> usize {
+    let Some((line_start, _, _)) = locate_source_line_bounds(source, line_end) else {
+        return line_end;
+    };
+    let marker_start = container_content_start_on_line(source, line_start, line_end);
+    let line = &source[marker_start..line_end];
+    let trimmed = line.trim_end_matches([' ', '\t']);
+    let before_hashes = trimmed.trim_end_matches('#');
+    if before_hashes.len() == trimmed.len() || !before_hashes.ends_with([' ', '\t']) {
+        return line_end;
+    }
+    let opening_end = line.len() - line.trim_start_matches('#').len();
+    let after_opening = &line[opening_end..];
+    let content_start =
+        opening_end + after_opening.len() - after_opening.trim_start_matches([' ', '\t']).len();
+    let closing_start = before_hashes.trim_end_matches([' ', '\t']).len();
+    marker_start + closing_start.max(content_start)
 }
 
 fn delete_context_container_path(
@@ -911,17 +967,29 @@ fn backspace_paragraph_boundary(source: &str, current_byte: usize) -> Option<Edi
             boundary_start -= 1;
         }
     }
+    if let Some(separator) = editable_paragraph_navigation::hidden_separator_range(
+        source,
+        current_byte,
+        editable_paragraph_navigation::Boundary::Start,
+    ) {
+        boundary_start = separator.start;
+    }
     if boundary_start == current_byte {
         return None;
     }
 
-    match classify_enter_context(source, boundary_start) {
+    let context = classify_enter_context(source, boundary_start);
+    match context {
         EnterContext::TopLevelParagraphEnd
         | EnterContext::ParagraphInterior
         | EnterContext::ParagraphStart { .. }
         | EnterContext::Heading { .. } => {
-            let delete_start = hard_break_marker_ending_at(source, boundary_start)
-                .map_or(boundary_start, |marker| marker.start);
+            let delete_start = if matches!(context, EnterContext::Heading { .. }) {
+                atx_heading_merge_end(source, boundary_start)
+            } else {
+                hard_break_marker_ending_at(source, boundary_start)
+                    .map_or(boundary_start, |marker| marker.start)
+            };
             let aug = EditAugmentation {
                 insert_text: Some(String::new()),
                 replace_range: Some(delete_start..current_byte),
@@ -1182,7 +1250,7 @@ fn enter_context_augmentation(
                     insert_at,
                     &continuation_prefix,
                 )),
-                HeadingPosition::Interior | HeadingPosition::End => Some(
+                HeadingPosition::Interior | HeadingPosition::End { .. } => Some(
                     setext_heading_enter_augmentation(source, underline_end, &continuation_prefix),
                 ),
             }
@@ -1280,11 +1348,11 @@ fn heading_enter_augmentation(
     if let HeadingPosition::Start { insert_at } = position {
         return Some(emit_paragraph_before(source, current_byte, insert_at, continuation_prefix));
     }
-    if matches!(position, HeadingPosition::End) {
+    if let HeadingPosition::End { insert_at } = position {
         if !continuation_prefix.is_empty() {
-            return Some(emit_container_line_break(source, current_byte, continuation_prefix));
+            return Some(emit_container_line_break(source, insert_at, continuation_prefix));
         }
-        return Some(emit_block_break(source, current_byte));
+        return Some(emit_block_break_at(source, insert_at));
     }
 
     // Heading 中间：在当前光标处分割标题，后半段成为普通段落。
@@ -1770,7 +1838,7 @@ fn cursor_touches_source_newline(source: &str, current_byte: usize) -> bool {
 pub enum HeadingPosition {
     Start { insert_at: usize },
     Interior,
-    End,
+    End { insert_at: usize },
 }
 
 #[derive(Debug)]
@@ -1888,8 +1956,8 @@ fn classify_heading_hit(
         probe += 1;
     }
     let content_start = probe.min(end);
-    let position = if current_byte == end {
-        HeadingPosition::End
+    let position = if current_byte == end || heading_ends_at(source, start, current_byte) {
+        HeadingPosition::End { insert_at: end }
     } else if is_visible_content_start(source, content_start, current_byte) {
         HeadingPosition::Start { insert_at: start }
     } else {
@@ -1904,6 +1972,29 @@ fn classify_heading_hit(
     } else {
         EnterContext::Other
     }
+}
+
+fn heading_ends_at(source: &str, heading_start: usize, cursor: usize) -> bool {
+    fn find_heading(blocks: &[crate::builder::BlockNode], start: usize, cursor: usize) -> bool {
+        for block in blocks {
+            if block.block_range.start == start
+                && matches!(block.kind, crate::builder::BlockKind::Heading { .. })
+            {
+                return editable_paragraph_navigation::has_text_boundary(
+                    std::slice::from_ref(block),
+                    cursor,
+                    editable_paragraph_navigation::Boundary::End,
+                );
+            }
+            if find_heading(&block.children, start, cursor) {
+                return true;
+            }
+        }
+        false
+    }
+    let document =
+        crate::builder::MarkdownDoc::build_structure(&crate::parser::parse_markdown(source));
+    find_heading(&document.blocks, heading_start, cursor)
 }
 
 /// 标题 range 起始处的源码必须是合法的 ATX marker：至多 3 个前导空格，

@@ -284,3 +284,133 @@ fn creation_heading_without_existing_separator_adds_one_editable_row() {
         }
     }
 }
+
+#[test]
+fn heading_visible_end_enter_preserves_hidden_closing_syntax() {
+    for newline in ["\n", "\r\n"] {
+        for heading in ["# Title ##", "# **Title**", "# [Title](url)", "# **Title** ##"] {
+            for follower in ["", "tail", "---", "# Next", "- item"] {
+                let suffix = if follower.is_empty() {
+                    String::new()
+                } else {
+                    format!("{newline}{newline}{follower}")
+                };
+                let source = format!("{heading}{suffix}");
+                let newline = if source.contains("\r\n") { "\r\n" } else { "\n" };
+                let cursor = source.find("Title").expect("fixture contains title") + "Title".len();
+                let (entered, entered_cursor) = apply_edit(&source, cursor, AugmentKind::Enter);
+                let expected = if follower.is_empty() {
+                    format!("{heading}{newline}{newline}")
+                } else {
+                    format!("{heading}{newline}{newline}{newline}{follower}")
+                };
+                assert_eq!(entered, expected, "visible title end: {source:?}");
+                assert_eq!(entered_cursor, heading.len() + newline.len() * 2);
+                let mut view = MarkdownEditorView::new();
+                render_at(&mut view, &source, cursor, 1, 1.0);
+                let original_rows = rendered_row_count(&view);
+                render_at(&mut view, &entered, entered_cursor, 2, 1.0);
+                assert_eq!(rendered_row_count(&view), original_rows + 1);
+            }
+        }
+    }
+}
+
+#[test]
+fn heading_visible_end_delete_removes_one_neighbor_before_closing_syntax() {
+    for newline in ["\n", "\r\n"] {
+        for heading in ["# Title ##", "# **Title** ##", "# [Title](url) ##"] {
+            let source = format!("{heading}{newline}{newline}{newline}tail");
+            let cursor = source.find("Title").expect("fixture contains title") + "Title".len();
+            let (edited, edited_cursor) =
+                apply_policy_erasure(&source, cursor, None, ui::plugin::EditIntent::DeleteForward);
+            assert_eq!(edited, format!("{heading}{newline}{newline}tail"), "{source:?}");
+            assert_eq!(edited_cursor, cursor);
+        }
+    }
+}
+
+#[test]
+fn paragraph_erasure_with_hidden_trailing_whitespace_is_direction_independent() {
+    use ui::plugin::EditIntent;
+    for newline in ["\n", "\r\n"] {
+        for content in ["x ", "x\t", "**x** ", "[x](url)\t"] {
+            for follower in ["tail", "---", "# Heading", "- item"] {
+                let source = format!("a{newline}{newline}{content}{newline}{newline}{follower}");
+                let start = source.find('x').expect("fixture contains editable text");
+                let expected = format!("a{newline}{newline}{newline}{follower}");
+                for (cursor, selection, intent) in [
+                    (start + 1, None, EditIntent::DeleteBackward),
+                    (start, None, EditIntent::DeleteForward),
+                    (start + 1, Some(start..start + 1), EditIntent::DeleteBackward),
+                ] {
+                    let (edited, cursor) = apply_policy_erasure(&source, cursor, selection, intent);
+                    assert_eq!(edited, expected, "erasing visible content of {source:?}");
+                    assert_eq!(cursor, 1 + newline.len() * 2);
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn closed_heading_final_boundary_merge_keeps_inline_style_and_removes_block_suffix() {
+    use ui::plugin::EditIntent;
+    for newline in ["\n", "\r\n"] {
+        for (heading, merged_heading) in [
+            ("# Title ##", "# Title"),
+            ("# **Title** ##", "# **Title**"),
+            ("# [Title](url) ##", "# [Title](url)"),
+            ("# Title ##  ", "# Title"),
+        ] {
+            for blank in ["", " ", "\t"] {
+                let source = format!("{heading}{newline}{blank}{newline}tail");
+                let expected = format!("{merged_heading}tail");
+                let title_end =
+                    source.find("Title").expect("fixture contains title") + "Title".len();
+                for (cursor, intent) in [
+                    (title_end, EditIntent::DeleteForward),
+                    (heading.len(), EditIntent::DeleteForward),
+                    (source.len() - "tail".len(), EditIntent::DeleteBackward),
+                ] {
+                    let (edited, _) = apply_policy_erasure(&source, cursor, None, intent);
+                    assert_eq!(edited, expected, "final hidden separator: {source:?}");
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn heading_final_boundary_preserves_literals_and_empty_heading_prefix() {
+    for (heading, joined) in [
+        ("# Title \\##", "# Title \\##tail"),
+        ("# Title#", "# Title#tail"),
+        ("# Title ## \t", "# Titletail"),
+        ("# ##", "# tail"),
+        ("### ###", "### tail"),
+    ] {
+        let source = format!("{heading}\n\ntail");
+        let (edited, _) = apply_policy_erasure(
+            &source,
+            heading.len(),
+            None,
+            ui::plugin::EditIntent::DeleteForward,
+        );
+        assert_eq!(edited, joined, "{source:?}");
+    }
+}
+
+#[test]
+fn heading_visible_end_delete_keeps_atomic_neighbors_and_eof_intact() {
+    for heading in ["# Title ##", "# **Title**", "# [Title](url) ##", "# **Title**  "] {
+        for suffix in ["", "\n\n---", "\n\n# Next", "\n\n- item", "\n\n```\ncode\n```"] {
+            let source = format!("{heading}{suffix}");
+            let cursor = source.find("Title").expect("fixture contains title") + "Title".len();
+            assert_eq!(
+                apply_policy_erasure(&source, cursor, None, ui::plugin::EditIntent::DeleteForward),
+                (source, cursor),
+            );
+        }
+    }
+}

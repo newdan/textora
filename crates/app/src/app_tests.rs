@@ -4559,6 +4559,38 @@ fn markdown_paragraph_transactions_restore_source_and_cursor_through_history() {
     }
     let cases = [
         ParagraphHistoryCase {
+            source: "# **Title** ##\r\n\r\ntail",
+            cursor_prefix: "# **Title",
+            selection: None,
+            command: EditCommand::InsertNewline,
+            expected: "# **Title** ##\r\n\r\n\r\ntail",
+            expected_cursor_prefix: "# **Title** ##\r\n\r\n",
+        },
+        ParagraphHistoryCase {
+            source: "# **Title** ##\n\ntail",
+            cursor_prefix: "# **Title",
+            selection: None,
+            command: EditCommand::DeleteForward,
+            expected: "# **Title**tail",
+            expected_cursor_prefix: "# **Title",
+        },
+        ParagraphHistoryCase {
+            source: "# **Title** ##\n\ntail",
+            cursor_prefix: "# **Title** ##\n\n",
+            selection: None,
+            command: EditCommand::Backspace,
+            expected: "# **Title**tail",
+            expected_cursor_prefix: "# **Title**",
+        },
+        ParagraphHistoryCase {
+            source: "a\n\nx \n\n---",
+            cursor_prefix: "a\n\nx",
+            selection: None,
+            command: EditCommand::Backspace,
+            expected: "a\n\n\n---",
+            expected_cursor_prefix: "a\n\n",
+        },
+        ParagraphHistoryCase {
             source: "a\n",
             cursor_prefix: "a",
             selection: None,

@@ -259,36 +259,39 @@ fn delete_from_empty_paragraph(
 }
 
 #[derive(Clone, Copy)]
-enum Boundary {
+pub(super) enum Boundary {
     Start,
     End,
 }
 
-fn boundary_prefix_candidate(prefix: &str) -> bool {
-    if prefix.chars().next_back().is_some_and(char::is_alphanumeric) {
-        return false;
+pub(super) fn hidden_separator_range(
+    source: &str,
+    cursor: usize,
+    boundary: Boundary,
+) -> Option<Range<usize>> {
+    let document = parse_structure(source);
+    let paragraphs = EditableParagraphMap::from_blocks(&document.blocks, source);
+    for run in paragraphs.runs() {
+        if run.hidden_separator_count != run.lines.len() {
+            continue;
+        }
+        let first = run.lines.first()?;
+        let last = run.lines.last()?;
+        let newline_width = super::newline_sequence_width_before(source, first.source_range.start)?;
+        let range = first.source_range.start - newline_width..last.newline_range.end;
+        let matches_boundary = match boundary {
+            Boundary::Start => range.end == cursor,
+            Boundary::End => range.start == cursor,
+        };
+        if matches_boundary {
+            return Some(range);
+        }
     }
-    prefix.chars().all(|character| {
-        character.is_ascii_digit()
-            || matches!(
-                character,
-                ' ' | '\t'
-                    | '#'
-                    | '>'
-                    | '-'
-                    | '+'
-                    | '*'
-                    | '_'
-                    | '~'
-                    | '`'
-                    | '.'
-                    | ')'
-                    | '['
-                    | ']'
-                    | 'x'
-                    | 'X'
-            )
-    })
+    None
+}
+
+fn boundary_prefix_candidate(prefix: &str) -> bool {
+    !prefix.chars().next_back().is_some_and(char::is_alphanumeric)
 }
 
 fn container_start_deletion_range(
@@ -312,7 +315,7 @@ fn container_start_deletion_range(
 }
 
 fn boundary_suffix_candidate(suffix: &str) -> bool {
-    suffix.is_empty() || suffix.starts_with(['*', '_', '~', '`', ']'])
+    !suffix.chars().next().is_some_and(char::is_alphanumeric)
 }
 
 fn cross_owner_deletion(
@@ -354,7 +357,7 @@ fn cross_owner_deletion(
     Some(augmentation)
 }
 
-fn has_text_boundary(
+pub(super) fn has_text_boundary(
     blocks: &[crate::builder::BlockNode],
     cursor: usize,
     boundary: Boundary,
@@ -367,11 +370,25 @@ fn has_text_boundary(
         ) {
             return false;
         }
-        let own_boundary = match boundary {
-            Boundary::Start => block.projected_lines.first().map(|line| line.source_extent().start),
-            Boundary::End => block.projected_lines.last().map(|line| line.source_extent().end),
+        let line = match boundary {
+            Boundary::Start => block.projected_lines.first(),
+            Boundary::End => block.projected_lines.last(),
         };
-        own_boundary == Some(cursor) || has_text_boundary(&block.children, cursor, boundary)
+        let own_boundary = line.is_some_and(|line| {
+            let mut visible_spans = line.spans.iter().filter(|span| !span.visual_range.is_empty());
+            let (extent_boundary, visible_boundary) = match boundary {
+                Boundary::Start => (
+                    line.source_extent().start,
+                    visible_spans.next().map(|span| span.source_range.start),
+                ),
+                Boundary::End => (
+                    line.source_extent().end,
+                    visible_spans.next_back().map(|span| span.source_range.end),
+                ),
+            };
+            extent_boundary == cursor || visible_boundary == Some(cursor)
+        });
+        own_boundary || has_text_boundary(&block.children, cursor, boundary)
     })
 }
 

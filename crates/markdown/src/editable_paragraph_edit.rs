@@ -107,7 +107,7 @@ pub(super) fn erase_last_grapheme(source: &str, current_byte: usize) -> Option<E
     let (_, _, line_end) = super::locate_source_line_bounds(source, current_byte)?;
     let content_end = super::source_line_content_end(source, line_end);
     let suffix = source.get(current_byte..content_end)?;
-    if !suffix.is_empty() && !suffix.starts_with(['*', '_', '~', '`', ']']) {
+    if suffix.trim_start_matches([' ', '\t']).chars().next().is_some_and(char::is_alphanumeric) {
         return None;
     }
     let (grapheme_start, _) = source.get(..current_byte)?.grapheme_indices(true).next_back()?;
