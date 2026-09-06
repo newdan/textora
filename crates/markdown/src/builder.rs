@@ -9,6 +9,12 @@ use regex::Regex;
 use std::ops::Range;
 use std::sync::LazyLock;
 
+#[path = "editable_paragraphs.rs"]
+mod editable_paragraphs;
+pub(crate) use editable_paragraphs::{
+    EditableParagraphLine, EditableParagraphMap, EditableParagraphRun,
+};
+
 // ===== Block 节点 =====
 
 #[derive(Clone, Debug)]
@@ -39,6 +45,14 @@ pub struct BlockNode {
 }
 
 impl BlockNode {
+    /// An editor-only insertion paragraph omitted by the Markdown parser.
+    pub fn is_editable_empty_paragraph(&self) -> bool {
+        matches!(self.kind, BlockKind::Paragraph)
+            && self.block_range.is_empty()
+            && self.text_lines.len() == 1
+            && self.text_lines[0].is_empty()
+    }
+
     pub fn lines<'a>(
         &'a self,
         doc: &'a dyn core::document::DocView,
@@ -520,7 +534,7 @@ struct MarkdownBuilder {
 }
 
 impl MarkdownBuilder {
-    fn new(_style: &MarkdownStyle) -> Self {
+    fn new() -> Self {
         Self {
             block_stack: vec![BlockNode {
                 kind: BlockKind::Container,
@@ -731,9 +745,21 @@ fn needs_empty_text_line(node: &BlockNode) -> bool {
 // ===== 公开入口 =====
 
 impl MarkdownDoc {
+    /// Build the editable layout tree without changing the parsed Markdown or source.
+    pub fn build_for_editing(parsed: &ParsedMarkdown, style: &MarkdownStyle, source: &str) -> Self {
+        let mut document = Self::build(parsed, style);
+        editable_paragraphs::insert(&mut document.blocks, source);
+        document
+    }
+
     /// Build a MarkdownDoc from parsed events + style configuration.
-    pub fn build(parsed: &ParsedMarkdown, style: &MarkdownStyle) -> Self {
-        let mut builder = MarkdownBuilder::new(style);
+    pub fn build(parsed: &ParsedMarkdown, _style: &MarkdownStyle) -> Self {
+        Self::build_structure(parsed)
+    }
+
+    /// Parse-event structure shared by layout and source-only editing commands.
+    pub(crate) fn build_structure(parsed: &ParsedMarkdown) -> Self {
+        let mut builder = MarkdownBuilder::new();
 
         for (event_idx, event) in parsed.events.iter().enumerate() {
             if event_idx < parsed.event_ranges.len() {

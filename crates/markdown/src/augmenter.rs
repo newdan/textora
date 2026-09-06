@@ -13,10 +13,16 @@
 //! 3. `insert_text` 与 `replace_range` 至少有一个存在
 //! 4. `emit_*` 三原语内部用 `debug_assert!` 强制以上约束
 
+#[path = "editable_paragraph_edit.rs"]
+mod editable_paragraph_edit;
+#[path = "editable_paragraph_navigation.rs"]
+mod editable_paragraph_navigation;
+
 use crate::builder::ListBullet;
 #[cfg(test)]
 use std::cell::Cell;
 use ui::plugin::{AugmentKind, EditAugmentation};
+#[cfg(test)]
 use unicode_segmentation::UnicodeSegmentation;
 
 const LF_SEQUENCE: &str = "\n";
@@ -99,6 +105,9 @@ fn emit_inline_html_break(source: &str, current_byte: usize) -> EditAugmentation
 }
 
 fn augment_enter(source: &str, current_byte: usize) -> Option<EditAugmentation> {
+    if let Some(augmentation) = editable_paragraph_navigation::enter(source, current_byte) {
+        return Some(augmentation);
+    }
     let context = classify_enter_context(source, current_byte);
     enter_context_augmentation(source, current_byte, context)
 }
@@ -122,7 +131,7 @@ fn augment_backspace(source: &str, current_byte: usize) -> Option<EditAugmentati
     if let Some(aug) = backspace_paragraph_boundary(source, current_byte) {
         return Some(aug);
     }
-    if let Some(aug) = backspace_last_interblock_paragraph_grapheme(source, current_byte) {
+    if let Some(aug) = backspace_last_isolated_paragraph_grapheme(source, current_byte) {
         return Some(aug);
     }
     let range = get_marker_delete_range(source, current_byte)?;
@@ -573,48 +582,11 @@ fn backspace_at_atx_heading_marker_start(
     Some(augmentation)
 }
 
-fn backspace_last_interblock_paragraph_grapheme(
+fn backspace_last_isolated_paragraph_grapheme(
     source: &str,
     current_byte: usize,
 ) -> Option<EditAugmentation> {
-    let (line_start, _, line_end) = locate_source_line_bounds(source, current_byte)?;
-    let content_end = source_line_content_end(source, line_end);
-    if current_byte != content_end {
-        return None;
-    }
-    if !matches!(classify_enter_context(source, current_byte), EnterContext::TopLevelParagraphEnd) {
-        return None;
-    }
-
-    if UnicodeSegmentation::graphemes(&source[line_start..content_end], true).count() != 1
-        || !has_two_newline_sequences_before(source, line_start)
-        || !has_two_newline_sequences_after(source, content_end)
-    {
-        return None;
-    }
-
-    let trailing_newline_width = newline_sequence_width_at(source, content_end)?;
-    let aug = EditAugmentation {
-        insert_text: Some(String::new()),
-        replace_range: Some(line_start..content_end + trailing_newline_width),
-        cursor_byte_after: line_start,
-    };
-    debug_assert_augmentation(&aug, source);
-    Some(aug)
-}
-
-fn has_two_newline_sequences_before(source: &str, byte: usize) -> bool {
-    let Some(first_width) = newline_sequence_width_before(source, byte) else {
-        return false;
-    };
-    newline_sequence_width_before(source, byte - first_width).is_some()
-}
-
-fn has_two_newline_sequences_after(source: &str, byte: usize) -> bool {
-    let Some(first_width) = newline_sequence_width_at(source, byte) else {
-        return false;
-    };
-    newline_sequence_width_at(source, byte + first_width).is_some()
+    editable_paragraph_edit::erase_last_grapheme(source, current_byte)
 }
 
 fn newline_sequence_width_before(source: &str, byte: usize) -> Option<usize> {
@@ -705,66 +677,7 @@ fn preferred_newline_sequence(source: &str, current_byte: usize) -> &'static str
 }
 
 fn augment_insert_text(source: &str, current_byte: usize, text: &str) -> Option<EditAugmentation> {
-    let (line_start, _, line_end) = locate_source_line_bounds(source, current_byte)?;
-    let content_end = source_line_content_end(source, line_end);
-    if source[line_start..content_end].chars().any(|character| !character.is_whitespace()) {
-        return None;
-    }
-    let context = classify_enter_context(source, current_byte);
-    if !matches!(context, EnterContext::EmptyBlockSeparatorLine) {
-        return None;
-    }
-    // 在"块间空行 run"里输入字符：把插入点周围的换行修剪为两侧各恰好 2 个
-    // （保持前后块间距不变），中间放入 text；如触及文档边界则不再强补换行。
-    let mut start = current_byte;
-    let mut left_newline_count = 0;
-    while let Some(width) = newline_sequence_width_before(source, start) {
-        start -= width;
-        left_newline_count += 1;
-    }
-    let mut end = current_byte;
-    let mut right_newline_count = 0;
-    while let Some(width) = newline_sequence_width_at(source, end) {
-        end += width;
-        right_newline_count += 1;
-    }
-
-    let at_start = start == 0;
-    let at_end = end == source.len();
-
-    let needed_left = if at_start {
-        left_newline_count
-    } else {
-        left_newline_count.max(BLOCK_BOUNDARY_NEWLINE_COUNT)
-    };
-    let needed_right = if at_end {
-        right_newline_count
-    } else {
-        right_newline_count.max(BLOCK_BOUNDARY_NEWLINE_COUNT)
-    };
-    if needed_left == 0 && needed_right == 0 {
-        return None;
-    }
-
-    let newline = preferred_newline_sequence(source, current_byte);
-    let mut insert =
-        String::with_capacity((needed_left + needed_right) * newline.len() + text.len());
-    for _ in 0..needed_left {
-        insert.push_str(newline);
-    }
-    insert.push_str(text);
-    let cursor_after = start + insert.len();
-    for _ in 0..needed_right {
-        insert.push_str(newline);
-    }
-
-    let aug = EditAugmentation {
-        replace_range: Some(start..end),
-        insert_text: Some(insert),
-        cursor_byte_after: cursor_after,
-    };
-    debug_assert_augmentation(&aug, source);
-    Some(aug)
+    editable_paragraph_edit::insert_text(source, current_byte, text)
 }
 
 // ─── emit_* 原语 ──────────────────────────────────────────────────────────
@@ -848,32 +761,7 @@ fn emit_block_break_at(source: &str, insert_at: usize) -> EditAugmentation {
 }
 
 fn backspace_empty_source_line(source: &str, current_byte: usize) -> Option<EditAugmentation> {
-    let (line_start, _, line_end) = locate_source_line_bounds(source, current_byte)?;
-    if line_start != source_line_content_end(source, line_end) {
-        return None;
-    }
-
-    let previous_line_end = previous_non_empty_line_end(source, current_byte);
-    let (delete_range, cursor_byte_after) = if current_byte >= source.len() {
-        let previous_newline_width = newline_sequence_width_before(source, current_byte)?;
-        if contiguous_newline_count_before(source, current_byte) > BLOCK_BOUNDARY_NEWLINE_COUNT {
-            let range = current_byte - previous_newline_width..current_byte;
-            let cursor = range.start;
-            (range, cursor)
-        } else {
-            (previous_line_end..current_byte, previous_line_end)
-        }
-    } else {
-        let newline_width = newline_sequence_width_at(source, line_start)?;
-        (line_start..line_start + newline_width, previous_line_end)
-    };
-    let aug = EditAugmentation {
-        insert_text: Some(String::new()),
-        replace_range: Some(delete_range),
-        cursor_byte_after,
-    };
-    debug_assert_augmentation(&aug, source);
-    Some(aug)
+    editable_paragraph_navigation::backspace(source, current_byte)
 }
 
 fn contiguous_newline_count_before(source: &str, byte: usize) -> usize {
@@ -979,14 +867,6 @@ fn guard_unmergeable_leaf_boundary(
     };
     debug_assert_augmentation(&aug, source);
     Some(aug)
-}
-
-fn previous_non_empty_line_end(source: &str, current_byte: usize) -> usize {
-    let mut previous_line_end = current_byte.min(source.len());
-    while let Some(newline_width) = newline_sequence_width_before(source, previous_line_end) {
-        previous_line_end -= newline_width;
-    }
-    previous_line_end
 }
 
 fn backspace_join_hard_break_line(source: &str, current_byte: usize) -> Option<EditAugmentation> {
@@ -3084,6 +2964,100 @@ mod tests {
         edited_source
     }
 
+    fn apply_backspace_with_default(source: &str, current_byte: usize) -> (String, usize) {
+        if let Some(augmentation) = augment_edit(source, current_byte, AugmentKind::Backspace) {
+            return (
+                apply_augmentation_at(source, current_byte, &augmentation),
+                augmentation.cursor_byte_after,
+            );
+        }
+
+        let (grapheme_start, _) =
+            UnicodeSegmentation::grapheme_indices(&source[..current_byte], true)
+                .next_back()
+                .expect("Backspace fixture must have a preceding grapheme");
+        let mut edited_source = source.to_owned();
+        edited_source.replace_range(grapheme_start..current_byte, "");
+        (edited_source, grapheme_start)
+    }
+
+    fn assert_empty_paragraph_text_roundtrip(
+        source: &str,
+        current_byte: usize,
+        expected_source: &str,
+        expected_cursor: usize,
+    ) {
+        let insertion =
+            augment_edit(source, current_byte, AugmentKind::InsertText(String::from("新")))
+                .expect("typing in an empty paragraph must preserve its sibling slots");
+        let typed_source = apply_augmentation_at(source, current_byte, &insertion);
+
+        assert_eq!(typed_source, expected_source, "insertion mismatch for {source:?}");
+        assert_eq!(insertion.cursor_byte_after, expected_cursor);
+
+        let (restored_source, restored_cursor) =
+            apply_backspace_with_default(&typed_source, insertion.cursor_byte_after);
+        assert_eq!(restored_source, source, "deletion mismatch for {source:?}");
+        assert_eq!(restored_cursor, current_byte);
+    }
+
+    fn editable_paragraph_slots(source: &str) -> Vec<(Vec<usize>, usize)> {
+        let parsed = crate::parser::parse_markdown(source);
+        let document = crate::builder::MarkdownDoc::build_structure(&parsed);
+        let paragraphs =
+            crate::builder::EditableParagraphMap::from_blocks(&document.blocks, source);
+        paragraphs
+            .runs()
+            .iter()
+            .flat_map(|run| {
+                run.lines[run.hidden_separator_count..]
+                    .iter()
+                    .map(|line| (run.owner_path.clone(), line.source_byte))
+            })
+            .collect()
+    }
+
+    fn assert_empty_paragraph_enter_backspace_sequence(
+        source: &str,
+        current_byte: usize,
+        expected_first_enter: &str,
+        expected_second_enter: &str,
+        expected_owner_path: &[usize],
+    ) {
+        let initial_slots = editable_paragraph_slots(source);
+        assert_eq!(initial_slots, [(expected_owner_path.to_vec(), current_byte)]);
+
+        let first_enter = augment_edit(source, current_byte, AugmentKind::Enter)
+            .expect("Enter on a real empty paragraph must add one sibling slot");
+        let after_first = apply_augmentation_at(source, current_byte, &first_enter);
+        let first_slots = editable_paragraph_slots(&after_first);
+        assert_eq!(after_first, expected_first_enter);
+        assert_eq!(first_slots.len(), 2);
+        assert_eq!(first_enter.cursor_byte_after, first_slots[1].1);
+        assert!(first_slots.iter().all(|(owner, _)| owner == expected_owner_path));
+
+        let second_enter =
+            augment_edit(&after_first, first_enter.cursor_byte_after, AugmentKind::Enter)
+                .expect("repeated Enter must add one more sibling slot");
+        let after_second =
+            apply_augmentation_at(&after_first, first_enter.cursor_byte_after, &second_enter);
+        let second_slots = editable_paragraph_slots(&after_second);
+        assert_eq!(after_second, expected_second_enter);
+        assert_eq!(second_slots.len(), 3);
+        assert_eq!(second_enter.cursor_byte_after, second_slots[2].1);
+        assert!(second_slots.iter().all(|(owner, _)| owner == expected_owner_path));
+
+        let (restored_first, restored_first_cursor) =
+            apply_backspace_with_default(&after_second, second_enter.cursor_byte_after);
+        assert_eq!(
+            (restored_first, restored_first_cursor),
+            (after_first.clone(), first_enter.cursor_byte_after)
+        );
+        let (restored_source, restored_cursor) =
+            apply_backspace_with_default(&after_first, first_enter.cursor_byte_after);
+        assert_eq!((restored_source, restored_cursor), (source.to_owned(), current_byte));
+    }
+
     #[test]
     fn regular_text_insertion_skips_document_classification_parse() {
         reset_classify_parse_count();
@@ -3094,6 +3068,111 @@ mod tests {
 
         assert!(augmentation.is_none());
         assert_eq!(classify_parse_count(), 0);
+    }
+
+    #[test]
+    fn padded_top_level_empty_paragraph_enter_backspace_preserves_source_and_slots() {
+        for newline in [LF_SEQUENCE, CRLF_SEQUENCE] {
+            let source = format!("head{newline} {newline} {newline}tail");
+            let current_byte = format!("head{newline} {newline}").len();
+            let after_first = format!("head{newline} {newline} {newline}{newline}tail");
+            let after_second = format!("head{newline} {newline} {newline}{newline}{newline}tail");
+
+            assert_empty_paragraph_enter_backspace_sequence(
+                &source,
+                current_byte,
+                &after_first,
+                &after_second,
+                &[],
+            );
+        }
+    }
+
+    #[test]
+    fn trailing_single_empty_paragraph_enter_accounts_for_new_hidden_separator() {
+        for newline in [LF_SEQUENCE, CRLF_SEQUENCE] {
+            let source = format!("head{newline}");
+            let current_byte = source.len();
+            let initial_slots = editable_paragraph_slots(&source);
+            assert_eq!(initial_slots, [(Vec::new(), current_byte)]);
+
+            let enter = augment_edit(&source, current_byte, AugmentKind::Enter)
+                .expect("Enter must add a trailing empty paragraph slot");
+            let edited_source = apply_augmentation_at(&source, current_byte, &enter);
+            let expected_source = format!("head{newline}{newline}{newline}");
+            let entered_slots = editable_paragraph_slots(&edited_source);
+            assert_eq!(edited_source, expected_source);
+            assert_eq!(entered_slots.len(), initial_slots.len() + 1);
+            assert_eq!(enter.cursor_byte_after, entered_slots[1].1);
+
+            let (after_backspace, backspace_cursor) =
+                apply_backspace_with_default(&edited_source, enter.cursor_byte_after);
+            let remaining_slots = editable_paragraph_slots(&after_backspace);
+            assert_eq!(remaining_slots.len(), initial_slots.len());
+            assert_eq!(backspace_cursor, remaining_slots[0].1);
+        }
+    }
+
+    #[test]
+    fn blockquote_empty_paragraph_enter_backspace_stays_in_owner() {
+        for newline in [LF_SEQUENCE, CRLF_SEQUENCE] {
+            let source = format!("> first{newline}>{newline}>{newline}> second");
+            let current_byte = format!("> first{newline}>{newline}>").len();
+            let after_first = format!("> first{newline}>{newline}>{newline}>{newline}> second");
+            let after_second =
+                format!("> first{newline}>{newline}>{newline}>{newline}>{newline}> second");
+
+            assert_empty_paragraph_enter_backspace_sequence(
+                &source,
+                current_byte,
+                &after_first,
+                &after_second,
+                &[0],
+            );
+        }
+    }
+
+    #[test]
+    fn all_empty_blockquote_with_multiple_slots_keeps_navigating_in_its_owner() {
+        for newline in [LF_SEQUENCE, CRLF_SEQUENCE] {
+            let source = format!(">{newline}>{newline}>");
+            let current_byte = source.len();
+            let initial_slots = editable_paragraph_slots(&source);
+            assert_eq!(initial_slots.len(), 3);
+            assert!(initial_slots.iter().all(|(owner, _)| owner == &[0]));
+
+            let enter = augment_edit(&source, current_byte, AugmentKind::Enter)
+                .expect("a multi-slot empty quote must keep Enter inside its owner");
+            let edited_source = apply_augmentation_at(&source, current_byte, &enter);
+            let expected_source = format!(">{newline}>{newline}>{newline}>");
+            let entered_slots = editable_paragraph_slots(&edited_source);
+            assert_eq!(edited_source, expected_source);
+            assert_eq!(entered_slots.len(), initial_slots.len() + 1);
+            assert_eq!(enter.cursor_byte_after, entered_slots[3].1);
+
+            let (restored_source, restored_cursor) =
+                apply_backspace_with_default(&edited_source, enter.cursor_byte_after);
+            assert_eq!((restored_source, restored_cursor), (source, current_byte));
+        }
+    }
+
+    #[test]
+    fn list_empty_paragraph_enter_backspace_stays_in_owner() {
+        for newline in [LF_SEQUENCE, CRLF_SEQUENCE] {
+            let source = format!("- first{newline}{newline}{newline}  second");
+            let current_byte = format!("- first{newline}{newline}").len();
+            let after_first = format!("- first{newline}{newline}{newline}{newline}  second");
+            let after_second =
+                format!("- first{newline}{newline}{newline}{newline}{newline}  second");
+
+            assert_empty_paragraph_enter_backspace_sequence(
+                &source,
+                current_byte,
+                &after_first,
+                &after_second,
+                &[0],
+            );
+        }
     }
 
     #[test]
@@ -3376,6 +3455,95 @@ mod tests {
     }
 
     #[test]
+    fn backspace_between_blocks_reverses_three_enters_one_at_a_time() {
+        for newline in [LF_SEQUENCE, CRLF_SEQUENCE] {
+            let initial_source = format!("前段{newline}{newline}后段");
+            let initial_cursor = "前段".len();
+            let mut edit_states = vec![(initial_source, initial_cursor)];
+
+            for _ in 0..3 {
+                let (source, cursor) =
+                    edit_states.last().expect("the initial edit state must exist");
+                let enter = augment_edit(source, *cursor, AugmentKind::Enter)
+                    .expect("Enter between blocks must create an editable empty paragraph");
+                edit_states.push((
+                    apply_augmentation_at(source, *cursor, &enter),
+                    enter.cursor_byte_after,
+                ));
+            }
+
+            for expected_state_index in (0..3).rev() {
+                let (source, cursor) =
+                    edit_states.last().expect("the latest edit state must exist");
+                let backspace = augment_edit(source, *cursor, AugmentKind::Backspace)
+                    .expect("Backspace must reverse the nearest Enter");
+                let edited_source = apply_augmentation_at(source, *cursor, &backspace);
+                let expected_state = &edit_states[expected_state_index];
+
+                assert_eq!(edited_source, expected_state.0, "source mismatch for {newline:?}");
+                assert_eq!(
+                    backspace.cursor_byte_after, expected_state.1,
+                    "cursor mismatch for {newline:?}"
+                );
+                edit_states.pop();
+            }
+        }
+    }
+
+    #[test]
+    fn backspace_in_blank_run_before_atomic_block_keeps_nearest_empty_line() {
+        let cases = [
+            ("前段\n\n\n\n---", "前段\n\n\n".len(), "前段\n\n\n---", "前段\n\n".len()),
+            (
+                "# 标题\r\n\r\n\r\n\r\n```",
+                "# 标题\r\n\r\n\r\n".len(),
+                "# 标题\r\n\r\n\r\n```",
+                "# 标题\r\n\r\n".len(),
+            ),
+        ];
+
+        for (source, current_byte, expected_source, expected_cursor) in cases {
+            let augmentation = augment_edit(source, current_byte, AugmentKind::Backspace)
+                .expect("Backspace in the blank run must remove one empty line");
+            let edited_source = apply_augmentation_at(source, current_byte, &augmentation);
+
+            assert_eq!(edited_source, expected_source);
+            assert_eq!(augmentation.cursor_byte_after, expected_cursor);
+        }
+    }
+
+    #[test]
+    fn backspace_on_fenced_code_blank_line_keeps_default_physical_newline_edit() {
+        let source = "```\nfirst\n\n\nsecond\n```";
+        let current_byte = "```\nfirst\n\n".len();
+
+        assert!(matches!(classify_enter_context(source, current_byte), EnterContext::CodeBlock));
+        assert!(
+            augment_edit(source, current_byte, AugmentKind::Backspace).is_none(),
+            "Backspace inside fenced code must delete the preceding physical newline by default"
+        );
+    }
+
+    #[test]
+    fn backspace_without_preceding_block_removes_only_one_empty_slot() {
+        let cases = [
+            ("\n\n", 2, "\n", 1),
+            ("\n\n\nhead", 2, "\n\nhead", 1),
+            ("\r\n\r\n", 4, "\r\n", 2),
+            ("\r\n\r\n\r\nhead", 4, "\r\n\r\nhead", 2),
+        ];
+
+        for (source, current_byte, expected_source, expected_cursor) in cases {
+            let augmentation = augment_edit(source, current_byte, AugmentKind::Backspace)
+                .expect("Backspace must remove only the nearest leading empty slot");
+            let edited_source = apply_augmentation_at(source, current_byte, &augmentation);
+
+            assert_eq!(edited_source, expected_source, "source mismatch for {source:?}");
+            assert_eq!(augmentation.cursor_byte_after, expected_cursor);
+        }
+    }
+
+    #[test]
     fn list_enter_preserves_marker_style_and_resets_completed_tasks() {
         let cases = [
             ("* item", "\n* "),
@@ -3529,6 +3697,96 @@ mod tests {
 
         assert_eq!(edited_source, "first\r\n\r\n中\r\n\r\nsecond");
         assert_eq!(augmentation.cursor_byte_after, "first\r\n\r\n中".len());
+    }
+
+    #[test]
+    fn insert_text_in_leading_empty_lines_preserves_every_slot_and_is_reversible() {
+        let cases = [
+            ("\n\nhead", 0, "新\n\n\nhead", "新".len()),
+            ("\n\nhead", 1, "\n新\n\nhead", "\n新".len()),
+            ("\r\n\r\nhead", 0, "新\r\n\r\n\r\nhead", "新".len()),
+            ("\r\n\r\nhead", 2, "\r\n新\r\n\r\nhead", "\r\n新".len()),
+        ];
+
+        for (source, current_byte, expected_source, expected_cursor) in cases {
+            assert_empty_paragraph_text_roundtrip(
+                source,
+                current_byte,
+                expected_source,
+                expected_cursor,
+            );
+        }
+    }
+
+    #[test]
+    fn insert_text_in_each_pure_empty_document_line_preserves_all_lines() {
+        let cases = [
+            ("\n\n", 0, "新\n\n\n", "新".len()),
+            ("\n\n", 1, "\n新\n\n", "\n新".len()),
+            ("\n\n", 2, "\n\n新", "\n\n新".len()),
+            ("\r\n\r\n", 0, "新\r\n\r\n\r\n", "新".len()),
+            ("\r\n\r\n", 2, "\r\n新\r\n\r\n", "\r\n新".len()),
+            ("\r\n\r\n", 4, "\r\n\r\n新", "\r\n\r\n新".len()),
+        ];
+
+        for (source, current_byte, expected_source, expected_cursor) in cases {
+            assert_empty_paragraph_text_roundtrip(
+                source,
+                current_byte,
+                expected_source,
+                expected_cursor,
+            );
+        }
+    }
+
+    #[test]
+    fn insert_text_in_each_interblock_empty_slot_preserves_the_complete_run() {
+        let cases = [
+            ("head\n\n\n\nfoot", "head\n\n".len(), "head\n\n新\n\n\nfoot"),
+            ("head\n\n\n\nfoot", "head\n\n\n".len(), "head\n\n\n新\n\nfoot"),
+            ("head\r\n\r\n\r\n\r\nfoot", "head\r\n\r\n".len(), "head\r\n\r\n新\r\n\r\n\r\nfoot"),
+            (
+                "head\r\n\r\n\r\n\r\nfoot",
+                "head\r\n\r\n\r\n".len(),
+                "head\r\n\r\n\r\n新\r\n\r\nfoot",
+            ),
+        ];
+
+        for (source, current_byte, expected_source) in cases {
+            assert_empty_paragraph_text_roundtrip(
+                source,
+                current_byte,
+                expected_source,
+                current_byte + "新".len(),
+            );
+        }
+    }
+
+    #[test]
+    fn insert_text_in_first_trailing_empty_line_preserves_every_slot_and_is_reversible() {
+        let cases = [
+            ("head\n\n\n\n", "head\n\n".len(), "head\n\n新\n\n\n"),
+            ("head\r\n\r\n\r\n\r\n", "head\r\n\r\n".len(), "head\r\n\r\n新\r\n\r\n\r\n"),
+        ];
+
+        for (source, current_byte, expected_source) in cases {
+            assert_empty_paragraph_text_roundtrip(
+                source,
+                current_byte,
+                expected_source,
+                current_byte + "新".len(),
+            );
+        }
+    }
+
+    #[test]
+    fn insert_text_with_source_newline_keeps_default_semantics_on_empty_lines() {
+        for text in ["\n", "\r\n", "新\n行"] {
+            assert!(
+                augment_edit("\n\nhead", 0, AugmentKind::InsertText(String::from(text))).is_none(),
+                "newline insertion must not use empty-paragraph normalization: {text:?}"
+            );
+        }
     }
 
     #[test]

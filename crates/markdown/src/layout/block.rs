@@ -267,7 +267,6 @@ pub(crate) fn layout_block(block: &BlockNode, ctx: &mut LayoutCtx) {
                     crate::edit::active_block_marker(block, edit_ctx.cursor_byte);
             }
             for child in &block.children {
-                reserve_nested_blank_source_lines(ctx, child);
                 layout_block(child, ctx);
             }
             ctx.active_block_marker = None;
@@ -438,7 +437,6 @@ pub(crate) fn layout_block(block: &BlockNode, ctx: &mut LayoutCtx) {
                 {
                     ctx.y += ctx.style.paragraph_spacing;
                 }
-                reserve_nested_blank_source_lines(ctx, child);
                 layout_block(child, ctx);
             }
             let sub_blocks: Vec<LaidOutBlock> = ctx.output.drain(..).collect();
@@ -544,55 +542,6 @@ pub(crate) fn layout_block(block: &BlockNode, ctx: &mut LayoutCtx) {
             ctx.y += trailing;
         }
     }
-}
-
-/// 嵌套子块前的源空行补偿：解析器会从块树中丢弃空行，此处为子块前
-/// 空行 run 中除隐藏分隔行外的每个可编辑空段落追加一行高和一份出向
-/// 段落间距，与 `LazyLayout::reserve_extra_blank_source_lines` 对顶层块的
-/// 公式一致。
-/// 仅在编辑模式（有 source_text）下生效；估计/预览阶段无源文本可参照。
-fn reserve_nested_blank_source_lines(ctx: &mut LayoutCtx, child: &BlockNode) {
-    let Some(source_text) = ctx.source_text else {
-        return;
-    };
-    let blank_run = preceding_blank_source_run(source_text, child.block_range.start);
-    ctx.y +=
-        ctx.reserve_blank_source_run(blank_run.following_line_start, blank_run.blank_line_count);
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-struct PrecedingBlankSourceRun {
-    following_line_start: usize,
-    blank_line_count: usize,
-}
-
-/// 统计紧贴 `byte` 所在源码行之前的连续空行数。
-fn preceding_blank_source_run(source: &str, byte: usize) -> PrecedingBlankSourceRun {
-    let byte = byte.min(source.len());
-    let mut line_start = source[..byte].rfind('\n').map_or(0, |idx| idx + 1);
-    let following_line_start = line_start;
-    let mut count = 0;
-    while line_start > 0 {
-        let prev_line_end = line_start - 1;
-        if source.as_bytes()[prev_line_end] != b'\n' {
-            break;
-        }
-        let prev_line_start = source[..prev_line_end].rfind('\n').map_or(0, |idx| idx + 1);
-        if !source_line_is_blank(&source[prev_line_start..prev_line_end]) {
-            break;
-        }
-        count += 1;
-        line_start = prev_line_start;
-    }
-    PrecedingBlankSourceRun { following_line_start, blank_line_count: count }
-}
-
-fn source_line_is_blank(line: &str) -> bool {
-    let mut remaining = line.trim();
-    while let Some(after_marker) = remaining.strip_prefix('>') {
-        remaining = after_marker.trim_start();
-    }
-    remaining.is_empty()
 }
 
 fn shaped_prefix_width(
@@ -902,6 +851,29 @@ fn marker_source_range_for_projected_line(
     content_start.saturating_sub(marker_len)..content_start
 }
 
+fn source_marker_for_projected_line(
+    projected: &crate::projection::ProjectedText,
+    marker: &crate::edit::ActiveBlockMarker,
+    source: Option<&str>,
+) -> Option<crate::edit::ActiveBlockMarker> {
+    if !marker.marker_text.starts_with('>') {
+        return Some(marker.clone());
+    }
+    let content_start = projected.boundaries.first()?.byte;
+    let preceding_source = source?.get(..content_start)?;
+    let line_start = preceding_source.rfind('\n').map_or(0, |newline| newline + 1);
+    let line_prefix = &preceding_source[line_start..];
+    let marker_offset = line_prefix.rfind('>')?;
+    let marker_text = &line_prefix[marker_offset..];
+    if !marker_text[1..].bytes().all(|byte| matches!(byte, b' ' | b'\t')) {
+        return None;
+    }
+    Some(crate::edit::ActiveBlockMarker {
+        marker_text: marker_text.to_owned(),
+        marker_source_range: line_start + marker_offset..content_start,
+    })
+}
+
 fn materialize_marker_for_projected_line(
     projected: crate::projection::ProjectedText,
     marker: &crate::edit::ActiveBlockMarker,
@@ -1036,7 +1008,11 @@ pub(crate) fn layout_text_block(
         if let Some(source_text) = ctx.source_text {
             append_trailing_whitespace_projection(&mut projected, source_text);
         }
-        let marker = (line_idx == 0).then_some(ctx.active_block_marker.as_ref()).flatten();
+        let marker =
+            (line_idx == 0).then_some(ctx.active_block_marker.as_ref()).flatten().and_then(
+                |marker| source_marker_for_projected_line(&projected, marker, ctx.source_text),
+            );
+        let marker = marker.as_ref();
         let marker_source_range =
             marker.map(|marker| marker_source_range_for_projected_line(&projected, marker));
         if let Some(marker) = marker {
@@ -1144,6 +1120,16 @@ pub(crate) fn layout_text_block(
                 source_projection: Some(source_projection),
             });
             ly += line_h;
+        }
+    }
+
+    if block.is_editable_empty_paragraph() {
+        for line in &mut laid_out_lines {
+            if let Some(projection) = &mut line.source_projection {
+                projection.owner = crate::projection::ProjectionOwnerId::EmptyLine {
+                    source_byte: block.block_range.start,
+                };
+            }
         }
     }
 
@@ -1756,7 +1742,7 @@ mod tests {
     ) -> LazyLayout<crate::builder::MarkdownDoc> {
         let parsed = crate::parser::parse_markdown(source);
         let style = default_style();
-        let doc = crate::builder::MarkdownDoc::build(&parsed, &style);
+        let doc = crate::builder::MarkdownDoc::build_for_editing(&parsed, &style, source);
         let doc_view = core::document::StringDocView::new(source);
         let mut lazy = LazyLayout::from_doc(doc, &style, width, &doc_view);
         lazy.set_edit_source(Some(source.to_string()));
@@ -1769,6 +1755,58 @@ mod tests {
         lazy.ensure_precise_range(0.0, 600.0, &style, &mut shaper, None, &doc_view);
         lazy.build_flat_lines(&doc_view);
         lazy
+    }
+
+    #[test]
+    fn empty_quote_marker_preserves_physical_source_boundaries() {
+        for newline in ["\n", "\r\n"] {
+            for prefix in [">", "> ", ">  ", ">\t"] {
+                let source = format!("> first{newline}{prefix}{newline}{prefix}{newline}> second");
+                let marker_start = "> first".len() + newline.len() * 2 + prefix.len();
+                let cursor = marker_start + prefix.len();
+                let layout = layout_with_cursor_and_width(&source, cursor, 400.0);
+                let line = layout
+                    .flat_lines
+                    .iter()
+                    .find(|line| {
+                        line.source_projection.as_ref().is_some_and(|projection| {
+                            projection.owner
+                                == crate::projection::ProjectionOwnerId::EmptyLine {
+                                    source_byte: cursor,
+                                }
+                        })
+                    })
+                    .expect("the second quoted blank line must be an editable paragraph");
+                assert_eq!(
+                    line.text, prefix,
+                    "source marker must not invent whitespace: {source:?}"
+                );
+                let projection =
+                    line.source_projection.as_ref().expect("empty paragraph projection");
+                assert_eq!(
+                    projection.source_extent,
+                    marker_start..cursor,
+                    "quote marker must never consume the preceding newline: {source:?}"
+                );
+                let index =
+                    layout.source_projection_index.as_ref().expect("valid source projection index");
+                for source_byte in marker_start..=cursor {
+                    let position = index
+                        .visual_position_for_source(
+                            source_byte,
+                            crate::projection::CursorAffinity::Downstream,
+                        )
+                        .expect("every actual quote marker boundary must have a visual position");
+                    assert_eq!(
+                        index
+                            .source_anchor_at(0, position)
+                            .expect("current projection generation must resolve")
+                            .byte,
+                        source_byte
+                    );
+                }
+            }
+        }
     }
 
     fn layout_with_selection_and_width(

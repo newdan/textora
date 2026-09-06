@@ -11,7 +11,7 @@ use ui::core::geom::Rect;
 use super::block::{layout_block, layout_doc_with_shaper};
 use super::reconcile::BlockReconcilePlan;
 use super::shaping::populate_style_segments;
-use super::source_line_map::{HiddenBlockSeparator, RenderedLineLayout, SourceLineMap};
+use super::source_line_map::{HiddenBlockSeparator, SourceLineMap};
 use super::{BlockSource, apply_deltas, flatten_blocks};
 
 /// Ratio of viewport height used as buffer above and below for lazy materialization.
@@ -83,6 +83,15 @@ struct RetainedVisualLineProjection {
     y: f32,
 }
 
+/// Snapshot of an explicitly laid out empty paragraph, for projection lookup.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct ProjectedEmptyLine {
+    pub owner: ProjectionOwnerId,
+    pub source_byte: usize,
+    pub y_top: f32,
+    pub height: f32,
+}
+
 // ===== Layout output types =====
 
 #[derive(Clone, Debug)]
@@ -142,21 +151,15 @@ pub struct LazyLayout<S: BlockSource> {
     cached_viewport_w: f32,
     /// Full source text for WYSIWYG span expansion via materialize_line.
     source_text: Option<String>,
-    /// Geometry used to materialize editable source-only empty lines.
-    source_line_height: f32,
-    /// Geometry reserved for a hidden separator between rendered blocks.
-    hidden_separator_height: f32,
-    /// Synthetic editable empty-line projections. These are deliberately kept
-    /// out of `flat_lines`, which is the public rendered-line collection.
-    projected_empty_lines: Vec<super::source_line_map::ProjectedEmptyLine>,
+    /// Empty paragraph geometry derived from the same rows exposed in `flat_lines`.
+    projected_empty_lines: Vec<ProjectedEmptyLine>,
     /// Hidden source ranges represented as collapsed boundaries in the index.
     hidden_block_separators: Vec<HiddenBlockSeparator>,
     /// Projection visual-line id → rendered `flat_lines` index. `None` denotes
     /// a zero-grapheme editable empty source line.
     projection_flat_line_indices: Vec<Option<usize>>,
-    /// Projection visual-line id → geometry for a synthetic empty source line.
-    projected_empty_line_geometry:
-        std::collections::BTreeMap<usize, super::source_line_map::ProjectedEmptyLine>,
+    /// Projection visual-line id → geometry for an explicitly laid out empty paragraph.
+    projected_empty_line_geometry: std::collections::BTreeMap<usize, ProjectedEmptyLine>,
     /// WYSIWYG edit context; None means pure preview (no cursor span expansion).
     edit_ctx: Option<crate::edit::EditContext>,
     /// Non-empty source selection range used for block-level editing fallbacks.
@@ -297,73 +300,44 @@ impl<S: BlockSource> LazyLayout<S> {
         }
         self.flat_lines = lines;
 
-        let (projected_empty_lines, hidden_block_separators) =
-            self.collect_source_only_empty_line_projections();
+        let (projected_empty_lines, hidden_block_separators) = self.collect_empty_line_layout();
         self.projected_empty_lines = projected_empty_lines;
         self.hidden_block_separators = hidden_block_separators;
-        if let Some(projected_content_bottom) = self
-            .projected_empty_lines
-            .iter()
-            .map(|line| line.y_top + line.height)
-            .max_by(f32::total_cmp)
-        {
-            self.total_height = self.total_height.max(projected_content_bottom);
-        }
-
         let _ = self.publish_flat_line_projection_index();
     }
 
-    fn collect_source_only_empty_line_projections(
-        &self,
-    ) -> (Vec<super::source_line_map::ProjectedEmptyLine>, Vec<HiddenBlockSeparator>) {
-        let Some(source_text) = self.source_text.as_deref() else {
-            return (Vec::new(), Vec::new());
-        };
-        if source_text.is_empty() || self.source_line_height <= 0.0 {
-            return (Vec::new(), Vec::new());
-        }
-
-        let rendered_lines = self
+    fn collect_empty_line_layout(&self) -> (Vec<ProjectedEmptyLine>, Vec<HiddenBlockSeparator>) {
+        let empty_lines = self
             .flat_lines
             .iter()
             .filter_map(|line| {
                 let projection = line.source_projection.as_ref()?;
-                Some(RenderedLineLayout {
-                    source_range: projection.source_extent.clone(),
+                let ProjectionOwnerId::EmptyLine { source_byte } = projection.owner else {
+                    return None;
+                };
+                Some(ProjectedEmptyLine {
+                    owner: projection.owner,
+                    source_byte,
                     y_top: line.rect.y,
                     height: line.rect.h,
                 })
             })
-            .collect::<Vec<_>>();
-        let mut source_line_map = SourceLineMap::from_source(source_text);
-        source_line_map.attach_layout(
-            &rendered_lines,
-            self.source_line_height,
-            self.hidden_separator_height,
-        );
-
-        let mut projected_empty_lines = source_line_map.projected_empty_lines().collect::<Vec<_>>();
-        for empty_line in &mut projected_empty_lines {
-            let Some(source_line) = source_line_map.line_at_byte(empty_line.source_byte) else {
-                continue;
-            };
-            let Some(run_position) = source_line_map.empty_run_position(source_line.index) else {
-                continue;
-            };
-            let run_ends_at_document_end = source_line.index
-                + (run_position.run_length - run_position.index_in_run)
-                == source_line_map.lines().len();
-            if !run_ends_at_document_end || run_position.run_length < 2 {
-                continue;
-            }
-            if run_position.index_in_run == 0 {
-                empty_line.height = self.hidden_separator_height;
-            } else {
-                empty_line.y_top -= self.source_line_height - self.hidden_separator_height;
-            }
-        }
-
-        (projected_empty_lines, source_line_map.hidden_block_separators().collect())
+            .collect();
+        let hidden_separators = self.source_text.as_deref().map_or_else(Vec::new, |source| {
+            let mut source_ranges = self
+                .flat_lines
+                .iter()
+                .filter_map(|line| {
+                    line.source_projection
+                        .as_ref()
+                        .map(|projection| projection.source_extent.clone())
+                        .or_else(|| line.atomic_source_range.clone())
+                })
+                .collect::<Vec<_>>();
+            source_ranges.sort_by_key(|range| range.start);
+            SourceLineMap::from_source(source).hidden_separators_for_rendered_lines(&source_ranges)
+        });
+        (empty_lines, hidden_separators)
     }
 
     fn add_hidden_separator_collapsed_ranges(
@@ -497,15 +471,6 @@ impl<S: BlockSource> LazyLayout<S> {
                 }
             }
         }
-        projection_candidates.extend(self.projected_empty_lines.iter().copied().map(
-            |empty_line| {
-                (
-                    VisualLineProjection::empty(0, empty_line.source_byte, empty_line.owner),
-                    None,
-                    empty_line.y_top,
-                )
-            },
-        ));
         projection_candidates.sort_by(|left, right| {
             left.0
                 .source_extent
@@ -521,16 +486,14 @@ impl<S: BlockSource> LazyLayout<S> {
             projection_candidates.into_iter().enumerate()
         {
             projection.flat_line_idx = visual_line_idx;
-            if flat_line_idx.is_none() {
-                let source_byte = projection.source_extent.start;
-                if let Some(empty_line) = self
+            if let ProjectionOwnerId::EmptyLine { source_byte } = projection.owner
+                && let Some(empty_line) = self
                     .projected_empty_lines
                     .iter()
                     .copied()
                     .find(|empty_line| empty_line.source_byte == source_byte)
-                {
-                    self.projected_empty_line_geometry.insert(visual_line_idx, empty_line);
-                }
+            {
+                self.projected_empty_line_geometry.insert(visual_line_idx, empty_line);
             }
             self.projection_flat_line_indices.push(flat_line_idx);
             visual_lines.push(projection);
@@ -572,7 +535,7 @@ impl<S: BlockSource> LazyLayout<S> {
     pub(crate) fn projected_empty_line_for_projection(
         &self,
         visual_line_idx: usize,
-    ) -> Option<super::source_line_map::ProjectedEmptyLine> {
+    ) -> Option<ProjectedEmptyLine> {
         self.projected_empty_line_geometry.get(&visual_line_idx).copied()
     }
 
@@ -1280,8 +1243,6 @@ impl<S: BlockSource> LazyLayout<S> {
             viewport_range: 0..0,
             cached_viewport_w: viewport_w,
             source_text: None,
-            source_line_height: 0.0,
-            hidden_separator_height: 0.0,
             projected_empty_lines: Vec::new(),
             hidden_block_separators: Vec::new(),
             projection_flat_line_indices: Vec::new(),
@@ -1399,72 +1360,6 @@ impl<S: BlockSource> LazyLayout<S> {
     /// Set the full source text for WYSIWYG span expansion.
     pub fn set_edit_source(&mut self, source_text: Option<String>) {
         self.source_text = source_text;
-    }
-
-    /// Reserve visual height for extra blank source lines between Markdown blocks.
-    ///
-    /// The parser drops blank lines from the block tree. In WYSIWYG editing mode,
-    /// those source lines still need spatial presence so paragraph insertion is
-    /// visible immediately after Enter.
-    ///
-    /// 2026-07-06：由 [`SourceLineMap`] 提供 run 位置，
-    /// 保留旧签名（供 `PreviewEngine::rebuild_layout` 直接调用）。
-    pub fn reserve_extra_blank_source_lines(&mut self, line_height: f32, paragraph_spacing: f32) {
-        self.source_line_height = line_height;
-        self.hidden_separator_height = paragraph_spacing;
-        let Some(source_text) = self.source_text.as_deref() else {
-            return;
-        };
-        if self.laid_to_doc.is_empty() {
-            return;
-        }
-        let map = super::source_line_map::SourceLineMap::from_source(source_text);
-        let blocks = self.source.blocks();
-
-        // ── Leading blank lines ──
-        if let Some(first_block) = self.laid_to_doc.first().and_then(|doc_idx| blocks.get(*doc_idx))
-        {
-            let first_start = first_block.block_range.start.min(source_text.len());
-            let leading_height =
-                map.extra_height_before_block(first_start, true, line_height, paragraph_spacing);
-            if leading_height > 0.0 {
-                for y_delta in &mut self.y_delta {
-                    *y_delta += leading_height;
-                }
-                self.total_height += leading_height;
-            }
-        }
-
-        if self.laid_to_doc.len() < 2 {
-            return;
-        }
-
-        // ── Inter-block blank lines ──
-        // 追加量 = (N-1)*(line_height+paragraph_spacing)：空行 run 首行的
-        // 入向间距由真实块间 gap 提供，其余每行是可编辑空段落，拥有独立
-        // 行高和出向段落间距（见 SourceLineMap::attach_layout）。
-        // 嵌套块（列表项/引用块子块）间的空行补偿在 layout_block 内完成，
-        // 与此处共用同一公式。
-        let mut gap_deltas = Vec::new();
-        for laid_idx in 1..self.laid_to_doc.len() {
-            let current_doc_idx = self.laid_to_doc[laid_idx];
-            let previous_doc_idx = self.laid_to_doc[laid_idx - 1];
-            if previous_doc_idx == current_doc_idx {
-                continue;
-            }
-            let Some(current_block) = blocks.get(current_doc_idx) else {
-                continue;
-            };
-            let current_start = current_block.block_range.start.min(source_text.len());
-            let extra_height =
-                map.extra_height_before_block(current_start, false, line_height, paragraph_spacing);
-            if extra_height > 0.0 {
-                gap_deltas.push((laid_idx - 1, extra_height));
-                self.total_height += extra_height;
-            }
-        }
-
-        apply_deltas(&mut self.y_delta, &gap_deltas);
     }
 
     /// Set the WYSIWYG edit context (cursor position for span expansion).
@@ -2156,7 +2051,8 @@ mod tests {
         source_generation: u32,
     ) -> LazyLayout<MarkdownDoc> {
         let style = default_style();
-        let (_, document) = make_doc(source);
+        let document =
+            MarkdownDoc::build_for_editing(&parse_markdown(source), &default_style(), source);
         let document_view = core::document::StringDocView::new(source);
         let mut layout = LazyLayout::new(document, &style, 400.0, &document_view);
         layout.set_source_generation(source_generation);
@@ -2166,7 +2062,6 @@ mod tests {
             preedit_text: None,
             preedit_cursor: None,
         }));
-        layout.reserve_extra_blank_source_lines(style.line_height, style.paragraph_spacing);
         layout.ensure_all_blocks(&style, 400.0, None, None, &document_view);
         layout.build_flat_lines(&document_view);
         layout
@@ -2236,7 +2131,8 @@ mod tests {
         source_generation: u32,
     ) -> (LazyLayout<MarkdownDoc>, usize) {
         let style = default_style();
-        let (_, document) = make_doc(source);
+        let document =
+            MarkdownDoc::build_for_editing(&parse_markdown(source), &default_style(), source);
         let document_view = core::document::StringDocView::new(source);
         let mut layout = LazyLayout::new(document, &style, 400.0, &document_view);
         layout.set_source_generation(source_generation);
@@ -2246,11 +2142,32 @@ mod tests {
             preedit_text: None,
             preedit_cursor: None,
         }));
-        layout.reserve_extra_blank_source_lines(style.line_height, style.paragraph_spacing);
         let reused_block_count = layout.reuse_unchanged_blocks_from(previous);
         layout.ensure_all_blocks(&style, 400.0, None, None, &document_view);
         layout.build_flat_lines(&document_view);
         (layout, reused_block_count)
+    }
+
+    #[test]
+    fn reconciled_zero_width_paragraphs_match_fresh_layout_through_edits() {
+        let sources = [
+            "# title\n\nhead\n\n\n---\n\n# tail",
+            "# title\n\nhead\n\n\n\n---\n\n# tail",
+            "# title\n\nhead\n\n新\n\n\n---\n\n# tail",
+            "# title\n\nhead\n\n\n---\n\n# tail",
+            "# title\n\nhead\n\n---\n\n# tail",
+        ];
+        let cursor = "# title\n\nhead\n\n".len();
+        let mut previous = build_editing_layout(sources[0], cursor, 1);
+        for (offset, source) in sources.iter().enumerate().skip(1) {
+            let generation = offset as u32 + 1;
+            let expected = build_editing_layout(source, cursor, generation);
+            let (reconciled, reused_count) =
+                reconcile_editing_layout(previous, source, cursor, generation);
+            assert!(reused_count > 0, "fixture must exercise block reuse");
+            assert_flat_layout_equivalent(&reconciled, &expected, source);
+            previous = reconciled;
+        }
     }
 
     #[test]
@@ -2266,7 +2183,11 @@ mod tests {
             new_source.find("changed").expect("the new fixture contains the inserted text");
         let expected = build_editing_layout(new_source, changed_cursor, 2);
         let style = default_style();
-        let (_, new_document) = make_doc(new_source);
+        let new_document = MarkdownDoc::build_for_editing(
+            &parse_markdown(new_source),
+            &default_style(),
+            new_source,
+        );
         let document_view = core::document::StringDocView::new(new_source);
         let mut reconciled = LazyLayout::new(new_document, &style, 400.0, &document_view);
         reconciled.set_source_generation(2);
@@ -2276,7 +2197,6 @@ mod tests {
             preedit_text: None,
             preedit_cursor: None,
         }));
-        reconciled.reserve_extra_blank_source_lines(style.line_height, style.paragraph_spacing);
 
         let reused_block_count = reconciled.reuse_unchanged_blocks_from(previous);
 
@@ -2431,12 +2351,11 @@ mod tests {
     #[test]
     fn trailing_empty_source_lines_are_included_in_total_height() {
         let source = "paragraph\n\n\n";
-        let (source, document) = make_doc(source);
         let style = default_style();
+        let document = MarkdownDoc::build_for_editing(&parse_markdown(source), &style, source);
         let document_view = core::document::StringDocView::new(source);
         let mut layout = LazyLayout::new(document, &style, 400.0, &document_view);
         layout.set_edit_source(Some(source.to_string()));
-        layout.reserve_extra_blank_source_lines(style.line_height, style.paragraph_spacing);
         layout.ensure_all_blocks(&style, 400.0, None, None, &document_view);
         layout.build_flat_lines(&document_view);
 
@@ -2551,12 +2470,12 @@ mod tests {
             .iter()
             .flatten()
             .find_map(|block| match &block.kind {
-                LaidOutBlockKind::ListItem { blocks, .. } if blocks.len() == 2 => Some(blocks),
+                LaidOutBlockKind::ListItem { blocks, .. } if blocks.len() == 3 => Some(blocks),
                 _ => None,
             })
-            .expect("fixture must produce a list item with two child paragraphs");
+            .expect("fixture must produce two text paragraphs and an explicit empty paragraph");
         let first_bottom = item_blocks[0].rect.y + item_blocks[0].rect.h;
-        let second_top = item_blocks[1].rect.y;
+        let second_top = item_blocks[2].rect.y;
         let expected = style.paragraph_spacing * 2.0 + style.line_height;
         assert!(
             (second_top - first_bottom - expected).abs() < 0.01,

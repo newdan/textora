@@ -28,6 +28,10 @@ use ui::plugin::{
 };
 use unicode_segmentation::UnicodeSegmentation;
 
+#[cfg(test)]
+#[path = "view_empty_paragraph_tests.rs"]
+mod empty_paragraph_tests;
+
 // ===== Syntax highlighter =====
 
 struct ByteSliceDoc<'a> {
@@ -210,9 +214,6 @@ fn source_line_at_byte_call_count() -> usize {
     SOURCE_LINE_AT_BYTE_CALLS.load(Ordering::Relaxed)
 }
 
-type RenderedLineRef<'a> = (usize, &'a crate::layout::FlatLine);
-type SurroundingRenderedLines<'a> = (Option<RenderedLineRef<'a>>, Option<RenderedLineRef<'a>>);
-
 struct StandalonePreeditRenderData<'a> {
     text: &'a str,
     cursor: Option<(usize, usize)>,
@@ -231,18 +232,6 @@ pub struct FlatLineProjectionBoundaries {
 impl SourceLineAtByte {
     fn is_empty(self) -> bool {
         self.is_blank
-    }
-}
-
-#[inline]
-fn source_line_span_to_at_byte(
-    span: crate::layout::source_line_map::SourceLineEntry,
-) -> SourceLineAtByte {
-    SourceLineAtByte {
-        index: span.index,
-        start: span.start,
-        end: span.end,
-        is_blank: span.is_blank,
     }
 }
 
@@ -582,7 +571,6 @@ impl<S: BlockSource> PreviewEngine<S> {
         lazy.set_edit_source(self.edit_source.clone());
         lazy.set_edit_ctx(self.edit_ctx.clone());
         lazy.set_selection_range(selection_range);
-        lazy.reserve_extra_blank_source_lines(style.line_height, style.paragraph_spacing);
         if let Some(previous_layout) = previous_layout {
             lazy.reuse_unchanged_blocks_from(previous_layout);
         }
@@ -1338,21 +1326,6 @@ impl<S: BlockSource> PreviewEngine<S> {
         let ctx = self.edit_ctx.as_ref()?;
         let preedit_text = ctx.preedit_text.as_deref().filter(|text| !text.is_empty())?;
         let lazy = self.lazy.as_ref()?;
-        let source = self.edit_source.as_ref()?;
-        let source_line = source_line_at_byte(source, ctx.cursor_byte)?;
-        if source_line.is_empty() {
-            if self.empty_source_line_role(source_line, lazy, source)
-                == EmptySourceLineRole::HiddenBlockSeparator
-            {
-                return None;
-            }
-            return self.empty_source_line_preedit_cursor_screen_pos(
-                source_line,
-                preedit_text,
-                ctx.preedit_cursor,
-            );
-        }
-
         let preedit_cursor_grapheme =
             preedit_cursor_grapheme_index(preedit_text, ctx.preedit_cursor);
         let virtual_position = lazy
@@ -1379,65 +1352,34 @@ impl<S: BlockSource> PreviewEngine<S> {
         Some((x, cursor_y, 2.0, cursor_height))
     }
 
-    fn empty_source_line_preedit_cursor_screen_pos(
-        &self,
-        source_line: SourceLineAtByte,
-        preedit_text: &str,
-        preedit_cursor: Option<(usize, usize)>,
-    ) -> Option<(f32, f32, f32, f32)> {
-        let source = self.edit_source.as_ref()?;
-        let lazy = self.lazy.as_ref()?;
-        let (x, line_top, font_size, line_height) =
-            self.empty_source_line_metrics(source_line, lazy, source);
-        let cursor_height = font_size.min(line_height);
-        let cursor_grapheme = preedit_cursor_grapheme_index(preedit_text, preedit_cursor);
-        let fallback_advance = cursor_grapheme as f32 * font_size * 0.3;
-        let cursor_x = x + self.standalone_preedit_cursor_advance.unwrap_or(fallback_advance);
-        let baseline_y = line_top + cursor_height;
-        let cursor_y = baseline_y - cursor_height * WYSIWYG_CURSOR_ASCENT_RATIO - self.scroll_y;
-        Some((cursor_x, cursor_y, 2.0, cursor_height))
-    }
-
     fn standalone_preedit_render_data(&self) -> Option<StandalonePreeditRenderData<'_>> {
         let ctx = self.edit_ctx.as_ref()?;
         let preedit_text = ctx.preedit_text.as_deref().filter(|text| !text.is_empty())?;
         let lazy = self.lazy.as_ref()?;
         let source = self.edit_source.as_deref()?;
         let source_line = source_line_at_byte(source, ctx.cursor_byte)?;
-        if !source_line.is_empty() {
-            let preedit_cursor_grapheme =
-                preedit_cursor_grapheme_index(preedit_text, ctx.preedit_cursor);
-            if lazy
-                .source_projection_index
-                .as_ref()?
-                .virtual_position_for_source(ctx.cursor_byte, preedit_cursor_grapheme)
-                .is_some()
-            {
-                return None;
-            }
-            let (x, cursor_y, _, cursor_height) =
-                self.cursor_screen_pos_for_byte(ctx.cursor_byte)?;
-            return Some(StandalonePreeditRenderData {
-                text: preedit_text,
-                cursor: ctx.preedit_cursor,
-                x,
-                baseline_y: cursor_y + cursor_height * WYSIWYG_CURSOR_ASCENT_RATIO,
-                font_size: cursor_height,
-            });
-        }
         if self.empty_source_line_role(source_line, lazy, source)
             == EmptySourceLineRole::HiddenBlockSeparator
         {
             return None;
         }
-
-        let (x, line_top, font_size, _) = self.empty_source_line_metrics(source_line, lazy, source);
+        let preedit_cursor_grapheme =
+            preedit_cursor_grapheme_index(preedit_text, ctx.preedit_cursor);
+        if lazy
+            .source_projection_index
+            .as_ref()?
+            .virtual_position_for_source(ctx.cursor_byte, preedit_cursor_grapheme)
+            .is_some()
+        {
+            return None;
+        }
+        let (x, cursor_y, _, cursor_height) = self.cursor_screen_pos_for_byte(ctx.cursor_byte)?;
         Some(StandalonePreeditRenderData {
             text: preedit_text,
             cursor: ctx.preedit_cursor,
             x,
-            baseline_y: line_top + font_size - self.scroll_y,
-            font_size,
+            baseline_y: cursor_y + cursor_height * WYSIWYG_CURSOR_ASCENT_RATIO,
+            font_size: cursor_height,
         })
     }
 
@@ -1463,7 +1405,7 @@ impl<S: BlockSource> PreviewEngine<S> {
         }
 
         let (x, line_top, font_size, line_height) =
-            self.empty_source_line_metrics(source_line, lazy, source);
+            self.empty_source_line_metrics(source_line, lazy, source)?;
         let cursor_height = font_size.min(line_height);
         let baseline_y = line_top + cursor_height;
         let cursor_y = baseline_y - cursor_height * WYSIWYG_CURSOR_ASCENT_RATIO - self.scroll_y;
@@ -1474,94 +1416,10 @@ impl<S: BlockSource> PreviewEngine<S> {
         &self,
         source_line: SourceLineAtByte,
         lazy: &LazyLayout<S>,
-        source: &str,
-    ) -> (f32, f32, f32, f32) {
-        if let Some(position) = lazy.source_projection_index.as_ref().and_then(|index| {
-            index.visual_position_for_source(source_line.start, CursorAffinity::Downstream)
-        }) && let Some(empty_line) =
-            lazy.projected_empty_line_for_projection(position.flat_line_idx)
-            && empty_line.source_byte == source_line.start
-        {
-            let (x, font_size, line_height) = self.empty_source_line_typography(source_line, lazy);
-            return (x, empty_line.y_top, font_size, line_height);
-        }
-
-        // 块内部空行自带渲染行：直接使用该渲染行几何，保证光标落在看到的空行上。
-        if let Some(own_line) = self.own_rendered_line(source_line, lazy) {
-            return (own_line.rect.x, own_line.rect.y, own_line.font_size, own_line.rect.h);
-        }
-
-        let (previous_line, next_line) = self.surrounding_rendered_lines(source_line, lazy);
-
-        if let (Some(previous), Some(next)) = (previous_line, next_line)
-            && let Some(metrics) =
-                self.empty_source_line_metrics_between(source_line, source, previous, next)
-        {
-            return metrics;
-        }
-
-        if let Some((previous_byte, previous_flat_line)) = previous_line {
-            let newline_count = count_newlines_between(source, previous_byte, source_line.start);
-            let gap = if newline_count <= 1 {
-                0.0
-            } else if newline_count == 2 {
-                self.paragraph_spacing
-            } else {
-                self.paragraph_spacing + (newline_count - 2) as f32 * previous_flat_line.rect.h
-            };
-            return (
-                previous_flat_line.rect.x,
-                previous_flat_line.rect.y + previous_flat_line.rect.h + gap,
-                previous_flat_line.font_size,
-                previous_flat_line.rect.h,
-            );
-        }
-
-        if let Some((next_byte, next_flat_line)) = next_line {
-            let newline_count = count_newlines_between(source, source_line.end, next_byte);
-            let gap = if newline_count <= 1 {
-                0.0
-            } else if newline_count == 2 {
-                self.paragraph_spacing
-            } else {
-                self.paragraph_spacing + (newline_count - 2) as f32 * next_flat_line.rect.h
-            };
-            return (
-                next_flat_line.rect.x,
-                next_flat_line.rect.y - next_flat_line.rect.h - gap,
-                next_flat_line.font_size,
-                next_flat_line.rect.h,
-            );
-        }
-
-        (
-            0.0,
-            self.rendered_line_height * source_line.index as f32,
-            self.rendered_body_font_size,
-            self.rendered_line_height,
-        )
-    }
-
-    fn empty_source_line_typography(
-        &self,
-        source_line: SourceLineAtByte,
-        lazy: &LazyLayout<S>,
-    ) -> (f32, f32, f32) {
-        let (previous_line, next_line) = self.surrounding_rendered_lines(source_line, lazy);
-
-        if let Some((_, previous_flat_line)) = previous_line {
-            return (
-                previous_flat_line.rect.x,
-                previous_flat_line.font_size,
-                previous_flat_line.rect.h,
-            );
-        }
-
-        if let Some((_, next_flat_line)) = next_line {
-            return (next_flat_line.rect.x, next_flat_line.font_size, next_flat_line.rect.h);
-        }
-
-        (0.0, self.rendered_body_font_size, self.rendered_line_height)
+        _source: &str,
+    ) -> Option<(f32, f32, f32, f32)> {
+        let line = self.own_rendered_line(source_line, lazy)?;
+        Some((line.rect.x, line.rect.y, line.font_size, line.rect.h))
     }
 
     /// 空源码行自身的渲染行（代码块/metadata 块会为内部空行生成投影）。
@@ -1577,71 +1435,6 @@ impl<S: BlockSource> PreviewEngine<S> {
                     && projection.source_extent.end <= source_line.end
             })
         })
-    }
-
-    fn surrounding_rendered_lines<'a>(
-        &self,
-        source_line: SourceLineAtByte,
-        lazy: &'a LazyLayout<S>,
-    ) -> SurroundingRenderedLines<'a> {
-        let mut previous_line = None;
-        let mut next_line = None;
-
-        for flat_line in &lazy.flat_lines {
-            let Some(projection) = flat_line.source_projection.as_ref() else {
-                continue;
-            };
-            let Some(line_start_byte) = projection.boundaries.first().map(|anchor| anchor.byte)
-            else {
-                continue;
-            };
-            let Some(line_end_byte) = projection.boundaries.last().map(|anchor| anchor.byte) else {
-                continue;
-            };
-
-            if line_end_byte <= source_line.start {
-                previous_line = Some((line_end_byte, flat_line));
-            }
-
-            if line_start_byte >= source_line.end {
-                next_line = Some((line_start_byte, flat_line));
-                break;
-            }
-        }
-
-        (previous_line, next_line)
-    }
-
-    fn empty_source_line_metrics_between(
-        &self,
-        source_line: SourceLineAtByte,
-        source: &str,
-        previous_line: (usize, &crate::layout::FlatLine),
-        next_line: (usize, &crate::layout::FlatLine),
-    ) -> Option<(f32, f32, f32, f32)> {
-        let (previous_byte, previous_flat_line) = previous_line;
-        let (next_byte, next_flat_line) = next_line;
-        let (empty_line_index, empty_line_count) =
-            empty_source_line_rank(source, previous_byte, next_byte, source_line)?;
-        let gap_top = previous_flat_line.rect.y + previous_flat_line.rect.h;
-        let gap_height = next_flat_line.rect.y - gap_top;
-        if gap_height <= 0.0 {
-            return None;
-        }
-
-        let editable_line_height = previous_flat_line.rect.h;
-        let editable_line_count = empty_line_count.saturating_sub(1);
-        let separator_height =
-            (gap_height - editable_line_height * editable_line_count as f32).max(0.0);
-        let (line_top, line_height) = if empty_line_index == 0 {
-            (gap_top, separator_height)
-        } else {
-            (
-                gap_top + separator_height + editable_line_height * (empty_line_index - 1) as f32,
-                editable_line_height,
-            )
-        };
-        Some((previous_flat_line.rect.x, line_top, previous_flat_line.font_size, line_height))
     }
 
     /// 扩展被 Markdown 布局剥离的行尾空格，令其光标仍归属原文本行。
@@ -1754,10 +1547,6 @@ impl<S: BlockSource> PreviewEngine<S> {
             return self.source_byte_for_flat_line_hit(flat_line, doc_x, doc_y);
         }
 
-        if let Some(byte) = self.visible_empty_source_line_byte_at_doc_y(doc_y, lazy) {
-            return Some(byte);
-        }
-
         let above = lazy.flat_lines.iter().rfind(|fl| fl.rect.y + fl.rect.h <= doc_y);
         let below = lazy.flat_lines.iter().find(|fl| fl.rect.y > doc_y);
 
@@ -1790,29 +1579,6 @@ impl<S: BlockSource> PreviewEngine<S> {
             return self.flat_line_source_start(below);
         }
 
-        None
-    }
-
-    fn visible_empty_source_line_byte_at_doc_y(
-        &self,
-        doc_y: f32,
-        lazy: &LazyLayout<S>,
-    ) -> Option<usize> {
-        let source = self.edit_source.as_ref()?;
-        let map = self.source_line_map.as_ref()?;
-        for span in map.lines().iter().filter(|line| line.is_empty()).copied() {
-            let source_line = source_line_span_to_at_byte(span);
-            if self.empty_source_line_role(source_line, lazy, source)
-                == EmptySourceLineRole::HiddenBlockSeparator
-            {
-                continue;
-            }
-            let (_x, line_top, _font_size, line_height) =
-                self.empty_source_line_metrics(source_line, lazy, source);
-            if doc_y >= line_top && doc_y < line_top + line_height {
-                return Some(source_line.start);
-            }
-        }
         None
     }
 
@@ -2037,16 +1803,9 @@ impl<S: BlockSource> PreviewEngine<S> {
     }
 
     fn projection_screen_x(&self, lazy: &LazyLayout<S>, position: VisualPosition) -> Option<f32> {
-        if let Some(flat_line_idx) = lazy.flat_line_idx_for_projection(position.flat_line_idx) {
-            let line = lazy.flat_lines.get(flat_line_idx)?;
-            return Some(line.rect.x + self.grapheme_x_for_line(line, position.grapheme_pos));
-        }
-
-        let empty_line = lazy.projected_empty_line_for_projection(position.flat_line_idx)?;
-        let source = self.edit_source.as_deref()?;
-        let source_line = source_line_at_byte(source, empty_line.source_byte)?;
-        let (x, _, _) = self.empty_source_line_typography(source_line, lazy);
-        Some(x)
+        let flat_line_idx = lazy.flat_line_idx_for_projection(position.flat_line_idx)?;
+        let line = lazy.flat_lines.get(flat_line_idx)?;
+        Some(line.rect.x + self.grapheme_x_for_line(line, position.grapheme_pos))
     }
 
     fn projection_grapheme_at_screen_x(
@@ -2055,12 +1814,9 @@ impl<S: BlockSource> PreviewEngine<S> {
         visual_line_idx: usize,
         screen_x: f32,
     ) -> Option<usize> {
-        if let Some(flat_line_idx) = lazy.flat_line_idx_for_projection(visual_line_idx) {
-            let line = lazy.flat_lines.get(flat_line_idx)?;
-            return Some(self.grapheme_at_x_for_line(line, screen_x - line.rect.x));
-        }
-
-        lazy.projected_empty_line_for_projection(visual_line_idx).map(|_| 0)
+        let flat_line_idx = lazy.flat_line_idx_for_projection(visual_line_idx)?;
+        let line = lazy.flat_lines.get(flat_line_idx)?;
+        Some(self.grapheme_at_x_for_line(line, screen_x - line.rect.x))
     }
 
     fn move_from_hidden_block_separator(
@@ -2094,24 +1850,10 @@ impl<S: BlockSource> PreviewEngine<S> {
         if !source_line.is_empty() {
             return EmptySourceLineRole::EditableLine;
         }
-        // 块内部空行（代码块/metadata 块）自带渲染投影，属于块内容而非块间分隔。
         if self.own_rendered_line(source_line, lazy).is_some() {
-            return EmptySourceLineRole::EditableLine;
-        }
-        let (previous_line, next_line) = self.surrounding_rendered_lines(source_line, lazy);
-        // HiddenBlockSeparator 只在"上下都有渲染块"时生效——首行/末行的空行仍视作可编辑。
-        if previous_line.is_none() || next_line.is_none() {
-            return EmptySourceLineRole::EditableLine;
-        }
-        let Some(pos) =
-            self.source_line_map.as_ref().and_then(|map| map.empty_run_position(source_line.index))
-        else {
-            return EmptySourceLineRole::EditableLine;
-        };
-        if pos.index_in_run == 0 {
-            EmptySourceLineRole::HiddenBlockSeparator
-        } else {
             EmptySourceLineRole::EditableLine
+        } else {
+            EmptySourceLineRole::HiddenBlockSeparator
         }
     }
 
@@ -2342,6 +2084,7 @@ impl MarkdownView {
         let style = settings.style(theme);
         self.engine.toc_max_depth = settings.toc_max_depth;
         let source = &self.source;
+        let editing = self.engine.edit_source.is_some();
         let engine = &mut self.engine;
         let string_doc = core::document::StringDocView::new(source);
         engine.render(
@@ -2353,7 +2096,11 @@ impl MarkdownView {
             &style,
             |s| {
                 let parsed = crate::parser::parse_markdown(source);
-                crate::builder::MarkdownDoc::build(&parsed, s)
+                if editing {
+                    crate::builder::MarkdownDoc::build_for_editing(&parsed, s, source)
+                } else {
+                    crate::builder::MarkdownDoc::build(&parsed, s)
+                }
             },
             shaper,
             &string_doc,
@@ -2490,33 +2237,6 @@ fn source_line_at_byte(source: &str, byte: usize) -> Option<SourceLineAtByte> {
     let is_blank = source[line_start..line_end].chars().all(char::is_whitespace);
 
     Some(SourceLineAtByte { index: line_index, start: line_start, end: line_end, is_blank })
-}
-
-fn empty_source_line_rank(
-    source: &str,
-    lower_byte: usize,
-    upper_byte: usize,
-    source_line: SourceLineAtByte,
-) -> Option<(usize, usize)> {
-    // 保留旧签名；内部走 SourceLineMap（2026-07-06 方案 1b）。
-    // lower_byte/upper_byte 限定"块间空行 run"的字节范围。
-    let map = crate::layout::source_line_map::SourceLineMap::from_source(source);
-    let empty_lines: Vec<_> = map.empty_lines_in_byte_range(lower_byte..upper_byte).collect();
-    let empty_line_index = empty_lines.iter().position(|line| {
-        line.index == source_line.index
-            && line.start == source_line.start
-            && line.end == source_line.end
-    })?;
-    Some((empty_line_index, empty_lines.len()))
-}
-
-fn count_newlines_between(source: &str, start: usize, end: usize) -> usize {
-    let start = start.min(source.len());
-    let end = end.min(source.len());
-    if start >= end {
-        return 0;
-    }
-    source.as_bytes()[start..end].iter().filter(|&&source_byte| source_byte == b'\n').count()
 }
 
 // `augment_enter` / `augment_backspace` / `augment_insert_text` 及分类器与
@@ -3030,7 +2750,7 @@ impl ViewPlugin for MarkdownEditorView {
             &style,
             |s| {
                 let parsed = crate::parser::parse_markdown(source);
-                crate::builder::MarkdownDoc::build(&parsed, s)
+                crate::builder::MarkdownDoc::build_for_editing(&parsed, s, source)
             },
             Some(shaper),
             &string_doc,
@@ -3439,8 +3159,8 @@ mod wysiwyg_tests {
         let view = make_view(source);
         assert_eq!(
             view.engine().flat_lines().len(),
-            2,
-            "source-only empty lines must not alter the public rendered-line collection"
+            3,
+            "the editable empty paragraph must participate in the rendered-line collection"
         );
         let position = view
             .engine()
@@ -4319,8 +4039,12 @@ mod wysiwyg_tests {
         let v = make_view("para1\n\npara2");
         let aug = v.engine().augment_edit(6, AugmentKind::InsertText(String::from("A"))).unwrap();
 
-        assert_eq!(aug.replace_range, Some(5..7));
-        assert_eq!(aug.insert_text, Some(String::from("\n\nA\n\n")));
+        let mut source = String::from("para1\n\npara2");
+        source.replace_range(
+            aug.replace_range.expect("explicit insertion range"),
+            aug.insert_text.as_deref().expect("paragraph insertion"),
+        );
+        assert_eq!(source, "para1\n\nA\n\npara2");
         assert_eq!(aug.cursor_byte_after, 5 + 3);
     }
 
@@ -4328,10 +4052,14 @@ mod wysiwyg_tests {
     fn augment_edit_insert_text_in_triple_empty_separator_line() {
         use ui::plugin::AugmentKind;
         let v = make_view("para1\n\n\npara2");
-        let aug = v.engine().augment_edit(6, AugmentKind::InsertText(String::from("A"))).unwrap();
+        let aug = v.engine().augment_edit(7, AugmentKind::InsertText(String::from("A"))).unwrap();
 
-        assert_eq!(aug.replace_range, Some(5..8));
-        assert_eq!(aug.insert_text, Some(String::from("\n\nA\n\n")));
+        let mut source = String::from("para1\n\n\npara2");
+        source.replace_range(
+            aug.replace_range.expect("explicit insertion range"),
+            aug.insert_text.as_deref().expect("paragraph insertion"),
+        );
+        assert_eq!(source, "para1\n\nA\n\npara2");
         assert_eq!(aug.cursor_byte_after, 5 + 3);
     }
 
@@ -4398,42 +4126,19 @@ mod wysiwyg_tests {
         );
     }
 
-    /// L1 guardrail: empty source lines' declared vertical span must fit
-    /// between the surrounding rendered flat_lines' rects. Any drift means
-    /// `empty_source_line_metrics` and `reserve_extra_blank_source_lines`
-    /// have diverged again.
     #[test]
-    fn empty_source_line_metrics_align_with_layout() {
-        let v = make_view("para1\n\npara2");
-        let lazy = v.engine().lazy.as_ref().expect("layout should be built");
-        let source = v.engine().edit_source.as_deref().expect("edit source should be set");
-
-        // "para1\n\npara2" — byte 6 is the empty separator line (start == end).
-        let source_line = source_line_at_byte(source, 6).expect("byte 6 should map to a line");
-        assert!(source_line.is_empty(), "byte 6 should sit on an empty source line");
-
-        let (_, line_top, _, line_height) =
-            v.engine().empty_source_line_metrics(source_line, lazy, source);
-        let line_bottom = line_top + line_height;
-
-        // Find the surrounding rendered lines.
-        let (prev, next) = v.engine().surrounding_rendered_lines(source_line, lazy);
-        let (_, prev_fl) = prev.expect("first paragraph should be laid out");
-        let (_, next_fl) = next.expect("second paragraph should be laid out");
-        let prev_bottom = prev_fl.rect.y + prev_fl.rect.h;
-        let next_top = next_fl.rect.y;
-
-        assert!(
-            line_top >= prev_bottom - 0.5,
-            "empty line top ({line_top}) must not overlap previous flat_line bottom ({prev_bottom})"
+    fn hidden_separator_has_no_independent_caret_geometry() {
+        let source = "para1\n\npara2";
+        let view = make_view(source);
+        let lazy = view.engine().lazy.as_ref().expect("layout should be built");
+        let separator = source_line_at_byte(source, "para1\n".len())
+            .expect("fixture has a separator source line");
+        assert_eq!(
+            view.engine().empty_source_line_role(separator, lazy, source),
+            EmptySourceLineRole::HiddenBlockSeparator
         );
-        assert!(
-            line_bottom <= next_top + 0.5,
-            "empty line bottom ({line_bottom}) must not overlap next flat_line top ({next_top})"
-        );
+        assert!(view.engine().empty_source_line_metrics(separator, lazy, source).is_none());
     }
-
-    // ── visual_move ──────────────────────────────────────────────────────
 
     #[test]
     fn visual_move_left_at_byte_zero() {
@@ -4876,8 +4581,10 @@ mod wysiwyg_tests {
         let source_line =
             source_line_at_byte(source, cursor_byte).expect("cursor should be on an empty line");
         let lazy = view.engine.lazy.as_ref().expect("layout should be built");
-        let (_x, line_top, _font_size, line_height) =
-            view.engine.empty_source_line_metrics(source_line, lazy, source);
+        let (_x, line_top, _font_size, line_height) = view
+            .engine
+            .empty_source_line_metrics(source_line, lazy, source)
+            .expect("editable source line must have an explicit layout row");
         let next_y = flat_line_y_for_source_byte(&view, next_byte)
             .expect("following paragraph should be laid out");
 
@@ -4960,7 +4667,7 @@ mod wysiwyg_tests {
     }
 
     #[test]
-    fn cursor_after_single_trailing_newline_uses_one_line_gap() {
+    fn cursor_after_single_trailing_newline_uses_paragraph_geometry() {
         let source = "hello\n";
         let cursor_byte = source.len();
         let mut view = MarkdownEditorView::new();
@@ -4978,11 +4685,12 @@ mod wysiwyg_tests {
         let cursor_doc_y = cursor_y + view.engine.scroll_y;
         let cursor_top_in_line = cursor_height * (1.0 - WYSIWYG_CURSOR_ASCENT_RATIO);
         let cursor_line_top = cursor_doc_y - cursor_top_in_line;
-        let expected_line_top = first_line.rect.y + first_line.rect.h;
+        let expected_line_top =
+            first_line.rect.y + first_line.rect.h + view.engine.paragraph_spacing;
 
         assert!(
             (cursor_line_top - expected_line_top).abs() < 1.0,
-            "cursor after a single trailing newline should advance by one line only: \
+            "trailing empty paragraph must already include the spacing used after typing: \
              got line_top={cursor_line_top}, expected={expected_line_top}"
         );
     }
@@ -5740,7 +5448,7 @@ C608-01 武昌职业第01组：计划 68，历史低线较低，是表里最像�
     }
 
     #[test]
-    fn projected_empty_line_screen_x_preserves_surrounding_indent() {
+    fn projected_empty_paragraph_outside_quote_uses_body_indent() {
         let source = "> quoted\n\n";
         let view = make_view(source);
         let position = view
@@ -5749,11 +5457,11 @@ C608-01 武昌职业第01组：计划 68，历史低线较低，是表里最像�
             .visual_position_for_source(source.len(), CursorAffinity::Downstream)
             .expect("trailing empty line should have a projection position");
         let previous_line_x =
-            view.engine().flat_lines().last().expect("quoted paragraph should render").rect.x;
+            view.engine().flat_lines().first().expect("quoted paragraph should render").rect.x;
 
         assert!(previous_line_x > 0.0, "fixture must provide a non-zero indentation");
         let lazy = view.engine().lazy.as_ref().expect("view should retain lazy layout state");
-        assert_eq!(view.engine().projection_screen_x(lazy, position), Some(previous_line_x));
+        assert_eq!(view.engine().projection_screen_x(lazy, position), Some(0.0));
     }
 
     #[test]
@@ -6671,7 +6379,7 @@ C608-01 武昌职业第01组：计划 68，历史低线较低，是表里最像�
     }
 
     #[test]
-    fn trailing_empty_source_line_inherits_preceding_line_metrics() {
+    fn trailing_empty_paragraph_after_heading_uses_body_metrics() {
         let source = "# Heading\n";
         let mut view = MarkdownEditorView::new();
         let doc = StubDoc::new(source);
@@ -6682,12 +6390,13 @@ C608-01 武昌职业第01组：计划 68，历史低线较低，是表里最像�
         let lazy = view.engine.lazy.as_ref().expect("layout should be built");
         let source_line = source_line_at_byte(source, source.len())
             .expect("document end should resolve to the trailing empty source line");
-        let previous_line = lazy.flat_lines.first().expect("heading should be rendered");
-        let (_, _, font_size, line_height) =
-            view.engine.empty_source_line_metrics(source_line, lazy, source);
+        let (_, _, font_size, line_height) = view
+            .engine
+            .empty_source_line_metrics(source_line, lazy, source)
+            .expect("editable source line must have an explicit layout row");
 
-        assert_eq!(font_size, previous_line.font_size);
-        assert_eq!(line_height, previous_line.rect.h);
+        assert_eq!(font_size, view.engine.rendered_body_font_size);
+        assert_eq!(line_height, view.engine.rendered_line_height);
     }
 
     #[test]
@@ -7258,9 +6967,9 @@ C608-01 武昌职业第01组：计划 68，历史低线较低，是表里最像�
         assert!(joined.contains("> "), "blockquote marker '> ' must be visible, got: {joined:?}");
     }
 
-    /// Empty document: FlatLines should be empty without crashing.
+    /// Empty documents contain one editable paragraph with zero graphemes.
     #[test]
-    fn empty_document_flat_lines_is_empty() {
+    fn empty_document_has_one_editable_layout_row() {
         use ui::plugin::{PluginQuery, PluginResponse, ViewPlugin};
 
         let doc = StubDoc::new("");
@@ -7273,7 +6982,8 @@ C608-01 武昌职业第01组：计划 68，历史低线较低，是表里最像�
             PluginResponse::FlatLines(lines) => lines,
             other => panic!("expected FlatLines, got {other:?}"),
         };
-        assert!(lines.is_empty(), "empty document should produce no FlatLines");
+        assert_eq!(lines.len(), 1, "empty document must lay out its editable paragraph");
+        assert!(lines[0].text.is_empty());
     }
 
     /// Very long line: FlatLines still produces output without panic.
@@ -8478,7 +8188,7 @@ viebcoding 用过吗?
     }
 
     #[test]
-    fn active_last_list_item_ignores_trailing_blank_separator_lines() {
+    fn active_last_list_item_keeps_trailing_empty_paragraph_outside_item() {
         use ui::plugin::{PluginMessage, ViewPlugin};
 
         let source = "- a\n- b\n\n";
@@ -8493,7 +8203,12 @@ viebcoding 用过吗?
         let flat_texts =
             view.engine().flat_lines().iter().map(|line| line.text.as_str()).collect::<Vec<_>>();
 
-        assert_eq!(flat_texts, vec!["a", "- b"]);
+        assert_eq!(flat_texts, vec!["a", "- b", ""]);
+        assert_eq!(
+            view.engine().flat_lines()[2].rect.x,
+            0.0,
+            "trailing paragraph belongs outside the list"
+        );
     }
 
     #[test]
