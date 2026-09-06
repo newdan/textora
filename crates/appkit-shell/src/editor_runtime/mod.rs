@@ -66,19 +66,37 @@ fn clipboard_command_for_key(
     key: ui::KeyCode,
     modifiers: ui::core::Modifiers,
 ) -> Option<ClipboardCommand> {
-    if !(modifiers.cmd || modifiers.ctrl) {
+    if !(modifiers.cmd || modifiers.ctrl) || modifiers.alt {
         return None;
     }
 
     match key {
-        ui::KeyCode::Char('c' | 'C') => Some(ClipboardCommand::Copy),
-        ui::KeyCode::Char('x' | 'X') => Some(ClipboardCommand::Cut),
+        ui::KeyCode::Char('c' | 'C') if !modifiers.shift => Some(ClipboardCommand::Copy),
+        ui::KeyCode::Char('x' | 'X') if !modifiers.shift => Some(ClipboardCommand::Cut),
         ui::KeyCode::Char('v' | 'V') => Some(ClipboardCommand::Paste),
         _ => None,
     }
 }
 
 const CURSOR_BLINK_INTERVAL_MS: u64 = 500;
+
+fn key_allowed_during_preedit(key: ui::KeyCode, modifiers: ui::core::Modifiers) -> bool {
+    match key {
+        ui::KeyCode::Left
+        | ui::KeyCode::Right
+        | ui::KeyCode::Up
+        | ui::KeyCode::Down
+        | ui::KeyCode::Home
+        | ui::KeyCode::End
+        | ui::KeyCode::PageUp
+        | ui::KeyCode::PageDown
+        | ui::KeyCode::Escape => true,
+        ui::KeyCode::Char('a' | 'A' | 'c' | 'C') => {
+            (modifiers.cmd || modifiers.ctrl) && !modifiers.shift && !modifiers.alt
+        }
+        _ => false,
+    }
+}
 const CURSOR_BLINK_WAKE_TOLERANCE_MS: u64 = 5;
 const IME_ANCHOR_WIDTH_PX: f32 = 2.0;
 
@@ -834,8 +852,31 @@ impl EditorRuntime {
         key: ui::KeyCode,
         modifiers: ui::core::Modifiers,
     ) -> EditorOutcome {
+        self.handle_key_input_with_physical_key(context, key, modifiers, None)
+    }
+
+    pub fn handle_key_input_with_physical_key(
+        &mut self,
+        context: EditorInputContext,
+        key: ui::KeyCode,
+        modifiers: ui::core::Modifiers,
+        physical_key: Option<winit::keyboard::PhysicalKey>,
+    ) -> EditorOutcome {
         if !self.input_session.keyboard_allowed(context) {
             return EditorOutcome::default();
+        }
+
+        let semantic_command = self.markdown_shortcut_command(key, modifiers, physical_key);
+        if !self.input_session.preedit().0.is_empty()
+            && (semantic_command.is_some() || !key_allowed_during_preedit(key, modifiers))
+        {
+            return EditorOutcome::default();
+        }
+
+        if let Some(command) = semantic_command {
+            self.input_session.set_preferred_x(None);
+            let (_, outcome) = self.execute_semantic_edit(command);
+            return outcome;
         }
 
         if let Some(clipboard_command) = clipboard_command_for_key(key, modifiers) {
@@ -891,6 +932,28 @@ impl EditorRuntime {
         intent.map_or_else(EditorOutcome::default, |intent| {
             self.model_session.edit_active_document(intent, self.editor_line_height())
         })
+    }
+
+    /// Identifies formatting owned by the active Markdown editor before product shortcuts.
+    /// Execution still goes through the focus, IME, and document access guards.
+    pub fn markdown_shortcut_command(
+        &self,
+        key: ui::KeyCode,
+        modifiers: ui::core::Modifiers,
+        physical_key: Option<winit::keyboard::PhysicalKey>,
+    ) -> Option<ui::plugin::SemanticEditCommand> {
+        let markdown_editor_is_active = self
+            .active_tab_id()
+            .and_then(|tab_id| self.tab_session(tab_id))
+            .is_some_and(|tab| tab.plugin_name() == ui::plugin::PLUGIN_MARKDOWN_EDITOR);
+        if !markdown_editor_is_active {
+            return None;
+        }
+
+        physical_key.map_or_else(
+            || crate::window_input::markdown_semantic_shortcut_for_key(key, modifiers),
+            |physical_key| crate::window_input::markdown_semantic_shortcut(physical_key, modifiers),
+        )
     }
 
     fn handle_clipboard_command(&mut self, command: ClipboardCommand) -> EditorOutcome {
@@ -2919,6 +2982,22 @@ mod tests {
 
         assert_eq!(outcome, EditorOutcome::default());
         assert_eq!(runtime.workspace_snapshot().tabs[0].content_lines, vec!["clean"]);
+    }
+
+    #[test]
+    fn formatting_modifiers_do_not_fall_back_to_clipboard_shortcuts() {
+        for (key, modifiers) in [
+            (
+                ui::KeyCode::Char('x'),
+                ui::core::Modifiers { cmd: true, shift: true, ..ui::core::Modifiers::NONE },
+            ),
+            (
+                ui::KeyCode::Char('c'),
+                ui::core::Modifiers { ctrl: true, alt: true, ..ui::core::Modifiers::NONE },
+            ),
+        ] {
+            assert_eq!(clipboard_command_for_key(key, modifiers), None);
+        }
     }
 
     #[test]

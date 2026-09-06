@@ -60,17 +60,17 @@ fn is_search_bar_whitelist(
     }
     match logical_key {
         Key::Character(c) => match c.as_str() {
-            "f" if !shift && !alt => true, // Cmd+F
-            "f" if shift && !alt => true,  // Cmd+Shift+F
-            "s" if !shift && !alt => true, // Cmd+S
-            "s" if shift && !alt => true,  // Cmd+Shift+S
-            "w" if !shift && !alt => true, // Cmd+W
-            "z" if !shift && !alt => true, // Cmd+Z
-            "z" if shift && !alt => true,  // Cmd+Shift+Z
-            "[" if !shift && !alt => true, // Cmd+[
-            "]" if !shift && !alt => true, // Cmd+]
-            "[" if shift && !alt => true,  // Cmd+Shift+[
-            "]" if shift && !alt => true,  // Cmd+Shift+]
+            "f" | "F" if !shift && !alt => true, // Cmd+F
+            "f" | "F" if shift && !alt => true,  // Cmd+Shift+F
+            "s" | "S" if !shift && !alt => true, // Cmd+S
+            "s" | "S" if shift && !alt => true,  // Cmd+Shift+S
+            "w" | "W" if !shift && !alt => true, // Cmd+W
+            "z" | "Z" if !shift && !alt => true, // Cmd+Z
+            "z" | "Z" if shift && !alt => true,  // Cmd+Shift+Z
+            "[" if !shift && !alt => true,       // Cmd+[
+            "]" if !shift && !alt => true,       // Cmd+]
+            "[" if shift && !alt => true,        // Cmd+Shift+[
+            "]" if shift && !alt => true,        // Cmd+Shift+]
             _ => false,
         },
         Key::Named(NamedKey::ArrowLeft) if sup && alt && !shift => true, // Cmd+Alt+Left
@@ -203,7 +203,7 @@ fn mindmap_style_panel_should_receive_keyboard(
     }
 
     // The global Cmd+Shift+P shortcut is handled explicitly by events::handle_keyboard.
-    if sup && shift && logical_key.to_text() == Some("p") {
+    if sup && shift && matches!(logical_key.to_text(), Some("p" | "P")) {
         return false;
     }
 
@@ -1980,6 +1980,20 @@ mod tests {
     }
 
     #[test]
+    fn mindmap_style_panel_keyboard_route_bypasses_uppercase_pin_shortcut() {
+        let shell = shell_with_mindmap_style_panel_focus();
+
+        assert!(!mindmap_style_panel_should_receive_keyboard(
+            &shell,
+            &Key::Character("P".into()),
+            true,
+            true,
+            false,
+            false,
+        ));
+    }
+
+    #[test]
     fn mindmap_style_panel_ime_route_consumes_preedit_and_commit_only() {
         let mut shell = shell_with_mindmap_style_panel_focus();
         let preedit = Event::ImePreedit { text: "拼".into(), cursor: Some((0, 3)) };
@@ -2326,6 +2340,24 @@ mod tests {
     #[test]
     fn whitelist_cmd_shift_z() {
         assert!(is_search_bar_whitelist(&Key::Character("z".into()), true, true, false));
+    }
+
+    #[test]
+    fn whitelist_uppercase_logical_keys_preserves_shortcut_routing() {
+        for (character, shift) in [
+            ("F", false),
+            ("F", true),
+            ("S", false),
+            ("S", true),
+            ("W", false),
+            ("Z", false),
+            ("Z", true),
+        ] {
+            let key = Key::Character(character.into());
+            assert!(is_search_bar_whitelist(&key, true, shift, false), "{key:?}");
+            assert!(!is_search_bar_whitelist(&key, false, shift, false), "{key:?}");
+            assert!(!is_search_bar_whitelist(&key, true, shift, true), "{key:?}");
+        }
     }
 
     #[test]

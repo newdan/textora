@@ -3,6 +3,69 @@ use ui::core::widget::{KeyCode, Modifiers};
 use winit::event::MouseScrollDelta;
 use winit::keyboard::{Key, ModifiersState, NamedKey};
 
+/// Resolves Markdown formatting from physical keys before layout-specific text conversion.
+pub fn markdown_semantic_shortcut(
+    physical_key: winit::keyboard::PhysicalKey,
+    modifiers: Modifiers,
+) -> Option<ui::plugin::SemanticEditCommand> {
+    use winit::keyboard::{KeyCode as PhysicalCode, PhysicalKey};
+
+    let PhysicalKey::Code(code) = physical_key else {
+        return None;
+    };
+    let character = match code {
+        PhysicalCode::KeyB => 'b',
+        PhysicalCode::KeyI => 'i',
+        PhysicalCode::KeyK => 'k',
+        PhysicalCode::KeyE => 'e',
+        PhysicalCode::KeyX => 'x',
+        PhysicalCode::KeyT => 't',
+        PhysicalCode::KeyC => 'c',
+        PhysicalCode::Digit1 => '1',
+        PhysicalCode::Digit2 => '2',
+        PhysicalCode::Digit3 => '3',
+        PhysicalCode::Digit4 => '4',
+        PhysicalCode::Digit5 => '5',
+        PhysicalCode::Digit6 => '6',
+        PhysicalCode::Digit7 => '7',
+        PhysicalCode::Digit8 => '8',
+        PhysicalCode::Digit9 => '9',
+        _ => return None,
+    };
+    markdown_semantic_shortcut_for_key(KeyCode::Char(character), modifiers)
+}
+
+/// Shared command table for physical keyboard adapters and logical-key clients.
+pub fn markdown_semantic_shortcut_for_key(
+    key: KeyCode,
+    modifiers: Modifiers,
+) -> Option<ui::plugin::SemanticEditCommand> {
+    use ui::plugin::SemanticEditCommand;
+
+    if !(modifiers.cmd || modifiers.ctrl) {
+        return None;
+    }
+    let KeyCode::Char(character) = key else {
+        return None;
+    };
+    match (character.to_ascii_lowercase(), modifiers.shift, modifiers.alt) {
+        ('b', false, false) => Some(SemanticEditCommand::ToggleBold),
+        ('i', false, false) => Some(SemanticEditCommand::ToggleItalic),
+        ('k', false, false) => Some(SemanticEditCommand::InsertLink),
+        ('e', false, false) => Some(SemanticEditCommand::ToggleInlineCode),
+        ('x', true, false) => Some(SemanticEditCommand::ToggleStrikethrough),
+        ('7', true, false) => Some(SemanticEditCommand::OrderedList),
+        ('8', true, false) => Some(SemanticEditCommand::UnorderedList),
+        ('9', true, false) => Some(SemanticEditCommand::Quote),
+        ('1'..='6', false, true) => {
+            Some(SemanticEditCommand::SetHeadingLevel(character as u8 - b'0'))
+        }
+        ('t', false, true) => Some(SemanticEditCommand::TaskList),
+        ('c', false, true) => Some(SemanticEditCommand::CodeBlock),
+        _ => None,
+    }
+}
+
 const WHEEL_LINES_PER_EVENT: f32 = 3.0;
 
 /// Returns whether the operating system assigned this key event to an IME.
@@ -25,6 +88,9 @@ pub fn ui_modifiers(state: ModifiersState) -> Modifiers {
 /// Preserves named Tab as a semantic command. Other keys prefer event text for
 /// keyboard-layout and Shift combinations, then fall back to the logical key.
 pub fn winit_key_to_keycode(logical_key: &Key, text: Option<&str>) -> Option<KeyCode> {
+    if is_ime_process_key(logical_key) {
+        return None;
+    }
     if matches!(logical_key, Key::Named(NamedKey::Tab)) {
         return Some(KeyCode::Tab);
     }
@@ -109,6 +175,11 @@ mod tests {
         command_allowed_during_preedit, is_ime_process_key, scroll_delta_pixels, ui_modifiers,
         winit_key_to_keycode,
     };
+
+    #[test]
+    fn ime_process_key_never_falls_back_to_event_text() {
+        assert_eq!(winit_key_to_keycode(&Key::Named(NamedKey::Process), Some("a")), None);
+    }
 
     #[test]
     fn identifies_ime_process_key() {

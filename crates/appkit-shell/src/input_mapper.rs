@@ -163,23 +163,23 @@ pub fn key_to_command(key: &Key, mods: ModifiersState) -> Option<EditCommand> {
             if super_ {
                 // Cmd+key shortcuts
                 match c.as_str() {
-                    "s" if shift => Some(EditCommand::SaveAs),
-                    "s" => Some(EditCommand::Save),
-                    "z" if shift => Some(EditCommand::Redo),
-                    "z" => Some(EditCommand::Undo),
-                    "a" => Some(EditCommand::SelectAll),
-                    "c" => Some(EditCommand::Copy),
-                    "x" => Some(EditCommand::Cut),
+                    "s" | "S" if shift => Some(EditCommand::SaveAs),
+                    "s" | "S" => Some(EditCommand::Save),
+                    "z" | "Z" if shift => Some(EditCommand::Redo),
+                    "z" | "Z" => Some(EditCommand::Undo),
+                    "a" | "A" => Some(EditCommand::SelectAll),
+                    "c" | "C" => Some(EditCommand::Copy),
+                    "x" | "X" => Some(EditCommand::Cut),
                     "v" | "V" if shift => Some(EditCommand::PastePlainText),
                     "v" | "V" => Some(EditCommand::Paste),
-                    "f" if shift || alt => Some(EditCommand::FindReplace),
-                    "f" => Some(EditCommand::Find),
-                    "o" => Some(EditCommand::OpenFile),
-                    "t" if shift => Some(EditCommand::ToggleToc),
-                    "t" => Some(EditCommand::NewTab),
-                    "w" => Some(EditCommand::CloseTab),
+                    "f" | "F" if shift || alt => Some(EditCommand::FindReplace),
+                    "f" | "F" => Some(EditCommand::Find),
+                    "o" | "O" => Some(EditCommand::OpenFile),
+                    "t" | "T" if shift => Some(EditCommand::ToggleToc),
+                    "t" | "T" => Some(EditCommand::NewTab),
+                    "w" | "W" => Some(EditCommand::CloseTab),
                     "m" | "M" if shift => Some(EditCommand::ToggleView),
-                    "b" => {
+                    "b" | "B" => {
                         if super_ && !ctrl && !alt {
                             Some(EditCommand::ToggleSidebarPin)
                         } else {
@@ -206,12 +206,12 @@ pub fn key_to_command(key: &Key, mods: ModifiersState) -> Option<EditCommand> {
                 match c.as_str() {
                     "v" | "V" if shift => Some(EditCommand::PastePlainText),
                     "v" | "V" => Some(EditCommand::Paste),
-                    "z" => Some(EditCommand::Undo),
-                    "y" => Some(EditCommand::Redo),
-                    "a" => Some(EditCommand::MoveToLineStart),
-                    "e" => Some(EditCommand::MoveToLineEnd),
-                    "h" => Some(EditCommand::Backspace),
-                    "d" => Some(EditCommand::DeleteForward),
+                    "z" | "Z" => Some(EditCommand::Undo),
+                    "y" | "Y" => Some(EditCommand::Redo),
+                    "a" | "A" => Some(EditCommand::MoveToLineStart),
+                    "e" | "E" => Some(EditCommand::MoveToLineEnd),
+                    "h" | "H" => Some(EditCommand::Backspace),
+                    "d" | "D" => Some(EditCommand::DeleteForward),
                     "k" => None, // kill line — future
                     _ => None,
                 }
@@ -446,6 +446,50 @@ mod tests {
     fn cmd_shift_z_redo() {
         let key = Key::Character("z".into());
         assert_eq!(key_to_command(&key, cmd_shift()), Some(EditCommand::Redo));
+    }
+
+    #[test]
+    fn uppercase_logical_keys_preserve_existing_shortcut_commands() {
+        let shortcuts = [
+            ("S", cmd_shift(), EditCommand::SaveAs),
+            ("Z", cmd_shift(), EditCommand::Redo),
+            ("F", cmd_shift(), EditCommand::FindReplace),
+            ("T", cmd_shift(), EditCommand::ToggleToc),
+            ("S", cmd(), EditCommand::Save),
+            ("Z", cmd(), EditCommand::Undo),
+            ("A", cmd(), EditCommand::SelectAll),
+            ("C", cmd(), EditCommand::Copy),
+            ("X", cmd(), EditCommand::Cut),
+            ("F", cmd(), EditCommand::Find),
+            ("O", cmd(), EditCommand::OpenFile),
+            ("T", cmd(), EditCommand::NewTab),
+            ("W", cmd(), EditCommand::CloseTab),
+            ("B", cmd(), EditCommand::ToggleSidebarPin),
+            ("Z", ctrl(), EditCommand::Undo),
+            ("Y", ctrl(), EditCommand::Redo),
+            ("A", ctrl(), EditCommand::MoveToLineStart),
+            ("E", ctrl(), EditCommand::MoveToLineEnd),
+            ("H", ctrl(), EditCommand::Backspace),
+            ("D", ctrl(), EditCommand::DeleteForward),
+        ];
+
+        for (character, modifiers, expected_command) in shortcuts {
+            let key = Key::Character(character.into());
+            assert_eq!(key_to_command(&key, modifiers), Some(expected_command), "{key:?}");
+        }
+    }
+
+    #[test]
+    fn uppercase_logical_keys_preserve_inserted_text_without_command_modifiers() {
+        for character in ["Z", "S", "F", "T", "A", "É", "世"] {
+            let key = Key::Character(character.into());
+            for modifiers in [no_mods(), ModifiersState::SHIFT] {
+                assert_eq!(
+                    key_to_command(&key, modifiers),
+                    Some(EditCommand::InsertChar(character.into()))
+                );
+            }
+        }
     }
 
     #[test]

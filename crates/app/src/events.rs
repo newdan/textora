@@ -9,7 +9,7 @@
 //!   The handler then translates the resulting `WidgetAction` into `AppAction`s.
 
 use winit::event::{ElementState, MouseScrollDelta};
-use winit::keyboard::{KeyCode as WinitKeyCode, ModifiersState, PhysicalKey};
+use winit::keyboard::{ModifiersState, PhysicalKey};
 use winit::window::CursorIcon;
 
 use crate::actions::AppAction;
@@ -57,36 +57,11 @@ fn markdown_semantic_shortcut(
     physical_key: PhysicalKey,
     modifiers: ModifiersState,
 ) -> Option<ui::plugin::SemanticEditCommand> {
-    use ui::plugin::SemanticEditCommand;
+    appkit_shell::window_input::markdown_semantic_shortcut(physical_key, ui_modifiers(modifiers))
+}
 
-    if !(modifiers.super_key() || modifiers.control_key()) {
-        return None;
-    }
-
-    let PhysicalKey::Code(key_code) = physical_key else {
-        return None;
-    };
-    let shift = modifiers.shift_key();
-    let alt = modifiers.alt_key();
-    match (key_code, shift, alt) {
-        (WinitKeyCode::KeyB, false, false) => Some(SemanticEditCommand::ToggleBold),
-        (WinitKeyCode::KeyI, false, false) => Some(SemanticEditCommand::ToggleItalic),
-        (WinitKeyCode::KeyK, false, false) => Some(SemanticEditCommand::InsertLink),
-        (WinitKeyCode::KeyE, false, false) => Some(SemanticEditCommand::ToggleInlineCode),
-        (WinitKeyCode::KeyX, true, false) => Some(SemanticEditCommand::ToggleStrikethrough),
-        (WinitKeyCode::Digit7, true, false) => Some(SemanticEditCommand::OrderedList),
-        (WinitKeyCode::Digit8, true, false) => Some(SemanticEditCommand::UnorderedList),
-        (WinitKeyCode::Digit9, true, false) => Some(SemanticEditCommand::Quote),
-        (WinitKeyCode::Digit1, false, true) => Some(SemanticEditCommand::SetHeadingLevel(1)),
-        (WinitKeyCode::Digit2, false, true) => Some(SemanticEditCommand::SetHeadingLevel(2)),
-        (WinitKeyCode::Digit3, false, true) => Some(SemanticEditCommand::SetHeadingLevel(3)),
-        (WinitKeyCode::Digit4, false, true) => Some(SemanticEditCommand::SetHeadingLevel(4)),
-        (WinitKeyCode::Digit5, false, true) => Some(SemanticEditCommand::SetHeadingLevel(5)),
-        (WinitKeyCode::Digit6, false, true) => Some(SemanticEditCommand::SetHeadingLevel(6)),
-        (WinitKeyCode::KeyT, false, true) => Some(SemanticEditCommand::TaskList),
-        (WinitKeyCode::KeyC, false, true) => Some(SemanticEditCommand::CodeBlock),
-        _ => None,
-    }
+fn is_toggle_pin_shortcut(key_text: Option<&str>, modifiers: ModifiersState) -> bool {
+    modifiers.super_key() && modifiers.shift_key() && matches!(key_text, Some("p" | "P"))
 }
 
 /// Handle keyboard input events.
@@ -143,7 +118,7 @@ pub(crate) fn handle_keyboard(app: &mut App, event: &winit::event::KeyEvent) -> 
     }
 
     let key_text = event.logical_key.to_text();
-    if input_modifiers.super_key() && input_modifiers.shift_key() && key_text == Some("p") {
+    if is_toggle_pin_shortcut(key_text, input_modifiers) {
         actions.push(AppAction::TogglePin);
         return actions;
     }
@@ -827,6 +802,12 @@ mod tests {
     use std::rc::Rc;
     use ui::plugin::{EditHitTarget, PluginQuery, PluginResponse, ViewPlugin};
     use winit::window::CursorIcon;
+
+    #[test]
+    fn toggle_pin_shortcut_accepts_the_uppercase_character_produced_by_shift() {
+        assert!(is_toggle_pin_shortcut(Some("P"), ModifiersState::SUPER | ModifiersState::SHIFT));
+        assert!(!is_toggle_pin_shortcut(Some("P"), ModifiersState::SUPER));
+    }
 
     #[test]
     fn markdown_semantic_shortcuts_cover_common_inline_and_block_commands() {

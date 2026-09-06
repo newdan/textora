@@ -65,6 +65,8 @@ pub fn plan_semantic_edit(
 }
 
 const CODE_MARKER: &str = "\x60";
+const LF_SEQUENCE: &str = "\n";
+const CRLF_SEQUENCE: &str = "\r\n";
 
 #[derive(Clone, Copy)]
 enum LinePrefix {
@@ -91,7 +93,10 @@ fn plan_inline_toggle(
         );
     };
     let selected = &source[range.clone()];
-    if selected.starts_with(marker) && selected.ends_with(marker) {
+    if selected.len() >= marker.len() * 2
+        && selected.starts_with(marker)
+        && selected.ends_with(marker)
+    {
         let unwrapped = selected[marker.len()..selected.len() - marker.len()].to_owned();
         return apply_transaction(
             source_generation,
@@ -150,7 +155,12 @@ fn plan_heading(
     }
     let replacement = transform_lines(&source[target.clone()], |line| {
         let indentation = leading_whitespace(line);
-        let content = line[indentation..].trim_start_matches('#').trim_start();
+        let content = &line[indentation..];
+        let content = if crate::augmenter::heading_source_is_atx(line, 0) {
+            content.trim_start_matches('#').trim_start_matches([' ', '\t'])
+        } else {
+            content
+        };
         format!("{}{} {}", &line[..indentation], "#".repeat(level as usize), content)
     });
     apply_line_transaction(source, source_generation, target, replacement)
@@ -165,11 +175,9 @@ fn plan_line_prefix(
 ) -> SemanticEditPlan {
     let target = line_selection_range(source, cursor_byte, selection.as_ref());
     let segment = &source[target.clone()];
-    if segment.is_empty() {
-        return SemanticEditPlan::NoChange;
-    }
-    let lines = segment.lines().collect::<Vec<_>>();
-    let remove_existing = lines.iter().all(|line| has_line_prefix(line, prefix));
+    let remove_existing = segment
+        .split('\n')
+        .all(|line| has_line_prefix(line.strip_suffix('\r').unwrap_or(line), prefix));
     let replacement = transform_lines(segment, |line| {
         if remove_existing {
             remove_line_prefix(line, prefix)
@@ -188,22 +196,35 @@ fn plan_code_block(
 ) -> SemanticEditPlan {
     let target = line_selection_range(source, cursor_byte, selection.as_ref());
     let segment = &source[target.clone()];
-    if segment.is_empty() {
-        return SemanticEditPlan::NoChange;
-    }
     let fence = CODE_MARKER.repeat(3);
-    let lines = segment.lines().collect::<Vec<_>>();
-    let replacement = if lines.len() >= 2
-        && lines.first().is_some_and(|line| line.trim_start().starts_with(&fence))
-        && lines.last().is_some_and(|line| line.trim() == fence)
-    {
-        let inner_start = lines[0].len() + 1;
-        let inner_end = segment.len().saturating_sub(lines.last().map_or(0, |line| line.len()) + 1);
-        segment[inner_start..inner_end].to_owned()
-    } else {
-        format!("{fence}\n{segment}\n{fence}")
-    };
+    let replacement = unwrap_code_fence(segment, &fence).unwrap_or_else(|| {
+        let newline = if source.find('\n').is_some_and(|index| source[..index].ends_with('\r')) {
+            CRLF_SEQUENCE
+        } else {
+            LF_SEQUENCE
+        };
+        format!("{fence}{newline}{segment}{newline}{fence}")
+    });
     apply_line_transaction(source, source_generation, target, replacement)
+}
+
+fn unwrap_code_fence(segment: &str, fence: &str) -> Option<String> {
+    let (opening_line, after_opening) = segment.split_once('\n')?;
+    if !opening_line.trim_start().starts_with(fence) {
+        return None;
+    }
+    let through_closing = after_opening.trim_end_matches(['\r', '\n']);
+    let closing_start = through_closing.rfind('\n').map_or(0, |newline| newline + 1);
+    if through_closing[closing_start..].trim() != fence {
+        return None;
+    }
+    let content = &after_opening[..closing_start];
+    let content = content
+        .strip_suffix(CRLF_SEQUENCE)
+        .or_else(|| content.strip_suffix(LF_SEQUENCE))
+        .unwrap_or(content);
+    let after_closing = &after_opening[through_closing.len()..];
+    Some(format!("{content}{after_closing}"))
 }
 
 fn apply_line_transaction(
@@ -255,7 +276,11 @@ fn line_start(source: &str, byte: usize) -> usize {
 }
 
 fn line_end(source: &str, byte: usize) -> usize {
-    source[byte..].find('\n').map_or(source.len(), |newline| byte + newline)
+    let Some(newline) = source[byte..].find('\n') else {
+        return source.len();
+    };
+    let newline_byte = byte + newline;
+    if source[..newline_byte].ends_with('\r') { newline_byte - 1 } else { newline_byte }
 }
 
 fn first_h1_range(source: &str) -> Option<std::ops::Range<usize>> {
@@ -280,12 +305,21 @@ fn leading_whitespace(line: &str) -> usize {
 }
 
 fn transform_lines(segment: &str, transform: impl Fn(&str) -> String) -> String {
+    if segment.is_empty() {
+        return transform(segment);
+    }
     let mut result = String::with_capacity(segment.len());
     for line in segment.split_inclusive('\n') {
-        let (content, newline) =
-            line.strip_suffix('\n').map_or((line, ""), |content| (content, "\n"));
+        let (content, newline) = if let Some(content) = line.strip_suffix(CRLF_SEQUENCE) {
+            (content, CRLF_SEQUENCE)
+        } else {
+            line.strip_suffix(LF_SEQUENCE).map_or((line, ""), |content| (content, LF_SEQUENCE))
+        };
         result.push_str(&transform(content));
         result.push_str(newline);
+    }
+    if segment.ends_with(LF_SEQUENCE) {
+        result.push_str(&transform(""));
     }
     result
 }
@@ -414,5 +448,165 @@ mod tests {
         );
 
         assert_eq!(plan, SemanticEditPlan::NoChange);
+    }
+
+    #[test]
+    fn inline_toggle_wraps_a_selection_that_contains_only_one_marker() {
+        for (command, marker) in [
+            (SemanticEditCommand::ToggleBold, "**"),
+            (SemanticEditCommand::ToggleItalic, "*"),
+            (SemanticEditCommand::ToggleStrikethrough, "~~"),
+            (SemanticEditCommand::ToggleInlineCode, CODE_MARKER),
+        ] {
+            let (result, _) = applied_text(marker, command, marker.len(), Some(0..marker.len()));
+
+            assert_eq!(result, marker.repeat(3));
+        }
+    }
+
+    #[test]
+    fn code_block_toggle_removes_an_empty_fenced_block() {
+        let source = "```\n```";
+        let (result, _) =
+            applied_text(source, SemanticEditCommand::CodeBlock, 0, Some(0..source.len()));
+
+        assert_eq!(result, "");
+    }
+
+    #[test]
+    fn line_commands_format_an_empty_document() {
+        for (command, expected) in [
+            (SemanticEditCommand::SetHeadingLevel(2), "## "),
+            (SemanticEditCommand::UnorderedList, "- "),
+            (SemanticEditCommand::OrderedList, "1. "),
+            (SemanticEditCommand::TaskList, "- [ ] "),
+            (SemanticEditCommand::Quote, "> "),
+            (SemanticEditCommand::CodeBlock, "```\n\n```"),
+        ] {
+            let (result, _) = applied_text("", command, 0, None);
+
+            assert_eq!(result, expected);
+        }
+    }
+
+    #[test]
+    fn line_commands_format_a_blank_line_between_paragraphs() {
+        for (command, expected) in [
+            (SemanticEditCommand::SetHeadingLevel(2), "before\n## \nafter"),
+            (SemanticEditCommand::UnorderedList, "before\n- \nafter"),
+            (SemanticEditCommand::OrderedList, "before\n1. \nafter"),
+            (SemanticEditCommand::TaskList, "before\n- [ ] \nafter"),
+            (SemanticEditCommand::Quote, "before\n> \nafter"),
+            (SemanticEditCommand::CodeBlock, "before\n```\n\n```\nafter"),
+        ] {
+            let (result, _) = applied_text("before\n\nafter", command, "before\n".len(), None);
+
+            assert_eq!(result, expected);
+        }
+    }
+
+    #[test]
+    fn heading_command_preserves_hashes_that_are_part_of_plain_text() {
+        for source in ["#hashtag", "##正文", "####### seven hashes"] {
+            let (result, _) =
+                applied_text(source, SemanticEditCommand::SetHeadingLevel(2), 0, None);
+
+            assert_eq!(result, format!("## {source}"));
+        }
+    }
+
+    #[test]
+    fn line_command_keeps_the_crlf_sequence_outside_its_replacement_range() {
+        let plan = plan_semantic_edit("first\r\nsecond", 7, 0, None, SemanticEditCommand::Quote);
+        let SemanticEditPlan::Apply(transaction) = plan else {
+            panic!("quote command should produce an edit transaction");
+        };
+
+        assert_eq!(transaction.replacements[0].range, 0.."first".len());
+        assert_eq!(transaction.replacements[0].text, "> first");
+    }
+
+    #[test]
+    fn code_block_toggle_preserves_crlf_when_adding_fences() {
+        let source = "first\r\nsecond";
+        let (result, _) =
+            applied_text(source, SemanticEditCommand::CodeBlock, 0, Some(0..source.len()));
+
+        assert_eq!(result, "```\r\nfirst\r\nsecond\r\n```");
+    }
+
+    #[test]
+    fn code_block_toggle_preserves_crlf_when_removing_fences() {
+        let source = "```rust\r\nfirst\r\nsecond\r\n```\r\nafter";
+        let closing_end =
+            source.find("\r\nafter").expect("fixture has a paragraph after the fence");
+        let (result, _) =
+            applied_text(source, SemanticEditCommand::CodeBlock, 0, Some(0..closing_end));
+
+        assert_eq!(result, "first\r\nsecond\r\nafter");
+    }
+
+    #[test]
+    fn code_block_toggle_preserves_a_selected_blank_line_after_the_closing_fence() {
+        for newline in [LF_SEQUENCE, CRLF_SEQUENCE] {
+            let source = format!("```{newline}a{newline}```{newline}{newline}last");
+            let selection_end = source.find("last").expect("fixture ends with a paragraph");
+            let (result, _) =
+                applied_text(&source, SemanticEditCommand::CodeBlock, 0, Some(0..selection_end));
+
+            assert_eq!(result, format!("a{newline}{newline}last"));
+        }
+    }
+
+    #[test]
+    fn empty_code_block_toggle_preserves_a_selected_blank_line_after_the_closing_fence() {
+        for newline in [LF_SEQUENCE, CRLF_SEQUENCE] {
+            let source = format!("```{newline}```{newline}{newline}last");
+            let selection_end = source.find("last").expect("fixture ends with a paragraph");
+            let (result, _) =
+                applied_text(&source, SemanticEditCommand::CodeBlock, 0, Some(0..selection_end));
+
+            assert_eq!(result, format!("{newline}{newline}last"));
+        }
+    }
+
+    #[test]
+    fn code_block_toggle_preserves_multiple_selected_blank_lines_after_the_closing_fence() {
+        for newline in [LF_SEQUENCE, CRLF_SEQUENCE] {
+            let source = format!("```{newline}a{newline}```{newline}{newline}{newline}last");
+            let selection_end = source.find("last").expect("fixture ends with a paragraph");
+            let (result, _) =
+                applied_text(&source, SemanticEditCommand::CodeBlock, 0, Some(0..selection_end));
+
+            assert_eq!(result, format!("a{newline}{newline}{newline}last"));
+        }
+    }
+
+    #[test]
+    fn multiline_heading_selection_formats_its_last_blank_line() {
+        for newline in [LF_SEQUENCE, CRLF_SEQUENCE] {
+            let source = format!("first{newline}{newline}last");
+            let selection_end = format!("first{newline}{newline}").len();
+            let (result, _) = applied_text(
+                &source,
+                SemanticEditCommand::SetHeadingLevel(2),
+                0,
+                Some(0..selection_end),
+            );
+
+            assert_eq!(result, format!("## first{newline}## {newline}last"));
+        }
+    }
+
+    #[test]
+    fn multiline_quote_selection_counts_its_last_blank_line_when_toggling() {
+        for newline in [LF_SEQUENCE, CRLF_SEQUENCE] {
+            let source = format!("> first{newline}{newline}last");
+            let selection_end = format!("> first{newline}{newline}").len();
+            let (result, _) =
+                applied_text(&source, SemanticEditCommand::Quote, 0, Some(0..selection_end));
+
+            assert_eq!(result, format!("> > first{newline}> {newline}last"));
+        }
     }
 }

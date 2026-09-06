@@ -1,5 +1,9 @@
 //! Notora 产品与编辑器运行时；平台应用只通过 `NotoraApp` 组合根访问。
 
+#[cfg(test)]
+#[path = "runtime/keyboard_shortcut_tests.rs"]
+mod keyboard_shortcut_tests;
+
 #[path = "runtime/action_runtime.rs"]
 mod action_runtime;
 #[path = "app/deadline_coordinator.rs"]
@@ -618,6 +622,9 @@ impl NotoraRuntime {
         let editor_is_active =
             focus_target == crate::FocusTarget::Editor && self.active_editor_matches_selection();
         self.document_runtime.editor_mut().set_active_cursor_paint_enabled(editor_is_active);
+        if !editor_is_active {
+            let _ = self.update_editor_preedit(String::new(), None);
+        }
         self.frame_runtime.synchronize_focus(focus_target, Instant::now());
     }
 
@@ -659,8 +666,22 @@ impl NotoraRuntime {
         key: ui::KeyCode,
         modifiers: ui::core::Modifiers,
     ) {
+        self.handle_editor_key_input_with_physical_key(key, modifiers, None);
+    }
+
+    pub(crate) fn handle_editor_key_input_with_physical_key(
+        &mut self,
+        key: ui::KeyCode,
+        modifiers: ui::core::Modifiers,
+        physical_key: Option<winit::keyboard::PhysicalKey>,
+    ) {
         let context = self.editor_input_context();
-        let outcome = self.document_runtime.editor_mut().handle_key_input(context, key, modifiers);
+        let outcome = self.document_runtime.editor_mut().handle_key_input_with_physical_key(
+            context,
+            key,
+            modifiers,
+            physical_key,
+        );
         self.apply_editor_outcome(outcome);
     }
 
@@ -3318,7 +3339,7 @@ mod tests {
         assert_eq!(resolve_pointer_cursor(None, None), CursorIcon::Default);
     }
 
-    fn app() -> NotoraRuntime {
+    pub(super) fn app() -> NotoraRuntime {
         let directory = tempfile::tempdir().expect("test should create a temporary directory");
         let paths = NotoraPaths::from_config_directory(directory.keep().join("notora"))
             .expect("test should create isolated product paths");
@@ -3342,7 +3363,7 @@ mod tests {
         }
     }
 
-    fn install_registered_note(
+    pub(super) fn install_registered_note(
         app: &mut NotoraRuntime,
         path: &str,
         contents: &str,
@@ -4418,6 +4439,127 @@ mod tests {
     }
 
     #[test]
+    fn markdown_bold_shortcut_formats_selection_and_undo_restores_it() {
+        let mut app = app();
+        let (_, tab_id) = install_registered_note(&mut app, "bold.md", "中文正文");
+        app.dispatch_action(NotoraAction::FocusRequested(FocusTarget::Editor));
+        let tab = app
+            .document_runtime
+            .editor_runtime
+            .tab_session_mut(tab_id)
+            .expect("Markdown shortcut fixture should retain its tab");
+        tab.document.cursor_move_to_offset("中文".len());
+        tab.document.cursor_mut().selection_anchor = Some(0);
+        let modifiers = ui::core::Modifiers { cmd: true, ..ui::core::Modifiers::NONE };
+
+        app.handle_key_input(ui::KeyCode::Char('b'), modifiers, None);
+
+        let tab = app
+            .document_runtime
+            .editor_runtime
+            .tab_session(tab_id)
+            .expect("formatted Markdown should retain its tab");
+        assert_eq!(tab.full_text(), "**中文**正文");
+        assert!(tab.document.dirty);
+
+        app.handle_key_input(ui::KeyCode::Char('z'), modifiers, None);
+
+        assert_eq!(
+            app.document_runtime
+                .editor_runtime
+                .document_text_snapshot(tab_id)
+                .expect("undo should preserve the Markdown document")
+                .text,
+            "中文正文"
+        );
+    }
+
+    #[test]
+    fn markdown_bold_shortcut_supports_control_without_a_selection() {
+        let mut app = app();
+        let (_, tab_id) = install_registered_note(&mut app, "bold.md", "正文");
+        app.dispatch_action(NotoraAction::FocusRequested(FocusTarget::Editor));
+        app.document_runtime
+            .editor_runtime
+            .tab_session_mut(tab_id)
+            .expect("Markdown shortcut fixture should retain its tab")
+            .document
+            .cursor_move_to_offset(0);
+
+        app.handle_key_input(
+            ui::KeyCode::Char('B'),
+            ui::core::Modifiers { ctrl: true, ..ui::core::Modifiers::NONE },
+            None,
+        );
+
+        let tab = app
+            .document_runtime
+            .editor_runtime
+            .tab_session(tab_id)
+            .expect("Markdown shortcut fixture should retain its tab");
+        assert_eq!(tab.full_text(), "****正文");
+        assert_eq!(tab.document.cursor_offset().to_usize(), "**".len());
+    }
+
+    #[test]
+    fn markdown_bold_shortcut_respects_focus_modal_preedit_and_source_view() {
+        #[derive(Debug)]
+        enum Blocker {
+            SearchFocus,
+            Modal,
+            Preedit,
+            SourceView,
+            WindowUnfocused,
+            SelectionDetached,
+        }
+
+        for blocker in [
+            Blocker::SearchFocus,
+            Blocker::Modal,
+            Blocker::Preedit,
+            Blocker::SourceView,
+            Blocker::WindowUnfocused,
+            Blocker::SelectionDetached,
+        ] {
+            let mut app = app();
+            let (_, tab_id) = install_registered_note(&mut app, "bold.md", "正文");
+            app.dispatch_action(NotoraAction::FocusRequested(FocusTarget::Editor));
+            match blocker {
+                Blocker::SearchFocus => {
+                    app.dispatch_action(NotoraAction::FocusRequested(FocusTarget::NavigationSearch))
+                }
+                Blocker::Modal => app.dispatch_action(NotoraAction::OpenSettings),
+                Blocker::Preedit => {
+                    assert!(app.update_editor_preedit("拼".to_owned(), Some((0, 1))));
+                }
+                Blocker::SourceView => {
+                    app.dispatch_action(NotoraAction::ToggleSourceViewRequested);
+                }
+                Blocker::WindowUnfocused => app.set_window_focused(false),
+                Blocker::SelectionDetached => {
+                    app.action_runtime.state.library.selected_card = None;
+                }
+            }
+
+            app.handle_key_input(
+                ui::KeyCode::Char('b'),
+                ui::core::Modifiers { cmd: true, ..ui::core::Modifiers::NONE },
+                None,
+            );
+
+            assert_eq!(
+                app.document_runtime
+                    .editor_runtime
+                    .document_text_snapshot(tab_id)
+                    .expect("blocked shortcut should retain the document")
+                    .text,
+                "正文",
+                "bold shortcut must be blocked by {blocker:?}"
+            );
+        }
+    }
+
+    #[test]
     fn document_ime_is_gated_by_product_focus_and_modal_state() {
         let mut app = app();
         assert!(!app.update_editor_preedit("拼".to_owned(), Some((0, 1))));
@@ -4620,13 +4762,13 @@ mod tests {
             ui::KeyCode::Char('f'),
             ui::KeyCode::Char('s'),
         ] {
-            app.handle_key_input(key_code, command_modifiers);
+            app.handle_key_input(key_code, command_modifiers, None);
         }
 
         assert_eq!(app.action_runtime.state().layout.overlay, OverlayState::Settings);
         assert_eq!(app.action_runtime.state().layout.focus_target, modal_focus);
 
-        app.handle_key_input(ui::KeyCode::Escape, ui::core::Modifiers::NONE);
+        app.handle_key_input(ui::KeyCode::Escape, ui::core::Modifiers::NONE, None);
         assert_eq!(app.action_runtime.state().layout.overlay, OverlayState::None);
         assert_eq!(app.action_runtime.state().layout.focus_target, FocusTarget::NavigationTree);
     }
@@ -4867,7 +5009,7 @@ mod tests {
             app.action_runtime.state().library.navigation_scope,
             NavigationScope::Search { query: "路线图".to_owned() }
         );
-        assert_eq!(app.document_runtime.editor_runtime.preedit().0, "document");
+        assert!(app.document_runtime.editor_runtime.preedit().0.is_empty());
     }
 
     #[test]

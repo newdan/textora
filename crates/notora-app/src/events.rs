@@ -177,32 +177,7 @@ impl NotoraRuntime {
             WindowEvent::DroppedFile(path) => {
                 self.receive_system_open_paths(vec![path]);
             }
-            WindowEvent::Ime(Ime::Preedit(text, cursor)) => {
-                let product_consumed =
-                    self.route_product_event(&ui::Event::ImePreedit { text: text.clone(), cursor });
-                if should_forward_input_to_editor(
-                    self.state().layout.focus_target,
-                    product_consumed,
-                ) {
-                    let _ = self.update_editor_preedit(text, cursor);
-                }
-            }
-            WindowEvent::Ime(Ime::Commit(text)) => {
-                let product_consumed =
-                    self.route_product_event(&ui::Event::ImeCommit(text.clone()));
-                if should_forward_input_to_editor(
-                    self.state().layout.focus_target,
-                    product_consumed,
-                ) {
-                    self.commit_editor_text(text);
-                }
-            }
-            WindowEvent::Ime(Ime::Enabled) => {
-                let _ = self.route_product_event(&ui::Event::ImeEnable);
-            }
-            WindowEvent::Ime(Ime::Disabled) => {
-                let _ = self.route_product_event(&ui::Event::ImeDisable);
-            }
+            WindowEvent::Ime(event) => self.handle_ime_input(event),
             WindowEvent::KeyboardInput { event, .. } if event.state == ElementState::Pressed => {
                 let Some(key_code) =
                     winit_key_to_keycode(&event.logical_key, event.text.as_deref())
@@ -210,7 +185,7 @@ impl NotoraRuntime {
                     return;
                 };
                 let modifiers = ui_modifiers(self.editor_runtime_mut().input_modifiers());
-                self.handle_key_input(key_code, modifiers);
+                self.handle_key_input(key_code, modifiers, Some(event.physical_key));
             }
             WindowEvent::RedrawRequested => match self.render() {
                 Ok(()) => {
@@ -235,7 +210,45 @@ impl NotoraRuntime {
 }
 
 impl NotoraRuntime {
-    pub(crate) fn handle_key_input(&mut self, key_code: ui::KeyCode, modifiers: Modifiers) {
+    pub(crate) fn handle_ime_input(&mut self, event: Ime) {
+        match event {
+            Ime::Preedit(text, cursor) => {
+                let product_consumed =
+                    self.route_product_event(&ui::Event::ImePreedit { text: text.clone(), cursor });
+                if should_forward_input_to_editor(
+                    self.state().layout.focus_target,
+                    product_consumed,
+                ) {
+                    let _ = self.update_editor_preedit(text, cursor);
+                }
+            }
+            Ime::Commit(text) => {
+                let product_consumed =
+                    self.route_product_event(&ui::Event::ImeCommit(text.clone()));
+                if should_forward_input_to_editor(
+                    self.state().layout.focus_target,
+                    product_consumed,
+                ) {
+                    self.commit_editor_text(text);
+                }
+            }
+            Ime::Enabled => {
+                let _ = self.route_product_event(&ui::Event::ImeEnable);
+                let _ = self.update_editor_preedit(String::new(), None);
+            }
+            Ime::Disabled => {
+                let _ = self.route_product_event(&ui::Event::ImeDisable);
+                let _ = self.update_editor_preedit(String::new(), None);
+            }
+        }
+    }
+
+    pub(crate) fn handle_key_input(
+        &mut self,
+        key_code: ui::KeyCode,
+        modifiers: Modifiers,
+        physical_key: Option<winit::keyboard::PhysicalKey>,
+    ) {
         let key_event = ui::Event::KeyDown(key_code, modifiers);
         if key_code == ui::KeyCode::Escape {
             if !self.route_product_event(&key_event) {
@@ -245,6 +258,15 @@ impl NotoraRuntime {
         }
         if self.state().layout.overlay != OverlayState::None {
             let _ = self.route_product_event(&key_event);
+            return;
+        }
+        if self.state().layout.focus_target == FocusTarget::Editor
+            && self
+                .editor_runtime_mut()
+                .markdown_shortcut_command(key_code, modifiers, physical_key)
+                .is_some()
+        {
+            self.route_editor_key_input(key_code, modifiers, physical_key);
             return;
         }
         if is_open_external_shortcut(key_code, modifiers) {
@@ -269,9 +291,22 @@ impl NotoraRuntime {
             self.request_manual_save();
             return;
         }
-        let product_consumed = self.route_product_event(&key_event);
+        self.route_editor_key_input(key_code, modifiers, physical_key);
+    }
+
+    fn route_editor_key_input(
+        &mut self,
+        key_code: ui::KeyCode,
+        modifiers: Modifiers,
+        physical_key: Option<winit::keyboard::PhysicalKey>,
+    ) {
+        let product_consumed = self.route_product_event(&ui::Event::KeyDown(key_code, modifiers));
         if should_forward_input_to_editor(self.state().layout.focus_target, product_consumed) {
-            self.handle_editor_key_input(key_code, modifiers);
+            if physical_key.is_some() {
+                self.handle_editor_key_input_with_physical_key(key_code, modifiers, physical_key);
+            } else {
+                self.handle_editor_key_input(key_code, modifiers);
+            }
         }
     }
 }
