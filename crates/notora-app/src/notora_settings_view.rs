@@ -68,6 +68,7 @@ const FONT_FAMILY_ID: WidgetId = WidgetId(0x6e6f_746f_666f_6e74);
 const FONT_SIZE_ID: WidgetId = WidgetId(0x6e6f_746f_7369_7a65);
 const LINE_HEIGHT_RATIO_ID: WidgetId = WidgetId(0x6e6f_746f_6c69_6e65);
 const WORD_WRAP_ID: WidgetId = WidgetId(0x6e6f_746f_7772_6170);
+const MARKDOWN_FIRST_LINE_INDENT_ID: WidgetId = WidgetId(0x6e6f_746f_6d64_696e);
 const LINE_NUMBERS_ID: WidgetId = WidgetId(0x6e6f_746f_6e75_6d62);
 const TAB_WIDTH_ID: WidgetId = WidgetId(0x6e6f_746f_7461_6273);
 const STATUS_BAR_ID: WidgetId = WidgetId(0x6e6f_746f_7374_6174);
@@ -389,6 +390,12 @@ impl NotoraSettingsView {
                     editor.word_wrap,
                 ),
                 switch_row(
+                    MARKDOWN_FIRST_LINE_INDENT_ID,
+                    "Markdown 首行缩进",
+                    "普通段落首行缩进两个字符，仅影响排版",
+                    editor.markdown_first_line_indent,
+                ),
+                switch_row(
                     LINE_NUMBERS_ID,
                     "显示行号",
                     "在编辑器左侧显示行号。",
@@ -563,6 +570,9 @@ impl NotoraSettingsView {
     fn map_toggle(&mut self, id: WidgetId, checked: bool) -> Option<SettingsOverlayAction> {
         let update = match id {
             WORD_WRAP_ID => ProductSettingsUpdate::WordWrap(checked),
+            MARKDOWN_FIRST_LINE_INDENT_ID => {
+                ProductSettingsUpdate::MarkdownFirstLineIndent(checked)
+            }
             LINE_NUMBERS_ID => ProductSettingsUpdate::ShowLineNumbers(checked),
             STATUS_BAR_ID => ProductSettingsUpdate::ShowStatusBar(checked),
             _ => return None,

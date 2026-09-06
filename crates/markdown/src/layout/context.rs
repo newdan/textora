@@ -531,6 +531,17 @@ impl<'a> LayoutCtx<'a> {
         font_weight: shaping::Weight,
         max_w: f32,
     ) -> Vec<WrappedLine> {
+        self.wrap_text_with_first_line_indent(text, font_size, font_weight, max_w, 0.0)
+    }
+
+    pub(crate) fn wrap_text_with_first_line_indent(
+        &mut self,
+        text: &str,
+        font_size: f32,
+        font_weight: shaping::Weight,
+        max_w: f32,
+        first_line_indent: f32,
+    ) -> Vec<WrappedLine> {
         let mut lines = Vec::new();
         self.last_wrap_shaped.clear();
         let mut input_offset = 0usize;
@@ -569,12 +580,13 @@ impl<'a> LayoutCtx<'a> {
                 if let Ok(shaped) = shaped {
                     self.last_wrap_shaped.push(Some(shaped.clone()));
                     let line_bytes = input_line.as_bytes();
-                    let visual_lines = ui::layout::compute_visual_lines(
+                    let visual_lines = ui::layout::compute_visual_lines_with_first_line_indent(
                         &shaped.clusters,
                         line_bytes,
                         char_width,
                         max_w,
                         0.0,
+                        if input_offset == 0 { first_line_indent } else { 0.0 },
                     );
                     if visual_lines.is_empty() {
                         lines.push(WrappedLine {

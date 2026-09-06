@@ -96,6 +96,7 @@ impl EditorRuntime {
                 &theme,
                 &metrics,
                 settings.toc_max_depth,
+                settings.markdown_first_line_indent,
                 preedit,
             )
         } else {
@@ -125,6 +126,7 @@ fn paint_plugin_editor(
     theme: &ui::Theme,
     metrics: &ui::settings::UiMetrics,
     toc_max_depth: u8,
+    markdown_first_line_indent: bool,
     preedit: (String, Option<(usize, usize)>),
 ) -> Vec<GlyphVertex> {
     let (Some(text), Some(gpu)) = (resources.text.as_mut(), resources.gpu.as_ref()) else {
@@ -144,6 +146,7 @@ fn paint_plugin_editor(
         font_size: metrics.font_size / metrics.dpi,
         line_height: metrics.line_height / metrics.dpi,
         toc_max_depth,
+        markdown_first_line_indent,
     });
     let cursor_visible = cursor_paint_enabled
         && (tab.cursor_blink_instant().elapsed().as_millis() / 500).is_multiple_of(2);

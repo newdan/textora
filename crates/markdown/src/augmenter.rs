@@ -17,6 +17,8 @@
 mod editable_paragraph_edit;
 #[path = "editable_paragraph_navigation.rs"]
 mod editable_paragraph_navigation;
+#[path = "paragraph_leading_spaces.rs"]
+mod paragraph_leading_spaces;
 
 use crate::builder::ListBullet;
 #[cfg(test)]
@@ -750,7 +752,16 @@ fn preferred_newline_sequence(source: &str, current_byte: usize) -> &'static str
 }
 
 fn augment_insert_text(source: &str, current_byte: usize, text: &str) -> Option<EditAugmentation> {
-    editable_paragraph_edit::insert_text(source, current_byte, text)
+    paragraph_leading_spaces::insert_text(source, current_byte, text)
+        .or_else(|| editable_paragraph_edit::insert_text(source, current_byte, text))
+}
+
+pub(crate) fn augment_selected_text(
+    source: &str,
+    selection: std::ops::Range<usize>,
+    text: &str,
+) -> Option<EditAugmentation> {
+    paragraph_leading_spaces::insert_selected_text(source, selection, text)
 }
 
 // ─── emit_* 原语 ──────────────────────────────────────────────────────────

@@ -265,6 +265,25 @@ pub fn compute_visual_lines(
     viewport_width: f32,
     min_fill_ratio: f32,
 ) -> Vec<(usize, usize, f32)> {
+    compute_visual_lines_with_first_line_indent(
+        clusters,
+        line_bytes,
+        char_width,
+        viewport_width,
+        min_fill_ratio,
+        0.0,
+    )
+}
+
+/// Wrap with a reduced first-line width and the full viewport for continuation lines.
+pub fn compute_visual_lines_with_first_line_indent(
+    clusters: &[shaping::GlyphCluster],
+    line_bytes: &[u8],
+    char_width: f32,
+    viewport_width: f32,
+    min_fill_ratio: f32,
+    first_line_indent: f32,
+) -> Vec<(usize, usize, f32)> {
     if clusters.is_empty() {
         return Vec::new();
     }
@@ -305,6 +324,11 @@ pub fn compute_visual_lines(
 
     let mut ci = 0usize;
     while ci < n {
+        let available_width = if visual_lines.is_empty() {
+            (viewport_width - first_line_indent).max(0.0)
+        } else {
+            viewport_width
+        };
         // Word-boundary detection
         if !ws_arr[ci] {
             if ci > 0 && ws_arr[ci - 1] {
@@ -335,7 +359,7 @@ pub fn compute_visual_lines(
             }
             if peek < n {
                 let space_and_next = width_of(start, peek) + adv[peek];
-                if space_and_next <= viewport_width {
+                if space_and_next <= available_width {
                     ci = peek; // 跳过空格，继续纳入中文
                     continue;
                 }
@@ -343,7 +367,7 @@ pub fn compute_visual_lines(
         }
 
         let visual_line_x = width_of(start, ci);
-        if visual_line_x + adv[ci] > viewport_width && ci > start {
+        if visual_line_x + adv[ci] > available_width && ci > start {
             // Choose break point: pick the widest valid candidate.
             // Hard break always competes; CJK mode prefers filling the line,
             // English mode prefers word boundaries.
@@ -425,7 +449,7 @@ pub fn compute_visual_lines(
                 }
                 if punct_end > break_at {
                     let with_punct = trimmed_width(start, punct_end);
-                    if with_punct <= viewport_width {
+                    if with_punct <= available_width {
                         // Punctuation fits without overflow — swallow it
                         break_at = punct_end;
                         break;
@@ -496,6 +520,34 @@ pub fn compute_visual_lines(
 mod tests {
 
     use super::*;
+    #[test]
+    fn first_line_indent_reduces_only_first_wrap_width() {
+        let text = "一二三四五六七八九十";
+        let clusters: Vec<_> = text
+            .char_indices()
+            .map(|(offset, character)| shaping::GlyphCluster {
+                byte_range: offset..offset + character.len_utf8(),
+                advance: 10.0,
+                glyph_id: 0,
+                font_id: Default::default(),
+                x_offset: 0.0,
+                y_offset: 0.0,
+            })
+            .collect();
+        let lines = compute_visual_lines_with_first_line_indent(
+            &clusters,
+            text.as_bytes(),
+            10.0,
+            50.0,
+            0.0,
+            20.0,
+        );
+        assert_eq!(
+            lines.iter().map(|&(start, end, _)| end - start).collect::<Vec<_>>(),
+            vec![3, 5, 2]
+        );
+    }
+
     // ── is_punct_char Unicode General Category unit tests ──
 
     #[test]

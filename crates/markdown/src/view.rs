@@ -272,11 +272,14 @@ impl<'a> CodeHighlighter for AppCodeHighlighter<'a> {
 
 // ===== MarkdownRenderSettings =====
 
+const PARAGRAPH_FIRST_LINE_INDENT_EMS: f32 = 2.0;
+
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct MarkdownRenderSettings {
     pub font_size: f32,
     pub line_height: f32,
     pub toc_max_depth: u8,
+    pub markdown_first_line_indent: bool,
 }
 
 impl MarkdownRenderSettings {
@@ -288,11 +291,16 @@ impl MarkdownRenderSettings {
             font_size: metrics.font_size,
             line_height: metrics.line_height,
             toc_max_depth: settings.toc_max_depth,
+            markdown_first_line_indent: settings.markdown_first_line_indent,
         }
     }
 
     pub(crate) fn style(self, theme: &Theme) -> MarkdownStyle {
-        MarkdownStyle::from_theme(theme, self.font_size, self.line_height)
+        let mut style = MarkdownStyle::from_theme(theme, self.font_size, self.line_height);
+        if self.markdown_first_line_indent {
+            style.paragraph_first_line_indent = PARAGRAPH_FIRST_LINE_INDENT_EMS * self.font_size;
+        }
+        style
     }
 }
 
@@ -364,6 +372,7 @@ pub struct PreviewEngine<S: BlockSource = MarkdownDoc> {
     navigation_metrics_style_hash: u64,
     pub paragraph_spacing: f32,
     pub toc_max_depth: u8,
+    pub markdown_first_line_indent: bool,
 
     /// WYSIWYG 编辑上下文。None 表示纯预览模式 (快速路径)。
     pub edit_ctx: Option<crate::edit::EditContext>,
@@ -415,6 +424,7 @@ impl<S: BlockSource> PreviewEngine<S> {
             navigation_metrics_style_hash: 0,
             paragraph_spacing: 12.0,
             toc_max_depth: 3,
+            markdown_first_line_indent: false,
             edit_ctx: None,
             edit_source: None,
             source_line_map: None,
@@ -2002,10 +2012,16 @@ impl<S: BlockSource> PreviewEngine<S> {
                 self.select_all();
                 Some(true)
             }
-            PluginMessage::SetRenderSettings { font_size, line_height, toc_max_depth } => {
+            PluginMessage::SetRenderSettings {
+                font_size,
+                line_height,
+                toc_max_depth,
+                markdown_first_line_indent,
+            } => {
                 self.base_font_size = *font_size;
                 self.base_line_height = *line_height;
                 self.toc_max_depth = *toc_max_depth;
+                self.markdown_first_line_indent = *markdown_first_line_indent;
                 Some(true)
             }
             PluginMessage::SetCursorByte(byte) => {
@@ -2149,6 +2165,7 @@ impl ViewPlugin for MarkdownView {
             font_size: self.engine.base_font_size * dpi_scale,
             line_height: self.engine.base_line_height * dpi_scale,
             toc_max_depth: self.engine.toc_max_depth,
+            markdown_first_line_indent: self.engine.markdown_first_line_indent,
         };
         let (dl, _) =
             self.render(theme, bounds.w, bounds.h, bounds.x, bounds.y, settings, Some(shaper));
@@ -2651,6 +2668,12 @@ impl MarkdownEditorView {
         if self.source.get(selection.clone()).is_none() {
             return ui::plugin::EditPlan::UseDefault;
         }
+        if let ui::plugin::EditIntent::InsertText(text) = &request.intent {
+            return crate::augmenter::augment_selected_text(&self.source, selection.clone(), text)
+                .map_or(ui::plugin::EditPlan::UseDefault, |augmentation| {
+                    selection_augmentation_edit_plan(request, selection, augmentation)
+                });
+        }
         if matches!(
             request.intent,
             ui::plugin::EditIntent::DeleteBackward | ui::plugin::EditIntent::DeleteForward
@@ -2739,6 +2762,7 @@ impl ViewPlugin for MarkdownEditorView {
             font_size: self.engine.base_font_size * dpi_scale,
             line_height: self.engine.base_line_height * dpi_scale,
             toc_max_depth: self.engine.toc_max_depth,
+            markdown_first_line_indent: self.engine.markdown_first_line_indent,
         };
         let style = settings.style(theme);
         self.engine.toc_max_depth = settings.toc_max_depth;
@@ -2904,6 +2928,7 @@ fn style_hash_quick(style: &MarkdownStyle) -> u64 {
     h = h.rotate_left(5) ^ (style.code_font_size.to_bits() as u64);
     h = h.rotate_left(5) ^ (style.line_height.to_bits() as u64);
     h = h.rotate_left(5) ^ (style.paragraph_spacing.to_bits() as u64);
+    h = h.rotate_left(5) ^ (style.paragraph_first_line_indent.to_bits() as u64);
     h = h.rotate_left(5) ^ (style.list_indent.to_bits() as u64);
     h = h.rotate_left(5) ^ (style.list_item_spacing.to_bits() as u64);
     for &c in &[
@@ -3055,6 +3080,24 @@ mod heading_tests {
     }
 
     #[test]
+    fn first_line_indent_settings_scale_and_invalidate_style_cache() {
+        let theme = ui::theme::Theme::from_definition(&ui::theme::ThemeDefinition::default_dark());
+        let mut settings = ui::settings::Settings::new();
+        let metrics = ui::settings::UiMetrics::from_settings(&settings, 2.0);
+        let disabled = MarkdownRenderSettings::from_metrics(&settings, &metrics).style(&theme);
+        settings.markdown_first_line_indent = true;
+        let enabled = MarkdownRenderSettings::from_metrics(&settings, &metrics).style(&theme);
+        assert_eq!(disabled.paragraph_first_line_indent, 0.0);
+        assert_eq!(enabled.paragraph_first_line_indent, 2.0 * metrics.font_size);
+        assert_ne!(style_hash_quick(&disabled), style_hash_quick(&enabled));
+        assert_eq!(
+            MarkdownStyle::novel(&theme, metrics.font_size, metrics.line_height)
+                .paragraph_first_line_indent,
+            0.0
+        );
+    }
+
+    #[test]
     fn markdown_render_settings_take_physical_metrics() {
         let settings = ui::settings::Settings::new();
         let metrics = ui::settings::UiMetrics::from_settings(&settings, 2.0);
@@ -3067,8 +3110,12 @@ mod heading_tests {
     #[test]
     fn render_settings_control_style_and_toc_depth() {
         let theme = ui::theme::Theme::from_definition(&ui::theme::ThemeDefinition::default_dark());
-        let settings =
-            MarkdownRenderSettings { font_size: 36.0, line_height: 58.0, toc_max_depth: 5 };
+        let settings = MarkdownRenderSettings {
+            font_size: 36.0,
+            line_height: 58.0,
+            toc_max_depth: 5,
+            markdown_first_line_indent: false,
+        };
         let style = settings.style(&theme);
         assert_eq!(style.body_font_size, 36.0);
         assert_eq!(style.line_height, 58.0);
@@ -3089,7 +3136,12 @@ mod wysiwyg_tests {
     use ui::plugin::MoveDirection;
 
     fn default_settings() -> MarkdownRenderSettings {
-        MarkdownRenderSettings { font_size: 15.0, line_height: 24.0, toc_max_depth: 5 }
+        MarkdownRenderSettings {
+            font_size: 15.0,
+            line_height: 24.0,
+            toc_max_depth: 5,
+            markdown_first_line_indent: false,
+        }
     }
 
     #[test]
@@ -5623,6 +5675,53 @@ C608-01 武昌职业第01组：计划 68，历史低线较低，是表里最像�
         let bounds = ui::core::geom::Rect::new(0.0, 0.0, 800.0, 600.0);
         let mut shaper = shaping::Shaper::new().expect("test shaper should initialize");
         <MarkdownEditorView as ViewPlugin>::render(view, doc, bounds, &theme, &mut shaper, 1.0)
+    }
+
+    #[test]
+    fn first_line_indent_plugin_setting_updates_cached_layout_caret_and_hit_testing() {
+        use ui::plugin::{PluginMessage, ViewPlugin};
+
+        for source in ["普通段落内容", ""] {
+            let mut document = StubDoc::new(source);
+            let mut view = MarkdownEditorView::new();
+            view.set_source(source.to_owned(), 1);
+            view.handle_message(PluginMessage::SetCursorByte(0), &mut document);
+            let font_size = 15.0;
+            let dpi_scale = 2.0;
+            for enabled in [false, true, false] {
+                view.handle_message(
+                    PluginMessage::SetRenderSettings {
+                        font_size,
+                        line_height: 24.0,
+                        toc_max_depth: 3,
+                        markdown_first_line_indent: enabled,
+                    },
+                    &mut document,
+                );
+                render_editor_draw_list_with_dpi(&mut view, &document, dpi_scale);
+                let first_line = &view.engine().flat_lines()[0];
+                let expected_x = if enabled {
+                    PARAGRAPH_FIRST_LINE_INDENT_EMS * font_size * dpi_scale
+                } else {
+                    0.0
+                };
+                assert_eq!(first_line.rect.x, expected_x, "setting={enabled}, source={source:?}");
+                let (cursor_x, _, _, _) = view
+                    .engine()
+                    .cursor_screen_pos()
+                    .expect("editable paragraph must expose a cursor position");
+                assert_eq!(cursor_x, expected_x);
+                assert_eq!(
+                    view.engine().hit_test_byte(
+                        expected_x,
+                        first_line.rect.y + first_line.rect.h / 2.0,
+                        0.0,
+                        0.0
+                    ),
+                    Some(0)
+                );
+            }
+        }
     }
 
     fn rendered_text_commands(draw_list: &DrawList) -> Vec<&str> {

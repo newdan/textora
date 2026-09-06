@@ -1052,6 +1052,48 @@ mod edit_tests {
 
     #[cfg(feature = "markdown")]
     #[test]
+    fn markdown_leading_spaces_type_and_undo_through_the_editor_transaction_route() {
+        let mut app = app_with_markdown_editor("正文");
+        for _ in 0..4 {
+            app.dispatch_transactional_edit_for_test(EditCommand::InsertChar(" ".into()));
+        }
+        let edited = active_text(&app);
+        assert_eq!(edited.replace('\u{a0}', " "), "    正文");
+        assert_eq!(active_cursor(&app), "\u{a0}".len() * 4);
+
+        app.dispatch_transactional_edit_for_test(EditCommand::Backspace);
+        assert_eq!(active_text(&app).replace('\u{a0}', " "), "   正文");
+        dispatch_undo(&mut app);
+        assert_eq!(active_text(&app), edited);
+        dispatch_redo(&mut app);
+        assert_eq!(active_text(&app).replace('\u{a0}', " "), "   正文");
+    }
+
+    #[cfg(feature = "markdown")]
+    #[test]
+    fn markdown_leading_spaces_selection_replacement_undo_restores_original_source() {
+        let original = "旧段落";
+        let mut app = app_with_markdown_editor(original);
+        select_all_active_text(&mut app);
+        app.dispatch_transactional_edit_for_test(EditCommand::InsertText("    新段落".into()));
+        let edited = active_text(&app);
+        assert_eq!(edited.replace('\u{a0}', " "), "    新段落");
+        assert_eq!(active_cursor(&app), edited.len());
+        dispatch_undo(&mut app);
+        assert_eq!(active_text(&app), original);
+        dispatch_redo(&mut app);
+        assert_eq!(active_text(&app), edited);
+    }
+
+    #[test]
+    fn source_editor_leading_spaces_remain_ascii() {
+        let mut app = app_with_text("正文");
+        app.dispatch_transactional_edit_for_test(EditCommand::InsertText("    ".into()));
+        assert_eq!(active_text(&app), "    正文");
+    }
+
+    #[cfg(feature = "markdown")]
+    #[test]
     fn markdown_editor_smart_paste_reads_snapshot_and_converts_html() {
         let mut app = app_with_markdown_editor("");
         let mut clipboard =

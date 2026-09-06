@@ -722,6 +722,7 @@ mod tests {
             font_size: 15.0,
             line_height_ratio: 1.618,
             word_wrap: true,
+            markdown_first_line_indent: false,
             show_line_numbers: true,
             tab_width: 4,
             view_mode: ViewMode::Sidebar,

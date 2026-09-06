@@ -48,8 +48,13 @@ pub enum PluginMessage {
     InterceptKey { key: crate::core::widget::KeyCode, modifiers: crate::core::widget::Modifiers },
     /// Select all text in the preview.
     SelectAll,
-    /// Update render settings (font_size, line_height, toc_max_depth).
-    SetRenderSettings { font_size: f32, line_height: f32, toc_max_depth: u8 },
+    /// Update host-controlled render settings.
+    SetRenderSettings {
+        font_size: f32,
+        line_height: f32,
+        toc_max_depth: u8,
+        markdown_first_line_indent: bool,
+    },
     /// Restore absolute scroll position (for switching back from edit mode).
     SetScrollY(f32),
     /// Restore scroll position as a ratio (0.0~1.0) of content height.

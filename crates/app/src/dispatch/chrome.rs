@@ -27,6 +27,7 @@ pub(crate) enum SettingsDispatchAction {
     SetLineHeightRatio(f32),
     SetTabWidth(usize),
     SetWordWrap(bool),
+    SetMarkdownFirstLineIndent(bool),
     SetShowLineNumbers(bool),
     SetShowStatusBar(bool),
     ToggleLineNumbers,
@@ -165,6 +166,10 @@ impl App {
                 AppEffect::PERSIST_SETTINGS.merge(AppEffect::RESHAPE)
             }
             SettingsDispatchAction::SetWordWrap(enabled) => self.apply_word_wrap(enabled),
+            SettingsDispatchAction::SetMarkdownFirstLineIndent(enabled) => {
+                self.settings.set_markdown_first_line_indent(enabled);
+                AppEffect::PERSIST_SETTINGS.merge(AppEffect::RESHAPE)
+            }
             SettingsDispatchAction::SetShowLineNumbers(enabled) => {
                 self.settings.set_show_line_numbers(enabled);
                 AppEffect::PERSIST_SETTINGS.merge(AppEffect::RESHAPE)
@@ -290,6 +295,17 @@ mod tests {
         let effect = app.dispatch_settings_action(SettingsDispatchAction::ToggleWordWrap);
 
         assert_eq!(app.settings.word_wrap, !before);
+        assert!(effect.persist_settings);
+        assert!(effect.reshape);
+    }
+
+    #[test]
+    fn markdown_first_line_indent_returns_persist_and_reshape() {
+        let mut app = App::new(None);
+        let effect =
+            app.dispatch_settings_action(SettingsDispatchAction::SetMarkdownFirstLineIndent(true));
+
+        assert!(app.settings.markdown_first_line_indent);
         assert!(effect.persist_settings);
         assert!(effect.reshape);
     }

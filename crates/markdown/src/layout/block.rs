@@ -902,13 +902,14 @@ fn materialize_marker_for_projected_line(
 }
 
 pub(crate) fn estimate_line_count(text: &str, max_w: f32, font_size: f32) -> usize {
-    estimated_visual_line_ranges(text, max_w, font_size).len()
+    estimated_visual_line_ranges(text, max_w, font_size, 0.0).len()
 }
 
 fn estimated_visual_line_ranges(
     text: &str,
     max_w: f32,
     font_size: f32,
+    first_line_indent: f32,
 ) -> Vec<std::ops::Range<usize>> {
     if text.is_empty() {
         let empty_text_range = 0..0;
@@ -919,11 +920,55 @@ fn estimated_visual_line_ranges(
     let visual_grapheme_bytes = crate::grapheme_map::grapheme_byte_boundaries(text);
     let grapheme_count = visual_grapheme_bytes.len().saturating_sub(1);
     let mut ranges = Vec::with_capacity(grapheme_count.div_ceil(graphemes_per_line));
-    for grapheme_start in (0..grapheme_count).step_by(graphemes_per_line) {
-        let grapheme_end = (grapheme_start + graphemes_per_line).min(grapheme_count);
+    let mut grapheme_start = 0;
+    while grapheme_start < grapheme_count {
+        let line_capacity = if grapheme_start == 0 {
+            ((max_w - first_line_indent) / char_w).max(1.0) as usize
+        } else {
+            graphemes_per_line
+        };
+        let grapheme_end = (grapheme_start + line_capacity).min(grapheme_count);
         ranges.push(visual_grapheme_bytes[grapheme_start]..visual_grapheme_bytes[grapheme_end]);
+        grapheme_start = grapheme_end;
     }
     ranges
+}
+
+fn paragraph_first_line_indent(
+    block: &BlockNode,
+    ctx: &LayoutCtx,
+    font_size: f32,
+    raw_lines: &[std::borrow::Cow<'_, str>],
+) -> f32 {
+    if ctx.style.paragraph_first_line_indent <= 0.0
+        || !matches!(block.kind, BlockKind::Paragraph)
+        || ctx.indent != 0.0
+        || ctx.list_depth != 0
+        || ctx.font_size_override.is_some()
+        || raw_lines.first().and_then(|line| line.chars().next()).is_some_and(char::is_whitespace)
+    {
+        return 0.0;
+    }
+
+    // CommonMark omits up to three leading ASCII spaces from paragraph text.
+    // Inspect the owning source line too, so existing manual whitespace wins.
+    let mut lower_line = 0;
+    let mut upper_line = ctx.doc.line_count();
+    while lower_line < upper_line {
+        let middle_line = lower_line + (upper_line - lower_line) / 2;
+        if ctx.doc.line_byte_offset(middle_line) <= block.block_range.start {
+            lower_line = middle_line + 1;
+        } else {
+            upper_line = middle_line;
+        }
+    }
+    if lower_line > 0
+        && ctx.doc.doc_line_text(lower_line - 1).chars().next().is_some_and(char::is_whitespace)
+    {
+        return 0.0;
+    }
+
+    ctx.style.paragraph_first_line_indent.min((ctx.available_width() - font_size).max(0.0))
 }
 
 pub(crate) fn layout_text_block(
@@ -940,11 +985,13 @@ pub(crate) fn layout_text_block(
     };
 
     let raw_lines = collect_text_lines(block, ctx.doc);
+    let first_line_indent = paragraph_first_line_indent(block, ctx, font_size, &raw_lines);
     let raw_styles = &block.text_styles;
     let mut laid_out_lines = Vec::new();
     let mut ly = ctx.y;
 
     for (line_idx, raw) in raw_lines.iter().enumerate() {
+        let line_indent = if line_idx == 0 { first_line_indent } else { 0.0 };
         if ctx.shaper.is_none() {
             // Estimate line count from raw text only — the active block marker
             // must NOT participate, or the count would be wrong for content
@@ -960,17 +1007,24 @@ pub(crate) fn layout_text_block(
                 &source_projection.text,
                 ctx.available_width(),
                 font_size,
+                line_indent,
             );
             let visual_grapheme_bytes =
                 crate::grapheme_map::grapheme_byte_boundaries(&source_projection.text);
             for (i, visual_range) in estimated_ranges.into_iter().enumerate() {
+                let visual_indent = if i == 0 { line_indent } else { 0.0 };
                 let text = if i == 0 { raw.to_string() } else { String::new() };
                 laid_out_lines.push(LaidOutLine {
                     // Put full raw text and styles in the first line so flat_lines
                     // have content. Wrapped lines (i>0) get empty — precision fills them.
                     text,
                     styles: if i == 0 { line_styles.clone() } else { vec![] },
-                    rect: ui::core::geom::Rect::new(ctx.indent, ly, ctx.available_width(), line_h),
+                    rect: ui::core::geom::Rect::new(
+                        ctx.indent + visual_indent,
+                        ly,
+                        ctx.available_width() - visual_indent,
+                        line_h,
+                    ),
                     font_size,
                     is_code: false,
                     font_weight,
@@ -1073,12 +1127,19 @@ pub(crate) fn layout_text_block(
                 },
             );
         }
-        let wrapped = ctx.wrap_text(&projected.text, font_size, font_weight);
+        let wrapped = ctx.wrap_text_with_first_line_indent(
+            &projected.text,
+            font_size,
+            font_weight,
+            ctx.available_width(),
+            line_indent,
+        );
         let visual_grapheme_bytes = crate::grapheme_map::grapheme_byte_boundaries(&projected.text);
 
         let shaped_input = ctx.last_wrap_shaped.first().and_then(|s| s.as_ref());
         let font_family_str = ctx.style.body_font_family.first().map(|s| s.as_str());
-        for w in &wrapped {
+        for (visual_index, w) in wrapped.iter().enumerate() {
+            let visual_indent = if visual_index == 0 { line_indent } else { 0.0 };
             let seg_start = w.byte_start;
             let seg_end = w.byte_end;
             // Extract style spans that fall within this wrapped segment
@@ -1115,7 +1176,12 @@ pub(crate) fn layout_text_block(
                 .expect("wrapped visual lines must end at projection grapheme boundaries");
             laid_out_lines.push(LaidOutLine {
                 text: w.text.clone(),
-                rect: ui::core::geom::Rect::new(ctx.indent, ly, ctx.available_width(), line_h),
+                rect: ui::core::geom::Rect::new(
+                    ctx.indent + visual_indent,
+                    ly,
+                    ctx.available_width() - visual_indent,
+                    line_h,
+                ),
                 font_size,
                 is_code: false,
                 font_weight,
@@ -1613,6 +1679,116 @@ mod tests {
     fn make_doc(md: &str) -> (&str, MarkdownDoc) {
         let parsed = parse_markdown(md);
         (md, MarkdownDoc::build(&parsed, &default_style()))
+    }
+
+    #[test]
+    fn paragraph_first_line_indent_positions_estimated_and_precise_lines() {
+        let source = "一二三四五六七八九十一二三四五六七八九十";
+        let mut style = default_style();
+        style.paragraph_first_line_indent = style.body_font_size * 2.0;
+        let (_, markdown) = make_doc(source);
+        let document = core::document::StringDocView::new(source);
+        let viewport_width = 100.0;
+        for precise in [false, true] {
+            let mut shaper = Shaper::new().expect("layout test requires a system font shaper");
+            let layout = layout_doc_with_shaper(
+                &markdown.blocks,
+                &style,
+                viewport_width,
+                precise.then_some(&mut shaper),
+                None,
+                &document,
+            );
+            let LaidOutBlockKind::Text { lines } = &layout.blocks[0].kind else {
+                panic!("fixture must produce paragraph text");
+            };
+            assert!(lines.len() > 1);
+            assert_eq!(lines[0].rect.x, style.body_font_size * 2.0);
+            assert_eq!(lines[0].rect.x + lines[0].rect.w, viewport_width);
+            assert!(
+                lines[1..].iter().all(|line| line.rect.x == 0.0 && line.rect.w == viewport_width)
+            );
+            let projections: String = lines
+                .iter()
+                .map(|line| {
+                    line.source_projection
+                        .as_ref()
+                        .expect("every visual line must retain projection")
+                        .source_extent
+                        .clone()
+                })
+                .map(|range| &source[range])
+                .collect();
+            assert_eq!(projections, source);
+        }
+    }
+
+    #[test]
+    fn paragraph_first_line_indent_preserves_manual_whitespace_and_structural_blocks() {
+        for source in [
+            "  正文",
+            "\u{a0}正文",
+            "\u{3000}正文",
+            "# 标题",
+            "- 列表",
+            "> 引用",
+            "```\n代码\n```",
+            "    代码",
+        ] {
+            let mut style = default_style();
+            let (_, markdown) = make_doc(source);
+            let document = core::document::StringDocView::new(source);
+            let baseline = layout_doc(&markdown.blocks, &style, 200.0, &document);
+            style.paragraph_first_line_indent = style.body_font_size * 2.0;
+            let indented = layout_doc(&markdown.blocks, &style, 200.0, &document);
+            assert_eq!(
+                format!("{baseline:?}"),
+                format!("{indented:?}"),
+                "unexpected indentation for {source:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn paragraph_first_line_indent_applies_once_across_soft_break_and_to_empty_paragraph() {
+        for source in ["第一行\n第二行", "\n"] {
+            let mut style = default_style();
+            style.paragraph_first_line_indent = style.body_font_size * 2.0;
+            let parsed = parse_markdown(source);
+            let markdown = MarkdownDoc::build_for_editing(&parsed, &style, source);
+            let document = core::document::StringDocView::new(source);
+            let layout = layout_doc(&markdown.blocks, &style, 400.0, &document);
+            let LaidOutBlockKind::Text { lines } = &layout.blocks[0].kind else {
+                panic!("fixture must produce editable paragraph");
+            };
+            assert_eq!(lines[0].rect.x, style.paragraph_first_line_indent);
+            assert!(lines[1..].iter().all(|line| line.rect.x == 0.0));
+        }
+    }
+
+    #[test]
+    fn paragraph_first_line_indent_leaves_room_for_a_character_in_narrow_viewports() {
+        let source = "一二三四五六";
+        let mut style = default_style();
+        style.paragraph_first_line_indent = style.body_font_size * 2.0;
+        let (_, markdown) = make_doc(source);
+        let document = core::document::StringDocView::new(source);
+        let mut shaper = Shaper::new().expect("layout test requires a system font shaper");
+        let viewport_width = style.body_font_size * 2.0;
+        let layout = layout_doc_with_shaper(
+            &markdown.blocks,
+            &style,
+            viewport_width,
+            Some(&mut shaper),
+            None,
+            &document,
+        );
+        let LaidOutBlockKind::Text { lines } = &layout.blocks[0].kind else {
+            panic!("fixture must produce paragraph text");
+        };
+        assert!(lines[0].rect.w >= style.body_font_size);
+        assert!(lines.iter().all(|line| line.rect.x + line.rect.w <= viewport_width));
+        assert_eq!(lines.iter().map(|line| line.text.as_str()).collect::<String>(), source);
     }
 
     #[test]

@@ -176,6 +176,7 @@ fn settings_from_persisted(
     settings.theme_mode = persisted.theme_mode;
     settings.show_line_numbers = persisted.show_line_numbers;
     settings.word_wrap = persisted.word_wrap;
+    settings.markdown_first_line_indent = persisted.markdown_first_line_indent;
     settings.show_status_bar = persisted.show_status_bar;
     settings.font_family = persisted.font_family.clone();
     settings.font_size = persisted.font_size;

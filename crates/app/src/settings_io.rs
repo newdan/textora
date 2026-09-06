@@ -20,6 +20,8 @@ pub(crate) struct PersistedSettings {
     #[serde(default = "default_true")]
     pub word_wrap: bool,
     #[serde(default = "default_false")]
+    pub markdown_first_line_indent: bool,
+    #[serde(default = "default_false")]
     pub show_status_bar: bool,
     /// Font family name (platform-dependent default, e.g. "Menlo" on macOS).
     #[serde(default = "default_font_family")]
@@ -53,6 +55,7 @@ impl Default for PersistedSettings {
             theme_mode: ThemeMode::default(),
             show_line_numbers: true,
             word_wrap: true,
+            markdown_first_line_indent: false,
             show_status_bar: false,
             font_family: default_font_family(),
             font_size: default_font_size(),
@@ -74,6 +77,7 @@ impl PersistedSettings {
         self.theme_mode = settings.theme_mode;
         self.show_line_numbers = settings.show_line_numbers;
         self.word_wrap = settings.word_wrap;
+        self.markdown_first_line_indent = settings.markdown_first_line_indent;
         self.show_status_bar = settings.show_status_bar;
         self.font_family = settings.font_family.clone();
         self.font_size = settings.font_size;
@@ -138,6 +142,18 @@ pub(crate) fn ensure_exists(path: &Path) -> std::io::Result<()> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn markdown_first_line_indent_defaults_off_and_round_trips() {
+        let mut persisted = super::PersistedSettings::default();
+        assert!(!persisted.markdown_first_line_indent);
+
+        persisted.markdown_first_line_indent = true;
+        let serialized = toml::to_string(&persisted).expect("测试设置应可序列化");
+        let loaded: super::PersistedSettings =
+            toml::from_str(&serialized).expect("测试设置应可反序列化");
+
+        assert!(loaded.markdown_first_line_indent);
+    }
     use super::*;
 
     #[test]
@@ -190,6 +206,7 @@ mod tests {
             theme_mode: ThemeMode::Dark,
             show_line_numbers: false,
             word_wrap: false,
+            markdown_first_line_indent: true,
             show_status_bar: true,
             font_family: "Test Font".to_owned(),
             font_size: 17.0,
@@ -208,6 +225,7 @@ mod tests {
         assert_eq!(loaded.theme_mode, expected.theme_mode);
         assert_eq!(loaded.show_line_numbers, expected.show_line_numbers);
         assert_eq!(loaded.word_wrap, expected.word_wrap);
+        assert_eq!(loaded.markdown_first_line_indent, expected.markdown_first_line_indent);
         assert_eq!(loaded.show_status_bar, expected.show_status_bar);
         assert_eq!(loaded.font_family, expected.font_family);
         assert_eq!(loaded.font_size, expected.font_size);

@@ -55,6 +55,7 @@ pub enum ProductSettingsUpdate {
     FontSize(f32),
     LineHeightRatio(f32),
     WordWrap(bool),
+    MarkdownFirstLineIndent(bool),
     ShowLineNumbers(bool),
     TabWidth(usize),
     ShowStatusBar(bool),
@@ -73,6 +74,9 @@ impl ProductSettingsUpdate {
                 settings.editor.line_height_ratio = *line_height_ratio
             }
             Self::WordWrap(word_wrap) => settings.editor.word_wrap = *word_wrap,
+            Self::MarkdownFirstLineIndent(enabled) => {
+                settings.editor.markdown_first_line_indent = *enabled
+            }
             Self::ShowLineNumbers(show_line_numbers) => {
                 settings.editor.show_line_numbers = *show_line_numbers
             }
@@ -205,11 +209,13 @@ mod tests {
     fn typed_updates_only_change_their_matching_product_fields() {
         let mut settings = ProductSettings::default();
         ProductSettingsUpdate::TabWidth(6).apply_to(&mut settings);
+        ProductSettingsUpdate::MarkdownFirstLineIndent(true).apply_to(&mut settings);
         ProductSettingsUpdate::RuntimeTabLimit(6).apply_to(&mut settings);
         ProductSettingsUpdate::AutoSaveDelayMillis(1_200).apply_to(&mut settings);
         ProductSettingsUpdate::CatalogBackupRetention(4).apply_to(&mut settings);
 
         assert_eq!(settings.editor.tab_width, 6);
+        assert!(settings.editor.markdown_first_line_indent);
         assert_eq!(settings.interface.runtime_tab_limit, 6);
         assert_eq!(settings.workspace.auto_save_delay_millis, 1_200);
         assert_eq!(settings.workspace.catalog_backup_retention, 4);

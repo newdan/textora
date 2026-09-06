@@ -45,6 +45,7 @@ pub struct EditorSettings {
     pub line_height_ratio: f32,
     pub tab_width: usize,
     pub word_wrap: bool,
+    pub markdown_first_line_indent: bool,
     pub show_line_numbers: bool,
 }
 
@@ -74,6 +75,7 @@ impl Default for ProductSettings {
                 line_height_ratio: ui_settings.line_height_ratio,
                 tab_width: ui_settings.tab_width,
                 word_wrap: ui_settings.word_wrap,
+                markdown_first_line_indent: ui_settings.markdown_first_line_indent,
                 show_line_numbers: ui_settings.show_line_numbers,
             },
             interface: InterfaceSettings {
@@ -114,6 +116,7 @@ impl ProductSettings {
         ui_settings.set_line_height_ratio(self.editor.line_height_ratio);
         ui_settings.set_tab_width(self.editor.tab_width);
         ui_settings.set_word_wrap(self.editor.word_wrap);
+        ui_settings.set_markdown_first_line_indent(self.editor.markdown_first_line_indent);
         ui_settings.set_show_line_numbers(self.editor.show_line_numbers);
         ui_settings.set_show_status_bar(self.interface.show_status_bar);
     }

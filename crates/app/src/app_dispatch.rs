@@ -378,6 +378,10 @@ impl App {
             ui::settings_view::SettingsViewAction::SetWordWrap(enabled) => {
                 self.dispatch_settings_action(SettingsDispatchAction::SetWordWrap(enabled))
             }
+            ui::settings_view::SettingsViewAction::SetMarkdownFirstLineIndent(enabled) => self
+                .dispatch_settings_action(SettingsDispatchAction::SetMarkdownFirstLineIndent(
+                    enabled,
+                )),
             ui::settings_view::SettingsViewAction::SetShowLineNumbers(enabled) => {
                 self.dispatch_settings_action(SettingsDispatchAction::SetShowLineNumbers(enabled))
             }

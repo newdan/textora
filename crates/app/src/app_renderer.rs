@@ -898,6 +898,7 @@ impl App {
                 let active_id = self.active_tab_id();
                 let theme = self.current_theme.clone();
                 let toc_max_depth = self.settings.toc_max_depth;
+                let markdown_first_line_indent = self.settings.markdown_first_line_indent;
                 let shaper = resources.text.as_mut().map(|text| &mut text.shaper);
                 let session = active_id.and_then(|id| self.editor_runtime.tab_session_mut(id));
                 if let Some(mut tab) = session
@@ -909,6 +910,7 @@ impl App {
                         font_size: metrics.font_size / dpi,
                         line_height: metrics.line_height / dpi,
                         toc_max_depth,
+                        markdown_first_line_indent,
                     });
                     // Forward blink phase to all rendering plugins so they can hide/show cursor
                     let (visible, _) = crate::app::compute_cursor_phase(tab.cursor_blink_instant());
@@ -1636,6 +1638,7 @@ impl App {
         let font_size = metrics.font_size / dpi;
         let line_height = metrics.line_height / dpi;
         let toc_max_depth = self.settings.toc_max_depth;
+        let markdown_first_line_indent = self.settings.markdown_first_line_indent;
         let theme = self.current_theme.clone();
         let mut tab = self.active_tab_session_mut()?;
 
@@ -1643,6 +1646,7 @@ impl App {
             font_size,
             line_height,
             toc_max_depth,
+            markdown_first_line_indent,
         });
         let (cursor_visible, _) = crate::app::compute_cursor_phase(tab.cursor_blink_instant());
         tab.send_message(ui::plugin::PluginMessage::SetCursorVisible(cursor_visible));

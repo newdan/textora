@@ -69,6 +69,8 @@ pub struct Settings {
     pub tab_width: usize,
     /// Whether word wrap is enabled.
     pub word_wrap: bool,
+    /// Whether Markdown paragraphs use a two-character first-line indent for layout.
+    pub markdown_first_line_indent: bool,
     /// Status bar height in pixels.
     pub status_bar_height: f32,
     /// Whether to show line numbers in the gutter.
@@ -133,6 +135,7 @@ impl Settings {
             line_height: 15.0 * 1.618, // font_size * line_height_ratio
             tab_width: 4,
             word_wrap: true,
+            markdown_first_line_indent: false,
             status_bar_height: 20.0,
             max_line_bytes_for_shaping: 5000,
             show_line_numbers: true,
@@ -185,6 +188,12 @@ impl Settings {
     /// Toggle word wrap.
     pub fn set_word_wrap(&mut self, enabled: bool) {
         self.word_wrap = enabled;
+        self.version += 1;
+    }
+
+    /// Update Markdown paragraph first-line indentation.
+    pub fn set_markdown_first_line_indent(&mut self, enabled: bool) {
+        self.markdown_first_line_indent = enabled;
         self.version += 1;
     }
 
@@ -255,6 +264,23 @@ impl Settings {
     #[cfg(test)]
     pub(crate) fn test_default() -> &'static Settings {
         Box::leak(Box::new(Settings::new()))
+    }
+}
+
+#[cfg(test)]
+mod markdown_first_line_indent_tests {
+    use super::Settings;
+
+    #[test]
+    fn markdown_first_line_indent_defaults_off_and_increments_version_when_changed() {
+        let mut settings = Settings::new();
+        let initial_version = settings.version;
+
+        assert!(!settings.markdown_first_line_indent);
+        settings.set_markdown_first_line_indent(true);
+
+        assert!(settings.markdown_first_line_indent);
+        assert_eq!(settings.version, initial_version + 1);
     }
 }
 

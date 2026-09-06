@@ -70,6 +70,7 @@ const FONT_FAMILY_ID: WidgetId = WidgetId(0x7365_7474_666f_6e74);
 const FONT_SIZE_ID: WidgetId = WidgetId(0x7365_7474_7369_7a65);
 const LINE_HEIGHT_RATIO_ID: WidgetId = WidgetId(0x7365_7474_6c69_6e65);
 const WORD_WRAP_ID: WidgetId = WidgetId(0x7365_7474_7772_6170);
+const MARKDOWN_FIRST_LINE_INDENT_ID: WidgetId = WidgetId(0x7365_7474_6d64_696e);
 const LINE_NUMBERS_ID: WidgetId = WidgetId(0x7365_7474_6e75_6d62);
 const TAB_WIDTH_ID: WidgetId = WidgetId(0x7365_7474_7461_6273);
 const VIEW_SIDEBAR_ID: WidgetId = WidgetId(0x7365_7474_7669_6577);
@@ -348,7 +349,12 @@ impl SettingsView {
         vec![FormSection::new(
             section_title_label("编辑器"),
             Some(section_description_label("调整编辑行为与制表符宽度。")),
-            vec![self.word_wrap_row(), self.line_numbers_row(), self.tab_width_row()],
+            vec![
+                self.word_wrap_row(),
+                self.markdown_first_line_indent_row(),
+                self.line_numbers_row(),
+                self.tab_width_row(),
+            ],
             settings_section_style(),
         )]
     }
@@ -358,6 +364,18 @@ impl SettingsView {
             row_label("自动换行"),
             Some(description_label("在编辑区域宽度不足时折行显示。")),
             Box::new(Switch::new(WORD_WRAP_ID, self.input.word_wrap)),
+            settings_row_style(),
+        )
+    }
+
+    fn markdown_first_line_indent_row(&self) -> FormRow {
+        FormRow::new(
+            row_label("Markdown 首行缩进"),
+            Some(description_label("普通段落首行缩进两个字符，仅影响排版")),
+            Box::new(Switch::new(
+                MARKDOWN_FIRST_LINE_INDENT_ID,
+                self.input.markdown_first_line_indent,
+            )),
             settings_row_style(),
         )
     }
@@ -567,6 +585,12 @@ impl SettingsView {
             WORD_WRAP_ID => {
                 self.input.word_wrap = checked;
                 Some(WidgetAction::Settings(SettingsViewAction::SetWordWrap(checked)))
+            }
+            MARKDOWN_FIRST_LINE_INDENT_ID => {
+                self.input.markdown_first_line_indent = checked;
+                Some(WidgetAction::Settings(SettingsViewAction::SetMarkdownFirstLineIndent(
+                    checked,
+                )))
             }
             LINE_NUMBERS_ID => {
                 self.input.show_line_numbers = checked;
@@ -1197,6 +1221,7 @@ mod tests {
             font_size: 15.0,
             line_height_ratio: 1.618,
             word_wrap: true,
+            markdown_first_line_indent: false,
             show_line_numbers: true,
             tab_width: 4,
             view_mode: ViewMode::Sidebar,
@@ -1304,6 +1329,13 @@ mod tests {
     fn editor_and_interface_controls_emit_typed_actions() {
         let mut editor = settings_fixture(SettingsCategory::Editor);
         assert_eq!(
+            editor.handle_control_action(ControlAction::Toggled {
+                id: MARKDOWN_FIRST_LINE_INDENT_ID,
+                checked: true,
+            }),
+            Some(WidgetAction::Settings(SettingsViewAction::SetMarkdownFirstLineIndent(true)))
+        );
+        assert_eq!(
             editor
                 .handle_control_action(ControlAction::Toggled { id: WORD_WRAP_ID, checked: false }),
             Some(WidgetAction::Settings(SettingsViewAction::SetWordWrap(false)))
@@ -1343,6 +1375,7 @@ mod tests {
             font_size: 15.0,
             line_height_ratio: 1.618,
             word_wrap: true,
+            markdown_first_line_indent: false,
             show_line_numbers: true,
             tab_width: 4,
             view_mode: ViewMode::Sidebar,
