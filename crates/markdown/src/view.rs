@@ -2642,25 +2642,28 @@ impl ui::plugin::EditPolicy for MarkdownEditorView {
 }
 
 impl MarkdownEditorView {
-    /// 带选区编辑的计划：仅回车做块级增强（删选区 + 删除点上下文增强），
-    /// 其余 intent 维持默认计划（替换/删除选区）。
+    /// 清空段落复用范围删除；回车基于删除选区后的上下文生成原子计划。
     fn plan_selection_edit(
         &self,
         request: &ui::plugin::EditRequest,
         selection: &std::ops::Range<usize>,
     ) -> ui::plugin::EditPlan {
+        if self.source.get(selection.clone()).is_none() {
+            return ui::plugin::EditPlan::UseDefault;
+        }
+        if matches!(
+            request.intent,
+            ui::plugin::EditIntent::DeleteBackward | ui::plugin::EditIntent::DeleteForward
+        ) {
+            return crate::augmenter::augment_erase_range(&self.source, selection.clone())
+                .map_or(ui::plugin::EditPlan::UseDefault, |augmentation| {
+                    augmentation_edit_plan(request, augmentation)
+                });
+        }
         if !matches!(
             request.intent,
             ui::plugin::EditIntent::InsertParagraphBreak | ui::plugin::EditIntent::InsertLineBreak
         ) {
-            return ui::plugin::EditPlan::UseDefault;
-        }
-        // 选区越界或落在非字符边界时无法构造虚拟源码，交回默认计划
-        // （默认计划产出的非法事务会在执行侧被校验拒绝，而不是在此 panic）。
-        if selection.end > self.source.len()
-            || !self.source.is_char_boundary(selection.start)
-            || !self.source.is_char_boundary(selection.end)
-        {
             return ui::plugin::EditPlan::UseDefault;
         }
         let mut source_after_delete = self.source.clone();
@@ -3790,7 +3793,8 @@ mod wysiwyg_tests {
         view.engine.handle_set_cursor_byte(paragraph_end);
 
         let aug = view.engine.augment_edit(paragraph_end, AugmentKind::Enter).unwrap();
-        assert_eq!(aug.insert_text.as_deref(), Some("\n"));
+        // Preserve the existing EOF paragraph while creating one more.
+        assert_eq!(aug.insert_text.as_deref(), Some("\n\n"));
         assert_eq!(aug.cursor_byte_after, paragraph_end + 2);
     }
 

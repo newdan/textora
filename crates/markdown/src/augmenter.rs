@@ -22,7 +22,6 @@ use crate::builder::ListBullet;
 #[cfg(test)]
 use std::cell::Cell;
 use ui::plugin::{AugmentKind, EditAugmentation};
-#[cfg(test)]
 use unicode_segmentation::UnicodeSegmentation;
 
 const LF_SEQUENCE: &str = "\n";
@@ -81,7 +80,9 @@ fn augment_line_break(source: &str, current_byte: usize) -> EditAugmentation {
         | EnterContext::Other => {
             return emit_source_newline(source, current_byte);
         }
-        EnterContext::TopLevelParagraphEnd | EnterContext::ParagraphInterior => String::new(),
+        EnterContext::TopLevelParagraphEnd
+        | EnterContext::ParagraphInterior
+        | EnterContext::ParagraphStart { .. } => String::new(),
     };
     let newline = preferred_newline_sequence(source, split_at);
     let insertion = format!("\\{newline}{continuation_prefix}");
@@ -113,6 +114,9 @@ fn augment_enter(source: &str, current_byte: usize) -> Option<EditAugmentation> 
 }
 
 fn augment_backspace(source: &str, current_byte: usize) -> Option<EditAugmentation> {
+    if let Some(aug) = editable_paragraph_navigation::backspace_boundary(source, current_byte) {
+        return Some(aug);
+    }
     if let Some(aug) = backspace_remove_inline_html_break(source, current_byte) {
         return Some(aug);
     }
@@ -146,9 +150,21 @@ pub(crate) fn augment_delete_forward(
     source: &str,
     current_byte: usize,
 ) -> Option<EditAugmentation> {
-    delete_forward_remove_inline_html_break(source, current_byte)
+    editable_paragraph_navigation::delete_forward(source, current_byte)
+        .or_else(|| delete_forward_remove_inline_html_break(source, current_byte))
         .or_else(|| delete_forward_join_reopened_inline_elements(source, current_byte))
+        .or_else(|| {
+            let grapheme = source.get(current_byte..)?.graphemes(true).next()?;
+            editable_paragraph_edit::erase_last_grapheme(source, current_byte + grapheme.len())
+        })
         .or_else(|| delete_forward_block_boundary(source, current_byte))
+}
+
+pub(crate) fn augment_erase_range(
+    source: &str,
+    erased: std::ops::Range<usize>,
+) -> Option<EditAugmentation> {
+    editable_paragraph_edit::erase_range(source, erased)
 }
 
 fn delete_forward_remove_inline_html_break(
@@ -298,6 +314,7 @@ fn delete_forward_block_boundary(source: &str, current_byte: usize) -> Option<Ed
         }
         EnterContext::TopLevelParagraphEnd
         | EnterContext::ParagraphInterior
+        | EnterContext::ParagraphStart { .. }
         | EnterContext::Heading { .. } => {
             if line_starts_independent_block(source, newline_run_end, &container_path) {
                 return consume_boundary();
@@ -710,33 +727,131 @@ fn emit_literal_source_newline(
     augmentation
 }
 
-/// 在当前位置插入 `\n\n`，跨越 CommonMark 块边界（"切两半"）。
-///
-/// - 通用情况：插入 `"\n\n"`，光标跳 +2。
-/// - 当 `bytes[current_byte] == '\n'`：如果这个 `\n` 已经是块分隔的一部分
-///   或文档末尾，插入 `"\n"` 补一个空源码行；否则仍插入 `"\n\n"`。
-///   两种情况下光标都固定跳到 `current_byte + 2`（下一段应有的位置）。
+/// Create one editable paragraph using the same separator roles as the layout tree.
 fn emit_block_break(source: &str, current_byte: usize) -> EditAugmentation {
     let newline = preferred_newline_sequence(source, current_byte);
-    let next_newline_width = newline_sequence_width_at(source, current_byte);
-    let touches_next_newline = next_newline_width.is_some();
-    let next_newline_end = current_byte + next_newline_width.unwrap_or(0);
-    let next_is_blank_separator =
-        touches_next_newline && newline_sequence_width_at(source, next_newline_end).is_some();
-    let insertion_count =
-        if touches_next_newline && (next_newline_end == source.len() || next_is_blank_separator) {
-            1
-        } else {
-            BLOCK_BOUNDARY_NEWLINE_COUNT
-        };
-    let insertion = newline.repeat(insertion_count);
-    let aug = EditAugmentation {
+    let insertion = newline.repeat(block_break_newline_count(source, current_byte));
+    let augmentation = EditAugmentation {
         cursor_byte_after: current_byte + newline.len() * BLOCK_BOUNDARY_NEWLINE_COUNT,
         insert_text: Some(insertion),
         ..Default::default()
     };
-    debug_assert_augmentation(&aug, source);
-    aug
+    debug_assert_augmentation(&augmentation, source);
+    augmentation
+}
+
+fn block_break_newline_count(source: &str, current_byte: usize) -> usize {
+    let Some(newline_width) = newline_sequence_width_at(source, current_byte) else {
+        return BLOCK_BOUNDARY_NEWLINE_COUNT;
+    };
+    let next_line_start = current_byte + newline_width;
+    if blank_source_line_width(source, next_line_start).is_none() {
+        return BLOCK_BOUNDARY_NEWLINE_COUNT;
+    }
+    let document =
+        crate::builder::MarkdownDoc::build_structure(&crate::parser::parse_markdown(source));
+    let paragraphs = crate::builder::EditableParagraphMap::from_blocks(&document.blocks, source);
+    let Some(run) = paragraphs.run_at_byte(next_line_start) else {
+        return BLOCK_BOUNDARY_NEWLINE_COUNT;
+    };
+    let separator_becomes_hidden = run.has_preceding_block && run.hidden_separator_count == 0;
+    1 + usize::from(separator_becomes_hidden)
+}
+
+fn emit_paragraph_before(
+    source: &str,
+    current_byte: usize,
+    insert_at: usize,
+    continuation_prefix: &str,
+) -> EditAugmentation {
+    let list_start = leading_heading_list_start(source, insert_at);
+    let container_prefix;
+    let (insert_at, continuation_prefix) = if let Some(marker_start) = list_start {
+        container_prefix = canonical_container_prefix(source, marker_start);
+        (marker_start, container_prefix.as_str())
+    } else {
+        (insert_at, continuation_prefix)
+    };
+    let insertion_unit =
+        format!("{}{continuation_prefix}", preferred_newline_sequence(source, insert_at));
+    let insertion = insertion_unit.repeat(preceding_paragraph_insertion_count(
+        source,
+        insert_at,
+        &insertion_unit,
+    ));
+    let augmentation = EditAugmentation {
+        cursor_byte_after: current_byte + insertion.len(),
+        replace_range: Some(insert_at..insert_at),
+        insert_text: Some(insertion),
+    };
+    debug_assert_augmentation(&augmentation, source);
+    augmentation
+}
+
+fn preceding_paragraph_insertion_count(source: &str, insert_at: usize, insertion: &str) -> usize {
+    let mut prospective = source.to_owned();
+    prospective.insert_str(insert_at, insertion);
+    let document =
+        crate::builder::MarkdownDoc::build_structure(&crate::parser::parse_markdown(&prospective));
+    let paragraphs =
+        crate::builder::EditableParagraphMap::from_blocks(&document.blocks, &prospective);
+    let hidden = paragraphs.run_at_byte(insert_at).is_some_and(|run| {
+        run.lines
+            .iter()
+            .position(|line| {
+                line.source_range.start <= insert_at && insert_at <= line.source_range.end
+            })
+            .is_some_and(|index| index < run.hidden_separator_count)
+    });
+    1 + usize::from(hidden)
+}
+
+fn leading_heading_list_start(source: &str, heading_start: usize) -> Option<usize> {
+    use pulldown_cmark::{Event, Parser, Tag, TagEnd};
+    struct LeadingListItem {
+        marker_start: usize,
+        has_content: bool,
+    }
+    let mut owners = Vec::<LeadingListItem>::new();
+    for (event, range) in
+        Parser::new_ext(source, crate::parser::markdown_options()).into_offset_iter()
+    {
+        if matches!(event, Event::Start(Tag::Heading { .. })) && range.start == heading_start {
+            return owners.iter().find(|owner| !owner.has_content).map(|owner| owner.marker_start);
+        }
+        match event {
+            Event::Start(Tag::Item) => {
+                owners.push(LeadingListItem { marker_start: range.start, has_content: false })
+            }
+            Event::End(TagEnd::Item) => {
+                owners.pop();
+            }
+            Event::Text(_)
+            | Event::Code(_)
+            | Event::Html(_)
+            | Event::InlineHtml(_)
+            | Event::Rule
+            | Event::Start(
+                Tag::CodeBlock(_) | Tag::Heading { .. } | Tag::Table(_) | Tag::Image { .. },
+            ) => {
+                for owner in &mut owners {
+                    owner.has_content = true;
+                }
+            }
+            _ => {}
+        }
+        if range.start > heading_start {
+            return None;
+        }
+    }
+    None
+}
+
+fn is_visible_content_start(source: &str, source_start: usize, cursor: usize) -> bool {
+    cursor == source_start
+        || inline_wrapper_frames(source)
+            .iter()
+            .any(|frame| frame.source_range.start == source_start && frame.content_start == cursor)
 }
 
 /// 用一个块边界替换现有硬换行源码，光标落在新块起点。
@@ -780,7 +895,9 @@ fn backspace_paragraph_boundary(source: &str, current_byte: usize) -> Option<Edi
         || line_start == line_end
         || !matches!(
             classify_enter_context(source, current_byte),
-            EnterContext::TopLevelParagraphEnd | EnterContext::ParagraphInterior
+            EnterContext::TopLevelParagraphEnd
+                | EnterContext::ParagraphInterior
+                | EnterContext::ParagraphStart { .. }
         )
     {
         return None;
@@ -801,6 +918,7 @@ fn backspace_paragraph_boundary(source: &str, current_byte: usize) -> Option<Edi
     match classify_enter_context(source, boundary_start) {
         EnterContext::TopLevelParagraphEnd
         | EnterContext::ParagraphInterior
+        | EnterContext::ParagraphStart { .. }
         | EnterContext::Heading { .. } => {
             let delete_start = hard_break_marker_ending_at(source, boundary_start)
                 .map_or(boundary_start, |marker| marker.start);
@@ -1050,11 +1168,24 @@ fn enter_context_augmentation(
         EnterContext::TopLevelParagraphEnd | EnterContext::ParagraphInterior => {
             Some(paragraph_enter_augmentation(source, current_byte))
         }
-        EnterContext::Heading { level: _, at_end, continuation_prefix } => {
-            heading_enter_augmentation(source, current_byte, at_end, &continuation_prefix)
+        EnterContext::ParagraphStart { insert_at } => {
+            Some(emit_paragraph_before(source, current_byte, insert_at, ""))
         }
-        EnterContext::SetextHeading { underline_end, continuation_prefix } => {
-            Some(setext_heading_enter_augmentation(source, underline_end, &continuation_prefix))
+        EnterContext::Heading { level: _, position, continuation_prefix } => {
+            heading_enter_augmentation(source, current_byte, position, &continuation_prefix)
+        }
+        EnterContext::SetextHeading { position, underline_end, continuation_prefix } => {
+            match position {
+                HeadingPosition::Start { insert_at } => Some(emit_paragraph_before(
+                    source,
+                    current_byte,
+                    insert_at,
+                    &continuation_prefix,
+                )),
+                HeadingPosition::Interior | HeadingPosition::End => Some(
+                    setext_heading_enter_augmentation(source, underline_end, &continuation_prefix),
+                ),
+            }
         }
         EnterContext::ListItem {
             indent,
@@ -1143,10 +1274,13 @@ fn paragraph_enter_augmentation(source: &str, current_byte: usize) -> EditAugmen
 fn heading_enter_augmentation(
     source: &str,
     current_byte: usize,
-    at_end: bool,
+    position: HeadingPosition,
     continuation_prefix: &str,
 ) -> Option<EditAugmentation> {
-    if at_end {
+    if let HeadingPosition::Start { insert_at } = position {
+        return Some(emit_paragraph_before(source, current_byte, insert_at, continuation_prefix));
+    }
+    if matches!(position, HeadingPosition::End) {
         if !continuation_prefix.is_empty() {
             return Some(emit_container_line_break(source, current_byte, continuation_prefix));
         }
@@ -1253,7 +1387,9 @@ fn list_item_enter_augmentation(
 
     if let Some(newline_width) = newline_sequence_width_at(source, current_byte) {
         let next_line_start = current_byte + newline_width;
-        if !next_source_line_has_list_marker(source, next_line_start) {
+        if !is_only_blank_separator_before_content(source, next_line_start)
+            && !next_source_line_has_list_marker(source, next_line_start)
+        {
             let replaced = extend_range_over_prefix_or_indent(
                 source,
                 current_byte..next_line_start,
@@ -1286,6 +1422,18 @@ fn list_item_enter_augmentation(
         emit_marker_break_at(source, split_at, indent, continuation_marker)
     };
     Some(preserve_inline_elements_at_split(source, split_at, augmentation))
+}
+
+fn is_only_blank_separator_before_content(source: &str, line_start: usize) -> bool {
+    let Some(blank_width) = blank_source_line_width(source, line_start) else {
+        return false;
+    };
+    let line_end = line_start + blank_width;
+    let Some(newline_width) = newline_sequence_width_at(source, line_end) else {
+        return false;
+    };
+    let following_start = line_end + newline_width;
+    following_start < source.len() && blank_source_line_width(source, following_start).is_none()
 }
 
 fn blockquote_enter_augmentation(
@@ -1618,17 +1766,28 @@ fn cursor_touches_source_newline(source: &str, current_byte: usize) -> bool {
 // ─── 分类器 ────────────────────────────────────────────────────────────────
 
 /// Enter 键的上下文分类。分类结果决定 `enter_context_augmentation` 的分支。
+#[derive(Clone, Copy, Debug)]
+pub enum HeadingPosition {
+    Start { insert_at: usize },
+    Interior,
+    End,
+}
+
 #[derive(Debug)]
 pub enum EnterContext {
     TopLevelParagraphEnd,
     ParagraphInterior,
+    ParagraphStart {
+        insert_at: usize,
+    },
     Heading {
         level: u8,
-        at_end: bool,
+        position: HeadingPosition,
         continuation_prefix: String,
     },
     /// Setext 标题；`underline_end` 不含下划线后的源码换行。
     SetextHeading {
+        position: HeadingPosition,
         underline_end: usize,
         continuation_prefix: String,
     },
@@ -1704,6 +1863,11 @@ fn classify_heading_hit(
     if !heading_source_is_atx(source, start) {
         if current_byte >= start && current_byte <= end {
             return EnterContext::SetextHeading {
+                position: if is_visible_content_start(source, start, current_byte) {
+                    HeadingPosition::Start { insert_at: start }
+                } else {
+                    HeadingPosition::Interior
+                },
                 underline_end: end,
                 continuation_prefix: canonical_container_prefix(source, start),
             };
@@ -1724,11 +1888,17 @@ fn classify_heading_hit(
         probe += 1;
     }
     let content_start = probe.min(end);
-    let at_end = current_byte == end;
+    let position = if current_byte == end {
+        HeadingPosition::End
+    } else if is_visible_content_start(source, content_start, current_byte) {
+        HeadingPosition::Start { insert_at: start }
+    } else {
+        HeadingPosition::Interior
+    };
     if current_byte >= content_start && current_byte <= end {
         EnterContext::Heading {
             level,
-            at_end,
+            position,
             continuation_prefix: canonical_container_prefix(source, start),
         }
     } else {
@@ -1738,7 +1908,7 @@ fn classify_heading_hit(
 
 /// 标题 range 起始处的源码必须是合法的 ATX marker：至多 3 个前导空格，
 /// 1-6 个 `#`，后跟空格/制表符/行尾。
-fn heading_source_is_atx(source: &str, heading_start: usize) -> bool {
+pub(crate) fn heading_source_is_atx(source: &str, heading_start: usize) -> bool {
     let bytes = source.as_bytes();
     let mut marker_probe = heading_start;
     let mut leading_spaces = 0;
@@ -2347,6 +2517,9 @@ pub fn classify_enter_context(source: &str, current_byte: usize) -> EnterContext
                     let end = content_end_without_trailing_newline(source, start..range.end);
                     if current_byte == end {
                         return EnterContext::TopLevelParagraphEnd;
+                    }
+                    if is_visible_content_start(source, start, current_byte) {
+                        return EnterContext::ParagraphStart { insert_at: start };
                     }
                     if source_line_is_empty(source, current_byte) {
                         return EnterContext::EmptyBlockSeparatorLine;
@@ -3939,7 +4112,7 @@ mod tests {
     }
 
     #[test]
-    fn setext_heading_enter_at_document_end_appends_one_newline() {
+    fn setext_heading_enter_at_document_end_preserves_existing_empty_paragraph() {
         let source = "Title\n=====\n";
         let current_byte = "Title".len();
 
@@ -3947,8 +4120,8 @@ mod tests {
             .expect("Enter inside a trailing setext heading must preserve the heading source");
         let edited_source = apply_augmentation_at(source, current_byte, &augmentation);
 
-        assert_eq!(edited_source, "Title\n=====\n\n");
-        assert_eq!(augmentation.cursor_byte_after, edited_source.len());
+        assert_eq!(edited_source, "Title\n=====\n\n\n");
+        assert_eq!(augmentation.cursor_byte_after, "Title\n=====\n\n".len());
     }
 
     #[test]
@@ -4274,6 +4447,28 @@ mod tests {
 
         assert_eq!(edited_source, "- first\n- second");
         assert_eq!(augmentation.cursor_byte_after, "- first\n- ".len());
+    }
+
+    #[test]
+    fn list_enter_before_blank_separator_preserves_source_for_each_marker() {
+        for newline in ["\n", "\r\n"] {
+            for separator in ["", " ", "\t"] {
+                for (first, marker) in
+                    [("- first", "- "), ("3. first", "4. "), ("- [x] first", "- [ ] ")]
+                {
+                    let suffix = format!("{newline}{separator}{newline}  following");
+                    let source = format!("{first}{suffix}");
+                    let augmentation = augment_edit(&source, first.len(), AugmentKind::Enter)
+                        .expect("Enter must create a new list item before the separator");
+                    let edited = apply_augmentation_at(&source, first.len(), &augmentation);
+                    assert_eq!(edited, format!("{first}{newline}{marker}{suffix}"));
+                    assert_eq!(
+                        augmentation.cursor_byte_after,
+                        first.len() + newline.len() + marker.len()
+                    );
+                }
+            }
+        }
     }
 
     #[test]
@@ -5556,12 +5751,13 @@ mod tests {
             );
         }
 
-        // 内容区回车行为不变:切分标题。
+        // 内容起点回车前插普通空段，原标题保持完整。
         let source = "#  Title";
         let cursor = "#  ".len();
         let augmentation = augment_edit(source, cursor, AugmentKind::Enter)
-            .expect("Enter at heading content start should split the heading");
-        assert_eq!(apply_augmentation_at(source, cursor, &augmentation), "#  \nTitle");
+            .expect("Enter at heading content start should insert a preceding paragraph");
+        assert_eq!(apply_augmentation_at(source, cursor, &augmentation), "\n#  Title");
+        assert_eq!(augmentation.cursor_byte_after, cursor + LF_SEQUENCE.len());
 
         // 空标题(`#` 后无空白)行尾回车 = 退出到新段落。
         let empty_heading = "#";

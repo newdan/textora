@@ -3867,9 +3867,10 @@ fn wysiwyg_paragraph_end_before_existing_newline_typing_stays_in_new_paragraph()
     let tab = app.active_tab_session().expect("active entry");
     assert_eq!(
         tab.full_text(),
-        "hello\n\nX",
-        "typing after paragraph-end Enter before an existing newline must not become a softbreak"
+        "hello\n\nX\n",
+        "typing must stay in the new paragraph while preserving the original EOF empty paragraph"
     );
+    assert_eq!(tab.document.cursor_offset().to_usize(), "hello\n\nX".len());
 }
 
 #[test]
@@ -4543,4 +4544,113 @@ fn wysiwyg_preedit_cursor_rect_resolves_with_cursor_window_rect() {
     // At this point, if text/gpu were available, the renderer would call
     // preedit_text_vertices(metrics, "ni", rect.x, rect.y, ...)
     // which generates glyph vertices at the cursor position.
+}
+
+#[test]
+#[cfg(feature = "markdown")]
+fn markdown_paragraph_transactions_restore_source_and_cursor_through_history() {
+    struct ParagraphHistoryCase {
+        source: &'static str,
+        cursor_prefix: &'static str,
+        selection: Option<std::ops::Range<usize>>,
+        command: EditCommand,
+        expected: &'static str,
+        expected_cursor_prefix: &'static str,
+    }
+    let cases = [
+        ParagraphHistoryCase {
+            source: "a\n",
+            cursor_prefix: "a",
+            selection: None,
+            command: EditCommand::InsertNewline,
+            expected: "a\n\n\n",
+            expected_cursor_prefix: "a\n\n",
+        },
+        ParagraphHistoryCase {
+            source: "# Title",
+            cursor_prefix: "# ",
+            selection: None,
+            command: EditCommand::InsertNewline,
+            expected: "\n# Title",
+            expected_cursor_prefix: "\n# ",
+        },
+        ParagraphHistoryCase {
+            source: "a\n\n\n\nb",
+            cursor_prefix: "a\n\n\n\n",
+            selection: None,
+            command: EditCommand::Backspace,
+            expected: "a\n\n\nb",
+            expected_cursor_prefix: "a\n\n\n",
+        },
+        ParagraphHistoryCase {
+            source: "a\n\nx\n\nb",
+            cursor_prefix: "a\n\n",
+            selection: None,
+            command: EditCommand::DeleteForward,
+            expected: "a\n\n\nb",
+            expected_cursor_prefix: "a\n\n",
+        },
+        ParagraphHistoryCase {
+            source: "a\r\n\r\n👩‍💻\r\n\r\nb",
+            cursor_prefix: "a\r\n\r\n",
+            selection: None,
+            command: EditCommand::DeleteForward,
+            expected: "a\r\n\r\n\r\nb",
+            expected_cursor_prefix: "a\r\n\r\n",
+        },
+        ParagraphHistoryCase {
+            source: "a\n\nwords\n\nb",
+            cursor_prefix: "a\n\nwords",
+            selection: Some("a\n\n".len().."a\n\nwords".len()),
+            command: EditCommand::Backspace,
+            expected: "a\n\n\nb",
+            expected_cursor_prefix: "a\n\n",
+        },
+        ParagraphHistoryCase {
+            source: "- 金蝶频繁变化,调整太多\n\n  小红书是异地, 上海的",
+            cursor_prefix: "- 金蝶频繁变化,调整太多",
+            selection: None,
+            command: EditCommand::InsertNewline,
+            expected: "- 金蝶频繁变化,调整太多\n- \n\n  小红书是异地, 上海的",
+            expected_cursor_prefix: "- 金蝶频繁变化,调整太多\n- ",
+        },
+    ];
+    for case in cases {
+        let fixture_directory = tempfile::tempdir().expect("paragraph history fixture directory");
+        let fixture_path = fixture_directory.path().join("paragraph-history.md");
+        std::fs::write(&fixture_path, case.source).expect("write exact paragraph fixture bytes");
+        let mut app = App::new(None);
+        let mut document = DocumentView::from_file(&fixture_path, 80, 10.0)
+            .expect("load paragraph fixture with its original newline encoding");
+        document.cursor_move_to_offset(case.cursor_prefix.len());
+        document.cursor_mut().selection_anchor =
+            case.selection.as_ref().map(|selection| selection.start);
+        app.push_entry_for_test(
+            document,
+            Box::new(textora_markdown::view::MarkdownEditorView::new()),
+        );
+        app.switch_workspace_for_test(0);
+        app.sync_plugin_state();
+        app.dispatch_transactional_edit_for_test(case.command);
+        {
+            let mut tab = app.active_tab_session_mut().expect("active Markdown tab");
+            assert_eq!(tab.full_text(), case.expected, "original source: {:?}", case.source);
+            assert_eq!(tab.document.cursor_offset().to_usize(), case.expected_cursor_prefix.len());
+            tab.undo();
+        }
+        app.sync_plugin_state();
+        {
+            let mut tab = app.active_tab_session_mut().expect("active Markdown tab after undo");
+            assert_eq!(tab.full_text(), case.source);
+            assert_eq!(tab.document.cursor_offset().to_usize(), case.cursor_prefix.len());
+            // History restores the original caret; selections are collapsed by the existing undo contract.
+            assert_eq!(tab.document.selection_range(), None);
+            tab.redo();
+        }
+        app.sync_plugin_state();
+        let tab = app.active_tab_session().expect("active Markdown tab after redo");
+        assert_eq!(tab.full_text(), case.expected);
+        assert_eq!(tab.document.cursor_offset().to_usize(), case.expected_cursor_prefix.len());
+        assert_eq!(tab.document.selection_range(), None);
+    }
 }

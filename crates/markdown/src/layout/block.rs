@@ -134,7 +134,11 @@ pub(crate) fn layout_block(block: &BlockNode, ctx: &mut LayoutCtx) {
                 ctx.last_trailing_spacing,
             );
             // Detect active block marker: cursor in heading's source range.
-            if let Some(edit_ctx) = ctx.edit_ctx {
+            if let Some(edit_ctx) = ctx.edit_ctx
+                && ctx.source_text.is_none_or(|source| {
+                    crate::augmenter::heading_source_is_atx(source, block.block_range.start)
+                })
+            {
                 ctx.active_block_marker =
                     crate::edit::active_block_marker(block, edit_ctx.cursor_byte);
             }
@@ -752,7 +756,16 @@ fn list_item_projected_lines(
     block: &BlockNode,
     doc: &dyn core::document::DocView,
 ) -> Vec<LayoutTextLine> {
-    let projected_lines = if block.projected_lines.is_empty() {
+    let projected_lines = if block.text_lines.len() == 1 && block.text_lines[0].is_empty() {
+        // Empty items have no text event; the parser's block end can include CRLF.
+        // Their insertion anchor belongs at the end of the physical marker line.
+        let block_source = doc.doc_text_in_range(block.block_range.clone());
+        let marker_line_length = block_source.lines().next().map_or(0, str::len);
+        vec![crate::projection::ProjectedText::direct(
+            "",
+            block.block_range.start + marker_line_length,
+        )]
+    } else if block.projected_lines.is_empty() {
         block
             .lines(doc)
             .into_iter()

@@ -371,3 +371,46 @@ fn repeated_enter_and_backspace_in_container_empty_paragraphs_restore_rows() {
         }
     }
 }
+
+#[test]
+fn list_enter_before_blank_separator_keeps_new_item_empty_and_caret_on_it() {
+    const FIRST_ITEM: &str = "- 金蝶频繁变化,调整太多";
+    const FOLLOWING_PARAGRAPH: &str = "  小红书是异地, 上海的";
+    for newline in ["\n", "\r\n"] {
+        for separator in ["", " ", "\t"] {
+            let source =
+                format!("{FIRST_ITEM}{newline}{separator}{newline}{FOLLOWING_PARAGRAPH}{newline}");
+            let (entered, cursor) = apply_edit(&source, FIRST_ITEM.len(), AugmentKind::Enter);
+            let expected = format!(
+                "{FIRST_ITEM}{newline}- {newline}{separator}{newline}{FOLLOWING_PARAGRAPH}{newline}"
+            );
+            assert_eq!(entered, expected, "Enter must preserve the existing paragraph separator");
+            assert_eq!(cursor, FIRST_ITEM.len() + newline.len() + "- ".len());
+
+            let parsed = crate::parser::parse_markdown(&entered);
+            let document = crate::builder::MarkdownDoc::build_structure(&parsed);
+            assert!(matches!(document.blocks[1].kind, crate::builder::BlockKind::ListItem { .. }));
+            assert_eq!(document.blocks[1].text_lines, [""]);
+            assert!(matches!(document.blocks[2].kind, crate::builder::BlockKind::Paragraph));
+            assert_eq!(document.blocks[2].text_lines, [FOLLOWING_PARAGRAPH.trim_start()]);
+
+            for dpi in [1.0, 2.0] {
+                let mut view = MarkdownEditorView::new();
+                let caret = render_at(&mut view, &entered, cursor, 1, dpi);
+                let item_row = &view.engine.flat_lines()[1];
+                assert!(
+                    caret.1 >= item_row.rect.y && caret.1 + caret.2 <= item_row.rect.bottom(),
+                    "new item caret must stay on its own row: {caret:?}, {:?}",
+                    item_row.rect
+                );
+                assert_eq!(
+                    view.engine.hit_test_byte(caret.0, caret.1 + caret.2 * 0.5, 0.0, 0.0),
+                    Some(cursor)
+                );
+            }
+        }
+    }
+}
+
+#[path = "view_paragraph_semantics_tests.rs"]
+mod paragraph_semantics;

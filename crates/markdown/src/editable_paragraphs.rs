@@ -87,7 +87,12 @@ fn collect_candidates(blocks: &[BlockNode], source: &str) -> Vec<EmptySourceLine
     let mut line_start = 0;
     for (line_index, physical_line) in source.split('\n').enumerate() {
         let content = physical_line.trim_end_matches('\r');
-        if let Some((content_offset, quote_depth)) = empty_content_offset(content) {
+        let empty_offset = empty_content_offset(content).or_else(|| {
+            let empty_offset = empty_list_content_offset(content)?;
+            parsed_empty_list_first_line(blocks, line_start, line_start + content.len())
+                .then_some(empty_offset)
+        });
+        if let Some((content_offset, quote_depth)) = empty_offset {
             let mut line = EmptySourceLine {
                 line_index,
                 line_start,
@@ -106,6 +111,58 @@ fn collect_candidates(blocks: &[BlockNode], source: &str) -> Vec<EmptySourceLine
         line_start += physical_line.len() + 1;
     }
     candidates
+}
+
+fn empty_list_content_offset(content: &str) -> Option<(usize, usize)> {
+    let mut probe = 0;
+    let mut quote_depth = 0;
+    while probe < content.len() {
+        let remaining = &content[probe..];
+        probe += remaining.len() - remaining.trim_start_matches([' ', '\t']).len();
+        if probe == content.len() {
+            break;
+        }
+        if content.as_bytes()[probe] == b'>' {
+            quote_depth += 1;
+            probe += 1;
+            continue;
+        }
+        let (_, content_start) = crate::augmenter::parse_list_marker(content, probe)?;
+        probe = content_start;
+    }
+    Some((probe, quote_depth))
+}
+
+fn parsed_empty_list_first_line(blocks: &[BlockNode], line_start: usize, line_end: usize) -> bool {
+    let insertion = blocks.partition_point(|block| block.block_range.start <= line_end);
+    let Some(block_index) = insertion.checked_sub(1) else {
+        return false;
+    };
+    let block = &blocks[block_index];
+    if block.block_range.end <= line_start {
+        return false;
+    }
+    if matches!(block.kind, BlockKind::ListItem { .. })
+        && block.block_range.start >= line_start
+        && empty_container_first_line(block, line_end)
+    {
+        return true;
+    }
+    parsed_empty_list_first_line(&block.children, line_start, line_end)
+}
+
+fn empty_container_first_line(block: &BlockNode, line_end: usize) -> bool {
+    if !block.projected_lines.is_empty() {
+        return false;
+    }
+    let Some(first_child) = block.children.first() else {
+        return false;
+    };
+    if first_child.block_range.start > line_end {
+        return true;
+    }
+    matches!(first_child.kind, BlockKind::BlockQuote | BlockKind::ListItem { .. })
+        && empty_container_first_line(first_child, line_end)
 }
 
 fn owns_terminal_code_line(block: &BlockNode, source: &str) -> bool {

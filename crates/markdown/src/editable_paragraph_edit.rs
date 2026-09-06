@@ -70,57 +70,74 @@ fn materialize_paragraph(
     }
 }
 
-pub(super) fn erase_last_grapheme(source: &str, current_byte: usize) -> Option<EditAugmentation> {
-    let (_, _, line_end) = super::locate_source_line_bounds(source, current_byte)?;
-    if current_byte != super::source_line_content_end(source, line_end) {
+pub(super) fn erase_range(
+    source: &str,
+    erased: std::ops::Range<usize>,
+) -> Option<EditAugmentation> {
+    if erased.is_empty() || source.get(erased.clone()).is_none() {
         return None;
     }
-    let newline_width = super::newline_sequence_width_at(source, current_byte)?;
     let document = parse_structure(source);
-    let (paragraph, owner_path) = single_grapheme_paragraph(&document.blocks, current_byte, &[])?;
-    let projection = paragraph.projected_lines.first()?;
-    let content_start = projection.source_extent().start;
-    if source.get(content_start..current_byte)? != paragraph.text_lines.first()? {
-        return None;
-    }
+    let (paragraph, owner_path) = erased_paragraph(&document.blocks, &erased, &[])?;
+    let content_start = paragraph.block_range.start;
+    let paragraph_end = paragraph.block_range.end;
+    let trailing_newline_width =
+        super::newline_sequence_width_before(source, paragraph_end).unwrap_or(0);
+    let mut replacement_end = paragraph_end - trailing_newline_width;
     let paragraphs = EditableParagraphMap::from_blocks(&document.blocks, source);
-    let next_line_start = current_byte + newline_width;
-    let run = paragraphs.run_at_byte(next_line_start)?;
-    let separator = run.lines.first()?;
-    if run.hidden_separator_count == 0
-        || run.owner_path != owner_path
-        || separator.source_range.start != next_line_start
-    {
-        return None;
+    if let Some(newline_width) = super::newline_sequence_width_at(source, replacement_end) {
+        let next_line_start = replacement_end + newline_width;
+        if let Some(run) = paragraphs.run_at_byte(next_line_start)
+            && run.hidden_separator_count > 0
+            && run.owner_path == owner_path
+            && let Some(separator) = run.lines.first()
+            && separator.source_range.start == next_line_start
+        {
+            replacement_end = separator.source_range.end;
+        }
     }
-    let (line_start, _, _) = super::locate_source_line_bounds(source, content_start)?;
-    let prefix = &source[line_start..content_start];
-    let cursor_byte_after = if prefix.contains('>') { content_start } else { line_start };
     Some(EditAugmentation {
-        replace_range: Some(content_start..separator.source_range.end),
+        replace_range: Some(content_start..replacement_end),
         insert_text: Some(String::new()),
-        cursor_byte_after,
+        cursor_byte_after: content_start,
     })
 }
 
-fn single_grapheme_paragraph<'a>(
+pub(super) fn erase_last_grapheme(source: &str, current_byte: usize) -> Option<EditAugmentation> {
+    let (_, _, line_end) = super::locate_source_line_bounds(source, current_byte)?;
+    let content_end = super::source_line_content_end(source, line_end);
+    let suffix = source.get(current_byte..content_end)?;
+    if !suffix.is_empty() && !suffix.starts_with(['*', '_', '~', '`', ']']) {
+        return None;
+    }
+    let (grapheme_start, _) = source.get(..current_byte)?.grapheme_indices(true).next_back()?;
+    erase_range(source, grapheme_start..current_byte)
+}
+
+fn erased_paragraph<'a>(
     blocks: &'a [BlockNode],
-    cursor: usize,
+    erased: &std::ops::Range<usize>,
     owner: &[usize],
 ) -> Option<(&'a BlockNode, Vec<usize>)> {
     for (index, block) in blocks.iter().enumerate() {
-        if !(block.block_range.start <= cursor && cursor <= block.block_range.end) {
+        if erased.start < block.block_range.start || erased.end > block.block_range.end {
             continue;
         }
         if matches!(block.kind, BlockKind::Paragraph)
-            && block.text_lines.len() == 1
-            && block.text_lines[0].graphemes(true).count() == 1
+            && !block.projected_lines.is_empty()
+            && block.projected_lines.iter().all(|line| {
+                !line.text.is_empty()
+                    && line.spans.iter().filter(|span| !span.visual_range.is_empty()).all(|span| {
+                        erased.start <= span.source_range.start
+                            && span.source_range.end <= erased.end
+                    })
+            })
         {
             return Some((block, owner.to_vec()));
         }
         let mut child_owner = owner.to_vec();
         child_owner.push(index);
-        if let Some(paragraph) = single_grapheme_paragraph(&block.children, cursor, &child_owner) {
+        if let Some(paragraph) = erased_paragraph(&block.children, erased, &child_owner) {
             return Some(paragraph);
         }
     }
@@ -145,3 +162,7 @@ mod tests {
         assert!(insert_text(source, marker_start + 1, "x").is_some());
     }
 }
+
+#[cfg(test)]
+#[path = "editable_paragraph_erasure_tests.rs"]
+mod erasure_tests;
