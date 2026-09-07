@@ -11,7 +11,9 @@ use crate::core::{PaintCtx, Rect};
 use crate::view_mode::ViewMode;
 use crate::widgets::icon::draw_icon;
 use crate::widgets::popup_menu::{PopupMenu, PopupMenuAction as PMA, PopupMenuItem};
-use crate::widgets::split_button::SPLIT_BUTTON_MENU_WIDTH_LOGICAL;
+use crate::widgets::split_button::{
+    SPLIT_BUTTON_FONT_SIZE_LOGICAL, SPLIT_BUTTON_MENU_WIDTH_LOGICAL,
+};
 
 #[derive(Default)]
 pub struct SidebarState {
@@ -710,7 +712,7 @@ impl SidebarState {
                 icon_sz,
                 g.fg,
             );
-            let font_size = 15.0 * g.dpi;
+            let font_size = SPLIT_BUTTON_FONT_SIZE_LOGICAL * g.dpi;
             if let Some(ref mut shaper) = ctx.shaper {
                 ctx.list.text_shaped(
                     g.cx + g.icon_half + 6.0 * g.dpi,

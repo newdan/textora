@@ -17,7 +17,7 @@ use ui::mindmap_style_panel::{
 };
 use ui::popup_menu::{PopupMenuAction, PopupMenuWidget, PopupOutcome};
 use ui::sidebar::NewDocumentKind;
-use ui::split_button::{SplitButtonInput, SplitButtonWidget};
+use ui::split_button::{SPLIT_BUTTON_FONT_SIZE_LOGICAL, SplitButtonInput, SplitButtonWidget};
 use ui::splitter::{SplitterAction, SplitterInput, SplitterWidget};
 use ui::status_state::{StatusStateInput, StatusStateKind, StatusStateWidget};
 use ui::text_box::TextBox;
@@ -3193,6 +3193,7 @@ fn paint_note_tool_button(
     const CONTENT_PADDING_LOGICAL: f32 = 8.0;
     const ICON_SIZE_LOGICAL: f32 = 14.0;
     const ICON_TEXT_GAP_LOGICAL: f32 = 4.0;
+    const TEXT_BASELINE_OFFSET_RATIO: f32 = 0.35;
     let application_theme = context.theme.application_theme();
     context.list.fill_rounded(rect, application_theme.overlay_surface, 4.0 * context.dpi);
     let mut text_x = rect.x + CONTENT_PADDING_LOGICAL * context.dpi;
@@ -3208,10 +3209,11 @@ fn paint_note_tool_button(
         );
         text_x += icon_size + ICON_TEXT_GAP_LOGICAL * context.dpi;
     }
+    let font_size = SPLIT_BUTTON_FONT_SIZE_LOGICAL * context.dpi;
     context.text(
         text_x,
-        rect.y + rect.h * 0.5 + 5.0 * context.dpi,
-        12.0 * context.dpi,
+        rect.y + rect.h * 0.5 + font_size * TEXT_BASELINE_OFFSET_RATIO,
+        font_size,
         application_theme.text_secondary,
         label,
     );
@@ -3749,6 +3751,62 @@ mod tests {
                 },
             }]
         );
+    }
+
+    #[test]
+    fn file_toolbar_labels_match_new_button_typography_at_each_dpi() {
+        use ui::core::paint::{DrawCmd, DrawList};
+
+        let theme = ui::theme::test_theme();
+        let mut shaper = shaping::Shaper::new().expect("toolbar text test requires a shaper");
+        for dpi in [1.0, 1.5, 2.0] {
+            let mut measure = ui::NoopMeasure;
+            let mut layout_context =
+                ui::LayoutCtx { ui_measure: None, measure: &mut measure, theme: &theme, dpi };
+            let mut new_button = SplitButtonWidget::new();
+            new_button.set_input(SplitButtonInput { label: "新建".to_owned(), enabled: true });
+            new_button.set_rect(
+                Rect::new(
+                    0.0,
+                    0.0,
+                    NEW_NOTE_BUTTON_WIDTH_LOGICAL * dpi,
+                    NOTE_TOOL_BUTTON_HEIGHT_LOGICAL * dpi,
+                ),
+                &mut layout_context,
+            );
+            let mut draw_list = DrawList::new();
+            let mut paint_context = ui::PaintCtx::new(&mut draw_list, &theme, dpi);
+            paint_context.shaper = Some(&mut shaper);
+            new_button.paint(&mut paint_context);
+            for button in note_toolbar_buttons(&NavigationScope::ExternalFiles, None, true) {
+                paint_note_tool_button(
+                    &mut paint_context,
+                    Rect::new(
+                        0.0,
+                        0.0,
+                        NOTE_TOOL_BUTTON_WIDTH_LOGICAL * dpi,
+                        NOTE_TOOL_BUTTON_HEIGHT_LOGICAL * dpi,
+                    ),
+                    &button.label,
+                    button.icon,
+                );
+            }
+
+            let typography: Vec<_> = draw_list
+                .cmds
+                .iter()
+                .filter_map(|command| match command {
+                    DrawCmd::TextLayout { layout, y_baseline, .. } => {
+                        Some((layout.font_size, *y_baseline))
+                    }
+                    _ => None,
+                })
+                .collect();
+            assert_eq!(typography.len(), 3, "应绘制新建、打开和清空三个标签");
+            for actual in &typography[1..] {
+                assert_eq!(*actual, typography[0], "同一工具栏的字号与基线应一致，DPI={dpi}");
+            }
+        }
     }
 
     #[test]

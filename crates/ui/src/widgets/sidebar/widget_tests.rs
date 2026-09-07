@@ -98,6 +98,48 @@ mod tests {
     }
 
     #[test]
+    fn sidebar_button_font_scales_consistently() {
+        let theme = test_theme();
+        let mut shaper = shaping::Shaper::new().expect("sidebar typography test requires fonts");
+        for dpi in [1.0, 1.5, 2.0] {
+            let mut widget = new_document_widget();
+            let mut input = sidebar_widget_input(Vec::new(), None);
+            input.metrics = metrics(dpi);
+            widget.set_input(input);
+            let mut measure = NoopMeasure;
+            let mut layout_context =
+                LayoutCtx { ui_measure: None, measure: &mut measure, theme: &theme, dpi };
+            widget.set_rect(Rect::new(0.0, 0.0, 220.0 * dpi, 800.0 * dpi), &mut layout_context);
+            let mut draw_list = DrawList::new();
+            let mut paint_context = PaintCtx::new(&mut draw_list, &theme, dpi);
+            paint_context.shaper = Some(&mut shaper);
+
+            widget.paint(&mut paint_context);
+
+            let button_fonts: Vec<_> = draw_list
+                .cmds
+                .iter()
+                .filter_map(|command| match command {
+                    DrawCmd::TextLayout { layout, .. }
+                        if matches!(layout.text.as_str(), "打开" | "新建") =>
+                    {
+                        Some((layout.text.as_str(), layout.font_size))
+                    }
+                    _ => None,
+                })
+                .collect();
+            assert_eq!(button_fonts.len(), 2, "应绘制打开和新建按钮");
+            for (label, font_size) in button_fonts {
+                assert_eq!(
+                    font_size,
+                    theme.control_metrics().font_size_logical * dpi,
+                    "{label}按钮应使用标准控件字号，DPI={dpi}"
+                );
+            }
+        }
+    }
+
+    #[test]
     fn widget_input_replaces_geometry_metrics_and_behavior() {
         let mut widget = SidebarWidget::new(SidebarConfig::new_default(1.0), metrics(1.0));
         let mut first = sidebar_widget_input(vec![make_tab("first")], Some(0));

@@ -146,13 +146,14 @@ impl Widget for StatusStateWidget {
             };
             ctx.list.fill_rounded(self.action_rect, background, 6.0 * ctx.dpi);
             let label = self.input.action_label.as_deref().unwrap_or_default();
+            let action_font_size = ctx.theme.control_metrics().font_size_logical * ctx.dpi;
             let label_width =
-                compute_text_width(label, description_font_size, ctx.shaper.as_deref_mut());
+                compute_text_width(label, action_font_size, ctx.shaper.as_deref_mut());
             let label_x = self.action_rect.x + (self.action_rect.w - label_width) * 0.5;
             ctx.text(
                 label_x,
-                self.action_rect.y + self.action_rect.h * 0.5 + description_font_size * 0.35,
-                description_font_size,
+                self.action_rect.y + self.action_rect.h * 0.5 + action_font_size * 0.35,
+                action_font_size,
                 ctx.theme.palette.text_main,
                 label,
             );
@@ -215,6 +216,49 @@ mod tests {
         let mut measure = NoopMeasure;
         let mut context = LayoutCtx { ui_measure: None, measure: &mut measure, theme: &theme, dpi };
         widget.set_rect(rect, &mut context);
+    }
+
+    #[test]
+    fn status_action_button_font_scales_consistently() {
+        let theme = crate::theme::test_theme();
+        let mut shaper =
+            shaping::Shaper::new().expect("status action typography test requires fonts");
+        let mut widget = StatusStateWidget::new();
+        widget.set_input(StatusStateInput {
+            action_label: Some("设置根目录".to_owned()),
+            action_id: Some(WidgetId(81)),
+            ..StatusStateInput::default()
+        });
+        for dpi in [1.0, 1.5, 2.0] {
+            layout(&mut widget, Rect::new(0.0, 0.0, 320.0 * dpi, 240.0 * dpi), dpi);
+            let mut draw_list = DrawList::new();
+            let mut paint_context = PaintCtx::new(&mut draw_list, &theme, dpi);
+            paint_context.shaper = Some(&mut shaper);
+
+            widget.paint(&mut paint_context);
+
+            let (text_layout, text_x) = draw_list
+                .cmds
+                .iter()
+                .find_map(|command| match command {
+                    DrawCmd::TextLayout { layout, x, .. } if layout.text == "设置根目录" => {
+                        Some((layout, *x))
+                    }
+                    _ => None,
+                })
+                .expect("操作按钮应绘制文字");
+            assert_eq!(
+                text_layout.font_size,
+                theme.control_metrics().font_size_logical * dpi,
+                "操作按钮应使用标准控件字号，DPI={dpi}"
+            );
+            let action_rect = widget.action_rect();
+            assert_eq!(text_x, action_rect.x + (action_rect.w - text_layout.shaped.width) * 0.5);
+            assert!(
+                text_x >= action_rect.x && text_x + text_layout.shaped.width <= action_rect.right(),
+                "操作文字应居中且不超出按钮边界"
+            );
+        }
     }
 
     #[test]
