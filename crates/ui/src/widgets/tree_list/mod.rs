@@ -119,6 +119,7 @@ pub struct TreeListWidget {
     rect: Rect,
     input: TreeListInput,
     layout: TreeListLayout,
+    section_starts: Vec<TreeRowKey>,
     selected_key: Option<TreeRowKey>,
     hovered_key: Option<TreeRowKey>,
     hovered_action: Option<(TreeRowKey, TreeRowActionKey)>,
@@ -147,6 +148,7 @@ impl TreeListWidget {
             rect: Rect::ZERO,
             input: TreeListInput::default(),
             layout: TreeListLayout::default(),
+            section_starts: Vec::new(),
             selected_key: None,
             hovered_key: None,
             hovered_action: None,
@@ -170,6 +172,11 @@ impl TreeListWidget {
 
     pub fn set_accessibility_label(&mut self, label: Option<String>) {
         self.accessibility_label = label;
+    }
+
+    /// 在指定行之前加入 12 逻辑像素的分组间距。
+    pub fn set_section_starts(&mut self, section_starts: Vec<TreeRowKey>) {
+        self.section_starts = section_starts;
     }
 
     /// 覆盖当前帧展示输入，并丢弃已不存在行的悬停状态。
@@ -359,6 +366,7 @@ impl Widget for TreeListWidget {
         self.layout = build_tree_layout(
             &self.input.rows,
             self.input.editor.as_ref(),
+            &self.section_starts,
             rect,
             self.input.scroll_offset_px,
             ctx.dpi,
@@ -891,6 +899,43 @@ mod tests {
             Some(TreeRowSelection::Selected)
         );
         assert_eq!(widget.input().scroll_offset_px, 42.0);
+    }
+
+    #[test]
+    fn section_gap_is_not_hittable_and_following_row_keeps_its_key() {
+        let mut widget = TreeListWidget::new();
+        widget.set_section_starts(vec![TreeRowKey(2)]);
+        widget.set_input(TreeListInput {
+            rows: vec![row(1, 0, TreeRowExpansion::Leaf), row(2, 0, TreeRowExpansion::Leaf)],
+            editor: None,
+            scroll_offset_px: 0.0,
+        });
+        layout(&mut widget, Rect::new(0.0, 0.0, 240.0, 100.0), 1.0);
+        let theme = crate::theme::test_theme();
+        let mut context = event_context(&theme);
+
+        assert_eq!(
+            widget.on_event(
+                &Event::MouseDown {
+                    px: 4.0,
+                    py: layout::TREE_ROW_HEIGHT_LOGICAL + 4.0,
+                    button: MouseButton::Left,
+                },
+                &mut context,
+            ),
+            None,
+        );
+        assert_eq!(
+            widget.on_event(
+                &Event::MouseDown {
+                    px: 4.0,
+                    py: layout::TREE_ROW_HEIGHT_LOGICAL + layout::TREE_SECTION_GAP_LOGICAL + 4.0,
+                    button: MouseButton::Left,
+                },
+                &mut context,
+            ),
+            Some(WidgetAction::TreeList(TreeListAction::Selected(TreeRowKey(2)))),
+        );
     }
 
     #[test]

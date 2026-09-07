@@ -1011,6 +1011,15 @@ impl NotoraRuntime {
         if let Some(action) = route.canvas_scrollbar_action {
             self.handle_editor_scrollbar_action(action);
         }
+        if let Some(command) = route.canvas_view_command
+            && let Some(snapshot) = self.document_runtime.editor().active_canvas_viewport_snapshot()
+        {
+            let outcome = self
+                .document_runtime
+                .editor_mut()
+                .apply_active_canvas_viewport_action(command.viewport_action(snapshot.viewport));
+            self.apply_editor_outcome(outcome);
+        }
         for action in route.actions {
             self.dispatch_action(action);
         }

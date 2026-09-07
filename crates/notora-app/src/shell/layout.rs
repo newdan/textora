@@ -11,11 +11,11 @@ pub const MAXIMUM_CARD_LIST_WIDTH_LOGICAL: f32 = 520.0;
 pub const MINIMUM_EDITOR_WIDTH_LOGICAL: f32 = 300.0;
 /// 仅作为可点击、可拖动的命中范围，不占用栏间视觉宽度。
 pub const SPLITTER_WIDTH_LOGICAL: f32 = 8.0;
-pub const EDITOR_HEADER_HEIGHT_LOGICAL: f32 = 108.0;
-pub const EDITOR_COMPACT_HEADER_HEIGHT_LOGICAL: f32 = 100.0;
+pub const EDITOR_HEADER_HEIGHT_LOGICAL: f32 = 92.0;
+pub const EDITOR_COMPACT_HEADER_HEIGHT_LOGICAL: f32 = 92.0;
 /// 头部底部的属性行（所属工作区 + 标签）高度；仅工作区笔记展示该行。
 pub const EDITOR_HEADER_PROPERTY_ROW_HEIGHT_LOGICAL: f32 = 28.0;
-pub const EDITOR_TOOLBAR_HEIGHT_LOGICAL: f32 = 40.0;
+pub const EDITOR_TOOLBAR_HEIGHT_LOGICAL: f32 = 36.0;
 pub const EDITOR_COMPACT_HEIGHT_THRESHOLD_LOGICAL: f32 = 480.0;
 pub const MINIMUM_WINDOW_WIDTH_LOGICAL: f32 = DEFAULT_NAVIGATION_WIDTH_LOGICAL
     + DEFAULT_CARD_LIST_WIDTH_LOGICAL
@@ -357,7 +357,7 @@ mod tests {
         assert_eq!(layout.responsive_mode, ResponsiveLayoutMode::ThreePane);
         assert_eq!(layout.navigation_rect.w, DEFAULT_NAVIGATION_WIDTH_LOGICAL);
         assert_eq!(layout.card_list_rect.w, DEFAULT_CARD_LIST_WIDTH_LOGICAL);
-        assert_eq!(layout.editor_header_rect.h, 108.0);
+        assert_eq!(layout.editor_header_rect.h, 92.0);
         assert_eq!(layout.editor_rect.x, layout.card_list_rect.right());
         assert_editor_chrome_is_partitioned(layout);
     }

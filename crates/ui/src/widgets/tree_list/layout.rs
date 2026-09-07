@@ -1,6 +1,6 @@
 use crate::core::Rect;
 
-use super::{TreeRowEditorInput, TreeRowInput};
+use super::{TreeRowEditorInput, TreeRowInput, TreeRowKey};
 
 pub const TREE_ROW_HEIGHT_LOGICAL: f32 = 28.0;
 pub const TREE_ROW_FONT_SIZE_LOGICAL: f32 = 13.0;
@@ -15,6 +15,7 @@ pub const TREE_BADGE_DIGIT_WIDTH_RATIO: f32 = 0.65;
 pub const TREE_ACTION_SIZE_LOGICAL: f32 = 22.0;
 pub const TREE_ACTION_ICON_SIZE_LOGICAL: f32 = 14.0;
 pub const TREE_ACTION_GAP_LOGICAL: f32 = 2.0;
+pub const TREE_SECTION_GAP_LOGICAL: f32 = 12.0;
 
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct TreeRowLayout {
@@ -42,6 +43,7 @@ pub struct TreeRowEditorLayout {
 pub(super) fn build_tree_layout(
     rows: &[TreeRowInput],
     editor: Option<&TreeRowEditorInput>,
+    section_starts: &[TreeRowKey],
     rect: Rect,
     scroll_offset_px: f32,
     dpi: f32,
@@ -55,21 +57,31 @@ pub(super) fn build_tree_layout(
     let badge_padding = TREE_BADGE_HORIZONTAL_PADDING_LOGICAL * dpi;
     let requested_action_size = TREE_ACTION_SIZE_LOGICAL * dpi;
     let action_gap = TREE_ACTION_GAP_LOGICAL * dpi;
+    let section_gap = TREE_SECTION_GAP_LOGICAL * dpi;
     let editor_insert_index = editor.and_then(|editor| {
         rows.iter().position(|row| row.key == editor.parent_key).map(|index| index + 1)
     });
+    let mut accumulated_section_gap = 0.0;
+    let mut editor_content_y = None;
 
     let row_layouts = rows
         .iter()
         .enumerate()
         .map(|(index, row)| {
+            if editor_insert_index == Some(index) {
+                editor_content_y = Some(index as f32 * row_height + accumulated_section_gap);
+            }
+            if section_starts.contains(&row.key) {
+                accumulated_section_gap += section_gap;
+            }
             let visual_index = index
                 + usize::from(
                     editor_insert_index.is_some_and(|insert_index| index >= insert_index),
                 );
             let row_rect = Rect::new(
                 rect.x,
-                rect.y + visual_index as f32 * row_height - scroll_offset_px,
+                rect.y + visual_index as f32 * row_height + accumulated_section_gap
+                    - scroll_offset_px,
                 rect.w,
                 row_height,
             );
@@ -154,15 +166,14 @@ pub(super) fn build_tree_layout(
                 action_rects,
             }
         })
-        .collect();
+        .collect::<Vec<_>>();
 
-    let editor_layout = editor.zip(editor_insert_index).map(|(editor, insert_index)| {
-        let row_rect = Rect::new(
-            rect.x,
-            rect.y + insert_index as f32 * row_height - scroll_offset_px,
-            rect.w,
-            row_height,
-        );
+    if editor_insert_index == Some(rows.len()) {
+        editor_content_y = Some(rows.len() as f32 * row_height + accumulated_section_gap);
+    }
+
+    let editor_layout = editor.zip(editor_content_y).map(|(editor, content_y)| {
+        let row_rect = Rect::new(rect.x, rect.y + content_y - scroll_offset_px, rect.w, row_height);
         let text_box_left =
             rect.x + horizontal_padding + editor.depth as f32 * TREE_ROW_INDENT_LOGICAL * dpi;
         let text_box_rect = Rect::new(
@@ -178,7 +189,7 @@ pub(super) fn build_tree_layout(
     TreeListLayout {
         rows: row_layouts,
         editor: editor_layout,
-        content_height_px: visual_row_count as f32 * row_height,
+        content_height_px: visual_row_count as f32 * row_height + accumulated_section_gap,
     }
 }
 
@@ -204,7 +215,7 @@ mod tests {
     #[test]
     fn layout_keeps_rows_inside_their_scrolled_content_space() {
         let layout =
-            build_tree_layout(&[row(3)], None, Rect::new(20.0, 10.0, 180.0, 100.0), 8.0, 1.5);
+            build_tree_layout(&[row(3)], None, &[], Rect::new(20.0, 10.0, 180.0, 100.0), 8.0, 1.5);
 
         assert_eq!(layout.content_height_px, TREE_ROW_HEIGHT_LOGICAL * 1.5);
         assert_eq!(layout.rows[0].row_rect.y, 2.0);
@@ -221,7 +232,7 @@ mod tests {
         leaf.icon = Some("file".to_owned());
         let list_rect = Rect::new(12.0, 20.0, 180.0, 100.0);
 
-        let layout = build_tree_layout(&[leaf], None, list_rect, 0.0, 1.0);
+        let layout = build_tree_layout(&[leaf], None, &[], list_rect, 0.0, 1.0);
 
         assert_eq!(
             layout.rows[0].icon_rect.expect("leaf icon should have layout").x,
@@ -242,7 +253,7 @@ mod tests {
         ];
         let list_rect = Rect::new(12.0, 20.0, 88.0, 100.0);
 
-        let layout = build_tree_layout(&[input], None, list_rect, 0.0, 2.0);
+        let layout = build_tree_layout(&[input], None, &[], list_rect, 0.0, 2.0);
         let row_layout = &layout.rows[0];
 
         assert_eq!(row_layout.action_rects.len(), 3);
@@ -271,6 +282,7 @@ mod tests {
         let layout = build_tree_layout(
             &[parent, sibling],
             Some(&editor),
+            &[],
             Rect::new(0.0, 0.0, 240.0, 100.0),
             0.0,
             1.0,
@@ -280,5 +292,33 @@ mod tests {
         assert_eq!(layout.editor.expect("editor should be laid out").row_rect.y, 28.0);
         assert_eq!(layout.rows[1].row_rect.y, 56.0);
         assert_eq!(layout.content_height_px, 84.0);
+    }
+
+    #[test]
+    fn section_gap_accounts_for_editor_scroll_and_total_height() {
+        let parent = row(0);
+        let mut section_row = row(0);
+        section_row.key = TreeRowKey(2);
+        let editor = TreeRowEditorInput {
+            key: TreeRowKey(99),
+            parent_key: parent.key,
+            depth: 1,
+            value: String::new(),
+            placeholder: "新目录名称".to_owned(),
+        };
+
+        let layout = build_tree_layout(
+            &[parent, section_row],
+            Some(&editor),
+            &[TreeRowKey(2)],
+            Rect::new(0.0, 0.0, 240.0, 100.0),
+            5.0,
+            1.0,
+        );
+
+        assert_eq!(layout.rows[0].row_rect.y, -5.0);
+        assert_eq!(layout.editor.expect("editor should be laid out").row_rect.y, 23.0);
+        assert_eq!(layout.rows[1].row_rect.y, 63.0);
+        assert_eq!(layout.content_height_px, 96.0);
     }
 }

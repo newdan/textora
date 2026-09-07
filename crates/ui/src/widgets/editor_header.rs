@@ -10,17 +10,17 @@ use crate::widgets::text_box::{TextBox, TextBoxChrome};
 use crate::widgets::tooltip::TooltipHint;
 use std::any::Any;
 
-const HEADER_HORIZONTAL_PADDING_LOGICAL: f32 = 16.0;
-const HEADER_ACTION_SIZE_LOGICAL: f32 = 28.0;
+const HEADER_ACTION_SIZE_LOGICAL: f32 = 24.0;
 const HEADER_ACTION_GAP_LOGICAL: f32 = 6.0;
 const HEADER_META_GAP_LOGICAL: f32 = 12.0;
 const HEADER_META_FONT_SIZE_LOGICAL: f32 = 11.0;
 const HEADER_MINIMUM_TITLE_WIDTH_LOGICAL: f32 = 120.0;
-const HEADER_TITLE_HEIGHT_LOGICAL: f32 = 40.0;
-const HEADER_ROW_GAP_LOGICAL: f32 = 4.0;
-const HEADER_COMPACT_HEIGHT_THRESHOLD_LOGICAL: f32 = 64.0;
+const HEADER_TITLE_HEIGHT_LOGICAL: f32 = 32.0;
+const HEADER_TOP_PADDING_LOGICAL: f32 = 8.0;
+const HEADER_TITLE_PADDING_LOGICAL: f32 = 8.0;
+const HEADER_COMPACT_HEIGHT_THRESHOLD_LOGICAL: f32 = 48.0;
 const HEADER_COMPACT_WIDTH_THRESHOLD_LOGICAL: f32 = 420.0;
-const HEADER_TITLE_FONT_SIZE_LOGICAL: f32 = 24.0;
+const HEADER_TITLE_FONT_SIZE_LOGICAL: f32 = 22.0;
 
 pub const EDITOR_HEADER_TITLE_ID: WidgetId = WidgetId(10_001);
 pub const EDITOR_HEADER_STAR_ID: WidgetId = WidgetId(10_002);
@@ -68,7 +68,7 @@ impl EditorHeaderWidget {
         title_box.set_blink(true);
         title_box.set_chrome(TextBoxChrome::Seamless);
         title_box.set_font_size_logical(HEADER_TITLE_FONT_SIZE_LOGICAL);
-        title_box.set_leading_content_inset_logical(0.0);
+        title_box.set_leading_content_inset_logical(HEADER_TITLE_PADDING_LOGICAL);
         title_box.set_placeholder("无标题");
         Self {
             input: EditorHeaderInput::default(),
@@ -188,7 +188,7 @@ impl Widget for EditorHeaderWidget {
     fn set_rect(&mut self, rect: Rect, ctx: &mut LayoutCtx) {
         self.rect = Rect::new(0.0, 0.0, rect.w, rect.h);
         let dpi = ctx.dpi;
-        let horizontal_padding = HEADER_HORIZONTAL_PADDING_LOGICAL * dpi;
+        let horizontal_padding = crate::layout::reading_content_inset(self.rect.w, dpi);
         let action_size = (HEADER_ACTION_SIZE_LOGICAL * dpi).min(self.rect.h);
         let action_gap = HEADER_ACTION_GAP_LOGICAL * dpi;
         let encryption_width = match self.input.encryption {
@@ -196,7 +196,7 @@ impl Widget for EditorHeaderWidget {
             EncryptionStatusInput::Hidden => 0.0,
         };
         let full_metadata_width =
-            ctx.measure.measure(&self.full_metadata_text(), HEADER_META_FONT_SIZE_LOGICAL * dpi);
+            ctx.measure.measure(&self.summary_metadata_text(), HEADER_META_FONT_SIZE_LOGICAL * dpi);
         let mut compact = self.input.compact
             || rect.h / dpi <= HEADER_COMPACT_HEIGHT_THRESHOLD_LOGICAL
             || rect.w / dpi <= HEADER_COMPACT_WIDTH_THRESHOLD_LOGICAL;
@@ -218,15 +218,23 @@ impl Widget for EditorHeaderWidget {
             compact = rect.w < required_width;
         }
         self.input.compact = compact;
-        let row_gap = (HEADER_ROW_GAP_LOGICAL * dpi).min((self.rect.h - action_size).max(0.0));
+        let title_y = (HEADER_TOP_PADDING_LOGICAL * dpi).min((self.rect.h - action_size).max(0.0));
         let title_height =
-            (HEADER_TITLE_HEIGHT_LOGICAL * dpi).min((self.rect.h - action_size - row_gap).max(0.0));
-        let content_height = title_height + row_gap + action_size;
-        let title_y = (self.rect.h - content_height).max(0.0) * 0.5;
-        let second_row_y = title_y + title_height + row_gap;
+            (HEADER_TITLE_HEIGHT_LOGICAL * dpi).min((self.rect.h - title_y - action_size).max(0.0));
+        let second_row_y = title_y + title_height;
         let title_x = horizontal_padding;
         let title_width = (self.rect.w - horizontal_padding * 2.0).max(0.0);
-        self.title_box.set_rect(Rect::new(title_x, title_y, title_width, title_height), ctx);
+        let title_padding = (HEADER_TITLE_PADDING_LOGICAL * dpi).min(horizontal_padding);
+        self.title_box.set_leading_content_inset_logical(title_padding / dpi);
+        self.title_box.set_rect(
+            Rect::new(
+                title_x - title_padding,
+                title_y,
+                title_width + title_padding * 2.0,
+                title_height,
+            ),
+            ctx,
+        );
 
         let mut right_edge = self.rect.right() - horizontal_padding;
 
@@ -281,6 +289,12 @@ impl Widget for EditorHeaderWidget {
             let baseline = self.metadata_rect.y
                 + self.metadata_rect.h * 0.5
                 + HEADER_META_FONT_SIZE_LOGICAL * dpi * 0.35;
+            ctx.list.cmds.push(crate::core::DrawCmd::PushClip(Rect::new(
+                self.metadata_rect.x + ctx.list.offset.0,
+                self.metadata_rect.y + ctx.list.offset.1,
+                self.metadata_rect.w,
+                self.metadata_rect.h,
+            )));
             ctx.text(
                 self.metadata_rect.x,
                 baseline,
@@ -288,6 +302,7 @@ impl Widget for EditorHeaderWidget {
                 ctx.theme.palette.text_muted,
                 &metadata_text,
             );
+            ctx.list.cmds.push(crate::core::DrawCmd::PopClip);
         }
 
         self.paint_action_button(
@@ -330,6 +345,12 @@ impl Widget for EditorHeaderWidget {
     }
 
     fn tooltip_at(&self, px: f32, py: f32) -> Option<TooltipHint> {
+        if self.metadata_rect.contains(px, py) {
+            return Some(TooltipHint {
+                label: self.full_metadata_text(),
+                target_rect: self.metadata_rect,
+            });
+        }
         if self.input.star_enabled && self.star_rect.contains(px, py) {
             let label = if self.input.starred { "取消星标" } else { "添加星标" };
             return Some(TooltipHint { label: label.to_owned(), target_rect: self.star_rect });
@@ -376,7 +397,15 @@ impl EditorHeaderWidget {
         if self.input.compact {
             return self.input.save_status_text.clone();
         }
-        self.full_metadata_text()
+        self.summary_metadata_text()
+    }
+
+    fn summary_metadata_text(&self) -> String {
+        [self.input.modified_at_text.as_str(), self.input.save_status_text.as_str()]
+            .into_iter()
+            .filter(|text| !text.is_empty())
+            .collect::<Vec<_>>()
+            .join(" · ")
     }
 
     fn full_metadata_text(&self) -> String {
@@ -486,6 +515,24 @@ mod tests {
             delete_enabled: true,
             compact: false,
         }
+    }
+
+    #[test]
+    fn header_summary_keeps_creation_details_in_a_tooltip() {
+        let mut header = EditorHeaderWidget::new();
+        header.set_input(input());
+        let theme = crate::theme::test_theme();
+        let mut measure = HeaderMeasure;
+        let mut context =
+            LayoutCtx { ui_measure: None, measure: &mut measure, theme: &theme, dpi: 1.0 };
+        header.set_rect(Rect::new(0.0, 0.0, 640.0, 56.0), &mut context);
+        assert_eq!(header.metadata_text(), "修改于刚刚 · 已保存");
+        let hint = header
+            .tooltip_at(header.metadata_rect.x + 1.0, header.metadata_rect.y + 1.0)
+            .expect("metadata must expose complete timestamps");
+        assert!(hint.label.contains("创建于 2026-08-03"));
+        assert!(header.title_box.rect().bottom() <= header.metadata_rect.y);
+        assert!(header.delete_rect.w > 0.0);
     }
 
     #[test]
@@ -735,6 +782,47 @@ mod tests {
     }
 
     #[test]
+    fn title_row_reserves_top_space_and_stays_close_to_metadata() {
+        for dpi in [1.0, 2.0] {
+            let mut header = EditorHeaderWidget::new();
+            header.set_input(input());
+            let theme = crate::theme::test_theme();
+            let mut measure = HeaderMeasure;
+            let mut context =
+                LayoutCtx { ui_measure: None, measure: &mut measure, theme: &theme, dpi };
+            header.set_rect(Rect::new(0.0, 0.0, 640.0 * dpi, 64.0 * dpi), &mut context);
+
+            let title_rect = header.title_box.rect();
+            assert_eq!(title_rect.y, 8.0 * dpi);
+            assert_eq!(title_rect.h, 32.0 * dpi);
+            assert_eq!(title_rect.bottom(), header.metadata_rect.y);
+            assert!(header.metadata_rect.bottom() <= 64.0 * dpi);
+        }
+    }
+
+    #[test]
+    fn title_input_has_padding_without_shifting_the_reading_alignment() {
+        for dpi in [1.0, 2.0] {
+            let mut header = EditorHeaderWidget::new();
+            header.set_input(EditorHeaderInput { title_editable: true, ..input() });
+            header.title_box.sync_text("");
+            header.set_keyboard_focus(Some(EDITOR_HEADER_TITLE_ID));
+            let theme = crate::theme::test_theme();
+            let mut measure = HeaderMeasure;
+            let mut context =
+                LayoutCtx { ui_measure: None, measure: &mut measure, theme: &theme, dpi };
+            header.set_rect(Rect::new(0.0, 0.0, 640.0 * dpi, 64.0 * dpi), &mut context);
+
+            let input_rect = header.title_box.rect();
+            let caret_rect = header.title_box.ime_cursor_rect();
+            assert!(caret_rect.x - input_rect.x >= 8.0 * dpi);
+            assert!(input_rect.h >= 32.0 * dpi);
+            assert_eq!(caret_rect.x, crate::layout::reading_content_inset(640.0 * dpi, dpi));
+            assert!(input_rect.bottom() <= header.metadata_rect.y);
+        }
+    }
+
+    #[test]
     fn wide_header_reserves_measured_metadata_space_before_trailing_actions() {
         let mut header = EditorHeaderWidget::new();
         header.set_input(input());
@@ -748,8 +836,14 @@ mod tests {
         assert!(!header.input.compact);
         assert_eq!(header.title_box.rect().h, HEADER_TITLE_HEIGHT_LOGICAL);
         assert!(header.title_box.rect().bottom() <= header.metadata_rect.y);
-        assert_eq!(header.title_box.rect().x, HEADER_HORIZONTAL_PADDING_LOGICAL);
-        assert_eq!(header.title_box.rect().right(), 760.0 - HEADER_HORIZONTAL_PADDING_LOGICAL);
+        assert_eq!(
+            header.title_box.rect().x + HEADER_TITLE_PADDING_LOGICAL,
+            crate::layout::reading_content_inset(760.0, 1.0)
+        );
+        assert_eq!(
+            header.title_box.rect().right(),
+            760.0 - crate::layout::reading_content_inset(760.0, 1.0) + HEADER_TITLE_PADDING_LOGICAL
+        );
         assert_eq!(header.metadata_rect.y, header.star_rect.y);
         assert!(header.metadata_rect.w > 0.0);
         assert!(

@@ -6,9 +6,9 @@ use crate::core::text_util::estimate_text_width_px;
 
 use super::CardInput;
 
-pub const CARD_VERTICAL_GAP_LOGICAL: f32 = 8.0;
+pub const CARD_VERTICAL_GAP_LOGICAL: f32 = 4.0;
 pub const CARD_HORIZONTAL_PADDING_LOGICAL: f32 = 14.0;
-pub const CARD_VERTICAL_PADDING_LOGICAL: f32 = 12.0;
+pub const CARD_VERTICAL_PADDING_LOGICAL: f32 = 10.0;
 pub const CARD_ICON_SLOT_SIZE_LOGICAL: f32 = 24.0;
 pub const CARD_ICON_GLYPH_SIZE_LOGICAL: f32 = 14.0;
 pub const CARD_ICON_GAP_LOGICAL: f32 = 8.0;
@@ -20,13 +20,13 @@ pub const CARD_EXCERPT_LINE_HEIGHT_LOGICAL: f32 = 18.0;
 pub const CARD_TITLE_MAX_LINES: usize = 2;
 pub const CARD_EXCERPT_MAX_LINES: usize = 2;
 pub const CARD_CORNER_RADIUS_LOGICAL: f32 = 8.0;
-pub const CARD_METADATA_GAP_LOGICAL: f32 = 12.0;
+pub const CARD_METADATA_GAP_LOGICAL: f32 = 8.0;
 pub const VIRTUAL_CARD_OVERSCAN_COUNT: usize = 2;
 pub const CARD_CLOSE_BUTTON_SIZE_LOGICAL: f32 = 24.0;
 pub const CARD_CLOSE_ICON_SIZE_LOGICAL: f32 = 16.0;
 
 const CARD_TEXT_SECTION_GAP_LOGICAL: f32 = 6.0;
-const CARD_CONTENT_METADATA_GAP_LOGICAL: f32 = 12.0;
+const CARD_CONTENT_METADATA_GAP_LOGICAL: f32 = 8.0;
 const CARD_TITLE_CLOSE_GAP_LOGICAL: f32 = 6.0;
 
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
@@ -116,7 +116,7 @@ impl VirtualCardListLayout {
             card_rect.right() - horizontal_padding
         };
         let secondary_text_right = card_rect.right() - horizontal_padding;
-        let secondary_text_x = card_rect.x + horizontal_padding;
+        let secondary_text_x = title_x;
         let metadata_width = (secondary_text_right - secondary_text_x) * 0.42;
         let metadata_rect =
             Rect::new(secondary_text_x, metadata_y, metadata_width.max(0.0), metadata_font_size);
@@ -187,7 +187,7 @@ fn build_card_placements(cards: &[CardInput], card_width_px: f32, dpi: f32) -> V
         - CARD_ICON_SLOT_SIZE_LOGICAL * dpi
         - CARD_ICON_GAP_LOGICAL * dpi)
         .max(0.0);
-    let excerpt_width_px = (card_width_px - horizontal_padding * 2.0).max(0.0);
+    let secondary_text_width_px = title_width_px;
     let card_gap_px = CARD_VERTICAL_GAP_LOGICAL * dpi;
     let mut next_card_top_px = 0.0;
 
@@ -204,7 +204,7 @@ fn build_card_placements(cards: &[CardInput], card_width_px: f32, dpi: f32) -> V
             .max(1);
             let excerpt_line_count = card_text_lines(
                 &card.excerpt,
-                excerpt_width_px,
+                secondary_text_width_px,
                 CARD_EXCERPT_FONT_SIZE_LOGICAL * dpi,
                 CARD_EXCERPT_MAX_LINES,
             )
@@ -258,8 +258,9 @@ mod tests {
         let layout =
             build_virtual_card_layout(&cards, Rect::new(20.0, 30.0, 300.0, 500.0), 0.0, 1.0);
         let geometry = layout.card_geometry(0);
-        let expected_text_x = geometry.card_rect.x + CARD_HORIZONTAL_PADDING_LOGICAL;
+        let expected_text_x = geometry.icon_rect.right() + CARD_ICON_GAP_LOGICAL;
 
+        assert_eq!(geometry.title_rect.x, expected_text_x);
         assert_eq!(geometry.excerpt_rect.x, expected_text_x);
         assert_eq!(geometry.metadata_rect.x, expected_text_x);
     }

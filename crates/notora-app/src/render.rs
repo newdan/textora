@@ -54,7 +54,7 @@ const SETTINGS_BUTTON_ID: WidgetId = WidgetId(9_001);
 const NEW_NOTE_BUTTON_ID: WidgetId = WidgetId(9_002);
 const NEW_NOTE_MENU_BUTTON_ID: WidgetId = WidgetId(9_003);
 const SET_WORKSPACE_ROOT_BUTTON_ID: WidgetId = WidgetId(9_004);
-const NEW_NOTE_BUTTON_WIDTH_LOGICAL: f32 = 128.0;
+const NEW_NOTE_BUTTON_WIDTH_LOGICAL: f32 = 96.0;
 const NOTE_TOOL_BUTTON_WIDTH_LOGICAL: f32 = 64.0;
 const NOTE_TOOL_BUTTON_HEIGHT_LOGICAL: f32 = 28.0;
 const NOTE_TOOL_BUTTON_GAP_LOGICAL: f32 = 6.0;
@@ -112,6 +112,7 @@ pub struct RenderCard {
 /// 产品层计算好的工具栏动作；widget 不保存 NoteId、TagId 或导航范围。
 #[derive(Clone, Debug, PartialEq)]
 pub struct NoteToolbarButtonInput {
+    pub icon: Option<&'static str>,
     pub label: String,
     pub action: NotoraAction,
 }
@@ -131,6 +132,7 @@ pub enum NewNoteControlState {
     Hidden,
     Disabled,
     Enabled,
+    EnabledForFiles,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -147,7 +149,7 @@ impl NewNoteControlState {
     }
 
     fn is_enabled(self) -> bool {
-        self == Self::Enabled
+        matches!(self, Self::Enabled | Self::EnabledForFiles)
     }
 }
 
@@ -778,54 +780,113 @@ pub(crate) fn add_source_toggle_command(
 }
 
 fn history_toolbar_input() -> ui::editor_toolbar::EditorToolbarInput {
-    toolbar_input(&[("undo", "撤销", 0), ("redo", "重做", 0)])
+    ui::editor_toolbar::EditorToolbarInput {
+        groups: vec![toolbar_group("历史", &[("undo", "撤销", 0), ("redo", "重做", 0)])],
+        overflow_open: false,
+    }
 }
 
 fn markdown_toolbar_input() -> ui::editor_toolbar::EditorToolbarInput {
-    toolbar_input(&[
-        ("undo", "撤销", 0),
-        ("redo", "重做", 0),
-        ("heading", "标题", 3),
-        ("bold", "粗体", 4),
-        ("italic", "斜体", 5),
-        ("strike", "删除线", 6),
-        ("inline_code", "行内代码", 7),
-        ("unordered_list", "项目列表", 8),
-        ("ordered_list", "编号列表", 9),
-        ("task_list", "任务列表", 10),
-        ("quote", "引用", 11),
-        ("code_block", "代码块", 12),
-        ("link", "链接", 13),
-    ])
+    ui::editor_toolbar::EditorToolbarInput {
+        groups: vec![
+            toolbar_group("历史", &[("undo", "撤销", 0), ("redo", "重做", 0)]),
+            toolbar_group(
+                "文字",
+                &[
+                    ("heading", "标题", 3),
+                    ("bold", "粗体", 4),
+                    ("italic", "斜体", 5),
+                    ("strike", "删除线", 6),
+                    ("inline_code", "行内代码", 7),
+                ],
+            ),
+            toolbar_group(
+                "列表",
+                &[
+                    ("unordered_list", "项目列表", 8),
+                    ("ordered_list", "编号列表", 9),
+                    ("task_list", "任务列表", 10),
+                ],
+            ),
+            toolbar_group(
+                "插入",
+                &[("quote", "引用", 11), ("code_block", "代码块", 12), ("link", "链接", 13)],
+            ),
+        ],
+        overflow_open: false,
+    }
 }
 
 fn mindmap_toolbar_input() -> ui::editor_toolbar::EditorToolbarInput {
-    toolbar_input(&[
-        ("undo", "撤销", 0),
-        ("redo", "重做", 0),
-        ("mindmap_style", "主题", 0),
-        ("promote", "提升层级", 3),
-        ("demote", "降低层级", 4),
-    ])
+    ui::editor_toolbar::EditorToolbarInput {
+        groups: vec![
+            toolbar_group("历史", &[("undo", "撤销", 0), ("redo", "重做", 0)]),
+            toolbar_group(
+                "脑图",
+                &[
+                    ("mindmap_style", "主题", 0),
+                    ("promote", "提升层级", 3),
+                    ("demote", "降低层级", 4),
+                ],
+            ),
+            toolbar_group(
+                "视图",
+                &[
+                    ("canvas_zoom_out", "缩小", 1),
+                    ("canvas_zoom_in", "放大", 1),
+                    ("canvas_fit", "适应窗口", 0),
+                ],
+            ),
+        ],
+        overflow_open: false,
+    }
 }
 
-fn toolbar_input(commands: &[(&str, &str, u8)]) -> ui::editor_toolbar::EditorToolbarInput {
-    ui::editor_toolbar::EditorToolbarInput {
-        groups: vec![ui::editor_toolbar::EditorToolbarGroupInput {
-            label: "编辑".to_owned(),
-            commands: commands
-                .iter()
-                .map(|(command_key, label, overflow_priority)| {
-                    ui::editor_toolbar::EditorToolbarCommandInput {
-                        command_key: (*command_key).to_owned(),
-                        label: (*label).to_owned(),
-                        enabled: true,
-                        overflow_priority: *overflow_priority,
-                    }
-                })
-                .collect(),
-        }],
-        overflow_open: false,
+fn toolbar_group(
+    label: &str,
+    commands: &[(&str, &str, u8)],
+) -> ui::editor_toolbar::EditorToolbarGroupInput {
+    ui::editor_toolbar::EditorToolbarGroupInput {
+        label: label.to_owned(),
+        commands: commands
+            .iter()
+            .map(|(command_key, label, priority)| ui::editor_toolbar::EditorToolbarCommandInput {
+                command_key: (*command_key).to_owned(),
+                label: (*label).to_owned(),
+                enabled: true,
+                overflow_priority: *priority,
+            })
+            .collect(),
+    }
+}
+
+/// 画布操作只改变视口，不产生笔记内容修改。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CanvasViewCommand {
+    ZoomOut,
+    ZoomIn,
+    Fit,
+}
+
+impl CanvasViewCommand {
+    pub(crate) fn viewport_action(
+        self,
+        viewport: Rect,
+    ) -> appkit_shell::canvas_viewport::CanvasViewportAction {
+        use appkit_shell::canvas_viewport::CanvasViewportAction;
+        const ZOOM_STEP: f32 = 1.2;
+        let factor = match self {
+            Self::Fit => return CanvasViewportAction::ResetView,
+            Self::ZoomIn => ZOOM_STEP,
+            Self::ZoomOut => ZOOM_STEP.recip(),
+        };
+        CanvasViewportAction::ZoomBy {
+            factor,
+            screen_anchor: ui::canvas::CanvasPoint::new(
+                viewport.x + viewport.w * 0.5,
+                viewport.y + viewport.h * 0.5,
+            ),
+        }
     }
 }
 
@@ -865,11 +926,13 @@ fn note_toolbar_buttons(
 ) -> Vec<NoteToolbarButtonInput> {
     if *scope == NavigationScope::ExternalFiles {
         let mut buttons = vec![NoteToolbarButtonInput {
+            icon: Some("folder-open"),
             label: "打开".to_owned(),
             action: NotoraAction::OpenExternalFileDialogRequested,
         }];
         if external_files_present {
             buttons.push(NoteToolbarButtonInput {
+                icon: Some("x"),
                 label: "清空".to_owned(),
                 action: NotoraAction::ExternalFilesClearRequested,
             });
@@ -878,6 +941,7 @@ fn note_toolbar_buttons(
     }
     if matches!(scope, NavigationScope::Search { .. }) {
         return vec![NoteToolbarButtonInput {
+            icon: None,
             label: "清除".to_owned(),
             action: NotoraAction::SearchCommitted { query: String::new(), search_generation: None },
         }];
@@ -885,16 +949,19 @@ fn note_toolbar_buttons(
     if *scope == NavigationScope::Trash {
         let Some(note_id) = selected_note_id else {
             return vec![NoteToolbarButtonInput {
+                icon: None,
                 label: "清空".to_owned(),
                 action: NotoraAction::TrashOperationRequested(TrashOperation::Empty),
             }];
         };
         return vec![
             NoteToolbarButtonInput {
+                icon: None,
                 label: "恢复".to_owned(),
                 action: NotoraAction::TrashOperationRequested(TrashOperation::Restore { note_id }),
             },
             NoteToolbarButtonInput {
+                icon: None,
                 label: "删除".to_owned(),
                 action: NotoraAction::TrashOperationRequested(TrashOperation::PermanentlyDelete {
                     note_id,
@@ -914,8 +981,8 @@ fn new_note_control_state(
         NavigationScope::Search { .. }
         | NavigationScope::Starred
         | NavigationScope::Trash
-        | NavigationScope::Tag { .. }
-        | NavigationScope::ExternalFiles => NewNoteControlState::Hidden,
+        | NavigationScope::Tag { .. } => NewNoteControlState::Hidden,
+        NavigationScope::ExternalFiles => NewNoteControlState::EnabledForFiles,
         NavigationScope::WorkspaceRoot | NavigationScope::Directory { .. } => {
             match workspace_root {
                 WorkspaceRootState::Missing => NewNoteControlState::Disabled,
@@ -926,6 +993,16 @@ fn new_note_control_state(
 }
 
 fn card_empty_state_input(state: &NotoraState) -> StatusStateInput {
+    if state.library.navigation_scope == NavigationScope::ExternalFiles {
+        return StatusStateInput {
+            kind: StatusStateKind::Empty,
+            title: "暂无文件".to_owned(),
+            description: "新建一个文件，或打开已有文件。".to_owned(),
+            icon: Some("file".to_owned()),
+            action_label: None,
+            action_id: None,
+        };
+    }
     if state.workspace_root == WorkspaceRootState::Missing {
         return StatusStateInput {
             kind: StatusStateKind::Empty,
@@ -956,6 +1033,7 @@ pub struct ConfirmationOverlayInput {
 }
 
 struct RenderedToolbarButton {
+    icon: Option<&'static str>,
     rect: Rect,
     label: String,
     action: NotoraAction,
@@ -966,6 +1044,7 @@ pub struct NotoraEventRoute {
     pub actions: Vec<NotoraAction>,
     pub consumed: bool,
     pub canvas_scrollbar_action: Option<CanvasScrollbarsAction>,
+    pub canvas_view_command: Option<CanvasViewCommand>,
     pub cursor_hint: Option<winit::window::CursorIcon>,
 }
 
@@ -975,6 +1054,7 @@ impl NotoraEventRoute {
             actions: Vec::new(),
             consumed: false,
             canvas_scrollbar_action: None,
+            canvas_view_command: None,
             cursor_hint: None,
         }
     }
@@ -984,6 +1064,7 @@ impl NotoraEventRoute {
             actions: action.into_iter().collect(),
             consumed: true,
             canvas_scrollbar_action: None,
+            canvas_view_command: None,
             cursor_hint: None,
         }
     }
@@ -993,6 +1074,7 @@ impl NotoraEventRoute {
             actions: vec![action],
             consumed: false,
             canvas_scrollbar_action: None,
+            canvas_view_command: None,
             cursor_hint: None,
         }
     }
@@ -1002,6 +1084,7 @@ impl NotoraEventRoute {
             actions: Vec::new(),
             consumed: true,
             canvas_scrollbar_action: action,
+            canvas_view_command: None,
             cursor_hint: None,
         }
     }
@@ -1022,6 +1105,7 @@ pub struct NotoraShell {
     navigation_splitter: SplitterWidget,
     card_list_splitter: SplitterWidget,
     new_note_button: SplitButtonWidget,
+    default_new_document_kind: DocumentKind,
     new_document_menu: Option<PopupMenuWidget>,
     editor_pane: EditorPaneChrome,
     editor_note_id: Option<NoteId>,
@@ -1099,6 +1183,7 @@ impl NotoraShell {
             navigation_splitter: SplitterWidget::new(),
             card_list_splitter: SplitterWidget::new(),
             new_note_button,
+            default_new_document_kind: DocumentKind::Markdown,
             new_document_menu: None,
             editor_pane: EditorPaneChrome::new(),
             editor_note_id: None,
@@ -1289,6 +1374,10 @@ impl NotoraShell {
                 }
             })
             .collect();
+        self.navigation_tree.set_section_starts(vec![
+            TreeRowKey(STARRED_NAVIGATION_KEY),
+            TreeRowKey(TRASH_NAVIGATION_KEY),
+        ]);
         self.navigation_tree.set_input(TreeListInput {
             rows: model.navigation_rows.clone(),
             editor: model.navigation_editor.clone(),
@@ -1299,8 +1388,14 @@ impl NotoraShell {
             scroll_offset_px: model.card_scroll_offset_px,
         });
         self.search_box.sync_text(&model.search_query);
+        self.default_new_document_kind =
+            if model.new_note_control == NewNoteControlState::EnabledForFiles {
+                DocumentKind::Text
+            } else {
+                DocumentKind::Markdown
+            };
         self.new_note_button.set_input(SplitButtonInput {
-            label: "新建笔记".to_owned(),
+            label: "新建".to_owned(),
             enabled: model.new_note_control.is_enabled(),
         });
         self.new_note_button.set_menu_open(model.show_new_document_menu);
@@ -1432,7 +1527,7 @@ impl NotoraShell {
                 new_note_rect,
                 (layout.overlay_rect.right(), layout.overlay_rect.bottom()),
                 &metrics,
-                true,
+                model.new_note_control != NewNoteControlState::EnabledForFiles,
             );
             self.synchronize_new_document_menu(menu);
         } else {
@@ -1592,7 +1687,7 @@ impl NotoraShell {
                 &model.card_list_title,
             );
             if self.compact_navigation_rect != Rect::ZERO {
-                paint_note_tool_button(context, self.compact_navigation_rect, "笔记库");
+                paint_note_tool_button(context, self.compact_navigation_rect, "笔记库", None);
             }
             if self.navigation_expand_rect != Rect::ZERO {
                 paint_navigation_visibility_button(
@@ -1602,7 +1697,7 @@ impl NotoraShell {
                 );
             }
             for button in &self.note_toolbar_buttons {
-                paint_note_tool_button(context, button.rect, &button.label);
+                paint_note_tool_button(context, button.rect, &button.label, button.icon);
             }
             if model.cards.is_empty() {
                 self.card_empty_state.paint(context);
@@ -1633,7 +1728,7 @@ impl NotoraShell {
         }
         if self.compact_back_rect != Rect::ZERO {
             frame.with_paint_context(|context| {
-                paint_note_tool_button(context, self.compact_back_rect, "返回");
+                paint_note_tool_button(context, self.compact_back_rect, "返回", None);
             });
         }
         if model.show_settings_overlay {
@@ -1693,11 +1788,12 @@ impl NotoraShell {
                     application_theme.text_secondary,
                     &confirmation.description,
                 );
-                paint_note_tool_button(context, self.confirmation_cancel_rect, "取消");
+                paint_note_tool_button(context, self.confirmation_cancel_rect, "取消", None);
                 paint_note_tool_button(
                     context,
                     self.confirmation_confirm_rect,
                     &confirmation.confirm_label,
+                    None,
                 );
             });
         }
@@ -1857,7 +1953,7 @@ impl NotoraShell {
                 Some(NotoraAction::WorkspaceRootSelectionRequested)
             }
             WidgetAction::Control(ControlAction::Activated { id }) if *id == NEW_NOTE_BUTTON_ID => {
-                Some(NotoraAction::CreateRequested(DocumentKind::Markdown))
+                Some(NotoraAction::CreateRequested(self.default_new_document_kind))
             }
             WidgetAction::Control(ControlAction::Activated { id })
                 if *id == NEW_NOTE_MENU_BUTTON_ID =>
@@ -1883,6 +1979,23 @@ impl NotoraShell {
             }) => Some(NotoraAction::FocusRequested(FocusTarget::CardList)),
             _ => None,
         }
+    }
+
+    fn route_editor_widget_action(&self, widget_action: &WidgetAction) -> NotoraEventRoute {
+        let mut route = NotoraEventRoute::consumed(self.translate_widget_action(widget_action));
+        if let WidgetAction::Control(ControlAction::TextCommitted {
+            id: ui::editor_toolbar::EDITOR_TOOLBAR_COMMAND_ID,
+            value: TextPayload::Plain(command_key),
+        }) = widget_action
+        {
+            route.canvas_view_command = match command_key.as_str() {
+                "canvas_zoom_out" => Some(CanvasViewCommand::ZoomOut),
+                "canvas_zoom_in" => Some(CanvasViewCommand::ZoomIn),
+                "canvas_fit" => Some(CanvasViewCommand::Fit),
+                _ => None,
+            };
+        }
+        route
     }
 
     /// 产品事件先路由给本产品 widget，并独立返回消费状态与产品动作。
@@ -2088,8 +2201,10 @@ impl NotoraShell {
         event_context: &mut EventCtx,
     ) -> NotoraEventRoute {
         let widget_action = self.editor_pane.route_event(event, event_context);
-        let action = widget_action.as_ref().and_then(|action| self.translate_widget_action(action));
-        NotoraEventRoute::consumed(action)
+        widget_action
+            .as_ref()
+            .map(|action| self.route_editor_widget_action(action))
+            .unwrap_or_else(|| NotoraEventRoute::consumed(None))
     }
 
     fn route_mindmap_style_panel_event(
@@ -2195,8 +2310,7 @@ impl NotoraShell {
             return Some(route);
         }
         if let Some(widget_action) = self.editor_pane.route_event(event, event_context) {
-            let action = self.translate_widget_action(&widget_action);
-            return Some(NotoraEventRoute::consumed(action));
+            return Some(self.route_editor_widget_action(&widget_action));
         }
         if let Some(action) = note_toolbar_action(event, &self.note_toolbar_buttons) {
             return Some(NotoraEventRoute::consumed(Some(action)));
@@ -2429,7 +2543,7 @@ impl NotoraShell {
         for (rect, label) in
             self.save_conflict_button_rects.iter().zip(["重新载入", "保存副本", "重试", "取消"])
         {
-            paint_note_tool_button(context, *rect, label);
+            paint_note_tool_button(context, *rect, label, None);
         }
     }
 
@@ -3070,11 +3184,32 @@ fn directory_has_children(directory: &std::path::Path, directories: &[std::path:
     directories.iter().any(|candidate| candidate.parent().is_some_and(|parent| parent == directory))
 }
 
-fn paint_note_tool_button(context: &mut ui::PaintCtx<'_>, rect: Rect, label: &str) {
+fn paint_note_tool_button(
+    context: &mut ui::PaintCtx<'_>,
+    rect: Rect,
+    label: &str,
+    icon: Option<&str>,
+) {
+    const CONTENT_PADDING_LOGICAL: f32 = 8.0;
+    const ICON_SIZE_LOGICAL: f32 = 14.0;
+    const ICON_TEXT_GAP_LOGICAL: f32 = 4.0;
     let application_theme = context.theme.application_theme();
     context.list.fill_rounded(rect, application_theme.overlay_surface, 4.0 * context.dpi);
+    let mut text_x = rect.x + CONTENT_PADDING_LOGICAL * context.dpi;
+    if let Some(icon_name) = icon {
+        let icon_size = ICON_SIZE_LOGICAL * context.dpi;
+        draw_icon(
+            context.list,
+            icon_name,
+            text_x,
+            rect.y + (rect.h - icon_size) * 0.5,
+            icon_size,
+            application_theme.text_secondary,
+        );
+        text_x += icon_size + ICON_TEXT_GAP_LOGICAL * context.dpi;
+    }
     context.text(
-        rect.x + 8.0 * context.dpi,
+        text_x,
         rect.y + rect.h * 0.5 + 5.0 * context.dpi,
         12.0 * context.dpi,
         application_theme.text_secondary,
@@ -3130,6 +3265,7 @@ fn layout_note_toolbar(
                 fitted_width,
                 button_height,
             ),
+            icon: input.icon,
             label: input.label.clone(),
             action: input.action.clone(),
         })
@@ -3426,7 +3562,6 @@ mod tests {
             NavigationScope::Starred,
             NavigationScope::Trash,
             NavigationScope::Tag { tag_id: notora_core::TagId::generate() },
-            NavigationScope::ExternalFiles,
         ] {
             let mut state = NotoraState::default();
             state.library.navigation_scope = scope;
@@ -3509,6 +3644,7 @@ mod tests {
             NOTE_TOOL_BUTTON_HEIGHT_LOGICAL,
             header.control_top_y,
             &[NoteToolbarButtonInput {
+                icon: None,
                 label: "操作".to_owned(),
                 action: NotoraAction::SettingsViewChanged,
             }],
@@ -3543,6 +3679,16 @@ mod tests {
     }
 
     #[test]
+    fn files_scope_offers_creation_without_a_workspace() {
+        let mut state = NotoraState::default();
+        state.library.navigation_scope = NavigationScope::ExternalFiles;
+        let model = NotoraRenderModel::from_state(&state);
+        assert!(model.new_note_control.is_enabled());
+        assert_eq!(model.card_empty_state.title, "暂无文件");
+        assert!(model.card_empty_state.action_id.is_none());
+    }
+
+    #[test]
     fn files_toolbar_exposes_open_external_file_action() {
         let mut state = NotoraState::default();
         state.library.navigation_scope = NavigationScope::ExternalFiles;
@@ -3552,6 +3698,7 @@ mod tests {
         assert_eq!(
             model.note_toolbar,
             vec![NoteToolbarButtonInput {
+                icon: Some("folder-open"),
                 label: "打开".to_owned(),
                 action: NotoraAction::OpenExternalFileDialogRequested,
             }]
@@ -3570,10 +3717,12 @@ mod tests {
             model.note_toolbar,
             vec![
                 NoteToolbarButtonInput {
+                    icon: Some("folder-open"),
                     label: "打开".to_owned(),
                     action: NotoraAction::OpenExternalFileDialogRequested,
                 },
                 NoteToolbarButtonInput {
+                    icon: Some("x"),
                     label: "清空".to_owned(),
                     action: NotoraAction::ExternalFilesClearRequested,
                 },
@@ -3592,6 +3741,7 @@ mod tests {
         assert_eq!(
             model.note_toolbar,
             vec![NoteToolbarButtonInput {
+                icon: None,
                 label: "清除".to_owned(),
                 action: NotoraAction::SearchCommitted {
                     query: String::new(),
@@ -4115,6 +4265,27 @@ mod tests {
         shell.synchronize_new_document_menu(build_menu());
 
         assert!(paints_second_item_hover(&shell, &theme));
+    }
+
+    #[test]
+    fn new_button_uses_plain_text_for_files_and_markdown_for_workspace() {
+        let mut shell = NotoraShell::new();
+        let mut state =
+            NotoraState { workspace_root: WorkspaceRootState::Active, ..NotoraState::default() };
+        for (scope, expected_kind) in [
+            (NavigationScope::ExternalFiles, DocumentKind::Text),
+            (NavigationScope::WorkspaceRoot, DocumentKind::Markdown),
+            (NavigationScope::ExternalFiles, DocumentKind::Text),
+        ] {
+            state.library.navigation_scope = scope;
+            shell.update_model(&NotoraRenderModel::from_state(&state));
+            assert_eq!(
+                shell.translate_widget_action(&WidgetAction::Control(ControlAction::Activated {
+                    id: NEW_NOTE_BUTTON_ID,
+                })),
+                Some(NotoraAction::CreateRequested(expected_kind))
+            );
+        }
     }
 
     #[test]
@@ -4798,6 +4969,54 @@ mod tests {
     }
 
     #[test]
+    fn canvas_toolbar_routes_viewport_commands_without_document_actions() {
+        let shell = NotoraShell::new();
+        for (key, expected) in [
+            ("canvas_zoom_in", CanvasViewCommand::ZoomIn),
+            ("canvas_zoom_out", CanvasViewCommand::ZoomOut),
+            ("canvas_fit", CanvasViewCommand::Fit),
+        ] {
+            let route = shell.route_editor_widget_action(&WidgetAction::Control(
+                ControlAction::TextCommitted {
+                    id: ui::editor_toolbar::EDITOR_TOOLBAR_COMMAND_ID,
+                    value: TextPayload::Plain(key.to_owned()),
+                },
+            ));
+            assert!(route.consumed);
+            assert!(route.actions.is_empty());
+            assert_eq!(route.canvas_view_command, Some(expected));
+        }
+        let viewport = Rect::new(200.0, 100.0, 600.0, 400.0);
+        let appkit_shell::canvas_viewport::CanvasViewportAction::ZoomBy { factor, screen_anchor } =
+            CanvasViewCommand::ZoomIn.viewport_action(viewport)
+        else {
+            panic!("zoom command must zoom");
+        };
+        assert!(factor > 1.0);
+        assert_eq!(screen_anchor, ui::canvas::CanvasPoint::new(500.0, 300.0));
+        assert_eq!(
+            CanvasViewCommand::Fit.viewport_action(viewport),
+            appkit_shell::canvas_viewport::CanvasViewportAction::ResetView
+        );
+    }
+
+    #[test]
+    fn mindmap_toolbar_exposes_view_controls_without_editing_commands() {
+        let toolbar = mindmap_toolbar_input();
+        let keys = toolbar
+            .groups
+            .iter()
+            .flat_map(|group| &group.commands)
+            .map(|command| command.command_key.as_str())
+            .collect::<Vec<_>>();
+        for expected in ["canvas_zoom_out", "canvas_zoom_in", "canvas_fit"] {
+            assert!(keys.contains(&expected), "missing view control {expected}");
+        }
+        assert!(!keys.contains(&"bold"));
+        assert!(markdown_toolbar_input().groups.len() >= 4);
+    }
+
+    #[test]
     fn editor_toolbar_commands_follow_the_active_plugin_capabilities() {
         let command_keys = |input: ui::editor_toolbar::EditorToolbarInput| {
             input
@@ -4832,6 +5051,9 @@ mod tests {
                 "mindmap_style".to_owned(),
                 "promote".to_owned(),
                 "demote".to_owned(),
+                "canvas_zoom_out".to_owned(),
+                "canvas_zoom_in".to_owned(),
+                "canvas_fit".to_owned(),
             ]
         );
         let mut compact_toolbar = editor_toolbar_input_for_plugin(

@@ -2,6 +2,16 @@ use crate::render_geom::AdvanceCacheEntry;
 use shaping;
 use unicode_categories::UnicodeCategories;
 
+const READING_HORIZONTAL_PADDING_LOGICAL: f32 = 32.0;
+const READING_MAXIMUM_WIDTH_LOGICAL: f32 = 760.0;
+
+/// 标题、属性、工具栏及正文共用的阅读栏水平留白（物理像素）。
+pub fn reading_content_inset(width_px: f32, dpi: f32) -> f32 {
+    let minimum_inset = READING_HORIZONTAL_PADDING_LOGICAL * dpi;
+    let centered_inset = (width_px - READING_MAXIMUM_WIDTH_LOGICAL * dpi) * 0.5;
+    minimum_inset.max(centered_inset).min((width_px - 1.0).max(0.0) * 0.5)
+}
+
 /// Build advance cache entries for a single doc line's visible visual lines.
 #[allow(
     clippy::too_many_arguments,

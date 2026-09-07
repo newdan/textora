@@ -409,8 +409,8 @@ impl FrameRuntime {
             summary.dirty,
             document_runtime.save_failure_message(tab_id),
         );
-        model.editor_chrome.header.compact = layout.editor_header_rect.h / layout.dpi
-            < crate::shell::layout::EDITOR_COMPACT_HEIGHT_THRESHOLD_LOGICAL;
+        model.editor_chrome.header.compact =
+            editor_header_is_compact(layout, model.editor_chrome.mode.shows_property_row());
         if let Some(plugin_name) =
             document_runtime.editor().tab_session(tab_id).map(|tab| tab.plugin_name())
         {
@@ -425,7 +425,7 @@ impl FrameRuntime {
                     showing_source,
                 );
             }
-            if model.editor_chrome.header.compact {
+            if model.editor_chrome.header.compact && model.editor_chrome.header.delete_visible {
                 crate::render::add_compact_editor_toolbar_commands(
                     &mut model.editor_chrome.toolbar,
                 );
@@ -557,4 +557,30 @@ fn clear_shell_surface(
 
 fn to_wgpu_color(color: [f32; 4]) -> wgpu::Color {
     wgpu::Color { r: color[0] as f64, g: color[1] as f64, b: color[2] as f64, a: color[3] as f64 }
+}
+
+fn editor_header_is_compact(layout: ShellLayout, property_row_visible: bool) -> bool {
+    crate::editor_pane::compact_editor_header(
+        layout.editor_header_rect,
+        layout.dpi,
+        property_row_visible,
+    )
+}
+
+#[cfg(test)]
+mod chrome_tests {
+    use super::*;
+
+    #[test]
+    fn wide_editor_does_not_duplicate_header_delete_in_toolbar() {
+        let layout = ShellLayout {
+            dpi: 1.0,
+            editor_header_rect: ui::Rect::new(560.0, 0.0, 640.0, 84.0),
+            ..ShellLayout::default()
+        };
+        assert!(!editor_header_is_compact(layout, true));
+        let narrow =
+            ShellLayout { editor_header_rect: ui::Rect::new(560.0, 0.0, 300.0, 84.0), ..layout };
+        assert!(editor_header_is_compact(narrow, true));
+    }
 }

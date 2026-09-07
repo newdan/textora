@@ -867,7 +867,8 @@ impl NotoraState {
     }
 
     fn open_new_document_menu(&mut self) -> Vec<NotoraEffect> {
-        if self.workspace_root == WorkspaceRootState::Missing
+        if (self.workspace_root == WorkspaceRootState::Missing
+            && self.library.navigation_scope != NavigationScope::ExternalFiles)
             || self.library.navigation_scope == NavigationScope::Trash
         {
             return vec![NotoraEffect::Redraw];
@@ -879,7 +880,9 @@ impl NotoraState {
     }
 
     fn request_note_creation(&mut self, kind: DocumentKind) -> Vec<NotoraEffect> {
-        if self.workspace_root == WorkspaceRootState::Missing {
+        if self.workspace_root == WorkspaceRootState::Missing
+            && self.library.navigation_scope != NavigationScope::ExternalFiles
+        {
             return vec![NotoraEffect::Redraw];
         }
         if self.layout.overlay == OverlayState::NewDocumentMenu {
@@ -3185,6 +3188,21 @@ mod tests {
                 NotoraEffect::Redraw,
             ]
         );
+    }
+
+    #[test]
+    fn files_scope_creates_each_document_kind_without_a_workspace() {
+        for kind in [DocumentKind::Markdown, DocumentKind::Text, DocumentKind::Mindmap] {
+            let mut state = NotoraState::default();
+            state.library.navigation_scope = NavigationScope::ExternalFiles;
+            assert_eq!(state.reduce(NotoraAction::OpenNewDocumentMenu), vec![NotoraEffect::Redraw]);
+            assert_eq!(state.layout.overlay, OverlayState::NewDocumentMenu);
+            assert_eq!(
+                state.reduce(NotoraAction::CreateRequested(kind)),
+                vec![NotoraEffect::CreateUntitledExternal(kind), NotoraEffect::Redraw]
+            );
+            assert_eq!(state.layout.overlay, OverlayState::None);
+        }
     }
 
     #[test]

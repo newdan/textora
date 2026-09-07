@@ -7,13 +7,15 @@ use ui::core::widget::{ControlAction, TextPayload, WidgetAction, WidgetId};
 use ui::editor_header::{EditorHeaderInput, EditorHeaderWidget};
 use ui::editor_toolbar::{EditorToolbarInput, EditorToolbarWidget};
 use ui::location_picker::{LocationPickerInput, LocationPickerWidget};
+use ui::popup_menu::{OverflowEntry, PopupMenu, PopupMenuAction, PopupMenuWidget, PopupOutcome};
 use ui::tag_editor::{TagEditorInput, TagEditorWidget};
 use ui::tooltip::TooltipHint;
 use ui::{Event, EventCtx, LayoutCtx, PaintCtx, Rect, Widget};
 
 const EDITOR_PANE_TAG_ROW_HEIGHT_LOGICAL: f32 =
     crate::shell::layout::EDITOR_HEADER_PROPERTY_ROW_HEIGHT_LOGICAL;
-const EDITOR_PANE_TAG_HORIZONTAL_INSET_LOGICAL: f32 = 16.0;
+const EDITOR_PANE_WORKSPACE_ICON_SIZE_LOGICAL: f32 = 14.0;
+const EDITOR_PANE_WORKSPACE_ICON_GAP_LOGICAL: f32 = 6.0;
 const EDITOR_PANE_PROPERTY_ROW_GAP_LOGICAL: f32 = 12.0;
 const EDITOR_PANE_PROPERTY_FONT_SIZE_LOGICAL: f32 = 12.0;
 const EDITOR_PANE_MAXIMUM_WORKSPACE_WIDTH_RATIO: f32 = 0.45;
@@ -22,8 +24,9 @@ const EDITOR_PANE_WIDE_TEXT_WIDTH_RATIO: f32 = 1.0;
 const EDITOR_PANE_LOCATION_WIDTH_LOGICAL: f32 = 360.0;
 const EDITOR_PANE_LOCATION_HEIGHT_LOGICAL: f32 = 220.0;
 const EDITOR_PANE_LOCATION_INSET_LOGICAL: f32 = 16.0;
-const EDITOR_PANE_COMPACT_DOCUMENT_HEADER_HEIGHT_LOGICAL: f32 = 72.0;
+const EDITOR_PANE_COMPACT_DOCUMENT_HEADER_HEIGHT_LOGICAL: f32 = 48.0;
 const EDITOR_PANE_COMPACT_HEADER_WIDTH_LOGICAL: f32 = 420.0;
+const EDITOR_PANE_OVERFLOW_BUTTON_SIZE_LOGICAL: f32 = 28.0;
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum EditorPaneMode {
@@ -115,6 +118,10 @@ pub struct EditorPaneChrome {
     workspace_rect: Rect,
     tag_rect: Rect,
     location_rect: Rect,
+    toolbar_overflow_menu: Option<PopupMenuWidget>,
+    toolbar_overflow_rect: Rect,
+    toolbar_overflow_command_keys: Vec<String>,
+    dpi: f32,
 }
 
 impl EditorPaneChrome {
@@ -130,11 +137,20 @@ impl EditorPaneChrome {
             workspace_rect: Rect::ZERO,
             tag_rect: Rect::ZERO,
             location_rect: Rect::ZERO,
+            toolbar_overflow_menu: None,
+            toolbar_overflow_rect: Rect::ZERO,
+            toolbar_overflow_command_keys: Vec::new(),
+            dpi: 1.0,
         }
     }
 
     pub fn set_input(&mut self, input: EditorPaneInput) {
         let mut effective_input = input.effective();
+        let document_changed = self.input.document_key != effective_input.document_key
+            || self.input.mode != effective_input.mode;
+        let preserve_toolbar_overflow = !document_changed && self.toolbar_overflow_menu.is_some();
+        effective_input.toolbar.overflow_open =
+            effective_input.toolbar.overflow_open || preserve_toolbar_overflow;
         let preserve_tag_draft = self.input.document_key == effective_input.document_key
             && self.tag_editor.has_keyboard_focus()
             && effective_input.tags.enabled;
@@ -150,6 +166,11 @@ impl EditorPaneChrome {
         self.location_picker.set_input(self.input.location.clone());
         self.tag_editor.set_input(self.input.tags.clone());
         self.toolbar.set_input(self.input.toolbar.clone());
+        if document_changed || !self.input.toolbar.overflow_open {
+            self.close_toolbar_overflow();
+        } else {
+            self.rebuild_toolbar_overflow();
+        }
         if !self.input.should_render_chrome() {
             self.set_keyboard_focus(None);
         }
@@ -157,11 +178,11 @@ impl EditorPaneChrome {
 
     pub fn set_rects(&mut self, rects: EditorPaneRects, context: &mut LayoutCtx<'_>) {
         self.rects = rects;
+        self.dpi = context.dpi;
         self.document_header_rect =
             document_header_rect(rects.header, context.dpi, self.input.mode.shows_property_row());
-        let compact = rects.header.w / context.dpi <= EDITOR_PANE_COMPACT_HEADER_WIDTH_LOGICAL
-            || self.document_header_rect.h / context.dpi
-                <= EDITOR_PANE_COMPACT_DOCUMENT_HEADER_HEIGHT_LOGICAL;
+        let compact =
+            compact_editor_header(rects.header, context.dpi, self.input.mode.shows_property_row());
         self.input.header.compact = compact;
         self.input.tags.compact = compact;
         self.header.set_input(self.input.header.clone());
@@ -175,6 +196,9 @@ impl EditorPaneChrome {
         self.toolbar.set_rect(local_rect(rects.toolbar), context);
         self.tag_editor.set_rect(local_rect(self.tag_rect), context);
         self.location_picker.set_rect(local_rect(self.location_rect), context);
+        if self.input.toolbar.overflow_open {
+            self.rebuild_toolbar_overflow();
+        }
     }
 
     pub fn has_open_property_popup(&self) -> bool {
@@ -182,7 +206,9 @@ impl EditorPaneChrome {
     }
 
     pub fn has_open_popup(&self) -> bool {
-        self.has_open_property_popup() || self.input.toolbar.overflow_open
+        self.has_open_property_popup()
+            || self.input.toolbar.overflow_open
+            || self.toolbar_overflow_menu.is_some()
     }
 
     pub fn set_keyboard_focus(&mut self, focused_id: Option<WidgetId>) {
@@ -228,6 +254,10 @@ impl EditorPaneChrome {
             return None;
         }
 
+        if self.toolbar_overflow_menu.is_some() {
+            return self.route_toolbar_overflow_event(event, context);
+        }
+
         if self.input.location.open {
             let local_event = translate_event(event, self.location_rect.x, self.location_rect.y);
             if let Some(action) = self.location_picker.on_event(&local_event, context) {
@@ -269,7 +299,17 @@ impl EditorPaneChrome {
             || matches!(event, Event::MouseMove { .. })
         {
             let local_event = translate_event(event, self.rects.toolbar.x, self.rects.toolbar.y);
-            return self.toolbar.on_event(&local_event, context);
+            let action = self.toolbar.on_event(&local_event, context);
+            if matches!(
+                action,
+                Some(WidgetAction::Control(ControlAction::Activated {
+                    id: ui::editor_toolbar::EDITOR_TOOLBAR_OVERFLOW_ID,
+                }))
+            ) {
+                self.open_toolbar_overflow();
+                return Some(WidgetAction::Consumed);
+            }
+            return action;
         }
         None
     }
@@ -282,16 +322,33 @@ impl EditorPaneChrome {
             paint_at(context, self.document_header_rect, |context| self.header.paint(context));
         }
         if let Some(label) = workspace_label(&self.input.location) {
-            let baseline = self.workspace_rect.y
-                + self.workspace_rect.h * 0.5
-                + EDITOR_PANE_PROPERTY_FONT_SIZE_LOGICAL * context.dpi * 0.35;
-            context.text(
-                self.workspace_rect.x,
-                baseline,
-                EDITOR_PANE_PROPERTY_FONT_SIZE_LOGICAL * context.dpi,
-                context.theme.palette.text_muted,
-                &label,
-            );
+            context.list.cmds.push(ui::core::DrawCmd::PushClip(Rect::new(
+                self.workspace_rect.x + context.list.offset.0,
+                self.workspace_rect.y + context.list.offset.1,
+                self.workspace_rect.w,
+                self.workspace_rect.h,
+            )));
+            paint_at(context, self.workspace_rect, |context| {
+                let icon_size = EDITOR_PANE_WORKSPACE_ICON_SIZE_LOGICAL * context.dpi;
+                let baseline = self.workspace_rect.h * 0.5
+                    + EDITOR_PANE_PROPERTY_FONT_SIZE_LOGICAL * context.dpi * 0.35;
+                ui::icon::draw_icon(
+                    context.list,
+                    "folder",
+                    0.0,
+                    (self.workspace_rect.h - icon_size) * 0.5,
+                    icon_size,
+                    context.theme.palette.text_muted,
+                );
+                context.text(
+                    icon_size + EDITOR_PANE_WORKSPACE_ICON_GAP_LOGICAL * context.dpi,
+                    baseline,
+                    EDITOR_PANE_PROPERTY_FONT_SIZE_LOGICAL * context.dpi,
+                    context.theme.palette.text_muted,
+                    &label,
+                );
+            });
+            context.list.cmds.push(ui::core::DrawCmd::PopClip);
         }
         if self.input.tags.enabled {
             paint_at(context, self.tag_rect, |context| self.tag_editor.paint(context));
@@ -302,6 +359,9 @@ impl EditorPaneChrome {
     pub fn paint_overlay(&self, context: &mut PaintCtx<'_>) {
         if self.input.should_render_chrome() && self.input.location.open {
             paint_at(context, self.location_rect, |context| self.location_picker.paint(context));
+        }
+        if let Some(menu) = &self.toolbar_overflow_menu {
+            paint_at(context, self.toolbar_overflow_rect, |context| menu.paint(context));
         }
     }
 
@@ -348,6 +408,127 @@ impl EditorPaneChrome {
             _ => {}
         }
     }
+
+    fn open_toolbar_overflow(&mut self) {
+        self.input.toolbar.overflow_open = true;
+        self.toolbar.set_input(self.input.toolbar.clone());
+        self.rebuild_toolbar_overflow();
+    }
+
+    fn close_toolbar_overflow(&mut self) {
+        self.input.toolbar.overflow_open = false;
+        self.toolbar.set_input(self.input.toolbar.clone());
+        self.toolbar_overflow_menu = None;
+        self.toolbar_overflow_rect = Rect::ZERO;
+        self.toolbar_overflow_command_keys.clear();
+    }
+
+    fn rebuild_toolbar_overflow(&mut self) {
+        if self.rects.toolbar.w <= 0.0 || self.rects.toolbar.h <= 0.0 {
+            return;
+        }
+        let hidden_command_keys =
+            self.toolbar.visible_command_keys(self.rects.toolbar.w / self.dpi).1;
+        let hidden_commands = hidden_command_keys
+            .iter()
+            .filter_map(|command_key| {
+                self.input
+                    .toolbar
+                    .groups
+                    .iter()
+                    .flat_map(|group| &group.commands)
+                    .find(|command| command.command_key == *command_key)
+                    .cloned()
+            })
+            .collect::<Vec<_>>();
+        if hidden_commands.is_empty() {
+            self.close_toolbar_overflow();
+            return;
+        }
+
+        let content_inset = ui::layout::reading_content_inset(self.rects.toolbar.w, self.dpi);
+        let button_size = EDITOR_PANE_OVERFLOW_BUTTON_SIZE_LOGICAL * self.dpi;
+        let button_right = self.rects.toolbar.right() - content_inset;
+        let anchor = Rect::new(
+            (button_right - button_size).max(self.rects.toolbar.x),
+            self.rects.toolbar.y,
+            button_size.min(self.rects.toolbar.w),
+            self.rects.toolbar.h,
+        );
+        let viewport_width =
+            self.rects.header.right().max(self.rects.toolbar.right()).max(self.rects.body.right());
+        let viewport_height = self
+            .rects
+            .header
+            .bottom()
+            .max(self.rects.toolbar.bottom())
+            .max(self.rects.body.bottom());
+        let entries = hidden_commands
+            .iter()
+            .enumerate()
+            .map(|(index, command)| OverflowEntry {
+                tab_index: index,
+                title: command.label.clone(),
+            })
+            .collect::<Vec<_>>();
+        let mut menu = PopupMenu::overflow_px(
+            &entries,
+            anchor,
+            (viewport_width, viewport_height),
+            usize::MAX,
+            self.dpi,
+        );
+        for (item, command) in menu.items.iter_mut().zip(&hidden_commands) {
+            item.enabled = command.enabled;
+        }
+        let command_keys =
+            hidden_commands.iter().map(|command| command.command_key.clone()).collect::<Vec<_>>();
+        let menu_unchanged = self.toolbar_overflow_menu.as_ref().is_some_and(|current_menu| {
+            self.toolbar_overflow_rect == menu.menu_rect
+                && self.toolbar_overflow_command_keys == command_keys
+                && current_menu.menu().items.len() == hidden_commands.len()
+                && current_menu.menu().items.iter().zip(&hidden_commands).all(|(item, command)| {
+                    item.label == command.label && item.enabled == command.enabled
+                })
+        });
+        if menu_unchanged {
+            return;
+        }
+        self.toolbar_overflow_rect = menu.menu_rect;
+        self.toolbar_overflow_command_keys = command_keys;
+        self.toolbar_overflow_menu = Some(PopupMenuWidget::new(menu));
+    }
+
+    fn route_toolbar_overflow_event(
+        &mut self,
+        event: &Event,
+        context: &mut EventCtx<'_>,
+    ) -> Option<WidgetAction> {
+        let local_event =
+            translate_event(event, self.toolbar_overflow_rect.x, self.toolbar_overflow_rect.y);
+        let action = self.toolbar_overflow_menu.as_mut()?.on_event(&local_event, context);
+        match action {
+            Some(WidgetAction::Popup(PopupOutcome::Selected(PopupMenuAction::SwitchTab(
+                index,
+            )))) => {
+                let command_key = self.toolbar_overflow_command_keys.get(index)?.clone();
+                self.close_toolbar_overflow();
+                Some(WidgetAction::Control(ControlAction::TextCommitted {
+                    id: ui::editor_toolbar::EDITOR_TOOLBAR_COMMAND_ID,
+                    value: TextPayload::Plain(command_key),
+                }))
+            }
+            Some(WidgetAction::Popup(PopupOutcome::Dismiss)) => {
+                self.close_toolbar_overflow();
+                Some(WidgetAction::Consumed)
+            }
+            Some(WidgetAction::Popup(PopupOutcome::Selected(_))) => {
+                self.close_toolbar_overflow();
+                Some(WidgetAction::Consumed)
+            }
+            action => action,
+        }
+    }
 }
 
 impl Default for EditorPaneChrome {
@@ -366,6 +547,12 @@ fn translate_tooltip_hint(mut hint: TooltipHint, offset: Rect) -> TooltipHint {
     hint
 }
 
+pub(crate) fn compact_editor_header(header: Rect, dpi: f32, property_row_visible: bool) -> bool {
+    header.w / dpi <= EDITOR_PANE_COMPACT_HEADER_WIDTH_LOGICAL
+        || document_header_rect(header, dpi, property_row_visible).h / dpi
+            <= EDITOR_PANE_COMPACT_DOCUMENT_HEADER_HEIGHT_LOGICAL
+}
+
 fn document_header_rect(header: Rect, dpi: f32, property_row_visible: bool) -> Rect {
     let property_row_height = if property_row_visible {
         (EDITOR_PANE_TAG_ROW_HEIGHT_LOGICAL * dpi).min(header.h)
@@ -376,8 +563,7 @@ fn document_header_rect(header: Rect, dpi: f32, property_row_visible: bool) -> R
 }
 
 fn workspace_label(location: &LocationPickerInput) -> Option<String> {
-    (!location.workspace_name.is_empty())
-        .then(|| format!("所属工作区：{}", location.workspace_name))
+    (!location.workspace_name.is_empty()).then(|| location.workspace_name.clone())
 }
 
 fn workspace_rect(header: Rect, context: &mut LayoutCtx<'_>, label: Option<&str>) -> Rect {
@@ -403,7 +589,10 @@ fn workspace_rect(header: Rect, context: &mut LayoutCtx<'_>, label: Option<&str>
     Rect::new(
         property_row.x,
         property_row.y,
-        measured_width.max(estimated_width).min(maximum_width),
+        (measured_width.max(estimated_width)
+            + (EDITOR_PANE_WORKSPACE_ICON_SIZE_LOGICAL + EDITOR_PANE_WORKSPACE_ICON_GAP_LOGICAL)
+                * context.dpi)
+            .min(maximum_width),
         property_row.h,
     )
 }
@@ -419,7 +608,7 @@ fn tag_rect(header: Rect, dpi: f32, visible: bool, workspace_width: f32) -> Rect
 }
 
 fn property_row_rect(header: Rect, dpi: f32) -> Rect {
-    let horizontal_inset = EDITOR_PANE_TAG_HORIZONTAL_INSET_LOGICAL * dpi;
+    let horizontal_inset = ui::layout::reading_content_inset(header.w, dpi);
     let height = (EDITOR_PANE_TAG_ROW_HEIGHT_LOGICAL * dpi).min(header.h);
     Rect::new(
         header.x + horizontal_inset,
@@ -606,7 +795,7 @@ mod tests {
             ..LocationPickerInput::default()
         };
 
-        assert_eq!(workspace_label(&location).as_deref(), Some("所属工作区：textora"));
+        assert_eq!(workspace_label(&location).as_deref(), Some("textora"));
     }
 
     #[test]
@@ -698,7 +887,7 @@ mod tests {
         let mut event_context = ui::EventCtx::new(&theme, 1.0);
 
         assert_eq!(
-            chrome.route_event(&ui::Event::MouseMove { px: 120.0, py: 168.0 }, &mut event_context,),
+            chrome.route_event(&ui::Event::MouseMove { px: 140.0, py: 168.0 }, &mut event_context,),
             Some(WidgetAction::Consumed)
         );
         assert_eq!(
@@ -751,10 +940,10 @@ mod tests {
         assert!(star_hint.target_rect.right() <= chrome.document_header_rect.right());
 
         let toolbar_hint = chrome
-            .tooltip_at(chrome.rects.toolbar.x + 20.0, chrome.rects.toolbar.y + 20.0)
+            .tooltip_at(chrome.rects.toolbar.x + 40.0, chrome.rects.toolbar.y + 20.0)
             .expect("toolbar command should expose a tooltip through the pane boundary");
         assert_eq!(toolbar_hint.label, "撤销");
-        assert_eq!(toolbar_hint.target_rect.x, chrome.rects.toolbar.x + 16.0);
+        assert_eq!(toolbar_hint.target_rect.x, chrome.rects.toolbar.x + 32.0);
     }
 
     #[test]
@@ -847,6 +1036,201 @@ mod tests {
         assert!(!chrome.has_open_popup());
     }
 
+    fn narrow_toolbar_input() -> EditorPaneInput {
+        let mut pane_input = input(EditorPaneMode::WorkspaceNote);
+        pane_input.toolbar = ui::editor_toolbar::EditorToolbarInput {
+            groups: vec![ui::editor_toolbar::EditorToolbarGroupInput {
+                label: "画布".to_owned(),
+                commands: [
+                    ("canvas_zoom_in", "放大"),
+                    ("canvas_zoom_out", "缩小"),
+                    ("canvas_fit", "适应窗口"),
+                ]
+                .into_iter()
+                .enumerate()
+                .map(|(priority, (command_key, label))| {
+                    ui::editor_toolbar::EditorToolbarCommandInput {
+                        command_key: command_key.to_owned(),
+                        label: label.to_owned(),
+                        enabled: true,
+                        overflow_priority: priority as u8,
+                    }
+                })
+                .collect(),
+            }],
+            overflow_open: false,
+        };
+        pane_input
+    }
+
+    fn layout_narrow_toolbar(chrome: &mut EditorPaneChrome) {
+        let theme = ui::theme::test_theme();
+        let mut measure = ui::NoopMeasure;
+        let mut layout_context =
+            ui::LayoutCtx { ui_measure: None, measure: &mut measure, theme: &theme, dpi: 1.0 };
+        chrome.set_rects(
+            EditorPaneRects {
+                header: Rect::new(0.0, 0.0, 124.0, 108.0),
+                toolbar: Rect::new(0.0, 108.0, 124.0, 40.0),
+                body: Rect::new(0.0, 148.0, 124.0, 400.0),
+            },
+            &mut layout_context,
+        );
+    }
+
+    fn click_toolbar_overflow(chrome: &mut EditorPaneChrome) -> Option<WidgetAction> {
+        let overflow_hint = (0..124)
+            .find_map(|px| {
+                chrome.tooltip_at(px as f32, 128.0).filter(|hint| hint.label == "更多命令")
+            })
+            .expect("narrow toolbar should expose its overflow button");
+        let theme = ui::theme::test_theme();
+        let mut event_context = ui::EventCtx::new(&theme, 1.0);
+        chrome.route_event(
+            &ui::Event::MouseDown {
+                px: overflow_hint.target_rect.x + overflow_hint.target_rect.w * 0.5,
+                py: overflow_hint.target_rect.y + overflow_hint.target_rect.h * 0.5,
+                button: ui::MouseButton::Left,
+            },
+            &mut event_context,
+        )
+    }
+
+    #[test]
+    fn clicking_toolbar_overflow_opens_a_real_popup() {
+        let mut chrome = EditorPaneChrome::new();
+        chrome.set_input(narrow_toolbar_input());
+        layout_narrow_toolbar(&mut chrome);
+
+        assert!(click_toolbar_overflow(&mut chrome).is_some());
+        assert!(chrome.has_open_popup());
+    }
+
+    #[test]
+    fn toolbar_overflow_survives_same_document_input_refresh() {
+        let pane_input = narrow_toolbar_input();
+        let mut chrome = EditorPaneChrome::new();
+        chrome.set_input(pane_input.clone());
+        layout_narrow_toolbar(&mut chrome);
+        let _ = click_toolbar_overflow(&mut chrome);
+
+        chrome.set_input(pane_input);
+
+        assert!(chrome.has_open_popup());
+    }
+
+    #[test]
+    fn clicking_hidden_toolbar_command_preserves_its_command_key() {
+        let mut chrome = EditorPaneChrome::new();
+        chrome.set_input(narrow_toolbar_input());
+        layout_narrow_toolbar(&mut chrome);
+        let _ = click_toolbar_overflow(&mut chrome);
+        let theme = ui::theme::test_theme();
+        let mut event_context = ui::EventCtx::new(&theme, 1.0);
+
+        let action = chrome.route_event(
+            &ui::Event::MouseDown { px: 4.0, py: 166.0, button: ui::MouseButton::Left },
+            &mut event_context,
+        );
+
+        assert_eq!(
+            action,
+            Some(WidgetAction::Control(ControlAction::TextCommitted {
+                id: ui::editor_toolbar::EDITOR_TOOLBAR_COMMAND_ID,
+                value: TextPayload::Plain("canvas_zoom_out".to_owned()),
+            }))
+        );
+        assert!(!chrome.has_open_popup());
+    }
+
+    #[test]
+    fn escape_closes_toolbar_overflow_popup() {
+        let mut chrome = EditorPaneChrome::new();
+        chrome.set_input(narrow_toolbar_input());
+        layout_narrow_toolbar(&mut chrome);
+        let _ = click_toolbar_overflow(&mut chrome);
+        let theme = ui::theme::test_theme();
+        let mut event_context = ui::EventCtx::new(&theme, 1.0);
+
+        assert!(
+            chrome
+                .route_event(
+                    &ui::Event::KeyDown(ui::KeyCode::Escape, ui::core::Modifiers::NONE),
+                    &mut event_context,
+                )
+                .is_some()
+        );
+        assert!(!chrome.has_open_popup());
+    }
+
+    #[test]
+    fn retina_toolbar_uses_logical_width_to_find_hidden_commands() {
+        let mut chrome = EditorPaneChrome::new();
+        chrome.set_input(narrow_toolbar_input());
+        let theme = ui::theme::test_theme();
+        let mut measure = ui::NoopMeasure;
+        let mut layout_context =
+            ui::LayoutCtx { ui_measure: None, measure: &mut measure, theme: &theme, dpi: 2.0 };
+        chrome.set_rects(
+            EditorPaneRects {
+                header: Rect::new(0.0, 0.0, 248.0, 216.0),
+                toolbar: Rect::new(0.0, 216.0, 248.0, 80.0),
+                body: Rect::new(0.0, 296.0, 248.0, 800.0),
+            },
+            &mut layout_context,
+        );
+        let overflow_hint = (0..248)
+            .find_map(|px| {
+                chrome.tooltip_at(px as f32, 256.0).filter(|hint| hint.label == "更多命令")
+            })
+            .expect("Retina narrow toolbar should expose its overflow button");
+        let mut event_context = ui::EventCtx::new(&theme, 2.0);
+
+        let _ = chrome.route_event(
+            &ui::Event::MouseDown {
+                px: overflow_hint.target_rect.x + overflow_hint.target_rect.w * 0.5,
+                py: overflow_hint.target_rect.y + overflow_hint.target_rect.h * 0.5,
+                button: ui::MouseButton::Left,
+            },
+            &mut event_context,
+        );
+
+        assert!(chrome.has_open_popup());
+    }
+
+    #[test]
+    fn toolbar_overflow_keeps_keyboard_highlight_across_frame_refresh() {
+        let pane_input = narrow_toolbar_input();
+        let mut chrome = EditorPaneChrome::new();
+        chrome.set_input(pane_input.clone());
+        layout_narrow_toolbar(&mut chrome);
+        let _ = click_toolbar_overflow(&mut chrome);
+        let theme = ui::theme::test_theme();
+        let mut event_context = ui::EventCtx::new(&theme, 1.0);
+        assert_eq!(
+            chrome.route_event(
+                &ui::Event::KeyDown(ui::KeyCode::Down, ui::core::Modifiers::NONE),
+                &mut event_context,
+            ),
+            Some(WidgetAction::Consumed)
+        );
+
+        chrome.set_input(pane_input);
+        layout_narrow_toolbar(&mut chrome);
+        let selected = chrome.route_event(
+            &ui::Event::KeyDown(ui::KeyCode::Enter, ui::core::Modifiers::NONE),
+            &mut event_context,
+        );
+
+        assert_eq!(
+            selected,
+            Some(WidgetAction::Control(ControlAction::TextCommitted {
+                id: ui::editor_toolbar::EDITOR_TOOLBAR_COMMAND_ID,
+                value: TextPayload::Plain("canvas_fit".to_owned()),
+            }))
+        );
+    }
+
     #[test]
     fn compact_geometry_is_forwarded_to_header_and_tag_widgets() {
         let mut chrome = EditorPaneChrome::new();
@@ -873,7 +1257,7 @@ mod tests {
     fn property_row_places_tags_after_the_workspace_label() {
         let tags = tag_rect(Rect::new(0.0, 0.0, 640.0, 108.0), 1.0, true, 120.0);
 
-        assert_eq!(tags.x, 148.0);
+        assert_eq!(tags.x, 164.0);
         assert_eq!(tags.y, 80.0);
         assert_eq!(tags.h, EDITOR_PANE_TAG_ROW_HEIGHT_LOGICAL);
     }

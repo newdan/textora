@@ -6,9 +6,7 @@ use ui::plugin::PluginMessage;
 use super::{EditorFrame, EditorRuntime, RenderError, RenderResources};
 use crate::tab_session::TabSession;
 
-const PLUGIN_CONTENT_HORIZONTAL_PADDING_LOGICAL: f32 = 24.0;
-/// 顶部内边距刻意收窄：工具条本身已提供视觉间隔，过大留白会显得编辑区与工具条脱节。
-const PLUGIN_CONTENT_TOP_PADDING_LOGICAL: f32 = 8.0;
+const PLUGIN_CONTENT_TOP_PADDING_LOGICAL: f32 = 16.0;
 const PLUGIN_CONTENT_BOTTOM_PADDING_LOGICAL: f32 = 24.0;
 
 fn measure_preedit_advance_px(
@@ -415,14 +413,16 @@ pub(super) fn plugin_bounds(editor_rect: ui::Rect, dpi: f32, is_canvas: bool) ->
     if is_canvas {
         return editor_rect;
     }
-    let horizontal_padding = PLUGIN_CONTENT_HORIZONTAL_PADDING_LOGICAL * dpi;
-    let top_padding = PLUGIN_CONTENT_TOP_PADDING_LOGICAL * dpi;
-    let bottom_padding = PLUGIN_CONTENT_BOTTOM_PADDING_LOGICAL * dpi;
+    let horizontal_padding = ui::layout::reading_content_inset(editor_rect.w, dpi);
+    let available_padding = (editor_rect.h - 1.0).max(0.0);
+    let top_padding = (PLUGIN_CONTENT_TOP_PADDING_LOGICAL * dpi).min(available_padding * 0.5);
+    let bottom_padding =
+        (PLUGIN_CONTENT_BOTTOM_PADDING_LOGICAL * dpi).min(available_padding - top_padding);
     ui::Rect::new(
         editor_rect.x + horizontal_padding,
         editor_rect.y + top_padding,
-        (editor_rect.w - horizontal_padding * 2.0).max(1.0),
-        (editor_rect.h - top_padding - bottom_padding).max(1.0),
+        (editor_rect.w - horizontal_padding * 2.0).max(0.0),
+        (editor_rect.h - top_padding - bottom_padding).max(0.0),
     )
 }
 
@@ -432,6 +432,27 @@ mod tests {
         editor_viewport_dimensions, plain_text_preedit_origin,
         plugin_cursor_visibility_scroll_delta,
     };
+
+    #[test]
+    fn reading_bounds_center_wide_documents_and_preserve_canvas_extent() {
+        let editor = ui::Rect::new(200.0, 120.0, 1200.0, 600.0);
+        let content = super::plugin_bounds(editor, 1.0, false);
+        assert_eq!(content.w, 760.0);
+        assert_eq!(content.x - editor.x, editor.right() - content.right());
+        assert_eq!(super::plugin_bounds(editor, 1.0, true), editor);
+        let scaled = super::plugin_bounds(ui::Rect::new(400.0, 240.0, 2400.0, 1200.0), 2.0, false);
+        assert_eq!(scaled.x, content.x * 2.0);
+        assert_eq!(scaled.w, content.w * 2.0);
+    }
+
+    #[test]
+    fn reading_bounds_stay_inside_a_tiny_editor() {
+        let editor = ui::Rect::new(20.0, 30.0, 12.0, 10.0);
+        let content = super::plugin_bounds(editor, 2.0, false);
+        assert!(content.x >= editor.x && content.y >= editor.y);
+        assert!(content.right() <= editor.right() && content.bottom() <= editor.bottom());
+        assert!(content.w > 0.0 && content.h > 0.0);
+    }
 
     #[test]
     fn partial_bottom_row_is_not_counted_as_fully_visible() {

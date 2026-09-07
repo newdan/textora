@@ -227,17 +227,19 @@ impl Widget for VirtualCardListWidget {
             let is_selected = card.selection == CardSelection::Selected;
             let is_hovered = self.hovered_key == Some(card.key);
             let background = if is_selected {
-                ctx.theme.palette.sidebar_active_bg
+                Some(ctx.theme.palette.sidebar_active_bg)
             } else if is_hovered {
-                ctx.theme.palette.sidebar_hover_bg
+                Some(ctx.theme.palette.sidebar_hover_bg)
             } else {
-                ctx.theme.palette.bg_surface
+                None
             };
-            ctx.list.fill_rounded(
-                geometry.card_rect,
-                background,
-                layout::CARD_CORNER_RADIUS_LOGICAL * ctx.dpi,
-            );
+            if let Some(background) = background {
+                ctx.list.fill_rounded(
+                    geometry.card_rect,
+                    background,
+                    layout::CARD_CORNER_RADIUS_LOGICAL * ctx.dpi,
+                );
+            }
 
             if let Some(icon) = &card.icon {
                 let glyph_size = layout::CARD_ICON_GLYPH_SIZE_LOGICAL * ctx.dpi;
@@ -632,7 +634,8 @@ mod tests {
     fn card_height_grows_only_for_visible_content() {
         let mut empty_excerpt = card(1);
         empty_excerpt.excerpt.clear();
-        let single_line_excerpt = card(2);
+        let mut single_line_excerpt = card(2);
+        single_line_excerpt.excerpt = "摘要".to_owned();
         let mut two_line_excerpt = card(3);
         two_line_excerpt.excerpt =
             "这是一段需要换行的摘要，用来验证卡片高度会随实际内容增长。".to_owned();

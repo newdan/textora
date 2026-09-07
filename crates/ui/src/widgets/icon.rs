@@ -338,6 +338,19 @@ struct IconSvg {
 const DATA_PLUS: IconSvg =
     IconSvg { paths: &["M5 12h14", "M12 5v14"], circles: &[], stroke_width: 2.0 };
 
+const DATA_MINUS: IconSvg = IconSvg { paths: &["M5 12h14"], circles: &[], stroke_width: 2.0 };
+
+const DATA_MAXIMIZE: IconSvg = IconSvg {
+    paths: &[
+        "M8 3H5a2 2 0 0 0-2 2v3",
+        "M16 3h3a2 2 0 0 1 2 2v3",
+        "M8 21H5a2 2 0 0 1-2-2v-3",
+        "M16 21h3a2 2 0 0 0 2-2v-3",
+    ],
+    circles: &[],
+    stroke_width: 2.0,
+};
+
 const DATA_FOLDER: IconSvg = IconSvg {
     paths: &[
         "M20 20a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-7.9a2 2 0 0 1-1.69-.9L9.6 3.9A2 2 0 0 0 7.93 3H4a2 2 0 0 0-2 2v13a2 2 0 0 0 2 2Z",
@@ -658,6 +671,8 @@ const DATA_ELLIPSIS: IconSvg = IconSvg {
 fn icon_svg(name: &str) -> Option<&'static IconSvg> {
     match name {
         "plus" => Some(&DATA_PLUS),
+        "minus" => Some(&DATA_MINUS),
+        "maximize" => Some(&DATA_MAXIMIZE),
         "folder" => Some(&DATA_FOLDER),
         "folder-plus" => Some(&DATA_FOLDER_PLUS),
         "workspace-plus" => Some(&DATA_WORKSPACE_PLUS),
@@ -853,6 +868,8 @@ mod tests {
     fn icon_svg_known_names() {
         for icon_name in [
             "plus",
+            "minus",
+            "maximize",
             "search",
             "eye",
             "eye-off",
