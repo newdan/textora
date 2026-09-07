@@ -1,8 +1,11 @@
+mod buttons;
+
 use std::collections::HashMap;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use appkit_shell::editor_runtime::{EditorFrame, RenderError};
 use notora_core::{DocumentIdentity, DocumentKind, NavigationScope, NoteId};
+use ui::button::{ButtonStyle, ButtonVisualState};
 use ui::canvas_scrollbars::{
     CanvasScrollbarsAction, CanvasScrollbarsInput, CanvasScrollbarsWidget,
 };
@@ -17,7 +20,7 @@ use ui::mindmap_style_panel::{
 };
 use ui::popup_menu::{PopupMenuAction, PopupMenuWidget, PopupOutcome};
 use ui::sidebar::NewDocumentKind;
-use ui::split_button::{SPLIT_BUTTON_FONT_SIZE_LOGICAL, SplitButtonInput, SplitButtonWidget};
+use ui::split_button::{SplitButtonInput, SplitButtonWidget};
 use ui::splitter::{SplitterAction, SplitterInput, SplitterWidget};
 use ui::status_state::{StatusStateInput, StatusStateKind, StatusStateWidget};
 use ui::text_box::TextBox;
@@ -1137,6 +1140,7 @@ pub struct NotoraShell {
     new_document_menu_rect: Rect,
     new_document_menu_open: bool,
     note_toolbar_buttons: Vec<RenderedToolbarButton>,
+    active_chrome_button: Option<(Rect, ButtonVisualState)>,
     compact_navigation_rect: Rect,
     navigation_collapse_rect: Rect,
     navigation_expand_rect: Rect,
@@ -1215,6 +1219,7 @@ impl NotoraShell {
             new_document_menu_rect: Rect::ZERO,
             new_document_menu_open: false,
             note_toolbar_buttons: Vec::new(),
+            active_chrome_button: None,
             compact_navigation_rect: Rect::ZERO,
             navigation_collapse_rect: Rect::ZERO,
             navigation_expand_rect: Rect::ZERO,
@@ -1651,7 +1656,7 @@ impl NotoraShell {
             self.card_list_splitter.paint(context);
             self.new_note_button.paint(context);
             if self.navigation_collapse_rect != Rect::ZERO {
-                paint_navigation_visibility_button(
+                self.paint_navigation_visibility_button(
                     context,
                     self.navigation_collapse_rect,
                     "chevron-left",
@@ -1687,17 +1692,17 @@ impl NotoraShell {
                 &model.card_list_title,
             );
             if self.compact_navigation_rect != Rect::ZERO {
-                paint_note_tool_button(context, self.compact_navigation_rect, "笔记库", None);
+                self.paint_note_tool_button(context, self.compact_navigation_rect, "笔记库", None);
             }
             if self.navigation_expand_rect != Rect::ZERO {
-                paint_navigation_visibility_button(
+                self.paint_navigation_visibility_button(
                     context,
                     self.navigation_expand_rect,
                     "chevron-right",
                 );
             }
             for button in &self.note_toolbar_buttons {
-                paint_note_tool_button(context, button.rect, &button.label, button.icon);
+                self.paint_note_tool_button(context, button.rect, &button.label, button.icon);
             }
             if model.cards.is_empty() {
                 self.card_empty_state.paint(context);
@@ -1728,7 +1733,7 @@ impl NotoraShell {
         }
         if self.compact_back_rect != Rect::ZERO {
             frame.with_paint_context(|context| {
-                paint_note_tool_button(context, self.compact_back_rect, "返回", None);
+                self.paint_note_tool_button(context, self.compact_back_rect, "返回", None);
             });
         }
         if model.show_settings_overlay {
@@ -1788,8 +1793,8 @@ impl NotoraShell {
                     application_theme.text_secondary,
                     &confirmation.description,
                 );
-                paint_note_tool_button(context, self.confirmation_cancel_rect, "取消", None);
-                paint_note_tool_button(
+                self.paint_note_tool_button(context, self.confirmation_cancel_rect, "取消", None);
+                self.paint_note_tool_button(
                     context,
                     self.confirmation_confirm_rect,
                     &confirmation.confirm_label,
@@ -2037,6 +2042,21 @@ impl NotoraShell {
     }
 
     fn route_event_with_context(
+        &mut self,
+        event: &Event,
+        focus_target: FocusTarget,
+        product_overlay: Option<OverlayState>,
+        event_context: &mut EventCtx,
+    ) -> NotoraEventRoute {
+        let appearance_changed =
+            self.update_chrome_button_pointer(event, product_overlay, event_context);
+        let mut route =
+            self.route_content_event(event, focus_target, product_overlay, event_context);
+        route.consumed |= appearance_changed;
+        route
+    }
+
+    fn route_content_event(
         &mut self,
         event: &Event,
         focus_target: FocusTarget,
@@ -2543,7 +2563,7 @@ impl NotoraShell {
         for (rect, label) in
             self.save_conflict_button_rects.iter().zip(["重新载入", "保存副本", "重试", "取消"])
         {
-            paint_note_tool_button(context, *rect, label, None);
+            self.paint_note_tool_button(context, *rect, label, None);
         }
     }
 
@@ -3189,13 +3209,13 @@ fn paint_note_tool_button(
     rect: Rect,
     label: &str,
     icon: Option<&str>,
+    state: ButtonVisualState,
 ) {
     const CONTENT_PADDING_LOGICAL: f32 = 8.0;
     const ICON_SIZE_LOGICAL: f32 = 14.0;
     const ICON_TEXT_GAP_LOGICAL: f32 = 4.0;
     const TEXT_BASELINE_OFFSET_RATIO: f32 = 0.35;
-    let application_theme = context.theme.application_theme();
-    context.list.fill_rounded(rect, application_theme.overlay_surface, 4.0 * context.dpi);
+    let foreground = ButtonStyle::from_theme(context.theme).paint(context, rect, state);
     let mut text_x = rect.x + CONTENT_PADDING_LOGICAL * context.dpi;
     if let Some(icon_name) = icon {
         let icon_size = ICON_SIZE_LOGICAL * context.dpi;
@@ -3205,23 +3225,27 @@ fn paint_note_tool_button(
             text_x,
             rect.y + (rect.h - icon_size) * 0.5,
             icon_size,
-            application_theme.text_secondary,
+            foreground,
         );
         text_x += icon_size + ICON_TEXT_GAP_LOGICAL * context.dpi;
     }
-    let font_size = SPLIT_BUTTON_FONT_SIZE_LOGICAL * context.dpi;
+    let font_size = context.theme.control_metrics().font_size_logical * context.dpi;
     context.text(
         text_x,
         rect.y + rect.h * 0.5 + font_size * TEXT_BASELINE_OFFSET_RATIO,
         font_size,
-        application_theme.text_secondary,
+        foreground,
         label,
     );
 }
 
-fn paint_navigation_visibility_button(context: &mut ui::PaintCtx<'_>, rect: Rect, icon_name: &str) {
-    let application_theme = context.theme.application_theme();
-    context.list.fill_rounded(rect, application_theme.overlay_surface, 4.0 * context.dpi);
+fn paint_navigation_visibility_button(
+    context: &mut ui::PaintCtx<'_>,
+    rect: Rect,
+    icon_name: &str,
+    state: ButtonVisualState,
+) {
+    let foreground = ButtonStyle::ghost(context.theme.settings_theme()).paint(context, rect, state);
     let icon_size = SIDEBAR_ICON_SIZE_LOGICAL * context.dpi;
     draw_icon(
         context.list,
@@ -3229,7 +3253,7 @@ fn paint_navigation_visibility_button(context: &mut ui::PaintCtx<'_>, rect: Rect
         rect.x + (rect.w - icon_size) * 0.5,
         rect.y + (rect.h - icon_size) * 0.5,
         icon_size,
-        application_theme.text_secondary,
+        foreground,
     );
 }
 
@@ -3753,6 +3777,101 @@ mod tests {
         );
     }
 
+    fn assert_toolbar_button_appearance(
+        actual: &ui::core::paint::DrawList,
+        reference: &ui::core::paint::DrawList,
+        rect: Rect,
+        label: &str,
+    ) {
+        use ui::core::paint::DrawCmd;
+
+        let foreground = reference
+            .cmds
+            .iter()
+            .find_map(|command| match command {
+                DrawCmd::TextLayout { color, .. } => Some(*color),
+                _ => None,
+            })
+            .expect("new button must paint its label");
+        assert!(actual.cmds.iter().any(|command| matches!(command, DrawCmd::TextLayout { .. })));
+        assert!(actual.cmds.iter().any(|command| matches!(command, DrawCmd::FillTriangle { .. })));
+        for command in &actual.cmds {
+            match command {
+                DrawCmd::TextLayout { color, .. } | DrawCmd::FillTriangle { color, .. } => {
+                    assert_eq!(*color, foreground, "{label}文字和图标色应与新建一致");
+                }
+                _ => {}
+            }
+        }
+        for command in &reference.cmds {
+            match command {
+                DrawCmd::FillRect { rect: bounds, .. } if *bounds == rect => {
+                    assert!(actual.cmds.contains(command), "{label}背景和圆角应与新建一致");
+                }
+                DrawCmd::StrokeRect { .. } => {
+                    assert!(actual.cmds.contains(command), "{label}边框应与新建一致");
+                }
+                _ => {}
+            }
+        }
+    }
+
+    #[test]
+    fn file_toolbar_buttons_match_new_button_colors_and_outline() {
+        use ui::core::paint::DrawList;
+
+        let mut shaper = shaping::Shaper::new().expect("toolbar appearance test requires fonts");
+        for (mode, system_theme) in [
+            (ui::settings::ThemeMode::Light, winit::window::Theme::Light),
+            (ui::settings::ThemeMode::Dark, winit::window::Theme::Dark),
+        ] {
+            let theme = ui::Theme::resolve_builtin(mode, system_theme);
+            for dpi in [1.0, 1.5, 2.0] {
+                for alpha in [1.0, 0.5] {
+                    let rect = Rect::new(
+                        0.0,
+                        0.0,
+                        NEW_NOTE_BUTTON_WIDTH_LOGICAL * dpi,
+                        NOTE_TOOL_BUTTON_HEIGHT_LOGICAL * dpi,
+                    );
+                    let mut measure = ui::NoopMeasure;
+                    let mut layout_context = ui::LayoutCtx {
+                        ui_measure: None,
+                        measure: &mut measure,
+                        theme: &theme,
+                        dpi,
+                    };
+                    let mut new_button = SplitButtonWidget::new();
+                    new_button.set_icon(Some("plus".to_owned()));
+                    new_button
+                        .set_input(SplitButtonInput { label: "新建".to_owned(), enabled: true });
+                    new_button.set_rect(rect, &mut layout_context);
+                    let mut reference = DrawList::new();
+                    let mut context = ui::PaintCtx::new(&mut reference, &theme, dpi);
+                    context.global_alpha = alpha;
+                    context.shaper = Some(&mut shaper);
+                    new_button.paint(&mut context);
+                    for button in note_toolbar_buttons(&NavigationScope::ExternalFiles, None, true)
+                    {
+                        let mut actual = DrawList::new();
+                        let mut context = ui::PaintCtx::new(&mut actual, &theme, dpi);
+                        context.global_alpha = alpha;
+                        context.shaper = Some(&mut shaper);
+                        paint_note_tool_button(
+                            &mut context,
+                            rect,
+                            &button.label,
+                            button.icon,
+                            ButtonVisualState::Normal,
+                        );
+
+                        assert_toolbar_button_appearance(&actual, &reference, rect, &button.label);
+                    }
+                }
+            }
+        }
+    }
+
     #[test]
     fn file_toolbar_labels_match_new_button_typography_at_each_dpi() {
         use ui::core::paint::{DrawCmd, DrawList};
@@ -3789,6 +3908,7 @@ mod tests {
                     ),
                     &button.label,
                     button.icon,
+                    ButtonVisualState::Normal,
                 );
             }
 

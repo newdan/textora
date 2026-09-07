@@ -33,9 +33,6 @@ const FORM_GAP_LOGICAL: f32 = 12.0;
 const TEXT_BOX_WIDTH_LOGICAL: f32 = 200.0;
 const CONTROL_HEIGHT_LOGICAL: f32 = 32.0;
 const SEGMENT_WIDTH_LOGICAL: f32 = 82.0;
-const BUTTON_FONT_SIZE_LOGICAL: f32 = 14.0;
-const BUTTON_PADDING_LOGICAL: f32 = 12.0;
-const BUTTON_RADIUS_LOGICAL: f32 = 8.0;
 const ROW_HEIGHT_LOGICAL: f32 = 64.0;
 const STACKED_ROW_HEIGHT_LOGICAL: f32 = 120.0;
 const ROW_STACK_GAP_LOGICAL: f32 = 8.0;
@@ -56,13 +53,6 @@ const MESSAGE_BASELINE_OFFSET_LOGICAL: f32 = 4.0;
 const MESSAGE_LINE_HEIGHT_LOGICAL: f32 = 16.0;
 const MESSAGE_MAXIMUM_LINES: usize = 2;
 const RETRY_BUTTON_WIDTH_LOGICAL: f32 = 84.0;
-const TRANSPARENT: [f32; 4] = [0.0, 0.0, 0.0, 0.0];
-const CATEGORY_HOVER_ACCENT_BLEND: f32 = 0.05;
-const CATEGORY_PRESSED_ACCENT_BLEND: f32 = 0.09;
-const CATEGORY_SELECTED_ACCENT_BLEND: f32 = 0.14;
-const SEGMENT_HOVER_ACCENT_BLEND: f32 = 0.16;
-const SEGMENT_PRESSED_ACCENT_BLEND: f32 = 0.14;
-const DISABLED_FOREGROUND_ALPHA: f32 = 0.45;
 
 const APPEARANCE_CATEGORY_ID: WidgetId = WidgetId(0x6e6f_746f_6170_7065);
 const EDITOR_CATEGORY_ID: WidgetId = WidgetId(0x6e6f_746f_6564_6974);
@@ -808,89 +798,15 @@ fn description_label(text: &str) -> Label {
 }
 
 fn category_button_style(settings: SettingsTheme) -> ButtonStyle {
-    ButtonStyle {
-        font_size_logical: BUTTON_FONT_SIZE_LOGICAL,
-        pad_x_logical: BUTTON_PADDING_LOGICAL,
-        foreground: settings.text_primary,
-        selected_foreground: settings.accent,
-        background: TRANSPARENT,
-        border: TRANSPARENT,
-        hover_background: blend_color(
-            settings.sidebar_surface,
-            settings.accent,
-            CATEGORY_HOVER_ACCENT_BLEND,
-        ),
-        pressed_background: blend_color(
-            settings.sidebar_surface,
-            settings.accent,
-            CATEGORY_PRESSED_ACCENT_BLEND,
-        ),
-        selected_background: blend_color(
-            settings.sidebar_surface,
-            settings.accent,
-            CATEGORY_SELECTED_ACCENT_BLEND,
-        ),
-        disabled_foreground: with_alpha(settings.text_primary, DISABLED_FOREGROUND_ALPHA),
-        disabled_background: TRANSPARENT,
-        corner_radius_logical: BUTTON_RADIUS_LOGICAL,
-    }
+    ButtonStyle::category(settings)
 }
 
 fn segmented_button_style(settings: SettingsTheme) -> ButtonStyle {
-    ButtonStyle {
-        font_size_logical: BUTTON_FONT_SIZE_LOGICAL,
-        pad_x_logical: BUTTON_PADDING_LOGICAL,
-        foreground: settings.text_primary,
-        selected_foreground: settings.text_inverse,
-        background: TRANSPARENT,
-        border: TRANSPARENT,
-        hover_background: blend_color(
-            settings.modal_surface,
-            settings.accent,
-            SEGMENT_HOVER_ACCENT_BLEND,
-        ),
-        pressed_background: blend_color(
-            settings.modal_surface,
-            settings.accent,
-            SEGMENT_PRESSED_ACCENT_BLEND,
-        ),
-        selected_background: settings.accent,
-        disabled_foreground: with_alpha(settings.text_primary, DISABLED_FOREGROUND_ALPHA),
-        disabled_background: TRANSPARENT,
-        corner_radius_logical: BUTTON_RADIUS_LOGICAL,
-    }
+    ButtonStyle::segmented(settings)
 }
 
 fn action_button_style(settings: SettingsTheme) -> ButtonStyle {
-    ButtonStyle {
-        foreground: settings.text_primary,
-        selected_foreground: settings.text_primary,
-        background: settings.control_surface,
-        border: settings.control_border,
-        hover_background: settings.control_surface,
-        pressed_background: settings.control_surface,
-        selected_background: settings.control_surface,
-        disabled_foreground: with_alpha(settings.text_primary, DISABLED_FOREGROUND_ALPHA),
-        disabled_background: settings.control_surface,
-        font_size_logical: BUTTON_FONT_SIZE_LOGICAL,
-        pad_x_logical: BUTTON_PADDING_LOGICAL,
-        corner_radius_logical: BUTTON_RADIUS_LOGICAL,
-    }
-}
-
-fn blend_color(base: [f32; 4], accent: [f32; 4], accent_factor: f32) -> [f32; 4] {
-    let base_factor = 1.0 - accent_factor;
-    [
-        base[0] * base_factor + accent[0] * accent_factor,
-        base[1] * base_factor + accent[1] * accent_factor,
-        base[2] * base_factor + accent[2] * accent_factor,
-        base[3] * base_factor + accent[3] * accent_factor,
-    ]
-}
-
-fn with_alpha(mut color: [f32; 4], alpha: f32) -> [f32; 4] {
-    color[3] *= alpha;
-    color
+    ButtonStyle::action(settings)
 }
 
 fn paint_widget_at(widget: &impl Widget, rect: Rect, context: &mut PaintCtx<'_>) {

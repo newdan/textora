@@ -11,9 +11,7 @@ use crate::core::{PaintCtx, Rect};
 use crate::view_mode::ViewMode;
 use crate::widgets::icon::draw_icon;
 use crate::widgets::popup_menu::{PopupMenu, PopupMenuAction as PMA, PopupMenuItem};
-use crate::widgets::split_button::{
-    SPLIT_BUTTON_FONT_SIZE_LOGICAL, SPLIT_BUTTON_MENU_WIDTH_LOGICAL,
-};
+use crate::widgets::split_button::SPLIT_BUTTON_MENU_WIDTH_LOGICAL;
 
 #[derive(Default)]
 pub struct SidebarState {
@@ -587,15 +585,13 @@ impl SidebarState {
         ctx: &mut PaintCtx,
         rect: Rect,
         hover: SidebarHoverButton,
-        alpha: f32,
     ) -> ActionBtnGeom {
-        if self.hovered_button == hover {
-            let mut h_bg = ctx.theme.palette.sidebar_hover_bg;
-            h_bg[3] *= alpha;
-            ctx.list.fill_rounded(rect, h_bg, 8.0 * ctx.dpi);
-        }
-        let mut fg = ctx.theme.palette.text_muted;
-        fg[3] *= alpha;
+        let state = if self.hovered_button == hover {
+            crate::button::ButtonVisualState::Hovered
+        } else {
+            crate::button::ButtonVisualState::Normal
+        };
+        let fg = crate::button::ButtonStyle::from_theme(ctx.theme).paint(ctx, rect, state);
         let icon_half = 5.0 * ctx.dpi;
         let cx = rect.x + 12.0 * ctx.dpi + icon_half;
         let cy = rect.y + rect.h * 0.5;
@@ -697,12 +693,7 @@ impl SidebarState {
 
         // 4.5) Open file button
         {
-            let g = self.action_btn_geom(
-                ctx,
-                layout.open_btn_rect,
-                SidebarHoverButton::OpenFile,
-                alpha,
-            );
+            let g = self.action_btn_geom(ctx, layout.open_btn_rect, SidebarHoverButton::OpenFile);
             let icon_sz = 14.0 * g.dpi;
             draw_icon(
                 ctx.list,
@@ -712,7 +703,7 @@ impl SidebarState {
                 icon_sz,
                 g.fg,
             );
-            let font_size = SPLIT_BUTTON_FONT_SIZE_LOGICAL * g.dpi;
+            let font_size = ctx.theme.control_metrics().font_size_logical * g.dpi;
             if let Some(ref mut shaper) = ctx.shaper {
                 ctx.list.text_shaped(
                     g.cx + g.icon_half + 6.0 * g.dpi,

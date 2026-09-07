@@ -37,3 +37,12 @@
 - light/dark 主题均从当前 `Theme` 解析语义色，控件实现中不得写固定白色或灰色。
 - hover 混色仅允许在两个语义色之间进行，混合系数必须是有名称的常量。
 - 绘制测试同时覆盖 light/dark 和 1x/2x DPI，验证 token 只缩放一次。
+
+## 两端共享按钮规则
+
+- `ui::button::ButtonStyle::from_theme` / `action` 是普通操作按钮的唯一标准构造入口。textora、notora、设置页、分段新建按钮、侧栏打开按钮和空状态操作均使用此入口。
+- 普通操作采用 14px 字号、8px 圆角、1px 边框（均为逻辑像素）；文字与图标共享 `text_primary`，背景/边框采用 `control_surface` / `control_border`。
+- `ButtonVisualState` 解析 Normal、Hovered、Pressed、Selected、Disabled；悬停与按下分别使用 `hover_surface`、`selected_surface`。选中按钮按下时保持成对的选中前景与背景，避免反色文字落在浅底上。
+- 禁用文字、背景和边框应用 0.45 局部透明度；公共绘制方法再统一乘一次 `PaintCtx.global_alpha`。分段按钮的内部分隔线使用同一边框色与透明度。
+- `category`、`segmented`、`ghost` 明确表示导航、分段选项、内嵌图标角色；这些角色可以使用透明背景和无边框，不复制普通操作按钮的样式实现。
+- 产品层只映射交互状态与展示数据。分段按钮保留独立区域悬停/按下和菜单打开状态；原有手绘操作按钮保留业务触发方式，通过共享规则绘制反馈。

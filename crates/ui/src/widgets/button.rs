@@ -12,50 +12,9 @@ use crate::widgets::icon::draw_icon;
 use std::any::Any;
 use std::sync::Arc;
 
-const BUTTON_DISABLED_ALPHA: f32 = 0.45;
+mod style;
 
-/// Visual style for a Button.
-#[derive(Clone, Debug)]
-pub struct ButtonStyle {
-    pub font_size_logical: f32,
-    pub pad_x_logical: f32,
-    pub foreground: [f32; 4],
-    pub selected_foreground: [f32; 4],
-    pub background: [f32; 4],
-    pub border: [f32; 4],
-    pub hover_background: [f32; 4],
-    pub pressed_background: [f32; 4],
-    pub selected_background: [f32; 4],
-    pub disabled_foreground: [f32; 4],
-    pub disabled_background: [f32; 4],
-    pub corner_radius_logical: f32,
-}
-
-impl ButtonStyle {
-    pub fn from_theme(theme: &crate::theme::Theme) -> Self {
-        let metrics = theme.control_metrics();
-        let application = theme.application_theme();
-        Self {
-            font_size_logical: metrics.font_size_logical,
-            pad_x_logical: metrics.horizontal_padding_logical,
-            foreground: application.text_primary,
-            selected_foreground: application.navigation_selected_text,
-            background: application.control_surface,
-            border: application.control_border,
-            hover_background: application.hover_surface,
-            pressed_background: application.selected_surface,
-            selected_background: application.selected_surface,
-            disabled_foreground: with_alpha(application.text_primary, BUTTON_DISABLED_ALPHA),
-            disabled_background: with_alpha(application.control_surface, BUTTON_DISABLED_ALPHA),
-            corner_radius_logical: metrics.corner_radius_logical,
-        }
-    }
-}
-
-fn with_alpha(mut color: [f32; 4], alpha: f32) -> [f32; 4] {
-    color[3] *= alpha;
-    color
-}
+pub use style::{ButtonStyle, ButtonVisualState};
 
 pub struct Button {
     id: WidgetId,
@@ -123,27 +82,17 @@ impl Button {
         self.rect
     }
 
-    fn background_color(&self) -> [f32; 4] {
+    fn visual_state(&self) -> ButtonVisualState {
         if !self.enabled {
-            self.style.disabled_background
+            ButtonVisualState::Disabled
+        } else if self.selected {
+            ButtonVisualState::Selected
         } else if self.pressed {
-            self.style.pressed_background
-        } else if self.selected {
-            self.style.selected_background
+            ButtonVisualState::Pressed
         } else if self.hovered {
-            self.style.hover_background
+            ButtonVisualState::Hovered
         } else {
-            self.style.background
-        }
-    }
-
-    fn foreground_color(&self) -> [f32; 4] {
-        if !self.enabled {
-            self.style.disabled_foreground
-        } else if self.selected {
-            self.style.selected_foreground
-        } else {
-            self.style.foreground
+            ButtonVisualState::Normal
         }
     }
 }
@@ -158,22 +107,10 @@ impl Widget for Button {
         let metrics = ctx.theme.control_metrics();
         let alpha = ctx.global_alpha;
         let corner_radius = self.style.corner_radius_logical * dpi;
-        let mut background = self.background_color();
-        background[3] *= alpha;
-        if background[3] > 0.0 {
-            ctx.list.fill_rounded(self.rect, background, corner_radius);
-        }
-
+        let fg = self.style.paint(ctx, self.rect, self.visual_state());
         let font_size = self.style.font_size_logical * dpi;
         let icon_size = self.icon_size_logical * dpi;
         let pad_x = self.style.pad_x_logical * dpi;
-        let mut fg = self.foreground_color();
-        fg[3] *= alpha;
-        let mut border = self.style.border;
-        border[3] *= alpha;
-        if border[3] > 0.0 {
-            ctx.list.stroke_rounded(self.rect, border, corner_radius, dpi);
-        }
         if self.focused && self.enabled {
             let mut focus_ring = ctx.theme.settings_theme().focus_ring;
             focus_ring[3] *= alpha;
@@ -273,6 +210,9 @@ impl Widget for Button {
     }
 
     fn on_event(&mut self, ev: &Event, ctx: &mut EventCtx) -> Option<WidgetAction> {
+        if !self.enabled {
+            return None;
+        }
         match ev {
             Event::MouseMove { px, py } => {
                 let inside = self.rect.contains(*px, *py);
@@ -290,9 +230,6 @@ impl Widget for Button {
                 std::mem::take(&mut self.hovered).then_some(WidgetAction::Consumed)
             }
             Event::MouseDown { px, py, button: MouseButton::Left } => {
-                if !self.enabled {
-                    return None;
-                }
                 if self.rect.contains(*px, *py) {
                     self.pressed = true;
                     if self.focused {
@@ -431,6 +368,53 @@ mod tests {
             button.accessibility_node(&context).expect("disabled button remains discoverable");
         assert!(disabled_node.state.disabled);
         assert!(disabled_node.actions.is_empty());
+    }
+
+    #[test]
+    fn pressing_a_selected_button_preserves_its_contrasting_color_pair() {
+        let mut button = make_button(WidgetId(92));
+        button.set_selected(true);
+        mouse_down(&mut button, 10.0, 10.0);
+        assert_eq!(
+            button.style.background_color(button.visual_state(), 1.0),
+            button.style.selected_background
+        );
+        assert_eq!(
+            button.style.foreground_color(button.visual_state(), 1.0),
+            button.style.selected_foreground
+        );
+    }
+
+    #[test]
+    fn disabled_button_border_obeys_local_and_global_alpha() {
+        let theme = crate::theme::test_theme();
+        let style = ButtonStyle::from_theme(&theme);
+        let mut button = make_button(WidgetId(90));
+        button.set_style(style.clone());
+        button.set_enabled(false);
+        let mut draw_list = DrawList::new();
+        let mut context = PaintCtx::new(&mut draw_list, &theme, 2.0);
+        context.global_alpha = 0.5;
+        button.paint(&mut context);
+        let border = draw_list
+            .cmds
+            .iter()
+            .find_map(|command| match command {
+                DrawCmd::StrokeRect { color, .. } => Some(*color),
+                _ => None,
+            })
+            .expect("standard buttons must have an outline");
+        assert_eq!(border[3], style.border[3] * 0.45 * 0.5);
+    }
+
+    #[test]
+    fn disabled_button_does_not_advertise_pointer_interaction() {
+        let theme = crate::theme::test_theme();
+        let mut button = make_button(WidgetId(91));
+        button.set_enabled(false);
+        let mut context = EventCtx::new(&theme, 1.0);
+        assert_eq!(button.on_event(&Event::MouseMove { px: 10.0, py: 10.0 }, &mut context), None);
+        assert_eq!(context.cursor_hint, None);
     }
 
     #[test]

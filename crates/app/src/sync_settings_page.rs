@@ -32,9 +32,6 @@ const SYNC_STACKED_ACTION_GAP_LOGICAL: f32 = 8.0;
 const SYNC_BUTTON_WIDTH_LOGICAL: f32 = 94.0;
 const SYNC_DYNAMIC_BUTTON_WIDTH_LOGICAL: f32 = 80.0;
 const SYNC_WIDE_BUTTON_WIDTH_LOGICAL: f32 = 160.0;
-const SYNC_BUTTON_FONT_SIZE_LOGICAL: f32 = 14.0;
-const SYNC_BUTTON_PADDING_LOGICAL: f32 = 12.0;
-const SYNC_BUTTON_RADIUS_LOGICAL: f32 = 8.0;
 const SYNC_SECTION_TITLE_FONT_SIZE_LOGICAL: f32 = 17.0;
 const SYNC_ROW_LABEL_FONT_SIZE_LOGICAL: f32 = 14.0;
 const SYNC_DESCRIPTION_FONT_SIZE_LOGICAL: f32 = 12.0;
@@ -42,8 +39,6 @@ const SYNC_SECTION_GAP_LOGICAL: f32 = 24.0;
 const SYNC_SECTION_TITLE_GAP_LOGICAL: f32 = 6.0;
 const SYNC_SECTION_DESCRIPTION_GAP_LOGICAL: f32 = 14.0;
 const SYNC_SECTION_CORNER_RADIUS_LOGICAL: f32 = 10.0;
-const SYNC_TRANSPARENT: [f32; 4] = [0.0, 0.0, 0.0, 0.0];
-const SYNC_DISABLED_FOREGROUND_ALPHA: f32 = 0.45;
 
 pub(super) const ENDPOINT_ID: WidgetId = WidgetId(0x7379_6e63_656e_6470);
 pub(super) const API_KEY_ID: WidgetId = WidgetId(0x7379_6e63_6170_696b);
@@ -992,20 +987,7 @@ fn single_button_group(
 }
 
 fn action_button_style(settings: SettingsTheme) -> ButtonStyle {
-    ButtonStyle {
-        font_size_logical: SYNC_BUTTON_FONT_SIZE_LOGICAL,
-        pad_x_logical: SYNC_BUTTON_PADDING_LOGICAL,
-        foreground: settings.text_primary,
-        selected_foreground: settings.text_primary,
-        background: settings.control_surface,
-        border: settings.control_border,
-        hover_background: blend_color(settings.control_surface, settings.accent, 0.06),
-        pressed_background: blend_color(settings.control_surface, settings.accent, 0.16),
-        selected_background: settings.control_surface,
-        disabled_foreground: with_alpha(settings.text_primary, SYNC_DISABLED_FOREGROUND_ALPHA),
-        disabled_background: settings.control_surface,
-        corner_radius_logical: SYNC_BUTTON_RADIUS_LOGICAL,
-    }
+    ButtonStyle::action(settings)
 }
 
 fn section_title_label(text: &str) -> Label {
@@ -1050,21 +1032,6 @@ fn section_description_label(text: &str) -> Label {
             ..LabelStyle::default()
         },
     )
-}
-
-fn blend_color(base: [f32; 4], accent: [f32; 4], accent_factor: f32) -> [f32; 4] {
-    let base_factor = 1.0 - accent_factor;
-    [
-        base[0] * base_factor + accent[0] * accent_factor,
-        base[1] * base_factor + accent[1] * accent_factor,
-        base[2] * base_factor + accent[2] * accent_factor,
-        base[3] * base_factor + accent[3] * accent_factor,
-    ]
-}
-
-fn with_alpha(mut color: [f32; 4], alpha: f32) -> [f32; 4] {
-    color[3] *= alpha;
-    color
 }
 
 fn fallback_settings_theme() -> SettingsTheme {
@@ -1431,14 +1398,15 @@ mod tests {
     fn narrow_library_rows_paint_all_five_action_buttons_at_full_width() {
         let page = laid_out_page_at_width(380.0, 1_200.0, connected_input_with_two_libraries());
         let draw = paint_for_test(&page);
-        let settings_theme = ui::theme::test_theme().settings_theme();
+        let style = ButtonStyle::from_theme(&ui::theme::test_theme());
         let button_rects = draw
             .cmds
             .iter()
             .filter_map(|command| match command {
                 DrawCmd::FillRect { rect, color, radius }
-                    if *color == settings_theme.control_surface
-                        && *radius == SYNC_BUTTON_RADIUS_LOGICAL
+                    if (*color == style.background || *color == style.disabled_background)
+                        && *radius
+                            == ui::theme::ControlMetrics::default().corner_radius_logical
                         && rect.h == SYNC_CONTROL_HEIGHT_LOGICAL
                         && rect.y >= 750.0 =>
                 {
@@ -1578,7 +1546,8 @@ mod tests {
 
         let mut backgrounds = draw_list.cmds.iter().filter_map(|command| match command {
             DrawCmd::FillRect { rect, color, radius }
-                if *radius == SYNC_BUTTON_RADIUS_LOGICAL && actions.button_rects.contains(rect) =>
+                if *radius == ui::theme::ControlMetrics::default().corner_radius_logical
+                    && actions.button_rects.contains(rect) =>
             {
                 Some(*color)
             }
@@ -1591,6 +1560,6 @@ mod tests {
     }
 
     fn settings_theme_hover_color(settings_theme: SettingsTheme) -> [f32; 4] {
-        blend_color(settings_theme.control_surface, settings_theme.accent, 0.06)
+        settings_theme.hover_surface
     }
 }

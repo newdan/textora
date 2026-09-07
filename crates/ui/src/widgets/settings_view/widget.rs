@@ -35,9 +35,6 @@ const SETTINGS_COMPACT_FORM_GAP_LOGICAL: f32 = 8.0;
 const SETTINGS_BUTTON_WIDTH_LOGICAL: f32 = 78.0;
 const SETTINGS_TEXT_BOX_WIDTH_LOGICAL: f32 = 192.0;
 const SETTINGS_CONTROL_HEIGHT_LOGICAL: f32 = 32.0;
-const SETTINGS_BUTTON_FONT_SIZE_LOGICAL: f32 = 14.0;
-const SETTINGS_BUTTON_PADDING_LOGICAL: f32 = 12.0;
-const SETTINGS_BUTTON_RADIUS_LOGICAL: f32 = 8.0;
 const SETTINGS_ROW_HEIGHT_LOGICAL: f32 = 64.0;
 const SETTINGS_ROW_LABEL_WIDTH_LOGICAL: f32 = 176.0;
 const SETTINGS_ROW_COLUMN_GAP_LOGICAL: f32 = 12.0;
@@ -50,15 +47,6 @@ const SETTINGS_SECTION_TITLE_FONT_SIZE_LOGICAL: f32 = 17.0;
 const SETTINGS_ROW_LABEL_FONT_SIZE_LOGICAL: f32 = 14.0;
 const SETTINGS_DESCRIPTION_FONT_SIZE_LOGICAL: f32 = 12.0;
 const SETTINGS_SIDEBAR_SEPARATOR_WIDTH_LOGICAL: f32 = 1.0;
-const SETTINGS_TRANSPARENT: [f32; 4] = [0.0, 0.0, 0.0, 0.0];
-const SETTINGS_ACTION_HOVER_ACCENT_BLEND: f32 = 0.06;
-const SETTINGS_ACTION_PRESSED_ACCENT_BLEND: f32 = 0.16;
-const SETTINGS_SEGMENT_HOVER_ACCENT_BLEND: f32 = 0.16;
-const SETTINGS_SEGMENT_PRESSED_ACCENT_BLEND: f32 = 0.14;
-const SETTINGS_CATEGORY_HOVER_ACCENT_BLEND: f32 = 0.05;
-const SETTINGS_CATEGORY_PRESSED_ACCENT_BLEND: f32 = 0.09;
-const SETTINGS_CATEGORY_SELECTED_ACCENT_BLEND: f32 = 0.14;
-const SETTINGS_DISABLED_FOREGROUND_ALPHA: f32 = 0.45;
 
 const APPEARANCE_CATEGORY_ID: WidgetId = WidgetId(0x7365_7474_6170_7065);
 const EDITOR_CATEGORY_ID: WidgetId = WidgetId(0x7365_7474_6564_6974);
@@ -1026,97 +1014,15 @@ impl Widget for SettingsView {
 }
 
 fn action_button_style(settings: SettingsTheme) -> ButtonStyle {
-    ButtonStyle {
-        font_size_logical: SETTINGS_BUTTON_FONT_SIZE_LOGICAL,
-        pad_x_logical: SETTINGS_BUTTON_PADDING_LOGICAL,
-        foreground: settings.text_primary,
-        selected_foreground: settings.text_primary,
-        background: settings.control_surface,
-        border: settings.control_border,
-        hover_background: blend_color(
-            settings.control_surface,
-            settings.accent,
-            SETTINGS_ACTION_HOVER_ACCENT_BLEND,
-        ),
-        pressed_background: blend_color(
-            settings.control_surface,
-            settings.accent,
-            SETTINGS_ACTION_PRESSED_ACCENT_BLEND,
-        ),
-        selected_background: settings.control_surface,
-        disabled_foreground: with_alpha(settings.text_primary, SETTINGS_DISABLED_FOREGROUND_ALPHA),
-        disabled_background: settings.control_surface,
-        corner_radius_logical: SETTINGS_BUTTON_RADIUS_LOGICAL,
-    }
+    ButtonStyle::action(settings)
 }
 
 fn segmented_button_style(settings: SettingsTheme) -> ButtonStyle {
-    ButtonStyle {
-        font_size_logical: SETTINGS_BUTTON_FONT_SIZE_LOGICAL,
-        pad_x_logical: SETTINGS_BUTTON_PADDING_LOGICAL,
-        foreground: settings.text_primary,
-        selected_foreground: settings.text_inverse,
-        background: SETTINGS_TRANSPARENT,
-        border: SETTINGS_TRANSPARENT,
-        hover_background: blend_color(
-            settings.modal_surface,
-            settings.accent,
-            SETTINGS_SEGMENT_HOVER_ACCENT_BLEND,
-        ),
-        pressed_background: blend_color(
-            settings.modal_surface,
-            settings.accent,
-            SETTINGS_SEGMENT_PRESSED_ACCENT_BLEND,
-        ),
-        selected_background: settings.accent,
-        disabled_foreground: with_alpha(settings.text_primary, SETTINGS_DISABLED_FOREGROUND_ALPHA),
-        disabled_background: SETTINGS_TRANSPARENT,
-        corner_radius_logical: SETTINGS_BUTTON_RADIUS_LOGICAL,
-    }
+    ButtonStyle::segmented(settings)
 }
 
 fn category_button_style(settings: SettingsTheme) -> ButtonStyle {
-    ButtonStyle {
-        font_size_logical: SETTINGS_BUTTON_FONT_SIZE_LOGICAL,
-        pad_x_logical: SETTINGS_BUTTON_PADDING_LOGICAL,
-        foreground: settings.text_primary,
-        selected_foreground: settings.accent,
-        background: SETTINGS_TRANSPARENT,
-        border: SETTINGS_TRANSPARENT,
-        hover_background: blend_color(
-            settings.sidebar_surface,
-            settings.accent,
-            SETTINGS_CATEGORY_HOVER_ACCENT_BLEND,
-        ),
-        pressed_background: blend_color(
-            settings.sidebar_surface,
-            settings.accent,
-            SETTINGS_CATEGORY_PRESSED_ACCENT_BLEND,
-        ),
-        selected_background: blend_color(
-            settings.sidebar_surface,
-            settings.accent,
-            SETTINGS_CATEGORY_SELECTED_ACCENT_BLEND,
-        ),
-        disabled_foreground: with_alpha(settings.text_primary, SETTINGS_DISABLED_FOREGROUND_ALPHA),
-        disabled_background: SETTINGS_TRANSPARENT,
-        corner_radius_logical: SETTINGS_BUTTON_RADIUS_LOGICAL,
-    }
-}
-
-fn blend_color(base: [f32; 4], accent: [f32; 4], accent_factor: f32) -> [f32; 4] {
-    let base_factor = 1.0 - accent_factor;
-    [
-        base[0] * base_factor + accent[0] * accent_factor,
-        base[1] * base_factor + accent[1] * accent_factor,
-        base[2] * base_factor + accent[2] * accent_factor,
-        base[3] * base_factor + accent[3] * accent_factor,
-    ]
-}
-
-fn with_alpha(mut color: [f32; 4], alpha: f32) -> [f32; 4] {
-    color[3] *= alpha;
-    color
+    ButtonStyle::category(settings)
 }
 
 fn fallback_settings_theme() -> SettingsTheme {
@@ -1584,7 +1490,7 @@ mod tests {
         assert_eq!(style.foreground, settings.text_primary);
         assert_eq!(style.selected_foreground, settings.text_inverse);
         assert_eq!(style.selected_background, settings.accent);
-        assert_eq!(style.background, SETTINGS_TRANSPARENT);
+        assert_eq!(style.background, [0.0; 4]);
         let hover_contrast: f32 = style
             .hover_background
             .iter()
@@ -1605,11 +1511,11 @@ mod tests {
         assert_eq!(view.category_rects[0].h, 34.0);
         assert_eq!(view.category_rects[1].y - view.category_rects[0].bottom(), 4.0);
         let category_style = category_button_style(theme.settings_theme());
-        assert_eq!(category_style.background, SETTINGS_TRANSPARENT);
-        assert_eq!(category_style.border, SETTINGS_TRANSPARENT);
-        assert_ne!(category_style.hover_background, SETTINGS_TRANSPARENT);
-        assert_ne!(category_style.pressed_background, SETTINGS_TRANSPARENT);
-        assert_ne!(category_style.selected_background, SETTINGS_TRANSPARENT);
+        assert_eq!(category_style.background, [0.0; 4]);
+        assert_eq!(category_style.border, [0.0; 4]);
+        assert_ne!(category_style.hover_background, [0.0; 4]);
+        assert_ne!(category_style.pressed_background, [0.0; 4]);
+        assert_ne!(category_style.selected_background, [0.0; 4]);
         assert_eq!(category_style.selected_foreground, theme.settings_theme().accent);
 
         let mut draw_list = DrawList::new();

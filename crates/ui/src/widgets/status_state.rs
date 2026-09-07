@@ -7,6 +7,7 @@ use crate::core::widget::{ControlAction, WidgetId};
 use crate::core::{
     DrawCmd, Event, EventCtx, LayoutCtx, MouseButton, PaintCtx, Rect, Widget, WidgetAction,
 };
+use crate::widgets::button::{ButtonStyle, ButtonVisualState};
 use crate::widgets::icon::draw_icon;
 
 const STATUS_ICON_TITLE_GAP: f32 = 12.0;
@@ -137,14 +138,14 @@ impl Widget for StatusStateWidget {
             &self.input.description,
         );
         if self.has_action() {
-            let background = if self.pressed_action {
-                ctx.theme.palette.bg_active
+            let state = if self.pressed_action && self.hovered_action {
+                ButtonVisualState::Pressed
             } else if self.hovered_action {
-                ctx.theme.palette.bg_hover
+                ButtonVisualState::Hovered
             } else {
-                ctx.theme.palette.bg_elevated
+                ButtonVisualState::Normal
             };
-            ctx.list.fill_rounded(self.action_rect, background, 6.0 * ctx.dpi);
+            let foreground = ButtonStyle::from_theme(ctx.theme).paint(ctx, self.action_rect, state);
             let label = self.input.action_label.as_deref().unwrap_or_default();
             let action_font_size = ctx.theme.control_metrics().font_size_logical * ctx.dpi;
             let label_width =
@@ -154,7 +155,7 @@ impl Widget for StatusStateWidget {
                 label_x,
                 self.action_rect.y + self.action_rect.h * 0.5 + action_font_size * 0.35,
                 action_font_size,
-                ctx.theme.palette.text_main,
+                foreground,
                 label,
             );
         }
@@ -171,21 +172,33 @@ impl Widget for StatusStateWidget {
         }
         match event {
             Event::MouseMove { px, py } => {
-                self.hovered_action = self.action_rect.contains(*px, *py);
-                if self.hovered_action {
+                let hovered = self.action_rect.contains(*px, *py);
+                let hover_changed = self.hovered_action != hovered;
+                self.hovered_action = hovered;
+                if hovered {
                     ctx.cursor_hint = Some(winit::window::CursorIcon::Pointer);
                     Some(WidgetAction::Consumed)
                 } else {
-                    None
+                    hover_changed.then_some(WidgetAction::Consumed)
                 }
+            }
+            Event::PointerLeave => {
+                std::mem::take(&mut self.hovered_action).then_some(WidgetAction::Consumed)
+            }
+            Event::InteractionCancel => {
+                let changed = std::mem::take(&mut self.hovered_action)
+                    | std::mem::take(&mut self.pressed_action);
+                changed.then_some(WidgetAction::Consumed)
             }
             Event::MouseDown { px, py, button: MouseButton::Left } => {
                 self.pressed_action = self.action_rect.contains(*px, *py);
+                self.hovered_action = self.pressed_action;
                 self.pressed_action.then_some(WidgetAction::Consumed)
             }
             Event::MouseUp { px, py, button: MouseButton::Left } if self.pressed_action => {
                 self.pressed_action = false;
-                if self.action_rect.contains(*px, *py) {
+                self.hovered_action = self.action_rect.contains(*px, *py);
+                if self.hovered_action {
                     self.input
                         .action_id
                         .map(|id| WidgetAction::Control(ControlAction::Activated { id }))
@@ -257,6 +270,64 @@ mod tests {
             assert!(
                 text_x >= action_rect.x && text_x + text_layout.shaped.width <= action_rect.right(),
                 "操作文字应居中且不超出按钮边界"
+            );
+        }
+    }
+
+    #[test]
+    fn action_cancellation_clears_pointer_feedback_and_capture() {
+        let theme = crate::theme::test_theme();
+        let mut widget = StatusStateWidget::new();
+        widget.set_input(StatusStateInput {
+            action_label: Some("重试".to_owned()),
+            action_id: Some(WidgetId(81)),
+            ..StatusStateInput::default()
+        });
+        layout(&mut widget, Rect::new(0.0, 0.0, 320.0, 240.0), 1.0);
+        let mut context = EventCtx::new(&theme, 1.0);
+        let rect = widget.action_rect();
+        let (px, py) = (rect.x + 1.0, rect.y + 1.0);
+        widget.on_event(&Event::MouseMove { px, py }, &mut context);
+        widget.on_event(&Event::MouseDown { px, py, button: MouseButton::Left }, &mut context);
+        assert_eq!(
+            widget.on_event(&Event::PointerLeave, &mut context),
+            Some(WidgetAction::Consumed)
+        );
+        assert!(!widget.hovered_action);
+        assert!(widget.is_capturing());
+        assert_eq!(
+            widget.on_event(&Event::InteractionCancel, &mut context),
+            Some(WidgetAction::Consumed)
+        );
+        assert!(!widget.is_capturing());
+    }
+
+    #[test]
+    fn status_action_uses_standard_button_surface() {
+        let theme = crate::theme::test_theme();
+        let mut widget = StatusStateWidget::new();
+        widget.set_input(StatusStateInput {
+            action_label: Some("重试".to_owned()),
+            action_id: Some(WidgetId(81)),
+            ..StatusStateInput::default()
+        });
+        layout(&mut widget, Rect::new(0.0, 0.0, 320.0, 240.0), 1.0);
+        let mut expected = DrawList::new();
+        let mut context = PaintCtx::new(&mut expected, &theme, 1.0);
+        context.global_alpha = 0.5;
+        crate::button::ButtonStyle::from_theme(&theme).paint(
+            &mut context,
+            widget.action_rect(),
+            crate::button::ButtonVisualState::Normal,
+        );
+        let mut actual = DrawList::new();
+        let mut context = PaintCtx::new(&mut actual, &theme, 1.0);
+        context.global_alpha = 0.5;
+        widget.paint(&mut context);
+        for command in &expected.cmds {
+            assert!(
+                actual.cmds.contains(command),
+                "空状态操作按钮应共享普通按钮绘制规则: {command:?}"
             );
         }
     }

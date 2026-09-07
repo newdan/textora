@@ -140,6 +140,51 @@ mod tests {
     }
 
     #[test]
+    fn sidebar_open_and_new_buttons_share_colors_and_outline() {
+        for (mode, system) in [
+            (crate::settings::ThemeMode::Light, winit::window::Theme::Light),
+            (crate::settings::ThemeMode::Dark, winit::window::Theme::Dark),
+        ] {
+            let theme = Theme::resolve_builtin(mode, system);
+            let mut widget = new_document_widget();
+            layout_new_document_widget(&mut widget, &theme);
+            let mut shaper = shaping::Shaper::new().expect("sidebar color test requires fonts");
+            let mut draw_list = DrawList::new();
+            let mut context = PaintCtx::new(&mut draw_list, &theme, 1.0);
+            context.shaper = Some(&mut shaper);
+            widget.paint(&mut context);
+            let colors: Vec<_> = draw_list
+                .cmds
+                .iter()
+                .filter_map(|command| match command {
+                    DrawCmd::TextLayout { layout, color, .. }
+                        if matches!(layout.text.as_str(), "打开" | "新建") =>
+                    {
+                        Some(*color)
+                    }
+                    _ => None,
+                })
+                .collect();
+            assert_eq!(colors.len(), 2);
+            assert_eq!(colors[0], colors[1], "打开与新建的文字色应一致");
+            let layout = widget.state.current_layout().expect("sidebar must be laid out");
+            let new_rect = Rect::new(
+                layout.new_btn_rect.x,
+                layout.new_btn_rect.y,
+                layout.new_btn_rect.w + layout.new_menu_btn_rect.w,
+                layout.new_btn_rect.h,
+            );
+            for rect in [layout.open_btn_rect, new_rect] {
+                assert!(draw_list.cmds.iter().any(|command| matches!(command,
+                    DrawCmd::StrokeRect { rect: bounds, color, radius, line_width }
+                        if *bounds == rect && *color == theme.application_theme().control_border
+                            && *radius == theme.control_metrics().corner_radius_logical && *line_width == 1.0
+                )), "侧栏操作按钮应绘制标准边框");
+            }
+        }
+    }
+
+    #[test]
     fn widget_input_replaces_geometry_metrics_and_behavior() {
         let mut widget = SidebarWidget::new(SidebarConfig::new_default(1.0), metrics(1.0));
         let mut first = sidebar_widget_input(vec![make_tab("first")], Some(0));

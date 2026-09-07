@@ -8,6 +8,7 @@ use crate::core::{
     AccessibilityNode, AccessibilityRole, Event, EventCtx, KeyCode, LayoutCtx, Modifiers,
     MouseButton, PaintCtx, Rect, Widget, WidgetAction,
 };
+use crate::widgets::button::{ButtonStyle, ButtonVisualState};
 use crate::widgets::icon::draw_icon;
 use crate::widgets::tooltip::TooltipHint;
 
@@ -15,11 +16,8 @@ use crate::widgets::tooltip::TooltipHint;
 pub const SPLIT_BUTTON_MENU_WIDTH_LOGICAL: f32 = 28.0;
 /// 按钮内侧横向留白。
 pub const SPLIT_BUTTON_HORIZONTAL_PADDING_LOGICAL: f32 = 10.0;
-/// 按钮标签字号。
-pub const SPLIT_BUTTON_FONT_SIZE_LOGICAL: f32 = 14.0;
 const SPLIT_BUTTON_ICON_SIZE_LOGICAL: f32 = 14.0;
 const SPLIT_BUTTON_ICON_GAP_LOGICAL: f32 = 6.0;
-const SPLIT_BUTTON_CORNER_RADIUS_LOGICAL: f32 = 7.0;
 const SPLIT_BUTTON_DIVIDER_INSET_LOGICAL: f32 = 6.0;
 
 /// Split button 的纯展示输入。
@@ -123,17 +121,21 @@ impl SplitButtonWidget {
         }
     }
 
-    fn region_background(&self, region: SplitButtonRegion, ctx: &PaintCtx<'_>) -> Option<[f32; 4]> {
+    fn region_state(&self, region: SplitButtonRegion) -> ButtonVisualState {
         if !self.input.enabled {
-            return None;
-        }
-        if self.pressed_region == Some(region) && self.hovered_region == Some(region) {
-            return Some(ctx.theme.palette.bg_active);
+            return ButtonVisualState::Disabled;
         }
         if region == SplitButtonRegion::Menu && self.menu_open {
-            return Some(ctx.theme.palette.bg_active);
+            return ButtonVisualState::Selected;
         }
-        (self.hovered_region == Some(region)).then_some(ctx.theme.palette.bg_hover)
+        if self.hovered_region != Some(region) {
+            return ButtonVisualState::Normal;
+        }
+        if self.pressed_region == Some(region) {
+            ButtonVisualState::Pressed
+        } else {
+            ButtonVisualState::Hovered
+        }
     }
 }
 
@@ -150,31 +152,25 @@ impl Widget for SplitButtonWidget {
             return;
         }
 
-        let background = if !self.input.enabled {
-            ctx.theme.palette.bg_surface
+        let style = ButtonStyle::from_theme(ctx.theme);
+        let state = if self.input.enabled {
+            ButtonVisualState::Normal
         } else {
-            ctx.theme.palette.bg_elevated
+            ButtonVisualState::Disabled
         };
         let alpha = ctx.global_alpha;
-        let mut fill_color = background;
-        fill_color[3] *= alpha;
-        let corner_radius = SPLIT_BUTTON_CORNER_RADIUS_LOGICAL * ctx.dpi;
-        ctx.list.fill_rounded(self.rect, fill_color, corner_radius);
+        let corner_radius = style.corner_radius_logical * ctx.dpi;
 
         for (region, rect) in
             [(SplitButtonRegion::Main, self.main_rect), (SplitButtonRegion::Menu, self.menu_rect)]
         {
-            let Some(mut region_color) = self.region_background(region, ctx) else {
-                continue;
-            };
-            region_color[3] *= alpha;
+            let region_color = style.background_color(self.region_state(region), alpha);
             ctx.list.clip(rect, |draw_list| {
                 draw_list.fill_rounded(self.rect, region_color, corner_radius);
             });
         }
 
-        let mut divider_color = ctx.theme.palette.border_subtle;
-        divider_color[3] *= alpha;
+        let divider_color = style.border_color(state, alpha);
         let divider_inset = SPLIT_BUTTON_DIVIDER_INSET_LOGICAL * ctx.dpi;
         ctx.list.fill(
             Rect::new(
@@ -185,13 +181,8 @@ impl Widget for SplitButtonWidget {
             ),
             divider_color,
         );
-        let mut foreground = if self.input.enabled {
-            ctx.theme.palette.text_main
-        } else {
-            ctx.theme.palette.text_muted
-        };
-        foreground[3] *= alpha;
-        let font_size = SPLIT_BUTTON_FONT_SIZE_LOGICAL * ctx.dpi;
+        let foreground = style.foreground_color(state, alpha);
+        let font_size = style.font_size_logical * ctx.dpi;
         let baseline = self.main_rect.y + self.main_rect.h * 0.5 + font_size * 0.35;
         let content_x = self.main_rect.x + SPLIT_BUTTON_HORIZONTAL_PADDING_LOGICAL * ctx.dpi;
         let text_x = if let Some(icon) = &self.icon {
@@ -218,7 +209,17 @@ impl Widget for SplitButtonWidget {
             [center_x, center_y + arrow_radius * 0.6],
             foreground,
         );
-        ctx.list.stroke_rounded(self.rect, divider_color, corner_radius, ctx.dpi);
+        style.paint_outline(ctx, self.rect, state);
+        if self.focused && self.input.enabled {
+            let mut focus_ring = ctx.theme.settings_theme().focus_ring;
+            focus_ring[3] *= alpha;
+            ctx.list.stroke_rounded(
+                self.rect,
+                focus_ring,
+                corner_radius,
+                ctx.theme.control_metrics().focus_ring_width_logical * ctx.dpi,
+            );
+        }
     }
 
     fn hit(&self, px: f32, py: f32) -> bool {
@@ -483,6 +484,47 @@ mod tests {
     }
 
     #[test]
+    fn split_button_matches_standard_button_surface_when_enabled_or_disabled() {
+        use crate::button::{Button, ButtonStyle};
+
+        for (mode, system) in [
+            (crate::settings::ThemeMode::Light, winit::window::Theme::Light),
+            (crate::settings::ThemeMode::Dark, winit::window::Theme::Dark),
+        ] {
+            let theme = crate::Theme::resolve_builtin(mode, system);
+            for dpi in [1.0, 1.5, 2.0] {
+                for enabled in [true, false] {
+                    let mut split = widget();
+                    split.set_keyboard_focus(None);
+                    split.set_input(SplitButtonInput { label: String::new(), enabled });
+                    let mut regular = Button::new(WidgetId(90), ButtonStyle::from_theme(&theme));
+                    regular.set_enabled(enabled);
+                    let mut measure = NoopMeasure;
+                    let mut layout_context =
+                        LayoutCtx { ui_measure: None, measure: &mut measure, theme: &theme, dpi };
+                    let rect = Rect::new(0.0, 0.0, 160.0 * dpi, 32.0 * dpi);
+                    split.set_rect(rect, &mut layout_context);
+                    regular.set_rect(rect, &mut layout_context);
+                    let mut expected = DrawList::new();
+                    let mut context = PaintCtx::new(&mut expected, &theme, dpi);
+                    context.global_alpha = 0.5;
+                    regular.paint(&mut context);
+                    let mut actual = DrawList::new();
+                    let mut context = PaintCtx::new(&mut actual, &theme, dpi);
+                    context.global_alpha = 0.5;
+                    split.paint(&mut context);
+                    for command in &expected.cmds {
+                        assert!(
+                            actual.cmds.contains(command),
+                            "分段按钮与普通按钮应共享背景和边框: {command:?}"
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
     fn creates_a_split_button() {
         let widget = SplitButtonWidget::new();
         assert_eq!(widget.main_rect(), Rect::ZERO);
@@ -608,7 +650,7 @@ mod tests {
                 command,
                 DrawCmd::StrokeRect { rect, color, .. }
                     if *rect == widget.rect
-                        && *color == theme.palette.border_subtle
+                        && *color == theme.application_theme().control_border
             )
         }));
         assert!(!draw_list.cmds.iter().any(|command| {
@@ -619,6 +661,59 @@ mod tests {
                         && *color == theme.palette.bg_hover
             )
         }));
+    }
+
+    #[test]
+    fn translucent_active_regions_each_paint_their_final_background_once() {
+        let theme = crate::theme::test_theme();
+        let style = ButtonStyle::from_theme(&theme);
+        for region in [SplitButtonRegion::Main, SplitButtonRegion::Menu] {
+            for state in [
+                ButtonVisualState::Hovered,
+                ButtonVisualState::Pressed,
+                ButtonVisualState::Selected,
+            ] {
+                let mut widget = widget();
+                widget.set_keyboard_focus(None);
+                if state == ButtonVisualState::Selected {
+                    if region == SplitButtonRegion::Main {
+                        continue;
+                    }
+                    widget.set_menu_open(true);
+                } else {
+                    widget.hovered_region = Some(region);
+                    widget.pressed_region = (state == ButtonVisualState::Pressed).then_some(region);
+                }
+                let mut draw_list = DrawList::new();
+                let mut context = PaintCtx::new(&mut draw_list, &theme, 1.0);
+                context.global_alpha = 0.5;
+                widget.paint(&mut context);
+                for (target, rect) in [
+                    (SplitButtonRegion::Main, widget.main_rect()),
+                    (SplitButtonRegion::Menu, widget.menu_rect()),
+                ] {
+                    let target_state =
+                        if target == region { state } else { ButtonVisualState::Normal };
+                    let expected = style.background_color(target_state, 0.5);
+                    assert!(draw_list.cmds.windows(3).any(|commands| {
+                        matches!(commands[0], DrawCmd::PushClip(bounds) if bounds == rect)
+                            && matches!(commands[1], DrawCmd::FillRect { color, .. } if color == expected)
+                            && matches!(commands[2], DrawCmd::PopClip)
+                    }), "每个分段应只绘制自身最终背景，不能叠加半透明底色");
+                }
+                assert_eq!(
+                    draw_list
+                        .cmds
+                        .iter()
+                        .filter(|command| matches!(command,
+                            DrawCmd::FillRect { rect, .. } if *rect == widget.rect
+                        ))
+                        .count(),
+                    2,
+                    "每个区域只允许一次背景填充"
+                );
+            }
+        }
     }
 
     #[test]

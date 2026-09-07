@@ -23,15 +23,7 @@ const SETTINGS_CATEGORY_BUTTON_HEIGHT_LOGICAL: f32 = 34.0;
 const SETTINGS_CATEGORY_BUTTON_GAP_LOGICAL: f32 = 4.0;
 const SETTINGS_FORM_GAP_LOGICAL: f32 = 16.0;
 const SETTINGS_COMPACT_FORM_GAP_LOGICAL: f32 = 8.0;
-const SETTINGS_BUTTON_FONT_SIZE_LOGICAL: f32 = 14.0;
-const SETTINGS_BUTTON_PADDING_LOGICAL: f32 = 12.0;
-const SETTINGS_BUTTON_RADIUS_LOGICAL: f32 = 8.0;
 const SETTINGS_SIDEBAR_SEPARATOR_WIDTH_LOGICAL: f32 = 1.0;
-const SETTINGS_TRANSPARENT: [f32; 4] = [0.0, 0.0, 0.0, 0.0];
-const SETTINGS_CATEGORY_HOVER_ACCENT_BLEND: f32 = 0.05;
-const SETTINGS_CATEGORY_PRESSED_ACCENT_BLEND: f32 = 0.09;
-const SETTINGS_CATEGORY_SELECTED_ACCENT_BLEND: f32 = 0.14;
-const SETTINGS_DISABLED_FOREGROUND_ALPHA: f32 = 0.45;
 
 const APPEARANCE_CATEGORY_ID: WidgetId = WidgetId(0x7365_7474_6170_7065);
 const EDITOR_CATEGORY_ID: WidgetId = WidgetId(0x7365_7474_6564_6974);
@@ -490,47 +482,7 @@ impl Widget for TextoraSettingsOverlay {
 }
 
 fn category_button_style(settings: SettingsTheme) -> ButtonStyle {
-    ButtonStyle {
-        font_size_logical: SETTINGS_BUTTON_FONT_SIZE_LOGICAL,
-        pad_x_logical: SETTINGS_BUTTON_PADDING_LOGICAL,
-        foreground: settings.text_primary,
-        selected_foreground: settings.accent,
-        background: SETTINGS_TRANSPARENT,
-        border: SETTINGS_TRANSPARENT,
-        hover_background: blend_color(
-            settings.sidebar_surface,
-            settings.accent,
-            SETTINGS_CATEGORY_HOVER_ACCENT_BLEND,
-        ),
-        pressed_background: blend_color(
-            settings.sidebar_surface,
-            settings.accent,
-            SETTINGS_CATEGORY_PRESSED_ACCENT_BLEND,
-        ),
-        selected_background: blend_color(
-            settings.sidebar_surface,
-            settings.accent,
-            SETTINGS_CATEGORY_SELECTED_ACCENT_BLEND,
-        ),
-        disabled_foreground: with_alpha(settings.text_primary, SETTINGS_DISABLED_FOREGROUND_ALPHA),
-        disabled_background: SETTINGS_TRANSPARENT,
-        corner_radius_logical: SETTINGS_BUTTON_RADIUS_LOGICAL,
-    }
-}
-
-fn blend_color(base: [f32; 4], accent: [f32; 4], accent_factor: f32) -> [f32; 4] {
-    let base_factor = 1.0 - accent_factor;
-    [
-        base[0] * base_factor + accent[0] * accent_factor,
-        base[1] * base_factor + accent[1] * accent_factor,
-        base[2] * base_factor + accent[2] * accent_factor,
-        base[3] * base_factor + accent[3] * accent_factor,
-    ]
-}
-
-fn with_alpha(mut color: [f32; 4], alpha: f32) -> [f32; 4] {
-    color[3] *= alpha;
-    color
+    ButtonStyle::category(settings)
 }
 
 fn inset_rect(rect: Rect, inset: f32) -> Rect {
