@@ -351,6 +351,7 @@ pub(crate) fn layout_block(block: &BlockNode, ctx: &mut LayoutCtx) {
                 let materialized_spans = if let Some(source_text) = ctx.source_text {
                     crate::edit::materialized_spans_for_projected_line(
                         &raw_line.projected,
+                        &projected,
                         line_styles,
                         source_text,
                         ctx.edit_ctx,
@@ -1082,18 +1083,10 @@ pub(crate) fn layout_text_block(
         let marker = marker.as_ref();
         let marker_source_range =
             marker.map(|marker| marker_source_range_for_projected_line(&projected, marker));
-        if let Some(marker) = marker {
-            projected = materialize_marker_for_projected_line(
-                projected,
-                marker,
-                marker_source_range
-                    .clone()
-                    .expect("an active marker must have a derived source range"),
-            );
-        }
         let materialized_spans = if let Some(source_text) = ctx.source_text {
             crate::edit::materialized_spans_for_projected_line(
                 &base_projection,
+                &projected,
                 line_styles,
                 source_text,
                 ctx.edit_ctx,
@@ -1111,6 +1104,13 @@ pub(crate) fn layout_text_block(
             })
             .collect();
         if let Some(marker) = marker {
+            projected = materialize_marker_for_projected_line(
+                projected,
+                marker,
+                marker_source_range
+                    .clone()
+                    .expect("an active marker must have a derived source range"),
+            );
             let marker_len = marker.marker_text.len();
             for style in &mut materialized_styles {
                 style.start += marker_len;
@@ -1245,6 +1245,47 @@ fn append_trailing_whitespace_projection(
     });
 }
 
+fn materialize_table_cell_line(
+    cell: &BlockNode,
+    line_index: usize,
+    text: &str,
+    styles: &[StyleSpan],
+    ctx: &LayoutCtx,
+) -> (crate::projection::ProjectedText, Vec<StyleSpan>) {
+    let base =
+        cell.projected_lines.get(line_index).cloned().unwrap_or_else(|| {
+            crate::projection::ProjectedText::direct(text, cell.block_range.start)
+        });
+    let Some(source) = ctx.source_text else {
+        return (base, styles.to_vec());
+    };
+    let source_line =
+        SourceLineContext { range: cell.block_range.clone(), text_start: cell.block_range.start };
+    let projected = crate::edit::materialize_projected_line(
+        &base,
+        styles,
+        source,
+        ctx.edit_ctx,
+        Some(&source_line),
+    );
+    let materialized_styles = crate::edit::materialized_spans_for_projected_line(
+        &base,
+        &projected,
+        styles,
+        source,
+        ctx.edit_ctx,
+    )
+    .into_iter()
+    .map(|span| StyleSpan {
+        start: span.start,
+        len: span.len,
+        style: span.style,
+        source_range: span.source_range,
+    })
+    .collect();
+    (projected, materialized_styles)
+}
+
 pub(crate) fn layout_table(block: &BlockNode, ctx: &mut LayoutCtx, columns: usize) {
     let font_size = ctx.style.body_font_size;
     let line_h = ctx.style.line_height;
@@ -1300,14 +1341,18 @@ pub(crate) fn layout_table(block: &BlockNode, ctx: &mut LayoutCtx, columns: usiz
             let mut cy = row_y + pad;
             for (t_idx, t) in texts.iter().enumerate() {
                 let line_styles = text_styles.get(t_idx).map(|s| s.as_slice()).unwrap_or(&[]);
-                let projected = cell.projected_lines.get(t_idx).cloned().unwrap_or_else(|| {
-                    crate::projection::ProjectedText::direct(t, cell.block_range.start)
-                });
+                let (projected, materialized_styles) =
+                    materialize_table_cell_line(cell, t_idx, t, line_styles, ctx);
                 let cell_x = col_x + pad;
                 let cell_inner_w = (cell_w - pad * 2.0).max(1.0);
-                let wrapped = ctx.wrap_text_with_width(t, font_size, Weight::NORMAL, cell_inner_w);
+                let wrapped = ctx.wrap_text_with_width(
+                    &projected.text,
+                    font_size,
+                    Weight::NORMAL,
+                    cell_inner_w,
+                );
                 let mut laid = layout_line_with_styles(
-                    line_styles,
+                    &materialized_styles,
                     &wrapped,
                     &projected,
                     font_size,
@@ -1944,6 +1989,104 @@ mod tests {
         lazy.ensure_precise_range(0.0, 600.0, &style, &mut shaper, None, &doc_view);
         lazy.build_flat_lines(&doc_view);
         lazy
+    }
+
+    fn layout_with_inline_code_preedit(source: &str, width: f32) -> LazyLayout<MarkdownDoc> {
+        let cursor_byte = source.find("b`").expect("fixture contains code suffix");
+        let mut layout = layout_with_cursor_and_width(source, cursor_byte, width);
+        layout.set_edit_ctx(Some(crate::edit::EditContext {
+            cursor_byte,
+            preedit_text: Some("中文".to_owned()),
+            preedit_cursor: Some(("中文".len(), "中文".len())),
+        }));
+        layout.invalidate_lines_for_source_bytes([cursor_byte]);
+        let mut shaper = Shaper::new().expect("inline code preedit test needs a shaper");
+        layout.ensure_precise_range(
+            0.0,
+            600.0,
+            &default_style(),
+            &mut shaper,
+            None,
+            &core::document::StringDocView::new(source),
+        );
+        layout
+    }
+
+    #[test]
+    fn focused_inline_code_preedit_keeps_content_and_marker_styles_aligned() {
+        use crate::builder::InlineStyle;
+
+        for prefix in ["", "# ", "- "] {
+            let source = format!("{prefix}before `ab` after");
+            let layout = layout_with_inline_code_preedit(&source, 400.0);
+            let line = layout
+                .laid_out
+                .iter()
+                .flatten()
+                .find_map(|block| match &block.kind {
+                    LaidOutBlockKind::Text { lines } | LaidOutBlockKind::ListItem { lines, .. } => {
+                        lines.first()
+                    }
+                    _ => None,
+                })
+                .expect("fixture must lay out an editable text line");
+            assert_eq!(line.text, format!("{prefix}before `a中文b` after"));
+            let styled_text = line
+                .styles
+                .iter()
+                .map(|span| (&span.style, &line.text[span.start..span.start + span.len]))
+                .filter(|(style, text)| **style == InlineStyle::InlineCode || *text == "`")
+                .collect::<Vec<_>>();
+            assert_eq!(
+                styled_text,
+                [
+                    (&InlineStyle::SourceMarker, "`"),
+                    (&InlineStyle::InlineCode, "a中文b"),
+                    (&InlineStyle::SourceMarker, "`"),
+                ]
+            );
+        }
+    }
+
+    #[test]
+    fn wrapped_table_inline_code_preedit_stays_in_the_focused_cell() {
+        let source = "| left | right |\n| --- | --- |\n| many words `ab` here | `other` |";
+        let mut layout = layout_with_inline_code_preedit(source, 160.0);
+        layout.build_flat_lines(&core::document::StringDocView::new(source));
+        let rows = layout
+            .laid_out
+            .iter()
+            .flatten()
+            .find_map(|block| match &block.kind {
+                LaidOutBlockKind::Table { rows, .. } => Some(rows),
+                _ => None,
+            })
+            .expect("fixture must lay out a table");
+        let focused_lines = &rows[0][0];
+        assert!(focused_lines.len() > 1, "narrow cell must exercise wrapping");
+        let code_text = focused_lines
+            .iter()
+            .flat_map(|line| {
+                line.styles
+                    .iter()
+                    .filter(|span| span.style == crate::builder::InlineStyle::InlineCode)
+                    .map(|span| &line.text[span.start..span.start + span.len])
+            })
+            .collect::<String>();
+        assert_eq!(code_text, "a中文b");
+        for line in focused_lines {
+            assert_eq!(
+                line.source_projection.as_ref().expect("wrapped cell requires a projection").owner,
+                crate::projection::ProjectionOwnerId::TableCell {
+                    table_start: 0,
+                    row: 1,
+                    column: 0,
+                    logical_line: 0,
+                },
+            );
+        }
+        let adjacent_text = rows[0][1].iter().map(|line| line.text.as_str()).collect::<String>();
+        assert_eq!(adjacent_text, "other", "adjacent code must remain folded without preedit");
     }
 
     #[test]

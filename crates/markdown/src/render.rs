@@ -2792,6 +2792,76 @@ Day -29          Day -7           Day -1    Today    Day +1
     }
 
     #[test]
+    fn focused_inline_code_draws_both_source_delimiters() {
+        for source in [
+            "before `code` after",
+            "# before `code` after",
+            "- before `code` after",
+            "> before `code` after",
+            "**before `code` after**",
+            "[before `code` after](https://example.com)",
+            "| before `code` after |\n| --- |",
+        ] {
+            let cursor_byte = source.find("code").expect("fixture contains inline code");
+            let (drawing, _) = build_and_render_editing(source, cursor_byte);
+            assert_eq!(
+                text_command_colors(&drawing, "`").len(),
+                2,
+                "focused inline code must draw both delimiters: {source:?}",
+            );
+        }
+    }
+
+    #[test]
+    fn table_inline_code_delimiters_follow_focus_and_keep_source_anchors() {
+        use ui::plugin::ViewPlugin;
+
+        let source = "| heading | other |\n| --- | --- |\n| before `中文` after | `next` |";
+        let code_start = source.find('`').expect("fixture contains inline code");
+        let code_end = code_start + "`中文`".len();
+        let next_code_cursor = source.find("next").expect("fixture contains adjacent code");
+        let document = core::document::StringDocView::new(source);
+        let mut editor = crate::view::MarkdownView::new();
+        editor.set_source(source.to_owned(), 1);
+        editor.engine_mut().set_edit_source(Some(source.to_owned()));
+        let mut shaper = shaping::Shaper::new().expect("focus test requires a text shaper");
+        for (cursor_byte, expected_delimiters) in
+            [(0, 0), (code_start + "`".len(), 2), (next_code_cursor, 2), (0, 0)]
+        {
+            editor.engine_mut().handle_set_cursor_byte(cursor_byte);
+            let drawing = ViewPlugin::render(
+                &mut editor,
+                &document,
+                Rect::new(0.0, 0.0, 800.0, 600.0),
+                &ui::theme::test_theme(),
+                &mut shaper,
+                1.0,
+            );
+            assert_eq!(text_command_colors(&drawing, "`").len(), expected_delimiters);
+            if cursor_byte < code_start || cursor_byte > code_end {
+                assert!(
+                    !editor.engine().flat_lines().iter().any(|line| line.text.contains("`中文`")),
+                    "the previous cell's delimiters must fold when focus leaves it"
+                );
+                continue;
+            }
+            let line = editor
+                .engine()
+                .flat_lines()
+                .iter()
+                .find(|line| line.text.contains("`中文`"))
+                .expect("focused table cell must expose its code delimiters");
+            let projection = line.source_projection.as_ref().expect("editable cell needs anchors");
+            for byte in (code_start..=code_end).filter(|&byte| source.is_char_boundary(byte)) {
+                assert!(
+                    projection.boundaries.iter().any(|anchor| anchor.byte == byte),
+                    "expanded table code must retain source boundary {byte}"
+                );
+            }
+        }
+    }
+
+    #[test]
     fn render_table_has_zebra_stripes() {
         let md = "| A | B |\n|---|---|\n| 1 | 2 |\n| 3 | 4 |\n| 5 | 6 |";
         let dl = build_and_render(md);

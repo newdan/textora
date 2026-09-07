@@ -299,11 +299,11 @@ fn inferred_inline_suffix_start(style: &InlineStyle, span_source: &str) -> Optio
 
 pub(crate) fn materialized_spans_for_projected_line(
     base: &ProjectedText,
+    projected: &ProjectedText,
     spans: &[StyleSpan],
     source: &str,
     edit_ctx: Option<&EditContext>,
 ) -> Vec<MaterializedSpan> {
-    let projected = materialize_projected_line(base, spans, source, edit_ctx, None);
     let preedit_visual_range = projected.spans.iter().find_map(|span| {
         matches!(span.kind, ProjectionSpanKind::Virtual { .. }).then(|| span.visual_range.clone())
     });
@@ -512,7 +512,11 @@ fn materialized_spans(
     }
 
     if let Some(preedit_visual_range) = preedit_visual_range {
-        shift_materialized_spans_for_preedit(&mut output, preedit_visual_range);
+        shift_materialized_spans_for_preedit(
+            &mut output,
+            preedit_visual_range,
+            cursor_span.map(|span| &span.source_range),
+        );
     }
     output
 }
@@ -532,14 +536,25 @@ fn push_non_empty_materialized_span(
 fn shift_materialized_spans_for_preedit(
     spans: &mut [MaterializedSpan],
     preedit_visual_range: Range<usize>,
+    active_source_range: Option<&Range<usize>>,
 ) {
     let inserted_len = preedit_visual_range.len();
-    for span in spans {
+    let insertion_byte = preedit_visual_range.start;
+    let containing_span = spans.iter().position(|span| {
         let span_end = span.start + span.len;
-        if span.start >= preedit_visual_range.start {
-            span.start += inserted_len;
-        } else if span_end >= preedit_visual_range.start {
+        let is_active_content = active_source_range.is_some_and(|active| {
+            active.start <= span.source_range.start && span.source_range.end <= active.end
+        });
+        if span.style == InlineStyle::SourceMarker || !is_active_content {
+            return span.start < insertion_byte && insertion_byte < span_end;
+        }
+        span.start <= insertion_byte && insertion_byte <= span_end
+    });
+    for (index, span) in spans.iter_mut().enumerate() {
+        if Some(index) == containing_span {
             span.len += inserted_len;
+        } else if span.start >= insertion_byte {
+            span.start += inserted_len;
         }
     }
 }
@@ -813,6 +828,81 @@ mod tests {
     }
 
     #[test]
+    fn inline_code_preedit_at_content_boundaries_keeps_markers_separate() {
+        let source = "before `ab` after";
+        let code_start = source.find("ab").expect("fixture contains inline code");
+        let delimiter_len = "`".len();
+        let spans = [make_span(
+            code_start - delimiter_len,
+            "ab".len(),
+            code_start - delimiter_len,
+            code_start + "ab`".len(),
+            InlineStyle::InlineCode,
+        )];
+        let source_line = SourceLineContext { range: 0..source.len(), text_start: 0 };
+        for (cursor_byte, expected_code) in [
+            (code_start - delimiter_len, "ab"),
+            (code_start, "中文ab"),
+            (code_start + "ab".len(), "ab中文"),
+            (code_start + "ab`".len(), "ab"),
+        ] {
+            let context = EditContext {
+                cursor_byte,
+                preedit_text: Some("中文".to_owned()),
+                preedit_cursor: Some(("中文".len(), "中文".len())),
+            };
+            let line = materialize_line_with_source_context(
+                "before ab after",
+                &spans,
+                source,
+                Some(&context),
+                Some(&source_line),
+            );
+            assert_eq!(
+                line.spans
+                    .iter()
+                    .map(|span| (&span.style, &line.text[span.start..span.start + span.len]))
+                    .collect::<Vec<_>>(),
+                [
+                    (&InlineStyle::SourceMarker, "`"),
+                    (&InlineStyle::InlineCode, expected_code),
+                    (&InlineStyle::SourceMarker, "`"),
+                ],
+                "preedit at source byte {cursor_byte} must inherit the code content style",
+            );
+        }
+    }
+
+    #[test]
+    fn inline_code_preedit_outside_closing_marker_does_not_extend_adjacent_style() {
+        let source = "`ab`**cd**";
+        let spans = [
+            make_span(0, "ab".len(), 0, "`ab`".len(), InlineStyle::InlineCode),
+            make_span("ab".len(), "cd".len(), "`ab`".len(), source.len(), InlineStyle::Bold),
+        ];
+        let source_line = SourceLineContext { range: 0..source.len(), text_start: 0 };
+        let context = EditContext {
+            cursor_byte: "`ab`".len(),
+            preedit_text: Some("中文".to_owned()),
+            preedit_cursor: Some(("中文".len(), "中文".len())),
+        };
+        let line = materialize_line_with_source_context(
+            "abcd",
+            &spans,
+            source,
+            Some(&context),
+            Some(&source_line),
+        );
+        assert_eq!(line.text, "`ab`中文cd");
+        let bold = line
+            .spans
+            .iter()
+            .find(|span| span.style == InlineStyle::Bold)
+            .expect("adjacent text must remain bold");
+        assert_eq!(&line.text[bold.start..bold.start + bold.len], "cd");
+    }
+
+    #[test]
     fn materialized_line_maps_expanded_bold_markers_to_source_bytes() {
         let source = "hello **world** here";
         let line_text = "hello world here";
@@ -842,7 +932,7 @@ mod tests {
 
         let projected = materialize_projected_line(&base, &spans, source, Some(&ctx), None);
         let materialized_spans =
-            materialized_spans_for_projected_line(&base, &spans, source, Some(&ctx));
+            materialized_spans_for_projected_line(&base, &projected, &spans, source, Some(&ctx));
 
         assert_eq!(projected.text, "**first second**");
         assert!(projected.spans.iter().any(|span| {

@@ -1391,33 +1391,25 @@ impl<S: BlockSource> LazyLayout<S> {
     /// 含旧/新光标字节的块必须无条件失效——即使它在渲染窗口外，否则其
     /// active marker 会在光标离开后永久残留（失效只清标记，不会立即重排屏外块）。
     pub fn invalidate_lines_for_source_bytes(&mut self, bytes: impl IntoIterator<Item = usize>) {
-        // Phase 1: collect the unique block line bases for each byte position.
-        let mut bases: Vec<usize> = Vec::new();
-        for byte in bytes {
-            if let Some((block_line_base, _line_idx)) = self.find_block_line_at_byte(byte) {
-                bases.push(block_line_base);
-            }
-        }
-        if bases.is_empty() {
+        let source_bytes: Vec<usize> = bytes.into_iter().collect();
+        if source_bytes.is_empty() {
             return;
         }
-        bases.sort();
-        bases.dedup();
 
-        // Phase 2: identify laid_out entries whose doc block matches a base.
+        // Invalidate the laid-out owner, including when the cursor is inside a
+        // descendant such as a table cell or nested list item.
         let blocks = self.source.blocks();
         let mut invalidated_indices = Vec::new();
         for (laid_idx, &doc_idx) in self.laid_to_doc.iter().enumerate() {
-            if doc_idx >= blocks.len() {
+            let Some(block) = blocks.get(doc_idx) else {
                 continue;
-            }
-            let before = Self::count_block_lines_before(blocks, &blocks[doc_idx]);
-            if bases.contains(&before) {
+            };
+            if source_bytes.iter().any(|&byte| block_contains_source_byte(block, byte)) {
                 invalidated_indices.push(laid_idx);
             }
         }
 
-        // Phase 3: invalidate each selected entry after releasing the source borrow.
+        // Release the source borrow before clearing cached layout entries.
         for laid_idx in invalidated_indices {
             if let Some(precise) = self.precise.get_mut(laid_idx) {
                 *precise = false;
