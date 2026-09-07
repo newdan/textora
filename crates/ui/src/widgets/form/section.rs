@@ -81,6 +81,10 @@ impl FormSection {
         self.content_rect.h
     }
 
+    pub(super) fn set_row_height_logical(&mut self, row_height_logical: f32) {
+        self.style.row_height_logical = row_height_logical.max(0.0);
+    }
+
     pub(crate) fn focused_ime_cursor_rect(&self) -> Option<Rect> {
         let row_index = self.focused_row_index()?;
         let row_rect = *self.row_rects.get(row_index)?;

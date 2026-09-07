@@ -2,6 +2,8 @@
 //!
 //! 本模块只复用 `ui` 的基础表单控件，不复用 Textora 的 `SettingsView` 业务页面。
 
+use std::collections::HashMap;
+
 use ui::ThemeMode;
 use ui::button::{Button, ButtonStyle};
 use ui::core::widget::{ControlAction, TextPayload, WidgetId};
@@ -35,6 +37,8 @@ const BUTTON_FONT_SIZE_LOGICAL: f32 = 14.0;
 const BUTTON_PADDING_LOGICAL: f32 = 12.0;
 const BUTTON_RADIUS_LOGICAL: f32 = 8.0;
 const ROW_HEIGHT_LOGICAL: f32 = 64.0;
+const STACKED_ROW_HEIGHT_LOGICAL: f32 = 120.0;
+const ROW_STACK_GAP_LOGICAL: f32 = 8.0;
 const ROW_LABEL_WIDTH_LOGICAL: f32 = 176.0;
 const ROW_COLUMN_GAP_LOGICAL: f32 = 12.0;
 const ROW_VERTICAL_INSET_LOGICAL: f32 = 10.0;
@@ -48,6 +52,9 @@ const DESCRIPTION_FONT_SIZE_LOGICAL: f32 = 12.0;
 const SIDEBAR_SEPARATOR_WIDTH_LOGICAL: f32 = 1.0;
 const MESSAGE_HEIGHT_LOGICAL: f32 = 40.0;
 const MESSAGE_GAP_LOGICAL: f32 = 10.0;
+const MESSAGE_BASELINE_OFFSET_LOGICAL: f32 = 4.0;
+const MESSAGE_LINE_HEIGHT_LOGICAL: f32 = 16.0;
+const MESSAGE_MAXIMUM_LINES: usize = 2;
 const RETRY_BUTTON_WIDTH_LOGICAL: f32 = 84.0;
 const TRANSPARENT: [f32; 4] = [0.0, 0.0, 0.0, 0.0];
 const CATEGORY_HOVER_ACCENT_BLEND: f32 = 0.05;
@@ -101,6 +108,7 @@ enum NotoraSettingsCategory {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct FieldValidation {
+    id: WidgetId,
     message: &'static str,
 }
 
@@ -118,6 +126,7 @@ pub(super) struct NotoraSettingsView {
     form_rect: Rect,
     form_needs_layout: bool,
     focused_id: Option<WidgetId>,
+    text_drafts: HashMap<WidgetId, String>,
     validation: Option<FieldValidation>,
     message_rect: Rect,
     retry_button: Button,
@@ -142,6 +151,7 @@ impl NotoraSettingsView {
             form_rect: Rect::ZERO,
             form_needs_layout: true,
             focused_id: None,
+            text_drafts: HashMap::new(),
             validation: None,
             message_rect: Rect::ZERO,
             retry_button: Button::new(RETRY_PERSISTENCE_ID, action_button_style(settings_theme)),
@@ -156,10 +166,8 @@ impl NotoraSettingsView {
         if self.input == input {
             return;
         }
+        self.form_needs_layout |= self.input.product_settings != input.product_settings;
         self.input = input;
-        self.form_needs_layout = true;
-        self.validation = None;
-        self.sync_category_selection();
     }
 
     pub(super) fn set_rect(&mut self, rect: Rect, context: &mut LayoutCtx<'_>) {
@@ -331,6 +339,7 @@ impl NotoraSettingsView {
         if self.form_needs_layout {
             self.rebuild_form(context);
         }
+        self.form.set_row_height_logical(self.row_height_logical());
         self.form.set_rect(Rect::new(0.0, 0.0, self.form_rect.w, self.form_rect.h), context);
         let retry_rect = self.retry_button_rect();
         self.retry_button.set_rect(Rect::new(0.0, 0.0, retry_rect.w, retry_rect.h), context);
@@ -343,65 +352,61 @@ impl NotoraSettingsView {
             NotoraSettingsCategory::Interface => self.interface_sections(),
             NotoraSettingsCategory::Workspace => self.workspace_sections(),
         };
-        self.form.set_sections(sections, context);
+        self.form.replace_sections_preserving_state(sections, context);
         self.form.set_keyboard_focus(self.focused_id);
         self.form_needs_layout = false;
     }
 
     fn appearance_sections(&self) -> Vec<FormSection> {
-        vec![settings_section(
-            "外观",
-            "选择 Notora 的浅色、深色或系统外观。",
-            vec![self.theme_mode_row()],
-        )]
+        vec![self.settings_section("外观", "选择外观，即时生效。", vec![self.theme_mode_row()])]
     }
 
     fn editor_sections(&self) -> Vec<FormSection> {
         let editor = &self.input.product_settings.editor;
-        vec![settings_section(
+        vec![self.settings_section(
             "编辑器",
-            "调整 Notora 文档的文字显示与编辑行为。",
+            "文本输入按 Enter 应用。",
             vec![
-                text_row(
+                self.text_row(
                     FONT_FAMILY_ID,
                     "字体",
-                    "输入编辑器字体名称。",
+                    "输入字体名称。",
                     &editor.font_family,
                     "字体名称",
                 ),
-                text_row(
+                self.text_row(
                     FONT_SIZE_ID,
                     "字号",
                     "允许范围：6–72。",
                     &format_float(editor.font_size),
                     "6–72",
                 ),
-                text_row(
+                self.text_row(
                     LINE_HEIGHT_RATIO_ID,
                     "行高比例",
                     "允许范围：1–3。",
                     &format_float(editor.line_height_ratio),
                     "1–3",
                 ),
-                switch_row(
+                self.switch_row(
                     WORD_WRAP_ID,
                     "自动换行",
-                    "在编辑区域宽度不足时折行。",
+                    "根据编辑区域宽度折行。",
                     editor.word_wrap,
                 ),
-                switch_row(
+                self.switch_row(
                     MARKDOWN_FIRST_LINE_INDENT_ID,
                     "Markdown 首行缩进",
-                    "普通段落首行缩进两个字符，仅影响排版",
+                    "缩进两字符，仅影响排版。",
                     editor.markdown_first_line_indent,
                 ),
-                switch_row(
+                self.switch_row(
                     LINE_NUMBERS_ID,
                     "显示行号",
-                    "在编辑器左侧显示行号。",
+                    "在左侧显示行号。",
                     editor.show_line_numbers,
                 ),
-                text_row(
+                self.text_row(
                     TAB_WIDTH_ID,
                     "制表符宽度",
                     "允许范围：1–16 个空格。",
@@ -414,19 +419,19 @@ impl NotoraSettingsView {
 
     fn interface_sections(&self) -> Vec<FormSection> {
         let interface = &self.input.product_settings.interface;
-        vec![settings_section(
+        vec![self.settings_section(
             "界面",
-            "调整 Notora 外壳与运行时资源使用。",
+            "数值输入按 Enter 应用。",
             vec![
-                switch_row(
+                self.switch_row(
                     STATUS_BAR_ID,
                     "显示状态栏",
-                    "在编辑器底部显示文档状态。",
+                    "在底部显示文档状态。",
                     interface.show_status_bar,
                 ),
-                text_row(
+                self.text_row(
                     RUNTIME_TAB_LIMIT_ID,
-                    "运行时 Tab 上限",
+                    "驻留标签页上限",
                     "允许范围：1–128。",
                     &interface.runtime_tab_limit.to_string(),
                     "1–128",
@@ -437,18 +442,18 @@ impl NotoraSettingsView {
 
     fn workspace_sections(&self) -> Vec<FormSection> {
         let workspace = &self.input.product_settings.workspace;
-        vec![settings_section(
+        vec![self.settings_section(
             "工作区",
-            "调整自动保存节奏和 catalog 备份策略。",
+            "数值输入按 Enter 应用。",
             vec![
-                text_row(
+                self.text_row(
                     AUTO_SAVE_DELAY_ID,
                     "自动保存延迟",
-                    "允许范围：100–60000 毫秒。",
+                    "100–60000 毫秒。",
                     &workspace.auto_save_delay_millis.to_string(),
                     "100–60000",
                 ),
-                text_row(
+                self.text_row(
                     CATALOG_BACKUP_RETENTION_ID,
                     "目录索引备份数",
                     "允许范围：1–100。",
@@ -471,15 +476,14 @@ impl NotoraSettingsView {
             let mut button = Button::new(id, segmented_button_style(self.settings_theme));
             button.set_text(Some(title.to_owned()));
             button.set_selected(selected);
-            InlineChild::fixed(Box::new(button), SEGMENT_WIDTH_LOGICAL)
-                .with_cross_size(CONTROL_HEIGHT_LOGICAL)
+            InlineChild::flex(Box::new(button), 1.0).with_cross_size(CONTROL_HEIGHT_LOGICAL)
         })
         .collect();
         let group = InlineGroup::new(buttons)
             .with_gap(0.0)
             .with_main_alignment(MainAlignment::End)
             .with_alignment(CrossAlignment::Center);
-        FormRow::new(row_label("主题"), None, Box::new(group), settings_row_style())
+        FormRow::new(row_label("主题"), None, Box::new(group), self.settings_row_style())
     }
 
     fn dispatch_form_event(
@@ -501,11 +505,14 @@ impl NotoraSettingsView {
         let rect = *self.category_rects.get(index)?;
         let local_event = Dock::to_local(event, rect.x, rect.y);
         let action = self.category_buttons[index].1.on_event(local_event.as_ref(), context)?;
-        if matches!(action, WidgetAction::Control(ControlAction::Activated { .. })) {
+        if matches!(action, WidgetAction::Control(ControlAction::Activated { .. }))
+            && self.active_category != self.category_buttons[index].0
+        {
             self.active_category = self.category_buttons[index].0;
             self.focused_id = None;
             self.validation = None;
             self.form_needs_layout = true;
+            self.form.reset_scroll();
             self.sync_category_selection();
         }
         Some(SettingsOverlayAction::ViewChanged)
@@ -543,13 +550,18 @@ impl NotoraSettingsView {
             ControlAction::TextCommitted { id, value: TextPayload::Plain(value) } => {
                 self.map_text_commit(id, &value)
             }
-            ControlAction::TextCommitted { .. } => {
-                self.set_validation("请输入有效值");
+            ControlAction::TextCommitted { id, .. } => {
+                self.validation = Some(FieldValidation { id, message: "请输入有效值" });
                 None
             }
             ControlAction::FocusRequested { id } => {
                 self.focused_id = Some(id);
                 self.form.set_keyboard_focus(Some(id));
+                Some(SettingsOverlayAction::ViewChanged)
+            }
+            ControlAction::TextEdited { id, value: TextPayload::Plain(value) } => {
+                self.text_drafts.insert(id, value);
+                self.clear_field_validation(id);
                 Some(SettingsOverlayAction::ViewChanged)
             }
             ControlAction::TextEdited { .. } => Some(SettingsOverlayAction::ViewChanged),
@@ -563,7 +575,6 @@ impl NotoraSettingsView {
             THEME_LIGHT_ID => ThemeMode::Light,
             _ => return None,
         };
-        self.validation = None;
         Some(SettingsOverlayAction::Update(ProductSettingsUpdate::ThemeMode(theme_mode)))
     }
 
@@ -577,93 +588,34 @@ impl NotoraSettingsView {
             STATUS_BAR_ID => ProductSettingsUpdate::ShowStatusBar(checked),
             _ => return None,
         };
-        self.validation = None;
         Some(SettingsOverlayAction::Update(update))
     }
 
     fn map_text_commit(&mut self, id: WidgetId, value: &str) -> Option<SettingsOverlayAction> {
-        let update = match id {
-            FONT_FAMILY_ID => ProductSettingsUpdate::FontFamily(self.parse_font_family(value)?),
-            FONT_SIZE_ID => ProductSettingsUpdate::FontSize(self.parse_f32_field(
-                value,
-                MINIMUM_FONT_SIZE,
-                MAXIMUM_FONT_SIZE,
-            )?),
-            LINE_HEIGHT_RATIO_ID => ProductSettingsUpdate::LineHeightRatio(self.parse_f32_field(
-                value,
-                MINIMUM_LINE_HEIGHT_RATIO,
-                MAXIMUM_LINE_HEIGHT_RATIO,
-            )?),
-            TAB_WIDTH_ID => ProductSettingsUpdate::TabWidth(self.parse_usize_field(
-                value,
-                MINIMUM_TAB_WIDTH,
-                MAXIMUM_TAB_WIDTH,
-            )?),
-            RUNTIME_TAB_LIMIT_ID => {
-                ProductSettingsUpdate::RuntimeTabLimit(self.parse_usize_field(
-                    value,
-                    MINIMUM_RUNTIME_TAB_LIMIT,
-                    MAXIMUM_RUNTIME_TAB_LIMIT,
-                )?)
-            }
-            AUTO_SAVE_DELAY_ID => {
-                ProductSettingsUpdate::AutoSaveDelayMillis(self.parse_u64_field(
-                    value,
-                    MINIMUM_AUTO_SAVE_DELAY_MILLIS,
-                    MAXIMUM_AUTO_SAVE_DELAY_MILLIS,
-                )?)
-            }
-            CATALOG_BACKUP_RETENTION_ID => {
-                ProductSettingsUpdate::CatalogBackupRetention(self.parse_usize_field(
-                    value,
-                    MINIMUM_CATALOG_BACKUP_RETENTION,
-                    MAXIMUM_CATALOG_BACKUP_RETENTION,
-                )?)
-            }
-            _ => return None,
+        let update = parse_text_update(id, value);
+        let Some(update) = update else {
+            self.validation = field_validation(id);
+            return None;
         };
-        self.validation = None;
+        self.text_drafts.remove(&id);
+        self.clear_field_validation(id);
         Some(SettingsOverlayAction::Update(update))
     }
 
-    fn parse_font_family(&mut self, value: &str) -> Option<String> {
-        let font_family = parse_non_empty(value);
-        if font_family.is_none() {
-            self.set_validation("字体名称不能为空");
+    fn clear_field_validation(&mut self, id: WidgetId) {
+        if self.validation.is_some_and(|validation| validation.id == id) {
+            self.validation = None;
         }
-        font_family
     }
 
-    fn parse_f32_field(&mut self, value: &str, minimum: f32, maximum: f32) -> Option<f32> {
-        let parsed = value.trim().parse::<f32>().ok();
-        let valid =
-            parsed.filter(|number| number.is_finite() && (minimum..=maximum).contains(number));
-        if valid.is_none() {
-            self.set_validation("数值超出允许范围");
-        }
-        valid
+    fn uses_stacked_rows(&self) -> bool {
+        let content_width = self.form_rect.w / self.dpi - ROW_HORIZONTAL_INSET_LOGICAL * 2.0;
+        content_width
+            < ROW_LABEL_WIDTH_LOGICAL + ROW_COLUMN_GAP_LOGICAL + SEGMENT_WIDTH_LOGICAL * 3.0
     }
 
-    fn parse_usize_field(&mut self, value: &str, minimum: usize, maximum: usize) -> Option<usize> {
-        let parsed = value.trim().parse::<usize>().ok();
-        let valid = parsed.filter(|number| (minimum..=maximum).contains(number));
-        if valid.is_none() {
-            self.set_validation("数值超出允许范围");
-        }
-        valid
-    }
-
-    fn parse_u64_field(&mut self, value: &str, minimum: u64, maximum: u64) -> Option<u64> {
-        let parsed = value.trim().parse::<u64>().ok();
-        let valid = parsed.filter(|number| (minimum..=maximum).contains(number));
-        if valid.is_none() {
-            self.set_validation("数值超出允许范围");
-        }
-        valid
-    }
-
-    fn set_validation(&mut self, message: &'static str) {
-        self.validation = Some(FieldValidation { message });
+    fn row_height_logical(&self) -> f32 {
+        if self.uses_stacked_rows() { STACKED_ROW_HEIGHT_LOGICAL } else { ROW_HEIGHT_LOGICAL }
     }
 
     fn category_index_at(&self, px: f32, py: f32) -> Option<usize> {
@@ -698,53 +650,121 @@ impl NotoraSettingsView {
         let Some(message) = self.message_text() else {
             return;
         };
-        context.text(
-            self.message_rect.x,
-            self.message_rect.y + self.message_rect.h * 0.5 + 4.0 * context.dpi,
-            DESCRIPTION_FONT_SIZE_LOGICAL * context.dpi,
-            self.settings_theme.text_secondary,
-            message,
-        );
+        let text_width = if self.retry_is_visible() {
+            (self.retry_button_rect().x - self.message_rect.x - MESSAGE_GAP_LOGICAL * self.dpi)
+                .max(0.0)
+        } else {
+            self.message_rect.w
+        };
+        let (offset_x, offset_y) = context.list.offset;
+        context.list.cmds.push(ui::core::paint::DrawCmd::PushClip(Rect::new(
+            self.message_rect.x + offset_x,
+            self.message_rect.y + offset_y,
+            text_width,
+            self.message_rect.h,
+        )));
+        self.paint_message_lines(message, text_width, context);
+        context.list.cmds.push(ui::core::paint::DrawCmd::PopClip);
         if self.retry_is_visible() {
             paint_widget_at(&self.retry_button, self.retry_button_rect(), context);
         }
     }
+
+    fn paint_message_lines(&self, message: &str, width: f32, context: &mut PaintCtx<'_>) {
+        let message = if self.validation.is_none() && self.retry_is_visible() {
+            std::borrow::Cow::Owned(format!("设置未保存：{message}"))
+        } else {
+            std::borrow::Cow::Borrowed(message)
+        };
+        let font_size = DESCRIPTION_FONT_SIZE_LOGICAL * context.dpi;
+        let lines = ui::core::text_layout::wrap_text_to_lines(
+            &message,
+            width,
+            MESSAGE_MAXIMUM_LINES,
+            |text| ui::core::text_util::estimate_text_width_px(text, font_size),
+        );
+        let line_height = MESSAGE_LINE_HEIGHT_LOGICAL * context.dpi;
+        let text_top =
+            self.message_rect.y + (self.message_rect.h - line_height * lines.len() as f32) * 0.5;
+        for (index, line) in lines.iter().enumerate() {
+            context.text(
+                self.message_rect.x,
+                text_top
+                    + line_height * (index as f32 + 0.5)
+                    + MESSAGE_BASELINE_OFFSET_LOGICAL * context.dpi,
+                font_size,
+                self.settings_theme.text_secondary,
+                line,
+            );
+        }
+    }
 }
 
-fn settings_section(title: &str, description: &str, rows: Vec<FormRow>) -> FormSection {
-    FormSection::new(
-        section_title_label(title),
-        Some(description_label(description)),
-        rows,
-        settings_section_style(),
-    )
-}
+impl NotoraSettingsView {
+    fn settings_section(&self, title: &str, description: &str, rows: Vec<FormRow>) -> FormSection {
+        FormSection::new(
+            section_title_label(title),
+            Some(description_label(description)),
+            rows,
+            self.settings_section_style(),
+        )
+    }
 
-fn text_row(
-    id: WidgetId,
-    title: &str,
-    description: &str,
-    value: &str,
-    placeholder: &str,
-) -> FormRow {
-    let mut text_box = settings_text_box(id);
-    text_box.set_text(value);
-    text_box.set_placeholder(placeholder);
-    FormRow::new(
-        row_label(title),
-        Some(description_label(description)),
-        Box::new(text_box),
-        settings_row_style(),
-    )
-}
+    fn text_row(
+        &self,
+        id: WidgetId,
+        title: &str,
+        description: &str,
+        value: &str,
+        placeholder: &str,
+    ) -> FormRow {
+        let mut text_box = settings_text_box(id);
+        text_box.set_text(self.text_drafts.get(&id).map(String::as_str).unwrap_or(value));
+        text_box.set_placeholder(placeholder);
+        FormRow::new(
+            row_label(title),
+            Some(description_label(description)),
+            Box::new(text_box),
+            self.settings_row_style(),
+        )
+    }
 
-fn switch_row(id: WidgetId, title: &str, description: &str, checked: bool) -> FormRow {
-    FormRow::new(
-        row_label(title),
-        Some(description_label(description)),
-        Box::new(Switch::new(id, checked)),
-        settings_row_style(),
-    )
+    fn switch_row(&self, id: WidgetId, title: &str, description: &str, checked: bool) -> FormRow {
+        FormRow::new(
+            row_label(title),
+            Some(description_label(description)),
+            Box::new(Switch::new(id, checked)),
+            self.settings_row_style(),
+        )
+    }
+
+    fn settings_row_style(&self) -> FormRowStyle {
+        FormRowStyle {
+            min_height_logical: ROW_HEIGHT_LOGICAL,
+            label_width_logical: ROW_LABEL_WIDTH_LOGICAL,
+            column_gap_logical: ROW_COLUMN_GAP_LOGICAL,
+            responsive_threshold_logical: ROW_LABEL_WIDTH_LOGICAL
+                + ROW_COLUMN_GAP_LOGICAL
+                + SEGMENT_WIDTH_LOGICAL * 3.0,
+            stack_gap_logical: ROW_STACK_GAP_LOGICAL,
+            padding_logical: [
+                ROW_VERTICAL_INSET_LOGICAL,
+                ROW_HORIZONTAL_INSET_LOGICAL,
+                ROW_VERTICAL_INSET_LOGICAL,
+                ROW_HORIZONTAL_INSET_LOGICAL,
+            ],
+        }
+    }
+
+    fn settings_section_style(&self) -> FormSectionStyle {
+        FormSectionStyle {
+            title_gap_logical: SECTION_TITLE_GAP_LOGICAL,
+            description_gap_logical: SECTION_DESCRIPTION_GAP_LOGICAL,
+            row_height_logical: self.row_height_logical(),
+            corner_radius_logical: SECTION_CORNER_RADIUS_LOGICAL,
+            ..FormSectionStyle::default()
+        }
+    }
 }
 
 fn settings_text_box(id: WidgetId) -> TextBox {
@@ -752,32 +772,6 @@ fn settings_text_box(id: WidgetId) -> TextBox {
     text_box.set_fixed_size_logical(TEXT_BOX_WIDTH_LOGICAL, CONTROL_HEIGHT_LOGICAL);
     text_box.set_blink(true);
     text_box
-}
-
-fn settings_row_style() -> FormRowStyle {
-    FormRowStyle {
-        min_height_logical: ROW_HEIGHT_LOGICAL,
-        label_width_logical: ROW_LABEL_WIDTH_LOGICAL,
-        column_gap_logical: ROW_COLUMN_GAP_LOGICAL,
-        responsive_threshold_logical: 0.0,
-        padding_logical: [
-            ROW_VERTICAL_INSET_LOGICAL,
-            ROW_HORIZONTAL_INSET_LOGICAL,
-            ROW_VERTICAL_INSET_LOGICAL,
-            ROW_HORIZONTAL_INSET_LOGICAL,
-        ],
-        ..FormRowStyle::default()
-    }
-}
-
-fn settings_section_style() -> FormSectionStyle {
-    FormSectionStyle {
-        title_gap_logical: SECTION_TITLE_GAP_LOGICAL,
-        description_gap_logical: SECTION_DESCRIPTION_GAP_LOGICAL,
-        row_height_logical: ROW_HEIGHT_LOGICAL,
-        corner_radius_logical: SECTION_CORNER_RADIUS_LOGICAL,
-        ..FormSectionStyle::default()
-    }
 }
 
 fn section_title_label(text: &str) -> Label {
@@ -911,13 +905,76 @@ fn parse_non_empty(value: &str) -> Option<String> {
     (!trimmed.is_empty()).then(|| trimmed.to_owned())
 }
 
+fn parse_number<T: std::str::FromStr + PartialOrd>(
+    value: &str,
+    minimum: T,
+    maximum: T,
+) -> Option<T> {
+    value.trim().parse().ok().filter(|number| (minimum..=maximum).contains(number))
+}
+
+fn parse_text_update(id: WidgetId, value: &str) -> Option<ProductSettingsUpdate> {
+    Some(match id {
+        FONT_FAMILY_ID => ProductSettingsUpdate::FontFamily(parse_non_empty(value)?),
+        FONT_SIZE_ID => ProductSettingsUpdate::FontSize(parse_number(
+            value,
+            MINIMUM_FONT_SIZE,
+            MAXIMUM_FONT_SIZE,
+        )?),
+        LINE_HEIGHT_RATIO_ID => ProductSettingsUpdate::LineHeightRatio(parse_number(
+            value,
+            MINIMUM_LINE_HEIGHT_RATIO,
+            MAXIMUM_LINE_HEIGHT_RATIO,
+        )?),
+        TAB_WIDTH_ID => ProductSettingsUpdate::TabWidth(parse_number(
+            value,
+            MINIMUM_TAB_WIDTH,
+            MAXIMUM_TAB_WIDTH,
+        )?),
+        RUNTIME_TAB_LIMIT_ID => ProductSettingsUpdate::RuntimeTabLimit(parse_number(
+            value,
+            MINIMUM_RUNTIME_TAB_LIMIT,
+            MAXIMUM_RUNTIME_TAB_LIMIT,
+        )?),
+        AUTO_SAVE_DELAY_ID => ProductSettingsUpdate::AutoSaveDelayMillis(parse_number(
+            value,
+            MINIMUM_AUTO_SAVE_DELAY_MILLIS,
+            MAXIMUM_AUTO_SAVE_DELAY_MILLIS,
+        )?),
+        CATALOG_BACKUP_RETENTION_ID => ProductSettingsUpdate::CatalogBackupRetention(parse_number(
+            value,
+            MINIMUM_CATALOG_BACKUP_RETENTION,
+            MAXIMUM_CATALOG_BACKUP_RETENTION,
+        )?),
+        _ => return None,
+    })
+}
+
+fn field_validation(id: WidgetId) -> Option<FieldValidation> {
+    let message = match id {
+        FONT_FAMILY_ID => "字体名称不能为空",
+        FONT_SIZE_ID => "字号：请输入 6–72 的数值",
+        LINE_HEIGHT_RATIO_ID => "行高比例：请输入 1–3 的数值",
+        TAB_WIDTH_ID => "制表符宽度：请输入 1–16 的整数",
+        RUNTIME_TAB_LIMIT_ID => "驻留标签页上限：请输入 1–128 的整数",
+        AUTO_SAVE_DELAY_ID => "自动保存延迟：请输入 100–60000 毫秒的整数",
+        CATALOG_BACKUP_RETENTION_ID => "目录索引备份数：请输入 1–100 的整数",
+        _ => return None,
+    };
+    Some(FieldValidation { id, message })
+}
+
 fn format_float(value: f32) -> String {
-    format!("{value:.3}").trim_end_matches('0').trim_end_matches('.').to_owned()
+    value.to_string()
 }
 
 fn fallback_settings_theme() -> SettingsTheme {
     ui::theme::test_theme().settings_theme()
 }
+
+#[cfg(test)]
+#[path = "notora_settings_view_tests.rs"]
+mod regression_tests;
 
 #[cfg(test)]
 mod tests {

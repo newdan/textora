@@ -80,6 +80,13 @@ impl FormView {
         let _ = self.set_scroll_offset(0.0);
     }
 
+    /// Update row sizing for the next layout without replacing controls or their editing state.
+    pub fn set_row_height_logical(&mut self, row_height_logical: f32) {
+        for section in &mut self.sections {
+            section.set_row_height_logical(row_height_logical);
+        }
+    }
+
     pub fn scroll_offset(&self) -> f32 {
         self.scroll_offset
     }
