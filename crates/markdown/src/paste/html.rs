@@ -1882,7 +1882,25 @@ mod tests {
 
         let plaintext = parse_html("<p>one<strong>two<plaintext>raw</plaintext><p>three", None)
             .expect("plaintext consumes remaining source fixture");
-        assert_eq!(write_markdown(&plaintext.document), "one**two**\n\nraw</plaintext><p>three");
+        let markdown = write_markdown(&plaintext.document);
+        assert_eq!(markdown, "one**two**\n\nraw\\</plaintext>\\<p>three");
+
+        let reparsed = crate::parser::parse_markdown(&markdown);
+        assert!(
+            reparsed
+                .events
+                .iter()
+                .all(|event| !matches!(event, crate::parser::MarkdownEvent::InlineHtml(_)))
+        );
+        let visible_text: String = reparsed
+            .events
+            .into_iter()
+            .filter_map(|event| match event {
+                crate::parser::MarkdownEvent::Text(text) => Some(text),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(visible_text, "onetworaw</plaintext><p>three");
     }
 
     #[test]

@@ -515,6 +515,21 @@ struct ListStackEntry {
 
 const ORDERED_LIST_PREVIEW_START: u64 = 1;
 
+pub(crate) fn inline_code_content_range(spelling: &str) -> Range<usize> {
+    let delimiter_len = spelling.bytes().take_while(|&byte| byte == b'`').count();
+    let mut content = delimiter_len..spelling.len() - delimiter_len;
+    let body = &spelling[content.clone()];
+    let is_padding = |character| matches!(character, ' ' | '\r' | '\n');
+    if body.starts_with(is_padding)
+        && body.ends_with(is_padding)
+        && body.chars().any(|character| !is_padding(character))
+    {
+        content.start += 1;
+        content.end -= 1;
+    }
+    content
+}
+
 // ===== MarkdownBuilder =====
 
 struct MarkdownBuilder {
@@ -522,7 +537,6 @@ struct MarkdownBuilder {
     pending_line: PendingLine,
     text_style_stack: Vec<TextStyleMod>,
     code_block_depth: usize,
-    link_depth: usize,
     list_stack: Vec<ListStackEntry>,
     table: TableState,
     /// 当前事件在源码中的字节范围，由 build 循环每轮更新。
@@ -549,7 +563,6 @@ impl MarkdownBuilder {
             pending_line: PendingLine::default(),
             text_style_stack: vec![],
             code_block_depth: 0,
-            link_depth: 0,
             list_stack: vec![],
             table: TableState::default(),
             current_event_range: 0..0,
@@ -642,6 +655,47 @@ impl MarkdownBuilder {
     fn push_text_with_source(&mut self, text: &str, source_range: Range<usize>) {
         self.append_text_and_style(text);
         self.pending_line.projection.push_direct(text, source_range);
+    }
+
+    fn push_inline_code(&mut self, code: &str, source: &str) {
+        let event_range = self.current_event_range.clone();
+        let spelling = &source[event_range.clone()];
+        let content = inline_code_content_range(spelling);
+        let content_start = event_range.start + content.start;
+        let content_end = event_range.start + content.end;
+        self.push_text_style(TextStyleMod::InlineCode);
+        self.append_text_and_style(code);
+        let mut source_characters = source[content_start..content_end].char_indices().rev();
+        let mut anchors = Vec::with_capacity(code.chars().count());
+        // The parser removes container prefixes and table escapes. Align from the
+        // end so repeated characters in those prefixes never replace content anchors.
+        for character in code.chars().rev() {
+            let Some((offset, original)) = source_characters.find(|(_, original)| {
+                let normalized = if matches!(original, '\r' | '\n') { ' ' } else { *original };
+                normalized == character
+            }) else {
+                self.pending_line.projection.push_collapsed(code, content_start..content_end);
+                self.pop_text_style();
+                return;
+            };
+            let start = content_start + offset;
+            anchors.push((character, start..start + original.len_utf8()));
+        }
+        let mut source_cursor = content_start;
+        for (character, range) in anchors.into_iter().rev() {
+            if source_cursor < range.start {
+                self.pending_line.projection.push_collapsed("", source_cursor..range.start);
+            }
+            let mut encoded = [0; 4];
+            let visible = character.encode_utf8(&mut encoded);
+            if source[range.clone()] == *visible {
+                self.pending_line.projection.push_direct(visible, range.clone());
+            } else {
+                self.pending_line.projection.push_collapsed(visible, range.clone());
+            }
+            source_cursor = range.end;
+        }
+        self.pop_text_style();
     }
 
     fn append_text_and_style(&mut self, text: &str) {
@@ -760,10 +814,19 @@ impl MarkdownDoc {
     /// Parse-event structure shared by layout and source-only editing commands.
     pub(crate) fn build_structure(parsed: &ParsedMarkdown) -> Self {
         let mut builder = MarkdownBuilder::new();
+        let mut image_depth = 0usize;
 
         for (event_idx, event) in parsed.events.iter().enumerate() {
             if event_idx < parsed.event_ranges.len() {
                 builder.current_event_range = parsed.event_ranges[event_idx].clone();
+            }
+            if image_depth > 0 {
+                match event {
+                    MarkdownEvent::Start(MarkdownTag::Image { .. }) => image_depth += 1,
+                    MarkdownEvent::End(MarkdownTagEnd::Image) => image_depth -= 1,
+                    _ => {}
+                }
+                continue;
             }
             match event {
                 // ---- Block-level Start ----
@@ -821,7 +884,6 @@ impl MarkdownDoc {
                         builder.push_block(BlockKind::MetadataBlock);
                     }
                     MarkdownTag::Link { url, .. } => {
-                        builder.link_depth += 1;
                         builder.push_text_style(TextStyleMod::Link { url: url.clone() });
                     }
                     MarkdownTag::Table(alignments) => {
@@ -845,8 +907,13 @@ impl MarkdownDoc {
                         builder.push_block(BlockKind::TableCell_ { col, row, is_header });
                     }
                     MarkdownTag::Image { url, title: _ } => {
-                        builder.link_depth += 1;
-                        builder.push_text(&format!("[Image: {}]", url));
+                        let placeholder = format!("[Image: {url}]");
+                        builder.append_text_and_style(&placeholder);
+                        builder
+                            .pending_line
+                            .projection
+                            .push_collapsed(&placeholder, builder.current_event_range.clone());
+                        image_depth = 1;
                     }
                 },
 
@@ -880,12 +947,9 @@ impl MarkdownDoc {
                         builder.code_block_depth = builder.code_block_depth.saturating_sub(1);
                     }
                     MarkdownTagEnd::Link => {
-                        builder.link_depth = builder.link_depth.saturating_sub(1);
                         builder.pop_text_style();
                     }
-                    MarkdownTagEnd::Image => {
-                        builder.link_depth = builder.link_depth.saturating_sub(1);
-                    }
+                    MarkdownTagEnd::Image => {}
                     MarkdownTagEnd::Table => {
                         builder.pop_block();
                         builder.table.end();
@@ -904,7 +968,13 @@ impl MarkdownDoc {
                 // ---- Inline ----
                 MarkdownEvent::Text(text) => {
                     let text_start = builder.current_event_range.start;
-                    builder.push_text_with_source(text, builder.current_event_range.clone());
+                    let range = builder.current_event_range.clone();
+                    if parsed.source[range.clone()] == *text {
+                        builder.push_text_with_source(text, range);
+                    } else {
+                        builder.append_text_and_style(text);
+                        builder.pending_line.projection.push_collapsed(text, range);
+                    }
                     if builder.code_block_depth > 0
                         && let Some(block) = builder.block_stack.last_mut()
                         && matches!(block.kind, BlockKind::CodeBlock { .. })
@@ -922,14 +992,7 @@ impl MarkdownDoc {
                     }
                 }
                 MarkdownEvent::Code(code) => {
-                    // InlineCode 是原子事件 (无 Start/End)，手动管理 source_range。
-                    let code_source = builder.current_event_range.clone();
-                    builder.inline_start_offsets.push(code_source.start);
-                    builder.push_text_style(TextStyleMod::InlineCode);
-                    builder.push_text(code);
-                    builder.finalize_inline_source_range(code_source.end);
-                    builder.inline_start_offsets.pop();
-                    builder.text_style_stack.pop();
+                    builder.push_inline_code(code, &parsed.source);
                 }
                 MarkdownEvent::InlineHtml(html) => {
                     if inline_html_is_break(html) {
@@ -1097,7 +1160,7 @@ fn modifier_to_inline(m: &TextStyleMod) -> Option<InlineStyle> {
     }
 }
 
-/// Merge overlapping/adjacent style spans. Higher-priority styles win on overlap.
+/// Merge fragments of the same source style node while retaining delimiter ownership.
 fn merge_style_spans(mut spans: Vec<StyleSpan>) -> Vec<StyleSpan> {
     if spans.is_empty() {
         return spans;
@@ -1109,7 +1172,10 @@ fn merge_style_spans(mut spans: Vec<StyleSpan>) -> Vec<StyleSpan> {
     for span in spans {
         if let Some(last) = merged.last_mut() {
             let last_end = last.start + last.len;
-            if last.start + last.len >= span.start && last.style == span.style {
+            if last_end >= span.start
+                && last.style == span.style
+                && last.source_range.start == span.source_range.start
+            {
                 // Extend last span
                 let new_end = (span.start + span.len).max(last_end);
                 last.len = new_end - last.start;

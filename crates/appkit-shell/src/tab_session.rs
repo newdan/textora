@@ -388,6 +388,21 @@ impl<'a> TabSession<'a> {
         match_color: [f32; 4],
         inactive_color: [f32; 4],
     ) -> DrawList {
+        let search = self.search_state();
+        if query == search.query
+            && match_case == search.options.match_case
+            && use_regex == search.options.use_regex
+            && let PluginResponse::DrawList(draw_list) =
+                self.query(PluginQuery::SourceSearchHighlights {
+                    matches: search.matches.clone(),
+                    source_generation: search.buffer_generation,
+                    active_idx,
+                    match_color,
+                    inactive_color,
+                })
+        {
+            return draw_list;
+        }
         match self.query(PluginQuery::SearchHighlights {
             query,
             match_case,

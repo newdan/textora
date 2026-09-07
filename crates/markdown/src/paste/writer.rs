@@ -56,6 +56,39 @@ mod tests {
     }
 
     #[test]
+    fn rich_text_reparses_literal_html_and_entities_as_text() {
+        let documents = [
+            RichDocument::new(vec![RichBlock::Paragraph(vec![RichInline::Strong(text(
+                "<br> &copy;",
+            ))])]),
+            RichDocument::new(vec![RichBlock::Paragraph(vec![RichInline::Link {
+                destination: "https://example.com".into(),
+                title: None,
+                children: text("<span> &amp;"),
+            }])]),
+            RichDocument::new(vec![RichBlock::Table {
+                header: vec![text("<head>")],
+                rows: vec![vec![text("&copy;")]],
+            }]),
+        ];
+        let expected_text = ["<br> &copy;", "<span> &amp;", "<head>&copy;"];
+
+        for (document, expected) in documents.into_iter().zip(expected_text) {
+            let markdown = write_markdown(&document);
+            let reparsed_text: String = crate::parser::parse_markdown(&markdown)
+                .events
+                .into_iter()
+                .filter_map(|event| match event {
+                    MarkdownEvent::Text(text) => Some(text),
+                    _ => None,
+                })
+                .collect();
+
+            assert_eq!(reparsed_text, expected, "generated Markdown: {markdown:?}");
+        }
+    }
+
+    #[test]
     fn code_fence_is_longer_than_backticks_in_content() {
         let document = RichDocument::new(vec![RichBlock::CodeBlock {
             language: Some("rust".into()),
@@ -1109,6 +1142,9 @@ fn should_escape_text_character(
 ) -> bool {
     match character {
         '\\' | '`' | '*' | '_' | '[' | ']' | '!' | '~' => true,
+        '<' => next_character
+            .is_some_and(|next| next.is_ascii_alphabetic() || matches!(next, '/' | '!' | '?')),
+        '&' => next_character.is_some_and(|next| next.is_ascii_alphanumeric() || next == '#'),
         '|' => context.table_cell,
         '.' | ')' => state.starts_ordered_list_marker(character, next_character),
         '=' | '#' | '+' | '-' | '>' => state.is_line_structure_start(),

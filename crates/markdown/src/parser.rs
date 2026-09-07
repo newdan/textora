@@ -62,6 +62,8 @@ pub enum MarkdownTagEnd {
 /// Result of parsing markdown text.
 #[derive(Clone, Debug, Default)]
 pub struct ParsedMarkdown {
+    /// Original spelling needed to project normalized parser text onto source boundaries.
+    pub(crate) source: String,
     pub events: Vec<MarkdownEvent>,
     /// event_ranges[i] = events[i] 在源码中的完整字节区间。
     pub event_ranges: Vec<Range<usize>>,
@@ -134,7 +136,7 @@ pub fn parse_markdown(src: &str) -> ParsedMarkdown {
     // Post-pass: detect tight vs loose lists and blank lines before lists.
     detect_list_properties(&mut events, src, &event_ranges);
 
-    ParsedMarkdown { events, event_ranges }
+    ParsedMarkdown { source: src.to_owned(), events, event_ranges }
 }
 
 fn convert_tag(tag: Tag<'_>) -> Option<MarkdownTag> {

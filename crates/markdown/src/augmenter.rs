@@ -178,6 +178,9 @@ fn delete_forward_remove_inline_html_break(
     let html_break =
         INLINE_HTML_BREAKS.into_iter().find(|html_break| suffix.starts_with(html_break))?;
     let replace_end = current_byte + html_break.len();
+    if !is_inline_html_break_range(source, current_byte..replace_end) {
+        return None;
+    }
     let augmentation = EditAugmentation {
         insert_text: Some(String::new()),
         replace_range: Some(current_byte..replace_end),
@@ -529,6 +532,9 @@ fn backspace_remove_inline_html_break(
     let html_break =
         INLINE_HTML_BREAKS.into_iter().find(|html_break| prefix.ends_with(html_break))?;
     let replace_start = current_byte - html_break.len();
+    if !is_inline_html_break_range(source, replace_start..current_byte) {
+        return None;
+    }
     let augmentation = EditAugmentation {
         insert_text: Some(String::new()),
         replace_range: Some(replace_start..current_byte),
@@ -536,6 +542,14 @@ fn backspace_remove_inline_html_break(
     };
     debug_assert_augmentation(&augmentation, source);
     Some(augmentation)
+}
+
+fn is_inline_html_break_range(source: &str, candidate_range: std::ops::Range<usize>) -> bool {
+    let parsed = crate::parser::parse_markdown(source);
+    parsed.events.iter().zip(&parsed.event_ranges).any(|(event, event_range)| {
+        matches!(event, crate::parser::MarkdownEvent::InlineHtml(_))
+            && *event_range == candidate_range
+    })
 }
 
 fn backspace_join_reopened_inline_elements(
@@ -3254,6 +3268,63 @@ mod tests {
         let mut edited_source = source.to_owned();
         edited_source.replace_range(grapheme_start..current_byte, "");
         (edited_source, grapheme_start)
+    }
+
+    fn apply_delete_forward_with_default(source: &str, current_byte: usize) -> (String, usize) {
+        if let Some(augmentation) = augment_delete_forward(source, current_byte) {
+            return (
+                apply_augmentation_at(source, current_byte, &augmentation),
+                augmentation.cursor_byte_after,
+            );
+        }
+
+        let grapheme = UnicodeSegmentation::graphemes(&source[current_byte..], true)
+            .next()
+            .expect("Delete fixture must have a following grapheme");
+        let mut edited_source = source.to_owned();
+        edited_source.replace_range(current_byte..current_byte + grapheme.len(), "");
+        (edited_source, current_byte)
+    }
+
+    #[test]
+    fn code_html_literal_backspace_removes_one_character() {
+        for (source, current_byte, expected) in [
+            ("```\n<br>\n```", "```\n<br>".len(), "```\n<br\n```"),
+            ("`<br>`", "`<br>".len(), "`<br`"),
+            (r"\<br>", r"\<br>".len(), r"\<br"),
+        ] {
+            let (edited, _) = apply_backspace_with_default(source, current_byte);
+            assert_eq!(edited, expected, "failed for {source:?}");
+        }
+    }
+
+    #[test]
+    fn code_html_literal_delete_removes_one_character() {
+        for (source, current_byte, expected) in [
+            ("```\n<br>\n```", "```\n".len(), "```\nbr>\n```"),
+            ("`<br>`", 1, "`br>`"),
+            (r"\<br>", 1, r"\br>"),
+        ] {
+            let (edited, _) = apply_delete_forward_with_default(source, current_byte);
+            assert_eq!(edited, expected, "failed for {source:?}");
+        }
+    }
+
+    #[test]
+    fn inline_html_break_deletion_removes_the_complete_element() {
+        for html_break in ["<br>", "<br/>", "<br />"] {
+            let source = format!("before{html_break}after");
+            let break_start = "before".len();
+            let break_end = break_start + html_break.len();
+
+            let (backspaced, backspace_cursor) = apply_backspace_with_default(&source, break_end);
+            assert_eq!(backspaced, "beforeafter");
+            assert_eq!(backspace_cursor, break_start);
+
+            let (deleted, delete_cursor) = apply_delete_forward_with_default(&source, break_start);
+            assert_eq!(deleted, "beforeafter");
+            assert_eq!(delete_cursor, break_start);
+        }
     }
 
     fn assert_empty_paragraph_text_roundtrip(

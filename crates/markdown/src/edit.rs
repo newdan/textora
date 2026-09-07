@@ -228,6 +228,17 @@ fn inline_expansion(
     span: &StyleSpan,
     source: &str,
 ) -> Option<InlineExpansion> {
+    if span.style == InlineStyle::InlineCode {
+        let spelling = source.get(span.source_range.clone())?;
+        let content = crate::builder::inline_code_content_range(spelling);
+        let content_start = span.source_range.start + content.start;
+        let content_end = span.source_range.start + content.end;
+        return Some(InlineExpansion {
+            prefix: span.source_range.start..content_start,
+            content: content_start..content_end,
+            suffix: content_end..span.source_range.end,
+        });
+    }
     let start_grapheme = crate::grapheme_map::grapheme_index_at_byte(&base.text, span.start);
     let end_grapheme =
         crate::grapheme_map::grapheme_index_at_byte(&base.text, span.start + span.len);

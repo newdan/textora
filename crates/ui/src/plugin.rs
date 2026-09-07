@@ -204,6 +204,14 @@ pub enum PluginQuery {
         match_color: [f32; 4],
         inactive_color: [f32; 4],
     },
+    /// Highlight authoritative source matches from the document search state.
+    SourceSearchHighlights {
+        matches: Vec<std::ops::Range<usize>>,
+        source_generation: u32,
+        active_idx: usize,
+        match_color: [f32; 4],
+        inactive_color: [f32; 4],
+    },
     /// Collect selection highlight quads in the given color.
     SelectionHighlights([f32; 4]),
     /// Flatten visible lines into text for copy/search.

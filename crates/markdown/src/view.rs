@@ -28,6 +28,15 @@ use ui::plugin::{
 };
 use unicode_segmentation::UnicodeSegmentation;
 
+#[path = "view_preedit.rs"]
+mod preedit;
+
+#[path = "view_source_search.rs"]
+mod source_search;
+
+#[path = "view_navigation.rs"]
+mod navigation;
+
 #[cfg(test)]
 #[path = "view_empty_paragraph_tests.rs"]
 mod empty_paragraph_tests;
@@ -318,6 +327,8 @@ struct BlockAnchor {
 enum EngineDirty {
     Clean,
     SourceChanged,
+    /// Current source projection is ready; visible glyph shaping is deferred to paint.
+    QueryLayoutReady,
     /// Reserved for future style-change event (e.g. theme toggle).
     /// Currently unused: style changes are detected via `cached_style_hash` comparison
     /// in `needs_rebuild()`, not via this variant.
@@ -344,6 +355,7 @@ pub struct PreviewEngine<S: BlockSource = MarkdownDoc> {
     lazy: Option<LazyLayout<S>>,
     dirty: EngineDirty,
     cached_style_hash: u64,
+    cached_query_style: Option<MarkdownStyle>,
     cached_viewport_w: f32,
 
     pub scroll_y: f32,
@@ -386,6 +398,7 @@ pub struct PreviewEngine<S: BlockSource = MarkdownDoc> {
     pub cursor_visible: bool,
     /// Actual shaped advance from an editable empty line's start to the IME caret.
     standalone_preedit_cursor_advance: Option<f32>,
+    replacement_preedit: Option<preedit::ReplacementPreedit<S>>,
 }
 
 impl Default for PreviewEngine {
@@ -400,6 +413,7 @@ impl<S: BlockSource> PreviewEngine<S> {
             lazy: None,
             dirty: EngineDirty::SourceChanged,
             cached_style_hash: 0,
+            cached_query_style: None,
             cached_viewport_w: 0.0,
             scroll_y: 0.0,
             content_height: 0.0,
@@ -431,6 +445,7 @@ impl<S: BlockSource> PreviewEngine<S> {
             source_generation: 0,
             cursor_visible: true,
             standalone_preedit_cursor_advance: None,
+            replacement_preedit: None,
         }
     }
 
@@ -453,6 +468,7 @@ impl<S: BlockSource> PreviewEngine<S> {
         let preedit_cursor = self.edit_ctx.as_ref().and_then(|ctx| ctx.preedit_cursor);
         self.edit_ctx =
             Some(crate::edit::EditContext { cursor_byte: new_byte, preedit_text, preedit_cursor });
+        self.update_replacement_preedit();
         if old_byte.is_none() {
             self.dirty = EngineDirty::SourceChanged;
         } else if !matches!(self.dirty, EngineDirty::SourceChanged) {
@@ -478,10 +494,12 @@ impl<S: BlockSource> PreviewEngine<S> {
         if existing_ctx.preedit_text == preedit_text
             && existing_ctx.preedit_cursor == preedit_cursor
         {
+            self.update_replacement_preedit();
             return;
         }
         self.edit_ctx =
             Some(crate::edit::EditContext { cursor_byte, preedit_text, preedit_cursor });
+        self.update_replacement_preedit();
         if !matches!(self.dirty, EngineDirty::SourceChanged) {
             self.dirty =
                 EngineDirty::CursorMoved { old_byte: Some(cursor_byte), new_byte: cursor_byte };
@@ -713,6 +731,7 @@ impl<S: BlockSource> PreviewEngine<S> {
         let mut render_path = "draw";
         self.rendered_body_font_size = style.body_font_size;
         self.rendered_line_height = style.line_height;
+        self.cached_query_style = Some(style.clone());
         let style_hash = style_hash_quick(style);
         let highlighter = AppCodeHighlighter { theme };
         if style_hash != self.navigation_metrics_style_hash
@@ -759,6 +778,26 @@ impl<S: BlockSource> PreviewEngine<S> {
             perf_rebuild_us = rebuild_started_at.elapsed().as_micros();
             self.cached_style_hash = style_hash;
             self.cached_viewport_w = viewport_w;
+        }
+
+        if self.dirty == EngineDirty::QueryLayoutReady {
+            let selection_range = self.byte_selection_range().map(|(start, end)| start..end);
+            if let Some(lazy) = self.lazy.as_mut() {
+                if let Some(active_shaper) = shaper.as_deref_mut() {
+                    lazy.refresh_precise_range(
+                        self.scroll_y,
+                        viewport_h,
+                        style,
+                        active_shaper,
+                        Some(&highlighter),
+                        doc_view,
+                    );
+                }
+                lazy.set_selection_range(selection_range);
+                lazy.build_flat_lines(doc_view);
+                self.content_height = lazy.total_height;
+            }
+            self.dirty = EngineDirty::Clean;
         }
 
         // Handle cursor-only changes: invalidate affected blocks without full rebuild.
@@ -926,6 +965,9 @@ impl<S: BlockSource> PreviewEngine<S> {
     // ── Selection ──
 
     pub fn hit_test(&self, px: f32, py: f32, offset_x: f32, offset_y: f32) -> Option<ViewPos> {
+        if let Some(composition) = &self.replacement_preedit {
+            return composition.engine.hit_test(px, py, offset_x, offset_y);
+        }
         let lazy = self.lazy.as_ref()?;
         selection::hit_test(&lazy.flat_lines, self.scroll_y, px, py, offset_x, offset_y)
     }
@@ -941,19 +983,28 @@ impl<S: BlockSource> PreviewEngine<S> {
     }
 
     pub fn select_all(&mut self) {
-        let Some(ref lazy) = self.lazy else { return };
-        self.sel.select_all(&lazy.flat_lines);
-        self.sel_anchor_byte = None;
-        self.sel_cursor_byte = None;
+        if let Some(lazy) = &self.lazy {
+            self.sel.select_all(&lazy.flat_lines);
+        } else if self.edit_source.is_none() {
+            return;
+        }
+        self.sel_anchor_byte = self.edit_source.as_ref().map(|_| 0);
+        self.sel_cursor_byte = self.edit_source.as_ref().map(String::len);
         self.mark_selection_changed();
     }
 
     pub fn word_at_pos(&self, pos: ViewPos) -> (ViewPos, ViewPos) {
+        if let Some(composition) = &self.replacement_preedit {
+            return composition.engine.word_at_pos(pos);
+        }
         let Some(ref lazy) = self.lazy else { return (pos, pos) };
         selection::word_at_pos(&lazy.flat_lines, pos)
     }
 
     pub fn line_range_at_pos(&self, pos: ViewPos) -> (ViewPos, ViewPos) {
+        if let Some(composition) = &self.replacement_preedit {
+            return composition.engine.line_range_at_pos(pos);
+        }
         let Some(ref lazy) = self.lazy else {
             return (
                 ViewPos { flat_line_idx: pos.flat_line_idx, grapheme_pos: 0 },
@@ -969,10 +1020,8 @@ impl<S: BlockSource> PreviewEngine<S> {
     }
 
     fn byte_selection_range(&self) -> Option<(usize, usize)> {
-        if let (Some(anchor), Some(cursor)) = (self.sel_anchor_byte, self.sel_cursor_byte)
-            && anchor != cursor
-        {
-            return Some((anchor.min(cursor), anchor.max(cursor)));
+        if let (Some(anchor), Some(cursor)) = (self.sel_anchor_byte, self.sel_cursor_byte) {
+            return (anchor != cursor).then_some((anchor.min(cursor), anchor.max(cursor)));
         }
 
         let (start, end) = self.sel.range()?;
@@ -993,6 +1042,9 @@ impl<S: BlockSource> PreviewEngine<S> {
     }
 
     pub fn selection_highlights(&self, sel_color: [f32; 4]) -> DrawList {
+        if self.replacement_preedit.is_some() {
+            return DrawList::new();
+        }
         let Some(ref lazy) = self.lazy else { return DrawList::new() };
         let Some((start, end)) =
             self.sel.range().or_else(|| self.visual_range_for_byte_selection())
@@ -1053,6 +1105,7 @@ impl<S: BlockSource> PreviewEngine<S> {
     }
 
     fn mark_selection_changed(&mut self) {
+        self.update_replacement_preedit();
         if matches!(self.dirty, EngineDirty::Clean | EngineDirty::SelectionChanged) {
             self.dirty = EngineDirty::SelectionChanged;
         }
@@ -1118,12 +1171,28 @@ impl<S: BlockSource> PreviewEngine<S> {
     // ── Flat lines ──
 
     pub fn flat_lines(&self) -> &[crate::layout::FlatLine] {
+        if let Some(composition) = &self.replacement_preedit {
+            return composition.engine.flat_lines();
+        }
         self.lazy.as_ref().map_or(&[], |l| &l.flat_lines)
     }
 
     /// Expose canonical projection boundaries for tests.
     #[cfg(test)]
     pub fn flat_line_projection_boundaries(&self) -> Vec<FlatLineProjectionBoundaries> {
+        if let Some(composition) = &self.replacement_preedit {
+            return composition
+                .engine
+                .flat_line_projection_boundaries()
+                .into_iter()
+                .map(|mut line| {
+                    for byte in &mut line.boundaries {
+                        *byte = composition.source_byte(*byte);
+                    }
+                    line
+                })
+                .collect();
+        }
         self.lazy
             .as_ref()
             .map(|lazy| {
@@ -1157,7 +1226,12 @@ impl<S: BlockSource> PreviewEngine<S> {
 
     /// 接收来自 app 层的光标位置变更通知。
     pub fn handle_set_cursor_byte(&mut self, byte: usize) {
+        let query_layout_ready = self.dirty == EngineDirty::QueryLayoutReady;
+        let previous_byte = self.edit_ctx.as_ref().map(|context| context.cursor_byte);
         self.mark_cursor_moved(byte);
+        if query_layout_ready && previous_byte != Some(byte) {
+            self.refresh_query_cursor_layout(previous_byte, byte);
+        }
     }
 
     /// 设置 WYSIWYG 编辑的完整源码文本。用于 span 展开时读取原始 markers。
@@ -1188,6 +1262,9 @@ impl<S: BlockSource> PreviewEngine<S> {
     /// y = fl.rect.y - scroll_y，与 render_line_with_offset 的投影一致。
     /// 调用方加 plugin_render_bounds().origin 即得窗口像素坐标。
     pub fn cursor_screen_pos(&self) -> Option<(f32, f32, f32, f32)> {
+        if let Some(composition) = &self.replacement_preedit {
+            return composition.engine.cursor_screen_pos();
+        }
         let ctx = self.edit_ctx.as_ref()?;
         self.cursor_screen_pos_for_byte(ctx.cursor_byte)
     }
@@ -1226,6 +1303,11 @@ impl<S: BlockSource> PreviewEngine<S> {
     }
 
     fn cursor_screen_pos_for_byte(&self, cursor_byte: usize) -> Option<(f32, f32, f32, f32)> {
+        if let Some(composition) = &self.replacement_preedit {
+            return composition
+                .engine
+                .cursor_screen_pos_for_byte(composition.preview_byte(cursor_byte));
+        }
         let lazy = self.lazy.as_ref()?;
 
         if let Some(rect) = self.empty_source_line_cursor_screen_pos(cursor_byte) {
@@ -1333,6 +1415,9 @@ impl<S: BlockSource> PreviewEngine<S> {
     }
 
     fn visual_cursor_screen_pos(&self) -> Option<(f32, f32, f32, f32)> {
+        if let Some(composition) = &self.replacement_preedit {
+            return composition.engine.cursor_screen_pos();
+        }
         let ctx = self.edit_ctx.as_ref()?;
         let preedit_text = ctx.preedit_text.as_deref().filter(|text| !text.is_empty())?;
         let lazy = self.lazy.as_ref()?;
@@ -1518,6 +1603,12 @@ impl<S: BlockSource> PreviewEngine<S> {
     /// 输入 y/offset_y 为插件渲染空间坐标；内部加回 scroll_y 以匹配
     /// flat_line 的文档绝对 y（与 render_line_with_offset 的投影互逆）。
     pub fn hit_test_byte(&self, x: f32, y: f32, offset_x: f32, offset_y: f32) -> Option<usize> {
+        if let Some(composition) = &self.replacement_preedit {
+            return composition
+                .engine
+                .hit_test_byte(x, y, offset_x, offset_y)
+                .map(|byte| composition.source_byte(byte));
+        }
         let lazy = self.lazy.as_ref()?;
         let doc_x = x - offset_x;
         let doc_y = y - offset_y + self.scroll_y;
@@ -1597,6 +1688,12 @@ impl<S: BlockSource> PreviewEngine<S> {
         flat_line_idx: usize,
         visual_grapheme: usize,
     ) -> Option<usize> {
+        if let Some(composition) = &self.replacement_preedit {
+            return composition
+                .engine
+                .byte_from_flat_line_and_visual_grapheme(flat_line_idx, visual_grapheme)
+                .map(|byte| composition.source_byte(byte));
+        }
         let lazy = self.lazy.as_ref()?;
         let index = lazy.source_projection_index.as_ref()?;
         let projection_flat_line_idx =
@@ -1620,6 +1717,11 @@ impl<S: BlockSource> PreviewEngine<S> {
     }
 
     fn find_flat_and_grapheme_for_byte(&self, byte: usize) -> Option<(usize, usize)> {
+        if let Some(composition) = &self.replacement_preedit {
+            return composition
+                .engine
+                .find_flat_and_grapheme_for_byte(composition.preview_byte(byte));
+        }
         let position = self.cursor_visual_position_for_byte(byte, CursorAffinity::Downstream)?;
         let flat_line_idx =
             self.lazy.as_ref()?.flat_line_idx_for_projection(position.flat_line_idx)?;
@@ -1680,6 +1782,12 @@ impl<S: BlockSource> PreviewEngine<S> {
         target_x: Option<f32>,
     ) -> Option<usize> {
         use ui::plugin::MoveDirection;
+        if let Some(composition) = &self.replacement_preedit {
+            return composition
+                .engine
+                .visual_move(composition.preview_byte(current_byte), direction, target_x)
+                .map(|byte| composition.source_byte(byte));
+        }
         let lazy = self.lazy.as_ref()?;
         let source = self.edit_source.as_ref();
         let current_source_line = source.and_then(|text| source_line_at_byte(text, current_byte));
@@ -2491,6 +2599,11 @@ impl MarkdownEditorView {
 
     pub fn set_source(&mut self, text: String, generation: u32) {
         let hash = fxhash(&text);
+        let source_changed =
+            hash != self.cached_source_hash || generation != self.cached_generation;
+        if source_changed {
+            self.engine.set_preedit_text(String::new(), None);
+        }
         if hash != self.cached_source_hash {
             self.source = text;
             self.cached_source_hash = hash;
@@ -2499,6 +2612,9 @@ impl MarkdownEditorView {
         self.engine.set_edit_source(Some(self.source.clone()));
         self.engine.set_source_generation(generation);
         self.cached_generation = generation;
+        if source_changed {
+            self.engine.prepare_current_source_layout(&self.source);
+        }
     }
 
     pub fn needs_source_update(&self, generation: u32) -> bool {
@@ -2757,86 +2873,7 @@ impl ViewPlugin for MarkdownEditorView {
         shaper: &mut shaping::Shaper,
         dpi_scale: f32,
     ) -> DrawList {
-        let _t0 = std::time::Instant::now();
-        let settings = MarkdownRenderSettings {
-            font_size: self.engine.base_font_size * dpi_scale,
-            line_height: self.engine.base_line_height * dpi_scale,
-            toc_max_depth: self.engine.toc_max_depth,
-            markdown_first_line_indent: self.engine.markdown_first_line_indent,
-        };
-        let style = settings.style(theme);
-        self.engine.toc_max_depth = settings.toc_max_depth;
-        let source = &self.source;
-        let string_doc = core::document::StringDocView::new(source);
-        let (mut dl, _) = self.engine.render(
-            theme,
-            bounds.w,
-            bounds.h,
-            bounds.x,
-            bounds.y,
-            &style,
-            |s| {
-                let parsed = crate::parser::parse_markdown(source);
-                crate::builder::MarkdownDoc::build_for_editing(&parsed, s, source)
-            },
-            Some(shaper),
-            &string_doc,
-            true,  // editing keeps whole-document flat lines for selection/navigation.
-            false, // precise shaping/highlighting stays viewport-driven for responsiveness.
-        );
-        let _dur = _t0.elapsed().as_micros();
-        #[cfg(debug_assertions)]
-        {
-            let _ = std::fs::OpenOptions::new()
-                .create(true)
-                .append(true)
-                .open("/tmp/perf.log")
-                .and_then(|mut f| {
-                    use std::io::Write;
-                    writeln!(f, "[md render] {} us", _dur)
-                });
-            println!("[md render] {} us", _dur);
-        }
-        if let Some(preedit) = self.engine.standalone_preedit_render_data() {
-            let preedit_text = preedit.text.to_owned();
-            let preedit_cursor = preedit.cursor;
-            let preedit_x = preedit.x;
-            let preedit_baseline_y = preedit.baseline_y;
-            let preedit_font_size = preedit.font_size;
-            let cursor_offset = preedit_cursor_offset(&preedit_text, preedit_cursor);
-            let cursor_advance = ui::core::text_layout::UiTextLayout::new(
-                &preedit_text[..cursor_offset],
-                preedit_font_size,
-                None,
-                shaping::Weight::NORMAL,
-                shaping::Style::Normal,
-                false,
-                shaper,
-            )
-            .map_or(0.0, |layout| layout.shaped.width);
-            self.engine.set_standalone_preedit_cursor_advance(cursor_advance);
-            dl.text_shaped(
-                bounds.x + preedit_x,
-                bounds.y + preedit_baseline_y,
-                preedit_font_size,
-                theme.editor.foreground,
-                &preedit_text,
-                shaper,
-            );
-        }
-        // Draw cursor at the WYSIWYG position (only when blink phase is visible)
-        if self.engine.cursor_visible
-            && let Some((cx, cy, cw, ch)) =
-                self.engine.visual_cursor_screen_pos().or_else(|| self.engine.cursor_screen_pos())
-        {
-            let cursor_x = bounds.x + cx;
-            let cursor_y = bounds.y + cy;
-            let visual_cw = cw * dpi_scale;
-            let cursor_rect =
-                ui::core::geom::Rect::new(cursor_x - visual_cw * 0.5, cursor_y, visual_cw, ch);
-            dl.fill(cursor_rect, theme.editor.cursor);
-        }
-        dl
+        preedit::render_editor(self, bounds, theme, shaper, dpi_scale)
     }
 
     fn handle_message(
@@ -2857,6 +2894,14 @@ impl ViewPlugin for MarkdownEditorView {
     }
 
     fn query(&self, q: PluginQuery, _doc: &dyn DocView) -> PluginResponse {
+        if self.engine.replacement_preedit.is_some()
+            && matches!(
+                &q,
+                PluginQuery::SearchHighlights { .. } | PluginQuery::SourceSearchHighlights { .. }
+            )
+        {
+            return PluginResponse::DrawList(DrawList::new());
+        }
         if let Some(resp) = self.engine.query_common(&q) {
             return resp;
         }
@@ -2864,10 +2909,32 @@ impl ViewPlugin for MarkdownEditorView {
             PluginQuery::NeedsSourceUpdate(gen_id) => {
                 PluginResponse::Bool(self.needs_source_update(gen_id))
             }
-            PluginQuery::SearchHighlights { .. } => {
-                // WYSIWYG editor delegates search to the app layer.
-                PluginResponse::DrawList(DrawList::new())
-            }
+            PluginQuery::SearchHighlights {
+                query,
+                match_case,
+                use_regex,
+                active_idx,
+                match_color,
+                inactive_color,
+            } => PluginResponse::DrawList(self.query_search_highlights(
+                &query,
+                match_case,
+                use_regex,
+                active_idx,
+                match_color,
+                inactive_color,
+            )),
+            PluginQuery::SourceSearchHighlights {
+                matches,
+                source_generation,
+                active_idx,
+                match_color,
+                inactive_color,
+            } => PluginResponse::DrawList(if source_generation == self.cached_generation {
+                self.source_search_highlights(&matches, active_idx, match_color, inactive_color)
+            } else {
+                DrawList::new()
+            }),
             PluginQuery::PlanSemanticEdit {
                 command,
                 source_generation,

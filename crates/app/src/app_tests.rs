@@ -2626,6 +2626,100 @@ fn render_active_wysiwyg_plugin_for_test(app: &mut App) -> ui::core::paint::Draw
     render_active_wysiwyg_plugin_in_bounds_for_test(app, bounds)
 }
 
+#[test]
+#[cfg(feature = "markdown")]
+fn wysiwyg_edit_then_navigation_does_not_require_an_intervening_paint() {
+    use crate::input::EditCommand;
+    let mut app = App::new(None);
+    let mut document = DocumentView::new(vec!["abc".into()], 80, 10.0);
+    document.cursor_move_to_offset(1);
+    app.push_entry_for_test(document, Box::new(textora_markdown::view::MarkdownEditorView::new()));
+    app.switch_workspace_for_test(0);
+    app.sync_plugin_state();
+    render_active_wysiwyg_plugin_for_test(&mut app);
+
+    assert!(app.dispatch_transactional_edit_for_test(EditCommand::InsertText("中".into())).redraw);
+    assert!(app.dispatch_wysiwyg_navigation(&EditCommand::MoveRight).redraw);
+    let tab = app.active_tab_session().expect("active Markdown editor");
+    assert_eq!(tab.full_text(), "a中bc");
+    assert_eq!(tab.cursor_offset().to_usize(), 5);
+    assert!(tab.query_cursor_screen_rect(5).is_some());
+
+    app.active_tab_session_mut().expect("active editor").document.undo();
+    app.sync_plugin_state();
+    assert!(app.dispatch_wysiwyg_navigation(&EditCommand::MoveRight).redraw);
+    let tab = app.active_tab_session().expect("active editor after undo");
+    assert_eq!(tab.full_text(), "abc");
+    assert_eq!(tab.cursor_offset().to_usize(), 2);
+
+    app.active_tab_session_mut().expect("active editor").document.redo();
+    app.sync_plugin_state();
+    assert_eq!(app.active_tab_session().expect("restored caret").cursor_offset().to_usize(), 5);
+    assert!(app.dispatch_wysiwyg_navigation(&EditCommand::MoveRight).redraw);
+    let tab = app.active_tab_session().expect("active editor after redo");
+    assert_eq!(tab.full_text(), "a中bc");
+    assert_eq!(tab.cursor_offset().to_usize(), 6);
+}
+
+#[test]
+#[cfg(feature = "markdown")]
+fn wysiwyg_search_geometry_uses_the_document_match_list() {
+    let mut app = App::new(None);
+    let document = DocumentView::new(vec!["one two one".into()], 80, 10.0);
+    app.push_entry_for_test(document, Box::new(textora_markdown::view::MarkdownEditorView::new()));
+    app.switch_workspace_for_test(0);
+    app.sync_plugin_state();
+    render_active_wysiwyg_plugin_for_test(&mut app);
+    {
+        let mut tab = app.active_tab_session_mut().expect("active Markdown editor");
+        let generation = tab.document.tb().gap_buffer().generation();
+        let search = tab.search_state_mut();
+        search.query = "one".into();
+        search.options.match_case = true;
+        search.update_matches(std::iter::once(8..11).collect(), generation);
+    }
+    let tab = app.active_tab_session().expect("active Markdown editor");
+    let highlights = tab.search_highlights("one".into(), true, false, 0, [1.0; 4], [0.5; 4]);
+    assert_eq!(
+        highlights.cmds.len(),
+        1,
+        "the plugin must use authoritative matches rather than searching again"
+    );
+    assert!(
+        matches!(highlights.cmds[0], ui::core::paint::DrawCmd::FillRect { color, .. } if color == [1.0; 4])
+    );
+}
+
+#[test]
+#[cfg(feature = "markdown")]
+fn wysiwyg_ime_navigation_preview_matches_commit() {
+    use crate::input::EditCommand;
+    let mut app = App::new(None);
+    let mut document = DocumentView::new(vec!["old tail".into()], 80, 10.0);
+    document.cursor_move_to_offset(3);
+    document.cursor_mut().selection_anchor = Some(0);
+    app.push_entry_for_test(document, Box::new(textora_markdown::view::MarkdownEditorView::new()));
+    app.switch_workspace_for_test(0);
+    set_editor_preedit_for_test(&mut app, "新", Some((3, 3)));
+    app.sync_plugin_state();
+    render_active_wysiwyg_plugin_for_test(&mut app);
+    assert_eq!(app.active_tab_session().expect("composing editor").flat_lines()[0].text, "新 tail");
+
+    app.dispatch_wysiwyg_navigation(&EditCommand::MoveRight);
+    set_editor_preedit_for_test(&mut app, "新", Some((3, 3)));
+    app.sync_plugin_state();
+    render_active_wysiwyg_plugin_for_test(&mut app);
+    let preview = app.active_tab_session().expect("navigated editor").flat_lines()[0].text.clone();
+    assert_eq!(preview, "old 新tail");
+    app.dispatch_transactional_edit_for_test(EditCommand::InsertText("新".into()));
+    set_editor_preedit_for_test(&mut app, "", None);
+    app.sync_plugin_state();
+    render_active_wysiwyg_plugin_for_test(&mut app);
+    let tab = app.active_tab_session().expect("committed editor");
+    assert_eq!(tab.full_text(), preview);
+    assert_eq!(tab.flat_lines()[0].text, preview);
+}
+
 #[cfg(feature = "markdown")]
 fn render_active_wysiwyg_plugin_in_bounds_for_test(
     app: &mut App,

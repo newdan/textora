@@ -34,7 +34,7 @@ pub fn plan_semantic_edit(
             plan_inline_toggle(source, source_generation, cursor_byte, selection, "~~")
         }
         SemanticEditCommand::ToggleInlineCode => {
-            plan_inline_toggle(source, source_generation, cursor_byte, selection, CODE_MARKER)
+            plan_inline_code(source, source_generation, cursor_byte, selection)
         }
         SemanticEditCommand::UnorderedList => plan_line_prefix(
             source,
@@ -112,6 +112,74 @@ fn plan_inline_toggle(
         replacement.clone(),
         range.start + replacement.len(),
     )
+}
+
+fn plan_inline_code(
+    source: &str,
+    source_generation: u32,
+    cursor_byte: usize,
+    selection: Option<std::ops::Range<usize>>,
+) -> SemanticEditPlan {
+    let Some(range) = selection.filter(|range| range.start < range.end) else {
+        return apply_transaction(
+            source_generation,
+            cursor_byte..cursor_byte,
+            CODE_MARKER.repeat(2),
+            cursor_byte + CODE_MARKER.len(),
+        );
+    };
+    let selected = &source[range.clone()];
+    let replacement = unwrap_inline_code(selected).unwrap_or_else(|| wrap_inline_code(selected));
+    apply_transaction(
+        source_generation,
+        range.clone(),
+        replacement.clone(),
+        range.start + replacement.len(),
+    )
+}
+
+fn wrap_inline_code(content: &str) -> String {
+    let delimiter = CODE_MARKER.repeat(longest_backtick_run(content).saturating_add(1));
+    let needs_padding = inline_code_needs_boundary_padding(content);
+    let padding = if needs_padding { " " } else { "" };
+    format!("{delimiter}{padding}{content}{padding}{delimiter}")
+}
+
+fn unwrap_inline_code(source: &str) -> Option<String> {
+    let opening_length = source.bytes().take_while(|byte| *byte == b'`').count();
+    let closing_length = source.bytes().rev().take_while(|byte| *byte == b'`').count();
+    if opening_length == 0 || opening_length != closing_length || source.len() < opening_length * 2
+    {
+        return None;
+    }
+    let closing_start = source.len() - opening_length;
+    if !source[closing_start..].bytes().all(|byte| byte == b'`') {
+        return None;
+    }
+    let content = &source[opening_length..closing_start];
+    if longest_backtick_run(content) >= opening_length {
+        return None;
+    }
+    if content.len() >= 2
+        && content.starts_with(' ')
+        && content.ends_with(' ')
+        && !content.bytes().all(|byte| byte == b' ')
+    {
+        return Some(content[1..content.len() - 1].to_owned());
+    }
+    Some(content.to_owned())
+}
+
+fn inline_code_needs_boundary_padding(content: &str) -> bool {
+    if content.is_empty() || content.chars().all(char::is_whitespace) {
+        return false;
+    }
+    matches!(content.chars().next(), Some('`' | ' '))
+        || matches!(content.chars().next_back(), Some('`' | ' '))
+}
+
+fn longest_backtick_run(content: &str) -> usize {
+    content.split(|character| character != '`').map(str::len).max().unwrap_or(0)
 }
 
 fn plan_link(
@@ -196,8 +264,8 @@ fn plan_code_block(
 ) -> SemanticEditPlan {
     let target = line_selection_range(source, cursor_byte, selection.as_ref());
     let segment = &source[target.clone()];
-    let fence = CODE_MARKER.repeat(3);
-    let replacement = unwrap_code_fence(segment, &fence).unwrap_or_else(|| {
+    let replacement = unwrap_code_fence(segment).unwrap_or_else(|| {
+        let fence = CODE_MARKER.repeat(longest_backtick_run(segment).saturating_add(1).max(3));
         let newline = if source.find('\n').is_some_and(|index| source[..index].ends_with('\r')) {
             CRLF_SEQUENCE
         } else {
@@ -208,14 +276,17 @@ fn plan_code_block(
     apply_line_transaction(source, source_generation, target, replacement)
 }
 
-fn unwrap_code_fence(segment: &str, fence: &str) -> Option<String> {
+fn unwrap_code_fence(segment: &str) -> Option<String> {
     let (opening_line, after_opening) = segment.split_once('\n')?;
-    if !opening_line.trim_start().starts_with(fence) {
+    let opening_marker = opening_line.trim_start();
+    let fence_length = opening_marker.bytes().take_while(|byte| *byte == b'`').count();
+    if fence_length < 3 {
         return None;
     }
     let through_closing = after_opening.trim_end_matches(['\r', '\n']);
     let closing_start = through_closing.rfind('\n').map_or(0, |newline| newline + 1);
-    if through_closing[closing_start..].trim() != fence {
+    let closing_marker = through_closing[closing_start..].trim();
+    if closing_marker.len() < fence_length || !closing_marker.bytes().all(|byte| byte == b'`') {
         return None;
     }
     let content = &after_opening[..closing_start];
@@ -456,11 +527,102 @@ mod tests {
             (SemanticEditCommand::ToggleBold, "**"),
             (SemanticEditCommand::ToggleItalic, "*"),
             (SemanticEditCommand::ToggleStrikethrough, "~~"),
-            (SemanticEditCommand::ToggleInlineCode, CODE_MARKER),
         ] {
             let (result, _) = applied_text(marker, command, marker.len(), Some(0..marker.len()));
 
             assert_eq!(result, marker.repeat(3));
+        }
+    }
+
+    #[test]
+    fn inline_code_command_preserves_embedded_backticks_and_boundary_spaces() {
+        for selected in ["a`b", "`edge", "edge`", " leading", "trailing ", " both "] {
+            let (formatted, _) = applied_text(
+                selected,
+                SemanticEditCommand::ToggleInlineCode,
+                selected.len(),
+                Some(0..selected.len()),
+            );
+            let parsed_code: Vec<String> = crate::parser::parse_markdown(&formatted)
+                .events
+                .into_iter()
+                .filter_map(|event| match event {
+                    crate::parser::MarkdownEvent::Code(code) => Some(code),
+                    _ => None,
+                })
+                .collect();
+
+            assert_eq!(parsed_code, [selected], "generated Markdown: {formatted:?}");
+
+            let formatted_length = formatted.len();
+            let (restored, _) = applied_text(
+                &formatted,
+                SemanticEditCommand::ToggleInlineCode,
+                formatted_length,
+                Some(0..formatted_length),
+            );
+            assert_eq!(restored, selected, "failed to toggle {formatted:?}");
+        }
+    }
+
+    #[test]
+    fn inline_code_command_uses_safe_delimiters_for_a_single_backtick() {
+        let (formatted, _) = applied_text(
+            CODE_MARKER,
+            SemanticEditCommand::ToggleInlineCode,
+            CODE_MARKER.len(),
+            Some(0..CODE_MARKER.len()),
+        );
+
+        assert_eq!(formatted, "`` ` ``");
+    }
+
+    #[test]
+    fn code_block_command_uses_a_fence_longer_than_content_runs() {
+        for newline in [LF_SEQUENCE, CRLF_SEQUENCE] {
+            let source = format!("before{newline}```{newline}after");
+            let (formatted, _) = applied_text(
+                &source,
+                SemanticEditCommand::CodeBlock,
+                source.len(),
+                Some(0..source.len()),
+            );
+
+            assert!(formatted.starts_with(&format!("````{newline}")));
+            assert!(formatted.ends_with(&format!("{newline}````")));
+            let parsed = crate::parser::parse_markdown(&formatted);
+            assert_eq!(
+                parsed
+                    .events
+                    .iter()
+                    .filter(|event| matches!(
+                        event,
+                        crate::parser::MarkdownEvent::Start(
+                            crate::parser::MarkdownTag::CodeBlock { .. }
+                        )
+                    ))
+                    .count(),
+                1,
+                "generated Markdown: {formatted:?}"
+            );
+
+            let formatted_length = formatted.len();
+            let (restored, _) = applied_text(
+                &formatted,
+                SemanticEditCommand::CodeBlock,
+                formatted_length,
+                Some(0..formatted_length),
+            );
+            assert_eq!(restored, source);
+        }
+    }
+
+    #[test]
+    fn code_block_toggle_accepts_a_longer_closing_fence() {
+        for source in ["```\na\n````", "```rust\r\na\r\n````"] {
+            let (restored, _) =
+                applied_text(source, SemanticEditCommand::CodeBlock, 0, Some(0..source.len()));
+            assert_eq!(restored, "a");
         }
     }
 

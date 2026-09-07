@@ -2,7 +2,7 @@
 
 use super::{canonical_container_prefix, preferred_newline_sequence};
 use crate::builder::{
-    BlockKind, BlockNode, EditableParagraphMap, EditableParagraphRun, MarkdownDoc,
+    BlockKind, BlockNode, EditableParagraphMap, EditableParagraphRun, InlineStyle, MarkdownDoc,
 };
 use crate::parser::parse_markdown;
 use ui::plugin::EditAugmentation;
@@ -124,6 +124,11 @@ fn erased_paragraph<'a>(
             continue;
         }
         if matches!(block.kind, BlockKind::Paragraph)
+            && block.text_styles.iter().flatten().all(|span| {
+                span.style != InlineStyle::InlineCode
+                    || erased.start <= span.source_range.start
+                        && span.source_range.end <= erased.end
+            })
             && !block.projected_lines.is_empty()
             && block.projected_lines.iter().all(|line| {
                 !line.text.is_empty()

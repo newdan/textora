@@ -80,29 +80,56 @@ pub(crate) struct TextProjectionBuilder {
 }
 
 impl TextProjectionBuilder {
+    /// Map replacement display text to a single source object, without inventing offsets.
+    pub(crate) fn push_collapsed(&mut self, text: &str, source_range: Range<usize>) {
+        self.flush_pending_gap(source_range.start);
+        let visual_start = self.text.len();
+        self.text.push_str(text);
+        self.char_anchors
+            .extend(text.chars().map(|_| SourceAnchor::downstream(source_range.start)));
+        self.spans.push(ProjectionSpan {
+            source_range,
+            visual_range: visual_start..self.text.len(),
+            kind: ProjectionSpanKind::Collapsed,
+        });
+    }
+
     pub(crate) fn push_direct(&mut self, text: &str, source_range: Range<usize>) {
-        self.truncated_terminal_anchor = None;
-        if let Some(gap_start) = self.pending_gap_start.take() {
-            let visual_start = self.text.len();
-            self.text.push(' ');
-            self.char_anchors.push(SourceAnchor::upstream(gap_start));
-            self.spans.push(ProjectionSpan {
-                source_range: gap_start..source_range.start,
-                visual_range: visual_start..self.text.len(),
-                kind: ProjectionSpanKind::Collapsed,
-            });
-        }
+        self.flush_pending_gap(source_range.start);
         let visual_start = self.text.len();
         self.text.push_str(text);
         self.char_anchors.extend(
             text.char_indices()
                 .map(|(offset, _)| SourceAnchor::downstream(source_range.start + offset)),
         );
-        self.spans.push(ProjectionSpan {
-            source_range,
-            visual_range: visual_start..self.text.len(),
-            kind: ProjectionSpanKind::Direct,
-        });
+        if let Some(previous) = self.spans.last_mut()
+            && previous.kind == ProjectionSpanKind::Direct
+            && previous.source_range.end == source_range.start
+            && previous.visual_range.end == visual_start
+        {
+            previous.source_range.end = source_range.end;
+            previous.visual_range.end = self.text.len();
+        } else {
+            self.spans.push(ProjectionSpan {
+                source_range,
+                visual_range: visual_start..self.text.len(),
+                kind: ProjectionSpanKind::Direct,
+            });
+        }
+    }
+
+    fn flush_pending_gap(&mut self, next_source_start: usize) {
+        self.truncated_terminal_anchor = None;
+        if let Some(gap_start) = self.pending_gap_start.take() {
+            let visual_start = self.text.len();
+            self.text.push(' ');
+            self.char_anchors.push(SourceAnchor::upstream(gap_start));
+            self.spans.push(ProjectionSpan {
+                source_range: gap_start..next_source_start,
+                visual_range: visual_start..self.text.len(),
+                kind: ProjectionSpanKind::Collapsed,
+            });
+        }
     }
 
     pub(crate) fn push_soft_break(&mut self, event_range: Range<usize>) {
