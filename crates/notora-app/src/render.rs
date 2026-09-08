@@ -142,7 +142,7 @@ pub enum NewNoteControlState {
 struct CardHeaderLayout {
     title_x: f32,
     title_baseline_y: f32,
-    control_top_y: f32,
+    toolbar_rect: Rect,
     content_top_y: f32,
 }
 
@@ -1520,12 +1520,8 @@ impl NotoraShell {
             model.note_toolbar.len(),
             self.navigation_expand_rect,
         );
-        let new_note_rect = new_note_button_rect(
-            layout.card_list_rect,
-            dpi,
-            model.new_note_control,
-            card_header.control_top_y,
-        );
+        let new_note_rect =
+            new_note_button_rect(card_header.toolbar_rect, dpi, model.new_note_control);
         if model.show_new_document_menu {
             let metrics =
                 ui::settings::UiMetrics::from_settings(&ui::settings::Settings::new(), dpi);
@@ -1560,22 +1556,9 @@ impl NotoraShell {
             (layout.card_list_rect.bottom() - card_header.content_top_y - padding).max(0.0),
         );
         self.card_content_rect = card_content_rect;
-        let tool_button_width = NOTE_TOOL_BUTTON_WIDTH_LOGICAL * dpi;
         let tool_button_height = NOTE_TOOL_BUTTON_HEIGHT_LOGICAL * dpi;
-        let toolbar_trailing_inset = if model.new_note_control.is_visible() {
-            layout.card_list_rect.right() - new_note_rect.x + NOTE_TOOL_BUTTON_GAP_LOGICAL * dpi
-        } else {
-            padding
-        };
-        self.note_toolbar_buttons = layout_note_toolbar(
-            layout.card_list_rect,
-            padding,
-            toolbar_trailing_inset,
-            tool_button_width,
-            tool_button_height,
-            card_header.control_top_y,
-            &model.note_toolbar,
-        );
+        self.note_toolbar_buttons =
+            layout_note_toolbar(card_header.toolbar_rect, dpi, new_note_rect, &model.note_toolbar);
         self.compact_navigation_rect = if layout.responsive_mode != ResponsiveLayoutMode::ThreePane
             && layout.navigation_rect == Rect::ZERO
         {
@@ -3270,24 +3253,21 @@ fn paint_navigation_visibility_button(
 }
 
 fn layout_note_toolbar(
-    card_list_rect: Rect,
-    padding: f32,
-    trailing_inset: f32,
-    button_width: f32,
-    button_height: f32,
-    button_y: f32,
+    toolbar_rect: Rect,
+    dpi: f32,
+    new_note_rect: Rect,
     inputs: &[NoteToolbarButtonInput],
 ) -> Vec<RenderedToolbarButton> {
-    let scale = button_height / NOTE_TOOL_BUTTON_HEIGHT_LOGICAL;
-    let gap = NOTE_TOOL_BUTTON_GAP_LOGICAL * scale;
-    let available_width = (card_list_rect.w - padding - trailing_inset).max(0.0);
+    let gap = NOTE_TOOL_BUTTON_GAP_LOGICAL * dpi;
+    let trailing_inset = if new_note_rect.w > 0.0 { new_note_rect.w + gap } else { 0.0 };
+    let available_width = (toolbar_rect.w - trailing_inset).max(0.0);
     let count = inputs.len();
     let fitted_width = if count == 0 {
         0.0
     } else {
         ((available_width - gap * count.saturating_sub(1) as f32) / count as f32)
             .max(0.0)
-            .min(button_width)
+            .min(NOTE_TOOL_BUTTON_WIDTH_LOGICAL * dpi)
     };
     inputs
         .iter()
@@ -3295,13 +3275,13 @@ fn layout_note_toolbar(
         .enumerate()
         .map(|(index, input)| RenderedToolbarButton {
             rect: Rect::new(
-                card_list_rect.right()
+                toolbar_rect.right()
                     - trailing_inset
                     - fitted_width
                     - index as f32 * (fitted_width + gap),
-                button_y,
+                toolbar_rect.y,
                 fitted_width,
-                button_height,
+                toolbar_rect.h,
             ),
             icon: input.icon,
             label: input.label.clone(),
@@ -3430,32 +3410,37 @@ fn card_header_layout(
         CARD_HEADER_CONTENT_TOP_LOGICAL
     };
 
+    let fitted_width = controls_width.min((card_list_rect.w - padding * 2.0).max(0.0));
+    let toolbar_x = if wraps {
+        card_list_rect.x + (card_list_rect.w - fitted_width) * 0.5
+    } else {
+        card_list_rect.right() - padding - fitted_width
+    };
+    let toolbar_rect = if fitted_width > 0.0 && card_list_rect.h > 0.0 {
+        Rect::new(
+            toolbar_x,
+            card_list_rect.y + control_top_logical * dpi,
+            fitted_width,
+            NOTE_TOOL_BUTTON_HEIGHT_LOGICAL * dpi,
+        )
+    } else {
+        Rect::ZERO
+    };
+
     CardHeaderLayout {
         title_x,
         title_baseline_y: card_list_rect.y + CARD_HEADER_TITLE_BASELINE_LOGICAL * dpi,
-        control_top_y: card_list_rect.y + control_top_logical * dpi,
+        toolbar_rect,
         content_top_y: card_list_rect.y + content_top_logical * dpi,
     }
 }
 
-fn new_note_button_rect(
-    card_list_rect: Rect,
-    dpi: f32,
-    state: NewNoteControlState,
-    control_top_y: f32,
-) -> Rect {
-    if !state.is_visible() || card_list_rect.w <= 0.0 || card_list_rect.h <= 0.0 {
+fn new_note_button_rect(toolbar_rect: Rect, dpi: f32, state: NewNoteControlState) -> Rect {
+    if !state.is_visible() || toolbar_rect.w <= 0.0 || toolbar_rect.h <= 0.0 {
         return Rect::ZERO;
     }
-    let padding = SHELL_PADDING_LOGICAL * dpi;
-    let width =
-        (NEW_NOTE_BUTTON_WIDTH_LOGICAL * dpi).min((card_list_rect.w - padding * 2.0).max(0.0));
-    Rect::new(
-        card_list_rect.right() - padding - width,
-        control_top_y,
-        width,
-        NOTE_TOOL_BUTTON_HEIGHT_LOGICAL * dpi,
-    )
+    let width = (NEW_NOTE_BUTTON_WIDTH_LOGICAL * dpi).min(toolbar_rect.w);
+    Rect::new(toolbar_rect.right() - width, toolbar_rect.y, width, toolbar_rect.h)
 }
 
 fn local_rect(rect: Rect) -> Rect {
@@ -3634,26 +3619,56 @@ mod tests {
         let navigation_rect = Rect::new(0.0, 0.0, 220.0, 600.0);
         let card_list_rect = Rect::new(228.0, 0.0, 340.0, 600.0);
 
-        let button_rect = new_note_button_rect(
+        let header = card_header_layout(
             card_list_rect,
             1.0,
+            "文件",
             NewNoteControlState::Enabled,
-            CARD_HEADER_CONTROL_TOP_LOGICAL,
+            0,
+            Rect::ZERO,
         );
+        let button_rect =
+            new_note_button_rect(header.toolbar_rect, 1.0, NewNoteControlState::Enabled);
 
         assert!(button_rect != Rect::ZERO);
         assert!(card_list_rect.contains(button_rect.x, button_rect.y));
         assert!(card_list_rect.contains(button_rect.right(), button_rect.bottom()));
         assert!(!navigation_rect.contains(button_rect.x, button_rect.y));
         assert_eq!(
-            new_note_button_rect(
-                card_list_rect,
-                1.0,
-                NewNoteControlState::Hidden,
-                CARD_HEADER_CONTROL_TOP_LOGICAL,
-            ),
+            new_note_button_rect(header.toolbar_rect, 1.0, NewNoteControlState::Hidden,),
             Rect::ZERO
         );
+    }
+
+    #[test]
+    fn wrapped_file_toolbar_is_centered_across_column_widths_and_dpi() {
+        let buttons = note_toolbar_buttons(&NavigationScope::ExternalFiles, None, true);
+        for dpi in [1.0, 1.25, 1.5, 2.0] {
+            for width in [260.0, 268.0, 280.0] {
+                let column = Rect::new(228.0 * dpi, 20.0 * dpi, width * dpi, 600.0 * dpi);
+                let header = card_header_layout(
+                    column,
+                    dpi,
+                    "文件",
+                    NewNoteControlState::EnabledForFiles,
+                    buttons.len(),
+                    Rect::ZERO,
+                );
+                let new_rect = new_note_button_rect(
+                    header.toolbar_rect,
+                    dpi,
+                    NewNoteControlState::EnabledForFiles,
+                );
+                let toolbar = layout_note_toolbar(header.toolbar_rect, dpi, new_rect, &buttons);
+                let left = toolbar.iter().map(|button| button.rect.x).fold(new_rect.x, f32::min);
+                let left_margin = left - column.x;
+                let right_margin = column.right() - new_rect.right();
+                assert!(
+                    (left_margin - right_margin).abs() < f32::EPSILON,
+                    "独占一行的工具栏应居中：栏宽={width}，DPI={dpi}，左留白={left_margin}，右留白={right_margin}"
+                );
+            }
+        }
     }
 
     #[test]
@@ -3668,19 +3683,12 @@ mod tests {
             1,
             Rect::ZERO,
         );
-        let new_note_rect = new_note_button_rect(
-            card_list_rect,
-            1.0,
-            NewNoteControlState::Enabled,
-            header.control_top_y,
-        );
+        let new_note_rect =
+            new_note_button_rect(header.toolbar_rect, 1.0, NewNoteControlState::Enabled);
         let toolbar = layout_note_toolbar(
-            card_list_rect,
-            padding,
-            card_list_rect.right() - new_note_rect.x + NOTE_TOOL_BUTTON_GAP_LOGICAL,
-            NOTE_TOOL_BUTTON_WIDTH_LOGICAL,
-            NOTE_TOOL_BUTTON_HEIGHT_LOGICAL,
-            header.control_top_y,
+            header.toolbar_rect,
+            1.0,
+            new_note_rect,
             &[NoteToolbarButtonInput {
                 icon: None,
                 label: "操作".to_owned(),
@@ -3806,12 +3814,19 @@ mod tests {
                         .new_note_button
                         .set_input(SplitButtonInput { label: "新建".to_owned(), enabled: true });
                     let card_rect = Rect::new(0.0, 0.0, 320.0 * dpi, 200.0 * dpi);
-                    let padding = SHELL_PADDING_LOGICAL * dpi;
-                    let new_rect = new_note_button_rect(
+                    let buttons = note_toolbar_buttons(&NavigationScope::ExternalFiles, None, true);
+                    let header = card_header_layout(
                         card_rect,
                         dpi,
+                        "文件",
                         NewNoteControlState::EnabledForFiles,
-                        10.0 * dpi,
+                        buttons.len(),
+                        Rect::ZERO,
+                    );
+                    let new_rect = new_note_button_rect(
+                        header.toolbar_rect,
+                        dpi,
+                        NewNoteControlState::EnabledForFiles,
                     );
                     let mut measure = ui::NoopMeasure;
                     let mut layout_context = ui::LayoutCtx {
@@ -3821,15 +3836,8 @@ mod tests {
                         dpi,
                     };
                     shell.new_note_button.set_rect(new_rect, &mut layout_context);
-                    shell.note_toolbar_buttons = layout_note_toolbar(
-                        card_rect,
-                        padding,
-                        card_rect.right() - new_rect.x + NOTE_TOOL_BUTTON_GAP_LOGICAL * dpi,
-                        NOTE_TOOL_BUTTON_WIDTH_LOGICAL * dpi,
-                        NOTE_TOOL_BUTTON_HEIGHT_LOGICAL * dpi,
-                        new_rect.y,
-                        &note_toolbar_buttons(&NavigationScope::ExternalFiles, None, true),
-                    );
+                    shell.note_toolbar_buttons =
+                        layout_note_toolbar(header.toolbar_rect, dpi, new_rect, &buttons);
                     let mut actual = DrawList::new();
                     let mut context = ui::PaintCtx::new(&mut actual, &theme, dpi);
                     context.global_alpha = alpha;
