@@ -312,6 +312,7 @@ mod tests {
             disabled_foreground: [0.5, 0.5, 0.5, 1.0],
             disabled_background: [0.0, 0.0, 0.0, 0.0],
             corner_radius_logical: 4.0,
+            background_inset_logical: 0.0,
         }
     }
 

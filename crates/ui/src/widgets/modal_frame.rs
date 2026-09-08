@@ -151,6 +151,7 @@ impl ModalFrame {
             disabled_foreground: settings.text_secondary,
             disabled_background: [0.0, 0.0, 0.0, 0.0],
             corner_radius_logical: style.corner_radius_logical * 0.5,
+            background_inset_logical: 0.0,
         }
     }
 

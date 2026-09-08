@@ -182,6 +182,10 @@ impl Widget for SplitButtonWidget {
         for (region, rect) in
             [(SplitButtonRegion::Main, self.main_rect), (SplitButtonRegion::Menu, self.menu_rect)]
         {
+            if self.presentation == SplitButtonPresentation::Toolbar {
+                style.paint_background(ctx, rect, self.region_state(region));
+                continue;
+            }
             let region_color = style.background_color(self.region_state(region), alpha);
             if region_color[3] == 0.0 {
                 continue;
@@ -653,6 +657,48 @@ mod tests {
 
         let _ = widget.on_event(&Event::MouseMove { px: 500.0, py: 500.0 }, &mut context);
         assert_eq!(widget.hovered_region, None);
+    }
+
+    #[test]
+    fn toolbar_hover_keeps_background_inside_each_region_and_clear_of_the_outer_border() {
+        let theme = crate::theme::test_theme();
+        for dpi in [1.0, 1.5, 2.0] {
+            for region in [SplitButtonRegion::Main, SplitButtonRegion::Menu] {
+                let mut widget = widget();
+                widget.set_presentation(SplitButtonPresentation::Toolbar);
+                widget.set_keyboard_focus(None);
+                layout(&mut widget, Rect::new(10.0 * dpi, 20.0 * dpi, 96.0 * dpi, 28.0 * dpi), dpi);
+                widget.hovered_region = Some(region);
+                let target = match region {
+                    SplitButtonRegion::Main => widget.main_rect(),
+                    SplitButtonRegion::Menu => widget.menu_rect(),
+                };
+                let mut draw_list = DrawList::new();
+                widget.paint(&mut PaintCtx::new(&mut draw_list, &theme, dpi));
+                let highlights: Vec<_> = draw_list
+                    .cmds
+                    .iter()
+                    .filter_map(|command| match command {
+                        DrawCmd::FillRect { rect, color, radius }
+                            if *color == theme.application_theme().button_hover_surface =>
+                        {
+                            Some((*rect, *radius))
+                        }
+                        _ => None,
+                    })
+                    .collect();
+                assert_eq!(highlights.len(), 1, "悬停区域只能绘制一次背景");
+                let (background, radius) = highlights[0];
+                assert!(
+                    background.x > target.x
+                        && background.y > target.y
+                        && background.right() < target.right()
+                        && background.bottom() < target.bottom(),
+                    "工具栏悬停背景应缩进当前区域，不能覆盖外框或相邻区域：{background:?}，{target:?}"
+                );
+                assert!(radius > 0.0, "悬停背景应保持完整圆角");
+            }
+        }
     }
 
     #[test]

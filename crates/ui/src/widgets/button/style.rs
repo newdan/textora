@@ -13,6 +13,7 @@ const CATEGORY_SELECTED_ACCENT_BLEND: f32 = 0.14;
 const SEGMENT_HOVER_ACCENT_BLEND: f32 = 0.16;
 const SEGMENT_PRESSED_ACCENT_BLEND: f32 = 0.14;
 const TOOLBAR_DIVIDER_INSET_LOGICAL: f32 = 6.0;
+const TOOLBAR_BACKGROUND_INSET_LOGICAL: f32 = 2.0;
 
 /// 互斥的按钮视觉状态；选中状态始终保持前景与背景成对使用。
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -40,6 +41,8 @@ pub struct ButtonStyle {
     pub disabled_foreground: [f32; 4],
     pub disabled_background: [f32; 4],
     pub corner_radius_logical: f32,
+    /// 背景相对点击区域的内缩距离，保留外框与相邻操作之间的留白。
+    pub background_inset_logical: f32,
 }
 
 impl ButtonStyle {
@@ -49,6 +52,7 @@ impl ButtonStyle {
             background: TRANSPARENT,
             disabled_background: TRANSPARENT,
             border: TRANSPARENT,
+            background_inset_logical: TOOLBAR_BACKGROUND_INSET_LOGICAL,
             ..self
         }
     }
@@ -98,6 +102,7 @@ impl ButtonStyle {
             disabled_foreground: with_alpha(settings.text_primary, BUTTON_DISABLED_ALPHA),
             disabled_background: with_alpha(settings.button_surface, BUTTON_DISABLED_ALPHA),
             corner_radius_logical: metrics.corner_radius_logical,
+            background_inset_logical: 0.0,
         }
     }
 
@@ -222,9 +227,17 @@ impl ButtonStyle {
         state: ButtonVisualState,
     ) {
         let color = self.background_color(state, context.global_alpha);
-        if color[3] > 0.0 {
-            context.list.fill_rounded(rect, color, self.corner_radius_logical * context.dpi);
+        if color[3] <= 0.0 {
+            return;
         }
+        let inset = self.background_inset_logical * context.dpi;
+        let background_rect = rect.shrink(inset, inset, inset, inset);
+        if background_rect == Rect::ZERO {
+            return;
+        }
+        let radius =
+            (self.corner_radius_logical - self.background_inset_logical).max(0.0) * context.dpi;
+        context.list.fill_rounded(background_rect, color, radius);
     }
 
     pub fn paint_outline(&self, context: &mut PaintCtx<'_>, rect: Rect, state: ButtonVisualState) {
@@ -270,6 +283,32 @@ mod tests {
             Theme::resolve_builtin(crate::ThemeMode::Light, winit::window::Theme::Light),
             Theme::resolve_builtin(crate::ThemeMode::Dark, winit::window::Theme::Dark),
         ]
+    }
+
+    #[test]
+    fn toolbar_action_background_preserves_clearance_from_its_outer_border() {
+        use crate::core::paint::{DrawCmd, DrawList};
+
+        for theme in builtin_themes() {
+            for dpi in [1.0, 1.5, 2.0] {
+                for state in [
+                    ButtonVisualState::Hovered,
+                    ButtonVisualState::Pressed,
+                    ButtonVisualState::Selected,
+                ] {
+                    let style = ButtonStyle::from_theme(&theme).toolbar_item();
+                    let rect = Rect::new(10.0 * dpi, 20.0 * dpi, 64.0 * dpi, 28.0 * dpi);
+                    let mut draw_list = DrawList::new();
+                    style.paint(&mut PaintCtx::new(&mut draw_list, &theme, dpi), rect, state);
+                    assert!(draw_list.cmds.iter().any(|command| matches!(command,
+                        DrawCmd::FillRect { rect: background, radius, .. }
+                            if background.x > rect.x && background.y > rect.y
+                                && background.right() < rect.right() && background.bottom() < rect.bottom()
+                                && *radius > 0.0
+                    )), "工具栏操作的 {state:?} 底色不能覆盖外框");
+                }
+            }
+        }
     }
 
     #[test]

@@ -369,14 +369,16 @@ mod tests {
 
         widget.paint(&mut PaintCtx::new(&mut draw_list, &theme, 1.0));
 
-        assert!(draw_list.cmds.windows(3).any(|commands| {
-            matches!(commands[0], DrawCmd::PushClip(rect) if rect == dropdown)
-                && matches!(
-                    commands[1],
-                    DrawCmd::FillRect { color, .. } if color == theme.application_theme().button_pressed_surface
-                )
-                && matches!(commands[2], DrawCmd::PopClip)
-        }));
+        assert!(
+            draw_list.cmds.iter().any(|command| matches!(command,
+                DrawCmd::FillRect { rect, color, radius }
+                    if *color == theme.application_theme().button_pressed_surface
+                        && rect.x > dropdown.x && rect.y > dropdown.y
+                        && rect.right() < dropdown.right() && rect.bottom() < dropdown.bottom()
+                        && *radius > 0.0
+            )),
+            "菜单展开时应保留内缩的圆角高亮，不能覆盖工具栏外框"
+        );
     }
 
     #[test]
