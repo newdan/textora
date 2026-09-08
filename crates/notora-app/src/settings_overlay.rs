@@ -4,7 +4,9 @@
 //! Textora 的设置业务页面，也不访问文件系统或 editor runtime。
 
 use ui::ThemeMode;
-use ui::core::{Dock, Event, EventCtx, LayoutCtx, PaintCtx, Rect};
+use ui::button::{Button, ButtonStyle};
+use ui::core::widget::ControlAction;
+use ui::core::{Dock, Event, EventCtx, LayoutCtx, PaintCtx, Rect, Widget, WidgetAction, WidgetId};
 
 use crate::notora_settings_view::NotoraSettingsView;
 use crate::settings::ProductSettings;
@@ -14,7 +16,16 @@ const PANEL_PREFERRED_HEIGHT_LOGICAL: f32 = 560.0;
 const PANEL_MINIMUM_MARGIN_LOGICAL: f32 = 24.0;
 const PANEL_MAXIMUM_WIDTH_RATIO: f32 = 0.92;
 const PANEL_MAXIMUM_HEIGHT_RATIO: f32 = 0.90;
-const PANEL_CORNER_RADIUS_LOGICAL: f32 = 12.0;
+pub(super) const PANEL_CORNER_RADIUS_LOGICAL: f32 = 12.0;
+pub(super) const PANEL_HEADER_HEIGHT_LOGICAL: f32 = 48.0;
+const CLOSE_BUTTON_ID: WidgetId = WidgetId(0x6e6f_746f_636c_6f73);
+const CLOSE_BUTTON_SIZE_LOGICAL: f32 = 32.0;
+const CLOSE_BUTTON_INSET_LOGICAL: f32 = 12.0;
+const CLOSE_ICON_SIZE_LOGICAL: f32 = 16.0;
+const HEADER_TITLE_INSET_LOGICAL: f32 = 20.0;
+const HEADER_TITLE_BASELINE_LOGICAL: f32 = 30.0;
+const HEADER_TITLE_FONT_SIZE_LOGICAL: f32 = 16.0;
+const TRANSPARENT: [f32; 4] = [0.0; 4];
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub enum NotoraSettingsPersistenceView {
@@ -108,6 +119,7 @@ pub enum SettingsOverlayAction {
 pub struct SettingsOverlay {
     view: NotoraSettingsView,
     panel_rect: Rect,
+    close_button: Button,
 }
 
 impl Default for SettingsOverlay {
@@ -118,9 +130,15 @@ impl Default for SettingsOverlay {
 
 impl SettingsOverlay {
     pub fn new() -> Self {
+        let mut close_button =
+            Button::new(CLOSE_BUTTON_ID, close_button_style(&ui::theme::test_theme()));
+        close_button.set_icon(Some("x".to_owned()));
+        close_button.set_icon_size(CLOSE_ICON_SIZE_LOGICAL);
+        close_button.set_accessibility_label(Some("关闭设置".to_owned()));
         Self {
             view: NotoraSettingsView::new(SettingsOverlayInput::default()),
             panel_rect: Rect::ZERO,
+            close_button,
         }
     }
 
@@ -135,19 +153,25 @@ impl SettingsOverlay {
     pub fn set_rect(&mut self, overlay_rect: Rect, context: &mut LayoutCtx<'_>) {
         self.panel_rect = resolve_panel_rect(overlay_rect, context.dpi);
         self.view.set_rect(Rect::new(0.0, 0.0, self.panel_rect.w, self.panel_rect.h), context);
+        self.close_button.set_style(close_button_style(context.theme));
+        self.close_button
+            .set_rect(resolve_close_button_rect(self.panel_rect, context.dpi), context);
     }
 
     pub fn paint(&self, context: &mut PaintCtx<'_>) {
-        context.list.fill_rounded(
-            self.panel_rect,
-            context.theme.settings_theme().modal_surface,
-            PANEL_CORNER_RADIUS_LOGICAL * context.dpi,
-        );
         let saved_offset = context.list.offset;
         context.list.offset =
             (saved_offset.0 + self.panel_rect.x, saved_offset.1 + self.panel_rect.y);
         self.view.paint(context);
         context.list.offset = saved_offset;
+        context.text(
+            self.panel_rect.x + HEADER_TITLE_INSET_LOGICAL * context.dpi,
+            self.panel_rect.y + HEADER_TITLE_BASELINE_LOGICAL * context.dpi,
+            HEADER_TITLE_FONT_SIZE_LOGICAL * context.dpi,
+            context.theme.settings_theme().text_primary,
+            "设置",
+        );
+        self.close_button.paint(context);
     }
 
     pub fn route_event(
@@ -155,12 +179,68 @@ impl SettingsOverlay {
         event: &Event,
         context: &mut EventCtx<'_>,
     ) -> Option<SettingsOverlayAction> {
-        if is_backdrop_click(event, self.panel_rect) {
-            return Some(SettingsOverlayAction::Dismiss);
+        if matches!(event, Event::KeyDown(ui::KeyCode::Escape, _)) {
+            return self.dismiss(context);
         }
+        if self.close_button.is_capturing()
+            && matches!(event, Event::MouseMove { .. } | Event::MouseUp { .. })
+        {
+            return self.route_close_event(event, context);
+        }
+        if is_backdrop_click(event, self.panel_rect) {
+            return self.dismiss(context);
+        }
+        if let Event::MouseDown { px, py, .. } = event
+            && self.close_button.rect().contains(*px, *py)
+        {
+            return self.route_close_event(event, context);
+        }
+        let close_action = if matches!(
+            event,
+            Event::MouseMove { .. } | Event::PointerLeave | Event::InteractionCancel
+        ) {
+            self.route_close_event(event, context)
+        } else {
+            None
+        };
         let local_event = Dock::to_local(event, self.panel_rect.x, self.panel_rect.y);
-        self.view.route_event(local_event.as_ref(), context)
+        self.view.route_event(local_event.as_ref(), context).or(close_action)
     }
+
+    fn route_close_event(
+        &mut self,
+        event: &Event,
+        context: &mut EventCtx<'_>,
+    ) -> Option<SettingsOverlayAction> {
+        match self.close_button.on_event(event, context)? {
+            WidgetAction::Control(ControlAction::Activated { id: CLOSE_BUTTON_ID }) => {
+                self.dismiss(context)
+            }
+            _ => Some(SettingsOverlayAction::ViewChanged),
+        }
+    }
+
+    fn dismiss(&mut self, context: &mut EventCtx<'_>) -> Option<SettingsOverlayAction> {
+        let _ = self.close_button.on_event(&Event::InteractionCancel, context);
+        let _ = self.view.route_event(&Event::InteractionCancel, context);
+        Some(SettingsOverlayAction::Dismiss)
+    }
+}
+
+fn close_button_style(theme: &ui::Theme) -> ButtonStyle {
+    ButtonStyle {
+        background: TRANSPARENT,
+        border: TRANSPARENT,
+        pad_x_logical: (CLOSE_BUTTON_SIZE_LOGICAL - CLOSE_ICON_SIZE_LOGICAL) * 0.5,
+        ..ButtonStyle::from_theme(theme)
+    }
+}
+
+fn resolve_close_button_rect(panel: Rect, dpi: f32) -> Rect {
+    let size = (CLOSE_BUTTON_SIZE_LOGICAL * dpi).min(panel.w).min(panel.h);
+    let inset_x = (CLOSE_BUTTON_INSET_LOGICAL * dpi).min((panel.w - size) * 0.5);
+    let inset_y = (CLOSE_BUTTON_INSET_LOGICAL * dpi).min((panel.h - size) * 0.5);
+    Rect::new(panel.right() - inset_x - size, panel.y + inset_y, size, size)
 }
 
 fn resolve_panel_rect(overlay_rect: Rect, dpi: f32) -> Rect {
@@ -187,6 +267,10 @@ fn is_backdrop_click(event: &Event, panel_rect: Rect) -> bool {
     };
     !panel_rect.contains(*px, *py)
 }
+
+#[cfg(test)]
+#[path = "settings_overlay_tests.rs"]
+mod regression_tests;
 
 #[cfg(test)]
 mod tests {

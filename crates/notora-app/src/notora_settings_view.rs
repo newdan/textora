@@ -16,8 +16,8 @@ use ui::text_box::TextBox;
 use ui::theme::SettingsTheme;
 
 use crate::settings_overlay::{
-    NotoraSettingsPersistenceView, ProductSettingsUpdate, SettingsOverlayAction,
-    SettingsOverlayInput,
+    NotoraSettingsPersistenceView, PANEL_CORNER_RADIUS_LOGICAL, PANEL_HEADER_HEIGHT_LOGICAL,
+    ProductSettingsUpdate, SettingsOverlayAction, SettingsOverlayInput,
 };
 
 const SIDEBAR_WIDTH_LOGICAL: f32 = 152.0;
@@ -175,10 +175,7 @@ impl NotoraSettingsView {
     }
 
     pub(super) fn paint(&self, context: &mut PaintCtx<'_>) {
-        context.list.fill(
-            Rect::new(0.0, 0.0, self.sidebar_width, self.rect.h),
-            self.settings_theme.sidebar_surface,
-        );
+        self.paint_panel_background(context);
         let separator_width = SIDEBAR_SEPARATOR_WIDTH_LOGICAL * context.dpi;
         context.list.fill(
             Rect::new(
@@ -196,11 +193,35 @@ impl NotoraSettingsView {
         self.paint_message(context);
     }
 
+    fn paint_panel_background(&self, context: &mut PaintCtx<'_>) {
+        let sidebar_rect = Rect::new(0.0, 0.0, self.sidebar_width, self.rect.h);
+        let content_rect =
+            Rect::new(self.sidebar_width, 0.0, self.rect.w - self.sidebar_width, self.rect.h);
+        for (clip_rect, surface) in [
+            (sidebar_rect, self.settings_theme.sidebar_surface),
+            (content_rect, self.settings_theme.modal_surface),
+        ] {
+            context.list.clip(clip_rect, |list| {
+                list.fill_rounded(self.rect, surface, PANEL_CORNER_RADIUS_LOGICAL * context.dpi);
+            });
+        }
+    }
+
     pub(super) fn route_event(
         &mut self,
         event: &Event,
         context: &mut EventCtx<'_>,
     ) -> Option<SettingsOverlayAction> {
+        if matches!(event, Event::InteractionCancel) {
+            self.category_pointer_index = None;
+            self.retry_pointer_active = false;
+            for (_, button) in &mut self.category_buttons {
+                let _ = button.on_event(event, context);
+            }
+            let _ = self.retry_button.on_event(event, context);
+            let _ = self.dispatch_form_event(event, context);
+            return Some(SettingsOverlayAction::ViewChanged);
+        }
         if self.form.is_capturing()
             && matches!(event, Event::MouseMove { .. } | Event::MouseUp { .. })
         {
@@ -288,7 +309,8 @@ impl NotoraSettingsView {
             if compact { COMPACT_SIDEBAR_WIDTH_LOGICAL } else { SIDEBAR_WIDTH_LOGICAL };
         self.sidebar_width = (sidebar_width_logical * context.dpi).min(self.rect.w);
         self.category_rects.clear();
-        let mut category_y = SIDEBAR_TOP_INSET_LOGICAL * context.dpi;
+        let mut category_y =
+            (PANEL_HEADER_HEIGHT_LOGICAL + SIDEBAR_TOP_INSET_LOGICAL) * context.dpi;
         for (_, button) in &mut self.category_buttons {
             button.set_style(category_button_style(self.settings_theme));
             let rect = Rect::new(
@@ -310,15 +332,17 @@ impl NotoraSettingsView {
             if compact { COMPACT_FORM_INSET_LOGICAL } else { FORM_INSET_LOGICAL };
         let form_inset = form_inset_logical * context.dpi;
         let form_gap = FORM_GAP_LOGICAL * context.dpi;
+        let header_height = PANEL_HEADER_HEIGHT_LOGICAL * context.dpi;
         let message_height =
             if self.message_text().is_some() { MESSAGE_HEIGHT_LOGICAL * context.dpi } else { 0.0 };
         let message_gap =
             if message_height > 0.0 { MESSAGE_GAP_LOGICAL * context.dpi } else { 0.0 };
         self.form_rect = Rect::new(
             self.sidebar_width + form_gap + form_inset,
-            form_inset,
+            header_height + form_inset,
             (self.rect.w - self.sidebar_width - form_gap - form_inset * 2.0).max(0.0),
-            (self.rect.h - form_inset * 2.0 - message_height - message_gap).max(0.0),
+            (self.rect.h - header_height - form_inset * 2.0 - message_height - message_gap)
+                .max(0.0),
         );
         self.message_rect = Rect::new(
             self.form_rect.x,
