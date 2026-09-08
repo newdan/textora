@@ -29,9 +29,7 @@ const SYNC_CONNECTION_FIELD_STACK_THRESHOLD_LOGICAL: f32 = 240.0;
 const SYNC_CONNECTION_ACTION_STACK_THRESHOLD_LOGICAL: f32 = 204.0;
 const SYNC_COMPACT_CONNECTION_ROW_HEIGHT_LOGICAL: f32 = 96.0;
 const SYNC_STACKED_ACTION_GAP_LOGICAL: f32 = 8.0;
-const SYNC_BUTTON_WIDTH_LOGICAL: f32 = 94.0;
-const SYNC_DYNAMIC_BUTTON_WIDTH_LOGICAL: f32 = 80.0;
-const SYNC_WIDE_BUTTON_WIDTH_LOGICAL: f32 = 160.0;
+const SYNC_BUTTON_WIDTH_LOGICAL: f32 = ui::button::ButtonMetrics::text_width(4);
 const SYNC_SECTION_TITLE_FONT_SIZE_LOGICAL: f32 = 17.0;
 const SYNC_ROW_LABEL_FONT_SIZE_LOGICAL: f32 = 14.0;
 const SYNC_DESCRIPTION_FONT_SIZE_LOGICAL: f32 = 12.0;
@@ -519,6 +517,7 @@ impl SyncSettingsPage {
                 InlineChild::fixed(Box::new(configure_button), SYNC_BUTTON_WIDTH_LOGICAL)
                     .with_cross_size(SYNC_CONTROL_HEIGHT_LOGICAL),
             ])
+            .with_gap(ui::button::ButtonMetrics::ACTION_GAP)
             .with_alignment(CrossAlignment::Center),
         )
     }
@@ -979,7 +978,7 @@ fn single_button_group(
     InlineGroup::new(vec![
         InlineChild::fixed(
             Box::new(action_button(id, text, enabled, settings_theme)),
-            SYNC_WIDE_BUTTON_WIDTH_LOGICAL,
+            ui::button::ButtonMetrics::text_width(text.chars().count()),
         )
         .with_cross_size(SYNC_CONTROL_HEIGHT_LOGICAL),
     ])
@@ -1417,7 +1416,7 @@ mod tests {
             .collect::<Vec<_>>();
 
         assert_eq!(button_rects.len(), 10, "两个资料库应各有五个可见操作按钮");
-        assert!(button_rects.iter().all(|rect| rect.w >= SYNC_DYNAMIC_BUTTON_WIDTH_LOGICAL));
+        assert!(button_rects.iter().all(|rect| rect.w >= ui::button::ButtonMetrics::text_width(2)));
     }
 
     #[test]

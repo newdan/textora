@@ -4,6 +4,7 @@ const MODAL_SCRIM_MINIMUM_ALPHA: f32 = 0.45;
 const BUTTON_SURFACE_TEXT_BLEND: f32 = 0.035;
 const BUTTON_BORDER_TEXT_BLEND: f32 = 0.12;
 const BUTTON_DANGER_TEXT_BLEND: f32 = 0.6;
+const BUTTON_PRESSED_TEXT_BLEND: f32 = 0.06;
 
 /// 应用外壳的通用视觉语义令牌。
 ///
@@ -45,6 +46,7 @@ impl ApplicationTheme {
         modal_scrim[3] = modal_scrim[3].max(MODAL_SCRIM_MINIMUM_ALPHA);
         let button_surface =
             blend_surface(palette.bg_elevated, palette.text_main, BUTTON_SURFACE_TEXT_BLEND);
+        let button_hover_surface = overlay_surface(button_surface, palette.bg_hover);
 
         Self {
             window_surface: palette.bg_base,
@@ -52,7 +54,7 @@ impl ApplicationTheme {
             content_surface: palette.bg_base,
             editor_surface: editor.background,
             overlay_surface: palette.bg_elevated,
-            hover_surface: palette.bg_hover,
+            hover_surface: button_hover_surface,
             selected_surface: palette.bg_active,
             navigation_hover_surface: palette.sidebar_hover_bg,
             navigation_selected_surface: palette.sidebar_active_bg,
@@ -70,8 +72,12 @@ impl ApplicationTheme {
                 palette.text_main,
                 BUTTON_BORDER_TEXT_BLEND,
             ),
-            button_hover_surface: overlay_surface(button_surface, palette.bg_hover),
-            button_pressed_surface: overlay_surface(button_surface, palette.bg_active),
+            button_hover_surface,
+            button_pressed_surface: blend_surface(
+                button_hover_surface,
+                palette.text_main,
+                BUTTON_PRESSED_TEXT_BLEND,
+            ),
             button_danger_foreground: blend_surface(
                 palette.danger,
                 palette.text_main,

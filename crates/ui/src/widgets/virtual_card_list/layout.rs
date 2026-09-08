@@ -7,11 +7,11 @@ use crate::core::text_util::estimate_text_width_px;
 use super::CardInput;
 
 pub const CARD_VERTICAL_GAP_LOGICAL: f32 = 4.0;
-pub const CARD_HORIZONTAL_PADDING_LOGICAL: f32 = 14.0;
+pub const CARD_HORIZONTAL_PADDING_LOGICAL: f32 = 8.0;
 pub const CARD_VERTICAL_PADDING_LOGICAL: f32 = 10.0;
-pub const CARD_ICON_SLOT_SIZE_LOGICAL: f32 = 24.0;
+pub const CARD_ICON_SLOT_SIZE_LOGICAL: f32 = 18.0;
 pub const CARD_ICON_GLYPH_SIZE_LOGICAL: f32 = 14.0;
-pub const CARD_ICON_GAP_LOGICAL: f32 = 8.0;
+pub const CARD_ICON_GAP_LOGICAL: f32 = 6.0;
 pub const CARD_TITLE_FONT_SIZE_LOGICAL: f32 = 15.0;
 pub const CARD_EXCERPT_FONT_SIZE_LOGICAL: f32 = 13.0;
 pub const CARD_METADATA_FONT_SIZE_LOGICAL: f32 = 12.0;
@@ -267,7 +267,7 @@ mod tests {
 
     #[test]
     fn closable_card_reserves_height_for_wrapped_filename() {
-        const CARD_WIDTH_LOGICAL: f32 = 250.0;
+        const CARD_WIDTH_LOGICAL: f32 = 230.0;
         const VIEWPORT_HEIGHT_LOGICAL: f32 = 500.0;
         let title = "黑暗血时代(1-500章).txt";
 
@@ -320,9 +320,9 @@ mod tests {
             build_virtual_card_layout(&cards, Rect::new(20.0, 30.0, 300.0, 500.0), 0.0, 1.0);
         let geometry = layout.card_geometry(0);
 
-        assert_eq!(geometry.icon_rect.w, 24.0);
-        assert_eq!(geometry.icon_rect.h, 24.0);
-        assert_eq!(geometry.title_rect.x, geometry.icon_rect.right() + 8.0);
+        assert_eq!(geometry.icon_rect.w, 18.0);
+        assert_eq!(geometry.icon_rect.h, 18.0);
+        assert_eq!(geometry.title_rect.x, geometry.icon_rect.right() + 6.0);
     }
 
     #[test]

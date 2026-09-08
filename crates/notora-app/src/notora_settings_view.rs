@@ -32,7 +32,7 @@ const COMPACT_FORM_INSET_LOGICAL: f32 = 12.0;
 const FORM_GAP_LOGICAL: f32 = 12.0;
 const TEXT_BOX_WIDTH_LOGICAL: f32 = 200.0;
 const CONTROL_HEIGHT_LOGICAL: f32 = 32.0;
-const SEGMENT_WIDTH_LOGICAL: f32 = 82.0;
+const SEGMENT_WIDTH_LOGICAL: f32 = ui::button::ButtonMetrics::text_width(4);
 const ROW_HEIGHT_LOGICAL: f32 = 64.0;
 const STACKED_ROW_HEIGHT_LOGICAL: f32 = 120.0;
 const ROW_STACK_GAP_LOGICAL: f32 = 8.0;
@@ -52,7 +52,7 @@ const MESSAGE_GAP_LOGICAL: f32 = 10.0;
 const MESSAGE_BASELINE_OFFSET_LOGICAL: f32 = 4.0;
 const MESSAGE_LINE_HEIGHT_LOGICAL: f32 = 16.0;
 const MESSAGE_MAXIMUM_LINES: usize = 2;
-const RETRY_BUTTON_WIDTH_LOGICAL: f32 = 84.0;
+const RETRY_BUTTON_WIDTH_LOGICAL: f32 = ui::button::ButtonMetrics::text_width(2);
 
 const APPEARANCE_CATEGORY_ID: WidgetId = WidgetId(0x6e6f_746f_6170_7065);
 const EDITOR_CATEGORY_ID: WidgetId = WidgetId(0x6e6f_746f_6564_6974);
@@ -490,7 +490,8 @@ impl NotoraSettingsView {
             let mut button = Button::new(id, segmented_button_style(self.settings_theme));
             button.set_text(Some(title.to_owned()));
             button.set_selected(selected);
-            InlineChild::flex(Box::new(button), 1.0).with_cross_size(CONTROL_HEIGHT_LOGICAL)
+            InlineChild::fixed(Box::new(button), SEGMENT_WIDTH_LOGICAL)
+                .with_cross_size(CONTROL_HEIGHT_LOGICAL)
         })
         .collect();
         let group = InlineGroup::new(buttons)

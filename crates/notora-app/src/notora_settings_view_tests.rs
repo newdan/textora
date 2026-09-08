@@ -196,13 +196,13 @@ fn persistence_message_is_clipped_before_the_retry_button() {
 
 #[test]
 fn long_validation_message_wraps_without_hiding_the_allowed_range() {
-    let mut view = editor_view(452.0, 352.0);
+    let mut view = editor_view(412.0, 352.0);
     let mut input = view.input.clone();
     input.persistence =
         NotoraSettingsPersistenceView::SaveFailed { message: "保存失败".to_owned() };
     view.set_input(input);
     view.map_text_commit(AUTO_SAVE_DELAY_ID, "0");
-    layout(&mut view, 452.0, 352.0, 1.0);
+    layout(&mut view, 412.0, 352.0, 1.0);
     let theme = ui::theme::test_theme();
     let mut draw_list = ui::core::paint::DrawList::new();
     let mut shaper = shaping::Shaper::new().expect("message test shaper should exist");

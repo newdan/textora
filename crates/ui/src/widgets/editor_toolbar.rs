@@ -6,13 +6,14 @@ use crate::core::{
     AccessibilityNode, AccessibilityRole, Event, EventCtx, LayoutCtx, PaintCtx, Rect, Widget,
     WidgetAction,
 };
+use crate::widgets::button::{ButtonStyle, ButtonVisualState};
 use crate::widgets::icon::draw_icon;
 use crate::widgets::tooltip::TooltipHint;
 use std::any::Any;
 
 const TOOLBAR_COMMAND_SIZE_LOGICAL: f32 = 28.0;
 const TOOLBAR_COMMAND_GAP_LOGICAL: f32 = 2.0;
-const TOOLBAR_GROUP_GAP_LOGICAL: f32 = 12.0;
+const TOOLBAR_GROUP_GAP_LOGICAL: f32 = crate::button::ButtonMetrics::ACTION_GAP * 2.0;
 const TOOLBAR_ICON_SIZE_LOGICAL: f32 = 16.0;
 const TOOLBAR_FONT_SIZE_LOGICAL: f32 = 12.0;
 const TOOLBAR_CORNER_RADIUS_LOGICAL: f32 = 5.0;
@@ -275,6 +276,8 @@ impl Widget for EditorToolbarWidget {
         }
         let layout = self.toolbar_layout(self.rect.w, ctx.dpi);
         let commands = self.commands();
+        let hover_color = ButtonStyle::from_theme(ctx.theme)
+            .background_color(ButtonVisualState::Hovered, ctx.global_alpha);
         for command_layout in &layout.commands {
             let Some(command) =
                 commands.iter().find(|command| command.command_key == command_layout.command_key)
@@ -287,7 +290,7 @@ impl Widget for EditorToolbarWidget {
             {
                 ctx.list.fill_rounded(
                     button_rect,
-                    ctx.theme.palette.bg_hover,
+                    hover_color,
                     TOOLBAR_CORNER_RADIUS_LOGICAL * ctx.dpi,
                 );
             }
@@ -321,7 +324,7 @@ impl Widget for EditorToolbarWidget {
             if self.overflow_hovered {
                 ctx.list.fill_rounded(
                     overflow_rect,
-                    ctx.theme.palette.bg_hover,
+                    hover_color,
                     TOOLBAR_CORNER_RADIUS_LOGICAL * ctx.dpi,
                 );
             }
@@ -526,6 +529,33 @@ fn toolbar_icon(command_key: &str) -> Option<&'static str> {
 mod tests {
     use super::*;
 
+    #[test]
+    fn toolbar_command_hover_matches_other_ordinary_actions() {
+        use crate::core::paint::{DrawCmd, DrawList};
+
+        for mode in [crate::ThemeMode::Light, crate::ThemeMode::Dark] {
+            let theme = crate::Theme::resolve_builtin(mode, winit::window::Theme::Light);
+            for dpi in [1.0, 2.0] {
+                let mut toolbar = toolbar();
+                toolbar.rect = Rect::new(0.0, 0.0, 320.0 * dpi, 40.0 * dpi);
+                toolbar.hovered_command_key = Some("undo".to_owned());
+                let mut draw_list = DrawList::new();
+                let mut context = PaintCtx::new(&mut draw_list, &theme, dpi);
+                context.global_alpha = 0.5;
+                toolbar.paint(&mut context);
+                let mut expected_hover = theme.application_theme().button_hover_surface;
+                expected_hover[3] *= 0.5;
+                assert!(
+                    draw_list.cmds.iter().any(|command| matches!(command,
+                        DrawCmd::FillRect { color, .. }
+                            if *color == expected_hover
+                    )),
+                    "编辑器工具栏应使用公共操作悬停色"
+                );
+            }
+        }
+    }
+
     fn toolbar() -> EditorToolbarWidget {
         let mut toolbar = EditorToolbarWidget::new();
         toolbar.set_input(EditorToolbarInput {
@@ -687,7 +717,7 @@ mod tests {
         let undo_rect = toolbar.command_rect("undo", 1.0).expect("undo should remain visible");
         let bold_rect = toolbar.command_rect("bold", 1.0).expect("bold should remain visible");
 
-        assert_eq!(bold_rect.x - undo_rect.right(), 12.0);
+        assert_eq!(bold_rect.x - undo_rect.right(), TOOLBAR_GROUP_GAP_LOGICAL);
     }
 
     #[test]

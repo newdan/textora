@@ -8,18 +8,18 @@ use crate::core::{
     AccessibilityNode, AccessibilityRole, Event, EventCtx, KeyCode, LayoutCtx, Modifiers,
     MouseButton, PaintCtx, Rect, Widget, WidgetAction,
 };
-use crate::widgets::button::{ButtonStyle, ButtonVisualState};
+use crate::widgets::button::{ButtonMetrics, ButtonStyle, ButtonVisualState};
 use crate::widgets::icon::draw_icon;
 use crate::widgets::tooltip::TooltipHint;
 
 /// 菜单区域的固定逻辑宽度。
-pub const SPLIT_BUTTON_MENU_WIDTH_LOGICAL: f32 = 28.0;
+pub const SPLIT_BUTTON_MENU_WIDTH_LOGICAL: f32 = ButtonMetrics::MENU_WIDTH;
 /// 按钮内侧横向留白。
-pub const SPLIT_BUTTON_HORIZONTAL_PADDING_LOGICAL: f32 = 10.0;
+pub const SPLIT_BUTTON_HORIZONTAL_PADDING_LOGICAL: f32 = ButtonMetrics::HORIZONTAL_PADDING;
 const SPLIT_BUTTON_ICON_SIZE_LOGICAL: f32 = 14.0;
-const SPLIT_BUTTON_ICON_GAP_LOGICAL: f32 = 6.0;
+const SPLIT_BUTTON_ICON_GAP_LOGICAL: f32 = ButtonMetrics::ICON_GAP;
 const SPLIT_BUTTON_DIVIDER_INSET_LOGICAL: f32 = 6.0;
-const SPLIT_BUTTON_TOOLBAR_ARROW_INSET_LOGICAL: f32 = 10.0;
+const SPLIT_BUTTON_TOOLBAR_ARROW_INSET_LOGICAL: f32 = 6.0;
 
 /// Split button 的纯展示输入。
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -410,6 +410,62 @@ mod tests {
     use crate::core::paint::{DrawCmd, DrawList};
     use crate::core::{EventCtx, LayoutCtx, Modifiers, NoopMeasure};
 
+    fn background_at(draw_list: &DrawList, bounds: Rect) -> [f32; 4] {
+        draw_list
+            .cmds
+            .iter()
+            .find_map(|command| match command {
+                DrawCmd::FillRect { rect, color, .. } if *rect == bounds => Some(*color),
+                _ => None,
+            })
+            .expect("悬停的操作区域应绘制背景")
+    }
+
+    #[test]
+    fn new_document_button_and_popup_share_hover_draw_color_at_every_scale() {
+        for mode in [crate::ThemeMode::Light, crate::ThemeMode::Dark] {
+            let theme = crate::Theme::resolve_builtin(mode, winit::window::Theme::Light);
+            for dpi in [1.0, 1.5, 2.0] {
+                let settings = crate::settings::Settings::new();
+                let metrics = crate::settings::UiMetrics::from_settings(&settings, dpi);
+                let mut split = widget();
+                split.set_presentation(SplitButtonPresentation::Toolbar);
+                layout(&mut split, Rect::new(10.0 * dpi, 20.0 * dpi, 96.0 * dpi, 28.0 * dpi), dpi);
+                let menu = crate::sidebar::build_new_document_menu(
+                    split.rect,
+                    (800.0 * dpi, 600.0 * dpi),
+                    &metrics,
+                    true,
+                );
+                for alpha in [1.0, 0.5] {
+                    let mut menu_draws = DrawList::new();
+                    let mut context = PaintCtx::new(&mut menu_draws, &theme, dpi);
+                    context.global_alpha = alpha;
+                    menu.paint(&mut context, Some(0));
+                    let menu_color =
+                        background_at(&menu_draws, menu.item_rects[0].shrink(dpi, dpi, dpi, dpi));
+                    for region in [SplitButtonRegion::Main, SplitButtonRegion::Menu] {
+                        split.hovered_region = Some(region);
+                        let target = match region {
+                            SplitButtonRegion::Main => split.main_rect(),
+                            SplitButtonRegion::Menu => split.menu_rect(),
+                        };
+                        let inset =
+                            ButtonStyle::from_theme(&theme).toolbar_item().background_inset_logical
+                                * dpi;
+                        let mut button_draws = DrawList::new();
+                        let mut context = PaintCtx::new(&mut button_draws, &theme, dpi);
+                        context.global_alpha = alpha;
+                        split.paint(&mut context);
+                        assert_eq!(
+                            background_at(&button_draws, target.shrink(inset, inset, inset, inset)),
+                            menu_color
+                        );
+                    }
+                }
+            }
+        }
+    }
     fn layout(widget: &mut SplitButtonWidget, rect: Rect, dpi: f32) {
         let theme = crate::theme::test_theme();
         let mut measure = NoopMeasure;
@@ -453,7 +509,10 @@ mod tests {
         assert!(node.children[0].state.focused);
         assert_eq!(node.children[1].name.as_deref(), Some("New note 菜单"));
         assert_eq!(node.children[1].state.expanded, Some(true));
-        assert_eq!(node.children[0].bounds, Rect::new(110.0, 220.0, 132.0, 32.0));
+        assert_eq!(
+            node.children[0].bounds,
+            Rect::new(110.0, 220.0, 160.0 - SPLIT_BUTTON_MENU_WIDTH_LOGICAL, 32.0)
+        );
         assert_eq!(
             widget.on_accessibility_action(&crate::core::AccessibilityActionRequest::new(
                 node.children[1].id,

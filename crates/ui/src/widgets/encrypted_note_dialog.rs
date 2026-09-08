@@ -18,8 +18,8 @@ const CREATE_PANEL_HEIGHT_LOGICAL: f32 = 330.0;
 const UNLOCK_PANEL_HEIGHT_LOGICAL: f32 = 270.0;
 const PANEL_MARGIN_LOGICAL: f32 = 24.0;
 const FIELD_HEIGHT_LOGICAL: f32 = 34.0;
-const BUTTON_WIDTH_LOGICAL: f32 = 92.0;
-const BUTTON_GAP_LOGICAL: f32 = 8.0;
+const BUTTON_WIDTH_LOGICAL: f32 = crate::button::ButtonMetrics::text_width(4);
+const BUTTON_GAP_LOGICAL: f32 = crate::button::ButtonMetrics::ACTION_GAP;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum DialogControl {

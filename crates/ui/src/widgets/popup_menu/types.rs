@@ -6,6 +6,7 @@ use crate::core::geom::Rect;
 use crate::core::widget::PaintCtx;
 use crate::tab_bar::truncate_title_by_width;
 use crate::view_mode::ViewMode;
+use crate::widgets::button::{ButtonStyle, ButtonVisualState};
 
 /// Context menu action for right-click on a tab.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -256,7 +257,9 @@ impl PopupMenu {
     pub fn paint(&self, ctx: &mut PaintCtx, hovered: Option<usize>) {
         let dpi = ctx.dpi;
         let mr = self.menu_rect;
-        let radius = 8.0 * dpi;
+        let style = ButtonStyle::from_theme(ctx.theme);
+        let radius = style.corner_radius_logical * dpi;
+        let hover_color = style.background_color(ButtonVisualState::Hovered, ctx.global_alpha);
 
         // Border (drawn as a larger rounded rect behind the bg)
         let border = 1.0 * dpi;
@@ -286,7 +289,7 @@ impl PopupMenu {
             if item.enabled && Some(i) == hovered {
                 let hr = r.shrink(1.0 * dpi, 1.0 * dpi, 1.0 * dpi, 1.0 * dpi);
                 if hr.w > 0.0 && hr.h > 0.0 {
-                    ctx.list.fill_rounded(hr, ctx.theme.palette.sidebar_hover_bg, radius);
+                    ctx.list.fill_rounded(hr, hover_color, radius);
                 }
             }
 

@@ -11,6 +11,7 @@ use crate::core::widget::MouseButton;
 use crate::core::{
     Event, EventCtx, KeyCode, LayoutCtx, PaintCtx, Rect, Widget, WidgetAction, WidgetId,
 };
+use crate::widgets::button::{ButtonStyle, ButtonVisualState};
 use crate::widgets::icon::draw_icon;
 use crate::widgets::tooltip::TooltipHint;
 use std::any::Any;
@@ -674,7 +675,9 @@ impl SearchBarWidget {
         dpi: f32,
     ) {
         if self.hovered_btn == hovered_button {
-            ctx.list.fill_rounded(rect, ctx.theme.palette.bg_hover, 4.0 * dpi);
+            let hover_color = ButtonStyle::from_theme(ctx.theme)
+                .background_color(ButtonVisualState::Hovered, ctx.global_alpha);
+            ctx.list.fill_rounded(rect, hover_color, 4.0 * dpi);
         }
     }
 

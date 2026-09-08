@@ -31,7 +31,7 @@ const SETTINGS_CATEGORY_HORIZONTAL_INSET_LOGICAL: f32 = 10.0;
 const SETTINGS_CATEGORY_BUTTON_HEIGHT_LOGICAL: f32 = 34.0;
 const SETTINGS_CATEGORY_BUTTON_GAP_LOGICAL: f32 = 4.0;
 const SETTINGS_FORM_GAP_LOGICAL: f32 = 12.0;
-const SETTINGS_BUTTON_WIDTH_LOGICAL: f32 = 82.0;
+const SETTINGS_BUTTON_WIDTH_LOGICAL: f32 = crate::button::ButtonMetrics::text_width(4);
 const SETTINGS_TEXT_BOX_WIDTH_LOGICAL: f32 = 200.0;
 const SETTINGS_CONTROL_HEIGHT_LOGICAL: f32 = 32.0;
 const SETTINGS_ROW_HEIGHT_LOGICAL: f32 = 64.0;
@@ -73,7 +73,7 @@ const RETRY_PERSISTENCE_ID: WidgetId = WidgetId(0x7365_7474_7265_7472);
 const SETTINGS_BANNER_HEIGHT_LOGICAL: f32 = 40.0;
 const SETTINGS_BANNER_GAP_LOGICAL: f32 = 12.0;
 const SETTINGS_BANNER_LABEL_WIDTH_LOGICAL: f32 = 220.0;
-const SETTINGS_BANNER_BUTTON_WIDTH_LOGICAL: f32 = 92.0;
+const SETTINGS_BANNER_BUTTON_WIDTH_LOGICAL: f32 = crate::button::ButtonMetrics::text_width(2);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct FieldValidation {
@@ -286,7 +286,7 @@ impl SettingsView {
             let mut button = Button::new(id, segmented_button_style(self.settings_theme));
             button.set_text(Some(title.to_owned()));
             button.set_selected(selected);
-            InlineChild::flex(Box::new(button), 1.0)
+            InlineChild::fixed(Box::new(button), SETTINGS_BUTTON_WIDTH_LOGICAL)
                 .with_cross_size(SETTINGS_CONTROL_HEIGHT_LOGICAL)
         })
         .collect();
@@ -411,7 +411,7 @@ impl SettingsView {
             let mut button = Button::new(id, segmented_button_style(self.settings_theme));
             button.set_text(Some(title.to_owned()));
             button.set_selected(selected);
-            InlineChild::flex(Box::new(button), 1.0)
+            InlineChild::fixed(Box::new(button), SETTINGS_BUTTON_WIDTH_LOGICAL)
                 .with_cross_size(SETTINGS_CONTROL_HEIGHT_LOGICAL)
         })
         .collect();

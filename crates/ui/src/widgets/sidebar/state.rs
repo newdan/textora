@@ -14,9 +14,12 @@ use crate::widgets::popup_menu::{PopupMenu, PopupMenuAction as PMA, PopupMenuIte
 use crate::widgets::split_button::SPLIT_BUTTON_MENU_WIDTH_LOGICAL;
 
 const ACTION_ROW_INSET_LOGICAL: f32 = 12.0;
-const ACTION_ROW_GAP_LOGICAL: f32 = 8.0;
-const NEW_DOCUMENT_MIN_WIDTH_LOGICAL: f32 = 96.0;
-const OPEN_BUTTON_WIDTH_LOGICAL: f32 = 72.0;
+const ACTION_ROW_GAP_LOGICAL: f32 = crate::button::ButtonMetrics::ACTION_GAP;
+const NEW_DOCUMENT_MIN_WIDTH_LOGICAL: f32 =
+    crate::button::ButtonMetrics::icon_text_width(2, SIDEBAR_ICON_SIZE_LOGICAL)
+        + SPLIT_BUTTON_MENU_WIDTH_LOGICAL;
+const OPEN_BUTTON_WIDTH_LOGICAL: f32 =
+    crate::button::ButtonMetrics::icon_text_width(2, SIDEBAR_ICON_SIZE_LOGICAL);
 const COMPACT_OPEN_BUTTON_WIDTH_LOGICAL: f32 = 32.0;
 
 #[derive(Default)]
@@ -358,7 +361,9 @@ impl SidebarState {
         let new_row_rect = Rect::new(
             action_inset,
             new_y,
-            (action_width - action_gap - open_width).max(0.0),
+            (action_width - action_gap - open_width)
+                .max(0.0)
+                .min(NEW_DOCUMENT_MIN_WIDTH_LOGICAL * dpi),
             new_h,
         );
         let new_menu_width = SPLIT_BUTTON_MENU_WIDTH_LOGICAL * dpi;
@@ -645,7 +650,7 @@ impl SidebarState {
         if show_label {
             let font_size = style.font_size_logical * ctx.dpi;
             ctx.text(
-                icon_x + icon_size + constants::SMALL_GAP * ctx.dpi,
+                icon_x + icon_size + crate::button::ButtonMetrics::ICON_GAP * ctx.dpi,
                 rect.y + rect.h * 0.5 + font_size * 0.35,
                 font_size,
                 foreground,
@@ -2114,7 +2119,11 @@ mod tests {
     #[test]
     fn compact_actions_remain_separate_and_clickable_at_supported_widths() {
         for dpi in [1.0, 2.0] {
-            for (width, expected_open_width) in [(160.0, 32.0), (220.0, 72.0), (400.0, 72.0)] {
+            for (width, expected_open_width) in [
+                (160.0, COMPACT_OPEN_BUTTON_WIDTH_LOGICAL),
+                (220.0, OPEN_BUTTON_WIDTH_LOGICAL),
+                (400.0, OPEN_BUTTON_WIDTH_LOGICAL),
+            ] {
                 let cfg = SidebarConfig { pinned: true, width: width * dpi };
                 let metrics = crate::settings::UiMetrics::from_settings(
                     &crate::settings::Settings::new(),

@@ -689,8 +689,9 @@ mod tests {
         // item 0 fill at index 2
         if let DrawCmd::FillRect { color, .. } = &dl.cmds[2] {
             assert_eq!(
-                *color, theme.palette.sidebar_hover_bg,
-                "hovered item should use menu_hover color"
+                *color,
+                theme.application_theme().button_hover_surface,
+                "菜单项与触发按钮应使用同一操作悬停色"
             );
         } else {
             panic!("expected FillRect for hovered item");

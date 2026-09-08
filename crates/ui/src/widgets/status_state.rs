@@ -7,7 +7,7 @@ use crate::core::widget::{ControlAction, WidgetId};
 use crate::core::{
     DrawCmd, Event, EventCtx, LayoutCtx, MouseButton, PaintCtx, Rect, Widget, WidgetAction,
 };
-use crate::widgets::button::{ButtonStyle, ButtonVisualState};
+use crate::widgets::button::{ButtonMetrics, ButtonStyle, ButtonVisualState};
 use crate::widgets::icon::draw_icon;
 
 const STATUS_ICON_TITLE_GAP: f32 = 12.0;
@@ -78,7 +78,16 @@ impl StatusStateWidget {
 impl Widget for StatusStateWidget {
     fn set_rect(&mut self, rect: Rect, ctx: &mut LayoutCtx) {
         self.rect = rect;
-        let action_width = (120.0 * ctx.dpi).min((rect.w - 24.0 * ctx.dpi).max(0.0));
+        let label = self.input.action_label.as_deref().unwrap_or_default();
+        let font_size = ButtonMetrics::FONT_SIZE * ctx.dpi;
+        let label_width = ctx
+            .ui_measure
+            .as_deref_mut()
+            .unwrap_or(ctx.measure)
+            .measure(label, font_size)
+            .max(crate::core::text_util::estimate_text_width_px(label, font_size));
+        let action_width = (label_width + ButtonMetrics::HORIZONTAL_PADDING * 2.0 * ctx.dpi)
+            .min((rect.w - 24.0 * ctx.dpi).max(0.0));
         let action_height = 32.0 * ctx.dpi;
         self.action_rect = if self.has_action() {
             Rect::new(

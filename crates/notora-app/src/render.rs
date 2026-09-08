@@ -57,10 +57,14 @@ const SETTINGS_BUTTON_ID: WidgetId = WidgetId(9_001);
 const NEW_NOTE_BUTTON_ID: WidgetId = WidgetId(9_002);
 const NEW_NOTE_MENU_BUTTON_ID: WidgetId = WidgetId(9_003);
 const SET_WORKSPACE_ROOT_BUTTON_ID: WidgetId = WidgetId(9_004);
-const NEW_NOTE_BUTTON_WIDTH_LOGICAL: f32 = 96.0;
-const NOTE_TOOL_BUTTON_WIDTH_LOGICAL: f32 = 64.0;
+const NOTE_TOOL_ICON_SIZE_LOGICAL: f32 = 14.0;
+const NEW_NOTE_BUTTON_WIDTH_LOGICAL: f32 =
+    ui::button::ButtonMetrics::icon_text_width(2, NOTE_TOOL_ICON_SIZE_LOGICAL)
+        + ui::button::ButtonMetrics::MENU_WIDTH;
+const NOTE_TOOL_BUTTON_WIDTH_LOGICAL: f32 =
+    ui::button::ButtonMetrics::icon_text_width(2, NOTE_TOOL_ICON_SIZE_LOGICAL);
 const NOTE_TOOL_BUTTON_HEIGHT_LOGICAL: f32 = 28.0;
-const NOTE_TOOL_BUTTON_GAP_LOGICAL: f32 = 6.0;
+const NOTE_TOOL_BUTTON_GAP_LOGICAL: f32 = ui::button::ButtonMetrics::ACTION_GAP;
 const CARD_HEADER_TITLE_FONT_SIZE_LOGICAL: f32 = 16.0;
 const CARD_HEADER_TITLE_BASELINE_LOGICAL: f32 = 28.0;
 const CARD_HEADER_CONTROL_TOP_LOGICAL: f32 = 8.0;
@@ -74,13 +78,14 @@ const SIDEBAR_CONTROL_HEIGHT_LOGICAL: f32 = 32.0;
 const SIDEBAR_ICON_SIZE_LOGICAL: f32 = 16.0;
 const SIDEBAR_LABEL_FONT_SIZE_LOGICAL: f32 = 15.0;
 const CARD_LOAD_MORE_THRESHOLD_LOGICAL: f32 = 160.0;
-const COMPACT_NAVIGATION_BUTTON_WIDTH_LOGICAL: f32 = 72.0;
-const COMPACT_BACK_BUTTON_WIDTH_LOGICAL: f32 = 64.0;
+const COMPACT_NAVIGATION_BUTTON_WIDTH_LOGICAL: f32 = ui::button::ButtonMetrics::text_width(3);
+const COMPACT_BACK_BUTTON_WIDTH_LOGICAL: f32 = ui::button::ButtonMetrics::text_width(2);
 const NAVIGATION_VISIBILITY_BUTTON_SIZE_LOGICAL: f32 = 28.0;
 const NAVIGATION_COLLAPSE_BUTTON_GAP_LOGICAL: f32 = 6.0;
 const CONFIRMATION_PANEL_WIDTH_LOGICAL: f32 = 360.0;
 const CONFIRMATION_PANEL_HEIGHT_LOGICAL: f32 = 160.0;
-const CONFIRMATION_BUTTON_WIDTH_LOGICAL: f32 = 88.0;
+const CONFIRMATION_BUTTON_WIDTH_LOGICAL: f32 = ui::button::ButtonMetrics::text_width(4);
+const CANCEL_BUTTON_WIDTH_LOGICAL: f32 = ui::button::ButtonMetrics::text_width(2);
 const CONFIRMATION_BUTTON_HEIGHT_LOGICAL: f32 = 32.0;
 const SAVE_CONFLICT_PANEL_WIDTH_LOGICAL: f32 = 440.0;
 const SAVE_CONFLICT_PANEL_HEIGHT_LOGICAL: f32 = 196.0;
@@ -2477,6 +2482,7 @@ impl NotoraShell {
             panel_height,
         );
         let button_width = CONFIRMATION_BUTTON_WIDTH_LOGICAL * dpi;
+        let cancel_width = CANCEL_BUTTON_WIDTH_LOGICAL * dpi;
         let button_height = CONFIRMATION_BUTTON_HEIGHT_LOGICAL * dpi;
         let button_y = self.confirmation_panel_rect.bottom() - button_height - 16.0 * dpi;
         self.confirmation_confirm_rect = Rect::new(
@@ -2486,9 +2492,11 @@ impl NotoraShell {
             button_height,
         );
         self.confirmation_cancel_rect = Rect::new(
-            self.confirmation_confirm_rect.x - button_width - 8.0 * dpi,
+            self.confirmation_confirm_rect.x
+                - cancel_width
+                - ui::button::ButtonMetrics::ACTION_GAP * dpi,
             button_y,
-            button_width,
+            cancel_width,
             button_height,
         );
     }
@@ -2507,15 +2515,19 @@ impl NotoraShell {
             panel_width,
             panel_height,
         );
-        let gap = 8.0 * dpi;
+        let gap = ui::button::ButtonMetrics::ACTION_GAP * dpi;
         let horizontal_padding = 20.0 * dpi;
         let button_height = CONFIRMATION_BUTTON_HEIGHT_LOGICAL * dpi;
-        let button_width = ((panel_width - horizontal_padding * 2.0 - gap * 3.0) / 4.0).max(0.0);
+        let button_width = ((panel_width - horizontal_padding * 2.0 - gap * 3.0) / 4.0)
+            .max(0.0)
+            .min(ui::button::ButtonMetrics::text_width(4) * dpi);
         let button_y = self.save_conflict_panel_rect.bottom() - button_height - 18.0 * dpi;
         self.save_conflict_button_rects = std::array::from_fn(|index| {
             Rect::new(
-                self.save_conflict_panel_rect.x
-                    + horizontal_padding
+                self.save_conflict_panel_rect.right()
+                    - horizontal_padding
+                    - button_width * 4.0
+                    - gap * 3.0
                     + index as f32 * (button_width + gap),
                 button_y,
                 button_width,
@@ -3208,14 +3220,11 @@ fn paint_note_tool_button(
     state: ButtonVisualState,
     style: &ButtonStyle,
 ) {
-    const CONTENT_PADDING_LOGICAL: f32 = 8.0;
-    const ICON_SIZE_LOGICAL: f32 = 14.0;
-    const ICON_TEXT_GAP_LOGICAL: f32 = 4.0;
     const TEXT_BASELINE_OFFSET_RATIO: f32 = 0.35;
     let foreground = style.paint(context, rect, state);
-    let mut text_x = rect.x + CONTENT_PADDING_LOGICAL * context.dpi;
+    let mut text_x = rect.x + style.pad_x_logical * context.dpi;
     if let Some(icon_name) = icon {
-        let icon_size = ICON_SIZE_LOGICAL * context.dpi;
+        let icon_size = NOTE_TOOL_ICON_SIZE_LOGICAL * context.dpi;
         draw_icon(
             context.list,
             icon_name,
@@ -3224,7 +3233,7 @@ fn paint_note_tool_button(
             icon_size,
             foreground,
         );
-        text_x += icon_size + ICON_TEXT_GAP_LOGICAL * context.dpi;
+        text_x += icon_size + ui::button::ButtonMetrics::ICON_GAP * context.dpi;
     }
     let font_size = context.theme.control_metrics().font_size_logical * context.dpi;
     context.text(
@@ -3724,7 +3733,7 @@ mod tests {
     fn wrapped_file_toolbar_is_centered_across_column_widths_and_dpi() {
         let buttons = note_toolbar_buttons(&NavigationScope::ExternalFiles, None, true);
         for dpi in [1.0, 1.25, 1.5, 2.0] {
-            for width in [260.0, 268.0, 280.0] {
+            for width in [252.0, 260.0, 268.0] {
                 let column = Rect::new(228.0 * dpi, 20.0 * dpi, width * dpi, 600.0 * dpi);
                 let header = card_header_layout(
                     column,
@@ -4504,7 +4513,7 @@ mod tests {
                 matches!(
                     command,
                     DrawCmd::FillRect { rect, color, .. }
-                        if *rect == expected_rect && *color == theme.palette.sidebar_hover_bg
+                        if *rect == expected_rect && *color == theme.application_theme().button_hover_surface
                 )
             })
         }

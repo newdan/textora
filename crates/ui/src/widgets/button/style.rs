@@ -1,3 +1,4 @@
+use super::ButtonMetrics;
 use crate::core::{PaintCtx, Rect};
 use crate::theme::{ControlMetrics, SettingsTheme, Theme};
 
@@ -90,8 +91,8 @@ impl ButtonStyle {
     pub fn action(settings: SettingsTheme) -> Self {
         let metrics = ControlMetrics::default();
         Self {
-            font_size_logical: metrics.font_size_logical,
-            pad_x_logical: metrics.horizontal_padding_logical,
+            font_size_logical: ButtonMetrics::FONT_SIZE,
+            pad_x_logical: ButtonMetrics::HORIZONTAL_PADDING,
             foreground: settings.text_primary,
             selected_foreground: settings.text_primary,
             background: settings.button_surface,
@@ -186,7 +187,7 @@ impl ButtonStyle {
             background: TRANSPARENT,
             border: TRANSPARENT,
             hover_background: settings.hover_surface,
-            pressed_background: settings.selected_surface,
+            pressed_background: settings.button_pressed_surface,
             selected_background: settings.selected_surface,
             disabled_foreground: with_alpha(settings.text_secondary, BUTTON_DISABLED_ALPHA),
             disabled_background: TRANSPARENT,
@@ -283,6 +284,37 @@ mod tests {
             Theme::resolve_builtin(crate::ThemeMode::Light, winit::window::Theme::Light),
             Theme::resolve_builtin(crate::ThemeMode::Dark, winit::window::Theme::Dark),
         ]
+    }
+
+    #[test]
+    fn ordinary_action_feedback_is_independent_of_selection_accent() {
+        for mut theme in builtin_themes() {
+            let original = ButtonStyle::from_theme(&theme);
+            theme.palette.bg_active = theme.palette.accent;
+            let recolored = ButtonStyle::from_theme(&theme);
+            assert_eq!(original.hover_background, recolored.hover_background);
+            assert_eq!(
+                original.pressed_background, recolored.pressed_background,
+                "按下和菜单展开是普通操作反馈，不能随内容选中强调色变化"
+            );
+            assert_ne!(recolored.background, recolored.hover_background);
+            assert_ne!(recolored.hover_background, recolored.pressed_background);
+        }
+    }
+
+    #[test]
+    fn inline_and_standard_actions_share_hover_and_press_feedback() {
+        for theme in builtin_themes() {
+            let standard = ButtonStyle::from_theme(&theme);
+            let inline = ButtonStyle::ghost(theme.settings_theme());
+            for state in [ButtonVisualState::Hovered, ButtonVisualState::Pressed] {
+                assert_eq!(
+                    inline.background_color(state, 1.0),
+                    standard.background_color(state, 1.0),
+                    "同类操作不能因为有无边框而改变 {state:?} 的颜色"
+                );
+            }
+        }
     }
 
     #[test]

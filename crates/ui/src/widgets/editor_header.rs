@@ -5,6 +5,7 @@ use crate::core::{
     Event, EventCtx, KeyCode, LayoutCtx, Modifiers, MouseButton, PaintCtx, Rect, Widget,
     WidgetAction,
 };
+use crate::widgets::button::{ButtonStyle, ButtonVisualState};
 use crate::widgets::icon::draw_icon;
 use crate::widgets::text_box::{TextBox, TextBoxChrome};
 use crate::widgets::tooltip::TooltipHint;
@@ -432,7 +433,9 @@ impl EditorHeaderWidget {
             return;
         }
         if hovered || selected {
-            ctx.list.fill_rounded(rect, ctx.theme.palette.bg_hover, 6.0 * ctx.dpi);
+            let hover_color = ButtonStyle::from_theme(ctx.theme)
+                .background_color(ButtonVisualState::Hovered, ctx.global_alpha);
+            ctx.list.fill_rounded(rect, hover_color, 6.0 * ctx.dpi);
         }
         let icon_size = 16.0 * ctx.dpi;
         let icon_color =

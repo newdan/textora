@@ -6,6 +6,7 @@
 use crate::core::widget::WidgetAction;
 use crate::core::{Event, EventCtx, LayoutCtx, MouseButton, PaintCtx, Rect, Widget};
 use crate::core::{TextMeasure, text_util::truncate_title_precise};
+use crate::widgets::button::{ButtonStyle, ButtonVisualState};
 use crate::widgets::icon::draw_icon;
 use crate::widgets::tooltip::TooltipHint;
 use std::any::Any;
@@ -324,6 +325,8 @@ impl Widget for TitleBarWidget {
 
         let dpi = ctx.dpi;
         let h = self.rect.h;
+        let hover_color = ButtonStyle::from_theme(ctx.theme)
+            .background_color(ButtonVisualState::Hovered, ctx.global_alpha);
 
         // 1) 背景（左侧留出汉堡按钮空间，避免覆盖）
         let bg_x = background_start(input, self.rect.w);
@@ -369,11 +372,8 @@ impl Widget for TitleBarWidget {
         // 4) Markdown 预览切换按钮
         if input.can_toggle && self.toggle_rect.w > 0.0 {
             let r = &self.toggle_rect;
-            let btn_bg = if self.toggle_hovered {
-                ctx.theme.application_theme().hover_surface
-            } else {
-                ctx.theme.editor.background
-            };
+            let btn_bg =
+                if self.toggle_hovered { hover_color } else { ctx.theme.editor.background };
             ctx.list.fill_rounded(
                 Rect::new(r.x, r.y, r.w, r.h),
                 btn_bg,
@@ -398,11 +398,8 @@ impl Widget for TitleBarWidget {
             && self.mindmap_style_rect.w > 0.0
         {
             let r = &self.mindmap_style_rect;
-            let btn_bg = if self.mindmap_style_hovered {
-                ctx.theme.application_theme().hover_surface
-            } else {
-                ctx.theme.editor.background
-            };
+            let btn_bg =
+                if self.mindmap_style_hovered { hover_color } else { ctx.theme.editor.background };
             ctx.list.fill_rounded(
                 Rect::new(r.x, r.y, r.w, r.h),
                 btn_bg,
@@ -425,11 +422,7 @@ impl Widget for TitleBarWidget {
         // 6) TOC toggle button (only in markdown preview mode)
         if input.toc_enabled && self.toc_rect.w > 0.0 {
             let r = &self.toc_rect;
-            let btn_bg = if self.toc_hovered {
-                ctx.theme.application_theme().hover_surface
-            } else {
-                ctx.theme.editor.background
-            };
+            let btn_bg = if self.toc_hovered { hover_color } else { ctx.theme.editor.background };
             ctx.list.fill_rounded(
                 Rect::new(r.x, r.y, r.w, r.h),
                 btn_bg,
@@ -772,7 +765,10 @@ mod tests {
                     },
                     &mut event_ctx,
                 );
-                let draw_list = paint_title_bar(&widget, theme, dpi);
+                let mut draw_list = DrawList::new();
+                let mut context = PaintCtx::new(&mut draw_list, theme, dpi);
+                context.global_alpha = 0.5;
+                widget.paint(&mut context);
                 let (hover_color, hover_radius) = draw_list
                     .cmds
                     .iter()
@@ -783,7 +779,9 @@ mod tests {
                         _ => None,
                     })
                     .expect("可见操作按钮应绘制 hover 背景");
-                assert_eq!(hover_color, theme.application_theme().hover_surface);
+                let mut expected_hover = theme.application_theme().hover_surface;
+                expected_hover[3] *= 0.5;
+                assert_eq!(hover_color, expected_hover);
                 assert_eq!(
                     hover_radius,
                     theme.control_metrics().compact_corner_radius_logical * dpi
