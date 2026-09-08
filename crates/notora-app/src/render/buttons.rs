@@ -1,10 +1,10 @@
 //! 手绘外壳操作按钮的指针反馈，产品事件仍由外壳原有路由负责。
 
 use super::{
-    NotoraShell, OverlayState, event_pointer_position, paint_navigation_visibility_button,
-    paint_note_tool_button,
+    NotoraAction, NotoraShell, OverlayState, TrashOperation, event_pointer_position,
+    paint_navigation_visibility_button, paint_note_tool_button,
 };
-use ui::button::ButtonVisualState;
+use ui::button::{ButtonStyle, ButtonVisualState};
 use ui::{Event, EventCtx, Rect};
 
 impl NotoraShell {
@@ -95,8 +95,16 @@ impl NotoraShell {
         rect: Rect,
         label: &str,
         icon: Option<&str>,
+        action: Option<&NotoraAction>,
     ) {
-        paint_note_tool_button(context, rect, label, icon, self.chrome_button_state(rect));
+        let destructive = action.is_some_and(is_permanent_deletion);
+        let style = if destructive {
+            ButtonStyle::destructive(context.theme.settings_theme())
+        } else {
+            ButtonStyle::from_theme(context.theme)
+        };
+        let icon = icon.or(destructive.then_some("trash-2"));
+        paint_note_tool_button(context, rect, label, icon, self.chrome_button_state(rect), &style);
     }
 
     pub(super) fn paint_navigation_visibility_button(
@@ -109,9 +117,110 @@ impl NotoraShell {
     }
 }
 
+fn is_permanent_deletion(action: &NotoraAction) -> bool {
+    matches!(
+        action,
+        NotoraAction::TrashOperationRequested(
+            TrashOperation::Empty | TrashOperation::PermanentlyDelete { .. }
+        ) | NotoraAction::TrashPermanentDeletionConfirmed
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::super::*;
+
+    #[test]
+    fn trash_actions_expose_restore_and_delete_icons() {
+        let buttons =
+            note_toolbar_buttons(&NavigationScope::Trash, Some(NoteId::generate()), false);
+        assert_eq!(buttons[0].icon, Some("undo-2"));
+        assert_eq!(buttons[1].icon, Some("trash-2"));
+        let empty = note_toolbar_buttons(&NavigationScope::Trash, None, false);
+        assert_eq!(empty[0].icon, Some("trash-2"));
+    }
+
+    #[test]
+    fn permanent_delete_and_confirmation_use_danger_foreground() {
+        use ui::core::paint::{DrawCmd, DrawList};
+
+        let theme = ui::theme::test_theme();
+        let rect = Rect::new(10.0, 10.0, 96.0, 28.0);
+        let mut shell = NotoraShell::new();
+        shell.note_toolbar_buttons = vec![RenderedToolbarButton {
+            rect,
+            icon: Some("trash-2"),
+            label: "删除".to_owned(),
+            action: NotoraAction::TrashOperationRequested(TrashOperation::PermanentlyDelete {
+                note_id: NoteId::generate(),
+            }),
+        }];
+        let mut shaper = shaping::Shaper::new().expect("delete button test requires fonts");
+        for confirmation in [false, true] {
+            if confirmation {
+                shell.note_toolbar_buttons.clear();
+                shell.confirmation_confirm_rect = rect;
+                shell.confirmation_action = Some(NotoraAction::TrashPermanentDeletionConfirmed);
+            }
+            let mut draw_list = DrawList::new();
+            let mut context = ui::PaintCtx::new(&mut draw_list, &theme, 1.0);
+            context.shaper = Some(&mut shaper);
+            let action = if confirmation {
+                shell.confirmation_action.as_ref()
+            } else {
+                Some(&shell.note_toolbar_buttons[0].action)
+            };
+            shell.paint_note_tool_button(&mut context, rect, "删除", None, action);
+            let expected = theme.application_theme().button_danger_foreground;
+            assert!(
+                draw_list.cmds.iter().any(|command| matches!(command,
+                    DrawCmd::TextLayout { color, .. } if *color == expected
+                )),
+                "永久删除与最终确认必须使用危险操作文字色"
+            );
+            assert!(
+                draw_list.cmds.iter().any(|command| matches!(command,
+                    DrawCmd::FillTriangle { color, .. } if *color == expected
+                )),
+                "删除图标应与危险操作文字同色"
+            );
+        }
+    }
+
+    #[test]
+    fn recover_cancel_and_external_file_clear_keep_standard_foreground() {
+        use ui::core::paint::{DrawCmd, DrawList};
+
+        let theme = ui::theme::test_theme();
+        let shell = NotoraShell::new();
+        let mut shaper = shaping::Shaper::new().expect("standard action test requires fonts");
+        for action in [
+            NotoraAction::TrashOperationRequested(TrashOperation::Restore {
+                note_id: NoteId::generate(),
+            }),
+            NotoraAction::TrashRestoreWithRenamedPathConfirmed,
+            NotoraAction::OverlayDismissed,
+            NotoraAction::ExternalFilesClearRequested,
+        ] {
+            let mut draw_list = DrawList::new();
+            let mut context = ui::PaintCtx::new(&mut draw_list, &theme, 1.0);
+            context.shaper = Some(&mut shaper);
+            shell.paint_note_tool_button(
+                &mut context,
+                Rect::new(10.0, 10.0, 96.0, 28.0),
+                "操作",
+                Some("undo-2"),
+                Some(&action),
+            );
+            for command in &draw_list.cmds {
+                if let DrawCmd::TextLayout { color, .. } | DrawCmd::FillTriangle { color, .. } =
+                    command
+                {
+                    assert_eq!(*color, theme.application_theme().text_primary);
+                }
+            }
+        }
+    }
 
     #[test]
     fn modal_buttons_receive_hover_without_highlighting_the_background_toolbar() {

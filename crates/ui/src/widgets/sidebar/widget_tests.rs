@@ -177,7 +177,7 @@ mod tests {
             for rect in [layout.open_btn_rect, new_rect] {
                 assert!(draw_list.cmds.iter().any(|command| matches!(command,
                     DrawCmd::StrokeRect { rect: bounds, color, radius, line_width }
-                        if *bounds == rect && *color == theme.application_theme().control_border
+                        if *bounds == rect && *color == theme.application_theme().button_border
                             && *radius == theme.control_metrics().corner_radius_logical && *line_width == 1.0
                 )), "侧栏操作按钮应绘制标准边框");
             }
@@ -319,7 +319,7 @@ mod tests {
             matches!(commands[0], DrawCmd::PushClip(rect) if rect == dropdown)
                 && matches!(
                     commands[1],
-                    DrawCmd::FillRect { color, .. } if color == theme.palette.bg_active
+                    DrawCmd::FillRect { color, .. } if color == theme.application_theme().button_pressed_surface
                 )
                 && matches!(commands[2], DrawCmd::PopClip)
         }));

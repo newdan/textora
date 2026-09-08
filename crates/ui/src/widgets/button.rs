@@ -436,9 +436,9 @@ mod tests {
             assert_eq!(style.font_size_logical, metrics.font_size_logical);
             assert_eq!(style.pad_x_logical, metrics.horizontal_padding_logical);
             assert_eq!(style.corner_radius_logical, metrics.corner_radius_logical);
-            assert_eq!(style.background, application.control_surface);
+            assert_eq!(style.background, application.button_surface);
             assert_eq!(style.foreground, application.text_primary);
-            assert_eq!(style.hover_background, application.hover_surface);
+            assert_eq!(style.hover_background, application.button_hover_surface);
         }
     }
 

@@ -641,7 +641,7 @@ mod tests {
                 && matches!(
                     commands[1],
                     DrawCmd::FillRect { rect, color, .. }
-                        if rect == widget.rect && color == theme.palette.bg_hover
+                        if rect == widget.rect && color == theme.application_theme().button_hover_surface
                 )
                 && matches!(commands[2], DrawCmd::PopClip)
         }));
@@ -650,7 +650,7 @@ mod tests {
                 command,
                 DrawCmd::StrokeRect { rect, color, .. }
                     if *rect == widget.rect
-                        && *color == theme.application_theme().control_border
+                        && *color == theme.application_theme().button_border
             )
         }));
         assert!(!draw_list.cmds.iter().any(|command| {
@@ -658,7 +658,7 @@ mod tests {
                 command,
                 DrawCmd::FillRect { rect, color, .. }
                     if *rect == widget.menu_rect()
-                        && *color == theme.palette.bg_hover
+                        && *color == theme.application_theme().button_hover_surface
             )
         }));
     }
@@ -731,7 +731,7 @@ mod tests {
             .cmds
             .iter()
             .filter(|command| {
-                matches!(command, DrawCmd::FillRect { color, .. } if *color == theme.palette.bg_hover)
+                matches!(command, DrawCmd::FillRect { color, .. } if *color == theme.application_theme().button_hover_surface)
             })
             .count();
         assert_eq!(hover_fill_count, 1, "hover 色不得在同一区域重复合成");
@@ -751,7 +751,7 @@ mod tests {
                 && matches!(
                     commands[1],
                     DrawCmd::FillRect { rect, color, .. }
-                        if rect == widget.rect && color == theme.palette.bg_active
+                        if rect == widget.rect && color == theme.application_theme().button_pressed_surface
                 )
                 && matches!(commands[2], DrawCmd::PopClip)
         }));
@@ -760,7 +760,7 @@ mod tests {
                 command,
                 DrawCmd::FillRect { rect, color, .. }
                     if *rect == widget.main_rect()
-                        && *color == theme.palette.bg_active
+                        && *color == theme.application_theme().button_pressed_surface
             )
         }));
     }

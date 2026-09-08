@@ -1634,7 +1634,7 @@ mod tests {
         ));
         assert!(matches!(
             draw_list.cmds.last(),
-            Some(DrawCmd::StrokeRect { color, .. }) if *color == light_settings.control_border
+            Some(DrawCmd::StrokeRect { color, .. }) if *color == light_settings.button_border
         ));
     }
 

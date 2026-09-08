@@ -1315,7 +1315,7 @@ mod tests {
         );
         assert_eq!(
             stacked_action_backgrounds(&actions),
-            [settings_theme_hover_color(settings_theme), settings_theme.control_surface],
+            [settings_theme_hover_color(settings_theme), settings_theme.button_surface],
         );
 
         let _ = actions.on_event(
@@ -1327,7 +1327,7 @@ mod tests {
         );
         assert_eq!(
             stacked_action_backgrounds(&actions),
-            [settings_theme.control_surface, settings_theme_hover_color(settings_theme)],
+            [settings_theme.button_surface, settings_theme_hover_color(settings_theme)],
             "同组按钮不得同时保持 hover",
         );
 
@@ -1337,7 +1337,7 @@ mod tests {
         );
         assert_eq!(
             stacked_action_backgrounds(&actions),
-            [settings_theme.control_surface; 2],
+            [settings_theme.button_surface; 2],
             "鼠标移出纵向按钮组后应清除全部 hover",
         );
     }
@@ -1560,6 +1560,6 @@ mod tests {
     }
 
     fn settings_theme_hover_color(settings_theme: SettingsTheme) -> [f32; 4] {
-        settings_theme.hover_surface
+        settings_theme.button_hover_surface
     }
 }

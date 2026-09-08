@@ -1,6 +1,9 @@
 use super::{ColorPalette, EditorTheme};
 
 const MODAL_SCRIM_MINIMUM_ALPHA: f32 = 0.45;
+const BUTTON_SURFACE_TEXT_BLEND: f32 = 0.035;
+const BUTTON_BORDER_TEXT_BLEND: f32 = 0.12;
+const BUTTON_DANGER_TEXT_BLEND: f32 = 0.6;
 
 /// 应用外壳的通用视觉语义令牌。
 ///
@@ -25,6 +28,11 @@ pub struct ApplicationTheme {
     pub strong_border: [f32; 4],
     pub control_surface: [f32; 4],
     pub control_border: [f32; 4],
+    pub button_surface: [f32; 4],
+    pub button_border: [f32; 4],
+    pub button_hover_surface: [f32; 4],
+    pub button_pressed_surface: [f32; 4],
+    pub button_danger_foreground: [f32; 4],
     pub accent: [f32; 4],
     pub danger: [f32; 4],
     pub warning: [f32; 4],
@@ -35,6 +43,8 @@ impl ApplicationTheme {
     pub(crate) fn from_theme(palette: &ColorPalette, editor: &EditorTheme) -> Self {
         let mut modal_scrim = palette.shadow;
         modal_scrim[3] = modal_scrim[3].max(MODAL_SCRIM_MINIMUM_ALPHA);
+        let button_surface =
+            blend_surface(palette.bg_elevated, palette.text_main, BUTTON_SURFACE_TEXT_BLEND);
 
         Self {
             window_surface: palette.bg_base,
@@ -54,10 +64,43 @@ impl ApplicationTheme {
             strong_border: palette.border_strong,
             control_surface: palette.input_bg,
             control_border: palette.input_border,
+            button_surface,
+            button_border: blend_surface(
+                palette.border_strong,
+                palette.text_main,
+                BUTTON_BORDER_TEXT_BLEND,
+            ),
+            button_hover_surface: overlay_surface(button_surface, palette.bg_hover),
+            button_pressed_surface: overlay_surface(button_surface, palette.bg_active),
+            button_danger_foreground: blend_surface(
+                palette.danger,
+                palette.text_main,
+                BUTTON_DANGER_TEXT_BLEND,
+            ),
             accent: palette.accent,
             danger: palette.danger,
             warning: palette.warning,
             modal_scrim,
         }
     }
+}
+
+fn blend_surface(surface: [f32; 4], foreground: [f32; 4], amount: f32) -> [f32; 4] {
+    std::array::from_fn(|index| surface[index] * (1.0 - amount) + foreground[index] * amount)
+}
+
+/// 状态色是覆盖层；先在主题的线性颜色空间合成，再统一应用控件透明度。
+fn overlay_surface(background: [f32; 4], overlay: [f32; 4]) -> [f32; 4] {
+    let background_alpha = background[3] * (1.0 - overlay[3]);
+    let alpha = overlay[3] + background_alpha;
+    if alpha <= 0.0 {
+        return [0.0; 4];
+    }
+    let mut surface = [0.0; 4];
+    for index in 0..3 {
+        surface[index] =
+            (overlay[index] * overlay[3] + background[index] * background_alpha) / alpha;
+    }
+    surface[3] = alpha;
+    surface
 }

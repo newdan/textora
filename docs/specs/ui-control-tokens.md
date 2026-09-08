@@ -22,7 +22,8 @@
 
 | 控件状态 | 语义来源 |
 |---|---|
-| 默认表面/边框 | `ApplicationTheme.control_surface` / `control_border` |
+| 输入控件表面/边框 | `ApplicationTheme.control_surface` / `control_border` |
+| 操作按钮表面/边框 | `ApplicationTheme.button_surface` / `button_border` |
 | 主文字/次文字 | `ApplicationTheme.text_primary` / `text_secondary` |
 | 选中表面/文字 | `selected_surface` / `navigation_selected_text` |
 | hover | `hover_surface` 或调用场景的 navigation hover token |
@@ -41,8 +42,11 @@
 ## 两端共享按钮规则
 
 - `ui::button::ButtonStyle::from_theme` / `action` 是普通操作按钮的唯一标准构造入口。textora、notora、设置页、分段新建按钮、侧栏打开按钮和空状态操作均使用此入口。
-- 普通操作采用 14px 字号、8px 圆角、1px 边框（均为逻辑像素）；文字与图标共享 `text_primary`，背景/边框采用 `control_surface` / `control_border`。
-- `ButtonVisualState` 解析 Normal、Hovered、Pressed、Selected、Disabled；悬停与按下分别使用 `hover_surface`、`selected_surface`。选中按钮按下时保持成对的选中前景与背景，避免反色文字落在浅底上。
+- 普通操作采用 14px 字号、8px 圆角、1px 边框（均为逻辑像素）；文字与图标共享 `text_primary`，背景/边框采用专用 `button_surface` / `button_border`，避免可用操作按钮呈现输入框的低对比外观。
+- 按钮底色在浮层底色中混入 3.5% 主文字色；轮廓在强边框色中混入 12% 主文字色。颜色在主题的线性空间派生，深浅主题均保留清晰文字、底色和轮廓，输入框配色不受影响。
+- `ButtonVisualState` 解析 Normal、Hovered、Pressed、Selected、Disabled；悬停与按下分别使用 `button_hover_surface`、`button_pressed_surface`。主题先将状态覆盖色合成到按钮底色上，保证启用态不会因覆盖色的低透明度丢失底色。选中按钮按下时保持成对的选中前景与背景，避免反色文字落在浅底上。
 - 禁用文字、背景和边框应用 0.45 局部透明度；公共绘制方法再统一乘一次 `PaintCtx.global_alpha`。分段按钮的内部分隔线使用同一边框色与透明度。
 - `category`、`segmented`、`ghost` 明确表示导航、分段选项、内嵌图标角色；这些角色可以使用透明背景和无边框，不复制普通操作按钮的样式实现。
 - 产品层只映射交互状态与展示数据。分段按钮保留独立区域悬停/按下和菜单打开状态；原有手绘操作按钮保留业务触发方式，通过共享规则绘制反馈。
+
+- `destructive` 表示回收站永久删除、清空及最终确认；图标与文字统一使用 `button_danger_foreground`（危险色混入 60% 主文字色，保证内置深浅主题启用态的文字对比度至少 4.5:1），底色与边框从普通按钮色和危险色派生，尺寸、圆角及禁用透明度沿用公共规则。恢复、取消和文件记录清空仍使用普通操作样式。

@@ -952,19 +952,19 @@ fn note_toolbar_buttons(
     if *scope == NavigationScope::Trash {
         let Some(note_id) = selected_note_id else {
             return vec![NoteToolbarButtonInput {
-                icon: None,
+                icon: Some("trash-2"),
                 label: "清空".to_owned(),
                 action: NotoraAction::TrashOperationRequested(TrashOperation::Empty),
             }];
         };
         return vec![
             NoteToolbarButtonInput {
-                icon: None,
+                icon: Some("undo-2"),
                 label: "恢复".to_owned(),
                 action: NotoraAction::TrashOperationRequested(TrashOperation::Restore { note_id }),
             },
             NoteToolbarButtonInput {
-                icon: None,
+                icon: Some("trash-2"),
                 label: "删除".to_owned(),
                 action: NotoraAction::TrashOperationRequested(TrashOperation::PermanentlyDelete {
                     note_id,
@@ -1692,7 +1692,13 @@ impl NotoraShell {
                 &model.card_list_title,
             );
             if self.compact_navigation_rect != Rect::ZERO {
-                self.paint_note_tool_button(context, self.compact_navigation_rect, "笔记库", None);
+                self.paint_note_tool_button(
+                    context,
+                    self.compact_navigation_rect,
+                    "笔记库",
+                    None,
+                    None,
+                );
             }
             if self.navigation_expand_rect != Rect::ZERO {
                 self.paint_navigation_visibility_button(
@@ -1702,7 +1708,13 @@ impl NotoraShell {
                 );
             }
             for button in &self.note_toolbar_buttons {
-                self.paint_note_tool_button(context, button.rect, &button.label, button.icon);
+                self.paint_note_tool_button(
+                    context,
+                    button.rect,
+                    &button.label,
+                    button.icon,
+                    Some(&button.action),
+                );
             }
             if model.cards.is_empty() {
                 self.card_empty_state.paint(context);
@@ -1733,7 +1745,7 @@ impl NotoraShell {
         }
         if self.compact_back_rect != Rect::ZERO {
             frame.with_paint_context(|context| {
-                self.paint_note_tool_button(context, self.compact_back_rect, "返回", None);
+                self.paint_note_tool_button(context, self.compact_back_rect, "返回", None, None);
             });
         }
         if model.show_settings_overlay {
@@ -1793,12 +1805,19 @@ impl NotoraShell {
                     application_theme.text_secondary,
                     &confirmation.description,
                 );
-                self.paint_note_tool_button(context, self.confirmation_cancel_rect, "取消", None);
+                self.paint_note_tool_button(
+                    context,
+                    self.confirmation_cancel_rect,
+                    "取消",
+                    None,
+                    None,
+                );
                 self.paint_note_tool_button(
                     context,
                     self.confirmation_confirm_rect,
                     &confirmation.confirm_label,
                     None,
+                    Some(&confirmation.confirm_action),
                 );
             });
         }
@@ -2563,7 +2582,7 @@ impl NotoraShell {
         for (rect, label) in
             self.save_conflict_button_rects.iter().zip(["重新载入", "保存副本", "重试", "取消"])
         {
-            self.paint_note_tool_button(context, *rect, label, None);
+            self.paint_note_tool_button(context, *rect, label, None, None);
         }
     }
 
@@ -3210,12 +3229,13 @@ fn paint_note_tool_button(
     label: &str,
     icon: Option<&str>,
     state: ButtonVisualState,
+    style: &ButtonStyle,
 ) {
     const CONTENT_PADDING_LOGICAL: f32 = 8.0;
     const ICON_SIZE_LOGICAL: f32 = 14.0;
     const ICON_TEXT_GAP_LOGICAL: f32 = 4.0;
     const TEXT_BASELINE_OFFSET_RATIO: f32 = 0.35;
-    let foreground = ButtonStyle::from_theme(context.theme).paint(context, rect, state);
+    let foreground = style.paint(context, rect, state);
     let mut text_x = rect.x + CONTENT_PADDING_LOGICAL * context.dpi;
     if let Some(icon_name) = icon {
         let icon_size = ICON_SIZE_LOGICAL * context.dpi;
@@ -3863,6 +3883,7 @@ mod tests {
                             &button.label,
                             button.icon,
                             ButtonVisualState::Normal,
+                            &ButtonStyle::from_theme(&theme),
                         );
 
                         assert_toolbar_button_appearance(&actual, &reference, rect, &button.label);
@@ -3909,6 +3930,7 @@ mod tests {
                     &button.label,
                     button.icon,
                     ButtonVisualState::Normal,
+                    &ButtonStyle::from_theme(&theme),
                 );
             }
 
