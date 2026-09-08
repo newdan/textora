@@ -12,17 +12,16 @@ use ui::theme::SettingsTheme;
 use crate::sync_settings_page::SyncSettingsPage;
 use crate::sync_settings_types::{SyncSettingsAction, SyncSettingsInput};
 
-const SETTINGS_SIDEBAR_WIDTH_LOGICAL: f32 = 160.0;
-const SETTINGS_COMPACT_SIDEBAR_WIDTH_LOGICAL: f32 = 96.0;
-const SETTINGS_COMPACT_LAYOUT_THRESHOLD_LOGICAL: f32 = 400.0;
+const SETTINGS_SIDEBAR_WIDTH_LOGICAL: f32 = 152.0;
+const SETTINGS_COMPACT_SIDEBAR_WIDTH_LOGICAL: f32 = 104.0;
+const SETTINGS_COMPACT_LAYOUT_THRESHOLD_LOGICAL: f32 = 520.0;
 const SETTINGS_SIDEBAR_TOP_INSET_LOGICAL: f32 = 12.0;
-const SETTINGS_FORM_INSET_LOGICAL: f32 = 24.0;
+const SETTINGS_FORM_INSET_LOGICAL: f32 = 20.0;
 const SETTINGS_COMPACT_FORM_INSET_LOGICAL: f32 = 12.0;
 const SETTINGS_CATEGORY_HORIZONTAL_INSET_LOGICAL: f32 = 10.0;
 const SETTINGS_CATEGORY_BUTTON_HEIGHT_LOGICAL: f32 = 34.0;
 const SETTINGS_CATEGORY_BUTTON_GAP_LOGICAL: f32 = 4.0;
-const SETTINGS_FORM_GAP_LOGICAL: f32 = 16.0;
-const SETTINGS_COMPACT_FORM_GAP_LOGICAL: f32 = 8.0;
+const SETTINGS_FORM_GAP_LOGICAL: f32 = 12.0;
 const SETTINGS_SIDEBAR_SEPARATOR_WIDTH_LOGICAL: f32 = 1.0;
 
 const APPEARANCE_CATEGORY_ID: WidgetId = WidgetId(0x7365_7474_6170_7065);
@@ -275,12 +274,7 @@ impl TextoraSettingsOverlay {
     }
 
     fn layout_pages(&mut self, compact_layout: bool, ctx: &mut LayoutCtx) {
-        let form_gap_logical = if compact_layout {
-            SETTINGS_COMPACT_FORM_GAP_LOGICAL
-        } else {
-            SETTINGS_FORM_GAP_LOGICAL
-        };
-        let form_gap = form_gap_logical * ctx.dpi;
+        let form_gap = SETTINGS_FORM_GAP_LOGICAL * ctx.dpi;
         let page_rect = Rect::new(
             self.sidebar_width + form_gap,
             0.0,
@@ -559,10 +553,11 @@ mod tests {
     #[test]
     fn outer_compact_breakpoint_keeps_generic_and_sync_content_geometry_aligned() {
         for (width, expected_content_rect) in [
-            (399.0, Rect::new(116.0, 12.0, 271.0, 456.0)),
-            (400.0, Rect::new(200.0, 24.0, 176.0, 432.0)),
-            (575.0, Rect::new(200.0, 24.0, 351.0, 432.0)),
-            (576.0, Rect::new(200.0, 24.0, 352.0, 432.0)),
+            (399.0, Rect::new(128.0, 12.0, 259.0, 456.0)),
+            (519.0, Rect::new(128.0, 12.0, 379.0, 456.0)),
+            (520.0, Rect::new(184.0, 20.0, 316.0, 440.0)),
+            (683.0, Rect::new(184.0, 20.0, 479.0, 440.0)),
+            (684.0, Rect::new(184.0, 20.0, 480.0, 440.0)),
         ] {
             let overlay = overlay_at_width(width);
             assert_eq!(overlay.sync_page_rect, expected_content_rect);
@@ -611,7 +606,7 @@ mod tests {
             &mut nodes,
         );
 
-        assert!(semantic_roles(&nodes).contains(&ui::core::AccessibilityRole::TextField));
+        assert!(!semantic_roles(&nodes).contains(&ui::core::AccessibilityRole::TextField));
         let mut root = ui::core::AccessibilityNode::new(
             ui::core::AccessibilityId(0x7465_7874_6f72_6173),
             ui::core::AccessibilityRole::Group,
@@ -628,6 +623,17 @@ mod tests {
             Some(WidgetAction::Consumed)
         );
         assert_eq!(overlay.active_category, ProductSettingsCategory::Editor);
+        let theme = ui::theme::test_theme();
+        let mut measure = NoopMeasure;
+        let mut layout =
+            LayoutCtx { ui_measure: None, measure: &mut measure, theme: &theme, dpi: 1.0 };
+        overlay.set_rect(Rect::new(0.0, 0.0, 720.0, 480.0), &mut layout);
+        let mut editor_nodes = Vec::new();
+        overlay.collect_accessibility_nodes(
+            &ui::core::AccessibilityContext::new(40.0, 60.0),
+            &mut editor_nodes,
+        );
+        assert!(semantic_roles(&editor_nodes).contains(&ui::core::AccessibilityRole::TextField));
     }
 
     #[test]

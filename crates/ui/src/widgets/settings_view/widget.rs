@@ -21,21 +21,26 @@ use super::types::{
 use crate::settings::ThemeMode;
 use crate::view_mode::ViewMode;
 
-const SETTINGS_SIDEBAR_WIDTH_LOGICAL: f32 = 160.0;
-const SETTINGS_COMPACT_SIDEBAR_WIDTH_LOGICAL: f32 = 96.0;
-const SETTINGS_COMPACT_LAYOUT_THRESHOLD_LOGICAL: f32 = 400.0;
+const SETTINGS_SIDEBAR_WIDTH_LOGICAL: f32 = 152.0;
+const SETTINGS_COMPACT_SIDEBAR_WIDTH_LOGICAL: f32 = 104.0;
+const SETTINGS_COMPACT_LAYOUT_THRESHOLD_LOGICAL: f32 = 520.0;
 const SETTINGS_SIDEBAR_TOP_INSET_LOGICAL: f32 = 12.0;
-const SETTINGS_FORM_INSET_LOGICAL: f32 = 24.0;
+const SETTINGS_FORM_INSET_LOGICAL: f32 = 20.0;
 const SETTINGS_COMPACT_FORM_INSET_LOGICAL: f32 = 12.0;
 const SETTINGS_CATEGORY_HORIZONTAL_INSET_LOGICAL: f32 = 10.0;
 const SETTINGS_CATEGORY_BUTTON_HEIGHT_LOGICAL: f32 = 34.0;
 const SETTINGS_CATEGORY_BUTTON_GAP_LOGICAL: f32 = 4.0;
-const SETTINGS_FORM_GAP_LOGICAL: f32 = 16.0;
-const SETTINGS_COMPACT_FORM_GAP_LOGICAL: f32 = 8.0;
-const SETTINGS_BUTTON_WIDTH_LOGICAL: f32 = 78.0;
-const SETTINGS_TEXT_BOX_WIDTH_LOGICAL: f32 = 192.0;
+const SETTINGS_FORM_GAP_LOGICAL: f32 = 12.0;
+const SETTINGS_BUTTON_WIDTH_LOGICAL: f32 = 82.0;
+const SETTINGS_TEXT_BOX_WIDTH_LOGICAL: f32 = 200.0;
 const SETTINGS_CONTROL_HEIGHT_LOGICAL: f32 = 32.0;
 const SETTINGS_ROW_HEIGHT_LOGICAL: f32 = 64.0;
+const SETTINGS_STACKED_ROW_HEIGHT_LOGICAL: f32 = 120.0;
+const SETTINGS_ROW_STACK_GAP_LOGICAL: f32 = 8.0;
+const SETTINGS_THEME_SEGMENT_COUNT: f32 = 3.0;
+const SETTINGS_ROW_RESPONSIVE_THRESHOLD_LOGICAL: f32 = SETTINGS_ROW_LABEL_WIDTH_LOGICAL
+    + SETTINGS_ROW_COLUMN_GAP_LOGICAL
+    + SETTINGS_BUTTON_WIDTH_LOGICAL * SETTINGS_THEME_SEGMENT_COUNT;
 const SETTINGS_ROW_LABEL_WIDTH_LOGICAL: f32 = 176.0;
 const SETTINGS_ROW_COLUMN_GAP_LOGICAL: f32 = 12.0;
 const SETTINGS_ROW_VERTICAL_INSET_LOGICAL: f32 = 10.0;
@@ -261,15 +266,10 @@ impl SettingsView {
     }
 
     fn build_appearance_sections(&self) -> Vec<FormSection> {
-        let rows = vec![
-            self.theme_mode_row(),
-            self.font_family_row(),
-            self.font_size_row(),
-            self.line_height_ratio_row(),
-        ];
+        let rows = vec![self.theme_mode_row()];
         vec![FormSection::new(
             section_title_label("外观"),
-            Some(section_description_label("调整主题与编辑器文字显示。")),
+            Some(section_description_label("选择外观，即时生效。")),
             rows,
             settings_section_style(),
         )]
@@ -286,7 +286,7 @@ impl SettingsView {
             let mut button = Button::new(id, segmented_button_style(self.settings_theme));
             button.set_text(Some(title.to_owned()));
             button.set_selected(selected);
-            InlineChild::fixed(Box::new(button), SETTINGS_BUTTON_WIDTH_LOGICAL)
+            InlineChild::flex(Box::new(button), 1.0)
                 .with_cross_size(SETTINGS_CONTROL_HEIGHT_LOGICAL)
         })
         .collect();
@@ -303,7 +303,7 @@ impl SettingsView {
         text_box.set_placeholder("字体名称");
         FormRow::new(
             row_label("字体"),
-            Some(description_label("输入编辑器使用的字体名称。")),
+            Some(description_label("输入字体名称。")),
             Box::new(text_box),
             settings_row_style(),
         )
@@ -336,8 +336,11 @@ impl SettingsView {
     fn build_editor_sections(&self) -> Vec<FormSection> {
         vec![FormSection::new(
             section_title_label("编辑器"),
-            Some(section_description_label("调整编辑行为与制表符宽度。")),
+            Some(section_description_label("文本输入按 Enter 应用。")),
             vec![
+                self.font_family_row(),
+                self.font_size_row(),
+                self.line_height_ratio_row(),
                 self.word_wrap_row(),
                 self.markdown_first_line_indent_row(),
                 self.line_numbers_row(),
@@ -350,7 +353,7 @@ impl SettingsView {
     fn word_wrap_row(&self) -> FormRow {
         FormRow::new(
             row_label("自动换行"),
-            Some(description_label("在编辑区域宽度不足时折行显示。")),
+            Some(description_label("根据编辑区域宽度折行。")),
             Box::new(Switch::new(WORD_WRAP_ID, self.input.word_wrap)),
             settings_row_style(),
         )
@@ -359,7 +362,7 @@ impl SettingsView {
     fn markdown_first_line_indent_row(&self) -> FormRow {
         FormRow::new(
             row_label("Markdown 首行缩进"),
-            Some(description_label("普通段落首行缩进两个字符，仅影响排版")),
+            Some(description_label("缩进两字符，仅影响排版。")),
             Box::new(Switch::new(
                 MARKDOWN_FIRST_LINE_INDENT_ID,
                 self.input.markdown_first_line_indent,
@@ -371,7 +374,7 @@ impl SettingsView {
     fn line_numbers_row(&self) -> FormRow {
         FormRow::new(
             row_label("显示行号"),
-            Some(description_label("在编辑器左侧显示行号。")),
+            Some(description_label("在左侧显示行号。")),
             Box::new(Switch::new(LINE_NUMBERS_ID, self.input.show_line_numbers)),
             settings_row_style(),
         )
@@ -382,7 +385,7 @@ impl SettingsView {
         text_box.set_text(&self.input.tab_width.to_string());
         text_box.set_placeholder("1–16");
         FormRow::new(
-            row_label("Tab 宽度"),
+            row_label("制表符宽度"),
             Some(description_label("允许范围：1–16 个空格。")),
             Box::new(text_box),
             settings_row_style(),
@@ -392,7 +395,7 @@ impl SettingsView {
     fn build_interface_sections(&self) -> Vec<FormSection> {
         vec![FormSection::new(
             section_title_label("界面"),
-            Some(section_description_label("选择主界面布局与状态栏显示。")),
+            Some(section_description_label("调整布局与状态显示，即时生效。")),
             vec![self.view_mode_row(), self.status_bar_row()],
             settings_section_style(),
         )]
@@ -408,7 +411,7 @@ impl SettingsView {
             let mut button = Button::new(id, segmented_button_style(self.settings_theme));
             button.set_text(Some(title.to_owned()));
             button.set_selected(selected);
-            InlineChild::fixed(Box::new(button), SETTINGS_BUTTON_WIDTH_LOGICAL)
+            InlineChild::flex(Box::new(button), 1.0)
                 .with_cross_size(SETTINGS_CONTROL_HEIGHT_LOGICAL)
         })
         .collect();
@@ -422,7 +425,7 @@ impl SettingsView {
     fn status_bar_row(&self) -> FormRow {
         FormRow::new(
             row_label("显示状态栏"),
-            Some(description_label("在窗口底部显示当前文档状态。")),
+            Some(description_label("在底部显示文档状态。")),
             Box::new(Switch::new(STATUS_BAR_ID, self.input.show_status_bar)),
             settings_row_style(),
         )
@@ -804,11 +807,7 @@ impl Widget for SettingsView {
         } else {
             SETTINGS_FORM_INSET_LOGICAL
         };
-        let form_gap_logical = if compact_layout {
-            SETTINGS_COMPACT_FORM_GAP_LOGICAL
-        } else {
-            SETTINGS_FORM_GAP_LOGICAL
-        };
+        let form_gap_logical = SETTINGS_FORM_GAP_LOGICAL;
         let form_inset = form_inset_logical * ctx.dpi;
         let form_gap = form_gap_logical * ctx.dpi;
         self.form_rect = if self.category_navigation_visible {
@@ -835,6 +834,15 @@ impl Widget for SettingsView {
         if self.form_needs_layout {
             self.rebuild_form(ctx);
         }
+        let content_width_logical =
+            self.form_rect.w / ctx.dpi - SETTINGS_ROW_HORIZONTAL_INSET_LOGICAL * 2.0;
+        let row_height_logical =
+            if content_width_logical < SETTINGS_ROW_RESPONSIVE_THRESHOLD_LOGICAL {
+                SETTINGS_STACKED_ROW_HEIGHT_LOGICAL
+            } else {
+                SETTINGS_ROW_HEIGHT_LOGICAL
+            };
+        self.form.set_row_height_logical(row_height_logical);
         self.form.set_rect(Rect::new(0.0, 0.0, self.form_rect.w, self.form_rect.h), ctx);
         if let Some(banner) = self.persistence_banner.as_mut() {
             banner.set_rect(
@@ -1042,14 +1050,14 @@ fn settings_row_style() -> FormRowStyle {
         min_height_logical: SETTINGS_ROW_HEIGHT_LOGICAL,
         label_width_logical: SETTINGS_ROW_LABEL_WIDTH_LOGICAL,
         column_gap_logical: SETTINGS_ROW_COLUMN_GAP_LOGICAL,
-        responsive_threshold_logical: 0.0,
+        responsive_threshold_logical: SETTINGS_ROW_RESPONSIVE_THRESHOLD_LOGICAL,
+        stack_gap_logical: SETTINGS_ROW_STACK_GAP_LOGICAL,
         padding_logical: [
             SETTINGS_ROW_VERTICAL_INSET_LOGICAL,
             SETTINGS_ROW_HORIZONTAL_INSET_LOGICAL,
             SETTINGS_ROW_VERTICAL_INSET_LOGICAL,
             SETTINGS_ROW_HORIZONTAL_INSET_LOGICAL,
         ],
-        ..FormRowStyle::default()
     }
 }
 
@@ -1164,6 +1172,90 @@ mod tests {
     }
 
     #[test]
+    fn notora_style_groups_typography_with_editor_controls() {
+        let theme = crate::theme::test_theme();
+        for (category, expected_ids) in [
+            (SettingsCategory::Appearance, vec![THEME_SYSTEM_ID, THEME_DARK_ID, THEME_LIGHT_ID]),
+            (
+                SettingsCategory::Editor,
+                vec![
+                    FONT_FAMILY_ID,
+                    FONT_SIZE_ID,
+                    LINE_HEIGHT_RATIO_ID,
+                    WORD_WRAP_ID,
+                    MARKDOWN_FIRST_LINE_INDENT_ID,
+                    LINE_NUMBERS_ID,
+                    TAB_WIDTH_ID,
+                ],
+            ),
+        ] {
+            let mut view = settings_fixture(category);
+            layout_settings_view(&mut view, &theme, Rect::new(0.0, 0.0, 720.0, 560.0));
+            let mut actual_ids = Vec::new();
+            view.form.collect_focusable_ids(&mut actual_ids);
+            assert_eq!(actual_ids, expected_ids);
+        }
+    }
+
+    #[test]
+    fn notora_style_narrow_rows_keep_segmented_controls_inside_the_card() {
+        let theme = crate::theme::test_theme();
+        for dpi in [1.0, 2.0] {
+            let mut measure = NoopMeasure;
+            let mut context =
+                LayoutCtx { ui_measure: None, measure: &mut measure, theme: &theme, dpi };
+            let view = settings_fixture(SettingsCategory::Appearance);
+            for mut row in [view.theme_mode_row(), view.view_mode_row()] {
+                row.set_rect(Rect::new(0.0, 0.0, 240.0 * dpi, 120.0 * dpi), &mut context);
+                assert_eq!(row.layout_mode(), crate::widgets::form::FormRowLayoutMode::Stacked);
+                assert!(row.label_rect().bottom() <= row.control_rect().y);
+                let mut nodes = Vec::new();
+                row.collect_accessibility_nodes(&AccessibilityContext::new(0.0, 0.0), &mut nodes);
+                for id in
+                    [THEME_SYSTEM_ID, THEME_DARK_ID, THEME_LIGHT_ID, VIEW_SIDEBAR_ID, VIEW_TABS_ID]
+                {
+                    if let Some(button) = semantic_node_with_id(&nodes, id.into()) {
+                        assert!(button.bounds.x >= row.control_rect().x);
+                        assert!(button.bounds.right() <= row.control_rect().right() + f32::EPSILON);
+                        assert_eq!(button.bounds.h, SETTINGS_CONTROL_HEIGHT_LOGICAL * dpi);
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn notora_style_editor_reflows_without_losing_uncommitted_text() {
+        let theme = crate::theme::test_theme();
+        let mut view = settings_fixture(SettingsCategory::Editor);
+        layout_settings_view(&mut view, &theme, Rect::new(0.0, 0.0, 900.0, 600.0));
+        view.set_keyboard_focus(Some(FONT_FAMILY_ID));
+        dispatch_settings_event(
+            &mut view,
+            Event::KeyDown(KeyCode::Char('a'), Modifiers { cmd: true, ..Modifiers::NONE }),
+        );
+        dispatch_settings_event(&mut view, Event::KeyDown(KeyCode::Char('X'), Modifiers::NONE));
+        for dpi in [1.0, 2.0] {
+            let mut measure = NoopMeasure;
+            let mut context =
+                LayoutCtx { ui_measure: None, measure: &mut measure, theme: &theme, dpi };
+            view.set_rect(Rect::new(0.0, 0.0, 480.0 * dpi, 600.0 * dpi), &mut context);
+            let mut nodes = Vec::new();
+            view.collect_accessibility_nodes(&AccessibilityContext::new(0.0, 0.0), &mut nodes);
+            let field = semantic_node_with_id(&nodes, FONT_FAMILY_ID.into())
+                .expect("editor must expose font field");
+            let label = semantic_node_with_id(&nodes, field.labelled_by[0])
+                .expect("font field must have a label");
+            assert!(field.bounds.y >= label.bounds.bottom());
+            assert_eq!(field.bounds.h, SETTINGS_CONTROL_HEIGHT_LOGICAL * dpi);
+        }
+        assert_eq!(
+            dispatch_settings_event(&mut view, Event::KeyDown(KeyCode::Enter, Modifiers::NONE)),
+            Some(WidgetAction::Settings(SettingsViewAction::SetFontFamily("X".into())))
+        );
+    }
+
+    #[test]
     fn appearance_category_uses_selected_buttons_and_validated_textboxes() {
         let mut view = settings_fixture(SettingsCategory::Appearance);
         assert!(view.category_is_selected(SettingsCategory::Appearance));
@@ -1191,7 +1283,7 @@ mod tests {
     #[test]
     fn settings_semantics_reach_nested_fields_and_reuse_category_actions() {
         let theme = crate::theme::test_theme();
-        let mut view = settings_fixture(SettingsCategory::Appearance);
+        let mut view = settings_fixture(SettingsCategory::Editor);
         layout_settings_view(&mut view, &theme, Rect::new(0.0, 0.0, 900.0, 600.0));
         let mut nodes = Vec::new();
         view.collect_accessibility_nodes(
@@ -1335,7 +1427,7 @@ mod tests {
         layout_settings_view(&mut view, &theme, Rect::new(0.0, 0.0, 720.0, 480.0));
 
         assert_eq!(view.active_category(), SettingsCategory::Editor);
-        assert_eq!(view.form.focused_id(), Some(WORD_WRAP_ID));
+        assert_eq!(view.form.focused_id(), Some(FONT_FAMILY_ID));
     }
 
     #[test]
@@ -1422,8 +1514,8 @@ mod tests {
         let theme = crate::theme::test_theme();
         layout_settings_view(&mut view, &theme, Rect::new(0.0, 0.0, 680.0, 480.0));
 
-        assert_eq!(view.sidebar_width, 160.0);
-        assert_eq!(view.form_rect, Rect::new(200.0, 24.0, 456.0, 432.0));
+        assert_eq!(view.sidebar_width, 152.0);
+        assert_eq!(view.form_rect, Rect::new(184.0, 20.0, 476.0, 440.0));
     }
 
     #[test]
@@ -1444,7 +1536,7 @@ mod tests {
         );
         let draw_list = paint_settings_view_for_test(&view, &theme);
         assert!(!draw_list.cmds.iter().any(|command| {
-            matches!(command, DrawCmd::FillRect { rect, .. } if *rect == Rect::new(0.0, 0.0, 160.0, 400.0))
+            matches!(command, DrawCmd::FillRect { rect, .. } if *rect == Rect::new(0.0, 0.0, 152.0, 400.0))
         }));
 
         click_at(&mut view, former_editor_category_rect.x, former_editor_category_rect.y);
@@ -1461,7 +1553,7 @@ mod tests {
         layout_settings_view(&mut view, &theme, Rect::new(0.0, 0.0, 720.0, 480.0));
 
         assert_eq!(view.active_category(), SettingsCategory::Editor);
-        assert_eq!(view.form.focused_id(), Some(WORD_WRAP_ID));
+        assert_eq!(view.form.focused_id(), Some(FONT_FAMILY_ID));
     }
 
     #[test]
@@ -1473,7 +1565,7 @@ mod tests {
         let mut ctx =
             LayoutCtx { ui_measure: None, measure: &mut measure, theme: &theme, dpi: 1.0 };
 
-        row.set_rect(Rect::new(0.0, 0.0, 456.0, SETTINGS_ROW_HEIGHT_LOGICAL), &mut ctx);
+        row.set_rect(Rect::new(0.0, 0.0, 476.0, SETTINGS_ROW_HEIGHT_LOGICAL), &mut ctx);
 
         let description_rect = row.description_rect().expect("editor row has a description");
         assert_eq!(row.layout_mode(), crate::widgets::form::FormRowLayoutMode::Columns);
@@ -1522,16 +1614,16 @@ mod tests {
         view.paint(&mut PaintCtx::new(&mut draw_list, &theme, 1.0));
         assert!(matches!(
             draw_list.cmds.first(),
-            Some(DrawCmd::FillRect { rect, .. }) if rect.w == 160.0
+            Some(DrawCmd::FillRect { rect, .. }) if rect.w == 152.0
         ));
     }
 
     #[test]
-    fn clicking_appearance_text_box_focuses_it_and_accepts_typed_input() {
+    fn clicking_editor_text_box_focuses_it_and_accepts_typed_input() {
         use crate::core::widget::{KeyCode, Modifiers};
 
         for dpi in [1.0, 2.0] {
-            let mut view = settings_fixture(SettingsCategory::Appearance);
+            let mut view = settings_fixture(SettingsCategory::Editor);
             let theme = crate::theme::test_theme();
             let mut measure = NoopMeasure;
             let mut layout =

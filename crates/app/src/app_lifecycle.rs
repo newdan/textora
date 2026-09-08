@@ -2026,6 +2026,21 @@ mod tests {
 
         let mut shaper = shaping::Shaper::new().expect("test shaper should initialize");
         let draw = app.ui_shell.paint_chrome(&theme, 1.0, Some(&mut shaper));
+        let (category_x, category_y) = draw
+            .cmds
+            .iter()
+            .find_map(|command| match command {
+                DrawCmd::TextLayout { layout, x, y_baseline, .. } if layout.text == "编辑器" => {
+                    Some((*x, *y_baseline))
+                }
+                _ => None,
+            })
+            .expect("settings overlay should expose the editor category");
+        for state in [ElementState::Pressed, ElementState::Released] {
+            let _ = crate::events::handle_mouse_input_left(&mut app, state, category_x, category_y);
+        }
+        app.ui_shell.update_frame(Screen::new(1200.0, 800.0), &theme, &mut measure, &inputs);
+        let draw = app.ui_shell.paint_chrome(&theme, 1.0, Some(&mut shaper));
         let text_index = draw
             .cmds
             .iter()
