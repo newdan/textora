@@ -12,6 +12,7 @@ const CATEGORY_PRESSED_ACCENT_BLEND: f32 = 0.09;
 const CATEGORY_SELECTED_ACCENT_BLEND: f32 = 0.14;
 const SEGMENT_HOVER_ACCENT_BLEND: f32 = 0.16;
 const SEGMENT_PRESSED_ACCENT_BLEND: f32 = 0.14;
+const TOOLBAR_DIVIDER_INSET_LOGICAL: f32 = 6.0;
 
 /// 互斥的按钮视觉状态；选中状态始终保持前景与背景成对使用。
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -42,6 +43,42 @@ pub struct ButtonStyle {
 }
 
 impl ButtonStyle {
+    /// 工具栏统一绘制底色与外框，子操作只在交互时显示背景。
+    pub fn toolbar_item(self) -> Self {
+        Self {
+            background: TRANSPARENT,
+            disabled_background: TRANSPARENT,
+            border: TRANSPARENT,
+            ..self
+        }
+    }
+
+    /// 将同一行的操作区域组合为一个工具栏；输入仅包含展示几何。
+    pub fn paint_toolbar_group(&self, context: &mut PaintCtx<'_>, segments: &[Rect]) {
+        let mut segments: Vec<_> =
+            segments.iter().copied().filter(|rect| rect.w > 0.0 && rect.h > 0.0).collect();
+        segments.sort_by(|left, right| left.x.total_cmp(&right.x));
+        let (Some(first), Some(last)) = (segments.first(), segments.last()) else {
+            return;
+        };
+        let bounds = Rect::new(first.x, first.y, last.right() - first.x, first.h);
+        self.paint(context, bounds, ButtonVisualState::Normal);
+        let inset = TOOLBAR_DIVIDER_INSET_LOGICAL * context.dpi;
+        let divider_color = self.border_color(ButtonVisualState::Normal, context.global_alpha);
+        for pair in segments.windows(2) {
+            let center_x = (pair[0].right() + pair[1].x) * 0.5;
+            context.list.fill(
+                Rect::new(
+                    center_x - context.dpi * 0.5,
+                    bounds.y + inset,
+                    context.dpi,
+                    (bounds.h - inset * 2.0).max(0.0),
+                ),
+                divider_color,
+            );
+        }
+    }
+
     pub fn from_theme(theme: &Theme) -> Self {
         Self::action(theme.settings_theme())
     }

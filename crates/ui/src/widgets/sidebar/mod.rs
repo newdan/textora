@@ -102,6 +102,7 @@ impl SidebarWidget {
             Orientation::Vertical,
         );
         let mut new_document_button = SplitButtonWidget::new();
+        new_document_button.set_presentation(crate::split_button::SplitButtonPresentation::Toolbar);
         new_document_button.set_action_ids(NEW_DOCUMENT_BUTTON_ID, NEW_DOCUMENT_MENU_BUTTON_ID);
         new_document_button.set_icon(Some("plus".to_owned()));
         new_document_button

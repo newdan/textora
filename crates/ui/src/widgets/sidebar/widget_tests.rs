@@ -162,7 +162,7 @@ mod tests {
     }
 
     #[test]
-    fn sidebar_open_and_new_buttons_share_colors_and_outline() {
+    fn sidebar_file_actions_share_one_toolbar_surface_and_outline() {
         for (mode, system) in [
             (crate::settings::ThemeMode::Light, winit::window::Theme::Light),
             (crate::settings::ThemeMode::Dark, winit::window::Theme::Dark),
@@ -216,18 +216,25 @@ mod tests {
                 layout.new_btn_rect.w + layout.new_menu_btn_rect.w,
                 layout.new_btn_rect.h,
             );
-            for rect in [layout.open_btn_rect, new_rect] {
-                assert!(draw_list.cmds.iter().any(|command| matches!(command,
-                    DrawCmd::FillRect { rect: bounds, color, radius }
-                        if *bounds == rect && *color == crate::button::ButtonStyle::from_theme(&theme).background
-                            && *radius == theme.control_metrics().corner_radius_logical
-                )), "侧栏操作按钮应使用相同的标准底色与圆角");
-                assert!(draw_list.cmds.iter().any(|command| matches!(command,
-                    DrawCmd::StrokeRect { rect: bounds, color, radius, line_width }
-                        if *bounds == rect && *color == theme.application_theme().button_border
-                            && *radius == theme.control_metrics().corner_radius_logical && *line_width == 1.0
-                )), "侧栏操作按钮应绘制标准边框");
-            }
+            let toolbar_rect = Rect::new(
+                new_rect.x,
+                new_rect.y,
+                layout.open_btn_rect.right() - new_rect.x,
+                new_rect.h,
+            );
+            assert!(draw_list.cmds.iter().any(|command| matches!(command,
+                DrawCmd::FillRect { rect, color, .. }
+                    if *rect == toolbar_rect && *color == crate::button::ButtonStyle::from_theme(&theme).background
+            )), "文件操作应共享一个工具栏底色");
+            assert!(
+                draw_list.cmds.iter().any(|command| matches!(command,
+                    DrawCmd::StrokeRect { rect, .. } if *rect == toolbar_rect
+                )),
+                "文件操作应共享一个工具栏外框"
+            );
+            assert!(!draw_list.cmds.iter().any(|command| matches!(command,
+                DrawCmd::StrokeRect { rect, .. } if *rect == new_rect || *rect == layout.open_btn_rect
+            )), "工具栏内的操作不应再绘制独立边框");
         }
     }
 

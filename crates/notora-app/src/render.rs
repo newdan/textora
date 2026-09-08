@@ -1171,6 +1171,7 @@ impl NotoraShell {
         search_box.set_leading_content_inset_logical(SEARCH_ICON_AREA_WIDTH_LOGICAL);
         search_box.set_blink(true);
         let mut new_note_button = SplitButtonWidget::new();
+        new_note_button.set_presentation(ui::split_button::SplitButtonPresentation::Toolbar);
         new_note_button.set_action_ids(NEW_NOTE_BUTTON_ID, NEW_NOTE_MENU_BUTTON_ID);
         new_note_button.set_icon(Some("plus".to_owned()));
         Self {
@@ -1654,7 +1655,6 @@ impl NotoraShell {
             self.navigation_tree.paint(context);
             self.navigation_splitter.paint(context);
             self.card_list_splitter.paint(context);
-            self.new_note_button.paint(context);
             if self.navigation_collapse_rect != Rect::ZERO {
                 self.paint_navigation_visibility_button(
                     context,
@@ -1707,15 +1707,7 @@ impl NotoraShell {
                     "chevron-right",
                 );
             }
-            for button in &self.note_toolbar_buttons {
-                self.paint_note_tool_button(
-                    context,
-                    button.rect,
-                    &button.label,
-                    button.icon,
-                    Some(&button.action),
-                );
-            }
+            self.paint_note_toolbar(context);
             if model.cards.is_empty() {
                 self.card_empty_state.paint(context);
             } else {
@@ -3797,48 +3789,9 @@ mod tests {
         );
     }
 
-    fn assert_toolbar_button_appearance(
-        actual: &ui::core::paint::DrawList,
-        reference: &ui::core::paint::DrawList,
-        rect: Rect,
-        label: &str,
-    ) {
-        use ui::core::paint::DrawCmd;
-
-        let foreground = reference
-            .cmds
-            .iter()
-            .find_map(|command| match command {
-                DrawCmd::TextLayout { color, .. } => Some(*color),
-                _ => None,
-            })
-            .expect("new button must paint its label");
-        assert!(actual.cmds.iter().any(|command| matches!(command, DrawCmd::TextLayout { .. })));
-        assert!(actual.cmds.iter().any(|command| matches!(command, DrawCmd::FillTriangle { .. })));
-        for command in &actual.cmds {
-            match command {
-                DrawCmd::TextLayout { color, .. } | DrawCmd::FillTriangle { color, .. } => {
-                    assert_eq!(*color, foreground, "{label}文字和图标色应与新建一致");
-                }
-                _ => {}
-            }
-        }
-        for command in &reference.cmds {
-            match command {
-                DrawCmd::FillRect { rect: bounds, .. } if *bounds == rect => {
-                    assert!(actual.cmds.contains(command), "{label}背景和圆角应与新建一致");
-                }
-                DrawCmd::StrokeRect { .. } => {
-                    assert!(actual.cmds.contains(command), "{label}边框应与新建一致");
-                }
-                _ => {}
-            }
-        }
-    }
-
     #[test]
-    fn file_toolbar_buttons_match_new_button_colors_and_outline() {
-        use ui::core::paint::DrawList;
+    fn file_actions_share_one_toolbar_surface_and_outline() {
+        use ui::core::paint::{DrawCmd, DrawList};
 
         let mut shaper = shaping::Shaper::new().expect("toolbar appearance test requires fonts");
         for (mode, system_theme) in [
@@ -3848,11 +3801,17 @@ mod tests {
             let theme = ui::Theme::resolve_builtin(mode, system_theme);
             for dpi in [1.0, 1.5, 2.0] {
                 for alpha in [1.0, 0.5] {
-                    let rect = Rect::new(
-                        0.0,
-                        0.0,
-                        NEW_NOTE_BUTTON_WIDTH_LOGICAL * dpi,
-                        NOTE_TOOL_BUTTON_HEIGHT_LOGICAL * dpi,
+                    let mut shell = NotoraShell::new();
+                    shell
+                        .new_note_button
+                        .set_input(SplitButtonInput { label: "新建".to_owned(), enabled: true });
+                    let card_rect = Rect::new(0.0, 0.0, 320.0 * dpi, 200.0 * dpi);
+                    let padding = SHELL_PADDING_LOGICAL * dpi;
+                    let new_rect = new_note_button_rect(
+                        card_rect,
+                        dpi,
+                        NewNoteControlState::EnabledForFiles,
+                        10.0 * dpi,
                     );
                     let mut measure = ui::NoopMeasure;
                     let mut layout_context = ui::LayoutCtx {
@@ -3861,32 +3820,53 @@ mod tests {
                         theme: &theme,
                         dpi,
                     };
-                    let mut new_button = SplitButtonWidget::new();
-                    new_button.set_icon(Some("plus".to_owned()));
-                    new_button
-                        .set_input(SplitButtonInput { label: "新建".to_owned(), enabled: true });
-                    new_button.set_rect(rect, &mut layout_context);
-                    let mut reference = DrawList::new();
-                    let mut context = ui::PaintCtx::new(&mut reference, &theme, dpi);
+                    shell.new_note_button.set_rect(new_rect, &mut layout_context);
+                    shell.note_toolbar_buttons = layout_note_toolbar(
+                        card_rect,
+                        padding,
+                        card_rect.right() - new_rect.x + NOTE_TOOL_BUTTON_GAP_LOGICAL * dpi,
+                        NOTE_TOOL_BUTTON_WIDTH_LOGICAL * dpi,
+                        NOTE_TOOL_BUTTON_HEIGHT_LOGICAL * dpi,
+                        new_rect.y,
+                        &note_toolbar_buttons(&NavigationScope::ExternalFiles, None, true),
+                    );
+                    let mut actual = DrawList::new();
+                    let mut context = ui::PaintCtx::new(&mut actual, &theme, dpi);
                     context.global_alpha = alpha;
                     context.shaper = Some(&mut shaper);
-                    new_button.paint(&mut context);
-                    for button in note_toolbar_buttons(&NavigationScope::ExternalFiles, None, true)
-                    {
-                        let mut actual = DrawList::new();
-                        let mut context = ui::PaintCtx::new(&mut actual, &theme, dpi);
-                        context.global_alpha = alpha;
-                        context.shaper = Some(&mut shaper);
-                        paint_note_tool_button(
-                            &mut context,
-                            rect,
-                            &button.label,
-                            button.icon,
-                            ButtonVisualState::Normal,
-                            &ButtonStyle::from_theme(&theme),
-                        );
-
-                        assert_toolbar_button_appearance(&actual, &reference, rect, &button.label);
+                    shell.paint_note_toolbar(&mut context);
+                    let first_x = shell
+                        .note_toolbar_buttons
+                        .iter()
+                        .map(|button| button.rect.x)
+                        .fold(new_rect.x, f32::min);
+                    let toolbar_rect =
+                        Rect::new(first_x, new_rect.y, new_rect.right() - first_x, new_rect.h);
+                    let outlines: Vec<_> = actual
+                        .cmds
+                        .iter()
+                        .filter_map(|command| match command {
+                            DrawCmd::StrokeRect { rect, .. } => Some(*rect),
+                            _ => None,
+                        })
+                        .collect();
+                    assert_eq!(outlines, vec![toolbar_rect], "文件操作应只绘制一个工具栏外框");
+                    let style = ButtonStyle::from_theme(&theme);
+                    let foreground = style.foreground_color(ButtonVisualState::Normal, alpha);
+                    let labels: Vec<_> = actual
+                        .cmds
+                        .iter()
+                        .filter_map(|command| match command {
+                            DrawCmd::TextLayout { layout, color, .. } => {
+                                assert_eq!(*color, foreground, "工具栏标签必须保留主题色与透明度");
+                                Some(layout.text.as_str())
+                            }
+                            _ => None,
+                        })
+                        .collect();
+                    assert_eq!(labels.len(), 3);
+                    for label in ["新建", "打开", "清空"] {
+                        assert!(labels.contains(&label), "工具栏必须保留{label}入口");
                     }
                 }
             }

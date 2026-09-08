@@ -5,9 +5,43 @@ use super::{
     paint_navigation_visibility_button, paint_note_tool_button,
 };
 use ui::button::{ButtonStyle, ButtonVisualState};
-use ui::{Event, EventCtx, Rect};
+use ui::{Event, EventCtx, Rect, Widget};
 
 impl NotoraShell {
+    pub(super) fn paint_note_toolbar(&self, context: &mut ui::PaintCtx<'_>) {
+        let main_rect = self.new_note_button.main_rect();
+        let new_note_rect = Rect::new(
+            main_rect.x,
+            main_rect.y,
+            self.new_note_button.menu_rect().right() - main_rect.x,
+            main_rect.h,
+        );
+        let segments: Vec<_> = self
+            .note_toolbar_buttons
+            .iter()
+            .map(|button| button.rect)
+            .chain([new_note_rect])
+            .collect();
+        ButtonStyle::from_theme(context.theme).paint_toolbar_group(context, &segments);
+        self.new_note_button.paint(context);
+        for button in &self.note_toolbar_buttons {
+            let style = if is_permanent_deletion(&button.action) {
+                ButtonStyle::destructive(context.theme.settings_theme())
+            } else {
+                ButtonStyle::from_theme(context.theme)
+            }
+            .toolbar_item();
+            paint_note_tool_button(
+                context,
+                button.rect,
+                &button.label,
+                button.icon,
+                self.chrome_button_state(button.rect),
+                &style,
+            );
+        }
+    }
+
     pub(super) fn update_chrome_button_pointer(
         &mut self,
         event: &Event,

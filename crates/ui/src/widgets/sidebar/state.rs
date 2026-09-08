@@ -620,7 +620,7 @@ impl SidebarState {
     }
 
     fn paint_open_button(&self, ctx: &mut PaintCtx, rect: Rect) {
-        let style = crate::button::ButtonStyle::from_theme(ctx.theme);
+        let style = crate::button::ButtonStyle::from_theme(ctx.theme).toolbar_item();
         let button_state = if self.hovered_button == SidebarHoverButton::OpenFile {
             crate::button::ButtonVisualState::Hovered
         } else {
@@ -695,6 +695,14 @@ impl SidebarState {
 
         self.paint_hamburger(ctx, alpha, false);
 
+        let new_document_rect = Rect::new(
+            layout.new_btn_rect.x,
+            layout.new_btn_rect.y,
+            layout.new_menu_btn_rect.right() - layout.new_btn_rect.x,
+            layout.new_btn_rect.h,
+        );
+        crate::button::ButtonStyle::from_theme(ctx.theme)
+            .paint_toolbar_group(ctx, &[new_document_rect, layout.open_btn_rect]);
         self.paint_open_button(ctx, layout.open_btn_rect);
 
         // 4.5) Files section header

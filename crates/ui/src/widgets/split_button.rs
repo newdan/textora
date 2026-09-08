@@ -33,12 +33,20 @@ enum SplitButtonRegion {
     Menu,
 }
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum SplitButtonPresentation {
+    #[default]
+    Standalone,
+    Toolbar,
+}
+
 /// 主按钮和菜单按钮动作分别由调用方提供 `WidgetId` 映射。
 pub struct SplitButtonWidget {
     rect: Rect,
     main_rect: Rect,
     menu_rect: Rect,
     input: SplitButtonInput,
+    presentation: SplitButtonPresentation,
     main_action_id: WidgetId,
     menu_action_id: WidgetId,
     icon: Option<String>,
@@ -61,6 +69,7 @@ impl SplitButtonWidget {
             main_rect: Rect::ZERO,
             menu_rect: Rect::ZERO,
             input: SplitButtonInput { enabled: true, ..SplitButtonInput::default() },
+            presentation: SplitButtonPresentation::default(),
             main_action_id: WidgetId(0),
             menu_action_id: WidgetId(0),
             icon: None,
@@ -78,6 +87,10 @@ impl SplitButtonWidget {
             self.pressed_region = None;
             self.focused = false;
         }
+    }
+
+    pub fn set_presentation(&mut self, presentation: SplitButtonPresentation) {
+        self.presentation = presentation;
     }
 
     pub fn set_action_ids(&mut self, main_action_id: WidgetId, menu_action_id: WidgetId) {
@@ -152,7 +165,11 @@ impl Widget for SplitButtonWidget {
             return;
         }
 
-        let style = ButtonStyle::from_theme(ctx.theme);
+        let base_style = ButtonStyle::from_theme(ctx.theme);
+        let style = match self.presentation {
+            SplitButtonPresentation::Standalone => base_style.clone(),
+            SplitButtonPresentation::Toolbar => base_style.clone().toolbar_item(),
+        };
         let state = if self.input.enabled {
             ButtonVisualState::Normal
         } else {
@@ -165,12 +182,15 @@ impl Widget for SplitButtonWidget {
             [(SplitButtonRegion::Main, self.main_rect), (SplitButtonRegion::Menu, self.menu_rect)]
         {
             let region_color = style.background_color(self.region_state(region), alpha);
+            if region_color[3] == 0.0 {
+                continue;
+            }
             ctx.list.clip(rect, |draw_list| {
                 draw_list.fill_rounded(self.rect, region_color, corner_radius);
             });
         }
 
-        let divider_color = style.border_color(state, alpha);
+        let divider_color = base_style.border_color(state, alpha);
         let divider_inset = SPLIT_BUTTON_DIVIDER_INSET_LOGICAL * ctx.dpi;
         ctx.list.fill(
             Rect::new(
