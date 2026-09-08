@@ -1625,48 +1625,50 @@ impl NotoraShell {
             context.list.fill(layout.card_list_rect, application_theme.content_surface);
             context.list.fill(layout.editor_rect, application_theme.editor_surface);
             self.editor_pane.paint_underlay(context);
-            self.search_box.paint(context);
-            let search_icon_size = SIDEBAR_ICON_SIZE_LOGICAL * context.dpi;
-            draw_icon(
-                context.list,
-                "search",
-                search_rect.x + (search_icon_area_width - search_icon_size) * 0.5,
-                search_rect.y + (search_rect.h - search_icon_size) * 0.5,
-                search_icon_size,
-                application_theme.text_secondary,
-            );
-            self.navigation_tree.paint(context);
-            self.navigation_splitter.paint(context);
-            self.card_list_splitter.paint(context);
-            if self.navigation_collapse_rect != Rect::ZERO {
-                self.paint_navigation_visibility_button(
-                    context,
-                    self.navigation_collapse_rect,
-                    "chevron-left",
+            if layout.navigation_rect != Rect::ZERO {
+                self.search_box.paint(context);
+                let search_icon_size = SIDEBAR_ICON_SIZE_LOGICAL * context.dpi;
+                draw_icon(
+                    context.list,
+                    "search",
+                    search_rect.x + (search_icon_area_width - search_icon_size) * 0.5,
+                    search_rect.y + (search_rect.h - search_icon_size) * 0.5,
+                    search_icon_size,
+                    application_theme.text_secondary,
+                );
+                self.navigation_tree.paint(context);
+                if self.navigation_collapse_rect != Rect::ZERO {
+                    self.paint_navigation_visibility_button(
+                        context,
+                        self.navigation_collapse_rect,
+                        "chevron-left",
+                    );
+                }
+                let settings_icon_size = SIDEBAR_ICON_SIZE_LOGICAL * context.dpi;
+                let settings_horizontal_inset = SHELL_PADDING_LOGICAL * context.dpi;
+                draw_icon(
+                    context.list,
+                    "settings",
+                    settings_rect.x + settings_horizontal_inset,
+                    settings_rect.y + (settings_rect.h - settings_icon_size) * 0.5,
+                    settings_icon_size,
+                    application_theme.text_secondary,
+                );
+                context.text(
+                    settings_rect.x
+                        + settings_horizontal_inset
+                        + settings_icon_size
+                        + 2.0 * context.dpi,
+                    settings_rect.y
+                        + settings_rect.h * 0.5
+                        + SIDEBAR_LABEL_FONT_SIZE_LOGICAL * 0.35 * context.dpi,
+                    SIDEBAR_LABEL_FONT_SIZE_LOGICAL * context.dpi,
+                    application_theme.text_secondary,
+                    "设置",
                 );
             }
-            let settings_icon_size = SIDEBAR_ICON_SIZE_LOGICAL * context.dpi;
-            let settings_horizontal_inset = SHELL_PADDING_LOGICAL * context.dpi;
-            draw_icon(
-                context.list,
-                "settings",
-                settings_rect.x + settings_horizontal_inset,
-                settings_rect.y + (settings_rect.h - settings_icon_size) * 0.5,
-                settings_icon_size,
-                application_theme.text_secondary,
-            );
-            context.text(
-                settings_rect.x
-                    + settings_horizontal_inset
-                    + settings_icon_size
-                    + 2.0 * context.dpi,
-                settings_rect.y
-                    + settings_rect.h * 0.5
-                    + SIDEBAR_LABEL_FONT_SIZE_LOGICAL * 0.35 * context.dpi,
-                SIDEBAR_LABEL_FONT_SIZE_LOGICAL * context.dpi,
-                application_theme.text_secondary,
-                "设置",
-            );
+            self.navigation_splitter.paint(context);
+            self.card_list_splitter.paint(context);
             context.text(
                 card_header.title_x,
                 card_header.title_baseline_y,
@@ -3524,6 +3526,84 @@ mod tests {
     use crate::action::CardQuery;
     use crate::state::CardPageState;
     use notora_core::{CatalogCard, DocumentIdentity, DocumentKind, NavigationScope, NoteId};
+
+    #[test]
+    fn collapsed_navigation_does_not_paint_search_over_the_expand_button() {
+        let directory = tempfile::tempdir().expect("navigation paint test needs isolated paths");
+        let paths = crate::NotoraPaths::from_config_directory(directory.path().join("notora"))
+            .expect("navigation paint test paths should be created");
+        let mut app = crate::NotoraApp::with_paths(paths)
+            .expect("navigation paint test should create a headless app");
+        let mut shell = NotoraShell::new();
+        let model = NotoraRenderModel::from_state(&NotoraState::default());
+        for dpi in [1.0, 1.5, 2.0] {
+            for visibility in [
+                crate::NavigationPaneVisibility::Collapsed,
+                crate::NavigationPaneVisibility::Expanded,
+                crate::NavigationPaneVisibility::Collapsed,
+            ] {
+                let layout = ShellLayout::compute(crate::shell::layout::ShellLayoutInput {
+                    window_width_px: 1000.0 * dpi,
+                    window_height_px: 600.0 * dpi,
+                    dpi,
+                    navigation_width_logical: 220.0,
+                    card_list_width_logical: 340.0,
+                    navigation_pane_visibility: visibility,
+                    compact_content: crate::CompactContent::CardList,
+                    compact_navigation: crate::CompactNavigation::Hidden,
+                    editor_property_row_visible: true,
+                    editor_header_visible: true,
+                });
+                let runtime = app.runtime_mut().editor_runtime_mut();
+                runtime.set_scale_factor(f64::from(dpi));
+                let mut frame = runtime.begin_frame().expect("navigation test frame should begin");
+                shell.render(&mut frame, layout, &model).expect("navigation frame should render");
+                assert_navigation_search_visibility(&mut frame, visibility);
+                if visibility == crate::NavigationPaneVisibility::Collapsed {
+                    let button = shell.navigation_expand_rect;
+                    let click = Event::MouseDown {
+                        px: button.x + button.w * 0.5,
+                        py: button.y + button.h * 0.5,
+                        button: ui::core::MouseButton::Left,
+                    };
+                    assert_eq!(
+                        shell_layout_action(&click, Rect::ZERO, Rect::ZERO, button, Rect::ZERO),
+                        Some(NotoraAction::NavigationPaneVisibilityToggled)
+                    );
+                }
+            }
+        }
+    }
+
+    fn assert_navigation_search_visibility(
+        frame: &mut EditorFrame,
+        visibility: crate::NavigationPaneVisibility,
+    ) {
+        frame.with_underlay_paint_context(|context| {
+            let mut search_icon = ui::DrawList::new();
+            let dpi = context.dpi;
+            let size = SIDEBAR_ICON_SIZE_LOGICAL * dpi;
+            draw_icon(
+                &mut search_icon,
+                "search",
+                SHELL_PADDING_LOGICAL * dpi + (SEARCH_ICON_AREA_WIDTH_LOGICAL * dpi - size) * 0.5,
+                SHELL_PADDING_LOGICAL * dpi + (SEARCH_BAR_HEIGHT_LOGICAL * dpi - size) * 0.5,
+                size,
+                context.theme.application_theme().text_secondary,
+            );
+            assert!(!search_icon.cmds.is_empty(), "search icon fixture must contain geometry");
+            let search_is_painted = context
+                .list
+                .cmds
+                .windows(search_icon.cmds.len())
+                .any(|commands| commands == search_icon.cmds);
+            assert_eq!(
+                search_is_painted,
+                visibility == crate::NavigationPaneVisibility::Expanded,
+                "搜索图标应随侧栏显隐，不能叠到展开按钮上：{visibility:?}，DPI={dpi}"
+            );
+        });
+    }
 
     #[test]
     fn builds_a_static_render_model() {
