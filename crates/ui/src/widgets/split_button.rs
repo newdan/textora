@@ -19,6 +19,7 @@ pub const SPLIT_BUTTON_HORIZONTAL_PADDING_LOGICAL: f32 = 10.0;
 const SPLIT_BUTTON_ICON_SIZE_LOGICAL: f32 = 14.0;
 const SPLIT_BUTTON_ICON_GAP_LOGICAL: f32 = 6.0;
 const SPLIT_BUTTON_DIVIDER_INSET_LOGICAL: f32 = 6.0;
+const SPLIT_BUTTON_TOOLBAR_ARROW_INSET_LOGICAL: f32 = 10.0;
 
 /// Split button 的纯展示输入。
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -190,17 +191,19 @@ impl Widget for SplitButtonWidget {
             });
         }
 
-        let divider_color = base_style.border_color(state, alpha);
-        let divider_inset = SPLIT_BUTTON_DIVIDER_INSET_LOGICAL * ctx.dpi;
-        ctx.list.fill(
-            Rect::new(
-                self.menu_rect.x,
-                self.menu_rect.y + divider_inset,
-                ctx.dpi,
-                (self.menu_rect.h - divider_inset * 2.0).max(0.0),
-            ),
-            divider_color,
-        );
+        if self.presentation == SplitButtonPresentation::Standalone {
+            let divider_color = base_style.border_color(state, alpha);
+            let divider_inset = SPLIT_BUTTON_DIVIDER_INSET_LOGICAL * ctx.dpi;
+            ctx.list.fill(
+                Rect::new(
+                    self.menu_rect.x,
+                    self.menu_rect.y + divider_inset,
+                    ctx.dpi,
+                    (self.menu_rect.h - divider_inset * 2.0).max(0.0),
+                ),
+                divider_color,
+            );
+        }
         let foreground = style.foreground_color(state, alpha);
         let font_size = style.font_size_logical * ctx.dpi;
         let baseline = self.main_rect.y + self.main_rect.h * 0.5 + font_size * 0.35;
@@ -220,7 +223,13 @@ impl Widget for SplitButtonWidget {
             content_x
         };
         ctx.text(text_x, baseline, font_size, foreground, &self.input.label);
-        let center_x = self.menu_rect.x + self.menu_rect.w * 0.5;
+        let arrow_inset = match self.presentation {
+            SplitButtonPresentation::Standalone => self.menu_rect.w * 0.5,
+            SplitButtonPresentation::Toolbar => {
+                (SPLIT_BUTTON_TOOLBAR_ARROW_INSET_LOGICAL * ctx.dpi).min(self.menu_rect.w * 0.5)
+            }
+        };
+        let center_x = self.menu_rect.x + arrow_inset;
         let center_y = self.menu_rect.y + self.menu_rect.h * 0.5;
         let arrow_radius = 4.0 * ctx.dpi;
         ctx.list.fill_triangle(
