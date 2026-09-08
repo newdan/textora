@@ -635,6 +635,53 @@ mod tests {
     }
 
     #[test]
+    fn modal_close_icon_is_centered_in_its_button_at_multiple_scales() {
+        const CENTER_TOLERANCE_PX: f32 = 0.001;
+        let theme = crate::theme::test_theme();
+        for dpi in [1.0, 1.25, 1.5, 2.0] {
+            let mut modal = fixture_modal();
+            let mut measure = NoopMeasure;
+            modal.set_rect(
+                Rect::new(0.0, 0.0, 320.0 * dpi, 180.0 * dpi),
+                &mut LayoutCtx { ui_measure: None, measure: &mut measure, theme: &theme, dpi },
+            );
+            let mut draw_list = DrawList::new();
+            modal.paint(&mut PaintCtx {
+                global_alpha: 1.0,
+                list: &mut draw_list,
+                theme: &theme,
+                dpi,
+                offset: (0.0, 0.0),
+                shaper: None,
+            });
+            let vertices: Vec<_> = draw_list
+                .cmds
+                .iter()
+                .filter_map(|command| match command {
+                    DrawCmd::FillTriangle { p0, p1, p2, .. } => Some([*p0, *p1, *p2]),
+                    _ => None,
+                })
+                .flatten()
+                .collect();
+            assert!(!vertices.is_empty(), "close icon must be painted");
+            let button = modal.close_button_rect;
+            for (axis, expected_center) in
+                [button.x + button.w * 0.5, button.y + button.h * 0.5].into_iter().enumerate()
+            {
+                let minimum =
+                    vertices.iter().map(|point| point[axis]).fold(f32::INFINITY, f32::min);
+                let maximum =
+                    vertices.iter().map(|point| point[axis]).fold(f32::NEG_INFINITY, f32::max);
+                let icon_center = (minimum + maximum) * 0.5;
+                assert!(
+                    (icon_center - expected_center).abs() < CENTER_TOLERANCE_PX,
+                    "close icon center {icon_center} must match button center {expected_center} on axis {axis} at scale {dpi}"
+                );
+            }
+        }
+    }
+
+    #[test]
     fn modal_frame_paints_surface_and_requests_close() {
         let mut modal = fixture_modal();
 

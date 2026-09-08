@@ -126,6 +126,9 @@ impl Widget for Button {
         let mut cursor_x = self.rect.x + pad_x;
 
         if let Some(ref icon_name) = self.icon {
+            if self.text.is_none() {
+                cursor_x = self.rect.x + (self.rect.w - icon_size) * 0.5;
+            }
             let icon_y = self.rect.y + (self.rect.h - icon_size) * 0.5;
             draw_icon(ctx.list, icon_name, cursor_x, icon_y, icon_size, fg);
             cursor_x += icon_size + icon_gap;
