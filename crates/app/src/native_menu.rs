@@ -218,7 +218,7 @@ mod macos {
         // -- App menu --
         {
             let m = new_menu("", mtm);
-            m.addItem(&make_item("关于 edit+", 1, "", target, mtm));
+            m.addItem(&make_item("关于 textora", 1, "", target, mtm));
             m.addItem(&separator(mtm));
             // Settings submenu
             {
@@ -229,8 +229,8 @@ mod macos {
                 theme.addItem(&make_item("浅色模式", 24, "", target, mtm));
                 settings.addItem(&make_submenu("主题", &theme, mtm));
                 let view_mode = new_menu("视图模式", mtm);
-                view_mode.addItem(&make_item("Sidebar 模式", 27, "", target, mtm));
-                view_mode.addItem(&make_item("Tabs 模式", 28, "", target, mtm));
+                view_mode.addItem(&make_item("侧边栏模式", 27, "", target, mtm));
+                view_mode.addItem(&make_item("标签页模式", 28, "", target, mtm));
                 settings.addItem(&make_submenu("视图模式", &view_mode, mtm));
                 settings.addItem(&make_item("显示行号", 25, "", target, mtm));
                 settings.addItem(&make_item("自动换行", 26, "", target, mtm));
@@ -238,7 +238,7 @@ mod macos {
             }
             m.addItem(&make_item("偏好设置…", 2, ",", target, mtm));
             m.addItem(&separator(mtm));
-            m.addItem(&make_item("退出 edit+", 3, "q", target, mtm));
+            m.addItem(&make_item("退出 textora", 3, "q", target, mtm));
             main_menu.addItem(&make_submenu("", &m, mtm));
         }
         // -- File --

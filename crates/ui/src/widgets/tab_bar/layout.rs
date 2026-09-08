@@ -264,7 +264,7 @@ pub fn layout_tabs(
     let available = ctx.screen_w - arrows_area - gap - right_reserved;
 
     // Font size for tab text (consistent with app.rs rendering)
-    let font_size = 15.0 * ctx.dpi;
+    let font_size = crate::constants::TITLE_FONT_SIZE * ctx.dpi;
 
     // Compute disambiguation for duplicate filenames
     let file_paths: Vec<Option<&Path>> =

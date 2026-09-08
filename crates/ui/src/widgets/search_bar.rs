@@ -1,9 +1,12 @@
 //! SearchBarWidget — 搜索面板的绘制 + 键盘事件转译。
 //! 显隐由 app 通过 set_visible 注入（visibility 信息源是 doc.search_state.panel_visible）。
 //! query 与 match_count 由 app 通过 set_input 注入。
+mod layout;
+
 /// Height of the search bar in logical pixels (before DPI scaling).
 pub use crate::constants::BAR_HEIGHT as SEARCH_BAR_HEIGHT;
 
+use self::layout::{SearchBarLayout, SearchBarLayoutInput, calculate_search_bar_layout};
 use crate::core::widget::MouseButton;
 use crate::core::{
     Event, EventCtx, KeyCode, LayoutCtx, PaintCtx, Rect, Widget, WidgetAction, WidgetId,
@@ -11,7 +14,6 @@ use crate::core::{
 use crate::widgets::icon::draw_icon;
 use crate::widgets::tooltip::TooltipHint;
 use std::any::Any;
-use std::cell::Cell;
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 enum HoveredButton {
@@ -61,20 +63,16 @@ use crate::widgets::text_box::{TextBox, TextBoxIme};
 
 const FIND_BOX_ID: WidgetId = WidgetId(2);
 const REPLACE_BOX_ID: WidgetId = WidgetId(3);
+const SEARCH_FONT_SIZE_LOGICAL: f32 = 14.0;
+const BUTTON_ASCII_GLYPH_WIDTH_LOGICAL: f32 = 8.0;
+const BUTTON_WIDE_GLYPH_WIDTH_LOGICAL: f32 = 14.0;
 
 pub struct SearchBarWidget {
     rect: Rect,
-    pill_rect: Cell<Rect>,
+    layout: SearchBarLayout,
     snap: SearchBarSnapshot,
     find_box: TextBox,
     replace_box: TextBox,
-    close_btn_rect: Cell<Rect>,
-    prev_btn_rect: Cell<Rect>,
-    next_btn_rect: Cell<Rect>,
-    replace_btn_rect: Cell<Rect>,
-    replace_all_btn_rect: Cell<Rect>,
-    toggle_replace_btn_rect: Cell<Rect>,
-    regex_btn_rect: Cell<Rect>,
     hovered_btn: HoveredButton,
 }
 
@@ -87,26 +85,19 @@ impl Default for SearchBarWidget {
 impl SearchBarWidget {
     pub fn new() -> Self {
         let mut find_box = TextBox::with_id(FIND_BOX_ID);
-        find_box.set_placeholder("Find...");
+        find_box.set_placeholder("查找…");
         find_box.set_max_len_bytes(2048);
 
         let mut replace_box = TextBox::with_id(REPLACE_BOX_ID);
-        replace_box.set_placeholder("Replace...");
+        replace_box.set_placeholder("替换为…");
         replace_box.set_max_len_bytes(2048);
 
         Self {
             rect: Rect::ZERO,
-            pill_rect: Cell::new(Rect::ZERO),
+            layout: SearchBarLayout::default(),
             snap: SearchBarSnapshot::default(),
             find_box,
             replace_box,
-            close_btn_rect: Cell::new(Rect::ZERO),
-            prev_btn_rect: Cell::new(Rect::ZERO),
-            next_btn_rect: Cell::new(Rect::ZERO),
-            replace_btn_rect: Cell::new(Rect::ZERO),
-            replace_all_btn_rect: Cell::new(Rect::ZERO),
-            toggle_replace_btn_rect: Cell::new(Rect::ZERO),
-            regex_btn_rect: Cell::new(Rect::ZERO),
             hovered_btn: HoveredButton::None,
         }
     }
@@ -120,7 +111,7 @@ impl SearchBarWidget {
 
     /// Get the close button rect (for testing / tooltip integration).
     pub fn close_btn_rect(&self) -> Rect {
-        self.close_btn_rect.get()
+        self.layout.close_btn_rect
     }
 
     pub fn set_input(&mut self, snap: SearchBarSnapshot) {
@@ -146,68 +137,18 @@ impl SearchBarWidget {
 impl Widget for SearchBarWidget {
     fn set_rect(&mut self, rect: Rect, ctx: &mut LayoutCtx) {
         self.rect = Rect::new(0.0, 0.0, rect.w, rect.h);
-
-        let dpi = ctx.dpi;
-        let font_size = 14.0 * dpi;
-        let pad_left = 36.0 * dpi;
-        let pad_right = 8.0 * dpi;
-        let btn_size = 20.0 * dpi;
-        let btn_gap = 4.0 * dpi;
-        let pill_w = self.rect.w;
-        let pill_h = self.rect.h;
-
-        let replace_btn_w = 4.0 * 8.0 * dpi;
-        let nav_width = if self.snap.match_count > 0 {
-            let count_text = format!(
-                "{}/{}",
-                self.snap.current_match.saturating_add(1).min(self.snap.match_count),
-                self.snap.match_count
-            );
-            btn_size
-                + btn_gap
-                + btn_size
-                + btn_gap
-                + count_text.len() as f32 * 8.0 * dpi
-                + btn_gap
-                + btn_size
-                + btn_gap
-        } else if !self.snap.query.is_empty() {
-            let no_w = "No results".len() as f32 * 8.0 * dpi;
-            no_w + btn_gap + btn_size + btn_gap
-        } else {
-            btn_size + btn_gap
-        };
-        let right_total = pad_right
-            + btn_size
-            + btn_gap
-            + btn_size
-            + btn_gap
-            + nav_width
-            + replace_btn_w
-            + btn_gap
-            + replace_btn_w
-            + btn_gap;
-
-        let input_area_left = pad_left;
-        let input_area_right = pill_w - right_total;
-        let input_area_w = (input_area_right - input_area_left).max(80.0 * dpi);
-        let sep_w = 20.0 * dpi;
-        let input_h = font_size + 4.0 * dpi;
-        let input_y = (pill_h - input_h) * 0.5;
-
+        self.layout = calculate_search_bar_layout(SearchBarLayoutInput {
+            width: self.rect.w,
+            height: self.rect.h,
+            dpi: ctx.dpi,
+            replace_mode: self.snap.replace_mode,
+            has_query: !self.snap.query.is_empty(),
+            match_count: self.snap.match_count,
+            current_match: self.snap.current_match,
+        });
+        self.find_box.layout(self.layout.find_input_rect, ctx);
         if self.snap.replace_mode {
-            let find_w = (input_area_w - sep_w) * 0.5;
-            let replace_w = (input_area_w - sep_w) * 0.5;
-            let find_rect =
-                Rect::new(input_area_left - 4.0 * dpi, input_y, find_w + 4.0 * dpi, input_h);
-            let replace_left = input_area_left + find_w + sep_w;
-            let replace_rect =
-                Rect::new(replace_left - 4.0 * dpi, input_y, replace_w + 4.0 * dpi, input_h);
-            self.find_box.layout(find_rect, ctx);
-            self.replace_box.layout(replace_rect, ctx);
-        } else {
-            let find_rect = Rect::new(input_area_left - 4.0 * dpi, input_y, input_area_w, input_h);
-            self.find_box.layout(find_rect, ctx);
+            self.replace_box.layout(self.layout.replace_input_rect, ctx);
         }
     }
 
@@ -216,7 +157,7 @@ impl Widget for SearchBarWidget {
             return;
         }
         let dpi = ctx.dpi;
-        let font_size = 14.0 * dpi;
+        let font_size = SEARCH_FONT_SIZE_LOGICAL * dpi;
         let baseline = self.rect.h * 0.5 + font_size * 0.35;
 
         if self.snap.replace_mode {
@@ -227,7 +168,7 @@ impl Widget for SearchBarWidget {
     }
 
     fn hit(&self, px: f32, py: f32) -> bool {
-        self.pill_rect.get().contains(px, py)
+        self.layout.pill_rect.contains(px, py)
     }
 
     fn on_event(&mut self, ev: &Event, _ctx: &mut EventCtx) -> Option<WidgetAction> {
@@ -373,40 +314,40 @@ impl Widget for SearchBarWidget {
     fn tooltip_at(&self, px: f32, py: f32) -> Option<TooltipHint> {
         let hit = |r: &Rect| r.w > 0.0 && r.contains(px, py);
 
-        let r = self.close_btn_rect.get();
+        let r = self.layout.close_btn_rect;
         if hit(&r) {
-            return Some(TooltipHint { label: "Close".into(), target_rect: r });
+            return Some(TooltipHint { label: "关闭查找".into(), target_rect: r });
         }
 
-        let r = self.toggle_replace_btn_rect.get();
+        let r = self.layout.toggle_replace_btn_rect;
         if hit(&r) {
-            let label = if self.snap.replace_mode { "Hide Replace" } else { "Show Replace" };
+            let label = if self.snap.replace_mode { "隐藏替换" } else { "显示替换" };
             return Some(TooltipHint { label: label.into(), target_rect: r });
         }
 
-        let r = self.regex_btn_rect.get();
+        let r = self.layout.regex_btn_rect;
         if hit(&r) {
-            return Some(TooltipHint { label: "Regex".into(), target_rect: r });
+            return Some(TooltipHint { label: "正则表达式".into(), target_rect: r });
         }
 
-        let r = self.prev_btn_rect.get();
+        let r = self.layout.prev_btn_rect;
         if hit(&r) {
-            return Some(TooltipHint { label: "Previous Match".into(), target_rect: r });
+            return Some(TooltipHint { label: "上一个匹配".into(), target_rect: r });
         }
 
-        let r = self.next_btn_rect.get();
+        let r = self.layout.next_btn_rect;
         if hit(&r) {
-            return Some(TooltipHint { label: "Next Match".into(), target_rect: r });
+            return Some(TooltipHint { label: "下一个匹配".into(), target_rect: r });
         }
 
-        let r = self.replace_btn_rect.get();
+        let r = self.layout.replace_btn_rect;
         if hit(&r) {
-            return Some(TooltipHint { label: "Replace".into(), target_rect: r });
+            return Some(TooltipHint { label: "替换".into(), target_rect: r });
         }
 
-        let r = self.replace_all_btn_rect.get();
+        let r = self.layout.replace_all_btn_rect;
         if hit(&r) {
-            return Some(TooltipHint { label: "Replace All".into(), target_rect: r });
+            return Some(TooltipHint { label: "全部替换".into(), target_rect: r });
         }
 
         None
@@ -452,628 +393,295 @@ impl SearchBarWidget {
 
     fn update_hover(&mut self, px: f32, py: f32) {
         let check = |r: &Rect| r.w > 0.0 && r.contains(px, py);
-        if check(&self.close_btn_rect.get()) {
+        if check(&self.layout.close_btn_rect) {
             self.hovered_btn = HoveredButton::CloseBar;
             return;
         }
-        if check(&self.toggle_replace_btn_rect.get()) {
+        if check(&self.layout.toggle_replace_btn_rect) {
             self.hovered_btn = HoveredButton::ToggleReplace;
             return;
         }
-        if check(&self.regex_btn_rect.get()) {
+        if check(&self.layout.regex_btn_rect) {
             self.hovered_btn = HoveredButton::Regex;
             return;
         }
-        if check(&self.prev_btn_rect.get()) {
+        if check(&self.layout.prev_btn_rect) {
             self.hovered_btn = HoveredButton::Prev;
             return;
         }
-        if check(&self.next_btn_rect.get()) {
+        if check(&self.layout.next_btn_rect) {
             self.hovered_btn = HoveredButton::Next;
             return;
         }
-        if check(&self.replace_btn_rect.get()) {
+        if check(&self.layout.replace_btn_rect) {
             self.hovered_btn = HoveredButton::Replace;
             return;
         }
-        if check(&self.replace_all_btn_rect.get()) {
+        if check(&self.layout.replace_all_btn_rect) {
             self.hovered_btn = HoveredButton::ReplaceAll;
         }
     }
 
     fn handle_mouse_down(&mut self, px: f32, py: f32) -> Option<WidgetAction> {
         let check = |r: &Rect| r.w > 0.0 && r.contains(px, py);
-        if check(&self.close_btn_rect.get()) {
+        if check(&self.layout.close_btn_rect) {
             return Some(WidgetAction::SearchBar(SearchBarAction::Close));
         }
-        if check(&self.toggle_replace_btn_rect.get()) {
+        if check(&self.layout.toggle_replace_btn_rect) {
             return Some(WidgetAction::SearchBar(SearchBarAction::ToggleReplace));
         }
-        if check(&self.regex_btn_rect.get()) {
+        if check(&self.layout.regex_btn_rect) {
             return Some(WidgetAction::SearchBar(SearchBarAction::ToggleRegex));
         }
-        if check(&self.prev_btn_rect.get()) {
+        if check(&self.layout.prev_btn_rect) {
             return Some(WidgetAction::SearchBar(SearchBarAction::Prev));
         }
-        if check(&self.next_btn_rect.get()) {
+        if check(&self.layout.next_btn_rect) {
             return Some(WidgetAction::SearchBar(SearchBarAction::Next));
         }
         if self.snap.match_count > 0 {
-            if check(&self.replace_btn_rect.get()) {
+            if check(&self.layout.replace_btn_rect) {
                 return Some(WidgetAction::SearchBar(SearchBarAction::Replace));
             }
-            if check(&self.replace_all_btn_rect.get()) {
+            if check(&self.layout.replace_all_btn_rect) {
                 return Some(WidgetAction::SearchBar(SearchBarAction::ReplaceAll));
             }
         }
         None
     }
 
-    /// Paint a tooltip below a button rect.
-
     /// Paint the find-only bar.
     fn paint_find_only(&self, ctx: &mut PaintCtx, dpi: f32, baseline: f32) {
-        let icon_x = 12.0 * dpi;
-        let pill_w = self.rect.w;
-        let pill_h = self.rect.h;
-        let pill_x = 0.0;
-        let pill_rect = Rect::new(pill_x, 0.0, pill_w, pill_h);
-        self.pill_rect.set(pill_rect);
-
-        ctx.list.fill(pill_rect, ctx.theme.palette.input_bg);
-        ctx.list.fill_rounded(pill_rect, ctx.theme.palette.input_border, 0.0);
-
-        {
-            let icon_sz = 14.0 * dpi;
-            let icon_color = {
-                let mut c = ctx.theme.palette.input_fg;
-                c[3] *= 0.6;
-                c
-            };
-            draw_icon(
-                ctx.list,
-                "search",
-                pill_x + icon_x - icon_sz * 0.5,
-                (pill_h - icon_sz) * 0.5,
-                icon_sz,
-                icon_color,
-            );
-        }
-
-        self.find_box.paint(ctx);
-
-        self.paint_right_buttons(ctx, dpi, baseline, pill_x, pill_w);
+        self.paint_shell(ctx, dpi);
+        self.paint_search_icon(ctx);
+        self.paint_text_box_clipped(&self.find_box, self.layout.find_input_rect, ctx);
+        self.paint_controls(ctx, dpi, baseline);
     }
 
     /// Paint the find+replace bar (inline single-row layout).
-    /// Layout: [/] [find] [→] [replace] [替换] [全部] [count] [◀][▶] [▲] [✕]
     fn paint_find_replace(&self, ctx: &mut PaintCtx, dpi: f32, baseline: f32) {
-        let font_size = 14.0 * dpi;
-        let pad_left = 36.0 * dpi;
-        let icon_x = 12.0 * dpi;
-        let pad_right = 8.0 * dpi;
-        let btn_size = 20.0 * dpi;
-        let btn_gap = 4.0 * dpi;
-        let pill_w = self.rect.w;
-        let pill_h = self.rect.h;
-        let pill_x = 0.0;
-        let pill_rect = Rect::new(pill_x, 0.0, pill_w, pill_h);
-        self.pill_rect.set(pill_rect);
+        self.paint_shell(ctx, dpi);
+        self.paint_search_icon(ctx);
+        self.paint_separator(ctx, dpi, baseline);
+        self.paint_text_box_clipped(&self.find_box, self.layout.find_input_rect, ctx);
+        self.paint_text_box_clipped(&self.replace_box, self.layout.replace_input_rect, ctx);
+        self.paint_controls(ctx, dpi, baseline);
+    }
 
-        ctx.list.fill(pill_rect, ctx.theme.palette.input_bg);
-        ctx.list.fill_rounded(pill_rect, ctx.theme.palette.input_border, 0.0);
+    fn paint_shell(&self, ctx: &mut PaintCtx, dpi: f32) {
+        ctx.list.fill(self.layout.pill_rect, ctx.theme.palette.input_bg);
+        ctx.list.stroke(self.layout.pill_rect, ctx.theme.palette.input_border, dpi);
+    }
 
-        // Compute right-side buttons width to determine input area
-        let replace_btn_w = 4.0 * 8.0 * dpi; // "替换" / "全部" width
-        let nav_width = if self.snap.match_count > 0 {
-            let count_text = format!(
-                "{}/{}",
-                self.snap.current_match.saturating_add(1).min(self.snap.match_count),
-                self.snap.match_count
-            );
-            btn_size
-                + btn_gap
-                + btn_size
-                + btn_gap
-                + count_text.len() as f32 * 8.0 * dpi
-                + btn_gap
-                + btn_size
-                + btn_gap
-        } else if !self.snap.query.is_empty() {
-            let no_w = "No results".len() as f32 * 8.0 * dpi;
-            no_w + btn_gap + btn_size + btn_gap
-        } else {
-            btn_size + btn_gap
-        };
-        let right_total = pad_right
-            + btn_size + btn_gap          // close
-            + btn_size + btn_gap          // toggle
-            + nav_width                   // nav + count
-            + replace_btn_w + btn_gap     // 替换
-            + replace_btn_w + btn_gap; // 全部
-
-        let input_area_left = pill_x + pad_left;
-        let input_area_right = pill_x + pill_w - right_total;
-        let input_area_w = (input_area_right - input_area_left).max(80.0 * dpi);
-        let sep_w = 20.0 * dpi; // "→" + gap
-        let find_w = (input_area_w - sep_w) * 0.5;
-
-        // Search icon
-        {
-            let icon_sz = 14.0 * dpi;
-            let icon_color = {
-                let mut c = ctx.theme.palette.input_fg;
-                c[3] *= 0.6;
-                c
-            };
-            draw_icon(
-                ctx.list,
-                "search",
-                pill_x + icon_x - icon_sz * 0.5,
-                (pill_h - icon_sz) * 0.5,
-                icon_sz,
-                icon_color,
-            );
+    fn paint_search_icon(&self, ctx: &mut PaintCtx) {
+        let icon_rect = self.layout.search_icon_rect;
+        if icon_rect.w <= 0.0 {
+            return;
         }
+        let mut icon_color = ctx.theme.palette.input_fg;
+        icon_color[3] *= 0.6;
+        draw_icon(ctx.list, "search", icon_rect.x, icon_rect.y, icon_rect.w, icon_color);
+    }
 
-        // "→" separator
-        let sep_x = input_area_left + find_w + 4.0 * dpi;
+    fn paint_separator(&self, ctx: &mut PaintCtx, dpi: f32, baseline: f32) {
+        let separator_rect = self.layout.separator_rect;
+        if separator_rect.w <= 0.0 {
+            return;
+        }
+        let mut color = ctx.theme.palette.input_fg;
+        color[3] *= 0.6;
         if let Some(ref mut shaper) = ctx.shaper {
             ctx.list.text_shaped(
-                sep_x,
+                separator_rect.x + (separator_rect.w - BUTTON_WIDE_GLYPH_WIDTH_LOGICAL * dpi) * 0.5,
                 baseline,
-                font_size,
-                {
-                    let mut c = ctx.theme.palette.input_fg;
-                    c[3] *= 0.6;
-                    c
-                },
+                SEARCH_FONT_SIZE_LOGICAL * dpi,
+                color,
                 "\u{2192}",
                 shaper,
             );
-        };
-
-        self.find_box.paint(ctx);
-        self.replace_box.paint(ctx);
-
-        // Right-side buttons: replace actions + nav + common
-        self.paint_right_buttons_inline(ctx, dpi, baseline, pill_x, pill_w);
+        }
     }
 
-    /// Paint right-side buttons for inline replace mode.
-    /// Order from right: close, toggle, nav+count, replaceAll, replace
-    fn paint_right_buttons_inline(
-        &self,
-        ctx: &mut PaintCtx,
-        dpi: f32,
-        baseline: f32,
-        pill_x: f32,
-        pill_w: f32,
-    ) {
-        let font_size = 14.0 * dpi;
-        let btn_size = 20.0 * dpi;
-        let pad_right = 8.0 * dpi;
-        let btn_gap = 4.0 * dpi;
-        let btn_color = {
-            let mut c = ctx.theme.palette.input_fg;
-            c[3] *= 0.6;
-            c
+    fn paint_text_box_clipped(&self, text_box: &TextBox, clip_rect: Rect, ctx: &mut PaintCtx) {
+        if clip_rect.w <= 0.0 || clip_rect.h <= 0.0 {
+            return;
+        }
+        let (offset_x, offset_y) = ctx.list.offset;
+        let absolute_clip =
+            Rect::new(clip_rect.x + offset_x, clip_rect.y + offset_y, clip_rect.w, clip_rect.h);
+        ctx.list.cmds.push(crate::core::paint::DrawCmd::PushClip(absolute_clip));
+        text_box.paint(ctx);
+        ctx.list.cmds.push(crate::core::paint::DrawCmd::PopClip);
+    }
+
+    fn paint_controls(&self, ctx: &mut PaintCtx, dpi: f32, baseline: f32) {
+        self.paint_text_button(
+            ctx,
+            self.layout.close_btn_rect,
+            "\u{2715}",
+            HoveredButton::CloseBar,
+            dpi,
+            baseline,
+        );
+        let toggle_label = if self.snap.replace_mode { "\u{25b2}" } else { "\u{25bc}" };
+        self.paint_text_button(
+            ctx,
+            self.layout.toggle_replace_btn_rect,
+            toggle_label,
+            HoveredButton::ToggleReplace,
+            dpi,
+            baseline,
+        );
+        self.paint_regex_button(ctx, dpi);
+        self.paint_navigation(ctx, dpi, baseline);
+        self.paint_auxiliary_text(ctx, dpi, baseline);
+        self.paint_replace_actions(ctx, dpi, baseline);
+    }
+
+    fn paint_regex_button(&self, ctx: &mut PaintCtx, dpi: f32) {
+        let rect = self.layout.regex_btn_rect;
+        if rect.w <= 0.0 {
+            return;
+        }
+        self.paint_hover_background(ctx, rect, HoveredButton::Regex, dpi);
+        let color = if self.snap.options_use_regex {
+            ctx.theme.palette.accent
+        } else {
+            self.button_color(ctx, HoveredButton::Regex)
         };
-        let btn_color_hovered = {
-            let mut c = ctx.theme.palette.input_fg;
-            c[3] *= 0.9;
-            c
-        };
-        let btn_clr = |hovered: bool| if hovered { btn_color_hovered } else { btn_color };
+        let icon_size = (14.0 * dpi).min(rect.w);
+        draw_icon(
+            ctx.list,
+            "regex",
+            rect.x + (rect.w - icon_size) * 0.5,
+            rect.y + (rect.h - icon_size) * 0.5,
+            icon_size,
+            color,
+        );
+    }
 
-        let mut right_x = pill_x + pill_w - pad_right;
+    fn paint_navigation(&self, ctx: &mut PaintCtx, dpi: f32, baseline: f32) {
+        self.paint_text_button(
+            ctx,
+            self.layout.prev_btn_rect,
+            "\u{25c0}",
+            HoveredButton::Prev,
+            dpi,
+            baseline,
+        );
+        self.paint_text_button(
+            ctx,
+            self.layout.next_btn_rect,
+            "\u{25b6}",
+            HoveredButton::Next,
+            dpi,
+            baseline,
+        );
+    }
 
-        // Close
-        {
-            let cx = right_x - btn_size * 0.5;
-            let cy = self.rect.h * 0.5;
-            let cr = Rect::new(cx - btn_size * 0.5, cy - btn_size * 0.5, btn_size, btn_size);
-            self.close_btn_rect.set(cr);
-            let h = self.hovered_btn == HoveredButton::CloseBar;
-            if h {
-                ctx.list.fill_rounded(cr, ctx.theme.palette.bg_hover, 4.0 * dpi);
-            }
-            if let Some(ref mut shaper) = ctx.shaper {
-                ctx.list.text_shaped(
-                    cx - 4.0 * dpi,
-                    baseline,
-                    font_size,
-                    btn_clr(h),
-                    "\u{2715}",
-                    shaper,
-                );
-            };
-            right_x -= btn_size + btn_gap;
+    fn paint_auxiliary_text(&self, ctx: &mut PaintCtx, dpi: f32, baseline: f32) {
+        let rect = self.layout.auxiliary_text_rect;
+        if rect.w <= 0.0 || self.snap.query.is_empty() {
+            return;
         }
-
-        // Toggle replace (▲ in replace mode)
-        {
-            let cx = right_x - btn_size * 0.5;
-            let cy = self.rect.h * 0.5;
-            let cr = Rect::new(cx - btn_size * 0.5, cy - btn_size * 0.5, btn_size, btn_size);
-            self.toggle_replace_btn_rect.set(cr);
-            let h = self.hovered_btn == HoveredButton::ToggleReplace;
-            if h {
-                ctx.list.fill_rounded(cr, ctx.theme.palette.bg_hover, 4.0 * dpi);
-            }
-            if let Some(ref mut shaper) = ctx.shaper {
-                ctx.list.text_shaped(
-                    cx - 4.0 * dpi,
-                    baseline,
-                    font_size,
-                    btn_clr(h),
-                    "\u{25b2}",
-                    shaper,
-                );
-            };
-            right_x -= btn_size + btn_gap;
-        }
-
-        // Regex toggle (.*)
-        {
-            let cx = right_x - btn_size * 0.5;
-            let cy = self.rect.h * 0.5;
-            let cr = Rect::new(cx - btn_size * 0.5, cy - btn_size * 0.5, btn_size, btn_size);
-            self.regex_btn_rect.set(cr);
-            let h = self.hovered_btn == HoveredButton::Regex;
-            if h {
-                ctx.list.fill_rounded(cr, ctx.theme.palette.bg_hover, 4.0 * dpi);
-            }
-            let clr =
-                if self.snap.options_use_regex { ctx.theme.palette.accent } else { btn_clr(h) };
-            {
-                let icon_sz = 14.0 * dpi;
-                draw_icon(ctx.list, "regex", cx - icon_sz * 0.5, cy - icon_sz * 0.5, icon_sz, clr);
-            }
-            right_x -= btn_size + btn_gap;
-        }
-
-        // Nav + count
-        if !self.snap.query.is_empty() && self.snap.match_count > 0 {
+        let (label, color) = if self.snap.match_count > 0 {
             let current = self.snap.current_match.saturating_add(1).min(self.snap.match_count);
-            let count_text = format!("{}/{}", current, self.snap.match_count);
-            let count_w = count_text.len() as f32 * 8.0 * dpi;
-
-            // ▶
-            {
-                let cx = right_x - btn_size * 0.5;
-                let cy = self.rect.h * 0.5;
-                self.next_btn_rect.set(Rect::new(
-                    cx - btn_size * 0.5,
-                    cy - btn_size * 0.5,
-                    btn_size,
-                    btn_size,
-                ));
-                let h = self.hovered_btn == HoveredButton::Next;
-                if h {
-                    ctx.list.fill_rounded(
-                        self.next_btn_rect.get(),
-                        ctx.theme.palette.bg_hover,
-                        4.0 * dpi,
-                    );
-                }
-                if let Some(ref mut shaper) = ctx.shaper {
-                    ctx.list.text_shaped(
-                        cx - 4.0 * dpi,
-                        baseline,
-                        font_size,
-                        btn_clr(h),
-                        "\u{25b6}",
-                        shaper,
-                    );
-                };
-                right_x -= btn_size + btn_gap;
-            }
-
-            // ◀
-            {
-                let cx = right_x - btn_size * 0.5;
-                let cy = self.rect.h * 0.5;
-                self.prev_btn_rect.set(Rect::new(
-                    cx - btn_size * 0.5,
-                    cy - btn_size * 0.5,
-                    btn_size,
-                    btn_size,
-                ));
-                let h = self.hovered_btn == HoveredButton::Prev;
-                if h {
-                    ctx.list.fill_rounded(
-                        self.prev_btn_rect.get(),
-                        ctx.theme.palette.bg_hover,
-                        4.0 * dpi,
-                    );
-                }
-                if let Some(ref mut shaper) = ctx.shaper {
-                    ctx.list.text_shaped(
-                        cx - 4.0 * dpi,
-                        baseline,
-                        font_size,
-                        btn_clr(h),
-                        "\u{25c0}",
-                        shaper,
-                    );
-                };
-                right_x -= btn_size + btn_gap;
-            }
-
-            // Count text (left of nav per spec: [count] [◀][▶])
-            right_x -= count_w + btn_gap;
-            if let Some(ref mut shaper) = ctx.shaper {
-                ctx.list.text_shaped(
-                    right_x,
-                    baseline,
-                    font_size,
-                    ctx.theme.palette.input_fg,
-                    &count_text,
-                    shaper,
-                );
-            };
-        } else if !self.snap.query.is_empty() {
-            let no_res = "No results";
-            let no_w = no_res.len() as f32 * 8.0 * dpi;
-            right_x -= no_w + btn_gap;
-            if let Some(ref mut shaper) = ctx.shaper {
-                ctx.list.text_shaped(
-                    right_x,
-                    baseline,
-                    font_size,
-                    ctx.theme.palette.danger,
-                    no_res,
-                    shaper,
-                );
-            };
-            self.prev_btn_rect.set(Rect::ZERO);
-            self.next_btn_rect.set(Rect::ZERO);
+            (format!("{current}/{}", self.snap.match_count), ctx.theme.palette.input_fg)
         } else {
-            self.prev_btn_rect.set(Rect::ZERO);
-            self.next_btn_rect.set(Rect::ZERO);
-        }
-
-        // "全部" (ReplaceAll)
-        {
-            let all_text = "\u{5168}\u{90e8}";
-            let all_w = 4.0 * 8.0 * dpi;
-            right_x -= all_w + btn_gap;
-            let btn_rect =
-                Rect::new(right_x, baseline - font_size * 0.75, all_w, font_size + 4.0 * dpi);
-            self.replace_all_btn_rect.set(btn_rect);
-            let h = self.hovered_btn == HoveredButton::ReplaceAll;
-            if h {
-                ctx.list.fill_rounded(btn_rect, ctx.theme.palette.bg_hover, 4.0 * dpi);
-            }
-            if let Some(ref mut shaper) = ctx.shaper {
-                ctx.list.text_shaped(
-                    right_x + 4.0 * dpi,
-                    baseline,
-                    font_size,
-                    btn_clr(h),
-                    all_text,
-                    shaper,
-                );
-            };
-        }
-
-        // "替换" (Replace)
-        {
-            let repl_text = "\u{66ff}\u{6362}";
-            let repl_w = 4.0 * 8.0 * dpi;
-            right_x -= repl_w + btn_gap;
-            let btn_rect =
-                Rect::new(right_x, baseline - font_size * 0.75, repl_w, font_size + 4.0 * dpi);
-            self.replace_btn_rect.set(btn_rect);
-            let h = self.hovered_btn == HoveredButton::Replace;
-            if h {
-                ctx.list.fill_rounded(btn_rect, ctx.theme.palette.bg_hover, 4.0 * dpi);
-            }
-            if let Some(ref mut shaper) = ctx.shaper {
-                ctx.list.text_shaped(
-                    right_x + 4.0 * dpi,
-                    baseline,
-                    font_size,
-                    btn_clr(h),
-                    repl_text,
-                    shaper,
-                );
-            };
+            ("无匹配结果".to_owned(), ctx.theme.palette.danger)
+        };
+        if let Some(ref mut shaper) = ctx.shaper {
+            ctx.list.text_shaped(
+                rect.x,
+                baseline,
+                SEARCH_FONT_SIZE_LOGICAL * dpi,
+                color,
+                &label,
+                shaper,
+            );
         }
     }
 
-    fn paint_right_buttons(
+    fn paint_replace_actions(&self, ctx: &mut PaintCtx, dpi: f32, baseline: f32) {
+        if !self.snap.replace_mode {
+            return;
+        }
+        let (replace_label, replace_all_label) = if self.layout.full_replace_labels {
+            ("\u{66ff}\u{6362}", "\u{5168}\u{90e8}")
+        } else {
+            ("\u{6362}", "\u{5168}")
+        };
+        self.paint_text_button(
+            ctx,
+            self.layout.replace_btn_rect,
+            replace_label,
+            HoveredButton::Replace,
+            dpi,
+            baseline,
+        );
+        self.paint_text_button(
+            ctx,
+            self.layout.replace_all_btn_rect,
+            replace_all_label,
+            HoveredButton::ReplaceAll,
+            dpi,
+            baseline,
+        );
+    }
+
+    fn paint_text_button(
         &self,
         ctx: &mut PaintCtx,
+        rect: Rect,
+        label: &str,
+        hovered_button: HoveredButton,
         dpi: f32,
         baseline: f32,
-        pill_x: f32,
-        pill_w: f32,
     ) {
-        let font_size = 14.0 * dpi;
-        let btn_size = 20.0 * dpi;
-        let pad_right = 8.0 * dpi;
-        let btn_gap = 4.0 * dpi;
-        let btn_color = {
-            let mut c = ctx.theme.palette.input_fg;
-            c[3] *= 0.6;
-            c
-        };
-        let btn_color_hovered = {
-            let mut c = ctx.theme.palette.input_fg;
-            c[3] *= 0.9;
-            c
-        };
-        let btn_clr = |hovered: bool| if hovered { btn_color_hovered } else { btn_color };
-
-        let mut right_x = pill_x + pill_w - pad_right;
-
-        // Close
-        {
-            let cx = right_x - btn_size * 0.5;
-            let cy = self.rect.h * 0.5;
-            let cr = Rect::new(cx - btn_size * 0.5, cy - btn_size * 0.5, btn_size, btn_size);
-            self.close_btn_rect.set(cr);
-            let h = self.hovered_btn == HoveredButton::CloseBar;
-            if h {
-                ctx.list.fill_rounded(cr, ctx.theme.palette.bg_hover, 4.0 * dpi);
-            }
-            if let Some(ref mut shaper) = ctx.shaper {
-                ctx.list.text_shaped(
-                    cx - 4.0 * dpi,
-                    baseline,
-                    font_size,
-                    btn_clr(h),
-                    "\u{2715}",
-                    shaper,
-                );
-            };
-            right_x -= btn_size + btn_gap;
+        if rect.w <= 0.0 {
+            return;
         }
-
-        // Toggle replace
-        {
-            let cx = right_x - btn_size * 0.5;
-            let cy = self.rect.h * 0.5;
-            let cr = Rect::new(cx - btn_size * 0.5, cy - btn_size * 0.5, btn_size, btn_size);
-            self.toggle_replace_btn_rect.set(cr);
-            let h = self.hovered_btn == HoveredButton::ToggleReplace;
-            if h {
-                ctx.list.fill_rounded(cr, ctx.theme.palette.bg_hover, 4.0 * dpi);
-            }
-            let arrow = if self.snap.replace_mode { "\u{25b2}" } else { "\u{25bc}" };
-            if let Some(ref mut shaper) = ctx.shaper {
-                ctx.list.text_shaped(
-                    cx - 4.0 * dpi,
-                    baseline,
-                    font_size,
-                    btn_clr(h),
-                    arrow,
-                    shaper,
-                );
-            };
-            right_x -= btn_size + btn_gap;
-        }
-
-        // Regex
-        {
-            let cx = right_x - btn_size * 0.5;
-            let cy = self.rect.h * 0.5;
-            let cr = Rect::new(cx - btn_size * 0.5, cy - btn_size * 0.5, btn_size, btn_size);
-            self.regex_btn_rect.set(cr);
-            let h = self.hovered_btn == HoveredButton::Regex;
-            if h {
-                ctx.list.fill_rounded(cr, ctx.theme.palette.bg_hover, 4.0 * dpi);
-            }
-            let clr =
-                if self.snap.options_use_regex { ctx.theme.palette.accent } else { btn_clr(h) };
-            {
-                let icon_sz = 14.0 * dpi;
-                draw_icon(ctx.list, "regex", cx - icon_sz * 0.5, cy - icon_sz * 0.5, icon_sz, clr);
-            }
-            right_x -= btn_size + btn_gap;
-        }
-
-        // Nav
-        if !self.snap.query.is_empty() {
-            if self.snap.match_count > 0 {
-                let current = self.snap.current_match.saturating_add(1).min(self.snap.match_count);
-                let count_text = format!("{}/{}", current, self.snap.match_count);
-                let count_w = count_text.len() as f32 * 8.0 * dpi;
-
-                {
-                    let cx = right_x - btn_size * 0.5;
-                    let cy = self.rect.h * 0.5;
-                    self.next_btn_rect.set(Rect::new(
-                        cx - btn_size * 0.5,
-                        cy - btn_size * 0.5,
-                        btn_size,
-                        btn_size,
-                    ));
-                    let h = self.hovered_btn == HoveredButton::Next;
-                    if h {
-                        ctx.list.fill_rounded(
-                            self.next_btn_rect.get(),
-                            ctx.theme.palette.bg_hover,
-                            4.0 * dpi,
-                        );
-                    }
-                    if let Some(ref mut shaper) = ctx.shaper {
-                        ctx.list.text_shaped(
-                            cx - 4.0 * dpi,
-                            baseline,
-                            font_size,
-                            btn_clr(h),
-                            "\u{25b6}",
-                            shaper,
-                        );
-                    };
-                    right_x -= btn_size + btn_gap;
+        self.paint_hover_background(ctx, rect, hovered_button, dpi);
+        let text_width = label
+            .chars()
+            .map(|character| {
+                if character.is_ascii() {
+                    BUTTON_ASCII_GLYPH_WIDTH_LOGICAL
+                } else {
+                    BUTTON_WIDE_GLYPH_WIDTH_LOGICAL
                 }
-
-                {
-                    let cx = right_x - btn_size * 0.5;
-                    let cy = self.rect.h * 0.5;
-                    self.prev_btn_rect.set(Rect::new(
-                        cx - btn_size * 0.5,
-                        cy - btn_size * 0.5,
-                        btn_size,
-                        btn_size,
-                    ));
-                    let h = self.hovered_btn == HoveredButton::Prev;
-                    if h {
-                        ctx.list.fill_rounded(
-                            self.prev_btn_rect.get(),
-                            ctx.theme.palette.bg_hover,
-                            4.0 * dpi,
-                        );
-                    }
-                    if let Some(ref mut shaper) = ctx.shaper {
-                        ctx.list.text_shaped(
-                            cx - 4.0 * dpi,
-                            baseline,
-                            font_size,
-                            btn_clr(h),
-                            "\u{25c0}",
-                            shaper,
-                        );
-                    };
-                    right_x -= btn_size + btn_gap;
-                }
-
-                right_x -= count_w + btn_gap;
-                if let Some(ref mut shaper) = ctx.shaper {
-                    ctx.list.text_shaped(
-                        right_x,
-                        baseline,
-                        font_size,
-                        ctx.theme.palette.input_fg,
-                        &count_text,
-                        shaper,
-                    );
-                };
-            } else {
-                let no_res = "No results";
-                let no_w = no_res.len() as f32 * 8.0 * dpi;
-                right_x -= no_w + btn_gap;
-                if let Some(ref mut shaper) = ctx.shaper {
-                    ctx.list.text_shaped(
-                        right_x,
-                        baseline,
-                        font_size,
-                        ctx.theme.palette.danger,
-                        no_res,
-                        shaper,
-                    );
-                };
-                self.prev_btn_rect.set(Rect::ZERO);
-                self.next_btn_rect.set(Rect::ZERO);
-            }
-        } else {
-            self.prev_btn_rect.set(Rect::ZERO);
-            self.next_btn_rect.set(Rect::ZERO);
+            })
+            .sum::<f32>()
+            * dpi;
+        let color = self.button_color(ctx, hovered_button);
+        if let Some(ref mut shaper) = ctx.shaper {
+            ctx.list.text_shaped(
+                rect.x + (rect.w - text_width) * 0.5,
+                baseline,
+                SEARCH_FONT_SIZE_LOGICAL * dpi,
+                color,
+                label,
+                shaper,
+            );
         }
+    }
+
+    fn paint_hover_background(
+        &self,
+        ctx: &mut PaintCtx,
+        rect: Rect,
+        hovered_button: HoveredButton,
+        dpi: f32,
+    ) {
+        if self.hovered_btn == hovered_button {
+            ctx.list.fill_rounded(rect, ctx.theme.palette.bg_hover, 4.0 * dpi);
+        }
+    }
+
+    fn button_color(&self, ctx: &PaintCtx, hovered_button: HoveredButton) -> [f32; 4] {
+        let mut color = ctx.theme.palette.input_fg;
+        color[3] *= if self.hovered_btn == hovered_button { 0.9 } else { 0.6 };
+        color
     }
 
     /// Returns the IME cursor rect of the currently focused TextBox.
@@ -1151,6 +759,276 @@ mod tests {
         w
     }
 
+    fn layout_search_bar(width: f32, snapshot: SearchBarSnapshot) -> SearchBarWidget {
+        let mut search_bar = SearchBarWidget::new();
+        search_bar.set_input(snapshot);
+        let theme = test_theme();
+        let mut measure = NoopMeasure;
+        let mut context =
+            LayoutCtx { ui_measure: None, measure: &mut measure, theme: &theme, dpi: 1.0 };
+        search_bar.set_rect(Rect::new(0.0, 0.0, width, 28.0), &mut context);
+        search_bar
+    }
+
+    fn paint_search_bar(search_bar: &SearchBarWidget) -> DrawList {
+        let theme = test_theme();
+        let mut draw_list = DrawList::new();
+        let mut context = PaintCtx::new(&mut draw_list, &theme, 1.0);
+        search_bar.paint(&mut context);
+        draw_list
+    }
+
+    #[test]
+    fn find_only_layout_does_not_reserve_replace_action_width() {
+        let search_bar = layout_search_bar(
+            480.0,
+            SearchBarSnapshot { visible: true, ..SearchBarSnapshot::default() },
+        );
+        let _ = paint_search_bar(&search_bar);
+
+        assert!(
+            search_bar.find_box.rect().right() + 12.0 >= search_bar.layout.regex_btn_rect.x,
+            "find-only input should extend close to the first trailing button"
+        );
+    }
+
+    #[test]
+    fn button_hit_regions_exist_immediately_after_layout() {
+        let mut search_bar = layout_search_bar(
+            480.0,
+            SearchBarSnapshot { visible: true, ..SearchBarSnapshot::default() },
+        );
+        let close_rect = search_bar.close_btn_rect();
+
+        assert!(close_rect.w > 0.0, "layout should establish the close button hit region");
+        assert_eq!(
+            search_bar.handle_mouse_down(
+                close_rect.x + close_rect.w * 0.5,
+                close_rect.y + close_rect.h * 0.5,
+            ),
+            Some(WidgetAction::SearchBar(SearchBarAction::Close))
+        );
+    }
+
+    #[test]
+    fn narrow_find_layout_keeps_input_before_visible_buttons() {
+        let search_bar = layout_search_bar(
+            160.0,
+            SearchBarSnapshot {
+                query: "needle".into(),
+                match_count: usize::MAX,
+                current_match: usize::MAX - 1,
+                visible: true,
+                ..SearchBarSnapshot::default()
+            },
+        );
+        let _ = paint_search_bar(&search_bar);
+        let first_button_x = [
+            search_bar.layout.close_btn_rect,
+            search_bar.layout.toggle_replace_btn_rect,
+            search_bar.layout.regex_btn_rect,
+            search_bar.layout.prev_btn_rect,
+            search_bar.layout.next_btn_rect,
+        ]
+        .into_iter()
+        .filter(|rect| rect.w > 0.0)
+        .map(|rect| rect.x)
+        .fold(f32::INFINITY, f32::min);
+
+        assert!(search_bar.find_box.rect().w > 0.0, "find input should remain usable");
+        assert!(
+            search_bar.find_box.rect().right() <= first_button_x,
+            "find input must not overlap visible buttons"
+        );
+    }
+
+    #[test]
+    fn narrow_replace_layout_keeps_actions_clickable_and_inside_bounds() {
+        let mut search_bar = layout_search_bar(
+            160.0,
+            SearchBarSnapshot {
+                query: "needle".into(),
+                replace_query: "replacement".into(),
+                match_count: 1,
+                visible: true,
+                replace_mode: true,
+                ..SearchBarSnapshot::default()
+            },
+        );
+
+        assert!(search_bar.find_box.rect().w > 0.0);
+        assert!(search_bar.replace_box.rect().w > 0.0);
+        assert!(search_bar.layout.replace_btn_rect.w > 0.0);
+        assert!(search_bar.layout.replace_all_btn_rect.w > 0.0);
+        for rect in [
+            search_bar.layout.close_btn_rect,
+            search_bar.layout.toggle_replace_btn_rect,
+            search_bar.layout.replace_btn_rect,
+            search_bar.layout.replace_all_btn_rect,
+        ] {
+            assert!(rect.x >= 0.0 && rect.right() <= search_bar.layout.pill_rect.right());
+        }
+
+        let replace_rect = search_bar.layout.replace_btn_rect;
+        assert_eq!(
+            search_bar.handle_mouse_down(
+                replace_rect.x + replace_rect.w * 0.5,
+                replace_rect.y + replace_rect.h * 0.5,
+            ),
+            Some(WidgetAction::SearchBar(SearchBarAction::Replace))
+        );
+    }
+
+    #[test]
+    fn compact_replace_labels_stay_inside_their_buttons() {
+        use crate::core::paint::DrawCmd;
+
+        let search_bar = layout_search_bar(
+            160.0,
+            SearchBarSnapshot {
+                query: "needle".into(),
+                replace_query: "replacement".into(),
+                match_count: 1,
+                visible: true,
+                replace_mode: true,
+                ..SearchBarSnapshot::default()
+            },
+        );
+        let theme = test_theme();
+        let mut draw_list = DrawList::new();
+        let mut shaper = shaping::Shaper::new().expect("测试环境必须能创建文字塑形器");
+        let mut context = PaintCtx {
+            list: &mut draw_list,
+            theme: &theme,
+            dpi: 1.0,
+            offset: (0.0, 0.0),
+            global_alpha: 1.0,
+            shaper: Some(&mut shaper),
+        };
+        search_bar.paint(&mut context);
+
+        for (label, button_rect) in [
+            ("换", search_bar.layout.replace_btn_rect),
+            ("全", search_bar.layout.replace_all_btn_rect),
+        ] {
+            let (text_x, text_width) = draw_list
+                .cmds
+                .iter()
+                .find_map(|command| match command {
+                    DrawCmd::TextLayout { layout, x, .. } if layout.text == label => {
+                        Some((*x, layout.shaped.width))
+                    }
+                    _ => None,
+                })
+                .expect("compact replace label should be painted");
+            assert!(text_x >= button_rect.x);
+            assert!(text_x + text_width <= button_rect.right());
+        }
+    }
+
+    #[test]
+    fn reasonable_replace_width_shows_all_controls() {
+        let search_bar = layout_search_bar(
+            480.0,
+            SearchBarSnapshot {
+                query: "needle".into(),
+                replace_query: "replacement".into(),
+                match_count: 120,
+                current_match: 11,
+                visible: true,
+                replace_mode: true,
+                ..SearchBarSnapshot::default()
+            },
+        );
+
+        assert!(search_bar.layout.full_replace_labels);
+        for rect in [
+            search_bar.layout.close_btn_rect,
+            search_bar.layout.toggle_replace_btn_rect,
+            search_bar.layout.regex_btn_rect,
+            search_bar.layout.prev_btn_rect,
+            search_bar.layout.next_btn_rect,
+            search_bar.layout.replace_btn_rect,
+            search_bar.layout.replace_all_btn_rect,
+            search_bar.layout.auxiliary_text_rect,
+        ] {
+            assert!(rect.w > 0.0, "all controls should fit at 480 logical pixels");
+            assert!(rect.x >= 0.0 && rect.right() <= search_bar.layout.pill_rect.right());
+        }
+    }
+
+    #[test]
+    fn no_match_message_reserves_width_for_chinese_text() {
+        use crate::core::paint::DrawCmd;
+
+        let search_bar = layout_search_bar(
+            480.0,
+            SearchBarSnapshot {
+                query: "needle".into(),
+                visible: true,
+                ..SearchBarSnapshot::default()
+            },
+        );
+
+        assert!(
+            search_bar.layout.auxiliary_text_rect.w >= 70.0,
+            "无匹配结果 should reserve five UI glyphs at the 14px font size"
+        );
+
+        let theme = test_theme();
+        let mut draw_list = DrawList::new();
+        let mut shaper = shaping::Shaper::new().expect("测试环境必须能创建文字塑形器");
+        let mut context = PaintCtx {
+            list: &mut draw_list,
+            theme: &theme,
+            dpi: 1.0,
+            offset: (0.0, 0.0),
+            global_alpha: 1.0,
+            shaper: Some(&mut shaper),
+        };
+        search_bar.paint(&mut context);
+        let no_match_layout = draw_list
+            .cmds
+            .iter()
+            .find_map(|command| match command {
+                DrawCmd::TextLayout { layout, .. } if layout.text == "无匹配结果" => {
+                    Some(layout)
+                }
+                _ => None,
+            })
+            .expect("无匹配结果 should be emitted as visible text");
+        assert!(no_match_layout.shaped.width <= search_bar.layout.auxiliary_text_rect.w);
+    }
+
+    #[test]
+    fn search_shell_uses_input_fill_border_stroke_and_clips_query() {
+        use crate::core::paint::DrawCmd;
+
+        let search_bar = layout_search_bar(
+            240.0,
+            SearchBarSnapshot {
+                query: "a very long query that must stay inside its input".into(),
+                visible: true,
+                ..SearchBarSnapshot::default()
+            },
+        );
+        let theme = test_theme();
+        let draw_list = paint_search_bar(&search_bar);
+
+        assert!(matches!(
+            draw_list.cmds.first(),
+            Some(DrawCmd::FillRect { color, .. }) if *color == theme.palette.input_bg
+        ));
+        assert!(matches!(
+            draw_list.cmds.get(1),
+            Some(DrawCmd::StrokeRect { color, .. }) if *color == theme.palette.input_border
+        ));
+        assert!(draw_list.cmds.iter().any(|command| matches!(
+            command,
+            DrawCmd::PushClip(rect) if *rect == search_bar.find_box.rect()
+        )));
+    }
+
     #[test]
     fn basic_creation() {
         let w = SearchBarWidget::new();
@@ -1160,11 +1038,11 @@ mod tests {
     #[test]
     fn tooltip_at_close_button() {
         let w = setup_search_bar("test");
-        let r = w.close_btn_rect.get();
+        let r = w.layout.close_btn_rect;
         assert!(r.w > 0.0, "close button should be laid out");
         let hint = w.tooltip_at(r.x + r.w / 2.0, r.y + r.h / 2.0);
         assert!(hint.is_some(), "hovering close button should return tooltip");
-        assert_eq!(hint.unwrap().label, "Close");
+        assert_eq!(hint.unwrap().label, "关闭查找");
     }
 
     #[test]
@@ -1177,11 +1055,39 @@ mod tests {
     #[test]
     fn tooltip_at_toggle_replace_button() {
         let w = setup_search_bar("test");
-        let r = w.toggle_replace_btn_rect.get();
+        let r = w.layout.toggle_replace_btn_rect;
         if r.w > 0.0 {
             let hint = w.tooltip_at(r.x + r.w / 2.0, r.y + r.h / 2.0);
             assert!(hint.is_some(), "hovering toggle replace should return tooltip");
-            assert_eq!(hint.unwrap().label, "Show Replace");
+            assert_eq!(hint.unwrap().label, "显示替换");
+        }
+    }
+
+    #[test]
+    fn action_tooltips_use_chinese_labels() {
+        let search_bar = layout_search_bar(
+            480.0,
+            SearchBarSnapshot {
+                query: "needle".into(),
+                replace_query: "replacement".into(),
+                match_count: 2,
+                visible: true,
+                replace_mode: true,
+                ..SearchBarSnapshot::default()
+            },
+        );
+        for (rect, expected) in [
+            (search_bar.layout.toggle_replace_btn_rect, "隐藏替换"),
+            (search_bar.layout.regex_btn_rect, "正则表达式"),
+            (search_bar.layout.prev_btn_rect, "上一个匹配"),
+            (search_bar.layout.next_btn_rect, "下一个匹配"),
+            (search_bar.layout.replace_btn_rect, "替换"),
+            (search_bar.layout.replace_all_btn_rect, "全部替换"),
+        ] {
+            let hint = search_bar
+                .tooltip_at(rect.x + rect.w * 0.5, rect.y + rect.h * 0.5)
+                .expect("visible action should expose a tooltip");
+            assert_eq!(hint.label, expected);
         }
     }
 

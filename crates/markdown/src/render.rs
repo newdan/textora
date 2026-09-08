@@ -2878,20 +2878,12 @@ Day -29          Day -7           Day -1    Today    Day +1
     #[test]
     fn render_blockquote_uses_bg_color() {
         let dl = build_and_render("> quote");
-        // Find the blockquote background fill (rounded rect with blockquote_bg alpha)
-        let fills: Vec<_> =
-            dl.cmds
-                .iter()
-                .filter_map(|c| {
-                    if let DrawCmd::FillRect { color, .. } = c { Some(*color) } else { None }
-                })
-                .collect();
-        // blockquote_bg has low alpha (0.08 dark, 0.05 light)
-        let has_low_alpha_bg = fills.iter().any(|c| c[3] < 0.15);
+        let expected_background = default_style().blockquote_bg;
         assert!(
-            has_low_alpha_bg,
-            "blockquote should have low-alpha background fill, got {:?}",
-            fills
+            dl.cmds.iter().any(|command| matches!(
+                command, DrawCmd::FillRect { color, .. } if *color == expected_background
+            )),
+            "blockquote should render its resolved theme background"
         );
     }
 

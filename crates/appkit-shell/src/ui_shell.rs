@@ -27,6 +27,7 @@ use ui::tooltip::{TooltipHint, TooltipWidget};
 use crate::editor_host::EditorHostWidget;
 
 const OVERLAY_LOCAL_ORIGIN: f32 = 0.0;
+const SIDEBAR_OVERLAY_DOCK_THICKNESS: f32 = 0.5;
 const UI_SHELL_ACCESSIBILITY_ID: ui::core::AccessibilityId =
     ui::core::AccessibilityId(0x7465_7874_6f72_615f);
 
@@ -661,6 +662,35 @@ impl UiShell {
         None
     }
 
+    fn resolve_sidebar_frame_inputs(
+        &mut self,
+        screen: Screen,
+        inputs: &ShellInputs,
+    ) -> Option<ShellInputs> {
+        if !inputs.sidebar_visible {
+            return None;
+        }
+        let visibility = self.sidebar_config.visibility_for_width(
+            self.sidebar_persistent.visibility,
+            screen.w,
+            inputs.metrics.dpi,
+        );
+        if visibility == self.sidebar_persistent.visibility {
+            return None;
+        }
+        self.sidebar_persistent.visibility = visibility;
+        let mut resolved = inputs.clone();
+        resolved.sidebar_thickness =
+            self.sidebar_editor_left_offset().max(SIDEBAR_OVERLAY_DOCK_THICKNESS);
+        if let Some(title) = &mut self.title_bar_input {
+            title.titlebar_x = resolved.sidebar_thickness;
+            title.sidebar_left = resolved
+                .sidebar_thickness
+                .max(ui::constants::TRAFFIC_LIGHT_TOTAL_W * inputs.metrics.dpi);
+        }
+        Some(resolved)
+    }
+
     /// 每帧调用：更新 widget 输入，重建 Dock children，执行布局。
     ///
     /// C-3: Widget 状态通过 downcast 原地更新（零堆分配）；
@@ -672,6 +702,8 @@ impl UiShell {
         measure: &mut dyn TextMeasure,
         inputs: &ShellInputs,
     ) {
+        let resolved_inputs = self.resolve_sidebar_frame_inputs(screen, inputs);
+        let inputs = resolved_inputs.as_ref().unwrap_or(inputs);
         let screen_rect = Rect::new(0.0, 0.0, screen.w, screen.h);
         let dpi = inputs.metrics.dpi;
 
@@ -3362,5 +3394,38 @@ mod tests {
         let layout_lifecycle = concat!("layout_sync", "_panel");
         assert!(!source.contains(open_lifecycle));
         assert!(!source.contains(layout_lifecycle));
+    }
+    #[test]
+    fn sidebar_resize_updates_dock_in_same_frame_without_mouse_events() {
+        let mut shell = UiShell::new();
+        let theme = test_theme();
+        let mut measure = NoopMeasure;
+        let metrics = ui::settings::UiMetrics::from_settings(&ui::settings::Settings::new(), 1.0);
+        let mut inputs = ShellInputs {
+            tabs_visible: false,
+            tabs_thickness: 0.0,
+            search_visible: false,
+            search_thickness: 0.0,
+            status_thickness: 0.0,
+            sidebar_visible: true,
+            sidebar_thickness: 220.0,
+            scrollbar_thickness: 0.0,
+            toc_visible: false,
+            toc_thickness: 0.0,
+            metrics,
+            sidebar_settings: Default::default(),
+        };
+        shell.set_sidebar_pinned(true);
+        let wide = Screen { w: 800.0, h: 600.0 };
+        shell.update_frame(wide, &theme, &mut measure, &inputs);
+        shell.update_frame(wide, &theme, &mut measure, &inputs);
+        assert_eq!(shell.editor_rect().x, 220.0);
+        shell.update_frame(Screen { w: 280.0, h: 600.0 }, &theme, &mut measure, &inputs);
+        assert_eq!(shell.sidebar_visibility(), ui::sidebar::Visibility::Hidden);
+        assert!(shell.editor_rect().x <= 1.0);
+        inputs.sidebar_thickness = 0.5;
+        shell.update_frame(wide, &theme, &mut measure, &inputs);
+        assert_eq!(shell.sidebar_visibility(), ui::sidebar::Visibility::Pinned);
+        assert_eq!(shell.editor_rect().x, 220.0);
     }
 }

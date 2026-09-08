@@ -169,9 +169,11 @@ const HEADER_H: f32 = constants::TITLE_BAR_HEIGHT;
 const ROW_H: f32 = constants::ROW_HEIGHT;
 const NEW_BTN_H: f32 = constants::ROW_HEIGHT;
 const SETTINGS_BTN_H: f32 = constants::ROW_HEIGHT;
-const PADDING: f32 = 6.0;
+const PADDING: f32 = constants::SMALL_GAP;
+const SIDEBAR_ACTION_SIZE_LOGICAL: f32 = 32.0;
+const SIDEBAR_ICON_SIZE_LOGICAL: f32 = 14.0;
+const HEADER_ACTION_INSET_LOGICAL: f32 = 4.0;
 const EDGE_RESIZE_W: f32 = 4.0;
-const MINIMUM_EDITOR_WIDTH_LOGICAL: f32 = 100.0;
 
 impl SidebarState {
     // ── Settings menu ──
@@ -295,19 +297,13 @@ impl SidebarState {
         cfg: &SidebarConfig,
         metrics: &crate::settings::UiMetrics,
     ) {
-        // Extreme narrow window: force hide sidebar even if pinned
-        if matches!(self.visibility, Visibility::Pinned)
-            && input.screen_w < cfg.width + MINIMUM_EDITOR_WIDTH_LOGICAL * metrics.dpi
-        {
-            self.visibility = Visibility::Hidden;
-        }
+        self.visibility = cfg.visibility_for_width(self.visibility, input.screen_w, metrics.dpi);
         if matches!(self.visibility, Visibility::Hidden) {
             // Produce minimal layout with only hamburger button overlay
             let dpi = metrics.dpi;
-            // Hamburger: 14dp (matches traffic light size), centered vertically with traffic lights
-            let btn_size = 16.0 * dpi;
-            let hx = input.traffic_light_inset.0 + 12.0 * dpi;
-            let hy = 8.0 * dpi;
+            let btn_size = SIDEBAR_ACTION_SIZE_LOGICAL * dpi;
+            let hx = input.traffic_light_inset.0 + HEADER_ACTION_INSET_LOGICAL * dpi;
+            let hy = (HEADER_H * dpi - btn_size) * 0.5;
             let menu_btn = Rect::new(hx, hy, btn_size, btn_size);
             self.layout = Some(SidebarLayout {
                 bg_rect: menu_btn,
@@ -342,9 +338,10 @@ impl SidebarState {
         let header_rect = Rect::new(0.0, top, w, header_h);
 
         // Hamburger menu button
-        let menu_x = input.traffic_light_inset.0 + 12.0 * dpi;
-        let menu_y = 8.0 * dpi;
-        let menu_btn_rect = Rect::new(menu_x, menu_y, 16.0 * dpi, 16.0 * dpi);
+        let action_size = SIDEBAR_ACTION_SIZE_LOGICAL * dpi;
+        let menu_x = input.traffic_light_inset.0 + HEADER_ACTION_INSET_LOGICAL * dpi;
+        let menu_y = (header_h - action_size) * 0.5;
+        let menu_btn_rect = Rect::new(menu_x, menu_y, action_size, action_size);
 
         // New and open actions share one row; narrow sidebars use an icon-only open button.
         let new_y = top + header_h + pad;
@@ -416,15 +413,6 @@ impl SidebarState {
         let _ = input.traffic_light_inset; // 阶段 5 接入
         let _ = input.active_index; // 渲染时再用
     }
-}
-
-/// Pre-computed geometry for a sidebar action button (New / Open).
-struct ActionBtnGeom {
-    fg: [f32; 4],
-    cx: f32,
-    cy: f32,
-    dpi: f32,
-    icon_half: f32,
 }
 
 impl SidebarState {
@@ -598,25 +586,6 @@ impl SidebarState {
 
     // ── Paint helpers ──
 
-    /// Draw hover background (if hovered) and return geometry for icon + text drawing.
-    fn action_btn_geom(
-        &self,
-        ctx: &mut PaintCtx,
-        rect: Rect,
-        hover: SidebarHoverButton,
-    ) -> ActionBtnGeom {
-        let state = if self.hovered_button == hover {
-            crate::button::ButtonVisualState::Hovered
-        } else {
-            crate::button::ButtonVisualState::Normal
-        };
-        let fg = crate::button::ButtonStyle::from_theme(ctx.theme).paint(ctx, rect, state);
-        let icon_half = 5.0 * ctx.dpi;
-        let cx = rect.x + 12.0 * ctx.dpi + icon_half;
-        let cy = rect.y + rect.h * 0.5;
-        ActionBtnGeom { fg, cx, cy, dpi: ctx.dpi, icon_half }
-    }
-
     /// Draw the hamburger icon at its layout position with the given alpha.
     pub fn paint_hamburger(&self, ctx: &mut PaintCtx, override_alpha: f32, skip_hover_bg: bool) {
         let Some(layout) = &self.layout else {
@@ -626,7 +595,11 @@ impl SidebarState {
         if !skip_hover_bg && self.hovered_button == SidebarHoverButton::Hamburger {
             let mut h_bg = ctx.theme.palette.sidebar_hover_bg;
             h_bg[3] *= alpha;
-            ctx.list.fill_menu_hover(layout.menu_btn_rect, h_bg, ctx.dpi);
+            ctx.list.fill_rounded(
+                layout.menu_btn_rect,
+                h_bg,
+                ctx.theme.control_metrics().corner_radius_logical * ctx.dpi,
+            );
         }
         let icon_color = ctx.theme.palette.text_muted;
         let line_w = 1.5 * ctx.dpi;
@@ -642,6 +615,41 @@ impl SidebarState {
                 Rect::new(cx - line_len * 0.5, y, line_len, line_w),
                 fg,
                 line_w * 0.5,
+            );
+        }
+    }
+
+    fn paint_open_button(&self, ctx: &mut PaintCtx, rect: Rect) {
+        let style = crate::button::ButtonStyle::from_theme(ctx.theme);
+        let button_state = if self.hovered_button == SidebarHoverButton::OpenFile {
+            crate::button::ButtonVisualState::Hovered
+        } else {
+            crate::button::ButtonVisualState::Normal
+        };
+        let foreground = style.paint(ctx, rect, button_state);
+        let show_label = rect.w >= OPEN_BUTTON_WIDTH_LOGICAL * ctx.dpi;
+        let icon_size = SIDEBAR_ICON_SIZE_LOGICAL * ctx.dpi;
+        let icon_x = if show_label {
+            rect.x + style.pad_x_logical * ctx.dpi
+        } else {
+            rect.x + (rect.w - icon_size) * 0.5
+        };
+        draw_icon(
+            ctx.list,
+            "folder-open",
+            icon_x,
+            rect.y + (rect.h - icon_size) * 0.5,
+            icon_size,
+            foreground,
+        );
+        if show_label {
+            let font_size = style.font_size_logical * ctx.dpi;
+            ctx.text(
+                icon_x + icon_size + constants::SMALL_GAP * ctx.dpi,
+                rect.y + rect.h * 0.5 + font_size * 0.35,
+                font_size,
+                foreground,
+                "打开",
             );
         }
     }
@@ -685,69 +693,17 @@ impl SidebarState {
         ctx.list.stroke_rounded(r, border, radius, 1.0);
         ctx.list.fill(Rect::new(r.x, r.y, r.w - radius, r.h), bg);
 
-        // 3) Hamburger (on top of background, always visible)
-        {
-            if self.hovered_button == SidebarHoverButton::Hamburger {
-                let mut h_bg = ctx.theme.palette.sidebar_hover_bg;
-                h_bg[3] *= alpha;
-                ctx.list.fill_menu_hover(layout.menu_btn_rect, h_bg, ctx.dpi);
-            }
-            let icon_color = ctx.theme.palette.text_muted;
-            let line_w = 1.5 * ctx.dpi;
-            let line_len = 12.0 * ctx.dpi;
-            let cx = layout.menu_btn_rect.x + layout.menu_btn_rect.w * 0.5;
-            let cy = layout.menu_btn_rect.y + layout.menu_btn_rect.h * 0.5;
-            let gap = 4.0 * ctx.dpi;
-            let mut fg = icon_color;
-            fg[3] *= alpha;
-            for i in [-1.0, 0.0, 1.0] {
-                let y = cy + i * gap - line_w * 0.5;
-                ctx.list.fill_rounded(
-                    Rect::new(cx - line_len * 0.5, y, line_len, line_w),
-                    fg,
-                    line_w * 0.5,
-                );
-            }
-        }
+        self.paint_hamburger(ctx, alpha, false);
 
-        // 4.5) Open file button
-        {
-            let g = self.action_btn_geom(ctx, layout.open_btn_rect, SidebarHoverButton::OpenFile);
-            let icon_sz = 14.0 * g.dpi;
-            let show_label = layout.open_btn_rect.w >= OPEN_BUTTON_WIDTH_LOGICAL * g.dpi;
-            let icon_center_x = if show_label {
-                g.cx
-            } else {
-                layout.open_btn_rect.x + layout.open_btn_rect.w * 0.5
-            };
-            draw_icon(
-                ctx.list,
-                "folder-open",
-                icon_center_x - icon_sz * 0.5,
-                g.cy - icon_sz * 0.5,
-                icon_sz,
-                g.fg,
-            );
-            let font_size = ctx.theme.control_metrics().font_size_logical * g.dpi;
-            if show_label && let Some(ref mut shaper) = ctx.shaper {
-                ctx.list.text_shaped(
-                    g.cx + g.icon_half + 6.0 * g.dpi,
-                    g.cy + font_size * 0.35,
-                    font_size,
-                    g.fg,
-                    "\u{6253}\u{5f00}",
-                    shaper,
-                );
-            };
-        }
+        self.paint_open_button(ctx, layout.open_btn_rect);
 
         // 4.5) Files section header
         {
-            let font_size = 13.0 * ctx.dpi;
+            let font_size = constants::TITLE_FONT_SIZE * ctx.dpi;
             let baseline =
                 layout.files_header_rect.y + layout.files_header_rect.h * 0.5 + font_size * 0.35;
             let mut fg = ctx.theme.palette.text_muted;
-            fg[3] *= 0.5 * alpha;
+            fg[3] *= alpha;
             if let Some(ref mut shaper) = ctx.shaper {
                 ctx.list.text_shaped(
                     layout.files_header_rect.x,
@@ -776,12 +732,15 @@ impl SidebarState {
             let mut fg = ctx.theme.palette.text_muted;
             fg[3] *= alpha;
             draw_icon(ctx.list, "settings", icon_x, icon_y, icon_size, fg);
-            let font_size = 15.0 * ctx.dpi;
+            let font_size = constants::TITLE_FONT_SIZE * ctx.dpi;
             let text_baseline =
                 layout.settings_btn_rect.y + layout.settings_btn_rect.h * 0.5 + font_size * 0.35;
             if let Some(ref mut shaper) = ctx.shaper {
                 ctx.list.text_shaped(
-                    layout.settings_btn_rect.x + pad_left + icon_size + 2.0 * ctx.dpi,
+                    layout.settings_btn_rect.x
+                        + pad_left
+                        + icon_size
+                        + constants::SMALL_GAP * ctx.dpi,
                     text_baseline,
                     font_size,
                     fg,
@@ -2143,5 +2102,89 @@ mod tests {
             &crate::settings::UiMetrics::from_settings(&crate::settings::Settings::new(), 1.0),
         );
         assert!(s.open_menu().is_some(), "menu should stay when mouse is inside");
+    }
+    #[test]
+    fn compact_actions_remain_separate_and_clickable_at_supported_widths() {
+        for dpi in [1.0, 2.0] {
+            for (width, expected_open_width) in [(160.0, 32.0), (220.0, 72.0), (400.0, 72.0)] {
+                let cfg = SidebarConfig { pinned: true, width: width * dpi };
+                let metrics = crate::settings::UiMetrics::from_settings(
+                    &crate::settings::Settings::new(),
+                    dpi,
+                );
+                let mut state = SidebarState::new(&cfg);
+                let input = SidebarInput {
+                    tabs: &[],
+                    active_index: None,
+                    screen_w: 1200.0 * dpi,
+                    screen_h: 600.0 * dpi,
+                    traffic_light_inset: (68.0 * dpi, 0.0),
+                    content_top: 0.0,
+                };
+                state.update_layout(&input, &cfg, &metrics);
+                let layout = state.current_layout().expect("visible sidebar has a layout");
+                assert_eq!(layout.new_btn_rect.y, layout.open_btn_rect.y);
+                assert!(layout.new_menu_btn_rect.right() < layout.open_btn_rect.x);
+                assert!(layout.open_btn_rect.right() <= cfg.width);
+                assert_eq!(layout.open_btn_rect.w, expected_open_width * dpi);
+                for (rect, action) in [
+                    (layout.new_btn_rect, SidebarAction::NewDocument(NewDocumentKind::Markdown)),
+                    (layout.new_menu_btn_rect, SidebarAction::OpenNewDocumentMenu),
+                    (layout.menu_btn_rect, SidebarAction::TogglePin),
+                ] {
+                    assert_eq!(
+                        state.hit_test_px(rect.x + rect.w * 0.5, rect.y + rect.h * 0.5, &metrics),
+                        Some(action)
+                    );
+                }
+
+                assert!(layout.list_clip.y >= layout.open_btn_rect.bottom());
+                assert!(layout.list_clip.bottom() <= layout.settings_btn_rect.y);
+                assert_eq!(
+                    state.hit_test_px(
+                        layout.open_btn_rect.x + 16.0 * dpi,
+                        layout.open_btn_rect.y + 16.0 * dpi,
+                        &metrics,
+                    ),
+                    Some(SidebarAction::OpenDocument)
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn pinned_sidebar_returns_when_window_is_widened() {
+        let cfg = SidebarConfig::new_default(1.0);
+        let (mut state, metrics) = laid_out_sidebar_state(1.0);
+        let mut input = SidebarInput {
+            tabs: &[],
+            active_index: None,
+            screen_w: 250.0,
+            screen_h: 600.0,
+            traffic_light_inset: (68.0, 0.0),
+            content_top: 0.0,
+        };
+        state.update_layout(&input, &cfg, &metrics);
+        assert_eq!(state.visibility(), Visibility::Hidden);
+        input.screen_w = 800.0;
+        state.update_layout(&input, &cfg, &metrics);
+        assert_eq!(state.visibility(), Visibility::Pinned);
+    }
+
+    #[test]
+    fn automatically_hidden_sidebar_can_remain_temporarily_expanded() {
+        let cfg = SidebarConfig::new_default(1.0);
+        let (mut state, metrics) = laid_out_sidebar_state(1.0);
+        state.set_visibility(Visibility::HoverPeek);
+        let input = SidebarInput {
+            tabs: &[],
+            active_index: None,
+            screen_w: 250.0,
+            screen_h: 600.0,
+            traffic_light_inset: (68.0, 0.0),
+            content_top: 0.0,
+        };
+        state.update_layout(&input, &cfg, &metrics);
+        assert_eq!(state.visibility(), Visibility::HoverPeek);
     }
 }

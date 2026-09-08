@@ -20,7 +20,7 @@ pub const MICRO_GAP: f32 = 2.0;
 // === 字体 ===
 pub const BODY_FONT_SIZE: f32 = 14.0;
 pub const TITLE_FONT_SIZE: f32 = 13.0;
-pub const CAPTION_FONT_SIZE: f32 = 10.0;
+pub const CAPTION_FONT_SIZE: f32 = 11.0;
 pub const LN_FONT_SCALE: f32 = 0.8; // 行号字号缩放比
 pub const BASELINE_RATIO: f32 = 0.8; // 基线偏移比
 
@@ -28,4 +28,4 @@ pub const BASELINE_RATIO: f32 = 0.8; // 基线偏移比
 pub const BUTTON_SIZE: f32 = 16.0;
 pub const CLOSE_BTN_SIZE: f32 = 12.0;
 pub const UNDERLINE_ALPHA: f32 = 0.75;
-pub const TRAFFIC_LIGHT_TOTAL_W: f32 = 96.0;
+pub const TRAFFIC_LIGHT_TOTAL_W: f32 = 104.0;

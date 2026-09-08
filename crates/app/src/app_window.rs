@@ -13,7 +13,7 @@ use appkit_shell::accessibility_adapter::PlatformAccessibilityAdapter;
 use winit::dpi::{LogicalSize, PhysicalPosition, PhysicalSize, Size};
 use winit::window::WindowAttributes;
 
-const WINDOW_TITLE: &str = "edit+";
+const WINDOW_TITLE: &str = "textora";
 const MINIMUM_WINDOW_WIDTH_LOGICAL: u32 = 800;
 const MINIMUM_WINDOW_HEIGHT_LOGICAL: u32 = 600;
 const MINIMUM_VISIBLE_WINDOW_EDGE_PHYSICAL: i64 = 64;

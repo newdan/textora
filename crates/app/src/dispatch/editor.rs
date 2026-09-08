@@ -79,6 +79,20 @@ fn search_panel_receives_edit_commands(
         && keyboard_focus == KeyboardFocusTarget::Widget(ui::core::widget::ids::SEARCH_BAR)
 }
 
+impl App {
+    fn toggle_active_toc(&mut self) -> bool {
+        if !self.active_handles_own_rendering() {
+            return false;
+        }
+        let Some(mut tab) = self.active_tab_session_mut() else {
+            return false;
+        };
+        tab.toggle_toc_visible();
+        self.ui_shell.mark_dock_dirty();
+        true
+    }
+}
+
 fn edit_requires_reshape(cmd: &EditCommand, outcome: &EditOutcome) -> bool {
     if !outcome.executed {
         return false;
@@ -457,11 +471,7 @@ impl App {
                 return effect;
             }
             EditCommand::ToggleToc => {
-                let in_preview = self.active_handles_own_rendering();
-                if in_preview {
-                    if let Some(mut tab) = self.active_tab_session_mut() {
-                        tab.toggle_toc_visible();
-                    }
+                if self.toggle_active_toc() {
                     effect = effect.merge(AppEffect::REDRAW);
                     return effect;
                 }
@@ -960,6 +970,37 @@ mod edit_tests {
         );
         app.switch_workspace_for_test(0);
         app
+    }
+
+    #[cfg(feature = "markdown")]
+    #[test]
+    fn toggling_toc_projects_preview_bounds_beyond_the_new_panel_at_each_scale() {
+        for dpi in [1.0, 2.0] {
+            let mut app = app_with_read_only_markdown("# Heading");
+            app.update_scale_factor(dpi);
+            let inputs = app.build_shell_inputs();
+            let screen = ui::core::Screen::new(app.screen_width(), app.screen_height());
+            let mut measure = ui::core::NoopMeasure;
+            app.ui_shell.update_frame(screen, &app.current_theme, &mut measure, &inputs);
+            app.ui_shell.update_frame(screen, &app.current_theme, &mut measure, &inputs);
+            assert!(!app.ui_shell.dock_is_dirty(), "测试前必须具有可复用的缓存编辑区边界");
+            let closed_bounds = app.plugin_render_bounds();
+            let toc_right = app.ui_shell.editor_rect().x + app.ui_metrics().toc_width;
+
+            assert!(app.toggle_active_toc());
+            let open_bounds = app.plugin_render_bounds();
+
+            assert!(app.ui_shell.dock_is_dirty(), "TOC 改变 Dock 结构后必须废弃缓存边界");
+            assert!(
+                open_bounds.x >= toc_right,
+                "{dpi}x 下正文起点必须位于 TOC 右边：正文 x={}，TOC 右边={toc_right}",
+                open_bounds.x
+            );
+            assert!(open_bounds.x > closed_bounds.x, "打开 TOC 后正文必须右移");
+
+            assert!(app.toggle_active_toc());
+            assert_eq!(app.plugin_render_bounds(), closed_bounds, "关闭 TOC 后应恢复原正文边界");
+        }
     }
 
     fn set_active_selection(app: &mut App, anchor: usize, cursor: usize) {

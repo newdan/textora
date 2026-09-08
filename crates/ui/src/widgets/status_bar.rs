@@ -53,26 +53,27 @@ pub fn build_text(input: &StatusBarInput, cache: &mut StatusBarCache) -> String 
     } else if let Some((start, end)) = input.selection_range {
         let byte_count = end - start;
         if byte_count > 0 {
-            if cache.selection_anchor.is_some()
+            if cache.selection_anchor == Some(start)
                 && cache.selection_cursor == end
                 && cache.byte_count == byte_count
+                && cache.char_count == input.selection_char_count.unwrap_or(byte_count)
             {
-                format!("{}c,{}b", cache.char_count, cache.byte_count)
+                format!("已选 {} 字符 · {} 字节", cache.char_count, cache.byte_count)
             } else {
                 let char_count = input.selection_char_count.unwrap_or(byte_count);
                 cache.selection_anchor = Some(start);
                 cache.selection_cursor = end;
                 cache.byte_count = byte_count;
                 cache.char_count = char_count;
-                format!("{}c,{}b", char_count, byte_count)
+                format!("已选 {} 字符 · {} 字节", char_count, byte_count)
             }
         } else {
             cache.invalidate();
-            format!("{},{}", input.cursor_line + 1, input.cursor_col + 1)
+            format!("行 {} · 列 {}", input.cursor_line + 1, input.cursor_col + 1)
         }
     } else {
         cache.invalidate();
-        format!("{},{}", input.cursor_line + 1, input.cursor_col + 1)
+        format!("行 {} · 列 {}", input.cursor_line + 1, input.cursor_col + 1)
     };
 
     match input.conflict_label.as_deref().filter(|label| !label.is_empty()) {
@@ -124,17 +125,20 @@ impl Widget for StatusBarWidget {
         if self.rect.w <= 0.0 || self.rect.h <= 0.0 {
             return;
         }
-        ctx.list.fill(Rect::new(0.0, 0.0, self.rect.w, self.rect.h), ctx.theme.palette.bg_surface);
+        ctx.list.fill(
+            Rect::new(0.0, 0.0, self.rect.w, self.rect.h),
+            ctx.theme.application_theme().navigation_surface,
+        );
         if !self.last_text.is_empty() {
             let font_size = crate::constants::CAPTION_FONT_SIZE * ctx.dpi;
             let y_baseline = self.rect.h * 0.5 + font_size * 0.35;
-            let x = 32.0 * ctx.dpi;
+            let x = crate::constants::H_PADDING * ctx.dpi;
             if let Some(ref mut shaper) = ctx.shaper {
                 ctx.list.text_shaped(
                     x,
                     y_baseline,
                     font_size,
-                    ctx.theme.palette.text_muted,
+                    ctx.theme.application_theme().text_secondary,
                     &self.last_text,
                     shaper,
                 );
@@ -215,7 +219,7 @@ mod tests {
             conflict_label: None,
         };
         let mut cache = StatusBarCache::new();
-        assert_eq!(build_text(&input, &mut cache), "5,12");
+        assert_eq!(build_text(&input, &mut cache), "行 5 · 列 12");
     }
 
     #[test]
@@ -229,7 +233,7 @@ mod tests {
             conflict_label: None,
         };
         let mut cache = StatusBarCache::new();
-        assert_eq!(build_text(&input, &mut cache), "10c,10b");
+        assert_eq!(build_text(&input, &mut cache), "已选 10 字符 · 10 字节");
     }
 
     #[test]
@@ -243,7 +247,7 @@ mod tests {
             conflict_label: Some("已保留冲突副本".to_owned()),
         };
         let mut cache = StatusBarCache::new();
-        assert_eq!(build_text(&input, &mut cache), "5,12 · 已保留冲突副本");
+        assert_eq!(build_text(&input, &mut cache), "行 5 · 列 12 · 已保留冲突副本");
     }
 
     #[test]
@@ -320,7 +324,7 @@ mod tests {
             conflict_label: None,
         };
         let mut cache = StatusBarCache::new();
-        assert_eq!(build_text(&input, &mut cache), "4,8");
+        assert_eq!(build_text(&input, &mut cache), "行 4 · 列 8");
     }
 
     #[test]
@@ -338,7 +342,7 @@ mod tests {
         let mut m = NoopMeasure;
         let mut lc = LayoutCtx { ui_measure: None, measure: &mut m, theme: &t, dpi: 1.0 };
         w.set_rect(Rect::new(0.0, 0.0, 1200.0, 24.0), &mut lc);
-        assert_eq!(w.last_text, "1,1");
+        assert_eq!(w.last_text, "行 1 · 列 1");
     }
 
     #[test]
@@ -428,7 +432,7 @@ mod tests {
         };
         let mut cache = StatusBarCache::new();
         let text = build_text(&input, &mut cache);
-        assert_eq!(text, "10c,15b");
+        assert_eq!(text, "已选 10 字符 · 15 字节");
     }
 
     #[test]
@@ -438,5 +442,24 @@ mod tests {
         let mut ctx = EventCtx::new(&t, 1.0);
         let result = w.on_event(&Event::MouseMove { px: 100.0, py: 12.0 }, &mut ctx);
         assert!(result.is_none());
+    }
+    #[test]
+    fn selection_count_updates_after_same_byte_length_edit() {
+        let mut cache = StatusBarCache::new();
+        let mut input = StatusBarInput {
+            buffer_len: 6,
+            selection_range: Some((0, 6)),
+            selection_char_count: Some(6),
+            cursor_line: 0,
+            cursor_col: 0,
+            conflict_label: None,
+        };
+        let previous = build_text(&input, &mut cache);
+        input.selection_char_count = Some(2);
+        assert_ne!(
+            build_text(&input, &mut cache),
+            previous,
+            "replacing six ASCII bytes with two Chinese characters must refresh the count"
+        );
     }
 }

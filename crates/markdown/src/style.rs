@@ -1,5 +1,9 @@
 //! MarkdownStyle — pure data configuration for markdown rendering.
 
+const BLOCKQUOTE_BACKGROUND_BLEND_RATIO: f32 = 0.98;
+const TABLE_HEADER_BACKGROUND_BLEND_RATIO: f32 = 0.94;
+const TABLE_STRIPE_BACKGROUND_BLEND_RATIO: f32 = 0.98;
+
 const DARK_INLINE_CODE_BG_BLEND_RATIO: f32 = 0.84;
 const LIGHT_INLINE_CODE_BG_BLEND_RATIO: f32 = 0.90;
 
@@ -58,7 +62,7 @@ impl MarkdownStyle {
     pub fn from_theme(theme: &ui::Theme, base_font_size: f32, line_height: f32) -> Self {
         let body_font_size = base_font_size;
         let code_font_size = base_font_size * 0.9;
-        let heading_scale = [1.8, 1.3, 1.15, 1.2, 1.1, 0.95];
+        let heading_scale = [1.8, 1.3, 1.15, 1.1, 1.05, 1.0];
         let heading_font_sizes = heading_scale.map(|s| base_font_size * s);
         let body_font_family = vec!["PingFang SC".to_string()];
         let code_font_family = Some("monospace".to_string());
@@ -68,8 +72,7 @@ impl MarkdownStyle {
         let accent = theme.palette.accent;
         let is_dark = theme.is_dark;
 
-        let code_bg = theme.markdown.code_bg;
-        let _code_block_bg = theme.markdown.code_block_bg;
+        let code_bg = theme.markdown.code_block_bg;
         let inline_code_bg_blend_ratio = if is_dark {
             DARK_INLINE_CODE_BG_BLEND_RATIO
         } else {
@@ -79,20 +82,13 @@ impl MarkdownStyle {
             blend_toward_bg(theme.markdown.inline_code, bg, inline_code_bg_blend_ratio);
 
         let blockquote_border = if is_dark { blend_toward_bg(accent, bg, 0.75) } else { accent };
-        let blockquote_bg = if is_dark {
-            [accent[0], accent[1], accent[2], 0.08]
-        } else {
-            [accent[0], accent[1], accent[2], 0.05]
-        };
+        let blockquote_bg = blend_toward_bg(accent, bg, BLOCKQUOTE_BACKGROUND_BLEND_RATIO);
 
         let table_border = theme.palette.border_subtle;
-        let table_header_bg = theme.palette.bg_hover;
-        let table_stripe_bg = [
-            theme.palette.bg_hover[0],
-            theme.palette.bg_hover[1],
-            theme.palette.bg_hover[2],
-            theme.palette.bg_hover[3] * 0.5,
-        ];
+        let table_header_bg =
+            blend_toward_bg(theme.palette.text_muted, bg, TABLE_HEADER_BACKGROUND_BLEND_RATIO);
+        let table_stripe_bg =
+            blend_toward_bg(theme.palette.text_muted, bg, TABLE_STRIPE_BACKGROUND_BLEND_RATIO);
         let code_block_border = theme.palette.border_subtle;
         let rule_color = theme.palette.border_subtle;
 
@@ -143,7 +139,7 @@ impl MarkdownStyle {
     pub fn novel(theme: &ui::Theme, base_font_size: f32, line_height: f32) -> Self {
         let body_font_size = base_font_size;
         let code_font_size = base_font_size * 0.9;
-        let heading_scale = [1.8, 1.3, 1.15, 1.2, 1.1, 0.95];
+        let heading_scale = [1.8, 1.3, 1.15, 1.1, 1.05, 1.0];
         let heading_font_sizes = heading_scale.map(|s| base_font_size * s);
         let body_font_family = vec!["PingFang SC".to_string()];
         let code_font_family = Some("monospace".to_string());
@@ -346,5 +342,33 @@ mod tests {
         assert!((style.blockquote_padding - base * 0.65).abs() < 0.01);
         assert!((style.table_cell_padding - base * 0.5).abs() < 0.01);
         assert!((style.code_line_height - code_fs * 1.5).abs() < 0.01);
+    }
+    #[test]
+    fn heading_sizes_decrease_with_semantic_depth() {
+        let theme = ui::Theme::from_definition(&ui::theme::ThemeDefinition::default_dark());
+        let style = MarkdownStyle::from_theme(&theme, 16.0, 24.0);
+        for pair in style.heading_font_sizes.windows(2) {
+            assert!(pair[0] >= pair[1], "a deeper heading must not be larger");
+        }
+    }
+
+    #[test]
+    fn document_surfaces_are_opaque_and_use_the_code_block_role() {
+        for definition in [
+            ui::theme::ThemeDefinition::default_dark(),
+            ui::theme::ThemeDefinition::default_light(),
+        ] {
+            let mut theme = ui::Theme::from_definition(&definition);
+            theme.markdown.code_block_bg = [0.13, 0.15, 0.18, 1.0];
+            theme.markdown.code_bg = [0.2, 0.22, 0.25, 1.0];
+            let style = MarkdownStyle::from_theme(&theme, 16.0, 24.0);
+            assert_eq!(style.code_bg, theme.markdown.code_block_bg);
+            for background in [style.table_header_bg, style.table_stripe_bg, style.blockquote_bg] {
+                assert_eq!(
+                    background[3], 1.0,
+                    "document surfaces must be resolved against the document background"
+                );
+            }
+        }
     }
 }

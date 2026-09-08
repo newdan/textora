@@ -112,9 +112,9 @@ impl SidebarPersistent {
         let hot_band = HOT_BAND_LOGICAL * dpi;
         let in_left_hot = px >= 0.0 && px <= hot_band;
         // Hamburger button as trigger zone
-        let btn_size = 16.0 * dpi;
-        let hx = traffic_light_inset_x + 8.0 * dpi;
-        let hy = 16.0 * dpi - btn_size * 0.5;
+        let btn_size = crate::theme::ControlMetrics::default().minimum_hit_target_logical * dpi;
+        let hx = traffic_light_inset_x + crate::constants::TINY_GAP * dpi;
+        let hy = (crate::constants::TITLE_BAR_HEIGHT * dpi - btn_size) * 0.5;
         let on_hamburger = px >= hx && px <= hx + btn_size && py >= hy && py <= hy + btn_size;
         let in_hot_zone = in_left_hot || on_hamburger;
 

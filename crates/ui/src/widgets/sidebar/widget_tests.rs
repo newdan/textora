@@ -150,7 +150,7 @@ mod tests {
                     _ => None,
                 })
                 .collect();
-            assert_eq!(button_fonts.len(), 2, "应绘制打开和新建按钮");
+            assert_eq!(button_fonts.len(), 2, "宽侧栏的新建与打开都应显示文字");
             for (label, font_size) in button_fonts {
                 assert_eq!(
                     font_size,
@@ -187,9 +187,29 @@ mod tests {
                     _ => None,
                 })
                 .collect();
-            assert_eq!(colors.len(), 2);
-            assert_eq!(colors[0], colors[1], "打开与新建的文字色应一致");
+            assert_eq!(colors.len(), 2, "宽侧栏的两个按钮必须绘制标签");
+            assert_eq!(colors[0], colors[1], "新建与打开文字的前景色应一致");
+            let label_color = colors[0];
             let layout = widget.state.current_layout().expect("sidebar must be laid out");
+            let icon_colors: Vec<_> = draw_list
+                .cmds
+                .iter()
+                .filter_map(|command| match command {
+                    DrawCmd::FillTriangle { p0, p1, p2, color }
+                        if [p0, p1, p2]
+                            .iter()
+                            .all(|point| layout.open_btn_rect.contains(point[0], point[1])) =>
+                    {
+                        Some(*color)
+                    }
+                    _ => None,
+                })
+                .collect();
+            assert!(!icon_colors.is_empty(), "打开按钮必须绘制图标");
+            assert!(
+                icon_colors.iter().all(|color| *color == label_color),
+                "打开图标与新建文字的前景色应一致"
+            );
             let new_rect = Rect::new(
                 layout.new_btn_rect.x,
                 layout.new_btn_rect.y,
@@ -197,6 +217,11 @@ mod tests {
                 layout.new_btn_rect.h,
             );
             for rect in [layout.open_btn_rect, new_rect] {
+                assert!(draw_list.cmds.iter().any(|command| matches!(command,
+                    DrawCmd::FillRect { rect: bounds, color, radius }
+                        if *bounds == rect && *color == crate::button::ButtonStyle::from_theme(&theme).background
+                            && *radius == theme.control_metrics().corner_radius_logical
+                )), "侧栏操作按钮应使用相同的标准底色与圆角");
                 assert!(draw_list.cmds.iter().any(|command| matches!(command,
                     DrawCmd::StrokeRect { rect: bounds, color, radius, line_width }
                         if *bounds == rect && *color == theme.application_theme().button_border
@@ -1396,6 +1421,47 @@ mod tests {
         let hit_y = r0_before.y + r0_before.h * 0.5;
         let hit = w.list.hit_row(110.0, hit_y, dpi);
         assert!(hit.is_some(), "scrolling should not break hit detection");
+    }
+    #[test]
+    fn hover_animation_preserves_layout_width_and_transient_visibility() {
+        let mut widget = new_document_widget();
+        widget.screen_w = 280.0;
+        let mut persistent = crate::widgets::sidebar::SidebarPersistent::new(&widget.cfg);
+        persistent.visibility = Visibility::HoverPeek;
+        persistent.hover_peek_start = Some(std::time::Instant::now());
+        widget.inject_persistent(&persistent);
+        layout_new_document_widget(&mut widget, &test_theme());
+        let layout = widget.current_layout().expect("hovering sidebar has a layout");
+        assert_eq!(layout.bg_rect.w, widget.cfg.width);
+        assert_eq!(widget.state.visibility(), Visibility::HoverPeek);
+    }
+    #[test]
+    fn compact_split_button_clicks_work_across_widths_and_dpi() {
+        let theme = test_theme();
+        for dpi in [1.0, 2.0] {
+            for width in [160.0, 220.0, 400.0] {
+                let cfg = SidebarConfig { pinned: true, width: width * dpi };
+                let mut widget = SidebarWidget::new(cfg, metrics(dpi));
+                let mut input = sidebar_widget_input(Vec::new(), None);
+                input.metrics = metrics(dpi);
+                input.screen_size_px = (1200.0 * dpi, 800.0 * dpi);
+                widget.set_input(input);
+                let mut measure = NoopMeasure;
+                let mut layout_ctx =
+                    LayoutCtx { ui_measure: None, measure: &mut measure, theme: &theme, dpi };
+                widget.set_rect(Rect::new(0.0, 0.0, width * dpi, 800.0 * dpi), &mut layout_ctx);
+                let layout = widget.current_layout().expect("sidebar is laid out").clone();
+                let mut event_ctx = EventCtx::new(&theme, dpi);
+                assert_eq!(
+                    click_new_document_region(&mut widget, layout.new_btn_rect, &mut event_ctx),
+                    Some(WidgetAction::Sidebar(SidebarAction::NewDocument(
+                        NewDocumentKind::Markdown
+                    )))
+                );
+                click_new_document_region(&mut widget, layout.new_menu_btn_rect, &mut event_ctx);
+                assert!(widget.open_menu().is_some());
+            }
+        }
     }
 }
 #[cfg(test)]

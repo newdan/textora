@@ -64,12 +64,12 @@ fn make_style_from_theme(theme: &crate::theme::Theme) -> ListStyle {
         item_w_logical: 0.0,
         pad_x_logical: theme.control_metrics().horizontal_padding_logical,
         pad_y_logical: 0.0,
-        font_size_logical: 13.0,
+        font_size_logical: crate::constants::TITLE_FONT_SIZE,
         bg: [0.0, 0.0, 0.0, 0.0], // 透明：sidebar 主背景已铺好
         item_active_bg: application.navigation_selected_surface,
         item_hover_bg: application.navigation_hover_surface,
-        item_fg: application.text_secondary,
-        item_active_fg: application.accent,
+        item_fg: application.text_primary,
+        item_active_fg: application.navigation_selected_text,
         item_hover_fg: application.text_primary,
         item_accent: application.accent,
         separator: application.strong_border,
@@ -88,7 +88,7 @@ impl SidebarWidget {
                 item_w_logical: 0.0,
                 pad_x_logical: 12.0,
                 pad_y_logical: 0.0,
-                font_size_logical: 13.0,
+                font_size_logical: crate::constants::TITLE_FONT_SIZE,
                 bg: [0.0; 4],
                 item_active_bg: [0.0; 4],
                 item_hover_bg: [0.0; 4],
@@ -660,6 +660,17 @@ impl Widget for SidebarWidget {
             _ => None,
         }
     }
+    fn tooltip_at(&self, px: f32, py: f32) -> Option<crate::widgets::tooltip::TooltipHint> {
+        let layout = self.state.current_layout()?;
+        if layout.open_btn_rect.w > 0.0 && layout.open_btn_rect.contains(px, py) {
+            return Some(crate::widgets::tooltip::TooltipHint {
+                label: "打开文件（⌘O）".to_owned(),
+                target_rect: layout.open_btn_rect,
+            });
+        }
+        self.new_document_button.tooltip_at(px, py)
+    }
+
     fn as_any(&self) -> &dyn Any {
         self
     }

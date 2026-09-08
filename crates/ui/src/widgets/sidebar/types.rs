@@ -7,6 +7,8 @@ use crate::view_mode::ViewMode;
 use crate::widgets::popup_menu::ContextMenuAction;
 use serde::{Deserialize, Serialize};
 
+const MINIMUM_EDITOR_WIDTH_LOGICAL: f32 = 100.0;
+
 // ── Configuration (persisted per-workspace) ──
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -18,6 +20,22 @@ pub struct SidebarConfig {
 impl SidebarConfig {
     pub fn new_default(dpi_scale: f32) -> Self {
         Self { pinned: true, width: 220.0 * dpi_scale }
+    }
+
+    /// Preserve temporary hover expansion while adapting a pinned sidebar to the window.
+    pub fn visibility_for_width(
+        &self,
+        current: Visibility,
+        window_width: f32,
+        dpi_scale: f32,
+    ) -> Visibility {
+        if !self.pinned {
+            return current;
+        }
+        if window_width >= self.width + MINIMUM_EDITOR_WIDTH_LOGICAL * dpi_scale {
+            return Visibility::Pinned;
+        }
+        if current == Visibility::Pinned { Visibility::Hidden } else { current }
     }
 
     pub fn clamp_width(&mut self, dpi_scale: f32) {

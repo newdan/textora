@@ -1,7 +1,7 @@
 // macOS native UI bindings (AppKit/winit); library crates remain cross-platform.
 #[cfg(not(target_os = "macos"))]
 compile_error!(
-    "The Edit+ application (NoteR binary) currently supports macOS only; library crates remain portable."
+    "The textora application currently supports macOS only; library crates remain portable."
 );
 
 use textora_app::{App, AppEvent, headless_init, parse_args};
@@ -12,7 +12,7 @@ fn main() {
     let cli = parse_args(&args);
 
     if cli.headless {
-        println!("edit+ running in headless mode");
+        println!("textora running in headless mode");
         match pollster::block_on(headless_init()) {
             Ok(adapter) => println!("GPU initialized: {adapter}"),
             Err(e) => {

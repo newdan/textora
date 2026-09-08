@@ -1,4 +1,4 @@
-//! CLI argument parsing for edit+.
+//! CLI argument parsing for textora.
 
 use std::path::PathBuf;
 
@@ -13,7 +13,7 @@ pub struct CliArgs {
 
 /// Parse CLI arguments.
 ///
-/// Usage: `edit-plus [OPTIONS] [FILE]`
+/// Usage: `textora [OPTIONS] [FILE]`
 ///
 /// Options:
 ///   --headless  Run without creating a window (for testing GPU init)
@@ -42,37 +42,37 @@ mod tests {
 
     #[test]
     fn no_args() {
-        let cli = parse_args(&args(&["edit-plus"]));
+        let cli = parse_args(&args(&["textora"]));
         assert_eq!(cli, CliArgs { file: None, headless: false });
     }
 
     #[test]
     fn file_arg() {
-        let cli = parse_args(&args(&["edit-plus", "foo.txt"]));
+        let cli = parse_args(&args(&["textora", "foo.txt"]));
         assert_eq!(cli, CliArgs { file: Some(PathBuf::from("foo.txt")), headless: false });
     }
 
     #[test]
     fn headless_flag() {
-        let cli = parse_args(&args(&["edit-plus", "--headless"]));
+        let cli = parse_args(&args(&["textora", "--headless"]));
         assert_eq!(cli, CliArgs { file: None, headless: true });
     }
 
     #[test]
     fn file_and_headless() {
-        let cli = parse_args(&args(&["edit-plus", "--headless", "test.rs"]));
+        let cli = parse_args(&args(&["textora", "--headless", "test.rs"]));
         assert_eq!(cli, CliArgs { file: Some(PathBuf::from("test.rs")), headless: true });
     }
 
     #[test]
     fn headless_after_file() {
-        let cli = parse_args(&args(&["edit-plus", "test.rs", "--headless"]));
+        let cli = parse_args(&args(&["textora", "test.rs", "--headless"]));
         assert_eq!(cli, CliArgs { file: Some(PathBuf::from("test.rs")), headless: true });
     }
 
     #[test]
     fn only_program_name() {
-        let cli = parse_args(&args(&["edit-plus"]));
+        let cli = parse_args(&args(&["textora"]));
         assert!(!cli.headless);
         assert!(cli.file.is_none());
     }

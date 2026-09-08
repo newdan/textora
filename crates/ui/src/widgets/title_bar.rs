@@ -5,6 +5,7 @@
 
 use crate::core::widget::WidgetAction;
 use crate::core::{Event, EventCtx, LayoutCtx, MouseButton, PaintCtx, Rect, Widget};
+use crate::core::{TextMeasure, text_util::truncate_title_precise};
 use crate::widgets::icon::draw_icon;
 use crate::widgets::tooltip::TooltipHint;
 use std::any::Any;
@@ -14,8 +15,14 @@ use winit::window::CursorIcon;
 const ACTION_HORIZONTAL_INSET_LOGICAL: f32 = 8.0;
 const ACTION_VERTICAL_INSET_LOGICAL: f32 = 4.0;
 const ACTION_GAP_LOGICAL: f32 = 4.0;
-const ACTION_CORNER_RADIUS_LOGICAL: f32 = 3.0;
 const ACTION_ICON_SIZE_LOGICAL: f32 = 18.0;
+const TEXT_HORIZONTAL_INSET_LOGICAL: f32 = 12.0;
+const TEXT_ACTION_GAP_LOGICAL: f32 = 8.0;
+const TITLE_PATH_GAP_LOGICAL: f32 = 8.0;
+const TITLE_FONT_SIZE_LOGICAL: f32 = 13.0;
+const PATH_FONT_SIZE_LOGICAL: f32 = 11.0;
+const CENTERED_TEXT_BASELINE_EM: f32 = 0.35;
+const ELLIPSIS: &str = "…";
 
 /// mmap 风格按钮的标题栏输入。
 #[derive(Clone, Copy, Debug)]
@@ -67,7 +74,15 @@ pub enum TitleBarAction {
 pub struct TitleBarWidget {
     rect: Rect,
     input: Option<TitleBarInput>,
-    /// 缓存文件名宽度（在 set_rect 阶段测量）
+    /// 布局后实际显示的文件名。
+    displayed_name: String,
+    /// 布局后实际显示的父路径；空间不足时为空。
+    displayed_path: String,
+    /// 标题文字可绘制和命中的安全区域。
+    text_rect: Rect,
+    /// 实际显示文字占据的区域，用于避免空白标题栏弹出 tooltip。
+    text_hit_rect: Rect,
+    /// 缓存实际显示文件名的宽度。
     name_width: f32,
     /// Precomputed toggle button rect (for hit testing).
     toggle_rect: Rect,
@@ -91,6 +106,10 @@ impl TitleBarWidget {
         Self {
             rect: Rect::ZERO,
             input: None,
+            displayed_name: String::new(),
+            displayed_path: String::new(),
+            text_rect: Rect::ZERO,
+            text_hit_rect: Rect::ZERO,
             name_width: 0.0,
             toggle_rect: Rect::ZERO,
             mindmap_style_rect: Rect::ZERO,
@@ -114,50 +133,166 @@ impl TitleBarWidget {
     fn mindmap_style_rect_for_test(&self) -> Rect {
         self.mindmap_style_rect
     }
+
+    fn layout_text(&mut self, input: &TitleBarInput, dpi: f32, measure: &mut dyn TextMeasure) {
+        self.displayed_name.clear();
+        self.displayed_path.clear();
+        self.text_hit_rect = Rect::ZERO;
+        self.name_width = 0.0;
+        if self.text_rect.w <= 0.0 {
+            return;
+        }
+
+        let (full_name, full_path) = title_parts(input);
+        let name_font_size = TITLE_FONT_SIZE_LOGICAL * dpi;
+        self.displayed_name =
+            truncate_or_hide(&full_name, self.text_rect.w, name_font_size, measure);
+        self.name_width = measure.measure(&self.displayed_name, name_font_size);
+        self.text_hit_rect = Rect::new(
+            self.text_rect.x,
+            self.text_rect.y,
+            self.name_width.min(self.text_rect.w),
+            self.text_rect.h,
+        );
+        if full_path.is_empty() {
+            return;
+        }
+
+        let title_path_gap = TITLE_PATH_GAP_LOGICAL * dpi;
+        let path_width = (self.text_rect.w - self.name_width - title_path_gap).max(0.0);
+        self.displayed_path =
+            truncate_or_hide(&full_path, path_width, PATH_FONT_SIZE_LOGICAL * dpi, measure);
+        if !self.displayed_path.is_empty() {
+            let displayed_path_width =
+                measure.measure(&self.displayed_path, PATH_FONT_SIZE_LOGICAL * dpi);
+            self.text_hit_rect.w =
+                (self.name_width + title_path_gap + displayed_path_width).min(self.text_rect.w);
+        }
+    }
+}
+
+fn background_start(input: &TitleBarInput, title_bar_width: f32) -> f32 {
+    (input.sidebar_left - input.titlebar_x).clamp(0.0, title_bar_width.max(0.0))
+}
+
+fn title_parts(input: &TitleBarInput) -> (String, String) {
+    let Some(file_path) = input.file_path.as_ref() else {
+        return ("untitled".to_owned(), String::new());
+    };
+    let filename = file_path
+        .file_name()
+        .map(|name| name.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "untitled".to_owned());
+    let parent_path =
+        file_path.parent().map(|parent| parent.to_string_lossy().into_owned()).unwrap_or_default();
+    (filename, parent_path)
+}
+
+fn truncate_or_hide(
+    text: &str,
+    available_width: f32,
+    font_size: f32,
+    measure: &mut dyn TextMeasure,
+) -> String {
+    if text.is_empty() || available_width <= 0.0 {
+        return String::new();
+    }
+    if measure.measure(text, font_size) <= available_width {
+        return text.to_owned();
+    }
+    if measure.measure(ELLIPSIS, font_size) > available_width {
+        return String::new();
+    }
+
+    let truncated = truncate_title_precise(text, available_width, font_size, measure);
+    if measure.measure(&truncated, font_size) <= available_width {
+        truncated
+    } else {
+        ELLIPSIS.to_owned()
+    }
+}
+
+fn next_action_rect(
+    next_right: &mut f32,
+    minimum_x: f32,
+    button_size: f32,
+    button_y: f32,
+    action_gap: f32,
+) -> Rect {
+    let button_x = *next_right - button_size;
+    *next_right = button_x - action_gap;
+    if button_size <= 0.0 || button_x < minimum_x {
+        return Rect::ZERO;
+    }
+    Rect::new(button_x, button_y, button_size, button_size)
 }
 
 impl Widget for TitleBarWidget {
     fn set_rect(&mut self, rect: Rect, ctx: &mut LayoutCtx) {
         self.rect = Rect::new(0.0, 0.0, rect.w, rect.h);
-        // 在 layout 阶段测量文件名宽度（有 TextMeasure 可用）
-        if let Some(ref input) = self.input {
-            let filename = input
-                .file_path
-                .as_ref()
-                .and_then(|p| p.file_name())
-                .and_then(|n| n.to_str())
-                .unwrap_or("untitled");
-            let name_font_size = 13.0 * ctx.dpi;
-            self.name_width = ctx.measure.measure(filename, name_font_size);
-
+        if let Some(input) = self.input.clone() {
             let dpi = ctx.dpi;
-            let btn_size = rect.h - 2.0 * ACTION_VERTICAL_INSET_LOGICAL * dpi;
+            let background_x = background_start(&input, rect.w);
+            let btn_size = (rect.h - 2.0 * ACTION_VERTICAL_INSET_LOGICAL * dpi).max(0.0);
             let btn_y = ACTION_VERTICAL_INSET_LOGICAL * dpi;
             let action_gap = ACTION_GAP_LOGICAL * dpi;
-            let mut next_action_right = rect.w - ACTION_HORIZONTAL_INSET_LOGICAL * dpi;
+            let mut next_action_right =
+                (rect.w - ACTION_HORIZONTAL_INSET_LOGICAL * dpi).clamp(0.0, rect.w.max(0.0));
 
             if input.can_toggle {
-                let btn_x = next_action_right - btn_size;
-                self.toggle_rect = Rect::new(btn_x, btn_y, btn_size, btn_size);
-                next_action_right = btn_x - action_gap;
+                self.toggle_rect = next_action_rect(
+                    &mut next_action_right,
+                    background_x,
+                    btn_size,
+                    btn_y,
+                    action_gap,
+                );
             } else {
                 self.toggle_rect = Rect::ZERO;
             }
 
             if input.mindmap_style.is_some() {
-                let btn_x = next_action_right - btn_size;
-                self.mindmap_style_rect = Rect::new(btn_x, btn_y, btn_size, btn_size);
-                next_action_right = btn_x - action_gap;
+                self.mindmap_style_rect = next_action_rect(
+                    &mut next_action_right,
+                    background_x,
+                    btn_size,
+                    btn_y,
+                    action_gap,
+                );
             } else {
                 self.mindmap_style_rect = Rect::ZERO;
             }
 
             if input.can_toggle && input.toc_enabled {
-                let btn_x = next_action_right - btn_size;
-                self.toc_rect = Rect::new(btn_x, btn_y, btn_size, btn_size);
+                self.toc_rect = next_action_rect(
+                    &mut next_action_right,
+                    background_x,
+                    btn_size,
+                    btn_y,
+                    action_gap,
+                );
             } else {
                 self.toc_rect = Rect::ZERO;
             }
+
+            let text_x = background_x + TEXT_HORIZONTAL_INSET_LOGICAL * dpi;
+            let first_action_x = [self.toc_rect, self.mindmap_style_rect, self.toggle_rect]
+                .into_iter()
+                .filter(|action_rect| action_rect.w > 0.0)
+                .map(|action_rect| action_rect.x)
+                .reduce(f32::min);
+            let text_right = first_action_x
+                .map(|action_x| action_x - TEXT_ACTION_GAP_LOGICAL * dpi)
+                .unwrap_or(rect.w - ACTION_HORIZONTAL_INSET_LOGICAL * dpi)
+                .clamp(text_x.min(rect.w.max(0.0)), rect.w.max(0.0));
+            self.text_rect =
+                Rect::new(text_x, 0.0, (text_right - text_x).max(0.0), rect.h.max(0.0));
+
+            let measure: &mut dyn TextMeasure = match ctx.ui_measure.as_deref_mut() {
+                Some(ui_measure) => ui_measure,
+                None => ctx.measure,
+            };
+            self.layout_text(&input, dpi, measure);
 
             debug_assert!(
                 self.mindmap_style_rect == Rect::ZERO
@@ -170,6 +305,11 @@ impl Widget for TitleBarWidget {
                     || self.toc_rect.right() <= self.mindmap_style_rect.x
             );
         } else {
+            self.displayed_name.clear();
+            self.displayed_path.clear();
+            self.text_rect = Rect::ZERO;
+            self.text_hit_rect = Rect::ZERO;
+            self.name_width = 0.0;
             self.toggle_rect = Rect::ZERO;
             self.mindmap_style_rect = Rect::ZERO;
             self.toc_rect = Rect::ZERO;
@@ -186,74 +326,58 @@ impl Widget for TitleBarWidget {
         let h = self.rect.h;
 
         // 1) 背景（左侧留出汉堡按钮空间，避免覆盖）
-        let bg_x = (input.sidebar_left - input.titlebar_x).max(0.0);
-        let bg = Rect::new(bg_x, 0.0, self.rect.w - bg_x, h);
+        let bg_x = background_start(input, self.rect.w);
+        let bg = Rect::new(bg_x, 0.0, (self.rect.w - bg_x).max(0.0), h);
         if bg.w > 0.0 {
             ctx.list.fill(bg, ctx.theme.editor.background);
         }
 
-        // 2) 文件名
-        let filename = input
-            .file_path
-            .as_ref()
-            .and_then(|p| p.file_name())
-            .and_then(|n| n.to_str())
-            .unwrap_or("untitled");
-
-        let path_str = input
-            .file_path
-            .as_ref()
-            .and_then(|p| p.parent())
-            .and_then(|p| p.to_str())
-            .unwrap_or("");
-
-        let pad = 12.0 * dpi;
-        let x = bg_x + pad;
-        let name_font_size = 13.0 * dpi;
-        let y_baseline = h * 0.6;
-
-        if let Some(ref mut shaper) = ctx.shaper {
-            ctx.list.text_shaped(
-                x,
-                y_baseline,
-                name_font_size,
-                ctx.theme.palette.text_muted,
-                filename,
-                shaper,
-            );
-        }
-
-        // 3) 路径（更小、更淡）
-        if !path_str.is_empty() {
-            let path_font_size = 10.0 * dpi;
-            // 使用 set_rect 阶段测量的精确宽度
-            let path_x = x + self.name_width + 8.0 * dpi;
-            let mut path_color = ctx.theme.palette.text_muted;
-            path_color[3] *= 0.5;
-            if let Some(ref mut shaper) = ctx.shaper {
-                ctx.list.text_shaped(
-                    path_x,
-                    y_baseline,
-                    path_font_size,
-                    path_color,
-                    path_str,
+        // 2) 文件名与路径
+        if self.text_rect.w > 0.0
+            && !self.displayed_name.is_empty()
+            && let Some(ref mut shaper) = ctx.shaper
+        {
+            let application = ctx.theme.application_theme();
+            let name_font_size = TITLE_FONT_SIZE_LOGICAL * dpi;
+            let path_font_size = PATH_FONT_SIZE_LOGICAL * dpi;
+            let name_baseline = h * 0.5 + name_font_size * CENTERED_TEXT_BASELINE_EM;
+            let path_baseline = h * 0.5 + path_font_size * CENTERED_TEXT_BASELINE_EM;
+            let text_x = self.text_rect.x;
+            let path_x = text_x + self.name_width + TITLE_PATH_GAP_LOGICAL * dpi;
+            ctx.list.clip(self.text_rect, |draw_list| {
+                draw_list.text_shaped(
+                    text_x,
+                    name_baseline,
+                    name_font_size,
+                    application.text_primary,
+                    &self.displayed_name,
                     shaper,
                 );
-            }
+                if !self.displayed_path.is_empty() {
+                    draw_list.text_shaped(
+                        path_x,
+                        path_baseline,
+                        path_font_size,
+                        application.text_secondary,
+                        &self.displayed_path,
+                        shaper,
+                    );
+                }
+            });
         }
 
         // 4) Markdown 预览切换按钮
         if input.can_toggle && self.toggle_rect.w > 0.0 {
             let r = &self.toggle_rect;
             let btn_bg = if self.toggle_hovered {
-                ctx.theme.palette.sidebar_hover_bg
+                ctx.theme.application_theme().hover_surface
             } else {
                 ctx.theme.editor.background
             };
             ctx.list.fill_rounded(
                 Rect::new(r.x, r.y, r.w, r.h),
                 btn_bg,
-                ACTION_CORNER_RADIUS_LOGICAL * dpi,
+                ctx.theme.control_metrics().compact_corner_radius_logical * dpi,
             );
 
             let icon_color = if input.toggled {
@@ -275,14 +399,14 @@ impl Widget for TitleBarWidget {
         {
             let r = &self.mindmap_style_rect;
             let btn_bg = if self.mindmap_style_hovered {
-                ctx.theme.palette.sidebar_hover_bg
+                ctx.theme.application_theme().hover_surface
             } else {
                 ctx.theme.editor.background
             };
             ctx.list.fill_rounded(
                 Rect::new(r.x, r.y, r.w, r.h),
                 btn_bg,
-                ACTION_CORNER_RADIUS_LOGICAL * dpi,
+                ctx.theme.control_metrics().compact_corner_radius_logical * dpi,
             );
 
             let icon_color = if style_input.panel_visible {
@@ -302,14 +426,14 @@ impl Widget for TitleBarWidget {
         if input.toc_enabled && self.toc_rect.w > 0.0 {
             let r = &self.toc_rect;
             let btn_bg = if self.toc_hovered {
-                ctx.theme.palette.sidebar_hover_bg
+                ctx.theme.application_theme().hover_surface
             } else {
                 ctx.theme.editor.background
             };
             ctx.list.fill_rounded(
                 Rect::new(r.x, r.y, r.w, r.h),
                 btn_bg,
-                ACTION_CORNER_RADIUS_LOGICAL * dpi,
+                ctx.theme.control_metrics().compact_corner_radius_logical * dpi,
             );
 
             let icon_color = if input.toc_visible {
@@ -330,11 +454,8 @@ impl Widget for TitleBarWidget {
 
     fn hit(&self, px: f32, py: f32) -> bool {
         // 排除汉堡按钮区域（与背景填充的 bg_x 偏移一致）
-        let bg_x = self
-            .input
-            .as_ref()
-            .map(|inp| (inp.sidebar_left - inp.titlebar_x).max(0.0))
-            .unwrap_or(0.0);
+        let bg_x =
+            self.input.as_ref().map(|input| background_start(input, self.rect.w)).unwrap_or(0.0);
         let effective = Rect::new(bg_x, 0.0, self.rect.w - bg_x, self.rect.h);
         effective.contains(px, py)
     }
@@ -415,21 +536,31 @@ impl Widget for TitleBarWidget {
                 target_rect: self.mindmap_style_rect,
             });
         }
-        if self.toggle_rect.w > 0.0 && self.toggle_rect.contains(px, py) {
-            if self.toc_rect.w > 0.0 && self.toc_rect.contains(px, py) {
-                let label = if let Some(ref input) = self.input {
-                    if input.toc_visible { "隐藏目录 ⌘⇧T" } else { "显示目录 ⌘⇧T" }
-                } else {
-                    "目录切换"
-                };
-                return Some(TooltipHint { label: label.to_string(), target_rect: self.toc_rect });
-            }
-            if let Some(ref input) = self.input {
-                return input.toggle_label.as_ref().map(|label| TooltipHint {
-                    label: label.clone(),
-                    target_rect: self.toggle_rect,
-                });
-            }
+        if self.toc_rect.w > 0.0 && self.toc_rect.contains(px, py) {
+            let label = if self.input.as_ref().is_some_and(|input| input.toc_visible) {
+                "隐藏目录 ⌘⇧T"
+            } else {
+                "显示目录 ⌘⇧T"
+            };
+            return Some(TooltipHint { label: label.to_owned(), target_rect: self.toc_rect });
+        }
+        if self.toggle_rect.w > 0.0
+            && self.toggle_rect.contains(px, py)
+            && let Some(input) = &self.input
+        {
+            return input
+                .toggle_label
+                .as_ref()
+                .map(|label| TooltipHint { label: label.clone(), target_rect: self.toggle_rect });
+        }
+        if self.text_hit_rect.w > 0.0 && self.text_hit_rect.contains(px, py) {
+            let label = self
+                .input
+                .as_ref()
+                .and_then(|input| input.file_path.as_ref())
+                .map(|path| path.to_string_lossy().into_owned())
+                .unwrap_or_else(|| "untitled".to_owned());
+            return Some(TooltipHint { label, target_rect: self.text_hit_rect });
         }
         None
     }
@@ -438,10 +569,20 @@ impl Widget for TitleBarWidget {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::core::measure::NoopMeasure;
+    use crate::core::measure::{NoopMeasure, TextMeasure};
     use crate::core::paint::{DrawCmd, DrawList};
     use crate::core::widget::{KeyCode, Modifiers, MouseButton};
     use crate::theme::Theme;
+
+    struct EstimatedMeasure;
+
+    impl TextMeasure for EstimatedMeasure {
+        fn measure(&mut self, text: &str, font_size: f32) -> f32 {
+            text.chars()
+                .map(|character| crate::core::text_util::char_width(character, font_size))
+                .sum()
+        }
+    }
 
     fn test_theme() -> Theme {
         let mut t = crate::theme::test_theme();
@@ -474,6 +615,207 @@ mod tests {
             LayoutCtx { ui_measure: None, measure: &mut measure, theme: &theme, dpi: 1.0 };
         widget.set_rect(Rect::new(0.0, 0.0, 1200.0, 36.0), &mut layout_ctx);
         widget
+    }
+
+    fn laid_out_title_bar_at(
+        input: TitleBarInput,
+        width: f32,
+        height: f32,
+        dpi: f32,
+        theme: &Theme,
+    ) -> TitleBarWidget {
+        let mut widget = TitleBarWidget::new();
+        widget.set_input(input);
+        let mut measure = EstimatedMeasure;
+        let mut layout_ctx = LayoutCtx { ui_measure: None, measure: &mut measure, theme, dpi };
+        widget.set_rect(Rect::new(0.0, 0.0, width, height), &mut layout_ctx);
+        widget
+    }
+
+    fn paint_title_bar(widget: &TitleBarWidget, theme: &Theme, dpi: f32) -> DrawList {
+        let mut draw_list = DrawList::new();
+        let mut shaper = shaping::Shaper::new().expect("测试环境必须能创建文字塑形器");
+        let mut paint_ctx = PaintCtx {
+            global_alpha: 1.0,
+            list: &mut draw_list,
+            theme,
+            dpi,
+            offset: (0.0, 0.0),
+            shaper: Some(&mut shaper),
+        };
+        widget.paint(&mut paint_ctx);
+        draw_list
+    }
+
+    #[test]
+    fn narrow_title_bar_clips_long_chinese_name_before_actions_and_keeps_full_tooltip() {
+        let full_path = PathBuf::from(
+            "/用户/项目/包含很多层级的资料目录/这是一份非常长的中文文件名用于验证标题栏裁剪.mmap",
+        );
+        let theme = test_theme();
+        let widget = laid_out_title_bar_at(
+            TitleBarInput {
+                file_path: Some(full_path.clone()),
+                toc_enabled: true,
+                mindmap_style: Some(MindmapStyleButtonInput { panel_visible: false }),
+                ..test_title_bar_input()
+            },
+            220.0,
+            36.0,
+            1.0,
+            &theme,
+        );
+
+        let draw_list = paint_title_bar(&widget, &theme, 1.0);
+        let clip_rect = draw_list
+            .cmds
+            .iter()
+            .find_map(|command| match command {
+                DrawCmd::PushClip(rect) => Some(*rect),
+                _ => None,
+            })
+            .expect("标题文字应限制在裁剪区域内");
+        let displayed_name = draw_list
+            .cmds
+            .iter()
+            .find_map(|command| match command {
+                DrawCmd::TextLayout { layout, .. } => Some(layout.text.as_str()),
+                _ => None,
+            })
+            .expect("窄标题栏仍应显示可辨认的文件名");
+
+        assert!(displayed_name.contains('…'), "长文件名应省略：{displayed_name}");
+        assert!(clip_rect.right() <= widget.toc_rect.x);
+        let tooltip = widget
+            .tooltip_at(clip_rect.x + 1.0, clip_rect.y + clip_rect.h * 0.5)
+            .expect("标题文字区域应提供完整路径 tooltip");
+        assert_eq!(tooltip.label, full_path.to_string_lossy());
+    }
+
+    #[test]
+    fn title_and_path_use_shared_text_tokens_sizes_and_vertical_centering() {
+        let theme = test_theme();
+        let widget = laid_out_title_bar_at(
+            TitleBarInput {
+                file_path: Some(PathBuf::from(
+                    "/用户/项目/包含很多层级的资料目录/另一层很长的目录/归档资料/设计稿/历史版本/notes.md",
+                )),
+                ..test_title_bar_input()
+            },
+            420.0,
+            36.0,
+            1.0,
+            &theme,
+        );
+
+        let draw_list = paint_title_bar(&widget, &theme, 1.0);
+        let text_commands: Vec<_> = draw_list
+            .cmds
+            .iter()
+            .filter_map(|command| match command {
+                DrawCmd::TextLayout { layout, y_baseline, color, .. } => {
+                    Some((layout.as_ref(), *y_baseline, *color))
+                }
+                _ => None,
+            })
+            .collect();
+        assert_eq!(text_commands.len(), 2, "文件名和路径都应有足够空间显示");
+
+        let application = theme.application_theme();
+        let (name_layout, name_baseline, name_color) = text_commands[0];
+        assert_eq!(name_layout.font_size, 13.0);
+        assert_eq!(name_color, application.text_primary);
+        assert!((name_baseline - (18.0 + 13.0 * 0.35)).abs() < 0.01);
+
+        let (path_layout, path_baseline, path_color) = text_commands[1];
+        assert_eq!(path_layout.font_size, 11.0);
+        assert_eq!(path_color, application.text_secondary);
+        assert_eq!(path_color[3], application.text_secondary[3]);
+        assert!(path_layout.text.contains('…'), "长路径应保留省略提示");
+        assert!((path_baseline - (18.0 + 11.0 * 0.35)).abs() < 0.01);
+    }
+
+    #[test]
+    fn narrow_action_geometry_and_hover_tokens_are_safe_across_themes_and_dpi() {
+        let themes = [
+            Theme::from_definition(&crate::theme::ThemeDefinition::default_light()),
+            Theme::from_definition(&crate::theme::ThemeDefinition::default_dark()),
+        ];
+
+        for theme in &themes {
+            for dpi in [1.0, 2.0] {
+                let width = 72.0 * dpi;
+                let height = 36.0 * dpi;
+                let mut widget = laid_out_title_bar_at(
+                    TitleBarInput {
+                        toc_enabled: true,
+                        mindmap_style: Some(MindmapStyleButtonInput { panel_visible: false }),
+                        ..test_title_bar_input()
+                    },
+                    width,
+                    height,
+                    dpi,
+                    theme,
+                );
+
+                for rect in [widget.toggle_rect, widget.mindmap_style_rect, widget.toc_rect] {
+                    assert!(rect.x >= 0.0 && rect.y >= 0.0 && rect.w >= 0.0 && rect.h >= 0.0);
+                    assert!(rect.right() <= width && rect.bottom() <= height);
+                }
+
+                let toggle = widget.toggle_rect;
+                let mut event_ctx = EventCtx::new(theme, dpi);
+                widget.on_event(
+                    &Event::MouseMove {
+                        px: toggle.x + toggle.w * 0.5,
+                        py: toggle.y + toggle.h * 0.5,
+                    },
+                    &mut event_ctx,
+                );
+                let draw_list = paint_title_bar(&widget, theme, dpi);
+                let (hover_color, hover_radius) = draw_list
+                    .cmds
+                    .iter()
+                    .find_map(|command| match command {
+                        DrawCmd::FillRect { rect, color, radius } if *rect == toggle => {
+                            Some((*color, *radius))
+                        }
+                        _ => None,
+                    })
+                    .expect("可见操作按钮应绘制 hover 背景");
+                assert_eq!(hover_color, theme.application_theme().hover_surface);
+                assert_eq!(
+                    hover_radius,
+                    theme.control_metrics().compact_corner_radius_logical * dpi
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn action_buttons_do_not_enter_reserved_hamburger_area() {
+        let theme = test_theme();
+        let reserved_hamburger_width = 68.0;
+        let widget = laid_out_title_bar_at(
+            TitleBarInput {
+                sidebar_left: reserved_hamburger_width,
+                titlebar_x: 0.0,
+                toc_enabled: true,
+                mindmap_style: Some(MindmapStyleButtonInput { panel_visible: false }),
+                ..test_title_bar_input()
+            },
+            120.0,
+            36.0,
+            1.0,
+            &theme,
+        );
+
+        for rect in [widget.toggle_rect, widget.mindmap_style_rect, widget.toc_rect] {
+            assert!(
+                rect == Rect::ZERO || rect.x >= reserved_hamburger_width,
+                "按钮不得进入汉堡保留区：{rect:?}"
+            );
+        }
     }
 
     #[test]
@@ -595,11 +937,13 @@ mod tests {
         };
         w.paint(&mut pc);
 
-        // FillRect (bg) + Text (filename) + Text (path)
-        assert_eq!(dl.cmds.len(), 3);
+        // FillRect (bg) + clip + Text (filename) + Text (path) + unclip
+        assert_eq!(dl.cmds.len(), 5);
         assert!(matches!(dl.cmds[0], DrawCmd::FillRect { .. }));
-        assert!(matches!(dl.cmds[1], DrawCmd::TextLayout { .. }));
+        assert!(matches!(dl.cmds[1], DrawCmd::PushClip(..)));
         assert!(matches!(dl.cmds[2], DrawCmd::TextLayout { .. }));
+        assert!(matches!(dl.cmds[3], DrawCmd::TextLayout { .. }));
+        assert!(matches!(dl.cmds[4], DrawCmd::PopClip));
     }
 
     #[test]
@@ -633,8 +977,8 @@ mod tests {
         };
         w.paint(&mut pc);
 
-        // FillRect (bg) + Text ("untitled") — no path, no divider
-        assert_eq!(dl.cmds.len(), 2);
+        // FillRect (bg) + clip + Text ("untitled") + unclip — no path
+        assert_eq!(dl.cmds.len(), 4);
     }
 
     #[test]
@@ -1333,5 +1677,17 @@ mod tests {
 
         let hint = w.tooltip_at(1180.0, 18.0);
         assert!(hint.is_none());
+    }
+    #[test]
+    fn toc_button_exposes_its_own_tooltip() {
+        let mut input = test_title_bar_input();
+        input.toc_enabled = true;
+        let widget = laid_out_title_bar(input);
+        let rect = widget.toc_rect;
+        let tooltip = widget
+            .tooltip_at(rect.x + rect.w * 0.5, rect.y + rect.h * 0.5)
+            .expect("TOC button should describe its own action");
+        assert_eq!(tooltip.label, "显示目录 ⌘⇧T");
+        assert_eq!(tooltip.target_rect, rect);
     }
 }

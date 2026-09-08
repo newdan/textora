@@ -133,8 +133,46 @@ impl App {
         action: crate::native_menu::MenuAction,
         event_loop: &winit::event_loop::ActiveEventLoop,
     ) {
+        if let Some(routed_action) = self.route_search_menu_action(action) {
+            self.dispatch(routed_action, event_loop);
+            return;
+        }
         let commands = crate::menu_handler::dispatch_menu_action(action);
         self.dispatch(AppAction::ExecuteAppCommands(commands), event_loop);
+    }
+
+    fn route_search_menu_action(
+        &mut self,
+        action: crate::native_menu::MenuAction,
+    ) -> Option<AppAction> {
+        use crate::native_menu::MenuAction;
+        use ui::core::{KeyCode, Modifiers, WidgetAction};
+
+        if !self.ui_shell.search_bar_has_keyboard_focus() {
+            return None;
+        }
+        let key = match action {
+            MenuAction::SelectAll => 'a',
+            MenuAction::Copy => 'c',
+            MenuAction::Cut => 'x',
+            MenuAction::Paste | MenuAction::PastePlainText => 'v',
+            MenuAction::Undo | MenuAction::Redo => 'z',
+            _ => return None,
+        };
+        let modifiers =
+            Modifiers { cmd: true, shift: action == MenuAction::Redo, ..Modifiers::NONE };
+        let widget_action = self.ui_shell.forward_key(
+            KeyCode::Char(key),
+            modifiers,
+            &self.current_theme,
+            self.ui_metrics().dpi,
+        );
+        Some(match widget_action {
+            Some(WidgetAction::SearchBar(search_action)) => {
+                AppAction::SearchBarAction(search_action)
+            }
+            _ => AppAction::RequestRedraw,
+        })
     }
 
     /// Top-level single-apply router: `reduce_action` → `apply_effect` → IME.
@@ -689,6 +727,7 @@ pub(crate) mod canvas_drag_test_support {
 
     use std::cell::RefCell;
     use std::rc::Rc;
+
     use ui::plugin::{
         CanvasDragRequest, CanvasDragResponse, EditHitTarget, PluginMessage, PluginQuery,
         PluginResponse, ViewPlugin,
@@ -807,6 +846,64 @@ mod tests {
 
     use std::cell::{Cell, RefCell};
     use std::rc::Rc;
+
+    fn app_with_focused_search(replace: bool) -> App {
+        let mut app = App::new(None);
+        let document = DocumentView::new(vec!["正文保持原样".to_owned()], 80, 10.0);
+        app.push_entry_for_test(document, Box::new(WysiwygBoundsPlugin));
+        app.switch_workspace_for_test(0);
+        app.active_tab_session_mut()
+            .expect("test document must be active")
+            .search_state_mut()
+            .panel_visible = true;
+        app.ui_shell.set_search_input(ui::search_bar::SearchBarSnapshot {
+            visible: true,
+            query: "旧查询".to_owned(),
+            replace_query: "旧替换".to_owned(),
+            replace_mode: replace,
+            focus_replace: replace,
+            ..Default::default()
+        });
+        let inputs = app.build_shell_inputs();
+        app.ui_shell.update_frame(
+            ui::core::Screen::new(800.0, 600.0),
+            &app.current_theme,
+            &mut ui::core::NoopMeasure,
+            &inputs,
+        );
+        assert!(app.ui_shell.search_bar_has_keyboard_focus());
+        app
+    }
+
+    #[test]
+    fn native_menu_select_all_targets_focused_search_field() {
+        for replace in [false, true] {
+            let mut app = app_with_focused_search(replace);
+            assert!(
+                app.route_search_menu_action(crate::native_menu::MenuAction::SelectAll).is_some(),
+                "native selection must be consumed by the focused search field"
+            );
+            let action = app.ui_shell.forward_ime(
+                ui::core::Event::ImeCommit("新内容".to_owned()),
+                &app.current_theme,
+                app.ui_metrics().dpi,
+            );
+            let expected = if replace {
+                ui::search_bar::SearchBarAction::ReplaceQueryChanged("新内容".to_owned())
+            } else {
+                ui::search_bar::SearchBarAction::QueryChanged("新内容".to_owned())
+            };
+            assert_eq!(action, Some(ui::core::WidgetAction::SearchBar(expected)));
+            assert_eq!(document_texts(&app), ["正文保持原样"]);
+        }
+    }
+
+    #[test]
+    fn native_edit_menu_falls_through_when_editor_has_focus() {
+        let mut app = app_with_focused_search(false);
+        app.ui_shell.focus_editor();
+        assert!(app.route_search_menu_action(crate::native_menu::MenuAction::Paste).is_none());
+    }
 
     fn has_direct_sync_controller_field_access(compact_source: &str) -> bool {
         let sync_controller_field = ["self.sync_", "controller"].concat();

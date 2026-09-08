@@ -195,13 +195,12 @@ impl TabBarState {
         }
 
         let tab_h = tab_bar_height(dpi);
-        let bar_bg = darken_color(theme.palette.bg_surface, 0.85);
+        let bar_bg = theme.application_theme().navigation_surface;
         let hovered = self.hovered_index;
-        let font_size = 15.0 * dpi;
+        let font_size = crate::constants::TITLE_FONT_SIZE * dpi;
         let baseline = tab_h * 0.5 + font_size * 0.25;
         let active_fg = theme.editor.foreground;
-        let inactive_fg =
-            [active_fg[0] * 0.48, active_fg[1] * 0.48, active_fg[2] * 0.48, active_fg[3]];
+        let inactive_fg = theme.application_theme().text_secondary;
 
         // Full-width bar background
         if let Some(first) = layout.tabs.first() {
@@ -212,10 +211,7 @@ impl TabBarState {
         // Right button area background (darker to distinguish from tab area)
         let btn_area_x = layout.dropdown_rect_px.x - 4.0 * dpi;
         let btn_area_w = layout.new_tab_rect_px.right() + 6.0 * dpi - btn_area_x;
-        dl.fill(
-            Rect::new(btn_area_x, 0.0, btn_area_w, tab_h),
-            darken_color(theme.palette.bg_surface, 0.75),
-        );
+        dl.fill(Rect::new(btn_area_x, 0.0, btn_area_w, tab_h), bar_bg);
 
         // ── Fixed areas: arrows, dropdown, new tab button (outside clip) ──
 
@@ -283,7 +279,7 @@ impl TabBarState {
                 let pinned_tabs: Vec<_> = layout.tabs.iter().filter(|t| t.pinned).collect();
                 for (i, entry) in pinned_tabs.iter().enumerate() {
                     let is_active = entry.index == active_index;
-                    draw_tab_bg(dl, entry, is_active, theme, dpi);
+                    draw_tab_bg(dl, entry, is_active, hovered == Some(entry.index), theme, dpi);
                     draw_tab_content(
                         dl,
                         entry,
@@ -307,7 +303,7 @@ impl TabBarState {
                             let sep_y = entry.rect_px.y + (entry.rect_px.h - sep_h) * 0.5;
                             dl.fill(
                                 Rect::new(sep_x, sep_y, sep_w, sep_h),
-                                darken_color(theme.editor.gutter_bg, 0.7),
+                                theme.application_theme().divider,
                             );
                         }
                     }
@@ -333,7 +329,7 @@ impl TabBarState {
                 let non_pinned: Vec<_> = layout.tabs.iter().filter(|t| !t.pinned).collect();
                 for (i, entry) in non_pinned.iter().enumerate() {
                     let is_active = entry.index == active_index;
-                    draw_tab_bg(dl, entry, is_active, theme, dpi);
+                    draw_tab_bg(dl, entry, is_active, hovered == Some(entry.index), theme, dpi);
                     draw_tab_content(
                         dl,
                         entry,
@@ -357,7 +353,7 @@ impl TabBarState {
                             let sep_y = entry.rect_px.y + (entry.rect_px.h - sep_h) * 0.5;
                             dl.fill(
                                 Rect::new(sep_x, sep_y, sep_w, sep_h),
-                                darken_color(theme.editor.gutter_bg, 0.7),
+                                theme.application_theme().divider,
                             );
                         }
                     }
@@ -367,40 +363,32 @@ impl TabBarState {
     }
 }
 
-/// Draw tab background (called inside clip block).
+/// Draw a tab surface using the same semantic colors as the sidebar.
 fn draw_tab_bg(
     dl: &mut DrawList,
     entry: &super::layout::TabEntry,
     is_active: bool,
+    is_hovered: bool,
     theme: &Theme,
     dpi: f32,
 ) {
-    if is_active {
-        // Active tab: floating rounded pill/card look
-        let bg = theme.editor.background;
-        let mut r = entry.rect_px;
-        // Make it float slightly if Claude theme (or just generally)
-        let pad_v = 4.0 * dpi;
-        let pad_h = 2.0 * dpi;
-        r.y += pad_v;
-        r.h -= pad_v * 1.5;
-        r.x += pad_h;
-        r.w -= pad_h * 2.0;
-
-        // Shadow/border
-        let shadow_rect = Rect::new(r.x, r.y + 1.0, r.w, r.h);
-        dl.fill_rounded(shadow_rect, [0.0, 0.0, 0.0, 0.04], 6.0 * dpi);
-        dl.fill_rounded(r, bg, 6.0 * dpi);
-
-        // No accent rect needed for rounded card style, but we can leave a subtle one if desired.
-    } else {
-        let bg = if entry.preview {
-            darken_color(theme.editor.gutter_bg, 0.87)
-        } else {
-            darken_color(theme.editor.gutter_bg, 0.9)
-        };
-        dl.fill(entry.rect_px, bg);
+    if !is_active && !is_hovered {
+        return;
     }
+    let controls = theme.control_metrics();
+    let inset = controls.compact_spacing_logical * dpi;
+    let rect = Rect::new(
+        entry.rect_px.x + inset,
+        entry.rect_px.y + inset,
+        (entry.rect_px.w - inset * 2.0).max(0.0),
+        (entry.rect_px.h - inset * 2.0).max(0.0),
+    );
+    let background = if is_active {
+        theme.application_theme().editor_surface
+    } else {
+        theme.application_theme().navigation_hover_surface
+    };
+    dl.fill_rounded(rect, background, controls.corner_radius_logical * dpi);
 }
 
 /// Draw tab content: pin indicator, close button, separators, dirty mark, text label.
@@ -429,26 +417,21 @@ fn draw_tab_content(
         let bar_h = entry.rect_px.h * 0.45;
         let bar_x = entry.rect_px.x + 6.0 * dpi;
         let bar_y = entry.rect_px.y + (entry.rect_px.h - bar_h) * 0.5;
-        dl.fill(Rect::new(bar_x, bar_y, bar_w, bar_h), [0.4, 0.55, 0.8, 0.8]);
+        dl.fill(Rect::new(bar_x, bar_y, bar_w, bar_h), theme.application_theme().accent);
     }
 
-    // Close button "x" on hover (non-pinned only)
+    // Close action keeps the same contrast as other navigation controls.
     if !entry.pinned && hovered == Some(entry.index) {
-        let cb = entry.close_rect_px;
-        let cx = cb.x + cb.w * 0.5;
-        let cy = cb.y + cb.h * 0.5;
-        let x_font_size = 10.0 * dpi;
-        let x_baseline = cy + x_font_size * 0.3;
-        if let Some(ref mut shaper) = shaper {
-            dl.text_shaped(
-                cx - x_font_size * 0.3,
-                x_baseline,
-                x_font_size,
-                [0.25, 0.25, 0.28, 0.95],
-                "x",
-                shaper,
-            );
-        };
+        let close_rect = entry.close_rect_px;
+        let icon_size = crate::constants::CLOSE_BTN_SIZE * dpi;
+        crate::widgets::icon::draw_icon(
+            dl,
+            "x",
+            close_rect.x + (close_rect.w - icon_size) * 0.5,
+            close_rect.y + (close_rect.h - icon_size) * 0.5,
+            icon_size,
+            theme.application_theme().text_primary,
+        );
     }
 
     // Dirty indicator
@@ -474,9 +457,4 @@ fn draw_tab_content(
     if let Some(ref mut shaper) = shaper {
         dl.text_shaped(x, entry.rect_px.y + baseline, font_size, fg, &entry.title, shaper);
     };
-}
-
-/// Darken a color by a factor (0..1).
-fn darken_color(c: [f32; 4], factor: f32) -> [f32; 4] {
-    [c[0] * factor, c[1] * factor, c[2] * factor, c[3]]
 }

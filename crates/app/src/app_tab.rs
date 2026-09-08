@@ -593,7 +593,7 @@ impl App {
         if let Some(w) = self.editor_runtime.window() {
             if let Some(file_path) = self.active_editor_file_path() {
                 let title = format!(
-                    "{} — edit+",
+                    "{} — textora",
                     file_path
                         .file_name()
                         .map(std::ffi::OsStr::to_string_lossy)
@@ -601,7 +601,7 @@ impl App {
                 );
                 w.set_title(&title);
             } else {
-                w.set_title("edit+");
+                w.set_title("textora");
             }
         }
     }

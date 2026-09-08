@@ -1647,17 +1647,25 @@ mod tests {
 
         init_sidebar_widgets(&mut app);
 
-        // Click on the second list item (b.rs).
-        // list_clip starts at y=137.0, row_h=28, so item 1 is at y=165.0..193.0
-        // Click at y=180 (within item 1 range)
-        let pressed_actions =
-            handle_mouse_input_left(&mut app, ElementState::Pressed, 110.0, 180.0);
+        // The compact action row places the second file at y=148..180 at 1x DPI.
+        let second_row_center = (110.0, 164.0);
+        let pressed_actions = handle_mouse_input_left(
+            &mut app,
+            ElementState::Pressed,
+            second_row_center.0,
+            second_row_center.1,
+        );
         assert!(
             pressed_actions.iter().any(|action| matches!(action, AppAction::SwitchTab(_))),
             "Sidebar document selection must switch on mouse press, matching the tab bar"
         );
 
-        let actions = handle_mouse_input_left(&mut app, ElementState::Released, 110.0, 180.0);
+        let actions = handle_mouse_input_left(
+            &mut app,
+            ElementState::Released,
+            second_row_center.0,
+            second_row_center.1,
+        );
 
         assert!(
             !actions.iter().any(|action| matches!(action, AppAction::SwitchTab(_))),

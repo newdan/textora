@@ -490,7 +490,7 @@ impl App {
     ) -> Result<TabId, String> {
         let ProductPreparedTab { prepared, suggested_file_name } =
             self.prepare_editor_file(path, dimensions)?;
-        let title = format!("{} — edit+", path.display());
+        let title = format!("{} — textora", path.display());
         if let Some(window) = self.editor_runtime.window() {
             window.set_title(&title);
         }
