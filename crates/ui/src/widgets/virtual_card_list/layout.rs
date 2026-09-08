@@ -110,11 +110,7 @@ impl VirtualCardListLayout {
                 * CARD_TEXT_SECTION_GAP_LOGICAL
                 * self.dpi;
         let metadata_y = card_rect.bottom() - vertical_padding - metadata_font_size;
-        let text_right = if placement.closable {
-            close_rect.x - CARD_TITLE_CLOSE_GAP_LOGICAL * self.dpi
-        } else {
-            card_rect.right() - horizontal_padding
-        };
+        let title_width = card_title_width_px(card_rect.w, placement.closable, self.dpi);
         let secondary_text_right = card_rect.right() - horizontal_padding;
         let secondary_text_x = title_x;
         let metadata_width = (secondary_text_right - secondary_text_x) * 0.42;
@@ -124,7 +120,7 @@ impl VirtualCardListLayout {
         CardGeometry {
             card_rect,
             icon_rect,
-            title_rect: Rect::new(title_x, title_y, (text_right - title_x).max(0.0), title_height),
+            title_rect: Rect::new(title_x, title_y, title_width, title_height),
             title_baseline: title_y + title_font_size * 0.8,
             close_rect,
             excerpt_rect: Rect::new(
@@ -181,13 +177,7 @@ pub(super) fn build_virtual_card_layout(
 }
 
 fn build_card_placements(cards: &[CardInput], card_width_px: f32, dpi: f32) -> Vec<CardPlacement> {
-    let horizontal_padding = CARD_HORIZONTAL_PADDING_LOGICAL * dpi;
-    let title_width_px = (card_width_px
-        - horizontal_padding * 2.0
-        - CARD_ICON_SLOT_SIZE_LOGICAL * dpi
-        - CARD_ICON_GAP_LOGICAL * dpi)
-        .max(0.0);
-    let secondary_text_width_px = title_width_px;
+    let secondary_text_width_px = card_title_width_px(card_width_px, false, dpi);
     let card_gap_px = CARD_VERTICAL_GAP_LOGICAL * dpi;
     let mut next_card_top_px = 0.0;
 
@@ -196,7 +186,7 @@ fn build_card_placements(cards: &[CardInput], card_width_px: f32, dpi: f32) -> V
         .map(|card| {
             let title_line_count = card_text_lines(
                 &card.title,
-                title_width_px,
+                card_title_width_px(card_width_px, card.closable, dpi),
                 CARD_TITLE_FONT_SIZE_LOGICAL * dpi,
                 CARD_TITLE_MAX_LINES,
             )
@@ -221,6 +211,16 @@ fn build_card_placements(cards: &[CardInput], card_width_px: f32, dpi: f32) -> V
             placement
         })
         .collect()
+}
+
+fn card_title_width_px(card_width_px: f32, closable: bool, dpi: f32) -> f32 {
+    let close_slot_width =
+        if closable { CARD_CLOSE_BUTTON_SIZE_LOGICAL + CARD_TITLE_CLOSE_GAP_LOGICAL } else { 0.0 };
+    let reserved_width = CARD_HORIZONTAL_PADDING_LOGICAL * 2.0
+        + CARD_ICON_SLOT_SIZE_LOGICAL
+        + CARD_ICON_GAP_LOGICAL
+        + close_slot_width;
+    (card_width_px - reserved_width * dpi).max(0.0)
 }
 
 fn card_height_px(title_line_count: usize, excerpt_line_count: usize, dpi: f32) -> f32 {
@@ -263,6 +263,42 @@ mod tests {
         assert_eq!(geometry.title_rect.x, expected_text_x);
         assert_eq!(geometry.excerpt_rect.x, expected_text_x);
         assert_eq!(geometry.metadata_rect.x, expected_text_x);
+    }
+
+    #[test]
+    fn closable_card_reserves_height_for_wrapped_filename() {
+        const CARD_WIDTH_LOGICAL: f32 = 250.0;
+        const VIEWPORT_HEIGHT_LOGICAL: f32 = 500.0;
+        let title = "黑暗血时代(1-500章).txt";
+
+        for dpi in [1.0, 1.5, 2.0] {
+            for closable in [false, true] {
+                let mut input = card("/Users/dan/Downloads/黑暗血时代(1-500章).txt");
+                input.title = title.to_owned();
+                input.closable = closable;
+                let viewport =
+                    Rect::new(0.0, 0.0, CARD_WIDTH_LOGICAL * dpi, VIEWPORT_HEIGHT_LOGICAL * dpi);
+                let layout = build_virtual_card_layout(&[input], viewport, 0.0, dpi);
+                let geometry = layout.card_geometry(0);
+                let title_lines = card_text_lines(
+                    title,
+                    geometry.title_rect.w,
+                    CARD_TITLE_FONT_SIZE_LOGICAL * dpi,
+                    CARD_TITLE_MAX_LINES,
+                );
+                let expected_line_count = if closable { 2 } else { 1 };
+                assert_eq!(title_lines.len(), expected_line_count);
+                let painted_title_height =
+                    title_lines.len() as f32 * CARD_TITLE_LINE_HEIGHT_LOGICAL * dpi;
+
+                assert_eq!(geometry.title_rect.h, painted_title_height);
+                assert!(
+                    geometry.title_rect.y + painted_title_height < geometry.excerpt_rect.y,
+                    "wrapped filename must remain above its path at DPI {dpi}"
+                );
+                assert!(geometry.excerpt_rect.bottom() < geometry.metadata_rect.y);
+            }
+        }
     }
 
     #[test]
