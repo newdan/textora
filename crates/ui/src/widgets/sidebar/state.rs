@@ -13,6 +13,12 @@ use crate::widgets::icon::draw_icon;
 use crate::widgets::popup_menu::{PopupMenu, PopupMenuAction as PMA, PopupMenuItem};
 use crate::widgets::split_button::SPLIT_BUTTON_MENU_WIDTH_LOGICAL;
 
+const ACTION_ROW_INSET_LOGICAL: f32 = 12.0;
+const ACTION_ROW_GAP_LOGICAL: f32 = 8.0;
+const NEW_DOCUMENT_MIN_WIDTH_LOGICAL: f32 = 96.0;
+const OPEN_BUTTON_WIDTH_LOGICAL: f32 = 72.0;
+const COMPACT_OPEN_BUTTON_WIDTH_LOGICAL: f32 = 32.0;
+
 #[derive(Default)]
 pub struct SidebarState {
     visibility: Visibility,
@@ -340,9 +346,24 @@ impl SidebarState {
         let menu_y = 8.0 * dpi;
         let menu_btn_rect = Rect::new(menu_x, menu_y, 16.0 * dpi, 16.0 * dpi);
 
-        // New document button
+        // New and open actions share one row; narrow sidebars use an icon-only open button.
         let new_y = top + header_h + pad;
-        let new_row_rect = Rect::new(12.0 * dpi, new_y, w - 24.0 * dpi, new_h);
+        let action_inset = ACTION_ROW_INSET_LOGICAL * dpi;
+        let action_gap = ACTION_ROW_GAP_LOGICAL * dpi;
+        let action_width = (w - action_inset * 2.0).max(0.0);
+        let full_action_width =
+            (NEW_DOCUMENT_MIN_WIDTH_LOGICAL + OPEN_BUTTON_WIDTH_LOGICAL) * dpi + action_gap;
+        let open_width = if action_width >= full_action_width {
+            OPEN_BUTTON_WIDTH_LOGICAL * dpi
+        } else {
+            COMPACT_OPEN_BUTTON_WIDTH_LOGICAL * dpi
+        };
+        let new_row_rect = Rect::new(
+            action_inset,
+            new_y,
+            (action_width - action_gap - open_width).max(0.0),
+            new_h,
+        );
         let new_menu_width = SPLIT_BUTTON_MENU_WIDTH_LOGICAL * dpi;
         let new_btn_rect = Rect::new(
             new_row_rect.x,
@@ -357,12 +378,10 @@ impl SidebarState {
             new_row_rect.h,
         );
 
-        // Open file button (below new button)
-        let open_y = new_y + new_h + pad * 0.5;
-        let open_btn_rect = Rect::new(12.0 * dpi, open_y, w - 24.0 * dpi, new_h);
+        let open_btn_rect = Rect::new(new_row_rect.right() + action_gap, new_y, open_width, new_h);
 
         // Files section header
-        let files_header_y = open_y + new_h + pad;
+        let files_header_y = new_y + new_h + pad;
         let files_header_h = 24.0 * dpi;
         let files_header_rect =
             Rect::new(12.0 * dpi, files_header_y, w - 24.0 * dpi, files_header_h);
@@ -695,16 +714,22 @@ impl SidebarState {
         {
             let g = self.action_btn_geom(ctx, layout.open_btn_rect, SidebarHoverButton::OpenFile);
             let icon_sz = 14.0 * g.dpi;
+            let show_label = layout.open_btn_rect.w >= OPEN_BUTTON_WIDTH_LOGICAL * g.dpi;
+            let icon_center_x = if show_label {
+                g.cx
+            } else {
+                layout.open_btn_rect.x + layout.open_btn_rect.w * 0.5
+            };
             draw_icon(
                 ctx.list,
                 "folder-open",
-                g.cx - icon_sz * 0.5,
+                icon_center_x - icon_sz * 0.5,
                 g.cy - icon_sz * 0.5,
                 icon_sz,
                 g.fg,
             );
             let font_size = ctx.theme.control_metrics().font_size_logical * g.dpi;
-            if let Some(ref mut shaper) = ctx.shaper {
+            if show_label && let Some(ref mut shaper) = ctx.shaper {
                 ctx.list.text_shaped(
                     g.cx + g.icon_half + 6.0 * g.dpi,
                     g.cy + font_size * 0.35,

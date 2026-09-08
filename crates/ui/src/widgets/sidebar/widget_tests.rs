@@ -98,6 +98,27 @@ mod tests {
     }
 
     #[test]
+    fn sidebar_slide_animation_preserves_action_row_geometry() {
+        let theme = test_theme();
+        let mut widget = new_document_widget();
+        layout_new_document_widget(&mut widget, &theme);
+        let stable = widget.current_layout().expect("sidebar layout must exist").clone();
+        for visibility in [Visibility::HoverPeek, Visibility::HoverPeekFadingOut] {
+            let mut persistent = widget.steal_persistent();
+            persistent.visibility = visibility;
+            let animation_start = std::time::Instant::now();
+            persistent.hover_peek_start = Some(animation_start);
+            persistent.hover_peek_leave_start = Some(animation_start);
+            widget.inject_persistent(&persistent);
+            layout_new_document_widget(&mut widget, &theme);
+            let animated = widget.current_layout().expect("animated sidebar layout must exist");
+            assert_eq!(animated.new_btn_rect, stable.new_btn_rect);
+            assert_eq!(animated.new_menu_btn_rect, stable.new_menu_btn_rect);
+            assert_eq!(animated.open_btn_rect, stable.open_btn_rect);
+        }
+    }
+
+    #[test]
     fn sidebar_button_font_scales_consistently() {
         let theme = test_theme();
         let mut shaper = shaping::Shaper::new().expect("sidebar typography test requires fonts");
@@ -106,6 +127,7 @@ mod tests {
             let mut input = sidebar_widget_input(Vec::new(), None);
             input.metrics = metrics(dpi);
             widget.set_input(input);
+            widget.set_sidebar_width(220.0 * dpi);
             let mut measure = NoopMeasure;
             let mut layout_context =
                 LayoutCtx { ui_measure: None, measure: &mut measure, theme: &theme, dpi };
@@ -806,9 +828,8 @@ mod tests {
         let mut lc = LayoutCtx { ui_measure: None, measure: &mut m, theme: &t, dpi: 1.0 };
         w.set_rect(Rect::new(0.0, 0.0, 220.0, 800.0), &mut lc);
 
-        let dpi = 1.0;
-        let new_y = 34.0 * dpi;
-        let result = w.hit_test_px(110.0, new_y + 10.0);
+        let main = w.current_layout().expect("sidebar layout must exist").new_btn_rect;
+        let result = w.hit_test_px(main.x + main.w * 0.5, main.y + main.h * 0.5);
         assert!(result.is_some());
         assert_eq!(result.unwrap(), SidebarAction::NewDocument(NewDocumentKind::Markdown));
     }
@@ -1078,7 +1099,6 @@ mod tests {
         let mut lc = LayoutCtx { ui_measure: None, measure: &mut NoopMeasure, theme: &t, dpi: 1.0 };
         w.set_rect(Rect::new(0.0, 0.0, 220.0, 600.0), &mut lc);
 
-        // new_btn_rect center at dpi=1.0: (6 + 208/2=110, 34+14=48)
         let mut ec = EventCtx::new(&t, 1.0);
         let main = w.current_layout().expect("layout must exist").new_btn_rect;
         let action = click_new_document_region(&mut w, main, &mut ec);

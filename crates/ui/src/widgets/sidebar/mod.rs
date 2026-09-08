@@ -338,22 +338,8 @@ impl Widget for SidebarWidget {
             traffic_light_inset: self.traffic_light_inset,
             content_top: 0.0,
         };
-        // E.3: 动画期间缩放 sidebar 宽度
-        let original_width = self.cfg.width;
-        let vis = self.state.visibility();
-        if let types::Visibility::HoverPeek = vis {
-            if let Some(start) = self.state.hover_peek_start() {
-                let progress = (start.elapsed().as_secs_f32() / 0.15).clamp(0.0, 1.0);
-                self.cfg.width = original_width * progress;
-            }
-        } else if let types::Visibility::HoverPeekFadingOut = vis
-            && let Some(leave_start) = self.state.hover_peek_leave_start()
-        {
-            let progress = 1.0 - (leave_start.elapsed().as_secs_f32() / 0.15).clamp(0.0, 1.0);
-            self.cfg.width = original_width * progress;
-        }
+        // 动画只改变绘制位置与透明度，保持按钮和列表内容的布局宽度。
         self.state.update_layout(&input, &self.cfg, &self.metrics);
-        self.cfg.width = original_width;
 
         // list 子 widget 的矩形 = list_clip
         let list_rect = self.state.current_layout().map(|l| l.list_clip).unwrap_or(Rect::ZERO);
