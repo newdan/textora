@@ -310,45 +310,44 @@ fn emit_from_instances(
     italic: bool,
 ) -> Vec<render::GlyphVertex> {
     let shear = if italic { ITALIC_SHEAR } else { 0.0 };
-    let mut verts = Vec::with_capacity(instances.len() * 6);
-    for inst in instances {
-        let px = (origin_x + inst.x + inst.bearing_x).round();
-        let py = (baseline_y - inst.bearing_y).round();
-        // Expand clip rect horizontally to account for italic shear
-        let max_shear = (inst.height * shear).abs().ceil();
-        let c_rect = apply_clip(
-            clip_stack,
-            ui::core::Rect::new(px - max_shear, py, inst.width + max_shear * 2.0, inst.height),
-        );
-        if c_rect.w <= 0.0 || c_rect.h <= 0.0 {
-            continue;
+    let screen = Screen::new(screen_w, screen_h);
+    let mut vertices = Vec::with_capacity(instances.len() * 6);
+    for instance in instances {
+        let quad = glyph_instance_quad(instance, origin_x, baseline_y, shear, color, screen);
+        if let Some(clip) = clip_stack.last().copied() {
+            // Clip the transformed geometry so positions and atlas UVs stay aligned.
+            append_clipped_triangles(&mut vertices, &quad, clip, &screen);
+        } else {
+            vertices.extend_from_slice(&quad);
         }
-        let left = c_rect.x / screen_w * 2.0 - 1.0;
-        let top = 1.0 - c_rect.y / screen_h * 2.0;
-        let right = (c_rect.x + c_rect.w) / screen_w * 2.0 - 1.0;
-        let bottom = 1.0 - (c_rect.y + c_rect.h) / screen_h * 2.0;
-        // Italic shear in NDC: x += (baseline_y - y_px) * shear * 2 / screen_w
-        let top_shear = (baseline_y - c_rect.y) * shear / screen_w * 2.0;
-        let bottom_shear = (baseline_y - (c_rect.y + c_rect.h)) * shear / screen_w * 2.0;
-        // Adjust UVs proportionally when glyph is partially clipped
-        let u_range = inst.uv[2] - inst.uv[0];
-        let v_range = inst.uv[3] - inst.uv[1];
-        let ul = inst.uv[0] + u_range * ((c_rect.x - px) / inst.width).max(0.0);
-        let ur = inst.uv[0] + u_range * ((c_rect.x + c_rect.w - px) / inst.width).min(1.0);
-        let ut = inst.uv[1] + v_range * ((c_rect.y - py) / inst.height).max(0.0);
-        let ub = inst.uv[1] + v_range * ((c_rect.y + c_rect.h - py) / inst.height).min(1.0);
-        let sx_tl = left + top_shear;
-        let sx_tr = right + top_shear;
-        let sx_bl = left + bottom_shear;
-        let sx_br = right + bottom_shear;
-        verts.push(render::GlyphVertex { position: [sx_tl, top], tex_coords: [ul, ut], color });
-        verts.push(render::GlyphVertex { position: [sx_tr, top], tex_coords: [ur, ut], color });
-        verts.push(render::GlyphVertex { position: [sx_bl, bottom], tex_coords: [ul, ub], color });
-        verts.push(render::GlyphVertex { position: [sx_tr, top], tex_coords: [ur, ut], color });
-        verts.push(render::GlyphVertex { position: [sx_br, bottom], tex_coords: [ur, ub], color });
-        verts.push(render::GlyphVertex { position: [sx_bl, bottom], tex_coords: [ul, ub], color });
     }
-    verts
+    vertices
+}
+
+fn glyph_instance_quad(
+    instance: &GlyphInstance,
+    origin_x: f32,
+    baseline_y: f32,
+    shear: f32,
+    color: [f32; 4],
+    screen: Screen,
+) -> [GlyphVertex; 6] {
+    let left = (origin_x + instance.x + instance.bearing_x).round();
+    let top = (baseline_y - instance.bearing_y).round();
+    let right = left + instance.width;
+    let bottom = top + instance.height;
+    let vertex = |x, y, u, v| GlyphVertex {
+        // Shear around the baseline without stretching the glyph's horizontal edges.
+        position: screen.px_to_ndc(x + (baseline_y - y) * shear, y),
+        tex_coords: [u, v],
+        color,
+    };
+    let [u_left, v_top, u_right, v_bottom] = instance.uv;
+    let top_left = vertex(left, top, u_left, v_top);
+    let top_right = vertex(right, top, u_right, v_top);
+    let bottom_left = vertex(left, bottom, u_left, v_bottom);
+    let bottom_right = vertex(right, bottom, u_right, v_bottom);
+    [top_left, top_right, bottom_left, top_right, bottom_right, bottom_left]
 }
 
 /// 将当前裁剪栈应用到 rect，返回交集。
@@ -857,6 +856,99 @@ fn push_quad(v: &mut Vec<GlyphVertex>, ndc: [f32; 4], color: [f32; 4]) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn italic_test_glyph() -> GlyphInstance {
+        GlyphInstance {
+            x: 0.0,
+            y: 0.0,
+            bearing_x: 0.0,
+            bearing_y: 16.0,
+            width: 8.0,
+            height: 20.0,
+            uv: [0.2, 0.3, 0.4, 0.7],
+            atlas_page: 0,
+            highlight_kind: 0,
+        }
+    }
+
+    #[test]
+    fn italic_glyph_preserves_width_and_texture_mapping() {
+        let glyph = italic_test_glyph();
+        let screen = Screen::new(100.0, 100.0);
+        let vertices = emit_from_instances(
+            std::slice::from_ref(&glyph),
+            20.0,
+            40.0,
+            screen.w,
+            screen.h,
+            [1.0; 4],
+            &[],
+            true,
+        );
+        assert_eq!(vertices.len(), 6);
+        let top_width = (vertices[1].position[0] - vertices[0].position[0]) * screen.w / 2.0;
+        assert!(
+            (top_width - glyph.width).abs() < 0.0001,
+            "italic must not stretch glyphs: {top_width}"
+        );
+        assert_glyph_texture_mapping(&vertices, &glyph, screen, true);
+    }
+
+    fn assert_glyph_texture_mapping(
+        vertices: &[GlyphVertex],
+        glyph: &GlyphInstance,
+        screen: Screen,
+        italic: bool,
+    ) {
+        let shear = if italic { ITALIC_SHEAR } else { 0.0 };
+        for vertex in vertices {
+            let x = (vertex.position[0] + 1.0) * screen.w / 2.0;
+            let y = (1.0 - vertex.position[1]) * screen.h / 2.0;
+            let original_x = x - (40.0 - y) * shear;
+            let expected_u =
+                glyph.uv[0] + (original_x - 20.0) / glyph.width * (glyph.uv[2] - glyph.uv[0]);
+            let expected_v = glyph.uv[1] + (y - 24.0) / glyph.height * (glyph.uv[3] - glyph.uv[1]);
+            assert!(
+                (vertex.tex_coords[0] - expected_u).abs() < 0.0001,
+                "texture must follow the sheared glyph"
+            );
+            assert!((vertex.tex_coords[1] - expected_v).abs() < 0.0001);
+        }
+    }
+
+    #[test]
+    fn italic_glyph_is_clipped_after_shear_with_matching_uvs() {
+        let glyph = italic_test_glyph();
+        let screen = Screen::new(100.0, 100.0);
+        for italic in [false, true] {
+            for clip in [
+                Rect::new(21.0, 0.0, 6.0, 100.0),
+                Rect::new(0.0, 26.0, 100.0, 15.0),
+                Rect::new(21.0, 26.0, 6.0, 15.0),
+            ] {
+                let vertices = emit_from_instances(
+                    std::slice::from_ref(&glyph),
+                    20.0,
+                    40.0,
+                    screen.w,
+                    screen.h,
+                    [1.0; 4],
+                    &[clip],
+                    italic,
+                );
+                assert!(!vertices.is_empty());
+                let [left, right, top, bottom] = screen.rect_to_ndc(clip);
+                for vertex in &vertices {
+                    assert!(
+                        vertex.position[0] >= left && vertex.position[0] <= right,
+                        "glyph escaped horizontal clip"
+                    );
+                    assert!(vertex.position[1] >= bottom && vertex.position[1] <= top);
+                }
+                assert_glyph_texture_mapping(&vertices, &glyph, screen, italic);
+            }
+        }
+    }
 
     fn triangle_mesh(
         vertices: [[f32; 2]; 3],
