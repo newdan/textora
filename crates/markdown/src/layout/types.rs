@@ -8,7 +8,7 @@ use std::ops::Range;
 use std::sync::Arc;
 use ui::core::geom::Rect;
 
-use super::block::{layout_block, layout_doc_with_shaper};
+use super::block::{layout_block_at_content_origin, layout_doc_with_shaper};
 use super::reconcile::BlockReconcilePlan;
 use super::shaping::populate_style_segments;
 use super::source_line_map::{HiddenBlockSeparator, SourceLineMap};
@@ -113,9 +113,9 @@ pub struct LaidOutDoc {
 pub struct LazyLayout<S: BlockSource> {
     /// Source document structure (MarkdownDoc or NovelStructure).
     pub source: S,
-    /// Estimated height of each laid-out block (from estimation pass, no shaping).
+    /// Estimated content height of each laid-out block, excluding boundary gaps.
     pub estimated_heights: Vec<f32>,
-    /// Estimated y-position (top) of each laid-out block. Precomputed prefix sum.
+    /// Estimated content top, including the resolved gaps before this block.
     pub estimated_positions: Vec<f32>,
     /// y_delta[i] = cumulative height correction for block i and beyond.
     /// Real visual Y of block i = estimated_positions[i] + y_delta[i].
@@ -1533,27 +1533,7 @@ impl<S: BlockSource> LazyLayout<S> {
             ctx.ascii_diagrams.set_selection_range(self.selection_range.clone());
             ctx.y = base_y;
             ctx.indent = 0.0;
-            ctx.block_count = i;
-
-            // Restore spacing context from previous block (same logic as layout_block).
-            if i > 0
-                && let Some(prev_laid) = &self.laid_out[i - 1]
-            {
-                let prev_doc_kind = self
-                    .laid_to_doc
-                    .get(i - 1)
-                    .and_then(|&prev_doc_idx| self.source.blocks().get(prev_doc_idx))
-                    .map(|block| &block.kind);
-                ctx.restore_spacing_context(super::context::spacing_kind_of_laid_block(
-                    &prev_laid.kind,
-                    prev_doc_kind,
-                ));
-            }
-
-            // Adjust for heading margin collapsing (same as layout_block).
-            ctx.presubtract_entry_spacing(&src_block.kind);
-
-            layout_block(src_block, &mut ctx);
+            layout_block_at_content_origin(src_block, &mut ctx);
             self.ascii_diagrams.extend(std::mem::take(&mut ctx.ascii_diagrams));
             if let Some(mut new_block) = ctx.output.into_iter().next() {
                 populate_style_segments(&mut new_block, shaper, style);
@@ -1646,30 +1626,11 @@ impl<S: BlockSource> LazyLayout<S> {
             ctx.selection_range = self.selection_range.as_ref();
             ctx.ascii_diagrams.set_selection_range(self.selection_range.clone());
             ctx.y = self.estimated_positions[i];
-            ctx.block_count = i;
-
-            // Restore spacing context (same as layout_block).
-            if i > 0
-                && let Some(prev_laid) = &self.laid_out[i - 1]
-            {
-                let prev_doc_kind = self
-                    .laid_to_doc
-                    .get(i - 1)
-                    .and_then(|&prev_doc_idx| self.source.blocks().get(prev_doc_idx))
-                    .map(|block| &block.kind);
-                ctx.restore_spacing_context(super::context::spacing_kind_of_laid_block(
-                    &prev_laid.kind,
-                    prev_doc_kind,
-                ));
-            }
-
-            ctx.presubtract_entry_spacing(&src_block.kind);
-
             let base_y = self.estimated_positions[i];
             let old_height = self.estimated_heights[i];
             let old_bottom = base_y + old_height;
 
-            layout_block(src_block, &mut ctx);
+            layout_block_at_content_origin(src_block, &mut ctx);
             self.ascii_diagrams.extend(std::mem::take(&mut ctx.ascii_diagrams));
             if let Some(mut new_block) = ctx.output.into_iter().next() {
                 // Populate style segments when shaper is available (same as ensure_visible).
@@ -1847,7 +1808,7 @@ impl<S: BlockSource> LazyLayout<S> {
     /// TableRow_/TableCell_）时的整组重排：一次 layout_block 的全部输出按序
     /// 写入该组各槽位，避免只取首个输出而静默丢弃/复制后续块。
     /// 返回各槽位的高度 delta。该路径在当前 parser 输出下不可达，仅为消除
-    /// 单块重排的静默丢弃而存在;间距上下文按 layout_block 主逻辑恢复。
+    /// 单块重排的静默丢弃而存在；首个内容位置由估计布局提供。
     fn relayout_multi_output_group(
         &mut self,
         laid_idx: usize,
@@ -1878,23 +1839,7 @@ impl<S: BlockSource> LazyLayout<S> {
         ctx.ascii_diagrams.set_selection_range(self.selection_range.clone());
         ctx.y = base_y;
         ctx.indent = 0.0;
-        ctx.block_count = group_start;
-        // 恢复上一块的间距上下文(与 layout_block 主逻辑一致)。
-        if group_start > 0
-            && let Some(prev_laid) = &self.laid_out[group_start - 1]
-        {
-            let prev_doc_kind = self
-                .laid_to_doc
-                .get(group_start - 1)
-                .and_then(|&prev_doc_idx| self.source.blocks().get(prev_doc_idx))
-                .map(|block| &block.kind);
-            ctx.restore_spacing_context(super::context::spacing_kind_of_laid_block(
-                &prev_laid.kind,
-                prev_doc_kind,
-            ));
-        }
-        ctx.presubtract_entry_spacing(&src_block.kind);
-        layout_block(src_block, &mut ctx);
+        layout_block_at_content_origin(src_block, &mut ctx);
         self.ascii_diagrams.extend(std::mem::take(&mut ctx.ascii_diagrams));
         let outputs = std::mem::take(&mut ctx.output);
 
@@ -1957,11 +1902,8 @@ impl<S: BlockSource> LazyLayout<S> {
             }
             return 0.0;
         }
-        // Use estimated_heights (slot height = spacing + content) rather than
-        // rect.h (content-only). layout_block may bake inter-block spacing into
-        // rect.y (e.g. list_group_spacing for list→non-list transitions, heading
-        // top spacing). Using rect.h omits that spacing, producing a spurious
-        // delta on every refresh_precise_range call that accumulates downward.
+        // Boundary spacing is already resolved in estimated_positions. Precision
+        // changes only content height and propagates that difference to later blocks.
         let old_height = self.estimated_heights[idx];
         let base_y = self.estimated_positions[idx];
         self.discard_ascii_diagrams_for_laid_index(idx);
@@ -1984,23 +1926,7 @@ impl<S: BlockSource> LazyLayout<S> {
         ctx.ascii_diagrams.set_selection_range(self.selection_range.clone());
         ctx.y = base_y;
         ctx.indent = estimated_indent;
-        ctx.block_count = 1;
-        // Restore context for spacing decisions (same logic as layout_block).
-        if idx > 0
-            && let Some(prev_laid) = &self.laid_out[idx - 1]
-        {
-            let prev_doc_kind = self
-                .laid_to_doc
-                .get(idx - 1)
-                .and_then(|&prev_doc_idx| self.source.blocks().get(prev_doc_idx))
-                .map(|block| &block.kind);
-            ctx.restore_spacing_context(super::context::spacing_kind_of_laid_block(
-                &prev_laid.kind,
-                prev_doc_kind,
-            ));
-        }
-        ctx.presubtract_entry_spacing(&src_block.kind);
-        layout_block(src_block, &mut ctx);
+        layout_block_at_content_origin(src_block, &mut ctx);
         self.ascii_diagrams.extend(std::mem::take(&mut ctx.ascii_diagrams));
         if let Some(mut new_block) = ctx.output.into_iter().next() {
             populate_style_segments(&mut new_block, shaper, style);
@@ -2074,6 +2000,51 @@ mod tests {
             horizontal_rule.atomic_source_range,
             Some(horizontal_rule_start..horizontal_rule_start + 3)
         );
+    }
+
+    #[test]
+    fn active_horizontal_rule_keeps_both_external_paragraph_gaps() {
+        let source = "before\n\n---\n\nafter";
+        let cursor = source.find("---").expect("fixture contains a rule");
+        let layout = build_editing_layout(source, cursor, 1);
+        let style = default_style();
+        let expected_gap = style.paragraph_spacing.max(style.rule_spacing);
+        let blocks: Vec<_> = layout
+            .laid_out
+            .iter()
+            .enumerate()
+            .map(|(index, block)| {
+                let mut rect = block.as_ref().expect("editing materializes each block").rect;
+                rect.y += layout.y_delta[index];
+                rect
+            })
+            .collect();
+        assert_eq!(blocks.len(), 3);
+        let before_gap = blocks[1].y - (blocks[0].y + blocks[0].h);
+        let after_gap = blocks[2].y - (blocks[1].y + blocks[1].h);
+        assert!((before_gap - expected_gap).abs() < 0.01, "before gap: {before_gap}");
+        assert!((after_gap - expected_gap).abs() < 0.01, "after gap: {after_gap}");
+    }
+
+    #[test]
+    fn rule_activation_and_neighbor_edits_reconcile_to_fresh_layout() {
+        let sources = [
+            "before\n\n---\n\nafter",
+            "before\n\n---\n\nafter",
+            "before\n\n---\n\n# after",
+            "before\n\n---\n\n\nafter",
+            "before\n\n---\n\nafter",
+        ];
+        let mut previous = build_editing_layout(sources[0], 0, 1);
+        for (offset, source) in sources.iter().enumerate().skip(1) {
+            let cursor =
+                if offset == 1 { source.find("---").expect("fixture contains a rule") } else { 0 };
+            let generation = offset as u32 + 1;
+            let expected = build_editing_layout(source, cursor, generation);
+            let (reconciled, _) = reconcile_editing_layout(previous, source, cursor, generation);
+            assert_flat_layout_equivalent(&reconciled, &expected, source);
+            previous = reconciled;
+        }
     }
 
     fn assert_flat_layout_equivalent(
@@ -2907,9 +2878,8 @@ mod tests {
 
     #[test]
     fn incremental_relayout_matches_one_shot_block_positions() {
-        // 间距上下文恢复 + 入口预扣必须与 layout_block 主逻辑逐项一致:
-        // 逐块重排(ensure_all_blocks)的最终落点必须与一次性全文布局相同。
-        // 覆盖列表组收尾 bump、tight 缩减、标题 margin collapsing 等入口调整。
+        // 逐块内容重排必须保留估计阶段解析的边界，与全文布局落点一致。
+        // 覆盖紧凑列表、列表组边界、连续标题和分割线邻接。
         let fixtures = [
             "para\n- a\n- b",
             "- a\n- b\n\npara",

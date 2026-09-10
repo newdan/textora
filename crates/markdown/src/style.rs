@@ -58,8 +58,18 @@ pub struct MarkdownStyle {
 }
 
 impl MarkdownStyle {
-    /// Build a style from the current theme and editor settings.
+    /// Build a 1x style from the current theme and editor settings.
     pub fn from_theme(theme: &ui::Theme, base_font_size: f32, line_height: f32) -> Self {
+        Self::from_theme_at_dpi(theme, base_font_size, line_height, 1.0)
+    }
+
+    /// Build a style from physical font metrics and logical theme dimensions.
+    pub fn from_theme_at_dpi(
+        theme: &ui::Theme,
+        base_font_size: f32,
+        line_height: f32,
+        dpi_scale: f32,
+    ) -> Self {
         let body_font_size = base_font_size;
         let code_font_size = base_font_size * 0.9;
         let heading_scale = [1.8, 1.3, 1.15, 1.1, 1.05, 1.0];
@@ -112,12 +122,12 @@ impl MarkdownStyle {
             table_border,
             table_header_bg,
             table_stripe_bg,
-            border_radius_base: sp.border_radius_base,
-            border_radius_small: sp.border_radius_small,
+            border_radius_base: sp.border_radius_base * dpi_scale,
+            border_radius_small: sp.border_radius_small * dpi_scale,
             code_block_border,
             list_item_spacing: line_height * sp.list_item_spacing_ratio,
             list_group_spacing: line_height * sp.list_group_spacing_ratio,
-            rule_spacing: sp.rule_spacing,
+            rule_spacing: sp.rule_spacing * dpi_scale,
             paragraph_spacing: line_height * sp.paragraph_spacing_ratio,
             paragraph_first_line_indent: 0.0,
             heading_spacing_top: line_height * sp.heading_spacing_top_ratio,
@@ -129,14 +139,24 @@ impl MarkdownStyle {
             line_height,
             code_line_height: code_font_size * sp.code_line_height_ratio,
             background_color: bg,
-            rule_thickness: sp.rule_thickness,
+            rule_thickness: sp.rule_thickness * dpi_scale,
             rule_width_ratio: sp.rule_width_ratio,
         }
     }
 
-    /// Build a style for novel reading mode from the NovelTheme section.
+    /// Build a 1x style for novel reading mode from the NovelTheme section.
     /// Uses the same MarkdownStyle structure but with novel-specific colors and spacing.
     pub fn novel(theme: &ui::Theme, base_font_size: f32, line_height: f32) -> Self {
+        Self::novel_at_dpi(theme, base_font_size, line_height, 1.0)
+    }
+
+    /// Build a novel style from physical font metrics and logical theme dimensions.
+    pub fn novel_at_dpi(
+        theme: &ui::Theme,
+        base_font_size: f32,
+        line_height: f32,
+        dpi_scale: f32,
+    ) -> Self {
         let body_font_size = base_font_size;
         let code_font_size = base_font_size * 0.9;
         let heading_scale = [1.8, 1.3, 1.15, 1.1, 1.05, 1.0];
@@ -170,12 +190,12 @@ impl MarkdownStyle {
             table_border: theme.palette.border_subtle,
             table_header_bg: theme.palette.bg_hover,
             table_stripe_bg: theme.palette.bg_hover,
-            border_radius_base: sp.border_radius_base,
-            border_radius_small: sp.border_radius_small,
+            border_radius_base: sp.border_radius_base * dpi_scale,
+            border_radius_small: sp.border_radius_small * dpi_scale,
             code_block_border: theme.palette.border_subtle,
             list_item_spacing: line_height * sp.list_item_spacing_ratio,
             list_group_spacing: line_height * sp.list_group_spacing_ratio,
-            rule_spacing: sp.rule_spacing,
+            rule_spacing: sp.rule_spacing * dpi_scale,
             paragraph_spacing: line_height * sp.paragraph_spacing_ratio,
             paragraph_first_line_indent: 0.0,
             heading_spacing_top: line_height * sp.heading_spacing_top_ratio,
@@ -187,7 +207,7 @@ impl MarkdownStyle {
             line_height,
             code_line_height: code_font_size * sp.code_line_height_ratio,
             background_color: bg,
-            rule_thickness: sp.rule_thickness,
+            rule_thickness: sp.rule_thickness * dpi_scale,
             rule_width_ratio: sp.rule_width_ratio,
         }
     }
@@ -209,6 +229,125 @@ pub fn blend_toward_bg(color: [f32; 4], target: [f32; 4], ratio: f32) -> [f32; 4
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    const LOGICAL_FONT_SIZE: f32 = 16.0;
+    const LOGICAL_LINE_HEIGHT: f32 = 24.0;
+
+    fn assert_dimension_close(actual: f32, expected: f32, dimension: &str, dpi_scale: f32) {
+        assert!(
+            (actual - expected).abs() < 0.01,
+            "{dimension} at {dpi_scale}x DPI: actual={actual}, expected={expected}"
+        );
+    }
+
+    #[test]
+    fn markdown_fixed_dimensions_scale_once_and_ratios_use_physical_metrics() {
+        let theme = ui::theme::test_theme();
+        let spacing = &theme.markdown.spacing;
+
+        for dpi_scale in [1.0, 1.5, 2.0] {
+            let physical_font_size = LOGICAL_FONT_SIZE * dpi_scale;
+            let physical_line_height = LOGICAL_LINE_HEIGHT * dpi_scale;
+            let style = MarkdownStyle::from_theme_at_dpi(
+                &theme,
+                physical_font_size,
+                physical_line_height,
+                dpi_scale,
+            );
+
+            assert_dimension_close(
+                style.rule_spacing,
+                spacing.rule_spacing * dpi_scale,
+                "rule spacing",
+                dpi_scale,
+            );
+            assert_dimension_close(
+                style.rule_thickness,
+                spacing.rule_thickness * dpi_scale,
+                "rule thickness",
+                dpi_scale,
+            );
+            assert_dimension_close(
+                style.border_radius_base,
+                spacing.border_radius_base * dpi_scale,
+                "base border radius",
+                dpi_scale,
+            );
+            assert_dimension_close(
+                style.border_radius_small,
+                spacing.border_radius_small * dpi_scale,
+                "small border radius",
+                dpi_scale,
+            );
+            assert_dimension_close(
+                style.paragraph_spacing,
+                physical_line_height * spacing.paragraph_spacing_ratio,
+                "paragraph spacing",
+                dpi_scale,
+            );
+            assert_dimension_close(
+                style.code_block_padding,
+                style.code_font_size * spacing.code_block_padding_ratio,
+                "code block padding",
+                dpi_scale,
+            );
+        }
+    }
+
+    #[test]
+    fn novel_fixed_dimensions_scale_once_and_ratios_use_physical_metrics() {
+        let theme = ui::theme::test_theme();
+        let spacing = &theme.novel.spacing;
+
+        for dpi_scale in [1.0, 1.5, 2.0] {
+            let physical_font_size = LOGICAL_FONT_SIZE * dpi_scale;
+            let physical_line_height = LOGICAL_LINE_HEIGHT * dpi_scale;
+            let style = MarkdownStyle::novel_at_dpi(
+                &theme,
+                physical_font_size,
+                physical_line_height,
+                dpi_scale,
+            );
+
+            assert_dimension_close(
+                style.rule_spacing,
+                spacing.rule_spacing * dpi_scale,
+                "novel rule spacing",
+                dpi_scale,
+            );
+            assert_dimension_close(
+                style.rule_thickness,
+                spacing.rule_thickness * dpi_scale,
+                "novel rule thickness",
+                dpi_scale,
+            );
+            assert_dimension_close(
+                style.paragraph_spacing,
+                physical_line_height * spacing.paragraph_spacing_ratio,
+                "novel paragraph spacing",
+                dpi_scale,
+            );
+            assert_dimension_close(
+                style.blockquote_padding,
+                physical_font_size * spacing.blockquote_padding_ratio,
+                "novel blockquote padding",
+                dpi_scale,
+            );
+        }
+    }
+
+    #[test]
+    fn legacy_theme_constructor_keeps_one_times_semantics() {
+        let theme = ui::theme::test_theme();
+        let legacy = MarkdownStyle::from_theme(&theme, LOGICAL_FONT_SIZE, LOGICAL_LINE_HEIGHT);
+        let explicit =
+            MarkdownStyle::from_theme_at_dpi(&theme, LOGICAL_FONT_SIZE, LOGICAL_LINE_HEIGHT, 1.0);
+
+        assert_eq!(legacy.rule_spacing, explicit.rule_spacing);
+        assert_eq!(legacy.rule_thickness, explicit.rule_thickness);
+        assert_eq!(legacy.paragraph_spacing, explicit.paragraph_spacing);
+        assert_eq!(legacy.code_block_padding, explicit.code_block_padding);
+    }
 
     #[test]
     fn blend_toward_bg_identity_at_zero() {

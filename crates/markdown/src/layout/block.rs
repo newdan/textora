@@ -88,6 +88,7 @@ pub fn layout_doc_with_shaper_for_rendering(
     for block in blocks {
         layout_block(block, &mut ctx);
     }
+    ctx.finish_document_spacing();
 
     MarkdownLayout {
         doc: super::types::LaidOutDoc { blocks: ctx.output, total_height: ctx.y },
@@ -98,41 +99,69 @@ pub fn layout_doc_with_shaper_for_rendering(
 use super::types::LaidOutDoc;
 
 pub(crate) fn layout_block(block: &BlockNode, ctx: &mut LayoutCtx) {
-    // End of a list group: the ListItem handler already added list_item_spacing
-    // as trailing for each item. Bump the gap to list_group_spacing so the
-    // transition from list to non-list feels like a normal block boundary.
-    if ctx.last_block_was_list && !matches!(block.kind, BlockKind::ListItem { .. }) {
-        ctx.y += ctx.style.list_group_spacing - ctx.style.list_item_spacing;
-        ctx.last_trailing_spacing = ctx.style.list_group_spacing;
+    layout_block_with_placement(block, ctx, BlockPlacement::InFlow);
+}
+
+/// Layout a block whose content origin has already been resolved by its caller.
+///
+/// This is the precision-layout entry point: `ctx.y` is the content top, so the
+/// block's external boundary is intentionally not applied again. Transparent
+/// containers pass that origin through to their first actual output block.
+pub(crate) fn layout_block_at_content_origin(block: &BlockNode, ctx: &mut LayoutCtx) {
+    layout_block_with_placement(block, ctx, BlockPlacement::AtContentOrigin);
+}
+
+#[derive(Clone, Copy)]
+enum BlockPlacement {
+    InFlow,
+    AtContentOrigin,
+}
+
+fn layout_block_with_placement(
+    block: &BlockNode,
+    ctx: &mut LayoutCtx,
+    placement: BlockPlacement,
+) -> bool {
+    let Some(spacing_block) = super::spacing::BlockSpacing::from_block_kind(&block.kind) else {
+        return layout_transparent_container(block, ctx, placement);
+    };
+    if matches!(placement, BlockPlacement::InFlow) {
+        ctx.advance_to_block(spacing_block);
     }
-    // Save list flag before reset; ListItem handler needs the previous value.
-    // Note: last_block_was_heading is NOT reset here — it's managed by
-    // Heading handler for margin collapsing between adjacent headings.
-    ctx.last_block_was_list = false;
+
+    layout_block_content(block, ctx);
+    ctx.finish_block(spacing_block);
+    true
+}
+
+fn layout_transparent_container(
+    block: &BlockNode,
+    ctx: &mut LayoutCtx,
+    placement: BlockPlacement,
+) -> bool {
+    let mut next_placement = placement;
+    let mut produced_output = false;
+    for child in &block.children {
+        if layout_block_with_placement(child, ctx, next_placement) {
+            next_placement = BlockPlacement::InFlow;
+            produced_output = true;
+        }
+    }
+    produced_output
+}
+
+fn layout_block_content(block: &BlockNode, ctx: &mut LayoutCtx) {
     match &block.kind {
-        BlockKind::Container => {
-            for child in &block.children {
-                layout_block(child, ctx);
-            }
+        BlockKind::Container | BlockKind::TableRow_ | BlockKind::TableCell_ { .. } => {
+            unreachable!("transparent containers are handled before content layout")
         }
         BlockKind::Paragraph => {
             let font_size = ctx.font_size_override.unwrap_or(ctx.style.body_font_size);
             layout_text_block(block, ctx, font_size, ctx.style.text_color, Weight::NORMAL);
-            let trailing = ctx.finish_block_spacing(super::context::LastBlockKind::Paragraph);
-            ctx.y += trailing;
         }
         BlockKind::Heading { level } => {
             let idx = (*level as usize).saturating_sub(1).min(5);
             let font_size = ctx.style.heading_font_sizes[idx];
-            // Heading top spacing: scale by level, collapse with previous trailing.
-            // H1 keeps full, H2-H3 80%, H4-H6 65%.
-            ctx.y += super::context::heading_top_spacing(
-                ctx.style,
-                *level,
-                ctx.block_count == 0,
-                ctx.last_block_was_heading,
-                ctx.last_trailing_spacing,
-            );
             // Detect active block marker: cursor in heading's source range.
             if let Some(edit_ctx) = ctx.edit_ctx
                 && ctx.source_text.is_none_or(|source| {
@@ -144,8 +173,6 @@ pub(crate) fn layout_block(block: &BlockNode, ctx: &mut LayoutCtx) {
             }
             layout_text_block(block, ctx, font_size, ctx.style.heading_color, Weight::SEMIBOLD);
             ctx.active_block_marker = None;
-            let trailing = ctx.finish_block_spacing(super::context::LastBlockKind::Heading);
-            ctx.y += trailing;
         }
         BlockKind::CodeBlock { language } => {
             let active = code_block_is_active(block, ctx.edit_ctx);
@@ -247,8 +274,6 @@ pub(crate) fn layout_block(block: &BlockNode, ctx: &mut LayoutCtx) {
                 LaidOutBlockKind::CodeBlock { lines: laid_out_lines, language: language.clone() },
                 total_h,
             );
-            let trailing = ctx.finish_block_spacing(super::context::LastBlockKind::CodeBlock);
-            ctx.y += trailing;
         }
         BlockKind::BlockQuote => {
             let saved_indent = ctx.indent;
@@ -270,22 +295,17 @@ pub(crate) fn layout_block(block: &BlockNode, ctx: &mut LayoutCtx) {
                 ctx.active_block_marker =
                     crate::edit::active_block_marker(block, edit_ctx.cursor_byte);
             }
+            let saved_previous_spacing_block = ctx.previous_spacing_block.take();
+            let mut child_placement = BlockPlacement::AtContentOrigin;
             for child in &block.children {
-                layout_block(child, ctx);
+                if layout_block_with_placement(child, ctx, child_placement) {
+                    child_placement = BlockPlacement::InFlow;
+                }
             }
+            ctx.previous_spacing_block = saved_previous_spacing_block;
             ctx.active_block_marker = None;
             sub_blocks.append(&mut ctx.output);
             ctx.output = saved_output;
-
-            // Remove trailing spacing from the last child so blockquote height
-            // doesn't include inter-block spacing that belongs to the parent context.
-            if let Some(last_child) = block.children.last() {
-                match last_child.kind {
-                    BlockKind::Paragraph => ctx.y -= ctx.style.paragraph_spacing,
-                    BlockKind::Heading { .. } => ctx.y -= ctx.style.heading_spacing_bottom,
-                    _ => {}
-                }
-            }
 
             let content_h = ctx.y - start_y + ctx.style.blockquote_padding; // + bottom padding
             ctx.y = start_y;
@@ -294,22 +314,8 @@ pub(crate) fn layout_block(block: &BlockNode, ctx: &mut LayoutCtx) {
             ctx.font_size_override = saved_font_size_override;
 
             ctx.push_block(LaidOutBlockKind::BlockQuote { blocks: sub_blocks }, content_h);
-            let trailing = ctx.finish_block_spacing(super::context::LastBlockKind::BlockQuote);
-            ctx.y += trailing; // spacing after blockquote
         }
-        BlockKind::ListItem { bullet, tight, blank_line_before } => {
-            // For tight lists immediately following a paragraph (no blank line),
-            // reduce the gap from paragraph_spacing to list_item_spacing.
-            if *tight
-                && !*blank_line_before
-                && !ctx.last_block_was_list
-                && ctx.last_block_kind == Some(super::context::LastBlockKind::Paragraph)
-                && ctx.last_trailing_spacing > ctx.style.list_item_spacing
-            {
-                let reduce = ctx.last_trailing_spacing - ctx.style.list_item_spacing;
-                ctx.y -= reduce;
-                ctx.last_trailing_spacing = ctx.style.list_item_spacing;
-            }
+        BlockKind::ListItem { bullet, .. } => {
             let font_size = ctx.font_size_override.unwrap_or(ctx.style.body_font_size);
             let line_h = ctx.style.line_height;
             let saved_indent = ctx.indent;
@@ -433,17 +439,22 @@ pub(crate) fn layout_block(block: &BlockNode, ctx: &mut LayoutCtx) {
             ctx.indent += ctx.style.list_indent;
             ctx.list_depth = current_depth + 1;
             let saved_output = std::mem::take(&mut ctx.output);
+            let saved_previous_spacing_block = ctx.previous_spacing_block.take();
+            let mut child_placement = BlockPlacement::AtContentOrigin;
             for (child_index, child) in block.children.iter().enumerate() {
                 // 项文本与子块（loose list 的子段落）之间保留 paragraph_spacing
                 // 级别的间距；嵌套子列表保持紧凑。与顶层块间间距同一视觉规范。
                 if child_index == 0
                     && !item_lines.is_empty()
-                    && !matches!(child.kind, BlockKind::ListItem { .. })
+                    && let Some(child_spacing_block) = first_spacing_block(child)
                 {
-                    ctx.y += ctx.style.paragraph_spacing;
+                    ctx.y += super::spacing::list_item_child_gap(child_spacing_block, ctx.style);
                 }
-                layout_block(child, ctx);
+                if layout_block_with_placement(child, ctx, child_placement) {
+                    child_placement = BlockPlacement::InFlow;
+                }
             }
+            ctx.previous_spacing_block = saved_previous_spacing_block;
             let sub_blocks: Vec<LaidOutBlock> = ctx.output.drain(..).collect();
             ctx.output = saved_output;
 
@@ -464,20 +475,9 @@ pub(crate) fn layout_block(block: &BlockNode, ctx: &mut LayoutCtx) {
                 },
                 content_h,
             );
-            // Uniform inter-item spacing: added after every list item,
-            // so all items have the same rect.h (content-only, no spacing baked in).
-            let trailing = ctx.finish_block_spacing(super::context::LastBlockKind::ListItem);
-            ctx.y += trailing;
         }
         BlockKind::TableWrapper { columns, alignments: _ } => {
             layout_table(block, ctx, *columns);
-            let trailing = ctx.finish_block_spacing(super::context::LastBlockKind::TableWrapper);
-            ctx.y += trailing;
-        }
-        BlockKind::TableRow_ | BlockKind::TableCell_ { .. } => {
-            for child in &block.children {
-                layout_block(child, ctx);
-            }
         }
         BlockKind::HorizontalRule => {
             let active = if let Some(edit_ctx) = ctx.edit_ctx {
@@ -494,15 +494,8 @@ pub(crate) fn layout_block(block: &BlockNode, ctx: &mut LayoutCtx) {
                     0.55, // SOURCE_MARKER_FADE_RATIO
                 );
                 layout_text_block(block, ctx, font_size, color, Weight::NORMAL);
-                let trailing = ctx.finish_block_spacing(super::context::LastBlockKind::Paragraph);
-                ctx.y += trailing;
             } else {
-                ctx.push_block(
-                    LaidOutBlockKind::HorizontalRule,
-                    ctx.style.rule_spacing + ctx.style.rule_thickness + ctx.style.rule_spacing,
-                );
-                // HR 的上下间距已烘进块高,此处只记录间距上下文,不再推进 ctx.y。
-                ctx.finish_block_spacing(super::context::LastBlockKind::HorizontalRule);
+                ctx.push_block(LaidOutBlockKind::HorizontalRule, ctx.style.rule_thickness);
             }
         }
         BlockKind::MetadataBlock => {
@@ -543,10 +536,13 @@ pub(crate) fn layout_block(block: &BlockNode, ctx: &mut LayoutCtx) {
             }
 
             ctx.push_block(LaidOutBlockKind::MetadataBlock { lines: laid_out_lines }, total_h);
-            let trailing = ctx.finish_block_spacing(super::context::LastBlockKind::MetadataBlock);
-            ctx.y += trailing;
         }
     }
+}
+
+fn first_spacing_block(block: &BlockNode) -> Option<super::spacing::BlockSpacing> {
+    super::spacing::BlockSpacing::from_block_kind(&block.kind)
+        .or_else(|| block.children.iter().find_map(first_spacing_block))
 }
 
 fn shaped_prefix_width(
@@ -3688,22 +3684,12 @@ mod tests {
             .find(|b| matches!(&b.kind, LaidOutBlockKind::ListItem { .. }))
             .unwrap();
         let block_gap = list_item.rect.y - (hr.rect.y + hr.rect.h);
+        let expected = style.rule_spacing.max(style.list_group_spacing);
         assert!(
-            block_gap.abs() < 1.0,
-            "block gap between HR and list should be ~0, got {}",
-            block_gap
-        );
-        let visual_gap = list_item.rect.y - (hr.rect.y + style.rule_spacing + style.rule_thickness);
-        assert!(
-            visual_gap >= style.rule_spacing - 1.0,
-            "visual gap from HR rule to list {} should be >= rule_spacing ({})",
-            visual_gap,
-            style.rule_spacing
-        );
-        assert!(
-            visual_gap < style.rule_spacing + style.paragraph_spacing,
-            "visual gap {} should NOT include extra paragraph_spacing",
-            visual_gap
+            (block_gap - expected).abs() < 1.0,
+            "gap from HR content to list {} should resolve to max(rule, group) ({})",
+            block_gap,
+            expected
         );
     }
 
@@ -3725,14 +3711,104 @@ mod tests {
                 matches!(&b.kind, LaidOutBlockKind::Text { .. }) && b.rect.y > hr.rect.y + hr.rect.h
             })
             .unwrap();
-        let visual_gap =
-            second_heading.rect.y - (hr.rect.y + style.rule_spacing + style.rule_thickness);
-        let expected = style.heading_spacing_top * 0.8;
+        let visual_gap = second_heading.rect.y - (hr.rect.y + hr.rect.h);
+        let expected = style.rule_spacing.max(style.heading_spacing_top * 0.8);
         assert!(
             (visual_gap - expected).abs() < 1.5,
             "visual gap from HR rule line to H2 {} should be ~heading_spacing_top ({})",
             visual_gap,
             expected
         );
+    }
+
+    #[test]
+    fn horizontal_rule_rect_contains_only_the_rule() {
+        let (src, doc) = make_doc("---");
+        let style = default_style();
+        let laid_out =
+            layout_doc(&doc.blocks, &style, 400.0, &core::document::StringDocView::new(src));
+
+        assert_eq!(laid_out.blocks.len(), 1);
+        assert_eq!(laid_out.blocks[0].rect.h, style.rule_thickness);
+        assert_eq!(laid_out.blocks[0].rect.y, style.rule_spacing);
+        assert_eq!(laid_out.total_height, style.rule_spacing * 2.0 + style.rule_thickness);
+    }
+
+    #[test]
+    fn paragraph_rule_paragraph_uses_symmetric_external_gaps() {
+        let source = "before\n\n---\n\nafter";
+        let (_, doc) = make_doc(source);
+        let mut style = default_style();
+        style.paragraph_spacing = 30.0;
+        style.rule_spacing = 12.0;
+        let laid_out =
+            layout_doc(&doc.blocks, &style, 400.0, &core::document::StringDocView::new(source));
+        let before = &laid_out.blocks[0];
+        let rule = &laid_out.blocks[1];
+        let after = &laid_out.blocks[2];
+
+        let gap_before = rule.rect.y - (before.rect.y + before.rect.h);
+        let gap_after = after.rect.y - (rule.rect.y + rule.rect.h);
+        assert_eq!(gap_before, 30.0);
+        assert_eq!(gap_after, 30.0);
+    }
+
+    #[test]
+    fn list_item_content_to_nested_rule_uses_the_larger_internal_gap() {
+        let mut style = default_style();
+        style.paragraph_spacing = 8.0;
+        style.rule_spacing = 20.0;
+        let (_, rule_doc) = make_doc("---");
+        let rule = rule_doc.blocks.into_iter().next().expect("fixture must produce a rule");
+        let item = BlockNode {
+            kind: BlockKind::ListItem {
+                bullet: crate::builder::ListBullet::Bullet,
+                tight: false,
+                blank_line_before: false,
+            },
+            children: vec![rule],
+            text_lines: vec!["item".to_string()],
+            projected_lines: vec![],
+            text_styles: vec![vec![]],
+            source_range: crate::builder::BlockSource::Continuous(0..4),
+            block_range: 0..4,
+            code_line_source_starts: None,
+        };
+        let document = core::document::StringDocView::new("item");
+        let mut ctx = LayoutCtx::new(&document, &style, 400.0, None, None, None, None);
+
+        layout_block(&item, &mut ctx);
+
+        let LaidOutBlockKind::ListItem { lines, blocks, .. } = &ctx.output[0].kind else {
+            panic!("fixture must produce a list item")
+        };
+        let item_line = lines.last().expect("list item must retain its text line");
+        let item_text_bottom = item_line.rect.y + item_line.rect.h;
+        let rule = blocks
+            .iter()
+            .find(|block| matches!(block.kind, LaidOutBlockKind::HorizontalRule))
+            .expect("fixture must produce a nested horizontal rule");
+
+        assert!((rule.rect.y - item_text_bottom - 20.0).abs() < 0.01);
+    }
+
+    #[test]
+    fn content_origin_container_places_first_actual_output_at_given_y() {
+        let source = "# First\n\n## Second";
+        let (_, doc) = make_doc(source);
+        let mut container = doc.blocks[0].clone();
+        container.kind = BlockKind::Container;
+        container.children = doc.blocks;
+        let style = default_style();
+        let document = core::document::StringDocView::new(source);
+        let mut ctx = LayoutCtx::new(&document, &style, 400.0, None, None, None, None);
+        ctx.y = 100.0;
+
+        layout_block_at_content_origin(&container, &mut ctx);
+
+        assert_eq!(ctx.output.len(), 2);
+        assert_eq!(ctx.output[0].rect.y, 100.0);
+        let first_bottom = ctx.output[0].rect.y + ctx.output[0].rect.h;
+        assert!((ctx.output[1].rect.y - first_bottom - style.heading_spacing_bottom).abs() < 0.01);
     }
 }

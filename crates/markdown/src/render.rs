@@ -9,8 +9,8 @@ use ui::core::text_layout::UiTextLayout;
 use crate::builder::{InlineStyle, ListBullet};
 use crate::layout::block::MarkdownLayout;
 use crate::layout::{
-    AsciiDiagramRegistry, AsciiDiagramRow, BoxConnections, LaidOutBlock, LaidOutBlockKind,
-    LaidOutDoc, LaidOutLine,
+    AsciiDiagramRegistry, AsciiDiagramRow, BlockSource, BoxConnections, LaidOutBlock,
+    LaidOutBlockKind, LaidOutDoc, LaidOutLine, LazyLayout,
 };
 use crate::safe_byte_idx;
 use crate::style::{MarkdownStyle, blend_toward_bg};
@@ -468,8 +468,7 @@ fn render_block_with_offset(
         LaidOutBlockKind::HorizontalRule => {
             let rule_w = r.w * style.rule_width_ratio;
             let rule_x = x + (r.w - rule_w) / 2.0;
-            let rule_y = y + (r.h - style.rule_thickness) / 2.0;
-            dl.fill(Rect::new(rule_x, rule_y, rule_w, style.rule_thickness), style.rule_color);
+            dl.fill(Rect::new(rule_x, y, rule_w, r.h), style.rule_color);
         }
         LaidOutBlockKind::MetadataBlock { lines } => {
             // Metadata blocks rendered like code blocks: background + border + clipped text
@@ -1284,230 +1283,119 @@ fn estimate_text_width(text: &str, font_size: f32) -> f32 {
     w
 }
 
-/// Debug visualization: draw colored rectangles showing top/bottom spacing of each block.
-/// Each element type gets a unique color. Top spacing = solid, bottom spacing = semi-transparent.
-///
-/// 间距取值与 `layout_block` 主逻辑共用单一事实源
-/// (`layout::context::trailing_spacing_for` / `heading_top_spacing`);HR 的上下
-/// 间距已烘进块高,底部色带不重复绘制,但 expected 计算仍按模型 trailing 计。
-/// 标题识别在此处只能按字号启发式(无文档块类型可用),与主逻辑的类型判定
-/// 可能存在出入,仅用于调试展示。
-pub fn render_debug_spacing(
-    doc: &LaidOutDoc,
+/// Draw each resolved inter-block gap once, using the published block positions.
+/// Block classification affects labels and colors only, never spacing geometry.
+pub(crate) fn render_debug_spacing<S: BlockSource>(
+    layout: &LazyLayout<S>,
     style: &MarkdownStyle,
     dl: &mut DrawList,
     scroll_y: f32,
     viewport_h: f32,
     offset_x: f32,
     offset_y: f32,
-    y_delta: &[f32],
     shaper: &mut shaping::Shaper,
 ) {
-    use LaidOutBlockKind::*;
-
-    // Color palette for different element types (RGBA)
-    const H1_TOP: [f32; 4] = [0.1, 0.4, 0.9, 0.9];
-    const H1_BOT: [f32; 4] = [0.1, 0.4, 0.9, 0.5];
-    const H2_TOP: [f32; 4] = [0.2, 0.55, 1.0, 0.85];
-    const H2_BOT: [f32; 4] = [0.2, 0.55, 1.0, 0.45];
-    const H3_TOP: [f32; 4] = [0.35, 0.65, 1.0, 0.8];
-    const H3_BOT: [f32; 4] = [0.35, 0.65, 1.0, 0.4];
-    const H4_TOP: [f32; 4] = [0.5, 0.75, 1.0, 0.75];
-    const H4_BOT: [f32; 4] = [0.5, 0.75, 1.0, 0.4];
-    const H5_TOP: [f32; 4] = [0.6, 0.82, 1.0, 0.7];
-    const H5_BOT: [f32; 4] = [0.6, 0.82, 1.0, 0.35];
-    const H6_TOP: [f32; 4] = [0.7, 0.88, 1.0, 0.65];
-    const H6_BOT: [f32; 4] = [0.7, 0.88, 1.0, 0.3];
-    const PARA_TOP: [f32; 4] = [0.3, 0.8, 0.3, 0.8];
-    const PARA_BOT: [f32; 4] = [0.3, 0.8, 0.3, 0.4];
-    const CODE_TOP: [f32; 4] = [0.9, 0.5, 0.2, 0.8];
-    const CODE_BOT: [f32; 4] = [0.9, 0.5, 0.2, 0.4];
-    const LIST_TOP: [f32; 4] = [0.8, 0.3, 0.8, 0.8];
-    const LIST_BOT: [f32; 4] = [0.8, 0.3, 0.8, 0.4];
-    const QUOTE_TOP: [f32; 4] = [0.9, 0.9, 0.2, 0.8];
-    const QUOTE_BOT: [f32; 4] = [0.9, 0.9, 0.2, 0.4];
-    const TABLE_TOP: [f32; 4] = [0.2, 0.8, 0.8, 0.8];
-    const TABLE_BOT: [f32; 4] = [0.2, 0.8, 0.8, 0.4];
-    const RULE_TOP: [f32; 4] = [0.8, 0.2, 0.2, 0.8];
-    const RULE_BOT: [f32; 4] = [0.8, 0.2, 0.2, 0.4];
-    const META_TOP: [f32; 4] = [0.5, 0.5, 0.5, 0.8];
-    const META_BOT: [f32; 4] = [0.5, 0.5, 0.5, 0.4];
-    const LABEL_COLOR: [f32; 4] = [0.95, 0.5, 0.15, 1.0];
-    let label_font_size = style.body_font_size * 0.85;
-
-    fn heading_colors(level: u8) -> ([f32; 4], [f32; 4]) {
-        match level {
-            1 => (H1_TOP, H1_BOT),
-            2 => (H2_TOP, H2_BOT),
-            3 => (H3_TOP, H3_BOT),
-            4 => (H4_TOP, H4_BOT),
-            5 => (H5_TOP, H5_BOT),
-            _ => (H6_TOP, H6_BOT),
-        }
-    }
-
-    fn is_heading_text(lines: &[LaidOutLine], style: &MarkdownStyle) -> bool {
-        if let Some(first_line) = lines.first() {
-            return first_line.font_size > style.body_font_size * 1.1;
-        }
-        false
-    }
-
-    fn detect_heading_level(lines: &[LaidOutLine], style: &MarkdownStyle) -> u8 {
-        if let Some(first_line) = lines.first() {
-            let font_size = first_line.font_size;
-            for (i, &size) in style.heading_font_sizes.iter().enumerate() {
-                if (font_size - size).abs() < 1.0 {
-                    return (i + 1) as u8;
-                }
-            }
-        }
-        1
-    }
-
-    let last_y = scroll_y + viewport_h;
-    let start = first_visible_block_idx(&doc.blocks, y_delta, scroll_y);
-
-    let mut prev_bottom: Option<f32> = None;
-    let mut prev_trailing: f32 = 0.0;
-    let mut prev_was_heading: bool = false;
-    // 前一块已烘进块高的底部间距(HR):expected 计算需扣除,避免与
-    // rect 内的间距重复计数。
-    let mut prev_baked_below: f32 = 0.0;
-
-    for i in start..doc.blocks.len() {
-        let block = &doc.blocks[i];
-        let real_y = block.rect.y + y_delta.get(i).copied().unwrap_or(0.0);
-        if real_y > last_y {
+    const OUTLINE_COLOR: [f32; 4] = [1.0, 1.0, 1.0, 0.15];
+    const OUTLINE_THICKNESS: f32 = 0.5;
+    let viewport_bottom = scroll_y + viewport_h;
+    for (index, block) in layout.laid_out.iter().enumerate() {
+        let Some(block) = block else { continue };
+        let y_correction = layout.y_delta.get(index).copied().unwrap_or(0.0);
+        let top = block.rect.y + y_correction;
+        let previous_bottom = index.checked_sub(1).map_or(0.0, |previous_index| {
+            layout.estimated_positions[previous_index]
+                + layout.estimated_heights[previous_index]
+                + layout.y_delta.get(previous_index).copied().unwrap_or(0.0)
+        });
+        if previous_bottom > viewport_bottom {
             break;
         }
-
-        let r = block.rect;
-        let x = r.x + offset_x;
-        let y = real_y - scroll_y + offset_y;
-
-        let (top_color, bottom_color, spacing_kind, heading_level, label) = match &block.kind {
-            Text { lines } => {
-                if is_heading_text(lines, style) {
-                    let level = detect_heading_level(lines, style);
-                    let (h_top, h_bot) = heading_colors(level);
-                    (
-                        h_top,
-                        h_bot,
-                        crate::layout::context::LastBlockKind::Heading,
-                        Some(level),
-                        format!("H{level}"),
-                    )
-                } else {
-                    (
-                        PARA_TOP,
-                        PARA_BOT,
-                        crate::layout::context::LastBlockKind::Paragraph,
-                        None,
-                        "Para".to_string(),
-                    )
-                }
-            }
-            CodeBlock { .. } => (
-                CODE_TOP,
-                CODE_BOT,
-                crate::layout::context::LastBlockKind::CodeBlock,
-                None,
-                "Code".to_string(),
-            ),
-            BlockQuote { .. } => (
-                QUOTE_TOP,
-                QUOTE_BOT,
-                crate::layout::context::LastBlockKind::BlockQuote,
-                None,
-                "Quote".to_string(),
-            ),
-            ListItem { .. } => (
-                LIST_TOP,
-                LIST_BOT,
-                crate::layout::context::LastBlockKind::ListItem,
-                None,
-                "List".to_string(),
-            ),
-            Table { .. } => (
-                TABLE_TOP,
-                TABLE_BOT,
-                crate::layout::context::LastBlockKind::TableWrapper,
-                None,
-                "Table".to_string(),
-            ),
-            HorizontalRule => (
-                RULE_TOP,
-                RULE_BOT,
-                crate::layout::context::LastBlockKind::HorizontalRule,
-                None,
-                "HR".to_string(),
-            ),
-            MetadataBlock { .. } => (
-                META_TOP,
-                META_BOT,
-                crate::layout::context::LastBlockKind::MetadataBlock,
-                None,
-                "Meta".to_string(),
-            ),
-        };
-
-        // 间距数值与 layout_block 主逻辑同源:标题顶端走 margin collapsing
-        // 公式,trailing 按块型查表;HR 的 trailing 已烘进块高(prev_baked_below),
-        // expected 需扣除,底部色带也不重复绘制。
-        let current_leading = heading_level.map_or(0.0, |level| {
-            crate::layout::context::heading_top_spacing(
-                style,
-                level,
-                prev_bottom.is_none(),
-                prev_was_heading,
-                prev_trailing,
-            )
-        });
-        let model_trailing = crate::layout::context::trailing_spacing_for(spacing_kind, style);
-        let bottom_spacing =
-            if spacing_kind == crate::layout::context::LastBlockKind::HorizontalRule {
-                0.0
-            } else {
-                model_trailing
-            };
-        let is_heading = spacing_kind == crate::layout::context::LastBlockKind::Heading;
-
-        let expected_top = prev_trailing + current_leading - prev_baked_below;
-        let actual_top = if let Some(prev_b) = prev_bottom { (y - prev_b).max(0.0) } else { y };
-
-        let top_spacing = actual_top;
-
-        if top_spacing > 0.5 {
-            dl.fill(Rect::new(x, y - top_spacing, r.w, top_spacing), top_color);
-            let label_text = if (actual_top - expected_top).abs() > 1.0 && expected_top > 0.5 {
-                format!("{} {:.0}/{:.0}", label, actual_top, expected_top)
-            } else {
-                format!("{} {:.0}", label, actual_top)
-            };
-            let label_y = y - top_spacing + label_font_size + 2.0;
-            dl.text_shaped(x + 4.0, label_y, label_font_size, LABEL_COLOR, &label_text, shaper);
+        if top + block.rect.h < scroll_y {
+            continue;
         }
-
-        if bottom_spacing > 0.5 {
-            dl.fill(Rect::new(x, y + r.h, r.w, bottom_spacing), bottom_color);
-            let bot_label = format!("{:.0}", bottom_spacing);
-            let bot_label_y = y + r.h + label_font_size + 2.0;
-            dl.text_shaped(x + 4.0, bot_label_y, label_font_size, LABEL_COLOR, &bot_label, shaper);
+        let (color, label) = debug_block_appearance(block, style);
+        let screen_y = top - scroll_y + offset_y;
+        let gap = (top - previous_bottom).max(0.0);
+        let band = Rect::new(block.rect.x + offset_x, screen_y - gap, block.rect.w, gap);
+        draw_debug_spacing_band(dl, band, color, label, style, shaper);
+        dl.stroke(
+            Rect::new(block.rect.x + offset_x, screen_y, block.rect.w, block.rect.h),
+            OUTLINE_COLOR,
+            OUTLINE_THICKNESS,
+        );
+        if index + 1 == layout.estimated_heights.len() {
+            let trailing_gap = (layout.total_height - top - block.rect.h).max(0.0);
+            let trailing_band = Rect::new(
+                block.rect.x + offset_x,
+                screen_y + block.rect.h,
+                block.rect.w,
+                trailing_gap,
+            );
+            draw_debug_spacing_band(dl, trailing_band, color, "End", style, shaper);
         }
-
-        dl.stroke(Rect::new(x, y, r.w, r.h), [1.0, 1.0, 1.0, 0.15], 0.5);
-
-        prev_bottom = Some(y + r.h);
-        prev_trailing = model_trailing;
-        prev_was_heading = is_heading;
-        prev_baked_below = if spacing_kind == crate::layout::context::LastBlockKind::HorizontalRule
-        {
-            model_trailing
-        } else {
-            0.0
-        };
     }
+}
+
+fn debug_block_appearance(block: &LaidOutBlock, style: &MarkdownStyle) -> ([f32; 4], &'static str) {
+    const HEADING_LABELS: [&str; 6] = ["H1", "H2", "H3", "H4", "H5", "H6"];
+    const HEADING_COLOR: [f32; 4] = [0.2, 0.55, 1.0, 0.85];
+    const PARAGRAPH_COLOR: [f32; 4] = [0.3, 0.8, 0.3, 0.8];
+    const CODE_COLOR: [f32; 4] = [0.9, 0.5, 0.2, 0.8];
+    const LIST_COLOR: [f32; 4] = [0.8, 0.3, 0.8, 0.8];
+    const QUOTE_COLOR: [f32; 4] = [0.9, 0.9, 0.2, 0.8];
+    const TABLE_COLOR: [f32; 4] = [0.2, 0.8, 0.8, 0.8];
+    const RULE_COLOR: [f32; 4] = [0.8, 0.2, 0.2, 0.8];
+    const METADATA_COLOR: [f32; 4] = [0.5, 0.5, 0.5, 0.8];
+    const FONT_SIZE_TOLERANCE: f32 = 0.01;
+    match &block.kind {
+        LaidOutBlockKind::Text { lines } => {
+            let heading = lines
+                .first()
+                .filter(|line| line.font_size > style.body_font_size)
+                .and_then(|line| {
+                    style
+                        .heading_font_sizes
+                        .iter()
+                        .position(|size| (line.font_size - size).abs() < FONT_SIZE_TOLERANCE)
+                });
+            heading
+                .map_or((PARAGRAPH_COLOR, "Para"), |level| (HEADING_COLOR, HEADING_LABELS[level]))
+        }
+        LaidOutBlockKind::CodeBlock { .. } => (CODE_COLOR, "Code"),
+        LaidOutBlockKind::BlockQuote { .. } => (QUOTE_COLOR, "Quote"),
+        LaidOutBlockKind::ListItem { .. } => (LIST_COLOR, "List"),
+        LaidOutBlockKind::Table { .. } => (TABLE_COLOR, "Table"),
+        LaidOutBlockKind::HorizontalRule => (RULE_COLOR, "HR"),
+        LaidOutBlockKind::MetadataBlock { .. } => (METADATA_COLOR, "Meta"),
+    }
+}
+
+fn draw_debug_spacing_band(
+    dl: &mut DrawList,
+    band: Rect,
+    color: [f32; 4],
+    label: &str,
+    style: &MarkdownStyle,
+    shaper: &mut shaping::Shaper,
+) {
+    const MINIMUM_BAND_HEIGHT: f32 = 0.5;
+    const LABEL_FONT_RATIO: f32 = 0.85;
+    const LABEL_INSET_X: f32 = 4.0;
+    const LABEL_INSET_Y: f32 = 2.0;
+    const LABEL_COLOR: [f32; 4] = [0.95, 0.5, 0.15, 1.0];
+    if band.h <= MINIMUM_BAND_HEIGHT {
+        return;
+    }
+    let font_size = style.body_font_size * LABEL_FONT_RATIO;
+    dl.fill(band, color);
+    dl.text_shaped(
+        band.x + LABEL_INSET_X,
+        band.y + font_size + LABEL_INSET_Y,
+        font_size,
+        LABEL_COLOR,
+        &format!("{label} {:.0}", band.h),
+        shaper,
+    );
 }
 
 #[cfg(test)]
@@ -3535,30 +3423,162 @@ code
     }
 
     #[test]
-    fn horizontal_rule_centered_and_spaced() {
-        let md = "text\n\n---";
+    fn debug_spacing_draws_each_resolved_boundary_once() {
+        let source = "before\n\nafter";
+        let style = default_style();
+        let document = MarkdownDoc::build(&parse_markdown(source), &style);
+        let document_view = core::document::StringDocView::new(source);
+        let layout = LazyLayout::from_doc(document, &style, 400.0, &document_view);
+        let first_block = layout.laid_out[0].as_ref().expect("first block is materialized");
+        let second_block = layout.laid_out[1].as_ref().expect("second block is materialized");
+        let gap_top = first_block.rect.y + first_block.rect.h + layout.y_delta[0];
+        let gap_bottom = second_block.rect.y + layout.y_delta[1];
+        let mut commands = DrawList::new();
+        let mut shaper = shaping::Shaper::new().expect("debug spacing test requires a shaper");
+        render_debug_spacing(&layout, &style, &mut commands, 0.0, 600.0, 0.0, 0.0, &mut shaper);
+        let gap_bands = commands
+            .cmds
+            .iter()
+            .filter(|command| {
+                matches!(command, DrawCmd::FillRect { rect, .. }
+                    if rect.y < gap_bottom && rect.y + rect.h > gap_top)
+            })
+            .count();
+        assert_eq!(gap_bands, 1, "one resolved boundary must have one debug band");
+    }
+
+    #[test]
+    fn debug_spacing_uses_sparse_slot_neighbors_without_document_edge_bands() {
+        const VIEWPORT_WIDTH: f32 = 400.0;
+        const VIEWPORT_HEIGHT: f32 = 96.0;
+        const POSITION_TOLERANCE: f32 = 0.01;
+
+        let source =
+            (0..80).map(|index| format!("paragraph {index}")).collect::<Vec<_>>().join("\n\n");
+        let style = default_style();
+        let document = MarkdownDoc::build(&parse_markdown(&source), &style);
+        let document_view = core::document::StringDocView::new(&source);
+        let mut layout = LazyLayout::new(document, &style, VIEWPORT_WIDTH, &document_view);
+        let materialization_scroll_y = layout.total_height * 0.5;
+        let mut shaper = shaping::Shaper::new().expect("sparse debug test requires a shaper");
+        layout.ensure_visible(
+            materialization_scroll_y,
+            VIEWPORT_HEIGHT,
+            &style,
+            VIEWPORT_WIDTH,
+            &mut shaper,
+            None,
+            &document_view,
+        );
+
+        let first_slot = layout
+            .laid_out
+            .iter()
+            .position(Option::is_some)
+            .expect("middle viewport must materialize blocks");
+        let last_slot = layout
+            .laid_out
+            .iter()
+            .rposition(Option::is_some)
+            .expect("middle viewport must materialize blocks");
+        assert!(first_slot > 0, "document start must remain unmaterialized");
+        assert!(last_slot + 1 < layout.laid_out.len(), "document end must remain unmaterialized");
+        assert!(
+            last_slot >= first_slot + 3,
+            "fixture must materialize enough slots to create a sparse interior hole"
+        );
+
+        let omitted_slot = first_slot + 1;
+        let successor_slot = omitted_slot + 1;
+        layout.laid_out[omitted_slot] = None;
+
+        let first_block =
+            layout.laid_out[first_slot].as_ref().expect("first visible slot remains materialized");
+        let first_top = first_block.rect.y + layout.y_delta[first_slot];
+        let debug_scroll_y = first_top;
+        let previous_bottom = layout.estimated_positions[first_slot - 1]
+            + layout.estimated_heights[first_slot - 1]
+            + layout.y_delta[first_slot - 1];
+        let expected_leading_band_top = previous_bottom - debug_scroll_y;
+        let expected_leading_band_bottom = first_top - debug_scroll_y;
+        let successor = layout.laid_out[successor_slot]
+            .as_ref()
+            .expect("slot after the sparse hole remains materialized");
+        let successor_top = successor.rect.y + layout.y_delta[successor_slot];
+        let omitted_bottom = layout.estimated_positions[omitted_slot]
+            + layout.estimated_heights[omitted_slot]
+            + layout.y_delta[omitted_slot];
+        let expected_successor_band_top = omitted_bottom - debug_scroll_y;
+        let expected_successor_band_bottom = successor_top - debug_scroll_y;
+        let document_end_screen_y = layout.total_height - debug_scroll_y;
+        let mut commands = DrawList::new();
+        render_debug_spacing(
+            &layout,
+            &style,
+            &mut commands,
+            debug_scroll_y,
+            VIEWPORT_HEIGHT,
+            0.0,
+            0.0,
+            &mut shaper,
+        );
+
+        let spacing_bands = commands
+            .cmds
+            .iter()
+            .filter_map(|command| match command {
+                DrawCmd::FillRect { rect, .. } => Some(rect),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        let leading_band = spacing_bands
+            .iter()
+            .find(|rect| {
+                (rect.y + rect.h - expected_leading_band_bottom).abs() < POSITION_TOLERANCE
+            })
+            .expect("first materialized block must expose its resolved leading boundary");
+        assert!(
+            (leading_band.y - expected_leading_band_top).abs() < POSITION_TOLERANCE,
+            "leading band must start at the evicted predecessor bottom: actual={}, expected={}",
+            leading_band.y,
+            expected_leading_band_top
+        );
+        let successor_band = spacing_bands
+            .iter()
+            .find(|rect| {
+                (rect.y + rect.h - expected_successor_band_bottom).abs() < POSITION_TOLERANCE
+            })
+            .expect("successor of an unmaterialized slot must expose its resolved boundary");
+        assert!(
+            (successor_band.y - expected_successor_band_top).abs() < POSITION_TOLERANCE,
+            "successor band must start at the missing predecessor bottom: actual={}, expected={}",
+            successor_band.y,
+            expected_successor_band_top
+        );
+        assert!(
+            spacing_bands.iter().all(|rect| {
+                (rect.y + rect.h - document_end_screen_y).abs() >= POSITION_TOLERANCE
+            }),
+            "a sparse materialized tail must not synthesize a document End band"
+        );
+    }
+
+    #[test]
+    fn horizontal_rule_content_matches_drawn_line_and_neighbor_spacing() {
+        let md = "text\n\n---\n\ntext";
         let parsed = parse_markdown(md);
         let style = default_style();
         let doc = MarkdownDoc::build(&parsed, &style);
         let laid_out =
             layout_doc(&doc.blocks, &style, 400.0, &core::document::StringDocView::new(md));
-        // blocks[0] is "text" paragraph, blocks[1] is the HR
         let hr = laid_out
             .blocks
             .iter()
             .find(|b| matches!(b.kind, LaidOutBlockKind::HorizontalRule))
             .expect("should have HorizontalRule block");
-        // Height should be 2*rule_spacing + rule_thickness
-        let expected_h = style.rule_spacing + style.rule_thickness + style.rule_spacing;
-        assert!(
-            (hr.rect.h - expected_h).abs() < 1.0,
-            "hr height should be ~{}, got {}",
-            expected_h,
-            hr.rect.h
-        );
-        // Render and check the fill is centered vertically
+        assert_eq!(hr.rect.h, style.rule_thickness);
         let mut dl = DrawList::new();
-        let mut shaper = shaping::Shaper::new().unwrap();
+        let mut shaper = shaping::Shaper::new().expect("rule rendering test requires a shaper");
         render_doc(&laid_out, &style, &mut dl, 0.0, 600.0, Some(&mut shaper));
         let rule_fills: Vec<_> = dl
             .cmds
@@ -3573,14 +3593,13 @@ code
             .collect();
         assert_eq!(rule_fills.len(), 1, "should have exactly one rule fill");
         let rule = &rule_fills[0];
-        // Rule should be centered: rule.y = block_y + (block_h - rule_thickness) / 2
-        let expected_y = hr.rect.y + (hr.rect.h - style.rule_thickness) / 2.0;
-        assert!(
-            (rule.y - expected_y).abs() < 1.0,
-            "rule should be centered at y={}, got {}",
-            expected_y,
-            rule.y
-        );
+        assert_eq!(rule.y, hr.rect.y);
+        assert_eq!(rule.h, hr.rect.h);
+        let before = laid_out.blocks[0].rect;
+        let after = laid_out.blocks[2].rect;
+        let expected_gap = style.paragraph_spacing.max(style.rule_spacing);
+        assert_eq!(rule.y - before.y - before.h, expected_gap);
+        assert_eq!(after.y - rule.y - rule.h, expected_gap);
     }
 
     #[test]

@@ -169,7 +169,7 @@ fn render_engine(
         toc_max_depth: engine.toc_max_depth,
         markdown_first_line_indent: engine.markdown_first_line_indent,
     };
-    let style = settings.style(theme);
+    let style = settings.style_at_dpi(theme, dpi_scale);
     engine.toc_max_depth = settings.toc_max_depth;
     let string_doc = core::document::StringDocView::new(source);
     let (mut dl, _) = engine.render(

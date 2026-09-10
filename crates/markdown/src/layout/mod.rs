@@ -12,6 +12,7 @@ pub mod context;
 pub(crate) mod reconcile;
 pub mod shaping;
 pub mod source_line_map;
+pub(crate) mod spacing;
 pub mod types;
 
 // ===== Re-exports for external callers =====

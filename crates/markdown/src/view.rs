@@ -41,6 +41,10 @@ mod navigation;
 #[path = "view_empty_paragraph_tests.rs"]
 mod empty_paragraph_tests;
 
+#[cfg(test)]
+#[path = "view_rule_spacing_tests.rs"]
+mod rule_spacing_tests;
+
 // ===== Syntax highlighter =====
 
 struct ByteSliceDoc<'a> {
@@ -305,7 +309,12 @@ impl MarkdownRenderSettings {
     }
 
     pub(crate) fn style(self, theme: &Theme) -> MarkdownStyle {
-        let mut style = MarkdownStyle::from_theme(theme, self.font_size, self.line_height);
+        self.style_at_dpi(theme, 1.0)
+    }
+
+    pub(crate) fn style_at_dpi(self, theme: &Theme, dpi_scale: f32) -> MarkdownStyle {
+        let mut style =
+            MarkdownStyle::from_theme_at_dpi(theme, self.font_size, self.line_height, dpi_scale);
         if self.markdown_first_line_indent {
             style.paragraph_first_line_indent = PARAGRAPH_FIRST_LINE_INDENT_EMS * self.font_size;
         }
@@ -1661,9 +1670,12 @@ impl<S: BlockSource> PreviewEngine<S> {
             };
         }
 
-        // Click landed below the final flat line. Only snap when the gap is
-        // reasonable (≤ 3× line height); clicks far outside content return None.
+        // Atomic blocks keep their allocated document-edge margin clickable,
+        // even when the painted content is only a thin horizontal rule.
         if let Some(above) = above {
+            if above.atomic_source_range.is_some() && doc_y <= lazy.total_height {
+                return self.flat_line_source_end(above);
+            }
             let gap = doc_y - (above.rect.y + above.rect.h);
             if gap > above.rect.h * HIT_TEST_SNAP_MAX_LINE_HEIGHTS {
                 return None; // far below content
@@ -1673,6 +1685,9 @@ impl<S: BlockSource> PreviewEngine<S> {
 
         // No line above — click above first line; snap to start of first line.
         if let Some(below) = lazy.flat_lines.first() {
+            if below.atomic_source_range.is_some() && doc_y >= 0.0 {
+                return self.flat_line_source_start(below);
+            }
             let gap = below.rect.y - doc_y;
             if gap > below.rect.h * HIT_TEST_SNAP_MAX_LINE_HEIGHTS {
                 return None; // far above content
@@ -2205,7 +2220,21 @@ impl MarkdownView {
         settings: MarkdownRenderSettings,
         shaper: Option<&mut shaping::Shaper>,
     ) -> (DrawList, bool) {
-        let style = settings.style(theme);
+        self.render_at_dpi(theme, viewport_w, viewport_h, offset_x, offset_y, settings, 1.0, shaper)
+    }
+
+    fn render_at_dpi(
+        &mut self,
+        theme: &Theme,
+        viewport_w: f32,
+        viewport_h: f32,
+        offset_x: f32,
+        offset_y: f32,
+        settings: MarkdownRenderSettings,
+        dpi_scale: f32,
+        shaper: Option<&mut shaping::Shaper>,
+    ) -> (DrawList, bool) {
+        let style = settings.style_at_dpi(theme, dpi_scale);
         self.engine.toc_max_depth = settings.toc_max_depth;
         let source = &self.source;
         let editing = self.engine.edit_source.is_some();
@@ -2275,8 +2304,16 @@ impl ViewPlugin for MarkdownView {
             toc_max_depth: self.engine.toc_max_depth,
             markdown_first_line_indent: self.engine.markdown_first_line_indent,
         };
-        let (dl, _) =
-            self.render(theme, bounds.w, bounds.h, bounds.x, bounds.y, settings, Some(shaper));
+        let (dl, _) = self.render_at_dpi(
+            theme,
+            bounds.w,
+            bounds.h,
+            bounds.x,
+            bounds.y,
+            settings,
+            dpi_scale,
+            Some(shaper),
+        );
         dl
     }
 
@@ -2446,7 +2483,7 @@ impl ViewPlugin for NovelView {
     ) -> DrawList {
         let font_size = self.engine.base_font_size * dpi_scale;
         let line_height = self.engine.base_line_height * dpi_scale;
-        let style = MarkdownStyle::novel(theme, font_size, line_height);
+        let style = MarkdownStyle::novel_at_dpi(theme, font_size, line_height, dpi_scale);
         self.engine.toc_max_depth = 3;
 
         let (dl, _) = self.engine.render(
@@ -2987,31 +3024,77 @@ impl PluginFactory for NotoraMarkdownEditorViewFactory {
 }
 
 fn style_hash_quick(style: &MarkdownStyle) -> u64 {
-    let mut h: u64 = 0x517cc1b727220a95;
-    for &fs in &style.heading_font_sizes {
-        h = h.rotate_left(5) ^ (fs.to_bits() as u64);
+    let mut hash = 0x517cc1b727220a95;
+
+    mix_hash_bytes(&mut hash, style.body_font_family.len().to_ne_bytes().as_slice());
+    for family in &style.body_font_family {
+        mix_hash_bytes(&mut hash, family.len().to_ne_bytes().as_slice());
+        mix_hash_bytes(&mut hash, family.as_bytes());
     }
-    h = h.rotate_left(5) ^ (style.body_font_size.to_bits() as u64);
-    h = h.rotate_left(5) ^ (style.code_font_size.to_bits() as u64);
-    h = h.rotate_left(5) ^ (style.line_height.to_bits() as u64);
-    h = h.rotate_left(5) ^ (style.paragraph_spacing.to_bits() as u64);
-    h = h.rotate_left(5) ^ (style.paragraph_first_line_indent.to_bits() as u64);
-    h = h.rotate_left(5) ^ (style.list_indent.to_bits() as u64);
-    h = h.rotate_left(5) ^ (style.list_item_spacing.to_bits() as u64);
-    for &c in &[
+    match &style.code_font_family {
+        Some(family) => {
+            mix_hash_value(&mut hash, 1);
+            mix_hash_bytes(&mut hash, family.as_bytes());
+        }
+        None => mix_hash_value(&mut hash, 0),
+    }
+
+    for dimension in style.heading_font_sizes.into_iter().chain([
+        style.body_font_size,
+        style.code_font_size,
+        style.border_radius_base,
+        style.border_radius_small,
+        style.list_item_spacing,
+        style.list_group_spacing,
+        style.rule_spacing,
+        style.paragraph_spacing,
+        style.paragraph_first_line_indent,
+        style.heading_spacing_top,
+        style.heading_spacing_bottom,
+        style.code_block_padding,
+        style.blockquote_padding,
+        style.list_indent,
+        style.table_cell_padding,
+        style.line_height,
+        style.code_line_height,
+        style.rule_thickness,
+        style.rule_width_ratio,
+    ]) {
+        mix_hash_value(&mut hash, dimension.to_bits() as u64);
+    }
+
+    for color in [
         style.text_color,
         style.code_color,
         style.code_bg,
-        style.link_color,
+        style.inline_code_bg,
         style.heading_color,
+        style.link_color,
+        style.rule_color,
         style.blockquote_bg,
         style.blockquote_border,
+        style.table_border,
+        style.table_header_bg,
+        style.table_stripe_bg,
+        style.code_block_border,
+        style.background_color,
     ] {
-        for &v in &c {
-            h = h.rotate_left(5) ^ (v.to_bits() as u64);
+        for channel in color {
+            mix_hash_value(&mut hash, channel.to_bits() as u64);
         }
     }
-    h
+
+    hash
+}
+
+fn mix_hash_bytes(hash: &mut u64, bytes: &[u8]) {
+    for &byte in bytes {
+        mix_hash_value(hash, byte as u64);
+    }
+}
+
+fn mix_hash_value(hash: &mut u64, value: u64) {
+    *hash = hash.rotate_left(5) ^ value;
 }
 
 fn fxhash(s: &str) -> u64 {
@@ -3023,6 +3106,222 @@ fn fxhash(s: &str) -> u64 {
 }
 
 // ===== Tests =====
+
+#[cfg(test)]
+mod dpi_style_tests {
+    use super::*;
+
+    const LOGICAL_FONT_SIZE: f32 = 15.0;
+    const LOGICAL_LINE_HEIGHT: f32 = 24.0;
+
+    fn assert_dimension_close(actual: f32, expected: f32, dimension: &str, dpi_scale: f32) {
+        assert!(
+            (actual - expected).abs() < 0.01,
+            "{dimension} at {dpi_scale}x DPI: actual={actual}, expected={expected}"
+        );
+    }
+
+    fn render_bounds(dpi_scale: f32) -> ui::Rect {
+        ui::Rect::new(0.0, 0.0, 800.0 * dpi_scale, 600.0 * dpi_scale)
+    }
+
+    #[test]
+    fn preview_plugin_resolves_fixed_dimensions_at_render_dpi() {
+        let theme = ui::theme::test_theme();
+
+        for dpi_scale in [1.0, 1.5, 2.0] {
+            let mut view = MarkdownView::new();
+            view.set_source("before\n\n---\n\nafter".into(), 1);
+            let document = core::document::StringDocView::new("");
+            let mut shaper = shaping::Shaper::new().expect("test shaper must initialize");
+            ViewPlugin::render(
+                &mut view,
+                &document,
+                render_bounds(dpi_scale),
+                &theme,
+                &mut shaper,
+                dpi_scale,
+            );
+
+            let style = view
+                .engine
+                .cached_query_style
+                .as_ref()
+                .expect("preview render must cache its resolved style");
+            assert_dimension_close(
+                style.rule_spacing,
+                theme.markdown.spacing.rule_spacing * dpi_scale,
+                "preview rule spacing",
+                dpi_scale,
+            );
+            assert_dimension_close(
+                style.rule_thickness,
+                theme.markdown.spacing.rule_thickness * dpi_scale,
+                "preview rule thickness",
+                dpi_scale,
+            );
+            assert_dimension_close(
+                style.paragraph_spacing,
+                LOGICAL_LINE_HEIGHT * dpi_scale * theme.markdown.spacing.paragraph_spacing_ratio,
+                "preview paragraph spacing",
+                dpi_scale,
+            );
+        }
+    }
+
+    #[test]
+    fn editor_plugin_resolves_fixed_dimensions_at_render_dpi() {
+        let theme = ui::theme::test_theme();
+
+        for dpi_scale in [1.0, 1.5, 2.0] {
+            let mut view = MarkdownEditorView::new();
+            view.set_source("before\n\n---\n\nafter".into(), 1);
+            let document = core::document::StringDocView::new("before\n\n---\n\nafter");
+            let mut shaper = shaping::Shaper::new().expect("test shaper must initialize");
+            ViewPlugin::render(
+                &mut view,
+                &document,
+                render_bounds(dpi_scale),
+                &theme,
+                &mut shaper,
+                dpi_scale,
+            );
+
+            let style = view
+                .engine
+                .cached_query_style
+                .as_ref()
+                .expect("editor render must cache its resolved style");
+            assert_dimension_close(
+                style.rule_spacing,
+                theme.markdown.spacing.rule_spacing * dpi_scale,
+                "editor rule spacing",
+                dpi_scale,
+            );
+            assert_dimension_close(
+                style.rule_thickness,
+                theme.markdown.spacing.rule_thickness * dpi_scale,
+                "editor rule thickness",
+                dpi_scale,
+            );
+            assert_dimension_close(
+                style.body_font_size,
+                LOGICAL_FONT_SIZE * dpi_scale,
+                "editor font size",
+                dpi_scale,
+            );
+        }
+    }
+
+    #[test]
+    fn novel_plugin_resolves_fixed_dimensions_at_render_dpi() {
+        let theme = ui::theme::test_theme();
+
+        for dpi_scale in [1.0, 1.5, 2.0] {
+            let mut view = NovelView::new();
+            let document = core::document::StringDocView::new("chapter text");
+            let mut shaper = shaping::Shaper::new().expect("test shaper must initialize");
+            ViewPlugin::render(
+                &mut view,
+                &document,
+                render_bounds(dpi_scale),
+                &theme,
+                &mut shaper,
+                dpi_scale,
+            );
+
+            let style = view
+                .engine
+                .cached_query_style
+                .as_ref()
+                .expect("novel render must cache its resolved style");
+            assert_dimension_close(
+                style.rule_spacing,
+                theme.novel.spacing.rule_spacing * dpi_scale,
+                "novel rule spacing",
+                dpi_scale,
+            );
+            assert_dimension_close(
+                style.rule_thickness,
+                theme.novel.spacing.rule_thickness * dpi_scale,
+                "novel rule thickness",
+                dpi_scale,
+            );
+            assert_dimension_close(
+                style.paragraph_spacing,
+                LOGICAL_LINE_HEIGHT * dpi_scale * theme.novel.spacing.paragraph_spacing_ratio,
+                "novel paragraph spacing",
+                dpi_scale,
+            );
+        }
+    }
+
+    #[test]
+    fn changing_rule_spacing_rebuilds_cached_preview_geometry() {
+        let mut theme = ui::theme::test_theme();
+        let mut view = MarkdownView::new();
+        view.set_source("before\n\n---\n\nafter".into(), 1);
+        let settings = MarkdownRenderSettings {
+            font_size: LOGICAL_FONT_SIZE,
+            line_height: LOGICAL_LINE_HEIGHT,
+            toc_max_depth: 3,
+            markdown_first_line_indent: false,
+        };
+
+        view.render(&theme, 800.0, 600.0, 0.0, 0.0, settings, None);
+        let initial_height = view.engine.content_height;
+        theme.markdown.spacing.rule_spacing += LOGICAL_LINE_HEIGHT;
+        view.render(&theme, 800.0, 600.0, 0.0, 0.0, settings, None);
+
+        assert!(
+            view.engine.content_height > initial_height,
+            "changing rule spacing must invalidate and rebuild cached block geometry"
+        );
+    }
+
+    #[test]
+    fn every_block_geometry_dimension_participates_in_style_hash() {
+        let theme = ui::theme::test_theme();
+        let style = MarkdownStyle::from_theme(&theme, LOGICAL_FONT_SIZE, LOGICAL_LINE_HEIGHT);
+        let expected_hash = style_hash_quick(&style);
+
+        macro_rules! assert_dimension_hashed {
+            ($field:ident) => {{
+                let mut changed = style.clone();
+                changed.$field += 1.0;
+                assert_ne!(
+                    style_hash_quick(&changed),
+                    expected_hash,
+                    concat!(stringify!($field), " must participate in the style hash")
+                );
+            }};
+        }
+
+        assert_dimension_hashed!(body_font_size);
+        assert_dimension_hashed!(code_font_size);
+        assert_dimension_hashed!(border_radius_base);
+        assert_dimension_hashed!(border_radius_small);
+        assert_dimension_hashed!(list_item_spacing);
+        assert_dimension_hashed!(list_group_spacing);
+        assert_dimension_hashed!(rule_spacing);
+        assert_dimension_hashed!(paragraph_spacing);
+        assert_dimension_hashed!(paragraph_first_line_indent);
+        assert_dimension_hashed!(heading_spacing_top);
+        assert_dimension_hashed!(heading_spacing_bottom);
+        assert_dimension_hashed!(code_block_padding);
+        assert_dimension_hashed!(blockquote_padding);
+        assert_dimension_hashed!(list_indent);
+        assert_dimension_hashed!(table_cell_padding);
+        assert_dimension_hashed!(line_height);
+        assert_dimension_hashed!(code_line_height);
+        assert_dimension_hashed!(rule_thickness);
+        assert_dimension_hashed!(rule_width_ratio);
+
+        let mut changed_heading = style.clone();
+        changed_heading.heading_font_sizes[0] += 1.0;
+        assert_ne!(style_hash_quick(&changed_heading), expected_hash);
+    }
+}
 
 #[cfg(test)]
 mod heading_tests {

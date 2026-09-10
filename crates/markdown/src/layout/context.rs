@@ -260,75 +260,6 @@ fn measure_char_widths(
 
 // ===== Layout context =====
 
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub(crate) enum LastBlockKind {
-    Paragraph,
-    Heading,
-    CodeBlock,
-    BlockQuote,
-    HorizontalRule,
-    TableWrapper,
-    MetadataBlock,
-    ListItem,
-}
-
-/// 块型的 trailing 间距 —— 块间距规则的单一事实源。
-/// `layout_block` 每块排完后、增量重排路径恢复上一块上下文、以及 debug
-/// 间距展示都取这里的值；新增/调整间距规则只需改此函数。
-pub(crate) fn trailing_spacing_for(
-    kind: LastBlockKind,
-    style: &crate::style::MarkdownStyle,
-) -> f32 {
-    match kind {
-        LastBlockKind::Paragraph
-        | LastBlockKind::CodeBlock
-        | LastBlockKind::BlockQuote
-        | LastBlockKind::TableWrapper
-        | LastBlockKind::MetadataBlock => style.paragraph_spacing,
-        LastBlockKind::Heading => style.heading_spacing_bottom,
-        LastBlockKind::ListItem => style.list_item_spacing,
-        LastBlockKind::HorizontalRule => style.rule_spacing,
-    }
-}
-
-/// 标题顶端间距(margin collapsing):首块减半;前块已是标题则不再叠加;
-/// 否则只补超出前块 trailing 的部分。`layout_block` 的 Heading 分支、
-/// 单块重排预扣与 debug 间距展示共用此公式。
-pub(crate) fn heading_top_spacing(
-    style: &crate::style::MarkdownStyle,
-    level: u8,
-    is_first_block: bool,
-    prev_was_heading: bool,
-    prev_trailing_spacing: f32,
-) -> f32 {
-    if prev_was_heading {
-        return 0.0;
-    }
-    let desired_top = style.heading_spacing_top * super::heading_spacing_scale(level);
-    if is_first_block { desired_top * 0.5 } else { (desired_top - prev_trailing_spacing).max(0.0) }
-}
-
-/// 由上一块的布局产物重建间距上下文块型:Text 需借文档块类型区分标题与
-/// 段落(active 的 HR 也排成 Text,按段落处理,与 layout_block 的 HR
-/// active 分支一致)。
-pub(crate) fn spacing_kind_of_laid_block(
-    laid_kind: &LaidOutBlockKind,
-    doc_kind: Option<&crate::builder::BlockKind>,
-) -> LastBlockKind {
-    match laid_kind {
-        LaidOutBlockKind::Text { .. } => match doc_kind {
-            Some(crate::builder::BlockKind::Heading { .. }) => LastBlockKind::Heading,
-            _ => LastBlockKind::Paragraph,
-        },
-        LaidOutBlockKind::ListItem { .. } => LastBlockKind::ListItem,
-        LaidOutBlockKind::CodeBlock { .. } => LastBlockKind::CodeBlock,
-        LaidOutBlockKind::BlockQuote { .. } => LastBlockKind::BlockQuote,
-        LaidOutBlockKind::HorizontalRule => LastBlockKind::HorizontalRule,
-        LaidOutBlockKind::Table { .. } => LastBlockKind::TableWrapper,
-        LaidOutBlockKind::MetadataBlock { .. } => LastBlockKind::MetadataBlock,
-    }
-}
-
 pub struct LayoutCtx<'a> {
     pub(crate) doc: &'a dyn core::document::DocView,
     pub(crate) style: &'a crate::style::MarkdownStyle,
@@ -337,12 +268,8 @@ pub struct LayoutCtx<'a> {
     pub(crate) indent: f32,
     pub(crate) output: Vec<LaidOutBlock>,
     pub(crate) shaper: Option<&'a mut Shaper>,
-    /// Track whether the previous block was a heading (for margin collapsing).
-    pub(crate) last_block_was_heading: bool,
-    /// Track whether the previous block was a list item (for inter-item spacing).
-    pub(crate) last_block_was_list: bool,
-    /// Count of blocks processed (for first-block special handling).
-    pub(crate) block_count: usize,
+    /// The previous sibling's spacing semantic in the current block flow.
+    pub(crate) previous_spacing_block: Option<super::spacing::BlockSpacing>,
     /// Color fade ratio for text in nested contexts (e.g. blockquote).
     /// 0.0 = normal, 1.0 = fully background color.
     pub(crate) color_fade: f32,
@@ -355,10 +282,6 @@ pub struct LayoutCtx<'a> {
     /// Built once at layout start; makes per-char width lookups O(1).
     pub(crate) ascii_widths: [f32; 128],
     pub(crate) highlighter: Option<&'a dyn crate::builder::CodeHighlighter>,
-    /// Track the kind of the previous block for spacing decisions.
-    pub(crate) last_block_kind: Option<LastBlockKind>,
-    /// Trailing spacing added by the previous block (for margin collapsing with headings).
-    pub(crate) last_trailing_spacing: f32,
     /// Shaped runs from the last wrap_text_with_width call, one per input line (split by newline).
     /// Used by layout_text_block to create per-segment text_layout without re-shaping.
     pub(crate) last_wrap_shaped: Vec<Option<shaping::ShapedRun>>,
@@ -420,16 +343,12 @@ impl<'a> LayoutCtx<'a> {
             indent: 0.0,
             output: vec![],
             shaper,
-            last_block_was_heading: false,
-            last_block_was_list: false,
-            block_count: 0,
+            previous_spacing_block: None,
             color_fade: 0.0,
             font_size_override: None,
             list_depth: 0,
             ascii_widths,
             highlighter,
-            last_block_kind: None,
-            last_trailing_spacing: 0.0,
             last_wrap_shaped: Vec::new(),
             source_text,
             edit_ctx,
@@ -443,66 +362,23 @@ impl<'a> LayoutCtx<'a> {
         (self.viewport_w - self.indent).max(20.0)
     }
 
-    /// 块排完后记录间距上下文,返回本块的 trailing 间距(调用方据此推进
-    /// `ctx.y`;HR 等已把间距烘进块高的块型不再推进)。
-    pub(crate) fn finish_block_spacing(&mut self, kind: LastBlockKind) -> f32 {
-        let trailing = trailing_spacing_for(kind, self.style);
-        self.last_trailing_spacing = trailing;
-        self.last_block_kind = Some(kind);
-        self.last_block_was_heading = kind == LastBlockKind::Heading;
-        self.last_block_was_list = kind == LastBlockKind::ListItem;
-        self.block_count += 1;
-        trailing
+    pub(crate) fn advance_to_block(&mut self, next: super::spacing::BlockSpacing) {
+        let gap = self.previous_spacing_block.map_or_else(
+            || super::spacing::document_start_gap(next, self.style),
+            |previous| super::spacing::resolve_block_gap(previous, next, self.style),
+        );
+        self.y += gap;
     }
 
-    /// 单块重排前恢复上一块的间距上下文(trailing 取间距规则单一事实源,
-    /// 与 layout_block 排完该块后的状态逐项一致)。
-    pub(crate) fn restore_spacing_context(&mut self, kind: LastBlockKind) {
-        self.last_block_kind = Some(kind);
-        self.last_trailing_spacing = trailing_spacing_for(kind, self.style);
-        self.last_block_was_heading = kind == LastBlockKind::Heading;
-        self.last_block_was_list = kind == LastBlockKind::ListItem;
+    pub(crate) fn finish_block(&mut self, block: super::spacing::BlockSpacing) {
+        self.previous_spacing_block = Some(block);
     }
 
-    /// 标题 margin collapsing 预扣:layout_block 的 Heading 分支会把同一
-    /// 数值加回 `ctx.y`,预扣使单块重排与全文布局落点一致。
-    pub(crate) fn presubtract_heading_top_spacing(&mut self, src_kind: &crate::builder::BlockKind) {
-        let crate::builder::BlockKind::Heading { level } = src_kind else {
+    pub(crate) fn finish_document_spacing(&mut self) {
+        let Some(last_block) = self.previous_spacing_block else {
             return;
         };
-        self.y -= heading_top_spacing(
-            self.style,
-            *level,
-            self.block_count == 0,
-            self.last_block_was_heading,
-            self.last_trailing_spacing,
-        );
-    }
-
-    /// 单块重排前预扣全部入口间距:estimated_positions 已包含 layout_block
-    /// 入口的间距调整(列表组收尾 bump、tight 列表缩减、标题顶端 margin
-    /// collapsing),而 layout_block 会再应用一次;此处预先反向扣除以抵消,
-    /// 保证重排落点与全文布局一致。guard 与 trailing 变化镜像 layout_block
-    /// 入口及 ListItem 分支,二者必须同步修改。
-    pub(crate) fn presubtract_entry_spacing(&mut self, src_kind: &crate::builder::BlockKind) {
-        // 列表组收尾 bump(镜像 layout_block 入口)
-        if self.last_block_was_list
-            && !matches!(src_kind, crate::builder::BlockKind::ListItem { .. })
-        {
-            self.y -= self.style.list_group_spacing - self.style.list_item_spacing;
-            self.last_trailing_spacing = self.style.list_group_spacing;
-        }
-        // tight 列表紧跟段落的缩减(镜像 layout_block ListItem 分支的 guard)
-        if let crate::builder::BlockKind::ListItem { tight, blank_line_before, .. } = src_kind
-            && *tight
-            && !*blank_line_before
-            && !self.last_block_was_list
-            && self.last_block_kind == Some(LastBlockKind::Paragraph)
-            && self.last_trailing_spacing > self.style.list_item_spacing
-        {
-            self.y += self.last_trailing_spacing - self.style.list_item_spacing;
-        }
-        self.presubtract_heading_top_spacing(src_kind);
+        self.y += super::spacing::document_end_gap(last_block, self.style);
     }
 
     pub(crate) fn push_block(&mut self, kind: LaidOutBlockKind, h: f32) {
