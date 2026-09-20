@@ -22,7 +22,7 @@ fn measure_preedit_advance_px(
     shaper.set_font_size(font_size);
     let advance = shaper
         .shape(preedit_text)
-        .map(|shaped| shaped.clusters.iter().map(|cluster| cluster.advance.max(1.0)).sum())
+        .map(|shaped| shaped.clusters.iter().map(|cluster| cluster.advance.max(0.0)).sum())
         .unwrap_or(0.0);
     shaper.set_font_size(previous_font_size);
     advance
@@ -95,6 +95,7 @@ impl EditorRuntime {
                 &metrics,
                 settings.toc_max_depth,
                 settings.markdown_first_line_indent,
+                settings.text_spacing_mode,
                 preedit,
             )
         } else {
@@ -125,6 +126,7 @@ fn paint_plugin_editor(
     metrics: &ui::settings::UiMetrics,
     toc_max_depth: u8,
     markdown_first_line_indent: bool,
+    text_spacing_mode: ui::typography::TextSpacingMode,
     preedit: (String, Option<(usize, usize)>),
 ) -> Vec<GlyphVertex> {
     let (Some(text), Some(gpu)) = (resources.text.as_mut(), resources.gpu.as_ref()) else {
@@ -146,6 +148,7 @@ fn paint_plugin_editor(
         toc_max_depth,
         markdown_first_line_indent,
     });
+    tab.send_message(PluginMessage::SetTextSpacingMode(text_spacing_mode));
     let cursor_visible = cursor_paint_enabled
         && (tab.cursor_blink_instant().elapsed().as_millis() / 500).is_multiple_of(2);
     tab.send_message(PluginMessage::SetCursorVisible(cursor_visible));
@@ -308,7 +311,8 @@ fn paint_text_editor(
     let mut tree_dirty = false;
     let mut vertices = crate::render_pipeline::shape_visible_lines(
         metrics,
-        settings.min_punctuation_width_ratio,
+        settings.text_spacing_mode,
+        settings.version,
         &context,
         tab.document,
         &mut presentation,

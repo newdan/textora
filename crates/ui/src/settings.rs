@@ -1,5 +1,6 @@
 //! User-configurable settings for the editor.
 
+use crate::typography::TextSpacingMode;
 use crate::view_mode::ViewMode;
 
 /// Theme mode: follow system, force dark, or force light.
@@ -71,6 +72,8 @@ pub struct Settings {
     pub word_wrap: bool,
     /// Whether Markdown paragraphs use a two-character first-line indent for layout.
     pub markdown_first_line_indent: bool,
+    /// Mixed CJK/Latin body text spacing policy.
+    pub text_spacing_mode: TextSpacingMode,
     /// Status bar height in pixels.
     pub status_bar_height: f32,
     /// Whether to show line numbers in the gutter.
@@ -92,9 +95,6 @@ pub struct Settings {
     pub theme_mode: ThemeMode,
     /// Line height multiplier relative to font_size.
     pub line_height_ratio: f32,
-    /// Minimum width ratio for punctuation glyphs relative to font_size/em.
-    /// 0.5 means punctuation takes at least half an em width; 0.0 disables.
-    pub min_punctuation_width_ratio: f32,
     /// Maximum heading depth shown in the TOC panel (1-6, default 3).
     pub toc_max_depth: u8,
     /// TOC panel width in logical pixels (default 200).
@@ -136,6 +136,7 @@ impl Settings {
             tab_width: 4,
             word_wrap: true,
             markdown_first_line_indent: false,
+            text_spacing_mode: TextSpacingMode::default(),
             status_bar_height: 20.0,
             max_line_bytes_for_shaping: 5000,
             show_line_numbers: true,
@@ -146,7 +147,6 @@ impl Settings {
             view_mode: ViewMode::default(),
             theme_mode: ThemeMode::default(),
             line_height_ratio: 1.618,
-            min_punctuation_width_ratio: 0.5,
             toc_max_depth: 3,
             toc_width: 200.0,
             enable_novel_mode: true,
@@ -197,6 +197,15 @@ impl Settings {
         self.version += 1;
     }
 
+    /// Update mixed CJK/Latin body text spacing policy.
+    pub fn set_text_spacing_mode(&mut self, mode: TextSpacingMode) {
+        if self.text_spacing_mode == mode {
+            return;
+        }
+        self.text_spacing_mode = mode;
+        self.version += 1;
+    }
+
     /// Update Tab indentation width.
     pub fn set_tab_width(&mut self, width: usize) {
         self.tab_width = width;
@@ -224,12 +233,6 @@ impl Settings {
     /// Update the theme mode.
     pub fn set_theme_mode(&mut self, mode: ThemeMode) {
         self.theme_mode = mode;
-        self.version += 1;
-    }
-
-    /// Update minimum punctuation width ratio.
-    pub fn set_min_punctuation_width_ratio(&mut self, ratio: f32) {
-        self.min_punctuation_width_ratio = ratio;
         self.version += 1;
     }
 
@@ -280,6 +283,26 @@ mod markdown_first_line_indent_tests {
         settings.set_markdown_first_line_indent(true);
 
         assert!(settings.markdown_first_line_indent);
+        assert_eq!(settings.version, initial_version + 1);
+    }
+}
+
+#[cfg(test)]
+mod text_spacing_mode_tests {
+    use super::Settings;
+    use crate::typography::TextSpacingMode;
+
+    #[test]
+    fn text_spacing_mode_defaults_to_natural_and_only_changed_values_increment_version() {
+        let mut settings = Settings::new();
+        let initial_version = settings.version;
+
+        assert_eq!(settings.text_spacing_mode, TextSpacingMode::Natural);
+        settings.set_text_spacing_mode(TextSpacingMode::Natural);
+        assert_eq!(settings.version, initial_version);
+
+        settings.set_text_spacing_mode(TextSpacingMode::Verbatim);
+        assert_eq!(settings.text_spacing_mode, TextSpacingMode::Verbatim);
         assert_eq!(settings.version, initial_version + 1);
     }
 }

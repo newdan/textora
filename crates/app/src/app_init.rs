@@ -177,6 +177,7 @@ fn settings_from_persisted(
     settings.show_line_numbers = persisted.show_line_numbers;
     settings.word_wrap = persisted.word_wrap;
     settings.markdown_first_line_indent = persisted.markdown_first_line_indent;
+    settings.text_spacing_mode = persisted.text_spacing_mode;
     settings.show_status_bar = persisted.show_status_bar;
     settings.font_family = persisted.font_family.clone();
     settings.font_size = persisted.font_size;
@@ -551,6 +552,18 @@ mod settings_tests {
         assert_eq!(settings.font_family, "Audit Mono");
         assert_eq!(settings.font_size, 19.0);
         assert_eq!(settings.line_height, 28.5);
+    }
+
+    #[test]
+    fn settings_from_persisted_loads_text_spacing_mode() {
+        let persisted = crate::settings_io::PersistedSettings {
+            text_spacing_mode: ui::typography::TextSpacingMode::Verbatim,
+            ..Default::default()
+        };
+
+        let settings = settings_from_persisted(&persisted);
+
+        assert_eq!(settings.text_spacing_mode, ui::typography::TextSpacingMode::Verbatim);
     }
 
     #[test]

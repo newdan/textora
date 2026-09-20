@@ -293,6 +293,7 @@ pub struct MarkdownRenderSettings {
     pub line_height: f32,
     pub toc_max_depth: u8,
     pub markdown_first_line_indent: bool,
+    pub text_spacing_mode: ui::typography::TextSpacingMode,
 }
 
 impl MarkdownRenderSettings {
@@ -305,6 +306,7 @@ impl MarkdownRenderSettings {
             line_height: metrics.line_height,
             toc_max_depth: settings.toc_max_depth,
             markdown_first_line_indent: settings.markdown_first_line_indent,
+            text_spacing_mode: settings.text_spacing_mode,
         }
     }
 
@@ -318,6 +320,7 @@ impl MarkdownRenderSettings {
         if self.markdown_first_line_indent {
             style.paragraph_first_line_indent = PARAGRAPH_FIRST_LINE_INDENT_EMS * self.font_size;
         }
+        style.text_spacing_mode = self.text_spacing_mode;
         style
     }
 }
@@ -394,6 +397,7 @@ pub struct PreviewEngine<S: BlockSource = MarkdownDoc> {
     pub paragraph_spacing: f32,
     pub toc_max_depth: u8,
     pub markdown_first_line_indent: bool,
+    pub text_spacing_mode: ui::typography::TextSpacingMode,
 
     /// WYSIWYG 编辑上下文。None 表示纯预览模式 (快速路径)。
     pub edit_ctx: Option<crate::edit::EditContext>,
@@ -448,6 +452,7 @@ impl<S: BlockSource> PreviewEngine<S> {
             paragraph_spacing: 12.0,
             toc_max_depth: 3,
             markdown_first_line_indent: false,
+            text_spacing_mode: ui::typography::TextSpacingMode::Natural,
             edit_ctx: None,
             edit_source: None,
             source_line_map: None,
@@ -2147,6 +2152,16 @@ impl<S: BlockSource> PreviewEngine<S> {
                 self.markdown_first_line_indent = *markdown_first_line_indent;
                 Some(true)
             }
+            PluginMessage::SetTextSpacingMode(mode) => {
+                if self.text_spacing_mode == *mode {
+                    return Some(true);
+                }
+                self.text_spacing_mode = *mode;
+                self.dirty = EngineDirty::StyleChanged;
+                self.cached_dl = None;
+                self.cached_vertices = None;
+                Some(true)
+            }
             PluginMessage::SetCursorByte(byte) => {
                 self.handle_set_cursor_byte(*byte);
                 Some(true)
@@ -2303,6 +2318,7 @@ impl ViewPlugin for MarkdownView {
             line_height: self.engine.base_line_height * dpi_scale,
             toc_max_depth: self.engine.toc_max_depth,
             markdown_first_line_indent: self.engine.markdown_first_line_indent,
+            text_spacing_mode: self.engine.text_spacing_mode,
         };
         let (dl, _) = self.render_at_dpi(
             theme,
@@ -2483,7 +2499,8 @@ impl ViewPlugin for NovelView {
     ) -> DrawList {
         let font_size = self.engine.base_font_size * dpi_scale;
         let line_height = self.engine.base_line_height * dpi_scale;
-        let style = MarkdownStyle::novel_at_dpi(theme, font_size, line_height, dpi_scale);
+        let mut style = MarkdownStyle::novel_at_dpi(theme, font_size, line_height, dpi_scale);
+        style.text_spacing_mode = self.engine.text_spacing_mode;
         self.engine.toc_max_depth = 3;
 
         let (dl, _) = self.engine.render(
@@ -2508,6 +2525,9 @@ impl ViewPlugin for NovelView {
         _doc: &mut dyn core::document::DocViewMut,
     ) -> bool {
         match msg {
+            PluginMessage::SetTextSpacingMode(_) => {
+                self.engine.handle_message_common(&msg).unwrap_or(false)
+            }
             PluginMessage::Scroll { delta, viewport_h } => self.engine.scroll(delta, viewport_h),
             PluginMessage::ScrollToHeading(index) => {
                 self.engine.scroll_to_heading(index);
@@ -3026,6 +3046,14 @@ impl PluginFactory for NotoraMarkdownEditorViewFactory {
 fn style_hash_quick(style: &MarkdownStyle) -> u64 {
     let mut hash = 0x517cc1b727220a95;
 
+    mix_hash_value(
+        &mut hash,
+        match style.text_spacing_mode {
+            ui::typography::TextSpacingMode::Natural => 0,
+            ui::typography::TextSpacingMode::Verbatim => 1,
+        },
+    );
+
     mix_hash_bytes(&mut hash, style.body_font_family.len().to_ne_bytes().as_slice());
     for family in &style.body_font_family {
         mix_hash_bytes(&mut hash, family.len().to_ne_bytes().as_slice());
@@ -3113,6 +3141,18 @@ mod dpi_style_tests {
 
     const LOGICAL_FONT_SIZE: f32 = 15.0;
     const LOGICAL_LINE_HEIGHT: f32 = 24.0;
+
+    #[test]
+    fn spacing_mode_message_updates_engine_state_once() {
+        let mut engine: PreviewEngine = PreviewEngine::new();
+        assert_eq!(engine.text_spacing_mode, ui::typography::TextSpacingMode::Natural);
+
+        let message = PluginMessage::SetTextSpacingMode(ui::typography::TextSpacingMode::Verbatim);
+        assert_eq!(engine.handle_message_common(&message), Some(true));
+        assert_eq!(engine.text_spacing_mode, ui::typography::TextSpacingMode::Verbatim);
+        assert_eq!(engine.handle_message_common(&message), Some(true));
+        assert_eq!(engine.text_spacing_mode, ui::typography::TextSpacingMode::Verbatim);
+    }
 
     fn assert_dimension_close(actual: f32, expected: f32, dimension: &str, dpi_scale: f32) {
         assert!(
@@ -3266,6 +3306,7 @@ mod dpi_style_tests {
             line_height: LOGICAL_LINE_HEIGHT,
             toc_max_depth: 3,
             markdown_first_line_indent: false,
+            text_spacing_mode: ui::typography::TextSpacingMode::Natural,
         };
 
         view.render(&theme, 800.0, 600.0, 0.0, 0.0, settings, None);
@@ -3471,6 +3512,7 @@ mod heading_tests {
         assert_eq!(input.font_size, metrics.font_size);
         assert_eq!(input.line_height, metrics.line_height);
         assert_eq!(input.toc_max_depth, settings.toc_max_depth);
+        assert_eq!(input.text_spacing_mode, settings.text_spacing_mode);
     }
 
     #[test]
@@ -3481,6 +3523,7 @@ mod heading_tests {
             line_height: 58.0,
             toc_max_depth: 5,
             markdown_first_line_indent: false,
+            text_spacing_mode: ui::typography::TextSpacingMode::Natural,
         };
         let style = settings.style(&theme);
         assert_eq!(style.body_font_size, 36.0);
@@ -3507,7 +3550,38 @@ mod wysiwyg_tests {
             line_height: 24.0,
             toc_max_depth: 5,
             markdown_first_line_indent: false,
+            text_spacing_mode: ui::typography::TextSpacingMode::Natural,
         }
+    }
+
+    #[test]
+    fn novel_view_spacing_setting_changes_geometry_without_editing_source() {
+        let source = "中文A,继续(说明)正文";
+        let mut document = StubDoc::new(source);
+        let mut view = NovelView::new();
+        let theme = ui::theme::test_theme();
+        let bounds = ui::core::geom::Rect::new(0.0, 0.0, 800.0, 600.0);
+        let mut shaper = shaping::Shaper::new().expect("novel spacing test requires fonts");
+        let render_width =
+            |view: &mut NovelView, shaper: &mut shaping::Shaper, document: &StubDoc| {
+                view.render(document, bounds, &theme, shaper, 1.0);
+                view.engine.flat_lines()[0].shaped.as_ref().expect("novel line must shape").width
+            };
+        let natural_width = render_width(&mut view, &mut shaper, &document);
+        assert!(view.handle_message(
+            PluginMessage::SetTextSpacingMode(ui::typography::TextSpacingMode::Verbatim),
+            &mut document,
+        ));
+        let verbatim_width = render_width(&mut view, &mut shaper, &document);
+        assert!(natural_width > verbatim_width);
+        assert_eq!(document.text, source);
+        assert!(view.handle_message(
+            PluginMessage::SetTextSpacingMode(ui::typography::TextSpacingMode::Natural),
+            &mut document,
+        ));
+        let restored_width = render_width(&mut view, &mut shaper, &document);
+        assert!((restored_width - natural_width).abs() < 0.01);
+        assert_eq!(document.text, source);
     }
 
     #[test]

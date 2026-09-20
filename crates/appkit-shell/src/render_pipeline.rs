@@ -6,7 +6,6 @@ use crate::cursor_motion::{LineCache, find_visual_line_index};
 use crate::document_presentation::DocumentPresentation;
 use crate::render_cache::{CachedLine, GlyphInstance};
 use crate::render_state::{GpuState, TextState};
-use appkit_core::content_hash;
 use appkit_core::document::DocumentModel;
 use core::highlight::HighlightKind;
 use render::GlyphVertex;
@@ -15,12 +14,16 @@ use ui::gutter::ATLAS_SIZE;
 use ui::gutter::*;
 use ui::layout::*;
 use ui::render_geom::AdvanceCacheEntry;
+use ui::typography::{TextSpacingMode, TypographyCluster, TypographyInput};
 
 use render::{GlyphKey, GlyphRenderer};
+
+use crate::reshape_worker::content_hash_for_layout;
 
 const PERF_LOG_ENV: &str = "EDIT_PLUS_PERF_LOG";
 const PERF_LOG_THRESHOLD_US_ENV: &str = "EDIT_PLUS_PERF_LOG_THRESHOLD_US";
 const DEFAULT_PERF_LOG_THRESHOLD_US: u128 = 1_000;
+const MARKDOWN_LANGUAGE_ID: &str = "markdown";
 
 #[derive(Clone, Copy)]
 struct ShapeMissMapStats {
@@ -168,6 +171,49 @@ fn perf_logging_enabled() -> bool {
     })
 }
 
+fn spacing_mode_for_line(
+    global_mode: TextSpacingMode,
+    source_uses_verbatim_spacing: bool,
+    line_bytes: &[u8],
+) -> TextSpacingMode {
+    if source_uses_verbatim_spacing
+        || global_mode == TextSpacingMode::Verbatim
+        || line_bytes.contains(&b'\t')
+    {
+        TextSpacingMode::Verbatim
+    } else {
+        TextSpacingMode::Natural
+    }
+}
+
+fn precise_cluster_advance(
+    cluster_bytes: &[u8],
+    shaped_advance: f32,
+    char_width: f32,
+) -> (bool, f32) {
+    if is_whitespace_cluster(cluster_bytes) {
+        (true, ws_cluster_advance(cluster_bytes, char_width))
+    } else {
+        (false, shaped_advance.max(0.0))
+    }
+}
+
+fn protected_ranges_for_line(
+    protected_ranges: &[std::ops::Range<usize>],
+    line_offset: usize,
+    line_length: usize,
+) -> Vec<std::ops::Range<usize>> {
+    let line_end = line_offset + line_length;
+    let first = protected_ranges.partition_point(|range| range.end <= line_offset);
+    let last = first + protected_ranges[first..].partition_point(|range| range.start < line_end);
+    protected_ranges[first..last]
+        .iter()
+        .map(|range| {
+            range.start.max(line_offset) - line_offset..range.end.min(line_end) - line_offset
+        })
+        .collect()
+}
+
 fn perf_log_threshold_us() -> u128 {
     static THRESHOLD_US: std::sync::OnceLock<u128> = std::sync::OnceLock::new();
     *THRESHOLD_US.get_or_init(|| {
@@ -278,7 +324,8 @@ fn build_cached_advance_cache_entries(
 
 pub fn shape_visible_lines(
     metrics: &ui::settings::UiMetrics,
-    min_punctuation_width_ratio: f32,
+    text_spacing_mode: TextSpacingMode,
+    _semantic_version: u64,
     ctx: &ui::gutter::RenderContext,
     dv: &mut DocumentModel,
     presentation: &mut DocumentPresentation,
@@ -379,6 +426,9 @@ pub fn shape_visible_lines(
     // placeholder VL estimates) so that the loop never starves before the
     // viewport is full.
     let bound = total_lines.saturating_sub(start_doc);
+    let source_uses_verbatim_spacing =
+        dv.language.is_some_and(|language| !language.id.eq_ignore_ascii_case(MARKDOWN_LANGUAGE_ID));
+    let source_semantic_version = presentation.source_spacing.semantic_version;
     for i in 0..bound {
         let doc_idx = start_doc + i;
         let is_active_line = {
@@ -492,10 +542,25 @@ pub fn shape_visible_lines(
         // Validate caches against the actual line content as well as layout inputs.
         let viewport_width =
             render_viewport_width(ctx.screen_w, ctx.left_margin, metrics, word_wrap);
+        let line_offset = dv.line_byte_offset(doc_line_idx).unwrap_or(0);
+        let line_protected_ranges = protected_ranges_for_line(
+            &presentation.source_spacing.protected_ranges,
+            line_offset,
+            line_bytes_early.as_ref().map_or(0, Vec::len),
+        );
         let current_content_hash = {
-            let off = dv.line_byte_offset(doc_line_idx).unwrap_or(0);
             let line_bytes = line_bytes_early.as_deref().unwrap_or_default();
-            content_hash::content_hash(line_bytes, off, viewport_width, metrics.font_size)
+            let line_spacing_mode =
+                spacing_mode_for_line(text_spacing_mode, source_uses_verbatim_spacing, line_bytes);
+            content_hash_for_layout(
+                line_bytes,
+                line_offset,
+                viewport_width,
+                metrics.font_size,
+                line_spacing_mode,
+                &line_protected_ranges,
+                source_semantic_version,
+            )
         };
         // IME preedit: skip cache for cursor line (positions need shifting)
         let preedit_on_cursor_line =
@@ -1047,19 +1112,42 @@ pub fn shape_visible_lines(
             })
         };
 
-        let visual_lines = if let Some(lines) = tree_breaks {
-            lines
+        let line_spacing_mode =
+            spacing_mode_for_line(text_spacing_mode, source_uses_verbatim_spacing, &line_bytes);
+        let typography_clusters: Vec<TypographyCluster> = shaped
+            .clusters
+            .iter()
+            .map(|cluster| {
+                TypographyCluster::new(cluster.byte_range.clone(), text.shaper.font_size())
+            })
+            .collect();
+        let typography_input = TypographyInput::new(
+            std::str::from_utf8(&line_bytes).unwrap_or_default(),
+            line_spacing_mode,
+            &typography_clusters,
+            &line_protected_ranges,
+        );
+        let gaps = ui::typography::calculate_gaps(&typography_input);
+        let visual_lines = if let Some(visual_lines) = tree_breaks {
+            shaped = ui::layout::typography::apply_gaps_to_existing_visual_lines(
+                &shaped,
+                &gaps,
+                &visual_lines,
+            );
+            visual_lines
         } else {
-            compute_visual_lines(&shaped.clusters, &line_bytes, char_width, viewport_width, 0.5)
+            let layout = ui::layout::typography::layout_shaped_run_with_gaps(
+                &shaped,
+                &gaps,
+                &line_bytes,
+                char_width,
+                viewport_width,
+                0.5,
+                0.0,
+            );
+            shaped = layout.shaped;
+            layout.visual_lines
         };
-
-        // Apply punctuation minimum-width padding after visual lines are computed.
-        // Line-break points use original advances; padding only affects rendering & cursor.
-        let em_width = text.shaper.font_size();
-        let min_ratio = min_punctuation_width_ratio;
-        if min_ratio > 0.0 {
-            apply_punctuation_padding(&mut shaped.clusters, &line_bytes, em_width, min_ratio);
-        }
         // Defer WrapIndex update until after the loop
         let doc_line = doc_idx;
 
@@ -1082,8 +1170,8 @@ pub fn shape_visible_lines(
                 .map(|c| {
                     let (_, adv) = line_bytes
                         .get(c.byte_range.clone())
-                        .map(|b| cluster_advance(b, c.advance, char_width))
-                        .unwrap_or((false, c.advance.max(1.0)));
+                        .map(|b| precise_cluster_advance(b, c.advance, char_width))
+                        .unwrap_or((false, c.advance.max(0.0)));
                     (c.byte_range.start, c.byte_range.end, adv)
                 })
                 .collect();
@@ -1098,8 +1186,8 @@ pub fn shape_visible_lines(
                 .map(|c| {
                     let (_, adv) = line_bytes
                         .get(c.byte_range.clone())
-                        .map(|b| cluster_advance(b, c.advance, char_width))
-                        .unwrap_or((false, c.advance.max(1.0)));
+                        .map(|b| precise_cluster_advance(b, c.advance, char_width))
+                        .unwrap_or((false, c.advance.max(0.0)));
                     (c.byte_range.start, c.byte_range.end, adv)
                 })
                 .collect();
@@ -1180,7 +1268,7 @@ pub fn shape_visible_lines(
                         smallvec::SmallVec::new();
                     let mut x = ctx.left_margin;
                     for c in &shaped.clusters[vl_start.._vl_end] {
-                        let (_, adv) = cluster_advance(
+                        let (_, adv) = precise_cluster_advance(
                             &line_bytes[c.byte_range.clone()],
                             c.advance,
                             char_width,
@@ -1324,7 +1412,8 @@ pub fn shape_visible_lines(
                 let font_size = text.shaper.font_size();
 
                 let cluster_bytes = &line_bytes[cluster.byte_range.clone()];
-                let (is_ws, advance) = cluster_advance(cluster_bytes, cluster.advance, char_width);
+                let (is_ws, advance) =
+                    precise_cluster_advance(cluster_bytes, cluster.advance, char_width);
                 if is_ws {
                     x_cursor += advance;
                     continue;
@@ -1420,7 +1509,7 @@ pub fn shape_visible_lines(
                     let c_fid = h.finish() as usize;
                     let c_fs = text.shaper.font_size();
 
-                    let (c_ws, c_adv) = cluster_advance(
+                    let (c_ws, c_adv) = precise_cluster_advance(
                         &line_bytes[cluster.byte_range.clone()],
                         cluster.advance,
                         char_width,
@@ -1478,8 +1567,11 @@ pub fn shape_visible_lines(
                 .clusters
                 .iter()
                 .map(|c| {
-                    let (_is_ws, adv) =
-                        cluster_advance(&line_bytes[c.byte_range.clone()], c.advance, char_width);
+                    let (_is_ws, adv) = precise_cluster_advance(
+                        &line_bytes[c.byte_range.clone()],
+                        c.advance,
+                        char_width,
+                    );
                     (c.byte_range.start, c.byte_range.end, adv)
                 })
                 .collect();
@@ -1648,7 +1740,7 @@ pub fn preedit_text_vertices(
     for cluster in &shaped.clusters {
         let glyph_id = cluster.glyph_id as u16;
         let font_id = cluster.font_id;
-        let advance = cluster.advance.max(1.0);
+        let advance = cluster.advance.max(0.0);
 
         let (int_x, phase) = render::split_subpixel(x_cursor);
         let Some(slot) = crate::text_rasterize::resolve_glyph(

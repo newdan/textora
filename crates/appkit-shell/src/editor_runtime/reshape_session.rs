@@ -188,6 +188,9 @@ mod tests {
             viewport_width: 100.0,
             font_size: 12.0,
             max_line_bytes: 0,
+            spacing_mode: ui::typography::TextSpacingMode::Natural,
+            protected_ranges: Arc::from([]),
+            semantic_version: 0,
             dv_idx: 0,
         }
     }

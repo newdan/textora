@@ -28,6 +28,7 @@ pub(crate) enum SettingsDispatchAction {
     SetTabWidth(usize),
     SetWordWrap(bool),
     SetMarkdownFirstLineIndent(bool),
+    SetTextSpacingMode(ui::typography::TextSpacingMode),
     SetShowLineNumbers(bool),
     SetShowStatusBar(bool),
     ToggleLineNumbers,
@@ -170,6 +171,10 @@ impl App {
                 self.settings.set_markdown_first_line_indent(enabled);
                 AppEffect::PERSIST_SETTINGS.merge(AppEffect::RESHAPE)
             }
+            SettingsDispatchAction::SetTextSpacingMode(mode) => {
+                self.settings.set_text_spacing_mode(mode);
+                AppEffect::PERSIST_SETTINGS.merge(AppEffect::RESHAPE)
+            }
             SettingsDispatchAction::SetShowLineNumbers(enabled) => {
                 self.settings.set_show_line_numbers(enabled);
                 AppEffect::PERSIST_SETTINGS.merge(AppEffect::RESHAPE)
@@ -295,6 +300,19 @@ mod tests {
         let effect = app.dispatch_settings_action(SettingsDispatchAction::ToggleWordWrap);
 
         assert_eq!(app.settings.word_wrap, !before);
+        assert!(effect.persist_settings);
+        assert!(effect.reshape);
+    }
+
+    #[test]
+    fn text_spacing_mode_returns_persist_and_reshape() {
+        let mut app = App::new(None);
+
+        let effect = app.dispatch_settings_action(SettingsDispatchAction::SetTextSpacingMode(
+            ui::typography::TextSpacingMode::Verbatim,
+        ));
+
+        assert_eq!(app.settings.text_spacing_mode, ui::typography::TextSpacingMode::Verbatim);
         assert!(effect.persist_settings);
         assert!(effect.reshape);
     }

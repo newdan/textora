@@ -2,6 +2,17 @@ use crate::cursor_motion::CursorRenderState;
 use crate::display_state::DisplayState;
 use appkit_core::document::SearchState;
 use core::highlight::HighlighterCache;
+use std::ops::Range;
+use std::sync::Arc;
+
+/// Cached source semantics used by plain editor shaping.
+#[derive(Clone, Debug, Default)]
+pub struct SourceSpacingState {
+    pub protected_ranges: Arc<[Range<usize>]>,
+    pub semantic_version: u64,
+    pub source_revision: u64,
+    pub is_markdown: bool,
+}
 
 /// Rebuildable presentation state layered on top of a headless document
 /// model.
@@ -10,6 +21,7 @@ pub struct DocumentPresentation {
     pub highlighter_cache: HighlighterCache,
     pub cursor_render_state: CursorRenderState,
     pub search_state: SearchState,
+    pub source_spacing: SourceSpacingState,
 }
 
 impl DocumentPresentation {
@@ -19,6 +31,7 @@ impl DocumentPresentation {
             highlighter_cache: HighlighterCache::new(),
             cursor_render_state: CursorRenderState::new(),
             search_state: SearchState::default(),
+            source_spacing: SourceSpacingState::default(),
         }
     }
 }

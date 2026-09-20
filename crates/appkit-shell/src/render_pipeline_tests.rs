@@ -3,8 +3,8 @@ use crate::snap_tree::DisplayLineEntry;
 use appkit_core::document::DocumentModel;
 use core::buffer::TextBuffer;
 use ui::layout::{
-    apply_punctuation_padding, build_advance_cache_entries, compute_visual_lines, is_cjk_char,
-    is_whitespace_cluster, pick_char_width, ws_cluster_advance,
+    build_advance_cache_entries, compute_visual_lines, is_cjk_char, is_whitespace_cluster,
+    pick_char_width, ws_cluster_advance,
 };
 
 #[test]
@@ -778,128 +778,52 @@ fn cjk_punct_quote_not_at_line_start() {
     }
 }
 
-// ── Punctuation padding integration: shape → pad → cache → cursor ──
-
 #[test]
-fn punctuation_padding_cursor_mapping() {
-    // Simulate: line = "a,b" where comma is narrow (3px), em=15.0, ratio=0.5
-    // After padding: comma advance becomes 7.5 (min), x_offset centered.
-    let em = 15.0f32;
-    let ratio = 0.5f32;
-    let char_width = 9.0f32;
+fn prose_spacing_cache_places_carets_at_gap_midpoints() {
+    use ui::typography::{TextSpacingMode, TypographyCluster, TypographyInput, calculate_gaps};
 
-    let line_bytes = b"a,b";
-    let mut clusters = vec![
-        mock_cluster(0, 1, 9.0), // 'a'
-        mock_cluster(1, 2, 3.0), // ','  — narrow, should be padded
-        mock_cluster(2, 3, 9.0), // 'b'
-    ];
-
-    // 1. compute_visual_lines uses ORIGINAL advances
-    let vlines = compute_visual_lines(&clusters, line_bytes, char_width, 200.0, 0.5);
-    assert_eq!(vlines.len(), 1, "short line should be single visual line");
-
-    // 2. Apply padding (same as render_pipeline.rs does)
-    apply_punctuation_padding(&mut clusters, line_bytes, em, ratio);
-    assert!(clusters[1].advance >= em * ratio, "comma should be padded");
-
-    // 3. Build advance cache entries from padded clusters
-    let shaped = shaping::ShapedRun { clusters: clusters.clone(), width: 0.0 };
-    let mut pool = Vec::new();
-    let entries =
-        build_advance_cache_entries(&vlines, 0, &shaped, line_bytes, char_width, 0, &mut pool, 0.0);
-    assert_eq!(entries.len(), 1);
-    let entry = &entries[0];
-
-    // Cursor at end of cluster for byte 1: accumulates through cd.1<=1
-    let x_after_a = super::compute_cursor_pixel_x_cached(
-        &entry
-            .clusters
-            .iter()
-            .map(|&(end, x, _)| (end.saturating_sub(1), end, x))
-            .collect::<Vec<_>>(),
-        0,
-        entry.clusters.len(),
-        1,
-        3,
+    let source = "甲,乙";
+    let raw = shaping::ShapedRun {
+        clusters: vec![mock_cluster(0, 3, 16.0), mock_cluster(3, 4, 4.0), mock_cluster(4, 7, 16.0)],
+        width: 36.0,
+    };
+    let typography_clusters: Vec<_> = raw
+        .clusters
+        .iter()
+        .map(|cluster| TypographyCluster::new(cluster.byte_range.clone(), 16.0))
+        .collect();
+    let gaps = calculate_gaps(&TypographyInput::new(
+        source,
+        TextSpacingMode::Natural,
+        &typography_clusters,
+        &[],
+    ));
+    let layout = ui::layout::typography::layout_shaped_run_with_gaps(
+        &raw,
+        &gaps,
+        source.as_bytes(),
+        8.0,
+        200.0,
+        0.5,
         0.0,
     );
-    assert_eq!(x_after_a, Some(9.0), "cursor at end of a");
-
-    // Cursor at end of cluster for byte 2: accumulates through cd.1<=2
-    let x_after_comma = super::compute_cursor_pixel_x_cached(
-        &entry
-            .clusters
-            .iter()
-            .map(|&(end, x, _)| (end.saturating_sub(1), end, x))
-            .collect::<Vec<_>>(),
-        0,
-        entry.clusters.len(),
-        2,
-        3,
-        0.0,
-    );
-    assert_eq!(x_after_comma, Some(25.5), "cursor at end of comma");
-
-    // Cursor at end of cluster for byte 3: accumulates all clusters
-    let x_after_b = super::compute_cursor_pixel_x_cached(
-        &entry
-            .clusters
-            .iter()
-            .map(|&(end, x, _)| (end.saturating_sub(1), end, x))
-            .collect::<Vec<_>>(),
-        0,
-        entry.clusters.len(),
-        3,
-        3,
-        0.0,
-    );
-    assert_eq!(x_after_b, Some(51.0), "cursor at end of b");
-
-    // Comma advance in cache should reflect padding
-    let comma_advance = entry.clusters[1].1 - entry.clusters[0].1;
-    assert_eq!(comma_advance, 7.5, "padded comma advance");
-}
-
-#[test]
-fn markdown_ordered_list_marker_cursor_mapping_keeps_dot_advance() {
-    let em = 15.0f32;
-    let ratio = 0.5f32;
-    let char_width = 9.0f32;
-    let line_bytes = b"10. item";
-    let mut clusters = vec![
-        mock_cluster(0, 1, 9.0),
-        mock_cluster(1, 2, 9.0),
-        mock_cluster(2, 3, 3.0),
-        mock_cluster(3, 4, 9.0),
-        mock_cluster(4, 5, 9.0),
-        mock_cluster(5, 6, 9.0),
-        mock_cluster(6, 7, 9.0),
-        mock_cluster(7, 8, 9.0),
-    ];
-
-    let visual_lines = compute_visual_lines(&clusters, line_bytes, char_width, 200.0, 0.5);
-    apply_punctuation_padding(&mut clusters, line_bytes, em, ratio);
-
-    let shaped = shaping::ShapedRun { clusters, width: 0.0 };
     let mut cluster_pool = Vec::new();
     let entries = build_advance_cache_entries(
-        &visual_lines,
+        &layout.visual_lines,
         0,
-        &shaped,
-        line_bytes,
-        char_width,
+        &layout.shaped,
+        source.as_bytes(),
+        8.0,
         0,
         &mut cluster_pool,
         0.0,
     );
-    let marker_entry = &entries[0];
-
-    let x_after_period = ui::render_geom::byte_to_x(3, &marker_entry.clusters, 0.0, true);
-    let x_after_marker_space = ui::render_geom::byte_to_x(4, &marker_entry.clusters, 0.0, true);
-
-    assert_eq!(x_after_period, 21.0);
-    assert_eq!(x_after_marker_space, 30.0);
+    let entry = &entries[0];
+    assert_eq!(ui::render_geom::byte_to_x(3, &entry.clusters, 0.0, true), 16.5);
+    assert_eq!(ui::render_geom::byte_to_x(4, &entry.clusters, 0.0, true), 22.0);
+    assert_eq!(ui::render_geom::byte_to_x(7, &entry.clusters, 0.0, true), 39.0);
+    assert_eq!(layout.visual_lines[0].2, 39.0);
+    assert_eq!(raw.width, 36.0);
 }
 
 #[test]

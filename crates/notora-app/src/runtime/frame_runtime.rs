@@ -1,5 +1,6 @@
 use std::collections::HashSet;
 use std::path::Path;
+use std::sync::Arc;
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -22,6 +23,57 @@ const SAVE_STATUS_UNSAVED: &str = "未保存";
 const SAVE_STATUS_PENDING: &str = "待保存";
 const SAVE_STATUS_SAVING: &str = "保存中";
 const SAVE_STATUS_FAILED: &str = "保存失败";
+const MARKDOWN_LANGUAGE_ID: &str = "markdown";
+const MARKDOWN_PLUGIN_ID: &str = ui::plugin::PLUGIN_MARKDOWN_EDITOR;
+const MARKDOWN_FILE_EXTENSIONS: &[&str] = &["md", "markdown", "mdown", "mkd"];
+const SOURCE_SPACING_SEMANTIC_VERSION: u64 = 1;
+
+fn refresh_source_spacing_state(editor: &mut appkit_shell::editor_runtime::EditorRuntime) {
+    let Some(tab_id) = editor.active_tab_id() else {
+        return;
+    };
+    let Some(mut tab) = editor.tab_session_mut(tab_id) else {
+        return;
+    };
+    let mut presentation = tab.take_presentation();
+    let is_markdown = tab.plugin_name() == MARKDOWN_PLUGIN_ID
+        || tab
+            .document
+            .language
+            .is_some_and(|language| language.id.eq_ignore_ascii_case(MARKDOWN_LANGUAGE_ID))
+        || tab.document.file_path.as_deref().and_then(|path| path.extension()).is_some_and(
+            |extension| {
+                extension.to_str().is_some_and(|extension| {
+                    MARKDOWN_FILE_EXTENSIONS
+                        .iter()
+                        .any(|candidate| extension.eq_ignore_ascii_case(candidate))
+                })
+            },
+        );
+    let source_revision = tab.document.content_revision();
+    if presentation.source_spacing.source_revision == source_revision
+        && presentation.source_spacing.is_markdown == is_markdown
+    {
+        tab.restore_presentation(presentation);
+        return;
+    }
+
+    let protected_ranges = if is_markdown {
+        let parsed = textora_markdown::parser::parse_markdown(&tab.document.full_text());
+        textora_markdown::typography::extract_prose_ranges(&parsed)
+            .protected_ranges()
+            .iter()
+            .map(|range| range.start..range.end)
+            .collect::<Vec<_>>()
+    } else {
+        Vec::new()
+    };
+    presentation.source_spacing.protected_ranges = Arc::from(protected_ranges);
+    presentation.source_spacing.semantic_version = SOURCE_SPACING_SEMANTIC_VERSION;
+    presentation.source_spacing.source_revision = source_revision;
+    presentation.source_spacing.is_markdown = is_markdown;
+    tab.restore_presentation(presentation);
+}
 
 #[derive(Debug)]
 pub(super) struct StartupTrace {
@@ -316,6 +368,7 @@ impl FrameRuntime {
         } else {
             model.editor_chrome = crate::editor_pane::EditorPaneInput::default();
         }
+        refresh_source_spacing_state(document_runtime.editor_mut());
         let mut render_resources = document_runtime.editor_mut().take_render_resources();
         let mut frame = document_runtime.editor_mut().begin_frame()?;
         self.shell.render(&mut frame, input.layout, &model)?;
@@ -582,5 +635,52 @@ mod chrome_tests {
         let narrow =
             ShellLayout { editor_header_rect: ui::Rect::new(560.0, 0.0, 300.0, 84.0), ..layout };
         assert!(editor_header_is_compact(narrow, true));
+    }
+}
+
+#[cfg(test)]
+mod spacing_tests {
+    #[test]
+    fn untitled_markdown_keeps_code_protection_in_source_mode() {
+        let mut app = super::super::tests::app();
+        let editor = app.document_runtime.editor_mut();
+        let (mut prepared, _) = crate::editor_adapter::prepare_untitled_document(
+            editor,
+            notora_core::DocumentKind::Markdown,
+        )
+        .expect("untitled Markdown should prepare");
+        let source = "正文,继续 `代码,中文`";
+        prepared.document.tb.write_raw(source.as_bytes());
+        prepared.document.line_index =
+            appkit_core::line_index::LineIndex::rebuild_from(&prepared.document.tb);
+        prepared.document.mark_content_changed();
+        editor.install_prepared_tab(
+            prepared,
+            None,
+            appkit_shell::editor_runtime::OpenDisposition::Persistent,
+        );
+        let tab_id = editor.active_tab_id().expect("untitled tab should be active");
+        editor
+            .tab_session_mut(tab_id)
+            .expect("untitled tab should exist")
+            .replace_plugin(Box::new(appkit_shell::editor_plugin::EditorPlugin::new()));
+        super::refresh_source_spacing_state(editor);
+        let mut tab = editor.tab_session_mut(tab_id).expect("source tab should exist");
+        assert!(tab.document.file_path.is_none());
+        assert_eq!(tab.document.full_text(), source);
+        let presentation = tab.take_presentation();
+        let code_start = source.find('`').expect("fixture has inline code");
+        assert!(presentation.source_spacing.is_markdown);
+        assert!(
+            presentation
+                .source_spacing
+                .protected_ranges
+                .iter()
+                .any(|range| { range.start <= code_start && range.end >= source.len() })
+        );
+        assert!(
+            !presentation.source_spacing.protected_ranges.iter().any(|range| range.contains(&0))
+        );
+        tab.restore_presentation(presentation);
     }
 }

@@ -2,9 +2,138 @@
 //! Methods on `impl App`, extracted from app.rs.
 
 use crate::app::App;
-use crate::reshape_worker::ReshapeRequest;
+use crate::reshape_worker::{ReshapeRequest, content_hash_for_layout};
+use appkit_shell::document_presentation::DocumentPresentation;
+use std::sync::Arc;
+use ui::typography::TextSpacingMode;
+
+const MARKDOWN_LANGUAGE_ID: &str = "markdown";
+const MARKDOWN_FILE_EXTENSIONS: &[&str] = &["md", "markdown", "mdown", "mkd"];
+const SOURCE_SPACING_SEMANTIC_VERSION: u64 = 1;
+
+fn spacing_mode_for_line(
+    global_mode: TextSpacingMode,
+    source_uses_verbatim_spacing: bool,
+    line_bytes: &[u8],
+) -> TextSpacingMode {
+    if source_uses_verbatim_spacing
+        || global_mode == TextSpacingMode::Verbatim
+        || line_bytes.contains(&b'\t')
+    {
+        TextSpacingMode::Verbatim
+    } else {
+        TextSpacingMode::Natural
+    }
+}
+
+fn document_is_markdown_source(document: &appkit_core::document::DocumentModel) -> bool {
+    document.language.is_some_and(|language| language.id.eq_ignore_ascii_case(MARKDOWN_LANGUAGE_ID))
+        || document.file_path.as_deref().and_then(|path| path.extension()).is_some_and(
+            |extension| {
+                extension.to_str().is_some_and(|extension| {
+                    MARKDOWN_FILE_EXTENSIONS
+                        .iter()
+                        .any(|candidate| extension.eq_ignore_ascii_case(candidate))
+                })
+            },
+        )
+}
+
+fn document_uses_verbatim_source_spacing(document: &appkit_core::document::DocumentModel) -> bool {
+    document
+        .language
+        .is_some_and(|language| !language.id.eq_ignore_ascii_case(MARKDOWN_LANGUAGE_ID))
+}
+
+fn refresh_source_spacing_state(
+    document: &appkit_core::document::DocumentModel,
+    presentation: &mut DocumentPresentation,
+) {
+    let source_revision = document.content_revision();
+    let is_markdown = document_is_markdown_source(document);
+    if presentation.source_spacing.source_revision == source_revision
+        && presentation.source_spacing.is_markdown == is_markdown
+    {
+        return;
+    }
+
+    let protected_ranges = markdown_protected_ranges(document, is_markdown);
+    update_source_spacing_state(presentation, source_revision, is_markdown, protected_ranges)
+}
+
+#[cfg(feature = "markdown")]
+fn markdown_protected_ranges(
+    document: &appkit_core::document::DocumentModel,
+    is_markdown: bool,
+) -> Vec<std::ops::Range<usize>> {
+    if !is_markdown {
+        return Vec::new();
+    }
+    let parsed = textora_markdown::parser::parse_markdown(&document.full_text());
+    textora_markdown::typography::extract_prose_ranges(&parsed)
+        .protected_ranges()
+        .iter()
+        .map(|range| range.start..range.end)
+        .collect()
+}
+
+#[cfg(not(feature = "markdown"))]
+fn markdown_protected_ranges(
+    document: &appkit_core::document::DocumentModel,
+    is_markdown: bool,
+) -> Vec<std::ops::Range<usize>> {
+    if !is_markdown {
+        return Vec::new();
+    }
+    let source_length = document.buffer_len();
+    if source_length == 0 {
+        return Vec::new();
+    }
+    vec![0..source_length]
+}
+
+fn protected_ranges_for_line(
+    protected_ranges: &[std::ops::Range<usize>],
+    line_offset: usize,
+    line_length: usize,
+) -> Vec<std::ops::Range<usize>> {
+    let line_end = line_offset + line_length;
+    let first = protected_ranges.partition_point(|range| range.end <= line_offset);
+    let last = first + protected_ranges[first..].partition_point(|range| range.start < line_end);
+    protected_ranges[first..last]
+        .iter()
+        .map(|range| {
+            range.start.max(line_offset) - line_offset..range.end.min(line_end) - line_offset
+        })
+        .collect()
+}
+
+fn update_source_spacing_state(
+    presentation: &mut DocumentPresentation,
+    source_revision: u64,
+    is_markdown: bool,
+    protected_ranges: Vec<std::ops::Range<usize>>,
+) {
+    presentation.source_spacing.protected_ranges = Arc::from(protected_ranges);
+    presentation.source_spacing.semantic_version = SOURCE_SPACING_SEMANTIC_VERSION;
+    presentation.source_spacing.source_revision = source_revision;
+    presentation.source_spacing.is_markdown = is_markdown;
+}
 
 impl App {
+    pub(crate) fn refresh_active_source_spacing_state(&mut self) {
+        let Some(tab_id) = self.active_tab_id() else {
+            return;
+        };
+        let Some(mut tab) = self.tab_session_mut(tab_id) else {
+            return;
+        };
+        let mut presentation = tab.take_presentation();
+        let document = &*tab.document;
+        refresh_source_spacing_state(document, &mut presentation);
+        tab.restore_presentation(presentation);
+    }
+
     pub(crate) fn invalidate_reshape(&mut self) {
         self.editor_runtime.invalidate_reshape();
     }
@@ -172,35 +301,59 @@ impl App {
             .min(document_line_count);
         let generation = self.editor_runtime.reshape_generation();
         let max_line_bytes = self.settings.max_line_bytes_for_shaping;
+        let configured_spacing_mode = self.settings.text_spacing_mode;
+        let pending_lines = (start_doc..ahead_end)
+            .filter(|line| self.editor_runtime.reshape_pending(*line))
+            .collect::<std::collections::HashSet<_>>();
         let requests: Vec<(usize, ReshapeRequest)> = {
-            let Some(tab) = self.tab_session(tab_id) else {
+            let Some(mut tab) = self.tab_session_mut(tab_id) else {
                 return;
             };
-            let document = tab.document;
-            (start_doc..ahead_end)
+            let mut presentation = tab.take_presentation();
+            let document = &*tab.document;
+            refresh_source_spacing_state(document, &mut presentation);
+            let protected_ranges = presentation.source_spacing.protected_ranges.clone();
+            let semantic_version = presentation.source_spacing.semantic_version;
+            let source_uses_verbatim_spacing = document_uses_verbatim_source_spacing(document);
+            let requests = (start_doc..ahead_end)
                 .filter_map(|dl| {
                     let line_bytes = document.doc_line_bytes(dl)?;
+                    let off = document.line_byte_offset(dl).unwrap_or(0);
+                    let local_protected_ranges: Arc<[std::ops::Range<usize>]> = Arc::from(
+                        protected_ranges_for_line(&protected_ranges, off, line_bytes.len()),
+                    );
                     // Skip lines that are already shaped and up-to-date
                     let is_up_to_date = if let Some(entry) = tab.display_map_entry(dl) {
-                        let off = document.line_byte_offset(dl).unwrap_or(0);
-                        let current_hash = crate::content_hash::content_hash(
+                        let spacing_mode = spacing_mode_for_line(
+                            configured_spacing_mode,
+                            source_uses_verbatim_spacing,
+                            line_bytes.as_ref(),
+                        );
+                        let current_hash = content_hash_for_layout(
                             line_bytes.as_ref(),
                             off,
                             viewport_width,
                             font_size,
+                            spacing_mode,
+                            &local_protected_ranges,
+                            semantic_version,
                         );
                         entry.content_hash != 0 && entry.content_hash == current_hash
                     } else {
                         false
                     };
 
-                    if is_up_to_date || self.editor_runtime.reshape_pending(dl) {
+                    if is_up_to_date || pending_lines.contains(&dl) {
                         _skipped += 1;
                         return None;
                     }
 
-                    let off = document.line_byte_offset(dl).unwrap_or(0);
                     let len = document.line_byte_length(dl).unwrap_or(0);
+                    let spacing_mode = spacing_mode_for_line(
+                        configured_spacing_mode,
+                        source_uses_verbatim_spacing,
+                        line_bytes.as_ref(),
+                    );
                     Some((
                         dl,
                         ReshapeRequest {
@@ -212,11 +365,16 @@ impl App {
                             viewport_width,
                             font_size,
                             max_line_bytes,
+                            spacing_mode,
+                            protected_ranges: local_protected_ranges,
+                            semantic_version,
                             dv_idx: active_index,
                         },
                     ))
                 })
-                .collect()
+                .collect::<Vec<_>>();
+            tab.restore_presentation(presentation);
+            requests
         };
         for (doc_line, request) in requests {
             if !self.editor_runtime.mark_reshape_pending(doc_line) {
@@ -732,5 +890,41 @@ mod zoom_tests {
         let available_h2 = screen_h - status_h - top_h;
         let expected2 = (available_h2 / metrics.line_height).max(1.0) as f64;
         assert_eq!(app.visible_height_lines(screen_h), expected2);
+    }
+
+    #[test]
+    fn tab_lines_always_use_verbatim_spacing() {
+        let settings = ui::settings::Settings::new();
+
+        assert_eq!(
+            spacing_mode_for_line(settings.text_spacing_mode, false, "中文\tvalue".as_bytes()),
+            TextSpacingMode::Verbatim
+        );
+    }
+
+    #[test]
+    fn spacing_mode_change_changes_worker_cache_key() {
+        let settings = ui::settings::Settings::new();
+        let line = "中文,正文".as_bytes();
+        let natural_hash = content_hash_for_layout(
+            line,
+            0,
+            200.0,
+            settings.font_size,
+            TextSpacingMode::Natural,
+            &[],
+            settings.version,
+        );
+        let verbatim_hash = content_hash_for_layout(
+            line,
+            0,
+            200.0,
+            settings.font_size,
+            TextSpacingMode::Verbatim,
+            &[],
+            settings.version,
+        );
+
+        assert_ne!(natural_hash, verbatim_hash);
     }
 }

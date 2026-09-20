@@ -186,6 +186,7 @@ impl App {
             show_line_numbers,
             word_wrap,
             markdown_first_line_indent,
+            text_spacing_mode,
             show_status_bar,
             font_family,
             font_size,
@@ -198,6 +199,7 @@ impl App {
                 s.show_line_numbers,
                 s.word_wrap,
                 s.markdown_first_line_indent,
+                s.text_spacing_mode,
                 s.show_status_bar,
                 s.font_family.clone(),
                 s.font_size,
@@ -209,6 +211,7 @@ impl App {
         settings.show_line_numbers = show_line_numbers;
         settings.word_wrap = word_wrap;
         settings.markdown_first_line_indent = markdown_first_line_indent;
+        settings.text_spacing_mode = text_spacing_mode;
         settings.show_status_bar = show_status_bar;
         settings.font_family = font_family;
         settings.font_size = font_size;

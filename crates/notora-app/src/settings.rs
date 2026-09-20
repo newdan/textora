@@ -46,6 +46,7 @@ pub struct EditorSettings {
     pub tab_width: usize,
     pub word_wrap: bool,
     pub markdown_first_line_indent: bool,
+    pub text_spacing_mode: ui::typography::TextSpacingMode,
     pub show_line_numbers: bool,
 }
 
@@ -76,6 +77,7 @@ impl Default for ProductSettings {
                 tab_width: ui_settings.tab_width,
                 word_wrap: ui_settings.word_wrap,
                 markdown_first_line_indent: ui_settings.markdown_first_line_indent,
+                text_spacing_mode: ui_settings.text_spacing_mode,
                 show_line_numbers: ui_settings.show_line_numbers,
             },
             interface: InterfaceSettings {
@@ -117,6 +119,7 @@ impl ProductSettings {
         ui_settings.set_tab_width(self.editor.tab_width);
         ui_settings.set_word_wrap(self.editor.word_wrap);
         ui_settings.set_markdown_first_line_indent(self.editor.markdown_first_line_indent);
+        ui_settings.set_text_spacing_mode(self.editor.text_spacing_mode);
         ui_settings.set_show_line_numbers(self.editor.show_line_numbers);
         ui_settings.set_show_status_bar(self.interface.show_status_bar);
     }
@@ -307,6 +310,25 @@ mod tests {
         let mut ui_settings = ui::Settings::new();
         loaded.settings.apply_to_ui(&mut ui_settings);
         assert_eq!(ui_settings.font_size, 19.0);
+    }
+
+    #[test]
+    fn text_spacing_mode_round_trips_and_maps_to_ui_settings() {
+        let directory = tempfile::tempdir().expect("settings test directory should exist");
+        let path = directory.path().join("settings.toml");
+        let mut settings = ProductSettings::default();
+        settings.editor.text_spacing_mode = ui::typography::TextSpacingMode::Verbatim;
+
+        save_product_settings(&path, &settings).expect("settings should save atomically");
+
+        let loaded = load_product_settings(&path);
+        assert_eq!(
+            loaded.settings.editor.text_spacing_mode,
+            ui::typography::TextSpacingMode::Verbatim
+        );
+        let mut ui_settings = ui::Settings::new();
+        loaded.settings.apply_to_ui(&mut ui_settings);
+        assert_eq!(ui_settings.text_spacing_mode, ui::typography::TextSpacingMode::Verbatim);
     }
 
     #[test]

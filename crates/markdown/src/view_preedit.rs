@@ -68,6 +68,10 @@ impl<S: BlockSource> PreviewEngine<S> {
         composition.selection = selection;
         composition.inserted_len = inserted_len;
         let engine = &mut composition.engine;
+        if engine.text_spacing_mode != self.text_spacing_mode {
+            engine.text_spacing_mode = self.text_spacing_mode;
+            engine.mark_source_dirty();
+        }
         if engine.edit_source.as_deref() != Some(preview_source.as_str()) {
             engine.set_edit_source(Some(preview_source));
             engine.mark_source_dirty();
@@ -99,6 +103,10 @@ pub(super) fn render_editor(
     preview.base_line_height = original.base_line_height;
     preview.toc_max_depth = original.toc_max_depth;
     preview.markdown_first_line_indent = original.markdown_first_line_indent;
+    if preview.text_spacing_mode != original.text_spacing_mode {
+        preview.text_spacing_mode = original.text_spacing_mode;
+        preview.mark_source_dirty();
+    }
     preview.scroll_y = original.scroll_y;
     preview.cursor_visible = original.cursor_visible;
     let preview_source = preview.edit_source.clone().expect("replacement preview owns its source");
@@ -168,6 +176,7 @@ fn render_engine(
         line_height: engine.base_line_height * dpi_scale,
         toc_max_depth: engine.toc_max_depth,
         markdown_first_line_indent: engine.markdown_first_line_indent,
+        text_spacing_mode: engine.text_spacing_mode,
     };
     let style = settings.style_at_dpi(theme, dpi_scale);
     engine.toc_max_depth = settings.toc_max_depth;
@@ -307,6 +316,35 @@ mod tests {
         render(&mut view);
         assert_eq!(text(&view), "新 tail");
         view
+    }
+
+    #[test]
+    fn replacement_preedit_copies_text_spacing_mode() {
+        let mut view = MarkdownEditorView::new();
+        view.set_source("old tail".into(), 1);
+        view.engine.handle_message_common(&PluginMessage::SetCursorByte(3));
+        view.engine.handle_message_common(&PluginMessage::SetSelAnchorByte(Some(0)));
+        view.engine.handle_message_common(&PluginMessage::SetSelCursorByte(Some(3)));
+        view.engine.handle_message_common(&PluginMessage::SetPreedit {
+            text: "新".into(),
+            cursor: Some((3, 3)),
+        });
+        view.engine.handle_message_common(&PluginMessage::SetTextSpacingMode(
+            ui::typography::TextSpacingMode::Verbatim,
+        ));
+
+        render(&mut view);
+
+        assert_eq!(view.engine.text_spacing_mode, ui::typography::TextSpacingMode::Verbatim);
+        assert_eq!(
+            view.engine
+                .replacement_preedit
+                .as_ref()
+                .expect("replacement preview exists")
+                .engine
+                .text_spacing_mode,
+            ui::typography::TextSpacingMode::Verbatim
+        );
     }
 
     fn assert_preedit_matches_commit(view: &mut MarkdownEditorView, expected: &str) {

@@ -40,6 +40,7 @@ impl App {
             line_height_ratio: self.settings.line_height_ratio,
             word_wrap: self.settings.word_wrap,
             markdown_first_line_indent: self.settings.markdown_first_line_indent,
+            text_spacing_mode: self.settings.text_spacing_mode,
             show_line_numbers: self.settings.show_line_numbers,
             tab_width: self.settings.tab_width,
             view_mode: self.settings.view_mode,

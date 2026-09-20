@@ -735,11 +735,13 @@ impl App {
         metrics: &ui::settings::UiMetrics,
         resources: &mut RenderResources,
     ) -> Vec<GlyphVertex> {
+        self.refresh_active_source_spacing_state();
         let lc = self.active_document_line_count();
         let gutter_w = self.settings.gutter_width(lc) * metrics.dpi;
         let left_margin =
             self.toc_left_offset() + self.editor_left_margin_with_metrics(lc, metrics);
-        let min_punct_ratio = self.settings.min_punctuation_width_ratio;
+        let text_spacing_mode = self.settings.text_spacing_mode;
+        let semantic_version = self.settings.version;
 
         let Some(tab_id) = self.active_tab_id() else {
             return vec![];
@@ -787,7 +789,8 @@ impl App {
         let mut presentation = tab.take_presentation();
         let vertices = crate::render_pipeline::shape_visible_lines(
             metrics,
-            min_punct_ratio,
+            text_spacing_mode,
+            semantic_version,
             &context,
             tab.document,
             &mut presentation,
@@ -899,6 +902,7 @@ impl App {
                 let theme = self.current_theme.clone();
                 let toc_max_depth = self.settings.toc_max_depth;
                 let markdown_first_line_indent = self.settings.markdown_first_line_indent;
+                let text_spacing_mode = self.settings.text_spacing_mode;
                 let shaper = resources.text.as_mut().map(|text| &mut text.shaper);
                 let session = active_id.and_then(|id| self.editor_runtime.tab_session_mut(id));
                 if let Some(mut tab) = session
@@ -912,6 +916,9 @@ impl App {
                         toc_max_depth,
                         markdown_first_line_indent,
                     });
+                    tab.send_message(ui::plugin::PluginMessage::SetTextSpacingMode(
+                        text_spacing_mode,
+                    ));
                     // Forward blink phase to all rendering plugins so they can hide/show cursor
                     let (visible, _) = crate::app::compute_cursor_phase(tab.cursor_blink_instant());
                     tab.send_message(ui::plugin::PluginMessage::SetCursorVisible(visible));
@@ -1639,6 +1646,7 @@ impl App {
         let line_height = metrics.line_height / dpi;
         let toc_max_depth = self.settings.toc_max_depth;
         let markdown_first_line_indent = self.settings.markdown_first_line_indent;
+        let text_spacing_mode = self.settings.text_spacing_mode;
         let theme = self.current_theme.clone();
         let mut tab = self.active_tab_session_mut()?;
 
@@ -1648,6 +1656,7 @@ impl App {
             toc_max_depth,
             markdown_first_line_indent,
         });
+        tab.send_message(ui::plugin::PluginMessage::SetTextSpacingMode(text_spacing_mode));
         let (cursor_visible, _) = crate::app::compute_cursor_phase(tab.cursor_blink_instant());
         tab.send_message(ui::plugin::PluginMessage::SetCursorVisible(cursor_visible));
         let draw_list = tab.render_canvas_plugin(&snapshot, &theme, shaper, dpi);

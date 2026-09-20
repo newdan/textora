@@ -11,6 +11,9 @@ const LIGHT_INLINE_CODE_BG_BLEND_RATIO: f32 = 0.90;
 /// Pure data, no logic. Derived from Theme + Settings at construction time.
 #[derive(Clone, Debug)]
 pub struct MarkdownStyle {
+    /// Natural mixed-script spacing for prose; code-like spans remain protected.
+    pub text_spacing_mode: ui::typography::TextSpacingMode,
+
     // -- Fonts --
     pub body_font_size: f32,
     pub code_font_size: f32,
@@ -105,6 +108,7 @@ impl MarkdownStyle {
         let sp = &theme.markdown.spacing;
 
         Self {
+            text_spacing_mode: ui::typography::TextSpacingMode::Natural,
             body_font_size,
             code_font_size,
             heading_font_sizes,
@@ -173,6 +177,7 @@ impl MarkdownStyle {
         let sp = &nt.spacing;
 
         Self {
+            text_spacing_mode: ui::typography::TextSpacingMode::Natural,
             body_font_size,
             code_font_size,
             heading_font_sizes,
@@ -481,6 +486,14 @@ mod tests {
         assert!((style.blockquote_padding - base * 0.65).abs() < 0.01);
         assert!((style.table_cell_padding - base * 0.5).abs() < 0.01);
         assert!((style.code_line_height - code_fs * 1.5).abs() < 0.01);
+    }
+
+    #[test]
+    fn markdown_style_defaults_to_natural_text_spacing() {
+        let theme = ui::theme::test_theme();
+        let style = MarkdownStyle::from_theme(&theme, 15.0, 24.0);
+
+        assert_eq!(style.text_spacing_mode, ui::typography::TextSpacingMode::Natural);
     }
     #[test]
     fn heading_sizes_decrease_with_semantic_depth() {

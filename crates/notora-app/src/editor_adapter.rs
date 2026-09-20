@@ -103,13 +103,14 @@ pub(crate) fn prepare_untitled_document(
 ) -> Result<(PreparedTab, String), DocumentPreparationError> {
     let text_buffer = core::buffer::TextBuffer::new(false)
         .map_err(|error| DocumentPreparationError::Buffer { message: error.to_string() })?;
-    let document = appkit_core::document::DocumentModel::new(text_buffer);
+    let mut document = appkit_core::document::DocumentModel::new(text_buffer);
     let suggested_file_name = match kind {
         DocumentKind::Text => "Untitled.txt",
         DocumentKind::Markdown => "Untitled.md",
         DocumentKind::Mindmap => "Untitled.mmap.md",
     }
     .to_owned();
+    document.set_language_from_path(Path::new(&suggested_file_name));
     let plugin = runtime.create_plugin_for_path(Path::new(&suggested_file_name));
     Ok((PreparedTab::new(document, TabRuntime::new(plugin)), suggested_file_name))
 }
