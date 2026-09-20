@@ -19,7 +19,6 @@ pub const SPLIT_BUTTON_HORIZONTAL_PADDING_LOGICAL: f32 = ButtonMetrics::HORIZONT
 const SPLIT_BUTTON_ICON_SIZE_LOGICAL: f32 = 14.0;
 const SPLIT_BUTTON_ICON_GAP_LOGICAL: f32 = ButtonMetrics::ICON_GAP;
 const SPLIT_BUTTON_DIVIDER_INSET_LOGICAL: f32 = 6.0;
-const SPLIT_BUTTON_TOOLBAR_ARROW_INSET_LOGICAL: f32 = 6.0;
 
 /// Split button 的纯展示输入。
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -227,13 +226,7 @@ impl Widget for SplitButtonWidget {
             content_x
         };
         ctx.text(text_x, baseline, font_size, foreground, &self.input.label);
-        let arrow_inset = match self.presentation {
-            SplitButtonPresentation::Standalone => self.menu_rect.w * 0.5,
-            SplitButtonPresentation::Toolbar => {
-                (SPLIT_BUTTON_TOOLBAR_ARROW_INSET_LOGICAL * ctx.dpi).min(self.menu_rect.w * 0.5)
-            }
-        };
-        let center_x = self.menu_rect.x + arrow_inset;
+        let center_x = self.menu_rect.x + self.menu_rect.w * 0.5;
         let center_y = self.menu_rect.y + self.menu_rect.h * 0.5;
         let arrow_radius = 4.0 * ctx.dpi;
         ctx.list.fill_triangle(
@@ -716,6 +709,57 @@ mod tests {
 
         let _ = widget.on_event(&Event::MouseMove { px: 500.0, py: 500.0 }, &mut context);
         assert_eq!(widget.hovered_region, None);
+    }
+
+    #[test]
+    fn toolbar_menu_arrow_stays_centered_in_its_interaction_background() {
+        let theme = crate::theme::test_theme();
+        for dpi in [1.0, 1.5, 2.0] {
+            for width in [96.0, 12.0] {
+                for state in [
+                    ButtonVisualState::Hovered,
+                    ButtonVisualState::Pressed,
+                    ButtonVisualState::Selected,
+                ] {
+                    let mut widget = widget();
+                    widget.set_presentation(SplitButtonPresentation::Toolbar);
+                    widget.set_keyboard_focus(None);
+                    layout(
+                        &mut widget,
+                        Rect::new(10.0 * dpi, 20.0 * dpi, width * dpi, 28.0 * dpi),
+                        dpi,
+                    );
+                    widget.hovered_region = Some(SplitButtonRegion::Menu);
+                    widget.pressed_region =
+                        (state == ButtonVisualState::Pressed).then_some(SplitButtonRegion::Menu);
+                    widget.set_menu_open(state == ButtonVisualState::Selected);
+                    let mut draw_list = DrawList::new();
+                    widget.paint(&mut PaintCtx::new(&mut draw_list, &theme, dpi));
+                    let background = draw_list
+                        .cmds
+                        .iter()
+                        .find_map(|command| match command {
+                            DrawCmd::FillRect { rect, .. } => Some(*rect),
+                            _ => None,
+                        })
+                        .expect("下拉按钮交互时应绘制背景");
+                    let (arrow_left, arrow_right) = draw_list
+                        .cmds
+                        .iter()
+                        .find_map(|command| match command {
+                            DrawCmd::FillTriangle { p0, p1, .. } => Some((p0[0], p1[0])),
+                            _ => None,
+                        })
+                        .expect("下拉按钮应绘制箭头");
+                    let left_padding = arrow_left - background.x;
+                    let right_padding = background.right() - arrow_right;
+                    assert!(
+                        (left_padding - right_padding).abs() < f32::EPSILON,
+                        "{state:?}、{dpi}x、宽度 {width}：箭头左右留白应相等，实际为 {left_padding} / {right_padding}"
+                    );
+                }
+            }
+        }
     }
 
     #[test]

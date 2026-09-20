@@ -1,0 +1,10 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024" fill="none" role="img" aria-labelledby="title description">
+  <title id="title">notora — 叠页</title>
+  <desc id="description">两张错位的圆角卡片，通过留白区分前后关系，抽象表达笔记的收集与整理。纯矢量，无字体和位图依赖。</desc>
+  <path d="M294 106H730C878 106 924 152 924 300V736C924 884 878 930 730 930H294C146 930 100 884 100 736V300C100 152 146 106 294 106Z" fill="#293329" fill-opacity="0.08"/>
+  <path d="M294 100H730C878 100 924 146 924 294V730C924 878 878 924 730 924H294C146 924 100 878 100 730V294C100 146 146 100 294 100Z" fill="#F8F5EF"/>
+  <rect x="280" y="260" width="330" height="408" rx="66" fill="#253D35"/>
+  <rect x="414" y="366" width="330" height="408" rx="66" fill="#F8F5EF" stroke="#F8F5EF" stroke-width="32"/>
+  <rect x="414" y="366" width="330" height="408" rx="66" fill="#253D35"/>
+  <path d="M482 440H567" stroke="#F8F5EF" stroke-width="24" stroke-linecap="round"/>
+</svg>

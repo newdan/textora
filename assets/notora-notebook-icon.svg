@@ -1,0 +1,58 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024" fill="none" role="img" aria-labelledby="title description">
+  <title id="title">notora — 记录与收藏</title>
+  <desc id="description">暖白圆角底板上的墨绿色翻开笔记本，带有正文横线、层叠纸页和陶土色书签，表达记录、阅读与收藏。纯矢量，透明画布。</desc>
+  <defs>
+    <linearGradient id="tile-fill" x1="290" y1="100" x2="728" y2="936" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#FFFEFA"/>
+      <stop offset="0.52" stop-color="#F7F4EC"/>
+      <stop offset="1" stop-color="#EAE4D7"/>
+    </linearGradient>
+    <linearGradient id="cover-fill" x1="245" y1="288" x2="779" y2="777" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#3C5149"/>
+      <stop offset="1" stop-color="#172D25"/>
+    </linearGradient>
+    <linearGradient id="left-page-fill" x1="274" y1="485" x2="512" y2="485" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#FFFFFB"/>
+      <stop offset="0.73" stop-color="#F8F5EC"/>
+      <stop offset="1" stop-color="#DFD7C6"/>
+    </linearGradient>
+    <linearGradient id="right-page-fill" x1="512" y1="485" x2="750" y2="485" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#E8E0CE"/>
+      <stop offset="0.24" stop-color="#FFFEF7"/>
+      <stop offset="1" stop-color="#F6F0E2"/>
+    </linearGradient>
+    <linearGradient id="bookmark-fill" x1="668" y1="271" x2="712" y2="436" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#CF8969"/>
+      <stop offset="1" stop-color="#AA6045"/>
+    </linearGradient>
+    <path id="tile" d="M294 100H730C878 100 924 146 924 294V730C924 878 878 924 730 924H294C146 924 100 878 100 730V294C100 146 146 100 294 100Z"/>
+    <path id="cover" d="M252 290C355 267 443 281 512 321C581 281 669 267 772 290C785 293 792 303 792 318V726C792 744 779 756 761 753C662 736 585 747 525 779C517 783 507 783 499 779C439 747 362 736 263 753C245 756 232 744 232 726V318C232 303 239 293 252 290Z"/>
+  </defs>
+  <g opacity="0.035"><use href="#tile" transform="translate(0 18)" fill="#352E20"/></g>
+  <g opacity="0.055"><use href="#tile" transform="translate(0 10)" fill="#352E20"/></g>
+  <use href="#tile" transform="translate(0 4)" fill="#D5CCBC"/>
+  <use href="#tile" fill="url(#tile-fill)"/>
+  <path d="M294 104H730C875 104 920 149 920 294V730C920 875 875 920 730 920H294C149 920 104 875 104 730V294C104 149 149 104 294 104Z" stroke="#FFFFFF" stroke-opacity="0.8" stroke-width="2"/>
+  <g opacity="0.045"><use href="#cover" transform="translate(0 16)" fill="#302B1F"/></g>
+  <g opacity="0.075"><use href="#cover" transform="translate(0 8)" fill="#302B1F"/></g>
+  <use href="#cover" fill="url(#cover-fill)"/>
+  <path d="M266 298C356 282 438 296 512 337C586 296 668 282 758 298V720C662 704 582 721 512 759C442 721 362 704 266 720V298Z" fill="#CEC7B6"/>
+  <path d="M272 291C361 276 441 290 512 331C583 290 663 276 752 291V709C660 695 581 710 512 749C443 710 364 695 272 709V291Z" fill="#FAF7ED"/>
+  <path d="M281 699C368 688 443 704 504 737M520 737C581 704 656 688 743 699" stroke="#C6BEAD" stroke-width="3" stroke-linecap="round"/>
+  <path d="M282 710C368 700 441 715 502 747M522 747C583 715 656 700 742 710" stroke="#C6BEAD" stroke-width="2" stroke-linecap="round"/>
+  <path d="M274 272C363 255 449 277 512 315V731C440 690 363 673 274 689V272Z" fill="url(#left-page-fill)"/>
+  <path d="M512 315C575 277 661 255 750 272V689C661 673 584 690 512 731V315Z" fill="url(#right-page-fill)"/>
+  <path d="M276 273C365 257 449 279 508 315" stroke="#FFFFFF" stroke-width="3" stroke-linecap="round"/>
+  <path d="M516 315C575 279 659 257 748 273" stroke="#FFFFFF" stroke-width="3" stroke-linecap="round"/>
+  <path d="M512 324V724" stroke="#B6AE9A" stroke-opacity="0.42" stroke-width="3"/>
+  <path d="M322 367C365 365 405 373 447 391" stroke="#344A40" stroke-width="22" stroke-linecap="round"/>
+  <path d="M322 428C365 426 405 434 447 452M322 475C365 473 405 481 447 499M322 522C360 520 396 527 431 540" stroke="#8B9888" stroke-width="12" stroke-linecap="round"/>
+  <path d="M322 605C351 604 379 608 405 615" stroke="#344A40" stroke-width="12" stroke-linecap="round"/>
+  <path d="M563 393C585 384 605 378 625 373" stroke="#344A40" stroke-width="17" stroke-linecap="round"/>
+  <path d="M563 455C607 435 650 427 697 430M563 502C607 482 650 474 697 477M563 549C602 531 639 523 678 524" stroke="#8B9888" stroke-width="12" stroke-linecap="round"/>
+  <path d="M563 625C589 613 614 606 640 602" stroke="#8B9888" stroke-width="12" stroke-linecap="round"/>
+  <path d="M652 270C674 269 696 269 718 273V422L685 400L652 418V270Z" fill="#7B4D33" opacity="0.09" transform="translate(3 6)"/>
+  <path d="M650 268C672 267 694 267 716 271V413L683 391L650 409V268Z" fill="url(#bookmark-fill)"/>
+  <path d="M655 271V398" stroke="#F3B795" stroke-opacity="0.48" stroke-width="2"/>
+  <path d="M657 268C675 267 692 268 709 270" stroke="#E9AF88" stroke-width="3" stroke-linecap="round"/>
+</svg>

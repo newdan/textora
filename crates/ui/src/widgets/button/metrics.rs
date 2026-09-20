@@ -5,7 +5,7 @@ impl ButtonMetrics {
     pub const HORIZONTAL_PADDING: f32 = 8.0;
     pub const ICON_GAP: f32 = 4.0;
     pub const ACTION_GAP: f32 = 4.0;
-    pub const MENU_WIDTH: f32 = 24.0;
+    pub const MENU_WIDTH: f32 = 20.0;
     pub const FONT_SIZE: f32 = 14.0;
 
     /// 固定中文标签按全宽字形预留内容宽度，两侧各保留统一内边距。
@@ -15,5 +15,12 @@ impl ButtonMetrics {
 
     pub const fn icon_text_width(wide_glyph_count: usize, icon_size: f32) -> f32 {
         Self::text_width(wide_glyph_count) + icon_size + Self::ICON_GAP
+    }
+
+    /// 分段按钮的标签右侧只留图标间距，避免与菜单区域的内边距叠加。
+    pub const fn split_icon_text_width(wide_glyph_count: usize, icon_size: f32) -> f32 {
+        Self::icon_text_width(wide_glyph_count, icon_size) - Self::HORIZONTAL_PADDING
+            + Self::ICON_GAP
+            + Self::MENU_WIDTH
     }
 }

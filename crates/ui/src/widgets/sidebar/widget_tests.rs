@@ -347,6 +347,57 @@ mod tests {
     }
 
     #[test]
+    fn new_document_arrow_keeps_a_compact_gap_after_the_label() {
+        const MAXIMUM_LABEL_ARROW_GAP_LOGICAL: f32 = 10.0;
+        let theme = test_theme();
+        let mut shaper = shaping::Shaper::new().expect("按钮间距测试需要字体");
+        for dpi in [1.0, 1.5, 2.0] {
+            let mut widget = new_document_widget();
+            let mut input = sidebar_widget_input(Vec::new(), None);
+            input.metrics = metrics(dpi);
+            widget.set_input(input);
+            let mut measure = NoopMeasure;
+            let mut layout_ctx =
+                LayoutCtx { ui_measure: None, measure: &mut measure, theme: &theme, dpi };
+            widget.set_rect(Rect::new(0.0, 0.0, 220.0 * dpi, 800.0 * dpi), &mut layout_ctx);
+            let dropdown = widget.current_layout().expect("侧栏应完成布局").new_menu_btn_rect;
+            let mut draw_list = DrawList::new();
+            let mut context = PaintCtx::new(&mut draw_list, &theme, dpi);
+            context.shaper = Some(&mut shaper);
+            widget.paint(&mut context);
+            let label_right = draw_list
+                .cmds
+                .iter()
+                .find_map(|command| match command {
+                    DrawCmd::TextLayout { layout, x, .. } if layout.text == "新建" => {
+                        Some(x + layout.shaped.width)
+                    }
+                    _ => None,
+                })
+                .expect("新建按钮应绘制文字");
+            let arrow_left = draw_list
+                .cmds
+                .iter()
+                .find_map(|command| match command {
+                    DrawCmd::FillTriangle { p0, p1, p2, .. }
+                        if [p0, p1, p2]
+                            .iter()
+                            .all(|point| dropdown.contains(point[0], point[1])) =>
+                    {
+                        Some(p0[0])
+                    }
+                    _ => None,
+                })
+                .expect("下拉区域应绘制箭头");
+            let gap = (arrow_left - label_right) / dpi;
+            assert!(
+                (0.0..=MAXIMUM_LABEL_ARROW_GAP_LOGICAL).contains(&gap),
+                "{dpi}x 下文字与箭头应紧凑且不重叠，实际间距 {gap}px"
+            );
+        }
+    }
+
+    #[test]
     fn new_document_button_uses_shared_split_geometry() {
         let mut widget = new_document_widget();
         let theme = test_theme();

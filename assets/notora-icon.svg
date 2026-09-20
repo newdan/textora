@@ -1,0 +1,49 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024" fill="none" role="img" aria-labelledby="title description">
+  <title id="title">notora — 折页 N</title>
+  <desc id="description">暖白纸张质感的圆角应用图标，中央为深墨色的折页字母 N。透明画布，所有图形均为矢量路径。</desc>
+  <defs>
+    <linearGradient id="paper" x1="290" y1="100" x2="728" y2="936" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#FFFEFA"/>
+      <stop offset="0.52" stop-color="#F7F4EC"/>
+      <stop offset="1" stop-color="#EAE4D7"/>
+    </linearGradient>
+    <linearGradient id="paper-edge" x1="512" y1="104" x2="512" y2="934" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#E7E1D5"/>
+      <stop offset="1" stop-color="#CFC6B6"/>
+    </linearGradient>
+    <linearGradient id="ink" x1="324" y1="296" x2="720" y2="716" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#30413E"/>
+      <stop offset="1" stop-color="#152522"/>
+    </linearGradient>
+    <linearGradient id="fold" x1="408" y1="328" x2="619" y2="680" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#3A4D47"/>
+      <stop offset="0.48" stop-color="#263B34"/>
+      <stop offset="1" stop-color="#1A2D27"/>
+    </linearGradient>
+    <linearGradient id="fold-tip" x1="618" y1="300" x2="714" y2="404" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#718177"/>
+      <stop offset="1" stop-color="#465B50"/>
+    </linearGradient>
+    <path id="tile" d="M294 100H730C878 100 924 146 924 294V730C924 878 878 924 730 924H294C146 924 100 878 100 730V294C100 146 146 100 294 100Z"/>
+    <path id="letter" d="M308 714V326C308 310.536 320.536 298 336 298H409L614 559V298L716 400V686C716 701.464 703.464 714 688 714H615L410 453V714H308Z"/>
+  </defs>
+  <g opacity="0.035">
+    <use href="#tile" transform="translate(0 18)" fill="#352E20"/>
+  </g>
+  <g opacity="0.055">
+    <use href="#tile" transform="translate(0 11)" fill="#352E20"/>
+  </g>
+  <use href="#tile" transform="translate(0 5)" fill="url(#paper-edge)"/>
+  <use href="#tile" fill="url(#paper)"/>
+  <path d="M294 104H730C875 104 920 149 920 294V730C920 875 875 920 730 920H294C149 920 104 875 104 730V294C104 149 149 104 294 104Z" stroke="#FFFFFF" stroke-opacity="0.8" stroke-width="2"/>
+  <path d="M165 821C187 863 223 879 294 879H730C801 879 837 863 859 821" stroke="#B9AD96" stroke-opacity="0.18" stroke-width="2" stroke-linecap="round"/>
+  <path d="M192 851C216 875 248 885 294 885H730C776 885 808 875 832 851" stroke="#FFFFFF" stroke-opacity="0.7" stroke-width="2" stroke-linecap="round"/>
+  <g opacity="0.16">
+    <use href="#letter" transform="translate(0 4)" fill="#A3977F"/>
+  </g>
+  <use href="#letter" fill="url(#ink)"/>
+  <path d="M409 298L614 559V714L410 453L409 298Z" fill="url(#fold)"/>
+  <path d="M410 302L614 561" stroke="#9DAA98" stroke-opacity="0.19" stroke-width="2"/>
+  <path d="M614 298L716 400H642C626.536 400 614 387.464 614 372V298Z" fill="url(#fold-tip)"/>
+  <path d="M616 303L711 398" stroke="#B7C0AC" stroke-opacity="0.48" stroke-width="2"/>
+</svg>

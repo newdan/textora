@@ -16,8 +16,7 @@ use crate::widgets::split_button::SPLIT_BUTTON_MENU_WIDTH_LOGICAL;
 const ACTION_ROW_INSET_LOGICAL: f32 = 12.0;
 const ACTION_ROW_GAP_LOGICAL: f32 = crate::button::ButtonMetrics::ACTION_GAP;
 const NEW_DOCUMENT_MIN_WIDTH_LOGICAL: f32 =
-    crate::button::ButtonMetrics::icon_text_width(2, SIDEBAR_ICON_SIZE_LOGICAL)
-        + SPLIT_BUTTON_MENU_WIDTH_LOGICAL;
+    crate::button::ButtonMetrics::split_icon_text_width(2, SIDEBAR_ICON_SIZE_LOGICAL);
 const OPEN_BUTTON_WIDTH_LOGICAL: f32 =
     crate::button::ButtonMetrics::icon_text_width(2, SIDEBAR_ICON_SIZE_LOGICAL);
 const COMPACT_OPEN_BUTTON_WIDTH_LOGICAL: f32 = 32.0;

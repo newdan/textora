@@ -59,8 +59,7 @@ const NEW_NOTE_MENU_BUTTON_ID: WidgetId = WidgetId(9_003);
 const SET_WORKSPACE_ROOT_BUTTON_ID: WidgetId = WidgetId(9_004);
 const NOTE_TOOL_ICON_SIZE_LOGICAL: f32 = 14.0;
 const NEW_NOTE_BUTTON_WIDTH_LOGICAL: f32 =
-    ui::button::ButtonMetrics::icon_text_width(2, NOTE_TOOL_ICON_SIZE_LOGICAL)
-        + ui::button::ButtonMetrics::MENU_WIDTH;
+    ui::button::ButtonMetrics::split_icon_text_width(2, NOTE_TOOL_ICON_SIZE_LOGICAL);
 const NOTE_TOOL_BUTTON_WIDTH_LOGICAL: f32 =
     ui::button::ButtonMetrics::icon_text_width(2, NOTE_TOOL_ICON_SIZE_LOGICAL);
 const NOTE_TOOL_BUTTON_HEIGHT_LOGICAL: f32 = 28.0;
