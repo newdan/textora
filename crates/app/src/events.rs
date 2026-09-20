@@ -988,6 +988,7 @@ mod tests {
                         line_height_ratio: 1.618,
                         word_wrap: true,
                         markdown_first_line_indent: false,
+                        text_spacing_mode: ui::typography::TextSpacingMode::Natural,
                         show_line_numbers: true,
                         tab_width: 4,
                         view_mode: ui::view_mode::ViewMode::Sidebar,

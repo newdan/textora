@@ -52,8 +52,13 @@ impl SourceAnchor {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum ProjectionSpanKind {
     Direct,
+    /// Literal source text whose internal typography must remain unchanged.
+    Verbatim,
     Collapsed,
-    Virtual { anchor_byte: usize, virtual_grapheme_start: usize },
+    Virtual {
+        anchor_byte: usize,
+        virtual_grapheme_start: usize,
+    },
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -95,6 +100,19 @@ impl TextProjectionBuilder {
     }
 
     pub(crate) fn push_direct(&mut self, text: &str, source_range: Range<usize>) {
+        self.push_mapped_text(text, source_range, ProjectionSpanKind::Direct);
+    }
+
+    pub(crate) fn push_verbatim(&mut self, text: &str, source_range: Range<usize>) {
+        self.push_mapped_text(text, source_range, ProjectionSpanKind::Verbatim);
+    }
+
+    fn push_mapped_text(
+        &mut self,
+        text: &str,
+        source_range: Range<usize>,
+        kind: ProjectionSpanKind,
+    ) {
         self.flush_pending_gap(source_range.start);
         let visual_start = self.text.len();
         self.text.push_str(text);
@@ -103,7 +121,7 @@ impl TextProjectionBuilder {
                 .map(|(offset, _)| SourceAnchor::downstream(source_range.start + offset)),
         );
         if let Some(previous) = self.spans.last_mut()
-            && previous.kind == ProjectionSpanKind::Direct
+            && previous.kind == kind
             && previous.source_range.end == source_range.start
             && previous.visual_range.end == visual_start
         {
@@ -113,7 +131,7 @@ impl TextProjectionBuilder {
             self.spans.push(ProjectionSpan {
                 source_range,
                 visual_range: visual_start..self.text.len(),
-                kind: ProjectionSpanKind::Direct,
+                kind,
             });
         }
     }
@@ -148,7 +166,7 @@ impl TextProjectionBuilder {
             self.char_anchors.pop().expect("a projection character must have a source anchor");
         let span =
             self.spans.last_mut().expect("a projection character must belong to a source span");
-        assert!(matches!(span.kind, ProjectionSpanKind::Direct));
+        assert!(matches!(span.kind, ProjectionSpanKind::Direct | ProjectionSpanKind::Verbatim));
         assert_eq!(span.visual_range.end, self.text.len());
 
         self.text.truncate(newline_start);

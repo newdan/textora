@@ -420,6 +420,9 @@ impl App {
                 .dispatch_settings_action(SettingsDispatchAction::SetMarkdownFirstLineIndent(
                     enabled,
                 )),
+            ui::settings_view::SettingsViewAction::SetTextSpacingMode(mode) => {
+                self.dispatch_settings_action(SettingsDispatchAction::SetTextSpacingMode(mode))
+            }
             ui::settings_view::SettingsViewAction::SetShowLineNumbers(enabled) => {
                 self.dispatch_settings_action(SettingsDispatchAction::SetShowLineNumbers(enabled))
             }

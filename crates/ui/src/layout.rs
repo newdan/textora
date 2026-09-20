@@ -2,6 +2,8 @@ use crate::render_geom::AdvanceCacheEntry;
 use shaping;
 use unicode_categories::UnicodeCategories;
 
+pub mod typography;
+
 const READING_HORIZONTAL_PADDING_LOGICAL: f32 = 32.0;
 const READING_MAXIMUM_WIDTH_LOGICAL: f32 = 760.0;
 
@@ -47,7 +49,7 @@ pub fn build_advance_cache_entries(
             x += if is_ws {
                 ws_cluster_advance(&line_bytes[c.byte_range.clone()], char_width)
             } else {
-                c.advance.max(1.0)
+                c.advance.max(0.0)
             };
             // vl-local byte offset: subtract vl_byte_start so byte_to_x's prev_end=0 works for all VLs.
             // saturating_sub guards against unexpected shaper output.
@@ -104,7 +106,7 @@ pub fn ws_cluster_advance(bytes: &[u8], char_width: f32) -> f32 {
 /// Combines `is_whitespace_cluster` + `ws_cluster_advance` / fallback advance.
 pub fn cluster_advance(bytes: &[u8], fallback_advance: f32, char_width: f32) -> (bool, f32) {
     let ws = is_whitespace_cluster(bytes);
-    let adv = if ws { ws_cluster_advance(bytes, char_width) } else { fallback_advance.max(1.0) };
+    let adv = if ws { ws_cluster_advance(bytes, char_width) } else { fallback_advance.max(0.0) };
     (ws, adv)
 }
 pub fn is_cjk_char(ch: char) -> bool {
@@ -189,83 +191,10 @@ pub fn is_punctuation(bytes: &[u8]) -> bool {
     }
 }
 
-fn is_ordered_list_marker_period(line_bytes: &[u8], period_range: std::ops::Range<usize>) -> bool {
-    const MARKER_PERIOD: u8 = b'.';
-
-    if period_range.len() != 1 || line_bytes.get(period_range.start) != Some(&MARKER_PERIOD) {
-        return false;
-    }
-
-    if let Some(next_byte) = line_bytes.get(period_range.end)
-        && !next_byte.is_ascii_whitespace()
-    {
-        return false;
-    }
-
-    let mut digit_seen = false;
-    for byte in &line_bytes[..period_range.start] {
-        if !digit_seen && byte.is_ascii_whitespace() {
-            continue;
-        }
-        if byte.is_ascii_digit() {
-            digit_seen = true;
-            continue;
-        }
-        return false;
-    }
-
-    digit_seen
-}
-
 /// Check if a cluster is a single ASCII alphanumeric byte (letters/digits).
 /// Used to prevent breaking inside long words/numbers.
 fn is_ascii_alnum_cluster(bytes: &[u8]) -> bool {
     bytes.len() == 1 && bytes[0].is_ascii_alphanumeric()
-}
-
-/// Apply minimum-width padding to punctuation glyph clusters.
-/// For clusters whose advance < em_width * min_ratio, expands the advance
-/// and centers the glyph by adjusting x_offset.
-/// Skips whitespace clusters (controlled separately via ws_cluster_advance).
-pub fn apply_punctuation_padding(
-    clusters: &mut [shaping::GlyphCluster],
-    line_bytes: &[u8],
-    em_width: f32,
-    min_ratio: f32,
-) {
-    if min_ratio <= 0.0 {
-        return;
-    }
-    let min_advance = em_width * min_ratio;
-    for c in clusters.iter_mut() {
-        let bytes = match line_bytes.get(c.byte_range.clone()) {
-            Some(b) => b,
-            None => continue,
-        };
-        // Skip whitespace clusters
-        if is_whitespace_cluster(bytes) {
-            continue;
-        }
-        if is_ordered_list_marker_period(line_bytes, c.byte_range.clone()) {
-            continue;
-        }
-        // Check if first char is punctuation
-        let is_punct = match std::str::from_utf8(bytes) {
-            Ok(s) => {
-                !s.is_empty()
-                    && s.chars().all(|ch| ch.is_ascii_punctuation() || ch.is_punctuation())
-            }
-            Err(_) => false,
-        };
-        if !is_punct {
-            continue;
-        }
-        if c.advance < min_advance {
-            let extra = min_advance - c.advance;
-            c.advance = min_advance;
-            c.x_offset += extra / 2.0;
-        }
-    }
 }
 
 pub fn compute_visual_lines(
@@ -294,6 +223,37 @@ pub fn compute_visual_lines_with_first_line_indent(
     min_fill_ratio: f32,
     first_line_indent: f32,
 ) -> Vec<(usize, usize, f32)> {
+    compute_visual_lines_with_gap_advances(
+        clusters,
+        line_bytes,
+        char_width,
+        viewport_width,
+        min_fill_ratio,
+        first_line_indent,
+        &[],
+        false,
+    )
+}
+
+/// Compute visual lines while accounting for boundary gap advances.
+///
+/// `gap_before[i]` is the spacing candidate between clusters `i - 1` and
+/// `i`. A candidate at either edge of a visual line is deliberately excluded
+/// from that line's width; this is what removes spacing across a soft wrap.
+#[allow(
+    clippy::too_many_arguments,
+    reason = "legacy visual-line callers provide explicit width and gap inputs"
+)]
+pub(crate) fn compute_visual_lines_with_gap_advances(
+    clusters: &[shaping::GlyphCluster],
+    line_bytes: &[u8],
+    char_width: f32,
+    viewport_width: f32,
+    min_fill_ratio: f32,
+    first_line_indent: f32,
+    gap_before: &[f32],
+    enforce_newline_rules: bool,
+) -> Vec<(usize, usize, f32)> {
     if clusters.is_empty() {
         return Vec::new();
     }
@@ -307,13 +267,25 @@ pub fn compute_visual_lines_with_first_line_indent(
     for c in clusters {
         let bytes = line_bytes.get(c.byte_range.clone()).unwrap_or(&[]);
         let ws = is_whitespace_cluster(bytes);
-        let a = if ws { ws_cluster_advance(bytes, char_width) } else { c.advance.max(1.0) };
+        let a = if ws { ws_cluster_advance(bytes, char_width) } else { c.advance.max(0.0) };
         adv.push(a);
         ws_arr.push(ws);
         prefix.push(prefix.last().unwrap() + a);
     }
 
-    let width_of = |s: usize, e: usize| prefix[e] - prefix[s];
+    let mut gap_prefix = Vec::with_capacity(n + 1);
+    gap_prefix.push(0.0f32);
+    for cluster_index in 1..=n {
+        gap_prefix.push(
+            gap_prefix[cluster_index - 1]
+                + gap_before.get(cluster_index - 1).copied().unwrap_or(0.0),
+        );
+    }
+
+    let gap_width_of = |s: usize, e: usize| {
+        if e <= s + 1 { 0.0 } else { gap_prefix[e] - gap_prefix[s + 1] }
+    };
+    let width_of = |s: usize, e: usize| prefix[e] - prefix[s] + gap_width_of(s, e);
 
     // Width after stripping trailing whitespace.
     let trimmed_width = |s: usize, e: usize| -> f32 {
@@ -376,8 +348,8 @@ pub fn compute_visual_lines_with_first_line_indent(
             }
         }
 
-        let visual_line_x = width_of(start, ci);
-        if visual_line_x + adv[ci] > available_width && ci > start {
+        let candidate_line_x = width_of(start, ci + 1);
+        if candidate_line_x > available_width && ci > start {
             // Choose break point: pick the widest valid candidate.
             // Hard break always competes; CJK mode prefers filling the line,
             // English mode prefers word boundaries.
@@ -495,6 +467,36 @@ pub fn compute_visual_lines_with_first_line_indent(
                     break; // no punct at break_at
                 }
             }
+
+            if enforce_newline_rules {
+                let original_break_at = break_at;
+                if break_at > start
+                    && break_at < n
+                    && same_byte_range(&clusters[break_at - 1], &clusters[break_at])
+                {
+                    let mut group_start = break_at - 1;
+                    while group_start > start
+                        && same_byte_range(&clusters[group_start - 1], &clusters[group_start])
+                    {
+                        group_start -= 1;
+                    }
+                    if group_start > start {
+                        break_at = group_start;
+                    } else {
+                        let group_end = same_byte_range_group_end(clusters, start);
+                        if group_end > original_break_at {
+                            break_at = group_end;
+                        }
+                    }
+                }
+                while break_at > start + 1
+                    && is_open_bracket_cluster(
+                        line_bytes.get(clusters[break_at - 1].byte_range.clone()).unwrap_or(&[]),
+                    )
+                {
+                    break_at -= 1;
+                }
+            }
             let break_x = trimmed_width(start, break_at); // was: if break_at == ci { visual_line_x } else { trimmed_width
             visual_lines.push((start, break_at, break_x));
             start = break_at;
@@ -524,6 +526,27 @@ pub fn compute_visual_lines_with_first_line_indent(
         visual_lines.push((start, n, width_of(start, n)));
     }
     visual_lines
+}
+
+fn same_byte_range(left: &shaping::GlyphCluster, right: &shaping::GlyphCluster) -> bool {
+    left.byte_range == right.byte_range
+}
+
+fn same_byte_range_group_end(clusters: &[shaping::GlyphCluster], start: usize) -> usize {
+    let byte_range = clusters[start].byte_range.clone();
+    clusters
+        .iter()
+        .enumerate()
+        .skip(start)
+        .find(|(_, cluster)| cluster.byte_range != byte_range)
+        .map(|(index, _)| index)
+        .unwrap_or(clusters.len())
+}
+
+fn is_open_bracket_cluster(bytes: &[u8]) -> bool {
+    std::str::from_utf8(bytes)
+        .map(|text| text.chars().all(|character| character.is_punctuation_open()))
+        .unwrap_or(false)
 }
 
 #[cfg(test)]
@@ -717,6 +740,29 @@ mod tests {
     }
 
     #[test]
+    fn zero_advance_cluster_stays_zero_in_layout_and_hit_cache() {
+        use shaping::GlyphCluster;
+
+        assert_eq!(cluster_advance(b"x", 0.0, 10.0), (false, 0.0));
+        let shaped = shaping::ShapedRun {
+            clusters: vec![GlyphCluster {
+                byte_range: 0..1,
+                advance: 0.0,
+                glyph_id: 0,
+                font_id: Default::default(),
+                x_offset: 0.0,
+                y_offset: 0.0,
+            }],
+            width: 0.0,
+        };
+        let mut pool = Vec::new();
+        let entries =
+            build_advance_cache_entries(&[(0, 1, 0.0)], 0, &shaped, b"x", 10.0, 0, &mut pool, 4.0);
+
+        assert_eq!(entries[0].clusters[0].1, 4.0);
+    }
+
+    #[test]
     fn ascii_number_no_space_backtrack() {
         // Non-alnum chars followed by long number (no spaces):
         // alnum backtrack should break at the non-alnum→alnum boundary.
@@ -872,203 +918,6 @@ mod tests {
             first_w > vp * 0.8,
             "first line should fill most of viewport (hard break), got width={first_w:.0}"
         );
-    }
-
-    // ── apply_punctuation_padding tests ─────────────────────────────
-
-    fn make_cluster(
-        range: std::ops::Range<usize>,
-        advance: f32,
-        x_offset: f32,
-    ) -> shaping::GlyphCluster {
-        shaping::GlyphCluster {
-            byte_range: range,
-            advance,
-            x_offset,
-            glyph_id: 0,
-            font_id: Default::default(),
-            y_offset: 0.0,
-        }
-    }
-
-    #[test]
-    fn punct_padding_comma_colon() {
-        // Comma and colon advances should be padded to >= em * 0.5
-        let em = 15.0;
-        let ratio = 0.5;
-        let min_adv = em * ratio; // 7.5
-        let line_bytes = b",:";
-        // cluster 0: ',' at byte 0..1, advance=3.0
-        // cluster 1: ':' at byte 1..2, advance=4.0
-        let mut clusters = vec![make_cluster(0..1, 3.0, 0.0), make_cluster(1..2, 4.0, 0.0)];
-        apply_punctuation_padding(&mut clusters, line_bytes, em, ratio);
-        assert!(
-            clusters[0].advance >= min_adv,
-            "comma advance {} < min {}",
-            clusters[0].advance,
-            min_adv
-        );
-        assert!(
-            clusters[1].advance >= min_adv,
-            "colon advance {} < min {}",
-            clusters[1].advance,
-            min_adv
-        );
-    }
-
-    #[test]
-    fn punct_padding_narrow_letters_untouched() {
-        // Narrow ASCII letters should not be modified
-        let em = 15.0;
-        let ratio = 0.5;
-        let line_bytes = b"ilt";
-        let mut clusters = vec![
-            make_cluster(0..1, 4.0, 0.0),
-            make_cluster(1..2, 4.0, 0.0),
-            make_cluster(2..3, 5.0, 0.0),
-        ];
-        apply_punctuation_padding(&mut clusters, line_bytes, em, ratio);
-        assert_eq!(clusters[0].advance, 4.0);
-        assert_eq!(clusters[1].advance, 4.0);
-        assert_eq!(clusters[2].advance, 5.0);
-    }
-
-    #[test]
-    fn punct_padding_x_offset_centering() {
-        let em = 15.0;
-        let ratio = 0.5;
-        let line_bytes = b",";
-        let mut clusters = vec![make_cluster(0..1, 3.0, 1.0)];
-        apply_punctuation_padding(&mut clusters, line_bytes, em, ratio);
-        let extra = em * ratio - 3.0; // 7.5 - 3.0 = 4.5
-        assert!(
-            (clusters[0].x_offset - (1.0 + extra / 2.0)).abs() < 0.01,
-            "x_offset expected {}, got {}",
-            1.0 + extra / 2.0,
-            clusters[0].x_offset
-        );
-    }
-
-    #[test]
-    fn punct_padding_ratio_zero_disabled() {
-        let em = 15.0;
-        let ratio = 0.0;
-        let line_bytes = b",";
-        let mut clusters = vec![make_cluster(0..1, 3.0, 0.0)];
-        apply_punctuation_padding(&mut clusters, line_bytes, em, ratio);
-        assert_eq!(clusters[0].advance, 3.0, "should be unchanged when ratio=0");
-    }
-
-    #[test]
-    fn punct_padding_whitespace_skipped() {
-        let em = 15.0;
-        let ratio = 0.5;
-        let line_bytes = b" ";
-        let mut clusters = vec![make_cluster(0..1, 4.0, 0.0)];
-        apply_punctuation_padding(&mut clusters, line_bytes, em, ratio);
-        assert_eq!(clusters[0].advance, 4.0, "whitespace should not be padded");
-    }
-
-    #[test]
-    fn punct_padding_already_wide_untouched() {
-        // Punctuation already wider than min_advance should not be modified
-        let em = 15.0;
-        let ratio = 0.5;
-        let line_bytes = b"!";
-        let mut clusters = vec![make_cluster(0..1, 10.0, 2.0)];
-        apply_punctuation_padding(&mut clusters, line_bytes, em, ratio);
-        assert_eq!(clusters[0].advance, 10.0);
-        assert_eq!(clusters[0].x_offset, 2.0);
-    }
-
-    #[test]
-    fn punct_padding_cjk_period() {
-        // CJK fullwidth period (U+3002, 0xe3 0x80 0x82) should be padded
-        let em = 15.0;
-        let ratio = 0.5;
-        let line_bytes = [0xe3u8, 0x80, 0x82]; // '。'
-        let mut clusters = vec![make_cluster(0..3, 3.0, 0.0)];
-        apply_punctuation_padding(&mut clusters, &line_bytes, em, ratio);
-        assert!(clusters[0].advance >= em * ratio, "CJK period should be padded");
-    }
-
-    #[test]
-    fn punct_padding_markdown_ordered_list_marker_period_untouched() {
-        let em = 15.0;
-        let ratio = 0.5;
-        let line_bytes = b"10. item";
-        let mut clusters = vec![
-            make_cluster(0..1, 9.0, 0.0),
-            make_cluster(1..2, 9.0, 0.0),
-            make_cluster(2..3, 3.0, 0.0),
-            make_cluster(3..4, 9.0, 0.0),
-        ];
-
-        apply_punctuation_padding(&mut clusters, line_bytes, em, ratio);
-
-        assert_eq!(clusters[2].advance, 3.0, "ordered-list marker period should not move cursor x");
-        assert_eq!(clusters[2].x_offset, 0.0, "ordered-list marker period should not be centered");
-    }
-
-    #[test]
-    fn punct_padding_high_ratio() {
-        // ratio=2.0: punctuation should be padded to 2x em width
-        let em = 10.0;
-        let ratio = 2.0;
-        let min_adv = em * ratio; // 20.0
-        let line_bytes = b"!";
-        let mut clusters = vec![make_cluster(0..1, 5.0, 0.0)];
-        apply_punctuation_padding(&mut clusters, line_bytes, em, ratio);
-        assert!(
-            (clusters[0].advance - min_adv).abs() < 0.01,
-            "expected advance={}, got {}",
-            min_adv,
-            clusters[0].advance
-        );
-        assert!(
-            (clusters[0].x_offset - 7.5).abs() < 0.01,
-            "expected x_offset=7.5, got {}",
-            clusters[0].x_offset
-        );
-    }
-
-    #[test]
-    fn punct_padding_cjk_exclamation() {
-        // CJK fullwidth exclamation (U+FF01, 0xEF 0xBC 0x81)
-        let em = 15.0;
-        let ratio = 0.5;
-        let line_bytes = [0xEFu8, 0xBC, 0x81];
-        let mut clusters = vec![make_cluster(0..3, 3.0, 1.0)];
-        apply_punctuation_padding(&mut clusters, &line_bytes, em, ratio);
-        let min_adv = em * ratio;
-        assert!(clusters[0].advance >= min_adv, "CJK ! should be padded");
-        let extra = min_adv - 3.0;
-        assert!(
-            (clusters[0].x_offset - (1.0 + extra / 2.0)).abs() < 0.01,
-            "x_offset should be centered, got {}",
-            clusters[0].x_offset
-        );
-    }
-
-    #[test]
-    fn punct_padding_multi_cluster_line() {
-        let em = 15.0;
-        let ratio = 0.5;
-        let line_bytes = b"a, b!";
-        let mut clusters = vec![
-            make_cluster(0..1, 9.0, 0.0),
-            make_cluster(1..2, 3.0, 0.0),
-            make_cluster(2..3, 4.0, 0.0),
-            make_cluster(3..4, 9.0, 0.0),
-            make_cluster(4..5, 4.0, 0.0),
-        ];
-        apply_punctuation_padding(&mut clusters, line_bytes, em, ratio);
-        let min_adv = em * ratio;
-        assert_eq!(clusters[0].advance, 9.0, "letter 'a' unchanged");
-        assert!(clusters[1].advance >= min_adv, "comma should be padded");
-        assert_eq!(clusters[2].advance, 4.0, "space unchanged");
-        assert_eq!(clusters[3].advance, 9.0, "letter 'b' unchanged");
-        assert!(clusters[4].advance >= min_adv, "! should be padded");
     }
 
     #[test]

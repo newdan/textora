@@ -179,26 +179,29 @@ fn populate_line_style_segments(
     shaper: &mut Shaper,
     font_family: Option<&str>,
 ) {
+    let shaped = line.shaped.take().or_else(|| {
+        shape_styled_run(
+            &line.text,
+            &line.styles,
+            line.font_size,
+            line.font_weight,
+            font_family,
+            shaper,
+        )
+    });
     line.style_segments = compute_style_segments(
         &line.text,
         &line.styles,
         line.font_size,
         line.font_weight,
         Some(shaper),
-        &line.shaped,
+        &shaped,
         font_family,
     );
-    line.shaped = shape_styled_run(
-        &line.text,
-        &line.styles,
-        line.font_size,
-        line.font_weight,
-        font_family,
-        shaper,
-    );
+    line.shaped = shaped;
 }
 
-fn shape_styled_run(
+pub(crate) fn shape_styled_run(
     text: &str,
     styles: &[crate::builder::StyleSpan],
     font_size: f32,
@@ -343,12 +346,19 @@ fn compute_style_segments(
 
         let span_end = (span.start + span.len).min(text.len());
         let segment = &text[safe_byte_idx(text, span.start)..safe_byte_idx(text, span_end)];
-        let seg_w = styled_segment_width(segment, font_size, base_weight, &span.style, shaper);
+        let (x_offset, seg_w) =
+            match (width_at_byte(pre_shaped, span.start), width_at_byte(pre_shaped, span_end)) {
+                (Some(start_x), Some(end_x)) => (start_x, (end_x - start_x).max(0.0)),
+                _ => (
+                    cursor_x,
+                    styled_segment_width(segment, font_size, base_weight, &span.style, shaper),
+                ),
+            };
 
         segments.push(StyleSegment {
             start: span.start,
             len: span.len,
-            x_offset: cursor_x,
+            x_offset,
             width: seg_w,
             style: match &span.style {
                 InlineStyle::Bold => InlineStyle::Bold,

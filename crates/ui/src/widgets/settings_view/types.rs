@@ -1,4 +1,5 @@
 use crate::settings::ThemeMode;
+use crate::typography::TextSpacingMode;
 use crate::view_mode::ViewMode;
 
 const MIN_FONT_SIZE: f32 = 6.0;
@@ -33,6 +34,7 @@ pub struct SettingsViewInput {
     pub line_height_ratio: f32,
     pub word_wrap: bool,
     pub markdown_first_line_indent: bool,
+    pub text_spacing_mode: TextSpacingMode,
     pub show_line_numbers: bool,
     pub tab_width: usize,
     pub view_mode: ViewMode,
@@ -48,6 +50,7 @@ pub enum SettingsViewAction {
     SetLineHeightRatio(f32),
     SetWordWrap(bool),
     SetMarkdownFirstLineIndent(bool),
+    SetTextSpacingMode(TextSpacingMode),
     SetShowLineNumbers(bool),
     SetTabWidth(usize),
     SetViewMode(ViewMode),

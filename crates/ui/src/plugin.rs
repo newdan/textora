@@ -55,6 +55,8 @@ pub enum PluginMessage {
         toc_max_depth: u8,
         markdown_first_line_indent: bool,
     },
+    /// Update the mixed CJK/Latin body text spacing policy independently.
+    SetTextSpacingMode(crate::typography::TextSpacingMode),
     /// Restore absolute scroll position (for switching back from edit mode).
     SetScrollY(f32),
     /// Restore scroll position as a ratio (0.0~1.0) of content height.

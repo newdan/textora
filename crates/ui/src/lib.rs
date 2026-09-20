@@ -22,6 +22,7 @@ pub mod tapered_path;
 pub mod theme;
 mod theme_file;
 mod theme_registry;
+pub mod typography;
 pub mod view_mode;
 pub mod viewport;
 mod widgets;

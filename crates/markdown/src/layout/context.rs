@@ -5,6 +5,8 @@ use core::unicode::{
 };
 use shaping::Shaper;
 
+use crate::builder::{InlineStyle, StyleSpan};
+
 use super::types::{FlatLine, LaidOutBlock, LaidOutBlockKind, WrappedLine};
 
 // ===== Width estimation helpers for wrap_text =====
@@ -418,6 +420,52 @@ impl<'a> LayoutCtx<'a> {
         max_w: f32,
         first_line_indent: f32,
     ) -> Vec<WrappedLine> {
+        self.wrap_text_with_first_line_indent_styled(
+            text,
+            font_size,
+            font_weight,
+            max_w,
+            first_line_indent,
+            &[],
+        )
+    }
+
+    /// Wrap a projected Markdown line after shaping its inline styles.
+    ///
+    /// The returned run is the same final geometry consumed by rendering and
+    /// style segments. Natural gaps therefore participate in fit decisions
+    /// exactly once, while source text and byte offsets remain unchanged.
+    pub(crate) fn wrap_text_with_first_line_indent_styled(
+        &mut self,
+        text: &str,
+        font_size: f32,
+        font_weight: shaping::Weight,
+        max_w: f32,
+        first_line_indent: f32,
+        styles: &[StyleSpan],
+    ) -> Vec<WrappedLine> {
+        self.wrap_text_with_first_line_indent_styled_and_protected(
+            text,
+            font_size,
+            font_weight,
+            max_w,
+            first_line_indent,
+            styles,
+            &[],
+        )
+    }
+
+    /// Wrap a styled projected line while protecting parser-provided literal ranges.
+    pub(crate) fn wrap_text_with_first_line_indent_styled_and_protected(
+        &mut self,
+        text: &str,
+        font_size: f32,
+        font_weight: shaping::Weight,
+        max_w: f32,
+        first_line_indent: f32,
+        styles: &[StyleSpan],
+        protected_ranges: &[std::ops::Range<usize>],
+    ) -> Vec<WrappedLine> {
         let mut lines = Vec::new();
         self.last_wrap_shaped.clear();
         let mut input_offset = 0usize;
@@ -446,24 +494,70 @@ impl<'a> LayoutCtx<'a> {
                 shaper.set_font_family(
                     self.style.body_font_family.first().map(|family| family.as_str()),
                 );
-                let shaped = shaper.shape(input_line);
+                let line_styles = style_spans_for_line(styles, input_offset, input_line.len());
+                let shaped = if line_styles.is_empty() {
+                    shaper.shape(input_line).ok()
+                } else {
+                    super::shaping::shape_styled_run(
+                        input_line,
+                        &line_styles,
+                        font_size,
+                        font_weight,
+                        self.style.body_font_family.first().map(String::as_str),
+                        shaper,
+                    )
+                };
                 let char_width = shaper.grapheme_advance(" ").unwrap_or(font_size * 0.3);
                 shaper.set_font_size(old_size);
                 shaper.set_font_weight(old_weight);
                 shaper.set_font_style(old_style);
                 shaper.set_font_family(old_family.as_deref());
 
-                if let Ok(shaped) = shaped {
-                    self.last_wrap_shaped.push(Some(shaped.clone()));
-                    let line_bytes = input_line.as_bytes();
-                    let visual_lines = ui::layout::compute_visual_lines_with_first_line_indent(
-                        &shaped.clusters,
-                        line_bytes,
+                if let Some(shaped) = shaped {
+                    let typography_clusters = shaped
+                        .clusters
+                        .iter()
+                        .map(|cluster| {
+                            ui::typography::TypographyCluster::new(
+                                cluster.byte_range.clone(),
+                                font_size,
+                            )
+                        })
+                        .collect::<Vec<_>>();
+                    let mut line_protected_ranges = line_styles
+                        .iter()
+                        .filter(|span| {
+                            matches!(
+                                span.style,
+                                InlineStyle::InlineCode | InlineStyle::SourceMarker
+                            )
+                        })
+                        .map(|span| span.start..span.start + span.len)
+                        .collect::<Vec<_>>();
+                    line_protected_ranges.extend(protected_ranges_for_text(
+                        protected_ranges,
+                        input_offset,
+                        input_line.len(),
+                    ));
+                    let gaps =
+                        ui::typography::calculate_gaps(&ui::typography::TypographyInput::new(
+                            input_line,
+                            self.style.text_spacing_mode,
+                            &typography_clusters,
+                            &line_protected_ranges,
+                        ));
+                    let shaped_layout = ui::layout::typography::layout_shaped_run_with_gaps(
+                        &shaped,
+                        &gaps,
+                        input_line.as_bytes(),
                         char_width,
                         max_w,
                         0.0,
                         if input_offset == 0 { first_line_indent } else { 0.0 },
                     );
+                    let shaped = shaped_layout.shaped;
+                    self.last_wrap_shaped.push(Some(shaped.clone()));
+                    let visual_lines = shaped_layout.visual_lines;
                     if visual_lines.is_empty() {
                         lines.push(WrappedLine {
                             text: String::new(),
@@ -560,6 +654,44 @@ impl<'a> LayoutCtx<'a> {
         }
         lines
     }
+}
+
+fn protected_ranges_for_text(
+    ranges: &[std::ops::Range<usize>],
+    line_start: usize,
+    line_len: usize,
+) -> Vec<std::ops::Range<usize>> {
+    let line_end = line_start + line_len;
+    ranges
+        .iter()
+        .filter_map(|range| {
+            let start = range.start.max(line_start);
+            let end = range.end.min(line_end);
+            (start < end).then(|| start - line_start..end - line_start)
+        })
+        .collect()
+}
+
+fn style_spans_for_line(
+    styles: &[StyleSpan],
+    line_start: usize,
+    line_len: usize,
+) -> Vec<StyleSpan> {
+    let line_end = line_start + line_len;
+    styles
+        .iter()
+        .filter_map(|span| {
+            let span_end = span.start + span.len;
+            let start = span.start.max(line_start);
+            let end = span_end.min(line_end);
+            (start < end).then(|| StyleSpan {
+                start: start - line_start,
+                len: end - start,
+                style: span.style.clone(),
+                source_range: span.source_range.clone(),
+            })
+        })
+        .collect()
 }
 
 #[cfg(test)]
@@ -701,6 +833,66 @@ mod tests {
             text.len(),
             wrapped
         );
+    }
+
+    #[test]
+    fn natural_spacing_enters_wrapping_shape_before_line_breaks() {
+        let document = core::document::StringDocView::new("");
+        let mut natural_style = default_style();
+        natural_style.text_spacing_mode = ui::typography::TextSpacingMode::Natural;
+        let mut natural_shaper = shaping::Shaper::new().expect("natural spacing needs a shaper");
+        let mut natural_ctx = LayoutCtx::new(
+            &document,
+            &natural_style,
+            400.0,
+            Some(&mut natural_shaper),
+            None,
+            None,
+            None,
+        );
+        natural_ctx.wrap_text("中A", 15.0, shaping::Weight::NORMAL);
+        let natural_width = natural_ctx.last_wrap_shaped[0]
+            .as_ref()
+            .expect("natural wrapping stores its final shape")
+            .width;
+
+        let mut verbatim_style = natural_style.clone();
+        verbatim_style.text_spacing_mode = ui::typography::TextSpacingMode::Verbatim;
+        let mut verbatim_shaper = shaping::Shaper::new().expect("verbatim spacing needs a shaper");
+        let mut verbatim_ctx = LayoutCtx::new(
+            &document,
+            &verbatim_style,
+            400.0,
+            Some(&mut verbatim_shaper),
+            None,
+            None,
+            None,
+        );
+        verbatim_ctx.wrap_text("中A", 15.0, shaping::Weight::NORMAL);
+        let verbatim_width = verbatim_ctx.last_wrap_shaped[0]
+            .as_ref()
+            .expect("verbatim wrapping stores its shape")
+            .width;
+
+        assert!(natural_width > verbatim_width, "natural spacing must affect final shaped width");
+    }
+
+    #[test]
+    fn protected_ranges_clip_before_after_and_across_visual_lines() {
+        let ranges = [2..8, 10..12];
+        assert_eq!(
+            protected_ranges_for_text(&ranges, 0, 4).as_slice(),
+            std::slice::from_ref(&(2..4))
+        );
+        assert_eq!(
+            protected_ranges_for_text(&ranges, 4, 5).as_slice(),
+            std::slice::from_ref(&(0..4))
+        );
+        assert_eq!(
+            protected_ranges_for_text(&ranges, 8, 4).as_slice(),
+            std::slice::from_ref(&(2..4))
+        );
+        assert!(protected_ranges_for_text(&ranges, 12, 4).is_empty());
     }
 
     #[test]

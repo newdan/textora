@@ -19,6 +19,7 @@ pub mod render;
 pub mod search;
 pub mod selection;
 pub mod style;
+pub mod typography;
 pub mod view;
 
 pub mod mindmap_view;

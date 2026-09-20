@@ -67,6 +67,9 @@ pub struct ParsedMarkdown {
     pub events: Vec<MarkdownEvent>,
     /// event_ranges[i] = events[i] 在源码中的完整字节区间。
     pub event_ranges: Vec<Range<usize>>,
+    /// Ranges emitted as pulldown-cmark HTML block events. These ranges are
+    /// opaque HTML and must not be rescanned as inline markup.
+    pub(crate) html_block_ranges: Vec<Range<usize>>,
 }
 
 /// 渲染与编辑分类共用的 Markdown 解析选项。
@@ -85,6 +88,7 @@ pub fn parse_markdown(src: &str) -> ParsedMarkdown {
     let parser = Parser::new_ext(src, markdown_options());
     let mut events = Vec::new();
     let mut event_ranges = Vec::new();
+    let mut html_block_ranges = Vec::new();
 
     for (event, range) in parser.into_offset_iter() {
         match event {
@@ -108,7 +112,12 @@ pub fn parse_markdown(src: &str) -> ParsedMarkdown {
                 event_ranges.push(range.clone());
                 events.push(MarkdownEvent::Code(code.into_string()));
             }
-            Event::Html(html) | Event::InlineHtml(html) => {
+            Event::Html(html) => {
+                event_ranges.push(range.clone());
+                html_block_ranges.push(range.clone());
+                events.push(MarkdownEvent::InlineHtml(html.into_string()));
+            }
+            Event::InlineHtml(html) => {
                 event_ranges.push(range.clone());
                 events.push(MarkdownEvent::InlineHtml(html.into_string()));
             }
@@ -136,7 +145,7 @@ pub fn parse_markdown(src: &str) -> ParsedMarkdown {
     // Post-pass: detect tight vs loose lists and blank lines before lists.
     detect_list_properties(&mut events, src, &event_ranges);
 
-    ParsedMarkdown { source: src.to_owned(), events, event_ranges }
+    ParsedMarkdown { source: src.to_owned(), events, event_ranges, html_block_ranges }
 }
 
 fn convert_tag(tag: Tag<'_>) -> Option<MarkdownTag> {

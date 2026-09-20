@@ -3,6 +3,7 @@
 use serde::{Deserialize, Serialize};
 use std::path::Path;
 use ui::settings::ThemeMode;
+use ui::typography::TextSpacingMode;
 use ui::view_mode::ViewMode;
 
 /// Default sidebar width in logical pixels (before DPI scaling).
@@ -21,6 +22,8 @@ pub(crate) struct PersistedSettings {
     pub word_wrap: bool,
     #[serde(default = "default_false")]
     pub markdown_first_line_indent: bool,
+    #[serde(default)]
+    pub text_spacing_mode: TextSpacingMode,
     #[serde(default = "default_false")]
     pub show_status_bar: bool,
     /// Font family name (platform-dependent default, e.g. "Menlo" on macOS).
@@ -56,6 +59,7 @@ impl Default for PersistedSettings {
             show_line_numbers: true,
             word_wrap: true,
             markdown_first_line_indent: false,
+            text_spacing_mode: TextSpacingMode::default(),
             show_status_bar: false,
             font_family: default_font_family(),
             font_size: default_font_size(),
@@ -78,6 +82,7 @@ impl PersistedSettings {
         self.show_line_numbers = settings.show_line_numbers;
         self.word_wrap = settings.word_wrap;
         self.markdown_first_line_indent = settings.markdown_first_line_indent;
+        self.text_spacing_mode = settings.text_spacing_mode;
         self.show_status_bar = settings.show_status_bar;
         self.font_family = settings.font_family.clone();
         self.font_size = settings.font_size;
@@ -154,6 +159,27 @@ mod tests {
 
         assert!(loaded.markdown_first_line_indent);
     }
+
+    #[test]
+    fn text_spacing_mode_defaults_to_natural_and_round_trips_verbatim() {
+        let mut persisted = super::PersistedSettings::default();
+        assert_eq!(persisted.text_spacing_mode, ui::typography::TextSpacingMode::Natural);
+
+        persisted.text_spacing_mode = ui::typography::TextSpacingMode::Verbatim;
+        let serialized = toml::to_string(&persisted).expect("测试设置应可序列化");
+        let loaded: super::PersistedSettings =
+            toml::from_str(&serialized).expect("测试设置应可反序列化");
+
+        assert_eq!(loaded.text_spacing_mode, ui::typography::TextSpacingMode::Verbatim);
+    }
+
+    #[test]
+    fn missing_text_spacing_mode_uses_natural_for_legacy_config() {
+        let parsed: super::PersistedSettings =
+            toml::from_str("view_mode = \"sidebar\"\n").expect("旧设置应可反序列化");
+
+        assert_eq!(parsed.text_spacing_mode, ui::typography::TextSpacingMode::Natural);
+    }
     use super::*;
 
     #[test]
@@ -207,6 +233,7 @@ mod tests {
             show_line_numbers: false,
             word_wrap: false,
             markdown_first_line_indent: true,
+            text_spacing_mode: TextSpacingMode::Natural,
             show_status_bar: true,
             font_family: "Test Font".to_owned(),
             font_size: 17.0,

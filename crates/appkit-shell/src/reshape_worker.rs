@@ -2,13 +2,23 @@
 //!
 //! 使用 mpsc channel 通信。generation 机制确保过期请求的结果被丢弃。
 
+use std::ops::Range;
 use std::sync::Arc;
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::thread::{self, JoinHandle};
 
 use appkit_core::content_hash;
+use core::unicode::{
+    ucd_grapheme_cluster_joins, ucd_grapheme_cluster_joins_done, ucd_grapheme_cluster_lookup,
+};
+use ui::typography::{TextSpacingMode, TypographyCluster, TypographyInput};
 
 use crate::snap_tree::{DisplayLineEntry, VisualBreak};
+
+const LAYOUT_HASH_FNV_PRIME: u64 = 0x0000_0100_0000_01b3;
+const NATURAL_MODE_HASH_TAG: u64 = 0x4e41_5455_5241_4c00;
+const VERBATIM_MODE_HASH_TAG: u64 = 0x5645_5242_4154_494d;
+const FALLBACK_MIN_FILL_RATIO: f32 = 0.0;
 
 /// 发送给 worker 的 reshape 请求。
 #[derive(Debug)]
@@ -23,19 +33,55 @@ pub struct ReshapeRequest {
     pub font_size: f32,
     /// 0 = 不截断，>0 = 最多 shape 这么多字节
     pub max_line_bytes: usize,
+    /// Source spacing policy shared by foreground and background shaping.
+    pub spacing_mode: TextSpacingMode,
+    /// Line-local source ranges that must retain verbatim geometry.
+    pub protected_ranges: Arc<[Range<usize>]>,
+    /// Semantic rules version used alongside the protected ranges in cache keys.
+    pub semantic_version: u64,
     /// Target DocumentView index (for routing results back).
     pub dv_idx: usize,
 }
 
 impl ReshapeRequest {
-    fn content_hash(&self) -> u64 {
-        content_hash::content_hash(
+    pub fn content_hash(&self) -> u64 {
+        content_hash_for_layout(
             self.line_bytes.as_ref(),
             self.byte_offset,
             self.viewport_width,
             self.font_size,
+            self.spacing_mode,
+            &self.protected_ranges,
+            self.semantic_version,
         )
     }
+}
+
+/// Compute the cache key shared by foreground rendering and worker reshaping.
+pub fn content_hash_for_layout(
+    line_bytes: &[u8],
+    byte_offset: usize,
+    viewport_width: f32,
+    font_size: f32,
+    spacing_mode: TextSpacingMode,
+    protected_ranges: &[Range<usize>],
+    semantic_version: u64,
+) -> u64 {
+    let mut hash = content_hash::content_hash(line_bytes, byte_offset, viewport_width, font_size);
+    hash ^= match spacing_mode {
+        TextSpacingMode::Natural => NATURAL_MODE_HASH_TAG,
+        TextSpacingMode::Verbatim => VERBATIM_MODE_HASH_TAG,
+    };
+    hash = hash.wrapping_mul(LAYOUT_HASH_FNV_PRIME);
+    hash ^= semantic_version;
+    hash = hash.wrapping_mul(LAYOUT_HASH_FNV_PRIME);
+    for range in protected_ranges {
+        hash ^= range.start as u64;
+        hash = hash.wrapping_mul(LAYOUT_HASH_FNV_PRIME);
+        hash ^= range.end as u64;
+        hash = hash.wrapping_mul(LAYOUT_HASH_FNV_PRIME);
+    }
+    hash
 }
 
 /// Worker 返回的 reshape 结果。
@@ -157,6 +203,10 @@ fn process_with_shaper(shaper: &mut shaping::Shaper, req: &ReshapeRequest) -> Di
     let max_bytes =
         if req.max_line_bytes > 0 { req.max_line_bytes.min(bytes.len()) } else { bytes.len() };
 
+    let source_line_str = match std::str::from_utf8(bytes) {
+        Ok(s) => s,
+        Err(error) => std::str::from_utf8(&bytes[..error.valid_up_to()]).unwrap_or(""),
+    };
     let line_str = match std::str::from_utf8(&bytes[..max_bytes]) {
         Ok(s) => s,
         Err(e) => std::str::from_utf8(&bytes[..e.valid_up_to()]).unwrap_or(""),
@@ -177,13 +227,32 @@ fn process_with_shaper(shaper: &mut shaping::Shaper, req: &ReshapeRequest) -> Di
 
     let viewport_width = req.viewport_width.max(1.0);
     let char_width = shaper.col_width();
-    let visual_lines =
-        ui::layout::compute_visual_lines(&shaped.clusters, bytes, char_width, viewport_width, 0.5);
+    let typography_clusters: Vec<TypographyCluster> = shaped
+        .clusters
+        .iter()
+        .map(|cluster| TypographyCluster::new(cluster.byte_range.clone(), req.font_size))
+        .collect();
+    let typography_input = TypographyInput::new(
+        source_line_str,
+        req.spacing_mode,
+        &typography_clusters,
+        &req.protected_ranges,
+    );
+    let gaps = ui::typography::calculate_gaps(&typography_input);
+    let layout = ui::layout::typography::layout_shaped_run_with_gaps(
+        &shaped,
+        &gaps,
+        source_line_str.as_bytes(),
+        char_width,
+        viewport_width,
+        0.5,
+        0.0,
+    );
 
     let mut breaks: smallvec::SmallVec<[VisualBreak; 1]> = smallvec::SmallVec::new();
-    for (start, end, pixel_width) in visual_lines {
-        let byte_start = shaped.clusters[start].byte_range.start as u32;
-        let byte_end = shaped.clusters[end - 1].byte_range.end as u32;
+    for (start, end, pixel_width) in layout.visual_lines {
+        let byte_start = layout.shaped.clusters[start].byte_range.start as u32;
+        let byte_end = layout.shaped.clusters[end - 1].byte_range.end as u32;
         breaks.push(VisualBreak { byte_start, byte_end, pixel_width });
     }
 
@@ -212,6 +281,10 @@ fn process_fallback(req: &ReshapeRequest) -> DisplayLineEntry {
         return DisplayLineEntry::placeholder(0, bytes.len() as u32, content_hash, 1);
     }
 
+    let source_line_str = match std::str::from_utf8(bytes) {
+        Ok(s) => s,
+        Err(error) => std::str::from_utf8(&bytes[..error.valid_up_to()]).unwrap_or(""),
+    };
     let line_str = match std::str::from_utf8(&bytes[..max_bytes]) {
         Ok(s) => s,
         Err(e) => std::str::from_utf8(&bytes[..e.valid_up_to()]).unwrap_or(""),
@@ -229,149 +302,50 @@ fn process_fallback(req: &ReshapeRequest) -> DisplayLineEntry {
         if ui::layout::is_cjk_char(ch) { cjk_w } else { ascii_w }
     };
 
-    // Build char info array with pre-computed widths for O(1) range queries
-    struct CharInfo {
-        byte_start: usize,
-        #[allow(dead_code)]
-        byte_end: usize,
-        width: f32,
-        is_ws: bool,
-        is_alnum: bool,
-        is_punct: bool,
-        is_newline: bool,
-    }
+    let fallback_clusters = approximate_grapheme_clusters(line_str, char_w);
 
-    let mut char_infos: Vec<CharInfo> = Vec::new();
-    for (ci, ch) in line_str.char_indices() {
-        char_infos.push(CharInfo {
-            byte_start: ci,
-            byte_end: ci + ch.len_utf8(),
-            width: char_w(ch),
-            is_ws: ch.is_ascii_whitespace(),
-            is_alnum: ch.is_ascii_alphanumeric(),
-            is_punct: ch.is_ascii_punctuation(),
-            is_newline: ch == '\n',
-        });
-    }
-
-    if char_infos.is_empty() {
+    if fallback_clusters.is_empty() {
         let content_hash = req.content_hash();
         return DisplayLineEntry::placeholder(0, bytes.len() as u32, content_hash, 1);
     }
 
-    let n = char_infos.len();
-    let vp = req.viewport_width.max(1.0);
-
-    // Prefix sums for O(1) range width queries
-    let mut prefix: Vec<f32> = Vec::with_capacity(n + 1);
-    prefix.push(0.0);
-    for ci in &char_infos {
-        prefix.push(prefix.last().unwrap() + ci.width);
-    }
-    let width_of = |s: usize, e: usize| prefix[e] - prefix[s];
-
-    // Width after stripping trailing whitespace
-    let trimmed_width = |s: usize, e: usize| -> f32 {
-        let mut w = width_of(s, e);
-        let mut i = e;
-        while i > s && char_infos[i - 1].is_ws {
-            w -= char_infos[i - 1].width;
-            i -= 1;
-        }
-        w
+    let typography_clusters: Vec<TypographyCluster> = fallback_clusters
+        .iter()
+        .map(|cluster| TypographyCluster::new(cluster.byte_range.clone(), req.font_size))
+        .collect();
+    let typography_input = TypographyInput::new(
+        source_line_str,
+        req.spacing_mode,
+        &typography_clusters,
+        &req.protected_ranges,
+    );
+    let gaps = ui::typography::calculate_gaps(&typography_input);
+    let shaped = shaping::ShapedRun {
+        width: fallback_clusters.iter().map(|cluster| cluster.advance).sum(),
+        clusters: fallback_clusters,
     };
+    let layout = ui::layout::typography::layout_shaped_run_with_gaps(
+        &shaped,
+        &gaps,
+        source_line_str.as_bytes(),
+        ascii_w,
+        req.viewport_width.max(1.0),
+        FALLBACK_MIN_FILL_RATIO,
+        0.0,
+    );
 
     let mut breaks: smallvec::SmallVec<[VisualBreak; 1]> = smallvec::SmallVec::new();
-    let mut start = 0usize;
-    let mut last_ws: Option<usize> = None; // index of first non-ws char after space
-
-    let mut ci = 0usize;
-    while ci < n {
-        let ch = &char_infos[ci];
-
-        // Track word boundary (after whitespace → before non-whitespace)
-        if !ch.is_ws && ci > 0 && char_infos[ci - 1].is_ws {
-            last_ws = Some(ci);
-        }
-
-        // Explicit newline: force break and skip
-        if ch.is_newline {
-            breaks.push(VisualBreak {
-                byte_start: char_infos[start].byte_start as u32,
-                byte_end: ch.byte_start as u32,
-                pixel_width: width_of(start, ci).min(vp),
-            });
-            start = ci + 1; // skip newline char
-            last_ws = None;
-            ci += 1;
+    for (start, end, pixel_width) in layout.visual_lines {
+        let Some(first_cluster) = layout.shaped.clusters.get(start) else {
             continue;
-        }
-
-        let line_x = width_of(start, ci);
-        if line_x + ch.width > vp && ci > start {
-            let hard_x = line_x;
-            let mut break_at = ci;
-
-            // Rule 1: if hard break falls inside ASCII alnum run, backtrack to run start
-            if ch.is_alnum && ci > start {
-                let mut run_start = ci;
-                while run_start > start && char_infos[run_start - 1].is_alnum {
-                    run_start -= 1;
-                }
-                if run_start > start {
-                    break_at = run_start;
-                }
-            }
-
-            // Rule 2: prefer word boundary (space), but only if line is reasonably filled
-            if let Some(ws) = last_ws
-                && ws > start
-                && ws <= ci
-            {
-                // Don't break right before punctuation
-                let next_is_punct = char_infos[ws].is_punct;
-                if !next_is_punct {
-                    let ws_x = trimmed_width(start, ws);
-                    if ws_x >= hard_x * 0.5 {
-                        break_at = ws;
-                    }
-                }
-            }
-
-            // Rule 3: if chosen break leaves punctuation at line start, fall back to hard break
-            if break_at < n && char_infos[break_at].is_punct {
-                break_at = ci;
-            }
-
-            let break_byte_end = char_infos[break_at].byte_start;
-            let break_x = if break_at == ci { line_x } else { trimmed_width(start, break_at) };
-
-            breaks.push(VisualBreak {
-                byte_start: char_infos[start].byte_start as u32,
-                byte_end: break_byte_end as u32,
-                pixel_width: break_x.min(vp),
-            });
-
-            start = break_at;
-            // Skip leading whitespace on continuation line
-            while start < n && char_infos[start].is_ws {
-                start += 1;
-            }
-            last_ws = None;
-            if start > ci {
-                ci = start;
-            }
+        };
+        let Some(last_cluster) = layout.shaped.clusters.get(end.saturating_sub(1)) else {
             continue;
-        }
-        ci += 1;
-    }
-
-    // Final visual line
-    if start < n {
+        };
         breaks.push(VisualBreak {
-            byte_start: char_infos[start].byte_start as u32,
-            byte_end: max_bytes as u32,
-            pixel_width: width_of(start, n).min(vp),
+            byte_start: first_cluster.byte_range.start as u32,
+            byte_end: last_cluster.byte_range.end as u32,
+            pixel_width,
         });
     }
 
@@ -387,6 +361,42 @@ fn process_fallback(req: &ReshapeRequest) -> DisplayLineEntry {
     }
 }
 
+/// Keep estimated widths on the same UAX#29 boundaries used by editing.
+fn approximate_grapheme_clusters(
+    text: &str,
+    character_width: impl Fn(char) -> f32,
+) -> Vec<shaping::GlyphCluster> {
+    let mut clusters = Vec::new();
+    let mut characters = text.char_indices().peekable();
+    while let Some((byte_start, character)) = characters.next() {
+        let mut byte_end = byte_start + character.len_utf8();
+        let mut advance = character_width(character);
+        let mut previous_properties = ucd_grapheme_cluster_lookup(character);
+        let mut join_state = 0;
+        while let Some(&(next_byte, next_character)) = characters.peek() {
+            let next_properties = ucd_grapheme_cluster_lookup(next_character);
+            join_state =
+                ucd_grapheme_cluster_joins(join_state, previous_properties, next_properties);
+            if ucd_grapheme_cluster_joins_done(join_state) {
+                break;
+            }
+            previous_properties = next_properties;
+            characters.next();
+            byte_end = next_byte + next_character.len_utf8();
+            advance = advance.max(character_width(next_character));
+        }
+        clusters.push(shaping::GlyphCluster {
+            byte_range: byte_start..byte_end,
+            advance,
+            glyph_id: 0,
+            font_id: Default::default(),
+            x_offset: 0.0,
+            y_offset: 0.0,
+        });
+    }
+    clusters
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -400,6 +410,9 @@ mod tests {
             viewport_width: 800.0,
             font_size: 14.0,
             max_line_bytes: 0,
+            spacing_mode: TextSpacingMode::Natural,
+            protected_ranges: Arc::from([]),
+            semantic_version: 0,
             dv_idx: 0,
             byte_offset: 0,
             byte_length: 0,
@@ -417,6 +430,9 @@ mod tests {
             viewport_width: 800.0,
             font_size: 14.0,
             max_line_bytes: 0,
+            spacing_mode: TextSpacingMode::Natural,
+            protected_ranges: Arc::from([]),
+            semantic_version: 0,
             dv_idx: 0,
             byte_offset: 0,
             byte_length: 5,
@@ -434,6 +450,9 @@ mod tests {
             viewport_width: 800.0,
             font_size: 14.0,
             max_line_bytes: 0,
+            spacing_mode: TextSpacingMode::Natural,
+            protected_ranges: Arc::from([]),
+            semantic_version: 0,
             dv_idx: 0,
             byte_offset: 0,
             byte_length: line.len() as u32,
@@ -470,6 +489,9 @@ mod tests {
             viewport_width: 200.0,
             font_size: 14.0,
             max_line_bytes: 0,
+            spacing_mode: TextSpacingMode::Natural,
+            protected_ranges: Arc::from([]),
+            semantic_version: 0,
             dv_idx: 0,
             byte_offset: 0,
             byte_length: 4,
@@ -491,6 +513,9 @@ mod tests {
             viewport_width: 800.0,
             font_size: 14.0,
             max_line_bytes: 0,
+            spacing_mode: TextSpacingMode::Natural,
+            protected_ranges: Arc::from([]),
+            semantic_version: 0,
             dv_idx: 0,
             byte_offset: 0,
             byte_length: 3,
@@ -513,6 +538,9 @@ mod tests {
             viewport_width: 800.0,
             font_size: 14.0,
             max_line_bytes: 1000,
+            spacing_mode: TextSpacingMode::Natural,
+            protected_ranges: Arc::from([]),
+            semantic_version: 0,
             dv_idx: 0,
             byte_offset: 0,
             byte_length: 200_000,
@@ -535,6 +563,9 @@ mod tests {
             viewport_width: 800.0,
             font_size: 14.0,
             max_line_bytes: 0,
+            spacing_mode: TextSpacingMode::Natural,
+            protected_ranges: Arc::from([]),
+            semantic_version: 0,
             dv_idx: 0,
             byte_offset: 0,
             byte_length: data.len() as u32,
@@ -542,6 +573,104 @@ mod tests {
         let r = recv_one(&w, std::time::Duration::from_secs(2));
         assert_eq!(r.entry.byte_length, data.len() as u32);
         w.shutdown();
+    }
+
+    #[test]
+    fn fallback_natural_spacing_changes_final_line_geometry() {
+        let build_request = |spacing_mode| ReshapeRequest {
+            generation: 1,
+            doc_line: 0,
+            line_bytes: Arc::from("甲,乙".as_bytes()),
+            viewport_width: 100.0,
+            font_size: 10.0,
+            max_line_bytes: 0,
+            dv_idx: 0,
+            byte_offset: 0,
+            byte_length: "甲,乙".len() as u32,
+            spacing_mode,
+            protected_ranges: Arc::from([]),
+            semantic_version: 0,
+        };
+
+        let natural = process_fallback(&build_request(ui::typography::TextSpacingMode::Natural));
+        let verbatim = process_fallback(&build_request(ui::typography::TextSpacingMode::Verbatim));
+
+        assert!(natural.visual_breaks[0].pixel_width > verbatim.visual_breaks[0].pixel_width);
+    }
+
+    #[test]
+    fn fallback_keeps_combining_mark_with_base_for_wrap_boundary() {
+        let data = "e\u{301}x";
+        let req = ReshapeRequest {
+            generation: 1,
+            doc_line: 0,
+            line_bytes: Arc::from(data.as_bytes()),
+            viewport_width: 10.0,
+            font_size: 14.0,
+            max_line_bytes: 0,
+            spacing_mode: TextSpacingMode::Natural,
+            protected_ranges: Arc::from([]),
+            semantic_version: 0,
+            dv_idx: 0,
+            byte_offset: 0,
+            byte_length: data.len() as u32,
+        };
+
+        let entry = process_fallback(&req);
+        assert_eq!(entry.visual_breaks[0].byte_end, 3);
+        assert_eq!(entry.visual_breaks[1].byte_start, 3);
+    }
+
+    #[test]
+    fn fallback_does_not_split_extended_grapheme_clusters() {
+        for grapheme in ["👩‍💻", "🇨🇳", "👍🏽", "e\u{301}"] {
+            let source = format!("{grapheme}x");
+            let request = ReshapeRequest {
+                generation: 1,
+                doc_line: 0,
+                line_bytes: Arc::from(source.as_bytes()),
+                viewport_width: 1.0,
+                font_size: 14.0,
+                max_line_bytes: 0,
+                spacing_mode: TextSpacingMode::Natural,
+                protected_ranges: Arc::from([]),
+                semantic_version: 0,
+                dv_idx: 0,
+                byte_offset: 0,
+                byte_length: source.len() as u32,
+            };
+            let entry = process_fallback(&request);
+            assert_eq!(entry.visual_breaks[0].byte_end as usize, grapheme.len(), "{source}");
+            assert_eq!(entry.visual_breaks[1].byte_start as usize, grapheme.len(), "{source}");
+        }
+    }
+
+    #[test]
+    fn fallback_truncated_subset_keeps_full_quote_context_for_gaps() {
+        let full_source = "甲\"x\"乙";
+        let visible_prefix = "甲\"x";
+        let build_request = |line: &str, max_line_bytes| ReshapeRequest {
+            generation: 1,
+            doc_line: 0,
+            line_bytes: Arc::from(line.as_bytes()),
+            viewport_width: 200.0,
+            font_size: 14.0,
+            max_line_bytes,
+            spacing_mode: TextSpacingMode::Natural,
+            protected_ranges: Arc::from([]),
+            semantic_version: 0,
+            dv_idx: 0,
+            byte_offset: 0,
+            byte_length: line.len() as u32,
+        };
+
+        let truncated = process_fallback(&build_request(full_source, visible_prefix.len()));
+        let isolated = process_fallback(&build_request(visible_prefix, 0));
+
+        assert!(
+            truncated.visual_breaks[0].pixel_width > isolated.visual_breaks[0].pixel_width,
+            "full source quote pairing should preserve the opening quote gap"
+        );
     }
 
     #[test]
@@ -555,6 +684,9 @@ mod tests {
             viewport_width: 120.0,
             font_size: 14.0,
             max_line_bytes: 0,
+            spacing_mode: TextSpacingMode::Natural,
+            protected_ranges: Arc::from([]),
+            semantic_version: 0,
             dv_idx: 0,
             byte_offset: 0,
             byte_length: data.len() as u32,
@@ -589,6 +721,9 @@ mod tests {
             viewport_width: 800.0,
             font_size: 14.0,
             max_line_bytes: 0,
+            spacing_mode: TextSpacingMode::Natural,
+            protected_ranges: Arc::from([]),
+            semantic_version: 0,
             dv_idx: 0,
             byte_offset: 0,
             byte_length: 200,
@@ -614,6 +749,9 @@ mod tests {
             viewport_width: 120.0,
             font_size: 14.0,
             max_line_bytes: 0,
+            spacing_mode: TextSpacingMode::Natural,
+            protected_ranges: Arc::from([]),
+            semantic_version: 0,
             dv_idx: 0,
             byte_offset: 0,
             byte_length: data.len() as u32,

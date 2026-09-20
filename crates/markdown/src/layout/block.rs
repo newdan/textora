@@ -89,6 +89,11 @@ pub fn layout_doc_with_shaper_for_rendering(
         layout_block(block, &mut ctx);
     }
     ctx.finish_document_spacing();
+    if let Some(shaper) = ctx.shaper.take() {
+        for block in &mut ctx.output {
+            super::shaping::populate_style_segments(block, shaper, style);
+        }
+    }
 
     MarkdownLayout {
         doc: super::types::LaidOutDoc { blocks: ctx.output, total_height: ctx.y },
@@ -407,7 +412,17 @@ fn layout_block_content(block: &BlockNode, ctx: &mut LayoutCtx) {
                 let estimated_marker_width = active_ordered_marker.map_or(0.0, |marker| {
                     marker.marker_text.chars().count() as f32 * font_size * 0.55
                 });
-                let wrapped = ctx.wrap_text(&projected.text, font_size, Weight::NORMAL);
+                let projected_verbatim_ranges = projected_verbatim_ranges(&projected);
+                let wrapped = ctx.wrap_text_with_first_line_indent_styled_and_protected(
+                    &projected.text,
+                    font_size,
+                    Weight::NORMAL,
+                    ctx.available_width(),
+                    0.0,
+                    &materialized_styles,
+                    &projected_verbatim_ranges,
+                );
+                let wrapped_shaped = ctx.last_wrap_shaped.first().cloned().flatten();
                 let marker_width = marker_len
                     .and_then(|marker_len| shaped_prefix_width(&ctx.last_wrap_shaped, marker_len))
                     .unwrap_or(estimated_marker_width);
@@ -426,7 +441,7 @@ fn layout_block_content(block: &BlockNode, ctx: &mut LayoutCtx) {
                     w,
                     ctx.style.text_color,
                     ctx.style.body_font_family.first().map(|s| s.as_str()),
-                    ctx.shaper.as_deref_mut(),
+                    wrapped_shaped.as_ref(),
                     line_idx,
                 );
                 let n = laid.len();
@@ -1123,12 +1138,18 @@ pub(crate) fn layout_text_block(
                 },
             );
         }
-        let wrapped = ctx.wrap_text_with_first_line_indent(
+        let mut projected_verbatim_ranges = projected_verbatim_ranges(&projected);
+        if block.text_lines.is_empty() && raw.contains('\t') {
+            projected_verbatim_ranges.push(0..projected.text.len());
+        }
+        let wrapped = ctx.wrap_text_with_first_line_indent_styled_and_protected(
             &projected.text,
             font_size,
             font_weight,
             ctx.available_width(),
             line_indent,
+            &materialized_styles,
+            &projected_verbatim_ranges,
         );
         let visual_grapheme_bytes = crate::grapheme_map::grapheme_byte_boundaries(&projected.text);
 
@@ -1189,7 +1210,7 @@ pub(crate) fn layout_text_block(
                 doc_line_idx: line_idx,
                 styles: seg_styles.clone(),
                 style_segments: vec![],
-                shaped: None,
+                shaped: seg_text_layout.as_ref().map(|layout| layout.shaped.clone()),
                 text_layout: seg_text_layout,
                 highlight_spans: vec![],
                 source_projection: Some(source_projection),
@@ -1241,6 +1262,17 @@ fn append_trailing_whitespace_projection(
     });
 }
 
+fn projected_verbatim_ranges(
+    projected: &crate::projection::ProjectedText,
+) -> Vec<std::ops::Range<usize>> {
+    projected
+        .spans
+        .iter()
+        .filter(|span| matches!(span.kind, crate::projection::ProjectionSpanKind::Verbatim))
+        .map(|span| span.visual_range.clone())
+        .collect()
+}
+
 fn materialize_table_cell_line(
     cell: &BlockNode,
     line_index: usize,
@@ -1289,8 +1321,15 @@ pub(crate) fn layout_table(block: &BlockNode, ctx: &mut LayoutCtx, columns: usiz
     let available_w = ctx.available_width().max(20.0);
 
     // Dynamic column width: measure content demand, then allocate proportionally
-    let demand =
-        measure_column_demand(block, columns, font_size, ctx.shaper.as_deref_mut(), ctx.doc);
+    let demand = measure_column_demand(
+        block,
+        columns,
+        font_size,
+        ctx.style.text_spacing_mode,
+        ctx.style.body_font_family.first().map(String::as_str),
+        ctx.shaper.as_deref_mut(),
+        ctx.doc,
+    );
     let min_col_w = font_size * 3.0; // at least 3 characters wide
     // For 2-column tables, allow a column to use most of the space (leaving
     // at least min_col_w for the other).  For 3+ columns, cap at 60 % so no
@@ -1341,12 +1380,17 @@ pub(crate) fn layout_table(block: &BlockNode, ctx: &mut LayoutCtx, columns: usiz
                     materialize_table_cell_line(cell, t_idx, t, line_styles, ctx);
                 let cell_x = col_x + pad;
                 let cell_inner_w = (cell_w - pad * 2.0).max(1.0);
-                let wrapped = ctx.wrap_text_with_width(
+                let projected_verbatim_ranges = projected_verbatim_ranges(&projected);
+                let wrapped = ctx.wrap_text_with_first_line_indent_styled_and_protected(
                     &projected.text,
                     font_size,
                     Weight::NORMAL,
                     cell_inner_w,
+                    0.0,
+                    &materialized_styles,
+                    &projected_verbatim_ranges,
                 );
+                let wrapped_shaped = ctx.last_wrap_shaped.first().cloned().flatten();
                 let mut laid = layout_line_with_styles(
                     &materialized_styles,
                     &wrapped,
@@ -1358,7 +1402,7 @@ pub(crate) fn layout_table(block: &BlockNode, ctx: &mut LayoutCtx, columns: usiz
                     cell_inner_w,
                     ctx.style.text_color,
                     ctx.style.body_font_family.first().map(|s| s.as_str()),
-                    ctx.shaper.as_deref_mut(),
+                    wrapped_shaped.as_ref(),
                     t_idx,
                 );
                 let owner = crate::projection::ProjectionOwnerId::TableCell {
@@ -1494,6 +1538,8 @@ pub(crate) fn measure_column_demand(
     block: &BlockNode,
     columns: usize,
     font_size: f32,
+    text_spacing_mode: ui::typography::TextSpacingMode,
+    font_family: Option<&str>,
     mut shaper: Option<&mut Shaper>,
     doc: &dyn core::document::DocView,
 ) -> Vec<f32> {
@@ -1501,11 +1547,13 @@ pub(crate) fn measure_column_demand(
 
     // Helper: update demand for a single cell's text content.
     let measure_cell = |texts: &[std::borrow::Cow<'_, str>],
+                        styles: &[Vec<StyleSpan>],
+                        projected_verbatim: &[Vec<std::ops::Range<usize>>],
                         ci: usize,
                         demand: &mut Vec<f32>,
                         shaper: &mut Option<&mut Shaper>,
                         font_size: f32| {
-        for t in texts {
+        for (line_index, t) in texts.iter().enumerate() {
             if t.is_empty() {
                 continue;
             }
@@ -1518,7 +1566,15 @@ pub(crate) fn measure_column_demand(
                         .filter_map(|tok| s.shape(tok).ok().map(|r| r.width))
                         .max_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal))
                         .unwrap_or(0.0);
-                    let full = s.shape(t).ok().map(|r| r.width).unwrap_or(0.0);
+                    let full = measure_styled_text_width(
+                        t,
+                        styles.get(line_index).map(Vec::as_slice).unwrap_or(&[]),
+                        font_size,
+                        text_spacing_mode,
+                        font_family,
+                        projected_verbatim.get(line_index).map(Vec::as_slice).unwrap_or(&[]),
+                        s,
+                    );
                     (max_tok, full)
                 })
                 .unwrap_or_else(|| {
@@ -1542,8 +1598,18 @@ pub(crate) fn measure_column_demand(
         if let BlockKind::TableCell_ { col, is_header: true, .. } = child.kind
             && col < columns
         {
-            let (texts, _) = collect_text_lines_with_styles(child, doc);
-            measure_cell(&texts, col, &mut demand, &mut shaper, font_size);
+            let (texts, styles) = collect_text_lines_with_styles(child, doc);
+            let projected_verbatim =
+                child.projected_lines.iter().map(projected_verbatim_ranges).collect::<Vec<_>>();
+            measure_cell(
+                &texts,
+                &styles,
+                &projected_verbatim,
+                col,
+                &mut demand,
+                &mut shaper,
+                font_size,
+            );
         }
     }
 
@@ -1556,11 +1622,67 @@ pub(crate) fn measure_column_demand(
             if ci >= columns {
                 break;
             }
-            let (texts, _) = collect_text_lines_with_styles(cell, doc);
-            measure_cell(&texts, ci, &mut demand, &mut shaper, font_size);
+            let (texts, styles) = collect_text_lines_with_styles(cell, doc);
+            let projected_verbatim =
+                cell.projected_lines.iter().map(projected_verbatim_ranges).collect::<Vec<_>>();
+            measure_cell(
+                &texts,
+                &styles,
+                &projected_verbatim,
+                ci,
+                &mut demand,
+                &mut shaper,
+                font_size,
+            );
         }
     }
     demand
+}
+
+fn measure_styled_text_width(
+    text: &str,
+    styles: &[StyleSpan],
+    font_size: f32,
+    text_spacing_mode: ui::typography::TextSpacingMode,
+    font_family: Option<&str>,
+    projected_verbatim: &[std::ops::Range<usize>],
+    shaper: &mut Shaper,
+) -> f32 {
+    let Some(shaped) = super::shaping::shape_styled_run(
+        text,
+        styles,
+        font_size,
+        Weight::NORMAL,
+        font_family,
+        shaper,
+    ) else {
+        return 0.0;
+    };
+    let clusters = shaped
+        .clusters
+        .iter()
+        .map(|cluster| {
+            ui::typography::TypographyCluster::new(cluster.byte_range.clone(), font_size)
+        })
+        .collect::<Vec<_>>();
+    let mut protected_ranges = styles
+        .iter()
+        .filter(|span| {
+            matches!(
+                span.style,
+                crate::builder::InlineStyle::InlineCode | crate::builder::InlineStyle::SourceMarker
+            )
+        })
+        .map(|span| span.start..span.start + span.len)
+        .collect::<Vec<_>>();
+    protected_ranges.extend(projected_verbatim.iter().cloned());
+    let gaps = ui::typography::calculate_gaps(&ui::typography::TypographyInput::new(
+        text,
+        text_spacing_mode,
+        &clusters,
+        &protected_ranges,
+    ));
+    shaped.width + gaps.iter().map(|gap| gap.advance).sum::<f32>()
 }
 
 /// Allocate column widths from content demand and available space.
@@ -1657,8 +1779,8 @@ fn layout_line_with_styles(
     y_start: f32,
     width: f32,
     color: [f32; 4],
-    _font_family: Option<&str>,
-    mut _shaper: Option<&mut Shaper>,
+    font_family: Option<&str>,
+    full_shaped: Option<&shaping::ShapedRun>,
     doc_line_idx: usize,
 ) -> Vec<LaidOutLine> {
     let mut result = Vec::new();
@@ -1685,6 +1807,17 @@ fn layout_line_with_styles(
         let source_projection = projected
             .slice_visual_line_indexed(&visual_grapheme_bytes, 0, seg_start..seg_end)
             .expect("wrapped visual lines must end at projection grapheme boundaries");
+        let seg_text_layout = full_shaped.and_then(|shaped| {
+            super::shaping::segment_text_layout(
+                shaped,
+                seg_start,
+                seg_end,
+                &w.text,
+                font_size,
+                font_family,
+                Weight::NORMAL,
+            )
+        });
         // Shaping deferred to render phase (only visible lines)
         result.push(LaidOutLine {
             text: w.text.clone(),
@@ -1696,8 +1829,8 @@ fn layout_line_with_styles(
             doc_line_idx,
             styles: seg_styles,
             style_segments: vec![],
-            shaped: None,
-            text_layout: None,
+            shaped: seg_text_layout.as_ref().map(|layout| layout.shaped.clone()),
+            text_layout: seg_text_layout,
             highlight_spans: vec![],
             source_projection: Some(source_projection),
         });
@@ -1709,6 +1842,7 @@ fn layout_line_with_styles(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::builder::InlineStyle;
     use crate::builder::MarkdownDoc;
     use crate::layout::LazyLayout;
     use crate::parser::parse_markdown;
@@ -1788,6 +1922,259 @@ mod tests {
                 "unexpected indentation for {source:?}"
             );
         }
+    }
+
+    #[test]
+    fn novel_tab_line_preserves_verbatim_geometry() {
+        let source = "中文A\t继续(说明)";
+        let document = core::document::StringDocView::new(source);
+        let structure = crate::builder::NovelStructure::scan(&document);
+        let mut shaper = Shaper::new().expect("novel tab layout requires fonts");
+        let mut widths = Vec::new();
+        for mode in
+            [ui::typography::TextSpacingMode::Natural, ui::typography::TextSpacingMode::Verbatim]
+        {
+            let mut style = MarkdownStyle::novel(&ui::theme::test_theme(), 15.0, 24.0);
+            style.text_spacing_mode = mode;
+            let layout = layout_doc_with_shaper_for_rendering(
+                crate::layout::BlockSource::blocks(&structure),
+                &style,
+                800.0,
+                Some(&mut shaper),
+                None,
+                &document,
+            );
+            let LaidOutBlockKind::Text { lines } = &layout.document().blocks[0].kind else {
+                panic!("novel fixture must be a text block");
+            };
+            widths.push(lines[0].shaped.as_ref().expect("novel line must shape").width);
+        }
+        assert!((widths[0] - widths[1]).abs() < 0.01, "tab line widths: {widths:?}");
+    }
+
+    #[test]
+    fn final_markdown_line_geometry_reuses_natural_spacing_for_styles() {
+        let source = "中文**Word**正文";
+        let document = core::document::StringDocView::new(source);
+        let parsed = parse_markdown(source);
+        let mut natural_style = default_style();
+        natural_style.text_spacing_mode = ui::typography::TextSpacingMode::Natural;
+        let markdown = MarkdownDoc::build(&parsed, &natural_style);
+        let mut shaper = Shaper::new().expect("styled geometry needs a text shaper");
+        let natural = layout_doc_with_shaper_for_rendering(
+            &markdown.blocks,
+            &natural_style,
+            800.0,
+            Some(&mut shaper),
+            None,
+            &document,
+        );
+        let natural_line = match &natural.document().blocks[0].kind {
+            LaidOutBlockKind::Text { lines } => lines.first().expect("paragraph line exists"),
+            _ => panic!("fixture must produce a paragraph"),
+        };
+        let natural_layout = natural_line.text_layout.as_ref().expect("line layout exists");
+        assert!(natural_line.styles.iter().any(|span| span.style == InlineStyle::Bold));
+        assert!(!natural_line.style_segments.is_empty());
+
+        let mut verbatim_style = natural_style.clone();
+        verbatim_style.text_spacing_mode = ui::typography::TextSpacingMode::Verbatim;
+        let verbatim_markdown = MarkdownDoc::build(&parse_markdown(source), &verbatim_style);
+        let mut verbatim_shaper = Shaper::new().expect("verbatim geometry needs a text shaper");
+        let verbatim = layout_doc_with_shaper_for_rendering(
+            &verbatim_markdown.blocks,
+            &verbatim_style,
+            800.0,
+            Some(&mut verbatim_shaper),
+            None,
+            &document,
+        );
+        let verbatim_line = match &verbatim.document().blocks[0].kind {
+            LaidOutBlockKind::Text { lines } => lines.first().expect("paragraph line exists"),
+            _ => panic!("fixture must produce a paragraph"),
+        };
+        let verbatim_layout = verbatim_line.text_layout.as_ref().expect("line layout exists");
+        assert_eq!(natural_line.text, verbatim_line.text);
+        assert!(natural_layout.shaped.width > verbatim_layout.shaped.width);
+        for segment in &natural_line.style_segments {
+            let start = segment.start;
+            let end = start + segment.len;
+            let segment_width = natural_line
+                .shaped
+                .as_ref()
+                .expect("line retains final shape")
+                .clusters
+                .iter()
+                .filter(|cluster| {
+                    cluster.byte_range.start >= start && cluster.byte_range.end <= end
+                })
+                .map(|cluster| cluster.advance)
+                .sum::<f32>();
+            assert!((segment.width - segment_width).abs() < 0.01);
+        }
+    }
+
+    fn line_widths_for_mode(source: &str, mode: ui::typography::TextSpacingMode) -> Vec<f32> {
+        let mut style = default_style();
+        style.text_spacing_mode = mode;
+        let markdown = MarkdownDoc::build(&parse_markdown(source), &style);
+        let document = core::document::StringDocView::new(source);
+        let mut shaper = Shaper::new().expect("spacing fixture needs a text shaper");
+        let layout = layout_doc_with_shaper_for_rendering(
+            &markdown.blocks,
+            &style,
+            800.0,
+            Some(&mut shaper),
+            None,
+            &document,
+        );
+        let mut widths = Vec::new();
+        fn collect(block: &LaidOutBlock, widths: &mut Vec<f32>) {
+            match &block.kind {
+                LaidOutBlockKind::Text { lines }
+                | LaidOutBlockKind::ListItem { lines, .. }
+                | LaidOutBlockKind::MetadataBlock { lines } => {
+                    widths.extend(lines.iter().filter_map(|line| {
+                        line.text_layout.as_ref().map(|layout| layout.shaped.width)
+                    }));
+                }
+                LaidOutBlockKind::BlockQuote { blocks } => {
+                    for child in blocks {
+                        collect(child, widths);
+                    }
+                }
+                LaidOutBlockKind::Table { header, rows, .. } => {
+                    for cell in header {
+                        collect_lines(cell, widths);
+                    }
+                    for row in rows {
+                        for cell in row {
+                            collect_lines(cell, widths);
+                        }
+                    }
+                }
+                LaidOutBlockKind::CodeBlock { .. } | LaidOutBlockKind::HorizontalRule => {}
+            }
+        }
+        fn collect_lines(lines: &[LaidOutLine], widths: &mut Vec<f32>) {
+            widths.extend(
+                lines
+                    .iter()
+                    .filter_map(|line| line.text_layout.as_ref().map(|layout| layout.shaped.width)),
+            );
+        }
+        for block in &layout.document().blocks {
+            collect(block, &mut widths);
+        }
+        widths
+    }
+
+    fn cumulative_width(line: &LaidOutLine, byte: usize) -> f32 {
+        line.shaped
+            .as_ref()
+            .expect("spacing fixture must retain final shape")
+            .clusters
+            .iter()
+            .filter(|cluster| cluster.byte_range.end <= byte)
+            .map(|cluster| cluster.advance)
+            .sum()
+    }
+
+    #[test]
+    fn natural_spacing_covers_list_table_code_and_autolink_layouts() {
+        let list_natural =
+            line_widths_for_mode("- 中文A\n- A中文", ui::typography::TextSpacingMode::Natural);
+        let list_verbatim =
+            line_widths_for_mode("- 中文A\n- A中文", ui::typography::TextSpacingMode::Verbatim);
+        assert_eq!(list_natural.len(), list_verbatim.len());
+        assert!(
+            list_natural.iter().zip(&list_verbatim).any(|(natural, verbatim)| natural > verbatim)
+        );
+
+        let table_source = "| 左A | B右 |\n| --- | --- |\n| 中A | A中 |";
+        let table_natural =
+            line_widths_for_mode(table_source, ui::typography::TextSpacingMode::Natural);
+        let table_verbatim =
+            line_widths_for_mode(table_source, ui::typography::TextSpacingMode::Verbatim);
+        assert_eq!(table_natural.len(), table_verbatim.len());
+        assert!(
+            table_natural.iter().zip(&table_verbatim).any(|(natural, verbatim)| natural > verbatim)
+        );
+
+        let source = "中文`A中文B`正文<span title=\"中文A\">X</span><https://example.com>A中文";
+        let mut natural_style = default_style();
+        natural_style.text_spacing_mode = ui::typography::TextSpacingMode::Natural;
+        let natural_doc = MarkdownDoc::build(&parse_markdown(source), &natural_style);
+        let document = core::document::StringDocView::new(source);
+        let mut natural_shaper = Shaper::new().expect("protected fixture needs a text shaper");
+        let natural = layout_doc_with_shaper_for_rendering(
+            &natural_doc.blocks,
+            &natural_style,
+            800.0,
+            Some(&mut natural_shaper),
+            None,
+            &document,
+        );
+        let natural_line = match &natural.document().blocks[0].kind {
+            LaidOutBlockKind::Text { lines } => lines.first().expect("paragraph line exists"),
+            _ => panic!("fixture must produce a paragraph"),
+        };
+        let code = natural_line
+            .styles
+            .iter()
+            .find(|span| span.style == InlineStyle::InlineCode)
+            .expect("inline code style exists");
+        let natural_code_width = cumulative_width(natural_line, code.start + code.len)
+            - cumulative_width(natural_line, code.start);
+        let mut verbatim_style = natural_style.clone();
+        verbatim_style.text_spacing_mode = ui::typography::TextSpacingMode::Verbatim;
+        let verbatim_doc = MarkdownDoc::build(&parse_markdown(source), &verbatim_style);
+        let mut verbatim_shaper = Shaper::new().expect("protected fixture needs a shaper");
+        let verbatim = layout_doc_with_shaper_for_rendering(
+            &verbatim_doc.blocks,
+            &verbatim_style,
+            800.0,
+            Some(&mut verbatim_shaper),
+            None,
+            &document,
+        );
+        let verbatim_line = match &verbatim.document().blocks[0].kind {
+            LaidOutBlockKind::Text { lines } => lines.first().expect("paragraph line exists"),
+            _ => panic!("fixture must produce a paragraph"),
+        };
+        let verbatim_code_width = cumulative_width(verbatim_line, code.start + code.len)
+            - cumulative_width(verbatim_line, code.start);
+        assert!((natural_code_width - verbatim_code_width).abs() < 0.01);
+        assert!(natural_line.text.contains("<span title=\"中文A\">X</span>"));
+        assert!(natural_line.text.contains("https://example.com"));
+        let html_start = natural_line.text.find("<span").expect("HTML literal starts");
+        let html_end =
+            natural_line.text.find("</span>").expect("HTML literal ends") + "</span>".len();
+        let natural_html_width =
+            cumulative_width(natural_line, html_end) - cumulative_width(natural_line, html_start);
+        let verbatim_html_width =
+            cumulative_width(verbatim_line, html_end) - cumulative_width(verbatim_line, html_start);
+        assert!((natural_html_width - verbatim_html_width).abs() < 0.01);
+        let url_start = natural_line.text.find("https://example.com").expect("autolink text");
+        let url_end = url_start + "https://example.com".len();
+        let natural_url_width =
+            cumulative_width(natural_line, url_end) - cumulative_width(natural_line, url_start);
+        let verbatim_url_width =
+            cumulative_width(verbatim_line, url_end) - cumulative_width(verbatim_line, url_start);
+        assert!((natural_url_width - verbatim_url_width).abs() < 0.01);
+        let html_block = "<script>\nconst label = \"<span title=\\\"中文A\\\">\";\n</script>";
+        let html_block_natural =
+            line_widths_for_mode(html_block, ui::typography::TextSpacingMode::Natural);
+        let html_block_verbatim =
+            line_widths_for_mode(html_block, ui::typography::TextSpacingMode::Verbatim);
+        assert_eq!(html_block_natural.len(), html_block_verbatim.len());
+        for (natural, verbatim) in html_block_natural.iter().zip(&html_block_verbatim) {
+            assert!((natural - verbatim).abs() < 0.01);
+        }
+        assert!(
+            natural_line.text_layout.as_ref().expect("line layout exists").shaped.width
+                > verbatim_line.text_layout.as_ref().expect("line layout exists").shaped.width
+        );
     }
 
     #[test]
@@ -2041,6 +2428,17 @@ mod tests {
                     (&InlineStyle::SourceMarker, "`"),
                 ]
             );
+            for marker in line.styles.iter().filter(|span| span.style == InlineStyle::SourceMarker)
+            {
+                let segment = line
+                    .style_segments
+                    .iter()
+                    .find(|segment| segment.start == marker.start && segment.len == marker.len)
+                    .expect("source marker must retain a final geometry segment");
+                let shaped_width = cumulative_width(line, marker.start + marker.len)
+                    - cumulative_width(line, marker.start);
+                assert!((segment.width - shaped_width).abs() < 0.01);
+            }
         }
     }
 

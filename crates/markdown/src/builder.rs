@@ -652,9 +652,27 @@ impl MarkdownBuilder {
         self.push_text_with_source(text, self.current_event_range.clone());
     }
 
-    fn push_text_with_source(&mut self, text: &str, source_range: Range<usize>) {
+    fn push_verbatim_text(&mut self, text: &str) {
         self.append_text_and_style(text);
-        self.pending_line.projection.push_direct(text, source_range);
+        self.pending_line.projection.push_verbatim(text, self.current_event_range.clone());
+    }
+
+    fn push_text_with_source(&mut self, text: &str, source_range: Range<usize>) {
+        let is_technical_link = self
+            .text_style_stack
+            .iter()
+            .rev()
+            .find_map(|modifier| match modifier {
+                TextStyleMod::Link { url } => Some(url.as_str()),
+                _ => None,
+            })
+            .is_some_and(|url| url == text || url.strip_prefix("mailto:") == Some(text));
+        self.append_text_and_style(text);
+        if is_technical_link {
+            self.pending_line.projection.push_verbatim(text, source_range);
+        } else {
+            self.pending_line.projection.push_direct(text, source_range);
+        }
     }
 
     fn push_inline_code(&mut self, code: &str, source: &str) {
@@ -1000,7 +1018,7 @@ impl MarkdownDoc {
                     } else {
                         // Other inline HTML remains literal text until the renderer has a
                         // dedicated, sanitized HTML representation.
-                        builder.push_text(html);
+                        builder.push_verbatim_text(html);
                     }
                 }
                 MarkdownEvent::SoftBreak => {
@@ -1517,6 +1535,44 @@ mod tests {
                 "inline HTML break {html_break:?} must create two visual lines"
             );
         }
+    }
+
+    #[test]
+    fn autolink_projection_preserves_technical_text_but_not_prose_labels() {
+        let source = "前文<https://a.test/中文A>后文";
+        let document = MarkdownDoc::build(&parse_markdown(source), &default_style());
+        let projected = &document.blocks[0].projected_lines[0];
+        assert!(projected.spans.iter().any(|span| {
+            span.kind == crate::projection::ProjectionSpanKind::Verbatim
+                && &projected.text[span.visual_range.clone()] == "https://a.test/中文A"
+        }));
+        let source = "前文[中文A](https://a.test)后文";
+        let document = MarkdownDoc::build(&parse_markdown(source), &default_style());
+        assert!(
+            document.blocks[0].projected_lines[0]
+                .spans
+                .iter()
+                .all(|span| { span.kind != crate::projection::ProjectionSpanKind::Verbatim })
+        );
+    }
+
+    #[test]
+    fn html_projection_preserves_literal_and_prose_boundaries() {
+        let html = "<span title=\"中A\">";
+        let source = format!("前文{html}后文");
+        let document = MarkdownDoc::build(&parse_markdown(&source), &default_style());
+        let projected = &document.blocks[0].projected_lines[0];
+        let html_start = "前文".len();
+        let html_end = html_start + html.len();
+        assert_eq!(projected.text, source);
+        assert!(
+            projected.spans.iter().any(|span| {
+                span.source_range == (html_start..html_end)
+                    && span.visual_range == (html_start..html_end)
+            }),
+            "HTML must retain a distinct source-to-visual span for spacing protection"
+        );
+        projected.validate(&source).expect("literal HTML must retain valid cursor boundaries");
     }
 
     #[test]

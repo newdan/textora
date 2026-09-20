@@ -7,6 +7,7 @@ use crate::core::{
     EventCtx, LayoutCtx, PaintCtx, Rect, Widget, WidgetAction, dispatch_child_event_route,
 };
 use crate::theme::SettingsTheme;
+use crate::typography::TextSpacingMode;
 use crate::widgets::button::{Button, ButtonStyle};
 use crate::widgets::form::{FormRow, FormRowStyle, FormSection, FormSectionStyle, FormView};
 use crate::widgets::inline_group::{InlineChild, InlineGroup};
@@ -64,6 +65,8 @@ const FONT_SIZE_ID: WidgetId = WidgetId(0x7365_7474_7369_7a65);
 const LINE_HEIGHT_RATIO_ID: WidgetId = WidgetId(0x7365_7474_6c69_6e65);
 const WORD_WRAP_ID: WidgetId = WidgetId(0x7365_7474_7772_6170);
 const MARKDOWN_FIRST_LINE_INDENT_ID: WidgetId = WidgetId(0x7365_7474_6d64_696e);
+const TEXT_SPACING_NATURAL_ID: WidgetId = WidgetId(0x7365_7474_7370_6e61);
+const TEXT_SPACING_VERBATIM_ID: WidgetId = WidgetId(0x7365_7474_7370_7665);
 const LINE_NUMBERS_ID: WidgetId = WidgetId(0x7365_7474_6e75_6d62);
 const TAB_WIDTH_ID: WidgetId = WidgetId(0x7365_7474_7461_6273);
 const VIEW_SIDEBAR_ID: WidgetId = WidgetId(0x7365_7474_7669_6577);
@@ -343,6 +346,7 @@ impl SettingsView {
                 self.line_height_ratio_row(),
                 self.word_wrap_row(),
                 self.markdown_first_line_indent_row(),
+                self.text_spacing_mode_row(),
                 self.line_numbers_row(),
                 self.tab_width_row(),
             ],
@@ -367,6 +371,40 @@ impl SettingsView {
                 MARKDOWN_FIRST_LINE_INDENT_ID,
                 self.input.markdown_first_line_indent,
             )),
+            settings_row_style(),
+        )
+    }
+
+    fn text_spacing_mode_row(&self) -> FormRow {
+        let buttons = [
+            (
+                TEXT_SPACING_NATURAL_ID,
+                "自然",
+                self.input.text_spacing_mode == TextSpacingMode::Natural,
+            ),
+            (
+                TEXT_SPACING_VERBATIM_ID,
+                "原样",
+                self.input.text_spacing_mode == TextSpacingMode::Verbatim,
+            ),
+        ]
+        .into_iter()
+        .map(|(id, title, selected)| {
+            let mut button = Button::new(id, segmented_button_style(self.settings_theme));
+            button.set_text(Some(title.to_owned()));
+            button.set_selected(selected);
+            InlineChild::fixed(Box::new(button), SETTINGS_BUTTON_WIDTH_LOGICAL)
+                .with_cross_size(SETTINGS_CONTROL_HEIGHT_LOGICAL)
+        })
+        .collect();
+        let group = InlineGroup::new(buttons)
+            .with_gap(0.0)
+            .with_main_alignment(crate::widgets::inline_group::MainAlignment::End)
+            .with_alignment(crate::widgets::inline_group::CrossAlignment::Center);
+        FormRow::new(
+            row_label("中西文间距"),
+            Some(description_label("选择正文间距方式。")),
+            Box::new(group),
             settings_row_style(),
         )
     }
@@ -558,6 +596,16 @@ impl SettingsView {
             }
             VIEW_SIDEBAR_ID => self.map_view_mode(ViewMode::Sidebar),
             VIEW_TABS_ID => self.map_view_mode(ViewMode::Tabs),
+            TEXT_SPACING_NATURAL_ID | TEXT_SPACING_VERBATIM_ID => {
+                let mode = if id == TEXT_SPACING_NATURAL_ID {
+                    TextSpacingMode::Natural
+                } else {
+                    TextSpacingMode::Verbatim
+                };
+                self.input.text_spacing_mode = mode;
+                self.validation = None;
+                Some(WidgetAction::Settings(SettingsViewAction::SetTextSpacingMode(mode)))
+            }
             RETRY_PERSISTENCE_ID => {
                 Some(WidgetAction::Settings(SettingsViewAction::RetryPersistence))
             }
@@ -1136,6 +1184,7 @@ mod tests {
             line_height_ratio: 1.618,
             word_wrap: true,
             markdown_first_line_indent: false,
+            text_spacing_mode: crate::typography::TextSpacingMode::Natural,
             show_line_numbers: true,
             tab_width: 4,
             view_mode: ViewMode::Sidebar,
@@ -1184,6 +1233,8 @@ mod tests {
                     LINE_HEIGHT_RATIO_ID,
                     WORD_WRAP_ID,
                     MARKDOWN_FIRST_LINE_INDENT_ID,
+                    TEXT_SPACING_NATURAL_ID,
+                    TEXT_SPACING_VERBATIM_ID,
                     LINE_NUMBERS_ID,
                     TAB_WIDTH_ID,
                 ],
@@ -1334,6 +1385,12 @@ mod tests {
             Some(WidgetAction::Settings(SettingsViewAction::SetMarkdownFirstLineIndent(true)))
         );
         assert_eq!(
+            editor.handle_control_action(ControlAction::Activated { id: TEXT_SPACING_VERBATIM_ID }),
+            Some(WidgetAction::Settings(SettingsViewAction::SetTextSpacingMode(
+                crate::typography::TextSpacingMode::Verbatim,
+            )))
+        );
+        assert_eq!(
             editor
                 .handle_control_action(ControlAction::Toggled { id: WORD_WRAP_ID, checked: false }),
             Some(WidgetAction::Settings(SettingsViewAction::SetWordWrap(false)))
@@ -1374,6 +1431,7 @@ mod tests {
             line_height_ratio: 1.618,
             word_wrap: true,
             markdown_first_line_indent: false,
+            text_spacing_mode: crate::typography::TextSpacingMode::Natural,
             show_line_numbers: true,
             tab_width: 4,
             view_mode: ViewMode::Sidebar,
