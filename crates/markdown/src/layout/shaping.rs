@@ -369,7 +369,7 @@ fn compute_style_segments(
                 InlineStyle::SourceMarker => InlineStyle::SourceMarker,
             },
         });
-        cursor_x += seg_w;
+        cursor_x = x_offset + seg_w;
         last_end = span_end;
     }
     shaper.set_font_size(old_size);
