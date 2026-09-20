@@ -70,3 +70,39 @@ pub fn resolve_glyph(
 
     Some(slot)
 }
+
+/// Shared positioning entry for source, preedit and preview glyphs.
+pub(crate) fn glyph_position(
+    shaper: &mut Shaper,
+    font_id: FontId,
+    x: f32,
+) -> (f32, render::SubpixelPhase) {
+    render::split_subpixel(shaper.glyph_rasterization(font_id).align_x(x))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn monospace_position_snaps_final_coordinate_to_zero_phase() {
+        let mut shaper =
+            Shaper::new().expect("system fonts must load").with_font_family("monospace");
+        let shaped = shaper.shape("e").expect("fixture must shape");
+        let font_id = shaped.clusters[0].font_id;
+        for x in [10.25_f32, 10.5, 10.75, -0.25, -0.5, -0.75] {
+            assert_eq!(glyph_position(&mut shaper, font_id, x), (x.round(), 0));
+        }
+    }
+
+    #[test]
+    fn proportional_position_preserves_fractional_phase() {
+        let mut shaper =
+            Shaper::new().expect("system fonts must load").with_font_family("sans-serif");
+        let shaped = shaper.shape("e").expect("fixture must shape");
+        let font_id = shaped.clusters[0].font_id;
+        for x in [10.25, 10.5, 10.75, -0.25, -0.5, -0.75] {
+            assert_eq!(glyph_position(&mut shaper, font_id, x), render::split_subpixel(x));
+        }
+    }
+}

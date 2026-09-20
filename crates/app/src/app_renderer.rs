@@ -751,6 +751,8 @@ impl App {
         let (Some(text), Some(gpu)) = (resources.text.as_mut(), resources.gpu.as_ref()) else {
             return vec![];
         };
+        text.shaper.set_font_family(Some(&settings.font_family));
+        text.shaper.set_font_size(metrics.font_size);
         let (preedit_text, _) = editor_runtime.preedit();
 
         let screen_w = gpu.ctx.config.width as f32;
@@ -900,6 +902,7 @@ impl App {
                 let handles_own_rendering = self.active_handles_own_rendering();
                 let active_id = self.active_tab_id();
                 let theme = self.current_theme.clone();
+                let font_family = self.settings.font_family.clone();
                 let toc_max_depth = self.settings.toc_max_depth;
                 let markdown_first_line_indent = self.settings.markdown_first_line_indent;
                 let text_spacing_mode = self.settings.text_spacing_mode;
@@ -911,6 +914,7 @@ impl App {
                     let plugin_setup_started_at = Instant::now();
                     // Push render settings (logical pixels) before rendering
                     tab.send_message(ui::plugin::PluginMessage::SetRenderSettings {
+                        font_family,
                         font_size: metrics.font_size / dpi,
                         line_height: metrics.line_height / dpi,
                         toc_max_depth,
@@ -1644,6 +1648,7 @@ impl App {
         let dpi = metrics.dpi;
         let font_size = metrics.font_size / dpi;
         let line_height = metrics.line_height / dpi;
+        let font_family = self.settings.font_family.clone();
         let toc_max_depth = self.settings.toc_max_depth;
         let markdown_first_line_indent = self.settings.markdown_first_line_indent;
         let text_spacing_mode = self.settings.text_spacing_mode;
@@ -1651,6 +1656,7 @@ impl App {
         let mut tab = self.active_tab_session_mut()?;
 
         tab.send_message(ui::plugin::PluginMessage::SetRenderSettings {
+            font_family,
             font_size,
             line_height,
             toc_max_depth,

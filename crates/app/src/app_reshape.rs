@@ -270,6 +270,7 @@ impl App {
             .map(|tab| self.viewport_content_width(tab.document))
             .unwrap_or(1.0);
         let font_size = self.ui_metrics().font_size;
+        let font_family: std::sync::Arc<str> = self.settings.font_family.clone().into();
         let (range, anchor_doc, document_line_count) = {
             let Some(tab) = self.tab_session(tab_id) else {
                 return;
@@ -337,6 +338,7 @@ impl App {
                             spacing_mode,
                             &local_protected_ranges,
                             semantic_version,
+                            &font_family,
                         );
                         entry.content_hash != 0 && entry.content_hash == current_hash
                     } else {
@@ -357,6 +359,7 @@ impl App {
                     Some((
                         dl,
                         ReshapeRequest {
+                            font_family: font_family.clone(),
                             generation,
                             doc_line: dl,
                             byte_offset: off,
@@ -914,6 +917,7 @@ mod zoom_tests {
             TextSpacingMode::Natural,
             &[],
             settings.version,
+            &settings.font_family,
         );
         let verbatim_hash = content_hash_for_layout(
             line,
@@ -923,6 +927,7 @@ mod zoom_tests {
             TextSpacingMode::Verbatim,
             &[],
             settings.version,
+            &settings.font_family,
         );
 
         assert_ne!(natural_hash, verbatim_hash);

@@ -180,6 +180,7 @@ mod tests {
 
     fn request() -> ReshapeRequest {
         ReshapeRequest {
+            font_family: "Menlo".into(),
             generation: 0,
             doc_line: 0,
             byte_offset: 0,

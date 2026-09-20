@@ -3,7 +3,10 @@
 //! Converts text into positioned glyph clusters for rendering.
 
 pub mod font_cache;
+mod rasterization;
 use hashlink::LruCache;
+pub use rasterization::GlyphRasterization;
+use std::collections::HashMap;
 use std::ops::Range;
 use std::sync::{Arc, Mutex};
 
@@ -28,9 +31,9 @@ pub struct GlyphCluster {
     pub font_id: cosmic_text::fontdb::ID,
     /// Horizontal advance in pixels.
     pub advance: f32,
-    /// X offset for subpixel positioning.
+    /// Horizontal glyph offset in pixels, positive to the right.
     pub x_offset: f32,
-    /// Y offset for baseline adjustment.
+    /// Vertical glyph offset in pixels, positive above the baseline.
     pub y_offset: f32,
 }
 /// Result of shaping a text run.
@@ -130,6 +133,7 @@ pub struct Shaper {
     font_style: Style,
     cache: GraphemeAdvanceCache,
     scale_context: swash::scale::ScaleContext,
+    rasterization_policies: HashMap<FontId, GlyphRasterization>,
     /// Reusable buffer — avoids reallocating on every shape() call.
     buffer: Buffer,
     /// Cached monospace column width (ASCII advance) keyed by font_size bits.
@@ -158,6 +162,7 @@ impl Shaper {
             font_style: Style::Normal,
             cache: GraphemeAdvanceCache::new(),
             scale_context: swash::scale::ScaleContext::new(),
+            rasterization_policies: HashMap::new(),
             buffer,
             col_width_cache: None,
         })
@@ -183,6 +188,7 @@ impl Shaper {
             font_style: Style::Normal,
             cache: GraphemeAdvanceCache::new(),
             scale_context: swash::scale::ScaleContext::new(),
+            rasterization_policies: HashMap::new(),
             buffer,
             col_width_cache: None,
         }
@@ -210,6 +216,7 @@ impl Shaper {
             font_style: Style::Normal,
             cache: GraphemeAdvanceCache::new(),
             scale_context: swash::scale::ScaleContext::new(),
+            rasterization_policies: HashMap::new(),
             buffer,
             col_width_cache: None,
         }
@@ -341,8 +348,8 @@ impl Shaper {
                     glyph_id: glyph.glyph_id as u32,
                     font_id: glyph.font_id,
                     advance: glyph.w,
-                    x_offset: glyph.x_offset,
-                    y_offset: glyph.y_offset,
+                    x_offset: glyph.x_offset * glyph.font_size,
+                    y_offset: glyph.y_offset * glyph.font_size,
                 };
                 total_width += glyph.w;
                 clusters.push(cluster);
@@ -412,8 +419,8 @@ impl Shaper {
                     glyph_id: glyph.glyph_id as u32,
                     font_id: glyph.font_id,
                     advance: glyph.w,
-                    x_offset: glyph.x_offset,
-                    y_offset: glyph.y_offset,
+                    x_offset: glyph.x_offset * glyph.font_size,
+                    y_offset: glyph.y_offset * glyph.font_size,
                 };
                 total_width += glyph.w;
                 clusters.push(cluster);
@@ -600,7 +607,8 @@ pub struct GlyphBitmap {
     pub top: i32,
 }
 impl Shaper {
-    /// Rasterize a glyph to a true subpixel bitmap using swash.
+    /// Rasterize with the resolved face policy: unhinted at zero phase for monospace,
+    /// hinted at the requested subpixel offset for proportional faces.
     ///
     /// Returns `None` if the glyph cannot be rasterized (e.g., space character).
     pub fn rasterize_glyph(
@@ -610,10 +618,20 @@ impl Shaper {
         font_size: f32,
         subpixel_offset: (f32, f32),
     ) -> Option<GlyphBitmap> {
-        let font = self.font_system.lock().unwrap().get_font(font_id)?;
+        let policy = self.glyph_rasterization(font_id);
+        let subpixel_offset = policy.raster_offset(subpixel_offset);
+        let font = self
+            .font_system
+            .lock()
+            .expect("font database must not be poisoned")
+            .get_font(font_id)?;
 
-        let mut scaler =
-            self.scale_context.builder(font.as_swash()).size(font_size).hint(true).build();
+        let mut scaler = self
+            .scale_context
+            .builder(font.as_swash())
+            .size(font_size)
+            .hint(policy.uses_hinting())
+            .build();
 
         // Render with grayscale alpha mask
         let image = swash::scale::Render::new(&[
@@ -675,6 +693,50 @@ impl Shaper {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn assert_offsets_use_pixels(highlighted: bool) {
+        let mut shaper = Shaper::new().expect("offset regression requires system fonts");
+        shaper.set_font_family(Some("Arial"));
+        let mut saw_nonzero_offset = false;
+        for font_size in [16.0, 32.0] {
+            shaper.set_font_size(font_size);
+            for text in ["q\u{0301}\u{0323}", "a\u{0308}\u{0301}", "x\u{0302}", "سَلَام", "שָׁלוֹם"]
+            {
+                let shaped = if highlighted {
+                    shaper.shape_with_highlights(text, &[(0, Weight::NORMAL, Style::Normal)])
+                } else {
+                    shaper.shape(text)
+                }
+                .expect("combining text must shape");
+                let glyphs = shaper.buffer.layout_runs().flat_map(|run| run.glyphs);
+                for (cluster, glyph) in shaped.clusters.iter().zip(glyphs) {
+                    saw_nonzero_offset |= glyph.x_offset != 0.0 || glyph.y_offset != 0.0;
+                    assert_eq!(
+                        cluster.x_offset,
+                        glyph.x_offset * glyph.font_size,
+                        "horizontal offsets must be pixels before typography adds pixel gaps"
+                    );
+                    assert_eq!(
+                        cluster.y_offset,
+                        glyph.y_offset * glyph.font_size,
+                        "vertical offsets must be pixels before rendering"
+                    );
+                }
+            }
+        }
+        assert!(saw_nonzero_offset, "fixture must exercise positioned combining glyphs");
+    }
+
+    #[test]
+    fn plain_shaping_offsets_use_pixels() {
+        assert_offsets_use_pixels(false);
+    }
+
+    #[test]
+    fn highlighted_shaping_offsets_use_pixels() {
+        assert_offsets_use_pixels(true);
+    }
+
     // ── GraphemeAdvanceCache tests (no font dependency) ────────────────────
     #[test]
     fn cache_miss_then_hit() {
@@ -1069,3 +1131,6 @@ mod tests {
         });
     }
 }
+
+#[cfg(test)]
+mod rasterization_tests;

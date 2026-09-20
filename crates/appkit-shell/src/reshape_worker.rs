@@ -31,6 +31,7 @@ pub struct ReshapeRequest {
     pub line_bytes: Arc<[u8]>,
     pub viewport_width: f32,
     pub font_size: f32,
+    pub font_family: Arc<str>,
     /// 0 = 不截断，>0 = 最多 shape 这么多字节
     pub max_line_bytes: usize,
     /// Source spacing policy shared by foreground and background shaping.
@@ -53,6 +54,7 @@ impl ReshapeRequest {
             self.spacing_mode,
             &self.protected_ranges,
             self.semantic_version,
+            &self.font_family,
         )
     }
 }
@@ -66,8 +68,13 @@ pub fn content_hash_for_layout(
     spacing_mode: TextSpacingMode,
     protected_ranges: &[Range<usize>],
     semantic_version: u64,
+    font_family: &str,
 ) -> u64 {
     let mut hash = content_hash::content_hash(line_bytes, byte_offset, viewport_width, font_size);
+    for byte in font_family.bytes() {
+        hash ^= u64::from(byte);
+        hash = hash.wrapping_mul(LAYOUT_HASH_FNV_PRIME);
+    }
     hash ^= match spacing_mode {
         TextSpacingMode::Natural => NATURAL_MODE_HASH_TAG,
         TextSpacingMode::Verbatim => VERBATIM_MODE_HASH_TAG,
@@ -136,10 +143,7 @@ impl ReshapeWorker {
                                 continue;
                             }
                             let entry = match &mut shaper {
-                                Some(s) => {
-                                    s.set_font_size(req.font_size);
-                                    process_with_shaper(s, &req)
-                                }
+                                Some(s) => process_with_shaper(s, &req),
                                 None => process_fallback(&req),
                             };
                             let _ = result_tx.send(ReshapeResult {
@@ -199,6 +203,8 @@ impl ReshapeWorker {
 
 /// 使用真实 Shaper 的 shape_fast 计算换行结果。
 fn process_with_shaper(shaper: &mut shaping::Shaper, req: &ReshapeRequest) -> DisplayLineEntry {
+    shaper.set_font_family(Some(&req.font_family));
+    shaper.set_font_size(req.font_size);
     let bytes = &req.line_bytes;
     let max_bytes =
         if req.max_line_bytes > 0 { req.max_line_bytes.min(bytes.len()) } else { bytes.len() };
@@ -402,8 +408,58 @@ mod tests {
     use super::*;
 
     #[test]
+    fn font_change_invalidates_the_shared_layout_hash() {
+        let hash = |font_family| {
+            content_hash_for_layout(
+                b"Skill agent loop",
+                0,
+                800.0,
+                16.0,
+                TextSpacingMode::Natural,
+                &[],
+                1,
+                font_family,
+            )
+        };
+        assert_ne!(hash("Menlo"), hash("Helvetica"));
+    }
+
+    #[test]
+    fn worker_uses_each_requests_font_instead_of_its_startup_font() {
+        let fonts = Arc::new(std::sync::Mutex::new(shaping::FontSystem::new()));
+        let worker = ReshapeWorker::spawn(Arc::clone(&fonts), 16.0, "Menlo".into());
+        let source = "iiiiiiiiiiii";
+        let mut expected = shaping::Shaper::from_shared_font_system(fonts, 16.0, "Helvetica");
+        let expected_width = expected.shape(source).expect("reference text must shape").width;
+        worker
+            .submit(ReshapeRequest {
+                font_family: "Helvetica".into(),
+                generation: 1,
+                doc_line: 0,
+                byte_offset: 0,
+                byte_length: source.len() as u32,
+                line_bytes: Arc::from(source.as_bytes()),
+                viewport_width: 800.0,
+                font_size: 16.0,
+                max_line_bytes: 0,
+                spacing_mode: TextSpacingMode::Natural,
+                protected_ranges: Arc::from([]),
+                semantic_version: 1,
+                dv_idx: 0,
+            })
+            .expect("worker must accept font change request");
+        let completed = recv_one(&worker, std::time::Duration::from_secs(2));
+        worker.shutdown();
+        assert!(
+            (completed.entry.visual_breaks[0].pixel_width - expected_width).abs() < 0.01,
+            "worker should shape using requested Helvetica instead of startup Menlo"
+        );
+    }
+
+    #[test]
     fn process_empty_line() {
         let req = ReshapeRequest {
+            font_family: "Menlo".into(),
             generation: 1,
             doc_line: 0,
             line_bytes: Arc::from(vec![].into_boxed_slice()),
@@ -424,6 +480,7 @@ mod tests {
     #[test]
     fn process_single_short_line() {
         let req = ReshapeRequest {
+            font_family: "Menlo".into(),
             generation: 1,
             doc_line: 0,
             line_bytes: Arc::from(b"hello".to_vec().into_boxed_slice()),
@@ -444,6 +501,7 @@ mod tests {
     #[test]
     fn fallback_entries_do_not_share_hash_for_equal_length_different_content() {
         let build_request = |line: &str| ReshapeRequest {
+            font_family: "Menlo".into(),
             generation: 1,
             doc_line: 0,
             line_bytes: Arc::from(line.as_bytes()),
@@ -483,6 +541,7 @@ mod tests {
         let fs = Arc::new(std::sync::Mutex::new(fs));
         let w = ReshapeWorker::spawn(Arc::clone(&fs), 14.0, "Menlo".into());
         let _ = w.submit(ReshapeRequest {
+            font_family: "Menlo".into(),
             generation: 1,
             doc_line: 0,
             line_bytes: Arc::from(b"test".to_vec().into_boxed_slice()),
@@ -507,6 +566,7 @@ mod tests {
         let fs = Arc::new(std::sync::Mutex::new(fs));
         let w = ReshapeWorker::spawn(Arc::clone(&fs), 14.0, "Menlo".into());
         let _ = w.submit(ReshapeRequest {
+            font_family: "Menlo".into(),
             generation: 99,
             doc_line: 0,
             line_bytes: Arc::from(b"old".to_vec().into_boxed_slice()),
@@ -532,6 +592,7 @@ mod tests {
         let fs = Arc::new(std::sync::Mutex::new(fs));
         let w = ReshapeWorker::spawn(Arc::clone(&fs), 14.0, "Menlo".into());
         let _ = w.submit(ReshapeRequest {
+            font_family: "Menlo".into(),
             generation: 1,
             doc_line: 0,
             line_bytes: Arc::from(big.into_boxed_slice()),
@@ -557,6 +618,7 @@ mod tests {
         let fs = Arc::new(std::sync::Mutex::new(fs));
         let w = ReshapeWorker::spawn(Arc::clone(&fs), 14.0, "Menlo".into());
         let _ = w.submit(ReshapeRequest {
+            font_family: "Menlo".into(),
             generation: 1,
             doc_line: 0,
             line_bytes: Arc::from(data.to_vec().into_boxed_slice()),
@@ -578,6 +640,7 @@ mod tests {
     #[test]
     fn fallback_natural_spacing_changes_final_line_geometry() {
         let build_request = |spacing_mode| ReshapeRequest {
+            font_family: "Menlo".into(),
             generation: 1,
             doc_line: 0,
             line_bytes: Arc::from("甲,乙".as_bytes()),
@@ -602,6 +665,7 @@ mod tests {
     fn fallback_keeps_combining_mark_with_base_for_wrap_boundary() {
         let data = "e\u{301}x";
         let req = ReshapeRequest {
+            font_family: "Menlo".into(),
             generation: 1,
             doc_line: 0,
             line_bytes: Arc::from(data.as_bytes()),
@@ -626,6 +690,7 @@ mod tests {
         for grapheme in ["👩‍💻", "🇨🇳", "👍🏽", "e\u{301}"] {
             let source = format!("{grapheme}x");
             let request = ReshapeRequest {
+                font_family: "Menlo".into(),
                 generation: 1,
                 doc_line: 0,
                 line_bytes: Arc::from(source.as_bytes()),
@@ -650,6 +715,7 @@ mod tests {
         let full_source = "甲\"x\"乙";
         let visible_prefix = "甲\"x";
         let build_request = |line: &str, max_line_bytes| ReshapeRequest {
+            font_family: "Menlo".into(),
             generation: 1,
             doc_line: 0,
             line_bytes: Arc::from(line.as_bytes()),
@@ -678,6 +744,7 @@ mod tests {
         // Long ASCII number without spaces: should backtrack to before the number.
         let data = b"ID: 123456789012345678901234567890";
         let req = ReshapeRequest {
+            font_family: "Menlo".into(),
             generation: 1,
             doc_line: 0,
             line_bytes: Arc::from(data.to_vec().into_boxed_slice()),
@@ -715,6 +782,7 @@ mod tests {
         // Long ASCII word with NO spaces at all: must hard-break inside.
         let big: Vec<u8> = (0..200).map(|_| b'x').collect();
         let req = ReshapeRequest {
+            font_family: "Menlo".into(),
             generation: 1,
             doc_line: 0,
             line_bytes: Arc::from(big.into_boxed_slice()),
@@ -743,6 +811,7 @@ mod tests {
         // Comma after space should not start a wrapped line.
         let data = b"hello, world, foo bar baz qux extra padding here";
         let req = ReshapeRequest {
+            font_family: "Menlo".into(),
             generation: 1,
             doc_line: 0,
             line_bytes: Arc::from(data.to_vec().into_boxed_slice()),

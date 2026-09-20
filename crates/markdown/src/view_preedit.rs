@@ -99,6 +99,7 @@ pub(super) fn render_editor(
         return render_engine(original, &view.source, None, bounds, theme, shaper, dpi_scale);
     };
     let preview = &mut composition.engine;
+    preview.base_font_family.clone_from(&original.base_font_family);
     preview.base_font_size = original.base_font_size;
     preview.base_line_height = original.base_line_height;
     preview.toc_max_depth = original.toc_max_depth;
@@ -172,6 +173,7 @@ fn render_engine(
 ) -> DrawList {
     let render_started_at = std::time::Instant::now();
     let settings = MarkdownRenderSettings {
+        font_family: &engine.base_font_family,
         font_size: engine.base_font_size * dpi_scale,
         line_height: engine.base_line_height * dpi_scale,
         toc_max_depth: engine.toc_max_depth,
@@ -239,7 +241,7 @@ fn draw_standalone_preedit(
         let cursor_advance = ui::core::text_layout::UiTextLayout::new(
             &preedit_text[..cursor_offset],
             preedit_font_size,
-            None,
+            Some(engine.base_font_family.clone()),
             shaping::Weight::NORMAL,
             shaping::Style::Normal,
             false,
@@ -247,12 +249,16 @@ fn draw_standalone_preedit(
         )
         .map_or(0.0, |layout| layout.shaped.width);
         engine.set_standalone_preedit_cursor_advance(cursor_advance);
-        dl.text_shaped(
+        dl.text_shaped_with_font(
             bounds.x + preedit_x,
             bounds.y + preedit_baseline_y,
             preedit_font_size,
             theme.editor.foreground,
             &preedit_text,
+            Some(engine.base_font_family.clone()),
+            shaping::Weight::NORMAL,
+            shaping::Style::Normal,
+            false,
             shaper,
         );
     }
@@ -279,6 +285,39 @@ fn build_composition_document(
 #[cfg(test)]
 mod tests {
     use super::super::*;
+
+    #[test]
+    fn standalone_preedit_preserves_body_font_and_caret_width() {
+        let mut view = MarkdownEditorView::new();
+        view.set_source(String::new(), 1);
+        view.engine.base_font_family = "Menlo".into();
+        view.engine.handle_set_cursor_byte(0);
+        render(&mut view);
+        // Exercise the fallback when the cached layout has no virtual IME projection.
+        let context = view.engine.edit_ctx.as_mut().expect("editor owns an edit context");
+        context.preedit_text = Some("Skill".into());
+        context.preedit_cursor = Some((5, 5));
+        assert!(view.engine.standalone_preedit_render_data().is_some());
+        let mut shaper = shaping::Shaper::new().expect("preedit test requires system fonts");
+        let mut commands = DrawList::new();
+        super::draw_standalone_preedit(
+            &mut view.engine,
+            &mut commands,
+            ui::Rect::new(0.0, 0.0, 800.0, 600.0),
+            &ui::theme::test_theme(),
+            &mut shaper,
+        );
+        let layout = commands
+            .cmds
+            .iter()
+            .find_map(|command| match command {
+                ui::DrawCmd::TextLayout { layout, .. } => Some(layout),
+                _ => None,
+            })
+            .expect("fallback preedit text should render");
+        assert_eq!(layout.font_family.as_deref(), Some("Menlo"));
+        assert_eq!(view.engine.standalone_preedit_cursor_advance, Some(layout.shaped.width));
+    }
 
     fn render(view: &mut MarkdownEditorView) -> DrawList {
         let mut shaper = shaping::Shaper::new().expect("test font shaper must initialize");

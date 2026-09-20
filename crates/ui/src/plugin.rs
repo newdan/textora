@@ -50,6 +50,7 @@ pub enum PluginMessage {
     SelectAll,
     /// Update host-controlled render settings.
     SetRenderSettings {
+        font_family: String,
         font_size: f32,
         line_height: f32,
         toc_max_depth: u8,

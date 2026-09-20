@@ -152,6 +152,7 @@ impl App {
             }
             SettingsDispatchAction::SetFontFamily(family) => {
                 self.settings.set_font_family(family);
+                self.editor_runtime.update_settings(self.settings.clone());
                 AppEffect::PERSIST_SETTINGS.merge(AppEffect::RESHAPE)
             }
             SettingsDispatchAction::SetFontSize(size) => {
@@ -302,6 +303,13 @@ mod tests {
         assert_eq!(app.settings.word_wrap, !before);
         assert!(effect.persist_settings);
         assert!(effect.reshape);
+    }
+
+    #[test]
+    fn font_change_synchronizes_editor_runtime_settings() {
+        let mut app = App::new(None);
+        app.dispatch_settings_action(SettingsDispatchAction::SetFontFamily("Helvetica".into()));
+        assert_eq!(app.editor_runtime.settings_snapshot().font_family, "Helvetica");
     }
 
     #[test]

@@ -560,6 +560,7 @@ pub fn shape_visible_lines(
                 line_spacing_mode,
                 &line_protected_ranges,
                 source_semantic_version,
+                text.shaper.font_family().unwrap_or("sans-serif"),
             )
         };
         // IME preedit: skip cache for cursor line (positions need shifting)
@@ -1419,7 +1420,20 @@ pub fn shape_visible_lines(
                     continue;
                 }
 
-                let (int_x, phase) = render::split_subpixel(x_cursor + cluster.x_offset);
+                // Apply composition displacement before choosing the raster phase and pixel origin.
+                let preedit_shift = if ctx.preedit_advance_px > 0.0
+                    && doc_line_idx == cursor_doc_line
+                    && cluster.byte_range.start >= ctx.preedit_cursor_col
+                {
+                    ctx.preedit_advance_px
+                } else {
+                    0.0
+                };
+                let (int_x, phase) = crate::text_rasterize::glyph_position(
+                    &mut text.shaper,
+                    font_id,
+                    x_cursor + cluster.x_offset + preedit_shift,
+                );
                 let Some(slot) = crate::text_rasterize::resolve_glyph(
                     font_id,
                     glyph_id,
@@ -1445,18 +1459,8 @@ pub fn shape_visible_lines(
                     )
                 };
 
-                // IME preedit: shift text after cursor on the cursor's doc line
-                let render_x = if ctx.preedit_advance_px > 0.0
-                    && doc_line_idx == cursor_doc_line
-                    && cluster.byte_range.start >= ctx.preedit_cursor_col
-                {
-                    int_x + ctx.preedit_advance_px
-                } else {
-                    int_x
-                };
-
                 let verts = GlyphRenderer::generate_vertices(
-                    &[(slot, render_x, y_base)],
+                    &[(slot, int_x, y_base)],
                     ATLAS_SIZE,
                     ATLAS_SIZE,
                     ctx.screen_w,
@@ -1520,7 +1524,11 @@ pub fn shape_visible_lines(
                         continue;
                     }
 
-                    let (int_x, phase) = render::split_subpixel(x_c + cluster.x_offset);
+                    let (int_x, phase) = crate::text_rasterize::glyph_position(
+                        &mut text.shaper,
+                        c_font_id,
+                        x_c + cluster.x_offset,
+                    );
                     let c_key = GlyphKey {
                         glyph_id: cluster.glyph_id,
                         font_id: c_fid,
@@ -1742,7 +1750,11 @@ pub fn preedit_text_vertices(
         let font_id = cluster.font_id;
         let advance = cluster.advance.max(0.0);
 
-        let (int_x, phase) = render::split_subpixel(x_cursor);
+        let (int_x, phase) = crate::text_rasterize::glyph_position(
+            &mut text.shaper,
+            font_id,
+            x_cursor + cluster.x_offset,
+        );
         let Some(slot) = crate::text_rasterize::resolve_glyph(
             font_id,
             glyph_id,

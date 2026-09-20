@@ -288,7 +288,8 @@ impl<'a> CodeHighlighter for AppCodeHighlighter<'a> {
 const PARAGRAPH_FIRST_LINE_INDENT_EMS: f32 = 2.0;
 
 #[derive(Debug, Clone, Copy, PartialEq)]
-pub struct MarkdownRenderSettings {
+pub struct MarkdownRenderSettings<'a> {
+    pub font_family: &'a str,
     pub font_size: f32,
     pub line_height: f32,
     pub toc_max_depth: u8,
@@ -296,12 +297,13 @@ pub struct MarkdownRenderSettings {
     pub text_spacing_mode: ui::typography::TextSpacingMode,
 }
 
-impl MarkdownRenderSettings {
+impl<'a> MarkdownRenderSettings<'a> {
     pub fn from_metrics(
-        settings: &ui::settings::Settings,
+        settings: &'a ui::settings::Settings,
         metrics: &ui::settings::UiMetrics,
     ) -> Self {
         Self {
+            font_family: &settings.font_family,
             font_size: metrics.font_size,
             line_height: metrics.line_height,
             toc_max_depth: settings.toc_max_depth,
@@ -320,6 +322,7 @@ impl MarkdownRenderSettings {
         if self.markdown_first_line_indent {
             style.paragraph_first_line_indent = PARAGRAPH_FIRST_LINE_INDENT_EMS * self.font_size;
         }
+        style.body_font_family = vec![self.font_family.to_string()];
         style.text_spacing_mode = self.text_spacing_mode;
         style
     }
@@ -387,6 +390,7 @@ pub struct PreviewEngine<S: BlockSource = MarkdownDoc> {
     cached_offset_x: f32,
     cached_offset_y: f32,
 
+    pub base_font_family: String,
     pub base_font_size: f32,
     pub base_line_height: f32,
     rendered_body_font_size: f32,
@@ -442,6 +446,7 @@ impl<S: BlockSource> PreviewEngine<S> {
             cached_vertices: None,
             cached_offset_x: 0.0,
             cached_offset_y: 0.0,
+            base_font_family: ui::settings::platform_default_font_family().to_string(),
             base_font_size: 15.0,
             base_line_height: 24.0,
             rendered_body_font_size: 15.0,
@@ -2141,11 +2146,20 @@ impl<S: BlockSource> PreviewEngine<S> {
                 Some(true)
             }
             PluginMessage::SetRenderSettings {
+                font_family,
                 font_size,
                 line_height,
                 toc_max_depth,
                 markdown_first_line_indent,
             } => {
+                if self.base_font_family != *font_family {
+                    self.base_font_family.clone_from(font_family);
+                    if !matches!(self.dirty, EngineDirty::SourceChanged) {
+                        self.dirty = EngineDirty::StyleChanged;
+                    }
+                    self.cached_dl = None;
+                    self.cached_vertices = None;
+                }
                 self.base_font_size = *font_size;
                 self.base_line_height = *line_height;
                 self.toc_max_depth = *toc_max_depth;
@@ -2232,7 +2246,7 @@ impl MarkdownView {
         viewport_h: f32,
         offset_x: f32,
         offset_y: f32,
-        settings: MarkdownRenderSettings,
+        settings: MarkdownRenderSettings<'_>,
         shaper: Option<&mut shaping::Shaper>,
     ) -> (DrawList, bool) {
         self.render_at_dpi(theme, viewport_w, viewport_h, offset_x, offset_y, settings, 1.0, shaper)
@@ -2245,7 +2259,7 @@ impl MarkdownView {
         viewport_h: f32,
         offset_x: f32,
         offset_y: f32,
-        settings: MarkdownRenderSettings,
+        settings: MarkdownRenderSettings<'_>,
         dpi_scale: f32,
         shaper: Option<&mut shaping::Shaper>,
     ) -> (DrawList, bool) {
@@ -2313,7 +2327,9 @@ impl ViewPlugin for MarkdownView {
         shaper: &mut shaping::Shaper,
         dpi_scale: f32,
     ) -> DrawList {
+        let font_family = self.engine.base_font_family.clone();
         let settings = MarkdownRenderSettings {
+            font_family: &font_family,
             font_size: self.engine.base_font_size * dpi_scale,
             line_height: self.engine.base_line_height * dpi_scale,
             toc_max_depth: self.engine.toc_max_depth,
@@ -3302,6 +3318,7 @@ mod dpi_style_tests {
         let mut view = MarkdownView::new();
         view.set_source("before\n\n---\n\nafter".into(), 1);
         let settings = MarkdownRenderSettings {
+            font_family: "PingFang SC",
             font_size: LOGICAL_FONT_SIZE,
             line_height: LOGICAL_LINE_HEIGHT,
             toc_max_depth: 3,
@@ -3519,6 +3536,7 @@ mod heading_tests {
     fn render_settings_control_style_and_toc_depth() {
         let theme = ui::theme::Theme::from_definition(&ui::theme::ThemeDefinition::default_dark());
         let settings = MarkdownRenderSettings {
+            font_family: "PingFang SC",
             font_size: 36.0,
             line_height: 58.0,
             toc_max_depth: 5,
@@ -3544,8 +3562,9 @@ mod wysiwyg_tests {
     use ui::plugin::AugmentKind;
     use ui::plugin::MoveDirection;
 
-    fn default_settings() -> MarkdownRenderSettings {
+    fn default_settings() -> MarkdownRenderSettings<'static> {
         MarkdownRenderSettings {
+            font_family: ui::settings::platform_default_font_family(),
             font_size: 15.0,
             line_height: 24.0,
             toc_max_depth: 5,
@@ -5963,6 +5982,9 @@ C608-01 武昌职业第01组：计划 68，历史低线较低，是表里最像�
     #[test]
     fn unshaped_navigation_preserves_proportional_font_advances() {
         let mut view = make_projected_view("Wi");
+        let settings = MarkdownRenderSettings { font_family: "PingFang SC", ..default_settings() };
+        let mut shaper = shaping::Shaper::new().expect("proportional navigation requires fonts");
+        view.render(&ui::theme::test_theme(), 800.0, 600.0, 0.0, 0.0, settings, Some(&mut shaper));
         view.engine_mut().lazy.as_mut().expect("projected view should retain layout").flat_lines
             [0]
         .shaped = None;
@@ -6131,6 +6153,7 @@ C608-01 武昌职业第01组：计划 68，历史低线较低，是表里最像�
             for enabled in [false, true, false] {
                 view.handle_message(
                     PluginMessage::SetRenderSettings {
+                        font_family: ui::settings::platform_default_font_family().to_string(),
                         font_size,
                         line_height: 24.0,
                         toc_max_depth: 3,
@@ -9615,3 +9638,7 @@ mod tests {
         assert_eq!(view.plan_edit(&request), EditPlan::UseDefault);
     }
 }
+
+#[cfg(test)]
+#[path = "view_font_tests.rs"]
+mod font_tests;

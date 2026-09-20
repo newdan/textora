@@ -1015,62 +1015,33 @@ fn render_line_with_offset(
         }
         // Render unstyled gap before this segment
         if seg.start > last_end {
-            let gap = &line.text
-                [safe_byte_idx(&line.text, last_end)..safe_byte_idx(&line.text, seg.start)];
             let gap_x = end_x_for_offset(segments, line_x, last_end, text_len);
-            if let Some(ref mut s) = shaper {
-                dl.text_shaped_with_font(
-                    gap_x,
-                    ly + font_size,
-                    font_size,
-                    base_color,
-                    gap,
-                    font_family.clone(),
-                    line.font_weight,
-                    Style::Normal,
-                    false,
-                    s,
-                );
-            }
+            draw_line_segment(
+                line,
+                last_end..seg.start,
+                None,
+                [gap_x, ly + font_size],
+                base_color,
+                font_family.as_deref(),
+                dl,
+                shaper.as_deref_mut(),
+            );
         }
         // Render styled segment
         let seg_end = (seg.start + seg.len).min(text_len);
         if seg.start < text_len {
-            let segment = &line.text
-                [safe_byte_idx(&line.text, seg.start)..safe_byte_idx(&line.text, seg_end)];
             let color = style_for_span(&seg.style, base_color, style);
             let x = line_x + seg.x_offset;
-            if let Some(ref mut s) = shaper {
-                if needs_styled_text(&seg.style) {
-                    let (ws_weight, ws_style) = weight_style_for(&seg.style);
-                    let italic = is_italic(&seg.style);
-                    dl.text_shaped_with_font(
-                        x,
-                        ly + font_size,
-                        font_size,
-                        color,
-                        segment,
-                        font_family.clone(),
-                        ws_weight,
-                        ws_style,
-                        italic,
-                        s,
-                    );
-                } else {
-                    dl.text_shaped_with_font(
-                        x,
-                        ly + font_size,
-                        font_size,
-                        color,
-                        segment,
-                        font_family.clone(),
-                        line.font_weight,
-                        Style::Normal,
-                        false,
-                        s,
-                    );
-                }
-            }
+            draw_line_segment(
+                line,
+                seg.start..seg_end,
+                Some(&seg.style),
+                [x, ly + font_size],
+                color,
+                font_family.as_deref(),
+                dl,
+                shaper.as_deref_mut(),
+            );
             let mut seg_w = seg.width;
             if is_italic(&seg.style) {
                 seg_w += font_size * ITALIC_SHEAR;
@@ -1090,22 +1061,67 @@ fn render_line_with_offset(
 
     // Render remaining unstyled tail after last segment
     if last_end < text_len {
-        let tail = &line.text[safe_byte_idx(&line.text, last_end)..];
         let tail_x = end_x_for_offset(segments, line_x, last_end, text_len);
-        if let Some(ref mut s) = shaper {
-            dl.text_shaped_with_font(
-                tail_x,
-                ly + font_size,
-                font_size,
-                base_color,
-                tail,
-                font_family,
-                line.font_weight,
-                Style::Normal,
-                false,
-                s,
-            );
-        }
+        draw_line_segment(
+            line,
+            last_end..text_len,
+            None,
+            [tail_x, ly + font_size],
+            base_color,
+            font_family.as_deref(),
+            dl,
+            shaper,
+        );
+    }
+}
+
+/// Reuse the final layout geometry, including boundary gaps and shaping offsets.
+fn draw_line_segment(
+    line: &LaidOutLine,
+    byte_range: std::ops::Range<usize>,
+    inline_style: Option<&InlineStyle>,
+    origin: [f32; 2],
+    color: [f32; 4],
+    font_family: Option<&str>,
+    draw_list: &mut DrawList,
+    shaper: Option<&mut shaping::Shaper>,
+) {
+    let start = safe_byte_idx(&line.text, byte_range.start);
+    let end = safe_byte_idx(&line.text, byte_range.end);
+    let text = &line.text[start..end];
+    let (weight, font_style) = inline_style
+        .filter(|style| needs_styled_text(style))
+        .map(weight_style_for)
+        .unwrap_or((line.font_weight, Style::Normal));
+    let italic = inline_style.is_some_and(is_italic);
+    if let Some(shaped) = &line.shaped
+        && let Some(mut layout) = crate::layout::shaping::segment_text_layout(
+            shaped,
+            start,
+            end,
+            text,
+            line.font_size,
+            font_family,
+            weight,
+        )
+    {
+        Arc::make_mut(&mut layout).italic = italic;
+        draw_list.text_layout(layout, origin[0], origin[1], color);
+        return;
+    }
+    if let Some(shaper) = shaper {
+        draw_list.text_shaped_with_font(
+            origin[0],
+            origin[1],
+            line.font_size,
+            color,
+            text,
+            font_family.map(str::to_string),
+            weight,
+            font_style,
+            italic,
+            shaper,
+        );
     }
 }
 
@@ -3641,3 +3657,7 @@ title: hello
         assert!(has_fill, "YAML metadata block should emit FillRect (background)");
     }
 }
+
+#[cfg(test)]
+#[path = "render_spacing_tests.rs"]
+mod spacing_tests;

@@ -239,7 +239,7 @@ impl RenderCache {
     }
 }
 
-/// 预览专用缓存：key = UiTextLayout.id (u64)，layout 时分配，跨帧稳定
+/// 预览专用缓存：key 由布局标识和字形绘制起点生成，固定位置时跨帧稳定。
 pub struct PreviewRenderCache {
     cache: LruCache<u64, CachedLine>,
 }

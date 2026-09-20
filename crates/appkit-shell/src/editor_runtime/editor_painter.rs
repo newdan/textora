@@ -132,6 +132,7 @@ fn paint_plugin_editor(
     let (Some(text), Some(gpu)) = (resources.text.as_mut(), resources.gpu.as_ref()) else {
         return Vec::new();
     };
+    let font_family = runtime.settings.font_family.clone();
     let cursor_paint_enabled = runtime.active_cursor_paint_enabled();
     let Some(mut tab) = runtime.tab_session_mut(tab_id) else {
         return Vec::new();
@@ -143,6 +144,7 @@ fn paint_plugin_editor(
         tab.invalidate_cursor_visibility();
     }
     tab.send_message(PluginMessage::SetRenderSettings {
+        font_family,
         font_size: metrics.font_size / metrics.dpi,
         line_height: metrics.line_height / metrics.dpi,
         toc_max_depth,
@@ -285,6 +287,8 @@ fn paint_text_editor(
     let (Some(text), Some(gpu)) = (resources.text.as_mut(), resources.gpu.as_ref()) else {
         return Vec::new();
     };
+    text.shaper.set_font_family(Some(&settings.font_family));
+    text.shaper.set_font_size(metrics.font_size);
     let preedit_advance_px =
         measure_preedit_advance_px(&mut text.shaper, &preedit_text, metrics.font_size);
     runtime.plain_text_preedit_advance_px = preedit_advance_px;

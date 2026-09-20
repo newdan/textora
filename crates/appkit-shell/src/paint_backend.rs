@@ -103,7 +103,7 @@ pub fn drain(
                     continue;
                 };
                 text_layout_count += 1;
-                let cache_key = layout.id;
+                let cache_key = preview_text_cache_key(layout.id, x);
 
                 // 尝试从预览 cache 获取
                 let cached = text_state.preview_cache.get(cache_key);
@@ -122,87 +122,51 @@ pub fn drain(
                     );
                     vertices.extend(verts);
                 } else {
-                    // Cache miss — rasterize from shaped data
-                    let mut instances = Vec::new();
-                    let mut x_cursor = x;
+                    let mut cached_line =
+                        build_cached_text_line(&layout, x, |cluster, requested_x| {
+                            let (glyph_x, phase) = crate::text_rasterize::glyph_position(
+                                &mut text_state.shaper,
+                                cluster.font_id,
+                                requested_x,
+                            );
+                            glyph_resolve_count += 1;
+                            // Check atlas hit before resolve_glyph
+                            let font_id_usize = {
+                                use std::hash::{Hash, Hasher};
+                                let mut h = std::hash::DefaultHasher::new();
+                                cluster.font_id.hash(&mut h);
+                                h.finish() as usize
+                            };
+                            let key = render::GlyphKey {
+                                glyph_id: cluster.glyph_id,
+                                font_id: font_id_usize,
+                                font_size: (layout.font_size * 64.0) as u32,
+                                subpixel_phase: phase,
+                            };
+                            if text_state.atlas.get(&key).is_some() {
+                                glyph_cache_hit += 1;
+                            } else {
+                                glyph_cache_miss += 1;
+                            }
 
-                    for cluster in &layout.shaped.clusters {
-                        let advance = cluster.advance.max(1.0);
-                        if layout
-                            .text
-                            .as_bytes()
-                            .get(cluster.byte_range.clone())
-                            .is_some_and(|bytes| bytes.iter().all(|&b| b == b' ' || b == b'\t'))
-                        {
-                            x_cursor += advance;
-                            continue;
-                        }
-
-                        glyph_resolve_count += 1;
-                        let (_int_x, phase) = render::split_subpixel(x_cursor);
-                        // Check atlas hit before resolve_glyph
-                        let font_id_usize = {
-                            use std::hash::{Hash, Hasher};
-                            let mut h = std::hash::DefaultHasher::new();
-                            cluster.font_id.hash(&mut h);
-                            h.finish() as usize
-                        };
-                        let key = render::GlyphKey {
-                            glyph_id: cluster.glyph_id,
-                            font_id: font_id_usize,
-                            font_size: (layout.font_size * 64.0) as u32,
-                            subpixel_phase: phase,
-                        };
-                        if text_state.atlas.get(&key).is_some() {
-                            glyph_cache_hit += 1;
-                        } else {
-                            glyph_cache_miss += 1;
-                        }
-
-                        if let Some(slot) = crate::text_rasterize::resolve_glyph(
-                            cluster.font_id,
-                            cluster.glyph_id as u16,
-                            layout.font_size,
-                            phase,
-                            &mut text_state.shaper,
-                            &mut text_state.atlas,
-                            &text_state.atlas_texture,
-                            &gpu.ctx.queue,
-                        ) {
-                            text_state.track_glyph_resolve();
-                            let aw = crate::render_state::ATLAS_SIZE as f32;
-                            let ah = crate::render_state::ATLAS_SIZE as f32;
-                            instances.push(GlyphInstance {
-                                x: x_cursor - x,
-                                y: 0.0,
-                                bearing_x: slot.bearing_x,
-                                bearing_y: slot.bearing_y,
-                                width: slot.width as f32,
-                                height: slot.height as f32,
-                                uv: [
-                                    slot.x as f32 / aw,
-                                    slot.y as f32 / ah,
-                                    (slot.x + slot.width) as f32 / aw,
-                                    (slot.y + slot.height) as f32 / ah,
-                                ],
-                                atlas_page: slot.page,
-                                highlight_kind: 0,
-                            });
-                        }
-                        x_cursor += advance;
-                    }
-
-                    // 构建并缓存 CachedLine
-                    let cluster_data: Vec<_> = layout
-                        .shaped
-                        .clusters
-                        .iter()
-                        .map(|c| (c.byte_range.start, c.byte_range.end, c.advance.max(1.0)))
-                        .collect();
-
-                    // 发射顶点（先发射，再 move instances 到缓存）
-                    let verts = emit_from_instances(
-                        &instances,
+                            let slot = crate::text_rasterize::resolve_glyph(
+                                cluster.font_id,
+                                cluster.glyph_id as u16,
+                                layout.font_size,
+                                phase,
+                                &mut text_state.shaper,
+                                &mut text_state.atlas,
+                                &text_state.atlas_texture,
+                                &gpu.ctx.queue,
+                            );
+                            if slot.is_some() {
+                                text_state.track_glyph_resolve();
+                            }
+                            slot.map(|slot| (glyph_x, slot))
+                        });
+                    cached_line.atlas_generation = text_state.atlas_generation;
+                    vertices.extend(emit_from_instances(
+                        &cached_line.instances,
                         x,
                         y_baseline,
                         sw,
@@ -210,20 +174,7 @@ pub fn drain(
                         color,
                         &clip_stack,
                         layout.italic,
-                    );
-                    vertices.extend(verts);
-
-                    let cached_line = CachedLine {
-                        instances,
-                        line_number_glyphs: vec![],
-                        atlas_generation: text_state.atlas_generation,
-                        visual_line_count: 1,
-                        content_hash: cache_key, // layout.id, used as cache key (not a content hash)
-                        visual_lines: vec![(0, layout.shaped.clusters.len(), x_cursor - x)],
-                        visual_line_instance_starts: vec![0],
-                        cluster_data,
-                        subset_start: 0,
-                    };
+                    ));
                     text_state.preview_cache.insert(cache_key, cached_line);
                 }
             }
@@ -298,6 +249,77 @@ pub fn drain_into(
     vertices.extend(drain(list, screen, text, gpu));
 }
 
+fn preview_text_cache_key(layout_id: u64, origin_x: f32) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut hasher = std::hash::DefaultHasher::new();
+    layout_id.hash(&mut hasher);
+    // Keep the full origin: round() is not translation-invariant across negative half pixels.
+    origin_x.to_bits().hash(&mut hasher);
+    hasher.finish()
+}
+
+// Keep glyph positioning and cache geometry testable without GPU resources.
+fn build_cached_text_line(
+    layout: &ui::core::text_layout::UiTextLayout,
+    origin_x: f32,
+    mut resolve: impl FnMut(&shaping::GlyphCluster, f32) -> Option<(f32, render::GlyphSlot)>,
+) -> CachedLine {
+    let mut instances = Vec::new();
+    let mut x_cursor = origin_x;
+    for cluster in &layout.shaped.clusters {
+        let advance = cluster.advance;
+        if layout
+            .text
+            .as_bytes()
+            .get(cluster.byte_range.clone())
+            .is_some_and(|bytes| bytes.iter().all(|&byte| byte == b' ' || byte == b'\t'))
+        {
+            x_cursor += advance;
+            continue;
+        }
+        if let Some((glyph_x, slot)) = resolve(cluster, x_cursor + cluster.x_offset) {
+            instances.push(cached_glyph_instance(slot, glyph_x - origin_x, -cluster.y_offset));
+        }
+        x_cursor += advance;
+    }
+    CachedLine {
+        instances,
+        line_number_glyphs: vec![],
+        atlas_generation: 0,
+        visual_line_count: 1,
+        content_hash: layout.id,
+        visual_lines: vec![(0, layout.shaped.clusters.len(), x_cursor - origin_x)],
+        visual_line_instance_starts: vec![0],
+        cluster_data: layout
+            .shaped
+            .clusters
+            .iter()
+            .map(|cluster| (cluster.byte_range.start, cluster.byte_range.end, cluster.advance))
+            .collect(),
+        subset_start: 0,
+    }
+}
+
+fn cached_glyph_instance(slot: render::GlyphSlot, x: f32, y: f32) -> GlyphInstance {
+    let atlas_size = crate::render_state::ATLAS_SIZE as f32;
+    GlyphInstance {
+        x,
+        y,
+        bearing_x: slot.bearing_x,
+        bearing_y: slot.bearing_y,
+        width: slot.width as f32,
+        height: slot.height as f32,
+        uv: [
+            slot.x as f32 / atlas_size,
+            slot.y as f32 / atlas_size,
+            (slot.x + slot.width) as f32 / atlas_size,
+            (slot.y + slot.height) as f32 / atlas_size,
+        ],
+        atlas_page: slot.page,
+        highlight_kind: 0,
+    }
+}
+
 /// 从 GlyphInstance 列表直接发射 NDC 顶点（用于预览 TextLayout 路径）。
 fn emit_from_instances(
     instances: &[GlyphInstance],
@@ -333,7 +355,7 @@ fn glyph_instance_quad(
     screen: Screen,
 ) -> [GlyphVertex; 6] {
     let left = (origin_x + instance.x + instance.bearing_x).round();
-    let top = (baseline_y - instance.bearing_y).round();
+    let top = (baseline_y + instance.y - instance.bearing_y).round();
     let right = left + instance.width;
     let bottom = top + instance.height;
     let vertex = |x, y, u, v| GlyphVertex {
@@ -1510,3 +1532,7 @@ mod tests {
         assert_eq!(v.len(), 3, "triangle fully inside clip should render");
     }
 }
+
+#[cfg(test)]
+#[path = "paint_backend_text_tests.rs"]
+mod text_tests;
