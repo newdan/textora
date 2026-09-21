@@ -2645,6 +2645,7 @@ mod tests {
             previous_relative_path: None,
             outcome: notora_core::note_command::NoteCommandOutcome::Created,
             created_access: Some(notora_core::CreatedNoteAccess::Unencrypted),
+            created_editor_metadata: None,
         };
 
         let effects = state.reduce(NotoraAction::NoteCommandCompleted(result));

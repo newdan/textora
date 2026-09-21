@@ -185,6 +185,7 @@ pub(super) struct DocumentRuntime {
     pending_external_save_as: HashMap<TabId, PendingExternalSaveAs>,
     #[cfg(test)]
     pub(super) pending_external_save_as: HashMap<TabId, PendingExternalSaveAs>,
+    pending_external_file_closes: HashSet<ExternalFileId>,
     #[cfg(not(test))]
     pending_external_documents: HashMap<ExternalFileId, LoadedDocument>,
     #[cfg(test)]
@@ -241,6 +242,7 @@ impl DocumentRuntime {
             autosave,
             save_failure_messages: HashMap::new(),
             pending_external_save_as: HashMap::new(),
+            pending_external_file_closes: HashSet::new(),
             pending_external_documents: HashMap::new(),
             pending_conflict_retries: HashMap::new(),
             pending_trash_moves: HashMap::new(),
@@ -309,9 +311,39 @@ impl DocumentRuntime {
     }
 
     fn unregister_tab(&mut self, tab_id: TabId) {
+        if let Some(DocumentIdentity::ExternalFile(external_file_id)) =
+            self.document_registry.identity_for(tab_id)
+        {
+            self.pending_external_file_closes.remove(&external_file_id);
+        }
         self.unlocked_note_sessions.remove(&tab_id);
         self.encrypted_note_tabs.remove(&tab_id);
         self.document_registry.remove_tab(tab_id);
+    }
+
+    pub(super) fn request_external_file_close_after_save(
+        &mut self,
+        external_file_id: ExternalFileId,
+    ) {
+        self.pending_external_file_closes.insert(external_file_id);
+    }
+
+    pub(super) fn external_file_close_is_pending(&self, external_file_id: ExternalFileId) -> bool {
+        self.pending_external_file_closes.contains(&external_file_id)
+    }
+
+    pub(super) fn cancel_external_file_close_after_save(
+        &mut self,
+        external_file_id: ExternalFileId,
+    ) {
+        self.pending_external_file_closes.remove(&external_file_id);
+    }
+
+    pub(super) fn take_external_file_close_after_save(
+        &mut self,
+        external_file_id: ExternalFileId,
+    ) -> bool {
+        self.pending_external_file_closes.remove(&external_file_id)
     }
 
     pub(super) fn take_due_autosaves(&mut self) -> Vec<AutoSaveRequest> {
@@ -793,18 +825,18 @@ impl DocumentRuntime {
         external_file_id: ExternalFileId,
         path: std::path::PathBuf,
         event_loop_proxy: Option<EventLoopProxy<ShellEvent>>,
-    ) -> DocumentOutcome {
+    ) -> (bool, DocumentOutcome) {
         let prepared = match self.editor_runtime.prepare_save_as(tab_id, &path) {
             Ok(prepared) => prepared,
-            Err(error) => return DocumentOutcome::failure(error.to_string()),
+            Err(error) => return (false, DocumentOutcome::failure(error.to_string())),
         };
         let pending =
             PendingExternalSaveAs { external_file_id, content_revision: prepared.content_revision };
         if let Err(message) = self.submit_prepared_save(prepared, event_loop_proxy) {
-            return DocumentOutcome::failure(message);
+            return (false, DocumentOutcome::failure(message));
         }
         self.pending_external_save_as.insert(tab_id, pending);
-        DocumentOutcome::default()
+        (true, DocumentOutcome::default())
     }
 
     pub(super) fn complete_pending_external_save_as(

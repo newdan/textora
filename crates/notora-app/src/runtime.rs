@@ -104,6 +104,59 @@ const SHUTDOWN_SAVE_DRAIN_POLL_INTERVAL: Duration = Duration::from_millis(10);
 const DEFAULT_RUNTIME_TAB_LIMIT: usize = 12;
 
 type WorkspaceDirectoryChooser = Box<dyn Fn() -> Option<std::path::PathBuf>>;
+type ExternalFileClosePrompt =
+    Box<dyn Fn(&str, Option<&winit::window::Window>) -> ExternalFileCloseChoice>;
+type ExternalFileSavePathChooser =
+    Box<dyn Fn(&str, Option<&winit::window::Window>) -> Option<std::path::PathBuf>>;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ExternalFileCloseChoice {
+    Save,
+    Discard,
+    Cancel,
+}
+
+fn prompt_external_file_close(
+    file_name: &str,
+    parent_window: Option<&winit::window::Window>,
+) -> ExternalFileCloseChoice {
+    let description = format!("是否保存对「{file_name}」的更改？");
+    let mut dialog = rfd::MessageDialog::new()
+        .set_title("未保存的更改")
+        .set_description(description)
+        .set_buttons(rfd::MessageButtons::YesNoCancelCustom(
+            "保存".to_owned(),
+            "放弃".to_owned(),
+            "取消".to_owned(),
+        ))
+        .set_level(rfd::MessageLevel::Warning);
+    if let Some(parent_window) = parent_window {
+        dialog = dialog.set_parent(parent_window);
+    }
+    let result = dialog.show();
+    match result {
+        rfd::MessageDialogResult::Custom(label) if label == "保存" => {
+            ExternalFileCloseChoice::Save
+        }
+        rfd::MessageDialogResult::Custom(label) if label == "放弃" => {
+            ExternalFileCloseChoice::Discard
+        }
+        _ => ExternalFileCloseChoice::Cancel,
+    }
+}
+
+fn choose_external_file_save_path(
+    default_file_name: &str,
+    parent_window: Option<&winit::window::Window>,
+) -> Option<std::path::PathBuf> {
+    let mut dialog = rfd::FileDialog::new()
+        .add_filter("文本文档", notora_core::EXTERNAL_TEXT_FILE_EXTENSIONS)
+        .set_file_name(default_file_name);
+    if let Some(parent_window) = parent_window {
+        dialog = dialog.set_parent(parent_window);
+    }
+    dialog.save_file()
+}
 
 fn resolve_pointer_cursor(
     product_cursor: Option<winit::window::CursorIcon>,
@@ -192,6 +245,8 @@ pub(crate) struct NotoraRuntime {
     product: NotoraProduct,
     workspace_controller: WorkspaceController,
     workspace_directory_chooser: WorkspaceDirectoryChooser,
+    external_file_close_prompt: ExternalFileClosePrompt,
+    external_file_save_path_chooser: ExternalFileSavePathChooser,
     workspace_transition_runtime: WorkspaceTransitionRuntime,
     window_runtime: WindowRuntime,
 }
@@ -294,6 +349,8 @@ impl NotoraRuntime {
                 migration_backup_retention,
             ),
             workspace_directory_chooser: Box::new(choose_workspace_directory),
+            external_file_close_prompt: Box::new(prompt_external_file_close),
+            external_file_save_path_chooser: Box::new(choose_external_file_save_path),
             workspace_transition_runtime: WorkspaceTransitionRuntime::default(),
             window_runtime: WindowRuntime::new(),
         };
@@ -1103,6 +1160,7 @@ impl NotoraRuntime {
     }
 
     fn finish_saves_and_snapshot_dirty_documents(&mut self) {
+        self.request_immediate_shutdown_workspace_note_saves();
         self.process_due_autosaves();
         let deadline = Instant::now() + SHUTDOWN_SAVE_DRAIN_TIMEOUT;
         while self.document_runtime.has_in_flight_save() && Instant::now() < deadline {
@@ -1113,6 +1171,15 @@ impl NotoraRuntime {
         }
         self.drain_runtime_save_completions();
         self.write_dirty_snapshots_in_background();
+    }
+
+    fn request_immediate_shutdown_workspace_note_saves(&mut self) {
+        for candidate in self.document_runtime.workspace_note_save_candidates() {
+            let Some(origin) = self.document_origin_for_tab(candidate.tab_id) else {
+                continue;
+            };
+            self.document_runtime.request_immediate_workspace_note_save(&origin, candidate);
+        }
     }
 
     fn write_dirty_snapshots_in_background(&self) {
@@ -1193,6 +1260,17 @@ impl NotoraRuntime {
             selection,
         );
         self.apply_document_outcome(outcome);
+        let Some(metadata) = result.created_editor_metadata.clone() else {
+            self.dispatch_action(NotoraAction::NoteCommandFailed(
+                "加密笔记已创建，但编辑区元数据缺失".to_owned(),
+            ));
+            return;
+        };
+        self.dispatch_action(NotoraAction::ActiveEditorMetadataLoaded {
+            request,
+            metadata,
+            tags: Vec::new(),
+        });
     }
 
     fn promote_active_preview_tab(&mut self) {
@@ -1367,13 +1445,52 @@ impl NotoraRuntime {
                     });
                 }
                 self.submit_document_title_initialization(*tab_id, *content_revision);
+                self.complete_pending_external_file_close(*tab_id);
+            }
+            EditorNotification::SaveFailed { tab_id, .. } => {
+                self.cancel_pending_external_file_close(*tab_id);
             }
             EditorNotification::ActiveDocumentChanged { tab_id: None }
             | EditorNotification::PathChanged { .. }
             | EditorNotification::DirtyChanged { .. }
-            | EditorNotification::SaveFailed { .. }
             | EditorNotification::CloseRequested { .. } => {}
         }
+    }
+
+    fn complete_pending_external_file_close(
+        &mut self,
+        tab_id: appkit_core::workspace::types::TabId,
+    ) {
+        let Some(DocumentIdentity::ExternalFile(external_file_id)) =
+            self.document_runtime.identity_for(tab_id)
+        else {
+            return;
+        };
+        let document_is_clean = self
+            .document_runtime
+            .editor()
+            .document_summary(tab_id)
+            .is_some_and(|summary| !summary.dirty);
+        let save_as_still_pending = matches!(
+            self.action_runtime.state().external_files.session(external_file_id),
+            Some(ExternalFileSession::Untitled { .. } | ExternalFileSession::Missing { .. })
+        );
+        if !document_is_clean
+            || save_as_still_pending
+            || !self.document_runtime.take_external_file_close_after_save(external_file_id)
+        {
+            return;
+        }
+        self.dispatch_action(NotoraAction::ExternalFileCloseRequested(external_file_id));
+    }
+
+    fn cancel_pending_external_file_close(&mut self, tab_id: appkit_core::workspace::types::TabId) {
+        let Some(DocumentIdentity::ExternalFile(external_file_id)) =
+            self.document_runtime.identity_for(tab_id)
+        else {
+            return;
+        };
+        self.document_runtime.cancel_external_file_close_after_save(external_file_id);
     }
 
     fn submit_autosave(&mut self, request: AutoSaveRequest) {
@@ -1423,11 +1540,15 @@ impl NotoraRuntime {
         tab_id: appkit_core::workspace::types::TabId,
         external_file_id: notora_core::ExternalFileId,
     ) {
-        let Some(path) = rfd::FileDialog::new().add_filter("文本文档", &["txt", "md"]).save_file()
-        else {
+        let default_file_name =
+            self.document_runtime.editor().tab_title(tab_id).unwrap_or_else(|| "未命名".to_owned());
+        let Some(path) = (self.external_file_save_path_chooser)(
+            &default_file_name,
+            self.document_runtime.editor().window(),
+        ) else {
             return;
         };
-        let outcome = self.document_runtime.save_external_file_as_to_path(
+        let (_, outcome) = self.document_runtime.save_external_file_as_to_path(
             tab_id,
             external_file_id,
             path,
@@ -1643,6 +1764,20 @@ enum ExternalFileCloseBlocker {
     PinnedTab,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum UnsavedExternalFileCloseHandling {
+    Prompt,
+    Block,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ExternalFileCloseOutcome {
+    Closed,
+    SavePending,
+    Cancelled,
+    Blocked(ExternalFileCloseBlocker),
+}
+
 impl ExternalFileCloseBlocker {
     fn message(self) -> &'static str {
         match self {
@@ -1849,7 +1984,16 @@ impl DocumentCommandTarget for NotoraRuntime {
         external_file_id: notora_core::ExternalFileId,
         canonical_path: CanonicalExternalPath,
     ) -> ExternalSaveAsApplication {
-        self.action_runtime.apply_external_save_as(external_file_id, canonical_path)
+        let application =
+            self.action_runtime.apply_external_save_as(external_file_id, canonical_path);
+        let should_close = matches!(application, ExternalSaveAsApplication::Updated)
+            && self.document_runtime.take_external_file_close_after_save(external_file_id);
+        if should_close {
+            self.dispatch_action(NotoraAction::ExternalFileCloseRequested(external_file_id));
+        } else if !matches!(application, ExternalSaveAsApplication::Updated) {
+            self.document_runtime.cancel_external_file_close_after_save(external_file_id);
+        }
+        application
     }
 
     fn dispatch_action(&mut self, action: NotoraAction) {
@@ -2268,9 +2412,16 @@ impl NotoraRuntime {
         &mut self,
         external_file_id: notora_core::ExternalFileId,
     ) -> Vec<NotoraAction> {
-        match self.try_close_external_file(external_file_id) {
-            Ok(()) => vec![NotoraAction::ExternalFileCloseCompleted(external_file_id)],
-            Err(blocker) => {
+        match self
+            .try_close_external_file(external_file_id, UnsavedExternalFileCloseHandling::Prompt)
+        {
+            ExternalFileCloseOutcome::Closed => {
+                vec![NotoraAction::ExternalFileCloseCompleted(external_file_id)]
+            }
+            ExternalFileCloseOutcome::SavePending | ExternalFileCloseOutcome::Cancelled => {
+                Vec::new()
+            }
+            ExternalFileCloseOutcome::Blocked(blocker) => {
                 vec![NotoraAction::ExternalFileCloseFailed(blocker.message().to_owned())]
             }
         }
@@ -2288,9 +2439,15 @@ impl NotoraRuntime {
         let mut closed_external_file_ids = Vec::with_capacity(external_file_ids.len());
         let mut blocked_count = 0;
         for external_file_id in external_file_ids {
-            match self.try_close_external_file(external_file_id) {
-                Ok(()) => closed_external_file_ids.push(external_file_id),
-                Err(_) => blocked_count += 1,
+            match self
+                .try_close_external_file(external_file_id, UnsavedExternalFileCloseHandling::Block)
+            {
+                ExternalFileCloseOutcome::Closed => {
+                    closed_external_file_ids.push(external_file_id);
+                }
+                ExternalFileCloseOutcome::SavePending
+                | ExternalFileCloseOutcome::Cancelled
+                | ExternalFileCloseOutcome::Blocked(_) => blocked_count += 1,
             }
         }
         vec![NotoraAction::ExternalFilesClearCompleted { closed_external_file_ids, blocked_count }]
@@ -2299,22 +2456,128 @@ impl NotoraRuntime {
     fn try_close_external_file(
         &mut self,
         external_file_id: notora_core::ExternalFileId,
-    ) -> Result<(), ExternalFileCloseBlocker> {
+        unsaved_handling: UnsavedExternalFileCloseHandling,
+    ) -> ExternalFileCloseOutcome {
         let identity = DocumentIdentity::ExternalFile(external_file_id);
         let Some(tab_id) = self.document_runtime.tab_for(identity) else {
-            return Ok(());
+            return ExternalFileCloseOutcome::Closed;
         };
+        if self.document_runtime.external_file_close_is_pending(external_file_id) {
+            return ExternalFileCloseOutcome::SavePending;
+        }
         match self.document_runtime.editor().close_decision(tab_id) {
             Some(appkit_shell::workspace::CloseTabDecision::NeedsSavePrompt) => {
-                return Err(ExternalFileCloseBlocker::UnsavedChanges);
+                return self.resolve_unsaved_external_file_close(
+                    identity,
+                    tab_id,
+                    unsaved_handling,
+                );
             }
             Some(appkit_shell::workspace::CloseTabDecision::Pinned) => {
-                return Err(ExternalFileCloseBlocker::PinnedTab);
+                return ExternalFileCloseOutcome::Blocked(ExternalFileCloseBlocker::PinnedTab);
             }
             Some(appkit_shell::workspace::CloseTabDecision::CanClose) | None => {}
         }
         self.close_document_runtime(identity);
-        Ok(())
+        ExternalFileCloseOutcome::Closed
+    }
+
+    fn resolve_unsaved_external_file_close(
+        &mut self,
+        identity: DocumentIdentity,
+        tab_id: appkit_core::workspace::types::TabId,
+        unsaved_handling: UnsavedExternalFileCloseHandling,
+    ) -> ExternalFileCloseOutcome {
+        if unsaved_handling == UnsavedExternalFileCloseHandling::Block {
+            return ExternalFileCloseOutcome::Blocked(ExternalFileCloseBlocker::UnsavedChanges);
+        }
+        let file_name =
+            self.document_runtime.editor().tab_title(tab_id).unwrap_or_else(|| "未命名".to_owned());
+        match (self.external_file_close_prompt)(&file_name, self.document_runtime.editor().window())
+        {
+            ExternalFileCloseChoice::Save => self.save_external_file_before_close(identity, tab_id),
+            ExternalFileCloseChoice::Discard => {
+                self.discard_external_file_changes(identity, tab_id)
+            }
+            ExternalFileCloseChoice::Cancel => ExternalFileCloseOutcome::Cancelled,
+        }
+    }
+
+    fn save_external_file_before_close(
+        &mut self,
+        identity: DocumentIdentity,
+        tab_id: appkit_core::workspace::types::TabId,
+    ) -> ExternalFileCloseOutcome {
+        let DocumentIdentity::ExternalFile(external_file_id) = identity else {
+            return ExternalFileCloseOutcome::Cancelled;
+        };
+        let Some(session) =
+            self.action_runtime.state().external_files.session(external_file_id).cloned()
+        else {
+            return ExternalFileCloseOutcome::Cancelled;
+        };
+        let save_started = match session {
+            ExternalFileSession::Existing { .. } => {
+                let (save_started, outcome) = self
+                    .document_runtime
+                    .submit_manual_external_save(tab_id, self.window_runtime.event_loop_proxy());
+                self.apply_document_outcome(outcome);
+                save_started
+            }
+            ExternalFileSession::Untitled { .. } | ExternalFileSession::Missing { .. } => {
+                self.save_external_file_as_before_close(tab_id, external_file_id)
+            }
+        };
+        if !save_started {
+            return ExternalFileCloseOutcome::Cancelled;
+        }
+        self.document_runtime.request_external_file_close_after_save(external_file_id);
+        ExternalFileCloseOutcome::SavePending
+    }
+
+    fn save_external_file_as_before_close(
+        &mut self,
+        tab_id: appkit_core::workspace::types::TabId,
+        external_file_id: notora_core::ExternalFileId,
+    ) -> bool {
+        let default_file_name =
+            self.document_runtime.editor().tab_title(tab_id).unwrap_or_else(|| "未命名".to_owned());
+        let Some(path) = (self.external_file_save_path_chooser)(
+            &default_file_name,
+            self.document_runtime.editor().window(),
+        ) else {
+            return false;
+        };
+        let (save_started, outcome) = self.document_runtime.save_external_file_as_to_path(
+            tab_id,
+            external_file_id,
+            path,
+            self.window_runtime.event_loop_proxy(),
+        );
+        self.apply_document_outcome(outcome);
+        save_started
+    }
+
+    fn discard_external_file_changes(
+        &mut self,
+        identity: DocumentIdentity,
+        tab_id: appkit_core::workspace::types::TabId,
+    ) -> ExternalFileCloseOutcome {
+        let outcome = self
+            .document_runtime
+            .editor_mut()
+            .confirm_close(tab_id, appkit_shell::editor_runtime::CloseConfirmation::Discard);
+        if self.document_runtime.editor().document_summary(tab_id).is_some() {
+            return ExternalFileCloseOutcome::Blocked(ExternalFileCloseBlocker::PinnedTab);
+        }
+        self.document_runtime.cancel_autosave(tab_id);
+        self.document_runtime.clear_save_failure(tab_id);
+        self.document_runtime.remove_tab(tab_id);
+        self.apply_editor_outcome(outcome);
+        if self.action_runtime.state().library.selected_card == Some(identity) {
+            self.action_runtime.invalidate_document_selection();
+        }
+        ExternalFileCloseOutcome::Closed
     }
 
     fn execute_note_command(&mut self, command: notora_core::note_command::NoteCommand) {
@@ -3614,6 +3877,143 @@ mod tests {
             assert!(Instant::now() < deadline, "encrypted creation should finish promptly");
             std::thread::sleep(Duration::from_millis(10));
         }
+    }
+
+    #[test]
+    fn newly_created_encrypted_note_persists_immediate_title_and_body_edits() {
+        const PASSWORD: &str = "new-encrypted-note-password";
+        const TITLE: &str = "私密路线图";
+        const FIRST_FRAGMENT: &str = "第一段";
+        const SECOND_FRAGMENT: &str = "\n第二段";
+
+        let _encryption_test_guard = encryption_runtime_test_guard();
+        let workspace = tempfile::tempdir().expect("workspace fixture should exist");
+        let mut app = app();
+        let (identity, tab_id) =
+            create_encrypted_note_for_test(&mut app, workspace.path(), PASSWORD);
+
+        assert!(
+            app.action_runtime.state().library.active_editor_metadata.is_some(),
+            "a newly created encrypted note must be ready for title commits before editing starts"
+        );
+        app.dispatch_action(NotoraAction::TitleCommitRequested(TITLE.to_owned()));
+
+        for fragment in [FIRST_FRAGMENT, SECOND_FRAGMENT] {
+            let outcome = app
+                .document_runtime
+                .editor_runtime
+                .commit_text(active_editor_input_context(), fragment.to_owned());
+            app.apply_editor_outcome(outcome);
+        }
+
+        let expected_path = app
+            .workspace_controller
+            .active_workspace()
+            .expect("created note should retain its active workspace")
+            .descriptor
+            .root
+            .join(format!("{TITLE}.md"));
+        let deadline = Instant::now() + Duration::from_secs(3);
+        loop {
+            app.drain_product_events();
+            let path_synchronized = app
+                .document_runtime
+                .tab_for(identity)
+                .and_then(|tab_id| app.document_runtime.editor_runtime.document_summary(tab_id))
+                .is_some_and(|summary| summary.path.as_deref() == Some(&expected_path));
+            if path_synchronized && expected_path.is_file() {
+                break;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "title and body should persist promptly; summary={:?}, error={:?}, files={:?}",
+                app.document_runtime.tab_for(identity).and_then(|tab_id| app
+                    .document_runtime
+                    .editor_runtime
+                    .document_summary(tab_id)),
+                app.action_runtime.state().library.last_command_error,
+                regular_files_below(workspace.path()),
+            );
+            thread::sleep(Duration::from_millis(10));
+        }
+
+        let prepared = app
+            .document_runtime
+            .editor_runtime
+            .prepare_save(tab_id)
+            .expect("immediate body edits should produce a save snapshot");
+        let transform = app
+            .document_runtime
+            .save_payload_transform(tab_id)
+            .expect("created encrypted note should retain its save transform")
+            .expect("encrypted note save must not use plaintext identity transform");
+        let completion =
+            appkit_shell::editor_runtime::execute_prepared_save_with_transform(prepared, transform);
+        assert!(completion.result.is_ok());
+        let outcome = app.document_runtime.editor_runtime.apply_save_completion(completion);
+        app.apply_editor_outcome(outcome);
+
+        let password = textora_encryption::EncryptionPassword::new(PASSWORD.to_owned())
+            .expect("test password should satisfy policy");
+        let encrypted = std::fs::read(expected_path).expect("renamed encrypted note should exist");
+        assert_eq!(
+            textora_encryption::unlock_encrypted_markdown(&encrypted, &password)
+                .expect("saved encrypted note should authenticate")
+                .plaintext(),
+            format!("{FIRST_FRAGMENT}{SECOND_FRAGMENT}")
+        );
+    }
+
+    #[test]
+    fn shutdown_makes_the_latest_encrypted_revision_immediately_saveable() {
+        const PASSWORD: &str = "shutdown-save-password";
+        const LATEST_FRAGMENT: &str = "退出前刚输入的内容";
+
+        let _encryption_test_guard = encryption_runtime_test_guard();
+        let workspace = tempfile::tempdir().expect("workspace fixture should exist");
+        let mut app = app();
+        let (_identity, tab_id) =
+            create_encrypted_note_for_test(&mut app, workspace.path(), PASSWORD);
+        let outcome = app
+            .document_runtime
+            .editor_runtime
+            .commit_text(active_editor_input_context(), LATEST_FRAGMENT.to_owned());
+        app.apply_editor_outcome(outcome);
+        assert!(matches!(
+            app.document_runtime.autosave_state(tab_id),
+            Some(AutoSaveState::Scheduled { .. })
+        ));
+
+        app.request_immediate_shutdown_workspace_note_saves();
+
+        let requests = app.document_runtime.take_due_autosaves();
+        assert_eq!(requests.len(), 1);
+        assert_eq!(requests[0].tab_id, tab_id);
+        let prepared = app
+            .document_runtime
+            .editor_runtime
+            .prepare_save(tab_id)
+            .expect("shutdown should prepare the latest encrypted revision");
+        assert_eq!(prepared.content_revision, requests[0].content_revision);
+        let transform = app
+            .document_runtime
+            .save_payload_transform(tab_id)
+            .expect("encrypted shutdown save should retain its session")
+            .expect("encrypted shutdown save must transform plaintext");
+        let completion =
+            appkit_shell::editor_runtime::execute_prepared_save_with_transform(prepared, transform);
+        assert!(completion.result.is_ok());
+
+        let password = textora_encryption::EncryptionPassword::new(PASSWORD.to_owned())
+            .expect("test password should satisfy policy");
+        let encrypted = std::fs::read(workspace.path().join("无标题.md"))
+            .expect("encrypted note should remain readable after the shutdown save");
+        assert_eq!(
+            textora_encryption::unlock_encrypted_markdown(&encrypted, &password)
+                .expect("shutdown save should authenticate")
+                .plaintext(),
+            LATEST_FRAGMENT
+        );
     }
 
     #[test]
@@ -6640,9 +7040,10 @@ mod tests {
     }
 
     #[test]
-    fn closing_a_dirty_untitled_file_keeps_its_record_and_runtime_tab() {
+    fn closing_a_dirty_untitled_file_can_discard_its_record_and_runtime_tab() {
         let mut app = app();
-        let (identity, tab_id) = install_registered_untitled_external(&mut app);
+        app.external_file_close_prompt = Box::new(|_, _| super::ExternalFileCloseChoice::Discard);
+        let (identity, _tab_id) = install_registered_untitled_external(&mut app);
         let DocumentIdentity::ExternalFile(external_file_id) = identity else {
             panic!("untitled external fixture must have an external identity");
         };
@@ -6654,12 +7055,64 @@ mod tests {
 
         app.dispatch_action(NotoraAction::ExternalFileCloseRequested(external_file_id));
 
-        assert!(app.action_runtime.state().external_files.session(external_file_id).is_some());
-        assert_eq!(app.document_tab_for(identity), Some(tab_id));
-        assert_eq!(
-            app.action_runtime.state().library.last_command_error.as_deref(),
-            Some("文件仍有未保存修改，请先保存后再关闭")
+        assert!(app.action_runtime.state().external_files.session(external_file_id).is_none());
+        assert_eq!(app.document_tab_for(identity), None);
+        assert_eq!(app.action_runtime.state().library.last_command_error, None);
+    }
+
+    #[test]
+    fn successful_untitled_save_requested_by_close_closes_after_path_promotion() {
+        let directory = tempfile::tempdir().expect("external save fixture directory should exist");
+        let saved_path = directory.path().join("saved-before-close.md");
+        let mut app = app();
+        let (identity, tab_id) = install_registered_untitled_external(&mut app);
+        let DocumentIdentity::ExternalFile(external_file_id) = identity else {
+            panic!("untitled external fixture must have an external identity");
+        };
+        let edit_outcome = app
+            .document_runtime
+            .editor_runtime
+            .commit_text(active_editor_input_context(), "关闭前保存的修改".to_owned());
+        app.apply_editor_outcome(edit_outcome);
+        let prepared = app
+            .document_runtime
+            .editor_runtime
+            .prepare_save_as(tab_id, &saved_path)
+            .expect("dirty untitled file should prepare the chosen save path");
+        let content_revision = prepared.content_revision;
+        app.document_runtime.pending_external_save_as.insert(
+            tab_id,
+            super::document_runtime::PendingExternalSaveAs { external_file_id, content_revision },
         );
+        app.document_runtime.request_external_file_close_after_save(external_file_id);
+        let completion = appkit_shell::editor_runtime::execute_prepared_save(prepared);
+        let saved_disk_path = completion
+            .result
+            .as_ref()
+            .expect("save-before-close should write the selected file")
+            .path
+            .clone();
+        let editor_outcome = app.document_runtime.editor_runtime.apply_save_completion(completion);
+        app.apply_editor_outcome(editor_outcome);
+        let completion_outcome = app.document_runtime.complete_pending_external_save_as(
+            AutoSaveRequest { tab_id, content_revision },
+            true,
+            Some(saved_disk_path),
+        );
+        app.apply_document_outcome(completion_outcome);
+
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while app.action_runtime.state().external_files.session(external_file_id).is_some() {
+            app.drain_product_events();
+            assert!(Instant::now() < deadline, "save-before-close should complete promptly");
+            thread::sleep(Duration::from_millis(10));
+        }
+        assert_eq!(app.document_tab_for(identity), None);
+        assert_eq!(
+            std::fs::read_to_string(saved_path).expect("saved file should remain on disk"),
+            "关闭前保存的修改"
+        );
+        assert_eq!(app.action_runtime.state().library.last_command_error, None);
     }
 
     #[test]

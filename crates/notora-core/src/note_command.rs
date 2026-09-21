@@ -8,10 +8,13 @@ use std::sync::Arc;
 use crate::catalog::{NotePathOperation, NotePathOperationKind, NotePathOperationState};
 use crate::workspace::move_file_no_replace;
 use crate::{
-    Catalog, CatalogError, CatalogNote, DEFAULT_NOTE_TITLE, DocumentKind, NoteEncryption,
-    NoteFileNameBinding, NoteId, Workspace, WorkspaceError, allocate_title_bound_file_name,
-    normalize_title_file_stem, parse_note_text_summary,
+    Catalog, CatalogError, CatalogNote, DEFAULT_NOTE_TITLE, DocumentKind, NoteEditorMetadata,
+    NoteEncryption, NoteFileNameBinding, NoteId, Workspace, WorkspaceError,
+    allocate_title_bound_file_name, normalize_title_file_stem, parse_note_text_summary,
 };
+
+const CREATED_NOTE_FILE_NAME_DISAMBIGUATOR: u32 = 1;
+const CREATED_NOTE_TITLE_REVISION: u64 = 0;
 
 /// 创建时已经具备全部执行条件的互斥存储方式。
 #[derive(Clone)]
@@ -139,6 +142,8 @@ pub struct NoteCommandResult {
     pub previous_relative_path: Option<PathBuf>,
     pub outcome: NoteCommandOutcome,
     pub created_access: Option<CreatedNoteAccess>,
+    /// 新建命令随结果返回刚写入 catalog 的编辑元数据，避免首次打开再读一次。
+    pub created_editor_metadata: Option<NoteEditorMetadata>,
 }
 
 /// 兼容仅含新建命令时的公开返回类型；后续命令共用相同结果结构。
@@ -622,6 +627,7 @@ fn commit_title_without_relocation(
         previous_relative_path: None,
         outcome: NoteCommandOutcome::TitleUpdated,
         created_access: None,
+        created_editor_metadata: None,
     })
 }
 
@@ -650,6 +656,7 @@ fn commit_title_bound_without_relocation(
         previous_relative_path: None,
         outcome: NoteCommandOutcome::TitleUpdated,
         created_access: None,
+        created_editor_metadata: None,
     })
 }
 
@@ -729,6 +736,7 @@ fn relocate_title_bound_note(
         previous_relative_path: Some(source_relative_path),
         outcome: NoteCommandOutcome::TitleUpdated,
         created_access: None,
+        created_editor_metadata: None,
     })
 }
 
@@ -835,6 +843,10 @@ fn create_configured_note(
                     ));
                 }
                 return Ok(NoteCommandResult {
+                    created_editor_metadata: Some(created_editor_metadata(
+                        &note,
+                        &prepared_contents,
+                    )),
                     note,
                     previous_relative_path: None,
                     outcome: NoteCommandOutcome::Created,
@@ -884,6 +896,7 @@ fn relocate_note(
             previous_relative_path: None,
             outcome: NoteCommandOutcome::Moved,
             created_access: None,
+            created_editor_metadata: None,
         });
     }
     let source_path = workspace
@@ -908,7 +921,25 @@ fn relocate_note(
         previous_relative_path: Some(source_relative_path),
         outcome: NoteCommandOutcome::Moved,
         created_access: None,
+        created_editor_metadata: None,
     })
+}
+
+fn created_editor_metadata(
+    note: &CatalogNote,
+    contents: &PreparedNoteContents,
+) -> NoteEditorMetadata {
+    NoteEditorMetadata {
+        note_id: note.note_id,
+        created_at: note.modified_at,
+        modified_at: note.modified_at,
+        encryption: contents.encryption(),
+        title_initialization: contents.title_initialization(note.kind),
+        file_name_binding: NoteFileNameBinding::TitleBound {
+            disambiguator: CREATED_NOTE_FILE_NAME_DISAMBIGUATOR,
+        },
+        title_revision: CREATED_NOTE_TITLE_REVISION,
+    }
 }
 
 struct TargetDirectory {
@@ -1239,6 +1270,7 @@ mod create {
         assert_eq!(unlocked.plaintext(), "");
         assert_eq!(metadata.encryption, crate::NoteEncryption::Encrypted);
         assert_eq!(metadata.title_initialization, crate::TitleInitialization::Independent);
+        assert_eq!(result.created_editor_metadata.as_ref(), Some(&metadata));
         assert_eq!(
             metadata.file_name_binding,
             crate::NoteFileNameBinding::TitleBound { disambiguator: 1 }
