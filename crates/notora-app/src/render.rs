@@ -1323,7 +1323,36 @@ impl NotoraShell {
         paint_at(context, self.canvas_rect, |context| self.canvas_scrollbars.paint(context));
     }
 
+    fn focused_autonomous_text_input(&self) -> Option<&TextBox> {
+        match self.focused_text_input? {
+            FocusTarget::Overlay if self.encrypted_note_dialog_open => {
+                self.encrypted_note_dialog.as_ref()?.focused_text_input()
+            }
+            FocusTarget::Editor if self.encrypted_note_unlock_open => {
+                self.encrypted_note_unlock.as_ref()?.focused_text_input()
+            }
+            _ => None,
+        }
+    }
+
+    pub(crate) fn focused_text_input_ime_allowed(&self) -> bool {
+        self.focused_autonomous_text_input().is_none_or(TextBox::ime_allowed)
+    }
+
     pub(crate) fn advance_text_cursor_blink(&mut self, now: Instant) -> bool {
+        if self.focused_autonomous_text_input().is_some() {
+            return match self.focused_text_input {
+                Some(FocusTarget::Overlay) => self
+                    .encrypted_note_dialog
+                    .as_mut()
+                    .is_some_and(|dialog| dialog.advance_cursor_blink(now)),
+                Some(FocusTarget::Editor) => self
+                    .encrypted_note_unlock
+                    .as_mut()
+                    .is_some_and(|unlock| unlock.advance_cursor_blink(now)),
+                _ => false,
+            };
+        }
         let Some(deadline) = self.next_text_cursor_blink_at else {
             return false;
         };
@@ -1337,6 +1366,9 @@ impl NotoraShell {
     }
 
     pub(crate) fn next_text_cursor_blink_at(&self) -> Option<Instant> {
+        if let Some(input) = self.focused_autonomous_text_input() {
+            return input.next_cursor_blink_at();
+        }
         self.next_text_cursor_blink_at
     }
 
@@ -4268,6 +4300,76 @@ mod tests {
         shell.synchronize_focus(FocusTarget::NavigationTree, Instant::now());
         assert!(!shell.editor_pane.tag_editor_has_keyboard_focus());
         assert!(shell.focused_text_input_ime_cursor_rect().is_none());
+    }
+
+    #[test]
+    fn encrypted_password_inputs_supply_blink_deadlines_and_ime_policy() {
+        use ui::core::paint::{DrawCmd, DrawList};
+
+        let theme = ui::theme::test_theme();
+        let mut measure = ui::NoopMeasure;
+        let mut layout_context =
+            ui::LayoutCtx { ui_measure: None, measure: &mut measure, theme: &theme, dpi: 1.0 };
+        for (focus, confirmation) in [
+            (FocusTarget::Overlay, false),
+            (FocusTarget::Overlay, true),
+            (FocusTarget::Editor, false),
+        ] {
+            let mut shell = NotoraShell::new();
+            let mut dialog = EncryptedNoteDialog::new(&theme);
+            dialog.set_input(EncryptedNoteDialogInput::create(), true);
+            dialog.set_rect(Rect::new(0.0, 0.0, 800.0, 600.0), &mut layout_context);
+            if confirmation {
+                dialog.route_event(
+                    &Event::KeyDown(ui::KeyCode::Tab, ui::core::Modifiers::NONE),
+                    &mut EventCtx::new(&theme, 1.0),
+                );
+            }
+            shell.encrypted_note_dialog = Some(dialog);
+            shell.encrypted_note_dialog_open = true;
+            let mut unlock = EncryptedNoteUnlock::new(&theme);
+            unlock.set_input(EncryptedNoteUnlockInput::new(String::new()), true);
+            unlock.set_rect(Rect::new(0.0, 0.0, 800.0, 600.0), &mut layout_context);
+            shell.encrypted_note_unlock = Some(unlock);
+            shell.encrypted_note_unlock_open = true;
+            let focused_at = Instant::now();
+            shell.synchronize_focus(focus, focused_at);
+            assert!(!shell.focused_text_input_ime_allowed());
+
+            for (phase, visible) in [true, false, true].into_iter().enumerate() {
+                if phase > 0 {
+                    assert!(
+                        shell.advance_text_cursor_blink(
+                            shell
+                                .next_text_cursor_blink_at()
+                                .expect("focused input schedules blinking")
+                        )
+                    );
+                }
+                let mut draw_list = DrawList::new();
+                let mut context = ui::PaintCtx::new(&mut draw_list, &theme, 1.0);
+                if focus == FocusTarget::Overlay {
+                    shell
+                        .encrypted_note_dialog
+                        .as_ref()
+                        .expect("dialog exists")
+                        .paint(&mut context);
+                } else {
+                    shell
+                        .encrypted_note_unlock
+                        .as_ref()
+                        .expect("unlock exists")
+                        .paint(&mut context);
+                }
+                let paints_caret = draw_list.cmds.iter().any(|command| {
+                    matches!(command, DrawCmd::FillRect { rect, radius, .. }
+                        if *radius == 0.0 && rect.w == 2.0)
+                });
+                assert_eq!(paints_caret, visible, "focus={focus:?}, phase={phase}");
+            }
+            shell.synchronize_focus(FocusTarget::NavigationSearch, Instant::now());
+            assert!(shell.focused_text_input_ime_allowed());
+        }
     }
 
     #[test]

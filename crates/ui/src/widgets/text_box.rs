@@ -1,6 +1,8 @@
 //! TextBox — single-line text input component.
 //! Manages text state, cursor, selection, IME preedit, and clipboard shortcuts.
 
+use std::time::{Duration, Instant};
+
 use crate::core::widget::{
     ControlAction, PointerClickKind, PointerClickTracker, SensitiveText, TextPayload, WidgetId,
 };
@@ -209,6 +211,7 @@ pub struct TextBox {
     accessibility_label: Option<String>,
     echo_mode: EchoMode,
     blink_on: bool,
+    next_cursor_blink: Option<Instant>,
     focused: bool,
     chrome: TextBoxChrome,
     font_size_logical: f32,
@@ -233,6 +236,8 @@ pub struct TextBox {
     committed_payload: Option<TextPayload>,
 }
 
+const TEXT_CURSOR_BLINK_INTERVAL: Duration = Duration::from_millis(500);
+
 impl Default for TextBox {
     fn default() -> Self {
         Self::new()
@@ -252,7 +257,8 @@ impl TextBox {
             placeholder: String::new(),
             accessibility_label: None,
             echo_mode: EchoMode::Plain,
-            blink_on: false,
+            blink_on: true,
+            next_cursor_blink: Some(Instant::now() + TEXT_CURSOR_BLINK_INTERVAL),
             focused: false,
             chrome: TextBoxChrome::Framed,
             font_size_logical: DEFAULT_FONT_SIZE_LOGICAL,
@@ -342,13 +348,43 @@ impl TextBox {
         self.max_len_bytes = max;
     }
 
+    /// Legacy externally controlled visibility. New inputs use component-owned blinking.
     pub fn set_blink(&mut self, on: bool) {
+        self.next_cursor_blink = None;
         self.blink_on = on;
+    }
+
+    pub fn ime_allowed(&self) -> bool {
+        self.echo_mode == EchoMode::Plain
+    }
+
+    pub fn next_cursor_blink_at(&self) -> Option<Instant> {
+        (self.focused && self.selection.is_none()).then_some(self.next_cursor_blink).flatten()
+    }
+
+    pub fn advance_cursor_blink(&mut self, now: Instant) -> bool {
+        let Some(deadline) = self.next_cursor_blink_at() else {
+            return false;
+        };
+        if now < deadline {
+            return false;
+        }
+        self.blink_on = !self.blink_on;
+        self.next_cursor_blink = Some(now + TEXT_CURSOR_BLINK_INTERVAL);
+        true
+    }
+
+    fn reset_cursor_blink(&mut self) {
+        if self.next_cursor_blink.is_some() {
+            self.blink_on = true;
+            self.next_cursor_blink = Some(Instant::now() + TEXT_CURSOR_BLINK_INTERVAL);
+        }
     }
 
     pub fn set_focus(&mut self, focused: bool) {
         if self.focused != focused {
             self.focused = focused;
+            self.reset_cursor_blink();
             if !focused {
                 self.selection = None;
                 self.dragging = false;
@@ -1284,6 +1320,9 @@ impl Widget for TextBox {
         {
             return None;
         }
+        if matches!(ev, Event::KeyDown(..) | Event::MouseDown { .. } | Event::ImeCommit(..)) {
+            self.reset_cursor_blink();
+        }
         match ev {
             Event::KeyDown(key_code, modifiers) => {
                 let (consumed, action) = self.handle_key_down(*key_code, *modifiers, ctx);
@@ -1352,6 +1391,40 @@ mod tests {
     use crate::core::widget::{ControlAction, Event, EventCtx, Widget, WidgetAction, WidgetId};
     use std::cell::RefCell;
     use std::rc::Rc;
+
+    #[test]
+    fn password_mode_owns_the_input_method_policy() {
+        let mut input = TextBox::new();
+        assert!(input.ime_allowed());
+        input.set_password_mode(true);
+        assert!(!input.ime_allowed());
+        input.set_password_mode(false);
+        assert!(input.ime_allowed());
+        input.set_echo_mode(EchoMode::Masked);
+        assert!(!input.ime_allowed());
+    }
+
+    #[test]
+    fn component_cursor_blinks_resets_on_typing_and_stops_when_unfocused() {
+        let mut input = TextBox::new();
+        assert_eq!(input.next_cursor_blink_at(), None);
+        input.set_focus(true);
+        let deadline =
+            input.next_cursor_blink_at().expect("focused input should schedule blinking");
+        assert!(!input.advance_cursor_blink(deadline - Duration::from_millis(1)));
+        assert!(input.blink_on);
+        assert!(input.advance_cursor_blink(deadline));
+        assert!(!input.blink_on);
+        let theme = crate::theme::test_theme();
+        let mut context = EventCtx::new(&theme, 1.0);
+        input.on_event(&Event::KeyDown(KeyCode::Char('a'), Modifiers::NONE), &mut context);
+        assert!(input.blink_on);
+        assert!(input.next_cursor_blink_at().is_some());
+        input.select_all();
+        assert_eq!(input.next_cursor_blink_at(), None);
+        input.set_focus(false);
+        assert_eq!(input.next_cursor_blink_at(), None);
+    }
 
     struct TestClipboard {
         text: Rc<RefCell<Option<String>>>,

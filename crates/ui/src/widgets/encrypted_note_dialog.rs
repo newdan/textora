@@ -335,6 +335,19 @@ impl EncryptedNoteDialog {
         }
     }
 
+    pub fn focused_text_input(&self) -> Option<&TextBox> {
+        [&self.password_input, &self.confirmation_input]
+            .into_iter()
+            .find(|input| input.is_focused())
+    }
+
+    pub fn advance_cursor_blink(&mut self, now: std::time::Instant) -> bool {
+        let mut changed = false;
+        changed |= self.password_input.advance_cursor_blink(now);
+        changed |= self.confirmation_input.advance_cursor_blink(now);
+        changed
+    }
+
     pub fn ime_cursor_rect(&self) -> Option<Rect> {
         if self.password_input.is_focused() {
             return Some(self.password_input.ime_cursor_rect());
@@ -458,7 +471,6 @@ fn sensitive_text_box(id: WidgetId, accessibility_label: &str) -> TextBox {
     text_box.set_password_mode(true);
     text_box.set_accessibility_label(Some(accessibility_label.to_owned()));
     text_box.set_max_len_bytes(4096);
-    text_box.set_blink(true);
     text_box
 }
 

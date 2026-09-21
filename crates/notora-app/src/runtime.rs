@@ -165,14 +165,6 @@ fn resolve_pointer_cursor(
     product_cursor.or(editor_cursor).unwrap_or(winit::window::CursorIcon::Default)
 }
 
-fn product_ime_allowed(state: &crate::NotoraState) -> bool {
-    !(state.layout.focus_target == crate::FocusTarget::Editor
-        && matches!(
-            state.encrypted_note_unlock,
-            crate::state::EncryptedNoteUnlockState::Editing { .. }
-        ))
-}
-
 fn choose_workspace_directory() -> Option<std::path::PathBuf> {
     rfd::FileDialog::new().set_title("设置工作区根目录").pick_folder()
 }
@@ -691,7 +683,7 @@ impl NotoraRuntime {
             let _ = self.update_editor_preedit(String::new(), None);
         }
         self.frame_runtime.synchronize_focus(focus_target, Instant::now());
-        let ime_allowed = product_ime_allowed(self.action_runtime.state());
+        let ime_allowed = self.frame_runtime.focused_text_input_ime_allowed();
         if let Some(window) = self.document_runtime.editor().window() {
             window.set_ime_allowed(ime_allowed);
         }
@@ -3608,8 +3600,8 @@ mod tests {
     };
     use super::frame_runtime::{FontSystemPreparation, StartupMilestone};
     use super::{
-        NotoraRuntime, SettingsPersistenceState, StartupTrace, product_ime_allowed,
-        resolve_pointer_cursor, workspace_relative_directory,
+        NotoraRuntime, SettingsPersistenceState, StartupTrace, resolve_pointer_cursor,
+        workspace_relative_directory,
     };
     use crate::action::{
         DocumentLoadRequest, MetadataMutation, NotoraAction, WorkspaceTransitionRequest,
@@ -3636,39 +3628,6 @@ mod tests {
         );
         assert_eq!(resolve_pointer_cursor(None, Some(CursorIcon::Grab)), CursorIcon::Grab);
         assert_eq!(resolve_pointer_cursor(None, None), CursorIcon::Default);
-    }
-
-    #[test]
-    fn inline_encrypted_password_focus_disables_ime_until_focus_leaves() {
-        let note_id = notora_core::NoteId::generate();
-        let request = DocumentLoadRequest {
-            identity: DocumentIdentity::Note(note_id),
-            selection_generation: 1,
-        };
-        let mut state = crate::NotoraState::default();
-        state.library.selected_card = Some(request.identity);
-        state.library.selected_document_generation = request.selection_generation;
-        let _ = state.reduce(NotoraAction::EncryptedNoteUnlockRequired {
-            request,
-            title: "私密笔记".to_owned(),
-            metadata: notora_core::NoteEditorMetadata {
-                note_id,
-                created_at: std::time::SystemTime::UNIX_EPOCH,
-                modified_at: std::time::SystemTime::UNIX_EPOCH,
-                encryption: notora_core::NoteEncryption::Encrypted,
-                title_initialization: notora_core::TitleInitialization::Independent,
-                file_name_binding: notora_core::NoteFileNameBinding::TitleBound {
-                    disambiguator: 1,
-                },
-                title_revision: 0,
-            },
-            tags: Vec::new(),
-        });
-
-        assert!(!product_ime_allowed(&state));
-
-        state.layout.focus_target = FocusTarget::CardList;
-        assert!(product_ime_allowed(&state));
     }
 
     pub(super) fn app() -> NotoraRuntime {

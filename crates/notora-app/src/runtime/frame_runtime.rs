@@ -190,6 +190,10 @@ impl FrameRuntime {
         }
     }
 
+    pub(super) fn focused_text_input_ime_allowed(&self) -> bool {
+        self.shell.focused_text_input_ime_allowed()
+    }
+
     pub(super) fn synchronize_focus(&mut self, target: crate::FocusTarget, now: Instant) {
         self.shell.synchronize_focus(target, now);
     }
@@ -377,6 +381,7 @@ impl FrameRuntime {
         let mut render_resources = document_runtime.editor_mut().take_render_resources();
         let mut frame = document_runtime.editor_mut().begin_frame()?;
         self.shell.render(&mut frame, input.layout, &model)?;
+        self.shell.synchronize_focus(input.state.layout.focus_target, Instant::now());
         let editor_surface = if input.editor_is_active {
             document_runtime.editor_mut().paint_active_editor(
                 &mut frame,
@@ -420,14 +425,15 @@ impl FrameRuntime {
         document_runtime: &DocumentRuntime,
         state: &NotoraState,
     ) {
+        let Some(window) = document_runtime.editor().window() else {
+            return;
+        };
+        window.set_ime_allowed(self.shell.focused_text_input_ime_allowed());
         let ime_rect = self.shell.focused_text_input_ime_cursor_rect().or_else(|| {
             (state.layout.focus_target == crate::FocusTarget::Editor)
                 .then(|| document_runtime.editor().active_editor_ime_cursor_rect())?
         });
         let Some(ime_rect) = ime_rect else {
-            return;
-        };
-        let Some(window) = document_runtime.editor().window() else {
             return;
         };
         window.set_ime_cursor_area(

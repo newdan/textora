@@ -101,7 +101,6 @@ impl EncryptedNoteUnlock {
         password_input.set_placeholder("输入密码");
         password_input.set_accessibility_label(Some("加密笔记密码".to_owned()));
         password_input.set_max_len_bytes(4_096);
-        password_input.set_blink(true);
         let mut submit_button = Button::new(SUBMIT_BUTTON_ID, ButtonStyle::from_theme(theme));
         submit_button.set_text(Some("解密".to_owned()));
         submit_button.set_accessibility_label(Some("解密笔记".to_owned()));
@@ -215,6 +214,14 @@ impl EncryptedNoteUnlock {
             |control, event, context| self.dispatch_to_control(control, event, context),
         );
         dispatch.action
+    }
+
+    pub fn focused_text_input(&self) -> Option<&TextBox> {
+        self.password_input.is_focused().then_some(&self.password_input)
+    }
+
+    pub fn advance_cursor_blink(&mut self, now: std::time::Instant) -> bool {
+        self.password_input.advance_cursor_blink(now)
     }
 
     pub fn ime_cursor_rect(&self) -> Option<Rect> {
