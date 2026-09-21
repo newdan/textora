@@ -297,15 +297,25 @@ impl WorkspaceController {
     pub fn prepare_document(
         &self,
         request: DocumentLoadRequest,
+        cached_session: Option<std::sync::Arc<textora_encryption::UnlockedNoteSession>>,
     ) -> Result<(), WorkspaceControllerError> {
-        self.prepare_workspace_document(request, WorkspaceDocumentSource::ActiveNote)
+        self.prepare_workspace_document(
+            request,
+            WorkspaceDocumentSource::ActiveNote,
+            cached_session,
+        )
     }
 
     pub fn prepare_trashed_document(
         &self,
         request: DocumentLoadRequest,
+        cached_session: Option<std::sync::Arc<textora_encryption::UnlockedNoteSession>>,
     ) -> Result<(), WorkspaceControllerError> {
-        self.prepare_workspace_document(request, WorkspaceDocumentSource::TrashedNote)
+        self.prepare_workspace_document(
+            request,
+            WorkspaceDocumentSource::TrashedNote,
+            cached_session,
+        )
     }
 
     pub fn unlock_encrypted_document(
@@ -335,12 +345,13 @@ impl WorkspaceController {
         &self,
         request: DocumentLoadRequest,
         source: WorkspaceDocumentSource,
+        cached_session: Option<std::sync::Arc<textora_encryption::UnlockedNoteSession>>,
     ) -> Result<(), WorkspaceControllerError> {
         let session =
             self.active_session.as_ref().ok_or(WorkspaceControllerError::NoActiveWorkspace)?;
         session
             .indexer
-            .send(IndexWorkerCommand::PrepareDocument { request, source })
+            .send(IndexWorkerCommand::PrepareDocument { request, source, cached_session })
             .map_err(|_| WorkspaceControllerError::CommandWorkerDisconnected)
     }
 
@@ -783,8 +794,15 @@ fn execute_workspace_command(
                 }
             }
         }
-        IndexWorkerCommand::PrepareDocument { request, source } => {
-            prepare_document_in_worker(workspace, catalog, request, source, event_sender);
+        IndexWorkerCommand::PrepareDocument { request, source, cached_session } => {
+            prepare_document_in_worker(
+                workspace,
+                catalog,
+                request,
+                source,
+                cached_session,
+                event_sender,
+            );
         }
         IndexWorkerCommand::UnlockEncryptedDocument { request, password, generation, source } => {
             unlock_encrypted_document_in_worker(
@@ -938,9 +956,24 @@ fn prepare_document_in_worker(
     catalog: &Catalog,
     request: DocumentLoadRequest,
     source: WorkspaceDocumentSource,
+    cached_session: Option<std::sync::Arc<textora_encryption::UnlockedNoteSession>>,
     event_sender: &WorkspaceEventSender,
 ) {
-    let result = (|| {
+    enum PreparedWorkspaceDocument {
+        Plain {
+            document: crate::editor_adapter::LoadedDocument,
+            metadata: notora_core::NoteEditorMetadata,
+            tags: Vec<notora_core::TagSummary>,
+        },
+        UnlockRequired {
+            title: String,
+            metadata: notora_core::NoteEditorMetadata,
+            tags: Vec<notora_core::TagSummary>,
+        },
+        Unlocked(crate::product::UnlockedWorkspaceDocument),
+    }
+
+    let result = (|| -> Result<PreparedWorkspaceDocument, String> {
         let DocumentIdentity::Note(note_id) = request.identity else {
             return Err("外部文档必须由外部文件会话加载".to_owned());
         };
@@ -954,18 +987,39 @@ fn prepare_document_in_worker(
             let serialized = std::fs::read(&path).map_err(|error| error.to_string())?;
             textora_encryption::inspect_encrypted_markdown(&serialized)
                 .map_err(|error| error.to_string())?;
+            if let Some(session) = cached_session
+                && let Ok(contents) =
+                    textora_encryption::decrypt_markdown_with_session(&serialized, &session)
+            {
+                let disk_revision = appkit_core::file_safety::capture_revision(&path)
+                    .map_err(|error| error.to_string())?;
+                return Ok(PreparedWorkspaceDocument::Unlocked(
+                    crate::product::UnlockedWorkspaceDocument {
+                        request,
+                        origin: crate::product::EncryptedDocumentUnlockOrigin::CachedSession,
+                        document: crate::editor_adapter::LoadedDocument {
+                            path,
+                            contents,
+                            disk_revision: Some(disk_revision),
+                        },
+                        session,
+                        metadata,
+                        tags,
+                    },
+                ));
+            }
             let title = path
                 .file_stem()
                 .map(|stem| stem.to_string_lossy().into_owned())
                 .ok_or_else(|| "加密笔记路径缺少文件名".to_owned())?;
-            return Ok((None, Some(title), metadata, tags));
+            return Ok(PreparedWorkspaceDocument::UnlockRequired { title, metadata, tags });
         }
         let document =
             crate::editor_adapter::load_document(&path).map_err(|error| error.to_string())?;
-        Ok((Some(document), None, metadata, tags))
+        Ok(PreparedWorkspaceDocument::Plain { document, metadata, tags })
     })();
     match result {
-        Ok((Some(document), None, metadata, tags)) => {
+        Ok(PreparedWorkspaceDocument::Plain { document, metadata, tags }) => {
             let _ = event_sender.send(WorkspaceCompletion::DocumentLoaded {
                 request,
                 document,
@@ -973,7 +1027,7 @@ fn prepare_document_in_worker(
                 tags,
             });
         }
-        Ok((None, Some(title), metadata, tags)) => {
+        Ok(PreparedWorkspaceDocument::UnlockRequired { title, metadata, tags }) => {
             let _ = event_sender.send(WorkspaceCompletion::EncryptedDocumentUnlockRequired {
                 request,
                 title,
@@ -981,11 +1035,8 @@ fn prepare_document_in_worker(
                 tags,
             });
         }
-        Ok(_) => {
-            let _ = event_sender.send(WorkspaceCompletion::DocumentLoadFailed {
-                request,
-                message: "文档加载结果不完整".to_owned(),
-            });
+        Ok(PreparedWorkspaceDocument::Unlocked(unlocked)) => {
+            let _ = event_sender.send(WorkspaceCompletion::EncryptedDocumentUnlocked { unlocked });
         }
         Err(message) => {
             let _ = event_sender.send(WorkspaceCompletion::DocumentLoadFailed { request, message });
@@ -1007,21 +1058,28 @@ fn unlock_encrypted_document_in_worker(
             return Err("外部文档不能作为工作区加密笔记解锁".to_owned());
         };
         let path = resolve_workspace_document_path(workspace, catalog, note_id, source)?;
+        let metadata = catalog
+            .note_editor_metadata(note_id)
+            .map_err(|error| error.to_string())?
+            .ok_or_else(|| format!("笔记 {note_id} 缺少编辑区 metadata"))?;
+        let tags = catalog.tags_for_note(note_id).map_err(|error| error.to_string())?;
         let serialized = std::fs::read(&path).map_err(|error| error.to_string())?;
         let disk_revision =
             appkit_core::file_safety::capture_revision(&path).map_err(|error| error.to_string())?;
         let unlocked = textora_encryption::unlock_encrypted_markdown(&serialized, password)
-            .map_err(|_| "密码错误或文件已损坏".to_owned())?;
+            .map_err(|_| "密码错误".to_owned())?;
         let (contents, session) = unlocked.into_parts();
         Ok(crate::product::UnlockedWorkspaceDocument {
             request,
-            generation,
+            origin: crate::product::EncryptedDocumentUnlockOrigin::Password { generation },
             document: crate::editor_adapter::LoadedDocument {
                 path,
                 contents,
                 disk_revision: Some(disk_revision),
             },
             session: std::sync::Arc::new(session),
+            metadata,
+            tags,
         })
     })();
     let completion = match result {
@@ -1858,7 +1916,7 @@ mod tests {
             identity: DocumentIdentity::Note(note_id),
             selection_generation: 7,
         };
-        controller.prepare_document(request).expect("worker should accept document loading");
+        controller.prepare_document(request, None).expect("worker should accept document loading");
 
         let deadline = Instant::now() + Duration::from_secs(2);
         loop {
@@ -1923,7 +1981,7 @@ mod tests {
             selection_generation: 9,
         };
         controller
-            .prepare_trashed_document(request)
+            .prepare_trashed_document(request, None)
             .expect("worker should accept trashed document loading");
         let canonical_trash_root = std::fs::canonicalize(directory.path().join(".notora/trash"))
             .expect("trash fixture root should canonicalize");

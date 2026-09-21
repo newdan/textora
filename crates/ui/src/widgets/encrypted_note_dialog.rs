@@ -15,7 +15,6 @@ const SUBMIT_BUTTON_ID: WidgetId = WidgetId(9_202);
 const CANCEL_BUTTON_ID: WidgetId = WidgetId(9_203);
 const PANEL_WIDTH_LOGICAL: f32 = 480.0;
 const CREATE_PANEL_HEIGHT_LOGICAL: f32 = 330.0;
-const UNLOCK_PANEL_HEIGHT_LOGICAL: f32 = 270.0;
 const PANEL_MARGIN_LOGICAL: f32 = 24.0;
 const FIELD_HEIGHT_LOGICAL: f32 = 34.0;
 const BUTTON_WIDTH_LOGICAL: f32 = crate::button::ButtonMetrics::text_width(4);
@@ -56,13 +55,6 @@ impl DialogControl {
 pub enum EncryptedNoteDialogMode {
     Create,
     ConflictCopy { file_name: String },
-    Unlock { title: String },
-}
-
-impl EncryptedNoteDialogMode {
-    fn requires_confirmation(&self) -> bool {
-        matches!(self, Self::Create | Self::ConflictCopy { .. })
-    }
 }
 
 #[derive(Clone, PartialEq)]
@@ -81,17 +73,6 @@ impl EncryptedNoteDialogInput {
             mode: EncryptedNoteDialogMode::Create,
             password: SensitiveText::new(String::new()),
             confirmation: Some(SensitiveText::new(String::new())),
-            submitting: false,
-            error_message: None,
-            failure_generation: 0,
-        }
-    }
-
-    pub fn unlock(title: String) -> Self {
-        Self {
-            mode: EncryptedNoteDialogMode::Unlock { title },
-            password: SensitiveText::new(String::new()),
-            confirmation: None,
             submitting: false,
             error_message: None,
             failure_generation: 0,
@@ -175,7 +156,6 @@ impl EncryptedNoteDialog {
         let submit_label = match input.mode {
             EncryptedNoteDialogMode::Create => "创建",
             EncryptedNoteDialogMode::ConflictCopy { .. } => "保存副本",
-            EncryptedNoteDialogMode::Unlock { .. } => "打开",
         };
         self.password_input.sync_text(input.password.expose());
         self.confirmation_input
@@ -183,8 +163,8 @@ impl EncryptedNoteDialog {
         self.submit_button.set_text(Some(submit_label.to_owned()));
         self.submit_button.set_enabled(input.can_submit());
 
-        let should_focus_password =
-            (open && !self.open) || input.failure_generation != self.observed_failure_generation;
+        let should_focus_password = (open && (!self.open || input.mode != self.input.mode))
+            || input.failure_generation != self.observed_failure_generation;
         self.input = input;
         if should_focus_password {
             self.set_focused_control(Some(DialogControl::Password));
@@ -205,12 +185,7 @@ impl EncryptedNoteDialog {
 
     pub fn set_rect(&mut self, overlay_rect: Rect, context: &mut LayoutCtx<'_>) {
         let margin = PANEL_MARGIN_LOGICAL * context.dpi;
-        let panel_height = match self.input.mode {
-            EncryptedNoteDialogMode::Create | EncryptedNoteDialogMode::ConflictCopy { .. } => {
-                CREATE_PANEL_HEIGHT_LOGICAL
-            }
-            EncryptedNoteDialogMode::Unlock { .. } => UNLOCK_PANEL_HEIGHT_LOGICAL,
-        };
+        let panel_height = CREATE_PANEL_HEIGHT_LOGICAL;
         let width =
             (PANEL_WIDTH_LOGICAL * context.dpi).min((overlay_rect.w - margin * 2.0).max(0.0));
         let height = (panel_height * context.dpi).min((overlay_rect.h - margin * 2.0).max(0.0));
@@ -275,7 +250,6 @@ impl EncryptedNoteDialog {
             EncryptedNoteDialogMode::ConflictCopy { file_name } => {
                 ("保存加密冲突副本", file_name.as_str())
             }
-            EncryptedNoteDialogMode::Unlock { title } => ("解锁加密笔记", title.as_str()),
         };
         context.text(
             left,
@@ -299,7 +273,7 @@ impl EncryptedNoteDialog {
             "密码",
         );
         self.password_input.paint(context);
-        if self.input.mode.requires_confirmation() {
+        if self.input.confirmation.is_some() {
             context.text(
                 left,
                 self.panel_rect.y + 150.0 * context.dpi,
@@ -415,7 +389,7 @@ impl EncryptedNoteDialog {
             WidgetAction::Control(ControlAction::TextCommitted {
                 id: PASSWORD_INPUT_ID,
                 value: TextPayload::Sensitive(_),
-            }) if self.input.mode.requires_confirmation() => {
+            }) if self.input.confirmation.is_some() => {
                 self.set_focused_control(Some(DialogControl::Confirmation));
                 None
             }
@@ -448,7 +422,7 @@ impl EncryptedNoteDialog {
 
     fn focusable_controls(&self) -> Vec<DialogControl> {
         let mut controls = vec![DialogControl::Password];
-        if self.input.mode.requires_confirmation() {
+        if self.input.confirmation.is_some() {
             controls.push(DialogControl::Confirmation);
         }
         if self.input.can_submit() {
@@ -469,7 +443,7 @@ impl EncryptedNoteDialog {
         if self.password_input.hit(px, py) {
             return Some(DialogControl::Password);
         }
-        if self.input.mode.requires_confirmation() && self.confirmation_input.hit(px, py) {
+        if self.input.confirmation.is_some() && self.confirmation_input.hit(px, py) {
             return Some(DialogControl::Confirmation);
         }
         if self.submit_button.hit(px, py) {
@@ -606,25 +580,6 @@ mod tests {
     }
 
     #[test]
-    fn unlock_mode_skips_confirmation_and_can_activate_submit_from_keyboard() {
-        let theme = crate::theme::test_theme();
-        let mut dialog = EncryptedNoteDialog::new(&theme);
-        let mut input = EncryptedNoteDialogInput::unlock("私密笔记".to_owned());
-        input.password = SensitiveText::new("valid-password".to_owned());
-        dialog.set_input(input, true);
-        let mut event_context = EventCtx::new(&theme, 1.0);
-
-        let _ =
-            dialog.route_event(&Event::KeyDown(KeyCode::Tab, Modifiers::NONE), &mut event_context);
-        assert_eq!(dialog.event_router.focused_target(), Some(DialogControl::Submit));
-        assert_eq!(
-            dialog
-                .route_event(&Event::KeyDown(KeyCode::Enter, Modifiers::NONE), &mut event_context,),
-            Some(EncryptedNoteDialogAction::Submit)
-        );
-    }
-
-    #[test]
     fn submit_button_keeps_pointer_capture_between_press_and_release() {
         let theme = crate::theme::test_theme();
         let mut dialog = EncryptedNoteDialog::new(&theme);
@@ -666,7 +621,7 @@ mod tests {
         layout_dialog(&mut dialog, &theme);
         focus_confirmation(&mut dialog, &theme);
 
-        dialog.set_input(EncryptedNoteDialogInput::unlock("私密笔记".to_owned()), true);
+        dialog.set_input(EncryptedNoteDialogInput::conflict_copy("副本.md".to_owned()), true);
         assert_eq!(dialog.event_router.focused_target(), Some(DialogControl::Password));
 
         dialog.set_input(EncryptedNoteDialogInput::create(), false);

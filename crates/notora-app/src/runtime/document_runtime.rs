@@ -172,6 +172,7 @@ pub(super) struct DocumentRuntime {
     #[cfg(test)]
     pub(super) document_registry: DocumentRegistry,
     unlocked_note_sessions: HashMap<TabId, Arc<textora_encryption::UnlockedNoteSession>>,
+    unlocked_workspace_note_sessions: HashMap<NoteId, Arc<textora_encryption::UnlockedNoteSession>>,
     encrypted_note_tabs: HashSet<TabId>,
     #[cfg(not(test))]
     autosave: AutoSaveScheduler<SystemAutoSaveClock>,
@@ -238,6 +239,7 @@ impl DocumentRuntime {
             runtime_lru,
             document_registry: DocumentRegistry::default(),
             unlocked_note_sessions: HashMap::new(),
+            unlocked_workspace_note_sessions: HashMap::new(),
             encrypted_note_tabs: HashSet::new(),
             autosave,
             save_failure_messages: HashMap::new(),
@@ -308,6 +310,17 @@ impl DocumentRuntime {
         tab_id: TabId,
     ) -> Option<Arc<textora_encryption::UnlockedNoteSession>> {
         self.unlocked_note_sessions.get(&tab_id).cloned()
+    }
+
+    pub(super) fn cached_unlocked_workspace_note_session(
+        &self,
+        note_id: NoteId,
+    ) -> Option<Arc<textora_encryption::UnlockedNoteSession>> {
+        self.unlocked_workspace_note_sessions.get(&note_id).cloned()
+    }
+
+    pub(super) fn discard_cached_unlocked_workspace_note_session(&mut self, note_id: NoteId) {
+        self.unlocked_workspace_note_sessions.remove(&note_id);
     }
 
     fn unregister_tab(&mut self, tab_id: TabId) {
@@ -670,7 +683,10 @@ impl DocumentRuntime {
             && let Some(tab_id) = self.document_registry.tab_for(request.identity)
         {
             self.encrypted_note_tabs.insert(tab_id);
-            self.unlocked_note_sessions.insert(tab_id, session);
+            self.unlocked_note_sessions.insert(tab_id, Arc::clone(&session));
+            if let DocumentIdentity::Note(note_id) = request.identity {
+                self.unlocked_workspace_note_sessions.insert(note_id, session);
+            }
             debug_assert!(self.unlocked_note_session(tab_id).is_some());
         }
         outcome

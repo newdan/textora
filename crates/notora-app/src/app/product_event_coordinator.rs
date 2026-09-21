@@ -20,6 +20,8 @@ pub(super) trait LoadedDocumentTarget: ProductActionTarget {
 
 /// Workspace 完成事件解释器所需的窄能力集合。
 pub(super) trait WorkspaceCompletionTarget: LoadedDocumentTarget {
+    fn discard_cached_encrypted_session(&mut self, _request: DocumentLoadRequest) {}
+
     fn accepts_encrypted_unlock(&self, request: DocumentLoadRequest, _generation: u64) -> bool {
         self.selection_matches(request)
     }
