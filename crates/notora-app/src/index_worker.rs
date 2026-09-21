@@ -31,6 +31,7 @@ pub(crate) enum IndexWorkerCommand {
     PrepareDocument {
         request: DocumentLoadRequest,
         source: WorkspaceDocumentSource,
+        cached_session: Option<std::sync::Arc<textora_encryption::UnlockedNoteSession>>,
     },
     UnlockEncryptedDocument {
         request: DocumentLoadRequest,

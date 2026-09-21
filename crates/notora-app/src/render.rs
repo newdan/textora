@@ -14,6 +14,9 @@ use ui::core::widget::{ControlAction, TextPayload, WidgetId};
 use ui::encrypted_note_dialog::{
     EncryptedNoteDialog, EncryptedNoteDialogAction, EncryptedNoteDialogInput,
 };
+use ui::encrypted_note_unlock::{
+    EncryptedNoteUnlock, EncryptedNoteUnlockAction, EncryptedNoteUnlockInput,
+};
 use ui::icon::draw_icon;
 use ui::mindmap_style_panel::{
     MindmapStylePanelInput, MindmapStylePanelWidget, PANEL_WIDTH_LOGICAL,
@@ -178,6 +181,7 @@ pub struct NotoraRenderModel {
     pub settings_overlay: SettingsOverlayInput,
     pub new_workspace_dialog: Option<NewWorkspaceDialogInput>,
     pub encrypted_note_dialog: Option<EncryptedNoteDialogInput>,
+    pub encrypted_note_unlock: Option<EncryptedNoteUnlockInput>,
     pub confirmation: Option<ConfirmationOverlayInput>,
     pub show_new_document_menu: bool,
     pub new_note_control: NewNoteControlState,
@@ -197,6 +201,7 @@ pub enum EditorPaneState {
     #[default]
     Empty,
     Active,
+    EncryptedUnlock,
 }
 
 impl NotoraRenderModel {
@@ -420,6 +425,7 @@ impl NotoraRenderModel {
                 WorkspaceCreationState::Inactive => None,
             },
             encrypted_note_dialog: encrypted_note_dialog_input(state),
+            encrypted_note_unlock: encrypted_note_unlock_input(&state.encrypted_note_unlock),
             confirmation: confirmation_overlay_input(state.layout.overlay),
             show_new_document_menu: state.layout.overlay == OverlayState::NewDocumentMenu,
             new_note_control: new_note_control_state(selected_scope, state.workspace_root),
@@ -1130,6 +1136,9 @@ pub struct NotoraShell {
     encrypted_note_dialog: Option<EncryptedNoteDialog>,
     encrypted_note_dialog_input: EncryptedNoteDialogInput,
     encrypted_note_dialog_open: bool,
+    encrypted_note_unlock: Option<EncryptedNoteUnlock>,
+    encrypted_note_unlock_input: EncryptedNoteUnlockInput,
+    encrypted_note_unlock_open: bool,
     navigation_actions: HashMap<TreeRowKey, NotoraAction>,
     navigation_trailing_actions: HashMap<(TreeRowKey, TreeRowActionKey), NotoraAction>,
     navigation_expansion_paths: HashMap<TreeRowKey, std::path::PathBuf>,
@@ -1210,6 +1219,9 @@ impl NotoraShell {
             encrypted_note_dialog: None,
             encrypted_note_dialog_input: EncryptedNoteDialogInput::create(),
             encrypted_note_dialog_open: false,
+            encrypted_note_unlock: None,
+            encrypted_note_unlock_input: EncryptedNoteUnlockInput::new(String::new()),
+            encrypted_note_unlock_open: false,
             navigation_actions: HashMap::new(),
             navigation_trailing_actions: HashMap::new(),
             navigation_expansion_paths: HashMap::new(),
@@ -1256,6 +1268,7 @@ impl NotoraShell {
         } else {
             match focus_target {
                 FocusTarget::NavigationSearch | FocusTarget::EditorTitle => Some(focus_target),
+                FocusTarget::Editor if self.encrypted_note_unlock_open => Some(focus_target),
                 FocusTarget::NavigationTree if self.navigation_tree.input().editor.is_some() => {
                     Some(FocusTarget::NavigationTree)
                 }
@@ -1279,6 +1292,11 @@ impl NotoraShell {
         self.navigation_tree.set_keyboard_focus(
             (focus_target == FocusTarget::NavigationTree).then_some(NAVIGATION_TREE_ID),
         );
+        if let Some(unlock) = self.encrypted_note_unlock.as_mut() {
+            unlock.set_keyboard_focus(
+                focus_target == FocusTarget::Editor && self.encrypted_note_unlock_open,
+            );
+        }
         self.apply_text_cursor_visibility();
     }
 
@@ -1336,7 +1354,10 @@ impl NotoraShell {
                 .or_else(|| {
                     self.new_workspace_dialog.as_ref().and_then(NewWorkspaceDialog::ime_cursor_rect)
                 }),
-            FocusTarget::CardList | FocusTarget::Editor => None,
+            FocusTarget::Editor => {
+                self.encrypted_note_unlock.as_ref().and_then(EncryptedNoteUnlock::ime_cursor_rect)
+            }
+            FocusTarget::CardList => None,
         }
     }
 
@@ -1416,6 +1437,11 @@ impl NotoraShell {
         self.encrypted_note_dialog_input =
             model.encrypted_note_dialog.clone().unwrap_or_else(EncryptedNoteDialogInput::create);
         self.encrypted_note_dialog_open = model.encrypted_note_dialog.is_some();
+        self.encrypted_note_unlock_input = model
+            .encrypted_note_unlock
+            .clone()
+            .unwrap_or_else(|| EncryptedNoteUnlockInput::new(String::new()));
+        self.encrypted_note_unlock_open = model.encrypted_note_unlock.is_some();
         self.confirmation_action =
             model.confirmation.as_ref().map(|input| input.confirm_action.clone());
         self.new_document_menu_open = model.show_new_document_menu;
@@ -1622,6 +1648,15 @@ impl NotoraShell {
             } else if let Some(dialog) = self.encrypted_note_dialog.as_mut() {
                 dialog.set_input(EncryptedNoteDialogInput::create(), false);
             }
+            if self.encrypted_note_unlock_open {
+                let unlock = self
+                    .encrypted_note_unlock
+                    .get_or_insert_with(|| EncryptedNoteUnlock::new(context.theme));
+                unlock.set_input(self.encrypted_note_unlock_input.clone(), true);
+                unlock.set_rect(layout.editor_body_rect, context);
+            } else if let Some(unlock) = self.encrypted_note_unlock.as_mut() {
+                unlock.set_input(EncryptedNoteUnlockInput::new(String::new()), false);
+            }
         });
         frame.with_underlay_paint_context(|context| {
             let application_theme = context.theme.application_theme();
@@ -1710,6 +1745,13 @@ impl NotoraShell {
                 })?;
             }
             EditorPaneState::Active => frame.paint_editor(layout.editor_body_rect)?,
+            EditorPaneState::EncryptedUnlock => {
+                frame.paint_editor_with(layout.editor_body_rect, |context| {
+                    if let Some(unlock) = self.encrypted_note_unlock.as_ref() {
+                        unlock.paint(context);
+                    }
+                })?;
+            }
         }
         frame.with_paint_context(|context| self.editor_pane.paint_overlay(context));
         if self.mindmap_style_panel_open {
@@ -2256,6 +2298,14 @@ impl NotoraShell {
         focus_target: FocusTarget,
         event_context: &mut EventCtx,
     ) -> NotoraEventRoute {
+        if focus_target == FocusTarget::Editor && self.encrypted_note_unlock_open {
+            let action = self
+                .encrypted_note_unlock
+                .as_mut()
+                .and_then(|unlock| unlock.route_event(event, event_context))
+                .map(encrypted_note_unlock_action_to_notora_action);
+            return NotoraEventRoute::consumed(action);
+        }
         if matches!(focus_target, FocusTarget::EditorTitle | FocusTarget::EditorTag)
             && let Some(widget_action) = self.editor_pane.route_event(event, event_context)
         {
@@ -2317,6 +2367,15 @@ impl NotoraShell {
         event: &Event,
         event_context: &mut EventCtx,
     ) -> Option<NotoraEventRoute> {
+        if self.encrypted_note_unlock_open
+            && let Some(unlock) = self.encrypted_note_unlock.as_mut()
+            && event_pointer_position(event).is_some_and(|(px, py)| unlock.contains(px, py))
+        {
+            let action = unlock
+                .route_event(event, event_context)
+                .map(encrypted_note_unlock_action_to_notora_action);
+            return Some(NotoraEventRoute::consumed(action));
+        }
         if let Some(action) = shell_layout_action(
             event,
             self.compact_navigation_rect,
@@ -2891,6 +2950,17 @@ fn encrypted_note_dialog_action_to_notora_action(
     }
 }
 
+fn encrypted_note_unlock_action_to_notora_action(
+    action: EncryptedNoteUnlockAction,
+) -> NotoraAction {
+    match action {
+        EncryptedNoteUnlockAction::PasswordChanged(password) => {
+            NotoraAction::EncryptedNotePasswordChanged(password)
+        }
+        EncryptedNoteUnlockAction::Submit => NotoraAction::EncryptedNoteDialogSubmitRequested,
+    }
+}
+
 fn new_directory_action(enabled: bool) -> TreeRowActionInput {
     TreeRowActionInput {
         key: NEW_DIRECTORY_ACTION_KEY,
@@ -2924,7 +2994,6 @@ fn open_workspace_action() -> TreeRowActionInput {
 fn encrypted_note_dialog_input(state: &NotoraState) -> Option<EncryptedNoteDialogInput> {
     encrypted_conflict_copy_dialog_input(&state.encrypted_conflict_copy)
         .or_else(|| encrypted_note_creation_dialog_input(&state.encrypted_note_creation))
-        .or_else(|| encrypted_note_unlock_dialog_input(&state.encrypted_note_unlock))
 }
 
 fn encrypted_conflict_copy_dialog_input(
@@ -2998,9 +3067,9 @@ fn encrypted_note_creation_dialog_input(
     }
 }
 
-fn encrypted_note_unlock_dialog_input(
+fn encrypted_note_unlock_input(
     state: &EncryptedNoteUnlockState,
-) -> Option<EncryptedNoteDialogInput> {
+) -> Option<EncryptedNoteUnlockInput> {
     match state {
         EncryptedNoteUnlockState::Inactive => None,
         EncryptedNoteUnlockState::Editing {
@@ -3009,22 +3078,16 @@ fn encrypted_note_unlock_dialog_input(
             error_message,
             failure_generation,
             ..
-        } => Some(EncryptedNoteDialogInput {
-            mode: ui::encrypted_note_dialog::EncryptedNoteDialogMode::Unlock {
-                title: title.clone(),
-            },
+        } => Some(EncryptedNoteUnlockInput {
+            title: title.clone(),
             password: password.clone(),
-            confirmation: None,
             submitting: false,
             error_message: error_message.clone(),
             failure_generation: *failure_generation,
         }),
-        EncryptedNoteUnlockState::Submitting { title, .. } => Some(EncryptedNoteDialogInput {
-            mode: ui::encrypted_note_dialog::EncryptedNoteDialogMode::Unlock {
-                title: title.clone(),
-            },
+        EncryptedNoteUnlockState::Submitting { title, .. } => Some(EncryptedNoteUnlockInput {
+            title: title.clone(),
             password: empty_sensitive_text(),
-            confirmation: None,
             submitting: true,
             error_message: None,
             failure_generation: 0,
@@ -3534,6 +3597,43 @@ mod tests {
     use crate::action::CardQuery;
     use crate::state::CardPageState;
     use notora_core::{CatalogCard, DocumentIdentity, DocumentKind, NavigationScope, NoteId};
+
+    #[test]
+    fn encrypted_unlock_is_rendered_inline_instead_of_as_a_product_dialog() {
+        let note_id = NoteId::generate();
+        let request = crate::action::DocumentLoadRequest {
+            identity: DocumentIdentity::Note(note_id),
+            selection_generation: 1,
+        };
+        let mut state = NotoraState::default();
+        state.library.selected_card = Some(request.identity);
+        state.library.selected_document_generation = request.selection_generation;
+        let _ = state.reduce(NotoraAction::EncryptedNoteUnlockRequired {
+            request,
+            title: "私密笔记".to_owned(),
+            metadata: notora_core::NoteEditorMetadata {
+                note_id,
+                created_at: SystemTime::UNIX_EPOCH,
+                modified_at: SystemTime::UNIX_EPOCH,
+                encryption: notora_core::NoteEncryption::Encrypted,
+                title_initialization: notora_core::TitleInitialization::Independent,
+                file_name_binding: notora_core::NoteFileNameBinding::TitleBound {
+                    disambiguator: 1,
+                },
+                title_revision: 0,
+            },
+            tags: Vec::new(),
+        });
+
+        let model = NotoraRenderModel::from_state(&state);
+
+        assert!(model.encrypted_note_dialog.is_none());
+        assert_eq!(
+            model.encrypted_note_unlock.as_ref().map(|input| input.title.as_str()),
+            Some("私密笔记")
+        );
+        assert_eq!(state.layout.overlay, OverlayState::None);
+    }
 
     #[test]
     fn collapsed_navigation_does_not_paint_search_over_the_expand_button() {

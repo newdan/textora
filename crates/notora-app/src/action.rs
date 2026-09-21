@@ -260,6 +260,7 @@ pub enum NotoraAction {
         metadata: NoteEditorMetadata,
         tags: Vec<TagSummary>,
     },
+    EncryptedNoteUnlockCompleted,
     EncryptedConflictCopyRequired {
         identity: DocumentIdentity,
         target_path: PathBuf,

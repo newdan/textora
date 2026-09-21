@@ -627,6 +627,11 @@ impl NotoraState {
             NotoraAction::EncryptedNoteUnlockRequired { request, title, metadata, tags } => {
                 self.require_encrypted_note_unlock(request, title, metadata, tags)
             }
+            NotoraAction::EncryptedNoteUnlockCompleted => {
+                self.encrypted_note_unlock = EncryptedNoteUnlockState::Inactive;
+                self.layout.focus_target = FocusTarget::Editor;
+                vec![NotoraEffect::Redraw]
+            }
             NotoraAction::EncryptedConflictCopyRequired { identity, target_path } => {
                 self.require_encrypted_conflict_copy(identity, target_path)
             }
@@ -1214,8 +1219,8 @@ impl NotoraState {
             failure_generation: 0,
             next_generation: 1,
         };
-        self.layout.overlay = OverlayState::EncryptedNoteDialog;
-        self.layout.focus_target = FocusTarget::Overlay;
+        self.layout.overlay = OverlayState::None;
+        self.layout.focus_target = FocusTarget::Editor;
         vec![NotoraEffect::Redraw]
     }
 
@@ -2871,7 +2876,7 @@ mod tests {
     }
 
     #[test]
-    fn encrypted_note_unlock_closes_cleanly_on_cancel_or_document_selection() {
+    fn encrypted_note_unlock_is_inline_and_closes_on_completion_or_document_selection() {
         use ui::core::widget::SensitiveText;
 
         let note_id = NoteId::generate();
@@ -2899,7 +2904,8 @@ mod tests {
             },
             tags: Vec::new(),
         });
-        assert_eq!(state.layout.overlay, OverlayState::EncryptedNoteDialog);
+        assert_eq!(state.layout.overlay, OverlayState::None);
+        assert_eq!(state.layout.focus_target, FocusTarget::Editor);
         let _ = state.reduce(NotoraAction::EncryptedNotePasswordChanged(SensitiveText::new(
             "abc123".to_owned(),
         )));
@@ -2924,9 +2930,10 @@ mod tests {
             } if pending_request == request
         ));
 
-        let _ = state.reduce(NotoraAction::OverlayDismissed);
-
+        assert!(matches!(state.encrypted_note_unlock, EncryptedNoteUnlockState::Submitting { .. }));
+        let _ = state.reduce(NotoraAction::EncryptedNoteUnlockCompleted);
         assert_eq!(state.encrypted_note_unlock, EncryptedNoteUnlockState::Inactive);
+        assert_eq!(state.layout.focus_target, FocusTarget::Editor);
     }
 
     #[test]

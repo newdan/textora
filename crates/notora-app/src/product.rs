@@ -31,17 +31,27 @@ pub struct WorkspaceCompletionEnvelope {
 #[derive(Clone, Debug)]
 pub struct UnlockedWorkspaceDocument {
     pub request: crate::action::DocumentLoadRequest,
-    pub generation: u64,
+    pub origin: EncryptedDocumentUnlockOrigin,
     pub document: crate::editor_adapter::LoadedDocument,
     pub session: std::sync::Arc<textora_encryption::UnlockedNoteSession>,
+    pub metadata: notora_core::NoteEditorMetadata,
+    pub tags: Vec<notora_core::TagSummary>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum EncryptedDocumentUnlockOrigin {
+    Password { generation: u64 },
+    CachedSession,
 }
 
 impl PartialEq for UnlockedWorkspaceDocument {
     fn eq(&self, other: &Self) -> bool {
         self.request == other.request
-            && self.generation == other.generation
+            && self.origin == other.origin
             && self.document == other.document
             && std::sync::Arc::ptr_eq(&self.session, &other.session)
+            && self.metadata == other.metadata
+            && self.tags == other.tags
     }
 }
 

@@ -112,6 +112,14 @@ fn resolve_pointer_cursor(
     product_cursor.or(editor_cursor).unwrap_or(winit::window::CursorIcon::Default)
 }
 
+fn product_ime_allowed(state: &crate::NotoraState) -> bool {
+    !(state.layout.focus_target == crate::FocusTarget::Editor
+        && matches!(
+            state.encrypted_note_unlock,
+            crate::state::EncryptedNoteUnlockState::Editing { .. }
+        ))
+}
+
 fn choose_workspace_directory() -> Option<std::path::PathBuf> {
     rfd::FileDialog::new().set_title("设置工作区根目录").pick_folder()
 }
@@ -626,6 +634,10 @@ impl NotoraRuntime {
             let _ = self.update_editor_preedit(String::new(), None);
         }
         self.frame_runtime.synchronize_focus(focus_target, Instant::now());
+        let ime_allowed = product_ime_allowed(self.action_runtime.state());
+        if let Some(window) = self.document_runtime.editor().window() {
+            window.set_ime_allowed(ime_allowed);
+        }
     }
 
     fn active_editor_matches_selection(&self) -> bool {
@@ -1948,6 +1960,12 @@ impl WorkspaceBootstrapTarget for NotoraRuntime {
 }
 
 impl WorkspaceCompletionTarget for NotoraRuntime {
+    fn discard_cached_encrypted_session(&mut self, request: DocumentLoadRequest) {
+        if let DocumentIdentity::Note(note_id) = request.identity {
+            self.document_runtime.discard_cached_unlocked_workspace_note_session(note_id);
+        }
+    }
+
     fn accepts_encrypted_unlock(&self, request: DocumentLoadRequest, generation: u64) -> bool {
         self.selection_matches(request)
             && matches!(
@@ -2429,6 +2447,9 @@ impl NotoraRuntime {
         if self.document_runtime.tab_for(identity) != Some(tab_id) {
             return;
         }
+        if let DocumentIdentity::Note(note_id) = identity {
+            self.document_runtime.discard_cached_unlocked_workspace_note_session(note_id);
+        }
         self.close_document_runtime(identity);
         self.dispatch_action(NotoraAction::SaveConflictResolved { identity });
         self.dispatch_action(NotoraAction::CardSelected(identity));
@@ -2480,12 +2501,18 @@ impl NotoraRuntime {
             self.apply_editor_outcome(outcome);
             return Vec::new();
         }
+        let cached_session = match identity {
+            DocumentIdentity::Note(note_id) => {
+                self.document_runtime.cached_unlocked_workspace_note_session(note_id)
+            }
+            DocumentIdentity::ExternalFile(_) => None,
+        };
         let preparation = if self.action_runtime.state().library.navigation_scope
             == notora_core::NavigationScope::Trash
         {
-            self.workspace_controller.prepare_trashed_document(request)
+            self.workspace_controller.prepare_trashed_document(request, cached_session)
         } else {
-            self.workspace_controller.prepare_document(request)
+            self.workspace_controller.prepare_document(request, cached_session)
         };
         preparation
             .err()
@@ -3318,8 +3345,8 @@ mod tests {
     };
     use super::frame_runtime::{FontSystemPreparation, StartupMilestone};
     use super::{
-        NotoraRuntime, SettingsPersistenceState, StartupTrace, resolve_pointer_cursor,
-        workspace_relative_directory,
+        NotoraRuntime, SettingsPersistenceState, StartupTrace, product_ime_allowed,
+        resolve_pointer_cursor, workspace_relative_directory,
     };
     use crate::action::{
         DocumentLoadRequest, MetadataMutation, NotoraAction, WorkspaceTransitionRequest,
@@ -3346,6 +3373,39 @@ mod tests {
         );
         assert_eq!(resolve_pointer_cursor(None, Some(CursorIcon::Grab)), CursorIcon::Grab);
         assert_eq!(resolve_pointer_cursor(None, None), CursorIcon::Default);
+    }
+
+    #[test]
+    fn inline_encrypted_password_focus_disables_ime_until_focus_leaves() {
+        let note_id = notora_core::NoteId::generate();
+        let request = DocumentLoadRequest {
+            identity: DocumentIdentity::Note(note_id),
+            selection_generation: 1,
+        };
+        let mut state = crate::NotoraState::default();
+        state.library.selected_card = Some(request.identity);
+        state.library.selected_document_generation = request.selection_generation;
+        let _ = state.reduce(NotoraAction::EncryptedNoteUnlockRequired {
+            request,
+            title: "私密笔记".to_owned(),
+            metadata: notora_core::NoteEditorMetadata {
+                note_id,
+                created_at: std::time::SystemTime::UNIX_EPOCH,
+                modified_at: std::time::SystemTime::UNIX_EPOCH,
+                encryption: notora_core::NoteEncryption::Encrypted,
+                title_initialization: notora_core::TitleInitialization::Independent,
+                file_name_binding: notora_core::NoteFileNameBinding::TitleBound {
+                    disambiguator: 1,
+                },
+                title_revision: 0,
+            },
+            tags: Vec::new(),
+        });
+
+        assert!(!product_ime_allowed(&state));
+
+        state.layout.focus_target = FocusTarget::CardList;
+        assert!(product_ime_allowed(&state));
     }
 
     pub(super) fn app() -> NotoraRuntime {
@@ -3546,7 +3606,7 @@ mod tests {
                 crate::state::EncryptedNoteUnlockState::Editing {
                     error_message: Some(message),
                     ..
-                } if message == "密码错误或文件已损坏"
+                } if message == "密码错误"
             ) {
                 break;
             }
@@ -3578,6 +3638,42 @@ mod tests {
                 .text,
             ""
         );
+    }
+
+    #[test]
+    fn encrypted_note_reopens_from_the_process_cache_without_another_password() {
+        let _encryption_test_guard = encryption_runtime_test_guard();
+        let workspace = tempfile::tempdir().expect("workspace fixture should exist");
+        let mut app = app();
+        let (encrypted_identity, encrypted_tab_id) =
+            create_encrypted_note_for_test(&mut app, workspace.path(), "process-cache-password");
+
+        let _ = app.document_runtime.editor_mut().close_for_product(encrypted_tab_id);
+        app.document_runtime.remove_tab(encrypted_tab_id);
+        assert_eq!(app.document_runtime.tab_for(encrypted_identity), None);
+        assert!(app.document_runtime.unlocked_note_session(encrypted_tab_id).is_none());
+
+        app.dispatch_action(NotoraAction::CardSelected(encrypted_identity));
+        let deadline = Instant::now() + Duration::from_secs(3);
+        let reopened_tab_id = loop {
+            app.drain_product_events();
+            if let Some(tab_id) = app.document_runtime.tab_for(encrypted_identity) {
+                break tab_id;
+            }
+            assert!(Instant::now() < deadline, "cached encrypted note should reopen promptly");
+            assert!(matches!(
+                app.action_runtime.state().encrypted_note_unlock,
+                crate::state::EncryptedNoteUnlockState::Inactive
+            ));
+            std::thread::sleep(Duration::from_millis(10));
+        };
+
+        assert_ne!(reopened_tab_id, encrypted_tab_id);
+        assert!(matches!(
+            app.action_runtime.state().encrypted_note_unlock,
+            crate::state::EncryptedNoteUnlockState::Inactive
+        ));
+        assert!(app.document_runtime.unlocked_note_session(reopened_tab_id).is_some());
     }
 
     fn active_editor_input_context() -> EditorInputContext {
