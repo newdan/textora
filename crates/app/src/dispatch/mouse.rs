@@ -12,7 +12,8 @@ use ui::plugin::{
 };
 use winit::event::ElementState;
 
-const PLUGIN_SELECTION_DRAG_THRESHOLD_PX: f32 = 5.0;
+const PLUGIN_SELECTION_DRAG_THRESHOLD_LOGICAL_PX: f32 = 5.0;
+const CANVAS_DRAG_THRESHOLD_PX: f32 = 5.0;
 
 fn editor_input_context(app: &App) -> EditorInputContext {
     let editor_focus =
@@ -44,17 +45,23 @@ fn expanded_wysiwyg_hit_point(
     (offset_x + cursor_x, offset_y + cursor_y + cursor_height * 0.5)
 }
 
-fn plugin_selection_drag_started(mouse: &crate::mouse::MouseState, px: f32, py: f32) -> bool {
+fn plugin_selection_drag_started(
+    mouse: &crate::mouse::MouseState,
+    px: f32,
+    py: f32,
+    scale_factor: f64,
+) -> bool {
     let dx = px - mouse.last_click_pos.0;
     let dy = py - mouse.last_click_pos.1;
-    let threshold_sq = PLUGIN_SELECTION_DRAG_THRESHOLD_PX * PLUGIN_SELECTION_DRAG_THRESHOLD_PX;
+    let threshold = PLUGIN_SELECTION_DRAG_THRESHOLD_LOGICAL_PX * scale_factor as f32;
+    let threshold_sq = threshold * threshold;
     dx * dx + dy * dy > threshold_sq
 }
 
 fn canvas_drag_started(session: &crate::mouse::CanvasDragSession, px: f32, py: f32) -> bool {
     let dx = px - session.pressed_at.0;
     let dy = py - session.pressed_at.1;
-    let threshold_sq = PLUGIN_SELECTION_DRAG_THRESHOLD_PX * PLUGIN_SELECTION_DRAG_THRESHOLD_PX;
+    let threshold_sq = CANVAS_DRAG_THRESHOLD_PX * CANVAS_DRAG_THRESHOLD_PX;
     dx * dx + dy * dy > threshold_sq
 }
 
@@ -515,7 +522,12 @@ impl App {
         let is_custom_renderer = self.active_handles_own_rendering();
         if is_preview {
             if self.mouse.is_down {
-                if !plugin_selection_drag_started(&self.mouse, px, py) {
+                if !plugin_selection_drag_started(
+                    &self.mouse,
+                    px,
+                    py,
+                    self.editor_runtime.scale_factor(),
+                ) {
                     return AppEffect::NONE;
                 }
                 let render_bounds = self.plugin_render_bounds();
@@ -572,7 +584,12 @@ impl App {
                 return AppEffect::REDRAW;
             }
             if self.mouse.is_down {
-                if !plugin_selection_drag_started(&self.mouse, px, py) {
+                if !plugin_selection_drag_started(
+                    &self.mouse,
+                    px,
+                    py,
+                    self.editor_runtime.scale_factor(),
+                ) {
                     return AppEffect::NONE;
                 }
                 let selection_anchor = self

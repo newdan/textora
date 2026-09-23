@@ -2346,30 +2346,45 @@ fn preview_mouse_hit_test_uses_plugin_render_bounds_origin() {
 
 #[test]
 fn preview_tiny_mouse_move_does_not_start_selection() {
-    let state = std::rc::Rc::new(std::cell::RefCell::new(RecordingPreviewState {
-        hit_test_position: Some((0, 0)),
-        ..RecordingPreviewState::default()
-    }));
-    let mut app = App::new(None);
-    let doc = DocumentView::new(vec!["hello world".to_string()], 80, 10.0);
-    app.push_entry_for_test(doc, Box::new(RecordingPreviewPlugin::new(state.clone())));
-    app.switch_workspace_for_test(0);
+    for scale_factor in [1.0, 1.5, 2.0, 3.0] {
+        let state = std::rc::Rc::new(std::cell::RefCell::new(RecordingPreviewState {
+            hit_test_position: Some((0, 0)),
+            ..RecordingPreviewState::default()
+        }));
+        let mut app = App::new(None);
+        app.update_scale_factor(scale_factor);
+        let doc = DocumentView::new(vec!["hello world".to_string()], 80, 10.0);
+        app.push_entry_for_test(doc, Box::new(RecordingPreviewPlugin::new(state.clone())));
+        app.switch_workspace_for_test(0);
 
-    let bounds = app.plugin_render_bounds();
-    let click_x = bounds.x + 10.0;
-    let click_y = bounds.y + 10.0;
-    let tiny_drag_x = click_x + 1.0;
-    app.dispatch_editor_mouse_input(winit::event::ElementState::Pressed, click_x, click_y, None);
-    state.borrow_mut().hit_test_position = Some((0, 1));
+        let bounds = app.plugin_render_bounds();
+        let click_x = bounds.x + 10.0;
+        let click_y = bounds.y + 10.0;
+        let tiny_drag_x = click_x + 4.0 * scale_factor as f32;
+        app.dispatch_editor_mouse_input(
+            winit::event::ElementState::Pressed,
+            click_x,
+            click_y,
+            None,
+        );
+        state.borrow_mut().hit_test_position = Some((0, 1));
 
-    app.dispatch_editor_cursor_moved(tiny_drag_x, click_y, None);
+        app.dispatch_editor_cursor_moved(tiny_drag_x, click_y, None);
 
-    assert!(
-        !app.active_tab_session()
-            .expect("active runtime session")
-            .query_bool(ui::plugin::PluginQuery::HasSelection),
-        "tiny preview mouse movement should not start text selection"
-    );
+        assert!(
+            !app.active_tab_session()
+                .expect("active runtime session")
+                .query_bool(ui::plugin::PluginQuery::HasSelection),
+            "tiny preview mouse movement should not start text selection"
+        );
+        app.dispatch_editor_cursor_moved(click_x + 6.0 * scale_factor as f32, click_y, None);
+        assert!(
+            app.active_tab_session()
+                .expect("active runtime session")
+                .query_bool(ui::plugin::PluginQuery::HasSelection),
+            "deliberate preview dragging should still select text at every scale"
+        );
+    }
 }
 
 #[test]
@@ -2423,84 +2438,100 @@ fn wysiwyg_missing_projection_keeps_cursor_and_selection_unchanged() {
 
 #[test]
 fn wysiwyg_tiny_mouse_move_after_click_does_not_create_selection() {
-    let state = std::rc::Rc::new(std::cell::RefCell::new(RecordingWysiwygState {
-        hit_test_byte: Some(2),
-        ..RecordingWysiwygState::default()
-    }));
-    let mut app = App::new(None);
-    let doc = DocumentView::new(vec!["abcdef".to_string()], 80, 10.0);
-    app.push_entry_for_test(doc, Box::new(RecordingWysiwygPlugin::new(state.clone())));
-    app.switch_workspace_for_test(0);
+    for scale_factor in [1.0, 1.5, 2.0, 3.0] {
+        let state = std::rc::Rc::new(std::cell::RefCell::new(RecordingWysiwygState {
+            hit_test_byte: Some(2),
+            ..RecordingWysiwygState::default()
+        }));
+        let mut app = App::new(None);
+        app.update_scale_factor(scale_factor);
+        let doc = DocumentView::new(vec!["abcdef".to_string()], 80, 10.0);
+        app.push_entry_for_test(doc, Box::new(RecordingWysiwygPlugin::new(state.clone())));
+        app.switch_workspace_for_test(0);
 
-    let bounds = app.plugin_render_bounds();
-    let click_x = bounds.x + 10.0;
-    let click_y = bounds.y + 10.0;
-    app.dispatch_editor_mouse_input(winit::event::ElementState::Pressed, click_x, click_y, None);
-    state.borrow_mut().hit_test_byte = Some(3);
+        let bounds = app.plugin_render_bounds();
+        let click_x = bounds.x + 10.0;
+        let click_y = bounds.y + 10.0;
+        app.dispatch_editor_mouse_input(
+            winit::event::ElementState::Pressed,
+            click_x,
+            click_y,
+            None,
+        );
+        state.borrow_mut().hit_test_byte = Some(3);
 
-    app.dispatch_editor_cursor_moved(click_x + 1.0, click_y, None);
-    app.dispatch_editor_mouse_input(
-        winit::event::ElementState::Released,
-        click_x + 1.0,
-        click_y,
-        None,
-    );
+        app.dispatch_editor_cursor_moved(click_x + 4.0 * scale_factor as f32, click_y, None);
+        app.dispatch_editor_mouse_input(
+            winit::event::ElementState::Released,
+            click_x + 4.0 * scale_factor as f32,
+            click_y,
+            None,
+        );
 
-    let active_entry = app.active_tab_session().expect("active entry");
-    assert_eq!(
-        active_entry.selection_range(),
-        None,
-        "tiny WYSIWYG mouse movement after a click should not create a document selection"
-    );
+        let active_entry = app.active_tab_session().expect("active entry");
+        assert_eq!(
+            active_entry.selection_range(),
+            None,
+            "tiny WYSIWYG mouse movement after a click should not create a document selection"
+        );
 
-    let recorded = state.borrow();
-    assert_eq!(
-        recorded.sel_anchor_byte, None,
-        "mouse release should clear the empty WYSIWYG selection anchor"
-    );
-    assert_eq!(
-        recorded.sel_cursor_byte, None,
-        "mouse release should clear the empty WYSIWYG selection cursor"
-    );
+        let recorded = state.borrow();
+        assert_eq!(
+            recorded.sel_anchor_byte, None,
+            "mouse release should clear the empty WYSIWYG selection anchor"
+        );
+        assert_eq!(
+            recorded.sel_cursor_byte, None,
+            "mouse release should clear the empty WYSIWYG selection cursor"
+        );
+    }
 }
 
 #[test]
 fn wysiwyg_backward_drag_keeps_plugin_selection_anchor() {
-    let state = std::rc::Rc::new(std::cell::RefCell::new(RecordingWysiwygState {
-        hit_test_byte: Some(8),
-        ..RecordingWysiwygState::default()
-    }));
-    let mut app = App::new(None);
-    let doc = DocumentView::new(vec!["abc：def".to_string()], 80, 10.0);
-    app.push_entry_for_test(doc, Box::new(RecordingWysiwygPlugin::new(state.clone())));
-    app.switch_workspace_for_test(0);
+    for scale_factor in [1.0, 1.5, 2.0, 3.0] {
+        let state = std::rc::Rc::new(std::cell::RefCell::new(RecordingWysiwygState {
+            hit_test_byte: Some(8),
+            ..RecordingWysiwygState::default()
+        }));
+        let mut app = App::new(None);
+        app.update_scale_factor(scale_factor);
+        let doc = DocumentView::new(vec!["abc：def".to_string()], 80, 10.0);
+        app.push_entry_for_test(doc, Box::new(RecordingWysiwygPlugin::new(state.clone())));
+        app.switch_workspace_for_test(0);
 
-    let bounds = app.plugin_render_bounds();
-    let click_x = bounds.x + 10.0;
-    let click_y = bounds.y + 10.0;
-    app.dispatch_editor_mouse_input(winit::event::ElementState::Pressed, click_x, click_y, None);
-    state.borrow_mut().hit_test_byte = Some(3);
+        let bounds = app.plugin_render_bounds();
+        let click_x = bounds.x + 10.0;
+        let click_y = bounds.y + 10.0;
+        app.dispatch_editor_mouse_input(
+            winit::event::ElementState::Pressed,
+            click_x,
+            click_y,
+            None,
+        );
+        state.borrow_mut().hit_test_byte = Some(3);
 
-    app.dispatch_editor_cursor_moved(click_x - 20.0, click_y, None);
-    app.dispatch_editor_mouse_input(
-        winit::event::ElementState::Released,
-        click_x - 20.0,
-        click_y,
-        None,
-    );
+        app.dispatch_editor_cursor_moved(click_x - 6.0 * scale_factor as f32, click_y, None);
+        app.dispatch_editor_mouse_input(
+            winit::event::ElementState::Released,
+            click_x - 6.0 * scale_factor as f32,
+            click_y,
+            None,
+        );
 
-    let active_entry = app.active_tab_session().expect("active entry");
-    assert_eq!(
-        active_entry.selection_range(),
-        Some((3, 8)),
-        "backward WYSIWYG drag should create a document selection"
-    );
-    assert!(
-        app.active_tab_session()
-            .expect("active runtime session")
-            .query_bool(ui::plugin::PluginQuery::HasSelection),
-        "backward WYSIWYG drag should keep the plugin selection visible"
-    );
+        let active_entry = app.active_tab_session().expect("active entry");
+        assert_eq!(
+            active_entry.selection_range(),
+            Some((3, 8)),
+            "backward WYSIWYG drag should create a document selection"
+        );
+        assert!(
+            app.active_tab_session()
+                .expect("active runtime session")
+                .query_bool(ui::plugin::PluginQuery::HasSelection),
+            "backward WYSIWYG drag should keep the plugin selection visible"
+        );
+    }
 }
 
 #[test]
