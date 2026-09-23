@@ -204,7 +204,7 @@ impl ThemeDefinition {
                 toc_hover_text: [0.9608, 0.9529, 0.9412, 1.0],
                 toc_level_indicator: [0.4549, 0.6784, 0.9098, 0.6],
                 spacing: MarkdownSpacing {
-                    paragraph_spacing_ratio: 0.5,
+                    paragraph_spacing_ratio: 0.4,
                     heading_spacing_top_ratio: 1.0,
                     heading_spacing_bottom_ratio: 0.45,
                     list_item_spacing_ratio: 0.15,
@@ -327,7 +327,7 @@ impl ThemeDefinition {
                 toc_hover_text: [0.1, 0.1, 0.08, 1.0],
                 toc_level_indicator: [0.4549, 0.6784, 0.9098, 0.6],
                 spacing: MarkdownSpacing {
-                    paragraph_spacing_ratio: 0.5,
+                    paragraph_spacing_ratio: 0.4,
                     heading_spacing_top_ratio: 1.0,
                     heading_spacing_bottom_ratio: 0.45,
                     list_item_spacing_ratio: 0.15,
