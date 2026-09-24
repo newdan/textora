@@ -19,7 +19,7 @@ fn apply_edit(source: &str, cursor: usize, kind: AugmentKind) -> (String, usize)
                 .map_or(cursor, |(start, _)| start);
             (start..cursor, String::new())
         }
-        AugmentKind::Tab => (cursor..cursor, String::from("\t")),
+        AugmentKind::Tab | AugmentKind::ShiftTab => (cursor..cursor, String::from("\t")),
     };
     let Some(augmentation) = crate::augmenter::augment_edit(source, cursor, kind) else {
         let mut updated = source.to_owned();

@@ -134,6 +134,9 @@ fn modal_widget_action(action: &WidgetAction) -> Option<AppAction> {
             Some(AppAction::Settings(settings_action.clone()))
         }
         WidgetAction::Overlay(OverlayAction::DismissRequested) => Some(AppAction::DismissOverlay),
+        WidgetAction::TablePicker(table_action) => {
+            Some(AppAction::TablePicker(table_action.clone()))
+        }
         _ => None,
     }
 }
@@ -2132,6 +2135,19 @@ mod tests {
         let action = WidgetAction::Overlay(ui::core::overlay::OverlayAction::DismissRequested);
 
         assert!(matches!(modal_widget_action(&action), Some(AppAction::DismissOverlay)));
+    }
+
+    #[test]
+    fn table_picker_modal_action_keeps_its_typed_size() {
+        let action = WidgetAction::TablePicker(ui::table_picker::TablePickerAction::Confirmed(
+            ui::table_picker::TableSize { columns: 4, rows: 8 },
+        ));
+
+        assert!(matches!(
+            modal_widget_action(&action),
+            Some(AppAction::TablePicker(ui::table_picker::TablePickerAction::Confirmed(size)))
+                if size == (ui::table_picker::TableSize { columns: 4, rows: 8 })
+        ));
     }
 
     // ── winit_key_to_keycode ──

@@ -114,6 +114,7 @@ pub enum AugmentKind {
     LineBreak,
     Backspace,
     Tab,
+    ShiftTab,
     InsertText(String),
 }
 
@@ -393,8 +394,30 @@ pub enum SemanticEditCommand {
     Quote,
     CodeBlock,
     InsertLink,
+    InsertTable { columns: usize, rows: usize },
+    TableStructure(TableStructureCommand),
     PromoteObject,
     DemoteObject,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TableStructureCommand {
+    InsertRowBefore,
+    InsertRowAfter,
+    DeleteRow,
+    InsertColumnBefore,
+    InsertColumnAfter,
+    DeleteColumn,
+    SetColumnAlignment(TableColumnAlignment),
+    DeleteTable,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TableColumnAlignment {
+    Default,
+    Left,
+    Center,
+    Right,
 }
 
 /// Typed result returned by a plugin when planning a semantic command.

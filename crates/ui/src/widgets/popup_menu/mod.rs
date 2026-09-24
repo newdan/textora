@@ -2,7 +2,10 @@
 
 mod types;
 
-pub use types::{ContextMenuAction, OverflowEntry, PopupMenu, PopupMenuAction, PopupMenuItem};
+pub use types::{
+    ContextMenuAction, OverflowEntry, PopupMenu, PopupMenuAction, PopupMenuItem,
+    TableStructureMenuEntry,
+};
 
 use crate::core::geom::Rect;
 use crate::core::widget::{

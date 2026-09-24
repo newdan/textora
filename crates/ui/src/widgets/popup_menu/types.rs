@@ -8,6 +8,10 @@ use crate::tab_bar::truncate_title_by_width;
 use crate::view_mode::ViewMode;
 use crate::widgets::button::{ButtonStyle, ButtonVisualState};
 
+const TABLE_STRUCTURE_MENU_ITEM_HEIGHT_LOGICAL: f32 = 30.0;
+const TABLE_STRUCTURE_MENU_WIDTH_LOGICAL: f32 = 220.0;
+const TABLE_STRUCTURE_MENU_PADDING_LOGICAL: f32 = 4.0;
+
 /// Context menu action for right-click on a tab.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ContextMenuAction {
@@ -28,6 +32,12 @@ pub enum PopupMenuAction {
     SwitchTab(usize),
     /// Context menu action on a specific tab.
     Context { action: ContextMenuAction, tab_index: usize },
+    /// Run a Markdown table structure command at a source cursor.
+    TableStructure {
+        command: crate::plugin::TableStructureCommand,
+        cursor_byte: usize,
+        source_generation: u32,
+    },
     /// Switch view mode (sidebar vs tabs).
     SetViewMode(ViewMode),
     /// Open the settings.yaml file.
@@ -83,6 +93,15 @@ impl PopupMenuItem {
 pub struct OverflowEntry {
     pub tab_index: usize,
     pub title: String,
+}
+
+/// Pure UI data for one Markdown table structure menu item.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TableStructureMenuEntry {
+    pub label: String,
+    pub command: crate::plugin::TableStructureCommand,
+    pub enabled: bool,
+    pub active: bool,
 }
 
 /// Unified popup menu.  Overflow menu and right-click context menu are
@@ -243,6 +262,65 @@ impl PopupMenu {
         }
     }
 
+    /// Build the table structure context menu at a pointer position in px.
+    pub fn table_structure_px(
+        entries: &[TableStructureMenuEntry],
+        cursor_byte: usize,
+        source_generation: u32,
+        screen_size: (f32, f32),
+        px_position: (f32, f32),
+        dpi: f32,
+    ) -> Self {
+        let (screen_width, screen_height) = screen_size;
+        let (pointer_x, pointer_y) = px_position;
+        let item_height = TABLE_STRUCTURE_MENU_ITEM_HEIGHT_LOGICAL * dpi;
+        let padding = TABLE_STRUCTURE_MENU_PADDING_LOGICAL * dpi;
+        let menu_width = TABLE_STRUCTURE_MENU_WIDTH_LOGICAL * dpi;
+        let items = entries
+            .iter()
+            .map(|entry| {
+                PopupMenuItem::action(
+                    entry.label.clone(),
+                    PopupMenuAction::TableStructure {
+                        command: entry.command,
+                        cursor_byte,
+                        source_generation,
+                    },
+                )
+                .with_enabled(entry.enabled)
+                .with_active(entry.active)
+            })
+            .collect::<Vec<_>>();
+        let menu_height = item_height * items.len() as f32 + padding;
+        let menu_left =
+            (pointer_x - menu_width * 0.5).max(0.0).min((screen_width - menu_width).max(0.0));
+        let menu_top = if pointer_y + menu_height > screen_height {
+            (pointer_y - menu_height).max(0.0)
+        } else {
+            pointer_y
+        };
+        let item_inset = padding * 0.5;
+        let item_width = (menu_width - padding).max(0.0);
+        let item_rects = (0..items.len())
+            .map(|index| {
+                Rect::new(
+                    menu_left + item_inset,
+                    menu_top + item_inset + index as f32 * item_height,
+                    item_width,
+                    item_height,
+                )
+            })
+            .collect();
+
+        Self {
+            items,
+            item_rects,
+            menu_rect: Rect::new(menu_left, menu_top, menu_width, menu_height),
+            screen_size,
+            show_checkmarks: false,
+        }
+    }
+
     /// Hit-test in px coordinates.
     pub fn hit_test_px(&self, px: f32, py: f32) -> Option<&PopupMenuAction> {
         for (i, rect) in self.item_rects.iter().enumerate() {
@@ -381,5 +459,74 @@ mod tests {
         assert_eq!(menu.hit_test_px(10.0, 10.0), Some(&PopupMenuAction::ToggleLineNumbers));
         assert_eq!(menu.hit_test_px(10.0, 30.0), None);
         assert_eq!(menu.hit_test_px(10.0, 44.0), None);
+    }
+
+    #[test]
+    fn table_structure_menu_keeps_disabled_operations_visible_but_unselectable() {
+        let commands = [
+            ("前插入行", crate::plugin::TableStructureCommand::InsertRowBefore, true),
+            ("后插入行", crate::plugin::TableStructureCommand::InsertRowAfter, true),
+            ("删除行", crate::plugin::TableStructureCommand::DeleteRow, false),
+            ("前插入列", crate::plugin::TableStructureCommand::InsertColumnBefore, true),
+            ("后插入列", crate::plugin::TableStructureCommand::InsertColumnAfter, true),
+            ("删除列", crate::plugin::TableStructureCommand::DeleteColumn, false),
+            (
+                "默认对齐",
+                crate::plugin::TableStructureCommand::SetColumnAlignment(
+                    crate::plugin::TableColumnAlignment::Default,
+                ),
+                true,
+            ),
+            (
+                "左对齐",
+                crate::plugin::TableStructureCommand::SetColumnAlignment(
+                    crate::plugin::TableColumnAlignment::Left,
+                ),
+                true,
+            ),
+            (
+                "居中对齐",
+                crate::plugin::TableStructureCommand::SetColumnAlignment(
+                    crate::plugin::TableColumnAlignment::Center,
+                ),
+                true,
+            ),
+            (
+                "右对齐",
+                crate::plugin::TableStructureCommand::SetColumnAlignment(
+                    crate::plugin::TableColumnAlignment::Right,
+                ),
+                true,
+            ),
+            ("删除表格", crate::plugin::TableStructureCommand::DeleteTable, true),
+        ];
+        let entries = commands
+            .into_iter()
+            .map(|(label, command, enabled)| TableStructureMenuEntry {
+                label: label.to_owned(),
+                command,
+                enabled,
+                active: false,
+            })
+            .collect::<Vec<_>>();
+
+        let menu =
+            PopupMenu::table_structure_px(&entries, 52, 7, (600.0, 400.0), (400.0, 20.0), 1.0);
+
+        assert_eq!(menu.items.len(), commands.len());
+        assert!(!menu.items[2].enabled);
+        assert!(!menu.items[5].enabled);
+        assert_eq!(
+            menu.items[7].action,
+            PopupMenuAction::TableStructure {
+                command: crate::plugin::TableStructureCommand::SetColumnAlignment(
+                    crate::plugin::TableColumnAlignment::Left,
+                ),
+                cursor_byte: 52,
+                source_generation: 7,
+            }
+        );
+        let disabled_rect = menu.item_rects[2];
+        assert_eq!(menu.hit_test_px(disabled_rect.x + 1.0, disabled_rect.y + 1.0), None);
     }
 }

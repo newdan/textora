@@ -7,6 +7,11 @@ use appkit_shell::editor_runtime::OpenDisposition;
 use winit::event_loop::ActiveEventLoop;
 
 const DEFAULT_LOGICAL_FONT_SIZE: f32 = 15.0;
+const TABLE_PICKER_PREFERRED_WIDTH_LOGICAL: f32 = 300.0;
+const TABLE_PICKER_PREFERRED_HEIGHT_LOGICAL: f32 = 270.0;
+const TABLE_PICKER_MIN_MARGIN_LOGICAL: f32 = 16.0;
+const TABLE_PICKER_MAX_WIDTH_RATIO: f32 = 0.92;
+const TABLE_PICKER_MAX_HEIGHT_RATIO: f32 = 0.90;
 
 #[derive(Debug, Clone, Copy, Default, PartialEq)]
 struct RecentFileViewState {
@@ -233,6 +238,9 @@ impl App {
             crate::menu_handler::AppCommand::OpenSettings => {
                 effect = effect.merge(self.open_settings_overlay());
             }
+            crate::menu_handler::AppCommand::OpenTablePicker => {
+                effect = effect.merge(self.open_table_picker());
+            }
             crate::menu_handler::AppCommand::SetThemeModeSystem => {
                 effect = effect.merge(self.dispatch_settings_action(
                     SettingsDispatchAction::SetThemeMode(ui::settings::ThemeMode::System),
@@ -270,6 +278,59 @@ impl App {
         }
         effect
     }
+
+    fn open_table_picker(&mut self) -> AppEffect {
+        if self.active_plugin_name() != Some(ui::plugin::PLUGIN_MARKDOWN_EDITOR)
+            || !self.active_allows_editing()
+        {
+            return AppEffect::NONE;
+        }
+
+        let Some(active_tab) = self.active_tab_session() else { return AppEffect::NONE };
+        if active_tab.document.selection_range().is_some_and(|(start, end)| start < end) {
+            return AppEffect::NONE;
+        }
+
+        self.sync_plugin_state();
+        let Some(active_tab) = self.active_tab_session() else { return AppEffect::NONE };
+        let insert_table_probe = active_tab.query(ui::plugin::PluginQuery::PlanSemanticEdit {
+            command: ui::plugin::SemanticEditCommand::InsertTable { columns: 1, rows: 2 },
+            source_generation: active_tab.document.generation(),
+            cursor_byte: active_tab.document.cursor_offset().to_usize(),
+            selection: None,
+        });
+        if !matches!(
+            insert_table_probe,
+            ui::plugin::PluginResponse::SemanticEdit(ui::plugin::SemanticEditPlan::Apply(_))
+        ) {
+            return AppEffect::NONE;
+        }
+
+        let mut picker = ui::table_picker::TablePickerWidget::new();
+        picker.set_input(ui::table_picker::TablePickerInput { open: true });
+        let frame = ui::modal_frame::ModalFrame::new("插入表格", Box::new(picker));
+        self.ui_shell.clear_overlays();
+        self.ui_shell.push_overlay_with_policy(
+            Box::new(frame),
+            ui::OverlayLayout::Centered {
+                preferred_size: (
+                    TABLE_PICKER_PREFERRED_WIDTH_LOGICAL,
+                    TABLE_PICKER_PREFERRED_HEIGHT_LOGICAL,
+                ),
+                min_margin: TABLE_PICKER_MIN_MARGIN_LOGICAL,
+                max_width_ratio: TABLE_PICKER_MAX_WIDTH_RATIO,
+                max_height_ratio: TABLE_PICKER_MAX_HEIGHT_RATIO,
+            },
+            ui::OverlayInputPolicy::Modal,
+            ui::DismissPolicy::EscapeOrExplicit,
+        );
+        if let Some(frame) =
+            self.ui_shell.active_overlay_widget_mut::<ui::modal_frame::ModalFrame>()
+        {
+            ui::Widget::set_keyboard_focus(frame, Some(ui::table_picker::TABLE_PICKER_CONFIRM_ID));
+        }
+        AppEffect::REDRAW
+    }
 }
 
 #[cfg(test)]
@@ -279,6 +340,20 @@ mod recent_file_tests {
     use appkit_core::file_history::FileHistoryEntry;
 
     use super::App;
+    use crate::document_view::DocumentView;
+
+    #[cfg(feature = "markdown")]
+    fn app_with_markdown_editor(source: &str) -> App {
+        let document = DocumentView::new(source.split('\n').map(str::to_owned).collect(), 80, 15.0);
+        let mut app = App::new(None);
+        app.push_entry_for_test(
+            document,
+            Box::new(textora_markdown::view::MarkdownEditorView::new()),
+        );
+        app.switch_workspace_for_test(0);
+        app.sync_plugin_state();
+        app
+    }
 
     fn history_entry(
         file_path: &Path,
@@ -369,6 +444,110 @@ mod recent_file_tests {
         assert!(effect.redraw);
         assert!(effect.update_title);
         assert!(effect.persist_workspace);
+    }
+
+    #[test]
+    fn opening_table_picker_preserves_the_active_markdown_document() {
+        let directory = tempfile::tempdir().expect("table-picker test directory should exist");
+        let path = directory.path().join("table-picker.md");
+        std::fs::write(&path, "existing text").expect("table-picker fixture should be writable");
+        let mut app = App::new(None);
+        app.open_file(&path).expect("Markdown fixture should open");
+        let generation_before =
+            app.active_tab_session().expect("Markdown tab should be active").document.generation();
+
+        let effect = app.open_table_picker();
+
+        assert_eq!(effect, crate::app_effect::AppEffect::REDRAW);
+        assert!(app.ui_shell.active_overlay_is_modal());
+        assert_eq!(app.ui_shell.keyboard_focus(), crate::ui_shell::KeyboardFocusTarget::Overlay);
+        let frame = app
+            .ui_shell
+            .active_overlay_widget_ref::<ui::modal_frame::ModalFrame>()
+            .expect("table picker should be shown in a modal frame");
+        assert!(frame.content_as_any().is::<ui::table_picker::TablePickerWidget>());
+        let theme = app.current_theme.clone();
+        let dpi = app.ui_metrics().dpi;
+        assert!(matches!(
+            app.ui_shell.forward_key(ui::KeyCode::Right, ui::Modifiers::NONE, &theme, dpi),
+            Some(ui::WidgetAction::TablePicker(
+                ui::table_picker::TablePickerAction::PreviewChanged(Some(
+                    ui::table_picker::TableSize { columns: 2, rows: 2 }
+                ))
+            ))
+        ));
+        let active_document = app.active_tab_session().expect("Markdown tab should remain active");
+        assert_eq!(active_document.document.full_text(), "existing text");
+        assert_eq!(active_document.document.generation(), generation_before);
+    }
+
+    #[test]
+    #[cfg(feature = "markdown")]
+    fn opening_table_picker_is_rejected_for_read_only_markdown_editor() {
+        let mut app = app_with_markdown_editor("ordinary paragraph");
+        app.active_runtime_mut()
+            .expect("Markdown runtime should be active")
+            .set_editing_access(appkit_shell::tab_runtime::DocumentEditingAccess::ReadOnly);
+        let source_before =
+            app.active_tab_session().expect("Markdown tab should be active").document.full_text();
+        let generation_before =
+            app.active_tab_session().expect("Markdown tab should be active").document.generation();
+
+        let effect = app.open_table_picker();
+
+        assert_eq!(effect, crate::app_effect::AppEffect::NONE);
+        assert!(!app.ui_shell.active_overlay_is_modal());
+        let active = app.active_tab_session().expect("Markdown tab should remain active");
+        assert_eq!(active.document.full_text(), source_before);
+        assert_eq!(active.document.generation(), generation_before);
+    }
+
+    #[test]
+    #[cfg(feature = "markdown")]
+    fn opening_table_picker_is_rejected_for_nonempty_selection() {
+        let source = "keep selected text";
+        let mut app = app_with_markdown_editor(source);
+        let selection_start = source.find("selected").expect("fixture has selected text");
+        let selection_end = selection_start + "selected".len();
+        {
+            let tab = app.active_tab_session_mut().expect("Markdown tab should be active");
+            tab.document.cursor_move_to_offset(selection_end);
+            tab.document.cursor_mut().selection_anchor = Some(selection_start);
+        }
+        let generation_before =
+            app.active_tab_session().expect("Markdown tab should be active").document.generation();
+
+        let effect = app.open_table_picker();
+
+        assert_eq!(effect, crate::app_effect::AppEffect::NONE);
+        assert!(!app.ui_shell.active_overlay_is_modal());
+        let active = app.active_tab_session().expect("Markdown tab should remain active");
+        assert_eq!(active.document.full_text(), source);
+        assert_eq!(active.document.selection_range(), Some((selection_start, selection_end)));
+        assert_eq!(active.document.generation(), generation_before);
+    }
+
+    #[test]
+    #[cfg(feature = "markdown")]
+    fn opening_table_picker_is_rejected_at_unsupported_code_block_position() {
+        let source = "```text\ninside code\n```";
+        let mut app = app_with_markdown_editor(source);
+        let cursor = source.find("inside").expect("fixture has code-block content") + 2;
+        app.active_tab_session_mut()
+            .expect("Markdown tab should be active")
+            .document
+            .cursor_move_to_offset(cursor);
+        let generation_before =
+            app.active_tab_session().expect("Markdown tab should be active").document.generation();
+
+        let effect = app.open_table_picker();
+
+        assert_eq!(effect, crate::app_effect::AppEffect::NONE);
+        assert!(!app.ui_shell.active_overlay_is_modal());
+        let active = app.active_tab_session().expect("Markdown tab should remain active");
+        assert_eq!(active.document.full_text(), source);
+        assert_eq!(active.document.cursor_offset().0, cursor);
+        assert_eq!(active.document.generation(), generation_before);
     }
 }
 

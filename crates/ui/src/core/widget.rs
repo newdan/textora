@@ -13,6 +13,7 @@ use crate::core::overlay::OverlayAction;
 use crate::core::paint::DrawList;
 use crate::theme::Theme;
 use crate::widgets::settings_view::SettingsViewAction;
+use crate::widgets::table_picker::TablePickerAction;
 use crate::widgets::tooltip::TooltipHint;
 use shaping::Shaper;
 
@@ -452,6 +453,7 @@ pub enum WidgetAction {
     VirtualCardList(crate::widgets::virtual_card_list::VirtualCardListAction),
     Splitter(crate::widgets::splitter::SplitterAction),
     MindmapStylePanel(MindmapStylePanelAction),
+    TablePicker(TablePickerAction),
     /// 事件已消费但无需 AppAction（如 hover 更新）
     Consumed,
 }

@@ -538,6 +538,18 @@ mod file_monitor_root_tests {
 mod app_tests;
 
 #[cfg(test)]
+#[path = "table_creation_acceptance_tests.rs"]
+mod table_creation_acceptance_tests;
+
+#[cfg(test)]
+#[path = "table_navigation_input_tests.rs"]
+mod table_navigation_input_tests;
+
+#[cfg(test)]
+#[path = "table_picker_ui_path_tests.rs"]
+mod table_picker_ui_path_tests;
+
+#[cfg(test)]
 #[path = "settings_boundary_tests.rs"]
 mod settings_boundary_tests;
 

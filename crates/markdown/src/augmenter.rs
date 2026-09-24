@@ -56,7 +56,8 @@ pub fn augment_edit(
         AugmentKind::Enter => augment_enter(source, current_byte),
         AugmentKind::LineBreak => Some(augment_line_break(source, current_byte)),
         AugmentKind::Backspace => augment_backspace(source, current_byte),
-        AugmentKind::Tab => None,
+        AugmentKind::Tab => augment_table_tab(source, current_byte, false),
+        AugmentKind::ShiftTab => augment_table_tab(source, current_byte, true),
         AugmentKind::InsertText(ref text) => augment_insert_text(source, current_byte, text),
     }
 }
@@ -108,11 +109,252 @@ fn emit_inline_html_break(source: &str, current_byte: usize) -> EditAugmentation
 }
 
 fn augment_enter(source: &str, current_byte: usize) -> Option<EditAugmentation> {
+    let pipe_candidate_context = if has_pipe_header_shape_at_cursor(source, current_byte) {
+        let context = classify_enter_context(source, current_byte);
+        if let Some(augmentation) = pipe_header_table_augmentation(source, current_byte, &context) {
+            return Some(augmentation);
+        }
+        Some(context)
+    } else {
+        None
+    };
     if let Some(augmentation) = editable_paragraph_navigation::enter(source, current_byte) {
         return Some(augmentation);
     }
-    let context = classify_enter_context(source, current_byte);
+    let context =
+        pipe_candidate_context.unwrap_or_else(|| classify_enter_context(source, current_byte));
     enter_context_augmentation(source, current_byte, context)
+}
+
+fn has_pipe_header_shape_at_cursor(source: &str, current_byte: usize) -> bool {
+    let Some((line_start, _, line_end)) = locate_source_line_bounds(source, current_byte) else {
+        return false;
+    };
+    let content_end = source_line_content_end(source, line_end);
+    if current_byte != content_end {
+        return false;
+    }
+    let mut content_start = line_start;
+    loop {
+        let leading_spaces = source[content_start..content_end]
+            .bytes()
+            .take(MAX_LEADING_BLOCK_INDENT)
+            .take_while(|byte| *byte == b' ')
+            .count();
+        let marker_start = content_start + leading_spaces;
+        match source.as_bytes().get(marker_start) {
+            Some(b'>') => {
+                content_start = marker_start + 1;
+                if matches!(source.as_bytes().get(content_start), Some(b' ' | b'\t')) {
+                    content_start += 1;
+                }
+            }
+            _ => {
+                if let Some((_, after_marker)) = parse_list_marker(source, marker_start) {
+                    content_start = after_marker;
+                } else {
+                    content_start = marker_start;
+                    break;
+                }
+            }
+        }
+    }
+    let Some(header) = source.get(content_start..content_end) else {
+        return false;
+    };
+    pipe_header_column_count(header.trim_start_matches([' ', '\t'])).is_some()
+}
+
+fn pipe_header_table_augmentation(
+    source: &str,
+    current_byte: usize,
+    context: &EnterContext,
+) -> Option<EditAugmentation> {
+    let (line_start, _, line_end) = locate_source_line_bounds(source, current_byte)?;
+    let content_end = source_line_content_end(source, line_end);
+    if current_byte != content_end {
+        return None;
+    }
+    let (header_content_start, container_prefix) = match context {
+        EnterContext::TopLevelParagraphEnd => (line_start, ""),
+        EnterContext::BlockQuoteLine { continuation_prefix, .. } => {
+            let (_, content_start, _) = locate_blockquote_line(source, current_byte)?;
+            (content_start, continuation_prefix.as_str())
+        }
+        EnterContext::ListItem { content_prefix, .. } => {
+            let content_start = parse_list_marker(source, line_start)
+                .map_or(line_start + content_prefix.len(), |(_, content_start)| content_start);
+            (content_start, content_prefix.as_str())
+        }
+        _ => return None,
+    };
+    let header = source.get(header_content_start..content_end)?;
+    let column_count = pipe_header_column_count(header)?;
+    let escaped_header = escape_inline_code_pipes(header);
+    let original_newline = preferred_newline_sequence(source, current_byte);
+    let divider = (0..column_count).map(|_| " --- |").collect::<String>();
+    let divider = format!("|{divider}");
+    let body = format!("|{}", "  |".repeat(column_count));
+    let divider = format!("{container_prefix}{divider}");
+    let body = format!("{container_prefix}{body}");
+    let trailing_separator = if suffix_needs_blank_line_after_table(source, current_byte) {
+        original_newline
+    } else {
+        ""
+    };
+    let table_suffix =
+        format!("{original_newline}{divider}{original_newline}{body}{trailing_separator}");
+    let original_header_prefix = source.get(line_start..header_content_start)?;
+    let replacement_text = format!("{original_header_prefix}{escaped_header}{table_suffix}");
+    let cursor_byte_after = line_start
+        + original_header_prefix.len()
+        + escaped_header.len()
+        + original_newline.len()
+        + divider.len()
+        + original_newline.len()
+        + container_prefix.len()
+        + 2;
+    let mut prospective = source.to_owned();
+    prospective.replace_range(line_start..current_byte, &replacement_text);
+    let table_count_before = parsed_table_count(source, column_count);
+    let table_count_after = parsed_table_count(&prospective, column_count);
+    if table_count_after != table_count_before + 1 {
+        return None;
+    }
+    Some(EditAugmentation {
+        insert_text: Some(replacement_text),
+        replace_range: Some(line_start..current_byte),
+        cursor_byte_after,
+    })
+}
+
+fn escape_inline_code_pipes(line: &str) -> String {
+    let bytes = line.as_bytes();
+    let mut result = String::with_capacity(line.len());
+    let mut index = 0;
+    while index < bytes.len() {
+        if bytes[index] != b'`' {
+            let next_delimiter = bytes[index..]
+                .iter()
+                .position(|byte| *byte == b'`')
+                .map_or(bytes.len(), |offset| index + offset);
+            result.push_str(&line[index..next_delimiter]);
+            index = next_delimiter;
+            continue;
+        }
+        let opener_end = index + bytes[index..].iter().take_while(|byte| **byte == b'`').count();
+        if is_escaped_by_backslash(bytes, index) {
+            result.push_str(&line[index..opener_end]);
+            index = opener_end;
+            continue;
+        }
+        let delimiter_length = opener_end - index;
+        let Some(closer_start) = matching_code_span_close(bytes, opener_end, delimiter_length)
+        else {
+            result.push_str(&line[index..opener_end]);
+            index = opener_end;
+            continue;
+        };
+        result.push_str(&line[index..opener_end]);
+        let mut content_start = opener_end;
+        for pipe_index in opener_end..closer_start {
+            if bytes[pipe_index] != b'|' {
+                continue;
+            }
+            let preceding_backslashes = bytes[opener_end..pipe_index]
+                .iter()
+                .rev()
+                .take_while(|byte| **byte == b'\\')
+                .count();
+            result.push_str(&line[content_start..pipe_index]);
+            if preceding_backslashes % 2 == 0 {
+                result.push('\\');
+            }
+            result.push('|');
+            content_start = pipe_index + 1;
+        }
+        result.push_str(&line[content_start..closer_start + delimiter_length]);
+        index = closer_start + delimiter_length;
+    }
+    result
+}
+
+fn suffix_needs_blank_line_after_table(source: &str, insertion_at: usize) -> bool {
+    let Some(newline_width) = newline_sequence_width_at(source, insertion_at) else {
+        return false;
+    };
+    let next_line_start = insertion_at + newline_width;
+    !source[next_line_start..].is_empty()
+        && newline_sequence_width_at(source, next_line_start).is_none()
+}
+
+fn pipe_header_column_count(header: &str) -> Option<usize> {
+    let trimmed = header.trim_matches([' ', '\t']);
+    let delimiters = unescaped_pipes_outside_code(trimmed);
+    if delimiters.first() != Some(&0) || delimiters.last() != Some(&(trimmed.len() - 1)) {
+        return None;
+    }
+    delimiters.len().checked_sub(1).filter(|columns| *columns > 0)
+}
+
+fn unescaped_pipes_outside_code(line: &str) -> Vec<usize> {
+    let bytes = line.as_bytes();
+    let mut index = 0;
+    let mut delimiters = Vec::new();
+    while index < bytes.len() {
+        if bytes[index] == b'`' {
+            let run_end = index + bytes[index..].iter().take_while(|byte| **byte == b'`').count();
+            if is_escaped_by_backslash(bytes, index) {
+                index = run_end;
+                continue;
+            }
+            let delimiter_length = run_end - index;
+            if let Some(close_start) = matching_code_span_close(bytes, run_end, delimiter_length) {
+                index = close_start + delimiter_length;
+                continue;
+            }
+            index = run_end;
+            continue;
+        }
+        if bytes[index] == b'|' && !is_escaped_by_backslash(bytes, index) {
+            delimiters.push(index);
+        }
+        index += 1;
+    }
+    delimiters
+}
+
+fn is_escaped_by_backslash(bytes: &[u8], byte_index: usize) -> bool {
+    bytes[..byte_index].iter().rev().take_while(|byte| **byte == b'\\').count() % 2 == 1
+}
+
+fn matching_code_span_close(
+    bytes: &[u8],
+    mut index: usize,
+    delimiter_length: usize,
+) -> Option<usize> {
+    while index < bytes.len() {
+        if bytes[index] != b'`' {
+            index += 1;
+            continue;
+        }
+        let run_end = index + bytes[index..].iter().take_while(|byte| **byte == b'`').count();
+        if run_end - index == delimiter_length {
+            return Some(index);
+        }
+        index = run_end;
+    }
+    None
+}
+
+fn parsed_table_count(source: &str, expected_columns: usize) -> usize {
+    use pulldown_cmark::{Event, Parser, Tag};
+    Parser::new_ext(source, crate::parser::markdown_options())
+        .into_offset_iter()
+        .filter(|(event, _)| {
+            matches!(event, Event::Start(Tag::Table(alignments)) if alignments.len() == expected_columns)
+        })
+        .count()
 }
 
 fn augment_backspace(source: &str, current_byte: usize) -> Option<EditAugmentation> {
@@ -766,6 +1008,12 @@ fn preferred_newline_sequence(source: &str, current_byte: usize) -> &'static str
 }
 
 fn augment_insert_text(source: &str, current_byte: usize, text: &str) -> Option<EditAugmentation> {
+    if text.contains(['|', '\r', '\n'])
+        && let EnterContext::TableCell { cell_range, .. } =
+            classify_enter_context(source, current_byte)
+    {
+        return Some(table_cell_text_augmentation(source, current_byte, text, cell_range));
+    }
     paragraph_leading_spaces::insert_text(source, current_byte, text)
         .or_else(|| editable_paragraph_edit::insert_text(source, current_byte, text))
 }
@@ -775,7 +1023,80 @@ pub(crate) fn augment_selected_text(
     selection: std::ops::Range<usize>,
     text: &str,
 ) -> Option<EditAugmentation> {
+    if text.contains(['|', '\r', '\n'])
+        && let EnterContext::TableCell { cell_range, .. } =
+            classify_enter_context(source, selection.start)
+        && selection.start >= cell_range.start
+        && selection.end <= cell_range.end
+    {
+        return Some(table_cell_text_augmentation(source, selection.start, text, cell_range));
+    }
     paragraph_leading_spaces::insert_selected_text(source, selection, text)
+}
+
+fn table_cell_text_augmentation(
+    source: &str,
+    current_byte: usize,
+    text: &str,
+    cell_range: std::ops::Range<usize>,
+) -> EditAugmentation {
+    let normalized_newlines = text.replace("\r\n", " ").replace(['\r', '\n'], " ");
+    let preceding_backslashes =
+        source[..current_byte].bytes().rev().take_while(|byte| *byte == b'\\').count();
+    let mut inserted_text = String::with_capacity(normalized_newlines.len());
+    for character in normalized_newlines.chars() {
+        if character == '|'
+            && inserted_text
+                .bytes()
+                .rev()
+                .take_while(|byte| *byte == b'\\')
+                .count()
+                .checked_add(if inserted_text.bytes().all(|byte| byte == b'\\') {
+                    preceding_backslashes
+                } else {
+                    0
+                })
+                .is_some_and(|backslash_count| backslash_count % 2 == 0)
+        {
+            inserted_text.push('\\');
+        }
+        inserted_text.push(character);
+    }
+    let augmentation = EditAugmentation {
+        replace_range: Some(current_byte..current_byte),
+        cursor_byte_after: current_byte + inserted_text.len(),
+        insert_text: Some(inserted_text),
+    };
+    debug_assert!(cell_range.start <= current_byte && current_byte <= cell_range.end);
+    debug_assert_augmentation(&augmentation, source);
+    augmentation
+}
+
+fn augment_table_tab(source: &str, current_byte: usize, reverse: bool) -> Option<EditAugmentation> {
+    let EnterContext::TableCell {
+        previous_tab_cell_start,
+        next_tab_cell_start,
+        column_count,
+        is_last_cell,
+        row_line_end,
+        container_prefix,
+        ..
+    } = classify_enter_context(source, current_byte)
+    else {
+        return None;
+    };
+    let target_cell = if reverse { previous_tab_cell_start } else { next_tab_cell_start };
+    if let Some(target_cell) = target_cell {
+        return Some(EditAugmentation {
+            insert_text: Some(String::new()),
+            replace_range: None,
+            cursor_byte_after: target_cell,
+        });
+    }
+    if reverse || !is_last_cell {
+        return None;
+    }
+    Some(table_insert_row_augmentation(source, row_line_end, column_count, &container_prefix))
 }
 
 // ─── emit_* 原语 ──────────────────────────────────────────────────────────
@@ -1310,6 +1631,7 @@ fn enter_context_augmentation(
             is_header_row,
             row_line_end,
             container_prefix,
+            ..
         } => {
             if let Some(next_cell_start) = next_cell_start {
                 Some(EditAugmentation {
@@ -1912,10 +2234,14 @@ pub enum EnterContext {
         continuation_prefix: String,
     },
     TableCell {
+        cell_range: std::ops::Range<usize>,
         next_cell_start: Option<usize>,
+        previous_tab_cell_start: Option<usize>,
+        next_tab_cell_start: Option<usize>,
         column_count: usize,
         row_is_empty: bool,
         is_header_row: bool,
+        is_last_cell: bool,
         row_line_end: usize,
         container_prefix: String,
     },
@@ -2739,6 +3065,22 @@ pub fn classify_enter_context(source: &str, current_byte: usize) -> EnterContext
                         .get(row_idx + 1)
                         .and_then(|next_row| next_row.get(col_idx))
                         .map(|next_cell| table_cell_content_start(source, next_cell));
+                    let previous_tab_cell_start = if col_idx > 0 {
+                        row.get(col_idx - 1)
+                    } else {
+                        row_idx.checked_sub(1).and_then(|previous_row| {
+                            t.cell_ranges
+                                .get(previous_row)
+                                .and_then(|previous_cells| previous_cells.last())
+                        })
+                    }
+                    .map(|previous_cell| table_cell_content_start(source, previous_cell));
+                    let next_tab_cell_start = row
+                        .get(col_idx + 1)
+                        .or_else(|| {
+                            t.cell_ranges.get(row_idx + 1).and_then(|next_row| next_row.first())
+                        })
+                        .map(|next_cell| table_cell_content_start(source, next_cell));
                     let column_count = row.len();
                     let row_is_empty = row.iter().all(|row_cell| {
                         source[row_cell.clone()]
@@ -2760,10 +3102,15 @@ pub fn classify_enter_context(source: &str, current_byte: usize) -> EnterContext
                         .map(|(_, _, line_end)| source_line_content_end(source, line_end))
                         .unwrap_or(last_cell_end);
                     return EnterContext::TableCell {
+                        cell_range: cell.clone(),
                         next_cell_start,
+                        previous_tab_cell_start,
+                        next_tab_cell_start,
                         column_count,
                         row_is_empty,
                         is_header_row,
+                        is_last_cell: row_idx + 1 == t.cell_ranges.len()
+                            && col_idx + 1 == row.len(),
                         row_line_end,
                         container_prefix: t.container_prefix.clone(),
                     };
@@ -3231,6 +3578,327 @@ fn locate_blockquote_line(source: &str, byte: usize) -> Option<(usize, usize, us
 #[cfg(test)]
 mod tests {
     use super::*;
+    use ui::plugin::EditPolicy;
+
+    #[test]
+    fn pipe_header_enter_creates_a_parseable_table_and_places_caret_in_first_body_cell() {
+        for (header, expected_columns) in [
+            ("| 名称 | 说明 | 备注 |", 3),
+            ("| 名称 | 说明 \\| 备注 |", 2),
+            ("| 名称 | `a|b` |", 2),
+        ] {
+            let cursor = header.len();
+            let augmentation = augment_edit(header, cursor, AugmentKind::Enter)
+                .expect("pipe header Enter must be augmented");
+            let result = apply_augmentation_at(header, cursor, &augmentation);
+            let parsed = crate::parser::parse_markdown(&result);
+            let parsed_columns = parsed.events.iter().find_map(|event| match event {
+                crate::parser::MarkdownEvent::Start(crate::parser::MarkdownTag::Table(columns)) => {
+                    Some(columns.len())
+                }
+                _ => None,
+            });
+            let table_cell_count = parsed
+                .events
+                .iter()
+                .filter(|event| {
+                    matches!(
+                        event,
+                        crate::parser::MarkdownEvent::Start(crate::parser::MarkdownTag::TableCell)
+                    )
+                })
+                .count();
+
+            assert_eq!(parsed_columns, Some(expected_columns), "{result:?}");
+            assert_eq!(table_cell_count, expected_columns * 2, "{result:?}");
+            assert!(result.starts_with(&escape_inline_code_pipes(header)));
+            if header.contains("`a|b`") {
+                assert!(parsed.events.iter().any(|event| {
+                    matches!(event, crate::parser::MarkdownEvent::Code(text) if text == "a|b")
+                }));
+            }
+            assert_eq!(
+                &result[augmentation.cursor_byte_after..augmentation.cursor_byte_after + 1],
+                " "
+            );
+        }
+        assert_eq!(pipe_header_column_count("| 名称 | `a|b` |"), Some(2));
+        assert_eq!(pipe_header_column_count("| 名称 | 说明 \\| 备注 |"), Some(2));
+    }
+
+    #[test]
+    fn escaped_pipe_inside_inline_code_keeps_parser_table_columns() {
+        let source = "| 名称 | `a\\|b` |\n| --- | --- |\n|  |  |";
+        let parsed = crate::parser::parse_markdown(source);
+        let column_count = parsed.events.iter().find_map(|event| match event {
+            crate::parser::MarkdownEvent::Start(crate::parser::MarkdownTag::Table(columns)) => {
+                Some(columns.len())
+            }
+            _ => None,
+        });
+        let code_text = parsed.events.iter().find_map(|event| match event {
+            crate::parser::MarkdownEvent::Code(text) => Some(text.as_str()),
+            _ => None,
+        });
+
+        assert_eq!(column_count, Some(2), "{parsed:?}");
+        assert_eq!(code_text, Some("a|b"));
+    }
+
+    #[test]
+    fn pipe_header_recognition_requires_unescaped_outer_boundaries() {
+        assert_eq!(pipe_header_column_count("| A | B \\"), None);
+        assert_eq!(pipe_header_column_count("| `A|B` |"), Some(1));
+        assert_eq!(pipe_header_column_count("| `A\\|B` |"), Some(1));
+    }
+
+    #[test]
+    fn pipe_header_enter_preserves_adjacent_blocks_and_crlf_newlines() {
+        for (source, expected_newline) in [
+            ("before\n\n| A | B |\n\nafter", "\n"),
+            ("before\r\n\r\n| A | B |\r\n\r\nafter", "\r\n"),
+        ] {
+            let cursor = source.find("| A | B |").expect("header exists") + "| A | B |".len();
+            assert!(has_pipe_header_shape_at_cursor(source, cursor));
+            let context = classify_enter_context(source, cursor);
+            assert!(matches!(context, EnterContext::TopLevelParagraphEnd), "{context:?}");
+            let augmentation = augment_edit(source, cursor, AugmentKind::Enter)
+                .expect("pipe header Enter must create a table");
+            let result = apply_augmentation_at(source, cursor, &augmentation);
+            assert!(result.starts_with("before"));
+            assert!(result.ends_with(if expected_newline == "\n" {
+                "\n\nafter"
+            } else {
+                "\r\n\r\nafter"
+            }));
+            assert!(
+                result
+                    .contains(&format!("{expected_newline}| --- | --- |{expected_newline}|  |  |")),
+                "{result:?}"
+            );
+            assert_eq!(parsed_table_count(&result, 2), 1);
+        }
+    }
+
+    #[test]
+    fn pipe_header_enter_preserves_blockquote_and_list_prefixes() {
+        for (source, cursor, expected) in [
+            ("> | A | B |", "> | A | B |".len(), "> | A | B |\n> | --- | --- |\n> |  |  |"),
+            (
+                "> | A | B |\r\n",
+                "> | A | B |".len(),
+                "> | A | B |\r\n> | --- | --- |\r\n> |  |  |\r\n",
+            ),
+            ("- | A | B |", "- | A | B |".len(), "- | A | B |\n  | --- | --- |\n  |  |  |"),
+            (
+                "- | A | B |\r\n",
+                "- | A | B |".len(),
+                "- | A | B |\r\n  | --- | --- |\r\n  |  |  |\r\n",
+            ),
+        ] {
+            let augmentation = augment_edit(source, cursor, AugmentKind::Enter)
+                .expect("container pipe header Enter should be augmented");
+            let result = apply_augmentation_at(source, cursor, &augmentation);
+            let parsed_columns = crate::parser::parse_markdown(&result).events.iter().find_map(
+                |event| match event {
+                    crate::parser::MarkdownEvent::Start(crate::parser::MarkdownTag::Table(
+                        columns,
+                    )) => Some(columns.len()),
+                    _ => None,
+                },
+            );
+
+            assert_eq!(result, expected);
+            assert_eq!(parsed_columns, Some(2), "{result:?}");
+            assert_eq!(parsed_table_count(&result, 2), 1);
+            assert!(result[augmentation.cursor_byte_after..].starts_with(' '));
+        }
+    }
+
+    #[test]
+    fn pipe_header_enter_rejects_plain_text_nonterminal_cursor_and_code_contexts() {
+        for (source, cursor) in [
+            ("甲 | 乙", "甲 | 乙".len()),
+            ("| 甲 | 乙 |", 2),
+            ("```\n| 甲 | 乙 |\n```", "```\n| 甲 | 乙 |".len()),
+            (
+                "| 甲 | 乙 |\n| --- | --- |\n| x | y |",
+                "| 甲 | 乙 |\n| --- | --- |\n| x | y |".len(),
+            ),
+        ] {
+            let result = augment_edit(source, cursor, AugmentKind::Enter).map_or_else(
+                || source.to_owned(),
+                |augmentation| apply_augmentation_at(source, cursor, &augmentation),
+            );
+            let parsed = crate::parser::parse_markdown(&result);
+            let table_count = parsed
+                .events
+                .iter()
+                .filter(|event| {
+                    matches!(
+                        event,
+                        crate::parser::MarkdownEvent::Start(crate::parser::MarkdownTag::Table(_))
+                    )
+                })
+                .count();
+            let original_table_count = crate::parser::parse_markdown(source)
+                .events
+                .iter()
+                .filter(|event| {
+                    matches!(
+                        event,
+                        crate::parser::MarkdownEvent::Start(crate::parser::MarkdownTag::Table(_))
+                    )
+                })
+                .count();
+            assert_eq!(table_count, original_table_count, "must not create a table for {source:?}");
+        }
+    }
+
+    #[test]
+    fn pipe_header_enter_adds_table_beside_an_existing_table_with_same_width() {
+        let source = "| 新表 | `a|b` |\n\n| 现有 | 表格 |\n| --- | --- |\n| x | y |";
+        let cursor = "| 新表 | `a|b` |".len();
+        let augmentation = augment_edit(source, cursor, AugmentKind::Enter)
+            .expect("pipe header before an existing table must be recognized");
+        let result = apply_augmentation_at(source, cursor, &augmentation);
+
+        assert_eq!(parsed_table_count(&result, 2), 2, "{result:?}");
+        assert!(result.starts_with("| 新表 | `a\\|b` |"));
+    }
+
+    #[test]
+    fn table_tab_moves_to_next_cell_in_visual_row_order() {
+        let source = "| H1 | H2 |\n| --- | --- |\n| A | B |\n| C | D |";
+        for (current_text, next_text) in
+            [("H1", "H2"), ("H2", "A"), ("A", "B"), ("B", "C"), ("C", "D")]
+        {
+            let current_byte = source.find(current_text).expect("current cell exists");
+            let augmentation = augment_edit(source, current_byte, AugmentKind::Tab)
+                .expect("Tab in a table cell must navigate");
+
+            assert_eq!(
+                augmentation.cursor_byte_after,
+                source.find(next_text).expect("next cell exists")
+            );
+            assert!(augmentation.insert_text.as_deref().unwrap_or_default().is_empty());
+        }
+    }
+
+    #[test]
+    fn table_shift_tab_moves_to_previous_cell_across_table_rows() {
+        let source = "| H1 | H2 |\n| --- | --- |\n| A | B |";
+        let mut view = crate::view::MarkdownEditorView::new();
+        view.set_source(source.to_owned(), 1);
+        let request = ui::plugin::EditRequest {
+            source_generation: 1,
+            cursor_byte: source.find("A").expect("body cell exists"),
+            selection: None,
+            intent: ui::plugin::EditIntent::Outdent,
+        };
+
+        assert!(matches!(view.plan_edit(&request), ui::plugin::EditPlan::MoveCursor(_)));
+    }
+
+    #[test]
+    fn table_last_cell_tab_appends_a_parseable_row_and_places_caret_in_its_first_cell() {
+        let source = "| H1 | H2 |\n| --- | --- |\n| A | B |";
+        let current_byte = source.find("B").expect("last cell exists");
+        let augmentation = augment_edit(source, current_byte, AugmentKind::Tab)
+            .expect("Tab in the last cell must append a body row");
+        let result = apply_augmentation_at(source, current_byte, &augmentation);
+        let parsed = crate::parser::parse_markdown(&result);
+
+        assert_eq!(parsed_table_count(&result, 2), 1);
+        assert_eq!(
+            parsed
+                .events
+                .iter()
+                .filter(|event| matches!(
+                    event,
+                    crate::parser::MarkdownEvent::Start(crate::parser::MarkdownTag::TableRow)
+                ))
+                .count(),
+            2,
+            "{result:?}"
+        );
+        assert_eq!(result[augmentation.cursor_byte_after..].chars().next(), Some(' '));
+    }
+
+    #[test]
+    fn tab_on_header_only_table_appends_the_first_body_row() {
+        let source = "| H1 | H2 |\n| :--- | ---: |";
+        let current_byte = source.find("H2").expect("last header cell exists");
+        let augmentation = augment_edit(source, current_byte, AugmentKind::Tab)
+            .expect("Tab on the last header cell must create the first body row");
+        let result = apply_augmentation_at(source, current_byte, &augmentation);
+        let parsed = crate::parser::parse_markdown(&result);
+
+        assert_eq!(parsed_table_count(&result, 2), 1);
+        assert_eq!(
+            parsed
+                .events
+                .iter()
+                .filter(|event| matches!(
+                    event,
+                    crate::parser::MarkdownEvent::Start(crate::parser::MarkdownTag::TableRow)
+                ))
+                .count(),
+            1,
+            "{result:?}"
+        );
+        assert!(result.contains("| :--- | ---: |"), "{result:?}");
+    }
+
+    #[test]
+    fn table_text_insertion_escapes_pipes_and_flattens_cell_newlines() {
+        let source = "| H1 | H2 |\n| --- | --- |\n| A | B |";
+        let current_byte = source.find("A").expect("body cell exists") + 1;
+        let augmentation =
+            augment_edit(source, current_byte, AugmentKind::InsertText("x|y\nz".to_owned()))
+                .expect("table-cell input must be sanitized");
+        let result = apply_augmentation_at(source, current_byte, &augmentation);
+
+        assert!(result.contains("Ax\\|y z |"), "{result:?}");
+        assert_eq!(parsed_table_count(&result, 2), 1);
+    }
+
+    #[test]
+    fn table_header_input_preserves_the_divider_row() {
+        let source = "| H1 | H2 |\n| :--- | ---: |\n| A | B |";
+        let current_byte = source.find("H1").expect("header cell exists") + 2;
+        let augmentation =
+            augment_edit(source, current_byte, AugmentKind::InsertText("x|y\r\nz".to_owned()))
+                .expect("table header input must be sanitized");
+        let result = apply_augmentation_at(source, current_byte, &augmentation);
+
+        assert!(result.starts_with("| H1x\\|y z | H2 |\n| :--- | ---: |"), "{result:?}");
+        assert_eq!(parsed_table_count(&result, 2), 1);
+    }
+
+    #[test]
+    fn table_paste_replacing_selected_cell_text_flattens_newlines_and_escapes_pipes() {
+        let source = "| H1 | H2 |\n| --- | --- |\n| A | B |";
+        let selected_cell_text = source.find('A').expect("body cell exists");
+        let selected_range = selected_cell_text..selected_cell_text + 1;
+        let pasted_text = "left|right\nnext";
+        let augmentation = augment_selected_text(source, selected_range.clone(), pasted_text)
+            .expect("pasting into a selected table cell must be sanitized");
+        let mut result = source.to_owned();
+        result
+            .replace_range(selected_range, augmentation.insert_text.as_deref().unwrap_or_default());
+
+        assert!(result.contains("left\\|right next"), "{result:?}");
+        assert_eq!(parsed_table_count(&result, 2), 1);
+    }
+
+    #[test]
+    fn tab_outside_a_table_uses_the_existing_editor_fallback() {
+        let source = "ordinary paragraph";
+
+        assert!(augment_edit(source, source.len(), AugmentKind::Tab).is_none());
+        assert!(augment_edit(source, source.len(), AugmentKind::ShiftTab).is_none());
+    }
 
     fn reset_classify_parse_count() {
         CLASSIFY_PARSE_COUNT.with(|parse_count| parse_count.set(0));

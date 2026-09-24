@@ -14,6 +14,7 @@ pub(crate) static RECENT_FILES: LazyLock<Mutex<Vec<PathBuf>>> =
 const RECENT_SLOTS: usize = 20;
 /// Base tag for recent file menu items (100-119).
 const RECENT_TAG_BASE: isize = 100;
+const INSERT_TABLE_TAG: isize = 30;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MenuAction {
@@ -49,6 +50,46 @@ pub enum MenuAction {
     ToggleWordWrap,
     SetViewModeSidebar,
     SetViewModeTabs,
+    InsertTable,
+}
+
+fn menu_action_from_tag(tag: isize) -> Option<MenuAction> {
+    Some(match tag {
+        1 => MenuAction::About,
+        2 => MenuAction::Preferences,
+        3 => MenuAction::Quit,
+        4 => MenuAction::NewFile,
+        5 => MenuAction::OpenFile,
+        6 => MenuAction::Save,
+        7 => MenuAction::SaveAs,
+        8 => MenuAction::CloseTab,
+        9 => MenuAction::Undo,
+        10 => MenuAction::Redo,
+        11 => MenuAction::Cut,
+        12 => MenuAction::Copy,
+        13 => MenuAction::Paste,
+        29 => MenuAction::PastePlainText,
+        14 => MenuAction::SelectAll,
+        15 => MenuAction::Find,
+        16 => MenuAction::ToggleTabBar,
+        17 => MenuAction::ToggleStatusBar,
+        18 => MenuAction::ZoomIn,
+        19 => MenuAction::ZoomOut,
+        20 => MenuAction::ZoomReset,
+        21 => MenuAction::ClearRecentFiles,
+        22 => MenuAction::SetThemeModeSystem,
+        23 => MenuAction::SetThemeModeDark,
+        24 => MenuAction::SetThemeModeLight,
+        25 => MenuAction::ToggleLineNumbers,
+        26 => MenuAction::ToggleWordWrap,
+        27 => MenuAction::SetViewModeSidebar,
+        28 => MenuAction::SetViewModeTabs,
+        INSERT_TABLE_TAG => MenuAction::InsertTable,
+        t if t >= RECENT_TAG_BASE && t < RECENT_TAG_BASE + RECENT_SLOTS as isize => {
+            MenuAction::OpenRecentFile((t - RECENT_TAG_BASE) as usize)
+        }
+        _ => return None,
+    })
 }
 
 pub struct NativeMenu {
@@ -87,7 +128,9 @@ impl NativeMenu {
 
 #[cfg(target_os = "macos")]
 mod macos {
-    use super::{MenuAction, RECENT_SLOTS, RECENT_TAG_BASE};
+    use super::{
+        INSERT_TABLE_TAG, MenuAction, RECENT_SLOTS, RECENT_TAG_BASE, menu_action_from_tag,
+    };
     use std::path::PathBuf;
     use std::sync::Mutex;
     use std::sync::mpsc;
@@ -110,41 +153,7 @@ mod macos {
             #[unsafe(method(menuAction:))]
             fn menu_action(&self, sender: &objc2::runtime::AnyObject) {
                 let tag: isize = unsafe { objc2::msg_send![sender, tag] };
-                let action = match tag {
-                    1 => MenuAction::About,
-                    2 => MenuAction::Preferences,
-                    3 => MenuAction::Quit,
-                    4 => MenuAction::NewFile,
-                    5 => MenuAction::OpenFile,
-                    6 => MenuAction::Save,
-                    7 => MenuAction::SaveAs,
-                    8 => MenuAction::CloseTab,
-                    9 => MenuAction::Undo,
-                    10 => MenuAction::Redo,
-                    11 => MenuAction::Cut,
-                    12 => MenuAction::Copy,
-                    13 => MenuAction::Paste,
-                    29 => MenuAction::PastePlainText,
-                    14 => MenuAction::SelectAll,
-                    15 => MenuAction::Find,
-                    16 => MenuAction::ToggleTabBar,
-                    17 => MenuAction::ToggleStatusBar,
-                    18 => MenuAction::ZoomIn,
-                    19 => MenuAction::ZoomOut,
-                    20 => MenuAction::ZoomReset,
-                    21 => MenuAction::ClearRecentFiles,
-                    22 => MenuAction::SetThemeModeSystem,
-                    23 => MenuAction::SetThemeModeDark,
-                    24 => MenuAction::SetThemeModeLight,
-                    25 => MenuAction::ToggleLineNumbers,
-                    26 => MenuAction::ToggleWordWrap,
-                    27 => MenuAction::SetViewModeSidebar,
-                    28 => MenuAction::SetViewModeTabs,
-                    t if t >= RECENT_TAG_BASE && t < RECENT_TAG_BASE + RECENT_SLOTS as isize => {
-                        MenuAction::OpenRecentFile((t - RECENT_TAG_BASE) as usize)
-                    }
-                    _ => return,
-                };
+                let Some(action) = menu_action_from_tag(tag) else { return };
                 if let Ok(guard) = MENU_TX.lock()
                     && let Some(ref tx) = *guard {
                         let _ = tx.send(action);
@@ -289,6 +298,12 @@ mod macos {
             m.addItem(&make_item("查找", 15, "f", target, mtm));
             main_menu.addItem(&make_submenu("编辑", &m, mtm));
         }
+        // -- Insert --
+        {
+            let menu = new_menu("插入", mtm);
+            menu.addItem(&make_item("表格…", INSERT_TABLE_TAG, "", target, mtm));
+            main_menu.addItem(&make_submenu("插入", &menu, mtm));
+        }
         // -- View --
         {
             let m = new_menu("视图", mtm);
@@ -348,5 +363,15 @@ mod macos {
         }
 
         super::NativeMenu { rx: Some(rx) }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{MenuAction, menu_action_from_tag};
+
+    #[test]
+    fn insert_table_menu_tag_routes_to_table_picker_action() {
+        assert_eq!(menu_action_from_tag(30), Some(MenuAction::InsertTable));
     }
 }

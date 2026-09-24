@@ -2747,8 +2747,8 @@ fn request_augment_kind(intent: &ui::plugin::EditIntent) -> Option<ui::plugin::A
         ui::plugin::EditIntent::InsertLineBreak => Some(ui::plugin::AugmentKind::LineBreak),
         ui::plugin::EditIntent::DeleteBackward => Some(ui::plugin::AugmentKind::Backspace),
         ui::plugin::EditIntent::Indent => Some(ui::plugin::AugmentKind::Tab),
+        ui::plugin::EditIntent::Outdent => Some(ui::plugin::AugmentKind::ShiftTab),
         ui::plugin::EditIntent::DeleteForward
-        | ui::plugin::EditIntent::Outdent
         | ui::plugin::EditIntent::PromoteObject
         | ui::plugin::EditIntent::DemoteObject
         | ui::plugin::EditIntent::SelectObject => None,
@@ -2974,6 +2974,13 @@ impl ViewPlugin for MarkdownEditorView {
             )
         {
             return PluginResponse::DrawList(DrawList::new());
+        }
+        if let PluginQuery::HitTestEditTarget { x, y, offset_x, offset_y } = &q {
+            return PluginResponse::EditHitTarget(
+                self.engine.hit_test_byte(*x, *y, *offset_x, *offset_y).map(|byte_offset| {
+                    ui::plugin::EditHitTarget::TextCaret { byte_offset, selection_scope: None }
+                }),
+            );
         }
         if let Some(resp) = self.engine.query_common(&q) {
             return resp;
@@ -8463,6 +8470,43 @@ viebcoding 用过吗?
                 "table cell {cell_text:?} must hit-test to its own source byte",
             );
         }
+    }
+
+    #[test]
+    fn markdown_editor_hit_test_edit_target_exposes_table_cell_caret() {
+        use ui::plugin::{EditHitTarget, PluginMessage, PluginQuery, PluginResponse, ViewPlugin};
+
+        let source = "| first | second |\n| --- | --- |\n| left | right |";
+        let target_byte = source.find("right").expect("fixture has a second-column cell");
+        let mut document = StubDoc::new(source);
+        let mut view = MarkdownEditorView::new();
+        view.set_source(document.text.clone(), 1);
+        view.handle_message(PluginMessage::SetCursorByte(target_byte), &mut document);
+        render_editor_once(&mut view, &document);
+
+        let (cursor_x, cursor_y, _, cursor_height) = view
+            .engine()
+            .cursor_screen_pos()
+            .expect("rendered second-column cell should expose its caret rect");
+        let response = view.query(
+            PluginQuery::HitTestEditTarget {
+                x: cursor_x,
+                y: cursor_y + cursor_height * 0.5,
+                offset_x: 0.0,
+                offset_y: 0.0,
+            },
+            &document,
+        );
+
+        let PluginResponse::EditHitTarget(Some(EditHitTarget::TextCaret {
+            byte_offset,
+            selection_scope,
+        })) = response
+        else {
+            panic!("Markdown table hit-test should return a text caret target");
+        };
+        assert_eq!(byte_offset, target_byte);
+        assert_eq!(selection_scope, None);
     }
 
     #[test]

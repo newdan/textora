@@ -54,6 +54,8 @@ pub(crate) enum AppCommand {
     ToggleTabBar,
     /// Open the settings file.
     OpenSettings,
+    /// Open the Markdown table size picker.
+    OpenTablePicker,
     SetThemeModeSystem,
     SetThemeModeDark,
     SetThemeModeLight,
@@ -68,6 +70,7 @@ pub(crate) fn dispatch_menu_action(action: MenuAction) -> Vec<AppCommand> {
     match action {
         MenuAction::About => vec![AppCommand::Noop], // TODO: show about dialog
         MenuAction::Preferences => vec![AppCommand::OpenSettings],
+        MenuAction::InsertTable => vec![AppCommand::OpenTablePicker],
         MenuAction::ToggleTabBar => vec![AppCommand::ToggleTabBar],
         MenuAction::ToggleStatusBar => vec![AppCommand::ToggleStatusBar],
         MenuAction::Find => vec![AppCommand::ToggleFind],
@@ -110,5 +113,11 @@ mod tests {
         let commands = dispatch_menu_action(MenuAction::PastePlainText);
         assert_eq!(commands.len(), 1);
         assert!(matches!(&commands[0], AppCommand::Edit(EditCommand::PastePlainText)));
+    }
+
+    #[test]
+    fn insert_table_menu_opens_the_table_picker() {
+        let commands = dispatch_menu_action(MenuAction::InsertTable);
+        assert!(matches!(commands.as_slice(), [AppCommand::OpenTablePicker]));
     }
 }

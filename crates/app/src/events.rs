@@ -64,6 +64,31 @@ fn is_toggle_pin_shortcut(key_text: Option<&str>, modifiers: ModifiersState) -> 
     modifiers.super_key() && modifiers.shift_key() && matches!(key_text, Some("p" | "P"))
 }
 
+fn dispatch_tab_key(
+    app: &mut App,
+    key_code: &ui::core::widget::KeyCode,
+    modifiers: &ui::core::Modifiers,
+) -> bool {
+    if *key_code != ui::core::widget::KeyCode::Tab
+        || !app.active_allows_editing()
+        || !app.editor_runtime.preedit().0.is_empty()
+        || modifiers.cmd
+        || modifiers.ctrl
+        || modifiers.alt
+    {
+        return false;
+    }
+
+    let intent = if modifiers.shift {
+        ui::plugin::EditIntent::Outdent
+    } else {
+        ui::plugin::EditIntent::Indent
+    };
+    let effect = app.dispatch_transactional_edit(intent, None);
+    app.apply_effect(effect);
+    true
+}
+
 /// Handle keyboard input events.
 pub(crate) fn handle_keyboard(app: &mut App, event: &winit::event::KeyEvent) -> Vec<AppAction> {
     let mut actions = Vec::new();
@@ -114,6 +139,12 @@ pub(crate) fn handle_keyboard(app: &mut App, event: &winit::event::KeyEvent) -> 
     if let Some(intent) = mapped_intent {
         let effect = app.dispatch_transactional_edit(intent, None);
         app.apply_effect(effect);
+        return Vec::new();
+    }
+
+    if let Some(key_code) = key_code.as_ref()
+        && dispatch_tab_key(app, key_code, &modifiers)
+    {
         return Vec::new();
     }
 
@@ -256,6 +287,9 @@ pub(crate) fn translate_widget_action(
         WidgetAction::MindmapStylePanel(action) => {
             actions.push(AppAction::MindmapStylePanel(action.clone()));
         }
+        WidgetAction::TablePicker(table_action) => {
+            actions.push(AppAction::TablePicker(table_action.clone()));
+        }
         WidgetAction::Consumed => {}
     }
 }
@@ -286,6 +320,7 @@ fn widget_action_consumes_editor_fallthrough(action: &WidgetAction) -> bool {
             | WidgetAction::List(_)
             | WidgetAction::TitleBar(_)
             | WidgetAction::MindmapStylePanel(_)
+            | WidgetAction::TablePicker(_)
             | WidgetAction::Consumed
     )
 }
@@ -532,10 +567,114 @@ pub(crate) fn handle_mouse_input_right(
         return actions;
     }
 
+    #[cfg(feature = "markdown")]
+    if let Some(menu) = table_structure_context_menu(app, px, py) {
+        actions.push(AppAction::OpenPopupMenu(menu));
+    }
+
     // 3. Tab bar right-click — already handled by dispatch_mouse above;
     //    removed redundant second dispatch.
 
     actions
+}
+
+#[cfg(feature = "markdown")]
+fn table_structure_context_menu(
+    app: &mut App,
+    px: f32,
+    py: f32,
+) -> Option<ui::popup_menu::PopupMenu> {
+    if app.active_plugin_name() != Some(ui::plugin::PLUGIN_MARKDOWN_EDITOR)
+        || !app.active_allows_editing()
+    {
+        return None;
+    }
+    let Some(Some(EditHitTarget::TextCaret { byte_offset, .. })) =
+        app.query_plugin_edit_hit_target(px, py)
+    else {
+        return None;
+    };
+    let (source, source_generation) = app
+        .active_tab_session()
+        .map(|tab| (tab.document.full_text(), tab.document.generation()))?;
+    table_structure_menu_for_source(
+        &source,
+        source_generation,
+        byte_offset,
+        (px, py),
+        (app.screen_width(), app.screen_height()),
+        app.ui_metrics().dpi,
+    )
+}
+
+#[cfg(feature = "markdown")]
+fn table_structure_menu_for_source(
+    source: &str,
+    source_generation: u32,
+    cursor_byte: usize,
+    px_position: (f32, f32),
+    screen_size: (f32, f32),
+    dpi: f32,
+) -> Option<ui::popup_menu::PopupMenu> {
+    let capabilities =
+        textora_markdown::commands::table_structure_capabilities(source, cursor_byte)?;
+    let operations = [
+        ("前插入行", ui::plugin::TableStructureCommand::InsertRowBefore),
+        ("后插入行", ui::plugin::TableStructureCommand::InsertRowAfter),
+        ("删除行", ui::plugin::TableStructureCommand::DeleteRow),
+        ("前插入列", ui::plugin::TableStructureCommand::InsertColumnBefore),
+        ("后插入列", ui::plugin::TableStructureCommand::InsertColumnAfter),
+        ("删除列", ui::plugin::TableStructureCommand::DeleteColumn),
+        (
+            "默认对齐",
+            ui::plugin::TableStructureCommand::SetColumnAlignment(
+                ui::plugin::TableColumnAlignment::Default,
+            ),
+        ),
+        (
+            "左对齐",
+            ui::plugin::TableStructureCommand::SetColumnAlignment(
+                ui::plugin::TableColumnAlignment::Left,
+            ),
+        ),
+        (
+            "居中对齐",
+            ui::plugin::TableStructureCommand::SetColumnAlignment(
+                ui::plugin::TableColumnAlignment::Center,
+            ),
+        ),
+        (
+            "右对齐",
+            ui::plugin::TableStructureCommand::SetColumnAlignment(
+                ui::plugin::TableColumnAlignment::Right,
+            ),
+        ),
+        ("删除表格", ui::plugin::TableStructureCommand::DeleteTable),
+    ];
+    let entries = operations
+        .into_iter()
+        .map(|(label, command)| {
+            let enabled = match command {
+                ui::plugin::TableStructureCommand::DeleteRow => capabilities.can_delete_row,
+                ui::plugin::TableStructureCommand::DeleteColumn => capabilities.can_delete_column,
+                _ => true,
+            };
+            ui::popup_menu::TableStructureMenuEntry {
+                label: label.to_owned(),
+                command,
+                enabled,
+                active: false,
+            }
+        })
+        .collect::<Vec<_>>();
+    Some(ui::popup_menu::PopupMenu::table_structure_px(
+        &entries,
+        cursor_byte,
+        source_generation,
+        screen_size,
+        px_position,
+        dpi,
+    ))
 }
 
 // ── Translation helpers ───────────────────────────────────────────────────
@@ -662,6 +801,13 @@ fn translate_popup_action(
         PMA::ToggleStatusBar => actions.push(AppAction::ToggleStatusBar),
         PMA::SetThemeMode(mode) => actions.push(AppAction::SetThemeMode(*mode)),
         PMA::NewDocument(kind) => actions.push(AppAction::NewDocument(*kind)),
+        PMA::TableStructure { command, cursor_byte, source_generation } => {
+            actions.push(AppAction::TableStructureEdit {
+                command: *command,
+                cursor_byte: *cursor_byte,
+                source_generation: *source_generation,
+            });
+        }
     }
 }
 
@@ -800,6 +946,144 @@ mod tests {
 
     use std::cell::RefCell;
     use std::rc::Rc;
+
+    #[cfg(feature = "markdown")]
+    #[test]
+    fn keyboard_shift_tab_dispatches_table_navigation_without_mutating_source() {
+        use ui::core::widget::KeyCode;
+
+        let directory = tempfile::tempdir().expect("table keyboard test directory should exist");
+        let path = directory.path().join("keyboard-table.md");
+        let source = "| head | other |\n| --- | --- |\n| one | two |\n| three | four |\n\noutside";
+        std::fs::write(&path, source).expect("Markdown fixture should be writable");
+        let mut app = App::new(None);
+        app.open_file(&path).expect("Markdown fixture should open");
+
+        let first_cell = source.find("one").expect("first table cell should exist");
+        let next_cell = source.find("two").expect("next table cell should exist");
+        {
+            let mut tab = app.active_tab_session_mut().expect("Markdown tab should be active");
+            tab.document.cursor_move_to_offset(next_cell);
+            tab.send_message(ui::plugin::PluginMessage::SetCursorByte(next_cell));
+        }
+
+        assert!(dispatch_tab_key(
+            &mut app,
+            &KeyCode::Tab,
+            &ui::core::Modifiers { shift: true, ..ui::core::Modifiers::NONE },
+        ));
+        assert_eq!(
+            app.active_tab_session()
+                .expect("Markdown tab should remain active")
+                .document
+                .cursor_offset()
+                .0,
+            first_cell,
+            "the window Shift+Tab path must dispatch Outdent to the Markdown plugin"
+        );
+        assert_eq!(
+            app.active_tab_session()
+                .expect("Markdown tab should remain active")
+                .document
+                .full_text(),
+            source,
+            "cell navigation must not modify the table"
+        );
+
+        let input_context = appkit_shell::editor_runtime::EditorInputContext {
+            focus: appkit_shell::editor_runtime::EditorFocus::Active,
+            modal_blocked: false,
+        };
+        app.editor_runtime.update_preedit(input_context, "拼".to_owned(), Some((0, 1)));
+        assert!(!dispatch_tab_key(&mut app, &KeyCode::Tab, &ui::core::Modifiers::NONE));
+        assert!(!dispatch_tab_key(
+            &mut app,
+            &KeyCode::Tab,
+            &ui::core::Modifiers { shift: true, ..ui::core::Modifiers::NONE },
+        ));
+        assert_eq!(
+            app.active_tab_session()
+                .expect("Markdown tab should remain active")
+                .document
+                .cursor_offset()
+                .0,
+            first_cell,
+            "IME preedit must block forward and reverse table navigation"
+        );
+        assert_eq!(
+            app.active_tab_session()
+                .expect("Markdown tab should remain active")
+                .document
+                .full_text(),
+            source,
+            "IME preedit must not mutate the table source"
+        );
+    }
+
+    #[cfg(feature = "markdown")]
+    #[test]
+    fn table_structure_context_menu_targets_the_clicked_column_and_disables_invalid_rows() {
+        let single_column = "| heading |\n| --- |\n| body |";
+        let header_cursor = single_column.find("heading").expect("header exists");
+        let header_menu = table_structure_menu_for_source(
+            single_column,
+            4,
+            header_cursor,
+            (120.0, 100.0),
+            (640.0, 480.0),
+            1.0,
+        )
+        .expect("right-click on a table header should open its structure menu");
+        assert!(!header_menu.items[2].enabled, "the header row cannot be deleted");
+        assert!(!header_menu.items[5].enabled, "a one-column table cannot lose its last column");
+
+        let two_columns = "| first | second |\n| --- | --- |\n| left | right |";
+        let clicked_cell = two_columns.find("right").expect("second-column body cell exists");
+        let generation = 9;
+        let menu = table_structure_menu_for_source(
+            two_columns,
+            generation,
+            clicked_cell,
+            (120.0, 100.0),
+            (640.0, 480.0),
+            1.0,
+        )
+        .expect("right-click on a table body cell should open its structure menu");
+        let alignment_action = &menu.items[9].action;
+        assert_eq!(
+            alignment_action,
+            &ui::popup_menu::PopupMenuAction::TableStructure {
+                command: ui::plugin::TableStructureCommand::SetColumnAlignment(
+                    ui::plugin::TableColumnAlignment::Right,
+                ),
+                cursor_byte: clicked_cell,
+                source_generation: generation,
+            }
+        );
+        let plan = textora_markdown::commands::plan_semantic_edit(
+            two_columns,
+            generation,
+            clicked_cell,
+            None,
+            ui::plugin::SemanticEditCommand::TableStructure(
+                ui::plugin::TableStructureCommand::SetColumnAlignment(
+                    ui::plugin::TableColumnAlignment::Right,
+                ),
+            ),
+        );
+        let ui::plugin::SemanticEditPlan::Apply(transaction) = plan else {
+            panic!("alignment on the clicked second column should produce a transaction");
+        };
+        assert_eq!(
+            &two_columns[transaction.replacements[0].range.clone()],
+            "---",
+            "the second delimiter cell should be the only edited source range"
+        );
+        assert_eq!(
+            transaction.replacements[0].range.start,
+            two_columns.rfind("---").expect("second alignment cell exists")
+        );
+    }
     use ui::plugin::{EditHitTarget, PluginQuery, PluginResponse, ViewPlugin};
     use winit::window::CursorIcon;
 
@@ -1507,6 +1791,22 @@ mod tests {
         translate_widget_action(&widget_action, &app, &mut actions);
 
         assert!(matches!(actions.as_slice(), [AppAction::DismissOverlay]));
+        assert!(widget_action_consumes_editor_fallthrough(&widget_action));
+    }
+
+    #[test]
+    fn table_picker_widget_action_routes_typed_result_and_consumes_editor_fallthrough() {
+        let app = App::new(None);
+        let widget_action =
+            WidgetAction::TablePicker(ui::table_picker::TablePickerAction::PreviewChanged(None));
+        let mut actions = Vec::new();
+
+        translate_widget_action(&widget_action, &app, &mut actions);
+
+        assert!(matches!(
+            actions.as_slice(),
+            [AppAction::TablePicker(ui::table_picker::TablePickerAction::PreviewChanged(None))]
+        ));
         assert!(widget_action_consumes_editor_fallthrough(&widget_action));
     }
 

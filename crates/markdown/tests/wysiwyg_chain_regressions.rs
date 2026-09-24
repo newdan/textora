@@ -46,6 +46,154 @@ fn render(view: &mut MarkdownEditorView, doc: &Document) {
 mod tests {
     use super::*;
     use ui::plugin::{EditIntent, EditPlan, EditRequest};
+
+    fn inserted_table(
+        source: &str,
+        cursor_byte: usize,
+        columns: usize,
+        rows: usize,
+    ) -> (String, usize) {
+        let plan = textora_markdown::commands::plan_semantic_edit(
+            source,
+            1,
+            cursor_byte,
+            None,
+            ui::plugin::SemanticEditCommand::InsertTable { columns, rows },
+        );
+        let ui::plugin::SemanticEditPlan::Apply(transaction) = plan else {
+            panic!("table insertion should produce one transaction");
+        };
+        let replacement = transaction.replacements.first().expect("table replacement exists");
+        let mut result = source.to_owned();
+        result.replace_range(replacement.range.clone(), &replacement.text);
+        let ui::plugin::EditSelection::Caret(cursor_after) = transaction.selection_after else {
+            panic!("table insertion should place a caret");
+        };
+        (result, cursor_after)
+    }
+
+    #[test]
+    fn insert_table_generates_parseable_empty_tables_and_places_caret_in_first_header_cell() {
+        for columns in [1, 3] {
+            let (source, cursor) = inserted_table("", 0, columns, 2);
+            let parsed = textora_markdown::parser::parse_markdown(&source);
+            assert!(
+                parsed.events.iter().any(|event| matches!(
+                    event,
+                    textora_markdown::parser::MarkdownEvent::Start(
+                        textora_markdown::parser::MarkdownTag::Table(_)
+                    )
+                )),
+                "generated source must parse as a GFM table: {source:?}"
+            );
+            assert_eq!(cursor, 2);
+        }
+    }
+
+    #[test]
+    fn insert_table_replaces_empty_paragraph_and_splits_text_at_all_cursor_positions() {
+        let (empty, _) = inserted_table("", 0, 1, 2);
+        assert!(empty.starts_with('|'));
+
+        let (empty_paragraph, _) = inserted_table("before\n\nafter", 7, 1, 2);
+        assert!(empty_paragraph.starts_with("before\n\n|"), "{empty_paragraph:?}");
+        assert!(empty_paragraph.ends_with("\n\nafter"));
+
+        let (at_start, _) = inserted_table("alpha", 0, 1, 2);
+        assert!(at_start.ends_with("\n\nalpha"));
+
+        let (in_middle, _) = inserted_table("alphaomega", 5, 1, 2);
+        assert!(in_middle.starts_with("alpha\n\n|"));
+        assert!(in_middle.ends_with("\n\nomega"));
+
+        let (at_end, _) = inserted_table("alpha", 5, 1, 2);
+        assert!(at_end.starts_with("alpha\n\n|"));
+    }
+
+    #[test]
+    fn insert_table_preserves_adjacent_blocks_and_crlf_style() {
+        let source = "# title\n\nparagraph\n\n- item";
+        let (result, _) = inserted_table(source, 12, 2, 2);
+        assert!(result.starts_with("# title\n\n"));
+        assert!(result.ends_with("\n\n- item"));
+
+        let (crlf, _) = inserted_table("left right\r\n\r\nnext", 5, 2, 2);
+        assert!(crlf.contains("\r\n|"));
+        assert!(!crlf.replace("\r\n", "").contains('\n'));
+    }
+
+    #[test]
+    fn insert_table_in_empty_list_line_stays_in_item_and_preserves_following_item() {
+        let source = "- before\n  \n- after";
+        let cursor = source.find("  \n").expect("list contains a blank line") + 2;
+        let (result, _) = inserted_table(source, cursor, 2, 2);
+        assert_eq!(result, "- before\n  \n\n  | | |\n  | --- | --- |\n  | | |\n- after");
+
+        let events = textora_markdown::parser::parse_markdown(&result).events;
+        let table_columns = events.iter().find_map(|event| match event {
+            textora_markdown::parser::MarkdownEvent::Start(
+                textora_markdown::parser::MarkdownTag::Table(columns),
+            ) => Some(columns.len()),
+            _ => None,
+        });
+        assert_eq!(table_columns, Some(2));
+        let first_item_start = events
+            .iter()
+            .position(|event| {
+                matches!(
+                    event,
+                    textora_markdown::parser::MarkdownEvent::Start(
+                        textora_markdown::parser::MarkdownTag::Item
+                    )
+                )
+            })
+            .expect("first list item should parse");
+        let first_item_end = events
+            .iter()
+            .position(|event| {
+                matches!(
+                    event,
+                    textora_markdown::parser::MarkdownEvent::End(
+                        textora_markdown::parser::MarkdownTagEnd::Item
+                    )
+                )
+            })
+            .expect("first list item should close");
+        let table_start = events
+            .iter()
+            .position(|event| {
+                matches!(
+                    event,
+                    textora_markdown::parser::MarkdownEvent::Start(
+                        textora_markdown::parser::MarkdownTag::Table(_)
+                    )
+                )
+            })
+            .expect("inserted table should parse");
+        assert!(first_item_start < table_start && table_start < first_item_end);
+        assert_eq!(
+            events
+                .iter()
+                .filter(|event| matches!(
+                    event,
+                    textora_markdown::parser::MarkdownEvent::Start(
+                        textora_markdown::parser::MarkdownTag::Item
+                    )
+                ))
+                .count(),
+            2,
+            "the neighboring list items must remain distinct"
+        );
+        assert!(events.iter().any(|event| matches!(
+            event,
+            textora_markdown::parser::MarkdownEvent::Text(text) if text == "before"
+        )));
+        assert!(events.iter().any(|event| matches!(
+            event,
+            textora_markdown::parser::MarkdownEvent::Text(text) if text == "after"
+        )));
+    }
+
     fn editor(source: &str, cursor: usize) -> (MarkdownEditorView, Document) {
         let mut document = Document(source.to_owned());
         let mut view = MarkdownEditorView::new();

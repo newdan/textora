@@ -40,6 +40,12 @@ pub(crate) enum AppAction {
     Settings(ui::settings_view::SettingsViewAction),
     /// Apply an action emitted by Textora's product-owned Sync settings page.
     Sync(SyncSettingsAction),
+    /// Run a Markdown table structure operation from its clicked cell context.
+    TableStructureEdit {
+        command: ui::plugin::TableStructureCommand,
+        cursor_byte: usize,
+        source_generation: u32,
+    },
 
     // ------------------------------------------------------------------------
     // Mouse and scroll inputs
@@ -117,6 +123,8 @@ pub(crate) enum AppAction {
     ToggleMindmapStylePanel,
     /// Handle an action emitted by the mmap style panel.
     MindmapStylePanel(ui::core::widget::MindmapStylePanelAction),
+    /// Handle a typed table picker result.
+    TablePicker(ui::table_picker::TablePickerAction),
 
     // ------------------------------------------------------------------------
     // Sidebar interactions (Phase 7 widget path)

@@ -195,7 +195,7 @@ impl App {
 
     /// Pure routing: match on `AppAction`, return the aggregated `AppEffect`
     /// without applying any global follow-ups.
-    fn reduce_action(
+    pub(crate) fn reduce_action(
         &mut self,
         action: AppAction,
         event_loop: Option<&winit::event_loop::ActiveEventLoop>,
@@ -294,6 +294,10 @@ impl App {
             AppAction::MindmapStylePanel(action) => {
                 self.dispatch_mindmap_style_panel_action(action)
             }
+            AppAction::TablePicker(action) => self.dispatch_table_picker_action(action),
+            AppAction::TableStructureEdit { command, cursor_byte, source_generation } => {
+                self.dispatch_table_structure_edit(command, cursor_byte, source_generation)
+            }
             AppAction::SidebarResizeStart => {
                 self.dispatch_chrome_action(ChromeDispatchAction::SidebarResizeStart)
             }
@@ -367,6 +371,70 @@ impl App {
                 self.apply_active_mindmap_theme(theme_id)
             }
         }
+    }
+
+    fn dispatch_table_picker_action(
+        &mut self,
+        action: ui::table_picker::TablePickerAction,
+    ) -> AppEffect {
+        use ui::table_picker::TablePickerAction;
+
+        match action {
+            TablePickerAction::PreviewChanged(_) => AppEffect::REDRAW,
+            TablePickerAction::Cancelled => {
+                if !self.table_picker_overlay_is_active() {
+                    return AppEffect::NONE;
+                }
+                self.ui_shell.pop_overlay();
+                AppEffect::REDRAW
+            }
+            TablePickerAction::Confirmed(size) => {
+                if !self.table_picker_overlay_is_active()
+                    || self.active_plugin_name() != Some(ui::plugin::PLUGIN_MARKDOWN_EDITOR)
+                {
+                    return AppEffect::NONE;
+                }
+                let effect =
+                    self.dispatch_semantic_edit(ui::plugin::SemanticEditCommand::InsertTable {
+                        columns: size.columns,
+                        rows: size.rows,
+                    });
+                self.ui_shell.pop_overlay();
+                effect.merge(AppEffect::REDRAW)
+            }
+        }
+    }
+
+    fn table_picker_overlay_is_active(&self) -> bool {
+        self.ui_shell
+            .active_overlay_widget_ref::<ui::modal_frame::ModalFrame>()
+            .is_some_and(|frame| frame.content_as_any().is::<ui::table_picker::TablePickerWidget>())
+    }
+
+    fn dispatch_table_structure_edit(
+        &mut self,
+        command: ui::plugin::TableStructureCommand,
+        cursor_byte: usize,
+        source_generation: u32,
+    ) -> AppEffect {
+        if self.active_plugin_name() != Some(ui::plugin::PLUGIN_MARKDOWN_EDITOR)
+            || !self.active_allows_editing()
+        {
+            return AppEffect::NONE;
+        }
+        {
+            let Some(tab) = self.active_tab_session_mut() else {
+                return AppEffect::NONE;
+            };
+            if tab.document.generation() != source_generation
+                || cursor_byte > tab.document.buffer_len()
+                || !tab.document.full_text().is_char_boundary(cursor_byte)
+            {
+                return AppEffect::NONE;
+            }
+            tab.document.cursor_move_to_offset(cursor_byte);
+        }
+        self.dispatch_semantic_edit(ui::plugin::SemanticEditCommand::TableStructure(command))
     }
 
     fn apply_active_mindmap_theme(&mut self, theme_id: String) -> AppEffect {
@@ -1141,6 +1209,157 @@ mod tests {
         assert!(entry.document.dirty);
         assert_eq!(state.plan_queries.borrow().as_slice(), &[("tide".into(), generation_before)]);
         assert_eq!(state.sync_queries.get(), 1);
+    }
+
+    #[test]
+    fn table_picker_confirmation_executes_one_semantic_insert_table_transaction() {
+        let directory = tempfile::tempdir().expect("table-picker test directory should exist");
+        let path = directory.path().join("insert-table.md");
+        std::fs::write(&path, "existing paragraph")
+            .expect("table-picker fixture should be writable");
+        let mut app = App::new(None);
+        app.open_file(&path).expect("Markdown fixture should open");
+        let generation_before =
+            app.active_tab_session().expect("Markdown tab should be active").document.generation();
+        let mut picker = ui::table_picker::TablePickerWidget::new();
+        picker.set_input(ui::table_picker::TablePickerInput { open: true });
+        app.ui_shell.push_overlay_with_policy(
+            Box::new(ui::modal_frame::ModalFrame::new("插入表格", Box::new(picker))),
+            ui::OverlayLayout::Centered {
+                preferred_size: (300.0, 270.0),
+                min_margin: 16.0,
+                max_width_ratio: 0.92,
+                max_height_ratio: 0.90,
+            },
+            ui::OverlayInputPolicy::Modal,
+            ui::DismissPolicy::EscapeOrExplicit,
+        );
+
+        let effect = app.reduce_action(
+            AppAction::TablePicker(ui::table_picker::TablePickerAction::Confirmed(
+                ui::table_picker::TableSize { columns: 2, rows: 3 },
+            )),
+            None,
+        );
+
+        let active_document = app.active_tab_session().expect("Markdown tab should remain active");
+        assert_eq!(active_document.document.generation(), generation_before + 1);
+        assert!(!app.ui_shell.active_overlay_is_modal());
+        let parsed =
+            textora_markdown::parser::parse_markdown(&active_document.document.full_text());
+        assert!(parsed.events.iter().any(|event| matches!(
+            event,
+            textora_markdown::parser::MarkdownEvent::Start(
+                textora_markdown::parser::MarkdownTag::Table(alignments)
+            ) if alignments.len() == 2
+        )));
+        assert!(effect.redraw);
+    }
+
+    #[test]
+    #[cfg(feature = "markdown")]
+    fn table_structure_menu_action_is_one_undoable_saved_transaction() {
+        let directory = tempfile::tempdir().expect("table-structure test directory should exist");
+        let path = directory.path().join("table-structure.md");
+        let original = "| first | second |\n| --- | --- |\n| left | right |";
+        std::fs::write(&path, original).expect("table-structure fixture should be writable");
+        let mut app = App::new(None);
+        app.open_file(&path).expect("Markdown fixture should open");
+        let generation_before =
+            app.active_tab_session().expect("Markdown tab should be active").document.generation();
+        let cursor_byte = original.find("right").expect("clicked second-column cell exists");
+
+        let effect = app.reduce_action(
+            AppAction::TableStructureEdit {
+                command: ui::plugin::TableStructureCommand::SetColumnAlignment(
+                    ui::plugin::TableColumnAlignment::Right,
+                ),
+                cursor_byte,
+                source_generation: generation_before,
+            },
+            None,
+        );
+
+        let expected = "| first | second |\n| --- | ---: |\n| left | right |";
+        let active = app.active_tab_session().expect("Markdown tab should remain active");
+        assert_eq!(active.document.full_text(), expected);
+        assert_eq!(active.document.generation(), generation_before + 1);
+        assert!(effect.redraw);
+
+        app.dispatch_semantic_edit(ui::plugin::SemanticEditCommand::Undo);
+        assert_eq!(
+            app.active_tab_session().expect("Markdown tab remains").document.full_text(),
+            original
+        );
+        app.dispatch_semantic_edit(ui::plugin::SemanticEditCommand::Redo);
+        assert_eq!(
+            app.active_tab_session().expect("Markdown tab remains").document.full_text(),
+            expected
+        );
+
+        let tab_id = app.editor_tab_id_at(0).expect("saved Markdown tab has an id");
+        let save =
+            app.editor_runtime.prepare_save(tab_id).expect("changed Markdown tab should save");
+        std::fs::write(&save.path, save.serialized_contents)
+            .expect("prepared Markdown save should write to disk");
+        let mut reopened_app = App::new(None);
+        reopened_app.open_file(&path).expect("saved Markdown file should reopen");
+        let reopened = reopened_app
+            .active_tab_session()
+            .expect("reopened Markdown tab should be active")
+            .document
+            .full_text();
+        assert_eq!(reopened, expected);
+        let parsed = textora_markdown::parser::parse_markdown(&reopened);
+        assert!(parsed.events.iter().any(|event| matches!(
+            event,
+            textora_markdown::parser::MarkdownEvent::Start(
+                textora_markdown::parser::MarkdownTag::Table(alignments)
+            ) if alignments.len() == 2 && alignments[0] != alignments[1]
+        )));
+    }
+
+    #[test]
+    fn table_picker_cancellation_closes_without_changing_the_document() {
+        let directory = tempfile::tempdir().expect("table-picker test directory should exist");
+        let path = directory.path().join("cancel-table-picker.md");
+        std::fs::write(&path, "existing paragraph")
+            .expect("table-picker fixture should be writable");
+        let mut app = App::new(None);
+        app.open_file(&path).expect("Markdown fixture should open");
+        let generation_before =
+            app.active_tab_session().expect("Markdown tab should be active").document.generation();
+        let source_before = app
+            .active_tab_session()
+            .expect("Markdown tab should be active")
+            .document
+            .full_text()
+            .to_owned();
+        app.ui_shell.push_overlay_with_policy(
+            Box::new(ui::modal_frame::ModalFrame::new(
+                "插入表格",
+                Box::new(ui::table_picker::TablePickerWidget::new()),
+            )),
+            ui::OverlayLayout::Centered {
+                preferred_size: (300.0, 270.0),
+                min_margin: 16.0,
+                max_width_ratio: 0.92,
+                max_height_ratio: 0.90,
+            },
+            ui::OverlayInputPolicy::Modal,
+            ui::DismissPolicy::EscapeOrExplicit,
+        );
+
+        let effect = app.reduce_action(
+            AppAction::TablePicker(ui::table_picker::TablePickerAction::Cancelled),
+            None,
+        );
+
+        assert!(!app.ui_shell.active_overlay_is_modal());
+        let active_document = app.active_tab_session().expect("Markdown tab should remain active");
+        assert_eq!(active_document.document.full_text(), source_before);
+        assert_eq!(active_document.document.generation(), generation_before);
+        assert!(effect.redraw);
     }
 
     #[test]

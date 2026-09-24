@@ -1,5 +1,10 @@
 use ui::plugin::{SemanticEditCommand, SemanticEditPlan};
 
+mod table_structure;
+pub use table_structure::{TableStructureCapabilities, table_structure_capabilities};
+#[cfg(test)]
+use table_structure::{format_table_row, source_table_at};
+
 pub fn plan_semantic_edit(
     source: &str,
     source_generation: u32,
@@ -58,6 +63,12 @@ pub fn plan_semantic_edit(
         SemanticEditCommand::InsertLink => {
             plan_link(source, source_generation, cursor_byte, selection)
         }
+        SemanticEditCommand::InsertTable { columns, rows } => {
+            plan_insert_table(source, source_generation, cursor_byte, selection, columns, rows)
+        }
+        SemanticEditCommand::TableStructure(operation) => {
+            table_structure::plan_table_structure(source, source_generation, cursor_byte, operation)
+        }
         SemanticEditCommand::PromoteObject | SemanticEditCommand::DemoteObject => {
             SemanticEditPlan::Unsupported
         }
@@ -67,6 +78,353 @@ pub fn plan_semantic_edit(
 const CODE_MARKER: &str = "\x60";
 const LF_SEQUENCE: &str = "\n";
 const CRLF_SEQUENCE: &str = "\r\n";
+const MAX_TABLE_COLUMNS: usize = 64;
+const MAX_TABLE_ROWS: usize = 1_000;
+
+fn plan_insert_table(
+    source: &str,
+    source_generation: u32,
+    cursor_byte: usize,
+    selection: Option<std::ops::Range<usize>>,
+    columns: usize,
+    rows: usize,
+) -> SemanticEditPlan {
+    if selection.is_some_and(|range| range.start < range.end)
+        || columns == 0
+        || columns > MAX_TABLE_COLUMNS
+        || !(2..=MAX_TABLE_ROWS).contains(&rows)
+    {
+        return SemanticEditPlan::Unsupported;
+    }
+
+    let newline = if source.contains(CRLF_SEQUENCE) { CRLF_SEQUENCE } else { LF_SEQUENCE };
+    let table_source = generate_empty_table(columns, rows, newline);
+    if !parsed_table_has_columns(&table_source, columns) {
+        return SemanticEditPlan::Unsupported;
+    }
+    if let Some(context) = container_paragraph_context(source, cursor_byte) {
+        if cursor_byte < context.content_start {
+            return SemanticEditPlan::Unsupported;
+        }
+        let paragraph_prefix = &source[context.range.start..context.content_start];
+        let paragraph_before = &source[context.content_start..cursor_byte];
+        let paragraph_after = &source[cursor_byte..context.range.end];
+        let container_table = prefix_table_rows(&table_source, &context.row_prefix, newline);
+        let separator = if context.separator_prefix.is_empty() {
+            format!("{newline}{newline}")
+        } else {
+            format!("{newline}{}{newline}", context.separator_prefix)
+        };
+        let before_paragraph = format!("{paragraph_prefix}{paragraph_before}");
+        let after_paragraph = if paragraph_after.is_empty() {
+            String::new()
+        } else {
+            format!("{}{paragraph_after}", context.row_prefix)
+        };
+        let replacement = if after_paragraph.is_empty() {
+            format!("{before_paragraph}{separator}{container_table}")
+        } else {
+            format!("{before_paragraph}{separator}{container_table}{separator}{after_paragraph}")
+        };
+        let result = format!(
+            "{}{replacement}{}",
+            &source[..context.range.start],
+            &source[context.range.end..]
+        );
+        if parsed_table_count(&result, columns) != parsed_table_count(source, columns) + 1 {
+            return SemanticEditPlan::Unsupported;
+        }
+        let cursor_after = context.range.start
+            + before_paragraph.len()
+            + separator.len()
+            + context.row_prefix.len()
+            + 2;
+        return apply_transaction(source_generation, context.range, replacement, cursor_after);
+    }
+    let replacement_range = if source.is_empty() {
+        0..0
+    } else if let Some(range) = top_level_paragraph_range(source, cursor_byte) {
+        range
+    } else if let Some(range) = empty_line_range(source, cursor_byte) {
+        let replacement = format!("{newline}{table_source}{newline}");
+        let result = format!("{}{replacement}{}", &source[..range.start], &source[range.end..]);
+        if parsed_table_count(&result, columns) != parsed_table_count(source, columns) + 1 {
+            return SemanticEditPlan::Unsupported;
+        }
+        let cursor_after = range.start + newline.len() + 2;
+        return apply_transaction(source_generation, range, replacement, cursor_after);
+    } else {
+        return SemanticEditPlan::Unsupported;
+    };
+    let paragraph_prefix = &source[replacement_range.start..cursor_byte];
+    let paragraph_suffix = &source[cursor_byte..replacement_range.end];
+    let replacement = match (paragraph_prefix.is_empty(), paragraph_suffix.is_empty()) {
+        (true, true) => table_source.clone(),
+        (true, false) => format!("{table_source}{newline}{newline}{paragraph_suffix}"),
+        (false, true) => format!("{paragraph_prefix}{newline}{newline}{table_source}"),
+        (false, false) => format!(
+            "{paragraph_prefix}{newline}{newline}{table_source}{newline}{newline}{paragraph_suffix}"
+        ),
+    };
+    let result = format!(
+        "{}{replacement}{}",
+        &source[..replacement_range.start],
+        &source[replacement_range.end..]
+    );
+    if parsed_table_count(&result, columns) != parsed_table_count(source, columns) + 1 {
+        return SemanticEditPlan::Unsupported;
+    }
+    let cursor_after = replacement_range.start
+        + paragraph_prefix.len()
+        + if paragraph_prefix.is_empty() { 0 } else { newline.len() * 2 }
+        + 2;
+    apply_transaction(source_generation, replacement_range, replacement, cursor_after)
+}
+
+fn generate_empty_table(columns: usize, rows: usize, newline: &str) -> String {
+    let empty_cells = "| ".repeat(columns);
+    let row_suffix = "|";
+    let header = format!("{empty_cells}{row_suffix}");
+    let separator = format!("{}|", "| --- ".repeat(columns));
+    let body_rows = (0..rows - 1).map(|_| header.as_str()).collect::<Vec<_>>().join(newline);
+    format!("{header}{newline}{separator}{newline}{body_rows}")
+}
+
+fn prefix_table_rows(table_source: &str, row_prefix: &str, newline: &str) -> String {
+    table_source
+        .split(newline)
+        .map(|row| format!("{row_prefix}{row}"))
+        .collect::<Vec<_>>()
+        .join(newline)
+}
+
+fn parsed_table_has_columns(source: &str, columns: usize) -> bool {
+    parsed_table_count(source, columns) > 0
+}
+
+fn parsed_table_count(source: &str, columns: usize) -> usize {
+    use crate::parser::{MarkdownEvent, MarkdownTag};
+    crate::parser::parse_markdown(source)
+        .events
+        .iter()
+        .filter(|event| matches!(event, MarkdownEvent::Start(MarkdownTag::Table(alignments)) if alignments.len() == columns))
+        .count()
+}
+
+fn top_level_paragraph_range(source: &str, cursor_byte: usize) -> Option<std::ops::Range<usize>> {
+    use crate::parser::{MarkdownEvent, MarkdownTag, MarkdownTagEnd};
+    let parsed = crate::parser::parse_markdown(source);
+    let mut block_depth = 0_usize;
+    let mut paragraph_start = None;
+    for (index, event) in parsed.events.iter().enumerate() {
+        match event {
+            MarkdownEvent::Start(MarkdownTag::Paragraph) if block_depth == 0 => {
+                paragraph_start = Some(index);
+            }
+            MarkdownEvent::End(MarkdownTagEnd::Paragraph) => {
+                if let Some(start_index) = paragraph_start.take() {
+                    let start = parsed.event_ranges[start_index].start;
+                    let end = parsed.event_ranges[index].end;
+                    let line_start = source[..start].rfind('\n').map_or(0, |newline| newline + 1);
+                    let mut line_end =
+                        source[end..].find('\n').map_or(source.len(), |offset| end + offset);
+                    if line_end > line_start && source.as_bytes()[line_end - 1] == b'\n' {
+                        line_end -= 1;
+                    }
+                    if line_end > line_start && source.as_bytes()[line_end - 1] == b'\r' {
+                        line_end -= 1;
+                    }
+                    if cursor_byte >= line_start && cursor_byte <= line_end {
+                        return Some(line_start..line_end);
+                    }
+                }
+            }
+            MarkdownEvent::Start(
+                MarkdownTag::BlockQuote
+                | MarkdownTag::List(..)
+                | MarkdownTag::Item
+                | MarkdownTag::Table(_),
+            ) => block_depth += 1,
+            MarkdownEvent::End(
+                MarkdownTagEnd::BlockQuote
+                | MarkdownTagEnd::List
+                | MarkdownTagEnd::Item
+                | MarkdownTagEnd::Table,
+            ) => block_depth = block_depth.saturating_sub(1),
+            _ => {}
+        }
+    }
+    None
+}
+
+struct ContainerParagraphContext {
+    range: std::ops::Range<usize>,
+    row_prefix: String,
+    separator_prefix: String,
+    content_start: usize,
+}
+
+fn container_paragraph_context(
+    source: &str,
+    cursor_byte: usize,
+) -> Option<ContainerParagraphContext> {
+    use crate::parser::{MarkdownEvent, MarkdownTag, MarkdownTagEnd};
+    let parsed = crate::parser::parse_markdown(source);
+    for (start_index, event) in parsed.events.iter().enumerate() {
+        if !matches!(event, MarkdownEvent::Start(MarkdownTag::Paragraph)) {
+            continue;
+        }
+        let Some(end_index) = (start_index + 1..parsed.events.len()).find(|index| {
+            matches!(parsed.events[*index], MarkdownEvent::End(MarkdownTagEnd::Paragraph))
+        }) else {
+            continue;
+        };
+        let paragraph_start = parsed.event_ranges[start_index].start;
+        let paragraph_end = parsed.event_ranges[end_index].end;
+        let line_start = source[..paragraph_start].rfind('\n').map_or(0, |newline| newline + 1);
+        let mut line_end = source[paragraph_end..]
+            .find('\n')
+            .map_or(source.len(), |offset| paragraph_end + offset);
+        if line_end > line_start && source.as_bytes()[line_end - 1] == b'\n' {
+            line_end -= 1;
+        }
+        if line_end > line_start && source.as_bytes()[line_end - 1] == b'\r' {
+            line_end -= 1;
+        }
+        if cursor_byte < line_start || cursor_byte > line_end {
+            continue;
+        }
+        let line = &source[line_start..line_end];
+        let (row_prefix, separator_prefix, content_offset) = container_prefixes(line)?;
+        return Some(ContainerParagraphContext {
+            range: line_start..line_end,
+            row_prefix,
+            separator_prefix,
+            content_start: line_start + content_offset,
+        });
+    }
+    let line_start = source[..cursor_byte].rfind('\n').map_or(0, |newline| newline + 1);
+    let mut line_end =
+        source[cursor_byte..].find('\n').map_or(source.len(), |offset| cursor_byte + offset);
+    if line_end > line_start && source.as_bytes()[line_end - 1] == b'\r' {
+        line_end -= 1;
+    }
+    let line = &source[line_start..line_end];
+    let (row_prefix, separator_prefix, content_offset) = container_prefixes(line)?;
+    Some(ContainerParagraphContext {
+        range: line_start..line_end,
+        row_prefix,
+        separator_prefix,
+        content_start: line_start + content_offset,
+    })
+}
+
+fn container_prefixes(line: &str) -> Option<(String, String, usize)> {
+    let indentation = line.len() - line.trim_start().len();
+    let mut remaining = &line[indentation..];
+    let mut quote_prefix = " ".repeat(indentation);
+    let mut has_quote = false;
+    loop {
+        let Some(after_marker) = remaining.strip_prefix('>') else {
+            break;
+        };
+        has_quote = true;
+        quote_prefix.push('>');
+        if let Some(after_space) = after_marker.strip_prefix(' ') {
+            quote_prefix.push(' ');
+            remaining = after_space;
+        } else {
+            remaining = after_marker;
+        }
+        let continuation_indentation = remaining.len() - remaining.trim_start().len();
+        quote_prefix.push_str(&" ".repeat(continuation_indentation));
+        remaining = &remaining[continuation_indentation..];
+    }
+    if let Some(marker_end) = list_marker_content_start(remaining) {
+        let continuation_prefix =
+            format!("{}{spaces}", quote_prefix, spaces = " ".repeat(marker_end));
+        let separator_prefix = if has_quote { quote_prefix } else { String::new() };
+        let content_offset = line.len() - remaining.len() + marker_end;
+        return Some((continuation_prefix, separator_prefix, content_offset));
+    }
+    has_quote.then(|| {
+        let content_offset = line.len() - remaining.len();
+        (quote_prefix.clone(), quote_prefix, content_offset)
+    })
+}
+
+fn list_marker_content_start(line: &str) -> Option<usize> {
+    let first = line.chars().next()?;
+    if matches!(first, '-' | '+' | '*') {
+        let marker_end = first.len_utf8();
+        return line[marker_end..].starts_with(char::is_whitespace).then(|| marker_end + 1);
+    }
+    let digit_end = line.bytes().position(|byte| !byte.is_ascii_digit())?;
+    if digit_end == 0 || !matches!(line.as_bytes().get(digit_end), Some(b'.' | b')')) {
+        return None;
+    }
+    let marker_end = digit_end + 1;
+    line[marker_end..].starts_with(char::is_whitespace).then(|| marker_end + 1)
+}
+
+fn empty_line_range(source: &str, cursor_byte: usize) -> Option<std::ops::Range<usize>> {
+    if cursor_is_inside_container(source, cursor_byte) {
+        return None;
+    }
+    let line_start = source[..cursor_byte].rfind('\n').map_or(0, |newline| newline + 1);
+    let mut line_end =
+        source[cursor_byte..].find('\n').map_or(source.len(), |offset| cursor_byte + offset);
+    if line_end > line_start && source.as_bytes()[line_end - 1] == b'\r' {
+        line_end -= 1;
+    }
+    let line_range = line_start..line_end;
+    source[line_range.clone()].trim().is_empty().then_some(line_range)
+}
+
+fn cursor_is_inside_container(source: &str, cursor_byte: usize) -> bool {
+    use crate::parser::{MarkdownEvent, MarkdownTag, MarkdownTagEnd};
+
+    #[derive(Clone, Copy, PartialEq, Eq)]
+    enum ContainerKind {
+        Quote,
+        List,
+        Item,
+    }
+
+    let parsed = crate::parser::parse_markdown(source);
+    let mut open_containers = Vec::new();
+    for (index, event) in parsed.events.iter().enumerate() {
+        let range = &parsed.event_ranges[index];
+        let opening = match event {
+            MarkdownEvent::Start(MarkdownTag::BlockQuote) => Some(ContainerKind::Quote),
+            MarkdownEvent::Start(MarkdownTag::List(..)) => Some(ContainerKind::List),
+            MarkdownEvent::Start(MarkdownTag::Item) => Some(ContainerKind::Item),
+            _ => None,
+        };
+        if let Some(kind) = opening {
+            open_containers.push((kind, range.start));
+            continue;
+        }
+        let closing = match event {
+            MarkdownEvent::End(MarkdownTagEnd::BlockQuote) => Some(ContainerKind::Quote),
+            MarkdownEvent::End(MarkdownTagEnd::List) => Some(ContainerKind::List),
+            MarkdownEvent::End(MarkdownTagEnd::Item) => Some(ContainerKind::Item),
+            _ => None,
+        };
+        let Some(kind) = closing else {
+            continue;
+        };
+        if let Some(open_index) =
+            open_containers.iter().rposition(|(open_kind, _)| *open_kind == kind)
+        {
+            let (_, start) = open_containers.remove(open_index);
+            if cursor_byte >= start && cursor_byte <= range.end {
+                return true;
+            }
+        }
+    }
+    false
+}
 
 #[derive(Clone, Copy)]
 enum LinePrefix {
@@ -450,6 +808,468 @@ fn add_line_prefix(line: &str, prefix: LinePrefix) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn table_structure_row_insertion_preserves_blockquote_prefix_and_adjacent_blocks() {
+        let source = "before\n\n> | name | value |\n> | --- | --- |\n> | a | b |\n\n# after";
+        let cursor = source.find("a | b").expect("blockquote table body exists");
+        let (result, _) = applied_text(
+            source,
+            SemanticEditCommand::TableStructure(ui::plugin::TableStructureCommand::InsertRowAfter),
+            cursor,
+            None,
+        );
+        assert!(result.contains("> | a | b |\n> |  |  |"), "result: {result:?}");
+        assert!(result.starts_with("before\n\n"));
+        assert!(result.ends_with("\n\n# after"));
+    }
+
+    #[test]
+    fn deleting_last_container_table_row_clears_cells_without_losing_prefix() {
+        let source = "> | heading | value |\n> | --- | --- |\n> | a | b |";
+        let cursor = source.find("a | b").expect("container table body exists");
+        let (result, _) = applied_text(
+            source,
+            SemanticEditCommand::TableStructure(ui::plugin::TableStructureCommand::DeleteRow),
+            cursor,
+            None,
+        );
+        assert!(result.ends_with("> |  |  |"), "result: {result:?}");
+        assert_eq!(parsed_table_column_count(&result), Some(2));
+    }
+
+    #[test]
+    fn container_row_insertion_preserves_crlf_and_adjacent_heading() {
+        let source =
+            "before\r\n\r\n> | heading | value |\r\n> | --- | --- |\r\n> | a | b |\r\n\r\n# after";
+        let cursor = source.find("a | b").expect("container table body exists");
+        assert!(source_table_at(source, cursor).is_some(), "container table should be modeled");
+        let (result, _) = applied_text(
+            source,
+            SemanticEditCommand::TableStructure(ui::plugin::TableStructureCommand::InsertRowAfter),
+            cursor,
+            None,
+        );
+        assert!(result.contains("> | a | b |\r\n> |  |  |"), "result: {result:?}");
+        assert!(!result.replace("\r\n", "").contains('\r'));
+        assert!(result.ends_with("\r\n\r\n# after"));
+    }
+
+    #[test]
+    fn table_structure_column_edit_preserves_list_continuation_prefix() {
+        let source = "- item\n\n  | name | value |\n  | --- | --- |\n  | a | b |";
+        let cursor = source.find("a | b").expect("list table body exists");
+        let (result, _) = applied_text(
+            source,
+            SemanticEditCommand::TableStructure(
+                ui::plugin::TableStructureCommand::InsertColumnAfter,
+            ),
+            cursor,
+            None,
+        );
+        assert!(result.contains("  | a |  | b |"), "result: {result:?}");
+        assert!(result.contains("- item\n\n  | name |  | value |"), "result: {result:?}");
+        assert_eq!(parsed_table_column_count(&result), Some(3));
+    }
+
+    #[test]
+    fn table_structure_conservatively_rejects_non_table_pipe_text() {
+        let source = "A | B\n---x---\nx | y";
+        assert_eq!(parsed_table_column_count(source), None);
+        let cursor = source.find("x | y").expect("table body exists");
+        assert_eq!(
+            table_structure_capabilities(source, cursor),
+            None,
+            "pipe-like text rejected by the parser must remain unavailable"
+        );
+        assert_eq!(
+            plan_semantic_edit(
+                source,
+                3,
+                cursor,
+                None,
+                SemanticEditCommand::TableStructure(
+                    ui::plugin::TableStructureCommand::InsertColumnAfter
+                )
+            ),
+            SemanticEditPlan::Unsupported
+        );
+    }
+
+    #[test]
+    fn table_structure_alignment_edits_a_parser_recognized_table_without_outer_pipes() {
+        let source = "A | B\n---|---\nx | y";
+        assert_eq!(parsed_table_column_count(source), Some(2));
+        let cursor = source.find("y").expect("second body cell exists");
+        let capability = table_structure_capabilities(source, cursor);
+        assert!(capability.is_some(), "the parsed GFM table should expose structure operations");
+        let (result, _) = applied_text(
+            source,
+            SemanticEditCommand::TableStructure(
+                ui::plugin::TableStructureCommand::SetColumnAlignment(
+                    ui::plugin::TableColumnAlignment::Right,
+                ),
+            ),
+            cursor,
+            None,
+        );
+        assert_eq!(result, "A | B\n---|---:\nx | y");
+    }
+
+    #[test]
+    fn table_structure_cell_scanning_treats_unclosed_backticks_as_plain_text() {
+        let source = "A | B\n---|---\nleft` | right";
+        assert_eq!(parsed_table_column_count(source), Some(2));
+        let cursor = source.find("right").expect("second body cell exists");
+        assert!(table_structure_capabilities(source, cursor).is_some());
+        let (result, _) = applied_text(
+            source,
+            SemanticEditCommand::TableStructure(
+                ui::plugin::TableStructureCommand::SetColumnAlignment(
+                    ui::plugin::TableColumnAlignment::Right,
+                ),
+            ),
+            cursor,
+            None,
+        );
+        assert_eq!(result, "A | B\n---|---:\nleft` | right");
+    }
+
+    #[test]
+    fn table_structure_row_and_column_edits_preserve_omitted_outer_pipe_style() {
+        let source = "A | B\n---|---\nx | y";
+        let cursor = source.find("y").expect("second body cell exists");
+        let (inserted_row, _) = applied_text(
+            source,
+            SemanticEditCommand::TableStructure(ui::plugin::TableStructureCommand::InsertRowAfter),
+            cursor,
+            None,
+        );
+        assert!(inserted_row.ends_with(" | "), "row insertion style: {inserted_row:?}");
+        assert_eq!(parsed_table_column_count(&inserted_row), Some(2));
+
+        let (inserted_column, _) = applied_text(
+            source,
+            SemanticEditCommand::TableStructure(
+                ui::plugin::TableStructureCommand::InsertColumnAfter,
+            ),
+            cursor,
+            None,
+        );
+        assert_eq!(
+            parsed_table_column_count(&inserted_column),
+            Some(3),
+            "inserted output: {inserted_column:?}"
+        );
+        assert!(
+            inserted_column.lines().all(|line| !line.trim_start().starts_with('|')),
+            "column edits must keep leading pipes omitted: {inserted_column:?}"
+        );
+        let inserted_rows = inserted_column.lines().collect::<Vec<_>>();
+        assert!(inserted_rows[0].trim_end().ends_with('|'));
+        assert!(inserted_rows[2].trim_end().ends_with('|'));
+
+        let inserted_body_cursor = inserted_column.find("y").expect("body cell remains");
+        let (deleted_column, _) = applied_text(
+            &inserted_column,
+            SemanticEditCommand::TableStructure(ui::plugin::TableStructureCommand::DeleteColumn),
+            inserted_body_cursor,
+            None,
+        );
+        assert_eq!(parsed_table_column_count(&deleted_column), Some(2));
+        assert!(deleted_column.lines().all(|line| !line.trim_start().starts_with('|')));
+    }
+
+    #[test]
+    fn large_table_context_lookup_and_column_edit_complete_within_budget() {
+        use std::time::{Duration, Instant};
+
+        let column_count = 24;
+        let body_row_count = 500;
+        let make_row = |cells: Vec<String>| format_table_row(&cells);
+        let header = make_row((0..column_count).map(|column| format!("h{column}")).collect());
+        let separator = make_row(vec!["---".to_owned(); column_count]);
+        let body = (0..body_row_count)
+            .map(|row| {
+                make_row((0..column_count).map(|column| format!("r{row}c{column}")).collect())
+            })
+            .collect::<Vec<_>>();
+        let source = std::iter::once(header)
+            .chain(std::iter::once(separator))
+            .chain(body)
+            .collect::<Vec<_>>()
+            .join("\n");
+        let cursor = source.find("r250c12").expect("middle table cell exists");
+        let started = Instant::now();
+        let capabilities = table_structure_capabilities(&source, cursor);
+        let plan = plan_semantic_edit(
+            &source,
+            5,
+            cursor,
+            None,
+            SemanticEditCommand::TableStructure(
+                ui::plugin::TableStructureCommand::InsertColumnAfter,
+            ),
+        );
+        assert!(capabilities.is_some(), "the large table should be recognized");
+        assert!(matches!(plan, SemanticEditPlan::Apply(_)), "column edit should be planned");
+        assert!(
+            started.elapsed() < Duration::from_secs(2),
+            "table context lookup and structure planning exceeded two seconds: {:?}",
+            started.elapsed()
+        );
+    }
+
+    #[test]
+    fn menu_table_creation_keeps_blockquote_context() {
+        let source = "> paragraph";
+        let cursor = source.len();
+        let (result, cursor_after) = applied_text(
+            source,
+            SemanticEditCommand::InsertTable { columns: 2, rows: 2 },
+            cursor,
+            None,
+        );
+        assert_eq!(parsed_table_count(&result, 2), 1, "result: {result:?}");
+        assert!(result.starts_with("> paragraph\n> \n> | | |"), "result: {result:?}");
+        assert_eq!(
+            cursor_after,
+            ui::plugin::EditSelection::Caret(
+                result.find("| | |").expect("table header exists") + 2
+            )
+        );
+    }
+
+    #[test]
+    fn menu_table_creation_keeps_list_item_context() {
+        let source = "- paragraph";
+        let cursor = source.len();
+        let expected = "- paragraph\n\n  | | |\n  | --- | --- |\n  | | |";
+        assert_eq!(parsed_table_count(expected, 2), 1, "expected candidate must parse");
+        assert!(container_paragraph_context(source, cursor).is_some());
+        let (result, _) = applied_text(
+            source,
+            SemanticEditCommand::InsertTable { columns: 2, rows: 2 },
+            cursor,
+            None,
+        );
+        assert_eq!(parsed_table_count(&result, 2), 1, "result: {result:?}");
+        assert!(result.starts_with("- paragraph\n\n  | | |"), "result: {result:?}");
+    }
+
+    #[test]
+    fn menu_table_creation_in_blockquote_splits_at_start_middle_and_end() {
+        let source = "> abcd";
+        for (cursor, before, after) in [(2, "> ", "> abcd"), (4, "> ab", "> cd"), (6, "> abcd", "")]
+        {
+            let (result, cursor_after) = applied_text(
+                source,
+                SemanticEditCommand::InsertTable { columns: 2, rows: 2 },
+                cursor,
+                None,
+            );
+            assert_eq!(parsed_table_count(&result, 2), 1, "cursor={cursor}, result={result:?}");
+            assert!(result.starts_with(before), "cursor={cursor}, result: {result:?}");
+            if !after.is_empty() {
+                assert!(result.ends_with(after), "cursor={cursor}, result: {result:?}");
+            }
+            assert!(
+                result.lines().filter(|line| line.contains('|')).all(|line| line.starts_with("> "))
+            );
+            assert_eq!(
+                cursor_after,
+                ui::plugin::EditSelection::Caret(
+                    result.find("| | |").expect("table header exists") + 2
+                )
+            );
+        }
+    }
+
+    #[test]
+    fn menu_table_creation_in_list_splits_at_start_middle_and_end() {
+        let source = "- abcd";
+        for (cursor, before, after) in [(2, "- ", "  abcd"), (4, "- ab", "  cd"), (6, "- abcd", "")]
+        {
+            let (result, cursor_after) = applied_text(
+                source,
+                SemanticEditCommand::InsertTable { columns: 2, rows: 2 },
+                cursor,
+                None,
+            );
+            assert_eq!(parsed_table_count(&result, 2), 1, "cursor={cursor}, result={result:?}");
+            assert!(
+                result.contains("  | | |"),
+                "table rows need list continuation indentation: {result:?}"
+            );
+            assert!(result.starts_with(before), "cursor={cursor}, result: {result:?}");
+            if !after.is_empty() {
+                assert!(result.ends_with(after), "cursor={cursor}, result: {result:?}");
+            }
+            assert_eq!(
+                cursor_after,
+                ui::plugin::EditSelection::Caret(
+                    result.find("| | |").expect("table header exists") + 2
+                )
+            );
+        }
+    }
+
+    #[test]
+    fn table_structure_capabilities_disable_header_and_only_column_deletion() {
+        let source = "| only |\n| --- |\n| value |";
+        let header =
+            table_structure_capabilities(source, source.find("only").expect("header exists"))
+                .expect("header lies in table");
+        assert!(!header.can_delete_row);
+        assert!(!header.can_delete_column);
+
+        let body = table_structure_capabilities(source, source.find("value").expect("body exists"))
+            .expect("body lies in table");
+        assert!(body.can_delete_row);
+        assert!(!body.can_delete_column);
+    }
+
+    #[test]
+    fn table_structure_commands_preserve_escaped_and_code_pipes() {
+        let source = "| 名称 | 说明 |\n| --- | --- |\n| a\\|b | `x|y` |";
+        let cursor = source.find("a\\|b").expect("table body cell exists");
+        let (inserted, _) = applied_text(
+            source,
+            SemanticEditCommand::TableStructure(
+                ui::plugin::TableStructureCommand::InsertColumnAfter,
+            ),
+            cursor,
+            None,
+        );
+        assert_eq!(parsed_table_column_count(&inserted), Some(3));
+        assert!(inserted.contains("a\\|b"));
+        assert!(inserted.contains("`x|y`"));
+    }
+
+    #[test]
+    fn row_and_column_insertions_and_deletions_keep_a_parseable_table() {
+        let source = "| a | b |\r\n| --- | --- |\r\n| c | d |\r\n| e | f |";
+        let cursor = source.find("c").expect("first body cell exists");
+        let (row_inserted, _) = applied_text(
+            source,
+            SemanticEditCommand::TableStructure(ui::plugin::TableStructureCommand::InsertRowBefore),
+            cursor,
+            None,
+        );
+        assert_eq!(parsed_table_column_count(&row_inserted), Some(2));
+        assert!(row_inserted.contains("|  |\r\n| c | d |"));
+
+        let (row_deleted, _) = applied_text(
+            source,
+            SemanticEditCommand::TableStructure(ui::plugin::TableStructureCommand::DeleteRow),
+            cursor,
+            None,
+        );
+        assert_eq!(row_deleted.matches("| --- | --- |").count(), 1);
+        assert!(!row_deleted.contains("| c | d |"));
+        assert!(row_deleted.contains("| e | f |"));
+
+        let (column_deleted, _) = applied_text(
+            source,
+            SemanticEditCommand::TableStructure(ui::plugin::TableStructureCommand::DeleteColumn),
+            cursor,
+            None,
+        );
+        assert_eq!(parsed_table_column_count(&column_deleted), Some(1));
+        assert!(
+            column_deleted.contains("| b |\r\n| --- |\r\n| d |\r\n| f |"),
+            "result: {column_deleted:?}"
+        );
+    }
+
+    #[test]
+    fn table_structure_commands_protect_header_and_only_column() {
+        let source = "| only |\n| --- |\n| value |";
+        let cursor = source.find("value").expect("table body exists");
+        let delete_column = plan_semantic_edit(
+            source,
+            7,
+            cursor,
+            None,
+            SemanticEditCommand::TableStructure(ui::plugin::TableStructureCommand::DeleteColumn),
+        );
+        assert_eq!(delete_column, SemanticEditPlan::Unsupported);
+
+        let header_cursor = source.find("only").expect("header exists");
+        let delete_header = plan_semantic_edit(
+            source,
+            7,
+            header_cursor,
+            None,
+            SemanticEditCommand::TableStructure(ui::plugin::TableStructureCommand::DeleteRow),
+        );
+        assert_eq!(delete_header, SemanticEditPlan::Unsupported);
+    }
+
+    #[test]
+    fn alignment_updates_only_its_separator_cell_and_accepts_short_body_rows() {
+        let source = "| a | b |\n| --- | --- |\n| short |\n\nafter";
+        let cursor = source.find("short").expect("body cell exists");
+        let plan = plan_semantic_edit(
+            source,
+            7,
+            cursor,
+            None,
+            SemanticEditCommand::TableStructure(
+                ui::plugin::TableStructureCommand::SetColumnAlignment(
+                    ui::plugin::TableColumnAlignment::Right,
+                ),
+            ),
+        );
+        let SemanticEditPlan::Apply(transaction) = plan else {
+            panic!("column alignment should produce a transaction");
+        };
+        assert_eq!(transaction.replacements.len(), 1);
+        assert_eq!(&source[transaction.replacements[0].range.clone()], "---");
+        assert_eq!(transaction.replacements[0].text, "---:");
+
+        let (expanded, _) = applied_text(
+            source,
+            SemanticEditCommand::TableStructure(
+                ui::plugin::TableStructureCommand::InsertColumnAfter,
+            ),
+            cursor,
+            None,
+        );
+        assert_eq!(parsed_table_column_count(&expanded), Some(3));
+        assert!(expanded.ends_with("\n\nafter"));
+    }
+
+    #[test]
+    fn deleting_the_only_body_row_clears_it_and_table_delete_is_atomic() {
+        let source = "before\n\n| h |\n| --- |\n| value |\n\nafter";
+        let cursor = source.find("value").expect("table body exists");
+        let (cleared, _) = applied_text(
+            source,
+            SemanticEditCommand::TableStructure(ui::plugin::TableStructureCommand::DeleteRow),
+            cursor,
+            None,
+        );
+        assert!(cleared.contains("| h |\n| --- |\n|  |"));
+        assert!(cleared.starts_with("before\n\n") && cleared.ends_with("\n\nafter"));
+
+        let (deleted, _) = applied_text(
+            source,
+            SemanticEditCommand::TableStructure(ui::plugin::TableStructureCommand::DeleteTable),
+            cursor,
+            None,
+        );
+        assert_eq!(deleted, "before\n\nafter");
+    }
+
+    fn parsed_table_column_count(source: &str) -> Option<usize> {
+        crate::parser::parse_markdown(source).events.into_iter().find_map(|event| match event {
+            crate::parser::MarkdownEvent::Start(crate::parser::MarkdownTag::Table(alignments)) => {
+                Some(alignments.len())
+            }
+            _ => None,
+        })
+    }
 
     fn applied_text(
         source: &str,
