@@ -1772,6 +1772,9 @@ fn fence_line_enter_augmentation(
     if !is_opening {
         return emit_block_break_at(source, line_content_end);
     }
+    if let Some(augmentation) = close_new_fence_augmentation(source, line_content_end) {
+        return augmentation;
+    }
     let newline = preferred_newline_sequence(source, line_content_end);
     let aug = EditAugmentation {
         cursor_byte_after: line_content_end + newline.len(),
@@ -1780,6 +1783,37 @@ fn fence_line_enter_augmentation(
     };
     debug_assert_augmentation(&aug, source);
     aug
+}
+
+fn close_new_fence_augmentation(source: &str, line_content_end: usize) -> Option<EditAugmentation> {
+    let trailing = source.get(line_content_end..)?;
+    if !matches!(trailing, "" | LF_SEQUENCE | CRLF_SEQUENCE) {
+        return None;
+    }
+    let (line_start, _, _) = locate_source_line_bounds(source, line_content_end)?;
+    let marker_start = container_content_start_on_line(source, line_start, line_content_end);
+    let fence_character = *source.as_bytes().get(marker_start)?;
+    if !matches!(fence_character, b'`' | b'~') {
+        return None;
+    }
+    let fence_length = source.as_bytes()[marker_start..line_content_end]
+        .iter()
+        .take_while(|byte| **byte == fence_character)
+        .count();
+    if fence_length < MIN_FENCE_MARKER_LENGTH {
+        return None;
+    }
+    let continuation_prefix = canonical_container_prefix(source, marker_start);
+    let fence = char::from(fence_character).to_string().repeat(fence_length);
+    let newline = preferred_newline_sequence(source, line_content_end);
+    let insertion = format!("{newline}{continuation_prefix}{newline}{continuation_prefix}{fence}");
+    let augmentation = EditAugmentation {
+        cursor_byte_after: line_content_end + newline.len() + continuation_prefix.len(),
+        replace_range: Some(line_content_end..source.len()),
+        insert_text: Some(insertion),
+    };
+    debug_assert_augmentation(&augmentation, source);
+    Some(augmentation)
 }
 
 fn list_item_enter_augmentation(
@@ -6453,7 +6487,7 @@ mod tests {
             ("```rust\ncode\n```", 5),
             ("```rust\ncode\n```", "```rust".len()),
             ("~~~\ncode\n~~~", "~~~".len()),
-            // 未闭合围栏(代码块延伸到 EOF)只有开头围栏行情形。
+            // 已有代码内容的未闭合围栏不应在开头插入闭合围栏。
             ("```rust\ncode", 5),
         ] {
             let fence_line_end = source.find('\n').unwrap_or(source.len());
@@ -6465,6 +6499,32 @@ mod tests {
 
             assert_eq!(edited_source, expected_source, "wrong opening fence enter for {source:?}");
             assert_eq!(augmentation.cursor_byte_after, fence_line_end + 1);
+        }
+    }
+
+    #[test]
+    fn enter_on_new_unclosed_fence_inserts_matching_closer() {
+        for (source, expected) in [
+            ("```", "```\n\n```"),
+            ("```rust", "```rust\n\n```"),
+            ("````", "````\n\n````"),
+            ("~~~~", "~~~~\n\n~~~~"),
+            ("  ```", "  ```\n  \n  ```"),
+            ("> ```", "> ```\n> \n> ```"),
+            ("- ```", "- ```\n  \n  ```"),
+            ("```\n", "```\n\n```"),
+            ("```rust\r\n", "```rust\r\n\r\n```"),
+        ] {
+            let cursor = source.find(['\r', '\n']).unwrap_or(source.len());
+            let augmentation = augment_edit(source, cursor, AugmentKind::Enter)
+                .unwrap_or_else(|| panic!("new fence should close: {source:?}"));
+            assert_eq!(apply_augmentation_at(source, cursor, &augmentation), expected);
+            let body_line_start = expected.find(['\r', '\n']).expect("fixture has body")
+                + if expected.contains("\r\n") { CRLF_SEQUENCE.len() } else { LF_SEQUENCE.len() };
+            let body_prefix_length = expected[body_line_start..]
+                .find(['\r', '\n'])
+                .expect("fixture has closing fence line");
+            assert_eq!(augmentation.cursor_byte_after, body_line_start + body_prefix_length);
         }
     }
 
