@@ -1320,7 +1320,8 @@ pub(crate) fn layout_table(block: &BlockNode, ctx: &mut LayoutCtx, columns: usiz
     let pad = ctx.style.table_cell_padding;
     let available_w = ctx.available_width().max(20.0);
 
-    // Dynamic column width: measure content demand, then allocate proportionally
+    // Give short columns enough room for their content, then use the remaining
+    // width where wrapping would otherwise be most severe.
     let demand = measure_column_demand(
         block,
         columns,
@@ -1330,17 +1331,9 @@ pub(crate) fn layout_table(block: &BlockNode, ctx: &mut LayoutCtx, columns: usiz
         ctx.shaper.as_deref_mut(),
         ctx.doc,
     );
-    let min_col_w = font_size * 3.0; // at least 3 characters wide
-    // For 2-column tables, allow a column to use most of the space (leaving
-    // at least min_col_w for the other).  For 3+ columns, cap at 60 % so no
-    // single column hogs the table.  The .max() fallback keeps the 60 % floor
-    // for extremely narrow viewports where available_w < min_col_w / 0.4.
-    let max_col_w = if columns == 2 {
-        (available_w - min_col_w).max(available_w * 0.6)
-    } else {
-        available_w * 0.6
-    };
-    let column_widths = allocate_column_widths(&demand, available_w, pad, min_col_w, max_col_w);
+    const MIN_COLUMN_CHARACTERS: f32 = 3.0;
+    let min_col_w = font_size * MIN_COLUMN_CHARACTERS;
+    let column_widths = allocate_column_widths(&demand, available_w, pad, min_col_w);
 
     let table_x = ctx.indent;
     let table_y = ctx.y;
@@ -1712,15 +1705,13 @@ fn measure_styled_text_width(
 
 /// Allocate column widths from content demand and available space.
 ///
-/// Each column gets at least `min_col_w` and at most `max_col_w` (before padding).
-/// Remaining space is distributed proportionally to demand. If clamping creates
-/// surplus or deficit, a second pass redistributes among eligible columns.
+/// Each column first gets its minimum width. When content does not fit, remaining
+/// space follows unmet demand; otherwise spare space is shared evenly.
 pub(crate) fn allocate_column_widths(
     demand: &[f32],
     available_w: f32,
     pad: f32,
     min_col_w: f32,
-    max_col_w: f32,
 ) -> Vec<f32> {
     let cols = demand.len();
     if cols == 0 {
@@ -1732,62 +1723,29 @@ pub(crate) fn allocate_column_widths(
         return vec![available_w];
     }
 
-    let total_pad = pad * 2.0 * cols as f32;
-    let net_w = (available_w - total_pad).max(0.0);
-    let total_demand: f32 = demand.iter().sum();
-
-    // Empty table — equal distribution
-    if total_demand <= 0.0 {
-        return vec![net_w / cols as f32 + pad * 2.0; cols];
+    let cell_padding = pad * 2.0;
+    let content_budget = (available_w - cell_padding * cols as f32).max(0.0);
+    let minimum_total = min_col_w * cols as f32;
+    if content_budget <= minimum_total {
+        return vec![available_w / cols as f32; cols];
     }
 
-    // First pass: proportional allocation with min/max clamping
-    let mut widths: Vec<f32> = demand
-        .iter()
-        .map(|&d| {
-            let w = (net_w * d / total_demand).max(min_col_w).min(max_col_w);
-            w + pad * 2.0 // add cell padding back to get full column width
-        })
-        .collect();
-
-    // Second pass: redistribute surplus/deficit from clamping
-    let allocated: f32 = widths.iter().sum::<f32>() - total_pad;
-    let delta = net_w - allocated;
-
-    if delta.abs() > 0.5 {
-        let eligible: Vec<usize> = (0..cols)
-            .filter(|&i| {
-                let w = widths[i] - pad * 2.0;
-                if delta > 0.0 { w < max_col_w } else { w > min_col_w }
-            })
+    let content_targets: Vec<f32> = demand.iter().map(|&width| width.max(min_col_w)).collect();
+    let target_total: f32 = content_targets.iter().sum();
+    if target_total <= content_budget {
+        let spare_per_column = (content_budget - target_total) / cols as f32;
+        return content_targets
+            .into_iter()
+            .map(|width| width + spare_per_column + cell_padding)
             .collect();
-        let eligible_demand: f32 = eligible.iter().map(|&i| demand[i]).sum();
-        if eligible_demand > 0.0 {
-            for &i in &eligible {
-                let share = delta * demand[i] / eligible_demand;
-                let new_w =
-                    (widths[i] + share).max(min_col_w + pad * 2.0).min(max_col_w + pad * 2.0);
-                widths[i] = new_w;
-            }
-        }
     }
 
-    // Final normalization: if second pass left slack due to all columns
-    // hitting constraints, distribute remaining space among expandable columns.
-    let final_allocated: f32 = widths.iter().sum::<f32>() - total_pad;
-    let slack = net_w - final_allocated;
-    if slack.abs() > 0.5 {
-        let expandable: Vec<usize> =
-            (0..cols).filter(|&i| widths[i] - pad * 2.0 < max_col_w).collect();
-        if !expandable.is_empty() {
-            let per_col = slack / expandable.len() as f32;
-            for &i in &expandable {
-                widths[i] = (widths[i] + per_col).min(max_col_w + pad * 2.0);
-            }
-        }
-    }
-
-    widths
+    let remaining = content_budget - minimum_total;
+    let unmet_total = target_total - minimum_total;
+    content_targets
+        .into_iter()
+        .map(|width| min_col_w + remaining * (width - min_col_w) / unmet_total + cell_padding)
+        .collect()
 }
 
 /// Layout a line of text with style spans, adjusting spans for wrapped segments.
@@ -3883,10 +3841,10 @@ mod tests {
     }
 
     #[test]
-    fn layout_table_three_columns_cap_still_60_percent() {
+    fn layout_table_three_columns_gives_long_text_remaining_space() {
         let md = "| A | B | C
 | --- | --- | ---
-| short | short | This is a very long description that used to be capped at 60 percent and should still be capped |";
+| short | short | This is a very long description that benefits from using the space left by short columns |";
         let (src, doc) = make_doc(md);
         let laid_out = layout_doc(
             &doc.blocks,
@@ -3908,14 +3866,25 @@ mod tests {
 
         assert_eq!(widths.len(), 3, "expected 3 columns");
         let total: f32 = widths.iter().sum();
-        for (i, w) in widths.iter().enumerate() {
-            assert!(
-                w / total < 0.65,
-                "column {} took {:.0}% — 60%% cap violated",
-                i,
-                w / total * 100.0
-            );
-        }
+        assert!(
+            widths[2] / total > 0.65,
+            "long text should use more than 65% when the other columns are short: {widths:?}"
+        );
+        assert!((total - 400.0).abs() < 0.01, "table should use the available width: {widths:?}");
+    }
+
+    #[test]
+    fn table_column_allocation_uses_full_width_after_clamping() {
+        let widths = allocate_column_widths(&[1.0, 1.0, 1000.0], 400.0, 8.0, 48.0);
+        assert!((widths.iter().sum::<f32>() - 400.0).abs() < 0.01, "{widths:?}");
+        assert!(widths[2] > 260.0, "long column should receive unused space: {widths:?}");
+    }
+
+    #[test]
+    fn table_column_allocation_fits_narrow_viewport() {
+        let widths = allocate_column_widths(&[100.0, 100.0, 100.0], 90.0, 8.0, 48.0);
+        assert!((widths.iter().sum::<f32>() - 90.0).abs() < 0.01, "{widths:?}");
+        assert!(widths.iter().all(|width| *width > 0.0));
     }
 
     #[test]
