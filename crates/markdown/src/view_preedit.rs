@@ -171,6 +171,7 @@ fn render_engine(
     shaper: &mut shaping::Shaper,
     dpi_scale: f32,
 ) -> DrawList {
+    #[cfg(debug_assertions)]
     let render_started_at = std::time::Instant::now();
     let settings = MarkdownRenderSettings {
         font_family: &engine.base_font_family,
@@ -196,9 +197,9 @@ fn render_engine(
         true,  // editing keeps whole-document flat lines for selection/navigation.
         false, // precise shaping/highlighting stays viewport-driven for responsiveness.
     );
-    let render_duration_us = render_started_at.elapsed().as_micros();
     #[cfg(debug_assertions)]
     {
+        let render_duration_us = render_started_at.elapsed().as_micros();
         let _ =
             std::fs::OpenOptions::new().create(true).append(true).open("/tmp/perf.log").and_then(
                 |mut f| {
