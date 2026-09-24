@@ -1563,7 +1563,7 @@ pub(crate) fn measure_column_demand(
                     s.set_font_size(font_size);
                     let max_tok = t
                         .split(' ')
-                        .filter_map(|tok| s.shape(tok).ok().map(|r| r.width))
+                        .filter_map(|tok| shape_table_demand_token(tok, font_size, font_family, s))
                         .max_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal))
                         .unwrap_or(0.0);
                     let full = measure_styled_text_width(
@@ -1637,6 +1637,31 @@ pub(crate) fn measure_column_demand(
         }
     }
     demand
+}
+
+fn shape_table_demand_token(
+    text: &str,
+    font_size: f32,
+    font_family: Option<&str>,
+    shaper: &mut Shaper,
+) -> Option<f32> {
+    let previous_font_size = shaper.font_size();
+    let previous_font_weight = shaper.font_weight();
+    let previous_font_style = shaper.font_style();
+    let previous_font_family = shaper.font_family().map(str::to_owned);
+
+    shaper.set_font_size(font_size);
+    shaper.set_font_weight(Weight::NORMAL);
+    shaper.set_font_style(shaping::Style::Normal);
+    shaper.set_font_family(font_family);
+    let width = shaper.shape(text).ok().map(|shaped| shaped.width);
+
+    shaper.set_font_size(previous_font_size);
+    shaper.set_font_weight(previous_font_weight);
+    shaper.set_font_style(previous_font_style);
+    shaper.set_font_family(previous_font_family.as_deref());
+
+    width
 }
 
 fn measure_styled_text_width(
@@ -2481,6 +2506,48 @@ mod tests {
         }
         let adjacent_text = rows[0][1].iter().map(|line| line.text.as_str()).collect::<String>();
         assert_eq!(adjacent_text, "other", "adjacent code must remain folded without preedit");
+    }
+
+    #[test]
+    fn table_width_and_plain_cell_wrap_stay_stable_when_focus_moves() {
+        let source = "| code | ordinary text |\n| --- | --- |\n| `alpha` | several ordinary words that should wrap consistently across the cell |";
+        let first_cursor = source.find("alpha").expect("fixture contains inline code");
+        let second_cursor = source.find("ordinary words").expect("fixture contains plain text");
+        let style = default_style();
+        let mut layout = layout_with_cursor_and_width(source, first_cursor, 220.0);
+        let doc_view = core::document::StringDocView::new(source);
+        let table_layout = |layout: &LazyLayout<MarkdownDoc>| {
+            layout
+                .laid_out
+                .iter()
+                .flatten()
+                .find_map(|block| match &block.kind {
+                    LaidOutBlockKind::Table { column_widths, rows, .. } => Some((
+                        column_widths.clone(),
+                        rows[0][1].iter().map(|line| line.text.clone()).collect::<Vec<_>>(),
+                    )),
+                    _ => None,
+                })
+                .expect("fixture lays out a table")
+        };
+        let (initial_widths, initial_plain_lines) = table_layout(&layout);
+
+        layout.set_edit_ctx(Some(crate::edit::EditContext {
+            cursor_byte: second_cursor,
+            preedit_text: None,
+            preedit_cursor: None,
+        }));
+        layout.invalidate_lines_for_source_bytes([first_cursor, second_cursor]);
+        let mut shaper = Shaper::new().expect("table focus test requires a system font shaper");
+        layout.ensure_precise_range(0.0, 600.0, &style, &mut shaper, None, &doc_view);
+        layout.build_flat_lines(&doc_view);
+        let (focused_widths, focused_plain_lines) = table_layout(&layout);
+
+        assert_eq!(focused_widths, initial_widths, "focus movement must preserve table columns");
+        assert_eq!(
+            focused_plain_lines, initial_plain_lines,
+            "ordinary text in the table must keep the same wrapping after focus movement"
+        );
     }
 
     #[test]
@@ -3498,6 +3565,54 @@ mod tests {
                 widths[0]
             );
         }
+    }
+
+    #[test]
+    fn table_column_demand_ignores_residual_shaper_font_state() {
+        let source = "| label | description |\n| --- | --- |\n| WWWW | iiiiiiii |";
+        let style = default_style();
+        let (_, document) = make_doc(source);
+        let table = document
+            .blocks
+            .iter()
+            .find(|block| matches!(block.kind, BlockKind::TableWrapper { .. }))
+            .expect("fixture contains a table");
+        let source_view = core::document::StringDocView::new(source);
+        let columns = match table.kind {
+            BlockKind::TableWrapper { columns, .. } => columns,
+            _ => unreachable!("selected block is a table"),
+        };
+
+        let mut clean_shaper =
+            Shaper::new().expect("table width test requires a system font shaper");
+        let clean_demand = measure_column_demand(
+            table,
+            columns,
+            style.body_font_size,
+            style.text_spacing_mode,
+            style.body_font_family.first().map(String::as_str),
+            Some(&mut clean_shaper),
+            &source_view,
+        );
+        let mut residual_shaper =
+            Shaper::new().expect("table width test requires a system font shaper");
+        residual_shaper.set_font_family(Some("monospace"));
+        residual_shaper.set_font_weight(Weight::BOLD);
+        residual_shaper.set_font_style(shaping::Style::Italic);
+        let residual_demand = measure_column_demand(
+            table,
+            columns,
+            style.body_font_size,
+            style.text_spacing_mode,
+            style.body_font_family.first().map(String::as_str),
+            Some(&mut residual_shaper),
+            &source_view,
+        );
+
+        assert_eq!(
+            residual_demand, clean_demand,
+            "column demand must depend on the table style, not the shaper's prior state"
+        );
     }
 
     #[test]
