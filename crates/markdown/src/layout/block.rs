@@ -1523,7 +1523,7 @@ pub(crate) fn collect_text_lines_with_styles<'a>(
 /// Measure per-column content width demand for dynamic column sizing.
 ///
 /// For each column, computes the maximum of:
-///   - the longest non-breakable token width (space-delimited)
+///   - the longest non-breakable token width (spaces and CJK characters break)
 ///   - the longest full-line width × 0.6
 /// This ensures narrow content columns don't hog space while wide columns
 /// get enough room to avoid excessive wrapping.
@@ -1555,10 +1555,17 @@ pub(crate) fn measure_column_demand(
                 .map(|s| {
                     s.set_font_size(font_size);
                     let max_tok = t
-                        .split(' ')
+                        .split(|character: char| {
+                            character == ' ' || super::context::is_cjk_or_fullwidth(character)
+                        })
                         .filter_map(|tok| shape_table_demand_token(tok, font_size, font_family, s))
                         .max_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal))
-                        .unwrap_or(0.0);
+                        .unwrap_or(0.0)
+                        .max(if t.chars().any(super::context::is_cjk_or_fullwidth) {
+                            font_size
+                        } else {
+                            0.0
+                        });
                     let full = measure_styled_text_width(
                         t,
                         styles.get(line_index).map(Vec::as_slice).unwrap_or(&[]),
@@ -1573,10 +1580,17 @@ pub(crate) fn measure_column_demand(
                 .unwrap_or_else(|| {
                     let char_est = |tok: &str| tok.chars().count() as f32 * font_size * 0.55;
                     let max_tok = t
-                        .split(' ')
+                        .split(|character: char| {
+                            character == ' ' || super::context::is_cjk_or_fullwidth(character)
+                        })
                         .map(&char_est)
                         .max_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal))
-                        .unwrap_or(0.0);
+                        .unwrap_or(0.0)
+                        .max(if t.chars().any(super::context::is_cjk_or_fullwidth) {
+                            font_size
+                        } else {
+                            0.0
+                        });
                     (max_tok, char_est(t))
                 });
             let d = max_token_w.max(full_w * 0.6);
@@ -3521,6 +3535,40 @@ mod tests {
                 "wide-content column 1 ({}px) should be wider than narrow column 0 ({}px)",
                 widths[1],
                 widths[0]
+            );
+        }
+    }
+
+    #[test]
+    fn table_short_cjk_cells_stay_on_one_line_beside_long_description() {
+        const TABLE_WIDTH: f32 = 780.0;
+        let source = "| 样式 | 笔画内部 | 笔画之间 | 用途 |\n| --- | --- | --- | --- |\n| 均匀墨迹 | 将每印记的有效覆盖率按最大值合并，限制同笔累积；整笔透明度在合成时应用一次 | 正常 source-over | 毛笔、硬笔，避免盖印结点发黑 |\n| 累积落墨 | 印记按流量累积，针对路径采样步长校正沉积量 | 正常 source-over | 铅笔、干墨颗粒 |";
+        let (_, document) = make_doc(source);
+        let source_view = core::document::StringDocView::new(source);
+        let mut shaper = Shaper::new().expect("table layout test requires a system font shaper");
+        let layout = layout_doc_with_shaper(
+            &document.blocks,
+            &default_style(),
+            TABLE_WIDTH,
+            Some(&mut shaper),
+            None,
+            &source_view,
+        );
+        let rows = layout
+            .blocks
+            .iter()
+            .find_map(|block| match &block.kind {
+                LaidOutBlockKind::Table { rows, .. } => Some(rows),
+                _ => None,
+            })
+            .expect("fixture should produce a table");
+
+        for row in rows {
+            assert_eq!(row[0].len(), 1, "short CJK label should fit on one line");
+            assert!(
+                row.iter().all(|cell| cell.len() <= 2),
+                "table cells should fit within two lines: {:?}",
+                row.iter().map(Vec::len).collect::<Vec<_>>()
             );
         }
     }
