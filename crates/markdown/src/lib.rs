@@ -10,6 +10,7 @@ pub mod augmenter;
 pub mod builder;
 pub mod commands;
 pub mod edit;
+pub mod embedded;
 pub mod grapheme_map;
 pub mod layout;
 pub mod parser;

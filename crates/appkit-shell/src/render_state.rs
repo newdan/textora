@@ -4,6 +4,7 @@
 //! application lifecycle orchestration.
 
 use crate::gpu::{GpuContext, GpuError};
+use crate::image_atlas::ImageAtlas;
 use crate::render_cache::PreviewRenderCache;
 use wgpu::util::DeviceExt;
 
@@ -23,6 +24,7 @@ pub struct TextState {
     pub shaper: shaping::Shaper,
     pub atlas: render::GlyphAtlas,
     pub atlas_texture: wgpu::Texture,
+    pub image_atlas: ImageAtlas,
     #[allow(dead_code)] // kept alive for bind group reference
     atlas_view: wgpu::TextureView,
     pub bind_group: wgpu::BindGroup,
@@ -67,6 +69,7 @@ impl TextState {
             view_formats: &[],
         });
         let atlas_view = atlas_texture.create_view(&wgpu::TextureViewDescriptor::default());
+        let image_atlas = ImageAtlas::new(&gpu.ctx.device);
 
         // Write a solid white pixel at atlas (0,0) for cursor/caret rendering.
         gpu.ctx.queue.write_texture(
@@ -106,6 +109,14 @@ impl TextState {
                     resource: wgpu::BindingResource::Sampler(renderer.sampler()),
                 },
                 wgpu::BindGroupEntry { binding: 2, resource: gamma_buffer.as_entire_binding() },
+                wgpu::BindGroupEntry {
+                    binding: 3,
+                    resource: wgpu::BindingResource::TextureView(image_atlas.view()),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 4,
+                    resource: wgpu::BindingResource::Sampler(renderer.image_sampler()),
+                },
             ],
         });
 
@@ -127,6 +138,7 @@ impl TextState {
             vertex_capacity,
             atlas: render::GlyphAtlas::new(ATLAS_SIZE, ATLAS_SIZE, 8192, 1),
             atlas_texture,
+            image_atlas,
             atlas_view,
             gamma_buffer,
             cached_gamma: gamma_uniform,
@@ -134,6 +146,11 @@ impl TextState {
             atlas_generation: 1,
             glyph_resolve_count: 0,
         })
+    }
+
+    /// Image entries used by a frame remain pinned until the next frame starts.
+    pub fn begin_frame(&mut self) {
+        self.image_atlas.begin_frame();
     }
 
     /// Update gamma uniform buffer only if values have changed.

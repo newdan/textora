@@ -326,10 +326,7 @@ fn table_row_pipe_style(
     let indentation = line.len() - trimmed.len();
     let mut prefix = line[..indentation].to_owned();
     let mut remaining = trimmed;
-    loop {
-        let Some(after_quote) = remaining.strip_prefix('>') else {
-            break;
-        };
+    while let Some(after_quote) = remaining.strip_prefix('>') {
         prefix.push('>');
         remaining = after_quote;
         if let Some(after_space) = remaining.strip_prefix(' ') {

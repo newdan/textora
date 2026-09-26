@@ -170,7 +170,7 @@ pub(crate) fn populate_style_segments(
                 }
             }
         }
-        LaidOutBlockKind::HorizontalRule => {}
+        LaidOutBlockKind::HorizontalRule | LaidOutBlockKind::Embedded { .. } => {}
     }
 }
 
@@ -365,6 +365,7 @@ fn compute_style_segments(
                 InlineStyle::Italic => InlineStyle::Italic,
                 InlineStyle::Strikethrough => InlineStyle::Strikethrough,
                 InlineStyle::InlineCode => InlineStyle::InlineCode,
+                InlineStyle::Math => InlineStyle::Math,
                 InlineStyle::Link { url } => InlineStyle::Link { url: url.clone() },
                 InlineStyle::SourceMarker => InlineStyle::SourceMarker,
             },
@@ -439,6 +440,7 @@ fn effective_segment_shape(base_weight: shaping::Weight, style: &InlineStyle) ->
         InlineStyle::SourceMarker
         | InlineStyle::Strikethrough
         | InlineStyle::InlineCode
+        | InlineStyle::Math
         | InlineStyle::Link { .. } => {
             SegmentShape { weight: base_weight, style: shaping::Style::Normal, italic: false }
         }

@@ -829,6 +829,9 @@ impl App {
         if self.editor_is_empty() || self.active_editor_index().is_none() {
             return None;
         }
+        if let Some(text) = resources.text.as_mut() {
+            text.begin_frame();
+        }
         self.needs_redraw = false;
         let screen_w = self.screen_width();
         let screen_h = self.screen_height();

@@ -877,6 +877,31 @@ impl<S: BlockSource> PreviewEngine<S> {
             let selection_range = self.byte_selection_range().map(|(start, end)| start..end);
             if let Some(lazy) = self.lazy.as_mut() {
                 lazy.set_selection_range(selection_range);
+                if full_layout || full_flat_lines {
+                    lazy.ensure_all_blocks(style, viewport_w, None, None, doc_view);
+                    if let Some(active_shaper) = shaper.as_deref_mut() {
+                        lazy.refresh_precise_range(
+                            self.scroll_y,
+                            viewport_h,
+                            style,
+                            active_shaper,
+                            Some(&highlighter),
+                            doc_view,
+                        );
+                    }
+                } else if let Some(active_shaper) = shaper.as_deref_mut() {
+                    lazy.ensure_visible(
+                        self.scroll_y,
+                        viewport_h,
+                        style,
+                        viewport_w,
+                        active_shaper,
+                        Some(&highlighter),
+                        doc_view,
+                    );
+                }
+                lazy.build_flat_lines(doc_view);
+                self.content_height = lazy.total_height;
             }
             self.dirty = EngineDirty::Clean;
         }
@@ -922,7 +947,7 @@ impl<S: BlockSource> PreviewEngine<S> {
         let flat_line_count = lazy.flat_lines.len();
         let visible_block_count = visible.blocks.len();
         let draw_started_at = Instant::now();
-        crate::render::render_doc_with_offset_and_ascii_diagrams(
+        crate::render::render_doc_with_offset_and_embedded(
             &visible,
             style,
             &mut dl,
@@ -933,6 +958,7 @@ impl<S: BlockSource> PreviewEngine<S> {
             shaper,
             &visible_yd,
             Some(lazy.ascii_diagrams()),
+            Some(lazy.embedded_images()),
         );
         let perf_draw_us = draw_started_at.elapsed().as_micros();
         let command_count = dl.cmds.len();
@@ -3978,7 +4004,8 @@ mod wysiwyg_tests {
                 })
             }
             crate::layout::LaidOutBlockKind::CodeBlock { .. }
-            | crate::layout::LaidOutBlockKind::HorizontalRule => None,
+            | crate::layout::LaidOutBlockKind::HorizontalRule
+            | crate::layout::LaidOutBlockKind::Embedded { .. } => None,
         }
     }
 

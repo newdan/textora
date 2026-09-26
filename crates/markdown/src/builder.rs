@@ -132,6 +132,7 @@ pub enum BlockKind {
         level: u8,
     },
     Paragraph,
+    DisplayMath,
     CodeBlock {
         language: Option<String>,
     },
@@ -183,6 +184,7 @@ pub enum InlineStyle {
     Italic,
     Strikethrough,
     InlineCode,
+    Math,
     Link { url: String },
     SourceMarker,
 }
@@ -1012,6 +1014,34 @@ impl MarkdownDoc {
                 MarkdownEvent::Code(code) => {
                     builder.push_inline_code(code, &parsed.source);
                 }
+                MarkdownEvent::InlineMath(_) => {
+                    let source_range = builder.current_event_range.clone();
+                    let start = builder.pending_line.text.len();
+                    builder.pending_line.text.push('\u{FFFC}');
+                    builder.pending_line.styles.push(StyleSpan {
+                        start,
+                        len: '\u{FFFC}'.len_utf8(),
+                        style: InlineStyle::Math,
+                        source_range: source_range.clone(),
+                    });
+                    builder.pending_line.projection.push_collapsed("\u{FFFC}", source_range);
+                }
+                MarkdownEvent::DisplayMath(_) => {
+                    if builder
+                        .block_stack
+                        .last()
+                        .is_some_and(|block| matches!(block.kind, BlockKind::Paragraph))
+                    {
+                        let source_range = builder.current_event_range.clone();
+                        builder.push_text_with_source(
+                            &parsed.source[source_range.clone()],
+                            source_range,
+                        );
+                    } else {
+                        builder.push_block(BlockKind::DisplayMath);
+                        builder.pop_block();
+                    }
+                }
                 MarkdownEvent::InlineHtml(html) => {
                     if inline_html_is_break(html) {
                         builder.flush_line_into_current_block();
@@ -1363,6 +1393,37 @@ fn is_paragraph_end_char(c: char) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn inline_math_is_one_projected_object_with_full_source_range() {
+        let source = "中$x^2$文";
+        let markdown = MarkdownDoc::build(
+            &crate::parser::parse_markdown(source),
+            &crate::test_utils::default_style(),
+        );
+        let paragraph = &markdown.blocks[0];
+        assert_eq!(paragraph.text_lines, vec!["中\u{FFFC}文"]);
+        let math = paragraph.text_styles[0]
+            .iter()
+            .find(|span| matches!(span.style, InlineStyle::Math))
+            .expect("math span");
+        assert_eq!(math.len, '\u{FFFC}'.len_utf8());
+        assert_eq!(&source[math.source_range.clone()], "$x^2$");
+    }
+
+    #[test]
+    fn same_line_display_math_splits_surrounding_paragraph() {
+        let source = "before $$x^2$$ after";
+        let markdown = MarkdownDoc::build(
+            &crate::parser::parse_markdown(source),
+            &crate::test_utils::default_style(),
+        );
+        assert_eq!(markdown.blocks.len(), 3);
+        assert!(matches!(markdown.blocks[0].kind, BlockKind::Paragraph));
+        assert!(matches!(markdown.blocks[1].kind, BlockKind::DisplayMath));
+        assert!(matches!(markdown.blocks[2].kind, BlockKind::Paragraph));
+        assert_eq!(&source[markdown.blocks[1].block_range.clone()], "$$x^2$$");
+    }
     use crate::layout::BlockSource;
     use crate::parser::parse_markdown;
 

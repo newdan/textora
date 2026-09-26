@@ -10,6 +10,8 @@ pub enum MarkdownEvent {
     End(MarkdownTagEnd),
     Text(String),
     Code(String),
+    InlineMath(String),
+    DisplayMath(String),
     InlineHtml(String),
     SoftBreak,
     HardBreak,
@@ -80,6 +82,7 @@ pub(crate) fn markdown_options() -> Options {
     opts.insert(Options::ENABLE_TASKLISTS);
     opts.insert(Options::ENABLE_HEADING_ATTRIBUTES);
     opts.insert(Options::ENABLE_YAML_STYLE_METADATA_BLOCKS);
+    opts.insert(Options::ENABLE_MATH);
     opts
 }
 
@@ -112,6 +115,14 @@ pub fn parse_markdown(src: &str) -> ParsedMarkdown {
                 event_ranges.push(range.clone());
                 events.push(MarkdownEvent::Code(code.into_string()));
             }
+            Event::InlineMath(expression) => {
+                event_ranges.push(range.clone());
+                events.push(MarkdownEvent::InlineMath(expression.into_string()));
+            }
+            Event::DisplayMath(expression) => {
+                event_ranges.push(range.clone());
+                events.push(MarkdownEvent::DisplayMath(expression.into_string()));
+            }
             Event::Html(html) => {
                 event_ranges.push(range.clone());
                 html_block_ranges.push(range.clone());
@@ -137,15 +148,105 @@ pub fn parse_markdown(src: &str) -> ParsedMarkdown {
                 event_ranges.push(range.clone());
                 events.push(MarkdownEvent::TaskListMarker(checked));
             }
-            // Skip footnote refs, math, etc. for now
+            // Skip footnote refs and unsupported extensions.
             _ => {}
         }
     }
+
+    (events, event_ranges) = split_paragraphs_around_display_math(events, event_ranges);
 
     // Post-pass: detect tight vs loose lists and blank lines before lists.
     detect_list_properties(&mut events, src, &event_ranges);
 
     ParsedMarkdown { source: src.to_owned(), events, event_ranges, html_block_ranges }
+}
+
+fn split_paragraphs_around_display_math(
+    events: Vec<MarkdownEvent>,
+    ranges: Vec<Range<usize>>,
+) -> (Vec<MarkdownEvent>, Vec<Range<usize>>) {
+    let mut normalized_events = Vec::with_capacity(events.len());
+    let mut normalized_ranges = Vec::with_capacity(ranges.len());
+    let mut index = 0;
+
+    while index < events.len() {
+        if !matches!(events[index], MarkdownEvent::Start(MarkdownTag::Paragraph)) {
+            normalized_events.push(events[index].clone());
+            normalized_ranges.push(ranges[index].clone());
+            index += 1;
+            continue;
+        }
+
+        let paragraph_end = ((index + 1)..events.len()).find(|&candidate| {
+            matches!(events[candidate], MarkdownEvent::End(MarkdownTagEnd::Paragraph))
+        });
+        let Some(paragraph_end) = paragraph_end else {
+            normalized_events.push(events[index].clone());
+            normalized_ranges.push(ranges[index].clone());
+            index += 1;
+            continue;
+        };
+        let mut inline_depth = 0usize;
+        let mut has_display_math = false;
+        let mut unsafe_display_math = false;
+        for event in &events[index + 1..paragraph_end] {
+            match event {
+                MarkdownEvent::Start(_) => inline_depth += 1,
+                MarkdownEvent::End(_) => inline_depth = inline_depth.saturating_sub(1),
+                MarkdownEvent::DisplayMath(_) => {
+                    has_display_math = true;
+                    unsafe_display_math |= inline_depth > 0;
+                }
+                _ => {}
+            }
+        }
+        if !has_display_math || unsafe_display_math {
+            for event_index in index..=paragraph_end {
+                normalized_events.push(events[event_index].clone());
+                normalized_ranges.push(ranges[event_index].clone());
+            }
+            index = paragraph_end + 1;
+            continue;
+        }
+
+        let mut segment_start = index + 1;
+        for event_index in index + 1..=paragraph_end {
+            if event_index != paragraph_end
+                && !matches!(events[event_index], MarkdownEvent::DisplayMath(_))
+            {
+                continue;
+            }
+            let has_visible_text = events[segment_start..event_index].iter().any(|event| {
+                matches!(event, MarkdownEvent::Text(text) if !text.trim().is_empty())
+                    || matches!(
+                        event,
+                        MarkdownEvent::Code(_)
+                            | MarkdownEvent::InlineMath(_)
+                            | MarkdownEvent::InlineHtml(_)
+                    )
+            });
+            if segment_start < event_index && has_visible_text {
+                let start = ranges[segment_start].start;
+                let end = ranges[event_index - 1].end;
+                normalized_events.push(MarkdownEvent::Start(MarkdownTag::Paragraph));
+                normalized_ranges.push(start..start);
+                for segment_index in segment_start..event_index {
+                    normalized_events.push(events[segment_index].clone());
+                    normalized_ranges.push(ranges[segment_index].clone());
+                }
+                normalized_events.push(MarkdownEvent::End(MarkdownTagEnd::Paragraph));
+                normalized_ranges.push(end..end);
+            }
+            if event_index != paragraph_end {
+                normalized_events.push(events[event_index].clone());
+                normalized_ranges.push(ranges[event_index].clone());
+            }
+            segment_start = event_index + 1;
+        }
+        index = paragraph_end + 1;
+    }
+
+    (normalized_events, normalized_ranges)
 }
 
 fn convert_tag(tag: Tag<'_>) -> Option<MarkdownTag> {
@@ -291,6 +392,55 @@ fn has_blank_line_before_offset(src: &str, offset: usize) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn math_events_keep_their_complete_source_ranges() {
+        let source = "中$x^2$文\n\n$$\\frac{1}{2}$$";
+        let parsed = parse_markdown(source);
+        let math_events = parsed
+            .events
+            .iter()
+            .zip(&parsed.event_ranges)
+            .filter(|(event, _)| {
+                matches!(event, MarkdownEvent::InlineMath(_) | MarkdownEvent::DisplayMath(_))
+            })
+            .map(|(_, range)| &source[range.clone()])
+            .collect::<Vec<_>>();
+
+        assert_eq!(math_events, vec!["$x^2$", "$$\\frac{1}{2}$$"]);
+    }
+
+    #[test]
+    fn display_math_split_does_not_cross_inline_tags() {
+        for source in ["**before $$x$$ after**", "[before $$x$$ after](https://example.com)"] {
+            let parsed = parse_markdown(source);
+            let paragraph_starts = parsed
+                .events
+                .iter()
+                .filter(|event| matches!(event, MarkdownEvent::Start(MarkdownTag::Paragraph)))
+                .count();
+            assert_eq!(paragraph_starts, 1, "{source}");
+        }
+    }
+
+    #[test]
+    fn adjacent_display_math_has_no_empty_paragraph() {
+        let parsed = parse_markdown("$$x$$\n$$y$$");
+        let paragraph_starts = parsed
+            .events
+            .iter()
+            .filter(|event| matches!(event, MarkdownEvent::Start(MarkdownTag::Paragraph)))
+            .count();
+        assert_eq!(paragraph_starts, 0);
+        assert_eq!(
+            parsed
+                .events
+                .iter()
+                .filter(|event| matches!(event, MarkdownEvent::DisplayMath(_)))
+                .count(),
+            2
+        );
+    }
 
     #[test]
     fn parse_simple_paragraph() {

@@ -8,7 +8,9 @@ use std::ops::Range;
 use std::sync::Arc;
 use ui::core::geom::Rect;
 
-use super::block::{layout_block_at_content_origin, layout_doc_with_shaper};
+use super::block::layout_block_at_content_origin;
+#[cfg(test)]
+use super::block::layout_doc_with_shaper;
 use super::reconcile::BlockReconcilePlan;
 use super::shaping::populate_style_segments;
 use super::source_line_map::{HiddenBlockSeparator, SourceLineMap};
@@ -166,6 +168,7 @@ pub struct LazyLayout<S: BlockSource> {
     selection_range: Option<std::ops::Range<usize>>,
     /// Crate-private rendering sidecar for ASCII diagram grid metadata.
     ascii_diagrams: super::ascii_diagram::AsciiDiagramRegistry,
+    embedded_images: super::embedded::EmbeddedRegistry,
 }
 
 impl<S: BlockSource> LazyLayout<S> {
@@ -611,7 +614,7 @@ impl<S: BlockSource> LazyLayout<S> {
                     }
                 }
             }
-            LaidOutBlockKind::HorizontalRule => {}
+            LaidOutBlockKind::HorizontalRule | LaidOutBlockKind::Embedded { .. } => {}
         }
     }
 
@@ -767,7 +770,7 @@ impl<S: BlockSource> LazyLayout<S> {
                     }
                 }
             }
-            LaidOutBlockKind::HorizontalRule => {
+            LaidOutBlockKind::HorizontalRule | LaidOutBlockKind::Embedded { .. } => {
                 flat.push(FlatLine {
                     flat_idx: *flat_idx,
                     rect: Rect::new(
@@ -939,6 +942,9 @@ pub enum LaidOutBlockKind {
         row_heights: Vec<f32>,
     },
     HorizontalRule,
+    Embedded {
+        source_range: Range<usize>,
+    },
     MetadataBlock {
         lines: Vec<LaidOutLine>,
     },
@@ -1078,13 +1084,31 @@ fn flat_line_count(block: &LaidOutBlock) -> usize {
                 rows.iter().flat_map(|row| row.iter()).map(Vec::len).sum::<usize>();
             header_line_count + body_line_count
         }
-        LaidOutBlockKind::HorizontalRule => 1,
+        LaidOutBlockKind::HorizontalRule | LaidOutBlockKind::Embedded { .. } => 1,
     }
 }
 
 fn block_tree_contains_code_block(block: &crate::builder::BlockNode) -> bool {
-    matches!(block.kind, crate::builder::BlockKind::CodeBlock { .. })
+    matches!(
+        block.kind,
+        crate::builder::BlockKind::CodeBlock { .. } | crate::builder::BlockKind::DisplayMath
+    ) || block
+        .text_styles
+        .iter()
+        .flatten()
+        .any(|span| matches!(span.style, crate::builder::InlineStyle::Math))
         || block.children.iter().any(block_tree_contains_code_block)
+}
+
+fn block_tree_contains_embedded(block: &crate::builder::BlockNode) -> bool {
+    matches!(block.kind, crate::builder::BlockKind::DisplayMath)
+        || matches!(&block.kind, crate::builder::BlockKind::CodeBlock { language: Some(language) } if super::block::is_mermaid_language(language))
+        || block
+            .text_styles
+            .iter()
+            .flatten()
+            .any(|span| span.style == crate::builder::InlineStyle::Math)
+        || block.children.iter().any(block_tree_contains_embedded)
 }
 
 fn block_contains_source_byte(block: &crate::builder::BlockNode, source_byte: usize) -> bool {
@@ -1187,6 +1211,16 @@ fn shift_laid_out_block(block: &mut LaidOutBlock, source_byte_delta: isize, y_de
             }
         }
         LaidOutBlockKind::HorizontalRule => {}
+        LaidOutBlockKind::Embedded { source_range } => {
+            source_range.start = source_range
+                .start
+                .checked_add_signed(source_byte_delta)
+                .expect("reused embedded source start stays valid");
+            source_range.end = source_range
+                .end
+                .checked_add_signed(source_byte_delta)
+                .expect("reused embedded source end stays valid");
+        }
     }
 }
 
@@ -1207,7 +1241,7 @@ impl<S: BlockSource> LazyLayout<S> {
         doc_view: &dyn core::document::DocView,
     ) -> Self {
         let laid_out_est =
-            layout_doc_with_shaper(source.blocks(), style, viewport_w, None, None, doc_view);
+            super::block::layout_doc_for_estimation(source.blocks(), style, viewport_w, doc_view);
         let n = laid_out_est.blocks.len();
         let estimated_heights: Vec<f32> = laid_out_est.blocks.iter().map(|b| b.rect.h).collect();
         let estimated_positions: Vec<f32> = laid_out_est.blocks.iter().map(|b| b.rect.y).collect();
@@ -1250,6 +1284,7 @@ impl<S: BlockSource> LazyLayout<S> {
             edit_ctx: None,
             selection_range: None,
             ascii_diagrams: super::ascii_diagram::AsciiDiagramRegistry::default(),
+            embedded_images: super::embedded::EmbeddedRegistry::default(),
         }
     }
 
@@ -1368,12 +1403,34 @@ impl<S: BlockSource> LazyLayout<S> {
     }
 
     pub fn set_selection_range(&mut self, selection_range: Option<std::ops::Range<usize>>) {
+        if self.selection_range != selection_range {
+            let changed_block_starts = self
+                .source
+                .blocks()
+                .iter()
+                .filter(|block| block_tree_contains_embedded(block))
+                .filter(|block| {
+                    self.selection_range
+                        .as_ref()
+                        .is_some_and(|range| ranges_intersect_block(range, block))
+                        || selection_range
+                            .as_ref()
+                            .is_some_and(|range| ranges_intersect_block(range, block))
+                })
+                .map(|block| block.block_range.start)
+                .collect::<Vec<_>>();
+            self.invalidate_lines_for_source_bytes(changed_block_starts);
+        }
         self.selection_range = selection_range;
         self.ascii_diagrams.set_selection_range(self.selection_range.clone());
     }
 
     pub(crate) fn ascii_diagrams(&self) -> &super::ascii_diagram::AsciiDiagramRegistry {
         &self.ascii_diagrams
+    }
+
+    pub(crate) fn embedded_images(&self) -> &super::embedded::EmbeddedRegistry {
+        &self.embedded_images
     }
 
     fn discard_ascii_diagrams_for_laid_index(&mut self, laid_idx: usize) {
@@ -1384,6 +1441,7 @@ impl<S: BlockSource> LazyLayout<S> {
             return;
         };
         self.ascii_diagrams.remove_source_range(&block.block_range);
+        self.embedded_images.remove_source_range(&block.block_range);
     }
 
     /// Invalidate laid-out blocks whose source text contains any of the given bytes.
@@ -1535,6 +1593,7 @@ impl<S: BlockSource> LazyLayout<S> {
             ctx.indent = 0.0;
             layout_block_at_content_origin(src_block, &mut ctx);
             self.ascii_diagrams.extend(std::mem::take(&mut ctx.ascii_diagrams));
+            self.embedded_images.extend(std::mem::take(&mut ctx.embedded_images));
             if let Some(mut new_block) = ctx.output.into_iter().next() {
                 populate_style_segments(&mut new_block, shaper, style);
                 let old_height = self.estimated_heights[i];
@@ -1632,6 +1691,7 @@ impl<S: BlockSource> LazyLayout<S> {
 
             layout_block_at_content_origin(src_block, &mut ctx);
             self.ascii_diagrams.extend(std::mem::take(&mut ctx.ascii_diagrams));
+            self.embedded_images.extend(std::mem::take(&mut ctx.embedded_images));
             if let Some(mut new_block) = ctx.output.into_iter().next() {
                 // Populate style segments when shaper is available (same as ensure_visible).
                 if let Some(ref mut s) = shaper {
@@ -1841,6 +1901,7 @@ impl<S: BlockSource> LazyLayout<S> {
         ctx.indent = 0.0;
         layout_block_at_content_origin(src_block, &mut ctx);
         self.ascii_diagrams.extend(std::mem::take(&mut ctx.ascii_diagrams));
+        self.embedded_images.extend(std::mem::take(&mut ctx.embedded_images));
         let outputs = std::mem::take(&mut ctx.output);
 
         // ctx 不再使用，释放其对 shaper 的借用。
@@ -1928,6 +1989,7 @@ impl<S: BlockSource> LazyLayout<S> {
         ctx.indent = estimated_indent;
         layout_block_at_content_origin(src_block, &mut ctx);
         self.ascii_diagrams.extend(std::mem::take(&mut ctx.ascii_diagrams));
+        self.embedded_images.extend(std::mem::take(&mut ctx.embedded_images));
         if let Some(mut new_block) = ctx.output.into_iter().next() {
             populate_style_segments(&mut new_block, shaper, style);
             self.retain_block_projections(idx, &new_block);
@@ -3988,6 +4050,22 @@ mod tests {
         let rendered_lines =
             layout.flat_lines.iter().map(|line| line.text.as_str()).collect::<Vec<_>>();
         assert_eq!(rendered_lines, ["first", "7. second", "third"]);
+    }
+
+    #[test]
+    fn changing_selection_invalidates_embedded_block_on_enter_and_exit() {
+        let source = "before\n\n```mermaid\ngraph TD\nA-->B\n```";
+        let mut layout = layout_with_cursor(source, 0);
+        let diagram_start = source.find("graph TD").expect("diagram source");
+        assert!(layout.laid_out.iter().any(Option::is_some));
+        layout.set_selection_range(Some(diagram_start..diagram_start + 5));
+        assert!(layout.laid_out.iter().any(Option::is_none));
+        let style = default_style();
+        let document_view = core::document::StringDocView::new(source);
+        layout.ensure_all_blocks(&style, 400.0, None, None, &document_view);
+        assert!(layout.laid_out.iter().all(Option::is_some));
+        layout.set_selection_range(None);
+        assert!(layout.laid_out.iter().any(Option::is_none));
     }
 
     // ===== y-stability: marker prepend must not shift subsequent blocks =====

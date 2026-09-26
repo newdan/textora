@@ -379,6 +379,9 @@ impl FrameRuntime {
         }
         refresh_source_spacing_state(document_runtime.editor_mut());
         let mut render_resources = document_runtime.editor_mut().take_render_resources();
+        if let Some(text) = render_resources.text.as_mut() {
+            text.begin_frame();
+        }
         let mut frame = document_runtime.editor_mut().begin_frame()?;
         self.shell.render(&mut frame, input.layout, &model)?;
         self.shell.synchronize_focus(input.state.layout.focus_target, Instant::now());

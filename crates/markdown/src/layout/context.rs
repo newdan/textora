@@ -295,6 +295,8 @@ pub struct LayoutCtx<'a> {
     pub(crate) selection_range: Option<&'a std::ops::Range<usize>>,
     /// Crate-private code-block render metadata, kept outside public layout output structs.
     pub(crate) ascii_diagrams: super::ascii_diagram::AsciiDiagramRegistry,
+    pub(crate) embedded_images: super::embedded::EmbeddedRegistry,
+    pub(crate) allow_embedded: bool,
     /// Active block marker when cursor is in a heading/list/blockquote source range.
     /// Set by the block handler before layout, cleared after.
     pub(crate) active_block_marker: Option<crate::edit::ActiveBlockMarker>,
@@ -356,6 +358,8 @@ impl<'a> LayoutCtx<'a> {
             edit_ctx,
             selection_range: None,
             ascii_diagrams: super::ascii_diagram::AsciiDiagramRegistry::default(),
+            embedded_images: super::embedded::EmbeddedRegistry::default(),
+            allow_embedded: true,
             active_block_marker: None,
         }
     }
@@ -452,6 +456,7 @@ impl<'a> LayoutCtx<'a> {
             first_line_indent,
             styles,
             &[],
+            self.style.text_color,
         )
     }
 
@@ -465,6 +470,7 @@ impl<'a> LayoutCtx<'a> {
         first_line_indent: f32,
         styles: &[StyleSpan],
         protected_ranges: &[std::ops::Range<usize>],
+        foreground: [f32; 4],
     ) -> Vec<WrappedLine> {
         let mut lines = Vec::new();
         self.last_wrap_shaped.clear();
@@ -495,7 +501,7 @@ impl<'a> LayoutCtx<'a> {
                     self.style.body_font_family.first().map(|family| family.as_str()),
                 );
                 let line_styles = style_spans_for_line(styles, input_offset, input_line.len());
-                let shaped = if line_styles.is_empty() {
+                let mut shaped = if line_styles.is_empty() {
                     shaper.shape(input_line).ok()
                 } else {
                     super::shaping::shape_styled_run(
@@ -507,6 +513,45 @@ impl<'a> LayoutCtx<'a> {
                         shaper,
                     )
                 };
+                if let Some(shaped) = shaped.as_mut() {
+                    for span in &line_styles {
+                        if span.style != InlineStyle::Math {
+                            continue;
+                        }
+                        let original = self.doc.doc_text_in_range(span.source_range.clone());
+                        let Some(expression) =
+                            original.strip_prefix('$').and_then(|body| body.strip_suffix('$'))
+                        else {
+                            continue;
+                        };
+                        let request = crate::embedded::EmbeddedRequest {
+                            kind: crate::embedded::EmbeddedKind::InlineMath,
+                            source: expression,
+                            font_size,
+                            foreground: foreground
+                                .map(|channel| (channel.clamp(0.0, 1.0) * 255.0).round() as u8),
+                            background: [0, 0, 0, 0],
+                        };
+                        let Ok(image) = crate::embedded::render_embedded(request) else {
+                            continue;
+                        };
+                        self.embedded_images.register(
+                            span.source_range.clone(),
+                            image.image.clone(),
+                            image.baseline,
+                        );
+                        let token_range = span.start..span.start + span.len;
+                        if let Some(cluster) = shaped
+                            .clusters
+                            .iter_mut()
+                            .find(|cluster| cluster.byte_range == token_range)
+                        {
+                            let advance = image.image.width() as f32;
+                            shaped.width += advance - cluster.advance;
+                            cluster.advance = advance;
+                        }
+                    }
+                }
                 let char_width = shaper.grapheme_advance(" ").unwrap_or(font_size * 0.3);
                 shaper.set_font_size(old_size);
                 shaper.set_font_weight(old_weight);
@@ -529,7 +574,9 @@ impl<'a> LayoutCtx<'a> {
                         .filter(|span| {
                             matches!(
                                 span.style,
-                                InlineStyle::InlineCode | InlineStyle::SourceMarker
+                                InlineStyle::InlineCode
+                                    | InlineStyle::SourceMarker
+                                    | InlineStyle::Math
                             )
                         })
                         .map(|span| span.start..span.start + span.len)

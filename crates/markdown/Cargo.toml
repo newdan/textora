@@ -10,6 +10,12 @@ rust-version.workspace = true
 encoding_rs.workspace = true
 ego-tree.workspace = true
 pulldown-cmark = { version = "0.13.0", default-features = false }
+ratex-parser = "=0.1.14"
+ratex-layout = "=0.1.14"
+ratex-types = "=0.1.14"
+ratex-svg = { version = "=0.1.14", features = ["standalone", "embed-fonts"] }
+mermaid-rs-renderer = { version = "=0.3.1", default-features = false }
+resvg = { version = "=0.48.1", default-features = false, features = ["text", "system-fonts", "raster-images"] }
 scraper.workspace = true
 ui.workspace = true
 shaping.workspace = true

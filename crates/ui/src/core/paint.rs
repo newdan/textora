@@ -6,6 +6,81 @@ use crate::core::text_layout::UiTextLayout;
 use crate::tapered_path::TaperedMesh;
 use shaping::{Style, Weight};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
+
+static NEXT_RASTER_IMAGE_ID: AtomicU64 = AtomicU64::new(1);
+const RGBA_CHANNEL_COUNT: usize = 4;
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum RasterImageError {
+    InvalidDimensions,
+    InvalidPixelLength { expected: usize, actual: usize },
+}
+
+impl std::fmt::Display for RasterImageError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::InvalidDimensions => formatter.write_str("raster image dimensions are invalid"),
+            Self::InvalidPixelLength { expected, actual } => {
+                write!(formatter, "raster image needs {expected} bytes, got {actual}")
+            }
+        }
+    }
+}
+
+impl std::error::Error for RasterImageError {}
+
+/// Immutable, premultiplied RGBA pixels shared by draw-list snapshots.
+#[derive(Clone, Debug)]
+pub struct RasterImage {
+    id: u64,
+    width: u32,
+    height: u32,
+    pixels: Arc<[u8]>,
+}
+
+impl RasterImage {
+    pub fn new(
+        width: u32,
+        height: u32,
+        pixels: impl Into<Arc<[u8]>>,
+    ) -> Result<Self, RasterImageError> {
+        let expected = usize::try_from(width)
+            .ok()
+            .and_then(|width| {
+                usize::try_from(height).ok().and_then(|height| width.checked_mul(height))
+            })
+            .and_then(|pixel_count| pixel_count.checked_mul(RGBA_CHANNEL_COUNT))
+            .ok_or(RasterImageError::InvalidDimensions)?;
+        if width == 0 || height == 0 {
+            return Err(RasterImageError::InvalidDimensions);
+        }
+        let pixels = pixels.into();
+        if pixels.len() != expected {
+            return Err(RasterImageError::InvalidPixelLength { expected, actual: pixels.len() });
+        }
+        Ok(Self { id: NEXT_RASTER_IMAGE_ID.fetch_add(1, Ordering::Relaxed), width, height, pixels })
+    }
+
+    pub fn id(&self) -> u64 {
+        self.id
+    }
+    pub fn width(&self) -> u32 {
+        self.width
+    }
+    pub fn height(&self) -> u32 {
+        self.height
+    }
+    pub fn pixels(&self) -> &[u8] {
+        &self.pixels
+    }
+}
+
+impl PartialEq for RasterImage {
+    fn eq(&self, other: &Self) -> bool {
+        self.id == other.id
+    }
+}
 
 /// 绘制命令：widget 输出语义化绘图指令，
 /// 由 app 端 paint_backend 翻译为 GPU 顶点。
@@ -18,6 +93,8 @@ pub enum DrawCmd {
     /// 预 shape 的文本布局 — 携带 harfbuzz 结果和绘制参数。
     /// app 层 drain 时做 atlas rasterize + emit。
     TextLayout { layout: Arc<UiTextLayout>, x: f32, y_baseline: f32, color: [f32; 4] },
+    /// Premultiplied RGBA image. The backend owns GPU allocation and clipping.
+    Image { image: Arc<RasterImage>, rect: Rect },
     /// 填充三角形（3 个顶点，像素坐标）
     FillTriangle { p0: [f32; 2], p1: [f32; 2], p2: [f32; 2], color: [f32; 4] },
     /// 共享的渐变宽度路径网格（顶点坐标为像素坐标）。
@@ -50,6 +127,11 @@ impl DrawList {
 
     pub fn fill(&mut self, rect: Rect, color: [f32; 4]) {
         self.fill_rounded(rect, color, 0.0);
+    }
+
+    pub fn image(&mut self, image: Arc<RasterImage>, rect: Rect) {
+        let rect = Rect::new(rect.x + self.offset.0, rect.y + self.offset.1, rect.w, rect.h);
+        self.cmds.push(DrawCmd::Image { image, rect });
     }
 
     pub fn fill_rounded(&mut self, rect: Rect, color: [f32; 4], radius: f32) {
@@ -188,6 +270,39 @@ impl DrawList {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn raster_image_checks_pixel_length_and_keeps_shared_pixels() {
+        let pixels: Arc<[u8]> = vec![10, 20, 30, 40].into();
+        let image =
+            RasterImage::new(1, 1, Arc::clone(&pixels)).expect("one RGBA pixel must be accepted");
+        assert_eq!(image.pixels(), pixels.as_ref());
+        assert_eq!(image.width(), 1);
+        assert_eq!(image.height(), 1);
+        assert_eq!(
+            RasterImage::new(0, 1, pixels.clone()),
+            Err(RasterImageError::InvalidDimensions)
+        );
+        assert_eq!(
+            RasterImage::new(2, 1, pixels),
+            Err(RasterImageError::InvalidPixelLength { expected: 8, actual: 4 })
+        );
+    }
+
+    #[test]
+    fn image_command_applies_draw_list_offset() {
+        let image = Arc::new(
+            RasterImage::new(1, 1, vec![255, 255, 255, 255])
+                .expect("one RGBA pixel must be accepted"),
+        );
+        let mut list = DrawList::new();
+        list.offset = (12.0, 8.0);
+        list.image(Arc::clone(&image), Rect::new(3.0, 4.0, 5.0, 6.0));
+        assert_eq!(
+            list.cmds,
+            vec![DrawCmd::Image { image, rect: Rect::new(15.0, 12.0, 5.0, 6.0) }]
+        );
+    }
 
     #[test]
     fn tapered_mesh_command_shares_geometry_and_applies_draw_list_offset() {

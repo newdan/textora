@@ -324,10 +324,7 @@ fn container_prefixes(line: &str) -> Option<(String, String, usize)> {
     let mut remaining = &line[indentation..];
     let mut quote_prefix = " ".repeat(indentation);
     let mut has_quote = false;
-    loop {
-        let Some(after_marker) = remaining.strip_prefix('>') else {
-            break;
-        };
+    while let Some(after_marker) = remaining.strip_prefix('>') {
         has_quote = true;
         quote_prefix.push('>');
         if let Some(after_space) = after_marker.strip_prefix(' ') {

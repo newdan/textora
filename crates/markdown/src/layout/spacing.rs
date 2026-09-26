@@ -19,6 +19,7 @@ impl BlockSpacing {
             BlockKind::Container | BlockKind::TableRow_ | BlockKind::TableCell_ { .. } => None,
             BlockKind::Heading { level } => Some(Self::Heading { level: *level }),
             BlockKind::Paragraph => Some(Self::Paragraph),
+            BlockKind::DisplayMath => Some(Self::Paragraph),
             BlockKind::CodeBlock { .. } => Some(Self::CodeBlock),
             BlockKind::BlockQuote => Some(Self::BlockQuote),
             BlockKind::ListItem { tight, blank_line_before, .. } => {

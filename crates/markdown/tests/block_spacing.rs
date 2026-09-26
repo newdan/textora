@@ -78,7 +78,7 @@ fn find_line_rect(blocks: &[LaidOutBlock], needle: &str) -> Option<Rect> {
             .chain(rows.iter().flatten().flatten())
             .find(|line| line.text.contains(needle))
             .map(|line| line.rect),
-        LaidOutBlockKind::HorizontalRule => None,
+        LaidOutBlockKind::HorizontalRule | LaidOutBlockKind::Embedded { .. } => None,
     })
 }
 

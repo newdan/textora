@@ -202,6 +202,17 @@ fn render_hello_to_png() {
         view_formats: &[],
     });
     let atlas_view = atlas_texture.create_view(&wgpu::TextureViewDescriptor::default());
+    let image_texture = device.create_texture(&wgpu::TextureDescriptor {
+        label: Some("unused image atlas"),
+        size: wgpu::Extent3d { width: 1, height: 1, depth_or_array_layers: 1 },
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: wgpu::TextureDimension::D2,
+        format: wgpu::TextureFormat::Rgba8Unorm,
+        usage: wgpu::TextureUsages::TEXTURE_BINDING,
+        view_formats: &[],
+    });
+    let image_view = image_texture.create_view(&wgpu::TextureViewDescriptor::default());
 
     // --- Create render target (must match pipeline MSAA 4x) ---
     let render_target = device.create_texture(&wgpu::TextureDescriptor {
@@ -261,6 +272,14 @@ fn render_hello_to_png() {
                 resource: wgpu::BindingResource::Sampler(renderer.sampler()),
             },
             wgpu::BindGroupEntry { binding: 2, resource: gamma_buffer.as_entire_binding() },
+            wgpu::BindGroupEntry {
+                binding: 3,
+                resource: wgpu::BindingResource::TextureView(&image_view),
+            },
+            wgpu::BindGroupEntry {
+                binding: 4,
+                resource: wgpu::BindingResource::Sampler(renderer.image_sampler()),
+            },
         ],
     });
 

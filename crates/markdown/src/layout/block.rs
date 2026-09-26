@@ -39,8 +39,7 @@ pub fn layout_doc_with_shaper(
     highlighter: Option<&dyn crate::builder::CodeHighlighter>,
     text_doc: &dyn core::document::DocView,
 ) -> LaidOutDoc {
-    layout_doc_with_shaper_for_rendering(blocks, style, viewport_w, shaper, highlighter, text_doc)
-        .doc
+    layout_doc_with_options(blocks, style, viewport_w, shaper, highlighter, text_doc, false).doc
 }
 
 /// A Markdown layout that retains crate-private render sidecars.
@@ -51,6 +50,7 @@ pub fn layout_doc_with_shaper(
 pub struct MarkdownLayout {
     pub(crate) doc: LaidOutDoc,
     pub(crate) ascii_diagrams: super::ascii_diagram::AsciiDiagramRegistry,
+    pub(crate) embedded_images: super::embedded::EmbeddedRegistry,
 }
 
 impl MarkdownLayout {
@@ -61,6 +61,10 @@ impl MarkdownLayout {
 
     pub(crate) fn ascii_diagrams(&self) -> &super::ascii_diagram::AsciiDiagramRegistry {
         &self.ascii_diagrams
+    }
+
+    pub(crate) fn embedded_images(&self) -> &super::embedded::EmbeddedRegistry {
+        &self.embedded_images
     }
 }
 
@@ -83,7 +87,20 @@ pub fn layout_doc_with_shaper_for_rendering(
     highlighter: Option<&dyn crate::builder::CodeHighlighter>,
     text_doc: &dyn core::document::DocView,
 ) -> MarkdownLayout {
+    layout_doc_with_options(blocks, style, viewport_w, shaper, highlighter, text_doc, true)
+}
+
+fn layout_doc_with_options(
+    blocks: &[BlockNode],
+    style: &MarkdownStyle,
+    viewport_w: f32,
+    shaper: Option<&mut Shaper>,
+    highlighter: Option<&dyn crate::builder::CodeHighlighter>,
+    text_doc: &dyn core::document::DocView,
+    allow_embedded: bool,
+) -> MarkdownLayout {
     let mut ctx = LayoutCtx::new(text_doc, style, viewport_w, shaper, highlighter, None, None);
+    ctx.allow_embedded = allow_embedded;
 
     for block in blocks {
         layout_block(block, &mut ctx);
@@ -98,7 +115,23 @@ pub fn layout_doc_with_shaper_for_rendering(
     MarkdownLayout {
         doc: super::types::LaidOutDoc { blocks: ctx.output, total_height: ctx.y },
         ascii_diagrams: ctx.ascii_diagrams,
+        embedded_images: ctx.embedded_images,
     }
+}
+
+pub(crate) fn layout_doc_for_estimation(
+    blocks: &[BlockNode],
+    style: &MarkdownStyle,
+    viewport_w: f32,
+    text_doc: &dyn core::document::DocView,
+) -> LaidOutDoc {
+    let mut ctx = LayoutCtx::new(text_doc, style, viewport_w, None, None, None, None);
+    ctx.allow_embedded = false;
+    for block in blocks {
+        layout_block(block, &mut ctx);
+    }
+    ctx.finish_document_spacing();
+    LaidOutDoc { blocks: ctx.output, total_height: ctx.y }
 }
 
 use super::types::LaidOutDoc;
@@ -164,6 +197,26 @@ fn layout_block_content(block: &BlockNode, ctx: &mut LayoutCtx) {
             let font_size = ctx.font_size_override.unwrap_or(ctx.style.body_font_size);
             layout_text_block(block, ctx, font_size, ctx.style.text_color, Weight::NORMAL);
         }
+        BlockKind::DisplayMath => {
+            let active = block_is_active(block, ctx);
+            if !active {
+                let spelling = ctx.doc.doc_text_in_range(block.block_range.clone());
+                let expression =
+                    spelling.trim().strip_prefix("$$").and_then(|body| body.strip_suffix("$$"));
+                if let Some(expression) = expression
+                    && layout_embedded_block(
+                        block,
+                        ctx,
+                        crate::embedded::EmbeddedKind::DisplayMath,
+                        expression.trim(),
+                    )
+                {
+                    return;
+                }
+            }
+            let font_size = ctx.font_size_override.unwrap_or(ctx.style.body_font_size);
+            layout_text_block(block, ctx, font_size, ctx.style.text_color, Weight::NORMAL);
+        }
         BlockKind::Heading { level } => {
             let idx = (*level as usize).saturating_sub(1).min(5);
             let font_size = ctx.style.heading_font_sizes[idx];
@@ -180,7 +233,22 @@ fn layout_block_content(block: &BlockNode, ctx: &mut LayoutCtx) {
             ctx.active_block_marker = None;
         }
         BlockKind::CodeBlock { language } => {
-            let active = code_block_is_active(block, ctx.edit_ctx);
+            let is_mermaid = language.as_deref().is_some_and(is_mermaid_language);
+            let mut active = code_block_is_active(block, ctx.edit_ctx)
+                || (is_mermaid && block_is_selected(block, ctx.selection_range));
+
+            if is_mermaid && !active {
+                let content = block.lines(ctx.doc).join("\n");
+                if layout_embedded_block(
+                    block,
+                    ctx,
+                    crate::embedded::EmbeddedKind::Mermaid,
+                    content.trim_end(),
+                ) {
+                    return;
+                }
+                active = true;
+            }
 
             let font_size = ctx.style.code_font_size;
             let line_h = ctx.style.code_line_height;
@@ -412,6 +480,15 @@ fn layout_block_content(block: &BlockNode, ctx: &mut LayoutCtx) {
                 let estimated_marker_width = active_ordered_marker.map_or(0.0, |marker| {
                     marker.marker_text.chars().count() as f32 * font_size * 0.55
                 });
+                super::embedded::expose_failed_math(
+                    &mut projected,
+                    &mut materialized_styles,
+                    ctx.doc,
+                    font_size,
+                    ctx.style.text_color,
+                    !ctx.allow_embedded || ctx.shaper.is_none(),
+                    ctx.selection_range,
+                );
                 let projected_verbatim_ranges = projected_verbatim_ranges(&projected);
                 let wrapped = ctx.wrap_text_with_first_line_indent_styled_and_protected(
                     &projected.text,
@@ -421,6 +498,7 @@ fn layout_block_content(block: &BlockNode, ctx: &mut LayoutCtx) {
                     0.0,
                     &materialized_styles,
                     &projected_verbatim_ranges,
+                    ctx.style.text_color,
                 );
                 let wrapped_shaped = ctx.last_wrap_shaped.first().cloned().flatten();
                 let marker_width = marker_len
@@ -443,10 +521,12 @@ fn layout_block_content(block: &BlockNode, ctx: &mut LayoutCtx) {
                     ctx.style.body_font_family.first().map(|s| s.as_str()),
                     wrapped_shaped.as_ref(),
                     line_idx,
+                    &ctx.embedded_images,
                 );
                 let n = laid.len();
+                let laid_height = laid.iter().map(|line| line.rect.h).sum::<f32>();
                 item_lines.extend(laid);
-                ctx.y += line_h * n as f32;
+                ctx.y += if n == 0 { line_h } else { laid_height };
             }
             ctx.active_block_marker = None;
 
@@ -608,6 +688,51 @@ fn ordered_source_marker(
         marker_text: source.get(marker_start..content_start)?.to_owned(),
         marker_source_range: marker_start..content_start,
     })
+}
+
+pub(crate) fn is_mermaid_language(language_hint: &str) -> bool {
+    language_hint
+        .split_whitespace()
+        .next()
+        .is_some_and(|language| language.eq_ignore_ascii_case("mermaid"))
+}
+
+fn block_is_selected(block: &BlockNode, selection: Option<&std::ops::Range<usize>>) -> bool {
+    selection.is_some_and(|range| {
+        range.start < block.block_range.end && block.block_range.start < range.end
+    })
+}
+
+fn block_is_active(block: &BlockNode, ctx: &LayoutCtx<'_>) -> bool {
+    code_block_is_active(block, ctx.edit_ctx) || block_is_selected(block, ctx.selection_range)
+}
+
+fn layout_embedded_block(
+    block: &BlockNode,
+    ctx: &mut LayoutCtx<'_>,
+    kind: crate::embedded::EmbeddedKind,
+    source: &str,
+) -> bool {
+    if !ctx.allow_embedded {
+        return false;
+    }
+    let foreground =
+        ctx.style.text_color.map(|channel| (channel.clamp(0.0, 1.0) * 255.0).round() as u8);
+    let request = crate::embedded::EmbeddedRequest {
+        kind,
+        source,
+        font_size: ctx.style.body_font_size,
+        foreground,
+        background: [0, 0, 0, 0],
+    };
+    let Ok(image) = crate::embedded::render_embedded(request) else {
+        return false;
+    };
+    let scale = (ctx.available_width() / image.image.width() as f32).min(1.0);
+    let height = image.image.height() as f32 * scale;
+    ctx.embedded_images.register(block.block_range.clone(), image.image, image.baseline * scale);
+    ctx.push_block(LaidOutBlockKind::Embedded { source_range: block.block_range.clone() }, height);
+    true
 }
 
 fn code_block_is_active(block: &BlockNode, edit_ctx: Option<&crate::edit::EditContext>) -> bool {
@@ -1010,11 +1135,20 @@ pub(crate) fn layout_text_block(
             // near the wrap boundary. The marker is prepended downstream by
             // the precision path (shaper available), which handles wrapping
             // and source-map adjustment via prepend_marker_to_line.
-            let line_styles = raw_styles.get(line_idx).cloned().unwrap_or_default();
-            let source_projection =
+            let mut line_styles = raw_styles.get(line_idx).cloned().unwrap_or_default();
+            let mut source_projection =
                 block.projected_lines.get(line_idx).cloned().unwrap_or_else(|| {
                     crate::projection::ProjectedText::direct(raw, block.block_range.start)
                 });
+            super::embedded::expose_failed_math(
+                &mut source_projection,
+                &mut line_styles,
+                ctx.doc,
+                font_size,
+                color,
+                true,
+                ctx.selection_range,
+            );
             let estimated_ranges = estimated_visual_line_ranges(
                 &source_projection.text,
                 ctx.available_width(),
@@ -1025,7 +1159,7 @@ pub(crate) fn layout_text_block(
                 crate::grapheme_map::grapheme_byte_boundaries(&source_projection.text);
             for (i, visual_range) in estimated_ranges.into_iter().enumerate() {
                 let visual_indent = if i == 0 { line_indent } else { 0.0 };
-                let text = if i == 0 { raw.to_string() } else { String::new() };
+                let text = if i == 0 { source_projection.text.clone() } else { String::new() };
                 laid_out_lines.push(LaidOutLine {
                     // Put full raw text and styles in the first line so flat_lines
                     // have content. Wrapped lines (i>0) get empty — precision fills them.
@@ -1138,6 +1272,15 @@ pub(crate) fn layout_text_block(
                 },
             );
         }
+        super::embedded::expose_failed_math(
+            &mut projected,
+            &mut materialized_styles,
+            ctx.doc,
+            font_size,
+            color,
+            !ctx.allow_embedded || ctx.shaper.is_none(),
+            ctx.selection_range,
+        );
         let mut projected_verbatim_ranges = projected_verbatim_ranges(&projected);
         if block.text_lines.is_empty() && raw.contains('\t') {
             projected_verbatim_ranges.push(0..projected.text.len());
@@ -1150,6 +1293,7 @@ pub(crate) fn layout_text_block(
             line_indent,
             &materialized_styles,
             &projected_verbatim_ranges,
+            color,
         );
         let visual_grapheme_bytes = crate::grapheme_map::grapheme_byte_boundaries(&projected.text);
 
@@ -1191,13 +1335,15 @@ pub(crate) fn layout_text_block(
             let source_projection = projected
                 .slice_visual_line_indexed(&visual_grapheme_bytes, 0, seg_start..seg_end)
                 .expect("wrapped visual lines must end at projection grapheme boundaries");
+            let row_height =
+                line_height_for_math(&seg_styles, line_h, font_size, &ctx.embedded_images);
             laid_out_lines.push(LaidOutLine {
                 text: w.text.clone(),
                 rect: ui::core::geom::Rect::new(
                     ctx.indent + visual_indent,
                     ly,
                     ctx.available_width() - visual_indent,
-                    line_h,
+                    row_height,
                 ),
                 font_size,
                 is_code: false,
@@ -1215,7 +1361,7 @@ pub(crate) fn layout_text_block(
                 highlight_spans: vec![],
                 source_projection: Some(source_projection),
             });
-            ly += line_h;
+            ly += row_height;
         }
     }
 
@@ -1229,8 +1375,7 @@ pub(crate) fn layout_text_block(
         }
     }
 
-    let total_h =
-        if laid_out_lines.is_empty() { line_h } else { laid_out_lines.len() as f32 * line_h };
+    let total_h = if laid_out_lines.is_empty() { line_h } else { ly - ctx.y };
     ctx.push_block(LaidOutBlockKind::Text { lines: laid_out_lines }, total_h);
 }
 
@@ -1369,8 +1514,17 @@ pub(crate) fn layout_table(block: &BlockNode, ctx: &mut LayoutCtx, columns: usiz
             let mut cy = row_y + pad;
             for (t_idx, t) in texts.iter().enumerate() {
                 let line_styles = text_styles.get(t_idx).map(|s| s.as_slice()).unwrap_or(&[]);
-                let (projected, materialized_styles) =
+                let (mut projected, mut materialized_styles) =
                     materialize_table_cell_line(cell, t_idx, t, line_styles, ctx);
+                super::embedded::expose_failed_math(
+                    &mut projected,
+                    &mut materialized_styles,
+                    ctx.doc,
+                    font_size,
+                    ctx.style.text_color,
+                    !ctx.allow_embedded || ctx.shaper.is_none(),
+                    ctx.selection_range,
+                );
                 let cell_x = col_x + pad;
                 let cell_inner_w = (cell_w - pad * 2.0).max(1.0);
                 let projected_verbatim_ranges = projected_verbatim_ranges(&projected);
@@ -1382,6 +1536,7 @@ pub(crate) fn layout_table(block: &BlockNode, ctx: &mut LayoutCtx, columns: usiz
                     0.0,
                     &materialized_styles,
                     &projected_verbatim_ranges,
+                    ctx.style.text_color,
                 );
                 let wrapped_shaped = ctx.last_wrap_shaped.first().cloned().flatten();
                 let mut laid = layout_line_with_styles(
@@ -1397,6 +1552,7 @@ pub(crate) fn layout_table(block: &BlockNode, ctx: &mut LayoutCtx, columns: usiz
                     ctx.style.body_font_family.first().map(|s| s.as_str()),
                     wrapped_shaped.as_ref(),
                     t_idx,
+                    &ctx.embedded_images,
                 );
                 let owner = crate::projection::ProjectionOwnerId::TableCell {
                     table_start,
@@ -1411,8 +1567,9 @@ pub(crate) fn layout_table(block: &BlockNode, ctx: &mut LayoutCtx, columns: usiz
                         .owner = owner;
                 }
                 let n = laid.len();
+                let laid_height = laid.iter().map(|line| line.rect.h).sum::<f32>();
                 laid_out.extend(laid);
-                cy += line_h * n as f32;
+                cy += if n == 0 { line_h } else { laid_height };
             }
             if cy > max_cell_bottom {
                 max_cell_bottom = cy;
@@ -1593,7 +1750,28 @@ pub(crate) fn measure_column_demand(
                         });
                     (max_tok, char_est(t))
                 });
-            let d = max_token_w.max(full_w * 0.6);
+            let image_width = styles
+                .get(line_index)
+                .into_iter()
+                .flatten()
+                .filter(|_| shaper.is_some())
+                .filter(|span| span.style == crate::builder::InlineStyle::Math)
+                .filter_map(|span| {
+                    let spelling = doc.doc_text_in_range(span.source_range.clone());
+                    let expression = spelling.strip_prefix('$')?.strip_suffix('$')?;
+                    let image =
+                        crate::embedded::render_embedded(crate::embedded::EmbeddedRequest {
+                            kind: crate::embedded::EmbeddedKind::InlineMath,
+                            source: expression,
+                            font_size,
+                            foreground: [0, 0, 0, 255],
+                            background: [0, 0, 0, 0],
+                        })
+                        .ok()?;
+                    Some(image.image.width() as f32)
+                })
+                .fold(0.0f32, f32::max);
+            let d = max_token_w.max(full_w * 0.6).max(image_width);
             if d > demand[ci] {
                 demand[ci] = d;
             }
@@ -1779,6 +1957,7 @@ fn layout_line_with_styles(
     font_family: Option<&str>,
     full_shaped: Option<&shaping::ShapedRun>,
     doc_line_idx: usize,
+    embedded_images: &super::embedded::EmbeddedRegistry,
 ) -> Vec<LaidOutLine> {
     let mut result = Vec::new();
     let mut ly = y_start;
@@ -1815,10 +1994,11 @@ fn layout_line_with_styles(
                 Weight::NORMAL,
             )
         });
+        let row_height = line_height_for_math(&seg_styles, line_h, font_size, embedded_images);
         // Shaping deferred to render phase (only visible lines)
         result.push(LaidOutLine {
             text: w.text.clone(),
-            rect: ui::core::geom::Rect::new(x, ly, width, line_h),
+            rect: ui::core::geom::Rect::new(x, ly, width, row_height),
             font_size,
             is_code: false,
             font_weight: Weight::NORMAL,
@@ -1831,9 +2011,30 @@ fn layout_line_with_styles(
             highlight_spans: vec![],
             source_projection: Some(source_projection),
         });
-        ly += line_h;
+        ly += row_height;
     }
     result
+}
+
+fn line_height_for_math(
+    styles: &[StyleSpan],
+    default_height: f32,
+    font_size: f32,
+    embedded_images: &super::embedded::EmbeddedRegistry,
+) -> f32 {
+    let mut ascent = font_size;
+    let mut descent = (default_height - font_size).max(0.0);
+    for span in styles {
+        if !matches!(span.style, crate::builder::InlineStyle::Math) {
+            continue;
+        }
+        let Some(image) = embedded_images.image_for(&span.source_range) else {
+            continue;
+        };
+        ascent = ascent.max(image.baseline);
+        descent = descent.max(image.image.height() as f32 - image.baseline);
+    }
+    (ascent + descent).max(default_height)
 }
 
 #[cfg(test)]
@@ -1844,6 +2045,221 @@ mod tests {
     use crate::layout::LazyLayout;
     use crate::parser::parse_markdown;
     use crate::test_utils::default_style;
+
+    #[test]
+    fn inline_math_cluster_uses_rendered_image_width() {
+        let source = "left $x^2$ right";
+        let parsed = parse_markdown(source);
+        let style = default_style();
+        let document = MarkdownDoc::build(&parsed, &style);
+        assert!(
+            document.blocks[0]
+                .text_styles
+                .iter()
+                .flatten()
+                .any(|span| matches!(span.style, InlineStyle::Math))
+        );
+        let text_document = core::document::StringDocView::new(source);
+        let mut shaper = shaping::Shaper::new().expect("test environment has a font");
+        let layout = layout_doc_with_shaper_for_rendering(
+            &document.blocks,
+            &style,
+            400.0,
+            Some(&mut shaper),
+            None,
+            &text_document,
+        );
+        let LaidOutBlockKind::Text { lines } = &layout.document().blocks[0].kind else {
+            panic!("math fixture has one paragraph");
+        };
+        let line = &lines[0];
+        let math_span = line
+            .styles
+            .iter()
+            .find(|span| matches!(span.style, InlineStyle::Math))
+            .expect("math span");
+        let cluster = line
+            .shaped
+            .as_ref()
+            .expect("shaped line")
+            .clusters
+            .iter()
+            .find(|cluster| {
+                cluster.byte_range == (math_span.start..math_span.start + math_span.len)
+            })
+            .expect("math cluster");
+        let expected = crate::embedded::render_embedded(crate::embedded::EmbeddedRequest {
+            kind: crate::embedded::EmbeddedKind::InlineMath,
+            source: "x^2",
+            font_size: style.body_font_size,
+            foreground: [0, 0, 0, 255],
+            background: [0, 0, 0, 0],
+        })
+        .expect("valid inline math");
+        assert!((cluster.advance - expected.image.width() as f32).abs() < 1.0);
+    }
+
+    #[test]
+    fn tall_inline_math_expands_its_row_and_following_block_position() {
+        let source = "left $\\frac{1}{2}$ right\n\nnext";
+        let parsed = parse_markdown(source);
+        let style = default_style();
+        let document = MarkdownDoc::build(&parsed, &style);
+        let text_document = core::document::StringDocView::new(source);
+        let mut shaper = shaping::Shaper::new().expect("test font");
+        let layout = layout_doc_with_shaper_for_rendering(
+            &document.blocks,
+            &style,
+            400.0,
+            Some(&mut shaper),
+            None,
+            &text_document,
+        );
+        let LaidOutBlockKind::Text { lines } = &layout.document().blocks[0].kind else {
+            panic!("first block is paragraph");
+        };
+        let math_range = lines[0]
+            .styles
+            .iter()
+            .find(|span| matches!(span.style, InlineStyle::Math))
+            .expect("math span")
+            .source_range
+            .clone();
+        let image = layout.embedded_images().image_for(&math_range).expect("math image");
+        let ascent = image.baseline.max(style.body_font_size);
+        let descent = (image.image.height() as f32 - image.baseline)
+            .max(style.line_height - style.body_font_size);
+        assert!(lines[0].rect.h >= ascent + descent);
+        assert!(
+            layout.document().blocks[1].rect.y
+                >= layout.document().blocks[0].rect.y + lines[0].rect.h
+        );
+    }
+
+    #[test]
+    fn display_math_and_mermaid_become_image_blocks() {
+        for source in ["$$\\frac{1}{2}$$", "```mermaid\nflowchart LR\nA --> B\n```"] {
+            let parsed = parse_markdown(source);
+            let style = default_style();
+            let document = MarkdownDoc::build(&parsed, &style);
+            let text_document = core::document::StringDocView::new(source);
+            let mut shaper = shaping::Shaper::new().expect("test font");
+            let layout = layout_doc_with_shaper_for_rendering(
+                &document.blocks,
+                &style,
+                400.0,
+                Some(&mut shaper),
+                None,
+                &text_document,
+            );
+            assert!(
+                format!("{:?}", layout.document().blocks[0].kind).contains("Embedded"),
+                "{source}"
+            );
+            assert!(
+                layout.embedded_images().image_for(&document.blocks[0].block_range).is_some(),
+                "{source}"
+            );
+        }
+    }
+
+    #[test]
+    fn invalid_inline_math_falls_back_to_readable_source() {
+        let source = "before $\\noSuchMathCommand$ after";
+        let parsed = parse_markdown(source);
+        let style = default_style();
+        let document = MarkdownDoc::build(&parsed, &style);
+        assert!(
+            document.blocks[0]
+                .text_styles
+                .iter()
+                .flatten()
+                .any(|span| matches!(span.style, InlineStyle::Math))
+        );
+        let text_document = core::document::StringDocView::new(source);
+        let mut shaper = shaping::Shaper::new().expect("test font");
+        let layout = layout_doc_with_shaper_for_rendering(
+            &document.blocks,
+            &style,
+            400.0,
+            Some(&mut shaper),
+            None,
+            &text_document,
+        );
+        let LaidOutBlockKind::Text { lines } = &layout.document().blocks[0].kind else {
+            panic!("paragraph expected");
+        };
+        assert_eq!(lines.iter().map(|line| line.text.as_str()).collect::<String>(), source);
+    }
+
+    #[test]
+    fn invalid_mermaid_shows_complete_fenced_source() {
+        let source = "```mermaid\nnot a diagram\n```";
+        let parsed = parse_markdown(source);
+        let style = default_style();
+        let document = MarkdownDoc::build(&parsed, &style);
+        let text_document = core::document::StringDocView::new(source);
+        let mut shaper = shaping::Shaper::new().expect("test font");
+        let layout = layout_doc_with_shaper_for_rendering(
+            &document.blocks,
+            &style,
+            400.0,
+            Some(&mut shaper),
+            None,
+            &text_document,
+        );
+        let LaidOutBlockKind::CodeBlock { lines, .. } = &layout.document().blocks[0].kind else {
+            panic!("invalid mermaid falls back to code block");
+        };
+        assert!(lines.iter().any(|line| line.text == "```mermaid"));
+        assert!(lines.iter().any(|line| line.text == "```"));
+    }
+
+    #[test]
+    fn table_column_demand_includes_inline_math_image_width() {
+        let source = "| x | y |\n|---|---|\n| $a+b+c+d+e+f+g+h+i+j+k+l$ | z |";
+        let style = default_style();
+        let document = MarkdownDoc::build(&parse_markdown(source), &style);
+        let table = &document.blocks[0];
+        let text_document = core::document::StringDocView::new(source);
+        let mut shaper = shaping::Shaper::new().expect("test font");
+        let demand = measure_column_demand(
+            table,
+            2,
+            style.body_font_size,
+            style.text_spacing_mode,
+            style.body_font_family.first().map(String::as_str),
+            Some(&mut shaper),
+            &text_document,
+        );
+        let image = crate::embedded::render_embedded(crate::embedded::EmbeddedRequest {
+            kind: crate::embedded::EmbeddedKind::InlineMath,
+            source: "a+b+c+d+e+f+g+h+i+j+k+l",
+            font_size: style.body_font_size,
+            foreground: [0, 0, 0, 255],
+            background: [0, 0, 0, 0],
+        })
+        .expect("valid math");
+        assert!(
+            demand[0] >= image.image.width() as f32,
+            "demand={} image={}",
+            demand[0],
+            image.image.width()
+        );
+    }
+
+    #[test]
+    fn bare_layout_keeps_inline_math_source_readable_without_image_sidecar() {
+        let source = "before $x^2$ after";
+        let style = default_style();
+        let document = MarkdownDoc::build(&parse_markdown(source), &style);
+        let text_document = core::document::StringDocView::new(source);
+        let layout = layout_doc(&document.blocks, &style, 400.0, &text_document);
+        let LaidOutBlockKind::Text { lines, .. } = &layout.blocks[0].kind else {
+            panic!("expected paragraph");
+        };
+        assert_eq!(lines[0].text, source);
+    }
 
     const ASCII_DIAGRAM_SOURCE: &str = "```\n┌────┐\n│中文│\n└────┘\n```";
     const INDENTED_ASCII_DIAGRAM_SOURCE: &str = "    ┌────┐\n    │中文│\n    └────┘";
@@ -2050,7 +2466,9 @@ mod tests {
                         }
                     }
                 }
-                LaidOutBlockKind::CodeBlock { .. } | LaidOutBlockKind::HorizontalRule => {}
+                LaidOutBlockKind::CodeBlock { .. }
+                | LaidOutBlockKind::HorizontalRule
+                | LaidOutBlockKind::Embedded { .. } => {}
             }
         }
         fn collect_lines(lines: &[LaidOutLine], widths: &mut Vec<f32>) {
@@ -2282,7 +2700,7 @@ mod tests {
                 .flatten()
                 .chain(rows.iter().flatten().flatten())
                 .find(|line| line.text.contains(needle)),
-            LaidOutBlockKind::HorizontalRule => None,
+            LaidOutBlockKind::HorizontalRule | LaidOutBlockKind::Embedded { .. } => None,
         }
     }
 
@@ -2788,7 +3206,7 @@ mod tests {
                     collect_laid_out_text(b, out);
                 }
             }
-            LaidOutBlockKind::HorizontalRule => {}
+            LaidOutBlockKind::HorizontalRule | LaidOutBlockKind::Embedded { .. } => {}
             LaidOutBlockKind::MetadataBlock { lines } => {
                 for l in lines {
                     out.push_str(&l.text);

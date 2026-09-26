@@ -135,6 +135,8 @@ pub fn extract_prose_ranges(parsed: &ParsedMarkdown) -> ProseRanges {
                 }
             }
             MarkdownEvent::Code(_)
+            | MarkdownEvent::InlineMath(_)
+            | MarkdownEvent::DisplayMath(_)
             | MarkdownEvent::InlineHtml(_)
             | MarkdownEvent::SoftBreak
             | MarkdownEvent::HardBreak

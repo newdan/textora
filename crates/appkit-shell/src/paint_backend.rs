@@ -3,7 +3,9 @@
 //! Phase 3：Text 路径——把 DrawCmd::Text 翻译为 atlas + GlyphVertex。
 
 use render::GlyphVertex;
+use std::sync::Arc;
 use ui::core::text_layout::ITALIC_SHEAR;
+use ui::core::text_layout::UiTextLayout;
 use ui::core::{DrawCmd, DrawList, Rect, Screen};
 
 use crate::render_cache::{CachedLine, GlyphInstance};
@@ -11,6 +13,14 @@ use crate::render_state::{GpuState, TextState};
 
 const ROUNDED_FILL_FEATHER_PX: f32 = 0.5;
 const CLIPPED_TRIANGLE_AREA_EPSILON: f32 = 1.0e-8;
+const IMAGE_FAILURE_MESSAGE: &str = "图像无法显示，点击编辑源码";
+const IMAGE_FAILURE_SHORT_MESSAGE: &str = "图像无法显示";
+const IMAGE_FAILURE_COMPACT_MESSAGE: &str = "错误";
+const IMAGE_FAILURE_FONT_SIZE: f32 = 14.0;
+const IMAGE_FAILURE_TEXT_PADDING: f32 = 8.0;
+const IMAGE_FAILURE_BACKGROUND: [f32; 4] = [0.32, 0.08, 0.08, 1.0];
+const IMAGE_FAILURE_BORDER: [f32; 4] = [1.0, 0.38, 0.38, 1.0];
+const IMAGE_FAILURE_TEXT_COLOR: [f32; 4] = [1.0, 0.92, 0.92, 1.0];
 
 /// 将 DrawList 中的命令转换为 GPU 顶点。
 /// 消耗整个 DrawList，返回 Vec<GlyphVertex>。
@@ -176,6 +186,32 @@ pub fn drain(
                         layout.italic,
                     ));
                     text_state.preview_cache.insert(cache_key, cached_line);
+                }
+            }
+            DrawCmd::Image { image, rect } => {
+                if has_non_positive_dimension(rect) {
+                    continue;
+                }
+                let clipped = apply_clip(&clip_stack, rect);
+                if has_non_positive_dimension(clipped) {
+                    continue;
+                }
+                let slot = match (text.as_deref_mut(), gpu) {
+                    (Some(text_state), Some(gpu)) => {
+                        text_state.image_atlas.get_or_upload(&image, &gpu.ctx.queue)
+                    }
+                    _ => Err(crate::image_atlas::ImageAtlasError::Full),
+                };
+                match slot {
+                    Ok(slot) => append_image_quad(&mut vertices, rect, clipped, slot.uv, &screen),
+                    Err(error) => {
+                        eprintln!("[image atlas] cannot draw image {}: {error:?}", image.id());
+                        let fallback = image_failure_draw_list(
+                            clipped,
+                            text.as_deref_mut().map(|state| &mut state.shaper),
+                        );
+                        vertices.extend(drain(fallback, screen, text.as_deref_mut(), gpu));
+                    }
                 }
             }
             DrawCmd::TaperedMesh { mesh, translation, color } => {
@@ -387,6 +423,67 @@ fn apply_clip(stack: &[Rect], rect: Rect) -> Rect {
         r = Rect::new(x, y, w, h);
     }
     r
+}
+
+fn append_image_quad(
+    vertices: &mut Vec<GlyphVertex>,
+    original: Rect,
+    clipped: Rect,
+    atlas_uv: [f32; 4],
+    screen: &Screen,
+) {
+    let [atlas_left, atlas_top, atlas_right, atlas_bottom] = atlas_uv;
+    let width = atlas_right - atlas_left;
+    let height = atlas_bottom - atlas_top;
+    let left = atlas_left + (clipped.x - original.x) / original.w * width;
+    let right = atlas_left + (clipped.right() - original.x) / original.w * width;
+    let top = atlas_top + (clipped.y - original.y) / original.h * height;
+    let bottom = atlas_top + (clipped.bottom() - original.y) / original.h * height;
+    let ndc = screen.rect_to_ndc(clipped);
+    let [x0, x1, y0, y1] = ndc;
+    let vertex =
+        |x, y, u, v| GlyphVertex { position: [x, y], tex_coords: [-1.0 - u, v], color: [1.0; 4] };
+    let top_left = vertex(x0, y0, left, top);
+    let top_right = vertex(x1, y0, right, top);
+    let bottom_left = vertex(x0, y1, left, bottom);
+    let bottom_right = vertex(x1, y1, right, bottom);
+    vertices.extend([top_left, top_right, bottom_left, top_right, bottom_right, bottom_left]);
+}
+
+fn image_failure_draw_list(rect: Rect, shaper: Option<&mut shaping::Shaper>) -> DrawList {
+    let mut fallback = DrawList::new();
+    fallback.clip(rect, |list| {
+        list.fill(rect, IMAGE_FAILURE_BACKGROUND);
+        list.stroke(rect, IMAGE_FAILURE_BORDER, 2.0);
+        let Some(shaper) = shaper else { return };
+        for message in
+            [IMAGE_FAILURE_MESSAGE, IMAGE_FAILURE_SHORT_MESSAGE, IMAGE_FAILURE_COMPACT_MESSAGE]
+        {
+            let Some(layout) = UiTextLayout::new(
+                message,
+                IMAGE_FAILURE_FONT_SIZE,
+                None,
+                shaping::Weight::NORMAL,
+                shaping::Style::Normal,
+                false,
+                shaper,
+            ) else {
+                continue;
+            };
+            if layout.shaped.width + IMAGE_FAILURE_TEXT_PADDING * 2.0 > rect.w {
+                continue;
+            }
+            let baseline = rect.y + rect.h * 0.5 + IMAGE_FAILURE_FONT_SIZE * 0.35;
+            list.text_layout(
+                Arc::new(layout),
+                rect.x + IMAGE_FAILURE_TEXT_PADDING,
+                baseline,
+                IMAGE_FAILURE_TEXT_COLOR,
+            );
+            break;
+        }
+    });
+    fallback
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -878,6 +975,48 @@ fn push_quad(v: &mut Vec<GlyphVertex>, ndc: [f32; 4], color: [f32; 4]) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn image_failure_draw_list_explains_how_to_reach_source() {
+        let mut shaper = shaping::Shaper::new().expect("test shaper must initialize");
+        let fallback =
+            image_failure_draw_list(Rect::new(20.0, 30.0, 320.0, 100.0), Some(&mut shaper));
+        assert!(matches!(fallback.cmds.first(), Some(DrawCmd::PushClip(_))));
+        assert!(matches!(fallback.cmds.last(), Some(DrawCmd::PopClip)));
+        assert!(fallback.cmds.iter().any(|command| {
+            matches!(command, DrawCmd::TextLayout { layout, .. } if layout.text == IMAGE_FAILURE_MESSAGE)
+        }));
+    }
+
+    #[test]
+    fn image_failure_without_text_resources_keeps_visible_box() {
+        let fallback = image_failure_draw_list(Rect::new(20.0, 30.0, 80.0, 40.0), None);
+        assert!(!fallback.cmds.iter().any(|command| matches!(command, DrawCmd::TextLayout { .. })));
+        let vertices = drain(fallback, Screen::new(400.0, 300.0), None, None);
+        assert!(!vertices.is_empty());
+    }
+
+    #[test]
+    fn nested_image_clips_preserve_source_uv_and_vertex_order() {
+        let original = Rect::new(0.0, 0.0, 100.0, 100.0);
+        let clipped = apply_clip(
+            &[Rect::new(20.0, 20.0, 80.0, 80.0), Rect::new(40.0, 10.0, 30.0, 50.0)],
+            original,
+        );
+        assert_eq!(clipped, Rect::new(40.0, 20.0, 30.0, 40.0));
+        let screen = Screen::new(100.0, 100.0);
+        let mut vertices = Vec::new();
+        push_quad(&mut vertices, screen.rect_to_ndc(Rect::new(0.0, 0.0, 10.0, 10.0)), [1.0; 4]);
+        append_image_quad(&mut vertices, original, clipped, [0.1, 0.2, 0.3, 0.6], &screen);
+        push_quad(&mut vertices, screen.rect_to_ndc(Rect::new(90.0, 90.0, 10.0, 10.0)), [1.0; 4]);
+        assert!(vertices[..6].iter().all(|vertex| vertex.tex_coords[0] == 0.0));
+        assert!(vertices[6..12].iter().all(|vertex| vertex.tex_coords[0] < 0.0));
+        assert!(vertices[12..].iter().all(|vertex| vertex.tex_coords[0] == 0.0));
+        assert!((vertices[6].tex_coords[0] + 1.18).abs() < 0.0001);
+        assert!((vertices[7].tex_coords[0] + 1.24).abs() < 0.0001);
+        assert!((vertices[6].tex_coords[1] - 0.28).abs() < 0.0001);
+        assert!((vertices[8].tex_coords[1] - 0.44).abs() < 0.0001);
+    }
 
     fn italic_test_glyph() -> GlyphInstance {
         GlyphInstance {

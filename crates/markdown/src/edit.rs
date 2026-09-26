@@ -35,6 +35,7 @@ pub(crate) fn span_marker_len(style: &InlineStyle) -> (usize, usize) {
         InlineStyle::Italic => (1, 1),
         InlineStyle::Strikethrough => (2, 2),
         InlineStyle::InlineCode => (1, 1),
+        InlineStyle::Math => (0, 0),
         InlineStyle::Link { .. } => (1, 0),
         InlineStyle::SourceMarker => (0, 0),
     }
@@ -173,7 +174,6 @@ pub(crate) fn materialize_projected_line(
 
     if let Some(cursor_span) =
         edit_ctx.and_then(|ctx| spans.iter().find(|span| cursor_in_span(span, ctx.cursor_byte)))
-        && let Some(expansion) = inline_expansion(base, cursor_span, source)
     {
         let start_grapheme =
             crate::grapheme_map::grapheme_index_at_byte(&projected.text, cursor_span.start);
@@ -181,18 +181,29 @@ pub(crate) fn materialize_projected_line(
             &projected.text,
             cursor_span.start + cursor_span.len,
         );
-        projected = projected.replace_graphemes_with_direct(
-            end_grapheme,
-            end_grapheme,
-            &source[expansion.suffix.clone()],
-            expansion.suffix,
-        );
-        projected = projected.replace_graphemes_with_direct(
-            start_grapheme,
-            start_grapheme,
-            &source[expansion.prefix.clone()],
-            expansion.prefix,
-        );
+        if cursor_span.style == InlineStyle::Math {
+            if let Some(spelling) = source.get(cursor_span.source_range.clone()) {
+                projected = projected.replace_graphemes_with_direct(
+                    start_grapheme,
+                    end_grapheme,
+                    spelling,
+                    cursor_span.source_range.clone(),
+                );
+            }
+        } else if let Some(expansion) = inline_expansion(base, cursor_span, source) {
+            projected = projected.replace_graphemes_with_direct(
+                end_grapheme,
+                end_grapheme,
+                &source[expansion.suffix.clone()],
+                expansion.suffix,
+            );
+            projected = projected.replace_graphemes_with_direct(
+                start_grapheme,
+                start_grapheme,
+                &source[expansion.prefix.clone()],
+                expansion.prefix,
+            );
+        }
     }
 
     let Some(ctx) = edit_ctx else {
@@ -293,7 +304,7 @@ fn inferred_inline_suffix_start(style: &InlineStyle, span_source: &str) -> Optio
                 .or_else(|| span_source.find("]["))
                 .or_else(|| span_source.rfind(']'))
         }
-        InlineStyle::SourceMarker => None,
+        InlineStyle::SourceMarker | InlineStyle::Math => None,
     }
 }
 
@@ -475,6 +486,20 @@ fn materialized_spans(
             continue;
         }
 
+        if span.style == InlineStyle::Math
+            && let Some(spelling) = source.get(span.source_range.clone())
+        {
+            push_non_empty_materialized_span(
+                &mut output,
+                materialized_start,
+                spelling.len(),
+                InlineStyle::SourceMarker,
+                span.source_range.clone(),
+            );
+            visual_delta += spelling.len() as isize - span.len as isize;
+            continue;
+        }
+
         let Some(expansion) = inline_expansion(base, span, source) else {
             output.push(MaterializedSpan {
                 start: materialized_start,
@@ -613,6 +638,31 @@ mod tests {
     use crate::builder::InlineStyle;
     use crate::layout::types::{CollapsedBoundary, VisualLineProjection};
     use crate::projection::{ProjectionError, ProjectionOwnerId, TextProjectionBuilder};
+
+    #[test]
+    fn editing_inline_math_replaces_entire_object_with_direct_source() {
+        let source = "中$x^2$文";
+        let document = crate::builder::MarkdownDoc::build(
+            &crate::parser::parse_markdown(source),
+            &crate::test_utils::default_style(),
+        );
+        let paragraph = &document.blocks[0];
+        let base = &paragraph.projected_lines[0];
+        let styles = &paragraph.text_styles[0];
+        let preview = materialize_projected_line(base, styles, source, None, None);
+        assert_eq!(preview.text, "中\u{FFFC}文");
+
+        let edit_context = EditContext {
+            cursor_byte: source.find('x').expect("fixture has math"),
+            preedit_text: None,
+            preedit_cursor: None,
+        };
+        let expanded = materialize_projected_line(base, styles, source, Some(&edit_context), None);
+        assert_eq!(expanded.text, source);
+        assert!(
+            expanded.spans.iter().all(|span| !matches!(span.kind, ProjectionSpanKind::Collapsed))
+        );
+    }
 
     fn make_span(
         start: usize,

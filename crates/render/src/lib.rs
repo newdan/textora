@@ -629,14 +629,17 @@ pub struct GlyphRenderer {
     pipeline: wgpu::RenderPipeline,
     bind_group_layout: wgpu::BindGroupLayout,
     sampler: wgpu::Sampler,
+    image_sampler: wgpu::Sampler,
 }
 
 impl GlyphRenderer {
     /// Create a new glyph renderer for the given surface format.
     pub fn new(device: &wgpu::Device, format: wgpu::TextureFormat) -> Self {
+        let shader_source =
+            format!("const IMAGE_TARGET_SRGB: bool = {};\n{SHADER_SRC}", format.is_srgb());
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("glyph shader"),
-            source: wgpu::ShaderSource::Wgsl(SHADER_SRC.into()),
+            source: wgpu::ShaderSource::Wgsl(shader_source.into()),
         });
 
         let bind_group_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
@@ -666,6 +669,22 @@ impl GlyphRenderer {
                         has_dynamic_offset: false,
                         min_binding_size: None,
                     },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 3,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        multisampled: false,
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 4,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
                     count: None,
                 },
             ],
@@ -721,7 +740,14 @@ impl GlyphRenderer {
             ..Default::default()
         });
 
-        Self { pipeline, bind_group_layout, sampler }
+        let image_sampler = device.create_sampler(&wgpu::SamplerDescriptor {
+            label: Some("image sampler"),
+            mag_filter: wgpu::FilterMode::Linear,
+            min_filter: wgpu::FilterMode::Linear,
+            ..Default::default()
+        });
+
+        Self { pipeline, bind_group_layout, sampler, image_sampler }
     }
 
     /// Generate vertices for a list of glyph positions.
@@ -795,6 +821,10 @@ impl GlyphRenderer {
         &self.sampler
     }
 
+    pub fn image_sampler(&self) -> &wgpu::Sampler {
+        &self.image_sampler
+    }
+
     /// Get the render pipeline.
     pub fn pipeline(&self) -> &wgpu::RenderPipeline {
         &self.pipeline
@@ -840,6 +870,14 @@ struct GammaUniform {
 @group(0) @binding(0) var atlas_texture: texture_2d<f32>;
 @group(0) @binding(1) var atlas_sampler: sampler;
 @group(0) @binding(2) var<uniform> gamma_params: GammaUniform;
+@group(0) @binding(3) var image_texture: texture_2d<f32>;
+@group(0) @binding(4) var image_sampler: sampler;
+
+fn srgb_to_linear(color: vec3<f32>) -> vec3<f32> {
+    let low = color / 12.92;
+    let high = pow((color + vec3<f32>(0.055)) / 1.055, vec3<f32>(2.4));
+    return select(high, low, color <= vec3<f32>(0.04045));
+}
 
 fn light_on_dark_contrast(base: f32, text_rgb: vec3<f32>) -> f32 {
     // Dark text on light backgrounds gets full contrast enhancement;
@@ -850,6 +888,20 @@ fn light_on_dark_contrast(base: f32, text_rgb: vec3<f32>) -> f32 {
 
 @fragment
 fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
+    if in.tex_coords.x < 0.0 {
+        let image_uv = vec2<f32>(-in.tex_coords.x - 1.0, in.tex_coords.y);
+        let premultiplied = textureSampleLevel(image_texture, image_sampler, image_uv, 0.0);
+        if premultiplied.a <= 0.0 {
+            return vec4<f32>(0.0);
+        }
+        // The existing pipeline uses straight-alpha blending. Undo resvg's
+        // premultiplication here so blending applies alpha exactly once.
+        let straight_rgb = premultiplied.rgb / premultiplied.a;
+        if IMAGE_TARGET_SRGB {
+            return vec4<f32>(srgb_to_linear(straight_rgb), premultiplied.a);
+        }
+        return vec4<f32>(straight_rgb, premultiplied.a);
+    }
     let coverage = textureSample(atlas_texture, atlas_sampler, in.tex_coords).r;
 
     // Dynamic contrast: brightness-aware stem darkening.

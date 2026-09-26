@@ -8,6 +8,7 @@ use ui::core::text_layout::UiTextLayout;
 
 use crate::builder::{InlineStyle, ListBullet};
 use crate::layout::block::MarkdownLayout;
+use crate::layout::embedded::EmbeddedRegistry;
 use crate::layout::{
     AsciiDiagramRegistry, AsciiDiagramRow, BlockSource, BoxConnections, LaidOutBlock,
     LaidOutBlockKind, LaidOutDoc, LaidOutLine, LazyLayout,
@@ -120,7 +121,7 @@ pub fn render_layout_with_offset(
     shaper: Option<&mut shaping::Shaper>,
     y_delta: &[f32],
 ) {
-    render_doc_with_offset_and_ascii_diagrams(
+    render_doc_with_offset_and_embedded(
         layout.document(),
         style,
         dl,
@@ -131,6 +132,7 @@ pub fn render_layout_with_offset(
         shaper,
         y_delta,
         Some(layout.ascii_diagrams()),
+        Some(layout.embedded_images()),
     );
 }
 
@@ -142,9 +144,37 @@ pub(crate) fn render_doc_with_offset_and_ascii_diagrams(
     viewport_h: f32,
     offset_x: f32,
     offset_y: f32,
+    shaper: Option<&mut shaping::Shaper>,
+    y_delta: &[f32],
+    ascii_diagrams: Option<&AsciiDiagramRegistry>,
+) {
+    render_doc_with_offset_and_embedded(
+        doc,
+        style,
+        dl,
+        scroll_y,
+        viewport_h,
+        offset_x,
+        offset_y,
+        shaper,
+        y_delta,
+        ascii_diagrams,
+        None,
+    );
+}
+
+pub(crate) fn render_doc_with_offset_and_embedded(
+    doc: &LaidOutDoc,
+    style: &MarkdownStyle,
+    dl: &mut DrawList,
+    scroll_y: f32,
+    viewport_h: f32,
+    offset_x: f32,
+    offset_y: f32,
     mut shaper: Option<&mut shaping::Shaper>,
     y_delta: &[f32],
     ascii_diagrams: Option<&AsciiDiagramRegistry>,
+    embedded_images: Option<&EmbeddedRegistry>,
 ) {
     dl.cmds.push(DrawCmd::PushClip(Rect::new(offset_x, offset_y, f32::MAX, viewport_h)));
 
@@ -167,6 +197,7 @@ pub(crate) fn render_doc_with_offset_and_ascii_diagrams(
             offset_y,
             shaper.as_deref_mut(),
             ascii_diagrams,
+            embedded_images,
         );
     }
 
@@ -183,6 +214,7 @@ fn render_block_with_offset(
     oy: f32,
     mut shaper: Option<&mut shaping::Shaper>,
     ascii_diagrams: Option<&AsciiDiagramRegistry>,
+    embedded_images: Option<&EmbeddedRegistry>,
 ) {
     let r = block.rect;
     let x = r.x + ox;
@@ -198,7 +230,16 @@ fn render_block_with_offset(
                 if line.rect.y > scroll_y + viewport_h {
                     break;
                 }
-                render_line_with_offset(line, style, dl, scroll_y, ox, oy, shaper.as_deref_mut());
+                render_line_with_embedded(
+                    line,
+                    style,
+                    dl,
+                    scroll_y,
+                    ox,
+                    oy,
+                    shaper.as_deref_mut(),
+                    embedded_images,
+                );
             }
         }
         LaidOutBlockKind::CodeBlock { lines, .. } => {
@@ -282,6 +323,7 @@ fn render_block_with_offset(
                     oy,
                     shaper.as_deref_mut(),
                     ascii_diagrams,
+                    embedded_images,
                 );
             }
         }
@@ -376,7 +418,16 @@ fn render_block_with_offset(
                 if line.rect.y > scroll_y + viewport_h {
                     break;
                 }
-                render_line_with_offset(line, style, dl, scroll_y, ox, oy, shaper.as_deref_mut());
+                render_line_with_embedded(
+                    line,
+                    style,
+                    dl,
+                    scroll_y,
+                    ox,
+                    oy,
+                    shaper.as_deref_mut(),
+                    embedded_images,
+                );
             }
             // Render nested child blocks
             for child in blocks {
@@ -396,6 +447,7 @@ fn render_block_with_offset(
                     oy,
                     shaper.as_deref_mut(),
                     ascii_diagrams,
+                    embedded_images,
                 );
             }
         }
@@ -418,7 +470,7 @@ fn render_block_with_offset(
                 );
                 for cell_lines in header.iter() {
                     for line in cell_lines {
-                        render_line_with_offset(
+                        render_line_with_embedded(
                             line,
                             style,
                             dl,
@@ -426,6 +478,7 @@ fn render_block_with_offset(
                             ox,
                             oy,
                             shaper.as_deref_mut(),
+                            embedded_images,
                         );
                     }
                 }
@@ -443,7 +496,7 @@ fn render_block_with_offset(
                 }
                 for cell_lines in row.iter() {
                     for line in cell_lines {
-                        render_line_with_offset(
+                        render_line_with_embedded(
                             line,
                             style,
                             dl,
@@ -451,6 +504,7 @@ fn render_block_with_offset(
                             ox,
                             oy,
                             shaper.as_deref_mut(),
+                            embedded_images,
                         );
                     }
                 }
@@ -469,6 +523,12 @@ fn render_block_with_offset(
             let rule_w = r.w * style.rule_width_ratio;
             let rule_x = x + (r.w - rule_w) / 2.0;
             dl.fill(Rect::new(rule_x, y, rule_w, r.h), style.rule_color);
+        }
+        LaidOutBlockKind::Embedded { source_range } => {
+            if let Some(entry) = embedded_images.and_then(|images| images.image_for(source_range)) {
+                let image_width = (entry.image.width() as f32).min(r.w);
+                dl.image(entry.image.clone(), Rect::new(x, y, image_width, r.h));
+            }
         }
         LaidOutBlockKind::MetadataBlock { lines } => {
             // Metadata blocks rendered like code blocks: background + border + clipped text
@@ -738,9 +798,31 @@ fn render_line_with_offset(
     scroll_y: f32,
     ox: f32,
     oy: f32,
-    mut shaper: Option<&mut shaping::Shaper>,
+    shaper: Option<&mut shaping::Shaper>,
 ) {
-    let ly = line.rect.y - scroll_y + oy;
+    render_line_with_embedded(line, style, dl, scroll_y, ox, oy, shaper, None);
+}
+
+fn render_line_with_embedded(
+    line: &LaidOutLine,
+    style: &MarkdownStyle,
+    dl: &mut DrawList,
+    scroll_y: f32,
+    ox: f32,
+    oy: f32,
+    mut shaper: Option<&mut shaping::Shaper>,
+    embedded_images: Option<&EmbeddedRegistry>,
+) {
+    let image_ascent = line
+        .styles
+        .iter()
+        .filter_map(|span| {
+            matches!(span.style, InlineStyle::Math)
+                .then(|| embedded_images?.image_for(&span.source_range).map(|entry| entry.baseline))
+                .flatten()
+        })
+        .fold(line.font_size, f32::max);
+    let ly = line.rect.y - scroll_y + oy + image_ascent - line.font_size;
     let base_color = line.color_override.unwrap_or(style.text_color);
     let font_size = line.font_size;
     let line_x = line.rect.x + ox;
@@ -910,6 +992,24 @@ fn render_line_with_offset(
             }
             let span_end = (span.start + span.len).min(text_len);
             if span.start < text_len {
+                if matches!(span.style, InlineStyle::Math)
+                    && let Some(entry) =
+                        embedded_images.and_then(|images| images.image_for(&span.source_range))
+                {
+                    let image_width = entry.image.width() as f32;
+                    dl.image(
+                        entry.image.clone(),
+                        Rect::new(
+                            cursor_x,
+                            ly + font_size - entry.baseline,
+                            image_width,
+                            entry.image.height() as f32,
+                        ),
+                    );
+                    cursor_x += image_width;
+                    last_end = span_end;
+                    continue;
+                }
                 let segment = &line.text
                     [safe_byte_idx(&line.text, span.start)..safe_byte_idx(&line.text, span_end)];
                 let color = style_for_span(&span.style, base_color, style);
@@ -1032,16 +1132,38 @@ fn render_line_with_offset(
         if seg.start < text_len {
             let color = style_for_span(&seg.style, base_color, style);
             let x = line_x + seg.x_offset;
-            draw_line_segment(
-                line,
-                seg.start..seg_end,
-                Some(&seg.style),
-                [x, ly + font_size],
-                color,
-                font_family.as_deref(),
-                dl,
-                shaper.as_deref_mut(),
-            );
+            let math_image = matches!(seg.style, InlineStyle::Math)
+                .then(|| {
+                    line.styles
+                        .iter()
+                        .find(|span| span.start == seg.start && span.len == seg.len)
+                        .and_then(|span| {
+                            embedded_images.and_then(|images| images.image_for(&span.source_range))
+                        })
+                })
+                .flatten();
+            if let Some(entry) = math_image {
+                dl.image(
+                    entry.image.clone(),
+                    Rect::new(
+                        x,
+                        ly + font_size - entry.baseline,
+                        entry.image.width() as f32,
+                        entry.image.height() as f32,
+                    ),
+                );
+            } else {
+                draw_line_segment(
+                    line,
+                    seg.start..seg_end,
+                    Some(&seg.style),
+                    [x, ly + font_size],
+                    color,
+                    font_family.as_deref(),
+                    dl,
+                    shaper.as_deref_mut(),
+                );
+            }
             let mut seg_w = seg.width;
             if is_italic(&seg.style) {
                 seg_w += font_size * ITALIC_SHEAR;
@@ -1240,6 +1362,7 @@ fn style_for_span(inline: &InlineStyle, base_color: [f32; 4], style: &MarkdownSt
         InlineStyle::Italic => base_color,
         InlineStyle::Strikethrough => base_color,
         InlineStyle::InlineCode => style.code_color,
+        InlineStyle::Math => base_color,
         InlineStyle::Link { .. } => style.link_color,
         InlineStyle::SourceMarker => {
             blend_toward_bg(base_color, style.background_color, SOURCE_MARKER_FADE_RATIO)
@@ -1270,6 +1393,7 @@ fn weight_style_for(inline: &InlineStyle) -> (Weight, Style) {
         InlineStyle::SourceMarker
         | InlineStyle::Strikethrough
         | InlineStyle::InlineCode
+        | InlineStyle::Math
         | InlineStyle::Link { .. } => (Weight::NORMAL, Style::Normal),
     }
 }
@@ -1382,6 +1506,7 @@ fn debug_block_appearance(block: &LaidOutBlock, style: &MarkdownStyle) -> ([f32;
         LaidOutBlockKind::ListItem { .. } => (LIST_COLOR, "List"),
         LaidOutBlockKind::Table { .. } => (TABLE_COLOR, "Table"),
         LaidOutBlockKind::HorizontalRule => (RULE_COLOR, "HR"),
+        LaidOutBlockKind::Embedded { .. } => (CODE_COLOR, "Embedded"),
         LaidOutBlockKind::MetadataBlock { .. } => (METADATA_COLOR, "Meta"),
     }
 }
@@ -1417,6 +1542,53 @@ fn draw_debug_spacing_band(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn render_layout_emits_inline_math_image_and_keeps_adjacent_text() {
+        let source = "left $x^2$ right";
+        let style = crate::test_utils::default_style();
+        let markdown =
+            crate::builder::MarkdownDoc::build(&crate::parser::parse_markdown(source), &style);
+        let text_document = core::document::StringDocView::new(source);
+        let mut shaper = shaping::Shaper::new().expect("test font");
+        let layout = crate::layout::layout_doc_with_shaper_for_rendering(
+            &markdown.blocks,
+            &style,
+            400.0,
+            Some(&mut shaper),
+            None,
+            &text_document,
+        );
+        let mut commands = DrawList::new();
+        render_layout(&layout, &style, &mut commands, 0.0, 100.0, Some(&mut shaper));
+        assert!(commands.cmds.iter().any(|command| matches!(command, DrawCmd::Image { .. })));
+        assert!(commands.cmds.iter().any(|command| matches!(command, DrawCmd::TextLayout { .. })));
+    }
+
+    #[test]
+    fn render_layout_emits_display_math_and_mermaid_images() {
+        for source in ["$$x^2$$", "```mermaid\nflowchart LR\nA --> B\n```"] {
+            let style = crate::test_utils::default_style();
+            let markdown =
+                crate::builder::MarkdownDoc::build(&crate::parser::parse_markdown(source), &style);
+            let text_document = core::document::StringDocView::new(source);
+            let mut shaper = shaping::Shaper::new().expect("test font");
+            let layout = crate::layout::layout_doc_with_shaper_for_rendering(
+                &markdown.blocks,
+                &style,
+                400.0,
+                Some(&mut shaper),
+                None,
+                &text_document,
+            );
+            let mut commands = DrawList::new();
+            render_layout(&layout, &style, &mut commands, 0.0, 600.0, Some(&mut shaper));
+            assert!(
+                commands.cmds.iter().any(|command| matches!(command, DrawCmd::Image { .. })),
+                "{source}"
+            );
+        }
+    }
     use crate::builder::{CodeHighlighter, HighlightSpan, MarkdownDoc};
     use crate::layout::block::{MarkdownLayout, layout_doc_with_shaper_for_rendering};
     use crate::layout::{LaidOutBlockKind, LaidOutDoc, LazyLayout, layout_doc};

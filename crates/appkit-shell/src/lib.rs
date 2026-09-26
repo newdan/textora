@@ -31,6 +31,7 @@ pub mod event;
 mod event_runtime;
 pub mod frame_cache;
 pub mod gpu;
+pub mod image_atlas;
 pub mod input_mapper;
 pub mod measure_adapter;
 pub mod mindmap_style_panel;
