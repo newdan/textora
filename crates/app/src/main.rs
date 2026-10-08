@@ -1,3 +1,5 @@
+#![cfg_attr(target_os = "windows", windows_subsystem = "windows")]
+
 use textora_app::{App, AppEvent, headless_init, parse_args};
 use winit::event_loop::EventLoop;
 
