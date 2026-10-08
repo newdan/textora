@@ -491,7 +491,10 @@ impl MindmapView {
             nodes.iter().position(|node| node.subtree_source_range == request.source_range)?;
         let source_node = *nodes.get(source_index)?;
         let source_layout = layout_node_for_source(layout, source_index)?;
-        let label = format!("{} · {}", source_node.title, descendant_count(source_node));
+        let label = match descendant_count(source_node) {
+            0 => source_node.title.clone(),
+            count => format!("{} · {count}", source_node.title),
+        };
         let preview_width = measured_preview_card_width(
             &label,
             source_layout.w,
@@ -3694,6 +3697,20 @@ mod tests {
             panic!("drag should produce a preview");
         };
         assert_eq!(preview.label, "Child · 3");
+    }
+
+    #[test]
+    fn drag_preview_label_omits_zero_descendant_count() {
+        let source = "# Root\n## Leaf\n## Sibling\n";
+        let (mut view, doc) = view_with_source(source);
+        render_test_view(&mut view, &doc);
+        let leaf_range = view.ready_tree().root.children[0].subtree_source_range.clone();
+        let request = drag_request(&view, CanvasDragPhase::Update, leaf_range, 700.0, 120.0, 1);
+        let CanvasDragResponse::Preview(preview) = view.handle_canvas_drag(request, &doc) else {
+            panic!("dragging a leaf should produce a preview");
+        };
+
+        assert_eq!(preview.label, "Leaf");
     }
 
     #[test]
