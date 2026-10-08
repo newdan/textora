@@ -54,6 +54,19 @@ pub struct PreparedGpuDevice {
     queue: wgpu::Queue,
 }
 
+fn startup_instance() -> (wgpu::Instance, wgpu::Backends) {
+    let mut descriptor = wgpu::InstanceDescriptor::new_without_display_handle();
+    let default_backends =
+        if cfg!(target_os = "windows") { wgpu::Backends::DX12 } else { descriptor.backends };
+    descriptor.backends = wgpu::Backends::from_env().unwrap_or(default_backends);
+    let requested_backends = descriptor.backends;
+    (wgpu::Instance::new(descriptor), requested_backends)
+}
+
+fn startup_power_preference() -> wgpu::PowerPreference {
+    wgpu::PowerPreference::from_env().unwrap_or(wgpu::PowerPreference::HighPerformance)
+}
+
 /// Create a multisampled texture for MSAA resolve.
 fn create_msaa_texture(
     device: &wgpu::Device,
@@ -95,7 +108,7 @@ pub fn create_gpu_context(
     height: u32,
 ) -> Result<GpuContext, GpuError> {
     let initialization_started_at = Instant::now();
-    let instance = wgpu::Instance::default();
+    let (instance, requested_backends) = startup_instance();
     let instance_elapsed = initialization_started_at.elapsed();
     let surface_started_at = Instant::now();
     let surface = instance
@@ -113,7 +126,8 @@ pub fn create_gpu_context(
     let context = configure_gpu_context(surface, &adapter, device, queue, width, height)?;
     let adapter_info = adapter.get_info();
     eprintln!(
-        "[startup:gpu_sync] adapter={} backend={:?} instance={:.2}ms surface={:.2}ms adapter_request={:.2}ms device_request={:.2}ms total={:.2}ms",
+        "[startup:gpu_sync] requested_backends={requested_backends:?} power_preference={:?} adapter={} backend={:?} instance={:.2}ms surface={:.2}ms adapter_request={:.2}ms device_request={:.2}ms total={:.2}ms",
+        startup_power_preference(),
         adapter_info.name,
         adapter_info.backend,
         instance_elapsed.as_secs_f64() * 1_000.0,
@@ -128,7 +142,7 @@ pub fn create_gpu_context(
 /// Request the adapter and device before a native window exists.
 pub fn prepare_gpu_device() -> Result<PreparedGpuDevice, GpuError> {
     let preparation_started_at = Instant::now();
-    let instance = wgpu::Instance::default();
+    let (instance, requested_backends) = startup_instance();
     let instance_elapsed = preparation_started_at.elapsed();
     let adapter_started_at = Instant::now();
     let adapter =
@@ -138,7 +152,8 @@ pub fn prepare_gpu_device() -> Result<PreparedGpuDevice, GpuError> {
     let (device, queue) = request_device(&adapter)?;
     let adapter_info = adapter.get_info();
     eprintln!(
-        "[startup:gpu_prepare] adapter={} backend={:?} instance={:.2}ms adapter_request={:.2}ms device_request={:.2}ms total={:.2}ms",
+        "[startup:gpu_prepare] requested_backends={requested_backends:?} power_preference={:?} adapter={} backend={:?} instance={:.2}ms adapter_request={:.2}ms device_request={:.2}ms total={:.2}ms",
+        startup_power_preference(),
         adapter_info.name,
         adapter_info.backend,
         instance_elapsed.as_secs_f64() * 1_000.0,
@@ -253,7 +268,7 @@ async fn request_adapter(
     compatible_surface: Option<&wgpu::Surface<'_>>,
 ) -> Option<wgpu::Adapter> {
     let opts = wgpu::RequestAdapterOptions {
-        power_preference: wgpu::PowerPreference::HighPerformance,
+        power_preference: startup_power_preference(),
         compatible_surface,
         force_fallback_adapter: false,
     };
