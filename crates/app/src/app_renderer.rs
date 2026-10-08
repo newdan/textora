@@ -17,6 +17,69 @@ const PERF_LOG_ENV: &str = "EDIT_PLUS_PERF_LOG";
 const PERF_LOG_THRESHOLD_US_ENV: &str = "EDIT_PLUS_PERF_LOG_THRESHOLD_US";
 const DEFAULT_PERF_LOG_THRESHOLD_US: u128 = 1_000;
 const WYSIWYG_CURSOR_LOG_ENV: &str = "EDIT_PLUS_WYSIWYG_CURSOR_LOG";
+const MACOS_TRAFFIC_LIGHT_INSET_LOGICAL: f32 = 68.0;
+
+#[derive(Clone, Copy)]
+enum SidebarWindowChrome {
+    NativeTitlebar,
+    IntegratedTrafficLights,
+}
+
+fn sidebar_window_chrome() -> SidebarWindowChrome {
+    if cfg!(target_os = "macos") {
+        SidebarWindowChrome::IntegratedTrafficLights
+    } else {
+        SidebarWindowChrome::NativeTitlebar
+    }
+}
+
+fn sidebar_traffic_light_inset(dpi: f32, chrome: SidebarWindowChrome) -> (f32, f32) {
+    let left = match chrome {
+        SidebarWindowChrome::NativeTitlebar => 0.0,
+        SidebarWindowChrome::IntegratedTrafficLights => MACOS_TRAFFIC_LIGHT_INSET_LOGICAL * dpi,
+    };
+    (left, 0.0)
+}
+
+fn sidebar_titlebar_reserved_width(dpi: f32, chrome: SidebarWindowChrome) -> f32 {
+    let logical_width = match chrome {
+        SidebarWindowChrome::NativeTitlebar => ui::constants::TITLE_BAR_HEIGHT,
+        SidebarWindowChrome::IntegratedTrafficLights => ui::constants::TRAFFIC_LIGHT_TOTAL_W,
+    };
+    logical_width * dpi
+}
+
+#[cfg(test)]
+mod sidebar_chrome_tests {
+    use super::{
+        SidebarWindowChrome, sidebar_titlebar_reserved_width, sidebar_traffic_light_inset,
+    };
+
+    #[test]
+    fn native_titlebar_keeps_sidebar_toggle_at_left_edge() {
+        let dpi = 1.5;
+        let chrome = SidebarWindowChrome::NativeTitlebar;
+        assert_eq!(sidebar_traffic_light_inset(dpi, chrome), (0.0, 0.0));
+        assert_eq!(
+            sidebar_titlebar_reserved_width(dpi, chrome),
+            ui::constants::TITLE_BAR_HEIGHT * dpi
+        );
+    }
+
+    #[test]
+    fn macos_reserves_traffic_lights_in_sidebar_header() {
+        let dpi = 1.5;
+        let chrome = SidebarWindowChrome::IntegratedTrafficLights;
+        assert_eq!(
+            sidebar_traffic_light_inset(dpi, chrome),
+            (super::MACOS_TRAFFIC_LIGHT_INSET_LOGICAL * dpi, 0.0)
+        );
+        assert_eq!(
+            sidebar_titlebar_reserved_width(dpi, chrome),
+            ui::constants::TRAFFIC_LIGHT_TOTAL_W * dpi
+        );
+    }
+}
 
 /// 已完成 Prepare、Shell 布局和画布渲染的正常帧结果。
 ///
@@ -1545,7 +1608,8 @@ impl App {
                 );
 
                 let dpi = metrics.dpi;
-                let traffic_inset = (68.0 * dpi, 0.0);
+                let chrome = sidebar_window_chrome();
+                let traffic_inset = sidebar_traffic_light_inset(dpi, chrome);
                 self.ui_shell.set_sidebar_input(
                     self.ui_shell.sidebar_cfg().clone(),
                     tab_infos,
@@ -1563,7 +1627,7 @@ impl App {
                     PLUGIN_MARKDOWN_EDITOR => "MD编辑".to_string(),
                     _ => name.to_string(),
                 });
-                let hamburger_right = ui::constants::TRAFFIC_LIGHT_TOTAL_W * dpi;
+                let hamburger_right = sidebar_titlebar_reserved_width(dpi, chrome);
                 let sidebar_left = self.ui_shell.sidebar_editor_left_offset().max(hamburger_right);
                 let titlebar_x = self.ui_shell.sidebar_editor_left_offset().max(0.5);
                 let toc_enabled = is_plugin_rendered;

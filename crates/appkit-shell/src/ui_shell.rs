@@ -710,9 +710,12 @@ impl UiShell {
             self.sidebar_editor_left_offset().max(SIDEBAR_OVERLAY_DOCK_THICKNESS);
         if let Some(title) = &mut self.title_bar_input {
             title.titlebar_x = resolved.sidebar_thickness;
-            title.sidebar_left = resolved
-                .sidebar_thickness
-                .max(ui::constants::TRAFFIC_LIGHT_TOTAL_W * inputs.metrics.dpi);
+            let sidebar_header_width = if cfg!(target_os = "macos") {
+                ui::constants::TRAFFIC_LIGHT_TOTAL_W
+            } else {
+                ui::constants::TITLE_BAR_HEIGHT
+            } * inputs.metrics.dpi;
+            title.sidebar_left = resolved.sidebar_thickness.max(sidebar_header_width);
         }
         Some(resolved)
     }

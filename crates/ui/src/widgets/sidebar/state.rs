@@ -329,6 +329,7 @@ impl SidebarState {
         let settings_h = SETTINGS_BTN_H * dpi;
         let pad = PADDING * dpi;
         let edge_w = EDGE_RESIZE_W * dpi;
+        let native_titlebar = input.traffic_light_inset.0 == 0.0;
         let w = cfg.width;
         let top = input.content_top.max(0.0);
         let sh = input.screen_h.max(1.0);
@@ -342,14 +343,24 @@ impl SidebarState {
         // Hamburger menu button
         let action_size = SIDEBAR_ACTION_SIZE_LOGICAL * dpi;
         let menu_x = input.traffic_light_inset.0 + HEADER_ACTION_INSET_LOGICAL * dpi;
-        let menu_y = (header_h - action_size) * 0.5;
+        let new_y = if native_titlebar { top } else { top + header_h + pad };
+        let menu_y = if native_titlebar {
+            new_y + (new_h - action_size) * 0.5
+        } else {
+            (header_h - action_size) * 0.5
+        };
         let menu_btn_rect = Rect::new(menu_x, menu_y, action_size, action_size);
 
         // New and open actions share one row; narrow sidebars use an icon-only open button.
-        let new_y = top + header_h + pad;
-        let action_inset = ACTION_ROW_INSET_LOGICAL * dpi;
+        let action_inset = if native_titlebar {
+            HEADER_ACTION_INSET_LOGICAL * dpi
+        } else {
+            ACTION_ROW_INSET_LOGICAL * dpi
+        };
         let action_gap = ACTION_ROW_GAP_LOGICAL * dpi;
-        let action_width = (w - action_inset * 2.0).max(0.0);
+        let action_start =
+            if native_titlebar { menu_btn_rect.right() + action_gap } else { action_inset };
+        let action_width = (w - action_start - action_inset).max(0.0);
         let full_action_width =
             (NEW_DOCUMENT_MIN_WIDTH_LOGICAL + OPEN_BUTTON_WIDTH_LOGICAL) * dpi + action_gap;
         let open_width = if action_width >= full_action_width {
@@ -358,7 +369,7 @@ impl SidebarState {
             COMPACT_OPEN_BUTTON_WIDTH_LOGICAL * dpi
         };
         let new_row_rect = Rect::new(
-            action_inset,
+            action_start,
             new_y,
             (action_width - action_gap - open_width)
                 .max(0.0)
@@ -2115,6 +2126,41 @@ mod tests {
         );
         assert!(s.open_menu().is_some(), "menu should stay when mouse is inside");
     }
+    #[test]
+    fn native_titlebar_places_sidebar_toggle_beside_file_actions() {
+        for dpi in [1.0, 2.0] {
+            for width in [160.0, 220.0, 400.0] {
+                let cfg = SidebarConfig { pinned: true, width: width * dpi };
+                let metrics = crate::settings::UiMetrics::from_settings(
+                    &crate::settings::Settings::new(),
+                    dpi,
+                );
+                let mut state = SidebarState::new(&cfg);
+                state.update_layout(
+                    &SidebarInput {
+                        tabs: &[],
+                        active_index: None,
+                        screen_w: 1200.0 * dpi,
+                        screen_h: 600.0 * dpi,
+                        traffic_light_inset: (0.0, 0.0),
+                        content_top: 0.0,
+                    },
+                    &cfg,
+                    &metrics,
+                );
+                let layout = state.current_layout().expect("visible sidebar has a layout");
+                assert_eq!(
+                    layout.menu_btn_rect.y + layout.menu_btn_rect.h * 0.5,
+                    layout.new_btn_rect.y + layout.new_btn_rect.h * 0.5
+                );
+                assert!(layout.menu_btn_rect.right() < layout.new_btn_rect.x);
+                assert!(layout.new_menu_btn_rect.right() < layout.open_btn_rect.x);
+                assert!(layout.open_btn_rect.right() <= cfg.width);
+                assert_eq!(layout.new_btn_rect.y, 0.0);
+            }
+        }
+    }
+
     #[test]
     fn compact_actions_remain_separate_and_clickable_at_supported_widths() {
         for dpi in [1.0, 2.0] {
