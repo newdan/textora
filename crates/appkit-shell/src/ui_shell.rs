@@ -307,6 +307,32 @@ impl UiShell {
         self.keyboard_focus == KeyboardFocusTarget::Widget(ui::core::widget::ids::SEARCH_BAR)
     }
 
+    pub fn next_search_cursor_blink_at(&self) -> Option<Instant> {
+        if !self.search_bar_has_keyboard_focus() {
+            return None;
+        }
+        self.dock.children.iter().find_map(|child| {
+            child
+                .widget
+                .as_any()
+                .downcast_ref::<SearchBarWidget>()
+                .and_then(SearchBarWidget::next_cursor_blink_at)
+        })
+    }
+
+    pub fn advance_search_cursor_blink(&mut self, now: Instant) -> bool {
+        if !self.search_bar_has_keyboard_focus() {
+            return false;
+        }
+        self.dock.children.iter_mut().any(|child| {
+            child
+                .widget
+                .as_any_mut()
+                .downcast_mut::<SearchBarWidget>()
+                .is_some_and(|search_bar| search_bar.advance_cursor_blink(now))
+        })
+    }
+
     pub fn search_ime_cursor_rect(&self) -> Option<ui::core::geom::Rect> {
         for child in &self.dock.children {
             if let Some(sw) =
@@ -2933,7 +2959,6 @@ mod tests {
             current_match: 0,
             visible: true,
 
-            blink_on: false,
             replace_query: String::new(),
             replace_mode: false,
             focus_replace: false,
@@ -2960,6 +2985,71 @@ mod tests {
     }
 
     #[test]
+    fn focused_search_bar_exposes_its_text_box_blink_deadline() {
+        let theme = test_theme();
+        let mut measure = NoopMeasure;
+        let mut shell = UiShell::new();
+        shell.set_search_input(ui::search_bar::SearchBarSnapshot {
+            visible: true,
+            ..ui::search_bar::SearchBarSnapshot::default()
+        });
+        let mut inputs = shell_inputs();
+        inputs.search_visible = true;
+        inputs.search_thickness = 28.0;
+        shell.update_frame(Screen::new(800.0, 600.0), &theme, &mut measure, &inputs);
+        shell.focus_widget(ui::core::widget::ids::SEARCH_BAR);
+
+        let deadline = shell.next_search_cursor_blink_at().expect("focused search should blink");
+        assert!(shell.advance_search_cursor_blink(deadline));
+        shell.focus_editor();
+        assert_eq!(shell.next_search_cursor_blink_at(), None);
+    }
+
+    #[test]
+    fn search_button_accessibility_focus_routes_enter_to_search_bar() {
+        fn named_node_id(
+            node: &ui::core::AccessibilityNode,
+            name: &str,
+        ) -> Option<ui::core::AccessibilityId> {
+            if node.name.as_deref() == Some(name) {
+                return Some(node.id);
+            }
+            node.children.iter().find_map(|child| named_node_id(child, name))
+        }
+
+        let theme = test_theme();
+        let mut measure = NoopMeasure;
+        let mut shell = UiShell::new();
+        shell.set_search_input(ui::search_bar::SearchBarSnapshot {
+            query: "needle".to_owned(),
+            match_count: 1,
+            visible: true,
+            ..ui::search_bar::SearchBarSnapshot::default()
+        });
+        let mut inputs = shell_inputs();
+        inputs.search_visible = true;
+        inputs.search_thickness = 28.0;
+        shell.update_frame(Screen::new(800.0, 600.0), &theme, &mut measure, &inputs);
+        let previous_button_id =
+            named_node_id(&shell.accessibility_tree("textora").root, "上一个匹配")
+                .expect("search button should appear in accessibility tree");
+
+        assert_eq!(
+            shell.dispatch_accessibility_action(&ui::core::AccessibilityActionRequest::new(
+                previous_button_id,
+                ui::core::AccessibilityAction::Focus,
+            )),
+            Some(WidgetAction::Control(ui::ControlAction::FocusRequested {
+                id: ui::core::widget::ids::SEARCH_BAR,
+            })),
+        );
+        assert_eq!(
+            shell.forward_key(ui::KeyCode::Enter, ui::Modifiers::NONE, &theme, 1.0),
+            Some(WidgetAction::SearchBar(ui::search_bar::SearchBarAction::Prev)),
+        );
+    }
+
+    #[test]
     fn tooltip_timer_created_when_over_button() {
         let theme = test_theme();
         let mut m = NoopMeasure;
@@ -2972,7 +3062,6 @@ mod tests {
             current_match: 0,
             visible: true,
 
-            blink_on: false,
             replace_query: String::new(),
             replace_mode: false,
             focus_replace: false,
@@ -3169,7 +3258,6 @@ mod tests {
             current_match: 0,
             visible: true,
 
-            blink_on: false,
             replace_query: String::new(),
             replace_mode: false,
             focus_replace: false,

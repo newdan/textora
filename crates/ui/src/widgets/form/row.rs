@@ -1,5 +1,6 @@
 use std::any::Any;
 use std::borrow::Cow;
+use std::time::Instant;
 
 use crate::core::{
     AccessibilityActionRequest, AccessibilityContext, AccessibilityId, AccessibilityNode,
@@ -127,6 +128,23 @@ impl FormRow {
         self.control_rect
     }
 
+    pub(super) fn control_id(&self) -> Option<WidgetId> {
+        self.control.id()
+    }
+
+    pub(super) fn preserve_control_state_from(&mut self, previous: &Self) {
+        if self.control_id().is_none() || self.control_id() != previous.control_id() {
+            return;
+        }
+        let Some(current) = self.control.as_any_mut().downcast_mut::<TextBox>() else {
+            return;
+        };
+        let Some(previous) = previous.control.as_any().downcast_ref::<TextBox>() else {
+            return;
+        };
+        current.preserve_editing_state_from(previous);
+    }
+
     pub(crate) fn focused_ime_cursor_rect(&self) -> Option<Rect> {
         if !self.control_has_focus() {
             return None;
@@ -137,6 +155,23 @@ impl FormRow {
             .downcast_ref::<TextBox>()
             .or_else(|| (&*self.control as &dyn Any).downcast_ref::<TextBox>())
             .map(TextBox::ime_cursor_rect)
+    }
+
+    pub(crate) fn next_cursor_blink_at(&self) -> Option<Instant> {
+        if !self.control_has_focus() {
+            return None;
+        }
+        self.control.as_any().downcast_ref::<TextBox>()?.next_cursor_blink_at()
+    }
+
+    pub(crate) fn advance_cursor_blink(&mut self, now: Instant) -> bool {
+        if !self.control_has_focus() {
+            return false;
+        }
+        self.control
+            .as_any_mut()
+            .downcast_mut::<TextBox>()
+            .is_some_and(|input| input.advance_cursor_blink(now))
     }
 
     fn logical_to_px(value_logical: f32, dpi: f32) -> f32 {

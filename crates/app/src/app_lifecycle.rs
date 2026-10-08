@@ -1162,6 +1162,7 @@ impl ApplicationHandler<AppEvent> for App {
         // 窗口未激活时不闪烁；搜索框焦点时跳过（TextBox 自己管理闪烁）
         // 预览模式没有可见光标，跳过闪烁检测
         if self.editor_runtime.window_focused()
+            && !self.ui_shell.active_overlay_is_modal()
             && !self.ui_shell.search_bar_has_keyboard_focus()
             && self.active_needs_cursor_blink_wakeup()
             && let Some(tab) = self.active_tab_session()
@@ -1175,6 +1176,17 @@ impl ApplicationHandler<AppEvent> for App {
                     redraw_reason = "blink";
                 }
             }
+        }
+
+        if self.advance_settings_overlay_cursor_blink(Instant::now()) {
+            self.needs_redraw = true;
+        }
+
+        if self.editor_runtime.window_focused()
+            && !self.ui_shell.active_overlay_is_modal()
+            && self.ui_shell.advance_search_cursor_blink(Instant::now())
+        {
+            self.needs_redraw = true;
         }
 
         // 检测动画 → 触发渲染

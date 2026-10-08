@@ -85,8 +85,10 @@ impl App {
         }
         let overlay_rect = self.ui_shell.active_overlay_layout_rect()?;
         let frame = self.ui_shell.active_overlay_widget_ref::<ui::modal_frame::ModalFrame>()?;
-        let view = frame.content_as_any().downcast_ref::<ui::settings_view::SettingsView>()?;
-        let local = view.focused_ime_cursor_rect()?;
+        let overlay = frame
+            .content_as_any()
+            .downcast_ref::<crate::textora_settings_overlay::TextoraSettingsOverlay>()?;
+        let local = overlay.focused_ime_cursor_rect()?;
         let content_rect = frame.content_rect();
         Some(ui::core::geom::Rect::new(
             overlay_rect.x + content_rect.x + local.x,
@@ -94,6 +96,31 @@ impl App {
             local.w,
             local.h,
         ))
+    }
+
+    fn settings_overlay_next_cursor_blink_at(&self) -> Option<Instant> {
+        if !self.editor_runtime.window_focused() || !self.ui_shell.active_overlay_is_modal() {
+            return None;
+        }
+        self.ui_shell
+            .active_overlay_widget_ref::<ui::modal_frame::ModalFrame>()?
+            .content_as_any()
+            .downcast_ref::<crate::textora_settings_overlay::TextoraSettingsOverlay>()?
+            .next_cursor_blink_at()
+    }
+
+    pub(crate) fn advance_settings_overlay_cursor_blink(&mut self, now: Instant) -> bool {
+        if !self.editor_runtime.window_focused() || !self.ui_shell.active_overlay_is_modal() {
+            return false;
+        }
+        self.ui_shell
+            .active_overlay_widget_mut::<ui::modal_frame::ModalFrame>()
+            .and_then(|frame| {
+                frame
+                    .content_as_any_mut()
+                    .downcast_mut::<crate::textora_settings_overlay::TextoraSettingsOverlay>()
+            })
+            .is_some_and(|overlay| overlay.advance_cursor_blink(now))
     }
 
     /// Phase 2：从 App / Workspace 状态组装 ShellInputs。
@@ -350,10 +377,21 @@ impl App {
     /// 计算下一次需要唤醒事件循环的时间点。
     /// 返回 None 表示可以无限期休眠（完全空闲）。
     pub(crate) fn compute_next_wake_time(&self) -> Option<Instant> {
-        let mut earliest: Option<Instant> = None;
+        let mut earliest: Option<Instant> = self.settings_overlay_next_cursor_blink_at();
+
+        if self.editor_runtime.window_focused()
+            && !self.ui_shell.active_overlay_is_modal()
+            && let Some(next_search_blink) = self.ui_shell.next_search_cursor_blink_at()
+        {
+            earliest = Some(
+                earliest.map_or(next_search_blink, |deadline| deadline.min(next_search_blink)),
+            );
+        }
 
         // 1. 光标闪烁 — 有文档且有光标且窗口激活时才需要（预览模式无光标，跳过）
         if self.editor_runtime.window_focused()
+            && !self.ui_shell.active_overlay_is_modal()
+            && !self.ui_shell.search_bar_has_keyboard_focus()
             && self.active_needs_cursor_blink_wakeup()
             && let Some(tab) = self.active_tab_session()
         {
@@ -1144,6 +1182,28 @@ mod wake_time_tests {
         assert!(app.active_tab_session().unwrap().runtime.plugin.allows_editing());
         let wake = app.compute_next_wake_time();
         assert!(wake.is_some(), "editor mode should schedule cursor blink wake");
+    }
+
+    #[test]
+    fn focused_search_uses_component_blink_deadline() {
+        let mut app = App::new(None);
+        app.editor_runtime.set_window_focus(true);
+        app.ui_shell.set_search_input(ui::search_bar::SearchBarSnapshot {
+            visible: true,
+            ..ui::search_bar::SearchBarSnapshot::default()
+        });
+        let mut inputs = app.build_shell_inputs();
+        inputs.search_visible = true;
+        inputs.search_thickness = ui::search_bar::SEARCH_BAR_HEIGHT;
+        app.ui_shell.mark_layout_initialized_for_test();
+        let theme = ui::theme::test_theme();
+        let mut measure = ui::NoopMeasure;
+        app.ui_shell.update_frame(ui::Screen::new(800.0, 600.0), &theme, &mut measure, &inputs);
+        app.ui_shell.focus_widget(ui::core::widget::ids::SEARCH_BAR);
+
+        let deadline = app.ui_shell.next_search_cursor_blink_at();
+        assert!(deadline.is_some());
+        assert_eq!(app.compute_next_wake_time(), deadline);
     }
 
     #[test]

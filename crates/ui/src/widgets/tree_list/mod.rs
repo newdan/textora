@@ -261,6 +261,15 @@ impl TreeListWidget {
         self.inline_editor.set_blink(visible);
     }
 
+    pub fn next_editor_cursor_blink_at(&self) -> Option<std::time::Instant> {
+        self.input.editor.as_ref()?;
+        self.inline_editor.next_cursor_blink_at()
+    }
+
+    pub fn advance_editor_cursor_blink(&mut self, now: std::time::Instant) -> bool {
+        self.input.editor.is_some() && self.inline_editor.advance_cursor_blink(now)
+    }
+
     fn max_scroll_offset(&self) -> f32 {
         (self.layout.content_height_px - self.rect.h).max(0.0)
     }
@@ -520,7 +529,6 @@ impl Widget for TreeListWidget {
         self.inline_editor.set_keyboard_focus(
             (self.focused && self.input.editor.is_some()).then_some(self.inline_editor_id),
         );
-        self.inline_editor.set_blink(self.focused && self.input.editor.is_some());
     }
 
     fn accessibility_node(&self, ctx: &AccessibilityContext) -> Option<AccessibilityNode> {

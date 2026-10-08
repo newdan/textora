@@ -220,6 +220,14 @@ impl EditorPaneChrome {
         self.header.set_title_blink_visible(visible);
     }
 
+    pub fn next_focused_cursor_blink_at(&self) -> Option<std::time::Instant> {
+        self.header.next_title_cursor_blink_at().or_else(|| self.tag_editor.next_cursor_blink_at())
+    }
+
+    pub fn advance_focused_cursor_blink(&mut self, now: std::time::Instant) -> bool {
+        self.header.advance_title_cursor_blink(now) | self.tag_editor.advance_cursor_blink(now)
+    }
+
     pub fn title_text(&self) -> &str {
         self.header.title_text()
     }

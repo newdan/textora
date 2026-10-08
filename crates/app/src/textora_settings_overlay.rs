@@ -1,6 +1,6 @@
 use std::any::Any;
 
-use ui::button::{Button, ButtonStyle};
+use ui::button::{Button, ButtonCollection, ButtonStyle};
 use ui::core::widget::{ControlAction, WidgetId};
 use ui::core::{
     AccessibilityActionRequest, AccessibilityContext, AccessibilityNode, Event, EventCtx,
@@ -30,12 +30,6 @@ const INTERFACE_CATEGORY_ID: WidgetId = WidgetId(0x7365_7474_696e_7466);
 const SYNC_CATEGORY_ID: WidgetId = WidgetId(0x7365_7474_7379_6e63);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum SettingsHoverTarget {
-    Category(usize),
-    Content,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum ProductSettingsCategory {
     Appearance,
     Editor,
@@ -47,10 +41,8 @@ pub(crate) struct TextoraSettingsOverlay {
     rect: Rect,
     sidebar_width: f32,
     active_category: ProductSettingsCategory,
-    category_buttons: Vec<(ProductSettingsCategory, Button)>,
+    category_buttons: ButtonCollection,
     category_rects: Vec<Rect>,
-    category_pointer_index: Option<usize>,
-    hover_target: Option<SettingsHoverTarget>,
     settings_view: SettingsView,
     sync_page: SyncSettingsPage,
     generic_page_rect: Rect,
@@ -68,10 +60,8 @@ impl TextoraSettingsOverlay {
             rect: Rect::ZERO,
             sidebar_width: 0.0,
             active_category,
-            category_buttons: Vec::new(),
+            category_buttons: ButtonCollection::new(Vec::new()),
             category_rects: Vec::new(),
-            category_pointer_index: None,
-            hover_target: None,
             settings_view,
             sync_page: SyncSettingsPage::new(sync_input),
             generic_page_rect: Rect::ZERO,
@@ -94,31 +84,68 @@ impl TextoraSettingsOverlay {
         self.sync_page.take_pending_action()
     }
 
-    fn build_category_buttons(&self) -> Vec<(ProductSettingsCategory, Button)> {
-        [
-            (ProductSettingsCategory::Appearance, "外观", APPEARANCE_CATEGORY_ID),
-            (ProductSettingsCategory::Editor, "编辑器", EDITOR_CATEGORY_ID),
-            (ProductSettingsCategory::Interface, "界面", INTERFACE_CATEGORY_ID),
-            (ProductSettingsCategory::Sync, "同步", SYNC_CATEGORY_ID),
-        ]
-        .into_iter()
-        .map(|(category, title, id)| {
-            let mut button = Button::new(id, category_button_style(self.settings_theme));
-            button.set_text(Some(title.to_owned()));
-            button.set_selected(category == self.active_category);
-            (category, button)
-        })
-        .collect()
+    pub(crate) fn focused_ime_cursor_rect(&self) -> Option<Rect> {
+        let (page_rect, local) = if self.active_category == ProductSettingsCategory::Sync {
+            (self.sync_page_rect, self.sync_page.focused_ime_cursor_rect()?)
+        } else {
+            (self.generic_page_rect, self.settings_view.focused_ime_cursor_rect()?)
+        };
+        Some(Rect::new(page_rect.x + local.x, page_rect.y + local.y, local.w, local.h))
+    }
+
+    pub(crate) fn next_cursor_blink_at(&self) -> Option<std::time::Instant> {
+        if self.active_category == ProductSettingsCategory::Sync {
+            self.sync_page.next_cursor_blink_at()
+        } else {
+            self.settings_view.next_cursor_blink_at()
+        }
+    }
+
+    pub(crate) fn advance_cursor_blink(&mut self, now: std::time::Instant) -> bool {
+        if self.active_category == ProductSettingsCategory::Sync {
+            self.sync_page.advance_cursor_blink(now)
+        } else {
+            self.settings_view.advance_cursor_blink(now)
+        }
+    }
+
+    fn build_category_buttons(&self) -> ButtonCollection {
+        ButtonCollection::new(
+            [
+                (ProductSettingsCategory::Appearance, "外观", APPEARANCE_CATEGORY_ID),
+                (ProductSettingsCategory::Editor, "编辑器", EDITOR_CATEGORY_ID),
+                (ProductSettingsCategory::Interface, "界面", INTERFACE_CATEGORY_ID),
+                (ProductSettingsCategory::Sync, "同步", SYNC_CATEGORY_ID),
+            ]
+            .into_iter()
+            .map(|(category, title, id)| {
+                let mut button = Button::new(id, category_button_style(self.settings_theme));
+                button.set_text(Some(title.to_owned()));
+                button.set_selected(category == self.active_category);
+                button
+            })
+            .collect(),
+        )
     }
 
     fn category_index_at(&self, px: f32, py: f32) -> Option<usize> {
-        self.category_rects.iter().position(|rect| rect.contains(px, py))
+        self.category_buttons.index_at(px, py)
+    }
+
+    fn category_for_id(id: WidgetId) -> Option<ProductSettingsCategory> {
+        match id {
+            APPEARANCE_CATEGORY_ID => Some(ProductSettingsCategory::Appearance),
+            EDITOR_CATEGORY_ID => Some(ProductSettingsCategory::Editor),
+            INTERFACE_CATEGORY_ID => Some(ProductSettingsCategory::Interface),
+            SYNC_CATEGORY_ID => Some(ProductSettingsCategory::Sync),
+            _ => None,
+        }
     }
 
     fn activate_category(&mut self, category: ProductSettingsCategory) {
         self.active_category = category;
-        for (candidate, button) in &mut self.category_buttons {
-            button.set_selected(*candidate == category);
+        for button in self.category_buttons.buttons_mut() {
+            button.set_selected(button.id().and_then(Self::category_for_id) == Some(category));
         }
         match category {
             ProductSettingsCategory::Appearance => self
@@ -136,18 +163,18 @@ impl TextoraSettingsOverlay {
 
     fn dispatch_category_event(
         &mut self,
-        index: usize,
         event: &Event,
         ctx: &mut EventCtx,
     ) -> Option<WidgetAction> {
-        let rect = *self.category_rects.get(index)?;
-        let local_event = ui::core::dock::Dock::to_local(event, rect.x, rect.y);
-        let action = self.category_buttons[index].1.on_event(local_event.as_ref(), ctx)?;
+        let action = self.category_buttons.on_event(event, ctx)?;
         match action {
-            WidgetAction::Control(ControlAction::Activated { .. }) => {
-                let category = self.category_buttons[index].0;
+            WidgetAction::Control(ControlAction::Activated { id }) => {
+                let category = Self::category_for_id(id)?;
                 self.activate_category(category);
                 Some(WidgetAction::Consumed)
+            }
+            WidgetAction::Control(ControlAction::FocusRequested { id }) => {
+                Some(WidgetAction::Control(ControlAction::FocusRequested { id }))
             }
             WidgetAction::Control(_) => Some(WidgetAction::Consumed),
             other => Some(other),
@@ -179,13 +206,6 @@ impl TextoraSettingsOverlay {
         self.settings_view.is_capturing()
     }
 
-    fn hover_target_at(&self, px: f32, py: f32) -> Option<SettingsHoverTarget> {
-        if let Some(index) = self.category_index_at(px, py) {
-            return Some(SettingsHoverTarget::Category(index));
-        }
-        self.active_page_rect().contains(px, py).then_some(SettingsHoverTarget::Content)
-    }
-
     fn active_page_rect(&self) -> Rect {
         if self.active_category == ProductSettingsCategory::Sync {
             return self.sync_page_rect;
@@ -193,72 +213,19 @@ impl TextoraSettingsOverlay {
         self.generic_page_rect
     }
 
-    fn dispatch_hover_target(
-        &mut self,
-        target: SettingsHoverTarget,
-        event: &Event,
-        ctx: &mut EventCtx,
-    ) -> Option<WidgetAction> {
-        match target {
-            SettingsHoverTarget::Category(index) => self.dispatch_category_event(index, event, ctx),
-            SettingsHoverTarget::Content => self.dispatch_active_page_event(event, ctx),
-        }
-    }
-
-    fn dispatch_mouse_move(
-        &mut self,
-        px: f32,
-        py: f32,
-        event: &Event,
-        ctx: &mut EventCtx,
-    ) -> Option<WidgetAction> {
-        let next_hover_target = self.hover_target_at(px, py);
-        let previous_hover_action = if self.hover_target != next_hover_target {
-            self.hover_target.and_then(|target| {
-                let saved_cursor_hint = ctx.cursor_hint;
-                let action = self.dispatch_hover_target(target, event, ctx);
-                ctx.cursor_hint = saved_cursor_hint;
-                action
-            })
-        } else {
-            None
-        };
-        self.hover_target = next_hover_target;
-        next_hover_target
-            .and_then(|target| self.dispatch_hover_target(target, event, ctx))
-            .or(previous_hover_action)
-    }
-
     fn dispatch_interaction_lifecycle(
         &mut self,
         event: &Event,
         ctx: &mut EventCtx,
     ) -> Option<WidgetAction> {
-        let container_changed = if matches!(event, Event::InteractionCancel) {
-            self.category_pointer_index.take().is_some() | self.hover_target.take().is_some()
-        } else {
-            self.hover_target.take().is_some()
-        };
-        let mut first_action = None;
-        for category_index in 0..self.category_buttons.len() {
-            if let Some(action) = self.dispatch_category_event(category_index, event, ctx)
-                && first_action.is_none()
-            {
-                first_action = Some(action);
-            }
-        }
-        if let Some(action) = self.dispatch_active_page_event(event, ctx)
-            && first_action.is_none()
-        {
-            first_action = Some(action);
-        }
-        first_action.or_else(|| container_changed.then_some(WidgetAction::Consumed))
+        let category_action = self.dispatch_category_event(event, ctx);
+        self.dispatch_active_page_event(event, ctx).or(category_action)
     }
 
     fn layout_category_buttons(&mut self, ctx: &mut LayoutCtx) {
-        self.category_rects.clear();
+        let mut category_rects = Vec::with_capacity(self.category_buttons.buttons().len());
         let mut category_y = SETTINGS_SIDEBAR_TOP_INSET_LOGICAL * ctx.dpi;
-        for (_, button) in &mut self.category_buttons {
+        for button in self.category_buttons.buttons_mut() {
             button.set_style(category_button_style(self.settings_theme));
             let category_rect = Rect::new(
                 SETTINGS_CATEGORY_HORIZONTAL_INSET_LOGICAL * ctx.dpi,
@@ -267,10 +234,11 @@ impl TextoraSettingsOverlay {
                     .max(0.0),
                 SETTINGS_CATEGORY_BUTTON_HEIGHT_LOGICAL * ctx.dpi,
             );
-            self.category_rects.push(category_rect);
-            button.set_rect(Rect::new(0.0, 0.0, category_rect.w, category_rect.h), ctx);
+            category_rects.push(category_rect);
             category_y += category_rect.h + SETTINGS_CATEGORY_BUTTON_GAP_LOGICAL * ctx.dpi;
         }
+        self.category_buttons.set_rects(category_rects.clone(), ctx);
+        self.category_rects = category_rects;
     }
 
     fn layout_pages(&mut self, compact_layout: bool, ctx: &mut LayoutCtx) {
@@ -334,12 +302,7 @@ impl Widget for TextoraSettingsOverlay {
             ),
             self.settings_theme.separator,
         );
-        for ((_, button), rect) in self.category_buttons.iter().zip(&self.category_rects) {
-            let saved_offset = ctx.list.offset;
-            ctx.list.offset = (saved_offset.0 + rect.x, saved_offset.1 + rect.y);
-            button.paint(ctx);
-            ctx.list.offset = saved_offset;
-        }
+        self.category_buttons.paint(ctx);
 
         let page_rect = self.active_page_rect();
         let saved_offset = ctx.list.offset;
@@ -357,9 +320,7 @@ impl Widget for TextoraSettingsOverlay {
     }
 
     fn collect_focusable_ids(&self, output: &mut Vec<WidgetId>) {
-        for (_, button) in &self.category_buttons {
-            button.collect_focusable_ids(output);
-        }
+        self.category_buttons.collect_focusable_ids(output);
         if self.active_category == ProductSettingsCategory::Sync {
             self.sync_page.collect_focusable_ids(output);
         } else {
@@ -368,9 +329,7 @@ impl Widget for TextoraSettingsOverlay {
     }
 
     fn set_keyboard_focus(&mut self, focused_id: Option<WidgetId>) {
-        for (_, button) in &mut self.category_buttons {
-            button.set_keyboard_focus(focused_id);
-        }
+        self.category_buttons.set_keyboard_focus(focused_id);
         if self.active_category == ProductSettingsCategory::Sync {
             self.sync_page.set_keyboard_focus(focused_id);
         } else {
@@ -383,11 +342,7 @@ impl Widget for TextoraSettingsOverlay {
         context: &AccessibilityContext,
         output: &mut Vec<AccessibilityNode>,
     ) {
-        for ((_, button), rect) in self.category_buttons.iter().zip(&self.category_rects) {
-            if rect.w > 0.0 && rect.h > 0.0 {
-                button.collect_accessibility_nodes(&context.offset_by(rect.x, rect.y), output);
-            }
-        }
+        self.category_buttons.collect_accessibility_nodes(context, output);
 
         let page_rect = self.active_page_rect();
         let page_context = context.offset_by(page_rect.x, page_rect.y);
@@ -402,14 +357,10 @@ impl Widget for TextoraSettingsOverlay {
         &mut self,
         request: &AccessibilityActionRequest,
     ) -> Option<WidgetAction> {
-        for index in 0..self.category_buttons.len() {
-            let Some(action) = self.category_buttons[index].1.on_accessibility_action(request)
-            else {
-                continue;
-            };
+        if let Some(action) = self.category_buttons.on_accessibility_action(request) {
             return match action {
-                WidgetAction::Control(ControlAction::Activated { .. }) => {
-                    let category = self.category_buttons[index].0;
+                WidgetAction::Control(ControlAction::Activated { id }) => {
+                    let category = Self::category_for_id(id)?;
                     self.activate_category(category);
                     Some(WidgetAction::Consumed)
                 }
@@ -439,31 +390,34 @@ impl Widget for TextoraSettingsOverlay {
         {
             return self.dispatch_active_page_event(event, ctx);
         }
-        if let Some(index) = self.category_pointer_index
+        if self.category_buttons.is_capturing()
             && matches!(event, Event::MouseMove { .. } | Event::MouseUp { .. })
         {
-            let action = self.dispatch_category_event(index, event, ctx);
-            if matches!(event, Event::MouseUp { .. }) {
-                self.category_pointer_index = None;
-            }
-            return action;
+            return self.dispatch_category_event(event, ctx);
         }
 
         match event {
             Event::MouseDown { px, py, .. } => {
-                if let Some(index) = self.category_index_at(*px, *py) {
-                    self.category_pointer_index = Some(index);
-                    return self.dispatch_category_event(index, event, ctx);
+                if self.category_index_at(*px, *py).is_some() {
+                    return self.dispatch_category_event(event, ctx);
                 }
+                self.category_buttons.set_keyboard_focus(None);
                 self.dispatch_active_page_event(event, ctx)
             }
-            Event::MouseMove { px, py } => self.dispatch_mouse_move(*px, *py, event, ctx),
+            Event::MouseMove { .. } => {
+                let category_action = self.dispatch_category_event(event, ctx);
+                self.dispatch_active_page_event(event, ctx).or(category_action)
+            }
+            Event::KeyDown(..) => {
+                let category_action = self.dispatch_category_event(event, ctx);
+                category_action.or_else(|| self.dispatch_active_page_event(event, ctx))
+            }
             _ => self.dispatch_active_page_event(event, ctx),
         }
     }
 
     fn is_capturing(&self) -> bool {
-        self.category_pointer_index.is_some() || self.active_page_is_capturing()
+        self.category_buttons.is_capturing() || self.active_page_is_capturing()
     }
 
     fn as_any(&self) -> &dyn Any {
@@ -515,16 +469,30 @@ mod tests {
         assert_eq!(
             overlay
                 .category_buttons
+                .buttons()
                 .iter()
-                .map(|(category, button)| (*category, button.id()))
+                .map(|button| {
+                    let id = button.id();
+                    (id.and_then(TextoraSettingsOverlay::category_for_id), id)
+                })
                 .collect::<Vec<_>>(),
             vec![
-                (ProductSettingsCategory::Appearance, Some(APPEARANCE_CATEGORY_ID)),
-                (ProductSettingsCategory::Editor, Some(EDITOR_CATEGORY_ID)),
-                (ProductSettingsCategory::Interface, Some(INTERFACE_CATEGORY_ID)),
-                (ProductSettingsCategory::Sync, Some(SYNC_CATEGORY_ID)),
+                (Some(ProductSettingsCategory::Appearance), Some(APPEARANCE_CATEGORY_ID)),
+                (Some(ProductSettingsCategory::Editor), Some(EDITOR_CATEGORY_ID)),
+                (Some(ProductSettingsCategory::Interface), Some(INTERFACE_CATEGORY_ID)),
+                (Some(ProductSettingsCategory::Sync), Some(SYNC_CATEGORY_ID)),
             ],
         );
+    }
+
+    #[test]
+    fn focused_sync_input_exposes_blink_deadline_and_ime_position() {
+        let mut overlay = laid_out_overlay(SettingsPersistenceView::Saved);
+        overlay.activate_category(ProductSettingsCategory::Sync);
+
+        let deadline = overlay.next_cursor_blink_at().expect("focused sync input should blink");
+        assert!(overlay.focused_ime_cursor_rect().is_some());
+        assert!(overlay.advance_cursor_blink(deadline));
     }
 
     #[test]

@@ -304,6 +304,25 @@ impl TextBox {
         self.selection = None;
     }
 
+    pub(crate) fn preserve_editing_state_from(&mut self, previous: &Self) {
+        if self.id != previous.id
+            || self.echo_mode != previous.echo_mode
+            || self.text.as_str() != previous.text.as_str()
+        {
+            return;
+        }
+
+        self.cursor_byte = previous.cursor_byte;
+        self.selection = previous.selection;
+        self.preedit = previous.preedit.clone();
+        self.preedit_cursor = previous.preedit_cursor;
+        self.focused = previous.focused;
+        self.blink_on = previous.blink_on;
+        if previous.next_cursor_blink.is_some() {
+            self.next_cursor_blink = previous.next_cursor_blink;
+        }
+    }
+
     pub fn set_placeholder(&mut self, ph: &str) {
         self.placeholder = ph.to_string();
     }
@@ -1379,6 +1398,10 @@ impl Widget for TextBox {
         self.dragging
     }
 
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
+
     fn as_any_mut(&mut self) -> &mut dyn std::any::Any {
         self
     }
@@ -1402,6 +1425,32 @@ mod tests {
         assert!(input.ime_allowed());
         input.set_echo_mode(EchoMode::Masked);
         assert!(!input.ime_allowed());
+    }
+
+    #[test]
+    fn matching_text_box_rebuild_preserves_selection_and_preedit() {
+        let theme = crate::theme::test_theme();
+        let mut context = EventCtx::new(&theme, 1.0);
+        let mut previous = TextBox::with_id(WidgetId(42));
+        previous.set_text("abcd");
+        previous.set_focus(true);
+        let _ = previous.on_event(
+            &Event::KeyDown(KeyCode::Left, Modifiers { shift: true, ..Modifiers::NONE }),
+            &mut context,
+        );
+        let mut replacement = TextBox::with_id(WidgetId(42));
+        replacement.set_text("abcd");
+        replacement.preserve_editing_state_from(&previous);
+        assert_eq!(replacement.cursor_byte, previous.cursor_byte);
+        assert_eq!(replacement.selection, previous.selection);
+
+        let _ = previous.on_event(
+            &Event::ImePreedit { text: "候选".to_owned(), cursor: Some((6, 6)) },
+            &mut context,
+        );
+        replacement.preserve_editing_state_from(&previous);
+        assert_eq!(replacement.preedit.as_str(), "候选");
+        assert_eq!(replacement.preedit_cursor, previous.preedit_cursor);
     }
 
     #[test]

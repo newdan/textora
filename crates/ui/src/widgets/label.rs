@@ -2,13 +2,17 @@ use std::any::Any;
 
 use crate::core::text_util::estimate_text_width_px;
 use crate::core::{
-    AccessibilityContext, AccessibilityId, AccessibilityNode, AccessibilityRole, Event, EventCtx,
-    LayoutCtx, PaintCtx, Rect, Widget, WidgetAction,
+    AccessibilityContext, AccessibilityId, AccessibilityNode, AccessibilityRole, DrawCmd, Event,
+    EventCtx, LayoutCtx, PaintCtx, Rect, Widget, WidgetAction,
 };
 use crate::widgets::icon::draw_icon;
 
 const DEFAULT_LABEL_FONT_SIZE_LOGICAL: f32 = 13.0;
 const DEFAULT_LABEL_ICON_GAP_LOGICAL: f32 = 6.0;
+const FORM_SECTION_TITLE_FONT_SIZE_LOGICAL: f32 = 17.0;
+const FORM_ROW_TITLE_FONT_SIZE_LOGICAL: f32 = 14.0;
+const FORM_DESCRIPTION_FONT_SIZE_LOGICAL: f32 = 12.0;
+const FORM_SECTION_DESCRIPTION_FONT_SIZE_LOGICAL: f32 = 11.5;
 
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub enum LabelForeground {
@@ -37,12 +41,47 @@ impl Default for LabelStyle {
     }
 }
 
+impl LabelStyle {
+    pub fn form_section_title() -> Self {
+        Self {
+            font_size_logical: FORM_SECTION_TITLE_FONT_SIZE_LOGICAL,
+            font_weight: shaping::Weight::MEDIUM,
+            ..Self::default()
+        }
+    }
+
+    pub fn form_row_title() -> Self {
+        Self {
+            font_size_logical: FORM_ROW_TITLE_FONT_SIZE_LOGICAL,
+            font_weight: shaping::Weight::MEDIUM,
+            ..Self::default()
+        }
+    }
+
+    pub fn form_description() -> Self {
+        Self {
+            font_size_logical: FORM_DESCRIPTION_FONT_SIZE_LOGICAL,
+            foreground: LabelForeground::ThemeMuted,
+            ..Self::default()
+        }
+    }
+
+    pub fn form_section_description() -> Self {
+        Self {
+            font_size_logical: FORM_SECTION_DESCRIPTION_FONT_SIZE_LOGICAL,
+            foreground: LabelForeground::ThemeMuted,
+            ..Self::default()
+        }
+    }
+}
+
 pub struct Label {
     rect: Rect,
     text: String,
     leading_icon: Option<String>,
     trailing_icon: Option<String>,
     style: LabelStyle,
+    clip_to_bounds: bool,
     accessibility_id: Option<AccessibilityId>,
 }
 
@@ -54,8 +93,21 @@ impl Label {
             leading_icon: None,
             trailing_icon: None,
             style,
+            clip_to_bounds: false,
             accessibility_id: None,
         }
+    }
+
+    pub fn set_text(&mut self, text: impl Into<String>) {
+        self.text = text.into();
+    }
+
+    pub fn set_style(&mut self, style: LabelStyle) {
+        self.style = style;
+    }
+
+    pub fn set_clip_to_bounds(&mut self, clip_to_bounds: bool) {
+        self.clip_to_bounds = clip_to_bounds;
     }
 
     pub fn set_leading_icon(&mut self, icon: Option<String>) {
@@ -128,6 +180,16 @@ impl Widget for Label {
             return;
         }
 
+        if self.clip_to_bounds {
+            let (offset_x, offset_y) = ctx.list.offset;
+            ctx.list.cmds.push(DrawCmd::PushClip(Rect::new(
+                self.rect.x + offset_x,
+                self.rect.y + offset_y,
+                self.rect.w,
+                self.rect.h,
+            )));
+        }
+
         let dpi = ctx.dpi;
         let font_size = self.style.font_size_logical * dpi;
         let icon_gap = self.style.gap_logical * dpi;
@@ -163,6 +225,10 @@ impl Widget for Label {
         if let Some(icon_name) = &self.trailing_icon {
             cursor_x += icon_gap;
             draw_label_icon(ctx, icon_name, cursor_x, icon_y, icon_size, color);
+        }
+
+        if self.clip_to_bounds {
+            ctx.list.cmds.push(DrawCmd::PopClip);
         }
     }
 
@@ -244,6 +310,23 @@ mod tests {
             label.on_event(&Event::KeyDown(KeyCode::Enter, Modifiers::NONE), &mut event_ctx()),
             None
         );
+    }
+
+    #[test]
+    fn dynamic_label_clips_long_text_to_its_rect() {
+        let mut label = Label::new("initial", LabelStyle::default());
+        label.set_text("a much longer path than the available width");
+        label.set_clip_to_bounds(true);
+        let rect = Rect::new(12.0, 18.0, 64.0, 20.0);
+        set_test_rect(&mut label, rect);
+
+        let draw_list = paint_for_test(&label);
+
+        assert!(
+            matches!(draw_list.cmds.first(), Some(DrawCmd::PushClip(bounds)) if *bounds == rect)
+        );
+        assert!(matches!(draw_list.cmds.last(), Some(DrawCmd::PopClip)));
+        assert!(draw_list.cmds.iter().any(|cmd| matches!(cmd, DrawCmd::TextLayout { layout, .. } if layout.text == "a much longer path than the available width")));
     }
 
     #[test]

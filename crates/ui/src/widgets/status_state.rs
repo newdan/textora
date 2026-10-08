@@ -3,11 +3,12 @@
 use std::any::Any;
 
 use crate::core::text_util::compute_text_width;
-use crate::core::widget::{ControlAction, WidgetId};
+use crate::core::widget::WidgetId;
 use crate::core::{
-    DrawCmd, Event, EventCtx, LayoutCtx, MouseButton, PaintCtx, Rect, Widget, WidgetAction,
+    AccessibilityActionRequest, AccessibilityContext, AccessibilityNode, DrawCmd, Event, EventCtx,
+    LayoutCtx, PaintCtx, Rect, Widget, WidgetAction,
 };
-use crate::widgets::button::{ButtonMetrics, ButtonStyle, ButtonVisualState};
+use crate::widgets::button::{Button, ButtonMetrics, ButtonStyle};
 use crate::widgets::icon::draw_icon;
 
 const STATUS_ICON_TITLE_GAP: f32 = 12.0;
@@ -37,8 +38,7 @@ pub struct StatusStateWidget {
     rect: Rect,
     action_rect: Rect,
     input: StatusStateInput,
-    hovered_action: bool,
-    pressed_action: bool,
+    action_button: Option<Button>,
 }
 
 impl Default for StatusStateWidget {
@@ -53,25 +53,31 @@ impl StatusStateWidget {
             rect: Rect::ZERO,
             action_rect: Rect::ZERO,
             input: StatusStateInput::default(),
-            hovered_action: false,
-            pressed_action: false,
+            action_button: None,
         }
     }
 
     pub fn set_input(&mut self, input: StatusStateInput) {
+        let action_button = match (input.action_id, input.action_label.as_ref()) {
+            (Some(action_id), Some(label)) => {
+                let mut button = self
+                    .action_button
+                    .take()
+                    .filter(|button| button.id() == Some(action_id))
+                    .unwrap_or_else(|| {
+                        Button::new(action_id, ButtonStyle::from_theme(&crate::theme::test_theme()))
+                    });
+                button.set_text(Some(label.clone()));
+                Some(button)
+            }
+            _ => None,
+        };
         self.input = input;
-        if self.input.action_id.is_none() || self.input.action_label.is_none() {
-            self.hovered_action = false;
-            self.pressed_action = false;
-        }
+        self.action_button = action_button;
     }
 
     pub fn action_rect(&self) -> Rect {
         self.action_rect
-    }
-
-    fn has_action(&self) -> bool {
-        self.input.action_id.is_some() && self.input.action_label.is_some()
     }
 }
 
@@ -89,7 +95,7 @@ impl Widget for StatusStateWidget {
         let action_width = (label_width + ButtonMetrics::HORIZONTAL_PADDING * 2.0 * ctx.dpi)
             .min((rect.w - 24.0 * ctx.dpi).max(0.0));
         let action_height = 32.0 * ctx.dpi;
-        self.action_rect = if self.has_action() {
+        self.action_rect = if self.action_button.is_some() {
             Rect::new(
                 rect.x + (rect.w - action_width) * 0.5,
                 rect.bottom() - 24.0 * ctx.dpi - action_height,
@@ -99,6 +105,10 @@ impl Widget for StatusStateWidget {
         } else {
             Rect::ZERO
         };
+        if let Some(button) = self.action_button.as_mut() {
+            button.set_style(ButtonStyle::from_theme(ctx.theme));
+            button.set_rect(self.action_rect, ctx);
+        }
     }
 
     fn paint(&self, ctx: &mut PaintCtx) {
@@ -146,27 +156,8 @@ impl Widget for StatusStateWidget {
             ctx.theme.palette.text_muted,
             &self.input.description,
         );
-        if self.has_action() {
-            let state = if self.pressed_action && self.hovered_action {
-                ButtonVisualState::Pressed
-            } else if self.hovered_action {
-                ButtonVisualState::Hovered
-            } else {
-                ButtonVisualState::Normal
-            };
-            let foreground = ButtonStyle::from_theme(ctx.theme).paint(ctx, self.action_rect, state);
-            let label = self.input.action_label.as_deref().unwrap_or_default();
-            let action_font_size = ctx.theme.control_metrics().font_size_logical * ctx.dpi;
-            let label_width =
-                compute_text_width(label, action_font_size, ctx.shaper.as_deref_mut());
-            let label_x = self.action_rect.x + (self.action_rect.w - label_width) * 0.5;
-            ctx.text(
-                label_x,
-                self.action_rect.y + self.action_rect.h * 0.5 + action_font_size * 0.35,
-                action_font_size,
-                foreground,
-                label,
-            );
+        if let Some(button) = self.action_button.as_ref() {
+            button.paint(ctx);
         }
         ctx.list.cmds.push(DrawCmd::PopClip);
     }
@@ -175,52 +166,41 @@ impl Widget for StatusStateWidget {
         self.rect.contains(px, py)
     }
 
-    fn on_event(&mut self, event: &Event, ctx: &mut EventCtx) -> Option<WidgetAction> {
-        if !self.has_action() {
-            return None;
-        }
-        match event {
-            Event::MouseMove { px, py } => {
-                let hovered = self.action_rect.contains(*px, *py);
-                let hover_changed = self.hovered_action != hovered;
-                self.hovered_action = hovered;
-                if hovered {
-                    ctx.cursor_hint = Some(winit::window::CursorIcon::Pointer);
-                    Some(WidgetAction::Consumed)
-                } else {
-                    hover_changed.then_some(WidgetAction::Consumed)
-                }
-            }
-            Event::PointerLeave => {
-                std::mem::take(&mut self.hovered_action).then_some(WidgetAction::Consumed)
-            }
-            Event::InteractionCancel => {
-                let changed = std::mem::take(&mut self.hovered_action)
-                    | std::mem::take(&mut self.pressed_action);
-                changed.then_some(WidgetAction::Consumed)
-            }
-            Event::MouseDown { px, py, button: MouseButton::Left } => {
-                self.pressed_action = self.action_rect.contains(*px, *py);
-                self.hovered_action = self.pressed_action;
-                self.pressed_action.then_some(WidgetAction::Consumed)
-            }
-            Event::MouseUp { px, py, button: MouseButton::Left } if self.pressed_action => {
-                self.pressed_action = false;
-                self.hovered_action = self.action_rect.contains(*px, *py);
-                if self.hovered_action {
-                    self.input
-                        .action_id
-                        .map(|id| WidgetAction::Control(ControlAction::Activated { id }))
-                } else {
-                    Some(WidgetAction::Consumed)
-                }
-            }
-            _ => None,
+    fn collect_focusable_ids(&self, output: &mut Vec<WidgetId>) {
+        if let Some(button) = self.action_button.as_ref() {
+            button.collect_focusable_ids(output);
         }
     }
 
+    fn set_keyboard_focus(&mut self, focused_id: Option<WidgetId>) {
+        if let Some(button) = self.action_button.as_mut() {
+            button.set_keyboard_focus(focused_id);
+        }
+    }
+
+    fn collect_accessibility_nodes(
+        &self,
+        context: &AccessibilityContext,
+        output: &mut Vec<AccessibilityNode>,
+    ) {
+        if let Some(button) = self.action_button.as_ref() {
+            button.collect_accessibility_nodes(context, output);
+        }
+    }
+
+    fn on_accessibility_action(
+        &mut self,
+        request: &AccessibilityActionRequest,
+    ) -> Option<WidgetAction> {
+        self.action_button.as_mut()?.on_accessibility_action(request)
+    }
+
+    fn on_event(&mut self, event: &Event, ctx: &mut EventCtx) -> Option<WidgetAction> {
+        self.action_button.as_mut()?.on_event(event, ctx)
+    }
+
     fn is_capturing(&self) -> bool {
-        self.pressed_action
+        self.action_button.as_ref().is_some_and(Widget::is_capturing)
     }
 
     fn as_any_mut(&mut self) -> &mut dyn Any {
@@ -231,13 +211,58 @@ impl Widget for StatusStateWidget {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::core::{DrawCmd, DrawList, EventCtx, LayoutCtx, NoopMeasure, PaintCtx};
+    use crate::core::widget::ControlAction;
+    use crate::core::{
+        AccessibilityAction, AccessibilityActionRequest, AccessibilityContext, AccessibilityId,
+        AccessibilityRole, DrawCmd, DrawList, EventCtx, KeyCode, LayoutCtx, Modifiers, MouseButton,
+        NoopMeasure, PaintCtx,
+    };
 
     fn layout(widget: &mut StatusStateWidget, rect: Rect, dpi: f32) {
         let theme = crate::theme::test_theme();
         let mut measure = NoopMeasure;
         let mut context = LayoutCtx { ui_measure: None, measure: &mut measure, theme: &theme, dpi };
         widget.set_rect(rect, &mut context);
+    }
+
+    #[test]
+    fn action_exposes_button_keyboard_and_accessibility_behavior() {
+        let action_id = WidgetId(81);
+        let mut widget = StatusStateWidget::new();
+        widget.set_input(StatusStateInput {
+            action_label: Some("重试".to_owned()),
+            action_id: Some(action_id),
+            ..StatusStateInput::default()
+        });
+        layout(&mut widget, Rect::new(0.0, 0.0, 320.0, 240.0), 1.0);
+
+        let mut focusable_ids = Vec::new();
+        widget.collect_focusable_ids(&mut focusable_ids);
+        assert_eq!(focusable_ids, vec![action_id]);
+
+        widget.set_keyboard_focus(Some(action_id));
+        let theme = crate::theme::test_theme();
+        let mut event_context = EventCtx::new(&theme, 1.0);
+        let expected = Some(WidgetAction::Control(ControlAction::Activated { id: action_id }));
+        assert_eq!(
+            widget.on_event(&Event::KeyDown(KeyCode::Enter, Modifiers::NONE), &mut event_context),
+            expected
+        );
+
+        let mut nodes = Vec::new();
+        widget.collect_accessibility_nodes(&AccessibilityContext::new(0.0, 0.0), &mut nodes);
+        assert_eq!(nodes.len(), 1);
+        assert_eq!(nodes[0].id, AccessibilityId::from(action_id));
+        assert_eq!(nodes[0].role, AccessibilityRole::Button);
+        assert_eq!(nodes[0].name.as_deref(), Some("重试"));
+        assert_eq!(
+            widget.on_accessibility_action(&AccessibilityActionRequest {
+                target: AccessibilityId::from(action_id),
+                action: AccessibilityAction::Activate,
+                value: None,
+            }),
+            expected
+        );
     }
 
     #[test]
@@ -302,7 +327,6 @@ mod tests {
             widget.on_event(&Event::PointerLeave, &mut context),
             Some(WidgetAction::Consumed)
         );
-        assert!(!widget.hovered_action);
         assert!(widget.is_capturing());
         assert_eq!(
             widget.on_event(&Event::InteractionCancel, &mut context),

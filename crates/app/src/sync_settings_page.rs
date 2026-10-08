@@ -1,7 +1,6 @@
 use std::any::Any;
-use std::borrow::Cow;
 
-use ui::button::{Button, ButtonStyle};
+use ui::button::{Button, ButtonCollection, ButtonStyle};
 use ui::core::widget::{ControlAction, SensitiveText, TextPayload, WidgetId};
 use ui::core::{
     AccessibilityActionRequest, AccessibilityContext, AccessibilityNode, Event, EventCtx,
@@ -9,7 +8,7 @@ use ui::core::{
 };
 use ui::form::{FormRow, FormRowStyle, FormSection, FormSectionStyle, FormView};
 use ui::inline_group::{CrossAlignment, InlineChild, InlineGroup};
-use ui::label::{Label, LabelForeground, LabelStyle};
+use ui::label::{Label, LabelStyle};
 use ui::text_box::TextBox;
 use ui::theme::SettingsTheme;
 
@@ -30,9 +29,6 @@ const SYNC_CONNECTION_ACTION_STACK_THRESHOLD_LOGICAL: f32 = 204.0;
 const SYNC_COMPACT_CONNECTION_ROW_HEIGHT_LOGICAL: f32 = 96.0;
 const SYNC_STACKED_ACTION_GAP_LOGICAL: f32 = 8.0;
 const SYNC_BUTTON_WIDTH_LOGICAL: f32 = ui::button::ButtonMetrics::text_width(4);
-const SYNC_SECTION_TITLE_FONT_SIZE_LOGICAL: f32 = 17.0;
-const SYNC_ROW_LABEL_FONT_SIZE_LOGICAL: f32 = 14.0;
-const SYNC_DESCRIPTION_FONT_SIZE_LOGICAL: f32 = 12.0;
 const SYNC_SECTION_GAP_LOGICAL: f32 = 24.0;
 const SYNC_SECTION_TITLE_GAP_LOGICAL: f32 = 6.0;
 const SYNC_SECTION_DESCRIPTION_GAP_LOGICAL: f32 = 14.0;
@@ -64,58 +60,17 @@ struct SyncSettingsDraft {
 
 struct StackedConnectionActions {
     rect: Rect,
-    buttons: [Button; 2],
+    buttons: ButtonCollection,
     button_rects: [Rect; 2],
-    pointer_index: Option<usize>,
-    hover_index: Option<usize>,
-    focused_id: Option<WidgetId>,
 }
 
 impl StackedConnectionActions {
     fn new(test_button: Button, configure_button: Button) -> Self {
         Self {
             rect: Rect::ZERO,
-            buttons: [test_button, configure_button],
+            buttons: ButtonCollection::new(vec![test_button, configure_button]),
             button_rects: [Rect::ZERO; 2],
-            pointer_index: None,
-            hover_index: None,
-            focused_id: None,
         }
-    }
-
-    fn button_index_at(&self, px: f32, py: f32) -> Option<usize> {
-        self.button_rects.iter().position(|rect| rect.contains(px, py))
-    }
-
-    fn focused_button_index(&self) -> Option<usize> {
-        let focused_id = self.focused_id?;
-        self.buttons.iter().position(|button| button.id() == Some(focused_id))
-    }
-
-    fn dispatch_to_button(
-        &mut self,
-        index: usize,
-        event: &Event,
-        ctx: &mut EventCtx,
-    ) -> Option<WidgetAction> {
-        let button_rect = self.button_rects[index];
-        let local_event: Cow<'_, Event> =
-            ui::core::dock::Dock::to_local(event, button_rect.x, button_rect.y);
-        self.buttons[index].on_event(local_event.as_ref(), ctx)
-    }
-
-    fn dispatch_outside_move_to_previous_hover(
-        &mut self,
-        next_hover_index: Option<usize>,
-        event: &Event,
-        ctx: &mut EventCtx,
-    ) -> Option<WidgetAction> {
-        let previous_hover_index = self.hover_index?;
-        if Some(previous_hover_index) == next_hover_index {
-            return None;
-        }
-
-        self.dispatch_to_button(previous_hover_index, event, ctx)
     }
 }
 
@@ -132,18 +87,11 @@ impl Widget for StackedConnectionActions {
             Rect::new(0.0, first_y + button_height + gap, self.rect.w, button_height),
         ];
 
-        for (button, button_rect) in self.buttons.iter_mut().zip(self.button_rects) {
-            button.set_rect(Rect::new(0.0, 0.0, button_rect.w, button_rect.h), ctx);
-        }
+        self.buttons.set_rects(self.button_rects.to_vec(), ctx);
     }
 
     fn paint(&self, ctx: &mut PaintCtx) {
-        let saved_offset = ctx.list.offset;
-        for (button, button_rect) in self.buttons.iter().zip(self.button_rects) {
-            ctx.list.offset = (saved_offset.0 + button_rect.x, saved_offset.1 + button_rect.y);
-            button.paint(ctx);
-        }
-        ctx.list.offset = saved_offset;
+        self.buttons.paint(ctx);
     }
 
     fn hit(&self, px: f32, py: f32) -> bool {
@@ -151,78 +99,34 @@ impl Widget for StackedConnectionActions {
     }
 
     fn collect_focusable_ids(&self, output: &mut Vec<WidgetId>) {
-        for button in &self.buttons {
-            button.collect_focusable_ids(output);
-        }
+        self.buttons.collect_focusable_ids(output);
     }
 
     fn set_keyboard_focus(&mut self, focused_id: Option<WidgetId>) {
-        self.focused_id = focused_id;
-        for button in &mut self.buttons {
-            button.set_keyboard_focus(focused_id);
-        }
+        self.buttons.set_keyboard_focus(focused_id);
+    }
+
+    fn collect_accessibility_nodes(
+        &self,
+        context: &AccessibilityContext,
+        output: &mut Vec<AccessibilityNode>,
+    ) {
+        self.buttons.collect_accessibility_nodes(context, output);
+    }
+
+    fn on_accessibility_action(
+        &mut self,
+        request: &AccessibilityActionRequest,
+    ) -> Option<WidgetAction> {
+        self.buttons.on_accessibility_action(request)
     }
 
     fn on_event(&mut self, event: &Event, ctx: &mut EventCtx) -> Option<WidgetAction> {
-        match event {
-            Event::PointerLeave => {
-                let hover_index = self.hover_index.take();
-                let action =
-                    hover_index.and_then(|index| self.dispatch_to_button(index, event, ctx));
-                action.or_else(|| hover_index.map(|_| WidgetAction::Consumed))
-            }
-            Event::InteractionCancel => {
-                let container_changed =
-                    self.pointer_index.take().is_some() | self.hover_index.take().is_some();
-                let mut first_action = None;
-                for index in 0..self.buttons.len() {
-                    if let Some(action) = self.dispatch_to_button(index, event, ctx)
-                        && first_action.is_none()
-                    {
-                        first_action = Some(action);
-                    }
-                }
-                first_action.or_else(|| container_changed.then_some(WidgetAction::Consumed))
-            }
-            Event::MouseDown { px, py, .. } => {
-                let index = self.button_index_at(*px, *py)?;
-                self.pointer_index = Some(index);
-                self.dispatch_to_button(index, event, ctx)
-            }
-            Event::MouseMove { px, py } => {
-                if let Some(index) = self.pointer_index {
-                    return self.dispatch_to_button(index, event, ctx);
-                }
-
-                let next_hover_index = self.button_index_at(*px, *py);
-                let previous_hover_action =
-                    self.dispatch_outside_move_to_previous_hover(next_hover_index, event, ctx);
-                self.hover_index = next_hover_index;
-
-                if let Some(index) = next_hover_index {
-                    return self.dispatch_to_button(index, event, ctx).or(previous_hover_action);
-                }
-
-                previous_hover_action
-            }
-            Event::MouseUp { .. } => {
-                let index = self.pointer_index.take()?;
-                self.dispatch_to_button(index, event, ctx)
-            }
-            Event::KeyDown(..)
-            | Event::ImePreedit { .. }
-            | Event::ImeCommit(..)
-            | Event::ImeEnable
-            | Event::ImeDisable => {
-                let index = self.focused_button_index()?;
-                self.dispatch_to_button(index, event, ctx)
-            }
-            Event::Wheel { .. } => None,
-        }
+        self.buttons.on_event(event, ctx)
     }
 
     fn is_capturing(&self) -> bool {
-        self.pointer_index.is_some()
+        self.buttons.is_capturing()
     }
 
     fn as_any(&self) -> &dyn Any {
@@ -689,6 +593,14 @@ impl SyncSettingsPage {
         self.form.focused_ime_cursor_rect()
     }
 
+    pub(super) fn next_cursor_blink_at(&self) -> Option<std::time::Instant> {
+        self.form.next_cursor_blink_at()
+    }
+
+    pub(super) fn advance_cursor_blink(&mut self, now: std::time::Instant) -> bool {
+        self.form.advance_cursor_blink(now)
+    }
+
     #[cfg(test)]
     fn scroll_for_test(&mut self, delta: f32) {
         let theme = ui::theme::test_theme();
@@ -827,7 +739,6 @@ impl Widget for SyncSettingsPage {
 fn sync_text_box(id: WidgetId) -> TextBox {
     let mut text_box = TextBox::with_id(id);
     text_box.set_fixed_size_logical(SYNC_TEXT_BOX_WIDTH_LOGICAL, SYNC_CONTROL_HEIGHT_LOGICAL);
-    text_box.set_blink(true);
     text_box
 }
 
@@ -990,47 +901,19 @@ fn action_button_style(settings: SettingsTheme) -> ButtonStyle {
 }
 
 fn section_title_label(text: &str) -> Label {
-    Label::new(
-        text,
-        LabelStyle {
-            font_size_logical: SYNC_SECTION_TITLE_FONT_SIZE_LOGICAL,
-            font_weight: shaping::Weight::MEDIUM,
-            ..LabelStyle::default()
-        },
-    )
+    Label::new(text, LabelStyle::form_section_title())
 }
 
 fn row_label(text: &str) -> Label {
-    Label::new(
-        text,
-        LabelStyle {
-            font_size_logical: SYNC_ROW_LABEL_FONT_SIZE_LOGICAL,
-            font_weight: shaping::Weight::MEDIUM,
-            ..LabelStyle::default()
-        },
-    )
+    Label::new(text, LabelStyle::form_row_title())
 }
 
 fn description_label(text: &str) -> Label {
-    Label::new(
-        text,
-        LabelStyle {
-            font_size_logical: SYNC_DESCRIPTION_FONT_SIZE_LOGICAL,
-            foreground: LabelForeground::ThemeMuted,
-            ..LabelStyle::default()
-        },
-    )
+    Label::new(text, LabelStyle::form_description())
 }
 
 fn section_description_label(text: &str) -> Label {
-    Label::new(
-        text,
-        LabelStyle {
-            font_size_logical: SYNC_DESCRIPTION_FONT_SIZE_LOGICAL - 0.5,
-            foreground: LabelForeground::ThemeMuted,
-            ..LabelStyle::default()
-        },
-    )
+    Label::new(text, LabelStyle::form_section_description())
 }
 
 fn fallback_settings_theme() -> SettingsTheme {

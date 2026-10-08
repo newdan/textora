@@ -6,6 +6,7 @@ use ui::WidgetAction;
 use ui::button::{Button, ButtonStyle};
 use ui::core::widget::{ControlAction, TextPayload, WidgetId};
 use ui::core::{Event, EventCtx, KeyCode, LayoutCtx, MouseButton, PaintCtx, Rect, Widget};
+use ui::label::{Label, LabelForeground, LabelStyle};
 use ui::text_box::TextBox;
 
 const NAME_INPUT_ID: WidgetId = WidgetId(9_100);
@@ -19,6 +20,11 @@ const FIELD_HEIGHT_LOGICAL: f32 = 34.0;
 const BUTTON_WIDTH_LOGICAL: f32 = ui::button::ButtonMetrics::text_width(2);
 const LOCATION_BUTTON_WIDTH_LOGICAL: f32 = ui::button::ButtonMetrics::text_width(4);
 const BUTTON_GAP_LOGICAL: f32 = ui::button::ButtonMetrics::ACTION_GAP;
+const CAPTION_FONT_SIZE_LOGICAL: f32 = 12.0;
+const CAPTION_HEIGHT_LOGICAL: f32 = 18.0;
+const LOCATION_LABEL_GAP_LOGICAL: f32 = 10.0;
+const PREVIEW_LABEL_TOP_LOGICAL: f32 = 189.0;
+const ERROR_LABEL_TOP_LOGICAL: f32 = 213.0;
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct NewWorkspaceDialogInput {
@@ -52,6 +58,9 @@ pub struct NewWorkspaceDialog {
     location_button: Button,
     create_button: Button,
     cancel_button: Button,
+    location_label: Label,
+    preview_label: Label,
+    error_label: Label,
     panel_rect: Rect,
     open: bool,
 }
@@ -62,7 +71,6 @@ impl NewWorkspaceDialog {
         name_input.set_placeholder("例如：我的笔记");
         name_input.set_accessibility_label(Some("工作区名称".to_owned()));
         name_input.set_max_len_bytes(255);
-        name_input.set_blink(true);
         let style = ButtonStyle::from_theme(theme);
         Self {
             input: NewWorkspaceDialogInput::default(),
@@ -70,6 +78,9 @@ impl NewWorkspaceDialog {
             location_button: labeled_button(LOCATION_BUTTON_ID, "选择位置", style.clone()),
             create_button: labeled_button(CREATE_BUTTON_ID, "创建", style.clone()),
             cancel_button: labeled_button(CANCEL_BUTTON_ID, "取消", style),
+            location_label: clipped_label("尚未选择"),
+            preview_label: clipped_label("选择名称和保存位置后显示最终路径"),
+            error_label: clipped_label(""),
             panel_rect: Rect::ZERO,
             open: false,
         }
@@ -79,6 +90,20 @@ impl NewWorkspaceDialog {
         self.input = input;
         self.name_input.sync_text(&self.input.name);
         self.create_button.set_enabled(self.input.can_create());
+        let location = self
+            .input
+            .parent_directory
+            .as_ref()
+            .map(|path| path.display().to_string())
+            .unwrap_or_else(|| "尚未选择".to_owned());
+        self.location_label.set_text(location);
+        let preview = self
+            .input
+            .target_path()
+            .map(|path| path.display().to_string())
+            .unwrap_or_else(|| "选择名称和保存位置后显示最终路径".to_owned());
+        self.preview_label.set_text(format!("最终路径：{preview}"));
+        self.error_label.set_text(self.input.error_message.clone().unwrap_or_default());
         if open && !self.open {
             self.name_input.set_focus(true);
             self.name_input.select_all();
@@ -143,6 +168,41 @@ impl NewWorkspaceDialog {
             ),
             context,
         );
+        let caption_style = dialog_caption_style(context.theme.application_theme().text_secondary);
+        self.location_label.set_style(caption_style.clone());
+        self.preview_label.set_style(caption_style);
+        self.error_label.set_style(dialog_caption_style(context.theme.application_theme().danger));
+        self.location_label.set_rect(
+            Rect::new(
+                self.location_button.rect().right() + LOCATION_LABEL_GAP_LOGICAL * context.dpi,
+                self.location_button.rect().y,
+                (self.panel_rect.right()
+                    - horizontal_padding
+                    - self.location_button.rect().right()
+                    - LOCATION_LABEL_GAP_LOGICAL * context.dpi)
+                    .max(0.0),
+                field_height,
+            ),
+            context,
+        );
+        self.preview_label.set_rect(
+            Rect::new(
+                self.panel_rect.x + horizontal_padding,
+                self.panel_rect.y + PREVIEW_LABEL_TOP_LOGICAL * context.dpi,
+                content_width,
+                CAPTION_HEIGHT_LOGICAL * context.dpi,
+            ),
+            context,
+        );
+        self.error_label.set_rect(
+            Rect::new(
+                self.panel_rect.x + horizontal_padding,
+                self.panel_rect.y + ERROR_LABEL_TOP_LOGICAL * context.dpi,
+                content_width,
+                CAPTION_HEIGHT_LOGICAL * context.dpi,
+            ),
+            context,
+        );
     }
 
     pub fn paint(&self, context: &mut PaintCtx<'_>) {
@@ -172,39 +232,10 @@ impl NewWorkspaceDialog {
             "保存位置",
         );
         self.location_button.paint(context);
-        let location = self
-            .input
-            .parent_directory
-            .as_ref()
-            .map(|path| path.display().to_string())
-            .unwrap_or_else(|| "尚未选择".to_owned());
-        context.text(
-            self.location_button.rect().right() + 10.0 * context.dpi,
-            self.location_button.rect().y + 22.0 * context.dpi,
-            12.0 * context.dpi,
-            theme.text_secondary,
-            &location,
-        );
-        let preview = self
-            .input
-            .target_path()
-            .map(|path| path.display().to_string())
-            .unwrap_or_else(|| "选择名称和保存位置后显示最终路径".to_owned());
-        context.text(
-            left,
-            self.panel_rect.y + 202.0 * context.dpi,
-            12.0 * context.dpi,
-            theme.text_secondary,
-            &format!("最终路径：{preview}"),
-        );
-        if let Some(message) = &self.input.error_message {
-            context.text(
-                left,
-                self.panel_rect.y + 226.0 * context.dpi,
-                12.0 * context.dpi,
-                theme.danger,
-                message,
-            );
+        self.location_label.paint(context);
+        self.preview_label.paint(context);
+        if self.input.error_message.is_some() {
+            self.error_label.paint(context);
         }
         self.cancel_button.paint(context);
         self.create_button.paint(context);
@@ -245,6 +276,14 @@ impl NewWorkspaceDialog {
         self.name_input.is_focused().then(|| self.name_input.ime_cursor_rect())
     }
 
+    pub fn next_cursor_blink_at(&self) -> Option<std::time::Instant> {
+        self.name_input.next_cursor_blink_at()
+    }
+
+    pub fn advance_cursor_blink(&mut self, now: std::time::Instant) -> bool {
+        self.name_input.advance_cursor_blink(now)
+    }
+
     fn map_name_action(&mut self, action: WidgetAction) -> Option<NewWorkspaceDialogAction> {
         match action {
             WidgetAction::Control(ControlAction::TextEdited {
@@ -272,9 +311,26 @@ fn labeled_button(id: WidgetId, label: &str, style: ButtonStyle) -> Button {
     button
 }
 
+fn clipped_label(text: &str) -> Label {
+    let mut label = Label::new(text, LabelStyle::default());
+    label.set_clip_to_bounds(true);
+    label
+}
+
+fn dialog_caption_style(color: [f32; 4]) -> LabelStyle {
+    LabelStyle {
+        font_size_logical: CAPTION_FONT_SIZE_LOGICAL,
+        foreground: LabelForeground::Explicit(color),
+        ..LabelStyle::default()
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use super::NewWorkspaceDialogInput;
+    use super::{NewWorkspaceDialog, NewWorkspaceDialogInput};
+    use ui::core::measure::NoopMeasure;
+    use ui::core::paint::{DrawCmd, DrawList};
+    use ui::core::{LayoutCtx, PaintCtx, Rect};
 
     #[test]
     fn target_preview_joins_the_selected_parent_and_valid_name() {
@@ -296,5 +352,37 @@ mod tests {
         };
 
         assert_eq!(input.target_path(), None);
+    }
+
+    #[test]
+    fn long_location_and_preview_are_clipped_within_panel() {
+        let theme = ui::theme::test_theme();
+        let mut dialog = NewWorkspaceDialog::new(&theme);
+        dialog.set_input(
+            NewWorkspaceDialogInput {
+                name: "笔记库".to_owned(),
+                parent_directory: Some(format!("/tmp/{}", "long-directory/".repeat(30)).into()),
+                error_message: None,
+            },
+            true,
+        );
+        let mut measure = NoopMeasure;
+        dialog.set_rect(
+            Rect::new(0.0, 0.0, 640.0, 480.0),
+            &mut LayoutCtx { ui_measure: None, measure: &mut measure, theme: &theme, dpi: 1.0 },
+        );
+        let mut draw_list = DrawList::new();
+        dialog.paint(&mut PaintCtx::new(&mut draw_list, &theme, 1.0));
+
+        let clip_rects: Vec<_> = draw_list
+            .cmds
+            .iter()
+            .filter_map(|command| match command {
+                DrawCmd::PushClip(rect) => Some(*rect),
+                _ => None,
+            })
+            .collect();
+        assert!(clip_rects.len() >= 2);
+        assert!(clip_rects.iter().all(|rect| rect.right() <= dialog.panel_rect.right()));
     }
 }

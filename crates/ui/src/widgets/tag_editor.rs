@@ -91,6 +91,14 @@ impl TagEditorWidget {
         self.text_box.set_blink(visible);
     }
 
+    pub fn next_cursor_blink_at(&self) -> Option<std::time::Instant> {
+        self.text_box.next_cursor_blink_at()
+    }
+
+    pub fn advance_cursor_blink(&mut self, now: std::time::Instant) -> bool {
+        self.text_box.advance_cursor_blink(now)
+    }
+
     pub fn pending_text(&self) -> &str {
         self.text_box.text()
     }

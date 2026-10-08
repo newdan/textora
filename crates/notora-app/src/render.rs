@@ -1,10 +1,13 @@
 mod buttons;
 
+use self::buttons::{ChromeButton, ChromeButtonKey};
+
 use std::collections::HashMap;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use appkit_shell::editor_runtime::{EditorFrame, RenderError};
 use notora_core::{DocumentIdentity, DocumentKind, NavigationScope, NoteId};
+#[cfg(test)]
 use ui::button::{ButtonStyle, ButtonVisualState};
 use ui::canvas_scrollbars::{
     CanvasScrollbarsAction, CanvasScrollbarsInput, CanvasScrollbarsWidget,
@@ -78,7 +81,6 @@ const SEARCH_ICON_AREA_WIDTH_LOGICAL: f32 = 32.0;
 const SHELL_PADDING_LOGICAL: f32 = 12.0;
 const SIDEBAR_CONTROL_HEIGHT_LOGICAL: f32 = 32.0;
 const SIDEBAR_ICON_SIZE_LOGICAL: f32 = 16.0;
-const SIDEBAR_LABEL_FONT_SIZE_LOGICAL: f32 = 15.0;
 const CARD_LOAD_MORE_THRESHOLD_LOGICAL: f32 = 160.0;
 const COMPACT_NAVIGATION_BUTTON_WIDTH_LOGICAL: f32 = ui::button::ButtonMetrics::text_width(3);
 const COMPACT_BACK_BUTTON_WIDTH_LOGICAL: f32 = ui::button::ButtonMetrics::text_width(2);
@@ -91,7 +93,6 @@ const CANCEL_BUTTON_WIDTH_LOGICAL: f32 = ui::button::ButtonMetrics::text_width(2
 const CONFIRMATION_BUTTON_HEIGHT_LOGICAL: f32 = 32.0;
 const SAVE_CONFLICT_PANEL_WIDTH_LOGICAL: f32 = 440.0;
 const SAVE_CONFLICT_PANEL_HEIGHT_LOGICAL: f32 = 196.0;
-const TEXT_CURSOR_BLINK_INTERVAL: Duration = Duration::from_millis(500);
 const WORKSPACE_NAVIGATION_KEY: u64 = 1;
 const STARRED_NAVIGATION_KEY: u64 = 2;
 const TRASH_NAVIGATION_KEY: u64 = 3;
@@ -1153,7 +1154,7 @@ pub struct NotoraShell {
     new_document_menu_rect: Rect,
     new_document_menu_open: bool,
     note_toolbar_buttons: Vec<RenderedToolbarButton>,
-    active_chrome_button: Option<(Rect, ButtonVisualState)>,
+    chrome_buttons: Vec<ChromeButton>,
     compact_navigation_rect: Rect,
     navigation_collapse_rect: Rect,
     navigation_expand_rect: Rect,
@@ -1166,8 +1167,6 @@ pub struct NotoraShell {
     save_conflict_button_rects: [Rect; 4],
     save_conflict_actions: Option<[NotoraAction; 4]>,
     focused_text_input: Option<FocusTarget>,
-    text_cursor_visible: bool,
-    next_text_cursor_blink_at: Option<Instant>,
 }
 
 impl Default for NotoraShell {
@@ -1182,7 +1181,6 @@ impl NotoraShell {
         search_box.set_placeholder("搜索笔记...");
         search_box.set_max_len_bytes(2_048);
         search_box.set_leading_content_inset_logical(SEARCH_ICON_AREA_WIDTH_LOGICAL);
-        search_box.set_blink(true);
         let mut new_note_button = SplitButtonWidget::new();
         new_note_button.set_presentation(ui::split_button::SplitButtonPresentation::Toolbar);
         new_note_button.set_action_ids(NEW_NOTE_BUTTON_ID, NEW_NOTE_MENU_BUTTON_ID);
@@ -1236,7 +1234,7 @@ impl NotoraShell {
             new_document_menu_rect: Rect::ZERO,
             new_document_menu_open: false,
             note_toolbar_buttons: Vec::new(),
-            active_chrome_button: None,
+            chrome_buttons: Vec::new(),
             compact_navigation_rect: Rect::ZERO,
             navigation_collapse_rect: Rect::ZERO,
             navigation_expand_rect: Rect::ZERO,
@@ -1249,12 +1247,10 @@ impl NotoraShell {
             save_conflict_button_rects: [Rect::ZERO; 4],
             save_conflict_actions: None,
             focused_text_input: None,
-            text_cursor_visible: true,
-            next_text_cursor_blink_at: None,
         }
     }
 
-    pub(crate) fn synchronize_focus(&mut self, focus_target: FocusTarget, now: Instant) {
+    pub(crate) fn synchronize_focus(&mut self, focus_target: FocusTarget, _now: Instant) {
         let editor_focused_id = match focus_target {
             FocusTarget::EditorTitle => Some(ui::editor_header::EDITOR_HEADER_TITLE_ID),
             FocusTarget::EditorTag => Some(ui::tag_editor::TAG_EDITOR_INPUT_ID),
@@ -1273,19 +1269,16 @@ impl NotoraShell {
                     Some(FocusTarget::NavigationTree)
                 }
                 FocusTarget::Overlay
-                    if self.new_workspace_dialog_open || self.encrypted_note_dialog_open =>
+                    if self.new_workspace_dialog_open
+                        || self.encrypted_note_dialog_open
+                        || self.settings_overlay_open =>
                 {
                     Some(FocusTarget::Overlay)
                 }
                 _ => None,
             }
         };
-        if self.focused_text_input != focused_text_input {
-            self.focused_text_input = focused_text_input;
-            self.text_cursor_visible = true;
-            self.next_text_cursor_blink_at =
-                focused_text_input.map(|_| now + TEXT_CURSOR_BLINK_INTERVAL);
-        }
+        self.focused_text_input = focused_text_input;
         self.search_box.set_keyboard_focus(
             (focus_target == FocusTarget::NavigationSearch).then_some(GLOBAL_SEARCH_BOX_ID),
         );
@@ -1297,7 +1290,6 @@ impl NotoraShell {
                 focus_target == FocusTarget::Editor && self.encrypted_note_unlock_open,
             );
         }
-        self.apply_text_cursor_visibility();
     }
 
     pub(crate) fn editor_title_text(&self) -> &str {
@@ -1340,36 +1332,54 @@ impl NotoraShell {
     }
 
     pub(crate) fn advance_text_cursor_blink(&mut self, now: Instant) -> bool {
-        if self.focused_autonomous_text_input().is_some() {
-            return match self.focused_text_input {
-                Some(FocusTarget::Overlay) => self
-                    .encrypted_note_dialog
-                    .as_mut()
-                    .is_some_and(|dialog| dialog.advance_cursor_blink(now)),
-                Some(FocusTarget::Editor) => self
-                    .encrypted_note_unlock
-                    .as_mut()
-                    .is_some_and(|unlock| unlock.advance_cursor_blink(now)),
-                _ => false,
-            };
+        match self.focused_text_input {
+            Some(FocusTarget::NavigationSearch) => self.search_box.advance_cursor_blink(now),
+            Some(FocusTarget::NavigationTree) => {
+                self.navigation_tree.advance_editor_cursor_blink(now)
+            }
+            Some(FocusTarget::EditorTitle | FocusTarget::EditorTag) => {
+                self.editor_pane.advance_focused_cursor_blink(now)
+            }
+            Some(FocusTarget::Overlay) if self.encrypted_note_dialog_open => self
+                .encrypted_note_dialog
+                .as_mut()
+                .is_some_and(|dialog| dialog.advance_cursor_blink(now)),
+            Some(FocusTarget::Overlay) if self.new_workspace_dialog_open => self
+                .new_workspace_dialog
+                .as_mut()
+                .is_some_and(|dialog| dialog.advance_cursor_blink(now)),
+            Some(FocusTarget::Overlay) if self.settings_overlay_open => {
+                self.settings_overlay.advance_cursor_blink(now)
+            }
+            Some(FocusTarget::Editor) if self.encrypted_note_unlock_open => self
+                .encrypted_note_unlock
+                .as_mut()
+                .is_some_and(|unlock| unlock.advance_cursor_blink(now)),
+            _ => false,
         }
-        let Some(deadline) = self.next_text_cursor_blink_at else {
-            return false;
-        };
-        if now < deadline {
-            return false;
-        }
-        self.text_cursor_visible = !self.text_cursor_visible;
-        self.next_text_cursor_blink_at = Some(now + TEXT_CURSOR_BLINK_INTERVAL);
-        self.apply_text_cursor_visibility();
-        true
     }
 
     pub(crate) fn next_text_cursor_blink_at(&self) -> Option<Instant> {
-        if let Some(input) = self.focused_autonomous_text_input() {
-            return input.next_cursor_blink_at();
+        match self.focused_text_input {
+            Some(FocusTarget::NavigationSearch) => self.search_box.next_cursor_blink_at(),
+            Some(FocusTarget::NavigationTree) => self.navigation_tree.next_editor_cursor_blink_at(),
+            Some(FocusTarget::EditorTitle | FocusTarget::EditorTag) => {
+                self.editor_pane.next_focused_cursor_blink_at()
+            }
+            Some(FocusTarget::Overlay) if self.encrypted_note_dialog_open => {
+                self.encrypted_note_dialog.as_ref()?.focused_text_input()?.next_cursor_blink_at()
+            }
+            Some(FocusTarget::Overlay) if self.new_workspace_dialog_open => {
+                self.new_workspace_dialog.as_ref()?.next_cursor_blink_at()
+            }
+            Some(FocusTarget::Overlay) if self.settings_overlay_open => {
+                self.settings_overlay.next_cursor_blink_at()
+            }
+            Some(FocusTarget::Editor) if self.encrypted_note_unlock_open => {
+                self.encrypted_note_unlock.as_ref()?.focused_text_input()?.next_cursor_blink_at()
+            }
+            _ => None,
         }
-        self.next_text_cursor_blink_at
     }
 
     pub(crate) fn focused_text_input_ime_cursor_rect(&self) -> Option<Rect> {
@@ -1379,13 +1389,16 @@ impl NotoraShell {
                 self.editor_pane.focused_ime_cursor_rect()
             }
             FocusTarget::NavigationTree => self.navigation_tree.ime_cursor_rect(),
-            FocusTarget::Overlay => self
-                .encrypted_note_dialog
-                .as_ref()
-                .and_then(EncryptedNoteDialog::ime_cursor_rect)
-                .or_else(|| {
-                    self.new_workspace_dialog.as_ref().and_then(NewWorkspaceDialog::ime_cursor_rect)
-                }),
+            FocusTarget::Overlay if self.encrypted_note_dialog_open => {
+                self.encrypted_note_dialog.as_ref().and_then(EncryptedNoteDialog::ime_cursor_rect)
+            }
+            FocusTarget::Overlay if self.new_workspace_dialog_open => {
+                self.new_workspace_dialog.as_ref().and_then(NewWorkspaceDialog::ime_cursor_rect)
+            }
+            FocusTarget::Overlay if self.settings_overlay_open => {
+                self.settings_overlay.ime_cursor_rect()
+            }
+            FocusTarget::Overlay => None,
             FocusTarget::Editor => {
                 self.encrypted_note_unlock.as_ref().and_then(EncryptedNoteUnlock::ime_cursor_rect)
             }
@@ -1401,13 +1414,6 @@ impl NotoraShell {
     #[cfg(test)]
     pub(crate) fn search_box_rect(&self) -> Rect {
         self.search_box.rect()
-    }
-
-    fn apply_text_cursor_visibility(&mut self) {
-        self.search_box.set_blink(self.text_cursor_visible);
-        self.navigation_tree.set_editor_blink(self.text_cursor_visible);
-        self.editor_pane.set_title_blink_visible(self.text_cursor_visible);
-        self.editor_pane.set_tag_blink_visible(self.text_cursor_visible);
     }
 
     pub fn update_model(&mut self, model: &NotoraRenderModel) {
@@ -1656,6 +1662,10 @@ impl NotoraShell {
             self.navigation_splitter.set_rect(layout.navigation_splitter_rect, context);
             self.card_list_splitter.set_rect(layout.card_list_splitter_rect, context);
             self.new_note_button.set_rect(new_note_rect, context);
+            self.synchronize_chrome_buttons(
+                model.confirmation.as_ref().map(|confirmation| confirmation.confirm_label.as_str()),
+                context,
+            );
             if let Some(menu) = self.new_document_menu.as_mut() {
                 menu.set_rect(local_rect(self.new_document_menu_rect), context);
             }
@@ -1709,34 +1719,9 @@ impl NotoraShell {
                 );
                 self.navigation_tree.paint(context);
                 if self.navigation_collapse_rect != Rect::ZERO {
-                    self.paint_navigation_visibility_button(
-                        context,
-                        self.navigation_collapse_rect,
-                        "chevron-left",
-                    );
+                    self.paint_chrome_button(context, ChromeButtonKey::NavigationCollapse);
                 }
-                let settings_icon_size = SIDEBAR_ICON_SIZE_LOGICAL * context.dpi;
-                let settings_horizontal_inset = SHELL_PADDING_LOGICAL * context.dpi;
-                draw_icon(
-                    context.list,
-                    "settings",
-                    settings_rect.x + settings_horizontal_inset,
-                    settings_rect.y + (settings_rect.h - settings_icon_size) * 0.5,
-                    settings_icon_size,
-                    application_theme.text_secondary,
-                );
-                context.text(
-                    settings_rect.x
-                        + settings_horizontal_inset
-                        + settings_icon_size
-                        + 2.0 * context.dpi,
-                    settings_rect.y
-                        + settings_rect.h * 0.5
-                        + SIDEBAR_LABEL_FONT_SIZE_LOGICAL * 0.35 * context.dpi,
-                    SIDEBAR_LABEL_FONT_SIZE_LOGICAL * context.dpi,
-                    application_theme.text_secondary,
-                    "设置",
-                );
+                self.paint_chrome_button(context, ChromeButtonKey::Settings);
             }
             self.navigation_splitter.paint(context);
             self.card_list_splitter.paint(context);
@@ -1748,20 +1733,10 @@ impl NotoraShell {
                 &model.card_list_title,
             );
             if self.compact_navigation_rect != Rect::ZERO {
-                self.paint_note_tool_button(
-                    context,
-                    self.compact_navigation_rect,
-                    "笔记库",
-                    None,
-                    None,
-                );
+                self.paint_chrome_button(context, ChromeButtonKey::CompactNavigation);
             }
             if self.navigation_expand_rect != Rect::ZERO {
-                self.paint_navigation_visibility_button(
-                    context,
-                    self.navigation_expand_rect,
-                    "chevron-right",
-                );
+                self.paint_chrome_button(context, ChromeButtonKey::NavigationExpand);
             }
             self.paint_note_toolbar(context);
             if model.cards.is_empty() {
@@ -1800,7 +1775,7 @@ impl NotoraShell {
         }
         if self.compact_back_rect != Rect::ZERO {
             frame.with_paint_context(|context| {
-                self.paint_note_tool_button(context, self.compact_back_rect, "返回", None, None);
+                self.paint_chrome_button(context, ChromeButtonKey::CompactBack);
             });
         }
         if model.show_settings_overlay {
@@ -1860,20 +1835,8 @@ impl NotoraShell {
                     application_theme.text_secondary,
                     &confirmation.description,
                 );
-                self.paint_note_tool_button(
-                    context,
-                    self.confirmation_cancel_rect,
-                    "取消",
-                    None,
-                    None,
-                );
-                self.paint_note_tool_button(
-                    context,
-                    self.confirmation_confirm_rect,
-                    &confirmation.confirm_label,
-                    None,
-                    Some(&confirmation.confirm_action),
-                );
+                self.paint_chrome_button(context, ChromeButtonKey::ConfirmationCancel);
+                self.paint_chrome_button(context, ChromeButtonKey::ConfirmationConfirm);
             });
         }
         if model.save_conflict.is_some() {
@@ -2122,8 +2085,17 @@ impl NotoraShell {
         product_overlay: Option<OverlayState>,
         event_context: &mut EventCtx,
     ) -> NotoraEventRoute {
-        let appearance_changed =
-            self.update_chrome_button_pointer(event, product_overlay, event_context);
+        let (appearance_changed, chrome_action) =
+            self.dispatch_chrome_button_event(event, product_overlay, event_context);
+        if let Some(action) = chrome_action {
+            return NotoraEventRoute::consumed(Some(action));
+        }
+        let pointer_button_event = matches!(event, Event::MouseDown { .. } | Event::MouseUp { .. });
+        let captured_move =
+            matches!(event, Event::MouseMove { .. }) && self.chrome_button_is_capturing();
+        if (appearance_changed && pointer_button_event) || captured_move {
+            return NotoraEventRoute::consumed(None);
+        }
         let mut route =
             self.route_content_event(event, focus_target, product_overlay, event_context);
         route.consumed |= appearance_changed;
@@ -2255,14 +2227,17 @@ impl NotoraShell {
         if self.save_conflict_actions.is_some()
             && product_overlay.is_none_or(|overlay| overlay == OverlayState::SaveConflict)
         {
-            let action =
-                self.route_save_conflict_event(event).or_else(|| escape_dismiss_action(event));
-            return Some(NotoraEventRoute::consumed(action));
+            return Some(NotoraEventRoute::consumed(escape_dismiss_action(event)));
         }
         if self.confirmation_action.is_some() && product_overlay.is_none_or(is_confirmation_overlay)
         {
-            let action =
-                self.confirmation_overlay_action(event).or_else(|| escape_dismiss_action(event));
+            let backdrop_click = matches!(event,
+                Event::MouseDown { px, py, button: ui::MouseButton::Left }
+                    if !self.confirmation_panel_rect.contains(*px, *py)
+            );
+            let action = backdrop_click
+                .then_some(NotoraAction::OverlayDismissed)
+                .or_else(|| escape_dismiss_action(event));
             return Some(NotoraEventRoute::consumed(action));
         }
         if self.new_document_menu_open
@@ -2408,23 +2383,11 @@ impl NotoraShell {
                 .map(encrypted_note_unlock_action_to_notora_action);
             return Some(NotoraEventRoute::consumed(action));
         }
-        if let Some(action) = shell_layout_action(
-            event,
-            self.compact_navigation_rect,
-            self.navigation_collapse_rect,
-            self.navigation_expand_rect,
-            self.compact_back_rect,
-        ) {
-            return Some(NotoraEventRoute::consumed(Some(action)));
-        }
         if let Some(route) = self.route_canvas_scrollbars_event(event, event_context) {
             return Some(route);
         }
         if let Some(widget_action) = self.editor_pane.route_event(event, event_context) {
             return Some(self.route_editor_widget_action(&widget_action));
-        }
-        if let Some(action) = note_toolbar_action(event, &self.note_toolbar_buttons) {
-            return Some(NotoraEventRoute::consumed(Some(action)));
         }
         if is_splitter_pointer_event(event)
             && let Some(widget_action) = self.new_note_button.on_event(event, event_context)
@@ -2434,9 +2397,6 @@ impl NotoraShell {
         }
         if let Some(action) = self.route_splitter_event(event, event_context) {
             return Some(NotoraEventRoute::consumed(action));
-        }
-        if let Some(action) = settings_button_action(event, self.settings_rect) {
-            return Some(NotoraEventRoute::consumed(Some(action)));
         }
         if self.card_empty_state_visible
             && let Some(widget_action) = self.card_empty_state.on_event(event, event_context)
@@ -2626,17 +2586,6 @@ impl NotoraShell {
         });
     }
 
-    fn route_save_conflict_event(&self, event: &Event) -> Option<NotoraAction> {
-        let Event::MouseDown { px, py, button: ui::core::MouseButton::Left } = event else {
-            return None;
-        };
-        let actions = self.save_conflict_actions.as_ref()?;
-        self.save_conflict_button_rects
-            .iter()
-            .position(|rect| rect.contains(*px, *py))
-            .map(|index| actions[index].clone())
-    }
-
     fn paint_save_conflict_overlay(&self, context: &mut ui::PaintCtx<'_>) {
         let application_theme = context.theme.application_theme();
         context.list.fill_rounded(
@@ -2658,27 +2607,9 @@ impl NotoraShell {
             application_theme.text_secondary,
             "请选择如何处理本地编辑，文件不会被静默覆盖。",
         );
-        for (rect, label) in
-            self.save_conflict_button_rects.iter().zip(["重新载入", "保存副本", "重试", "取消"])
-        {
-            self.paint_note_tool_button(context, *rect, label, None, None);
+        for index in 0..self.save_conflict_button_rects.len() {
+            self.paint_chrome_button(context, ChromeButtonKey::SaveConflict(index));
         }
-    }
-
-    fn confirmation_overlay_action(&self, event: &Event) -> Option<NotoraAction> {
-        let Event::MouseDown { px, py, button: ui::core::MouseButton::Left } = event else {
-            return None;
-        };
-        if self.confirmation_confirm_rect.contains(*px, *py) {
-            return self.confirmation_action.clone();
-        }
-        if self.confirmation_cancel_rect.contains(*px, *py)
-            || (self.confirmation_panel_rect != Rect::ZERO
-                && !self.confirmation_panel_rect.contains(*px, *py))
-        {
-            return Some(NotoraAction::OverlayDismissed);
-        }
-        None
     }
 
     fn paint_compact_navigation_overlay(&self, context: &mut ui::PaintCtx<'_>) {
@@ -2702,28 +2633,7 @@ impl NotoraShell {
             application_theme.text_secondary,
         );
         self.navigation_tree.paint(context);
-        let settings_icon_size = SIDEBAR_ICON_SIZE_LOGICAL * context.dpi;
-        let settings_horizontal_inset = SHELL_PADDING_LOGICAL * context.dpi;
-        draw_icon(
-            context.list,
-            "settings",
-            self.settings_rect.x + settings_horizontal_inset,
-            self.settings_rect.y + (self.settings_rect.h - settings_icon_size) * 0.5,
-            settings_icon_size,
-            application_theme.text_secondary,
-        );
-        context.text(
-            self.settings_rect.x
-                + settings_horizontal_inset
-                + settings_icon_size
-                + 2.0 * context.dpi,
-            self.settings_rect.y
-                + self.settings_rect.h * 0.5
-                + SIDEBAR_LABEL_FONT_SIZE_LOGICAL * 0.35 * context.dpi,
-            SIDEBAR_LABEL_FONT_SIZE_LOGICAL * context.dpi,
-            application_theme.text_secondary,
-            "设置",
-        );
+        self.paint_chrome_button(context, ChromeButtonKey::Settings);
     }
 
     fn card_key_for(&mut self, identity: DocumentIdentity) -> CardKey {
@@ -2934,13 +2844,6 @@ fn splitter_action_to_notora_action(action: &WidgetAction, pane: Pane) -> Option
         ) => Some(NotoraAction::SplitterDragged { pane, logical_width: *logical_width }),
         _ => None,
     }
-}
-
-fn settings_button_action(event: &Event, settings_rect: Rect) -> Option<NotoraAction> {
-    let Event::MouseDown { px, py, button: ui::core::widget::MouseButton::Left } = event else {
-        return None;
-    };
-    settings_rect.contains(*px, *py).then_some(NotoraAction::OpenSettings)
 }
 
 fn settings_overlay_action_to_notora_action(action: SettingsOverlayAction) -> NotoraAction {
@@ -3306,57 +3209,6 @@ fn directory_has_children(directory: &std::path::Path, directories: &[std::path:
     directories.iter().any(|candidate| candidate.parent().is_some_and(|parent| parent == directory))
 }
 
-fn paint_note_tool_button(
-    context: &mut ui::PaintCtx<'_>,
-    rect: Rect,
-    label: &str,
-    icon: Option<&str>,
-    state: ButtonVisualState,
-    style: &ButtonStyle,
-) {
-    const TEXT_BASELINE_OFFSET_RATIO: f32 = 0.35;
-    let foreground = style.paint(context, rect, state);
-    let mut text_x = rect.x + style.pad_x_logical * context.dpi;
-    if let Some(icon_name) = icon {
-        let icon_size = NOTE_TOOL_ICON_SIZE_LOGICAL * context.dpi;
-        draw_icon(
-            context.list,
-            icon_name,
-            text_x,
-            rect.y + (rect.h - icon_size) * 0.5,
-            icon_size,
-            foreground,
-        );
-        text_x += icon_size + ui::button::ButtonMetrics::ICON_GAP * context.dpi;
-    }
-    let font_size = context.theme.control_metrics().font_size_logical * context.dpi;
-    context.text(
-        text_x,
-        rect.y + rect.h * 0.5 + font_size * TEXT_BASELINE_OFFSET_RATIO,
-        font_size,
-        foreground,
-        label,
-    );
-}
-
-fn paint_navigation_visibility_button(
-    context: &mut ui::PaintCtx<'_>,
-    rect: Rect,
-    icon_name: &str,
-    state: ButtonVisualState,
-) {
-    let foreground = ButtonStyle::ghost(context.theme.settings_theme()).paint(context, rect, state);
-    let icon_size = SIDEBAR_ICON_SIZE_LOGICAL * context.dpi;
-    draw_icon(
-        context.list,
-        icon_name,
-        rect.x + (rect.w - icon_size) * 0.5,
-        rect.y + (rect.h - icon_size) * 0.5,
-        icon_size,
-        foreground,
-    );
-}
-
 fn layout_note_toolbar(
     toolbar_rect: Rect,
     dpi: f32,
@@ -3393,32 +3245,6 @@ fn layout_note_toolbar(
             action: input.action.clone(),
         })
         .collect()
-}
-
-fn note_toolbar_action(event: &Event, buttons: &[RenderedToolbarButton]) -> Option<NotoraAction> {
-    let Event::MouseDown { px, py, button: ui::core::MouseButton::Left } = event else {
-        return None;
-    };
-    buttons.iter().find(|button| button.rect.contains(*px, *py)).map(|button| button.action.clone())
-}
-
-fn shell_layout_action(
-    event: &Event,
-    compact_navigation_rect: Rect,
-    navigation_collapse_rect: Rect,
-    navigation_expand_rect: Rect,
-    compact_back_rect: Rect,
-) -> Option<NotoraAction> {
-    let Event::MouseDown { px, py, button: ui::core::MouseButton::Left } = event else {
-        return None;
-    };
-    if compact_navigation_rect.contains(*px, *py) {
-        return Some(NotoraAction::CompactNavigationRequested);
-    }
-    if navigation_collapse_rect.contains(*px, *py) || navigation_expand_rect.contains(*px, *py) {
-        return Some(NotoraAction::NavigationPaneVisibilityToggled);
-    }
-    compact_back_rect.contains(*px, *py).then_some(NotoraAction::CompactBackRequested)
 }
 
 fn navigation_collapse_button_rect(layout: ShellLayout, dpi: f32, padding: f32) -> Rect {
@@ -3675,6 +3501,7 @@ mod tests {
         let mut app = crate::NotoraApp::with_paths(paths)
             .expect("navigation paint test should create a headless app");
         let mut shell = NotoraShell::new();
+        let theme = ui::theme::test_theme();
         let model = NotoraRenderModel::from_state(&NotoraState::default());
         for dpi in [1.0, 1.5, 2.0] {
             for visibility in [
@@ -3701,14 +3528,25 @@ mod tests {
                 assert_navigation_search_visibility(&mut frame, visibility);
                 if visibility == crate::NavigationPaneVisibility::Collapsed {
                     let button = shell.navigation_expand_rect;
-                    let click = Event::MouseDown {
+                    let press = Event::MouseDown {
                         px: button.x + button.w * 0.5,
                         py: button.y + button.h * 0.5,
                         button: ui::core::MouseButton::Left,
                     };
+                    let release = Event::MouseUp {
+                        px: button.x + button.w * 0.5,
+                        py: button.y + button.h * 0.5,
+                        button: ui::core::MouseButton::Left,
+                    };
+                    assert!(
+                        shell
+                            .route_event(&press, FocusTarget::CardList, &theme, dpi)
+                            .actions
+                            .is_empty()
+                    );
                     assert_eq!(
-                        shell_layout_action(&click, Rect::ZERO, Rect::ZERO, button, Rect::ZERO),
-                        Some(NotoraAction::NavigationPaneVisibilityToggled)
+                        shell.route_event(&release, FocusTarget::CardList, &theme, dpi).actions,
+                        vec![NotoraAction::NavigationPaneVisibilityToggled]
                     );
                 }
             }
@@ -4058,6 +3896,7 @@ mod tests {
                     shell.new_note_button.set_rect(new_rect, &mut layout_context);
                     shell.note_toolbar_buttons =
                         layout_note_toolbar(header.toolbar_rect, dpi, new_rect, &buttons);
+                    shell.synchronize_chrome_buttons(None, &mut layout_context);
                     let mut actual = DrawList::new();
                     let mut context = ui::PaintCtx::new(&mut actual, &theme, dpi);
                     context.global_alpha = alpha;
@@ -4126,20 +3965,26 @@ mod tests {
             let mut paint_context = ui::PaintCtx::new(&mut draw_list, &theme, dpi);
             paint_context.shaper = Some(&mut shaper);
             new_button.paint(&mut paint_context);
-            for button in note_toolbar_buttons(&NavigationScope::ExternalFiles, None, true) {
-                paint_note_tool_button(
-                    &mut paint_context,
+            for (index, input) in
+                note_toolbar_buttons(&NavigationScope::ExternalFiles, None, true).iter().enumerate()
+            {
+                let mut button = ui::button::Button::new(
+                    WidgetId(index as u64),
+                    ButtonStyle::from_theme(&theme).toolbar_item(),
+                );
+                button.set_text(Some(input.label.clone()));
+                button.set_icon(input.icon.map(str::to_owned));
+                button.set_icon_size(NOTE_TOOL_ICON_SIZE_LOGICAL);
+                button.set_rect(
                     Rect::new(
                         0.0,
                         0.0,
                         NOTE_TOOL_BUTTON_WIDTH_LOGICAL * dpi,
                         NOTE_TOOL_BUTTON_HEIGHT_LOGICAL * dpi,
                     ),
-                    &button.label,
-                    button.icon,
-                    ButtonVisualState::Normal,
-                    &ButtonStyle::from_theme(&theme),
+                    &mut layout_context,
                 );
+                button.paint(&mut paint_context);
             }
 
             let typography: Vec<_> = draw_list
@@ -4394,18 +4239,19 @@ mod tests {
         let focused_at = Instant::now();
 
         shell.synchronize_focus(FocusTarget::NavigationSearch, focused_at);
-        assert_eq!(
-            shell.next_text_cursor_blink_at(),
-            Some(focused_at + TEXT_CURSOR_BLINK_INTERVAL)
-        );
+        assert_eq!(shell.next_text_cursor_blink_at(), shell.search_box.next_cursor_blink_at());
+        let first_deadline =
+            shell.next_text_cursor_blink_at().expect("focused search schedules blinking");
+        assert!(first_deadline >= focused_at);
         assert!(paints_caret(&shell, &theme));
 
-        assert!(shell.advance_text_cursor_blink(focused_at + TEXT_CURSOR_BLINK_INTERVAL));
+        assert!(shell.advance_text_cursor_blink(first_deadline));
         assert!(!paints_caret(&shell, &theme));
 
-        assert!(shell.advance_text_cursor_blink(
-            focused_at + TEXT_CURSOR_BLINK_INTERVAL + TEXT_CURSOR_BLINK_INTERVAL
-        ));
+        let second_deadline =
+            shell.next_text_cursor_blink_at().expect("blink schedules next phase");
+        assert!(second_deadline > first_deadline);
+        assert!(shell.advance_text_cursor_blink(second_deadline));
         assert!(paints_caret(&shell, &theme));
     }
 
@@ -4506,17 +4352,31 @@ mod tests {
     fn navigation_pane_controls_dispatch_the_same_visibility_toggle() {
         let collapse_rect = Rect::new(180.0, 12.0, 28.0, 28.0);
         let expand_rect = Rect::new(12.0, 8.0, 28.0, 28.0);
+        let theme = ui::theme::test_theme();
 
         for (px, py) in [(194.0, 26.0), (26.0, 22.0)] {
-            let action = shell_layout_action(
+            let mut shell = NotoraShell::new();
+            shell.navigation_collapse_rect = collapse_rect;
+            shell.navigation_expand_rect = expand_rect;
+            let mut measure = ui::NoopMeasure;
+            let mut layout_context =
+                ui::LayoutCtx { ui_measure: None, measure: &mut measure, theme: &theme, dpi: 1.0 };
+            shell.synchronize_chrome_buttons(None, &mut layout_context);
+            let press = shell.route_event(
                 &Event::MouseDown { px, py, button: ui::MouseButton::Left },
-                Rect::ZERO,
-                collapse_rect,
-                expand_rect,
-                Rect::ZERO,
+                FocusTarget::CardList,
+                &theme,
+                1.0,
+            );
+            assert!(press.actions.is_empty());
+            let route = shell.route_event(
+                &Event::MouseUp { px, py, button: ui::MouseButton::Left },
+                FocusTarget::CardList,
+                &theme,
+                1.0,
             );
 
-            assert_eq!(action, Some(NotoraAction::NavigationPaneVisibilityToggled));
+            assert_eq!(route.actions, vec![NotoraAction::NavigationPaneVisibilityToggled]);
         }
     }
 

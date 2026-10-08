@@ -1,5 +1,6 @@
 use std::any::Any;
 use std::borrow::Cow;
+use std::time::Instant;
 
 use crate::core::{
     AccessibilityActionRequest, AccessibilityContext, AccessibilityNode, ChildEventRouter, DrawCmd,
@@ -85,11 +86,34 @@ impl FormSection {
         self.style.row_height_logical = row_height_logical.max(0.0);
     }
 
+    pub(super) fn preserve_control_state_from(&mut self, previous: &Self) {
+        for row in &mut self.rows {
+            let Some(control_id) = row.control_id() else {
+                continue;
+            };
+            if let Some(previous_row) =
+                previous.rows.iter().find(|old| old.control_id() == Some(control_id))
+            {
+                row.preserve_control_state_from(previous_row);
+            }
+        }
+    }
+
     pub(crate) fn focused_ime_cursor_rect(&self) -> Option<Rect> {
         let row_index = self.focused_row_index()?;
         let row_rect = *self.row_rects.get(row_index)?;
         let ime_rect = self.rows.get(row_index)?.focused_ime_cursor_rect()?;
         Some(Rect::new(row_rect.x + ime_rect.x, row_rect.y + ime_rect.y, ime_rect.w, ime_rect.h))
+    }
+
+    pub(crate) fn next_cursor_blink_at(&self) -> Option<Instant> {
+        self.rows.get(self.focused_row_index()?)?.next_cursor_blink_at()
+    }
+
+    pub(crate) fn advance_cursor_blink(&mut self, now: Instant) -> bool {
+        self.focused_row_index()
+            .and_then(|index| self.rows.get_mut(index))
+            .is_some_and(|row| row.advance_cursor_blink(now))
     }
 
     fn logical_to_px(value_logical: f32, dpi: f32) -> f32 {

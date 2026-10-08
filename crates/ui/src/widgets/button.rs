@@ -12,9 +12,11 @@ use crate::widgets::icon::draw_icon;
 use std::any::Any;
 use std::sync::Arc;
 
+mod collection;
 mod metrics;
 mod style;
 
+pub use collection::ButtonCollection;
 pub use metrics::ButtonMetrics;
 pub use style::{ButtonStyle, ButtonVisualState};
 

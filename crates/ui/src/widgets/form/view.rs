@@ -1,5 +1,6 @@
 use std::any::Any;
 use std::borrow::Cow;
+use std::time::Instant;
 
 use crate::core::widget::ControlAction;
 use crate::core::{
@@ -64,11 +65,16 @@ impl FormView {
 
     pub fn replace_sections_preserving_state(
         &mut self,
-        sections: Vec<FormSection>,
+        mut sections: Vec<FormSection>,
         ctx: &mut LayoutCtx,
     ) {
         let previous_scroll = self.scroll_offset;
         let previous_focus = self.focused_id;
+        for section in &mut sections {
+            for previous_section in &self.sections {
+                section.preserve_control_state_from(previous_section);
+            }
+        }
         self.sections = sections;
         self.event_router.clear_interactions();
         self.layout_sections(ctx);
@@ -105,6 +111,16 @@ impl FormView {
             ime_rect.w,
             ime_rect.h,
         ))
+    }
+
+    pub fn next_cursor_blink_at(&self) -> Option<Instant> {
+        self.sections.get(self.focused_section_index()?)?.next_cursor_blink_at()
+    }
+
+    pub fn advance_cursor_blink(&mut self, now: Instant) -> bool {
+        self.focused_section_index()
+            .and_then(|index| self.sections.get_mut(index))
+            .is_some_and(|section| section.advance_cursor_blink(now))
     }
 
     fn logical_to_px(value_logical: f32, dpi: f32) -> f32 {
@@ -943,6 +959,52 @@ mod tests {
 
         assert_eq!(view.focused_id(), Some(WidgetId(2)));
         assert_eq!(view.scroll_offset(), previous_scroll);
+    }
+
+    #[test]
+    fn replacing_sections_preserves_text_cursor_when_content_is_unchanged() {
+        struct CharacterMeasure;
+
+        impl crate::core::measure::TextMeasure for CharacterMeasure {
+            fn measure(&mut self, text: &str, _font_size: f32) -> f32 {
+                text.chars().count() as f32 * 10.0
+            }
+        }
+
+        fn text_section() -> FormSection {
+            let mut input = crate::widgets::text_box::TextBox::with_id(WidgetId(42));
+            input.set_text("abcd");
+            FormSection::new(
+                fixture_label("Text"),
+                None,
+                vec![FormRow::new(
+                    fixture_label("Value"),
+                    None,
+                    Box::new(input),
+                    FormRowStyle::default(),
+                )],
+                FormSectionStyle::default(),
+            )
+        }
+
+        let theme = crate::theme::test_theme();
+        let mut measure = CharacterMeasure;
+        let mut layout_ctx =
+            LayoutCtx { ui_measure: None, measure: &mut measure, theme: &theme, dpi: 1.0 };
+        let mut view = FormView::new(FormViewStyle::default());
+        view.set_rect(Rect::new(0.0, 0.0, 500.0, 200.0), &mut layout_ctx);
+        view.set_sections(vec![text_section()], &mut layout_ctx);
+        view.set_keyboard_focus(Some(WidgetId(42)));
+        let deadline = view.next_cursor_blink_at().expect("focused input should schedule blink");
+        assert!(view.advance_cursor_blink(deadline));
+        let _ = pointer_event(&mut view, Event::KeyDown(KeyCode::Home, Modifiers::NONE));
+        view.set_rect(Rect::new(0.0, 0.0, 500.0, 200.0), &mut layout_ctx);
+        let cursor_before =
+            view.focused_ime_cursor_rect().expect("focused input should have caret");
+
+        view.replace_sections_preserving_state(vec![text_section()], &mut layout_ctx);
+
+        assert_eq!(view.focused_ime_cursor_rect(), Some(cursor_before));
     }
 
     #[test]

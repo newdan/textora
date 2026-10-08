@@ -66,7 +66,6 @@ pub struct EditorHeaderWidget {
 impl EditorHeaderWidget {
     pub fn new() -> Self {
         let mut title_box = TextBox::with_id(EDITOR_HEADER_TITLE_ID);
-        title_box.set_blink(true);
         title_box.set_chrome(TextBoxChrome::Seamless);
         title_box.set_font_size_logical(HEADER_TITLE_FONT_SIZE_LOGICAL);
         title_box.set_leading_content_inset_logical(HEADER_TITLE_PADDING_LOGICAL);
@@ -105,6 +104,14 @@ impl EditorHeaderWidget {
 
     pub fn set_title_blink_visible(&mut self, visible: bool) {
         self.title_box.set_blink(visible);
+    }
+
+    pub fn next_title_cursor_blink_at(&self) -> Option<std::time::Instant> {
+        self.title_box.next_cursor_blink_at()
+    }
+
+    pub fn advance_title_cursor_blink(&mut self, now: std::time::Instant) -> bool {
+        self.title_box.advance_cursor_blink(now)
     }
 
     pub fn handle_event(

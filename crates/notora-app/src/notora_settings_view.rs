@@ -5,12 +5,12 @@
 use std::collections::HashMap;
 
 use ui::ThemeMode;
-use ui::button::{Button, ButtonStyle};
+use ui::button::{Button, ButtonCollection, ButtonStyle};
 use ui::core::widget::{ControlAction, TextPayload, WidgetId};
 use ui::core::{Dock, Event, EventCtx, LayoutCtx, PaintCtx, Rect, Widget, WidgetAction};
 use ui::form::{FormRow, FormRowStyle, FormSection, FormSectionStyle, FormView, FormViewStyle};
 use ui::inline_group::{CrossAlignment, InlineChild, InlineGroup, MainAlignment};
-use ui::label::{Label, LabelForeground, LabelStyle};
+use ui::label::{Label, LabelStyle};
 use ui::switch::Switch;
 use ui::text_box::TextBox;
 use ui::theme::SettingsTheme;
@@ -43,9 +43,6 @@ const ROW_HORIZONTAL_INSET_LOGICAL: f32 = 16.0;
 const SECTION_TITLE_GAP_LOGICAL: f32 = 6.0;
 const SECTION_DESCRIPTION_GAP_LOGICAL: f32 = 14.0;
 const SECTION_CORNER_RADIUS_LOGICAL: f32 = 10.0;
-const SECTION_TITLE_FONT_SIZE_LOGICAL: f32 = 17.0;
-const ROW_LABEL_FONT_SIZE_LOGICAL: f32 = 14.0;
-const DESCRIPTION_FONT_SIZE_LOGICAL: f32 = 12.0;
 const SIDEBAR_SEPARATOR_WIDTH_LOGICAL: f32 = 1.0;
 const MESSAGE_HEIGHT_LOGICAL: f32 = 40.0;
 const MESSAGE_GAP_LOGICAL: f32 = 10.0;
@@ -108,9 +105,8 @@ pub(super) struct NotoraSettingsView {
     sidebar_width: f32,
     input: SettingsOverlayInput,
     active_category: NotoraSettingsCategory,
-    category_buttons: Vec<(NotoraSettingsCategory, Button)>,
+    category_buttons: ButtonCollection,
     category_rects: Vec<Rect>,
-    category_pointer_index: Option<usize>,
     retry_pointer_active: bool,
     form: FormView,
     form_rect: Rect,
@@ -133,9 +129,8 @@ impl NotoraSettingsView {
             sidebar_width: 0.0,
             input,
             active_category,
-            category_buttons: Vec::new(),
+            category_buttons: ButtonCollection::new(Vec::new()),
             category_rects: Vec::new(),
-            category_pointer_index: None,
             retry_pointer_active: false,
             form: FormView::new(FormViewStyle::default()),
             form_rect: Rect::ZERO,
@@ -158,6 +153,19 @@ impl NotoraSettingsView {
         }
         self.form_needs_layout |= self.input.product_settings != input.product_settings;
         self.input = input;
+    }
+
+    pub(super) fn next_cursor_blink_at(&self) -> Option<std::time::Instant> {
+        self.form.next_cursor_blink_at()
+    }
+
+    pub(super) fn focused_ime_cursor_rect(&self) -> Option<Rect> {
+        let local = self.form.focused_ime_cursor_rect()?;
+        Some(Rect::new(self.form_rect.x + local.x, self.form_rect.y + local.y, local.w, local.h))
+    }
+
+    pub(super) fn advance_cursor_blink(&mut self, now: std::time::Instant) -> bool {
+        self.form.advance_cursor_blink(now)
     }
 
     pub(super) fn set_rect(&mut self, rect: Rect, context: &mut LayoutCtx<'_>) {
@@ -186,9 +194,7 @@ impl NotoraSettingsView {
             ),
             self.settings_theme.separator,
         );
-        for ((_, button), rect) in self.category_buttons.iter().zip(&self.category_rects) {
-            paint_widget_at(button, *rect, context);
-        }
+        self.category_buttons.paint(context);
         paint_widget_at(&self.form, self.form_rect, context);
         self.paint_message(context);
     }
@@ -212,12 +218,14 @@ impl NotoraSettingsView {
         event: &Event,
         context: &mut EventCtx<'_>,
     ) -> Option<SettingsOverlayAction> {
+        if matches!(event, Event::PointerLeave) {
+            let category_action = self.dispatch_category_event(event, context);
+            let form_action = self.dispatch_form_event(event, context);
+            return form_action.or(category_action);
+        }
         if matches!(event, Event::InteractionCancel) {
-            self.category_pointer_index = None;
             self.retry_pointer_active = false;
-            for (_, button) in &mut self.category_buttons {
-                let _ = button.on_event(event, context);
-            }
+            let _ = self.dispatch_category_event(event, context);
             let _ = self.retry_button.on_event(event, context);
             let _ = self.dispatch_form_event(event, context);
             return Some(SettingsOverlayAction::ViewChanged);
@@ -236,14 +244,10 @@ impl NotoraSettingsView {
             }
             return action;
         }
-        if let Some(index) = self.category_pointer_index
+        if self.category_buttons.is_capturing()
             && matches!(event, Event::MouseMove { .. } | Event::MouseUp { .. })
         {
-            let action = self.dispatch_category_event(index, event, context);
-            if matches!(event, Event::MouseUp { .. }) {
-                self.category_pointer_index = None;
-            }
-            return action;
+            return self.dispatch_category_event(event, context);
         }
 
         match event {
@@ -252,20 +256,21 @@ impl NotoraSettingsView {
                     self.retry_pointer_active = true;
                     return self.dispatch_retry_event(event, context);
                 }
-                if let Some(index) = self.category_index_at(*px, *py) {
-                    self.category_pointer_index = Some(index);
-                    return self.dispatch_category_event(index, event, context);
+                if self.category_index_at(*px, *py).is_some() {
+                    return self.dispatch_category_event(event, context);
                 }
                 self.dispatch_form_event(event, context)
             }
             Event::MouseMove { .. } => {
-                self.dispatch_category_hover(event, context);
+                let category_action = self.dispatch_category_event(event, context);
                 if self.retry_is_visible() {
                     let _ = self.dispatch_retry_event(event, context);
                 }
-                self.dispatch_form_event(event, context)
-                    .or(Some(SettingsOverlayAction::ViewChanged))
+                self.dispatch_form_event(event, context).or(category_action)
             }
+            Event::KeyDown(..) => self
+                .dispatch_category_event(event, context)
+                .or_else(|| self.dispatch_form_event(event, context)),
             _ => self.dispatch_form_event(event, context),
         }
     }
@@ -280,26 +285,40 @@ impl NotoraSettingsView {
         }
     }
 
-    fn build_category_buttons(&self) -> Vec<(NotoraSettingsCategory, Button)> {
-        [
-            (NotoraSettingsCategory::Appearance, "外观", APPEARANCE_CATEGORY_ID),
-            (NotoraSettingsCategory::Editor, "编辑器", EDITOR_CATEGORY_ID),
-            (NotoraSettingsCategory::Interface, "界面", INTERFACE_CATEGORY_ID),
-            (NotoraSettingsCategory::Workspace, "工作区", WORKSPACE_CATEGORY_ID),
-        ]
-        .into_iter()
-        .map(|(category, title, id)| {
-            let mut button = Button::new(id, category_button_style(self.settings_theme));
-            button.set_text(Some(title.to_owned()));
-            button.set_selected(category == self.active_category);
-            (category, button)
-        })
-        .collect()
+    fn build_category_buttons(&self) -> ButtonCollection {
+        ButtonCollection::new(
+            [
+                (NotoraSettingsCategory::Appearance, "外观", APPEARANCE_CATEGORY_ID),
+                (NotoraSettingsCategory::Editor, "编辑器", EDITOR_CATEGORY_ID),
+                (NotoraSettingsCategory::Interface, "界面", INTERFACE_CATEGORY_ID),
+                (NotoraSettingsCategory::Workspace, "工作区", WORKSPACE_CATEGORY_ID),
+            ]
+            .into_iter()
+            .map(|(category, title, id)| {
+                let mut button = Button::new(id, category_button_style(self.settings_theme));
+                button.set_text(Some(title.to_owned()));
+                button.set_selected(category == self.active_category);
+                button
+            })
+            .collect(),
+        )
+    }
+
+    fn category_for_id(id: WidgetId) -> Option<NotoraSettingsCategory> {
+        match id {
+            APPEARANCE_CATEGORY_ID => Some(NotoraSettingsCategory::Appearance),
+            EDITOR_CATEGORY_ID => Some(NotoraSettingsCategory::Editor),
+            INTERFACE_CATEGORY_ID => Some(NotoraSettingsCategory::Interface),
+            WORKSPACE_CATEGORY_ID => Some(NotoraSettingsCategory::Workspace),
+            _ => None,
+        }
     }
 
     fn sync_category_selection(&mut self) {
-        for (category, button) in &mut self.category_buttons {
-            button.set_selected(*category == self.active_category);
+        for button in self.category_buttons.buttons_mut() {
+            button.set_selected(
+                button.id().and_then(Self::category_for_id) == Some(self.active_category),
+            );
         }
     }
 
@@ -308,10 +327,10 @@ impl NotoraSettingsView {
         let sidebar_width_logical =
             if compact { COMPACT_SIDEBAR_WIDTH_LOGICAL } else { SIDEBAR_WIDTH_LOGICAL };
         self.sidebar_width = (sidebar_width_logical * context.dpi).min(self.rect.w);
-        self.category_rects.clear();
+        let mut category_rects = Vec::with_capacity(self.category_buttons.buttons().len());
         let mut category_y =
             (PANEL_HEADER_HEIGHT_LOGICAL + SIDEBAR_TOP_INSET_LOGICAL) * context.dpi;
-        for (_, button) in &mut self.category_buttons {
+        for button in self.category_buttons.buttons_mut() {
             button.set_style(category_button_style(self.settings_theme));
             let rect = Rect::new(
                 CATEGORY_HORIZONTAL_INSET_LOGICAL * context.dpi,
@@ -320,10 +339,11 @@ impl NotoraSettingsView {
                     .max(0.0),
                 CATEGORY_HEIGHT_LOGICAL * context.dpi,
             );
-            button.set_rect(Rect::new(0.0, 0.0, rect.w, rect.h), context);
-            self.category_rects.push(rect);
+            category_rects.push(rect);
             category_y += rect.h + CATEGORY_GAP_LOGICAL * context.dpi;
         }
+        self.category_buttons.set_rects(category_rects.clone(), context);
+        self.category_rects = category_rects;
     }
 
     fn layout_form_and_message(&mut self, context: &mut LayoutCtx<'_>) {
@@ -513,30 +533,30 @@ impl NotoraSettingsView {
 
     fn dispatch_category_event(
         &mut self,
-        index: usize,
         event: &Event,
         context: &mut EventCtx<'_>,
     ) -> Option<SettingsOverlayAction> {
-        let rect = *self.category_rects.get(index)?;
-        let local_event = Dock::to_local(event, rect.x, rect.y);
-        let action = self.category_buttons[index].1.on_event(local_event.as_ref(), context)?;
-        if matches!(action, WidgetAction::Control(ControlAction::Activated { .. }))
-            && self.active_category != self.category_buttons[index].0
-        {
-            self.active_category = self.category_buttons[index].0;
-            self.focused_id = None;
-            self.validation = None;
-            self.form_needs_layout = true;
-            self.form.reset_scroll();
-            self.sync_category_selection();
+        let action = self.category_buttons.on_event(event, context)?;
+        match action {
+            WidgetAction::Control(ControlAction::Activated { id }) => {
+                let category = Self::category_for_id(id)?;
+                if self.active_category != category {
+                    self.active_category = category;
+                    self.focused_id = None;
+                    self.validation = None;
+                    self.form_needs_layout = true;
+                    self.form.reset_scroll();
+                    self.sync_category_selection();
+                }
+            }
+            WidgetAction::Control(ControlAction::FocusRequested { id }) => {
+                self.category_buttons.set_keyboard_focus(Some(id));
+                self.form.set_keyboard_focus(None);
+                self.focused_id = None;
+            }
+            _ => {}
         }
         Some(SettingsOverlayAction::ViewChanged)
-    }
-
-    fn dispatch_category_hover(&mut self, event: &Event, context: &mut EventCtx<'_>) {
-        for index in 0..self.category_buttons.len() {
-            let _ = self.dispatch_category_event(index, event, context);
-        }
     }
 
     fn dispatch_retry_event(
@@ -571,6 +591,7 @@ impl NotoraSettingsView {
             }
             ControlAction::FocusRequested { id } => {
                 self.focused_id = Some(id);
+                self.category_buttons.set_keyboard_focus(None);
                 self.form.set_keyboard_focus(Some(id));
                 Some(SettingsOverlayAction::ViewChanged)
             }
@@ -634,7 +655,7 @@ impl NotoraSettingsView {
     }
 
     fn category_index_at(&self, px: f32, py: f32) -> Option<usize> {
-        self.category_rects.iter().position(|rect| rect.contains(px, py))
+        self.category_buttons.index_at(px, py)
     }
 
     fn retry_is_visible(&self) -> bool {
@@ -691,7 +712,7 @@ impl NotoraSettingsView {
         } else {
             std::borrow::Cow::Borrowed(message)
         };
-        let font_size = DESCRIPTION_FONT_SIZE_LOGICAL * context.dpi;
+        let font_size = LabelStyle::form_description().font_size_logical * context.dpi;
         let lines = ui::core::text_layout::wrap_text_to_lines(
             &message,
             width,
@@ -785,41 +806,19 @@ impl NotoraSettingsView {
 fn settings_text_box(id: WidgetId) -> TextBox {
     let mut text_box = TextBox::with_id(id);
     text_box.set_fixed_size_logical(TEXT_BOX_WIDTH_LOGICAL, CONTROL_HEIGHT_LOGICAL);
-    text_box.set_blink(true);
     text_box
 }
 
 fn section_title_label(text: &str) -> Label {
-    Label::new(
-        text,
-        LabelStyle {
-            font_size_logical: SECTION_TITLE_FONT_SIZE_LOGICAL,
-            font_weight: shaping::Weight::MEDIUM,
-            ..LabelStyle::default()
-        },
-    )
+    Label::new(text, LabelStyle::form_section_title())
 }
 
 fn row_label(text: &str) -> Label {
-    Label::new(
-        text,
-        LabelStyle {
-            font_size_logical: ROW_LABEL_FONT_SIZE_LOGICAL,
-            font_weight: shaping::Weight::MEDIUM,
-            ..LabelStyle::default()
-        },
-    )
+    Label::new(text, LabelStyle::form_row_title())
 }
 
 fn description_label(text: &str) -> Label {
-    Label::new(
-        text,
-        LabelStyle {
-            font_size_logical: DESCRIPTION_FONT_SIZE_LOGICAL,
-            foreground: LabelForeground::ThemeMuted,
-            ..LabelStyle::default()
-        },
-    )
+    Label::new(text, LabelStyle::form_description())
 }
 
 fn category_button_style(settings: SettingsTheme) -> ButtonStyle {
@@ -985,9 +984,26 @@ mod tests {
     }
 
     #[test]
+    fn focused_settings_input_exposes_blink_deadline_and_ime_position() {
+        let theme = ui::theme::test_theme();
+        let mut measure = NoopMeasure;
+        let mut layout_context =
+            LayoutCtx { ui_measure: None, measure: &mut measure, theme: &theme, dpi: 1.0 };
+        let mut view = NotoraSettingsView::new(SettingsOverlayInput::default());
+        view.active_category = NotoraSettingsCategory::Editor;
+        view.form_needs_layout = true;
+        view.set_rect(Rect::new(0.0, 0.0, 720.0, 560.0), &mut layout_context);
+        view.form.set_keyboard_focus(Some(FONT_FAMILY_ID));
+
+        let deadline = view.next_cursor_blink_at().expect("focused settings input should blink");
+        assert!(view.focused_ime_cursor_rect().is_some());
+        assert!(view.advance_cursor_blink(deadline));
+    }
+
+    #[test]
     fn notora_owns_four_product_categories() {
         let view = laid_out_view();
-        assert_eq!(view.category_buttons.len(), 4);
+        assert_eq!(view.category_buttons.buttons().len(), 4);
         assert_eq!(view.active_category_name(), "appearance");
     }
 

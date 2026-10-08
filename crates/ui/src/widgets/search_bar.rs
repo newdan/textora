@@ -11,21 +11,68 @@ use crate::core::widget::MouseButton;
 use crate::core::{
     Event, EventCtx, KeyCode, LayoutCtx, PaintCtx, Rect, Widget, WidgetAction, WidgetId,
 };
-use crate::widgets::button::{ButtonStyle, ButtonVisualState};
+use crate::widgets::button::{Button, ButtonCollection, ButtonStyle};
 use crate::widgets::icon::draw_icon;
 use crate::widgets::tooltip::TooltipHint;
 use std::any::Any;
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
-enum HoveredButton {
-    None,
-    CloseBar,
-    Prev,
-    Next,
+enum SearchControl {
+    Close,
     ToggleReplace,
     Regex,
+    Prev,
+    Next,
     Replace,
     ReplaceAll,
+}
+
+impl SearchControl {
+    const ALL: [Self; 7] = [
+        Self::Close,
+        Self::ToggleReplace,
+        Self::Regex,
+        Self::Prev,
+        Self::Next,
+        Self::Replace,
+        Self::ReplaceAll,
+    ];
+
+    fn id(self) -> WidgetId {
+        match self {
+            Self::Close => WidgetId(0x7365_6172_6368_636c),
+            Self::ToggleReplace => WidgetId(0x7365_6172_6368_7467),
+            Self::Regex => WidgetId(0x7365_6172_6368_7267),
+            Self::Prev => WidgetId(0x7365_6172_6368_7072),
+            Self::Next => WidgetId(0x7365_6172_6368_6e78),
+            Self::Replace => WidgetId(0x7365_6172_6368_7270),
+            Self::ReplaceAll => WidgetId(0x7365_6172_6368_7261),
+        }
+    }
+
+    fn rect(self, layout: &SearchBarLayout) -> Rect {
+        match self {
+            Self::Close => layout.close_btn_rect,
+            Self::ToggleReplace => layout.toggle_replace_btn_rect,
+            Self::Regex => layout.regex_btn_rect,
+            Self::Prev => layout.prev_btn_rect,
+            Self::Next => layout.next_btn_rect,
+            Self::Replace => layout.replace_btn_rect,
+            Self::ReplaceAll => layout.replace_all_btn_rect,
+        }
+    }
+
+    fn accessibility_label(self) -> &'static str {
+        match self {
+            Self::Close => "关闭查找",
+            Self::ToggleReplace => "显示或隐藏替换",
+            Self::Regex => "正则表达式",
+            Self::Prev => "上一个匹配",
+            Self::Next => "下一个匹配",
+            Self::Replace => "替换",
+            Self::ReplaceAll => "全部替换",
+        }
+    }
 }
 
 /// app 端注入的纯数据（widget 内部不知道 doc / search_state 概念）。
@@ -36,7 +83,6 @@ pub struct SearchBarSnapshot {
     pub match_count: usize,
     pub current_match: usize,
     pub visible: bool,
-    pub blink_on: bool,
     pub replace_query: String,
     pub replace_mode: bool,
     pub focus_replace: bool,
@@ -62,11 +108,24 @@ pub enum SearchBarAction {
 
 use crate::widgets::text_box::{TextBox, TextBoxIme};
 
-const FIND_BOX_ID: WidgetId = WidgetId(2);
-const REPLACE_BOX_ID: WidgetId = WidgetId(3);
+const FIND_BOX_ID: WidgetId = WidgetId(0x7365_6172_6368_6669);
+const REPLACE_BOX_ID: WidgetId = WidgetId(0x7365_6172_6368_7265);
 const SEARCH_FONT_SIZE_LOGICAL: f32 = 14.0;
-const BUTTON_ASCII_GLYPH_WIDTH_LOGICAL: f32 = 8.0;
 const BUTTON_WIDE_GLYPH_WIDTH_LOGICAL: f32 = 14.0;
+const SEARCH_CONTROL_ICON_SIZE_LOGICAL: f32 = 14.0;
+
+fn search_control_style(theme: &crate::theme::Theme) -> ButtonStyle {
+    let mut style = ButtonStyle::ghost(theme.settings_theme());
+    let mut foreground = theme.palette.input_fg;
+    foreground[3] *= 0.6;
+    style.foreground = foreground;
+    style.selected_foreground = theme.palette.accent;
+    style.selected_background = [0.0; 4];
+    style.font_size_logical = SEARCH_FONT_SIZE_LOGICAL;
+    style.pad_x_logical = 0.0;
+    style.corner_radius_logical = 4.0;
+    style
+}
 
 pub struct SearchBarWidget {
     rect: Rect,
@@ -74,7 +133,7 @@ pub struct SearchBarWidget {
     snap: SearchBarSnapshot,
     find_box: TextBox,
     replace_box: TextBox,
-    hovered_btn: HoveredButton,
+    controls: ButtonCollection,
 }
 
 impl Default for SearchBarWidget {
@@ -84,6 +143,28 @@ impl Default for SearchBarWidget {
 }
 
 impl SearchBarWidget {
+    fn map_button_widget_action(&mut self, action: WidgetAction) -> Option<WidgetAction> {
+        let id = match action {
+            WidgetAction::Control(crate::core::widget::ControlAction::Activated { id }) => id,
+            WidgetAction::Control(crate::core::widget::ControlAction::FocusRequested { id }) => {
+                self.controls.set_keyboard_focus(Some(id));
+                return Some(WidgetAction::SearchBar(SearchBarAction::HoverChanged));
+            }
+            _ => return Some(WidgetAction::SearchBar(SearchBarAction::HoverChanged)),
+        };
+        let control = SearchControl::ALL.into_iter().find(|control| control.id() == id)?;
+        let action = match control {
+            SearchControl::Close => SearchBarAction::Close,
+            SearchControl::ToggleReplace => SearchBarAction::ToggleReplace,
+            SearchControl::Regex => SearchBarAction::ToggleRegex,
+            SearchControl::Prev => SearchBarAction::Prev,
+            SearchControl::Next => SearchBarAction::Next,
+            SearchControl::Replace => SearchBarAction::Replace,
+            SearchControl::ReplaceAll => SearchBarAction::ReplaceAll,
+        };
+        Some(WidgetAction::SearchBar(action))
+    }
+
     pub fn new() -> Self {
         let mut find_box = TextBox::with_id(FIND_BOX_ID);
         find_box.set_placeholder("查找…");
@@ -93,13 +174,31 @@ impl SearchBarWidget {
         replace_box.set_placeholder("替换为…");
         replace_box.set_max_len_bytes(2048);
 
+        let controls = ButtonCollection::new(
+            SearchControl::ALL
+                .iter()
+                .map(|control| {
+                    let mut button = Button::new(
+                        control.id(),
+                        search_control_style(&crate::theme::test_theme()),
+                    );
+                    button.set_accessibility_label(Some(control.accessibility_label().to_owned()));
+                    button.set_icon_size(SEARCH_CONTROL_ICON_SIZE_LOGICAL);
+                    if *control == SearchControl::Regex {
+                        button.set_icon(Some("regex".to_owned()));
+                    }
+                    button
+                })
+                .collect(),
+        );
+
         Self {
             rect: Rect::ZERO,
             layout: SearchBarLayout::default(),
             snap: SearchBarSnapshot::default(),
             find_box,
             replace_box,
-            hovered_btn: HoveredButton::None,
+            controls,
         }
     }
 
@@ -117,21 +216,50 @@ impl SearchBarWidget {
 
     pub fn set_input(&mut self, snap: SearchBarSnapshot) {
         if !snap.visible {
-            self.hovered_btn = HoveredButton::None;
+            let theme = crate::theme::test_theme();
+            let mut context = EventCtx::new(&theme, 1.0);
+            let _ = self.controls.on_event(&Event::InteractionCancel, &mut context);
             self.find_box.cancel_transient_interaction();
             self.replace_box.cancel_transient_interaction();
         }
         self.find_box.sync_text(&snap.query);
         self.replace_box.sync_text(&snap.replace_query);
-        self.find_box.set_blink(snap.blink_on);
-        self.replace_box.set_blink(snap.blink_on);
         self.find_box.set_focus(snap.visible && (!snap.replace_mode || !snap.focus_replace));
         self.replace_box.set_focus(snap.visible && snap.replace_mode && snap.focus_replace);
+        for (control, button) in SearchControl::ALL.iter().zip(self.controls.buttons_mut()) {
+            button.set_selected(*control == SearchControl::Regex && snap.options_use_regex);
+            button.set_enabled(
+                !matches!(control, SearchControl::Replace | SearchControl::ReplaceAll)
+                    || snap.match_count > 0,
+            );
+        }
         self.snap = snap;
     }
 
     pub fn is_visible(&self) -> bool {
         self.snap.visible
+    }
+
+    pub fn next_cursor_blink_at(&self) -> Option<std::time::Instant> {
+        if !self.snap.visible {
+            return None;
+        }
+        if self.snap.replace_mode && self.snap.focus_replace {
+            self.replace_box.next_cursor_blink_at()
+        } else {
+            self.find_box.next_cursor_blink_at()
+        }
+    }
+
+    pub fn advance_cursor_blink(&mut self, now: std::time::Instant) -> bool {
+        if !self.snap.visible {
+            return false;
+        }
+        if self.snap.replace_mode && self.snap.focus_replace {
+            self.replace_box.advance_cursor_blink(now)
+        } else {
+            self.find_box.advance_cursor_blink(now)
+        }
     }
 }
 
@@ -151,6 +279,27 @@ impl Widget for SearchBarWidget {
         if self.snap.replace_mode {
             self.replace_box.layout(self.layout.replace_input_rect, ctx);
         }
+        for (control, button) in SearchControl::ALL.iter().zip(self.controls.buttons_mut()) {
+            button.set_style(search_control_style(ctx.theme));
+            button.set_text(match control {
+                SearchControl::Close => Some("✕".to_owned()),
+                SearchControl::ToggleReplace => {
+                    Some(if self.snap.replace_mode { "▲" } else { "▼" }.to_owned())
+                }
+                SearchControl::Regex => None,
+                SearchControl::Prev => Some("◀".to_owned()),
+                SearchControl::Next => Some("▶".to_owned()),
+                SearchControl::Replace => {
+                    Some(if self.layout.full_replace_labels { "更换" } else { "换" }.to_owned())
+                }
+                SearchControl::ReplaceAll => {
+                    Some(if self.layout.full_replace_labels { "全部" } else { "全" }.to_owned())
+                }
+            });
+        }
+        let button_rects =
+            SearchControl::ALL.iter().map(|control| control.rect(&self.layout)).collect();
+        self.controls.set_rects(button_rects, ctx);
     }
 
     fn paint(&self, ctx: &mut PaintCtx) {
@@ -179,22 +328,25 @@ impl Widget for SearchBarWidget {
 
         match ev {
             Event::PointerLeave => {
-                let hover_changed = self.hovered_btn != HoveredButton::None;
-                self.hovered_btn = HoveredButton::None;
+                let button_changed = self.controls.on_event(ev, _ctx).is_some();
                 let _ = self.find_box.on_event(ev, _ctx);
                 let _ = self.replace_box.on_event(ev, _ctx);
-                hover_changed.then_some(WidgetAction::SearchBar(SearchBarAction::HoverChanged))
+                button_changed.then_some(WidgetAction::SearchBar(SearchBarAction::HoverChanged))
             }
             Event::InteractionCancel => {
-                let hover_changed = self.hovered_btn != HoveredButton::None;
-                self.hovered_btn = HoveredButton::None;
+                let button_changed = self.controls.on_event(ev, _ctx).is_some();
                 let find_changed = self.find_box.on_event(ev, _ctx).is_some();
                 let replace_changed = self.replace_box.on_event(ev, _ctx).is_some();
-                (hover_changed || find_changed || replace_changed).then_some(WidgetAction::Consumed)
+                (button_changed || find_changed || replace_changed)
+                    .then_some(WidgetAction::Consumed)
             }
             Event::KeyDown(kc, _modifiers) => {
+                if let Some(action) = self.controls.on_event(ev, _ctx) {
+                    return self.map_button_widget_action(action);
+                }
                 // Handle tab locally
                 if *kc == KeyCode::Tab {
+                    self.controls.set_keyboard_focus(None);
                     if self.snap.replace_mode {
                         if self.snap.focus_replace {
                             return Some(WidgetAction::SearchBar(SearchBarAction::FocusFind));
@@ -249,7 +401,7 @@ impl Widget for SearchBarWidget {
                 self.replace_box.on_ime(&TextBoxIme::Disabled);
                 Some(WidgetAction::Consumed)
             }
-            Event::MouseMove { px, py } => {
+            Event::MouseMove { .. } => {
                 let text_box_action = if self.find_box.is_capturing() {
                     self.find_box.on_event(ev, _ctx)
                 } else if self.replace_box.is_capturing() {
@@ -260,22 +412,17 @@ impl Widget for SearchBarWidget {
                 if text_box_action.is_some() {
                     return self.map_text_box_widget_action(text_box_action);
                 }
-
-                let old = self.hovered_btn;
-                self.hovered_btn = HoveredButton::None;
-                self.update_hover(*px, *py);
-                if self.hovered_btn != HoveredButton::None {
-                    _ctx.cursor_hint = Some(winit::window::CursorIcon::Pointer);
-                }
-                if old != self.hovered_btn {
-                    Some(WidgetAction::SearchBar(SearchBarAction::HoverChanged))
-                } else {
-                    None
-                }
+                self.controls
+                    .on_event(ev, _ctx)
+                    .and_then(|action| self.map_button_widget_action(action))
             }
             Event::MouseDown { px, py, button: MouseButton::Left } => {
-                if let Some(action) = self.handle_mouse_down(*px, *py) {
-                    return Some(action);
+                if self.controls.index_at(*px, *py).is_some() {
+                    return self
+                        .controls
+                        .on_event(ev, _ctx)
+                        .and_then(|action| self.map_button_widget_action(action))
+                        .or(Some(WidgetAction::Consumed));
                 }
                 let text_box_action = if self.snap.replace_mode && self.replace_box.hit(*px, *py) {
                     self.replace_box.on_event(ev, _ctx)
@@ -287,6 +434,10 @@ impl Widget for SearchBarWidget {
                 self.map_text_box_widget_action(text_box_action)
             }
             Event::MouseUp { .. } => {
+                if self.controls.is_capturing() {
+                    let action = self.controls.on_event(ev, _ctx)?;
+                    return self.map_button_widget_action(action);
+                }
                 let was_dragging = self.find_box.is_capturing() || self.replace_box.is_capturing();
                 self.find_box.on_mouse_up();
                 self.replace_box.on_mouse_up();
@@ -301,7 +452,72 @@ impl Widget for SearchBarWidget {
     }
 
     fn is_capturing(&self) -> bool {
-        self.find_box.is_capturing() || self.replace_box.is_capturing()
+        self.controls.is_capturing()
+            || self.find_box.is_capturing()
+            || self.replace_box.is_capturing()
+    }
+
+    fn collect_focusable_ids(&self, output: &mut Vec<WidgetId>) {
+        if !self.snap.visible {
+            return;
+        }
+        self.find_box.collect_focusable_ids(output);
+        if self.snap.replace_mode {
+            self.replace_box.collect_focusable_ids(output);
+        }
+        self.controls.collect_focusable_ids(output);
+    }
+
+    fn set_keyboard_focus(&mut self, focused_id: Option<WidgetId>) {
+        if focused_id == Some(crate::core::widget::ids::SEARCH_BAR) {
+            return;
+        }
+        self.controls.set_keyboard_focus(if self.snap.visible { focused_id } else { None });
+    }
+
+    fn collect_accessibility_nodes(
+        &self,
+        context: &crate::core::AccessibilityContext,
+        output: &mut Vec<crate::core::AccessibilityNode>,
+    ) {
+        if !self.snap.visible {
+            return;
+        }
+        self.find_box.collect_accessibility_nodes(context, output);
+        if self.snap.replace_mode {
+            self.replace_box.collect_accessibility_nodes(context, output);
+        }
+        self.controls.collect_accessibility_nodes(context, output);
+    }
+
+    fn on_accessibility_action(
+        &mut self,
+        request: &crate::core::AccessibilityActionRequest,
+    ) -> Option<WidgetAction> {
+        if !self.snap.visible {
+            return None;
+        }
+        if let Some(action) = self.controls.on_accessibility_action(request) {
+            if let WidgetAction::Control(crate::core::widget::ControlAction::FocusRequested {
+                id,
+            }) = action
+            {
+                self.controls.set_keyboard_focus(Some(id));
+                return Some(WidgetAction::Control(
+                    crate::core::widget::ControlAction::FocusRequested {
+                        id: crate::core::widget::ids::SEARCH_BAR,
+                    },
+                ));
+            }
+            return self.map_button_widget_action(action);
+        }
+        let text_box_action = self.find_box.on_accessibility_action(request).or_else(|| {
+            self.snap
+                .replace_mode
+                .then(|| self.replace_box.on_accessibility_action(request))
+                .flatten()
+        });
+        self.map_text_box_widget_action(text_box_action)
     }
 
     fn as_any(&self) -> &dyn Any {
@@ -313,50 +529,24 @@ impl Widget for SearchBarWidget {
     }
 
     fn tooltip_at(&self, px: f32, py: f32) -> Option<TooltipHint> {
-        let hit = |r: &Rect| r.w > 0.0 && r.contains(px, py);
-
-        let r = self.layout.close_btn_rect;
-        if hit(&r) {
-            return Some(TooltipHint { label: "关闭查找".into(), target_rect: r });
+        for control in SearchControl::ALL {
+            let rect = control.rect(&self.layout);
+            if rect.w <= 0.0 || !rect.contains(px, py) {
+                continue;
+            }
+            let label = if control == SearchControl::ToggleReplace {
+                if self.snap.replace_mode { "隐藏替换" } else { "显示替换" }
+            } else {
+                control.accessibility_label()
+            };
+            return Some(TooltipHint { label: label.to_owned(), target_rect: rect });
         }
-
-        let r = self.layout.toggle_replace_btn_rect;
-        if hit(&r) {
-            let label = if self.snap.replace_mode { "隐藏替换" } else { "显示替换" };
-            return Some(TooltipHint { label: label.into(), target_rect: r });
-        }
-
-        let r = self.layout.regex_btn_rect;
-        if hit(&r) {
-            return Some(TooltipHint { label: "正则表达式".into(), target_rect: r });
-        }
-
-        let r = self.layout.prev_btn_rect;
-        if hit(&r) {
-            return Some(TooltipHint { label: "上一个匹配".into(), target_rect: r });
-        }
-
-        let r = self.layout.next_btn_rect;
-        if hit(&r) {
-            return Some(TooltipHint { label: "下一个匹配".into(), target_rect: r });
-        }
-
-        let r = self.layout.replace_btn_rect;
-        if hit(&r) {
-            return Some(TooltipHint { label: "替换".into(), target_rect: r });
-        }
-
-        let r = self.layout.replace_all_btn_rect;
-        if hit(&r) {
-            return Some(TooltipHint { label: "全部替换".into(), target_rect: r });
-        }
-
         None
     }
 }
 
 impl SearchBarWidget {
-    fn map_text_box_widget_action(&self, action: Option<WidgetAction>) -> Option<WidgetAction> {
+    fn map_text_box_widget_action(&mut self, action: Option<WidgetAction>) -> Option<WidgetAction> {
         match action {
             Some(WidgetAction::Control(control_action)) => self.map_control_action(control_action),
             other => other,
@@ -364,7 +554,7 @@ impl SearchBarWidget {
     }
 
     fn map_control_action(
-        &self,
+        &mut self,
         control_action: crate::core::widget::ControlAction,
     ) -> Option<WidgetAction> {
         match control_action {
@@ -383,72 +573,15 @@ impl SearchBarWidget {
                 Some(WidgetAction::SearchBar(SearchBarAction::Replace))
             }
             crate::core::widget::ControlAction::FocusRequested { id: FIND_BOX_ID } => {
+                self.controls.set_keyboard_focus(None);
                 Some(WidgetAction::SearchBar(SearchBarAction::FocusFind))
             }
             crate::core::widget::ControlAction::FocusRequested { id: REPLACE_BOX_ID } => {
+                self.controls.set_keyboard_focus(None);
                 Some(WidgetAction::SearchBar(SearchBarAction::FocusReplace))
             }
             _ => Some(WidgetAction::Consumed),
         }
-    }
-
-    fn update_hover(&mut self, px: f32, py: f32) {
-        let check = |r: &Rect| r.w > 0.0 && r.contains(px, py);
-        if check(&self.layout.close_btn_rect) {
-            self.hovered_btn = HoveredButton::CloseBar;
-            return;
-        }
-        if check(&self.layout.toggle_replace_btn_rect) {
-            self.hovered_btn = HoveredButton::ToggleReplace;
-            return;
-        }
-        if check(&self.layout.regex_btn_rect) {
-            self.hovered_btn = HoveredButton::Regex;
-            return;
-        }
-        if check(&self.layout.prev_btn_rect) {
-            self.hovered_btn = HoveredButton::Prev;
-            return;
-        }
-        if check(&self.layout.next_btn_rect) {
-            self.hovered_btn = HoveredButton::Next;
-            return;
-        }
-        if check(&self.layout.replace_btn_rect) {
-            self.hovered_btn = HoveredButton::Replace;
-            return;
-        }
-        if check(&self.layout.replace_all_btn_rect) {
-            self.hovered_btn = HoveredButton::ReplaceAll;
-        }
-    }
-
-    fn handle_mouse_down(&mut self, px: f32, py: f32) -> Option<WidgetAction> {
-        let check = |r: &Rect| r.w > 0.0 && r.contains(px, py);
-        if check(&self.layout.close_btn_rect) {
-            return Some(WidgetAction::SearchBar(SearchBarAction::Close));
-        }
-        if check(&self.layout.toggle_replace_btn_rect) {
-            return Some(WidgetAction::SearchBar(SearchBarAction::ToggleReplace));
-        }
-        if check(&self.layout.regex_btn_rect) {
-            return Some(WidgetAction::SearchBar(SearchBarAction::ToggleRegex));
-        }
-        if check(&self.layout.prev_btn_rect) {
-            return Some(WidgetAction::SearchBar(SearchBarAction::Prev));
-        }
-        if check(&self.layout.next_btn_rect) {
-            return Some(WidgetAction::SearchBar(SearchBarAction::Next));
-        }
-        if self.snap.match_count > 0 {
-            if check(&self.layout.replace_btn_rect) {
-                return Some(WidgetAction::SearchBar(SearchBarAction::Replace));
-            }
-            if check(&self.layout.replace_all_btn_rect) {
-                return Some(WidgetAction::SearchBar(SearchBarAction::ReplaceAll));
-            }
-        }
-        None
     }
 
     /// Paint the find-only bar.
@@ -516,68 +649,8 @@ impl SearchBarWidget {
     }
 
     fn paint_controls(&self, ctx: &mut PaintCtx, dpi: f32, baseline: f32) {
-        self.paint_text_button(
-            ctx,
-            self.layout.close_btn_rect,
-            "\u{2715}",
-            HoveredButton::CloseBar,
-            dpi,
-            baseline,
-        );
-        let toggle_label = if self.snap.replace_mode { "\u{25b2}" } else { "\u{25bc}" };
-        self.paint_text_button(
-            ctx,
-            self.layout.toggle_replace_btn_rect,
-            toggle_label,
-            HoveredButton::ToggleReplace,
-            dpi,
-            baseline,
-        );
-        self.paint_regex_button(ctx, dpi);
-        self.paint_navigation(ctx, dpi, baseline);
+        self.controls.paint(ctx);
         self.paint_auxiliary_text(ctx, dpi, baseline);
-        self.paint_replace_actions(ctx, dpi, baseline);
-    }
-
-    fn paint_regex_button(&self, ctx: &mut PaintCtx, dpi: f32) {
-        let rect = self.layout.regex_btn_rect;
-        if rect.w <= 0.0 {
-            return;
-        }
-        self.paint_hover_background(ctx, rect, HoveredButton::Regex, dpi);
-        let color = if self.snap.options_use_regex {
-            ctx.theme.palette.accent
-        } else {
-            self.button_color(ctx, HoveredButton::Regex)
-        };
-        let icon_size = (14.0 * dpi).min(rect.w);
-        draw_icon(
-            ctx.list,
-            "regex",
-            rect.x + (rect.w - icon_size) * 0.5,
-            rect.y + (rect.h - icon_size) * 0.5,
-            icon_size,
-            color,
-        );
-    }
-
-    fn paint_navigation(&self, ctx: &mut PaintCtx, dpi: f32, baseline: f32) {
-        self.paint_text_button(
-            ctx,
-            self.layout.prev_btn_rect,
-            "\u{25c0}",
-            HoveredButton::Prev,
-            dpi,
-            baseline,
-        );
-        self.paint_text_button(
-            ctx,
-            self.layout.next_btn_rect,
-            "\u{25b6}",
-            HoveredButton::Next,
-            dpi,
-            baseline,
-        );
     }
 
     fn paint_auxiliary_text(&self, ctx: &mut PaintCtx, dpi: f32, baseline: f32) {
@@ -601,90 +674,6 @@ impl SearchBarWidget {
                 shaper,
             );
         }
-    }
-
-    fn paint_replace_actions(&self, ctx: &mut PaintCtx, dpi: f32, baseline: f32) {
-        if !self.snap.replace_mode {
-            return;
-        }
-        let (replace_label, replace_all_label) = if self.layout.full_replace_labels {
-            ("\u{66ff}\u{6362}", "\u{5168}\u{90e8}")
-        } else {
-            ("\u{6362}", "\u{5168}")
-        };
-        self.paint_text_button(
-            ctx,
-            self.layout.replace_btn_rect,
-            replace_label,
-            HoveredButton::Replace,
-            dpi,
-            baseline,
-        );
-        self.paint_text_button(
-            ctx,
-            self.layout.replace_all_btn_rect,
-            replace_all_label,
-            HoveredButton::ReplaceAll,
-            dpi,
-            baseline,
-        );
-    }
-
-    fn paint_text_button(
-        &self,
-        ctx: &mut PaintCtx,
-        rect: Rect,
-        label: &str,
-        hovered_button: HoveredButton,
-        dpi: f32,
-        baseline: f32,
-    ) {
-        if rect.w <= 0.0 {
-            return;
-        }
-        self.paint_hover_background(ctx, rect, hovered_button, dpi);
-        let text_width = label
-            .chars()
-            .map(|character| {
-                if character.is_ascii() {
-                    BUTTON_ASCII_GLYPH_WIDTH_LOGICAL
-                } else {
-                    BUTTON_WIDE_GLYPH_WIDTH_LOGICAL
-                }
-            })
-            .sum::<f32>()
-            * dpi;
-        let color = self.button_color(ctx, hovered_button);
-        if let Some(ref mut shaper) = ctx.shaper {
-            ctx.list.text_shaped(
-                rect.x + (rect.w - text_width) * 0.5,
-                baseline,
-                SEARCH_FONT_SIZE_LOGICAL * dpi,
-                color,
-                label,
-                shaper,
-            );
-        }
-    }
-
-    fn paint_hover_background(
-        &self,
-        ctx: &mut PaintCtx,
-        rect: Rect,
-        hovered_button: HoveredButton,
-        dpi: f32,
-    ) {
-        if self.hovered_btn == hovered_button {
-            let hover_color = ButtonStyle::from_theme(ctx.theme)
-                .background_color(ButtonVisualState::Hovered, ctx.global_alpha);
-            ctx.list.fill_rounded(rect, hover_color, 4.0 * dpi);
-        }
-    }
-
-    fn button_color(&self, ctx: &PaintCtx, hovered_button: HoveredButton) -> [f32; 4] {
-        let mut color = ctx.theme.palette.input_fg;
-        color[3] *= if self.hovered_btn == hovered_button { 0.9 } else { 0.6 };
-        color
     }
 
     /// Returns the IME cursor rect of the currently focused TextBox.
@@ -738,7 +727,6 @@ mod tests {
             current_match: 0,
             visible: true,
 
-            blink_on: false,
             replace_query: String::new(),
             replace_mode: false,
             focus_replace: false,
@@ -804,13 +792,145 @@ mod tests {
         let close_rect = search_bar.close_btn_rect();
 
         assert!(close_rect.w > 0.0, "layout should establish the close button hit region");
+        let theme = test_theme();
+        let mut context = EventCtx::new(&theme, 1.0);
+        let px = close_rect.x + close_rect.w * 0.5;
+        let py = close_rect.y + close_rect.h * 0.5;
         assert_eq!(
-            search_bar.handle_mouse_down(
-                close_rect.x + close_rect.w * 0.5,
-                close_rect.y + close_rect.h * 0.5,
-            ),
+            search_bar
+                .on_event(&Event::MouseDown { px, py, button: MouseButton::Left }, &mut context),
+            Some(WidgetAction::SearchBar(SearchBarAction::HoverChanged))
+        );
+        assert_eq!(
+            search_bar
+                .on_event(&Event::MouseUp { px, py, button: MouseButton::Left }, &mut context),
             Some(WidgetAction::SearchBar(SearchBarAction::Close))
         );
+    }
+
+    #[test]
+    fn search_control_release_outside_does_not_activate() {
+        let mut search_bar = setup_search_bar("needle");
+        let close_rect = search_bar.close_btn_rect();
+        let theme = test_theme();
+        let mut context = EventCtx::new(&theme, 1.0);
+        let px = close_rect.x + close_rect.w * 0.5;
+        let py = close_rect.y + close_rect.h * 0.5;
+
+        let _ = search_bar
+            .on_event(&Event::MouseDown { px, py, button: MouseButton::Left }, &mut context);
+        assert!(search_bar.is_capturing());
+        assert_eq!(
+            search_bar.on_event(
+                &Event::MouseUp { px: 0.0, py: 0.0, button: MouseButton::Left },
+                &mut context
+            ),
+            Some(WidgetAction::SearchBar(SearchBarAction::HoverChanged))
+        );
+        assert!(!search_bar.is_capturing());
+    }
+
+    #[test]
+    fn search_control_supports_accessibility_focus_and_keyboard_activation() {
+        let mut search_bar = setup_search_bar("needle");
+        let theme = test_theme();
+        let mut context = EventCtx::new(&theme, 1.0);
+        let target = crate::core::AccessibilityId::from(SearchControl::Prev.id());
+
+        assert_eq!(
+            search_bar.on_accessibility_action(&crate::core::AccessibilityActionRequest::new(
+                target,
+                crate::core::AccessibilityAction::Focus,
+            )),
+            Some(WidgetAction::Control(crate::core::widget::ControlAction::FocusRequested {
+                id: crate::core::widget::ids::SEARCH_BAR,
+            },)),
+        );
+        assert_eq!(
+            search_bar.on_event(
+                &Event::KeyDown(KeyCode::Enter, crate::core::Modifiers::NONE),
+                &mut context
+            ),
+            Some(WidgetAction::SearchBar(SearchBarAction::Prev)),
+        );
+    }
+
+    #[test]
+    fn clicking_search_input_clears_accessibility_button_focus() {
+        let mut search_bar = layout_search_bar(
+            800.0,
+            SearchBarSnapshot {
+                query: "needle".to_owned(),
+                match_count: 1,
+                visible: true,
+                ..SearchBarSnapshot::default()
+            },
+        );
+        let theme = test_theme();
+        let mut context = EventCtx::new(&theme, 1.0);
+        let target = crate::core::AccessibilityId::from(SearchControl::Prev.id());
+        let _ = search_bar.on_accessibility_action(&crate::core::AccessibilityActionRequest::new(
+            target,
+            crate::core::AccessibilityAction::Focus,
+        ));
+        assert_eq!(
+            search_bar.on_event(
+                &Event::KeyDown(KeyCode::Enter, crate::core::Modifiers::NONE),
+                &mut context,
+            ),
+            Some(WidgetAction::SearchBar(SearchBarAction::Prev)),
+        );
+        let input = search_bar.layout.find_input_rect;
+        let px = input.x + input.w * 0.5;
+        let py = input.y + input.h * 0.5;
+        let _ = search_bar
+            .on_event(&Event::MouseDown { px, py, button: MouseButton::Left }, &mut context);
+        let _ = search_bar
+            .on_event(&Event::MouseUp { px, py, button: MouseButton::Left }, &mut context);
+
+        assert_eq!(
+            search_bar.on_event(
+                &Event::KeyDown(KeyCode::Enter, crate::core::Modifiers::NONE),
+                &mut context,
+            ),
+            Some(WidgetAction::SearchBar(SearchBarAction::Next)),
+        );
+    }
+
+    #[test]
+    fn disabled_replace_control_consumes_pointer_press() {
+        let mut search_bar = layout_search_bar(
+            480.0,
+            SearchBarSnapshot { visible: true, replace_mode: true, ..SearchBarSnapshot::default() },
+        );
+        let rect = search_bar.layout.replace_btn_rect;
+        let theme = test_theme();
+        let mut context = EventCtx::new(&theme, 1.0);
+
+        assert_eq!(
+            search_bar.on_event(
+                &Event::MouseDown {
+                    px: rect.x + rect.w * 0.5,
+                    py: rect.y + rect.h * 0.5,
+                    button: MouseButton::Left,
+                },
+                &mut context,
+            ),
+            Some(WidgetAction::Consumed),
+        );
+        assert!(!search_bar.is_capturing());
+    }
+
+    #[test]
+    fn focused_search_input_uses_text_box_blink_deadline() {
+        let mut search_bar = layout_search_bar(
+            480.0,
+            SearchBarSnapshot { visible: true, ..SearchBarSnapshot::default() },
+        );
+
+        let deadline =
+            search_bar.next_cursor_blink_at().expect("focused search input should blink");
+        assert!(search_bar.advance_cursor_blink(deadline));
     }
 
     #[test]
@@ -873,11 +993,15 @@ mod tests {
         }
 
         let replace_rect = search_bar.layout.replace_btn_rect;
+        let theme = test_theme();
+        let mut context = EventCtx::new(&theme, 1.0);
+        let px = replace_rect.x + replace_rect.w * 0.5;
+        let py = replace_rect.y + replace_rect.h * 0.5;
+        let _ = search_bar
+            .on_event(&Event::MouseDown { px, py, button: MouseButton::Left }, &mut context);
         assert_eq!(
-            search_bar.handle_mouse_down(
-                replace_rect.x + replace_rect.w * 0.5,
-                replace_rect.y + replace_rect.h * 0.5,
-            ),
+            search_bar
+                .on_event(&Event::MouseUp { px, py, button: MouseButton::Left }, &mut context),
             Some(WidgetAction::SearchBar(SearchBarAction::Replace))
         );
     }
@@ -1162,7 +1286,12 @@ mod tests {
             ),
             Some(WidgetAction::SearchBar(SearchBarAction::HoverChanged))
         );
-        assert_eq!(search_bar.hovered_btn, HoveredButton::CloseBar);
+        assert_eq!(
+            search_bar
+                .controls
+                .index_at(close_rect.x + close_rect.w * 0.5, close_rect.y + close_rect.h * 0.5),
+            Some(0)
+        );
         let _ = search_bar.on_event(
             &Event::MouseDown {
                 px: find_rect.x + 1.0,
@@ -1180,7 +1309,7 @@ mod tests {
             search_bar.on_event(&Event::PointerLeave, &mut event_context),
             Some(WidgetAction::SearchBar(SearchBarAction::HoverChanged))
         );
-        assert_eq!(search_bar.hovered_btn, HoveredButton::None);
+        assert_eq!(search_bar.on_event(&Event::PointerLeave, &mut event_context), None);
         assert!(search_bar.is_capturing());
         assert!(search_bar.find_box.has_preedit());
 

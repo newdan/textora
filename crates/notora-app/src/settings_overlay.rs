@@ -150,6 +150,19 @@ impl SettingsOverlay {
         self.view.set_input(input);
     }
 
+    pub fn next_cursor_blink_at(&self) -> Option<std::time::Instant> {
+        self.view.next_cursor_blink_at()
+    }
+
+    pub fn ime_cursor_rect(&self) -> Option<Rect> {
+        let local = self.view.focused_ime_cursor_rect()?;
+        Some(Rect::new(self.panel_rect.x + local.x, self.panel_rect.y + local.y, local.w, local.h))
+    }
+
+    pub fn advance_cursor_blink(&mut self, now: std::time::Instant) -> bool {
+        self.view.advance_cursor_blink(now)
+    }
+
     pub fn set_rect(&mut self, overlay_rect: Rect, context: &mut LayoutCtx<'_>) {
         self.panel_rect = resolve_panel_rect(overlay_rect, context.dpi);
         self.view.set_rect(Rect::new(0.0, 0.0, self.panel_rect.w, self.panel_rect.h), context);

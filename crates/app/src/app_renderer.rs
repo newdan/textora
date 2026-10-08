@@ -1489,7 +1489,6 @@ impl App {
                     conflict_label,
                 };
                 let search = entry.search_state();
-                let (blink_on, _) = crate::app::compute_cursor_phase(entry.cursor_blink_instant());
                 let search_input = SearchBarSnapshot {
                     query: search.query.clone(),
                     preedit_text: if search.panel_visible {
@@ -1501,7 +1500,6 @@ impl App {
                     current_match: search.active_match_idx,
                     visible: search.panel_visible,
 
-                    blink_on,
                     replace_query: search.replace_query.clone(),
                     replace_mode: search.replace_mode,
                     focus_replace: search.focus_replace,

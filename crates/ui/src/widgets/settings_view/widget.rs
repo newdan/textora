@@ -11,7 +11,7 @@ use crate::typography::TextSpacingMode;
 use crate::widgets::button::{Button, ButtonStyle};
 use crate::widgets::form::{FormRow, FormRowStyle, FormSection, FormSectionStyle, FormView};
 use crate::widgets::inline_group::{InlineChild, InlineGroup};
-use crate::widgets::label::{Label, LabelForeground, LabelStyle};
+use crate::widgets::label::{Label, LabelStyle};
 use crate::widgets::switch::Switch;
 use crate::widgets::text_box::TextBox;
 
@@ -49,9 +49,6 @@ const SETTINGS_ROW_HORIZONTAL_INSET_LOGICAL: f32 = 16.0;
 const SETTINGS_SECTION_TITLE_GAP_LOGICAL: f32 = 6.0;
 const SETTINGS_SECTION_DESCRIPTION_GAP_LOGICAL: f32 = 14.0;
 const SETTINGS_SECTION_CORNER_RADIUS_LOGICAL: f32 = 10.0;
-const SETTINGS_SECTION_TITLE_FONT_SIZE_LOGICAL: f32 = 17.0;
-const SETTINGS_ROW_LABEL_FONT_SIZE_LOGICAL: f32 = 14.0;
-const SETTINGS_DESCRIPTION_FONT_SIZE_LOGICAL: f32 = 12.0;
 const SETTINGS_SIDEBAR_SEPARATOR_WIDTH_LOGICAL: f32 = 1.0;
 
 const APPEARANCE_CATEGORY_ID: WidgetId = WidgetId(0x7365_7474_6170_7065);
@@ -189,6 +186,14 @@ impl SettingsView {
     pub fn focused_ime_cursor_rect(&self) -> Option<Rect> {
         let local = self.form.focused_ime_cursor_rect()?;
         Some(Rect::new(self.form_rect.x + local.x, self.form_rect.y + local.y, local.w, local.h))
+    }
+
+    pub fn next_cursor_blink_at(&self) -> Option<std::time::Instant> {
+        self.form.next_cursor_blink_at()
+    }
+
+    pub fn advance_cursor_blink(&mut self, now: std::time::Instant) -> bool {
+        self.form.advance_cursor_blink(now)
     }
 
     pub fn validation_message(&self) -> Option<&'static str> {
@@ -1089,7 +1094,6 @@ fn settings_text_box(id: WidgetId) -> TextBox {
     let mut text_box = TextBox::with_id(id);
     text_box
         .set_fixed_size_logical(SETTINGS_TEXT_BOX_WIDTH_LOGICAL, SETTINGS_CONTROL_HEIGHT_LOGICAL);
-    text_box.set_blink(true);
     text_box
 }
 
@@ -1120,47 +1124,19 @@ fn settings_section_style() -> FormSectionStyle {
 }
 
 fn section_title_label(text: &str) -> Label {
-    Label::new(
-        text,
-        LabelStyle {
-            font_size_logical: SETTINGS_SECTION_TITLE_FONT_SIZE_LOGICAL,
-            font_weight: shaping::Weight::MEDIUM,
-            ..LabelStyle::default()
-        },
-    )
+    Label::new(text, LabelStyle::form_section_title())
 }
 
 fn row_label(text: &str) -> Label {
-    Label::new(
-        text,
-        LabelStyle {
-            font_size_logical: SETTINGS_ROW_LABEL_FONT_SIZE_LOGICAL,
-            font_weight: shaping::Weight::MEDIUM,
-            ..LabelStyle::default()
-        },
-    )
+    Label::new(text, LabelStyle::form_row_title())
 }
 
 fn description_label(text: &str) -> Label {
-    Label::new(
-        text,
-        LabelStyle {
-            font_size_logical: SETTINGS_DESCRIPTION_FONT_SIZE_LOGICAL,
-            foreground: LabelForeground::ThemeMuted,
-            ..LabelStyle::default()
-        },
-    )
+    Label::new(text, LabelStyle::form_description())
 }
 
 fn section_description_label(text: &str) -> Label {
-    Label::new(
-        text,
-        LabelStyle {
-            font_size_logical: SETTINGS_DESCRIPTION_FONT_SIZE_LOGICAL - 0.5,
-            foreground: LabelForeground::ThemeMuted,
-            ..LabelStyle::default()
-        },
-    )
+    Label::new(text, LabelStyle::form_section_description())
 }
 
 fn format_float(value: f32) -> String {
