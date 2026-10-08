@@ -94,6 +94,104 @@ fn proportional_glyphs_keep_hinting_and_requested_phase() {
     }
 }
 
+#[cfg(target_os = "windows")]
+fn assert_yahei_reference(shaper: &mut Shaper, shaped: &ShapedRun, family: &str, hinted: bool) {
+    let size = shaper.font_size();
+    for cluster in &shaped.clusters {
+        assert!(
+            shaper
+                .font_system()
+                .db()
+                .face(cluster.font_id)
+                .expect("fixture face must exist")
+                .families
+                .iter()
+                .any(|(name, _)| name == family),
+            "fixture must use the requested YaHei face"
+        );
+        assert_eq!(
+            shaper.glyph_rasterization(cluster.font_id),
+            GlyphRasterization::SubpixelFontRecommended
+        );
+        for offset in [(0.0, 0.0), (0.25, 0.0), (0.75, 0.5)] {
+            let reference = reference_bitmap(shaper, cluster, size, hinted, offset);
+            let actual = shaper
+                .rasterize_glyph(
+                    cluster.font_id,
+                    u16::try_from(cluster.glyph_id).expect("font glyph ID fits u16"),
+                    size,
+                    offset,
+                )
+                .expect("visible Chinese glyph must rasterize");
+            assert_bitmap_matches(&actual, &reference);
+        }
+    }
+}
+
+#[cfg(target_os = "windows")]
+#[test]
+fn yahei_chinese_glyphs_follow_size_specific_hinting_at_requested_phase() {
+    let mut shaper = Shaper::new().expect("system font database must load");
+    for family in ["Microsoft YaHei", "Microsoft YaHei UI"] {
+        shaper.set_font_family(Some(family));
+        for weight in [Weight::NORMAL, Weight::BOLD] {
+            shaper.set_font_weight(weight);
+            for (size, hinted) in [(16.0, true), (24.0, false), (32.0, false), (16.0, true)] {
+                shaper.set_font_size(size);
+                let shaped = shaper.shape("请选择笔记").expect("Chinese fixture must shape");
+                assert_yahei_reference(&mut shaper, &shaped, family, hinted);
+                assert_eq!(shaper.shape("请选择笔记").expect("fixture must still shape"), shaped);
+            }
+        }
+    }
+}
+
+#[test]
+fn font_recommended_policy_preserves_fractional_positions_and_offsets() {
+    let policy = GlyphRasterization::SubpixelFontRecommended;
+    for coordinate in [10.25, 10.5, 10.75, -0.25, -0.5, -0.75] {
+        assert_eq!(policy.align_x(coordinate), coordinate);
+    }
+    for offset in [(0.0, 0.0), (0.25, 0.0), (0.75, 0.5)] {
+        assert_eq!(policy.raster_offset(offset), offset);
+    }
+}
+
+#[cfg(target_os = "windows")]
+#[test]
+fn yahei_fallback_uses_resolved_face_policy_after_requested_family_changes() {
+    let mut shaper =
+        Shaper::new().expect("system font database must load").with_font_family("Consolas");
+    shaper.set_font_size(24.0);
+    let shaped = shaper.shape("A请").expect("mixed fixture must shape");
+    let latin_face = shaped.clusters[0].font_id;
+    let chinese = &shaped.clusters[1];
+    assert_ne!(latin_face, chinese.font_id, "Chinese must exercise font fallback");
+    assert_eq!(shaper.glyph_rasterization(latin_face), GlyphRasterization::IntegerUnhinted);
+    assert_eq!(
+        shaper.glyph_rasterization(chinese.font_id),
+        GlyphRasterization::SubpixelFontRecommended,
+        "resolved proportional fallback must follow its own font recommendations"
+    );
+    shaper.set_font_family(Some("Arial"));
+    assert_eq!(shaper.glyph_rasterization(latin_face), GlyphRasterization::IntegerUnhinted);
+    assert_eq!(
+        shaper.glyph_rasterization(chinese.font_id),
+        GlyphRasterization::SubpixelFontRecommended
+    );
+    let offset = (0.5, 0.0);
+    let reference = reference_bitmap(&shaper, chinese, shaper.font_size(), false, offset);
+    let actual = shaper
+        .rasterize_glyph(
+            chinese.font_id,
+            u16::try_from(chinese.glyph_id).expect("font glyph ID fits u16"),
+            shaper.font_size(),
+            offset,
+        )
+        .expect("fallback Chinese glyph must rasterize");
+    assert_bitmap_matches(&actual, &reference);
+}
+
 #[test]
 fn raster_policy_uses_resolved_face_across_family_and_style_changes() {
     let mut shaper = Shaper::new().expect("system fonts must load");
@@ -117,9 +215,15 @@ fn raster_policy_uses_resolved_face_across_family_and_style_changes() {
     for font_id in mono_faces {
         assert_eq!(shaper.glyph_rasterization(font_id), GlyphRasterization::IntegerUnhinted);
     }
-    assert_eq!(shaper.glyph_rasterization(proportional), GlyphRasterization::SubpixelHinted);
+    assert_eq!(
+        shaper.glyph_rasterization(proportional),
+        GlyphRasterization::SubpixelFontRecommended
+    );
     shaper.set_font_family(Some("monospace"));
-    assert_eq!(shaper.glyph_rasterization(proportional), GlyphRasterization::SubpixelHinted);
+    assert_eq!(
+        shaper.glyph_rasterization(proportional),
+        GlyphRasterization::SubpixelFontRecommended
+    );
 }
 
 #[cfg(target_os = "macos")]
@@ -142,7 +246,7 @@ fn menlo_chinese_fallback_preserves_each_faces_raster_policy() {
             if monospaced {
                 GlyphRasterization::IntegerUnhinted
             } else {
-                GlyphRasterization::SubpixelHinted
+                GlyphRasterization::SubpixelFontRecommended
             }
         );
         found_mono |= monospaced;
