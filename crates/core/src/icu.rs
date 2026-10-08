@@ -12,7 +12,9 @@ use stdext::arena_format;
 use stdext::collections::{BString, BVec};
 
 mod sys {
-    use std::ffi::{CStr, c_char, c_void};
+    #[cfg(unix)]
+    use std::ffi::CStr;
+    use std::ffi::{c_char, c_void};
     use std::io;
     use std::ptr::NonNull;
 
@@ -33,12 +35,23 @@ mod sys {
         }
     }
 
-    #[cfg(not(unix))]
+    #[cfg(windows)]
     pub fn load_icu() -> io::Result<LibIcu> {
-        Err(io::Error::new(
-            io::ErrorKind::Unsupported,
-            "ICU loading not implemented for this platform",
-        ))
+        let handle = unsafe {
+            LoadLibraryExA(c"icu.dll".as_ptr(), std::ptr::null_mut(), LOAD_LIBRARY_SEARCH_SYSTEM32)
+        };
+        let library = NonNull::new(handle).ok_or_else(io::Error::last_os_error)?;
+        Ok(LibIcu { libicuuc: library, libicui18n: library })
+    }
+
+    #[cfg(windows)]
+    const LOAD_LIBRARY_SEARCH_SYSTEM32: u32 = 0x0000_0800;
+
+    #[cfg(windows)]
+    #[link(name = "kernel32")]
+    unsafe extern "system" {
+        fn LoadLibraryExA(name: *const c_char, file: *mut c_void, flags: u32) -> *mut c_void;
+        fn GetProcAddress(handle: *mut c_void, name: *const c_char) -> *mut c_void;
     }
 
     #[cfg(unix)]
@@ -68,6 +81,18 @@ mod sys {
                 Ok(std::mem::transmute_copy(&sym))
             }
         }
+    }
+
+    #[cfg(windows)]
+    pub unsafe fn get_proc_address<T>(
+        handle: NonNull<c_void>,
+        name: *const c_char,
+    ) -> io::Result<T> {
+        let symbol = unsafe { GetProcAddress(handle.as_ptr(), name) };
+        if symbol.is_null() {
+            return Err(io::Error::last_os_error());
+        }
+        Ok(unsafe { std::mem::transmute_copy(&symbol) })
     }
 
     /// Detect ICU symbol renaming suffix (e.g., version suffix on Linux).

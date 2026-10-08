@@ -2,6 +2,7 @@ use std::fmt;
 
 use textora_sync::ApiKey;
 
+#[cfg(target_os = "macos")]
 use crate::sync_connection_store::SYNC_KEYCHAIN_SERVICE;
 
 pub(crate) trait SyncSecretStore: Send + Sync {

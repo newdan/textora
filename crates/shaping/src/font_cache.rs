@@ -21,7 +21,7 @@ const CACHE_VERSION: u32 = 1;
 #[cfg(target_os = "macos")]
 const FONT_DIRS: &[&str] = &["/System/Library/Fonts", "/Library/Fonts", "/Network/Library/Fonts"];
 
-#[cfg(not(target_os = "macos"))]
+#[cfg(target_os = "linux")]
 const FONT_DIRS: &[&str] = &["/usr/share/fonts", "/usr/local/share/fonts"];
 
 // ---------------------------------------------------------------------------
@@ -113,8 +113,7 @@ pub fn new_font_system_with_cache(cache_path: &Path) -> FontSystem {
 
 /// Returns the default cache file path.
 pub fn default_cache_path() -> Option<PathBuf> {
-    let home = std::env::var("HOME").ok()?;
-    Some(PathBuf::from(home).join("Library/Caches/edit+/fontdb.cache"))
+    Some(dirs::cache_dir()?.join("textora/fontdb.cache"))
 }
 
 // ---------------------------------------------------------------------------
@@ -218,17 +217,6 @@ fn cache_is_fresh(cache_path: &Path) -> bool {
         }
     }
 
-    // Check ~/Library/Fonts
-    if let Ok(home) = std::env::var("HOME") {
-        let user_fonts = PathBuf::from(home).join("Library/Fonts");
-        if let Ok(meta) = fs::metadata(&user_fonts)
-            && let Ok(dir_mtime) = meta.modified()
-            && dir_mtime > cache_mtime
-        {
-            return false;
-        }
-    }
-
     true
 }
 
@@ -243,18 +231,36 @@ fn set_default_families(db: &mut Database) {
 }
 
 fn collect_font_dirs() -> HashSet<PathBuf> {
-    let mut dirs: HashSet<PathBuf> = FONT_DIRS.iter().map(|d| PathBuf::from(*d)).collect();
+    let mut font_dirs = HashSet::new();
+
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
+    font_dirs.extend(FONT_DIRS.iter().map(PathBuf::from));
+
+    #[cfg(target_os = "macos")]
+    if let Some(home_dir) = dirs::home_dir() {
+        font_dirs.insert(home_dir.join("Library/Fonts"));
+    }
+
+    #[cfg(target_os = "windows")]
+    {
+        if let Some(windows_dir) = std::env::var_os("WINDIR") {
+            font_dirs.insert(PathBuf::from(windows_dir).join("Fonts"));
+        }
+        if let Some(local_app_data) = std::env::var_os("LOCALAPPDATA") {
+            font_dirs.insert(PathBuf::from(local_app_data).join("Microsoft/Windows/Fonts"));
+        }
+    }
 
     #[cfg(target_os = "macos")]
     {
         if let Ok(entries) = fs::read_dir("/System/Library/AssetsV2") {
             for entry in entries.flatten() {
                 if entry.file_name().to_string_lossy().starts_with("com_apple_MobileAsset_Font") {
-                    dirs.insert(entry.path());
+                    font_dirs.insert(entry.path());
                 }
             }
         }
     }
 
-    dirs
+    font_dirs
 }

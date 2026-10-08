@@ -1,9 +1,3 @@
-// macOS native UI bindings (AppKit/winit); library crates remain cross-platform.
-#[cfg(not(target_os = "macos"))]
-compile_error!(
-    "The textora application currently supports macOS only; library crates remain portable."
-);
-
 use textora_app::{App, AppEvent, headless_init, parse_args};
 use winit::event_loop::EventLoop;
 

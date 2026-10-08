@@ -626,21 +626,14 @@ pub fn save_file(
     metadata: &FileMetadata,
 ) -> Result<(), SaveError> {
     // ── Check if target exists and is read-only ────────────────────────
-    let (original_mode, _target_exists) = if let Ok(meta) = fs::metadata(path) {
-        let perms = meta.permissions();
-        if perms.readonly() {
-            return Err(SaveError::ReadOnly);
-        }
-        #[cfg(unix)]
-        let mode = {
-            use std::os::unix::fs::PermissionsExt;
-            perms.mode()
-        };
-        #[cfg(not(unix))]
-        let mode = 0o644;
-        (Some(mode), true)
-    } else {
-        (None, false)
+    let original_metadata = fs::metadata(path).ok();
+    if original_metadata.as_ref().is_some_and(|meta| meta.permissions().readonly()) {
+        return Err(SaveError::ReadOnly);
+    }
+    #[cfg(unix)]
+    let original_mode = {
+        use std::os::unix::fs::PermissionsExt;
+        original_metadata.as_ref().map(|meta| meta.permissions().mode())
     };
 
     // ── Read + convert content ────────────────────────────────────────
@@ -675,7 +668,7 @@ pub fn save_file(
     // ── Atomic rename ─────────────────────────────────────────────────
     match fs::rename(&temp_path, path) {
         Ok(()) => Ok(()),
-        Err(e) if e.raw_os_error() == Some(libc::EXDEV) => {
+        Err(e) if e.kind() == io::ErrorKind::CrossesDevices => {
             // Cross-volume: fall back to copy + delete
             fs::copy(&temp_path, path).map_err(|source| save_io("copy saved file", source))?;
             let _ = fs::remove_file(&temp_path);
