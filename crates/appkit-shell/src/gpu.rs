@@ -3,6 +3,7 @@
 //! Used by both the windowed app and headless mode.
 
 use std::sync::Arc;
+use std::time::Instant;
 
 /// Errors that can occur during GPU initialization.
 #[derive(Debug)]
@@ -93,23 +94,58 @@ pub fn create_gpu_context(
     width: u32,
     height: u32,
 ) -> Result<GpuContext, GpuError> {
+    let initialization_started_at = Instant::now();
     let instance = wgpu::Instance::default();
+    let instance_elapsed = initialization_started_at.elapsed();
+    let surface_started_at = Instant::now();
     let surface = instance
         .create_surface(window.clone())
         .map_err(|e| GpuError::SurfaceCreation(e.to_string()))?;
+    let surface_elapsed = surface_started_at.elapsed();
+    let adapter_started_at = Instant::now();
     let adapter = pollster::block_on(request_adapter(&instance, Some(&surface)))
         .ok_or(GpuError::NoAdapter)?;
+    let adapter_elapsed = adapter_started_at.elapsed();
+    let device_started_at = Instant::now();
     let (device, queue) = request_device(&adapter)?;
+    let device_elapsed = device_started_at.elapsed();
 
-    configure_gpu_context(surface, &adapter, device, queue, width, height)
+    let context = configure_gpu_context(surface, &adapter, device, queue, width, height)?;
+    let adapter_info = adapter.get_info();
+    eprintln!(
+        "[startup:gpu_sync] adapter={} backend={:?} instance={:.2}ms surface={:.2}ms adapter_request={:.2}ms device_request={:.2}ms total={:.2}ms",
+        adapter_info.name,
+        adapter_info.backend,
+        instance_elapsed.as_secs_f64() * 1_000.0,
+        surface_elapsed.as_secs_f64() * 1_000.0,
+        adapter_elapsed.as_secs_f64() * 1_000.0,
+        device_elapsed.as_secs_f64() * 1_000.0,
+        initialization_started_at.elapsed().as_secs_f64() * 1_000.0,
+    );
+    Ok(context)
 }
 
 /// Request the adapter and device before a native window exists.
 pub fn prepare_gpu_device() -> Result<PreparedGpuDevice, GpuError> {
+    let preparation_started_at = Instant::now();
     let instance = wgpu::Instance::default();
+    let instance_elapsed = preparation_started_at.elapsed();
+    let adapter_started_at = Instant::now();
     let adapter =
         pollster::block_on(request_adapter(&instance, None)).ok_or(GpuError::NoAdapter)?;
+    let adapter_elapsed = adapter_started_at.elapsed();
+    let device_started_at = Instant::now();
     let (device, queue) = request_device(&adapter)?;
+    let adapter_info = adapter.get_info();
+    eprintln!(
+        "[startup:gpu_prepare] adapter={} backend={:?} instance={:.2}ms adapter_request={:.2}ms device_request={:.2}ms total={:.2}ms",
+        adapter_info.name,
+        adapter_info.backend,
+        instance_elapsed.as_secs_f64() * 1_000.0,
+        adapter_elapsed.as_secs_f64() * 1_000.0,
+        device_started_at.elapsed().as_secs_f64() * 1_000.0,
+        preparation_started_at.elapsed().as_secs_f64() * 1_000.0,
+    );
     Ok(PreparedGpuDevice { instance, adapter, device, queue })
 }
 
@@ -123,16 +159,32 @@ pub fn create_gpu_context_from_prepared_device(
     height: u32,
     prepared: PreparedGpuDevice,
 ) -> Result<GpuContext, GpuError> {
+    let attachment_started_at = Instant::now();
     let PreparedGpuDevice { instance, adapter, device, queue } = prepared;
     let surface = instance
         .create_surface(Arc::clone(&window))
         .map_err(|error| GpuError::SurfaceCreation(error.to_string()))?;
+    let surface_elapsed = attachment_started_at.elapsed();
     if !adapter.is_surface_supported(&surface) {
+        eprintln!("[startup:gpu_prepared] fallback=unsupported_surface");
         return create_gpu_context(window, width, height);
     }
-    match configure_gpu_context(surface, &adapter, device, queue, width, height) {
-        Err(GpuError::NoSurfaceFormat) => create_gpu_context(window, width, height),
-        result => result,
+    let configured_context = configure_gpu_context(surface, &adapter, device, queue, width, height);
+    let attachment_elapsed = attachment_started_at.elapsed();
+    match configured_context {
+        Err(GpuError::NoSurfaceFormat) => {
+            eprintln!("[startup:gpu_prepared] fallback=no_surface_format");
+            create_gpu_context(window, width, height)
+        }
+        result => {
+            eprintln!(
+                "[startup:gpu_prepared] surface={:.2}ms configure={:.2}ms total={:.2}ms",
+                surface_elapsed.as_secs_f64() * 1_000.0,
+                attachment_elapsed.saturating_sub(surface_elapsed).as_secs_f64() * 1_000.0,
+                attachment_elapsed.as_secs_f64() * 1_000.0,
+            );
+            result
+        }
     }
 }
 
@@ -153,6 +205,7 @@ fn configure_gpu_context(
     width: u32,
     height: u32,
 ) -> Result<GpuContext, GpuError> {
+    let configuration_started_at = Instant::now();
     let surface_caps = surface.get_capabilities(adapter);
     // Prefer sRGB for correct color rendering (critical on macOS)
     let format = surface_caps
@@ -162,7 +215,7 @@ fn configure_gpu_context(
         .or_else(|| surface_caps.formats.first())
         .copied()
         .ok_or(GpuError::NoSurfaceFormat)?;
-    eprintln!("GPU surface format: {format:?}");
+    let capabilities_elapsed = configuration_started_at.elapsed();
 
     let config = wgpu::SurfaceConfiguration {
         usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
@@ -174,9 +227,22 @@ fn configure_gpu_context(
         view_formats: vec![],
         desired_maximum_frame_latency: 2,
     };
+    let surface_configuration_started_at = Instant::now();
     surface.configure(&device, &config);
+    let surface_configuration_elapsed = surface_configuration_started_at.elapsed();
 
+    let msaa_started_at = Instant::now();
     let (msaa_tex, msaa_view) = create_msaa_texture(&device, &config);
+    let msaa_elapsed = msaa_started_at.elapsed();
+    let configuration_elapsed = configuration_started_at.elapsed();
+    eprintln!("GPU surface format: {format:?}");
+    eprintln!(
+        "[startup:gpu_configure] capabilities={:.2}ms surface_configure={:.2}ms msaa_texture={:.2}ms total={:.2}ms",
+        capabilities_elapsed.as_secs_f64() * 1_000.0,
+        surface_configuration_elapsed.as_secs_f64() * 1_000.0,
+        msaa_elapsed.as_secs_f64() * 1_000.0,
+        configuration_elapsed.as_secs_f64() * 1_000.0,
+    );
 
     Ok(GpuContext { surface, device, queue, config, format, msaa_tex, msaa_view })
 }

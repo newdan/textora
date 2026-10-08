@@ -83,17 +83,24 @@ impl RenderSession {
         font_size: f32,
         font_family: &str,
     ) -> Result<(), GpuError> {
+        let resume_started_at = Instant::now();
         let window = Arc::new(
             event_loop
                 .create_window(attributes)
                 .map_err(|error| GpuError::SurfaceCreation(error.to_string()))?,
         );
+        let window_creation_elapsed = resume_started_at.elapsed();
         let size = window.inner_size();
-        let prepared_gpu = self
-            .gpu_preparation
-            .take()
-            .and_then(|preparation| preparation.join().ok())
-            .and_then(Result::ok);
+        let gpu_wait_started_at = Instant::now();
+        let preparation_result = self.gpu_preparation.take().map(|preparation| preparation.join());
+        let gpu_wait_elapsed = gpu_wait_started_at.elapsed();
+        let (prepared_gpu, preparation_status) = match preparation_result {
+            Some(Ok(Ok(prepared))) => (Some(prepared), "ready"),
+            Some(Ok(Err(_))) => (None, "failed"),
+            Some(Err(_)) => (None, "panicked"),
+            None => (None, "not_started"),
+        };
+        let gpu_context_started_at = Instant::now();
         let gpu_context = match prepared_gpu {
             Some(prepared) => gpu::create_gpu_context_from_prepared_device(
                 window.clone(),
@@ -103,10 +110,13 @@ impl RenderSession {
             )?,
             None => gpu::create_gpu_context(window.clone(), size.width, size.height)?,
         };
+        let gpu_context_elapsed = gpu_context_started_at.elapsed();
         let gpu = GpuState { ctx: gpu_context, size };
         let scale_factor = window.scale_factor();
+        let text_init_started_at = Instant::now();
         let text =
             TextState::init(&gpu, font_size * scale_factor as f32, font_system, font_family)?;
+        let text_init_elapsed = text_init_started_at.elapsed();
 
         self.scale_factor = scale_factor;
         self.update_surface_size(size);
@@ -115,6 +125,14 @@ impl RenderSession {
         self.text = Some(text);
         self.redraw_requested = true;
         self.first_frame_presented = false;
+        eprintln!(
+            "[startup:render_session] create_window={:.2}ms gpu_wait={:.2}ms gpu_prepare={preparation_status} gpu_context={:.2}ms text_init={:.2}ms total={:.2}ms",
+            window_creation_elapsed.as_secs_f64() * 1_000.0,
+            gpu_wait_elapsed.as_secs_f64() * 1_000.0,
+            gpu_context_elapsed.as_secs_f64() * 1_000.0,
+            text_init_elapsed.as_secs_f64() * 1_000.0,
+            resume_started_at.elapsed().as_secs_f64() * 1_000.0,
+        );
         Ok(())
     }
 

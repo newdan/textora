@@ -6,6 +6,7 @@
 use crate::gpu::{GpuContext, GpuError};
 use crate::image_atlas::ImageAtlas;
 use crate::render_cache::PreviewRenderCache;
+use std::time::Instant;
 use wgpu::util::DeviceExt;
 
 /// Atlas texture size for glyph caching.
@@ -52,8 +53,11 @@ impl TextState {
         font_system: std::sync::Arc<std::sync::Mutex<shaping::FontSystem>>,
         font_family: &str,
     ) -> Result<Self, GpuError> {
+        let initialization_started_at = Instant::now();
         let renderer = render::GlyphRenderer::new(&gpu.ctx.device, gpu.ctx.format);
+        let renderer_elapsed = initialization_started_at.elapsed();
 
+        let glyph_atlas_started_at = Instant::now();
         let atlas_texture = gpu.ctx.device.create_texture(&wgpu::TextureDescriptor {
             label: Some("atlas texture"),
             size: wgpu::Extent3d {
@@ -69,8 +73,12 @@ impl TextState {
             view_formats: &[],
         });
         let atlas_view = atlas_texture.create_view(&wgpu::TextureViewDescriptor::default());
+        let glyph_atlas_elapsed = glyph_atlas_started_at.elapsed();
+        let image_atlas_started_at = Instant::now();
         let image_atlas = ImageAtlas::new(&gpu.ctx.device);
+        let image_atlas_elapsed = image_atlas_started_at.elapsed();
 
+        let bindings_started_at = Instant::now();
         // Write a solid white pixel at atlas (0,0) for cursor/caret rendering.
         gpu.ctx.queue.write_texture(
             wgpu::TexelCopyTextureInfo {
@@ -127,10 +135,13 @@ impl TextState {
             usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
+        let bindings_elapsed = bindings_started_at.elapsed();
 
+        let shaper_started_at = Instant::now();
         let shaper = shaping::Shaper::from_shared_font_system(font_system, font_size, font_family);
+        let shaper_elapsed = shaper_started_at.elapsed();
 
-        Ok(Self {
+        let text_state = Self {
             renderer,
             shaper,
             bind_group,
@@ -145,7 +156,17 @@ impl TextState {
             preview_cache: PreviewRenderCache::new(),
             atlas_generation: 1,
             glyph_resolve_count: 0,
-        })
+        };
+        eprintln!(
+            "[startup:text_init] renderer={:.2}ms glyph_atlas={:.2}ms image_atlas={:.2}ms bindings={:.2}ms shaper={:.2}ms total={:.2}ms",
+            renderer_elapsed.as_secs_f64() * 1_000.0,
+            glyph_atlas_elapsed.as_secs_f64() * 1_000.0,
+            image_atlas_elapsed.as_secs_f64() * 1_000.0,
+            bindings_elapsed.as_secs_f64() * 1_000.0,
+            shaper_elapsed.as_secs_f64() * 1_000.0,
+            initialization_started_at.elapsed().as_secs_f64() * 1_000.0,
+        );
+        Ok(text_state)
     }
 
     /// Image entries used by a frame remain pinned until the next frame starts.
