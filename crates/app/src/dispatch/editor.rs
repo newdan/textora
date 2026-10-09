@@ -1135,14 +1135,15 @@ mod edit_tests {
 
     #[cfg(feature = "markdown")]
     #[test]
-    fn markdown_editor_smart_paste_reads_snapshot_and_converts_html() {
+    fn markdown_editor_smart_paste_respects_html_build_feature() {
         let mut app = app_with_markdown_editor("");
         let mut clipboard =
             TestDocumentClipboard::with_html("<p><strong>rich</strong></p>", "rich");
 
         app.dispatch_document_paste_with_clipboard_for_test(&EditCommand::Paste, &mut clipboard);
 
-        assert_eq!(active_text(&app), "**rich**");
+        let expected = if cfg!(feature = "markdown-rich") { "**rich**" } else { "rich" };
+        assert_eq!(active_text(&app), expected);
         assert_eq!(clipboard.plain_reads, 0);
         assert_eq!(clipboard.snapshot_reads, 1);
     }
@@ -1162,7 +1163,8 @@ mod edit_tests {
             .expect("smart paste must be intercepted before the legacy executor");
 
         assert!(effect.redraw);
-        assert_eq!(active_text(&app), "**rich**");
+        let expected = if cfg!(feature = "markdown-rich") { "**rich**" } else { "rich" };
+        assert_eq!(active_text(&app), expected);
         assert_eq!(clipboard.plain_reads, 0);
         assert_eq!(clipboard.snapshot_reads, 1);
     }

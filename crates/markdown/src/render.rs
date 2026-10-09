@@ -1543,6 +1543,7 @@ fn draw_debug_spacing_band(
 mod tests {
     use super::*;
 
+    #[cfg(feature = "rich-markdown")]
     #[test]
     fn render_layout_emits_inline_math_image_and_keeps_adjacent_text() {
         let source = "left $x^2$ right";
@@ -1565,6 +1566,7 @@ mod tests {
         assert!(commands.cmds.iter().any(|command| matches!(command, DrawCmd::TextLayout { .. })));
     }
 
+    #[cfg(feature = "rich-markdown")]
     #[test]
     fn render_layout_emits_display_math_and_mermaid_images() {
         for source in ["$$x^2$$", "```mermaid\nflowchart LR\nA --> B\n```"] {

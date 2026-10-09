@@ -53,6 +53,14 @@ cargo run -p textora-app -- --headless
 cargo build -p textora-app
 ```
 
+构建精简版可执行文件（保留基础 Markdown 和思维导图，不编译 LaTeX、Mermaid 图表与 HTML 富文本粘贴支持）：
+
+```bash
+cargo lite
+```
+
+产物位于 `target/lite/textora`。精简版将数学公式和 HTML 标签显示为原文，`mermaid` 代码块仍按普通代码块显示。
+
 构建 macOS 发布版 `.app` 包：
 
 ```bash

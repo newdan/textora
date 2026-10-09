@@ -1,0 +1,2 @@
+[alias]
+lite = "build --profile lite --package textora-app --no-default-features --features markdown"

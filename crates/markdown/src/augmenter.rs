@@ -75,7 +75,10 @@ fn augment_line_break(source: &str, current_byte: usize) -> EditAugmentation {
         EnterContext::Heading { .. }
         | EnterContext::SetextHeading { .. }
         | EnterContext::TableCell { .. } => {
-            return emit_inline_html_break(source, current_byte);
+            if cfg!(feature = "rich-markdown") {
+                return emit_inline_html_break(source, current_byte);
+            }
+            return emit_source_newline(source, current_byte);
         }
         EnterContext::CodeBlock
         | EnterContext::CodeBlockFenceLine { .. }
@@ -787,6 +790,9 @@ fn backspace_remove_inline_html_break(
 }
 
 fn is_inline_html_break_range(source: &str, candidate_range: std::ops::Range<usize>) -> bool {
+    if !cfg!(feature = "rich-markdown") {
+        return false;
+    }
     let parsed = crate::parser::parse_markdown(source);
     parsed.events.iter().zip(&parsed.event_ranges).any(|(event, event_range)| {
         matches!(event, crate::parser::MarkdownEvent::InlineHtml(_))
@@ -4012,6 +4018,7 @@ mod tests {
         }
     }
 
+    #[cfg(feature = "rich-markdown")]
     #[test]
     fn inline_html_break_deletion_removes_the_complete_element() {
         for html_break in ["<br>", "<br/>", "<br />"] {
@@ -5863,6 +5870,7 @@ mod tests {
         assert_eq!(backspace.cursor_byte_after, reversible_split_point(source, current_byte));
     }
 
+    #[cfg(feature = "rich-markdown")]
     #[test]
     fn inline_html_line_break_is_backspace_reversible() {
         let source = "# left right";
@@ -5987,6 +5995,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "rich-markdown")]
     #[test]
     fn line_break_uses_inline_html_where_a_physical_line_would_end_the_leaf() {
         for (source, current_byte) in [

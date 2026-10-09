@@ -53,6 +53,14 @@ Build the application in debug mode:
 cargo build -p textora-app
 ```
 
+Build the smaller executable with basic Markdown and mind maps, without LaTeX, Mermaid diagrams, or HTML rich paste:
+
+```bash
+cargo lite
+```
+
+The binary is written to `target/lite/textora`. Math and HTML tags remain visible as source text, while `mermaid` fences render as ordinary code blocks.
+
 Build a release `.app` bundle for macOS:
 
 ```bash

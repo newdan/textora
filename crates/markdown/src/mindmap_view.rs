@@ -1968,12 +1968,12 @@ mod tests {
                 geometry.card_rect.y + geometry.card_rect.h + 8.0,
             );
             let pointer_screen = snapshot.content_to_screen(pointer_content);
-            // 预览卡宽按源节点（B 为 depth 1）深度缩放字号测量，与 render_drag_preview 一致。
+            // 叶节点 B 的预览标签不带后代数量，宽度按 depth 1 的字号测量。
             let mut preview_shaper = Shaper::new().expect("test shaper should initialize");
             preview_shaper
                 .set_font_size(view.cached_font_size * view.constants.font_scale_for_depth(1));
             let expected_preview_width =
-                measured_card_width("B · 0", &view.constants, &mut preview_shaper)
+                measured_card_width("B", &view.constants, &mut preview_shaper)
                     .max(geometry.card_rect.w);
             let expected_preview_center_x = pointer_content.x
                 + (geometry.card_rect.x + expected_preview_width * 0.5
@@ -1989,14 +1989,22 @@ mod tests {
                 ),
                 &doc,
             );
-            // 预览中心经 screen round-trip 换算，深度缩放高度引入的浮点尾差需容忍。
-            assert!(matches!(response,
-                CanvasDragResponse::Preview(preview)
-                    if (preview.preview_rect.x + preview.preview_rect.w * 0.5 - expected_preview_center_x)
-                        .abs() < f32::EPSILON
-                        && (preview.preview_rect.y + preview.preview_rect.h * 0.5 - pointer_content.y)
-                            .abs() < 0.01
-            ));
+            let CanvasDragResponse::Preview(preview) = response else {
+                panic!("drag update should produce a preview");
+            };
+            assert_eq!(preview.label, "B");
+            let preview_center_x = preview.preview_rect.x + preview.preview_rect.w * 0.5;
+            let preview_center_y = preview.preview_rect.y + preview.preview_rect.h * 0.5;
+            assert!(
+                (preview_center_x - expected_preview_center_x).abs() < f32::EPSILON,
+                "preview center x {preview_center_x}, expected {expected_preview_center_x}"
+            );
+            // 预览中心经 screen round-trip 换算，高度存在浮点尾差。
+            assert!(
+                (preview_center_y - pointer_content.y).abs() < 0.01,
+                "preview center y {preview_center_y}, expected {}",
+                pointer_content.y
+            );
 
             view.handle_message(
                 PluginMessage::SetPreedit { text: "你".into(), cursor: Some((0, 3)) },
