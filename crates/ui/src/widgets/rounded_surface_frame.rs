@@ -5,7 +5,7 @@ use crate::{PaintCtx, Rect};
 /// 应用统一采用的 macOS 风格圆角；外窗描边与内容表面共用，按 DPI 缩放。
 pub const SHELL_CORNER_RADIUS_LOGICAL: f32 = 16.0;
 const CORNER_ARC_SEGMENTS: usize = 24;
-const OUTLINE_WIDTH_PHYSICAL: f32 = 1.0;
+const OUTLINE_WIDTH_LOGICAL: f32 = 1.0;
 
 #[derive(Clone, Copy, Debug)]
 pub struct RoundedSurfaceFrame {
@@ -30,7 +30,12 @@ impl RoundedSurfaceFrame {
         ] {
             Self::paint_corner(context, corner, direction, radius, application.window_surface);
         }
-        context.list.stroke_rounded(rect, application.divider, radius, OUTLINE_WIDTH_PHYSICAL);
+        context.list.stroke_rounded(
+            rect,
+            application.divider,
+            radius,
+            OUTLINE_WIDTH_LOGICAL * context.dpi,
+        );
     }
 
     fn paint_corner(
@@ -62,6 +67,24 @@ mod tests {
     use crate::{DrawCmd, DrawList, Theme};
 
     #[test]
+    fn shared_outline_matches_the_internal_pane_divider_color() {
+        for definition in [
+            crate::theme::ThemeDefinition::default_light(),
+            crate::theme::ThemeDefinition::default_dark(),
+        ] {
+            let theme = Theme::from_definition(&definition);
+            let mut list = DrawList::new();
+            RoundedSurfaceFrame {
+                rect: Rect::new(0.0, 0.0, 800.0, 600.0),
+                radius: SHELL_CORNER_RADIUS_LOGICAL,
+            }
+            .paint(&mut PaintCtx::new(&mut list, &theme, 1.0));
+            assert!(matches!(list.cmds.last(), Some(DrawCmd::StrokeRect { color, .. })
+                if *color == theme.palette.border_subtle));
+        }
+    }
+
+    #[test]
     fn shared_outline_masks_only_the_outer_corners_at_each_dpi() {
         for dpi in [1.0, 1.5, 2.0] {
             let rect = Rect::new(220.0 * dpi, 36.0 * dpi, 976.0 * dpi, 760.0 * dpi);
@@ -85,7 +108,7 @@ mod tests {
             }
             assert!(
                 matches!(list.cmds.last(), Some(DrawCmd::StrokeRect { rect: outline, radius, line_width, .. })
-                if *outline == rect && *radius == frame.radius && *line_width == OUTLINE_WIDTH_PHYSICAL)
+                if *outline == rect && *radius == frame.radius && *line_width == dpi)
             );
         }
     }

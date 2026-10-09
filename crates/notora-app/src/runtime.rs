@@ -144,7 +144,15 @@ fn notora_window_attributes() -> WindowAttributes {
             .with_undecorated_shadow(false)
             .with_corner_preference(CornerPreference::DoNotRound)
     }
-    #[cfg(not(target_os = "windows"))]
+    #[cfg(target_os = "macos")]
+    {
+        use winit::platform::macos::WindowAttributesExtMacOS;
+        attributes
+            .with_titlebar_transparent(true)
+            .with_title_hidden(true)
+            .with_fullsize_content_view(true)
+    }
+    #[cfg(not(any(target_os = "windows", target_os = "macos")))]
     attributes
 }
 
@@ -1013,7 +1021,7 @@ impl NotoraRuntime {
         };
         match action {
             WindowFrameAction::Drag => {
-                if let Err(error) = window.drag_window() {
+                if let Err(error) = window_runtime::drag_window(window) {
                     eprintln!("notora window drag failed: {error}");
                 }
             }
@@ -1044,7 +1052,7 @@ impl NotoraRuntime {
     }
 
     pub(crate) fn set_pointer_position(&mut self, px: f32, py: f32) {
-        self.window_runtime.set_pointer_position(px, py);
+        self.window_runtime.set_pointer_position(px, py, self.document_runtime.editor());
     }
 
     pub(crate) fn pointer_position(&self) -> (f32, f32) {
@@ -1053,7 +1061,7 @@ impl NotoraRuntime {
 
     pub(crate) fn set_scale_factor(&mut self, scale_factor: f64) {
         self.document_runtime.editor_mut().set_scale_factor(scale_factor);
-        self.window_runtime.synchronize_shape(self.document_runtime.editor());
+        self.window_runtime.synchronize_window_chrome(self.document_runtime.editor());
         self.action_runtime.set_responsive_mode(self.shell_layout().responsive_mode);
         self.window_runtime.schedule_redraw();
     }
@@ -1116,7 +1124,7 @@ impl NotoraRuntime {
         }) {
             self.set_window_size(width, height);
         }
-        self.window_runtime.synchronize_shape(self.document_runtime.editor());
+        self.window_runtime.synchronize_window_chrome(self.document_runtime.editor());
         if let Some(event_loop_proxy) = self.window_runtime.event_loop_proxy() {
             ProductHost::start_background_services(
                 &mut self.product,
@@ -1141,7 +1149,7 @@ impl NotoraRuntime {
 
     pub(crate) fn resize_window(&mut self, width: u32, height: u32) {
         self.set_window_size(width, height);
-        self.window_runtime.synchronize_shape(self.document_runtime.editor());
+        self.window_runtime.synchronize_window_chrome(self.document_runtime.editor());
         let _ = self.document_runtime.editor_mut().resize_now(width, height);
         self.window_runtime.schedule_redraw();
     }
@@ -1235,7 +1243,7 @@ impl NotoraRuntime {
     }
 
     fn render_frame(&mut self) -> Result<EditorSurfacePaint, RenderError> {
-        self.window_runtime.synchronize_shape(self.document_runtime.editor());
+        self.window_runtime.synchronize_window_chrome(self.document_runtime.editor());
         self.window_runtime.mark_frame_rendered();
         let layout = self.shell_layout();
         let editor_is_active = self.active_editor_matches_selection();

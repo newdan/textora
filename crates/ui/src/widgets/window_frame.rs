@@ -12,6 +12,8 @@ const CONTROL_ICON_SIZE_LOGICAL: f32 = 14.0;
 const TITLE_INSET_LOGICAL: f32 = 16.0;
 const TITLE_FONT_SIZE_LOGICAL: f32 = 16.0;
 const TITLE_FONT_FAMILY: &str = "Segoe UI";
+const MACOS_TITLE_FONT_FAMILY: &str = "system-ui";
+const MACOS_TRAFFIC_LIGHTS_WIDTH_LOGICAL: f32 = 80.0;
 const TITLE_FONT_WEIGHT: shaping::Weight = shaping::Weight::SEMIBOLD;
 const TEXT_BASELINE_EM: f32 = 0.35;
 const RESIZE_MARGIN_LOGICAL: f32 = 6.0;
@@ -38,6 +40,7 @@ pub enum WindowFrameNavigationToggle {
 pub enum WindowFrameState {
     #[default]
     Native,
+    MacOs,
     Restored,
     Maximized,
 }
@@ -95,7 +98,7 @@ enum PointerOrigin {
 impl WindowFrameWidget {
     pub fn set_input(&mut self, input: WindowFrameInput, window_rect: Rect, dpi: f32) {
         let dpi = dpi.max(1.0);
-        if self.input.title != input.title || self.dpi != dpi {
+        if self.input.title != input.title || self.input.state != input.state || self.dpi != dpi {
             self.title_layout = None;
         }
         self.input = input;
@@ -113,6 +116,9 @@ impl WindowFrameWidget {
     }
 
     fn control_rects(&self) -> [Rect; 3] {
+        if self.input.state == WindowFrameState::MacOs {
+            return [Rect::ZERO; 3];
+        }
         let title = self.title_rect();
         let width = (CONTROL_WIDTH_LOGICAL * self.dpi).min(title.w / 3.0);
         std::array::from_fn(|index| {
@@ -126,8 +132,12 @@ impl WindowFrameWidget {
         }
         let title = self.title_rect();
         let size = NAVIGATION_BUTTON_SIZE_LOGICAL * self.dpi;
-        let left = self.title_text_rect().right() + TITLE_NAVIGATION_GAP_LOGICAL * self.dpi;
-        if title.h < size || left + size > self.control_rects()[0].x {
+        let left = if self.input.state == WindowFrameState::MacOs {
+            title.x + MACOS_TRAFFIC_LIGHTS_WIDTH_LOGICAL * self.dpi
+        } else {
+            self.title_text_rect().right() + TITLE_NAVIGATION_GAP_LOGICAL * self.dpi
+        };
+        if title.h < size || left + size > self.title_content_right() {
             return Rect::ZERO;
         }
         Rect::new(left, title.y + (title.h - size) * 0.5, size, size)
@@ -136,14 +146,19 @@ impl WindowFrameWidget {
     fn title_text_rect(&self) -> Rect {
         let title = self.title_rect();
         let inset = TITLE_INSET_LOGICAL * self.dpi;
-        let left = title.x + inset;
-        let available_width = (self.control_rects()[0].x - left - inset).max(0.0);
         let navigation_width =
             if self.input.navigation_toggle == WindowFrameNavigationToggle::Hidden {
                 0.0
             } else {
                 (NAVIGATION_BUTTON_SIZE_LOGICAL + TITLE_NAVIGATION_GAP_LOGICAL) * self.dpi
             };
+        let (left, trailing_navigation_width) = if self.input.state == WindowFrameState::MacOs {
+            (title.x + MACOS_TRAFFIC_LIGHTS_WIDTH_LOGICAL * self.dpi + navigation_width, 0.0)
+        } else {
+            (title.x + inset, navigation_width)
+        };
+        let available_width =
+            (self.title_content_right() - left - inset - trailing_navigation_width).max(0.0);
         let width =
             self.title_layout.as_ref().map(|layout| layout.shaped.width).unwrap_or_else(|| {
                 crate::core::text_util::estimate_text_width_px(
@@ -151,7 +166,24 @@ impl WindowFrameWidget {
                     TITLE_FONT_SIZE_LOGICAL * self.dpi,
                 )
             });
-        Rect::new(left, title.y, width.min((available_width - navigation_width).max(0.0)), title.h)
+        Rect::new(left, title.y, width.min(available_width), title.h)
+    }
+
+    fn title_content_right(&self) -> f32 {
+        if self.input.state == WindowFrameState::MacOs {
+            self.title_rect().right()
+        } else {
+            self.control_rects()[0].x
+        }
+    }
+
+    pub fn is_title_drag_position(&self, px: f32, py: f32) -> bool {
+        self.input.state != WindowFrameState::Native
+            && self.title_rect().contains(px, py)
+            && !self.navigation_toggle_rect().contains(px, py)
+            && !self.control_rects().iter().any(|control| control.contains(px, py))
+            && (self.input.state != WindowFrameState::MacOs
+                || px >= self.title_rect().x + MACOS_TRAFFIC_LIGHTS_WIDTH_LOGICAL * self.dpi)
     }
 
     fn prepare_title_layout(&mut self, context: &mut PaintCtx<'_>) {
@@ -164,7 +196,11 @@ impl WindowFrameWidget {
         self.title_layout = UiTextLayout::new(
             &self.input.title,
             TITLE_FONT_SIZE_LOGICAL * self.dpi,
-            Some(TITLE_FONT_FAMILY.to_owned()),
+            Some(if self.input.state == WindowFrameState::MacOs {
+                MACOS_TITLE_FONT_FAMILY.to_owned()
+            } else {
+                TITLE_FONT_FAMILY.to_owned()
+            }),
             TITLE_FONT_WEIGHT,
             shaping::Style::Normal,
             false,
@@ -239,6 +275,13 @@ impl WindowFrameWidget {
         };
         self.hovered_control = self.control_rects().iter().position(|rect| rect.contains(px, py));
         self.hovered_navigation = self.navigation_toggle_rect().contains(px, py);
+        if self.input.state == WindowFrameState::MacOs
+            && self.title_rect().contains(px, py)
+            && px < self.title_rect().x + MACOS_TRAFFIC_LIGHTS_WIDTH_LOGICAL * self.dpi
+        {
+            self.title_clicks.reset();
+            return WindowFrameEvent::default();
+        }
         if let Some(direction) = self.resize_direction(px, py) {
             self.hovered_control = None;
             self.hovered_navigation = false;
@@ -319,6 +362,9 @@ impl WindowFrameWidget {
             });
         }
         for (index, rect) in controls.into_iter().enumerate() {
+            if rect == Rect::ZERO {
+                continue;
+            }
             let hovered = self.hovered_control == Some(index);
             let foreground = if hovered && index == 2 {
                 application.text_inverse
@@ -450,6 +496,72 @@ mod tests {
 
     fn press(px: f32, py: f32) -> Event {
         Event::MouseDown { px, py, button: MouseButton::Left }
+    }
+
+    #[test]
+    fn macos_navigation_toggle_follows_traffic_lights_and_precedes_title() {
+        for dpi in [1.0, 1.5, 2.0] {
+            let mut widget = frame(WindowFrameState::MacOs, dpi);
+            widget.input.navigation_toggle = WindowFrameNavigationToggle::Enabled;
+            let toggle = widget.navigation_toggle_rect();
+            assert_eq!(toggle.x, 80.0 * dpi);
+            assert!(widget.title_text_rect().x > toggle.right());
+            assert_eq!(
+                widget
+                    .on_event(&press(toggle.x + toggle.w * 0.5, toggle.y + toggle.h * 0.5))
+                    .action,
+                Some(WindowFrameAction::ToggleNavigation)
+            );
+            widget.input.navigation_toggle = WindowFrameNavigationToggle::Disabled;
+            assert_eq!(
+                widget
+                    .on_event(&press(toggle.x + toggle.w * 0.5, toggle.y + toggle.h * 0.5))
+                    .action,
+                None
+            );
+        }
+    }
+
+    #[test]
+    fn macos_preserves_native_controls_and_resize_without_windows_chrome() {
+        let theme = Theme::from_definition(&crate::theme::ThemeDefinition::default_light());
+        for dpi in [1.0, 1.5, 2.0] {
+            let mut widget = frame(WindowFrameState::MacOs, dpi);
+            assert!(!widget.on_event(&press(40.0 * dpi, 18.0 * dpi)).consumed);
+            assert_eq!(widget.control_rects(), [Rect::ZERO; 3]);
+            assert_eq!(widget.resize_direction(1.0 * dpi, 200.0 * dpi), None);
+            assert_eq!(
+                widget.on_event(&press(1199.0 * dpi, 18.0 * dpi)).action,
+                Some(WindowFrameAction::Drag)
+            );
+            let mut list = DrawList::new();
+            widget.paint_title(&mut PaintCtx::new(&mut list, &theme, dpi));
+            assert_eq!(
+                list.cmds.len(),
+                1,
+                "without a shaper or navigation button only the title background is drawn"
+            );
+            list.cmds.clear();
+            widget.paint_border(&mut PaintCtx::new(&mut list, &theme, dpi));
+            assert!(list.cmds.is_empty());
+        }
+    }
+
+    #[test]
+    fn macos_drag_positions_exclude_native_buttons_navigation_and_content() {
+        for dpi in [1.0, 1.5, 2.0] {
+            let mut widget = frame(WindowFrameState::MacOs, dpi);
+            widget.input.navigation_toggle = WindowFrameNavigationToggle::Enabled;
+            for (x, y, draggable) in [
+                (40.0, 18.0, false),
+                (94.0, 18.0, false),
+                (250.0, 18.0, true),
+                (250.0, 34.0, true),
+                (250.0, 100.0, false),
+            ] {
+                assert_eq!(widget.is_title_drag_position(x * dpi, y * dpi), draggable);
+            }
+        }
     }
 
     #[test]

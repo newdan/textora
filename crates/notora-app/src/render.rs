@@ -3484,6 +3484,7 @@ mod tests {
             for dpi in [1.0, 1.5, 2.0] {
                 for frame_state in [
                     ui::window_frame::WindowFrameState::Native,
+                    ui::window_frame::WindowFrameState::MacOs,
                     ui::window_frame::WindowFrameState::Restored,
                 ] {
                     let title_height = frame_state.title_height(dpi);

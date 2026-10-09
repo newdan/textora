@@ -3,6 +3,18 @@ use appkit_shell::editor_runtime::{EditorCursorBlinkPhase, EditorRuntime};
 use winit::event_loop::EventLoopProxy;
 use winit::window::CursorIcon;
 
+#[cfg(target_os = "macos")]
+#[path = "window_runtime/macos_titlebar.rs"]
+mod macos_titlebar;
+
+#[cfg(all(test, target_os = "macos"))]
+#[test]
+fn macos_frame_reserves_custom_title_bar_at_each_dpi() {
+    for dpi in [1.0, 1.5, 2.0] {
+        assert!(frame_state(None).title_height(dpi) > 0.0);
+    }
+}
+
 #[cfg(target_os = "windows")]
 #[path = "window_runtime/window_shape.rs"]
 mod window_shape;
@@ -11,6 +23,9 @@ pub(super) fn frame_state(
     window: Option<&winit::window::Window>,
 ) -> ui::window_frame::WindowFrameState {
     use ui::window_frame::WindowFrameState;
+    if cfg!(target_os = "macos") {
+        return WindowFrameState::MacOs;
+    }
     if !cfg!(target_os = "windows") {
         return WindowFrameState::Native;
     }
@@ -18,6 +33,15 @@ pub(super) fn frame_state(
         return WindowFrameState::Maximized;
     }
     WindowFrameState::Restored
+}
+
+pub(super) fn drag_window(
+    window: &winit::window::Window,
+) -> Result<(), winit::error::ExternalError> {
+    #[cfg(target_os = "macos")]
+    return macos_titlebar::drag_window(window);
+    #[cfg(not(target_os = "macos"))]
+    window.drag_window()
 }
 
 const DEFAULT_WINDOW_WIDTH_PX: f32 = 1_200.0;
@@ -55,14 +79,19 @@ impl WindowRuntime {
         self.event_loop_proxy = Some(proxy);
     }
 
-    pub(super) fn synchronize_shape(&mut self, editor_runtime: &EditorRuntime) {
+    pub(super) fn synchronize_window_chrome(&mut self, editor_runtime: &EditorRuntime) {
+        #[cfg(target_os = "macos")]
+        if let Some(window) = editor_runtime.window() {
+            macos_titlebar::align_traffic_lights(window);
+            macos_titlebar::synchronize_pointer_dragging(window, self.pointer_position);
+        }
         #[cfg(target_os = "windows")]
         if let Some(window) = editor_runtime.window()
             && let Err(error) = self.window_shape.synchronize(window)
         {
             eprintln!("[window] 无法同步圆角轮廓：{error}");
         }
-        #[cfg(not(target_os = "windows"))]
+        #[cfg(not(any(target_os = "windows", target_os = "macos")))]
         let _ = editor_runtime;
     }
 
@@ -93,8 +122,19 @@ impl WindowRuntime {
         (self.width_px, self.height_px)
     }
 
-    pub(super) fn set_pointer_position(&mut self, px: f32, py: f32) {
+    pub(super) fn set_pointer_position(
+        &mut self,
+        px: f32,
+        py: f32,
+        editor_runtime: &EditorRuntime,
+    ) {
         self.pointer_position = (px, py);
+        #[cfg(target_os = "macos")]
+        if let Some(window) = editor_runtime.window() {
+            macos_titlebar::synchronize_pointer_dragging(window, self.pointer_position);
+        }
+        #[cfg(not(target_os = "macos"))]
+        let _ = editor_runtime;
     }
 
     pub(super) fn pointer_position(&self) -> (f32, f32) {

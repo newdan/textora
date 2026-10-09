@@ -45,7 +45,14 @@ tempfile.workspace = true
 name = "library_bench"
 harness = false
 
+[[test]]
+name = "macos_titlebar"
+harness = false
+
 [target.'cfg(target_os = "macos")'.dependencies]
+objc2.workspace = true
+objc2-app-kit.workspace = true
+objc2-foundation.workspace = true
 wgpu = { workspace = true, features = ["metal"] }
 
 [target.'cfg(target_os = "linux")'.dependencies]
