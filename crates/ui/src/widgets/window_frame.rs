@@ -1,0 +1,425 @@
+//! 沉浸式窗口外壳。只接收标题与平台窗口状态，不访问产品模型。
+
+use crate::core::widget::{PointerClickKind, PointerClickTracker};
+use crate::{Event, MouseButton, PaintCtx, Rect};
+use winit::window::{CursorIcon, ResizeDirection};
+
+const TITLE_HEIGHT_LOGICAL: f32 = 36.0;
+const CONTROL_WIDTH_LOGICAL: f32 = 46.0;
+const CONTROL_ICON_SIZE_LOGICAL: f32 = 14.0;
+const TITLE_INSET_LOGICAL: f32 = 16.0;
+const TITLE_FONT_SIZE_LOGICAL: f32 = 13.0;
+const TEXT_BASELINE_EM: f32 = 0.35;
+const RESIZE_MARGIN_LOGICAL: f32 = 6.0;
+const FRAME_BORDER_PHYSICAL: f32 = 1.0;
+const RESTORE_SQUARE_LOGICAL: f32 = 9.0;
+const RESTORE_OFFSET_LOGICAL: f32 = 3.0;
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum WindowFrameState {
+    #[default]
+    Native,
+    Restored,
+    Maximized,
+}
+
+impl WindowFrameState {
+    pub fn title_height(self, dpi: f32) -> f32 {
+        if self == Self::Native { 0.0 } else { TITLE_HEIGHT_LOGICAL * dpi }
+    }
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct WindowFrameInput {
+    pub title: String,
+    pub state: WindowFrameState,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum WindowFrameAction {
+    Drag,
+    Resize(ResizeDirection),
+    Minimize,
+    ToggleMaximize,
+    Close,
+}
+
+#[derive(Default)]
+pub struct WindowFrameEvent {
+    pub consumed: bool,
+    pub needs_redraw: bool,
+    pub action: Option<WindowFrameAction>,
+    pub cursor: Option<CursorIcon>,
+}
+
+#[derive(Default)]
+pub struct WindowFrameWidget {
+    input: WindowFrameInput,
+    window_rect: Rect,
+    dpi: f32,
+    hovered_control: Option<usize>,
+    title_clicks: PointerClickTracker,
+    pointer_origin: PointerOrigin,
+}
+
+#[derive(Clone, Copy, Default)]
+enum PointerOrigin {
+    #[default]
+    Released,
+    Content(MouseButton),
+}
+
+impl WindowFrameWidget {
+    pub fn set_input(&mut self, input: WindowFrameInput, window_rect: Rect, dpi: f32) {
+        self.input = input;
+        self.window_rect = window_rect;
+        self.dpi = dpi.max(1.0);
+    }
+
+    fn title_rect(&self) -> Rect {
+        Rect::new(
+            self.window_rect.x,
+            self.window_rect.y,
+            self.window_rect.w,
+            self.input.state.title_height(self.dpi).min(self.window_rect.h),
+        )
+    }
+
+    fn control_rects(&self) -> [Rect; 3] {
+        let title = self.title_rect();
+        let width = (CONTROL_WIDTH_LOGICAL * self.dpi).min(title.w / 3.0);
+        std::array::from_fn(|index| {
+            Rect::new(title.right() - (3 - index) as f32 * width, title.y, width, title.h)
+        })
+    }
+
+    fn resize_direction(&self, px: f32, py: f32) -> Option<ResizeDirection> {
+        if self.input.state != WindowFrameState::Restored || !self.window_rect.contains(px, py) {
+            return None;
+        }
+        let margin = RESIZE_MARGIN_LOGICAL * self.dpi;
+        let left = px < self.window_rect.x + margin;
+        let right = px >= self.window_rect.right() - margin;
+        let top = py < self.window_rect.y + margin;
+        let bottom = py >= self.window_rect.bottom() - margin;
+        match (left, right, top, bottom) {
+            (true, _, true, _) => Some(ResizeDirection::NorthWest),
+            (_, true, true, _) => Some(ResizeDirection::NorthEast),
+            (true, _, _, true) => Some(ResizeDirection::SouthWest),
+            (_, true, _, true) => Some(ResizeDirection::SouthEast),
+            (true, _, _, _) => Some(ResizeDirection::West),
+            (_, true, _, _) => Some(ResizeDirection::East),
+            (_, _, true, _) => Some(ResizeDirection::North),
+            (_, _, _, true) => Some(ResizeDirection::South),
+            _ => None,
+        }
+    }
+
+    pub fn on_event(&mut self, event: &Event) -> WindowFrameEvent {
+        let previous_hover = self.hovered_control;
+        let mut route = match (self.pointer_origin, event) {
+            (PointerOrigin::Content(button), Event::MouseUp { button: released_button, .. })
+                if button == *released_button =>
+            {
+                self.pointer_origin = PointerOrigin::Released;
+                self.hovered_control = None;
+                WindowFrameEvent::default()
+            }
+            (PointerOrigin::Content(_), Event::MouseMove { .. }) => {
+                self.hovered_control = None;
+                WindowFrameEvent::default()
+            }
+            _ => self.route_event(event),
+        };
+        route.needs_redraw = previous_hover != self.hovered_control;
+        route
+    }
+
+    fn route_event(&mut self, event: &Event) -> WindowFrameEvent {
+        if self.input.state == WindowFrameState::Native {
+            return WindowFrameEvent::default();
+        }
+        let (px, py) = match event {
+            Event::MouseMove { px, py }
+            | Event::MouseDown { px, py, .. }
+            | Event::MouseUp { px, py, .. }
+            | Event::Wheel { px, py, .. } => (*px, *py),
+            Event::PointerLeave | Event::InteractionCancel => {
+                self.hovered_control = None;
+                self.title_clicks.reset();
+                if matches!(event, Event::InteractionCancel) {
+                    self.pointer_origin = PointerOrigin::Released;
+                }
+                return WindowFrameEvent::default();
+            }
+            _ => return WindowFrameEvent::default(),
+        };
+        self.hovered_control = self.control_rects().iter().position(|rect| rect.contains(px, py));
+        if let Some(direction) = self.resize_direction(px, py) {
+            self.hovered_control = None;
+            let pressed = matches!(event, Event::MouseDown { button: MouseButton::Left, .. });
+            return WindowFrameEvent {
+                consumed: true,
+                action: pressed.then_some(WindowFrameAction::Resize(direction)),
+                cursor: Some(direction.into()),
+                ..WindowFrameEvent::default()
+            };
+        }
+        if !self.title_rect().contains(px, py) {
+            if let Event::MouseDown { button, .. } = event {
+                self.pointer_origin = PointerOrigin::Content(*button);
+                self.title_clicks.reset();
+            }
+            return WindowFrameEvent::default();
+        }
+        let action = matches!(event, Event::MouseDown { button: MouseButton::Left, .. })
+            .then(|| self.title_press_action(px, py));
+        WindowFrameEvent {
+            consumed: true,
+            action,
+            cursor: Some(CursorIcon::Default),
+            ..WindowFrameEvent::default()
+        }
+    }
+
+    fn title_press_action(&mut self, px: f32, py: f32) -> WindowFrameAction {
+        if let Some(index) = self.hovered_control {
+            self.title_clicks.reset();
+            return [
+                WindowFrameAction::Minimize,
+                WindowFrameAction::ToggleMaximize,
+                WindowFrameAction::Close,
+            ][index];
+        }
+        if self.title_clicks.record_press((px, py)) == PointerClickKind::Double {
+            self.title_clicks.reset();
+            WindowFrameAction::ToggleMaximize
+        } else {
+            WindowFrameAction::Drag
+        }
+    }
+
+    pub fn paint_title(&self, context: &mut PaintCtx<'_>) {
+        let title = self.title_rect();
+        if title.w <= 0.0 || title.h <= 0.0 {
+            return;
+        }
+        let application = context.theme.application_theme();
+        context.list.fill(title, application.window_surface);
+        let controls = self.control_rects();
+        let inset = TITLE_INSET_LOGICAL * self.dpi;
+        let text_rect = Rect::new(
+            title.x + inset,
+            title.y,
+            (controls[0].x - title.x - inset * 2.0).max(0.0),
+            title.h,
+        );
+        let font_size = TITLE_FONT_SIZE_LOGICAL * self.dpi;
+        let baseline = title.y + title.h * 0.5 + font_size * TEXT_BASELINE_EM;
+        if let Some(shaper) = context.shaper.as_mut() {
+            context.list.clip(text_rect, |list| {
+                list.text_shaped(
+                    text_rect.x,
+                    baseline,
+                    font_size,
+                    application.text_secondary,
+                    &self.input.title,
+                    shaper,
+                );
+            });
+        }
+        for (index, rect) in controls.into_iter().enumerate() {
+            let hovered = self.hovered_control == Some(index);
+            let foreground = if hovered && index == 2 {
+                application.text_inverse
+            } else {
+                application.text_secondary
+            };
+            if hovered {
+                context.list.fill(
+                    rect,
+                    if index == 2 {
+                        application.danger
+                    } else {
+                        application.navigation_hover_surface
+                    },
+                );
+            }
+            self.paint_control(context, rect, index, foreground);
+        }
+    }
+
+    fn paint_control(&self, context: &mut PaintCtx<'_>, rect: Rect, index: usize, color: [f32; 4]) {
+        if index == 1 && self.input.state == WindowFrameState::Maximized {
+            self.paint_restore_control(context, rect, color);
+            return;
+        }
+        let icon_size = CONTROL_ICON_SIZE_LOGICAL * self.dpi;
+        let icon = match index {
+            0 => "minus",
+            1 => "maximize",
+            _ => "x",
+        };
+        crate::icon::draw_icon(
+            context.list,
+            icon,
+            rect.x + (rect.w - icon_size) * 0.5,
+            rect.y + (rect.h - icon_size) * 0.5,
+            icon_size,
+            color,
+        );
+    }
+
+    fn paint_restore_control(&self, context: &mut PaintCtx<'_>, rect: Rect, color: [f32; 4]) {
+        let size = RESTORE_SQUARE_LOGICAL * self.dpi;
+        let offset = RESTORE_OFFSET_LOGICAL * self.dpi;
+        let left = rect.x + (rect.w - size - offset) * 0.5;
+        let top = rect.y + (rect.h - size - offset) * 0.5;
+        context.list.stroke_rounded(
+            Rect::new(left + offset, top, size, size),
+            color,
+            0.0,
+            self.dpi,
+        );
+        let front = Rect::new(left, top + offset, size, size);
+        let application = context.theme.application_theme();
+        let background = if self.hovered_control == Some(1) {
+            application.navigation_hover_surface
+        } else {
+            application.window_surface
+        };
+        context.list.fill(front, background);
+        context.list.stroke_rounded(front, color, 0.0, self.dpi);
+    }
+
+    /// 最后绘制，确保内容或弹窗不会覆盖窗口边界。
+    pub fn paint_border(&self, context: &mut PaintCtx<'_>) {
+        if self.input.state != WindowFrameState::Restored {
+            return;
+        }
+        let rect = self.window_rect;
+        if rect.w <= 0.0 || rect.h <= 0.0 {
+            return;
+        }
+        let width = FRAME_BORDER_PHYSICAL.min(rect.w).min(rect.h);
+        let color = context.theme.application_theme().strong_border;
+        for edge in [
+            Rect::new(rect.x, rect.y, rect.w, width),
+            Rect::new(rect.x, rect.bottom() - width, rect.w, width),
+            Rect::new(rect.x, rect.y, width, rect.h),
+            Rect::new(rect.right() - width, rect.y, width, rect.h),
+        ] {
+            context.list.fill(edge, color);
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{DrawCmd, DrawList, Theme};
+
+    fn frame(state: WindowFrameState, dpi: f32) -> WindowFrameWidget {
+        let mut widget = WindowFrameWidget::default();
+        widget.set_input(
+            WindowFrameInput { title: "notora".to_owned(), state },
+            Rect::new(0.0, 0.0, 1200.0 * dpi, 800.0 * dpi),
+            dpi,
+        );
+        widget
+    }
+
+    fn press(px: f32, py: f32) -> Event {
+        Event::MouseDown { px, py, button: MouseButton::Left }
+    }
+
+    #[test]
+    fn title_drag_double_click_and_controls_have_distinct_actions() {
+        let mut widget = frame(WindowFrameState::Restored, 1.0);
+        assert_eq!(widget.on_event(&press(100.0, 18.0)).action, Some(WindowFrameAction::Drag));
+        assert_eq!(
+            widget.on_event(&press(100.0, 18.0)).action,
+            Some(WindowFrameAction::ToggleMaximize)
+        );
+        for (rect, expected) in widget.control_rects().into_iter().zip([
+            WindowFrameAction::Minimize,
+            WindowFrameAction::ToggleMaximize,
+            WindowFrameAction::Close,
+        ]) {
+            assert_eq!(
+                widget.on_event(&press(rect.x + rect.w * 0.5, rect.y + rect.h * 0.5)).action,
+                Some(expected)
+            );
+        }
+        assert!(!widget.on_event(&press(300.0, 200.0)).consumed);
+    }
+
+    #[test]
+    fn edges_resize_at_each_dpi_but_maximized_windows_do_not() {
+        for dpi in [1.0, 1.5, 2.0] {
+            let mut widget = frame(WindowFrameState::Restored, dpi);
+            for (px, py, direction) in [
+                (1.0, 1.0, ResizeDirection::NorthWest),
+                (1199.0, 1.0, ResizeDirection::NorthEast),
+                (1.0, 799.0, ResizeDirection::SouthWest),
+                (1199.0, 799.0, ResizeDirection::SouthEast),
+                (1.0, 400.0, ResizeDirection::West),
+                (1199.0, 400.0, ResizeDirection::East),
+                (600.0, 1.0, ResizeDirection::North),
+                (600.0, 799.0, ResizeDirection::South),
+            ] {
+                assert_eq!(
+                    widget.on_event(&press(px * dpi, py * dpi)).action,
+                    Some(WindowFrameAction::Resize(direction))
+                );
+            }
+        }
+        let mut widget = frame(WindowFrameState::Maximized, 1.0);
+        assert_eq!(widget.resize_direction(1.0, 1.0), None);
+        assert_eq!(widget.on_event(&press(1199.0, 18.0)).action, Some(WindowFrameAction::Close));
+    }
+
+    #[test]
+    fn frame_uses_warm_shell_surface_and_four_physical_pixel_borders() {
+        let theme = Theme::from_definition(&crate::theme::ThemeDefinition::default_light());
+        let widget = frame(WindowFrameState::Restored, 2.0);
+        let mut list = DrawList::new();
+        widget.paint_title(&mut PaintCtx::new(&mut list, &theme, 2.0));
+        assert!(
+            matches!(list.cmds.first(), Some(DrawCmd::FillRect { rect, color, .. }) if rect.h == 72.0 && *color == theme.application_theme().window_surface)
+        );
+        list.cmds.clear();
+        widget.paint_border(&mut PaintCtx::new(&mut list, &theme, 2.0));
+        assert_eq!(list.cmds.len(), 4);
+        for command in list.cmds {
+            assert!(
+                matches!(command, DrawCmd::FillRect { rect, color, .. } if (rect.w == 1.0 || rect.h == 1.0) && color == theme.application_theme().strong_border)
+            );
+        }
+    }
+
+    #[test]
+    fn native_frame_does_not_paint_or_consume_product_events() {
+        let mut widget = frame(WindowFrameState::Native, 1.0);
+        assert!(!widget.on_event(&press(100.0, 18.0)).consumed);
+        let theme = Theme::from_definition(&crate::theme::ThemeDefinition::default_dark());
+        let mut list = DrawList::new();
+        let mut context = PaintCtx::new(&mut list, &theme, 1.0);
+        widget.paint_title(&mut context);
+        widget.paint_border(&mut context);
+        assert!(list.cmds.is_empty());
+    }
+
+    #[test]
+    fn content_drag_keeps_move_and_release_when_it_crosses_the_title_bar() {
+        let mut widget = frame(WindowFrameState::Restored, 1.0);
+        assert!(!widget.on_event(&press(300.0, 200.0)).consumed);
+        assert!(!widget.on_event(&Event::MouseMove { px: 300.0, py: 18.0 }).consumed);
+        assert!(
+            !widget
+                .on_event(&Event::MouseUp { px: 300.0, py: 18.0, button: MouseButton::Left })
+                .consumed
+        );
+        assert!(widget.on_event(&Event::MouseMove { px: 300.0, py: 18.0 }).consumed);
+    }
+}

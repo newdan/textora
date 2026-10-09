@@ -65,6 +65,30 @@ pub struct ShellLayout {
 }
 
 impl ShellLayout {
+    /// 标题栏由 UI 单独绘制；所有产品区域和弹窗均使用其下方的坐标空间。
+    pub fn compute_below_title_bar(mut input: ShellLayoutInput, title_height_px: f32) -> Self {
+        let title_height_px = title_height_px.clamp(0.0, input.window_height_px.max(0.0));
+        input.window_height_px = (input.window_height_px - title_height_px).max(0.0);
+        let mut layout = Self::compute(input);
+        for rect in [
+            &mut layout.navigation_rect,
+            &mut layout.navigation_splitter_rect,
+            &mut layout.card_list_rect,
+            &mut layout.card_list_splitter_rect,
+            &mut layout.editor_rect,
+            &mut layout.editor_header_rect,
+            &mut layout.editor_toolbar_rect,
+            &mut layout.editor_body_rect,
+            &mut layout.overlay_rect,
+            &mut layout.menu_rect,
+        ] {
+            if *rect != Rect::ZERO {
+                rect.y += title_height_px;
+            }
+        }
+        layout
+    }
+
     pub fn compute(input: ShellLayoutInput) -> Self {
         let dpi = input.dpi.max(1.0);
         let window_rect =
@@ -312,6 +336,31 @@ mod tests {
             compact_navigation: CompactNavigation::Hidden,
             editor_property_row_visible: true,
             editor_header_visible: true,
+        }
+    }
+
+    #[test]
+    fn immersive_title_bar_reserves_space_in_every_responsive_mode_and_dpi() {
+        for dpi in [1.0, 1.5, 2.0] {
+            for width in [500.0, 700.0, 1200.0] {
+                let mut shell_input = input(width * dpi, dpi);
+                shell_input.compact_navigation = CompactNavigation::Visible;
+                let title_height = ui::window_frame::WindowFrameState::Restored.title_height(dpi);
+                let layout = ShellLayout::compute_below_title_bar(shell_input, title_height);
+                for rect in [
+                    layout.navigation_rect,
+                    layout.card_list_rect,
+                    layout.editor_rect,
+                    layout.overlay_rect,
+                ] {
+                    if rect != Rect::ZERO {
+                        assert_eq!(rect.y, title_height);
+                        assert_eq!(rect.bottom(), shell_input.window_height_px);
+                    }
+                }
+                assert_non_negative(layout);
+                assert_editor_chrome_is_partitioned(layout);
+            }
         }
     }
 

@@ -103,6 +103,31 @@ const SHUTDOWN_SAVE_DRAIN_TIMEOUT: Duration = Duration::from_secs(2);
 const SHUTDOWN_SAVE_DRAIN_POLL_INTERVAL: Duration = Duration::from_millis(10);
 const DEFAULT_RUNTIME_TAB_LIMIT: usize = 12;
 
+fn notora_window_attributes() -> WindowAttributes {
+    let attributes = WindowAttributes::default()
+        .with_title(PRODUCT_WINDOW_TITLE)
+        .with_decorations(!cfg!(target_os = "windows"))
+        .with_min_inner_size(LogicalSize::new(
+            crate::shell::layout::MINIMUM_WINDOW_WIDTH_LOGICAL,
+            crate::shell::layout::MINIMUM_WINDOW_HEIGHT_LOGICAL,
+        ));
+    #[cfg(target_os = "windows")]
+    {
+        use winit::platform::windows::WindowAttributesExtWindows;
+        attributes.with_undecorated_shadow(true)
+    }
+    #[cfg(not(target_os = "windows"))]
+    attributes
+}
+
+#[cfg(test)]
+#[test]
+fn window_attributes_preserve_product_title_and_platform_decorations() {
+    let attributes = notora_window_attributes();
+    assert_eq!(attributes.title, "notora");
+    assert_eq!(attributes.decorations, !cfg!(target_os = "windows"));
+}
+
 type WorkspaceDirectoryChooser = Box<dyn Fn() -> Option<std::path::PathBuf>>;
 type ExternalFileClosePrompt =
     Box<dyn Fn(&str, Option<&winit::window::Window>) -> ExternalFileCloseChoice>;
@@ -601,22 +626,34 @@ impl NotoraRuntime {
         let (window_width_px, window_height_px) = self.window_runtime.size();
         let editor_pane_mode =
             crate::render::selected_editor_pane_mode(self.action_runtime.state());
-        ShellLayout::compute(ShellLayoutInput {
-            window_width_px,
-            window_height_px,
-            dpi,
-            navigation_width_logical: self.action_runtime.state().layout.navigation_width_logical,
-            card_list_width_logical: self.action_runtime.state().layout.card_list_width_logical,
-            navigation_pane_visibility: self
-                .action_runtime
-                .state()
-                .layout
-                .navigation_pane_visibility,
-            compact_content: self.action_runtime.state().layout.compact_content,
-            compact_navigation: self.action_runtime.state().layout.compact_navigation,
-            editor_property_row_visible: editor_pane_mode.shows_property_row(),
-            editor_header_visible: editor_pane_mode.shows_header(),
-        })
+        let title_height = if cfg!(target_os = "windows") {
+            ui::window_frame::WindowFrameState::Restored.title_height(dpi)
+        } else {
+            0.0
+        };
+        ShellLayout::compute_below_title_bar(
+            ShellLayoutInput {
+                window_width_px,
+                window_height_px,
+                dpi,
+                navigation_width_logical: self
+                    .action_runtime
+                    .state()
+                    .layout
+                    .navigation_width_logical,
+                card_list_width_logical: self.action_runtime.state().layout.card_list_width_logical,
+                navigation_pane_visibility: self
+                    .action_runtime
+                    .state()
+                    .layout
+                    .navigation_pane_visibility,
+                compact_content: self.action_runtime.state().layout.compact_content,
+                compact_navigation: self.action_runtime.state().layout.compact_navigation,
+                editor_property_row_visible: editor_pane_mode.shows_property_row(),
+                editor_header_visible: editor_pane_mode.shows_header(),
+            },
+            title_height,
+        )
     }
 
     pub fn dispatch_action(&mut self, action: NotoraAction) {
@@ -911,6 +948,56 @@ impl NotoraRuntime {
         product_consumed
     }
 
+    pub(crate) fn route_window_frame_event(
+        &mut self,
+        event: &ui::Event,
+        event_loop: &ActiveEventLoop,
+    ) -> bool {
+        let route = self.frame_runtime.route_window_frame_event(event);
+        if let Some(cursor) = route.cursor {
+            self.set_window_cursor(cursor);
+        }
+        if route.needs_redraw {
+            self.window_runtime.schedule_redraw();
+        }
+        if let Some(action) = route.action {
+            self.apply_window_frame_action(action, event_loop);
+        }
+        route.consumed
+    }
+
+    fn apply_window_frame_action(
+        &mut self,
+        action: ui::window_frame::WindowFrameAction,
+        event_loop: &ActiveEventLoop,
+    ) {
+        use ui::window_frame::WindowFrameAction;
+        if action == WindowFrameAction::Close {
+            self.shutdown();
+            event_loop.exit();
+            return;
+        }
+        let Some(window) = self.document_runtime.editor().window() else {
+            return;
+        };
+        match action {
+            WindowFrameAction::Drag => {
+                if let Err(error) = window.drag_window() {
+                    eprintln!("notora window drag failed: {error}");
+                }
+            }
+            WindowFrameAction::Resize(direction) => {
+                if let Err(error) = window.drag_resize_window(direction) {
+                    eprintln!("notora window resize failed: {error}");
+                }
+            }
+            WindowFrameAction::Minimize => window.set_minimized(true),
+            WindowFrameAction::ToggleMaximize => window.set_maximized(!window.is_maximized()),
+            WindowFrameAction::Close => {}
+        }
+        window.request_redraw();
+    }
+
     pub(crate) fn editor_pointer_is_captured(&self) -> bool {
         self.document_runtime.editor().pointer_capture()
             != appkit_shell::editor_runtime::MouseCapture::None
@@ -967,18 +1054,7 @@ impl NotoraRuntime {
         let font_family = self.frame_runtime.settings().font_family.clone();
         self.document_runtime
             .editor_mut()
-            .resume(
-                event_loop,
-                WindowAttributes::default().with_title("notora").with_min_inner_size(
-                    LogicalSize::new(
-                        crate::shell::layout::MINIMUM_WINDOW_WIDTH_LOGICAL,
-                        crate::shell::layout::MINIMUM_WINDOW_HEIGHT_LOGICAL,
-                    ),
-                ),
-                font_system,
-                font_size,
-                &font_family,
-            )
+            .resume(event_loop, notora_window_attributes(), font_system, font_size, &font_family)
             .map_err(NotoraAppError::Runtime)?;
         self.frame_runtime
             .record_startup_stage("window_gpu_text_ready", editor_runtime_resume_started_at);
@@ -5140,10 +5216,11 @@ mod tests {
         let mut app = app();
         app.render().expect("headless shell frame should render");
         app.dispatch_action(NotoraAction::FocusRequested(FocusTarget::Editor));
+        let search_rect = app.frame_runtime.shell.search_box_rect();
 
         assert!(app.route_product_event(&ui::Event::MouseDown {
-            px: 24.0,
-            py: 24.0,
+            px: search_rect.x + search_rect.w * 0.5,
+            py: search_rect.y + search_rect.h * 0.5,
             button: ui::core::MouseButton::Left,
         }));
 
@@ -5460,10 +5537,11 @@ mod tests {
         app.dispatch_action(NotoraAction::FocusRequested(FocusTarget::Editor));
         assert!(app.update_editor_preedit("document".to_owned(), Some((0, 8))));
         app.render().expect("headless shell frame should render");
+        let search_rect = app.frame_runtime.shell.search_box_rect();
 
         assert!(app.route_product_event(&ui::Event::MouseDown {
-            px: 24.0,
-            py: 24.0,
+            px: search_rect.x + search_rect.w * 0.5,
+            py: search_rect.y + search_rect.h * 0.5,
             button: ui::core::widget::MouseButton::Left,
         }));
         assert_eq!(app.action_runtime.state().layout.focus_target, FocusTarget::NavigationSearch);

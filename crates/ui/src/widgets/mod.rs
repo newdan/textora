@@ -37,3 +37,4 @@ pub mod settings_view;
 pub mod toc;
 pub mod tree_list;
 pub mod virtual_card_list;
+pub mod window_frame;

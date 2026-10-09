@@ -11,13 +11,11 @@ fn app() -> NotoraApp {
 }
 
 #[test]
-fn binary_title_and_three_pane_editor_rect_are_product_specific() {
+fn binary_and_three_pane_editor_rect_are_product_specific() {
     let manifest = include_str!("../Cargo.toml");
-    let runtime_source = include_str!("../src/runtime.rs");
     let layout = app().shell_layout();
 
     assert!(manifest.contains("name = \"notora\""));
-    assert!(runtime_source.contains("with_title(\"notora\")"));
     assert!(layout.editor_rect.x > 0.0);
     assert!(layout.navigation_rect.right() <= layout.editor_rect.x);
     assert!(layout.card_list_rect.right() <= layout.editor_rect.x);

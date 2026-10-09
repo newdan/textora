@@ -192,6 +192,7 @@ impl EditorPaneChrome {
         self.tag_rect =
             tag_rect(rects.header, context.dpi, self.input.tags.enabled, self.workspace_rect.w);
         self.location_rect = location_rect(rects.header, context.dpi, self.input.location.open);
+        self.header.set_background(context.theme.application_theme().editor_surface);
         self.header.set_rect(local_rect(self.document_header_rect), context);
         self.toolbar.set_rect(local_rect(rects.toolbar), context);
         self.tag_editor.set_rect(local_rect(self.tag_rect), context);
@@ -326,7 +327,7 @@ impl EditorPaneChrome {
         if !self.input.should_render_chrome() {
             return;
         }
-        let chrome_surface = context.theme.application_theme().navigation_surface;
+        let chrome_surface = context.theme.application_theme().editor_surface;
         context.list.fill(self.rects.header, chrome_surface);
         context.list.fill(self.rects.toolbar, chrome_surface);
         if self.input.mode.shows_header() {
@@ -769,7 +770,7 @@ mod tests {
     }
 
     #[test]
-    fn pane_header_and_toolbar_share_the_navigation_background() {
+    fn pane_header_and_toolbar_share_the_editor_background() {
         use ui::core::paint::{DrawCmd, DrawList};
 
         for mode in [
@@ -797,7 +798,7 @@ mod tests {
                 let paints_chrome_background = draw_list.cmds.iter().any(|command| {
                     matches!(command, DrawCmd::FillRect { rect, color, .. }
                         if *rect == expected_rect
-                            && *color == theme.application_theme().navigation_surface)
+                            && *color == theme.application_theme().editor_surface)
                 });
                 assert_eq!(paints_chrome_background, mode != EditorPaneMode::Empty);
             }

@@ -1702,8 +1702,9 @@ impl NotoraShell {
         });
         frame.with_underlay_paint_context(|context| {
             let application_theme = context.theme.application_theme();
-            context.list.fill(layout.navigation_rect, application_theme.navigation_surface);
-            context.list.fill(layout.card_list_rect, application_theme.content_surface);
+            // 顶部和导航属于同一外壳；中栏比外壳浅，正文保持编辑器底色。
+            context.list.fill(layout.navigation_rect, application_theme.window_surface);
+            context.list.fill(layout.card_list_rect, application_theme.navigation_surface);
             context.list.fill(layout.editor_rect, application_theme.editor_surface);
             self.editor_pane.paint_underlay(context);
             if layout.navigation_rect != Rect::ZERO {
@@ -2620,7 +2621,7 @@ impl NotoraShell {
             self.search_rect.w + SHELL_PADDING_LOGICAL * context.dpi * 2.0,
             self.settings_rect.bottom() + 10.0 * context.dpi,
         );
-        context.list.fill(panel_rect, application_theme.navigation_surface);
+        context.list.fill(panel_rect, application_theme.window_surface);
         self.search_box.paint(context);
         let search_icon_size = SIDEBAR_ICON_SIZE_LOGICAL * context.dpi;
         draw_icon(
@@ -3430,6 +3431,61 @@ fn card_list_title(scope: &NavigationScope) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn three_panes_keep_distinct_surfaces_below_the_immersive_title_bar() {
+        let config_directory = tempfile::tempdir().expect("surface test config should be created");
+        let paths = crate::NotoraPaths::from_config_directory(config_directory.path())
+            .expect("surface test paths should be created");
+        let mut app =
+            crate::NotoraApp::with_paths(paths).expect("surface test should create a headless app");
+        let mut shell = NotoraShell::new();
+        let model = NotoraRenderModel::from_state(&crate::NotoraState::default());
+        for definition in [
+            ui::theme::ThemeDefinition::default_light(),
+            ui::theme::ThemeDefinition::default_dark(),
+        ] {
+            let theme = ui::Theme::from_definition(&definition);
+            let surfaces = theme.application_theme();
+            assert_ne!(surfaces.window_surface, surfaces.navigation_surface);
+            assert_ne!(surfaces.navigation_surface, surfaces.editor_surface);
+            for dpi in [1.0, 1.5, 2.0] {
+                let title_height = ui::window_frame::WindowFrameState::Restored.title_height(dpi);
+                let layout = ShellLayout::compute_below_title_bar(
+                    crate::shell::layout::ShellLayoutInput {
+                        window_width_px: 1200.0 * dpi,
+                        window_height_px: 800.0 * dpi,
+                        dpi,
+                        navigation_width_logical: 220.0,
+                        card_list_width_logical: 340.0,
+                        navigation_pane_visibility: crate::NavigationPaneVisibility::Expanded,
+                        compact_content: crate::CompactContent::CardList,
+                        compact_navigation: crate::CompactNavigation::Hidden,
+                        editor_property_row_visible: false,
+                        editor_header_visible: false,
+                    },
+                    title_height,
+                );
+                let runtime = app.runtime_mut().editor_runtime_mut();
+                runtime.update_theme(theme.clone());
+                runtime.set_scale_factor(f64::from(dpi));
+                let mut frame = runtime.begin_frame().expect("surface test frame should begin");
+                shell.render(&mut frame, layout, &model).expect("surface test should render");
+                frame.with_underlay_paint_context(|context| {
+                    for (expected_rect, expected_color) in [
+                        (layout.navigation_rect, surfaces.window_surface),
+                        (layout.card_list_rect, surfaces.navigation_surface),
+                        (layout.editor_rect, surfaces.editor_surface),
+                    ] {
+                        assert!(context.list.cmds.iter().any(|command| matches!(command,
+                            ui::DrawCmd::FillRect { rect, color, .. }
+                                if *rect == expected_rect && *color == expected_color
+                        )));
+                    }
+                });
+            }
+        }
+    }
 
     struct TestClipboard(String);
 

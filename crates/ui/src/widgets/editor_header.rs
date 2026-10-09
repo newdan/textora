@@ -53,6 +53,7 @@ pub struct EditorHeaderInput {
 
 pub struct EditorHeaderWidget {
     input: EditorHeaderInput,
+    background: Option<[f32; 4]>,
     rect: Rect,
     title_box: TextBox,
     star_rect: Rect,
@@ -72,6 +73,7 @@ impl EditorHeaderWidget {
         title_box.set_placeholder("无标题");
         Self {
             input: EditorHeaderInput::default(),
+            background: None,
             rect: Rect::ZERO,
             title_box,
             star_rect: Rect::ZERO,
@@ -88,6 +90,11 @@ impl EditorHeaderWidget {
             self.title_box.sync_text(&input.title);
         }
         self.input = input;
+    }
+
+    /// 容器可将头部融入所属内容区域；未设置时沿用导航底色。
+    pub fn set_background(&mut self, background: [f32; 4]) {
+        self.background = Some(background);
     }
 
     pub fn title_text(&self) -> &str {
@@ -288,7 +295,10 @@ impl Widget for EditorHeaderWidget {
         if self.rect.w <= 0.0 || self.rect.h <= 0.0 {
             return;
         }
-        ctx.list.fill(self.rect, ctx.theme.application_theme().navigation_surface);
+        ctx.list.fill(
+            self.rect,
+            self.background.unwrap_or(ctx.theme.application_theme().navigation_surface),
+        );
         self.title_box.paint(ctx);
 
         let dpi = ctx.dpi;
