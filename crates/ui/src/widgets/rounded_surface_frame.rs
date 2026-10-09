@@ -2,7 +2,8 @@
 
 use crate::{PaintCtx, Rect};
 
-pub const CONTENT_CORNER_RADIUS_LOGICAL: f32 = 16.0;
+/// 应用统一采用的 macOS 风格圆角；外窗描边与内容表面共用，按 DPI 缩放。
+pub const SHELL_CORNER_RADIUS_LOGICAL: f32 = 16.0;
 const CORNER_ARC_SEGMENTS: usize = 24;
 const OUTLINE_WIDTH_PHYSICAL: f32 = 1.0;
 
@@ -64,7 +65,7 @@ mod tests {
     fn shared_outline_masks_only_the_outer_corners_at_each_dpi() {
         for dpi in [1.0, 1.5, 2.0] {
             let rect = Rect::new(220.0 * dpi, 36.0 * dpi, 976.0 * dpi, 760.0 * dpi);
-            let frame = RoundedSurfaceFrame { rect, radius: CONTENT_CORNER_RADIUS_LOGICAL * dpi };
+            let frame = RoundedSurfaceFrame { rect, radius: SHELL_CORNER_RADIUS_LOGICAL * dpi };
             let theme = Theme::from_definition(&crate::theme::ThemeDefinition::default_light());
             let mut list = DrawList::new();
             frame.paint(&mut PaintCtx::new(&mut list, &theme, dpi));
@@ -93,12 +94,12 @@ mod tests {
     fn tiny_surfaces_clamp_the_radius_and_empty_surfaces_emit_nothing() {
         let theme = Theme::from_definition(&crate::theme::ThemeDefinition::default_dark());
         let mut list = DrawList::new();
-        RoundedSurfaceFrame { rect: Rect::ZERO, radius: CONTENT_CORNER_RADIUS_LOGICAL }
+        RoundedSurfaceFrame { rect: Rect::ZERO, radius: SHELL_CORNER_RADIUS_LOGICAL }
             .paint(&mut PaintCtx::new(&mut list, &theme, 1.0));
         assert!(list.cmds.is_empty());
         RoundedSurfaceFrame {
             rect: Rect::new(0.0, 0.0, 8.0, 4.0),
-            radius: CONTENT_CORNER_RADIUS_LOGICAL,
+            radius: SHELL_CORNER_RADIUS_LOGICAL,
         }
         .paint(&mut PaintCtx::new(&mut list, &theme, 1.0));
         assert!(

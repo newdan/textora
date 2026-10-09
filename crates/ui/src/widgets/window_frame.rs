@@ -425,16 +425,11 @@ impl WindowFrameWidget {
         if rect.w <= 0.0 || rect.h <= 0.0 {
             return;
         }
-        let width = FRAME_BORDER_PHYSICAL.min(rect.w).min(rect.h);
         let color = context.theme.application_theme().strong_border;
-        for edge in [
-            Rect::new(rect.x, rect.y, rect.w, width),
-            Rect::new(rect.x, rect.bottom() - width, rect.w, width),
-            Rect::new(rect.x, rect.y, width, rect.h),
-            Rect::new(rect.right() - width, rect.y, width, rect.h),
-        ] {
-            context.list.fill(edge, color);
-        }
+        let radius = (crate::rounded_surface_frame::SHELL_CORNER_RADIUS_LOGICAL * self.dpi)
+            .min(rect.w * 0.5)
+            .min(rect.h * 0.5);
+        context.list.stroke_rounded(rect, color, radius, FRAME_BORDER_PHYSICAL);
     }
 }
 
@@ -569,22 +564,32 @@ mod tests {
     }
 
     #[test]
-    fn frame_uses_warm_shell_surface_and_four_physical_pixel_borders() {
+    fn frame_uses_warm_shell_surface_and_the_same_radius_as_content() {
         let theme = Theme::from_definition(&crate::theme::ThemeDefinition::default_light());
-        let mut widget = frame(WindowFrameState::Restored, 2.0);
-        let mut list = DrawList::new();
-        widget.paint_title(&mut PaintCtx::new(&mut list, &theme, 2.0));
-        assert!(
-            matches!(list.cmds.first(), Some(DrawCmd::FillRect { rect, color, .. }) if rect.h == 72.0 && *color == theme.application_theme().window_surface)
-        );
-        list.cmds.clear();
-        widget.paint_border(&mut PaintCtx::new(&mut list, &theme, 2.0));
-        assert_eq!(list.cmds.len(), 4);
-        for command in list.cmds {
+        for dpi in [1.0, 1.5, 2.0] {
+            let mut widget = frame(WindowFrameState::Restored, dpi);
+            let mut list = DrawList::new();
+            widget.paint_title(&mut PaintCtx::new(&mut list, &theme, dpi));
             assert!(
-                matches!(command, DrawCmd::FillRect { rect, color, .. } if (rect.w == 1.0 || rect.h == 1.0) && color == theme.application_theme().strong_border)
+                matches!(list.cmds.first(), Some(DrawCmd::FillRect { rect, color, .. }) if rect.h == TITLE_HEIGHT_LOGICAL * dpi && *color == theme.application_theme().window_surface)
             );
+            list.cmds.clear();
+            widget.paint_border(&mut PaintCtx::new(&mut list, &theme, dpi));
+            assert_eq!(list.cmds.len(), 1);
+            assert!(matches!(list.cmds[0], DrawCmd::StrokeRect { radius, line_width, color, .. }
+                    if radius == crate::rounded_surface_frame::SHELL_CORNER_RADIUS_LOGICAL * dpi
+                        && line_width == FRAME_BORDER_PHYSICAL
+                        && color == theme.application_theme().strong_border));
         }
+    }
+
+    #[test]
+    fn maximized_frame_has_no_rounded_outer_border() {
+        let theme = Theme::from_definition(&crate::theme::ThemeDefinition::default_light());
+        let widget = frame(WindowFrameState::Maximized, 1.0);
+        let mut list = DrawList::new();
+        widget.paint_border(&mut PaintCtx::new(&mut list, &theme, 1.0));
+        assert!(list.cmds.is_empty());
     }
 
     #[test]

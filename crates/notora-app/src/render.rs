@@ -1300,6 +1300,20 @@ impl NotoraShell {
         self.chrome_button_available(ChromeButtonKey::NavigationCollapse, Some(overlay), None)
     }
 
+    fn paint_navigation_splitter(&self, context: &mut ui::PaintCtx<'_>, layout: ShellLayout) {
+        let surface = layout.content_surface_rect();
+        let radius = (ui::rounded_surface_frame::SHELL_CORNER_RADIUS_LOGICAL * layout.dpi)
+            .min(surface.w * 0.5)
+            .min(surface.h * 0.5);
+        let visual_rect = Rect::new(
+            layout.navigation_splitter_rect.x,
+            surface.y + radius,
+            layout.navigation_splitter_rect.w,
+            (surface.h - radius * 2.0).max(0.0),
+        );
+        self.navigation_splitter.paint_handle(context, visual_rect);
+    }
+
     pub fn set_canvas_scrollbars_input(
         &mut self,
         input: Option<CanvasScrollbarsInput>,
@@ -1730,7 +1744,7 @@ impl NotoraShell {
                 }
                 self.paint_chrome_button(context, ChromeButtonKey::Settings);
             }
-            self.navigation_splitter.paint(context);
+            self.paint_navigation_splitter(context, layout);
             self.card_list_splitter.paint(context);
             context.text(
                 card_header.title_x,
@@ -1771,15 +1785,13 @@ impl NotoraShell {
             self.paint_canvas_scrollbars(context);
             self.editor_pane.paint_overlay(context);
         });
-        if layout.has_immersive_title_bar() {
-            frame.with_paint_context(|context| {
-                ui::rounded_surface_frame::RoundedSurfaceFrame {
-                    rect: layout.content_surface_rect(),
-                    radius: ui::rounded_surface_frame::CONTENT_CORNER_RADIUS_LOGICAL * dpi,
-                }
-                .paint(context);
-            });
-        }
+        frame.with_paint_context(|context| {
+            ui::rounded_surface_frame::RoundedSurfaceFrame {
+                rect: layout.content_surface_rect(),
+                radius: ui::rounded_surface_frame::SHELL_CORNER_RADIUS_LOGICAL * dpi,
+            }
+            .paint(context);
+        });
         if self.mindmap_style_panel_open {
             frame.with_paint_context(|context| {
                 paint_at(context, self.mindmap_style_panel_rect, |context| {
@@ -3453,7 +3465,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn three_panes_keep_distinct_surfaces_below_the_immersive_title_bar() {
+    fn three_panes_share_rounded_surfaces_with_native_or_immersive_title_bar() {
         let config_directory = tempfile::tempdir().expect("surface test config should be created");
         let paths = crate::NotoraPaths::from_config_directory(config_directory.path())
             .expect("surface test paths should be created");
@@ -3470,48 +3482,56 @@ mod tests {
             assert_ne!(surfaces.window_surface, surfaces.navigation_surface);
             assert_ne!(surfaces.navigation_surface, surfaces.editor_surface);
             for dpi in [1.0, 1.5, 2.0] {
-                let title_height = ui::window_frame::WindowFrameState::Restored.title_height(dpi);
-                let layout = ShellLayout::compute_below_title_bar(
-                    crate::shell::layout::ShellLayoutInput {
-                        window_width_px: 1200.0 * dpi,
-                        window_height_px: 800.0 * dpi,
-                        dpi,
-                        navigation_width_logical: 220.0,
-                        card_list_width_logical: 340.0,
-                        navigation_pane_visibility: crate::NavigationPaneVisibility::Expanded,
-                        compact_content: crate::CompactContent::CardList,
-                        compact_navigation: crate::CompactNavigation::Hidden,
-                        editor_property_row_visible: false,
-                        editor_header_visible: false,
-                    },
-                    title_height,
-                );
-                let runtime = app.runtime_mut().editor_runtime_mut();
-                runtime.update_theme(theme.clone());
-                runtime.set_scale_factor(f64::from(dpi));
-                let mut frame = runtime.begin_frame().expect("surface test frame should begin");
-                frame.with_layout_context(|context| {
-                    shell.set_canvas_scrollbars_input(
-                        Some(CanvasScrollbarsInput {
-                            horizontal: None,
-                            vertical: Some(ui::scrollbar::ScrollbarInput {
-                                viewport_height_px: f64::from(layout.editor_body_rect.h),
-                                total_display_rows: 2400,
-                                scroll_top_rows: 2400.0,
-                            }),
-                        }),
-                        layout.editor_body_rect,
-                        context,
+                for frame_state in [
+                    ui::window_frame::WindowFrameState::Native,
+                    ui::window_frame::WindowFrameState::Restored,
+                ] {
+                    let title_height = frame_state.title_height(dpi);
+                    let layout = ShellLayout::compute_below_title_bar(
+                        crate::shell::layout::ShellLayoutInput {
+                            window_width_px: 1200.0 * dpi,
+                            window_height_px: 800.0 * dpi,
+                            dpi,
+                            navigation_width_logical: 220.0,
+                            card_list_width_logical: 340.0,
+                            navigation_pane_visibility: crate::NavigationPaneVisibility::Expanded,
+                            compact_content: crate::CompactContent::CardList,
+                            compact_navigation: crate::CompactNavigation::Hidden,
+                            editor_property_row_visible: false,
+                            editor_header_visible: false,
+                        },
+                        title_height,
                     );
-                });
-                shell.render(&mut frame, layout, &model).expect("surface test should render");
-                assert_eq!(shell.navigation_collapse_rect, Rect::ZERO);
-                assert_eq!(shell.navigation_expand_rect, Rect::ZERO);
-                assert_eq!(
-                    shell.search_rect.w,
-                    layout.navigation_rect.w - SHELL_PADDING_LOGICAL * dpi * 2.0
-                );
-                frame.with_paint_context(|context| {
+                    let runtime = app.runtime_mut().editor_runtime_mut();
+                    runtime.update_theme(theme.clone());
+                    runtime.set_scale_factor(f64::from(dpi));
+                    let mut frame = runtime.begin_frame().expect("surface test frame should begin");
+                    frame.with_layout_context(|context| {
+                        shell.set_canvas_scrollbars_input(
+                            Some(CanvasScrollbarsInput {
+                                horizontal: None,
+                                vertical: Some(ui::scrollbar::ScrollbarInput {
+                                    viewport_height_px: f64::from(layout.editor_body_rect.h),
+                                    total_display_rows: 2400,
+                                    scroll_top_rows: 2400.0,
+                                }),
+                            }),
+                            layout.editor_body_rect,
+                            context,
+                        );
+                    });
+                    shell.render(&mut frame, layout, &model).expect("surface test should render");
+                    if layout.has_immersive_title_bar() {
+                        assert_eq!(shell.navigation_collapse_rect, Rect::ZERO);
+                        assert_eq!(shell.navigation_expand_rect, Rect::ZERO);
+                        assert_eq!(
+                            shell.search_rect.w,
+                            layout.navigation_rect.w - SHELL_PADDING_LOGICAL * dpi * 2.0
+                        );
+                    } else {
+                        assert_ne!(shell.navigation_collapse_rect, Rect::ZERO);
+                    }
+                    frame.with_paint_context(|context| {
                     let mut thumb_color = context.theme.editor.scrollbar_thumb;
                     thumb_color[3] *= 0.6;
                     let scrollbar_index = context.list.cmds.iter().position(|command| matches!(command,
@@ -3525,10 +3545,16 @@ mod tests {
                     assert!(context.list.cmds.iter().any(|command| matches!(command,
                         ui::DrawCmd::StrokeRect { rect, radius, .. }
                             if *rect == layout.content_surface_rect()
-                                && *radius == ui::rounded_surface_frame::CONTENT_CORNER_RADIUS_LOGICAL * dpi
+                                && *radius == ui::rounded_surface_frame::SHELL_CORNER_RADIUS_LOGICAL * dpi
                     )));
                 });
-                frame.with_underlay_paint_context(|context| {
+                    frame.with_underlay_paint_context(|context| {
+                    let surface = layout.content_surface_rect();
+                    let corner_probe = (surface.x - dpi * 0.25, surface.y + dpi);
+                    assert!(!context.list.cmds.iter().any(|command| matches!(command,
+                        ui::DrawCmd::FillRect { rect, color, .. }
+                            if *color == surfaces.divider && rect.contains(corner_probe.0, corner_probe.1)
+                    )), "navigation divider must not protrude beside the rounded corner");
                     for (expected_rect, expected_color) in [
                         (layout.navigation_rect, surfaces.window_surface),
                         (layout.card_list_rect, surfaces.navigation_surface),
@@ -3540,6 +3566,7 @@ mod tests {
                         )));
                     }
                 });
+                }
             }
         }
     }

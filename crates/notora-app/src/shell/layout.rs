@@ -87,9 +87,7 @@ impl ShellLayout {
                 rect.y += title_height_px;
             }
         }
-        if title_height_px > 0.0 {
-            layout.inset_content_surface(input);
-        }
+        layout.inset_content_surface(input);
         layout
     }
 
@@ -447,6 +445,26 @@ mod tests {
                     assert_eq!(surface.x, layout.navigation_rect.right());
                 }
             }
+        }
+    }
+
+    #[test]
+    fn native_title_bar_keeps_the_same_content_insets() {
+        for dpi in [1.0, 1.5, 2.0] {
+            let shell_input = input(1200.0 * dpi, dpi);
+            let native = ShellLayout::compute_below_title_bar(shell_input, 0.0);
+            let immersive = ShellLayout::compute_below_title_bar(shell_input, 36.0 * dpi);
+            assert!(!native.has_immersive_title_bar());
+            assert_eq!(native.content_surface_rect().x, immersive.content_surface_rect().x);
+            assert_eq!(
+                native.content_surface_rect().right(),
+                immersive.content_surface_rect().right()
+            );
+            assert_eq!(
+                native.content_surface_rect().bottom(),
+                immersive.content_surface_rect().bottom()
+            );
+            assert_editor_chrome_is_partitioned(native);
         }
     }
 

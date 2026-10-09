@@ -113,8 +113,11 @@ fn notora_window_attributes() -> WindowAttributes {
         ));
     #[cfg(target_os = "windows")]
     {
-        use winit::platform::windows::WindowAttributesExtWindows;
-        attributes.with_undecorated_shadow(true)
+        use winit::platform::windows::{CornerPreference, WindowAttributesExtWindows};
+        // GDI 区域控制精确半径；关闭会引入非客户区黑线的 winit 阴影补偿。
+        attributes
+            .with_undecorated_shadow(false)
+            .with_corner_preference(CornerPreference::DoNotRound)
     }
     #[cfg(not(target_os = "windows"))]
     attributes
@@ -626,11 +629,8 @@ impl NotoraRuntime {
         let (window_width_px, window_height_px) = self.window_runtime.size();
         let editor_pane_mode =
             crate::render::selected_editor_pane_mode(self.action_runtime.state());
-        let title_height = if cfg!(target_os = "windows") {
-            ui::window_frame::WindowFrameState::Restored.title_height(dpi)
-        } else {
-            0.0
-        };
+        let title_height =
+            window_runtime::frame_state(self.document_runtime.editor().window()).title_height(dpi);
         ShellLayout::compute_below_title_bar(
             ShellLayoutInput {
                 window_width_px,
@@ -1026,6 +1026,7 @@ impl NotoraRuntime {
 
     pub(crate) fn set_scale_factor(&mut self, scale_factor: f64) {
         self.document_runtime.editor_mut().set_scale_factor(scale_factor);
+        self.window_runtime.synchronize_shape(self.document_runtime.editor());
         self.action_runtime.set_responsive_mode(self.shell_layout().responsive_mode);
         self.window_runtime.schedule_redraw();
     }
@@ -1088,6 +1089,7 @@ impl NotoraRuntime {
         }) {
             self.set_window_size(width, height);
         }
+        self.window_runtime.synchronize_shape(self.document_runtime.editor());
         if let Some(event_loop_proxy) = self.window_runtime.event_loop_proxy() {
             ProductHost::start_background_services(
                 &mut self.product,
@@ -1112,6 +1114,7 @@ impl NotoraRuntime {
 
     pub(crate) fn resize_window(&mut self, width: u32, height: u32) {
         self.set_window_size(width, height);
+        self.window_runtime.synchronize_shape(self.document_runtime.editor());
         let _ = self.document_runtime.editor_mut().resize_now(width, height);
         self.window_runtime.schedule_redraw();
     }
@@ -1205,6 +1208,7 @@ impl NotoraRuntime {
     }
 
     fn render_frame(&mut self) -> Result<EditorSurfacePaint, RenderError> {
+        self.window_runtime.synchronize_shape(self.document_runtime.editor());
         self.window_runtime.mark_frame_rendered();
         let layout = self.shell_layout();
         let editor_is_active = self.active_editor_matches_selection();

@@ -396,15 +396,7 @@ impl FrameRuntime {
             text.begin_frame();
         }
         let mut frame = document_runtime.editor_mut().begin_frame()?;
-        let frame_state = if cfg!(target_os = "windows") {
-            if document_runtime.editor().window().is_some_and(|window| window.is_maximized()) {
-                ui::window_frame::WindowFrameState::Maximized
-            } else {
-                ui::window_frame::WindowFrameState::Restored
-            }
-        } else {
-            ui::window_frame::WindowFrameState::Native
-        };
+        let frame_state = super::window_runtime::frame_state(document_runtime.editor().window());
         self.window_frame.set_input(
             ui::window_frame::WindowFrameInput {
                 title: super::PRODUCT_WINDOW_TITLE.to_owned(),
