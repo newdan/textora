@@ -96,27 +96,38 @@ impl RenderSession {
         let gpu_wait_elapsed = gpu_wait_started_at.elapsed();
         let (prepared_gpu, preparation_status) = match preparation_result {
             Some(Ok(Ok(prepared))) => (Some(prepared), "ready"),
-            Some(Ok(Err(_))) => (None, "failed"),
+            Some(Ok(Err(error))) => {
+                eprintln!("[startup:gpu_prepare] failed: {error}");
+                (None, "failed")
+            }
             Some(Err(_)) => (None, "panicked"),
             None => (None, "not_started"),
         };
-        let gpu_context_started_at = Instant::now();
-        let gpu_context = match prepared_gpu {
-            Some(prepared) => gpu::create_gpu_context_from_prepared_device(
-                window.clone(),
-                size.width,
-                size.height,
-                prepared,
-            )?,
-            None => gpu::create_gpu_context(window.clone(), size.width, size.height)?,
-        };
-        let gpu_context_elapsed = gpu_context_started_at.elapsed();
-        let gpu = GpuState { ctx: gpu_context, size };
         let scale_factor = window.scale_factor();
-        let text_init_started_at = Instant::now();
-        let text =
-            TextState::init(&gpu, font_size * scale_factor as f32, font_system, font_family)?;
-        let text_init_elapsed = text_init_started_at.elapsed();
+        let mut text_init_elapsed = Duration::ZERO;
+        let gpu_context_started_at = Instant::now();
+        let (gpu, text) = gpu::initialize_window_resources(
+            window.clone(),
+            size.width,
+            size.height,
+            prepared_gpu,
+            |context| {
+                let gpu = GpuState { ctx: context, size };
+                let text_init_started_at = Instant::now();
+                let text = gpu::with_gpu_error_scopes(&gpu.ctx.device, || {
+                    TextState::init(
+                        &gpu,
+                        font_size * scale_factor as f32,
+                        Arc::clone(&font_system),
+                        font_family,
+                    )
+                });
+                text_init_elapsed += text_init_started_at.elapsed();
+                Ok((gpu, text?))
+            },
+        )?;
+        let gpu_context_elapsed =
+            gpu_context_started_at.elapsed().saturating_sub(text_init_elapsed);
 
         self.scale_factor = scale_factor;
         self.update_surface_size(size);
