@@ -1,0 +1,36 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024" fill="none">
+  <title>Notora — Windows Layered Notebook App Icon</title>
+  <desc>Complete rounded notebook silhouette on a transparent canvas. All covers and pages stay within the viewBox because Windows does not supply an icon corner mask.</desc>
+  <defs>
+    <linearGradient id="cover" x1="280" y1="0" x2="800" y2="1024" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#7AD8E9"/><stop offset="1" stop-color="#43B2CC"/>
+    </linearGradient>
+    <linearGradient id="spine" x1="88" y1="0" x2="88" y2="1024" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#0B7D9D"/><stop offset="1" stop-color="#05617F"/>
+    </linearGradient>
+    <linearGradient id="back" x1="512" y1="0" x2="512" y2="1024" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#D88A31"/><stop offset="1" stop-color="#BD681D"/>
+    </linearGradient>
+    <linearGradient id="N-side" x1="300" y1="282" x2="740" y2="720" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#08748E"/><stop offset="1" stop-color="#055B76"/>
+    </linearGradient>
+    <linearGradient id="N-fold" x1="376" y1="278" x2="648" y2="744" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#28A0B7"/><stop offset="1" stop-color="#13819D"/>
+    </linearGradient>
+    <clipPath id="front-cover-clip"><rect width="914" height="906" rx="164"/></clipPath>
+  </defs>
+  <rect id="back-cover" x="56" y="60" width="968" height="964" rx="164" fill="url(#back)"/>
+  <g id="pages">
+    <rect x="30" y="30" width="934" height="934" rx="164" fill="#E0ECE9"/>
+    <rect x="24" y="24" width="932" height="932" rx="164" fill="#FFFEF9"/>
+  </g>
+  <rect id="front-cover" width="914" height="906" rx="164" fill="url(#cover)"/>
+  <rect id="book-spine" width="146" height="906" fill="url(#spine)" clip-path="url(#front-cover-clip)"/>
+  <g id="notora-monogram" transform="translate(-1.6 -73.35) scale(1.05)">
+    <path id="N-left-fold" d="M290 736V326C290 299.49 311.49 278 338 278H430V696C430 718.09 412.09 736 390 736H290Z" fill="url(#N-side)"/>
+    <path id="N-right-fold" d="M594 328C594 300.39 616.39 278 644 278H734V696C734 718.09 716.09 736 694 736H594V328Z" fill="url(#N-side)"/>
+    <path id="N-diagonal-fold" d="M338 278H430L734 696C734 718.09 716.09 736 694 736H594L290 326C290 299.49 311.49 278 338 278Z" fill="url(#N-fold)"/>
+    <path id="N-fold-depth" d="M290 326L430 515V548L290 360Z" fill="#044A63" fill-opacity=".15"/>
+  </g>
+</svg>
