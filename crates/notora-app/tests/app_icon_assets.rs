@@ -1,6 +1,5 @@
 use image::{DynamicImage, ImageFormat};
 
-const VISIBLE_ALPHA_THRESHOLD: u8 = 16;
 const ICON_DIRECTORY_HEADER_BYTES: usize = 6;
 const ICON_DIRECTORY_ENTRY_BYTES: usize = 16;
 
@@ -21,24 +20,13 @@ fn icns_png<'a>(icon_bytes: &'a [u8], resource_type: &[u8; 4]) -> &'a [u8] {
 
 fn assert_artwork_fills_canvas(image: &DynamicImage) {
     let pixels = image.to_rgba8();
-    let (width, height) = pixels.dimensions();
-    let mut left = width;
-    let mut top = height;
-    let mut right = 0;
-    let mut bottom = 0;
-
     for (x, y, pixel) in pixels.enumerate_pixels() {
-        if pixel[3] < VISIBLE_ALPHA_THRESHOLD {
-            continue;
-        }
-        left = left.min(x);
-        top = top.min(y);
-        right = right.max(x);
-        bottom = bottom.max(y);
+        assert_eq!(
+            pixel[3],
+            u8::MAX,
+            "app icon must fill pixel ({x}, {y}); transparency triggers a macOS backdrop"
+        );
     }
-
-    let edge_margin = left.max(top).max(width - right - 1).max(height - bottom - 1);
-    assert_eq!(edge_margin, 0, "app icon must touch every canvas edge");
 }
 
 fn assert_mac_icon_sizes_fill(icon_bytes: &[u8]) {
@@ -50,6 +38,9 @@ fn assert_mac_icon_sizes_fill(icon_bytes: &[u8]) {
         (b"ic08", 256),
         (b"ic09", 512),
         (b"ic10", 1024),
+        (b"ic11", 32),
+        (b"ic13", 256),
+        (b"ic14", 512),
     ] {
         let artwork = image::load_from_memory_with_format(
             icns_png(icon_bytes, resource_type),
