@@ -11,12 +11,36 @@ use crate::workspace_persistence::restore_workspace;
 use appkit_shell::ProductHost;
 use appkit_shell::accessibility_adapter::PlatformAccessibilityAdapter;
 use winit::dpi::{LogicalSize, PhysicalPosition, PhysicalSize, Size};
+#[cfg(target_os = "windows")]
+use winit::window::Icon;
 use winit::window::WindowAttributes;
 
 const WINDOW_TITLE: &str = "textora";
 const MINIMUM_WINDOW_WIDTH_LOGICAL: u32 = 800;
 const MINIMUM_WINDOW_HEIGHT_LOGICAL: u32 = 600;
 const MINIMUM_VISIBLE_WINDOW_EDGE_PHYSICAL: i64 = 64;
+#[cfg(target_os = "windows")]
+const WINDOW_ICON_SIZE: u32 = 32;
+#[cfg(target_os = "windows")]
+const TASKBAR_ICON_SIZE: u32 = 256;
+
+#[cfg(target_os = "windows")]
+fn windows_window_icons() -> (Icon, Icon) {
+    use image::imageops::FilterType;
+
+    let artwork = image::load_from_memory_with_format(
+        include_bytes!("../../../assets/AppIcon.ico"),
+        image::ImageFormat::Ico,
+    )
+    .expect("the embedded Windows app icon must be a valid ICO image");
+    let icon_at_size = |size| {
+        let pixels = artwork.resize_exact(size, size, FilterType::Lanczos3).into_rgba8();
+        Icon::from_rgba(pixels.into_raw(), size, size)
+            .expect("the decoded Windows app icon must have valid RGBA dimensions")
+    };
+
+    (icon_at_size(WINDOW_ICON_SIZE), icon_at_size(TASKBAR_ICON_SIZE))
+}
 
 fn logical_window_dimension(physical_dimension: u32, scale_factor: f64) -> u32 {
     let normalized_scale_factor =
@@ -440,6 +464,13 @@ impl App {
             .with_title(WINDOW_TITLE)
             .with_visible(false)
             .with_decorations(!cfg!(target_os = "windows"));
+        #[cfg(target_os = "windows")]
+        {
+            use winit::platform::windows::WindowAttributesExtWindows;
+
+            let (window_icon, taskbar_icon) = windows_window_icons();
+            attrs = attrs.with_window_icon(Some(window_icon)).with_taskbar_icon(Some(taskbar_icon));
+        }
         if let (Some(w), Some(h)) = (persisted.window_width, persisted.window_height) {
             let scale_factor =
                 event_loop.primary_monitor().map_or(1.0, |monitor| monitor.scale_factor());

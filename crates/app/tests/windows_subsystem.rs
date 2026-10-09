@@ -2,11 +2,43 @@
 
 use std::fs::File;
 use std::io::{Read, Seek, SeekFrom};
+use std::os::windows::ffi::OsStrExt;
+use std::path::Path;
 
 const PE_HEADER_POINTER_OFFSET: u64 = 0x3c;
 const COFF_HEADER_SIZE: u64 = 24;
 const OPTIONAL_HEADER_SUBSYSTEM_OFFSET: u64 = 68;
 const WINDOWS_GUI_SUBSYSTEM: u16 = 2;
+const LOAD_LIBRARY_AS_DATAFILE: u32 = 0x0000_0002;
+const APP_ICON_RESOURCE_ID: usize = 1;
+const GROUP_ICON_RESOURCE_TYPE: usize = 14;
+
+#[link(name = "kernel32")]
+unsafe extern "system" {
+    fn LoadLibraryExW(file_name: *const u16, file: *mut (), flags: u32) -> *mut ();
+    fn FindResourceW(module: *mut (), name: *const u16, resource_type: *const u16) -> *mut ();
+    fn FreeLibrary(module: *mut ()) -> i32;
+}
+
+#[test]
+fn application_binary_embeds_app_icon() {
+    let executable_path = Path::new(env!("CARGO_BIN_EXE_textora"));
+    let wide_path: Vec<u16> = executable_path.as_os_str().encode_wide().chain(Some(0)).collect();
+    let module = unsafe {
+        LoadLibraryExW(wide_path.as_ptr(), std::ptr::null_mut(), LOAD_LIBRARY_AS_DATAFILE)
+    };
+    assert!(!module.is_null(), "Windows must load the textora executable as a resource file");
+
+    let icon_resource = unsafe {
+        FindResourceW(
+            module,
+            APP_ICON_RESOURCE_ID as *const u16,
+            GROUP_ICON_RESOURCE_TYPE as *const u16,
+        )
+    };
+    unsafe { FreeLibrary(module) };
+    assert!(!icon_resource.is_null(), "the Windows executable must embed the app icon");
+}
 
 #[test]
 fn application_binary_uses_windows_gui_subsystem() {

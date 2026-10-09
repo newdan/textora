@@ -3953,9 +3953,11 @@ version = "0.1.0"
 dependencies = [
  "blake3",
  "bytemuck",
+ "cc",
  "criterion",
  "dirs",
  "hashlink 0.12.0",
+ "image",
  "notify",
  "objc2 0.6.4",
  "objc2-app-kit 0.3.2",
