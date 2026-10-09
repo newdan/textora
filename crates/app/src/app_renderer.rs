@@ -18,16 +18,20 @@ const PERF_LOG_THRESHOLD_US_ENV: &str = "EDIT_PLUS_PERF_LOG_THRESHOLD_US";
 const DEFAULT_PERF_LOG_THRESHOLD_US: u128 = 1_000;
 const WYSIWYG_CURSOR_LOG_ENV: &str = "EDIT_PLUS_WYSIWYG_CURSOR_LOG";
 const MACOS_TRAFFIC_LIGHT_INSET_LOGICAL: f32 = 68.0;
+const WINDOWS_FRAMELESS_RESIZE_INSET_LOGICAL: f32 = crate::events::WINDOW_RESIZE_MARGIN_LOGICAL;
 
 #[derive(Clone, Copy)]
 enum SidebarWindowChrome {
     NativeTitlebar,
     IntegratedTrafficLights,
+    CustomTitlebar,
 }
 
 fn sidebar_window_chrome() -> SidebarWindowChrome {
     if cfg!(target_os = "macos") {
         SidebarWindowChrome::IntegratedTrafficLights
+    } else if cfg!(target_os = "windows") {
+        SidebarWindowChrome::CustomTitlebar
     } else {
         SidebarWindowChrome::NativeTitlebar
     }
@@ -36,6 +40,7 @@ fn sidebar_window_chrome() -> SidebarWindowChrome {
 fn sidebar_traffic_light_inset(dpi: f32, chrome: SidebarWindowChrome) -> (f32, f32) {
     let left = match chrome {
         SidebarWindowChrome::NativeTitlebar => 0.0,
+        SidebarWindowChrome::CustomTitlebar => WINDOWS_FRAMELESS_RESIZE_INSET_LOGICAL * dpi,
         SidebarWindowChrome::IntegratedTrafficLights => MACOS_TRAFFIC_LIGHT_INSET_LOGICAL * dpi,
     };
     (left, 0.0)
@@ -43,7 +48,9 @@ fn sidebar_traffic_light_inset(dpi: f32, chrome: SidebarWindowChrome) -> (f32, f
 
 fn sidebar_titlebar_reserved_width(dpi: f32, chrome: SidebarWindowChrome) -> f32 {
     let logical_width = match chrome {
-        SidebarWindowChrome::NativeTitlebar => ui::constants::TITLE_BAR_HEIGHT,
+        SidebarWindowChrome::NativeTitlebar | SidebarWindowChrome::CustomTitlebar => {
+            ui::constants::TITLE_BAR_HEIGHT
+        }
         SidebarWindowChrome::IntegratedTrafficLights => ui::constants::TRAFFIC_LIGHT_TOTAL_W,
     };
     logical_width * dpi
@@ -77,6 +84,16 @@ mod sidebar_chrome_tests {
         assert_eq!(
             sidebar_titlebar_reserved_width(dpi, chrome),
             ui::constants::TRAFFIC_LIGHT_TOTAL_W * dpi
+        );
+    }
+
+    #[test]
+    fn windows_reserves_resize_edge_before_sidebar_toggle() {
+        let dpi = 1.5;
+        let chrome = SidebarWindowChrome::CustomTitlebar;
+        assert_eq!(
+            sidebar_traffic_light_inset(dpi, chrome),
+            (super::WINDOWS_FRAMELESS_RESIZE_INSET_LOGICAL * dpi, 0.0)
         );
     }
 }
@@ -1627,9 +1644,21 @@ impl App {
                     PLUGIN_MARKDOWN_EDITOR => "MD编辑".to_string(),
                     _ => name.to_string(),
                 });
-                let hamburger_right = sidebar_titlebar_reserved_width(dpi, chrome);
-                let sidebar_left = self.ui_shell.sidebar_editor_left_offset().max(hamburger_right);
-                let titlebar_x = self.ui_shell.sidebar_editor_left_offset().max(0.5);
+                let sidebar_mode = self.settings.view_mode == ui::view_mode::ViewMode::Sidebar;
+                let sidebar_left = if sidebar_mode {
+                    self.ui_shell
+                        .sidebar_editor_left_offset()
+                        .max(sidebar_titlebar_reserved_width(dpi, chrome))
+                } else if cfg!(target_os = "macos") {
+                    ui::constants::TRAFFIC_LIGHT_TOTAL_W * dpi
+                } else {
+                    0.0
+                };
+                let titlebar_x = if sidebar_mode {
+                    self.ui_shell.sidebar_editor_left_offset().max(0.5)
+                } else {
+                    0.0
+                };
                 let toc_enabled = is_plugin_rendered;
                 let active_is_mindmap = self.active_is_mindmap();
                 let mindmap_style = self.active_tab_session().and_then(|session| {
@@ -1647,6 +1676,17 @@ impl App {
                     toc_visible: self.active_toc_visible(),
                     toc_enabled,
                     mindmap_style,
+                    window_chrome: if cfg!(target_os = "windows") {
+                        ui::title_bar::WindowChrome::Custom {
+                            maximized: self
+                                .editor_runtime
+                                .window()
+                                .is_some_and(|window| window.is_maximized()),
+                        }
+                    } else {
+                        ui::title_bar::WindowChrome::Native
+                    },
+                    show_hamburger: !sidebar_mode,
                 });
             }
 

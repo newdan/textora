@@ -2185,6 +2185,10 @@ mod tests {
                 };
                 state.update_layout(&input, &cfg, &metrics);
                 let layout = state.current_layout().expect("visible sidebar has a layout");
+                assert_eq!(
+                    layout.menu_btn_rect.y + layout.menu_btn_rect.h * 0.5,
+                    crate::constants::TITLE_BAR_HEIGHT * dpi * 0.5
+                );
                 assert_eq!(layout.new_btn_rect.y, layout.open_btn_rect.y);
                 assert!(layout.new_menu_btn_rect.right() < layout.open_btn_rect.x);
                 assert!(layout.open_btn_rect.right() <= cfg.width);

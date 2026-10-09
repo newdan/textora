@@ -94,6 +94,10 @@ fn projected_editor_rect(
 ) -> ui::core::geom::Rect {
     let mut rect = ui::core::geom::Rect::new(0.0, 0.0, screen_w, screen_h);
 
+    if !inputs.sidebar_visible {
+        take_top(&mut rect, ui::title_bar::title_bar_height(inputs.metrics.dpi));
+    }
+
     if inputs.tabs_visible {
         take_top(&mut rect, inputs.tabs_thickness);
     }
@@ -206,6 +210,34 @@ impl App {
                 if let Some(window) = self.editor_runtime.window() {
                     window.set_cursor(cursor);
                 }
+                AppEffect::NONE
+            }
+            AppAction::DragWindow => {
+                if let Some(window) = self.editor_runtime.window() {
+                    let _ = window.drag_window();
+                }
+                AppEffect::NONE
+            }
+            AppAction::ResizeWindow(direction) => {
+                if let Some(window) = self.editor_runtime.window() {
+                    let _ = window.drag_resize_window(direction);
+                }
+                AppEffect::NONE
+            }
+            AppAction::MinimizeWindow => {
+                if let Some(window) = self.editor_runtime.window() {
+                    window.set_minimized(true);
+                }
+                AppEffect::NONE
+            }
+            AppAction::ToggleMaximizeWindow => {
+                if let Some(window) = self.editor_runtime.window() {
+                    window.set_maximized(!window.is_maximized());
+                }
+                AppEffect::REDRAW
+            }
+            AppAction::CloseWindow => {
+                self.close_window(event_loop.expect("window close requires an active event loop"));
                 AppEffect::NONE
             }
             AppAction::ExecuteAppCommands(commands) => self.execute_commands(
@@ -1484,8 +1516,8 @@ mod tests {
         let panel_thickness = ui::mindmap_style_panel::PANEL_WIDTH_LOGICAL;
         let with_panel = projected_editor_rect(1_200.0, 800.0, &inputs, panel_thickness);
 
-        assert_eq!(without_panel, ui::core::geom::Rect::new(0.0, 0.0, 1_188.0, 776.0));
-        assert_eq!(with_panel, ui::core::geom::Rect::new(0.0, 0.0, 908.0, 776.0));
+        assert_eq!(without_panel, ui::core::geom::Rect::new(0.0, 36.0, 1_188.0, 740.0));
+        assert_eq!(with_panel, ui::core::geom::Rect::new(0.0, 36.0, 908.0, 740.0));
         inputs.scrollbar_thickness = 0.0;
         assert_eq!(projected_editor_rect(1_200.0, 800.0, &inputs, panel_thickness).w, 920.0);
     }

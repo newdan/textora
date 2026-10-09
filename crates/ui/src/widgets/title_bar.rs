@@ -24,6 +24,16 @@ const TITLE_FONT_SIZE_LOGICAL: f32 = 13.0;
 const PATH_FONT_SIZE_LOGICAL: f32 = 11.0;
 const CENTERED_TEXT_BASELINE_EM: f32 = 0.35;
 const ELLIPSIS: &str = "…";
+const WINDOW_BUTTON_WIDTH_LOGICAL: f32 = 40.0;
+const WINDOW_ICON_SIZE_LOGICAL: f32 = 16.0;
+const HAMBURGER_LINE_HEIGHT_LOGICAL: f32 = 2.0;
+const HAMBURGER_LINE_SPACING_LOGICAL: f32 = 5.0;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum WindowChrome {
+    Native,
+    Custom { maximized: bool },
+}
 
 /// mmap 风格按钮的标题栏输入。
 #[derive(Clone, Copy, Debug)]
@@ -59,11 +69,18 @@ pub struct TitleBarInput {
     pub toc_enabled: bool,
     /// mmap 风格按钮；非 mmap 视图传入 `None`。
     pub mindmap_style: Option<MindmapStyleButtonInput>,
+    pub window_chrome: WindowChrome,
+    pub show_hamburger: bool,
 }
 
 /// Actions emitted by the title bar widget.
 #[derive(Debug, Clone, PartialEq)]
 pub enum TitleBarAction {
+    ToggleSidebar,
+    DragWindow,
+    MinimizeWindow,
+    ToggleMaximizeWindow,
+    CloseWindow,
     /// 切换当前文件的视图模式。
     ToggleView,
     /// Toggle the table of contents panel.
@@ -91,6 +108,10 @@ pub struct TitleBarWidget {
     mindmap_style_rect: Rect,
     /// Precomputed TOC toggle button rect (for hit testing).
     toc_rect: Rect,
+    hamburger_rect: Rect,
+    window_button_rects: [Rect; 3],
+    hovered_window_button: Option<usize>,
+    hamburger_hovered: bool,
     toggle_hovered: bool,
     mindmap_style_hovered: bool,
     toc_hovered: bool,
@@ -115,6 +136,10 @@ impl TitleBarWidget {
             toggle_rect: Rect::ZERO,
             mindmap_style_rect: Rect::ZERO,
             toc_rect: Rect::ZERO,
+            hamburger_rect: Rect::ZERO,
+            window_button_rects: [Rect::ZERO; 3],
+            hovered_window_button: None,
+            hamburger_hovered: false,
             toggle_hovered: false,
             mindmap_style_hovered: false,
             toc_hovered: false,
@@ -239,6 +264,26 @@ impl Widget for TitleBarWidget {
             let action_gap = ACTION_GAP_LOGICAL * dpi;
             let mut next_action_right =
                 (rect.w - ACTION_HORIZONTAL_INSET_LOGICAL * dpi).clamp(0.0, rect.w.max(0.0));
+            self.window_button_rects = [Rect::ZERO; 3];
+            if matches!(input.window_chrome, WindowChrome::Custom { .. }) {
+                let button_width = WINDOW_BUTTON_WIDTH_LOGICAL * dpi;
+                for button_rect in self.window_button_rects.iter_mut().rev() {
+                    *button_rect = next_action_rect(
+                        &mut next_action_right,
+                        background_x,
+                        button_width,
+                        0.0,
+                        0.0,
+                    );
+                    button_rect.h = rect.h;
+                }
+                next_action_right -= action_gap;
+            }
+            self.hamburger_rect = if input.show_hamburger {
+                Rect::new(background_x, btn_y, btn_size, btn_size)
+            } else {
+                Rect::ZERO
+            };
 
             if input.can_toggle {
                 self.toggle_rect = next_action_rect(
@@ -276,7 +321,8 @@ impl Widget for TitleBarWidget {
                 self.toc_rect = Rect::ZERO;
             }
 
-            let text_x = background_x + TEXT_HORIZONTAL_INSET_LOGICAL * dpi;
+            let text_x =
+                self.hamburger_rect.right().max(background_x) + TEXT_HORIZONTAL_INSET_LOGICAL * dpi;
             let first_action_x = [self.toc_rect, self.mindmap_style_rect, self.toggle_rect]
                 .into_iter()
                 .filter(|action_rect| action_rect.w > 0.0)
@@ -314,6 +360,8 @@ impl Widget for TitleBarWidget {
             self.toggle_rect = Rect::ZERO;
             self.mindmap_style_rect = Rect::ZERO;
             self.toc_rect = Rect::ZERO;
+            self.hamburger_rect = Rect::ZERO;
+            self.window_button_rects = [Rect::ZERO; 3];
         }
     }
 
@@ -333,6 +381,56 @@ impl Widget for TitleBarWidget {
         let bg = Rect::new(bg_x, 0.0, (self.rect.w - bg_x).max(0.0), h);
         if bg.w > 0.0 {
             ctx.list.fill(bg, ctx.theme.editor.background);
+        }
+
+        if self.hamburger_rect.w > 0.0 {
+            let button = self.hamburger_rect;
+            if self.hamburger_hovered {
+                ctx.list.fill_rounded(
+                    button,
+                    hover_color,
+                    ctx.theme.control_metrics().compact_corner_radius_logical * dpi,
+                );
+            }
+            let line_width = ACTION_ICON_SIZE_LOGICAL * dpi;
+            let line_height = HAMBURGER_LINE_HEIGHT_LOGICAL * dpi;
+            for row in [-1.0_f32, 0.0, 1.0] {
+                ctx.list.fill(
+                    Rect::new(
+                        button.x + (button.w - line_width) * 0.5,
+                        button.y + button.h * 0.5 + row * HAMBURGER_LINE_SPACING_LOGICAL * dpi
+                            - line_height * 0.5,
+                        line_width,
+                        line_height,
+                    ),
+                    ctx.theme.palette.text_muted,
+                );
+            }
+        }
+
+        let control_icons = ["minus", "maximize", "x"];
+        for (index, button) in self.window_button_rects.iter().enumerate() {
+            if button.w <= 0.0 {
+                continue;
+            }
+            if self.hovered_window_button == Some(index) {
+                let color = if index == 2 { ctx.theme.palette.danger } else { hover_color };
+                ctx.list.fill(*button, color);
+            }
+            let icon_size = WINDOW_ICON_SIZE_LOGICAL * dpi;
+            let icon_color = if index == 2 && self.hovered_window_button == Some(index) {
+                ctx.theme.application_theme().button_danger_foreground
+            } else {
+                ctx.theme.palette.text_muted
+            };
+            draw_icon(
+                ctx.list,
+                control_icons[index],
+                button.x + (button.w - icon_size) * 0.5,
+                button.y + (button.h - icon_size) * 0.5,
+                icon_size,
+                icon_color,
+            );
         }
 
         // 2) 文件名与路径
@@ -458,13 +556,24 @@ impl Widget for TitleBarWidget {
             // MouseMove: only consume when inside rect, so the editor
             // can get the event and show its I-beam cursor when outside.
             Event::MouseMove { px, py } => {
+                self.hamburger_hovered =
+                    self.hamburger_rect.w > 0.0 && self.hamburger_rect.contains(*px, *py);
+                self.hovered_window_button = self
+                    .window_button_rects
+                    .iter()
+                    .position(|rect| rect.w > 0.0 && rect.contains(*px, *py));
                 self.toc_hovered = self.toc_rect.w > 0.0 && self.toc_rect.contains(*px, *py);
                 self.mindmap_style_hovered =
                     self.mindmap_style_rect.w > 0.0 && self.mindmap_style_rect.contains(*px, *py);
                 self.toggle_hovered =
                     self.toggle_rect.w > 0.0 && self.toggle_rect.contains(*px, *py);
 
-                if self.toc_hovered || self.mindmap_style_hovered || self.toggle_hovered {
+                if self.toc_hovered
+                    || self.mindmap_style_hovered
+                    || self.toggle_hovered
+                    || self.hamburger_hovered
+                    || self.hovered_window_button.is_some()
+                {
                     ctx.cursor_hint = Some(CursorIcon::Pointer);
                     return Some(WidgetAction::Consumed);
                 }
@@ -476,11 +585,28 @@ impl Widget for TitleBarWidget {
                     self.toc_hovered = false;
                     self.mindmap_style_hovered = false;
                     self.toggle_hovered = false;
+                    self.hamburger_hovered = false;
+                    self.hovered_window_button = None;
                     None
                 }
             }
             // MouseDown: check toggle button first, then consume for title bar.
             Event::MouseDown { px, py, button } => {
+                if *button == MouseButton::Left {
+                    if self.hamburger_rect.w > 0.0 && self.hamburger_rect.contains(*px, *py) {
+                        return Some(WidgetAction::TitleBar(TitleBarAction::ToggleSidebar));
+                    }
+                    for (index, rect) in self.window_button_rects.iter().enumerate() {
+                        if rect.w > 0.0 && rect.contains(*px, *py) {
+                            let action = match index {
+                                0 => TitleBarAction::MinimizeWindow,
+                                1 => TitleBarAction::ToggleMaximizeWindow,
+                                _ => TitleBarAction::CloseWindow,
+                            };
+                            return Some(WidgetAction::TitleBar(action));
+                        }
+                    }
+                }
                 if *button == MouseButton::Left
                     && self.toggle_rect.w > 0.0
                     && self.toggle_rect.contains(*px, *py)
@@ -501,7 +627,11 @@ impl Widget for TitleBarWidget {
                 }
                 if self.rect.contains(*px, *py) {
                     ctx.cursor_hint = Some(CursorIcon::Default);
-                    Some(WidgetAction::Consumed)
+                    if *button == MouseButton::Left {
+                        Some(WidgetAction::TitleBar(TitleBarAction::DragWindow))
+                    } else {
+                        Some(WidgetAction::Consumed)
+                    }
                 } else {
                     None
                 }
@@ -523,6 +653,28 @@ impl Widget for TitleBarWidget {
     }
 
     fn tooltip_at(&self, px: f32, py: f32) -> Option<TooltipHint> {
+        if self.hamburger_rect.w > 0.0 && self.hamburger_rect.contains(px, py) {
+            return Some(TooltipHint {
+                label: "显示侧栏".to_owned(),
+                target_rect: self.hamburger_rect,
+            });
+        }
+        for (index, rect) in self.window_button_rects.iter().enumerate() {
+            if rect.w > 0.0 && rect.contains(px, py) {
+                let label = match index {
+                    0 => "最小化",
+                    1 if self.input.as_ref().is_some_and(|input| {
+                        matches!(input.window_chrome, WindowChrome::Custom { maximized: true })
+                    }) =>
+                    {
+                        "还原窗口"
+                    }
+                    1 => "最大化",
+                    _ => "关闭窗口",
+                };
+                return Some(TooltipHint { label: label.to_owned(), target_rect: *rect });
+            }
+        }
         if self.mindmap_style_rect.w > 0.0 && self.mindmap_style_rect.contains(px, py) {
             return Some(TooltipHint {
                 label: "思维导图风格".to_string(),
@@ -596,6 +748,8 @@ mod tests {
             toc_visible: false,
             toc_enabled: false,
             mindmap_style: None,
+            window_chrome: WindowChrome::Native,
+            show_hamburger: false,
         }
     }
 
@@ -917,6 +1071,8 @@ mod tests {
             toc_visible: false,
             toc_enabled: false,
             mindmap_style: None,
+            window_chrome: WindowChrome::Native,
+            show_hamburger: false,
         });
         let t = test_theme();
         let mut m = NoopMeasure;
@@ -957,6 +1113,8 @@ mod tests {
             toc_visible: false,
             toc_enabled: false,
             mindmap_style: None,
+            window_chrome: WindowChrome::Native,
+            show_hamburger: false,
         });
         let t = test_theme();
         let mut m = NoopMeasure;
@@ -1004,6 +1162,8 @@ mod tests {
             toc_visible: false,
             toc_enabled: false,
             mindmap_style: None,
+            window_chrome: WindowChrome::Native,
+            show_hamburger: false,
         });
         let t = test_theme();
         let mut m = NoopMeasure;
@@ -1044,6 +1204,8 @@ mod tests {
             toc_visible: false,
             toc_enabled: false,
             mindmap_style: None,
+            window_chrome: WindowChrome::Native,
+            show_hamburger: false,
         });
         let t = test_theme();
         let mut m = NoopMeasure;
@@ -1092,6 +1254,8 @@ mod tests {
             toc_visible: false,
             toc_enabled: false,
             mindmap_style: None,
+            window_chrome: WindowChrome::Native,
+            show_hamburger: false,
         });
         let t = test_theme();
         let mut m = NoopMeasure;
@@ -1118,6 +1282,8 @@ mod tests {
             toc_visible: false,
             toc_enabled: false,
             mindmap_style: None,
+            window_chrome: WindowChrome::Native,
+            show_hamburger: false,
         });
         let t = test_theme();
         let mut m = NoopMeasure;
@@ -1143,6 +1309,8 @@ mod tests {
             toc_visible: false,
             toc_enabled: false,
             mindmap_style: None,
+            window_chrome: WindowChrome::Native,
+            show_hamburger: false,
         });
         let t = test_theme();
         let mut m = NoopMeasure;
@@ -1155,7 +1323,7 @@ mod tests {
             &mut ctx,
         );
         assert!(result.is_some());
-        assert!(matches!(result.unwrap(), WidgetAction::Consumed));
+        assert!(matches!(result.unwrap(), WidgetAction::TitleBar(TitleBarAction::DragWindow)));
         assert_eq!(ctx.cursor_hint, Some(CursorIcon::Default));
     }
 
@@ -1172,6 +1340,8 @@ mod tests {
             toc_visible: false,
             toc_enabled: false,
             mindmap_style: None,
+            window_chrome: WindowChrome::Native,
+            show_hamburger: false,
         });
         let t = test_theme();
         let mut m = NoopMeasure;
@@ -1198,6 +1368,8 @@ mod tests {
             toc_visible: false,
             toc_enabled: false,
             mindmap_style: None,
+            window_chrome: WindowChrome::Native,
+            show_hamburger: false,
         });
         let t = test_theme();
         let mut m = NoopMeasure;
@@ -1224,6 +1396,8 @@ mod tests {
             toc_visible: false,
             toc_enabled: false,
             mindmap_style: None,
+            window_chrome: WindowChrome::Native,
+            show_hamburger: false,
         });
         let t = test_theme();
         let mut m = NoopMeasure;
@@ -1251,6 +1425,8 @@ mod tests {
             toc_visible: false,
             toc_enabled: false,
             mindmap_style: None,
+            window_chrome: WindowChrome::Native,
+            show_hamburger: false,
         });
         assert!(w.input.is_some());
         assert_eq!(
@@ -1274,6 +1450,8 @@ mod tests {
             toc_visible: false,
             toc_enabled: false,
             mindmap_style: None,
+            window_chrome: WindowChrome::Native,
+            show_hamburger: false,
         });
         let t = test_theme();
         let mut m = NoopMeasure;
@@ -1295,6 +1473,8 @@ mod tests {
             toc_visible: false,
             toc_enabled: false,
             mindmap_style: None,
+            window_chrome: WindowChrome::Native,
+            show_hamburger: false,
         });
         let t = test_theme();
         let mut m = NoopMeasure;
@@ -1317,6 +1497,8 @@ mod tests {
             toc_visible: false,
             toc_enabled: false,
             mindmap_style: None,
+            window_chrome: WindowChrome::Native,
+            show_hamburger: false,
         });
         let t = test_theme();
         let mut m = NoopMeasure;
@@ -1344,6 +1526,8 @@ mod tests {
             toc_visible: false,
             toc_enabled: false,
             mindmap_style: None,
+            window_chrome: WindowChrome::Native,
+            show_hamburger: false,
         });
         let t = test_theme();
         let mut m = NoopMeasure;
@@ -1372,6 +1556,8 @@ mod tests {
             toc_visible: false,
             toc_enabled: false,
             mindmap_style: None,
+            window_chrome: WindowChrome::Native,
+            show_hamburger: false,
         });
         let t = test_theme();
         let mut m = NoopMeasure;
@@ -1400,6 +1586,8 @@ mod tests {
             toc_visible: false,
             toc_enabled: false,
             mindmap_style: None,
+            window_chrome: WindowChrome::Native,
+            show_hamburger: false,
         });
         let t = test_theme();
         let mut m = NoopMeasure;
@@ -1412,7 +1600,7 @@ mod tests {
             &mut ctx,
         );
         assert!(result.is_some(), "click inside title bar should consume");
-        assert_eq!(result.unwrap(), WidgetAction::Consumed);
+        assert_eq!(result.unwrap(), WidgetAction::TitleBar(TitleBarAction::DragWindow));
     }
 
     #[test]
@@ -1428,6 +1616,8 @@ mod tests {
             toc_visible: false,
             toc_enabled: false,
             mindmap_style: None,
+            window_chrome: WindowChrome::Native,
+            show_hamburger: false,
         });
         let t = test_theme();
         let mut m = NoopMeasure;
@@ -1455,6 +1645,8 @@ mod tests {
             toc_visible: false,
             toc_enabled: false,
             mindmap_style: None,
+            window_chrome: WindowChrome::Native,
+            show_hamburger: false,
         });
         let t = test_theme();
         let mut m = NoopMeasure;
@@ -1489,6 +1681,8 @@ mod tests {
             toc_visible: false,
             toc_enabled: false,
             mindmap_style: None,
+            window_chrome: WindowChrome::Native,
+            show_hamburger: false,
         });
         let t = test_theme();
         let mut m = NoopMeasure;
@@ -1523,6 +1717,8 @@ mod tests {
             toc_visible: false,
             toc_enabled: false,
             mindmap_style: None,
+            window_chrome: WindowChrome::Native,
+            show_hamburger: false,
         });
         let mut w2 = TitleBarWidget::new();
         w2.set_input(TitleBarInput {
@@ -1535,6 +1731,8 @@ mod tests {
             toc_visible: false,
             toc_enabled: false,
             mindmap_style: None,
+            window_chrome: WindowChrome::Native,
+            show_hamburger: false,
         });
         let t = test_theme();
         let mut m = NoopMeasure;
@@ -1592,6 +1790,8 @@ mod tests {
             toc_visible: false,
             toc_enabled: false,
             mindmap_style: None,
+            window_chrome: WindowChrome::Native,
+            show_hamburger: false,
         });
         let t = test_theme();
         let mut m = NoopMeasure;
@@ -1618,6 +1818,8 @@ mod tests {
             toc_visible: false,
             toc_enabled: false,
             mindmap_style: None,
+            window_chrome: WindowChrome::Native,
+            show_hamburger: false,
         });
         let t = test_theme();
         let mut m = NoopMeasure;
@@ -1644,6 +1846,8 @@ mod tests {
             toc_visible: false,
             toc_enabled: false,
             mindmap_style: None,
+            window_chrome: WindowChrome::Native,
+            show_hamburger: false,
         });
         let t = test_theme();
         let mut m = NoopMeasure;
@@ -1667,6 +1871,8 @@ mod tests {
             toc_visible: false,
             toc_enabled: false,
             mindmap_style: None,
+            window_chrome: WindowChrome::Native,
+            show_hamburger: false,
         });
         let t = test_theme();
         let mut m = NoopMeasure;
@@ -1687,5 +1893,59 @@ mod tests {
             .expect("TOC button should describe its own action");
         assert_eq!(tooltip.label, "显示目录 ⌘⇧T");
         assert_eq!(tooltip.target_rect, rect);
+    }
+
+    #[test]
+    fn custom_window_buttons_reserve_space_and_route_clicks() {
+        let widget = laid_out_title_bar(TitleBarInput {
+            window_chrome: WindowChrome::Custom { maximized: false },
+            show_hamburger: true,
+            ..test_title_bar_input()
+        });
+        assert!(widget.text_rect.right() < widget.window_button_rects[0].x);
+        let theme = test_theme();
+        let mut widget = widget;
+        let mut context = EventCtx::new(&theme, 1.0);
+        let expected = [
+            TitleBarAction::MinimizeWindow,
+            TitleBarAction::ToggleMaximizeWindow,
+            TitleBarAction::CloseWindow,
+        ];
+        for (rect, action) in widget.window_button_rects.into_iter().zip(expected) {
+            let result = widget.on_event(
+                &Event::MouseDown {
+                    px: rect.x + rect.w * 0.5,
+                    py: rect.y + rect.h * 0.5,
+                    button: MouseButton::Left,
+                },
+                &mut context,
+            );
+            assert_eq!(result, Some(WidgetAction::TitleBar(action)));
+        }
+        let hamburger = widget.hamburger_rect;
+        assert_eq!(
+            widget.on_event(
+                &Event::MouseDown {
+                    px: hamburger.x + hamburger.w * 0.5,
+                    py: hamburger.y + hamburger.h * 0.5,
+                    button: MouseButton::Left,
+                },
+                &mut context,
+            ),
+            Some(WidgetAction::TitleBar(TitleBarAction::ToggleSidebar))
+        );
+    }
+
+    #[test]
+    fn native_window_chrome_leaves_native_controls_unpainted() {
+        let widget = laid_out_title_bar(TitleBarInput {
+            sidebar_left: crate::constants::TRAFFIC_LIGHT_TOTAL_W,
+            window_chrome: WindowChrome::Native,
+            show_hamburger: true,
+            ..test_title_bar_input()
+        });
+        assert_eq!(widget.window_button_rects, [Rect::ZERO; 3]);
+        assert!(!widget.hit(10.0, widget.rect.h * 0.5));
+        assert!(widget.hamburger_rect.x >= crate::constants::TRAFFIC_LIGHT_TOTAL_W);
     }
 }

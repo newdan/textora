@@ -226,9 +226,9 @@ impl App {
             return ui::title_bar::title_bar_height(metrics.dpi) + search_h;
         }
 
-        // Tabs mode: tab bar + search bar
+        // Tabs mode keeps the shared title bar above the optional tab strip.
         let tbh = self.current_tab_bar_height_with_metrics(&metrics);
-        tbh + search_h
+        ui::title_bar::title_bar_height(metrics.dpi) + tbh + search_h
     }
 
     pub(crate) fn visible_rows(&self, screen_height: f32) -> usize {
@@ -332,14 +332,7 @@ impl App {
         let Some(window) = self.editor_runtime.window() else {
             return;
         };
-        match self.settings.view_mode {
-            ui::view_mode::ViewMode::Sidebar => {
-                crate::sys::macos_titlebar::enable_full_size_content(window);
-            }
-            ui::view_mode::ViewMode::Tabs => {
-                crate::sys::macos_titlebar::disable_full_size_content(window);
-            }
-        }
+        crate::sys::macos_titlebar::enable_full_size_content(window);
     }
 
     pub(crate) fn apply_effect(&mut self, effect: crate::app_effect::AppEffect) {

@@ -436,7 +436,10 @@ impl App {
                 crate::settings_io::PersistedSettings::default()
             }
         };
-        let mut attrs = WindowAttributes::default().with_title(WINDOW_TITLE).with_visible(false);
+        let mut attrs = WindowAttributes::default()
+            .with_title(WINDOW_TITLE)
+            .with_visible(false)
+            .with_decorations(!cfg!(target_os = "windows"));
         if let (Some(w), Some(h)) = (persisted.window_width, persisted.window_height) {
             let scale_factor =
                 event_loop.primary_monitor().map_or(1.0, |monitor| monitor.scale_factor());
@@ -487,14 +490,9 @@ impl App {
         self.editor_runtime.update_theme(self.current_theme.clone());
         eprintln!("[startup] window create + theme: {:?}", _t0.elapsed());
 
-        // Apply macOS titlebar mode based on persisted view_mode
+        // Both view modes draw content beneath the native macOS traffic lights.
         if let Some(w) = self.editor_runtime.window() {
-            match self.settings.view_mode {
-                ui::view_mode::ViewMode::Sidebar => {
-                    crate::sys::macos_titlebar::enable_full_size_content(w);
-                }
-                ui::view_mode::ViewMode::Tabs => {}
-            }
+            crate::sys::macos_titlebar::enable_full_size_content(w);
         }
 
         // Restore window position from persisted settings (after titlebar config)
@@ -913,6 +911,19 @@ mod ui_shell_alignment_tests {
         let theme = ui::theme::test_theme();
         let mut m = NoopMeasure;
         let mut shell = UiShell::new();
+        shell.set_title_bar_input(ui::title_bar::TitleBarInput {
+            file_path: None,
+            sidebar_left: 0.0,
+            titlebar_x: 0.0,
+            can_toggle: false,
+            toggled: false,
+            toggle_label: None,
+            toc_visible: false,
+            toc_enabled: false,
+            mindmap_style: None,
+            window_chrome: ui::title_bar::WindowChrome::Native,
+            show_hamburger: !inputs.sidebar_visible,
+        });
         shell.mark_layout_initialized_for_test();
         shell.update_frame(Screen::new(1200.0, 800.0), &theme, &mut m, &inputs);
         shell.editor_rect()
@@ -934,8 +945,8 @@ mod ui_shell_alignment_tests {
             toc_thickness: 0.0,
             sidebar_settings: Default::default(),
         });
-        // 屏幕 1200x800, 上 32, 下 24, 右 12 → editor = (0, 32, 1188, 744)
-        assert_eq!(r, Rect::new(0.0, 32.0, 1188.0, 744.0));
+        // 标题栏 36 + 标签栏 32，下 24，右 12。
+        assert_eq!(r, Rect::new(0.0, 68.0, 1188.0, 708.0));
     }
 
     #[test]
@@ -994,12 +1005,12 @@ mod ui_shell_alignment_tests {
             toc_thickness: 0.0,
             sidebar_settings: Default::default(),
         });
-        // 上 32+28=60, 下 24 → editor = (0, 60, 1200, 716)
-        assert_eq!(r, Rect::new(0.0, 60.0, 1200.0, 716.0));
+        // 标题栏 36 + 标签栏 32 + 搜索栏 28，下 24。
+        assert_eq!(r, Rect::new(0.0, 96.0, 1200.0, 680.0));
     }
 
     #[test]
-    fn alignment_full_screen_no_chrome() {
+    fn alignment_tabs_mode_without_tab_strip_keeps_title_bar() {
         let r = run(ShellInputs {
             tabs_visible: false,
             tabs_thickness: 0.0,
@@ -1014,7 +1025,7 @@ mod ui_shell_alignment_tests {
             toc_thickness: 0.0,
             sidebar_settings: Default::default(),
         });
-        assert_eq!(r, Rect::new(0.0, 0.0, 1200.0, 800.0));
+        assert_eq!(r, Rect::new(0.0, 36.0, 1200.0, 764.0));
     }
 }
 
@@ -1117,7 +1128,7 @@ mod update_frame_skip_tests {
     }
 
     #[test]
-    fn update_frame_with_no_chrome_gives_full_screen() {
+    fn update_frame_without_title_input_gives_full_screen() {
         let theme = ui::theme::test_theme();
         let mut m = NoopMeasure;
         let mut shell = UiShell::new();

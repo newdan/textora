@@ -1766,9 +1766,9 @@ fn tabs_geometry_and_preview_offset_use_instance_settings() {
     app.update_scale_factor(2.0);
 
     assert_eq!(app.current_tab_bar_height(), 64.0);
-    assert_eq!(app.content_top_offset(), 64.0);
+    assert_eq!(app.content_top_offset(), 136.0);
     let (_, preview_y) = app.preview_offsets();
-    assert_eq!(preview_y, 96.0);
+    assert_eq!(preview_y, 168.0);
 
     app.settings.view_mode = ui::view_mode::ViewMode::Sidebar;
     assert_eq!(app.current_tab_bar_height(), 0.0);

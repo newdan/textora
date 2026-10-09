@@ -3,6 +3,7 @@ use core::types::UniCharOffset;
 use ui::canvas::{CanvasAxis, CanvasPoint};
 use winit::event::{ElementState, MouseScrollDelta};
 use winit::window::CursorIcon;
+use winit::window::ResizeDirection;
 
 use crate::menu_handler::AppCommand;
 use crate::sync_settings_types::SyncSettingsAction;
@@ -19,6 +20,11 @@ pub(crate) enum AppAction {
     RequestRedraw,
     /// Update the window cursor icon.
     SetCursor(CursorIcon),
+    DragWindow,
+    ResizeWindow(ResizeDirection),
+    MinimizeWindow,
+    ToggleMaximizeWindow,
+    CloseWindow,
 
     // ------------------------------------------------------------------------
     // Commands and Menus
@@ -63,7 +69,11 @@ pub(crate) enum AppAction {
         hit: Option<(UniCharOffset, usize, usize)>,
     },
     /// Handle cursor drag movement targeting the editor area.
-    EditorCursorMoved { px: f32, py: f32, hit: Option<(UniCharOffset, usize, usize)> },
+    EditorCursorMoved {
+        px: f32,
+        py: f32,
+        hit: Option<(UniCharOffset, usize, usize)>,
+    },
 
     // ------------------------------------------------------------------------
     // Tab interactions
@@ -94,9 +104,15 @@ pub(crate) enum AppAction {
     /// Update the viewport's top scroll offset (e.g. from drag).
     UpdateScrollTop(f64),
     /// Route an overlay canvas scrollbar action to the active canvas viewport.
-    CanvasScrollbar { axis: CanvasAxis, action: ScrollbarAction },
+    CanvasScrollbar {
+        axis: CanvasAxis,
+        action: ScrollbarAction,
+    },
     /// Zoom the active canvas viewport around a screen-space pinch anchor.
-    CanvasPinch { delta: f64, screen_anchor: CanvasPoint },
+    CanvasPinch {
+        delta: f64,
+        screen_anchor: CanvasPoint,
+    },
 
     // ------------------------------------------------------------------------
     // Viewport and cursor

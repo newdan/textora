@@ -10,7 +10,7 @@
 
 use winit::event::{ElementState, MouseScrollDelta};
 use winit::keyboard::{ModifiersState, PhysicalKey};
-use winit::window::CursorIcon;
+use winit::window::{CursorIcon, ResizeDirection};
 
 use crate::actions::AppAction;
 use crate::app::App;
@@ -25,6 +25,45 @@ use appkit_shell::window_input::{
 };
 use ui::core::widget::{Event, EventCtx, MouseButton as WidgetMouseButton, WidgetAction};
 use ui::plugin::EditHitTarget;
+
+pub(crate) const WINDOW_RESIZE_MARGIN_LOGICAL: f32 = 6.0;
+
+fn window_resize_direction(app: &App, px: f32, py: f32) -> Option<ResizeDirection> {
+    if !cfg!(target_os = "windows") {
+        return None;
+    }
+    let window = app.editor_runtime.window()?;
+    if window.is_maximized() || !window.is_resizable() {
+        return None;
+    }
+    let size = window.inner_size();
+    let margin = WINDOW_RESIZE_MARGIN_LOGICAL * app.ui_metrics().dpi;
+    resize_direction_for_bounds(px, py, size.width as f32, size.height as f32, margin)
+}
+
+fn resize_direction_for_bounds(
+    px: f32,
+    py: f32,
+    width: f32,
+    height: f32,
+    margin: f32,
+) -> Option<ResizeDirection> {
+    let left = px < margin;
+    let right = px >= width - margin;
+    let top = py < margin;
+    let bottom = py >= height - margin;
+    match (left, right, top, bottom) {
+        (true, _, true, _) => Some(ResizeDirection::NorthWest),
+        (_, true, true, _) => Some(ResizeDirection::NorthEast),
+        (true, _, _, true) => Some(ResizeDirection::SouthWest),
+        (_, true, _, true) => Some(ResizeDirection::SouthEast),
+        (true, _, _, _) => Some(ResizeDirection::West),
+        (_, true, _, _) => Some(ResizeDirection::East),
+        (_, _, true, _) => Some(ResizeDirection::North),
+        (_, _, _, true) => Some(ResizeDirection::South),
+        _ => None,
+    }
+}
 
 fn mmap_cursor_icon(app: &mut App, px: f32, py: f32) -> Option<CursorIcon> {
     let is_mmap = app.active_tab_session().is_some_and(|tab| {
@@ -330,6 +369,13 @@ fn translate_title_bar_action(ta: &ui::title_bar::TitleBarAction, actions: &mut 
     use crate::menu_handler::AppCommand;
     use ui::title_bar::TitleBarAction;
     match ta {
+        TitleBarAction::ToggleSidebar => {
+            actions.push(AppAction::SetViewMode(ui::view_mode::ViewMode::Sidebar));
+        }
+        TitleBarAction::DragWindow => actions.push(AppAction::DragWindow),
+        TitleBarAction::MinimizeWindow => actions.push(AppAction::MinimizeWindow),
+        TitleBarAction::ToggleMaximizeWindow => actions.push(AppAction::ToggleMaximizeWindow),
+        TitleBarAction::CloseWindow => actions.push(AppAction::CloseWindow),
         TitleBarAction::ToggleView => {
             actions.push(AppAction::ExecuteAppCommands(vec![AppCommand::Edit(
                 crate::input::EditCommand::ToggleView,
@@ -361,6 +407,13 @@ fn translate_toc_action(ta: &ui::toc::TocAction, actions: &mut Vec<AppAction>) {
 /// overlay highlight, and editor hit-test fallthrough.
 pub(crate) fn handle_cursor_moved(app: &mut App, px: f32, py: f32) -> Vec<AppAction> {
     let mut actions = vec![AppAction::UpdateMousePos(px as f64, py as f64)];
+
+    if !app.mouse.is_down
+        && let Some(direction) = window_resize_direction(app, px, py)
+    {
+        actions.push(AppAction::SetCursor(direction.into()));
+        return actions;
+    }
 
     // 0. Sidebar hover state machine: feed mouse position every frame
 
@@ -476,6 +529,13 @@ pub(crate) fn handle_mouse_input_left(
     py: f32,
 ) -> Vec<AppAction> {
     let mut actions = Vec::new();
+
+    if state.is_pressed()
+        && let Some(direction) = window_resize_direction(app, px, py)
+    {
+        actions.push(AppAction::ResizeWindow(direction));
+        return actions;
+    }
 
     // 1. Unified widget dispatch (overlays → Dock)
     let ev = if state.is_pressed() {
@@ -2059,5 +2119,22 @@ mod tests {
             app.ui_shell.keyboard_focus(),
             crate::ui_shell::KeyboardFocusTarget::Widget(ui::core::widget::ids::SEARCH_BAR)
         );
+    }
+
+    #[test]
+    fn border_resize_uses_corner_and_edge_directions() {
+        assert_eq!(
+            resize_direction_for_bounds(2.0, 2.0, 800.0, 600.0, 6.0),
+            Some(ResizeDirection::NorthWest)
+        );
+        assert_eq!(
+            resize_direction_for_bounds(798.0, 598.0, 800.0, 600.0, 6.0),
+            Some(ResizeDirection::SouthEast)
+        );
+        assert_eq!(
+            resize_direction_for_bounds(400.0, 2.0, 800.0, 600.0, 6.0),
+            Some(ResizeDirection::North)
+        );
+        assert_eq!(resize_direction_for_bounds(400.0, 300.0, 800.0, 600.0, 6.0), None);
     }
 }

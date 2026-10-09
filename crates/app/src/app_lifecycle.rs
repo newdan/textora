@@ -442,6 +442,26 @@ impl App {
         }
     }
 
+    pub(crate) fn close_window(&mut self, event_loop: &ActiveEventLoop) {
+        let dirty = self.active_tab_session().is_some_and(|tab| tab.document.dirty);
+        let file_backed =
+            self.active_tab_session().is_some_and(|tab| tab.document.file_path.is_some());
+        if dirty && file_backed {
+            let Some(tab_id) = self.active_tab_id() else {
+                self.quit_app(event_loop);
+                return;
+            };
+            self.pending_quit_after_save = true;
+            if let Err(error) = self.submit_editor_save(tab_id, None) {
+                self.pending_quit_after_save = false;
+                eprintln!("auto-save on close failed: {error}");
+                self.quit_app(event_loop);
+            }
+            return;
+        }
+        self.quit_app(event_loop);
+    }
+
     /// Actual resumed logic, wrapped in catch_unwind by the trait method.
     fn do_resumed(&mut self, event_loop: &ActiveEventLoop) {
         self.running = true;
@@ -492,27 +512,7 @@ impl App {
             self.dispatch_menu_action(action, event_loop);
         }
         match event {
-            WindowEvent::CloseRequested => {
-                // If there are unsaved changes, try to save first
-                let dirty = self.active_tab_session().is_some_and(|tab| tab.document.dirty);
-                let file_backed =
-                    self.active_tab_session().is_some_and(|tab| tab.document.file_path.is_some());
-                if dirty && file_backed {
-                    let Some(tab_id) = self.active_tab_id() else {
-                        self.quit_app(event_loop);
-                        return;
-                    };
-                    self.pending_quit_after_save = true;
-                    if let Err(error) = self.submit_editor_save(tab_id, None) {
-                        self.pending_quit_after_save = false;
-                        eprintln!("auto-save on close failed: {error}");
-                        self.quit_app(event_loop);
-                    }
-                    return;
-                }
-                // If no file path (new unsaved doc), just discard
-                self.quit_app(event_loop);
-            }
+            WindowEvent::CloseRequested => self.close_window(event_loop),
             WindowEvent::ModifiersChanged(modifiers) => {
                 self.editor_runtime.set_input_modifiers(modifiers.state());
             }
@@ -739,6 +739,9 @@ impl App {
                 } = self.editor_runtime.request_resize(physical_size.width, physical_size.height)
                 {
                     self.apply_resize_layout(height, width_changed);
+                }
+                if let Some(window) = self.editor_runtime.window() {
+                    crate::sys::macos_titlebar::align_traffic_lights(window);
                 }
             }
             WindowEvent::ScaleFactorChanged { scale_factor, .. } => {

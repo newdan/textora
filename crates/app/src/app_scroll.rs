@@ -316,7 +316,9 @@ impl App {
 
         // If the mouse is over the tab bar, scroll tabs horizontally via navigator
         let tbh = self.current_tab_bar_height();
-        if tbh > 0.0 && (self.mouse.pos.1 as f32) < tbh {
+        let tab_bar_top = ui::title_bar::title_bar_height(dpi);
+        let pointer_y = self.mouse.pos.1 as f32;
+        if tbh > 0.0 && pointer_y >= tab_bar_top && pointer_y < tab_bar_top + tbh {
             let dx: f32 = match delta {
                 MouseScrollDelta::LineDelta(x, y) => {
                     if x != 0.0 {

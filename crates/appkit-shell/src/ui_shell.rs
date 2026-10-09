@@ -356,6 +356,9 @@ impl UiShell {
 
     /// app 在 update_frame 之前调用，注入 titlebar 数据。
     pub fn set_title_bar_input(&mut self, input: TitleBarInput) {
+        if self.title_bar_input.is_none() {
+            self.dock_dirty = true;
+        }
         self.title_bar_input = Some(input);
     }
 
@@ -898,6 +901,22 @@ impl UiShell {
 
     fn rebuild_dock_children(&mut self, inputs: &ShellInputs, screen: Screen) {
         self.dock.children.clear();
+
+        // Tabs mode uses the same window title bar above its tab strip.
+        if !inputs.sidebar_visible && self.title_bar_input.is_some() {
+            let title_h = ui::title_bar::title_bar_height(inputs.metrics.dpi);
+            let mut title_bar = TitleBarWidget::new();
+            if let Some(ref input) = self.title_bar_input {
+                title_bar.set_input(input.clone());
+            }
+            self.dock.children.push(DockChild {
+                widget: Box::new(title_bar),
+                side: Side::Top,
+                thickness: Box::new(move |_, _| title_h),
+                visible: true,
+                layout_rect: Rect::ZERO,
+            });
+        }
 
         // Tab bar: top
         if inputs.tabs_visible && inputs.tabs_thickness > 0.0 {
