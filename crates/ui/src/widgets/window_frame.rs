@@ -1,21 +1,25 @@
 //! 沉浸式窗口外壳。只接收标题与平台窗口状态，不访问产品模型。
 
+use crate::core::text_layout::UiTextLayout;
 use crate::core::widget::{PointerClickKind, PointerClickTracker};
 use crate::{Event, MouseButton, PaintCtx, Rect};
+use std::sync::Arc;
 use winit::window::{CursorIcon, ResizeDirection};
 
 const TITLE_HEIGHT_LOGICAL: f32 = 36.0;
 const CONTROL_WIDTH_LOGICAL: f32 = 46.0;
 const CONTROL_ICON_SIZE_LOGICAL: f32 = 14.0;
 const TITLE_INSET_LOGICAL: f32 = 16.0;
-const TITLE_FONT_SIZE_LOGICAL: f32 = 13.0;
+const TITLE_FONT_SIZE_LOGICAL: f32 = 16.0;
+const TITLE_FONT_FAMILY: &str = "Segoe UI";
+const TITLE_FONT_WEIGHT: shaping::Weight = shaping::Weight::SEMIBOLD;
 const TEXT_BASELINE_EM: f32 = 0.35;
 const RESIZE_MARGIN_LOGICAL: f32 = 6.0;
 const FRAME_BORDER_PHYSICAL: f32 = 1.0;
 const RESTORE_SQUARE_LOGICAL: f32 = 9.0;
 const RESTORE_OFFSET_LOGICAL: f32 = 3.0;
 const NAVIGATION_BUTTON_SIZE_LOGICAL: f32 = 28.0;
-const NAVIGATION_BUTTON_INSET_LOGICAL: f32 = 12.0;
+const TITLE_NAVIGATION_GAP_LOGICAL: f32 = 8.0;
 const NAVIGATION_ICON_WIDTH_LOGICAL: f32 = 18.0;
 const NAVIGATION_ICON_HEIGHT_LOGICAL: f32 = 14.0;
 const NAVIGATION_ICON_RADIUS_LOGICAL: f32 = 3.0;
@@ -74,6 +78,7 @@ pub struct WindowFrameWidget {
     input: WindowFrameInput,
     window_rect: Rect,
     dpi: f32,
+    title_layout: Option<Arc<UiTextLayout>>,
     hovered_control: Option<usize>,
     hovered_navigation: bool,
     title_clicks: PointerClickTracker,
@@ -89,9 +94,13 @@ enum PointerOrigin {
 
 impl WindowFrameWidget {
     pub fn set_input(&mut self, input: WindowFrameInput, window_rect: Rect, dpi: f32) {
+        let dpi = dpi.max(1.0);
+        if self.input.title != input.title || self.dpi != dpi {
+            self.title_layout = None;
+        }
         self.input = input;
         self.window_rect = window_rect;
-        self.dpi = dpi.max(1.0);
+        self.dpi = dpi;
     }
 
     fn title_rect(&self) -> Rect {
@@ -117,11 +126,51 @@ impl WindowFrameWidget {
         }
         let title = self.title_rect();
         let size = NAVIGATION_BUTTON_SIZE_LOGICAL * self.dpi;
-        let left = title.x + NAVIGATION_BUTTON_INSET_LOGICAL * self.dpi;
+        let left = self.title_text_rect().right() + TITLE_NAVIGATION_GAP_LOGICAL * self.dpi;
         if title.h < size || left + size > self.control_rects()[0].x {
             return Rect::ZERO;
         }
         Rect::new(left, title.y + (title.h - size) * 0.5, size, size)
+    }
+
+    fn title_text_rect(&self) -> Rect {
+        let title = self.title_rect();
+        let inset = TITLE_INSET_LOGICAL * self.dpi;
+        let left = title.x + inset;
+        let available_width = (self.control_rects()[0].x - left - inset).max(0.0);
+        let navigation_width =
+            if self.input.navigation_toggle == WindowFrameNavigationToggle::Hidden {
+                0.0
+            } else {
+                (NAVIGATION_BUTTON_SIZE_LOGICAL + TITLE_NAVIGATION_GAP_LOGICAL) * self.dpi
+            };
+        let width =
+            self.title_layout.as_ref().map(|layout| layout.shaped.width).unwrap_or_else(|| {
+                crate::core::text_util::estimate_text_width_px(
+                    &self.input.title,
+                    TITLE_FONT_SIZE_LOGICAL * self.dpi,
+                )
+            });
+        Rect::new(left, title.y, width.min((available_width - navigation_width).max(0.0)), title.h)
+    }
+
+    fn prepare_title_layout(&mut self, context: &mut PaintCtx<'_>) {
+        if self.title_layout.is_some() {
+            return;
+        }
+        let Some(shaper) = context.shaper.as_mut() else {
+            return;
+        };
+        self.title_layout = UiTextLayout::new(
+            &self.input.title,
+            TITLE_FONT_SIZE_LOGICAL * self.dpi,
+            Some(TITLE_FONT_FAMILY.to_owned()),
+            TITLE_FONT_WEIGHT,
+            shaping::Style::Normal,
+            false,
+            shaper,
+        )
+        .map(Arc::new);
     }
 
     fn resize_direction(&self, px: f32, py: f32) -> Option<ResizeDirection> {
@@ -246,34 +295,26 @@ impl WindowFrameWidget {
         }
     }
 
-    pub fn paint_title(&self, context: &mut PaintCtx<'_>) {
+    pub fn paint_title(&mut self, context: &mut PaintCtx<'_>) {
         let title = self.title_rect();
         if title.w <= 0.0 || title.h <= 0.0 {
             return;
         }
+        self.prepare_title_layout(context);
         let application = context.theme.application_theme();
         context.list.fill(title, application.window_surface);
         self.paint_navigation_toggle(context);
         let controls = self.control_rects();
-        let inset = TITLE_INSET_LOGICAL * self.dpi;
-        let text_left = if self.navigation_toggle_rect() == Rect::ZERO {
-            title.x + inset
-        } else {
-            self.navigation_toggle_rect().right() + NAVIGATION_BUTTON_INSET_LOGICAL * self.dpi
-        };
-        let text_rect =
-            Rect::new(text_left, title.y, (controls[0].x - text_left - inset).max(0.0), title.h);
+        let text_rect = self.title_text_rect();
         let font_size = TITLE_FONT_SIZE_LOGICAL * self.dpi;
         let baseline = title.y + title.h * 0.5 + font_size * TEXT_BASELINE_EM;
-        if let Some(shaper) = context.shaper.as_mut() {
+        if let Some(layout) = &self.title_layout {
             context.list.clip(text_rect, |list| {
-                list.text_shaped(
+                list.text_layout(
+                    Arc::clone(layout),
                     text_rect.x,
                     baseline,
-                    font_size,
-                    application.text_secondary,
-                    &self.input.title,
-                    shaper,
+                    application.text_primary,
                 );
             });
         }
@@ -417,13 +458,54 @@ mod tests {
     }
 
     #[test]
+    fn title_precedes_navigation_toggle_and_uses_readable_system_typography() {
+        let mut shaper =
+            shaping::Shaper::new().expect("title typography test should load system fonts");
+        let theme = Theme::from_definition(&crate::theme::ThemeDefinition::default_light());
+        for dpi in [1.0, 1.5, 2.0] {
+            let mut widget = frame(WindowFrameState::Restored, dpi);
+            widget.input.navigation_toggle = WindowFrameNavigationToggle::Enabled;
+            let mut list = DrawList::new();
+            let mut context = PaintCtx::new(&mut list, &theme, dpi);
+            context.shaper = Some(&mut shaper);
+            widget.paint_title(&mut context);
+            let (layout, text_x) = list
+                .cmds
+                .iter()
+                .find_map(|command| {
+                    if let DrawCmd::TextLayout { layout, x, .. } = command {
+                        Some((layout, *x))
+                    } else {
+                        None
+                    }
+                })
+                .expect("title should emit shaped text");
+            assert!(
+                widget.navigation_toggle_rect().x > text_x + layout.shaped.width,
+                "navigation toggle must follow the rendered title"
+            );
+            assert_eq!(text_x, 16.0 * dpi);
+            assert_eq!(layout.font_size, 16.0 * dpi);
+            assert_eq!(layout.font_weight, shaping::Weight::SEMIBOLD);
+            assert_eq!(layout.font_family.as_deref(), Some("Segoe UI"));
+            let toggle = widget.navigation_toggle_rect();
+            assert_eq!(
+                widget
+                    .on_event(&press(toggle.x + toggle.w * 0.5, toggle.y + toggle.h * 0.5))
+                    .action,
+                Some(WindowFrameAction::ToggleNavigation)
+            );
+        }
+    }
+
+    #[test]
     fn navigation_toggle_uses_a_fixed_title_bar_target_and_never_drags_the_window() {
         for dpi in [1.0, 1.5, 2.0] {
             let mut widget = frame(WindowFrameState::Restored, dpi);
             widget.input.navigation_toggle = WindowFrameNavigationToggle::Enabled;
             let rect = widget.navigation_toggle_rect();
             let click = press(rect.x + rect.w * 0.5, rect.y + rect.h * 0.5);
-            assert_eq!(rect.x, NAVIGATION_BUTTON_INSET_LOGICAL * dpi);
+            assert!(rect.x > TITLE_INSET_LOGICAL * dpi);
             assert!(rect.bottom() < widget.title_rect().bottom());
             for _ in 0..2 {
                 let route = widget.on_event(&click);
@@ -489,7 +571,7 @@ mod tests {
     #[test]
     fn frame_uses_warm_shell_surface_and_four_physical_pixel_borders() {
         let theme = Theme::from_definition(&crate::theme::ThemeDefinition::default_light());
-        let widget = frame(WindowFrameState::Restored, 2.0);
+        let mut widget = frame(WindowFrameState::Restored, 2.0);
         let mut list = DrawList::new();
         widget.paint_title(&mut PaintCtx::new(&mut list, &theme, 2.0));
         assert!(
