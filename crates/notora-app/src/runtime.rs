@@ -102,6 +102,28 @@ const PRODUCT_WINDOW_TITLE: &str = "notora";
 const SHUTDOWN_SAVE_DRAIN_TIMEOUT: Duration = Duration::from_secs(2);
 const SHUTDOWN_SAVE_DRAIN_POLL_INTERVAL: Duration = Duration::from_millis(10);
 const DEFAULT_RUNTIME_TAB_LIMIT: usize = 12;
+#[cfg(target_os = "windows")]
+const WINDOW_ICON_SIZE: u32 = 32;
+#[cfg(target_os = "windows")]
+const TASKBAR_ICON_SIZE: u32 = 256;
+
+#[cfg(target_os = "windows")]
+fn windows_window_icons() -> (winit::window::Icon, winit::window::Icon) {
+    use image::imageops::FilterType;
+
+    let artwork = image::load_from_memory_with_format(
+        include_bytes!("../../../assets/NotoraAppIcon.ico"),
+        image::ImageFormat::Ico,
+    )
+    .expect("the embedded notora app icon must be a valid ICO image");
+    let icon_at_size = |size| {
+        let pixels = artwork.resize_exact(size, size, FilterType::Lanczos3).into_rgba8();
+        winit::window::Icon::from_rgba(pixels.into_raw(), size, size)
+            .expect("the decoded notora app icon must have valid RGBA dimensions")
+    };
+
+    (icon_at_size(WINDOW_ICON_SIZE), icon_at_size(TASKBAR_ICON_SIZE))
+}
 
 fn notora_window_attributes() -> WindowAttributes {
     let attributes = WindowAttributes::default()
@@ -114,8 +136,11 @@ fn notora_window_attributes() -> WindowAttributes {
     #[cfg(target_os = "windows")]
     {
         use winit::platform::windows::{CornerPreference, WindowAttributesExtWindows};
+        let (window_icon, taskbar_icon) = windows_window_icons();
         // GDI 区域控制精确半径；关闭会引入非客户区黑线的 winit 阴影补偿。
         attributes
+            .with_window_icon(Some(window_icon))
+            .with_taskbar_icon(Some(taskbar_icon))
             .with_undecorated_shadow(false)
             .with_corner_preference(CornerPreference::DoNotRound)
     }
@@ -129,6 +154,8 @@ fn window_attributes_preserve_product_title_and_platform_decorations() {
     let attributes = notora_window_attributes();
     assert_eq!(attributes.title, "notora");
     assert_eq!(attributes.decorations, !cfg!(target_os = "windows"));
+    #[cfg(target_os = "windows")]
+    assert!(attributes.window_icon.is_some(), "custom window chrome must retain the app icon");
 }
 
 type WorkspaceDirectoryChooser = Box<dyn Fn() -> Option<std::path::PathBuf>>;

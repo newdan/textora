@@ -1,0 +1,36 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="86 66 852 892" preserveAspectRatio="none" fill="none">
+  <title>Notora — Folded N Cover / 方案11-参考色优化</title>
+  <defs>
+    <linearGradient id="cover" x1="328" y1="64" x2="706" y2="900" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#7AD8E9"/><stop offset="1" stop-color="#43B2CC"/>
+    </linearGradient>
+    <linearGradient id="spine" x1="152" y1="64" x2="152" y2="900" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#0B7D9D"/><stop offset="1" stop-color="#05617F"/>
+    </linearGradient>
+    <linearGradient id="back" x1="540" y1="124" x2="540" y2="960" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#C46307"/><stop offset="1" stop-color="#A64F04"/>
+    </linearGradient>
+    <clipPath id="cover-clip"><rect x="84" y="64" width="800" height="836" rx="136"/></clipPath>
+    <linearGradient id="N-side" x1="300" y1="282" x2="740" y2="720" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#08748E"/><stop offset="1" stop-color="#055B76"/>
+    </linearGradient>
+    <linearGradient id="N-fold" x1="376" y1="278" x2="648" y2="744" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#28A0B7"/><stop offset="1" stop-color="#13819D"/>
+    </linearGradient>
+  </defs>
+  <g id="notebook">
+    <rect id="back-cover" x="140" y="124" width="800" height="836" rx="136" fill="url(#back)"/>
+    <rect id="pages" x="116" y="98" width="800" height="836" rx="136" fill="#FFFFFF"/>
+    <g id="front-cover" clip-path="url(#cover-clip)">
+      <rect x="84" y="64" width="800" height="836" rx="136" fill="url(#cover)"/>
+      <rect id="book-spine" x="84" y="64" width="136" height="836" fill="url(#spine)"/>
+      <g id="notora-monogram" transform="translate(152.64 82.54) scale(.78)">
+        <path id="N-left-fold" d="M290 736V326C290 299.49 311.49 278 338 278H430V696C430 718.09 412.09 736 390 736H290Z" fill="url(#N-side)"/>
+        <path id="N-right-fold" d="M594 328C594 300.39 616.39 278 644 278H734V696C734 718.09 716.09 736 694 736H594V328Z" fill="url(#N-side)"/>
+        <path id="N-diagonal-fold" d="M338 278H430L734 696C734 718.09 716.09 736 694 736H594L290 326C290 299.49 311.49 278 338 278Z" fill="url(#N-fold)"/>
+        <path id="N-fold-depth" d="M290 326L430 515V548L290 360Z" fill="#044A63" fill-opacity=".15"/>
+      </g>
+    </g>
+  </g>
+</svg>
