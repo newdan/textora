@@ -326,6 +326,9 @@ impl EditorPaneChrome {
         if !self.input.should_render_chrome() {
             return;
         }
+        let chrome_surface = context.theme.application_theme().navigation_surface;
+        context.list.fill(self.rects.header, chrome_surface);
+        context.list.fill(self.rects.toolbar, chrome_surface);
         if self.input.mode.shows_header() {
             paint_at(context, self.document_header_rect, |context| self.header.paint(context));
         }
@@ -762,6 +765,45 @@ mod tests {
             },
             tags: TagEditorInput { enabled: true, ..TagEditorInput::default() },
             toolbar: EditorToolbarInput::default(),
+        }
+    }
+
+    #[test]
+    fn pane_header_and_toolbar_share_the_navigation_background() {
+        use ui::core::paint::{DrawCmd, DrawList};
+
+        for mode in [
+            EditorPaneMode::WorkspaceNote,
+            EditorPaneMode::ExternalFile,
+            EditorPaneMode::TrashNote,
+            EditorPaneMode::Empty,
+        ] {
+            let theme = ui::theme::test_theme();
+            let mut chrome = EditorPaneChrome::new();
+            chrome.set_input(input(mode));
+            let mut measure = ui::core::NoopMeasure;
+            let mut layout_context =
+                LayoutCtx { ui_measure: None, measure: &mut measure, theme: &theme, dpi: 1.0 };
+            let rects = EditorPaneRects {
+                header: Rect::new(420.0, 48.0, 640.0, 108.0),
+                toolbar: Rect::new(420.0, 156.0, 640.0, 36.0),
+                body: Rect::new(420.0, 192.0, 640.0, 480.0),
+            };
+            chrome.set_rects(rects, &mut layout_context);
+            let mut draw_list = DrawList::new();
+            chrome.paint_underlay(&mut PaintCtx::new(&mut draw_list, &theme, 1.0));
+
+            for expected_rect in [rects.header, rects.toolbar] {
+                let paints_chrome_background = draw_list.cmds.iter().any(|command| {
+                    matches!(command, DrawCmd::FillRect { rect, color, .. }
+                        if *rect == expected_rect
+                            && *color == theme.application_theme().navigation_surface)
+                });
+                assert_eq!(paints_chrome_background, mode != EditorPaneMode::Empty);
+            }
+            assert!(!draw_list.cmds.iter().any(|command| {
+                matches!(command, DrawCmd::FillRect { rect, .. } if *rect == rects.body)
+            }));
         }
     }
 

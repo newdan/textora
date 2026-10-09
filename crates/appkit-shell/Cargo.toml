@@ -31,3 +31,6 @@ smallvec.workspace = true
 unicode_categories.workspace = true
 clipboard-rs.workspace = true
 url.workspace = true
+
+[target.'cfg(target_os = "windows")'.dependencies]
+wgpu = { workspace = true, features = ["gles", "dx12"] }
