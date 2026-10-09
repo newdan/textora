@@ -145,7 +145,7 @@ mod tests {
 
     #[cfg(feature = "markdown")]
     #[test]
-    fn wysiwyg_smart_paste_converts_html() {
+    fn wysiwyg_smart_paste_respects_html_build_feature() {
         let mut clipboard =
             TestDocumentClipboard::with_html("<p><strong>rich</strong></p>", "rich");
         let text = prepare_document_paste(
@@ -154,7 +154,8 @@ mod tests {
             PasteRequestKind::Smart,
         );
 
-        assert_eq!(text.as_deref(), Some("**rich**"));
+        let expected = if cfg!(feature = "markdown-rich") { "**rich**" } else { "rich" };
+        assert_eq!(text.as_deref(), Some(expected));
         assert_eq!(clipboard.snapshot_reads, 1);
     }
 

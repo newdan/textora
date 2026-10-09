@@ -9500,6 +9500,7 @@ mod tests {
         assert_eq!(edited_source, "left \\\n right");
     }
 
+    #[cfg(feature = "rich-markdown")]
     #[test]
     fn markdown_edit_policy_deletes_complete_inline_html_break_forward() {
         let mut view = MarkdownEditorView::new();

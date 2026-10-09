@@ -10,6 +10,10 @@ pub mod augmenter;
 pub mod builder;
 pub mod commands;
 pub mod edit;
+#[cfg(feature = "rich-markdown")]
+pub mod embedded;
+#[cfg(not(feature = "rich-markdown"))]
+#[path = "embedded_lite.rs"]
 pub mod embedded;
 pub mod grapheme_map;
 pub mod layout;
@@ -143,6 +147,53 @@ pub(crate) mod test_utils {
     pub fn default_style() -> MarkdownStyle {
         let theme = ui::theme::test_theme();
         MarkdownStyle::from_theme(&theme, 15.0, 24.0)
+    }
+}
+
+#[cfg(all(test, not(feature = "rich-markdown")))]
+mod lite_tests {
+    use crate::builder::{BlockKind, MarkdownDoc};
+    use crate::parser::{MarkdownEvent, parse_markdown};
+    use crate::paste::{PasteFallbackReason, PasteRepresentations, PreparedPaste, prepare_paste};
+
+    #[test]
+    fn basic_markdown_keeps_math_and_html_as_text() {
+        let source = "# Heading\n\n**bold** $x$ <br>";
+        let parsed = parse_markdown(source);
+        assert!(!parsed.events.iter().any(|event| {
+            matches!(event, MarkdownEvent::InlineMath(_) | MarkdownEvent::DisplayMath(_))
+        }));
+
+        let document = MarkdownDoc::build(&parsed, &crate::test_utils::default_style());
+        assert!(matches!(document.blocks[0].kind, BlockKind::Heading { .. }));
+        assert_eq!(document.blocks[1].text_lines, ["bold $x$ <br>"]);
+    }
+
+    #[test]
+    fn mermaid_fence_stays_a_code_block() {
+        let source = "```mermaid\nflowchart LR\nA --> B\n```";
+        let document =
+            MarkdownDoc::build(&parse_markdown(source), &crate::test_utils::default_style());
+        assert!(matches!(document.blocks[0].kind, BlockKind::CodeBlock { .. }));
+        assert!(!crate::layout::block::is_mermaid_language("mermaid"));
+    }
+
+    #[test]
+    fn html_clipboard_format_is_ignored() {
+        let prepared = prepare_paste(PasteRepresentations {
+            markdown: None,
+            html: Some("<strong>rich</strong>"),
+            rtf: None,
+            plain: Some("rich"),
+            source_url: None,
+        });
+        assert_eq!(
+            prepared,
+            PreparedPaste::PlainTextFallback {
+                text: "rich".into(),
+                reason: PasteFallbackReason::NoRichRepresentation,
+            }
+        );
     }
 }
 

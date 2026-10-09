@@ -639,6 +639,7 @@ mod tests {
     use crate::layout::types::{CollapsedBoundary, VisualLineProjection};
     use crate::projection::{ProjectionError, ProjectionOwnerId, TextProjectionBuilder};
 
+    #[cfg(feature = "rich-markdown")]
     #[test]
     fn editing_inline_math_replaces_entire_object_with_direct_source() {
         let source = "中$x^2$文";

@@ -12,9 +12,10 @@ name = "textora"
 path = "src/main.rs"
 
 [features]
-default = ["markdown"]
+default = ["markdown-rich"]
 ci-no-fonts = ["appkit-shell/ci-no-fonts"]
 markdown = ["dep:textora-markdown"]
+markdown-rich = ["markdown", "textora-markdown/rich-markdown"]
 
 [dependencies]
 unicode_categories = { workspace = true }
@@ -22,7 +23,7 @@ ui.workspace = true
 winit.workspace = true
 wgpu.workspace = true
 shaping.workspace = true
-textora-markdown = { path = "../markdown", optional = true }
+textora-markdown = { path = "../markdown", optional = true, default-features = false }
 appkit-core = { path = "../appkit-core", package = "textora-appkit-core" }
 appkit-shell = { path = "../appkit-shell", package = "textora-appkit-shell" }
 render.workspace = true

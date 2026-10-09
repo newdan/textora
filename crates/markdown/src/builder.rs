@@ -1192,7 +1192,8 @@ impl MarkdownDoc {
 }
 
 fn inline_html_is_break(html: &str) -> bool {
-    matches!(html.trim().to_ascii_lowercase().as_str(), "<br>" | "<br/>" | "<br />")
+    cfg!(feature = "rich-markdown")
+        && matches!(html.trim().to_ascii_lowercase().as_str(), "<br>" | "<br/>" | "<br />")
 }
 
 /// Convert TextStyleMod to InlineStyle (if applicable for rendering).
@@ -1394,6 +1395,7 @@ fn is_paragraph_end_char(c: char) -> bool {
 mod tests {
     use super::*;
 
+    #[cfg(feature = "rich-markdown")]
     #[test]
     fn inline_math_is_one_projected_object_with_full_source_range() {
         let source = "中$x^2$文";
@@ -1411,6 +1413,7 @@ mod tests {
         assert_eq!(&source[math.source_range.clone()], "$x^2$");
     }
 
+    #[cfg(feature = "rich-markdown")]
     #[test]
     fn same_line_display_math_splits_surrounding_paragraph() {
         let source = "before $$x^2$$ after";
@@ -1584,6 +1587,7 @@ mod tests {
         assert_eq!(doc.blocks[0].text_lines, ["first", "second"]);
     }
 
+    #[cfg(feature = "rich-markdown")]
     #[test]
     fn builder_renders_inline_html_break_as_a_hard_break() {
         for html_break in ["<br>", "<br/>", "<br />"] {

@@ -1,11 +1,11 @@
+#[cfg(feature = "rich-markdown")]
+use super::html::{SemanticMarkup, parse_html};
 use super::{
     PasteFallbackReason, PasteRepresentations, PreparedPaste, RichDocument, VisibleSegment,
-    VisibleTextMode,
-    html::{SemanticMarkup, parse_html},
-    rtf::parse_rtf,
-    writer::write_markdown,
+    VisibleTextMode, rtf::parse_rtf, writer::write_markdown,
 };
 
+#[cfg(feature = "rich-markdown")]
 enum HtmlSelection {
     Prepared(PreparedPaste),
     TryRtf(PasteFallbackReason),
@@ -45,12 +45,21 @@ pub fn prepare_paste(input: PasteRepresentations<'_>) -> PreparedPaste {
     }
 
     let plain = non_empty_text(input.plain);
-    match select_html(input.html, input.source_url, plain) {
-        HtmlSelection::Prepared(prepared) => prepared,
-        HtmlSelection::TryRtf(fallback_reason) => select_rtf(input.rtf, plain, fallback_reason),
+    #[cfg(not(feature = "rich-markdown"))]
+    {
+        select_rtf(input.rtf, plain, PasteFallbackReason::NoRichRepresentation)
+    }
+
+    #[cfg(feature = "rich-markdown")]
+    {
+        match select_html(input.html, input.source_url, plain) {
+            HtmlSelection::Prepared(prepared) => prepared,
+            HtmlSelection::TryRtf(fallback_reason) => select_rtf(input.rtf, plain, fallback_reason),
+        }
     }
 }
 
+#[cfg(feature = "rich-markdown")]
 fn select_html(html: Option<&str>, source_url: Option<&str>, plain: Option<&str>) -> HtmlSelection {
     let Some(html) = non_empty_text(html) else {
         return HtmlSelection::TryRtf(PasteFallbackReason::NoRichRepresentation);
@@ -297,7 +306,7 @@ fn is_flow_whitespace(character: char) -> bool {
     character == '\u{a0}' || character.is_whitespace()
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "rich-markdown"))]
 mod tests {
     use super::{
         PatternToken, equivalent_visible_text, pattern_matches_plain,

@@ -691,10 +691,11 @@ fn ordered_source_marker(
 }
 
 pub(crate) fn is_mermaid_language(language_hint: &str) -> bool {
-    language_hint
-        .split_whitespace()
-        .next()
-        .is_some_and(|language| language.eq_ignore_ascii_case("mermaid"))
+    cfg!(feature = "rich-markdown")
+        && language_hint
+            .split_whitespace()
+            .next()
+            .is_some_and(|language| language.eq_ignore_ascii_case("mermaid"))
 }
 
 fn block_is_selected(block: &BlockNode, selection: Option<&std::ops::Range<usize>>) -> bool {
@@ -2046,6 +2047,7 @@ mod tests {
     use crate::parser::parse_markdown;
     use crate::test_utils::default_style;
 
+    #[cfg(feature = "rich-markdown")]
     #[test]
     fn inline_math_cluster_uses_rendered_image_width() {
         let source = "left $x^2$ right";
@@ -2099,6 +2101,7 @@ mod tests {
         assert!((cluster.advance - expected.image.width() as f32).abs() < 1.0);
     }
 
+    #[cfg(feature = "rich-markdown")]
     #[test]
     fn tall_inline_math_expands_its_row_and_following_block_position() {
         let source = "left $\\frac{1}{2}$ right\n\nnext";
@@ -2136,6 +2139,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "rich-markdown")]
     #[test]
     fn display_math_and_mermaid_become_image_blocks() {
         for source in ["$$\\frac{1}{2}$$", "```mermaid\nflowchart LR\nA --> B\n```"] {
@@ -2163,6 +2167,7 @@ mod tests {
         }
     }
 
+    #[cfg(feature = "rich-markdown")]
     #[test]
     fn invalid_inline_math_falls_back_to_readable_source() {
         let source = "before $\\noSuchMathCommand$ after";
@@ -2192,6 +2197,7 @@ mod tests {
         assert_eq!(lines.iter().map(|line| line.text.as_str()).collect::<String>(), source);
     }
 
+    #[cfg(feature = "rich-markdown")]
     #[test]
     fn invalid_mermaid_shows_complete_fenced_source() {
         let source = "```mermaid\nnot a diagram\n```";
@@ -2215,6 +2221,7 @@ mod tests {
         assert!(lines.iter().any(|line| line.text == "```"));
     }
 
+    #[cfg(feature = "rich-markdown")]
     #[test]
     fn table_column_demand_includes_inline_math_image_width() {
         let source = "| x | y |\n|---|---|\n| $a+b+c+d+e+f+g+h+i+j+k+l$ | z |";
