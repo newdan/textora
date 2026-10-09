@@ -139,7 +139,12 @@ impl NotoraRuntime {
                 let (px, py) = (position.x as f32, position.y as f32);
                 self.set_pointer_position(px, py);
                 let pointer_event = ui::Event::MouseMove { px, py };
-                self.route_pointer_event(&pointer_event);
+                if !self.route_window_frame_event(&pointer_event, event_loop) {
+                    self.route_pointer_event(&pointer_event);
+                }
+            }
+            WindowEvent::CursorLeft { .. } => {
+                self.route_window_frame_event(&ui::Event::PointerLeave, event_loop);
             }
             WindowEvent::MouseInput { state, button, .. } => {
                 let Some(button) = map_mouse_button(button) else {
@@ -150,11 +155,16 @@ impl NotoraRuntime {
                     ElementState::Pressed => ui::Event::MouseDown { px, py, button },
                     ElementState::Released => ui::Event::MouseUp { px, py, button },
                 };
-                self.route_pointer_event(&product_event);
+                if !self.route_window_frame_event(&product_event, event_loop) {
+                    self.route_pointer_event(&product_event);
+                }
             }
             WindowEvent::MouseWheel { delta, .. } => {
                 let (px, py) = self.pointer_position();
                 let (dx, dy) = scroll_delta_pixels(&delta, self.shell_layout().dpi * 16.0);
+                if self.route_window_frame_event(&ui::Event::Wheel { dx, dy, px, py }, event_loop) {
+                    return;
+                }
                 let product_consumed =
                     self.route_product_event(&ui::Event::Wheel { dx, dy, px, py });
                 if product_consumed {

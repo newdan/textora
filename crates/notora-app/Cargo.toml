@@ -53,6 +53,7 @@ wgpu = { workspace = true, features = ["vulkan"] }
 
 [target.'cfg(target_os = "windows")'.dependencies]
 wgpu = { workspace = true, features = ["dx12"] }
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Graphics_Gdi", "Win32_UI_WindowsAndMessaging"] }
 image = { version = "0.25", default-features = false, features = ["ico"] }
 
 [build-dependencies]

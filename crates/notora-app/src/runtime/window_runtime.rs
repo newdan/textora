@@ -3,11 +3,30 @@ use appkit_shell::editor_runtime::{EditorCursorBlinkPhase, EditorRuntime};
 use winit::event_loop::EventLoopProxy;
 use winit::window::CursorIcon;
 
+#[cfg(target_os = "windows")]
+#[path = "window_runtime/window_shape.rs"]
+mod window_shape;
+
+pub(super) fn frame_state(
+    window: Option<&winit::window::Window>,
+) -> ui::window_frame::WindowFrameState {
+    use ui::window_frame::WindowFrameState;
+    if !cfg!(target_os = "windows") {
+        return WindowFrameState::Native;
+    }
+    if window.is_some_and(|window| window.is_maximized() || window.fullscreen().is_some()) {
+        return WindowFrameState::Maximized;
+    }
+    WindowFrameState::Restored
+}
+
 const DEFAULT_WINDOW_WIDTH_PX: f32 = 1_200.0;
 const DEFAULT_WINDOW_HEIGHT_PX: f32 = 800.0;
 
 /// UI 线程上的平台窗口瞬时状态与窄能力端口。
 pub(super) struct WindowRuntime {
+    #[cfg(target_os = "windows")]
+    window_shape: window_shape::WindowShapeCache,
     focused: bool,
     width_px: f32,
     height_px: f32,
@@ -20,6 +39,8 @@ pub(super) struct WindowRuntime {
 impl WindowRuntime {
     pub(super) fn new() -> Self {
         Self {
+            #[cfg(target_os = "windows")]
+            window_shape: window_shape::WindowShapeCache::default(),
             focused: true,
             width_px: DEFAULT_WINDOW_WIDTH_PX,
             height_px: DEFAULT_WINDOW_HEIGHT_PX,
@@ -32,6 +53,17 @@ impl WindowRuntime {
 
     pub(super) fn set_event_loop_proxy(&mut self, proxy: EventLoopProxy<ShellEvent>) {
         self.event_loop_proxy = Some(proxy);
+    }
+
+    pub(super) fn synchronize_shape(&mut self, editor_runtime: &EditorRuntime) {
+        #[cfg(target_os = "windows")]
+        if let Some(window) = editor_runtime.window()
+            && let Err(error) = self.window_shape.synchronize(window)
+        {
+            eprintln!("[window] 无法同步圆角轮廓：{error}");
+        }
+        #[cfg(not(target_os = "windows"))]
+        let _ = editor_runtime;
     }
 
     pub(super) fn event_loop_proxy(&self) -> Option<EventLoopProxy<ShellEvent>> {

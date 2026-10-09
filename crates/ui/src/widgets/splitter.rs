@@ -101,6 +101,34 @@ impl SplitterWidget {
         self.accessibility_label = label;
     }
 
+    /// 圆角容器已有轮廓时，只在交互期间绘制指定直边上的调整手柄。
+    /// visual_rect 不改变命中范围或拖动坐标。
+    pub fn paint_handle(&self, ctx: &mut PaintCtx, visual_rect: Rect) {
+        if !self.is_capturing() && !self.hovered && !self.focused {
+            return;
+        }
+        self.paint_line(ctx, visual_rect);
+    }
+
+    fn paint_line(&self, ctx: &mut PaintCtx, rect: Rect) {
+        if rect.w <= 0.0 || rect.h <= 0.0 {
+            return;
+        }
+        let active = self.is_capturing() || self.hovered;
+        let color = if active { ctx.theme.palette.accent } else { ctx.theme.palette.border_subtle };
+        let thickness = if active { 2.0 * ctx.dpi } else { ctx.dpi };
+        let x = rect.x + (rect.w - thickness) * 0.5;
+        ctx.list.fill(Rect::new(x, rect.y, thickness, rect.h), color);
+        if self.focused && self.input.enabled {
+            ctx.list.stroke_rounded(
+                rect,
+                ctx.theme.settings_theme().focus_ring,
+                0.0,
+                SPLITTER_FOCUS_RING_WIDTH_LOGICAL * ctx.dpi,
+            );
+        }
+    }
+
     fn clamp_logical_position(&self, logical_position: f32) -> f32 {
         logical_position.clamp(
             self.input.minimum_logical_position,
@@ -138,26 +166,7 @@ impl Widget for SplitterWidget {
     }
 
     fn paint(&self, ctx: &mut PaintCtx) {
-        if self.rect.w <= 0.0 || self.rect.h <= 0.0 {
-            return;
-        }
-
-        let color = if self.is_capturing() || self.hovered {
-            ctx.theme.palette.accent
-        } else {
-            ctx.theme.palette.border_subtle
-        };
-        let thickness = if self.is_capturing() || self.hovered { 2.0 * ctx.dpi } else { ctx.dpi };
-        let x = self.rect.x + (self.rect.w - thickness) * 0.5;
-        ctx.list.fill(Rect::new(x, self.rect.y, thickness, self.rect.h), color);
-        if self.focused && self.input.enabled {
-            ctx.list.stroke_rounded(
-                self.rect,
-                ctx.theme.settings_theme().focus_ring,
-                0.0,
-                SPLITTER_FOCUS_RING_WIDTH_LOGICAL * ctx.dpi,
-            );
-        }
+        self.paint_line(ctx, self.rect);
     }
 
     fn hit(&self, px: f32, py: f32) -> bool {
@@ -344,6 +353,34 @@ mod tests {
 
     fn event_context(theme: &crate::Theme) -> EventCtx<'_> {
         EventCtx::new(theme, 2.0)
+    }
+
+    #[test]
+    fn bounded_handle_keeps_the_full_hit_target_and_does_not_draw_idle_edges() {
+        let theme = crate::theme::test_theme();
+        for dpi in [1.0, 1.5, 2.0] {
+            let mut widget = widget();
+            layout(&mut widget, dpi);
+            let visual_rect = Rect::new(100.0, 16.0 * dpi, 8.0, 500.0 - 32.0 * dpi);
+            let mut list = DrawList::new();
+            widget.paint_handle(&mut PaintCtx::new(&mut list, &theme, dpi), visual_rect);
+            assert!(list.cmds.is_empty());
+            let mut events = EventCtx::new(&theme, dpi);
+            widget.on_event(&Event::MouseMove { px: 104.0, py: 1.0 }, &mut events);
+            assert!(widget.hit(104.0, 1.0));
+            widget.paint_handle(&mut PaintCtx::new(&mut list, &theme, dpi), visual_rect);
+            assert!(matches!(list.cmds.as_slice(), [DrawCmd::FillRect { rect, color, .. }]
+                if rect.y == visual_rect.y && rect.bottom() == visual_rect.bottom()
+                    && *color == theme.palette.accent));
+            assert_eq!(
+                widget.on_event(
+                    &Event::MouseDown { px: 104.0, py: 1.0, button: MouseButton::Left },
+                    &mut events
+                ),
+                Some(WidgetAction::Splitter(SplitterAction::DragStarted))
+            );
+            assert!(widget.is_capturing());
+        }
     }
 
     #[test]

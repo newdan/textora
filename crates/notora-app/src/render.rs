@@ -1296,6 +1296,24 @@ impl NotoraShell {
         self.editor_pane.title_text()
     }
 
+    pub(crate) fn navigation_toggle_available(&self, overlay: OverlayState) -> bool {
+        self.chrome_button_available(ChromeButtonKey::NavigationCollapse, Some(overlay), None)
+    }
+
+    fn paint_navigation_splitter(&self, context: &mut ui::PaintCtx<'_>, layout: ShellLayout) {
+        let surface = layout.content_surface_rect();
+        let radius = (ui::rounded_surface_frame::SHELL_CORNER_RADIUS_LOGICAL * layout.dpi)
+            .min(surface.w * 0.5)
+            .min(surface.h * 0.5);
+        let visual_rect = Rect::new(
+            layout.navigation_splitter_rect.x,
+            surface.y + radius,
+            layout.navigation_splitter_rect.w,
+            (surface.h - radius * 2.0).max(0.0),
+        );
+        self.navigation_splitter.paint_handle(context, visual_rect);
+    }
+
     pub fn set_canvas_scrollbars_input(
         &mut self,
         input: Option<CanvasScrollbarsInput>,
@@ -1627,7 +1645,8 @@ impl NotoraShell {
         let tool_button_height = NOTE_TOOL_BUTTON_HEIGHT_LOGICAL * dpi;
         self.note_toolbar_buttons =
             layout_note_toolbar(card_header.toolbar_rect, dpi, new_note_rect, &model.note_toolbar);
-        self.compact_navigation_rect = if layout.responsive_mode != ResponsiveLayoutMode::ThreePane
+        self.compact_navigation_rect = if !layout.has_immersive_title_bar()
+            && layout.responsive_mode != ResponsiveLayoutMode::ThreePane
             && layout.navigation_rect == Rect::ZERO
         {
             Rect::new(
@@ -1702,8 +1721,10 @@ impl NotoraShell {
         });
         frame.with_underlay_paint_context(|context| {
             let application_theme = context.theme.application_theme();
-            context.list.fill(layout.navigation_rect, application_theme.navigation_surface);
-            context.list.fill(layout.card_list_rect, application_theme.content_surface);
+            context.list.fill(layout.overlay_rect, application_theme.window_surface);
+            // 顶部和导航属于同一外壳；中栏比外壳浅，正文保持编辑器底色。
+            context.list.fill(layout.navigation_rect, application_theme.window_surface);
+            context.list.fill(layout.card_list_rect, application_theme.navigation_surface);
             context.list.fill(layout.editor_rect, application_theme.editor_surface);
             self.editor_pane.paint_underlay(context);
             if layout.navigation_rect != Rect::ZERO {
@@ -1723,7 +1744,7 @@ impl NotoraShell {
                 }
                 self.paint_chrome_button(context, ChromeButtonKey::Settings);
             }
-            self.navigation_splitter.paint(context);
+            self.paint_navigation_splitter(context, layout);
             self.card_list_splitter.paint(context);
             context.text(
                 card_header.title_x,
@@ -1760,7 +1781,17 @@ impl NotoraShell {
                 })?;
             }
         }
-        frame.with_paint_context(|context| self.editor_pane.paint_overlay(context));
+        frame.with_paint_context(|context| {
+            self.paint_canvas_scrollbars(context);
+            self.editor_pane.paint_overlay(context);
+        });
+        frame.with_paint_context(|context| {
+            ui::rounded_surface_frame::RoundedSurfaceFrame {
+                rect: layout.content_surface_rect(),
+                radius: ui::rounded_surface_frame::SHELL_CORNER_RADIUS_LOGICAL * dpi,
+            }
+            .paint(context);
+        });
         if self.mindmap_style_panel_open {
             frame.with_paint_context(|context| {
                 paint_at(context, self.mindmap_style_panel_rect, |context| {
@@ -2620,7 +2651,7 @@ impl NotoraShell {
             self.search_rect.w + SHELL_PADDING_LOGICAL * context.dpi * 2.0,
             self.settings_rect.bottom() + 10.0 * context.dpi,
         );
-        context.list.fill(panel_rect, application_theme.navigation_surface);
+        context.list.fill(panel_rect, application_theme.window_surface);
         self.search_box.paint(context);
         let search_icon_size = SIDEBAR_ICON_SIZE_LOGICAL * context.dpi;
         draw_icon(
@@ -3248,7 +3279,8 @@ fn layout_note_toolbar(
 }
 
 fn navigation_collapse_button_rect(layout: ShellLayout, dpi: f32, padding: f32) -> Rect {
-    if layout.responsive_mode != ResponsiveLayoutMode::ThreePane
+    if layout.has_immersive_title_bar()
+        || layout.responsive_mode != ResponsiveLayoutMode::ThreePane
         || layout.navigation_rect == Rect::ZERO
     {
         return Rect::ZERO;
@@ -3263,7 +3295,8 @@ fn navigation_collapse_button_rect(layout: ShellLayout, dpi: f32, padding: f32) 
 }
 
 fn navigation_expand_button_rect(layout: ShellLayout, dpi: f32, padding: f32) -> Rect {
-    if layout.responsive_mode != ResponsiveLayoutMode::ThreePane
+    if layout.has_immersive_title_bar()
+        || layout.responsive_mode != ResponsiveLayoutMode::ThreePane
         || layout.navigation_rect != Rect::ZERO
     {
         return Rect::ZERO;
@@ -3430,6 +3463,113 @@ fn card_list_title(scope: &NavigationScope) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn three_panes_share_rounded_surfaces_with_native_or_immersive_title_bar() {
+        let config_directory = tempfile::tempdir().expect("surface test config should be created");
+        let paths = crate::NotoraPaths::from_config_directory(config_directory.path())
+            .expect("surface test paths should be created");
+        let mut app =
+            crate::NotoraApp::with_paths(paths).expect("surface test should create a headless app");
+        let mut shell = NotoraShell::new();
+        let model = NotoraRenderModel::from_state(&crate::NotoraState::default());
+        for definition in [
+            ui::theme::ThemeDefinition::default_light(),
+            ui::theme::ThemeDefinition::default_dark(),
+        ] {
+            let theme = ui::Theme::from_definition(&definition);
+            let surfaces = theme.application_theme();
+            assert_ne!(surfaces.window_surface, surfaces.navigation_surface);
+            assert_ne!(surfaces.navigation_surface, surfaces.editor_surface);
+            for dpi in [1.0, 1.5, 2.0] {
+                for frame_state in [
+                    ui::window_frame::WindowFrameState::Native,
+                    ui::window_frame::WindowFrameState::Restored,
+                ] {
+                    let title_height = frame_state.title_height(dpi);
+                    let layout = ShellLayout::compute_below_title_bar(
+                        crate::shell::layout::ShellLayoutInput {
+                            window_width_px: 1200.0 * dpi,
+                            window_height_px: 800.0 * dpi,
+                            dpi,
+                            navigation_width_logical: 220.0,
+                            card_list_width_logical: 340.0,
+                            navigation_pane_visibility: crate::NavigationPaneVisibility::Expanded,
+                            compact_content: crate::CompactContent::CardList,
+                            compact_navigation: crate::CompactNavigation::Hidden,
+                            editor_property_row_visible: false,
+                            editor_header_visible: false,
+                        },
+                        title_height,
+                    );
+                    let runtime = app.runtime_mut().editor_runtime_mut();
+                    runtime.update_theme(theme.clone());
+                    runtime.set_scale_factor(f64::from(dpi));
+                    let mut frame = runtime.begin_frame().expect("surface test frame should begin");
+                    frame.with_layout_context(|context| {
+                        shell.set_canvas_scrollbars_input(
+                            Some(CanvasScrollbarsInput {
+                                horizontal: None,
+                                vertical: Some(ui::scrollbar::ScrollbarInput {
+                                    viewport_height_px: f64::from(layout.editor_body_rect.h),
+                                    total_display_rows: 2400,
+                                    scroll_top_rows: 2400.0,
+                                }),
+                            }),
+                            layout.editor_body_rect,
+                            context,
+                        );
+                    });
+                    shell.render(&mut frame, layout, &model).expect("surface test should render");
+                    if layout.has_immersive_title_bar() {
+                        assert_eq!(shell.navigation_collapse_rect, Rect::ZERO);
+                        assert_eq!(shell.navigation_expand_rect, Rect::ZERO);
+                        assert_eq!(
+                            shell.search_rect.w,
+                            layout.navigation_rect.w - SHELL_PADDING_LOGICAL * dpi * 2.0
+                        );
+                    } else {
+                        assert_ne!(shell.navigation_collapse_rect, Rect::ZERO);
+                    }
+                    frame.with_paint_context(|context| {
+                    let mut thumb_color = context.theme.editor.scrollbar_thumb;
+                    thumb_color[3] *= 0.6;
+                    let scrollbar_index = context.list.cmds.iter().position(|command| matches!(command,
+                        ui::DrawCmd::FillRect { rect, color, .. }
+                            if *color == thumb_color && rect.right() == layout.editor_rect.right()
+                    )).expect("editor scrollbar must be part of the content overlay");
+                    let corner_index = context.list.cmds.iter().position(|command| matches!(command,
+                        ui::DrawCmd::FillTriangle { color, .. } if *color == surfaces.window_surface
+                    )).expect("content corners must be masked");
+                    assert!(scrollbar_index < corner_index, "rounded corners must cover scrollbar endpoints");
+                    assert!(context.list.cmds.iter().any(|command| matches!(command,
+                        ui::DrawCmd::StrokeRect { rect, radius, .. }
+                            if *rect == layout.content_surface_rect()
+                                && *radius == ui::rounded_surface_frame::SHELL_CORNER_RADIUS_LOGICAL * dpi
+                    )));
+                });
+                    frame.with_underlay_paint_context(|context| {
+                    let surface = layout.content_surface_rect();
+                    let corner_probe = (surface.x - dpi * 0.25, surface.y + dpi);
+                    assert!(!context.list.cmds.iter().any(|command| matches!(command,
+                        ui::DrawCmd::FillRect { rect, color, .. }
+                            if *color == surfaces.divider && rect.contains(corner_probe.0, corner_probe.1)
+                    )), "navigation divider must not protrude beside the rounded corner");
+                    for (expected_rect, expected_color) in [
+                        (layout.navigation_rect, surfaces.window_surface),
+                        (layout.card_list_rect, surfaces.navigation_surface),
+                        (layout.editor_rect, surfaces.editor_surface),
+                    ] {
+                        assert!(context.list.cmds.iter().any(|command| matches!(command,
+                            ui::DrawCmd::FillRect { rect, color, .. }
+                                if *rect == expected_rect && *color == expected_color
+                        )));
+                    }
+                });
+                }
+            }
+        }
+    }
 
     struct TestClipboard(String);
 

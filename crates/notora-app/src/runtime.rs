@@ -125,6 +125,39 @@ fn windows_window_icons() -> (winit::window::Icon, winit::window::Icon) {
     (icon_at_size(WINDOW_ICON_SIZE), icon_at_size(TASKBAR_ICON_SIZE))
 }
 
+fn notora_window_attributes() -> WindowAttributes {
+    let attributes = WindowAttributes::default()
+        .with_title(PRODUCT_WINDOW_TITLE)
+        .with_decorations(!cfg!(target_os = "windows"))
+        .with_min_inner_size(LogicalSize::new(
+            crate::shell::layout::MINIMUM_WINDOW_WIDTH_LOGICAL,
+            crate::shell::layout::MINIMUM_WINDOW_HEIGHT_LOGICAL,
+        ));
+    #[cfg(target_os = "windows")]
+    {
+        use winit::platform::windows::{CornerPreference, WindowAttributesExtWindows};
+        let (window_icon, taskbar_icon) = windows_window_icons();
+        // GDI 区域控制精确半径；关闭会引入非客户区黑线的 winit 阴影补偿。
+        attributes
+            .with_window_icon(Some(window_icon))
+            .with_taskbar_icon(Some(taskbar_icon))
+            .with_undecorated_shadow(false)
+            .with_corner_preference(CornerPreference::DoNotRound)
+    }
+    #[cfg(not(target_os = "windows"))]
+    attributes
+}
+
+#[cfg(test)]
+#[test]
+fn window_attributes_preserve_product_title_and_platform_decorations() {
+    let attributes = notora_window_attributes();
+    assert_eq!(attributes.title, "notora");
+    assert_eq!(attributes.decorations, !cfg!(target_os = "windows"));
+    #[cfg(target_os = "windows")]
+    assert!(attributes.window_icon.is_some(), "custom window chrome must retain the app icon");
+}
+
 type WorkspaceDirectoryChooser = Box<dyn Fn() -> Option<std::path::PathBuf>>;
 type ExternalFileClosePrompt =
     Box<dyn Fn(&str, Option<&winit::window::Window>) -> ExternalFileCloseChoice>;
@@ -623,22 +656,31 @@ impl NotoraRuntime {
         let (window_width_px, window_height_px) = self.window_runtime.size();
         let editor_pane_mode =
             crate::render::selected_editor_pane_mode(self.action_runtime.state());
-        ShellLayout::compute(ShellLayoutInput {
-            window_width_px,
-            window_height_px,
-            dpi,
-            navigation_width_logical: self.action_runtime.state().layout.navigation_width_logical,
-            card_list_width_logical: self.action_runtime.state().layout.card_list_width_logical,
-            navigation_pane_visibility: self
-                .action_runtime
-                .state()
-                .layout
-                .navigation_pane_visibility,
-            compact_content: self.action_runtime.state().layout.compact_content,
-            compact_navigation: self.action_runtime.state().layout.compact_navigation,
-            editor_property_row_visible: editor_pane_mode.shows_property_row(),
-            editor_header_visible: editor_pane_mode.shows_header(),
-        })
+        let title_height =
+            window_runtime::frame_state(self.document_runtime.editor().window()).title_height(dpi);
+        ShellLayout::compute_below_title_bar(
+            ShellLayoutInput {
+                window_width_px,
+                window_height_px,
+                dpi,
+                navigation_width_logical: self
+                    .action_runtime
+                    .state()
+                    .layout
+                    .navigation_width_logical,
+                card_list_width_logical: self.action_runtime.state().layout.card_list_width_logical,
+                navigation_pane_visibility: self
+                    .action_runtime
+                    .state()
+                    .layout
+                    .navigation_pane_visibility,
+                compact_content: self.action_runtime.state().layout.compact_content,
+                compact_navigation: self.action_runtime.state().layout.compact_navigation,
+                editor_property_row_visible: editor_pane_mode.shows_property_row(),
+                editor_header_visible: editor_pane_mode.shows_header(),
+            },
+            title_height,
+        )
     }
 
     pub fn dispatch_action(&mut self, action: NotoraAction) {
@@ -933,6 +975,69 @@ impl NotoraRuntime {
         product_consumed
     }
 
+    pub(crate) fn route_window_frame_event(
+        &mut self,
+        event: &ui::Event,
+        event_loop: &ActiveEventLoop,
+    ) -> bool {
+        let route = self.frame_runtime.route_window_frame_event(event);
+        if let Some(cursor) = route.cursor {
+            self.set_window_cursor(cursor);
+        }
+        if route.needs_redraw {
+            self.window_runtime.schedule_redraw();
+        }
+        if let Some(action) = route.action {
+            self.apply_window_frame_action(action, event_loop);
+        }
+        route.consumed
+    }
+
+    fn apply_window_frame_action(
+        &mut self,
+        action: ui::window_frame::WindowFrameAction,
+        event_loop: &ActiveEventLoop,
+    ) {
+        use ui::window_frame::WindowFrameAction;
+        if action == WindowFrameAction::ToggleNavigation {
+            self.toggle_navigation_from_title_bar();
+            return;
+        }
+        if action == WindowFrameAction::Close {
+            self.shutdown();
+            event_loop.exit();
+            return;
+        }
+        let Some(window) = self.document_runtime.editor().window() else {
+            return;
+        };
+        match action {
+            WindowFrameAction::Drag => {
+                if let Err(error) = window.drag_window() {
+                    eprintln!("notora window drag failed: {error}");
+                }
+            }
+            WindowFrameAction::Resize(direction) => {
+                if let Err(error) = window.drag_resize_window(direction) {
+                    eprintln!("notora window resize failed: {error}");
+                }
+            }
+            WindowFrameAction::Minimize => window.set_minimized(true),
+            WindowFrameAction::ToggleMaximize => window.set_maximized(!window.is_maximized()),
+            WindowFrameAction::Close => {}
+            WindowFrameAction::ToggleNavigation => {}
+        }
+        window.request_redraw();
+    }
+
+    fn toggle_navigation_from_title_bar(&mut self) {
+        if !self.frame_runtime.navigation_toggle_available(self.state().layout.overlay) {
+            return;
+        }
+        self.action_runtime.set_responsive_mode(self.shell_layout().responsive_mode);
+        self.dispatch_action(NotoraAction::NavigationPaneVisibilityToggled);
+    }
+
     pub(crate) fn editor_pointer_is_captured(&self) -> bool {
         self.document_runtime.editor().pointer_capture()
             != appkit_shell::editor_runtime::MouseCapture::None
@@ -948,6 +1053,7 @@ impl NotoraRuntime {
 
     pub(crate) fn set_scale_factor(&mut self, scale_factor: f64) {
         self.document_runtime.editor_mut().set_scale_factor(scale_factor);
+        self.window_runtime.synchronize_shape(self.document_runtime.editor());
         self.action_runtime.set_responsive_mode(self.shell_layout().responsive_mode);
         self.window_runtime.schedule_redraw();
     }
@@ -987,23 +1093,9 @@ impl NotoraRuntime {
         let editor_runtime_resume_started_at = Instant::now();
         let font_size = self.frame_runtime.settings().font_size;
         let font_family = self.frame_runtime.settings().font_family.clone();
-        let window_attributes =
-            WindowAttributes::default().with_title("notora").with_min_inner_size(LogicalSize::new(
-                crate::shell::layout::MINIMUM_WINDOW_WIDTH_LOGICAL,
-                crate::shell::layout::MINIMUM_WINDOW_HEIGHT_LOGICAL,
-            ));
-        #[cfg(target_os = "windows")]
-        let window_attributes = {
-            use winit::platform::windows::WindowAttributesExtWindows;
-
-            let (window_icon, taskbar_icon) = windows_window_icons();
-            window_attributes
-                .with_window_icon(Some(window_icon))
-                .with_taskbar_icon(Some(taskbar_icon))
-        };
         self.document_runtime
             .editor_mut()
-            .resume(event_loop, window_attributes, font_system, font_size, &font_family)
+            .resume(event_loop, notora_window_attributes(), font_system, font_size, &font_family)
             .map_err(NotoraAppError::Runtime)?;
         self.frame_runtime
             .record_startup_stage("window_gpu_text_ready", editor_runtime_resume_started_at);
@@ -1024,6 +1116,7 @@ impl NotoraRuntime {
         }) {
             self.set_window_size(width, height);
         }
+        self.window_runtime.synchronize_shape(self.document_runtime.editor());
         if let Some(event_loop_proxy) = self.window_runtime.event_loop_proxy() {
             ProductHost::start_background_services(
                 &mut self.product,
@@ -1048,6 +1141,7 @@ impl NotoraRuntime {
 
     pub(crate) fn resize_window(&mut self, width: u32, height: u32) {
         self.set_window_size(width, height);
+        self.window_runtime.synchronize_shape(self.document_runtime.editor());
         let _ = self.document_runtime.editor_mut().resize_now(width, height);
         self.window_runtime.schedule_redraw();
     }
@@ -1141,6 +1235,7 @@ impl NotoraRuntime {
     }
 
     fn render_frame(&mut self) -> Result<EditorSurfacePaint, RenderError> {
+        self.window_runtime.synchronize_shape(self.document_runtime.editor());
         self.window_runtime.mark_frame_rendered();
         let layout = self.shell_layout();
         let editor_is_active = self.active_editor_matches_selection();
@@ -3662,6 +3757,40 @@ mod tests {
         NotoraRuntime::with_paths(paths).expect("notora app should construct without a window")
     }
 
+    #[test]
+    fn title_bar_navigation_toggle_preserves_width_and_respects_modal_input() {
+        let mut app = app();
+        let width = app.state().layout.navigation_width_logical;
+        app.toggle_navigation_from_title_bar();
+        assert_eq!(
+            app.state().layout.navigation_pane_visibility,
+            crate::NavigationPaneVisibility::Collapsed
+        );
+        assert_eq!(app.state().layout.navigation_width_logical, width);
+        app.toggle_navigation_from_title_bar();
+        assert_eq!(
+            app.state().layout.navigation_pane_visibility,
+            crate::NavigationPaneVisibility::Expanded
+        );
+        app.dispatch_action(NotoraAction::OpenSettings);
+        app.toggle_navigation_from_title_bar();
+        assert_eq!(
+            app.state().layout.navigation_pane_visibility,
+            crate::NavigationPaneVisibility::Expanded
+        );
+    }
+
+    #[test]
+    fn title_bar_navigation_toggle_opens_and_closes_compact_navigation() {
+        let mut app = app();
+        app.window_runtime.set_size(700, 600);
+        app.toggle_navigation_from_title_bar();
+        assert_eq!(app.state().layout.compact_navigation, crate::CompactNavigation::Visible);
+        app.toggle_navigation_from_title_bar();
+        assert_eq!(app.state().layout.compact_navigation, crate::CompactNavigation::Hidden);
+        assert_eq!(app.state().layout.focus_target, FocusTarget::CardList);
+    }
+
     fn encryption_runtime_test_guard() -> MutexGuard<'static, ()> {
         static ENCRYPTION_RUNTIME_TEST_LOCK: Mutex<()> = Mutex::new(());
 
@@ -5165,10 +5294,11 @@ mod tests {
         let mut app = app();
         app.render().expect("headless shell frame should render");
         app.dispatch_action(NotoraAction::FocusRequested(FocusTarget::Editor));
+        let search_rect = app.frame_runtime.shell.search_box_rect();
 
         assert!(app.route_product_event(&ui::Event::MouseDown {
-            px: 24.0,
-            py: 24.0,
+            px: search_rect.x + search_rect.w * 0.5,
+            py: search_rect.y + search_rect.h * 0.5,
             button: ui::core::MouseButton::Left,
         }));
 
@@ -5485,10 +5615,11 @@ mod tests {
         app.dispatch_action(NotoraAction::FocusRequested(FocusTarget::Editor));
         assert!(app.update_editor_preedit("document".to_owned(), Some((0, 8))));
         app.render().expect("headless shell frame should render");
+        let search_rect = app.frame_runtime.shell.search_box_rect();
 
         assert!(app.route_product_event(&ui::Event::MouseDown {
-            px: 24.0,
-            py: 24.0,
+            px: search_rect.x + search_rect.w * 0.5,
+            py: search_rect.y + search_rect.h * 0.5,
             button: ui::core::widget::MouseButton::Left,
         }));
         assert_eq!(app.action_runtime.state().layout.focus_target, FocusTarget::NavigationSearch);

@@ -3,6 +3,7 @@ use ui::Rect;
 use crate::{CompactContent, CompactNavigation, NavigationPaneVisibility, ResponsiveLayoutMode};
 
 pub const DEFAULT_NAVIGATION_WIDTH_LOGICAL: f32 = 220.0;
+pub const CONTENT_SURFACE_INSET_LOGICAL: f32 = 4.0;
 pub const DEFAULT_CARD_LIST_WIDTH_LOGICAL: f32 = 340.0;
 pub const MINIMUM_NAVIGATION_WIDTH_LOGICAL: f32 = 180.0;
 pub const MAXIMUM_NAVIGATION_WIDTH_LOGICAL: f32 = 320.0;
@@ -65,6 +66,76 @@ pub struct ShellLayout {
 }
 
 impl ShellLayout {
+    /// 标题栏由 UI 单独绘制；所有产品区域和弹窗均使用其下方的坐标空间。
+    pub fn compute_below_title_bar(mut input: ShellLayoutInput, title_height_px: f32) -> Self {
+        let title_height_px = title_height_px.clamp(0.0, input.window_height_px.max(0.0));
+        input.window_height_px = (input.window_height_px - title_height_px).max(0.0);
+        let mut layout = Self::compute(input);
+        for rect in [
+            &mut layout.navigation_rect,
+            &mut layout.navigation_splitter_rect,
+            &mut layout.card_list_rect,
+            &mut layout.card_list_splitter_rect,
+            &mut layout.editor_rect,
+            &mut layout.editor_header_rect,
+            &mut layout.editor_toolbar_rect,
+            &mut layout.editor_body_rect,
+            &mut layout.overlay_rect,
+            &mut layout.menu_rect,
+        ] {
+            if *rect != Rect::ZERO {
+                rect.y += title_height_px;
+            }
+        }
+        layout.inset_content_surface(input);
+        layout
+    }
+
+    pub fn has_immersive_title_bar(&self) -> bool {
+        self.overlay_rect.y > 0.0
+    }
+
+    pub fn content_surface_rect(&self) -> Rect {
+        if self.card_list_rect == Rect::ZERO {
+            return self.editor_rect;
+        }
+        if self.editor_rect == Rect::ZERO {
+            return self.card_list_rect;
+        }
+        Rect::new(
+            self.card_list_rect.x,
+            self.card_list_rect.y,
+            self.editor_rect.right() - self.card_list_rect.x,
+            self.card_list_rect.h,
+        )
+    }
+
+    fn inset_content_surface(&mut self, input: ShellLayoutInput) {
+        let inset = CONTENT_SURFACE_INSET_LOGICAL * self.dpi;
+        let right = (input.window_width_px - inset).max(0.0);
+        for rect in [&mut self.card_list_rect, &mut self.editor_rect] {
+            if *rect == Rect::ZERO {
+                continue;
+            }
+            let original_right = rect.right().min(right);
+            rect.x = rect.x.max(inset.min(original_right));
+            rect.w = (original_right - rect.x).max(0.0);
+            rect.h = (rect.h - inset).max(0.0);
+        }
+        for rect in [&mut self.navigation_splitter_rect, &mut self.card_list_splitter_rect] {
+            rect.h = (rect.h - inset).max(0.0);
+        }
+        (self.editor_header_rect, self.editor_toolbar_rect, self.editor_body_rect) =
+            editor_chrome_rects(
+                self.editor_rect,
+                self.dpi,
+                EditorChromeVisibility {
+                    property_row: input.editor_property_row_visible,
+                    header: input.editor_header_visible,
+                },
+            );
+    }
+
     pub fn compute(input: ShellLayoutInput) -> Self {
         let dpi = input.dpi.max(1.0);
         let window_rect =
@@ -312,6 +383,88 @@ mod tests {
             compact_navigation: CompactNavigation::Hidden,
             editor_property_row_visible: true,
             editor_header_visible: true,
+        }
+    }
+
+    #[test]
+    fn immersive_title_bar_reserves_space_in_every_responsive_mode_and_dpi() {
+        for dpi in [1.0, 1.5, 2.0] {
+            for width in [500.0, 700.0, 1200.0] {
+                let mut shell_input = input(width * dpi, dpi);
+                shell_input.compact_navigation = CompactNavigation::Visible;
+                let title_height = ui::window_frame::WindowFrameState::Restored.title_height(dpi);
+                let layout = ShellLayout::compute_below_title_bar(shell_input, title_height);
+                for rect in [
+                    layout.navigation_rect,
+                    layout.card_list_rect,
+                    layout.editor_rect,
+                    layout.overlay_rect,
+                ] {
+                    if rect != Rect::ZERO {
+                        assert_eq!(rect.y, title_height);
+                        let bottom_inset =
+                            if rect == layout.card_list_rect || rect == layout.editor_rect {
+                                CONTENT_SURFACE_INSET_LOGICAL * dpi
+                            } else {
+                                0.0
+                            };
+                        assert_eq!(rect.bottom(), shell_input.window_height_px - bottom_inset);
+                    }
+                }
+                assert_non_negative(layout);
+                assert_editor_chrome_is_partitioned(layout);
+            }
+        }
+    }
+
+    #[test]
+    fn immersive_content_has_one_shared_outline_when_navigation_is_visible_or_hidden() {
+        for dpi in [1.0, 1.5, 2.0] {
+            for visibility in
+                [NavigationPaneVisibility::Expanded, NavigationPaneVisibility::Collapsed]
+            {
+                let mut shell_input = input(1200.0 * dpi, dpi);
+                shell_input.navigation_pane_visibility = visibility;
+                let layout = ShellLayout::compute_below_title_bar(shell_input, 36.0 * dpi);
+                let surface = layout.content_surface_rect();
+                assert_eq!(surface.x, layout.card_list_rect.x);
+                assert_eq!(
+                    surface.right(),
+                    shell_input.window_width_px - CONTENT_SURFACE_INSET_LOGICAL * dpi
+                );
+                assert_eq!(
+                    surface.bottom(),
+                    shell_input.window_height_px - CONTENT_SURFACE_INSET_LOGICAL * dpi
+                );
+                assert_eq!(layout.card_list_rect.right(), layout.editor_rect.x);
+                assert_eq!(layout.card_list_rect.y, layout.editor_rect.y);
+                assert_eq!(layout.card_list_rect.bottom(), layout.editor_rect.bottom());
+                if visibility == NavigationPaneVisibility::Collapsed {
+                    assert_eq!(surface.x, CONTENT_SURFACE_INSET_LOGICAL * dpi);
+                } else {
+                    assert_eq!(surface.x, layout.navigation_rect.right());
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn native_title_bar_keeps_the_same_content_insets() {
+        for dpi in [1.0, 1.5, 2.0] {
+            let shell_input = input(1200.0 * dpi, dpi);
+            let native = ShellLayout::compute_below_title_bar(shell_input, 0.0);
+            let immersive = ShellLayout::compute_below_title_bar(shell_input, 36.0 * dpi);
+            assert!(!native.has_immersive_title_bar());
+            assert_eq!(native.content_surface_rect().x, immersive.content_surface_rect().x);
+            assert_eq!(
+                native.content_surface_rect().right(),
+                immersive.content_surface_rect().right()
+            );
+            assert_eq!(
+                native.content_surface_rect().bottom(),
+                immersive.content_surface_rect().bottom()
+            );
+            assert_editor_chrome_is_partitioned(native);
         }
     }
 

@@ -131,6 +131,7 @@ impl StartupTrace {
 
 /// shell、主题、字体准备与 GPU frame 提交的唯一所有者。
 pub(super) struct FrameRuntime {
+    window_frame: ui::window_frame::WindowFrameWidget,
     #[cfg(not(test))]
     shell: NotoraShell,
     #[cfg(test)]
@@ -170,6 +171,7 @@ impl FrameRuntime {
         startup_trace: Option<StartupTrace>,
     ) -> Self {
         Self {
+            window_frame: ui::window_frame::WindowFrameWidget::default(),
             shell: NotoraShell::new(),
             settings,
             theme,
@@ -226,6 +228,17 @@ impl FrameRuntime {
         dpi: f32,
     ) -> crate::render::NotoraEventRoute {
         self.shell.route_event_with_overlay(event, focus_target, overlay, &self.theme, dpi)
+    }
+
+    pub(super) fn route_window_frame_event(
+        &mut self,
+        event: &ui::Event,
+    ) -> ui::window_frame::WindowFrameEvent {
+        self.window_frame.on_event(event)
+    }
+
+    pub(super) fn navigation_toggle_available(&self, overlay: crate::OverlayState) -> bool {
+        self.shell.navigation_toggle_available(overlay)
     }
 
     pub(super) fn editor_title_text(&self) -> &str {
@@ -383,8 +396,21 @@ impl FrameRuntime {
             text.begin_frame();
         }
         let mut frame = document_runtime.editor_mut().begin_frame()?;
-        self.shell.render(&mut frame, input.layout, &model)?;
-        self.shell.synchronize_focus(input.state.layout.focus_target, Instant::now());
+        let frame_state = super::window_runtime::frame_state(document_runtime.editor().window());
+        self.window_frame.set_input(
+            ui::window_frame::WindowFrameInput {
+                title: super::PRODUCT_WINDOW_TITLE.to_owned(),
+                state: frame_state,
+                navigation_toggle: if self.navigation_toggle_available(input.state.layout.overlay) {
+                    ui::window_frame::WindowFrameNavigationToggle::Enabled
+                } else {
+                    ui::window_frame::WindowFrameNavigationToggle::Disabled
+                },
+            },
+            ui::Rect::new(0.0, 0.0, input.window_width_px, input.window_height_px),
+            input.layout.dpi,
+        );
+        frame.with_underlay_paint_context(|context| self.window_frame.paint_title(context));
         let editor_surface = if input.editor_is_active {
             document_runtime.editor_mut().paint_active_editor(
                 &mut frame,
@@ -405,7 +431,9 @@ impl FrameRuntime {
                 context,
             );
         });
-        frame.with_paint_context(|context| self.shell.paint_canvas_scrollbars(context));
+        self.shell.render(&mut frame, input.layout, &model)?;
+        self.shell.synchronize_focus(input.state.layout.focus_target, Instant::now());
+        frame.with_paint_context(|context| self.window_frame.paint_border(context));
         let mut vertices = Vec::new();
         frame.drain_into(
             ui::Screen::new(input.window_width_px, input.window_height_px),
