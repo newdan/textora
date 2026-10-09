@@ -288,7 +288,7 @@ impl Widget for EditorHeaderWidget {
         if self.rect.w <= 0.0 || self.rect.h <= 0.0 {
             return;
         }
-        ctx.list.fill(self.rect, ctx.theme.editor.background);
+        ctx.list.fill(self.rect, ctx.theme.application_theme().navigation_surface);
         self.title_box.paint(ctx);
 
         let dpi = ctx.dpi;
@@ -859,6 +859,34 @@ mod tests {
         assert!(
             header.metadata_rect.right() + HEADER_ACTION_GAP_LOGICAL <= header.encryption_rect.x
         );
+    }
+
+    #[test]
+    fn header_background_matches_navigation_in_both_appearances() {
+        use crate::core::paint::{DrawCmd, DrawList};
+
+        for definition in [
+            crate::theme::ThemeDefinition::default_light(),
+            crate::theme::ThemeDefinition::default_dark(),
+        ] {
+            let theme = crate::theme::Theme::from_definition(&definition);
+            let mut header = EditorHeaderWidget::new();
+            header.set_input(input());
+            let mut measure = HeaderMeasure;
+            let mut layout_context =
+                LayoutCtx { ui_measure: None, measure: &mut measure, theme: &theme, dpi: 1.0 };
+            let header_rect = Rect::new(0.0, 0.0, 760.0, 80.0);
+            header.set_rect(header_rect, &mut layout_context);
+            let mut draw_list = DrawList::new();
+            header.paint(&mut PaintCtx::new(&mut draw_list, &theme, 1.0));
+
+            assert!(matches!(
+                draw_list.cmds.first(),
+                Some(DrawCmd::FillRect { rect, color, .. })
+                    if *rect == header_rect
+                        && *color == theme.application_theme().navigation_surface
+            ));
+        }
     }
 
     #[test]
