@@ -608,7 +608,7 @@ pub struct GlyphBitmap {
 }
 impl Shaper {
     /// Rasterize with the resolved face policy: unhinted at zero phase for monospace,
-    /// hinted at the requested subpixel offset for proportional faces.
+    /// proportional faces keep the requested phase and follow their size-specific gasp hints.
     ///
     /// Returns `None` if the glyph cannot be rasterized (e.g., space character).
     pub fn rasterize_glyph(
@@ -626,12 +626,9 @@ impl Shaper {
             .expect("font database must not be poisoned")
             .get_font(font_id)?;
 
-        let mut scaler = self
-            .scale_context
-            .builder(font.as_swash())
-            .size(font_size)
-            .hint(policy.uses_hinting())
-            .build();
+        let uses_hinting = policy.uses_hinting(font.as_swash(), font_size);
+        let mut scaler =
+            self.scale_context.builder(font.as_swash()).size(font_size).hint(uses_hinting).build();
 
         // Render with grayscale alpha mask
         let image = swash::scale::Render::new(&[
