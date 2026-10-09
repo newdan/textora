@@ -1,7 +1,8 @@
 use image::{DynamicImage, ImageFormat};
 
-const MAXIMUM_EMPTY_EDGE_FRACTION: f32 = 0.03;
 const VISIBLE_ALPHA_THRESHOLD: u8 = 16;
+const ICON_DIRECTORY_HEADER_BYTES: usize = 6;
+const ICON_DIRECTORY_ENTRY_BYTES: usize = 16;
 
 fn icns_png<'a>(icon_bytes: &'a [u8], resource_type: &[u8; 4]) -> &'a [u8] {
     assert_eq!(&icon_bytes[..4], b"icns");
@@ -37,25 +38,67 @@ fn assert_artwork_fills_canvas(image: &DynamicImage) {
     }
 
     let edge_margin = left.max(top).max(width - right - 1).max(height - bottom - 1);
-    let allowed_margin = width as f32 * MAXIMUM_EMPTY_EDGE_FRACTION;
-    assert!(edge_margin as f32 <= allowed_margin, "app icon leaves {edge_margin} empty pixels");
+    assert_eq!(edge_margin, 0, "app icon must touch every canvas edge");
+}
+
+fn assert_mac_icon_sizes_fill(icon_bytes: &[u8]) {
+    for (resource_type, expected_size) in [
+        (b"icp4", 16),
+        (b"icp5", 32),
+        (b"ic12", 64),
+        (b"ic07", 128),
+        (b"ic08", 256),
+        (b"ic09", 512),
+        (b"ic10", 1024),
+    ] {
+        let artwork = image::load_from_memory_with_format(
+            icns_png(icon_bytes, resource_type),
+            ImageFormat::Png,
+        )
+        .expect("macOS icon size must decode");
+        assert_eq!(artwork.width(), expected_size);
+        assert_eq!(artwork.height(), expected_size);
+        assert_artwork_fills_canvas(&artwork);
+    }
+}
+
+fn assert_windows_icon_sizes_fill(icon_bytes: &[u8]) {
+    let expected_sizes = [16, 24, 32, 48, 64, 128, 256];
+    let image_count = u16::from_le_bytes([icon_bytes[4], icon_bytes[5]]) as usize;
+    assert_eq!(image_count, expected_sizes.len());
+
+    for (index, expected_size) in expected_sizes.into_iter().enumerate() {
+        let entry = ICON_DIRECTORY_HEADER_BYTES + index * ICON_DIRECTORY_ENTRY_BYTES;
+        let length = u32::from_le_bytes(
+            icon_bytes[entry + 8..entry + 12].try_into().expect("ICO image length"),
+        ) as usize;
+        let start = u32::from_le_bytes(
+            icon_bytes[entry + 12..entry + 16].try_into().expect("ICO image offset"),
+        ) as usize;
+        let artwork = image::load_from_memory_with_format(
+            &icon_bytes[start..start + length],
+            ImageFormat::Png,
+        )
+        .expect("Windows icon size must decode");
+        assert_eq!(artwork.width(), expected_size);
+        assert_eq!(artwork.height(), expected_size);
+        assert_artwork_fills_canvas(&artwork);
+    }
 }
 
 #[test]
 fn notora_mac_and_windows_icons_fill_their_canvases() {
     let mac_icon = include_bytes!("../../../assets/NotoraAppIcon.icns");
     let windows_icon = include_bytes!("../../../assets/NotoraAppIcon.ico");
-    let mac_artwork =
-        image::load_from_memory_with_format(icns_png(mac_icon, b"ic10"), ImageFormat::Png)
-            .expect("macOS icon must contain a 1024-pixel PNG");
+    assert_mac_icon_sizes_fill(mac_icon);
+    assert_windows_icon_sizes_fill(windows_icon);
+
     let mac_artwork_at_windows_size =
         image::load_from_memory_with_format(icns_png(mac_icon, b"ic08"), ImageFormat::Png)
             .expect("macOS icon must contain a 256-pixel PNG");
     let windows_artwork = image::load_from_memory_with_format(windows_icon, ImageFormat::Ico)
         .expect("Windows icon must decode");
 
-    assert_artwork_fills_canvas(&mac_artwork);
-    assert_artwork_fills_canvas(&windows_artwork);
     assert_eq!(mac_artwork_at_windows_size.to_rgba8(), windows_artwork.to_rgba8());
     assert_ne!(mac_icon.as_slice(), include_bytes!("../../../assets/AppIcon.icns").as_slice());
     let textora_windows_artwork = image::load_from_memory_with_format(
