@@ -102,6 +102,28 @@ const PRODUCT_WINDOW_TITLE: &str = "notora";
 const SHUTDOWN_SAVE_DRAIN_TIMEOUT: Duration = Duration::from_secs(2);
 const SHUTDOWN_SAVE_DRAIN_POLL_INTERVAL: Duration = Duration::from_millis(10);
 const DEFAULT_RUNTIME_TAB_LIMIT: usize = 12;
+#[cfg(target_os = "windows")]
+const WINDOW_ICON_SIZE: u32 = 32;
+#[cfg(target_os = "windows")]
+const TASKBAR_ICON_SIZE: u32 = 256;
+
+#[cfg(target_os = "windows")]
+fn windows_window_icons() -> (winit::window::Icon, winit::window::Icon) {
+    use image::imageops::FilterType;
+
+    let artwork = image::load_from_memory_with_format(
+        include_bytes!("../../../assets/NotoraAppIcon.ico"),
+        image::ImageFormat::Ico,
+    )
+    .expect("the embedded notora app icon must be a valid ICO image");
+    let icon_at_size = |size| {
+        let pixels = artwork.resize_exact(size, size, FilterType::Lanczos3).into_rgba8();
+        winit::window::Icon::from_rgba(pixels.into_raw(), size, size)
+            .expect("the decoded notora app icon must have valid RGBA dimensions")
+    };
+
+    (icon_at_size(WINDOW_ICON_SIZE), icon_at_size(TASKBAR_ICON_SIZE))
+}
 
 type WorkspaceDirectoryChooser = Box<dyn Fn() -> Option<std::path::PathBuf>>;
 type ExternalFileClosePrompt =
@@ -965,20 +987,23 @@ impl NotoraRuntime {
         let editor_runtime_resume_started_at = Instant::now();
         let font_size = self.frame_runtime.settings().font_size;
         let font_family = self.frame_runtime.settings().font_family.clone();
+        let window_attributes =
+            WindowAttributes::default().with_title("notora").with_min_inner_size(LogicalSize::new(
+                crate::shell::layout::MINIMUM_WINDOW_WIDTH_LOGICAL,
+                crate::shell::layout::MINIMUM_WINDOW_HEIGHT_LOGICAL,
+            ));
+        #[cfg(target_os = "windows")]
+        let window_attributes = {
+            use winit::platform::windows::WindowAttributesExtWindows;
+
+            let (window_icon, taskbar_icon) = windows_window_icons();
+            window_attributes
+                .with_window_icon(Some(window_icon))
+                .with_taskbar_icon(Some(taskbar_icon))
+        };
         self.document_runtime
             .editor_mut()
-            .resume(
-                event_loop,
-                WindowAttributes::default().with_title("notora").with_min_inner_size(
-                    LogicalSize::new(
-                        crate::shell::layout::MINIMUM_WINDOW_WIDTH_LOGICAL,
-                        crate::shell::layout::MINIMUM_WINDOW_HEIGHT_LOGICAL,
-                    ),
-                ),
-                font_system,
-                font_size,
-                &font_family,
-            )
+            .resume(event_loop, window_attributes, font_system, font_size, &font_family)
             .map_err(NotoraAppError::Runtime)?;
         self.frame_runtime
             .record_startup_stage("window_gpu_text_ready", editor_runtime_resume_started_at);

@@ -37,6 +37,7 @@ winit.workspace = true
 
 [dev-dependencies]
 criterion.workspace = true
+image = { version = "0.25", default-features = false, features = ["ico", "png"] }
 rusqlite.workspace = true
 tempfile.workspace = true
 
@@ -52,3 +53,7 @@ wgpu = { workspace = true, features = ["vulkan"] }
 
 [target.'cfg(target_os = "windows")'.dependencies]
 wgpu = { workspace = true, features = ["dx12"] }
+image = { version = "0.25", default-features = false, features = ["ico"] }
+
+[build-dependencies]
+cc = "1"

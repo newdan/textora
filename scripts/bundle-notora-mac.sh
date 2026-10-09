@@ -12,7 +12,7 @@ readonly TARGET_ROOT="${CARGO_TARGET_DIR:-$PROJECT_ROOT/target}"
 readonly RELEASE_DIR="$TARGET_ROOT/release"
 readonly BUNDLE_PATH="$TARGET_ROOT/${APP_NAME}.app"
 readonly INFO_PLIST_SOURCE="$PROJECT_ROOT/assets/Info.plist"
-readonly ICON_SOURCE="$PROJECT_ROOT/assets/AppIcon.icns"
+readonly ICON_SOURCE="$PROJECT_ROOT/assets/NotoraAppIcon.icns"
 
 require_macos() {
     if [[ "$(uname -s)" != "Darwin" ]]; then
