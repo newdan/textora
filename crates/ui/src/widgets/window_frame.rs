@@ -14,6 +14,21 @@ const RESIZE_MARGIN_LOGICAL: f32 = 6.0;
 const FRAME_BORDER_PHYSICAL: f32 = 1.0;
 const RESTORE_SQUARE_LOGICAL: f32 = 9.0;
 const RESTORE_OFFSET_LOGICAL: f32 = 3.0;
+const NAVIGATION_BUTTON_SIZE_LOGICAL: f32 = 28.0;
+const NAVIGATION_BUTTON_INSET_LOGICAL: f32 = 12.0;
+const NAVIGATION_ICON_WIDTH_LOGICAL: f32 = 18.0;
+const NAVIGATION_ICON_HEIGHT_LOGICAL: f32 = 14.0;
+const NAVIGATION_ICON_RADIUS_LOGICAL: f32 = 3.0;
+const NAVIGATION_ICON_DIVIDER_LOGICAL: f32 = 5.0;
+const NAVIGATION_ICON_STROKE_LOGICAL: f32 = 1.25;
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum WindowFrameNavigationToggle {
+    #[default]
+    Hidden,
+    Enabled,
+    Disabled,
+}
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum WindowFrameState {
@@ -33,10 +48,12 @@ impl WindowFrameState {
 pub struct WindowFrameInput {
     pub title: String,
     pub state: WindowFrameState,
+    pub navigation_toggle: WindowFrameNavigationToggle,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum WindowFrameAction {
+    ToggleNavigation,
     Drag,
     Resize(ResizeDirection),
     Minimize,
@@ -58,6 +75,7 @@ pub struct WindowFrameWidget {
     window_rect: Rect,
     dpi: f32,
     hovered_control: Option<usize>,
+    hovered_navigation: bool,
     title_clicks: PointerClickTracker,
     pointer_origin: PointerOrigin,
 }
@@ -93,6 +111,19 @@ impl WindowFrameWidget {
         })
     }
 
+    fn navigation_toggle_rect(&self) -> Rect {
+        if self.input.navigation_toggle == WindowFrameNavigationToggle::Hidden {
+            return Rect::ZERO;
+        }
+        let title = self.title_rect();
+        let size = NAVIGATION_BUTTON_SIZE_LOGICAL * self.dpi;
+        let left = title.x + NAVIGATION_BUTTON_INSET_LOGICAL * self.dpi;
+        if title.h < size || left + size > self.control_rects()[0].x {
+            return Rect::ZERO;
+        }
+        Rect::new(left, title.y + (title.h - size) * 0.5, size, size)
+    }
+
     fn resize_direction(&self, px: f32, py: f32) -> Option<ResizeDirection> {
         if self.input.state != WindowFrameState::Restored || !self.window_rect.contains(px, py) {
             return None;
@@ -116,22 +147,24 @@ impl WindowFrameWidget {
     }
 
     pub fn on_event(&mut self, event: &Event) -> WindowFrameEvent {
-        let previous_hover = self.hovered_control;
+        let previous_hover = (self.hovered_control, self.hovered_navigation);
         let mut route = match (self.pointer_origin, event) {
             (PointerOrigin::Content(button), Event::MouseUp { button: released_button, .. })
                 if button == *released_button =>
             {
                 self.pointer_origin = PointerOrigin::Released;
                 self.hovered_control = None;
+                self.hovered_navigation = false;
                 WindowFrameEvent::default()
             }
             (PointerOrigin::Content(_), Event::MouseMove { .. }) => {
                 self.hovered_control = None;
+                self.hovered_navigation = false;
                 WindowFrameEvent::default()
             }
             _ => self.route_event(event),
         };
-        route.needs_redraw = previous_hover != self.hovered_control;
+        route.needs_redraw = previous_hover != (self.hovered_control, self.hovered_navigation);
         route
     }
 
@@ -146,6 +179,7 @@ impl WindowFrameWidget {
             | Event::Wheel { px, py, .. } => (*px, *py),
             Event::PointerLeave | Event::InteractionCancel => {
                 self.hovered_control = None;
+                self.hovered_navigation = false;
                 self.title_clicks.reset();
                 if matches!(event, Event::InteractionCancel) {
                     self.pointer_origin = PointerOrigin::Released;
@@ -155,8 +189,10 @@ impl WindowFrameWidget {
             _ => return WindowFrameEvent::default(),
         };
         self.hovered_control = self.control_rects().iter().position(|rect| rect.contains(px, py));
+        self.hovered_navigation = self.navigation_toggle_rect().contains(px, py);
         if let Some(direction) = self.resize_direction(px, py) {
             self.hovered_control = None;
+            self.hovered_navigation = false;
             let pressed = matches!(event, Event::MouseDown { button: MouseButton::Left, .. });
             return WindowFrameEvent {
                 consumed: true,
@@ -171,6 +207,17 @@ impl WindowFrameWidget {
                 self.title_clicks.reset();
             }
             return WindowFrameEvent::default();
+        }
+        if self.hovered_navigation {
+            self.title_clicks.reset();
+            return WindowFrameEvent {
+                consumed: true,
+                action: (self.input.navigation_toggle == WindowFrameNavigationToggle::Enabled
+                    && matches!(event, Event::MouseDown { button: MouseButton::Left, .. }))
+                .then_some(WindowFrameAction::ToggleNavigation),
+                cursor: Some(CursorIcon::Default),
+                ..WindowFrameEvent::default()
+            };
         }
         let action = matches!(event, Event::MouseDown { button: MouseButton::Left, .. })
             .then(|| self.title_press_action(px, py));
@@ -206,14 +253,16 @@ impl WindowFrameWidget {
         }
         let application = context.theme.application_theme();
         context.list.fill(title, application.window_surface);
+        self.paint_navigation_toggle(context);
         let controls = self.control_rects();
         let inset = TITLE_INSET_LOGICAL * self.dpi;
-        let text_rect = Rect::new(
-            title.x + inset,
-            title.y,
-            (controls[0].x - title.x - inset * 2.0).max(0.0),
-            title.h,
-        );
+        let text_left = if self.navigation_toggle_rect() == Rect::ZERO {
+            title.x + inset
+        } else {
+            self.navigation_toggle_rect().right() + NAVIGATION_BUTTON_INSET_LOGICAL * self.dpi
+        };
+        let text_rect =
+            Rect::new(text_left, title.y, (controls[0].x - text_left - inset).max(0.0), title.h);
         let font_size = TITLE_FONT_SIZE_LOGICAL * self.dpi;
         let baseline = title.y + title.h * 0.5 + font_size * TEXT_BASELINE_EM;
         if let Some(shaper) = context.shaper.as_mut() {
@@ -247,6 +296,40 @@ impl WindowFrameWidget {
             }
             self.paint_control(context, rect, index, foreground);
         }
+    }
+
+    fn paint_navigation_toggle(&self, context: &mut PaintCtx<'_>) {
+        let rect = self.navigation_toggle_rect();
+        if rect == Rect::ZERO {
+            return;
+        }
+        let application = context.theme.application_theme();
+        if self.hovered_navigation
+            && self.input.navigation_toggle == WindowFrameNavigationToggle::Enabled
+        {
+            context.list.fill_rounded(
+                rect,
+                application.navigation_hover_surface,
+                NAVIGATION_ICON_RADIUS_LOGICAL * self.dpi,
+            );
+        }
+        let icon = Rect::new(
+            rect.x + (rect.w - NAVIGATION_ICON_WIDTH_LOGICAL * self.dpi) * 0.5,
+            rect.y + (rect.h - NAVIGATION_ICON_HEIGHT_LOGICAL * self.dpi) * 0.5,
+            NAVIGATION_ICON_WIDTH_LOGICAL * self.dpi,
+            NAVIGATION_ICON_HEIGHT_LOGICAL * self.dpi,
+        );
+        let stroke = NAVIGATION_ICON_STROKE_LOGICAL * self.dpi;
+        context.list.stroke_rounded(
+            icon,
+            application.text_secondary,
+            NAVIGATION_ICON_RADIUS_LOGICAL * self.dpi,
+            stroke,
+        );
+        context.list.fill(
+            Rect::new(icon.x + NAVIGATION_ICON_DIVIDER_LOGICAL * self.dpi, icon.y, stroke, icon.h),
+            application.text_secondary,
+        );
     }
 
     fn paint_control(&self, context: &mut PaintCtx<'_>, rect: Rect, index: usize, color: [f32; 4]) {
@@ -322,7 +405,7 @@ mod tests {
     fn frame(state: WindowFrameState, dpi: f32) -> WindowFrameWidget {
         let mut widget = WindowFrameWidget::default();
         widget.set_input(
-            WindowFrameInput { title: "notora".to_owned(), state },
+            WindowFrameInput { title: "notora".to_owned(), state, ..WindowFrameInput::default() },
             Rect::new(0.0, 0.0, 1200.0 * dpi, 800.0 * dpi),
             dpi,
         );
@@ -331,6 +414,30 @@ mod tests {
 
     fn press(px: f32, py: f32) -> Event {
         Event::MouseDown { px, py, button: MouseButton::Left }
+    }
+
+    #[test]
+    fn navigation_toggle_uses_a_fixed_title_bar_target_and_never_drags_the_window() {
+        for dpi in [1.0, 1.5, 2.0] {
+            let mut widget = frame(WindowFrameState::Restored, dpi);
+            widget.input.navigation_toggle = WindowFrameNavigationToggle::Enabled;
+            let rect = widget.navigation_toggle_rect();
+            let click = press(rect.x + rect.w * 0.5, rect.y + rect.h * 0.5);
+            assert_eq!(rect.x, NAVIGATION_BUTTON_INSET_LOGICAL * dpi);
+            assert!(rect.bottom() < widget.title_rect().bottom());
+            for _ in 0..2 {
+                let route = widget.on_event(&click);
+                assert!(route.consumed);
+                assert_eq!(route.action, Some(WindowFrameAction::ToggleNavigation));
+            }
+            widget.input.navigation_toggle = WindowFrameNavigationToggle::Disabled;
+            let route = widget.on_event(&click);
+            assert!(route.consumed);
+            assert_eq!(route.action, None);
+            widget.input.state = WindowFrameState::Native;
+            assert_eq!(widget.navigation_toggle_rect(), Rect::ZERO);
+            assert!(!widget.on_event(&click).consumed);
+        }
     }
 
     #[test]

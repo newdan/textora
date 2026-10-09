@@ -238,7 +238,7 @@ impl NotoraShell {
         self.chrome_buttons.iter().any(|button| button.widget.is_capturing())
     }
 
-    fn chrome_button_available(
+    pub(super) fn chrome_button_available(
         &self,
         key: ChromeButtonKey,
         overlay: Option<OverlayState>,

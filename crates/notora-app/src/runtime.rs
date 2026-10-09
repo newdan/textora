@@ -972,6 +972,10 @@ impl NotoraRuntime {
         event_loop: &ActiveEventLoop,
     ) {
         use ui::window_frame::WindowFrameAction;
+        if action == WindowFrameAction::ToggleNavigation {
+            self.toggle_navigation_from_title_bar();
+            return;
+        }
         if action == WindowFrameAction::Close {
             self.shutdown();
             event_loop.exit();
@@ -994,8 +998,17 @@ impl NotoraRuntime {
             WindowFrameAction::Minimize => window.set_minimized(true),
             WindowFrameAction::ToggleMaximize => window.set_maximized(!window.is_maximized()),
             WindowFrameAction::Close => {}
+            WindowFrameAction::ToggleNavigation => {}
         }
         window.request_redraw();
+    }
+
+    fn toggle_navigation_from_title_bar(&mut self) {
+        if !self.frame_runtime.navigation_toggle_available(self.state().layout.overlay) {
+            return;
+        }
+        self.action_runtime.set_responsive_mode(self.shell_layout().responsive_mode);
+        self.dispatch_action(NotoraAction::NavigationPaneVisibilityToggled);
     }
 
     pub(crate) fn editor_pointer_is_captured(&self) -> bool {
@@ -3711,6 +3724,40 @@ mod tests {
         let paths = NotoraPaths::from_config_directory(directory.keep().join("notora"))
             .expect("test should create isolated product paths");
         NotoraRuntime::with_paths(paths).expect("notora app should construct without a window")
+    }
+
+    #[test]
+    fn title_bar_navigation_toggle_preserves_width_and_respects_modal_input() {
+        let mut app = app();
+        let width = app.state().layout.navigation_width_logical;
+        app.toggle_navigation_from_title_bar();
+        assert_eq!(
+            app.state().layout.navigation_pane_visibility,
+            crate::NavigationPaneVisibility::Collapsed
+        );
+        assert_eq!(app.state().layout.navigation_width_logical, width);
+        app.toggle_navigation_from_title_bar();
+        assert_eq!(
+            app.state().layout.navigation_pane_visibility,
+            crate::NavigationPaneVisibility::Expanded
+        );
+        app.dispatch_action(NotoraAction::OpenSettings);
+        app.toggle_navigation_from_title_bar();
+        assert_eq!(
+            app.state().layout.navigation_pane_visibility,
+            crate::NavigationPaneVisibility::Expanded
+        );
+    }
+
+    #[test]
+    fn title_bar_navigation_toggle_opens_and_closes_compact_navigation() {
+        let mut app = app();
+        app.window_runtime.set_size(700, 600);
+        app.toggle_navigation_from_title_bar();
+        assert_eq!(app.state().layout.compact_navigation, crate::CompactNavigation::Visible);
+        app.toggle_navigation_from_title_bar();
+        assert_eq!(app.state().layout.compact_navigation, crate::CompactNavigation::Hidden);
+        assert_eq!(app.state().layout.focus_target, FocusTarget::CardList);
     }
 
     fn encryption_runtime_test_guard() -> MutexGuard<'static, ()> {

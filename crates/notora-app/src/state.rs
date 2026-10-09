@@ -527,6 +527,20 @@ impl NotoraState {
                 vec![NotoraEffect::Redraw]
             }
             NotoraAction::NavigationPaneVisibilityToggled => {
+                if self.layout.responsive_mode != ResponsiveLayoutMode::ThreePane {
+                    self.layout.compact_navigation = match self.layout.compact_navigation {
+                        CompactNavigation::Hidden => CompactNavigation::Visible,
+                        CompactNavigation::Visible => CompactNavigation::Hidden,
+                    };
+                    self.layout.focus_target = match self.layout.compact_navigation {
+                        CompactNavigation::Visible => FocusTarget::NavigationTree,
+                        CompactNavigation::Hidden => match self.layout.compact_content {
+                            CompactContent::CardList => FocusTarget::CardList,
+                            CompactContent::Editor => FocusTarget::Editor,
+                        },
+                    };
+                    return vec![NotoraEffect::Redraw];
+                }
                 self.layout.navigation_pane_visibility =
                     match self.layout.navigation_pane_visibility {
                         NavigationPaneVisibility::Expanded => NavigationPaneVisibility::Collapsed,
@@ -3153,6 +3167,24 @@ mod tests {
         let _ = state.reduce(NotoraAction::CompactBackRequested);
         assert_eq!(state.layout.compact_content, CompactContent::CardList);
         assert_eq!(state.layout.compact_navigation, CompactNavigation::Hidden);
+    }
+
+    #[test]
+    fn compact_navigation_toggle_preserves_the_editor_and_persistent_pane_visibility() {
+        let mut state = NotoraState::default();
+        state.layout.responsive_mode = crate::ResponsiveLayoutMode::EditorOverlay;
+        state.layout.compact_content = CompactContent::Editor;
+        let visibility = state.layout.navigation_pane_visibility;
+        for expected in [CompactNavigation::Visible, CompactNavigation::Hidden] {
+            assert_eq!(
+                state.reduce(NotoraAction::NavigationPaneVisibilityToggled),
+                vec![NotoraEffect::Redraw]
+            );
+            assert_eq!(state.layout.compact_navigation, expected);
+            assert_eq!(state.layout.compact_content, CompactContent::Editor);
+            assert_eq!(state.layout.navigation_pane_visibility, visibility);
+        }
+        assert_eq!(state.layout.focus_target, FocusTarget::Editor);
     }
 
     #[test]

@@ -1296,6 +1296,10 @@ impl NotoraShell {
         self.editor_pane.title_text()
     }
 
+    pub(crate) fn navigation_toggle_available(&self, overlay: OverlayState) -> bool {
+        self.chrome_button_available(ChromeButtonKey::NavigationCollapse, Some(overlay), None)
+    }
+
     pub fn set_canvas_scrollbars_input(
         &mut self,
         input: Option<CanvasScrollbarsInput>,
@@ -1627,7 +1631,8 @@ impl NotoraShell {
         let tool_button_height = NOTE_TOOL_BUTTON_HEIGHT_LOGICAL * dpi;
         self.note_toolbar_buttons =
             layout_note_toolbar(card_header.toolbar_rect, dpi, new_note_rect, &model.note_toolbar);
-        self.compact_navigation_rect = if layout.responsive_mode != ResponsiveLayoutMode::ThreePane
+        self.compact_navigation_rect = if !layout.has_immersive_title_bar()
+            && layout.responsive_mode != ResponsiveLayoutMode::ThreePane
             && layout.navigation_rect == Rect::ZERO
         {
             Rect::new(
@@ -1702,6 +1707,7 @@ impl NotoraShell {
         });
         frame.with_underlay_paint_context(|context| {
             let application_theme = context.theme.application_theme();
+            context.list.fill(layout.overlay_rect, application_theme.window_surface);
             // 顶部和导航属于同一外壳；中栏比外壳浅，正文保持编辑器底色。
             context.list.fill(layout.navigation_rect, application_theme.window_surface);
             context.list.fill(layout.card_list_rect, application_theme.navigation_surface);
@@ -1761,7 +1767,19 @@ impl NotoraShell {
                 })?;
             }
         }
-        frame.with_paint_context(|context| self.editor_pane.paint_overlay(context));
+        frame.with_paint_context(|context| {
+            self.paint_canvas_scrollbars(context);
+            self.editor_pane.paint_overlay(context);
+        });
+        if layout.has_immersive_title_bar() {
+            frame.with_paint_context(|context| {
+                ui::rounded_surface_frame::RoundedSurfaceFrame {
+                    rect: layout.content_surface_rect(),
+                    radius: ui::rounded_surface_frame::CONTENT_CORNER_RADIUS_LOGICAL * dpi,
+                }
+                .paint(context);
+            });
+        }
         if self.mindmap_style_panel_open {
             frame.with_paint_context(|context| {
                 paint_at(context, self.mindmap_style_panel_rect, |context| {
@@ -3249,7 +3267,8 @@ fn layout_note_toolbar(
 }
 
 fn navigation_collapse_button_rect(layout: ShellLayout, dpi: f32, padding: f32) -> Rect {
-    if layout.responsive_mode != ResponsiveLayoutMode::ThreePane
+    if layout.has_immersive_title_bar()
+        || layout.responsive_mode != ResponsiveLayoutMode::ThreePane
         || layout.navigation_rect == Rect::ZERO
     {
         return Rect::ZERO;
@@ -3264,7 +3283,8 @@ fn navigation_collapse_button_rect(layout: ShellLayout, dpi: f32, padding: f32) 
 }
 
 fn navigation_expand_button_rect(layout: ShellLayout, dpi: f32, padding: f32) -> Rect {
-    if layout.responsive_mode != ResponsiveLayoutMode::ThreePane
+    if layout.has_immersive_title_bar()
+        || layout.responsive_mode != ResponsiveLayoutMode::ThreePane
         || layout.navigation_rect != Rect::ZERO
     {
         return Rect::ZERO;
@@ -3470,7 +3490,44 @@ mod tests {
                 runtime.update_theme(theme.clone());
                 runtime.set_scale_factor(f64::from(dpi));
                 let mut frame = runtime.begin_frame().expect("surface test frame should begin");
+                frame.with_layout_context(|context| {
+                    shell.set_canvas_scrollbars_input(
+                        Some(CanvasScrollbarsInput {
+                            horizontal: None,
+                            vertical: Some(ui::scrollbar::ScrollbarInput {
+                                viewport_height_px: f64::from(layout.editor_body_rect.h),
+                                total_display_rows: 2400,
+                                scroll_top_rows: 2400.0,
+                            }),
+                        }),
+                        layout.editor_body_rect,
+                        context,
+                    );
+                });
                 shell.render(&mut frame, layout, &model).expect("surface test should render");
+                assert_eq!(shell.navigation_collapse_rect, Rect::ZERO);
+                assert_eq!(shell.navigation_expand_rect, Rect::ZERO);
+                assert_eq!(
+                    shell.search_rect.w,
+                    layout.navigation_rect.w - SHELL_PADDING_LOGICAL * dpi * 2.0
+                );
+                frame.with_paint_context(|context| {
+                    let mut thumb_color = context.theme.editor.scrollbar_thumb;
+                    thumb_color[3] *= 0.6;
+                    let scrollbar_index = context.list.cmds.iter().position(|command| matches!(command,
+                        ui::DrawCmd::FillRect { rect, color, .. }
+                            if *color == thumb_color && rect.right() == layout.editor_rect.right()
+                    )).expect("editor scrollbar must be part of the content overlay");
+                    let corner_index = context.list.cmds.iter().position(|command| matches!(command,
+                        ui::DrawCmd::FillTriangle { color, .. } if *color == surfaces.window_surface
+                    )).expect("content corners must be masked");
+                    assert!(scrollbar_index < corner_index, "rounded corners must cover scrollbar endpoints");
+                    assert!(context.list.cmds.iter().any(|command| matches!(command,
+                        ui::DrawCmd::StrokeRect { rect, radius, .. }
+                            if *rect == layout.content_surface_rect()
+                                && *radius == ui::rounded_surface_frame::CONTENT_CORNER_RADIUS_LOGICAL * dpi
+                    )));
+                });
                 frame.with_underlay_paint_context(|context| {
                     for (expected_rect, expected_color) in [
                         (layout.navigation_rect, surfaces.window_surface),
