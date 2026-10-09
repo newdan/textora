@@ -6,17 +6,30 @@ license.workspace = true
 repository.workspace = true
 rust-version.workspace = true
 
+[features]
+default = ["rich-markdown"]
+rich-markdown = [
+    "dep:ratex-parser",
+    "dep:ratex-layout",
+    "dep:ratex-types",
+    "dep:ratex-svg",
+    "dep:mermaid-rs-renderer",
+    "dep:resvg",
+    "dep:ego-tree",
+    "dep:scraper",
+]
+
 [dependencies]
 encoding_rs.workspace = true
-ego-tree.workspace = true
+ego-tree = { workspace = true, optional = true }
 pulldown-cmark = { version = "0.13.0", default-features = false }
-ratex-parser = "=0.1.14"
-ratex-layout = "=0.1.14"
-ratex-types = "=0.1.14"
-ratex-svg = { version = "=0.1.14", features = ["standalone", "embed-fonts"] }
-mermaid-rs-renderer = { version = "=0.3.1", default-features = false }
-resvg = { version = "=0.48.1", default-features = false, features = ["text", "system-fonts", "raster-images"] }
-scraper.workspace = true
+ratex-parser = { version = "=0.1.14", optional = true }
+ratex-layout = { version = "=0.1.14", optional = true }
+ratex-types = { version = "=0.1.14", optional = true }
+ratex-svg = { version = "=0.1.14", features = ["standalone", "embed-fonts"], optional = true }
+mermaid-rs-renderer = { version = "=0.3.1", default-features = false, optional = true }
+resvg = { version = "=0.48.1", default-features = false, features = ["text", "system-fonts", "raster-images"], optional = true }
+scraper = { workspace = true, optional = true }
 ui.workspace = true
 shaping.workspace = true
 core.workspace = true

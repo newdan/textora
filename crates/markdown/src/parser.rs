@@ -82,7 +82,9 @@ pub(crate) fn markdown_options() -> Options {
     opts.insert(Options::ENABLE_TASKLISTS);
     opts.insert(Options::ENABLE_HEADING_ATTRIBUTES);
     opts.insert(Options::ENABLE_YAML_STYLE_METADATA_BLOCKS);
-    opts.insert(Options::ENABLE_MATH);
+    if cfg!(feature = "rich-markdown") {
+        opts.insert(Options::ENABLE_MATH);
+    }
     opts
 }
 
@@ -393,6 +395,7 @@ fn has_blank_line_before_offset(src: &str, offset: usize) -> bool {
 mod tests {
     use super::*;
 
+    #[cfg(feature = "rich-markdown")]
     #[test]
     fn math_events_keep_their_complete_source_ranges() {
         let source = "中$x^2$文\n\n$$\\frac{1}{2}$$";
@@ -423,6 +426,7 @@ mod tests {
         }
     }
 
+    #[cfg(feature = "rich-markdown")]
     #[test]
     fn adjacent_display_math_has_no_empty_paragraph() {
         let parsed = parse_markdown("$$x$$\n$$y$$");

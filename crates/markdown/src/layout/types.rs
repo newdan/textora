@@ -4052,6 +4052,7 @@ mod tests {
         assert_eq!(rendered_lines, ["first", "7. second", "third"]);
     }
 
+    #[cfg(feature = "rich-markdown")]
     #[test]
     fn changing_selection_invalidates_embedded_block_on_enter_and_exit() {
         let source = "before\n\n```mermaid\ngraph TD\nA-->B\n```";

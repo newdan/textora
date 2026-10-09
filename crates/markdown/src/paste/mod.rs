@@ -1,5 +1,6 @@
 pub mod model;
 
+#[cfg(feature = "rich-markdown")]
 mod html;
 mod rtf;
 mod selection;
