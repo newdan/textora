@@ -30,6 +30,7 @@
     <rect width="1024" height="1024" fill="url(#cover)"/>
     <path d="M0 0H146V1024H0Z" fill="url(#spine)"/>
     <path d="M106 0H146V1024H106Z" fill="#14789C"/>
+    <g id="n-centered" transform="translate(0 48)">
     <path d="M769 218.5L795 254.5C802 264 805 276 805 288V687C805 718 785 736 756 736H658.5L622.5 700H721C750 700 769 680.8 769 651Z M450 466.7L486 516V687C486 719 467 736 437.5 736H338.7L302.7 700H401.5C433.7 700 450 683.5 450 651Z" fill="#16799E" opacity="1"/>
     <use xlink:href="#n" fill="url(#fold)"/>
     <g clip-path="url(#n-clip)">
@@ -38,6 +39,7 @@
       <path d="M302.7 271.8L450 466.7V503L302.7 309Z" fill="#CDA37B"/>
       <path d="M621.5 421.5L769 619.5V657L621.5 454.5Z" fill="#BF9268"/>
       <path d="M302.7 271.8V218H450L769 657V700H622.5Z" fill="url(#ivory)"/>
+    </g>
     </g>
   </g>
 </svg>
