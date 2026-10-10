@@ -1,40 +1,43 @@
-<?xml version="1.0" encoding="UTF-8"?>
-<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024" fill="none">
-  <title>Notora — Layered Notebook App Icon</title>
-  <desc>Full-bleed notebook icon. The front cover, inset page block and offset back cover fill the complete square canvas. No separate background or outer margin; the system supplies the final corner mask.</desc>
+<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" width="1024" height="1024" viewBox="0 0 1024 1024" fill="none">
+  <title>Notora — blue teal and warm ivory</title>
+  <desc>Vector reconstruction of the supplied icon, preserving its outline, spine, N silhouette, folded facets and offset shadow.</desc>
   <defs>
-    <linearGradient id="cover" x1="280" y1="0" x2="800" y2="1024" gradientUnits="userSpaceOnUse">
-      <stop stop-color="#7AD8E9"/><stop offset="1" stop-color="#43B2CC"/>
+    <linearGradient id="cover" x1="145" y1="50" x2="945" y2="870" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#09B9DE"/>
+      <stop offset="1" stop-color="#0C90CA"/>
     </linearGradient>
-    <linearGradient id="spine" x1="88" y1="0" x2="88" y2="1024" gradientUnits="userSpaceOnUse">
-      <stop stop-color="#0B7D9D"/><stop offset="1" stop-color="#05617F"/>
+    <linearGradient id="spine" x1="0" y1="512" x2="146" y2="512" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#167E9E"/>
+      <stop offset="1" stop-color="#148CB5"/>
     </linearGradient>
-    <linearGradient id="back" x1="512" y1="0" x2="512" y2="1024" gradientUnits="userSpaceOnUse">
-      <stop stop-color="#D88A31"/><stop offset="1" stop-color="#BD681D"/>
+    <linearGradient id="ivory" x1="352" y1="218" x2="726" y2="700" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#FFF6E6"/>
+      <stop offset="1" stop-color="#FEF5E5"/>
     </linearGradient>
-    <linearGradient id="N-side" x1="300" y1="282" x2="740" y2="720" gradientUnits="userSpaceOnUse">
-      <stop stop-color="#08748E"/><stop offset="1" stop-color="#055B76"/>
+    <linearGradient id="fold" x1="400" y1="240" x2="735" y2="690" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#EED4B7"/>
+      <stop offset="1" stop-color="#EDD2B4"/>
     </linearGradient>
-    <linearGradient id="N-fold" x1="376" y1="278" x2="648" y2="744" gradientUnits="userSpaceOnUse">
-      <stop stop-color="#28A0B7"/><stop offset="1" stop-color="#13819D"/>
+    <linearGradient id="paper" x1="302" y1="300" x2="615" y2="650" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#FBECCE"/>
+      <stop offset="1" stop-color="#FAEBCC"/>
     </linearGradient>
-    <clipPath id="front-cover-clip"><path d="M0 -24H780C854 -24 914 36 914 110V742A164 164 0 0 1 750 906H164A164 164 0 0 1 0 742Z"/></clipPath>
+    <path id="n" d="M354 218H450L621.5 454.5V272.5C621.5 242.7 645.7 218.5 675.5 218.5H769V651C769 680.8 750 700 721 700H622.5L450 466.7V651C450 683.5 433.7 700 401.5 700H302.7V271.8C302.7 242.1 325.3 218 354 218Z"/>
+    <clipPath id="icon-clip"><rect width="1024" height="1024" rx="164"/></clipPath>
+    <clipPath id="n-clip"><use xlink:href="#n"/></clipPath>
   </defs>
-  <g id="01-back-cover">
-    <rect width="1024" height="1024" fill="url(#back)"/>
-  </g>
-  <g id="02-pages">
-    <path d="M160 30H826A138 138 0 0 1 964 168V766A198 198 0 0 1 766 964H164A198 198 0 0 1 -34 766V168Q-34 30 160 30Z" fill="#E0ECE9"/>
-    <path d="M148 24H824A132 132 0 0 1 956 156V766A190 190 0 0 1 766 956H164A190 190 0 0 1 -26 766V156Q-26 24 148 24Z" fill="#FFFEF9"/>
-  </g>
-  <g id="03-front-cover">
-    <path d="M0 -24H780C854 -24 914 36 914 110V742A164 164 0 0 1 750 906H164A164 164 0 0 1 0 742Z" fill="url(#cover)"/>
-  </g>
-  <rect id="book-spine" x="0" y="0" width="146" height="1024" fill="url(#spine)" clip-path="url(#front-cover-clip)"/>
-  <g id="04-notora-monogram" transform="translate(-1.6 -73.35) scale(1.05)">
-    <path id="N-left-fold" d="M290 736V326C290 299.49 311.49 278 338 278H430V696C430 718.09 412.09 736 390 736H290Z" fill="url(#N-side)"/>
-    <path id="N-right-fold" d="M594 328C594 300.39 616.39 278 644 278H734V696C734 718.09 716.09 736 694 736H594V328Z" fill="url(#N-side)"/>
-    <path id="N-diagonal-fold" d="M338 278H430L734 696C734 718.09 716.09 736 694 736H594L290 326C290 299.49 311.49 278 338 278Z" fill="url(#N-fold)"/>
-    <path id="N-fold-depth" d="M290 326L430 515V548L290 360Z" fill="#044A63" fill-opacity=".15"/>
+  <g clip-path="url(#icon-clip)">
+    <rect width="1024" height="1024" fill="url(#cover)"/>
+    <path d="M0 0H146V1024H0Z" fill="url(#spine)"/>
+    <path d="M106 0H146V1024H106Z" fill="#14789C"/>
+    <path d="M769 218.5L795 254.5C802 264 805 276 805 288V687C805 718 785 736 756 736H658.5L622.5 700H721C750 700 769 680.8 769 651Z M450 466.7L486 516V687C486 719 467 736 437.5 736H338.7L302.7 700H401.5C433.7 700 450 683.5 450 651Z" fill="#16799E" opacity="1"/>
+    <use xlink:href="#n" fill="url(#fold)"/>
+    <g clip-path="url(#n-clip)">
+      <path d="M302.7 271.8L450 466.7V544L302.7 699.5Z" fill="url(#paper)"/>
+      <path d="M621.5 218.5H769L621.5 369Z" fill="url(#paper)"/>
+      <path d="M302.7 271.8L450 466.7V503L302.7 309Z" fill="#CDA37B"/>
+      <path d="M621.5 421.5L769 619.5V657L621.5 454.5Z" fill="#BF9268"/>
+      <path d="M302.7 271.8V218H450L769 657V700H622.5Z" fill="url(#ivory)"/>
+    </g>
   </g>
 </svg>
