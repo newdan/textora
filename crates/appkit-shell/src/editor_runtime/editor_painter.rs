@@ -8,6 +8,16 @@ use crate::tab_session::TabSession;
 
 const PLUGIN_CONTENT_TOP_PADDING_LOGICAL: f32 = 16.0;
 const PLUGIN_CONTENT_BOTTOM_PADDING_LOGICAL: f32 = 24.0;
+const ACTIVE_SEARCH_OVERLAY_OPACITY: f32 = 0.28;
+const INACTIVE_SEARCH_OVERLAY_OPACITY: f32 = 0.14;
+
+fn search_overlay_colors(theme: &ui::Theme) -> ([f32; 4], [f32; 4]) {
+    let mut active = theme.palette.highlight;
+    active[3] = active[3].min(ACTIVE_SEARCH_OVERLAY_OPACITY);
+    let mut inactive = theme.palette.inactive_highlight;
+    inactive[3] = inactive[3].min(INACTIVE_SEARCH_OVERLAY_OPACITY);
+    (active, inactive)
+}
 
 fn measure_preedit_advance_px(
     shaper: &mut shaping::Shaper,
@@ -171,8 +181,9 @@ fn paint_plugin_editor(
     if tab_view.has_selection() {
         draw_list.cmds.extend(tab_view.selection_highlights(theme.editor.selection).cmds);
     }
-    if tab_view.search_state().is_active() && !tab_view.search_state().query.is_empty() {
+    if tab_view.search_state().panel_visible && tab_view.search_state().is_active() {
         let search = tab_view.search_state();
+        let (active_color, inactive_color) = search_overlay_colors(theme);
         draw_list.cmds.extend(
             tab_view
                 .search_highlights(
@@ -180,8 +191,8 @@ fn paint_plugin_editor(
                     search.options.match_case,
                     search.options.use_regex,
                     search.active_match_idx,
-                    theme.palette.highlight,
-                    theme.palette.inactive_highlight,
+                    active_color,
+                    inactive_color,
                 )
                 .cmds,
         );
@@ -343,6 +354,14 @@ fn paint_text_editor(
         theme,
         editor_rect.y,
     ));
+    vertices.extend(text_search_vertices(
+        &tab_view,
+        metrics,
+        screen,
+        left_margin,
+        theme,
+        editor_rect.y,
+    ));
     let preedit_origin = plain_text_preedit_origin(
         &preedit_text,
         tab_view.cursor_visual_line(),
@@ -391,11 +410,7 @@ fn text_selection_vertices(
     theme: &ui::Theme,
     editor_top: f32,
 ) -> Vec<GlyphVertex> {
-    let max_doc_line = tab.advance_cache().iter().map(|entry| entry.doc_line).max().unwrap_or(0);
-    let mut line_offsets = vec![0usize; max_doc_line + 1];
-    for entry in tab.advance_cache() {
-        line_offsets[entry.doc_line] = tab.document.line_byte_offset(entry.doc_line).unwrap_or(0);
-    }
+    let line_offsets = visible_line_byte_offsets(tab);
     ui::decorations::selection_vertices(
         tab.document.selection_range(),
         tab.advance_cache(),
@@ -408,6 +423,55 @@ fn text_selection_vertices(
         tab.sub_line_pixel_offset(metrics.line_height),
         &line_offsets,
     )
+}
+
+fn text_search_vertices(
+    tab: &TabSession<'_>,
+    metrics: &ui::settings::UiMetrics,
+    screen: ui::Screen,
+    left_margin: f32,
+    theme: &ui::Theme,
+    editor_top: f32,
+) -> Vec<GlyphVertex> {
+    let search = tab.search_state();
+    if !search.panel_visible
+        || search.matches.is_empty()
+        || search.is_stale(tab.document.tb.gap_buffer().generation())
+    {
+        return Vec::new();
+    }
+    let line_offsets = visible_line_byte_offsets(tab);
+    let (active_color, inactive_color) = search_overlay_colors(theme);
+    search
+        .matches
+        .iter()
+        .enumerate()
+        .flat_map(|(index, matched)| {
+            let color =
+                if index == search.active_match_idx { active_color } else { inactive_color };
+            ui::render_geom::compute_selection_highlight_quads(
+                tab.advance_cache(),
+                (matched.start, matched.end),
+                &line_offsets,
+                screen.w,
+                screen.h,
+                metrics.line_height,
+                tab.sub_line_pixel_offset(metrics.line_height),
+                left_margin,
+                color,
+                editor_top,
+            )
+        })
+        .collect()
+}
+
+fn visible_line_byte_offsets(tab: &TabSession<'_>) -> Vec<usize> {
+    let max_doc_line = tab.advance_cache().iter().map(|entry| entry.doc_line).max().unwrap_or(0);
+    let mut line_offsets = vec![0usize; max_doc_line + 1];
+    for entry in tab.advance_cache() {
+        line_offsets[entry.doc_line] = tab.document.line_byte_offset(entry.doc_line).unwrap_or(0);
+    }
+    line_offsets
 }
 
 fn editor_screen(resources: &RenderResources, editor_rect: ui::Rect) -> ui::Screen {
@@ -440,6 +504,42 @@ mod tests {
         editor_viewport_dimensions, plain_text_preedit_origin,
         plugin_cursor_visibility_scroll_delta,
     };
+
+    #[test]
+    fn plain_text_search_highlights_all_matches_and_closing_removes_them() {
+        let mut buffer = core::buffer::TextBuffer::new(false).expect("fixture creates buffer");
+        buffer.write_raw("中文 中文".as_bytes());
+        let document = appkit_core::document::DocumentModel::new(buffer);
+        let mut runtime = crate::tab_runtime::TabRuntime::new(Box::new(
+            crate::editor_plugin::EditorPlugin::new(),
+        ));
+        runtime.presentation.display.advance_cache = vec![ui::render_geom::AdvanceCacheEntry {
+            doc_line: 0,
+            vl_byte_start: 0,
+            vl_grapheme_start: 0,
+            clusters: vec![(3, 50.0, 0), (6, 60.0, 1), (7, 65.0, 2), (10, 75.0, 3), (13, 85.0, 4)],
+        }];
+        runtime.presentation.search_state.query = "中文".to_owned();
+        runtime.presentation.search_state.panel_visible = true;
+        runtime
+            .presentation
+            .search_state
+            .update_matches(vec![0..6, 7..13], document.tb.gap_buffer().generation());
+        let mut ids = appkit_core::workspace::types::TabIdAllocator::new();
+        let tab_id = ids.allocate();
+        let theme = ui::Theme::resolve_builtin(ui::ThemeMode::Dark, winit::window::Theme::Dark);
+        let metrics = ui::UiMetrics::from_settings(&ui::Settings::new(), 1.0);
+        let screen = ui::Screen::new(300.0, 200.0);
+        let tab = crate::tab_session::TabSession::new(tab_id, &document, &runtime);
+        let vertices = super::text_search_vertices(&tab, &metrics, screen, 40.0, &theme, 50.0);
+        assert_eq!(vertices.len(), 12, "both source matches must produce highlight quads");
+        assert_eq!(vertices[0].color[..3], theme.palette.highlight[..3]);
+        assert_eq!(vertices[6].color[..3], theme.palette.inactive_highlight[..3]);
+        assert!(vertices[0].color[3] < 1.0, "search overlay must leave matched glyphs readable");
+        runtime.presentation.search_state.panel_visible = false;
+        let tab = crate::tab_session::TabSession::new(tab_id, &document, &runtime);
+        assert!(super::text_search_vertices(&tab, &metrics, screen, 40.0, &theme, 50.0).is_empty());
+    }
 
     #[test]
     fn reading_bounds_center_wide_documents_and_preserve_canvas_extent() {

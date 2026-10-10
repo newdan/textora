@@ -6,6 +6,10 @@ use std::time::{Duration, Instant};
 
 use appkit_shell::editor_runtime::{EditorSurfacePaint, RenderError, RenderResources};
 use appkit_shell::render_state::{GpuState, TextState};
+use ui::Widget;
+use ui::document_search_bar::{
+    DocumentSearchBarEvent, DocumentSearchBarInput, DocumentSearchBarWidget,
+};
 use winit::dpi::{PhysicalPosition, PhysicalSize};
 
 use crate::NotoraState;
@@ -131,6 +135,9 @@ impl StartupTrace {
 
 /// shell、主题、字体准备与 GPU frame 提交的唯一所有者。
 pub(super) struct FrameRuntime {
+    pub(super) document_search_bar: DocumentSearchBarWidget,
+    document_search_input: DocumentSearchBarInput,
+    document_search_rect: ui::Rect,
     window_frame: ui::window_frame::WindowFrameWidget,
     #[cfg(not(test))]
     shell: NotoraShell,
@@ -171,6 +178,9 @@ impl FrameRuntime {
         startup_trace: Option<StartupTrace>,
     ) -> Self {
         Self {
+            document_search_bar: DocumentSearchBarWidget::new(),
+            document_search_input: DocumentSearchBarInput::default(),
+            document_search_rect: ui::Rect::ZERO,
             window_frame: ui::window_frame::WindowFrameWidget::default(),
             shell: NotoraShell::new(),
             settings,
@@ -193,6 +203,9 @@ impl FrameRuntime {
     }
 
     pub(super) fn focused_text_input_ime_allowed(&self) -> bool {
+        if self.document_search_input.focused {
+            return self.document_search_bar.ime_allowed();
+        }
         self.shell.focused_text_input_ime_allowed()
     }
 
@@ -201,11 +214,47 @@ impl FrameRuntime {
     }
 
     pub(super) fn advance_text_cursor_blink(&mut self, now: Instant) -> bool {
-        self.shell.advance_text_cursor_blink(now)
+        let search_changed = self.document_search_bar.advance_cursor_blink(now);
+        self.shell.advance_text_cursor_blink(now) || search_changed
     }
 
     pub(super) fn next_text_cursor_blink_at(&self) -> Option<Instant> {
-        self.shell.next_text_cursor_blink_at()
+        [self.shell.next_text_cursor_blink_at(), self.document_search_bar.next_cursor_blink_at()]
+            .into_iter()
+            .flatten()
+            .min()
+    }
+
+    pub(super) fn synchronize_document_search(
+        &mut self,
+        input: DocumentSearchBarInput,
+        rect: ui::Rect,
+        dpi: f32,
+    ) {
+        self.document_search_bar.set_input(input.clone());
+        self.document_search_input = input;
+        if self.document_search_rect == rect {
+            return;
+        }
+        self.document_search_rect = rect;
+        let mut measure = ui::NoopMeasure;
+        let mut context =
+            ui::LayoutCtx { ui_measure: None, measure: &mut measure, theme: &self.theme, dpi };
+        self.document_search_bar.set_rect(rect, &mut context);
+    }
+
+    pub(super) fn route_document_search_event(
+        &mut self,
+        event: &ui::Event,
+        dpi: f32,
+    ) -> DocumentSearchBarEvent {
+        let mut clipboard = appkit_shell::SystemClipboard;
+        let mut context = ui::EventCtx::with_clipboard(&self.theme, dpi, &mut clipboard);
+        self.document_search_bar.route_event(event, &mut context)
+    }
+
+    pub(super) fn editor_popup_is_open(&self) -> bool {
+        self.shell.editor_popup_is_open()
     }
 
     pub(super) fn theme(&self) -> &ui::Theme {
@@ -396,6 +445,9 @@ impl FrameRuntime {
             text.begin_frame();
         }
         let mut frame = document_runtime.editor_mut().begin_frame()?;
+        frame.with_layout_context(|context| {
+            self.document_search_bar.set_rect(self.document_search_rect, context);
+        });
         let frame_state = super::window_runtime::frame_state(document_runtime.editor().window());
         self.window_frame.set_input(
             ui::window_frame::WindowFrameInput {
@@ -431,7 +483,9 @@ impl FrameRuntime {
                 context,
             );
         });
-        self.shell.render(&mut frame, input.layout, &model)?;
+        let search_bar = (input.state.layout.overlay == crate::OverlayState::None)
+            .then_some(&self.document_search_bar);
+        self.shell.render_with_document_search(&mut frame, input.layout, &model, search_bar)?;
         self.shell.synchronize_focus(input.state.layout.focus_target, Instant::now());
         frame.with_paint_context(|context| self.window_frame.paint_border(context));
         let mut vertices = Vec::new();
@@ -459,11 +513,15 @@ impl FrameRuntime {
         let Some(window) = document_runtime.editor().window() else {
             return;
         };
-        window.set_ime_allowed(self.shell.focused_text_input_ime_allowed());
-        let ime_rect = self.shell.focused_text_input_ime_cursor_rect().or_else(|| {
-            (state.layout.focus_target == crate::FocusTarget::Editor)
-                .then(|| document_runtime.editor().active_editor_ime_cursor_rect())?
-        });
+        window.set_ime_allowed(self.focused_text_input_ime_allowed());
+        let ime_rect = self
+            .document_search_bar
+            .ime_cursor_rect()
+            .or_else(|| self.shell.focused_text_input_ime_cursor_rect())
+            .or_else(|| {
+                (state.layout.focus_target == crate::FocusTarget::Editor)
+                    .then(|| document_runtime.editor().active_editor_ime_cursor_rect())?
+            });
         let Some(ime_rect) = ime_rect else {
             return;
         };
@@ -524,6 +582,9 @@ impl FrameRuntime {
                 crate::render::add_compact_editor_toolbar_commands(
                     &mut model.editor_chrome.toolbar,
                 );
+            }
+            if plugin_name != ui::plugin::PLUGIN_MINDMAP {
+                crate::render::add_document_search_command(&mut model.editor_chrome.toolbar);
             }
             if plugin_name == ui::plugin::PLUGIN_MINDMAP
                 && let Some(tab) = document_runtime.editor().tab_session(tab_id)

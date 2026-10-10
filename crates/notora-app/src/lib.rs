@@ -8,6 +8,7 @@ mod app;
 pub mod autosave;
 pub mod dirty_snapshot;
 pub mod document_registry;
+mod document_search;
 mod editor_adapter;
 pub mod editor_pane;
 pub mod effect_executor;

@@ -291,7 +291,10 @@ impl NotoraRuntime {
             self.dispatch_action(action);
             return;
         }
-        if is_search_shortcut(key_code, modifiers) {
+        if is_search_shortcut(key_code, modifiers, physical_key) {
+            if !modifiers.shift && self.open_document_search() {
+                return;
+            }
             self.dispatch_action(NotoraAction::FocusRequested(
                 crate::FocusTarget::NavigationSearch,
             ));
@@ -348,9 +351,18 @@ fn is_save_shortcut(key_code: ui::KeyCode, modifiers: Modifiers) -> bool {
         && (modifiers.cmd || modifiers.ctrl)
 }
 
-fn is_search_shortcut(key_code: ui::KeyCode, modifiers: Modifiers) -> bool {
-    matches!(key_code, ui::KeyCode::Char('f') | ui::KeyCode::Char('F'))
-        && (modifiers.cmd || modifiers.ctrl)
+fn is_search_shortcut(
+    key_code: ui::KeyCode,
+    modifiers: Modifiers,
+    physical_key: Option<winit::keyboard::PhysicalKey>,
+) -> bool {
+    if !(modifiers.cmd || modifiers.ctrl) || modifiers.alt {
+        return false;
+    }
+    match physical_key {
+        Some(winit::keyboard::PhysicalKey::Code(code)) => code == winit::keyboard::KeyCode::KeyF,
+        _ => matches!(key_code, ui::KeyCode::Char('f' | 'F')),
+    }
 }
 
 fn map_mouse_button(button: WinitMouseButton) -> Option<ui::core::widget::MouseButton> {
@@ -455,13 +467,15 @@ mod tests {
     fn command_or_control_f_uses_the_global_search_shortcut() {
         assert!(is_search_shortcut(
             ui::KeyCode::Char('f'),
-            Modifiers { cmd: true, ..Modifiers::NONE }
+            Modifiers { cmd: true, ..Modifiers::NONE },
+            None
         ));
         assert!(is_search_shortcut(
             ui::KeyCode::Char('F'),
-            Modifiers { ctrl: true, ..Modifiers::NONE }
+            Modifiers { ctrl: true, ..Modifiers::NONE },
+            None
         ));
-        assert!(!is_search_shortcut(ui::KeyCode::Char('f'), Modifiers::NONE));
+        assert!(!is_search_shortcut(ui::KeyCode::Char('f'), Modifiers::NONE, None));
     }
 
     #[test]
