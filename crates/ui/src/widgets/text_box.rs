@@ -16,8 +16,6 @@ use unicode_segmentation::UnicodeSegmentation;
 const MASKED_ECHO_GLYPH: char = '•';
 const DEFAULT_FONT_SIZE_LOGICAL: f32 = 14.0;
 const MINIMUM_FONT_SIZE_LOGICAL: f32 = 1.0;
-const FRAMED_CORNER_RADIUS_LOGICAL: f32 = 3.0;
-const SEAMLESS_FOCUS_CORNER_RADIUS_LOGICAL: f32 = 6.0;
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum TextBoxChrome {
@@ -1192,13 +1190,10 @@ impl TextBox {
 
     fn paint_chrome(&self, ctx: &mut PaintCtx) {
         let dpi = ctx.dpi;
+        let corner_radius = ctx.theme.control_metrics().corner_radius_logical * dpi;
         if self.chrome == TextBoxChrome::Seamless {
             if self.focused {
-                ctx.list.fill_rounded(
-                    self.rect,
-                    ctx.theme.palette.bg_hover,
-                    SEAMLESS_FOCUS_CORNER_RADIUS_LOGICAL * dpi,
-                );
+                ctx.list.fill_rounded(self.rect, ctx.theme.palette.bg_hover, corner_radius);
             }
             return;
         }
@@ -1209,7 +1204,6 @@ impl TextBox {
             background[1] = (background[1] + 0.04).min(1.0);
             background[2] = (background[2] + 0.04).min(1.0);
         }
-        let corner_radius = FRAMED_CORNER_RADIUS_LOGICAL * dpi;
         ctx.list.fill_rounded(self.rect, background, corner_radius);
 
         let border_color =

@@ -123,7 +123,6 @@ fn search_control_style(theme: &crate::theme::Theme) -> ButtonStyle {
     style.selected_background = [0.0; 4];
     style.font_size_logical = SEARCH_FONT_SIZE_LOGICAL;
     style.pad_x_logical = 0.0;
-    style.corner_radius_logical = 4.0;
     style
 }
 

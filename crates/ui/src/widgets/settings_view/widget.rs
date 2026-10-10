@@ -1686,7 +1686,12 @@ mod tests {
                     .iter()
                     .rev()
                     .find_map(|command| match command {
-                        DrawCmd::FillRect { rect, radius, .. } if *radius == 3.0 * dpi => {
+                        DrawCmd::FillRect { rect, radius, .. }
+                            if *radius
+                                == crate::theme::ControlMetrics::default()
+                                    .corner_radius_logical
+                                    * dpi =>
+                        {
                             Some(*rect)
                         }
                         _ => None,
