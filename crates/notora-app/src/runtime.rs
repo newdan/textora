@@ -6011,6 +6011,52 @@ mod tests {
     }
 
     #[test]
+    fn tab_in_empty_markdown_body_immediately_moves_the_caret() {
+        const TAB_SPACES: &str = "    ";
+        let mut app = app();
+        let (_, tab_id) = install_registered_note(&mut app, "tab-caret.md", "");
+        app.dispatch_action(NotoraAction::FocusRequested(FocusTarget::Editor));
+        let mut shaper = shaping::Shaper::new().expect("Tab caret test requires body fonts");
+        let _ = app
+            .document_runtime
+            .editor_runtime
+            .tab_session_mut(tab_id)
+            .expect("empty body must retain its session")
+            .render_plugin(
+                ui::Rect::new(0.0, 0.0, 800.0, 600.0),
+                &ui::theme::test_theme(),
+                &mut shaper,
+                1.0,
+            );
+        let before = app
+            .document_runtime
+            .editor_runtime
+            .tab_session(tab_id)
+            .and_then(|session| session.query_cursor_screen_rect(0))
+            .expect("empty Markdown body must expose its caret");
+
+        app.handle_editor_key_input(ui::KeyCode::Tab, ui::core::Modifiers::NONE);
+
+        let snapshot = app
+            .document_runtime
+            .editor_runtime
+            .document_text_snapshot(tab_id)
+            .expect("indented body must remain available");
+        assert_eq!(snapshot.text, TAB_SPACES);
+        let session = app
+            .document_runtime
+            .editor_runtime
+            .tab_session(tab_id)
+            .expect("indented body must retain its session");
+        assert_eq!(session.document.cursor_offset().to_usize(), TAB_SPACES.len());
+        let after = session
+            .query_cursor_screen_rect(TAB_SPACES.len())
+            .expect("Tab must expose the updated caret before another paint");
+        assert!(after.0 > before.0, "Tab must immediately advance the visual caret");
+        assert_eq!(after.1, before.1, "Tab must keep the caret on its current row");
+    }
+
+    #[test]
     fn tab_after_typing_into_an_empty_mindmap_root_creates_a_child() {
         let workspace_directory =
             tempfile::tempdir().expect("workspace test directory should be created");

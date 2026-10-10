@@ -1544,14 +1544,27 @@ impl<S: BlockSource> PreviewEngine<S> {
             return None;
         }
 
-        let (x, line_top, font_size, line_height) =
-            self.empty_source_line_metrics(source_line, lazy, source)?;
-        let cursor_height = font_size.min(line_height);
-        let baseline_y = line_top + cursor_height;
+        let line = self.own_rendered_line(source_line, lazy)?;
+        let source_start = line.source_projection.as_ref()?.boundaries.first()?.byte;
+        let whitespace_before_cursor = source.get(source_start..cursor_byte)?;
+        let whitespace_graphemes = crate::grapheme_map::grapheme_count(whitespace_before_cursor);
+        let whitespace_advance = if line.text.starts_with(whitespace_before_cursor) {
+            self.grapheme_x_for_line(line, whitespace_graphemes)
+        } else {
+            self.navigation_font_metrics_for_line(line).grapheme_x(
+                whitespace_before_cursor,
+                whitespace_graphemes,
+                line.font_size,
+            )
+        };
+        let x = line.rect.x + whitespace_advance;
+        let cursor_height = line.font_size.min(line.rect.h);
+        let baseline_y = line.rect.y + cursor_height;
         let cursor_y = baseline_y - cursor_height * WYSIWYG_CURSOR_ASCENT_RATIO - self.scroll_y;
         Some((x, cursor_y, 2.0, cursor_height))
     }
 
+    #[cfg(test)]
     fn empty_source_line_metrics(
         &self,
         source_line: SourceLineAtByte,
@@ -9316,6 +9329,78 @@ viebcoding 用过吗?
             "roundtrip byte {roundtrip} should match original byte {mid_byte} \
              or be within same source map (map bytes: {bytes_2:?})",
         );
+    }
+
+    #[test]
+    fn cursor_moves_immediately_after_indenting_an_empty_paragraph() {
+        const SOFT_TAB: &str = "    ";
+        for prefix in ["", "before\n\n"] {
+            let mut document = StubDoc::new(prefix);
+            let mut view = MarkdownEditorView::new();
+            view.set_source(document.text.clone(), 1);
+            view.handle_message(PluginMessage::SetCursorByte(prefix.len()), &mut document);
+            render_editor_once(&mut view, &document);
+            let before = view.engine().cursor_screen_pos().expect("empty line must have a caret");
+
+            document.text.push_str(SOFT_TAB);
+            view.set_source(document.text.clone(), 2);
+            view.handle_message(PluginMessage::SetCursorByte(document.text.len()), &mut document);
+            let updated = view.engine().cursor_screen_pos().expect("indented line needs a caret");
+            assert!(updated.0 > before.0, "Tab must move the caret before the next paint");
+            render_editor_once(&mut view, &document);
+            let painted = view.engine().cursor_screen_pos().expect("painted line needs a caret");
+            assert!(painted.0 > before.0, "Tab must remain visible after painting");
+            assert_eq!(painted.1, before.1, "indentation must preserve the caret row");
+            let line = view.engine().flat_lines().last().expect("empty paragraph is rendered");
+            let expected_advance = view.engine().navigation_font_metrics_for_line(line).grapheme_x(
+                SOFT_TAB,
+                SOFT_TAB.len(),
+                line.font_size,
+            );
+            assert!(
+                (painted.0 - before.0 - expected_advance).abs() < f32::EPSILON,
+                "caret must advance by four body-font spaces",
+            );
+        }
+    }
+
+    #[test]
+    fn indented_code_hit_testing_preserves_multibyte_source_boundaries() {
+        for indentation in ["    ", "\t"] {
+            let source = format!("before\n\n{indentation}第一行\n\n{indentation}第二行\n\nafter");
+            let document = StubDoc::new(&source);
+            let mut view = MarkdownEditorView::new();
+            view.set_source(source.clone(), 1);
+            render_editor_once(&mut view, &document);
+
+            for content in ["第一行", "第二行"] {
+                let line = view
+                    .engine()
+                    .flat_lines()
+                    .iter()
+                    .find(|line| line.is_code && line.text == content)
+                    .expect("indented code content must have a rendered line");
+                let content_start = source.find(content).expect("fixture contains code content");
+                assert_eq!(
+                    view.engine().hit_test_byte(
+                        line.rect.x,
+                        line.rect.y + line.rect.h * 0.5,
+                        0.0,
+                        0.0,
+                    ),
+                    Some(content_start),
+                    "code hit must skip source indentation {indentation:?}",
+                );
+                let projection = line
+                    .source_projection
+                    .as_ref()
+                    .expect("code line must retain its source projection");
+                assert!(projection.boundaries.iter().all(|anchor| {
+                    source.is_char_boundary(anchor.byte)
+                        && (content_start..=content_start + content.len()).contains(&anchor.byte)
+                }));
+            }
+        }
     }
 
     #[test]

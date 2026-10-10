@@ -654,6 +654,26 @@ impl MarkdownBuilder {
         self.push_text_with_source(text, self.current_event_range.clone());
     }
 
+    fn record_code_line_source_starts(&mut self, text: &str) {
+        if self.code_block_depth == 0 {
+            return;
+        }
+        let Some(block) = self.block_stack.last_mut() else { return };
+        if !matches!(block.kind, BlockKind::CodeBlock { .. }) {
+            return;
+        }
+
+        let text_start = self.current_event_range.start;
+        let starts = block.code_line_source_starts.get_or_insert_with(Vec::new);
+        if starts.is_empty() {
+            starts.push(text_start);
+        } else if self.pending_line.text.ends_with('\n') {
+            // The parser omits indentation and container prefixes before this event.
+            *starts.last_mut().expect("code line starts were checked as nonempty") = text_start;
+        }
+        starts.extend(text.match_indices('\n').map(|(offset, _)| text_start + offset + 1));
+    }
+
     fn push_verbatim_text(&mut self, text: &str) {
         self.append_text_and_style(text);
         self.pending_line.projection.push_verbatim(text, self.current_event_range.clone());
@@ -987,28 +1007,13 @@ impl MarkdownDoc {
 
                 // ---- Inline ----
                 MarkdownEvent::Text(text) => {
-                    let text_start = builder.current_event_range.start;
+                    builder.record_code_line_source_starts(text);
                     let range = builder.current_event_range.clone();
                     if parsed.source[range.clone()] == *text {
                         builder.push_text_with_source(text, range);
                     } else {
                         builder.append_text_and_style(text);
                         builder.pending_line.projection.push_collapsed(text, range);
-                    }
-                    if builder.code_block_depth > 0
-                        && let Some(block) = builder.block_stack.last_mut()
-                        && matches!(block.kind, BlockKind::CodeBlock { .. })
-                    {
-                        let mut starts = block.code_line_source_starts.take().unwrap_or_default();
-                        if starts.is_empty() {
-                            starts.push(text_start);
-                        }
-                        for (i, b) in text.bytes().enumerate() {
-                            if b == b'\n' {
-                                starts.push(text_start + i + 1);
-                            }
-                        }
-                        block.code_line_source_starts = Some(starts);
                     }
                 }
                 MarkdownEvent::Code(code) => {
@@ -1678,6 +1683,37 @@ mod tests {
         let projected = &doc.blocks[0].projected_lines[0];
         assert_eq!(projected.text, "first second");
         assert_eq!(projected.boundaries[6].byte, 6);
+    }
+
+    #[test]
+    fn code_line_source_starts_follow_parser_content_after_indentation() {
+        for (opening, indentation, closing) in
+            [("", "    ", ""), ("", "\t", ""), ("> ```\n", "> ", "> ```\n"), ("```\n", "", "```\n")]
+        {
+            for newline in ["\n", "\r\n"] {
+                let source =
+                    format!("{opening}{indentation}第一行\n{indentation}第二行\n{closing}")
+                        .replace('\n', newline);
+                let document = MarkdownDoc::build(&parse_markdown(&source), &default_style());
+                let block = document.blocks.first().expect("fixture contains a code container");
+                let code = if matches!(block.kind, BlockKind::BlockQuote) {
+                    block.children.first().expect("quote contains a code block")
+                } else {
+                    block
+                };
+                let starts = code
+                    .code_line_source_starts
+                    .as_ref()
+                    .expect("code content must retain source line starts");
+                for (line_index, content) in ["第一行", "第二行"].into_iter().enumerate() {
+                    assert_eq!(
+                        starts[line_index],
+                        source.find(content).expect("fixture contains code content"),
+                        "code content start must skip {indentation:?} with {newline:?}",
+                    );
+                }
+            }
+        }
     }
 
     #[test]
