@@ -108,6 +108,12 @@ impl ModelSession {
     }
 
     pub(crate) fn active_selected_text(&self) -> Option<String> {
+        let tab_id = self.workspace.active_tab_id()?;
+        let tab = self.tab_session(tab_id)?;
+        if tab.plugin_name() == ui::plugin::PLUGIN_MARKDOWN_EDITOR {
+            let reading_text = tab.selected_text();
+            return (!reading_text.is_empty()).then_some(reading_text);
+        }
         self.workspace
             .active_entry()?
             .extract_selected_text()

@@ -6,6 +6,7 @@
 
 use crate::grapheme_map::byte_at_grapheme_index;
 use crate::layout::{FlatLine, grapheme_at_x, grapheme_x};
+use crate::projection::ProjectionOwnerId;
 use core::text::word_class::{CharClass, classify};
 use ui::core::geom::Rect;
 use ui::core::paint::{DrawCmd, DrawList};
@@ -261,6 +262,36 @@ impl SelectionState {
         Some(result)
     }
 
+    /// Copy visible Markdown text while retaining source paragraph breaks.
+    /// Wrapped visual rows share a source line and therefore add no newline.
+    pub fn selected_reading_text(&self, flat_lines: &[FlatLine], source: &str) -> Option<String> {
+        let (start, end) = self.range()?;
+        let end_idx = end.flat_line_idx.min(flat_lines.len().checked_sub(1)?);
+        let mut copied = String::new();
+        let mut previous_line: Option<&FlatLine> = None;
+
+        for (idx, line) in flat_lines.iter().enumerate().take(end_idx + 1).skip(start.flat_line_idx)
+        {
+            if let Some(previous) = previous_line {
+                append_reading_separator(&mut copied, previous, line, source);
+            }
+
+            let first_grapheme = if idx == start.flat_line_idx { start.grapheme_pos } else { 0 };
+            let last_grapheme = if idx == end.flat_line_idx {
+                end.grapheme_pos
+            } else {
+                grapheme_count_on_line(line)
+            };
+            let first_byte = visual_byte_at_grapheme_on_line(line, first_grapheme);
+            let last_byte = visual_byte_at_grapheme_on_line(line, last_grapheme);
+            if first_byte < last_byte {
+                copied.push_str(&line.text[first_byte..last_byte]);
+            }
+            previous_line = Some(line);
+        }
+        Some(copied)
+    }
+
     /// Generate [`DrawList`] commands for selection highlight rectangles.
     pub fn highlights(
         &self,
@@ -313,6 +344,61 @@ impl SelectionState {
         }
         dl
     }
+}
+
+fn append_reading_separator(
+    copied: &mut String,
+    previous: &FlatLine,
+    next: &FlatLine,
+    source: &str,
+) {
+    let previous_projection = previous.source_projection.as_ref();
+    let next_projection = next.source_projection.as_ref();
+    if previous_projection.zip(next_projection).is_some_and(|(previous, next)| {
+        matches!(
+            (previous.owner, next.owner),
+            (
+                ProjectionOwnerId::TableCell { table_start: first_table, row: first_row, column: first_column, .. },
+                ProjectionOwnerId::TableCell { table_start: second_table, row: second_row, column: second_column, .. }
+            ) if first_table == second_table && first_row == second_row && first_column != second_column
+        )
+    }) {
+        copied.push('\t');
+        return;
+    }
+
+    let previous_end = previous_projection
+        .map(|projection| projection.source_extent.end)
+        .or_else(|| previous.atomic_source_range.as_ref().map(|range| range.end));
+    let next_start = next_projection
+        .map(|projection| projection.source_extent.start)
+        .or_else(|| next.atomic_source_range.as_ref().map(|range| range.start));
+    let Some(source_gap) = previous_end
+        .zip(next_start)
+        .filter(|(end, start)| end <= start)
+        .and_then(|(end, start)| source.get(end..start))
+    else {
+        copied.push('\n');
+        return;
+    };
+
+    for _ in 0..longest_break_run(source_gap) {
+        copied.push('\n');
+    }
+}
+
+fn longest_break_run(source_gap: &str) -> usize {
+    let mut longest_break_run = 0;
+    let mut current_break_run = 0;
+    for byte in source_gap.bytes() {
+        if byte == b'\n' {
+            current_break_run += 1;
+            longest_break_run = longest_break_run.max(current_break_run);
+        } else if byte != b'\r' {
+            current_break_run = 0;
+        }
+    }
+    longest_break_run
 }
 
 #[cfg(test)]

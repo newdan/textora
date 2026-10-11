@@ -1064,6 +1064,11 @@ impl<S: BlockSource> PreviewEngine<S> {
         self.sel.selected_text(&lazy.flat_lines)
     }
 
+    pub fn selected_reading_text(&self, source: &str) -> Option<String> {
+        let lazy = self.lazy.as_ref()?;
+        self.sel.selected_reading_text(&lazy.flat_lines, source)
+    }
+
     fn byte_selection_range(&self) -> Option<(usize, usize)> {
         if let (Some(anchor), Some(cursor)) = (self.sel_anchor_byte, self.sel_cursor_byte) {
             return (anchor != cursor).then_some((anchor.min(cursor), anchor.max(cursor)));
@@ -2397,6 +2402,11 @@ impl ViewPlugin for MarkdownView {
     }
 
     fn query(&self, q: PluginQuery, _doc: &dyn DocView) -> PluginResponse {
+        if matches!(q, PluginQuery::SelectedText) {
+            return PluginResponse::String(
+                self.engine.selected_reading_text(&self.source).unwrap_or_default(),
+            );
+        }
         if let Some(resp) = self.engine.query_common(&q) {
             return resp;
         }
@@ -2993,6 +3003,11 @@ impl ViewPlugin for MarkdownEditorView {
     }
 
     fn query(&self, q: PluginQuery, _doc: &dyn DocView) -> PluginResponse {
+        if matches!(q, PluginQuery::SelectedText) {
+            return PluginResponse::String(
+                self.engine.selected_reading_text(&self.source).unwrap_or_default(),
+            );
+        }
         if self.engine.replacement_preedit.is_some()
             && matches!(
                 &q,
@@ -6446,6 +6461,73 @@ C608-01 武昌职业第01组：计划 68，历史低线较低，是表里最像�
             selected_text.contains("final selectable line"),
             "preview select-all must include the final visible line, got {selected_text:?}"
         );
+    }
+
+    #[test]
+    fn preview_copy_preserves_paragraph_boundary() {
+        use ui::plugin::{PluginMessage, PluginQuery, PluginResponse, ViewPlugin};
+
+        let source = "first paragraph\n\nsecond paragraph";
+        let mut doc = StubDoc::new(source);
+        let mut view = MarkdownView::new();
+        view.set_source(source.to_owned(), 1);
+        render_preview_narrow(&mut view, 800.0);
+        view.handle_message(PluginMessage::SelectAll, &mut doc);
+
+        let copied = view.query(PluginQuery::SelectedText, &doc);
+        assert!(matches!(
+            copied,
+            PluginResponse::String(text) if text == "first paragraph\n\nsecond paragraph"
+        ));
+    }
+
+    #[test]
+    fn preview_copy_preserves_extra_blank_line_without_copying_visual_wraps() {
+        use ui::plugin::{PluginMessage, PluginQuery, PluginResponse, ViewPlugin};
+
+        let source = "first paragraph has enough words to wrap at a narrow width\n\n\nsecond";
+        let mut doc = StubDoc::new(source);
+        let mut view = MarkdownView::new();
+        view.set_source(source.to_owned(), 1);
+        render_preview_narrow(&mut view, 180.0);
+        assert!(view.engine().flat_lines().len() > 2, "first paragraph should wrap");
+        view.handle_message(PluginMessage::SelectAll, &mut doc);
+
+        let copied = view.query(PluginQuery::SelectedText, &doc);
+        assert!(matches!(copied, PluginResponse::String(text) if text == source));
+    }
+
+    #[test]
+    fn editor_copy_uses_visible_text_and_paragraph_breaks() {
+        use ui::plugin::{PluginMessage, PluginQuery, PluginResponse, ViewPlugin};
+
+        let source = "# Heading\n\nfirst **bold** paragraph\n\nsecond";
+        let mut doc = StubDoc::new(source);
+        let mut view = MarkdownEditorView::new();
+        view.set_source(source.to_owned(), 1);
+        render_editor_narrow(&mut view, &doc, 800.0);
+        view.handle_message(PluginMessage::SelectAll, &mut doc);
+
+        let copied = view.query(PluginQuery::SelectedText, &doc);
+        assert!(matches!(
+            copied,
+            PluginResponse::String(text) if text == "Heading\n\nfirst bold paragraph\n\nsecond"
+        ));
+    }
+
+    #[test]
+    fn preview_copy_excludes_fence_lines_from_paragraph_spacing() {
+        use ui::plugin::{PluginMessage, PluginQuery, PluginResponse, ViewPlugin};
+
+        let source = "first\n\n```rust\ncode\n```\n\nlast";
+        let mut doc = StubDoc::new(source);
+        let mut view = MarkdownView::new();
+        view.set_source(source.to_owned(), 1);
+        render_preview_narrow(&mut view, 800.0);
+        view.handle_message(PluginMessage::SelectAll, &mut doc);
+
+        let copied = view.query(PluginQuery::SelectedText, &doc);
+        assert!(matches!(copied, PluginResponse::String(text) if text == "first\n\ncode\n\nlast"));
     }
 
     fn visible_line_snapshots(engine: &PreviewEngine) -> Vec<(String, i32)> {

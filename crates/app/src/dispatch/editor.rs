@@ -369,6 +369,18 @@ impl App {
         if self.active_allows_editing() {
             self.sync_plugin_state();
 
+            if cmd == EditCommand::Copy
+                && self.active_plugin_name() == Some(ui::plugin::PLUGIN_MARKDOWN_EDITOR)
+            {
+                if let Some(tab) = self.active_tab_session() {
+                    let text = tab.selected_text();
+                    if !text.is_empty() {
+                        crate::clipboard::copy_to_clipboard(&text);
+                    }
+                }
+                return effect;
+            }
+
             let mut clipboard = SystemClipboard;
             if let Some(effect) =
                 self.dispatch_pre_navigation_edit_command(&cmd, &mut clipboard, Some(event_loop))
