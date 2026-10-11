@@ -31,6 +31,7 @@ pub enum FocusTarget {
     NavigationTree,
     CardList,
     Editor,
+    DocumentSearch,
     EditorTitle,
     EditorTag,
     Overlay,
@@ -378,6 +379,7 @@ impl NotoraState {
 
     pub fn reduce(&mut self, action: NotoraAction) -> Vec<NotoraEffect> {
         match action {
+            NotoraAction::DocumentSearchRequested => vec![NotoraEffect::Redraw],
             NotoraAction::NavigationSelected(scope) => self.select_navigation_scope(scope),
             NotoraAction::SearchTextChanged(query) => {
                 self.library.search_text = query;

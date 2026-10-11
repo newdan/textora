@@ -1,3 +1,5 @@
+#![cfg_attr(target_os = "windows", windows_subsystem = "windows")]
+
 fn main() {
     let mut app = match notora_app::NotoraApp::try_new() {
         Ok(app) => app,

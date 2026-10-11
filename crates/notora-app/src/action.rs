@@ -303,6 +303,7 @@ pub enum NotoraAction {
         logical_width: f32,
     },
     FocusRequested(FocusTarget),
+    DocumentSearchRequested,
     OpenSettings,
     ProductSettingsUpdateRequested(ProductSettingsUpdate),
     RetryProductSettingsPersistence,

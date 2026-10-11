@@ -4,6 +4,13 @@
 #[path = "runtime/keyboard_shortcut_tests.rs"]
 mod keyboard_shortcut_tests;
 
+#[cfg(test)]
+#[path = "runtime/document_search_tests.rs"]
+mod document_search_tests;
+
+#[path = "runtime/document_search_runtime.rs"]
+mod document_search_runtime;
+
 #[path = "runtime/action_runtime.rs"]
 mod action_runtime;
 #[path = "app/deadline_coordinator.rs"]
@@ -666,7 +673,7 @@ impl NotoraRuntime {
             crate::render::selected_editor_pane_mode(self.action_runtime.state());
         let title_height =
             window_runtime::frame_state(self.document_runtime.editor().window()).title_height(dpi);
-        ShellLayout::compute_below_title_bar(
+        let mut layout = ShellLayout::compute_below_title_bar(
             ShellLayoutInput {
                 window_width_px,
                 window_height_px,
@@ -688,10 +695,21 @@ impl NotoraRuntime {
                 editor_header_visible: editor_pane_mode.shows_header(),
             },
             title_height,
-        )
+        );
+        if self.document_search_is_visible() && layout.editor_rect != ui::Rect::ZERO {
+            let search_height = (ui::document_search_bar::DOCUMENT_SEARCH_BAR_HEIGHT_LOGICAL * dpi)
+                .min(layout.editor_body_rect.h);
+            layout.editor_body_rect.y += search_height;
+            layout.editor_body_rect.h -= search_height;
+        }
+        layout
     }
 
     pub fn dispatch_action(&mut self, action: NotoraAction) {
+        if matches!(action, NotoraAction::DocumentSearchRequested) {
+            self.open_document_search();
+            return;
+        }
         if self.action_will_leave_title_focus(&action)
             && let Some(title_commit) = self.title_commit_action()
         {
@@ -755,6 +773,7 @@ impl NotoraRuntime {
             let _ = self.update_editor_preedit(String::new(), None);
         }
         self.frame_runtime.synchronize_focus(focus_target, Instant::now());
+        self.synchronize_document_search();
         let ime_allowed = self.frame_runtime.focused_text_input_ime_allowed();
         if let Some(window) = self.document_runtime.editor().window() {
             window.set_ime_allowed(ime_allowed);
@@ -855,6 +874,7 @@ impl NotoraRuntime {
 
     pub(crate) fn set_window_focused(&mut self, focused: bool) {
         self.window_runtime.set_focused(focused, self.document_runtime.editor_mut());
+        self.synchronize_product_focus();
     }
 
     pub(crate) fn set_window_size(&mut self, width: u32, height: u32) {
@@ -1175,6 +1195,9 @@ impl NotoraRuntime {
         &mut self,
         event: &ui::Event,
     ) -> (bool, Option<winit::window::CursorIcon>) {
+        if self.route_document_search_event(event) {
+            return (true, None);
+        }
         let focus_target = self.action_runtime.state().layout.focus_target;
         let product_modal_is_open =
             self.action_runtime.state().layout.overlay != crate::state::OverlayState::None;
@@ -1243,6 +1266,7 @@ impl NotoraRuntime {
     }
 
     fn render_frame(&mut self) -> Result<EditorSurfacePaint, RenderError> {
+        self.synchronize_document_search();
         self.window_runtime.synchronize_window_chrome(self.document_runtime.editor());
         self.window_runtime.mark_frame_rendered();
         let layout = self.shell_layout();
@@ -6008,6 +6032,52 @@ mod tests {
         let tree = textora_markdown::mmf::parser::parse(&snapshot.text)
             .expect("renamed mmap must retain one valid root");
         assert_eq!(tree.root.title, "项目路线图");
+    }
+
+    #[test]
+    fn tab_in_empty_markdown_body_immediately_moves_the_caret() {
+        const TAB_SPACES: &str = "    ";
+        let mut app = app();
+        let (_, tab_id) = install_registered_note(&mut app, "tab-caret.md", "");
+        app.dispatch_action(NotoraAction::FocusRequested(FocusTarget::Editor));
+        let mut shaper = shaping::Shaper::new().expect("Tab caret test requires body fonts");
+        let _ = app
+            .document_runtime
+            .editor_runtime
+            .tab_session_mut(tab_id)
+            .expect("empty body must retain its session")
+            .render_plugin(
+                ui::Rect::new(0.0, 0.0, 800.0, 600.0),
+                &ui::theme::test_theme(),
+                &mut shaper,
+                1.0,
+            );
+        let before = app
+            .document_runtime
+            .editor_runtime
+            .tab_session(tab_id)
+            .and_then(|session| session.query_cursor_screen_rect(0))
+            .expect("empty Markdown body must expose its caret");
+
+        app.handle_editor_key_input(ui::KeyCode::Tab, ui::core::Modifiers::NONE);
+
+        let snapshot = app
+            .document_runtime
+            .editor_runtime
+            .document_text_snapshot(tab_id)
+            .expect("indented body must remain available");
+        assert_eq!(snapshot.text, TAB_SPACES);
+        let session = app
+            .document_runtime
+            .editor_runtime
+            .tab_session(tab_id)
+            .expect("indented body must retain its session");
+        assert_eq!(session.document.cursor_offset().to_usize(), TAB_SPACES.len());
+        let after = session
+            .query_cursor_screen_rect(TAB_SPACES.len())
+            .expect("Tab must expose the updated caret before another paint");
+        assert!(after.0 > before.0, "Tab must immediately advance the visual caret");
+        assert_eq!(after.1, before.1, "Tab must keep the caret on its current row");
     }
 
     #[test]

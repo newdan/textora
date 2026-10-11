@@ -793,6 +793,23 @@ pub(crate) fn add_source_toggle_command(
     );
 }
 
+pub(crate) const DOCUMENT_SEARCH_COMMAND_KEY: &str = "document_search";
+
+pub(crate) fn add_document_search_command(toolbar: &mut ui::editor_toolbar::EditorToolbarInput) {
+    if toolbar.groups.is_empty() {
+        toolbar.groups.push(toolbar_group("查找", &[]));
+    }
+    let Some(group) = toolbar.groups.first_mut() else {
+        return;
+    };
+    group.commands.push(ui::editor_toolbar::EditorToolbarCommandInput {
+        command_key: DOCUMENT_SEARCH_COMMAND_KEY.to_owned(),
+        label: "文内查找".to_owned(),
+        enabled: true,
+        overflow_priority: 0,
+    });
+}
+
 fn history_toolbar_input() -> ui::editor_toolbar::EditorToolbarInput {
     ui::editor_toolbar::EditorToolbarInput {
         groups: vec![toolbar_group("历史", &[("undo", "撤销", 0), ("redo", "重做", 0)])],
@@ -927,6 +944,7 @@ fn editor_command_actions() -> HashMap<String, NotoraAction> {
     .into_iter()
     .map(|(key, command)| (key.to_owned(), NotoraAction::SemanticEditRequested(command)))
     .chain([
+        (DOCUMENT_SEARCH_COMMAND_KEY.to_owned(), NotoraAction::DocumentSearchRequested),
         ("toggle_source".to_owned(), NotoraAction::ToggleSourceViewRequested),
         ("mindmap_style".to_owned(), NotoraAction::ToggleMindmapStylePanelRequested),
     ])
@@ -1296,6 +1314,10 @@ impl NotoraShell {
         self.editor_pane.title_text()
     }
 
+    pub(crate) fn editor_popup_is_open(&self) -> bool {
+        self.editor_pane.has_open_popup()
+    }
+
     pub(crate) fn navigation_toggle_available(&self, overlay: OverlayState) -> bool {
         self.chrome_button_available(ChromeButtonKey::NavigationCollapse, Some(overlay), None)
     }
@@ -1420,7 +1442,7 @@ impl NotoraShell {
             FocusTarget::Editor => {
                 self.encrypted_note_unlock.as_ref().and_then(EncryptedNoteUnlock::ime_cursor_rect)
             }
-            FocusTarget::CardList => None,
+            FocusTarget::CardList | FocusTarget::DocumentSearch => None,
         }
     }
 
@@ -1541,6 +1563,16 @@ impl NotoraShell {
         frame: &mut EditorFrame,
         layout: ShellLayout,
         model: &NotoraRenderModel,
+    ) -> Result<(), RenderError> {
+        self.render_with_document_search(frame, layout, model, None)
+    }
+
+    pub(crate) fn render_with_document_search(
+        &mut self,
+        frame: &mut EditorFrame,
+        layout: ShellLayout,
+        model: &NotoraRenderModel,
+        document_search: Option<&ui::document_search_bar::DocumentSearchBarWidget>,
     ) -> Result<(), RenderError> {
         self.update_model(model);
         let dpi = layout.dpi;
@@ -1783,6 +1815,9 @@ impl NotoraShell {
         }
         frame.with_paint_context(|context| {
             self.paint_canvas_scrollbars(context);
+            if let Some(search_bar) = document_search {
+                search_bar.paint(context);
+            }
             self.editor_pane.paint_overlay(context);
         });
         frame.with_paint_context(|context| {
@@ -2449,6 +2484,7 @@ impl NotoraShell {
             FocusTarget::NavigationTree => self.navigation_tree.on_event(event, event_context),
             FocusTarget::CardList => self.card_list.on_event(event, event_context),
             FocusTarget::Editor
+            | FocusTarget::DocumentSearch
             | FocusTarget::EditorTitle
             | FocusTarget::EditorTag
             | FocusTarget::Overlay => None,
@@ -5570,6 +5606,14 @@ mod tests {
                 .expect("visual toggle should be present")
                 .label,
             "可视化"
+        );
+    }
+
+    #[test]
+    fn document_search_toolbar_action_opens_search_without_editing() {
+        assert_eq!(
+            editor_command_actions().get("document_search"),
+            Some(&NotoraAction::DocumentSearchRequested)
         );
     }
 
