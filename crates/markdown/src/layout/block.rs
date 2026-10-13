@@ -256,14 +256,12 @@ fn layout_block_content(block: &BlockNode, ctx: &mut LayoutCtx) {
 
             let (lines, starts) = if active {
                 let full_text = ctx.doc.doc_text_in_range(block.block_range.clone());
-                let lines_vec: Vec<String> = full_text.split('\n').map(|s| s.to_string()).collect();
-                let mut current = block.block_range.start;
-                let mut st = Vec::new();
-                for l in &lines_vec {
-                    st.push(current);
-                    current += l.len() + 1; // +1 for \n
-                }
-                (lines_vec, Some(st))
+                let (lines, starts) = active_code_source_lines(
+                    &full_text,
+                    block.block_range.start,
+                    !is_fenced_code_block(block, ctx.doc),
+                );
+                (lines, Some(starts))
             } else if let Some(content_start) = empty_fenced_code_content_start(block, ctx.doc) {
                 (vec![String::new()], Some(vec![content_start]))
             } else {
@@ -576,8 +574,11 @@ fn layout_block_content(block: &BlockNode, ctx: &mut LayoutCtx) {
         }
         BlockKind::HorizontalRule => {
             let active = if let Some(edit_ctx) = ctx.edit_ctx {
+                let rule_source = ctx.doc.doc_text_in_range(block.block_range.clone());
+                let marker_end =
+                    block.block_range.start + rule_source.trim_end_matches(['\r', '\n']).len();
                 edit_ctx.cursor_byte >= block.block_range.start
-                    && edit_ctx.cursor_byte <= block.block_range.end
+                    && edit_ctx.cursor_byte <= marker_end
             } else {
                 false
             };
@@ -738,6 +739,50 @@ fn layout_embedded_block(
 
 fn code_block_is_active(block: &BlockNode, edit_ctx: Option<&crate::edit::EditContext>) -> bool {
     code_block_cursor_is_inside(block, edit_ctx)
+}
+
+const INDENTED_CODE_COLUMNS: usize = 4;
+
+fn active_code_source_lines(
+    source: &str,
+    source_start: usize,
+    indented: bool,
+) -> (Vec<String>, Vec<usize>) {
+    let mut lines = Vec::new();
+    let mut starts = Vec::new();
+    let mut line_start = source_start;
+
+    for (line_index, raw_line) in source.split('\n').enumerate() {
+        let line = raw_line.trim_end_matches('\r');
+        let indentation_bytes =
+            if indented && line_index > 0 { indented_code_content_start(line) } else { 0 };
+        lines.push(line[indentation_bytes..].to_owned());
+        starts.push(line_start + indentation_bytes);
+        line_start += raw_line.len() + 1;
+    }
+
+    (lines, starts)
+}
+
+fn indented_code_content_start(line: &str) -> usize {
+    if line.trim_matches([' ', '\t']).is_empty() {
+        return line.len();
+    }
+
+    let mut columns = 0;
+    for (byte, character) in line.char_indices() {
+        let width = match character {
+            ' ' => 1,
+            '\t' => INDENTED_CODE_COLUMNS - columns % INDENTED_CODE_COLUMNS,
+            _ => return byte,
+        };
+        columns += width;
+        if columns >= INDENTED_CODE_COLUMNS {
+            return byte + character.len_utf8();
+        }
+    }
+
+    line.len()
 }
 
 fn code_block_cursor_is_inside(
@@ -3085,6 +3130,27 @@ mod tests {
         assert!(
             layout.ascii_diagrams().diagram_for(lines).is_none(),
             "active code blocks must keep the existing path"
+        );
+    }
+
+    #[test]
+    fn active_indented_code_with_blank_lines_aligns_content() {
+        let source = "    2400w出货, 小米有1.3kw出货量???\n    \n    国际版没上,设备大头是联想.年底有1300w出货.\n    \n    三星国际预装拿下.";
+        let cursor_byte = source.find("2400w").expect("source contains the first code line");
+        let layout = layout_with_cursor_and_width(source, cursor_byte, 800.0);
+        let block = layout.laid_out[0].as_ref().expect("code block must be visible");
+        let LaidOutBlockKind::CodeBlock { lines, .. } = &block.kind else {
+            panic!("source must produce an indented code block");
+        };
+        assert_eq!(
+            lines.iter().map(|line| line.text.as_str()).collect::<Vec<_>>(),
+            [
+                "2400w出货, 小米有1.3kw出货量???",
+                "",
+                "国际版没上,设备大头是联想.年底有1300w出货.",
+                "",
+                "三星国际预装拿下.",
+            ]
         );
     }
 

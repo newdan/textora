@@ -2065,6 +2065,21 @@ mod tests {
     }
 
     #[test]
+    fn one_enter_after_rule_marker_collapses_source_marker() {
+        for source in ["---\n", "before\n\n---\n", "---\r\n"] {
+            let layout = build_editing_layout(source, source.len(), 1);
+            assert!(
+                layout
+                    .laid_out
+                    .iter()
+                    .flatten()
+                    .any(|block| { matches!(block.kind, LaidOutBlockKind::HorizontalRule) }),
+                "one Enter should render the horizontal rule for {source:?}"
+            );
+        }
+    }
+
+    #[test]
     fn active_horizontal_rule_keeps_both_external_paragraph_gaps() {
         let source = "before\n\n---\n\nafter";
         let cursor = source.find("---").expect("fixture contains a rule");

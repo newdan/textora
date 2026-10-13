@@ -8344,8 +8344,7 @@ viebcoding 用过吗?
         let first_code_line_start = source.find("first").expect("fixture has first code line");
         let blank_line_start =
             source.find("first\n\n").expect("fixture has blank line") + "first\n".len();
-        let second_code_line_start =
-            source.find("    second").expect("fixture has second code line");
+        let second_code_line_start = source.find("second").expect("fixture has second code line");
         view.handle_message(PluginMessage::SetCursorByte(first_code_line_start), &mut doc);
         render_editor_once(&mut view, &doc);
 
