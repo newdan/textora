@@ -2716,7 +2716,13 @@ impl NotoraShell {
 
 fn render_cards(state: &NotoraState) -> Vec<RenderCard> {
     if state.library.navigation_scope == NavigationScope::ExternalFiles {
-        return state.external_files.sessions().iter().map(render_external_file_card).collect();
+        return state
+            .external_files
+            .sessions()
+            .iter()
+            .rev()
+            .map(render_external_file_card)
+            .collect();
     }
     let mut cards = match &state.library.card_page {
         CardPageState::Ready { cards, .. }
@@ -5315,6 +5321,28 @@ mod tests {
             )),
             Some(NotoraAction::ExternalFileCloseRequested(external_file_id))
         );
+    }
+
+    #[test]
+    fn newly_opened_and_created_files_appear_at_the_top_of_the_file_list() {
+        let directory = tempfile::tempdir().expect("external file directory should exist");
+        let path = directory.path().join("opened.md");
+        std::fs::write(&path, "# Opened").expect("external file fixture should be written");
+        let canonical_path = crate::external_files::CanonicalExternalPath::canonicalize(&path)
+            .expect("external file fixture should canonicalize");
+        let mut state = NotoraState::default();
+        state.library.navigation_scope = NavigationScope::ExternalFiles;
+        let first = state.external_files.create_untitled(DocumentKind::Text);
+        let opened = state.external_files.open_existing(canonical_path).identity();
+        let newest = state.external_files.create_untitled(DocumentKind::Markdown);
+
+        let identities = NotoraRenderModel::from_state(&state)
+            .cards
+            .iter()
+            .map(|card| card.identity)
+            .collect::<Vec<_>>();
+
+        assert_eq!(identities, vec![newest, opened, first]);
     }
 
     #[test]

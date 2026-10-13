@@ -568,6 +568,7 @@ impl NotoraState {
             }
             NotoraAction::ExternalFileOpened(identity) => {
                 self.transition_navigation_scope(NavigationScope::ExternalFiles);
+                self.library.card_scroll_offset_px = 0.0;
                 let request = self.select_document(identity);
                 self.layout.focus_target = FocusTarget::CardList;
                 vec![NotoraEffect::PrepareDocument(request), NotoraEffect::Redraw]
@@ -2570,6 +2571,20 @@ mod tests {
             state.reduce(NotoraAction::NavigationSelected(NavigationScope::ExternalFiles)),
             vec![NotoraEffect::Redraw]
         );
+    }
+
+    #[test]
+    fn opening_an_external_file_scrolls_the_file_list_to_the_top() {
+        let mut state = NotoraState::default();
+        state.library.navigation_scope = NavigationScope::ExternalFiles;
+        state.library.card_scroll_offset_px = 240.0;
+        let identity = state.external_files.create_untitled(DocumentKind::Markdown);
+
+        let effects = state.reduce(NotoraAction::ExternalFileOpened(identity));
+
+        assert_eq!(state.library.card_scroll_offset_px, 0.0);
+        assert_eq!(state.library.selected_card, Some(identity));
+        assert!(effects.contains(&NotoraEffect::Redraw));
     }
 
     #[test]
