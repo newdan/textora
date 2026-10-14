@@ -11,7 +11,7 @@ use ui::core::{DrawCmd, DrawList, Rect, Screen};
 use crate::render_cache::{CachedLine, GlyphInstance};
 use crate::render_state::{GpuState, TextState};
 
-const ROUNDED_FILL_FEATHER_PX: f32 = 0.5;
+const ROUNDED_EDGE_HALF_WIDTH_PX: f32 = 0.5;
 const CLIPPED_TRIANGLE_AREA_EPSILON: f32 = 1.0e-8;
 const IMAGE_FAILURE_MESSAGE: &str = "图像无法显示，点击编辑源码";
 const IMAGE_FAILURE_SHORT_MESSAGE: &str = "图像无法显示";
@@ -51,10 +51,10 @@ pub fn drain(
                         continue;
                     }
                     let tessellation_bounds = Rect::new(
-                        rect.x - ROUNDED_FILL_FEATHER_PX,
-                        rect.y - ROUNDED_FILL_FEATHER_PX,
-                        rect.w + ROUNDED_FILL_FEATHER_PX * 2.0,
-                        rect.h + ROUNDED_FILL_FEATHER_PX * 2.0,
+                        rect.x - ROUNDED_EDGE_HALF_WIDTH_PX,
+                        rect.y - ROUNDED_EDGE_HALF_WIDTH_PX,
+                        rect.w + ROUNDED_EDGE_HALF_WIDTH_PX * 2.0,
+                        rect.h + ROUNDED_EDGE_HALF_WIDTH_PX * 2.0,
                     );
                     if !intersects_final_clip(tessellation_bounds, &clip_stack) {
                         continue;
@@ -83,7 +83,7 @@ pub fn drain(
                 if radius > 0.0 {
                     if has_non_positive_dimension(rect)
                         || !intersects_final_clip(
-                            rounded_stroke_bounds(rect, line_width),
+                            rounded_stroke_antialias_bounds(rect, line_width),
                             &clip_stack,
                         )
                     {
@@ -561,6 +561,16 @@ fn intersects_final_clip(bounds: Rect, clips: &[Rect]) -> bool {
         && bounds.bottom() > clip.y
 }
 
+fn rounded_stroke_antialias_bounds(rect: Rect, line_width: f32) -> Rect {
+    let bounds = rounded_stroke_bounds(rect, line_width);
+    Rect::new(
+        bounds.x - ROUNDED_EDGE_HALF_WIDTH_PX,
+        bounds.y - ROUNDED_EDGE_HALF_WIDTH_PX,
+        bounds.w + 2.0 * ROUNDED_EDGE_HALF_WIDTH_PX,
+        bounds.h + 2.0 * ROUNDED_EDGE_HALF_WIDTH_PX,
+    )
+}
+
 fn rounded_stroke_bounds(rect: Rect, line_width: f32) -> Rect {
     let horizontal_extension = (line_width - rect.w).max(0.0);
     let vertical_extension = (line_width - rect.h).max(0.0);
@@ -764,10 +774,58 @@ fn interpolate_components(start: [f32; 2], end: [f32; 2], factor: f32) -> [f32; 
     [start[0] + (end[0] - start[0]) * factor, start[1] + (end[1] - start[1]) * factor]
 }
 
-/// 生成填充矩形的 6 个顶点（2 个三角形，NDC 空间）。
+/// Sample matching contours so straight edges and corners share coverage transitions.
+fn rounded_contour(rect: Rect, radius: f32, inset: f32) -> Vec<[f32; 2]> {
+    const SEGMENTS_PER_RADIUS: f32 = 5.0;
+    const MIN_CORNER_SEGMENTS: usize = 8;
+    const MAX_CORNER_SEGMENTS: usize = 64;
+    let radius = radius.min(rect.w * 0.5).min(rect.h * 0.5);
+    let segments = ((radius * SEGMENTS_PER_RADIUS).ceil() as usize)
+        .clamp(MIN_CORNER_SEGMENTS, MAX_CORNER_SEGMENTS);
+    let inset_radius = (radius - inset).max(0.0);
+    let half_pi = std::f32::consts::FRAC_PI_2;
+    let corner_centers = [
+        (rect.right() - inset - inset_radius, rect.y + inset + inset_radius, 0.0),
+        (rect.x + inset + inset_radius, rect.y + inset + inset_radius, half_pi),
+        (rect.x + inset + inset_radius, rect.bottom() - inset - inset_radius, 2.0 * half_pi),
+        (rect.right() - inset - inset_radius, rect.bottom() - inset - inset_radius, 3.0 * half_pi),
+    ];
+    let mut contour = Vec::with_capacity(4 * (segments + 1));
+    for (center_x, center_y, start_angle) in corner_centers {
+        for step in 0..=segments {
+            let angle = start_angle + step as f32 / segments as f32 * half_pi;
+            contour.push([
+                center_x + inset_radius * angle.cos(),
+                center_y - inset_radius * angle.sin(),
+            ]);
+        }
+    }
+    contour
+}
 
-/// Generate rounded rectangle vertices using radial triangles.
-/// Each corner uses `segments` angular steps; higher = smoother.
+fn push_coverage_ring(
+    vertices: &mut Vec<GlyphVertex>,
+    outer: &[[f32; 2]],
+    inner: &[[f32; 2]],
+    color: [f32; 4],
+    coverage: [f32; 2],
+    screen: &Screen,
+) {
+    let vertex = |position: [f32; 2], alpha: f32| GlyphVertex {
+        position: screen.px_to_ndc(position[0], position[1]),
+        tex_coords: [0.0; 2],
+        color: [color[0], color[1], color[2], color[3] * alpha],
+    };
+    for index in 0..outer.len() {
+        let next = (index + 1) % outer.len();
+        let outer_start = vertex(outer[index], coverage[0]);
+        let outer_end = vertex(outer[next], coverage[0]);
+        let inner_start = vertex(inner[index], coverage[1]);
+        let inner_end = vertex(inner[next], coverage[1]);
+        vertices.extend([outer_start, outer_end, inner_start, outer_end, inner_end, inner_start]);
+    }
+}
+
 fn push_fill(
     vertices: &mut Vec<GlyphVertex>,
     rect: Rect,
@@ -775,82 +833,27 @@ fn push_fill(
     radius: f32,
     screen: &Screen,
 ) {
-    let r = radius.min(rect.w * 0.5).min(rect.h * 0.5);
-    if r <= 0.0 {
-        let ndc = screen.rect_to_ndc(rect);
-        push_quad(vertices, ndc, color);
+    if radius <= 0.0 {
+        push_quad(vertices, screen.rect_to_ndc(rect), color);
         return;
     }
-    let segments = ((r * 5.0).ceil() as usize).clamp(8, 64);
-    let n = segments.max(1);
-    let nf = n as f32;
-    let half_pi = std::f32::consts::FRAC_PI_2;
-
-    let x0 = rect.x;
-    let y0 = rect.y;
-    let x1 = rect.x + rect.w;
-    let y1 = rect.y + rect.h;
-    let sw = screen.w;
-    let sh = screen.h;
-
-    // Center rectangle (fill) covers the entire height from top to bottom
-    let center_ndc = screen.rect_to_ndc(Rect::new(x0 + r, y0, rect.w - 2.0 * r, rect.h));
-    push_quad(vertices, center_ndc, color);
-    // Left edge
-    let left_ndc = screen.rect_to_ndc(Rect::new(x0, y0 + r, r, rect.h - 2.0 * r));
-    push_quad(vertices, left_ndc, color);
-    // Right edge
-    let right_ndc = screen.rect_to_ndc(Rect::new(x1 - r, y0 + r, r, rect.h - 2.0 * r));
-    push_quad(vertices, right_ndc, color);
-
-    // Corner wedges (TL, TR, BL, BR) with soft-edge feathering
-    let corners: [(f32, f32, f32); 4] = [
-        (x0 + r, y0 + r, half_pi),              // TL: top→left
-        (x1 - r, y0 + r, 0.0),                  // TR: right→top
-        (x0 + r, y1 - r, std::f32::consts::PI), // BL: left→bottom
-        (x1 - r, y1 - r, 3.0 * half_pi),        // BR: bottom→right
-    ];
-    let feather_r = r + ROUNDED_FILL_FEATHER_PX;
-    let mut color_alpha0 = color;
-    color_alpha0[3] = 0.0;
-
-    for (cx, cy, start_angle) in corners {
-        let _c = corner_vertex(cx, cy, color, screen, None);
-        for i in 0..n {
-            let a = start_angle + (i as f32) / nf * half_pi;
-            let b = start_angle + ((i + 1) as f32) / nf * half_pi;
-            let ax = cx + r * a.cos();
-            let ay = cy - r * a.sin();
-            let bx = cx + r * b.cos();
-            let by = cy - r * b.sin();
-            // Feather outer edge points (alpha → 0 at feather_r)
-            let fax = cx + feather_r * a.cos();
-            let fay = cy - feather_r * a.sin();
-            let fbx = cx + feather_r * b.cos();
-            let fby = cy - feather_r * b.sin();
-            let p = |x: f32, y: f32| GlyphVertex {
-                position: [x / sw * 2.0 - 1.0, 1.0 - y / sh * 2.0],
-                tex_coords: [0.0, 0.0],
-                color,
-            };
-            let pf = |x: f32, y: f32| GlyphVertex {
-                position: [x / sw * 2.0 - 1.0, 1.0 - y / sh * 2.0],
-                tex_coords: [0.0, 0.0],
-                color: color_alpha0,
-            };
-            // Solid inner triangle
-            vertices.push(p(cx, cy));
-            vertices.push(p(bx, by));
-            vertices.push(p(ax, ay));
-            // Feather ring: inner edge (full alpha) → outer edge (alpha=0)
-            vertices.push(p(bx, by));
-            vertices.push(pf(fbx, fby));
-            vertices.push(pf(fax, fay));
-            vertices.push(p(bx, by));
-            vertices.push(pf(fax, fay));
-            vertices.push(p(ax, ay));
-        }
+    let feather = ROUNDED_EDGE_HALF_WIDTH_PX.min(rect.w * 0.5).min(rect.h * 0.5);
+    let outer = rounded_contour(rect, radius, -feather);
+    let inner = rounded_contour(rect, radius, feather);
+    let center = GlyphVertex {
+        position: screen.px_to_ndc(rect.x + rect.w * 0.5, rect.y + rect.h * 0.5),
+        tex_coords: [0.0; 2],
+        color,
+    };
+    for index in 0..inner.len() {
+        let vertex = |position: [f32; 2]| GlyphVertex {
+            position: screen.px_to_ndc(position[0], position[1]),
+            tex_coords: [0.0; 2],
+            color,
+        };
+        vertices.extend([center, vertex(inner[index]), vertex(inner[(index + 1) % inner.len()])]);
     }
+    push_coverage_ring(vertices, &outer, &inner, color, [0.0, 1.0], screen);
 }
 
 /// 绘制圆角矩形的描边轮廓。
@@ -877,6 +880,18 @@ fn push_stroke(
         push_quad(vertices, ndc, color);
         let ndc = screen.rect_to_ndc(Rect::new(x1 - lw, y0 + lw, lw, rect.h - 2.0 * lw));
         push_quad(vertices, ndc, color);
+        return;
+    }
+
+    if line_width < rect.w.min(rect.h) * 0.5 {
+        let feather = ROUNDED_EDGE_HALF_WIDTH_PX.min(line_width * 0.5);
+        let outer = rounded_contour(rect, r, -feather);
+        let outer_solid = rounded_contour(rect, r, feather);
+        let inner_solid = rounded_contour(rect, r, line_width - feather);
+        let inner = rounded_contour(rect, r, line_width + feather);
+        push_coverage_ring(vertices, &outer, &outer_solid, color, [0.0, 1.0], screen);
+        push_coverage_ring(vertices, &outer_solid, &inner_solid, color, [1.0, 1.0], screen);
+        push_coverage_ring(vertices, &inner_solid, &inner, color, [1.0, 0.0], screen);
         return;
     }
 
@@ -943,18 +958,6 @@ fn push_stroke(
     }
 }
 
-fn corner_vertex(
-    x_px: f32,
-    y_px: f32,
-    color: [f32; 4],
-    screen: &Screen,
-    _clip: Option<[f32; 4]>,
-) -> GlyphVertex {
-    let l = x_px / screen.w * 2.0 - 1.0;
-    let t = 1.0 - y_px / screen.h * 2.0;
-    GlyphVertex { position: [l, t], tex_coords: [0.0, 0.0], color }
-}
-
 fn push_quad(v: &mut Vec<GlyphVertex>, ndc: [f32; 4], color: [f32; 4]) {
     let [left, right, top, bottom] = ndc;
     let tl = [left, top];
@@ -975,6 +978,45 @@ fn push_quad(v: &mut Vec<GlyphVertex>, ndc: [f32; 4], color: [f32; 4]) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn rounded_stroke_has_transparent_antialias_edges() {
+        let mut vertices = Vec::new();
+        push_stroke(
+            &mut vertices,
+            Rect::new(20.0, 20.0, 72.0, 40.0),
+            [1.0; 4],
+            20.0,
+            2.0,
+            &Screen::new(200.0, 200.0),
+        );
+        assert!(
+            vertices.iter().any(|vertex| vertex.color[3] == 0.0),
+            "rounded borders need coverage transitions instead of hard triangle edges"
+        );
+    }
+
+    #[test]
+    fn rounded_fill_feathers_straight_edges() {
+        let mut vertices = Vec::new();
+        let screen = Screen::new(200.0, 200.0);
+        push_fill(&mut vertices, Rect::new(20.0, 20.0, 100.0, 40.0), [1.0; 4], 10.0, &screen);
+        let top_middle = screen.px_to_ndc(30.0, 19.5);
+        assert!(
+            vertices.iter().any(|vertex| vertex.color[3] == 0.0
+                && (vertex.position[0] - top_middle[0]).abs() < 0.0001
+                && (vertex.position[1] - top_middle[1]).abs() < 0.0001),
+            "straight edges must join the corner coverage transition"
+        );
+        let solid_top = screen.px_to_ndc(30.0, 20.5)[1];
+        assert!(
+            vertices
+                .iter()
+                .filter(|vertex| vertex.color[3] > 0.0)
+                .all(|vertex| vertex.position[1] <= solid_top + f32::EPSILON),
+            "full coverage must start half a pixel inside the outline"
+        );
+    }
 
     #[test]
     fn image_failure_draw_list_explains_how_to_reach_source() {
