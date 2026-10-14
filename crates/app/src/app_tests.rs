@@ -3967,6 +3967,36 @@ fn wysiwyg_paragraph_end_enter_then_typing_inserts_at_new_paragraph_start() {
 
 #[test]
 #[cfg(feature = "markdown")]
+fn wysiwyg_enter_after_horizontal_rule_places_cursor_in_paragraph_below() {
+    let source = "---";
+    let mut app = App::new(None);
+    let mut document = DocumentView::new(vec![source.to_owned()], 80, 10.0);
+    document.cursor_move_to_offset(source.len());
+    app.push_entry_for_test(document, Box::new(textora_markdown::view::MarkdownEditorView::new()));
+    app.switch_workspace_for_test(0);
+    app.sync_plugin_state();
+    render_active_wysiwyg_plugin_for_test(&mut app);
+    let rule_cursor_y = app
+        .active_tab_session()
+        .expect("active Markdown editor")
+        .query_cursor_screen_rect(source.len())
+        .expect("horizontal rule cursor rect")
+        .1;
+
+    assert!(app.dispatch_transactional_edit_for_test(EditCommand::InsertNewline).redraw);
+    app.sync_plugin_state();
+    render_active_wysiwyg_plugin_for_test(&mut app);
+
+    let tab = app.active_tab_session().expect("active Markdown editor");
+    assert_eq!(tab.full_text(), "---\n\n");
+    assert_eq!(tab.cursor_offset().to_usize(), "---\n\n".len());
+    let paragraph_cursor_y =
+        tab.query_cursor_screen_rect("---\n\n".len()).expect("paragraph cursor rect").1;
+    assert!(paragraph_cursor_y > rule_cursor_y);
+}
+
+#[test]
+#[cfg(feature = "markdown")]
 fn wysiwyg_paragraph_end_before_existing_newline_typing_stays_in_new_paragraph() {
     let source = "hello\n";
     let paragraph_end = "hello".len();

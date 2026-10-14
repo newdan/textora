@@ -82,6 +82,7 @@ fn augment_line_break(source: &str, current_byte: usize) -> EditAugmentation {
         }
         EnterContext::CodeBlock
         | EnterContext::CodeBlockFenceLine { .. }
+        | EnterContext::HorizontalRuleEnd
         | EnterContext::EmptyBlockSeparatorLine
         | EnterContext::Other => {
             return emit_source_newline(source, current_byte);
@@ -1657,6 +1658,7 @@ fn enter_context_augmentation(
             }
         }
         EnterContext::EmptyBlockSeparatorLine => Some(emit_source_newline(source, current_byte)),
+        EnterContext::HorizontalRuleEnd => Some(emit_block_break(source, current_byte)),
         EnterContext::IndentedCodeBlock { continuation_prefix } => {
             Some(indented_code_block_enter_augmentation(source, current_byte, &continuation_prefix))
         }
@@ -2286,6 +2288,7 @@ pub enum EnterContext {
         container_prefix: String,
     },
     EmptyBlockSeparatorLine,
+    HorizontalRuleEnd,
     Other,
 }
 
@@ -3008,6 +3011,14 @@ pub fn classify_enter_context(source: &str, current_byte: usize) -> EnterContext
                     }
                     return EnterContext::ParagraphInterior;
                 }
+            }
+            Event::Rule
+                if item_stack.is_empty()
+                    && blockquote_depth == 0
+                    && current_byte
+                        == content_end_without_trailing_newline(source, range.clone()) =>
+            {
+                return EnterContext::HorizontalRuleEnd;
             }
             Event::Start(Tag::CodeBlock(kind)) => {
                 mark_item_content_seen(&mut item_stack);
@@ -4294,6 +4305,19 @@ mod tests {
                 Some("\n- [ ] "),
                 "continued task marker must remain valid for {source:?}"
             );
+        }
+    }
+
+    #[test]
+    fn enter_after_top_level_horizontal_rule_creates_editable_paragraph() {
+        for source in ["---", "***", "___", "before\n\n---", "---\n"] {
+            let rule_end = source.rfind(['-', '*', '_']).expect("fixture has a rule") + 1;
+            let augmentation = augment_edit(source, rule_end, AugmentKind::Enter)
+                .expect("Enter after a horizontal rule must create a paragraph");
+            let edited_source = apply_augmentation_at(source, rule_end, &augmentation);
+
+            assert_eq!(augmentation.cursor_byte_after, rule_end + 2, "{source:?}");
+            assert_eq!(&edited_source[rule_end..rule_end + 2], "\n\n", "{source:?}");
         }
     }
 
