@@ -376,8 +376,16 @@ impl App {
                 let monitor_reported_change =
                     self.library_file_monitor.as_ref().is_some_and(|monitor| {
                         let mut reported = false;
-                        while let Some(batch) = monitor.try_recv() {
-                            reported |= !batch.paths.is_empty();
+                        while let Some(event) = monitor.try_recv() {
+                            use crate::library_file_monitor::MonitorEvent;
+                            match event {
+                                MonitorEvent::PathsChanged(paths) => reported |= !paths.is_empty(),
+                                MonitorEvent::RootsUpdated => reported = true,
+                                MonitorEvent::Failed(error) => {
+                                    eprintln!("[file-monitor] {error}");
+                                    reported = true;
+                                }
+                            }
                         }
                         reported
                     });
@@ -1043,8 +1051,13 @@ impl App {
                 self.file_safety_notices
                     .push(crate::file_safety::FileSafetyNotice::CleanDocumentReloaded { path });
             }
-            Ok(crate::file_safety::FileSafetyOutcome::Conflict { conflict, content, .. }) => {
-                self.update_editor_document_path(tab_id, conflict.clone(), None);
+            Ok(crate::file_safety::FileSafetyOutcome::Conflict {
+                conflict,
+                conflict_revision,
+                content,
+                ..
+            }) => {
+                self.update_editor_document_path(tab_id, conflict.clone(), Some(conflict_revision));
                 self.editor_runtime.forget_file_safety_tab(tab_id);
                 self.file_safety_notices.push(
                     crate::file_safety::FileSafetyNotice::ConflictCopyCreated {
@@ -1296,6 +1309,7 @@ mod file_safety_race_tests {
         let path = directory.path().join("notes.md");
         let conflict = directory.path().join("notes.textora-conflict.md");
         fs::write(&path, "remote").expect("file should be written");
+        fs::write(&conflict, "stale local snapshot").expect("conflict snapshot should exist");
         let revision = capture_revision(&path).expect("revision should capture");
 
         let mut document = DocumentView::new(vec!["latest local edit".to_owned()], 10, 10.0);
@@ -1313,6 +1327,8 @@ mod file_safety_race_tests {
             0,
             Ok(FileSafetyOutcome::Conflict {
                 conflict: conflict.clone(),
+                conflict_revision: capture_revision(&conflict)
+                    .expect("conflict revision should capture"),
                 content: "remote".to_owned(),
                 revision,
             }),
@@ -1371,6 +1387,56 @@ mod file_safety_race_tests {
         assert_eq!(
             app.editor_tab_ids_in_order().into_iter().collect::<std::collections::HashSet<_>>(),
             app.editor_runtime_tab_ids()
+        );
+    }
+
+    #[test]
+    fn conflict_copy_can_be_edited_and_saved_without_overwriting_external_changes() {
+        let directory = tempfile::tempdir().expect("conflict save fixture directory");
+        let path = directory.path().join("notes.md");
+        fs::write(&path, "baseline").expect("write conflict baseline");
+        let mut monitor = crate::file_safety::FileSafetyMonitor::new();
+        monitor.track(&path).expect("track conflict baseline");
+        let mut document = DocumentView::from_file(&path, 10, 10.0).expect("load conflict fixture");
+        document.insert_at_cursor(b"local ");
+        let content_revision = document.content_revision();
+        let local = document.full_text();
+        let mut app = App::new(None);
+        let tab_id = app.push_entry_for_test(document, Box::new(EditorPlugin::new()));
+        fs::write(&path, "remote").expect("write actual external change");
+        let outcome =
+            monitor.observe(&path, true, &local, "test").expect("detect external conflict");
+        app.apply_file_safety_outcome(tab_id, path.clone(), true, content_revision, Ok(outcome));
+        let conflict_path = app
+            .tab_session(tab_id)
+            .expect("conflict tab")
+            .document
+            .file_path
+            .clone()
+            .expect("conflict path");
+        assert_ne!(conflict_path, path);
+        app.tab_session_mut(tab_id).expect("conflict tab").document.insert_at_cursor(b"later ");
+        let prepared = app.editor_runtime.prepare_save(tab_id).expect("prepare conflict copy save");
+        let completion = appkit_shell::editor_runtime::execute_prepared_save(prepared);
+        assert!(
+            completion.result.is_ok(),
+            "the conflict copy needs its own disk baseline: {:?}",
+            completion.result
+        );
+        let _ = app.editor_runtime.apply_save_completion(completion);
+        assert_eq!(fs::read_to_string(&path).expect("original external file"), "remote");
+        assert!(fs::read_to_string(&conflict_path).expect("saved conflict file").contains("later"));
+        let prepared =
+            app.editor_runtime.prepare_save(tab_id).expect("prepare second conflict save");
+        fs::write(&conflict_path, "second remote").expect("externally change the conflict copy");
+        let completion = appkit_shell::editor_runtime::execute_prepared_save(prepared);
+        assert!(matches!(
+            completion.result,
+            Err(appkit_core::document::DocumentSaveError::ConcurrentModification)
+        ));
+        assert_eq!(
+            fs::read_to_string(conflict_path).expect("changed conflict file"),
+            "second remote"
         );
     }
 }
@@ -2070,7 +2136,11 @@ mod tests {
             .iter()
             .rev()
             .find_map(|command| match command {
-                DrawCmd::FillRect { rect, radius, .. } if *radius == 3.0 => Some(*rect),
+                DrawCmd::FillRect { rect, radius, .. }
+                    if *radius == theme.control_metrics().corner_radius_logical =>
+                {
+                    Some(*rect)
+                }
                 _ => None,
             })
             .expect("expected text box background before its text");

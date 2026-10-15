@@ -5,13 +5,13 @@ use crate::buffer::history::{
 use crate::buffer::text_buffer::{CursorMovement, MoveLineDirection, TextBuffer};
 use crate::cell::SemiRefCell;
 use crate::helpers::CoordType;
-use crate::simd::{self, memchr2};
+use crate::simd::memchr2;
 use crate::types::{ByteIndex, LogicalPoint};
-use crate::unicode::{self, Cursor};
+use crate::unicode::Cursor;
 use std::mem;
 use stdext::arena::scratch_arena;
 use stdext::collections::BString;
-use stdext::{ReplaceRange, minmax, slice_copy_safe};
+use stdext::{ReplaceRange, minmax};
 
 pub(crate) const MARGIN_TEMPLATE: &str = "                                                                                                    ";
 pub(crate) const TAB_WHITESPACE: &str = MARGIN_TEMPLATE;
@@ -771,41 +771,10 @@ impl TextBuffer {
                 // Delete the inserted portion.
                 self.buffer.allocate_gap(cursor.offset.to_usize(), 0, change.deleted.len());
 
-                // Reinsert the deleted portion.
-                {
-                    let added = &change.added[..];
-                    let mut beg = 0;
-                    let mut offset = cursor.offset.to_usize();
-
-                    while beg < added.len() {
-                        let (end, line) = simd::lines_fwd(added, beg, 0, 1);
-                        let has_newline = line != 0;
-                        let link = &added[beg..end];
-                        let line = unicode::strip_newline(link);
-                        let mut written;
-
-                        {
-                            let gap = self.buffer.allocate_gap(offset, line.len() + 2, 0);
-                            written = slice_copy_safe(gap, line);
-
-                            if has_newline {
-                                if self.newlines_are_crlf && written < gap.len() {
-                                    gap[written] = b'\r';
-                                    written += 1;
-                                }
-                                if written < gap.len() {
-                                    gap[written] = b'\n';
-                                    written += 1;
-                                }
-                            }
-
-                            self.buffer.commit_gap(written);
-                        }
-
-                        beg = end;
-                        offset += written;
-                    }
-                }
+                // History contains the exact bytes written or deleted. Reformatting
+                // these bytes would corrupt mixed endings and literal carriage returns.
+                self.buffer
+                    .replace(cursor.offset.to_usize()..cursor.offset.to_usize(), &change.added);
 
                 // Restore the previous line statistics.
                 mem::swap(&mut self.stats, &mut change.stats_before);

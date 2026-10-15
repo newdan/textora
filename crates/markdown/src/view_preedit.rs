@@ -38,7 +38,12 @@ impl<S: BlockSource> PreviewEngine<S> {
             self.clear_replacement_preedit();
             return;
         };
-        let selection = self.byte_selection_range().map(|(start, end)| start..end);
+        let selection = self.byte_selection_range().map(|(start, end)| start..end).or_else(|| {
+            self.lazy
+                .as_ref()
+                .filter(|layout| cursor_in_code_block(layout.source.blocks(), context.cursor_byte))
+                .map(|_| context.cursor_byte..context.cursor_byte)
+        });
         let Some(selection) = selection else {
             self.clear_replacement_preedit();
             return;
@@ -133,6 +138,7 @@ fn draw_replacement_underline(
     theme: &Theme,
     dpi_scale: f32,
 ) {
+    let mut underline = DrawList::new();
     let composing_range =
         composition.selection.start..composition.selection.start + composition.inserted_len;
     let thickness = dpi_scale;
@@ -150,7 +156,7 @@ fn draw_replacement_underline(
         let (Some(first), Some(last)) = (covered.first(), covered.last()) else { continue };
         let left = crate::layout::grapheme_x(line, *first);
         let right = crate::layout::grapheme_x(line, last + 1);
-        commands.fill(
+        underline.fill(
             ui::Rect::new(
                 bounds.x + line.rect.x + left,
                 bounds.y + line.rect.y + line.font_size - composition.engine.scroll_y,
@@ -160,6 +166,16 @@ fn draw_replacement_underline(
             theme.editor.foreground,
         );
     }
+    commands.cmds.extend(composition.engine.clip_code_highlights(underline).cmds);
+}
+
+fn cursor_in_code_block(blocks: &[crate::builder::BlockNode], cursor: usize) -> bool {
+    blocks.iter().any(|block| {
+        block.block_range.start <= cursor
+            && cursor <= block.block_range.end
+            && (matches!(block.kind, crate::builder::BlockKind::CodeBlock { .. })
+                || cursor_in_code_block(&block.children, cursor))
+    })
 }
 
 fn render_engine(

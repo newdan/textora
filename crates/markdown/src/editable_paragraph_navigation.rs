@@ -178,18 +178,24 @@ pub(super) fn backspace_boundary(source: &str, current_byte: usize) -> Option<Ed
         return None;
     }
     let document = parse_structure(source);
-    if !has_text_boundary(&document.blocks, current_byte, Boundary::Start) {
+    if !has_editable_boundary(&document.blocks, source, current_byte, Boundary::Start) {
         return None;
     }
     let paragraphs = EditableParagraphMap::from_blocks(&document.blocks, source);
     let run = paragraphs
         .runs()
         .iter()
-        .find(|run| run.lines.last().is_some_and(|line| line.newline_range.end == line_start))?;
+        .find(|run| run.lines.last().is_some_and(|line| line.newline_range.end == line_start));
+    let Some(run) = run else {
+        return protect_atomic_boundary(&document.blocks, source, current_byte, Boundary::Start);
+    };
     if let Some(augmentation) = cross_owner_deletion(source, &document, run, current_byte) {
         return Some(augmentation);
     }
-    let line = run.lines.get(run.hidden_separator_count..)?.last()?;
+    let Some(line) = run.lines.get(run.hidden_separator_count..).and_then(|lines| lines.last())
+    else {
+        return protect_atomic_boundary(&document.blocks, source, current_byte, Boundary::Start);
+    };
     let deletion = container_start_deletion_range(source, run, line)
         .or_else(|| line_deletion_range(source, line))?;
     let cursor = current_byte.checked_sub(deletion.len())?;
@@ -211,15 +217,20 @@ pub(super) fn delete_forward(source: &str, current_byte: usize) -> Option<EditAu
     if let Some((run, index)) = line_at(&paragraphs, current_byte) {
         return delete_from_empty_paragraph(source, &document, run, index);
     }
-    if !has_text_boundary(&document.blocks, current_byte, Boundary::End) {
+    if !has_editable_boundary(&document.blocks, source, current_byte, Boundary::End) {
         return None;
     }
     let next_line_start = source.get(content_end..)?.find('\n')? + content_end + 1;
     let run = paragraphs.runs().iter().find(|run| {
         run.lines.first().is_some_and(|line| line.source_range.start == next_line_start)
-    })?;
-    let editable = run.lines.get(run.hidden_separator_count..)?;
-    let first = editable.first()?;
+    });
+    let Some(run) = run else {
+        return protect_atomic_boundary(&document.blocks, source, current_byte, Boundary::End);
+    };
+    let editable = run.lines.get(run.hidden_separator_count..).unwrap_or_default();
+    let Some(first) = editable.first() else {
+        return protect_atomic_boundary(&document.blocks, source, current_byte, Boundary::End);
+    };
     if let Some(augmentation) = cross_owner_deletion(source, &document, run, current_byte) {
         return Some(augmentation);
     }
@@ -355,6 +366,52 @@ fn cross_owner_deletion(
     };
     debug_assert_augmentation(&augmentation, source);
     Some(augmentation)
+}
+
+fn has_editable_boundary(
+    blocks: &[crate::builder::BlockNode],
+    source: &str,
+    cursor: usize,
+    boundary: Boundary,
+) -> bool {
+    has_text_boundary(blocks, cursor, boundary)
+        || has_atomic_boundary(blocks, source, cursor, boundary)
+}
+
+fn protect_atomic_boundary(
+    blocks: &[crate::builder::BlockNode],
+    source: &str,
+    cursor: usize,
+    boundary: Boundary,
+) -> Option<EditAugmentation> {
+    has_atomic_boundary(blocks, source, cursor, boundary).then(|| EditAugmentation {
+        replace_range: None,
+        insert_text: Some(String::new()),
+        cursor_byte_after: cursor,
+    })
+}
+
+fn has_atomic_boundary(
+    blocks: &[crate::builder::BlockNode],
+    source: &str,
+    cursor: usize,
+    boundary: Boundary,
+) -> bool {
+    blocks.iter().any(|block| {
+        use crate::builder::BlockKind;
+        let atomic_boundary =
+            matches!(block.kind, BlockKind::HorizontalRule | BlockKind::CodeBlock { .. })
+                && match boundary {
+                    Boundary::Start => block.block_range.start == cursor,
+                    Boundary::End => {
+                        super::content_end_without_trailing_newline(
+                            source,
+                            block.block_range.clone(),
+                        ) == cursor
+                    }
+                };
+        atomic_boundary || has_atomic_boundary(&block.children, source, cursor, boundary)
+    })
 }
 
 pub(super) fn has_text_boundary(

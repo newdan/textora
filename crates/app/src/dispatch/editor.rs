@@ -465,22 +465,7 @@ impl App {
             }
             EditCommand::ToggleSidebarPin => return effect,
             EditCommand::ToggleView => {
-                self.switch_active_plugin();
-                let h = self.screen_height();
-                let visible_rows = self.visible_rows(h);
-                let viewport_height = self.visible_height_lines(h);
-                if let Some(mut tab) = self.active_tab_session_mut() {
-                    tab.resize_presentation(visible_rows, viewport_height);
-                }
-                if let Some(active_index) = self.active_editor_index() {
-                    self.init_display_map(active_index);
-                }
-                if let Some(mut tab) = self.active_tab_session_mut() {
-                    tab.clear_advance_cache();
-                }
-                self.editor_runtime.clear_frame_cluster_pool();
-                effect = effect.merge(AppEffect::REDRAW);
-                return effect;
+                return effect.merge(self.toggle_editor_view());
             }
             EditCommand::ToggleToc => {
                 if self.toggle_active_toc() {
@@ -739,9 +724,30 @@ impl App {
         let allows_editing = self.active_allows_editing();
         if allows_editing {
             self.sync_plugin_state();
+            self.ensure_wysiwyg_cursor_visible();
         }
 
         editor_outcome.shell_effect
+    }
+
+    pub(crate) fn toggle_editor_view(&mut self) -> AppEffect {
+        self.switch_active_plugin();
+        let height = self.screen_height();
+        let visible_rows = self.visible_rows(height);
+        let viewport_height = self.visible_height_lines(height);
+        if let Some(mut tab) = self.active_tab_session_mut() {
+            tab.resize_presentation(visible_rows, viewport_height);
+        }
+        if let Some(active_index) = self.active_editor_index() {
+            self.init_display_map(active_index);
+        }
+        if let Some(mut tab) = self.active_tab_session_mut() {
+            tab.clear_advance_cache();
+        }
+        self.editor_runtime.clear_frame_cluster_pool();
+        self.sync_plugin_state();
+        self.ensure_wysiwyg_cursor_visible();
+        AppEffect::REDRAW
     }
 
     pub(crate) fn dispatch_transactional_edit(
@@ -780,6 +786,9 @@ impl App {
         };
         let outcome_result =
             crate::edit_transaction::execute_edit_plan(resolved_plan, tab.document);
+        let should_reveal_cursor = outcome_result
+            .as_ref()
+            .is_ok_and(|outcome| outcome.edit_outcome.executed || outcome.cursor_moved);
 
         let mut current_content_revision = previous_content_revision;
         let mut current_dirty = previous_dirty;
@@ -841,6 +850,10 @@ impl App {
         }
 
         self.sync_plugin_state();
+
+        if should_reveal_cursor {
+            self.ensure_wysiwyg_cursor_visible();
+        }
 
         let editor_outcome = editor_edit_outcome(
             tab_id,
@@ -1632,5 +1645,206 @@ mod edit_tests {
 
         assert_eq!(app.dispatch_keyboard_tab_switch(&EditCommand::NextTab), AppEffect::NONE);
         assert_eq!(app.dispatch_keyboard_tab_switch(&EditCommand::PrevTab), AppEffect::NONE);
+    }
+
+    #[cfg(feature = "markdown")]
+    #[test]
+    fn editing_boundary_audit_undo_redo_restores_exact_source_and_cursor() {
+        for newline in ["\n", "\r\n"] {
+            for before in ["前段", "---", "```\ncode\n```", "# 标题", "> 引用", "- 条目"] {
+                for after in ["后段", "---", "```\ncode\n```"] {
+                    let before = before.replace('\n', newline);
+                    let source =
+                        format!("{before}{}{}", newline.repeat(3), after.replace('\n', newline));
+                    for cursor in [before.len(), source.len() - after.replace('\n', newline).len()]
+                    {
+                        for command in [
+                            EditCommand::InsertNewline,
+                            EditCommand::Backspace,
+                            EditCommand::InsertText("新".into()),
+                        ] {
+                            let mut app = app_with_editing_audit_document(&source);
+                            app.active_tab_session_mut()
+                                .expect("audit tab must exist")
+                                .document
+                                .cursor_move_to_offset(cursor);
+                            assert_editing_audit_history(&mut app, command);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    #[cfg(feature = "markdown")]
+    #[test]
+    fn editing_boundary_audit_undo_redo_restores_selections_and_clears_redo_branch() {
+        let mut checked = 0;
+        for newline in ["\n", "\r\n"] {
+            for before in ["前👩🏽‍💻", "---", "```rust\n# literal\n```"] {
+                for after in ["后e\u{301}", "---", "~~~\ncode\n~~~"] {
+                    let before = before.replace('\n', newline);
+                    let source =
+                        format!("{before}{}{}", newline.repeat(3), after.replace('\n', newline));
+                    for (start, end) in
+                        [(0, source.len()), (0, before.len()), (before.len(), source.len())]
+                    {
+                        for (anchor, cursor) in [(start, end), (end, start)] {
+                            for command in [
+                                EditCommand::Backspace,
+                                EditCommand::DeleteForward,
+                                EditCommand::InsertNewline,
+                                EditCommand::InsertText("新\n\n---\n\n```\n文\n```".into()),
+                            ] {
+                                let mut app = app_with_editing_audit_document(&source);
+                                set_active_selection(&mut app, anchor, cursor);
+                                let before = (
+                                    active_text(&app),
+                                    active_cursor(&app),
+                                    active_selection(&app),
+                                );
+                                app.dispatch_transactional_edit_for_test(command);
+                                let after = (
+                                    active_text(&app),
+                                    active_cursor(&app),
+                                    active_selection(&app),
+                                );
+                                dispatch_undo(&mut app);
+                                assert_eq!(
+                                    (
+                                        active_text(&app),
+                                        active_cursor(&app),
+                                        active_selection(&app)
+                                    ),
+                                    before
+                                );
+                                dispatch_redo(&mut app);
+                                assert_eq!(
+                                    (
+                                        active_text(&app),
+                                        active_cursor(&app),
+                                        active_selection(&app)
+                                    ),
+                                    after
+                                );
+                                dispatch_undo(&mut app);
+                                app.dispatch_transactional_edit_for_test(EditCommand::InsertText(
+                                    "分支".into(),
+                                ));
+                                let branch = (active_text(&app), active_cursor(&app));
+                                dispatch_redo(&mut app);
+                                assert_eq!(
+                                    (active_text(&app), active_cursor(&app)),
+                                    branch,
+                                    "new edit must invalidate redo"
+                                );
+                                checked += 1;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        println!("checked {checked} selection/history branches");
+    }
+
+    #[cfg(feature = "markdown")]
+    #[test]
+    fn editing_boundary_audit_undo_redo_consumed_keys_do_not_add_history() {
+        for newline in ["\n", "\r\n"] {
+            let source = format!("---{newline}after");
+            let mut app = app_with_editing_audit_document(&source);
+            app.active_tab_session_mut()
+                .expect("audit document exists")
+                .document
+                .cursor_move_to_offset(source.len());
+            app.dispatch_transactional_edit_for_test(EditCommand::InsertText("新".into()));
+            app.active_tab_session_mut()
+                .expect("audit document exists")
+                .document
+                .cursor_move_to_offset("---".len());
+            for _ in 0..3 {
+                app.dispatch_transactional_edit_for_test(EditCommand::DeleteForward);
+            }
+            assert_eq!(active_text(&app), format!("{source}新"));
+            dispatch_undo(&mut app);
+            assert_eq!((active_text(&app), active_cursor(&app)), (source.clone(), source.len()));
+            dispatch_redo(&mut app);
+            assert_eq!(active_text(&app), format!("{source}新"));
+        }
+    }
+
+    #[cfg(feature = "markdown")]
+    fn assert_editing_audit_history(app: &mut App, command: EditCommand) {
+        let before = (active_text(app), active_cursor(app));
+        app.dispatch_transactional_edit_for_test(command);
+        let after = (active_text(app), active_cursor(app));
+        if before == after {
+            return;
+        }
+        dispatch_undo(app);
+        assert_eq!(
+            (active_text(app), active_cursor(app)),
+            before,
+            "Undo must restore the exact source and cursor"
+        );
+        dispatch_redo(app);
+        assert_eq!(
+            (active_text(app), active_cursor(app)),
+            after,
+            "Redo must restore the exact edited state"
+        );
+    }
+
+    #[cfg(feature = "markdown")]
+    fn app_with_editing_audit_document(source: &str) -> App {
+        let directory = tempfile::tempdir().expect("loaded editing audit uses disposable files");
+        let path = directory.path().join("audit.md");
+        std::fs::write(&path, source)
+            .expect("editing audit source must write without normalization");
+        let mut document = DocumentView::from_file(&path, 40, 40.0)
+            .expect("editing audit must use production loading");
+        document.file_path = None;
+        assert_eq!(document.full_text(), source);
+        let mut app = App::new(None);
+        app.push_entry_for_test(
+            document,
+            Box::new(textora_markdown::view::MarkdownEditorView::new()),
+        );
+        app.switch_workspace_for_test(0);
+        app
+    }
+
+    #[test]
+    fn editing_boundary_audit_file_open_save_preserves_source_bytes() {
+        let directory =
+            tempfile::tempdir().expect("file audit requires an isolated temporary directory");
+        for newline in ["\n", "\r\n", "\r"] {
+            for source in
+                ["", "---\nafter", "before\n\n---", "```rust\ncode\n```\n\nafter", "中\n👨‍👩‍👧\n"]
+            {
+                for bom in ["", "\u{feff}"] {
+                    let source = format!("{bom}{}", source.replace('\n', newline));
+                    let path = directory.path().join("editing-audit.md");
+                    std::fs::write(&path, &source).expect("audit fixture must be written");
+                    let mut document =
+                        DocumentView::from_file(&path, 40, 40.0).expect("audit fixture must load");
+                    document.save().expect("saving the disposable audit fixture must succeed");
+                    assert_eq!(
+                        std::fs::read(&path).expect("saved fixture must be readable"),
+                        source.as_bytes(),
+                        "loading and saving must preserve the exact original source bytes"
+                    );
+                    document.save().expect("repeated saves must succeed");
+                    let mut reloaded = DocumentView::from_file(&path, 40, 40.0)
+                        .expect("saved fixture must reload");
+                    reloaded.save().expect("reloaded fixture must save");
+                    assert_eq!(
+                        std::fs::read(&path).expect("fixture remains readable"),
+                        source.as_bytes()
+                    );
+                }
+            }
+        }
     }
 }

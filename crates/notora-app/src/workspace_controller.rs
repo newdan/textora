@@ -11,8 +11,8 @@ use notora_core::note_command::NoteCommand;
 use notora_core::{
     Catalog, CatalogNavigationTree, DocumentIdentity, Workspace, WorkspaceDescriptor,
     WorkspaceError, WorkspaceFileBatch, WorkspaceFileMonitor, WorkspaceFileMonitorError,
-    execute_note_command, scan_workspace, scan_workspace_directories, scan_workspace_file_batch,
-    scan_workspace_paths,
+    WorkspaceFileMonitorEvent, execute_note_command, scan_workspace, scan_workspace_directories,
+    scan_workspace_file_batch, scan_workspace_paths,
 };
 
 use crate::action::{CardQuery, DocumentLoadRequest, MetadataMutation, TrashOperation};
@@ -509,7 +509,7 @@ impl WorkspaceSession {
             event_sender,
             WorkspaceEventScope { workspace_id: descriptor.workspace_id, generation },
         );
-        let (mut file_monitor, file_batches) =
+        let (mut file_monitor, monitor_events) =
             WorkspaceFileMonitor::start(workspace.root().to_path_buf())
                 .map_err(WorkspaceControllerError::FileMonitor)?;
         let (startup_sender, startup_receiver) = mpsc::channel();
@@ -519,7 +519,7 @@ impl WorkspaceSession {
                 catalog_path,
                 catalog_backups_directory,
                 migration_backup_retention,
-                file_batches,
+                monitor_events,
                 command_receiver,
                 event_sender,
                 Some(startup_sender),
@@ -565,7 +565,7 @@ fn run_indexer(
     catalog_path: PathBuf,
     catalog_backups_directory: Option<PathBuf>,
     migration_backup_retention: notora_core::BackupRetention,
-    file_batches: mpsc::Receiver<WorkspaceFileBatch>,
+    monitor_events: mpsc::Receiver<WorkspaceFileMonitorEvent>,
     command_receiver: mpsc::Receiver<IndexWorkerCommand>,
     event_sender: WorkspaceEventSender,
 ) {
@@ -574,7 +574,7 @@ fn run_indexer(
         catalog_path,
         catalog_backups_directory,
         migration_backup_retention,
-        file_batches,
+        monitor_events,
         command_receiver,
         event_sender,
         None,
@@ -587,7 +587,7 @@ fn run_indexer_with_startup(
     catalog_path: PathBuf,
     catalog_backups_directory: Option<PathBuf>,
     migration_backup_retention: notora_core::BackupRetention,
-    file_batches: mpsc::Receiver<WorkspaceFileBatch>,
+    monitor_events: mpsc::Receiver<WorkspaceFileMonitorEvent>,
     command_receiver: mpsc::Receiver<IndexWorkerCommand>,
     event_sender: WorkspaceEventSender,
     mut startup_sender: Option<mpsc::Sender<Result<(), String>>>,
@@ -661,20 +661,48 @@ fn run_indexer_with_startup(
         let _ = sender.send(Ok(()));
     }
     index_workspace(&workspace, &catalog, &event_sender);
+    run_indexer_event_loop(&workspace, &catalog, monitor_events, command_receiver, &event_sender);
+}
+
+fn run_indexer_event_loop(
+    workspace: &Workspace,
+    catalog: &Catalog,
+    monitor_events: mpsc::Receiver<WorkspaceFileMonitorEvent>,
+    command_receiver: mpsc::Receiver<IndexWorkerCommand>,
+    event_sender: &WorkspaceEventSender,
+) {
+    let mut monitor_events = Some(monitor_events);
     let mut pending_presence_confirmation_paths = BTreeSet::new();
     let mut presence_confirmation_due_at = None;
     loop {
-        while let Ok(command) = command_receiver.try_recv() {
-            execute_workspace_command(&workspace, &catalog, command, &event_sender);
+        if !drain_indexer_commands(workspace, catalog, &command_receiver, event_sender) {
+            return;
         }
-        match file_batches.recv_timeout(WORKSPACE_WORKER_IDLE_WAIT) {
-            Ok(batch) => {
+        let event = match &monitor_events {
+            Some(receiver) => receiver.recv_timeout(WORKSPACE_WORKER_IDLE_WAIT),
+            None => {
+                thread::sleep(WORKSPACE_WORKER_IDLE_WAIT);
+                Err(mpsc::RecvTimeoutError::Timeout)
+            }
+        };
+        match event {
+            Ok(WorkspaceFileMonitorEvent::Ready) => {
+                index_workspace(workspace, catalog, event_sender);
+                send_navigation_tree(workspace, catalog, event_sender);
+            }
+            Ok(WorkspaceFileMonitorEvent::Failed(error)) => {
+                let _ = event_sender.send(WorkspaceCompletion::WorkspaceIndexFailed {
+                    message: format!("工作区文件监视器启动或运行失败，自动同步已停止：{error}"),
+                });
+                monitor_events = None;
+            }
+            Ok(WorkspaceFileMonitorEvent::Changes(batch)) => {
                 pending_presence_confirmation_paths.extend(batch.relative_paths.iter().cloned());
                 presence_confirmation_due_at =
                     Some(Instant::now() + WATCHER_PRESENCE_CONFIRMATION_DELAY);
                 let note_relocations =
-                    index_workspace_file_batch(&workspace, &catalog, &batch, &event_sender);
-                send_navigation_tree(&workspace, &catalog, &event_sender);
+                    index_workspace_file_batch(workspace, catalog, &batch, event_sender);
+                send_navigation_tree(workspace, catalog, event_sender);
                 let _ = event_sender.send(WorkspaceCompletion::WorkspaceChanged {
                     changed_paths: batch.relative_paths,
                     note_relocations,
@@ -685,7 +713,7 @@ fn run_indexer_with_startup(
                 let _ = event_sender.send(WorkspaceCompletion::WorkspaceIndexFailed {
                     message: "工作区文件监视器已断开，自动同步已停止".to_owned(),
                 });
-                return;
+                monitor_events = None;
             }
         }
         if presence_confirmation_due_at.is_some_and(|due_at| due_at <= Instant::now()) {
@@ -693,7 +721,22 @@ fn run_indexer_with_startup(
                 .into_iter()
                 .collect::<Vec<_>>();
             presence_confirmation_due_at = None;
-            index_workspace_paths(&workspace, &catalog, &relative_paths, &event_sender);
+            index_workspace_paths(workspace, catalog, &relative_paths, event_sender);
+        }
+    }
+}
+
+fn drain_indexer_commands(
+    workspace: &Workspace,
+    catalog: &Catalog,
+    receiver: &mpsc::Receiver<IndexWorkerCommand>,
+    event_sender: &WorkspaceEventSender,
+) -> bool {
+    loop {
+        match receiver.try_recv() {
+            Ok(command) => execute_workspace_command(workspace, catalog, command, event_sender),
+            Err(mpsc::TryRecvError::Empty) => return true,
+            Err(mpsc::TryRecvError::Disconnected) => return false,
         }
     }
 }
@@ -1220,9 +1263,10 @@ mod tests {
     use super::{
         ActiveWorkspace, CATALOG_FILE_NAME, Catalog, Workspace, WorkspaceCommand,
         WorkspaceCommandResult, WorkspaceController, WorkspaceControllerError,
-        default_migration_backup_retention, run_indexer, scan_workspace,
+        WorkspaceFileMonitorEvent, default_migration_backup_retention, run_indexer, scan_workspace,
     };
     use crate::action::{CardQuery, DocumentLoadRequest};
+    use crate::index_worker::IndexWorkerCommand;
     use crate::product::{
         NotoraProduct, NotoraProductEvent, WorkspaceBootstrapCompletion, WorkspaceCompletion,
         WorkspaceEventScope, WorkspaceEventSender,
@@ -1531,46 +1575,168 @@ mod tests {
     }
 
     #[test]
-    fn watcher_disconnection_reports_a_recoverable_index_failure() {
-        let directory = tempfile::tempdir().expect("workspace test directory should be created");
+    fn indexer_shutdown_does_not_wait_for_a_blocked_monitor() {
+        let directory = tempfile::tempdir().expect("workspace fixture should exist");
         let workspace = notora_core::Workspace::open_or_initialize(directory.path())
-            .expect("workspace metadata should be initialized");
+            .expect("workspace fixture should initialize");
         let descriptor = workspace.descriptor();
         let catalog_path = workspace.metadata_directory().join(CATALOG_FILE_NAME);
-        Catalog::open(&catalog_path).expect("catalog should initialize before worker startup");
-        let (file_batch_sender, file_batches) = mpsc::channel();
-        let (_command_sender, command_receiver) = mpsc::channel();
+        let (file_sender, monitor_events) = mpsc::channel();
+        let (command_sender, command_receiver) = mpsc::channel();
+        let product = NotoraProduct::new();
+        let event_sender = WorkspaceEventSender::new(
+            product.event_sender(),
+            WorkspaceEventScope { workspace_id: descriptor.workspace_id, generation: 1 },
+        );
+        let (stopped_sender, stopped_receiver) = mpsc::channel();
+        let worker = thread::spawn(move || {
+            run_indexer(
+                workspace,
+                catalog_path,
+                None,
+                default_migration_backup_retention(),
+                monitor_events,
+                command_receiver,
+                event_sender,
+            );
+            let _ = stopped_sender.send(());
+        });
+        drop(command_sender);
+        let stopped = stopped_receiver.recv_timeout(Duration::from_secs(2));
+        drop(file_sender);
+        worker.join().expect("indexer should stop after fixture release");
+        assert!(
+            stopped.is_ok(),
+            "indexer shutdown must follow command ownership, not monitor completion"
+        );
+    }
+
+    #[test]
+    fn watcher_disconnection_reports_failure_and_keeps_commands_available() {
+        assert_monitor_failure_keeps_commands_available(None);
+    }
+
+    #[test]
+    fn watcher_startup_failure_reports_failure_and_keeps_commands_available() {
+        assert_monitor_failure_keeps_commands_available(Some(WorkspaceFileMonitorEvent::Failed(
+            notora_core::WorkspaceFileMonitorError::WorkerDisconnected,
+        )));
+    }
+
+    fn assert_monitor_failure_keeps_commands_available(failure: Option<WorkspaceFileMonitorEvent>) {
+        let directory = tempfile::tempdir().expect("workspace fixture should exist");
+        let workspace =
+            Workspace::open_or_initialize(directory.path()).expect("workspace should initialize");
+        let descriptor = workspace.descriptor();
+        let catalog_path = workspace.metadata_directory().join(CATALOG_FILE_NAME);
+        let (file_sender, monitor_events) = mpsc::channel();
+        let (command_sender, command_receiver) = mpsc::channel();
         let mut product = NotoraProduct::new();
         product.set_active_workspace(descriptor.workspace_id, 1);
-        drop(file_batch_sender);
-
-        run_indexer(
-            workspace,
-            catalog_path,
-            None,
-            default_migration_backup_retention(),
-            file_batches,
-            command_receiver,
-            WorkspaceEventSender::new(
-                product.event_sender(),
-                WorkspaceEventScope { workspace_id: descriptor.workspace_id, generation: 1 },
-            ),
+        let event_sender = WorkspaceEventSender::new(
+            product.event_sender(),
+            WorkspaceEventScope { workspace_id: descriptor.workspace_id, generation: 1 },
         );
-
-        let _ = product.drain_product_events();
-        assert!(product.take_events().iter().any(|event| {
-            matches!(
-                event,
-                NotoraProductEvent::Workspace(event)
-                    if event.scope.workspace_id == descriptor.workspace_id
-                        && event.scope.generation == 1
-                        && matches!(
-                            &event.completion,
-                            WorkspaceCompletion::WorkspaceIndexFailed { message }
-                                if message.contains("文件监视器已断开")
-                        )
+        let worker = thread::spawn(move || {
+            run_indexer(
+                workspace,
+                catalog_path,
+                None,
+                default_migration_backup_retention(),
+                monitor_events,
+                command_receiver,
+                event_sender,
             )
-        }));
+        });
+        if let Some(failure) = failure {
+            file_sender.send(failure).expect("backend failure should reach indexer");
+        }
+        drop(file_sender);
+        wait_for_workspace_completion(&mut product, |completion| {
+            matches!(completion,
+            WorkspaceCompletion::WorkspaceIndexFailed { message } if message.contains("文件监视器"))
+        });
+        command_sender
+            .send(IndexWorkerCommand::QueryNavigationTree)
+            .expect("monitor failure must not terminate command handling");
+        wait_for_workspace_completion(&mut product, |completion| {
+            matches!(completion, WorkspaceCompletion::NavigationTreeLoaded { .. })
+        });
+        drop(command_sender);
+        worker.join().expect("indexer should stop after command ownership ends");
+    }
+
+    #[test]
+    fn monitor_ready_rescans_files_created_before_registration() {
+        let directory = tempfile::tempdir().expect("workspace fixture should exist");
+        let workspace =
+            Workspace::open_or_initialize(directory.path()).expect("workspace should initialize");
+        let descriptor = workspace.descriptor();
+        let catalog_path = workspace.metadata_directory().join(CATALOG_FILE_NAME);
+        let completed_catalog_path = catalog_path.clone();
+        let (event_sender, monitor_events) = mpsc::channel();
+        let (command_sender, command_receiver) = mpsc::channel();
+        let mut product = NotoraProduct::new();
+        product.set_active_workspace(descriptor.workspace_id, 1);
+        let product_sender = WorkspaceEventSender::new(
+            product.event_sender(),
+            WorkspaceEventScope { workspace_id: descriptor.workspace_id, generation: 1 },
+        );
+        let worker = thread::spawn(move || {
+            run_indexer(
+                workspace,
+                catalog_path,
+                None,
+                default_migration_backup_retention(),
+                monitor_events,
+                command_receiver,
+                product_sender,
+            )
+        });
+        wait_for_workspace_completion(&mut product, |completion| {
+            matches!(completion, WorkspaceCompletion::WorkspaceScanCompleted { .. })
+        });
+        let late_note_relative_path = PathBuf::from("late.md");
+        fs::write(
+            directory.path().join(&late_note_relative_path),
+            "# Created while registration was blocked",
+        )
+        .expect("registration-gap fixture should be written");
+        event_sender
+            .send(WorkspaceFileMonitorEvent::Ready)
+            .expect("registration completion should publish");
+        wait_for_workspace_completion(&mut product, |completion| {
+            matches!(completion, WorkspaceCompletion::NavigationTreeLoaded { .. })
+        });
+        drop(command_sender);
+        drop(event_sender);
+        worker.join().expect("indexer should stop after command ownership ends");
+        let catalog = Catalog::open(&completed_catalog_path).expect("catalog should reopen");
+        assert!(
+            catalog
+                .active_notes()
+                .expect("indexed notes should query")
+                .iter()
+                .any(|note| note.relative_path == late_note_relative_path)
+        );
+    }
+
+    fn wait_for_workspace_completion(
+        product: &mut NotoraProduct,
+        predicate: impl Fn(&WorkspaceCompletion) -> bool,
+    ) {
+        let deadline = Instant::now() + Duration::from_secs(2);
+        loop {
+            let _ = product.drain_product_events();
+            if product.take_events().iter().any(|event| {
+                matches!(event,
+                NotoraProductEvent::Workspace(event) if predicate(&event.completion))
+            }) {
+                return;
+            }
+            assert!(Instant::now() < deadline, "workspace completion should arrive promptly");
+            thread::sleep(Duration::from_millis(10));
+        }
     }
 
     #[test]
@@ -1596,18 +1762,19 @@ mod tests {
         drop(catalog);
         fs::write(&catalog_path, "damaged after the startup preflight")
             .expect("fixture catalog should be damaged");
-        let (file_batch_sender, file_batches) = mpsc::channel();
-        let (_command_sender, command_receiver) = mpsc::channel();
+        let (monitor_event_sender, monitor_events) = mpsc::channel();
+        let (command_sender, command_receiver) = mpsc::channel();
         let mut product = NotoraProduct::new();
         product.set_active_workspace(descriptor.workspace_id, 1);
-        drop(file_batch_sender);
+        drop(monitor_event_sender);
+        drop(command_sender);
 
         run_indexer(
             workspace,
             catalog_path,
             Some(workspace_backups),
             default_migration_backup_retention(),
-            file_batches,
+            monitor_events,
             command_receiver,
             WorkspaceEventSender::new(
                 product.event_sender(),
@@ -1640,8 +1807,8 @@ mod tests {
             .expect("workspace metadata should be initialized");
         let descriptor = workspace.descriptor();
         let catalog_path = workspace.metadata_directory().join(CATALOG_FILE_NAME);
-        let (file_batch_sender, file_batches) = mpsc::channel();
-        let (_command_sender, command_receiver) = mpsc::channel();
+        let (monitor_event_sender, monitor_events) = mpsc::channel();
+        let (command_sender, command_receiver) = mpsc::channel();
         let mut product = NotoraProduct::new();
         product.set_active_workspace(descriptor.workspace_id, 1);
         let event_sender = product.event_sender();
@@ -1653,7 +1820,7 @@ mod tests {
                     catalog_path,
                     None,
                     default_migration_backup_retention(),
-                    file_batches,
+                    monitor_events,
                     command_receiver,
                     WorkspaceEventSender::new(
                         event_sender,
@@ -1683,11 +1850,11 @@ mod tests {
             thread::sleep(Duration::from_millis(10));
         }
         fs::remove_file(&note_path).expect("fixture note should be removed");
-        file_batch_sender
-            .send(notora_core::WorkspaceFileBatch {
+        monitor_event_sender
+            .send(WorkspaceFileMonitorEvent::Changes(notora_core::WorkspaceFileBatch {
                 relative_paths: vec!["removed.md".into()],
                 changes: vec![notora_core::WorkspaceFileChange::Removed("removed.md".into())],
-            })
+            }))
             .expect("watcher batch should reach the indexer");
 
         while completed_scans < 3 {
@@ -1707,8 +1874,9 @@ mod tests {
             );
             thread::sleep(Duration::from_millis(10));
         }
-        drop(file_batch_sender);
-        worker.join().expect("indexer should stop after its file channel closes");
+        drop(monitor_event_sender);
+        drop(command_sender);
+        worker.join().expect("indexer should stop after its command channel closes");
         let catalog = Catalog::open(&catalog_path).expect("catalog should reopen after indexing");
         assert!(catalog.active_notes().expect("active notes should query").is_empty());
     }
@@ -1720,8 +1888,8 @@ mod tests {
             .expect("workspace metadata should be initialized");
         let descriptor = workspace.descriptor();
         let catalog_path = workspace.metadata_directory().join(CATALOG_FILE_NAME);
-        let (file_batch_sender, file_batches) = mpsc::channel();
-        let (_command_sender, command_receiver) = mpsc::channel();
+        let (monitor_event_sender, monitor_events) = mpsc::channel();
+        let (command_sender, command_receiver) = mpsc::channel();
         let mut product = NotoraProduct::new();
         product.set_active_workspace(descriptor.workspace_id, 1);
         let event_sender = product.event_sender();
@@ -1731,7 +1899,7 @@ mod tests {
                 catalog_path,
                 None,
                 default_migration_backup_retention(),
-                file_batches,
+                monitor_events,
                 command_receiver,
                 WorkspaceEventSender::new(
                     event_sender,
@@ -1762,13 +1930,13 @@ mod tests {
         let external_directory = PathBuf::from("external-empty");
         fs::create_dir(directory.path().join(&external_directory))
             .expect("external directory fixture should be created");
-        file_batch_sender
-            .send(notora_core::WorkspaceFileBatch {
+        monitor_event_sender
+            .send(WorkspaceFileMonitorEvent::Changes(notora_core::WorkspaceFileBatch {
                 relative_paths: vec![external_directory.clone()],
                 changes: vec![notora_core::WorkspaceFileChange::Created(
                     external_directory.clone(),
                 )],
-            })
+            }))
             .expect("watcher batch should reach the indexer");
 
         loop {
@@ -1793,8 +1961,9 @@ mod tests {
             thread::sleep(Duration::from_millis(10));
         }
 
-        drop(file_batch_sender);
-        worker.join().expect("indexer should stop after its file channel closes");
+        drop(monitor_event_sender);
+        drop(command_sender);
+        worker.join().expect("indexer should stop after its command channel closes");
     }
 
     #[test]

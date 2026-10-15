@@ -44,7 +44,7 @@ impl MarkdownEditorView {
                     .cmds,
             );
         }
-        highlights
+        engine.clip_code_highlights(highlights)
     }
 
     fn search_position_for_byte(&self, byte: usize, is_end: bool) -> Option<(usize, usize)> {

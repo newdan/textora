@@ -34,8 +34,14 @@ mod preedit;
 #[path = "view_source_search.rs"]
 mod source_search;
 
+#[path = "view_code_viewport.rs"]
+mod code_viewport;
+
 #[path = "view_navigation.rs"]
 mod navigation;
+
+#[path = "view_split_history.rs"]
+mod split_history;
 
 #[cfg(test)]
 #[path = "view_empty_paragraph_tests.rs"]
@@ -377,6 +383,7 @@ pub struct PreviewEngine<S: BlockSource = MarkdownDoc> {
     pub content_height: f32,
     headings: Vec<HeadingEntry>,
     pending_heading_jump: Option<usize>,
+    pending_cursor_reveal: Option<usize>,
 
     sel: SelectionState,
     sel_anchor_byte: Option<usize>,
@@ -436,6 +443,7 @@ impl<S: BlockSource> PreviewEngine<S> {
             content_height: 0.0,
             headings: Vec::new(),
             pending_heading_jump: None,
+            pending_cursor_reveal: None,
             sel: SelectionState::new(),
             sel_anchor_byte: None,
             sel_cursor_byte: None,
@@ -593,6 +601,22 @@ impl<S: BlockSource> PreviewEngine<S> {
             || viewport_w != self.cached_viewport_w
     }
 
+    fn create_layout_with_view_state(
+        &self,
+        document: S,
+        style: &MarkdownStyle,
+        viewport_width: f32,
+        document_view: &dyn DocView,
+    ) -> LazyLayout<S> {
+        let mut layout = LazyLayout::new(document, style, viewport_width, document_view);
+        layout.code_viewport = self.lazy.as_ref().and_then(|previous| previous.code_viewport);
+        layout.set_source_generation(self.source_generation);
+        layout.set_edit_source(self.edit_source.clone());
+        layout.set_edit_ctx(self.edit_ctx.clone());
+        layout.set_selection_range(self.byte_selection_range().map(|(start, end)| start..end));
+        layout
+    }
+
     fn rebuild_layout(
         &mut self,
         doc: S,
@@ -606,18 +630,13 @@ impl<S: BlockSource> PreviewEngine<S> {
         full_layout: bool,
     ) {
         self.paragraph_spacing = style.paragraph_spacing;
-        let selection_range = self.byte_selection_range().map(|(start, end)| start..end);
+        let mut lazy = self.create_layout_with_view_state(doc, style, viewport_w, doc_view);
         let previous_layout = (incremental_layout_reuse_enabled()
             && matches!(self.dirty, EngineDirty::SourceChanged)
             && style_hash_quick(style) == self.cached_style_hash
             && viewport_w == self.cached_viewport_w)
             .then(|| self.lazy.take())
             .flatten();
-        let mut lazy = LazyLayout::new(doc, style, viewport_w, doc_view);
-        lazy.set_source_generation(self.source_generation);
-        lazy.set_edit_source(self.edit_source.clone());
-        lazy.set_edit_ctx(self.edit_ctx.clone());
-        lazy.set_selection_range(selection_range);
         if let Some(previous_layout) = previous_layout {
             lazy.reuse_unchanged_blocks_from(previous_layout);
         }
@@ -906,6 +925,7 @@ impl<S: BlockSource> PreviewEngine<S> {
             self.dirty = EngineDirty::Clean;
         }
 
+        self.reveal_pending_cursor(viewport_h);
         let vp_key = (viewport_w, viewport_h);
         if let Some(ref cached) = self.cached_dl
             && self.cached_dl_scroll_y == self.scroll_y
@@ -939,6 +959,9 @@ impl<S: BlockSource> PreviewEngine<S> {
             doc_view,
         );
         let perf_precision_us = precision_started_at.elapsed().as_micros();
+        if self.reveal_pending_cursor(viewport_h) {
+            self.pending_cursor_reveal = None;
+        }
 
         let lazy = self.lazy.as_ref().expect("lazy layout must exist after precision pass");
         let mut dl = DrawList::new();
@@ -996,6 +1019,7 @@ impl<S: BlockSource> PreviewEngine<S> {
     // ── Scroll ──
 
     pub fn scroll(&mut self, delta: f32, viewport_h: f32) -> bool {
+        self.pending_cursor_reveal = None;
         let max_scroll = (self.content_height - viewport_h).max(0.0);
         let old = self.scroll_y;
         self.scroll_y = (self.scroll_y + delta).clamp(0.0, max_scroll);
@@ -1102,14 +1126,14 @@ impl<S: BlockSource> PreviewEngine<S> {
             return DrawList::new();
         };
         let selection = SelectionState { anchor: Some(start), cursor: Some(end) };
-        selection.highlights(
+        self.clip_code_highlights(selection.highlights(
             &lazy.flat_lines,
             self.scroll_y,
             self.cached_offset_x,
             self.cached_offset_y,
             self.cached_dl_viewport.1,
             sel_color,
-        )
+        ))
     }
 
     pub fn has_selection(&self) -> bool {
@@ -1186,7 +1210,7 @@ impl<S: BlockSource> PreviewEngine<S> {
             0,
             &self.lazy.as_ref().expect("lazy layout must exist for search").flat_lines,
         );
-        self.search.highlights(
+        self.clip_code_highlights(self.search.highlights(
             self.scroll_y,
             self.cached_dl_viewport.1,
             self.cached_offset_x,
@@ -1194,7 +1218,7 @@ impl<S: BlockSource> PreviewEngine<S> {
             active_match_idx,
             match_color,
             inactive_color,
-        )
+        ))
     }
 
     pub fn scroll_to_search_match(&mut self, query: &str, case_sensitive: bool, active_idx: usize) {
@@ -1276,6 +1300,9 @@ impl<S: BlockSource> PreviewEngine<S> {
 
     /// 接收来自 app 层的光标位置变更通知。
     pub fn handle_set_cursor_byte(&mut self, byte: usize) {
+        if self.pending_cursor_reveal.is_some() {
+            self.pending_cursor_reveal = Some(byte);
+        }
         let query_layout_ready = self.dirty == EngineDirty::QueryLayoutReady;
         let previous_byte = self.edit_ctx.as_ref().map(|context| context.cursor_byte);
         self.mark_cursor_moved(byte);
@@ -2224,6 +2251,12 @@ impl<S: BlockSource> PreviewEngine<S> {
                 self.handle_set_cursor_byte(*byte);
                 Some(true)
             }
+            PluginMessage::RevealCursor(byte) => {
+                self.pending_cursor_reveal = Some(*byte);
+                self.cached_dl = None;
+                self.cached_vertices = None;
+                Some(true)
+            }
             PluginMessage::SetPreedit { text, cursor } => {
                 self.set_preedit_text(text.clone(), *cursor);
                 Some(true)
@@ -2704,6 +2737,7 @@ pub struct MarkdownEditorView {
     source: String,
     cached_source_hash: u64,
     cached_generation: u32,
+    split_history: std::cell::RefCell<split_history::SplitHistory>,
 }
 
 impl Default for MarkdownEditorView {
@@ -2716,10 +2750,17 @@ impl MarkdownEditorView {
     pub fn new() -> Self {
         let mut engine = PreviewEngine::new();
         engine.set_edit_source(Some(String::new()));
-        Self { engine, source: String::new(), cached_source_hash: 0, cached_generation: 0 }
+        Self {
+            engine,
+            source: String::new(),
+            cached_source_hash: 0,
+            cached_generation: 0,
+            split_history: Default::default(),
+        }
     }
 
     pub fn set_source(&mut self, text: String, generation: u32) {
+        self.split_history.get_mut().synchronize(&self.source, &text);
         let hash = fxhash(&text);
         let source_changed =
             hash != self.cached_source_hash || generation != self.cached_generation;
@@ -2874,10 +2915,19 @@ fn selection_augmentation_edit_plan(
 
 impl ui::plugin::EditPolicy for MarkdownEditorView {
     fn plan_edit(&self, request: &ui::plugin::EditRequest) -> ui::plugin::EditPlan {
+        self.split_history.borrow_mut().begin_request();
+        if request.source_generation != self.cached_generation {
+            return ui::plugin::EditPlan::UseDefault;
+        }
         // 零宽选区视为无选区。
         let selection = request.selection.as_ref().filter(|range| range.start < range.end);
         if let Some(selection) = selection {
             return self.plan_selection_edit(request, selection);
+        }
+        if matches!(request.intent, ui::plugin::EditIntent::DeleteBackward)
+            && let Some(plan) = self.split_history.borrow_mut().restore(&self.source, request)
+        {
+            return plan;
         }
         if matches!(request.intent, ui::plugin::EditIntent::DeleteForward) {
             return crate::augmenter::augment_delete_forward(&self.source, request.cursor_byte)
@@ -2888,11 +2938,16 @@ impl ui::plugin::EditPolicy for MarkdownEditorView {
         let Some(kind) = request_augment_kind(&request.intent) else {
             return ui::plugin::EditPlan::UseDefault;
         };
-        self.engine
+        let plan = self
+            .engine
             .augment_edit(request.cursor_byte, kind)
             .map_or(ui::plugin::EditPlan::UseDefault, |augmentation| {
                 augmentation_edit_plan(request, augmentation)
-            })
+            });
+        if matches!(request.intent, ui::plugin::EditIntent::InsertParagraphBreak) {
+            self.split_history.borrow_mut().remember(&self.source, request, &plan);
+        }
+        plan
     }
 }
 

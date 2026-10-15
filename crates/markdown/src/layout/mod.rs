@@ -8,6 +8,7 @@
 
 pub(crate) mod ascii_diagram;
 pub mod block;
+pub(crate) mod code_viewport;
 pub mod context;
 pub(crate) mod embedded;
 pub(crate) mod reconcile;

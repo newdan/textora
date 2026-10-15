@@ -80,9 +80,10 @@ fn augment_line_break(source: &str, current_byte: usize) -> EditAugmentation {
             }
             return emit_source_newline(source, current_byte);
         }
-        EnterContext::CodeBlock
-        | EnterContext::CodeBlockFenceLine { .. }
-        | EnterContext::HorizontalRuleEnd
+        EnterContext::CodeBlock | EnterContext::CodeBlockFenceLine { .. } => {
+            return emit_fenced_source_newline(source, current_byte);
+        }
+        EnterContext::HorizontalRuleEnd
         | EnterContext::EmptyBlockSeparatorLine
         | EnterContext::Other => {
             return emit_source_newline(source, current_byte);
@@ -365,6 +366,13 @@ fn augment_backspace(source: &str, current_byte: usize) -> Option<EditAugmentati
     if let Some(aug) = editable_paragraph_navigation::backspace_boundary(source, current_byte) {
         return Some(aug);
     }
+    let context = backspace_literal_context(source, current_byte);
+    if matches!(context, EnterContext::CodeBlock | EnterContext::IndentedCodeBlock { .. }) {
+        return backspace_code_boundary(source, current_byte);
+    }
+    if matches!(context, EnterContext::CodeBlockFenceLine { .. }) {
+        return Some(consume_edit(current_byte));
+    }
     if let Some(aug) = backspace_remove_inline_html_break(source, current_byte) {
         return Some(aug);
     }
@@ -391,6 +399,101 @@ fn augment_backspace(source: &str, current_byte: usize) -> Option<EditAugmentati
         insert_text: Some(String::new()),
         replace_range: Some(range.clone()),
         cursor_byte_after: range.start,
+    })
+}
+
+fn consume_edit(cursor: usize) -> EditAugmentation {
+    EditAugmentation {
+        insert_text: Some(String::new()),
+        replace_range: None,
+        cursor_byte_after: cursor,
+    }
+}
+
+fn backspace_literal_context(source: &str, cursor: usize) -> EnterContext {
+    let Some((line_start, _, _)) = locate_source_line_bounds(source, cursor) else {
+        return EnterContext::Other;
+    };
+    let prefix = &source[line_start..cursor];
+    if !prefix.chars().all(char::is_whitespace) && get_marker_delete_range(source, cursor).is_none()
+    {
+        return EnterContext::Other;
+    }
+    classify_enter_context(source, cursor)
+}
+
+fn backspace_code_boundary(source: &str, cursor: usize) -> Option<EditAugmentation> {
+    let (line_start, _, line_end) = locate_source_line_bounds(source, cursor)?;
+    let boundary = enclosing_fenced_boundary(source, cursor)?;
+    let position = matching_container_position(
+        source,
+        line_start,
+        source_line_content_end(source, line_end),
+        &boundary.frame.container_path,
+    )?;
+    if cursor != position.byte_offset {
+        return None;
+    }
+    if position.absolute_column > position.container_target_column {
+        return backspace_container_tab_residue(source, line_start, position);
+    }
+    let previous_end =
+        line_start.checked_sub(newline_sequence_width_before(source, line_start)?)?;
+    if matches!(
+        classify_enter_context(source, previous_end),
+        EnterContext::CodeBlockFenceLine { is_opening: true, .. }
+    ) {
+        return Some(consume_edit(cursor));
+    }
+    if cursor == line_start {
+        return None;
+    }
+    Some(EditAugmentation {
+        replace_range: Some(previous_end..cursor),
+        insert_text: Some(String::new()),
+        cursor_byte_after: previous_end,
+    })
+}
+
+fn backspace_container_tab_residue(
+    source: &str,
+    line_start: usize,
+    position: LineColumnPosition,
+) -> Option<EditAugmentation> {
+    let tab_start = position.byte_offset.checked_sub(1)?;
+    if source.as_bytes().get(tab_start) != Some(&b'\t') {
+        return None;
+    }
+    let column_before_tab = markdown_column_after(source.get(line_start..tab_start)?, 0);
+    let replacement = " ".repeat(position.container_target_column.checked_sub(column_before_tab)?);
+    Some(EditAugmentation {
+        replace_range: Some(tab_start..position.byte_offset),
+        cursor_byte_after: tab_start + replacement.len(),
+        insert_text: Some(replacement),
+    })
+}
+
+fn delete_forward_code_row_join(
+    source: &str,
+    cursor: usize,
+    next_line_start: usize,
+) -> Option<EditAugmentation> {
+    let boundary = enclosing_fenced_boundary(source, cursor)?;
+    let (_, _, line_end) = locate_source_line_bounds(source, next_line_start)?;
+    let position = matching_container_position(
+        source,
+        next_line_start,
+        source_line_content_end(source, line_end),
+        &boundary.frame.container_path,
+    )?;
+    if position.byte_offset == next_line_start {
+        return None;
+    }
+    let literal_indent = " ".repeat(position.leaf_indent_columns()?);
+    Some(EditAugmentation {
+        replace_range: Some(cursor..position.byte_offset),
+        insert_text: Some(literal_indent),
+        cursor_byte_after: cursor,
     })
 }
 
@@ -529,8 +632,13 @@ fn delete_forward_block_boundary(source: &str, current_byte: usize) -> Option<Ed
     }
     let context = classify_enter_context(source, boundary_end);
     // ATX 标题尾部空白不产生段内硬换行。
-    if !matches!(context, EnterContext::Heading { .. })
-        && hard_break_marker_ending_at(source, boundary_end).is_some()
+    if !matches!(
+        context,
+        EnterContext::Heading { .. }
+            | EnterContext::CodeBlock
+            | EnterContext::IndentedCodeBlock { .. }
+            | EnterContext::CodeBlockFenceLine { .. }
+    ) && hard_break_marker_ending_at(source, boundary_end).is_some()
     {
         return None;
     }
@@ -553,15 +661,15 @@ fn delete_forward_block_boundary(source: &str, current_byte: usize) -> Option<Ed
     let container_path = delete_context_container_path(source, boundary_end, &context);
     match context {
         EnterContext::CodeBlock => {
-            // 代码体内只有闭合围栏行需要保护;其余代码行交给默认删除。
-            if newline_run_end == boundary_end + first_newline_width
-                && line_closes_enclosing_fenced_block(source, boundary_end, newline_run_end)
-            {
-                return consume_boundary();
+            if newline_run_end == boundary_end + first_newline_width {
+                if line_closes_enclosing_fenced_block(source, boundary_end, newline_run_end) {
+                    return consume_boundary();
+                }
+                return delete_forward_code_row_join(source, boundary_end, newline_run_end);
             }
             None
         }
-        EnterContext::CodeBlockFenceLine { .. } => {
+        EnterContext::CodeBlockFenceLine { .. } | EnterContext::HorizontalRuleEnd => {
             // 围栏行与相邻行并线必然破坏围栏;仅在边界恰好一个换行序列时拦截,
             // 有空行兜底(≥2 个换行)时默认删除一个仍保持结构合法。
             if newline_run_end == boundary_end + first_newline_width {
@@ -1136,6 +1244,23 @@ fn emit_literal_source_newline(
     augmentation
 }
 
+fn emit_fenced_source_newline(source: &str, current_byte: usize) -> EditAugmentation {
+    let continuation_prefix = fenced_continuation_prefix(source, current_byte).unwrap_or_default();
+    emit_literal_source_newline(source, current_byte, &continuation_prefix)
+}
+
+fn fenced_continuation_prefix(source: &str, current_byte: usize) -> Option<String> {
+    let boundary = enclosing_fenced_boundary(source, current_byte)?;
+    let mut prefix = String::new();
+    for segment in boundary.frame.container_path.0 {
+        match segment {
+            ContainerSegment::BlockQuote => prefix.push_str("> "),
+            ContainerSegment::IndentColumns(columns) => prefix.push_str(&" ".repeat(columns)),
+        }
+    }
+    Some(prefix)
+}
+
 /// Create one editable paragraph using the same separator roles as the layout tree.
 fn emit_block_break(source: &str, current_byte: usize) -> EditAugmentation {
     let newline = preferred_newline_sequence(source, current_byte);
@@ -1668,7 +1793,10 @@ fn enter_context_augmentation(
         EnterContext::CodeBlockFenceLine { is_opening, line_content_end } => {
             Some(fence_line_enter_augmentation(source, line_content_end, is_opening))
         }
-        EnterContext::CodeBlock | EnterContext::Other => None,
+        EnterContext::CodeBlock => fenced_continuation_prefix(source, current_byte)
+            .filter(|prefix| !prefix.is_empty())
+            .map(|prefix| emit_literal_source_newline(source, current_byte, &prefix)),
+        EnterContext::Other => None,
     }
 }
 
@@ -1783,14 +1911,7 @@ fn fence_line_enter_augmentation(
     if let Some(augmentation) = close_new_fence_augmentation(source, line_content_end) {
         return augmentation;
     }
-    let newline = preferred_newline_sequence(source, line_content_end);
-    let aug = EditAugmentation {
-        cursor_byte_after: line_content_end + newline.len(),
-        replace_range: Some(line_content_end..line_content_end),
-        insert_text: Some(newline.to_owned()),
-    };
-    debug_assert_augmentation(&aug, source);
-    aug
+    emit_fenced_source_newline(source, line_content_end)
 }
 
 fn close_new_fence_augmentation(source: &str, line_content_end: usize) -> Option<EditAugmentation> {
@@ -2310,6 +2431,7 @@ struct TableFrame {
 struct CodeBlockFrame {
     range: std::ops::Range<usize>,
     is_indented: bool,
+    container_path: ContainerPath,
 }
 
 fn classify_heading_hit(
@@ -2417,6 +2539,7 @@ fn classify_fence_line_hit(
     current_byte: usize,
     block_start: usize,
     block_content_end: usize,
+    container_path: &ContainerPath,
 ) -> Option<EnterContext> {
     let (opening_line_start, _, opening_line_end) = locate_source_line_bounds(source, block_start)?;
     let opening_content_end = source_line_content_end(source, opening_line_end);
@@ -2436,7 +2559,12 @@ fn classify_fence_line_hit(
         return None;
     }
     let closing_content_end = source_line_content_end(source, closing_line_end);
-    let closing_position = LineColumnPosition::at_line_start(closing_line_start);
+    let closing_position = matching_container_position(
+        source,
+        closing_line_start,
+        closing_content_end,
+        container_path,
+    )?;
     if !line_is_closing_fence(
         source,
         closing_position,
@@ -3025,6 +3153,15 @@ pub fn classify_enter_context(source: &str, current_byte: usize) -> EnterContext
                 code_block = Some(CodeBlockFrame {
                     range: range.clone(),
                     is_indented: matches!(kind, CodeBlockKind::Indented),
+                    container_path: {
+                        let base = item_stack
+                            .last()
+                            .map(|item| container_path(&item.content_prefix))
+                            .unwrap_or_default();
+                        let opening_line_start = locate_source_line_bounds(source, range.start)
+                            .map_or(range.start, |bounds| bounds.0);
+                        source_container_path(source, opening_line_start, range.start, &base)
+                    },
                 });
             }
             Event::End(TagEnd::CodeBlock) => {
@@ -3043,9 +3180,13 @@ pub fn classify_enter_context(source: &str, current_byte: usize) -> EnterContext
                             );
                             return EnterContext::IndentedCodeBlock { continuation_prefix };
                         }
-                        if let Some(fence_context) =
-                            classify_fence_line_hit(source, current_byte, frame.range.start, end)
-                        {
+                        if let Some(fence_context) = classify_fence_line_hit(
+                            source,
+                            current_byte,
+                            frame.range.start,
+                            end,
+                            &frame.container_path,
+                        ) {
                             return fence_context;
                         }
                         return EnterContext::CodeBlock;
@@ -6323,39 +6464,47 @@ mod tests {
     }
 
     #[test]
-    fn delete_forward_inside_container_fenced_code_allows_pseudo_closers() {
-        for source in [
-            "> ```\n> code\n> ```not-close\n> ```",
-            "> ```\n> code\n```\nparagraph",
-            "- ```\n  code\n  ```not-close\n  ```",
-            "- ```\n  code\n```\nparagraph",
+    fn delete_forward_container_code_distinguishes_literal_pseudo_fences_from_neighboring_blocks() {
+        for (source, expected) in [
+            ("> ```\n> code\n> ```not-close\n> ```", "> ```\n> code```not-close\n> ```"),
+            ("- ```\n  code\n  ```not-close\n  ```", "- ```\n  code```not-close\n  ```"),
         ] {
             let cursor = source.find("code").expect("fixture contains code") + "code".len();
-
-            assert!(
-                augment_delete_forward(source, cursor).is_none(),
-                "pseudo closer must stay default for {source:?}"
-            );
+            let join = augment_delete_forward(source, cursor)
+                .expect("literal rows join without structural prefixes");
+            assert_eq!(apply_augmentation_at(source, cursor, &join), expected);
+        }
+        for source in ["> ```\n> code\n```\nparagraph", "- ```\n  code\n```\nparagraph"] {
+            let cursor = source.find("code").expect("fixture contains code") + "code".len();
+            let protected = augment_delete_forward(source, cursor)
+                .expect("neighboring outer code block stays separate");
+            assert_eq!(apply_augmentation_at(source, cursor, &protected), source);
         }
     }
 
     #[test]
-    fn delete_forward_inside_fenced_code_rejects_over_indented_pseudo_closers() {
-        for source in [
-            "```\ncode\n    ```\n```",
-            "```\ncode\n\t```\n```",
-            "> ```\n> code\n>     ```\n> ```",
-            "> ```\n> code\n> \t```\n> ```",
-            "- ```\n  code\n      ```\n  ```",
-            "- ```\n  code\n  \t```\n  ```",
-            "- item\n\n  ```\n  code\n      ```\n  ```",
+    fn delete_forward_inside_fenced_code_joins_over_indented_pseudo_fences_as_literal_text() {
+        for (source, expected) in [
+            ("```\ncode\n    ```\n```", "```\ncode    ```\n```"),
+            ("```\ncode\n\t```\n```", "```\ncode\t```\n```"),
+            ("> ```\n> code\n>     ```\n> ```", "> ```\n> code    ```\n> ```"),
+            ("> ```\n> code\n> \t```\n> ```", "> ```\n> code\t```\n> ```"),
+            ("- ```\n  code\n      ```\n  ```", "- ```\n  code    ```\n  ```"),
+            ("- ```\n  code\n  \t```\n  ```", "- ```\n  code\t```\n  ```"),
+            ("- item\n\n  ```\n  code\n      ```\n  ```", "- item\n\n  ```\n  code    ```\n  ```"),
         ] {
             let cursor = source.find("code").expect("fixture contains code") + "code".len();
-
-            assert!(
-                augment_delete_forward(source, cursor).is_none(),
-                "over-indented pseudo closer must stay default for {source:?}"
+            let edited = augment_delete_forward(source, cursor).map_or_else(
+                || {
+                    let mut edited = source.to_owned();
+                    let width = newline_sequence_width_at(source, cursor)
+                        .expect("fixture joins a source newline");
+                    edited.replace_range(cursor..cursor + width, "");
+                    edited
+                },
+                |augmentation| apply_augmentation_at(source, cursor, &augmentation),
             );
+            assert_eq!(edited, expected, "pseudo fence is literal text in {source:?}");
         }
     }
 
@@ -6595,19 +6744,21 @@ mod tests {
     }
 
     #[test]
-    fn delete_forward_after_closing_fence_line_is_consumed_at_tight_boundary() {
-        // 闭合围栏行尾紧贴下一段(单个换行)时 Delete 必须拦截;
-        // 有空行兜底(≥2 个换行)时交回默认删除。
-        let tight_source = "```\ncode\n```\npara";
-        let tight_cursor = "```\ncode\n```".len();
-        let augmentation = augment_delete_forward(tight_source, tight_cursor)
-            .expect("DeleteForward must not merge a paragraph into the closing fence");
-
-        assert_eq!(apply_augmentation_at(tight_source, tight_cursor, &augmentation), tight_source);
-        assert_eq!(augmentation.cursor_byte_after, tight_cursor);
-
-        let spaced_source = "```\ncode\n```\n\npara";
-        assert!(augment_delete_forward(spaced_source, tight_cursor).is_none());
+    fn delete_forward_after_closing_fence_preserves_hidden_separators_and_deletes_visible_slots() {
+        let cursor = "```\ncode\n```".len();
+        for source in ["```\ncode\n```\npara", "```\ncode\n```\n\npara"] {
+            let protected =
+                augment_delete_forward(source, cursor).expect("structural separator is protected");
+            assert_eq!(apply_augmentation_at(source, cursor, &protected), source);
+            assert_eq!(protected.cursor_byte_after, cursor);
+        }
+        let editable_source = "```\ncode\n```\n\n\npara";
+        let deletion = augment_delete_forward(editable_source, cursor)
+            .expect("visible empty paragraph can be removed");
+        assert_eq!(
+            apply_augmentation_at(editable_source, cursor, &deletion),
+            "```\ncode\n```\n\npara"
+        );
     }
 
     #[test]

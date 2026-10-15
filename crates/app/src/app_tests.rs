@@ -4400,6 +4400,123 @@ fn wysiwyg_move_up_scrolls_to_reveal_cursor_above_viewport() {
 }
 
 #[test]
+#[cfg(feature = "markdown")]
+fn wysiwyg_document_boundary_navigation_reveals_the_actual_markdown_caret() {
+    let source = "中文段落 English é 👩🏽‍💻\n\n---\n\n```rust\nlet value = 1;\n```\n\n".repeat(80);
+    for extend_selection in [false, true] {
+        let mut app = App::new(None);
+        let document = DocumentView::new(vec![source.clone()], 80, 10.0);
+        app.push_entry_for_test(
+            document,
+            Box::new(textora_markdown::view::MarkdownEditorView::new()),
+        );
+        app.switch_workspace_for_test(0);
+        app.sync_plugin_state();
+        render_active_wysiwyg_plugin_for_test(&mut app);
+        let commands = if extend_selection {
+            [EditCommand::ExtendToDocEnd, EditCommand::ExtendToDocStart]
+        } else {
+            [EditCommand::MoveToDocEnd, EditCommand::MoveToDocStart]
+        };
+        for command in commands {
+            assert!(app.dispatch_wysiwyg_navigation(&command).redraw);
+            render_active_wysiwyg_plugin_for_test(&mut app);
+            let tab = app.active_tab_session().expect("Markdown boundary fixture remains active");
+            let byte = tab.document.cursor_offset().to_usize();
+            let (_, y, _, height) =
+                tab.query_cursor_screen_rect(byte).expect("boundary caret geometry");
+            let viewport_height = app.plugin_render_bounds().h;
+            assert!(
+                y >= 0.0 && y + height <= viewport_height + 1.0,
+                "{command:?}: caret {y}..{} must be inside viewport {}",
+                y + height,
+                viewport_height
+            );
+            assert_eq!(tab.full_text(), source, "navigation must preserve source bytes");
+        }
+    }
+}
+
+#[test]
+#[cfg(feature = "markdown")]
+fn wysiwyg_edit_at_an_offscreen_caret_reveals_the_actual_markdown_caret() {
+    let source = "paragraph\n\n---\n\n```rust\nlet value = 1;\n```\n\n".repeat(80);
+    let mut app = App::new(None);
+    let document = DocumentView::new(vec![source.clone()], 80, 10.0);
+    app.push_entry_for_test(document, Box::new(textora_markdown::view::MarkdownEditorView::new()));
+    app.switch_workspace_for_test(0);
+    app.sync_plugin_state();
+    render_active_wysiwyg_plugin_for_test(&mut app);
+    app.active_tab_session_mut()
+        .expect("Markdown edit fixture")
+        .cursor_move_to_offset(source.len());
+    app.sync_plugin_state();
+    assert!(
+        app.dispatch_transactional_edit_for_test(EditCommand::InsertText("尾部".into())).redraw
+    );
+    render_active_wysiwyg_plugin_for_test(&mut app);
+    let tab = app.active_tab_session().expect("Markdown edit fixture remains active");
+    assert_eq!(tab.full_text(), source + "尾部");
+    let (_, y, _, height) =
+        tab.query_cursor_screen_rect(tab.document.buffer_len()).expect("edited caret geometry");
+    assert!(
+        y >= 0.0 && y + height <= app.plugin_render_bounds().h + 1.0,
+        "edited caret {y}..{} must be visible",
+        y + height
+    );
+}
+
+#[test]
+#[cfg(feature = "markdown")]
+fn wysiwyg_source_toggle_reveals_the_caret_moved_in_the_source_editor() {
+    let source = "paragraph\n\n---\n\n```rust\nlet value = 1;\n```\n\n".repeat(80);
+    for paint_before_toggle in [false, true] {
+        let directory = tempfile::tempdir().expect("mode-switch fixture directory");
+        let path = directory.path().join("toggle.md");
+        std::fs::write(&path, &source).expect("write mode-switch fixture");
+        let mut app = App::new(None);
+        let prepared = app
+            .prepare_editor_file(
+                &path,
+                crate::workspace_tab_factory::ViewportDimensions {
+                    visible_rows: 10,
+                    viewport_height: 10.0,
+                },
+            )
+            .expect("load routed Markdown fixture");
+        let _ = app.install_editor_tab(
+            prepared.prepared,
+            prepared.suggested_file_name,
+            appkit_shell::editor_runtime::OpenDisposition::Persistent,
+        );
+        app.sync_plugin_state();
+        if paint_before_toggle {
+            render_active_wysiwyg_plugin_for_test(&mut app);
+        }
+        for byte in [source.len(), 0] {
+            assert!(app.toggle_editor_view().redraw);
+            assert_eq!(app.active_plugin_name(), Some(ui::plugin::PLUGIN_EDITOR));
+            app.active_tab_session_mut()
+                .expect("source editor fixture")
+                .cursor_move_to_offset(byte);
+            assert!(app.toggle_editor_view().redraw);
+            assert_eq!(app.active_plugin_name(), Some(ui::plugin::PLUGIN_MARKDOWN_EDITOR));
+            app.sync_plugin_state();
+            render_active_wysiwyg_plugin_for_test(&mut app);
+            let tab = app.active_tab_session().expect("restored Markdown fixture");
+            let (_, y, _, height) =
+                tab.query_cursor_screen_rect(byte).expect("restored caret geometry");
+            assert!(
+                y >= 0.0 && y + height <= app.plugin_render_bounds().h + 1.0,
+                "source toggle @{byte}: caret {y}..{} must be visible",
+                y + height
+            );
+            assert_eq!(tab.full_text(), source);
+        }
+    }
+}
+
+#[test]
 fn wysiwyg_move_down_does_not_scroll_when_cursor_already_visible() {
     const VISIBLE_Y: f32 = 8.0;
     const CURSOR_X: f32 = 10.0;
@@ -4830,8 +4947,11 @@ fn markdown_paragraph_transactions_restore_source_and_cursor_through_history() {
             let mut tab = app.active_tab_session_mut().expect("active Markdown tab after undo");
             assert_eq!(tab.full_text(), case.source);
             assert_eq!(tab.document.cursor_offset().to_usize(), case.cursor_prefix.len());
-            // History restores the original caret; selections are collapsed by the existing undo contract.
-            assert_eq!(tab.document.selection_range(), None);
+            assert_eq!(
+                tab.document.selection_range(),
+                case.selection.as_ref().map(|selection| (selection.start, selection.end)),
+                "Undo must restore the original selection as well as its caret"
+            );
             tab.redo();
         }
         app.sync_plugin_state();

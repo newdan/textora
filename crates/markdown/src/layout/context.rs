@@ -86,11 +86,24 @@ pub(crate) fn grapheme_at_x(flat_line: &FlatLine, rel_x: f32) -> usize {
 
 /// Get the pixel x-coordinate for a grapheme position within a [`FlatLine`].
 pub(crate) fn grapheme_x(flat_line: &FlatLine, visual_grapheme: usize) -> f32 {
-    let text = &flat_line.text;
+    text_grapheme_x(
+        &flat_line.text,
+        flat_line.shaped.as_ref(),
+        flat_line.font_size,
+        visual_grapheme,
+    )
+}
+
+pub(crate) fn text_grapheme_x(
+    text: &str,
+    shaped: Option<&shaping::ShapedRun>,
+    font_size: f32,
+    visual_grapheme: usize,
+) -> f32 {
     if text.is_empty() || visual_grapheme == 0 {
         return 0.0;
     }
-    if let Some(ref shaped) = flat_line.shaped {
+    if let Some(shaped) = shaped {
         // Find the byte position of the visual_grapheme'th grapheme cluster.
         let mut g_count = 0usize;
         let mut target_byte = text.len();
@@ -122,7 +135,6 @@ pub(crate) fn grapheme_x(flat_line: &FlatLine, visual_grapheme: usize) -> f32 {
         }
         return cum_x;
     }
-    let font_size = flat_line.font_size;
     let mut cum_x = 0.0f32;
     let mut g_idx = 0usize;
     let mut chars = text.char_indices().peekable();

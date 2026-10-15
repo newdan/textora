@@ -212,14 +212,9 @@ impl DocumentModel {
     /// Produce an immutable byte snapshot for an off-thread save.
     pub fn serialized_contents_for_save(&self) -> Vec<u8> {
         let text = self.full_text();
-        let normalized = if self.crlf { text.replace('\n', "\r\n") } else { text };
-        if !self.had_bom {
-            return normalized.into_bytes();
-        }
-        let mut contents = Vec::with_capacity(normalized.len() + 3);
-        contents.extend_from_slice(&[0xEF, 0xBB, 0xBF]);
-        contents.extend_from_slice(normalized.as_bytes());
-        contents
+        let ending =
+            if self.crlf { core::file::LineEnding::Crlf } else { core::file::LineEnding::Mixed };
+        core::file::serialized_file_contents(text.as_bytes(), ending, self.had_bom)
     }
 
     /// Apply a successful worker save without clearing newer edits.
@@ -249,9 +244,26 @@ impl DocumentModel {
     }
 
     pub fn sync_cursor_from_buffer(&mut self) {
-        self.cursor.selection_anchor = None;
         self.cursor.offset = self.tb.cursor_offset();
+        self.cursor.selection_anchor = self.tb.selection_range().map(|(start, end)| {
+            if self.cursor.offset == start.offset {
+                end.offset.to_usize()
+            } else {
+                start.offset.to_usize()
+            }
+        });
         self.cursor.cached_line = None;
+    }
+
+    /// Capture the model selection in the buffer before recording an edit group.
+    pub fn sync_selection_to_buffer(&mut self) {
+        let cursor = self.cursor.offset;
+        if let Some(anchor) = self.cursor.selection_anchor {
+            self.tb.cursor_move_to_byte(ByteIndex(anchor));
+            self.tb.selection_update_offset(cursor.to_usize());
+        } else {
+            self.tb.clear_selection();
+        }
     }
 
     pub fn sync_cursor(&mut self) {
@@ -698,6 +710,51 @@ mod tests {
         model.had_bom = true;
 
         assert_eq!(model.serialized_contents_for_save(), b"\xEF\xBB\xBFfirst\r\nsecond");
+    }
+
+    #[test]
+    fn save_snapshot_does_not_duplicate_existing_crlf() {
+        let directory = tempfile::tempdir().expect("save snapshot fixture directory must exist");
+        let path = directory.path().join("loaded.md");
+        for original in ["", "first\r\nsecond", "first\r\nsecond\n", "中\r\n👨‍👩‍👧\r\n"]
+        {
+            for had_bom in [false, true] {
+                std::fs::write(&path, original).expect("loaded-source fixture must be written");
+                let (gap, _) = core::file::load_file(&path)
+                    .expect("loaded-source fixture must use the production loading path");
+                let buffer = core::buffer::TextBuffer::from_gap_buffer(gap)
+                    .expect("loaded-source fixture must preserve its original bytes");
+                let mut model = DocumentModel::new(buffer);
+                model.crlf = true;
+                model.had_bom = had_bom;
+                let before = model.full_text();
+                let expected_text = original.replace("\r\n", "\n").replace('\n', "\r\n");
+                let mut expected = Vec::new();
+                if had_bom {
+                    expected.extend_from_slice(b"\xEF\xBB\xBF");
+                }
+                expected.extend_from_slice(expected_text.as_bytes());
+                assert_eq!(model.serialized_contents_for_save(), expected);
+                assert_eq!(model.full_text(), before, "saving must not mutate the document");
+            }
+        }
+    }
+
+    #[test]
+    fn loaded_mixed_line_endings_undo_restores_exact_deleted_bytes() {
+        let directory = tempfile::tempdir().expect("mixed history fixture directory exists");
+        let path = directory.path().join("mixed.md");
+        let source = "a\r\nb\nc\r";
+        std::fs::write(&path, source).expect("mixed history fixture writes");
+        let (gap, _) = core::file::load_file(&path).expect("mixed history fixture loads");
+        let buffer =
+            core::buffer::TextBuffer::from_gap_buffer(gap).expect("mixed bytes remain intact");
+        let mut model = DocumentModel::new(buffer);
+        model.replace_range(0..source.len(), "replacement");
+        model.undo();
+        assert_eq!(model.full_text(), source);
+        model.redo();
+        assert_eq!(model.full_text(), "replacement");
     }
 
     #[test]

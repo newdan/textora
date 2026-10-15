@@ -164,6 +164,7 @@ pub struct LazyLayout<S: BlockSource> {
     projected_empty_line_geometry: std::collections::BTreeMap<usize, ProjectedEmptyLine>,
     /// WYSIWYG edit context; None means pure preview (no cursor span expansion).
     edit_ctx: Option<crate::edit::EditContext>,
+    pub(crate) code_viewport: Option<super::code_viewport::CodeViewport>,
     /// Non-empty source selection range used for block-level editing fallbacks.
     selection_range: Option<std::ops::Range<usize>>,
     /// Crate-private rendering sidecar for ASCII diagram grid metadata.
@@ -246,6 +247,16 @@ impl<S: BlockSource> LazyLayout<S> {
     /// Phase 4: only iterates blocks in `viewport_range` (visible + buffer).
     /// Blocks outside this range that are None are skipped safely.
     pub fn build_flat_lines(&mut self, _doc_view: &dyn core::document::DocView) {
+        let (code_viewport, changed_indices) = super::code_viewport::update(
+            &mut self.laid_out,
+            &self.precise,
+            self.edit_ctx.as_ref().map(|context| context.cursor_byte),
+            self.code_viewport,
+        );
+        self.code_viewport = code_viewport;
+        for index in changed_indices {
+            self.reconciled_flat_lines[index] = None;
+        }
         let mut lines = Vec::new();
         let mut flat_idx = 0usize;
 
@@ -1282,6 +1293,7 @@ impl<S: BlockSource> LazyLayout<S> {
             projection_flat_line_indices: Vec::new(),
             projected_empty_line_geometry: std::collections::BTreeMap::new(),
             edit_ctx: None,
+            code_viewport: None,
             selection_range: None,
             ascii_diagrams: super::ascii_diagram::AsciiDiagramRegistry::default(),
             embedded_images: super::embedded::EmbeddedRegistry::default(),

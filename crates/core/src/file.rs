@@ -19,6 +19,8 @@ use std::io::{self, Read, Write};
 use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering};
 
+const UTF8_BOM: &[u8] = b"\xEF\xBB\xBF";
+
 /// Line ending style detected in a file.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LineEnding {
@@ -600,12 +602,28 @@ fn make_temp_path(target: &Path) -> Result<std::path::PathBuf, SaveError> {
     Ok(parent.join(temp_name))
 }
 
+/// Serialize a snapshot with the requested line endings and optional UTF-8 BOM.
+/// Mixed and unspecified endings preserve the original bytes.
+pub fn serialized_file_contents(source: &[u8], ending: LineEnding, had_bom: bool) -> Vec<u8> {
+    let contents = match ending {
+        LineEnding::Mixed | LineEnding::None => source.to_vec(),
+        _ => convert_line_endings(&normalize_to_lf(source), ending),
+    };
+    if !had_bom {
+        return contents;
+    }
+    let mut encoded = Vec::with_capacity(contents.len() + UTF8_BOM.len());
+    encoded.extend_from_slice(UTF8_BOM);
+    encoded.extend_from_slice(&contents);
+    encoded
+}
+
 /// Save a GapBuffer to a file atomically.
 ///
 /// # Strategy
 ///
 /// 1. Check existing file: if read-only → `SaveError::ReadOnly`
-/// 2. Read all content from buffer (internally LF-only)
+/// 2. Read all content from buffer
 /// 3. Convert line endings to match the original file format
 /// 4. Prepend UTF-8 BOM if the original file had one
 /// 5. Write to `<parent>/.<basename>.<pid>.tmp`
@@ -638,15 +656,7 @@ pub fn save_file(
 
     // ── Read + convert content ────────────────────────────────────────
     let raw = read_all(buffer);
-    let normalized = normalize_to_lf(&raw);
-    let with_eol = convert_line_endings(&normalized, metadata.line_ending);
-    let final_content: Vec<u8> = if metadata.had_bom {
-        let mut bommed = vec![0xEF, 0xBB, 0xBF];
-        bommed.extend_from_slice(&with_eol);
-        bommed
-    } else {
-        with_eol
-    };
+    let final_content = serialized_file_contents(&raw, metadata.line_ending, metadata.had_bom);
 
     // ── Write to temp file in same directory ──────────────────────────
     let temp_path = make_temp_path(path)?;
@@ -1140,6 +1150,21 @@ mod tests {
 
         save_file(&gb, &path, &meta).unwrap();
         assert_eq!(read_file_bytes(&path), b"hello\r\nworld\r\n");
+    }
+
+    #[test]
+    fn save_preserves_mixed_line_endings_without_editing() {
+        let directory = tempfile::tempdir().expect("mixed line ending test directory must exist");
+        let path = directory.path().join("mixed.md");
+        let original = b"first\r\nsecond\nthird\r";
+        let buffer = make_gap_buffer(original);
+        let metadata = FileMetadata {
+            line_ending: LineEnding::Mixed,
+            had_bom: false,
+            original_encoding: None,
+        };
+        save_file(&buffer, &path, &metadata).expect("mixed line ending fixture must save");
+        assert_eq!(std::fs::read(path).expect("saved fixture must be readable"), original);
     }
 
     #[test]

@@ -130,15 +130,52 @@ fn conflict_timestamp(timestamp: u64) -> String {
 #[derive(Debug)]
 pub enum FileSafetyOutcome {
     Unchanged,
-    Reload { content: String, revision: DiskRevision },
-    Conflict { conflict: PathBuf, content: String, revision: DiskRevision },
-    Renamed { new_path: PathBuf, revision: DiskRevision },
-    AmbiguousRename { original: PathBuf },
+    Reload {
+        content: String,
+        revision: DiskRevision,
+    },
+    Conflict {
+        conflict: PathBuf,
+        conflict_revision: DiskRevision,
+        content: String,
+        revision: DiskRevision,
+    },
+    Renamed {
+        new_path: PathBuf,
+        revision: DiskRevision,
+    },
+    AmbiguousRename {
+        original: PathBuf,
+    },
     Deleted,
 }
 
+enum TrackedRevision {
+    Observed(DiskRevision),
+    Saved { revision: DiskRevision, predecessors: Vec<DiskRevision> },
+}
+
+impl TrackedRevision {
+    fn revision(&self) -> &DiskRevision {
+        match self {
+            Self::Observed(revision) | Self::Saved { revision, .. } => revision,
+        }
+    }
+
+    fn saved_successor(&self, expected: &DiskRevision) -> Option<&DiskRevision> {
+        match self {
+            Self::Saved { revision, predecessors }
+                if revision == expected || predecessors.contains(expected) =>
+            {
+                Some(revision)
+            }
+            Self::Observed(_) | Self::Saved { .. } => None,
+        }
+    }
+}
+
 pub struct FileSafetyMonitor {
-    revisions: BTreeMap<PathBuf, DiskRevision>,
+    revisions: BTreeMap<PathBuf, TrackedRevision>,
 }
 
 impl Default for FileSafetyMonitor {
@@ -154,7 +191,7 @@ impl FileSafetyMonitor {
 
     pub fn track(&mut self, path: &Path) -> Result<DiskRevision, FileSafetyError> {
         let revision = capture_revision(path)?;
-        self.revisions.insert(path.to_owned(), revision.clone());
+        self.revisions.insert(path.to_owned(), TrackedRevision::Observed(revision.clone()));
         Ok(revision)
     }
 
@@ -162,8 +199,36 @@ impl FileSafetyMonitor {
         self.revisions.remove(path);
     }
 
-    pub fn confirm(&mut self, revision: DiskRevision) {
-        self.revisions.insert(revision.path.clone(), revision);
+    fn confirm_save(&mut self, revision: DiskRevision, baseline: Option<DiskRevision>) {
+        let previous = self.revisions.remove(&revision.path);
+        let mut predecessors = match (previous, baseline.as_ref()) {
+            (Some(TrackedRevision::Saved { revision, predecessors }), Some(baseline))
+                if revision == *baseline =>
+            {
+                predecessors
+            }
+            _ => Vec::new(),
+        };
+        if let Some(baseline) = baseline {
+            predecessors.push(baseline);
+        }
+        self.revisions
+            .insert(revision.path.clone(), TrackedRevision::Saved { revision, predecessors });
+    }
+
+    fn acknowledge_save(&mut self, acknowledged: &DiskRevision) {
+        let Some(TrackedRevision::Saved { revision, predecessors }) =
+            self.revisions.get_mut(&acknowledged.path)
+        else {
+            return;
+        };
+        if revision == acknowledged {
+            predecessors.clear();
+            return;
+        }
+        if let Some(index) = predecessors.iter().position(|previous| previous == acknowledged) {
+            predecessors.drain(..index);
+        }
     }
 
     pub fn observe(
@@ -176,7 +241,7 @@ impl FileSafetyMonitor {
         let expected = self
             .revisions
             .get(path)
-            .cloned()
+            .map(|tracked| tracked.revision().clone())
             .ok_or(FileSafetyError::InvalidPath { operation: "observe untracked file" })?;
         let current = match read_file_state(path) {
             Ok(current) => current,
@@ -190,7 +255,10 @@ impl FileSafetyMonitor {
         if expected == current.revision {
             return Ok(FileSafetyOutcome::Unchanged);
         }
-        self.confirm(current.revision.clone());
+        self.revisions.insert(path.to_owned(), TrackedRevision::Observed(current.revision.clone()));
+        if current.bytes == current_content.as_bytes() {
+            return Ok(FileSafetyOutcome::Unchanged);
+        }
         if !dirty {
             return Ok(FileSafetyOutcome::Reload {
                 content: String::from_utf8_lossy(&current.bytes).into_owned(),
@@ -199,8 +267,10 @@ impl FileSafetyMonitor {
         }
         let conflict =
             create_conflict_copy(path, current_content.as_bytes(), local_device_short_id)?;
+        let conflict_revision = capture_revision(&conflict)?;
         Ok(FileSafetyOutcome::Conflict {
             conflict,
+            conflict_revision,
             content: String::from_utf8_lossy(&current.bytes).into_owned(),
             revision: current.revision,
         })
@@ -213,7 +283,12 @@ impl FileSafetyMonitor {
         current_content: &str,
         local_device_short_id: &str,
     ) -> Result<FileSafetyOutcome, FileSafetyError> {
-        self.revisions.insert(path.to_owned(), baseline.clone());
+        // A queued save already confirmed the disk revision even when its UI
+        // completion has not yet updated the restored document's baseline.
+        if self.revisions.get(path).and_then(|tracked| tracked.saved_successor(baseline)).is_none()
+        {
+            self.revisions.insert(path.to_owned(), TrackedRevision::Observed(baseline.clone()));
+        }
         self.observe(path, true, current_content, local_device_short_id)
     }
 
@@ -227,7 +302,8 @@ impl FileSafetyMonitor {
             RenameResolution::Follow(new_path) => {
                 let revision = capture_revision(&new_path)?;
                 self.revisions.remove(path);
-                self.revisions.insert(new_path.clone(), revision.clone());
+                self.revisions
+                    .insert(new_path.clone(), TrackedRevision::Observed(revision.clone()));
                 Ok(FileSafetyOutcome::Renamed { new_path, revision })
             }
             RenameResolution::Deleted => {
@@ -262,6 +338,15 @@ pub enum FileSafetyCommand {
         current_content: String,
         local_device_short_id: String,
     },
+    /// Run a local save in the same queue as observations and confirm its revision
+    /// before observing another snapshot. The operation returns None on failure.
+    Save {
+        path: PathBuf,
+        expected_revision: Option<DiskRevision>,
+        execute: Box<dyn FnOnce(Option<DiskRevision>) -> Option<DiskRevision> + Send>,
+    },
+    /// The document model has received this local save completion.
+    AcknowledgeSave(DiskRevision),
     Shutdown,
 }
 
@@ -393,6 +478,16 @@ fn file_safety_worker_loop(
                     },
                 );
             }
+            FileSafetyCommand::Save { path, expected_revision, execute } => {
+                let saved_revision = expected_revision.as_ref().and_then(|expected| {
+                    monitor.revisions.get(&path)?.saved_successor(expected).cloned()
+                });
+                let baseline = saved_revision.clone().or(expected_revision);
+                if let Some(revision) = execute(saved_revision) {
+                    monitor.confirm_save(revision, baseline);
+                }
+            }
+            FileSafetyCommand::AcknowledgeSave(revision) => monitor.acknowledge_save(&revision),
             FileSafetyCommand::Shutdown => break,
         }
     }
@@ -551,6 +646,57 @@ mod tests {
             monitor.observe(&path, false, "old", "local").expect("change should be observed");
         assert!(matches!(outcome, FileSafetyOutcome::Reload { content, .. } if content == "new"));
         assert_ne!(capture_revision(&path).expect("revision should capture"), baseline);
+    }
+
+    #[test]
+    fn dirty_observation_of_saved_content_does_not_create_conflict() {
+        for saved_content in ["鼠标替换", "段落\r\n\r\n---\r\n", "\u{feff}正文\n"] {
+            let directory = tempfile::tempdir().expect("test directory should be created");
+            let path = directory.path().join("notes.md");
+            fs::write(&path, "baseline").expect("initial source should be written");
+            let mut monitor = FileSafetyMonitor::new();
+            monitor.track(&path).expect("initial revision should be tracked");
+            fs::write(&path, saved_content).expect("local save should reach disk");
+
+            let outcome = monitor
+                .observe(&path, true, saved_content, "local")
+                .expect("pending dirty observation should reconcile the completed save");
+
+            assert!(matches!(outcome, FileSafetyOutcome::Unchanged));
+            assert_eq!(
+                fs::read_dir(directory.path()).expect("directory should be readable").count(),
+                1
+            );
+            let outcome = monitor
+                .observe(&path, true, "newer local edit", "local")
+                .expect("completed save should become the new baseline");
+            assert!(matches!(outcome, FileSafetyOutcome::Unchanged));
+            fs::write(&path, "external update").expect("external edit should reach disk");
+            let outcome = monitor
+                .observe(&path, true, "newer local edit", "local")
+                .expect("a real divergent external edit should still be protected");
+            assert!(matches!(outcome, FileSafetyOutcome::Conflict { .. }));
+        }
+    }
+
+    #[test]
+    fn dirty_snapshot_matching_disk_reconciles_without_conflict() {
+        let directory = tempfile::tempdir().expect("test directory should be created");
+        let path = directory.path().join("notes.md");
+        fs::write(&path, "baseline").expect("initial source should be written");
+        let baseline = capture_revision(&path).expect("initial revision should capture");
+        fs::write(&path, "completed save").expect("local save should reach disk");
+        let mut monitor = FileSafetyMonitor::new();
+
+        let outcome = monitor
+            .reconcile_dirty_snapshot(&path, &baseline, "completed save", "local")
+            .expect("snapshot equal to disk should reconcile");
+
+        assert!(matches!(outcome, FileSafetyOutcome::Unchanged));
+        assert_eq!(
+            fs::read_dir(directory.path()).expect("directory should be readable").count(),
+            1
+        );
     }
 
     #[test]

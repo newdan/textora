@@ -66,6 +66,8 @@ pub enum PluginMessage {
     RestoreScrollAnchor { text: String, offset: f32 },
     /// Notify plugin that the cursor byte offset in source has changed.
     SetCursorByte(usize),
+    /// Reveal this source caret once layout is available; manual scrolling cancels it.
+    RevealCursor(usize),
     /// Notify plugin whether the cursor blink phase is currently visible.
     SetCursorVisible(bool),
     /// Leave the plugin's object-specific editing focus without changing source text.

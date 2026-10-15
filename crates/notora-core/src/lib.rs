@@ -38,6 +38,7 @@ pub use domain::{
 };
 pub use file_monitor::{
     WorkspaceFileBatch, WorkspaceFileChange, WorkspaceFileMonitor, WorkspaceFileMonitorError,
+    WorkspaceFileMonitorEvent,
 };
 pub use file_name::{
     AllocatedTitleBoundFileName, DEFAULT_NOTE_TITLE, MAX_AUTOMATIC_NAME_DISAMBIGUATOR,

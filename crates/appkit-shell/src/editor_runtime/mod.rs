@@ -537,6 +537,7 @@ impl EditorRuntime {
         match completion.result {
             Ok(disk_revision) => {
                 let saved_path = disk_revision.path.clone();
+                let acknowledged_revision = disk_revision.clone();
                 let Some((clean, path_changed)) = self.model_session.apply_save_completion(
                     tab_id,
                     saved_path.clone(),
@@ -545,6 +546,7 @@ impl EditorRuntime {
                 ) else {
                     return EditorOutcome::default();
                 };
+                self.file_safety_session.acknowledge_save(acknowledged_revision);
                 let mut notifications = smallvec::smallvec![EditorNotification::SaveCompleted {
                     tab_id,
                     content_revision: completion.content_revision,
@@ -577,6 +579,9 @@ impl EditorRuntime {
         prepared: PreparedDocumentSave,
         wake: impl Fn() + Send + Sync + 'static,
     ) -> Result<(), String> {
+        if let Some(worker) = self.file_safety_session.worker() {
+            return self.save_session.submit_on_file_worker(worker, prepared, None, wake);
+        }
         self.save_session.submit(prepared, wake)
     }
 
@@ -586,6 +591,14 @@ impl EditorRuntime {
         transform: SavePayloadTransform,
         wake: impl Fn() + Send + Sync + 'static,
     ) -> Result<(), String> {
+        if let Some(worker) = self.file_safety_session.worker() {
+            return self.save_session.submit_on_file_worker(
+                worker,
+                prepared,
+                Some(transform),
+                wake,
+            );
+        }
         self.save_session.submit_with_transform(prepared, Some(transform), wake)
     }
 
@@ -623,15 +636,17 @@ impl EditorRuntime {
             .document_summaries()
             .into_iter()
             .filter_map(|summary| {
-                let path = summary.path?;
-                let current_content = self.model_session.tab_session(summary.tab_id)?.full_text();
+                let (path, serialized_contents, baseline, content_revision) =
+                    self.model_session.document_save_snapshot(summary.tab_id)?;
+                let current_content = String::from_utf8(serialized_contents)
+                    .expect("document save serialization only adds UTF-8 BOM and line endings to UTF-8 text");
                 Some(FileSafetyCandidate {
                     tab_id: summary.tab_id,
                     path,
                     dirty: summary.dirty,
-                    content_revision: summary.content_revision,
+                    content_revision,
                     current_content,
-                    baseline: summary.disk_revision,
+                    baseline,
                 })
             })
             .collect();

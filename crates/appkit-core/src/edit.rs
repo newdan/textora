@@ -47,6 +47,7 @@ pub fn apply_text_edit(
         Err(index) => index.saturating_sub(1),
     };
 
+    model.sync_selection_to_buffer();
     model.tb.edit_begin_grouping();
     model.tb.replace_range_with_history(
         edit.range.clone(),

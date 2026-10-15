@@ -70,6 +70,16 @@ impl FileSafetySession {
         self.worker.is_some()
     }
 
+    pub(crate) fn worker(&self) -> Option<&FileSafetyWorker> {
+        self.worker.as_ref()
+    }
+
+    pub(crate) fn acknowledge_save(&self, revision: DiskRevision) {
+        if let Some(worker) = &self.worker {
+            let _ = worker.submit(FileSafetyCommand::AcknowledgeSave(revision));
+        }
+    }
+
     pub(crate) fn next_check(&self) -> Instant {
         self.next_check
     }

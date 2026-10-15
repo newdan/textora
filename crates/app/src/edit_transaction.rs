@@ -468,6 +468,7 @@ fn execute_grouped_replacements(
         Err(i) => i.saturating_sub(1),
     };
 
+    doc.sync_selection_to_buffer();
     doc.tb.edit_begin_grouping();
     for replacement in replacements.iter().rev() {
         doc.tb.replace_range(replacement.range.clone(), replacement.text.as_bytes());

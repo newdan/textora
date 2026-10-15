@@ -27,6 +27,13 @@ pub enum WorkspaceFileChange {
     Removed(PathBuf),
 }
 
+#[derive(Debug)]
+pub enum WorkspaceFileMonitorEvent {
+    Ready,
+    Changes(WorkspaceFileBatch),
+    Failed(WorkspaceFileMonitorError),
+}
+
 pub struct WorkspaceFileMonitor {
     command_sender: mpsc::Sender<MonitorCommand>,
     worker: Option<JoinHandle<()>>,
@@ -54,22 +61,40 @@ impl std::error::Error for WorkspaceFileMonitorError {}
 impl WorkspaceFileMonitor {
     pub fn start(
         root: PathBuf,
-    ) -> Result<(Self, mpsc::Receiver<WorkspaceFileBatch>), WorkspaceFileMonitorError> {
+    ) -> Result<(Self, mpsc::Receiver<WorkspaceFileMonitorEvent>), WorkspaceFileMonitorError> {
+        Self::start_with_backend(root, |event_sender| {
+            RecommendedWatcher::new(
+                move |event| {
+                    let _ = event_sender.send(event);
+                },
+                Config::default(),
+            )
+        })
+    }
+
+    fn start_with_backend<W: Watcher + 'static>(
+        root: PathBuf,
+        create_watcher: impl FnOnce(mpsc::Sender<notify::Result<Event>>) -> notify::Result<W>
+        + Send
+        + 'static,
+    ) -> Result<(Self, mpsc::Receiver<WorkspaceFileMonitorEvent>), WorkspaceFileMonitorError> {
         let (command_sender, command_receiver) = mpsc::channel();
         let (result_sender, result_receiver) = mpsc::channel();
-        let (startup_sender, startup_receiver) = mpsc::channel();
         let worker = thread::Builder::new()
             .name("notora-file-monitor".to_owned())
-            .spawn(move || run_worker(root, command_receiver, result_sender, startup_sender))
+            .spawn(move || run_worker(root, command_receiver, result_sender, create_watcher))
             .map_err(|_| WorkspaceFileMonitorError::WorkerDisconnected)?;
-        startup_receiver.recv().map_err(|_| WorkspaceFileMonitorError::WorkerDisconnected)??;
 
         Ok((Self { command_sender, worker: Some(worker) }, result_receiver))
     }
 
     pub fn shutdown(&mut self) {
         let _ = self.command_sender.send(MonitorCommand::Shutdown);
-        if let Some(worker) = self.worker.take() {
+        // Platform registration and backend destruction may wait inside the OS.
+        // The worker owns those resources; callers only request its eventual exit.
+        if let Some(worker) = self.worker.take()
+            && worker.is_finished()
+        {
             let _ = worker.join();
         }
     }
@@ -85,30 +110,29 @@ enum MonitorCommand {
     Shutdown,
 }
 
-fn run_worker(
+fn run_worker<W: Watcher>(
     root: PathBuf,
     command_receiver: mpsc::Receiver<MonitorCommand>,
-    result_sender: mpsc::Sender<WorkspaceFileBatch>,
-    startup_sender: mpsc::Sender<Result<(), WorkspaceFileMonitorError>>,
+    result_sender: mpsc::Sender<WorkspaceFileMonitorEvent>,
+    create_watcher: impl FnOnce(mpsc::Sender<notify::Result<Event>>) -> notify::Result<W>,
 ) {
     let (event_sender, event_receiver) = mpsc::channel();
-    let mut watcher = match RecommendedWatcher::new(
-        move |event| {
-            let _ = event_sender.send(event);
-        },
-        Config::default(),
-    ) {
+    let mut watcher = match create_watcher(event_sender) {
         Ok(watcher) => watcher,
         Err(error) => {
-            let _ = startup_sender.send(Err(WorkspaceFileMonitorError::Watcher(error)));
+            let _ = result_sender
+                .send(WorkspaceFileMonitorEvent::Failed(WorkspaceFileMonitorError::Watcher(error)));
             return;
         }
     };
     if let Err(error) = watcher.watch(&root, RecursiveMode::Recursive) {
-        let _ = startup_sender.send(Err(WorkspaceFileMonitorError::Watcher(error)));
+        let _ = result_sender
+            .send(WorkspaceFileMonitorEvent::Failed(WorkspaceFileMonitorError::Watcher(error)));
         return;
     }
-    if startup_sender.send(Ok(())).is_err() {
+    if command_receiver.try_recv().is_ok()
+        || result_sender.send(WorkspaceFileMonitorEvent::Ready).is_err()
+    {
         return;
     }
 
@@ -125,7 +149,7 @@ fn run_event_batch_loop(
     root: &Path,
     command_receiver: &mpsc::Receiver<MonitorCommand>,
     event_receiver: &mpsc::Receiver<notify::Result<notify::Event>>,
-    result_sender: &mpsc::Sender<WorkspaceFileBatch>,
+    result_sender: &mpsc::Sender<WorkspaceFileMonitorEvent>,
     debounce: Duration,
 ) {
     let mut pending_events = Vec::new();
@@ -133,8 +157,14 @@ fn run_event_batch_loop(
         match command_receiver.recv_timeout(debounce) {
             Ok(MonitorCommand::Shutdown) | Err(mpsc::RecvTimeoutError::Disconnected) => return,
             Err(mpsc::RecvTimeoutError::Timeout) => {
-                drain_events(event_receiver, &mut pending_events);
+                let drained = drain_events(event_receiver, &mut pending_events);
                 if !send_batch(root, result_sender, &mut pending_events) {
+                    return;
+                }
+                if let Err(error) = drained {
+                    let _ = result_sender.send(WorkspaceFileMonitorEvent::Failed(
+                        WorkspaceFileMonitorError::Watcher(error),
+                    ));
                     return;
                 }
             }
@@ -145,15 +175,16 @@ fn run_event_batch_loop(
 fn drain_events(
     event_receiver: &mpsc::Receiver<notify::Result<notify::Event>>,
     pending_events: &mut Vec<Event>,
-) {
-    while let Ok(Ok(event)) = event_receiver.try_recv() {
-        pending_events.push(event);
+) -> notify::Result<()> {
+    while let Ok(event) = event_receiver.try_recv() {
+        pending_events.push(event?);
     }
+    Ok(())
 }
 
 fn send_batch(
     root: &Path,
-    sender: &mpsc::Sender<WorkspaceFileBatch>,
+    sender: &mpsc::Sender<WorkspaceFileMonitorEvent>,
     pending_events: &mut Vec<Event>,
 ) -> bool {
     let changes = normalize_changes(root, std::mem::take(pending_events));
@@ -167,7 +198,9 @@ fn send_batch(
     if relative_paths.is_empty() {
         return true;
     }
-    sender.send(WorkspaceFileBatch { relative_paths, changes }).is_ok()
+    sender
+        .send(WorkspaceFileMonitorEvent::Changes(WorkspaceFileBatch { relative_paths, changes }))
+        .is_ok()
 }
 
 fn normalize_changes(root: &Path, events: Vec<Event>) -> Vec<WorkspaceFileChange> {
@@ -341,6 +374,124 @@ mod tests {
 
     use super::{MonitorCommand, WorkspaceFileChange, filter_relative_paths, run_event_batch_loop};
 
+    struct BlockedRegistration {
+        entered: mpsc::Sender<()>,
+        release: mpsc::Receiver<()>,
+    }
+
+    impl notify::Watcher for BlockedRegistration {
+        fn new<F: notify::EventHandler>(_: F, _: notify::Config) -> notify::Result<Self> {
+            panic!("test backend requires an explicit registration gate");
+        }
+
+        fn watch(&mut self, _: &Path, _: notify::RecursiveMode) -> notify::Result<()> {
+            self.entered.send(()).expect("registration should report entry");
+            self.release.recv().expect("test should release registration");
+            Ok(())
+        }
+
+        fn unwatch(&mut self, _: &Path) -> notify::Result<()> {
+            Ok(())
+        }
+
+        fn kind() -> notify::WatcherKind {
+            notify::WatcherKind::PollWatcher
+        }
+    }
+
+    #[test]
+    fn workspace_monitor_start_does_not_wait_for_platform_registration() {
+        let (entered_sender, entered_receiver) = mpsc::channel();
+        let (release_sender, release_receiver) = mpsc::channel();
+        let watcher = BlockedRegistration { entered: entered_sender, release: release_receiver };
+        let (started_sender, started_receiver) = mpsc::channel();
+        let caller = thread::spawn(move || {
+            let monitor = super::WorkspaceFileMonitor::start_with_backend(
+                PathBuf::from("/workspace"),
+                move |_| Ok(watcher),
+            );
+            started_sender.send(monitor).expect("start outcome should be observed");
+        });
+        entered_receiver.recv_timeout(Duration::from_secs(2)).expect("registration should start");
+        let started_while_blocked = started_receiver.recv_timeout(Duration::from_secs(1));
+        release_sender.send(()).expect("registration should be released");
+        caller.join().expect("start caller should finish");
+        let was_nonblocking = started_while_blocked.is_ok();
+        let (mut monitor, _) = started_while_blocked
+            .or_else(|_| started_receiver.recv_timeout(Duration::from_secs(2)))
+            .expect("start should finish after release")
+            .expect("test backend should start");
+        monitor.shutdown();
+        assert!(was_nonblocking, "workspace activation must not wait for platform registration");
+    }
+
+    #[test]
+    fn workspace_monitor_shutdown_returns_during_blocked_registration() {
+        let (entered_sender, entered_receiver) = mpsc::channel();
+        let (release_sender, release_receiver) = mpsc::channel();
+        let watcher = BlockedRegistration { entered: entered_sender, release: release_receiver };
+        let (mut monitor, _) = super::WorkspaceFileMonitor::start_with_backend(
+            PathBuf::from("/workspace"),
+            move |_| Ok(watcher),
+        )
+        .expect("worker should start");
+        entered_receiver.recv_timeout(Duration::from_secs(2)).expect("registration should enter");
+        let (stopped_sender, stopped_receiver) = mpsc::channel();
+        let caller = thread::spawn(move || {
+            monitor.shutdown();
+            stopped_sender.send(()).expect("shutdown should report completion");
+        });
+        let stopped_while_blocked = stopped_receiver.recv_timeout(Duration::from_secs(1));
+        release_sender.send(()).expect("test should release registration");
+        caller.join().expect("shutdown caller should finish");
+        assert!(stopped_while_blocked.is_ok(), "shutdown must not join a blocked platform backend");
+    }
+
+    #[test]
+    fn workspace_monitor_initialization_failure_is_reported_asynchronously() {
+        let (mut monitor, events) = super::WorkspaceFileMonitor::start_with_backend(
+            PathBuf::from("/workspace"),
+            |_| -> notify::Result<BlockedRegistration> {
+                Err(notify::Error::generic("injected initialization failure"))
+            },
+        )
+        .expect("worker creation should succeed before backend initialization");
+        assert!(matches!(
+            events.recv_timeout(Duration::from_secs(2)),
+            Ok(super::WorkspaceFileMonitorEvent::Failed(
+                super::WorkspaceFileMonitorError::Watcher(_)
+            ))
+        ));
+        monitor.shutdown();
+    }
+
+    #[test]
+    fn workspace_monitor_reports_backend_event_errors() {
+        let (command_sender, command_receiver) = mpsc::channel();
+        let (event_sender, event_receiver) = mpsc::channel();
+        let (result_sender, result_receiver) = mpsc::channel();
+        let worker = thread::spawn(move || {
+            run_event_batch_loop(
+                Path::new("/workspace"),
+                &command_receiver,
+                &event_receiver,
+                &result_sender,
+                Duration::from_millis(10),
+            )
+        });
+        event_sender
+            .send(Err(notify::Error::generic("injected stream failure")))
+            .expect("backend error should be injected");
+        assert!(matches!(
+            result_receiver.recv_timeout(Duration::from_secs(2)),
+            Ok(super::WorkspaceFileMonitorEvent::Failed(
+                super::WorkspaceFileMonitorError::Watcher(_)
+            ))
+        ));
+        drop(command_sender);
+        worker.join().expect("failed monitor event loop should stop");
+    }
+
     #[test]
     fn filter_ignores_metadata_and_deduplicates_paths() {
         let root = Path::new("/workspace");
@@ -379,9 +530,12 @@ mod tests {
                 .add_path(PathBuf::from("/workspace/after.md"))))
             .expect("rename destination event should send");
 
-        let batch = result_receiver
+        let super::WorkspaceFileMonitorEvent::Changes(batch) = result_receiver
             .recv_timeout(Duration::from_secs(1))
-            .expect("rename events should be emitted as one batch");
+            .expect("rename events should be emitted as one batch")
+        else {
+            panic!("injected rename events must produce a changes batch");
+        };
         assert_eq!(
             batch.relative_paths,
             vec![PathBuf::from("after.md"), PathBuf::from("before.md")]

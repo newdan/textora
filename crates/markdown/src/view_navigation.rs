@@ -8,11 +8,12 @@ impl PreviewEngine<MarkdownDoc> {
         let document_view = core::document::StringDocView::new(source);
         let parsed = crate::parser::parse_markdown(source);
         let document = MarkdownDoc::build_for_editing(&parsed, &style, source);
-        let mut layout = LazyLayout::new(document, &style, self.cached_viewport_w, &document_view);
-        layout.set_source_generation(self.source_generation);
-        layout.set_edit_source(self.edit_source.clone());
-        layout.set_edit_ctx(self.edit_ctx.clone());
-        layout.set_selection_range(self.byte_selection_range().map(|(start, end)| start..end));
+        let mut layout = self.create_layout_with_view_state(
+            document,
+            &style,
+            self.cached_viewport_w,
+            &document_view,
+        );
         if incremental_layout_reuse_enabled()
             && let Some(previous) = self.lazy.take()
         {
@@ -28,6 +29,21 @@ impl PreviewEngine<MarkdownDoc> {
 }
 
 impl<S: BlockSource> PreviewEngine<S> {
+    pub(super) fn reveal_pending_cursor(&mut self, viewport_height: f32) -> bool {
+        let Some(byte) = self.pending_cursor_reveal else { return false };
+        let Some((_, cursor_y, _, cursor_height)) = self.cursor_screen_pos_for_byte(byte) else {
+            return false;
+        };
+        let delta = if cursor_y < 0.0 {
+            cursor_y
+        } else {
+            (cursor_y + cursor_height - viewport_height).max(0.0)
+        };
+        self.scroll_y =
+            (self.scroll_y + delta).clamp(0.0, (self.content_height - viewport_height).max(0.0));
+        true
+    }
+
     pub(super) fn refresh_query_cursor_layout(&mut self, previous: Option<usize>, current: usize) {
         let Some(style) = self.cached_query_style.as_ref() else { return };
         let Some(source) = self.edit_source.as_deref() else { return };

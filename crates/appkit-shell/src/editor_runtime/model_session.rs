@@ -1091,6 +1091,7 @@ fn apply_edit_transaction(
         return apply_edit_selection(document, transaction.selection_after);
     }
 
+    document.sync_selection_to_buffer();
     document.tb.edit_begin_grouping();
     for replacement in replacements.iter().rev() {
         document.tb.replace_range_with_history(

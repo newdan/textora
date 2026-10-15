@@ -119,40 +119,43 @@ impl App {
                     .and_then(|active_tab| wysiwyg_cursor_x(&active_tab, cursor_after))
             });
             self.editor_runtime.set_preferred_x(resolved_anchor_x);
-            self.ensure_wysiwyg_cursor_visible();
         } else {
             self.editor_runtime.set_preferred_x(None);
         }
+        self.ensure_wysiwyg_cursor_visible();
 
         AppEffect::REDRAW
     }
 
     /// Scroll the plugin viewport by the minimal delta that reveals the cursor
-    /// after vertical navigation. No-op when the cursor is already inside the
+    /// after navigation or editing. No-op when the cursor is already inside the
     /// viewport (avoids scroll jitter).
-    fn ensure_wysiwyg_cursor_visible(&mut self) {
-        let viewport_h = self.plugin_viewport_h();
-        let Some(delta) = self.wysiwyg_cursor_visibility_delta(viewport_h) else {
+    pub(crate) fn ensure_wysiwyg_cursor_visible(&mut self) {
+        if !self.active_handles_own_rendering() {
             return;
-        };
-        let Some(mut tab) = self.active_tab_session_mut() else {
-            return;
-        };
-        tab.send_message(PluginMessage::Scroll { delta, viewport_h });
-    }
-
-    /// Minimal signed scroll delta needed to bring the cursor into the plugin
-    /// viewport; `None` when the cursor is already visible or its on-screen
-    /// geometry is unavailable.
-    fn wysiwyg_cursor_visibility_delta(&self, viewport_h: f32) -> Option<f32> {
-        let tab = self.active_tab_session()?;
-        let cursor_byte = tab.document.cursor_offset().to_usize();
-        let (_x, cursor_y, _w, cursor_h) = tab.query_cursor_screen_rect(cursor_byte)?;
-        if cursor_y < 0.0 {
-            return Some(cursor_y);
         }
-        let overflow_below = cursor_y + cursor_h - viewport_h;
-        (overflow_below > 0.0).then_some(overflow_below)
+        let viewport_h = self.plugin_viewport_h();
+        let Some(tab) = self.active_tab_session() else {
+            return;
+        };
+        let cursor_byte = tab.document.cursor_offset().to_usize();
+        let message = match tab.query_cursor_screen_rect(cursor_byte) {
+            Some((_, cursor_y, _, cursor_h)) => {
+                let delta = if cursor_y < 0.0 {
+                    cursor_y
+                } else {
+                    (cursor_y + cursor_h - viewport_h).max(0.0)
+                };
+                if delta == 0.0 {
+                    return;
+                }
+                PluginMessage::Scroll { delta, viewport_h }
+            }
+            None => PluginMessage::RevealCursor(cursor_byte),
+        };
+        if let Some(mut tab) = self.active_tab_session_mut() {
+            tab.send_message(message);
+        }
     }
 
     /// Move cursor to byte offset 0 (document start).
@@ -169,6 +172,7 @@ impl App {
             .then(|| tab.document.cursor().selection_anchor.unwrap_or(current_byte));
         let _snapped = set_wysiwyg_cursor_and_selection(&mut tab, byte, selection_anchor);
         self.editor_runtime.set_preferred_x(None);
+        self.ensure_wysiwyg_cursor_visible();
         AppEffect::REDRAW
     }
 

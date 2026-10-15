@@ -62,7 +62,7 @@ impl DocumentView {
     /// Incremental sync for undo/redo: rescan from line 0 reusing Vec capacity,
     /// and update viewport in-place instead of recreating it.
     fn sync_after_edit_incremental_undo_redo(&mut self) {
-        self.sync_cursor_offset_from_tb();
+        self.model.sync_cursor_from_buffer();
         self.mark_content_changed();
         self.dirty = self.tb.is_dirty();
         // Assign stable snapshot ID when tab becomes dirty (for hot exit).
