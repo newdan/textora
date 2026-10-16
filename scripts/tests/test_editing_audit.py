@@ -18,6 +18,22 @@ REPOSITORY = SCRIPT.parent.parent
 PHASES = ("build", "formatting", "semantic", "file_roundtrip", "history", "harness", "full_verify", "visual_metrics")
 
 
+class CanvasComparisonTests(unittest.TestCase):
+    def test_blinking_caret_over_text_does_not_change_layout(self):
+        changed_pixels = [frozenset(range(14))] * 3
+        caret_pixels = [frozenset(range(14))] * 3
+        self.assertEqual(AUDIT.changed_content_rows(changed_pixels, caret_pixels), 0)
+
+    def test_content_change_outside_both_carets_remains_visible(self):
+        changed_pixels = [frozenset(range(40))] * 3
+        caret_pixels = [frozenset(range(2)) | frozenset(range(8, 10))] * 3
+        self.assertEqual(AUDIT.changed_content_rows(changed_pixels, caret_pixels), 3)
+
+    def test_different_canvas_heights_are_rejected(self):
+        with self.assertRaises(ValueError):
+            AUDIT.changed_content_rows([], [frozenset()])
+
+
 class EvidenceAcceptanceTests(unittest.TestCase):
     def setUp(self):
         self.workspace = tempfile.TemporaryDirectory()

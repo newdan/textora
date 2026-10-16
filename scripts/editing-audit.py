@@ -469,27 +469,36 @@ def layout_metrics_passed(case, steps, restored):
                for action, step in zip(case["keys"], steps))
 
 
+def changed_content_rows(changed_pixels, occluded_pixels, pixel_delta=10):
+    if len(changed_pixels) != len(occluded_pixels):
+        raise ValueError("Canvas captures must have the same height")
+    return sum(len(changes - occlusion) > pixel_delta
+               for changes, occlusion in zip(changed_pixels, occluded_pixels))
+
+
 def image_metrics(directory):
     from PIL import Image
     import numpy as np
 
     color_distance = 10
-    row_pixel_delta = 10
     minimum_changed_rows = 3
 
-    def row_signature(image_path):
+    def canvas_pixels(image_path):
         with Image.open(image_path) as image:
             if image.width < 1440 or image.height < 600:
                 raise ValueError("Screenshot dimensions require editor-canvas crop recalibration")
             canvas = image.convert("RGB").crop((440, 72, 1440, 600))
-            background = max(canvas.getcolors(canvas.width * canvas.height), key=lambda entry: entry[0])[1]
             pixels = np.asarray(canvas, dtype=np.int16)
-            foreground = np.max(np.abs(pixels - np.asarray(background)), axis=2) > color_distance
             caret = (pixels[:, :, 0] - pixels[:, :, 1] > 30) & (pixels[:, :, 1] - pixels[:, :, 2] > 15)
-            return (foreground & ~caret).sum(axis=1)
+            return pixels, caret
 
     def changed_rows(first, second):
-        return int((np.abs(first - second) > row_pixel_delta).sum())
+        differences = np.max(np.abs(first[0] - second[0]), axis=2) > color_distance
+        occlusion = first[1] | second[1]
+        return changed_content_rows(
+            [frozenset(np.flatnonzero(row)) for row in differences],
+            [frozenset(np.flatnonzero(row)) for row in occlusion],
+        )
 
     manifest = json.loads((directory / "manifest.json").read_text())
     completed = []
@@ -506,17 +515,17 @@ def image_metrics(directory):
         if not image_check_ready(captures, case, result, manifest):
             missing.append(case["id"])
             continue
-        previous = row_signature(captures / "before.png")
+        previous = canvas_pixels(captures / "before.png")
         before = previous
         steps = []
         for index, key in enumerate(case["keys"], start=1):
-            current = row_signature(captures / f"step-{index:02}.png")
+            current = canvas_pixels(captures / f"step-{index:02}.png")
             difference = changed_rows(previous, current)
             steps.append({"key": key, "changed_content_rows": difference,
                           "layout_changed": difference >= minimum_changed_rows,
                           "capture_scope": "batch-final" if is_key_batch(key) else "single-key"})
             previous = current
-        restored = changed_rows(before, row_signature(captures / "after.png")) < minimum_changed_rows
+        restored = changed_rows(before, canvas_pixels(captures / "after.png")) < minimum_changed_rows
         completed.append({"id": case["id"], "steps": steps, "layout_restored": restored,
                           "passed": layout_metrics_passed(case, steps, restored)})
     summary = {"run_id": manifest["run_id"], "cases": completed, "missing": missing,
