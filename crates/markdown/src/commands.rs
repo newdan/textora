@@ -1,5 +1,6 @@
 use ui::plugin::{SemanticEditCommand, SemanticEditPlan};
 
+mod strikethrough;
 mod table_structure;
 pub use table_structure::{TableStructureCapabilities, table_structure_capabilities};
 #[cfg(test)]
@@ -36,7 +37,7 @@ pub fn plan_semantic_edit(
             plan_inline_toggle(source, source_generation, cursor_byte, selection, "*")
         }
         SemanticEditCommand::ToggleStrikethrough => {
-            plan_inline_toggle(source, source_generation, cursor_byte, selection, "~~")
+            strikethrough::plan_toggle(source, source_generation, cursor_byte, selection)
         }
         SemanticEditCommand::ToggleInlineCode => {
             plan_inline_code(source, source_generation, cursor_byte, selection)
@@ -1299,6 +1300,141 @@ mod tests {
         let (result, _) = applied_text("中文文本", SemanticEditCommand::ToggleBold, 6, Some(0..6));
 
         assert_eq!(result, "**中文**文本");
+    }
+
+    #[test]
+    fn strikethrough_formats_each_selected_paragraph() {
+        for newline in [LF_SEQUENCE, CRLF_SEQUENCE] {
+            let source = format!(
+                "前文{newline}{newline}第一段{newline}{newline}第二段{newline}{newline}后文"
+            );
+            let start = source.find("第一段").expect("first selected paragraph exists");
+            let end =
+                source.find("第二段").expect("last selected paragraph exists") + "第二段".len();
+            let (formatted, _) = applied_text(
+                &source,
+                SemanticEditCommand::ToggleStrikethrough,
+                end,
+                Some(start..end),
+            );
+
+            assert_eq!(
+                formatted,
+                source.replace("第一段", "~~第一段~~").replace("第二段", "~~第二段~~")
+            );
+            assert_eq!(
+                crate::parser::parse_markdown(&formatted)
+                    .events
+                    .iter()
+                    .filter(|event| matches!(
+                        event,
+                        crate::parser::MarkdownEvent::Start(
+                            crate::parser::MarkdownTag::Strikethrough
+                        )
+                    ))
+                    .count(),
+                2,
+            );
+        }
+    }
+
+    #[test]
+    fn strikethrough_removes_markers_from_every_selected_paragraph() {
+        let source = "~~第一段~~\n\n~~第二段~~\n\n~~第三段~~";
+        let (restored, _) = applied_text(
+            source,
+            SemanticEditCommand::ToggleStrikethrough,
+            source.len(),
+            Some(0..source.len()),
+        );
+
+        assert_eq!(restored, "第一段\n\n第二段\n\n第三段");
+    }
+
+    #[test]
+    fn strikethrough_applies_consistently_to_mixed_selected_paragraphs() {
+        let source = "~~第一段~~\n\n第二段\n\n~~第三段~~";
+        let (formatted, _) = applied_text(
+            source,
+            SemanticEditCommand::ToggleStrikethrough,
+            source.len(),
+            Some(0..source.len()),
+        );
+
+        assert_eq!(formatted, "~~第一段~~\n\n~~第二段~~\n\n~~第三段~~");
+    }
+
+    #[test]
+    fn strikethrough_preserves_block_structure_and_round_trips() {
+        for (source, expected) in [
+            ("## 标题\n\n正文", "## ~~标题~~\n\n~~正文~~"),
+            ("- 第一项\n- 第二项", "- ~~第一项~~\n- ~~第二项~~"),
+            ("- [ ] 任务一\n- [x] 任务二", "- [ ] ~~任务一~~\n- [x] ~~任务二~~"),
+            ("> 第一段\n>\n> 第二段", "> ~~第一段~~\n>\n> ~~第二段~~"),
+            ("> 第一行\n> 第二行", "> ~~第一行\n> 第二行~~"),
+            ("  第一段  \r\n\r\n第二段\r\n", "  ~~第一段~~  \r\n\r\n~~第二段~~\r\n"),
+            ("正文\n\n```\n代码\n```\n\n末段", "~~正文~~\n\n```\n代码\n```\n\n~~末段~~"),
+            ("| 标题 |\n| --- |\n| 内容 |", "| ~~标题~~ |\n| --- |\n| ~~内容~~ |"),
+        ] {
+            let (formatted, _) = applied_text(
+                source,
+                SemanticEditCommand::ToggleStrikethrough,
+                source.len(),
+                Some(0..source.len()),
+            );
+            assert_eq!(formatted, expected, "source: {source:?}");
+            let (restored, _) = applied_text(
+                &formatted,
+                SemanticEditCommand::ToggleStrikethrough,
+                formatted.len(),
+                Some(0..formatted.len()),
+            );
+            assert_eq!(restored, source, "formatted: {formatted:?}");
+        }
+    }
+
+    #[test]
+    fn strikethrough_only_formats_selected_parts_of_boundary_paragraphs() {
+        let source = "前文第一段\n\n第二段后文";
+        let start = "前文".len();
+        let end = source.len() - "后文".len();
+        let (formatted, _) =
+            applied_text(source, SemanticEditCommand::ToggleStrikethrough, end, Some(start..end));
+        assert_eq!(formatted, "前文~~第一段~~\n\n~~第二段~~后文");
+
+        let start = formatted.find("第一段").expect("first paragraph exists");
+        let end = formatted.find("第二段").expect("second paragraph exists") + "第二段".len();
+        let (restored, _) = applied_text(
+            &formatted,
+            SemanticEditCommand::ToggleStrikethrough,
+            end,
+            Some(start..end),
+        );
+        assert_eq!(restored, source);
+    }
+
+    #[test]
+    fn strikethrough_removes_multiple_spans_within_each_paragraph() {
+        let source = "~~第一处~~ ~~第二处~~\n\n~~第三处~~";
+        let (restored, _) = applied_text(
+            source,
+            SemanticEditCommand::ToggleStrikethrough,
+            source.len(),
+            Some(0..source.len()),
+        );
+        assert_eq!(restored, "第一处 第二处\n\n第三处");
+    }
+
+    #[test]
+    fn strikethrough_does_not_nest_markers_in_partially_formatted_paragraphs() {
+        let source = "第一处 ~~第二处~~\n\n第三处";
+        let (formatted, _) = applied_text(
+            source,
+            SemanticEditCommand::ToggleStrikethrough,
+            source.len(),
+            Some(0..source.len()),
+        );
+        assert_eq!(formatted, "~~第一处 第二处~~\n\n~~第三处~~");
     }
 
     #[test]
