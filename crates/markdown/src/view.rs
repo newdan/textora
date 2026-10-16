@@ -7,7 +7,8 @@
 use crate::builder::{CodeHighlighter, HighlightSpan, MarkdownDoc};
 use crate::layout::{BlockSource, HeadingEntry, LazyLayout};
 use crate::projection::{
-    CursorAffinity, HorizontalDirection, LineBoundary, SourceProjectionIndex, VisualPosition,
+    CursorAffinity, HorizontalDirection, LineBoundary, SourceAnchor, SourceProjectionIndex,
+    VisualPosition,
 };
 use crate::search::SearchHighlightCache;
 use crate::selection::{self, SelectionState, ViewPos};
@@ -25,6 +26,7 @@ use ui::Theme;
 use ui::core::paint::DrawList;
 use ui::plugin::{
     PastePreference, PluginFactory, PluginMessage, PluginQuery, PluginResponse, ViewPlugin,
+    VisualCaretPosition,
 };
 use unicode_segmentation::UnicodeSegmentation;
 
@@ -384,6 +386,7 @@ pub struct PreviewEngine<S: BlockSource = MarkdownDoc> {
     headings: Vec<HeadingEntry>,
     pending_heading_jump: Option<usize>,
     pending_cursor_reveal: Option<usize>,
+    cursor_affinity: CursorAffinity,
 
     sel: SelectionState,
     sel_anchor_byte: Option<usize>,
@@ -444,6 +447,7 @@ impl<S: BlockSource> PreviewEngine<S> {
             headings: Vec::new(),
             pending_heading_jump: None,
             pending_cursor_reveal: None,
+            cursor_affinity: CursorAffinity::Downstream,
             sel: SelectionState::new(),
             sel_anchor_byte: None,
             sel_cursor_byte: None,
@@ -478,6 +482,7 @@ impl<S: BlockSource> PreviewEngine<S> {
 
     /// Mark the engine cache as dirty (source changed). Full rebuild.
     pub fn mark_source_dirty(&mut self) {
+        self.cursor_affinity = CursorAffinity::Downstream;
         self.dirty = EngineDirty::SourceChanged;
         self.sel.clear();
         self.cached_dl = None;
@@ -491,6 +496,7 @@ impl<S: BlockSource> PreviewEngine<S> {
         if old_byte == Some(new_byte) {
             return;
         }
+        self.cursor_affinity = CursorAffinity::Downstream;
         let preedit_text = self.edit_ctx.as_ref().and_then(|ctx| ctx.preedit_text.clone());
         let preedit_cursor = self.edit_ctx.as_ref().and_then(|ctx| ctx.preedit_cursor);
         self.edit_ctx =
@@ -1392,7 +1398,10 @@ impl<S: BlockSource> PreviewEngine<S> {
         }
 
         let (visual_line_idx, visual_grapheme) = self
-            .cursor_visual_position_for_byte(cursor_byte, CursorAffinity::Downstream)
+            .cursor_visual_position_for_byte(
+                cursor_byte,
+                self.cursor_affinity_for_byte(cursor_byte),
+            )
             .map(|position| (position.flat_line_idx, position.grapheme_pos))?;
         let flat_idx = lazy.flat_line_idx_for_projection(visual_line_idx)?;
         let fl = lazy.flat_lines.get(flat_idx)?;
@@ -1650,54 +1659,64 @@ impl<S: BlockSource> PreviewEngine<S> {
         (flat_line.rect.x + flat_line.rect.w).max(text_right) + trailing_space_advance
     }
 
-    fn flat_line_source_start(&self, flat_line: &crate::layout::FlatLine) -> Option<usize> {
+    fn flat_line_start_anchor(&self, flat_line: &crate::layout::FlatLine) -> Option<SourceAnchor> {
         if let Some(source_range) = &flat_line.atomic_source_range {
-            return Some(source_range.start);
+            return Some(SourceAnchor::downstream(source_range.start));
         }
 
-        self.byte_from_flat_line_and_visual_grapheme(flat_line.flat_idx, 0)
+        self.anchor_from_flat_line_and_visual_grapheme(flat_line.flat_idx, 0)
     }
 
-    fn flat_line_source_end(&self, flat_line: &crate::layout::FlatLine) -> Option<usize> {
+    fn flat_line_end_anchor(&self, flat_line: &crate::layout::FlatLine) -> Option<SourceAnchor> {
         if let Some(source_range) = &flat_line.atomic_source_range {
-            return Some(source_range.end);
+            return Some(SourceAnchor::downstream(source_range.end));
         }
 
-        self.byte_from_flat_line_and_visual_grapheme(
+        self.anchor_from_flat_line_and_visual_grapheme(
             flat_line.flat_idx,
             crate::grapheme_map::grapheme_count(&flat_line.text),
         )
     }
 
-    fn source_byte_for_flat_line_hit(
+    fn source_anchor_for_flat_line_hit(
         &self,
         flat_line: &crate::layout::FlatLine,
         doc_x: f32,
         doc_y: f32,
-    ) -> Option<usize> {
+    ) -> Option<SourceAnchor> {
         if let Some(source_range) = &flat_line.atomic_source_range {
             let vertical_midpoint = flat_line.rect.y + flat_line.rect.h * 0.5;
-            return Some(if doc_y < vertical_midpoint {
+            return Some(SourceAnchor::downstream(if doc_y < vertical_midpoint {
                 source_range.start
             } else {
                 source_range.end
-            });
+            }));
         }
 
         let line_x = doc_x - flat_line.rect.x;
         let visual_grapheme = crate::layout::grapheme_at_x(flat_line, line_x);
-        self.byte_from_flat_line_and_visual_grapheme(flat_line.flat_idx, visual_grapheme)
+        self.anchor_from_flat_line_and_visual_grapheme(flat_line.flat_idx, visual_grapheme)
     }
 
     /// 屏幕坐标 → 源码字节偏移。用于鼠标点击。
     /// 输入 y/offset_y 为插件渲染空间坐标；内部加回 scroll_y 以匹配
     /// flat_line 的文档绝对 y（与 render_line_with_offset 的投影互逆）。
     pub fn hit_test_byte(&self, x: f32, y: f32, offset_x: f32, offset_y: f32) -> Option<usize> {
+        self.hit_test_anchor(x, y, offset_x, offset_y).map(|anchor| anchor.byte)
+    }
+
+    fn hit_test_anchor(
+        &self,
+        x: f32,
+        y: f32,
+        offset_x: f32,
+        offset_y: f32,
+    ) -> Option<SourceAnchor> {
         if let Some(composition) = &self.replacement_preedit {
             return composition
                 .engine
-                .hit_test_byte(x, y, offset_x, offset_y)
-                .map(|byte| composition.source_byte(byte));
+                .hit_test_anchor(x, y, offset_x, offset_y)
+                .map(|anchor| composition.source_anchor(anchor));
         }
         let lazy = self.lazy.as_ref()?;
         let doc_x = x - offset_x;
@@ -1735,7 +1754,7 @@ impl<S: BlockSource> PreviewEngine<S> {
             });
 
         if let Some(flat_line) = flat_line {
-            return self.source_byte_for_flat_line_hit(flat_line, doc_x, doc_y);
+            return self.source_anchor_for_flat_line_hit(flat_line, doc_x, doc_y);
         }
 
         let above = lazy.flat_lines.iter().rfind(|fl| fl.rect.y + fl.rect.h <= doc_y);
@@ -1745,9 +1764,9 @@ impl<S: BlockSource> PreviewEngine<S> {
             let above_bottom = above.rect.y + above.rect.h;
             let gap_mid_y = (above_bottom + below.rect.y) * 0.5;
             return if doc_y < gap_mid_y {
-                self.flat_line_source_end(above)
+                self.flat_line_end_anchor(above)
             } else {
-                self.flat_line_source_start(below)
+                self.flat_line_start_anchor(below)
             };
         }
 
@@ -1755,25 +1774,25 @@ impl<S: BlockSource> PreviewEngine<S> {
         // even when the painted content is only a thin horizontal rule.
         if let Some(above) = above {
             if above.atomic_source_range.is_some() && doc_y <= lazy.total_height {
-                return self.flat_line_source_end(above);
+                return self.flat_line_end_anchor(above);
             }
             let gap = doc_y - (above.rect.y + above.rect.h);
             if gap > above.rect.h * HIT_TEST_SNAP_MAX_LINE_HEIGHTS {
                 return None; // far below content
             }
-            return self.flat_line_source_end(above);
+            return self.flat_line_end_anchor(above);
         }
 
         // No line above — click above first line; snap to start of first line.
         if let Some(below) = lazy.flat_lines.first() {
             if below.atomic_source_range.is_some() && doc_y >= 0.0 {
-                return self.flat_line_source_start(below);
+                return self.flat_line_start_anchor(below);
             }
             let gap = below.rect.y - doc_y;
             if gap > below.rect.h * HIT_TEST_SNAP_MAX_LINE_HEIGHTS {
                 return None; // far above content
             }
-            return self.flat_line_source_start(below);
+            return self.flat_line_start_anchor(below);
         }
 
         None
@@ -1784,11 +1803,20 @@ impl<S: BlockSource> PreviewEngine<S> {
         flat_line_idx: usize,
         visual_grapheme: usize,
     ) -> Option<usize> {
+        self.anchor_from_flat_line_and_visual_grapheme(flat_line_idx, visual_grapheme)
+            .map(|anchor| anchor.byte)
+    }
+
+    fn anchor_from_flat_line_and_visual_grapheme(
+        &self,
+        flat_line_idx: usize,
+        visual_grapheme: usize,
+    ) -> Option<SourceAnchor> {
         if let Some(composition) = &self.replacement_preedit {
             return composition
                 .engine
-                .byte_from_flat_line_and_visual_grapheme(flat_line_idx, visual_grapheme)
-                .map(|byte| composition.source_byte(byte));
+                .anchor_from_flat_line_and_visual_grapheme(flat_line_idx, visual_grapheme)
+                .map(|anchor| composition.source_anchor(anchor));
         }
         let lazy = self.lazy.as_ref()?;
         let index = lazy.source_projection_index.as_ref()?;
@@ -1799,7 +1827,7 @@ impl<S: BlockSource> PreviewEngine<S> {
             flat_line_idx: projection_flat_line_idx,
             grapheme_pos: visual_grapheme,
         };
-        index.source_anchor_at(self.source_generation, position).ok().map(|anchor| anchor.byte)
+        index.source_anchor_at(self.source_generation, position).ok()
     }
 
     /// 找到 byte 所在的 flat_line 索引和该 byte 在行内的 x 像素位置。
@@ -1818,7 +1846,8 @@ impl<S: BlockSource> PreviewEngine<S> {
                 .engine
                 .find_flat_and_grapheme_for_byte(composition.preview_byte(byte));
         }
-        let position = self.cursor_visual_position_for_byte(byte, CursorAffinity::Downstream)?;
+        let position =
+            self.cursor_visual_position_for_byte(byte, self.cursor_affinity_for_byte(byte))?;
         let flat_line_idx =
             self.lazy.as_ref()?.flat_line_idx_for_projection(position.flat_line_idx)?;
         Some((flat_line_idx, position.grapheme_pos))
@@ -1877,12 +1906,21 @@ impl<S: BlockSource> PreviewEngine<S> {
         direction: ui::plugin::MoveDirection,
         target_x: Option<f32>,
     ) -> Option<usize> {
+        self.visual_move_anchor(current_byte, direction, target_x).map(|anchor| anchor.byte)
+    }
+
+    fn visual_move_anchor(
+        &self,
+        current_byte: usize,
+        direction: ui::plugin::MoveDirection,
+        target_x: Option<f32>,
+    ) -> Option<SourceAnchor> {
         use ui::plugin::MoveDirection;
         if let Some(composition) = &self.replacement_preedit {
             return composition
                 .engine
-                .visual_move(composition.preview_byte(current_byte), direction, target_x)
-                .map(|byte| composition.source_byte(byte));
+                .visual_move_anchor(composition.preview_byte(current_byte), direction, target_x)
+                .map(|anchor| composition.source_anchor(anchor));
         }
         let lazy = self.lazy.as_ref()?;
         let source = self.edit_source.as_ref();
@@ -1905,21 +1943,21 @@ impl<S: BlockSource> PreviewEngine<S> {
         match direction {
             MoveDirection::Left => {
                 if current_byte == 0 {
-                    return Some(0);
+                    return Some(SourceAnchor::downstream(0));
                 }
                 if let Some(anchor) =
                     index.move_horizontal(current_byte, HorizontalDirection::Previous)
                 {
-                    return Some(anchor.byte);
+                    return Some(anchor);
                 }
-                Some(0)
+                Some(SourceAnchor::downstream(0))
             }
             MoveDirection::Right => {
                 if let Some(anchor) = index.move_horizontal(current_byte, HorizontalDirection::Next)
                 {
-                    return Some(anchor.byte);
+                    return Some(anchor);
                 }
-                Some(current_byte)
+                Some(SourceAnchor::downstream(current_byte))
             }
             MoveDirection::Up | MoveDirection::Down => self.visual_move_in_projection_sequence(
                 lazy,
@@ -1932,17 +1970,25 @@ impl<S: BlockSource> PreviewEngine<S> {
                 if let Some(line) = current_source_line
                     && line.is_empty()
                 {
-                    return Some(line.start);
+                    return Some(SourceAnchor::downstream(line.start));
                 }
-                index.line_boundary(current_byte, LineBoundary::Start).map(|anchor| anchor.byte)
+                index.line_boundary_with_affinity(
+                    current_byte,
+                    self.cursor_affinity_for_byte(current_byte),
+                    LineBoundary::Start,
+                )
             }
             MoveDirection::LineEnd => {
                 if let Some(line) = current_source_line
                     && line.is_empty()
                 {
-                    return Some(line.start);
+                    return Some(SourceAnchor::downstream(line.start));
                 }
-                index.line_boundary(current_byte, LineBoundary::End).map(|anchor| anchor.byte)
+                index.line_boundary_with_affinity(
+                    current_byte,
+                    self.cursor_affinity_for_byte(current_byte),
+                    LineBoundary::End,
+                )
             }
         }
     }
@@ -1954,22 +2000,25 @@ impl<S: BlockSource> PreviewEngine<S> {
         current_byte: usize,
         direction: ui::plugin::MoveDirection,
         target_x: Option<f32>,
-    ) -> Option<usize> {
+    ) -> Option<SourceAnchor> {
         let current_position =
             self.projection_position_for_vertical_move(lazy, index, current_byte)?;
         let target_visual_line_idx = match direction {
             ui::plugin::MoveDirection::Up => {
                 let Some(target) = current_position.flat_line_idx.checked_sub(1) else {
-                    return Some(0);
+                    return Some(SourceAnchor::downstream(0));
                 };
                 target
             }
             ui::plugin::MoveDirection::Down => {
                 let Some(target) = current_position.flat_line_idx.checked_add(1) else {
-                    return Some(current_byte);
+                    return Some(SourceAnchor::downstream(current_byte));
                 };
                 if target >= index.visual_lines().len() {
-                    return self.edit_source.as_deref().map(str::len);
+                    return self
+                        .edit_source
+                        .as_deref()
+                        .map(|source| SourceAnchor::downstream(source.len()));
                 }
                 target
             }
@@ -1986,10 +2035,7 @@ impl<S: BlockSource> PreviewEngine<S> {
             flat_line_idx: target_visual_line_idx,
             grapheme_pos: target_grapheme,
         };
-        index
-            .source_anchor_at(self.source_generation, target_position)
-            .ok()
-            .map(|anchor| anchor.byte)
+        index.source_anchor_at(self.source_generation, target_position).ok()
     }
 
     fn projection_position_for_vertical_move(
@@ -2013,7 +2059,7 @@ impl<S: BlockSource> PreviewEngine<S> {
             });
         }
 
-        index.visual_position_for_source(current_byte, CursorAffinity::Downstream)
+        index.visual_position_for_source(current_byte, self.cursor_affinity_for_byte(current_byte))
     }
 
     fn projection_screen_x(&self, lazy: &LazyLayout<S>, position: VisualPosition) -> Option<f32> {
@@ -2037,20 +2083,18 @@ impl<S: BlockSource> PreviewEngine<S> {
         &self,
         current_byte: usize,
         direction: ui::plugin::MoveDirection,
-    ) -> Option<usize> {
+    ) -> Option<SourceAnchor> {
         let index = self.lazy.as_ref()?.source_projection_index.as_ref()?;
         match direction {
-            ui::plugin::MoveDirection::Left => {
-                index.line_boundary(current_byte, LineBoundary::End).map(|anchor| anchor.byte)
-            }
+            ui::plugin::MoveDirection::Left => index.line_boundary(current_byte, LineBoundary::End),
             ui::plugin::MoveDirection::Up | ui::plugin::MoveDirection::LineStart => {
-                index.line_boundary(current_byte, LineBoundary::Start).map(|anchor| anchor.byte)
+                index.line_boundary(current_byte, LineBoundary::Start)
             }
-            ui::plugin::MoveDirection::Right | ui::plugin::MoveDirection::Down => index
-                .move_horizontal(current_byte, HorizontalDirection::Next)
-                .map(|anchor| anchor.byte),
+            ui::plugin::MoveDirection::Right | ui::plugin::MoveDirection::Down => {
+                index.move_horizontal(current_byte, HorizontalDirection::Next)
+            }
             ui::plugin::MoveDirection::LineEnd => {
-                index.line_boundary(current_byte, LineBoundary::End).map(|anchor| anchor.byte)
+                index.line_boundary(current_byte, LineBoundary::End)
             }
         }
     }
@@ -2170,12 +2214,26 @@ impl<S: BlockSource> PreviewEngine<S> {
             PluginQuery::HitTestByte { x, y, offset_x, offset_y } => {
                 Some(PluginResponse::BytePosition(self.hit_test_byte(*x, *y, *offset_x, *offset_y)))
             }
+            PluginQuery::HitTestVisualCaret { x, y, offset_x, offset_y } => {
+                Some(PluginResponse::VisualCaretPosition(
+                    self.hit_test_anchor(*x, *y, *offset_x, *offset_y).map(|anchor| {
+                        VisualCaretPosition { byte_offset: anchor.byte, affinity: anchor.affinity }
+                    }),
+                ))
+            }
             PluginQuery::VisualMove { current_byte, direction, target_x } => {
                 Some(PluginResponse::BytePosition(self.visual_move(
                     *current_byte,
                     *direction,
                     *target_x,
                 )))
+            }
+            PluginQuery::VisualMoveCaret { current_byte, direction, target_x } => {
+                Some(PluginResponse::VisualCaretPosition(
+                    self.visual_move_anchor(*current_byte, *direction, *target_x).map(|anchor| {
+                        VisualCaretPosition { byte_offset: anchor.byte, affinity: anchor.affinity }
+                    }),
+                ))
             }
 
             _ => None,
@@ -2249,6 +2307,15 @@ impl<S: BlockSource> PreviewEngine<S> {
             }
             PluginMessage::SetCursorByte(byte) => {
                 self.handle_set_cursor_byte(*byte);
+                Some(true)
+            }
+            PluginMessage::SetVisualCaret(position) => {
+                self.handle_set_cursor_byte(position.byte_offset);
+                if self.cursor_affinity != position.affinity {
+                    self.cursor_affinity = position.affinity;
+                    self.cached_dl = None;
+                    self.cached_vertices = None;
+                }
                 Some(true)
             }
             PluginMessage::RevealCursor(byte) => {

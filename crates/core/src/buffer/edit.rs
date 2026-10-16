@@ -496,6 +496,7 @@ impl TextBuffer {
     pub fn edit_begin_grouping(&mut self) {
         self.active_edit_group = Some(ActiveEditGroupInfo {
             cursor_before: self.cursor.logical_pos,
+            cursor_affinity_before: self.cursor_affinity,
             selection_before: self.selection,
             stats_before: self.stats,
             generation_before: self.buffer.generation(),
@@ -519,6 +520,7 @@ impl TextBuffer {
         self.edit_merge_anchor = None;
 
         let cursor_before = self.cursor;
+        let cursor_affinity_before = self.cursor_affinity;
         self.set_cursor_internal(cursor);
 
         // If both the last and this are a Write/Delete operation, we skip allocating a new undo history item.
@@ -533,6 +535,7 @@ impl TextBuffer {
             self.last_history_type = history_type;
             self.undo_stack.push_back(SemiRefCell::new(HistoryEntry {
                 cursor_before: cursor_before.logical_pos,
+                cursor_affinity_before,
                 selection_before: self.selection,
                 stats_before: self.stats,
                 generation_before: self.buffer.generation(),
@@ -546,6 +549,7 @@ impl TextBuffer {
             {
                 let mut entry = entry.borrow_mut();
                 entry.cursor_before = info.cursor_before;
+                entry.cursor_affinity_before = info.cursor_affinity_before;
                 entry.selection_before = info.selection_before;
                 entry.stats_before = info.stats_before;
                 entry.generation_before = info.generation_before;
@@ -792,6 +796,7 @@ impl TextBuffer {
                 change.cursor_before = self.cursor.logical_pos;
                 // Can't use `set_cursor_internal` here, because we haven't updated the line stats yet.
                 self.cursor = cursor_before;
+                mem::swap(&mut self.cursor_affinity, &mut change.cursor_affinity_before);
 
                 if self.undo_stack.is_empty() {
                     self.last_history_type = HistoryType::Other;
@@ -869,6 +874,31 @@ mod tests {
         let mut text = String::new();
         buffer.save_as_string(&mut text);
         text
+    }
+
+    #[test]
+    fn coalesced_history_restores_caret_affinity_across_repeated_undo_redo() {
+        use crate::types::CursorAffinity;
+        const HISTORY_CYCLES: usize = 3;
+        let mut buffer = buffer_with_text("abcd");
+        buffer.cursor_move_to_byte(ByteIndex(2));
+        buffer.set_cursor_affinity(CursorAffinity::Upstream);
+        for (byte, inserted) in [(2, b"X"), (3, b"Y")] {
+            buffer.edit_begin_grouping();
+            buffer.replace_range_with_history(byte..byte, inserted, EditHistoryKind::Insert);
+            buffer.edit_end_grouping();
+        }
+        assert_eq!(buffer_text(&mut buffer), "abXYcd");
+        for _ in 0..HISTORY_CYCLES {
+            buffer.undo();
+            assert_eq!(buffer_text(&mut buffer), "abcd");
+            assert_eq!(buffer.cursor_offset(), ByteIndex(2));
+            assert_eq!(buffer.cursor_affinity(), CursorAffinity::Upstream);
+            buffer.redo();
+            assert_eq!(buffer_text(&mut buffer), "abXYcd");
+            assert_eq!(buffer.cursor_offset(), ByteIndex(4));
+            assert_eq!(buffer.cursor_affinity(), CursorAffinity::Downstream);
+        }
     }
 
     #[test]

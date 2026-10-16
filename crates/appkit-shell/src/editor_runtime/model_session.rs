@@ -957,12 +957,7 @@ impl ModelSession {
         let Some(mut tab) = self.tab_session_mut(tab_id) else {
             return;
         };
-        let source = tab.document.full_text();
-        let source_generation = tab.document.generation();
-        let _ = tab.send_message(ui::plugin::PluginMessage::UpdateSource {
-            text: source,
-            generation: source_generation,
-        });
+        synchronize_plugin_source(&mut tab);
     }
 
     fn synchronize_plugin_source_if_stale(&mut self, tab_id: TabId) {
@@ -973,11 +968,7 @@ impl ModelSession {
         if !tab.needs_source_update(source_generation) {
             return;
         }
-        let source = tab.document.full_text();
-        let _ = tab.send_message(ui::plugin::PluginMessage::UpdateSource {
-            text: source,
-            generation: source_generation,
-        });
+        synchronize_plugin_source(&mut tab);
     }
 }
 
@@ -1155,9 +1146,17 @@ fn refresh_presentation_after_edit(tab: &mut TabSessionMut<'_>, line_height: f32
 }
 
 fn synchronize_plugin_source(tab: &mut TabSessionMut<'_>) {
+    use ui::plugin::{PluginMessage, VisualCaretPosition};
     let source = tab.document.full_text();
     let generation = tab.document.generation();
-    let _ = tab.send_message(ui::plugin::PluginMessage::UpdateSource { text: source, generation });
+    tab.send_message(PluginMessage::UpdateSource { text: source, generation });
+    let byte_offset = tab.document.cursor_offset().to_usize();
+    let affinity = tab.document.tb().cursor_affinity();
+    let anchor = tab.document.cursor().selection_anchor;
+    tab.send_message(PluginMessage::SetSelAnchorByte(anchor));
+    tab.send_message(PluginMessage::SetSelCursorByte(anchor.map(|_| byte_offset)));
+    tab.send_message(PluginMessage::SetCursorByte(byte_offset));
+    tab.send_message(PluginMessage::SetVisualCaret(VisualCaretPosition { byte_offset, affinity }));
 }
 
 fn edit_outcome(

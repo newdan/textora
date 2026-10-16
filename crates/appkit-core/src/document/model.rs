@@ -258,12 +258,14 @@ impl DocumentModel {
     /// Capture the model selection in the buffer before recording an edit group.
     pub fn sync_selection_to_buffer(&mut self) {
         let cursor = self.cursor.offset;
+        let affinity = self.tb.cursor_affinity();
         if let Some(anchor) = self.cursor.selection_anchor {
             self.tb.cursor_move_to_byte(ByteIndex(anchor));
             self.tb.selection_update_offset(cursor.to_usize());
         } else {
             self.tb.clear_selection();
         }
+        self.tb.set_cursor_affinity(affinity);
     }
 
     pub fn sync_cursor(&mut self) {

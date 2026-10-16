@@ -1,5 +1,5 @@
 use crate::helpers::CoordType;
-use crate::types::LogicalPoint;
+use crate::types::{CursorAffinity, LogicalPoint};
 
 /// Stores statistics about the whole document.
 #[derive(Copy, Clone)]
@@ -103,6 +103,7 @@ impl EditMergeAnchor {
 pub(crate) struct HistoryEntry {
     /// cursor position before the change was made.
     pub cursor_before: LogicalPoint,
+    pub cursor_affinity_before: CursorAffinity,
     /// selection before the change was made.
     pub selection_before: Option<TextBufferSelection>,
     /// stats before the change was made.
@@ -128,6 +129,7 @@ pub(crate) struct HistoryEntry {
 pub(crate) struct ActiveEditGroupInfo {
     /// cursor position before the change was made.
     pub cursor_before: LogicalPoint,
+    pub cursor_affinity_before: CursorAffinity,
     /// selection before the change was made.
     pub selection_before: Option<TextBufferSelection>,
     /// stats before the change was made.

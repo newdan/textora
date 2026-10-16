@@ -18,10 +18,48 @@ use crate::input::EditCommand;
 use crate::tab_session::{TabSession, TabSessionMut};
 use appkit_core::document::DocumentModel;
 use core::types::ByteIndex;
-use ui::plugin::{EditHitTarget, MoveDirection, PluginMessage};
+use ui::plugin::{
+    CursorAffinity, EditHitTarget, MoveDirection, PluginMessage, PluginQuery, PluginResponse,
+    VisualCaretPosition,
+};
 
 fn wysiwyg_cursor_x(tab: &TabSession<'_>, byte: usize) -> Option<f32> {
     tab.query_cursor_screen_rect(byte).map(|(x, _y, _w, _h)| x)
+}
+
+fn query_visual_caret_move(
+    tab: &TabSession<'_>,
+    current_byte: usize,
+    direction: MoveDirection,
+    target_x: Option<f32>,
+) -> Option<VisualCaretPosition> {
+    if let PluginResponse::VisualCaretPosition(position) =
+        tab.query(PluginQuery::VisualMoveCaret { current_byte, direction, target_x })
+    {
+        return position;
+    }
+    tab.visual_move_byte(current_byte, direction, target_x).map(|byte_offset| VisualCaretPosition {
+        byte_offset,
+        affinity: CursorAffinity::Downstream,
+    })
+}
+
+pub(crate) fn query_visual_caret_hit(
+    tab: &TabSession<'_>,
+    x: f32,
+    y: f32,
+    offset_x: f32,
+    offset_y: f32,
+) -> Option<VisualCaretPosition> {
+    if let PluginResponse::VisualCaretPosition(position) =
+        tab.query(PluginQuery::HitTestVisualCaret { x, y, offset_x, offset_y })
+    {
+        return position;
+    }
+    tab.hit_test_byte(x, y, offset_x, offset_y).map(|byte_offset| VisualCaretPosition {
+        byte_offset,
+        affinity: CursorAffinity::Downstream,
+    })
 }
 
 // ────────────────────────────────────────────────────────────────────────────
@@ -94,7 +132,7 @@ impl App {
             let semantic_target = tab.move_edit_target(current_byte, direction, target_x);
             let visual_target = semantic_target
                 .is_none()
-                .then(|| tab.visual_move_byte(current_byte, direction, target_x));
+                .then(|| query_visual_caret_move(&tab, current_byte, direction, target_x));
             (semantic_target, visual_target.flatten(), selection_anchor, vertical_anchor_x)
         };
 
@@ -105,8 +143,8 @@ impl App {
             };
             if let Some(target) = semantic_target {
                 apply_edit_hit_target(&mut tab, target);
-            } else if let Some(new_byte) = visual_target {
-                set_wysiwyg_cursor_and_selection(&mut tab, new_byte, selection_anchor);
+            } else if let Some(position) = visual_target {
+                set_wysiwyg_visual_caret_and_selection(&mut tab, position, selection_anchor);
             } else {
                 return AppEffect::NONE;
             }
@@ -127,34 +165,35 @@ impl App {
         AppEffect::REDRAW
     }
 
-    /// Scroll the plugin viewport by the minimal delta that reveals the cursor
-    /// after navigation or editing. No-op when the cursor is already inside the
-    /// viewport (avoids scroll jitter).
+    /// Let the plugin reveal the caret after its final layout. Plugins without
+    /// deferred reveal support use the current geometry as a compatibility fallback.
     pub(crate) fn ensure_wysiwyg_cursor_visible(&mut self) {
         if !self.active_handles_own_rendering() {
             return;
         }
-        let viewport_h = self.plugin_viewport_h();
         let Some(tab) = self.active_tab_session() else {
             return;
         };
         let cursor_byte = tab.document.cursor_offset().to_usize();
-        let message = match tab.query_cursor_screen_rect(cursor_byte) {
-            Some((_, cursor_y, _, cursor_h)) => {
-                let delta = if cursor_y < 0.0 {
-                    cursor_y
-                } else {
-                    (cursor_y + cursor_h - viewport_h).max(0.0)
-                };
-                if delta == 0.0 {
-                    return;
-                }
-                PluginMessage::Scroll { delta, viewport_h }
-            }
-            None => PluginMessage::RevealCursor(cursor_byte),
+        if self
+            .active_tab_session_mut()
+            .is_some_and(|mut tab| tab.send_message(PluginMessage::RevealCursor(cursor_byte)))
+        {
+            return;
+        }
+        let Some((_, cursor_y, _, cursor_h)) =
+            self.active_tab_session().and_then(|tab| tab.query_cursor_screen_rect(cursor_byte))
+        else {
+            return;
         };
+        let viewport_h = self.plugin_viewport_h();
+        let delta =
+            if cursor_y < 0.0 { cursor_y } else { (cursor_y + cursor_h - viewport_h).max(0.0) };
+        if delta == 0.0 {
+            return;
+        }
         if let Some(mut tab) = self.active_tab_session_mut() {
-            tab.send_message(message);
+            tab.send_message(PluginMessage::Scroll { delta, viewport_h });
         }
     }
 
@@ -200,19 +239,23 @@ impl App {
         }
 
         // Phase 2: find cursor target via hit test (immutable borrow).
-        let new_byte = {
+        let position = {
             let Some(tab) = self.active_tab_session() else {
                 return AppEffect::NONE;
             };
-            tab.hit_test_byte(0.0, 0.0, 0.0, 0.0)
-                .unwrap_or_else(|| tab.document.cursor_offset().to_usize())
+            query_visual_caret_hit(&tab, 0.0, 0.0, 0.0, 0.0).unwrap_or_else(|| {
+                VisualCaretPosition {
+                    byte_offset: tab.document.cursor_offset().to_usize(),
+                    affinity: tab.document.tb().cursor_affinity(),
+                }
+            })
         };
 
         // Phase 3: apply cursor + notify plugin with snapped byte (mutable borrow).
         let Some(mut tab) = self.active_tab_session_mut() else {
             return AppEffect::NONE;
         };
-        let _snapped = set_wysiwyg_cursor_and_selection(&mut tab, new_byte, None);
+        set_wysiwyg_visual_caret_and_selection(&mut tab, position, None);
         self.editor_runtime.set_preferred_x(None);
         AppEffect::REDRAW
     }
@@ -231,11 +274,29 @@ pub(crate) fn set_wysiwyg_cursor_and_selection(
     let snapped_cursor_byte = tab.document.cursor_offset().to_usize();
     tab.document.cursor_mut().selection_anchor = selection_anchor;
     tab.send_message(PluginMessage::SetCursorByte(snapped_cursor_byte));
+    tab.send_message(PluginMessage::SetVisualCaret(VisualCaretPosition {
+        byte_offset: snapped_cursor_byte,
+        affinity: CursorAffinity::Downstream,
+    }));
     tab.send_message(PluginMessage::SetSelAnchorByte(selection_anchor));
     tab.send_message(PluginMessage::SetSelCursorByte(
         selection_anchor.map(|_| snapped_cursor_byte),
     ));
     snapped_cursor_byte
+}
+
+pub(crate) fn set_wysiwyg_visual_caret_and_selection(
+    tab: &mut TabSessionMut<'_>,
+    position: VisualCaretPosition,
+    selection_anchor: Option<usize>,
+) {
+    let snapped_byte =
+        set_wysiwyg_cursor_and_selection(tab, position.byte_offset, selection_anchor);
+    if snapped_byte != position.byte_offset {
+        return;
+    }
+    tab.document.tb.set_cursor_affinity(position.affinity);
+    tab.send_message(PluginMessage::SetVisualCaret(position));
 }
 
 pub(crate) fn apply_target_to_document(

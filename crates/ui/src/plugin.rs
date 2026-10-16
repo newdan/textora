@@ -7,6 +7,7 @@ use std::path::Path;
 
 use core::buffer::EditHistoryKind;
 use core::document::{DocView, DocViewMut};
+pub use core::types::CursorAffinity;
 use shaping::Shaper;
 
 use crate::canvas::{CanvasPoint, CanvasViewportSnapshot};
@@ -66,6 +67,8 @@ pub enum PluginMessage {
     RestoreScrollAnchor { text: String, offset: f32 },
     /// Notify plugin that the cursor byte offset in source has changed.
     SetCursorByte(usize),
+    /// Place a visual caret, retaining its side of a soft-wrap boundary.
+    SetVisualCaret(VisualCaretPosition),
     /// Reveal this source caret once layout is available; manual scrolling cancels it.
     RevealCursor(usize),
     /// Notify plugin whether the cursor blink phase is currently visible.
@@ -91,6 +94,13 @@ pub enum MoveDirection {
     Down,
     LineStart,
     LineEnd,
+}
+
+/// A source caret together with its unambiguous visual position.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct VisualCaretPosition {
+    pub byte_offset: usize,
+    pub affinity: CursorAffinity,
 }
 
 /// Semantic destination for editing interactions in a custom-rendered view.
@@ -276,6 +286,19 @@ pub enum PluginQuery {
         /// Preferred X pixel position when moving up/down (sticky column).
         target_x: Option<f32>,
     },
+    /// Visual navigation retaining the destination's soft-wrap affinity.
+    VisualMoveCaret {
+        current_byte: usize,
+        direction: MoveDirection,
+        target_x: Option<f32>,
+    },
+    /// Hit-test retaining the side of a shared soft-wrap source position.
+    HitTestVisualCaret {
+        x: f32,
+        y: f32,
+        offset_x: f32,
+        offset_y: f32,
+    },
     /// Semantic direction navigation from the current source byte.
     MoveEditTarget {
         current_byte: usize,
@@ -315,6 +338,8 @@ pub enum PluginResponse {
     CursorScreenRect(Option<(f32, f32, f32, f32)>),
     /// Source byte offset.
     BytePosition(Option<usize>),
+    /// Source position and side of a soft-wrap boundary.
+    VisualCaretPosition(Option<VisualCaretPosition>),
     /// Semantic target for an editing interaction.
     EditHitTarget(Option<EditHitTarget>),
     /// Declarative edit plan for a canvas control.

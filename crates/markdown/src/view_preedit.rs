@@ -10,6 +10,14 @@ pub(super) struct ReplacementPreedit<S: BlockSource> {
 }
 
 impl<S: BlockSource> ReplacementPreedit<S> {
+    pub(super) fn source_anchor(&self, anchor: SourceAnchor) -> SourceAnchor {
+        let byte = self.source_byte(anchor.byte);
+        match anchor.affinity {
+            CursorAffinity::Upstream => SourceAnchor::upstream(byte),
+            CursorAffinity::Downstream => SourceAnchor::downstream(byte),
+        }
+    }
+
     pub(super) fn preview_byte(&self, source_byte: usize) -> usize {
         if source_byte <= self.selection.start {
             return source_byte;

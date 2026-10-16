@@ -29,6 +29,14 @@ impl PreviewEngine<MarkdownDoc> {
 }
 
 impl<S: BlockSource> PreviewEngine<S> {
+    pub(super) fn cursor_affinity_for_byte(&self, byte: usize) -> CursorAffinity {
+        if self.edit_ctx.as_ref().is_some_and(|context| context.cursor_byte == byte) {
+            self.cursor_affinity
+        } else {
+            CursorAffinity::Downstream
+        }
+    }
+
     pub(super) fn reveal_pending_cursor(&mut self, viewport_height: f32) -> bool {
         let Some(byte) = self.pending_cursor_reveal else { return false };
         let Some((_, cursor_y, _, cursor_height)) = self.cursor_screen_pos_for_byte(byte) else {

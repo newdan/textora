@@ -4466,6 +4466,286 @@ fn wysiwyg_edit_at_an_offscreen_caret_reveals_the_actual_markdown_caret() {
     );
 }
 
+#[cfg(feature = "markdown")]
+fn wrapped_markdown_app_for_caret_test(
+    path: &std::path::Path,
+    dpi: f64,
+    window_width: f32,
+    window_height: f32,
+) -> App {
+    let mut app = App::new(None);
+    app.update_scale_factor(dpi);
+    let prepared = app
+        .prepare_editor_file(
+            path,
+            crate::workspace_tab_factory::ViewportDimensions {
+                visible_rows: 40,
+                viewport_height: f64::from(window_height),
+            },
+        )
+        .expect("load wrapped Markdown fixture");
+    let _ = app.install_editor_tab(
+        prepared.prepared,
+        prepared.suggested_file_name,
+        appkit_shell::editor_runtime::OpenDisposition::Persistent,
+    );
+    app.ui_shell.mark_layout_initialized_for_test();
+    let inputs = app.build_shell_inputs();
+    app.ui_shell.update_frame(
+        ui::Screen::new(window_width, window_height),
+        &app.current_theme,
+        &mut ui::core::measure::NoopMeasure,
+        &inputs,
+    );
+    let metrics = app.ui_metrics();
+    let settings_message = ui::plugin::PluginMessage::SetRenderSettings {
+        font_family: app.settings.font_family.clone(),
+        font_size: metrics.font_size / metrics.dpi,
+        line_height: metrics.line_height / metrics.dpi,
+        toc_max_depth: app.settings.toc_max_depth,
+        markdown_first_line_indent: app.settings.markdown_first_line_indent,
+    };
+    app.active_tab_session_mut().expect("wrapped Markdown fixture").send_message(settings_message);
+    app
+}
+
+#[cfg(feature = "markdown")]
+fn assert_wysiwyg_navigation_caret_row(app: &mut App, command: &EditCommand, expected_y: f32) {
+    const GEOMETRY_TOLERANCE: f32 = 1.0;
+    assert!(app.dispatch_wysiwyg_navigation(command).redraw);
+    render_active_wysiwyg_plugin_for_test(app);
+    let tab = app.active_tab_session().expect("soft-wrap navigation fixture");
+    let (_, caret_y, _, _) = tab
+        .query_cursor_screen_rect(tab.document.cursor_offset().to_usize())
+        .expect("visual boundary caret");
+    assert!(
+        (caret_y - expected_y).abs() <= GEOMETRY_TOLERANCE,
+        "{command:?}: caret row {caret_y} differs from requested row {expected_y}"
+    );
+}
+
+#[test]
+#[cfg(feature = "markdown")]
+fn wysiwyg_soft_wrap_line_end_preserves_the_visible_caret_row() {
+    const WRAPPED_TEXT_REPETITIONS: usize = 50;
+    const GEOMETRY_TOLERANCE: f32 = 1.0;
+    let source = "中文 alpha é 👩🏽‍💻 beta gamma ".repeat(WRAPPED_TEXT_REPETITIONS);
+    let scenarios = [1.0, 2.0].into_iter().flat_map(|dpi| {
+        [EditCommand::MoveToLineEnd, EditCommand::ExtendToLineEnd].map(|command| (dpi, command))
+    });
+    for (dpi, command) in scenarios {
+        let mut app = App::new(None);
+        app.update_scale_factor(dpi);
+        app.push_entry_for_test(
+            DocumentView::new(vec![source.clone()], 80, 10.0),
+            Box::new(textora_markdown::view::MarkdownEditorView::new()),
+        );
+        app.switch_workspace_for_test(0);
+        app.sync_plugin_state();
+        render_active_wysiwyg_plugin_for_test(&mut app);
+        let tab = app.active_tab_session().expect("soft-wrap navigation fixture");
+        let (_, first_y, _, _) = tab.query_cursor_screen_rect(0).expect("first visual row");
+        let (byte, (_, row_y, _, _)) = source
+            .match_indices("beta")
+            .filter_map(|(byte, _)| tab.query_cursor_screen_rect(byte).map(|rect| (byte, rect)))
+            .find(|(_, (_, y, _, _))| *y > first_y + GEOMETRY_TOLERANCE)
+            .expect("fixture has a second visual row");
+        app.active_tab_session_mut()
+            .expect("soft-wrap navigation fixture")
+            .cursor_move_to_offset(byte);
+        app.sync_plugin_state();
+        render_active_wysiwyg_plugin_for_test(&mut app);
+        assert_wysiwyg_navigation_caret_row(&mut app, &command, row_y);
+        if command == EditCommand::ExtendToLineEnd {
+            assert_eq!(
+                app.active_tab_session()
+                    .expect("selected visual line")
+                    .document
+                    .cursor()
+                    .selection_anchor,
+                Some(byte),
+            );
+        }
+        app.sync_plugin_state();
+        assert_wysiwyg_navigation_caret_row(&mut app, &EditCommand::MoveToLineEnd, row_y);
+        assert_wysiwyg_navigation_caret_row(&mut app, &EditCommand::MoveUp, first_y);
+        assert_wysiwyg_navigation_caret_row(&mut app, &EditCommand::MoveDown, row_y);
+        assert_wysiwyg_navigation_caret_row(&mut app, &EditCommand::MoveToLineStart, row_y);
+        assert_eq!(app.active_tab_session().expect("unchanged source").full_text(), source);
+    }
+}
+
+#[cfg(feature = "markdown")]
+fn assert_wysiwyg_history_caret(
+    app: &mut App,
+    source: &str,
+    byte: usize,
+    expected_rect: (f32, f32, f32, f32),
+    anchor: Option<usize>,
+) {
+    const GEOMETRY_TOLERANCE: f32 = 1.0;
+    render_active_wysiwyg_plugin_for_test(app);
+    let tab = app.active_tab_session().expect("restored soft-wrap history fixture");
+    assert_eq!(tab.full_text(), source);
+    assert_eq!(tab.document.cursor_offset().to_usize(), byte);
+    assert_eq!(tab.document.cursor().selection_anchor, anchor);
+    let actual = tab.query_cursor_screen_rect(byte).expect("restored visual caret");
+    assert!(
+        (actual.0 - expected_rect.0).abs() <= GEOMETRY_TOLERANCE
+            && (actual.1 - expected_rect.1).abs() <= GEOMETRY_TOLERANCE,
+        "History must restore visual caret {expected_rect:?}, got {actual:?}"
+    );
+}
+
+#[test]
+#[cfg(feature = "markdown")]
+fn wysiwyg_soft_wrap_edit_history_restores_visual_line_end_caret() {
+    const WRAPPED_TEXT_REPETITIONS: usize = 50;
+    const HISTORY_CYCLES: usize = 3;
+    let source = "中文 alpha é 👩🏽‍💻 beta gamma ".repeat(WRAPPED_TEXT_REPETITIONS);
+    let scenarios = [1.0, 2.0].into_iter().flat_map(|dpi| {
+        [EditCommand::MoveToLineEnd, EditCommand::ExtendToLineEnd].map(|command| (dpi, command))
+    });
+    for (dpi, command) in scenarios {
+        let mut app = App::new(None);
+        app.update_scale_factor(dpi);
+        let mut document = DocumentView::new(vec![source.clone()], 80, 10.0);
+        document.cursor_move_to_offset("中文 ".len());
+        app.push_entry_for_test(
+            document,
+            Box::new(textora_markdown::view::MarkdownEditorView::new()),
+        );
+        app.switch_workspace_for_test(0);
+        app.sync_plugin_state();
+        render_active_wysiwyg_plugin_for_test(&mut app);
+        assert!(app.dispatch_wysiwyg_navigation(&command).redraw);
+        render_active_wysiwyg_plugin_for_test(&mut app);
+        let tab = app.active_tab_session().expect("soft-wrap history fixture");
+        let byte = tab.document.cursor_offset().to_usize();
+        let anchor = tab.document.cursor().selection_anchor;
+        let before = tab.query_cursor_screen_rect(byte).expect("visual line-end caret");
+        let insertion_start = anchor.unwrap_or(byte).min(byte);
+        let edited = source[..insertion_start].to_owned() + "X" + &source[byte..];
+        assert!(
+            app.dispatch_transactional_edit_for_test(EditCommand::InsertText("X".into())).redraw
+        );
+        render_active_wysiwyg_plugin_for_test(&mut app);
+        let after_byte = insertion_start + "X".len();
+        let after = app
+            .active_tab_session()
+            .expect("edited soft-wrap fixture")
+            .query_cursor_screen_rect(after_byte)
+            .expect("edited visual caret");
+        for _ in 0..HISTORY_CYCLES {
+            assert!(app.dispatch_semantic_edit(ui::plugin::SemanticEditCommand::Undo).redraw);
+            assert_wysiwyg_history_caret(&mut app, &source, byte, before, anchor);
+            assert!(app.dispatch_semantic_edit(ui::plugin::SemanticEditCommand::Redo).redraw);
+            assert_wysiwyg_history_caret(&mut app, &edited, after_byte, after, None);
+        }
+    }
+}
+
+#[test]
+#[cfg(feature = "markdown")]
+fn wysiwyg_mouse_click_preserves_the_requested_soft_wrap_side() {
+    const WRAPPED_TEXT_REPETITIONS: usize = 50;
+    const GEOMETRY_TOLERANCE: f32 = 1.0;
+    let source = "中文 alpha beta gamma ".repeat(WRAPPED_TEXT_REPETITIONS);
+    for dpi in [1.0, 2.0] {
+        let mut app = App::new(None);
+        app.update_scale_factor(dpi);
+        app.push_entry_for_test(
+            DocumentView::new(vec![source.clone()], 80, 10.0),
+            Box::new(textora_markdown::view::MarkdownEditorView::new()),
+        );
+        app.switch_workspace_for_test(0);
+        app.sync_plugin_state();
+        render_active_wysiwyg_plugin_for_test(&mut app);
+        assert!(app.dispatch_wysiwyg_navigation(&EditCommand::MoveToLineEnd).redraw);
+        render_active_wysiwyg_plugin_for_test(&mut app);
+        let tab = app.active_tab_session().expect("soft-wrap pointer fixture");
+        let byte = tab.document.cursor_offset().to_usize();
+        let before = tab.query_cursor_screen_rect(byte).expect("line-end click geometry");
+        let bounds = app.plugin_render_bounds();
+        let click_x = bounds.x + before.0;
+        let click_y = bounds.y + before.1 + before.3 * 0.5;
+        app.dispatch_editor_mouse_input(
+            winit::event::ElementState::Pressed,
+            click_x,
+            click_y,
+            None,
+        );
+        app.dispatch_editor_mouse_input(
+            winit::event::ElementState::Released,
+            click_x,
+            click_y,
+            None,
+        );
+        render_active_wysiwyg_plugin_for_test(&mut app);
+        let tab = app.active_tab_session().expect("clicked soft-wrap pointer fixture");
+        assert_eq!(tab.document.cursor_offset().to_usize(), byte);
+        let after = tab.query_cursor_screen_rect(byte).expect("clicked line-end geometry");
+        assert!(
+            (after.0 - before.0).abs() <= GEOMETRY_TOLERANCE
+                && (after.1 - before.1).abs() <= GEOMETRY_TOLERANCE,
+            "Click must retain visual wrap side {before:?}, got {after:?}"
+        );
+        assert_eq!(tab.full_text(), source);
+    }
+}
+
+#[test]
+#[cfg(feature = "markdown")]
+fn wysiwyg_long_wrapped_document_reveals_caret_after_precise_layout() {
+    const SECTION_COUNT: usize = 80;
+    const PARAGRAPH_REPETITIONS: usize = 8;
+    const CODE_REPETITIONS: usize = 12;
+    const WINDOW_WIDTH: f32 = 2022.0;
+    const WINDOW_HEIGHT: f32 = 1648.0;
+    let source = (1..=SECTION_COUNT)
+        .map(|section| {
+            format!(
+                "段落 {section}：{}\n\n---\n\n```rust\n{}\n```",
+                "中文与 English é 👩🏽‍💻 自动换行。".repeat(PARAGRAPH_REPETITIONS),
+                "let long_value = 1; ".repeat(CODE_REPETITIONS),
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\n\n");
+    let code_end = source.rfind("\n```").expect("last code fence in fixture");
+    for dpi in [1.0, 2.0] {
+        let directory = tempfile::tempdir().expect("wrapped mode-switch fixture directory");
+        let path = directory.path().join("wrapped.md");
+        std::fs::write(&path, &source).expect("write wrapped mode-switch fixture");
+        let mut app = wrapped_markdown_app_for_caret_test(&path, dpi, WINDOW_WIDTH, WINDOW_HEIGHT);
+        app.sync_plugin_state();
+        render_active_wysiwyg_plugin_for_test(&mut app);
+        assert!(app.toggle_editor_view().redraw);
+        app.active_tab_session_mut()
+            .expect("wrapped source editor fixture")
+            .cursor_move_to_offset(code_end);
+        assert!(app.toggle_editor_view().redraw);
+        for command in [None, Some(EditCommand::MoveToDocStart), Some(EditCommand::MoveToDocEnd)] {
+            if let Some(command) = command.as_ref() {
+                assert!(app.dispatch_wysiwyg_navigation(command).redraw);
+            }
+            app.sync_plugin_state();
+            render_active_wysiwyg_plugin_for_test(&mut app);
+            let tab = app.active_tab_session().expect("wrapped Markdown fixture remains active");
+            let byte = tab.document.cursor_offset().to_usize();
+            let (_, y, _, height) =
+                tab.query_cursor_screen_rect(byte).expect("wrapped caret geometry");
+            let viewport_height = app.plugin_render_bounds().h;
+            assert!(
+                y >= 0.0 && y + height <= viewport_height + 1.0,
+                "dpi={dpi}, {command:?}, byte={byte}: caret {y}..{} exceeds viewport {viewport_height}",
+                y + height,
+            );
+            assert_eq!(tab.full_text(), source);
+        }
+    }
+}
+
 #[test]
 #[cfg(feature = "markdown")]
 fn wysiwyg_source_toggle_reveals_the_caret_moved_in_the_source_editor() {

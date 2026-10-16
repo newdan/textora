@@ -32,7 +32,9 @@ use crate::document::ReadableDocument;
 use crate::helpers::*;
 use crate::highlight::HighlighterCache;
 use crate::highlight::Language;
-use crate::types::{ByteIndex, LogicalPoint, UniCharOffset, UnicharLineLookup, VisualPoint};
+use crate::types::{
+    ByteIndex, CursorAffinity, LogicalPoint, UniCharOffset, UnicharLineLookup, VisualPoint,
+};
 use crate::unicode::Cursor;
 use crate::{icu, simd};
 
@@ -99,6 +101,7 @@ pub struct TextBuffer {
 
     pub(crate) stats: TextBufferStatistics,
     pub(crate) cursor: Cursor,
+    pub(crate) cursor_affinity: CursorAffinity,
     pub(crate) cursor_for_rendering: Option<Cursor>,
     pub(crate) selection: Option<TextBufferSelection>,
     pub(crate) selection_generation: u32,
@@ -147,6 +150,7 @@ impl TextBuffer {
 
             stats: TextBufferStatistics { logical_lines: 1, visual_lines: 1 },
             cursor: Default::default(),
+            cursor_affinity: Default::default(),
             cursor_for_rendering: None,
             selection: None,
             selection_generation: 0,
@@ -209,6 +213,7 @@ impl TextBuffer {
                 visual_lines: logical_lines.min(CoordType::MAX),
             },
             cursor: Default::default(),
+            cursor_affinity: Default::default(),
             cursor_for_rendering: None,
             selection: None,
             selection_generation: 0,
@@ -541,6 +546,7 @@ impl TextBuffer {
         self.last_history_type = HistoryType::Other;
         self.edit_merge_anchor = None;
         self.cursor = Default::default();
+        self.cursor_affinity = Default::default();
         self.set_selection(None);
         self.mark_as_clean();
         self.reflow();
@@ -633,6 +639,15 @@ impl TextBuffer {
         debug_assert!(cursor.visual_pos.column >= 0);
         debug_assert!(cursor.visual_pos.row as CoordType <= self.stats.visual_lines);
         self.cursor = cursor;
+        self.cursor_affinity = CursorAffinity::Downstream;
+    }
+
+    pub fn cursor_affinity(&self) -> CursorAffinity {
+        self.cursor_affinity
+    }
+
+    pub fn set_cursor_affinity(&mut self, affinity: CursorAffinity) {
+        self.cursor_affinity = affinity;
     }
 
     /// For interfacing with ICU.

@@ -1900,6 +1900,10 @@ impl App {
 
         let cursor_byte = tab.document.cursor_offset().to_usize();
         tab.send_message(ui::plugin::PluginMessage::SetCursorByte(cursor_byte));
+        let affinity = tab.document.tb().cursor_affinity();
+        tab.send_message(ui::plugin::PluginMessage::SetVisualCaret(
+            ui::plugin::VisualCaretPosition { byte_offset: cursor_byte, affinity },
+        ));
         tab.send_message(ui::plugin::PluginMessage::SetPreedit {
             text: preedit_text,
             cursor: preedit_cursor,

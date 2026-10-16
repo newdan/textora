@@ -3,11 +3,7 @@ use std::ops::Range;
 
 use crate::layout::types::VisualLineProjection;
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
-pub(crate) enum CursorAffinity {
-    Upstream,
-    Downstream,
-}
+pub(crate) use ui::plugin::CursorAffinity;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub(crate) enum ProjectionOwnerId {
@@ -251,7 +247,7 @@ pub(crate) struct SourceProjectionIndex {
 }
 
 impl SourceProjectionIndex {
-    fn canonical_reverse_anchor(
+    fn canonical_source_anchor(
         visual_lines: &[VisualLineProjection],
         line_idx: usize,
         grapheme_pos: usize,
@@ -327,7 +323,7 @@ impl SourceProjectionIndex {
                 }
                 previous_source_byte = Some(source.byte);
                 let source =
-                    Self::canonical_reverse_anchor(&visual_lines, line_idx, grapheme_pos, source);
+                    Self::canonical_source_anchor(&visual_lines, line_idx, grapheme_pos, source);
                 let anchor = SourceVisualAnchor {
                     source,
                     visual: VisualPosition {
@@ -399,17 +395,27 @@ impl SourceProjectionIndex {
             });
         }
 
-        let line = self
+        let line_idx = self
             .visual_lines
             .binary_search_by_key(&position.flat_line_idx, |line| line.flat_line_idx)
-            .ok()
-            .and_then(|line_idx| self.visual_lines.get(line_idx))
-            .ok_or(ProjectionError::MissingEditableProjection {
+            .map_err(|_| ProjectionError::MissingEditableProjection {
                 flat_line_idx: position.flat_line_idx,
             })?;
-        line.boundaries.get(position.grapheme_pos).copied().ok_or(
-            ProjectionError::MissingEditableProjection { flat_line_idx: position.flat_line_idx },
-        )
+        self.visual_lines[line_idx]
+            .boundaries
+            .get(position.grapheme_pos)
+            .copied()
+            .map(|source| {
+                Self::canonical_source_anchor(
+                    &self.visual_lines,
+                    line_idx,
+                    position.grapheme_pos,
+                    source,
+                )
+            })
+            .ok_or(ProjectionError::MissingEditableProjection {
+                flat_line_idx: position.flat_line_idx,
+            })
     }
 
     pub(crate) fn visual_position_for_source(
@@ -484,16 +490,27 @@ impl SourceProjectionIndex {
         current_byte: usize,
         boundary: LineBoundary,
     ) -> Option<SourceAnchor> {
-        let position = self.visual_position_for_source(current_byte, CursorAffinity::Downstream)?;
+        self.line_boundary_with_affinity(current_byte, CursorAffinity::Downstream, boundary)
+    }
+
+    pub(crate) fn line_boundary_with_affinity(
+        &self,
+        current_byte: usize,
+        affinity: CursorAffinity,
+        boundary: LineBoundary,
+    ) -> Option<SourceAnchor> {
+        let position = self.visual_position_for_source(current_byte, affinity)?;
         let line = self
             .visual_lines
             .binary_search_by_key(&position.flat_line_idx, |line| line.flat_line_idx)
             .ok()
             .and_then(|line_idx| self.visual_lines.get(line_idx))?;
-        match boundary {
-            LineBoundary::Start => line.boundaries.first().copied(),
-            LineBoundary::End => line.boundaries.last().copied(),
-        }
+        let grapheme_pos = match boundary {
+            LineBoundary::Start => 0,
+            LineBoundary::End => line.boundaries.len().checked_sub(1)?,
+        };
+        self.source_anchor_at(self.source_generation, VisualPosition { grapheme_pos, ..position })
+            .ok()
     }
 
     fn previous_distinct_boundary(
@@ -861,6 +878,27 @@ mod tests {
                 collapsed: Vec::new(),
             },
         ]
+    }
+
+    #[test]
+    fn visual_navigation_anchor_roundtrips_the_requested_soft_wrap_side() {
+        const GENERATION: u32 = 7;
+        const REVISION: u64 = 3;
+        const WRAP_BYTE: usize = 5;
+        let mut lines = shared_boundary_fixture();
+        *lines[0].boundaries.last_mut().expect("first fixture row has a sentinel") =
+            SourceAnchor::downstream(WRAP_BYTE);
+        let index = SourceProjectionIndex::build(GENERATION, REVISION, lines)
+            .expect("raw shared-boundary fixture is valid");
+        let position =
+            VisualPosition { layout_revision: REVISION, flat_line_idx: 0, grapheme_pos: WRAP_BYTE };
+        let anchor = index.source_anchor_at(GENERATION, position).expect("visual line end anchor");
+        assert_eq!(anchor, SourceAnchor::upstream(WRAP_BYTE));
+        assert_eq!(index.visual_position_for_source(anchor.byte, anchor.affinity), Some(position));
+        assert_eq!(
+            index.line_boundary_with_affinity(2, CursorAffinity::Downstream, LineBoundary::End),
+            Some(anchor)
+        );
     }
 
     #[test]

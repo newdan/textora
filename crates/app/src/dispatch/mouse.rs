@@ -1,19 +1,30 @@
 use crate::app::App;
 use crate::app_effect::AppEffect;
-use crate::dispatch::wysiwyg::{apply_edit_hit_target, set_wysiwyg_cursor_and_selection};
+use crate::dispatch::wysiwyg::{
+    apply_edit_hit_target, query_visual_caret_hit, set_wysiwyg_cursor_and_selection,
+    set_wysiwyg_visual_caret_and_selection,
+};
 use crate::edit_transaction::execute_edit_plan;
 use crate::mouse::CanvasDragEligibility;
 use appkit_shell::editor_runtime::{EditorFocus, EditorInputContext};
 use core::types::UniCharOffset;
 use ui::canvas::CanvasPoint;
 use ui::plugin::{
-    CanvasDragPhase, CanvasDragRequest, CanvasDragResponse, EditHitTarget, EditPlan,
-    EditTransaction, PluginMessage,
+    CanvasDragPhase, CanvasDragRequest, CanvasDragResponse, CursorAffinity, EditHitTarget,
+    EditPlan, EditTransaction, PluginMessage, VisualCaretPosition,
 };
 use winit::event::ElementState;
 
 const PLUGIN_SELECTION_DRAG_THRESHOLD_LOGICAL_PX: f32 = 5.0;
 const CANVAS_DRAG_THRESHOLD_PX: f32 = 5.0;
+
+fn visual_caret_for_hit(app: &App, byte_offset: usize, x: f32, y: f32) -> VisualCaretPosition {
+    let bounds = app.plugin_render_bounds();
+    app.active_tab_session()
+        .and_then(|tab| query_visual_caret_hit(&tab, x, y, bounds.x, bounds.y))
+        .filter(|position| position.byte_offset == byte_offset)
+        .unwrap_or(VisualCaretPosition { byte_offset, affinity: CursorAffinity::Downstream })
+}
 
 fn editor_input_context(app: &App) -> EditorInputContext {
     let editor_focus =
@@ -169,21 +180,29 @@ impl App {
                 }
                 match self.query_plugin_edit_hit_target(px, py) {
                     Some(Some(EditHitTarget::TextCaret { byte_offset, selection_scope })) => {
+                        let position = visual_caret_for_hit(self, byte_offset, px, py);
                         self.mouse.wysiwyg_selection_scope = selection_scope;
                         let click_count = self.mouse.click_count;
                         if let Some(mut tab) = self.active_tab_session_mut() {
                             if click_count == 2 {
                                 let (word_start, word_end) =
                                     tab.document.word_select_at(byte_offset);
-                                set_wysiwyg_cursor_and_selection(
+                                set_wysiwyg_visual_caret_and_selection(
                                     &mut tab,
-                                    word_end,
+                                    VisualCaretPosition {
+                                        byte_offset: word_end,
+                                        affinity: if word_end == position.byte_offset {
+                                            position.affinity
+                                        } else {
+                                            CursorAffinity::Downstream
+                                        },
+                                    },
                                     Some(word_start),
                                 );
                             } else {
-                                set_wysiwyg_cursor_and_selection(
+                                set_wysiwyg_visual_caret_and_selection(
                                     &mut tab,
-                                    byte_offset,
+                                    position,
                                     Some(byte_offset),
                                 );
                             }
@@ -597,6 +616,7 @@ impl App {
                     .and_then(|tab| tab.document.cursor().selection_anchor);
                 match self.query_plugin_edit_hit_target(px, py) {
                     Some(Some(EditHitTarget::TextCaret { byte_offset, selection_scope })) => {
+                        let position = visual_caret_for_hit(self, byte_offset, px, py);
                         if !semantic_drag_stays_within_scope(
                             self.mouse.wysiwyg_selection_scope.as_ref(),
                             selection_scope.as_ref(),
@@ -604,9 +624,9 @@ impl App {
                             return AppEffect::NONE;
                         }
                         if let Some(mut tab) = self.active_tab_session_mut() {
-                            set_wysiwyg_cursor_and_selection(
+                            set_wysiwyg_visual_caret_and_selection(
                                 &mut tab,
-                                byte_offset,
+                                position,
                                 selection_anchor,
                             );
                             return AppEffect::REDRAW;
