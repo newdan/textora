@@ -71,6 +71,8 @@ struct EmptySourceLine {
 }
 
 pub(super) fn insert(blocks: &mut Vec<BlockNode>, source: &str) {
+    anchor_empty_headings(blocks, source);
+    retain_terminal_hard_breaks(blocks, source, 0);
     let paragraphs = EditableParagraphMap::from_blocks(blocks, source);
     let mut anchors_by_owner = BTreeMap::<Vec<usize>, Vec<usize>>::new();
     for run in paragraphs.runs() {
@@ -80,6 +82,109 @@ pub(super) fn insert(blocks: &mut Vec<BlockNode>, source: &str) {
             .extend(run.lines[run.hidden_separator_count..].iter().map(|line| line.source_byte));
     }
     insert_owned_anchors(blocks, &mut Vec::new(), &mut anchors_by_owner);
+}
+
+fn anchor_empty_headings(blocks: &mut [BlockNode], source: &str) {
+    for block in blocks {
+        anchor_empty_headings(&mut block.children, source);
+        if !matches!(block.kind, BlockKind::Heading { .. })
+            || !block.text_lines.iter().all(String::is_empty)
+            || !crate::augmenter::heading_source_is_atx(source, block.block_range.start)
+        {
+            continue;
+        }
+        let spelling = &source[block.block_range.clone()];
+        let line = spelling
+            .split('\n')
+            .next()
+            .expect("a heading has a source line")
+            .trim_end_matches('\r');
+        block.projected_lines =
+            vec![ProjectedText::direct("", block.block_range.start + line.len())];
+    }
+}
+
+// CommonMark treats a break at a leaf's end as literal text. Editing still needs
+// its empty continuation row before the user types the next character.
+fn retain_terminal_hard_breaks(blocks: &mut [BlockNode], source: &str, quote_depth: usize) {
+    for block in blocks {
+        let child_quote_depth =
+            quote_depth + usize::from(matches!(block.kind, BlockKind::BlockQuote));
+        retain_terminal_hard_breaks(&mut block.children, source, child_quote_depth);
+        let Some((marker_start, continuation_byte)) =
+            terminal_hard_break(block, source, child_quote_depth)
+        else {
+            continue;
+        };
+        project_terminal_hard_break(block, marker_start, continuation_byte);
+    }
+}
+
+fn project_terminal_hard_break(
+    block: &mut BlockNode,
+    marker_start: usize,
+    continuation_byte: usize,
+) {
+    let projection = block.projected_lines.last_mut().expect("terminal break has a projected line");
+    let visual_end = projection.text.len() - 1;
+    projection.text.truncate(visual_end);
+    projection.boundaries.pop();
+    projection.spans.retain_mut(|span| {
+        if span.visual_range.start >= visual_end {
+            return false;
+        }
+        if span.visual_range.end > visual_end {
+            span.visual_range.end = visual_end;
+            span.source_range.end = marker_start;
+        }
+        true
+    });
+    *block.text_lines.last_mut().expect("projection has a matching text line") =
+        projection.text.clone();
+    if let Some(styles) = block.text_styles.last_mut() {
+        styles.retain_mut(|span| {
+            span.len = span.len.min(visual_end.saturating_sub(span.start));
+            span.len > 0
+        });
+    }
+    block.text_lines.push(String::new());
+    block.text_styles.push(Vec::new());
+    block.projected_lines.push(ProjectedText::direct("", continuation_byte));
+    block.block_range.end = block.block_range.end.max(continuation_byte);
+}
+
+fn terminal_hard_break(
+    block: &BlockNode,
+    source: &str,
+    quote_depth: usize,
+) -> Option<(usize, usize)> {
+    if !matches!(
+        block.kind,
+        BlockKind::Paragraph | BlockKind::ListItem { .. } | BlockKind::BlockQuote
+    ) {
+        return None;
+    }
+    let projection = block.projected_lines.last()?;
+    if !projection.text.ends_with('\\') {
+        return None;
+    }
+    let marker_start = projection.boundaries.get(projection.boundaries.len().checked_sub(2)?)?.byte;
+    let after_marker = source.get(marker_start..)?.strip_prefix('\\')?;
+    let after_newline =
+        after_marker.strip_prefix("\r\n").or_else(|| after_marker.strip_prefix('\n'))?;
+    let backslash_count =
+        source[..=marker_start].bytes().rev().take_while(|&byte| byte == b'\\').count();
+    if backslash_count.is_multiple_of(2) {
+        return None;
+    }
+    let continuation = after_newline.split('\n').next()?.trim_end_matches('\r');
+    if !continuation.bytes().all(|byte| matches!(byte, b' ' | b'\t' | b'>'))
+        || continuation.bytes().filter(|&byte| byte == b'>').count() != quote_depth
+    {
+        return None;
+    }
+    let continuation_byte = source.len() - after_newline.len() + continuation.len();
+    Some((marker_start, continuation_byte))
 }
 
 fn collect_candidates(blocks: &[BlockNode], source: &str) -> Vec<EmptySourceLine> {
@@ -104,7 +209,7 @@ fn collect_candidates(blocks: &[BlockNode], source: &str) -> Vec<EmptySourceLine
             };
             let terminal_code_content = line.source_byte == source.len()
                 && blocks.last().is_some_and(|block| owns_terminal_code_line(block, source));
-            if !terminal_code_content && resolve_owner(blocks, &mut line, 0) {
+            if !terminal_code_content && resolve_owner(blocks, &mut line, 0, source) {
                 candidates.push(line);
             }
         }
@@ -196,12 +301,31 @@ fn empty_content_offset(content: &str) -> Option<(usize, usize)> {
     (remaining.is_empty() && quote_depth > 0).then_some((content.len(), quote_depth))
 }
 
-fn resolve_owner(blocks: &[BlockNode], line: &mut EmptySourceLine, quote_depth: usize) -> bool {
+fn resolve_owner(
+    blocks: &[BlockNode],
+    line: &mut EmptySourceLine,
+    quote_depth: usize,
+    source: &str,
+) -> bool {
     let insertion = blocks.partition_point(|block| block.block_range.start <= line.source_byte);
     let Some(block_index) = insertion.checked_sub(1) else {
         return line.quote_depth == quote_depth;
     };
     let block = &blocks[block_index];
+    let block_quote_depth = quote_depth + usize::from(matches!(block.kind, BlockKind::BlockQuote));
+    if terminal_hard_break(block, source, block_quote_depth)
+        .is_some_and(|(_, continuation)| continuation == line.line_end)
+    {
+        return false;
+    }
+    if block.projected_lines.iter().any(|projected| {
+        let extent = projected.source_extent();
+        (extent.start <= line.source_byte && line.source_byte <= extent.end)
+            || (projected.text.is_empty()
+                && (line.line_start..=line.line_end).contains(&extent.start))
+    }) {
+        return false;
+    }
     let owns_line = line.source_byte < block.block_range.end
         || (line.line_start < block.block_range.end && line.source_byte == block.block_range.end);
     if !owns_line {
@@ -218,15 +342,9 @@ fn resolve_owner(blocks: &[BlockNode], line: &mut EmptySourceLine, quote_depth: 
     if line.quote_depth == quote_depth && content_end(block) <= line.source_byte {
         return true;
     }
-    if block.projected_lines.iter().any(|projected| {
-        let extent = projected.source_extent();
-        extent.start <= line.source_byte && line.source_byte <= extent.end
-    }) {
-        return false;
-    }
     line.owner.push(block_index);
     let child_quote_depth = quote_depth + usize::from(matches!(block.kind, BlockKind::BlockQuote));
-    resolve_owner(&block.children, line, child_quote_depth)
+    resolve_owner(&block.children, line, child_quote_depth, source)
 }
 
 fn content_end(block: &BlockNode) -> usize {
@@ -313,6 +431,60 @@ mod tests {
 
     fn build(source: &str) -> MarkdownDoc {
         MarkdownDoc::build_for_editing(&parse_markdown(source), &default_style(), source)
+    }
+
+    #[test]
+    fn terminal_hard_break_projection_preserves_literal_backslashes_and_code() {
+        for source in [
+            "literal\\",
+            "literal\\\\\n",
+            "`literal\\`\n",
+            "```\nliteral\\\n",
+            "    literal\\\n",
+            "# heading\\\n",
+            "literal\\\n> quote",
+        ] {
+            let parsed = parse_markdown(source);
+            let original = MarkdownDoc::build(&parsed, &default_style());
+            let mut edited = original.clone();
+            super::retain_terminal_hard_breaks(&mut edited.blocks, source, 0);
+            assert_eq!(format!("{edited:?}"), format!("{original:?}"), "source={source:?}");
+        }
+    }
+
+    #[test]
+    fn terminal_hard_break_continuation_is_owned_once_by_its_original_leaf() {
+        for source in [
+            "body\\\n",
+            "body\\\r\n",
+            "body\\\n\nnext",
+            "- body\\\n  ",
+            "> body\\\n> ",
+            "- > body\\\n  > ",
+        ] {
+            let document = build(source);
+            fn text_rows(blocks: &[BlockNode]) -> Vec<&str> {
+                blocks
+                    .iter()
+                    .flat_map(|block| {
+                        block
+                            .text_lines
+                            .iter()
+                            .map(String::as_str)
+                            .chain(text_rows(&block.children))
+                    })
+                    .collect()
+            }
+            let expected =
+                if source.ends_with("next") { vec!["body", "", "next"] } else { vec!["body", ""] };
+            assert_eq!(text_rows(&document.blocks), expected, "source={source:?}");
+            let raw = MarkdownDoc::build(&parse_markdown(source), &default_style());
+            let paragraphs = super::EditableParagraphMap::from_blocks(&raw.blocks, source);
+            assert!(
+                paragraphs.runs().is_empty(),
+                "hard-break continuation is not an empty paragraph: source={source:?}"
+            );
+        }
     }
 
     #[test]

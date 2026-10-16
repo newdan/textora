@@ -233,6 +233,7 @@ fn render_engine(
             );
         println!("[md render] {} us", render_duration_us);
     }
+    draw_empty_heading_placeholder(engine, &mut dl, bounds, &style, shaper);
     draw_standalone_preedit(engine, &mut dl, bounds, theme, shaper);
     // Draw cursor at the WYSIWYG position (only when blink phase is visible)
     if engine.cursor_visible
@@ -247,6 +248,77 @@ fn render_engine(
         dl.fill(cursor_rect, theme.editor.cursor);
     }
     dl
+}
+
+fn empty_heading_level(blocks: &[crate::builder::BlockNode], cursor: usize) -> Option<u8> {
+    for block in blocks {
+        if block.block_range.start > cursor || block.block_range.end < cursor {
+            continue;
+        }
+        if let crate::builder::BlockKind::Heading { level } = block.kind
+            && block.text_lines.iter().all(String::is_empty)
+        {
+            return Some(level);
+        }
+        if let Some(level) = empty_heading_level(&block.children, cursor) {
+            return Some(level);
+        }
+    }
+    None
+}
+
+fn empty_heading_placeholder_target(
+    engine: &PreviewEngine,
+) -> Option<(u8, &crate::layout::FlatLine)> {
+    let context = engine.edit_ctx.as_ref()?;
+    if context.preedit_text.as_ref().is_some_and(|text| !text.is_empty())
+        || engine.byte_selection_range().is_some()
+    {
+        return None;
+    }
+    let layout = engine.lazy.as_ref()?;
+    let level = empty_heading_level(layout.source.blocks(), context.cursor_byte)?;
+    let line = engine.flat_lines().iter().find(|line| {
+        line.text.is_empty()
+            && line.source_projection.as_ref().is_some_and(|projection| {
+                projection
+                    .boundaries
+                    .first()
+                    .is_some_and(|anchor| anchor.byte == context.cursor_byte)
+            })
+    })?;
+    Some((level, line))
+}
+
+fn draw_empty_heading_placeholder(
+    engine: &PreviewEngine,
+    commands: &mut DrawList,
+    bounds: ui::Rect,
+    style: &MarkdownStyle,
+    shaper: &mut shaping::Shaper,
+) {
+    const HEADING_PLACEHOLDERS: [&str; 6] =
+        ["一级标题", "二级标题", "三级标题", "四级标题", "五级标题", "六级标题"];
+    const PLACEHOLDER_FADE_RATIO: f32 = 0.55;
+    let Some((level, line)) = empty_heading_placeholder_target(engine) else { return };
+    commands.clip(bounds, |commands| {
+        commands.text_shaped_with_font(
+            bounds.x + line.rect.x,
+            bounds.y + line.rect.y - engine.scroll_y + line.font_size,
+            line.font_size,
+            crate::style::blend_toward_bg(
+                style.heading_color,
+                style.background_color,
+                PLACEHOLDER_FADE_RATIO,
+            ),
+            HEADING_PLACEHOLDERS[usize::from(level - 1)],
+            style.body_font_family.first().cloned(),
+            shaping::Weight::SEMIBOLD,
+            shaping::Style::Normal,
+            false,
+            shaper,
+        );
+    });
 }
 
 fn draw_standalone_preedit(

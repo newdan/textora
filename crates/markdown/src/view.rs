@@ -4238,7 +4238,7 @@ mod wysiwyg_tests {
         use ui::plugin::{PluginMessage, ViewPlugin};
 
         let source = "# Title";
-        let marker_end = "# ".len();
+        let marker_end = "#".len();
         let mut document = StubDoc::new(source);
         let mut view = MarkdownEditorView::new();
         view.set_source(document.text.clone(), 1);
@@ -4284,7 +4284,7 @@ mod wysiwyg_tests {
             .shape("# ")
             .expect("heading marker should shape with its line font weight")
             .width;
-        let expected_x = flat_line.rect.x + expected_marker_width;
+        let expected_x = flat_line.rect.x + shaper.shape("#").expect("prefix cursor advance").width;
 
         assert!(
             (marker.width - expected_marker_width).abs() < 0.01,
@@ -5184,7 +5184,7 @@ mod wysiwyg_tests {
         let mut doc = StubDoc::new(&source);
         let mut view = MarkdownEditorView::new();
         view.set_source(source.clone(), 1);
-        view.handle_message(PluginMessage::SetCursorByte(2), &mut doc);
+        view.handle_message(PluginMessage::SetCursorByte(1), &mut doc);
         render_editor_once(&mut view, &doc);
 
         fn heading_text(view: &MarkdownEditorView) -> String {
@@ -6321,6 +6321,167 @@ C608-01 武昌职业第01组：计划 68，历史低线较低，是表里最像�
         let bounds = ui::core::geom::Rect::new(0.0, 0.0, 800.0, 600.0);
         let mut shaper = shaping::Shaper::new().expect("test shaper should initialize");
         <MarkdownEditorView as ViewPlugin>::render(view, doc, bounds, &theme, &mut shaper, 1.0)
+    }
+
+    #[test]
+    fn heading_space_shows_empty_heading_feedback_without_source_prefix() {
+        let mut view = MarkdownEditorView::new();
+        for (generation, source, expected_text) in
+            [(1, "###", "###"), (2, "### ", ""), (3, "### 标题", "标题")]
+        {
+            view.set_source(source.to_owned(), generation);
+            view.engine.handle_set_cursor_byte(source.len());
+            let document = StubDoc::new(source);
+            let commands = render_editor_draw_list(&mut view, &document);
+            let line = &view.engine.flat_lines()[0];
+            assert_eq!(line.text, expected_text, "source={source:?}");
+            assert!(line.source_projection.as_ref().is_some_and(|projection| {
+                projection.boundaries.last().is_some_and(|anchor| anchor.byte == source.len())
+            }));
+            let has_placeholder = commands.cmds.iter().any(|command| {
+                matches!(command, ui::DrawCmd::TextLayout { layout, .. } if layout.text == "三级标题")
+            });
+            assert_eq!(has_placeholder, source == "### ", "source={source:?}");
+            let (cursor_x, cursor_y, _, _) =
+                view.engine.cursor_screen_pos().expect("heading caret");
+            assert_eq!(
+                view.engine.hit_test_byte(cursor_x, cursor_y + line.rect.h * 0.5, 0.0, 0.0),
+                Some(source.len())
+            );
+        }
+    }
+
+    #[test]
+    fn empty_heading_enter_and_backspace_keep_paragraph_semantics() {
+        use super::tests::apply_single_replacement;
+        use ui::plugin::{EditIntent, EditPolicy, EditRequest};
+
+        let source = "### ";
+        let mut view = make_editor_view_with_cursor(source, source.len());
+        for intent in [EditIntent::DeleteBackward, EditIntent::InsertParagraphBreak] {
+            let request = EditRequest {
+                source_generation: 1,
+                cursor_byte: source.len(),
+                selection: None,
+                intent: intent.clone(),
+            };
+            let (edited, cursor) = apply_single_replacement(source, &view.plan_edit(&request));
+            if intent == EditIntent::DeleteBackward {
+                assert_eq!(edited, "");
+            }
+            view.set_source(edited.clone(), 2);
+            view.engine.handle_set_cursor_byte(cursor);
+            let commands = render_editor_draw_list(&mut view, &StubDoc::new(&edited));
+            assert!(!commands.cmds.iter().any(|command| matches!(command,
+                ui::DrawCmd::TextLayout { layout, .. } if layout.text == "三级标题")));
+            let line = view.engine.flat_lines().last().expect("body row");
+            let style = view.engine.cached_query_style.as_ref().expect("resolved body style");
+            assert_eq!(line.font_size, style.body_font_size);
+            view.set_source(source.to_owned(), 1);
+        }
+    }
+
+    #[test]
+    fn empty_heading_feedback_uses_heading_metrics_at_each_dpi_and_source_position() {
+        let theme = ui::theme::test_theme();
+        for dpi_scale in [1.0, 2.0] {
+            for level in 1..=6 {
+                for suffix in ["", "\n\n正文"] {
+                    let prefix = format!("{} ", "#".repeat(level));
+                    let source = format!("{prefix}{suffix}");
+                    let mut view = MarkdownEditorView::new();
+                    view.set_source(source.clone(), 1);
+                    view.engine.handle_set_cursor_byte(prefix.len());
+                    let mut shaper = shaping::Shaper::new().expect("heading test shaper");
+                    let commands = view.render(
+                        &StubDoc::new(&source),
+                        ui::Rect::new(0.0, 0.0, 800.0 * dpi_scale, 600.0 * dpi_scale),
+                        &theme,
+                        &mut shaper,
+                        dpi_scale,
+                    );
+                    let placeholder = commands
+                        .cmds
+                        .iter()
+                        .find_map(|command| match command {
+                            ui::DrawCmd::TextLayout { layout, .. }
+                                if layout.text.ends_with("级标题") =>
+                            {
+                                Some(layout)
+                            }
+                            _ => None,
+                        })
+                        .expect("empty heading needs a visible placeholder");
+                    let line = &view.engine.flat_lines()[0];
+                    assert!(line.text.is_empty());
+                    let style = view.engine.cached_query_style.as_ref().expect("resolved style");
+                    assert_eq!(placeholder.font_size, style.heading_font_sizes[level - 1]);
+                    assert_eq!(line.font_size, placeholder.font_size);
+                    assert_eq!(
+                        line.source_projection
+                            .as_ref()
+                            .expect("empty heading projection")
+                            .boundaries[0]
+                            .byte,
+                        prefix.len()
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn shift_enter_hides_terminal_hard_break_and_keeps_paragraph_line_spacing() {
+        use super::tests::apply_single_replacement;
+        use ui::plugin::{EditIntent, EditPolicy, EditRequest};
+
+        for source in [
+            "正文",
+            "前文\n\n正文",
+            "**正文**",
+            "- 正文",
+            "> 正文",
+            "正文\r\n续行",
+            "- > 正文",
+            "> - 正文",
+            "1. 正文",
+        ] {
+            let mut view = MarkdownEditorView::new();
+            view.set_source(source.to_owned(), 1);
+            let request = EditRequest {
+                source_generation: 1,
+                cursor_byte: source.len(),
+                selection: None,
+                intent: EditIntent::InsertLineBreak,
+            };
+            let (edited, cursor) = apply_single_replacement(source, &view.plan_edit(&request));
+            view.set_source(edited.clone(), 2);
+            view.engine.handle_set_cursor_byte(cursor);
+            render_editor_once(&mut view, &StubDoc::new(&edited));
+            let lines = view.engine.flat_lines();
+            assert!(lines.iter().all(|line| !line.text.contains('\\')), "source={edited:?}");
+            let continuation = lines.last().expect("hard break continuation");
+            assert_eq!(continuation.text, "", "source={edited:?}");
+            let previous = &lines[lines.len() - 2];
+            assert!(
+                (continuation.rect.y - previous.rect.y - previous.rect.h).abs() < 0.01,
+                "hard break must have no paragraph gap: source={edited:?}"
+            );
+            let (cursor_x, cursor_y, _, _) =
+                view.engine.cursor_screen_pos().expect("continuation caret");
+            assert_eq!(
+                view.engine.hit_test_byte(cursor_x, cursor_y + continuation.rect.h * 0.5, 0.0, 0.0),
+                Some(cursor)
+            );
+            let backspace = EditRequest {
+                source_generation: 2,
+                cursor_byte: cursor,
+                selection: None,
+                intent: EditIntent::DeleteBackward,
+            };
+            let (restored, _) = apply_single_replacement(&edited, &view.plan_edit(&backspace));
+            assert_eq!(restored, source);
+        }
     }
 
     #[test]
@@ -7746,8 +7907,8 @@ C608-01 武昌职业第01组：计划 68，历史低线较低，是表里最像�
             "marker should NOT be visible when cursor is in paragraph, got: {joined:?}"
         );
 
-        // Cursor at byte 3 (inside heading content "Title") → marker visible.
-        view.handle_message(PluginMessage::SetCursorByte(3), &mut doc);
+        // Cursor at byte 1 (inside the heading prefix) → marker visible.
+        view.handle_message(PluginMessage::SetCursorByte(1), &mut doc);
         render_editor_once(&mut view, &doc);
         let response = view.query(PluginQuery::FlatLines, &doc);
         let lines = match response {
@@ -7828,7 +7989,7 @@ C608-01 武昌职业第01组：计划 68，历史低线较低，是表里最像�
         let mut view = MarkdownEditorView::new();
         view.set_source(doc.text.clone(), 1);
 
-        view.handle_message(PluginMessage::SetCursorByte(5), &mut doc);
+        view.handle_message(PluginMessage::SetCursorByte(1), &mut doc);
         render_editor_once(&mut view, &doc);
         let response = view.query(PluginQuery::FlatLines, &doc);
         let lines = match response {
@@ -7840,7 +8001,7 @@ C608-01 武昌职业第01组：计划 68，历史低线较低，是表里最像�
     }
 
     #[test]
-    fn folded_h2_click_uses_expanded_cursor_rect_after_marker_appears() {
+    fn heading_content_click_keeps_prefix_hidden_and_caret_stable() {
         use ui::plugin::{PluginMessage, ViewPlugin};
 
         let source = "## SubTitle\n\nparagraph";
@@ -7872,8 +8033,8 @@ C608-01 武昌职业第01组：计划 68，历史低线较低，是表里最像�
 
         let expanded_line = view.engine().flat_lines()[0].clone();
         assert!(
-            expanded_line.text.starts_with("## "),
-            "heading marker should appear after cursor enters heading, got {:?}",
+            expanded_line.text == folded_line.text,
+            "heading prefix should stay hidden after clicking content, got {:?}",
             expanded_line.text
         );
 
@@ -7881,9 +8042,9 @@ C608-01 武昌职业第01组：计划 68，历史低线较低，是表里最像�
             .engine()
             .hit_test_byte(px, py, 0.0, 0.0)
             .expect("expanded heading stale hit-test should still hit the line");
-        assert_ne!(
+        assert_eq!(
             stale_mouse_hit, candidate,
-            "reusing the folded mouse x after marker expansion should demonstrate the drift"
+            "clicking heading content must keep the original source position"
         );
 
         let (cursor_x, cursor_y, _cursor_w, cursor_h) =
@@ -7909,7 +8070,7 @@ C608-01 武昌职业第01组：计划 68，历史低线较低，是表里最像�
         let mut view = MarkdownEditorView::new();
         view.set_source(doc.text.clone(), 1);
 
-        view.handle_message(PluginMessage::SetCursorByte(6), &mut doc);
+        view.handle_message(PluginMessage::SetCursorByte(1), &mut doc);
         render_editor_once(&mut view, &doc);
         let response = view.query(PluginQuery::FlatLines, &doc);
         let lines = match response {
@@ -9876,7 +10037,7 @@ mod tests {
     }
 
     /// 应用单条替换计划到源码，返回（最终文本, 光标落点）。
-    fn apply_single_replacement(source: &str, plan: &EditPlan) -> (String, usize) {
+    pub(super) fn apply_single_replacement(source: &str, plan: &EditPlan) -> (String, usize) {
         let EditPlan::Apply(transaction) = plan else {
             panic!("expected a single Apply plan, got {plan:?}");
         };

@@ -8,6 +8,8 @@ use crate::builder::{BlockKind, BlockNode, BlockSource, StyleSpan};
 use crate::edit::SourceLineContext;
 use crate::style::MarkdownStyle;
 
+const HEADING_LINE_HEIGHT_RATIO: f32 = 1.3;
+
 // ===== Public API =====
 
 /// Layout a list of `BlockNode`s into positioned blocks.
@@ -220,14 +222,9 @@ fn layout_block_content(block: &BlockNode, ctx: &mut LayoutCtx) {
         BlockKind::Heading { level } => {
             let idx = (*level as usize).saturating_sub(1).min(5);
             let font_size = ctx.style.heading_font_sizes[idx];
-            // Detect active block marker: cursor in heading's source range.
-            if let Some(edit_ctx) = ctx.edit_ctx
-                && ctx.source_text.is_none_or(|source| {
-                    crate::augmenter::heading_source_is_atx(source, block.block_range.start)
-                })
-            {
+            if let (Some(edit_ctx), Some(source)) = (ctx.edit_ctx, ctx.source_text) {
                 ctx.active_block_marker =
-                    crate::edit::active_block_marker(block, edit_ctx.cursor_byte);
+                    heading_marker_at_cursor(block, source, edit_ctx.cursor_byte);
             }
             layout_text_block(block, ctx, font_size, ctx.style.heading_color, Weight::SEMIBOLD);
             ctx.active_block_marker = None;
@@ -634,6 +631,34 @@ fn layout_block_content(block: &BlockNode, ctx: &mut LayoutCtx) {
             ctx.push_block(LaidOutBlockKind::MetadataBlock { lines: laid_out_lines }, total_h);
         }
     }
+}
+
+fn heading_marker_at_cursor(
+    block: &BlockNode,
+    source: &str,
+    cursor_byte: usize,
+) -> Option<crate::edit::ActiveBlockMarker> {
+    if cursor_byte < block.block_range.start
+        || cursor_byte > block.block_range.end
+        || !crate::augmenter::heading_source_is_atx(source, block.block_range.start)
+    {
+        return None;
+    }
+    let spelling = &source[block.block_range.clone()];
+    let line = spelling.split('\n').next()?.trim_end_matches('\r');
+    let indentation = line.len() - line.trim_start_matches(' ').len();
+    let hashes = line[indentation..].bytes().take_while(|&byte| byte == b'#').count();
+    let hash_end = indentation + hashes;
+    let separator =
+        line[hash_end..].bytes().take_while(|byte| matches!(byte, b' ' | b'\t')).count();
+    let prefix_end = block.block_range.start + hash_end + separator;
+    if separator > 0 && cursor_byte >= prefix_end {
+        return None;
+    }
+    Some(crate::edit::ActiveBlockMarker {
+        marker_text: line[..hash_end + separator].to_owned(),
+        marker_source_range: block.block_range.start..prefix_end,
+    })
 }
 
 fn first_spacing_block(block: &BlockNode) -> Option<super::spacing::BlockSpacing> {
@@ -1161,8 +1186,10 @@ pub(crate) fn layout_text_block(
     color: [f32; 4],
     font_weight: Weight,
 ) {
-    let line_h = if font_size >= ctx.style.heading_font_sizes[1] {
-        font_size * 1.3
+    let line_h = if matches!(block.kind, BlockKind::Heading { .. })
+        || font_size >= ctx.style.heading_font_sizes[1]
+    {
+        font_size * HEADING_LINE_HEIGHT_RATIO
     } else {
         ctx.style.line_height
     };
@@ -2880,7 +2907,8 @@ mod tests {
                     _ => None,
                 })
                 .expect("fixture must lay out an editable text line");
-            assert_eq!(line.text, format!("{prefix}before `a中文b` after"));
+            let visible_prefix = if prefix == "# " { "" } else { prefix };
+            assert_eq!(line.text, format!("{visible_prefix}before `a中文b` after"));
             let styled_text = line
                 .styles
                 .iter()

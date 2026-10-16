@@ -3839,7 +3839,7 @@ mod tests {
 
     #[test]
     fn heading_active_marker_appears_in_flat_line_text() {
-        let lazy = layout_with_cursor("# Title", 3); // cursor in "Title"
+        let lazy = layout_with_cursor("# Title", 1); // cursor in the prefix
         assert!(!lazy.flat_lines.is_empty(), "should have flat lines");
         let first_text = &lazy.flat_lines[0].text;
         assert!(
@@ -3892,7 +3892,7 @@ mod tests {
 
     #[test]
     fn heading_h2_active_marker_text() {
-        let lazy = layout_with_cursor("## Section", 5); // cursor in "Section"
+        let lazy = layout_with_cursor("## Section", 1); // cursor in the prefix
         let first_text = &lazy.flat_lines[0].text;
         assert!(
             first_text.starts_with("## "),
@@ -3955,7 +3955,7 @@ mod tests {
     #[test]
     fn heading_active_marker_projection_correct() {
         // "# Title" = 7 bytes: [0]='#', [1]=' ', [2]='T', [3]='i', [4]='t', [5]='l', [6]='e'
-        let lazy = layout_with_cursor("# Title", 3);
+        let lazy = layout_with_cursor("# Title", 1);
         let fl = &lazy.flat_lines[0];
         let map = fl
             .source_projection
@@ -4005,30 +4005,19 @@ mod tests {
     }
 
     #[test]
-    fn heading_with_inline_bold_active_marker_projection() {
-        // "# **bold**" = 11 bytes: [0]='#', [1]=' ', [2]='*', [3]='*', [4]='b', [5]='o', [6]='l', [7]='d', [8]='*', [9]='*'
-        // Cursor inside bold span (byte 5 = 'o')
+    fn heading_with_inline_bold_keeps_hidden_prefix_projection() {
         let lazy = layout_with_cursor("# **bold**", 5);
-        let fl = &lazy.flat_lines[0];
-        let map = fl
+        let line = &lazy.flat_lines[0];
+        assert_eq!(line.text, "**bold**");
+        let boundaries = line
             .source_projection
             .as_ref()
-            .expect("should have projection")
+            .expect("heading projection")
             .boundaries
             .iter()
             .map(|anchor| anchor.byte)
             .collect::<Vec<_>>();
-        // Visual chars: '#', ' ', '**', 'bold', '**' = 10 chars
-        // The marker "# " (bytes 0..2) should map correctly
-        assert_eq!(map[0], 0, "visual char 0 '#' → source byte 0");
-        assert_eq!(map[1], 1, "visual char 1 ' ' → source byte 1");
-        // The expanded bold "**bold**" (bytes 2..10)
-        assert_eq!(map[2], 2, "visual char 2 '*' → source byte 2");
-        assert_eq!(map[3], 3, "visual char 3 '*' → source byte 3");
-        assert_eq!(map[4], 4, "visual char 4 'b' → source byte 4");
-        assert_eq!(map[8], 8, "visual char 8 '*' → source byte 8");
-        assert_eq!(map[9], 9, "visual char 9 '*' → source byte 9");
-        assert_eq!(map[10], 10, "sentinel should be 10 (len of '# **bold**')");
+        assert_eq!(boundaries, (2..=10).collect::<Vec<_>>());
     }
 
     #[test]
@@ -4196,8 +4185,8 @@ mod tests {
         let md = "# Title\n\nparagraph";
         // Cursor at byte 10 (in "paragraph") -> heading has no marker
         let outside = layout_with_cursor(md, 10);
-        // Cursor at byte 3 (in "Title") -> heading has marker
-        let inside = layout_with_cursor(md, 3);
+        // Cursor at byte 1 (in the prefix) -> heading has marker
+        let inside = layout_with_cursor(md, 1);
 
         // Heading text check
         assert!(

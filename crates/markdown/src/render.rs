@@ -2843,7 +2843,7 @@ Day -29          Day -7           Day -1    Today    Day +1
 
     #[test]
     fn render_wysiwyg_source_marker_uses_muted_color() {
-        let (draw_list, style) = build_and_render_editing("# Title", 3);
+        let (draw_list, style) = build_and_render_editing("# Title", 1);
         let marker_color =
             text_command_color(&draw_list, "# ").expect("marker should render as its own text");
         let text_color =
