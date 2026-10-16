@@ -1,7 +1,8 @@
 use ui::plugin::{SemanticEditCommand, SemanticEditPlan};
 
-mod strikethrough;
+mod inline_formatting;
 mod table_structure;
+use inline_formatting::InlineFormat;
 pub use table_structure::{TableStructureCapabilities, table_structure_capabilities};
 #[cfg(test)]
 use table_structure::{format_table_row, source_table_at};
@@ -30,15 +31,27 @@ pub fn plan_semantic_edit(
         SemanticEditCommand::SetHeadingLevel(level) => {
             plan_heading(source, source_generation, cursor_byte, selection, level)
         }
-        SemanticEditCommand::ToggleBold => {
-            plan_inline_toggle(source, source_generation, cursor_byte, selection, "**")
-        }
-        SemanticEditCommand::ToggleItalic => {
-            plan_inline_toggle(source, source_generation, cursor_byte, selection, "*")
-        }
-        SemanticEditCommand::ToggleStrikethrough => {
-            strikethrough::plan_toggle(source, source_generation, cursor_byte, selection)
-        }
+        SemanticEditCommand::ToggleBold => inline_formatting::plan_toggle(
+            source,
+            source_generation,
+            cursor_byte,
+            selection,
+            InlineFormat::Bold,
+        ),
+        SemanticEditCommand::ToggleItalic => inline_formatting::plan_toggle(
+            source,
+            source_generation,
+            cursor_byte,
+            selection,
+            InlineFormat::Italic,
+        ),
+        SemanticEditCommand::ToggleStrikethrough => inline_formatting::plan_toggle(
+            source,
+            source_generation,
+            cursor_byte,
+            selection,
+            InlineFormat::Strikethrough,
+        ),
         SemanticEditCommand::ToggleInlineCode => {
             plan_inline_code(source, source_generation, cursor_byte, selection)
         }
@@ -432,44 +445,6 @@ enum LinePrefix {
     Quote,
 }
 
-fn plan_inline_toggle(
-    source: &str,
-    source_generation: u32,
-    cursor_byte: usize,
-    selection: Option<std::ops::Range<usize>>,
-    marker: &str,
-) -> SemanticEditPlan {
-    let Some(range) = selection.filter(|range| range.start < range.end) else {
-        let replacement = format!("{marker}{marker}");
-        return apply_transaction(
-            source_generation,
-            cursor_byte..cursor_byte,
-            replacement,
-            cursor_byte + marker.len(),
-        );
-    };
-    let selected = &source[range.clone()];
-    if selected.len() >= marker.len() * 2
-        && selected.starts_with(marker)
-        && selected.ends_with(marker)
-    {
-        let unwrapped = selected[marker.len()..selected.len() - marker.len()].to_owned();
-        return apply_transaction(
-            source_generation,
-            range.clone(),
-            unwrapped.clone(),
-            range.start + unwrapped.len(),
-        );
-    }
-    let replacement = format!("{marker}{selected}{marker}");
-    apply_transaction(
-        source_generation,
-        range.clone(),
-        replacement.clone(),
-        range.start + replacement.len(),
-    )
-}
-
 fn plan_inline_code(
     source: &str,
     source_generation: u32,
@@ -484,14 +459,16 @@ fn plan_inline_code(
             cursor_byte + CODE_MARKER.len(),
         );
     };
-    let selected = &source[range.clone()];
-    let replacement = unwrap_inline_code(selected).unwrap_or_else(|| wrap_inline_code(selected));
-    apply_transaction(
-        source_generation,
-        range.clone(),
-        replacement.clone(),
-        range.start + replacement.len(),
-    )
+    let targets = inline_formatting::selected_blocks(source, &range);
+    let remove_existing =
+        targets.iter().all(|target| unwrap_inline_code(&source[target.clone()]).is_some());
+    inline_formatting::plan_block_transform(source, source_generation, &targets, |selected| {
+        match unwrap_inline_code(selected) {
+            Some(unwrapped) if remove_existing => unwrapped,
+            Some(_) => selected.to_owned(),
+            None => wrap_inline_code(selected),
+        }
+    })
 }
 
 fn wrap_inline_code(content: &str) -> String {
@@ -552,13 +529,10 @@ fn plan_link(
             cursor_byte + 1,
         );
     };
-    let replacement = format!("[{}](https://)", &source[range.clone()]);
-    apply_transaction(
-        source_generation,
-        range.clone(),
-        replacement.clone(),
-        range.start + replacement.len(),
-    )
+    let targets = inline_formatting::selected_blocks(source, &range);
+    inline_formatting::plan_block_transform(source, source_generation, &targets, |selected| {
+        format!("[{selected}](https://)")
+    })
 }
 
 fn plan_heading(
@@ -605,6 +579,8 @@ fn plan_line_prefix(
     let replacement = transform_lines(segment, |line| {
         if remove_existing {
             remove_line_prefix(line, prefix)
+        } else if has_line_prefix(line, prefix) {
+            line.to_owned()
         } else {
             add_line_prefix(line, prefix)
         }
@@ -1303,6 +1279,154 @@ mod tests {
     }
 
     #[test]
+    fn inline_commands_format_each_selected_paragraph() {
+        let mut mismatches = Vec::new();
+        for (command, expected) in [
+            (SemanticEditCommand::ToggleBold, "**第一段**\n\n**第二段**"),
+            (SemanticEditCommand::ToggleItalic, "*第一段*\n\n*第二段*"),
+            (SemanticEditCommand::ToggleInlineCode, "`第一段`\n\n`第二段`"),
+            (SemanticEditCommand::InsertLink, "[第一段](https://)\n\n[第二段](https://)"),
+        ] {
+            let source = "第一段\n\n第二段";
+            let (formatted, _) =
+                applied_text(source, command.clone(), source.len(), Some(0..source.len()));
+            if formatted != expected {
+                mismatches.push((command, formatted, expected));
+            }
+        }
+        assert!(mismatches.is_empty(), "incorrect cross-paragraph formatting: {mismatches:?}");
+    }
+
+    #[test]
+    fn bold_and_italic_remove_formatting_from_every_selected_paragraph() {
+        for (command, source) in [
+            (SemanticEditCommand::ToggleBold, "**第一段**\n\n**第二段**"),
+            (SemanticEditCommand::ToggleItalic, "*第一段*\n\n*第二段*"),
+        ] {
+            let (restored, _) =
+                applied_text(source, command.clone(), source.len(), Some(0..source.len()));
+            assert_eq!(restored, "第一段\n\n第二段", "command: {command:?}");
+        }
+    }
+
+    #[test]
+    fn emphasis_toggles_preserve_other_styles_and_alternate_markers() {
+        for (command, source, expected) in [
+            (SemanticEditCommand::ToggleBold, "__第一段__\n\n__第二段__", "第一段\n\n第二段"),
+            (SemanticEditCommand::ToggleItalic, "_第一段_\n\n_第二段_", "第一段\n\n第二段"),
+            (
+                SemanticEditCommand::ToggleBold,
+                "***第一段***\n\n***第二段***",
+                "*第一段*\n\n*第二段*",
+            ),
+            (
+                SemanticEditCommand::ToggleItalic,
+                "***第一段***\n\n***第二段***",
+                "**第一段**\n\n**第二段**",
+            ),
+            (SemanticEditCommand::ToggleBold, "**第一段**\n\n第二段", "**第一段**\n\n**第二段**"),
+            (SemanticEditCommand::ToggleItalic, "*第一段*\n\n第二段", "*第一段*\n\n*第二段*"),
+        ] {
+            let (formatted, _) =
+                applied_text(source, command.clone(), source.len(), Some(0..source.len()));
+            assert_eq!(formatted, expected, "command: {command:?}, source: {source:?}");
+        }
+    }
+
+    #[test]
+    fn cross_paragraph_inline_code_preserves_existing_code_and_safe_delimiters() {
+        for (source, expected) in [
+            ("`第一段`\n\n`第二段`", "第一段\n\n第二段"),
+            ("`第一段`\n\n第二段", "`第一段`\n\n`第二段`"),
+            ("a`b\n\nc`d", "``a`b``\n\n``c`d``"),
+        ] {
+            let (formatted, _) = applied_text(
+                source,
+                SemanticEditCommand::ToggleInlineCode,
+                source.len(),
+                Some(0..source.len()),
+            );
+            assert_eq!(formatted, expected, "source: {source:?}");
+        }
+    }
+
+    #[test]
+    fn inline_commands_preserve_containers_and_atomic_blocks() {
+        for (command, opening, closing) in [
+            (SemanticEditCommand::ToggleBold, "**", "**"),
+            (SemanticEditCommand::ToggleItalic, "*", "*"),
+            (SemanticEditCommand::ToggleInlineCode, "`", "`"),
+            (SemanticEditCommand::InsertLink, "[", "](https://)"),
+        ] {
+            for newline in [LF_SEQUENCE, CRLF_SEQUENCE] {
+                for source in [
+                    format!("## 第一段{newline}{newline}- 第二段"),
+                    format!("> 第一段{newline}>{newline}> 第二段"),
+                    format!(
+                        "第一段{newline}{newline}```{newline}代码{newline}```{newline}{newline}第二段"
+                    ),
+                    format!("| 第一段 |{newline}| --- |{newline}| 第二段 |"),
+                ] {
+                    let expected = source
+                        .replace("第一段", &format!("{opening}第一段{closing}"))
+                        .replace("第二段", &format!("{opening}第二段{closing}"));
+                    let (formatted, _) =
+                        applied_text(&source, command.clone(), source.len(), Some(0..source.len()));
+                    assert_eq!(formatted, expected, "command: {command:?}, source: {source:?}");
+                    let parsed = crate::parser::parse_markdown(&formatted);
+                    let formatted_spans = parsed
+                        .events
+                        .iter()
+                        .filter(|event| {
+                            matches!(
+                                (&command, event),
+                                (
+                                    SemanticEditCommand::ToggleBold,
+                                    crate::parser::MarkdownEvent::Start(
+                                        crate::parser::MarkdownTag::Strong,
+                                    ),
+                                ) | (
+                                    SemanticEditCommand::ToggleItalic,
+                                    crate::parser::MarkdownEvent::Start(
+                                        crate::parser::MarkdownTag::Emphasis,
+                                    ),
+                                ) | (
+                                    SemanticEditCommand::ToggleInlineCode,
+                                    crate::parser::MarkdownEvent::Code(_),
+                                ) | (
+                                    SemanticEditCommand::InsertLink,
+                                    crate::parser::MarkdownEvent::Start(
+                                        crate::parser::MarkdownTag::Link { .. },
+                                    ),
+                                )
+                            )
+                        })
+                        .count();
+                    assert_eq!(formatted_spans, 2, "generated markup must parse: {formatted:?}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn mixed_line_formatting_does_not_duplicate_existing_prefixes() {
+        let mut mismatches = Vec::new();
+        for (command, source, expected) in [
+            (SemanticEditCommand::UnorderedList, "- 第一项\n第二项", "- 第一项\n- 第二项"),
+            (SemanticEditCommand::OrderedList, "1. 第一项\n第二项", "1. 第一项\n1. 第二项"),
+            (SemanticEditCommand::TaskList, "- [x] 第一项\n第二项", "- [x] 第一项\n- [ ] 第二项"),
+            (SemanticEditCommand::Quote, "> 第一段\n第二段", "> 第一段\n> 第二段"),
+        ] {
+            let (formatted, _) =
+                applied_text(source, command.clone(), source.len(), Some(0..source.len()));
+            if formatted != expected {
+                mismatches.push((command, formatted, expected));
+            }
+        }
+        assert!(mismatches.is_empty(), "duplicated line prefixes: {mismatches:?}");
+    }
+
+    #[test]
     fn strikethrough_formats_each_selected_paragraph() {
         for newline in [LF_SEQUENCE, CRLF_SEQUENCE] {
             let source = format!(
@@ -1721,7 +1845,7 @@ mod tests {
             let (result, _) =
                 applied_text(&source, SemanticEditCommand::Quote, 0, Some(0..selection_end));
 
-            assert_eq!(result, format!("> > first{newline}> {newline}last"));
+            assert_eq!(result, format!("> first{newline}> {newline}last"));
         }
     }
 }
