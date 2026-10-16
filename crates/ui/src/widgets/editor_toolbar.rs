@@ -514,6 +514,7 @@ fn toolbar_icon(command_key: &str) -> Option<&'static str> {
         "code_block" => Some("square-code"),
         "link" => Some("link"),
         "toggle_source" => Some("eye"),
+        "document_search" => Some("search"),
         "mindmap_style" => Some("palette"),
         "canvas_zoom_out" => Some("minus"),
         "canvas_zoom_in" => Some("plus"),
@@ -718,6 +719,55 @@ mod tests {
         let bold_rect = toolbar.command_rect("bold", 1.0).expect("bold should remain visible");
 
         assert_eq!(bold_rect.x - undo_rect.right(), TOOLBAR_GROUP_GAP_LOGICAL);
+    }
+
+    #[test]
+    fn document_search_paints_a_compact_icon_with_a_tooltip() {
+        use crate::core::paint::DrawList;
+
+        let mut toolbar = EditorToolbarWidget::new();
+        toolbar.set_input(EditorToolbarInput {
+            groups: vec![EditorToolbarGroupInput {
+                label: "查找".to_owned(),
+                commands: vec![EditorToolbarCommandInput {
+                    command_key: "document_search".to_owned(),
+                    label: "文内查找".to_owned(),
+                    enabled: true,
+                    overflow_priority: 0,
+                }],
+            }],
+            overflow_open: false,
+        });
+        let theme = crate::theme::test_theme();
+        for dpi in [1.0, 2.0] {
+            toolbar.rect = Rect::new(0.0, 0.0, 320.0 * dpi, 40.0 * dpi);
+            toolbar.dpi = dpi;
+            let button_rect = toolbar
+                .command_rect("document_search", dpi)
+                .expect("document search should remain visible");
+            let icon_size = TOOLBAR_ICON_SIZE_LOGICAL * dpi;
+            let mut expected_icon = DrawList::new();
+            draw_icon(
+                &mut expected_icon,
+                "search",
+                button_rect.x + (button_rect.w - icon_size) * 0.5,
+                button_rect.y + (button_rect.h - icon_size) * 0.5,
+                icon_size,
+                theme.palette.text_muted,
+            );
+            assert!(!expected_icon.cmds.is_empty(), "search icon must contain geometry");
+            let mut painted = DrawList::new();
+            toolbar.paint(&mut PaintCtx::new(&mut painted, &theme, dpi));
+
+            assert!(painted.cmds.starts_with(&expected_icon.cmds), "文内查找应绘制搜索图标");
+            assert_eq!(button_rect.w, TOOLBAR_COMMAND_SIZE_LOGICAL * dpi);
+            assert_eq!(
+                toolbar
+                    .tooltip_at(button_rect.x + button_rect.w * 0.5, button_rect.h * 0.5)
+                    .map(|hint| hint.label),
+                Some("文内查找".to_owned())
+            );
+        }
     }
 
     #[test]
