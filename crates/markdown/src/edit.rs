@@ -148,7 +148,9 @@ pub fn block_marker_len(block: &crate::builder::BlockNode) -> usize {
         crate::builder::BlockKind::Heading { level } => *level as usize + 1,
         crate::builder::BlockKind::ListItem { bullet, .. } => match bullet {
             crate::builder::ListBullet::Bullet => 2,
-            crate::builder::ListBullet::Ordered(n) => n.ilog10() as usize + 3, // "n. "
+            crate::builder::ListBullet::Ordered(n) => {
+                n.checked_ilog10().unwrap_or(0) as usize + 3 // "n. "
+            }
             crate::builder::ListBullet::TaskList(_) => 6, // "- [ ] " or "- [x] "
         },
         crate::builder::BlockKind::BlockQuote => 2,
@@ -1221,6 +1223,21 @@ mod tests {
             text_styles: vec![vec![]],
         };
         assert_eq!(block_marker_len(&h3), 4); // "### " = 4 bytes
+    }
+
+    #[test]
+    fn block_marker_len_ordered_list_accepts_zero_and_digit_boundaries() {
+        for (number, expected_length) in
+            [(0, 3), (1, 3), (9, 3), (10, 4), (42, 4), (999_999_999, 11)]
+        {
+            let source = format!("{number}. item");
+            let parsed = crate::parser::parse_markdown(&source);
+            let document =
+                crate::builder::MarkdownDoc::build(&parsed, &crate::test_utils::default_style());
+            let block = document.blocks.first().expect("fixture must contain an ordered list item");
+
+            assert_eq!(block_marker_len(block), expected_length, "source: {source:?}");
+        }
     }
 
     #[test]

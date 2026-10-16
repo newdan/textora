@@ -202,6 +202,24 @@ mod integration_tests {
     use super::*;
     use test_utils::default_style;
 
+    const Q4_LIST_SOURCE: &str = r#"Q4的几件事是一定要完成的:
+1. Office一定要完成Agent转型,Q4要做完.尤其是表格一堆的分析助手.
+
+计费可以做处理,ai目录可以保留,效果提升,不计智点费用,包到会员里
+
+2.个人Q4,明年到底怎么收钱?\
+可适当扩大测试的情况
+
+传统的会员收入一定会增速变慢,甚至下滑
+
+C端的传统功能也要改造成agent底座的
+
+C端的核心是尽快跑通商业闭环
+
+3. 进一步整合,进一步统一底座,核心能力agent化(**是否已经做完?**)
+4. 调一下研发节奏,尽快达成目标
+"#;
+
     #[test]
     fn e2e_paragraph_text_reaches_drawlist() {
         let dl = render_markdown("hello world", &default_style(), 400.0, 600.0, 0.0);
@@ -404,7 +422,7 @@ mod integration_tests {
     }
 
     #[test]
-    fn e2e_ordered_list_preview_normalizes_a_non_one_source_start() {
+    fn e2e_ordered_list_preview_preserves_a_non_one_source_start() {
         let source = "”\n\n2. 拆分容易合并难,框架要有决策权\n3. 质量保障的屁股问题\n4. 业务类型? toC or  toB,如AP 多维表\n5. 组件的边界会变强, 存在一些跨业务协调的事情,需要考虑\n6. 普遍缺用户运营的人,这个是统建还是各业务自己搞\n\n“";
         let draw_list = render_markdown(source, &default_style(), 800.0, 800.0, 0.0);
         let rendered_numbers = draw_list
@@ -422,7 +440,67 @@ mod integration_tests {
             })
             .collect::<Vec<_>>();
 
-        assert_eq!(rendered_numbers, ["1.", "2.", "3.", "4.", "5."]);
+        assert_eq!(rendered_numbers, ["2.", "3.", "4.", "5.", "6."]);
+    }
+
+    #[test]
+    fn q4_source_preserves_ordered_lists_paragraphs_hard_breaks_and_bold() {
+        use builder::{BlockKind, InlineStyle, ListBullet};
+
+        for source in [Q4_LIST_SOURCE.to_owned(), Q4_LIST_SOURCE.replace('\n', "\r\n")] {
+            let parsed = parser::parse_markdown(&source);
+            let document = builder::MarkdownDoc::build(&parsed, &default_style());
+            let block_numbers = document.blocks.iter().map(|block| match block.kind {
+                BlockKind::ListItem { bullet: ListBullet::Ordered(number), .. } => Some(number),
+                BlockKind::Paragraph => None,
+                ref unexpected => panic!("unexpected block: {unexpected:?}"),
+            });
+            assert_eq!(
+                block_numbers.collect::<Vec<_>>(),
+                [None, Some(1), None, None, None, None, None, Some(3), Some(4)]
+            );
+            assert_eq!(
+                document.blocks[3].text_lines,
+                ["2.个人Q4,明年到底怎么收钱?", "可适当扩大测试的情况"]
+            );
+            let third_item = &document.blocks[7];
+            let bold_span = third_item.text_styles[0]
+                .iter()
+                .find(|span| span.style == InlineStyle::Bold)
+                .expect("third item must retain its bold span");
+            assert_eq!(
+                &third_item.text_lines[0][bold_span.start..bold_span.start + bold_span.len],
+                "是否已经做完?"
+            );
+        }
+    }
+
+    #[test]
+    fn e2e_ordered_list_q4_source_preserves_numbering_and_hides_markup() {
+        for source in [Q4_LIST_SOURCE.to_owned(), Q4_LIST_SOURCE.replace('\n', "\r\n")] {
+            let draw_list = render_markdown(&source, &default_style(), 1800.0, 1600.0, 0.0);
+            let rendered_text = draw_list
+                .cmds
+                .iter()
+                .filter_map(|command| match command {
+                    ui::core::DrawCmd::TextLayout { layout, .. } => Some(layout.text.as_str()),
+                    _ => None,
+                })
+                .collect::<Vec<_>>();
+            let rendered_numbers = rendered_text
+                .iter()
+                .copied()
+                .filter(|text| {
+                    text.strip_suffix('.').is_some_and(|digits| {
+                        !digits.is_empty() && digits.bytes().all(|byte| byte.is_ascii_digit())
+                    })
+                })
+                .collect::<Vec<_>>();
+            assert_eq!(rendered_numbers, ["1.", "3.", "4."]);
+            assert!(rendered_text.contains(&"2.个人Q4,明年到底怎么收钱?"));
+            assert!(rendered_text.contains(&"可适当扩大测试的情况"));
+            assert!(!rendered_text.iter().any(|text| text.contains('\\') || text.contains("**")));
+        }
     }
 
     #[test]

@@ -515,8 +515,6 @@ struct ListStackEntry {
     blank_line_before: bool,
 }
 
-const ORDERED_LIST_PREVIEW_START: u64 = 1;
-
 pub(crate) fn inline_code_content_range(spelling: &str) -> Range<usize> {
     let delimiter_len = spelling.bytes().take_while(|&byte| byte == b'`').count();
     let mut content = delimiter_len..spelling.len() - delimiter_len;
@@ -797,8 +795,7 @@ impl MarkdownBuilder {
     }
 
     fn push_list(&mut self, start: Option<u64>, tight: bool, blank_line_before: bool) {
-        let bullet_index = start.map(|_| ORDERED_LIST_PREVIEW_START);
-        self.list_stack.push(ListStackEntry { bullet_index, tight, blank_line_before });
+        self.list_stack.push(ListStackEntry { bullet_index: start, tight, blank_line_before });
     }
 
     fn pop_list(&mut self) {
@@ -1500,19 +1497,47 @@ mod tests {
     }
 
     #[test]
-    fn build_ordered_list_normalizes_non_one_source_start_for_preview() {
-        let parsed = parse_markdown("4. one\n5. two\n6. three");
-        let doc = MarkdownDoc::build(&parsed, &default_style());
-        let rendered_numbers = doc
-            .blocks
-            .iter()
-            .filter_map(|block| match block.kind {
-                BlockKind::ListItem { bullet: ListBullet::Ordered(number), .. } => Some(number),
-                _ => None,
-            })
-            .collect::<Vec<_>>();
+    fn build_ordered_list_preserves_source_start_for_preview() {
+        for (source, expected_numbers) in [
+            ("4. one\n5. two\n6. three", vec![4, 5, 6]),
+            ("0. one\n1. two\n2. three", vec![0, 1, 2]),
+            ("42) one\n1) two\n9) three", vec![42, 43, 44]),
+            ("1. one\n1. two\n1. three", vec![1, 2, 3]),
+            ("1. one\n\nparagraph\n\n3. three\n4. four", vec![1, 3, 4]),
+        ] {
+            let parsed = parse_markdown(source);
+            let doc = MarkdownDoc::build(&parsed, &default_style());
+            let rendered_numbers = doc
+                .blocks
+                .iter()
+                .filter_map(|block| match block.kind {
+                    BlockKind::ListItem { bullet: ListBullet::Ordered(number), .. } => Some(number),
+                    _ => None,
+                })
+                .collect::<Vec<_>>();
 
-        assert_eq!(rendered_numbers, [1, 2, 3]);
+            assert_eq!(rendered_numbers, expected_numbers, "source: {source:?}");
+        }
+    }
+
+    #[test]
+    fn build_nested_ordered_lists_preserve_independent_source_starts() {
+        let parsed = parse_markdown("3. parent\n\n   7. child\n   1. child\n\n1. parent");
+        let doc = MarkdownDoc::build(&parsed, &default_style());
+
+        fn ordered_numbers(blocks: &[BlockNode]) -> Vec<u64> {
+            let mut numbers = Vec::new();
+            for block in blocks {
+                if let BlockKind::ListItem { bullet: ListBullet::Ordered(number), .. } = block.kind
+                {
+                    numbers.push(number);
+                }
+                numbers.extend(ordered_numbers(&block.children));
+            }
+            numbers
+        }
+
+        assert_eq!(ordered_numbers(&doc.blocks), [3, 7, 8, 4]);
     }
 
     #[test]

@@ -8106,37 +8106,34 @@ C608-01 武昌职业第01组：计划 68，历史低线较低，是表里最像�
     fn activating_ordered_list_replaces_preview_number_with_source_marker() {
         use ui::plugin::{PluginMessage, ViewPlugin};
 
-        let source = "# Title\n\n1. item";
-        let item_cursor = source.find("item").expect("fixture must contain list item text");
-        let mut document = StubDoc::new(source);
-        let mut view = MarkdownEditorView::new();
-        view.set_source(document.text.clone(), 1);
-        view.handle_message(PluginMessage::SetCursorByte(2), &mut document);
+        for number in [0, 1, 7, 42] {
+            let source = format!("# Title\n\n{number}. item");
+            let preview_marker = format!("{number}.");
+            let source_marker = format!("{number}. ");
+            let item_cursor = source.find("item").expect("fixture must contain list item text");
+            let mut document = StubDoc::new(&source);
+            let mut view = MarkdownEditorView::new();
+            view.set_source(document.text.clone(), 1);
+            view.handle_message(PluginMessage::SetCursorByte(2), &mut document);
 
-        let preview_draw_list = render_editor_draw_list(&mut view, &document);
-        let preview_text = rendered_text_commands(&preview_draw_list);
-        assert!(
-            preview_text.contains(&"1."),
-            "inactive ordered list must retain its preview number"
-        );
-        assert!(
-            !preview_text.contains(&"1. "),
-            "inactive ordered list must fold its source marker"
-        );
+            let preview_draw_list = render_editor_draw_list(&mut view, &document);
+            let preview_text = rendered_text_commands(&preview_draw_list);
+            assert!(preview_text.contains(&preview_marker.as_str()), "source: {source:?}");
+            assert!(!preview_text.contains(&source_marker.as_str()), "source: {source:?}");
 
-        view.handle_message(PluginMessage::SetCursorByte(item_cursor), &mut document);
+            view.handle_message(PluginMessage::SetCursorByte(item_cursor), &mut document);
+            let draw_list = render_editor_draw_list(&mut view, &document);
+            let rendered_text = rendered_text_commands(&draw_list);
+            assert!(rendered_text.contains(&source_marker.as_str()), "source: {source:?}");
+            assert!(!rendered_text.contains(&preview_marker.as_str()), "source: {source:?}");
 
-        let draw_list = render_editor_draw_list(&mut view, &document);
-        let rendered_text = rendered_text_commands(&draw_list);
-
-        assert!(
-            rendered_text.contains(&"1. "),
-            "active ordered list must render its source marker"
-        );
-        assert!(
-            !rendered_text.contains(&"1."),
-            "active ordered list must stop rendering its preview number, got {rendered_text:?}"
-        );
+            view.handle_message(PluginMessage::SetCursorByte(2), &mut document);
+            let draw_list = render_editor_draw_list(&mut view, &document);
+            let rendered_text = rendered_text_commands(&draw_list);
+            assert!(rendered_text.contains(&preview_marker.as_str()), "source: {source:?}");
+            assert!(!rendered_text.contains(&source_marker.as_str()), "source: {source:?}");
+            assert_eq!(document.text, source, "changing cursor must preserve the source");
+        }
     }
 
     #[test]
