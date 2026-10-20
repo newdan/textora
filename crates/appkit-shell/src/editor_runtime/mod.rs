@@ -741,11 +741,13 @@ impl EditorRuntime {
             .map_err(|error| EditorRuntimeError::GpuInitialization {
                 message: error.to_string(),
             })?;
-        let scaled_font_size = font_size * self.render_session.scale_factor() as f32;
+        let scale_factor = self.render_session.scale_factor() as f32;
+        let ui_font_size = ui::settings::UI_FONT_SIZE_LOGICAL * scale_factor;
+        let ui_font_family = self.settings.ui_font_family.clone();
         self.ui_shaper = Some(Arc::new(Mutex::new(shaping::Shaper::from_shared_font_system(
             ui_font_system,
-            scaled_font_size,
-            font_family,
+            ui_font_size,
+            &ui_font_family,
         ))));
         Ok(())
     }
@@ -1405,7 +1407,26 @@ impl EditorRuntime {
     }
 
     pub fn update_settings(&mut self, settings: ui::settings::Settings) {
+        let ui_font_family_changed = settings.ui_font_family != self.settings.ui_font_family;
         self.settings = settings;
+        if ui_font_family_changed {
+            self.rebuild_ui_shaper();
+        }
+    }
+
+    /// Rebuild only the UI shaper after an interface-font change; editor shaping
+    /// keeps its own session and must not be disturbed by chrome typography.
+    fn rebuild_ui_shaper(&mut self) {
+        let Some(font_system) = self.shared_font_system() else {
+            return;
+        };
+        let scale_factor = self.render_session.scale_factor() as f32;
+        let ui_font_size = ui::settings::UI_FONT_SIZE_LOGICAL * scale_factor;
+        self.ui_shaper = Some(Arc::new(Mutex::new(shaping::Shaper::from_shared_font_system(
+            font_system,
+            ui_font_size,
+            &self.settings.ui_font_family,
+        ))));
     }
 
     pub fn settings_snapshot(&self) -> ui::settings::Settings {

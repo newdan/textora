@@ -1058,7 +1058,7 @@ impl UiShell {
         if self.ui_shaper.is_some() {
             return;
         }
-        let ui_font = "system".to_string(); // FIXED BY SCRIPT
+        let ui_font = ui::settings::platform_default_ui_font_family().to_string();
         if let Ok(s) = shaping::Shaper::new() {
             self.ui_shaper = Some(s.with_font_family(&ui_font));
         }

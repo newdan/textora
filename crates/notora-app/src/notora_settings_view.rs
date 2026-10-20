@@ -59,6 +59,7 @@ const THEME_SYSTEM_ID: WidgetId = WidgetId(0x6e6f_746f_7468_7379);
 const THEME_DARK_ID: WidgetId = WidgetId(0x6e6f_746f_7468_6461);
 const THEME_LIGHT_ID: WidgetId = WidgetId(0x6e6f_746f_7468_6c69);
 const FONT_FAMILY_ID: WidgetId = WidgetId(0x6e6f_746f_666f_6e74);
+const UI_FONT_FAMILY_ID: WidgetId = WidgetId(0x6e6f_746f_7569_666e);
 const FONT_SIZE_ID: WidgetId = WidgetId(0x6e6f_746f_7369_7a65);
 const LINE_HEIGHT_RATIO_ID: WidgetId = WidgetId(0x6e6f_746f_6c69_6e65);
 const WORD_WRAP_ID: WidgetId = WidgetId(0x6e6f_746f_7772_6170);
@@ -403,8 +404,8 @@ impl NotoraSettingsView {
             vec![
                 self.text_row(
                     FONT_FAMILY_ID,
-                    "字体",
-                    "输入字体名称。",
+                    "正文字体",
+                    "输入字体名称；代码块仍使用等宽字体。",
                     &editor.font_family,
                     "字体名称",
                 ),
@@ -457,6 +458,13 @@ impl NotoraSettingsView {
             "界面",
             "数值输入按 Enter 应用。",
             vec![
+                self.text_row(
+                    UI_FONT_FAMILY_ID,
+                    "界面字体",
+                    "控制侧栏、标题与按钮文字；不影响正文。",
+                    &interface.ui_font_family,
+                    "字体名称",
+                ),
                 self.switch_row(
                     STATUS_BAR_ID,
                     "显示状态栏",
@@ -856,6 +864,7 @@ fn parse_number<T: std::str::FromStr + PartialOrd>(
 fn parse_text_update(id: WidgetId, value: &str) -> Option<ProductSettingsUpdate> {
     Some(match id {
         FONT_FAMILY_ID => ProductSettingsUpdate::FontFamily(parse_non_empty(value)?),
+        UI_FONT_FAMILY_ID => ProductSettingsUpdate::UiFontFamily(parse_non_empty(value)?),
         FONT_SIZE_ID => ProductSettingsUpdate::FontSize(parse_number(
             value,
             MINIMUM_FONT_SIZE,
@@ -893,6 +902,7 @@ fn parse_text_update(id: WidgetId, value: &str) -> Option<ProductSettingsUpdate>
 fn field_validation(id: WidgetId) -> Option<FieldValidation> {
     let message = match id {
         FONT_FAMILY_ID => "字体名称不能为空",
+        UI_FONT_FAMILY_ID => "界面字体名称不能为空",
         FONT_SIZE_ID => "字号：请输入 6–72 的数值",
         LINE_HEIGHT_RATIO_ID => "行高比例：请输入 1–3 的数值",
         TAB_WIDTH_ID => "制表符宽度：请输入 1–16 的整数",

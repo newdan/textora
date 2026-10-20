@@ -833,10 +833,6 @@ impl GlyphRenderer {
 
 /// WGSL shader for glyph rendering.
 const SHADER_SRC: &str = r#"
-fn color_brightness(color: vec3<f32>) -> f32 {
-    return dot(color, vec3<f32>(0.299, 0.587, 0.114));
-}
-
 fn enhance_contrast(alpha: f32, k: f32) -> f32 {
     return alpha * (k + 1.0) / (alpha * k + 1.0);
 }
@@ -879,13 +875,6 @@ fn srgb_to_linear(color: vec3<f32>) -> vec3<f32> {
     return select(high, low, color <= vec3<f32>(0.04045));
 }
 
-fn light_on_dark_contrast(base: f32, text_rgb: vec3<f32>) -> f32 {
-    // Dark text on light backgrounds gets full contrast enhancement;
-    // light text on dark backgrounds gets reduced enhancement to avoid over-bolding.
-    let text_brightness = color_brightness(text_rgb);
-    return mix(base, base * 0.3, text_brightness);
-}
-
 @fragment
 fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     if in.tex_coords.x < 0.0 {
@@ -904,13 +893,9 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     }
     let coverage = textureSample(atlas_texture, atlas_sampler, in.tex_coords).r;
 
-    // Dynamic contrast: brightness-aware stem darkening.
-    // Dark text on light backgrounds gets full contrast enhancement;
-    // light text on dark backgrounds gets reduced enhancement to avoid over-bolding.
-    let dilation = light_on_dark_contrast(gamma_params.contrast, in.color.rgb);
-    let alpha_corrected = enhance_contrast(coverage, dilation);
-
-    // Gamma correction to counter sRGB linear blending.
+    // Coverage curve calibrated against Windows GridFit output. `contrast`
+    // tightens midtones (dark surfaces), `gamma` shapes the edge falloff.
+    let alpha_corrected = enhance_contrast(coverage, gamma_params.contrast);
     let final_alpha = pow(alpha_corrected, 1.0 / gamma_params.gamma);
     return vec4<f32>(in.color.rgb, in.color.a * final_alpha);
 }

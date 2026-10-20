@@ -103,6 +103,12 @@ pub struct Settings {
     pub enable_novel_mode: bool,
 }
 
+/// Base UI font size in logical pixels.
+///
+/// Only a fallback for text without an explicit size; every widget passes its
+/// own logical size, so this value must never be used to scale widget text.
+pub const UI_FONT_SIZE_LOGICAL: f32 = 14.0;
+
 /// Platform-dependent default monospace font family.
 pub fn platform_default_font_family() -> &'static str {
     if cfg!(target_os = "macos") {

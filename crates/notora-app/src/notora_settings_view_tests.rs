@@ -149,8 +149,23 @@ fn responsive_layout_keeps_the_text_selection() {
 }
 
 #[test]
-fn invalid_number_identifies_the_field_and_allowed_range() {
-    let mut view = editor_view(720.0, 560.0);
+fn interface_font_commits_as_a_separate_update() {
+    let mut view = NotoraSettingsView::new(SettingsOverlayInput::default());
+    view.active_category = NotoraSettingsCategory::Interface;
+    layout(&mut view, 720.0, 560.0, 1.0);
+
+    assert_eq!(
+        view.map_text_commit(UI_FONT_FAMILY_ID, "Segoe UI"),
+        Some(SettingsOverlayAction::Update(ProductSettingsUpdate::UiFontFamily(
+            "Segoe UI".to_owned()
+        )))
+    );
+    assert_eq!(view.map_text_commit(UI_FONT_FAMILY_ID, "   "), None);
+    assert_eq!(view.validation.map(|validation| validation.id), Some(UI_FONT_FAMILY_ID));
+}
+
+#[test]
+fn invalid_number_identifies_the_field_and_allowed_range() {    let mut view = editor_view(720.0, 560.0);
     assert_eq!(view.map_text_commit(FONT_SIZE_ID, "NaN"), None);
     let message = view.message_text().expect("invalid input should explain the correction");
     assert!(message.contains("字号"));

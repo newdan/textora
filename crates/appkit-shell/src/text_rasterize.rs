@@ -6,6 +6,12 @@ use render::{GlyphAtlas, GlyphKey, GlyphSlot};
 use shaping::FontId;
 use shaping::Shaper;
 
+/// Quantise the rasterisation size so float drift from DPI scaling cannot
+/// split identical glyphs into separate atlas entries.
+fn quantized_raster_font_size(font_size: f32) -> f32 {
+    (font_size * 64.0).round() / 64.0
+}
+
 /// Look up a glyph in the atlas, or rasterize + upload it on cache miss.
 ///
 /// Returns `Some(GlyphSlot)` with position in the atlas texture, or `None` if
@@ -28,10 +34,11 @@ pub fn resolve_glyph(
         font_id.hash(&mut h);
         h.finish() as usize
     };
+    let raster_font_size = quantized_raster_font_size(font_size);
     let key = GlyphKey {
         glyph_id: glyph_id as u32,
         font_id: font_id_usize,
-        font_size: (font_size * 64.0) as u32,
+        font_size: (raster_font_size * 64.0) as u32,
         subpixel_phase,
     };
 
@@ -42,7 +49,7 @@ pub fn resolve_glyph(
 
     // Cache miss: rasterize
     let subpixel_x = subpixel_phase as f32 * 0.25;
-    let bitmap = shaper.rasterize_glyph(font_id, glyph_id, font_size, (subpixel_x, 0.0))?;
+    let bitmap = shaper.rasterize_glyph(font_id, glyph_id, raster_font_size, (subpixel_x, 0.0))?;
     if bitmap.width == 0 || bitmap.height == 0 {
         return None;
     }
@@ -85,6 +92,14 @@ mod tests {
     use super::*;
 
     #[test]
+    fn fractional_dpi_sizes_share_one_atlas_key() {
+        let base = quantized_raster_font_size(18.75);
+        assert_eq!(quantized_raster_font_size(18.750_001), base);
+        assert_eq!(quantized_raster_font_size(18.749_999), base);
+        assert_eq!((base * 64.0) as u32, 1200);
+    }
+
+    #[test]
     fn monospace_position_snaps_final_coordinate_to_zero_phase() {
         let mut shaper =
             Shaper::new().expect("system fonts must load").with_font_family("monospace");
@@ -96,13 +111,18 @@ mod tests {
     }
 
     #[test]
-    fn proportional_position_preserves_fractional_phase() {
+    fn proportional_position_follows_the_platform_raster_policy() {
         let mut shaper =
             Shaper::new().expect("system fonts must load").with_font_family("sans-serif");
         let shaped = shaper.shape("e").expect("fixture must shape");
         let font_id = shaped.clusters[0].font_id;
         for x in [10.25, 10.5, 10.75, -0.25, -0.5, -0.75] {
-            assert_eq!(glyph_position(&mut shaper, font_id, x), render::split_subpixel(x));
+            let expected = if cfg!(target_os = "macos") {
+                render::split_subpixel(x)
+            } else {
+                (x.round(), 0)
+            };
+            assert_eq!(glyph_position(&mut shaper, font_id, x), expected);
         }
     }
 }

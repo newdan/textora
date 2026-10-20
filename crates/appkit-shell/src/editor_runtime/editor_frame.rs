@@ -10,6 +10,18 @@ pub struct RenderResources {
     pub frame_cache: crate::frame_cache::FrameCache,
 }
 
+/// Coverage curves calibrated against native GDI+ text measured through the
+/// application (6-character glyph box, same theme colors):
+/// light surfaces `coverage^1.40`, dark surfaces `coverage^0.25`.
+const LIGHT_BACKGROUND_GAMMA: f32 = 0.714;
+const LIGHT_BACKGROUND_CONTRAST: f32 = 0.0;
+const DARK_BACKGROUND_GAMMA: f32 = 4.0;
+const DARK_BACKGROUND_CONTRAST: f32 = 0.0;
+/// macOS has no calibrated native baseline yet; keep raw coverage until it is
+/// measured against CoreText output.
+const MACOS_BACKGROUND_GAMMA: f32 = 1.0;
+const DARK_BACKGROUND_LUMINANCE_THRESHOLD: f32 = 0.5;
+
 /// 帧组合和提交错误。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RenderError {
@@ -176,6 +188,10 @@ impl EditorFrame {
         resources: &mut RenderResources,
         vertices: &mut Vec<GlyphVertex>,
     ) {
+        if let (Some(text), Some(gpu)) = (resources.text.as_mut(), resources.gpu.as_ref()) {
+            let gamma = gamma_for_theme(&self.theme);
+            text.update_gamma_if_changed(&gpu.ctx.queue, gamma);
+        }
         crate::paint_backend::drain_into(
             std::mem::take(&mut self.product_underlay),
             screen,
@@ -209,6 +225,19 @@ impl EditorFrame {
 
     pub fn present(self) -> Result<EditorOutcome, RenderError> {
         Ok(EditorOutcome::default())
+    }
+}
+
+fn gamma_for_theme(theme: &ui::Theme) -> render::GammaUniform {
+    if cfg!(target_os = "macos") {
+        return render::GammaUniform { contrast: 0.0, gamma: MACOS_BACKGROUND_GAMMA };
+    }
+    let background = theme.editor.background;
+    let luminance = 0.299 * background[0] + 0.587 * background[1] + 0.114 * background[2];
+    if luminance < DARK_BACKGROUND_LUMINANCE_THRESHOLD {
+        render::GammaUniform { contrast: DARK_BACKGROUND_CONTRAST, gamma: DARK_BACKGROUND_GAMMA }
+    } else {
+        render::GammaUniform { contrast: LIGHT_BACKGROUND_CONTRAST, gamma: LIGHT_BACKGROUND_GAMMA }
     }
 }
 
@@ -249,6 +278,22 @@ mod tests {
 
     fn theme() -> ui::Theme {
         ui::Theme::from_definition(&ui::theme::ThemeDefinition::default_dark())
+    }
+
+    #[test]
+    fn gamma_follows_the_editor_background_luminance() {
+        let dark = ui::Theme::from_definition(&ui::theme::ThemeDefinition::default_dark());
+        let light = ui::Theme::from_definition(&ui::theme::ThemeDefinition::default_light());
+
+        if cfg!(target_os = "macos") {
+            assert_eq!(gamma_for_theme(&dark).gamma, MACOS_BACKGROUND_GAMMA);
+            assert_eq!(gamma_for_theme(&light).gamma, MACOS_BACKGROUND_GAMMA);
+            return;
+        }
+        assert_eq!(gamma_for_theme(&dark).gamma, DARK_BACKGROUND_GAMMA);
+        assert_eq!(gamma_for_theme(&light).gamma, LIGHT_BACKGROUND_GAMMA);
+        assert_eq!(gamma_for_theme(&light).contrast, LIGHT_BACKGROUND_CONTRAST);
+        assert_eq!(gamma_for_theme(&dark).contrast, DARK_BACKGROUND_CONTRAST);
     }
 
     fn frame(

@@ -11,6 +11,9 @@ const GASP_SYMMETRIC_GRIDFIT: u16 = 0x0004;
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum GlyphRasterization {
     IntegerUnhinted,
+    /// Snap glyph origins to whole pixels and let the hinter align stems to the
+    /// pixel grid, matching Windows GridFit rendering.
+    IntegerGridFitted,
     SubpixelFontRecommended,
 }
 
@@ -18,7 +21,7 @@ impl GlyphRasterization {
     /// Align only the drawing position; shaping advances remain unchanged.
     pub fn align_x(self, x: f32) -> f32 {
         match self {
-            Self::IntegerUnhinted => x.round(),
+            Self::IntegerUnhinted | Self::IntegerGridFitted => x.round(),
             Self::SubpixelFontRecommended => x,
         }
     }
@@ -37,7 +40,7 @@ impl GlyphRasterization {
 
     pub(crate) fn raster_offset(self, offset: (f32, f32)) -> (f32, f32) {
         match self {
-            Self::IntegerUnhinted => (0.0, 0.0),
+            Self::IntegerUnhinted | Self::IntegerGridFitted => (0.0, 0.0),
             Self::SubpixelFontRecommended => offset,
         }
     }
@@ -54,8 +57,12 @@ impl Shaper {
         };
         let policy = if face.monospaced {
             GlyphRasterization::IntegerUnhinted
-        } else {
+        } else if cfg!(target_os = "macos") {
+            // CoreText-based platforms rely on subpixel positioning for even
+            // tracking; grid fitting there reads as jittery letter spacing.
             GlyphRasterization::SubpixelFontRecommended
+        } else {
+            GlyphRasterization::IntegerGridFitted
         };
         self.rasterization_policies.insert(font_id, policy);
         policy

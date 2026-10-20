@@ -65,11 +65,16 @@ fn monospace_glyphs_use_unhinted_zero_phase_without_changing_shaping() {
 }
 
 #[test]
-fn proportional_glyphs_keep_hinting_and_requested_phase() {
+fn proportional_glyphs_use_grid_fit_and_ignore_subpixel_offsets() {
     let mut shaper =
         Shaper::new().expect("system font database must load").with_font_family("sans-serif");
     shaper.set_font_size(32.0);
     let shaped = shaper.shape("eg").expect("ASCII fixture must shape");
+    let expected = if cfg!(target_os = "macos") {
+        GlyphRasterization::SubpixelFontRecommended
+    } else {
+        GlyphRasterization::IntegerGridFitted
+    };
     for cluster in &shaped.clusters {
         assert!(
             !shaper
@@ -79,8 +84,12 @@ fn proportional_glyphs_keep_hinting_and_requested_phase() {
                 .expect("fixture face must exist")
                 .monospaced
         );
+        assert_eq!(shaper.glyph_rasterization(cluster.font_id), expected);
         for offset in [(0.0, 0.0), (0.5, 0.25)] {
-            let reference = reference_bitmap(&shaper, cluster, 32.0, true, offset);
+            // macOS keeps subpixel positioning; Windows grid-fits and ignores
+            // the requested phase.
+            let reference_offset = if cfg!(target_os = "macos") { offset } else { (0.0, 0.0) };
+            let reference = reference_bitmap(&shaper, cluster, 32.0, true, reference_offset);
             let actual = shaper
                 .rasterize_glyph(
                     cluster.font_id,
@@ -111,10 +120,10 @@ fn assert_yahei_reference(shaper: &mut Shaper, shaped: &ShapedRun, family: &str,
         );
         assert_eq!(
             shaper.glyph_rasterization(cluster.font_id),
-            GlyphRasterization::SubpixelFontRecommended
+            GlyphRasterization::IntegerGridFitted
         );
         for offset in [(0.0, 0.0), (0.25, 0.0), (0.75, 0.5)] {
-            let reference = reference_bitmap(shaper, cluster, size, hinted, offset);
+            let reference = reference_bitmap(shaper, cluster, size, hinted, (0.0, 0.0));
             let actual = shaper
                 .rasterize_glyph(
                     cluster.font_id,
@@ -170,17 +179,17 @@ fn yahei_fallback_uses_resolved_face_policy_after_requested_family_changes() {
     assert_eq!(shaper.glyph_rasterization(latin_face), GlyphRasterization::IntegerUnhinted);
     assert_eq!(
         shaper.glyph_rasterization(chinese.font_id),
-        GlyphRasterization::SubpixelFontRecommended,
+        GlyphRasterization::IntegerGridFitted,
         "resolved proportional fallback must follow its own font recommendations"
     );
     shaper.set_font_family(Some("Arial"));
     assert_eq!(shaper.glyph_rasterization(latin_face), GlyphRasterization::IntegerUnhinted);
     assert_eq!(
         shaper.glyph_rasterization(chinese.font_id),
-        GlyphRasterization::SubpixelFontRecommended
+        GlyphRasterization::IntegerGridFitted
     );
     let offset = (0.5, 0.0);
-    let reference = reference_bitmap(&shaper, chinese, shaper.font_size(), false, offset);
+    let reference = reference_bitmap(&shaper, chinese, shaper.font_size(), false, (0.0, 0.0));
     let actual = shaper
         .rasterize_glyph(
             chinese.font_id,
@@ -215,15 +224,14 @@ fn raster_policy_uses_resolved_face_across_family_and_style_changes() {
     for font_id in mono_faces {
         assert_eq!(shaper.glyph_rasterization(font_id), GlyphRasterization::IntegerUnhinted);
     }
-    assert_eq!(
-        shaper.glyph_rasterization(proportional),
+    let proportional_expected = if cfg!(target_os = "macos") {
         GlyphRasterization::SubpixelFontRecommended
-    );
+    } else {
+        GlyphRasterization::IntegerGridFitted
+    };
+    assert_eq!(shaper.glyph_rasterization(proportional), proportional_expected);
     shaper.set_font_family(Some("monospace"));
-    assert_eq!(
-        shaper.glyph_rasterization(proportional),
-        GlyphRasterization::SubpixelFontRecommended
-    );
+    assert_eq!(shaper.glyph_rasterization(proportional), proportional_expected);
 }
 
 #[cfg(target_os = "macos")]
@@ -246,7 +254,7 @@ fn menlo_chinese_fallback_preserves_each_faces_raster_policy() {
             if monospaced {
                 GlyphRasterization::IntegerUnhinted
             } else {
-                GlyphRasterization::SubpixelFontRecommended
+                GlyphRasterization::IntegerGridFitted
             }
         );
         found_mono |= monospaced;

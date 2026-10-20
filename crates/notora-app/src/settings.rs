@@ -53,6 +53,8 @@ pub struct EditorSettings {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct InterfaceSettings {
+    /// UI chrome font, independent from the editor body font.
+    pub ui_font_family: String,
     pub show_status_bar: bool,
     pub runtime_tab_limit: usize,
 }
@@ -71,7 +73,9 @@ impl Default for ProductSettings {
             schema_version: SETTINGS_SCHEMA_VERSION,
             appearance: AppearanceSettings { theme_mode: ui_settings.theme_mode },
             editor: EditorSettings {
-                font_family: ui_settings.font_family,
+                // Notes read as prose: start from a proportional interface face.
+                // Code spans keep the monospace family from the markdown style.
+                font_family: ui::settings::platform_default_ui_font_family().to_owned(),
                 font_size: ui_settings.font_size,
                 line_height_ratio: ui_settings.line_height_ratio,
                 tab_width: ui_settings.tab_width,
@@ -81,6 +85,7 @@ impl Default for ProductSettings {
                 show_line_numbers: ui_settings.show_line_numbers,
             },
             interface: InterfaceSettings {
+                ui_font_family: ui_settings.ui_font_family,
                 show_status_bar: ui_settings.show_status_bar,
                 runtime_tab_limit: 12,
             },
@@ -114,6 +119,7 @@ impl ProductSettings {
     pub fn apply_to_ui(&self, ui_settings: &mut ui::Settings) {
         ui_settings.set_theme_mode(self.appearance.theme_mode);
         ui_settings.set_font_family(self.editor.font_family.clone());
+        ui_settings.set_ui_font_family(self.interface.ui_font_family.clone());
         ui_settings.set_font_size(self.editor.font_size);
         ui_settings.set_line_height_ratio(self.editor.line_height_ratio);
         ui_settings.set_tab_width(self.editor.tab_width);
@@ -127,6 +133,9 @@ impl ProductSettings {
     fn validate(&self) -> Result<(), &'static str> {
         if self.editor.font_family.trim().is_empty() {
             return Err("font family must not be empty");
+        }
+        if self.interface.ui_font_family.trim().is_empty() {
+            return Err("interface font family must not be empty");
         }
         if !float_is_in_range(self.editor.font_size, MINIMUM_FONT_SIZE, MAXIMUM_FONT_SIZE) {
             return Err("font size must be between 6 and 72");
@@ -294,6 +303,38 @@ impl Drop for TemporarySettingsPath {
 #[cfg(test)]
 mod tests {
     use super::{ProductSettings, load_product_settings, save_product_settings};
+
+    #[test]
+    fn default_body_font_is_proportional_and_interface_font_is_separate() {
+        let settings = ProductSettings::default();
+
+        assert_eq!(settings.editor.font_family, ui::settings::platform_default_ui_font_family());
+        assert_eq!(
+            settings.interface.ui_font_family,
+            ui::settings::platform_default_ui_font_family()
+        );
+        let mut ui_settings = ui::Settings::new();
+        settings.apply_to_ui(&mut ui_settings);
+        assert_eq!(ui_settings.font_family, settings.editor.font_family);
+        assert_eq!(ui_settings.ui_font_family, settings.interface.ui_font_family);
+    }
+
+    #[test]
+    fn legacy_settings_default_the_interface_font_without_overwriting_the_body_font() {
+        let directory = tempfile::tempdir().expect("settings test directory should exist");
+        let path = directory.path().join("settings.toml");
+        std::fs::write(&path, "schema_version = 1\n[editor]\nfont_family = 'Consolas'\n")
+            .expect("legacy settings fixture should write");
+
+        let loaded = load_product_settings(&path);
+
+        assert_eq!(loaded.diagnostic, None);
+        assert_eq!(loaded.settings.editor.font_family, "Consolas");
+        assert_eq!(
+            loaded.settings.interface.ui_font_family,
+            ui::settings::platform_default_ui_font_family()
+        );
+    }
 
     #[test]
     fn settings_round_trip_and_map_to_ui_settings() {

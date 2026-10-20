@@ -62,6 +62,7 @@ impl Default for SettingsOverlayInput {
 #[derive(Clone, Debug, PartialEq)]
 pub enum ProductSettingsUpdate {
     ThemeMode(ThemeMode),
+    UiFontFamily(String),
     FontFamily(String),
     FontSize(f32),
     LineHeightRatio(f32),
@@ -79,6 +80,9 @@ impl ProductSettingsUpdate {
     pub fn apply_to(&self, settings: &mut ProductSettings) {
         match self {
             Self::ThemeMode(theme_mode) => settings.appearance.theme_mode = *theme_mode,
+            Self::UiFontFamily(ui_font_family) => {
+                settings.interface.ui_font_family = ui_font_family.clone()
+            }
             Self::FontFamily(font_family) => settings.editor.font_family = font_family.clone(),
             Self::FontSize(font_size) => settings.editor.font_size = *font_size,
             Self::LineHeightRatio(line_height_ratio) => {
