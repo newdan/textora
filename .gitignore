@@ -25,3 +25,8 @@
 *.swo
 *~
 .worktrees/
+
+# Local agent artifacts: screenshots, edit buffers, runtime logs
+/.screenshots/
+/.edit+/
+/debug.log
