@@ -2,9 +2,11 @@ use super::{ColorPalette, EditorTheme};
 
 const MODAL_SCRIM_MINIMUM_ALPHA: f32 = 0.45;
 const BUTTON_SURFACE_TEXT_BLEND: f32 = 0.035;
+const DARK_BUTTON_SURFACE_TEXT_BLEND: f32 = 0.015;
 const BUTTON_BORDER_TEXT_BLEND: f32 = 0.12;
 const BUTTON_DANGER_TEXT_BLEND: f32 = 0.6;
 const BUTTON_PRESSED_TEXT_BLEND: f32 = 0.06;
+const DARK_BUTTON_PRESSED_TEXT_BLEND: f32 = 0.015;
 
 /// 应用外壳的通用视觉语义令牌。
 ///
@@ -41,11 +43,15 @@ pub struct ApplicationTheme {
 }
 
 impl ApplicationTheme {
-    pub(crate) fn from_theme(palette: &ColorPalette, editor: &EditorTheme) -> Self {
+    pub(crate) fn from_theme(palette: &ColorPalette, editor: &EditorTheme, is_dark: bool) -> Self {
         let mut modal_scrim = palette.shadow;
         modal_scrim[3] = modal_scrim[3].max(MODAL_SCRIM_MINIMUM_ALPHA);
-        let button_surface =
-            blend_surface(palette.bg_elevated, palette.text_main, BUTTON_SURFACE_TEXT_BLEND);
+        let (button_base, surface_text_blend, pressed_text_blend) = if is_dark {
+            (palette.input_bg, DARK_BUTTON_SURFACE_TEXT_BLEND, DARK_BUTTON_PRESSED_TEXT_BLEND)
+        } else {
+            (palette.bg_elevated, BUTTON_SURFACE_TEXT_BLEND, BUTTON_PRESSED_TEXT_BLEND)
+        };
+        let button_surface = blend_surface(button_base, palette.text_main, surface_text_blend);
         let button_hover_surface = overlay_surface(button_surface, palette.bg_hover);
 
         Self {
@@ -76,7 +82,7 @@ impl ApplicationTheme {
             button_pressed_surface: blend_surface(
                 button_hover_surface,
                 palette.text_main,
-                BUTTON_PRESSED_TEXT_BLEND,
+                pressed_text_blend,
             ),
             button_danger_foreground: blend_surface(
                 palette.danger,

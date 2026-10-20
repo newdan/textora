@@ -143,7 +143,7 @@ impl Theme {
     }
 
     pub fn application_theme(&self) -> ApplicationTheme {
-        ApplicationTheme::from_theme(&self.palette, &self.editor)
+        ApplicationTheme::from_theme(&self.palette, &self.editor, self.is_dark)
     }
 
     pub fn control_metrics(&self) -> ControlMetrics {
@@ -152,57 +152,57 @@ impl Theme {
 }
 
 impl ThemeDefinition {
-    /// Built-in default dark theme (Claude Dark values, sRGB).
+    /// Built-in default dark theme (warm gray surfaces, sRGB).
     pub fn default_dark() -> Self {
         Self {
             display_name: "默认黑".into(),
             is_dark: true,
             palette: ColorPalette {
-                bg_base: [0.0667, 0.0745, 0.0941, 1.0000],
-                bg_surface: [0.0902, 0.0980, 0.1216, 1.0000],
-                bg_elevated: [0.0941, 0.1059, 0.1333, 1.0000],
-                bg_hover: [1.0, 1.0, 1.0, 0.08],
+                bg_base: [0.2000, 0.1765, 0.1608, 1.0000],
+                bg_surface: [0.1529, 0.1333, 0.1216, 1.0000],
+                bg_elevated: [0.2118, 0.1882, 0.1686, 1.0000],
+                bg_hover: [1.0, 1.0, 1.0, 0.02],
                 bg_active: [0.9608, 0.6039, 0.2902, 0.1412],
-                text_main: [0.9490, 0.9569, 0.9725, 1.0000],
-                text_muted: [0.5569, 0.5922, 0.6588, 1.0000],
-                text_inverse: [0.0667, 0.0745, 0.0941, 1.0000],
-                border_subtle: [0.1373, 0.1569, 0.1961, 1.0000],
-                border_strong: [0.1647, 0.1843, 0.2275, 1.0000],
+                text_main: [0.9490, 0.9294, 0.9098, 1.0000],
+                text_muted: [0.7216, 0.6784, 0.6392, 1.0000],
+                text_inverse: [0.1294, 0.1176, 0.1098, 1.0000],
+                border_subtle: [0.2745, 0.2353, 0.2078, 1.0000],
+                border_strong: [0.4667, 0.4118, 0.3647, 1.0000],
                 shadow: [0.0000, 0.0000, 0.0000, 0.3216],
                 accent: [0.9608, 0.6039, 0.2902, 1.0000],
                 highlight: [0.9608, 0.6039, 0.2902, 1.0000],
                 inactive_highlight: [0.80, 0.60, 0.25, 0.70],
                 danger: [0.8941, 0.3373, 0.2863, 1.0],
                 warning: [0.8745, 0.7569, 0.5176, 1.0],
-                input_bg: [0.0745, 0.0824, 0.1020, 1.0],
-                input_border: [0.1647, 0.1843, 0.2275, 1.0],
-                input_fg: [0.9490, 0.9569, 0.9725, 1.0],
-                sidebar_hover_bg: [0.1373, 0.1529, 0.1843, 1.0],
-                sidebar_active_bg: [0.1922, 0.1725, 0.1569, 1.0],
+                input_bg: [0.1294, 0.1137, 0.1020, 1.0000],
+                input_border: [0.4667, 0.4118, 0.3647, 1.0],
+                input_fg: [0.9490, 0.9294, 0.9098, 1.0],
+                sidebar_hover_bg: [0.2627, 0.2275, 0.2000, 1.0000],
+                sidebar_active_bg: [0.2863, 0.2078, 0.1608, 1.0000],
                 sidebar_active_fg: [0.95, 0.65, 0.35, 1.0],
             },
             editor: EditorTheme {
-                background: [0.0941, 0.1059, 0.1333, 1.0000],
-                foreground: [0.7686, 0.7922, 0.8353, 1.0000],
-                gutter_bg: [0.0941, 0.1059, 0.1333, 1.0000],
-                line_number: [0.4078, 0.4471, 0.5137, 1.0000],
-                selection: [0.3569, 0.6118, 1.0000, 0.2510],
-                cursor: [0.3569, 0.6118, 1.0000, 1.0000],
-                scrollbar_track: [0.1800, 0.2000, 0.2350, 0.30],
-                scrollbar_thumb: [0.6000, 0.6000, 0.6500, 1.0],
+                background: [0.0980, 0.0863, 0.0784, 1.0000],
+                foreground: [0.8314, 0.7922, 0.7569, 1.0000],
+                gutter_bg: [0.0980, 0.0863, 0.0784, 1.0000],
+                line_number: [0.6627, 0.6078, 0.5569, 1.0000],
+                selection: [0.9608, 0.6039, 0.2902, 0.2510],
+                cursor: [0.9608, 0.6039, 0.2902, 1.0000],
+                scrollbar_track: [0.2980, 0.2627, 0.2314, 0.30],
+                scrollbar_thumb: [0.6118, 0.5490, 0.4941, 1.0],
             },
             markdown: MarkdownTheme {
-                heading: [0.75, 0.75, 0.75, 1.0],
+                heading: [0.8980, 0.8431, 0.7922, 1.0],
                 link: [0.4510, 0.6784, 0.9137, 1.0],
-                inline_code: [0.6745, 0.6980, 0.7451, 1.0],
-                code_bg: [0.122, 0.122, 0.122, 1.0],
-                code_block_bg: [0.0745, 0.0824, 0.1020, 1.0],
-                toc_background: [0.0902, 0.0980, 0.1216, 1.0],
+                inline_code: [0.8353, 0.7255, 0.6157, 1.0],
+                code_bg: [0.1569, 0.1333, 0.1137, 1.0000],
+                code_block_bg: [0.0824, 0.0706, 0.0627, 1.0000],
+                toc_background: [0.1529, 0.1333, 0.1216, 1.0000],
                 toc_active_background: [0.8706, 0.4510, 0.3373, 0.12],
                 toc_hover_background: [0.8706, 0.4510, 0.3373, 0.08],
                 toc_text: [0.9608, 0.9529, 0.9412, 1.0],
                 toc_hover_text: [0.9608, 0.9529, 0.9412, 1.0],
-                toc_level_indicator: [0.4549, 0.6784, 0.9098, 0.6],
+                toc_level_indicator: [0.9608, 0.6039, 0.2902, 0.6],
                 spacing: MarkdownSpacing {
                     paragraph_spacing_ratio: 0.4,
                     heading_spacing_top_ratio: 1.0,
@@ -226,7 +226,7 @@ impl ThemeDefinition {
                 quote: [0.9608, 0.6039, 0.2902, 1.0000],
                 toc_text: [0.9608, 0.9529, 0.9412, 1.0],
                 toc_hover_text: [0.9608, 0.9529, 0.9412, 1.0],
-                toc_background: [0.0902, 0.0980, 0.1216, 1.0],
+                toc_background: [0.1529, 0.1333, 0.1216, 1.0000],
                 toc_active_background: [0.8706, 0.4510, 0.3373, 0.12],
                 spacing: MarkdownSpacing {
                     paragraph_spacing_ratio: 0.5,
@@ -248,13 +248,13 @@ impl ThemeDefinition {
             },
             mindmap: MindmapTheme::default_dark(),
             scopes: BTreeMap::from([
-                ("comment".into(), [0.3647, 0.3882, 0.4353, 1.0]),
+                ("comment".into(), [0.6000, 0.5412, 0.4902, 1.0]),
                 ("string".into(), [0.6314, 0.7569, 0.5059, 1.0]),
                 ("keyword.control".into(), [0.7059, 0.4667, 0.8118, 1.0]),
                 ("keyword.other".into(), [0.7059, 0.4667, 0.8118, 1.0]),
                 ("constant.numeric".into(), [0.7490, 0.5843, 0.4157, 1.0]),
                 ("constant.language".into(), [0.8745, 0.7569, 0.5176, 1.0]),
-                ("variable".into(), [0.6745, 0.6980, 0.7451, 1.0]),
+                ("variable".into(), [0.7882, 0.7255, 0.6706, 1.0]),
                 ("variable.special".into(), [0.7490, 0.5843, 0.4157, 1.0]),
                 ("keyword.import".into(), [0.7059, 0.4667, 0.8118, 1.0]),
                 ("keyword.declaration".into(), [0.7059, 0.4667, 0.8118, 1.0]),
@@ -266,7 +266,7 @@ impl ThemeDefinition {
                 ("markup.italic".into(), [0.4549, 0.6784, 0.9098, 1.0]),
                 ("markup.list".into(), [0.8157, 0.4471, 0.4667, 1.0]),
                 ("markup.link".into(), [0.4510, 0.6784, 0.9137, 1.0]),
-                ("markup.strikethrough".into(), [0.6745, 0.6980, 0.7451, 1.0]),
+                ("markup.strikethrough".into(), [0.7882, 0.7255, 0.6706, 1.0]),
                 ("markup.changed".into(), [0.8745, 0.7569, 0.5176, 1.0]),
                 ("markup.deleted".into(), [0.8784, 0.4235, 0.4588, 1.0]),
                 ("markup.inserted".into(), [0.5961, 0.7647, 0.4745, 1.0]),
@@ -651,6 +651,135 @@ pub fn test_light_theme() -> Theme {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn dark_neutral_ui_colors_share_a_warm_gray_palette() {
+        let theme = ThemeDefinition::default_dark();
+        for (role, color) in [
+            ("window", theme.palette.bg_base),
+            ("list", theme.palette.bg_surface),
+            ("overlay", theme.palette.bg_elevated),
+            ("primary text", theme.palette.text_main),
+            ("secondary text", theme.palette.text_muted),
+            ("inverse text", theme.palette.text_inverse),
+            ("divider", theme.palette.border_subtle),
+            ("border", theme.palette.border_strong),
+            ("input", theme.palette.input_bg),
+            ("input border", theme.palette.input_border),
+            ("input text", theme.palette.input_fg),
+            ("navigation hover", theme.palette.sidebar_hover_bg),
+            ("navigation selection", theme.palette.sidebar_active_bg),
+            ("editor", theme.editor.background),
+            ("editor text", theme.editor.foreground),
+            ("gutter", theme.editor.gutter_bg),
+            ("line number", theme.editor.line_number),
+            ("scrollbar track", theme.editor.scrollbar_track),
+            ("scrollbar thumb", theme.editor.scrollbar_thumb),
+            ("code", theme.markdown.code_bg),
+            ("code block", theme.markdown.code_block_bg),
+            ("markdown navigation", theme.markdown.toc_background),
+            ("novel navigation", theme.novel.toc_background),
+        ] {
+            assert!(
+                color[0] >= color[1] && color[1] >= color[2],
+                "{role} should use warm gray, got {color:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn dark_shell_panes_have_distinct_background_luminance() {
+        const MINIMUM_PANE_CONTRAST: f32 = 1.12;
+        const CONTRAST_LUMINANCE_OFFSET: f32 = 0.05;
+        let theme = Theme::from_definition(&ThemeDefinition::default_dark());
+        let surfaces = theme.application_theme();
+        let luminance = |color: [f32; 4]| color[0] * 0.2126 + color[1] * 0.7152 + color[2] * 0.0722;
+        for (left, right) in [
+            (surfaces.window_surface, surfaces.navigation_surface),
+            (surfaces.navigation_surface, surfaces.editor_surface),
+        ] {
+            let left_luminance = luminance(left);
+            let right_luminance = luminance(right);
+            let contrast = (left_luminance.max(right_luminance) + CONTRAST_LUMINANCE_OFFSET)
+                / (left_luminance.min(right_luminance) + CONTRAST_LUMINANCE_OFFSET);
+            assert!(
+                contrast >= MINIMUM_PANE_CONTRAST,
+                "adjacent dark panes need visible background separation, got {contrast:.3}:1"
+            );
+        }
+        assert_eq!(surfaces.editor_surface, theme.editor.gutter_bg);
+    }
+
+    #[test]
+    fn dark_ui_text_remains_readable_across_surfaces_and_button_states() {
+        const MINIMUM_TEXT_CONTRAST: f32 = 4.5;
+        const CONTRAST_LUMINANCE_OFFSET: f32 = 0.05;
+        let theme = Theme::from_definition(&ThemeDefinition::default_dark());
+        let tokens = theme.application_theme();
+        let luminance = |color: [f32; 4]| color[0] * 0.2126 + color[1] * 0.7152 + color[2] * 0.0722;
+        for (role, foreground, background) in [
+            ("navigation text", tokens.text_primary, tokens.window_surface),
+            ("navigation caption", tokens.text_secondary, tokens.window_surface),
+            ("list caption", tokens.text_secondary, tokens.navigation_surface),
+            ("overlay caption", tokens.text_secondary, tokens.overlay_surface),
+            ("navigation hover caption", tokens.text_secondary, tokens.navigation_hover_surface),
+            (
+                "navigation selection",
+                tokens.navigation_selected_text,
+                tokens.navigation_selected_surface,
+            ),
+            ("input", theme.palette.input_fg, tokens.control_surface),
+            ("button", tokens.text_primary, tokens.button_surface),
+            ("hovered button", tokens.text_primary, tokens.button_hover_surface),
+            ("pressed button", tokens.text_primary, tokens.button_pressed_surface),
+            ("destructive button", tokens.button_danger_foreground, tokens.button_surface),
+            ("editor", theme.editor.foreground, tokens.editor_surface),
+            ("line number", theme.editor.line_number, theme.editor.gutter_bg),
+            ("heading", theme.markdown.heading, tokens.editor_surface),
+            ("inline code", theme.markdown.inline_code, theme.markdown.code_bg),
+            ("link", theme.markdown.link, tokens.editor_surface),
+        ] {
+            let foreground_luminance = luminance(foreground);
+            let background_luminance = luminance(background);
+            let contrast = (foreground_luminance.max(background_luminance)
+                + CONTRAST_LUMINANCE_OFFSET)
+                / (foreground_luminance.min(background_luminance) + CONTRAST_LUMINANCE_OFFSET);
+            assert!(
+                contrast >= MINIMUM_TEXT_CONTRAST,
+                "{role} needs readable text, got {contrast:.3}:1"
+            );
+        }
+    }
+
+    #[test]
+    fn dark_button_styles_keep_labels_readable_during_interaction() {
+        use crate::button::{ButtonStyle, ButtonVisualState};
+
+        const MINIMUM_TEXT_CONTRAST: f32 = 4.5;
+        let theme = Theme::from_definition(&ThemeDefinition::default_dark());
+        let overlay = theme.application_theme().overlay_surface;
+        let luminance = |color: [f32; 4]| color[0] * 0.2126 + color[1] * 0.7152 + color[2] * 0.0722;
+        for (role, style) in [
+            ("action", ButtonStyle::from_theme(&theme)),
+            ("ghost", ButtonStyle::ghost(theme.settings_theme())),
+            ("destructive", ButtonStyle::destructive(theme.settings_theme())),
+        ] {
+            for state in
+                [ButtonVisualState::Normal, ButtonVisualState::Hovered, ButtonVisualState::Pressed]
+            {
+                let foreground = luminance(style.foreground_color(state, 1.0));
+                let background = style.background_color(state, 1.0);
+                let background = luminance(background) * background[3]
+                    + luminance(overlay) * (1.0 - background[3]);
+                let contrast =
+                    (foreground.max(background) + 0.05) / (foreground.min(background) + 0.05);
+                assert!(
+                    contrast >= MINIMUM_TEXT_CONTRAST,
+                    "{role} {state:?}: button label contrast is {contrast:.3}:1"
+                );
+            }
+        }
+    }
 
     #[test]
     fn resolve_accepts_immutable_registry() {
