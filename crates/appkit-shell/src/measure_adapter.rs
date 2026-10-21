@@ -30,7 +30,11 @@ impl TextMeasure for MeasureFromShaper<'_> {
         let old_style = self.0.font_style();
 
         self.0.set_font_size(font_size);
-        self.0.set_font_family(font_family);
+        // Match `UiTextLayout`: no family means "use the UI shaper's family", so
+        // measurement and painting stay on the same face.
+        if let Some(family) = font_family {
+            self.0.set_font_family(Some(family));
+        }
         self.0.set_font_weight(font_weight);
         self.0.set_font_style(font_style);
         let width = self.0.shape(text).map(|run| run.width).unwrap_or(0.0);

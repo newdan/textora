@@ -627,8 +627,13 @@ impl Shaper {
             .get_font(font_id)?;
 
         let uses_hinting = policy.uses_hinting(font.as_swash(), font_size);
-        let mut scaler =
-            self.scale_context.builder(font.as_swash()).size(font_size).hint(uses_hinting).build();
+        let raster_size = if uses_hinting { policy.raster_em(font_size) } else { font_size };
+        let mut scaler = self
+            .scale_context
+            .builder(font.as_swash())
+            .size(raster_size)
+            .hint(uses_hinting)
+            .build();
 
         // Render with grayscale alpha mask
         let image = swash::scale::Render::new(&[

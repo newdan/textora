@@ -7,6 +7,9 @@ const GASP_VERSION_SYMMETRIC: u16 = 1;
 const GASP_GRIDFIT: u16 = 0x0001;
 const GASP_SYMMETRIC_GRIDFIT: u16 = 0x0004;
 
+/// Smallest em size handed to the hinter, which cannot work with a zero grid.
+const MIN_HINTED_PPEM: f32 = 1.0;
+
 /// Rendering policy belongs to the resolved face, including fallback fonts.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum GlyphRasterization {
@@ -26,11 +29,26 @@ impl GlyphRasterization {
         }
     }
 
+    /// Em size handed to the scaler.
+    ///
+    /// Grid-fitted faces run TrueType instructions on a whole-pixel ppem while
+    /// skrifa scales the hinted outline with the requested size. A fractional
+    /// request therefore snaps stems to a grid the outline was not drawn for:
+    /// dense CJK glyphs drop strokes at Windows 125% scaling (15 px × 1.25 =
+    /// 18.75 px), so those faces rasterize on the nearest whole pixel.
+    /// Unhinted and CoreText-style faces keep the exact fractional size.
+    pub(crate) fn raster_em(self, font_size: f32) -> f32 {
+        match self {
+            Self::IntegerGridFitted => font_size.round().max(MIN_HINTED_PPEM),
+            Self::IntegerUnhinted | Self::SubpixelFontRecommended => font_size,
+        }
+    }
+
     pub(crate) fn uses_hinting(self, font: swash::FontRef<'_>, font_size: f32) -> bool {
         if self == Self::IntegerUnhinted {
             return false;
         }
-        let ppem = font_size.round().clamp(0.0, u16::MAX as f32) as u16;
+        let ppem = self.raster_em(font_size).clamp(0.0, u16::MAX as f32) as u16;
         // Swash 0.1.19 fixes its hinter to horizontal LCD with symmetric rendering,
         // independently of the output mask format. Match that target's gasp flags.
         font.table(swash::tag_from_bytes(b"gasp"))
@@ -122,6 +140,26 @@ mod tests {
         let table = gasp_table(GASP_VERSION_LEGACY, &[(8, 0), (u16::MAX, GASP_GRIDFIT)]);
         assert_eq!(lcd_hinting_recommendation(&table, 8), Some(false));
         assert_eq!(lcd_hinting_recommendation(&table, 9), Some(true));
+    }
+
+    #[test]
+    fn grid_fitted_faces_rasterize_on_whole_pixel_ems() {
+        let grid_fitted = GlyphRasterization::IntegerGridFitted;
+        for (requested, whole_pixels) in [(14.0, 14.0), (17.5, 18.0), (18.75, 19.0), (22.5, 23.0)] {
+            assert_eq!(grid_fitted.raster_em(requested), whole_pixels, "size {requested}");
+        }
+        assert_eq!(grid_fitted.raster_em(0.25), MIN_HINTED_PPEM, "sub-pixel sizes keep a grid");
+        for policy in
+            [GlyphRasterization::IntegerUnhinted, GlyphRasterization::SubpixelFontRecommended]
+        {
+            for requested in [14.0, 17.5, 18.75, 22.5] {
+                assert_eq!(
+                    policy.raster_em(requested),
+                    requested,
+                    "{policy:?} must keep the exact em size"
+                );
+            }
+        }
     }
 
     #[test]

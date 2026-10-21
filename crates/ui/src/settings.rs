@@ -60,7 +60,7 @@ impl UiMetrics {
 pub struct Settings {
     /// Font family name (e.g., "Menlo", "Helvetica").
     pub font_family: String,
-    /// UI Font family name (e.g., "-apple-system", "Segoe UI").
+    /// UI Font family name (e.g., "-apple-system", "微软雅黑").
     pub ui_font_family: String,
     /// Font size in pixels.
     pub font_size: f32,
@@ -125,7 +125,9 @@ pub fn platform_default_ui_font_family() -> &'static str {
     if cfg!(target_os = "macos") {
         "-apple-system"
     } else if cfg!(target_os = "windows") {
-        "Segoe UI"
+        // Microsoft YaHei is the Windows system UI face for CJK; the localized
+        // family name resolves to the same face as "Microsoft YaHei".
+        "微软雅黑"
     } else {
         "system-ui"
     }
