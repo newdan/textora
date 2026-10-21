@@ -14,6 +14,8 @@ use wgpu::util::DeviceExt;
 
 const ATLAS_SIZE: u32 = 1024;
 const PADDING: f32 = 8.0;
+/// Baseline position inside a sheet cell, leaving room for descenders.
+const SHEET_BASELINE_RATIO: f32 = 0.78;
 
 struct PackedGlyph {
     atlas_x: u32,
@@ -86,9 +88,26 @@ fn main() {
     let family = arguments.get(2).cloned().unwrap_or_else(|| "Segoe UI".to_owned());
     let size: f32 = arguments.get(3).and_then(|value| value.parse().ok()).unwrap_or(18.75);
     let text = arguments.get(4).cloned().unwrap_or_else(|| "中文汉字测试 Notora 2027".to_owned());
+    // A leading `@` reads the text from a UTF-8 file, which keeps long or
+    // punctuation-heavy samples out of the shell command line.
+    let text = match text.strip_prefix('@') {
+        Some(path) => std::fs::read_to_string(path)
+            .unwrap_or_else(|error| panic!("text file {path} must be readable: {error}"))
+            .trim_end_matches(['\r', '\n'])
+            .to_owned(),
+        None => text,
+    };
     let gamma: f32 = arguments.get(5).and_then(|value| value.parse().ok()).unwrap_or(0.714);
     let contrast: f32 = arguments.get(6).and_then(|value| value.parse().ok()).unwrap_or(0.0);
     let dark = arguments.get(7).is_some_and(|value| value == "dark");
+    // `sheet:<columns>:<cell>` lays every glyph out in its own square cell so a
+    // reference renderer can be compared glyph by glyph.
+    let sheet = arguments.get(8).and_then(|value| value.strip_prefix("sheet:")).map(|value| {
+        let mut parts = value.split(':');
+        let columns: u32 = parts.next().and_then(|part| part.parse().ok()).unwrap_or(50);
+        let cell: f32 = parts.next().and_then(|part| part.parse().ok()).unwrap_or(26.0);
+        (columns.max(1), cell)
+    });
 
     let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
         flags: wgpu::InstanceFlags::default(),
@@ -107,9 +126,8 @@ fn main() {
         pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor::default()))
             .expect("text preview device creation failed");
 
-    let mut shaper = Shaper::new()
-        .expect("system font database must load")
-        .with_font_family(&family);
+    let mut shaper =
+        Shaper::new().expect("system font database must load").with_font_family(&family);
     shaper.set_font_size(size);
     let shaped = shaper.shape(&text).expect("preview text must shape");
 
@@ -117,7 +135,7 @@ fn main() {
     let mut placements = Vec::new();
     let mut pen_x = PADDING;
     let baseline_y = PADDING + size * 1.2;
-    for cluster in &shaped.clusters {
+    for (index, cluster) in shaped.clusters.iter().enumerate() {
         let Some(bitmap) = shaper.rasterize_glyph(
             cluster.font_id,
             u16::try_from(cluster.glyph_id).expect("glyph id must fit u16"),
@@ -130,14 +148,34 @@ fn main() {
         let Some(packed) = packer.insert(&bitmap) else {
             panic!("preview atlas overflow");
         };
-        let x = (pen_x + cluster.x_offset + packed.bearing_x as f32).round();
-        let y = (baseline_y - packed.bearing_y as f32).round();
+        let (x, y) = match sheet {
+            Some((columns, cell)) => {
+                let cell_x = PADDING + (index as u32 % columns) as f32 * cell;
+                let cell_y = PADDING + (index as u32 / columns) as f32 * cell;
+                let cell_baseline = cell_y + cell * SHEET_BASELINE_RATIO;
+                let centered_x = cell_x + (cell - cluster.advance) * 0.5;
+                (
+                    (centered_x + packed.bearing_x as f32).round(),
+                    (cell_baseline - packed.bearing_y as f32).round(),
+                )
+            }
+            None => (
+                (pen_x + cluster.x_offset + packed.bearing_x as f32).round(),
+                (baseline_y - packed.bearing_y as f32).round(),
+            ),
+        };
         placements.push(GlyphPlacement { packed, x, y });
         pen_x += cluster.advance;
     }
 
-    let width = (pen_x + PADDING).ceil() as u32;
-    let height = (baseline_y + size * 1.2).ceil() as u32;
+    let (width, height) = match sheet {
+        Some((columns, cell)) => {
+            let rows = shaped.clusters.len().div_ceil(columns as usize) as f32;
+            (PADDING * 2.0 + columns as f32 * cell, PADDING * 2.0 + rows * cell)
+        }
+        None => (pen_x + PADDING, baseline_y + size * 1.2),
+    };
+    let (width, height) = (width.ceil() as u32, height.ceil() as u32);
     let format = wgpu::TextureFormat::Rgba8UnormSrgb;
 
     let atlas_texture = device.create_texture(&wgpu::TextureDescriptor {

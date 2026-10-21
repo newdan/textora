@@ -176,7 +176,12 @@ impl UiTextLayout {
         shaper.set_font_size(font_size);
         shaper.set_font_weight(font_weight);
         shaper.set_font_style(font_style);
-        shaper.set_font_family(font_family.as_deref());
+        // `None` means "inherit the configured UI font": resetting the shaper to
+        // the generic sans family here made every widget ignore the interface
+        // font setting (and fall back to the system default).
+        if let Some(family) = font_family.as_deref() {
+            shaper.set_font_family(Some(family));
+        }
 
         let result = shaper.shape(text).ok().map(|shaped| {
             let id = NEXT_LAYOUT_ID.fetch_add(1, Ordering::Relaxed);

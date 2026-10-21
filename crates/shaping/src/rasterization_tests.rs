@@ -155,6 +155,38 @@ fn yahei_chinese_glyphs_follow_size_specific_hinting_at_requested_phase() {
     }
 }
 
+#[cfg(target_os = "windows")]
+#[test]
+fn hinted_fractional_sizes_rasterize_on_the_whole_pixel_grid() {
+    // Windows 125% scaling requests 15 * 1.25 = 18.75 px. Hinting that fraction
+    // snapped stems for one ppem while the outline scaled for another, which
+    // merged the two interior horizontals of 看 into a single thick bar.
+    let mut shaper = Shaper::new().expect("system font database must load");
+    shaper.set_font_family(Some("Microsoft YaHei UI"));
+    for size in [16.75_f32, 17.5, 18.75] {
+        let whole = size.round();
+        shaper.set_font_size(size);
+        let shaped = shaper.shape("看").expect("Chinese fixture must shape");
+        let cluster = &shaped.clusters[0];
+        let glyph_id = u16::try_from(cluster.glyph_id).expect("font glyph ID fits u16");
+        let fractional = shaper
+            .rasterize_glyph(cluster.font_id, glyph_id, size, (0.0, 0.0))
+            .expect("visible Chinese glyph must rasterize");
+        let reference = shaper
+            .rasterize_glyph(cluster.font_id, glyph_id, whole, (0.0, 0.0))
+            .expect("visible Chinese glyph must rasterize");
+        assert_eq!(
+            (fractional.width, fractional.height, fractional.left, fractional.top),
+            (reference.width, reference.height, reference.left, reference.top),
+            "size {size} must share the {whole} px placement"
+        );
+        assert_eq!(
+            fractional.data, reference.data,
+            "size {size} must hint on the {whole} px grid, not a fractional one"
+        );
+    }
+}
+
 #[test]
 fn font_recommended_policy_preserves_fractional_positions_and_offsets() {
     let policy = GlyphRasterization::SubpixelFontRecommended;
@@ -184,10 +216,7 @@ fn yahei_fallback_uses_resolved_face_policy_after_requested_family_changes() {
     );
     shaper.set_font_family(Some("Arial"));
     assert_eq!(shaper.glyph_rasterization(latin_face), GlyphRasterization::IntegerUnhinted);
-    assert_eq!(
-        shaper.glyph_rasterization(chinese.font_id),
-        GlyphRasterization::IntegerGridFitted
-    );
+    assert_eq!(shaper.glyph_rasterization(chinese.font_id), GlyphRasterization::IntegerGridFitted);
     let offset = (0.5, 0.0);
     let reference = reference_bitmap(&shaper, chinese, shaper.font_size(), false, (0.0, 0.0));
     let actual = shaper

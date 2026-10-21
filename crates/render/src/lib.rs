@@ -622,6 +622,17 @@ pub struct GammaUniform {
     pub gamma: f32,
 }
 
+/// Edge-contrast correction applied to the antialiasing ramp.
+///
+/// Swash's coverage masks carry more partial pixels than GDI+'s grid-fitted
+/// masks, so text with matching ink mass still reads softer. The shader S-curve
+/// with this strength matches the native solid/partial pixel distribution
+/// (233-glyph corpus at 18.75 px: 35.8 → 43.1 solid pixels per glyph vs 42.4
+/// native) and lowers the pixel MAE against native from 27.9 to 25.8.
+fn platform_glyph_sharpness() -> f32 {
+    if cfg!(target_os = "windows") { 0.2 } else { 0.0 }
+}
+
 /// GPU glyph renderer.
 ///
 /// Manages a texture atlas on the GPU and renders shaped text as textured quads.
@@ -635,8 +646,11 @@ pub struct GlyphRenderer {
 impl GlyphRenderer {
     /// Create a new glyph renderer for the given surface format.
     pub fn new(device: &wgpu::Device, format: wgpu::TextureFormat) -> Self {
-        let shader_source =
-            format!("const IMAGE_TARGET_SRGB: bool = {};\n{SHADER_SRC}", format.is_srgb());
+        let shader_source = format!(
+            "const IMAGE_TARGET_SRGB: bool = {};\nconst GLYPH_SHARPNESS: f32 = {};\n{SHADER_SRC}",
+            format.is_srgb(),
+            platform_glyph_sharpness()
+        );
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("glyph shader"),
             source: wgpu::ShaderSource::Wgsl(shader_source.into()),
@@ -896,7 +910,13 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     // Coverage curve calibrated against Windows GridFit output. `contrast`
     // tightens midtones (dark surfaces), `gamma` shapes the edge falloff.
     let alpha_corrected = enhance_contrast(coverage, gamma_params.contrast);
-    let final_alpha = pow(alpha_corrected, 1.0 / gamma_params.gamma);
+    let gamma_alpha = pow(alpha_corrected, 1.0 / gamma_params.gamma);
+    // Swash spreads antialiasing over more partial pixels than GDI+'s
+    // grid-fitted masks. This S-curve pulls edge coverage toward solid or
+    // empty without moving the 50% crossing, matching native edge contrast.
+    let sharpened = gamma_alpha
+        + GLYPH_SHARPNESS * 4.0 * gamma_alpha * (1.0 - gamma_alpha) * (2.0 * gamma_alpha - 1.0);
+    let final_alpha = clamp(sharpened, 0.0, 1.0);
     return vec4<f32>(in.color.rgb, in.color.a * final_alpha);
 }
 "#;

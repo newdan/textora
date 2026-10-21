@@ -10,10 +10,11 @@ pub struct RenderResources {
     pub frame_cache: crate::frame_cache::FrameCache,
 }
 
-/// Coverage curves calibrated against native GDI+ text measured through the
-/// application (6-character glyph box, same theme colors):
-/// light surfaces `coverage^1.40`, dark surfaces `coverage^0.25`.
-const LIGHT_BACKGROUND_GAMMA: f32 = 0.714;
+/// Coverage curves calibrated against native GDI+ text on a 233-glyph,
+/// 10-family corpus (same theme colors, 18.75 px): the shader applies
+/// `coverage^(1/gamma)`, so light surfaces use `coverage^0.71` to match GDI+
+/// ink mass, dark surfaces use `coverage^0.25`.
+const LIGHT_BACKGROUND_GAMMA: f32 = 1.3;
 const LIGHT_BACKGROUND_CONTRAST: f32 = 0.0;
 const DARK_BACKGROUND_GAMMA: f32 = 4.0;
 const DARK_BACKGROUND_CONTRAST: f32 = 0.0;
