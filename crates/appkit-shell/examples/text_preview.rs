@@ -180,11 +180,7 @@ fn main() {
 
     let atlas_texture = device.create_texture(&wgpu::TextureDescriptor {
         label: Some("preview atlas"),
-        size: wgpu::Extent3d {
-            width: ATLAS_SIZE,
-            height: ATLAS_SIZE,
-            depth_or_array_layers: 1,
-        },
+        size: wgpu::Extent3d { width: ATLAS_SIZE, height: ATLAS_SIZE, depth_or_array_layers: 1 },
         mip_level_count: 1,
         sample_count: 1,
         dimension: wgpu::TextureDimension::D2,
@@ -200,11 +196,7 @@ fn main() {
             bytes_per_row: Some(ATLAS_SIZE),
             rows_per_image: Some(ATLAS_SIZE),
         },
-        wgpu::Extent3d {
-            width: ATLAS_SIZE,
-            height: ATLAS_SIZE,
-            depth_or_array_layers: 1,
-        },
+        wgpu::Extent3d { width: ATLAS_SIZE, height: ATLAS_SIZE, depth_or_array_layers: 1 },
     );
     let atlas_view = atlas_texture.create_view(&wgpu::TextureViewDescriptor::default());
 
@@ -221,11 +213,7 @@ fn main() {
     queue.write_texture(
         placeholder.as_image_copy(),
         &[0, 0, 0, 0],
-        wgpu::TexelCopyBufferLayout {
-            offset: 0,
-            bytes_per_row: Some(4),
-            rows_per_image: Some(1),
-        },
+        wgpu::TexelCopyBufferLayout { offset: 0, bytes_per_row: Some(4), rows_per_image: Some(1) },
         wgpu::Extent3d { width: 1, height: 1, depth_or_array_layers: 1 },
     );
     let placeholder_view = placeholder.create_view(&wgpu::TextureViewDescriptor::default());
@@ -265,12 +253,7 @@ fn main() {
     // (#989898), not the theme's nominal sRGB value.
     let foreground = if dark { [0.600, 0.600, 0.600] } else { [0.2157, 0.2549, 0.3176] };
     let linear = |value: f32| value.powf(2.2);
-    let text_color = [
-        linear(foreground[0]),
-        linear(foreground[1]),
-        linear(foreground[2]),
-        1.0,
-    ];
+    let text_color = [linear(foreground[0]), linear(foreground[1]), linear(foreground[2]), 1.0];
     let clear_color = wgpu::Color {
         r: linear(background[0]) as f64,
         g: linear(background[1]) as f64,
@@ -315,9 +298,8 @@ fn main() {
         mapped_at_creation: false,
     });
 
-    let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
-        label: Some("preview encoder"),
-    });
+    let mut encoder = device
+        .create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("preview encoder") });
     {
         let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
             label: Some("preview pass"),
@@ -387,9 +369,7 @@ fn build_vertices(
     color: [f32; 4],
 ) -> Vec<GlyphVertex> {
     let mut vertices = Vec::with_capacity(placements.len() * 6);
-    let screen = |x: f32, y: f32| {
-        [x / width as f32 * 2.0 - 1.0, 1.0 - y / height as f32 * 2.0]
-    };
+    let screen = |x: f32, y: f32| [x / width as f32 * 2.0 - 1.0, 1.0 - y / height as f32 * 2.0];
     for placement in placements {
         let packed = &placement.packed;
         let left = placement.x;
@@ -401,21 +381,12 @@ fn build_vertices(
         let uv_top = packed.atlas_y as f32 / atlas;
         let uv_right = (packed.atlas_x + packed.width) as f32 / atlas;
         let uv_bottom = (packed.atlas_y + packed.height) as f32 / atlas;
-        let top_left = GlyphVertex {
-            position: screen(left, top),
-            tex_coords: [uv_left, uv_top],
-            color,
-        };
-        let top_right = GlyphVertex {
-            position: screen(right, top),
-            tex_coords: [uv_right, uv_top],
-            color,
-        };
-        let bottom_left = GlyphVertex {
-            position: screen(left, bottom),
-            tex_coords: [uv_left, uv_bottom],
-            color,
-        };
+        let top_left =
+            GlyphVertex { position: screen(left, top), tex_coords: [uv_left, uv_top], color };
+        let top_right =
+            GlyphVertex { position: screen(right, top), tex_coords: [uv_right, uv_top], color };
+        let bottom_left =
+            GlyphVertex { position: screen(left, bottom), tex_coords: [uv_left, uv_bottom], color };
         let bottom_right = GlyphVertex {
             position: screen(right, bottom),
             tex_coords: [uv_right, uv_bottom],

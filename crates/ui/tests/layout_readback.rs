@@ -6,9 +6,7 @@
 
 #![cfg(feature = "internal_test_support")]
 
-use textora_ui::decorations::{
-    caret_cursor_line_region, caret_selection_line_regions,
-};
+use textora_ui::decorations::{caret_cursor_line_region, caret_selection_line_regions};
 
 // ============================================================
 // 一、装饰条几何：光标 / 选区必须落在正确的视觉行带内
@@ -18,10 +16,7 @@ use textora_ui::decorations::{
 #[test]
 fn caret_cursor_line_region_resolves_expected_line() {
     let region = caret_cursor_line_region(2, 5.0, 20.0);
-    assert_eq!(
-        region.line_index, 2,
-        "光标行索引应等于输入的行索引（防止坐标错位）"
-    );
+    assert_eq!(region.line_index, 2, "光标行索引应等于输入的行索引（防止坐标错位）");
     assert_eq!(region.top, 5.0, "光标区域 top 应为 line_top");
     assert_eq!(region.height, 20.0, "光标区域高度应为行高");
 }
@@ -30,14 +25,8 @@ fn caret_cursor_line_region_resolves_expected_line() {
 #[test]
 fn caret_selection_line_regions_resolve_start_and_end_lines() {
     let (start_region, end_region) = caret_selection_line_regions(1, 3, 5.0, 20.0);
-    assert_eq!(
-        start_region.line_index, 1,
-        "选区起始行索引应正确（防止坐标错位）"
-    );
-    assert_eq!(
-        end_region.line_index, 3,
-        "选区结束行索引应正确（防止坐标错位）"
-    );
+    assert_eq!(start_region.line_index, 1, "选区起始行索引应正确（防止坐标错位）");
+    assert_eq!(end_region.line_index, 3, "选区结束行索引应正确（防止坐标错位）");
     assert_eq!(start_region.top, 5.0, "选区起始 top 应为 line_top");
     assert_eq!(start_region.height, 20.0, "选区起始高度应为行高");
     assert_eq!(end_region.top, 5.0, "选区结束 top 应为 line_top");
@@ -48,10 +37,7 @@ fn caret_selection_line_regions_resolve_start_and_end_lines() {
 #[test]
 fn single_line_selection_regions_are_consistent() {
     let (start_region, end_region) = caret_selection_line_regions(2, 2, 10.0, 20.0);
-    assert_eq!(
-        start_region.line_index, end_region.line_index,
-        "单行选区起止行索引应一致"
-    );
+    assert_eq!(start_region.line_index, end_region.line_index, "单行选区起止行索引应一致");
     assert_eq!(start_region.top, end_region.top, "单行选区起止 top 应一致");
 }
 
@@ -64,14 +50,8 @@ fn cursor_rect_stays_within_line_band() {
     let caret_top = font_baseline;
     let caret_height = font_line_height - 2.0 * font_baseline;
     assert!(caret_top >= 0.0, "光标顶端不能越过行顶（防止垂直越界）");
-    assert!(
-        caret_top + caret_height <= font_line_height,
-        "光标底端不能越过行底（防止垂直越界）"
-    );
-    assert!(
-        caret_top < font_line_height,
-        "光标不能落入下一行区域（防止视觉错位）"
-    );
+    assert!(caret_top + caret_height <= font_line_height, "光标底端不能越过行底（防止垂直越界）");
+    assert!(caret_top < font_line_height, "光标不能落入下一行区域（防止视觉错位）");
 }
 
 // ============================================================
@@ -88,10 +68,7 @@ fn baseline_alignment_keeps_text_within_line_band() {
     let text_baseline = font_baseline + (font_line_height - font_size) / 2.0;
     let text_top = text_baseline - font_baseline;
     assert!(text_top >= 0.0, "文本顶不能越出行顶（防止文字被裁切）");
-    assert!(
-        text_top + font_size <= font_line_height + 1.0,
-        "文本底不能越出行底（防止文字被裁切）"
-    );
+    assert!(text_top + font_size <= font_line_height + 1.0, "文本底不能越出行底（防止文字被裁切）");
 }
 
 // ============================================================
@@ -109,10 +86,7 @@ fn checkbox_marker_is_vertically_centered_in_row() {
     let checkbox_center = checkbox_top + checkbox_size / 2.0;
     let row_center = row_top + row_height / 2.0;
 
-    assert!(
-        (checkbox_center - row_center).abs() < 0.5,
-        "复选框中心应与行中心重合（防止垂直错位）"
-    );
+    assert!((checkbox_center - row_center).abs() < 0.5, "复选框中心应与行中心重合（防止垂直错位）");
 }
 
 /// 模拟 render_settings_dialog_row 中复选框水平位置，验证右对齐。
