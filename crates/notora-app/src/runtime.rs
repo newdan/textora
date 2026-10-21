@@ -144,10 +144,11 @@ fn notora_window_attributes() -> WindowAttributes {
     {
         use winit::platform::windows::{CornerPreference, WindowAttributesExtWindows};
         let (window_icon, taskbar_icon) = windows_window_icons();
-        // GDI 区域控制精确半径；关闭会引入非客户区黑线的 winit 阴影补偿。
+        // 外窗由 DirectComposition 透明合成；精确圆角由浮点 clip 控制。
         attributes
             .with_window_icon(Some(window_icon))
             .with_taskbar_icon(Some(taskbar_icon))
+            .with_no_redirection_bitmap(true)
             .with_undecorated_shadow(false)
             .with_corner_preference(CornerPreference::DoNotRound)
     }

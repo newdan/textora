@@ -6,10 +6,14 @@ use std::sync::Arc;
 use std::time::Instant;
 
 mod startup;
+#[cfg(any(target_os = "windows", test))]
+mod window_clip;
+#[cfg(target_os = "windows")]
+mod windows_composition;
 #[cfg(all(test, target_os = "windows"))]
 mod windows_tests;
 pub(crate) use startup::with_gpu_error_scopes;
-use startup::{backend_candidates, try_backends};
+use startup::{backend_candidates, surface_backend_candidates, try_backends};
 
 /// Errors that can occur during GPU initialization.
 #[derive(Debug)]
@@ -51,6 +55,8 @@ impl std::error::Error for GpuError {}
 /// A configured GPU context (device, queue, surface config).
 pub struct GpuContext {
     pub surface: wgpu::Surface<'static>,
+    #[cfg(target_os = "windows")]
+    composition: Option<windows_composition::WindowComposition>,
     pub device: wgpu::Device,
     pub queue: wgpu::Queue,
     pub config: wgpu::SurfaceConfiguration,
@@ -58,6 +64,49 @@ pub struct GpuContext {
     /// MSAA multisample target (recreated on resize).
     pub msaa_tex: wgpu::Texture,
     pub msaa_view: wgpu::TextureView,
+}
+
+struct WindowSurface {
+    surface: wgpu::Surface<'static>,
+    #[cfg(target_os = "windows")]
+    composition: Option<windows_composition::WindowComposition>,
+}
+
+fn composition_surface_required(window: &winit::window::Window) -> bool {
+    #[cfg(target_os = "windows")]
+    return windows_composition::is_required(window);
+    #[cfg(not(target_os = "windows"))]
+    {
+        let _ = window;
+        false
+    }
+}
+
+fn create_window_surface(
+    instance: &wgpu::Instance,
+    window: Arc<winit::window::Window>,
+) -> Result<WindowSurface, GpuError> {
+    #[cfg(target_os = "windows")]
+    if composition_surface_required(&window) {
+        let composition = windows_composition::WindowComposition::new(window)?;
+        // SAFETY: visual is a valid IDCompositionVisual. wgpu retains its own COM
+        // reference; composition also retains the native window until surface drop.
+        let surface = unsafe {
+            instance.create_surface_unsafe(wgpu::SurfaceTargetUnsafe::CompositionVisual(
+                windows::core::Interface::as_raw(&composition.visual),
+            ))
+        }
+        .map_err(|error| GpuError::SurfaceCreation(error.to_string()))?;
+        return Ok(WindowSurface { surface, composition: Some(composition) });
+    }
+    let surface = instance
+        .create_surface(window)
+        .map_err(|error| GpuError::SurfaceCreation(error.to_string()))?;
+    Ok(WindowSurface {
+        surface,
+        #[cfg(target_os = "windows")]
+        composition: None,
+    })
 }
 
 /// A surface-independent adapter and device prepared before a window is available.
@@ -104,6 +153,21 @@ fn create_msaa_texture(
 }
 
 impl GpuContext {
+    /// Update desktop composition geometry in physical pixels before presenting.
+    /// `None` removes rounded clipping for maximized/fullscreen windows.
+    pub fn set_window_corner_radius(&mut self, radius: Option<f32>) -> Result<(), GpuError> {
+        #[cfg(target_os = "windows")]
+        if let Some(composition) = self.composition.as_mut() {
+            return composition.synchronize(window_clip::WindowClip::new(
+                self.config.width,
+                self.config.height,
+                radius,
+            ));
+        }
+        let _ = radius;
+        Ok(())
+    }
+
     /// Recreate the MSAA texture after surface resize.
     pub fn recreate_msaa(&mut self) {
         let (tex, view) = create_msaa_texture(&self.device, &self.config);
@@ -133,19 +197,17 @@ fn create_gpu_context_for_backend(
     let instance = startup_instance(requested_backends);
     let instance_elapsed = initialization_started_at.elapsed();
     let surface_started_at = Instant::now();
-    let surface = instance
-        .create_surface(window.clone())
-        .map_err(|e| GpuError::SurfaceCreation(e.to_string()))?;
+    let window_surface = create_window_surface(&instance, window)?;
     let surface_elapsed = surface_started_at.elapsed();
     let adapter_started_at = Instant::now();
-    let adapter = pollster::block_on(request_adapter(&instance, Some(&surface)))
+    let adapter = pollster::block_on(request_adapter(&instance, Some(&window_surface.surface)))
         .ok_or(GpuError::NoAdapter)?;
     let adapter_elapsed = adapter_started_at.elapsed();
     let device_started_at = Instant::now();
     let (device, queue) = request_device(&adapter)?;
     let device_elapsed = device_started_at.elapsed();
 
-    let context = configure_gpu_context(surface, &adapter, device, queue, width, height)?;
+    let context = configure_gpu_context(window_surface, &adapter, device, queue, width, height)?;
     let adapter_info = adapter.get_info();
     eprintln!(
         "[startup:gpu_sync] requested_backends={requested_backends:?} power_preference={:?} adapter={} backend={:?} instance={:.2}ms surface={:.2}ms adapter_request={:.2}ms device_request={:.2}ms total={:.2}ms",
@@ -223,6 +285,14 @@ pub(crate) fn initialize_window_resources<T>(
     mut prepared: Option<PreparedGpuDevice>,
     mut initialize: impl FnMut(GpuContext) -> Result<T, GpuError>,
 ) -> Result<T, GpuError> {
+    let composition_surface = composition_surface_required(&window);
+    if composition_surface
+        && prepared
+            .as_ref()
+            .is_some_and(|prepared| prepared.adapter.get_info().backend != wgpu::Backend::Dx12)
+    {
+        prepared = None;
+    }
     let candidates = prepared
         .as_ref()
         .map(|prepared| {
@@ -230,7 +300,9 @@ pub(crate) fn initialize_window_resources<T>(
                 .chain(prepared.remaining_backends.iter().copied())
                 .collect::<Vec<_>>()
         })
-        .unwrap_or_else(|| backend_candidates(wgpu::Backends::from_env()));
+        .unwrap_or_else(|| {
+            surface_backend_candidates(wgpu::Backends::from_env(), composition_surface)
+        });
     try_backends(&mut candidates.into_iter(), |backends| {
         let context = match prepared.take() {
             Some(prepared) => attach_prepared_device(window.clone(), width, height, prepared),
@@ -248,16 +320,15 @@ fn attach_prepared_device(
 ) -> Result<GpuContext, GpuError> {
     let attachment_started_at = Instant::now();
     let PreparedGpuDevice { instance, adapter, device, queue, requested_backends, .. } = prepared;
-    let surface = instance
-        .create_surface(Arc::clone(&window))
-        .map_err(|error| GpuError::SurfaceCreation(error.to_string()))?;
+    let window_surface = create_window_surface(&instance, Arc::clone(&window))?;
     let surface_elapsed = attachment_started_at.elapsed();
-    if !adapter.is_surface_supported(&surface) {
+    if !adapter.is_surface_supported(&window_surface.surface) {
         eprintln!("[startup:gpu_prepared] fallback=unsupported_surface");
-        drop((surface, adapter, device, queue, instance));
+        drop((window_surface, adapter, device, queue, instance));
         return create_gpu_context_for_backend(window, width, height, requested_backends);
     }
-    let configured_context = configure_gpu_context(surface, &adapter, device, queue, width, height);
+    let configured_context =
+        configure_gpu_context(window_surface, &adapter, device, queue, width, height);
     let attachment_elapsed = attachment_started_at.elapsed();
     match configured_context {
         Err(GpuError::NoSurfaceFormat) => {
@@ -287,7 +358,7 @@ fn request_device(adapter: &wgpu::Adapter) -> Result<(wgpu::Device, wgpu::Queue)
 }
 
 fn configure_gpu_context(
-    surface: wgpu::Surface<'static>,
+    window_surface: WindowSurface,
     adapter: &wgpu::Adapter,
     device: wgpu::Device,
     queue: wgpu::Queue,
@@ -296,18 +367,23 @@ fn configure_gpu_context(
 ) -> Result<GpuContext, GpuError> {
     let scope_device = device.clone();
     with_gpu_error_scopes(&scope_device, || {
-        configure_gpu_context_resources(surface, adapter, device, queue, width, height)
+        configure_gpu_context_resources(window_surface, adapter, device, queue, width, height)
     })
 }
 
 fn configure_gpu_context_resources(
-    surface: wgpu::Surface<'static>,
+    window_surface: WindowSurface,
     adapter: &wgpu::Adapter,
     device: wgpu::Device,
     queue: wgpu::Queue,
     width: u32,
     height: u32,
 ) -> Result<GpuContext, GpuError> {
+    let WindowSurface {
+        surface,
+        #[cfg(target_os = "windows")]
+        mut composition,
+    } = window_surface;
     let configuration_started_at = Instant::now();
     let surface_caps = surface.get_capabilities(adapter);
     // Prefer sRGB for correct color rendering (critical on macOS)
@@ -320,18 +396,34 @@ fn configure_gpu_context_resources(
         .ok_or(GpuError::NoSurfaceFormat)?;
     let capabilities_elapsed = configuration_started_at.elapsed();
 
+    let alpha_mode = surface_caps.alpha_modes.first().copied().ok_or(GpuError::NoSurfaceFormat)?;
+    #[cfg(target_os = "windows")]
+    let alpha_mode = if composition.is_some() {
+        if !surface_caps.alpha_modes.contains(&wgpu::CompositeAlphaMode::PreMultiplied) {
+            return Err(GpuError::SurfaceCreation(
+                "DirectComposition requires premultiplied surface alpha".to_owned(),
+            ));
+        }
+        wgpu::CompositeAlphaMode::PreMultiplied
+    } else {
+        alpha_mode
+    };
     let config = wgpu::SurfaceConfiguration {
         usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
         format,
         width: width.max(1),
         height: height.max(1),
         present_mode: wgpu::PresentMode::AutoVsync,
-        alpha_mode: surface_caps.alpha_modes.first().copied().ok_or(GpuError::NoSurfaceFormat)?,
+        alpha_mode,
         view_formats: vec![],
         desired_maximum_frame_latency: 2,
     };
     let surface_configuration_started_at = Instant::now();
     surface.configure(&device, &config);
+    #[cfg(target_os = "windows")]
+    if let Some(composition) = composition.as_mut() {
+        composition.synchronize(window_clip::WindowClip::new(width, height, None))?;
+    }
     let surface_configuration_elapsed = surface_configuration_started_at.elapsed();
 
     let msaa_started_at = Instant::now();
@@ -347,7 +439,17 @@ fn configure_gpu_context_resources(
         configuration_elapsed.as_secs_f64() * 1_000.0,
     );
 
-    Ok(GpuContext { surface, device, queue, config, format, msaa_tex, msaa_view })
+    Ok(GpuContext {
+        surface,
+        #[cfg(target_os = "windows")]
+        composition,
+        device,
+        queue,
+        config,
+        format,
+        msaa_tex,
+        msaa_view,
+    })
 }
 
 /// Request a GPU adapter with hardware-first fallback.

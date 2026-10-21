@@ -3523,7 +3523,7 @@ mod tests {
             let surfaces = theme.application_theme();
             assert_ne!(surfaces.window_surface, surfaces.navigation_surface);
             assert_ne!(surfaces.navigation_surface, surfaces.editor_surface);
-            for dpi in [1.0, 1.5, 2.0] {
+            for dpi in [1.0, 1.25, 1.5, 1.75, 2.0] {
                 for frame_state in [
                     ui::window_frame::WindowFrameState::Native,
                     ui::window_frame::WindowFrameState::MacOs,
@@ -3582,7 +3582,7 @@ mod tests {
                             if *color == thumb_color && rect.right() == layout.editor_rect.right()
                     )).expect("editor scrollbar must be part of the content overlay");
                     let corner_index = context.list.cmds.iter().position(|command| matches!(command,
-                        ui::DrawCmd::FillTriangle { color, .. } if *color == surfaces.window_surface
+                        ui::DrawCmd::TaperedMesh { color, .. } if *color == surfaces.window_surface
                     )).expect("content corners must be masked");
                     assert!(scrollbar_index < corner_index, "rounded corners must cover scrollbar endpoints");
                     assert!(context.list.cmds.iter().any(|command| matches!(command,

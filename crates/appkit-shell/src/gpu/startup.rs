@@ -1,5 +1,15 @@
 use super::GpuError;
 
+pub(super) fn surface_backend_candidates(
+    override_backends: Option<wgpu::Backends>,
+    composition_surface: bool,
+) -> Vec<wgpu::Backends> {
+    if composition_surface {
+        return vec![wgpu::Backends::DX12];
+    }
+    backend_candidates(override_backends)
+}
+
 pub(super) fn backend_candidates(override_backends: Option<wgpu::Backends>) -> Vec<wgpu::Backends> {
     if let Some(backends) = override_backends {
         return vec![backends];
@@ -60,6 +70,20 @@ pub(crate) fn with_gpu_error_scopes<T>(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn composition_surfaces_require_dx12_even_when_opengl_is_overridden() {
+        for requested in [None, Some(wgpu::Backends::GL), Some(wgpu::Backends::all())] {
+            assert_eq!(surface_backend_candidates(requested, true), [wgpu::Backends::DX12]);
+        }
+    }
+
+    #[test]
+    fn regular_surfaces_preserve_existing_backend_selection() {
+        for requested in [None, Some(wgpu::Backends::GL)] {
+            assert_eq!(surface_backend_candidates(requested, false), backend_candidates(requested));
+        }
+    }
 
     #[test]
     #[cfg(target_os = "windows")]

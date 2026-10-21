@@ -7,7 +7,7 @@
 - 中栏使用较浅的 `navigation_surface`；右栏头部、工具栏和正文统一使用 `editor_surface`。
 - 应用选用 16 逻辑像素作为统一的 macOS 风格圆角基准，集中定义在 `SHELL_CORNER_RADIUS_LOGICAL`，不是根据操作系统分别选择数值。
 - 中栏与右栏共享一个圆角外轮廓，两栏内部仍为直线分界；右边和底部保留 4 逻辑像素的外壳留白。左栏隐藏时左边同样保留留白。原生与沉浸式标题栏均使用同一内容圆角和留白。
-- 普通 Windows 外窗裁剪和自绘 `strong_border` 共用上述半径；描边宽度保持 1 个物理像素。最大化和全屏时清除原生裁剪并隐藏客户端描边。左栏分隔线的可见拖动手柄避开内容区的上下圆角，命中范围仍覆盖完整栏高。
+- 普通 Windows 外窗合成裁剪和自绘 `strong_border` 共用上述半径；描边宽度保持 1 个物理像素。最大化和全屏时清除圆角裁剪并隐藏客户端描边。左栏分隔线的可见拖动手柄避开内容区的上下圆角，命中范围仍覆盖完整栏高。
 
 ## 交互与平台
 
@@ -25,7 +25,11 @@ macOS 原生按钮中心与自绘标题栏中心对齐，AppKit 坐标使用逻�
 
 Linux 继续使用已有原生窗口装饰。
 
-Windows 通过 `SetWindowRgn` 同步实际外窗形状，不能只画圆角边框而保留直角底色。创建、尺寸变化、DPI 变化及绘制前同步；同一 HWND 与形状仅设置一次。原生区域使用客户区相对于外窗的坐标，补偿 GDI 圆角矩形的右／下边界；成功后的区域所有权交给系统，失败时应用释放。关闭 winit 的无装饰阴影补偿，避免其引入 1 像素非客户区黑线；精确裁剪方案不承诺保留 Windows 原生阴影。
+Windows 外窗使用 `WS_EX_NOREDIRECTIONBITMAP` 和 DirectComposition visual 承载 DX12 交换链，使用预乘透明度。外轮廓由 `IDCompositionRectangleClip` 裁剪，八个圆角半径分量均为 `16 × DPI` 的浮点物理像素；125% 缩放时半径为 20 物理像素，不取整到系统圆角。visual 显式设置 `DCOMPOSITION_BORDER_MODE_SOFT` 和线性采样，使透明角落与桌面之间保留抗锯齿覆盖率。禁止使用 `SetWindowRgn` 等整数 GDI 区域二次硬裁剪。依据：[DirectComposition 裁剪](https://learn.microsoft.com/en-us/windows/win32/directcomp/clipping)、[SOFT 边缘模式](https://learn.microsoft.com/en-us/windows/win32/api/dcomptypes/ne-dcomptypes-dcomposition_border_mode)。
+
+创建交换链后提交合成树；每次绘制前，使用当前交换链尺寸和布局 DPI 同步裁剪，随后执行 `Commit`，覆盖交换链重建、尺寸和 DPI 变化。相同几何不重复写入 clip 属性，但仍提交 wgpu 对 visual 内容的更新。最大化和全屏移除 clip，恢复普通窗口时重新应用统一半径。GPU 上下文保留窗口的 `Arc` 以及合成设备、target、visual 和 clip，销毁时先释放 surface，再释放合成对象与窗口。普通非合成窗口继续使用既有 OpenGL → DX12 回退；合成窗口仅使用支持透明交换链的 DX12。
+
+关闭 winit 的无装饰阴影补偿，并禁用 DWM 系统圆角，避免非客户区黑线以及系统半径覆盖应用的 16 逻辑像素约定；此方案不承诺保留 Windows 原生阴影。透明角落的鼠标命中仍遵循矩形 HWND 的系统行为，外观裁剪不安装 GDI 命中区域。
 
 macOS 与 Linux 外窗轮廓仍由窗口系统管理。16 逻辑像素是应用的视觉约定，不声称所有 macOS 版本的原生外窗半径均为固定数值。
 

@@ -15,10 +15,6 @@ fn macos_frame_reserves_custom_title_bar_at_each_dpi() {
     }
 }
 
-#[cfg(target_os = "windows")]
-#[path = "window_runtime/window_shape.rs"]
-mod window_shape;
-
 pub(super) fn frame_state(
     window: Option<&winit::window::Window>,
 ) -> ui::window_frame::WindowFrameState {
@@ -49,8 +45,6 @@ const DEFAULT_WINDOW_HEIGHT_PX: f32 = 800.0;
 
 /// UI 线程上的平台窗口瞬时状态与窄能力端口。
 pub(super) struct WindowRuntime {
-    #[cfg(target_os = "windows")]
-    window_shape: window_shape::WindowShapeCache,
     focused: bool,
     width_px: f32,
     height_px: f32,
@@ -63,8 +57,6 @@ pub(super) struct WindowRuntime {
 impl WindowRuntime {
     pub(super) fn new() -> Self {
         Self {
-            #[cfg(target_os = "windows")]
-            window_shape: window_shape::WindowShapeCache::default(),
             focused: true,
             width_px: DEFAULT_WINDOW_WIDTH_PX,
             height_px: DEFAULT_WINDOW_HEIGHT_PX,
@@ -85,13 +77,7 @@ impl WindowRuntime {
             macos_titlebar::align_traffic_lights(window);
             macos_titlebar::synchronize_pointer_dragging(window, self.pointer_position);
         }
-        #[cfg(target_os = "windows")]
-        if let Some(window) = editor_runtime.window()
-            && let Err(error) = self.window_shape.synchronize(window)
-        {
-            eprintln!("[window] 无法同步圆角轮廓：{error}");
-        }
-        #[cfg(not(any(target_os = "windows", target_os = "macos")))]
+        #[cfg(not(target_os = "macos"))]
         let _ = editor_runtime;
     }
 

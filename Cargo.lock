@@ -2219,7 +2219,6 @@ dependencies = [
  "textora-ui",
  "toml",
  "wgpu",
- "windows-sys 0.61.2",
  "winit",
 ]
 
@@ -4076,6 +4075,7 @@ dependencies = [
  "unicode_categories",
  "url",
  "wgpu",
+ "windows 0.62.2",
  "winit",
 ]
 

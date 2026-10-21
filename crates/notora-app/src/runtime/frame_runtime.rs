@@ -498,6 +498,9 @@ impl FrameRuntime {
             &mut render_resources,
             &vertices,
             self.theme.application_theme().editor_surface,
+            (frame_state == ui::window_frame::WindowFrameState::Restored).then_some(
+                ui::rounded_surface_frame::SHELL_CORNER_RADIUS_LOGICAL * input.layout.dpi,
+            ),
         );
         let _ = frame.present()?;
         document_runtime.editor_mut().restore_render_resources(render_resources);
@@ -616,10 +619,15 @@ fn submit_shell_frame(
     render_resources: &mut RenderResources,
     vertices: &[render::GlyphVertex],
     background: [f32; 4],
+    window_corner_radius: Option<f32>,
 ) {
     let Some(gpu) = render_resources.gpu.as_mut() else {
         return;
     };
+    if let Err(error) = gpu.ctx.set_window_corner_radius(window_corner_radius) {
+        eprintln!("[window] 无法同步合成窗口圆角：{error}");
+        return;
+    }
     let surface_texture = match gpu.ctx.surface.get_current_texture() {
         wgpu::CurrentSurfaceTexture::Success(texture)
         | wgpu::CurrentSurfaceTexture::Suboptimal(texture) => texture,
