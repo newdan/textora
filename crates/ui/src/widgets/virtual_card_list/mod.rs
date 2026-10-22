@@ -262,6 +262,7 @@ impl Widget for VirtualCardListWidget {
                 &card.title,
                 geometry.title_rect,
                 layout::CARD_TITLE_FONT_SIZE_LOGICAL * ctx.dpi,
+                shaping::Weight::SEMIBOLD,
                 layout::CARD_TITLE_LINE_HEIGHT_LOGICAL * ctx.dpi,
                 layout::CARD_TITLE_MAX_LINES,
                 title_color,
@@ -271,6 +272,7 @@ impl Widget for VirtualCardListWidget {
                 &card.excerpt,
                 geometry.excerpt_rect,
                 layout::CARD_EXCERPT_FONT_SIZE_LOGICAL * ctx.dpi,
+                shaping::Weight::NORMAL,
                 layout::CARD_EXCERPT_LINE_HEIGHT_LOGICAL * ctx.dpi,
                 layout::CARD_EXCERPT_MAX_LINES,
                 ctx.theme.palette.text_muted,
@@ -477,6 +479,7 @@ fn paint_card_text(
     text: &str,
     rect: Rect,
     font_size_px: f32,
+    font_weight: shaping::Weight,
     line_height_px: f32,
     max_lines: usize,
     color: [f32; 4],
@@ -484,7 +487,16 @@ fn paint_card_text(
     let lines = card_text_lines(text, rect.w, font_size_px, max_lines);
     for (line_index, line) in lines.iter().enumerate() {
         let baseline = rect.y + font_size_px * 0.8 + line_index as f32 * line_height_px;
-        ctx.text(rect.x, baseline, font_size_px, color, line);
+        ctx.text_with_font(
+            rect.x,
+            baseline,
+            font_size_px,
+            color,
+            line,
+            None,
+            font_weight,
+            shaping::Style::Normal,
+        );
     }
 }
 

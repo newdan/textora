@@ -449,7 +449,20 @@ impl Widget for TreeListWidget {
                     row_layout.label_rect.h,
                 );
                 ctx.list.cmds.push(DrawCmd::PushClip(label_clip));
-                ctx.text(row_layout.label_rect.x, baseline, font_size, text_color, &row.label);
+                ctx.text_with_font(
+                    row_layout.label_rect.x,
+                    baseline,
+                    font_size,
+                    text_color,
+                    &row.label,
+                    None,
+                    if is_selected || is_hovered {
+                        shaping::Weight::SEMIBOLD
+                    } else {
+                        shaping::Weight::NORMAL
+                    },
+                    shaping::Style::Normal,
+                );
                 ctx.list.cmds.push(DrawCmd::PopClip);
             }
 
@@ -836,6 +849,60 @@ mod tests {
 
     fn event_context(theme: &crate::Theme) -> EventCtx<'_> {
         EventCtx::new(theme, 1.0)
+    }
+
+    fn painted_row_weights(
+        widget: &TreeListWidget,
+        theme: &crate::Theme,
+        shaper: &mut shaping::Shaper,
+    ) -> Vec<shaping::Weight> {
+        let mut draw_list = crate::core::DrawList::new();
+        let mut context = PaintCtx::new(&mut draw_list, theme, 1.0);
+        context.shaper = Some(shaper);
+        widget.paint(&mut context);
+        draw_list
+            .cmds
+            .iter()
+            .filter_map(|command| match command {
+                DrawCmd::TextLayout { layout, .. } => Some(layout.font_weight),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn row_weight_tracks_selection_hover_and_pointer_leave() {
+        use shaping::Weight;
+
+        let mut selected = row(1, 0, TreeRowExpansion::Leaf);
+        selected.selection = TreeRowSelection::Selected;
+        let mut widget = TreeListWidget::new();
+        widget.set_input(TreeListInput {
+            rows: vec![selected, row(2, 0, TreeRowExpansion::Leaf)],
+            editor: None,
+            scroll_offset_px: 0.0,
+        });
+        layout(&mut widget, Rect::new(0.0, 0.0, 240.0, 100.0), 1.0);
+        let second_label = widget.layout().rows[1].label_rect;
+        let px = second_label.x + 1.0;
+        let py = second_label.y + second_label.h * 0.5;
+        let theme = crate::theme::test_theme();
+        let mut shaper = shaping::Shaper::new().expect("row weight test requires system fonts");
+        for (event, expected) in [
+            (None, [Weight::SEMIBOLD, Weight::NORMAL]),
+            (Some(Event::MouseMove { px, py }), [Weight::SEMIBOLD, Weight::SEMIBOLD]),
+            (Some(Event::PointerLeave), [Weight::SEMIBOLD, Weight::NORMAL]),
+            (
+                Some(Event::MouseDown { px, py, button: MouseButton::Left }),
+                [Weight::NORMAL, Weight::SEMIBOLD],
+            ),
+            (Some(Event::PointerLeave), [Weight::NORMAL, Weight::SEMIBOLD]),
+        ] {
+            if let Some(event) = event {
+                widget.on_event(&event, &mut event_context(&theme));
+            }
+            assert_eq!(painted_row_weights(&widget, &theme, &mut shaper), expected);
+        }
     }
 
     #[test]

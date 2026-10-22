@@ -1778,12 +1778,15 @@ impl NotoraShell {
             }
             self.paint_navigation_splitter(context, layout);
             self.card_list_splitter.paint(context);
-            context.text(
+            context.text_with_font(
                 card_header.title_x,
                 card_header.title_baseline_y,
                 CARD_HEADER_TITLE_FONT_SIZE_LOGICAL * context.dpi,
                 application_theme.text_primary,
                 &model.card_list_title,
+                None,
+                shaping::Weight::SEMIBOLD,
+                shaping::Style::Normal,
             );
             if self.compact_navigation_rect != Rect::ZERO {
                 self.paint_chrome_button(context, ChromeButtonKey::CompactNavigation);
