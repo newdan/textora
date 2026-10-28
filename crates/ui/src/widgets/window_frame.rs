@@ -177,13 +177,12 @@ impl WindowFrameWidget {
         }
     }
 
+    /// macOS 原生按钮区域保持可移动，按钮命中与空白拖动由 AppKit 区分。
     pub fn is_title_drag_position(&self, px: f32, py: f32) -> bool {
         self.input.state != WindowFrameState::Native
             && self.title_rect().contains(px, py)
             && !self.navigation_toggle_rect().contains(px, py)
             && !self.control_rects().iter().any(|control| control.contains(px, py))
-            && (self.input.state != WindowFrameState::MacOs
-                || px >= self.title_rect().x + MACOS_TRAFFIC_LIGHTS_WIDTH_LOGICAL * self.dpi)
     }
 
     fn prepare_title_layout(&mut self, context: &mut PaintCtx<'_>) {
@@ -548,18 +547,26 @@ mod tests {
     }
 
     #[test]
-    fn macos_drag_positions_exclude_native_buttons_navigation_and_content() {
+    fn macos_drag_positions_preserve_native_region_and_exclude_navigation_and_content() {
         for dpi in [1.0, 1.5, 2.0] {
             let mut widget = frame(WindowFrameState::MacOs, dpi);
             widget.input.navigation_toggle = WindowFrameNavigationToggle::Enabled;
             for (x, y, draggable) in [
-                (40.0, 18.0, false),
+                (4.0, 18.0, true),
+                (40.0, 4.0, true),
+                (40.0, 18.0, true),
+                (76.0, 18.0, true),
                 (94.0, 18.0, false),
                 (250.0, 18.0, true),
                 (250.0, 34.0, true),
                 (250.0, 100.0, false),
             ] {
                 assert_eq!(widget.is_title_drag_position(x * dpi, y * dpi), draggable);
+            }
+            for (x, y) in [(4.0, 18.0), (40.0, 4.0), (40.0, 18.0), (76.0, 18.0)] {
+                let route = widget.on_event(&press(x * dpi, y * dpi));
+                assert!(!route.consumed, "AppKit must retain traffic light hit testing");
+                assert_eq!(route.action, None);
             }
         }
     }

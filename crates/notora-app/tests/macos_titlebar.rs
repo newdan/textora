@@ -21,7 +21,8 @@ fn main() {
     let window = event_loop
         .create_window(attributes)
         .expect("native titlebar regression should create a hidden window");
-    macos_titlebar::synchronize_pointer_dragging(&window, (0.0, 0.0));
+    let dpi = window.scale_factor() as f32;
+    macos_titlebar::synchronize_pointer_dragging(&window, (94.0 * dpi, 18.0 * dpi));
     macos_titlebar::align_traffic_lights(&window);
     let handle = window.window_handle().expect("the hidden window must have an AppKit handle");
     let RawWindowHandle::AppKit(handle) = handle.as_raw() else {
@@ -42,7 +43,6 @@ fn main() {
         native_window.isMovable(),
         "geometry synchronization must not cancel an asynchronous native drag"
     );
-    let dpi = window.scale_factor() as f32;
     macos_titlebar::synchronize_pointer_dragging(&window, (250.0 * dpi, 18.0 * dpi));
     assert!(native_window.isMovable(), "blank titlebar must enable native dragging");
     macos_titlebar::synchronize_pointer_dragging(&window, (94.0 * dpi, 18.0 * dpi));
@@ -50,6 +50,15 @@ fn main() {
         !native_window.isMovable(),
         "returning to the sidebar toggle must restore client titlebar input"
     );
+    for (x, y) in [(4.0, 18.0), (40.0, 4.0), (76.0, 18.0)] {
+        macos_titlebar::synchronize_pointer_dragging(&window, (x * dpi, y * dpi));
+        assert!(
+            native_window.isMovable(),
+            "blank space around the traffic lights must allow native dragging at ({x}, {y})"
+        );
+    }
+    macos_titlebar::synchronize_pointer_dragging(&window, (40.0 * dpi, 100.0 * dpi));
+    assert!(!native_window.isMovable(), "content below the traffic lights must keep client input");
 }
 
 #[cfg(not(target_os = "macos"))]
