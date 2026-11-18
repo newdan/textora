@@ -555,6 +555,39 @@ mod tests {
         )
     }
 
+    #[test]
+    fn form_section_clips_long_heading_and_description_to_the_form_width() {
+        let mut section = FormSection::new(
+            fixture_label(&"很长的分区标题".repeat(20)),
+            Some(fixture_description(&"很长的设置说明".repeat(20))),
+            Vec::new(),
+            FormSectionStyle::default(),
+        );
+        let theme = crate::theme::test_theme();
+        let mut measure = NoopMeasure;
+        section.set_rect(Rect::new(0.0, 0.0, 120.0, 80.0), &mut layout_ctx(&theme, &mut measure));
+        let mut shaper = shaping::Shaper::new().expect("section regression needs system fonts");
+        let mut drawing = DrawList::new();
+        section.paint(&mut PaintCtx {
+            list: &mut drawing,
+            theme: &theme,
+            dpi: 1.0,
+            offset: (0.0, 0.0),
+            global_alpha: 1.0,
+            shaper: Some(&mut shaper),
+        });
+        let clips: Vec<_> = drawing
+            .cmds
+            .iter()
+            .filter_map(|command| match command {
+                DrawCmd::PushClip(bounds) => Some(*bounds),
+                _ => None,
+            })
+            .collect();
+        assert!(clips.contains(&section.title_rect));
+        assert!(clips.contains(&section.description_rect.expect("section has a description")));
+    }
+
     fn laid_out_section(row_count: usize) -> FormSection {
         let mut section = FormSection::new(
             fixture_label("General"),
@@ -647,7 +680,7 @@ mod tests {
             .cmds
             .iter()
             .find_map(|cmd| match cmd {
-                DrawCmd::PushClip(rect) => Some(*rect),
+                DrawCmd::PushClip(rect) if *rect == section.content_rect => Some(*rect),
                 _ => None,
             })
             .expect("section should push a clip rect for row content");

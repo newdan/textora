@@ -16,7 +16,11 @@ pub(crate) enum SyncSecretStoreError {
     InvalidAccount,
     InvalidSecret,
     InvalidStoredSecret,
-    Backend { operation: &'static str, message: String },
+    Backend {
+        operation: &'static str,
+        message: String,
+    },
+    #[cfg_attr(target_os = "macos", allow(dead_code))]
     UnsupportedPlatform,
 }
 

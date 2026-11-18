@@ -283,7 +283,7 @@ fn menlo_chinese_fallback_preserves_each_faces_raster_policy() {
             if monospaced {
                 GlyphRasterization::IntegerUnhinted
             } else {
-                GlyphRasterization::IntegerGridFitted
+                GlyphRasterization::SubpixelFontRecommended
             }
         );
         found_mono |= monospaced;

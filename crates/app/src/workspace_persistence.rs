@@ -7,9 +7,11 @@ use appkit_shell::editor_runtime::{EditorTabSnapshot, EditorWorkspaceSnapshot};
 use appkit_shell::prepared_tab::PreparedTab;
 use ui::plugin::PLUGIN_EDITOR;
 
-use crate::document_view::DocumentView;
+use crate::document_presentation::DocumentPresentation;
 use crate::tab_runtime::{TabRuntime, TabRuntimeStore};
-use crate::tab_session::{TabSession, TabSessionMut};
+#[cfg(test)]
+use crate::tab_session::TabSession;
+use crate::tab_session::TabSessionMut;
 use crate::workspace::Workspace;
 use crate::workspace_tab_factory::ViewportDimensions;
 
@@ -29,6 +31,7 @@ struct PersistedDirtyState {
     original_disk_revision: Option<crate::dirty_snapshot::PersistedDiskRevision>,
 }
 
+#[cfg(test)]
 fn document_lines(document: &DocumentModel) -> Vec<String> {
     (0..document.line_count())
         .filter_map(|line| {
@@ -53,6 +56,7 @@ fn read_disk_baseline(path: &Path) -> (Vec<String>, u64, i64) {
     (lines, file_size, modified_time)
 }
 
+#[cfg(test)]
 fn snapshot_dirty_state(document: &DocumentModel, snapshots_dir: &Path) -> PersistedDirtyState {
     let empty_state = || PersistedDirtyState {
         snapshot_filename: None,
@@ -200,6 +204,7 @@ fn persisted_runtime_tab(tab: &EditorTabSnapshot, snapshots_dir: &Path) -> Persi
     }
 }
 
+#[cfg(test)]
 fn persisted_tab(
     workspace: &Workspace,
     runtimes: &TabRuntimeStore,
@@ -249,6 +254,7 @@ fn persisted_tab(
     }
 }
 
+#[cfg(test)]
 pub(crate) fn snapshot_workspace(
     workspace: &Workspace,
     runtimes: &TabRuntimeStore,
@@ -323,15 +329,13 @@ fn restore_dirty_lines(
 fn restore_document(
     tab: &PersistedTab,
     is_active: bool,
-    dimensions: ViewportDimensions,
     snapshots_dir: &Path,
-) -> (DocumentView, bool) {
+) -> (DocumentModel, bool) {
     let mut snapshot_baseline = tab.original_disk_revision.clone();
     let (dirty_lines, mut legacy_without_baseline) =
         restore_dirty_lines(tab, snapshots_dir, &mut snapshot_baseline);
     let mut document = if let Some(lines) = dirty_lines {
-        let mut restored =
-            DocumentView::new(lines, dimensions.visible_rows, dimensions.viewport_height);
+        let mut restored = DocumentModel::from_lines(&lines);
         restored.file_path = (!legacy_without_baseline).then(|| tab.file_path.clone()).flatten();
         if let Some(path) = restored.file_path.clone() {
             restored.set_language_from_path(&path);
@@ -343,37 +347,23 @@ fn restore_document(
             }
         }
         restored.dirty_snapshot_id = tab.snapshot_filename.clone();
-        restored.resize(dimensions.visible_rows, dimensions.viewport_height);
         restored
     } else if let Some(path) = tab.file_path.as_deref() {
         if is_active {
-            DocumentView::from_file(path, dimensions.visible_rows, dimensions.viewport_height)
-                .unwrap_or_else(|_| {
-                    let mut stub = DocumentView::new(
-                        vec![String::new()],
-                        dimensions.visible_rows,
-                        dimensions.viewport_height,
-                    );
-                    stub.file_path = Some(path.to_owned());
-                    stub
-                })
+            DocumentModel::from_file(path).unwrap_or_else(|_| {
+                let mut stub = DocumentModel::from_lines(&[String::new()]);
+                stub.file_path = Some(path.to_owned());
+                stub
+            })
         } else {
-            let mut stub = DocumentView::new(
-                vec![String::new()],
-                dimensions.visible_rows,
-                dimensions.viewport_height,
-            );
+            let mut stub = DocumentModel::from_lines(&[String::new()]);
             stub.file_path = Some(path.to_owned());
             stub
         }
     } else if let Some(content) = tab.clean_untitled_content.as_ref() {
-        DocumentView::new(
-            vec![content.clone()],
-            dimensions.visible_rows,
-            dimensions.viewport_height,
-        )
+        DocumentModel::from_lines(std::slice::from_ref(content))
     } else {
-        DocumentView::new(vec![String::new()], dimensions.visible_rows, dimensions.viewport_height)
+        DocumentModel::from_lines(&[String::new()])
     };
 
     let is_stub = document.buffer_len() == 0 && document.file_path.is_some();
@@ -432,8 +422,7 @@ fn append_restored_tab(
     dimensions: ViewportDimensions,
     snapshots_dir: &Path,
 ) -> TabId {
-    let (document, legacy_without_baseline) =
-        restore_document(tab, is_active, dimensions, snapshots_dir);
+    let (document, legacy_without_baseline) = restore_document(tab, is_active, snapshots_dir);
     let route = tab.file_path.as_deref().and_then(|path| workspace.plugin_route_for_path(path));
     let plugin_name = tab
         .active_plugin
@@ -450,7 +439,8 @@ fn append_restored_tab(
         tab.scroll_anchor_offset.unwrap_or(0.0),
     );
     let is_stub = document.buffer_len() == 0 && document.file_path.is_some();
-    let (document, presentation) = document.into_parts();
+    let presentation =
+        DocumentPresentation::new(dimensions.visible_rows, dimensions.viewport_height);
     let runtime = TabRuntime::with_presentation(plugin, presentation);
     let suggested_name =
         tab.suggested_file_name.clone().or_else(|| recovery_name(tab, legacy_without_baseline));

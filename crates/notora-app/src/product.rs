@@ -153,6 +153,9 @@ pub enum WorkspaceCompletion {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum DocumentCompletion {
+    SystemOpenPathsRequested {
+        paths: Vec<std::path::PathBuf>,
+    },
     ExternalFileOpenCompleted {
         canonical_path: crate::external_files::CanonicalExternalPath,
         document: crate::editor_adapter::LoadedDocument,
@@ -225,6 +228,22 @@ pub enum NotoraProductEvent {
 pub type NotoraProductEventSender = ProductEventSender<NotoraProductEvent>;
 
 #[derive(Clone)]
+pub struct OpenDocumentSender {
+    sender: NotoraProductEventSender,
+}
+
+impl OpenDocumentSender {
+    pub fn send(
+        &self,
+        paths: Vec<std::path::PathBuf>,
+    ) -> Result<(), appkit_shell::ProductEventSendError> {
+        self.sender.send(NotoraProductEvent::Document(
+            DocumentCompletion::SystemOpenPathsRequested { paths },
+        ))
+    }
+}
+
+#[derive(Clone)]
 pub struct WorkspaceEventSender {
     sender: NotoraProductEventSender,
     scope: WorkspaceEventScope,
@@ -278,6 +297,10 @@ impl NotoraProduct {
 
     pub fn event_sender(&self) -> NotoraProductEventSender {
         self.event_sender.clone()
+    }
+
+    pub fn open_document_sender(&self) -> OpenDocumentSender {
+        OpenDocumentSender { sender: self.event_sender() }
     }
 
     pub fn set_active_workspace(&mut self, workspace_id: WorkspaceId, workspace_generation: u64) {
@@ -505,5 +528,25 @@ mod tests {
         product.shutdown();
         assert_eq!(product.drain_product_events(), ShellEffect::NONE);
         assert_eq!(call_count.get(), 1);
+    }
+
+    #[test]
+    fn open_document_sender_queues_system_open_paths_in_product_inbox() {
+        let mut product = NotoraProduct::new();
+        let paths = vec![std::path::PathBuf::from("/tmp/architecture.md")];
+
+        product
+            .open_document_sender()
+            .send(paths.clone())
+            .expect("product receiver should accept system open paths");
+        let effect = ProductHost::drain_product_events(&mut product);
+
+        assert_eq!(effect, ShellEffect::REDRAW);
+        assert_eq!(
+            product.take_events(),
+            vec![NotoraProductEvent::Document(
+                super::DocumentCompletion::SystemOpenPathsRequested { paths }
+            )]
+        );
     }
 }

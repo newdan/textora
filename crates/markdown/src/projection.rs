@@ -187,7 +187,6 @@ pub(crate) enum ProjectionError {
     BoundaryCountMismatch { expected: usize, actual: usize },
     InvalidSourceBoundary { byte: usize },
     NonMonotonicSourceOrder { previous: usize, current: usize },
-    UnclassifiedDuplicateBoundary { byte: usize },
     StaleGeneration { expected: u32, actual: u32 },
     StaleLayoutRevision { expected: u64, actual: u64 },
     MissingEditableProjection { flat_line_idx: usize },
@@ -702,6 +701,7 @@ impl ProjectedText {
         Self { text, spans, boundaries }
     }
 
+    #[cfg(test)]
     pub(crate) fn validate(&self, source: &str) -> Result<(), ProjectionError> {
         let expected = self.grapheme_count() + 1;
         if self.boundaries.len() != expected {

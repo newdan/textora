@@ -14,12 +14,15 @@ pub enum SyncConnectionView {
 pub enum LibrarySyncState {
     Pending,
     Scanning,
+    #[allow(dead_code, reason = "reserved for active sync progress state")]
     Syncing,
     UpToDate,
     Paused,
     AwaitingRemoteAcceptance,
     ConfigurationMismatch,
-    Error { message: String },
+    Error {
+        message: String,
+    },
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]

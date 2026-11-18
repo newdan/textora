@@ -63,6 +63,10 @@ impl NotoraApp {
         self.runtime.receive_system_open_paths(paths);
     }
 
+    pub fn open_document_sender(&self) -> crate::product::OpenDocumentSender {
+        self.runtime.open_document_sender()
+    }
+
     pub fn request_external_file_dialog(&mut self) {
         self.runtime.request_external_file_dialog();
     }

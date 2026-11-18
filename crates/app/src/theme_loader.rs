@@ -8,6 +8,7 @@ use ui::theme::ThemeSource;
 pub(crate) struct ThemeLoadReport {
     pub(crate) source_diagnostics: Vec<ThemeSourceDiagnostic>,
     pub(crate) registry_errors: Vec<ui::theme::ThemeLoadError>,
+    #[cfg(test)]
     pub(crate) registered_ids: Vec<String>,
 }
 

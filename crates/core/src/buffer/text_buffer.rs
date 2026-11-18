@@ -19,8 +19,6 @@
 
 pub use super::gap_buffer::GapBuffer;
 use super::history::*;
-use super::search::*;
-use std::cell::UnsafeCell;
 use std::collections::VecDeque;
 use std::io;
 use std::mem;
@@ -28,34 +26,15 @@ use std::rc::Rc;
 
 use crate::buffer::edit::ActiveEditLineInfo;
 use crate::cell::SemiRefCell;
-use crate::document::ReadableDocument;
+use crate::document::{ReadableDocument, WriteableDocument};
 use crate::helpers::*;
 use crate::highlight::HighlighterCache;
 use crate::highlight::Language;
+use crate::simd;
 use crate::types::{
     ByteIndex, CursorAffinity, LogicalPoint, UniCharOffset, UnicharLineLookup, VisualPoint,
 };
 use crate::unicode::Cursor;
-use crate::{icu, simd};
-
-pub enum IoError {
-    Io(io::Error),
-    Icu(icu::Error),
-}
-
-pub type IoResult<T> = std::result::Result<T, IoError>;
-
-impl From<io::Error> for IoError {
-    fn from(err: io::Error) -> Self {
-        Self::Io(err)
-    }
-}
-
-impl From<icu::Error> for IoError {
-    fn from(err: icu::Error) -> Self {
-        Self::Icu(err)
-    }
-}
 
 /// Char- or word-wise navigation? Your choice.
 pub enum CursorMovement {
@@ -104,8 +83,6 @@ pub struct TextBuffer {
     pub(crate) cursor_affinity: CursorAffinity,
     pub(crate) cursor_for_rendering: Option<Cursor>,
     pub(crate) selection: Option<TextBufferSelection>,
-    pub(crate) selection_generation: u32,
-    pub(crate) search: Option<UnsafeCell<ActiveSearch>>,
     pub(crate) highlighter_cache: HighlighterCache,
 
     pub(crate) margin_width: CoordType,
@@ -115,7 +92,6 @@ pub struct TextBuffer {
     pub(crate) line_highlight_enabled: bool,
     pub(crate) language: Option<&'static Language>,
     pub(crate) ruler: CoordType,
-    pub(crate) encoding: &'static str,
     pub(crate) newlines_are_crlf: bool,
     pub(crate) insert_final_newline: bool,
     pub(crate) overtype: bool,
@@ -153,8 +129,6 @@ impl TextBuffer {
             cursor_affinity: Default::default(),
             cursor_for_rendering: None,
             selection: None,
-            selection_generation: 0,
-            search: None,
             highlighter_cache: HighlighterCache::new(),
 
             margin_width: 0,
@@ -165,7 +139,6 @@ impl TextBuffer {
             line_highlight_enabled: false,
             language: None,
             ruler: 0,
-            encoding: "UTF-8",
             newlines_are_crlf: cfg!(windows), // Windows users want CRLF
             insert_final_newline: false, // NOTE: Even with POSIX, single-line buffers need this to be false
             overtype: false,
@@ -216,8 +189,6 @@ impl TextBuffer {
             cursor_affinity: Default::default(),
             cursor_for_rendering: None,
             selection: None,
-            selection_generation: 0,
-            search: None,
             highlighter_cache: HighlighterCache::new(),
             margin_width: 0,
             margin_enabled: false,
@@ -226,7 +197,6 @@ impl TextBuffer {
             line_highlight_enabled: false,
             language: None,
             ruler: 0,
-            encoding: "UTF-8",
             newlines_are_crlf: cfg!(windows),
             insert_final_newline: false,
             overtype: false,
@@ -267,19 +237,6 @@ impl TextBuffer {
     /// Use this with caution. It's called automatically on write().
     pub fn mark_as_clean(&mut self) {
         self.last_save_generation = self.buffer.generation();
-    }
-
-    /// The encoding used during reading/writing. "UTF-8" is the default.
-    pub fn encoding(&self) -> &'static str {
-        self.encoding
-    }
-
-    /// Set the encoding used during reading/writing.
-    pub fn set_encoding(&mut self, encoding: &'static str) {
-        if self.encoding != encoding {
-            self.encoding = encoding;
-            self.mark_as_dirty();
-        }
     }
 
     /// The newline type used in the document. LF or CRLF.
@@ -558,10 +515,8 @@ impl TextBuffer {
         self.selection.is_some()
     }
 
-    pub(crate) fn set_selection(&mut self, selection: Option<TextBufferSelection>) -> u32 {
+    pub(crate) fn set_selection(&mut self, selection: Option<TextBufferSelection>) {
         self.selection = selection.filter(|s| s.beg != s.end);
-        self.selection_generation = self.selection_generation.wrapping_add(1);
-        self.selection_generation
     }
 
     /// Moves the cursor to the given byte offset.
@@ -650,12 +605,16 @@ impl TextBuffer {
         self.cursor_affinity = affinity;
     }
 
-    /// For interfacing with ICU.
+    /// Copies the contents of the buffer into a string.
+    pub fn save_as_string(&mut self, dst: &mut dyn WriteableDocument) {
+        self.buffer.copy_into(dst);
+        self.mark_as_clean();
+    }
+
     pub fn read_backward(&self, off: usize) -> &[u8] {
         self.buffer.read_backward(off)
     }
 
-    /// For interfacing with ICU.
     pub fn read_forward(&self, off: usize) -> &[u8] {
         self.buffer.read_forward(off)
     }

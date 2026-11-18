@@ -171,7 +171,8 @@ impl NewWorkspaceDialog {
         let caption_style = dialog_caption_style(context.theme.application_theme().text_secondary);
         self.location_label.set_style(caption_style.clone());
         self.preview_label.set_style(caption_style);
-        self.error_label.set_style(dialog_caption_style(context.theme.application_theme().danger));
+        self.error_label
+            .set_style(dialog_caption_style(context.theme.application_theme().danger_text));
         self.location_label.set_rect(
             Rect::new(
                 self.location_button.rect().right() + LOCATION_LABEL_GAP_LOGICAL * context.dpi,
@@ -331,6 +332,45 @@ mod tests {
     use ui::core::measure::NoopMeasure;
     use ui::core::paint::{DrawCmd, DrawList};
     use ui::core::{LayoutCtx, PaintCtx, Rect};
+
+    #[test]
+    fn creation_error_remains_readable_on_light_dialog_surface() {
+        const MINIMUM_TEXT_CONTRAST: f32 = 4.5;
+        let theme = ui::Theme::from_definition(&ui::theme::ThemeDefinition::default_light());
+        let mut dialog = NewWorkspaceDialog::new(&theme);
+        dialog.set_input(
+            NewWorkspaceDialogInput {
+                name: "笔记库".to_owned(),
+                parent_directory: Some("/tmp".into()),
+                error_message: Some("创建失败".to_owned()),
+            },
+            true,
+        );
+        let mut measure = NoopMeasure;
+        dialog.set_rect(
+            Rect::new(0.0, 0.0, 640.0, 480.0),
+            &mut LayoutCtx { ui_measure: None, measure: &mut measure, theme: &theme, dpi: 1.0 },
+        );
+        let mut draw_list = DrawList::new();
+        let mut shaper = shaping::Shaper::new().expect("dialog contrast test needs text shaping");
+        let mut context = PaintCtx::new(&mut draw_list, &theme, 1.0);
+        context.shaper = Some(&mut shaper);
+        dialog.paint(&mut context);
+        let foreground = draw_list
+            .cmds
+            .iter()
+            .find_map(|command| match command {
+                DrawCmd::TextLayout { layout, color, .. } if layout.text == "创建失败" => {
+                    Some(*color)
+                }
+                _ => None,
+            })
+            .expect("creation dialog paints its error message");
+        let luminance = |color: [f32; 4]| color[0] * 0.2126 + color[1] * 0.7152 + color[2] * 0.0722;
+        let contrast = (luminance(theme.application_theme().overlay_surface) + 0.05)
+            / (luminance(foreground) + 0.05);
+        assert!(contrast >= MINIMUM_TEXT_CONTRAST, "creation error contrast: {contrast}");
+    }
 
     #[test]
     fn target_preview_joins_the_selected_parent_and_valid_name() {

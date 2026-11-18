@@ -16,7 +16,6 @@ pub(crate) enum ChromeDispatchAction {
     SidebarResizeEnd,
     SetSidebarWidth(f32),
     ToggleSidebarPin,
-    OpenSidebarSettingsMenu,
 }
 
 pub(crate) enum SettingsDispatchAction {
@@ -114,23 +113,6 @@ impl App {
                 if !pinned {
                     self.ui_shell.set_sidebar_suppress_hover_enter(true);
                 }
-                AppEffect::REDRAW
-            }
-            ChromeDispatchAction::OpenSidebarSettingsMenu => {
-                let screen_width = self.screen_width();
-                let screen_height = self.screen_height();
-                let button = self.ui_shell.sidebar_settings_button_rect();
-                let button = (button.w > 0.0 && button.h > 0.0).then_some(button);
-                let metrics = self.ui_metrics();
-                let input = ui::sidebar::SidebarSettingsInput::from(&self.settings);
-                let menu = ui::sidebar::build_settings_menu(
-                    button,
-                    &input,
-                    screen_width,
-                    screen_height,
-                    &metrics,
-                );
-                self.ui_shell.sidebar_set_open_menu(menu);
                 AppEffect::REDRAW
             }
         }

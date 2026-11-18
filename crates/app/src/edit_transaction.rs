@@ -520,19 +520,6 @@ mod tests {
         DocumentModel::new(text_buffer)
     }
 
-    fn request_at(cursor_byte: usize, intent: EditIntent) -> EditRequest {
-        EditRequest { source_generation: 1, cursor_byte, selection: None, intent }
-    }
-
-    fn request_with_selection(selection: Range<usize>, intent: EditIntent) -> EditRequest {
-        EditRequest {
-            source_generation: 1,
-            cursor_byte: selection.end,
-            selection: Some(selection),
-            intent,
-        }
-    }
-
     fn apply(
         source_generation: u32,
         range: Range<usize>,

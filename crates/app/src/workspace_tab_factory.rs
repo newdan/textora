@@ -1,11 +1,14 @@
 use std::path::Path;
 
+use appkit_core::document::DocumentModel;
 use appkit_shell::prepared_tab::PreparedTab;
+#[cfg(test)]
 use ui::plugin::{PLUGIN_EDITOR, PLUGIN_MARKDOWN_EDITOR, PLUGIN_MINDMAP};
 use ui::sidebar::NewDocumentKind;
 
-use crate::document_view::DocumentView;
+use crate::document_presentation::DocumentPresentation;
 use crate::tab_runtime::TabRuntime;
+#[cfg(test)]
 use crate::workspace::Workspace;
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -21,6 +24,7 @@ pub(crate) struct ProductPreparedTab {
 
 struct TypedUntitledSpec {
     suggested_file_name: &'static str,
+    #[cfg(test)]
     plugin_name: &'static str,
     initial_text: &'static str,
     initial_cursor_byte: usize,
@@ -30,18 +34,21 @@ fn typed_untitled_spec(kind: NewDocumentKind) -> TypedUntitledSpec {
     match kind {
         NewDocumentKind::Text => TypedUntitledSpec {
             suggested_file_name: "未命名.txt",
+            #[cfg(test)]
             plugin_name: PLUGIN_EDITOR,
             initial_text: "",
             initial_cursor_byte: 0,
         },
         NewDocumentKind::Mindmap => TypedUntitledSpec {
             suggested_file_name: "未命名.mmap.md",
+            #[cfg(test)]
             plugin_name: PLUGIN_MINDMAP,
             initial_text: "#",
             initial_cursor_byte: 1,
         },
         NewDocumentKind::Markdown => TypedUntitledSpec {
             suggested_file_name: "未命名.md",
+            #[cfg(test)]
             plugin_name: PLUGIN_MARKDOWN_EDITOR,
             initial_text: "",
             initial_cursor_byte: 0,
@@ -53,20 +60,23 @@ fn typed_untitled_spec(kind: NewDocumentKind) -> TypedUntitledSpec {
 }
 
 fn prepare_document(
-    document: DocumentView,
+    document: DocumentModel,
+    dimensions: ViewportDimensions,
     plugin: Box<dyn ui::plugin::ViewPlugin>,
     suggested_file_name: Option<String>,
 ) -> ProductPreparedTab {
-    let (document, presentation) = document.into_parts();
+    let presentation =
+        DocumentPresentation::new(dimensions.visible_rows, dimensions.viewport_height);
     let runtime = TabRuntime::with_presentation(plugin, presentation);
     ProductPreparedTab { prepared: PreparedTab::new(document, runtime), suggested_file_name }
 }
 
-fn assign_untitled_snapshot(document: &mut DocumentView) {
+fn assign_untitled_snapshot(document: &mut DocumentModel) {
     document.dirty_snapshot_id =
         Some(crate::dirty_snapshot::snapshot_filename(&crate::dirty_snapshot::untitled_id()));
 }
 
+#[cfg(test)]
 pub(crate) fn prepare_file(
     workspace: &Workspace,
     path: &Path,
@@ -81,11 +91,11 @@ pub(crate) fn prepare_file_with_plugin(
     dimensions: ViewportDimensions,
     plugin: Box<dyn ui::plugin::ViewPlugin>,
 ) -> Result<ProductPreparedTab, String> {
-    let document =
-        DocumentView::from_file(path, dimensions.visible_rows, dimensions.viewport_height)?;
-    Ok(prepare_document(document, plugin, None))
+    let document = DocumentModel::from_file(path)?;
+    Ok(prepare_document(document, dimensions, plugin, None))
 }
 
+#[cfg(test)]
 pub(crate) fn prepare_external_content(
     workspace: &Workspace,
     path: &Path,
@@ -102,15 +112,11 @@ pub(crate) fn prepare_external_content_with_plugin(
     dimensions: ViewportDimensions,
     plugin: Box<dyn ui::plugin::ViewPlugin>,
 ) -> ProductPreparedTab {
-    let document = DocumentView::from_external_content(
-        path,
-        content,
-        dimensions.visible_rows,
-        dimensions.viewport_height,
-    );
-    prepare_document(document, plugin, None)
+    let document = DocumentModel::from_external_content(path, content);
+    prepare_document(document, dimensions, plugin, None)
 }
 
+#[cfg(test)]
 pub(crate) fn prepare_untitled(
     workspace: &Workspace,
     dimensions: ViewportDimensions,
@@ -123,12 +129,12 @@ pub(crate) fn prepare_untitled_with_plugin(
     dimensions: ViewportDimensions,
     plugin: Box<dyn ui::plugin::ViewPlugin>,
 ) -> ProductPreparedTab {
-    let mut document =
-        DocumentView::new(vec![String::new()], dimensions.visible_rows, dimensions.viewport_height);
+    let mut document = DocumentModel::from_lines(&[String::new()]);
     assign_untitled_snapshot(&mut document);
-    prepare_document(document, plugin, None)
+    prepare_document(document, dimensions, plugin, None)
 }
 
+#[cfg(test)]
 pub(crate) fn prepare_typed_untitled(
     workspace: &Workspace,
     kind: NewDocumentKind,
@@ -145,14 +151,15 @@ pub(crate) fn prepare_typed_untitled_with_plugin(
     plugin: Box<dyn ui::plugin::ViewPlugin>,
 ) -> ProductPreparedTab {
     let specification = typed_untitled_spec(kind);
-    let mut document = DocumentView::new(
-        vec![specification.initial_text.to_owned()],
-        dimensions.visible_rows,
-        dimensions.viewport_height,
-    );
+    let mut document = DocumentModel::from_lines(&[specification.initial_text.to_owned()]);
     document.set_cursor_offset_synced(specification.initial_cursor_byte);
     assign_untitled_snapshot(&mut document);
-    prepare_document(document, plugin, Some(specification.suggested_file_name.to_owned()))
+    prepare_document(
+        document,
+        dimensions,
+        plugin,
+        Some(specification.suggested_file_name.to_owned()),
+    )
 }
 
 #[cfg(test)]

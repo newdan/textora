@@ -196,6 +196,7 @@ fn load_user_themes(
     let report = crate::theme_loader::ThemeLoadReport {
         source_diagnostics: batch.diagnostics,
         registry_errors: registration.errors,
+        #[cfg(test)]
         registered_ids: registration.registered_ids,
     };
     (registry, report)
@@ -291,7 +292,6 @@ impl App {
             current_theme,
             theme_registry,
             active_theme_pair,
-            theme_load_report,
             product: crate::textora_product::TextoraProduct::new(),
             action_pump: appkit_shell::EventPump::default(),
             editor_runtime,

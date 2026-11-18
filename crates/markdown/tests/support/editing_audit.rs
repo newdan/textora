@@ -188,12 +188,7 @@ impl DocView for AuditDocument {
         VIEWPORT_HEIGHT
     }
 }
-impl DocViewMut for AuditDocument {
-    fn set_scroll_y(&mut self, _: f32) {}
-    fn replace_range(&mut self, range: std::ops::Range<usize>, text: &str) {
-        self.0.replace_range(range, text);
-    }
-}
+impl DocViewMut for AuditDocument {}
 
 pub fn blank_paragraph_count(source: &str) -> usize {
     fn count(blocks: &[BlockNode]) -> usize {

@@ -135,7 +135,7 @@ impl ButtonStyle {
 
     pub fn category(settings: SettingsTheme) -> Self {
         Self {
-            selected_foreground: settings.accent,
+            selected_foreground: settings.accent_text,
             background: TRANSPARENT,
             border: TRANSPARENT,
             hover_background: blend(
@@ -160,7 +160,7 @@ impl ButtonStyle {
 
     pub fn segmented(settings: SettingsTheme) -> Self {
         Self {
-            selected_foreground: settings.text_inverse,
+            selected_foreground: settings.on_accent,
             background: TRANSPARENT,
             border: TRANSPARENT,
             hover_background: blend(
@@ -183,7 +183,7 @@ impl ButtonStyle {
     pub fn ghost(settings: SettingsTheme) -> Self {
         Self {
             foreground: settings.text_secondary,
-            selected_foreground: settings.accent,
+            selected_foreground: settings.accent_text,
             background: TRANSPARENT,
             border: TRANSPARENT,
             hover_background: settings.hover_surface,
@@ -284,6 +284,42 @@ mod tests {
             Theme::resolve_builtin(crate::ThemeMode::Light, winit::window::Theme::Light),
             Theme::resolve_builtin(crate::ThemeMode::Dark, winit::window::Theme::Dark),
         ]
+    }
+
+    #[test]
+    fn enabled_button_labels_remain_readable_on_their_actual_surfaces() {
+        const MINIMUM_TEXT_CONTRAST: f32 = 4.5;
+        let luminance = |color: [f32; 4]| color[0] * 0.2126 + color[1] * 0.7152 + color[2] * 0.0722;
+        for theme in builtin_themes() {
+            let settings = theme.settings_theme();
+            for (role, style, backdrop) in [
+                ("action", ButtonStyle::action(settings), settings.modal_surface),
+                ("segmented", ButtonStyle::segmented(settings), settings.modal_surface),
+                ("category", ButtonStyle::category(settings), settings.sidebar_surface),
+                ("ghost", ButtonStyle::ghost(settings), settings.modal_surface),
+                ("destructive", ButtonStyle::destructive(settings), settings.modal_surface),
+            ] {
+                for state in [
+                    ButtonVisualState::Normal,
+                    ButtonVisualState::Hovered,
+                    ButtonVisualState::Pressed,
+                    ButtonVisualState::Selected,
+                ] {
+                    let surface = style.background_color(state, 1.0);
+                    let background =
+                        luminance(surface) * surface[3] + luminance(backdrop) * (1.0 - surface[3]);
+                    let label = style.foreground_color(state, 1.0);
+                    let foreground = luminance(label) * label[3] + background * (1.0 - label[3]);
+                    let contrast =
+                        (foreground.max(background) + 0.05) / (foreground.min(background) + 0.05);
+                    assert!(
+                        contrast >= MINIMUM_TEXT_CONTRAST,
+                        "{} {role} {state:?}: {contrast}",
+                        theme.name
+                    );
+                }
+            }
+        }
     }
 
     #[test]

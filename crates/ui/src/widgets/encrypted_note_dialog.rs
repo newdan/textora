@@ -288,7 +288,7 @@ impl EncryptedNoteDialog {
                 left,
                 self.submit_button.rect().y - 16.0 * context.dpi,
                 12.0 * context.dpi,
-                theme.danger,
+                theme.danger_text,
                 message,
             );
         }
@@ -500,6 +500,47 @@ mod tests {
         let mut layout_context =
             LayoutCtx { measure: &mut measure, ui_measure: None, theme, dpi: 1.0 };
         dialog.set_rect(Rect::new(0.0, 0.0, 800.0, 600.0), &mut layout_context);
+    }
+
+    #[test]
+    fn light_dialog_error_uses_readable_body_color() {
+        use crate::core::paint::{DrawCmd, DrawList};
+        use crate::core::widget::PaintCtx;
+
+        let theme = crate::Theme::from_definition(&crate::theme::ThemeDefinition::default_light());
+        let mut dialog = EncryptedNoteDialog::new(&theme);
+        let mut input = EncryptedNoteDialogInput::create();
+        input.error_message = Some("两次密码不一致".to_owned());
+        dialog.set_input(input, true);
+        layout_dialog(&mut dialog, &theme);
+        let mut draw_list = DrawList::new();
+        let mut shaper = shaping::Shaper::new().expect("测试环境必须能创建文字塑形器");
+        dialog.paint(&mut PaintCtx {
+            global_alpha: 1.0,
+            list: &mut draw_list,
+            theme: &theme,
+            dpi: 1.0,
+            offset: (0.0, 0.0),
+            shaper: Some(&mut shaper),
+        });
+
+        let error_color = draw_list
+            .cmds
+            .iter()
+            .find_map(|command| match command {
+                DrawCmd::TextLayout { layout, color, .. } if layout.text == "两次密码不一致" => {
+                    Some(*color)
+                }
+                _ => None,
+            })
+            .expect("the dialog must paint its validation error");
+        let application = theme.application_theme();
+        assert_eq!(error_color, application.danger_text);
+        let luminance = |color: [f32; 4]| 0.2126 * color[0] + 0.7152 * color[1] + 0.0722 * color[2];
+        let foreground = luminance(error_color);
+        let background = luminance(application.overlay_surface);
+        let contrast = (foreground.max(background) + 0.05) / (foreground.min(background) + 0.05);
+        assert!(contrast >= 4.5, "runtime linear error-text contrast: {contrast}");
     }
 
     fn focus_confirmation(dialog: &mut EncryptedNoteDialog, theme: &crate::Theme) {

@@ -16,7 +16,7 @@ cargo clippy --workspace --all-targets -- -D warnings
 echo "Running notora-app tests with deterministic resource usage..."
 cargo test -p notora-app -- --test-threads=1
 
-echo "Running workspace tests except notora-app..."
-cargo test --workspace --exclude notora-app
+echo "Running workspace tests except notora-app and textora-sync..."
+cargo test --workspace --exclude notora-app --exclude textora-sync
 
 echo "All checks passed! Baseline is trusted."

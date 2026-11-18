@@ -876,12 +876,6 @@ impl App {
         effect
     }
 
-    pub(crate) fn drain_file_safety_notices(
-        &mut self,
-    ) -> Vec<crate::file_safety::FileSafetyNotice> {
-        std::mem::take(&mut self.file_safety_notices)
-    }
-
     fn submit_file_safety_checks(&mut self) {
         let now = Instant::now();
         if !self.editor_runtime.file_safety_should_check(now) {

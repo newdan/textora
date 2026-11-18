@@ -209,13 +209,7 @@ impl DocView for EditableDocument {
     }
 }
 
-impl DocViewMut for EditableDocument {
-    fn set_scroll_y(&mut self, _: f32) {}
-
-    fn replace_range(&mut self, range: std::ops::Range<usize>, text: &str) {
-        self.0.replace_range(range, text);
-    }
-}
+impl DocViewMut for EditableDocument {}
 
 fn render_editor(
     view: &mut MarkdownEditorView,

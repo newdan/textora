@@ -16,7 +16,6 @@ const CHECK_MARK_THICKNESS_RATIO: f32 = 0.14;
 const DISABLED_ALPHA_FACTOR: f32 = 0.5;
 const SURFACE_HOVER_BLEND: f32 = 0.08;
 const BORDER_HOVER_BLEND: f32 = 0.22;
-const CHECK_ICON_HOVER_BLEND: f32 = 0.12;
 
 pub struct Checkbox {
     id: WidgetId,
@@ -97,13 +96,7 @@ impl Checkbox {
 
     fn check_icon_color(&self, ctx: &PaintCtx) -> [f32; 4] {
         let application = ctx.theme.application_theme();
-        let base_color = application.text_inverse;
-        let color = if self.hovered {
-            blend_color(base_color, application.text_primary, CHECK_ICON_HOVER_BLEND)
-        } else {
-            base_color
-        };
-        apply_alpha(color, ctx.global_alpha * self.alpha_factor())
+        apply_alpha(application.on_accent, ctx.global_alpha * self.alpha_factor())
     }
 
     fn check_icon_rect(&self, dpi: f32) -> Rect {
@@ -318,6 +311,53 @@ impl Widget for Checkbox {
 mod tests {
     use super::*;
 
+    #[test]
+    fn checked_checkbox_mark_remains_visible_across_themes_and_hover_states() {
+        const MINIMUM_MARK_CONTRAST: f32 = 3.0;
+        const CONTRAST_LUMINANCE_OFFSET: f32 = 0.05;
+        let luminance = |color: [f32; 4]| color[0] * 0.2126 + color[1] * 0.7152 + color[2] * 0.0722;
+        for definition in [
+            crate::theme::ThemeDefinition::default_light(),
+            crate::theme::ThemeDefinition::default_dark(),
+        ] {
+            let theme = crate::theme::Theme::from_definition(&definition);
+            for hovered in [false, true] {
+                let mut checkbox = Checkbox::new(WidgetId(91), true);
+                checkbox.hovered = hovered;
+                let mut draw_list = DrawList::new();
+                let context = PaintCtx::new(&mut draw_list, &theme, 1.0);
+                let mark_luminance = luminance(checkbox.check_icon_color(&context));
+                let surface_luminance = luminance(checkbox.surface_color(&context));
+                let contrast = (mark_luminance.max(surface_luminance) + CONTRAST_LUMINANCE_OFFSET)
+                    / (mark_luminance.min(surface_luminance) + CONTRAST_LUMINANCE_OFFSET);
+                assert!(
+                    contrast >= MINIMUM_MARK_CONTRAST,
+                    "{} hovered={hovered}: {contrast}",
+                    theme.name
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn checked_checkbox_hover_preserves_mark_and_updates_surface_and_border() {
+        for definition in [
+            crate::theme::ThemeDefinition::default_light(),
+            crate::theme::ThemeDefinition::default_dark(),
+        ] {
+            let theme = crate::theme::Theme::from_definition(&definition);
+            let idle = Checkbox::new(WidgetId(93), true);
+            let mut hovered = Checkbox::new(WidgetId(94), true);
+            hovered.hovered = true;
+            let mut draw_list = DrawList::new();
+            let context = PaintCtx::new(&mut draw_list, &theme, 1.0);
+
+            assert_eq!(hovered.check_icon_color(&context), theme.application_theme().on_accent);
+            assert_ne!(hovered.surface_color(&context), idle.surface_color(&context));
+            assert_ne!(hovered.outline_color(&context), idle.outline_color(&context));
+        }
+    }
+
     const CHECKBOX_SIZE_LOGICAL: f32 = 20.0;
 
     use crate::core::measure::NoopMeasure;
@@ -499,7 +539,7 @@ mod tests {
                 assert_eq!(outline.1, metrics.focus_ring_width_logical * dpi);
                 assert!(draw_list.cmds.iter().any(|command| matches!(
                     command,
-                    DrawCmd::FillTriangle { color, .. } if *color == application.text_inverse
+                    DrawCmd::FillTriangle { color, .. } if *color == application.on_accent
                 )));
             }
         }

@@ -419,28 +419,6 @@ impl App {
         self.rebuild_native_menu();
         app_effect.merge(AppEffect::REDRAW)
     }
-    pub(crate) fn execute_batch_close(&mut self, indices: &[usize]) -> AppEffect {
-        if indices.is_empty() {
-            return AppEffect::NONE;
-        }
-        let mut sorted = indices.to_vec();
-        sorted.sort_by(|left, right| right.cmp(left));
-        for &index in &sorted {
-            self.record_entry_to_history(index);
-        }
-        let mut app_effect = AppEffect::NONE;
-        for &index in &sorted {
-            let Some(tab_id) = self.editor_tab_id_at(index) else {
-                continue;
-            };
-            if let Some(next) = self.close_editor_tab(tab_id) {
-                app_effect = app_effect.merge(self.apply_workspace_effect(next));
-            }
-        }
-        self.save_history();
-        self.rebuild_native_menu();
-        app_effect.merge(AppEffect::REDRAW)
-    }
 
     pub(crate) fn open_settings_file(&mut self) -> AppEffect {
         let path = self.paths.settings_file.clone();
@@ -513,6 +491,32 @@ impl App {
         let viewport_height = self.visible_height_lines(screen_height as f32);
         let dimensions = crate::workspace::ViewportDimensions { visible_rows, viewport_height };
         let _ = self.load_file_with_dimensions(&path, dimensions);
+    }
+}
+
+#[cfg(test)]
+impl App {
+    pub(crate) fn execute_batch_close(&mut self, indices: &[usize]) -> AppEffect {
+        if indices.is_empty() {
+            return AppEffect::NONE;
+        }
+        let mut sorted = indices.to_vec();
+        sorted.sort_by(|left, right| right.cmp(left));
+        for &index in &sorted {
+            self.record_entry_to_history(index);
+        }
+        let mut app_effect = AppEffect::NONE;
+        for &index in &sorted {
+            let Some(tab_id) = self.editor_tab_id_at(index) else {
+                continue;
+            };
+            if let Some(next) = self.close_editor_tab(tab_id) {
+                app_effect = app_effect.merge(self.apply_workspace_effect(next));
+            }
+        }
+        self.save_history();
+        self.rebuild_native_menu();
+        app_effect.merge(AppEffect::REDRAW)
     }
 }
 

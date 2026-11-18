@@ -180,7 +180,7 @@ impl EncryptedNoteUnlock {
                 left,
                 self.submit_button.rect().y + 22.0 * context.dpi,
                 12.0 * context.dpi,
-                theme.danger,
+                theme.danger_text,
                 message,
             );
         }

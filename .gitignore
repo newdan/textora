@@ -1,7 +1,10 @@
 # Rust and Cargo build artifacts
 /target/
+**/target/
 **/*.rs.bk
 *.pdb
+*.orig
+*.rej
 
 # cargo-mutants output
 **/mutants.out*/
@@ -9,6 +12,7 @@
 # Generated large-file fixture
 # The remaining assets/samples files are intentional regression fixtures.
 /assets/samples/huge_ascii_200mb.txt
+/assets/samples/large_*.txt
 
 # macOS metadata and resource forks
 .DS_Store

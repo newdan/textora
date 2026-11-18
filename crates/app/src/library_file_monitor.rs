@@ -251,10 +251,6 @@ impl PendingPaths {
         self.flush_at = Some(Instant::now() + DEBOUNCE_WINDOW);
     }
 
-    fn len(&self) -> usize {
-        self.paths.len()
-    }
-
     fn time_until_flush(&self) -> Option<Duration> {
         self.flush_at.map(|flush_at| flush_at.saturating_duration_since(Instant::now()))
     }
@@ -272,6 +268,13 @@ fn should_ignore_path(path: &Path) -> bool {
     path.file_name()
         .and_then(|name| name.to_str())
         .is_some_and(|name| name.starts_with(TEXTORA_SAVE_TEMP_PREFIX))
+}
+
+#[cfg(test)]
+impl PendingPaths {
+    fn len(&self) -> usize {
+        self.paths.len()
+    }
 }
 
 #[cfg(test)]

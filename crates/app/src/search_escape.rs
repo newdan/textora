@@ -24,16 +24,6 @@ pub fn parse_escapes(input: &str) -> String {
     result
 }
 
-/// Truncate a string to `max_chars` characters, appending "..." if truncated.
-/// Operates on char boundaries (UTF-8 safe).
-pub fn truncate_display(s: &str, max_chars: usize) -> String {
-    if s.chars().count() <= max_chars {
-        s.to_string()
-    } else {
-        format!("{}...", s.chars().take(max_chars).collect::<String>())
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -81,42 +71,5 @@ mod tests {
     #[test]
     fn parse_emoji_preserved() {
         assert_eq!(parse_escapes("hello 🌍\\nworld"), "hello 🌍\nworld");
-    }
-
-    // ── truncate_display ──
-
-    #[test]
-    fn truncate_short_string_unchanged() {
-        assert_eq!(truncate_display("hello", 10), "hello");
-    }
-
-    #[test]
-    fn truncate_exact_length_unchanged() {
-        assert_eq!(truncate_display("hello", 5), "hello");
-    }
-
-    #[test]
-    fn truncate_long_string_cut() {
-        assert_eq!(truncate_display("hello world", 5), "hello...");
-    }
-
-    #[test]
-    fn truncate_cjk_chars() {
-        assert_eq!(truncate_display("中文字符测试", 3), "中文字...");
-    }
-
-    #[test]
-    fn truncate_empty_string() {
-        assert_eq!(truncate_display("", 5), "");
-    }
-
-    #[test]
-    fn truncate_zero_max() {
-        assert_eq!(truncate_display("hello", 0), "...");
-    }
-
-    #[test]
-    fn truncate_emoji_boundary() {
-        assert_eq!(truncate_display("a🌍b🌍c", 3), "a🌍b...");
     }
 }

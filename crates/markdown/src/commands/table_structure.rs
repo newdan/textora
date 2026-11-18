@@ -434,6 +434,7 @@ fn matching_code_span_end(bytes: &[u8], mut index: usize, tick_count: usize) -> 
     None
 }
 
+#[cfg(test)]
 pub(super) fn format_table_row(cells: &[String]) -> String {
     format_table_row_with_style(cells, true, true)
 }

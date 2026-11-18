@@ -268,6 +268,7 @@ impl LibraryRegistry {
         self.libraries.remove(library_id)
     }
 
+    #[cfg(test)]
     pub(crate) fn owner_of(&self, path: &Path) -> Option<&LibraryRecord> {
         let normalized = lookup_path(path)?;
         self.libraries
@@ -463,6 +464,7 @@ fn canonical_library_root(path: &Path) -> Result<PathBuf, LibraryRegistryError> 
     })
 }
 
+#[cfg(test)]
 fn lookup_path(path: &Path) -> Option<PathBuf> {
     if path.exists() {
         return fs::canonicalize(path).ok();

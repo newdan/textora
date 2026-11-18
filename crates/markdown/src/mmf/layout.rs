@@ -197,6 +197,7 @@ fn subtree_height(
 }
 
 /// 自顶向下分配坐标
+#[allow(clippy::too_many_arguments)]
 fn assign_positions(
     node: &Node,
     source_node_index: usize,

@@ -77,67 +77,7 @@ impl DocView for PresentedDocument<'_> {
     }
 }
 
-struct PresentedDocumentMut<'a> {
-    document: &'a mut DocumentModel,
-    presentation: &'a mut DocumentPresentation,
-}
-
-impl DocView for PresentedDocumentMut<'_> {
-    fn line_count(&self) -> usize {
-        self.document.line_count()
-    }
-
-    fn doc_line_text(&self, line: usize) -> Cow<'_, str> {
-        document_line_text(self.document, line)
-    }
-
-    fn doc_text_in_range(&self, range: std::ops::Range<usize>) -> Cow<'_, str> {
-        document_text_in_range(self.document, range)
-    }
-
-    fn line_byte_offset(&self, line: usize) -> usize {
-        self.document.line_byte_offset(line).unwrap_or(0)
-    }
-
-    fn line_byte_length(&self, line: usize) -> usize {
-        self.document.line_byte_length(line).unwrap_or(0)
-    }
-
-    fn scroll_y(&self) -> f32 {
-        self.presentation.display.viewport.scroll_top as f32
-    }
-
-    fn viewport_height(&self) -> f32 {
-        self.presentation.display.viewport.viewport_height as f32
-    }
-
-    fn is_empty(&self) -> bool {
-        self.document.is_empty()
-    }
-}
-
-impl DocViewMut for PresentedDocumentMut<'_> {
-    fn set_scroll_y(&mut self, y: f32) {
-        self.presentation.display.viewport.scroll_top = y as f64;
-    }
-
-    fn replace_range(&mut self, range: std::ops::Range<usize>, text: &str) {
-        self.document.tb.replace_range(range, text.as_bytes());
-    }
-
-    fn begin_edit(&mut self) {
-        self.document.tb.edit_begin_grouping();
-    }
-
-    fn end_edit(&mut self) {
-        self.document.tb.edit_end_grouping();
-        self.document.line_index =
-            appkit_core::line_index::LineIndex::rebuild_from(&self.document.tb);
-        self.document.mark_content_changed();
-        self.document.dirty = self.document.tb.is_dirty();
-        self.document.sync_cursor_from_buffer();
-    }
-}
+impl DocViewMut for PresentedDocument<'_> {}
 
 pub struct TabSession<'a> {
     pub id: TabId,
@@ -344,17 +284,6 @@ impl<'a> TabSession<'a> {
             PluginResponse::BytePosition(Some(byte)) => Some(byte),
             _ => None,
         }
-    }
-
-    pub fn augment_edit(
-        &self,
-        current_byte: usize,
-        kind: ui::plugin::AugmentKind,
-    ) -> Option<ui::plugin::EditAugmentation> {
-        let document =
-            PresentedDocument { document: self.document, presentation: &self.runtime.presentation };
-        let context = ui::plugin::AugmentContext { current_byte, kind, doc: &document };
-        self.runtime.plugin.augmenter().augment(&context)
     }
 
     fn plan_mindmap_theme(
@@ -955,10 +884,8 @@ impl<'a> TabSessionMut<'a> {
     }
 
     pub fn send_message(&mut self, message: PluginMessage) -> bool {
-        let mut document = PresentedDocumentMut {
-            document: self.document,
-            presentation: &mut self.runtime.presentation,
-        };
+        let mut document =
+            PresentedDocument { document: self.document, presentation: &self.runtime.presentation };
         self.runtime.plugin.handle_message(message, &mut document)
     }
 
@@ -977,10 +904,8 @@ impl<'a> TabSessionMut<'a> {
             return false;
         };
         let scroll_y = self.runtime.toggle_source_scroll_y;
-        let mut document = PresentedDocumentMut {
-            document: self.document,
-            presentation: &mut self.runtime.presentation,
-        };
+        let mut document =
+            PresentedDocument { document: self.document, presentation: &self.runtime.presentation };
         cached.handle_message(PluginMessage::SetScrollY(scroll_y), &mut document);
         self.runtime.plugin = cached;
         true
@@ -1052,17 +977,6 @@ impl<'a> TabSessionMut<'a> {
         let document =
             PresentedDocument { document: self.document, presentation: &self.runtime.presentation };
         self.runtime.plugin.handle_canvas_drag(request, &document)
-    }
-
-    pub fn intercept_key(&mut self, key_code: &KeyCode, modifiers: &Modifiers) -> bool {
-        let Some(interceptor) = self.runtime.plugin.key_interceptor() else {
-            return false;
-        };
-        let mut document = PresentedDocumentMut {
-            document: self.document,
-            presentation: &mut self.runtime.presentation,
-        };
-        interceptor.intercept_key(key_code, modifiers, &mut document)
     }
 }
 

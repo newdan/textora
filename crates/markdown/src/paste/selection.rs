@@ -13,6 +13,7 @@ enum HtmlSelection {
 
 #[derive(Clone, Copy)]
 enum RichRepresentation {
+    #[cfg(feature = "rich-markdown")]
     Html,
     Rtf,
 }
@@ -112,6 +113,7 @@ fn select_converted_document(
         return PreparedPaste::Empty;
     }
     match representation {
+        #[cfg(feature = "rich-markdown")]
         RichRepresentation::Html => PreparedPaste::HtmlConverted(markdown),
         RichRepresentation::Rtf => PreparedPaste::RtfConverted(markdown),
     }

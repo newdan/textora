@@ -93,6 +93,7 @@ impl SearchHighlightCache {
     }
 
     /// Generate [`DrawList`] commands for search match highlights.
+    #[allow(clippy::too_many_arguments)]
     pub fn highlights(
         &self,
         scroll_y: f32,

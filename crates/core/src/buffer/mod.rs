@@ -3,7 +3,6 @@
 pub mod edit;
 mod gap_buffer;
 pub mod history;
-pub mod io;
 mod navigation;
 pub mod search;
 pub mod selection;

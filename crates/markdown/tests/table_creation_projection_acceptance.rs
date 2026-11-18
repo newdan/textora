@@ -38,13 +38,7 @@ impl DocView for TestDocument {
     }
 }
 
-impl DocViewMut for TestDocument {
-    fn set_scroll_y(&mut self, _: f32) {}
-
-    fn replace_range(&mut self, range: std::ops::Range<usize>, text: &str) {
-        self.0.replace_range(range, text);
-    }
-}
+impl DocViewMut for TestDocument {}
 
 fn create_empty_table(columns: usize, rows: usize) -> (String, usize) {
     let plan = textora_markdown::commands::plan_semantic_edit(

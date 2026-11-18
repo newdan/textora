@@ -1135,17 +1135,13 @@ impl TextBox {
                 }
             }
         } else if self.preedit.is_empty() && !self.placeholder.is_empty() {
-            let ph_color = {
-                let mut c = ctx.theme.palette.input_fg;
-                c[3] *= 0.4;
-                c
-            };
+            let placeholder_color = ctx.theme.application_theme().text_secondary;
             if let Some(ref mut shaper) = ctx.shaper {
                 ctx.list.text_shaped(
                     text_x,
                     baseline,
                     font_size,
-                    ph_color,
+                    placeholder_color,
                     &self.placeholder,
                     shaper,
                 );
@@ -1206,8 +1202,11 @@ impl TextBox {
         }
         ctx.list.fill_rounded(self.rect, background, corner_radius);
 
-        let border_color =
-            if self.focused { ctx.theme.palette.accent } else { ctx.theme.palette.input_border };
+        let border_color = if self.focused {
+            ctx.theme.settings_theme().focus_ring
+        } else {
+            ctx.theme.palette.input_border
+        };
         let line_width = if self.focused { 1.5 * dpi } else { 1.0 * dpi };
         ctx.list.stroke_rounded(self.rect, border_color, corner_radius, line_width);
     }
@@ -2203,6 +2202,107 @@ mod tests {
         let texts: Vec<_> =
             dl.cmds.iter().filter(|c| matches!(c, DrawCmd::TextLayout { .. })).collect();
         assert_eq!(texts.len(), 1, "expected 1 text (placeholder)");
+    }
+
+    fn input_chrome_colors(theme: &crate::theme::Theme, focused: bool) -> ([f32; 4], [f32; 4]) {
+        use crate::core::paint::{DrawCmd, DrawList};
+
+        let mut input = TextBox::new();
+        input.set_focus(focused);
+        input.rect = Rect::new(0.0, 0.0, 200.0, 28.0);
+        let mut draw_list = DrawList::new();
+        input.paint_chrome(&mut PaintCtx::new(&mut draw_list, theme, 1.0));
+        let background = draw_list
+            .cmds
+            .iter()
+            .find_map(|command| match command {
+                DrawCmd::FillRect { color, .. } => Some(*color),
+                _ => None,
+            })
+            .expect("input paints its actual background");
+        let border = draw_list
+            .cmds
+            .iter()
+            .find_map(|command| match command {
+                DrawCmd::StrokeRect { color, .. } => Some(*color),
+                _ => None,
+            })
+            .expect("input paints its actual border");
+        (background, border)
+    }
+
+    #[test]
+    fn input_borders_are_visible_on_their_actual_builtin_surfaces() {
+        const MINIMUM_CONTROL_CONTRAST: f32 = 3.0;
+        let luminance = |color: [f32; 4]| color[0] * 0.2126 + color[1] * 0.7152 + color[2] * 0.0722;
+        for definition in [
+            crate::theme::ThemeDefinition::default_light(),
+            crate::theme::ThemeDefinition::default_dark(),
+        ] {
+            let theme = crate::theme::Theme::from_definition(&definition);
+            for focused in [false, true] {
+                let (background, border) = input_chrome_colors(&theme, focused);
+                for surface in [
+                    theme.palette.bg_base,
+                    theme.palette.bg_surface,
+                    theme.palette.bg_elevated,
+                    background,
+                ] {
+                    let outside = luminance(surface);
+                    let outline = luminance(border);
+                    let contrast = (outside.max(outline) + 0.05) / (outside.min(outline) + 0.05);
+                    assert!(
+                        contrast >= MINIMUM_CONTROL_CONTRAST,
+                        "{} focused={focused}: border contrast {contrast}",
+                        theme.name
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn placeholder_text_remains_readable_in_builtin_input_states() {
+        use crate::core::paint::{DrawCmd, DrawList};
+
+        const MINIMUM_TEXT_CONTRAST: f32 = 4.5;
+        let luminance = |color: [f32; 4]| color[0] * 0.2126 + color[1] * 0.7152 + color[2] * 0.0722;
+        let mut shaper = shaping::Shaper::new().expect("placeholder test needs text shaping");
+        for definition in [
+            crate::theme::ThemeDefinition::default_light(),
+            crate::theme::ThemeDefinition::default_dark(),
+        ] {
+            let theme = crate::theme::Theme::from_definition(&definition);
+            for focused in [false, true] {
+                let mut input = TextBox::new();
+                input.set_placeholder("搜索笔记");
+                input.set_focus(focused);
+                input.rect = Rect::new(0.0, 0.0, 200.0, 28.0);
+                let mut draw_list = DrawList::new();
+                let mut context = PaintCtx::new(&mut draw_list, &theme, 1.0);
+                context.shaper = Some(&mut shaper);
+                input.paint(&mut context);
+                let label = draw_list
+                    .cmds
+                    .iter()
+                    .find_map(|command| match command {
+                        DrawCmd::TextLayout { layout, color, .. } if layout.text == "搜索笔记" => {
+                            Some(*color)
+                        }
+                        _ => None,
+                    })
+                    .expect("empty input paints its placeholder");
+                let background = luminance(input_chrome_colors(&theme, focused).0);
+                let foreground = luminance(label) * label[3] + background * (1.0 - label[3]);
+                let contrast =
+                    (background.max(foreground) + 0.05) / (background.min(foreground) + 0.05);
+                assert!(
+                    contrast >= MINIMUM_TEXT_CONTRAST,
+                    "{} focused={focused}: placeholder contrast {contrast}",
+                    theme.name
+                );
+            }
+        }
     }
 
     #[test]

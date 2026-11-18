@@ -43,10 +43,6 @@
     reason = "style preference for readability during active development"
 )]
 #![allow(
-    dead_code,
-    reason = "crate is mid-migration; unused items will be wired up or removed in later phases"
-)]
-#![allow(
     clippy::match_like_matches_macro,
     reason = "explicit match arms for readability in state-machine code"
 )]
@@ -113,11 +109,6 @@ mod sync_view_model;
 pub(crate) mod sys;
 pub(crate) use appkit_shell::tab_runtime;
 pub(crate) use appkit_shell::tab_session;
-#[allow(
-    unused_imports,
-    reason = "temporary semantic re-export keeps the moved shell module addressable from app"
-)]
-pub(crate) use appkit_shell::text_rasterize;
 mod textora_product;
 mod textora_settings_overlay;
 pub(crate) mod theme_loader;

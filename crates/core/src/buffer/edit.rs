@@ -448,19 +448,10 @@ impl TextBuffer {
         out
     }
 
-    /// Extracts the contents of the current selection the user made.
-    /// This differs from `TextBuffer::extract_selection()` in that
-    /// it does nothing if the selection was made by searching.
+    /// Extracts the contents of the current selection.
     pub fn extract_user_selection(&mut self, delete: bool) -> Option<Vec<u8>> {
         if !self.has_selection() {
             return None;
-        }
-
-        if !delete && let Some(search) = &self.search {
-            let search = unsafe { &*search.get() };
-            if search.selection_generation == self.selection_generation {
-                return None;
-            }
         }
 
         Some(self.extract_selection(delete))

@@ -74,6 +74,7 @@ mod tests {
     #[cfg(not(feature = "ci-no-fonts"))]
     fn title_text_box_caret_measure_matches_its_painted_font() {
         use shaping::{Shaper, Style, Weight};
+        use ui::core::text_layout::UiTextLayout;
         use ui::core::{LayoutCtx, Rect};
         use ui::text_box::TextBox;
 
@@ -82,16 +83,19 @@ mod tests {
         const CURSOR_PREFIX: &str = "H2AI 战";
 
         let mut shaper = Shaper::new().expect("system fonts should create a shaper");
-        shaper.set_font_family(None);
-        shaper.set_font_size(TITLE_FONT_SIZE);
-        shaper.set_font_weight(Weight::NORMAL);
-        shaper.set_font_style(Style::Normal);
-        let painted_prefix_width = shaper
-            .shape(CURSOR_PREFIX)
-            .expect("title prefix should shape with the painted font")
-            .width;
-
         shaper.set_font_family(Some("Menlo"));
+        let painted_prefix_width = UiTextLayout::new(
+            CURSOR_PREFIX,
+            TITLE_FONT_SIZE,
+            None,
+            Weight::NORMAL,
+            Style::Normal,
+            false,
+            &mut shaper,
+        )
+        .expect("title prefix should shape with the inherited UI font")
+        .shaped
+        .width;
         let mut text_box = TextBox::new();
         text_box.set_font_size_logical(TITLE_FONT_SIZE);
         text_box.set_leading_content_inset_logical(0.0);

@@ -3,6 +3,7 @@ use std::fmt;
 use std::path::{Path, PathBuf};
 
 use core::buffer::text_buffer::{CursorMovement, TextBuffer};
+use core::document::ReadableDocument;
 use core::highlight::{FILE_ASSOCIATIONS, Language};
 use core::types::{ByteIndex, LogicalPoint, UniCharOffset};
 
@@ -65,6 +66,107 @@ impl DocumentModel {
             original_encoding: None,
             language: None,
         }
+    }
+
+    pub fn from_lines(lines: &[String]) -> Self {
+        let mut text_buffer = TextBuffer::new(false).expect("TextBuffer creation failed");
+        let content = lines.join("\n");
+        if !content.is_empty() {
+            let sanitized = replace_null_bytes(content.as_bytes());
+            text_buffer.write_raw(&sanitized);
+        }
+        text_buffer.mark_as_clean();
+        text_buffer.cursor_move_to_byte(ByteIndex::ZERO);
+        Self::new(text_buffer)
+    }
+
+    pub fn from_external_content(path: &Path, content: &str) -> Self {
+        let crlf = content.contains("\r\n");
+        let normalized = content.replace("\r\n", "\n");
+        let lines: Vec<String> = normalized.split('\n').map(str::to_owned).collect();
+        let mut document = Self::from_lines(&lines);
+        document.file_path = Some(path.to_owned());
+        document.disk_revision = crate::file_safety::capture_revision(path).ok();
+        document.crlf = crlf;
+        document.tb.set_crlf(crlf);
+        document.set_language_from_path(path);
+        document
+    }
+
+    pub fn from_file(path: &Path) -> Result<Self, String> {
+        let started_at = std::time::Instant::now();
+        let (buffer, metadata) = core::file::load_file(path)
+            .map_err(|error| format!("failed to load {}: {error}", path.display()))?;
+        let disk_revision = crate::file_safety::capture_revision(path).ok();
+        let load_elapsed_us = started_at.elapsed().as_micros();
+
+        let has_null = {
+            let total = buffer.len();
+            let mut offset = 0;
+            let mut found = false;
+            while offset < total {
+                let chunk = buffer.read_forward(offset);
+                let end = chunk.len().min(total - offset);
+                if chunk[..end].contains(&0) {
+                    found = true;
+                    break;
+                }
+                offset += end;
+            }
+            found
+        };
+
+        let mut text_buffer = if has_null {
+            let total = buffer.len();
+            let mut content_bytes = Vec::with_capacity(total);
+            let mut offset = 0;
+            while offset < total {
+                let chunk = buffer.read_forward(offset);
+                if chunk.is_empty() {
+                    break;
+                }
+                let take = (total - offset).min(chunk.len());
+                content_bytes.extend_from_slice(&chunk[..take]);
+                offset += take;
+            }
+            let mut tb = TextBuffer::new(false).expect("TextBuffer creation failed");
+            if !content_bytes.is_empty() {
+                let sanitized = replace_null_bytes(&content_bytes);
+                tb.write_raw(&sanitized);
+            }
+            tb
+        } else {
+            TextBuffer::from_gap_buffer(buffer).expect("TextBuffer creation failed")
+        };
+        let write_elapsed_us = started_at.elapsed().as_micros();
+
+        if metadata.line_ending == core::file::LineEnding::Crlf {
+            text_buffer.set_crlf(true);
+        }
+        text_buffer.mark_as_clean();
+        text_buffer.cursor_move_to_byte(ByteIndex::ZERO);
+
+        let mut document = Self::new(text_buffer);
+        document.file_path = Some(path.to_path_buf());
+        document.disk_revision = disk_revision;
+        document.dirty = metadata.original_encoding.is_some();
+        document.crlf = metadata.line_ending == core::file::LineEnding::Crlf;
+        document.had_bom = metadata.had_bom;
+        document.original_encoding = metadata.original_encoding;
+        document.set_language_from_path(path);
+
+        let total_elapsed_us = started_at.elapsed().as_micros();
+        eprintln!(
+            "[perf:from_file] load={}us scan_write={}us index={}us total={}us lines={} null={}",
+            load_elapsed_us,
+            write_elapsed_us - load_elapsed_us,
+            total_elapsed_us - write_elapsed_us,
+            total_elapsed_us,
+            document.line_index.offsets.len(),
+            has_null
+        );
+
+        Ok(document)
     }
 
     pub fn cursor(&self) -> &CursorState {

@@ -28,6 +28,25 @@ pub use crate::theme_registry::{
 
 use std::collections::{BTreeMap, HashMap};
 
+const DEFAULT_DARK_ON_ACCENT_SRGB: &str = "#2a1504";
+const DEFAULT_DARK_ACCENT_TEXT_SRGB: &str = "#ffc080";
+const DEFAULT_DARK_DANGER_TEXT_SRGB: &str = "#f08a7f";
+const DEFAULT_DARK_WARNING_TEXT_SRGB: &str = "#e5ca9a";
+const DEFAULT_DARK_FOCUS_RING_SRGB: &str = "#f59a4a";
+const DEFAULT_DARK_INPUT_BORDER_SRGB: &str = "#8a7865";
+const DEFAULT_LIGHT_ON_ACCENT_SRGB: &str = "#2a1808";
+const DEFAULT_LIGHT_ACCENT_TEXT_SRGB: &str = "#9a4815";
+const DEFAULT_LIGHT_DANGER_TEXT_SRGB: &str = "#b3261e";
+const DEFAULT_LIGHT_WARNING_TEXT_SRGB: &str = "#8a5a00";
+const DEFAULT_LIGHT_FOCUS_RING_SRGB: &str = "#c2410c";
+const DEFAULT_LIGHT_INPUT_BORDER_SRGB: &str = "#9f8d76";
+const DEFAULT_LIGHT_LINE_NUMBER_SRGB: &str = "#75695c";
+
+fn builtin_srgb_color(hex: &'static str) -> [f32; 4] {
+    crate::hex_color::parse_hex(hex)
+        .expect("built-in theme sRGB constants are valid six-digit hexadecimal colors")
+}
+
 /// A modular color theme for the editor.
 #[derive(Debug, Clone)]
 pub struct Theme {
@@ -170,12 +189,17 @@ impl ThemeDefinition {
                 border_strong: [0.4667, 0.4118, 0.3647, 1.0000],
                 shadow: [0.0000, 0.0000, 0.0000, 0.3216],
                 accent: [0.9608, 0.6039, 0.2902, 1.0000],
+                on_accent: builtin_srgb_color(DEFAULT_DARK_ON_ACCENT_SRGB),
+                accent_text: builtin_srgb_color(DEFAULT_DARK_ACCENT_TEXT_SRGB),
                 highlight: [0.9608, 0.6039, 0.2902, 1.0000],
                 inactive_highlight: [0.80, 0.60, 0.25, 0.70],
                 danger: [0.8941, 0.3373, 0.2863, 1.0],
+                danger_text: builtin_srgb_color(DEFAULT_DARK_DANGER_TEXT_SRGB),
                 warning: [0.8745, 0.7569, 0.5176, 1.0],
+                warning_text: builtin_srgb_color(DEFAULT_DARK_WARNING_TEXT_SRGB),
+                focus_ring: builtin_srgb_color(DEFAULT_DARK_FOCUS_RING_SRGB),
                 input_bg: [0.1294, 0.1137, 0.1020, 1.0000],
-                input_border: [0.4667, 0.4118, 0.3647, 1.0],
+                input_border: builtin_srgb_color(DEFAULT_DARK_INPUT_BORDER_SRGB),
                 input_fg: [0.9490, 0.9294, 0.9098, 1.0],
                 sidebar_hover_bg: [0.2627, 0.2275, 0.2000, 1.0000],
                 sidebar_active_bg: [0.2863, 0.2078, 0.1608, 1.0000],
@@ -293,12 +317,17 @@ impl ThemeDefinition {
                 border_strong: [0.8706, 0.8471, 0.8196, 1.0000],
                 shadow: [0.0000, 0.0000, 0.0000, 0.0588],
                 accent: [0.9137, 0.4745, 0.1412, 1.0000],
+                on_accent: builtin_srgb_color(DEFAULT_LIGHT_ON_ACCENT_SRGB),
+                accent_text: builtin_srgb_color(DEFAULT_LIGHT_ACCENT_TEXT_SRGB),
                 highlight: [0.9137, 0.4745, 0.1412, 1.0000],
                 inactive_highlight: [0.7, 0.6, 0.2, 0.5],
                 danger: [0.8941, 0.3373, 0.2863, 1.0],
+                danger_text: builtin_srgb_color(DEFAULT_LIGHT_DANGER_TEXT_SRGB),
                 warning: [0.7569, 0.5176, 0.0039, 1.0],
+                warning_text: builtin_srgb_color(DEFAULT_LIGHT_WARNING_TEXT_SRGB),
+                focus_ring: builtin_srgb_color(DEFAULT_LIGHT_FOCUS_RING_SRGB),
                 input_bg: [1.0000, 1.0000, 1.0000, 1.0],
-                input_border: [0.8706, 0.8471, 0.8196, 1.0],
+                input_border: builtin_srgb_color(DEFAULT_LIGHT_INPUT_BORDER_SRGB),
                 input_fg: [0.1255, 0.1255, 0.1255, 1.0],
                 sidebar_hover_bg: [0.9765, 0.9686, 0.9569, 1.0],
                 sidebar_active_bg: [0.9725, 0.8980, 0.8235, 1.0],
@@ -308,7 +337,7 @@ impl ThemeDefinition {
                 background: [1.0000, 1.0000, 1.0000, 1.0000],
                 foreground: [0.2196, 0.2196, 0.2196, 1.0000],
                 gutter_bg: [1.0000, 1.0000, 1.0000, 1.0000],
-                line_number: [0.6039, 0.6039, 0.6039, 1.0000],
+                line_number: builtin_srgb_color(DEFAULT_LIGHT_LINE_NUMBER_SRGB),
                 selection: [0.9137, 0.4745, 0.1412, 0.18],
                 cursor: [0.1255, 0.1255, 0.1255, 1.0000],
                 scrollbar_track: [0.7800, 0.7800, 0.7800, 0.30],
@@ -419,10 +448,15 @@ pub fn test_theme() -> Theme {
             border_strong: [0.133, 0.145, 0.161, 1.0],
             shadow: [0.0, 0.0, 0.0, 0.30],
             accent: [0.4549, 0.6784, 0.9098, 1.0],
+            on_accent: [0.9, 0.9, 0.9, 1.0],
+            accent_text: [0.4549, 0.6784, 0.9098, 1.0],
             highlight: [1.0, 0.65, 0.2, 0.90],
             inactive_highlight: [0.80, 0.60, 0.25, 0.70],
             danger: [0.8941, 0.3373, 0.2863, 1.0],
+            danger_text: [0.8941, 0.3373, 0.2863, 1.0],
             warning: [0.8745, 0.7569, 0.5176, 1.0],
+            warning_text: [0.8745, 0.7569, 0.5176, 1.0],
+            focus_ring: [0.4549, 0.6784, 0.9098, 1.0],
             input_bg: [0.188, 0.204, 0.224, 1.0],
             input_border: [0.133, 0.145, 0.161, 1.0],
             input_fg: [0.8627, 0.8784, 0.8980, 1.0],
@@ -543,10 +577,15 @@ pub fn test_light_theme() -> Theme {
             border_strong: [0.9020, 0.8824, 0.8471, 1.0],
             shadow: [0.0, 0.0, 0.0, 0.08],
             accent: [0.4549, 0.6784, 0.9098, 1.0],
+            on_accent: [0.15, 0.15, 0.15, 1.0],
+            accent_text: [0.4549, 0.6784, 0.9098, 1.0],
             highlight: [1.0, 0.55, 0.15, 0.7],
             inactive_highlight: [0.7, 0.6, 0.2, 0.5],
             danger: [0.8941, 0.3373, 0.2863, 1.0],
+            danger_text: [0.8941, 0.3373, 0.2863, 1.0],
             warning: [0.7569, 0.5176, 0.0039, 1.0],
+            warning_text: [0.7569, 0.5176, 0.0039, 1.0],
+            focus_ring: [0.4549, 0.6784, 0.9098, 1.0],
             input_bg: [0.906, 0.906, 0.914, 1.0],
             input_border: [0.816, 0.816, 0.824, 1.0],
             input_fg: [0.1412, 0.1451, 0.1608, 1.0],

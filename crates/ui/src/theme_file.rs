@@ -47,6 +47,11 @@ pub struct PaletteFile {
     pub border_strong: Option<String>,
     pub shadow: Option<String>,
     pub accent: Option<String>,
+    pub on_accent: Option<String>,
+    pub accent_text: Option<String>,
+    pub danger_text: Option<String>,
+    pub warning_text: Option<String>,
+    pub focus_ring: Option<String>,
     pub highlight: Option<String>,
     pub inactive_highlight: Option<String>,
     pub danger: Option<String>,
@@ -290,6 +295,7 @@ fn resolve_palette(target: &mut ColorPalette, src: &PaletteFile) -> Result<(), R
     apply_color(&mut target.border_strong, &src.border_strong, "palette.border_strong")?;
     apply_color(&mut target.shadow, &src.shadow, "palette.shadow")?;
     apply_color(&mut target.accent, &src.accent, "palette.accent")?;
+    resolve_readability_roles(target, src)?;
     apply_color(&mut target.highlight, &src.highlight, "palette.highlight")?;
     apply_color(
         &mut target.inactive_highlight,
@@ -313,6 +319,17 @@ fn resolve_palette(target: &mut ColorPalette, src: &PaletteFile) -> Result<(), R
         "palette.sidebar_active_fg",
     )?;
     Ok(())
+}
+
+fn resolve_readability_roles(
+    target: &mut ColorPalette,
+    source: &PaletteFile,
+) -> Result<(), ResolveError> {
+    apply_color(&mut target.on_accent, &source.on_accent, "palette.on_accent")?;
+    apply_color(&mut target.accent_text, &source.accent_text, "palette.accent_text")?;
+    apply_color(&mut target.danger_text, &source.danger_text, "palette.danger_text")?;
+    apply_color(&mut target.warning_text, &source.warning_text, "palette.warning_text")?;
+    apply_color(&mut target.focus_ring, &source.focus_ring, "palette.focus_ring")
 }
 
 fn resolve_editor(target: &mut EditorTheme, src: &EditorFile) -> Result<(), ResolveError> {
@@ -634,6 +651,59 @@ string = "#98C379"
         let file: ThemeFile = toml::from_str("").unwrap();
         assert!(file.display_name.is_none());
         assert!(file.palette.is_none());
+    }
+
+    #[test]
+    fn readability_roles_accept_optional_palette_overrides() {
+        let source = r##"
+[palette]
+on_accent = "#10203080"
+accent_text = "#213141"
+danger_text = "#324252"
+warning_text = "#435363"
+focus_ring = "#546474"
+"##;
+        let file: ThemeFile =
+            toml::from_str(source).expect("readability roles are valid optional palette keys");
+        let resolved = file
+            .resolve(&ThemeDefinition::default_light())
+            .expect("all readability role colors are valid hex values");
+        for (actual, expected) in [
+            (resolved.palette.on_accent, "#10203080"),
+            (resolved.palette.accent_text, "#213141"),
+            (resolved.palette.danger_text, "#324252"),
+            (resolved.palette.warning_text, "#435363"),
+            (resolved.palette.focus_ring, "#546474"),
+        ] {
+            assert_eq!(actual, parse_hex_field(expected, "test role").expect("valid test hex"));
+        }
+    }
+
+    #[test]
+    fn legacy_palette_overrides_inherit_readability_roles_from_the_base() {
+        let file: ThemeFile = toml::from_str("[palette]\naccent = '#336699'")
+            .expect("legacy palette syntax remains valid");
+        for base in [ThemeDefinition::default_light(), ThemeDefinition::default_dark()] {
+            let inherited = file.resolve(&base).expect("legacy palette resolves against its base");
+            assert_eq!(inherited.palette.on_accent, base.palette.on_accent);
+            assert_eq!(inherited.palette.accent_text, base.palette.accent_text);
+            assert_eq!(inherited.palette.danger_text, base.palette.danger_text);
+            assert_eq!(inherited.palette.warning_text, base.palette.warning_text);
+            assert_eq!(inherited.palette.focus_ring, base.palette.focus_ring);
+            assert_ne!(inherited.palette.accent, base.palette.accent);
+        }
+    }
+
+    #[test]
+    fn invalid_readability_colors_report_the_exact_palette_field() {
+        for role in ["on_accent", "accent_text", "danger_text", "warning_text", "focus_ring"] {
+            let source = format!("[palette]\n{role} = 'invalid-color'");
+            let file: ThemeFile = toml::from_str(&source).expect("all role names are supported");
+            let failure = file
+                .resolve(&ThemeDefinition::default_light())
+                .expect_err("invalid role colors must fail resolution");
+            assert!(failure.to_string().contains(&format!("palette.{role}")));
+        }
     }
 
     #[test]

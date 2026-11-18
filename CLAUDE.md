@@ -27,19 +27,40 @@
 ```text
 crates/ui (纯 UI 组件库)
   ├── 依赖: core, render, shaping, winit, wgpu, unicode_categories
-  ├── 不依赖: DocumentView, Workspace, Commands, Events
-  └── 模块: theme, settings, viewport, render_geom, layout, gutter, decorations, 
+  ├── 不依赖: DocumentModel, DocumentView, Workspace, Commands, Events, notora-core, notora-app
+  └── 模块: theme, settings, viewport, render_geom, layout, gutter, decorations,
             以及 widgets 模块 (tab_bar, text_box, search_bar 等)
 
-crates/app (应用层)
-  ├── 依赖: ui, core, render, shaping, wgpu, winit
-  └── 职责: 从 DocumentView 提取数据 → 构造 Widget 输入 → 调用 ui::render()
+crates/appkit-core (产品无关文档与工作区内核)
+  ├── 依赖: core, serde, toml, similar, blake3, dirs, notify
+  ├── 不依赖: ui, winit, wgpu, render, shaping, 产品 crate
+  └── 职责: DocumentModel, 通用 Workspace, 持久化, 文件历史与文件安全
+
+crates/appkit-shell (跨产品编辑器宿主与渲染壳层)
+  ├── 依赖: appkit-core, ui, core, render, shaping, winit, wgpu
+  ├── 不依赖: textora-markdown, textora-sync, textora-app, notora-core, notora-app
+  └── 职责: EditorRuntime, TabRuntime/TabSession, GPU/文本排版管线与窗口宿主抽象
+
+crates/notora-core (Notora 笔记域内核)
+  ├── 依赖: blake3, notify, rusqlite, textora-encryption, serde, toml 等
+  ├── 不依赖: ui, winit, wgpu, appkit-core, appkit-shell, textora-*
+  └── 职责: 笔记库索引, SQLite 持久化, 加密笔记与文件监控
+
+crates/app (Textora 应用层)
+  ├── 依赖: appkit-core, appkit-shell, ui, core, render, shaping,
+  │         textora-markdown, textora-sync, wgpu, winit
+  └── 职责: 从 DocumentModel / EditorRuntime 提取数据 → 构造 Widget 输入 → 调用 ui::render()
+
+crates/notora-app (Notora 应用层)
+  ├── 依赖: appkit-core, appkit-shell, notora-core, ui, core, render, shaping,
+  │         textora-markdown, textora-encryption, wgpu, winit
+  └── 职责: 将笔记域模型适配到 EditorRuntime 与 ui 组件（不依赖 textora-app 与 textora-sync）
 ```
 
 ### UI 模块一览
 | 模块 | 职责 | 输入抽象 |
 |------|------|----------|
-| `ui::theme` / `settings` | 主题与编辑器配置 | 纯数据 / 全局单例 `Settings::get()` |
+| `ui::theme` / `settings` | 主题与编辑器配置 | 纯数据 / `Settings` 与 `UiMetrics::from_settings()` |
 | `ui::viewport` | 视口几何计算 | `LineMap` trait |
 | `ui::render_geom` | 选区高亮、像素映射 | `AdvanceCacheEntry` |
 | `ui::layout` | 换行与 CJK 边界检测 | 纯函数 |

@@ -133,8 +133,8 @@ fn collect_empty_runs(lines: &[SourceLineSpan]) -> Vec<Option<EmptyRunPosition>>
                 j += 1;
             }
             let run_length = j - i;
-            for k in i..j {
-                runs[k] = Some(EmptyRunPosition { index_in_run: k - i, run_length });
+            for (index_in_run, slot) in runs[i..j].iter_mut().enumerate() {
+                *slot = Some(EmptyRunPosition { index_in_run, run_length });
             }
             i = j;
         } else {

@@ -4,6 +4,7 @@
 //! which is a pure command dispatcher that doesn't depend on DocumentView's internal state.
 
 use crate::cursor_motion::find_visual_line_index;
+#[cfg(test)]
 use crate::document_view::DocumentView;
 use crate::edit_transaction::DocumentModelMut;
 use crate::input::EditCommand;
@@ -124,6 +125,7 @@ impl EditOutcome {
 }
 
 /// 包装 `execute_edit_command`，返回受影响行范围。
+#[cfg(test)]
 pub(crate) fn execute_edit_command_v2(
     cmd: &EditCommand,
     dv: &mut DocumentView,
@@ -227,6 +229,7 @@ fn execute_edit_command_v2_with_presentation_and_clipboard(
     EditOutcome { executed, dirty_lines, old_line_count, new_line_count }
 }
 
+#[cfg(test)]
 pub(crate) fn execute_edit_command(
     cmd: &EditCommand,
     dv: &mut DocumentView,

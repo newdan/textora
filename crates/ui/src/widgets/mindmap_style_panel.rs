@@ -29,12 +29,47 @@ const ROW_GAP_LOGICAL: f32 = 8.0;
 const NOTICE_TOP_GAP_LOGICAL: f32 = 8.0;
 const NOTICE_HEIGHT_LOGICAL: f32 = 20.0;
 const CARD_RADIUS_LOGICAL: f32 = 8.0;
+const FOCUS_RING_OUTSET_LOGICAL: f32 = 2.0;
 const SUMMARY_RADIUS_LOGICAL: f32 = 8.0;
 const FONT_SIZE_TITLE_LOGICAL: f32 = 14.0;
 const FONT_SIZE_BODY_LOGICAL: f32 = 12.0;
 const FONT_SIZE_NOTICE_LOGICAL: f32 = 11.0;
 const CLOSE_SIZE_LOGICAL: f32 = 28.0;
 const CLOSE_RIGHT_INSET_LOGICAL: f32 = 8.0;
+
+#[derive(Clone, Copy)]
+struct CardFocusGeometry {
+    outset: f32,
+    line_width: f32,
+    corner_radius: f32,
+}
+
+impl CardFocusGeometry {
+    fn for_dpi(dpi: f32) -> Self {
+        Self {
+            outset: FOCUS_RING_OUTSET_LOGICAL * dpi,
+            line_width: dpi.max(1.0),
+            corner_radius: (CARD_RADIUS_LOGICAL + FOCUS_RING_OUTSET_LOGICAL) * dpi,
+        }
+    }
+
+    fn outline_rect(self, card_rect: Rect) -> Rect {
+        expand_rect(card_rect, self.outset)
+    }
+
+    fn paint_outset(self) -> f32 {
+        // One stroke width also reserves the renderer's antialias fringe.
+        self.outset + self.line_width
+    }
+
+    fn paint_bounds(self, card_rect: Rect) -> Rect {
+        expand_rect(card_rect, self.paint_outset())
+    }
+}
+
+fn expand_rect(rect: Rect, outset: f32) -> Rect {
+    Rect::new(rect.x - outset, rect.y - outset, rect.w + 2.0 * outset, rect.h + 2.0 * outset)
+}
 
 #[derive(Clone, Debug)]
 pub struct MindmapStyleOption {
@@ -90,6 +125,7 @@ pub struct MindmapStylePanelWidget {
     scroll_offset: f32,
     scroll_limit: f32,
     grid_clip_top: f32,
+    focus_geometry: CardFocusGeometry,
 }
 
 impl Default for MindmapStylePanelWidget {
@@ -115,6 +151,7 @@ impl MindmapStylePanelWidget {
             scroll_offset: 0.0,
             scroll_limit: 0.0,
             grid_clip_top: 0.0,
+            focus_geometry: CardFocusGeometry::for_dpi(1.0),
         }
     }
 
@@ -293,7 +330,7 @@ impl MindmapStylePanelWidget {
         let card_rect = self.visible_card_rect(index);
         ctx.list.fill_rounded(card_rect, option.canvas_background, CARD_RADIUS_LOGICAL * dpi);
         let border_color = if option.selected {
-            ctx.theme.palette.accent
+            ctx.theme.palette.accent_text
         } else if self.hovered_option_index == Some(index) {
             ctx.theme.palette.border_strong
         } else {
@@ -306,8 +343,12 @@ impl MindmapStylePanelWidget {
             self.paint_checkmark(ctx, card_rect);
         }
         if self.has_keyboard_focus && self.focused_option_index == index {
-            let focus_rect = card_rect.shrink(3.0 * dpi, 3.0 * dpi, 3.0 * dpi, 3.0 * dpi);
-            ctx.list.stroke_rounded(focus_rect, ctx.theme.palette.accent, 5.0 * dpi, dpi.max(1.0));
+            ctx.list.stroke_rounded(
+                self.focus_geometry.outline_rect(card_rect),
+                ctx.theme.palette.focus_ring,
+                self.focus_geometry.corner_radius,
+                self.focus_geometry.line_width,
+            );
         }
     }
 
@@ -413,7 +454,7 @@ impl MindmapStylePanelWidget {
             marker.x + 3.0 * dpi,
             marker.y + 11.0 * dpi,
             9.0 * dpi,
-            ctx.theme.palette.text_inverse,
+            ctx.theme.palette.on_accent,
             "✓",
         );
     }
@@ -435,17 +476,12 @@ impl MindmapStylePanelWidget {
                 notice_rect.x,
                 notice_rect.y + 14.0 * dpi,
                 FONT_SIZE_NOTICE_LOGICAL * dpi,
-                ctx.theme.palette.warning,
+                ctx.theme.palette.warning_text,
                 &notice,
             );
         }
         if self.input.presets_expanded {
-            let grid_clip = Rect::new(
-                self.rect.x,
-                self.grid_clip_top,
-                self.rect.w,
-                (self.rect.bottom() - self.grid_clip_top).max(0.0),
-            );
+            let grid_clip = self.grid_paint_rect();
             ctx.list.clip(grid_clip, |clipped_list| {
                 let mut clipped_ctx = PaintCtx {
                     list: clipped_list,
@@ -498,6 +534,7 @@ impl MindmapStylePanelWidget {
 impl Widget for MindmapStylePanelWidget {
     fn set_rect(&mut self, rect: Rect, ctx: &mut LayoutCtx) {
         let dpi = ctx.dpi;
+        self.focus_geometry = CardFocusGeometry::for_dpi(dpi);
         self.rect = Rect::new(0.0, 0.0, rect.w, rect.h);
         let close_size = CLOSE_SIZE_LOGICAL * dpi;
         self.close_rect = Rect::new(
@@ -640,16 +677,23 @@ impl MindmapStylePanelWidget {
         self.scroll_offset = (self.scroll_offset + delta).clamp(0.0, self.scroll_limit);
     }
 
-    /// 键盘移动焦点时把焦点卡片滚进可视区域。
+    fn grid_paint_rect(&self) -> Rect {
+        let top = self.grid_clip_top - self.focus_geometry.paint_outset();
+        Rect::new(self.rect.x, top, self.rect.w, (self.rect.bottom() - top).max(0.0))
+    }
+
+    /// 键盘移动焦点时让完整焦点绘制范围可见；空间不足时固定顶部对齐。
     fn ensure_focused_card_visible(&mut self) {
-        let Some(rect) = self.card_rects.get(self.focused_option_index).copied() else {
+        let Some(card_rect) = self.card_rects.get(self.focused_option_index).copied() else {
             return;
         };
-        let visible_top = rect.y - self.scroll_offset;
-        if visible_top < self.grid_clip_top {
-            self.scroll_offset = rect.y - self.grid_clip_top;
-        } else if visible_top + rect.h > self.rect.bottom() {
-            self.scroll_offset = rect.bottom() - self.rect.bottom();
+        let bounds = self.focus_geometry.paint_bounds(card_rect);
+        let viewport = self.grid_paint_rect();
+        let visible_top = bounds.y - self.scroll_offset;
+        if bounds.h > viewport.h || visible_top < viewport.y {
+            self.scroll_offset = bounds.y - viewport.y;
+        } else if visible_top + bounds.h > viewport.bottom() {
+            self.scroll_offset = bounds.bottom() - viewport.bottom();
         }
         self.scroll_offset = self.scroll_offset.clamp(0.0, self.scroll_limit);
     }
@@ -732,6 +776,15 @@ mod tests {
         widget
     }
 
+    fn paint_with_text(widget: &MindmapStylePanelWidget, theme: &crate::Theme) -> DrawList {
+        let mut draw_list = DrawList::new();
+        let mut shaper = shaping::Shaper::new().expect("测试环境必须能创建文字塑形器");
+        let mut context = PaintCtx::new(&mut draw_list, theme, 1.0);
+        context.shaper = Some(&mut shaper);
+        widget.paint(&mut context);
+        draw_list
+    }
+
     #[test]
     fn sixteen_scheme_cards_layout_as_two_columns_and_eight_rows() {
         let widget = laid_out_panel(MindmapThemeSelection::Default);
@@ -754,12 +807,240 @@ mod tests {
             widget.selected_option_for_test().map(|option| option.id.as_str()),
             Some("tide")
         );
-        let mut draw_list = DrawList::new();
-        let theme = crate::theme::test_theme();
-        widget.paint(&mut PaintCtx::new(&mut draw_list, &theme, 1.0));
+        let theme = crate::Theme::from_definition(&crate::theme::ThemeDefinition::default_light());
+        let draw_list = paint_with_text(&widget, &theme);
         assert!(draw_list.cmds.iter().any(|command| matches!(
             command,
-            DrawCmd::StrokeRect { line_width, .. } if *line_width == 2.0
+            DrawCmd::StrokeRect { line_width, color, .. }
+                if *line_width == 2.0 && *color == theme.palette.accent_text
+        )));
+        assert!(draw_list.cmds.iter().any(|command| matches!(
+            command,
+            DrawCmd::TextLayout { layout, color, .. }
+                if layout.text == "✓" && *color == theme.palette.on_accent
+        )));
+        assert!(draw_list.cmds.iter().any(|command| matches!(
+            command,
+            DrawCmd::FillRect { color, radius, .. }
+                if *radius == 7.0 && *color == theme.palette.accent
+        )));
+    }
+
+    fn painted_background_at(commands: &[DrawCmd], sample: (f32, f32)) -> [f32; 4] {
+        commands
+            .iter()
+            .rev()
+            .find_map(|command| match command {
+                DrawCmd::FillRect { rect, color, .. } if rect.contains(sample.0, sample.1) => {
+                    Some(*color)
+                }
+                _ => None,
+            })
+            .expect("focus outline must have a painted background")
+    }
+
+    fn runtime_linear_contrast(foreground: [f32; 4], background: [f32; 4]) -> f32 {
+        let luminance = |color: [f32; 4]| 0.2126 * color[0] + 0.7152 * color[1] + 0.0722 * color[2];
+        let foreground_luminance = luminance(foreground);
+        let background_luminance = luminance(background);
+        (foreground_luminance.max(background_luminance) + 0.05)
+            / (foreground_luminance.min(background_luminance) + 0.05)
+    }
+
+    fn assert_focus_on_controlled_surface(theme: &crate::Theme, scheme_id: &str, dpi: f32) {
+        let mut widget = laid_out_panel(MindmapThemeSelection::Selected(scheme_id.to_owned()));
+        let mut measure = NoopMeasure;
+        widget.set_rect(
+            Rect::new(0.0, 0.0, PANEL_WIDTH_LOGICAL * dpi, 600.0 * dpi),
+            &mut LayoutCtx { ui_measure: None, measure: &mut measure, theme, dpi },
+        );
+        widget.set_keyboard_focus(widget.id());
+        let focused_card = widget.visible_card_rect(widget.focused_option_index);
+        let mut draw_list = DrawList::new();
+        widget.paint(&mut PaintCtx::new(&mut draw_list, theme, dpi));
+        let (command_index, focus_rect, focus_color, radius, line_width) = draw_list
+            .cmds
+            .iter()
+            .enumerate()
+            .find_map(|(index, command)| match command {
+                DrawCmd::StrokeRect { rect, color, radius, line_width }
+                    if *color == theme.palette.focus_ring =>
+                {
+                    Some((index, *rect, *color, *radius, *line_width))
+                }
+                _ => None,
+            })
+            .expect("focused card must paint a focus outline");
+        let sample = (focus_rect.x + focus_rect.w * 0.5, focus_rect.y + line_width * 0.5);
+        let background = painted_background_at(&draw_list.cmds[..command_index], sample);
+        let contrast = runtime_linear_contrast(focus_color, background);
+        assert!(
+            contrast >= 3.0,
+            "runtime linear focus contrast for {scheme_id}, dark={}: {contrast}",
+            theme.is_dark
+        );
+        assert_eq!(background, theme.palette.bg_surface);
+        assert!(focus_rect.x + line_width < focused_card.x);
+        assert!(focus_rect.y + line_width < focused_card.y);
+        assert!(focus_rect.right() - line_width > focused_card.right());
+        assert!(focus_rect.bottom() - line_width > focused_card.bottom());
+        assert_eq!(line_width, dpi.max(1.0));
+        assert_eq!(radius, (CARD_RADIUS_LOGICAL + FOCUS_RING_OUTSET_LOGICAL) * dpi);
+    }
+
+    #[test]
+    fn keyboard_focus_stays_on_controlled_surface_across_appearances() {
+        for definition in [
+            crate::theme::ThemeDefinition::default_dark(),
+            crate::theme::ThemeDefinition::default_light(),
+        ] {
+            let theme = crate::Theme::from_definition(&definition);
+            for scheme_id in ["paper", "tide"] {
+                for dpi in [1.0, 2.0] {
+                    assert_focus_on_controlled_surface(&theme, scheme_id, dpi);
+                }
+            }
+        }
+    }
+
+    fn focus_clips(draw_list: &DrawList, theme: &crate::Theme) -> Vec<Rect> {
+        let mut clips = Vec::new();
+        for command in &draw_list.cmds {
+            match command {
+                DrawCmd::PushClip(rect) => clips.push(*rect),
+                DrawCmd::PopClip => {
+                    clips.pop();
+                }
+                DrawCmd::StrokeRect { color, .. } if *color == theme.palette.focus_ring => {
+                    return clips;
+                }
+                _ => {}
+            }
+        }
+        panic!("focus outline must be painted");
+    }
+
+    fn focus_paint_bounds(draw_list: &DrawList, theme: &crate::Theme) -> Rect {
+        draw_list
+            .cmds
+            .iter()
+            .find_map(|command| match command {
+                DrawCmd::StrokeRect { rect, color, line_width, .. }
+                    if *color == theme.palette.focus_ring =>
+                {
+                    Some(Rect::new(
+                        rect.x - line_width,
+                        rect.y - line_width,
+                        rect.w + 2.0 * line_width,
+                        rect.h + 2.0 * line_width,
+                    ))
+                }
+                _ => None,
+            })
+            .expect("focused card must paint its outline")
+    }
+
+    fn laid_out_focus_panel(
+        theme: &crate::Theme,
+        dpi: f32,
+        height: f32,
+    ) -> MindmapStylePanelWidget {
+        let mut widget = laid_out_panel(MindmapThemeSelection::Default);
+        let mut measure = NoopMeasure;
+        widget.set_rect(
+            Rect::new(0.0, 0.0, PANEL_WIDTH_LOGICAL * dpi, height * dpi),
+            &mut LayoutCtx { ui_measure: None, measure: &mut measure, theme, dpi },
+        );
+        widget.set_keyboard_focus(widget.id());
+        widget
+    }
+
+    #[test]
+    fn keyboard_home_end_keep_complete_focus_bounds_visible_when_card_fits() {
+        let theme = crate::Theme::from_definition(&crate::theme::ThemeDefinition::default_dark());
+        for dpi in [1.0, 2.0] {
+            let mut widget = laid_out_focus_panel(&theme, dpi, 300.0);
+            for key in [KeyCode::End, KeyCode::Home] {
+                widget.on_event(
+                    &Event::KeyDown(key, Modifiers::NONE),
+                    &mut EventCtx::new(&theme, dpi),
+                );
+                let mut draw_list = DrawList::new();
+                widget.paint(&mut PaintCtx::new(&mut draw_list, &theme, dpi));
+                let bounds = focus_paint_bounds(&draw_list, &theme);
+                for clip in focus_clips(&draw_list, &theme) {
+                    assert!(bounds.x >= clip.x && bounds.right() <= clip.right());
+                    assert!(
+                        bounds.y >= clip.y && bounds.bottom() <= clip.bottom(),
+                        "{key:?} at dpi={dpi}: focus {bounds:?} exceeds clip {clip:?}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn first_row_focus_outline_has_clip_space_without_entering_header() {
+        let mut widget = laid_out_panel(MindmapThemeSelection::Default);
+        widget.set_keyboard_focus(widget.id());
+        let theme = crate::Theme::from_definition(&crate::theme::ThemeDefinition::default_dark());
+        let mut draw_list = DrawList::new();
+        widget.paint(&mut PaintCtx::new(&mut draw_list, &theme, 1.0));
+        let clips = focus_clips(&draw_list, &theme);
+        let grid_clip = clips.last().expect("focus must be clipped to the card grid");
+        let bounds = focus_paint_bounds(&draw_list, &theme);
+        assert!(bounds.y >= grid_clip.y && bounds.bottom() <= grid_clip.bottom());
+        assert!(grid_clip.y > widget.summary_rect.bottom());
+        assert_eq!(clips.first(), Some(&widget.rect));
+    }
+
+    #[test]
+    fn scrolled_focus_remains_clipped_to_short_panel_and_below_summary() {
+        let theme = crate::Theme::from_definition(&crate::theme::ThemeDefinition::default_dark());
+        for dpi in [1.0, 2.0] {
+            let mut widget = laid_out_focus_panel(&theme, dpi, 220.0);
+            for key in [KeyCode::End, KeyCode::End, KeyCode::Home] {
+                widget.on_event(
+                    &Event::KeyDown(key, Modifiers::NONE),
+                    &mut EventCtx::new(&theme, dpi),
+                );
+                let previous_offset = widget.scroll_offset;
+                let mut draw_list = DrawList::new();
+                widget.paint(&mut PaintCtx::new(&mut draw_list, &theme, dpi));
+                let clips = focus_clips(&draw_list, &theme);
+                let grid_clip =
+                    clips.last().expect("scrolled focus must be clipped to the card grid");
+                let bounds = focus_paint_bounds(&draw_list, &theme);
+                assert_eq!(bounds.y, grid_clip.y);
+                assert!(
+                    bounds.bottom() > grid_clip.bottom(),
+                    "short grid cannot fit the complete focus bounds"
+                );
+                assert!(grid_clip.y > widget.summary_rect.bottom());
+                assert_eq!(grid_clip.bottom(), widget.rect.bottom());
+                assert_eq!(clips.first(), Some(&widget.rect));
+                widget.on_event(
+                    &Event::KeyDown(key, Modifiers::NONE),
+                    &mut EventCtx::new(&theme, dpi),
+                );
+                assert_eq!(
+                    widget.scroll_offset, previous_offset,
+                    "repeating a key must not oscillate scrolling"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn metadata_warning_uses_warning_body_color() {
+        let widget = laid_out_panel(MindmapThemeSelection::InvalidMetadata);
+        let theme = crate::Theme::from_definition(&crate::theme::ThemeDefinition::default_light());
+        let draw_list = paint_with_text(&widget, &theme);
+
+        assert!(draw_list.cmds.iter().any(|command| matches!(
+            command,
+            DrawCmd::TextLayout { layout, color, .. }
+                if layout.text == "请先修复文件元数据" && *color == theme.palette.warning_text
         )));
     }
 

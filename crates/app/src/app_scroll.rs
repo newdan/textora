@@ -125,76 +125,6 @@ impl App {
         AppEffect::REDRAW
     }
 
-    /// Scroll the active non-editing plugin by a navigation command.
-    /// Used for PageUp/PageDown/Arrow keys/Home/End in preview/novel mode.
-    pub(crate) fn plugin_scroll_by_command(
-        &mut self,
-        cmd: &crate::input::EditCommand,
-    ) -> AppEffect {
-        use crate::input::EditCommand;
-
-        let metrics = self.ui_metrics();
-        let line_height = metrics.line_height;
-        let viewport_h = self.plugin_viewport_h();
-        let handles_own_rendering = self.active_handles_own_rendering();
-
-        // Dispatch scroll command to plugin and collect resulting scroll state.
-        // The inner scope ensures the mutable borrow of workspace ends before
-        // we touch self.ui_shell for the scrollbar update.
-        let scroll_result: Option<(f32, f32)> = {
-            let Some(mut tab) = self.active_tab_session_mut() else {
-                return AppEffect::NONE;
-            };
-            // Only plugins that render their own viewport get plugin scroll.
-            // Standard editor (allows_editing=true, handles_own_rendering=false)
-            // falls through to normal DocumentView scrolling below.
-            if !handles_own_rendering {
-                return AppEffect::NONE;
-            }
-
-            let scroll_msg = match cmd {
-                EditCommand::PageUp => {
-                    Some(ui::plugin::PluginMessage::Scroll { delta: -viewport_h, viewport_h })
-                }
-                EditCommand::PageDown => {
-                    Some(ui::plugin::PluginMessage::Scroll { delta: viewport_h, viewport_h })
-                }
-                EditCommand::MoveUp => Some(ui::plugin::PluginMessage::Scroll {
-                    delta: -line_height * 3.0,
-                    viewport_h,
-                }),
-                EditCommand::MoveDown => {
-                    Some(ui::plugin::PluginMessage::Scroll { delta: line_height * 3.0, viewport_h })
-                }
-                EditCommand::MoveToDocStart => {
-                    tab.send_message(ui::plugin::PluginMessage::SetScrollY(0.0));
-                    None
-                }
-                EditCommand::MoveToDocEnd => {
-                    tab.send_message(ui::plugin::PluginMessage::SetScrollRatio(1.0));
-                    None
-                }
-                _ => return AppEffect::NONE,
-            };
-
-            let consumed = if let Some(msg) = scroll_msg { tab.send_message(msg) } else { true };
-
-            if consumed {
-                let content_h = tab.content_height();
-                let scroll_y = tab.scroll_y();
-                Some((content_h, scroll_y))
-            } else {
-                None
-            }
-        };
-
-        if let Some((content_h, scroll_y)) = scroll_result {
-            self.sync_plugin_scrollbar(content_h, scroll_y, line_height, viewport_h);
-            return AppEffect::REDRAW;
-        }
-        AppEffect::NONE
-    }
-
     /// Scroll the active non-editing plugin by pixel delta.
     /// Shared by mouse wheel and keyboard scroll paths.
     pub(crate) fn plugin_scroll_by_pixels(&mut self, delta: f32) -> AppEffect {
@@ -425,6 +355,73 @@ impl App {
         }
         self.last_scroll_time = std::time::Instant::now();
         AppEffect::REDRAW
+    }
+}
+
+#[cfg(test)]
+impl App {
+    /// Scroll the active non-editing plugin by a navigation command.
+    /// Used for PageUp/PageDown/Arrow keys/Home/End in preview/novel mode.
+    pub(crate) fn plugin_scroll_by_command(
+        &mut self,
+        cmd: &crate::input::EditCommand,
+    ) -> AppEffect {
+        use crate::input::EditCommand;
+
+        let metrics = self.ui_metrics();
+        let line_height = metrics.line_height;
+        let viewport_h = self.plugin_viewport_h();
+        let handles_own_rendering = self.active_handles_own_rendering();
+
+        let scroll_result: Option<(f32, f32)> = {
+            let Some(mut tab) = self.active_tab_session_mut() else {
+                return AppEffect::NONE;
+            };
+            if !handles_own_rendering {
+                return AppEffect::NONE;
+            }
+
+            let scroll_msg = match cmd {
+                EditCommand::PageUp => {
+                    Some(ui::plugin::PluginMessage::Scroll { delta: -viewport_h, viewport_h })
+                }
+                EditCommand::PageDown => {
+                    Some(ui::plugin::PluginMessage::Scroll { delta: viewport_h, viewport_h })
+                }
+                EditCommand::MoveUp => Some(ui::plugin::PluginMessage::Scroll {
+                    delta: -line_height * 3.0,
+                    viewport_h,
+                }),
+                EditCommand::MoveDown => {
+                    Some(ui::plugin::PluginMessage::Scroll { delta: line_height * 3.0, viewport_h })
+                }
+                EditCommand::MoveToDocStart => {
+                    tab.send_message(ui::plugin::PluginMessage::SetScrollY(0.0));
+                    None
+                }
+                EditCommand::MoveToDocEnd => {
+                    tab.send_message(ui::plugin::PluginMessage::SetScrollRatio(1.0));
+                    None
+                }
+                _ => return AppEffect::NONE,
+            };
+
+            let consumed = if let Some(msg) = scroll_msg { tab.send_message(msg) } else { true };
+
+            if consumed {
+                let content_h = tab.content_height();
+                let scroll_y = tab.scroll_y();
+                Some((content_h, scroll_y))
+            } else {
+                None
+            }
+        };
+
+        if let Some((content_h, scroll_y)) = scroll_result {
+            self.sync_plugin_scrollbar(content_h, scroll_y, line_height, viewport_h);
+            return AppEffect::REDRAW;
+        }
+        AppEffect::NONE
     }
 }
 

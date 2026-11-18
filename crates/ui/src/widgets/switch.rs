@@ -99,8 +99,7 @@ impl Switch {
         let settings = ctx.theme.settings_theme();
         let application = ctx.theme.application_theme();
         let base_color = if self.checked { settings.accent } else { settings.control_surface };
-        let hover_target =
-            if self.checked { application.text_inverse } else { settings.text_primary };
+        let hover_target = if self.checked { application.on_accent } else { settings.text_primary };
         let hover_blend = if self.checked { CHECKED_HOVER_BLEND } else { UNCHECKED_HOVER_BLEND };
         let color = if self.hovered {
             blend_color(base_color, hover_target, hover_blend)
@@ -115,7 +114,7 @@ impl Switch {
         let base_color = if self.focused {
             settings.focus_ring
         } else if self.checked {
-            settings.accent
+            settings.accent_text
         } else {
             settings.control_border
         };
@@ -128,16 +127,18 @@ impl Switch {
     }
 
     fn thumb_color(&self, ctx: &PaintCtx) -> [f32; 4] {
+        if self.checked {
+            return apply_alpha(
+                ctx.theme.application_theme().on_accent,
+                ctx.global_alpha * self.alpha_factor(),
+            );
+        }
+
         let settings = ctx.theme.settings_theme();
-        let application = ctx.theme.application_theme();
-        let base_color =
-            if self.checked { application.text_inverse } else { settings.text_secondary };
-        let hover_target =
-            if self.checked { application.text_primary } else { settings.text_primary };
         let color = if self.hovered {
-            blend_color(base_color, hover_target, THUMB_HOVER_BLEND)
+            blend_color(settings.text_secondary, settings.text_primary, THUMB_HOVER_BLEND)
         } else {
-            base_color
+            settings.text_secondary
         };
         apply_alpha(color, ctx.global_alpha * self.alpha_factor())
     }
@@ -506,16 +507,53 @@ mod tests {
     }
 
     #[test]
-    fn checked_switch_uses_a_light_thumb_and_accent_border_in_light_theme() {
-        let switch = Switch::new(WidgetId(25), true);
-        let light_theme =
-            crate::theme::Theme::from_definition(&crate::theme::ThemeDefinition::default_light());
-        let mut draw_list = DrawList::new();
-        let paint_ctx = PaintCtx::new(&mut draw_list, &light_theme, 1.0);
+    fn checked_switch_thumb_remains_visible_across_themes_and_hover_states() {
+        const MINIMUM_THUMB_CONTRAST: f32 = 3.0;
+        const CONTRAST_LUMINANCE_OFFSET: f32 = 0.05;
+        let luminance = |color: [f32; 4]| color[0] * 0.2126 + color[1] * 0.7152 + color[2] * 0.0722;
+        for definition in [
+            crate::theme::ThemeDefinition::default_light(),
+            crate::theme::ThemeDefinition::default_dark(),
+        ] {
+            let theme = crate::theme::Theme::from_definition(&definition);
+            for hovered in [false, true] {
+                let mut switch = Switch::new(WidgetId(25), true);
+                switch.hovered = hovered;
+                let mut draw_list = DrawList::new();
+                let paint_ctx = PaintCtx::new(&mut draw_list, &theme, 1.0);
+                let thumb_luminance = luminance(switch.thumb_color(&paint_ctx));
+                let track_luminance = luminance(switch.track_color(&paint_ctx));
+                let contrast = (thumb_luminance.max(track_luminance) + CONTRAST_LUMINANCE_OFFSET)
+                    / (thumb_luminance.min(track_luminance) + CONTRAST_LUMINANCE_OFFSET);
+                assert!(
+                    contrast >= MINIMUM_THUMB_CONTRAST,
+                    "{} hovered={hovered}: thumb contrast {contrast}",
+                    theme.name
+                );
+                if !hovered {
+                    assert_eq!(switch.border_color(&paint_ctx), theme.palette.accent_text);
+                }
+            }
+        }
+    }
 
-        let thumb_color = switch.thumb_color(&paint_ctx);
-        assert!(thumb_color[0] >= 0.95 && thumb_color[1] >= 0.95 && thumb_color[2] >= 0.95);
-        assert_eq!(switch.border_color(&paint_ctx), light_theme.palette.accent);
+    #[test]
+    fn checked_switch_hover_preserves_thumb_and_updates_track_and_border() {
+        for definition in [
+            crate::theme::ThemeDefinition::default_light(),
+            crate::theme::ThemeDefinition::default_dark(),
+        ] {
+            let theme = crate::theme::Theme::from_definition(&definition);
+            let idle = Switch::new(WidgetId(93), true);
+            let mut hovered = Switch::new(WidgetId(94), true);
+            hovered.hovered = true;
+            let mut draw_list = DrawList::new();
+            let context = PaintCtx::new(&mut draw_list, &theme, 1.0);
+
+            assert_eq!(hovered.thumb_color(&context), theme.application_theme().on_accent);
+            assert_ne!(hovered.track_color(&context), idle.track_color(&context));
+            assert_ne!(hovered.border_color(&context), idle.border_color(&context));
+        }
     }
 
     #[test]
@@ -541,7 +579,7 @@ mod tests {
                 let mut draw_list = DrawList::new();
                 switch.paint(&mut PaintCtx::new(&mut draw_list, &theme, dpi));
 
-                assert_eq!(fill_color(&draw_list.cmds[2]), application.text_inverse);
+                assert_eq!(fill_color(&draw_list.cmds[2]), application.on_accent);
                 match &draw_list.cmds[1] {
                     DrawCmd::StrokeRect { line_width, .. } => {
                         assert_eq!(*line_width, metrics.focus_ring_width_logical * dpi);

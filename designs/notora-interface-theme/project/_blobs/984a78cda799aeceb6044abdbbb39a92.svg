@@ -1,0 +1,6 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="512" height="512" viewBox="0 0 512 512" fill="none" role="img" aria-labelledby="title description">
+  <title id="title">notora — 单色标志</title>
+  <desc id="description">折页字母 N 的单色矢量版本，适合小尺寸、印刷和品牌延展。</desc>
+  <path d="M52 464V76C52 60.536 64.536 48 80 48H153L358 309V48L460 150V436C460 451.464 447.464 464 432 464H359L154 203V464H52Z" fill="#20332C"/>
+  <path d="M358 48V122C358 137.464 370.536 150 386 150H460" stroke="#FFFFFF" stroke-width="10" stroke-linejoin="round"/>
+</svg>

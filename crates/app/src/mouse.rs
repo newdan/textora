@@ -7,6 +7,7 @@ use winit::event::ElementState;
 use winit::keyboard::ModifiersState;
 
 use crate::cursor_motion::CursorRenderState;
+#[cfg(test)]
 use crate::document_view::DocumentView;
 use crate::edit_transaction::DocumentModelMut;
 use crate::line_index::LineIndex;
@@ -21,6 +22,7 @@ pub(crate) use appkit_shell::mouse_state::{CanvasDragEligibility, CanvasDragSess
 /// can avoid ambiguous VL boundary disambiguation.
 /// Uses the advance cache populated during `shape_visible_lines()`.
 /// Accounts for sub-line pixel offset from scroll_y fractional part.
+#[cfg(test)]
 pub(crate) fn hit_test(
     px: f32,
     py: f32,
@@ -184,6 +186,7 @@ pub(crate) fn handle_cursor_moved(
 
 /// Handle MouseInput (left button press/release).
 /// Returns true if redraw is needed.
+#[cfg(test)]
 pub(crate) fn handle_mouse_input(
     state: ElementState,
     px: f32,

@@ -12,7 +12,6 @@
 pub mod alloc;
 pub mod arena;
 pub mod collections;
-pub mod float;
 mod helpers;
 pub mod simd;
 pub mod sys;

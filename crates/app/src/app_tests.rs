@@ -1,9 +1,11 @@
 use super::*;
 use crate::document_view::DocumentView;
+use crate::input::EditCommand;
 use appkit_shell::editor_runtime::{EditorFocus, EditorInputContext};
 use core::types::ByteIndex;
 use core::types::UniCharOffset;
 use ui::layout::compute_visual_lines;
+use ui::render_geom::{AdvanceCacheEntry, compute_selection_highlight_quads};
 use ui::viewport::Viewport;
 
 fn editor_input_context_for_test() -> EditorInputContext {
@@ -156,7 +158,6 @@ fn cached_line_for_test(content_hash: u64) -> crate::render_cache::CachedLine {
 #[test]
 fn line_end_enter_invalidates_cache_for_inserted_line() {
     const STALE_LINE_HASH: u64 = 42;
-    const TEST_LINE_HEIGHT: f32 = 24.27;
 
     let mut app = app_with_content(vec!["alpha", "beta"]);
     let mut tab = app.active_tab_session_mut().unwrap();

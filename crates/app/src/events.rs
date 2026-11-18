@@ -192,14 +192,6 @@ pub(crate) fn handle_keyboard(app: &mut App, event: &winit::event::KeyEvent) -> 
         actions.push(AppAction::TogglePin);
         return actions;
     }
-    #[allow(clippy::collapsible_if)]
-    if let Some(mut tab) = app.active_tab_session_mut() {
-        if let Some(key_code) = key_code.as_ref() {
-            if tab.intercept_key(key_code, &modifiers) {
-                return vec![AppAction::RequestRedraw];
-            }
-        }
-    }
 
     let fallback_cmd = key_to_command(&event.logical_key, input_modifiers);
 

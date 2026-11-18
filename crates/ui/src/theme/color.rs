@@ -18,12 +18,17 @@ pub struct ColorPalette {
     pub border_strong: [f32; 4],
     pub shadow: [f32; 4],
 
-    // Accents & Feedback (5)
+    // Accents & Feedback (10)
     pub accent: [f32; 4],
+    pub on_accent: [f32; 4],
+    pub accent_text: [f32; 4],
     pub highlight: [f32; 4],
     pub inactive_highlight: [f32; 4],
     pub danger: [f32; 4],
+    pub danger_text: [f32; 4],
     pub warning: [f32; 4],
+    pub warning_text: [f32; 4],
+    pub focus_ring: [f32; 4],
 
     // Input (3)
     pub input_bg: [f32; 4],
@@ -52,10 +57,15 @@ impl ColorPalette {
             &mut self.border_strong,
             &mut self.shadow,
             &mut self.accent,
+            &mut self.on_accent,
+            &mut self.accent_text,
             &mut self.highlight,
             &mut self.inactive_highlight,
             &mut self.danger,
+            &mut self.danger_text,
             &mut self.warning,
+            &mut self.warning_text,
+            &mut self.focus_ring,
             &mut self.input_bg,
             &mut self.input_border,
             &mut self.input_fg,

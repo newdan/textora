@@ -1,0 +1,2242 @@
+use super::*;
+
+#[cfg(feature = "rich-markdown")]
+#[test]
+fn render_layout_emits_inline_math_image_and_keeps_adjacent_text() {
+    let source = "left $x^2$ right";
+    let style = crate::test_utils::default_style();
+    let markdown =
+        crate::builder::MarkdownDoc::build(&crate::parser::parse_markdown(source), &style);
+    let text_document = core::document::StringDocView::new(source);
+    let mut shaper = shaping::Shaper::new().expect("test font");
+    let layout = crate::layout::layout_doc_with_shaper_for_rendering(
+        &markdown.blocks,
+        &style,
+        400.0,
+        Some(&mut shaper),
+        None,
+        &text_document,
+    );
+    let mut commands = DrawList::new();
+    render_layout(&layout, &style, &mut commands, 0.0, 100.0, Some(&mut shaper));
+    assert!(commands.cmds.iter().any(|command| matches!(command, DrawCmd::Image { .. })));
+    assert!(commands.cmds.iter().any(|command| matches!(command, DrawCmd::TextLayout { .. })));
+}
+
+#[cfg(feature = "rich-markdown")]
+#[test]
+fn render_layout_emits_display_math_and_mermaid_images() {
+    for source in ["$$x^2$$", "```mermaid\nflowchart LR\nA --> B\n```"] {
+        let style = crate::test_utils::default_style();
+        let markdown =
+            crate::builder::MarkdownDoc::build(&crate::parser::parse_markdown(source), &style);
+        let text_document = core::document::StringDocView::new(source);
+        let mut shaper = shaping::Shaper::new().expect("test font");
+        let layout = crate::layout::layout_doc_with_shaper_for_rendering(
+            &markdown.blocks,
+            &style,
+            400.0,
+            Some(&mut shaper),
+            None,
+            &text_document,
+        );
+        let mut commands = DrawList::new();
+        render_layout(&layout, &style, &mut commands, 0.0, 600.0, Some(&mut shaper));
+        assert!(
+            commands.cmds.iter().any(|command| matches!(command, DrawCmd::Image { .. })),
+            "{source}"
+        );
+    }
+}
+use crate::builder::{CodeHighlighter, HighlightSpan, MarkdownDoc};
+use crate::layout::block::{MarkdownLayout, layout_doc_with_shaper_for_rendering};
+use crate::layout::{LaidOutBlockKind, LaidOutDoc, LazyLayout, layout_doc};
+use crate::parser::parse_markdown;
+
+use crate::test_utils::default_style;
+
+const ELECTRON_GO_ARCHITECTURE_DIAGRAM: &str = r#"```
+Electron (UI Shell)          Go (Agent Core)
+┌──────────────────────┐    ┌─────────────────────────────┐
+│  Main Process         │    │  WebSocket Server            │
+│  ├─ spawn Go 二进制    │◄──►│  ├─ token 认证               │
+│  └─ BrowserWindow     │ WS │  └─ 收发 JSON 消息           │
+│                       │    │                              │
+│  Renderer (Chat UI)   │    │  Agent Loop                  │
+│  ├─ 流式对话           │    │  ├─ Orchestrator (主 agent)  │
+│  ├─ 工具调用卡片        │    │  └─ Worker (子 agent)       │
+│  ├─ 子 agent 进度      │    │                              │
+│  └─ 任务面板            │    │  LLM Provider               │
+└──────────────────────┘    │  ├─ Anthropic (流式 SSE)      │
+                        │  └─ OpenAI 兼容               │
+                        │                               │
+                        │  工具系统 (8 tools)            │
+                        │  条件式 Prompt 构建            │
+                        │  Skills 系统                  │
+                        │  会话持久化                    │
+                        └─────────────────────────────┘
+```"#;
+
+const WPS_ARCHITECTURE_DIAGRAM: &str = r#"```
+┌──────────── WPS 客户端 ────────────┐          ┌────── 服务端（增量持续）──────┐
+│                                     │          │                              │
+│  ┌─ 本地日志（30天滚动）─────────┐  │  每日增量 │  ┌─ 画像更新 Pipeline ───┐  │
+│  │ · 文件操作（打开/关闭/保存）  │  │  上传     │  │ · 角色标签更新          │  │
+│  │ · 编辑会话（时长/段落/光标）  │  │────────→ │  │ · 模板偏好更新          │  │
+│  │ · 模板使用记录               │  │  DSL包   │  │ · 活跃项目检测          │  │
+│  │ · 搜索/崩溃日志              │  │ (仅增量)  │  │ · 周期性模式识别        │  │
+│  │ · 过去30天全部可触达         │  │          │  └─────────────────────────┘  │
+│  └──────────────────────────────┘  │          │                              │
+│                                     │          │  ┌─ 行为预测 Agent ──────┐  │
+│  ┌─ 本地 Tool（核心）────────────┐  │          │  │ · 读取 30 天滚动窗口    │  │
+│  │ ① 扫描 30 天日志目录         │  │          │  │ · 加载用户画像          │  │
+│  │ ② 数据清洗 + 去噪 + 聚合    │  │          │  │ · LLM 推理：            │  │
+│  │ ③ 结构化 DSL 事件            │  │          │  │   短期意图(续编/模板)    │  │
+│  │ ④ 上下文字段填充             │  │          │  │   周期性模式(月报/周报)  │  │
+│  │ ⑤ 画像缓存附加               │  │          │  │ · 生成焦点项（≤5 条）   │  │
+│  │ ⑥ 增量打包上传               │  │          │  │ · 输出结构化焦点 DSL    │  │
+│  └──────────────────────────────┘  │          │  └─────────────────────────┘  │
+│                                     │          │                              │
+│  ┌─ 焦点渲染 ──────────────────┐  │  每日拉取  │  ┌─ 焦点项存储 + 下发 ───┐  │
+│  │ · 首页焦点卡片列表           │  │←──────── │  │ · 存储到用户维度        │  │
+│  │ · 排序展示（按优先级）       │  │ 焦点DSL   │  │ · 客户端启动时拉取      │  │
+│  │ · 点击执行 action            │  │          │  │ · 附带更新后画像        │  │
+│  └──────────────────────────────┘  │          │  └─────────────────────────┘  │
+│                                     │          │                              │
+│  ┌─ 反馈采集 ──────────────────┐  │          │  ┌─ 反馈回收 ─────────────┐  │
+│  │ · 卡片点击（accepted）       │──反馈上报→│  │ · 焦点项点击/忽略统计   │  │
+│  │ · 卡片关闭（dismissed）      │  │          │  │ · 纳入画像调整信号      │  │
+│  │ · 无操作（ignored）          │  │          │  │ · 周期准确性验证        │  │
+│  └──────────────────────────────┘  │          │  └─────────────────────────┘  │
+└────────────────────────────────────┘          └──────────────────────────────┘
+```"#;
+
+const HORIZONTAL_ARROW_DIAGRAM: &str = r#"```
+┌────────────┐
+│ ────────→  │
+│ ←────────  │
+│ DSL → add  │
+└────────────┘
+```"#;
+
+const WPS_ROLLING_WINDOW_DIAGRAM: &str = r#"```
+时间轴（30天滚动窗口）
+
+Day -29          Day -7           Day -1    Today    Day +1
+  │                │                │         │         │
+  ├────────────────┼────────────────┼─────────┼─────────┤
+  │                 │                │         │         │
+  │  30天历史行为   │  近期模式      │ 昨日    │ 今日    │ 次日展示
+  │  (服务端存储)   │  (7天细粒度)   │ 增量    │ WPS     │ 焦点项
+  │                 │                │ 上传    │ 首页    │
+  │                 │                │         │         │
+  ▼                 ▼                ▼         ▼         ▼
+ ┌─────────────────────────────────────────────────────────┐
+ │  服务端滚动窗口（始终保留最近 30 天行为摘要）             │
+ │                                                         │
+ │  每天凌晨：                                              │
+ │    ① 接收昨日增量 DSL 包 → 追加到滚动窗口               │
+ │    ② 淘汰 Day-31 旧数据                                 │
+ │    ③ 更新画像（5个维度全量重算）                        │
+ │    ④ 短期意图预测（基于 1-7 天近期行为）                │
+ │    ⑤ 周期性模式检测（基于 7-30 天中长周期）             │
+ │    ⑥ 合并焦点项 → 排序 → 存储                          │
+ └─────────────────────────────────────────────────────────┘
+```"#;
+
+fn build_and_render(md: &str) -> DrawList {
+    let parsed = parse_markdown(md);
+    let style = default_style();
+    let doc = MarkdownDoc::build(&parsed, &style);
+    let doc_view = core::document::StringDocView::new(md);
+    let layout =
+        layout_doc_with_shaper_for_rendering(&doc.blocks, &style, 400.0, None, None, &doc_view);
+    let mut dl = DrawList::new();
+    let mut shaper = shaping::Shaper::new().expect("need shaper for render tests");
+    render_doc_with_offset_and_ascii_diagrams(
+        &layout.doc,
+        &style,
+        &mut dl,
+        0.0,
+        600.0,
+        0.0,
+        0.0,
+        Some(&mut shaper),
+        &[],
+        Some(&layout.ascii_diagrams),
+    );
+    dl
+}
+
+fn build_and_render_editing(md: &str, cursor_byte: usize) -> (DrawList, MarkdownStyle) {
+    let parsed = parse_markdown(md);
+    let style = default_style();
+    let doc = MarkdownDoc::build(&parsed, &style);
+    let doc_view = core::document::StringDocView::new(md);
+    let mut layout = LazyLayout::from_doc(doc, &style, 400.0, &doc_view);
+    layout.set_edit_source(Some(md.to_string()));
+    layout.set_edit_ctx(Some(crate::edit::EditContext {
+        cursor_byte,
+        preedit_text: None,
+        preedit_cursor: None,
+    }));
+
+    let mut shaper = shaping::Shaper::new().expect("need shaper for render tests");
+    layout.ensure_precise_range(0.0, 600.0, &style, &mut shaper, None, &doc_view);
+    layout.build_flat_lines(&doc_view);
+
+    let mut dl = DrawList::new();
+    let laid_out = LaidOutDoc {
+        blocks: layout.laid_out.iter().flatten().cloned().collect(),
+        total_height: layout.total_height,
+    };
+    render_doc_with_offset_and_ascii_diagrams(
+        &laid_out,
+        &style,
+        &mut dl,
+        0.0,
+        600.0,
+        0.0,
+        0.0,
+        Some(&mut shaper),
+        &[],
+        Some(layout.ascii_diagrams()),
+    );
+    (dl, style)
+}
+
+fn build_and_render_with_highlighter(md: &str, highlighter: &dyn CodeHighlighter) -> DrawList {
+    let parsed = parse_markdown(md);
+    let style = default_style();
+    let doc = MarkdownDoc::build(&parsed, &style);
+    let doc_view = core::document::StringDocView::new(md);
+    let mut shaper = shaping::Shaper::new().expect("need shaper for render tests");
+    let layout = layout_doc_with_shaper_for_rendering(
+        &doc.blocks,
+        &style,
+        400.0,
+        Some(&mut shaper),
+        Some(highlighter),
+        &doc_view,
+    );
+    let mut dl = DrawList::new();
+    render_doc_with_offset_and_ascii_diagrams(
+        &layout.doc,
+        &style,
+        &mut dl,
+        0.0,
+        600.0,
+        0.0,
+        0.0,
+        Some(&mut shaper),
+        &[],
+        Some(&layout.ascii_diagrams),
+    );
+    dl
+}
+
+fn build_laid_out(md: &str) -> MarkdownLayout {
+    let parsed = parse_markdown(md);
+    let style = default_style();
+    let doc = MarkdownDoc::build(&parsed, &style);
+    let doc_view = core::document::StringDocView::new(md);
+    layout_doc_with_shaper_for_rendering(&doc.blocks, &style, 400.0, None, None, &doc_view)
+}
+
+fn render_laid_out(layout: &MarkdownLayout, viewport_height: f32) -> DrawList {
+    let style = default_style();
+    let mut draw_list = DrawList::new();
+    let mut shaper = shaping::Shaper::new().expect("need shaper for render tests");
+    render_doc_with_offset_and_ascii_diagrams(
+        &layout.doc,
+        &style,
+        &mut draw_list,
+        0.0,
+        viewport_height,
+        0.0,
+        0.0,
+        Some(&mut shaper),
+        &[],
+        Some(&layout.ascii_diagrams),
+    );
+    draw_list
+}
+
+fn line_text_xs(draw_list: &DrawList, line: &LaidOutLine, text: &str) -> Vec<f32> {
+    let expected_baseline = line.rect.y + line.font_size;
+    draw_list
+        .cmds
+        .iter()
+        .filter_map(|command| match command {
+            DrawCmd::TextLayout { layout, x, y_baseline, .. }
+                if layout.text == text && (*y_baseline - expected_baseline).abs() < 0.01 =>
+            {
+                Some(*x)
+            }
+            _ => None,
+        })
+        .collect()
+}
+
+fn line_text_center_xs(draw_list: &DrawList, line: &LaidOutLine, text: &str) -> Vec<f32> {
+    let expected_baseline = line.rect.y + line.font_size;
+    draw_list
+        .cmds
+        .iter()
+        .filter_map(|command| match command {
+            DrawCmd::TextLayout { layout, x, y_baseline, .. }
+                if layout.text == text && (*y_baseline - expected_baseline).abs() < 0.01 =>
+            {
+                Some(*x + layout.shaped.width * 0.5)
+            }
+            _ => None,
+        })
+        .collect()
+}
+
+fn fill_triangles_for_line(draw_list: &DrawList, line: &LaidOutLine) -> Vec<[[f32; 2]; 3]> {
+    draw_list
+        .cmds
+        .iter()
+        .filter_map(|command| match command {
+            DrawCmd::FillTriangle { p0, p1, p2, .. }
+                if [p0, p1, p2].into_iter().all(|point| {
+                    line.rect.y <= point[1] && point[1] <= line.rect.y + line.rect.h
+                }) =>
+            {
+                Some([*p0, *p1, *p2])
+            }
+            _ => None,
+        })
+        .collect()
+}
+
+fn line_has_horizontal_fill_containing_x(
+    draw_list: &DrawList,
+    line: &LaidOutLine,
+    target_x: f32,
+) -> bool {
+    const GEOMETRY_EPSILON: f32 = 0.01;
+
+    let line_center_y = line.rect.y + line.rect.h * 0.5;
+    draw_list.cmds.iter().any(|command| match command {
+        DrawCmd::FillRect { rect, .. } => {
+            let fill_center_y = rect.y + rect.h * 0.5;
+            rect.w > rect.h
+                && rect.x <= target_x
+                && target_x <= rect.x + rect.w
+                && (fill_center_y - line_center_y).abs() < GEOMETRY_EPSILON
+        }
+        _ => false,
+    })
+}
+
+fn assert_contains_x(actual_xs: &[f32], expected_x: f32, context: &str) {
+    assert!(
+        actual_xs.iter().any(|actual_x| (*actual_x - expected_x).abs() < 0.01),
+        "{context} must contain x={expected_x}; actual={actual_xs:?}"
+    );
+}
+
+fn text_command_color(draw_list: &DrawList, text: &str) -> Option<[f32; 4]> {
+    draw_list.cmds.iter().find_map(|cmd| {
+        if let DrawCmd::TextLayout { layout, color, .. } = cmd
+            && layout.text == text
+        {
+            return Some(*color);
+        }
+        None
+    })
+}
+
+fn text_command_colors(draw_list: &DrawList, text: &str) -> Vec<[f32; 4]> {
+    draw_list
+        .cmds
+        .iter()
+        .filter_map(|cmd| {
+            if let DrawCmd::TextLayout { layout, color, .. } = cmd
+                && layout.text == text
+            {
+                return Some(*color);
+            }
+            None
+        })
+        .collect()
+}
+
+#[test]
+fn render_paragraph_emits_text() {
+    let dl = build_and_render("hello world");
+    let has_text = dl.cmds.iter().any(|c| matches!(c, DrawCmd::TextLayout { .. }));
+    assert!(has_text, "paragraph should produce Text commands");
+}
+
+#[test]
+fn render_heading_emits_text() {
+    let dl = build_and_render("# Title");
+    let has_text = dl.cmds.iter().any(|c| matches!(c, DrawCmd::TextLayout { .. }));
+    assert!(has_text, "heading should produce Text commands");
+}
+
+#[test]
+fn render_code_block_emits_fill_rect() {
+    let dl = build_and_render("```\ncode\n```");
+    let has_fill = dl.cmds.iter().any(|c| matches!(c, DrawCmd::FillRect { .. }));
+    assert!(has_fill, "code block should have background FillRect");
+}
+
+#[test]
+fn render_ascii_diagram_places_vertical_borders_on_one_grid_column() {
+    let layout = build_laid_out("```\n┌────┐\n│中文│\n│内容│\n└────┘\n```");
+    let code_block = layout.doc.blocks.first().expect("fixture has one code block");
+    let LaidOutBlockKind::CodeBlock { lines, .. } = &code_block.kind else {
+        panic!("fixture must produce a code block");
+    };
+    let first_content_line =
+        lines.iter().find(|line| line.text == "│中文│").expect("first content line");
+    let second_content_line =
+        lines.iter().find(|line| line.text == "│内容│").expect("second content line");
+
+    let style = default_style();
+    let mut draw_list = DrawList::new();
+    let mut shaper = shaping::Shaper::new().expect("need shaper for render tests");
+    render_doc_with_offset_and_ascii_diagrams(
+        &layout.doc,
+        &style,
+        &mut draw_list,
+        0.0,
+        600.0,
+        0.0,
+        0.0,
+        Some(&mut shaper),
+        &[],
+        Some(&layout.ascii_diagrams),
+    );
+
+    let first_borders = vertical_border_xs_for_line(&draw_list, first_content_line);
+    let second_borders = vertical_border_xs_for_line(&draw_list, second_content_line);
+    assert_eq!(
+        first_borders.len(),
+        2,
+        "each content line must have left and right vertical borders"
+    );
+    assert_eq!(
+        second_borders.len(),
+        2,
+        "each content line must have left and right vertical borders"
+    );
+    assert_eq!(
+        first_borders, second_borders,
+        "different content rows must share both border columns"
+    );
+}
+
+#[test]
+fn render_snapped_rectangle_uses_one_right_edge_x() {
+    let layout = build_laid_out(
+        "```\n┌─ 本地日志（30天滚动）─────────┐\n│ · 文件操作（打开/关闭/保存）  │\n│ · 模板使用记录               │\n└──────────────────────────────┘\n```",
+    );
+    let code_block = layout.doc.blocks.first().expect("fixture has one code block");
+    let LaidOutBlockKind::CodeBlock { lines, .. } = &code_block.kind else {
+        panic!("fixture must produce a code block");
+    };
+
+    let style = default_style();
+    let mut draw_list = DrawList::new();
+    let mut shaper = shaping::Shaper::new().expect("need shaper for render tests");
+    render_doc_with_offset_and_ascii_diagrams(
+        &layout.doc,
+        &style,
+        &mut draw_list,
+        0.0,
+        600.0,
+        0.0,
+        0.0,
+        Some(&mut shaper),
+        &[],
+        Some(&layout.ascii_diagrams),
+    );
+
+    let right_edge_xs = lines
+        .iter()
+        .map(|line| {
+            vertical_border_xs_for_line(&draw_list, line)
+                .last()
+                .copied()
+                .expect("every fixture row must draw a right edge")
+        })
+        .collect::<Vec<_>>();
+    assert!(
+        right_edge_xs.windows(2).all(|pair| (pair[0] - pair[1]).abs() < 0.01),
+        "all right-edge segments must share one x coordinate: {right_edge_xs:?}"
+    );
+}
+
+#[test]
+fn render_electron_go_architecture_keeps_outer_tracks_and_arrow_separate() {
+    const LEFT_FRAME_START_ROW: usize = 1;
+    const LEFT_FRAME_END_ROW: usize = 11;
+    const EXPECTED_LEFT_RIGHT_TRACK_INDEX: usize = 1;
+    const EXPECTED_SERVER_LEFT_TRACK_INDEX: usize = 2;
+    const EXPECTED_SERVER_RIGHT_TRACK_INDEX: usize = 3;
+
+    let layout = build_laid_out(ELECTRON_GO_ARCHITECTURE_DIAGRAM);
+    let code_block = layout.doc.blocks.first().expect("fixture has one code block");
+    let LaidOutBlockKind::CodeBlock { lines, .. } = &code_block.kind else {
+        panic!("fixture must produce a code block");
+    };
+    assert_eq!(lines.len(), 19, "fixture must retain every architecture row");
+
+    let draw_list = render_laid_out(&layout, 2_000.0);
+    let top_border_xs = vertical_border_center_xs_for_line(&draw_list, &lines[1]);
+    assert_eq!(top_border_xs.len(), 4, "top row must expose both outer rectangles");
+    let left_right_x = top_border_xs[EXPECTED_LEFT_RIGHT_TRACK_INDEX];
+    let server_left_x = top_border_xs[EXPECTED_SERVER_LEFT_TRACK_INDEX];
+    let server_right_x = top_border_xs[EXPECTED_SERVER_RIGHT_TRACK_INDEX];
+
+    for (frame_row, line) in lines[LEFT_FRAME_START_ROW..=LEFT_FRAME_END_ROW].iter().enumerate() {
+        let border_xs = vertical_border_center_xs_for_line(&draw_list, line);
+        assert_contains_x(
+            &border_xs,
+            left_right_x,
+            &format!("left outer right track row {frame_row}"),
+        );
+    }
+
+    for (row_index, line) in lines[1..].iter().enumerate() {
+        let border_xs = vertical_border_center_xs_for_line(&draw_list, line);
+        assert_contains_x(&border_xs, server_left_x, &format!("server left track row {row_index}"));
+        assert_contains_x(
+            &border_xs,
+            server_right_x,
+            &format!("server right track row {row_index}"),
+        );
+    }
+
+    let arrow_centers = line_text_center_xs(&draw_list, &lines[3], "►");
+    assert_eq!(arrow_centers.len(), 1, "connector row must draw one right arrow head");
+    assert!(
+        left_right_x < arrow_centers[0] && arrow_centers[0] < server_left_x,
+        "arrow must stay between the frames: left={left_right_x}, arrow={}, right={server_left_x}",
+        arrow_centers[0]
+    );
+}
+
+#[test]
+fn render_horizontal_connector_arrows_share_box_line_center() {
+    const GEOMETRY_EPSILON: f32 = 0.01;
+
+    let layout = build_laid_out(HORIZONTAL_ARROW_DIAGRAM);
+    let code_block = layout.doc.blocks.first().expect("fixture has one code block");
+    let LaidOutBlockKind::CodeBlock { lines, .. } = &code_block.kind else {
+        panic!("fixture must produce a code block");
+    };
+    let draw_list = render_laid_out(&layout, 600.0);
+
+    let right_arrow = fill_triangles_for_line(&draw_list, &lines[1]);
+    let left_arrow = fill_triangles_for_line(&draw_list, &lines[2]);
+    assert_eq!(right_arrow.len(), 1, "right connector must draw one arrowhead");
+    assert_eq!(left_arrow.len(), 1, "left connector must draw one arrowhead");
+
+    for (line, triangle) in [(&lines[1], right_arrow[0]), (&lines[2], left_arrow[0])] {
+        let minimum_y = triangle.iter().map(|point| point[1]).fold(f32::INFINITY, f32::min);
+        let maximum_y = triangle.iter().map(|point| point[1]).fold(f32::NEG_INFINITY, f32::max);
+        let arrow_center_y = (minimum_y + maximum_y) * 0.5;
+        let box_line_center_y = line.rect.y + line.rect.h * 0.5;
+        assert!((arrow_center_y - box_line_center_y).abs() < GEOMETRY_EPSILON);
+    }
+
+    assert!(right_arrow[0][0][0] > right_arrow[0][1][0]);
+    assert!(right_arrow[0][0][0] > right_arrow[0][2][0]);
+    assert!(left_arrow[0][0][0] < left_arrow[0][1][0]);
+    assert!(left_arrow[0][0][0] < left_arrow[0][2][0]);
+    assert!(line_has_horizontal_fill_containing_x(&draw_list, &lines[1], right_arrow[0][1][0]));
+    assert!(line_has_horizontal_fill_containing_x(&draw_list, &lines[2], left_arrow[0][1][0]));
+    assert!(line_text_xs(&draw_list, &lines[1], "→").is_empty());
+    assert!(line_text_xs(&draw_list, &lines[2], "←").is_empty());
+    assert!(fill_triangles_for_line(&draw_list, &lines[3]).is_empty());
+    assert_eq!(line_text_xs(&draw_list, &lines[3], "→").len(), 1);
+}
+
+#[test]
+fn render_wps_ring_buffer_uses_one_right_edge_x_with_discontinuous_source_columns() {
+    let layout = build_laid_out(
+        "```\n每个用户维护一个环形缓冲区：\n\n┌──────────────────────────────────────────────────────────┐\n│  Day-30  Day-29  ...  Day-2  Day-1  Today  ← 窗口滑动    │\n│  ─────  ─────        ─────  ─────  ─────                 │\n│  淘汰    保留         保留   保留   新增                  │\n│                                                          │\n│  每天凌晨批处理时：                                       │\n│    1. 追加昨日增量包到窗口尾部                            │\n│    2. 如果窗口长度 > 30，淘汰最早的 Day-31               │\n│    3. 基于完整 30 天窗口重算画像 + 检测周期               │\n└──────────────────────────────────────────────────────────┘\n```",
+    );
+    let code_block = layout.doc.blocks.first().expect("fixture has one code block");
+    let LaidOutBlockKind::CodeBlock { lines, .. } = &code_block.kind else {
+        panic!("fixture must produce a code block");
+    };
+
+    let style = default_style();
+    let mut draw_list = DrawList::new();
+    let mut shaper = shaping::Shaper::new().expect("need shaper for render tests");
+    render_doc_with_offset_and_ascii_diagrams(
+        &layout.doc,
+        &style,
+        &mut draw_list,
+        0.0,
+        600.0,
+        0.0,
+        0.0,
+        Some(&mut shaper),
+        &[],
+        Some(&layout.ascii_diagrams),
+    );
+
+    let right_edge_xs = lines
+        .iter()
+        .filter(|line| line.text.starts_with(['┌', '│', '└']))
+        .map(|line| {
+            vertical_border_xs_for_line(&draw_list, line)
+                .last()
+                .copied()
+                .expect("every outer-frame row must draw a right edge")
+        })
+        .collect::<Vec<_>>();
+    assert!(
+        right_edge_xs.windows(2).all(|pair| (pair[0] - pair[1]).abs() < 0.01),
+        "all existing right-edge segments must share one x coordinate: {right_edge_xs:?}"
+    );
+}
+
+#[test]
+fn render_wps_architecture_accumulates_all_outer_tracks_from_the_left_edge() {
+    const EXPECTED_OUTER_COLUMNS: [usize; 4] = [0, 38, 51, 84];
+
+    let layout = build_laid_out(WPS_ARCHITECTURE_DIAGRAM);
+    let code_block = layout.doc.blocks.first().expect("fixture has one code block");
+    let LaidOutBlockKind::CodeBlock { lines, .. } = &code_block.kind else {
+        panic!("fixture must produce a code block");
+    };
+    assert_eq!(lines.len(), 31, "fixture must retain every architecture row");
+
+    let style = default_style();
+    let mut shaper = shaping::Shaper::new().expect("need shaper for render tests");
+    let cell_width =
+        code_cell_width(&mut shaper, style.code_font_size, style.code_font_family.as_deref());
+    let draw_list = render_laid_out(&layout, 2_000.0);
+
+    let top_border_xs = vertical_border_xs_for_line(&draw_list, &lines[0]);
+    assert_eq!(top_border_xs.len(), EXPECTED_OUTER_COLUMNS.len());
+    let client_left_x = top_border_xs[0];
+    let expected_outer_xs =
+        EXPECTED_OUTER_COLUMNS.map(|column| client_left_x + column as f32 * cell_width);
+    for (actual_x, expected_x) in top_border_xs.iter().zip(expected_outer_xs) {
+        assert!(
+            (*actual_x - expected_x).abs() < 0.01,
+            "top-level track must use cumulative column spacing: actual={top_border_xs:?}, expected={expected_outer_xs:?}"
+        );
+    }
+
+    for (row_index, line) in lines.iter().enumerate() {
+        let row_border_xs = vertical_border_xs_for_line(&draw_list, line);
+        let expected_track_indices: &[usize] =
+            if row_index == 26 { &[0, 2, 3] } else { &[0, 1, 2, 3] };
+        for track_index in expected_track_indices.iter().copied() {
+            assert_contains_x(
+                &row_border_xs,
+                expected_outer_xs[track_index],
+                &format!("architecture row {row_index}, outer track {track_index}"),
+            );
+        }
+    }
+
+    let feedback_line = &lines[26];
+    let feedback_border_xs = vertical_border_xs_for_line(&draw_list, feedback_line);
+    assert!(
+        !feedback_border_xs.iter().any(|actual_x| (*actual_x - expected_outer_xs[1]).abs() < 0.01),
+        "feedback row must preserve the missing client-right outer edge"
+    );
+    let feedback_arrow_xs = line_text_xs(&draw_list, feedback_line, "→");
+    assert_eq!(feedback_arrow_xs.len(), 1, "feedback row must draw exactly one arrow");
+    assert!(
+        expected_outer_xs[1] < feedback_arrow_xs[0] && feedback_arrow_xs[0] < expected_outer_xs[2],
+        "feedback arrow must inherit the prefix shift and stay between client and server: arrow={}, client_right={}, server_left={}",
+        feedback_arrow_xs[0],
+        expected_outer_xs[1],
+        expected_outer_xs[2]
+    );
+}
+
+#[test]
+fn render_wps_rolling_window_includes_bottom_corners_in_both_outer_tracks() {
+    const FRAME_START_ROW: usize = 11;
+    const FRAME_END_ROW: usize = 21;
+
+    let layout = build_laid_out(WPS_ROLLING_WINDOW_DIAGRAM);
+    let code_block = layout.doc.blocks.first().expect("fixture has one code block");
+    let LaidOutBlockKind::CodeBlock { lines, .. } = &code_block.kind else {
+        panic!("fixture must produce a code block");
+    };
+    assert_eq!(lines.len(), FRAME_END_ROW + 1, "fixture must retain the bottom border row");
+
+    let draw_list = render_laid_out(&layout, 2_000.0);
+    let frame_border_xs = lines[FRAME_START_ROW..=FRAME_END_ROW]
+        .iter()
+        .enumerate()
+        .map(|(frame_row, line)| {
+            let border_xs = vertical_border_xs_for_line(&draw_list, line);
+            assert_eq!(
+                border_xs.len(),
+                2,
+                "rolling-window frame row {} must draw both outer borders",
+                FRAME_START_ROW + frame_row
+            );
+            [border_xs[0], border_xs[1]]
+        })
+        .collect::<Vec<_>>();
+    let expected_left_x = frame_border_xs[0][0];
+    let expected_right_x = frame_border_xs[0][1];
+    for (frame_row, [left_x, right_x]) in frame_border_xs.iter().copied().enumerate() {
+        assert!(
+            (left_x - expected_left_x).abs() < 0.01 && (right_x - expected_right_x).abs() < 0.01,
+            "rolling-window row {} must share both outer x coordinates: expected=[{}, {}], actual=[{}, {}]",
+            FRAME_START_ROW + frame_row,
+            expected_left_x,
+            expected_right_x,
+            left_x,
+            right_x
+        );
+    }
+}
+
+#[test]
+fn render_wps_open_timeline_uses_shared_vertical_track_xs() {
+    const FIRST_TRACK_ROW: usize = 3;
+    const LAST_TRACK_ROW: usize = 9;
+    const TRACK_COUNT: usize = 5;
+
+    let layout = build_laid_out(WPS_ROLLING_WINDOW_DIAGRAM);
+    let code_block = layout.doc.blocks.first().expect("fixture has one code block");
+    let LaidOutBlockKind::CodeBlock { lines, .. } = &code_block.kind else {
+        panic!("fixture must produce a code block");
+    };
+    let draw_list = render_laid_out(&layout, 2_000.0);
+    let expected_xs = vertical_border_xs_for_line(&draw_list, &lines[FIRST_TRACK_ROW]);
+    assert_eq!(expected_xs.len(), TRACK_COUNT, "fixture must expose five timeline tracks");
+
+    for (row_index, line) in
+        lines.iter().enumerate().take(LAST_TRACK_ROW + 1).skip(FIRST_TRACK_ROW + 1)
+    {
+        let actual_xs = vertical_border_xs_for_line(&draw_list, line);
+        assert_eq!(
+            actual_xs, expected_xs,
+            "timeline row {row_index} must share all vertical track x coordinates"
+        );
+    }
+
+    let stem_center_xs = vertical_border_center_xs_for_line(&draw_list, &lines[LAST_TRACK_ROW]);
+    let arrow_line = &lines[LAST_TRACK_ROW + 1];
+    let arrow_center_xs = line_text_center_xs(&draw_list, arrow_line, "▼");
+    assert_eq!(arrow_center_xs.len(), TRACK_COUNT, "all arrowheads must remain text cells");
+    assert!(
+        stem_center_xs
+            .iter()
+            .zip(&arrow_center_xs)
+            .all(|(stem_x, arrow_x)| (*stem_x - *arrow_x).abs() < 0.01),
+        "arrowheads must share the vertical track centers: stems={stem_center_xs:?}, arrows={arrow_center_xs:?}"
+    );
+    assert!(
+        vertical_border_xs_for_line(&draw_list, arrow_line).is_empty(),
+        "arrowheads must not be converted into box-line geometry"
+    );
+}
+
+#[test]
+fn render_snapped_rectangle_extends_a_shifted_corner_connection() {
+    let layout = build_laid_out("```\n┌────┐\n│x │\n└───┘\n```");
+    let code_block = layout.doc.blocks.first().expect("fixture has one code block");
+    let LaidOutBlockKind::CodeBlock { lines, .. } = &code_block.kind else {
+        panic!("fixture must produce a code block");
+    };
+    let bottom_line = lines.iter().find(|line| line.text == "└───┘").expect("bottom line");
+    let diagram = layout
+        .ascii_diagrams
+        .diagram_for(lines)
+        .expect("fixture must retain its ASCII diagram sidecar");
+    let shifted_corner = diagram.rows[2]
+        .cells
+        .iter()
+        .find(|cell| cell.text == "┘")
+        .expect("bottom row must contain the shifted right corner");
+    let source_column = shifted_corner.column;
+    let render_column = shifted_corner.render_column();
+    assert!(render_column > source_column, "fixture must shift the bottom right corner");
+
+    let style = default_style();
+    let mut draw_list = DrawList::new();
+    let mut shaper = shaping::Shaper::new().expect("need shaper for render tests");
+    let cell_width =
+        code_cell_width(&mut shaper, style.code_font_size, style.code_font_family.as_deref());
+    render_doc_with_offset_and_ascii_diagrams(
+        &layout.doc,
+        &style,
+        &mut draw_list,
+        0.0,
+        600.0,
+        0.0,
+        0.0,
+        Some(&mut shaper),
+        &[],
+        Some(&layout.ascii_diagrams),
+    );
+
+    let thickness = (bottom_line.font_size * 0.08).clamp(1.0, 2.0);
+    let half_thickness = thickness * 0.5;
+    let corner_x = bottom_line.rect.x + render_column as f32 * cell_width;
+    let extension_width = (render_column - source_column) as f32 * cell_width;
+    let expected_horizontal_x = corner_x - extension_width;
+    let expected_horizontal_width = extension_width + cell_width * 0.5 + half_thickness;
+    let expected_horizontal_y = bottom_line.rect.y + bottom_line.rect.h * 0.5 - half_thickness;
+    let expected_vertical_x = corner_x + cell_width * 0.5 - half_thickness;
+    let expected_vertical_height = bottom_line.rect.h * 0.5 + half_thickness;
+    const GEOMETRY_EPSILON: f32 = 0.01;
+
+    let horizontal_connection = draw_list
+        .cmds
+        .iter()
+        .find_map(|command| match command {
+            DrawCmd::FillRect { rect, .. }
+                if (rect.x - expected_horizontal_x).abs() < GEOMETRY_EPSILON
+                    && (rect.y - expected_horizontal_y).abs() < GEOMETRY_EPSILON
+                    && (rect.w - expected_horizontal_width).abs() < GEOMETRY_EPSILON
+                    && (rect.h - thickness).abs() < GEOMETRY_EPSILON =>
+            {
+                Some(rect)
+            }
+            _ => None,
+        })
+        .expect("shifted corner must draw its exact extended left connection");
+    let right_vertical_connection = draw_list
+        .cmds
+        .iter()
+        .find_map(|command| match command {
+            DrawCmd::FillRect { rect, .. }
+                if (rect.x - expected_vertical_x).abs() < GEOMETRY_EPSILON
+                    && (rect.y - bottom_line.rect.y).abs() < GEOMETRY_EPSILON
+                    && (rect.w - thickness).abs() < GEOMETRY_EPSILON
+                    && (rect.h - expected_vertical_height).abs() < GEOMETRY_EPSILON =>
+            {
+                Some(rect)
+            }
+            _ => None,
+        })
+        .expect("shifted corner must draw its right vertical connection");
+
+    assert!(
+        ((horizontal_connection.x + horizontal_connection.w)
+            - (right_vertical_connection.x + right_vertical_connection.w))
+            .abs()
+            < GEOMETRY_EPSILON,
+        "extended horizontal connection must end with the expected overlap on the right vertical edge"
+    );
+}
+
+#[test]
+fn render_keeps_shifted_text_beyond_a_corner_extension() {
+    let layout = build_laid_out("```\n┌──┐ X\n│  │\n└────┘\n```");
+    let code_block = layout.doc.blocks.first().expect("fixture has one code block");
+    let LaidOutBlockKind::CodeBlock { lines, .. } = &code_block.kind else {
+        panic!("fixture must produce a code block");
+    };
+    let top_line = lines.iter().find(|line| line.text == "┌──┐ X").expect("top line");
+    let diagram = layout
+        .ascii_diagrams
+        .diagram_for(lines)
+        .expect("fixture must retain its ASCII diagram sidecar");
+    let text_cell = diagram.rows[0]
+        .cells
+        .iter()
+        .find(|cell| cell.text == "X")
+        .expect("top row must retain the shifted text cell");
+
+    let style = default_style();
+    let mut draw_list = DrawList::new();
+    let mut shaper = shaping::Shaper::new().expect("need shaper for render tests");
+    let cell_width =
+        code_cell_width(&mut shaper, style.code_font_size, style.code_font_family.as_deref());
+    render_doc_with_offset_and_ascii_diagrams(
+        &layout.doc,
+        &style,
+        &mut draw_list,
+        0.0,
+        600.0,
+        0.0,
+        0.0,
+        Some(&mut shaper),
+        &[],
+        Some(&layout.ascii_diagrams),
+    );
+
+    assert_eq!(text_cell.render_column(), 7);
+    let text_center_x = top_line.rect.x
+        + (text_cell.render_column() as f32 + text_cell.column_width as f32 * 0.5) * cell_width;
+    let extension_overlaps_shifted_text = draw_list.cmds.iter().any(|command| match command {
+        DrawCmd::FillRect { rect, .. } => {
+            rect.y >= top_line.rect.y
+                && rect.y + rect.h <= top_line.rect.y + top_line.rect.h
+                && rect.h <= 2.0
+                && rect.x < text_center_x
+                && text_center_x < rect.x + rect.w
+        }
+        _ => false,
+    });
+    assert!(
+        !extension_overlaps_shifted_text,
+        "the corner extension must end before text shifted with the row suffix"
+    );
+}
+
+#[test]
+fn render_keeps_shifted_text_beyond_a_moved_middle_edge() {
+    let layout = build_laid_out("```\n┌────┐\n│  │ X\n└────┘\n```");
+    let code_block = layout.doc.blocks.first().expect("fixture has one code block");
+    let LaidOutBlockKind::CodeBlock { lines, .. } = &code_block.kind else {
+        panic!("fixture must produce a code block");
+    };
+    let middle_line = lines.iter().find(|line| line.text == "│  │ X").expect("middle line");
+    let diagram = layout
+        .ascii_diagrams
+        .diagram_for(lines)
+        .expect("fixture must retain its ASCII diagram sidecar");
+    let text_cell = diagram.rows[1]
+        .cells
+        .iter()
+        .find(|cell| cell.text == "X")
+        .expect("middle row must retain the shifted text cell");
+
+    let style = default_style();
+    let mut draw_list = DrawList::new();
+    let mut shaper = shaping::Shaper::new().expect("need shaper for render tests");
+    let cell_width =
+        code_cell_width(&mut shaper, style.code_font_size, style.code_font_family.as_deref());
+    render_doc_with_offset_and_ascii_diagrams(
+        &layout.doc,
+        &style,
+        &mut draw_list,
+        0.0,
+        600.0,
+        0.0,
+        0.0,
+        Some(&mut shaper),
+        &[],
+        Some(&layout.ascii_diagrams),
+    );
+
+    assert_eq!(text_cell.render_column(), 7);
+    let text_center_x = middle_line.rect.x
+        + (text_cell.render_column() as f32 + text_cell.column_width as f32 * 0.5) * cell_width;
+    let vertical_edge_overlaps_text = draw_list.cmds.iter().any(|command| match command {
+        DrawCmd::FillRect { rect, .. } => {
+            rect.y >= middle_line.rect.y
+                && rect.y + rect.h <= middle_line.rect.y + middle_line.rect.h
+                && rect.w <= 2.0
+                && rect.h > 8.0
+                && rect.x <= text_center_x
+                && text_center_x <= rect.x + rect.w
+        }
+        _ => false,
+    });
+    assert!(
+        !vertical_edge_overlaps_text,
+        "the middle edge must remain left of text shifted with the row suffix"
+    );
+}
+
+fn vertical_border_xs_for_line(draw_list: &DrawList, line: &LaidOutLine) -> Vec<f32> {
+    let line_bottom = line.rect.y + line.rect.h;
+    let mut xs = draw_list
+        .cmds
+        .iter()
+        .filter_map(|command| match command {
+            DrawCmd::FillRect { rect, .. }
+                if rect.w <= 2.0
+                    && rect.h > 8.0
+                    && rect.y >= line.rect.y
+                    && rect.y + rect.h <= line_bottom =>
+            {
+                Some(rect.x)
+            }
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    xs.sort_by(f32::total_cmp);
+    xs.dedup_by(|left, right| (*left - *right).abs() < 0.01);
+    xs
+}
+
+fn vertical_border_center_xs_for_line(draw_list: &DrawList, line: &LaidOutLine) -> Vec<f32> {
+    let line_bottom = line.rect.y + line.rect.h;
+    let mut xs = draw_list
+        .cmds
+        .iter()
+        .filter_map(|command| match command {
+            DrawCmd::FillRect { rect, .. }
+                if rect.w <= 2.0
+                    && rect.h > 8.0
+                    && rect.y >= line.rect.y
+                    && rect.y + rect.h <= line_bottom =>
+            {
+                Some(rect.x + rect.w * 0.5)
+            }
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    xs.sort_by(f32::total_cmp);
+    xs.dedup_by(|left, right| (*left - *right).abs() < 0.01);
+    xs
+}
+
+#[test]
+fn render_normal_code_block_keeps_single_text_line_path() {
+    let dl = build_and_render("```\nlet value = 1;\n```");
+    let text_count = dl
+        .cmds
+        .iter()
+        .filter(|command| {
+            matches!(command, DrawCmd::TextLayout { layout, .. } if layout.text == "let value = 1;")
+        })
+        .count();
+    assert_eq!(text_count, 1, "normal code must not be split into grid cells");
+}
+
+#[test]
+fn render_active_ascii_diagram_keeps_text_path() {
+    let source = "```\n┌────┐\n│中文│\n└────┘\n```";
+    let cursor = source.find("中文").expect("fixture has CJK label");
+    let (dl, _) = build_and_render_editing(source, cursor);
+    assert!(dl.cmds.iter().any(
+        |command| matches!(command, DrawCmd::TextLayout { layout, .. } if layout.text.contains("中文"))
+    ));
+}
+
+#[test]
+fn render_ascii_diagram_preserves_highlight_span_colors() {
+    const HIGHLIGHT_COLOR: [f32; 4] = [0.9, 0.3, 0.1, 1.0];
+
+    struct DiagramHighlighter;
+
+    impl CodeHighlighter for DiagramHighlighter {
+        fn highlight(&self, _language: &str, code: &str) -> Vec<Vec<HighlightSpan>> {
+            code.lines()
+                .map(|line| {
+                    if line == "│fn │" {
+                        vec![HighlightSpan {
+                            start: "│".len(),
+                            len: "fn".len(),
+                            color: HIGHLIGHT_COLOR,
+                        }]
+                    } else {
+                        vec![]
+                    }
+                })
+                .collect()
+        }
+    }
+
+    let dl = build_and_render_with_highlighter(
+        "```diagram\n┌───┐\n│fn │\n└───┘\n```",
+        &DiagramHighlighter,
+    );
+    let highlighted_cells = dl
+        .cmds
+        .iter()
+        .filter(|command| {
+            matches!(
+                command,
+                DrawCmd::TextLayout { layout, color, .. }
+                    if (layout.text == "f" || layout.text == "n") && *color == HIGHLIGHT_COLOR
+            )
+        })
+        .count();
+
+    assert_eq!(highlighted_cells, 2, "grid cells must retain their syntax highlight color");
+}
+
+#[test]
+fn render_ascii_diagram_without_shaper_skips_grid_geometry() {
+    let layout = build_laid_out("```\n┌────┐\n│中文│\n└────┘\n```");
+    let style = default_style();
+    let mut dl = DrawList::new();
+    render_doc_with_offset_and_ascii_diagrams(
+        &layout.doc,
+        &style,
+        &mut dl,
+        0.0,
+        600.0,
+        0.0,
+        0.0,
+        None,
+        &[],
+        Some(&layout.ascii_diagrams),
+    );
+
+    assert!(
+        !dl.cmds.iter().any(|command| {
+            matches!(command, DrawCmd::FillRect { rect, .. } if rect.w <= 2.0 && rect.h > 8.0)
+        }),
+        "without a shaper the renderer must keep the existing non-grid fallback"
+    );
+}
+
+#[test]
+fn render_ascii_diagram_unknown_box_drawing_character_uses_text_fallback() {
+    let draw_list = build_and_render("```\n┌──┐\n│═ │\n└──┘\n```");
+    assert!(draw_list.cmds.iter().any(
+        |command| matches!(command, DrawCmd::TextLayout { layout, .. } if layout.text == "═")
+    ));
+}
+
+#[test]
+fn render_ascii_diagram_with_mismatched_rows_keeps_text_line_path() {
+    let mut layout = build_laid_out("```\n┌────┐\n│中文│\n└────┘\n```");
+    let (doc, ascii_diagrams) = (&mut layout.doc, &mut layout.ascii_diagrams);
+    let block = doc.blocks.first().expect("fixture has one code block");
+    let LaidOutBlockKind::CodeBlock { lines, .. } = &block.kind else {
+        panic!("fixture must produce a code block");
+    };
+    ascii_diagrams.remove_last_row_for(lines);
+
+    let style = default_style();
+    let mut dl = DrawList::new();
+    let mut shaper = shaping::Shaper::new().expect("need shaper for render tests");
+    render_doc_with_offset_and_ascii_diagrams(
+        doc,
+        &style,
+        &mut dl,
+        0.0,
+        600.0,
+        0.0,
+        0.0,
+        Some(&mut shaper),
+        &[],
+        Some(ascii_diagrams),
+    );
+
+    assert!(dl.cmds.iter().any(
+        |command| matches!(command, DrawCmd::TextLayout { layout, .. } if layout.text == "│中文│")
+    ));
+}
+
+#[test]
+fn render_horizontal_rule_emits_fill() {
+    let dl = build_and_render("text\n\n---");
+    let has_fill = dl.cmds.iter().any(|c| matches!(c, DrawCmd::FillRect { .. }));
+    assert!(has_fill, "horizontal rule should emit FillRect");
+}
+
+#[test]
+fn render_empty_doc_is_noop() {
+    let dl = build_and_render("");
+    // Empty doc: only PushClip + PopClip
+    assert_eq!(dl.cmds.len(), 2, "empty doc should only have clip commands");
+}
+
+#[test]
+fn render_inline_code_has_background() {
+    let dl = build_and_render("use `println!` here");
+    // Should have at least one FillRect (inline code background)
+    let fill_count = dl.cmds.iter().filter(|c| matches!(c, DrawCmd::FillRect { .. })).count();
+    assert!(fill_count >= 1, "inline code should have background FillRect, got {}", fill_count);
+    // Should have text commands for the segments
+    let text_count = dl.cmds.iter().filter(|c| matches!(c, DrawCmd::TextLayout { .. })).count();
+    assert!(
+        text_count >= 2,
+        "should have multiple text segments for styled line, got {}",
+        text_count
+    );
+}
+
+#[test]
+fn render_inline_code_background_does_not_overlap_adjacent_text() {
+    const BACKGROUND_EDGE_TOLERANCE_PX: f32 = 0.5;
+
+    let dl = build_and_render("a`code`b");
+    let code_text = dl
+        .cmds
+        .iter()
+        .find_map(|cmd| {
+            if let DrawCmd::TextLayout { layout, x, .. } = cmd
+                && layout.text == "code"
+            {
+                return Some((*x, layout.shaped.width));
+            }
+            None
+        })
+        .expect("inline code text should render as its own text command");
+    let background_rect = dl
+        .cmds
+        .iter()
+        .find_map(|cmd| {
+            if let DrawCmd::FillRect { rect, color, .. } = cmd
+                && *color == default_style().inline_code_bg
+            {
+                return Some(*rect);
+            }
+            None
+        })
+        .expect("inline code background should render");
+
+    let code_left = code_text.0;
+    let code_right = code_text.0 + code_text.1;
+    let background_right = background_rect.x + background_rect.w;
+
+    assert!(
+        background_rect.x + BACKGROUND_EDGE_TOLERANCE_PX >= code_left,
+        "inline code background should not enter preceding text; background={background_rect:?}, code_left={code_left}"
+    );
+    assert!(
+        background_right <= code_right + BACKGROUND_EDGE_TOLERANCE_PX,
+        "inline code background should not enter following text; background={background_rect:?}, code_right={code_right}"
+    );
+}
+
+#[test]
+fn render_inline_code_background_keeps_padding_when_spacing_allows() {
+    let dl = build_and_render("a `code` b");
+    let code_text = dl
+        .cmds
+        .iter()
+        .find_map(|cmd| {
+            if let DrawCmd::TextLayout { layout, x, .. } = cmd
+                && layout.text == "code"
+            {
+                return Some((*x, layout.shaped.width));
+            }
+            None
+        })
+        .expect("inline code text should render as its own text command");
+    let background_rect = dl
+        .cmds
+        .iter()
+        .find_map(|cmd| {
+            if let DrawCmd::FillRect { rect, color, .. } = cmd
+                && *color == default_style().inline_code_bg
+            {
+                return Some(*rect);
+            }
+            None
+        })
+        .expect("inline code background should render");
+
+    assert!(
+        background_rect.x < code_text.0,
+        "inline code background should add left padding when spacing allows; background={background_rect:?}, code_x={}",
+        code_text.0
+    );
+    assert!(
+        background_rect.x + background_rect.w > code_text.0 + code_text.1,
+        "inline code background should add right padding when spacing allows; background={background_rect:?}, code_right={}",
+        code_text.0 + code_text.1
+    );
+}
+
+#[test]
+fn render_inline_code_color_differs_from_base() {
+    let md = "`code`";
+    let parsed = parse_markdown(md);
+    let style = default_style();
+    let doc = MarkdownDoc::build(&parsed, &style);
+    let laid_out = layout_doc(&doc.blocks, &style, 400.0, &core::document::StringDocView::new(md));
+    let mut dl = DrawList::new();
+    let mut test_shaper = shaping::Shaper::new().unwrap();
+    render_doc(&laid_out, &style, &mut dl, 0.0, 600.0, Some(&mut test_shaper));
+    // Find the text command for inline code - should use code_color
+    let code_texts: Vec<_> = dl
+        .cmds
+        .iter()
+        .filter_map(|c| {
+            if let DrawCmd::TextLayout { layout, color, .. } = c {
+                if layout.text.contains("code") { Some(*color) } else { None }
+            } else {
+                None
+            }
+        })
+        .collect();
+    assert!(!code_texts.is_empty(), "should render inline code text");
+    // code_color should differ from link_color (sanity check)
+    assert_ne!(code_texts[0], style.link_color, "inline code should not use link color");
+}
+
+#[test]
+fn render_strikethrough_thickness_scales_with_high_dpi_font_size() {
+    let markdown = "~~deleted~~";
+    let parsed = parse_markdown(markdown);
+    let mut style = default_style();
+    style.body_font_size *= 2.0;
+    let doc = MarkdownDoc::build(&parsed, &style);
+    let laid_out =
+        layout_doc(&doc.blocks, &style, 800.0, &core::document::StringDocView::new(markdown));
+    let mut draw_list = DrawList::new();
+    let mut shaper = shaping::Shaper::new().expect("render test requires a text shaper");
+    render_doc(&laid_out, &style, &mut draw_list, 0.0, 600.0, Some(&mut shaper));
+
+    let strikethrough = draw_list
+        .cmds
+        .iter()
+        .find_map(|command| match command {
+            DrawCmd::FillRect { rect, color, .. }
+                if *color == style.text_color && rect.w > rect.h =>
+            {
+                Some(*rect)
+            }
+            _ => None,
+        })
+        .expect("strikethrough should render as a text-colored rectangle");
+
+    assert_eq!(strikethrough.h, 2.0, "2x DPI should produce a 2px strikethrough");
+}
+
+#[test]
+fn render_wysiwyg_source_marker_uses_muted_color() {
+    let (draw_list, style) = build_and_render_editing("# Title", 1);
+    let marker_color =
+        text_command_color(&draw_list, "# ").expect("marker should render as its own text");
+    let text_color =
+        text_command_color(&draw_list, "Title").expect("body text should render separately");
+    let expected_marker_color =
+        blend_toward_bg(style.heading_color, style.background_color, SOURCE_MARKER_FADE_RATIO);
+
+    assert_eq!(text_color, style.heading_color, "heading text should keep heading color");
+    assert_eq!(marker_color, expected_marker_color, "source marker should be muted");
+}
+
+#[test]
+fn render_wysiwyg_inline_source_markers_use_muted_color() {
+    let (draw_list, style) = build_and_render_editing("**bold**", 3);
+    let marker_colors = text_command_colors(&draw_list, "**");
+    let bold_color =
+        text_command_color(&draw_list, "bold").expect("bold text should render separately");
+    let expected_marker_color =
+        blend_toward_bg(style.text_color, style.background_color, SOURCE_MARKER_FADE_RATIO);
+
+    assert_eq!(marker_colors.len(), 2, "both bold markers should render separately");
+    assert!(marker_colors.iter().all(|color| *color == expected_marker_color));
+    assert_eq!(bold_color, style.text_color, "bold content should keep normal color");
+}
+
+#[test]
+fn focused_inline_code_draws_both_source_delimiters() {
+    for source in [
+        "before `code` after",
+        "# before `code` after",
+        "- before `code` after",
+        "> before `code` after",
+        "**before `code` after**",
+        "[before `code` after](https://example.com)",
+        "| before `code` after |\n| --- |",
+    ] {
+        let cursor_byte = source.find("code").expect("fixture contains inline code");
+        let (drawing, _) = build_and_render_editing(source, cursor_byte);
+        assert_eq!(
+            text_command_colors(&drawing, "`").len(),
+            2,
+            "focused inline code must draw both delimiters: {source:?}",
+        );
+    }
+}
+
+#[test]
+fn table_inline_code_delimiters_follow_focus_and_keep_source_anchors() {
+    use ui::plugin::ViewPlugin;
+
+    let source = "| heading | other |\n| --- | --- |\n| before `中文` after | `next` |";
+    let code_start = source.find('`').expect("fixture contains inline code");
+    let code_end = code_start + "`中文`".len();
+    let next_code_cursor = source.find("next").expect("fixture contains adjacent code");
+    let document = core::document::StringDocView::new(source);
+    let mut editor = crate::view::MarkdownView::new();
+    editor.set_source(source.to_owned(), 1);
+    editor.engine_mut().set_edit_source(Some(source.to_owned()));
+    let mut shaper = shaping::Shaper::new().expect("focus test requires a text shaper");
+    for (cursor_byte, expected_delimiters) in
+        [(0, 0), (code_start + "`".len(), 2), (next_code_cursor, 2), (0, 0)]
+    {
+        editor.engine_mut().handle_set_cursor_byte(cursor_byte);
+        let drawing = ViewPlugin::render(
+            &mut editor,
+            &document,
+            Rect::new(0.0, 0.0, 800.0, 600.0),
+            &ui::theme::test_theme(),
+            &mut shaper,
+            1.0,
+        );
+        assert_eq!(text_command_colors(&drawing, "`").len(), expected_delimiters);
+        if cursor_byte < code_start || cursor_byte > code_end {
+            assert!(
+                !editor.engine().flat_lines().iter().any(|line| line.text.contains("`中文`")),
+                "the previous cell's delimiters must fold when focus leaves it"
+            );
+            continue;
+        }
+        let line = editor
+            .engine()
+            .flat_lines()
+            .iter()
+            .find(|line| line.text.contains("`中文`"))
+            .expect("focused table cell must expose its code delimiters");
+        let projection = line.source_projection.as_ref().expect("editable cell needs anchors");
+        for byte in (code_start..=code_end).filter(|&byte| source.is_char_boundary(byte)) {
+            assert!(
+                projection.boundaries.iter().any(|anchor| anchor.byte == byte),
+                "expanded table code must retain source boundary {byte}"
+            );
+        }
+    }
+}
+
+#[test]
+fn render_table_has_zebra_stripes() {
+    let md = "| A | B |\n|---|---|\n| 1 | 2 |\n| 3 | 4 |\n| 5 | 6 |";
+    let dl = build_and_render(md);
+    // Should have multiple FillRect commands for header bg, stripe bg, separators
+    let fill_count = dl.cmds.iter().filter(|c| matches!(c, DrawCmd::FillRect { .. })).count();
+    // At least: header bg + header separator + stripe for row 2 + row separators + vertical grid
+    assert!(fill_count >= 5, "table with 3 body rows should have stripe fills, got {}", fill_count);
+}
+
+#[test]
+fn render_blockquote_uses_bg_color() {
+    let dl = build_and_render("> quote");
+    let expected_background = default_style().blockquote_bg;
+    assert!(
+        dl.cmds.iter().any(|command| matches!(
+            command, DrawCmd::FillRect { color, .. } if *color == expected_background
+        )),
+        "blockquote should render its resolved theme background"
+    );
+}
+
+#[test]
+fn render_table_single_row_no_extra_stripe() {
+    let md = "| A | B |\n|---|---|\n| 1 | 2 |";
+    let parsed = parse_markdown(md);
+    let style = default_style();
+    let doc = MarkdownDoc::build(&parsed, &style);
+    let laid_out = layout_doc(&doc.blocks, &style, 400.0, &core::document::StringDocView::new(md));
+    let mut dl = DrawList::new();
+    render_doc(&laid_out, &style, &mut dl, 0.0, 600.0, None);
+    // Single body row (row_idx=0, even) should NOT get stripe bg
+    // The stripe bg uses table_stripe_bg which has alpha 1.0
+    // Count fills with table_stripe_bg color
+    let stripe_color = style.table_stripe_bg;
+    let stripe_count = dl
+        .cmds
+        .iter()
+        .filter(|c| matches!(c, DrawCmd::FillRect { color, .. } if *color == stripe_color))
+        .count();
+    assert_eq!(stripe_count, 0, "single body row (even index) should have no stripe");
+}
+
+#[test]
+fn render_bold_text_uses_bold_weight() {
+    let dl = build_and_render("**bold** text");
+    // Find text command for "bold"
+    let bold_cmds: Vec<_> = dl
+        .cmds
+        .iter()
+        .filter_map(|c| {
+            if let DrawCmd::TextLayout { layout, .. } = c {
+                if layout.text.contains("bold") { Some(layout.font_weight) } else { None }
+            } else {
+                None
+            }
+        })
+        .collect();
+    assert!(
+        bold_cmds.contains(&Weight::SEMIBOLD),
+        "bold text should use Weight::SEMIBOLD, got {:?}",
+        bold_cmds
+    );
+}
+
+#[test]
+fn render_italic_text_uses_italic_flag() {
+    let dl = build_and_render("*italic* text");
+    let italic_cmds: Vec<_> = dl
+        .cmds
+        .iter()
+        .filter_map(|c| {
+            if let DrawCmd::TextLayout { layout, .. } = c {
+                if layout.text.contains("italic") { Some(layout.italic) } else { None }
+            } else {
+                None
+            }
+        })
+        .collect();
+    assert!(
+        italic_cmds.iter().any(|&italic| italic),
+        "italic text should have italic flag set, got {:?}",
+        italic_cmds
+    );
+}
+
+#[test]
+fn render_code_line_uses_monospace_family() {
+    let dl = build_and_render("```\ncode\n```");
+    // Code block text should use monospace font family
+    let code_texts: Vec<_> = dl
+        .cmds
+        .iter()
+        .filter_map(|c| {
+            if let DrawCmd::TextLayout { layout, .. } = c {
+                if layout.text.contains("code") { Some(layout.font_family.clone()) } else { None }
+            } else {
+                None
+            }
+        })
+        .collect();
+    assert!(
+        code_texts.iter().any(|f| f.as_deref() == Some("monospace")),
+        "code block should use monospace font, got {:?}",
+        code_texts
+    );
+}
+
+#[test]
+fn render_body_text_font_family_restored() {
+    let dl = build_and_render("normal **bold** normal");
+    // Collect all text commands with their font families
+    let all_texts: Vec<_> = dl
+        .cmds
+        .iter()
+        .filter_map(|c| {
+            if let DrawCmd::TextLayout { layout, .. } = c {
+                Some((layout.text.clone(), layout.font_family.clone()))
+            } else {
+                None
+            }
+        })
+        .collect();
+    // All body text (non-code) should have sans-serif font family
+    for (content, family) in &all_texts {
+        if !content.is_empty() {
+            assert_eq!(
+                family.as_deref(),
+                Some("PingFang SC"),
+                "body text '{}' should use PingFang SC font family, got {:?}",
+                content,
+                family
+            );
+        }
+    }
+}
+
+#[test]
+fn nested_list_bullet_varies_by_depth() {
+    // Top-level: "•", nested: "◦"
+    let md = "- top\n  - nested";
+    let dl = build_and_render(md);
+    let bullets: Vec<String> = dl
+        .cmds
+        .iter()
+        .filter_map(|c| {
+            if let DrawCmd::TextLayout { layout, .. } = c {
+                if layout.text == "•" || layout.text == "◦" || layout.text == "▪" {
+                    Some(layout.text.clone())
+                } else {
+                    None
+                }
+            } else {
+                None
+            }
+        })
+        .collect();
+    assert!(bullets.contains(&"•".to_string()), "top-level should use •");
+    assert!(bullets.contains(&"◦".to_string()), "nested should use ◦");
+}
+
+#[test]
+fn unchecked_tasklist_has_subtle_border() {
+    let md = "- [ ] unchecked\n- [x] checked";
+    let dl = build_and_render(md);
+    // All checkbox borders should be fully opaque (blend_toward_bg keeps alpha=1.0)
+    let strokes: Vec<[f32; 4]> = dl
+        .cmds
+        .iter()
+        .filter_map(|c| if let DrawCmd::StrokeRect { color, .. } = c { Some(*color) } else { None })
+        .collect();
+    assert!(
+        strokes.iter().all(|c| c[3] >= 0.99),
+        "all borders should be opaque, got {:?}",
+        strokes
+    );
+    // Unchecked border should be blended toward background (dimmer than checked)
+    let _bg = [1.0, 1.0, 1.0, 1.0]; // test theme bg
+    let unchecked = strokes[0];
+    let checked = strokes[1];
+    let unchecked_lum = unchecked[0] + unchecked[1] + unchecked[2];
+    let checked_lum = checked[0] + checked[1] + checked[2];
+    // Unchecked is blended toward bg so in light theme it should be brighter (higher sum)
+    assert!(unchecked_lum != checked_lum, "unchecked and checked should differ visually");
+    // Checked state should render a x checkmark
+    let has_checkmark = dl.cmds.iter().any(|c| {
+        if let DrawCmd::TextLayout { layout, .. } = c { layout.text == "x" } else { false }
+    });
+    assert!(has_checkmark, "checked checkbox should render a x checkmark");
+}
+
+#[test]
+fn render_table_cell_text_no_chars_lost_at_different_widths() {
+    // End-to-end: render table with CJK + inline code at multiple widths.
+    // Extract all rendered text from DrawList and verify no characters lost.
+    let md = "| 状图（├── `mod.rs  # comment`）整行 |\n|---|\n| x |";
+    let source_texts = ["状图（├──", "mod.rs  # comment", "）整行"];
+    for &w in &[100.0, 188.0, 300.0, 500.0, 800.0] {
+        let parsed = parse_markdown(md);
+        let style = default_style();
+        let doc = MarkdownDoc::build(&parsed, &style);
+        let laid_out = layout_doc(&doc.blocks, &style, w, &core::document::StringDocView::new(md));
+        let mut dl = DrawList::new();
+        let mut shaper = shaping::Shaper::new().expect("need shaper");
+        render_doc(&laid_out, &style, &mut dl, 0.0, 600.0, Some(&mut shaper));
+        // Collect all rendered text
+        let mut rendered = String::new();
+        for cmd in &dl.cmds {
+            if let DrawCmd::TextLayout { layout, .. } = cmd {
+                rendered.push_str(&layout.text);
+            }
+        }
+        for expected in &source_texts {
+            assert!(
+                rendered.contains(expected),
+                "missing {:?} at w={}: rendered={:?}",
+                expected,
+                w,
+                rendered
+            );
+        }
+    }
+}
+
+#[test]
+fn first_visible_block_idx_finds_block() {
+    let md = "# H1\n\nparagraph text\n\n## H2";
+    let parsed = parse_markdown(md);
+    let style = default_style();
+    let doc = MarkdownDoc::build(&parsed, &style);
+    let laid_out = layout_doc(&doc.blocks, &style, 400.0, &core::document::StringDocView::new(md));
+    assert!(laid_out.blocks.len() >= 2);
+
+    // At top: first block visible
+    assert_eq!(first_visible_block_idx(&laid_out.blocks, &[], 0.0), 0);
+
+    // Scroll past first block
+    let past_h1 = laid_out.blocks[0].rect.y + laid_out.blocks[0].rect.h + 1.0;
+    assert!(first_visible_block_idx(&laid_out.blocks, &[], past_h1) >= 1);
+
+    // Scroll past end: clamp to last
+    let way_past = laid_out.total_height + 1000.0;
+    assert_eq!(first_visible_block_idx(&laid_out.blocks, &[], way_past), laid_out.blocks.len() - 1);
+}
+
+#[test]
+fn culling_excludes_block_above_viewport() {
+    let md = "# Top\n\n## Bottom";
+    let parsed = parse_markdown(md);
+    let style = default_style();
+    let doc = MarkdownDoc::build(&parsed, &style);
+    let laid_out = layout_doc(&doc.blocks, &style, 400.0, &core::document::StringDocView::new(md));
+    // Scroll past first heading
+    let scroll_y = laid_out.blocks[0].rect.y + laid_out.blocks[0].rect.h + 10.0;
+    let mut dl = DrawList::new();
+    let mut shaper = shaping::Shaper::new().unwrap();
+    render_doc_with_offset(
+        &laid_out,
+        &style,
+        &mut dl,
+        scroll_y,
+        600.0,
+        0.0,
+        0.0,
+        Some(&mut shaper),
+        &[],
+    );
+    let texts: Vec<&str> = dl
+        .cmds
+        .iter()
+        .filter_map(|c| {
+            if let DrawCmd::TextLayout { layout, .. } = c {
+                Some(layout.text.as_str())
+            } else {
+                None
+            }
+        })
+        .collect();
+    assert!(!texts.iter().any(|t| t.contains("Top")), "block above viewport excluded");
+    assert!(texts.iter().any(|t| t.contains("Bottom")), "visible block included");
+}
+
+#[test]
+fn culling_excludes_block_below_viewport() {
+    let md = "# Top\n\n## Bottom";
+    let parsed = parse_markdown(md);
+    let style = default_style();
+    let doc = MarkdownDoc::build(&parsed, &style);
+    let laid_out = layout_doc(&doc.blocks, &style, 400.0, &core::document::StringDocView::new(md));
+    let small_vp = laid_out.blocks[0].rect.y + laid_out.blocks[0].rect.h + 5.0;
+    let mut dl = DrawList::new();
+    let mut shaper = shaping::Shaper::new().unwrap();
+    render_doc_with_offset(
+        &laid_out,
+        &style,
+        &mut dl,
+        0.0,
+        small_vp,
+        0.0,
+        0.0,
+        Some(&mut shaper),
+        &[],
+    );
+    let texts: Vec<&str> = dl
+        .cmds
+        .iter()
+        .filter_map(|c| {
+            if let DrawCmd::TextLayout { layout, .. } = c {
+                Some(layout.text.as_str())
+            } else {
+                None
+            }
+        })
+        .collect();
+    assert!(!texts.iter().any(|t| t.contains("Bottom")), "block below viewport excluded");
+    assert!(texts.iter().any(|t| t.contains("Top")), "visible block included");
+}
+
+#[test]
+fn blockquote_border_rendered_even_when_child_culled() {
+    let md = "> quoted\n> text";
+    let parsed = parse_markdown(md);
+    let style = default_style();
+    let doc = MarkdownDoc::build(&parsed, &style);
+    let laid_out = layout_doc(&doc.blocks, &style, 400.0, &core::document::StringDocView::new(md));
+    let blockquote = &laid_out.blocks[0];
+    // Scroll to show only the bottom half of the blockquote
+    let scroll_y = blockquote.rect.y + blockquote.rect.h * 0.5;
+    let mut dl = DrawList::new();
+    let mut shaper = shaping::Shaper::new().unwrap();
+    render_doc_with_offset(
+        &laid_out,
+        &style,
+        &mut dl,
+        scroll_y,
+        600.0,
+        0.0,
+        0.0,
+        Some(&mut shaper),
+        &[],
+    );
+    // Blockquote border should still be rendered (the block IS visible, just scrolled)
+    let has_border = dl
+        .cmds
+        .iter()
+        .any(|c| matches!(c, DrawCmd::FillRect { color, .. } if *color == style.blockquote_border));
+    assert!(has_border, "blockquote border must render when block is visible");
+}
+
+#[test]
+fn culling_excludes_codeblock_line_above_viewport() {
+    let md = "```\nline1\nline2\nline3\n```";
+    let parsed = parse_markdown(md);
+    let style = default_style();
+    let doc = MarkdownDoc::build(&parsed, &style);
+    let laid_out = layout_doc(&doc.blocks, &style, 400.0, &core::document::StringDocView::new(md));
+    let block = &laid_out.blocks[0];
+    // Extract line positions
+    if let LaidOutBlockKind::CodeBlock { lines, .. } = &block.kind {
+        assert!(lines.len() >= 2, "need at least 2 lines");
+        // Scroll past first line
+        let scroll_y = lines[0].rect.y + lines[0].rect.h + 1.0;
+        let mut dl = DrawList::new();
+        let mut shaper = shaping::Shaper::new().unwrap();
+        render_doc_with_offset(
+            &laid_out,
+            &style,
+            &mut dl,
+            scroll_y,
+            600.0,
+            0.0,
+            0.0,
+            Some(&mut shaper),
+            &[],
+        );
+        // line1 should not appear, line2/line3 should
+        let texts: Vec<&str> = dl
+            .cmds
+            .iter()
+            .filter_map(|c| {
+                if let DrawCmd::TextLayout { layout, .. } = c {
+                    Some(layout.text.as_str())
+                } else {
+                    None
+                }
+            })
+            .collect();
+        let rendered: String = texts.concat();
+        assert!(!rendered.contains("line1"), "line above viewport should be culled");
+        assert!(
+            rendered.contains("line2") || rendered.contains("line3"),
+            "visible lines should render"
+        );
+    } else {
+        panic!("expected CodeBlock");
+    }
+}
+
+#[test]
+fn culling_excludes_listitem_line_above_viewport() {
+    let md = "- item one\n- item two\n- item three";
+    let parsed = parse_markdown(md);
+    let style = default_style();
+    let doc = MarkdownDoc::build(&parsed, &style);
+    let laid_out = layout_doc(&doc.blocks, &style, 400.0, &core::document::StringDocView::new(md));
+    assert!(laid_out.blocks.len() >= 2, "need at least 2 list items");
+    // Scroll past first item
+    let scroll_y = laid_out.blocks[0].rect.y + laid_out.blocks[0].rect.h + 1.0;
+    let mut dl = DrawList::new();
+    let mut shaper = shaping::Shaper::new().unwrap();
+    render_doc_with_offset(
+        &laid_out,
+        &style,
+        &mut dl,
+        scroll_y,
+        600.0,
+        0.0,
+        0.0,
+        Some(&mut shaper),
+        &[],
+    );
+    let texts: Vec<&str> = dl
+        .cmds
+        .iter()
+        .filter_map(|c| {
+            if let DrawCmd::TextLayout { layout, .. } = c {
+                Some(layout.text.as_str())
+            } else {
+                None
+            }
+        })
+        .collect();
+    let rendered: String = texts.concat();
+    assert!(!rendered.contains("item one"), "list item above viewport should be culled");
+    assert!(
+        rendered.contains("item two") || rendered.contains("item three"),
+        "visible items should render"
+    );
+}
+
+#[test]
+fn empty_doc_renders_nothing() {
+    let md = "";
+    let parsed = parse_markdown(md);
+    let style = default_style();
+    let doc = MarkdownDoc::build(&parsed, &style);
+    let laid_out = layout_doc(&doc.blocks, &style, 400.0, &core::document::StringDocView::new(md));
+    let mut dl = DrawList::new();
+    let mut shaper = shaping::Shaper::new().unwrap();
+    render_doc_with_offset(
+        &laid_out,
+        &style,
+        &mut dl,
+        0.0,
+        600.0,
+        0.0,
+        0.0,
+        Some(&mut shaper),
+        &[],
+    );
+    // Should only have PushClip and PopClip
+    assert!(
+        dl.cmds.len() <= 2,
+        "empty doc should produce no draw commands beyond clip, got {}",
+        dl.cmds.len()
+    );
+}
+
+#[test]
+fn code_block_uses_border_radius_base() {
+    let dl = build_and_render(
+        "```
+code
+```",
+    );
+    // CodeBlock background should use border_radius_base (8.0), not hardcoded 4.0
+    let code_fills: Vec<_> = dl
+        .cmds
+        .iter()
+        .filter_map(|c| if let DrawCmd::FillRect { radius, .. } = c { Some(*radius) } else { None })
+        .collect();
+    let style = default_style();
+    assert!(
+        code_fills.contains(&style.border_radius_base),
+        "code block should use border_radius_base={}, got {:?}",
+        style.border_radius_base,
+        code_fills
+    );
+}
+
+#[test]
+fn code_block_has_stroke_border() {
+    let dl = build_and_render(
+        "```
+code
+```",
+    );
+    let style = default_style();
+    let has_border = dl.cmds.iter().any(
+        |c| matches!(c, DrawCmd::StrokeRect { color, .. } if *color == style.code_block_border),
+    );
+    assert!(has_border, "code block should have stroke border with code_block_border color");
+}
+
+#[test]
+fn inline_code_uses_inline_code_bg() {
+    let dl = build_and_render("use `println!` here");
+    let style = default_style();
+    // inline_code_bg should differ from code_bg
+    assert_ne!(style.inline_code_bg, style.code_bg, "inline_code_bg should differ from code_bg");
+    // Should have a fill with inline_code_bg color
+    let has_inline_bg = dl
+        .cmds
+        .iter()
+        .any(|c| matches!(c, DrawCmd::FillRect { color, .. } if *color == style.inline_code_bg));
+    assert!(has_inline_bg, "inline code should use inline_code_bg color, not code_bg");
+}
+
+#[test]
+fn blockquote_border_is_4px_wide() {
+    let dl = build_and_render("> quote");
+    let style = default_style();
+    // Find the blockquote border fill — should be 4px wide
+    let border_fills: Vec<_> = dl
+        .cmds
+        .iter()
+        .filter_map(|c| {
+            if let DrawCmd::FillRect { rect, color, radius: _ } = c {
+                if *color == style.blockquote_border { Some(rect.w) } else { None }
+            } else {
+                None
+            }
+        })
+        .collect();
+    assert!(
+        border_fills.contains(&4.0),
+        "blockquote border should be 4px wide, got {:?}",
+        border_fills
+    );
+}
+
+#[test]
+fn blockquote_bg_covers_full_width() {
+    let dl = build_and_render("> quote");
+    let style = default_style();
+    // The blockquote bg fill should start at the block's x (not x+4)
+    // and have the block's full width (not reduced)
+    let bg_fills: Vec<_> = dl
+        .cmds
+        .iter()
+        .filter_map(|c| {
+            if let DrawCmd::FillRect { rect, color, radius } = c {
+                if *color == style.blockquote_bg && *radius == style.border_radius_base {
+                    Some(rect)
+                } else {
+                    None
+                }
+            } else {
+                None
+            }
+        })
+        .collect();
+    assert!(!bg_fills.is_empty(), "should have blockquote bg fill");
+    // The bg rect width should be > 0 (full-width, not reduced by border)
+    assert!(bg_fills[0].w > 4.0, "blockquote bg should cover full width, got w={}", bg_fills[0].w);
+}
+
+#[test]
+fn blockquote_height_includes_vertical_padding() {
+    let md = "> line1\n> line2";
+    let parsed = parse_markdown(md);
+    let style = default_style();
+    let doc = MarkdownDoc::build(&parsed, &style);
+    let laid_out = layout_doc(&doc.blocks, &style, 400.0, &core::document::StringDocView::new(md));
+    let blockquote = &laid_out.blocks[0];
+    // Block height should include top + bottom padding
+    assert!(
+        blockquote.rect.h > style.blockquote_padding * 2.0,
+        "blockquote height {} should include 2*padding={}",
+        blockquote.rect.h,
+        style.blockquote_padding * 2.0
+    );
+    if let LaidOutBlockKind::BlockQuote { blocks } = &blockquote.kind {
+        // The internal child blocks should be positioned after top padding
+        let first_child_y = blocks[0].rect.y;
+        let bq_top = blockquote.rect.y;
+        let top_gap = first_child_y - bq_top;
+        assert!(
+            top_gap >= style.blockquote_padding - 1.0,
+            "top gap {} should be >= blockquote_padding {}",
+            top_gap,
+            style.blockquote_padding
+        );
+    } else {
+        panic!("expected BlockQuote");
+    }
+}
+
+#[test]
+fn list_items_have_uniform_height() {
+    let md = "- a\n- b\n- c";
+    let parsed = parse_markdown(md);
+    let style = default_style();
+    let doc = MarkdownDoc::build(&parsed, &style);
+    let laid_out = layout_doc(&doc.blocks, &style, 400.0, &core::document::StringDocView::new(md));
+    assert!(laid_out.blocks.len() >= 3, "need 3 list items");
+    // All single-line list items should have the same rect height.
+    // Spacing between items is handled externally, not baked into rect.h.
+    let first_h = laid_out.blocks[0].rect.h;
+    let second_h = laid_out.blocks[1].rect.h;
+    let third_h = laid_out.blocks[2].rect.h;
+    assert!(
+        (second_h - first_h).abs() < 1.0,
+        "all list items should have equal height, got {} vs {}",
+        first_h,
+        second_h
+    );
+    assert!(
+        (third_h - first_h).abs() < 1.0,
+        "all list items should have equal height, got {} vs {}",
+        first_h,
+        third_h
+    );
+    // Verify inter-item spacing is correct
+    let gap_0_1 =
+        laid_out.blocks[1].rect.y - (laid_out.blocks[0].rect.y + laid_out.blocks[0].rect.h);
+    let gap_1_2 =
+        laid_out.blocks[2].rect.y - (laid_out.blocks[1].rect.y + laid_out.blocks[1].rect.h);
+    assert!(
+        (gap_0_1 - style.list_item_spacing).abs() < 1.0,
+        "gap between items 0-1 should be ~{}, got {}",
+        style.list_item_spacing,
+        gap_0_1
+    );
+    assert!(
+        (gap_1_2 - style.list_item_spacing).abs() < 1.0,
+        "gap between items 1-2 should be ~{}, got {}",
+        style.list_item_spacing,
+        gap_1_2
+    );
+}
+
+#[test]
+fn debug_spacing_draws_each_resolved_boundary_once() {
+    let source = "before\n\nafter";
+    let style = default_style();
+    let document = MarkdownDoc::build(&parse_markdown(source), &style);
+    let document_view = core::document::StringDocView::new(source);
+    let layout = LazyLayout::from_doc(document, &style, 400.0, &document_view);
+    let first_block = layout.laid_out[0].as_ref().expect("first block is materialized");
+    let second_block = layout.laid_out[1].as_ref().expect("second block is materialized");
+    let gap_top = first_block.rect.y + first_block.rect.h + layout.y_delta[0];
+    let gap_bottom = second_block.rect.y + layout.y_delta[1];
+    let mut commands = DrawList::new();
+    let mut shaper = shaping::Shaper::new().expect("debug spacing test requires a shaper");
+    render_debug_spacing(&layout, &style, &mut commands, 0.0, 600.0, 0.0, 0.0, &mut shaper);
+    let gap_bands = commands
+        .cmds
+        .iter()
+        .filter(|command| {
+            matches!(command, DrawCmd::FillRect { rect, .. }
+                if rect.y < gap_bottom && rect.y + rect.h > gap_top)
+        })
+        .count();
+    assert_eq!(gap_bands, 1, "one resolved boundary must have one debug band");
+}
+
+#[test]
+fn debug_spacing_uses_sparse_slot_neighbors_without_document_edge_bands() {
+    const VIEWPORT_WIDTH: f32 = 400.0;
+    const VIEWPORT_HEIGHT: f32 = 96.0;
+    const POSITION_TOLERANCE: f32 = 0.01;
+
+    let source = (0..80).map(|index| format!("paragraph {index}")).collect::<Vec<_>>().join("\n\n");
+    let style = default_style();
+    let document = MarkdownDoc::build(&parse_markdown(&source), &style);
+    let document_view = core::document::StringDocView::new(&source);
+    let mut layout = LazyLayout::new(document, &style, VIEWPORT_WIDTH, &document_view);
+    let materialization_scroll_y = layout.total_height * 0.5;
+    let mut shaper = shaping::Shaper::new().expect("sparse debug test requires a shaper");
+    layout.ensure_visible(
+        materialization_scroll_y,
+        VIEWPORT_HEIGHT,
+        &style,
+        VIEWPORT_WIDTH,
+        &mut shaper,
+        None,
+        &document_view,
+    );
+
+    let first_slot = layout
+        .laid_out
+        .iter()
+        .position(Option::is_some)
+        .expect("middle viewport must materialize blocks");
+    let last_slot = layout
+        .laid_out
+        .iter()
+        .rposition(Option::is_some)
+        .expect("middle viewport must materialize blocks");
+    assert!(first_slot > 0, "document start must remain unmaterialized");
+    assert!(last_slot + 1 < layout.laid_out.len(), "document end must remain unmaterialized");
+    assert!(
+        last_slot >= first_slot + 3,
+        "fixture must materialize enough slots to create a sparse interior hole"
+    );
+
+    let omitted_slot = first_slot + 1;
+    let successor_slot = omitted_slot + 1;
+    layout.laid_out[omitted_slot] = None;
+
+    let first_block =
+        layout.laid_out[first_slot].as_ref().expect("first visible slot remains materialized");
+    let first_top = first_block.rect.y + layout.y_delta[first_slot];
+    let debug_scroll_y = first_top;
+    let previous_bottom = layout.estimated_positions[first_slot - 1]
+        + layout.estimated_heights[first_slot - 1]
+        + layout.y_delta[first_slot - 1];
+    let expected_leading_band_top = previous_bottom - debug_scroll_y;
+    let expected_leading_band_bottom = first_top - debug_scroll_y;
+    let successor = layout.laid_out[successor_slot]
+        .as_ref()
+        .expect("slot after the sparse hole remains materialized");
+    let successor_top = successor.rect.y + layout.y_delta[successor_slot];
+    let omitted_bottom = layout.estimated_positions[omitted_slot]
+        + layout.estimated_heights[omitted_slot]
+        + layout.y_delta[omitted_slot];
+    let expected_successor_band_top = omitted_bottom - debug_scroll_y;
+    let expected_successor_band_bottom = successor_top - debug_scroll_y;
+    let document_end_screen_y = layout.total_height - debug_scroll_y;
+    let mut commands = DrawList::new();
+    render_debug_spacing(
+        &layout,
+        &style,
+        &mut commands,
+        debug_scroll_y,
+        VIEWPORT_HEIGHT,
+        0.0,
+        0.0,
+        &mut shaper,
+    );
+
+    let spacing_bands = commands
+        .cmds
+        .iter()
+        .filter_map(|command| match command {
+            DrawCmd::FillRect { rect, .. } => Some(rect),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    let leading_band = spacing_bands
+        .iter()
+        .find(|rect| (rect.y + rect.h - expected_leading_band_bottom).abs() < POSITION_TOLERANCE)
+        .expect("first materialized block must expose its resolved leading boundary");
+    assert!(
+        (leading_band.y - expected_leading_band_top).abs() < POSITION_TOLERANCE,
+        "leading band must start at the evicted predecessor bottom: actual={}, expected={}",
+        leading_band.y,
+        expected_leading_band_top
+    );
+    let successor_band = spacing_bands
+        .iter()
+        .find(|rect| (rect.y + rect.h - expected_successor_band_bottom).abs() < POSITION_TOLERANCE)
+        .expect("successor of an unmaterialized slot must expose its resolved boundary");
+    assert!(
+        (successor_band.y - expected_successor_band_top).abs() < POSITION_TOLERANCE,
+        "successor band must start at the missing predecessor bottom: actual={}, expected={}",
+        successor_band.y,
+        expected_successor_band_top
+    );
+    assert!(
+        spacing_bands
+            .iter()
+            .all(|rect| { (rect.y + rect.h - document_end_screen_y).abs() >= POSITION_TOLERANCE }),
+        "a sparse materialized tail must not synthesize a document End band"
+    );
+}
+
+#[test]
+fn horizontal_rule_content_matches_drawn_line_and_neighbor_spacing() {
+    let md = "text\n\n---\n\ntext";
+    let parsed = parse_markdown(md);
+    let style = default_style();
+    let doc = MarkdownDoc::build(&parsed, &style);
+    let laid_out = layout_doc(&doc.blocks, &style, 400.0, &core::document::StringDocView::new(md));
+    let hr = laid_out
+        .blocks
+        .iter()
+        .find(|b| matches!(b.kind, LaidOutBlockKind::HorizontalRule))
+        .expect("should have HorizontalRule block");
+    assert_eq!(hr.rect.h, style.rule_thickness);
+    let mut dl = DrawList::new();
+    let mut shaper = shaping::Shaper::new().expect("rule rendering test requires a shaper");
+    render_doc(&laid_out, &style, &mut dl, 0.0, 600.0, Some(&mut shaper));
+    let rule_fills: Vec<_> = dl
+        .cmds
+        .iter()
+        .filter_map(|c| {
+            if let DrawCmd::FillRect { rect, color, .. } = c {
+                if *color == style.rule_color { Some(*rect) } else { None }
+            } else {
+                None
+            }
+        })
+        .collect();
+    assert_eq!(rule_fills.len(), 1, "should have exactly one rule fill");
+    let rule = &rule_fills[0];
+    assert_eq!(rule.y, hr.rect.y);
+    assert_eq!(rule.h, hr.rect.h);
+    let before = laid_out.blocks[0].rect;
+    let after = laid_out.blocks[2].rect;
+    let expected_gap = style.paragraph_spacing.max(style.rule_spacing);
+    assert_eq!(rule.y - before.y - before.h, expected_gap);
+    assert_eq!(after.y - rule.y - rule.h, expected_gap);
+}
+
+#[test]
+fn estimate_text_width_cjk_wider_than_ascii() {
+    // CJK chars should be ~1.0 * font_size, ASCII ~0.55 * font_size
+    let cjk_w = estimate_text_width("栏目", 15.0); // 2 CJK chars
+    let ascii_w = estimate_text_width("ab", 15.0); // 2 ASCII chars
+    assert!(cjk_w > ascii_w, "CJK width ({}) should be > ASCII width ({})", cjk_w, ascii_w);
+    // CJK: 2 * 15.0 = 30.0; ASCII: 2 * 15.0 * 0.55 = 16.5
+    assert!((cjk_w - 30.0).abs() < 0.1, "CJK width should be ~30.0, got {}", cjk_w);
+    assert!((ascii_w - 16.5).abs() < 0.1, "ASCII width should be ~16.5, got {}", ascii_w);
+}
+
+#[test]
+fn estimate_text_width_mixed_cjk_ascii() {
+    // Mixed "删除 crash" = 2 CJK + 1 space + 5 ASCII
+    let w = estimate_text_width("删除 crash", 15.0);
+    // CJK: 2 * 15.0 = 30.0; space: 15.0 * 0.55 = 8.25; ASCII: 5 * 15.0 * 0.55 = 41.25
+    let expected = 30.0 + 8.25 + 41.25;
+    assert!((w - expected).abs() < 0.1, "mixed width should be ~{}, got {}", expected, w);
+}
+
+#[test]
+fn estimate_text_width_fullwidth_punctuation() {
+    // Fullwidth punctuation (：) is in U+FF01..=U+FF5E range
+    let w = estimate_text_width("：", 15.0);
+    assert!((w - 15.0).abs() < 0.1, "fullwidth colon should be ~15.0, got {}", w);
+}
+
+#[test]
+fn render_yaml_metadata_block_emits_fill() {
+    let dl = build_and_render(
+        "---
+title: hello
+---",
+    );
+    // Metadata block should render with code-block-like background
+    let has_fill = dl.cmds.iter().any(|c| matches!(c, DrawCmd::FillRect { .. }));
+    assert!(has_fill, "YAML metadata block should emit FillRect (background)");
+}

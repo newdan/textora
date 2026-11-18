@@ -9,15 +9,6 @@ pub(crate) fn collect_nodes_dfs(node: &Node) -> Vec<&Node> {
     out
 }
 
-/// Returns titles for every node in DFS pre-order.
-pub(crate) fn collect_dfs_titles(node: &Node) -> Vec<String> {
-    let mut out = vec![node.title.clone()];
-    for child in &node.children {
-        out.extend(collect_dfs_titles(child));
-    }
-    out
-}
-
 /// Finds the parent node for the node at `target_idx` in DFS order.
 pub(crate) fn find_parent(tree: &Tree, target_idx: usize) -> Option<&Node> {
     let nodes = collect_nodes_dfs(&tree.root);

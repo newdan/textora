@@ -195,6 +195,7 @@ impl SyncSettingsPage {
         self.form_needs_rebuild = true;
     }
 
+    #[cfg(test)]
     pub fn input(&self) -> &SyncSettingsInput {
         &self.input
     }

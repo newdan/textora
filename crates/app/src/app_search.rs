@@ -206,9 +206,4 @@ impl App {
         // Re-search to update matches
         self.perform_search_for_active_doc();
     }
-
-    /// Get the count of matches for the current search (for confirmation dialog).
-    pub(crate) fn current_match_count(&self) -> usize {
-        self.active_tab_session().map(|tab| tab.search_state().matches.len()).unwrap_or(0)
-    }
 }

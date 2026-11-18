@@ -11,6 +11,9 @@ impl DocumentCompletionInterpreter {
         completion: DocumentCompletion,
     ) {
         match completion {
+            DocumentCompletion::SystemOpenPathsRequested { paths } => {
+                target.dispatch_action(NotoraAction::ExternalPathsReceived(paths));
+            }
             DocumentCompletion::ExternalFileOpenCompleted {
                 canonical_path,
                 document,

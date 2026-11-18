@@ -44,9 +44,6 @@ pub enum PluginMessage {
     SetSelAnchorByte(Option<usize>),
     /// Clear the current selection.
     ClearSelection,
-    /// 请求插件拦截处理结构编辑按键。
-    /// 插件可调用 doc 的方法直接修改源码。返回 true 表示已消费。
-    InterceptKey { key: crate::core::widget::KeyCode, modifiers: crate::core::widget::Modifiers },
     /// Select all text in the preview.
     SelectAll,
     /// Update host-controlled render settings.
@@ -145,28 +142,6 @@ pub struct EditAugmentation {
     pub cursor_byte_after: usize,
 }
 
-/// Context passed to `EditAugmenter` for processing an edit.
-pub struct AugmentContext<'a> {
-    pub current_byte: usize,
-    pub kind: AugmentKind,
-    pub doc: &'a dyn DocView,
-}
-
-pub trait EditAugmenter {
-    fn augment(&self, ctx: &AugmentContext) -> Option<EditAugmentation>;
-}
-
-pub trait KeyInterceptor {
-    /// Give the plugin a chance to intercept and handle raw key events.
-    /// Returns true if the key event was consumed.
-    fn intercept_key(
-        &self,
-        key: &crate::core::widget::KeyCode,
-        modifiers: &crate::core::widget::Modifiers,
-        doc: &mut dyn DocViewMut,
-    ) -> bool;
-}
-
 /// Maps raw keys to declarative editing intents without mutating the document.
 pub trait KeyIntentMapper {
     fn map_key(
@@ -174,13 +149,6 @@ pub trait KeyIntentMapper {
         key: &crate::core::widget::KeyCode,
         modifiers: &crate::core::widget::Modifiers,
     ) -> Option<EditIntent>;
-}
-
-pub struct NoopAugmenter;
-impl EditAugmenter for NoopAugmenter {
-    fn augment(&self, _ctx: &AugmentContext) -> Option<EditAugmentation> {
-        None
-    }
 }
 
 /// Synchronous queries from the host into a plugin.
@@ -205,12 +173,7 @@ pub enum PluginQuery {
     /// Byte range of the selection, if any.
     SelectionRange,
     /// Hit-test at screen coordinates.
-    HitTest {
-        x: f32,
-        y: f32,
-        offset_x: f32,
-        offset_y: f32,
-    },
+    HitTest { x: f32, y: f32, offset_x: f32, offset_y: f32 },
     /// Collect search highlight quads.
     SearchHighlights {
         query: String,
@@ -238,47 +201,18 @@ pub enum PluginQuery {
     LineRangeAtPos(usize, usize),
     /// Get content-anchored scroll position (text_snippet, pixel_offset).
     ScrollAnchor,
-    /// 画布坐标 → 源码字节偏移。用于点击画布节点定位光标。
-    HitTestCanvas {
-        x: f32,
-        y: f32,
-        offset_x: f32,
-        offset_y: f32,
-    },
-    /// 源码字节偏移 → 画布像素坐标 (x, y, height)。用于光标绘制和 IME 定位。
-    CursorRect(usize),
-    CanvasMove {
-        from_byte: usize,
-        direction: Direction,
-    },
     /// Source byte offset → screen pixel rect (x, y, w, h). For IME positioning.
     CursorScreenPos(usize),
     /// Screen pixel → source byte offset. For mouse-click byte positioning.
-    HitTestByte {
-        x: f32,
-        y: f32,
-        offset_x: f32,
-        offset_y: f32,
-    },
+    HitTestByte { x: f32, y: f32, offset_x: f32, offset_y: f32 },
     /// Screen pixel → semantic target for editing interactions.
-    HitTestEditTarget {
-        x: f32,
-        y: f32,
-        offset_x: f32,
-        offset_y: f32,
-    },
+    HitTestEditTarget { x: f32, y: f32, offset_x: f32, offset_y: f32 },
     /// Plan an edit for a canvas control represented by a source range.
-    PlanCanvasControl {
-        source_range: std::ops::Range<usize>,
-        source_generation: u32,
-    },
+    PlanCanvasControl { source_range: std::ops::Range<usize>, source_generation: u32 },
     /// Report the file-level mindmap theme selection for the current document.
     MindmapThemeSelection,
     /// Plan an edit that sets the file-level mindmap theme.
-    PlanMindmapTheme {
-        theme_id: String,
-        source_generation: u32,
-    },
+    PlanMindmapTheme { theme_id: String, source_generation: u32 },
     /// Visual direction navigation from `current_byte` (considering folded/invisible markers).
     VisualMove {
         current_byte: usize,
@@ -287,18 +221,9 @@ pub enum PluginQuery {
         target_x: Option<f32>,
     },
     /// Visual navigation retaining the destination's soft-wrap affinity.
-    VisualMoveCaret {
-        current_byte: usize,
-        direction: MoveDirection,
-        target_x: Option<f32>,
-    },
+    VisualMoveCaret { current_byte: usize, direction: MoveDirection, target_x: Option<f32> },
     /// Hit-test retaining the side of a shared soft-wrap source position.
-    HitTestVisualCaret {
-        x: f32,
-        y: f32,
-        offset_x: f32,
-        offset_y: f32,
-    },
+    HitTestVisualCaret { x: f32, y: f32, offset_x: f32, offset_y: f32 },
     /// Semantic direction navigation from the current source byte.
     MoveEditTarget {
         current_byte: usize,
@@ -331,9 +256,6 @@ pub enum PluginResponse {
     PositionPair(Option<((usize, usize), (usize, usize))>),
     /// Content-anchored scroll position (text_snippet, pixel_offset).
     ScrollAnchor(String, f32),
-    HitResult(Option<HitResult>),
-    /// 光标的画布物理坐标 (x, y, height)。None = 字节偏移不在任何节点内。
-    CursorRect(Option<(f32, f32, f32)>),
     /// Cursor rect in document coordinates (x, y, w, h).
     CursorScreenRect(Option<(f32, f32, f32, f32)>),
     /// Source byte offset.
@@ -344,8 +266,6 @@ pub enum PluginResponse {
     EditHitTarget(Option<EditHitTarget>),
     /// Declarative edit plan for a canvas control.
     EditPlan(EditPlan),
-    /// Edit augmentation suggestion.
-    Augmentation(Option<EditAugmentation>),
     /// The file-level mindmap theme selection reported by the plugin.
     MindmapThemeSelection(crate::theme::MindmapThemeSelection),
     /// Result of planning a product semantic editing command.
@@ -383,22 +303,6 @@ pub struct CanvasContentMetrics {
     pub content_bounds: Rect,
     /// Optional content-space point the host can use as an initial focus target.
     pub focus_anchor: Option<CanvasPoint>,
-}
-
-/// Hit-test 结果：画布坐标 → 源码信息。
-#[derive(Debug, Clone)]
-pub struct HitResult {
-    pub byte_offset: usize, // 在源码中的精确字节位置
-    pub node_idx: usize,    // 命中的节点 DFS 索引
-}
-
-/// 画布方向导航。
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Direction {
-    Up,
-    Down,
-    Left,
-    Right,
 }
 
 // ---------------------------------------------------------------------------
@@ -704,18 +608,8 @@ pub trait ViewPlugin {
         &NoopEditPolicy
     }
 
-    /// Retrieve the edit augmenter for this plugin.
-    fn augmenter(&self) -> &dyn EditAugmenter {
-        &NoopAugmenter
-    }
-
     /// Retrieve the declarative key-to-edit-intent mapper for this plugin, if any.
     fn key_intent_mapper(&self) -> Option<&dyn KeyIntentMapper> {
-        None
-    }
-
-    /// Retrieve the key interceptor for this plugin, if any.
-    fn key_interceptor(&self) -> Option<&dyn KeyInterceptor> {
         None
     }
 

@@ -119,7 +119,7 @@ fn search_control_style(theme: &crate::theme::Theme) -> ButtonStyle {
     let mut foreground = theme.palette.input_fg;
     foreground[3] *= 0.6;
     style.foreground = foreground;
-    style.selected_foreground = theme.palette.accent;
+    style.selected_foreground = theme.application_theme().accent_text;
     style.selected_background = [0.0; 4];
     style.font_size_logical = SEARCH_FONT_SIZE_LOGICAL;
     style.pad_x_logical = 0.0;
@@ -661,7 +661,7 @@ impl SearchBarWidget {
             let current = self.snap.current_match.saturating_add(1).min(self.snap.match_count);
             (format!("{current}/{}", self.snap.match_count), ctx.theme.palette.input_fg)
         } else {
-            ("无匹配结果".to_owned(), ctx.theme.palette.danger)
+            ("无匹配结果".to_owned(), ctx.theme.application_theme().danger_text)
         };
         if let Some(ref mut shaper) = ctx.shaper {
             ctx.list.text_shaped(
@@ -700,6 +700,37 @@ mod tests {
     use crate::core::measure::NoopMeasure;
     use crate::core::paint::DrawList;
     use crate::theme::test_theme;
+
+    #[test]
+    fn no_match_message_remains_readable_on_light_input_surface() {
+        use crate::core::paint::DrawCmd;
+
+        const MINIMUM_TEXT_CONTRAST: f32 = 4.5;
+        let search_bar = layout_search_bar(
+            480.0,
+            SearchBarSnapshot { query: "needle".into(), visible: true, ..Default::default() },
+        );
+        let theme =
+            crate::theme::Theme::from_definition(&crate::theme::ThemeDefinition::default_light());
+        let mut draw_list = DrawList::new();
+        let mut shaper = shaping::Shaper::new().expect("search contrast test needs text shaping");
+        let mut context = PaintCtx::new(&mut draw_list, &theme, 1.0);
+        context.shaper = Some(&mut shaper);
+        search_bar.paint(&mut context);
+        let foreground = draw_list
+            .cmds
+            .iter()
+            .find_map(|command| match command {
+                DrawCmd::TextLayout { layout, color, .. } if layout.text == "无匹配结果" => {
+                    Some(*color)
+                }
+                _ => None,
+            })
+            .expect("search with no matches paints its message");
+        let luminance = |color: [f32; 4]| color[0] * 0.2126 + color[1] * 0.7152 + color[2] * 0.0722;
+        let contrast = (luminance(theme.palette.input_bg) + 0.05) / (luminance(foreground) + 0.05);
+        assert!(contrast >= MINIMUM_TEXT_CONTRAST, "no-match text contrast: {contrast}");
+    }
 
     #[derive(Default)]
     struct TestClipboard {

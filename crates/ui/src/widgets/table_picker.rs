@@ -371,7 +371,7 @@ impl Widget for TablePickerWidget {
             let field_rect = self.input_rect(dpi, field);
             ctx.list.stroke_rounded(
                 field_rect,
-                ctx.theme.palette.border_subtle,
+                ctx.theme.settings_theme().control_border,
                 1.0 * dpi,
                 3.0 * dpi,
             );
@@ -433,6 +433,33 @@ mod tests {
             LayoutCtx { ui_measure: None, measure: &mut measure, theme: &theme, dpi: 1.0 };
         picker.set_rect(Rect::new(0.0, 0.0, 260.0, 220.0), &mut context);
         picker
+    }
+
+    #[test]
+    fn numeric_input_boundaries_remain_visible_on_the_panel() {
+        use crate::core::paint::{DrawCmd, DrawList};
+
+        const MINIMUM_CONTROL_CONTRAST: f32 = 3.0;
+        let theme =
+            crate::theme::Theme::from_definition(&crate::theme::ThemeDefinition::default_light());
+        let picker = picker();
+        let mut draw_list = DrawList::new();
+        picker.paint(&mut PaintCtx::new(&mut draw_list, &theme, 1.0));
+        let luminance = |color: [f32; 4]| color[0] * 0.2126 + color[1] * 0.7152 + color[2] * 0.0722;
+        for field in [NumericField::Columns, NumericField::Rows] {
+            let field_rect = picker.input_rect(1.0, field);
+            let boundary = draw_list
+                .cmds
+                .iter()
+                .find_map(|command| match command {
+                    DrawCmd::StrokeRect { rect, color, .. } if *rect == field_rect => Some(*color),
+                    _ => None,
+                })
+                .expect("numeric field paints its boundary");
+            let contrast =
+                (luminance(theme.palette.bg_surface) + 0.05) / (luminance(boundary) + 0.05);
+            assert!(contrast >= MINIMUM_CONTROL_CONTRAST, "numeric field boundary: {contrast}");
+        }
     }
 
     #[test]

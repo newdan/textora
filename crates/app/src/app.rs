@@ -12,16 +12,6 @@ use crate::native_menu::NativeMenu;
 use crate::ui_shell::UiShell;
 use ui::theme::Theme;
 
-#[allow(unused_imports)]
-use crate::commands::execute_edit_command_v2;
-#[allow(unused_imports)]
-use crate::input::EditCommand;
-/// Per-visual-line data for hit-testing, selection rendering, and cursor movement.
-#[allow(unused_imports)]
-use render::GlyphVertex;
-#[allow(unused_imports)]
-use ui::render_geom::{AdvanceCacheEntry, compute_selection_highlight_quads};
-
 // Font size and line height are now in Settings
 
 /// 计算光标当前是否可见，以及下一次切换的时间点。
@@ -67,7 +57,6 @@ pub struct App {
     pub(crate) current_theme: Theme,
     pub(crate) theme_registry: ui::theme::ThemeRegistry,
     pub(crate) active_theme_pair: ui::theme::ActiveThemePair,
-    pub(crate) theme_load_report: crate::theme_loader::ThemeLoadReport,
     pub(crate) product: crate::textora_product::TextoraProduct,
     pub(crate) action_pump: EventPump<crate::actions::AppAction>,
     pub(crate) editor_runtime: EditorRuntime,
@@ -123,19 +112,6 @@ impl App {
         &mut self,
     ) -> Option<&mut crate::sync_controller::SyncController> {
         self.product.sync_controller_mut()
-    }
-
-    pub(crate) fn set_sync_controller(
-        &mut self,
-        controller: crate::sync_controller::SyncController,
-    ) {
-        self.product.set_sync_controller(controller);
-    }
-
-    pub(crate) fn take_sync_controller(
-        &mut self,
-    ) -> Option<crate::sync_controller::SyncController> {
-        self.product.take_sync_controller()
     }
 
     pub(crate) fn snapshot_popup_tab_ids(&mut self) {
@@ -313,11 +289,6 @@ impl App {
         self.settings.font_size
     }
 
-    /// Set font size from a logical (pre-DPI-scale) value.
-    pub(crate) fn set_logical_font_size(&mut self, logical_size: f32) {
-        self.settings.set_font_size(logical_size);
-    }
-
     /// Convert the current physical sidebar width to logical units for persistence.
     pub(crate) fn sidebar_width_for_persistence(&self) -> f32 {
         let dpi = self.editor_runtime.scale_factor() as f32;
@@ -460,6 +431,13 @@ mod background_startup_boundary_tests {
 
 #[cfg(test)]
 impl App {
+    pub(crate) fn set_sync_controller(
+        &mut self,
+        controller: crate::sync_controller::SyncController,
+    ) {
+        self.product.set_sync_controller(controller);
+    }
+
     pub(crate) fn switch_workspace_for_test(&mut self, index: usize) {
         let tab_id = self.editor_tab_id_at(index).expect("test tab index should be valid");
         let _ = self.activate_editor_tab(tab_id);

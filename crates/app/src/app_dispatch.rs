@@ -764,17 +764,6 @@ impl App {
 
     /// Rebuild the theme from system theme and settings mode.
     /// Handle sidebar keyboard actions (TogglePin, Escape).
-    /// Compute preview render offsets (shared by mouse input and cursor moved).
-    pub(crate) fn preview_offsets(&self) -> (f32, f32) {
-        let metrics = self.ui_metrics();
-        let dpi = metrics.dpi;
-        let preview_top_pad = 16.0 * dpi;
-        let line_count = self.active_document_line_count();
-        let gutter_left_margin = self.editor_left_margin(line_count);
-        let content_top = self.content_top_offset();
-        (gutter_left_margin, content_top + preview_top_pad)
-    }
-
     /// Compute the plugin render bounds (the same Rect + viewport dimensions
     /// used by the main render pass). Used for the WYSIWYG two-phase hit-test
     /// inter-phase layout refresh mini-render.
@@ -820,6 +809,20 @@ impl App {
             &inputs,
             self.ui_shell.mindmap_style_panel_thickness(),
         )
+    }
+}
+
+#[cfg(test)]
+impl App {
+    /// Compute preview render offsets (shared by mouse input and cursor moved).
+    pub(crate) fn preview_offsets(&self) -> (f32, f32) {
+        let metrics = self.ui_metrics();
+        let dpi = metrics.dpi;
+        let preview_top_pad = 16.0 * dpi;
+        let line_count = self.active_document_line_count();
+        let gutter_left_margin = self.editor_left_margin(line_count);
+        let content_top = self.content_top_offset();
+        (gutter_left_margin, content_top + preview_top_pad)
     }
 }
 

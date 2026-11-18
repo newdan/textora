@@ -3,6 +3,7 @@
 
 use crate::app::App;
 use crate::file_history::{FileHistoryEntry, compute_workspace_root};
+#[cfg(test)]
 use crate::tab_runtime::TabRuntime;
 use crate::tab_session::{TabSession, TabSessionMut};
 use crate::workspace::Workspace;
@@ -98,6 +99,7 @@ impl App {
         self.editor_runtime.tab_ids_in_order()
     }
 
+    #[cfg(test)]
     pub(crate) fn editor_runtime_tab_ids(&self) -> std::collections::HashSet<TabId> {
         self.editor_runtime.runtime_tab_ids()
     }
@@ -397,10 +399,12 @@ impl App {
         Some(callback(mouse, tab.document))
     }
 
+    #[cfg(test)]
     pub(crate) fn tab_runtime(&self, id: TabId) -> Option<&TabRuntime> {
         self.editor_runtime.tab_runtime(id)
     }
 
+    #[cfg(test)]
     pub(crate) fn tab_runtime_mut(&mut self, id: TabId) -> Option<&mut TabRuntime> {
         self.editor_runtime.tab_runtime_mut(id)
     }
@@ -436,10 +440,7 @@ impl App {
         self.editor_runtime.append_prepared_tab(PreparedTab::new(document, runtime), None)
     }
 
-    pub(crate) fn active_runtime(&self) -> Option<&TabRuntime> {
-        self.active_tab_id().and_then(|id| self.tab_runtime(id))
-    }
-
+    #[cfg(test)]
     pub(crate) fn active_runtime_mut(&mut self) -> Option<&mut TabRuntime> {
         self.active_tab_id().and_then(|id| self.tab_runtime_mut(id))
     }

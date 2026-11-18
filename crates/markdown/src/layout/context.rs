@@ -159,119 +159,6 @@ pub(crate) fn text_grapheme_x(
     cum_x
 }
 
-/// Single-character pixel advance using the shaper when needed (cached).
-/// CJK/fullwidth chars use the pre-measured `cjk_advance`; everything else
-/// falls back to `shaper.grapheme_advance`.
-#[allow(dead_code)] // Used by measure_char_widths indirectly
-fn char_width(ch: char, cjk_advance: f32, font_size: f32, shaper: &mut Shaper) -> f32 {
-    if is_cjk_or_fullwidth(ch) {
-        return cjk_advance;
-    }
-    let mut buf = [0u8; 4];
-    let s = ch.encode_utf8(&mut buf);
-    shaper.grapheme_advance(s).unwrap_or(font_size * 0.55)
-}
-
-/// Estimate the pixel width of a token without full shaping.
-///
-/// `cjk_advance` should be the measured advance of one CJK ideograph at the
-/// current font — measured once per `wrap_text` call, not once per token.
-///
-/// Strategy:
-/// - Pure CJK → `cjk_advance × char_count` (zero shaping)
-/// - Pure ASCII → sum of per-char `char_width` (cache hits after first use)
-/// - Mixed/other → shape once
-fn estimate_token_width(
-    token: &str,
-    cjk_advance: f32,
-    ascii_widths: &[f32; 128],
-    font_size_scale: f32,
-    shaper: &mut Shaper,
-) -> f32 {
-    if token.is_empty() {
-        return 0.0;
-    }
-    // Fast path: pure ASCII via lookup table (zero HarfBuzz)
-    let mut all_ascii = true;
-    let mut ascii_sum = 0.0f32;
-    for b in token.bytes() {
-        if !(0x20..0x7f).contains(&b) {
-            all_ascii = false;
-            break;
-        }
-        ascii_sum += ascii_widths[b as usize];
-    }
-    if all_ascii {
-        return ascii_sum * font_size_scale;
-    }
-    // Fast path: pure CJK
-    let all_cjk = token.chars().all(is_cjk_or_fullwidth);
-    if all_cjk {
-        return cjk_advance * token.chars().count() as f32;
-    }
-    // Mixed: shape once
-    shaper.shape(token).map(|r| r.width).unwrap_or_else(|_| {
-        ascii_widths[0x58] * font_size_scale * token.chars().count() as f32 // 'x' width as fallback
-    })
-}
-
-/// Measure per-character widths in one shape() call.
-/// Returns (char_widths, total_width).
-fn measure_char_widths(
-    token: &str,
-    cjk_advance: f32,
-    ascii_widths: &[f32; 128],
-    font_size: f32,
-    font_size_scale: f32,
-    shaper: &mut Shaper,
-) -> (Vec<f32>, f32) {
-    let chars: Vec<char> = token.chars().collect();
-    let n = chars.len();
-    let mut widths = vec![0.0f32; n];
-    // Fast path: pure CJK
-    if chars.iter().all(|c| is_cjk_or_fullwidth(*c)) {
-        widths.fill(cjk_advance);
-        return (widths, cjk_advance * n as f32);
-    }
-    // Fast path: pure ASCII via lookup table
-    let all_ascii = token.bytes().all(|b| (0x20..0x7f).contains(&b));
-    if all_ascii {
-        for (i, b) in token.bytes().enumerate() {
-            widths[i] = ascii_widths[b as usize] * font_size_scale;
-        }
-        let total: f32 = widths.iter().sum();
-        return (widths, total);
-    }
-    // Shape the whole token, then distribute cluster widths to char slots
-    if let Ok(run) = shaper.shape(token) {
-        let mut char_idx = 0usize;
-        for cluster in &run.clusters {
-            let cluster_chars: Vec<char> = token[cluster.byte_range.clone()].chars().collect();
-            let cluster_w = cluster.advance;
-            let cc = cluster_chars.len().max(1);
-            let per_char = cluster_w / cc as f32;
-            for _ in 0..cc {
-                if char_idx < n {
-                    widths[char_idx] = per_char;
-                    char_idx += 1;
-                }
-            }
-        }
-        // Fill any remaining (shouldn't happen for well-formed text)
-        while char_idx < n {
-            widths[char_idx] = font_size * 0.55;
-            char_idx += 1;
-        }
-        let total: f32 = widths.iter().sum();
-        (widths, total)
-    } else {
-        // Fallback: estimate
-        let w = font_size * 0.55;
-        widths.fill(w);
-        (widths, w * n as f32)
-    }
-}
-
 // ===== Layout context =====
 
 pub struct LayoutCtx<'a> {
@@ -292,9 +179,6 @@ pub struct LayoutCtx<'a> {
     pub(crate) font_size_override: Option<f32>,
     /// Current list nesting depth (0 = top-level list).
     pub(crate) list_depth: usize,
-    /// Pre-computed ASCII character widths (indexed by char value).
-    /// Built once at layout start; makes per-char width lookups O(1).
-    pub(crate) ascii_widths: [f32; 128],
     pub(crate) highlighter: Option<&'a dyn crate::builder::CodeHighlighter>,
     /// Shaped runs from the last wrap_text_with_width call, one per input line (split by newline).
     /// Used by layout_text_block to create per-segment text_layout without re-shaping.
@@ -319,38 +203,11 @@ impl<'a> LayoutCtx<'a> {
         doc: &'a dyn core::document::DocView,
         style: &'a crate::style::MarkdownStyle,
         viewport_w: f32,
-        mut shaper: Option<&'a mut Shaper>,
+        shaper: Option<&'a mut Shaper>,
         highlighter: Option<&'a dyn crate::builder::CodeHighlighter>,
         source_text: Option<&'a str>,
         edit_ctx: Option<&'a crate::edit::EditContext>,
     ) -> Self {
-        let mut ascii_widths = [0.0f32; 128];
-        if let Some(ref mut s) = shaper {
-            let old_size = s.font_size();
-            let old_weight = s.font_weight();
-            let old_style = s.font_style();
-            let old_family = s.font_family().map(|family| family.to_string());
-            s.set_font_size(style.body_font_size);
-            s.set_font_weight(shaping::Weight::NORMAL);
-            s.set_font_style(shaping::Style::Normal);
-            s.set_font_family(style.body_font_family.first().map(|family| family.as_str()));
-            for c in 0x20..0x7f {
-                let mut buf = [0u8; 4];
-                let ch = char::from_u32(c).unwrap();
-                let s_str = ch.encode_utf8(&mut buf);
-                ascii_widths[c as usize] =
-                    s.grapheme_advance(s_str).unwrap_or(style.body_font_size * 0.55);
-            }
-            s.set_font_size(old_size);
-            s.set_font_weight(old_weight);
-            s.set_font_style(old_style);
-            s.set_font_family(old_family.as_deref());
-        } else {
-            let w = style.body_font_size * 0.55;
-            for c in 0x20..0x7f {
-                ascii_widths[c as usize] = w;
-            }
-        }
         Self {
             doc,
             style,
@@ -363,7 +220,6 @@ impl<'a> LayoutCtx<'a> {
             color_fade: 0.0,
             font_size_override: None,
             list_depth: 0,
-            ascii_widths,
             highlighter,
             last_wrap_shaped: Vec::new(),
             source_text,
@@ -407,6 +263,7 @@ impl<'a> LayoutCtx<'a> {
     }
 
     /// Word wrap to the full available viewport width (default).
+    #[cfg(test)]
     pub(crate) fn wrap_text(
         &mut self,
         text: &str,
@@ -418,6 +275,7 @@ impl<'a> LayoutCtx<'a> {
 
     /// Word wrap with an explicit maximum width in pixels.
     /// Used for table cells, blockquotes, and other constrained contexts.
+    #[cfg(test)]
     pub(crate) fn wrap_text_with_width(
         &mut self,
         text: &str,
@@ -428,6 +286,7 @@ impl<'a> LayoutCtx<'a> {
         self.wrap_text_with_first_line_indent(text, font_size, font_weight, max_w, 0.0)
     }
 
+    #[cfg(test)]
     pub(crate) fn wrap_text_with_first_line_indent(
         &mut self,
         text: &str,
@@ -451,6 +310,7 @@ impl<'a> LayoutCtx<'a> {
     /// The returned run is the same final geometry consumed by rendering and
     /// style segments. Natural gaps therefore participate in fit decisions
     /// exactly once, while source text and byte offsets remain unchanged.
+    #[cfg(test)]
     pub(crate) fn wrap_text_with_first_line_indent_styled(
         &mut self,
         text: &str,
@@ -473,6 +333,7 @@ impl<'a> LayoutCtx<'a> {
     }
 
     /// Wrap a styled projected line while protecting parser-provided literal ranges.
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn wrap_text_with_first_line_indent_styled_and_protected(
         &mut self,
         text: &str,

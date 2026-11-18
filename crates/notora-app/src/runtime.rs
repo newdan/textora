@@ -101,7 +101,9 @@ use self::product_event_coordinator::{
     ProductActionTarget, ProductEventCoordinator, WorkspaceBootstrapTarget,
     WorkspaceCompletionTarget,
 };
-use self::session_restore_runtime::{SessionRestore, SessionRestoreRuntime};
+use self::session_restore_runtime::{
+    SessionRestore, SessionRestoreFocusPolicy, SessionRestoreRuntime,
+};
 use self::window_runtime::WindowRuntime;
 use self::workspace_transition_runtime::WorkspaceTransitionRuntime;
 
@@ -485,6 +487,10 @@ impl NotoraRuntime {
     /// 系统 open event 与拖入路径的统一产品入口。
     pub fn receive_system_open_paths(&mut self, paths: Vec<std::path::PathBuf>) {
         self.dispatch_action(NotoraAction::ExternalPathsReceived(paths));
+    }
+
+    pub fn open_document_sender(&self) -> crate::product::OpenDocumentSender {
+        self.product.open_document_sender()
     }
 
     pub fn request_external_file_dialog(&mut self) {
@@ -3175,7 +3181,13 @@ impl NotoraRuntime {
         self.window_runtime
             .restore_size(session.window_geometry.width_px, session.window_geometry.height_px);
         let Some(root) = session.workspace_root.clone().filter(|root| root.is_dir()) else {
-            self.finish_session_restore(session, false, restore_started_at);
+            let preserved_external_selection = self.selected_external_document_identity();
+            self.finish_session_restore(
+                session,
+                false,
+                restore_started_at,
+                preserved_external_selection,
+            );
             return;
         };
         let workspace_started_at = Instant::now();
@@ -3190,7 +3202,13 @@ impl NotoraRuntime {
             }
             Err(error) => {
                 self.action_runtime.record_command_error(error.to_string());
-                self.finish_session_restore(session, false, restore_started_at);
+                let preserved_external_selection = self.selected_external_document_identity();
+                self.finish_session_restore(
+                    session,
+                    false,
+                    restore_started_at,
+                    preserved_external_selection,
+                );
             }
         }
     }
@@ -3206,6 +3224,7 @@ impl NotoraRuntime {
             self.session_restore_runtime.start(pending_restore);
             return;
         }
+        let preserved_external_selection = self.selected_external_document_identity();
         let completion_result = self
             .workspace_controller
             .complete_open_existing(completion.generation, &mut self.product);
@@ -3249,7 +3268,16 @@ impl NotoraRuntime {
             pending_restore.session,
             workspace_restored,
             pending_restore.restore_started_at,
+            preserved_external_selection,
         );
+    }
+
+    fn selected_external_document_identity(&self) -> Option<DocumentIdentity> {
+        self.action_runtime
+            .state()
+            .library
+            .selected_card
+            .filter(|identity| matches!(identity, DocumentIdentity::ExternalFile(_)))
     }
 
     fn finish_session_restore(
@@ -3257,12 +3285,17 @@ impl NotoraRuntime {
         session: crate::session::ProductSession,
         workspace_restored: bool,
         restore_started_at: Instant,
+        preserved_external_selection: Option<DocumentIdentity>,
     ) {
+        let focus_policy = self.session_restore_runtime.take_focus_policy();
+        let preserve_system_open_target =
+            focus_policy == SessionRestoreFocusPolicy::PreserveSystemOpenTarget;
         if !workspace_restored && session.workspace_id.is_some() {
             self.action_runtime
                 .record_command_error("上次使用的工作区不可用，或与保存的标识不再匹配".to_owned());
         }
-        let saved_last_document = session.last_document.clone();
+        let saved_last_document =
+            if preserve_system_open_target { None } else { session.last_document.clone() };
         let saved_external_path = match &saved_last_document {
             Some(crate::session::SavedDocument::ExternalPath { path }) => Some(path.as_path()),
             Some(crate::session::SavedDocument::Note { .. }) | None => None,
@@ -3274,11 +3307,13 @@ impl NotoraRuntime {
                 session.tag_root_expanded,
                 session.expanded_directories,
             );
-            self.dispatch_action(NotoraAction::NavigationSelected(
-                session.last_navigation_scope.into(),
-            ));
-        } else if session.last_navigation_scope
-            == crate::session::SavedNavigationScope::ExternalFiles
+            if !preserve_system_open_target {
+                self.dispatch_action(NotoraAction::NavigationSelected(
+                    session.last_navigation_scope.into(),
+                ));
+            }
+        } else if !preserve_system_open_target
+            && session.last_navigation_scope == crate::session::SavedNavigationScope::ExternalFiles
         {
             self.dispatch_action(NotoraAction::NavigationSelected(
                 notora_core::NavigationScope::ExternalFiles,
@@ -3292,6 +3327,9 @@ impl NotoraRuntime {
             }
             Some(crate::session::SavedDocument::ExternalPath { .. }) => {}
             Some(crate::session::SavedDocument::Note { .. }) | None => {}
+        }
+        if preserve_system_open_target && let Some(identity) = preserved_external_selection {
+            self.dispatch_action(NotoraAction::ExternalFileOpened(identity));
         }
         self.frame_runtime.record_session_restore_finished(restore_started_at);
         self.window_runtime.schedule_redraw();
@@ -3561,6 +3599,12 @@ impl NotoraRuntime {
     }
 
     fn open_external_paths(&mut self, paths: Vec<std::path::PathBuf>) {
+        if !paths.is_empty()
+            && (self.persistence_runtime.has_pending_session()
+                || self.session_restore_runtime.is_active())
+        {
+            self.session_restore_runtime.preserve_system_open_target();
+        }
         let outcome = self.document_runtime.open_external_paths(paths);
         self.apply_document_outcome(outcome);
     }
@@ -7575,5 +7619,100 @@ mod tests {
                 .name(),
             ui::plugin::PLUGIN_MINDMAP
         );
+    }
+
+    #[test]
+    fn open_document_sender_routes_system_paths_through_product_inbox() {
+        let directory = tempfile::tempdir().expect("external fixture directory should exist");
+        let path = directory.path().join("architecture.md");
+        std::fs::write(&path, "# Architecture").expect("external fixture should be written");
+        let mut app = app();
+
+        app.open_document_sender()
+            .send(vec![path.clone()])
+            .expect("product inbox should accept system open paths");
+
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while app.editor_runtime_tab_count() == 0 {
+            app.drain_product_events();
+            assert!(Instant::now() < deadline, "external preview should install promptly");
+            thread::sleep(Duration::from_millis(10));
+        }
+
+        let canonical_path =
+            std::fs::canonicalize(&path).expect("external fixture path should canonicalize");
+        assert_eq!(
+            app.action_runtime.state().library.navigation_scope,
+            NavigationScope::ExternalFiles
+        );
+        assert!(matches!(
+            app.action_runtime.state().library.selected_card,
+            Some(DocumentIdentity::ExternalFile(external_file_id))
+                if matches!(
+                    app.action_runtime.state().external_files.session(external_file_id),
+                    Some(ExternalFileSession::Existing { canonical_path: known_path, .. })
+                        if known_path.as_path() == canonical_path.as_path()
+                )
+        ));
+    }
+
+    #[test]
+    fn system_open_before_session_restore_completion_keeps_the_external_document_focused() {
+        let workspace_directory = tempfile::tempdir().expect("workspace fixture should be created");
+        let workspace = notora_core::Workspace::open_or_initialize(workspace_directory.path())
+            .expect("workspace metadata should initialize");
+        let external_directory = tempfile::tempdir().expect("external fixture should be created");
+        let external_path = external_directory.path().join("architecture.md");
+        std::fs::write(&external_path, "# Architecture")
+            .expect("external fixture should be written");
+        let mut app = app();
+        app.persistence_runtime.pending_session = Some(crate::session::ProductSession {
+            workspace_root: Some(workspace_directory.path().to_path_buf()),
+            workspace_id: Some(workspace.descriptor().workspace_id),
+            last_navigation_scope: crate::session::SavedNavigationScope::WorkspaceRoot,
+            last_document: Some(crate::session::SavedDocument::Note {
+                note_id: notora_core::NoteId::generate(),
+            }),
+            ..crate::session::ProductSession::default()
+        });
+
+        app.restore_pending_session();
+        assert!(app.session_restore_runtime.is_active());
+        app.receive_system_open_paths(vec![external_path.clone()]);
+
+        let deadline = Instant::now() + Duration::from_secs(2);
+        loop {
+            app.drain_product_events();
+            let restored = !app.session_restore_runtime.is_active();
+            let focused_external = matches!(
+                app.action_runtime.state().library.selected_card,
+                Some(DocumentIdentity::ExternalFile(_))
+            );
+            if restored
+                && app.editor_runtime_tab_count() == 1
+                && focused_external
+                && app.action_runtime.state().library.navigation_scope
+                    == NavigationScope::ExternalFiles
+            {
+                break;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "system open target should remain focused after session restore completes"
+            );
+            thread::sleep(Duration::from_millis(10));
+        }
+
+        let canonical_path = std::fs::canonicalize(&external_path)
+            .expect("external fixture path should canonicalize");
+        assert!(matches!(
+            app.action_runtime.state().library.selected_card,
+            Some(DocumentIdentity::ExternalFile(external_file_id))
+                if matches!(
+                    app.action_runtime.state().external_files.session(external_file_id),
+                    Some(ExternalFileSession::Existing { canonical_path: known_path, .. })
+                        if known_path.as_path() == canonical_path.as_path()
+                )
+        ));
     }
 }

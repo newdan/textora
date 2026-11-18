@@ -130,16 +130,7 @@ pub trait DocView {
 /// Mutable viewport access — extends [`DocView`] with scroll control.
 pub trait DocViewMut: DocView {
     /// Set the vertical scroll position in pixels.
-    fn set_scroll_y(&mut self, y: f32);
-
-    /// 替换 [range] 字节区间的文本为 text。
-    fn replace_range(&mut self, range: std::ops::Range<usize>, text: &str);
-
-    /// 开始一个编辑事务——后续多次 replace_range 合并为一个 Undo 单元。
-    fn begin_edit(&mut self) {}
-
-    /// 结束编辑事务。
-    fn end_edit(&mut self) {}
+    fn set_scroll_y(&mut self, _y: f32) {}
 }
 
 /// A simple read-only DocView backed by a string.

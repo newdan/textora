@@ -93,7 +93,7 @@ impl Label {
             leading_icon: None,
             trailing_icon: None,
             style,
-            clip_to_bounds: false,
+            clip_to_bounds: true,
             accessibility_id: None,
         }
     }
@@ -304,7 +304,8 @@ mod tests {
         let draw_list = paint_for_test(&label);
 
         assert!(draw_list.cmds.len() >= 2);
-        assert!(matches!(draw_list.cmds[0], DrawCmd::FillTriangle { .. }));
+        assert!(matches!(draw_list.cmds.first(), Some(DrawCmd::PushClip(_))));
+        assert!(matches!(draw_list.cmds[1], DrawCmd::FillTriangle { .. }));
         assert!(draw_list.cmds.iter().any(|cmd| matches!(cmd, DrawCmd::TextLayout { .. })));
         assert_eq!(
             label.on_event(&Event::KeyDown(KeyCode::Enter, Modifiers::NONE), &mut event_ctx()),
@@ -313,10 +314,9 @@ mod tests {
     }
 
     #[test]
-    fn dynamic_label_clips_long_text_to_its_rect() {
+    fn dynamic_label_clips_long_text_to_its_rect_by_default() {
         let mut label = Label::new("initial", LabelStyle::default());
         label.set_text("a much longer path than the available width");
-        label.set_clip_to_bounds(true);
         let rect = Rect::new(12.0, 18.0, 64.0, 20.0);
         set_test_rect(&mut label, rect);
 

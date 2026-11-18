@@ -16,7 +16,6 @@ pub mod table_picker;
 pub mod tag_editor;
 pub mod text_box;
 pub mod title_bar;
-pub mod title_bar_spacer;
 pub mod tooltip;
 
 pub mod button;

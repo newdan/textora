@@ -479,7 +479,7 @@ impl Widget for TitleBarWidget {
             );
 
             let icon_color = if input.toggled {
-                ctx.theme.palette.accent
+                ctx.theme.palette.accent_text
             } else {
                 let mut c = ctx.theme.palette.text_muted;
                 c[3] *= 0.6;
@@ -505,7 +505,7 @@ impl Widget for TitleBarWidget {
             );
 
             let icon_color = if style_input.panel_visible {
-                ctx.theme.palette.accent
+                ctx.theme.palette.accent_text
             } else {
                 let mut color = ctx.theme.palette.text_muted;
                 color[3] *= 0.6;
@@ -528,7 +528,7 @@ impl Widget for TitleBarWidget {
             );
 
             let icon_color = if input.toc_visible {
-                ctx.theme.palette.accent
+                ctx.theme.palette.accent_text
             } else {
                 let mut c = ctx.theme.palette.text_muted;
                 c[3] *= 0.6;
@@ -989,12 +989,19 @@ mod tests {
     }
 
     #[test]
-    fn active_mmap_style_button_uses_accent_color() {
-        let widget = laid_out_title_bar(TitleBarInput {
-            mindmap_style: Some(MindmapStyleButtonInput { panel_visible: true }),
-            ..test_title_bar_input()
-        });
-        let theme = test_theme();
+    fn active_mmap_style_button_uses_readable_accent_foreground() {
+        let theme = Theme::from_definition(&crate::theme::ThemeDefinition::default_light());
+        let widget = laid_out_title_bar_at(
+            TitleBarInput {
+                mindmap_style: Some(MindmapStyleButtonInput { panel_visible: true }),
+                can_toggle: false,
+                ..test_title_bar_input()
+            },
+            1200.0,
+            36.0,
+            1.0,
+            &theme,
+        );
         let mut draw_list = DrawList::new();
         let mut paint_ctx = PaintCtx {
             global_alpha: 1.0,
@@ -1007,10 +1014,20 @@ mod tests {
 
         widget.paint(&mut paint_ctx);
 
-        assert!(draw_list.cmds.iter().any(|command| matches!(
-            command,
-            DrawCmd::FillTriangle { color, .. } if *color == theme.palette.accent
-        )));
+        let icon_color = draw_list
+            .cmds
+            .iter()
+            .find_map(|command| match command {
+                DrawCmd::FillTriangle { color, .. } => Some(*color),
+                _ => None,
+            })
+            .expect("active palette icon must be painted");
+        assert_eq!(icon_color, theme.palette.accent_text);
+        let luminance = |color: [f32; 4]| 0.2126 * color[0] + 0.7152 * color[1] + 0.0722 * color[2];
+        let foreground = luminance(icon_color);
+        let background = luminance(theme.editor.background);
+        let contrast = (foreground.max(background) + 0.05) / (foreground.min(background) + 0.05);
+        assert!(contrast >= 3.0, "runtime linear active-icon contrast: {contrast}");
     }
 
     #[test]

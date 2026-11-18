@@ -117,11 +117,8 @@ mod tests {
         let shaped = shaper.shape("e").expect("fixture must shape");
         let font_id = shaped.clusters[0].font_id;
         for x in [10.25, 10.5, 10.75, -0.25, -0.5, -0.75] {
-            let expected = if cfg!(target_os = "macos") {
-                render::split_subpixel(x)
-            } else {
-                (x.round(), 0)
-            };
+            let expected =
+                if cfg!(target_os = "macos") { render::split_subpixel(x) } else { (x.round(), 0) };
             assert_eq!(glyph_position(&mut shaper, font_id, x), expected);
         }
     }

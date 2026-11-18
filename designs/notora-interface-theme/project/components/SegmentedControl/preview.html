@@ -1,0 +1,29 @@
+<!-- @dsCard group="控件" height=112 -->
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>SegmentedControl — 预览</title>
+<style>
+  html, body { margin:0; height:100%; }
+  body { background:var(--surface-overlay); color:var(--ink); font-family:var(--font-sans); -webkit-font-smoothing:antialiased; }
+  .stage { box-sizing:border-box; height:100%; padding:24px; display:flex; align-items:center; gap:16px; }
+  .label { font-size:13px; line-height:18px; color:var(--ink); }
+  .seg { display:flex; height:32px; }
+  .seg button { box-sizing:border-box; width:72px; height:32px; padding:0 8px; border:0; background:transparent;
+                color:var(--ink); font:400 14px/20px var(--font-sans); border-radius:8px; cursor:default; }
+  .seg button.hover { background:var(--button-hover); }
+  .seg button.selected { background:var(--accent); color:var(--on-accent); }
+</style>
+</head>
+<body>
+<div class="stage">
+  <span class="label">主题</span>
+  <div class="seg" role="group" aria-label="主题">
+    <button type="button" class="selected" aria-pressed="true">跟随系统</button>
+    <button type="button" aria-pressed="false">深色</button>
+    <button type="button" class="hover" aria-pressed="false">浅色</button>
+  </div>
+</div>
+</body>
+</html>

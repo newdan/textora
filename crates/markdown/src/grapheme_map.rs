@@ -21,11 +21,13 @@ pub(crate) struct VisualGraphemeMap {
 
 impl VisualGraphemeMap {
     /// Number of grapheme clusters (excluding the one-past-end sentinel).
+    #[cfg(test)]
     pub(crate) fn len(&self) -> usize {
         self.source_bytes_by_grapheme.len().saturating_sub(1)
     }
 
     /// Source byte at the start of grapheme `grapheme_index`.
+    #[cfg(test)]
     pub(crate) fn source_byte_at(&self, grapheme_index: usize) -> Option<usize> {
         self.source_bytes_by_grapheme.get(grapheme_index).copied()
     }
@@ -34,6 +36,7 @@ impl VisualGraphemeMap {
     ///
     /// Returns `None` only when the map is empty.  Bytes before the first
     /// grapheme snap to 0; bytes at or past the end snap to `len()-1`.
+    #[cfg(test)]
     pub(crate) fn byte_to_grapheme(&self, source_byte: usize) -> Option<usize> {
         if self.source_bytes_by_grapheme.len() <= 1 {
             return None;

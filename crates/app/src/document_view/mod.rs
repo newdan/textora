@@ -19,6 +19,11 @@
 //! holds the correct position). Direct field assignment is forbidden outside of
 //! these methods to guarantee `tb.cursor_offset()` stays in sync.
 
+#![allow(
+    dead_code,
+    reason = "legacy compatibility shim retained for tests and benches until full retirement"
+)]
+
 use crate::line_index::{LineIndex, count_graphemes_before, grapheme_to_byte};
 use std::borrow::Cow;
 
@@ -96,15 +101,7 @@ impl DocumentView {
 
     /// Create a new document view from pre-split lines (for testing).
     pub fn new(lines: Vec<String>, visible_rows: usize, viewport_height: f64) -> Self {
-        let mut tb = TextBuffer::new(false).expect("TextBuffer creation failed");
-        let content = lines.join("\n");
-        if !content.is_empty() {
-            let sanitized = replace_null_bytes(content.as_bytes());
-            tb.write_raw(&sanitized);
-        }
-        tb.mark_as_clean();
-        tb.cursor_move_to_byte(ByteIndex::ZERO);
-        let model = DocumentModel::new(tb);
+        let model = DocumentModel::from_lines(&lines);
         let presentation = DocumentPresentation::new(visible_rows, viewport_height);
 
         Self { model, presentation }
@@ -116,18 +113,9 @@ impl DocumentView {
         visible_rows: usize,
         viewport_height: f64,
     ) -> Self {
-        let crlf = content.contains("\r\n");
-        let normalized = content.replace("\r\n", "\n");
-        let mut document = Self::new(
-            normalized.split('\n').map(str::to_owned).collect(),
-            visible_rows,
-            viewport_height,
-        );
-        document.file_path = Some(path.to_owned());
-        document.disk_revision = crate::file_safety::capture_revision(path).ok();
-        document.crlf = crlf;
-        document.set_language_from_path(path);
-        document
+        let model = DocumentModel::from_external_content(path, content);
+        let presentation = DocumentPresentation::new(visible_rows, viewport_height);
+        Self { model, presentation }
     }
 
     pub(crate) fn restore_edit_position(
@@ -161,86 +149,7 @@ impl DocumentView {
         visible_rows: usize,
         viewport_height: f64,
     ) -> Result<Self, String> {
-        let _ff_t0 = std::time::Instant::now();
-        let (buffer, _meta) =
-            file::load_file(path).map_err(|e| format!("failed to load {}: {e}", path.display()))?;
-        let disk_revision = crate::file_safety::capture_revision(path).ok();
-        let _ff_load_us = _ff_t0.elapsed().as_micros();
-
-        // Quick scan for null bytes (zero-copy)
-        let has_null = {
-            let total = buffer.len();
-            let mut off = 0;
-            let mut found = false;
-            while off < total {
-                let chunk = buffer.read_forward(off);
-                let end = chunk.len().min(total - off);
-                if chunk[..end].contains(&0) {
-                    found = true;
-                    break;
-                }
-                off += end;
-            }
-            found
-        };
-
-        let mut tb = if has_null {
-            // Rare path: extract, replace null bytes, write through edit pipeline
-            let content_bytes: Vec<u8> = {
-                let total = buffer.len();
-                if total == 0 {
-                    Vec::new()
-                } else {
-                    let chunk = buffer.read_forward(0);
-                    if chunk.len() >= total { chunk[..total].to_vec() } else { chunk.to_vec() }
-                }
-            };
-            let mut tb = TextBuffer::new(false).expect("TextBuffer creation failed");
-            if !content_bytes.is_empty() {
-                let sanitized = replace_null_bytes(&content_bytes);
-                tb.write_raw(&sanitized);
-            }
-            tb
-        } else {
-            // Fast path: zero-copy from GapBuffer
-            TextBuffer::from_gap_buffer(buffer).expect("TextBuffer creation failed")
-        };
-        let _ff_write_us = _ff_t0.elapsed().as_micros();
-
-        if _meta.line_ending == core::file::LineEnding::Crlf {
-            tb.set_crlf(true);
-        }
-        let had_bom = _meta.had_bom;
-        tb.mark_as_clean();
-        tb.cursor_move_to_byte(ByteIndex::ZERO);
-
-        // Detect language from file extension for syntax highlighting.
-        let language = path.extension().and_then(|ext| ext.to_str()).and_then(|ext| {
-            FILE_ASSOCIATIONS
-                .iter()
-                .find(|(pattern, _)| *pattern == ext || pattern.ends_with(&format!(".{ext}")))
-                .map(|(_, lang)| *lang)
-        });
-
-        let mut model = DocumentModel::new(tb);
-        model.file_path = Some(path.to_path_buf());
-        model.disk_revision = disk_revision;
-        model.dirty = _meta.original_encoding.is_some();
-        model.crlf = _meta.line_ending == core::file::LineEnding::Crlf;
-        model.had_bom = had_bom;
-        model.original_encoding = _meta.original_encoding;
-        model.language = language;
-
-        let _ff_total = _ff_t0.elapsed().as_micros();
-        eprintln!(
-            "[perf:from_file] load={}us scan_write={}us index={}us total={}us lines={} null={}",
-            _ff_load_us,
-            _ff_write_us - _ff_load_us,
-            _ff_total - _ff_write_us,
-            _ff_total,
-            model.line_index.offsets.len(),
-            has_null
-        );
+        let model = DocumentModel::from_file(path)?;
         let presentation = DocumentPresentation::new(visible_rows, viewport_height);
 
         Ok(Self { model, presentation })
@@ -979,28 +888,7 @@ impl DocView for DocumentView {
     }
 }
 
-impl DocViewMut for DocumentView {
-    fn set_scroll_y(&mut self, y: f32) {
-        self.presentation.display.viewport.scroll_top = y as f64;
-    }
-
-    fn replace_range(&mut self, range: std::ops::Range<usize>, text: &str) {
-        self.tb.replace_range(range, text.as_bytes());
-        // replace_range 之后需要重建 line_index
-        self.rebuild_viewport();
-        self.dirty = true;
-    }
-
-    fn begin_edit(&mut self) {
-        self.tb.edit_begin_grouping();
-    }
-
-    fn end_edit(&mut self) {
-        self.tb.edit_end_grouping();
-        self.rebuild_viewport();
-        self.dirty = true;
-    }
-}
+impl DocViewMut for DocumentView {}
 
 /// Replace null bytes (\0) with Unicode replacement character U+FFFD.
 ///

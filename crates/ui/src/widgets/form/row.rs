@@ -65,6 +65,7 @@ pub struct FormRow {
     description: Option<Label>,
     control: Box<dyn Widget>,
     style: FormRowStyle,
+    column_control_width_logical: Option<f32>,
     layout_mode: FormRowLayoutMode,
     label_rect: Rect,
     description_rect: Option<Rect>,
@@ -101,6 +102,7 @@ impl FormRow {
             description,
             control,
             style,
+            column_control_width_logical: None,
             layout_mode: FormRowLayoutMode::Columns,
             label_rect: Rect::ZERO,
             description_rect: None,
@@ -114,6 +116,11 @@ impl FormRow {
 
     pub fn layout_mode(&self) -> FormRowLayoutMode {
         self.layout_mode
+    }
+
+    pub fn with_column_control_width_logical(mut self, width: f32) -> Self {
+        self.column_control_width_logical = Some(width.max(0.0));
+        self
     }
 
     pub fn label_rect(&self) -> Rect {
@@ -284,7 +291,12 @@ impl FormRow {
         let label_width = desired_label_width.min(content_rect.w);
         let remaining_width_after_label = (content_rect.w - label_width).max(0.0);
         let control_gap = gap_px.min(remaining_width_after_label);
-        let control_width = (content_rect.w - label_width - control_gap).max(0.0);
+        let available_control_width = (content_rect.w - label_width - control_gap).max(0.0);
+        let control_width =
+            self.column_control_width_logical.map_or(available_control_width, |width| {
+                Self::logical_to_px(width, ctx.dpi).min(available_control_width)
+            });
+        let label_width = (content_rect.w - control_gap - control_width).max(0.0);
         let label_block = Rect::new(content_rect.x, content_rect.y, label_width, content_rect.h);
 
         self.layout_mode = FormRowLayoutMode::Columns;
@@ -619,6 +631,59 @@ mod tests {
             Box::new(Checkbox::new(WidgetId(101), false)),
             FormRowStyle::default(),
         )
+    }
+
+    #[test]
+    fn form_row_clips_long_labels_to_their_columns_at_each_scale() {
+        use crate::core::{DrawCmd, DrawList};
+
+        let theme = crate::theme::test_theme();
+        for dpi in [1.0, 1.5, 2.0] {
+            for width in [320.0, 760.0] {
+                let mut row = FormRow::new(
+                    fixture_label(&"很长的设置标题".repeat(20)),
+                    Some(fixture_description("输入字体名称；代码块仍使用等宽字体。")),
+                    Box::new(TrackingControl::new(WidgetId(101), None)),
+                    FormRowStyle::default(),
+                );
+                let mut measure = NoopMeasure;
+                row.set_rect(
+                    Rect::new(0.0, 0.0, width * dpi, 120.0 * dpi),
+                    &mut LayoutCtx { ui_measure: None, measure: &mut measure, theme: &theme, dpi },
+                );
+                let mut shaper =
+                    shaping::Shaper::new().expect("form regression needs system fonts");
+                let mut drawing = DrawList::new();
+                let offset = (23.0 * dpi, 31.0 * dpi);
+                drawing.offset = offset;
+                row.paint(&mut PaintCtx {
+                    list: &mut drawing,
+                    theme: &theme,
+                    dpi,
+                    offset: (0.0, 0.0),
+                    global_alpha: 1.0,
+                    shaper: Some(&mut shaper),
+                });
+                let clips: Vec<_> = drawing
+                    .cmds
+                    .iter()
+                    .filter_map(|command| match command {
+                        DrawCmd::PushClip(bounds) => Some(*bounds),
+                        _ => None,
+                    })
+                    .collect();
+                let expected: Vec<_> =
+                    [row.label_rect(), row.description_rect().expect("description")]
+                        .into_iter()
+                        .map(|bounds| {
+                            Rect::new(bounds.x + offset.0, bounds.y + offset.1, bounds.w, bounds.h)
+                        })
+                        .collect();
+                assert_eq!(clips, expected, "width={width}, dpi={dpi}");
+                assert_eq!(drawing.offset, offset);
+                assert!(matches!(drawing.cmds.last(), Some(DrawCmd::FillRect { .. })));
+            }
+        }
     }
 
     #[test]

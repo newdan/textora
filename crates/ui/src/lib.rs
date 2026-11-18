@@ -34,8 +34,8 @@ pub use widgets::{
     encrypted_note_unlock, form, icon, inline_group, label, list, location_picker,
     mindmap_style_panel, modal_frame, popup_menu, rounded_surface_frame, scrollbar, search_bar,
     settings_view, sidebar, split_button, splitter, status_bar, status_state, switch, tab_bar,
-    table_picker, tag_editor, text_box, title_bar, title_bar_spacer, toc, tooltip, tree_list,
-    virtual_card_list, window_frame,
+    table_picker, tag_editor, text_box, title_bar, toc, tooltip, tree_list, virtual_card_list,
+    window_frame,
 };
 
 pub use gutter::RenderContext;

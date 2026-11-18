@@ -289,7 +289,7 @@ impl Widget for VirtualCardListWidget {
                     geometry.tag_rect.x,
                     geometry.metadata_baseline,
                     layout::CARD_METADATA_FONT_SIZE_LOGICAL * ctx.dpi,
-                    ctx.theme.palette.accent,
+                    ctx.theme.palette.accent_text,
                     &card.tag_summary,
                 );
             }
@@ -553,6 +553,29 @@ mod tests {
         let mut measure = NoopMeasure;
         let mut context = LayoutCtx { ui_measure: None, measure: &mut measure, theme: &theme, dpi };
         widget.set_rect(rect, &mut context);
+    }
+
+    #[test]
+    fn card_tag_uses_readable_accent_text() {
+        let theme = crate::Theme::from_definition(&crate::theme::ThemeDefinition::default_light());
+        let mut widget = VirtualCardListWidget::new();
+        widget.set_input(VirtualCardListInput { cards: vec![card(1)], scroll_offset_px: 0.0 });
+        layout(&mut widget, Rect::new(0.0, 0.0, 360.0, 220.0), 1.0);
+        let mut draw_list = crate::core::paint::DrawList::new();
+        let mut shaper = shaping::Shaper::new().expect("测试环境必须能创建文字塑形器");
+        let mut paint_context = crate::core::PaintCtx::new(&mut draw_list, &theme, 1.0);
+        paint_context.shaper = Some(&mut shaper);
+        widget.paint(&mut paint_context);
+
+        let tag_color = draw_list
+            .cmds
+            .iter()
+            .find_map(|command| match command {
+                DrawCmd::TextLayout { layout, color, .. } if layout.text == "#work" => Some(*color),
+                _ => None,
+            })
+            .expect("card tag must be painted");
+        assert_eq!(tag_color, theme.palette.accent_text);
     }
 
     #[test]

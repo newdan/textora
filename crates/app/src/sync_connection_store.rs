@@ -133,14 +133,6 @@ impl SyncConnectionStore {
         }
         Ok(())
     }
-
-    pub(crate) fn remove(&self) -> Result<(), SyncConnectionStoreError> {
-        match fs::remove_file(self.path()) {
-            Ok(()) => Ok(()),
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
-            Err(source) => Err(SyncConnectionStoreError::Io { operation: "remove", source }),
-        }
-    }
 }
 
 fn validate_keychain_account(account: &str) -> Result<(), SyncConnectionStoreError> {

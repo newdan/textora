@@ -6,14 +6,6 @@ use lsh::compiler::{Generator, builtin_definitions_path};
 use stdext::arena::scratch_arena;
 
 fn main() {
-    // ── ICU defaults ──────────────────────────────────────────────
-    set_if_unset("EDIT_CFG_ICUUC_SONAME", "libicucore.dylib");
-    set_if_unset("EDIT_CFG_ICUI18N_SONAME", "libicucore.dylib");
-    set_if_unset("EDIT_CFG_ICU_EXPORT_PREFIX", "");
-    set_if_unset("EDIT_CFG_ICU_EXPORT_SUFFIX", "");
-
-    println!("cargo::rustc-check-cfg=cfg(edit_icu_renaming_auto_detect)");
-
     // ── LSH definitions ──────────────────────────────────────────
     let arena = scratch_arena(None);
     let mut generator = Generator::new(&arena);
@@ -34,11 +26,4 @@ fn main() {
     fs::write(&dest_path, rust_code).unwrap_or_else(|e| {
         panic!("failed to write lsh_definitions.rs: {e}");
     });
-}
-
-fn set_if_unset(key: &str, fallback: &str) {
-    if std::env::var(key).unwrap_or_default().is_empty() {
-        println!("cargo::rerun-if-env-changed={key}");
-        println!("cargo::rustc-env={key}={fallback}");
-    }
 }

@@ -36,7 +36,7 @@ const SEGMENT_WIDTH_LOGICAL: f32 = ui::button::ButtonMetrics::text_width(4);
 const ROW_HEIGHT_LOGICAL: f32 = 64.0;
 const STACKED_ROW_HEIGHT_LOGICAL: f32 = 120.0;
 const ROW_STACK_GAP_LOGICAL: f32 = 8.0;
-const ROW_LABEL_WIDTH_LOGICAL: f32 = 176.0;
+const ROW_LABEL_WIDTH_LOGICAL: f32 = 240.0;
 const ROW_COLUMN_GAP_LOGICAL: f32 = 12.0;
 const ROW_VERTICAL_INSET_LOGICAL: f32 = 10.0;
 const ROW_HORIZONTAL_INSET_LOGICAL: f32 = 16.0;
@@ -771,6 +771,7 @@ impl NotoraSettingsView {
             Box::new(text_box),
             self.settings_row_style(),
         )
+        .with_column_control_width_logical(TEXT_BOX_WIDTH_LOGICAL)
     }
 
     fn switch_row(&self, id: WidgetId, title: &str, description: &str, checked: bool) -> FormRow {

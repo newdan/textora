@@ -66,12 +66,12 @@ pub fn apply_deltas(y_delta: &mut [f32], height_deltas: &[(usize, f32)]) {
     }
     let mut cum: f32 = 0.0;
     let mut di = 0usize;
-    for i in 0..y_delta.len() {
+    for (i, delta) in y_delta.iter_mut().enumerate() {
         while di < height_deltas.len() && height_deltas[di].0 < i {
             cum += height_deltas[di].1;
             di += 1;
         }
-        y_delta[i] += cum;
+        *delta += cum;
     }
 }
 

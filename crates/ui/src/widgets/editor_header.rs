@@ -456,7 +456,7 @@ impl EditorHeaderWidget {
         }
         let icon_size = 16.0 * ctx.dpi;
         let icon_color =
-            if selected { ctx.theme.palette.accent } else { ctx.theme.palette.text_muted };
+            if selected { ctx.theme.palette.accent_text } else { ctx.theme.palette.text_muted };
         draw_icon(
             ctx.list,
             icon,
@@ -535,6 +535,32 @@ mod tests {
             delete_enabled: true,
             compact: false,
         }
+    }
+
+    #[test]
+    fn selected_action_icon_uses_readable_accent_foreground() {
+        use crate::core::paint::{DrawCmd, DrawList};
+
+        let theme = crate::Theme::from_definition(&crate::theme::ThemeDefinition::default_light());
+        let mut header = EditorHeaderWidget::new();
+        header.set_input(EditorHeaderInput { starred: true, ..input() });
+        let mut measure = HeaderMeasure;
+        header.set_rect(
+            Rect::new(0.0, 0.0, 640.0, 128.0),
+            &mut LayoutCtx { ui_measure: None, measure: &mut measure, theme: &theme, dpi: 1.0 },
+        );
+        let mut draw_list = DrawList::new();
+        header.paint(&mut PaintCtx::new(&mut draw_list, &theme, 1.0));
+
+        let icon_color = draw_list
+            .cmds
+            .iter()
+            .find_map(|command| match command {
+                DrawCmd::FillTriangle { color, .. } => Some(*color),
+                _ => None,
+            })
+            .expect("selected star icon must be painted");
+        assert_eq!(icon_color, theme.palette.accent_text);
     }
 
     #[test]

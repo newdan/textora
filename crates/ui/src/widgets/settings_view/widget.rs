@@ -315,6 +315,7 @@ impl SettingsView {
             Box::new(text_box),
             settings_row_style(),
         )
+        .with_column_control_width_logical(SETTINGS_TEXT_BOX_WIDTH_LOGICAL)
     }
 
     fn font_size_row(&self) -> FormRow {
@@ -327,6 +328,7 @@ impl SettingsView {
             Box::new(text_box),
             settings_row_style(),
         )
+        .with_column_control_width_logical(SETTINGS_TEXT_BOX_WIDTH_LOGICAL)
     }
 
     fn line_height_ratio_row(&self) -> FormRow {
@@ -339,6 +341,7 @@ impl SettingsView {
             Box::new(text_box),
             settings_row_style(),
         )
+        .with_column_control_width_logical(SETTINGS_TEXT_BOX_WIDTH_LOGICAL)
     }
 
     fn build_editor_sections(&self) -> Vec<FormSection> {
@@ -433,6 +436,7 @@ impl SettingsView {
             Box::new(text_box),
             settings_row_style(),
         )
+        .with_column_control_width_logical(SETTINGS_TEXT_BOX_WIDTH_LOGICAL)
     }
 
     fn build_interface_sections(&self) -> Vec<FormSection> {
@@ -1609,12 +1613,12 @@ mod tests {
     }
 
     #[test]
-    fn segmented_buttons_use_inverse_selected_text_and_visible_hover() {
+    fn segmented_buttons_use_on_accent_selected_text_and_visible_hover() {
         let settings = crate::theme::test_theme().settings_theme();
         let style = segmented_button_style(settings);
 
         assert_eq!(style.foreground, settings.text_primary);
-        assert_eq!(style.selected_foreground, settings.text_inverse);
+        assert_eq!(style.selected_foreground, settings.on_accent);
         assert_eq!(style.selected_background, settings.accent);
         assert_eq!(style.background, [0.0; 4]);
         let hover_contrast: f32 = style
@@ -1642,7 +1646,7 @@ mod tests {
         assert_ne!(category_style.hover_background, [0.0; 4]);
         assert_ne!(category_style.pressed_background, [0.0; 4]);
         assert_ne!(category_style.selected_background, [0.0; 4]);
-        assert_eq!(category_style.selected_foreground, theme.settings_theme().accent);
+        assert_eq!(category_style.selected_foreground, theme.settings_theme().accent_text);
 
         let mut draw_list = DrawList::new();
         view.paint(&mut PaintCtx::new(&mut draw_list, &theme, 1.0));

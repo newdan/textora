@@ -1,13 +1,17 @@
+#[cfg(test)]
 use std::path::Path;
 
 use appkit_core::document::DocumentModel;
 
-use crate::document_view::DocumentView;
+#[cfg(test)]
 use crate::file_history::FileHistoryEntry;
+#[cfg(test)]
 use crate::workspace::Workspace;
 
+#[cfg(test)]
 const RECOVERY_TITLE_PREFIX: &str = "恢复：";
 
+#[cfg(test)]
 pub(crate) fn hydrate_active_stub(workspace: &mut Workspace) -> bool {
     let active_index = workspace.active_index();
     let Some(document) = workspace.entry_mut(active_index) else {
@@ -24,16 +28,16 @@ pub(crate) fn hydrate_stub_document(document: &mut DocumentModel) -> bool {
     let hydration_started = std::time::Instant::now();
     let path =
         document.file_path.clone().expect("stub path existence checked before active hydration");
-    let Ok(loaded) = DocumentView::from_file(&path, 1, 1.0) else {
+    let Ok(mut loaded_model) = DocumentModel::from_file(&path) else {
         return false;
     };
-    let (mut loaded_model, _) = loaded.into_parts();
     loaded_model.dirty = document.dirty;
     *document = loaded_model;
     eprintln!("[perf:lazy_load] from_file={}us", hydration_started.elapsed().as_micros());
     true
 }
 
+#[cfg(test)]
 pub(crate) fn detach_deleted_document(
     workspace: &mut Workspace,
     index: usize,
@@ -54,6 +58,7 @@ pub(crate) fn detach_deleted_document(
     workspace.set_suggested_file_name(index, Some(format!("{RECOVERY_TITLE_PREFIX}{file_name}")));
 }
 
+#[cfg(test)]
 pub(crate) fn history_entry(
     workspace: &Workspace,
     index: usize,
@@ -75,6 +80,7 @@ pub(crate) fn history_entry(
     })
 }
 
+#[cfg(test)]
 fn copy_tab_path_with<E>(
     workspace: &Workspace,
     index: usize,
@@ -85,13 +91,6 @@ fn copy_tab_path_with<E>(
         return;
     };
     let _ = copy_text(path.to_string_lossy().into_owned());
-}
-
-pub(crate) fn copy_tab_path(workspace: &Workspace, index: usize) {
-    let Some(document) = workspace.entry(index) else {
-        return;
-    };
-    copy_document_path(document);
 }
 
 pub(crate) fn copy_document_path(document: &DocumentModel) {
