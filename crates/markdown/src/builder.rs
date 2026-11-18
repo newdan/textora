@@ -443,6 +443,8 @@ struct PendingLine {
     /// Style spans accumulated so far in this line.
     styles: Vec<StyleSpan>,
     projection: TextProjectionBuilder,
+    last_source_end: usize,
+    last_style_span_owner: Option<u64>,
 }
 
 // ===== ListStackEntry =====
@@ -470,6 +472,16 @@ pub(crate) fn inline_code_content_range(spelling: &str) -> Range<usize> {
 
 // ===== MarkdownBuilder =====
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum InlineOffsetState {
+    /// 开定界符位于该源码字节，尚未附加到本逻辑行的任意视觉片段。
+    PendingDelimiter(usize),
+    /// 该层开定界符或起点已附加到本逻辑行先前的视觉片段上。
+    AttachedOnCurrentLine,
+    /// 跨过块内 HardBreak / `<br>` 后被重置；下一片段从自身起点开始。
+    ResetAfterLineBreak,
+}
+
 struct MarkdownBuilder {
     block_stack: Vec<BlockNode>,
     pending_line: PendingLine,
@@ -481,8 +493,11 @@ struct MarkdownBuilder {
     current_event_range: Range<usize>,
     /// 每层 block 的起始源码偏移，用于 pop_block 时计算 source_range。
     block_source_starts: Vec<usize>,
-    /// 每层 inline style 的起始源码偏移，用于 push_text 时计算 StyleSpan::source_range。
-    inline_start_offsets: Vec<usize>,
+    /// 每层 inline style 的实例 ID 与偏移状态，用于精确分配内外层定界符所有权。
+    inline_start_offsets: Vec<(u64, InlineOffsetState)>,
+    next_inline_id: u64,
+    /// 上一次以容器级 Event::Html 写入段落的原始事件结束字节，用于合并同块多行 HTML。
+    last_html_block_end: Option<usize>,
 }
 
 impl MarkdownBuilder {
@@ -506,12 +521,17 @@ impl MarkdownBuilder {
             current_event_range: 0..0,
             block_source_starts: vec![0],
             inline_start_offsets: vec![],
+            next_inline_id: 1,
+            last_html_block_end: None,
         }
     }
 
     fn push_text_style(&mut self, modifier: TextStyleMod) {
         if modifier_to_inline(&modifier).is_some() {
-            self.inline_start_offsets.push(self.current_event_range.start);
+            let id = self.next_inline_id;
+            self.next_inline_id += 1;
+            self.inline_start_offsets
+                .push((id, InlineOffsetState::PendingDelimiter(self.current_event_range.start)));
         }
         self.text_style_stack.push(modifier);
     }
@@ -528,11 +548,13 @@ impl MarkdownBuilder {
 
     /// 更新当前行最后一个 inline span 的 source_range.end，使其包含闭合标记。
     fn finalize_inline_source_range(&mut self, end: usize) {
-        if let Some(&start) = self.inline_start_offsets.last()
-            && let Some(span) = self.pending_line.styles.last_mut()
-            && span.source_range.start == start
+        self.record_pending_source_end(end);
+        if matches!(
+            self.inline_start_offsets.last(),
+            Some((_, InlineOffsetState::AttachedOnCurrentLine))
+        ) && let Some(span) = self.pending_line.styles.last_mut()
         {
-            span.source_range.end = end;
+            span.source_range.end = span.source_range.end.max(end);
         }
     }
 
@@ -606,9 +628,15 @@ impl MarkdownBuilder {
         starts.extend(text.match_indices('\n').map(|(offset, _)| text_start + offset + 1));
     }
 
+    fn record_pending_source_end(&mut self, end: usize) {
+        self.pending_line.last_source_end = self.pending_line.last_source_end.max(end);
+    }
+
     fn push_verbatim_text(&mut self, text: &str) {
         self.append_text_and_style(text);
-        self.pending_line.projection.push_verbatim(text, self.current_event_range.clone());
+        let range = self.current_event_range.clone();
+        self.record_pending_source_end(range.end);
+        self.pending_line.projection.push_verbatim(text, range);
     }
 
     fn push_text_with_source(&mut self, text: &str, source_range: Range<usize>) {
@@ -622,6 +650,7 @@ impl MarkdownBuilder {
             })
             .is_some_and(|url| url == text || url.strip_prefix("mailto:") == Some(text));
         self.append_text_and_style(text);
+        self.record_pending_source_end(source_range.end);
         if is_technical_link {
             self.pending_line.projection.push_verbatim(text, source_range);
         } else {
@@ -631,6 +660,7 @@ impl MarkdownBuilder {
 
     fn push_inline_code(&mut self, code: &str, source: &str) {
         let event_range = self.current_event_range.clone();
+        self.record_pending_source_end(event_range.end);
         let spelling = &source[event_range.clone()];
         let content = inline_code_content_range(spelling);
         let content_start = event_range.start + content.start;
@@ -677,21 +707,52 @@ impl MarkdownBuilder {
         // Record only the most specific inline style (top of stack).
         // Avoids creating overlapping spans for nested modifiers.
         if let Some(top_inline) = self.text_style_stack.iter().rev().find_map(modifier_to_inline) {
-            let source_range = if let Some(&inline_start) = self.inline_start_offsets.last() {
-                inline_start..self.current_event_range.end
-            } else {
-                self.current_event_range.clone()
-            };
+            let mut claimed_start = None;
+            for (_, state) in &mut self.inline_start_offsets {
+                match *state {
+                    InlineOffsetState::PendingDelimiter(offset) => {
+                        if claimed_start.is_none() {
+                            claimed_start = Some(offset);
+                        }
+                        *state = InlineOffsetState::AttachedOnCurrentLine;
+                    }
+                    InlineOffsetState::ResetAfterLineBreak => {
+                        *state = InlineOffsetState::AttachedOnCurrentLine;
+                    }
+                    InlineOffsetState::AttachedOnCurrentLine => {}
+                }
+            }
+            let top_id = self.inline_start_offsets.last().map(|(id, _)| *id);
+            let span_start = claimed_start.unwrap_or(self.current_event_range.start);
+            let source_range = span_start..self.current_event_range.end;
+            if claimed_start.is_none()
+                && top_id.is_some()
+                && self.pending_line.last_style_span_owner == top_id
+                && let Some(last) = self.pending_line.styles.last_mut()
+                && last.start + last.len == start
+            {
+                last.len += len;
+                last.source_range.end = source_range.end;
+                return;
+            }
+            self.pending_line.last_style_span_owner = top_id;
             self.pending_line.styles.push(StyleSpan {
                 start,
                 len,
                 style: top_inline,
-                source_range: source_range.clone(),
+                source_range,
             });
         }
     }
 
-    fn push_soft_break(&mut self, source_range: Range<usize>) {
+    fn push_soft_break(&mut self, source: &str, mut source_range: Range<usize>) {
+        let min_start = self.pending_line.last_source_end;
+        while source_range.start > min_start
+            && matches!(source.as_bytes().get(source_range.start - 1), Some(b' ' | b'\t'))
+        {
+            source_range.start -= 1;
+        }
+        self.record_pending_source_end(source_range.end);
         self.append_text_and_style(" ");
         self.pending_line.projection.push_soft_break(source_range);
     }
@@ -708,6 +769,32 @@ impl MarkdownBuilder {
     }
 
     fn flush_line(&mut self) {
+        let in_container = self.block_stack.last().is_some_and(|block| {
+            matches!(
+                block.kind,
+                BlockKind::Container | BlockKind::BlockQuote | BlockKind::ListItem { .. }
+            )
+        });
+        if in_container && !self.pending_line.text.is_empty() {
+            let (text_lines, text_styles, projected_lines) = self.flush_line_to_vec();
+            let block_range = projected_lines
+                .first()
+                .map(|line| line.source_extent())
+                .unwrap_or_else(|| self.current_event_range.clone());
+            if let Some(parent) = self.block_stack.last_mut() {
+                parent.children.push(BlockNode {
+                    kind: BlockKind::Paragraph,
+                    children: vec![],
+                    text_styles,
+                    text_lines,
+                    projected_lines,
+                    source_range: BlockSource::Continuous(block_range.clone()),
+                    code_line_source_starts: None,
+                    block_range,
+                });
+            }
+            return;
+        }
         self.flush_line_to_vec();
     }
 
@@ -716,12 +803,74 @@ impl MarkdownBuilder {
         if text_lines.is_empty() {
             return;
         }
+        for (_, state) in &mut self.inline_start_offsets {
+            *state = InlineOffsetState::ResetAfterLineBreak;
+        }
 
         if let Some(block) = self.block_stack.last_mut() {
             block.text_lines.extend(text_lines);
             block.text_styles.extend(text_styles);
             block.projected_lines.extend(projected_lines);
         }
+    }
+
+    fn push_html_block_lines(&mut self, html: &str) {
+        self.flush_line();
+        let range_start = self.current_event_range.start;
+        let event_end = self.current_event_range.end;
+        let trimmed = html
+            .strip_suffix('\n')
+            .map_or(html, |without_lf| without_lf.strip_suffix('\r').unwrap_or(without_lf));
+        let block_end = range_start + trimmed.len();
+        let mut text_lines = Vec::new();
+        let mut text_styles = Vec::new();
+        let mut projected_lines = Vec::new();
+        let mut offset = 0usize;
+        for raw_line in trimmed.split('\n') {
+            let line = raw_line.strip_suffix('\r').unwrap_or(raw_line);
+            let line_start = range_start + offset;
+            let line_end = line_start + line.len();
+            let mut proj = TextProjectionBuilder::default();
+            proj.push_verbatim(line, line_start..line_end);
+            let projected = proj.finish(range_start + offset + raw_line.len());
+            text_lines.push(line.to_owned());
+            text_styles.push(Vec::new());
+            projected_lines.push(projected);
+            offset += raw_line.len() + 1;
+        }
+        if text_lines.is_empty() {
+            text_lines.push(String::new());
+            text_styles.push(Vec::new());
+            projected_lines.push(TextProjectionBuilder::default().finish(block_end));
+        }
+
+        if self.last_html_block_end == Some(range_start)
+            && let Some(parent) = self.block_stack.last_mut()
+            && let Some(prev) = parent.children.last_mut()
+            && matches!(prev.kind, BlockKind::Paragraph)
+        {
+            prev.text_lines.extend(text_lines);
+            prev.text_styles.extend(text_styles);
+            prev.projected_lines.extend(projected_lines);
+            prev.block_range.end = block_end;
+            prev.source_range = BlockSource::Continuous(prev.block_range.clone());
+            self.last_html_block_end = Some(event_end);
+            return;
+        }
+
+        if let Some(parent) = self.block_stack.last_mut() {
+            parent.children.push(BlockNode {
+                kind: BlockKind::Paragraph,
+                children: vec![],
+                text_styles,
+                text_lines,
+                projected_lines,
+                source_range: BlockSource::Continuous(range_start..block_end),
+                code_line_source_starts: None,
+                block_range: range_start..block_end,
+            });
+        }
+        self.last_html_block_end = Some(event_end);
     }
 
     fn push_list(&mut self, start: Option<u64>, tight: bool, blank_line_before: bool) {
@@ -875,11 +1024,21 @@ impl MarkdownDoc {
                     }
                     MarkdownTag::Image { url, title: _ } => {
                         let placeholder = format!("[Image: {url}]");
+                        let start = builder.pending_line.text.len();
+                        let image_range = builder.current_event_range.clone();
+                        builder.record_pending_source_end(image_range.end);
                         builder.append_text_and_style(&placeholder);
-                        builder
-                            .pending_line
-                            .projection
-                            .push_collapsed(&placeholder, builder.current_event_range.clone());
+                        if !builder.pending_line.styles.last().is_some_and(|span| {
+                            span.start == start && span.len == placeholder.len()
+                        }) {
+                            builder.pending_line.styles.push(StyleSpan {
+                                start,
+                                len: placeholder.len(),
+                                style: InlineStyle::Link { url: url.clone() },
+                                source_range: image_range.clone(),
+                            });
+                        }
+                        builder.pending_line.projection.push_collapsed(&placeholder, image_range);
                         image_depth = 1;
                     }
                 },
@@ -940,6 +1099,7 @@ impl MarkdownDoc {
                         builder.push_text_with_source(text, range);
                     } else {
                         builder.append_text_and_style(text);
+                        builder.record_pending_source_end(range.end);
                         builder.pending_line.projection.push_collapsed(text, range);
                     }
                 }
@@ -956,6 +1116,7 @@ impl MarkdownDoc {
                         style: InlineStyle::Math,
                         source_range: source_range.clone(),
                     });
+                    builder.record_pending_source_end(source_range.end);
                     builder.pending_line.projection.push_collapsed("\u{FFFC}", source_range);
                 }
                 MarkdownEvent::DisplayMath(_) => {
@@ -975,7 +1136,17 @@ impl MarkdownDoc {
                     }
                 }
                 MarkdownEvent::InlineHtml(html) => {
-                    if inline_html_is_break(html) {
+                    let in_container = builder.block_stack.last().is_some_and(|block| {
+                        matches!(
+                            block.kind,
+                            BlockKind::Container
+                                | BlockKind::BlockQuote
+                                | BlockKind::ListItem { .. }
+                        )
+                    });
+                    if in_container {
+                        builder.push_html_block_lines(html);
+                    } else if inline_html_is_break(html) {
                         builder.flush_line_into_current_block();
                     } else {
                         // Other inline HTML remains literal text until the renderer has a
@@ -984,7 +1155,7 @@ impl MarkdownDoc {
                     }
                 }
                 MarkdownEvent::SoftBreak => {
-                    builder.push_soft_break(builder.current_event_range.clone());
+                    builder.push_soft_break(&parsed.source, builder.current_event_range.clone());
                 }
                 MarkdownEvent::HardBreak => {
                     builder.flush_line_into_current_block();

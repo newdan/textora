@@ -1,5 +1,26 @@
 use super::*;
 
+fn horizontal_whitespace_start_before(source: &str, byte: usize) -> usize {
+    source
+        .get(..byte)
+        .and_then(|prefix| {
+            prefix
+                .char_indices()
+                .rev()
+                .find(|(_, character)| !matches!(character, ' ' | '\t'))
+                .map(|(offset, character)| offset + character.len_utf8())
+        })
+        .unwrap_or(0)
+}
+
+fn trailing_ws_reaches_newline(source: &str, cursor_byte: usize) -> bool {
+    let Some(rest) = source.get(cursor_byte..) else {
+        return false;
+    };
+    let after_ws = rest.trim_start_matches([' ', '\t']);
+    after_ws.starts_with('\n') || after_ws.starts_with("\r\n")
+}
+
 impl<S: BlockSource> PreviewEngine<S> {
     /// 查询：返回光标在插件渲染空间中的 (x, y, w, h)。
     /// y = fl.rect.y - scroll_y，与 render_line_with_offset 的投影一致。
@@ -114,49 +135,30 @@ impl<S: BlockSource> PreviewEngine<S> {
         flat_idx: usize,
         cursor_byte: usize,
     ) -> f32 {
-        let lazy = match self.lazy.as_ref() {
-            Some(l) => l,
-            None => return 0.0,
-        };
-        let sentinel = match lazy
-            .flat_lines
-            .get(flat_idx)
-            .and_then(|line| line.source_projection.as_ref())
-            .and_then(|projection| projection.boundaries.last())
-        {
-            Some(anchor) => anchor.byte,
-            None => return 0.0,
-        };
-        if cursor_byte < sentinel {
+        let Some(lazy) = self.lazy.as_ref() else { return 0.0 };
+        let Some(fl) = lazy.flat_lines.get(flat_idx) else { return 0.0 };
+        let Some(projection) = fl.source_projection.as_ref() else { return 0.0 };
+        let Some(sentinel) = projection.boundaries.last().map(|anchor| anchor.byte) else {
             return 0.0;
-        }
-        let source = match self.edit_source.as_deref() {
-            Some(s) => s,
-            None => return 0.0,
         };
-        let stripped_start = if cursor_byte > sentinel {
-            sentinel
+        let Some(source) = self.edit_source.as_deref() else { return 0.0 };
+
+        let missing_space_count = if cursor_byte >= sentinel {
+            self.terminal_stripped_space_count(
+                source,
+                fl,
+                projection.flat_line_idx,
+                sentinel,
+                cursor_byte,
+            )
         } else {
-            source[..cursor_byte]
-                .char_indices()
-                .rev()
-                .find(|(_, character)| !matches!(character, ' ' | '\t'))
-                .map_or(0, |(byte, character)| byte + character.len_utf8())
+            self.internal_soft_break_stripped_space_count(
+                source,
+                projection.flat_line_idx,
+                cursor_byte,
+            )
         };
-        let stripped = match source.get(stripped_start..cursor_byte) {
-            Some(s) => s,
-            None => return 0.0,
-        };
-        // Only whitespace gets stripped by pulldown-cmark from paragraph text;
-        // bail out for any other content so we don't misplace the cursor.
-        if !stripped.chars().all(|c| c == ' ' || c == '\t') {
-            return 0.0;
-        }
-        let fl = match lazy.flat_lines.get(flat_idx) {
-            Some(fl) => fl,
-            None => return 0.0,
-        };
-        if stripped.is_empty() || fl.text.ends_with(stripped) {
+        if missing_space_count == 0 {
             return 0.0;
         }
         // Prefer the shaped space advance from the flat_line if a trailing space
@@ -172,7 +174,89 @@ impl<S: BlockSource> PreviewEngine<S> {
                 })
             })
             .unwrap_or(fl.font_size * 0.3);
-        stripped.chars().count() as f32 * per_space
+        missing_space_count as f32 * per_space
+    }
+
+    fn terminal_stripped_space_count(
+        &self,
+        source: &str,
+        fl: &crate::layout::FlatLine,
+        expected_proj_idx: usize,
+        sentinel: usize,
+        cursor_byte: usize,
+    ) -> usize {
+        let ws_start = horizontal_whitespace_start_before(source, cursor_byte);
+        let effective_start =
+            if cursor_byte == sentinel { ws_start } else { ws_start.max(sentinel) };
+        let Some(stripped) = source.get(effective_start..cursor_byte) else {
+            return 0;
+        };
+        // Only whitespace gets stripped by pulldown-cmark from paragraph text;
+        // bail out for any other content so we don't misplace the cursor.
+        if stripped.is_empty()
+            || !stripped.chars().all(|c| c == ' ' || c == '\t')
+            || (cursor_byte == sentinel && fl.text.ends_with(stripped))
+        {
+            return 0;
+        }
+        if effective_start > sentinel {
+            return self.unadvanced_space_count_on_line(
+                stripped,
+                effective_start,
+                expected_proj_idx,
+                cursor_byte,
+            );
+        }
+        stripped.chars().count()
+    }
+
+    fn internal_soft_break_stripped_space_count(
+        &self,
+        source: &str,
+        expected_proj_idx: usize,
+        cursor_byte: usize,
+    ) -> usize {
+        let before_ws_start = horizontal_whitespace_start_before(source, cursor_byte);
+        let Some(ws_before) = source.get(before_ws_start..cursor_byte) else {
+            return 0;
+        };
+        if ws_before.is_empty() || !trailing_ws_reaches_newline(source, cursor_byte) {
+            return 0;
+        }
+        self.unadvanced_space_count_on_line(
+            ws_before,
+            before_ws_start,
+            expected_proj_idx,
+            cursor_byte,
+        )
+    }
+
+    fn unadvanced_space_count_on_line(
+        &self,
+        ws_before: &str,
+        before_ws_start: usize,
+        expected_proj_idx: usize,
+        cursor_byte: usize,
+    ) -> usize {
+        let Some(before_pos) = self.cursor_visual_position_for_byte(
+            before_ws_start,
+            self.cursor_affinity_for_byte(before_ws_start),
+        ) else {
+            return 0;
+        };
+        let Some(cursor_pos) = self.cursor_visual_position_for_byte(
+            cursor_byte,
+            self.cursor_affinity_for_byte(cursor_byte),
+        ) else {
+            return 0;
+        };
+        if cursor_pos.flat_line_idx != expected_proj_idx
+            || before_pos.flat_line_idx != expected_proj_idx
+        {
+            return 0;
+        }
+        let advanced_graphemes = cursor_pos.grapheme_pos.saturating_sub(before_pos.grapheme_pos);
+        ws_before.chars().count().saturating_sub(advanced_graphemes)
     }
 
     pub(in crate::view) fn visual_cursor_screen_pos(&self) -> Option<(f32, f32, f32, f32)> {

@@ -619,3 +619,113 @@ fn novel_scan_implements_block_source() {
     assert_eq!(blocks.len(), 2);
     assert_eq!(headings.len(), 1);
 }
+
+#[test]
+fn top_level_html_block_is_preserved_for_rendering_and_editing() {
+    let single = "<div>hello</div>";
+    let single_doc = MarkdownDoc::build(&parse_markdown(single), &default_style());
+    assert_eq!(single_doc.blocks.len(), 1);
+    assert_eq!(single_doc.blocks[0].text_lines, vec!["<div>hello</div>"]);
+    single_doc.blocks[0].projected_lines[0].validate(single).expect("valid html block projection");
+
+    let followed = "<div>hello</div>\n\npara";
+    let followed_doc = MarkdownDoc::build(&parse_markdown(followed), &default_style());
+    assert_eq!(followed_doc.blocks.len(), 2);
+    assert_eq!(followed_doc.blocks[0].text_lines, vec!["<div>hello</div>"]);
+    assert_eq!(followed_doc.blocks[1].text_lines, vec!["para"]);
+
+    let multiline = "<div>\n  line\n</div>\n\npara";
+    let multiline_doc = MarkdownDoc::build(&parse_markdown(multiline), &default_style());
+    assert_eq!(multiline_doc.blocks.len(), 2);
+    assert_eq!(multiline_doc.blocks[0].text_lines, vec!["<div>", "  line", "</div>"]);
+    for projected in &multiline_doc.blocks[0].projected_lines {
+        projected.validate(multiline).expect("multiline html projection must be valid");
+    }
+}
+
+#[test]
+fn image_span_expands_full_markdown_source_when_focused() {
+    let source = "before ![alt](img.png) after";
+    let doc = MarkdownDoc::build(&parse_markdown(source), &default_style());
+    let block = &doc.blocks[0];
+    let folded = crate::edit::materialize_projected_line(
+        &block.projected_lines[0],
+        &block.text_styles[0],
+        source,
+        None,
+        None,
+    );
+    assert_eq!(folded.text, "before [Image: img.png] after");
+
+    let edit_ctx = crate::edit::EditContext {
+        cursor_byte: source.find("alt").expect("fixture contains image alt"),
+        preedit_text: None,
+        preedit_cursor: None,
+    };
+    let expanded = crate::edit::materialize_projected_line(
+        &block.projected_lines[0],
+        &block.text_styles[0],
+        source,
+        Some(&edit_ctx),
+        None,
+    );
+    assert_eq!(expanded.text, source);
+    expanded.validate(source).expect("expanded image projection must be valid");
+}
+
+#[test]
+fn nested_inline_styles_expand_outer_and_inner_delimiters() {
+    for (source, cursor_needle) in [
+        ("**_text_**", "text"),
+        ("***text***", "text"),
+        ("**[link](https://x.test)**", "link"),
+        ("[**bold**](https://x.test)", "bold"),
+        ("**outer _inner_ rest**", "inner"),
+        ("**outer _inner_ rest**", "outer"),
+        ("**outer _inner_ rest**", "rest"),
+        ("**outer _inner_**", "outer"),
+        ("**outer _inner_**", "inner"),
+        ("**_first_ second**", "first"),
+        ("**_first_ second**", "second"),
+        ("**bold `code`**", "code"),
+    ] {
+        let doc = MarkdownDoc::build(&parse_markdown(source), &default_style());
+        let block = &doc.blocks[0];
+        let base = &block.projected_lines[0];
+        let styles = &block.text_styles[0];
+        let ctx = crate::edit::EditContext {
+            cursor_byte: source.find(cursor_needle).expect("fixture contains cursor needle"),
+            preedit_text: None,
+            preedit_cursor: None,
+        };
+        let expanded =
+            crate::edit::materialize_projected_line(base, styles, source, Some(&ctx), None);
+        assert_eq!(
+            expanded.text, source,
+            "nested delimiters must expand cleanly for {source:?} at {cursor_needle:?}"
+        );
+        expanded.validate(source).expect("nested expanded projection must validate");
+        assert!(
+            expanded.boundaries.windows(2).all(|pair| pair[0].byte <= pair[1].byte),
+            "nested expanded boundaries must remain non-decreasing for {source:?}"
+        );
+    }
+
+    // Sibling non-nested spans touching at the boundary must stay independent.
+    let sibling_source = "`ab`**cd**";
+    let sibling_doc = MarkdownDoc::build(&parse_markdown(sibling_source), &default_style());
+    let block = &sibling_doc.blocks[0];
+    let ctx = crate::edit::EditContext {
+        cursor_byte: sibling_source.find("cd").expect("fixture has cd"),
+        preedit_text: None,
+        preedit_cursor: None,
+    };
+    let expanded = crate::edit::materialize_projected_line(
+        &block.projected_lines[0],
+        &block.text_styles[0],
+        sibling_source,
+        Some(&ctx),
+        None,
+    );
+    assert_eq!(expanded.text, "ab**cd**");
+}

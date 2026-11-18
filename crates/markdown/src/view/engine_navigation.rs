@@ -372,26 +372,19 @@ impl<S: BlockSource> PreviewEngine<S> {
     ) -> Option<SourceAnchor> {
         let current_position =
             self.projection_position_for_vertical_move(lazy, index, current_byte)?;
-        let target_visual_line_idx = match direction {
-            ui::plugin::MoveDirection::Up => {
-                let Some(target) = current_position.flat_line_idx.checked_sub(1) else {
-                    return Some(SourceAnchor::downstream(0));
-                };
-                target
+        let target_visual_line_idx = match vertical_move_target(
+            index.visual_lines(),
+            current_position.flat_line_idx,
+            direction,
+        )? {
+            VerticalMoveTarget::VisualLine(target) => target,
+            VerticalMoveTarget::DocumentStart => return Some(SourceAnchor::downstream(0)),
+            VerticalMoveTarget::DocumentEnd => {
+                return self
+                    .edit_source
+                    .as_deref()
+                    .map(|source| SourceAnchor::downstream(source.len()));
             }
-            ui::plugin::MoveDirection::Down => {
-                let Some(target) = current_position.flat_line_idx.checked_add(1) else {
-                    return Some(SourceAnchor::downstream(current_byte));
-                };
-                if target >= index.visual_lines().len() {
-                    return self
-                        .edit_source
-                        .as_deref()
-                        .map(|source| SourceAnchor::downstream(source.len()));
-                }
-                target
-            }
-            _ => return None,
         };
         let screen_x = match target_x {
             Some(screen_x) => screen_x,
@@ -487,4 +480,145 @@ impl<S: BlockSource> PreviewEngine<S> {
             EmptySourceLineRole::HiddenBlockSeparator
         }
     }
+}
+
+enum VerticalMoveTarget {
+    VisualLine(usize),
+    DocumentStart,
+    DocumentEnd,
+}
+
+fn vertical_move_target(
+    visual_lines: &[crate::layout::types::VisualLineProjection],
+    current_idx: usize,
+    direction: ui::plugin::MoveDirection,
+) -> Option<VerticalMoveTarget> {
+    if let Some(crate::projection::ProjectionOwnerId::TableCell {
+        table_start, row, column, ..
+    }) = visual_lines.get(current_idx).map(|line| line.owner)
+    {
+        return table_cell_vertical_target(
+            visual_lines,
+            current_idx,
+            table_start,
+            row,
+            column,
+            direction,
+        );
+    }
+
+    match direction {
+        ui::plugin::MoveDirection::Up => Some(
+            current_idx
+                .checked_sub(1)
+                .map_or(VerticalMoveTarget::DocumentStart, VerticalMoveTarget::VisualLine),
+        ),
+        ui::plugin::MoveDirection::Down => {
+            let target = current_idx.checked_add(1)?;
+            Some(if target >= visual_lines.len() {
+                VerticalMoveTarget::DocumentEnd
+            } else {
+                VerticalMoveTarget::VisualLine(target)
+            })
+        }
+        _ => None,
+    }
+}
+
+fn table_cell_vertical_target(
+    visual_lines: &[crate::layout::types::VisualLineProjection],
+    current_idx: usize,
+    table_start: usize,
+    row: usize,
+    column: usize,
+    direction: ui::plugin::MoveDirection,
+) -> Option<VerticalMoveTarget> {
+    match direction {
+        ui::plugin::MoveDirection::Up => {
+            table_cell_vertical_up(visual_lines, current_idx, table_start, row, column)
+        }
+        ui::plugin::MoveDirection::Down => {
+            table_cell_vertical_down(visual_lines, current_idx, table_start, row, column)
+        }
+        _ => None,
+    }
+}
+
+fn table_cell_vertical_up(
+    visual_lines: &[crate::layout::types::VisualLineProjection],
+    current_idx: usize,
+    table_start: usize,
+    row: usize,
+    column: usize,
+) -> Option<VerticalMoveTarget> {
+    if let Some(prev_idx) = current_idx.checked_sub(1)
+        && visual_lines
+            .get(prev_idx)
+            .is_some_and(|line| is_table_cell(line.owner, table_start, row, column))
+    {
+        return Some(VerticalMoveTarget::VisualLine(prev_idx));
+    }
+    if let Some(above_idx) = visual_lines[..current_idx].iter().rposition(|line| {
+        matches!(
+            line.owner,
+            crate::projection::ProjectionOwnerId::TableCell { table_start: t, row: r, column: c, .. }
+                if t == table_start && r < row && c == column
+        )
+    }) {
+        return Some(VerticalMoveTarget::VisualLine(above_idx));
+    }
+    let before_table = visual_lines[..current_idx]
+        .iter()
+        .rposition(|line| !belongs_to_table(line.owner, table_start));
+    Some(before_table.map_or(VerticalMoveTarget::DocumentStart, VerticalMoveTarget::VisualLine))
+}
+
+fn table_cell_vertical_down(
+    visual_lines: &[crate::layout::types::VisualLineProjection],
+    current_idx: usize,
+    table_start: usize,
+    row: usize,
+    column: usize,
+) -> Option<VerticalMoveTarget> {
+    let next_idx = current_idx.checked_add(1)?;
+    if visual_lines
+        .get(next_idx)
+        .is_some_and(|line| is_table_cell(line.owner, table_start, row, column))
+    {
+        return Some(VerticalMoveTarget::VisualLine(next_idx));
+    }
+    let tail = visual_lines.get(next_idx..).unwrap_or(&[]);
+    if let Some(offset) = tail.iter().position(|line| {
+        matches!(
+            line.owner,
+            crate::projection::ProjectionOwnerId::TableCell { table_start: t, row: r, column: c, .. }
+                if t == table_start && r > row && c == column
+        )
+    }) {
+        return Some(VerticalMoveTarget::VisualLine(next_idx + offset));
+    }
+    let after_offset = tail.iter().position(|line| !belongs_to_table(line.owner, table_start));
+    Some(after_offset.map_or(VerticalMoveTarget::DocumentEnd, |offset| {
+        VerticalMoveTarget::VisualLine(next_idx + offset)
+    }))
+}
+
+fn is_table_cell(
+    owner: crate::projection::ProjectionOwnerId,
+    table_start: usize,
+    row: usize,
+    column: usize,
+) -> bool {
+    matches!(
+        owner,
+        crate::projection::ProjectionOwnerId::TableCell { table_start: t, row: r, column: c, .. }
+            if t == table_start && r == row && c == column
+    )
+}
+
+fn belongs_to_table(owner: crate::projection::ProjectionOwnerId, table_start: usize) -> bool {
+    matches!(
+        owner,
+        crate::projection::ProjectionOwnerId::TableCell { table_start: t, .. } if t == table_start
+    )
 }

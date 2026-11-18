@@ -212,3 +212,55 @@ fn creation_heading_after_list_content_stays_inside_its_item() {
         assert_eq!(rendered_row_count(&view), original_rows + 1, "{entered:?}");
     }
 }
+
+#[test]
+fn setext_heading_backspace_and_delete_clear_underline_via_edit_plan() {
+    use ui::plugin::{EditIntent, EditPlan, EditPolicy, EditRequest};
+
+    let apply_plan = |source: &str, plan: EditPlan| -> String {
+        let mut edited = source.to_owned();
+        match plan {
+            EditPlan::Apply(transaction) => {
+                let mut replacements = transaction.replacements;
+                replacements.sort_by_key(|replacement| replacement.range.start);
+                for replacement in replacements.iter().rev() {
+                    edited.replace_range(replacement.range.clone(), &replacement.text);
+                }
+                edited
+            }
+            other => panic!("expected Replace plan for {source:?}, got {other:?}"),
+        }
+    };
+
+    let mut view = MarkdownEditorView::new();
+    view.set_source("A\n---".into(), 1);
+    let bs_plan = view.plan_edit(&EditRequest {
+        source_generation: 1,
+        cursor_byte: 1,
+        selection: None,
+        intent: EditIntent::DeleteBackward,
+    });
+    assert_eq!(apply_plan("A\n---", bs_plan), "");
+
+    let del_plan = view.plan_edit(&EditRequest {
+        source_generation: 1,
+        cursor_byte: 0,
+        selection: None,
+        intent: EditIntent::DeleteForward,
+    });
+    assert_eq!(apply_plan("A\n---", del_plan), "");
+
+    view.set_source("Title\n===".into(), 2);
+    let sel_plan = view.plan_edit(&EditRequest {
+        source_generation: 2,
+        cursor_byte: 5,
+        selection: Some(0..5),
+        intent: EditIntent::DeleteBackward,
+    });
+    assert_eq!(apply_plan("Title\n===", sel_plan), "");
+
+    // Setext heading Enter contract remains intact (exits after underline).
+    let (entered, entered_cursor) = apply_edit("Title\n===", 5, AugmentKind::Enter);
+    assert_eq!(entered, "Title\n===\n\n");
+    assert_eq!(entered_cursor, "Title\n===\n\n".len());
+}

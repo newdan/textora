@@ -1,6 +1,8 @@
 //! Source edits use the same empty paragraph ownership as the layout builder.
 
-use super::{canonical_container_prefix, preferred_newline_sequence};
+use super::{
+    canonical_container_prefix, format_container_multiline_insertion, preferred_newline_sequence,
+};
 use crate::builder::{
     BlockKind, BlockNode, EditableParagraphMap, EditableParagraphRun, InlineStyle, MarkdownDoc,
 };
@@ -13,7 +15,7 @@ pub(super) fn insert_text(
     current_byte: usize,
     text: &str,
 ) -> Option<EditAugmentation> {
-    if text.bytes().all(|byte| matches!(byte, b' ' | b'\t')) || text.contains(['\r', '\n']) {
+    if text.trim_matches([' ', '\t', '\r', '\n']).is_empty() {
         return None;
     }
     let (line_start, _, line_end) = super::locate_source_line_bounds(source, current_byte)?;
@@ -26,6 +28,9 @@ pub(super) fn insert_text(
     let document = parse_structure(source);
     let paragraphs = EditableParagraphMap::from_blocks(&document.blocks, source);
     let run = paragraphs.run_at_byte(current_byte)?;
+    if text.contains(['\r', '\n']) && run.continuation_source_start.is_none() {
+        return None;
+    }
     let line_index = run.lines.iter().position(|line| {
         line.source_range.contains(&current_byte) || line.source_range.end == current_byte
     })?;
@@ -49,6 +54,12 @@ fn materialize_paragraph(
         .map(|start| canonical_container_prefix(source, start))
         .unwrap_or_default();
     let newline = preferred_newline_sequence(source, current_byte);
+    let formatted_text = if text.contains(['\r', '\n']) && !prefix.is_empty() {
+        let blank_line_prefix = prefix.trim_end_matches([' ', '\t']);
+        format_container_multiline_insertion(text, &prefix, blank_line_prefix)
+    } else {
+        text.to_owned()
+    };
     let needs_left_separator = line_index == 0 && run.has_preceding_block;
     let needs_right_separator = !line.newline_range.is_empty();
     let mut insertion = String::new();
@@ -57,7 +68,7 @@ fn materialize_paragraph(
         insertion.push_str(newline);
     }
     insertion.push_str(&prefix);
-    insertion.push_str(text);
+    insertion.push_str(&formatted_text);
     let cursor_byte_after = line.source_range.start + insertion.len();
     if needs_right_separator {
         insertion.push_str(newline);
@@ -78,7 +89,7 @@ pub(super) fn erase_range(
         return None;
     }
     let document = parse_structure(source);
-    let (paragraph, owner_path) = erased_paragraph(&document.blocks, &erased, &[])?;
+    let (paragraph, owner_path) = erased_paragraph(source, &document.blocks, &erased, &[])?;
     let content_start = paragraph.block_range.start;
     let paragraph_end = paragraph.block_range.end;
     let trailing_newline_width =
@@ -114,7 +125,20 @@ pub(super) fn erase_last_grapheme(source: &str, current_byte: usize) -> Option<E
     erase_range(source, grapheme_start..current_byte)
 }
 
+fn is_setext_heading(source: &str, block: &BlockNode) -> bool {
+    if !matches!(block.kind, BlockKind::Heading { .. }) {
+        return false;
+    }
+    let Some(block_source) = source.get(block.block_range.clone()) else {
+        return false;
+    };
+    let trimmed = block_source.trim_end_matches(['\r', '\n']);
+    trimmed.contains('\n')
+        && !super::classify::heading_source_is_atx(source, block.block_range.start)
+}
+
 fn erased_paragraph<'a>(
+    source: &str,
     blocks: &'a [BlockNode],
     erased: &std::ops::Range<usize>,
     owner: &[usize],
@@ -123,7 +147,9 @@ fn erased_paragraph<'a>(
         if erased.start < block.block_range.start || erased.end > block.block_range.end {
             continue;
         }
-        if matches!(block.kind, BlockKind::Paragraph)
+        let is_erased_kind =
+            matches!(block.kind, BlockKind::Paragraph) || is_setext_heading(source, block);
+        if is_erased_kind
             && block.text_styles.iter().flatten().all(|span| {
                 span.style != InlineStyle::InlineCode
                     || erased.start <= span.source_range.start
@@ -142,7 +168,7 @@ fn erased_paragraph<'a>(
         }
         let mut child_owner = owner.to_vec();
         child_owner.push(index);
-        if let Some(paragraph) = erased_paragraph(&block.children, erased, &child_owner) {
+        if let Some(paragraph) = erased_paragraph(source, &block.children, erased, &child_owner) {
             return Some(paragraph);
         }
     }

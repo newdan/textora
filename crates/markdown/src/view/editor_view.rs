@@ -201,7 +201,7 @@ impl ui::plugin::EditPolicy for MarkdownEditorView {
 }
 
 impl MarkdownEditorView {
-    /// 清空段落复用范围删除；回车基于删除选区后的上下文生成原子计划。
+    /// 清空或改写选区时，先在原始源码上计算结构保护擦除，再合成为单一原子事务。
     pub(in crate::view) fn plan_selection_edit(
         &self,
         request: &ui::plugin::EditRequest,
@@ -209,12 +209,6 @@ impl MarkdownEditorView {
     ) -> ui::plugin::EditPlan {
         if self.source.get(selection.clone()).is_none() {
             return ui::plugin::EditPlan::UseDefault;
-        }
-        if let ui::plugin::EditIntent::InsertText(text) = &request.intent {
-            return crate::augmenter::augment_selected_text(&self.source, selection.clone(), text)
-                .map_or(ui::plugin::EditPlan::UseDefault, |augmentation| {
-                    selection_augmentation_edit_plan(request, selection, augmentation)
-                });
         }
         if matches!(
             request.intent,
@@ -225,17 +219,44 @@ impl MarkdownEditorView {
                     augmentation_edit_plan(request, augmentation)
                 });
         }
+        let protected = structural_selection_erasure(&self.source, selection);
+        if let ui::plugin::EditIntent::InsertText(text) = &request.intent {
+            if let Some(erasure) = protected {
+                return protected_selection_insert_text_plan(
+                    &self.source,
+                    request.source_generation,
+                    erasure,
+                    text,
+                );
+            }
+            return crate::augmenter::augment_selected_text(&self.source, selection.clone(), text)
+                .map_or(ui::plugin::EditPlan::UseDefault, |augmentation| {
+                    selection_augmentation_edit_plan(request, selection, augmentation)
+                });
+        }
         if !matches!(
             request.intent,
             ui::plugin::EditIntent::InsertParagraphBreak | ui::plugin::EditIntent::InsertLineBreak
         ) {
             return ui::plugin::EditPlan::UseDefault;
         }
+        let is_line_break = matches!(request.intent, ui::plugin::EditIntent::InsertLineBreak);
+        if let Some(erasure) = protected
+            .or_else(|| crate::augmenter::augment_erase_range(&self.source, selection.clone()))
+        {
+            return protected_selection_break_plan(
+                &self.source,
+                request.source_generation,
+                erasure,
+                is_line_break,
+            );
+        }
         let mut source_after_delete = self.source.clone();
         source_after_delete.replace_range(selection.clone(), "");
-        let kind = match request.intent {
-            ui::plugin::EditIntent::InsertLineBreak => ui::plugin::AugmentKind::LineBreak,
-            _ => ui::plugin::AugmentKind::Enter,
+        let kind = if is_line_break {
+            ui::plugin::AugmentKind::LineBreak
+        } else {
+            ui::plugin::AugmentKind::Enter
         };
         let Some(augmentation) =
             crate::augmenter::augment_edit(&source_after_delete, selection.start, kind)
@@ -244,6 +265,188 @@ impl MarkdownEditorView {
         };
         selection_augmentation_edit_plan(request, selection, augmentation)
     }
+}
+
+fn structural_selection_erasure(
+    source: &str,
+    selection: &std::ops::Range<usize>,
+) -> Option<ui::plugin::EditAugmentation> {
+    let erasure = crate::augmenter::augment_erase_range(source, selection.clone())?;
+    let Some(range) = &erasure.replace_range else {
+        return Some(erasure);
+    };
+    if !erasure.insert_text.as_deref().unwrap_or_default().is_empty()
+        || range.start > selection.start
+        || range.end < selection.end
+    {
+        return Some(erasure);
+    }
+    let mut source_after_erase = source.to_owned();
+    source_after_erase
+        .replace_range(range.clone(), erasure.insert_text.as_deref().unwrap_or_default());
+    let inside_table_cell = matches!(
+        crate::augmenter::classify_enter_context(&source_after_erase, erasure.cursor_byte_after),
+        crate::augmenter::EnterContext::TableCell { .. }
+    );
+    inside_table_cell.then_some(erasure)
+}
+
+fn protected_selection_insert_text_plan(
+    source: &str,
+    source_generation: u32,
+    erasure: ui::plugin::EditAugmentation,
+    text: &str,
+) -> ui::plugin::EditPlan {
+    let Some(erased_range) = erasure.replace_range.clone() else {
+        return ui::plugin::EditPlan::Consume;
+    };
+    let erased_text = erasure.insert_text.as_deref().unwrap_or_default().to_owned();
+    let mut source_after_erase = source.to_owned();
+    source_after_erase.replace_range(erased_range.clone(), &erased_text);
+
+    if let Some(follow) = crate::augmenter::augment_edit(
+        &source_after_erase,
+        erasure.cursor_byte_after,
+        ui::plugin::AugmentKind::InsertText(text.to_owned()),
+    ) {
+        return combine_erasure_and_followup_plan(
+            source,
+            source_generation,
+            erased_range,
+            erased_text,
+            follow,
+        );
+    }
+    combine_erasure_and_literal_insert(
+        source_generation,
+        erased_range,
+        erased_text,
+        erasure.cursor_byte_after,
+        text,
+    )
+}
+
+fn protected_selection_break_plan(
+    source: &str,
+    source_generation: u32,
+    erasure: ui::plugin::EditAugmentation,
+    is_line_break: bool,
+) -> ui::plugin::EditPlan {
+    let Some(erased_range) = erasure.replace_range.clone() else {
+        return ui::plugin::EditPlan::Consume;
+    };
+    let erased_text = erasure.insert_text.as_deref().unwrap_or_default().to_owned();
+    let mut source_after_erase = source.to_owned();
+    source_after_erase.replace_range(erased_range.clone(), &erased_text);
+
+    if matches!(
+        crate::augmenter::classify_enter_context(&source_after_erase, erasure.cursor_byte_after),
+        crate::augmenter::EnterContext::TableCell { .. }
+    ) {
+        return ui::plugin::EditPlan::Apply(ui::plugin::EditTransaction::replace(
+            source_generation,
+            erased_range,
+            erased_text,
+            erasure.cursor_byte_after,
+        ));
+    }
+
+    let kind = if is_line_break {
+        ui::plugin::AugmentKind::LineBreak
+    } else {
+        ui::plugin::AugmentKind::Enter
+    };
+    if let Some(follow) =
+        crate::augmenter::augment_edit(&source_after_erase, erasure.cursor_byte_after, kind)
+    {
+        return combine_erasure_and_followup_plan(
+            source,
+            source_generation,
+            erased_range,
+            erased_text,
+            follow,
+        );
+    }
+    let newline = if source.contains("\r\n") { "\r\n" } else { "\n" };
+    combine_erasure_and_literal_insert(
+        source_generation,
+        erased_range,
+        erased_text,
+        erasure.cursor_byte_after,
+        newline,
+    )
+}
+
+fn combine_erasure_and_followup_plan(
+    source: &str,
+    source_generation: u32,
+    erased_range: std::ops::Range<usize>,
+    mut erased_text: String,
+    follow: ui::plugin::EditAugmentation,
+) -> ui::plugin::EditPlan {
+    let follow_range = follow.replace_range.unwrap_or(0..0);
+    let follow_text = follow.insert_text.unwrap_or_default();
+    let erased_end_in_new = erased_range.start + erased_text.len();
+
+    if follow_range.start >= erased_range.start && follow_range.end <= erased_end_in_new {
+        let local_start = follow_range.start - erased_range.start;
+        let local_end = follow_range.end - erased_range.start;
+        erased_text.replace_range(local_start..local_end, &follow_text);
+        return ui::plugin::EditPlan::Apply(ui::plugin::EditTransaction::replace(
+            source_generation,
+            erased_range,
+            erased_text,
+            follow.cursor_byte_after,
+        ));
+    }
+
+    let delta = erased_text.len() as isize - (erased_range.end - erased_range.start) as isize;
+    if follow_range.end <= erased_range.start && follow_range.end <= source.len() {
+        return ui::plugin::EditPlan::Apply(ui::plugin::EditTransaction {
+            source_generation,
+            replacements: vec![
+                ui::plugin::TextReplacement { range: follow_range, text: follow_text },
+                ui::plugin::TextReplacement { range: erased_range, text: erased_text },
+            ],
+            selection_after: ui::plugin::EditSelection::Caret(follow.cursor_byte_after),
+        });
+    }
+    if follow_range.start >= erased_end_in_new {
+        let orig_start = (follow_range.start as isize - delta).max(0) as usize;
+        let orig_end = (follow_range.end as isize - delta).max(orig_start as isize) as usize;
+        if orig_end <= source.len() {
+            return ui::plugin::EditPlan::Apply(ui::plugin::EditTransaction {
+                source_generation,
+                replacements: vec![
+                    ui::plugin::TextReplacement { range: erased_range, text: erased_text },
+                    ui::plugin::TextReplacement { range: orig_start..orig_end, text: follow_text },
+                ],
+                selection_after: ui::plugin::EditSelection::Caret(follow.cursor_byte_after),
+            });
+        }
+    }
+    ui::plugin::EditPlan::UseDefault
+}
+
+fn combine_erasure_and_literal_insert(
+    source_generation: u32,
+    erased_range: std::ops::Range<usize>,
+    mut erased_text: String,
+    insert_cursor: usize,
+    inserted: &str,
+) -> ui::plugin::EditPlan {
+    let erased_end_in_new = erased_range.start + erased_text.len();
+    if insert_cursor >= erased_range.start && insert_cursor <= erased_end_in_new {
+        let local = insert_cursor - erased_range.start;
+        erased_text.insert_str(local, inserted);
+        return ui::plugin::EditPlan::Apply(ui::plugin::EditTransaction::replace(
+            source_generation,
+            erased_range,
+            erased_text,
+            insert_cursor + inserted.len(),
+        ));
+    }
+    ui::plugin::EditPlan::UseDefault
 }
 
 impl ViewPlugin for MarkdownEditorView {

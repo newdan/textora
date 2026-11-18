@@ -1124,13 +1124,13 @@ mod wysiwyg_tests {
     }
 
     #[test]
-    fn augment_edit_blockquote_middle_inserts_prefix() {
+    fn augment_edit_blockquote_middle_splits_into_two_paragraphs() {
         let mut v = make_view("> hello world");
         v.engine_mut().handle_set_cursor_byte(5); // "> hel|lo world"
         let aug = v.engine().augment_edit(5, AugmentKind::Enter).unwrap();
-        assert_eq!(aug.insert_text.as_deref(), Some("\n> "));
+        assert_eq!(aug.insert_text.as_deref(), Some("\n>\n> "));
         assert_eq!(aug.replace_range, None);
-        assert_eq!(aug.cursor_byte_after, 8); // 5 + 3
+        assert_eq!(aug.cursor_byte_after, 10); // 5 + 5
     }
 
     #[test]
@@ -1430,9 +1430,19 @@ mod wysiwyg_tests {
 
     #[test]
     fn augment_edit_tab_returns_none() {
-        let mut v = make_view("- item");
-        v.engine_mut().handle_set_cursor_byte(4);
-        assert!(v.engine().augment_edit(4, AugmentKind::Tab).is_none());
+        let mut plain_view = make_view("plain");
+        plain_view.engine_mut().handle_set_cursor_byte(2);
+        assert!(plain_view.engine().augment_edit(2, AugmentKind::Tab).is_none());
+
+        let mut list_view = make_view("- item");
+        list_view.engine_mut().handle_set_cursor_byte(4);
+        let list_aug = list_view
+            .engine()
+            .augment_edit(4, AugmentKind::Tab)
+            .expect("first list item Tab must return consuming augmentation");
+        assert_eq!(list_aug.insert_text.as_deref(), Some(""));
+        assert_eq!(list_aug.replace_range, None);
+        assert_eq!(list_aug.cursor_byte_after, 4);
     }
 
     #[test]
@@ -6535,6 +6545,65 @@ viebcoding 用过吗?
             Some(content_start),
         );
     }
+
+    #[test]
+    fn internal_soft_break_trailing_whitespace_advances_cursor_x() {
+        for source in ["hello \nworld", "hello\t\nworld"] {
+            let mut view = MarkdownEditorView::new();
+            let mut doc = StubDoc::new(source);
+            view.set_source(source.into(), 1);
+            render_editor_once(&mut view, &doc);
+
+            let before_space = "hello".len();
+            let after_space = before_space + 1;
+            let x_before = view
+                .engine()
+                .cursor_screen_pos_for_byte(before_space)
+                .expect("before soft break space must have cursor pos")
+                .0;
+            let x_after_downstream = view
+                .engine()
+                .cursor_screen_pos_for_byte(after_space)
+                .expect("after soft break trailing whitespace must have cursor pos")
+                .0;
+            view.handle_message(ui::plugin::PluginMessage::SetCursorByte(after_space), &mut doc);
+            let x_after_cursor = view
+                .engine()
+                .cursor_screen_pos()
+                .expect("caret at trailing whitespace before SoftBreak must render")
+                .0;
+            assert!(
+                x_after_downstream > x_before && x_after_cursor > x_before,
+                "cursor after trailing whitespace before SoftBreak must advance visually for {source:?}: before={x_before}, downstream={x_after_downstream}, cursor={x_after_cursor}"
+            );
+        }
+
+        let multi_ws = "hello \t\nworld";
+        let mut view = MarkdownEditorView::new();
+        let doc = StubDoc::new(multi_ws);
+        view.set_source(multi_ws.into(), 1);
+        render_editor_once(&mut view, &doc);
+        let x5 = view.engine().cursor_screen_pos_for_byte(5).expect("byte 5").0;
+        let x6 = view.engine().cursor_screen_pos_for_byte(6).expect("byte 6").0;
+        let x7 = view.engine().cursor_screen_pos_for_byte(7).expect("byte 7").0;
+        assert!(
+            x6 > x5 && x7 > x6,
+            "multi-ws before SoftBreak must advance: x5={x5}, x6={x6}, x7={x7}"
+        );
+
+        let bold_ws = "**hello** \t\nworld";
+        let mut bold_view = MarkdownEditorView::new();
+        let bold_doc = StubDoc::new(bold_ws);
+        bold_view.set_source(bold_ws.into(), 1);
+        render_editor_once(&mut bold_view, &bold_doc);
+        let bx9 = bold_view.engine().cursor_screen_pos_for_byte(9).expect("byte 9").0;
+        let bx10 = bold_view.engine().cursor_screen_pos_for_byte(10).expect("byte 10").0;
+        let bx11 = bold_view.engine().cursor_screen_pos_for_byte(11).expect("byte 11").0;
+        assert!(
+            bx10 > bx9 && bx11 > bx10,
+            "trailing ws after bold marker must advance: bx9={bx9}, bx10={bx10}, bx11={bx11}"
+        );
+    }
 }
 
 #[cfg(test)]
@@ -6814,6 +6883,152 @@ mod tests {
         };
 
         assert_eq!(view.plan_edit(&request), EditPlan::UseDefault);
+    }
+
+    #[test]
+    fn table_vertical_navigation_preserves_column_and_traverses_wrapped_cell_lines() {
+        use ui::plugin::{MoveDirection, ViewPlugin};
+
+        let source = concat!(
+            "before\n\n",
+            "| alpha wrap one two | head2 |\n",
+            "| --- | --- |\n",
+            "| bravo | r1c1 top<br>r1c1 bottom |\n",
+            "| charl | r2c1 |\n\n",
+            "after"
+        );
+        let mut view = MarkdownEditorView::new();
+        view.set_source(source.to_owned(), 1);
+        let document = core::document::StringDocView::new(source);
+        let theme = ui::theme::Theme::from_definition(&ui::theme::ThemeDefinition::default_dark());
+        let mut shaper = shaping::Shaper::new().expect("test shaper should initialize");
+        let narrow_bounds = ui::core::geom::Rect::new(0.0, 0.0, 260.0, 600.0);
+        let _ = <MarkdownEditorView as ViewPlugin>::render(
+            &mut view,
+            &document,
+            narrow_bounds,
+            &theme,
+            &mut shaper,
+            1.0,
+        );
+
+        let alpha_line_lines: Vec<usize> = view
+            .engine()
+            .flat_lines()
+            .iter()
+            .enumerate()
+            .filter_map(|(idx, line)| {
+                let owner = line.source_projection.as_ref()?.owner;
+                matches!(
+                    owner,
+                    crate::projection::ProjectionOwnerId::TableCell { row: 0, column: 0, .. }
+                )
+                .then_some(idx)
+            })
+            .collect();
+        assert!(
+            alpha_line_lines.len() >= 2,
+            "narrow table fixture must wrap cell (0, 0) into >= 2 visual lines"
+        );
+
+        // Column 0: Down traverses wrapped lines inside (0,0), then enters (1,0), (2,0), then exits to `after`.
+        let alpha_start = source.find("alpha").expect("alpha") + 2;
+        let step1 = view
+            .engine()
+            .visual_move(alpha_start, MoveDirection::Down, None)
+            .expect("Down within wrapped cell (0, 0)");
+        let step1_owner = view.engine().flat_lines().iter().find_map(|line| {
+            let proj = line.source_projection.as_ref()?;
+            proj.boundaries.iter().any(|b| b.byte == step1).then_some(proj.owner)
+        });
+        assert!(
+            matches!(
+                step1_owner,
+                Some(crate::projection::ProjectionOwnerId::TableCell { row: 0, column: 0, .. })
+            ),
+            "first Down inside wrapped (0,0) must stay in (0,0): byte={step1}, owner={step1_owner:?}"
+        );
+
+        let last_wrap_line =
+            &view.engine().flat_lines()[*alpha_line_lines.last().expect("nonempty")];
+        let last_wrap_start = last_wrap_line
+            .source_projection
+            .as_ref()
+            .and_then(|p| p.boundaries.first())
+            .expect("wrapped line start")
+            .byte;
+        let step_to_r1c0 = view
+            .engine()
+            .visual_move(last_wrap_start, MoveDirection::Down, None)
+            .expect("Down from last wrap of (0,0) to (1,0)");
+        let bravo_start = source.find("bravo").expect("bravo");
+        let bravo_end = bravo_start + "bravo".len();
+        assert!(
+            (bravo_start..=bravo_end).contains(&step_to_r1c0),
+            "expected Down from (0,0) to land in (1,0) bravo, got {step_to_r1c0} ({:?})",
+            source.get(step_to_r1c0.saturating_sub(2)..(step_to_r1c0 + 4).min(source.len()))
+        );
+
+        let step_to_r2c0 = view
+            .engine()
+            .visual_move(step_to_r1c0, MoveDirection::Down, None)
+            .expect("Down from (1,0) to (2,0)");
+        let charl_start = source.find("charl").expect("charl");
+        let charl_end = charl_start + "charl".len();
+        assert!(
+            (charl_start..=charl_end).contains(&step_to_r2c0),
+            "expected Down from (1,0) to land in (2,0) charl, got {step_to_r2c0}"
+        );
+
+        let exit_down = view
+            .engine()
+            .visual_move(step_to_r2c0, MoveDirection::Down, None)
+            .expect("Down from last table row exits to after");
+        let after_start = source.find("after").expect("after");
+        assert!(exit_down >= after_start, "expected exit to after, got {exit_down}");
+
+        // Column 1: Up from header exits to `before`; Down enters r1c1 top -> bottom -> r2c1; Up reverses.
+        let head2_mid = source.find("head2").expect("head2") + 2;
+        let exit_up = view
+            .engine()
+            .visual_move(head2_mid, MoveDirection::Up, None)
+            .expect("Up from header col 1 exits to before");
+        assert!(
+            exit_up <= "before".len(),
+            "expected Up from header to reach before, got {exit_up}"
+        );
+
+        let r1c1_top_start = source.find("r1c1 top").expect("r1c1 top");
+        let r1c1_bottom_start = source.find("r1c1 bottom").expect("r1c1 bottom");
+        let r2c1_mid = source.find("r2c1").expect("r2c1") + 2;
+
+        let down_into_r1c1 = view
+            .engine()
+            .visual_move(head2_mid, MoveDirection::Down, None)
+            .expect("Down from head2 to r1c1 top");
+        assert!(
+            (r1c1_top_start..r1c1_bottom_start).contains(&down_into_r1c1),
+            "expected landing in r1c1 top, got {down_into_r1c1}"
+        );
+
+        let down_into_r1c1_bottom = view
+            .engine()
+            .visual_move(r1c1_top_start + 2, MoveDirection::Down, None)
+            .expect("Down from r1c1 top to r1c1 bottom");
+        assert!(
+            (r1c1_bottom_start..r1c1_bottom_start + "r1c1 bottom".len())
+                .contains(&down_into_r1c1_bottom),
+            "expected landing in r1c1 bottom, got {down_into_r1c1_bottom}"
+        );
+
+        let up_from_r2c1 = view
+            .engine()
+            .visual_move(r2c1_mid, MoveDirection::Up, None)
+            .expect("Up from r2c1 enters bottom line of r1c1");
+        assert!(
+            (r1c1_bottom_start..=r1c1_bottom_start + "r1c1 bottom".len()).contains(&up_from_r2c1),
+            "expected Up from r2c1 to land in r1c1 bottom, got {up_from_r2c1}"
+        );
     }
 }
 

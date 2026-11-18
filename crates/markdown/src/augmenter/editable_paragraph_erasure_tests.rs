@@ -144,3 +144,37 @@ fn paragraph_range_erasure_removes_complete_multiline_link_syntax() {
         }
     }
 }
+
+#[test]
+fn setext_heading_erasure_removes_underline_and_keeps_owner_slots() {
+    for source in ["A\n---", "A\r\n===", "**A**\r\n---"] {
+        assert_eq!(apply_erasure(source, "A"), "", "{source:?}");
+        let cursor = source.find('A').expect("fixture contains A") + 1;
+        let edit = erase_last_grapheme(source, cursor)
+            .unwrap_or_else(|| panic!("erasing final grapheme must clear Setext {source:?}"));
+        let mut edited = source.to_string();
+        edited.replace_range(
+            edit.replace_range.expect("replacement range"),
+            &edit.insert_text.expect("replacement text"),
+        );
+        assert_eq!(edited, "", "{source:?}");
+        assert_eq!(edit.cursor_byte_after, 0);
+    }
+
+    assert_eq!(apply_erasure("before\n\nTitle\n---\n\nafter", "Title"), "before\n\n\nafter");
+    assert_eq!(
+        apply_erasure("before\r\n\r\nTitle\r\n===\r\n\r\nafter", "Title"),
+        "before\r\n\r\n\r\nafter"
+    );
+    assert_eq!(
+        apply_erasure("> before\n>\n> A\n> ---\n>\n> after", "A"),
+        "> before\n>\n> \n> after"
+    );
+    assert_eq!(apply_erasure("- before\n\n  A\n  ---\n\n  after", "A"), "- before\n\n  \n  after");
+
+    assert!(erase_range("Title\n---", 0..2).is_none(), "partial content must not erase Setext");
+    assert!(
+        erase_range("Title\n---", 5..9).is_none(),
+        "underline-only selection must not match content erasure"
+    );
+}

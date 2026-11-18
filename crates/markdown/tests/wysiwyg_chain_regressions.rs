@@ -597,4 +597,174 @@ mod tests {
             "formatted source {formatted:?} must form one intact code block"
         );
     }
+
+    fn apply_view_intent_on(
+        view: &mut MarkdownEditorView,
+        source: &mut String,
+        generation: &mut u32,
+        cursor: usize,
+        selection: Option<std::ops::Range<usize>>,
+        intent: EditIntent,
+    ) -> (usize, Option<ui::plugin::EditTransaction>) {
+        use ui::plugin::{EditPolicy, EditSelection};
+
+        let request = EditRequest {
+            source_generation: *generation,
+            cursor_byte: cursor,
+            selection: selection.clone(),
+            intent: intent.clone(),
+        };
+        let mut applied_tx = None;
+        let next_cursor = match view.plan_edit(&request) {
+            EditPlan::Apply(transaction) | EditPlan::ApplyDefault(transaction, _) => {
+                for replacement in transaction.replacements.iter().rev() {
+                    source.replace_range(replacement.range.clone(), &replacement.text);
+                }
+                let caret = match transaction.selection_after {
+                    EditSelection::Caret(c) => c,
+                    EditSelection::Range { cursor, .. } => cursor,
+                };
+                applied_tx = Some(transaction);
+                caret
+            }
+            EditPlan::Consume => cursor,
+            EditPlan::MoveCursor(u) => u.cursor_after,
+            EditPlan::UseDefault => {
+                let range = selection.unwrap_or(cursor..cursor);
+                let text = match intent {
+                    EditIntent::InsertText(t) => t,
+                    EditIntent::InsertParagraphBreak | EditIntent::InsertLineBreak => {
+                        "\n".to_owned()
+                    }
+                    _ => String::new(),
+                };
+                let start = range.start;
+                source.replace_range(range, &text);
+                start + text.len()
+            }
+            EditPlan::SetSelection(_) => panic!("unexpected SetSelection"),
+        };
+        *generation += 1;
+        view.set_source(source.clone(), *generation);
+        let doc = Document(source.clone());
+        render(view, &doc);
+        (next_cursor, applied_tx)
+    }
+
+    fn apply_view_intent(
+        source: &str,
+        cursor: usize,
+        selection: Option<std::ops::Range<usize>>,
+        intent: EditIntent,
+    ) -> (String, usize, Option<ui::plugin::EditTransaction>) {
+        let mut view = MarkdownEditorView::new();
+        view.set_source(source.to_owned(), 1);
+        let doc = Document(source.to_owned());
+        render(&mut view, &doc);
+        let mut edited = source.to_owned();
+        let mut generation = 1;
+        let (caret, tx) = apply_view_intent_on(
+            &mut view,
+            &mut edited,
+            &mut generation,
+            cursor,
+            selection,
+            intent,
+        );
+        (edited, caret, tx)
+    }
+
+    #[test]
+    fn wysiwyg_end_to_end_chains_blockquote_lists_and_protected_selections() {
+        // 1. BlockQuote 段中 Enter 分裂 -> 同视图 Backspace 还原。
+        let mut quote_view = MarkdownEditorView::new();
+        let mut quote = String::from("> left right");
+        let mut generation = 1;
+        quote_view.set_source(quote.clone(), generation);
+        render(&mut quote_view, &Document(quote.clone()));
+        let (split_caret, _) = apply_view_intent_on(
+            &mut quote_view,
+            &mut quote,
+            &mut generation,
+            "> left".len(),
+            None,
+            EditIntent::InsertParagraphBreak,
+        );
+        assert_eq!(quote, "> left \n>\n> right");
+        assert_eq!(split_caret, "> left \n>\n> ".len());
+        let (merged_caret, _) = apply_view_intent_on(
+            &mut quote_view,
+            &mut quote,
+            &mut generation,
+            split_caret,
+            None,
+            EditIntent::DeleteBackward,
+        );
+        assert_eq!(quote, "> left right");
+        assert_eq!(merged_caret, "> left".len());
+
+        // 2. OrderedList 插入新项 -> 自动重编号后续项 -> 空项 Enter 退出再前移重编号。
+        let list = "1. alpha\n2. beta\n3. gamma";
+        let (inserted, list_caret, _) =
+            apply_view_intent(list, "1. alpha".len(), None, EditIntent::InsertParagraphBreak);
+        assert_eq!(inserted, "1. alpha\n2. \n3. beta\n4. gamma");
+        let (exited, exit_caret, _) =
+            apply_view_intent(&inserted, list_caret, None, EditIntent::InsertParagraphBreak);
+        assert_eq!(exited, "1. alpha\n\n2. beta\n3. gamma");
+        assert_eq!(exit_caret, "1. alpha\n".len());
+
+        // 3. ListItem 完整子树 Tab 缩进 -> Shift+Tab 还原。
+        let tree = "- parent\n- target\n  - nested";
+        let (indented, tab_caret, _) =
+            apply_view_intent(tree, "- parent\n- tar".len(), None, EditIntent::Indent);
+        assert_eq!(indented, "- parent\n  - target\n    - nested");
+        let (outdented, _, _) = apply_view_intent(&indented, tab_caret, None, EditIntent::Outdent);
+        assert_eq!(outdented, tree);
+
+        // 4. 跨 HardBreak 粗体块逐行展开定界符且渲染无异常。
+        let hard_break_bold = "**first  \nsecond**";
+        let mut bold_view = MarkdownEditorView::new();
+        bold_view.set_source(hard_break_bold.to_owned(), 1);
+        let bold_doc = Document(hard_break_bold.to_owned());
+        bold_view.handle_message(
+            PluginMessage::SetCursorByte(3),
+            &mut Document(hard_break_bold.to_owned()),
+        );
+        render(&mut bold_view, &bold_doc);
+        assert_eq!(bold_view.engine().flat_lines().len(), 2);
+        assert!(bold_view.engine().flat_lines()[0].text.starts_with("**first"));
+        assert!(!bold_view.engine().flat_lines()[1].text.ends_with("**"));
+
+        // 5. 跨围栏与跨单元格选区覆盖 Delete / Type / Paste / Enter，并校验单事务 Undo 还原。
+        let fenced = "```\nline1\nline2\n```";
+        let close_sel = fenced.find("line2").expect("body")..fenced.len();
+        let table = "| col1 | col2 |\n| --- | --- |\n| c1 | c2 |";
+        let cross_cell_sel =
+            table.find("ol1").expect("col1")..table.find("col2").expect("col2") + 2;
+        for intent in [
+            EditIntent::DeleteBackward,
+            EditIntent::InsertText("X|Y".into()),
+            EditIntent::InsertParagraphBreak,
+        ] {
+            let (fenced_edited, _, tx_opt) =
+                apply_view_intent(fenced, close_sel.end, Some(close_sel.clone()), intent.clone());
+            assert!(fenced_edited.ends_with("\n```"), "closing fence broken: {fenced_edited:?}");
+            let tx = tx_opt.expect("protected fence selection produces atomic tx");
+            let mut undone = fenced_edited.clone();
+            let mut applied = Vec::new();
+            for r in tx.replacements.iter().rev() {
+                let s = r.range.start;
+                applied.push((s..s + r.text.len(), fenced[r.range.clone()].to_owned()));
+            }
+            for (r, orig) in applied {
+                undone.replace_range(r, &orig);
+            }
+            assert_eq!(undone, fenced);
+
+            let (table_edited, _, t_tx) =
+                apply_view_intent(table, cross_cell_sel.end, Some(cross_cell_sel.clone()), intent);
+            assert!(table_edited.contains("| --- | --- |"));
+            assert!(t_tx.is_some());
+        }
+    }
 }

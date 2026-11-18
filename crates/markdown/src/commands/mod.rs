@@ -545,23 +545,138 @@ fn plan_heading(
     if !(1..=6).contains(&level) {
         return SemanticEditPlan::Unsupported;
     }
-    let target = line_selection_range(source, cursor_byte, selection.as_ref());
+    let mut target = line_selection_range(source, cursor_byte, selection.as_ref());
+    let setext_ranges = setext_heading_ranges(source);
+    for setext in &setext_ranges {
+        if ranges_overlap(&target, setext) {
+            target.start = target.start.min(setext.start);
+            target.end = target.end.max(setext.end);
+        }
+    }
     if let Some(title_range) = first_h1_range(source)
         && ranges_overlap(&target, &title_range)
     {
         return SemanticEditPlan::NoChange;
     }
-    let replacement = transform_lines(&source[target.clone()], |line| {
-        let indentation = leading_whitespace(line);
-        let content = &line[indentation..];
-        let content = if crate::augmenter::heading_source_is_atx(line, 0) {
-            content.trim_start_matches('#').trim_start_matches([' ', '\t'])
-        } else {
-            content
-        };
-        format!("{}{} {}", &line[..indentation], "#".repeat(level as usize), content)
-    });
+    let replacement = transform_heading_target(source, &target, &setext_ranges, level);
     apply_line_transaction(source, source_generation, target, replacement)
+}
+
+fn setext_heading_ranges(source: &str) -> Vec<std::ops::Range<usize>> {
+    use pulldown_cmark::{Event, Parser, Tag};
+
+    Parser::new_ext(source, crate::parser::markdown_options())
+        .into_offset_iter()
+        .filter_map(|(event, range)| {
+            let Event::Start(Tag::Heading { .. }) = event else {
+                return None;
+            };
+            if crate::augmenter::heading_source_is_atx(source, range.start) {
+                return None;
+            }
+            let start = line_start(source, range.start);
+            let mut end = range.end.min(source.len());
+            while end > start && matches!(source.as_bytes()[end - 1], b'\n' | b'\r') {
+                end -= 1;
+            }
+            Some(start..end)
+        })
+        .collect()
+}
+
+fn transform_heading_target(
+    source: &str,
+    target: &std::ops::Range<usize>,
+    setext_ranges: &[std::ops::Range<usize>],
+    level: u8,
+) -> String {
+    if target.is_empty() {
+        return format_single_heading_line("", level);
+    }
+    let mut result = String::with_capacity(target.len());
+    let mut offset = target.start;
+    let mut trailing_newline = false;
+    while offset < target.end {
+        if let Some(setext) = setext_ranges.iter().find(|range| range.start == offset) {
+            result.push_str(&format_setext_heading(&source[setext.clone()], level));
+            offset = setext.end;
+        } else {
+            let next_nl =
+                source[offset..target.end].find('\n').map_or(target.end, |delta| offset + delta);
+            let content_end = if next_nl > offset && source.as_bytes()[next_nl - 1] == b'\r' {
+                next_nl - 1
+            } else {
+                next_nl
+            };
+            result.push_str(&format_single_heading_line(&source[offset..content_end], level));
+            offset = content_end;
+        }
+        trailing_newline = false;
+        if let Some(newline) = next_eol_slice(&source[offset..target.end]) {
+            result.push_str(newline);
+            offset += newline.len();
+            trailing_newline = true;
+        }
+    }
+    if trailing_newline {
+        result.push_str(&format_single_heading_line("", level));
+    }
+    result
+}
+
+fn next_eol_slice(rest: &str) -> Option<&str> {
+    if rest.starts_with(CRLF_SEQUENCE) {
+        Some(CRLF_SEQUENCE)
+    } else if rest.starts_with(LF_SEQUENCE) {
+        Some(LF_SEQUENCE)
+    } else {
+        None
+    }
+}
+
+fn format_setext_heading(block: &str, level: u8) -> String {
+    let lines: Vec<&str> =
+        block.split('\n').map(|line| line.strip_suffix('\r').unwrap_or(line)).collect();
+    let content_count = lines.len().saturating_sub(1);
+    let first_line = lines.first().copied().unwrap_or("");
+    let indentation = leading_whitespace(first_line);
+    let title_parts: Vec<&str> = lines[..content_count]
+        .iter()
+        .map(|line| line.trim())
+        .filter(|part| !part.is_empty())
+        .collect();
+    format!(
+        "{}{} {}",
+        &first_line[..indentation],
+        "#".repeat(level as usize),
+        title_parts.join(" ")
+    )
+}
+
+fn format_single_heading_line(line: &str, level: u8) -> String {
+    let indentation = leading_whitespace(line);
+    let content = &line[indentation..];
+    let title = if crate::augmenter::heading_source_is_atx(line, 0) {
+        strip_atx_closing_hashes(content.trim_start_matches('#').trim_start_matches([' ', '\t']))
+    } else {
+        content
+    };
+    format!("{}{} {}", &line[..indentation], "#".repeat(level as usize), title)
+}
+
+fn strip_atx_closing_hashes(content: &str) -> &str {
+    let trimmed = content.trim_end_matches([' ', '\t']);
+    let before_hashes = trimmed.trim_end_matches('#');
+    if before_hashes.len() == trimmed.len() {
+        return content;
+    }
+    if before_hashes.is_empty() {
+        return "";
+    }
+    if before_hashes.ends_with([' ', '\t']) {
+        return before_hashes.trim_end_matches([' ', '\t']);
+    }
+    content
 }
 
 fn plan_line_prefix(
@@ -687,14 +802,28 @@ fn line_end(source: &str, byte: usize) -> usize {
 }
 
 fn first_h1_range(source: &str) -> Option<std::ops::Range<usize>> {
-    let mut offset = 0;
-    for line in source.split_inclusive('\n') {
-        let content = line.strip_suffix('\n').unwrap_or(line);
-        let indentation = leading_whitespace(content);
-        if content[indentation..].starts_with("# ") {
-            return Some(offset..offset + content.len());
+    use pulldown_cmark::{Event, HeadingLevel, Parser, Tag, TagEnd};
+
+    let mut container_depth = 0usize;
+    for (event, range) in
+        Parser::new_ext(source, crate::parser::markdown_options()).into_offset_iter()
+    {
+        match event {
+            Event::Start(Tag::BlockQuote(_) | Tag::List(_) | Tag::Item | Tag::Table(_)) => {
+                container_depth += 1;
+            }
+            Event::End(TagEnd::BlockQuote(_) | TagEnd::List(_) | TagEnd::Item | TagEnd::Table) => {
+                container_depth = container_depth.saturating_sub(1);
+            }
+            Event::Start(Tag::Heading { level: HeadingLevel::H1, .. })
+                if container_depth == 0
+                    && crate::augmenter::heading_source_is_atx(source, range.start) =>
+            {
+                let start = line_start(source, range.start);
+                return Some(start..line_end(source, range.start));
+            }
+            _ => {}
         }
-        offset += line.len();
     }
     None
 }
@@ -727,18 +856,66 @@ fn transform_lines(segment: &str, transform: impl Fn(&str) -> String) -> String 
     result
 }
 
+fn task_prefix_len(content: &str) -> usize {
+    let Some(first) = content.as_bytes().first() else {
+        return 0;
+    };
+    if !matches!(first, b'-' | b'*' | b'+') || content.as_bytes().get(1) != Some(&b' ') {
+        return 0;
+    }
+    let rest = &content[2..];
+    if rest.starts_with("[ ] ") || rest.starts_with("[x] ") || rest.starts_with("[X] ") {
+        6
+    } else {
+        0
+    }
+}
+
+fn unordered_prefix_len(content: &str) -> usize {
+    if task_prefix_len(content) > 0 {
+        return 0;
+    }
+    let Some(first) = content.as_bytes().first() else {
+        return 0;
+    };
+    if matches!(first, b'-' | b'*' | b'+') && content.as_bytes().get(1) == Some(&b' ') {
+        2
+    } else {
+        0
+    }
+}
+
+fn ordered_prefix_len(content: &str) -> usize {
+    let digits = content.bytes().take_while(u8::is_ascii_digit).count();
+    if digits == 0 {
+        return 0;
+    }
+    let bytes = content.as_bytes();
+    if matches!(bytes.get(digits), Some(b'.' | b')')) && bytes.get(digits + 1) == Some(&b' ') {
+        digits + 2
+    } else {
+        0
+    }
+}
+
+fn any_list_prefix_len(content: &str) -> usize {
+    let task_len = task_prefix_len(content);
+    if task_len > 0 {
+        return task_len;
+    }
+    let unordered_len = unordered_prefix_len(content);
+    if unordered_len > 0 {
+        return unordered_len;
+    }
+    ordered_prefix_len(content)
+}
+
 fn has_line_prefix(line: &str, prefix: LinePrefix) -> bool {
     let content = &line[leading_whitespace(line)..];
     match prefix {
-        LinePrefix::Unordered => content.starts_with("- ") || content.starts_with("* "),
-        LinePrefix::Ordered => content.split_once(". ").is_some_and(|(number, _)| {
-            !number.is_empty() && number.chars().all(|character| character.is_ascii_digit())
-        }),
-        LinePrefix::Task => {
-            content.starts_with("- [ ] ")
-                || content.starts_with("- [x] ")
-                || content.starts_with("- [X] ")
-        }
+        LinePrefix::Unordered => unordered_prefix_len(content) > 0,
+        LinePrefix::Ordered => ordered_prefix_len(content) > 0,
+        LinePrefix::Task => task_prefix_len(content) > 0,
         LinePrefix::Quote => content.starts_with("> ") || content == ">",
     }
 }
@@ -747,20 +924,9 @@ fn remove_line_prefix(line: &str, prefix: LinePrefix) -> String {
     let indentation = leading_whitespace(line);
     let content = &line[indentation..];
     let marker_length = match prefix {
-        LinePrefix::Unordered if content.starts_with("- ") || content.starts_with("* ") => 2,
-        LinePrefix::Ordered => content
-            .find(". ")
-            .filter(|index| {
-                *index > 0 && content[..*index].chars().all(|character| character.is_ascii_digit())
-            })
-            .map_or(0, |index| index + 2),
-        LinePrefix::Task
-            if content.starts_with("- [ ] ")
-                || content.starts_with("- [x] ")
-                || content.starts_with("- [X] ") =>
-        {
-            6
-        }
+        LinePrefix::Unordered => unordered_prefix_len(content),
+        LinePrefix::Ordered => ordered_prefix_len(content),
+        LinePrefix::Task => task_prefix_len(content),
         LinePrefix::Quote if content.starts_with("> ") => 2,
         LinePrefix::Quote if content == ">" => 1,
         _ => 0,
@@ -770,13 +936,20 @@ fn remove_line_prefix(line: &str, prefix: LinePrefix) -> String {
 
 fn add_line_prefix(line: &str, prefix: LinePrefix) -> String {
     let indentation = leading_whitespace(line);
+    let content = &line[indentation..];
+    let stripped_len = match prefix {
+        LinePrefix::Unordered | LinePrefix::Ordered | LinePrefix::Task => {
+            any_list_prefix_len(content)
+        }
+        LinePrefix::Quote => 0,
+    };
     let marker = match prefix {
         LinePrefix::Unordered => "- ",
         LinePrefix::Ordered => "1. ",
         LinePrefix::Task => "- [ ] ",
         LinePrefix::Quote => "> ",
     };
-    format!("{}{}{}", &line[..indentation], marker, &line[indentation..])
+    format!("{}{}{}", &line[..indentation], marker, &content[stripped_len..])
 }
 
 #[cfg(test)]

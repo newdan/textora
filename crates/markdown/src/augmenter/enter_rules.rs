@@ -256,6 +256,25 @@ pub(in crate::augmenter) fn list_item_enter_augmentation(
     continuation_content_prefix: &str,
     empty: bool,
 ) -> Option<EditAugmentation> {
+    let augmentation = base_list_item_enter_augmentation(
+        source,
+        current_byte,
+        indent,
+        continuation_marker,
+        continuation_content_prefix,
+        empty,
+    )?;
+    Some(renumber_following_ordered_siblings(source, current_byte, empty, augmentation))
+}
+
+fn base_list_item_enter_augmentation(
+    source: &str,
+    current_byte: usize,
+    indent: &str,
+    continuation_marker: &str,
+    continuation_content_prefix: &str,
+    empty: bool,
+) -> Option<EditAugmentation> {
     if empty {
         return emit_replace_current_line(source, current_byte, indent);
     }
@@ -269,7 +288,7 @@ pub(in crate::augmenter) fn list_item_enter_augmentation(
     if let Some(newline_width) = newline_sequence_width_at(source, current_byte) {
         let next_line_start = current_byte + newline_width;
         if !is_only_blank_separator_before_content(source, next_line_start)
-            && !next_source_line_has_list_marker(source, next_line_start)
+            && !next_source_line_has_list_marker(source, next_line_start, indent)
         {
             let replaced = extend_range_over_prefix_or_indent(
                 source,
@@ -286,7 +305,7 @@ pub(in crate::augmenter) fn list_item_enter_augmentation(
     }
 
     if newline_sequence_width_before(source, current_byte).is_some()
-        && !next_source_line_has_list_marker(source, current_byte)
+        && !next_source_line_has_list_marker(source, current_byte, indent)
     {
         let replaced = extend_range_over_prefix_or_indent(
             source,
@@ -303,6 +322,187 @@ pub(in crate::augmenter) fn list_item_enter_augmentation(
         emit_marker_break_at(source, split_at, indent, continuation_marker)
     };
     Some(preserve_inline_elements_at_split(source, split_at, augmentation))
+}
+
+fn renumber_following_ordered_siblings(
+    source: &str,
+    current_byte: usize,
+    empty: bool,
+    augmentation: EditAugmentation,
+) -> EditAugmentation {
+    let base_range = augmentation.replace_range.clone().unwrap_or(current_byte..current_byte);
+    let Some((active_number, siblings)) =
+        following_ordered_sibling_digit_spans(source, current_byte, base_range.end)
+    else {
+        return augmentation;
+    };
+    let expected_start = if empty { active_number } else { active_number + 2 };
+    let mut planned: Vec<(std::ops::Range<usize>, u64, bool)> = siblings
+        .into_iter()
+        .enumerate()
+        .map(|(offset, OrderedSiblingSpan { digit_range, number })| {
+            let expected = expected_start + offset as u64;
+            (digit_range, expected, number != expected)
+        })
+        .collect();
+    while planned.last().is_some_and(|(_, _, changed)| !changed) {
+        planned.pop();
+    }
+    if planned.is_empty() {
+        return augmentation;
+    }
+
+    let mut merged = augmentation.insert_text.unwrap_or_default();
+    let mut copied_until = base_range.end;
+    for (digit_range, expected_number, _) in planned {
+        merged.push_str(&source[copied_until..digit_range.start]);
+        merged.push_str(&expected_number.to_string());
+        copied_until = digit_range.end;
+    }
+    let result = EditAugmentation {
+        replace_range: Some(base_range.start..copied_until),
+        insert_text: Some(merged),
+        cursor_byte_after: augmentation.cursor_byte_after,
+    };
+    debug_assert_augmentation(&result, source);
+    result
+}
+
+struct OrderedSiblingSpan {
+    digit_range: std::ops::Range<usize>,
+    number: u64,
+}
+
+struct OrderedListFrame {
+    quote_depth: usize,
+    items: Vec<OrderedSiblingSpan>,
+}
+
+struct OpenOrderedItem {
+    list_depth_index: usize,
+    item_index: usize,
+    first_line_start: usize,
+    number_info: Option<OrderedSiblingSpan>,
+}
+
+fn start_open_ordered_item(
+    source: &str,
+    range_start: usize,
+    lists: &mut [OrderedListFrame],
+    open_items: &mut Vec<OpenOrderedItem>,
+) {
+    let Some(list_depth_index) = lists.len().checked_sub(1) else {
+        return;
+    };
+    let list_quote_depth = lists[list_depth_index].quote_depth;
+    let number_info = item_ordered_digit_range(source, range_start, list_quote_depth)
+        .map(|(digit_range, number)| OrderedSiblingSpan { digit_range, number });
+    let item_index = lists[list_depth_index].items.len();
+    if let Some(span) = &number_info {
+        lists[list_depth_index].items.push(OrderedSiblingSpan {
+            digit_range: span.digit_range.clone(),
+            number: span.number,
+        });
+    }
+    let first_line_start =
+        locate_source_line_bounds(source, range_start).map_or(range_start, |(start, _, _)| start);
+    open_items.push(OpenOrderedItem {
+        list_depth_index,
+        item_index,
+        first_line_start,
+        number_info,
+    });
+}
+
+fn following_ordered_sibling_digit_spans(
+    source: &str,
+    current_byte: usize,
+    min_sibling_start: usize,
+) -> Option<(u64, Vec<OrderedSiblingSpan>)> {
+    use pulldown_cmark::{Event, Parser, Tag, TagEnd};
+
+    let mut quote_depth = 0usize;
+    let mut lists: Vec<OrderedListFrame> = Vec::new();
+    let mut open_items: Vec<OpenOrderedItem> = Vec::new();
+    let mut target: Option<(usize, usize, u64)> = None;
+
+    for (event, range) in
+        Parser::new_ext(source, crate::parser::markdown_options()).into_offset_iter()
+    {
+        match event {
+            Event::Start(Tag::BlockQuote(_)) => quote_depth += 1,
+            Event::End(TagEnd::BlockQuote(_)) => quote_depth = quote_depth.saturating_sub(1),
+            Event::Start(Tag::List(_)) => {
+                lists.push(OrderedListFrame { quote_depth, items: Vec::new() });
+            }
+            Event::End(TagEnd::List(_)) => {
+                let closed_index = lists.len().checked_sub(1)?;
+                let closed = lists.pop()?;
+                if let Some((target_list, target_item_idx, target_num)) = target
+                    && target_list == closed_index
+                {
+                    let tail = closed
+                        .items
+                        .into_iter()
+                        .skip(target_item_idx + 1)
+                        .filter(|span| span.digit_range.start >= min_sibling_start)
+                        .collect();
+                    return Some((target_num, tail));
+                }
+            }
+            Event::Start(Tag::Item) => {
+                start_open_ordered_item(source, range.start, &mut lists, &mut open_items);
+            }
+            Event::End(TagEnd::Item) => {
+                let Some(item) = open_items.pop() else {
+                    continue;
+                };
+                if target.is_none()
+                    && current_byte >= item.first_line_start
+                    && current_byte <= content_end_without_trailing_newline(source, range)
+                {
+                    let span = item.number_info?;
+                    target = Some((item.list_depth_index, item.item_index, span.number));
+                }
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
+fn item_ordered_digit_range(
+    source: &str,
+    range_start: usize,
+    quote_depth: usize,
+) -> Option<(std::ops::Range<usize>, u64)> {
+    let (line_start, _, line_end) = locate_source_line_bounds(source, range_start)?;
+    let bytes = source.as_bytes();
+    let mut probe = line_start;
+    for _ in 0..quote_depth {
+        while probe < line_end && matches!(bytes[probe], b' ' | b'\t') {
+            probe += 1;
+        }
+        if bytes.get(probe) != Some(&b'>') {
+            return None;
+        }
+        probe += 1;
+        if matches!(bytes.get(probe), Some(b' ' | b'\t')) {
+            probe += 1;
+        }
+    }
+    probe = probe.max(range_start);
+    while probe <= line_end {
+        if let Some((ListBullet::Ordered(number), _)) = parse_list_marker(source, probe) {
+            let digits = bytes[probe..line_end].iter().take_while(|b| b.is_ascii_digit()).count();
+            return Some((probe..probe + digits, number));
+        }
+        if !matches!(bytes.get(probe), Some(b' ' | b'\t')) {
+            break;
+        }
+        probe += 1;
+    }
+    None
 }
 
 pub(in crate::augmenter) fn is_only_blank_separator_before_content(
@@ -360,12 +560,33 @@ pub(in crate::augmenter) fn blockquote_enter_augmentation(
     }
 
     let split_at = reversible_split_point(source, current_byte);
-    let augmentation = if split_at == current_byte {
-        emit_marker_break(source, current_byte, "", continuation_prefix)
+    let marker = if is_blockquote_mid_line_split(source, split_at) {
+        let newline = preferred_newline_sequence(source, split_at);
+        let separator = continuation_prefix.trim_end_matches([' ', '\t']);
+        format!("{separator}{newline}{continuation_prefix}")
     } else {
-        emit_marker_break_at(source, split_at, "", continuation_prefix)
+        continuation_prefix.to_owned()
+    };
+    let augmentation = if split_at == current_byte {
+        emit_marker_break(source, current_byte, "", &marker)
+    } else {
+        emit_marker_break_at(source, split_at, "", &marker)
     };
     Some(preserve_inline_elements_at_split(source, split_at, augmentation))
+}
+
+fn is_blockquote_mid_line_split(source: &str, split_at: usize) -> bool {
+    let Some((line_start, _, line_end)) = locate_source_line_bounds(source, split_at) else {
+        return false;
+    };
+    let line_content_start = locate_blockquote_line(source, split_at)
+        .map_or(line_start, |(_, content_start, _)| content_start);
+    let line_content_end = source_line_content_end(source, line_end);
+    let has_content_before =
+        source.get(line_content_start..split_at).is_some_and(|before| !before.trim().is_empty());
+    let has_content_after =
+        source.get(split_at..line_content_end).is_some_and(|after| !after.trim().is_empty());
+    has_content_before && has_content_after
 }
 
 pub(in crate::augmenter) fn extend_range_over_prefix(
@@ -429,8 +650,16 @@ pub(in crate::augmenter) fn next_source_line_marker_start(
 pub(in crate::augmenter) fn next_source_line_has_list_marker(
     source: &str,
     line_start: usize,
+    indent: &str,
 ) -> bool {
-    next_source_line_marker_start(source, line_start)
+    let probe_start = if !indent.is_empty()
+        && source.get(line_start..).is_some_and(|rest| rest.starts_with(indent))
+    {
+        line_start + indent.len()
+    } else {
+        line_start
+    };
+    next_source_line_marker_start(source, probe_start)
         .is_some_and(|marker_start| parse_list_marker(source, marker_start).is_some())
 }
 

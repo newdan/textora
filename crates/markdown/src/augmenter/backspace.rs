@@ -7,12 +7,15 @@ pub(in crate::augmenter) fn augment_backspace(
     if let Some(aug) = editable_paragraph_navigation::backspace_boundary(source, current_byte) {
         return Some(aug);
     }
+    if let Some(fence_line) = fenced_line_span(source, current_byte) {
+        if !fence_line.is_opening {
+            return Some(consume_edit(current_byte));
+        }
+        return (current_byte <= fence_line.fence_end).then(|| consume_edit(current_byte));
+    }
     let context = backspace_literal_context(source, current_byte);
     if matches!(context, EnterContext::CodeBlock | EnterContext::IndentedCodeBlock { .. }) {
         return backspace_code_boundary(source, current_byte);
-    }
-    if matches!(context, EnterContext::CodeBlockFenceLine { .. }) {
-        return Some(consume_edit(current_byte));
     }
     if let Some(aug) = backspace_remove_inline_html_break(source, current_byte) {
         return Some(aug);
@@ -141,12 +144,65 @@ pub(in crate::augmenter) fn delete_forward_code_row_join(
     })
 }
 
+struct FencedLineSpan {
+    fence_end: usize,
+    line_content_end: usize,
+    is_opening: bool,
+}
+
+fn fenced_line_span(source: &str, current_byte: usize) -> Option<FencedLineSpan> {
+    let (line_start, _, line_end) = locate_source_line_bounds(source, current_byte)?;
+    let current_line = &source[line_start..source_line_content_end(source, line_end)];
+    if !current_line.contains("```") && !current_line.contains("~~~") {
+        return None;
+    }
+    let EnterContext::CodeBlockFenceLine { is_opening, line_content_end } =
+        classify_enter_context(source, current_byte)
+    else {
+        return None;
+    };
+    let boundary = enclosing_fenced_boundary(source, line_content_end)?;
+    let line_position = if is_opening {
+        boundary.frame.opening_position
+    } else {
+        matching_container_position(
+            source,
+            line_start,
+            line_content_end,
+            &boundary.frame.container_path,
+        )?
+    };
+    let fence_start =
+        marker_position_after_optional_indent(source, line_content_end, line_position)?.byte_offset;
+    let fence_char =
+        *source.as_bytes().get(fence_start).filter(|byte| matches!(byte, b'`' | b'~'))?;
+    let fence_len = source.as_bytes()[fence_start..line_content_end]
+        .iter()
+        .take_while(|&&byte| byte == fence_char)
+        .count();
+    Some(FencedLineSpan { fence_end: fence_start + fence_len, line_content_end, is_opening })
+}
+
 pub(crate) fn augment_delete_forward(
     source: &str,
     current_byte: usize,
 ) -> Option<EditAugmentation> {
-    editable_paragraph_navigation::delete_forward(source, current_byte)
-        .or_else(|| delete_forward_remove_inline_html_break(source, current_byte))
+    if let Some(augmentation) = editable_paragraph_navigation::delete_forward(source, current_byte)
+    {
+        return Some(augmentation);
+    }
+    if let Some(fence_line) = fenced_line_span(source, current_byte) {
+        if fence_line.is_opening && current_byte < fence_line.fence_end {
+            return Some(consume_edit(current_byte));
+        }
+        if !fence_line.is_opening && current_byte < fence_line.line_content_end {
+            return Some(consume_edit(current_byte));
+        }
+        if current_byte < fence_line.line_content_end {
+            return None;
+        }
+    }
+    delete_forward_remove_inline_html_break(source, current_byte)
         .or_else(|| delete_forward_join_reopened_inline_elements(source, current_byte))
         .or_else(|| {
             let grapheme = source.get(current_byte..)?.graphemes(true).next()?;
@@ -159,7 +215,245 @@ pub(crate) fn augment_erase_range(
     source: &str,
     erased: std::ops::Range<usize>,
 ) -> Option<EditAugmentation> {
-    editable_paragraph_edit::erase_range(source, erased)
+    if erased.is_empty() || source.get(erased.clone()).is_none() {
+        return None;
+    }
+    protect_fenced_selection(source, erased.clone())
+        .or_else(|| protect_table_selection(source, erased.clone()))
+        .or_else(|| editable_paragraph_edit::erase_range(source, erased))
+}
+
+fn protect_fenced_selection(
+    source: &str,
+    erased: std::ops::Range<usize>,
+) -> Option<EditAugmentation> {
+    use pulldown_cmark::{CodeBlockKind, Event, Parser, Tag, TagEnd};
+
+    let mut open_starts = Vec::new();
+    for (event, range) in
+        Parser::new_ext(source, crate::parser::markdown_options()).into_offset_iter()
+    {
+        match event {
+            Event::Start(Tag::CodeBlock(CodeBlockKind::Fenced(_))) => {
+                open_starts.push(range.start);
+            }
+            Event::End(TagEnd::CodeBlock) => {
+                let Some(marker_start) = open_starts.pop() else {
+                    continue;
+                };
+                if let Some(aug) =
+                    clip_partial_fenced_erasure(source, marker_start..range.end, &erased)
+                {
+                    return Some(aug);
+                }
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
+fn clip_partial_fenced_erasure(
+    source: &str,
+    block_range: std::ops::Range<usize>,
+    erased: &std::ops::Range<usize>,
+) -> Option<EditAugmentation> {
+    let marker_start = block_range.start;
+    let (open_line_start, _, open_line_end) = locate_source_line_bounds(source, marker_start)?;
+    let open_content_end = source_line_content_end(source, open_line_end);
+    let close_content_end = content_end_without_trailing_newline(source, block_range);
+    let (close_line_start, _, _) = locate_source_line_bounds(source, close_content_end)?;
+    if close_line_start == open_line_start {
+        return None;
+    }
+    let body_start = (open_line_end + LF_SEQUENCE.len()).min(source.len());
+    let body_content_end = if body_start == close_line_start {
+        body_start
+    } else {
+        close_line_start
+            .saturating_sub(newline_sequence_width_before(source, close_line_start).unwrap_or(0))
+    };
+    if erased.end <= open_line_start || erased.start >= close_content_end {
+        return None;
+    }
+    if erased.start <= open_line_start && erased.end >= close_content_end {
+        return None;
+    }
+    if erased.start >= body_start && erased.end <= body_content_end {
+        return None;
+    }
+    let open_fence_end = opening_fence_marker_end(source, marker_start, open_content_end);
+    if erased.start >= open_fence_end && erased.end <= open_content_end {
+        return None;
+    }
+
+    let mut sub_ranges = Vec::new();
+    if erased.start < open_line_start {
+        let starts_at_line_boundary = erased.start == 0 || source[..erased.start].ends_with('\n');
+        let pre_end = if starts_at_line_boundary {
+            open_line_start
+        } else {
+            open_line_start
+                .saturating_sub(newline_sequence_width_before(source, open_line_start).unwrap_or(0))
+        };
+        if erased.start < pre_end {
+            sub_ranges.push(erased.start..pre_end);
+        }
+    }
+    let in_start = erased.start.max(body_start);
+    let in_end = erased.end.min(body_content_end);
+    if in_start < in_end {
+        sub_ranges.push(in_start..in_end);
+    }
+    if erased.end > close_content_end {
+        let post_start =
+            close_content_end + newline_sequence_width_at(source, close_content_end).unwrap_or(0);
+        if post_start < erased.end {
+            sub_ranges.push(post_start..erased.end);
+        }
+    }
+    Some(merge_disjoint_erasure_ranges(source, &sub_ranges, erased.start))
+}
+
+fn opening_fence_marker_end(source: &str, marker_start: usize, line_content_end: usize) -> usize {
+    let bytes = source.as_bytes();
+    let Some(fence_char) = bytes.get(marker_start).filter(|byte| matches!(byte, b'`' | b'~'))
+    else {
+        return marker_start;
+    };
+    let fence_len = bytes[marker_start..line_content_end]
+        .iter()
+        .take_while(|&&byte| byte == *fence_char)
+        .count();
+    marker_start + fence_len
+}
+
+fn protect_table_selection(
+    source: &str,
+    erased: std::ops::Range<usize>,
+) -> Option<EditAugmentation> {
+    use pulldown_cmark::{Event, Parser, Tag, TagEnd};
+
+    let mut table_start: Option<usize> = None;
+    let mut cell_starts: Vec<usize> = Vec::new();
+    let mut cells: Vec<std::ops::Range<usize>> = Vec::new();
+
+    for (event, range) in
+        Parser::new_ext(source, crate::parser::markdown_options()).into_offset_iter()
+    {
+        match event {
+            Event::Start(Tag::Table(_)) => {
+                table_start = Some(range.start);
+                cells.clear();
+                cell_starts.clear();
+            }
+            Event::Start(Tag::TableCell) if table_start.is_some() => {
+                cell_starts.push(range.start);
+            }
+            Event::End(TagEnd::TableCell) if table_start.is_some() => {
+                if let Some(start) = cell_starts.pop() {
+                    cells.push(start..range.end);
+                }
+            }
+            Event::End(TagEnd::Table) => {
+                let Some(start) = table_start.take() else {
+                    continue;
+                };
+                if let Some(aug) =
+                    clip_partial_table_erasure(source, start..range.end, &cells, &erased)
+                {
+                    return Some(aug);
+                }
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
+fn clip_partial_table_erasure(
+    source: &str,
+    table_range: std::ops::Range<usize>,
+    cells: &[std::ops::Range<usize>],
+    erased: &std::ops::Range<usize>,
+) -> Option<EditAugmentation> {
+    let table_line_start = locate_source_line_bounds(source, table_range.start)
+        .map_or(table_range.start, |(s, _, _)| s);
+    let table_content_end = content_end_without_trailing_newline(source, table_range);
+    if erased.end <= table_line_start || erased.start >= table_content_end {
+        return None;
+    }
+    if erased.start <= table_line_start && erased.end >= table_content_end {
+        return None;
+    }
+    if cells.iter().any(|cell| erased.start >= cell.start && erased.end <= cell.end) {
+        return None;
+    }
+
+    let mut sub_ranges = Vec::new();
+    if erased.start < table_line_start {
+        let starts_at_line_boundary = erased.start == 0 || source[..erased.start].ends_with('\n');
+        let pre_end = if starts_at_line_boundary {
+            table_line_start
+        } else {
+            table_line_start.saturating_sub(
+                newline_sequence_width_before(source, table_line_start).unwrap_or(0),
+            )
+        };
+        if erased.start < pre_end {
+            sub_ranges.push(erased.start..pre_end);
+        }
+    }
+    for cell in cells {
+        let content_start = table_cell_content_start(source, cell);
+        let content_end = trim_trailing_cell_delimiters(source, content_start, cell.end);
+        let del_start = erased.start.max(content_start);
+        let del_end = erased.end.min(content_end);
+        if del_start < del_end {
+            sub_ranges.push(del_start..del_end);
+        }
+    }
+    if erased.end > table_content_end {
+        let post_start =
+            table_content_end + newline_sequence_width_at(source, table_content_end).unwrap_or(0);
+        if post_start < erased.end {
+            sub_ranges.push(post_start..erased.end);
+        }
+    }
+    Some(merge_disjoint_erasure_ranges(source, &sub_ranges, erased.start))
+}
+
+fn trim_trailing_cell_delimiters(source: &str, min_start: usize, cell_end: usize) -> usize {
+    let mut end = cell_end.min(source.len());
+    let bytes = source.as_bytes();
+    while end > min_start && matches!(bytes[end - 1], b' ' | b'\t' | b'\r' | b'\n' | b'|') {
+        end -= 1;
+    }
+    end
+}
+
+fn merge_disjoint_erasure_ranges(
+    source: &str,
+    sub_ranges: &[std::ops::Range<usize>],
+    fallback_cursor: usize,
+) -> EditAugmentation {
+    let Some(first) = sub_ranges.first() else {
+        return consume_edit(fallback_cursor);
+    };
+    let last = sub_ranges.last().expect("non-empty sub_ranges has last");
+    let mut preserved = String::new();
+    let mut previous_end = first.end;
+    for next in &sub_ranges[1..] {
+        preserved.push_str(&source[previous_end..next.start]);
+        previous_end = next.end;
+    }
+    let augmentation = EditAugmentation {
+        replace_range: Some(first.start..last.end),
+        insert_text: Some(preserved),
+        cursor_byte_after: first.start,
+    };
+    debug_assert_augmentation(&augmentation, source);
+    augmentation
 }
 
 pub(in crate::augmenter) fn delete_forward_remove_inline_html_break(
@@ -336,9 +630,14 @@ pub(in crate::augmenter) fn delete_forward_block_boundary(
             } else {
                 boundary_end
             };
+            let delete_end = delete_forward_folded_leading_whitespace_end(
+                source,
+                newline_run_end,
+                matches!(context, EnterContext::Heading { .. }),
+            );
             let augmentation = EditAugmentation {
                 insert_text: Some(String::new()),
-                replace_range: Some(delete_start..newline_run_end),
+                replace_range: Some(delete_start..delete_end),
                 cursor_byte_after: current_byte.min(delete_start),
             };
             debug_assert_augmentation(&augmentation, source);
@@ -351,6 +650,28 @@ pub(in crate::augmenter) fn delete_forward_block_boundary(
             None
         }
     }
+}
+
+fn delete_forward_folded_leading_whitespace_end(
+    source: &str,
+    newline_run_end: usize,
+    from_heading: bool,
+) -> usize {
+    let Some((_line_start, _, line_end)) = locate_source_line_bounds(source, newline_run_end)
+    else {
+        return newline_run_end;
+    };
+    let content_end = source_line_content_end(source, line_end);
+    let Some(offset) = source[newline_run_end..content_end]
+        .find(|character: char| !matches!(character, ' ' | '\t'))
+    else {
+        return newline_run_end;
+    };
+    let after_spaces = newline_run_end + offset;
+    if from_heading && markdown_column_after(&source[newline_run_end..after_spaces], 0) >= 4 {
+        return newline_run_end;
+    }
+    after_spaces
 }
 
 /// Resolve a visible text endpoint to the end of its complete source line.

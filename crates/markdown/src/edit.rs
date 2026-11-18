@@ -168,37 +168,43 @@ pub(crate) fn materialize_projected_line(
 ) -> ProjectedText {
     let mut projected = base.clone();
 
-    if let Some(cursor_span) =
-        edit_ctx.and_then(|ctx| spans.iter().find(|span| cursor_in_span(span, ctx.cursor_byte)))
+    if let Some(group_range) =
+        edit_ctx.and_then(|ctx| active_span_group_range(base, spans, source, ctx.cursor_byte))
     {
-        let start_grapheme =
-            crate::grapheme_map::grapheme_index_at_byte(&projected.text, cursor_span.start);
-        let end_grapheme = crate::grapheme_map::grapheme_index_at_byte(
-            &projected.text,
-            cursor_span.start + cursor_span.len,
-        );
-        if cursor_span.style == InlineStyle::Math {
-            if let Some(spelling) = source.get(cursor_span.source_range.clone()) {
-                projected = projected.replace_graphemes_with_direct(
-                    start_grapheme,
-                    end_grapheme,
-                    spelling,
-                    cursor_span.source_range.clone(),
-                );
+        for cursor_span in spans[group_range].iter().rev() {
+            let start_grapheme =
+                crate::grapheme_map::grapheme_index_at_byte(&base.text, cursor_span.start);
+            let end_grapheme = crate::grapheme_map::grapheme_index_at_byte(
+                &base.text,
+                cursor_span.start + cursor_span.len,
+            );
+            if is_atomic_source_expansion(base, cursor_span, source) {
+                if let Some(spelling) = source.get(cursor_span.source_range.clone()) {
+                    projected = projected.replace_graphemes_with_direct(
+                        start_grapheme,
+                        end_grapheme,
+                        spelling,
+                        cursor_span.source_range.clone(),
+                    );
+                }
+            } else if let Some(expansion) = inline_expansion(base, cursor_span, source) {
+                if !expansion.suffix.is_empty() {
+                    projected = projected.replace_graphemes_with_direct(
+                        end_grapheme,
+                        end_grapheme,
+                        &source[expansion.suffix.clone()],
+                        expansion.suffix,
+                    );
+                }
+                if !expansion.prefix.is_empty() {
+                    projected = projected.replace_graphemes_with_direct(
+                        start_grapheme,
+                        start_grapheme,
+                        &source[expansion.prefix.clone()],
+                        expansion.prefix,
+                    );
+                }
             }
-        } else if let Some(expansion) = inline_expansion(base, cursor_span, source) {
-            projected = projected.replace_graphemes_with_direct(
-                end_grapheme,
-                end_grapheme,
-                &source[expansion.suffix.clone()],
-                expansion.suffix,
-            );
-            projected = projected.replace_graphemes_with_direct(
-                start_grapheme,
-                start_grapheme,
-                &source[expansion.prefix.clone()],
-                expansion.prefix,
-            );
         }
     }
 
@@ -237,9 +243,14 @@ fn inline_expansion(
 ) -> Option<InlineExpansion> {
     if span.style == InlineStyle::InlineCode {
         let spelling = source.get(span.source_range.clone())?;
-        let content = crate::builder::inline_code_content_range(spelling);
-        let content_start = span.source_range.start + content.start;
-        let content_end = span.source_range.start + content.end;
+        let tick_start = spelling.find('`')?;
+        let rest = &spelling[tick_start..];
+        let tick_len = rest.bytes().take_while(|&byte| byte == b'`').count();
+        let closing_offset = find_matching_backtick_run(rest, tick_len)?;
+        let code_spelling = &rest[..closing_offset + tick_len];
+        let content = crate::builder::inline_code_content_range(code_spelling);
+        let content_start = span.source_range.start + tick_start + content.start;
+        let content_end = span.source_range.start + tick_start + content.end;
         return Some(InlineExpansion {
             prefix: span.source_range.start..content_start,
             content: content_start..content_end,
@@ -250,12 +261,15 @@ fn inline_expansion(
     let end_grapheme =
         crate::grapheme_map::grapheme_index_at_byte(&base.text, span.start + span.len);
     let content_start = base.boundaries.get(start_grapheme)?.byte;
-    let projected_content_end = base.boundaries.get(end_grapheme)?.byte;
+    let projected_content_end = direct_span_content_end(base, start_grapheme, end_grapheme, source)
+        .unwrap_or(base.boundaries.get(end_grapheme)?.byte);
     let content_end = if projected_content_end == span.source_range.end {
         inferred_inline_suffix_start(&span.style, &source[span.source_range.clone()])
             .map_or(projected_content_end, |relative_start| {
                 span.source_range.start + relative_start
             })
+    } else if projected_content_end > span.source_range.end {
+        span.source_range.end
     } else {
         projected_content_end
     };
@@ -272,11 +286,220 @@ fn inline_expansion(
         return None;
     }
 
+    let allows_cross_line_delimiter =
+        matches!(span.style, InlineStyle::Link { .. } | InlineStyle::InlineCode);
+    let prefix_start = if !allows_cross_line_delimiter
+        && source[span.source_range.start..content_start].contains('\n')
+    {
+        content_start
+    } else {
+        span.source_range.start
+    };
+    let suffix_end = if !allows_cross_line_delimiter
+        && source[content_end..span.source_range.end].contains('\n')
+    {
+        content_end
+    } else {
+        span.source_range.end
+    };
+
     Some(InlineExpansion {
-        prefix: span.source_range.start..content_start,
+        prefix: prefix_start..content_start,
         content: content_start..content_end,
-        suffix: content_end..span.source_range.end,
+        suffix: content_end..suffix_end,
     })
+}
+
+fn direct_span_content_end(
+    base: &ProjectedText,
+    start_grapheme: usize,
+    end_grapheme: usize,
+    source: &str,
+) -> Option<usize> {
+    if end_grapheme <= start_grapheme {
+        return None;
+    }
+    let last_grapheme = end_grapheme - 1;
+    let last_start_byte = base.boundaries.get(last_grapheme)?.byte;
+    let last_visual_start = crate::grapheme_map::byte_at_grapheme_index(&base.text, last_grapheme);
+    let last_visual_end = crate::grapheme_map::byte_at_grapheme_index(&base.text, end_grapheme);
+    let last_grapheme_str = base.text.get(last_visual_start..last_visual_end)?;
+    if source.get(last_start_byte..)?.starts_with(last_grapheme_str) {
+        Some(last_start_byte + last_grapheme_str.len())
+    } else {
+        None
+    }
+}
+
+fn find_matching_backtick_run(text: &str, tick_len: usize) -> Option<usize> {
+    let bytes = text.as_bytes();
+    let mut index = tick_len;
+    while index < bytes.len() {
+        if bytes[index] != b'`' {
+            index += 1;
+            continue;
+        }
+        let run_end = index + bytes[index..].iter().take_while(|&&byte| byte == b'`').count();
+        if run_end - index == tick_len {
+            return Some(index);
+        }
+        index = run_end;
+    }
+    None
+}
+
+fn collapsed_image_source_range(
+    base: &ProjectedText,
+    span: &StyleSpan,
+    source: &str,
+) -> Option<Range<usize>> {
+    let visual_end = span.start + span.len;
+    base.spans.iter().find_map(|proj| {
+        (proj.kind == ProjectionSpanKind::Collapsed
+            && proj.visual_range.start == span.start
+            && proj.visual_range.end == visual_end
+            && source.get(proj.source_range.clone()).is_some_and(|s| s.starts_with("![")))
+        .then(|| proj.source_range.clone())
+    })
+}
+
+fn is_atomic_source_expansion(base: &ProjectedText, span: &StyleSpan, source: &str) -> bool {
+    span.style == InlineStyle::Math || collapsed_image_source_range(base, span, source).is_some()
+}
+
+fn active_span_group_range(
+    base: &ProjectedText,
+    spans: &[StyleSpan],
+    source: &str,
+    cursor_byte: usize,
+) -> Option<Range<usize>> {
+    let mut depth = 0isize;
+    let mut group_start = 0usize;
+    for index in 0..spans.len() {
+        if index > group_start
+            && (spans[index - 1].start + spans[index - 1].len != spans[index].start
+                || spans[index - 1].source_range.end > spans[index].source_range.start)
+        {
+            if spans[group_start..index].iter().any(|span| cursor_in_span(span, cursor_byte)) {
+                return Some(group_start..index);
+            }
+            depth = 0;
+            group_start = index;
+        }
+        depth = (depth + inline_span_delimiter_delta(base, &spans[index], source)).max(0);
+        if depth == 0 {
+            if spans[group_start..=index].iter().any(|span| cursor_in_span(span, cursor_byte)) {
+                return Some(group_start..index + 1);
+            }
+            group_start = index + 1;
+        }
+    }
+    if group_start < spans.len()
+        && spans[group_start..].iter().any(|span| cursor_in_span(span, cursor_byte))
+    {
+        return Some(group_start..spans.len());
+    }
+    None
+}
+
+fn inline_span_delimiter_delta(base: &ProjectedText, span: &StyleSpan, source: &str) -> isize {
+    if let Some(image_range) = collapsed_image_source_range(base, span, source) {
+        let prefix = source.get(span.source_range.start..image_range.start).unwrap_or("");
+        let suffix = source.get(image_range.end..span.source_range.end).unwrap_or("");
+        return count_prefix_delimiter_tokens(prefix) as isize
+            - count_suffix_delimiter_tokens(suffix) as isize;
+    }
+    if span.style == InlineStyle::Math || span.style == InlineStyle::SourceMarker {
+        return 0;
+    }
+    let Some(expansion) = inline_expansion(base, span, source) else {
+        return 0;
+    };
+    let prefix = source.get(expansion.prefix).unwrap_or("");
+    let suffix = source.get(expansion.suffix).unwrap_or("");
+    count_prefix_delimiter_tokens(prefix) as isize - count_suffix_delimiter_tokens(suffix) as isize
+}
+
+fn count_prefix_delimiter_tokens(mut prefix: &str) -> usize {
+    let mut count = 0;
+    while !prefix.is_empty() {
+        if prefix.starts_with("**") || prefix.starts_with("__") || prefix.starts_with("~~") {
+            count += 1;
+            prefix = &prefix[2..];
+        } else if prefix.starts_with('*') || prefix.starts_with('_') || prefix.starts_with('[') {
+            count += 1;
+            prefix = &prefix[1..];
+        } else if prefix == "<" {
+            count += 1;
+            break;
+        } else if prefix.starts_with('`') {
+            let ticks = prefix.bytes().take_while(|&byte| byte == b'`').count();
+            prefix = &prefix[ticks..];
+            if prefix.starts_with(' ') {
+                prefix = &prefix[1..];
+            }
+            count += 1;
+        } else if let Some(ch) = prefix.chars().next() {
+            prefix = &prefix[ch.len_utf8()..];
+        }
+    }
+    count
+}
+
+fn count_suffix_delimiter_tokens(mut suffix: &str) -> usize {
+    let mut count = 0;
+    while !suffix.is_empty() {
+        if suffix.starts_with(' ') && suffix[1..].starts_with('`') {
+            suffix = &suffix[1..];
+            continue;
+        }
+        if suffix.starts_with(']') {
+            suffix = &suffix[1..];
+            if suffix.starts_with('(') {
+                suffix = skip_parenthesized_destination(suffix);
+            } else if let Some(close_bracket) = suffix.find(']') {
+                suffix = &suffix[close_bracket + 1..];
+            }
+            count += 1;
+        } else if suffix.starts_with("**") || suffix.starts_with("__") || suffix.starts_with("~~") {
+            count += 1;
+            suffix = &suffix[2..];
+        } else if suffix.starts_with('*') || suffix.starts_with('_') || suffix.starts_with('>') {
+            count += 1;
+            suffix = &suffix[1..];
+        } else if suffix.starts_with('`') {
+            let ticks = suffix.bytes().take_while(|&byte| byte == b'`').count();
+            suffix = &suffix[ticks..];
+            count += 1;
+        } else if let Some(ch) = suffix.chars().next() {
+            suffix = &suffix[ch.len_utf8()..];
+        }
+    }
+    count
+}
+
+fn skip_parenthesized_destination(text: &str) -> &str {
+    let mut depth = 0usize;
+    let mut escaped = false;
+    for (idx, ch) in text.char_indices() {
+        if escaped {
+            escaped = false;
+            continue;
+        }
+        if ch == '\\' {
+            escaped = true;
+            continue;
+        }
+        if ch == '(' {
+            depth += 1;
+        } else if ch == ')' {
+            depth = depth.saturating_sub(1);
+            if depth == 0 {
+                return &text[idx + 1..];
+            }
+        }
+    }
+    ""
 }
 
 fn inferred_inline_suffix_start(style: &InlineStyle, span_source: &str) -> Option<usize> {
@@ -461,18 +684,17 @@ fn materialized_spans(
     edit_ctx: Option<&EditContext>,
     preedit_visual_range: Option<Range<usize>>,
 ) -> Vec<MaterializedSpan> {
-    let cursor_span =
-        edit_ctx.and_then(|ctx| spans.iter().find(|span| cursor_in_span(span, ctx.cursor_byte)));
+    let active_group =
+        edit_ctx.and_then(|ctx| active_span_group_range(base, spans, source, ctx.cursor_byte));
     let mut output = Vec::with_capacity(spans.len());
     let mut visual_delta = 0isize;
 
-    for span in spans {
+    for (index, span) in spans.iter().enumerate() {
         let materialized_start = span
             .start
             .checked_add_signed(visual_delta)
             .expect("materialized style offsets must remain non-negative after source expansion");
-        if Some(span.source_range.clone()) != cursor_span.map(|cursor| cursor.source_range.clone())
-        {
+        if active_group.as_ref().is_none_or(|group| !group.contains(&index)) {
             output.push(MaterializedSpan {
                 start: materialized_start,
                 len: span.len,
@@ -482,7 +704,7 @@ fn materialized_spans(
             continue;
         }
 
-        if span.style == InlineStyle::Math
+        if is_atomic_source_expansion(base, span, source)
             && let Some(spelling) = source.get(span.source_range.clone())
         {
             push_non_empty_materialized_span(
@@ -533,10 +755,13 @@ fn materialized_spans(
     }
 
     if let Some(preedit_visual_range) = preedit_visual_range {
+        let active_source_range = active_group.map(|group| {
+            spans[group.start].source_range.start..spans[group.end - 1].source_range.end
+        });
         shift_materialized_spans_for_preedit(
             &mut output,
             preedit_visual_range,
-            cursor_span.map(|span| &span.source_range),
+            active_source_range.as_ref(),
         );
     }
     output

@@ -272,3 +272,385 @@ pub(in crate::augmenter) fn locate_blockquote_line(
 
     innermost_marker_is_quote.then_some((line_start, content_start, line_end))
 }
+
+struct ActiveListItemContext {
+    outer_quote_depth: usize,
+    item_range: std::ops::Range<usize>,
+    marker_start: usize,
+    prev_sibling_marker_start: Option<usize>,
+    parent_marker_start: Option<usize>,
+}
+
+enum SubtreeIndentChange {
+    Indent(usize),
+    Outdent(usize),
+}
+
+enum ListIndentAstFrame {
+    BlockQuote,
+    List {
+        outer_quote_depth: usize,
+        prev_item_marker_start: Option<usize>,
+    },
+    Item {
+        outer_quote_depth: usize,
+        marker_start: Option<usize>,
+        prev_sibling_marker_start: Option<usize>,
+        parent_marker_start: Option<usize>,
+    },
+}
+
+pub(in crate::augmenter) fn augment_list_item_tab(
+    source: &str,
+    current_byte: usize,
+    reverse: bool,
+) -> Option<EditAugmentation> {
+    let context = find_active_list_item_context(source, current_byte)?;
+    let (first_line_start, _, _) = locate_source_line_bounds(source, context.item_range.start)?;
+    let first_line_end = locate_source_line_bounds(source, context.marker_start)?.2;
+    let first_origin = first_line_start
+        + line_indent_origin(&source[first_line_start..first_line_end], context.outer_quote_depth);
+    let curr_marker_col = markdown_column_after(&source[first_origin..context.marker_start], 0);
+
+    if reverse {
+        let target_marker_col = parent_item_marker_column(
+            source,
+            context.parent_marker_start,
+            context.outer_quote_depth,
+        );
+        let dedent_cols = curr_marker_col.saturating_sub(target_marker_col);
+        if dedent_cols == 0 {
+            return Some(consume_edit(current_byte));
+        }
+        return Some(rewrite_list_item_subtree_indent(
+            source,
+            current_byte,
+            &context.item_range,
+            context.outer_quote_depth,
+            SubtreeIndentChange::Outdent(dedent_cols),
+        ));
+    }
+
+    let Some(prev_marker_start) = context.prev_sibling_marker_start else {
+        return Some(consume_edit(current_byte));
+    };
+    let (prev_line_start, _, prev_line_end) = locate_source_line_bounds(source, prev_marker_start)?;
+    let prev_origin = prev_line_start
+        + line_indent_origin(&source[prev_line_start..prev_line_end], context.outer_quote_depth);
+    let prev_content_start = list_item_structural_content_start(source, prev_marker_start)?;
+    let prev_content_col = markdown_column_after(&source[prev_origin..prev_content_start], 0);
+    let delta_cols = prev_content_col.saturating_sub(curr_marker_col);
+    if delta_cols == 0 {
+        return Some(consume_edit(current_byte));
+    }
+    Some(rewrite_list_item_subtree_indent(
+        source,
+        current_byte,
+        &context.item_range,
+        context.outer_quote_depth,
+        SubtreeIndentChange::Indent(delta_cols),
+    ))
+}
+
+fn parent_item_marker_column(
+    source: &str,
+    parent_marker_start: Option<usize>,
+    outer_quote_depth: usize,
+) -> usize {
+    let Some(parent_start) = parent_marker_start else {
+        return 0;
+    };
+    let Some((line_start, _, line_end)) = locate_source_line_bounds(source, parent_start) else {
+        return 0;
+    };
+    let origin = line_start + line_indent_origin(&source[line_start..line_end], outer_quote_depth);
+    markdown_column_after(&source[origin..parent_start.max(origin)], 0)
+}
+
+fn find_active_list_item_context(
+    source: &str,
+    current_byte: usize,
+) -> Option<ActiveListItemContext> {
+    use pulldown_cmark::{Event, Parser, Tag, TagEnd};
+
+    let mut quote_depth = 0usize;
+    let mut frames: Vec<ListIndentAstFrame> = Vec::new();
+    let mut protected_block_starts: Vec<usize> = Vec::new();
+    let mut matched: Option<ActiveListItemContext> = None;
+
+    for (event, range) in
+        Parser::new_ext(source, crate::parser::markdown_options()).into_offset_iter()
+    {
+        match event {
+            Event::Start(Tag::BlockQuote(_)) => {
+                quote_depth += 1;
+                frames.push(ListIndentAstFrame::BlockQuote);
+            }
+            Event::End(TagEnd::BlockQuote(_)) => {
+                pop_quote_frame(&mut frames, &mut quote_depth);
+            }
+            Event::Start(Tag::List(_)) => {
+                frames.push(ListIndentAstFrame::List {
+                    outer_quote_depth: quote_depth,
+                    prev_item_marker_start: None,
+                });
+            }
+            Event::End(TagEnd::List(_)) => {
+                pop_list_frame(&mut frames);
+            }
+            Event::Start(Tag::Item) => {
+                push_item_frame(source, &mut frames, quote_depth, range.start);
+            }
+            Event::End(TagEnd::Item) => {
+                finish_item_frame(source, &mut frames, range, current_byte, &mut matched);
+            }
+            Event::Start(Tag::CodeBlock(_) | Tag::Table(_)) => {
+                let start = locate_source_line_bounds(source, range.start)
+                    .map_or(range.start, |(line_start, _, _)| line_start);
+                protected_block_starts.push(start);
+            }
+            Event::End(TagEnd::CodeBlock | TagEnd::Table) => {
+                if let Some(block_start) = protected_block_starts.pop() {
+                    let content_end =
+                        content_end_without_trailing_newline(source, block_start..range.end);
+                    if current_byte >= block_start && current_byte <= content_end {
+                        return None;
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    matched
+}
+
+fn pop_quote_frame(frames: &mut Vec<ListIndentAstFrame>, quote_depth: &mut usize) {
+    if let Some(pos) =
+        frames.iter().rposition(|frame| matches!(frame, ListIndentAstFrame::BlockQuote))
+    {
+        frames.remove(pos);
+        *quote_depth = quote_depth.saturating_sub(1);
+    }
+}
+
+fn pop_list_frame(frames: &mut Vec<ListIndentAstFrame>) {
+    if let Some(pos) =
+        frames.iter().rposition(|frame| matches!(frame, ListIndentAstFrame::List { .. }))
+    {
+        frames.remove(pos);
+    }
+}
+
+fn push_item_frame(
+    source: &str,
+    frames: &mut Vec<ListIndentAstFrame>,
+    quote_depth: usize,
+    range_start: usize,
+) {
+    let (list_quote_depth, prev_sibling_marker_start) = frames
+        .iter()
+        .rev()
+        .find_map(|frame| match frame {
+            ListIndentAstFrame::List { outer_quote_depth, prev_item_marker_start } => {
+                Some((*outer_quote_depth, *prev_item_marker_start))
+            }
+            _ => None,
+        })
+        .unwrap_or((quote_depth, None));
+    let parent_marker_start = frames.iter().rev().find_map(|frame| match frame {
+        ListIndentAstFrame::Item { marker_start, .. } => *marker_start,
+        _ => None,
+    });
+    let marker_start = find_list_marker_on_item_start(source, range_start, list_quote_depth);
+    frames.push(ListIndentAstFrame::Item {
+        outer_quote_depth: list_quote_depth,
+        marker_start,
+        prev_sibling_marker_start,
+        parent_marker_start,
+    });
+}
+
+fn finish_item_frame(
+    source: &str,
+    frames: &mut Vec<ListIndentAstFrame>,
+    range: std::ops::Range<usize>,
+    current_byte: usize,
+    matched: &mut Option<ActiveListItemContext>,
+) {
+    let Some(pos) =
+        frames.iter().rposition(|frame| matches!(frame, ListIndentAstFrame::Item { .. }))
+    else {
+        return;
+    };
+    let ListIndentAstFrame::Item {
+        outer_quote_depth,
+        marker_start,
+        prev_sibling_marker_start,
+        parent_marker_start,
+    } = frames.remove(pos)
+    else {
+        return;
+    };
+    if let Some(ListIndentAstFrame::List { prev_item_marker_start, .. }) =
+        frames.iter_mut().rev().find(|frame| matches!(frame, ListIndentAstFrame::List { .. }))
+    {
+        *prev_item_marker_start = marker_start;
+    }
+    if matched.is_none()
+        && let Some(marker_start) = marker_start
+        && let Some((first_line_start, _, _)) = locate_source_line_bounds(source, range.start)
+    {
+        let content_end = content_end_without_trailing_newline(source, range);
+        if current_byte >= first_line_start && current_byte <= content_end {
+            *matched = Some(ActiveListItemContext {
+                outer_quote_depth,
+                item_range: first_line_start..content_end,
+                marker_start,
+                prev_sibling_marker_start,
+                parent_marker_start,
+            });
+        }
+    }
+}
+
+fn find_list_marker_on_item_start(
+    source: &str,
+    start_byte: usize,
+    outer_quote_depth: usize,
+) -> Option<usize> {
+    let (line_start, _, line_end) = locate_source_line_bounds(source, start_byte)?;
+    let origin = line_start + line_indent_origin(&source[line_start..line_end], outer_quote_depth);
+    let mut probe = start_byte.max(origin);
+    while probe <= line_end {
+        if parse_list_marker(source, probe).is_some() {
+            return Some(probe);
+        }
+        if !matches!(source.as_bytes().get(probe), Some(b' ' | b'\t')) {
+            break;
+        }
+        probe += 1;
+    }
+    None
+}
+
+fn list_item_structural_content_start(source: &str, marker_start: usize) -> Option<usize> {
+    if matches!(source.as_bytes().get(marker_start), Some(b'-' | b'+' | b'*')) {
+        return list_marker_separator_end(source, marker_start + 1);
+    }
+    parse_list_marker(source, marker_start).map(|(_, content_start)| content_start)
+}
+
+fn line_indent_origin(line: &str, outer_quote_depth: usize) -> usize {
+    let bytes = line.as_bytes();
+    let mut probe = 0usize;
+    for _ in 0..outer_quote_depth {
+        let mut scan = probe;
+        while scan < bytes.len() && matches!(bytes[scan], b' ' | b'\t') {
+            scan += 1;
+        }
+        if bytes.get(scan) != Some(&b'>') {
+            return probe;
+        }
+        probe = scan + 1;
+        if matches!(bytes.get(probe), Some(b' ' | b'\t')) {
+            probe += 1;
+        }
+    }
+    probe
+}
+
+fn line_indent_edit_span(
+    content: &str,
+    outer_quote_depth: usize,
+    change: &SubtreeIndentChange,
+) -> Option<(usize, usize, String)> {
+    let origin = line_indent_origin(content, outer_quote_depth);
+    if content[origin..].trim_matches([' ', '\t']).is_empty() {
+        return None;
+    }
+    match change {
+        SubtreeIndentChange::Indent(delta_cols) => Some((origin, origin, " ".repeat(*delta_cols))),
+        SubtreeIndentChange::Outdent(dedent_cols) => {
+            let bytes = content.as_bytes();
+            let mut column = 0usize;
+            let mut probe = origin;
+            while probe < bytes.len() && column < *dedent_cols {
+                match bytes[probe] {
+                    b' ' => {
+                        column += 1;
+                        probe += 1;
+                    }
+                    b'\t' => {
+                        column = next_markdown_tab_stop(column);
+                        probe += 1;
+                    }
+                    _ => break,
+                }
+            }
+            let overshoot = column.saturating_sub(*dedent_cols);
+            Some((origin, probe, " ".repeat(overshoot)))
+        }
+    }
+}
+
+fn rewrite_list_item_subtree_indent(
+    source: &str,
+    current_byte: usize,
+    item_range: &std::ops::Range<usize>,
+    outer_quote_depth: usize,
+    change: SubtreeIndentChange,
+) -> EditAugmentation {
+    let block_start = item_range.start;
+    let block_end = item_range.end;
+    let segment = &source[block_start..block_end];
+    let rel_cursor = current_byte.saturating_sub(block_start).min(segment.len());
+
+    let mut replacement = String::with_capacity(segment.len() + 16);
+    let mut chunk_start = 0usize;
+    let mut mapped_cursor: Option<usize> = None;
+
+    for chunk in segment.split_inclusive('\n') {
+        let chunk_end = chunk_start + chunk.len();
+        let line_no_lf = chunk.strip_suffix(LF_SEQUENCE).unwrap_or(chunk);
+        let content = line_no_lf.strip_suffix('\r').unwrap_or(line_no_lf);
+        let eol = &chunk[content.len()..];
+        let out_line_start = replacement.len();
+        let line_contains_cursor = mapped_cursor.is_none()
+            && rel_cursor >= chunk_start
+            && (rel_cursor < chunk_end || chunk_end == segment.len());
+
+        if let Some((edit_start, edit_end, inserted)) =
+            line_indent_edit_span(content, outer_quote_depth, &change)
+        {
+            if line_contains_cursor {
+                let line_rel = rel_cursor - chunk_start;
+                let adjusted = if line_rel < edit_start {
+                    line_rel
+                } else if line_rel >= edit_end {
+                    edit_start + inserted.len() + (line_rel - edit_end)
+                } else {
+                    edit_start
+                };
+                mapped_cursor = Some(block_start + out_line_start + adjusted);
+            }
+            replacement.push_str(&content[..edit_start]);
+            replacement.push_str(&inserted);
+            replacement.push_str(&content[edit_end..]);
+            replacement.push_str(eol);
+        } else {
+            if line_contains_cursor {
+                mapped_cursor = Some(block_start + out_line_start + (rel_cursor - chunk_start));
+            }
+            replacement.push_str(chunk);
+        }
+        chunk_start = chunk_end;
+    }
+
+    let augmentation = EditAugmentation {
+        replace_range: Some(block_start..block_end),
+        insert_text: Some(replacement),
+        cursor_byte_after: mapped_cursor.unwrap_or(block_start + rel_cursor),
+    };
+    debug_assert_augmentation(&augmentation, source);
+    augmentation
+}

@@ -54,8 +54,10 @@ pub fn augment_edit(
         AugmentKind::Enter => augment_enter(source, current_byte),
         AugmentKind::LineBreak => Some(augment_line_break(source, current_byte)),
         AugmentKind::Backspace => augment_backspace(source, current_byte),
-        AugmentKind::Tab => augment_table_tab(source, current_byte, false),
-        AugmentKind::ShiftTab => augment_table_tab(source, current_byte, true),
+        AugmentKind::Tab => augment_table_tab(source, current_byte, false)
+            .or_else(|| augment_list_item_tab(source, current_byte, false)),
+        AugmentKind::ShiftTab => augment_table_tab(source, current_byte, true)
+            .or_else(|| augment_list_item_tab(source, current_byte, true)),
         AugmentKind::InsertText(ref text) => augment_insert_text(source, current_byte, text),
     }
 }
@@ -386,8 +388,122 @@ pub(in crate::augmenter) fn augment_insert_text(
     {
         return Some(table_cell_text_augmentation(source, current_byte, text, cell_range));
     }
-    paragraph_leading_spaces::insert_text(source, current_byte, text)
+    empty_fenced_code_insert_text(source, current_byte, text)
+        .or_else(|| paragraph_leading_spaces::insert_text(source, current_byte, text))
         .or_else(|| editable_paragraph_edit::insert_text(source, current_byte, text))
+        .or_else(|| container_multiline_insert_text(source, current_byte, text))
+}
+
+pub(in crate::augmenter) fn format_container_multiline_insertion(
+    text: &str,
+    continuation_prefix: &str,
+    blank_line_prefix: &str,
+) -> String {
+    let mut formatted = String::with_capacity(text.len() + continuation_prefix.len() * 4);
+    for (line_index, chunk) in text.split_inclusive('\n').enumerate() {
+        let line_no_lf = chunk.strip_suffix(LF_SEQUENCE).unwrap_or(chunk);
+        let content = line_no_lf.strip_suffix('\r').unwrap_or(line_no_lf);
+        let eol = &chunk[content.len()..];
+        if line_index > 0 {
+            let prefix =
+                if content.trim().is_empty() { blank_line_prefix } else { continuation_prefix };
+            if !prefix.is_empty() && !content.starts_with(prefix) {
+                formatted.push_str(prefix);
+            }
+        }
+        formatted.push_str(content);
+        formatted.push_str(eol);
+    }
+    if text.ends_with('\n') && !continuation_prefix.is_empty() {
+        formatted.push_str(continuation_prefix);
+    }
+    formatted
+}
+
+fn container_multiline_insert_text(
+    source: &str,
+    current_byte: usize,
+    text: &str,
+) -> Option<EditAugmentation> {
+    if !text.contains(['\r', '\n']) || text.trim_matches([' ', '\t', '\r', '\n']).is_empty() {
+        return None;
+    }
+    let continuation_prefix = match classify_enter_context(source, current_byte) {
+        EnterContext::BlockQuoteLine { continuation_prefix, .. } => continuation_prefix,
+        EnterContext::ListItem { content_prefix, .. } => content_prefix,
+        _ => return None,
+    };
+    if continuation_prefix.is_empty() {
+        return None;
+    }
+    let blank_line_prefix = continuation_prefix.trim_end_matches([' ', '\t']);
+    let formatted =
+        format_container_multiline_insertion(text, &continuation_prefix, blank_line_prefix);
+    let augmentation = EditAugmentation {
+        replace_range: Some(current_byte..current_byte),
+        cursor_byte_after: current_byte + formatted.len(),
+        insert_text: Some(formatted),
+    };
+    debug_assert_augmentation(&augmentation, source);
+    Some(augmentation)
+}
+
+fn empty_fenced_code_insert_text(
+    source: &str,
+    current_byte: usize,
+    text: &str,
+) -> Option<EditAugmentation> {
+    if text.is_empty() {
+        return None;
+    }
+    let (closing_line_start, _, closing_line_end) =
+        locate_source_line_bounds(source, current_byte)?;
+    let closing_content_end = source_line_content_end(source, closing_line_end);
+    let closing_line = &source[closing_line_start..closing_content_end];
+    if !closing_line.contains("```") && !closing_line.contains("~~~") {
+        return None;
+    }
+    let boundary = enclosing_fenced_boundary(source, current_byte)?;
+    let (_, _, opening_line_end) = locate_source_line_bounds(source, boundary.frame.marker_start)?;
+    if closing_line_start != opening_line_end + LF_SEQUENCE.len() {
+        return None;
+    }
+    let opening_content_end = source_line_content_end(source, opening_line_end);
+    let (fence_char, opening_fence_len) =
+        opening_fence_signature(source, boundary.frame.opening_position, opening_content_end)?;
+    let closing_position = matching_container_position(
+        source,
+        closing_line_start,
+        closing_content_end,
+        &boundary.frame.container_path,
+    )?;
+    if !line_is_closing_fence(
+        source,
+        closing_position,
+        closing_content_end,
+        fence_char,
+        opening_fence_len,
+    ) {
+        return None;
+    }
+    let closing_fence_start =
+        marker_position_after_optional_indent(source, closing_content_end, closing_position)?
+            .byte_offset;
+    if current_byte > closing_fence_start {
+        return None;
+    }
+
+    let continuation_prefix = fenced_continuation_prefix(source, current_byte).unwrap_or_default();
+    let closing_prefix = &source[closing_line_start..closing_fence_start];
+    let newline = preferred_newline_sequence(source, current_byte);
+    let replacement = format!("{continuation_prefix}{text}{newline}{closing_prefix}");
+    let augmentation = EditAugmentation {
+        cursor_byte_after: closing_line_start + continuation_prefix.len() + text.len(),
+        replace_range: Some(closing_line_start..closing_fence_start),
+        insert_text: Some(replacement),
+    };
+    debug_assert_augmentation(&augmentation, source);
+    Some(augmentation)
 }
 
 pub(crate) fn augment_selected_text(
@@ -403,7 +519,21 @@ pub(crate) fn augment_selected_text(
     {
         return Some(table_cell_text_augmentation(source, selection.start, text, cell_range));
     }
-    paragraph_leading_spaces::insert_selected_text(source, selection, text)
+    paragraph_leading_spaces::insert_selected_text(source, selection.clone(), text)
+        .or_else(|| container_multiline_selected_text(source, selection, text))
+}
+
+fn container_multiline_selected_text(
+    source: &str,
+    selection: std::ops::Range<usize>,
+    text: &str,
+) -> Option<EditAugmentation> {
+    if !text.contains(['\r', '\n']) || text.trim_matches([' ', '\t', '\r', '\n']).is_empty() {
+        return None;
+    }
+    let mut source_after_delete = source.to_owned();
+    source_after_delete.replace_range(selection.clone(), "");
+    container_multiline_insert_text(&source_after_delete, selection.start, text)
 }
 
 pub(in crate::augmenter) fn table_cell_text_augmentation(

@@ -246,7 +246,11 @@ pub(in crate::augmenter) fn backspace_paragraph_boundary(
     current_byte: usize,
 ) -> Option<EditAugmentation> {
     let (line_start, _, line_end) = locate_source_line_bounds(source, current_byte)?;
-    if current_byte != line_start
+    let at_visual_line_start = current_byte == line_start
+        || (current_byte < line_end
+            && !source[current_byte..].starts_with([' ', '\t', '\r', '\n'])
+            && source[line_start..current_byte].bytes().all(|byte| matches!(byte, b' ' | b'\t')));
+    if !at_visual_line_start
         || line_start == line_end
         || !matches!(
             classify_enter_context(source, current_byte),
@@ -259,7 +263,7 @@ pub(in crate::augmenter) fn backspace_paragraph_boundary(
     }
 
     let source_bytes = source.as_bytes();
-    let mut boundary_start = current_byte;
+    let mut boundary_start = line_start;
     while boundary_start > 0 && source_bytes[boundary_start - 1] == b'\n' {
         boundary_start -= 1;
         if boundary_start > 0 && source_bytes[boundary_start - 1] == b'\r' {
@@ -268,12 +272,12 @@ pub(in crate::augmenter) fn backspace_paragraph_boundary(
     }
     if let Some(separator) = editable_paragraph_navigation::hidden_separator_range(
         source,
-        current_byte,
+        line_start,
         editable_paragraph_navigation::Boundary::Start,
     ) {
         boundary_start = separator.start;
     }
-    if boundary_start == current_byte {
+    if boundary_start == line_start {
         return None;
     }
 
@@ -342,7 +346,9 @@ pub(in crate::augmenter) fn guard_unmergeable_leaf_boundary(
     current_byte: usize,
 ) -> Option<EditAugmentation> {
     debug_assert!(boundary_start < current_byte);
-    if contiguous_newline_count_before(source, current_byte) > 1 {
+    let line_start =
+        locate_source_line_bounds(source, current_byte).map_or(current_byte, |(s, _, _)| s);
+    if contiguous_newline_count_before(source, line_start) > 1 {
         return None;
     }
     let aug = EditAugmentation {
@@ -369,7 +375,17 @@ pub(in crate::augmenter) fn backspace_join_hard_break_line(
     let newline_width = newline_sequence_width_before(source, line_start)?;
     let previous_content_end = line_start - newline_width;
     let marker = hard_break_marker_ending_at(source, previous_content_end)?;
-    if !continuation_prefix_matches_previous_container(source, line_start, continuation_prefix) {
+    let previous_prefix = previous_container_prefix(source, line_start);
+    let matches_previous =
+        continuation_prefix_matches_prefix(previous_prefix.as_deref(), continuation_prefix)
+            && (continuation_prefix.len() == previous_prefix.as_deref().map_or(0, str::len)
+                || (!source[current_byte..].starts_with([' ', '\t'])
+                    && !line_starts_independent_block(
+                        source,
+                        line_start,
+                        &ContainerPath::default(),
+                    )));
+    if !matches_previous {
         return Some(EditAugmentation {
             insert_text: Some(String::new()),
             replace_range: Some(current_byte..current_byte),
@@ -385,18 +401,8 @@ pub(in crate::augmenter) fn backspace_join_hard_break_line(
     Some(aug)
 }
 
-pub(in crate::augmenter) fn continuation_prefix_matches_previous_container(
-    source: &str,
-    line_start: usize,
-    continuation_prefix: &str,
-) -> bool {
-    if continuation_prefix.is_empty() {
-        return true;
-    }
-
-    let Some(newline_width) = newline_sequence_width_before(source, line_start) else {
-        return false;
-    };
+fn previous_container_prefix(source: &str, line_start: usize) -> Option<String> {
+    let newline_width = newline_sequence_width_before(source, line_start)?;
     let previous_line_end = line_start - newline_width;
     let previous_line_start = source[..previous_line_end]
         .bytes()
@@ -404,7 +410,25 @@ pub(in crate::augmenter) fn continuation_prefix_matches_previous_container(
         .map_or(0, |newline| newline + 1);
     let previous_content_start =
         container_content_start_on_line(source, previous_line_start, previous_line_end);
-    canonical_container_prefix(source, previous_content_start) == continuation_prefix
+    Some(canonical_container_prefix(source, previous_content_start))
+}
+
+fn continuation_prefix_matches_prefix(
+    previous_prefix: Option<&str>,
+    continuation_prefix: &str,
+) -> bool {
+    if continuation_prefix.is_empty() {
+        return true;
+    }
+    let Some(previous_prefix) = previous_prefix else {
+        return false;
+    };
+    if previous_prefix == continuation_prefix {
+        return true;
+    }
+    continuation_prefix
+        .strip_prefix(previous_prefix)
+        .is_some_and(|extra| extra.bytes().all(|byte| matches!(byte, b' ' | b'\t')))
 }
 
 pub(in crate::augmenter) fn container_content_start_on_line(

@@ -604,3 +604,105 @@ fn block_marker_len_paragraph_is_zero() {
     };
     assert_eq!(block_marker_len(&para), 0);
 }
+
+#[test]
+fn cross_hard_break_bold_and_br_expand_delimiters_per_logical_line() {
+    for (source, line1_cursor_needle, expected_line1) in [
+        ("**line1\\\nline2**", "line2", "line2**"),
+        ("**line1<br>line2**", "line2", "line2**"),
+        ("[a\\\nb](https://x.test)", "b", "b](https://x.test)"),
+    ] {
+        let parsed = crate::parser::parse_markdown(source);
+        let doc = crate::builder::MarkdownDoc::build(&parsed, &crate::test_utils::default_style());
+        let block = &doc.blocks[0];
+        assert_eq!(block.projected_lines.len(), 2, "expected 2 lines in {source:?}");
+
+        let line1_cursor = source.find(line1_cursor_needle).expect("fixture contains line2");
+        let ctx =
+            EditContext { cursor_byte: line1_cursor, preedit_text: None, preedit_cursor: None };
+        let line0 = materialize_projected_line(
+            &block.projected_lines[0],
+            &block.text_styles[0],
+            source,
+            Some(&ctx),
+            None,
+        );
+        let line1 = materialize_projected_line(
+            &block.projected_lines[1],
+            &block.text_styles[1],
+            source,
+            Some(&ctx),
+            None,
+        );
+
+        assert_eq!(line1.text, expected_line1, "line1 expansion mismatch for {source:?}");
+        line0.validate(source).expect("line0 projection must be valid");
+        line1.validate(source).expect("line1 projection must be valid");
+
+        let mut all_bytes = Vec::new();
+        all_bytes.extend(line0.boundaries.iter().map(|anchor| anchor.byte));
+        all_bytes.extend(line1.boundaries.iter().map(|anchor| anchor.byte));
+        assert!(
+            all_bytes.windows(2).all(|pair| pair[0] <= pair[1]),
+            "cross-line boundaries must be monotonically non-decreasing in {source:?}: {all_bytes:?}"
+        );
+    }
+
+    let three_line = "**l1\\\nl2\\\nl3**";
+    let parsed = crate::parser::parse_markdown(three_line);
+    let doc = crate::builder::MarkdownDoc::build(&parsed, &crate::test_utils::default_style());
+    let block = &doc.blocks[0];
+    assert_eq!(block.projected_lines.len(), 3);
+    let middle_cursor = three_line.find("l2").expect("fixture contains l2");
+    let ctx = EditContext { cursor_byte: middle_cursor, preedit_text: None, preedit_cursor: None };
+    let middle = materialize_projected_line(
+        &block.projected_lines[1],
+        &block.text_styles[1],
+        three_line,
+        Some(&ctx),
+        None,
+    );
+    assert_eq!(middle.text, "l2");
+}
+
+#[test]
+fn cross_hard_break_preedit_preserves_monotonic_anchors_and_caret() {
+    use crate::projection::SourceProjectionIndex;
+
+    let source = "**line1\\\nline2**";
+    let parsed = crate::parser::parse_markdown(source);
+    let doc = crate::builder::MarkdownDoc::build(&parsed, &crate::test_utils::default_style());
+    let block = &doc.blocks[0];
+    let line2_start = source.find("line2").expect("fixture has line2");
+    let cursor_byte = line2_start + 2;
+    let ctx = EditContext {
+        cursor_byte,
+        preedit_text: Some("中文".to_owned()),
+        preedit_cursor: Some(("中".len(), "中".len())),
+    };
+    let line0 = materialize_projected_line(
+        &block.projected_lines[0],
+        &block.text_styles[0],
+        source,
+        Some(&ctx),
+        None,
+    );
+    let line1 = materialize_projected_line(
+        &block.projected_lines[1],
+        &block.text_styles[1],
+        source,
+        Some(&ctx),
+        Some(&SourceLineContext { range: line2_start..source.len(), text_start: line2_start }),
+    );
+    assert_eq!(line1.text, "li中文ne2**");
+
+    let mut visual0 =
+        line0.slice_visual_line(0, 0..line0.text.len()).expect("line0 slice must build");
+    visual0.owner = ProjectionOwnerId::Block { block_start: 0, logical_line: 0 };
+    let mut visual1 =
+        line1.slice_visual_line(1, 0..line1.text.len()).expect("line1 slice must build");
+    visual1.owner = ProjectionOwnerId::Block { block_start: line2_start, logical_line: 1 };
+    let index = SourceProjectionIndex::build(1, 1, vec![visual0, visual1])
+        .expect("cross-line preedit index must satisfy monotonically non-decreasing anchors");
+    assert!(index.virtual_position_for_source(cursor_byte, 1).is_some());
+}

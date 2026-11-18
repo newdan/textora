@@ -1023,3 +1023,79 @@ fn multiline_quote_selection_counts_its_last_blank_line_when_toggling() {
         assert_eq!(result, format!("> first{newline}> {newline}last"));
     }
 }
+
+#[test]
+fn first_h1_protection_ignores_code_block_hashes_while_guarding_real_top_level_atx_h1() {
+    let fenced_then_h2 = "```\n# code comment\n```\n\n## Sub";
+    let h2_cursor = fenced_then_h2.find("## Sub").expect("h2 exists");
+    let (promoted, _) =
+        applied_text(fenced_then_h2, SemanticEditCommand::SetHeadingLevel(3), h2_cursor, None);
+    assert_eq!(promoted, "```\n# code comment\n```\n\n### Sub");
+
+    let indented_then_h2 = "    # indented comment\n\n## Sub";
+    let indented_h2_cursor = indented_then_h2.find("## Sub").expect("h2 exists");
+    let (indented_promoted, _) = applied_text(
+        indented_then_h2,
+        SemanticEditCommand::SetHeadingLevel(3),
+        indented_h2_cursor,
+        None,
+    );
+    assert_eq!(indented_promoted, "    # indented comment\n\n### Sub");
+
+    let code_then_real_h1 = "```\n# code comment\n```\n\n# Real H1\n\nBody";
+    let real_h1_cursor = code_then_real_h1.find("# Real H1").expect("real h1 exists") + 2;
+    let plan = plan_semantic_edit(
+        code_then_real_h1,
+        7,
+        real_h1_cursor,
+        None,
+        SemanticEditCommand::SetHeadingLevel(2),
+    );
+    assert_eq!(plan, SemanticEditPlan::NoChange);
+}
+
+#[test]
+fn heading_command_converts_setext_heading_and_removes_underline() {
+    let setext_h2 = "Setext Title\n---\n\nafter";
+    for cursor in [0usize, "Setext Title\n-".len()] {
+        let (result, _) =
+            applied_text(setext_h2, SemanticEditCommand::SetHeadingLevel(3), cursor, None);
+        assert_eq!(result, "### Setext Title\n\nafter");
+    }
+
+    let setext_h1 = "Setext H1\n===\n\nafter";
+    let (h1_converted, _) =
+        applied_text(setext_h1, SemanticEditCommand::SetHeadingLevel(2), 0, None);
+    assert_eq!(h1_converted, "## Setext H1\n\nafter");
+
+    let crlf_setext = "Setext\r\n===\r\nafter";
+    let (crlf_converted, _) =
+        applied_text(crlf_setext, SemanticEditCommand::SetHeadingLevel(2), 0, None);
+    assert_eq!(crlf_converted, "## Setext\r\nafter");
+
+    let closed_atx = "# Keep\n\n## Closed ##";
+    let closed_cursor = closed_atx.find("## Closed").expect("closed atx exists");
+    let (closed_converted, _) =
+        applied_text(closed_atx, SemanticEditCommand::SetHeadingLevel(3), closed_cursor, None);
+    assert_eq!(closed_converted, "# Keep\n\n### Closed");
+}
+
+#[test]
+fn list_prefix_commands_convert_between_unordered_ordered_and_task_without_nesting() {
+    for (source, command, expected) in [
+        ("- item", SemanticEditCommand::OrderedList, "1. item"),
+        ("- item", SemanticEditCommand::TaskList, "- [ ] item"),
+        ("+ item", SemanticEditCommand::OrderedList, "1. item"),
+        ("1) item", SemanticEditCommand::UnorderedList, "- item"),
+        ("1. item", SemanticEditCommand::TaskList, "- [ ] item"),
+        ("- [ ] item", SemanticEditCommand::UnorderedList, "- item"),
+        ("- [x] item", SemanticEditCommand::OrderedList, "1. item"),
+        ("- [ ] a\n* b\n1) c", SemanticEditCommand::TaskList, "- [ ] a\n- [ ] b\n- [ ] c"),
+        ("- [x] a\n1. b", SemanticEditCommand::UnorderedList, "- a\n- b"),
+        ("- [x] a\n+ b", SemanticEditCommand::UnorderedList, "- a\n+ b"),
+        ("1) first", SemanticEditCommand::OrderedList, "first"),
+    ] {
+        let (result, _) = applied_text(source, command.clone(), 0, Some(0..source.len()));
+        assert_eq!(result, expected, "conversion failed for {source:?} with {command:?}");
+    }
+}

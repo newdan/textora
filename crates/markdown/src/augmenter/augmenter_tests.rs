@@ -2119,7 +2119,7 @@ fn blockquote_inside_list_takes_precedence_over_the_outer_item() {
         .expect("the inner quote should own Enter");
     let edited_source = apply_augmentation_at(source, current_byte, &augmentation);
 
-    assert_eq!(edited_source, "- > left \n  > right");
+    assert_eq!(edited_source, "- > left \n  >\n  > right");
 }
 
 #[test]
@@ -2718,14 +2718,12 @@ fn fenced_code_start_range_points_to_the_opening_marker() {
 fn delete_forward_rejects_indented_code_as_thematic_break() {
     for source in ["first\n\t***", "first\n    ***"] {
         let cursor = "first".len();
+        let stars = source.find("***").expect("fixture contains stars");
         let augmentation = augment_delete_forward(source, cursor)
             .unwrap_or_else(|| panic!("DeleteForward must merge {source:?}"));
 
-        assert_eq!(augmentation.replace_range, Some(cursor..cursor + 1));
-        assert_eq!(
-            apply_augmentation_at(source, cursor, &augmentation),
-            source.replacen('\n', "", 1)
-        );
+        assert_eq!(augmentation.replace_range, Some(cursor..stars));
+        assert_eq!(apply_augmentation_at(source, cursor, &augmentation), "first***");
     }
 }
 
@@ -3020,4 +3018,507 @@ fn heading_content_start_scans_actual_whitespace_after_hashes() {
         .expect("Enter on an empty heading should create a paragraph break");
     assert_eq!(apply_augmentation_at(empty_heading, 1, &augmentation), "#\n\n");
     assert_eq!(augmentation.cursor_byte_after, 3);
+}
+
+#[test]
+fn blockquote_mid_line_enter_splits_into_two_paragraphs() {
+    let source = "> hello world";
+    let current_byte = "> hel".len();
+    let augmentation = augment_edit(source, current_byte, AugmentKind::Enter)
+        .expect("mid-line Enter in blockquote should split paragraph");
+    assert_eq!(apply_augmentation_at(source, current_byte, &augmentation), "> hel\n>\n> lo world");
+    assert_eq!(augmentation.cursor_byte_after, "> hel\n>\n> ".len());
+
+    let crlf_source = "> hello world\r\n> next";
+    let crlf_byte = "> hel".len();
+    let crlf_aug = augment_edit(crlf_source, crlf_byte, AugmentKind::Enter)
+        .expect("CRLF blockquote mid-line Enter should preserve CRLF");
+    assert_eq!(
+        apply_augmentation_at(crlf_source, crlf_byte, &crlf_aug),
+        "> hel\r\n>\r\n> lo world\r\n> next"
+    );
+    assert_eq!(crlf_aug.cursor_byte_after, "> hel\r\n>\r\n> ".len());
+
+    let bold_source = "> **left right**";
+    let bold_byte = "> **left".len();
+    let bold_aug = augment_edit(bold_source, bold_byte, AugmentKind::Enter)
+        .expect("mid-line Enter inside bold span in blockquote should split cleanly");
+    assert_eq!(
+        apply_augmentation_at(bold_source, bold_byte, &bold_aug),
+        "> **left** \n>\n> **right**"
+    );
+}
+
+#[test]
+fn blockquote_lazy_continuation_mid_line_enter_splits_inside_quote() {
+    let source = "> hello\nworld";
+    let current_byte = "> hello\nwor".len();
+    let augmentation = augment_edit(source, current_byte, AugmentKind::Enter)
+        .expect("lazy continuation line inside blockquote should split inside quote");
+    assert_eq!(apply_augmentation_at(source, current_byte, &augmentation), "> hello\nwor\n>\n> ld");
+    assert_eq!(augmentation.cursor_byte_after, "> hello\nwor\n>\n> ".len());
+}
+
+#[test]
+fn blockquote_nested_list_continuation_preserves_list_indent() {
+    let source = "> - para 1\n>\n>   para 2";
+    let current_byte = source.len();
+    let augmentation = augment_edit(source, current_byte, AugmentKind::Enter)
+        .expect("list continuation inside blockquote should resolve to list item");
+    assert_eq!(
+        apply_augmentation_at(source, current_byte, &augmentation),
+        "> - para 1\n>\n>   para 2\n> - "
+    );
+    assert_eq!(augmentation.cursor_byte_after, "> - para 1\n>\n>   para 2\n> - ".len());
+}
+
+#[test]
+fn backspace_at_soft_line_start_strips_folded_leading_whitespace() {
+    for (source, needle, expected) in [
+        ("left\n   right", "right", "left|right"),
+        ("left\r\n  \tright", "right", "left|right"),
+        ("left \n   right", "right", "left |right"),
+        ("left\\\n   right", "right", "left|right"),
+        ("left  \r\n  right", "right", "left|right"),
+    ] {
+        let current_byte = source.find(needle).expect("fixture must contain needle");
+        let augmentation = augment_edit(source, current_byte, AugmentKind::Backspace)
+            .unwrap_or_else(|| panic!("expected backspace augmentation for {source:?}"));
+        let edited = apply_augmentation_at(source, current_byte, &augmentation);
+        let expected_cursor = expected.find('|').expect("expected must contain caret marker");
+        let expected_source = expected.replace('|', "");
+        assert_eq!(edited, expected_source, "wrong result for {source:?}");
+        assert_eq!(augmentation.cursor_byte_after, expected_cursor, "wrong caret for {source:?}");
+    }
+}
+
+#[test]
+fn delete_forward_before_soft_break_strips_folded_leading_whitespace() {
+    for (source, expected) in [
+        ("left\n   right", "leftright"),
+        ("left\r\n  \tright", "leftright"),
+        ("left\n\n   right", "leftright"),
+    ] {
+        let current_byte = "left".len();
+        let augmentation = augment_delete_forward(source, current_byte)
+            .unwrap_or_else(|| panic!("expected delete-forward augmentation for {source:?}"));
+        let edited = apply_augmentation_at(source, current_byte, &augmentation);
+        assert_eq!(edited, expected, "wrong forward-delete result for {source:?}");
+        assert_eq!(augmentation.cursor_byte_after, current_byte, "wrong caret for {source:?}");
+    }
+}
+
+#[test]
+fn empty_fenced_code_insert_at_closing_fence_writes_inside_code_body() {
+    for (source, cursor, insertion, expected, expected_cursor) in [
+        ("```\n```", "```\n".len(), "x", "```\nx\n```", "```\nx".len()),
+        ("```\r\n```", "```\r\n".len(), "x", "```\r\nx\r\n```", "```\r\nx".len()),
+        (
+            "```rust\n```",
+            "```rust\n".len(),
+            "let a = 1;",
+            "```rust\nlet a = 1;\n```",
+            "```rust\nlet a = 1;".len(),
+        ),
+        ("> ```\n> ```", "> ```\n".len(), "x", "> ```\n> x\n> ```", "> ```\n> x".len()),
+        ("> ```\n> ```", "> ```\n> ".len(), "x", "> ```\n> x\n> ```", "> ```\n> x".len()),
+        ("- ```\n  ```", "- ```\n".len(), "x", "- ```\n  x\n  ```", "- ```\n  x".len()),
+    ] {
+        let augmentation =
+            augment_edit(source, cursor, AugmentKind::InsertText(insertion.to_owned()))
+                .unwrap_or_else(|| {
+                    panic!("empty fenced code insert should augment for {source:?} at {cursor}")
+                });
+        let edited = apply_augmentation_at(source, cursor, &augmentation);
+        assert_eq!(edited, expected, "wrong edited source for {source:?} at {cursor}");
+        assert_eq!(
+            augmentation.cursor_byte_after, expected_cursor,
+            "wrong cursor for {source:?} at {cursor}"
+        );
+    }
+
+    assert!(
+        augment_edit("```\na\n```", "```\na\n".len(), AugmentKind::InsertText(String::from("x")))
+            .is_none(),
+        "non-empty fenced code closing fence must not synthesize extra empty body line"
+    );
+}
+
+#[test]
+fn opening_fence_allows_editing_info_string_and_protects_fence_markers() {
+    assert_eq!(
+        apply_backspace_with_default("```rust\ncode\n```", "```rust".len()),
+        (String::from("```rus\ncode\n```"), "```rus".len())
+    );
+    assert_eq!(
+        apply_backspace_with_default("```rust\ncode\n```", "```r".len()),
+        (String::from("```ust\ncode\n```"), "```".len())
+    );
+    assert_eq!(
+        apply_delete_forward_with_default("```rust\ncode\n```", "```".len()),
+        (String::from("```ust\ncode\n```"), "```".len())
+    );
+    assert_eq!(
+        apply_backspace_with_default("> ```rust\n> code\n> ```", "> ```rust".len()),
+        (String::from("> ```rus\n> code\n> ```"), "> ```rus".len())
+    );
+    assert_eq!(
+        apply_delete_forward_with_default("~~~~rust\ncode\n~~~~", "~~~~".len()),
+        (String::from("~~~~ust\ncode\n~~~~"), "~~~~".len())
+    );
+
+    let fenced = "```rust\ncode\n```";
+    for cursor in [0usize, 1, 2, 3] {
+        assert_eq!(
+            apply_backspace_with_default(fenced, cursor),
+            (String::from(fenced), cursor),
+            "Backspace at opening fence byte {cursor} must preserve fence"
+        );
+    }
+    for cursor in [0usize, 1, 2] {
+        assert_eq!(
+            apply_delete_forward_with_default(fenced, cursor),
+            (String::from(fenced), cursor),
+            "DeleteForward at opening fence byte {cursor} must preserve fence"
+        );
+    }
+    assert_eq!(
+        apply_backspace_with_default("```\ncode\n```", "```".len()),
+        (String::from("```\ncode\n```"), "```".len())
+    );
+    assert_eq!(
+        apply_backspace_with_default("~~~rust\ncode\n~~~", "~~~".len()),
+        (String::from("~~~rust\ncode\n~~~"), "~~~".len())
+    );
+
+    let quoted = "> ```rust\n> code\n> ```";
+    for cursor in ["> ".len(), "> ```".len()] {
+        assert_eq!(
+            apply_backspace_with_default(quoted, cursor),
+            (String::from(quoted), cursor),
+            "quoted opening fence Backspace at {cursor} must preserve prefix and marker"
+        );
+    }
+    assert_eq!(
+        apply_delete_forward_with_default(quoted, "> ".len()),
+        (String::from(quoted), "> ".len())
+    );
+
+    let closing_source = "```\ncode\n```";
+    let closing_start = "```\ncode\n".len();
+    for offset in 0..=3 {
+        let cursor = closing_start + offset;
+        assert_eq!(
+            apply_backspace_with_default(closing_source, cursor),
+            (String::from(closing_source), cursor),
+            "Backspace on closing fence byte {cursor} must preserve closing fence"
+        );
+    }
+    for offset in 0..3 {
+        let cursor = closing_start + offset;
+        assert_eq!(
+            apply_delete_forward_with_default(closing_source, cursor),
+            (String::from(closing_source), cursor),
+            "DeleteForward on closing fence byte {cursor} must preserve closing fence"
+        );
+    }
+
+    let quoted_closing_start = "> ```rust\n> code\n".len();
+    for offset in 0..="> ```".len() {
+        let cursor = quoted_closing_start + offset;
+        assert_eq!(
+            apply_backspace_with_default(quoted, cursor),
+            (String::from(quoted), cursor),
+            "quoted closing fence Backspace at {cursor} must preserve closing fence"
+        );
+    }
+}
+
+fn list_item_nesting_depths(source: &str) -> Vec<(usize, String)> {
+    use pulldown_cmark::{Event, Parser, Tag, TagEnd};
+
+    let mut depth = 0usize;
+    let mut item_texts: Vec<(usize, String)> = Vec::new();
+    let mut active_items: Vec<Option<usize>> = Vec::new();
+
+    for event in Parser::new_ext(source, crate::parser::markdown_options()) {
+        match event {
+            Event::Start(Tag::List(_)) => {
+                if let Some(slot) = active_items.last_mut() {
+                    *slot = None;
+                }
+                depth += 1;
+            }
+            Event::End(TagEnd::List(_)) => depth = depth.saturating_sub(1),
+            Event::Start(Tag::Item) => {
+                let index = item_texts.len();
+                item_texts.push((depth, String::new()));
+                active_items.push(Some(index));
+            }
+            Event::Text(text) => {
+                if let Some(Some(index)) = active_items.last().copied() {
+                    item_texts[index].1.push_str(&text);
+                }
+            }
+            Event::SoftBreak => {
+                if let Some(Some(index)) = active_items.last().copied()
+                    && !item_texts[index].1.is_empty()
+                {
+                    item_texts[index].1.push(' ');
+                }
+            }
+            Event::End(TagEnd::Paragraph) => {
+                if let Some(slot) = active_items.last_mut()
+                    && slot.is_some_and(|index| !item_texts[index].1.is_empty())
+                {
+                    *slot = None;
+                }
+            }
+            Event::End(TagEnd::Item) => {
+                active_items.pop();
+            }
+            _ => {}
+        }
+    }
+    item_texts
+}
+
+#[test]
+fn list_item_tab_and_shift_tab_move_complete_subtree_and_preserve_ast_hierarchy() {
+    // 1. 首项无前驱兄弟按 Tab 消费（不变为缩进代码块），顶层 0 缩进 Shift+Tab 消费，带前导空格 Shift+Tab 去缩进。
+    let first_only = "- first\n- second";
+    let first_tab = augment_edit(first_only, "- fir".len(), AugmentKind::Tab)
+        .expect("first item Tab must consume instead of falling back");
+    assert_eq!(apply_augmentation_at(first_only, "- fir".len(), &first_tab), first_only);
+    assert_eq!(first_tab.cursor_byte_after, "- fir".len());
+
+    let first_shift = augment_edit(first_only, "- fir".len(), AugmentKind::ShiftTab)
+        .expect("top-level zero-indent item ShiftTab must consume");
+    assert_eq!(apply_augmentation_at(first_only, "- fir".len(), &first_shift), first_only);
+
+    let leading_indented = "  - solo";
+    let unindent = augment_edit(leading_indented, leading_indented.len(), AugmentKind::ShiftTab)
+        .expect("leading indented top-level item ShiftTab should outdent");
+    assert_eq!(
+        apply_augmentation_at(leading_indented, leading_indented.len(), &unindent),
+        "- solo"
+    );
+    assert_eq!(unindent.cursor_byte_after, "- solo".len());
+
+    // 2. 普通无序列表、引用内列表与任务列表第二项 Tab / Shift+Tab 往返与 AST 父子关系。
+    for (source, cursor_needle, expected_indented) in [
+        ("- first\n- second", "sec", "- first\n  - second"),
+        ("> - first\n> - second", "sec", "> - first\n>   - second"),
+        ("- [ ] first\n- [ ] second", "sec", "- [ ] first\n  - [ ] second"),
+    ] {
+        let cursor = source.find(cursor_needle).expect("needle exists") + 1;
+        let indent_aug = augment_edit(source, cursor, AugmentKind::Tab)
+            .unwrap_or_else(|| panic!("Tab should indent item in {source:?}"));
+        let indented = apply_augmentation_at(source, cursor, &indent_aug);
+        assert_eq!(indented, expected_indented);
+        assert_eq!(
+            indented.find(cursor_needle).expect("needle survives") + 1,
+            indent_aug.cursor_byte_after
+        );
+        assert_eq!(
+            list_item_nesting_depths(&indented),
+            vec![(1, String::from("first")), (2, String::from("second"))],
+            "AST must nest second under first for {indented:?}"
+        );
+
+        let outdent_aug =
+            augment_edit(&indented, indent_aug.cursor_byte_after, AugmentKind::ShiftTab)
+                .expect("ShiftTab should outdent item back to parent level");
+        let restored = apply_augmentation_at(&indented, indent_aug.cursor_byte_after, &outdent_aug);
+        assert_eq!(restored, source);
+        assert_eq!(outdent_aug.cursor_byte_after, cursor);
+    }
+
+    // 3. 多位有序列表按前驱内容起始列（4 空格）对齐并保持嵌套 AST 结构
+    // （注：CommonMark 仅允许 `1.` 或空行后的有序子列表打断紧邻段落，故用空行或 `1.` 验证 AST 嵌套）。
+    let multi_tight = "10. first\n11. second";
+    let multi_tight_cursor = "10. first\n11. sec".len();
+    let multi_tight_tab = augment_edit(multi_tight, multi_tight_cursor, AugmentKind::Tab)
+        .expect("multi-digit ordered item Tab should indent to 4 columns");
+    assert_eq!(
+        apply_augmentation_at(multi_tight, multi_tight_cursor, &multi_tight_tab),
+        "10. first\n    11. second"
+    );
+    assert_eq!(multi_tight_tab.cursor_byte_after, "10. first\n    11. sec".len());
+
+    for (source, cursor_needle, expected_indented) in [
+        ("10. first\n\n11. second", "sec", "10. first\n\n    11. second"),
+        ("10. first\n1. second", "sec", "10. first\n    1. second"),
+    ] {
+        let cursor = source.find(cursor_needle).expect("needle exists") + 1;
+        let indent_aug = augment_edit(source, cursor, AugmentKind::Tab)
+            .expect("multi-digit ordered item Tab should indent to 4 columns");
+        let indented = apply_augmentation_at(source, cursor, &indent_aug);
+        assert_eq!(indented, expected_indented);
+        assert_eq!(
+            indented.find(cursor_needle).expect("needle survives") + 1,
+            indent_aug.cursor_byte_after
+        );
+        assert_eq!(
+            list_item_nesting_depths(&indented),
+            vec![(1, String::from("first")), (2, String::from("second"))]
+        );
+        let outdent_aug =
+            augment_edit(&indented, indent_aug.cursor_byte_after, AugmentKind::ShiftTab)
+                .expect("ShiftTab restores multi-digit ordered item");
+        assert_eq!(
+            apply_augmentation_at(&indented, indent_aug.cursor_byte_after, &outdent_aug),
+            source
+        );
+        assert_eq!(outdent_aug.cursor_byte_after, cursor);
+    }
+
+    // 4. 完整子树（含续段、空行续段与子列表）同步移动，重解析 AST 校验 3 层级保留。
+    let subtree = "- parent\n- target\n  continuation\n\n  more\n  - nested";
+    let target_cursor = "- parent\n- tar".len();
+    let subtree_tab = augment_edit(subtree, target_cursor, AugmentKind::Tab)
+        .expect("subtree Tab must indent item, continuations, and child list");
+    let subtree_indented = apply_augmentation_at(subtree, target_cursor, &subtree_tab);
+    assert_eq!(
+        subtree_indented,
+        "- parent\n  - target\n    continuation\n\n    more\n    - nested"
+    );
+    assert_eq!(subtree_tab.cursor_byte_after, "- parent\n  - tar".len());
+    assert_eq!(
+        list_item_nesting_depths(&subtree_indented),
+        vec![
+            (1, String::from("parent")),
+            (2, String::from("target continuation")),
+            (3, String::from("nested")),
+        ]
+    );
+
+    let subtree_shift =
+        augment_edit(&subtree_indented, subtree_tab.cursor_byte_after, AugmentKind::ShiftTab)
+            .expect("subtree ShiftTab must outdent complete subtree");
+    assert_eq!(
+        apply_augmentation_at(&subtree_indented, subtree_tab.cursor_byte_after, &subtree_shift),
+        subtree
+    );
+    assert_eq!(subtree_shift.cursor_byte_after, target_cursor);
+}
+
+#[test]
+fn ordered_list_renumbers_following_siblings_on_enter_split_and_exit() {
+    // 1. 段尾 Enter 新增有序列表项，后续同级项在单次替换内顺延重编号（保留 `.` 与 `)` 分隔符）。
+    for (source, cursor, expected_source, expected_cursor) in [
+        (
+            "1. first\n2. second\n3. third",
+            "1. first".len(),
+            "1. first\n2. \n3. second\n4. third",
+            "1. first\n2. ".len(),
+        ),
+        (
+            "1) first\n2) second",
+            "1) first".len(),
+            "1) first\n2) \n3) second",
+            "1) first\n2) ".len(),
+        ),
+        ("9. nine\n10. ten", "9. nine".len(), "9. nine\n10. \n11. ten", "9. nine\n10. ".len()),
+        // CRLF 与 blockquote 容器前缀兼容
+        (
+            "> 1. first\r\n> 2. second",
+            "> 1. first".len(),
+            "> 1. first\r\n> 2. \r\n> 3. second",
+            "> 1. first\r\n> 2. ".len(),
+        ),
+        // 列表项中部拆分 + 保留嵌套子列表不受外层编号改动影响
+        (
+            "1. ab\n   1. sub1\n   2. sub2\n2. next",
+            "1. a".len(),
+            "1. a\n2. b\n   1. sub1\n   2. sub2\n3. next",
+            "1. a\n2. ".len(),
+        ),
+        // 空有序列表项 Enter 退出时，后续同级项前移重编号
+        (
+            "1. first\n2. \n3. third\n4. fourth",
+            "1. first\n2. ".len(),
+            "1. first\n\n2. third\n3. fourth",
+            "1. first\n".len(),
+        ),
+        // 引用容器内空有序列表项退出时保留 `> ` 且重编号后续同级项
+        (
+            "> 1. first\n> 2. \n> 3. third",
+            "> 1. first\n> 2. ".len(),
+            "> 1. first\n> \n> 2. third",
+            "> 1. first\n> ".len(),
+        ),
+    ] {
+        let augmentation = augment_edit(source, cursor, AugmentKind::Enter)
+            .unwrap_or_else(|| panic!("Enter must augment {source:?} at {cursor}"));
+        let edited = apply_augmentation_at(source, cursor, &augmentation);
+        assert_eq!(edited, expected_source, "renumber mismatch for {source:?} at {cursor}");
+        assert_eq!(
+            augmentation.cursor_byte_after, expected_cursor,
+            "cursor mismatch for {source:?} at {cursor}"
+        );
+    }
+}
+
+#[test]
+fn multiline_insert_in_containers_preserves_blockquote_and_list_continuation_prefixes() {
+    for (source, cursor, pasted, expected, expected_cursor) in [
+        // 1. BlockQuote 文本行粘贴多行（含空行与尾部换行），保留 `> ` 与 `>`。
+        (
+            "> first",
+            "> first".len(),
+            " second\nthird\n\nfourth",
+            "> first second\n> third\n>\n> fourth",
+            "> first second\n> third\n>\n> fourth".len(),
+        ),
+        // 2. 无序与有序列表项中粘贴多行，后续行按列表内容列缩进补齐前缀。
+        ("- first", "- fir".len(), "X\nY", "- firX\n  Yst", "- firX\n  Y".len()),
+        ("10. first", "10. first".len(), "\nsub", "10. first\n    sub", "10. first\n    sub".len()),
+        // 3. 引用内嵌套列表项多行粘贴。
+        (
+            "> - first",
+            "> - first".len(),
+            "a\n\nb",
+            "> - firsta\n>\n>   b",
+            "> - firsta\n>\n>   b".len(),
+        ),
+        // 4. CRLF 引用块多行粘贴。
+        (
+            "> first\r\n> second",
+            "> first".len(),
+            " line\r\nadded",
+            "> first line\r\n> added\r\n> second",
+            "> first line\r\n> added".len(),
+        ),
+        // 5. 容器内虚拟可编辑空段粘贴多行，同时补齐隐藏分隔与容器续行前缀。
+        (
+            "> first\n> \n> after",
+            "> first\n> ".len(),
+            "mid1\nmid2",
+            "> first\n> \n> mid1\n> mid2\n> \n> after",
+            "> first\n> \n> mid1\n> mid2".len(),
+        ),
+    ] {
+        let augmentation = augment_edit(source, cursor, AugmentKind::InsertText(pasted.to_owned()))
+            .unwrap_or_else(|| panic!("container multiline insert must augment {source:?}"));
+        assert_eq!(
+            apply_augmentation_at(source, cursor, &augmentation),
+            expected,
+            "mismatch for {source:?}"
+        );
+        assert_eq!(augmentation.cursor_byte_after, expected_cursor, "wrong caret for {source:?}");
+    }
+
+    // 6. 容器内选区替换为多行文本也应补齐容器续行前缀。
+    let quoted = "> hello world";
+    let sel_start = "> hello ".len();
+    let sel_end = quoted.len();
+    let sel_aug = augment_selected_text(quoted, sel_start..sel_end, "a\nb")
+        .expect("selected text inside blockquote should augment multiline paste");
+    let mut edited = quoted.to_owned();
+    edited.replace_range(sel_start..sel_end, "");
+    let virtual_range = sel_aug.replace_range.unwrap_or(sel_start..sel_start);
+    edited.replace_range(virtual_range, sel_aug.insert_text.as_deref().unwrap_or_default());
+    assert_eq!(edited, "> hello a\n> b");
+    assert_eq!(sel_aug.cursor_byte_after, "> hello a\n> b".len());
 }

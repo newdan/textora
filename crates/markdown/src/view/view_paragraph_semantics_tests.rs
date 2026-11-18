@@ -414,3 +414,139 @@ fn heading_visible_end_delete_keeps_atomic_neighbors_and_eof_intact() {
         }
     }
 }
+
+fn run_selection_intent_with_single_undo(
+    source: &str,
+    selection: std::ops::Range<usize>,
+    intent: ui::plugin::EditIntent,
+) -> (String, usize) {
+    use ui::plugin::{EditPlan, EditPolicy, EditRequest, EditSelection};
+
+    let mut view = MarkdownEditorView::new();
+    view.set_source(source.to_owned(), 1);
+    let request = EditRequest {
+        source_generation: 1,
+        cursor_byte: selection.end,
+        selection: Some(selection.clone()),
+        intent: intent.clone(),
+    };
+    let mut edited = source.to_owned();
+    match view.plan_edit(&request) {
+        EditPlan::Apply(transaction) | EditPlan::ApplyDefault(transaction, _) => {
+            let mut undo_stack: Vec<(std::ops::Range<usize>, String)> = Vec::new();
+            for replacement in transaction.replacements.iter().rev() {
+                let start = replacement.range.start;
+                let replaced_len = replacement.text.len();
+                let original_slice = edited[replacement.range.clone()].to_owned();
+                edited.replace_range(replacement.range.clone(), &replacement.text);
+                undo_stack.push((start..start + replaced_len, original_slice));
+            }
+            // Verify single-transaction Undo restores original source cleanly.
+            let mut undone = edited.clone();
+            for (applied_range, original_slice) in undo_stack.into_iter().rev() {
+                undone.replace_range(applied_range, &original_slice);
+            }
+            assert_eq!(undone, source, "single transaction Undo must restore original source");
+            let caret = match transaction.selection_after {
+                EditSelection::Caret(c) => c,
+                EditSelection::Range { cursor, .. } => cursor,
+            };
+            (edited, caret)
+        }
+        EditPlan::Consume => (edited, selection.start),
+        EditPlan::MoveCursor(update) => (edited, update.cursor_after),
+        EditPlan::UseDefault => {
+            let text = match &intent {
+                ui::plugin::EditIntent::InsertText(t) => t.as_str(),
+                ui::plugin::EditIntent::InsertParagraphBreak
+                | ui::plugin::EditIntent::InsertLineBreak => "\n",
+                _ => "",
+            };
+            edited.replace_range(selection.clone(), text);
+            (edited, selection.start + text.len())
+        }
+        EditPlan::SetSelection(_) => panic!("unexpected selection result"),
+    }
+}
+
+#[test]
+fn selection_edits_protect_fences_tables_and_setext_across_all_intents_and_undo() {
+    use ui::plugin::EditIntent;
+
+    // 1. Cross-fence selections: never break opening/closing fences across Delete, Type, Paste, Enter.
+    let fenced_doc = "para\n\n```\nline1\nline2\n```\n\nafter";
+    let body_to_closing_start = fenced_doc.find("line2").expect("body exists");
+    let body_to_closing_end = fenced_doc.find("\n\nafter").expect("closing fence end exists");
+    let closing_only_start = fenced_doc.find("\n```\n\nafter").expect("closing fence") + 1;
+    let open_to_body_start = fenced_doc.find("```").expect("opening fence");
+    let open_to_body_end = fenced_doc.find("\nline2").expect("line1 end");
+
+    for intent in [
+        EditIntent::DeleteBackward,
+        EditIntent::DeleteForward,
+        EditIntent::InsertText(String::from("X")),
+        EditIntent::InsertText(String::from("p1\np2")),
+        EditIntent::InsertParagraphBreak,
+    ] {
+        let (edited, _) = run_selection_intent_with_single_undo(
+            fenced_doc,
+            body_to_closing_start..body_to_closing_end,
+            intent.clone(),
+        );
+        assert!(
+            edited.ends_with("\n```\n\nafter"),
+            "closing fence & trailing prose must stay intact for {intent:?}: {edited:?}"
+        );
+
+        let (opened_edited, _) = run_selection_intent_with_single_undo(
+            fenced_doc,
+            open_to_body_start..open_to_body_end,
+            intent.clone(),
+        );
+        assert!(
+            opened_edited.starts_with("para\n\n```\n"),
+            "opening fence must stay intact for {intent:?}: {opened_edited:?}"
+        );
+
+        let (marker_only, _) = run_selection_intent_with_single_undo(
+            fenced_doc,
+            closing_only_start..body_to_closing_end,
+            intent,
+        );
+        assert_eq!(marker_only, fenced_doc, "pure closing fence marker must not be destroyed");
+    }
+
+    // 2. Cross-cell table selections: preserve pipes and separator row across Delete, Type, Paste, Enter.
+    let table_doc = "| alpha | beta |\n| --- | --- |\n| gamma | delta |";
+    let cross_cells = table_doc.find("pha").expect("pha exists")
+        ..table_doc.find("beta").expect("beta exists") + 2;
+    for intent in [
+        EditIntent::DeleteBackward,
+        EditIntent::DeleteForward,
+        EditIntent::InsertText(String::from("X|Y")),
+        EditIntent::InsertText(String::from("p1\np2")),
+        EditIntent::InsertParagraphBreak,
+    ] {
+        let (edited, _) =
+            run_selection_intent_with_single_undo(table_doc, cross_cells.clone(), intent.clone());
+        let rows: Vec<&str> = edited.lines().collect();
+        assert_eq!(rows.len(), 3, "table row count broken for {intent:?}: {edited:?}");
+        assert_eq!(rows[1], "| --- | --- |", "separator row broken for {intent:?}: {edited:?}");
+        assert!(rows[0].starts_with("| al"), "cell 0 prefix broken: {edited:?}");
+        assert!(rows[0].ends_with("ta |"), "cell 1 suffix broken: {edited:?}");
+    }
+
+    // 3. Setext heading full-title selection + Enter must remove underline cleanly (no orphan `---` HR).
+    let setext_doc = "Setext\n---\n\nafter";
+    let (after_enter, caret) = run_selection_intent_with_single_undo(
+        setext_doc,
+        0.."Setext".len(),
+        EditIntent::InsertParagraphBreak,
+    );
+    assert!(
+        !after_enter.contains("---"),
+        "Enter over erased Setext heading must not leave orphan HR: {after_enter:?}"
+    );
+    assert_eq!(after_enter, "\n\nafter");
+    assert_eq!(caret, 1);
+}

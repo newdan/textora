@@ -93,6 +93,95 @@ pub(in crate::augmenter) struct CodeBlockFrame {
     pub(in crate::augmenter) container_path: ContainerPath,
 }
 
+pub(in crate::augmenter) struct QuoteFrame {
+    pub(in crate::augmenter) start: usize,
+    pub(in crate::augmenter) continuation_prefix: String,
+    pub(in crate::augmenter) empty_parent_prefix: String,
+}
+
+fn build_quote_frame(source: &str, range_start: usize) -> QuoteFrame {
+    let bytes = source.as_bytes();
+    let mut probe = range_start;
+    while matches!(bytes.get(probe), Some(b' ' | b'\t')) {
+        probe += 1;
+    }
+    let marker_end = if bytes.get(probe) == Some(&b'>') {
+        let after_marker = probe + 1;
+        if matches!(bytes.get(after_marker), Some(b' ' | b'\t')) {
+            after_marker + 1
+        } else {
+            after_marker
+        }
+    } else {
+        locate_blockquote_line(source, range_start)
+            .map_or(range_start, |(_, content_start, _)| content_start)
+    };
+    QuoteFrame {
+        start: range_start,
+        continuation_prefix: canonical_container_prefix(source, marker_end),
+        empty_parent_prefix: blockquote_parent_prefix(source, marker_end),
+    }
+}
+
+fn explicit_blockquote_line_context(source: &str, current_byte: usize) -> Option<EnterContext> {
+    let (_line_start, content_start, line_end) = locate_blockquote_line(source, current_byte)?;
+    let content_end = source_line_content_end(source, line_end);
+    (current_byte >= content_start && current_byte <= content_end).then(|| {
+        EnterContext::BlockQuoteLine {
+            continuation_prefix: canonical_container_prefix(source, content_start),
+            empty_parent_prefix: blockquote_parent_prefix(source, content_start),
+            empty: content_start == content_end,
+        }
+    })
+}
+
+fn classify_blockquote_frame(
+    source: &str,
+    current_byte: usize,
+    frame: &QuoteFrame,
+    range_end: usize,
+) -> Option<(usize, EnterContext)> {
+    let end = content_end_without_trailing_newline(source, frame.start..range_end);
+    if let Some((line_start, content_start, line_end)) =
+        locate_blockquote_line(source, current_byte)
+    {
+        let in_frame_range = (current_byte >= frame.start && current_byte <= end)
+            || (content_start > frame.start && line_start <= range_end);
+        let content_end = source_line_content_end(source, line_end);
+        if !in_frame_range || current_byte < content_start || current_byte > content_end {
+            return None;
+        }
+        return Some((
+            frame.start,
+            EnterContext::BlockQuoteLine {
+                continuation_prefix: canonical_container_prefix(source, content_start),
+                empty_parent_prefix: blockquote_parent_prefix(source, content_start),
+                empty: content_start == content_end,
+            },
+        ));
+    }
+
+    if current_byte < frame.start || current_byte > end {
+        return None;
+    }
+    let (line_start, _, line_end) = locate_source_line_bounds(source, current_byte)?;
+    let content_end = source_line_content_end(source, line_end);
+    if current_byte < line_start
+        || current_byte > content_end
+        || source_line_is_empty(source, current_byte)
+    {
+        return None;
+    }
+    Some((
+        frame.start,
+        EnterContext::BlockQuoteLine {
+            continuation_prefix: frame.continuation_prefix.clone(),
+            empty_parent_prefix: frame.empty_parent_prefix.clone(),
+            empty: false,
+        },
+    ))
+}
+
 pub(in crate::augmenter) fn classify_heading_hit(
     source: &str,
     current_byte: usize,
@@ -679,13 +768,14 @@ pub fn classify_enter_context(source: &str, current_byte: usize) -> EnterContext
 
     let parser = Parser::new_ext(source, crate::parser::markdown_options());
     let mut item_stack: Vec<ItemFrame> = Vec::new();
+    let mut quote_stack: Vec<QuoteFrame> = Vec::new();
     let mut table: Option<TableFrame> = None;
     let mut heading_level: Option<u8> = None;
     let mut heading_start: Option<usize> = None;
     let mut paragraph_start: Option<(usize, usize, usize)> = None;
     let mut code_block: Option<CodeBlockFrame> = None;
-    let mut blockquote_depth: usize = 0;
-    let mut matched_list_item: Option<EnterContext> = None;
+    let mut matched_list_item: Option<(usize, EnterContext)> = None;
+    let mut matched_blockquote: Option<(usize, EnterContext)> = None;
     let mut matched_literal_block: Option<EnterContext> = None;
 
     for (event, range) in parser.into_offset_iter() {
@@ -748,23 +838,31 @@ pub fn classify_enter_context(source: &str, current_byte: usize) -> EnterContext
                         };
                         let at_end = current_byte == end;
                         if frame_is_exit_target && matched_list_item.is_none() {
-                            matched_list_item = Some(EnterContext::ListItem {
-                                indent: frame.indent,
-                                continuation_marker: frame.continuation_marker,
-                                content_prefix: frame.content_prefix,
-                                empty,
-                                at_end,
-                            });
+                            matched_list_item = Some((
+                                frame.start,
+                                EnterContext::ListItem {
+                                    indent: frame.indent,
+                                    continuation_marker: frame.continuation_marker,
+                                    content_prefix: frame.content_prefix,
+                                    empty,
+                                    at_end,
+                                },
+                            ));
                         }
                     }
                 }
             }
             Event::Start(Tag::BlockQuote(_)) => {
-                blockquote_depth += 1;
                 mark_item_content_seen(&mut item_stack);
+                quote_stack.push(build_quote_frame(source, range.start));
             }
             Event::End(TagEnd::BlockQuote(_)) => {
-                blockquote_depth = blockquote_depth.saturating_sub(1);
+                if let Some(frame) = quote_stack.pop()
+                    && matched_blockquote.is_none()
+                {
+                    matched_blockquote =
+                        classify_blockquote_frame(source, current_byte, &frame, range.end);
+                }
             }
             Event::Start(Tag::Heading { level, .. }) => {
                 mark_item_content_seen(&mut item_stack);
@@ -784,7 +882,7 @@ pub fn classify_enter_context(source: &str, current_byte: usize) -> EnterContext
             }
             Event::Start(Tag::Paragraph) => {
                 mark_item_content_seen(&mut item_stack);
-                paragraph_start = Some((range.start, item_stack.len(), blockquote_depth));
+                paragraph_start = Some((range.start, item_stack.len(), quote_stack.len()));
             }
             Event::End(TagEnd::Paragraph) => {
                 if let Some((start, p_item_depth, p_bq_depth)) = paragraph_start.take()
@@ -808,7 +906,7 @@ pub fn classify_enter_context(source: &str, current_byte: usize) -> EnterContext
             }
             Event::Rule
                 if item_stack.is_empty()
-                    && blockquote_depth == 0
+                    && quote_stack.is_empty()
                     && current_byte
                         == content_end_without_trailing_newline(source, range.clone()) =>
             {
@@ -981,22 +1079,20 @@ pub fn classify_enter_context(source: &str, current_byte: usize) -> EnterContext
         return literal_block;
     }
 
-    if let Some((_line_start, content_start, line_end)) =
-        locate_blockquote_line(source, current_byte)
-        && let content_end = source_line_content_end(source, line_end)
-        && current_byte >= content_start
-        && current_byte <= content_end
-    {
-        let empty = content_start == content_end;
-        return EnterContext::BlockQuoteLine {
-            continuation_prefix: canonical_container_prefix(source, content_start),
-            empty_parent_prefix: blockquote_parent_prefix(source, content_start),
-            empty,
-        };
-    }
-
-    if let Some(list_item) = matched_list_item {
-        return list_item;
+    match (matched_blockquote, matched_list_item) {
+        (Some((quote_start, quote_ctx)), Some((item_start, item_ctx))) => {
+            if item_start > quote_start {
+                return item_ctx;
+            }
+            return quote_ctx;
+        }
+        (Some((_, quote_ctx)), None) => return quote_ctx,
+        (None, Some((_, item_ctx))) => return item_ctx,
+        (None, None) => {
+            if let Some(explicit_quote) = explicit_blockquote_line_context(source, current_byte) {
+                return explicit_quote;
+            }
+        }
     }
 
     if source_line_is_empty(source, current_byte) {
