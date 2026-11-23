@@ -141,7 +141,7 @@ impl<S: BlockSource> LazyLayout<S> {
                 &mut flat_idx,
                 current_line_base,
                 doc_block,
-                self.source_text.as_deref(),
+                self.source_text.as_deref().map(String::as_str),
             );
         }
         self.flat_lines = lines;
@@ -171,20 +171,22 @@ impl<S: BlockSource> LazyLayout<S> {
                 })
             })
             .collect();
-        let hidden_separators = self.source_text.as_deref().map_or_else(Vec::new, |source| {
-            let mut source_ranges = self
-                .flat_lines
-                .iter()
-                .filter_map(|line| {
-                    line.source_projection
-                        .as_ref()
-                        .map(|projection| projection.source_extent.clone())
-                        .or_else(|| line.atomic_source_range.clone())
-                })
-                .collect::<Vec<_>>();
-            source_ranges.sort_by_key(|range| range.start);
-            SourceLineMap::from_source(source).hidden_separators_for_rendered_lines(&source_ranges)
-        });
+        let hidden_separators =
+            self.source_text.as_deref().map(String::as_str).map_or_else(Vec::new, |source| {
+                let mut source_ranges = self
+                    .flat_lines
+                    .iter()
+                    .filter_map(|line| {
+                        line.source_projection
+                            .as_ref()
+                            .map(|projection| projection.source_extent.clone())
+                            .or_else(|| line.atomic_source_range.clone())
+                    })
+                    .collect::<Vec<_>>();
+                source_ranges.sort_by_key(|range| range.start);
+                SourceLineMap::from_source(source)
+                    .hidden_separators_for_rendered_lines(&source_ranges)
+            });
         (empty_lines, hidden_separators)
     }
 
@@ -306,7 +308,7 @@ impl<S: BlockSource> LazyLayout<S> {
             .iter_mut()
             .map(|(projection, _, _)| projection)
             .collect::<Vec<_>>();
-        if let Some(source_text) = self.source_text.as_deref() {
+        if let Some(source_text) = self.source_text.as_deref().map(String::as_str) {
             for projection in &mut visual_lines {
                 // A zero-width projection is an insertion anchor, not a line-terminal boundary.
                 if projection.source_extent.is_empty() {
@@ -355,7 +357,7 @@ impl<S: BlockSource> LazyLayout<S> {
             self.hidden_block_separators.iter().cloned(),
         );
         Self::add_inter_line_collapsed_ranges(&mut visual_lines);
-        if let Some(source_text) = self.source_text.as_deref() {
+        if let Some(source_text) = self.source_text.as_deref().map(String::as_str) {
             Self::add_document_edge_collapsed_ranges(&mut visual_lines, source_text.len());
         }
         self.publish_source_projection_index(visual_lines)

@@ -2,7 +2,7 @@ use super::*;
 
 fn apply_erasure(source: &str, content: &str) -> String {
     let start = source.find(content).expect("fixture contains selected content");
-    let edit = erase_range(source, start..start + content.len())
+    let edit = erase_range(&MarkdownSource::borrowed(source), start..start + content.len())
         .expect("clearing a complete paragraph must produce an edit");
     let mut edited = source.to_string();
     edited.replace_range(
@@ -70,7 +70,7 @@ fn paragraph_range_erasure_rejects_partial_atomic_and_invalid_ranges() {
         ("a", 0..2),
         ("a", std::ops::Range { start: 1, end: 0 }),
     ] {
-        assert!(erase_range(source, erased).is_none(), "{source:?}");
+        assert!(erase_range(&MarkdownSource::borrowed(source), erased).is_none(), "{source:?}");
     }
 }
 
@@ -79,7 +79,8 @@ fn paragraph_grapheme_erasure_matches_range_erasure() {
     for content in ["x", "👩‍💻", "e\u{301}"] {
         let source = format!("a\n\n{content}\n\nb");
         let end = 3 + content.len();
-        let edit = erase_last_grapheme(&source, end).expect("last grapheme empties paragraph");
+        let edit = erase_last_grapheme(&MarkdownSource::borrowed(&source), end)
+            .expect("last grapheme empties paragraph");
         let mut edited = source.clone();
         edited.replace_range(
             edit.replace_range.expect("replacement range"),
@@ -94,7 +95,7 @@ fn paragraph_grapheme_erasure_handles_caret_before_closing_styles() {
     for content in ["**x**", "*x*", "~~x~~", "[x](https://example.test)"] {
         let source = format!("a\n\n{content}\n\nb");
         let cursor = source.find('x').expect("fixture contains visible grapheme") + 1;
-        let edit = erase_last_grapheme(&source, cursor)
+        let edit = erase_last_grapheme(&MarkdownSource::borrowed(&source), cursor)
             .expect("visible final grapheme empties styled paragraph");
         let mut edited = source.clone();
         edited.replace_range(
@@ -150,7 +151,7 @@ fn setext_heading_erasure_removes_underline_and_keeps_owner_slots() {
     for source in ["A\n---", "A\r\n===", "**A**\r\n---"] {
         assert_eq!(apply_erasure(source, "A"), "", "{source:?}");
         let cursor = source.find('A').expect("fixture contains A") + 1;
-        let edit = erase_last_grapheme(source, cursor)
+        let edit = erase_last_grapheme(&MarkdownSource::borrowed(source), cursor)
             .unwrap_or_else(|| panic!("erasing final grapheme must clear Setext {source:?}"));
         let mut edited = source.to_string();
         edited.replace_range(
@@ -172,9 +173,12 @@ fn setext_heading_erasure_removes_underline_and_keeps_owner_slots() {
     );
     assert_eq!(apply_erasure("- before\n\n  A\n  ---\n\n  after", "A"), "- before\n\n  \n  after");
 
-    assert!(erase_range("Title\n---", 0..2).is_none(), "partial content must not erase Setext");
     assert!(
-        erase_range("Title\n---", 5..9).is_none(),
+        erase_range(&MarkdownSource::borrowed("Title\n---"), 0..2).is_none(),
+        "partial content must not erase Setext"
+    );
+    assert!(
+        erase_range(&MarkdownSource::borrowed("Title\n---"), 5..9).is_none(),
         "underline-only selection must not match content erasure"
     );
 }

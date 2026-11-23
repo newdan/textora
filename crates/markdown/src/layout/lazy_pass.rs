@@ -323,10 +323,10 @@ impl<S: BlockSource> LazyLayout<S> {
     }
 
     pub(crate) fn reuse_unchanged_blocks_from(&mut self, mut previous: Self) -> usize {
-        let Some(previous_source_text) = previous.source_text.as_deref() else {
+        let Some(previous_source_text) = previous.source_text.as_deref().map(String::as_str) else {
             return 0;
         };
-        let Some(current_source_text) = self.source_text.as_deref() else {
+        let Some(current_source_text) = self.source_text.as_deref().map(String::as_str) else {
             return 0;
         };
         let reconcile_plan = BlockReconcilePlan::between(
@@ -428,6 +428,10 @@ impl<S: BlockSource> LazyLayout<S> {
 
     /// Set the full source text for WYSIWYG span expansion.
     pub fn set_edit_source(&mut self, source_text: Option<String>) {
+        self.set_shared_source(source_text.map(Arc::new));
+    }
+
+    pub(crate) fn set_shared_source(&mut self, source_text: Option<Arc<String>>) {
         self.source_text = source_text;
     }
 
@@ -622,7 +626,7 @@ impl<S: BlockSource> LazyLayout<S> {
                 viewport_w,
                 Some(shaper),
                 highlighter,
-                self.source_text.as_deref(),
+                self.source_text.as_deref().map(String::as_str),
                 self.edit_ctx.as_ref(),
             );
             ctx.selection_range = self.selection_range.as_ref();
@@ -717,7 +721,7 @@ impl<S: BlockSource> LazyLayout<S> {
                 viewport_w,
                 shaper.as_deref_mut(),
                 highlighter,
-                self.source_text.as_deref(),
+                self.source_text.as_deref().map(String::as_str),
                 self.edit_ctx.as_ref(),
             );
             ctx.selection_range = self.selection_range.as_ref();
@@ -930,7 +934,7 @@ impl<S: BlockSource> LazyLayout<S> {
             self.cached_viewport_w,
             shaper.as_deref_mut(),
             highlighter,
-            self.source_text.as_deref(),
+            self.source_text.as_deref().map(String::as_str),
             self.edit_ctx.as_ref(),
         );
         ctx.selection_range = self.selection_range.as_ref();
@@ -1018,7 +1022,7 @@ impl<S: BlockSource> LazyLayout<S> {
             estimated_w,
             Some(shaper),
             highlighter,
-            self.source_text.as_deref(),
+            self.source_text.as_deref().map(String::as_str),
             self.edit_ctx.as_ref(),
         );
         ctx.selection_range = self.selection_range.as_ref();

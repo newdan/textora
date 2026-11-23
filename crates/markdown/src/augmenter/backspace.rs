@@ -1,7 +1,7 @@
 use super::*;
 
 pub(in crate::augmenter) fn augment_backspace(
-    source: &str,
+    source: &MarkdownSource<'_>,
     current_byte: usize,
 ) -> Option<EditAugmentation> {
     if let Some(aug) = editable_paragraph_navigation::backspace_boundary(source, current_byte) {
@@ -54,7 +54,10 @@ pub(in crate::augmenter) fn consume_edit(cursor: usize) -> EditAugmentation {
     }
 }
 
-pub(in crate::augmenter) fn backspace_literal_context(source: &str, cursor: usize) -> EnterContext {
+pub(in crate::augmenter) fn backspace_literal_context(
+    source: &MarkdownSource<'_>,
+    cursor: usize,
+) -> EnterContext {
     let Some((line_start, _, _)) = locate_source_line_bounds(source, cursor) else {
         return EnterContext::Other;
     };
@@ -63,11 +66,11 @@ pub(in crate::augmenter) fn backspace_literal_context(source: &str, cursor: usiz
     {
         return EnterContext::Other;
     }
-    classify_enter_context(source, cursor)
+    classify_source(source, cursor)
 }
 
 pub(in crate::augmenter) fn backspace_code_boundary(
-    source: &str,
+    source: &MarkdownSource<'_>,
     cursor: usize,
 ) -> Option<EditAugmentation> {
     let (line_start, _, line_end) = locate_source_line_bounds(source, cursor)?;
@@ -87,7 +90,7 @@ pub(in crate::augmenter) fn backspace_code_boundary(
     let previous_end =
         line_start.checked_sub(newline_sequence_width_before(source, line_start)?)?;
     if matches!(
-        classify_enter_context(source, previous_end),
+        classify_source(source, previous_end),
         EnterContext::CodeBlockFenceLine { is_opening: true, .. }
     ) {
         return Some(consume_edit(cursor));
@@ -121,7 +124,7 @@ pub(in crate::augmenter) fn backspace_container_tab_residue(
 }
 
 pub(in crate::augmenter) fn delete_forward_code_row_join(
-    source: &str,
+    source: &MarkdownSource<'_>,
     cursor: usize,
     next_line_start: usize,
 ) -> Option<EditAugmentation> {
@@ -150,14 +153,14 @@ struct FencedLineSpan {
     is_opening: bool,
 }
 
-fn fenced_line_span(source: &str, current_byte: usize) -> Option<FencedLineSpan> {
+fn fenced_line_span(source: &MarkdownSource<'_>, current_byte: usize) -> Option<FencedLineSpan> {
     let (line_start, _, line_end) = locate_source_line_bounds(source, current_byte)?;
     let current_line = &source[line_start..source_line_content_end(source, line_end)];
     if !current_line.contains("```") && !current_line.contains("~~~") {
         return None;
     }
     let EnterContext::CodeBlockFenceLine { is_opening, line_content_end } =
-        classify_enter_context(source, current_byte)
+        classify_source(source, current_byte)
     else {
         return None;
     };
@@ -184,7 +187,7 @@ fn fenced_line_span(source: &str, current_byte: usize) -> Option<FencedLineSpan>
 }
 
 pub(crate) fn augment_delete_forward(
-    source: &str,
+    source: &MarkdownSource<'_>,
     current_byte: usize,
 ) -> Option<EditAugmentation> {
     if let Some(augmentation) = editable_paragraph_navigation::delete_forward(source, current_byte)
@@ -213,7 +216,7 @@ pub(crate) fn augment_delete_forward(
 }
 
 pub(crate) fn augment_erase_range(
-    source: &str,
+    source: &MarkdownSource<'_>,
     erased: std::ops::Range<usize>,
 ) -> Option<EditAugmentation> {
     if erased.is_empty() || source.get(erased.clone()).is_none() {
@@ -225,20 +228,18 @@ pub(crate) fn augment_erase_range(
 }
 
 fn protect_fenced_selection(
-    source: &str,
+    source: &MarkdownSource<'_>,
     erased: std::ops::Range<usize>,
 ) -> Option<EditAugmentation> {
-    use pulldown_cmark::{CodeBlockKind, Event, Parser, Tag, TagEnd};
-
     let mut open_starts = Vec::new();
-    for (event, range) in
-        Parser::new_ext(source, crate::parser::markdown_options()).into_offset_iter()
-    {
+    for (event, range) in source.parsed().source_events() {
         match event {
-            Event::Start(Tag::CodeBlock(CodeBlockKind::Fenced(_))) => {
+            MarkdownEvent::Start(MarkdownTag::CodeBlock { .. })
+                if source.parsed().is_fenced_code_start(range.start) =>
+            {
                 open_starts.push(range.start);
             }
-            Event::End(TagEnd::CodeBlock) => {
+            MarkdownEvent::End(MarkdownTagEnd::CodeBlock) => {
                 let Some(marker_start) = open_starts.pop() else {
                     continue;
                 };
@@ -330,33 +331,29 @@ fn opening_fence_marker_end(source: &str, marker_start: usize, line_content_end:
 }
 
 fn protect_table_selection(
-    source: &str,
+    source: &MarkdownSource<'_>,
     erased: std::ops::Range<usize>,
 ) -> Option<EditAugmentation> {
-    use pulldown_cmark::{Event, Parser, Tag, TagEnd};
-
     let mut table_start: Option<usize> = None;
     let mut cell_starts: Vec<usize> = Vec::new();
     let mut cells: Vec<std::ops::Range<usize>> = Vec::new();
 
-    for (event, range) in
-        Parser::new_ext(source, crate::parser::markdown_options()).into_offset_iter()
-    {
+    for (event, range) in source.parsed().source_events() {
         match event {
-            Event::Start(Tag::Table(_)) => {
+            MarkdownEvent::Start(MarkdownTag::Table(_)) => {
                 table_start = Some(range.start);
                 cells.clear();
                 cell_starts.clear();
             }
-            Event::Start(Tag::TableCell) if table_start.is_some() => {
+            MarkdownEvent::Start(MarkdownTag::TableCell) if table_start.is_some() => {
                 cell_starts.push(range.start);
             }
-            Event::End(TagEnd::TableCell) if table_start.is_some() => {
+            MarkdownEvent::End(MarkdownTagEnd::TableCell) if table_start.is_some() => {
                 if let Some(start) = cell_starts.pop() {
                     cells.push(start..range.end);
                 }
             }
-            Event::End(TagEnd::Table) => {
+            MarkdownEvent::End(MarkdownTagEnd::Table) => {
                 let Some(start) = table_start.take() else {
                     continue;
                 };
@@ -476,7 +473,7 @@ fn cursor_followed_by_inline_closing(source: &str, cursor: usize) -> bool {
 }
 
 pub(in crate::augmenter) fn inline_html_break_ending_at(
-    source: &str,
+    source: &MarkdownSource<'_>,
     current_byte: usize,
 ) -> Option<std::ops::Range<usize>> {
     if !cfg!(feature = "rich-markdown") {
@@ -497,7 +494,7 @@ pub(in crate::augmenter) fn inline_html_break_ending_at(
 }
 
 pub(in crate::augmenter) fn inline_html_break_starting_at(
-    source: &str,
+    source: &MarkdownSource<'_>,
     current_byte: usize,
 ) -> Option<std::ops::Range<usize>> {
     if !cfg!(feature = "rich-markdown") {
@@ -518,7 +515,7 @@ pub(in crate::augmenter) fn inline_html_break_starting_at(
 }
 
 pub(in crate::augmenter) fn delete_forward_remove_inline_html_break(
-    source: &str,
+    source: &MarkdownSource<'_>,
     current_byte: usize,
 ) -> Option<EditAugmentation> {
     let break_range = inline_html_break_starting_at(source, current_byte)?;
@@ -532,7 +529,7 @@ pub(in crate::augmenter) fn delete_forward_remove_inline_html_break(
 }
 
 pub(in crate::augmenter) fn delete_forward_join_reopened_inline_elements(
-    source: &str,
+    source: &MarkdownSource<'_>,
     current_byte: usize,
 ) -> Option<EditAugmentation> {
     if !cursor_followed_by_inline_closing(source, current_byte) {
@@ -612,7 +609,7 @@ pub(in crate::augmenter) fn delete_forward_join_reopened_inline_elements(
 }
 
 fn delete_forward_join_hard_break_line(
-    source: &str,
+    source: &MarkdownSource<'_>,
     current_byte: usize,
 ) -> Option<EditAugmentation> {
     let boundary = hard_break_boundary_after(source, current_byte)?;
@@ -636,7 +633,7 @@ fn delete_forward_join_hard_break_line(
         }
     }
 
-    let context = classify_enter_context(source, current_byte);
+    let context = classify_source(source, current_byte);
     if matches!(
         context,
         EnterContext::CodeBlock
@@ -702,7 +699,7 @@ fn delete_forward_join_hard_break_line(
 /// - 段落/标题末尾且下一行是普通段落文本:删除整个换行 run,合并两段
 ///   (与段首 Backspace 删整个边界对称)。
 pub(in crate::augmenter) fn delete_forward_block_boundary(
-    source: &str,
+    source: &MarkdownSource<'_>,
     current_byte: usize,
 ) -> Option<EditAugmentation> {
     let boundary_end = text_block_source_end(source, current_byte)?;
@@ -716,7 +713,7 @@ pub(in crate::augmenter) fn delete_forward_block_boundary(
     if boundary_end == source.len() && current_byte != boundary_end {
         return consume_boundary();
     }
-    let context = classify_enter_context(source, boundary_end);
+    let context = classify_source(source, boundary_end);
     // ATX 标题尾部空白不产生段内硬换行。
     if !matches!(
         context,
@@ -844,7 +841,7 @@ fn delete_forward_folded_leading_whitespace_end(
 
 /// Resolve a visible text endpoint to the end of its complete source line.
 pub(in crate::augmenter) fn text_block_source_end(
-    source: &str,
+    source: &MarkdownSource<'_>,
     current_byte: usize,
 ) -> Option<usize> {
     let (line_start, _, line_end) = locate_source_line_bounds(source, current_byte)?;
@@ -857,8 +854,7 @@ pub(in crate::augmenter) fn text_block_source_end(
         {
             return None;
         }
-        let document =
-            crate::builder::MarkdownDoc::build_structure(&crate::parser::parse_markdown(source));
+        let document = source.structure();
         if !editable_paragraph_navigation::has_text_boundary(
             &document.blocks,
             current_byte,
@@ -1021,7 +1017,7 @@ pub(in crate::augmenter) fn content_is_thematic_break(content: &str) -> bool {
 }
 
 pub(in crate::augmenter) fn backspace_remove_inline_html_break(
-    source: &str,
+    source: &MarkdownSource<'_>,
     current_byte: usize,
 ) -> Option<EditAugmentation> {
     let break_range = inline_html_break_ending_at(source, current_byte)?;
@@ -1036,13 +1032,13 @@ pub(in crate::augmenter) fn backspace_remove_inline_html_break(
 }
 
 pub(in crate::augmenter) fn is_inline_html_break_range(
-    source: &str,
+    source: &MarkdownSource<'_>,
     candidate_range: std::ops::Range<usize>,
 ) -> bool {
     if !cfg!(feature = "rich-markdown") {
         return false;
     }
-    let parsed = crate::parser::parse_markdown(source);
+    let parsed = source.parsed();
     parsed.events.iter().zip(&parsed.event_ranges).any(|(event, event_range)| {
         matches!(
             event,
@@ -1053,7 +1049,7 @@ pub(in crate::augmenter) fn is_inline_html_break_range(
 }
 
 pub(in crate::augmenter) fn backspace_join_reopened_inline_elements(
-    source: &str,
+    source: &MarkdownSource<'_>,
     current_byte: usize,
 ) -> Option<EditAugmentation> {
     if !cursor_preceded_by_inline_opening(source, current_byte) {
@@ -1187,7 +1183,7 @@ pub(in crate::augmenter) fn backspace_at_atx_heading_marker_start(
 }
 
 pub(in crate::augmenter) fn backspace_last_isolated_paragraph_grapheme(
-    source: &str,
+    source: &MarkdownSource<'_>,
     current_byte: usize,
 ) -> Option<EditAugmentation> {
     editable_paragraph_edit::erase_last_grapheme(source, current_byte)

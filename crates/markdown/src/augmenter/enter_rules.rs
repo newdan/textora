@@ -3,7 +3,7 @@ use super::*;
 // ─── 分类结果 → 具体 augmentation ────────────────────────────────────────
 
 pub(in crate::augmenter) fn enter_context_augmentation(
-    source: &str,
+    source: &MarkdownSource<'_>,
     current_byte: usize,
     context: EnterContext,
 ) -> Option<EditAugmentation> {
@@ -98,7 +98,7 @@ pub(in crate::augmenter) fn enter_context_augmentation(
 }
 
 pub(in crate::augmenter) fn paragraph_enter_augmentation(
-    source: &str,
+    source: &MarkdownSource<'_>,
     current_byte: usize,
 ) -> EditAugmentation {
     if let Some(boundary) = hard_break_boundary_after(source, current_byte) {
@@ -126,7 +126,7 @@ pub(in crate::augmenter) fn paragraph_enter_augmentation(
 }
 
 pub(in crate::augmenter) fn heading_enter_augmentation(
-    source: &str,
+    source: &MarkdownSource<'_>,
     current_byte: usize,
     position: HeadingPosition,
     continuation_prefix: &str,
@@ -172,7 +172,7 @@ pub(in crate::augmenter) fn emit_container_line_break(
 
 /// Setext 标题内的无选区 Enter：保留标题源码，在下划线之后建立块边界。
 pub(in crate::augmenter) fn setext_heading_enter_augmentation(
-    source: &str,
+    source: &MarkdownSource<'_>,
     underline_end: usize,
     continuation_prefix: &str,
 ) -> EditAugmentation {
@@ -204,7 +204,7 @@ pub(in crate::augmenter) fn indented_code_block_enter_augmentation(
 /// - 开头围栏行(含 info string):行尾插入单个换行,光标进入代码体第一行;
 /// - 闭合围栏行:行尾建立块边界,光标落到围栏外的新空段(退出代码块)。
 pub(in crate::augmenter) fn fence_line_enter_augmentation(
-    source: &str,
+    source: &MarkdownSource<'_>,
     line_content_end: usize,
     is_opening: bool,
 ) -> EditAugmentation {
@@ -252,7 +252,7 @@ pub(in crate::augmenter) fn close_new_fence_augmentation(
 }
 
 pub(in crate::augmenter) fn list_item_enter_augmentation(
-    source: &str,
+    source: &MarkdownSource<'_>,
     current_byte: usize,
     indent: &str,
     continuation_marker: &str,
@@ -271,7 +271,7 @@ pub(in crate::augmenter) fn list_item_enter_augmentation(
 }
 
 fn base_list_item_enter_augmentation(
-    source: &str,
+    source: &MarkdownSource<'_>,
     current_byte: usize,
     indent: &str,
     continuation_marker: &str,
@@ -334,7 +334,7 @@ fn base_list_item_enter_augmentation(
 }
 
 fn renumber_following_ordered_siblings(
-    source: &str,
+    source: &MarkdownSource<'_>,
     current_byte: usize,
     empty: bool,
     augmentation: EditAugmentation,
@@ -424,27 +424,25 @@ fn start_open_ordered_item(
 }
 
 fn following_ordered_sibling_digit_spans(
-    source: &str,
+    source: &MarkdownSource<'_>,
     current_byte: usize,
     min_sibling_start: usize,
 ) -> Option<(u64, Vec<OrderedSiblingSpan>)> {
-    use pulldown_cmark::{Event, Parser, Tag, TagEnd};
-
     let mut quote_depth = 0usize;
     let mut lists: Vec<OrderedListFrame> = Vec::new();
     let mut open_items: Vec<OpenOrderedItem> = Vec::new();
     let mut target: Option<(usize, usize, u64)> = None;
 
-    for (event, range) in
-        Parser::new_ext(source, crate::parser::markdown_options()).into_offset_iter()
-    {
+    for (event, range) in source.parsed().source_events() {
         match event {
-            Event::Start(Tag::BlockQuote(_)) => quote_depth += 1,
-            Event::End(TagEnd::BlockQuote(_)) => quote_depth = quote_depth.saturating_sub(1),
-            Event::Start(Tag::List(_)) => {
+            MarkdownEvent::Start(MarkdownTag::BlockQuote) => quote_depth += 1,
+            MarkdownEvent::End(MarkdownTagEnd::BlockQuote) => {
+                quote_depth = quote_depth.saturating_sub(1)
+            }
+            MarkdownEvent::Start(MarkdownTag::List(..)) => {
                 lists.push(OrderedListFrame { quote_depth, items: Vec::new() });
             }
-            Event::End(TagEnd::List(_)) => {
+            MarkdownEvent::End(MarkdownTagEnd::List) => {
                 let closed_index = lists.len().checked_sub(1)?;
                 let closed = lists.pop()?;
                 if let Some((target_list, target_item_idx, target_num)) = target
@@ -459,10 +457,10 @@ fn following_ordered_sibling_digit_spans(
                     return Some((target_num, tail));
                 }
             }
-            Event::Start(Tag::Item) => {
+            MarkdownEvent::Start(MarkdownTag::Item) => {
                 start_open_ordered_item(source, range.start, &mut lists, &mut open_items);
             }
-            Event::End(TagEnd::Item) => {
+            MarkdownEvent::End(MarkdownTagEnd::Item) => {
                 let Some(item) = open_items.pop() else {
                     continue;
                 };
@@ -530,7 +528,7 @@ pub(in crate::augmenter) fn is_only_blank_separator_before_content(
 }
 
 pub(in crate::augmenter) fn blockquote_enter_augmentation(
-    source: &str,
+    source: &MarkdownSource<'_>,
     current_byte: usize,
     continuation_prefix: &str,
     empty_parent_prefix: &str,
@@ -729,7 +727,7 @@ pub(in crate::augmenter) struct InlineWrapperFrame<'a> {
 }
 
 pub(in crate::augmenter) fn preserve_inline_elements_at_split(
-    source: &str,
+    source: &MarkdownSource<'_>,
     split_at: usize,
     augmentation: EditAugmentation,
 ) -> EditAugmentation {
@@ -739,7 +737,7 @@ pub(in crate::augmenter) fn preserve_inline_elements_at_split(
 }
 
 pub(in crate::augmenter) fn preserve_inline_code_at_split(
-    source: &str,
+    source: &MarkdownSource<'_>,
     split_at: usize,
     augmentation: EditAugmentation,
 ) -> EditAugmentation {
@@ -808,10 +806,10 @@ pub(in crate::augmenter) fn inline_safe_split_point(source: &str, split_at: usiz
     if belongs_to_space_run { split_at } else { previous_byte }
 }
 
-pub(in crate::augmenter) fn inline_split_frames(
-    source: &str,
+pub(in crate::augmenter) fn inline_split_frames<'a>(
+    source: &'a MarkdownSource<'_>,
     split_at: usize,
-) -> Vec<InlineSplitFrame<'_>> {
+) -> Vec<InlineSplitFrame<'a>> {
     inline_wrapper_frames(source)
         .into_iter()
         .filter(|frame| split_at >= frame.content_start && split_at <= frame.content_end)
@@ -819,50 +817,51 @@ pub(in crate::augmenter) fn inline_split_frames(
         .collect()
 }
 
-pub(in crate::augmenter) fn inline_wrapper_frames(source: &str) -> Vec<InlineWrapperFrame<'_>> {
-    use pulldown_cmark::{Event, Parser, Tag, TagEnd};
-
+pub(in crate::augmenter) fn inline_wrapper_frames<'a>(
+    source: &'a MarkdownSource<'_>,
+) -> Vec<InlineWrapperFrame<'a>> {
     let mut drafts = Vec::<InlineFrameDraft>::new();
     let mut completed = Vec::new();
-    for (event, source_range) in
-        Parser::new_ext(source, crate::parser::markdown_options()).into_offset_iter()
-    {
+    for (event, source_range) in source.parsed().source_events() {
         match event {
-            Event::Start(Tag::Emphasis) => drafts.push(InlineFrameDraft {
+            MarkdownEvent::Start(MarkdownTag::Emphasis) => drafts.push(InlineFrameDraft {
                 source_range,
                 content_start: None,
                 content_end: 0,
                 kind: InlineFrameKind::Emphasis,
             }),
-            Event::Start(Tag::Strong) => drafts.push(InlineFrameDraft {
+            MarkdownEvent::Start(MarkdownTag::Strong) => drafts.push(InlineFrameDraft {
                 source_range,
                 content_start: None,
                 content_end: 0,
                 kind: InlineFrameKind::Strong,
             }),
-            Event::Start(Tag::Strikethrough) => drafts.push(InlineFrameDraft {
+            MarkdownEvent::Start(MarkdownTag::Strikethrough) => drafts.push(InlineFrameDraft {
                 source_range,
                 content_start: None,
                 content_end: 0,
                 kind: InlineFrameKind::Strikethrough,
             }),
-            Event::Start(Tag::Link { .. }) => drafts.push(InlineFrameDraft {
+            MarkdownEvent::Start(MarkdownTag::Link { .. }) => drafts.push(InlineFrameDraft {
                 source_range,
                 content_start: None,
                 content_end: 0,
                 kind: InlineFrameKind::Link,
             }),
-            Event::Text(_) | Event::InlineHtml(_) | Event::Html(_) => {
+            MarkdownEvent::Text(_) | MarkdownEvent::InlineHtml(_) | MarkdownEvent::HtmlBlock(_) => {
                 record_inline_content(&mut drafts, &source_range);
             }
-            Event::Code(code) => {
+            MarkdownEvent::Code(code) => {
                 record_inline_content(&mut drafts, &source_range);
-                if let Some(frame) = inline_code_wrapper_frame(source, source_range, &code) {
+                if let Some(frame) = inline_code_wrapper_frame(source, source_range, code) {
                     completed.push(frame);
                 }
             }
-            Event::End(
-                TagEnd::Emphasis | TagEnd::Strong | TagEnd::Strikethrough | TagEnd::Link,
+            MarkdownEvent::End(
+                MarkdownTagEnd::Emphasis
+                | MarkdownTagEnd::Strong
+                | MarkdownTagEnd::Strikethrough
+                | MarkdownTagEnd::Link,
             ) => {
                 let Some(draft) = drafts.pop() else {
                     continue;

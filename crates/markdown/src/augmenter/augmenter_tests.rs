@@ -1,6 +1,22 @@
 use super::*;
 use ui::plugin::EditPolicy;
 
+fn parsed_table_count(source: &str, columns: usize) -> usize {
+    super::parsed_table_count(&MarkdownSource::borrowed(source), columns)
+}
+
+fn augment_delete_forward(source: &str, cursor_byte: usize) -> Option<EditAugmentation> {
+    super::augment_delete_forward(&MarkdownSource::borrowed(source), cursor_byte)
+}
+
+fn augment_selected_text(
+    source: &str,
+    selection: std::ops::Range<usize>,
+    text: &str,
+) -> Option<EditAugmentation> {
+    super::augment_selected_text(&MarkdownSource::borrowed(source), selection, text, None)
+}
+
 #[test]
 fn pipe_header_enter_creates_a_parseable_table_and_places_caret_in_first_body_cell() {
     for (header, expected_columns) in
@@ -304,11 +320,11 @@ fn tab_outside_a_table_uses_the_existing_editor_fallback() {
 }
 
 fn reset_classify_parse_count() {
-    CLASSIFY_PARSE_COUNT.with(|parse_count| parse_count.set(0));
+    crate::parser::MARKDOWN_PARSE_COUNT.with(|parse_count| parse_count.set(0));
 }
 
 fn classify_parse_count() -> usize {
-    CLASSIFY_PARSE_COUNT.with(Cell::get)
+    crate::parser::MARKDOWN_PARSE_COUNT.with(std::cell::Cell::get)
 }
 
 fn apply_augmentation_at(

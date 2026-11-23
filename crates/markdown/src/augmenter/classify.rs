@@ -183,13 +183,13 @@ fn classify_blockquote_frame(
 }
 
 pub(in crate::augmenter) fn classify_heading_hit(
-    source: &str,
+    source: &MarkdownSource<'_>,
     current_byte: usize,
     level: u8,
     start: usize,
     range: &std::ops::Range<usize>,
 ) -> EnterContext {
-    // pulldown-cmark 对 ATX 与 setext 标题都发 `Tag::Heading`；两种源码形态必须
+    // pulldown-cmark 对 ATX 与 setext 标题都发 `MarkdownTag::Heading`；两种源码形态必须
     // 分流，否则 setext 会被错误套用 `# ` 前缀语义。
     let end = content_end_without_trailing_newline(source, start..range.end);
     if !heading_source_is_atx(source, start) {
@@ -239,7 +239,7 @@ pub(in crate::augmenter) fn classify_heading_hit(
 }
 
 pub(in crate::augmenter) fn heading_ends_at(
-    source: &str,
+    source: &MarkdownSource<'_>,
     heading_start: usize,
     cursor: usize,
 ) -> bool {
@@ -260,8 +260,7 @@ pub(in crate::augmenter) fn heading_ends_at(
         }
         false
     }
-    let document =
-        crate::builder::MarkdownDoc::build_structure(&crate::parser::parse_markdown(source));
+    let document = source.structure();
     find_heading(&document.blocks, heading_start, cursor)
 }
 
@@ -350,7 +349,7 @@ pub(in crate::augmenter) struct EnclosingFencedBoundary {
 /// 该冷路径只在 CodeBlock 行尾 Delete 上触发。公开分类 API 不携带 parser frame，
 /// 因此这里独立解析一次以取得 opener 与容器栈，避免扩大 EnterContext 公共形状。
 pub(in crate::augmenter) fn line_closes_enclosing_fenced_block(
-    source: &str,
+    source: &MarkdownSource<'_>,
     current_byte: usize,
     candidate_line_start: usize,
 ) -> bool {
@@ -361,17 +360,14 @@ pub(in crate::augmenter) fn line_closes_enclosing_fenced_block(
 }
 
 pub(in crate::augmenter) fn enclosing_fenced_boundary(
-    source: &str,
+    source: &MarkdownSource<'_>,
     current_byte: usize,
 ) -> Option<EnclosingFencedBoundary> {
-    use pulldown_cmark::{CodeBlockKind, Event, Parser, Tag, TagEnd};
-
-    let parser = Parser::new_ext(source, crate::parser::markdown_options());
     let mut item_container_paths = Vec::new();
     let mut fenced_block = None;
-    for (event, range) in parser.into_offset_iter() {
+    for (event, range) in source.parsed().source_events() {
         match event {
-            Event::Start(Tag::Item) => {
+            MarkdownEvent::Start(MarkdownTag::Item) => {
                 let container_path = parse_list_marker(source, range.start)
                     .map(|(_, content_start)| {
                         container_path(&canonical_container_prefix(source, content_start))
@@ -380,15 +376,17 @@ pub(in crate::augmenter) fn enclosing_fenced_boundary(
                     .unwrap_or_default();
                 item_container_paths.push(container_path);
             }
-            Event::End(TagEnd::Item) => {
+            MarkdownEvent::End(MarkdownTagEnd::Item) => {
                 item_container_paths.pop();
             }
-            Event::Start(Tag::CodeBlock(CodeBlockKind::Fenced(_))) => {
+            MarkdownEvent::Start(MarkdownTag::CodeBlock { .. })
+                if source.parsed().is_fenced_code_start(range.start) =>
+            {
                 fenced_block =
                     fenced_boundary_frame(source, range.start, item_container_paths.last());
             }
-            Event::Start(Tag::CodeBlock(CodeBlockKind::Indented)) => fenced_block = None,
-            Event::End(TagEnd::CodeBlock) => {
+            MarkdownEvent::Start(MarkdownTag::CodeBlock { .. }) => fenced_block = None,
+            MarkdownEvent::End(MarkdownTagEnd::CodeBlock) => {
                 let Some(frame) = fenced_block.take() else {
                     continue;
                 };
@@ -754,19 +752,13 @@ pub(in crate::augmenter) fn line_is_closing_fence(
     bytes[fence_start + fence_len..content_end].iter().all(|byte| matches!(byte, b' ' | b'\t'))
 }
 
-pub fn classify_enter_context(source: &str, current_byte: usize) -> EnterContext {
-    use pulldown_cmark::{CodeBlockKind, Event, Parser, Tag, TagEnd};
-
-    #[cfg(test)]
-    CLASSIFY_PARSE_COUNT.with(|parse_count| parse_count.set(parse_count.get() + 1));
-
+pub(crate) fn classify_source(source: &MarkdownSource<'_>, current_byte: usize) -> EnterContext {
     let mark_item_content_seen = |stack: &mut Vec<ItemFrame>| {
         if let Some(frame) = stack.last_mut() {
             frame.saw_content = true;
         }
     };
 
-    let parser = Parser::new_ext(source, crate::parser::markdown_options());
     let mut item_stack: Vec<ItemFrame> = Vec::new();
     let mut quote_stack: Vec<QuoteFrame> = Vec::new();
     let mut table: Option<TableFrame> = None;
@@ -778,9 +770,9 @@ pub fn classify_enter_context(source: &str, current_byte: usize) -> EnterContext
     let mut matched_blockquote: Option<(usize, EnterContext)> = None;
     let mut matched_literal_block: Option<EnterContext> = None;
 
-    for (event, range) in parser.into_offset_iter() {
+    for (event, range) in source.parsed().source_events() {
         match event {
-            Event::Start(Tag::Item) => {
+            MarkdownEvent::Start(MarkdownTag::Item) => {
                 // 子 item 本身也是父 item 的内容:只挂子列表的父 item 不算空,
                 // 否则父行回车会走"空 item 退出"删掉 marker、把子列表提升为顶层。
                 mark_item_content_seen(&mut item_stack);
@@ -811,7 +803,7 @@ pub fn classify_enter_context(source: &str, current_byte: usize) -> EnterContext
                     });
                 }
             }
-            Event::End(TagEnd::Item) => {
+            MarkdownEvent::End(MarkdownTagEnd::Item) => {
                 if let Some(frame) = item_stack.pop() {
                     // item range 含尾部换行 run（块间空行分隔也算在内）；
                     // 命中测试用去尾换行的内容末尾，否则紧随其后的顶层块首字节
@@ -852,11 +844,11 @@ pub fn classify_enter_context(source: &str, current_byte: usize) -> EnterContext
                     }
                 }
             }
-            Event::Start(Tag::BlockQuote(_)) => {
+            MarkdownEvent::Start(MarkdownTag::BlockQuote) => {
                 mark_item_content_seen(&mut item_stack);
                 quote_stack.push(build_quote_frame(source, range.start));
             }
-            Event::End(TagEnd::BlockQuote(_)) => {
+            MarkdownEvent::End(MarkdownTagEnd::BlockQuote) => {
                 if let Some(frame) = quote_stack.pop()
                     && matched_blockquote.is_none()
                 {
@@ -864,12 +856,12 @@ pub fn classify_enter_context(source: &str, current_byte: usize) -> EnterContext
                         classify_blockquote_frame(source, current_byte, &frame, range.end);
                 }
             }
-            Event::Start(Tag::Heading { level, .. }) => {
+            MarkdownEvent::Start(MarkdownTag::Heading { level, .. }) => {
                 mark_item_content_seen(&mut item_stack);
-                heading_level = Some(level as u8);
+                heading_level = Some(*level as u8);
                 heading_start = Some(range.start);
             }
-            Event::End(TagEnd::Heading(_)) => {
+            MarkdownEvent::End(MarkdownTagEnd::Heading) => {
                 if let (Some(level), Some(start)) = (heading_level.take(), heading_start.take())
                     && current_byte >= start
                     && current_byte <= range.end
@@ -880,11 +872,11 @@ pub fn classify_enter_context(source: &str, current_byte: usize) -> EnterContext
                     }
                 }
             }
-            Event::Start(Tag::Paragraph) => {
+            MarkdownEvent::Start(MarkdownTag::Paragraph) => {
                 mark_item_content_seen(&mut item_stack);
                 paragraph_start = Some((range.start, item_stack.len(), quote_stack.len()));
             }
-            Event::End(TagEnd::Paragraph) => {
+            MarkdownEvent::End(MarkdownTagEnd::Paragraph) => {
                 if let Some((start, p_item_depth, p_bq_depth)) = paragraph_start.take()
                     && current_byte >= start
                     && current_byte <= range.end
@@ -904,7 +896,7 @@ pub fn classify_enter_context(source: &str, current_byte: usize) -> EnterContext
                     return EnterContext::ParagraphInterior;
                 }
             }
-            Event::Rule
+            MarkdownEvent::Rule
                 if item_stack.is_empty()
                     && quote_stack.is_empty()
                     && current_byte
@@ -912,11 +904,11 @@ pub fn classify_enter_context(source: &str, current_byte: usize) -> EnterContext
             {
                 return EnterContext::HorizontalRuleEnd;
             }
-            Event::Start(Tag::CodeBlock(kind)) => {
+            MarkdownEvent::Start(MarkdownTag::CodeBlock { .. }) => {
                 mark_item_content_seen(&mut item_stack);
                 code_block = Some(CodeBlockFrame {
                     range: range.clone(),
-                    is_indented: matches!(kind, CodeBlockKind::Indented),
+                    is_indented: !source.parsed().is_fenced_code_start(range.start),
                     container_path: {
                         let base = item_stack
                             .last()
@@ -928,7 +920,7 @@ pub fn classify_enter_context(source: &str, current_byte: usize) -> EnterContext
                     },
                 });
             }
-            Event::End(TagEnd::CodeBlock) => {
+            MarkdownEvent::End(MarkdownTagEnd::CodeBlock) => {
                 if let Some(frame) = code_block.take() {
                     // pulldown-cmark 对缩进代码块的 range 包含结尾换行
                     // （fenced 则不包含）；用去尾换行的 content_end 统一两种边界，
@@ -958,14 +950,14 @@ pub fn classify_enter_context(source: &str, current_byte: usize) -> EnterContext
                     }
                 }
             }
-            Event::Start(Tag::MetadataBlock(_))
+            MarkdownEvent::Start(MarkdownTag::MetadataBlock(_))
                 if current_byte >= range.start && current_byte <= range.end =>
             {
                 matched_literal_block = Some(EnterContext::LiteralBlockLine {
                     continuation_prefix: literal_line_continuation_prefix(source, current_byte),
                 });
             }
-            Event::Start(Tag::Table(_)) => {
+            MarkdownEvent::Start(MarkdownTag::Table(_)) => {
                 mark_item_content_seen(&mut item_stack);
                 table = Some(TableFrame {
                     cell_ranges: Vec::new(),
@@ -973,19 +965,20 @@ pub fn classify_enter_context(source: &str, current_byte: usize) -> EnterContext
                     container_prefix: canonical_container_prefix(source, range.start),
                 });
             }
-            Event::Start(Tag::TableHead) | Event::Start(Tag::TableRow) => {
+            MarkdownEvent::Start(MarkdownTag::TableHead)
+            | MarkdownEvent::Start(MarkdownTag::TableRow) => {
                 if let Some(t) = table.as_mut() {
                     t.cell_ranges.push(Vec::new());
                 }
             }
-            Event::Start(Tag::TableCell) => {
+            MarkdownEvent::Start(MarkdownTag::TableCell) => {
                 if let Some(t) = table.as_mut()
                     && let Some(row) = t.cell_ranges.last_mut()
                 {
                     row.push(range.start..range.end);
                 }
             }
-            Event::End(TagEnd::TableCell) => {
+            MarkdownEvent::End(MarkdownTagEnd::TableCell) => {
                 if let Some(t) = table.as_mut()
                     && let Some(row) = t.cell_ranges.last_mut()
                     && let Some(cell) = row.last_mut()
@@ -993,12 +986,12 @@ pub fn classify_enter_context(source: &str, current_byte: usize) -> EnterContext
                     cell.end = range.end;
                 }
             }
-            Event::End(TagEnd::Table) => {
+            MarkdownEvent::End(MarkdownTagEnd::Table) => {
                 if let Some(table_frame) = table.as_mut() {
                     table_frame.table_end = range.end;
                 }
             }
-            Event::Html(text) if !text.is_empty() => {
+            MarkdownEvent::HtmlBlock(text) if !text.is_empty() => {
                 mark_item_content_seen(&mut item_stack);
                 if current_byte >= range.start && current_byte <= range.end {
                     matched_literal_block = Some(EnterContext::LiteralBlockLine {
@@ -1006,7 +999,11 @@ pub fn classify_enter_context(source: &str, current_byte: usize) -> EnterContext
                     });
                 }
             }
-            Event::Text(text) | Event::Code(text) | Event::InlineHtml(text) if !text.is_empty() => {
+            MarkdownEvent::Text(text)
+            | MarkdownEvent::Code(text)
+            | MarkdownEvent::InlineHtml(text)
+                if !text.is_empty() =>
+            {
                 mark_item_content_seen(&mut item_stack);
             }
             _ => {}

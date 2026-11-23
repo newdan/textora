@@ -43,7 +43,7 @@ impl<S: BlockSource> PreviewEngine<S> {
             return;
         }
         self.sel_anchor_byte = self.edit_source.as_ref().map(|_| 0);
-        self.sel_cursor_byte = self.edit_source.as_ref().map(String::len);
+        self.sel_cursor_byte = self.edit_source.as_deref().map(|source| source.len());
         self.mark_selection_changed();
     }
 
@@ -295,7 +295,7 @@ impl<S: BlockSource> PreviewEngine<S> {
 
     /// 设置 WYSIWYG 编辑的完整源码文本。用于 span 展开时读取原始 markers。
     pub fn set_edit_source(&mut self, source: Option<String>) {
-        self.edit_source = source;
+        self.edit_source = source.map(MarkdownSource::snapshot);
     }
 
     pub(crate) fn set_source_generation(&mut self, source_generation: u32) {

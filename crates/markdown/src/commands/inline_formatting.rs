@@ -1,3 +1,4 @@
+use crate::source_snapshot::MarkdownSource;
 use std::ops::Range;
 
 use crate::parser::{MarkdownEvent, MarkdownTag, MarkdownTagEnd};
@@ -61,7 +62,7 @@ enum ContentBlock {
 }
 
 pub(super) fn plan_toggle(
-    source: &str,
+    source: &MarkdownSource<'_>,
     source_generation: u32,
     cursor_byte: usize,
     selection: Option<Range<usize>>,
@@ -93,7 +94,10 @@ pub(super) fn plan_toggle(
     })
 }
 
-pub(super) fn selected_blocks(source: &str, selection: &Range<usize>) -> Vec<Range<usize>> {
+pub(super) fn selected_blocks(
+    source: &MarkdownSource<'_>,
+    selection: &Range<usize>,
+) -> Vec<Range<usize>> {
     if !source[selection.clone()].contains('\n') {
         return vec![selection.clone()];
     }
@@ -136,8 +140,8 @@ fn plan_targets(
     super::apply_transaction(source_generation, start..end, replacement, cursor_after)
 }
 
-fn inline_ranges(source: &str, format: Option<InlineFormat>) -> InlineRanges {
-    let parsed = crate::parser::parse_markdown(source);
+fn inline_ranges(source: &MarkdownSource<'_>, format: Option<InlineFormat>) -> InlineRanges {
+    let parsed = source.parsed();
     let mut inline =
         InlineRanges { blocks: Vec::new(), styles: Vec::new(), visible_content: Vec::new() };
     let mut containers = Vec::new();

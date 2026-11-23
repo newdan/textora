@@ -34,7 +34,10 @@ fn container_row_insertion_preserves_crlf_and_adjacent_heading() {
     let source =
         "before\r\n\r\n> | heading | value |\r\n> | --- | --- |\r\n> | a | b |\r\n\r\n# after";
     let cursor = source.find("a | b").expect("container table body exists");
-    assert!(source_table_at(source, cursor).is_some(), "container table should be modeled");
+    assert!(
+        source_table_at(&MarkdownSource::borrowed(source), cursor).is_some(),
+        "container table should be modeled"
+    );
     let (result, _) = applied_text(
         source,
         SemanticEditCommand::TableStructure(ui::plugin::TableStructureCommand::InsertRowAfter),
@@ -209,7 +212,7 @@ fn menu_table_creation_keeps_blockquote_context() {
         cursor,
         None,
     );
-    assert_eq!(parsed_table_count(&result, 2), 1, "result: {result:?}");
+    assert_eq!(parsed_table_count(&MarkdownSource::borrowed(&result), 2), 1, "result: {result:?}");
     assert!(result.starts_with("> paragraph\n> \n> | | |"), "result: {result:?}");
     assert_eq!(
         cursor_after,
@@ -222,15 +225,19 @@ fn menu_table_creation_keeps_list_item_context() {
     let source = "- paragraph";
     let cursor = source.len();
     let expected = "- paragraph\n\n  | | |\n  | --- | --- |\n  | | |";
-    assert_eq!(parsed_table_count(expected, 2), 1, "expected candidate must parse");
-    assert!(container_paragraph_context(source, cursor).is_some());
+    assert_eq!(
+        parsed_table_count(&MarkdownSource::borrowed(expected), 2),
+        1,
+        "expected candidate must parse"
+    );
+    assert!(container_paragraph_context(&MarkdownSource::borrowed(source), cursor).is_some());
     let (result, _) = applied_text(
         source,
         SemanticEditCommand::InsertTable { columns: 2, rows: 2 },
         cursor,
         None,
     );
-    assert_eq!(parsed_table_count(&result, 2), 1, "result: {result:?}");
+    assert_eq!(parsed_table_count(&MarkdownSource::borrowed(&result), 2), 1, "result: {result:?}");
     assert!(result.starts_with("- paragraph\n\n  | | |"), "result: {result:?}");
 }
 
@@ -244,7 +251,11 @@ fn menu_table_creation_in_blockquote_splits_at_start_middle_and_end() {
             cursor,
             None,
         );
-        assert_eq!(parsed_table_count(&result, 2), 1, "cursor={cursor}, result={result:?}");
+        assert_eq!(
+            parsed_table_count(&MarkdownSource::borrowed(&result), 2),
+            1,
+            "cursor={cursor}, result={result:?}"
+        );
         assert!(result.starts_with(before), "cursor={cursor}, result: {result:?}");
         if !after.is_empty() {
             assert!(result.ends_with(after), "cursor={cursor}, result: {result:?}");
@@ -271,7 +282,11 @@ fn menu_table_creation_in_list_splits_at_start_middle_and_end() {
             cursor,
             None,
         );
-        assert_eq!(parsed_table_count(&result, 2), 1, "cursor={cursor}, result={result:?}");
+        assert_eq!(
+            parsed_table_count(&MarkdownSource::borrowed(&result), 2),
+            1,
+            "cursor={cursor}, result={result:?}"
+        );
         assert!(
             result.contains("  | | |"),
             "table rows need list continuation indentation: {result:?}"

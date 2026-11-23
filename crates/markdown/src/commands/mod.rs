@@ -1,14 +1,32 @@
+use crate::source_snapshot::MarkdownSource;
 use ui::plugin::{SemanticEditCommand, SemanticEditPlan};
 
 mod inline_formatting;
 mod table_structure;
 use inline_formatting::InlineFormat;
+pub(crate) use table_structure::snapshot_table_capabilities;
 pub use table_structure::{TableStructureCapabilities, table_structure_capabilities};
 #[cfg(test)]
 use table_structure::{format_table_row, source_table_at};
 
 pub fn plan_semantic_edit(
     source: &str,
+    source_generation: u32,
+    cursor_byte: usize,
+    selection: Option<std::ops::Range<usize>>,
+    command: SemanticEditCommand,
+) -> SemanticEditPlan {
+    plan_semantic_source(
+        &MarkdownSource::borrowed(source),
+        source_generation,
+        cursor_byte,
+        selection,
+        command,
+    )
+}
+
+pub(crate) fn plan_semantic_source(
+    source: &MarkdownSource<'_>,
     source_generation: u32,
     cursor_byte: usize,
     selection: Option<std::ops::Range<usize>>,
@@ -96,7 +114,7 @@ const MAX_TABLE_COLUMNS: usize = 64;
 const MAX_TABLE_ROWS: usize = 1_000;
 
 fn plan_insert_table(
-    source: &str,
+    source: &MarkdownSource<'_>,
     source_generation: u32,
     cursor_byte: usize,
     selection: Option<std::ops::Range<usize>>,
@@ -113,9 +131,6 @@ fn plan_insert_table(
 
     let newline = if source.contains(CRLF_SEQUENCE) { CRLF_SEQUENCE } else { LF_SEQUENCE };
     let table_source = generate_empty_table(columns, rows, newline);
-    if !parsed_table_has_columns(&table_source, columns) {
-        return SemanticEditPlan::Unsupported;
-    }
     if let Some(context) = container_paragraph_context(source, cursor_byte) {
         if cursor_byte < context.content_start {
             return SemanticEditPlan::Unsupported;
@@ -145,7 +160,9 @@ fn plan_insert_table(
             &source[..context.range.start],
             &source[context.range.end..]
         );
-        if parsed_table_count(&result, columns) != parsed_table_count(source, columns) + 1 {
+        if parsed_table_count(&MarkdownSource::owned(result), columns)
+            != parsed_table_count(source, columns) + 1
+        {
             return SemanticEditPlan::Unsupported;
         }
         let cursor_after = context.range.start
@@ -162,7 +179,9 @@ fn plan_insert_table(
     } else if let Some(range) = empty_line_range(source, cursor_byte) {
         let replacement = format!("{newline}{table_source}{newline}");
         let result = format!("{}{replacement}{}", &source[..range.start], &source[range.end..]);
-        if parsed_table_count(&result, columns) != parsed_table_count(source, columns) + 1 {
+        if parsed_table_count(&MarkdownSource::owned(result), columns)
+            != parsed_table_count(source, columns) + 1
+        {
             return SemanticEditPlan::Unsupported;
         }
         let cursor_after = range.start + newline.len() + 2;
@@ -185,7 +204,9 @@ fn plan_insert_table(
         &source[..replacement_range.start],
         &source[replacement_range.end..]
     );
-    if parsed_table_count(&result, columns) != parsed_table_count(source, columns) + 1 {
+    if parsed_table_count(&MarkdownSource::owned(result), columns)
+        != parsed_table_count(source, columns) + 1
+    {
         return SemanticEditPlan::Unsupported;
     }
     let cursor_after = replacement_range.start
@@ -212,22 +233,21 @@ fn prefix_table_rows(table_source: &str, row_prefix: &str, newline: &str) -> Str
         .join(newline)
 }
 
-fn parsed_table_has_columns(source: &str, columns: usize) -> bool {
-    parsed_table_count(source, columns) > 0
-}
-
-fn parsed_table_count(source: &str, columns: usize) -> usize {
+fn parsed_table_count(source: &MarkdownSource<'_>, columns: usize) -> usize {
     use crate::parser::{MarkdownEvent, MarkdownTag};
-    crate::parser::parse_markdown(source)
+    source.parsed()
         .events
         .iter()
         .filter(|event| matches!(event, MarkdownEvent::Start(MarkdownTag::Table(alignments)) if alignments.len() == columns))
         .count()
 }
 
-fn top_level_paragraph_range(source: &str, cursor_byte: usize) -> Option<std::ops::Range<usize>> {
+fn top_level_paragraph_range(
+    source: &MarkdownSource<'_>,
+    cursor_byte: usize,
+) -> Option<std::ops::Range<usize>> {
     use crate::parser::{MarkdownEvent, MarkdownTag, MarkdownTagEnd};
-    let parsed = crate::parser::parse_markdown(source);
+    let parsed = source.parsed();
     let mut block_depth = 0_usize;
     let mut paragraph_start = None;
     for (index, event) in parsed.events.iter().enumerate() {
@@ -279,11 +299,11 @@ struct ContainerParagraphContext {
 }
 
 fn container_paragraph_context(
-    source: &str,
+    source: &MarkdownSource<'_>,
     cursor_byte: usize,
 ) -> Option<ContainerParagraphContext> {
     use crate::parser::{MarkdownEvent, MarkdownTag, MarkdownTagEnd};
-    let parsed = crate::parser::parse_markdown(source);
+    let parsed = source.parsed();
     for (start_index, event) in parsed.events.iter().enumerate() {
         if !matches!(event, MarkdownEvent::Start(MarkdownTag::Paragraph)) {
             continue;
@@ -378,7 +398,10 @@ fn list_marker_content_start(line: &str) -> Option<usize> {
     line[marker_end..].starts_with(char::is_whitespace).then(|| marker_end + 1)
 }
 
-fn empty_line_range(source: &str, cursor_byte: usize) -> Option<std::ops::Range<usize>> {
+fn empty_line_range(
+    source: &MarkdownSource<'_>,
+    cursor_byte: usize,
+) -> Option<std::ops::Range<usize>> {
     if cursor_is_inside_container(source, cursor_byte) {
         return None;
     }
@@ -392,7 +415,7 @@ fn empty_line_range(source: &str, cursor_byte: usize) -> Option<std::ops::Range<
     source[line_range.clone()].trim().is_empty().then_some(line_range)
 }
 
-fn cursor_is_inside_container(source: &str, cursor_byte: usize) -> bool {
+fn cursor_is_inside_container(source: &MarkdownSource<'_>, cursor_byte: usize) -> bool {
     use crate::parser::{MarkdownEvent, MarkdownTag, MarkdownTagEnd};
 
     #[derive(Clone, Copy, PartialEq, Eq)]
@@ -402,7 +425,7 @@ fn cursor_is_inside_container(source: &str, cursor_byte: usize) -> bool {
         Item,
     }
 
-    let parsed = crate::parser::parse_markdown(source);
+    let parsed = source.parsed();
     let mut open_containers = Vec::new();
     for (index, event) in parsed.events.iter().enumerate() {
         let range = &parsed.event_ranges[index];
@@ -446,7 +469,7 @@ enum LinePrefix {
 }
 
 fn plan_inline_code(
-    source: &str,
+    source: &MarkdownSource<'_>,
     source_generation: u32,
     cursor_byte: usize,
     selection: Option<std::ops::Range<usize>>,
@@ -516,7 +539,7 @@ fn longest_backtick_run(content: &str) -> usize {
 }
 
 fn plan_link(
-    source: &str,
+    source: &MarkdownSource<'_>,
     source_generation: u32,
     cursor_byte: usize,
     selection: Option<std::ops::Range<usize>>,
@@ -536,7 +559,7 @@ fn plan_link(
 }
 
 fn plan_heading(
-    source: &str,
+    source: &MarkdownSource<'_>,
     source_generation: u32,
     cursor_byte: usize,
     selection: Option<std::ops::Range<usize>>,
@@ -562,13 +585,14 @@ fn plan_heading(
     apply_line_transaction(source, source_generation, target, replacement)
 }
 
-fn setext_heading_ranges(source: &str) -> Vec<std::ops::Range<usize>> {
-    use pulldown_cmark::{Event, Parser, Tag};
+fn setext_heading_ranges(source: &MarkdownSource<'_>) -> Vec<std::ops::Range<usize>> {
+    use crate::parser::{MarkdownEvent, MarkdownTag};
 
-    Parser::new_ext(source, crate::parser::markdown_options())
-        .into_offset_iter()
+    source
+        .parsed()
+        .source_events()
         .filter_map(|(event, range)| {
-            let Event::Start(Tag::Heading { .. }) = event else {
+            let MarkdownEvent::Start(MarkdownTag::Heading { .. }) = event else {
                 return None;
             };
             if crate::augmenter::heading_source_is_atx(source, range.start) {
@@ -801,21 +825,29 @@ fn line_end(source: &str, byte: usize) -> usize {
     if source[..newline_byte].ends_with('\r') { newline_byte - 1 } else { newline_byte }
 }
 
-fn first_h1_range(source: &str) -> Option<std::ops::Range<usize>> {
-    use pulldown_cmark::{Event, HeadingLevel, Parser, Tag, TagEnd};
+fn first_h1_range(source: &MarkdownSource<'_>) -> Option<std::ops::Range<usize>> {
+    use crate::parser::{MarkdownEvent, MarkdownTag, MarkdownTagEnd};
 
     let mut container_depth = 0usize;
-    for (event, range) in
-        Parser::new_ext(source, crate::parser::markdown_options()).into_offset_iter()
-    {
+    for (event, range) in source.parsed().source_events() {
         match event {
-            Event::Start(Tag::BlockQuote(_) | Tag::List(_) | Tag::Item | Tag::Table(_)) => {
+            MarkdownEvent::Start(
+                MarkdownTag::BlockQuote
+                | MarkdownTag::List(..)
+                | MarkdownTag::Item
+                | MarkdownTag::Table(_),
+            ) => {
                 container_depth += 1;
             }
-            Event::End(TagEnd::BlockQuote(_) | TagEnd::List(_) | TagEnd::Item | TagEnd::Table) => {
+            MarkdownEvent::End(
+                MarkdownTagEnd::BlockQuote
+                | MarkdownTagEnd::List
+                | MarkdownTagEnd::Item
+                | MarkdownTagEnd::Table,
+            ) => {
                 container_depth = container_depth.saturating_sub(1);
             }
-            Event::Start(Tag::Heading { level: HeadingLevel::H1, .. })
+            MarkdownEvent::Start(MarkdownTag::Heading { level: 1 })
                 if container_depth == 0
                     && crate::augmenter::heading_source_is_atx(source, range.start) =>
             {

@@ -1,16 +1,20 @@
 use super::{
     CRLF_SEQUENCE, LF_SEQUENCE, MAX_TABLE_COLUMNS, apply_transaction, list_marker_content_start,
 };
+use crate::source_snapshot::MarkdownSource;
 use ui::plugin::SemanticEditPlan;
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct TableStructureCapabilities {
-    pub can_delete_row: bool,
-    pub can_delete_column: bool,
-}
+pub use ui::plugin::TableStructureCapabilities;
 
 pub fn table_structure_capabilities(
     source: &str,
+    cursor_byte: usize,
+) -> Option<TableStructureCapabilities> {
+    snapshot_table_capabilities(&MarkdownSource::borrowed(source), cursor_byte)
+}
+
+pub(crate) fn snapshot_table_capabilities(
+    source: &MarkdownSource<'_>,
     cursor_byte: usize,
 ) -> Option<TableStructureCapabilities> {
     let table = source_table_at(source, cursor_byte)?;
@@ -23,7 +27,7 @@ pub fn table_structure_capabilities(
 }
 
 pub(super) fn plan_table_structure(
-    source: &str,
+    source: &MarkdownSource<'_>,
     source_generation: u32,
     cursor_byte: usize,
     operation: ui::plugin::TableStructureCommand,
@@ -214,9 +218,12 @@ struct SourceTableRow {
     cells: Vec<std::ops::Range<usize>>,
 }
 
-pub(super) fn source_table_at(source: &str, cursor_byte: usize) -> Option<SourceTable> {
+pub(super) fn source_table_at(
+    source: &MarkdownSource<'_>,
+    cursor_byte: usize,
+) -> Option<SourceTable> {
     use crate::parser::{MarkdownEvent, MarkdownTag, MarkdownTagEnd};
-    let parsed = crate::parser::parse_markdown(source);
+    let parsed = source.parsed();
     let mut table_start = None;
     let mut table_range = None;
     let mut table_column_count = None;

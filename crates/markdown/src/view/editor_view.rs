@@ -7,8 +7,7 @@ use super::*;
 /// and provides layout-aware editing queries.
 pub struct MarkdownEditorView {
     pub(in crate::view) engine: PreviewEngine,
-    pub(in crate::view) source: String,
-    pub(in crate::view) cached_source_hash: u64,
+    pub(in crate::view) source: SourceSnapshot,
     pub(in crate::view) cached_generation: u32,
     pub(in crate::view) split_history: std::cell::RefCell<split_history::SplitHistory>,
 }
@@ -22,30 +21,23 @@ impl Default for MarkdownEditorView {
 impl MarkdownEditorView {
     pub fn new() -> Self {
         let mut engine = PreviewEngine::new();
-        engine.set_edit_source(Some(String::new()));
-        Self {
-            engine,
-            source: String::new(),
-            cached_source_hash: 0,
-            cached_generation: 0,
-            split_history: Default::default(),
-        }
+        let source = MarkdownSource::snapshot(String::new());
+        engine.edit_source = Some(source.clone());
+        Self { engine, source, cached_generation: 0, split_history: Default::default() }
     }
 
     pub fn set_source(&mut self, text: String, generation: u32) {
         self.split_history.get_mut().synchronize(&self.source, &text);
-        let hash = fxhash(&text);
-        let source_changed =
-            hash != self.cached_source_hash || generation != self.cached_generation;
+        let text_changed = self.source.as_str() != text;
+        let source_changed = text_changed || generation != self.cached_generation;
         if source_changed {
             self.engine.set_preedit_text(String::new(), None);
         }
-        if hash != self.cached_source_hash {
-            self.source = text;
-            self.cached_source_hash = hash;
+        if text_changed {
+            self.source = MarkdownSource::snapshot(text);
+            self.engine.edit_source = Some(self.source.clone());
             self.engine.mark_source_dirty();
         }
-        self.engine.set_edit_source(Some(self.source.clone()));
         self.engine.set_source_generation(generation);
         self.cached_generation = generation;
         if source_changed {
@@ -219,20 +211,19 @@ impl MarkdownEditorView {
                     augmentation_edit_plan(request, augmentation)
                 });
         }
-        let protected = structural_selection_erasure(&self.source, selection);
         if let ui::plugin::EditIntent::InsertText(text) = &request.intent {
-            if let Some(erasure) = protected {
+            if let Some(erasure) =
+                crate::augmenter::augment_erase_range(&self.source, selection.clone())
+            {
                 return protected_selection_insert_text_plan(
                     &self.source,
-                    request.source_generation,
+                    request,
+                    selection,
                     erasure,
                     text,
                 );
             }
-            return crate::augmenter::augment_selected_text(&self.source, selection.clone(), text)
-                .map_or(ui::plugin::EditPlan::UseDefault, |augmentation| {
-                    selection_augmentation_edit_plan(request, selection, augmentation)
-                });
+            return selection_insert_text_plan(&self.source, request, selection, text, None);
         }
         if !matches!(
             request.intent,
@@ -241,8 +232,8 @@ impl MarkdownEditorView {
             return ui::plugin::EditPlan::UseDefault;
         }
         let is_line_break = matches!(request.intent, ui::plugin::EditIntent::InsertLineBreak);
-        if let Some(erasure) = protected
-            .or_else(|| crate::augmenter::augment_erase_range(&self.source, selection.clone()))
+        if let Some(erasure) =
+            crate::augmenter::augment_erase_range(&self.source, selection.clone())
         {
             return protected_selection_break_plan(
                 &self.source,
@@ -251,74 +242,79 @@ impl MarkdownEditorView {
                 is_line_break,
             );
         }
-        let mut source_after_delete = self.source.clone();
+        let mut source_after_delete = self.source.as_str().to_owned();
         source_after_delete.replace_range(selection.clone(), "");
         let kind = if is_line_break {
             ui::plugin::AugmentKind::LineBreak
         } else {
             ui::plugin::AugmentKind::Enter
         };
-        let Some(augmentation) =
-            crate::augmenter::augment_edit(&source_after_delete, selection.start, kind)
-        else {
+        let Some(augmentation) = crate::augmenter::augment_source(
+            &MarkdownSource::owned(source_after_delete),
+            selection.start,
+            kind,
+        ) else {
             return ui::plugin::EditPlan::UseDefault;
         };
         selection_augmentation_edit_plan(request, selection, augmentation)
     }
 }
 
-fn structural_selection_erasure(
-    source: &str,
+fn selection_insert_text_plan(
+    source: &MarkdownSource<'_>,
+    request: &ui::plugin::EditRequest,
     selection: &std::ops::Range<usize>,
-) -> Option<ui::plugin::EditAugmentation> {
-    let erasure = crate::augmenter::augment_erase_range(source, selection.clone())?;
-    let Some(range) = &erasure.replace_range else {
-        return Some(erasure);
-    };
-    if !erasure.insert_text.as_deref().unwrap_or_default().is_empty()
-        || range.start > selection.start
-        || range.end < selection.end
-    {
-        return Some(erasure);
-    }
-    let mut source_after_erase = source.to_owned();
-    source_after_erase
-        .replace_range(range.clone(), erasure.insert_text.as_deref().unwrap_or_default());
-    let inside_table_cell = matches!(
-        crate::augmenter::classify_enter_context(&source_after_erase, erasure.cursor_byte_after),
-        crate::augmenter::EnterContext::TableCell { .. }
-    );
-    inside_table_cell.then_some(erasure)
+    text: &str,
+    erased_source: Option<&MarkdownSource<'_>>,
+) -> ui::plugin::EditPlan {
+    crate::augmenter::augment_selected_text(source, selection.clone(), text, erased_source)
+        .map_or(ui::plugin::EditPlan::UseDefault, |augmentation| {
+            selection_augmentation_edit_plan(request, selection, augmentation)
+        })
 }
 
 fn protected_selection_insert_text_plan(
-    source: &str,
-    source_generation: u32,
+    source: &MarkdownSource<'_>,
+    request: &ui::plugin::EditRequest,
+    selection: &std::ops::Range<usize>,
     erasure: ui::plugin::EditAugmentation,
     text: &str,
 ) -> ui::plugin::EditPlan {
-    let Some(erased_range) = erasure.replace_range.clone() else {
+    let Some(erased_range) = erasure.replace_range else {
         return ui::plugin::EditPlan::Consume;
     };
-    let erased_text = erasure.insert_text.as_deref().unwrap_or_default().to_owned();
-    let mut source_after_erase = source.to_owned();
+    let erased_text = erasure.insert_text.unwrap_or_default();
+    let mut source_after_erase = source.as_str().to_owned();
     source_after_erase.replace_range(erased_range.clone(), &erased_text);
+    let source_after_erase = MarkdownSource::owned(source_after_erase);
 
-    if let Some(follow) = crate::augmenter::augment_edit(
+    if erased_text.is_empty()
+        && erased_range.start <= selection.start
+        && selection.end <= erased_range.end
+        && !matches!(
+            crate::augmenter::classify_source(&source_after_erase, erasure.cursor_byte_after),
+            crate::augmenter::EnterContext::TableCell { .. }
+        )
+    {
+        let erased_source = (&erased_range == selection).then_some(&source_after_erase);
+        return selection_insert_text_plan(source, request, selection, text, erased_source);
+    }
+
+    if let Some(follow) = crate::augmenter::augment_source(
         &source_after_erase,
         erasure.cursor_byte_after,
         ui::plugin::AugmentKind::InsertText(text.to_owned()),
     ) {
         return combine_erasure_and_followup_plan(
             source,
-            source_generation,
+            request.source_generation,
             erased_range,
             erased_text,
             follow,
         );
     }
     combine_erasure_and_literal_insert(
-        source_generation,
+        request.source_generation,
         erased_range,
         erased_text,
         erasure.cursor_byte_after,
@@ -332,15 +328,16 @@ fn protected_selection_break_plan(
     erasure: ui::plugin::EditAugmentation,
     is_line_break: bool,
 ) -> ui::plugin::EditPlan {
-    let Some(erased_range) = erasure.replace_range.clone() else {
+    let Some(erased_range) = erasure.replace_range else {
         return ui::plugin::EditPlan::Consume;
     };
-    let erased_text = erasure.insert_text.as_deref().unwrap_or_default().to_owned();
+    let erased_text = erasure.insert_text.unwrap_or_default();
     let mut source_after_erase = source.to_owned();
     source_after_erase.replace_range(erased_range.clone(), &erased_text);
 
+    let source_after_erase = MarkdownSource::owned(source_after_erase);
     if matches!(
-        crate::augmenter::classify_enter_context(&source_after_erase, erasure.cursor_byte_after),
+        crate::augmenter::classify_source(&source_after_erase, erasure.cursor_byte_after),
         crate::augmenter::EnterContext::TableCell { .. }
     ) {
         return ui::plugin::EditPlan::Apply(ui::plugin::EditTransaction::replace(
@@ -357,7 +354,7 @@ fn protected_selection_break_plan(
         ui::plugin::AugmentKind::Enter
     };
     if let Some(follow) =
-        crate::augmenter::augment_edit(&source_after_erase, erasure.cursor_byte_after, kind)
+        crate::augmenter::augment_source(&source_after_erase, erasure.cursor_byte_after, kind)
     {
         return combine_erasure_and_followup_plan(
             source,
@@ -543,6 +540,13 @@ impl ViewPlugin for MarkdownEditorView {
             return resp;
         }
         match q {
+            PluginQuery::SourceSpacingProtectedRanges { source_generation }
+                if source_generation == self.cached_generation =>
+            {
+                PluginResponse::SourceSpacingProtectedRanges(
+                    self.source.source_spacing_protected_ranges(),
+                )
+            }
             PluginQuery::NeedsSourceUpdate(gen_id) => {
                 PluginResponse::Bool(self.needs_source_update(gen_id))
             }
@@ -572,12 +576,19 @@ impl ViewPlugin for MarkdownEditorView {
             } else {
                 DrawList::new()
             }),
+            PluginQuery::TableStructureCapabilities { source_generation, cursor_byte }
+                if source_generation == self.cached_generation =>
+            {
+                PluginResponse::TableStructureCapabilities(
+                    crate::commands::snapshot_table_capabilities(&self.source, cursor_byte),
+                )
+            }
             PluginQuery::PlanSemanticEdit {
                 command,
                 source_generation,
                 cursor_byte,
                 selection,
-            } => PluginResponse::SemanticEdit(crate::commands::plan_semantic_edit(
+            } => PluginResponse::SemanticEdit(crate::commands::plan_semantic_source(
                 &self.source,
                 source_generation,
                 cursor_byte,

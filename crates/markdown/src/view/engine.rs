@@ -190,7 +190,7 @@ impl<S: BlockSource> PreviewEngine<S> {
         let mut layout = LazyLayout::new(document, style, viewport_width, document_view);
         layout.code_viewport = self.lazy.as_ref().and_then(|previous| previous.code_viewport);
         layout.set_source_generation(self.source_generation);
-        layout.set_edit_source(self.edit_source.clone());
+        layout.set_shared_source(self.edit_source.as_deref().map(MarkdownSource::shared_text));
         layout.set_edit_ctx(self.edit_ctx.clone());
         layout.set_selection_range(self.byte_selection_range().map(|(start, end)| start..end));
         layout

@@ -641,35 +641,41 @@ fn table_structure_context_menu(
     {
         return None;
     }
+    app.sync_plugin_state();
     let Some(Some(EditHitTarget::TextCaret { byte_offset, .. })) =
         app.query_plugin_edit_hit_target(px, py)
     else {
         return None;
     };
-    let (source, source_generation) = app
-        .active_tab_session()
-        .map(|tab| (tab.document.full_text(), tab.document.generation()))?;
-    table_structure_menu_for_source(
-        &source,
+    let tab = app.active_tab_session()?;
+    let source_generation = tab.document.generation();
+    let ui::plugin::PluginResponse::TableStructureCapabilities(Some(capabilities)) =
+        tab.query(ui::plugin::PluginQuery::TableStructureCapabilities {
+            source_generation,
+            cursor_byte: byte_offset,
+        })
+    else {
+        return None;
+    };
+    Some(table_structure_menu(
+        capabilities,
         source_generation,
         byte_offset,
         (px, py),
         (app.screen_width(), app.screen_height()),
         app.ui_metrics().dpi,
-    )
+    ))
 }
 
 #[cfg(feature = "markdown")]
-fn table_structure_menu_for_source(
-    source: &str,
+fn table_structure_menu(
+    capabilities: ui::plugin::TableStructureCapabilities,
     source_generation: u32,
     cursor_byte: usize,
     px_position: (f32, f32),
     screen_size: (f32, f32),
     dpi: f32,
-) -> Option<ui::popup_menu::PopupMenu> {
-    let capabilities =
-        textora_markdown::commands::table_structure_capabilities(source, cursor_byte)?;
+) -> ui::popup_menu::PopupMenu {
     let operations = [
         ("前插入行", ui::plugin::TableStructureCommand::InsertRowBefore),
         ("后插入行", ui::plugin::TableStructureCommand::InsertRowAfter),
@@ -719,14 +725,14 @@ fn table_structure_menu_for_source(
             }
         })
         .collect::<Vec<_>>();
-    Some(ui::popup_menu::PopupMenu::table_structure_px(
+    ui::popup_menu::PopupMenu::table_structure_px(
         &entries,
         cursor_byte,
         source_generation,
         screen_size,
         px_position,
         dpi,
-    ))
+    )
 }
 
 // ── Translation helpers ───────────────────────────────────────────────────
@@ -1077,30 +1083,34 @@ mod tests {
     fn table_structure_context_menu_targets_the_clicked_column_and_disables_invalid_rows() {
         let single_column = "| heading |\n| --- |\n| body |";
         let header_cursor = single_column.find("heading").expect("header exists");
-        let header_menu = table_structure_menu_for_source(
-            single_column,
+        let header_capabilities =
+            textora_markdown::commands::table_structure_capabilities(single_column, header_cursor)
+                .expect("table header should expose structure actions");
+        let header_menu = table_structure_menu(
+            header_capabilities,
             4,
             header_cursor,
             (120.0, 100.0),
             (640.0, 480.0),
             1.0,
-        )
-        .expect("right-click on a table header should open its structure menu");
+        );
         assert!(!header_menu.items[2].enabled, "the header row cannot be deleted");
         assert!(!header_menu.items[5].enabled, "a one-column table cannot lose its last column");
 
         let two_columns = "| first | second |\n| --- | --- |\n| left | right |";
         let clicked_cell = two_columns.find("right").expect("second-column body cell exists");
         let generation = 9;
-        let menu = table_structure_menu_for_source(
-            two_columns,
+        let body_capabilities =
+            textora_markdown::commands::table_structure_capabilities(two_columns, clicked_cell)
+                .expect("table body should expose structure actions");
+        let menu = table_structure_menu(
+            body_capabilities,
             generation,
             clicked_cell,
             (120.0, 100.0),
             (640.0, 480.0),
             1.0,
-        )
-        .expect("right-click on a table body cell should open its structure menu");
+        );
         let alignment_action = &menu.items[9].action;
         assert_eq!(
             alignment_action,

@@ -1,15 +1,16 @@
 //! Preserve literal paragraph whitespace without enabling Markdown code indentation.
 
-use crate::builder::{BlockKind, EditableParagraphMap, MarkdownDoc};
-use crate::parser::parse_markdown;
+use crate::builder::{BlockKind, EditableParagraphMap};
+use crate::source_snapshot::MarkdownSource;
 use ui::plugin::EditAugmentation;
 
 const LITERAL_PARAGRAPH_SPACE: char = '\u{a0}';
 
 pub(super) fn insert_selected_text(
-    source: &str,
+    source: &MarkdownSource<'_>,
     selection: std::ops::Range<usize>,
     text: &str,
+    erased_source: Option<&MarkdownSource<'_>>,
 ) -> Option<EditAugmentation> {
     let (line_start, _, line_end) = super::locate_source_line_bounds(source, selection.start)?;
     let prefix = source.get(line_start..selection.start)?;
@@ -21,13 +22,14 @@ pub(super) fn insert_selected_text(
     if !is_plain_paragraph_line(source, selection.start, line_start, content_end) {
         return None;
     }
-    let mut source_after_delete = source.to_owned();
-    source_after_delete.replace_range(selection.clone(), "");
-    insert_text(&source_after_delete, selection.start, text)
+    let cursor = selection.start;
+    super::with_erased_selection(source, selection, erased_source, |candidate| {
+        insert_text(candidate, cursor, text)
+    })
 }
 
 pub(super) fn insert_text(
-    source: &str,
+    source: &MarkdownSource<'_>,
     current_byte: usize,
     text: &str,
 ) -> Option<EditAugmentation> {
@@ -69,7 +71,7 @@ fn requires_space_protection(prefix: &str, text: &str, suffix: &str) -> bool {
 }
 
 fn insert_into_blank_line(
-    source: &str,
+    source: &MarkdownSource<'_>,
     current_byte: usize,
     line_start: usize,
     suffix: &str,
@@ -92,14 +94,12 @@ fn insert_into_blank_line(
 }
 
 fn is_plain_paragraph_line(
-    source: &str,
+    source: &MarkdownSource<'_>,
     current_byte: usize,
     line_start: usize,
     content_end: usize,
 ) -> bool {
-    #[cfg(test)]
-    super::CLASSIFY_PARSE_COUNT.with(|count| count.set(count.get() + 1));
-    let document = MarkdownDoc::build_structure(&parse_markdown(source));
+    let document = source.structure();
     if document.blocks.iter().any(|block| {
         matches!(block.kind, BlockKind::Paragraph)
             && block.block_range.start <= content_end
@@ -131,9 +131,17 @@ mod tests {
             ("普通段落", "普通".len().."普通段".len(), "新"),
             ("普通段落", 0.."普".len(), "多\n行"),
         ] {
-            super::super::CLASSIFY_PARSE_COUNT.with(|count| count.set(0));
-            assert!(super::insert_selected_text(source, selection, text).is_none());
-            super::super::CLASSIFY_PARSE_COUNT.with(|count| assert_eq!(count.get(), 0));
+            crate::parser::MARKDOWN_PARSE_COUNT.with(|count| count.set(0));
+            assert!(
+                super::insert_selected_text(
+                    &super::MarkdownSource::borrowed(source),
+                    selection,
+                    text,
+                    None,
+                )
+                .is_none()
+            );
+            crate::parser::MARKDOWN_PARSE_COUNT.with(|count| assert_eq!(count.get(), 0));
         }
     }
 }

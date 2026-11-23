@@ -63,17 +63,18 @@ fn refresh_source_spacing_state(editor: &mut appkit_shell::editor_runtime::Edito
         return;
     }
 
-    let protected_ranges = if is_markdown {
-        let parsed = textora_markdown::parser::parse_markdown(&tab.document.full_text());
-        textora_markdown::typography::extract_prose_ranges(&parsed)
-            .protected_ranges()
-            .iter()
-            .map(|range| range.start..range.end)
-            .collect::<Vec<_>>()
+    presentation.source_spacing.protected_ranges = if is_markdown {
+        tab.source_spacing_protected_ranges().unwrap_or_else(|| {
+            let parsed = textora_markdown::parser::parse_markdown(&tab.document.full_text());
+            textora_markdown::typography::extract_prose_ranges(&parsed)
+                .protected_ranges()
+                .iter()
+                .map(|range| range.start..range.end)
+                .collect()
+        })
     } else {
-        Vec::new()
+        Arc::default()
     };
-    presentation.source_spacing.protected_ranges = Arc::from(protected_ranges);
     presentation.source_spacing.semantic_version = SOURCE_SPACING_SEMANTIC_VERSION;
     presentation.source_spacing.source_revision = source_revision;
     presentation.source_spacing.is_markdown = is_markdown;

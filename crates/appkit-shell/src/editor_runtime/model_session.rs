@@ -775,6 +775,10 @@ impl ModelSession {
             return false;
         };
         *current = document;
+        if let Some(mut tab) = self.tab_session_mut(tab_id) {
+            tab.runtime.presentation.source_spacing = Default::default();
+            synchronize_plugin_source(&mut tab);
+        }
         true
     }
 
@@ -931,6 +935,13 @@ impl ModelSession {
 
     pub(crate) fn switch_active_plugin(&mut self) {
         self.workspace.switch_plugin_with_runtime(&mut self.runtimes);
+        if let Some(tab_id) = self.active_tab_id()
+            && let Some(mut tab) = self.tab_session_mut(tab_id)
+            && tab.plugin_name() == ui::plugin::PLUGIN_MARKDOWN_EDITOR
+        {
+            // The source editor can reuse a buffer generation after undo and a new edit.
+            synchronize_plugin_source(&mut tab);
+        }
         debug_assert_eq!(self.workspace.tab_ids(), self.runtimes.ids());
     }
 
@@ -1297,6 +1308,29 @@ mod tests {
 
         assert!(matches!(effect, WorkspaceEffect::Activated(_)));
         assert_eq!(sources.borrow().as_slice(), &[("#".to_owned(), expected_generation)]);
+    }
+
+    #[test]
+    fn replace_document_synchronizes_even_when_buffer_generation_is_reused() {
+        let mut session = model_session();
+        let original = prepared_text("original").document;
+        let replacement = prepared_text("replacement").document;
+        let generation = original.generation();
+        assert_eq!(replacement.generation(), generation);
+        let sources = Rc::new(RefCell::new(Vec::new()));
+        let prepared = PreparedTab::new(
+            original,
+            TabRuntime::new(Box::new(SourceSyncProbePlugin { sources: Rc::clone(&sources) })),
+        );
+        let WorkspaceEffect::Activated(tab_id) =
+            session.install_prepared_tab(prepared, None, OpenDisposition::Persistent)
+        else {
+            panic!("the plugin's tab must be active");
+        };
+
+        assert!(session.replace_document(tab_id, replacement));
+
+        assert_eq!(sources.borrow().last(), Some(&("replacement".to_owned(), generation)));
     }
 
     #[test]

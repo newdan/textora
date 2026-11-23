@@ -110,7 +110,7 @@ pub struct LazyLayout<S: BlockSource> {
     /// when the block hasn't been materialized yet.
     pub(in crate::layout::types) cached_viewport_w: f32,
     /// Full source text for WYSIWYG span expansion via materialize_line.
-    pub(in crate::layout::types) source_text: Option<String>,
+    pub(in crate::layout::types) source_text: Option<Arc<String>>,
     /// Empty paragraph geometry derived from the same rows exposed in `flat_lines`.
     pub(in crate::layout::types) projected_empty_lines: Vec<ProjectedEmptyLine>,
     /// Hidden source ranges represented as collapsed boundaries in the index.

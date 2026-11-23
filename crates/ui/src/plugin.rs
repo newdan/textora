@@ -231,6 +231,10 @@ pub enum PluginQuery {
         /// Preferred X pixel position when moving up/down (sticky column).
         target_x: Option<f32>,
     },
+    /// Source ranges whose glyph spacing must remain literal.
+    SourceSpacingProtectedRanges { source_generation: u32 },
+    /// Available actions for the table at a source position.
+    TableStructureCapabilities { source_generation: u32, cursor_byte: usize },
     /// Plan a product semantic editing command without mutating the document.
     PlanSemanticEdit {
         command: SemanticEditCommand,
@@ -268,6 +272,8 @@ pub enum PluginResponse {
     EditPlan(EditPlan),
     /// The file-level mindmap theme selection reported by the plugin.
     MindmapThemeSelection(crate::theme::MindmapThemeSelection),
+    SourceSpacingProtectedRanges(std::sync::Arc<[std::ops::Range<usize>]>),
+    TableStructureCapabilities(Option<TableStructureCapabilities>),
     /// Result of planning a product semantic editing command.
     SemanticEdit(SemanticEditPlan),
 }
@@ -329,6 +335,12 @@ pub enum SemanticEditCommand {
     TableStructure(TableStructureCommand),
     PromoteObject,
     DemoteObject,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct TableStructureCapabilities {
+    pub can_delete_row: bool,
+    pub can_delete_column: bool,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

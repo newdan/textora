@@ -2,16 +2,16 @@
 
 use super::{debug_assert_augmentation, preferred_newline_sequence};
 use crate::builder::{EditableParagraphMap, EditableParagraphRun, MarkdownDoc};
-use crate::parser::parse_markdown;
+use crate::source_snapshot::MarkdownSource;
 use std::ops::Range;
 use ui::plugin::EditAugmentation;
 
-pub(super) fn enter(source: &str, current_byte: usize) -> Option<EditAugmentation> {
+pub(super) fn enter(source: &MarkdownSource<'_>, current_byte: usize) -> Option<EditAugmentation> {
     if !is_blank_or_quote_only_line(source, current_byte) {
         return None;
     }
 
-    let document = parse_structure(source);
+    let document = source.structure();
     let paragraphs = EditableParagraphMap::from_blocks(&document.blocks, source);
     let (run, line_index) = line_at(&paragraphs, current_byte)?;
     if is_container_exit_primitive(run) || line_index < run.hidden_separator_count {
@@ -39,12 +39,15 @@ pub(super) fn enter(source: &str, current_byte: usize) -> Option<EditAugmentatio
     Some(augmentation)
 }
 
-pub(super) fn backspace(source: &str, current_byte: usize) -> Option<EditAugmentation> {
+pub(super) fn backspace(
+    source: &MarkdownSource<'_>,
+    current_byte: usize,
+) -> Option<EditAugmentation> {
     if !is_blank_or_quote_only_line(source, current_byte) {
         return None;
     }
 
-    let document = parse_structure(source);
+    let document = source.structure();
     let paragraphs = EditableParagraphMap::from_blocks(&document.blocks, source);
     let (run, line_index) = line_at(&paragraphs, current_byte)?;
     if is_container_exit_primitive(run) {
@@ -59,7 +62,7 @@ pub(super) fn backspace(source: &str, current_byte: usize) -> Option<EditAugment
         first_line_backspace(source, run, line_index)?
     };
     if line_index >= run.hidden_separator_count
-        && let Some(augmentation) = cross_owner_deletion(source, &document, run, cursor_byte_after)
+        && let Some(augmentation) = cross_owner_deletion(source, document, run, cursor_byte_after)
     {
         return Some(augmentation);
     }
@@ -166,18 +169,15 @@ fn is_blank_or_quote_only_line(source: &str, current_byte: usize) -> bool {
     quote_depth > 0 && remaining.is_empty()
 }
 
-fn parse_structure(source: &str) -> MarkdownDoc {
-    #[cfg(test)]
-    super::CLASSIFY_PARSE_COUNT.with(|count| count.set(count.get() + 1));
-    MarkdownDoc::build_structure(&parse_markdown(source))
-}
-
-pub(super) fn backspace_boundary(source: &str, current_byte: usize) -> Option<EditAugmentation> {
+pub(super) fn backspace_boundary(
+    source: &MarkdownSource<'_>,
+    current_byte: usize,
+) -> Option<EditAugmentation> {
     let (line_start, _, _) = super::locate_source_line_bounds(source, current_byte)?;
     if line_start == 0 || !boundary_prefix_candidate(source.get(line_start..current_byte)?) {
         return None;
     }
-    let document = parse_structure(source);
+    let document = source.structure();
     if !has_editable_boundary(&document.blocks, source, current_byte, Boundary::Start) {
         return None;
     }
@@ -189,7 +189,7 @@ pub(super) fn backspace_boundary(source: &str, current_byte: usize) -> Option<Ed
     let Some(run) = run else {
         return protect_atomic_boundary(&document.blocks, source, current_byte, Boundary::Start);
     };
-    if let Some(augmentation) = cross_owner_deletion(source, &document, run, current_byte) {
+    if let Some(augmentation) = cross_owner_deletion(source, document, run, current_byte) {
         return Some(augmentation);
     }
     let Some(line) = run.lines.get(run.hidden_separator_count..).and_then(|lines| lines.last())
@@ -202,7 +202,10 @@ pub(super) fn backspace_boundary(source: &str, current_byte: usize) -> Option<Ed
     deletion_augmentation(source, deletion, cursor)
 }
 
-pub(super) fn delete_forward(source: &str, current_byte: usize) -> Option<EditAugmentation> {
+pub(super) fn delete_forward(
+    source: &MarkdownSource<'_>,
+    current_byte: usize,
+) -> Option<EditAugmentation> {
     if current_byte >= source.len() {
         return None;
     }
@@ -212,10 +215,10 @@ pub(super) fn delete_forward(source: &str, current_byte: usize) -> Option<EditAu
     if !boundary_suffix_candidate(suffix) && !is_blank_or_quote_only_line(source, current_byte) {
         return None;
     }
-    let document = parse_structure(source);
+    let document = source.structure();
     let paragraphs = EditableParagraphMap::from_blocks(&document.blocks, source);
     if let Some((run, index)) = line_at(&paragraphs, current_byte) {
-        return delete_from_empty_paragraph(source, &document, run, index);
+        return delete_from_empty_paragraph(source, document, run, index);
     }
     if !has_editable_boundary(&document.blocks, source, current_byte, Boundary::End) {
         return None;
@@ -231,7 +234,7 @@ pub(super) fn delete_forward(source: &str, current_byte: usize) -> Option<EditAu
     let Some(first) = editable.first() else {
         return protect_atomic_boundary(&document.blocks, source, current_byte, Boundary::End);
     };
-    if let Some(augmentation) = cross_owner_deletion(source, &document, run, current_byte) {
+    if let Some(augmentation) = cross_owner_deletion(source, document, run, current_byte) {
         return Some(augmentation);
     }
     let deletion = if run.lines.last()?.source_range.end == source.len() && editable.len() == 1 {
@@ -276,11 +279,11 @@ pub(super) enum Boundary {
 }
 
 pub(super) fn hidden_separator_range(
-    source: &str,
+    source: &MarkdownSource<'_>,
     cursor: usize,
     boundary: Boundary,
 ) -> Option<Range<usize>> {
-    let document = parse_structure(source);
+    let document = source.structure();
     let paragraphs = EditableParagraphMap::from_blocks(&document.blocks, source);
     for run in paragraphs.runs() {
         if run.hidden_separator_count != run.lines.len() {
@@ -486,14 +489,19 @@ fn deletion_augmentation(
 mod tests {
     use super::*;
 
+    fn parse_structure(source: &str) -> MarkdownDoc {
+        MarkdownDoc::build_structure(&crate::parser::parse_markdown(source))
+    }
+
     fn assert_edit(
         source: &str,
         cursor: usize,
         expected: &str,
         expected_cursor: usize,
-        operation: fn(&str, usize) -> Option<EditAugmentation>,
+        operation: fn(&MarkdownSource<'_>, usize) -> Option<EditAugmentation>,
     ) {
-        let edit = operation(source, cursor).expect("editable neighbor must produce a deletion");
+        let edit = operation(&MarkdownSource::borrowed(source), cursor)
+            .expect("editable neighbor must produce a deletion");
         let mut edited = source.to_owned();
         edited.replace_range(
             edit.replace_range.expect("deletion has a range"),
@@ -596,7 +604,7 @@ mod tests {
             let document = parse_structure(source);
             let paragraphs = EditableParagraphMap::from_blocks(&document.blocks, source);
             assert!(
-                delete_forward(source, cursor).is_none(),
+                delete_forward(&MarkdownSource::borrowed(source), cursor).is_none(),
                 "source {source:?}; blocks {:#?}; map {paragraphs:#?}",
                 document.blocks
             );
@@ -660,15 +668,15 @@ mod tests {
     #[test]
     fn interior_keys_do_not_parse_the_document() {
         for source in ["word", "xxxx", "12345"] {
-            super::super::CLASSIFY_PARSE_COUNT.with(|count| count.set(0));
-            assert!(backspace_boundary(source, 2).is_none());
-            assert!(delete_forward(source, 2).is_none());
-            assert_eq!(super::super::CLASSIFY_PARSE_COUNT.with(|count| count.get()), 0);
+            crate::parser::MARKDOWN_PARSE_COUNT.with(|count| count.set(0));
+            assert!(backspace_boundary(&MarkdownSource::borrowed(source), 2).is_none());
+            assert!(delete_forward(&MarkdownSource::borrowed(source), 2).is_none());
+            assert_eq!(crate::parser::MARKDOWN_PARSE_COUNT.with(|count| count.get()), 0);
         }
         let source = "head\n\n\nxxxx";
-        super::super::CLASSIFY_PARSE_COUNT.with(|count| count.set(0));
-        assert!(backspace_boundary(source, source.len() - 1).is_none());
-        assert_eq!(super::super::CLASSIFY_PARSE_COUNT.with(|count| count.get()), 0);
+        crate::parser::MARKDOWN_PARSE_COUNT.with(|count| count.set(0));
+        assert!(backspace_boundary(&MarkdownSource::borrowed(source), source.len() - 1).is_none());
+        assert_eq!(crate::parser::MARKDOWN_PARSE_COUNT.with(|count| count.get()), 0);
     }
 
     #[test]
@@ -690,10 +698,10 @@ mod tests {
     #[test]
     fn boundaries_without_editable_neighbors_keep_existing_guards() {
         for (source, cursor) in [("a\n\nb", 3), ("```\n\nb\n```", 5)] {
-            assert!(backspace_boundary(source, cursor).is_none());
+            assert!(backspace_boundary(&MarkdownSource::borrowed(source), cursor).is_none());
         }
         for (source, cursor) in [("a\n\nb", 1), ("a\n\n", 3), ("```\na\n\n```", 5)] {
-            assert!(delete_forward(source, cursor).is_none());
+            assert!(delete_forward(&MarkdownSource::borrowed(source), cursor).is_none());
         }
     }
 }

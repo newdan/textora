@@ -19,8 +19,8 @@ pub(in crate::augmenter) mod editable_paragraph_navigation;
 pub(in crate::augmenter) mod paragraph_leading_spaces;
 
 use crate::builder::ListBullet;
-#[cfg(test)]
-use std::cell::Cell;
+use crate::parser::{MarkdownEvent, MarkdownTag, MarkdownTagEnd};
+use crate::source_snapshot::MarkdownSource;
 use ui::plugin::{AugmentKind, EditAugmentation};
 use unicode_segmentation::UnicodeSegmentation;
 
@@ -35,11 +35,6 @@ pub(crate) const HARD_BREAK_MIN_SPACES: usize = 2;
 pub(in crate::augmenter) const TASK_LIST_CONTENT_SEPARATOR: char = ' ';
 pub(in crate::augmenter) const MARKDOWN_TAB_STOP_WIDTH: usize = 4;
 
-#[cfg(test)]
-thread_local! {
-    pub(in crate::augmenter) static CLASSIFY_PARSE_COUNT: Cell<usize> = const { Cell::new(0) };
-}
-
 // ─── 入口 ──────────────────────────────────────────────────────────────────
 
 /// 根据当前光标位置和键类型，计算一个 markdown 感知的编辑增强。
@@ -47,6 +42,18 @@ thread_local! {
 /// 返回 `None` 表示当前上下文没有特殊行为，调用方应回落到普通 Enter/Backspace/InsertText。
 pub fn augment_edit(
     source: &str,
+    current_byte: usize,
+    kind: AugmentKind,
+) -> Option<EditAugmentation> {
+    augment_source(&MarkdownSource::borrowed(source), current_byte, kind)
+}
+
+pub fn classify_enter_context(source: &str, current_byte: usize) -> EnterContext {
+    classify_source(&MarkdownSource::borrowed(source), current_byte)
+}
+
+pub(crate) fn augment_source(
+    source: &MarkdownSource<'_>,
     current_byte: usize,
     kind: AugmentKind,
 ) -> Option<EditAugmentation> {
@@ -70,7 +77,7 @@ enum LineBreakEncoding {
 }
 
 fn line_break_encoding_for_context(
-    source: &str,
+    source: &MarkdownSource<'_>,
     current_byte: usize,
     context: &EnterContext,
 ) -> LineBreakEncoding {
@@ -114,10 +121,10 @@ fn line_break_encoding_for_context(
 }
 
 pub(in crate::augmenter) fn augment_line_break(
-    source: &str,
+    source: &MarkdownSource<'_>,
     current_byte: usize,
 ) -> EditAugmentation {
-    let context = classify_enter_context(source, current_byte);
+    let context = classify_source(source, current_byte);
     match line_break_encoding_for_context(source, current_byte, &context) {
         LineBreakEncoding::Literal { continuation_prefix } => {
             emit_literal_source_newline(source, current_byte, &continuation_prefix)
@@ -157,11 +164,11 @@ pub(in crate::augmenter) fn emit_inline_html_break(
 }
 
 pub(in crate::augmenter) fn augment_enter(
-    source: &str,
+    source: &MarkdownSource<'_>,
     current_byte: usize,
 ) -> Option<EditAugmentation> {
     let pipe_candidate_context = if has_pipe_header_shape_at_cursor(source, current_byte) {
-        let context = classify_enter_context(source, current_byte);
+        let context = classify_source(source, current_byte);
         if let Some(augmentation) = pipe_header_table_augmentation(source, current_byte, &context) {
             return Some(augmentation);
         }
@@ -172,8 +179,7 @@ pub(in crate::augmenter) fn augment_enter(
     if let Some(augmentation) = editable_paragraph_navigation::enter(source, current_byte) {
         return Some(augmentation);
     }
-    let context =
-        pipe_candidate_context.unwrap_or_else(|| classify_enter_context(source, current_byte));
+    let context = pipe_candidate_context.unwrap_or_else(|| classify_source(source, current_byte));
     enter_context_augmentation(source, current_byte, context)
 }
 
@@ -220,7 +226,7 @@ pub(in crate::augmenter) fn has_pipe_header_shape_at_cursor(
 }
 
 pub(in crate::augmenter) fn pipe_header_table_augmentation(
-    source: &str,
+    source: &MarkdownSource<'_>,
     current_byte: usize,
     context: &EnterContext,
 ) -> Option<EditAugmentation> {
@@ -268,10 +274,10 @@ pub(in crate::augmenter) fn pipe_header_table_augmentation(
         + original_newline.len()
         + container_prefix.len()
         + 2;
-    let mut prospective = source.to_owned();
+    let mut prospective = source.as_str().to_owned();
     prospective.replace_range(line_start..current_byte, &replacement_text);
     let table_count_before = parsed_table_count(source, column_count);
-    let table_count_after = parsed_table_count(&prospective, column_count);
+    let table_count_after = parsed_table_count(&MarkdownSource::owned(prospective), column_count);
     if table_count_after != table_count_before + 1 {
         return None;
     }
@@ -404,24 +410,24 @@ pub(in crate::augmenter) fn matching_code_span_close(
     None
 }
 
-pub(in crate::augmenter) fn parsed_table_count(source: &str, expected_columns: usize) -> usize {
-    use pulldown_cmark::{Event, Parser, Tag};
-    Parser::new_ext(source, crate::parser::markdown_options())
-        .into_offset_iter()
+pub(in crate::augmenter) fn parsed_table_count(
+    source: &MarkdownSource<'_>,
+    expected_columns: usize,
+) -> usize {
+    source.parsed().source_events()
         .filter(|(event, _)| {
-            matches!(event, Event::Start(Tag::Table(alignments)) if alignments.len() == expected_columns)
+            matches!(event, MarkdownEvent::Start(MarkdownTag::Table(alignments)) if alignments.len() == expected_columns)
         })
         .count()
 }
 
 pub(in crate::augmenter) fn augment_insert_text(
-    source: &str,
+    source: &MarkdownSource<'_>,
     current_byte: usize,
     text: &str,
 ) -> Option<EditAugmentation> {
     if text.contains(['|', '\r', '\n'])
-        && let EnterContext::TableCell { cell_range, .. } =
-            classify_enter_context(source, current_byte)
+        && let EnterContext::TableCell { cell_range, .. } = classify_source(source, current_byte)
     {
         return Some(table_cell_text_augmentation(source, current_byte, text, cell_range));
     }
@@ -458,14 +464,14 @@ pub(in crate::augmenter) fn format_container_multiline_insertion(
 }
 
 fn container_multiline_insert_text(
-    source: &str,
+    source: &MarkdownSource<'_>,
     current_byte: usize,
     text: &str,
 ) -> Option<EditAugmentation> {
     if !text.contains(['\r', '\n']) || text.trim_matches([' ', '\t', '\r', '\n']).is_empty() {
         return None;
     }
-    let continuation_prefix = match classify_enter_context(source, current_byte) {
+    let continuation_prefix = match classify_source(source, current_byte) {
         EnterContext::BlockQuoteLine { continuation_prefix, .. } => continuation_prefix,
         EnterContext::ListItem { content_prefix, .. } => content_prefix,
         _ => return None,
@@ -486,7 +492,7 @@ fn container_multiline_insert_text(
 }
 
 fn empty_fenced_code_insert_text(
-    source: &str,
+    source: &MarkdownSource<'_>,
     current_byte: usize,
     text: &str,
 ) -> Option<EditAugmentation> {
@@ -544,33 +550,39 @@ fn empty_fenced_code_insert_text(
 }
 
 pub(crate) fn augment_selected_text(
-    source: &str,
+    source: &MarkdownSource<'_>,
     selection: std::ops::Range<usize>,
     text: &str,
+    erased_source: Option<&MarkdownSource<'_>>,
 ) -> Option<EditAugmentation> {
     if text.contains(['|', '\r', '\n'])
-        && let EnterContext::TableCell { cell_range, .. } =
-            classify_enter_context(source, selection.start)
+        && let EnterContext::TableCell { cell_range, .. } = classify_source(source, selection.start)
         && selection.start >= cell_range.start
         && selection.end <= cell_range.end
     {
         return Some(table_cell_text_augmentation(source, selection.start, text, cell_range));
     }
-    paragraph_leading_spaces::insert_selected_text(source, selection.clone(), text)
-        .or_else(|| container_multiline_selected_text(source, selection, text))
+    if text.contains(['\r', '\n']) && !text.trim_matches([' ', '\t', '\r', '\n']).is_empty() {
+        let cursor = selection.start;
+        return with_erased_selection(source, selection, erased_source, |candidate| {
+            container_multiline_insert_text(candidate, cursor, text)
+        });
+    }
+    paragraph_leading_spaces::insert_selected_text(source, selection, text, erased_source)
 }
 
-fn container_multiline_selected_text(
+fn with_erased_selection(
     source: &str,
     selection: std::ops::Range<usize>,
-    text: &str,
+    erased_source: Option<&MarkdownSource<'_>>,
+    plan: impl FnOnce(&MarkdownSource<'_>) -> Option<EditAugmentation>,
 ) -> Option<EditAugmentation> {
-    if !text.contains(['\r', '\n']) || text.trim_matches([' ', '\t', '\r', '\n']).is_empty() {
-        return None;
+    if let Some(candidate) = erased_source {
+        return plan(candidate);
     }
-    let mut source_after_delete = source.to_owned();
-    source_after_delete.replace_range(selection.clone(), "");
-    container_multiline_insert_text(&source_after_delete, selection.start, text)
+    let mut candidate = source.to_owned();
+    candidate.replace_range(selection, "");
+    plan(&MarkdownSource::owned(candidate))
 }
 
 pub(in crate::augmenter) fn table_cell_text_augmentation(
@@ -612,7 +624,7 @@ pub(in crate::augmenter) fn table_cell_text_augmentation(
 }
 
 pub(in crate::augmenter) fn augment_table_tab(
-    source: &str,
+    source: &MarkdownSource<'_>,
     current_byte: usize,
     reverse: bool,
 ) -> Option<EditAugmentation> {
@@ -624,7 +636,7 @@ pub(in crate::augmenter) fn augment_table_tab(
         row_line_end,
         container_prefix,
         ..
-    } = classify_enter_context(source, current_byte)
+    } = classify_source(source, current_byte)
     else {
         return None;
     };
@@ -650,7 +662,8 @@ mod source_slice;
 
 #[allow(unused_imports)]
 pub(crate) use backspace::{augment_delete_forward, augment_erase_range};
-pub use classify::{EnterContext, HeadingPosition, classify_enter_context};
+pub(crate) use classify::classify_source;
+pub use classify::{EnterContext, HeadingPosition};
 #[allow(unused_imports)]
 pub(crate) use classify::{heading_source_is_atx, table_cell_content_start};
 #[allow(unused_imports)]

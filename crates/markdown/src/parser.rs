@@ -2,6 +2,7 @@
 
 use pulldown_cmark::{Event, HeadingLevel, MetadataBlockKind, Options, Parser, Tag, TagEnd};
 use std::ops::Range;
+use std::sync::Arc;
 
 /// Owned version of pulldown_cmark events, free of lifetime constraints.
 #[derive(Clone, Debug, PartialEq)]
@@ -66,13 +67,15 @@ pub enum MarkdownTagEnd {
 #[derive(Clone, Debug, Default)]
 pub struct ParsedMarkdown {
     /// Original spelling needed to project normalized parser text onto source boundaries.
-    pub(crate) source: String,
+    pub(crate) source: Arc<String>,
     pub events: Vec<MarkdownEvent>,
     /// event_ranges[i] = events[i] 在源码中的完整字节区间。
     pub event_ranges: Vec<Range<usize>>,
     /// Ranges emitted as pulldown-cmark HTML block events. These ranges are
     /// opaque HTML and must not be rescanned as inline markup.
     pub(crate) html_block_ranges: Vec<Range<usize>>,
+    fenced_code_starts: Vec<usize>,
+    original_paragraphs: Vec<ReplacedParagraph>,
 }
 
 /// 是否为可映射为块内硬换行的内联 HTML `<br>` 标签（大小写及可选空白不敏感）。
@@ -105,16 +108,65 @@ pub(crate) fn markdown_options() -> Options {
     opts
 }
 
+#[cfg(test)]
+thread_local! {
+    pub(crate) static MARKDOWN_PARSE_COUNT: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+#[derive(Clone, Debug)]
+struct ReplacedParagraph {
+    normalized_range: Range<usize>,
+    events: Vec<MarkdownEvent>,
+    ranges: Vec<Range<usize>>,
+}
+
+impl ParsedMarkdown {
+    /// Source rules use the original paragraph bounds before display math splits them.
+    pub(crate) fn source_events(&self) -> impl Iterator<Item = (&MarkdownEvent, Range<usize>)> {
+        let mut next = 0;
+        self.original_paragraphs.iter().map(Some).chain(std::iter::once(None)).flat_map(
+            move |original| {
+                let end = original
+                    .map_or(self.events.len(), |paragraph| paragraph.normalized_range.start);
+                let unchanged = next..end;
+                next = original.map_or(end, |paragraph| paragraph.normalized_range.end);
+                self.events[unchanged.clone()]
+                    .iter()
+                    .zip(self.event_ranges[unchanged].iter().cloned())
+                    .chain(original.into_iter().flat_map(|paragraph| {
+                        paragraph.events.iter().zip(paragraph.ranges.iter().cloned())
+                    }))
+            },
+        )
+    }
+
+    pub(crate) fn is_fenced_code_start(&self, byte: usize) -> bool {
+        self.fenced_code_starts.binary_search(&byte).is_ok()
+    }
+}
+
 /// Parse markdown text into an owned event list.
 pub fn parse_markdown(src: &str) -> ParsedMarkdown {
+    parse_shared_markdown(Arc::new(src.to_owned()))
+}
+
+pub(crate) fn parse_shared_markdown(source: Arc<String>) -> ParsedMarkdown {
+    #[cfg(test)]
+    MARKDOWN_PARSE_COUNT.with(|count| count.set(count.get() + 1));
+
+    let src = source.as_str();
     let parser = Parser::new_ext(src, markdown_options());
     let mut events = Vec::new();
     let mut event_ranges = Vec::new();
     let mut html_block_ranges = Vec::new();
+    let mut fenced_code_starts = Vec::new();
 
     for (event, range) in parser.into_offset_iter() {
         match event {
             Event::Start(tag) => {
+                if matches!(&tag, Tag::CodeBlock(pulldown_cmark::CodeBlockKind::Fenced(_))) {
+                    fenced_code_starts.push(range.start);
+                }
                 if let Some(t) = convert_tag(tag) {
                     event_ranges.push(range.clone());
                     events.push(MarkdownEvent::Start(t));
@@ -172,18 +224,34 @@ pub fn parse_markdown(src: &str) -> ParsedMarkdown {
         }
     }
 
-    (events, event_ranges) = split_paragraphs_around_display_math(events, event_ranges);
+    let original_paragraphs =
+        if events.iter().any(|event| matches!(event, MarkdownEvent::DisplayMath(_))) {
+            let (normalized_events, normalized_ranges, replaced) =
+                split_paragraphs_around_display_math(&events, &event_ranges);
+            events = normalized_events;
+            event_ranges = normalized_ranges;
+            replaced
+        } else {
+            Vec::new()
+        };
 
-    // Post-pass: detect tight vs loose lists and blank lines before lists.
     detect_list_properties(&mut events, src, &event_ranges);
 
-    ParsedMarkdown { source: src.to_owned(), events, event_ranges, html_block_ranges }
+    ParsedMarkdown {
+        source,
+        events,
+        event_ranges,
+        html_block_ranges,
+        fenced_code_starts,
+        original_paragraphs,
+    }
 }
 
 fn split_paragraphs_around_display_math(
-    events: Vec<MarkdownEvent>,
-    ranges: Vec<Range<usize>>,
-) -> (Vec<MarkdownEvent>, Vec<Range<usize>>) {
+    events: &[MarkdownEvent],
+    ranges: &[Range<usize>],
+) -> (Vec<MarkdownEvent>, Vec<Range<usize>>, Vec<ReplacedParagraph>) {
+    let mut original_paragraphs = Vec::new();
     let mut normalized_events = Vec::with_capacity(events.len());
     let mut normalized_ranges = Vec::with_capacity(ranges.len());
     let mut index = 0;
@@ -228,6 +296,7 @@ fn split_paragraphs_around_display_math(
             continue;
         }
 
+        let normalized_start = normalized_events.len();
         let mut segment_start = index + 1;
         for event_index in index + 1..=paragraph_end {
             if event_index != paragraph_end
@@ -262,10 +331,15 @@ fn split_paragraphs_around_display_math(
             }
             segment_start = event_index + 1;
         }
+        original_paragraphs.push(ReplacedParagraph {
+            normalized_range: normalized_start..normalized_events.len(),
+            events: events[index..=paragraph_end].to_vec(),
+            ranges: ranges[index..=paragraph_end].to_vec(),
+        });
         index = paragraph_end + 1;
     }
 
-    (normalized_events, normalized_ranges)
+    (normalized_events, normalized_ranges, original_paragraphs)
 }
 
 fn convert_tag(tag: Tag<'_>) -> Option<MarkdownTag> {
@@ -411,6 +485,36 @@ fn has_blank_line_before_offset(src: &str, offset: usize) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(feature = "rich-markdown")]
+    #[test]
+    fn source_rules_keep_original_paragraph_ranges_around_display_math() {
+        let source = "before\n\nAlpha\n$$x$$\nBeta\n\nuntouched\n\nGamma\n$$y$$\nTail\n\nafter";
+        let parsed = parse_markdown(source);
+        let original: Vec<_> = Parser::new_ext(source, markdown_options())
+            .into_offset_iter()
+            .filter_map(|(event, range)| {
+                matches!(event, Event::Start(Tag::Paragraph)).then_some(range)
+            })
+            .collect();
+        let editing: Vec<_> = parsed
+            .source_events()
+            .filter_map(|(event, range)| {
+                matches!(event, MarkdownEvent::Start(MarkdownTag::Paragraph)).then_some(range)
+            })
+            .collect();
+
+        assert_eq!(editing, original);
+        assert_eq!(parsed.original_paragraphs.len(), 2);
+        assert_ne!(
+            parsed
+                .events
+                .iter()
+                .filter(|event| matches!(event, MarkdownEvent::Start(MarkdownTag::Paragraph)))
+                .count(),
+            original.len(),
+        );
+    }
 
     #[cfg(feature = "rich-markdown")]
     #[test]

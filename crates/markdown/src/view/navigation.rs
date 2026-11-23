@@ -3,11 +3,10 @@
 use super::*;
 
 impl PreviewEngine<MarkdownDoc> {
-    pub(super) fn prepare_current_source_layout(&mut self, source: &str) {
+    pub(super) fn prepare_current_source_layout(&mut self, source: &MarkdownSource<'_>) {
         let Some(style) = self.cached_query_style.clone() else { return };
         let document_view = textora_core::document::StringDocView::new(source);
-        let parsed = crate::parser::parse_markdown(source);
-        let document = MarkdownDoc::build_for_editing(&parsed, &style, source);
+        let document = source.layout_document().with_editable_paragraphs(source);
         let mut layout = self.create_layout_with_view_state(
             document,
             &style,

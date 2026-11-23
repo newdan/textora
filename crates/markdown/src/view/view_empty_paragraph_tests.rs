@@ -184,7 +184,7 @@ fn empty_paragraph_ime_and_hit_testing_share_the_layout_row() {
             view.engine.visual_cursor_screen_pos().expect("preedit must have a visual cursor");
         assert!((preedit_y - before.1).abs() < GEOMETRY_TOLERANCE);
         assert_eq!(preedit_height, before.2);
-        assert_eq!(view.source, source, "composition must not mutate source");
+        assert_eq!(view.source.as_str(), source, "composition must not mutate source");
         view.engine.set_preedit_text(String::new(), None);
         let (typed, typed_cursor) =
             apply_edit(source, cursor, AugmentKind::InsertText(PREEDIT.to_owned()));

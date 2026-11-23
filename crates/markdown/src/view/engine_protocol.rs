@@ -9,7 +9,7 @@ impl<S: BlockSource> PreviewEngine<S> {
         kind: ui::plugin::AugmentKind,
     ) -> Option<ui::plugin::EditAugmentation> {
         let source = self.edit_source.as_deref()?;
-        crate::augmenter::augment_edit(source, current_byte, kind)
+        crate::augmenter::augment_source(source, current_byte, kind)
     }
 
     /// 判断光标是否在某个 span 内。

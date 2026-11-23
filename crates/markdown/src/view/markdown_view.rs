@@ -5,8 +5,7 @@ use super::*;
 /// Markdown preview view — wraps PreviewEngine with markdown-specific doc building.
 pub struct MarkdownView {
     pub(in crate::view) engine: PreviewEngine,
-    pub(in crate::view) source: String,
-    pub(in crate::view) cached_source_hash: u64,
+    pub(in crate::view) source: SourceSnapshot,
     pub(in crate::view) cached_generation: u32,
 }
 
@@ -20,17 +19,14 @@ impl MarkdownView {
     pub fn new() -> Self {
         Self {
             engine: PreviewEngine::new(),
-            source: String::new(),
-            cached_source_hash: 0,
+            source: MarkdownSource::snapshot(String::new()),
             cached_generation: 0,
         }
     }
 
     pub fn set_source(&mut self, text: String, generation: u32) {
-        let hash = fxhash(&text);
-        if hash != self.cached_source_hash {
-            self.source = text;
-            self.cached_source_hash = hash;
+        if self.source.as_str() != text {
+            self.source = MarkdownSource::snapshot(text);
             self.engine.mark_source_dirty();
         }
         self.engine.set_source_generation(generation);
@@ -80,13 +76,9 @@ impl MarkdownView {
             offset_x,
             offset_y,
             &style,
-            |s| {
-                let parsed = crate::parser::parse_markdown(source);
-                if editing {
-                    crate::builder::MarkdownDoc::build_for_editing(&parsed, s, source)
-                } else {
-                    crate::builder::MarkdownDoc::build(&parsed, s)
-                }
+            |_| {
+                let document = source.layout_document();
+                if editing { document.with_editable_paragraphs(source) } else { document }
             },
             shaper,
             &string_doc,
@@ -184,6 +176,13 @@ impl ViewPlugin for MarkdownView {
             return resp;
         }
         match q {
+            PluginQuery::SourceSpacingProtectedRanges { source_generation }
+                if source_generation == self.cached_generation =>
+            {
+                PluginResponse::SourceSpacingProtectedRanges(
+                    self.source.source_spacing_protected_ranges(),
+                )
+            }
             PluginQuery::NeedsSourceUpdate(gen_id) => {
                 PluginResponse::Bool(self.needs_source_update(gen_id))
             }

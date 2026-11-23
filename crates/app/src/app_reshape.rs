@@ -27,9 +27,10 @@ fn document_is_markdown_source(document: &appkit_core::document::DocumentModel) 
 }
 
 fn refresh_source_spacing_state(
-    document: &appkit_core::document::DocumentModel,
+    tab: &appkit_shell::tab_session::TabSessionMut<'_>,
     presentation: &mut DocumentPresentation,
 ) {
+    let document = &*tab.document;
     let source_revision = document.content_revision();
     let is_markdown = document_is_markdown_source(document);
     if presentation.source_spacing.source_revision == source_revision
@@ -38,18 +39,18 @@ fn refresh_source_spacing_state(
         return;
     }
 
-    let protected_ranges = markdown_protected_ranges(document, is_markdown);
+    let protected_ranges = if is_markdown {
+        tab.source_spacing_protected_ranges().unwrap_or_else(|| markdown_protected_ranges(document))
+    } else {
+        Arc::default()
+    };
     update_source_spacing_state(presentation, source_revision, is_markdown, protected_ranges)
 }
 
 #[cfg(feature = "markdown")]
 fn markdown_protected_ranges(
     document: &appkit_core::document::DocumentModel,
-    is_markdown: bool,
-) -> Vec<std::ops::Range<usize>> {
-    if !is_markdown {
-        return Vec::new();
-    }
+) -> Arc<[std::ops::Range<usize>]> {
     let parsed = textora_markdown::parser::parse_markdown(&document.full_text());
     textora_markdown::typography::extract_prose_ranges(&parsed)
         .protected_ranges()
@@ -61,25 +62,21 @@ fn markdown_protected_ranges(
 #[cfg(not(feature = "markdown"))]
 fn markdown_protected_ranges(
     document: &appkit_core::document::DocumentModel,
-    is_markdown: bool,
-) -> Vec<std::ops::Range<usize>> {
-    if !is_markdown {
-        return Vec::new();
-    }
+) -> Arc<[std::ops::Range<usize>]> {
     let source_length = document.buffer_len();
     if source_length == 0 {
-        return Vec::new();
+        return Arc::default();
     }
-    vec![0..source_length]
+    std::iter::once(0..source_length).collect()
 }
 
 fn update_source_spacing_state(
     presentation: &mut DocumentPresentation,
     source_revision: u64,
     is_markdown: bool,
-    protected_ranges: Vec<std::ops::Range<usize>>,
+    protected_ranges: Arc<[std::ops::Range<usize>]>,
 ) {
-    presentation.source_spacing.protected_ranges = Arc::from(protected_ranges);
+    presentation.source_spacing.protected_ranges = protected_ranges;
     presentation.source_spacing.semantic_version = SOURCE_SPACING_SEMANTIC_VERSION;
     presentation.source_spacing.source_revision = source_revision;
     presentation.source_spacing.is_markdown = is_markdown;
@@ -94,8 +91,7 @@ impl App {
             return;
         };
         let mut presentation = tab.take_presentation();
-        let document = &*tab.document;
-        refresh_source_spacing_state(document, &mut presentation);
+        refresh_source_spacing_state(&tab, &mut presentation);
         tab.restore_presentation(presentation);
     }
 

@@ -301,7 +301,7 @@ enum ListIndentAstFrame {
 }
 
 pub(in crate::augmenter) fn augment_list_item_tab(
-    source: &str,
+    source: &MarkdownSource<'_>,
     current_byte: usize,
     reverse: bool,
 ) -> Option<EditAugmentation> {
@@ -368,48 +368,44 @@ fn parent_item_marker_column(
 }
 
 fn find_active_list_item_context(
-    source: &str,
+    source: &MarkdownSource<'_>,
     current_byte: usize,
 ) -> Option<ActiveListItemContext> {
-    use pulldown_cmark::{Event, Parser, Tag, TagEnd};
-
     let mut quote_depth = 0usize;
     let mut frames: Vec<ListIndentAstFrame> = Vec::new();
     let mut protected_block_starts: Vec<usize> = Vec::new();
     let mut matched: Option<ActiveListItemContext> = None;
 
-    for (event, range) in
-        Parser::new_ext(source, crate::parser::markdown_options()).into_offset_iter()
-    {
+    for (event, range) in source.parsed().source_events() {
         match event {
-            Event::Start(Tag::BlockQuote(_)) => {
+            MarkdownEvent::Start(MarkdownTag::BlockQuote) => {
                 quote_depth += 1;
                 frames.push(ListIndentAstFrame::BlockQuote);
             }
-            Event::End(TagEnd::BlockQuote(_)) => {
+            MarkdownEvent::End(MarkdownTagEnd::BlockQuote) => {
                 pop_quote_frame(&mut frames, &mut quote_depth);
             }
-            Event::Start(Tag::List(_)) => {
+            MarkdownEvent::Start(MarkdownTag::List(..)) => {
                 frames.push(ListIndentAstFrame::List {
                     outer_quote_depth: quote_depth,
                     prev_item_marker_start: None,
                 });
             }
-            Event::End(TagEnd::List(_)) => {
+            MarkdownEvent::End(MarkdownTagEnd::List) => {
                 pop_list_frame(&mut frames);
             }
-            Event::Start(Tag::Item) => {
+            MarkdownEvent::Start(MarkdownTag::Item) => {
                 push_item_frame(source, &mut frames, quote_depth, range.start);
             }
-            Event::End(TagEnd::Item) => {
+            MarkdownEvent::End(MarkdownTagEnd::Item) => {
                 finish_item_frame(source, &mut frames, range, current_byte, &mut matched);
             }
-            Event::Start(Tag::CodeBlock(_) | Tag::Table(_)) => {
+            MarkdownEvent::Start(MarkdownTag::CodeBlock { .. } | MarkdownTag::Table(_)) => {
                 let start = locate_source_line_bounds(source, range.start)
                     .map_or(range.start, |(line_start, _, _)| line_start);
                 protected_block_starts.push(start);
             }
-            Event::End(TagEnd::CodeBlock | TagEnd::Table) => {
+            MarkdownEvent::End(MarkdownTagEnd::CodeBlock | MarkdownTagEnd::Table) => {
                 if let Some(block_start) = protected_block_starts.pop() {
                     let content_end =
                         content_end_without_trailing_newline(source, block_start..range.end);

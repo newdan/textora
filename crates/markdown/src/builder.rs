@@ -952,9 +952,12 @@ fn needs_empty_text_line(node: &BlockNode) -> bool {
 impl MarkdownDoc {
     /// Build the editable layout tree without changing the parsed Markdown or source.
     pub fn build_for_editing(parsed: &ParsedMarkdown, style: &MarkdownStyle, source: &str) -> Self {
-        let mut document = Self::build(parsed, style);
-        editable_paragraphs::insert(&mut document.blocks, source);
-        document
+        Self::build(parsed, style).with_editable_paragraphs(source)
+    }
+
+    pub(crate) fn with_editable_paragraphs(mut self, source: &str) -> Self {
+        editable_paragraphs::insert(&mut self.blocks, source);
+        self
     }
 
     /// Build a MarkdownDoc from parsed events + style configuration.
@@ -964,6 +967,13 @@ impl MarkdownDoc {
 
     /// Parse-event structure shared by layout and source-only editing commands.
     pub(crate) fn build_structure(parsed: &ParsedMarkdown) -> Self {
+        Self::build_structure_with_composition(parsed, None)
+    }
+
+    pub(crate) fn build_structure_with_composition(
+        parsed: &ParsedMarkdown,
+        composing_range: Option<&std::ops::Range<usize>>,
+    ) -> Self {
         let mut builder = MarkdownBuilder::new();
         let mut image_depth = 0usize;
 
@@ -1183,7 +1193,14 @@ impl MarkdownDoc {
                     }
                 }
                 MarkdownEvent::SoftBreak => {
-                    builder.push_soft_break(&parsed.source, builder.current_event_range.clone());
+                    if composing_range
+                        .is_some_and(|range| range.contains(&builder.current_event_range.start))
+                    {
+                        builder.push_hard_break();
+                    } else {
+                        builder
+                            .push_soft_break(&parsed.source, builder.current_event_range.clone());
+                    }
                 }
                 MarkdownEvent::HardBreak => {
                     builder.push_hard_break();

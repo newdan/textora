@@ -4,14 +4,14 @@ use super::{
     canonical_container_prefix, format_container_multiline_insertion, preferred_newline_sequence,
 };
 use crate::builder::{
-    BlockKind, BlockNode, EditableParagraphMap, EditableParagraphRun, InlineStyle, MarkdownDoc,
+    BlockKind, BlockNode, EditableParagraphMap, EditableParagraphRun, InlineStyle,
 };
-use crate::parser::parse_markdown;
+use crate::source_snapshot::MarkdownSource;
 use ui::plugin::EditAugmentation;
 use unicode_segmentation::UnicodeSegmentation;
 
 pub(super) fn insert_text(
-    source: &str,
+    source: &MarkdownSource<'_>,
     current_byte: usize,
     text: &str,
 ) -> Option<EditAugmentation> {
@@ -25,7 +25,7 @@ pub(super) fn insert_text(
     {
         return None;
     }
-    let document = parse_structure(source);
+    let document = source.structure();
     let paragraphs = EditableParagraphMap::from_blocks(&document.blocks, source);
     let run = paragraphs.run_at_byte(current_byte)?;
     if text.contains(['\r', '\n']) && run.continuation_source_start.is_none() {
@@ -82,13 +82,13 @@ fn materialize_paragraph(
 }
 
 pub(super) fn erase_range(
-    source: &str,
+    source: &MarkdownSource<'_>,
     erased: std::ops::Range<usize>,
 ) -> Option<EditAugmentation> {
     if erased.is_empty() || source.get(erased.clone()).is_none() {
         return None;
     }
-    let document = parse_structure(source);
+    let document = source.structure();
     let (paragraph, owner_path) = erased_paragraph(source, &document.blocks, &erased, &[])?;
     let content_start = paragraph.block_range.start;
     let paragraph_end = paragraph.block_range.end;
@@ -114,7 +114,10 @@ pub(super) fn erase_range(
     })
 }
 
-pub(super) fn erase_last_grapheme(source: &str, current_byte: usize) -> Option<EditAugmentation> {
+pub(super) fn erase_last_grapheme(
+    source: &MarkdownSource<'_>,
+    current_byte: usize,
+) -> Option<EditAugmentation> {
     let (_, _, line_end) = super::locate_source_line_bounds(source, current_byte)?;
     let content_end = super::source_line_content_end(source, line_end);
     let suffix = source.get(current_byte..content_end)?;
@@ -175,12 +178,6 @@ fn erased_paragraph<'a>(
     None
 }
 
-fn parse_structure(source: &str) -> MarkdownDoc {
-    #[cfg(test)]
-    super::CLASSIFY_PARSE_COUNT.with(|count| count.set(count.get() + 1));
-    MarkdownDoc::build_structure(&parse_markdown(source))
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -189,8 +186,8 @@ mod tests {
     fn typing_before_an_expanded_quote_marker_preserves_source_editing() {
         let source = "> first\n>\n>\n> second";
         let marker_start = "> first\n>\n".len();
-        assert!(insert_text(source, marker_start, "x").is_none());
-        assert!(insert_text(source, marker_start + 1, "x").is_some());
+        assert!(insert_text(&MarkdownSource::borrowed(source), marker_start, "x").is_none());
+        assert!(insert_text(&MarkdownSource::borrowed(source), marker_start + 1, "x").is_some());
     }
 }
 

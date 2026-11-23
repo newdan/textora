@@ -17,6 +17,7 @@ pub(crate) mod projection;
 pub mod render;
 pub mod search;
 pub mod selection;
+mod source_snapshot;
 pub mod style;
 pub mod typography;
 pub mod view;

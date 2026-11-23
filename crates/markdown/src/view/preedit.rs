@@ -64,7 +64,7 @@ impl<S: BlockSource> PreviewEngine<S> {
         let requested_caret =
             selection.start + preedit_cursor_offset(preedit_text, context.preedit_cursor);
         let inserted_len = preedit_text.len();
-        let mut preview_source = source.to_owned();
+        let mut preview_source = source.as_str().to_owned();
         preview_source.replace_range(selection.clone(), preedit_text);
         let caret_byte = preview_source
             .grapheme_indices(true)
@@ -85,7 +85,9 @@ impl<S: BlockSource> PreviewEngine<S> {
             engine.text_spacing_mode = self.text_spacing_mode;
             engine.mark_source_dirty();
         }
-        if engine.edit_source.as_deref() != Some(preview_source.as_str()) {
+        if engine.edit_source.as_deref().map(MarkdownSource::as_str)
+            != Some(preview_source.as_str())
+        {
             engine.set_edit_source(Some(preview_source));
             engine.mark_source_dirty();
         }
@@ -188,7 +190,7 @@ fn cursor_in_code_block(blocks: &[crate::builder::BlockNode], cursor: usize) -> 
 
 fn render_engine(
     engine: &mut PreviewEngine,
-    source: &str,
+    source: &MarkdownSource<'_>,
     composing_range: Option<Range<usize>>,
     bounds: ui::Rect,
     theme: &Theme,
@@ -215,7 +217,7 @@ fn render_engine(
         bounds.x,
         bounds.y,
         &style,
-        |s| build_composition_document(source, s, composing_range.as_ref()),
+        |_| build_composition_document(source, composing_range.as_ref()),
         Some(shaper),
         &string_doc,
         true,  // editing keeps whole-document flat lines for selection/navigation.
@@ -362,21 +364,15 @@ fn draw_standalone_preedit(
 }
 
 fn build_composition_document(
-    source: &str,
-    style: &MarkdownStyle,
+    source: &MarkdownSource<'_>,
     composing_range: Option<&Range<usize>>,
 ) -> MarkdownDoc {
-    let mut parsed = crate::parser::parse_markdown(source);
-    if let Some(composing_range) = composing_range {
-        for (event, range) in parsed.events.iter_mut().zip(&parsed.event_ranges) {
-            if matches!(event, crate::parser::MarkdownEvent::SoftBreak)
-                && composing_range.contains(&range.start)
-            {
-                *event = crate::parser::MarkdownEvent::HardBreak;
-            }
-        }
-    }
-    crate::builder::MarkdownDoc::build_for_editing(&parsed, style, source)
+    let document = if composing_range.is_some() {
+        MarkdownDoc::build_structure_with_composition(source.parsed(), composing_range)
+    } else {
+        source.layout_document()
+    };
+    document.with_editable_paragraphs(source)
 }
 
 #[cfg(test)]
@@ -501,7 +497,7 @@ mod tests {
             .engine
             .selection_source_range()
             .map_or(cursor_byte..cursor_byte, |(start, end)| start..end);
-        let mut committed_source = view.source.clone();
+        let mut committed_source = view.source.as_str().to_owned();
         committed_source.replace_range(range, "新");
         assert_eq!(committed_source, expected, "host commit uses authoritative document selection");
         view.set_source(committed_source, 2);
@@ -580,7 +576,7 @@ mod tests {
                 );
                 render(&mut view);
                 assert_eq!(text(&view), expected, "source={source:?}, cursor={cursor}");
-                assert_eq!(view.source, source);
+                assert_eq!(view.source.as_str(), source);
                 assert_eq!(
                     view.engine.edit_ctx.as_ref().expect("cursor was set").cursor_byte,
                     cursor
@@ -656,7 +652,7 @@ mod tests {
         render(&mut view);
         assert_eq!(text(&view), original);
         assert_eq!(view.engine.selection_source_range(), Some((1, 6)));
-        assert_eq!(view.source, source);
+        assert_eq!(view.source.as_str(), source);
     }
 
     #[test]

@@ -527,6 +527,17 @@ impl<'a> TabSessionMut<'a> {
         self.runtime.canvas_viewport.apply(action);
     }
 
+    pub fn source_spacing_protected_ranges(
+        &self,
+    ) -> Option<std::sync::Arc<[std::ops::Range<usize>]>> {
+        match self.as_ref().query(PluginQuery::SourceSpacingProtectedRanges {
+            source_generation: self.document.generation(),
+        }) {
+            PluginResponse::SourceSpacingProtectedRanges(ranges) => Some(ranges),
+            _ => None,
+        }
+    }
+
     pub fn content_height(&self) -> f32 {
         self.as_ref().content_height()
     }

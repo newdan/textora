@@ -12,6 +12,7 @@ use crate::projection::{
 };
 use crate::search::SearchHighlightCache;
 use crate::selection::{self, SelectionState, ViewPos};
+use crate::source_snapshot::{MarkdownSource, SourceSnapshot};
 use crate::style::MarkdownStyle;
 use render::GlyphVertex;
 use std::path::Path;
@@ -33,6 +34,9 @@ use unicode_segmentation::UnicodeSegmentation;
 mod preedit;
 
 mod source_search;
+
+#[cfg(test)]
+mod source_snapshot_tests;
 
 mod code_viewport;
 
@@ -412,7 +416,7 @@ pub struct PreviewEngine<S: BlockSource = MarkdownDoc> {
     /// WYSIWYG 编辑上下文。None 表示纯预览模式 (快速路径)。
     pub edit_ctx: Option<crate::edit::EditContext>,
     /// Full source text for WYSIWYG span expansion (materialize_line).
-    pub(in crate::view) edit_source: Option<String>,
+    pub(in crate::view) edit_source: Option<SourceSnapshot>,
     /// Generation of the source text currently rendered by this engine.
     pub(in crate::view) source_generation: u32,
     /// Whether the cursor blink phase is currently visible (controlled by app).
@@ -424,14 +428,6 @@ pub struct PreviewEngine<S: BlockSource = MarkdownDoc> {
 
 pub(in crate::view) fn mix_hash_value(hash: &mut u64, value: u64) {
     *hash = hash.rotate_left(5) ^ value;
-}
-
-pub(in crate::view) fn fxhash(s: &str) -> u64 {
-    let mut h: u64 = 0x517cc1b727220a95;
-    for byte in s.bytes() {
-        h = h.rotate_left(5) ^ (byte as u64);
-    }
-    h
 }
 
 mod editor_view;

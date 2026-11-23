@@ -34,7 +34,7 @@ pub(in crate::augmenter) fn emit_literal_source_newline(
 }
 
 pub(in crate::augmenter) fn emit_fenced_source_newline(
-    source: &str,
+    source: &MarkdownSource<'_>,
     current_byte: usize,
 ) -> EditAugmentation {
     let continuation_prefix = fenced_continuation_prefix(source, current_byte).unwrap_or_default();
@@ -42,7 +42,7 @@ pub(in crate::augmenter) fn emit_fenced_source_newline(
 }
 
 pub(in crate::augmenter) fn fenced_continuation_prefix(
-    source: &str,
+    source: &MarkdownSource<'_>,
     current_byte: usize,
 ) -> Option<String> {
     let boundary = enclosing_fenced_boundary(source, current_byte)?;
@@ -58,7 +58,7 @@ pub(in crate::augmenter) fn fenced_continuation_prefix(
 
 /// Create one editable paragraph using the same separator roles as the layout tree.
 pub(in crate::augmenter) fn emit_block_break(
-    source: &str,
+    source: &MarkdownSource<'_>,
     current_byte: usize,
 ) -> EditAugmentation {
     let newline = preferred_newline_sequence(source, current_byte);
@@ -72,7 +72,10 @@ pub(in crate::augmenter) fn emit_block_break(
     augmentation
 }
 
-pub(in crate::augmenter) fn block_break_newline_count(source: &str, current_byte: usize) -> usize {
+pub(in crate::augmenter) fn block_break_newline_count(
+    source: &MarkdownSource<'_>,
+    current_byte: usize,
+) -> usize {
     let Some(newline_width) = newline_sequence_width_at(source, current_byte) else {
         return BLOCK_BOUNDARY_NEWLINE_COUNT;
     };
@@ -80,8 +83,7 @@ pub(in crate::augmenter) fn block_break_newline_count(source: &str, current_byte
     if blank_source_line_width(source, next_line_start).is_none() {
         return BLOCK_BOUNDARY_NEWLINE_COUNT;
     }
-    let document =
-        crate::builder::MarkdownDoc::build_structure(&crate::parser::parse_markdown(source));
+    let document = source.structure();
     let paragraphs = crate::builder::EditableParagraphMap::from_blocks(&document.blocks, source);
     let Some(run) = paragraphs.run_at_byte(next_line_start) else {
         return BLOCK_BOUNDARY_NEWLINE_COUNT;
@@ -91,7 +93,7 @@ pub(in crate::augmenter) fn block_break_newline_count(source: &str, current_byte
 }
 
 pub(in crate::augmenter) fn emit_paragraph_before(
-    source: &str,
+    source: &MarkdownSource<'_>,
     current_byte: usize,
     insert_at: usize,
     continuation_prefix: &str,
@@ -127,8 +129,8 @@ pub(in crate::augmenter) fn preceding_paragraph_insertion_count(
 ) -> usize {
     let mut prospective = source.to_owned();
     prospective.insert_str(insert_at, insertion);
-    let document =
-        crate::builder::MarkdownDoc::build_structure(&crate::parser::parse_markdown(&prospective));
+    let prospective = MarkdownSource::owned(prospective);
+    let document = prospective.structure();
     let paragraphs =
         crate::builder::EditableParagraphMap::from_blocks(&document.blocks, &prospective);
     let hidden = paragraphs.run_at_byte(insert_at).is_some_and(|run| {
@@ -143,35 +145,37 @@ pub(in crate::augmenter) fn preceding_paragraph_insertion_count(
 }
 
 pub(in crate::augmenter) fn leading_heading_list_start(
-    source: &str,
+    source: &MarkdownSource<'_>,
     heading_start: usize,
 ) -> Option<usize> {
-    use pulldown_cmark::{Event, Parser, Tag, TagEnd};
     struct LeadingListItem {
         marker_start: usize,
         has_content: bool,
     }
     let mut owners = Vec::<LeadingListItem>::new();
-    for (event, range) in
-        Parser::new_ext(source, crate::parser::markdown_options()).into_offset_iter()
-    {
-        if matches!(event, Event::Start(Tag::Heading { .. })) && range.start == heading_start {
+    for (event, range) in source.parsed().source_events() {
+        if matches!(event, MarkdownEvent::Start(MarkdownTag::Heading { .. }))
+            && range.start == heading_start
+        {
             return owners.iter().find(|owner| !owner.has_content).map(|owner| owner.marker_start);
         }
         match event {
-            Event::Start(Tag::Item) => {
+            MarkdownEvent::Start(MarkdownTag::Item) => {
                 owners.push(LeadingListItem { marker_start: range.start, has_content: false })
             }
-            Event::End(TagEnd::Item) => {
+            MarkdownEvent::End(MarkdownTagEnd::Item) => {
                 owners.pop();
             }
-            Event::Text(_)
-            | Event::Code(_)
-            | Event::Html(_)
-            | Event::InlineHtml(_)
-            | Event::Rule
-            | Event::Start(
-                Tag::CodeBlock(_) | Tag::Heading { .. } | Tag::Table(_) | Tag::Image { .. },
+            MarkdownEvent::Text(_)
+            | MarkdownEvent::Code(_)
+            | MarkdownEvent::HtmlBlock(_)
+            | MarkdownEvent::InlineHtml(_)
+            | MarkdownEvent::Rule
+            | MarkdownEvent::Start(
+                MarkdownTag::CodeBlock { .. }
+                | MarkdownTag::Heading { .. }
+                | MarkdownTag::Table(_)
+                | MarkdownTag::Image { .. },
             ) => {
                 for owner in &mut owners {
                     owner.has_content = true;
@@ -187,7 +191,7 @@ pub(in crate::augmenter) fn leading_heading_list_start(
 }
 
 pub(in crate::augmenter) fn is_visible_content_start(
-    source: &str,
+    source: &MarkdownSource<'_>,
     source_start: usize,
     cursor: usize,
 ) -> bool {
@@ -215,7 +219,7 @@ pub(in crate::augmenter) fn emit_block_break_replacing(
 
 /// 与 [`emit_block_break`] 相同，但插入点由上下文指定而不是使用原光标。
 pub(in crate::augmenter) fn emit_block_break_at(
-    source: &str,
+    source: &MarkdownSource<'_>,
     insert_at: usize,
 ) -> EditAugmentation {
     let mut aug = emit_block_break(source, insert_at);
@@ -225,7 +229,7 @@ pub(in crate::augmenter) fn emit_block_break_at(
 }
 
 pub(in crate::augmenter) fn backspace_empty_source_line(
-    source: &str,
+    source: &MarkdownSource<'_>,
     current_byte: usize,
 ) -> Option<EditAugmentation> {
     editable_paragraph_navigation::backspace(source, current_byte)
@@ -286,7 +290,7 @@ fn backspace_quote_boundary(
 }
 
 pub(in crate::augmenter) fn backspace_paragraph_boundary(
-    source: &str,
+    source: &MarkdownSource<'_>,
     current_byte: usize,
 ) -> Option<EditAugmentation> {
     let (line_start, _, line_end) = locate_source_line_bounds(source, current_byte)?;
@@ -307,7 +311,7 @@ pub(in crate::augmenter) fn backspace_paragraph_boundary(
         return None;
     }
 
-    let current_context = classify_enter_context(source, current_byte);
+    let current_context = classify_source(source, current_byte);
     let current_quote_prefix = if at_quote_content_start {
         let EnterContext::BlockQuoteLine { continuation_prefix, .. } = &current_context else {
             return None;
@@ -343,7 +347,7 @@ pub(in crate::augmenter) fn backspace_paragraph_boundary(
         return None;
     }
 
-    let context = classify_enter_context(source, boundary_start);
+    let context = classify_source(source, boundary_start);
     if let Some(current_prefix) = current_quote_prefix {
         return backspace_quote_boundary(
             source,
