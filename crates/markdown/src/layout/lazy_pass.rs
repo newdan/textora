@@ -8,6 +8,19 @@ use crate::style::MarkdownStyle;
 
 pub(in crate::layout::types) const VIEWPORT_BUFFER_RATIO: f32 = 0.5;
 
+impl LazyLayout<crate::builder::MarkdownDoc> {
+    /// Move the editable tree into replacement geometry when the source is unchanged.
+    pub(crate) fn take_editor_structure_for_reflow(
+        &mut self,
+        current: &MarkdownSource<'_>,
+    ) -> Option<crate::builder::MarkdownDoc> {
+        let previous = self.source_snapshot.as_deref()?;
+        std::ptr::eq(previous, current).then(|| crate::builder::MarkdownDoc {
+            blocks: std::mem::take(&mut self.source.blocks),
+        })
+    }
+}
+
 /// 该文档块是否展开为多个 LaidOutBlock（与 flatten_blocks 的展开规则一致）：
 /// 单块重排路径遇到这类块时必须整组处理，不能只取首个输出。
 pub(in crate::layout::types) fn expands_into_multiple_laid_out_blocks(

@@ -13,7 +13,8 @@ use textora_markdown::view::MarkdownEditorView;
 use ui::Rect;
 use ui::core::DrawList;
 use ui::plugin::{
-    AugmentKind, EditIntent, EditPlan, EditRequest, EditSelection, EditTransaction, ViewPlugin,
+    AugmentKind, EditIntent, EditPlan, EditRequest, EditSelection, EditTransaction, SyncReason,
+    ViewPlugin,
 };
 use ui::plugin::{EditPolicy, EditableView};
 use ui::theme::Theme;
@@ -159,12 +160,17 @@ impl EditorFrame {
         let plan = self.view.plan_edit(request);
         let transaction = match (plan, &request.intent) {
             (EditPlan::Apply(transaction), _) => transaction,
-            (EditPlan::UseDefault, EditIntent::InsertText(text)) => EditTransaction::replace(
-                request.source_generation,
-                request.cursor_byte..request.cursor_byte,
-                text.clone(),
-                request.cursor_byte + text.len(),
-            ),
+            (EditPlan::UseDefault, EditIntent::InsertText(text)) => {
+                let range =
+                    request.selection.clone().unwrap_or(request.cursor_byte..request.cursor_byte);
+                let caret_after = range.start + text.len();
+                EditTransaction::replace(
+                    request.source_generation,
+                    range,
+                    text.clone(),
+                    caret_after,
+                )
+            }
             (plan, _) => panic!("editor benchmark expected a text replacement: {plan:?}"),
         };
         for replacement in transaction.replacements.into_iter().rev() {
@@ -173,7 +179,11 @@ impl EditorFrame {
         let EditSelection::Caret(caret) = transaction.selection_after else {
             panic!("editor benchmark expected a caret after the replacement");
         };
-        self.view.set_source(self.source.clone(), transaction.source_generation + 1);
+        self.view.sync_document(
+            transaction.source_generation.wrapping_add(1),
+            SyncReason::Normal,
+            &mut || self.source.clone(),
+        );
         self.set_caret(caret);
     }
 }
@@ -252,6 +262,37 @@ fn benchmark_editor_table_enter(criterion: &mut Criterion) {
     group.finish();
 }
 
+fn benchmark_editor_selection_replacement(criterion: &mut Criterion) {
+    const SELECTED_PARAGRAPH: &str = "普通段落";
+    const REPLACEMENT_TEXT: &str = " 新";
+
+    let mut group = criterion.benchmark_group("markdown_editor_mixed");
+    let theme = ui::theme::test_theme();
+    let shaper = RefCell::new(Shaper::new().expect("benchmark font shaper must initialize"));
+    for &size_kib in MIXED_DOCUMENT_SIZES_KIB {
+        let source = format!("{SELECTED_PARAGRAPH}\n\n{}", mixed_document(size_kib * 1024));
+        let caret = SELECTED_PARAGRAPH.len();
+        let request = EditRequest {
+            source_generation: INITIAL_GENERATION,
+            cursor_byte: caret,
+            selection: Some(0..caret),
+            intent: EditIntent::InsertText(REPLACEMENT_TEXT.into()),
+        };
+        group.throughput(Throughput::Bytes(source.len() as u64));
+        group.bench_function(BenchmarkId::new("replace_selection", size_kib), |bencher| {
+            bencher.iter_batched_ref(
+                || EditorFrame::prepare(&source, caret, &theme, &mut shaper.borrow_mut()),
+                |frame| {
+                    frame.apply_edit(&request);
+                    frame.draw(VIEWPORT_WIDTH, &theme, &mut shaper.borrow_mut())
+                },
+                BatchSize::PerIteration,
+            );
+        });
+    }
+    group.finish();
+}
+
 fn benchmark_editor_view(criterion: &mut Criterion) {
     benchmark_editor_insert(
         criterion,
@@ -275,6 +316,7 @@ fn benchmark_editor_view(criterion: &mut Criterion) {
         |source| floor_char_boundary(source, source.len() / 2),
     );
     benchmark_editor_table_enter(criterion);
+    benchmark_editor_selection_replacement(criterion);
 }
 
 criterion_group!(

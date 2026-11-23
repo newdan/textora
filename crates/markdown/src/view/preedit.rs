@@ -207,6 +207,13 @@ fn render_engine(
     };
     let style = settings.style_at_dpi(theme, dpi_scale);
     engine.toc_max_depth = settings.toc_max_depth;
+    // A changed width forces new geometry. The old layout will not reconcile its
+    // blocks at a different width, so its exact-source editable tree can move.
+    let reuse_structure = if composing_range.is_none() && bounds.w != engine.cached_viewport_w {
+        engine.lazy.as_mut().and_then(|layout| layout.take_editor_structure_for_reflow(source))
+    } else {
+        None
+    };
     let string_doc = textora_core::document::StringDocView::new(source);
     let (mut dl, _) = engine.render(
         theme,
@@ -215,7 +222,10 @@ fn render_engine(
         bounds.x,
         bounds.y,
         &style,
-        |_| build_composition_document(source, composing_range.as_ref()),
+        |_| {
+            reuse_structure
+                .unwrap_or_else(|| build_composition_document(source, composing_range.as_ref()))
+        },
         Some(shaper),
         &string_doc,
         true,  // editing keeps whole-document flat lines for selection/navigation.

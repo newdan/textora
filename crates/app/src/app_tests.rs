@@ -2270,6 +2270,44 @@ fn markdown_enter_then_backspace_removes_generated_item_before_horizontal_rule()
 
 #[test]
 #[cfg(feature = "markdown")]
+fn markdown_table_creation_from_enter_is_one_undoable_source_change() {
+    use ui::plugin::SemanticEditCommand;
+
+    let source = "普通段落\n\n| first | second |";
+    let created = "普通段落\n\n| first | second |\n| --- | --- |\n|  |  |";
+    let cell_caret = "普通段落\n\n| first | second |\n| --- | --- |\n| ".len();
+    let mut app = App::new(None);
+    let mut doc = DocumentFixture::new(source.lines().map(str::to_owned).collect(), 80, 10.0);
+    doc.cursor_move_to_offset(source.len());
+    let generation_before = doc.generation();
+    app.push_entry_for_test(doc, Box::new(textora_markdown::view::MarkdownEditorView::new()));
+    app.switch_workspace_for_test(0);
+    app.sync_plugin_state();
+    render_active_wysiwyg_plugin_for_test(&mut app);
+
+    assert!(app.dispatch_transactional_edit_for_test(EditCommand::InsertNewline).redraw);
+
+    let tab = app.active_tab_session().expect("table creation document");
+    assert_eq!(tab.document().full_text(), created);
+    assert_eq!(tab.document().generation(), generation_before.wrapping_add(1));
+    assert_eq!(tab.document().cursor_offset().to_usize(), cell_caret);
+    assert_eq!(tab.document().selection_range(), None);
+
+    assert!(app.dispatch_semantic_edit(SemanticEditCommand::Undo).redraw);
+    let tab = app.active_tab_session().expect("table creation document after undo");
+    assert_eq!(tab.document().full_text(), source);
+    assert_eq!(tab.document().cursor_offset().to_usize(), source.len());
+    assert_eq!(tab.document().selection_range(), None);
+
+    assert!(app.dispatch_semantic_edit(SemanticEditCommand::Redo).redraw);
+    let tab = app.active_tab_session().expect("table creation document after redo");
+    assert_eq!(tab.document().full_text(), created);
+    assert_eq!(tab.document().cursor_offset().to_usize(), cell_caret);
+    assert_eq!(tab.document().selection_range(), None);
+}
+
+#[test]
+#[cfg(feature = "markdown")]
 fn markdown_table_enter_keeps_moved_cursor_visible() {
     let source = "| a |\n|---|\n| b |";
     let expected_cursor = source.find('b').expect("table target content must exist");

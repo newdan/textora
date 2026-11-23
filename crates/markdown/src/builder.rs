@@ -948,6 +948,11 @@ fn needs_empty_text_line(node: &BlockNode) -> bool {
 
 // ===== 公开入口 =====
 
+#[cfg(test)]
+thread_local! {
+    pub(crate) static MARKDOWN_STRUCTURE_BUILD_COUNT: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
 impl MarkdownDoc {
     /// Build the editable layout tree without changing the parsed Markdown or source.
     pub fn build_for_editing(parsed: &ParsedMarkdown, style: &MarkdownStyle, source: &str) -> Self {
@@ -973,6 +978,8 @@ impl MarkdownDoc {
         parsed: &ParsedMarkdown,
         composing_range: Option<&std::ops::Range<usize>>,
     ) -> Self {
+        #[cfg(test)]
+        MARKDOWN_STRUCTURE_BUILD_COUNT.with(|count| count.set(count.get() + 1));
         let mut builder = MarkdownBuilder::new();
         let mut image_depth = 0usize;
 

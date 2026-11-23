@@ -10,6 +10,12 @@ pub struct MarkdownEditorView {
     pub(in crate::view) source: SourceSnapshot,
     pub(in crate::view) cached_generation: Option<u32>,
     pub(in crate::view) split_history: std::cell::RefCell<split_history::SplitHistory>,
+    pending_commit_source: std::cell::RefCell<Option<PendingCommitSource>>,
+}
+
+struct PendingCommitSource {
+    base_generation: u32,
+    snapshot: SourceSnapshot,
 }
 
 impl Default for MarkdownEditorView {
@@ -23,10 +29,26 @@ impl MarkdownEditorView {
         let mut engine = PreviewEngine::new();
         let source = MarkdownSource::snapshot(String::new());
         engine.edit_source = Some(source.clone());
-        Self { engine, source, cached_generation: None, split_history: Default::default() }
+        Self {
+            engine,
+            source,
+            cached_generation: None,
+            split_history: Default::default(),
+            pending_commit_source: Default::default(),
+        }
     }
 
     pub fn set_source(&mut self, text: String, generation: u32) {
+        self.synchronize_source(text, generation, ui::plugin::SyncReason::Force);
+    }
+
+    fn synchronize_source(
+        &mut self,
+        text: String,
+        generation: u32,
+        reason: ui::plugin::SyncReason,
+    ) {
+        let pending = self.pending_commit_source.get_mut().take();
         self.split_history.get_mut().synchronize(&self.source, &text);
         let text_changed = self.source.as_str() != text;
         let source_changed = text_changed || self.needs_source_update(generation);
@@ -34,7 +56,14 @@ impl MarkdownEditorView {
             self.engine.set_preedit_text(String::new(), None);
         }
         if text_changed {
-            self.source = MarkdownSource::snapshot(text);
+            let reusable = pending.filter(|pending| {
+                reason == ui::plugin::SyncReason::Normal
+                    && self.cached_generation == Some(pending.base_generation)
+                    && generation == pending.base_generation.wrapping_add(1)
+                    && pending.snapshot.as_bytes() == text.as_bytes()
+            });
+            self.source =
+                reusable.map_or_else(|| MarkdownSource::snapshot(text), |pending| pending.snapshot);
             self.engine.edit_source = Some(self.source.clone());
             self.engine.mark_source_dirty();
         }
@@ -156,6 +185,7 @@ fn selection_augmentation_edit_plan(
 
 impl ui::plugin::EditPolicy for MarkdownEditorView {
     fn plan_edit(&self, request: &ui::plugin::EditRequest) -> ui::plugin::EditPlan {
+        *self.pending_commit_source.borrow_mut() = None;
         self.split_history.borrow_mut().begin_request();
         if self.needs_source_update(request.source_generation) {
             return ui::plugin::EditPlan::UseDefault;
@@ -179,20 +209,36 @@ impl ui::plugin::EditPolicy for MarkdownEditorView {
         let Some(kind) = request_augment_kind(&request.intent) else {
             return ui::plugin::EditPlan::UseDefault;
         };
-        let plan = self
-            .engine
+        if matches!(kind, ui::plugin::AugmentKind::Enter) {
+            return self.plan_paragraph_break(request);
+        }
+        self.engine
             .augment_edit(request.cursor_byte, kind)
             .map_or(ui::plugin::EditPlan::UseDefault, |augmentation| {
                 augmentation_edit_plan(request, augmentation)
-            });
-        if matches!(request.intent, ui::plugin::EditIntent::InsertParagraphBreak) {
-            self.split_history.borrow_mut().remember(&self.source, request, &plan);
-        }
-        plan
+            })
     }
 }
 
 impl MarkdownEditorView {
+    fn plan_paragraph_break(&self, request: &ui::plugin::EditRequest) -> ui::plugin::EditPlan {
+        let Some(enter) = crate::augmenter::augment_enter(&self.source, request.cursor_byte) else {
+            return ui::plugin::EditPlan::UseDefault;
+        };
+        let plan = augmentation_edit_plan(request, enter.augmentation);
+        if let ui::plugin::EditPlan::Apply(transaction) = &plan
+            && let Some(snapshot) = enter.validated_source
+            && self.engine.edit_ctx.as_ref().is_none_or(|context| context.preedit_text.is_none())
+        {
+            *self.pending_commit_source.borrow_mut() = Some(PendingCommitSource {
+                base_generation: transaction.source_generation,
+                snapshot,
+            });
+        }
+        self.split_history.borrow_mut().remember(&self.source, request, &plan);
+        plan
+    }
+
     /// 清空或改写选区时，先在原始源码上计算结构保护擦除，再合成为单一原子事务。
     pub(in crate::view) fn plan_selection_edit(
         &self,
@@ -475,7 +521,7 @@ impl ViewPlugin for MarkdownEditorView {
         if reason == ui::plugin::SyncReason::Normal && !self.needs_source_update(generation) {
             return ui::plugin::SyncOutcome::Unchanged;
         }
-        self.set_source(load_source(), generation);
+        self.synchronize_source(load_source(), generation, reason);
         ui::plugin::SyncOutcome::Updated
     }
 }
@@ -552,6 +598,7 @@ impl ui::plugin::EditableView for MarkdownEditorView {
         cursor_byte: usize,
         selection: Option<std::ops::Range<usize>>,
     ) -> ui::plugin::SemanticEditPlan {
+        *self.pending_commit_source.borrow_mut() = None;
         if self.needs_source_update(source_generation) {
             return ui::plugin::SemanticEditPlan::Unsupported;
         }
@@ -658,6 +705,9 @@ impl ui::plugin::EditableView for MarkdownEditorView {
     }
 
     fn set_preedit(&mut self, text: String, cursor: Option<(usize, usize)>) {
+        if !text.is_empty() {
+            *self.pending_commit_source.get_mut() = None;
+        }
         self.engine.set_preedit_text(text, cursor);
     }
 }

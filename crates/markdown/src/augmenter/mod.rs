@@ -20,7 +20,7 @@ pub(in crate::augmenter) mod paragraph_leading_spaces;
 
 use crate::builder::ListBullet;
 use crate::parser::{MarkdownEvent, MarkdownTag, MarkdownTagEnd};
-use crate::source_snapshot::MarkdownSource;
+use crate::source_snapshot::{MarkdownSource, SourceSnapshot};
 use ui::plugin::{AugmentKind, EditAugmentation};
 
 pub(in crate::augmenter) const LF_SEQUENCE: &str = "\n";
@@ -57,7 +57,7 @@ pub(crate) fn augment_source(
     kind: AugmentKind,
 ) -> Option<EditAugmentation> {
     match kind {
-        AugmentKind::Enter => augment_enter(source, current_byte),
+        AugmentKind::Enter => augment_enter(source, current_byte).map(|plan| plan.augmentation),
         AugmentKind::LineBreak => Some(augment_line_break(source, current_byte)),
         AugmentKind::Backspace => augment_backspace(source, current_byte),
         AugmentKind::Tab => augment_table_tab(source, current_byte, false)
@@ -156,10 +156,15 @@ pub(in crate::augmenter) fn emit_inline_html_break(
     augmentation
 }
 
-pub(in crate::augmenter) fn augment_enter(
+pub(crate) struct EnterAugmentation {
+    pub(crate) augmentation: EditAugmentation,
+    pub(crate) validated_source: Option<SourceSnapshot>,
+}
+
+pub(crate) fn augment_enter(
     source: &MarkdownSource<'_>,
     current_byte: usize,
-) -> Option<EditAugmentation> {
+) -> Option<EnterAugmentation> {
     let pipe_candidate_context = if has_pipe_header_shape_at_cursor(source, current_byte) {
         let context = classify_source(source, current_byte);
         if let Some(augmentation) = pipe_header_table_augmentation(source, current_byte, &context) {
@@ -170,10 +175,11 @@ pub(in crate::augmenter) fn augment_enter(
         None
     };
     if let Some(augmentation) = editable_paragraph_navigation::enter(source, current_byte) {
-        return Some(augmentation);
+        return Some(EnterAugmentation { augmentation, validated_source: None });
     }
     let context = pipe_candidate_context.unwrap_or_else(|| classify_source(source, current_byte));
     enter_context_augmentation(source, current_byte, context)
+        .map(|augmentation| EnterAugmentation { augmentation, validated_source: None })
 }
 
 pub(in crate::augmenter) fn has_pipe_header_shape_at_cursor(
@@ -218,11 +224,11 @@ pub(in crate::augmenter) fn has_pipe_header_shape_at_cursor(
     pipe_header_column_count(header.trim_start_matches([' ', '\t'])).is_some()
 }
 
-pub(in crate::augmenter) fn pipe_header_table_augmentation(
+fn pipe_header_table_augmentation(
     source: &MarkdownSource<'_>,
     current_byte: usize,
     context: &EnterContext,
-) -> Option<EditAugmentation> {
+) -> Option<EnterAugmentation> {
     let (line_start, _, line_end) = locate_snapshot_line_bounds(source, current_byte)?;
     let content_end = source_line_content_end(source, line_end);
     if current_byte != content_end {
@@ -270,14 +276,18 @@ pub(in crate::augmenter) fn pipe_header_table_augmentation(
     let mut prospective = source.as_str().to_owned();
     prospective.replace_range(line_start..current_byte, &replacement_text);
     let table_count_before = parsed_table_count(source, column_count);
-    let table_count_after = parsed_table_count(&MarkdownSource::owned(prospective), column_count);
+    let validated_source = MarkdownSource::snapshot(prospective);
+    let table_count_after = parsed_table_count(&validated_source, column_count);
     if table_count_after != table_count_before + 1 {
         return None;
     }
-    Some(EditAugmentation {
-        insert_text: Some(replacement_text),
-        replace_range: Some(line_start..current_byte),
-        cursor_byte_after,
+    Some(EnterAugmentation {
+        augmentation: EditAugmentation {
+            insert_text: Some(replacement_text),
+            replace_range: Some(line_start..current_byte),
+            cursor_byte_after,
+        },
+        validated_source: Some(validated_source),
     })
 }
 
