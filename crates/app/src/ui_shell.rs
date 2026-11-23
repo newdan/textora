@@ -31,7 +31,7 @@ const SIDEBAR_OVERLAY_DOCK_THICKNESS: f32 = 0.5;
 const UI_SHELL_ACCESSIBILITY_ID: ui::core::AccessibilityId =
     ui::core::AccessibilityId(0x7465_7874_6f72_615f);
 
-/// Shell 输入：从 App / Workspace 读出的 chrome 状态。
+/// Shell 输入：从 App / EditorTabSet 读出的 chrome 状态。
 #[derive(Debug, Clone)]
 pub struct ShellInputs {
     pub tabs_visible: bool,
@@ -109,7 +109,7 @@ pub struct UiShell {
     scrollbar_scroll_top: f64,
     /// Phase 7：Sidebar 状态持久化（每帧重建 widget 时保持配置）。
     sidebar_config: ui::sidebar::SidebarConfig,
-    sidebar_persistent: ui::sidebar::SidebarPersistent,
+    detached_sidebar: Option<ui::sidebar::SidebarInteraction>,
     dragging_sidebar: bool,
     frames_rendered: u32,
     sidebar_tabs: Vec<ui::tab_bar::TabInfo>,
@@ -173,9 +173,9 @@ impl UiShell {
             scrollbar_total_display_rows: 0,
             scrollbar_scroll_top: 0.0,
             sidebar_config: ui::sidebar::SidebarConfig::new_default(1.0),
-            sidebar_persistent: ui::sidebar::SidebarPersistent::new(
+            detached_sidebar: Some(ui::sidebar::SidebarInteraction::new(
                 &ui::sidebar::SidebarConfig::new_default(1.0),
-            ),
+            )),
             dragging_sidebar: false,
             frames_rendered: 0,
             sidebar_tabs: Vec::new(),
@@ -400,40 +400,60 @@ impl UiShell {
     pub fn scale_sidebar_width(&mut self, ratio: f32) {
         self.sidebar_config.width *= ratio;
     }
-    pub fn set_sidebar_visibility(&mut self, visibility: ui::sidebar::Visibility) {
-        self.sidebar_persistent.visibility = visibility;
+    fn sidebar_widget(&self) -> Option<&SidebarWidget> {
+        self.dock.children.iter().find_map(|child| child.widget.as_any().downcast_ref())
     }
-    #[cfg(test)]
+
+    fn sidebar_widget_mut(&mut self) -> Option<&mut SidebarWidget> {
+        self.dock.children.iter_mut().find_map(|child| child.widget.as_any_mut().downcast_mut())
+    }
+
+    fn sidebar_interaction(&self) -> &ui::sidebar::SidebarInteraction {
+        self.detached_sidebar.as_ref().unwrap_or_else(|| {
+            self.sidebar_widget().expect("mounted sidebar must live in the Dock").interaction()
+        })
+    }
+
+    fn sidebar_interaction_mut(&mut self) -> &mut ui::sidebar::SidebarInteraction {
+        if let Some(interaction) = &mut self.detached_sidebar {
+            return interaction;
+        }
+        self.dock
+            .children
+            .iter_mut()
+            .find_map(|child| child.widget.as_any_mut().downcast_mut::<SidebarWidget>())
+            .expect("mounted sidebar must live in the Dock")
+            .interaction_mut()
+    }
+
+    pub fn set_sidebar_visibility(&mut self, visibility: ui::sidebar::Visibility) {
+        self.sidebar_interaction_mut().hover.visibility = visibility;
+    }
     fn sidebar_visibility(&self) -> ui::sidebar::Visibility {
-        self.sidebar_persistent.visibility
+        self.sidebar_interaction().hover.visibility
     }
     pub fn set_sidebar_suppress_hover_enter(&mut self, suppress: bool) {
-        self.sidebar_persistent.suppress_hover_enter = suppress;
-    }
-    #[cfg(test)]
-    fn sidebar_settings_button_rect(&self) -> Rect {
-        self.sidebar_persistent.settings_btn_rect
+        self.sidebar_interaction_mut().hover.suppress_hover_enter = suppress;
     }
     pub fn sidebar_current_width(&self) -> f32 {
-        self.sidebar_persistent.current_width(&self.sidebar_config)
+        self.sidebar_interaction().current_width(&self.sidebar_config)
     }
     pub fn sidebar_editor_left_offset(&self) -> f32 {
-        self.sidebar_persistent.editor_left_offset(&self.sidebar_config)
+        self.sidebar_interaction().editor_left_offset(&self.sidebar_config)
     }
     pub fn sidebar_clamp_width(&mut self, dpi: f32) {
         self.sidebar_config.clamp_width(dpi);
     }
     pub fn sidebar_on_scroll(&mut self, delta_px: f32, _total_tabs: usize) {
-        self.sidebar_persistent.list_scroll_offset += delta_px;
+        self.sidebar_interaction_mut().list_scroll_offset += delta_px;
     }
-    pub fn sidebar_set_hovered(&mut self, idx: Option<usize>) {
-        self.sidebar_persistent.hovered_index = idx;
-    }
-    pub fn sidebar_set_open_menu(&mut self, menu: Option<ui::popup_menu::PopupMenu>) {
-        self.sidebar_persistent.open_menu = menu;
+    pub fn sidebar_clear_menu(&mut self) {
+        if let Some(widget) = self.sidebar_widget_mut() {
+            widget.set_open_menu(None);
+        }
     }
     pub fn sidebar_tick(&mut self, now: std::time::Instant) -> (bool, bool) {
-        self.sidebar_persistent.tick(now)
+        self.sidebar_interaction_mut().tick(now)
     }
     pub fn dock_is_dirty(&self) -> bool {
         self.dock_dirty
@@ -453,44 +473,36 @@ impl UiShell {
             ui::sidebar::SidebarKey::TogglePin => {
                 let new_pinned = !self.sidebar_config.pinned;
                 self.sidebar_config.pinned = new_pinned;
-                self.sidebar_persistent.visibility = if new_pinned {
+                self.sidebar_interaction_mut().hover.visibility = if new_pinned {
                     ui::sidebar::Visibility::Pinned
                 } else {
                     ui::sidebar::Visibility::Hidden
                 };
                 if !new_pinned {
-                    self.sidebar_persistent.suppress_hover_enter = true;
+                    self.sidebar_interaction_mut().hover.suppress_hover_enter = true;
                 }
                 Some(ui::sidebar::SidebarAction::TogglePin)
             }
             ui::sidebar::SidebarKey::Escape => {
                 // Dismiss popup menu first
-                if self.sidebar_persistent.open_menu.is_some() {
-                    self.sidebar_persistent.open_menu = None;
+                if let Some(widget) = self.sidebar_widget_mut()
+                    && widget.open_menu().is_some()
+                {
+                    widget.set_open_menu(None);
                     return Some(ui::sidebar::SidebarAction::Hovered);
                 }
-                if self.sidebar_persistent.visibility == ui::sidebar::Visibility::HoverPeek
-                    || self.sidebar_persistent.visibility
-                        == ui::sidebar::Visibility::HoverPeekFadingOut
+                if self.sidebar_visibility() == ui::sidebar::Visibility::HoverPeek
+                    || self.sidebar_visibility() == ui::sidebar::Visibility::HoverPeekFadingOut
                 {
-                    self.sidebar_persistent.hover_peek_start = None;
-                    self.sidebar_persistent.hover_peek_leave_start = None;
-                    self.sidebar_persistent.visibility = ui::sidebar::Visibility::Hidden;
-                    self.sidebar_persistent.hover_leave_at = None;
+                    self.sidebar_interaction_mut().hover.hover_peek_start = None;
+                    self.sidebar_interaction_mut().hover.hover_peek_leave_start = None;
+                    self.sidebar_interaction_mut().hover.visibility =
+                        ui::sidebar::Visibility::Hidden;
+                    self.sidebar_interaction_mut().hover.hover_leave_at = None;
                     Some(ui::sidebar::SidebarAction::PersistConfig)
                 } else {
                     None
                 }
-            }
-        }
-    }
-
-    /// 从 Dock child 中同步 SidebarWidget 的持久化状态回来。
-    pub fn sync_sidebar_persistent(&mut self) {
-        for child in self.dock.children.iter_mut() {
-            if let Some(sw) = child.widget.as_any_mut().downcast_mut::<SidebarWidget>() {
-                self.sidebar_persistent = sw.steal_persistent();
-                return;
             }
         }
     }
@@ -687,14 +699,14 @@ impl UiShell {
             return None;
         }
         let visibility = self.sidebar_config.visibility_for_width(
-            self.sidebar_persistent.visibility,
+            self.sidebar_visibility(),
             screen.w,
             inputs.metrics.dpi,
         );
-        if visibility == self.sidebar_persistent.visibility {
+        if visibility == self.sidebar_visibility() {
             return None;
         }
-        self.sidebar_persistent.visibility = visibility;
+        self.sidebar_interaction_mut().hover.visibility = visibility;
         let mut resolved = inputs.clone();
         resolved.sidebar_thickness =
             self.sidebar_editor_left_offset().max(SIDEBAR_OVERLAY_DOCK_THICKNESS);
@@ -779,9 +791,13 @@ impl UiShell {
         }
 
         // Step 2: Rebuild Dock children when structure changes
-        if self.dock_dirty {
+        let sidebar_popup = if self.dock_dirty {
+            let popup = self.sidebar_widget().and_then(SidebarWidget::open_popup_kind);
             self.rebuild_dock_children(inputs, screen);
-        }
+            popup
+        } else {
+            None
+        };
 
         // Search bar keyboard focus: auto-focus on first open, clear on close.
         // Subsequent focus changes are driven by mouse/key events (Phase 3).
@@ -811,6 +827,11 @@ impl UiShell {
         if let Some(input) = self.canvas_scrollbars_input {
             self.canvas_scrollbars.set_input(input);
             self.canvas_scrollbars.set_rect(self.dock.fill_rect, &mut layout_ctx);
+        }
+        if let Some(popup) = sidebar_popup
+            && let Some(sidebar) = self.sidebar_widget_mut()
+        {
+            sidebar.open_popup(popup);
         }
         self.frames_rendered += 1;
         // Sidebar 在 frame 0 被 macOS 初始化守卫跳过（frames_rendered > 0）。
@@ -859,8 +880,8 @@ impl UiShell {
             }
             // Sidebar
             if let Some(sw) = child.widget.as_any_mut().downcast_mut::<SidebarWidget>() {
+                *sw.config_mut() = self.sidebar_config.clone();
                 sw.set_input(sidebar_input.clone());
-                sw.inject_persistent(&self.sidebar_persistent);
                 continue;
             }
             // Scrollbar
@@ -886,6 +907,10 @@ impl UiShell {
     }
 
     fn rebuild_dock_children(&mut self, inputs: &ShellInputs, screen: Screen) {
+        if let Some(widget) = self.sidebar_widget_mut() {
+            let interaction = widget.take_interaction();
+            self.detached_sidebar = Some(interaction);
+        }
         self.dock.children.clear();
 
         // Tabs mode uses the same window title bar above its tab strip.
@@ -925,7 +950,8 @@ impl UiShell {
             let mut sw = SidebarWidget::new(self.sidebar_config.clone(), inputs.metrics);
             let sidebar_input = self.sidebar_widget_input(screen, inputs);
             sw.set_input(sidebar_input);
-            sw.inject_persistent(&self.sidebar_persistent);
+            *sw.interaction_mut() =
+                self.detached_sidebar.take().expect("only a detached sidebar can be mounted");
             self.dock.children.push(DockChild {
                 widget: Box::new(sw),
                 side: Side::Left,
@@ -1353,8 +1379,7 @@ impl UiShell {
         // dock children（tab, search, status, sidebar, scrollbar）
         // 阶段4：为每个子 widget 推入其 layout_rect 偏移
         // 非 Pinned 模式：sidebar 延迟到最后绘制（覆盖 titlebar/statusbar）
-        let sidebar_on_top =
-            !matches!(self.sidebar_persistent.visibility, ui::sidebar::Visibility::Pinned);
+        let sidebar_on_top = !matches!(self.sidebar_visibility(), ui::sidebar::Visibility::Pinned);
         for child in &self.dock.children {
             if sidebar_on_top && child.widget.as_any().is::<SidebarWidget>() {
                 continue;
@@ -1862,21 +1887,18 @@ mod tests {
     #[test]
     fn semantic_state_methods_update_private_shell_state() {
         let mut shell = UiShell::new();
-        let settings_button_rect = Rect::new(12.0, 24.0, 36.0, 48.0);
 
         shell.set_sidebar_width(240.0);
         shell.scale_sidebar_width(1.5);
         shell.set_sidebar_visibility(ui::sidebar::Visibility::Pinned);
         shell.set_sidebar_suppress_hover_enter(true);
-        shell.sidebar_persistent.settings_btn_rect = settings_button_rect;
         shell.dock_dirty = false;
         shell.mark_dock_dirty();
         shell.mark_layout_initialized_for_test();
 
         assert_eq!(shell.sidebar_width(), 360.0);
         assert_eq!(shell.sidebar_visibility(), ui::sidebar::Visibility::Pinned);
-        assert!(shell.sidebar_persistent.suppress_hover_enter);
-        assert_eq!(shell.sidebar_settings_button_rect(), settings_button_rect);
+        assert!(shell.sidebar_interaction().hover.suppress_hover_enter);
         assert!(shell.dock_is_dirty());
         assert_eq!(shell.frames_rendered, 1);
     }
@@ -2856,7 +2878,7 @@ mod tests {
     }
 
     #[test]
-    fn sync_sidebar_persistent_updates_persistent_from_widget() {
+    fn sidebar_rebuild_moves_only_cross_frame_state() {
         let theme = test_theme();
         let mut m = NoopMeasure;
         let mut shell = UiShell::new();
@@ -2893,16 +2915,71 @@ mod tests {
         };
         shell.update_frame(Screen::new(1200.0, 800.0), &theme, &mut m, &inputs);
 
-        // Set hovered_index on persistent, inject, then sync back
-        shell.sidebar_persistent.hovered_index = Some(0);
-        shell.update_frame(Screen::new(1200.0, 800.0), &theme, &mut m, &inputs);
+        let now = std::time::Instant::now();
+        {
+            let widget = shell.sidebar_widget_mut().expect("sidebar is mounted");
+            widget.interaction_mut().hover.visibility = ui::sidebar::Visibility::HoverPeek;
+            widget.interaction_mut().hover.hover_peek_start = Some(now);
+            widget.interaction_mut().list_scroll_offset = 42.0;
+            widget.set_hovered_index(Some(0));
+            widget.open_settings_menu();
+            assert!(widget.open_menu().is_some());
+        }
 
-        // After sync, persistent should retain the hovered_index from the widget
-        // (widget was injected with hovered_index=Some(0), so after processing it should be Some(0) or None)
-        // The key test: sync_sidebar_persistent should not panic and should update the persistent
-        shell.sync_sidebar_persistent();
-        // After sync, the persistent is replaced by the widget's state
-        // Since we didn't send any events, the widget's hovered_index should be whatever was injected
+        shell.rebuild_dock_children(&inputs, Screen::new(1200.0, 800.0));
+        let widget = shell.sidebar_widget().expect("sidebar remounted");
+        assert_eq!(widget.visibility(), ui::sidebar::Visibility::HoverPeek);
+        assert_eq!(widget.interaction().hover.hover_peek_start, Some(now));
+        assert_eq!(widget.list_scroll_offset(), 42.0);
+        assert!(widget.current_layout().is_none(), "old geometry must be dropped");
+        assert!(widget.hovered_index().is_none(), "old list hover must be dropped");
+        assert!(widget.open_menu().is_none(), "old popup hit geometry must be dropped");
+        assert!(shell.detached_sidebar.is_none(), "the mounted widget owns the sole state");
+
+        let mut without_sidebar = inputs.clone();
+        without_sidebar.sidebar_visible = false;
+        shell.rebuild_dock_children(&without_sidebar, Screen::new(1200.0, 800.0));
+        assert!(shell.sidebar_widget().is_none());
+        assert_eq!(shell.sidebar_interaction().list_scroll_offset, 42.0);
+        shell.rebuild_dock_children(&inputs, Screen::new(1200.0, 800.0));
+        assert_eq!(shell.sidebar_widget().expect("sidebar remounted").list_scroll_offset(), 42.0);
+    }
+
+    #[test]
+    fn dock_rebuild_reanchors_open_sidebar_menu() {
+        use ui::sidebar::{SidebarAction, SidebarKey};
+
+        let theme = test_theme();
+        let mut measure = NoopMeasure;
+        let mut shell = UiShell::new();
+        shell.set_sidebar_pinned(true);
+        shell.frames_rendered = 2;
+        let mut inputs =
+            ShellInputs { sidebar_visible: true, sidebar_thickness: 220.0, ..shell_inputs() };
+        shell.update_frame(Screen::new(1200.0, 800.0), &theme, &mut measure, &inputs);
+        shell.sidebar_widget_mut().expect("pinned sidebar").open_settings_menu();
+
+        inputs.toc_visible = true;
+        inputs.toc_thickness = 180.0;
+        shell.update_frame(Screen::new(900.0, 650.0), &theme, &mut measure, &inputs);
+
+        let widget = shell.sidebar_widget_mut().expect("sidebar beside table of contents");
+        let popup = widget.open_menu().expect("open menu survives Dock rebuild");
+        assert_eq!(popup.screen_size, (900.0, 650.0));
+        let first_item = popup.item_rects[0];
+        assert_eq!(
+            widget.dispatch_menu_click(
+                first_item.x + first_item.w * 0.5,
+                first_item.y + first_item.h * 0.5
+            ),
+            Some(SidebarAction::ToggleLineNumbers)
+        );
+
+        widget.open_settings_menu();
+        inputs.toc_visible = false;
+        shell.update_frame(Screen::new(900.0, 650.0), &theme, &mut measure, &inputs);
+        assert_eq!(shell.sidebar_on_key(SidebarKey::Escape), Some(SidebarAction::Hovered));
+        assert!(shell.sidebar_widget().expect("pinned sidebar").open_menu().is_none());
     }
 
     #[test]
@@ -2976,7 +3053,6 @@ mod tests {
         shell.frames_rendered = 1;
         shell.set_search_input(ui::search_bar::SearchBarSnapshot {
             query: "test".into(),
-            preedit_text: String::new(),
             match_count: 2,
             current_match: 0,
             visible: true,
@@ -3079,7 +3155,6 @@ mod tests {
         shell.frames_rendered = 1;
         shell.set_search_input(ui::search_bar::SearchBarSnapshot {
             query: "test".into(),
-            preedit_text: String::new(),
             match_count: 2,
             current_match: 0,
             visible: true,
@@ -3275,7 +3350,6 @@ mod tests {
         shell.frames_rendered = 1;
         shell.set_search_input(ui::search_bar::SearchBarSnapshot {
             query: "test".into(),
-            preedit_text: String::new(),
             match_count: 0,
             current_match: 0,
             visible: true,

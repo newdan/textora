@@ -800,8 +800,8 @@ mod tests {
         let luminance = |color: [f32; 4]| color[0] * 0.2126 + color[1] * 0.7152 + color[2] * 0.0722;
         for (role, style) in [
             ("action", ButtonStyle::from_theme(&theme)),
-            ("ghost", ButtonStyle::ghost(theme.settings_theme())),
-            ("destructive", ButtonStyle::destructive(theme.settings_theme())),
+            ("ghost", ButtonStyle::ghost(theme.application_theme())),
+            ("destructive", ButtonStyle::destructive(theme.application_theme())),
         ] {
             for state in
                 [ButtonVisualState::Normal, ButtonVisualState::Hovered, ButtonVisualState::Pressed]
@@ -858,9 +858,9 @@ mod tests {
         assert_eq!(tokens.modal_surface, theme.palette.bg_elevated);
         assert_eq!(tokens.sidebar_surface, theme.palette.bg_surface);
         assert_eq!(tokens.section_surface, theme.palette.bg_elevated);
-        assert_eq!(tokens.focus_ring, theme.palette.accent);
-        assert_eq!(tokens.text_primary, theme.palette.text_main);
-        assert_eq!(tokens.text_secondary, theme.palette.text_muted);
+        assert_eq!(tokens.application.focus_ring, theme.palette.accent);
+        assert_eq!(tokens.application.text_primary, theme.palette.text_main);
+        assert_eq!(tokens.application.text_secondary, theme.palette.text_muted);
     }
 
     #[test]

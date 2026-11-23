@@ -96,10 +96,11 @@ impl Switch {
     }
 
     fn track_color(&self, ctx: &PaintCtx) -> [f32; 4] {
-        let settings = ctx.theme.settings_theme();
         let application = ctx.theme.application_theme();
-        let base_color = if self.checked { settings.accent } else { settings.control_surface };
-        let hover_target = if self.checked { application.on_accent } else { settings.text_primary };
+        let base_color =
+            if self.checked { application.accent } else { application.control_surface };
+        let hover_target =
+            if self.checked { application.on_accent } else { application.text_primary };
         let hover_blend = if self.checked { CHECKED_HOVER_BLEND } else { UNCHECKED_HOVER_BLEND };
         let color = if self.hovered {
             blend_color(base_color, hover_target, hover_blend)
@@ -110,16 +111,16 @@ impl Switch {
     }
 
     fn border_color(&self, ctx: &PaintCtx) -> [f32; 4] {
-        let settings = ctx.theme.settings_theme();
+        let application = ctx.theme.application_theme();
         let base_color = if self.focused {
-            settings.focus_ring
+            application.focus_ring
         } else if self.checked {
-            settings.accent_text
+            application.accent_text
         } else {
-            settings.control_border
+            application.control_border
         };
         let color = if self.hovered && !self.focused {
-            blend_color(base_color, settings.text_primary, BORDER_HOVER_BLEND)
+            blend_color(base_color, application.text_primary, BORDER_HOVER_BLEND)
         } else {
             base_color
         };
@@ -134,11 +135,11 @@ impl Switch {
             );
         }
 
-        let settings = ctx.theme.settings_theme();
+        let application = ctx.theme.application_theme();
         let color = if self.hovered {
-            blend_color(settings.text_secondary, settings.text_primary, THUMB_HOVER_BLEND)
+            blend_color(application.text_secondary, application.text_primary, THUMB_HOVER_BLEND)
         } else {
-            settings.text_secondary
+            application.text_secondary
         };
         apply_alpha(color, ctx.global_alpha * self.alpha_factor())
     }

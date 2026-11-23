@@ -1,7 +1,7 @@
+use textora_markdown::augmenter::AugmentKind;
 use textora_markdown::augmenter::augment_edit;
 use textora_markdown::parser::{MarkdownEvent, MarkdownTag, parse_markdown};
 use textora_markdown::view::MarkdownEditorView;
-use ui::plugin::AugmentKind;
 use ui::plugin::{EditIntent, EditPlan, EditPolicy, EditRequest, EditSelection};
 
 fn type_text(source: &str, cursor: usize, text: &str) -> (String, usize) {

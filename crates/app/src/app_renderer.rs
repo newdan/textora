@@ -1089,7 +1089,6 @@ impl App {
                     .map(|v| (v.viewport_height(), v.total_display_rows(), v.scroll_top()))
             };
             let conflict_label = self.file_safety_status_label();
-            let (preedit_text, _) = self.editor_runtime.preedit();
             let active_shell_input = self.active_tab_session().map(|entry| {
                 let document = entry.document();
                 let status = StatusBarInput {
@@ -1103,11 +1102,6 @@ impl App {
                 let search = entry.search_state();
                 let search_input = SearchBarSnapshot {
                     query: search.query.clone(),
-                    preedit_text: if search.panel_visible {
-                        preedit_text.clone()
-                    } else {
-                        String::new()
-                    },
                     match_count: search.matches.len(),
                     current_match: search.active_match_idx,
                     visible: search.panel_visible,

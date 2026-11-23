@@ -1,12 +1,14 @@
 //! SearchBarWidget — 搜索面板的绘制 + 键盘事件转译。
-//! 显隐由 app 通过 set_visible 注入（visibility 信息源是 doc.search_state.panel_visible）。
-//! query 与 match_count 由 app 通过 set_input 注入。
+//! 宿主通过快照注入显隐、查询词和匹配计数，并按产品转译查找动作。
 mod layout;
 
 /// Height of the search bar in logical pixels (before DPI scaling).
 pub use crate::constants::BAR_HEIGHT as SEARCH_BAR_HEIGHT;
 
-use self::layout::{SearchBarLayout, SearchBarLayoutInput, calculate_search_bar_layout};
+use self::layout::{
+    SearchBarLayout, SearchBarLayoutInput, calculate_full_width_find_layout,
+    calculate_search_bar_layout,
+};
 use crate::core::widget::MouseButton;
 use crate::core::{
     Event, EventCtx, KeyCode, LayoutCtx, PaintCtx, Rect, Widget, WidgetAction, WidgetId,
@@ -79,7 +81,6 @@ impl SearchControl {
 #[derive(Clone, Default)]
 pub struct SearchBarSnapshot {
     pub query: String,
-    pub preedit_text: String,
     pub match_count: usize,
     pub current_match: usize,
     pub visible: bool,
@@ -106,6 +107,18 @@ pub enum SearchBarAction {
     HoverChanged,
 }
 
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct SearchBarEvent {
+    pub consumed: bool,
+    pub action: Option<SearchBarAction>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum SearchBarMode {
+    FindOnly,
+    FindReplace,
+}
+
 use crate::widgets::text_box::{TextBox, TextBoxIme};
 
 const FIND_BOX_ID: WidgetId = WidgetId(0x7365_6172_6368_6669);
@@ -115,7 +128,7 @@ const BUTTON_WIDE_GLYPH_WIDTH_LOGICAL: f32 = 14.0;
 const SEARCH_CONTROL_ICON_SIZE_LOGICAL: f32 = 14.0;
 
 fn search_control_style(theme: &crate::theme::Theme) -> ButtonStyle {
-    let mut style = ButtonStyle::ghost(theme.settings_theme());
+    let mut style = ButtonStyle::ghost(theme.application_theme());
     let mut foreground = theme.palette.input_fg;
     foreground[3] *= 0.6;
     style.foreground = foreground;
@@ -127,6 +140,8 @@ fn search_control_style(theme: &crate::theme::Theme) -> ButtonStyle {
 }
 
 pub struct SearchBarWidget {
+    mode: SearchBarMode,
+    input_focused: bool,
     rect: Rect,
     layout: SearchBarLayout,
     snap: SearchBarSnapshot,
@@ -146,6 +161,9 @@ impl SearchBarWidget {
         let id = match action {
             WidgetAction::Control(crate::core::widget::ControlAction::Activated { id }) => id,
             WidgetAction::Control(crate::core::widget::ControlAction::FocusRequested { id }) => {
+                if self.mode == SearchBarMode::FindOnly {
+                    return Some(WidgetAction::SearchBar(SearchBarAction::FocusFind));
+                }
                 self.controls.set_keyboard_focus(Some(id));
                 return Some(WidgetAction::SearchBar(SearchBarAction::HoverChanged));
             }
@@ -165,9 +183,23 @@ impl SearchBarWidget {
     }
 
     pub fn new() -> Self {
+        Self::with_mode(SearchBarMode::FindReplace)
+    }
+
+    /// Standalone find row with screen-coordinate layout and no editing controls.
+    pub fn find_only() -> Self {
+        Self::with_mode(SearchBarMode::FindOnly)
+    }
+
+    fn with_mode(mode: SearchBarMode) -> Self {
         let mut find_box = TextBox::with_id(FIND_BOX_ID);
-        find_box.set_placeholder("查找…");
-        find_box.set_max_len_bytes(2048);
+        if mode == SearchBarMode::FindOnly {
+            find_box.set_placeholder("在文档中查找…");
+            find_box.set_accessibility_label(Some("文档查找".to_owned()));
+        } else {
+            find_box.set_placeholder("查找…");
+            find_box.set_max_len_bytes(2048);
+        }
 
         let mut replace_box = TextBox::with_id(REPLACE_BOX_ID);
         replace_box.set_placeholder("替换为…");
@@ -192,6 +224,8 @@ impl SearchBarWidget {
         );
 
         Self {
+            mode,
+            input_focused: false,
             rect: Rect::ZERO,
             layout: SearchBarLayout::default(),
             snap: SearchBarSnapshot::default(),
@@ -214,25 +248,101 @@ impl SearchBarWidget {
     }
 
     pub fn set_input(&mut self, snap: SearchBarSnapshot) {
+        self.set_input_with_focus(snap, true);
+    }
+
+    pub fn set_input_with_focus(&mut self, mut snap: SearchBarSnapshot, focused: bool) {
+        self.input_focused = snap.visible && focused;
+        if self.mode == SearchBarMode::FindOnly {
+            snap.replace_mode = false;
+            snap.focus_replace = false;
+            snap.options_use_regex = false;
+        }
         if !snap.visible {
             let theme = crate::theme::test_theme();
             let mut context = EventCtx::new(&theme, 1.0);
             let _ = self.controls.on_event(&Event::InteractionCancel, &mut context);
+            self.controls.set_keyboard_focus(None);
             self.find_box.cancel_transient_interaction();
             self.replace_box.cancel_transient_interaction();
         }
         self.find_box.sync_text(&snap.query);
         self.replace_box.sync_text(&snap.replace_query);
-        self.find_box.set_focus(snap.visible && (!snap.replace_mode || !snap.focus_replace));
-        self.replace_box.set_focus(snap.visible && snap.replace_mode && snap.focus_replace);
-        for (control, button) in SearchControl::ALL.iter().zip(self.controls.buttons_mut()) {
-            button.set_selected(*control == SearchControl::Regex && snap.options_use_regex);
-            button.set_enabled(
-                !matches!(control, SearchControl::Replace | SearchControl::ReplaceAll)
-                    || snap.match_count > 0,
-            );
+        self.find_box.set_focus(self.input_focused && (!snap.replace_mode || !snap.focus_replace));
+        self.replace_box.set_focus(self.input_focused && snap.replace_mode && snap.focus_replace);
+        for (control, button) in SearchControl::ALL.into_iter().zip(self.controls.buttons_mut()) {
+            button.set_selected(control == SearchControl::Regex && snap.options_use_regex);
+            let requires_matches = if self.mode == SearchBarMode::FindOnly {
+                matches!(control, SearchControl::Prev | SearchControl::Next)
+            } else {
+                matches!(control, SearchControl::Replace | SearchControl::ReplaceAll)
+            };
+            let available = self.mode != SearchBarMode::FindOnly
+                || matches!(
+                    control,
+                    SearchControl::Prev | SearchControl::Next | SearchControl::Close
+                );
+            button.set_enabled(available && (!requires_matches || snap.match_count > 0));
         }
         self.snap = snap;
+    }
+
+    pub fn select_query(&mut self) {
+        self.find_box.select_all();
+    }
+
+    pub fn input_has_focus(&self) -> bool {
+        self.input_focused
+    }
+
+    pub fn ime_allowed(&self) -> bool {
+        self.input_focused
+            && if self.snap.replace_mode && self.snap.focus_replace {
+                self.replace_box.ime_allowed()
+            } else {
+                self.find_box.ime_allowed()
+            }
+    }
+
+    pub fn ime_cursor_rect(&self) -> Option<Rect> {
+        if !self.ime_allowed() {
+            return None;
+        }
+        self.focused_textbox_ime_cursor_rect()
+    }
+
+    /// Route an event for a standalone search row whose parent owns editor fallthrough.
+    pub fn route_event(&mut self, event: &Event, context: &mut EventCtx) -> SearchBarEvent {
+        if !self.snap.visible {
+            return SearchBarEvent::default();
+        }
+        let keyboard = matches!(
+            event,
+            Event::KeyDown(..)
+                | Event::ImePreedit { .. }
+                | Event::ImeCommit(..)
+                | Event::ImeEnable
+                | Event::ImeDisable
+        );
+        if keyboard && !self.input_focused {
+            return SearchBarEvent::default();
+        }
+        let inside = match event {
+            Event::MouseDown { px, py, .. }
+            | Event::MouseUp { px, py, .. }
+            | Event::Wheel { px, py, .. } => self.hit(*px, *py),
+            _ => false,
+        };
+        let captured =
+            self.is_capturing() && matches!(event, Event::MouseMove { .. } | Event::MouseUp { .. });
+        let widget_action = self.on_event(event, context);
+        SearchBarEvent {
+            consumed: keyboard || inside || captured || widget_action.is_some(),
+            action: match widget_action {
+                Some(WidgetAction::SearchBar(action)) => Some(action),
+                _ => None,
+            },
+        }
     }
 
     pub fn is_visible(&self) -> bool {
@@ -264,22 +374,31 @@ impl SearchBarWidget {
 
 impl Widget for SearchBarWidget {
     fn set_rect(&mut self, rect: Rect, ctx: &mut LayoutCtx) {
-        self.rect = Rect::new(0.0, 0.0, rect.w, rect.h);
-        self.layout = calculate_search_bar_layout(SearchBarLayoutInput {
-            width: self.rect.w,
-            height: self.rect.h,
-            dpi: ctx.dpi,
-            replace_mode: self.snap.replace_mode,
-            has_query: !self.snap.query.is_empty(),
-            match_count: self.snap.match_count,
-            current_match: self.snap.current_match,
-        });
+        if self.mode == SearchBarMode::FindOnly {
+            self.rect = rect;
+            self.layout = calculate_full_width_find_layout(rect, ctx.dpi);
+        } else {
+            self.rect = Rect::new(0.0, 0.0, rect.w, rect.h);
+            self.layout = calculate_search_bar_layout(SearchBarLayoutInput {
+                width: self.rect.w,
+                height: self.rect.h,
+                dpi: ctx.dpi,
+                replace_mode: self.snap.replace_mode,
+                has_query: !self.snap.query.is_empty(),
+                match_count: self.snap.match_count,
+                current_match: self.snap.current_match,
+            });
+        }
         self.find_box.layout(self.layout.find_input_rect, ctx);
         if self.snap.replace_mode {
             self.replace_box.layout(self.layout.replace_input_rect, ctx);
         }
         for (control, button) in SearchControl::ALL.iter().zip(self.controls.buttons_mut()) {
-            button.set_style(search_control_style(ctx.theme));
+            button.set_style(if self.mode == SearchBarMode::FindOnly {
+                ButtonStyle::ghost(ctx.theme.application_theme())
+            } else {
+                search_control_style(ctx.theme)
+            });
             button.set_text(match control {
                 SearchControl::Close => Some("✕".to_owned()),
                 SearchControl::ToggleReplace => {
@@ -309,7 +428,9 @@ impl Widget for SearchBarWidget {
         let font_size = SEARCH_FONT_SIZE_LOGICAL * dpi;
         let baseline = self.rect.h * 0.5 + font_size * 0.35;
 
-        if self.snap.replace_mode {
+        if self.mode == SearchBarMode::FindOnly {
+            self.paint_document_find_row(ctx, dpi);
+        } else if self.snap.replace_mode {
             self.paint_find_replace(ctx, dpi, baseline);
         } else {
             self.paint_find_only(ctx, dpi, baseline);
@@ -317,7 +438,7 @@ impl Widget for SearchBarWidget {
     }
 
     fn hit(&self, px: f32, py: f32) -> bool {
-        self.layout.pill_rect.contains(px, py)
+        self.snap.visible && self.layout.pill_rect.contains(px, py)
     }
 
     fn on_event(&mut self, ev: &Event, _ctx: &mut EventCtx) -> Option<WidgetAction> {
@@ -339,9 +460,31 @@ impl Widget for SearchBarWidget {
                 (button_changed || find_changed || replace_changed)
                     .then_some(WidgetAction::Consumed)
             }
-            Event::KeyDown(kc, _modifiers) => {
+            Event::KeyDown(kc, modifiers) => {
+                if self.mode == SearchBarMode::FindOnly
+                    && *kc == KeyCode::Enter
+                    && self.find_box.has_preedit()
+                {
+                    return Some(WidgetAction::Consumed);
+                }
                 if let Some(action) = self.controls.on_event(ev, _ctx) {
                     return self.map_button_widget_action(action);
+                }
+                if self.mode == SearchBarMode::FindOnly {
+                    let action = match kc {
+                        KeyCode::Escape => Some(SearchBarAction::Close),
+                        KeyCode::Enter => Some(if modifiers.shift {
+                            SearchBarAction::Prev
+                        } else {
+                            SearchBarAction::Next
+                        }),
+                        _ => None,
+                    };
+                    if let Some(action) = action {
+                        return Some(WidgetAction::SearchBar(action));
+                    }
+                    let action = self.find_box.on_event(ev, _ctx);
+                    return self.map_text_box_widget_action(action);
                 }
                 // Handle tab locally
                 if *kc == KeyCode::Tab {
@@ -408,7 +551,9 @@ impl Widget for SearchBarWidget {
                 } else {
                     None
                 };
-                if text_box_action.is_some() {
+                if text_box_action.is_some()
+                    || (self.mode == SearchBarMode::FindOnly && self.find_box.is_capturing())
+                {
                     return self.map_text_box_widget_action(text_box_action);
                 }
                 self.controls
@@ -528,15 +673,21 @@ impl Widget for SearchBarWidget {
     }
 
     fn tooltip_at(&self, px: f32, py: f32) -> Option<TooltipHint> {
+        if !self.snap.visible {
+            return None;
+        }
         for control in SearchControl::ALL {
             let rect = control.rect(&self.layout);
             if rect.w <= 0.0 || !rect.contains(px, py) {
                 continue;
             }
-            let label = if control == SearchControl::ToggleReplace {
-                if self.snap.replace_mode { "隐藏替换" } else { "显示替换" }
-            } else {
-                control.accessibility_label()
+            let label = match (self.mode, control) {
+                (SearchBarMode::FindOnly, SearchControl::Prev) => "上一个匹配（Shift+Enter）",
+                (SearchBarMode::FindOnly, SearchControl::Next) => "下一个匹配（Enter）",
+                (SearchBarMode::FindOnly, SearchControl::Close) => "关闭查找（Esc）",
+                (_, SearchControl::ToggleReplace) if self.snap.replace_mode => "隐藏替换",
+                (_, SearchControl::ToggleReplace) => "显示替换",
+                _ => control.accessibility_label(),
             };
             return Some(TooltipHint { label: label.to_owned(), target_rect: rect });
         }
@@ -581,6 +732,36 @@ impl SearchBarWidget {
             }
             _ => Some(WidgetAction::Consumed),
         }
+    }
+
+    fn auxiliary_result_text(&self) -> Option<String> {
+        if self.snap.query.is_empty() {
+            return None;
+        }
+        if self.mode == SearchBarMode::FindReplace && self.snap.match_count == 0 {
+            return Some("无匹配结果".to_owned());
+        }
+        Some(layout::format_match_count(self.snap.match_count, self.snap.current_match))
+    }
+
+    fn paint_document_find_row(&self, ctx: &mut PaintCtx, dpi: f32) {
+        const COUNT_BASELINE_CENTER_SHIFT: f32 = 0.35;
+
+        ctx.list.fill(self.rect, ctx.theme.palette.input_bg);
+        self.find_box.paint(ctx);
+        self.controls.paint(ctx);
+        let Some(label) = self.auxiliary_result_text() else {
+            return;
+        };
+        let font_size = crate::constants::CAPTION_FONT_SIZE * dpi;
+        let count = self.layout.auxiliary_text_rect;
+        ctx.text(
+            count.x + crate::constants::TINY_GAP * dpi,
+            count.y + count.h * 0.5 + font_size * COUNT_BASELINE_CENTER_SHIFT,
+            font_size,
+            ctx.theme.palette.input_fg,
+            &label,
+        );
     }
 
     /// Paint the find-only bar.
@@ -654,14 +835,16 @@ impl SearchBarWidget {
 
     fn paint_auxiliary_text(&self, ctx: &mut PaintCtx, dpi: f32, baseline: f32) {
         let rect = self.layout.auxiliary_text_rect;
-        if rect.w <= 0.0 || self.snap.query.is_empty() {
+        if rect.w <= 0.0 {
             return;
         }
-        let (label, color) = if self.snap.match_count > 0 {
-            let current = self.snap.current_match.saturating_add(1).min(self.snap.match_count);
-            (format!("{current}/{}", self.snap.match_count), ctx.theme.palette.input_fg)
+        let Some(label) = self.auxiliary_result_text() else {
+            return;
+        };
+        let color = if self.snap.match_count > 0 {
+            ctx.theme.palette.input_fg
         } else {
-            ("无匹配结果".to_owned(), ctx.theme.application_theme().danger_text)
+            ctx.theme.application_theme().danger_text
         };
         if let Some(ref mut shaper) = ctx.shaper {
             ctx.list.text_shaped(
@@ -696,10 +879,297 @@ impl SearchBarWidget {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::Modifiers;
     use crate::core::Clipboard;
     use crate::core::measure::NoopMeasure;
     use crate::core::paint::DrawList;
     use crate::theme::test_theme;
+
+    fn visible_find_only_bar(query: &str, focused: bool, count: usize) -> SearchBarWidget {
+        let mut widget = SearchBarWidget::find_only();
+        widget.set_input_with_focus(
+            SearchBarSnapshot {
+                query: query.to_owned(),
+                visible: true,
+                match_count: count,
+                ..Default::default()
+            },
+            focused,
+        );
+        let theme = crate::theme::test_theme();
+        let mut measure = crate::NoopMeasure;
+        let mut context =
+            LayoutCtx { ui_measure: None, measure: &mut measure, theme: &theme, dpi: 1.0 };
+        widget.set_rect(Rect::new(100.0, 50.0, 300.0, SEARCH_BAR_HEIGHT), &mut context);
+        widget
+    }
+
+    #[test]
+    fn full_width_find_ime_preedit_is_consumed_without_changing_query_and_commit_edits_query() {
+        let mut widget = visible_find_only_bar("", true, 0);
+        let theme = crate::theme::test_theme();
+        let mut context = EventCtx::new(&theme, 1.0);
+        let preedit = widget.route_event(
+            &Event::ImePreedit { text: "中文".to_owned(), cursor: Some((0, 6)) },
+            &mut context,
+        );
+        assert!(preedit.consumed);
+        assert_eq!(widget.find_box.text(), "");
+        assert!(widget.find_box.has_preedit());
+        assert_eq!(
+            widget.route_event(&Event::ImeCommit("中文".to_owned()), &mut context).action,
+            Some(SearchBarAction::QueryChanged("中文".to_owned()))
+        );
+        assert!(widget.ime_cursor_rect().expect("focused query has IME rectangle").x >= 100.0);
+    }
+
+    #[test]
+    fn full_width_find_snapshot_keeps_selection_and_preedit_until_focus_is_lost() {
+        let mut widget = visible_find_only_bar("中文", true, 1);
+        widget.select_query();
+        let theme = crate::theme::test_theme();
+        let mut context = EventCtx::new(&theme, 1.0);
+        widget.route_event(
+            &Event::ImePreedit { text: "zhong".to_owned(), cursor: None },
+            &mut context,
+        );
+        widget.set_input_with_focus(widget.snap.clone(), true);
+        assert_eq!(widget.find_box.selection_text(), Some("中文"));
+        assert!(widget.find_box.has_preedit());
+        widget.set_input_with_focus(widget.snap.clone(), false);
+        assert!(!widget.find_box.has_preedit());
+        assert!(!widget.ime_allowed());
+        assert!(widget.ime_cursor_rect().is_none());
+    }
+
+    #[test]
+    fn full_width_find_unfocused_query_does_not_consume_keyboard_or_ime() {
+        let mut widget = visible_find_only_bar("", false, 0);
+        let theme = crate::theme::test_theme();
+        let mut context = EventCtx::new(&theme, 1.0);
+        for event in [
+            Event::KeyDown(KeyCode::Char('x'), Modifiers::NONE),
+            Event::KeyDown(KeyCode::Enter, Modifiers::NONE),
+            Event::ImeCommit("中文".to_owned()),
+            Event::ImeEnable,
+            Event::ImeDisable,
+        ] {
+            assert!(!widget.route_event(&event, &mut context).consumed);
+        }
+        assert_eq!(widget.find_box.text(), "");
+    }
+
+    #[test]
+    fn full_width_find_enter_during_ime_composition_does_not_navigate_results() {
+        let mut widget = visible_find_only_bar("中文", true, 2);
+        let theme = crate::theme::test_theme();
+        let mut context = EventCtx::new(&theme, 1.0);
+        widget.route_event(
+            &Event::ImePreedit { text: "拼".to_owned(), cursor: Some((0, 3)) },
+            &mut context,
+        );
+        let routed =
+            widget.route_event(&Event::KeyDown(KeyCode::Enter, Modifiers::NONE), &mut context);
+        assert!(routed.consumed);
+        assert_ne!(routed.action, Some(SearchBarAction::Next));
+    }
+
+    #[test]
+    fn full_width_find_narrow_layout_uses_global_coordinates_and_buttons_navigate() {
+        let mut widget = visible_find_only_bar("中文", true, 2);
+        assert!(widget.find_box.rect().w > 100.0);
+        assert!(widget.find_box.rect().x >= widget.rect.x);
+        let theme = crate::theme::test_theme();
+        let mut context = EventCtx::new(&theme, 1.0);
+        for (rect, expected) in [
+            (widget.layout.prev_btn_rect, SearchBarAction::Prev),
+            (widget.layout.next_btn_rect, SearchBarAction::Next),
+            (widget.layout.close_btn_rect, SearchBarAction::Close),
+        ] {
+            assert!(rect.x >= widget.rect.x && rect.x + rect.w <= widget.rect.x + widget.rect.w);
+            let px = rect.x + rect.w * 0.5;
+            let py = rect.y + rect.h * 0.5;
+            widget.route_event(
+                &Event::MouseDown { px, py, button: crate::MouseButton::Left },
+                &mut context,
+            );
+            assert_eq!(
+                widget
+                    .route_event(
+                        &Event::MouseUp { px, py, button: crate::MouseButton::Left },
+                        &mut context
+                    )
+                    .action,
+                Some(expected)
+            );
+        }
+    }
+
+    #[test]
+    fn full_width_find_no_results_shows_zero_and_disables_navigation() {
+        let mut widget = visible_find_only_bar("不存在", true, 0);
+        assert_eq!(widget.auxiliary_result_text().as_deref(), Some("0/0"));
+        let theme = crate::theme::test_theme();
+        let mut context = EventCtx::new(&theme, 1.0);
+        let rect = widget.layout.prev_btn_rect;
+        let px = rect.x + rect.w * 0.5;
+        let py = rect.y + rect.h * 0.5;
+        widget.route_event(
+            &Event::MouseDown { px, py, button: crate::MouseButton::Left },
+            &mut context,
+        );
+        assert_eq!(
+            widget
+                .route_event(
+                    &Event::MouseUp { px, py, button: crate::MouseButton::Left },
+                    &mut context
+                )
+                .action,
+            None
+        );
+        widget
+            .set_input_with_focus(SearchBarSnapshot { visible: true, ..Default::default() }, false);
+        assert_eq!(widget.auxiliary_result_text(), None);
+    }
+
+    #[test]
+    fn full_width_find_dragging_query_over_button_keeps_text_selection_capture() {
+        let mut widget = visible_find_only_bar("abcdef", true, 1);
+        let theme = crate::theme::test_theme();
+        let mut context = EventCtx::new(&theme, 1.0);
+        let rect = widget.find_box.rect();
+        let py = rect.y + rect.h * 0.5;
+        widget.route_event(
+            &Event::MouseDown { px: rect.x + 1.0, py, button: crate::MouseButton::Left },
+            &mut context,
+        );
+        let button_rect = widget.layout.prev_btn_rect;
+        widget.route_event(&Event::MouseMove { px: button_rect.x + 1.0, py }, &mut context);
+        assert!(widget.find_box.selection_text().is_some());
+        widget.route_event(
+            &Event::MouseUp { px: button_rect.x + 1.0, py, button: crate::MouseButton::Left },
+            &mut context,
+        );
+        assert!(!widget.is_capturing());
+    }
+
+    #[test]
+    fn full_width_find_focused_enter_navigates_and_escape_closes() {
+        let mut widget = SearchBarWidget::find_only();
+        widget.set_input(SearchBarSnapshot { visible: true, ..Default::default() });
+        let theme = crate::theme::test_theme();
+        let mut context = EventCtx::new(&theme, 1.0);
+        assert_eq!(
+            widget
+                .route_event(&Event::KeyDown(KeyCode::Enter, Modifiers::default()), &mut context)
+                .action,
+            Some(SearchBarAction::Next)
+        );
+        assert_eq!(
+            widget
+                .route_event(
+                    &Event::KeyDown(
+                        KeyCode::Enter,
+                        Modifiers { shift: true, ..Default::default() }
+                    ),
+                    &mut context
+                )
+                .action,
+            Some(SearchBarAction::Prev)
+        );
+        assert_eq!(
+            widget
+                .route_event(&Event::KeyDown(KeyCode::Escape, Modifiers::default()), &mut context)
+                .action,
+            Some(SearchBarAction::Close)
+        );
+    }
+    #[test]
+    fn full_width_find_hiding_releases_capture_and_clears_ime() {
+        let theme = test_theme();
+        let mut context = EventCtx::new(&theme, 1.0);
+        let hit_rects: [fn(&SearchBarWidget) -> Rect; 2] =
+            [|bar| bar.find_box.rect(), |bar| bar.layout.next_btn_rect];
+        for press_rect in hit_rects {
+            let mut bar = visible_find_only_bar("needle", true, 2);
+            let rect = press_rect(&bar);
+            let press = Event::MouseDown {
+                px: rect.x + rect.w * 0.5,
+                py: rect.y + rect.h * 0.5,
+                button: MouseButton::Left,
+            };
+            assert!(bar.route_event(&press, &mut context).consumed);
+            assert!(bar.is_capturing());
+            bar.route_event(
+                &Event::ImePreedit { text: "拼".to_owned(), cursor: None },
+                &mut context,
+            );
+            bar.set_input_with_focus(SearchBarSnapshot::default(), false);
+
+            assert!(!bar.is_capturing());
+            assert!(!bar.find_box.has_preedit());
+            let Event::MouseDown { px, py, button } = press else {
+                unreachable!("press fixture must be a mouse-down event");
+            };
+            assert_eq!(
+                bar.route_event(&Event::MouseUp { px, py, button }, &mut context),
+                SearchBarEvent::default()
+            );
+        }
+    }
+
+    #[test]
+    fn full_width_find_exposes_only_enabled_query_and_navigation_focus_targets() {
+        let mut bar = visible_find_only_bar("missing", true, 0);
+        let mut ids = Vec::new();
+        bar.collect_focusable_ids(&mut ids);
+        assert_eq!(ids, [FIND_BOX_ID, SearchControl::Close.id()]);
+
+        let mut snapshot = bar.snap.clone();
+        snapshot.match_count = 2;
+        bar.set_input(snapshot);
+        ids.clear();
+        bar.collect_focusable_ids(&mut ids);
+        assert_eq!(
+            ids,
+            [
+                FIND_BOX_ID,
+                SearchControl::Close.id(),
+                SearchControl::Prev.id(),
+                SearchControl::Next.id()
+            ]
+        );
+    }
+
+    #[test]
+    fn full_width_find_routes_accessibility_focus_to_the_visible_previous_control() {
+        use crate::core::widget::{ControlAction, ids};
+        use crate::core::{AccessibilityAction, AccessibilityActionRequest, AccessibilityContext};
+
+        let mut bar = visible_find_only_bar("needle", true, 2);
+        let mut nodes = Vec::new();
+        bar.collect_accessibility_nodes(&AccessibilityContext::new(0.0, 0.0), &mut nodes);
+        let previous = nodes
+            .iter()
+            .find(|node| node.name.as_deref() == Some("上一个匹配"))
+            .expect("previous result exposes an accessibility button");
+        assert_eq!(previous.bounds, bar.layout.prev_btn_rect);
+        let focus_action = bar.on_accessibility_action(&AccessibilityActionRequest::new(
+            previous.id,
+            AccessibilityAction::Focus,
+        ));
+        assert_eq!(
+            focus_action,
+            Some(WidgetAction::Control(ControlAction::FocusRequested { id: ids::SEARCH_BAR }))
+        );
+
+        let theme = test_theme();
+        let mut context = EventCtx::new(&theme, 1.0);
+        assert_eq!(
+            bar.route_event(&Event::KeyDown(KeyCode::Enter, Modifiers::NONE), &mut context),
+            SearchBarEvent { consumed: true, action: Some(SearchBarAction::Prev) }
+        );
+    }
 
     #[test]
     fn no_match_message_remains_readable_on_light_input_surface() {
@@ -752,7 +1222,6 @@ mod tests {
         let mut w = SearchBarWidget::new();
         w.set_input(SearchBarSnapshot {
             query: query.into(),
-            preedit_text: String::new(),
             match_count: 0,
             current_match: 0,
             visible: true,

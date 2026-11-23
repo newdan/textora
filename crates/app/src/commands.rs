@@ -494,14 +494,6 @@ mod command_tests {
         assert_eq!(dv.document_lines()[0], "hello    ");
     }
 
-    // ── Commands that don't modify DocumentFixture ──────────────────────
-
-    #[test]
-    fn escape_returns_false() {
-        let mut dv = make_dv("hello");
-        assert!(!execute_edit_command(&EditCommand::Escape, &mut dv, &[]));
-    }
-
     #[test]
     fn cut_without_a_selection_is_not_reported_as_executed() {
         let mut dv = make_dv("hello");

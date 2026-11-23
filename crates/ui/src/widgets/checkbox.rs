@@ -73,10 +73,11 @@ impl Checkbox {
     }
 
     fn outline_color(&self, ctx: &PaintCtx) -> [f32; 4] {
-        let settings = ctx.theme.settings_theme();
-        let base_color = if self.focused { settings.focus_ring } else { settings.control_border };
+        let application = ctx.theme.application_theme();
+        let base_color =
+            if self.focused { application.focus_ring } else { application.control_border };
         let color = if self.hovered && !self.focused {
-            blend_color(base_color, settings.text_primary, BORDER_HOVER_BLEND)
+            blend_color(base_color, application.text_primary, BORDER_HOVER_BLEND)
         } else {
             base_color
         };
@@ -84,10 +85,11 @@ impl Checkbox {
     }
 
     fn surface_color(&self, ctx: &PaintCtx) -> [f32; 4] {
-        let settings = ctx.theme.settings_theme();
-        let base_color = if self.checked { settings.accent } else { settings.control_surface };
+        let application = ctx.theme.application_theme();
+        let base_color =
+            if self.checked { application.accent } else { application.control_surface };
         let color = if self.hovered {
-            blend_color(base_color, settings.text_primary, SURFACE_HOVER_BLEND)
+            blend_color(base_color, application.text_primary, SURFACE_HOVER_BLEND)
         } else {
             base_color
         };

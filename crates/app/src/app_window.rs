@@ -147,7 +147,7 @@ impl App {
             .is_some_and(|overlay| overlay.advance_cursor_blink(now))
     }
 
-    /// Phase 2：从 App / Workspace 状态组装 ShellInputs。
+    /// Phase 2：从 App / EditorTabSet 状态组装 ShellInputs。
     pub(crate) fn build_shell_inputs(&self) -> ShellInputs {
         let metrics = self.ui_metrics();
         let dpi = metrics.dpi;

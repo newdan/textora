@@ -32,7 +32,7 @@ use crate::highlight::HighlighterCache;
 use crate::highlight::Language;
 use crate::simd;
 use crate::types::{
-    ByteIndex, CursorAffinity, LogicalPoint, UniCharOffset, UnicharLineLookup, VisualPoint,
+    ByteIndex, CursorAffinity, GraphemeLineLookup, GraphemeOffset, LogicalPoint, VisualPoint,
 };
 use crate::unicode::Cursor;
 
@@ -335,7 +335,7 @@ impl TextBuffer {
     }
 
     /// Gets the logical cursor position, that is,
-    /// the position in lines and unichars per line.
+    /// the position in lines and graphemes per line.
     pub fn cursor_logical_pos(&self) -> LogicalPoint {
         self.cursor.logical_pos
     }
@@ -487,7 +487,7 @@ impl TextBuffer {
     pub fn copy_from_str(&mut self, text: &dyn ReadableDocument) {
         if self.buffer.copy_from(text) {
             self.recalc_after_content_swap();
-            self.cursor_move_to_logical(LogicalPoint { unichar: usize::MAX, line: 0 });
+            self.cursor_move_to_logical(LogicalPoint { grapheme_column: usize::MAX, line: 0 });
 
             let delete = self.buffer.len() - self.cursor.offset.to_usize();
             if delete != 0 {
@@ -521,22 +521,22 @@ impl TextBuffer {
 
     /// Moves the cursor to the given byte offset.
     ///
-    /// Internal — prefer `cursor_move_to_unichar` for user-facing cursor paths.
+    /// Internal — prefer `cursor_move_to_grapheme_offset` for user-facing cursor paths.
     pub fn cursor_move_to_byte(&mut self, offset: ByteIndex) {
         unsafe { self.set_cursor(self.cursor_move_to_byte_internal(self.cursor, offset)) }
     }
 
-    /// Moves the cursor to the given document-level unichar offset.
+    /// Moves the cursor to the given document-level grapheme offset.
     ///
-    /// Converts the offset to a (line, local_unichar) pair via the provided
-    /// `UnicharLineLookup` implementation, then delegates to `cursor_move_to_logical`.
-    pub fn cursor_move_to_unichar(
+    /// Converts the offset to a (line, line_grapheme_column) pair via the provided
+    /// `GraphemeLineLookup` implementation, then delegates to `cursor_move_to_logical`.
+    pub fn cursor_move_to_grapheme_offset(
         &mut self,
-        offset: UniCharOffset,
-        lookup: &dyn UnicharLineLookup,
+        offset: GraphemeOffset,
+        lookup: &dyn GraphemeLineLookup,
     ) {
-        let (line, local) = lookup.line_at_unichar(offset);
-        self.cursor_move_to_logical(LogicalPoint { line, unichar: local });
+        let (line, local) = lookup.line_at_grapheme_offset(offset);
+        self.cursor_move_to_logical(LogicalPoint { line, grapheme_column: local });
     }
 
     /// Moves the cursor to the given logical position.

@@ -371,7 +371,7 @@ impl Widget for TablePickerWidget {
             let field_rect = self.input_rect(dpi, field);
             ctx.list.stroke_rounded(
                 field_rect,
-                ctx.theme.settings_theme().control_border,
+                ctx.theme.application_theme().control_border,
                 1.0 * dpi,
                 3.0 * dpi,
             );

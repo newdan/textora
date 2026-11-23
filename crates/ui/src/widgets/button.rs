@@ -116,7 +116,7 @@ impl Widget for Button {
         let icon_size = self.icon_size_logical * dpi;
         let pad_x = self.style.pad_x_logical * dpi;
         if self.focused && self.enabled {
-            let mut focus_ring = ctx.theme.settings_theme().focus_ring;
+            let mut focus_ring = ctx.theme.application_theme().focus_ring;
             focus_ring[3] *= alpha;
             ctx.list.stroke_rounded(
                 self.rect,
@@ -799,7 +799,7 @@ mod tests {
         let mut button = make_button(id);
         button.set_keyboard_focus(Some(id));
         let theme = crate::theme::test_theme();
-        let focus_ring = theme.settings_theme().focus_ring;
+        let focus_ring = theme.application_theme().focus_ring;
         let mut draw_list = DrawList::new();
         let mut paint_ctx = PaintCtx::new(&mut draw_list, &theme, 1.0);
 

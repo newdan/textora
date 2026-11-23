@@ -10,7 +10,7 @@ use ui::form::{FormRow, FormRowStyle, FormSection, FormSectionStyle, FormView};
 use ui::inline_group::{CrossAlignment, InlineChild, InlineGroup};
 use ui::label::{Label, LabelStyle};
 use ui::text_box::TextBox;
-use ui::theme::SettingsTheme;
+use ui::theme::ApplicationTheme;
 
 use crate::sync_settings_types::{
     LibrarySyncState, LibraryView, SyncConnectionView, SyncNoticeSeverity, SyncSettingsAction,
@@ -149,7 +149,7 @@ pub struct SyncSettingsPage {
     compact_connection_layout: bool,
     stack_connection_actions: bool,
     endpoint_dirty: bool,
-    settings_theme: SettingsTheme,
+    application_theme: ApplicationTheme,
 }
 
 impl SyncSettingsPage {
@@ -169,7 +169,7 @@ impl SyncSettingsPage {
             compact_connection_layout: false,
             stack_connection_actions: false,
             endpoint_dirty: false,
-            settings_theme: fallback_settings_theme(),
+            application_theme: fallback_application_theme(),
         }
     }
 
@@ -408,9 +408,10 @@ impl SyncSettingsPage {
     }
 
     fn connection_actions(&self) -> Box<dyn Widget> {
-        let test_button = action_button(TEST_CONNECTION_ID, "测试连接", true, self.settings_theme);
+        let test_button =
+            action_button(TEST_CONNECTION_ID, "测试连接", true, self.application_theme);
         let configure_button =
-            action_button(CONFIGURE_CONNECTION_ID, "保存连接", true, self.settings_theme);
+            action_button(CONFIGURE_CONNECTION_ID, "保存连接", true, self.application_theme);
         if self.stack_connection_actions {
             return Box::new(StackedConnectionActions::new(test_button, configure_button));
         }
@@ -457,7 +458,7 @@ impl SyncSettingsPage {
                         PUBLISH_LIBRARY_ID,
                         "选择目录并发布资料库",
                         true,
-                        self.settings_theme,
+                        self.application_theme,
                     )),
                 ),
             ],
@@ -479,7 +480,7 @@ impl SyncSettingsPage {
                         indexed_id(PENDING_ACCEPT_BASE_ID, index),
                         "选择空目录",
                         true,
-                        self.settings_theme,
+                        self.application_theme,
                     )),
                 )
             })
@@ -519,7 +520,7 @@ impl SyncSettingsPage {
                     indexed_id(SCAN_BASE_ID, index),
                     "扫描",
                     true,
-                    self.settings_theme,
+                    self.application_theme,
                 )),
             ),
             form_row(
@@ -533,7 +534,7 @@ impl SyncSettingsPage {
                         "暂停"
                     },
                     true,
-                    self.settings_theme,
+                    self.application_theme,
                 )),
             ),
             form_row(
@@ -543,7 +544,7 @@ impl SyncSettingsPage {
                     indexed_id(REPAIR_BASE_ID, index),
                     "修复",
                     library.can_repair,
-                    self.settings_theme,
+                    self.application_theme,
                 )),
             ),
             form_row(
@@ -553,7 +554,7 @@ impl SyncSettingsPage {
                     indexed_id(REMOVE_MAPPING_BASE_ID, index),
                     "移除映射",
                     library.can_remove_mapping,
-                    self.settings_theme,
+                    self.application_theme,
                 )),
             ),
             form_row(
@@ -563,7 +564,7 @@ impl SyncSettingsPage {
                     indexed_id(UNREGISTER_BASE_ID, index),
                     "注销",
                     library.can_unregister,
-                    self.settings_theme,
+                    self.application_theme,
                 )),
             ),
         ]
@@ -670,9 +671,9 @@ impl Widget for SyncSettingsPage {
             self.stack_connection_actions = stack_connection_actions;
             self.form_needs_rebuild = true;
         }
-        let settings_theme = ctx.theme.settings_theme();
-        if self.settings_theme != settings_theme {
-            self.settings_theme = settings_theme;
+        let application_theme = ctx.theme.application_theme();
+        if self.application_theme != application_theme {
+            self.application_theme = application_theme;
             self.form_needs_rebuild = true;
         }
         self.form.set_rect(self.rect, ctx);
@@ -874,8 +875,13 @@ fn section_style() -> FormSectionStyle {
     }
 }
 
-fn action_button(id: WidgetId, text: &str, enabled: bool, settings_theme: SettingsTheme) -> Button {
-    let mut button = Button::new(id, action_button_style(settings_theme));
+fn action_button(
+    id: WidgetId,
+    text: &str,
+    enabled: bool,
+    application_theme: ApplicationTheme,
+) -> Button {
+    let mut button = Button::new(id, action_button_style(application_theme));
     button.set_text(Some(text.to_owned()));
     button.set_enabled(enabled);
     button
@@ -885,11 +891,11 @@ fn single_button_group(
     id: WidgetId,
     text: &str,
     enabled: bool,
-    settings_theme: SettingsTheme,
+    application_theme: ApplicationTheme,
 ) -> InlineGroup {
     InlineGroup::new(vec![
         InlineChild::fixed(
-            Box::new(action_button(id, text, enabled, settings_theme)),
+            Box::new(action_button(id, text, enabled, application_theme)),
             ui::button::ButtonMetrics::text_width(text.chars().count()),
         )
         .with_cross_size(SYNC_CONTROL_HEIGHT_LOGICAL),
@@ -897,7 +903,7 @@ fn single_button_group(
     .with_alignment(CrossAlignment::Center)
 }
 
-fn action_button_style(settings: SettingsTheme) -> ButtonStyle {
+fn action_button_style(settings: ApplicationTheme) -> ButtonStyle {
     ButtonStyle::action(settings)
 }
 
@@ -917,8 +923,8 @@ fn section_description_label(text: &str) -> Label {
     Label::new(text, LabelStyle::form_section_description())
 }
 
-fn fallback_settings_theme() -> SettingsTheme {
-    ui::theme::test_theme().settings_theme()
+fn fallback_application_theme() -> ApplicationTheme {
+    ui::theme::test_theme().application_theme()
 }
 
 #[cfg(test)]
@@ -1176,13 +1182,13 @@ mod tests {
     #[test]
     fn stacked_connection_actions_clear_previous_hover_target() {
         let theme = ui::theme::test_theme();
-        let settings_theme = theme.settings_theme();
+        let application_theme = theme.application_theme();
         let mut measure = ui::core::measure::NoopMeasure;
         let mut layout =
             LayoutCtx { measure: &mut measure, ui_measure: None, theme: &theme, dpi: 1.0 };
         let mut actions = StackedConnectionActions::new(
-            action_button(TEST_CONNECTION_ID, "测试连接", true, settings_theme),
-            action_button(CONFIGURE_CONNECTION_ID, "保存连接", true, settings_theme),
+            action_button(TEST_CONNECTION_ID, "测试连接", true, application_theme),
+            action_button(CONFIGURE_CONNECTION_ID, "保存连接", true, application_theme),
         );
         actions.set_rect(Rect::new(0.0, 0.0, 160.0, 80.0), &mut layout);
         let mut event_ctx = EventCtx::new(&theme, 1.0);
@@ -1198,7 +1204,7 @@ mod tests {
         );
         assert_eq!(
             stacked_action_backgrounds(&actions),
-            [settings_theme_hover_color(settings_theme), settings_theme.button_surface],
+            [application_theme_hover_color(application_theme), application_theme.button_surface],
         );
 
         let _ = actions.on_event(
@@ -1210,7 +1216,7 @@ mod tests {
         );
         assert_eq!(
             stacked_action_backgrounds(&actions),
-            [settings_theme.button_surface, settings_theme_hover_color(settings_theme)],
+            [application_theme.button_surface, application_theme_hover_color(application_theme)],
             "同组按钮不得同时保持 hover",
         );
 
@@ -1220,7 +1226,7 @@ mod tests {
         );
         assert_eq!(
             stacked_action_backgrounds(&actions),
-            [settings_theme.button_surface; 2],
+            [application_theme.button_surface; 2],
             "鼠标移出纵向按钮组后应清除全部 hover",
         );
     }
@@ -1228,13 +1234,13 @@ mod tests {
     #[test]
     fn stacked_connection_actions_cancel_pressed_button_without_activation() {
         let theme = ui::theme::test_theme();
-        let settings_theme = theme.settings_theme();
+        let application_theme = theme.application_theme();
         let mut measure = ui::core::measure::NoopMeasure;
         let mut layout =
             LayoutCtx { measure: &mut measure, ui_measure: None, theme: &theme, dpi: 1.0 };
         let mut actions = StackedConnectionActions::new(
-            action_button(TEST_CONNECTION_ID, "测试连接", true, settings_theme),
-            action_button(CONFIGURE_CONNECTION_ID, "保存连接", true, settings_theme),
+            action_button(TEST_CONNECTION_ID, "测试连接", true, application_theme),
+            action_button(CONFIGURE_CONNECTION_ID, "保存连接", true, application_theme),
         );
         actions.set_rect(Rect::new(0.0, 0.0, 160.0, 80.0), &mut layout);
         let mut event_ctx = EventCtx::new(&theme, 1.0);
@@ -1442,7 +1448,7 @@ mod tests {
         ]
     }
 
-    fn settings_theme_hover_color(settings_theme: SettingsTheme) -> [f32; 4] {
-        settings_theme.button_hover_surface
+    fn application_theme_hover_color(application_theme: ApplicationTheme) -> [f32; 4] {
+        application_theme.button_hover_surface
     }
 }

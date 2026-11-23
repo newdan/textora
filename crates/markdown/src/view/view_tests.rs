@@ -12,7 +12,7 @@ mod dpi_style_tests {
 
     #[test]
     fn spacing_mode_message_updates_engine_state_once() {
-        let mut engine: PreviewEngine = PreviewEngine::new();
+        let mut engine: BlockViewEngine = BlockViewEngine::new();
         assert_eq!(engine.text_spacing_mode, ui::typography::TextSpacingMode::Natural);
 
         let mode = ui::typography::TextSpacingMode::Verbatim;
@@ -244,8 +244,8 @@ mod heading_tests {
             .collect()
     }
 
-    fn make_engine_with_headings(headings: Vec<HeadingEntry>) -> PreviewEngine {
-        let mut e = PreviewEngine::new();
+    fn make_engine_with_headings(headings: Vec<HeadingEntry>) -> BlockViewEngine {
+        let mut e = BlockViewEngine::new();
         e.headings = headings;
         e
     }
@@ -410,8 +410,8 @@ mod heading_tests {
 #[cfg(test)]
 mod wysiwyg_tests {
     use super::*;
+    use crate::augmenter::AugmentKind;
     use crate::projection::{CursorAffinity, ProjectionOwnerId, SourceAnchor};
-    use ui::plugin::AugmentKind;
     use ui::plugin::MoveDirection;
 
     fn default_settings() -> MarkdownRenderSettings<'static> {
@@ -571,7 +571,7 @@ mod wysiwyg_tests {
     }
 
     fn click_point_for_visible_text(
-        engine: &PreviewEngine<MarkdownDoc>,
+        engine: &BlockViewEngine<MarkdownDoc>,
         needle: &str,
     ) -> (f32, f32) {
         let line = engine
@@ -1396,7 +1396,7 @@ mod wysiwyg_tests {
 
     #[test]
     fn augment_edit_insert_text_in_empty_separator_line() {
-        use ui::plugin::AugmentKind;
+        use crate::augmenter::AugmentKind;
         let v = make_view("para1\n\npara2");
         let aug = v.engine().augment_edit(6, AugmentKind::InsertText(String::from("A"))).unwrap();
 
@@ -1411,7 +1411,7 @@ mod wysiwyg_tests {
 
     #[test]
     fn augment_edit_insert_text_in_triple_empty_separator_line() {
-        use ui::plugin::AugmentKind;
+        use crate::augmenter::AugmentKind;
         let v = make_view("para1\n\n\npara2");
         let aug = v.engine().augment_edit(7, AugmentKind::InsertText(String::from("A"))).unwrap();
 
@@ -1606,7 +1606,7 @@ mod wysiwyg_tests {
         assert_eq!(hit, Some(1));
     }
 
-    // ── cursor_in_span (PreviewEngine wrapper) ───────────────────────────
+    // ── cursor_in_span (BlockViewEngine wrapper) ───────────────────────────
 
     #[test]
     fn cursor_in_span_inside_returns_true() {
@@ -3627,7 +3627,7 @@ C608-01 武昌职业第01组：计划 68，历史低线较低，是表里最像�
         assert!(matches!(copied, Some(text) if text == "first\n\ncode\n\nlast"));
     }
 
-    fn visible_line_snapshots(engine: &PreviewEngine) -> Vec<(String, i32)> {
+    fn visible_line_snapshots(engine: &BlockViewEngine) -> Vec<(String, i32)> {
         engine
             .flat_lines()
             .iter()
@@ -3635,7 +3635,7 @@ C608-01 武昌职业第01组：计划 68，历史低线较低，是表里最像�
             .collect()
     }
 
-    fn layout_snapshot(engine: &PreviewEngine) -> (Vec<(String, i32)>, i32) {
+    fn layout_snapshot(engine: &BlockViewEngine) -> (Vec<(String, i32)>, i32) {
         (visible_line_snapshots(engine), engine.content_height.round() as i32)
     }
 
@@ -4275,7 +4275,7 @@ C608-01 武昌职业第01组：计划 68，历史低线较低，是表里最像�
         let theme = ui::theme::Theme::from_definition(&ui::theme::ThemeDefinition::default_dark());
         let style = crate::test_utils::default_style();
         let build_count = Cell::new(0usize);
-        let mut engine = PreviewEngine::<crate::builder::MarkdownDoc>::new();
+        let mut engine = BlockViewEngine::<crate::builder::MarkdownDoc>::new();
         engine.set_edit_source(Some(source.to_owned()));
         let mut shaper = shaping::Shaper::new().expect("selection test requires a shaper");
 
@@ -6395,7 +6395,7 @@ viebcoding 用过吗?
         let src = "- ";
         let v = make_view(src);
 
-        let aug = v.engine().augment_edit(2, ui::plugin::AugmentKind::Enter);
+        let aug = v.engine().augment_edit(2, crate::augmenter::AugmentKind::Enter);
 
         let aug = aug.expect("Should return an augmentation");
         assert_eq!(aug.replace_range, Some(0..2), "Should replace the entire list marker");
@@ -6411,7 +6411,7 @@ viebcoding 用过吗?
         let src = "1. ";
         let v = make_view(src);
 
-        let aug = v.engine().augment_edit(3, ui::plugin::AugmentKind::Enter);
+        let aug = v.engine().augment_edit(3, crate::augmenter::AugmentKind::Enter);
 
         let aug = aug.expect("Should return an augmentation");
         assert_eq!(aug.replace_range, Some(0..3), "Should replace the entire ordered list marker");
@@ -6427,7 +6427,7 @@ viebcoding 用过吗?
         let src = "1. abc";
         let v = make_view(src);
 
-        let aug = v.engine().augment_edit(6, ui::plugin::AugmentKind::Enter);
+        let aug = v.engine().augment_edit(6, crate::augmenter::AugmentKind::Enter);
 
         let aug = aug.expect("Should return an augmentation");
         assert_eq!(aug.replace_range, None, "Should not replace anything");
@@ -6541,9 +6541,10 @@ viebcoding 用过吗?
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::augmenter::EditAugmentation;
     use ui::plugin::{
-        EditAugmentation, EditIntent, EditPlan, EditPolicy, EditRequest, EditSelection,
-        EditTransaction, KeyIntentMapper, PastePreference, TextReplacement,
+        EditIntent, EditPlan, EditPolicy, EditRequest, EditSelection, EditTransaction,
+        KeyIntentMapper, PastePreference, TextReplacement,
     };
 
     #[test]
@@ -6652,7 +6653,7 @@ mod tests {
     #[test]
     fn blockquote_marker_byte_selection_highlight_reuses_prepared_source_line_index() {
         let text = "> quoted text\n\nparagraph";
-        let mut engine = PreviewEngine::<crate::builder::MarkdownDoc>::new();
+        let mut engine = BlockViewEngine::<crate::builder::MarkdownDoc>::new();
         engine.set_edit_source(Some(text.to_string()));
         let style = crate::test_utils::default_style();
         let parsed = crate::parser::parse_markdown(text);

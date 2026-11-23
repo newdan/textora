@@ -1,46 +1,21 @@
-//! SidebarPersistent — 跨帧保持的 sidebar 状态。
+//! Sidebar visibility, animation timing, and cross-frame scrolling.
 
-use super::types::{HOT_BAND_LOGICAL, SidebarConfig, SidebarHoverButton, Visibility};
+use super::types::{SidebarConfig, Visibility};
 use std::time::{Duration, Instant};
 
-// ── Persistent State (minimal cross-frame backup) ──
-
-#[derive(Debug, Clone)]
-pub struct SidebarPersistent {
-    pub visibility: Visibility,
-    pub hovered_index: Option<usize>,
+#[derive(Debug, Default)]
+pub struct SidebarInteraction {
+    pub hover: SidebarHoverState,
     pub list_scroll_offset: f32,
-    pub open_menu: Option<crate::widgets::popup_menu::PopupMenu>,
-    pub hover_enter_at: Option<Instant>,
-    pub hover_leave_at: Option<Instant>,
-    pub hover_peek_start: Option<Instant>,
-    pub hover_peek_leave_start: Option<Instant>,
-    pub hovered_button: SidebarHoverButton,
-    /// When true, suppress hover entry until mouse leaves hot zone.
-    /// Set when visibility is programmatically changed to Hidden (e.g. TogglePin).
-    pub suppress_hover_enter: bool,
-    pub settings_btn_rect: crate::core::Rect,
 }
 
-impl SidebarPersistent {
+impl SidebarInteraction {
     pub fn new(cfg: &SidebarConfig) -> Self {
-        Self {
-            visibility: if cfg.pinned { Visibility::Pinned } else { Visibility::Hidden },
-            hovered_index: None,
-            list_scroll_offset: 0.0,
-            open_menu: None,
-            hover_enter_at: None,
-            hover_leave_at: None,
-            hover_peek_start: None,
-            hover_peek_leave_start: None,
-            hovered_button: SidebarHoverButton::None,
-            suppress_hover_enter: false,
-            settings_btn_rect: crate::core::Rect::ZERO,
-        }
+        Self { hover: SidebarHoverState::new(cfg), list_scroll_offset: 0.0 }
     }
 
     pub fn current_width(&self, cfg: &SidebarConfig) -> f32 {
-        match self.visibility {
+        match self.hover.visibility {
             Visibility::Hidden => 0.0,
             Visibility::HoverPeek | Visibility::HoverPeekFadingOut | Visibility::Pinned => {
                 cfg.width
@@ -49,10 +24,33 @@ impl SidebarPersistent {
     }
 
     pub fn editor_left_offset(&self, cfg: &SidebarConfig) -> f32 {
-        match self.visibility {
+        match self.hover.visibility {
             Visibility::Pinned => cfg.width,
             _ => 0.0,
         }
+    }
+
+    /// Hover state machine: tick every frame.
+    pub fn tick(&mut self, now: Instant) -> (bool, bool) {
+        self.hover.tick(now)
+    }
+}
+
+/// Visibility and animation scheduling for the sidebar.
+#[derive(Debug, Clone, Default)]
+pub struct SidebarHoverState {
+    pub visibility: Visibility,
+    pub hover_enter_at: Option<Instant>,
+    pub hover_leave_at: Option<Instant>,
+    pub hover_peek_start: Option<Instant>,
+    pub hover_peek_leave_start: Option<Instant>,
+    pub suppress_hover_enter: bool,
+}
+
+impl SidebarHoverState {
+    pub(super) fn new(cfg: &SidebarConfig) -> Self {
+        let visibility = if cfg.pinned { Visibility::Pinned } else { Visibility::Hidden };
+        Self { visibility, ..Self::default() }
     }
 
     /// Hover state machine: tick every frame.
@@ -99,70 +97,42 @@ impl SidebarPersistent {
         }
         (false, false)
     }
-    /// Feed mouse position into hover state machine.
-    pub fn on_mouse_move(
-        &mut self,
-        px: f32,
-        py: f32,
-        screen_w: f32,
-        dpi: f32,
-        traffic_light_inset_x: f32,
-        cfg: &SidebarConfig,
-    ) {
-        let hot_band = HOT_BAND_LOGICAL * dpi;
-        let in_left_hot = px >= 0.0 && px <= hot_band;
-        // Hamburger button as trigger zone
-        let btn_size = crate::theme::ControlMetrics::default().minimum_hit_target_logical * dpi;
-        let hx = traffic_light_inset_x + crate::constants::TINY_GAP * dpi;
-        let hy = (crate::constants::TITLE_BAR_HEIGHT * dpi - btn_size) * 0.5;
-        let on_hamburger = px >= hx && px <= hx + btn_size && py >= hy && py <= hy + btn_size;
-        let in_hot_zone = in_left_hot || on_hamburger;
 
+    /// Update visibility scheduling from pointer geometry computed by the caller.
+    /// Returns whether a visible widget should clear its immediate button hover.
+    pub(super) fn pointer_moved(
+        &mut self,
+        in_hot_zone: bool,
+        in_sidebar: bool,
+        now: Instant,
+    ) -> bool {
         match self.visibility {
             Visibility::Hidden => {
-                if in_hot_zone {
-                    if self.suppress_hover_enter {
-                        // Suppress: visibility was just set to Hidden programmatically
-                        // (e.g. TogglePin). Wait for mouse to leave hot zone first.
-                    } else if self.hover_enter_at.is_none() {
-                        self.hover_enter_at = Some(Instant::now());
-                    }
-                } else {
+                if !in_hot_zone {
                     self.hover_enter_at = None;
                     self.suppress_hover_enter = false;
+                } else if !self.suppress_hover_enter {
+                    self.hover_enter_at.get_or_insert(now);
                 }
+                false
             }
             Visibility::HoverPeek => {
-                let sidebar_w = cfg.width;
-                let in_sidebar = px >= 0.0 && px <= sidebar_w && px < screen_w;
-                if !in_sidebar {
-                    self.hovered_button = SidebarHoverButton::None;
-                    if self.hover_leave_at.is_none() {
-                        self.hover_leave_at = Some(Instant::now());
-                    }
-                } else {
+                if in_sidebar {
                     self.hover_leave_at = None;
+                } else {
+                    self.hover_leave_at.get_or_insert(now);
                 }
+                !in_sidebar
             }
             Visibility::HoverPeekFadingOut => {
-                let sidebar_w = cfg.width;
-                let in_sidebar = px >= 0.0 && px <= sidebar_w && px < screen_w;
                 if in_sidebar {
-                    // 鼠标回到 sidebar：取消 fade out，回到 HoverPeek
                     self.visibility = Visibility::HoverPeek;
                     self.hover_peek_leave_start = None;
                     self.hover_leave_at = None;
-                } else {
-                    self.hovered_button = SidebarHoverButton::None;
                 }
+                !in_sidebar
             }
-            Visibility::Pinned => {
-                let sidebar_w = cfg.width;
-                let in_sidebar = px >= 0.0 && px <= sidebar_w && px < screen_w;
-                if !in_sidebar {
-                    self.hovered_button = SidebarHoverButton::None;
-                }
-            }
+            Visibility::Pinned => !in_sidebar,
         }
     }
 }

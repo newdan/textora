@@ -1,6 +1,6 @@
 use super::ButtonMetrics;
 use crate::core::{PaintCtx, Rect};
-use crate::theme::{ControlMetrics, SettingsTheme, Theme};
+use crate::theme::{ApplicationTheme, ControlMetrics, Theme};
 
 const BUTTON_DISABLED_ALPHA: f32 = 0.45;
 const DESTRUCTIVE_SURFACE_BLEND: f32 = 0.08;
@@ -85,113 +85,114 @@ impl ButtonStyle {
     }
 
     pub fn from_theme(theme: &Theme) -> Self {
-        Self::action(theme.settings_theme())
+        Self::action(theme.application_theme())
     }
 
-    pub fn action(settings: SettingsTheme) -> Self {
+    pub fn action(application: ApplicationTheme) -> Self {
         let metrics = ControlMetrics::default();
         Self {
             font_size_logical: ButtonMetrics::FONT_SIZE,
             pad_x_logical: ButtonMetrics::HORIZONTAL_PADDING,
-            foreground: settings.text_primary,
-            selected_foreground: settings.text_primary,
-            background: settings.button_surface,
-            border: settings.button_border,
-            hover_background: settings.button_hover_surface,
-            pressed_background: settings.button_pressed_surface,
-            selected_background: settings.button_pressed_surface,
-            disabled_foreground: with_alpha(settings.text_primary, BUTTON_DISABLED_ALPHA),
-            disabled_background: with_alpha(settings.button_surface, BUTTON_DISABLED_ALPHA),
+            foreground: application.text_primary,
+            selected_foreground: application.text_primary,
+            background: application.button_surface,
+            border: application.button_border,
+            hover_background: application.button_hover_surface,
+            pressed_background: application.button_pressed_surface,
+            selected_background: application.button_pressed_surface,
+            disabled_foreground: with_alpha(application.text_primary, BUTTON_DISABLED_ALPHA),
+            disabled_background: with_alpha(application.button_surface, BUTTON_DISABLED_ALPHA),
             corner_radius_logical: metrics.corner_radius_logical,
             background_inset_logical: 0.0,
         }
     }
 
     /// 不可逆操作沿用普通按钮尺寸，以危险色区分文字、图标和轮廓。
-    pub fn destructive(settings: SettingsTheme) -> Self {
-        let background = blend(settings.button_surface, settings.danger, DESTRUCTIVE_SURFACE_BLEND);
+    pub fn destructive(application: ApplicationTheme) -> Self {
+        let background =
+            blend(application.button_surface, application.danger, DESTRUCTIVE_SURFACE_BLEND);
         let pressed_background =
-            blend(settings.button_surface, settings.danger, DESTRUCTIVE_PRESSED_BLEND);
+            blend(application.button_surface, application.danger, DESTRUCTIVE_PRESSED_BLEND);
         Self {
-            foreground: settings.button_danger_foreground,
-            selected_foreground: settings.button_danger_foreground,
+            foreground: application.button_danger_foreground,
+            selected_foreground: application.button_danger_foreground,
             background,
-            border: blend(settings.button_border, settings.danger, DESTRUCTIVE_BORDER_BLEND),
+            border: blend(application.button_border, application.danger, DESTRUCTIVE_BORDER_BLEND),
             hover_background: blend(
-                settings.button_surface,
-                settings.danger,
+                application.button_surface,
+                application.danger,
                 DESTRUCTIVE_HOVER_BLEND,
             ),
             pressed_background,
             selected_background: pressed_background,
             disabled_foreground: with_alpha(
-                settings.button_danger_foreground,
+                application.button_danger_foreground,
                 BUTTON_DISABLED_ALPHA,
             ),
             disabled_background: with_alpha(background, BUTTON_DISABLED_ALPHA),
-            ..Self::action(settings)
+            ..Self::action(application)
         }
     }
 
-    pub fn category(settings: SettingsTheme) -> Self {
+    pub fn category(application: ApplicationTheme) -> Self {
         Self {
-            selected_foreground: settings.accent_text,
+            selected_foreground: application.accent_text,
             background: TRANSPARENT,
             border: TRANSPARENT,
             hover_background: blend(
-                settings.sidebar_surface,
-                settings.accent,
+                application.navigation_surface,
+                application.accent,
                 CATEGORY_HOVER_ACCENT_BLEND,
             ),
             pressed_background: blend(
-                settings.sidebar_surface,
-                settings.accent,
+                application.navigation_surface,
+                application.accent,
                 CATEGORY_PRESSED_ACCENT_BLEND,
             ),
             selected_background: blend(
-                settings.sidebar_surface,
-                settings.accent,
+                application.navigation_surface,
+                application.accent,
                 CATEGORY_SELECTED_ACCENT_BLEND,
             ),
             disabled_background: TRANSPARENT,
-            ..Self::action(settings)
+            ..Self::action(application)
         }
     }
 
-    pub fn segmented(settings: SettingsTheme) -> Self {
+    pub fn segmented(application: ApplicationTheme) -> Self {
         Self {
-            selected_foreground: settings.on_accent,
+            selected_foreground: application.on_accent,
             background: TRANSPARENT,
             border: TRANSPARENT,
             hover_background: blend(
-                settings.modal_surface,
-                settings.accent,
+                application.overlay_surface,
+                application.accent,
                 SEGMENT_HOVER_ACCENT_BLEND,
             ),
             pressed_background: blend(
-                settings.modal_surface,
-                settings.accent,
+                application.overlay_surface,
+                application.accent,
                 SEGMENT_PRESSED_ACCENT_BLEND,
             ),
-            selected_background: settings.accent,
+            selected_background: application.accent,
             disabled_background: TRANSPARENT,
-            ..Self::action(settings)
+            ..Self::action(application)
         }
     }
 
     /// 无底色的内嵌图标操作，不绘制普通操作按钮边框。
-    pub fn ghost(settings: SettingsTheme) -> Self {
+    pub fn ghost(application: ApplicationTheme) -> Self {
         Self {
-            foreground: settings.text_secondary,
-            selected_foreground: settings.accent_text,
+            foreground: application.text_secondary,
+            selected_foreground: application.accent_text,
             background: TRANSPARENT,
             border: TRANSPARENT,
-            hover_background: settings.hover_surface,
-            pressed_background: settings.button_pressed_surface,
-            selected_background: settings.selected_surface,
-            disabled_foreground: with_alpha(settings.text_secondary, BUTTON_DISABLED_ALPHA),
+            hover_background: application.hover_surface,
+            pressed_background: application.button_pressed_surface,
+            selected_background: application.selected_surface,
+            disabled_foreground: with_alpha(application.text_secondary, BUTTON_DISABLED_ALPHA),
             disabled_background: TRANSPARENT,
-            ..Self::action(settings)
+            ..Self::action(application)
         }
     }
 
@@ -293,11 +294,15 @@ mod tests {
         for theme in builtin_themes() {
             let settings = theme.settings_theme();
             for (role, style, backdrop) in [
-                ("action", ButtonStyle::action(settings), settings.modal_surface),
-                ("segmented", ButtonStyle::segmented(settings), settings.modal_surface),
-                ("category", ButtonStyle::category(settings), settings.sidebar_surface),
-                ("ghost", ButtonStyle::ghost(settings), settings.modal_surface),
-                ("destructive", ButtonStyle::destructive(settings), settings.modal_surface),
+                ("action", ButtonStyle::action(settings.application), settings.modal_surface),
+                ("segmented", ButtonStyle::segmented(settings.application), settings.modal_surface),
+                ("category", ButtonStyle::category(settings.application), settings.sidebar_surface),
+                ("ghost", ButtonStyle::ghost(settings.application), settings.modal_surface),
+                (
+                    "destructive",
+                    ButtonStyle::destructive(settings.application),
+                    settings.modal_surface,
+                ),
             ] {
                 for state in [
                     ButtonVisualState::Normal,
@@ -342,7 +347,7 @@ mod tests {
     fn inline_and_standard_actions_share_hover_and_press_feedback() {
         for theme in builtin_themes() {
             let standard = ButtonStyle::from_theme(&theme);
-            let inline = ButtonStyle::ghost(theme.settings_theme());
+            let inline = ButtonStyle::ghost(theme.application_theme());
             for state in [ButtonVisualState::Hovered, ButtonVisualState::Pressed] {
                 assert_eq!(
                     inline.background_color(state, 1.0),
@@ -384,7 +389,7 @@ mod tests {
         const MINIMUM_TEXT_CONTRAST: f32 = 4.5;
         let luminance = |color: [f32; 4]| color[0] * 0.2126 + color[1] * 0.7152 + color[2] * 0.0722;
         for theme in builtin_themes() {
-            let style = ButtonStyle::destructive(theme.settings_theme());
+            let style = ButtonStyle::destructive(theme.application_theme());
             for state in [
                 ButtonVisualState::Normal,
                 ButtonVisualState::Hovered,
@@ -407,7 +412,7 @@ mod tests {
     fn destructive_actions_preserve_metrics_and_keep_state_feedback_distinct() {
         for theme in builtin_themes() {
             let standard = ButtonStyle::from_theme(&theme);
-            let destructive = ButtonStyle::destructive(theme.settings_theme());
+            let destructive = ButtonStyle::destructive(theme.application_theme());
             assert_eq!(destructive.font_size_logical, standard.font_size_logical);
             assert_eq!(destructive.pad_x_logical, standard.pad_x_logical);
             assert_eq!(destructive.corner_radius_logical, standard.corner_radius_logical);

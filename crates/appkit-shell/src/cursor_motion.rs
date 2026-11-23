@@ -8,7 +8,7 @@ use ui::render_geom::AdvanceCacheEntry;
 use ui::viewport::DisplayRow;
 
 use std::time::Instant;
-use textora_core::types::{ByteIndex, UniCharOffset};
+use textora_core::types::{ByteIndex, GraphemeOffset};
 
 /// Contains transient cursor rendering and caching state that is updated during layout and drawing.
 pub struct CursorRenderState {
@@ -19,9 +19,9 @@ pub struct CursorRenderState {
     pub sticky_x: f32,
     pub sticky_x_dirty: bool,
     pub last_cursor_offset: ByteIndex,
-    /// (unichar_offset, vis_line) from last mouse click — bypasses ambiguous VL boundary disambiguation.
+    /// (grapheme_offset, vis_line) from last mouse click — bypasses ambiguous VL boundary disambiguation.
     /// Cleared on keyboard movement and viewport scroll.
-    pub click_hint: Option<(UniCharOffset, usize)>,
+    pub click_hint: Option<(GraphemeOffset, usize)>,
 }
 
 impl CursorRenderState {

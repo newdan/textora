@@ -40,10 +40,10 @@ pub(in crate::layout::block) fn source_line_context_for_layout(
     line_text: &str,
 ) -> Option<SourceLineContext> {
     match &block.source_range {
-        BlockSource::Fragmented(ranges) => ranges
+        BlockSourceSpan::Fragmented(ranges) => ranges
             .get(line_idx)
             .map(|range| SourceLineContext { range: range.clone(), text_start: range.start }),
-        BlockSource::Continuous(range) => {
+        BlockSourceSpan::Continuous(range) => {
             let mut line_start = range.start;
             for (idx, current_line) in block.lines(doc).iter().enumerate() {
                 let current_len = source_line_len(block, idx, current_line);

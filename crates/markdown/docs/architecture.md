@@ -13,7 +13,7 @@
 
 ### 绝对边界（由 `scripts/check_architecture.sh` 强制）
 - `textora-ui`、`textora-appkit-core`、`textora-appkit-shell`、`notora-core` **禁止**依赖 `textora-markdown`。
-- 本 crate 通过 `ui::plugin` 定义的 trait（`ViewPlugin`、`PluginFactory`）和纯数据结构（`EditIntent`、`EditAugmentation`、`SemanticEditPlan` 等）与宿主通信，**禁止**引入 `app` 层的 `DocumentView`、`Workspace` 或产品概念。
+- 本 crate 通过 `ui::plugin` 定义的 trait（`ViewPlugin`、`PluginFactory`）和纯数据结构（`EditIntent`、`EditAugmentation`、`SemanticEditPlan` 等）与宿主通信，**禁止**引入 `app` 层的 `DocumentView`、`EditorTabSet` 或产品概念。
 
 ---
 
@@ -29,7 +29,7 @@
   → render::render_layout           → ui::core::paint::DrawList
 ```
 - 一次性无状态入口：`lib.rs` 提供 `render_markdown*` 和 `markdown_content_height`。
-- 有状态视图入口：`view::PreviewEngine<S>`（泛型 `S: BlockSource`），被 `MarkdownView`、`NovelView`、`MarkdownEditorView` 复用。
+- 有状态视图入口：`view::BlockViewEngine<S>`（泛型 `S: BlockSource`），被 `MarkdownView`、`NovelView`、`MarkdownEditorView` 复用。
 
 ### B. WYSIWYG 编辑闭环（`MarkdownEditorView`）
 ```text
@@ -82,7 +82,7 @@ MMF 源码（标题树 + TOML 属性块）
 | `src/projection.rs` | 源码锚点与视觉位置之间的双向权威投影索引 | `SourceProjectionIndex`, `SourceAnchor`, `ProjectedText` |
 | `src/grapheme_map.rs` | 字符映射转为 UAX#29 字素簇（grapheme）映射 | `VisualGraphemeMap` |
 | `src/selection.rs`, `search.rs` | 扁平行选区、点击命中、词边界、搜索高亮矩形缓存 | `ViewPos`, `SelectionState`, `SearchHighlightCache` |
-| `src/view/` 及 `src/view_*.rs` | 共享视图引擎与各插件实现；preedit/导航/搜索/拆分历史/代码裁剪 | `PreviewEngine`, `MarkdownView`, `NovelView`, `MarkdownEditorView` |
+| `src/view/` 及 `src/view_*.rs` | 共享视图引擎与各插件实现；preedit/导航/搜索/拆分历史/代码裁剪 | `BlockViewEngine`, `MarkdownView`, `NovelView`, `MarkdownEditorView` |
 | `src/edit.rs` | WYSIWYG 展开上下文与行内标记物化 | `EditContext`, `MaterializedLine`, `materialize_line` |
 | `src/augmenter/` | Enter / LineBreak / Backspace / Tab / InsertText 的语法感知增强 | `augment_edit`, `EnterContext`, `classify_enter_context` |
 | `src/editable_paragraph*.rs`, `paragraph_leading_spaces.rs` | 编辑器专用空段落的归属映射、增删导航与段首字面空格保留 | `EditableParagraphMap`, `EditableParagraphRun` |

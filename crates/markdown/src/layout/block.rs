@@ -4,7 +4,9 @@ pub(in crate::layout::block) use shaping::{Shaper, Weight};
 
 pub(in crate::layout::block) use super::context::LayoutCtx;
 pub(in crate::layout::block) use super::types::{LaidOutBlock, LaidOutBlockKind, LaidOutLine};
-pub(in crate::layout::block) use crate::builder::{BlockKind, BlockNode, BlockSource, StyleSpan};
+pub(in crate::layout::block) use crate::builder::{
+    BlockKind, BlockNode, BlockSourceSpan, StyleSpan,
+};
 pub(in crate::layout::block) use crate::edit::SourceLineContext;
 pub(in crate::layout::block) use crate::style::MarkdownStyle;
 

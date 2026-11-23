@@ -1,6 +1,6 @@
 use super::*;
+use crate::augmenter::AugmentKind;
 use textora_core::unicode::grapheme_start_indices;
-use ui::plugin::AugmentKind;
 
 const VIEWPORT_WIDTH: f32 = 800.0;
 const VIEWPORT_HEIGHT: f32 = 1600.0;

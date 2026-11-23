@@ -428,7 +428,7 @@ fn preedit_visual_text_anchors_every_boundary_to_cursor_byte() {
 
 // ===== ActiveBlockMarker tests =====
 
-use crate::builder::{BlockKind, BlockNode, BlockSource, ListBullet};
+use crate::builder::{BlockKind, BlockNode, BlockSourceSpan, ListBullet};
 
 fn heading_block(text: &str) -> BlockNode {
     BlockNode {
@@ -436,7 +436,7 @@ fn heading_block(text: &str) -> BlockNode {
         children: vec![],
         block_range: 0..text.len(),
         code_line_source_starts: None,
-        source_range: BlockSource::Continuous(0..text.len()),
+        source_range: BlockSourceSpan::Continuous(0..text.len()),
         text_lines: vec![text[2..].to_string()], // content after "# "
         projected_lines: vec![],
         text_styles: vec![vec![]],
@@ -465,7 +465,7 @@ fn active_marker_for_h2() {
         children: vec![],
         block_range: 0..9,
         code_line_source_starts: None,
-        source_range: BlockSource::Continuous(0..9),
+        source_range: BlockSourceSpan::Continuous(0..9),
         text_lines: vec!["SubTitle".to_string()],
         projected_lines: vec![],
         text_styles: vec![vec![]],
@@ -486,7 +486,7 @@ fn active_marker_for_list_item_bullet() {
         children: vec![],
         block_range: 0..7,
         code_line_source_starts: None,
-        source_range: BlockSource::Continuous(0..7),
+        source_range: BlockSourceSpan::Continuous(0..7),
         text_lines: vec!["item".to_string()],
         projected_lines: vec![],
         text_styles: vec![vec![]],
@@ -507,7 +507,7 @@ fn active_marker_for_ordered_list_item() {
         children: vec![],
         block_range: 0..6,
         code_line_source_starts: None,
-        source_range: BlockSource::Continuous(0..6),
+        source_range: BlockSourceSpan::Continuous(0..6),
         text_lines: vec!["item".to_string()],
         projected_lines: vec![],
         text_styles: vec![vec![]],
@@ -528,7 +528,7 @@ fn active_marker_for_task_list() {
         children: vec![],
         block_range: 0..9,
         code_line_source_starts: None,
-        source_range: BlockSource::Continuous(0..9),
+        source_range: BlockSourceSpan::Continuous(0..9),
         text_lines: vec!["todo".to_string()],
         projected_lines: vec![],
         text_styles: vec![vec![]],
@@ -545,7 +545,7 @@ fn active_marker_for_blockquote() {
         children: vec![],
         block_range: 0..10,
         code_line_source_starts: None,
-        source_range: BlockSource::Continuous(0..10),
+        source_range: BlockSourceSpan::Continuous(0..10),
         text_lines: vec!["quoted".to_string()],
         projected_lines: vec![],
         text_styles: vec![vec![]],
@@ -562,7 +562,7 @@ fn block_marker_len_heading() {
         children: vec![],
         block_range: 0..7,
         code_line_source_starts: None,
-        source_range: BlockSource::Continuous(0..7),
+        source_range: BlockSourceSpan::Continuous(0..7),
         text_lines: vec!["Title".to_string()],
         projected_lines: vec![],
         text_styles: vec![vec![]],
@@ -577,7 +577,7 @@ fn block_marker_len_h3() {
         children: vec![],
         block_range: 0..9,
         code_line_source_starts: None,
-        source_range: BlockSource::Continuous(0..9),
+        source_range: BlockSourceSpan::Continuous(0..9),
         text_lines: vec!["Small".to_string()],
         projected_lines: vec![],
         text_styles: vec![vec![]],
@@ -605,7 +605,7 @@ fn block_marker_len_paragraph_is_zero() {
         children: vec![],
         block_range: 0..5,
         code_line_source_starts: None,
-        source_range: BlockSource::Continuous(0..5),
+        source_range: BlockSourceSpan::Continuous(0..5),
         text_lines: vec!["text".to_string()],
         projected_lines: vec![],
         text_styles: vec![vec![]],

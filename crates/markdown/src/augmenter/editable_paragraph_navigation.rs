@@ -1,10 +1,10 @@
 //! Enter and Backspace navigation for editor-only empty paragraphs.
 
 use super::{debug_assert_augmentation, preferred_newline_sequence};
+use crate::augmenter::EditAugmentation;
 use crate::builder::{EditableParagraphMap, EditableParagraphRun, MarkdownDoc};
 use crate::source_snapshot::MarkdownSource;
 use std::ops::Range;
-use ui::plugin::EditAugmentation;
 
 pub(super) fn enter(source: &MarkdownSource<'_>, current_byte: usize) -> Option<EditAugmentation> {
     if !is_blank_or_quote_only_line(source, current_byte) {

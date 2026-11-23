@@ -1,13 +1,13 @@
 use super::*;
 
-impl<S: BlockSource> PreviewEngine<S> {
+impl<S: BlockSource> BlockViewEngine<S> {
     /// 编辑干预：Enter/Backspace/Tab/InsertText 的 markdown 感知行为。委派到
     /// [`crate::augmenter`]（2026-07-06 方案阶段 2b/2c 抽出）。
     pub fn augment_edit(
         &self,
         current_byte: usize,
-        kind: ui::plugin::AugmentKind,
-    ) -> Option<ui::plugin::EditAugmentation> {
+        kind: crate::augmenter::AugmentKind,
+    ) -> Option<crate::augmenter::EditAugmentation> {
         let source = self.edit_source.as_deref()?;
         crate::augmenter::augment_source(source, current_byte, kind)
     }
@@ -52,7 +52,7 @@ impl<S: BlockSource> PreviewEngine<S> {
     }
 }
 
-impl<S: BlockSource> ui::plugin::OutlineProvider for PreviewEngine<S> {
+impl<S: BlockSource> ui::plugin::OutlineProvider for BlockViewEngine<S> {
     fn headings(&self) -> Vec<ui::plugin::HeadingEntry> {
         self.headings()
             .iter()
@@ -65,15 +65,15 @@ impl<S: BlockSource> ui::plugin::OutlineProvider for PreviewEngine<S> {
     }
 
     fn current_heading_index(&self, scroll_y: f32) -> Option<usize> {
-        PreviewEngine::current_heading_index(self, scroll_y)
+        BlockViewEngine::current_heading_index(self, scroll_y)
     }
 
     fn scroll_to_heading(&mut self, index: usize) {
-        PreviewEngine::scroll_to_heading(self, index);
+        BlockViewEngine::scroll_to_heading(self, index);
     }
 }
 
-impl<S: BlockSource> ui::plugin::ScrollableView for PreviewEngine<S> {
+impl<S: BlockSource> ui::plugin::ScrollableView for BlockViewEngine<S> {
     fn scroll_y(&self, _document: &dyn DocView) -> f32 {
         self.scroll_y
     }
@@ -83,7 +83,7 @@ impl<S: BlockSource> ui::plugin::ScrollableView for PreviewEngine<S> {
     }
 
     fn scroll(&mut self, delta: f32, viewport_height: f32) -> bool {
-        PreviewEngine::scroll(self, delta, viewport_height)
+        BlockViewEngine::scroll(self, delta, viewport_height)
     }
 }
 
@@ -92,7 +92,7 @@ fn reading_position(position: ViewPos) -> ui::plugin::ReadingPosition {
     ui::plugin::ReadingPosition::new(line_index, grapheme_index)
 }
 
-impl<S: BlockSource> PreviewEngine<S> {
+impl<S: BlockSource> BlockViewEngine<S> {
     fn reading_flat_lines(&self) -> Vec<ui::plugin::FlatLine> {
         self.flat_lines()
             .iter()

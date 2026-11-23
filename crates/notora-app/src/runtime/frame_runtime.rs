@@ -9,9 +9,7 @@ use appkit_shell::editor_runtime::{
 };
 use appkit_shell::source_spacing;
 use ui::Widget;
-use ui::document_search_bar::{
-    DocumentSearchBarEvent, DocumentSearchBarInput, DocumentSearchBarWidget,
-};
+use ui::search_bar::{SearchBarEvent, SearchBarSnapshot, SearchBarWidget};
 use winit::dpi::{PhysicalPosition, PhysicalSize};
 
 use crate::NotoraState;
@@ -96,11 +94,20 @@ impl StartupTrace {
     }
 }
 
+#[derive(Default, PartialEq, Eq)]
+enum DocumentSearchComposition {
+    #[default]
+    Idle,
+    Active,
+    Cancelled,
+}
+
 /// shell、主题、字体准备与 GPU frame 提交的唯一所有者。
 pub(super) struct FrameRuntime {
-    pub(super) document_search_bar: DocumentSearchBarWidget,
-    document_search_input: DocumentSearchBarInput,
+    pub(super) document_search_bar: SearchBarWidget,
     document_search_rect: ui::Rect,
+    document_search_tab: Option<appkit_core::workspace::types::TabId>,
+    document_search_composition: DocumentSearchComposition,
     window_frame: ui::window_frame::WindowFrameWidget,
     #[cfg(not(test))]
     shell: NotoraShell,
@@ -141,9 +148,10 @@ impl FrameRuntime {
         startup_trace: Option<StartupTrace>,
     ) -> Self {
         Self {
-            document_search_bar: DocumentSearchBarWidget::new(),
-            document_search_input: DocumentSearchBarInput::default(),
+            document_search_bar: SearchBarWidget::find_only(),
             document_search_rect: ui::Rect::ZERO,
+            document_search_tab: None,
+            document_search_composition: DocumentSearchComposition::Idle,
             window_frame: ui::window_frame::WindowFrameWidget::default(),
             shell: NotoraShell::new(),
             settings,
@@ -166,7 +174,7 @@ impl FrameRuntime {
     }
 
     pub(super) fn focused_text_input_ime_allowed(&self) -> bool {
-        if self.document_search_input.focused {
+        if self.document_search_bar.input_has_focus() {
             return self.document_search_bar.ime_allowed();
         }
         self.shell.focused_text_input_ime_allowed()
@@ -190,13 +198,22 @@ impl FrameRuntime {
 
     pub(super) fn synchronize_document_search(
         &mut self,
-        input: DocumentSearchBarInput,
+        tab: Option<appkit_core::workspace::types::TabId>,
+        input: SearchBarSnapshot,
+        focused: bool,
         rect: ui::Rect,
         dpi: f32,
     ) {
-        self.document_search_bar.set_input(input.clone());
-        self.document_search_input = input;
-        if self.document_search_rect == rect {
+        let binding_changed = self.document_search_tab != tab;
+        if binding_changed || !focused {
+            self.cancel_document_search_composition();
+        }
+        if binding_changed {
+            self.document_search_bar = SearchBarWidget::find_only();
+            self.document_search_tab = tab;
+        }
+        self.document_search_bar.set_input_with_focus(input, focused);
+        if !binding_changed && self.document_search_rect == rect {
             return;
         }
         self.document_search_rect = rect;
@@ -206,14 +223,48 @@ impl FrameRuntime {
         self.document_search_bar.set_rect(rect, &mut context);
     }
 
+    fn cancel_document_search_composition(&mut self) {
+        if self.document_search_composition == DocumentSearchComposition::Active {
+            self.document_search_composition = DocumentSearchComposition::Cancelled;
+        }
+    }
+
+    pub(super) fn consumes_cancelled_search_ime(&mut self, event: &ui::Event) -> bool {
+        match event {
+            ui::Event::ImeCommit(_) => {
+                std::mem::take(&mut self.document_search_composition)
+                    == DocumentSearchComposition::Cancelled
+            }
+            ui::Event::ImePreedit { text, .. } if !text.is_empty() => {
+                self.document_search_composition = DocumentSearchComposition::Idle;
+                false
+            }
+            ui::Event::ImePreedit { .. } => {
+                // 平台可在提交之前先清空预编辑，空预编辑不结束旧合成的归属。
+                self.document_search_composition == DocumentSearchComposition::Cancelled
+            }
+            ui::Event::ImeDisable => {
+                self.cancel_document_search_composition();
+                false
+            }
+            _ => false,
+        }
+    }
+
     pub(super) fn route_document_search_event(
         &mut self,
         event: &ui::Event,
         dpi: f32,
-    ) -> DocumentSearchBarEvent {
+    ) -> SearchBarEvent {
         let mut clipboard = appkit_shell::SystemClipboard;
         let mut context = ui::EventCtx::with_clipboard(&self.theme, dpi, &mut clipboard);
-        self.document_search_bar.route_event(event, &mut context)
+        let routed = self.document_search_bar.route_event(event, &mut context);
+        if routed.consumed
+            && matches!(event, ui::Event::ImePreedit { text, .. } if !text.is_empty())
+        {
+            self.document_search_composition = DocumentSearchComposition::Active;
+        }
+        routed
     }
 
     pub(super) fn editor_popup_is_open(&self) -> bool {

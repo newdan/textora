@@ -603,7 +603,7 @@ fn list_item_text_and_child_paragraph_have_paragraph_spacing() {
         text_lines: vec!["a".to_string()],
         projected_lines: vec![],
         text_styles: vec![vec![]],
-        source_range: crate::builder::BlockSource::Continuous(0..2),
+        source_range: crate::builder::BlockSourceSpan::Continuous(0..2),
         block_range: 0..2,
         code_line_source_starts: None,
     };
@@ -1593,9 +1593,7 @@ fn style_segments_computed_for_inline_code() {
 
 #[test]
 fn layout_cjk_text_no_panic() {
-    let (src, doc) = make_doc(
-        "需保留 SidebarPersistent 机制（inject_persistent 在生产中使用，用于跨帧保持隐藏/显示状态）",
-    );
+    let (src, doc) = make_doc("SidebarInteraction 在组件重建时保留可见性、动画计时与滚动位置。");
     let laid_out = layout_doc(
         &doc.blocks,
         &default_style(),
@@ -2675,7 +2673,7 @@ fn list_item_content_to_nested_rule_uses_the_larger_internal_gap() {
         text_lines: vec!["item".to_string()],
         projected_lines: vec![],
         text_styles: vec![vec![]],
-        source_range: crate::builder::BlockSource::Continuous(0..4),
+        source_range: crate::builder::BlockSourceSpan::Continuous(0..4),
         block_range: 0..4,
         code_line_source_starts: None,
     };

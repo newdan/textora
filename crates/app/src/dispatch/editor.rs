@@ -1,5 +1,6 @@
 use crate::app::App;
 use crate::app_effect::AppEffect;
+use crate::menu_handler::EditorShortcut;
 use crate::ui_shell::KeyboardFocusTarget;
 use appkit_core::edit_command::EditCommand;
 use appkit_shell::editor_runtime::{EditorNotification, EditorOutcome};
@@ -7,7 +8,7 @@ use appkit_shell::{DocumentClipboard, SystemClipboard};
 use winit::event_loop::ActiveEventLoop;
 
 /// Caret-moving commands that must split any ongoing undo coalescing run.
-/// Includes selection extension and jumps (SelectAll, navigation history):
+/// Includes selection extension and SelectAll:
 /// anything that repositions the caret without editing text. Editing commands
 /// never reach this predicate: they are handled earlier by the transactional
 /// edit path.
@@ -37,8 +38,6 @@ fn is_cursor_navigation_command(cmd: &EditCommand) -> bool {
             | EditCommand::ExtendToDocStart
             | EditCommand::ExtendToDocEnd
             | EditCommand::SelectAll
-            | EditCommand::NavigateBack
-            | EditCommand::NavigateForward
     )
 }
 
@@ -122,19 +121,19 @@ impl App {
         outcome.shell_effect
     }
 
-    fn dispatch_keyboard_tab_switch(&mut self, command: &EditCommand) -> AppEffect {
+    fn dispatch_keyboard_tab_switch(&mut self, command: EditorShortcut) -> AppEffect {
         let index = match command {
-            EditCommand::NextTab if !self.editor_is_empty() => {
+            EditorShortcut::NextTab if !self.editor_is_empty() => {
                 (self.active_editor_index().unwrap_or(0) + 1) % self.editor_tab_count()
             }
-            EditCommand::PrevTab if !self.editor_is_empty() => {
+            EditorShortcut::PrevTab if !self.editor_is_empty() => {
                 if self.active_editor_index().unwrap_or(0) == 0 {
                     self.editor_tab_count() - 1
                 } else {
                     self.active_editor_index().unwrap_or(0) - 1
                 }
             }
-            EditCommand::SwitchTab(index) => *index,
+            EditorShortcut::SwitchTab(index) => index,
             _ => return AppEffect::NONE,
         };
         if let Some(id) = self.editor_tab_id_at(index) {
@@ -151,6 +150,10 @@ impl App {
         if !is_cursor_navigation_command(cmd) {
             return;
         }
+        self.break_active_edit_merge();
+    }
+
+    fn break_active_edit_merge(&mut self) {
         if let Some(mut tab) = self.active_tab_session_mut() {
             tab.document_mut().break_edit_merge();
         }
@@ -166,9 +169,7 @@ impl App {
         // ── Markdown preview mode: block editing commands ──
         if !self.active_allows_editing() {
             match cmd {
-                EditCommand::ToggleView
-                | EditCommand::Escape
-                | EditCommand::PageUp
+                EditCommand::PageUp
                 | EditCommand::PageDown
                 | EditCommand::MoveUp
                 | EditCommand::MoveDown
@@ -180,16 +181,6 @@ impl App {
                 | EditCommand::MoveToDocEnd
                 | EditCommand::Save
                 | EditCommand::SaveAs
-                | EditCommand::CloseTab
-                | EditCommand::NextTab
-                | EditCommand::PrevTab
-                | EditCommand::NavigateBack
-                | EditCommand::NavigateForward
-                | EditCommand::ToggleSidebarPin
-                | EditCommand::ToggleToc
-                | EditCommand::Find
-                | EditCommand::FindNext
-                | EditCommand::FindPrev
                 | EditCommand::Copy
                 | EditCommand::Cut
                 | EditCommand::SelectAll
@@ -200,9 +191,7 @@ impl App {
                 | EditCommand::ExtendToLineStart
                 | EditCommand::ExtendToLineEnd
                 | EditCommand::ExtendToDocStart
-                | EditCommand::ExtendToDocEnd
-                | EditCommand::NextChapter
-                | EditCommand::PrevChapter => {}
+                | EditCommand::ExtendToDocEnd => {}
                 _ => return effect,
             }
         }
@@ -339,55 +328,6 @@ impl App {
             }
         }
 
-        if matches!(self.settings.view_mode, ui::view_mode::ViewMode::Sidebar) {
-            match &cmd {
-                EditCommand::Escape => {
-                    if let Some(mut tab) = self.active_tab_session_mut()
-                        && tab.search_state().panel_visible
-                    {
-                        tab.search_state_mut().dismiss_or_clear();
-                        self.ui_shell.focus_editor();
-                        effect = effect.merge(AppEffect::REDRAW);
-                        return effect;
-                    }
-                    let action = {
-                        let shell = &mut self.ui_shell;
-                        shell.sidebar_on_key(ui::sidebar::SidebarKey::Escape)
-                    };
-                    if let Some(action) = action {
-                        effect = effect.merge(self.handle_sidebar_key_action(action));
-                        return effect;
-                    }
-                    self.quit_app(event_loop);
-                    return effect;
-                }
-                EditCommand::ToggleSidebarPin => {
-                    let action = {
-                        let shell = &mut self.ui_shell;
-                        shell.sidebar_on_key(ui::sidebar::SidebarKey::TogglePin)
-                    };
-                    if let Some(action) = action {
-                        effect = effect.merge(self.handle_sidebar_key_action(action));
-                    }
-                    return effect;
-                }
-                _ => {}
-            }
-        }
-
-        if cmd == EditCommand::Escape {
-            if let Some(mut tab) = self.active_tab_session_mut()
-                && tab.search_state().panel_visible
-            {
-                tab.search_state_mut().dismiss_or_clear();
-                self.ui_shell.focus_editor();
-                effect = effect.merge(AppEffect::REDRAW);
-                return effect;
-            }
-            self.quit_app(event_loop);
-            return effect;
-        }
-
         match &cmd {
             EditCommand::MoveUp => {
                 effect = effect.merge(self.move_cursor_visual(-1));
@@ -403,31 +343,6 @@ impl App {
             }
             EditCommand::ExtendDown => {
                 effect = effect.merge(self.extend_selection_visual(1));
-                return effect;
-            }
-            EditCommand::ToggleSidebarPin => return effect,
-            EditCommand::ToggleView => {
-                return effect.merge(self.toggle_editor_view());
-            }
-            EditCommand::ToggleToc => {
-                if self.toggle_active_toc() {
-                    effect = effect.merge(AppEffect::REDRAW);
-                    return effect;
-                }
-                return effect;
-            }
-            EditCommand::NextChapter => {
-                if let Some(mut tab) = self.active_tab_session_mut() {
-                    tab.scroll_to_chapter(ui::plugin::ChapterDirection::Next);
-                    effect = effect.merge(AppEffect::REDRAW);
-                }
-                return effect;
-            }
-            EditCommand::PrevChapter => {
-                if let Some(mut tab) = self.active_tab_session_mut() {
-                    tab.scroll_to_chapter(ui::plugin::ChapterDirection::Previous);
-                    effect = effect.merge(AppEffect::REDRAW);
-                }
                 return effect;
             }
             EditCommand::PageUp => {
@@ -446,81 +361,10 @@ impl App {
                 effect = effect.merge(self.save_active_entry(true));
                 return effect;
             }
-            EditCommand::OpenFile => {
-                return effect.merge(self.open_file_dialog());
-            }
-            EditCommand::NewTab => {
-                return effect.merge(self.new_untitled_doc());
-            }
-            EditCommand::CloseTab => {
-                if let Some(id) = self.active_tab_id() {
-                    effect = effect.merge(self.try_close_entry_with_prompt(id));
-                }
-                return effect;
-            }
-            EditCommand::ReopenTab => return effect,
-            EditCommand::NextTab | EditCommand::PrevTab | EditCommand::SwitchTab(_) => {
-                return self.dispatch_keyboard_tab_switch(&cmd);
-            }
-            EditCommand::NavigateBack => {
-                let ws_effect = self.navigate_editor_back();
-                return effect.merge(self.handle_nav_effect(ws_effect));
-            }
-            EditCommand::NavigateForward => {
-                let ws_effect = self.navigate_editor_forward();
-                return effect.merge(self.handle_nav_effect(ws_effect));
-            }
             _ => {}
         }
 
         match &cmd {
-            EditCommand::Find => {
-                if let Some(mut tab) = self.active_tab_session_mut() {
-                    let search_state = tab.search_state_mut();
-                    search_state.panel_visible = !search_state.panel_visible;
-                    if !search_state.panel_visible {
-                        search_state.clear();
-                        self.ui_shell.focus_editor();
-                    } else {
-                        self.ui_shell.focus_widget(ui::core::widget::ids::SEARCH_BAR);
-                    }
-                    effect = effect.merge(AppEffect::REDRAW);
-                }
-                return effect;
-            }
-            EditCommand::FindReplace => {
-                if let Some(mut tab) = self.active_tab_session_mut() {
-                    let search_state = tab.search_state_mut();
-                    search_state.panel_visible = true;
-                    if !search_state.replace_mode {
-                        search_state.toggle_replace_mode();
-                    }
-                    search_state.focus_replace = true;
-                    self.ui_shell.focus_widget(ui::core::widget::ids::SEARCH_BAR);
-                    effect = effect.merge(AppEffect::REDRAW);
-                }
-                return effect;
-            }
-            EditCommand::FindNext => {
-                if let Some(mut tab) = self.active_tab_session_mut()
-                    && tab.search_state().is_active()
-                {
-                    tab.search_state_mut().next_match();
-                    self.scroll_to_active_match();
-                    effect = effect.merge(AppEffect::REDRAW);
-                }
-                return effect;
-            }
-            EditCommand::FindPrev => {
-                if let Some(mut tab) = self.active_tab_session_mut()
-                    && tab.search_state().is_active()
-                {
-                    tab.search_state_mut().prev_match();
-                    self.scroll_to_active_match();
-                    effect = effect.merge(AppEffect::REDRAW);
-                }
-                return effect;
-            }
             EditCommand::InsertChar(ch) => {
                 let shell = &self.ui_shell;
                 let keyboard_focus = shell.keyboard_focus();
@@ -586,6 +430,141 @@ impl App {
             self.ensure_wysiwyg_cursor_visible();
         }
         effect.merge(outcome.shell_effect)
+    }
+
+    pub(crate) fn dispatch_editor_shortcut(
+        &mut self,
+        shortcut: EditorShortcut,
+        event_loop: &ActiveEventLoop,
+    ) -> AppEffect {
+        let mut effect = AppEffect::NONE;
+        let allows_editing = self.active_allows_editing();
+        if !allows_editing && !shortcut.allowed_in_read_only() {
+            return effect;
+        }
+        if allows_editing {
+            self.sync_plugin_state();
+            if shortcut.breaks_edit_merge() {
+                self.break_active_edit_merge();
+            }
+        }
+
+        match shortcut {
+            EditorShortcut::ToggleSidebarPin => self.toggle_sidebar_pin_from_shortcut(),
+            EditorShortcut::ToggleView => effect.merge(self.toggle_editor_view()),
+            EditorShortcut::ToggleToc => {
+                if self.toggle_active_toc() {
+                    effect = effect.merge(AppEffect::REDRAW);
+                }
+                effect
+            }
+            EditorShortcut::NextChapter => {
+                if let Some(mut tab) = self.active_tab_session_mut() {
+                    tab.scroll_to_chapter(ui::plugin::ChapterDirection::Next);
+                    effect = effect.merge(AppEffect::REDRAW);
+                }
+                effect
+            }
+            EditorShortcut::PrevChapter => {
+                if let Some(mut tab) = self.active_tab_session_mut() {
+                    tab.scroll_to_chapter(ui::plugin::ChapterDirection::Previous);
+                    effect = effect.merge(AppEffect::REDRAW);
+                }
+                effect
+            }
+            EditorShortcut::OpenFile => effect.merge(self.open_file_dialog()),
+            EditorShortcut::NewTab => effect.merge(self.new_untitled_doc()),
+            EditorShortcut::CloseTab => {
+                if let Some(id) = self.active_tab_id() {
+                    effect = effect.merge(self.try_close_entry_with_prompt(id));
+                }
+                effect
+            }
+            EditorShortcut::NextTab | EditorShortcut::PrevTab | EditorShortcut::SwitchTab(_) => {
+                self.dispatch_keyboard_tab_switch(shortcut)
+            }
+            EditorShortcut::NavigateBack => {
+                let ws_effect = self.navigate_editor_back();
+                effect.merge(self.handle_nav_effect(ws_effect))
+            }
+            EditorShortcut::NavigateForward => {
+                let ws_effect = self.navigate_editor_forward();
+                effect.merge(self.handle_nav_effect(ws_effect))
+            }
+            EditorShortcut::Find => {
+                if let Some(mut tab) = self.active_tab_session_mut() {
+                    let search_state = tab.search_state_mut();
+                    search_state.panel_visible = !search_state.panel_visible;
+                    if !search_state.panel_visible {
+                        search_state.clear();
+                        self.ui_shell.focus_editor();
+                    } else {
+                        self.ui_shell.focus_widget(ui::core::widget::ids::SEARCH_BAR);
+                    }
+                    effect = effect.merge(AppEffect::REDRAW);
+                }
+                effect
+            }
+            EditorShortcut::FindReplace => {
+                if let Some(mut tab) = self.active_tab_session_mut() {
+                    let search_state = tab.search_state_mut();
+                    search_state.panel_visible = true;
+                    if !search_state.replace_mode {
+                        search_state.toggle_replace_mode();
+                    }
+                    search_state.focus_replace = true;
+                    self.ui_shell.focus_widget(ui::core::widget::ids::SEARCH_BAR);
+                    effect = effect.merge(AppEffect::REDRAW);
+                }
+                effect
+            }
+            EditorShortcut::FindNext => {
+                if let Some(mut tab) = self.active_tab_session_mut()
+                    && tab.search_state().is_active()
+                {
+                    tab.search_state_mut().next_match();
+                    self.scroll_to_active_match();
+                    effect = effect.merge(AppEffect::REDRAW);
+                }
+                effect
+            }
+            EditorShortcut::FindPrev => {
+                if let Some(mut tab) = self.active_tab_session_mut()
+                    && tab.search_state().is_active()
+                {
+                    tab.search_state_mut().prev_match();
+                    self.scroll_to_active_match();
+                    effect = effect.merge(AppEffect::REDRAW);
+                }
+                effect
+            }
+            EditorShortcut::Escape => self.dispatch_editor_escape(event_loop),
+        }
+    }
+
+    fn dispatch_editor_escape(&mut self, event_loop: &ActiveEventLoop) -> AppEffect {
+        if let Some(mut tab) = self.active_tab_session_mut()
+            && tab.search_state().panel_visible
+        {
+            tab.search_state_mut().dismiss_or_clear();
+            self.ui_shell.focus_editor();
+            return AppEffect::REDRAW;
+        }
+        if matches!(self.settings.view_mode, ui::view_mode::ViewMode::Sidebar)
+            && let Some(action) = self.ui_shell.sidebar_on_key(ui::sidebar::SidebarKey::Escape)
+        {
+            return self.handle_sidebar_key_action(action);
+        }
+        self.quit_app(event_loop);
+        AppEffect::NONE
+    }
+
+    fn toggle_sidebar_pin_from_shortcut(&mut self) -> AppEffect {
+        if !matches!(self.settings.view_mode, ui::view_mode::ViewMode::Sidebar) {
+            return AppEffect::NONE;
+        }
+        let action = self.ui_shell.sidebar_on_key(ui::sidebar::SidebarKey::TogglePin);
+        action.map_or(AppEffect::NONE, |action| self.handle_sidebar_key_action(action))
     }
 
     pub(crate) fn toggle_editor_view(&mut self) -> AppEffect {
@@ -1330,8 +1309,6 @@ mod edit_tests {
             EditCommand::ExtendToDocStart,
             EditCommand::ExtendToDocEnd,
             EditCommand::SelectAll,
-            EditCommand::NavigateBack,
-            EditCommand::NavigateForward,
         ] {
             assert!(is_cursor_navigation_command(&command), "{command:?} must break edit merge");
         }
@@ -1351,8 +1328,6 @@ mod edit_tests {
             EditCommand::Cut,
             EditCommand::Copy,
             EditCommand::Paste,
-            EditCommand::Find,
-            EditCommand::Escape,
         ] {
             assert!(
                 !is_cursor_navigation_command(&command),
@@ -1404,18 +1379,20 @@ mod edit_tests {
 
     #[test]
     fn keyboard_tab_switch_commands_cancel_started_canvas_drag_once() {
-        for command in [EditCommand::NextTab, EditCommand::PrevTab, EditCommand::SwitchTab(1)] {
+        for command in
+            [EditorShortcut::NextTab, EditorShortcut::PrevTab, EditorShortcut::SwitchTab(1)]
+        {
             let (mut app, state) = app_with_canvas_drag_tabs();
             start_canvas_drag(&mut app);
 
-            let effect = app.dispatch_keyboard_tab_switch(&command);
+            let effect = app.dispatch_keyboard_tab_switch(command);
 
             assert_eq!(app.active_editor_index(), Some(1));
             assert!(effect.redraw);
             assert_eq!(cancel_request_count(&state.borrow()), 1);
             assert_eq!(document_texts(&app), ["abc", "def"]);
 
-            let _ = app.dispatch_keyboard_tab_switch(&command);
+            let _ = app.dispatch_keyboard_tab_switch(command);
 
             assert_eq!(cancel_request_count(&state.borrow()), 1);
         }
@@ -1425,8 +1402,8 @@ mod edit_tests {
     fn keyboard_tab_switch_is_noop_without_an_active_tab() {
         let mut app = App::new(None);
 
-        assert_eq!(app.dispatch_keyboard_tab_switch(&EditCommand::NextTab), AppEffect::NONE);
-        assert_eq!(app.dispatch_keyboard_tab_switch(&EditCommand::PrevTab), AppEffect::NONE);
+        assert_eq!(app.dispatch_keyboard_tab_switch(EditorShortcut::NextTab), AppEffect::NONE);
+        assert_eq!(app.dispatch_keyboard_tab_switch(EditorShortcut::PrevTab), AppEffect::NONE);
     }
 
     #[cfg(feature = "markdown")]

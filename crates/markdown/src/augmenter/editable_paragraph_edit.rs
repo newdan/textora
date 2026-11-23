@@ -3,12 +3,12 @@
 use super::{
     canonical_container_prefix, format_container_multiline_insertion, preferred_newline_sequence,
 };
+use crate::augmenter::EditAugmentation;
 use crate::builder::{
     BlockKind, BlockNode, EditableParagraphMap, EditableParagraphRun, InlineStyle,
 };
 use crate::source_snapshot::MarkdownSource;
 use textora_core::unicode::grapheme_start_indices;
-use ui::plugin::EditAugmentation;
 
 pub(super) fn insert_text(
     source: &MarkdownSource<'_>,

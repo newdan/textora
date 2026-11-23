@@ -73,12 +73,12 @@ impl From<ByteIndex> for usize {
     }
 }
 
-/// Unichar offset within a logical line (UAX #29 grapheme cluster index).
+/// Document-wide UAX #29 grapheme offset, excluding line endings.
 #[derive(Default, Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct UniCharOffset(pub usize);
+pub struct GraphemeOffset(pub usize);
 
-impl UniCharOffset {
-    pub const ZERO: Self = UniCharOffset(0);
+impl GraphemeOffset {
+    pub const ZERO: Self = GraphemeOffset(0);
 
     #[inline]
     pub fn to_usize(self) -> usize {
@@ -86,59 +86,59 @@ impl UniCharOffset {
     }
 
     #[inline]
-    pub fn saturating_add_signed(self, rhs: isize) -> UniCharOffset {
-        UniCharOffset(self.0.saturating_add_signed(rhs))
+    pub fn saturating_add_signed(self, rhs: isize) -> GraphemeOffset {
+        GraphemeOffset(self.0.saturating_add_signed(rhs))
     }
 }
 
-impl Add<usize> for UniCharOffset {
-    type Output = UniCharOffset;
+impl Add<usize> for GraphemeOffset {
+    type Output = GraphemeOffset;
     #[inline]
-    fn add(self, rhs: usize) -> UniCharOffset {
-        UniCharOffset(self.0 + rhs)
+    fn add(self, rhs: usize) -> GraphemeOffset {
+        GraphemeOffset(self.0 + rhs)
     }
 }
 
-impl AddAssign<usize> for UniCharOffset {
+impl AddAssign<usize> for GraphemeOffset {
     #[inline]
     fn add_assign(&mut self, rhs: usize) {
         self.0 += rhs;
     }
 }
 
-impl Sub<usize> for UniCharOffset {
-    type Output = UniCharOffset;
+impl Sub<usize> for GraphemeOffset {
+    type Output = GraphemeOffset;
     #[inline]
-    fn sub(self, rhs: usize) -> UniCharOffset {
-        UniCharOffset(self.0.saturating_sub(rhs))
+    fn sub(self, rhs: usize) -> GraphemeOffset {
+        GraphemeOffset(self.0.saturating_sub(rhs))
     }
 }
 
-impl SubAssign<usize> for UniCharOffset {
+impl SubAssign<usize> for GraphemeOffset {
     #[inline]
     fn sub_assign(&mut self, rhs: usize) {
         self.0 = self.0.saturating_sub(rhs);
     }
 }
 
-impl Sub for UniCharOffset {
+impl Sub for GraphemeOffset {
     type Output = usize;
     #[inline]
-    fn sub(self, rhs: UniCharOffset) -> usize {
+    fn sub(self, rhs: GraphemeOffset) -> usize {
         self.0.saturating_sub(rhs.0)
     }
 }
 
-impl From<usize> for UniCharOffset {
+impl From<usize> for GraphemeOffset {
     #[inline]
     fn from(v: usize) -> Self {
-        UniCharOffset(v)
+        GraphemeOffset(v)
     }
 }
 
-impl From<UniCharOffset> for usize {
+impl From<GraphemeOffset> for usize {
     #[inline]
-    fn from(v: UniCharOffset) -> Self {
+    fn from(v: GraphemeOffset) -> Self {
         v.0
     }
 }
@@ -146,16 +146,16 @@ impl From<UniCharOffset> for usize {
 /// Logical cursor position — (line number, grapheme cluster index).
 ///
 /// Line wrapping has NO influence on this coordinate.
-/// Field ordering: line first (y-axis), then unichar (x-axis).
+/// Field ordering: line first (y-axis), then grapheme_column (x-axis).
 #[derive(Default, Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct LogicalPoint {
     pub line: usize,
-    pub unichar: usize,
+    pub grapheme_column: usize,
 }
 
 impl LogicalPoint {
-    pub const ZERO: Self = LogicalPoint { line: 0, unichar: 0 };
-    pub const MAX: Self = LogicalPoint { line: usize::MAX, unichar: usize::MAX };
+    pub const ZERO: Self = LogicalPoint { line: 0, grapheme_column: 0 };
+    pub const MAX: Self = LogicalPoint { line: usize::MAX, grapheme_column: usize::MAX };
 }
 
 impl PartialOrd for LogicalPoint {
@@ -166,13 +166,13 @@ impl PartialOrd for LogicalPoint {
 
 impl Ord for LogicalPoint {
     fn cmp(&self, other: &Self) -> std::cmp::Ordering {
-        self.line.cmp(&other.line).then(self.unichar.cmp(&other.unichar))
+        self.line.cmp(&other.line).then(self.grapheme_column.cmp(&other.grapheme_column))
     }
 }
 
 impl From<Point> for LogicalPoint {
     fn from(p: Point) -> Self {
-        LogicalPoint { line: p.y.max(0) as usize, unichar: p.x.max(0) as usize }
+        LogicalPoint { line: p.y.max(0) as usize, grapheme_column: p.x.max(0) as usize }
     }
 }
 
@@ -209,11 +209,11 @@ impl From<Point> for VisualPoint {
     }
 }
 
-/// Resolves a document-level `UniCharOffset` to a `(line, line_local_unichar)` pair.
+/// Resolves a document-level `GraphemeOffset` to a `(line, grapheme_column)` pair.
 ///
 /// This trait decouples `TextBuffer` (in `crates/core`) from concrete line-index
-/// types in higher-level crates (e.g., `LineIndex` in `crates/app`), allowing
-/// `cursor_move_to_unichar` to accept any implementation.
-pub trait UnicharLineLookup {
-    fn line_at_unichar(&self, offset: UniCharOffset) -> (usize, usize);
+/// types in higher-level crates (e.g., `LineIndex` in `crates/appkit-core`), allowing
+/// `cursor_move_to_grapheme_offset` to accept any implementation.
+pub trait GraphemeLineLookup {
+    fn line_at_grapheme_offset(&self, offset: GraphemeOffset) -> (usize, usize);
 }

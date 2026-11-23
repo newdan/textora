@@ -237,7 +237,7 @@ impl Widget for SplitButtonWidget {
         );
         style.paint_outline(ctx, self.rect, state);
         if self.focused && self.input.enabled {
-            let mut focus_ring = ctx.theme.settings_theme().focus_ring;
+            let mut focus_ring = ctx.theme.application_theme().focus_ring;
             focus_ring[3] *= alpha;
             ctx.list.stroke_rounded(
                 self.rect,

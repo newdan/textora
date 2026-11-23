@@ -304,7 +304,7 @@ impl TextBox {
         ctx.list.fill_rounded(self.rect, background, corner_radius);
 
         let border_color = if self.focused {
-            ctx.theme.settings_theme().focus_ring
+            ctx.theme.application_theme().focus_ring
         } else {
             ctx.theme.palette.input_border
         };

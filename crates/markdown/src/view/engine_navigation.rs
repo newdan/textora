@@ -1,6 +1,6 @@
 use super::*;
 
-impl<S: BlockSource> PreviewEngine<S> {
+impl<S: BlockSource> BlockViewEngine<S> {
     /// 扩展被 Markdown 布局剥离的行尾空格，令其光标仍归属原文本行。
     pub(in crate::view) fn hit_test_line_right(&self, flat_line: &crate::layout::FlatLine) -> f32 {
         let text_right = flat_line.rect.x

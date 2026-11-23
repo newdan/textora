@@ -749,7 +749,7 @@ pub fn shape_visible_lines(
                                     .click_hint
                                     .is_some_and(|(ho, _hv)| {
                                         ho == dv
-                                            .byte_to_unichar_offset(dv.cursor().offset.to_usize())
+                                            .byte_to_grapheme_offset(dv.cursor().offset.to_usize())
                                     });
                                 if hint_matches {
                                     // click_hint resolves VL-in-doc boundary ambiguity;
@@ -1245,7 +1245,7 @@ pub fn shape_visible_lines(
                 // boundary ambiguity (byte=5 can be VL0-end or VL1-start).
                 let hint_matches =
                     presentation.cursor_render_state.click_hint.is_some_and(|(ho, _hv)| {
-                        ho == dv.byte_to_unichar_offset(dv.cursor().offset.to_usize())
+                        ho == dv.byte_to_grapheme_offset(dv.cursor().offset.to_usize())
                     });
                 if hint_matches {
                     // click_hint resolves VL-in-doc boundary ambiguity;

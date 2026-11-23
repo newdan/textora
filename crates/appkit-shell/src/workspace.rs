@@ -1,6 +1,6 @@
-//! Workspace module: headless document model management and tab aggregation.
+//! EditorTabSet module: headless document model management and tab aggregation.
 //!
-//! The Workspace owns all open document models and manages tab lifecycle:
+//! The EditorTabSet owns all open document models and manages tab lifecycle:
 //! opening, closing, switching, pinning, and navigation history.
 
 use std::collections::HashSet;
@@ -8,7 +8,7 @@ use std::path::{Path, PathBuf};
 
 use appkit_core::document::DocumentModel;
 use appkit_core::navigator::{NavEffect, NavEntry, Navigator};
-use appkit_core::workspace::model::{WorkspaceEntry, WorkspaceModel};
+use appkit_core::workspace::model::{TabEntry, TabSet};
 use appkit_core::workspace::types::TabId;
 
 use crate::editor_plugin::EditorPlugin;
@@ -69,18 +69,18 @@ pub enum CloseTabDecision {
 }
 
 /// Manages all open document tabs and their navigation state.
-pub struct Workspace {
-    model: WorkspaceModel<DocumentModel>,
+pub struct EditorTabSet {
+    model: TabSet<DocumentModel>,
     entry_history: Vec<usize>,
     preview_index: Option<usize>,
     registry: ui::plugin::PluginRegistry,
     view_routes: ViewRouteTable,
 }
 
-impl Workspace {
+impl EditorTabSet {
     pub fn with_plugins(registry: ui::plugin::PluginRegistry, view_routes: ViewRouteTable) -> Self {
         Self {
-            model: WorkspaceModel::new(),
+            model: TabSet::new(),
             entry_history: Vec::new(),
             preview_index: None,
             registry,
@@ -142,7 +142,7 @@ impl Workspace {
             !runtimes.contains(id),
             "newly allocated workspace tab ID must not already exist in its runtime store"
         );
-        self.model.push_entry(WorkspaceEntry::new(id, document, suggested_file_name));
+        self.model.push_entry(TabEntry::new(id, document, suggested_file_name));
         let replaced_runtime = runtimes.insert(id, runtime);
         debug_assert!(
             replaced_runtime.is_none(),
@@ -280,7 +280,7 @@ impl Workspace {
         self.model.entry(index)?.suggested_file_name.as_deref()
     }
 
-    pub fn entries(&self) -> &[WorkspaceEntry<DocumentModel>] {
+    pub fn entries(&self) -> &[TabEntry<DocumentModel>] {
         self.model.entries()
     }
 
@@ -561,7 +561,7 @@ impl Workspace {
     }
 }
 
-impl Navigator for Workspace {
+impl Navigator for EditorTabSet {
     fn id(&self) -> &str {
         "builtin.files"
     }
@@ -617,13 +617,13 @@ mod tests {
     use crate::editor_plugin::EditorPluginFactory;
     use crate::prepared_tab::PreparedTab;
 
-    fn test_workspace() -> Workspace {
+    fn test_workspace() -> EditorTabSet {
         let mut registry = ui::plugin::PluginRegistry::new();
         registry.register(Box::new(EditorPluginFactory));
         let registered_plugin_ids = HashSet::from([PLUGIN_EDITOR]);
         let routes = ViewRouteTable::new(Vec::new(), &registered_plugin_ids)
             .expect("empty controller test routes should be valid");
-        Workspace::with_plugins(registry, routes)
+        EditorTabSet::with_plugins(registry, routes)
     }
 
     fn document_from_lines(lines: Vec<String>) -> DocumentModel {
@@ -641,13 +641,13 @@ mod tests {
         document_from_lines(vec![text.to_owned()])
     }
 
-    fn set_active_fixture(workspace: &mut Workspace, index: usize) {
+    fn set_active_fixture(workspace: &mut EditorTabSet, index: usize) {
         let id = workspace.tab_id_at(index).expect("fixture tab index should be valid");
         workspace.model.set_active_id(id);
     }
 
     fn runtime_at<'a>(
-        workspace: &Workspace,
+        workspace: &EditorTabSet,
         runtimes: &'a TabRuntimeStore,
         index: usize,
     ) -> &'a TabRuntime {
@@ -667,7 +667,7 @@ mod tests {
     }
 
     fn append_document(
-        workspace: &mut Workspace,
+        workspace: &mut EditorTabSet,
         runtimes: &mut TabRuntimeStore,
         document: DocumentModel,
         plugin: Box<dyn ui::plugin::ViewPluginCapabilities>,
@@ -676,21 +676,21 @@ mod tests {
     }
 
     fn append_editor_tab(
-        workspace: &mut Workspace,
+        workspace: &mut EditorTabSet,
         runtimes: &mut TabRuntimeStore,
         text: &str,
     ) -> TabId {
         workspace.append_prepared_tab(runtimes, prepared_editor_tab(text), None)
     }
 
-    fn open_editor_tab(workspace: &mut Workspace, runtimes: &mut TabRuntimeStore, text: &str) {
+    fn open_editor_tab(workspace: &mut EditorTabSet, runtimes: &mut TabRuntimeStore, text: &str) {
         let effect = workspace.open_prepared_tab(runtimes, prepared_editor_tab(text), None);
         effect.reconcile_runtime_store(runtimes);
     }
 
     // ── CloseTabDecision & try_close_entry ──
 
-    fn make_dirty_ws() -> (Workspace, TabRuntimeStore) {
+    fn make_dirty_ws() -> (EditorTabSet, TabRuntimeStore) {
         let mut ws = test_workspace();
         let mut runtimes = TabRuntimeStore::default();
         append_editor_tab(&mut ws, &mut runtimes, "");
@@ -961,7 +961,7 @@ mod tests {
         assert_eq!(runtimes.ids(), expected_ids);
     }
 
-    fn make_three_tab_ws() -> (Workspace, TabRuntimeStore, Vec<TabId>) {
+    fn make_three_tab_ws() -> (EditorTabSet, TabRuntimeStore, Vec<TabId>) {
         let mut ws = test_workspace();
         let mut runtimes = TabRuntimeStore::default();
         open_editor_tab(&mut ws, &mut runtimes, "");
@@ -1048,7 +1048,7 @@ mod tests {
 
     // ── Navigation history ──
 
-    fn make_nav_ws() -> (Workspace, TabRuntimeStore) {
+    fn make_nav_ws() -> (EditorTabSet, TabRuntimeStore) {
         let mut ws = test_workspace();
         let mut runtimes = TabRuntimeStore::default();
         open_editor_tab(&mut ws, &mut runtimes, "");

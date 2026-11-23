@@ -60,35 +60,7 @@ pub enum EditCommand {
     // ── File IO ──
     Save,
     SaveAs,
-    OpenFile,
-    OpenFolder,
 
-    // ── Tab management ──
-    NewTab,
-    CloseTab,
-    ToggleSidebarPin,
-    ToggleView,
-    ToggleToc,
-    ReopenTab,
-    NextTab,
-    PrevTab,
-    SwitchTab(usize),
-
-    // ── Navigation history ──
-    NavigateBack,
-    NavigateForward,
-
-    // ── Chapter navigation ──
-    NextChapter,
-    PrevChapter,
-
-    // ── Misc ──
+    // ── Indentation ──
     Tab,
-    Escape,
-
-    // ── Search ──
-    Find,
-    FindReplace,
-    FindNext,
-    FindPrev,
 }

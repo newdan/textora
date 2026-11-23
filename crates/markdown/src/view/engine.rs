@@ -1,12 +1,12 @@
 use super::*;
 
-impl Default for PreviewEngine {
+impl Default for BlockViewEngine {
     fn default() -> Self {
         Self::new()
     }
 }
 
-impl<S: BlockSource> PreviewEngine<S> {
+impl<S: BlockSource> BlockViewEngine<S> {
     pub fn new() -> Self {
         Self {
             lazy: None,

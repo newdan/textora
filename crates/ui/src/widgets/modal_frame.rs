@@ -5,7 +5,7 @@ use crate::core::{
     AccessibilityRole, ChildEventRouter, Event, EventCtx, KeyCode, LayoutCtx, MouseButton,
     PaintCtx, Rect, Widget, WidgetAction, dispatch_child_event_route,
 };
-use crate::theme::SettingsTheme;
+use crate::theme::ApplicationTheme;
 use crate::widgets::button::{Button, ButtonStyle};
 use crate::widgets::label::{Label, LabelForeground, LabelStyle};
 use std::any::Any;
@@ -123,32 +123,35 @@ impl ModalFrame {
         self.content_rect
     }
 
-    fn build_close_button(style: &ModalFrameStyle, tokens: Option<SettingsTheme>) -> Button {
+    fn build_close_button(style: &ModalFrameStyle, tokens: Option<ApplicationTheme>) -> Button {
         let mut close_button = Button::new(
             MODAL_FRAME_CLOSE_BUTTON_ID,
-            Self::close_button_style(style, tokens.unwrap_or_else(Self::fallback_settings_theme)),
+            Self::close_button_style(
+                style,
+                tokens.unwrap_or_else(Self::fallback_application_theme),
+            ),
         );
         close_button.set_icon(Some("x".into()));
         close_button.set_icon_size(style.close_icon_size_logical);
         close_button
     }
 
-    fn fallback_settings_theme() -> SettingsTheme {
-        crate::theme::test_theme().settings_theme()
+    fn fallback_application_theme() -> ApplicationTheme {
+        crate::theme::test_theme().application_theme()
     }
 
-    fn close_button_style(style: &ModalFrameStyle, settings: SettingsTheme) -> ButtonStyle {
+    fn close_button_style(style: &ModalFrameStyle, application: ApplicationTheme) -> ButtonStyle {
         ButtonStyle {
             font_size_logical: style.title_font_size_logical,
             pad_x_logical: 0.0,
-            foreground: settings.text_secondary,
-            selected_foreground: settings.text_secondary,
+            foreground: application.text_secondary,
+            selected_foreground: application.text_secondary,
             background: [0.0, 0.0, 0.0, 0.0],
             border: [0.0, 0.0, 0.0, 0.0],
-            hover_background: settings.control_surface,
-            pressed_background: settings.control_border,
-            selected_background: settings.control_surface,
-            disabled_foreground: settings.text_secondary,
+            hover_background: application.control_surface,
+            pressed_background: application.control_border,
+            selected_background: application.control_surface,
+            disabled_foreground: application.text_secondary,
             disabled_background: [0.0, 0.0, 0.0, 0.0],
             corner_radius_logical: style.corner_radius_logical * 0.5,
             background_inset_logical: 0.0,
@@ -260,8 +263,8 @@ impl Widget for ModalFrame {
     fn set_rect(&mut self, rect: Rect, ctx: &mut LayoutCtx) {
         self.rect = Rect::new(0.0, 0.0, rect.w.max(0.0), rect.h.max(0.0));
 
-        let settings = ctx.theme.settings_theme();
-        self.close_button.set_style(Self::close_button_style(&self.style, settings));
+        let application = ctx.theme.application_theme();
+        self.close_button.set_style(Self::close_button_style(&self.style, application));
 
         let header_height =
             Self::logical_to_px(self.style.header_height_logical, ctx.dpi).min(self.rect.h);

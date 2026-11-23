@@ -2,9 +2,9 @@ use super::*;
 
 // ===== MarkdownView =====
 
-/// Markdown preview view — wraps PreviewEngine with markdown-specific doc building.
+/// Markdown preview view — wraps BlockViewEngine with markdown-specific doc building.
 pub struct MarkdownView {
-    pub(in crate::view) engine: PreviewEngine,
+    pub(in crate::view) engine: BlockViewEngine,
     pub(in crate::view) source: SourceSnapshot,
     pub(in crate::view) cached_generation: Option<u32>,
 }
@@ -18,7 +18,7 @@ impl Default for MarkdownView {
 impl MarkdownView {
     pub fn new() -> Self {
         Self {
-            engine: PreviewEngine::new(),
+            engine: BlockViewEngine::new(),
             source: MarkdownSource::snapshot(String::new()),
             cached_generation: None,
         }
@@ -87,10 +87,10 @@ impl MarkdownView {
         )
     }
 
-    pub fn engine(&self) -> &PreviewEngine {
+    pub fn engine(&self) -> &BlockViewEngine {
         &self.engine
     }
-    pub fn engine_mut(&mut self) -> &mut PreviewEngine {
+    pub fn engine_mut(&mut self) -> &mut BlockViewEngine {
         &mut self.engine
     }
     pub fn scroll_y(&self) -> f32 {

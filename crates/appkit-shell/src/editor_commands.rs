@@ -193,11 +193,6 @@ fn execute_edit_command_with_presentation(
     cursor_render_state.click_hint = None;
 
     match cmd {
-        EditCommand::ToggleSidebarPin => false,
-        EditCommand::ToggleView => false,
-        EditCommand::ToggleToc => false,
-        EditCommand::NextChapter => false,
-        EditCommand::PrevChapter => false,
         EditCommand::MoveLeft => {
             dv.cursor_move_left();
             true
@@ -499,20 +494,6 @@ fn execute_edit_command_with_presentation(
         // Commands that need external state (event_loop)
         // ── Save (handled at App level, not in execute_edit_command) ──
         EditCommand::Save | EditCommand::SaveAs => false,
-
-        EditCommand::Escape => false,
-
-        // ── Search (handled at App level) ──
-        EditCommand::Find
-        | EditCommand::FindReplace
-        | EditCommand::FindNext
-        | EditCommand::FindPrev => false,
-
-        EditCommand::OpenFile | EditCommand::OpenFolder => false,
-        EditCommand::NewTab | EditCommand::CloseTab | EditCommand::ReopenTab => false,
-        EditCommand::NextTab | EditCommand::PrevTab => false,
-        EditCommand::NavigateBack | EditCommand::NavigateForward => false,
-        EditCommand::SwitchTab(_) => false,
     }
 }
 

@@ -108,7 +108,7 @@ pub struct EditorTabSnapshot {
     pub clean_untitled_content: Option<String>,
 }
 
-/// runtime 持有的 workspace 只读快照，不暴露 Workspace 或 TabRuntimeStore。
+/// runtime 持有的 workspace 只读快照，不暴露 EditorTabSet 或 TabRuntimeStore。
 #[derive(Debug, Clone, PartialEq)]
 pub struct EditorWorkspaceSnapshot {
     pub active_index: usize,

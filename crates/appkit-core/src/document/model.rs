@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 use textora_core::buffer::text_buffer::{CursorMovement, TextBuffer};
 use textora_core::document::ReadableDocument;
 use textora_core::highlight::{FILE_ASSOCIATIONS, Language};
-use textora_core::types::{ByteIndex, LogicalPoint, UniCharOffset};
+use textora_core::types::{ByteIndex, GraphemeOffset, LogicalPoint};
 
 use crate::document::CursorState;
 use crate::file_safety::DiskRevision;
@@ -383,37 +383,44 @@ impl DocumentModel {
         self.sync_cursor_from_buffer();
     }
 
-    pub fn cursor_move_to_unichar(&mut self, offset: UniCharOffset) {
-        self.tb.cursor_move_to_unichar(offset, &self.line_index);
+    pub fn cursor_move_to_grapheme_offset(&mut self, offset: GraphemeOffset) {
+        self.tb.cursor_move_to_grapheme_offset(offset, &self.line_index);
         self.sync_cursor_from_buffer();
     }
 
-    pub fn cursor_move_to_unichar_on_line(&mut self, offset: UniCharOffset, document_line: usize) {
-        let line_start = self.line_index.unichar_of_line(document_line);
-        let local_offset = offset.to_usize().saturating_sub(line_start.to_usize());
-        self.tb.cursor_move_to_logical(LogicalPoint { line: document_line, unichar: local_offset });
-        self.sync_cursor_from_buffer();
-    }
-
-    pub fn set_cursor_unichar_synced_on_line(
+    pub fn cursor_move_to_grapheme_offset_on_line(
         &mut self,
-        offset: UniCharOffset,
+        offset: GraphemeOffset,
+        document_line: usize,
+    ) {
+        let line_start = self.line_index.grapheme_offset_of_line(document_line);
+        let local_offset = offset.to_usize().saturating_sub(line_start.to_usize());
+        self.tb.cursor_move_to_logical(LogicalPoint {
+            line: document_line,
+            grapheme_column: local_offset,
+        });
+        self.sync_cursor_from_buffer();
+    }
+
+    pub fn set_cursor_grapheme_offset_synced_on_line(
+        &mut self,
+        offset: GraphemeOffset,
         document_line: usize,
     ) {
         let selection_anchor = self.cursor.selection_anchor;
-        self.cursor_move_to_unichar_on_line(offset, document_line);
+        self.cursor_move_to_grapheme_offset_on_line(offset, document_line);
         self.cursor.selection_anchor = selection_anchor;
     }
 
-    pub fn unichar_to_byte_offset(&self, offset: UniCharOffset) -> usize {
-        let (line, line_local_grapheme) = self.line_index.line_at_unichar(offset);
+    pub fn grapheme_offset_to_byte(&self, offset: GraphemeOffset) -> usize {
+        let (line, line_local_grapheme) = self.line_index.line_at_grapheme_offset(offset);
         let line_start = self.line_index.offsets[line];
         let line_end =
             self.line_index.offsets.get(line + 1).copied().unwrap_or_else(|| self.tb.text_length());
         crate::line_index::grapheme_to_byte(&self.tb, line_start, line_end, line_local_grapheme)
     }
 
-    pub fn byte_to_unichar_offset(&self, byte_offset: usize) -> UniCharOffset {
+    pub fn byte_to_grapheme_offset(&self, byte_offset: usize) -> GraphemeOffset {
         let line = match self.line_index.offsets.binary_search(&byte_offset) {
             Ok(line) => line,
             Err(line) => line.saturating_sub(1),
@@ -423,7 +430,7 @@ impl DocumentModel {
             self.line_index.offsets.get(line + 1).copied().unwrap_or_else(|| self.tb.text_length());
         let grapheme_count =
             crate::line_index::count_graphemes_before(&self.tb, line_start, line_end, byte_offset);
-        self.line_index.unichar_of_line(line) + grapheme_count
+        self.line_index.grapheme_offset_of_line(line) + grapheme_count
     }
 
     pub fn cursor_move_left(&mut self) {
@@ -464,7 +471,7 @@ impl DocumentModel {
             return;
         }
         self.tb.cursor_move_to_logical(LogicalPoint {
-            unichar: position.unichar,
+            grapheme_column: position.grapheme_column,
             line: position.line - 1,
         });
         self.sync_cursor_from_buffer();
@@ -473,7 +480,7 @@ impl DocumentModel {
     pub fn cursor_move_down(&mut self) {
         let position = self.tb.cursor_logical_pos();
         self.tb.cursor_move_to_logical(LogicalPoint {
-            unichar: position.unichar,
+            grapheme_column: position.grapheme_column,
             line: position.line + 1,
         });
         self.sync_cursor_from_buffer();
@@ -570,7 +577,7 @@ impl DocumentModel {
             return;
         }
         self.tb.cursor_move_to_logical(LogicalPoint {
-            unichar: position.unichar,
+            grapheme_column: position.grapheme_column,
             line: position.line - 1,
         });
         self.set_cursor_offset_synced(self.tb.cursor_offset().to_usize());
@@ -580,7 +587,7 @@ impl DocumentModel {
         self.ensure_selection_active();
         let position = self.tb.cursor_logical_pos();
         self.tb.cursor_move_to_logical(LogicalPoint {
-            unichar: position.unichar,
+            grapheme_column: position.grapheme_column,
             line: position.line + 1,
         });
         self.set_cursor_offset_synced(self.tb.cursor_offset().to_usize());

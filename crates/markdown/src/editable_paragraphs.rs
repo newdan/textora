@@ -1,6 +1,6 @@
 //! Editor-only paragraphs have real layout geometry and zero-width source anchors.
 
-use super::{BlockKind, BlockNode, BlockSource};
+use super::{BlockKind, BlockNode, BlockSourceSpan};
 use crate::projection::ProjectedText;
 use std::collections::BTreeMap;
 use std::ops::Range;
@@ -455,7 +455,7 @@ fn empty_paragraph(source_byte: usize) -> BlockNode {
     BlockNode {
         kind: BlockKind::Paragraph,
         children: Vec::new(),
-        source_range: BlockSource::Continuous(source_byte..source_byte),
+        source_range: BlockSourceSpan::Continuous(source_byte..source_byte),
         text_styles: vec![Vec::new()],
         text_lines: vec![String::new()],
         projected_lines: vec![ProjectedText::direct("", source_byte)],

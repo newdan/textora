@@ -9,7 +9,7 @@ use ui::sidebar::NewDocumentKind;
 use appkit_shell::document_presentation::DocumentPresentation;
 use appkit_shell::tab_runtime::TabRuntime;
 #[cfg(test)]
-use appkit_shell::workspace::Workspace;
+use appkit_shell::workspace::EditorTabSet;
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub(crate) struct ViewportDimensions {
@@ -78,7 +78,7 @@ fn assign_untitled_snapshot(document: &mut DocumentModel) {
 
 #[cfg(test)]
 pub(crate) fn prepare_file(
-    workspace: &Workspace,
+    workspace: &EditorTabSet,
     path: &Path,
     dimensions: ViewportDimensions,
 ) -> Result<ProductPreparedTab, String> {
@@ -97,7 +97,7 @@ pub(crate) fn prepare_file_with_plugin(
 
 #[cfg(test)]
 pub(crate) fn prepare_external_content(
-    workspace: &Workspace,
+    workspace: &EditorTabSet,
     path: &Path,
     content: &str,
     dimensions: ViewportDimensions,
@@ -118,7 +118,7 @@ pub(crate) fn prepare_external_content_with_plugin(
 
 #[cfg(test)]
 pub(crate) fn prepare_untitled(
-    workspace: &Workspace,
+    workspace: &EditorTabSet,
     dimensions: ViewportDimensions,
 ) -> ProductPreparedTab {
     let plugin = workspace.create_plugin_by_name(PLUGIN_EDITOR);
@@ -136,7 +136,7 @@ pub(crate) fn prepare_untitled_with_plugin(
 
 #[cfg(test)]
 pub(crate) fn prepare_typed_untitled(
-    workspace: &Workspace,
+    workspace: &EditorTabSet,
     kind: NewDocumentKind,
     dimensions: ViewportDimensions,
 ) -> ProductPreparedTab {
@@ -467,10 +467,10 @@ mod tests {
             !command_dispatch_source.contains(concat!("workspace.", "open_file_with_viewport(")),
             "command dispatch still calls the legacy recent-file constructor"
         );
-        for test_only_api in ["Workspace::new()", "set_active_index_for_test"] {
+        for test_only_api in ["EditorTabSet::new()", "set_active_index_for_test"] {
             assert!(
                 !workspace_source.contains(test_only_api),
-                "Workspace still exposes productized test API {test_only_api}"
+                "EditorTabSet still exposes productized test API {test_only_api}"
             );
         }
     }

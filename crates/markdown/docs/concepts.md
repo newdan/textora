@@ -35,6 +35,6 @@
 
 ## 5. 其他子系统核心概念
 
-- **ReplacementPreedit（`view_preedit.rs`）**：当 IME 正在替换一段选区或在代码块内输入组合串（preedit）时，通过独立的临时 `PreviewEngine` 预览替换后的布局，同时保持底层文档坐标为权威。
+- **ReplacementPreedit（`view_preedit.rs`）**：当 IME 正在替换一段选区或在代码块内输入组合串（preedit）时，通过独立的临时 `BlockViewEngine` 预览替换后的布局，同时保持底层文档坐标为权威。
 - **CodeViewport（`layout/code_viewport.rs`）**：代码块不折行时使用的有状态水平滚动视口，光标移动时更新水平偏移，渲染与高亮覆盖层共用同一裁剪区域。
 - **MMF（Markdown Mindmap Format）**：基于 Markdown 标题层级（`#` 根、`##` 一级子……）与嵌入式 TOML 属性块（节点属性 / 全局主题）的文本格式，`mmf::Tree` 保存每个节点及子树在源码中的精确字节范围，所有导图交互均规划为对 MMF 源码的原子替换（`EditPlan`）。

@@ -433,7 +433,7 @@ impl TextBuffer {
             return result;
         }
 
-        result.logical_pos.unichar = 0;
+        result.logical_pos.grapheme_column = 0;
         result.visual_pos.column = 0;
         result.visual_pos.row = result.logical_pos.line;
         result.column = 0;
@@ -491,8 +491,10 @@ impl TextBuffer {
 
         // goto_line_start() is the fastest way for seeking across lines. As such we always
         // use it if the requested `.line` position is different. We still need to use it if
-        // the `.unichar` position is smaller, but only because `goto_logical()` cannot seek backwards.
-        if pos.line != cursor.logical_pos.line || pos.unichar < cursor.logical_pos.unichar {
+        // the `.grapheme_column` position is smaller, but only because `goto_logical()` cannot seek backwards.
+        if pos.line != cursor.logical_pos.line
+            || pos.grapheme_column < cursor.logical_pos.grapheme_column
+        {
             cursor = self.goto_line_start(cursor, pos.line);
         }
 
@@ -530,19 +532,21 @@ impl TextBuffer {
 
         match granularity {
             CursorMovement::Grapheme => {
-                let start_unichar: usize = if delta > 0 { 0 } else { usize::MAX };
+                let start_grapheme_column: usize = if delta > 0 { 0 } else { usize::MAX };
 
                 loop {
-                    let target_unichar_signed = cursor.logical_pos.unichar as isize + delta;
+                    let target_grapheme_column_signed =
+                        cursor.logical_pos.grapheme_column as isize + delta;
                     // Clamp to 0 for the seek (negative means "before this line"),
                     // but keep the signed value for the remaining-delta calculation
                     // so the cross-line logic below triggers correctly.
-                    let target_unichar_clamped = target_unichar_signed.max(0) as usize;
+                    let target_grapheme_column_clamped =
+                        target_grapheme_column_signed.max(0) as usize;
 
                     cursor = self.cursor_move_to_logical_internal(
                         cursor,
                         LogicalPoint {
-                            unichar: target_unichar_clamped,
+                            grapheme_column: target_grapheme_column_clamped,
                             line: cursor.logical_pos.line,
                         },
                     );
@@ -550,7 +554,8 @@ impl TextBuffer {
                     // We can stop if we ran out of remaining delta
                     // (or perhaps ran past the goal; in either case the sign would've changed),
                     // or if we hit the beginning or end of the buffer.
-                    let remaining = target_unichar_signed - cursor.logical_pos.unichar as isize;
+                    let remaining =
+                        target_grapheme_column_signed - cursor.logical_pos.grapheme_column as isize;
                     if remaining.signum() != sign
                         || (remaining < 0 && cursor.offset == ByteIndex::ZERO)
                         || (remaining > 0 && cursor.offset.to_usize() >= self.text_length())
@@ -561,7 +566,7 @@ impl TextBuffer {
                     let target_line = (cursor.logical_pos.line as isize + sign).max(0) as usize;
                     cursor = self.cursor_move_to_logical_internal(
                         cursor,
-                        LogicalPoint { unichar: start_unichar, line: target_line },
+                        LogicalPoint { grapheme_column: start_grapheme_column, line: target_line },
                     );
 
                     // We crossed a newline which counts for 1 grapheme cluster.

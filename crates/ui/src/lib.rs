@@ -12,7 +12,6 @@ pub mod canvas;
 pub mod constants;
 pub mod core;
 pub mod decorations;
-pub mod document_search_bar;
 pub mod gutter;
 mod hex_color;
 pub mod layout;

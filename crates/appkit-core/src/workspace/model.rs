@@ -1,6 +1,6 @@
 //! Generic, headless workspace model.
 //!
-//! `WorkspaceModel<T>` tracks tab ordering, active selection, pinning and
+//! `TabSet<T>` tracks tab ordering, active selection, pinning and
 //! navigation history using stable `TabId`s. It does not know the concrete
 //! document or runtime type stored in each entry.
 
@@ -10,19 +10,19 @@ use crate::navigator::NavEffect;
 use crate::workspace::types::{TabId, TabIdAllocator};
 
 /// A single tab in the generic workspace model.
-pub struct WorkspaceEntry<T> {
+pub struct TabEntry<T> {
     pub id: TabId,
     pub value: T,
     pub suggested_file_name: Option<String>,
 }
 
-impl<T> WorkspaceEntry<T> {
+impl<T> TabEntry<T> {
     pub fn new(id: TabId, value: T, suggested_file_name: Option<String>) -> Self {
         Self { id, value, suggested_file_name }
     }
 }
 
-/// Effect report produced by `WorkspaceModel::close_by_id`.
+/// Effect report produced by `TabSet::close_by_id`.
 pub struct CloseEffect {
     /// The index the closed tab occupied before removal.
     pub removed_index: usize,
@@ -32,8 +32,8 @@ pub struct CloseEffect {
 
 /// Headless container for tab ordering, active selection, pinning and
 /// navigation history.
-pub struct WorkspaceModel<T> {
-    entries: Vec<WorkspaceEntry<T>>,
+pub struct TabSet<T> {
+    entries: Vec<TabEntry<T>>,
     active_id: Option<TabId>,
     pinned_ids: HashSet<TabId>,
     back_history: Vec<TabId>,
@@ -41,7 +41,7 @@ pub struct WorkspaceModel<T> {
     id_allocator: TabIdAllocator,
 }
 
-impl<T> WorkspaceModel<T> {
+impl<T> TabSet<T> {
     pub fn new() -> Self {
         Self {
             entries: Vec::new(),
@@ -65,27 +65,27 @@ impl<T> WorkspaceModel<T> {
         self.entries.len()
     }
 
-    pub fn entries(&self) -> &[WorkspaceEntry<T>] {
+    pub fn entries(&self) -> &[TabEntry<T>] {
         &self.entries
     }
 
-    pub fn entries_mut(&mut self) -> &mut [WorkspaceEntry<T>] {
+    pub fn entries_mut(&mut self) -> &mut [TabEntry<T>] {
         &mut self.entries
     }
 
-    pub fn entry(&self, index: usize) -> Option<&WorkspaceEntry<T>> {
+    pub fn entry(&self, index: usize) -> Option<&TabEntry<T>> {
         self.entries.get(index)
     }
 
-    pub fn entry_mut(&mut self, index: usize) -> Option<&mut WorkspaceEntry<T>> {
+    pub fn entry_mut(&mut self, index: usize) -> Option<&mut TabEntry<T>> {
         self.entries.get_mut(index)
     }
 
-    pub fn entry_by_id(&self, id: TabId) -> Option<&WorkspaceEntry<T>> {
+    pub fn entry_by_id(&self, id: TabId) -> Option<&TabEntry<T>> {
         self.entries.iter().find(|e| e.id == id)
     }
 
-    pub fn entry_by_id_mut(&mut self, id: TabId) -> Option<&mut WorkspaceEntry<T>> {
+    pub fn entry_by_id_mut(&mut self, id: TabId) -> Option<&mut TabEntry<T>> {
         self.entries.iter_mut().find(|e| e.id == id)
     }
 
@@ -97,11 +97,11 @@ impl<T> WorkspaceModel<T> {
         self.active_id.and_then(|id| self.index_of(id)).unwrap_or(0)
     }
 
-    pub fn active_entry(&self) -> Option<&WorkspaceEntry<T>> {
+    pub fn active_entry(&self) -> Option<&TabEntry<T>> {
         self.active_id.and_then(|id| self.entry_by_id(id))
     }
 
-    pub fn active_entry_mut(&mut self) -> Option<&mut WorkspaceEntry<T>> {
+    pub fn active_entry_mut(&mut self) -> Option<&mut TabEntry<T>> {
         let id = self.active_id?;
         self.entry_by_id_mut(id)
     }
@@ -141,7 +141,7 @@ impl<T> WorkspaceModel<T> {
 
     /// Append an already-built entry and return its stable ID. If the workspace
     /// was empty, the new entry becomes active.
-    pub fn push_entry(&mut self, entry: WorkspaceEntry<T>) -> TabId {
+    pub fn push_entry(&mut self, entry: TabEntry<T>) -> TabId {
         let id = entry.id;
         self.entries.push(entry);
         if self.active_id.is_none() {
@@ -154,7 +154,7 @@ impl<T> WorkspaceModel<T> {
     /// the new entry becomes active.
     pub fn push(&mut self, value: T, suggested_file_name: Option<String>) -> TabId {
         let id = self.allocate_id();
-        self.push_entry(WorkspaceEntry::new(id, value, suggested_file_name));
+        self.push_entry(TabEntry::new(id, value, suggested_file_name));
         id
     }
 
@@ -168,7 +168,7 @@ impl<T> WorkspaceModel<T> {
     ) -> TabId {
         let id = self.allocate_id();
         let clamped = index.min(self.entries.len());
-        self.entries.insert(clamped, WorkspaceEntry::new(id, value, suggested_file_name));
+        self.entries.insert(clamped, TabEntry::new(id, value, suggested_file_name));
         if self.active_id.is_none() {
             self.active_id = Some(id);
         }
@@ -295,7 +295,7 @@ impl<T> WorkspaceModel<T> {
     }
 }
 
-impl<T> Default for WorkspaceModel<T> {
+impl<T> Default for TabSet<T> {
     fn default() -> Self {
         Self::new()
     }
@@ -305,8 +305,8 @@ impl<T> Default for WorkspaceModel<T> {
 mod tests {
     use super::*;
 
-    fn make_model_with(n: usize) -> WorkspaceModel<&'static str> {
-        let mut model = WorkspaceModel::new();
+    fn make_model_with(n: usize) -> TabSet<&'static str> {
+        let mut model = TabSet::new();
         for _ in 0..n {
             model.push("", None);
         }
@@ -315,7 +315,7 @@ mod tests {
 
     #[test]
     fn push_allocates_increasing_ids() {
-        let mut model = WorkspaceModel::new();
+        let mut model = TabSet::new();
         let a = model.push("a", None);
         let b = model.push("b", None);
         assert_ne!(a, b);
@@ -324,7 +324,7 @@ mod tests {
 
     #[test]
     fn active_follows_first_push() {
-        let mut model = WorkspaceModel::new();
+        let mut model = TabSet::new();
         let id = model.push("x", None);
         assert_eq!(model.active_id(), Some(id));
         assert_eq!(model.active_index(), 0);
@@ -392,7 +392,7 @@ mod tests {
 
     #[test]
     fn close_last_active_clears_active() {
-        let mut model = WorkspaceModel::new();
+        let mut model = TabSet::new();
         let id = model.push("only", None);
         let effect = model.close_by_id(id).unwrap();
         assert_eq!(effect.removed_index, 0);
@@ -445,7 +445,7 @@ mod tests {
 
     #[test]
     fn index_of_and_id_at_are_inverse() {
-        let mut model = WorkspaceModel::new();
+        let mut model = TabSet::new();
         let id = model.push("x", None);
         assert_eq!(model.index_of(id), Some(0));
         assert_eq!(model.id_at(0), Some(id));

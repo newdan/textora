@@ -185,7 +185,7 @@ impl SettingsOverlay {
             self.panel_rect.x + HEADER_TITLE_INSET_LOGICAL * context.dpi,
             self.panel_rect.y + HEADER_TITLE_BASELINE_LOGICAL * context.dpi,
             HEADER_TITLE_FONT_SIZE_LOGICAL * context.dpi,
-            context.theme.settings_theme().text_primary,
+            context.theme.application_theme().text_primary,
             "设置",
         );
         self.close_button.paint(context);

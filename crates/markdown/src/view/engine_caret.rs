@@ -21,7 +21,7 @@ fn trailing_ws_reaches_newline(source: &str, cursor_byte: usize) -> bool {
     after_ws.starts_with('\n') || after_ws.starts_with("\r\n")
 }
 
-impl<S: BlockSource> PreviewEngine<S> {
+impl<S: BlockSource> BlockViewEngine<S> {
     /// 查询：返回光标在插件渲染空间中的 (x, y, w, h)。
     /// y = fl.rect.y - scroll_y，与 render_line_with_offset 的投影一致。
     /// 调用方加 plugin_render_bounds().origin 即得窗口像素坐标。

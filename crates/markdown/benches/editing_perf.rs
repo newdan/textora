@@ -4,7 +4,7 @@ use criterion::{
 use shaping::Shaper;
 use std::cell::RefCell;
 use textora_core::document::StringDocView;
-use textora_markdown::augmenter::augment_edit;
+use textora_markdown::augmenter::{AugmentKind, augment_edit};
 use textora_markdown::builder::MarkdownDoc;
 use textora_markdown::layout::layout_doc_for_rendering;
 use textora_markdown::parser::parse_markdown;
@@ -13,8 +13,7 @@ use textora_markdown::view::MarkdownEditorView;
 use ui::Rect;
 use ui::core::DrawList;
 use ui::plugin::{
-    AugmentKind, EditIntent, EditPlan, EditRequest, EditSelection, EditTransaction, SyncReason,
-    ViewPlugin,
+    EditIntent, EditPlan, EditRequest, EditSelection, EditTransaction, SyncReason, ViewPlugin,
 };
 use ui::plugin::{EditPolicy, EditableView};
 use ui::theme::Theme;

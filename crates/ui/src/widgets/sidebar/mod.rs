@@ -8,7 +8,7 @@ pub mod types;
 
 // Re-export all public types for backward compatibility
 pub use menu::{build_new_document_menu, build_settings_menu};
-pub use persistent::SidebarPersistent;
+pub use persistent::{SidebarHoverState, SidebarInteraction};
 pub(crate) use state::SidebarState;
 #[allow(unused_imports)]
 pub(crate) use types::SidebarInput;
@@ -31,6 +31,12 @@ use crate::widgets::split_button::{SplitButtonInput, SplitButtonWidget};
 
 const NEW_DOCUMENT_BUTTON_ID: WidgetId = WidgetId(8_100);
 const NEW_DOCUMENT_MENU_BUTTON_ID: WidgetId = WidgetId(8_101);
+
+#[derive(Clone, Copy)]
+pub enum SidebarPopupKind {
+    Settings,
+    NewDocument,
+}
 
 pub struct SidebarWidget {
     pub(crate) rect: Rect,
@@ -165,14 +171,17 @@ impl SidebarWidget {
         self.settings_input = settings;
     }
 
-    /// 跨帧持久化：导出轻量状态
-    pub fn steal_persistent(&mut self) -> SidebarPersistent {
-        self.state.to_persistent()
+    pub fn interaction(&self) -> &SidebarInteraction {
+        &self.state.interaction
     }
 
-    /// 跨帧持久化：恢复轻量状态
-    pub fn inject_persistent(&mut self, p: &SidebarPersistent) {
-        self.state.restore_from_persistent(p);
+    pub fn interaction_mut(&mut self) -> &mut SidebarInteraction {
+        &mut self.state.interaction
+    }
+
+    /// Move only the cross-frame state. The Dock recreates local hit geometry.
+    pub fn take_interaction(&mut self) -> SidebarInteraction {
+        std::mem::take(&mut self.state.interaction)
     }
 
     pub fn config(&self) -> &SidebarConfig {
@@ -236,6 +245,26 @@ impl SidebarWidget {
     /// 委托：打开菜单状态
     pub fn open_menu(&self) -> Option<&crate::widgets::popup_menu::PopupMenu> {
         self.state.open_menu()
+    }
+
+    pub fn open_popup_kind(&self) -> Option<SidebarPopupKind> {
+        self.open_menu().map(|menu| {
+            if is_new_document_menu(menu) {
+                SidebarPopupKind::NewDocument
+            } else {
+                SidebarPopupKind::Settings
+            }
+        })
+    }
+
+    pub fn open_popup(&mut self, kind: SidebarPopupKind) {
+        match kind {
+            SidebarPopupKind::Settings => self.open_settings_menu(),
+            SidebarPopupKind::NewDocument => {
+                self.state.open_new_document_menu(self.screen_w, self.screen_h, &self.metrics);
+                self.new_document_button.set_menu_open(true);
+            }
+        }
     }
 
     /// 委托：设置打开菜单
@@ -645,12 +674,7 @@ impl Widget for SidebarWidget {
                     WidgetAction::Control(ControlAction::Activated {
                         id: NEW_DOCUMENT_MENU_BUTTON_ID,
                     }) => {
-                        self.state.open_new_document_menu(
-                            self.screen_w,
-                            self.screen_h,
-                            &self.metrics,
-                        );
-                        self.new_document_button.set_menu_open(true);
+                        self.open_popup(SidebarPopupKind::NewDocument);
                         Some(WidgetAction::Sidebar(SidebarAction::Hovered))
                     }
                     WidgetAction::Consumed => Some(WidgetAction::Consumed),

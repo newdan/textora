@@ -737,7 +737,7 @@ impl NotoraSettingsView {
                     + line_height * (index as f32 + 0.5)
                     + MESSAGE_BASELINE_OFFSET_LOGICAL * context.dpi,
                 font_size,
-                self.settings_theme.text_secondary,
+                self.settings_theme.application.text_secondary,
                 line,
             );
         }
@@ -831,15 +831,15 @@ fn description_label(text: &str) -> Label {
 }
 
 fn category_button_style(settings: SettingsTheme) -> ButtonStyle {
-    ButtonStyle::category(settings)
+    ButtonStyle::category(settings.application)
 }
 
 fn segmented_button_style(settings: SettingsTheme) -> ButtonStyle {
-    ButtonStyle::segmented(settings)
+    ButtonStyle::segmented(settings.application)
 }
 
 fn action_button_style(settings: SettingsTheme) -> ButtonStyle {
-    ButtonStyle::action(settings)
+    ButtonStyle::action(settings.application)
 }
 
 fn paint_widget_at(widget: &impl Widget, rect: Rect, context: &mut PaintCtx<'_>) {

@@ -3,7 +3,7 @@ use crate::document_fixture::DocumentFixture;
 use appkit_core::edit_command::EditCommand;
 use appkit_shell::editor_runtime::{EditorFocus, EditorInputContext};
 use textora_core::types::ByteIndex;
-use textora_core::types::UniCharOffset;
+use textora_core::types::GraphemeOffset;
 use ui::layout::compute_visual_lines;
 use ui::render_geom::{AdvanceCacheEntry, compute_selection_highlight_quads};
 use ui::viewport::Viewport;
@@ -1652,7 +1652,7 @@ fn test_double_click_spatial_proximity() {
             document,
             &mut cursor_render_state,
             modifiers,
-            Some((UniCharOffset(0), 0, 0)),
+            Some((GraphemeOffset(0), 0, 0)),
         );
     })
     .expect("test tab session should exist");
@@ -1669,7 +1669,7 @@ fn test_double_click_spatial_proximity() {
             document,
             &mut cursor_render_state,
             modifiers,
-            Some((UniCharOffset(0), 0, 0)),
+            Some((GraphemeOffset(0), 0, 0)),
         );
     })
     .expect("test tab session should exist");
@@ -1684,7 +1684,7 @@ fn test_double_click_spatial_proximity() {
             document,
             &mut cursor_render_state,
             modifiers,
-            Some((UniCharOffset(15), 0, 0)),
+            Some((GraphemeOffset(15), 0, 0)),
         );
     })
     .expect("test tab session should exist");
@@ -1713,7 +1713,7 @@ fn test_mouse_release_clears_empty_selection() {
             document,
             &mut cursor_render_state,
             modifiers,
-            Some((UniCharOffset(5), 0, 0)),
+            Some((GraphemeOffset(5), 0, 0)),
         );
     })
     .expect("test tab session should exist");
@@ -1739,7 +1739,7 @@ fn test_mouse_release_clears_empty_selection() {
             document,
             &mut cursor_render_state,
             modifiers,
-            Some((UniCharOffset(5), 0, 0)),
+            Some((GraphemeOffset(5), 0, 0)),
         );
     })
     .expect("test tab session should exist");

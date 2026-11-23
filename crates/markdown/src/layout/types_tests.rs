@@ -801,7 +801,7 @@ fn multi_output_source(kind: crate::builder::BlockKind, md: &str) -> MultiOutput
         text_lines: vec![],
         projected_lines: vec![],
         text_styles: vec![],
-        source_range: crate::builder::BlockSource::Continuous(0..md.len()),
+        source_range: crate::builder::BlockSourceSpan::Continuous(0..md.len()),
         block_range: 0..md.len(),
         code_line_source_starts: None,
     };

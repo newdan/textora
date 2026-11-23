@@ -62,7 +62,7 @@ impl NotoraShell {
         let mut specs = Vec::new();
         for (index, input) in self.note_toolbar_buttons.iter().enumerate() {
             let style = if is_permanent_deletion(&input.action) {
-                ButtonStyle::destructive(theme.settings_theme())
+                ButtonStyle::destructive(theme.application_theme())
             } else {
                 ButtonStyle::from_theme(theme)
             };
@@ -76,7 +76,7 @@ impl NotoraShell {
             });
         }
         let action_style = ButtonStyle::from_theme(theme);
-        let ghost_style = ButtonStyle::ghost(theme.settings_theme());
+        let ghost_style = ButtonStyle::ghost(theme.application_theme());
         specs.extend([
             ChromeButtonSpec {
                 key: ChromeButtonKey::CompactNavigation,
@@ -116,7 +116,7 @@ impl NotoraShell {
                 text: Some("设置".into()),
                 accessibility_label: "设置".into(),
                 icon: Some("settings".into()),
-                style: ButtonStyle::ghost(theme.settings_theme()),
+                style: ButtonStyle::ghost(theme.application_theme()),
             },
             ChromeButtonSpec {
                 key: ChromeButtonKey::ConfirmationCancel,
@@ -137,7 +137,7 @@ impl NotoraShell {
                     .filter(|action| is_permanent_deletion(action))
                     .map(|_| "trash-2".into()),
                 style: if self.confirmation_action.as_ref().is_some_and(is_permanent_deletion) {
-                    ButtonStyle::destructive(theme.settings_theme())
+                    ButtonStyle::destructive(theme.application_theme())
                 } else {
                     action_style.clone()
                 },

@@ -2,10 +2,10 @@ use super::*;
 
 // ===== NovelView =====
 
-/// Novel reading view — wraps PreviewEngine with txt→NovelStructure conversion.
+/// Novel reading view — wraps BlockViewEngine with txt→NovelStructure conversion.
 /// Uses `MarkdownStyle::novel()` for independent theme section.
 pub struct NovelView {
-    pub(in crate::view) engine: PreviewEngine<crate::builder::NovelStructure>,
+    pub(in crate::view) engine: BlockViewEngine<crate::builder::NovelStructure>,
 }
 
 impl Default for NovelView {
@@ -16,11 +16,11 @@ impl Default for NovelView {
 
 impl NovelView {
     pub fn new() -> Self {
-        Self { engine: PreviewEngine::new() }
+        Self { engine: BlockViewEngine::new() }
     }
 
     pub(in crate::view) fn find_chapter_heading<S: BlockSource>(
-        engine: &PreviewEngine<S>,
+        engine: &BlockViewEngine<S>,
         direction: ui::plugin::ChapterDirection,
     ) -> Option<usize> {
         let current = engine.current_heading_index(engine.scroll_y)?;

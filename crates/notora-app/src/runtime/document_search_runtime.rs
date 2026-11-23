@@ -1,9 +1,7 @@
 use super::NotoraRuntime;
 use crate::action::NotoraAction;
 use crate::{FocusTarget, OverlayState};
-use ui::document_search_bar::{
-    DOCUMENT_SEARCH_BAR_HEIGHT_LOGICAL, DocumentSearchBarAction, DocumentSearchBarInput,
-};
+use ui::search_bar::{SEARCH_BAR_HEIGHT, SearchBarAction, SearchBarSnapshot};
 
 impl NotoraRuntime {
     pub(crate) fn open_document_search(&mut self) -> bool {
@@ -38,8 +36,10 @@ impl NotoraRuntime {
         let focused = visible
             && self.window_runtime.is_focused()
             && self.state().layout.focus_target == FocusTarget::DocumentSearch
-            && self.state().layout.overlay == OverlayState::None;
-        let mut input = DocumentSearchBarInput { visible, focused, ..Default::default() };
+            && self.state().layout.overlay == OverlayState::None
+            && !self.frame_runtime.editor_popup_is_open();
+        let search_tab = self.document_runtime.editor().active_tab_id().filter(|_| visible);
+        let mut input = SearchBarSnapshot { visible, ..Default::default() };
         if visible {
             crate::document_search::refresh(self.document_runtime.editor_mut());
             if let Some(tab) = self
@@ -53,7 +53,7 @@ impl NotoraRuntime {
                 input.current_match = tab.search_state().active_match_idx;
             }
         }
-        let height = DOCUMENT_SEARCH_BAR_HEIGHT_LOGICAL * layout.dpi;
+        let height = SEARCH_BAR_HEIGHT * layout.dpi;
         let rect = if visible {
             ui::Rect::new(
                 layout.editor_body_rect.x,
@@ -64,10 +64,16 @@ impl NotoraRuntime {
         } else {
             ui::Rect::ZERO
         };
-        self.frame_runtime.synchronize_document_search(input, rect, layout.dpi);
+        self.frame_runtime
+            .synchronize_document_search(search_tab, input, focused, rect, layout.dpi);
     }
 
     pub(super) fn route_document_search_event(&mut self, event: &ui::Event) -> bool {
+        self.synchronize_document_search();
+        if self.frame_runtime.consumes_cancelled_search_ime(event) {
+            self.apply_shell_effect(appkit_shell::ShellEffect::REDRAW);
+            return true;
+        }
         if self.state().layout.overlay != OverlayState::None
             || self.frame_runtime.editor_popup_is_open()
         {
@@ -77,10 +83,15 @@ impl NotoraRuntime {
             && self.document_search_is_visible()
             && matches!(event, ui::Event::KeyDown(ui::KeyCode::Escape, _))
         {
-            self.apply_document_search_action(DocumentSearchBarAction::Close);
+            self.apply_document_search_action(SearchBarAction::Close);
             return true;
         }
-        self.synchronize_document_search();
+        if let ui::Event::KeyDown(ui::KeyCode::Char(character), modifiers) = event
+            && character.eq_ignore_ascii_case(&'f')
+            && (modifiers.cmd || modifiers.ctrl)
+        {
+            return false;
+        }
         let routed = self.frame_runtime.route_document_search_event(event, self.shell_layout().dpi);
         if let Some(action) = routed.action {
             self.apply_document_search_action(action);
@@ -91,25 +102,32 @@ impl NotoraRuntime {
         routed.consumed
     }
 
-    fn apply_document_search_action(&mut self, action: DocumentSearchBarAction) {
+    fn apply_document_search_action(&mut self, action: SearchBarAction) {
         match action {
-            DocumentSearchBarAction::QueryChanged(query) => {
+            SearchBarAction::QueryChanged(query) => {
                 crate::document_search::set_query(self.document_runtime.editor_mut(), query);
             }
-            DocumentSearchBarAction::Next | DocumentSearchBarAction::Prev => {
+            SearchBarAction::Next | SearchBarAction::Prev => {
                 crate::document_search::navigate(
                     self.document_runtime.editor_mut(),
-                    action == DocumentSearchBarAction::Prev,
+                    action == SearchBarAction::Prev,
                 );
             }
-            DocumentSearchBarAction::Close => {
+            SearchBarAction::Close => {
                 crate::document_search::close(self.document_runtime.editor_mut());
                 self.dispatch_action(NotoraAction::FocusRequested(FocusTarget::Editor));
             }
-            DocumentSearchBarAction::FocusRequested => {
+            SearchBarAction::FocusFind => {
                 self.dispatch_action(NotoraAction::FocusRequested(FocusTarget::DocumentSearch));
             }
-            DocumentSearchBarAction::AppearanceChanged => {}
+            SearchBarAction::HoverChanged => {}
+            SearchBarAction::DismissOrClear
+            | SearchBarAction::ToggleReplace
+            | SearchBarAction::ToggleRegex
+            | SearchBarAction::Replace
+            | SearchBarAction::ReplaceAll
+            | SearchBarAction::FocusReplace
+            | SearchBarAction::ReplaceQueryChanged(_) => return,
         }
         self.synchronize_document_search();
     }

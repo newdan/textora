@@ -15,7 +15,7 @@ use winit::window::{CursorIcon, ResizeDirection};
 use crate::actions::AppAction;
 use crate::app::App;
 use crate::app_effect::AppEffect;
-use crate::input_mapper::key_to_command;
+use crate::input_mapper::key_to_app_command;
 use crate::menu_handler::AppCommand;
 use crate::source_pointer::hit_test_with_sub_line_offset as mouse_hit_test;
 use appkit_core::workspace::types::TabId;
@@ -154,10 +154,14 @@ pub(crate) fn handle_keyboard(app: &mut App, event: &winit::event::KeyEvent) -> 
     // EditIntent 直接修改文档。导航与非编辑快捷键仍可继续执行。
     let (preedit_text, _) = app.editor_runtime.preedit();
     if !preedit_text.is_empty() {
-        if let Some(command) = key_to_command(&event.logical_key, input_modifiers)
-            && command_allowed_during_preedit(&preedit_text, &command)
+        if let Some(command) = key_to_app_command(&event.logical_key, input_modifiers)
+            && match &command {
+                AppCommand::Edit(edit) => command_allowed_during_preedit(&preedit_text, edit),
+                AppCommand::EditorShortcut(_) => true,
+                _ => false,
+            }
         {
-            actions.push(AppAction::ExecuteAppCommands(vec![AppCommand::Edit(command)]));
+            actions.push(AppAction::ExecuteAppCommands(vec![command]));
         }
         return actions;
     }
@@ -195,14 +199,16 @@ pub(crate) fn handle_keyboard(app: &mut App, event: &winit::event::KeyEvent) -> 
         return actions;
     }
 
-    let fallback_cmd = key_to_command(&event.logical_key, input_modifiers);
+    let fallback_cmd = key_to_app_command(&event.logical_key, input_modifiers);
 
     // Reading mode: Space acts as PageDown instead of inserting a character.
     let is_reading_mode = app.active_is_reading_mode();
     let fallback_cmd = if is_reading_mode {
         match fallback_cmd {
-            Some(appkit_core::edit_command::EditCommand::InsertChar(s)) if s == " " => {
-                Some(appkit_core::edit_command::EditCommand::PageDown)
+            Some(AppCommand::Edit(appkit_core::edit_command::EditCommand::InsertChar(s)))
+                if s == " " =>
+            {
+                Some(AppCommand::Edit(appkit_core::edit_command::EditCommand::PageDown))
             }
             other => other,
         }
@@ -211,7 +217,7 @@ pub(crate) fn handle_keyboard(app: &mut App, event: &winit::event::KeyEvent) -> 
     };
 
     if let Some(cmd) = fallback_cmd {
-        actions.push(AppAction::ExecuteAppCommands(vec![AppCommand::Edit(cmd)]));
+        actions.push(AppAction::ExecuteAppCommands(vec![cmd]));
     }
     actions
 }
@@ -371,13 +377,13 @@ fn translate_title_bar_action(ta: &ui::title_bar::TitleBarAction, actions: &mut 
         TitleBarAction::ToggleMaximizeWindow => actions.push(AppAction::ToggleMaximizeWindow),
         TitleBarAction::CloseWindow => actions.push(AppAction::CloseWindow),
         TitleBarAction::ToggleView => {
-            actions.push(AppAction::ExecuteAppCommands(vec![AppCommand::Edit(
-                appkit_core::edit_command::EditCommand::ToggleView,
+            actions.push(AppAction::ExecuteAppCommands(vec![AppCommand::EditorShortcut(
+                crate::menu_handler::EditorShortcut::ToggleView,
             )]));
         }
         TitleBarAction::ToggleToc => {
-            actions.push(AppAction::ExecuteAppCommands(vec![AppCommand::Edit(
-                appkit_core::edit_command::EditCommand::ToggleToc,
+            actions.push(AppAction::ExecuteAppCommands(vec![AppCommand::EditorShortcut(
+                crate::menu_handler::EditorShortcut::ToggleToc,
             )]));
         }
         TitleBarAction::ToggleInspectorPanel => {
@@ -421,11 +427,6 @@ pub(crate) fn handle_cursor_moved(app: &mut App, px: f32, py: f32) -> Vec<AppAct
         }
     }
     actions.extend(widget_actions);
-    // Sync sidebar persistent state back from widget after Dock dispatch
-    if matches!(app.settings.view_mode, ui::view_mode::ViewMode::Sidebar) {
-        app.ui_shell.sync_sidebar_persistent();
-    }
-
     // Cursor hint from widgets (sidebar edge → ColResize, title bar → Default, etc.)
     // always takes priority — cursor icon should reflect what's under the pointer,
     // even during an editor drag.
@@ -539,11 +540,6 @@ pub(crate) fn handle_mouse_input_left(
     };
     let (widget_actions, consumed, cursor_hint) = dispatch_mouse(app, ev);
     actions.extend(widget_actions);
-    // Sync sidebar persistent state after MouseDown/MouseUp (menu close, etc.)
-    if matches!(app.settings.view_mode, ui::view_mode::ViewMode::Sidebar) {
-        app.ui_shell.sync_sidebar_persistent();
-    }
-
     if let Some(icon) = cursor_hint {
         actions.push(AppAction::SetCursor(icon));
     }

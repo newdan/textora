@@ -696,8 +696,8 @@ impl NotoraRuntime {
             title_height,
         );
         if self.document_search_is_visible() && layout.editor_rect != ui::Rect::ZERO {
-            let search_height = (ui::document_search_bar::DOCUMENT_SEARCH_BAR_HEIGHT_LOGICAL * dpi)
-                .min(layout.editor_body_rect.h);
+            let search_height =
+                (ui::search_bar::SEARCH_BAR_HEIGHT * dpi).min(layout.editor_body_rect.h);
             layout.editor_body_rect.y += search_height;
             layout.editor_body_rect.h -= search_height;
         }

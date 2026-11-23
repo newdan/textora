@@ -1,12 +1,13 @@
 use super::*;
+use crate::augmenter::{AugmentKind, EditAugmentation};
 
 // ===== MarkdownEditorView =====
 
-/// WYSIWYG markdown editor view — wraps PreviewEngine with editing support.
+/// WYSIWYG markdown editor view — wraps BlockViewEngine with editing support.
 /// Differs from MarkdownView in that it accepts cursor position updates
 /// and provides layout-aware editing queries.
 pub struct MarkdownEditorView {
-    pub(in crate::view) engine: PreviewEngine,
+    pub(in crate::view) engine: BlockViewEngine,
     pub(in crate::view) source: SourceSnapshot,
     pub(in crate::view) cached_generation: Option<u32>,
     pub(in crate::view) split_history: std::cell::RefCell<split_history::SplitHistory>,
@@ -26,7 +27,7 @@ impl Default for MarkdownEditorView {
 
 impl MarkdownEditorView {
     pub fn new() -> Self {
-        let mut engine = PreviewEngine::new();
+        let mut engine = BlockViewEngine::new();
         let source = MarkdownSource::snapshot(String::new());
         engine.edit_source = Some(source.clone());
         Self {
@@ -78,7 +79,7 @@ impl MarkdownEditorView {
         self.cached_generation != Some(generation)
     }
 
-    pub fn engine(&self) -> &PreviewEngine {
+    pub fn engine(&self) -> &BlockViewEngine {
         &self.engine
     }
 }
@@ -98,16 +99,14 @@ impl ui::plugin::KeyIntentMapper for MarkdownEditorView {
     }
 }
 
-fn request_augment_kind(intent: &ui::plugin::EditIntent) -> Option<ui::plugin::AugmentKind> {
+fn request_augment_kind(intent: &ui::plugin::EditIntent) -> Option<AugmentKind> {
     match intent {
-        ui::plugin::EditIntent::InsertText(text) => {
-            Some(ui::plugin::AugmentKind::InsertText(text.clone()))
-        }
-        ui::plugin::EditIntent::InsertParagraphBreak => Some(ui::plugin::AugmentKind::Enter),
-        ui::plugin::EditIntent::InsertLineBreak => Some(ui::plugin::AugmentKind::LineBreak),
-        ui::plugin::EditIntent::DeleteBackward => Some(ui::plugin::AugmentKind::Backspace),
-        ui::plugin::EditIntent::Indent => Some(ui::plugin::AugmentKind::Tab),
-        ui::plugin::EditIntent::Outdent => Some(ui::plugin::AugmentKind::ShiftTab),
+        ui::plugin::EditIntent::InsertText(text) => Some(AugmentKind::InsertText(text.clone())),
+        ui::plugin::EditIntent::InsertParagraphBreak => Some(AugmentKind::Enter),
+        ui::plugin::EditIntent::InsertLineBreak => Some(AugmentKind::LineBreak),
+        ui::plugin::EditIntent::DeleteBackward => Some(AugmentKind::Backspace),
+        ui::plugin::EditIntent::Indent => Some(AugmentKind::Tab),
+        ui::plugin::EditIntent::Outdent => Some(AugmentKind::ShiftTab),
         ui::plugin::EditIntent::DeleteForward
         | ui::plugin::EditIntent::PromoteObject
         | ui::plugin::EditIntent::DemoteObject
@@ -117,7 +116,7 @@ fn request_augment_kind(intent: &ui::plugin::EditIntent) -> Option<ui::plugin::A
 
 pub(in crate::view) fn augmentation_edit_plan(
     request: &ui::plugin::EditRequest,
-    augmentation: ui::plugin::EditAugmentation,
+    augmentation: EditAugmentation,
 ) -> ui::plugin::EditPlan {
     let range = augmentation.replace_range.unwrap_or(request.cursor_byte..request.cursor_byte);
     let text = augmentation.insert_text.unwrap_or_default();
@@ -151,7 +150,7 @@ pub(in crate::view) fn augmentation_edit_plan(
 fn selection_augmentation_edit_plan(
     request: &ui::plugin::EditRequest,
     selection: &std::ops::Range<usize>,
-    augmentation: ui::plugin::EditAugmentation,
+    augmentation: EditAugmentation,
 ) -> ui::plugin::EditPlan {
     let virtual_range = augmentation.replace_range.unwrap_or(selection.start..selection.start);
     let deleted_len = selection.end - selection.start;
@@ -209,7 +208,7 @@ impl ui::plugin::EditPolicy for MarkdownEditorView {
         let Some(kind) = request_augment_kind(&request.intent) else {
             return ui::plugin::EditPlan::UseDefault;
         };
-        if matches!(kind, ui::plugin::AugmentKind::Enter) {
+        if matches!(kind, AugmentKind::Enter) {
             return self.plan_paragraph_break(request);
         }
         self.engine
@@ -290,11 +289,7 @@ impl MarkdownEditorView {
         }
         let mut source_after_delete = self.source.as_str().to_owned();
         source_after_delete.replace_range(selection.clone(), "");
-        let kind = if is_line_break {
-            ui::plugin::AugmentKind::LineBreak
-        } else {
-            ui::plugin::AugmentKind::Enter
-        };
+        let kind = if is_line_break { AugmentKind::LineBreak } else { AugmentKind::Enter };
         let Some(augmentation) = crate::augmenter::augment_source(
             &MarkdownSource::owned(source_after_delete),
             selection.start,
@@ -323,7 +318,7 @@ fn protected_selection_insert_text_plan(
     source: &MarkdownSource<'_>,
     request: &ui::plugin::EditRequest,
     selection: &std::ops::Range<usize>,
-    erasure: ui::plugin::EditAugmentation,
+    erasure: EditAugmentation,
     text: &str,
 ) -> ui::plugin::EditPlan {
     let Some(erased_range) = erasure.replace_range else {
@@ -349,7 +344,7 @@ fn protected_selection_insert_text_plan(
     if let Some(follow) = crate::augmenter::augment_source(
         &source_after_erase,
         erasure.cursor_byte_after,
-        ui::plugin::AugmentKind::InsertText(text.to_owned()),
+        AugmentKind::InsertText(text.to_owned()),
     ) {
         return combine_erasure_and_followup_plan(
             source,
@@ -371,7 +366,7 @@ fn protected_selection_insert_text_plan(
 fn protected_selection_break_plan(
     source: &str,
     source_generation: u32,
-    erasure: ui::plugin::EditAugmentation,
+    erasure: EditAugmentation,
     is_line_break: bool,
 ) -> ui::plugin::EditPlan {
     let Some(erased_range) = erasure.replace_range else {
@@ -394,11 +389,7 @@ fn protected_selection_break_plan(
         ));
     }
 
-    let kind = if is_line_break {
-        ui::plugin::AugmentKind::LineBreak
-    } else {
-        ui::plugin::AugmentKind::Enter
-    };
+    let kind = if is_line_break { AugmentKind::LineBreak } else { AugmentKind::Enter };
     if let Some(follow) =
         crate::augmenter::augment_source(&source_after_erase, erasure.cursor_byte_after, kind)
     {
@@ -425,7 +416,7 @@ fn combine_erasure_and_followup_plan(
     source_generation: u32,
     erased_range: std::ops::Range<usize>,
     mut erased_text: String,
-    follow: ui::plugin::EditAugmentation,
+    follow: EditAugmentation,
 ) -> ui::plugin::EditPlan {
     let follow_range = follow.replace_range.unwrap_or(0..0);
     let follow_text = follow.insert_text.unwrap_or_default();
@@ -509,7 +500,19 @@ impl ViewPlugin for MarkdownEditorView {
         shaper: &mut shaping::Shaper,
         dpi_scale: f32,
     ) -> DrawList {
-        preedit::render_editor(self, bounds, theme, shaper, dpi_scale)
+        if let Some(commands) = preedit::render_replacement(self, bounds, theme, shaper, dpi_scale)
+        {
+            return commands;
+        }
+        editor_render::render_engine(
+            &mut self.engine,
+            &self.source,
+            None,
+            bounds,
+            theme,
+            shaper,
+            dpi_scale,
+        )
     }
 
     fn sync_document(

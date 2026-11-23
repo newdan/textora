@@ -21,11 +21,11 @@ use crate::prepared_tab::{PreparedTab, placeholder_display_entries};
 use crate::tab_runtime::{DocumentEditingAccess, TabRuntime, TabRuntimeStore};
 use crate::tab_session::{TabSession, TabSessionMut};
 use crate::view_route::ViewRouteTable;
-use crate::workspace::{CloseTabDecision, Workspace, WorkspaceEffect};
+use crate::workspace::{CloseTabDecision, EditorTabSet, WorkspaceEffect};
 use appkit_core::edit_command::EditCommand;
 
 pub(crate) struct ModelSession {
-    workspace: Workspace,
+    workspace: EditorTabSet,
     runtimes: TabRuntimeStore,
 }
 
@@ -34,7 +34,7 @@ fn inspector_redraw() -> EditorOutcome {
 }
 
 impl ModelSession {
-    pub(crate) fn replace_parts(&mut self, workspace: Workspace, runtimes: TabRuntimeStore) {
+    pub(crate) fn replace_parts(&mut self, workspace: EditorTabSet, runtimes: TabRuntimeStore) {
         self.workspace = workspace;
         self.runtimes = runtimes;
         debug_assert_eq!(self.workspace.tab_ids(), self.runtimes.ids());
@@ -45,7 +45,7 @@ impl ModelSession {
         view_routes: ViewRouteTable,
     ) -> Self {
         Self {
-            workspace: Workspace::with_plugins(plugin_registry, view_routes),
+            workspace: EditorTabSet::with_plugins(plugin_registry, view_routes),
             runtimes: TabRuntimeStore::default(),
         }
     }

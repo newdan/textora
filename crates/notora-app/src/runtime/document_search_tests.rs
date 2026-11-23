@@ -156,6 +156,56 @@ fn escape_from_editor_closes_a_visible_document_search() {
     assert_eq!(runtime.state().layout.focus_target, FocusTarget::Editor);
 }
 
+#[test]
+fn late_composition_commit_cannot_change_another_tabs_identical_query() {
+    let mut runtime = app();
+    let (first, first_tab) = install_registered_note(&mut runtime, "first.md", "first note");
+    runtime.handle_key_input(KeyCode::Char('f'), PRIMARY, None);
+    runtime.handle_ime_input(winit::event::Ime::Commit("same".into()));
+    let (second, second_tab) = install_registered_note(&mut runtime, "second.md", "second note");
+    runtime.handle_key_input(KeyCode::Char('f'), PRIMARY, None);
+    runtime.handle_ime_input(winit::event::Ime::Commit("same".into()));
+    switch_search_tab(&mut runtime, first, first_tab);
+    runtime.handle_ime_input(winit::event::Ime::Preedit("旧词".into(), None));
+
+    switch_search_tab(&mut runtime, second, second_tab);
+    // Some IMEs clear the displayed preedit immediately before delivering a late commit.
+    runtime.handle_ime_input(winit::event::Ime::Preedit(String::new(), None));
+    runtime.handle_ime_input(winit::event::Ime::Commit("旧词".into()));
+
+    assert_eq!(search_state(&runtime).query, "same");
+    runtime.handle_key_input(KeyCode::End, Modifiers::NONE, None);
+    runtime.handle_ime_input(winit::event::Ime::Commit("new".into()));
+    assert_eq!(search_state(&runtime).query, "samenew");
+    switch_search_tab(&mut runtime, first, first_tab);
+    assert_eq!(search_state(&runtime).query, "same");
+}
+
+#[test]
+fn late_search_composition_commit_cannot_edit_the_new_editor() {
+    let mut runtime = app();
+    install_registered_note(&mut runtime, "first.md", "first note");
+    runtime.handle_key_input(KeyCode::Char('f'), PRIMARY, None);
+    runtime.handle_ime_input(winit::event::Ime::Preedit("旧词".into(), None));
+
+    let (_, second_tab) = install_registered_note(&mut runtime, "second.md", "second note");
+    runtime.dispatch_action(NotoraAction::FocusRequested(FocusTarget::Editor));
+    let before = runtime.document_runtime.editor().document_text_snapshot(second_tab);
+    runtime.handle_ime_input(winit::event::Ime::Commit("旧词".into()));
+
+    assert_eq!(runtime.document_runtime.editor().document_text_snapshot(second_tab), before);
+}
+
+fn switch_search_tab(
+    runtime: &mut NotoraRuntime,
+    identity: notora_core::DocumentIdentity,
+    tab_id: appkit_core::workspace::types::TabId,
+) {
+    runtime.action_runtime.state.library.selected_card = Some(identity);
+    let outcome = runtime.document_runtime.editor_mut().activate(tab_id);
+    runtime.apply_editor_outcome(outcome);
+}
+
 fn search_state(runtime: &NotoraRuntime) -> appkit_core::document::SearchState {
     let editor = runtime.document_runtime.editor();
     editor

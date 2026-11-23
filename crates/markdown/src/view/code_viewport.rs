@@ -4,7 +4,7 @@ use super::*;
 use crate::layout::{LaidOutBlock, LaidOutBlockKind};
 use ui::core::{geom::Rect, paint::DrawCmd};
 
-impl<S: BlockSource> PreviewEngine<S> {
+impl<S: BlockSource> BlockViewEngine<S> {
     pub(super) fn clip_code_highlights(&self, mut highlights: DrawList) -> DrawList {
         let Some(lazy) = &self.lazy else { return highlights };
         let mut code_viewports = Vec::new();

@@ -52,11 +52,11 @@ impl TextBuffer {
     pub fn select_line(&mut self) {
         let beg = self.cursor_move_to_logical_internal(
             self.cursor,
-            LogicalPoint { unichar: 0, line: self.cursor.logical_pos.line },
+            LogicalPoint { grapheme_column: 0, line: self.cursor.logical_pos.line },
         );
         let end = self.cursor_move_to_logical_internal(
             beg,
-            LogicalPoint { unichar: 0, line: self.cursor.logical_pos.line + 1 },
+            LogicalPoint { grapheme_column: 0, line: self.cursor.logical_pos.line + 1 },
         );
         unsafe { self.set_cursor(end) };
         self.set_selection(Some(TextBufferSelection {

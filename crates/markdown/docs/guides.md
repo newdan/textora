@@ -25,7 +25,7 @@
 
 ## 4. 调整光标、选区、IME 或视图缓存
 - **坐标与投影**：修改映射规则时优先改 `src/projection.rs` 与 `src/grapheme_map.rs`，确保 `SourceProjectionIndex` 成为唯一权威。
-- **Preedit / 搜索 / 拆分历史 / 代码裁剪**：分别位于独立子文件 `src/view_preedit.rs`、`src/view_source_search.rs`、`src/view_split_history.rs`、`src/view_code_viewport.rs`，与 `src/view/` 解耦；修改缓存失效逻辑时检查 `PreviewEngine` 的 `EngineDirty` 状态机及增量复用（`LazyLayout::reuse_unchanged_blocks_from`）。
+- **Preedit / 搜索 / 拆分历史 / 代码裁剪**：分别位于独立子文件 `src/view_preedit.rs`、`src/view_source_search.rs`、`src/view_split_history.rs`、`src/view_code_viewport.rs`，与 `src/view/` 解耦；修改缓存失效逻辑时检查 `BlockViewEngine` 的 `EngineDirty` 状态机及增量复用（`LazyLayout::reuse_unchanged_blocks_from`）。
 
 ## 5. 新增嵌入内容或调整数学/图表渲染
 - **双实现同步**：任何对 `src/embedded.rs` 公开接口（`EmbeddedKind`、`EmbeddedRequest`、`EmbeddedImage`、`EmbeddedError`、`render_embedded`）的修改，**必须**同步更新 `src/embedded_lite.rs`，保证 `--no-default-features` 编译通过。

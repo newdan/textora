@@ -1,6 +1,6 @@
 use super::*;
 
-impl<S: BlockSource> PreviewEngine<S> {
+impl<S: BlockSource> BlockViewEngine<S> {
     // ── Scroll ──
 
     pub fn scroll(&mut self, delta: f32, viewport_h: f32) -> bool {

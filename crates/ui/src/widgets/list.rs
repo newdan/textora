@@ -517,7 +517,7 @@ impl Widget for ListWidget {
                         if is_keyboard_focused {
                             ctx.list.stroke_rounded(
                                 row_rect,
-                                ctx.theme.settings_theme().focus_ring,
+                                ctx.theme.application_theme().focus_ring,
                                 metrics.compact_corner_radius_logical * dpi,
                                 metrics.focus_ring_width_logical * dpi,
                             );

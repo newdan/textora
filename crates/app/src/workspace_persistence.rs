@@ -13,14 +13,14 @@ use appkit_shell::tab_runtime::{TabRuntime, TabRuntimeStore};
 #[cfg(test)]
 use appkit_shell::tab_session::TabSession;
 use appkit_shell::tab_session::TabSessionMut;
-use appkit_shell::workspace::Workspace;
+use appkit_shell::workspace::EditorTabSet;
 
 const WORKSPACE_VERSION: u32 = 1;
 const RECOVERY_TITLE_PREFIX: &str = "恢复：";
 const UNNAMED_RECOVERY_TITLE: &str = "恢复：未命名";
 
 pub(crate) struct RestoredWorkspace {
-    pub(crate) workspace: Workspace,
+    pub(crate) workspace: EditorTabSet,
     pub(crate) runtimes: TabRuntimeStore,
 }
 
@@ -206,9 +206,9 @@ fn persisted_runtime_tab(tab: &EditorTabSnapshot, snapshots_dir: &Path) -> Persi
 
 #[cfg(test)]
 fn persisted_tab(
-    workspace: &Workspace,
+    workspace: &EditorTabSet,
     runtimes: &TabRuntimeStore,
-    entry: &appkit_core::workspace::model::WorkspaceEntry<appkit_core::document::DocumentModel>,
+    entry: &appkit_core::workspace::model::TabEntry<appkit_core::document::DocumentModel>,
     snapshots_dir: &Path,
 ) -> PersistedTab {
     let document = &entry.value;
@@ -256,7 +256,7 @@ fn persisted_tab(
 
 #[cfg(test)]
 pub(crate) fn snapshot_workspace(
-    workspace: &Workspace,
+    workspace: &EditorTabSet,
     runtimes: &TabRuntimeStore,
     sidebar_pinned: bool,
     sidebar_width: Option<f32>,
@@ -412,7 +412,7 @@ fn restore_runtime_state(
 }
 
 fn append_restored_tab(
-    workspace: &mut Workspace,
+    workspace: &mut EditorTabSet,
     runtimes: &mut TabRuntimeStore,
     tab: &PersistedTab,
     is_active: bool,
@@ -473,7 +473,7 @@ fn append_restored_tab(
 }
 
 pub(crate) fn restore_workspace(
-    mut workspace: Workspace,
+    mut workspace: EditorTabSet,
     snapshot: PersistedWorkspace,
     dimensions: ViewportDimensions,
     line_height: f64,
@@ -525,7 +525,7 @@ mod tests {
     use appkit_shell::tab_session::{TabSession, TabSessionMut};
 
     fn append_document(
-        workspace: &mut appkit_shell::workspace::Workspace,
+        workspace: &mut appkit_shell::workspace::EditorTabSet,
         runtimes: &mut TabRuntimeStore,
         document: DocumentFixture,
     ) -> appkit_core::workspace::types::TabId {

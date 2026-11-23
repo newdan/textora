@@ -11,7 +11,7 @@ use appkit_shell::prepared_tab::PreparedTab;
 #[cfg(test)]
 use appkit_shell::tab_runtime::TabRuntime;
 use appkit_shell::tab_session::{TabSession, TabSessionMut};
-use appkit_shell::workspace::Workspace;
+use appkit_shell::workspace::EditorTabSet;
 
 pub(crate) struct EditorSaveContext {
     pub(crate) dirty: bool,
@@ -305,7 +305,7 @@ impl App {
 
     pub(crate) fn replace_editor_model(
         &mut self,
-        workspace: Workspace,
+        workspace: EditorTabSet,
         runtimes: appkit_shell::tab_runtime::TabRuntimeStore,
     ) {
         self.editor_runtime.replace_model_state(workspace, runtimes);

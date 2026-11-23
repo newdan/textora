@@ -5,7 +5,7 @@ use crate::dispatch::wysiwyg::{
 };
 use appkit_shell::editor_runtime::{EditorNotification, EditorOutcome};
 use appkit_shell::pointer_capture::CanvasDragEligibility;
-use textora_core::types::UniCharOffset;
+use textora_core::types::GraphemeOffset;
 use ui::canvas::CanvasPoint;
 use ui::plugin::{CursorAffinity, EditHitTarget, VisualCaretPosition};
 use winit::event::ElementState;
@@ -46,7 +46,7 @@ impl App {
         state: ElementState,
         px: f32,
         py: f32,
-        hit: Option<(UniCharOffset, usize, usize)>,
+        hit: Option<(GraphemeOffset, usize, usize)>,
     ) -> AppEffect {
         let is_preview = !self.active_allows_editing();
         let is_custom_renderer = self.active_handles_own_rendering();
@@ -400,7 +400,7 @@ impl App {
         &mut self,
         px: f32,
         py: f32,
-        hit: Option<(UniCharOffset, usize, usize)>,
+        hit: Option<(GraphemeOffset, usize, usize)>,
     ) -> AppEffect {
         let is_preview = !self.active_allows_editing();
         let is_custom_renderer = self.active_handles_own_rendering();

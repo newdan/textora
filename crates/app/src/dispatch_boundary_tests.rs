@@ -57,11 +57,11 @@ fn workspace_stores_document_models_without_doc_item_runtime_fallback() {
     let workspace_source = include_str!("../../appkit-shell/src/workspace.rs");
 
     assert!(
-        workspace_source.contains("WorkspaceModel<DocumentModel>"),
+        workspace_source.contains("TabSet<DocumentModel>"),
         "workspace must store headless document models directly"
     );
     assert!(
-        !workspace_source.contains("WorkspaceModel<DocItem>"),
+        !workspace_source.contains("TabSet<DocItem>"),
         "workspace must not retain the transitional DocItem model"
     );
     assert!(

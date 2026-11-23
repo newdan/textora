@@ -13,7 +13,7 @@ use crate::types::{ByteIndex, LogicalPoint, VisualPoint};
 pub struct Cursor {
     /// Offset in bytes within the buffer.
     pub offset: ByteIndex,
-    /// Position in the buffer in lines (`.line`) and unichar offsets (`.unichar`).
+    /// Position in the buffer in lines (`.line`) and grapheme_column offsets (`.grapheme_column`).
     ///
     /// Line wrapping has NO influence on this.
     pub logical_pos: LogicalPoint,
@@ -223,7 +223,7 @@ impl<'doc, A: GraphemeAdvance> CursorNav<'doc, A> {
 
     /// Navigates **forward** to the given logical position.
     ///
-    /// Logical positions are in lines and unichar offsets.
+    /// Logical positions are in lines and grapheme_column offsets.
     ///
     /// # Returns
     ///
@@ -262,13 +262,13 @@ impl<'doc, A: GraphemeAdvance> CursorNav<'doc, A> {
         }
 
         let mut offset = self.cursor.offset.to_usize();
-        let mut logical_pos_unichar = self.cursor.logical_pos.unichar;
+        let mut logical_grapheme_column = self.cursor.logical_pos.grapheme_column;
         let mut logical_pos_line = self.cursor.logical_pos.line;
         let mut visual_pos_column = self.cursor.visual_pos.column;
         let mut visual_pos_row = self.cursor.visual_pos.row;
         let mut column = self.cursor.column;
 
-        let mut logical_target_unichar =
+        let mut target_logical_grapheme_column =
             Self::calc_logical_target_x(logical_target, logical_pos_line);
         let mut visual_target_column = Self::calc_visual_target_x(visual_target, visual_pos_row);
 
@@ -278,7 +278,7 @@ impl<'doc, A: GraphemeAdvance> CursorNav<'doc, A> {
 
         loop {
             if offset >= offset_target.to_usize()
-                || logical_pos_unichar >= logical_target_unichar
+                || logical_grapheme_column >= target_logical_grapheme_column
                 || visual_pos_column >= visual_target_column
             {
                 break;
@@ -344,13 +344,13 @@ impl<'doc, A: GraphemeAdvance> CursorNav<'doc, A> {
                 }
 
                 offset = offset_next_cluster;
-                logical_pos_unichar = 0;
+                logical_grapheme_column = 0;
                 logical_pos_line += 1;
                 visual_pos_column = 0;
                 visual_pos_row += 1;
                 column = 0;
 
-                logical_target_unichar =
+                target_logical_grapheme_column =
                     Self::calc_logical_target_x(logical_target, logical_pos_line);
                 visual_target_column = Self::calc_visual_target_x(visual_target, visual_pos_row);
                 continue;
@@ -366,14 +366,14 @@ impl<'doc, A: GraphemeAdvance> CursorNav<'doc, A> {
             }
 
             offset = offset_next_cluster;
-            logical_pos_unichar += 1;
+            logical_grapheme_column += 1;
             visual_pos_column += width;
             column += width;
         }
 
         self.cursor.offset = ByteIndex(offset);
         self.cursor.logical_pos =
-            LogicalPoint { unichar: logical_pos_unichar, line: logical_pos_line };
+            LogicalPoint { grapheme_column: logical_grapheme_column, line: logical_pos_line };
         self.cursor.visual_pos = VisualPoint { column: visual_pos_column, row: visual_pos_row };
         self.cursor.column = column;
         self.cursor
@@ -383,7 +383,7 @@ impl<'doc, A: GraphemeAdvance> CursorNav<'doc, A> {
     fn calc_logical_target_x(target: LogicalPoint, pos_line: usize) -> usize {
         match pos_line.cmp(&target.line) {
             std::cmp::Ordering::Less => usize::MAX,
-            std::cmp::Ordering::Equal => target.unichar,
+            std::cmp::Ordering::Equal => target.grapheme_column,
             std::cmp::Ordering::Greater => 0,
         }
     }
@@ -450,7 +450,7 @@ mod test {
             cursor,
             Cursor {
                 offset: ByteIndex(4),
-                logical_pos: LogicalPoint { unichar: 0, line: 1 },
+                logical_pos: LogicalPoint { grapheme_column: 0, line: 1 },
                 visual_pos: VisualPoint { column: 0, row: 1 },
                 column: 0,
             }
@@ -465,7 +465,7 @@ mod test {
             cursor,
             Cursor {
                 offset: ByteIndex(1),
-                logical_pos: LogicalPoint { unichar: 1, line: 0 },
+                logical_pos: LogicalPoint { grapheme_column: 1, line: 0 },
                 visual_pos: VisualPoint { column: 1, row: 0 },
                 column: 1,
             }
@@ -481,7 +481,7 @@ mod test {
             cursor,
             Cursor {
                 offset: ByteIndex(2),
-                logical_pos: LogicalPoint { unichar: 2, line: 0 },
+                logical_pos: LogicalPoint { grapheme_column: 2, line: 0 },
                 visual_pos: VisualPoint { column: 4, row: 0 },
                 column: 4,
             }
@@ -498,7 +498,7 @@ mod test {
         let doc = ChunkedDoc(&chunks);
         let cursor = CursorNav::new(&doc).goto_visual(VisualPoint { column: 5 + 2 + 3, row: 0 });
         assert_eq!(cursor.offset, ByteIndex(5 + 8 + 3));
-        assert_eq!(cursor.logical_pos, LogicalPoint { unichar: 5 + 1 + 3, line: 0 });
+        assert_eq!(cursor.logical_pos, LogicalPoint { grapheme_column: 5 + 1 + 3, line: 0 });
     }
 
     #[test]
@@ -510,7 +510,7 @@ mod test {
             cursor,
             Cursor {
                 offset: ByteIndex(6),
-                logical_pos: LogicalPoint { unichar: 3, line: 1 },
+                logical_pos: LogicalPoint { grapheme_column: 3, line: 1 },
                 visual_pos: VisualPoint { column: 3, row: 1 },
                 column: 3,
             }
@@ -535,7 +535,7 @@ mod test {
             cursor,
             Cursor {
                 offset: ByteIndex(3),
-                logical_pos: LogicalPoint { unichar: 3, line: 0 },
+                logical_pos: LogicalPoint { grapheme_column: 3, line: 0 },
                 visual_pos: VisualPoint { column: 24, row: 0 },
                 column: 24,
             }
@@ -553,7 +553,7 @@ mod test {
             cursor,
             Cursor {
                 offset: ByteIndex(2),
-                logical_pos: LogicalPoint { unichar: 2, line: 0 },
+                logical_pos: LogicalPoint { grapheme_column: 2, line: 0 },
                 visual_pos: VisualPoint { column: 32, row: 0 },
                 column: 32,
             }

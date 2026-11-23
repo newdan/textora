@@ -1079,15 +1079,15 @@ impl Widget for SettingsView {
 }
 
 fn action_button_style(settings: SettingsTheme) -> ButtonStyle {
-    ButtonStyle::action(settings)
+    ButtonStyle::action(settings.application)
 }
 
 fn segmented_button_style(settings: SettingsTheme) -> ButtonStyle {
-    ButtonStyle::segmented(settings)
+    ButtonStyle::segmented(settings.application)
 }
 
 fn category_button_style(settings: SettingsTheme) -> ButtonStyle {
-    ButtonStyle::category(settings)
+    ButtonStyle::category(settings.application)
 }
 
 fn fallback_settings_theme() -> SettingsTheme {
@@ -1617,9 +1617,9 @@ mod tests {
         let settings = crate::theme::test_theme().settings_theme();
         let style = segmented_button_style(settings);
 
-        assert_eq!(style.foreground, settings.text_primary);
-        assert_eq!(style.selected_foreground, settings.on_accent);
-        assert_eq!(style.selected_background, settings.accent);
+        assert_eq!(style.foreground, settings.application.text_primary);
+        assert_eq!(style.selected_foreground, settings.application.on_accent);
+        assert_eq!(style.selected_background, settings.application.accent);
         assert_eq!(style.background, [0.0; 4]);
         let hover_contrast: f32 = style
             .hover_background
@@ -1646,7 +1646,7 @@ mod tests {
         assert_ne!(category_style.hover_background, [0.0; 4]);
         assert_ne!(category_style.pressed_background, [0.0; 4]);
         assert_ne!(category_style.selected_background, [0.0; 4]);
-        assert_eq!(category_style.selected_foreground, theme.settings_theme().accent_text);
+        assert_eq!(category_style.selected_foreground, theme.application_theme().accent_text);
 
         let mut draw_list = DrawList::new();
         view.paint(&mut PaintCtx::new(&mut draw_list, &theme, 1.0));
@@ -1769,7 +1769,7 @@ mod tests {
         ));
         assert!(matches!(
             draw_list.cmds.last(),
-            Some(DrawCmd::StrokeRect { color, .. }) if *color == light_settings.button_border
+            Some(DrawCmd::StrokeRect { color, .. }) if *color == light_settings.application.button_border
         ));
     }
 

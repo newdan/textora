@@ -119,11 +119,10 @@ impl App {
     }
 
     pub(crate) fn dispatch_settings_action(&mut self, action: SettingsDispatchAction) -> AppEffect {
-        self.ui_shell.sidebar_set_open_menu(None);
+        self.ui_shell.sidebar_clear_menu();
         let effect = match action {
             SettingsDispatchAction::SetViewMode(mode) => {
                 self.settings.set_view_mode(mode);
-                self.ui_shell.sidebar_set_hovered(None);
                 self.ui_shell.set_dragging_sidebar(false);
                 AppEffect::SYNC_WINDOW_CHROME
             }

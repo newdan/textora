@@ -18,7 +18,7 @@ pub(crate) use editable_paragraphs::{
 // ===== Block 节点 =====
 
 #[derive(Clone, Debug)]
-pub enum BlockSource {
+pub enum BlockSourceSpan {
     Continuous(Range<usize>),
     Fragmented(Vec<Range<usize>>),
 }
@@ -28,7 +28,7 @@ pub struct BlockNode {
     pub kind: BlockKind,
     pub children: Vec<BlockNode>,
     /// The source range containing the text for this block.
-    pub source_range: BlockSource,
+    pub source_range: BlockSourceSpan,
     /// Style spans for each logical text line (this assumes text formatting is independent).
     pub text_styles: Vec<Vec<StyleSpan>>,
     /// Parsed text lines (Markdown path only). Populated by the builder from
@@ -67,7 +67,7 @@ impl BlockNode {
         }
         // Novel zero-copy path: fetch text from source byte ranges.
         match &self.source_range {
-            BlockSource::Continuous(r) => {
+            BlockSourceSpan::Continuous(r) => {
                 let text = doc.doc_text_in_range(r.clone());
                 if text.is_empty() {
                     vec![]
@@ -107,7 +107,7 @@ impl BlockNode {
                     }
                 }
             }
-            BlockSource::Fragmented(ranges) => {
+            BlockSourceSpan::Fragmented(ranges) => {
                 ranges.iter().map(|r| doc.doc_text_in_range(r.clone())).collect()
             }
         }
@@ -277,7 +277,7 @@ impl NovelStructure {
                         text_lines: vec![],
                         projected_lines: vec![],
                         text_styles,
-                        source_range: BlockSource::Continuous(byte_range),
+                        source_range: BlockSourceSpan::Continuous(byte_range),
                         code_line_source_starts: None,
                         block_range: para_start_byte..line_start,
                     });
@@ -298,7 +298,7 @@ impl NovelStructure {
                         text_lines: vec![],
                         projected_lines: vec![],
                         text_styles,
-                        source_range: BlockSource::Continuous(byte_range),
+                        source_range: BlockSourceSpan::Continuous(byte_range),
                         code_line_source_starts: None,
                         block_range: para_start_byte..line_start,
                     });
@@ -313,7 +313,7 @@ impl NovelStructure {
                     text_lines: vec![],
                     projected_lines: vec![],
                     text_styles: vec![vec![]],
-                    source_range: BlockSource::Continuous(byte_range),
+                    source_range: BlockSourceSpan::Continuous(byte_range),
                     code_line_source_starts: None,
                     block_range: line_start..(line_start + content_len),
                 });
@@ -338,7 +338,7 @@ impl NovelStructure {
                     text_lines: vec![],
                     projected_lines: vec![],
                     text_styles,
-                    source_range: BlockSource::Continuous(byte_range),
+                    source_range: BlockSourceSpan::Continuous(byte_range),
                     code_line_source_starts: None,
                     block_range: para_start_byte..line_end,
                 });
@@ -363,7 +363,7 @@ impl NovelStructure {
                 text_lines: vec![],
                 projected_lines: vec![],
                 text_styles,
-                source_range: BlockSource::Continuous(byte_range),
+                source_range: BlockSourceSpan::Continuous(byte_range),
                 code_line_source_starts: None,
                 block_range: para_start_byte..last_line_end,
             });
@@ -509,7 +509,7 @@ impl MarkdownBuilder {
                 text_lines: vec![],
                 projected_lines: vec![],
                 text_styles: vec![],
-                source_range: BlockSource::Continuous(0..0),
+                source_range: BlockSourceSpan::Continuous(0..0),
                 code_line_source_starts: None,
                 block_range: 0..0,
             }],
@@ -567,7 +567,7 @@ impl MarkdownBuilder {
             text_styles: vec![],
             text_lines: vec![],
             projected_lines: vec![],
-            source_range: BlockSource::Continuous(
+            source_range: BlockSourceSpan::Continuous(
                 self.current_event_range.start..self.current_event_range.start,
             ),
             code_line_source_starts: None,
@@ -598,7 +598,7 @@ impl MarkdownBuilder {
                 node.projected_lines.push(TextProjectionBuilder::default().finish(block_end));
             }
             if let Some(&block_start) = self.block_source_starts.last() {
-                node.source_range = BlockSource::Continuous(block_start..block_end);
+                node.source_range = BlockSourceSpan::Continuous(block_start..block_end);
                 node.block_range = block_start..block_end;
             }
             self.block_source_starts.pop();
@@ -817,7 +817,7 @@ impl MarkdownBuilder {
                     text_styles,
                     text_lines,
                     projected_lines,
-                    source_range: BlockSource::Continuous(block_range.clone()),
+                    source_range: BlockSourceSpan::Continuous(block_range.clone()),
                     code_line_source_starts: None,
                     block_range,
                 });
@@ -887,7 +887,7 @@ impl MarkdownBuilder {
             prev.text_styles.extend(text_styles);
             prev.projected_lines.extend(projected_lines);
             prev.block_range.end = block_end;
-            prev.source_range = BlockSource::Continuous(prev.block_range.clone());
+            prev.source_range = BlockSourceSpan::Continuous(prev.block_range.clone());
             self.last_html_block_end = Some(event_end);
             return;
         }
@@ -899,7 +899,7 @@ impl MarkdownBuilder {
                 text_styles,
                 text_lines,
                 projected_lines,
-                source_range: BlockSource::Continuous(range_start..block_end),
+                source_range: BlockSourceSpan::Continuous(range_start..block_end),
                 code_line_source_starts: None,
                 block_range: range_start..block_end,
             });

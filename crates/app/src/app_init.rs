@@ -10,7 +10,7 @@ use crate::ui_shell::UiShell;
 use appkit_core::file_history::FileHistory;
 use appkit_shell::editor_runtime::{EditorRuntime, EditorRuntimeConfig, EditorRuntimeError};
 use appkit_shell::view_route::{ViewPathMatcher, ViewRouteRule, ViewRouteTable};
-use appkit_shell::workspace::Workspace;
+use appkit_shell::workspace::EditorTabSet;
 
 #[cfg(feature = "markdown")]
 const MINDMAP_ROUTE_PRIORITY: u16 = 400;
@@ -138,9 +138,9 @@ fn product_editor_plugins() -> (ui::plugin::PluginRegistry, ViewRouteTable) {
     (registry, routes)
 }
 
-pub(crate) fn build_product_workspace() -> Workspace {
+pub(crate) fn build_product_workspace() -> EditorTabSet {
     let (registry, routes) = product_editor_plugins();
-    Workspace::with_plugins(registry, routes)
+    EditorTabSet::with_plugins(registry, routes)
 }
 
 pub(crate) fn build_product_editor_runtime(

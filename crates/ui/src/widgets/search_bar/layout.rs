@@ -105,8 +105,7 @@ pub(super) fn calculate_search_bar_layout(input: SearchBarLayoutInput) -> Search
     }
 
     let auxiliary_width = if input.match_count > 0 {
-        let current = input.current_match.saturating_add(1).min(input.match_count);
-        format!("{current}/{}", input.match_count).len() as f32
+        format_match_count(input.match_count, input.current_match).len() as f32
             * RESULT_CHARACTER_WIDTH_LOGICAL
             * dpi
     } else {
@@ -190,6 +189,47 @@ pub(super) fn calculate_search_bar_layout(input: SearchBarLayoutInput) -> Search
         replace_all_btn_rect,
         auxiliary_text_rect,
         full_replace_labels,
+    }
+}
+
+pub(super) fn format_match_count(match_count: usize, current_match: usize) -> String {
+    let current = current_match.saturating_add(1).min(match_count);
+    format!("{current}/{match_count}")
+}
+
+/// The document find row fills the editor lane rather than a padded floating surface.
+pub(super) fn calculate_full_width_find_layout(rect: Rect, dpi: f32) -> SearchBarLayout {
+    const CONTROL_WIDTH_LOGICAL: f32 = 24.0;
+    const COUNT_WIDTH_LOGICAL: f32 = 60.0;
+    const CONTROL_COUNT: usize = 3;
+
+    let inset = crate::constants::TINY_GAP * dpi;
+    let control_width = CONTROL_WIDTH_LOGICAL * dpi;
+    let count_width = COUNT_WIDTH_LOGICAL * dpi;
+    let row_y = rect.y + inset;
+    let row_height = (rect.h - inset * 2.0).max(0.0);
+    let controls_x = rect.right() - inset - control_width * CONTROL_COUNT as f32;
+    let count_x = controls_x - count_width;
+    let query_x = rect.x + inset;
+
+    SearchBarLayout {
+        pill_rect: rect,
+        find_input_rect: Rect::new(
+            query_x,
+            row_y,
+            (count_x - inset - query_x).max(0.0),
+            row_height,
+        ),
+        auxiliary_text_rect: Rect::new(count_x, row_y, count_width, row_height),
+        prev_btn_rect: Rect::new(controls_x, row_y, control_width, row_height),
+        next_btn_rect: Rect::new(controls_x + control_width, row_y, control_width, row_height),
+        close_btn_rect: Rect::new(
+            controls_x + control_width * 2.0,
+            row_y,
+            control_width,
+            row_height,
+        ),
+        ..SearchBarLayout::default()
     }
 }
 

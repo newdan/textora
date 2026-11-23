@@ -20,7 +20,7 @@ use winit::keyboard::{Key, ModifiersState, NamedKey};
 use winit::window::WindowId;
 
 use crate::actions::AppAction;
-use crate::input_mapper::key_to_command;
+use crate::input_mapper::key_to_app_command;
 use crate::native_menu::{MenuAction, NativeMenu};
 use crate::textora_product::ProductEventSender;
 use appkit_core::file_history::compute_workspace_root;
@@ -36,7 +36,7 @@ fn report_lifecycle_error(message: std::fmt::Arguments<'_>) {
 }
 
 /// Returns true if the key combo should bypass search bar forwarding
-/// and go through the normal key_to_command → handle_command pipeline.
+/// and go through the normal key_to_app_command → handle_command pipeline.
 fn is_search_bar_whitelist(
     logical_key: &winit::keyboard::Key,
     sup: bool,
@@ -209,7 +209,7 @@ fn inspector_panel_should_receive_keyboard(
     modifiers.set(ModifiersState::SHIFT, shift);
     modifiers.set(ModifiersState::ALT, alt);
     modifiers.set(ModifiersState::CONTROL, ctrl);
-    key_to_command(logical_key, modifiers).is_none()
+    key_to_app_command(logical_key, modifiers).is_none()
 }
 
 fn inspector_panel_consumes_ime(
@@ -680,7 +680,7 @@ impl App {
 
                 // ── Search bar keyboard focus routing ──
                 // When search bar has keyboard focus, route keys directly to it.
-                // Whitelisted shortcuts still go through key_to_command → handle_command.
+                // Whitelisted shortcuts still go through key_to_app_command → handle_command.
                 if self.ui_shell.search_bar_has_keyboard_focus()
                     && !is_search_bar_whitelist(&event.logical_key, sup, shift, alt)
                 {

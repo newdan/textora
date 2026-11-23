@@ -193,6 +193,9 @@ impl App {
                     effect = effect.merge(AppEffect::REDRAW);
                 }
             }
+            crate::menu_handler::AppCommand::EditorShortcut(shortcut) => {
+                effect = effect.merge(self.dispatch_editor_shortcut(shortcut, event_loop));
+            }
             crate::menu_handler::AppCommand::Edit(cmd) => {
                 effect = effect.merge(self.dispatch_edit_command(cmd, event_loop));
             }

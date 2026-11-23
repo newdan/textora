@@ -68,7 +68,7 @@ impl TextBuffer {
             // Can't use `unicode::newlines_forward` because bracketed paste uses CR instead of LF/CRLF.
             let offset_next = memchr2(b'\r', b'\n', text, offset);
             let line = &text[offset..offset_next];
-            let column_before = self.cursor.logical_pos.unichar;
+            let column_before = self.cursor.logical_pos.grapheme_column;
 
             // Write the contents of the line into the buffer.
             let mut line_off = 0;
@@ -94,11 +94,11 @@ impl TextBuffer {
             }
 
             if !raw && self.overtype {
-                let delete = self.cursor.logical_pos.unichar - column_before;
+                let delete = self.cursor.logical_pos.grapheme_column - column_before;
                 let end = self.cursor_move_to_logical_internal(
                     self.cursor,
                     LogicalPoint {
-                        unichar: self.cursor.logical_pos.unichar + delete,
+                        grapheme_column: self.cursor.logical_pos.grapheme_column + delete,
                         line: self.cursor.logical_pos.line,
                     },
                 );
@@ -183,7 +183,7 @@ impl TextBuffer {
         if self.insert_final_newline
             && self.cursor.offset.to_usize() > 0
             && self.cursor.offset.to_usize() == self.text_length()
-            && self.cursor.logical_pos.unichar > 0
+            && self.cursor.logical_pos.grapheme_column > 0
         {
             let cursor = self.cursor;
             self.edit_write(if self.newlines_are_crlf { b"\r\n" } else { b"\n" });
@@ -235,11 +235,11 @@ impl TextBuffer {
     }
 
     /// Returns the logical position of the first character on this line.
-    /// Return `.unichar == 0` if there are no non-whitespace characters.
+    /// Return `.grapheme_column == 0` if there are no non-whitespace characters.
     pub fn indent_end_logical_pos(&self) -> LogicalPoint {
         let cursor = self.goto_line_start(self.cursor, self.cursor.logical_pos.line);
         let (chars, _) = self.measure_indent_internal(cursor.offset.to_usize(), CoordType::MAX);
-        LogicalPoint { unichar: chars.max(0) as usize, line: cursor.logical_pos.line }
+        LogicalPoint { grapheme_column: chars.max(0) as usize, line: cursor.logical_pos.line }
     }
 
     /// Indents/unindents the current selection or line.
@@ -263,14 +263,14 @@ impl TextBuffer {
         for y in
             selection_beg.line.min(selection_end.line)..=selection_beg.line.max(selection_end.line)
         {
-            self.cursor_move_to_logical(LogicalPoint { unichar: 0, line: y });
+            self.cursor_move_to_logical(LogicalPoint { grapheme_column: 0, line: y });
 
             let line_start_offset = self.cursor.offset.to_usize();
             let (curr_chars, curr_columns) =
                 self.measure_indent_internal(line_start_offset, CoordType::MAX);
 
             self.cursor_move_to_logical(LogicalPoint {
-                unichar: curr_chars.max(0) as usize,
+                grapheme_column: curr_chars.max(0) as usize,
                 line: self.cursor.logical_pos.line,
             });
 
@@ -297,10 +297,12 @@ impl TextBuffer {
 
             // As the lines get unindented, the selection should shift with them.
             if y == selection_beg.line {
-                selection_beg.unichar = (selection_beg.unichar as isize + delta) as usize;
+                selection_beg.grapheme_column =
+                    (selection_beg.grapheme_column as isize + delta) as usize;
             }
             if y == selection_end.line {
-                selection_end.unichar = (selection_end.unichar as isize + delta) as usize;
+                selection_end.grapheme_column =
+                    (selection_end.grapheme_column as isize + delta) as usize;
             }
         }
         self.edit_end_grouping();
@@ -386,12 +388,12 @@ impl TextBuffer {
         {
             // Let's say this is `MoveLineDirection::Up`.
             // In that case, we'll cut (remove) the line above the selection here...
-            self.cursor_move_to_logical(LogicalPoint { unichar: 0, line: cut });
+            self.cursor_move_to_logical(LogicalPoint { grapheme_column: 0, line: cut });
             let line = self.extract_selection(true);
 
             // ...and paste it below the selection. This will then
             // appear to the user as if the selection was moved up.
-            self.cursor_move_to_logical(LogicalPoint { unichar: 0, line: paste });
+            self.cursor_move_to_logical(LogicalPoint { grapheme_column: 0, line: paste });
             self.edit_begin(HistoryType::Write, self.cursor);
             // The `extract_selection` call can return an empty `Vec`),
             // if the `cut` line was at the end of the file. Since we want to
@@ -412,7 +414,7 @@ impl TextBuffer {
 
         // Shift the cursor and selection together with the moved lines.
         self.cursor_move_to_logical(LogicalPoint {
-            unichar: cursor.logical_pos.unichar,
+            grapheme_column: cursor.logical_pos.grapheme_column,
             line: (cursor.logical_pos.line as isize + delta) as usize,
         });
         self.set_selection(selection.map(|mut s| {
@@ -472,8 +474,8 @@ impl TextBuffer {
         let [beg, end] = match self.selection {
             None if !line_fallback => return None,
             None => [
-                LogicalPoint { unichar: 0, line: self.cursor.logical_pos.line },
-                LogicalPoint { unichar: 0, line: self.cursor.logical_pos.line + 1 },
+                LogicalPoint { grapheme_column: 0, line: self.cursor.logical_pos.line },
+                LogicalPoint { grapheme_column: 0, line: self.cursor.logical_pos.line + 1 },
             ],
             Some(TextBufferSelection { beg, end }) => minmax(beg, end),
         };
@@ -674,7 +676,7 @@ impl TextBuffer {
                 // Now we can measure how many more visual rows this logical line spans.
                 let next_line = self.cursor_move_to_logical_internal(
                     self.cursor,
-                    LogicalPoint { unichar: 0, line: target.line + 1 },
+                    LogicalPoint { grapheme_column: 0, line: target.line + 1 },
                 );
                 let lines_before = info.line_height_in_rows;
                 let lines_after = next_line.visual_pos.row as CoordType

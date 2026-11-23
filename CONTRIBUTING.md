@@ -32,7 +32,7 @@ New UI widgets must follow the project's architecture:
 
 - Define a **pure data input struct** in `crates/ui`.
 - `crates/app` is responsible for extracting data from `DocumentView` and constructing that struct.
-- UI modules must not depend on `DocumentView`, `Workspace`, or app-layer types directly.
+- UI modules must not depend on `DocumentView`, `EditorTabSet`, or app-layer types directly.
 
 ## No Production Stubs
 

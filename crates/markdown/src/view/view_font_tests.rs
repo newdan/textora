@@ -3,7 +3,7 @@ use super::*;
 const SOURCE_TEXT: &str = "Skill agent loop";
 const LOGICAL_FONT_SIZE: f32 = 16.0;
 
-fn set_engine_font(engine: &mut PreviewEngine, font_family: &str) {
+fn set_engine_font(engine: &mut BlockViewEngine, font_family: &str) {
     engine.set_view_render_settings(ui::plugin::ViewRenderSettings {
         font_family: font_family.into(),
         font_size: LOGICAL_FONT_SIZE,

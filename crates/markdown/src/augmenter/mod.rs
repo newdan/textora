@@ -8,7 +8,7 @@
 //! 收敛到本模块，并把三条通用产物（source_newline / block_break / marker_break）
 //! 抽成 `emit_*` 原语，让所有分支共享同一份不变量断言。
 //!
-//! 不变量（对每一次成功返回的 [`ui::plugin::EditAugmentation`]）：
+//! 不变量（对每一次成功返回的 [`EditAugmentation`]）：
 //! 1. `replace_range.end <= source.len()`
 //! 2. `cursor_byte_after` 位于最终字符串的合法字节位置
 //! 3. `insert_text` 与 `replace_range` 至少有一个存在
@@ -21,7 +21,31 @@ pub(in crate::augmenter) mod paragraph_leading_spaces;
 use crate::builder::ListBullet;
 use crate::parser::{MarkdownEvent, MarkdownTag, MarkdownTagEnd};
 use crate::source_snapshot::{MarkdownSource, SourceSnapshot};
-use ui::plugin::{AugmentKind, EditAugmentation};
+
+/// Input to Markdown's source-aware edit rules.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AugmentKind {
+    Enter,
+    LineBreak,
+    Backspace,
+    Tab,
+    ShiftTab,
+    InsertText(String),
+}
+
+/// Suggested augmentation for a pending edit action.
+///
+/// Markdown rules return an augmentation to continue a list, remove paired
+/// delimiters, or perform another source-aware edit.
+#[derive(Debug, Clone, Default)]
+pub struct EditAugmentation {
+    /// Replacement delete range (overrides default single-char backspace). `None` = no change.
+    pub replace_range: Option<std::ops::Range<usize>>,
+    /// Replacement insert text (overrides default `"\n"` or `""`). `None` = use default.
+    pub insert_text: Option<String>,
+    /// Cursor byte offset after the augmented edit.
+    pub cursor_byte_after: usize,
+}
 
 pub(in crate::augmenter) const LF_SEQUENCE: &str = "\n";
 pub(in crate::augmenter) const CRLF_SEQUENCE: &str = "\r\n";

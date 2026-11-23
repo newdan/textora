@@ -122,7 +122,7 @@ impl SplitterWidget {
         if self.focused && self.input.enabled {
             ctx.list.stroke_rounded(
                 rect,
-                ctx.theme.settings_theme().focus_ring,
+                ctx.theme.application_theme().focus_ring,
                 0.0,
                 SPLITTER_FOCUS_RING_WIDTH_LOGICAL * ctx.dpi,
             );

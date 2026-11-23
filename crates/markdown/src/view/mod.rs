@@ -1,6 +1,6 @@
-//! PreviewEngine — shared cache/render/scroll/selection/search core.
+//! BlockViewEngine — shared cache/render/scroll/selection/search core.
 //!
-//! MarkdownView and NovelView each wrap a PreviewEngine, providing different
+//! MarkdownView and NovelView each wrap a BlockViewEngine, providing different
 //! doc-building strategies (markdown parse vs. txt→MarkdownDoc) and styles
 //! (from_theme vs. novel).
 
@@ -341,13 +341,13 @@ pub(in crate::view) enum EngineDirty {
     },
 }
 
-// ===== PreviewEngine =====
+// ===== BlockViewEngine =====
 
 /// Shared cache/render/scroll/selection/search engine.
 /// Used by both MarkdownView and NovelView.
 /// 共享缓存/渲染/滚动/选择/搜索引擎。泛型 S 允许 MarkdownView (MarkdownDoc)
 /// 和 NovelView (NovelStructure) 共用同一套渲染管线。
-pub struct PreviewEngine<S: BlockSource = MarkdownDoc> {
+pub struct BlockViewEngine<S: BlockSource = MarkdownDoc> {
     pub(in crate::view) lazy: Option<LazyLayout<S>>,
     pub(in crate::view) dirty: EngineDirty,
     pub(in crate::view) cached_style_hash: u64,
@@ -403,6 +403,7 @@ pub(in crate::view) fn mix_hash_value(hash: &mut u64, value: u64) {
     *hash = hash.rotate_left(5) ^ value;
 }
 
+mod editor_render;
 mod editor_view;
 mod engine;
 mod engine_caret;

@@ -65,7 +65,7 @@ use winit::window::{Window, WindowAttributes};
 use crate::prepared_tab::PreparedTab;
 use crate::reshape_worker::{ReshapeResult, ReshapeWorker};
 use crate::tab_runtime::TabRuntimeStore;
-use crate::workspace::Workspace;
+use crate::workspace::EditorTabSet;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum ClipboardCommand {
@@ -239,7 +239,7 @@ impl EditorRuntime {
         self.model_session.append_prepared_tab(prepared, suggested_file_name)
     }
 
-    pub fn replace_model_state(&mut self, workspace: Workspace, runtimes: TabRuntimeStore) {
+    pub fn replace_model_state(&mut self, workspace: EditorTabSet, runtimes: TabRuntimeStore) {
         self.model_session.replace_parts(workspace, runtimes);
     }
 

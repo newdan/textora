@@ -1,8 +1,8 @@
 //! Preserve literal paragraph whitespace without enabling Markdown code indentation.
 
+use crate::augmenter::EditAugmentation;
 use crate::builder::{BlockKind, EditableParagraphMap};
 use crate::source_snapshot::MarkdownSource;
-use ui::plugin::EditAugmentation;
 
 const LITERAL_PARAGRAPH_SPACE: char = '\u{a0}';
 

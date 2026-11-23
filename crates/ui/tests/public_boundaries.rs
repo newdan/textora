@@ -115,6 +115,7 @@ fn ui_has_no_app_types_or_production_filesystem_access() {
     for forbidden in [
         "DocumentView",
         "Workspace",
+        "EditorTabSet",
         "AppAction",
         "AppCommand",
         "textora_sync",

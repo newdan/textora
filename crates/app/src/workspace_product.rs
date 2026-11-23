@@ -6,13 +6,13 @@ use appkit_core::document::DocumentModel;
 #[cfg(test)]
 use appkit_core::file_history::FileHistoryEntry;
 #[cfg(test)]
-use appkit_shell::workspace::Workspace;
+use appkit_shell::workspace::EditorTabSet;
 
 #[cfg(test)]
 const RECOVERY_TITLE_PREFIX: &str = "恢复：";
 
 #[cfg(test)]
-pub(crate) fn hydrate_active_stub(workspace: &mut Workspace) -> bool {
+pub(crate) fn hydrate_active_stub(workspace: &mut EditorTabSet) -> bool {
     let active_index = workspace.active_index();
     let Some(document) = workspace.entry_mut(active_index) else {
         return false;
@@ -39,7 +39,7 @@ pub(crate) fn hydrate_stub_document(document: &mut DocumentModel) -> bool {
 
 #[cfg(test)]
 pub(crate) fn detach_deleted_document(
-    workspace: &mut Workspace,
+    workspace: &mut EditorTabSet,
     index: usize,
     original_path: &Path,
 ) {
@@ -60,7 +60,7 @@ pub(crate) fn detach_deleted_document(
 
 #[cfg(test)]
 pub(crate) fn history_entry(
-    workspace: &Workspace,
+    workspace: &EditorTabSet,
     index: usize,
     scroll_anchor: ui::viewport::ScrollAnchor,
 ) -> Option<FileHistoryEntry> {
@@ -82,7 +82,7 @@ pub(crate) fn history_entry(
 
 #[cfg(test)]
 fn copy_tab_path_with<E>(
-    workspace: &Workspace,
+    workspace: &EditorTabSet,
     index: usize,
     mut copy_text: impl FnMut(String) -> Result<(), E>,
 ) {
@@ -110,10 +110,10 @@ mod tests {
     use crate::document_fixture::DocumentFixture;
     use crate::plugins::editor::EditorPlugin;
     use appkit_shell::tab_runtime::{TabRuntime, TabRuntimeStore};
-    use appkit_shell::workspace::Workspace;
+    use appkit_shell::workspace::EditorTabSet;
 
     fn append_document(
-        workspace: &mut Workspace,
+        workspace: &mut EditorTabSet,
         runtimes: &mut TabRuntimeStore,
         document: DocumentFixture,
     ) {

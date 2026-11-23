@@ -104,12 +104,12 @@ mod tests {
         layout_new_document_widget(&mut widget, &theme);
         let stable = widget.current_layout().expect("sidebar layout must exist").clone();
         for visibility in [Visibility::HoverPeek, Visibility::HoverPeekFadingOut] {
-            let mut persistent = widget.steal_persistent();
-            persistent.visibility = visibility;
+            let mut persistent = widget.take_interaction();
+            persistent.hover.visibility = visibility;
             let animation_start = std::time::Instant::now();
-            persistent.hover_peek_start = Some(animation_start);
-            persistent.hover_peek_leave_start = Some(animation_start);
-            widget.inject_persistent(&persistent);
+            persistent.hover.hover_peek_start = Some(animation_start);
+            persistent.hover.hover_peek_leave_start = Some(animation_start);
+            *widget.interaction_mut() = persistent;
             layout_new_document_widget(&mut widget, &theme);
             let animated = widget.current_layout().expect("animated sidebar layout must exist");
             assert_eq!(animated.new_btn_rect, stable.new_btn_rect);
@@ -1486,10 +1486,10 @@ mod tests {
     fn hover_animation_preserves_layout_width_and_transient_visibility() {
         let mut widget = new_document_widget();
         widget.screen_w = 280.0;
-        let mut persistent = crate::widgets::sidebar::SidebarPersistent::new(&widget.cfg);
-        persistent.visibility = Visibility::HoverPeek;
-        persistent.hover_peek_start = Some(std::time::Instant::now());
-        widget.inject_persistent(&persistent);
+        let mut persistent = crate::widgets::sidebar::SidebarInteraction::new(&widget.cfg);
+        persistent.hover.visibility = Visibility::HoverPeek;
+        persistent.hover.hover_peek_start = Some(std::time::Instant::now());
+        *widget.interaction_mut() = persistent;
         layout_new_document_widget(&mut widget, &test_theme());
         let layout = widget.current_layout().expect("hovering sidebar has a layout");
         assert_eq!(layout.bg_rect.w, widget.cfg.width);

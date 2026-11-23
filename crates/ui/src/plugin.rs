@@ -51,32 +51,6 @@ pub enum EditHitTarget {
     ClearFocus,
 }
 
-/// Edit-augmentation kind — which key the host is about to process.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum AugmentKind {
-    Enter,
-    LineBreak,
-    Backspace,
-    Tab,
-    ShiftTab,
-    InsertText(String),
-}
-
-/// Suggested augmentation for a pending edit action.
-///
-/// When a WYSIWYG plugin wants to override default edit behavior (e.g. continue
-/// a list on Enter, delete a paired delimiter on Backspace), it returns this
-/// struct when planning the edit.
-#[derive(Debug, Clone, Default)]
-pub struct EditAugmentation {
-    /// Replacement delete range (overrides default single-char backspace). `None` = no change.
-    pub replace_range: Option<std::ops::Range<usize>>,
-    /// Replacement insert text (overrides default `"\n"` or `""`). `None` = use default.
-    pub insert_text: Option<String>,
-    /// Cursor byte offset after the augmented edit.
-    pub cursor_byte_after: usize,
-}
-
 /// Maps raw keys to declarative editing intents without mutating the document.
 pub trait KeyIntentMapper {
     fn map_key(
@@ -1244,14 +1218,6 @@ mod tests {
 
             assert_eq!(plugin.rendered_bounds, Some(viewport_bounds()));
         }
-    }
-
-    #[test]
-    fn edit_augmentation_default_is_empty() {
-        let aug = EditAugmentation::default();
-        assert!(aug.replace_range.is_none());
-        assert!(aug.insert_text.is_none());
-        assert_eq!(aug.cursor_byte_after, 0);
     }
 
     #[test]

@@ -85,7 +85,7 @@ impl NotoraShell {
         frame: &mut EditorFrame,
         layout: ShellLayout,
         model: &NotoraRenderModel,
-        document_search: Option<&ui::document_search_bar::DocumentSearchBarWidget>,
+        document_search: Option<&ui::search_bar::SearchBarWidget>,
     ) -> Result<(), RenderError> {
         self.update_model(model);
         let dpi = layout.dpi;

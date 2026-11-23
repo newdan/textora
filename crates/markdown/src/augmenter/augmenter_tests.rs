@@ -3824,3 +3824,11 @@ fn stateless_blockquote_backspace_merges_same_depth_paragraphs_without_split_his
     let (code_edited, _) = apply_backspace_with_default(quoted_code, right_cursor);
     assert!(code_edited.contains("```"), "quoted code block fence must survive: {code_edited:?}");
 }
+
+#[test]
+fn edit_augmentation_default_is_empty() {
+    let aug = EditAugmentation::default();
+    assert!(aug.replace_range.is_none());
+    assert!(aug.insert_text.is_none());
+    assert_eq!(aug.cursor_byte_after, 0);
+}

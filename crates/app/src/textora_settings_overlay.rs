@@ -430,7 +430,7 @@ impl Widget for TextoraSettingsOverlay {
 }
 
 fn category_button_style(settings: SettingsTheme) -> ButtonStyle {
-    ButtonStyle::category(settings)
+    ButtonStyle::category(settings.application)
 }
 
 fn inset_rect(rect: Rect, inset: f32) -> Rect {

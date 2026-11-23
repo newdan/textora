@@ -2,7 +2,7 @@
 
 use super::*;
 
-impl PreviewEngine<MarkdownDoc> {
+impl BlockViewEngine<MarkdownDoc> {
     pub(super) fn prepare_current_source_layout(&mut self, source: &MarkdownSource<'_>) {
         let Some(style) = self.cached_query_style.clone() else { return };
         let document_view = textora_core::document::StringDocView::new(source);
@@ -27,7 +27,7 @@ impl PreviewEngine<MarkdownDoc> {
     }
 }
 
-impl<S: BlockSource> PreviewEngine<S> {
+impl<S: BlockSource> BlockViewEngine<S> {
     pub(super) fn cursor_affinity_for_byte(&self, byte: usize) -> CursorAffinity {
         if self.edit_ctx.as_ref().is_some_and(|context| context.cursor_byte == byte) {
             self.cursor_affinity

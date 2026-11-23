@@ -4,7 +4,7 @@ use std::time::Instant;
 
 use appkit_core::document::DocumentModel;
 use appkit_core::line_index::LineIndex;
-use textora_core::types::UniCharOffset;
+use textora_core::types::GraphemeOffset;
 use ui::render_geom::AdvanceCacheEntry;
 use ui::settings::UiMetrics;
 use winit::event::ElementState;
@@ -23,18 +23,19 @@ pub(crate) fn hit_test_with_sub_line_offset(
     content_top: f32,
     sub_line_offset: f32,
     line_index: &LineIndex,
-) -> Option<(UniCharOffset, usize, usize)> {
+) -> Option<(GraphemeOffset, usize, usize)> {
     let (vis_line, entry) =
         hit_test_visual_row(py, content_top, sub_line_offset, metrics.line_height, advance_cache)?;
     let line_grapheme = hit_test_row_grapheme(px, left_margin, entry);
-    let doc_unichar = line_index.unichar_of_line(entry.doc_line) + line_grapheme;
-    Some((doc_unichar, entry.doc_line, vis_line))
+    let document_grapheme_offset =
+        line_index.grapheme_offset_of_line(entry.doc_line) + line_grapheme;
+    Some((document_grapheme_offset, entry.doc_line, vis_line))
 }
 
 pub(crate) fn handle_cursor_moved(
     mouse: &mut MouseState,
     dv: &mut DocumentModel,
-    hit: Option<(UniCharOffset, usize, usize)>,
+    hit: Option<(GraphemeOffset, usize, usize)>,
 ) -> bool {
     if !mouse.captures_pointer() {
         return false;
@@ -46,11 +47,11 @@ pub(crate) fn handle_cursor_moved(
         if let Some(anchor_byte) = mouse.down_byte_offset.take() {
             dv.cursor_mut().selection_anchor = Some(anchor_byte);
         }
-        dv.set_cursor_unichar_synced_on_line(offset, doc_line);
+        dv.set_cursor_grapheme_offset_synced_on_line(offset, doc_line);
         return true;
     }
 
-    let byte_offset = dv.unichar_to_byte_offset(offset);
+    let byte_offset = dv.grapheme_offset_to_byte(offset);
     let (selection_start, selection_end) = if mouse.click_count >= 3 {
         let range = dv.source_line_selection_range(doc_line).unwrap_or_else(|| 0..dv.buffer_len());
         (range.start, range.end)
@@ -79,7 +80,7 @@ pub(crate) fn handle_mouse_input_with_cursor_state(
     dv: &mut DocumentModel,
     cursor_render_state: &mut CursorRenderState,
     modifiers: ModifiersState,
-    hit: Option<(UniCharOffset, usize, usize)>,
+    hit: Option<(GraphemeOffset, usize, usize)>,
 ) -> bool {
     if state.is_pressed() {
         mouse.is_down = true;
@@ -103,7 +104,7 @@ pub(crate) fn handle_mouse_input_with_cursor_state(
                 mouse.down_byte_offset = Some(range.start);
             } else if mouse.click_count == 2 {
                 // Double-click: word select
-                let byte_offset = dv.unichar_to_byte_offset(offset);
+                let byte_offset = dv.grapheme_offset_to_byte(offset);
                 let (start, end) = dv.word_select_at(byte_offset);
                 dv.cursor_mut().selection_anchor = Some(start);
                 dv.set_cursor_offset_synced(end);
@@ -111,13 +112,13 @@ pub(crate) fn handle_mouse_input_with_cursor_state(
             } else if shift {
                 // Shift+click: extend selection
                 dv.ensure_selection_active();
-                dv.set_cursor_unichar_synced_on_line(offset, doc_line);
+                dv.set_cursor_grapheme_offset_synced_on_line(offset, doc_line);
                 cursor_render_state.click_hint = Some((offset, vis_line));
             } else {
                 // Single click: set cursor, clear any existing selection
                 // Record down_byte_offset for potential drag-to-select
                 dv.cursor_mut().selection_anchor = None;
-                dv.cursor_move_to_unichar_on_line(offset, doc_line);
+                dv.cursor_move_to_grapheme_offset_on_line(offset, doc_line);
                 mouse.down_byte_offset = Some(dv.cursor().offset.to_usize());
                 cursor_render_state.click_hint = Some((offset, vis_line));
             }
@@ -151,7 +152,7 @@ impl App {
         state: ElementState,
         position: (f32, f32),
         modifiers: ModifiersState,
-        hit: Option<(UniCharOffset, usize, usize)>,
+        hit: Option<(GraphemeOffset, usize, usize)>,
         line_height: f32,
     ) -> bool {
         let Some(mut tab) = self
@@ -182,7 +183,7 @@ impl App {
     /// Updates the selection of a captured source pointer.
     pub(crate) fn move_source_pointer_selection(
         &mut self,
-        hit: Option<(UniCharOffset, usize, usize)>,
+        hit: Option<(GraphemeOffset, usize, usize)>,
     ) -> bool {
         let Some(mut tab) = self
             .editor_runtime

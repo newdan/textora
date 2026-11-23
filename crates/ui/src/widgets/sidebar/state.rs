@@ -1,10 +1,12 @@
 //! SidebarState — main state machine for sidebar.
 
-use std::time::{Duration, Instant};
+#[cfg(test)]
+use std::time::Duration;
+use std::time::Instant;
 
 use super::layout::*;
 use super::menu::build_new_document_menu;
-use super::persistent::SidebarPersistent;
+use super::persistent::SidebarInteraction;
 use super::types::*;
 use crate::constants;
 use crate::core::{PaintCtx, Rect};
@@ -23,35 +25,28 @@ const COMPACT_OPEN_BUTTON_WIDTH_LOGICAL: f32 = 32.0;
 
 #[derive(Default)]
 pub struct SidebarState {
-    visibility: Visibility,
+    pub(super) interaction: SidebarInteraction,
     layout: Option<SidebarLayout>,
     open_menu: Option<PopupMenu>,
     menu_hovered_index: Option<usize>,
     hovered_index: Option<usize>,
-    list_scroll_offset: f32,
-    hover_enter_at: Option<Instant>,
-    hover_leave_at: Option<Instant>,
-    hover_peek_start: Option<Instant>,
-    hover_peek_leave_start: Option<Instant>,
     pub(crate) hovered_button: SidebarHoverButton,
-    suppress_hover_enter: bool,
 }
 
 impl SidebarState {
     pub fn new(cfg: &SidebarConfig) -> Self {
-        let visibility = if cfg.pinned { Visibility::Pinned } else { Visibility::Hidden };
-        Self { visibility, ..Self::default() }
+        Self { interaction: SidebarInteraction::new(cfg), ..Self::default() }
     }
 
     pub fn visibility(&self) -> Visibility {
-        self.visibility
+        self.interaction.hover.visibility
     }
     pub fn set_visibility(&mut self, v: Visibility) {
-        self.visibility = v;
+        self.interaction.hover.visibility = v;
         // 离开 hover 态时清理动画状态
         if !matches!(v, Visibility::HoverPeek | Visibility::HoverPeekFadingOut) {
-            self.hover_peek_start = None;
-            self.hover_peek_leave_start = None;
+            self.interaction.hover.hover_peek_start = None;
+            self.interaction.hover.hover_peek_leave_start = None;
         }
     }
     pub fn current_layout(&self) -> Option<&SidebarLayout> {
@@ -82,11 +77,11 @@ impl SidebarState {
         self.hovered_index
     }
     pub fn hover_peek_start(&self) -> Option<Instant> {
-        self.hover_peek_start
+        self.interaction.hover.hover_peek_start
     }
 
     pub fn hover_peek_leave_start(&self) -> Option<Instant> {
-        self.hover_peek_leave_start
+        self.interaction.hover.hover_peek_leave_start
     }
 
     pub fn on_scroll(
@@ -99,54 +94,20 @@ impl SidebarState {
         let row_h = ROW_H * dpi;
         let visible_h =
             self.layout.as_ref().map(|l| l.list_clip.h).filter(|&h| h > 0.0).unwrap_or(400.0 * dpi);
-        self.list_scroll_offset += delta_px;
+        self.interaction.list_scroll_offset += delta_px;
         self.clamp_scroll(total_tabs, row_h, visible_h);
     }
     pub fn set_hovered_index(&mut self, idx: Option<usize>) {
         self.hovered_index = idx;
     }
     pub fn list_scroll_offset(&self) -> f32 {
-        self.list_scroll_offset
+        self.interaction.list_scroll_offset
     }
-    pub fn to_persistent(&self) -> SidebarPersistent {
-        SidebarPersistent {
-            visibility: self.visibility,
-            hovered_index: self.hovered_index,
-            list_scroll_offset: self.list_scroll_offset,
-            open_menu: self.open_menu.clone(),
-            hover_enter_at: self.hover_enter_at,
-            hover_leave_at: self.hover_leave_at,
-            hover_peek_start: self.hover_peek_start,
-            hover_peek_leave_start: self.hover_peek_leave_start,
-            hovered_button: self.hovered_button,
-            suppress_hover_enter: self.suppress_hover_enter,
-            settings_btn_rect: self
-                .layout
-                .as_ref()
-                .map(|l| l.settings_btn_rect)
-                .unwrap_or(crate::core::Rect::ZERO),
-        }
-    }
-
-    pub fn restore_from_persistent(&mut self, p: &SidebarPersistent) {
-        // Restore visibility from persistent (may differ from cfg.pinned during hover transitions)
-        self.visibility = p.visibility;
-        self.hovered_index = p.hovered_index;
-        self.list_scroll_offset = p.list_scroll_offset;
-        self.open_menu = p.open_menu.clone();
-        self.hover_enter_at = p.hover_enter_at;
-        self.hover_leave_at = p.hover_leave_at;
-        self.hover_peek_start = p.hover_peek_start;
-        self.hover_peek_leave_start = p.hover_peek_leave_start;
-        self.suppress_hover_enter = p.suppress_hover_enter;
-        // hovered_button 是帧内 transient 状态，由 on_mouse_move 驱动；
-        // 不从 persistent 恢复，否则每帧 inject 后会覆盖掉事件分发刚设好的值。
-    }
-
     /// Clamp scroll offset to valid range.
     pub fn clamp_scroll(&mut self, total_items: usize, row_h: f32, visible_h: f32) {
         let max_scroll = ((total_items as f32) * row_h - visible_h).max(0.0);
-        self.list_scroll_offset = self.list_scroll_offset.clamp(0.0, max_scroll);
+        self.interaction.list_scroll_offset =
+            self.interaction.list_scroll_offset.clamp(0.0, max_scroll);
     }
 
     pub fn editor_left_offset(
@@ -154,14 +115,11 @@ impl SidebarState {
         cfg: &SidebarConfig,
         _metrics: &crate::settings::UiMetrics,
     ) -> f32 {
-        match self.visibility {
-            Visibility::Pinned => cfg.width,
-            _ => 0.0,
-        }
+        self.interaction.editor_left_offset(cfg)
     }
 
     pub fn is_visible(&self) -> bool {
-        !matches!(self.visibility, Visibility::Hidden)
+        !matches!(self.interaction.hover.visibility, Visibility::Hidden)
     }
 }
 
@@ -299,8 +257,12 @@ impl SidebarState {
         cfg: &SidebarConfig,
         metrics: &crate::settings::UiMetrics,
     ) {
-        self.visibility = cfg.visibility_for_width(self.visibility, input.screen_w, metrics.dpi);
-        if matches!(self.visibility, Visibility::Hidden) {
+        self.interaction.hover.visibility = cfg.visibility_for_width(
+            self.interaction.hover.visibility,
+            input.screen_w,
+            metrics.dpi,
+        );
+        if matches!(self.interaction.hover.visibility, Visibility::Hidden) {
             // Produce minimal layout with only hamburger button overlay
             let dpi = metrics.dpi;
             let btn_size = SIDEBAR_ACTION_SIZE_LOGICAL * dpi;
@@ -468,51 +430,9 @@ impl SidebarState {
             self.layout.as_ref().map(|l| l.menu_btn_rect.contains(px, py)).unwrap_or(false);
         let in_hot_zone = in_left_hot || on_hamburger;
 
-        match self.visibility {
-            Visibility::Hidden => {
-                if in_hot_zone {
-                    if self.suppress_hover_enter {
-                        // Suppress: visibility was just set to Hidden programmatically
-                        // (e.g. TogglePin). Wait for mouse to leave hot zone first.
-                    } else if self.hover_enter_at.is_none() {
-                        self.hover_enter_at = Some(Instant::now());
-                    }
-                } else {
-                    self.hover_enter_at = None;
-                    self.suppress_hover_enter = false;
-                }
-            }
-            Visibility::HoverPeek => {
-                let sidebar_w = cfg.width;
-                let in_sidebar = px >= 0.0 && px <= sidebar_w && px < screen_w;
-                if !in_sidebar {
-                    self.hovered_button = SidebarHoverButton::None;
-                    if self.hover_leave_at.is_none() {
-                        self.hover_leave_at = Some(Instant::now());
-                    }
-                } else {
-                    self.hover_leave_at = None;
-                }
-            }
-            Visibility::HoverPeekFadingOut => {
-                let sidebar_w = cfg.width;
-                let in_sidebar = px >= 0.0 && px <= sidebar_w && px < screen_w;
-                if in_sidebar {
-                    // 鼠标回到 sidebar：取消 fade out，回到 HoverPeek
-                    self.visibility = Visibility::HoverPeek;
-                    self.hover_peek_leave_start = None;
-                    self.hover_leave_at = None;
-                } else {
-                    self.hovered_button = SidebarHoverButton::None;
-                }
-            }
-            Visibility::Pinned => {
-                let sidebar_w = cfg.width;
-                let in_sidebar = px >= 0.0 && px <= sidebar_w && px < screen_w;
-                if !in_sidebar {
-                    self.hovered_button = SidebarHoverButton::None;
-                }
-            }
+        let in_sidebar = px >= 0.0 && px <= cfg.width && px < screen_w;
+        if self.interaction.hover.pointer_moved(in_hot_zone, in_sidebar, Instant::now()) {
+            self.hovered_button = SidebarHoverButton::None;
         }
         self.hovered_button != prev
     }
@@ -522,74 +442,33 @@ impl SidebarState {
     pub fn tick(
         &mut self,
         now: Instant,
-        cfg: &SidebarConfig,
+        _cfg: &SidebarConfig,
         _metrics: &crate::settings::UiMetrics,
     ) -> (bool, bool) {
-        match self.visibility {
-            Visibility::Hidden => {
-                if self.hover_enter_at.is_some() {
-                    self.visibility = Visibility::HoverPeek;
-                    self.hover_enter_at = None;
-                    self.hover_peek_start = Some(now);
-                    let _ = cfg;
-                    return (true, true);
-                }
-            }
-            Visibility::HoverPeek => {
-                let animating = if let Some(start) = self.hover_peek_start {
-                    let elapsed = now.duration_since(start);
-                    elapsed < Duration::from_millis(150)
-                } else {
-                    false
-                };
-                if self.hover_leave_at.is_some() {
-                    self.visibility = Visibility::HoverPeekFadingOut;
-                    self.hover_leave_at = None;
-                    self.hover_peek_leave_start = Some(now);
-                    return (true, true);
-                }
-                if animating {
-                    return (false, true);
-                }
-            }
-            Visibility::HoverPeekFadingOut => {
-                if let Some(leave_start) = self.hover_peek_leave_start {
-                    let elapsed = now.duration_since(leave_start);
-                    if elapsed >= Duration::from_millis(150) {
-                        self.visibility = Visibility::Hidden;
-                        self.hover_peek_leave_start = None;
-                        self.hover_peek_start = None;
-                        return (true, false);
-                    }
-                }
-                return (false, true);
-            }
-            Visibility::Pinned => {}
-        }
-        (false, false)
+        self.interaction.hover.tick(now)
     }
     pub fn on_key(&mut self, key: SidebarKey, cfg: &mut SidebarConfig) -> Option<SidebarAction> {
         match key {
             SidebarKey::TogglePin => {
-                if self.visibility == Visibility::Pinned {
-                    self.visibility = Visibility::Hidden;
+                if self.interaction.hover.visibility == Visibility::Pinned {
+                    self.interaction.hover.visibility = Visibility::Hidden;
                     cfg.pinned = false;
-                    self.suppress_hover_enter = true;
+                    self.interaction.hover.suppress_hover_enter = true;
                 } else {
-                    self.visibility = Visibility::Pinned;
+                    self.interaction.hover.visibility = Visibility::Pinned;
                     cfg.pinned = true;
-                    self.suppress_hover_enter = false;
+                    self.interaction.hover.suppress_hover_enter = false;
                 }
                 Some(SidebarAction::TogglePin)
             }
             SidebarKey::Escape => {
-                if self.visibility == Visibility::HoverPeek
-                    || self.visibility == Visibility::HoverPeekFadingOut
+                if self.interaction.hover.visibility == Visibility::HoverPeek
+                    || self.interaction.hover.visibility == Visibility::HoverPeekFadingOut
                 {
                     self.set_visibility(Visibility::Hidden);
-                    self.hover_leave_at = None;
-                    self.hover_peek_start = None;
-                    self.hover_peek_leave_start = None;
+                    self.interaction.hover.hover_leave_at = None;
+                    self.interaction.hover.hover_peek_start = None;
+                    self.interaction.hover.hover_peek_leave_start = None;
                     Some(SidebarAction::PersistConfig)
                 } else {
                     None
@@ -678,7 +557,7 @@ impl SidebarState {
         let alpha = ctx.global_alpha;
 
         // Hidden (auto-hide) mode: only draw hamburger icon, no panel background
-        if matches!(self.visibility, Visibility::Hidden) {
+        if matches!(self.interaction.hover.visibility, Visibility::Hidden) {
             self.paint_hamburger(ctx, alpha, true);
             return;
         }
@@ -795,7 +674,7 @@ impl SidebarState {
             return Some(SidebarAction::TogglePin);
         }
         // When hidden, only hamburger button is active
-        if matches!(self.visibility, Visibility::Hidden) {
+        if matches!(self.interaction.hover.visibility, Visibility::Hidden) {
             return None;
         }
         if layout.new_btn_rect.contains(px, py) {
@@ -819,7 +698,6 @@ impl SidebarState {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::widgets::sidebar::persistent::SidebarPersistent;
 
     fn laid_out_sidebar_state(dpi: f32) -> (SidebarState, crate::settings::UiMetrics) {
         let mut cfg = SidebarConfig::new_default(dpi);
@@ -1241,7 +1119,7 @@ mod tests {
     fn sidebar_scroll_clamps_to_zero() {
         let cfg = SidebarConfig::new_default(1.0);
         let mut s = SidebarState::new(&cfg);
-        s.list_scroll_offset = -50.0;
+        s.interaction.list_scroll_offset = -50.0;
         let dpi = 1.0;
         s.clamp_scroll(5, 24.0 * dpi, 200.0 * dpi);
         assert_eq!(s.list_scroll_offset(), 0.0);
@@ -1254,7 +1132,7 @@ mod tests {
         let dpi = 1.0;
         let row_h = 24.0 * dpi;
         // 10 items at 24px row_h in 200px visible area: max = 10*24 - 200 = 40
-        s.list_scroll_offset = 999.0;
+        s.interaction.list_scroll_offset = 999.0;
         s.clamp_scroll(10, row_h, 200.0 * dpi);
         let expected_max = (10.0 * row_h - 200.0 * dpi).max(0.0);
         assert_eq!(s.list_scroll_offset(), expected_max);
@@ -1837,89 +1715,66 @@ mod tests {
         assert_eq!(menu.items[11].label, "打开Settings");
     }
 
-    // ── SidebarPersistent 测试 ──
+    // ── SidebarInteraction 测试 ──
 
     #[test]
     fn persistent_new_pinned() {
         let cfg = SidebarConfig { pinned: true, width: 220.0 };
-        let p = SidebarPersistent::new(&cfg);
-        assert_eq!(p.visibility, Visibility::Pinned);
-        assert!(p.hovered_index.is_none());
+        let p = SidebarInteraction::new(&cfg);
+        assert_eq!(p.hover.visibility, Visibility::Pinned);
         assert_eq!(p.list_scroll_offset, 0.0);
-        assert!(p.open_menu.is_none());
-        assert!(!p.suppress_hover_enter);
+        assert!(!p.hover.suppress_hover_enter);
     }
 
     #[test]
     fn persistent_new_not_pinned() {
         let cfg = SidebarConfig { pinned: false, width: 220.0 };
-        let p = SidebarPersistent::new(&cfg);
-        assert_eq!(p.visibility, Visibility::Hidden);
+        let p = SidebarInteraction::new(&cfg);
+        assert_eq!(p.hover.visibility, Visibility::Hidden);
     }
 
     #[test]
     fn persistent_current_width_hidden() {
         let cfg = SidebarConfig { pinned: false, width: 220.0 };
-        let p = SidebarPersistent::new(&cfg);
+        let p = SidebarInteraction::new(&cfg);
         assert_eq!(p.current_width(&cfg), 0.0);
     }
 
     #[test]
     fn persistent_current_width_pinned() {
         let cfg = SidebarConfig { pinned: true, width: 220.0 };
-        let p = SidebarPersistent::new(&cfg);
+        let p = SidebarInteraction::new(&cfg);
         assert_eq!(p.current_width(&cfg), 220.0);
     }
 
     #[test]
     fn persistent_current_width_hover_peek() {
         let cfg = SidebarConfig { pinned: false, width: 220.0 };
-        let mut p = SidebarPersistent::new(&cfg);
-        p.visibility = Visibility::HoverPeek;
+        let mut p = SidebarInteraction::new(&cfg);
+        p.hover.visibility = Visibility::HoverPeek;
         assert_eq!(p.current_width(&cfg), 220.0);
     }
 
     #[test]
     fn persistent_editor_left_offset_pinned() {
         let cfg = SidebarConfig { pinned: true, width: 220.0 };
-        let p = SidebarPersistent::new(&cfg);
+        let p = SidebarInteraction::new(&cfg);
         assert_eq!(p.editor_left_offset(&cfg), 220.0);
     }
 
     #[test]
     fn persistent_editor_left_offset_hidden() {
         let cfg = SidebarConfig { pinned: false, width: 220.0 };
-        let p = SidebarPersistent::new(&cfg);
+        let p = SidebarInteraction::new(&cfg);
         assert_eq!(p.editor_left_offset(&cfg), 0.0);
     }
 
     #[test]
     fn persistent_editor_left_offset_hover_peek() {
         let cfg = SidebarConfig { pinned: false, width: 220.0 };
-        let mut p = SidebarPersistent::new(&cfg);
-        p.visibility = Visibility::HoverPeek;
+        let mut p = SidebarInteraction::new(&cfg);
+        p.hover.visibility = Visibility::HoverPeek;
         assert_eq!(p.editor_left_offset(&cfg), 0.0);
-    }
-
-    #[test]
-    fn state_to_restore_from_persistent_roundtrip() {
-        let cfg = SidebarConfig { pinned: true, width: 220.0 };
-        let _t0 = Instant::now();
-        let mut s = SidebarState::new(&cfg);
-        s.list_scroll_offset = 42.0;
-        s.hovered_index = Some(3);
-
-        let p = s.to_persistent();
-        assert_eq!(p.visibility, Visibility::Pinned);
-        assert_eq!(p.hovered_index, Some(3));
-        assert_eq!(p.list_scroll_offset, 42.0);
-
-        // Restore into a fresh state
-        let mut s2 = SidebarState::new(&cfg);
-        s2.restore_from_persistent(&p);
-        assert_eq!(s2.visibility, Visibility::Pinned);
-        assert_eq!(s2.hovered_index, Some(3));
-        assert_eq!(s2.list_scroll_offset, 42.0);
     }
 
     #[test]

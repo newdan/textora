@@ -56,20 +56,20 @@ pub fn byte_to_x(
 
 /// Map a grapheme index (vl-local) to its pixel x position.
 ///
-/// `target_unichar`: 0-based grapheme index within this visual line.
+/// `target_grapheme_column`: 0-based grapheme index within this visual line.
 /// `clusters`: sorted `(cluster_end_byte_vl_local, pixel_x, grapheme_idx)` tuples.
 /// `left_margin`: starting x pixel where text content begins.
 /// `trailing`: if true, return the *end* x of the target grapheme;
 ///             if false, return the *start* x.
-pub fn unichar_to_x(
-    target_unichar: u32,
+pub fn grapheme_column_to_x(
+    target_grapheme_column: u32,
     clusters: &[(usize, f32, u32)],
     left_margin: f32,
     trailing: bool,
 ) -> f32 {
     let mut prev_x = left_margin;
     for &(_, c_x, g_idx) in clusters {
-        if g_idx >= target_unichar {
+        if g_idx >= target_grapheme_column {
             return if trailing { c_x } else { prev_x };
         }
         prev_x = c_x;
@@ -83,7 +83,11 @@ pub fn unichar_to_x(
 /// `clusters`: sorted `(cluster_end_byte_vl_local, pixel_x, grapheme_idx)` tuples.
 /// Returns the `grapheme_idx` of the closest cluster. Returns 0 if clusters is
 /// empty or `target_x` is before the first cluster.
-pub fn x_to_unichar(target_x: f32, clusters: &[(usize, f32, u32)], left_margin: f32) -> u32 {
+pub fn x_to_grapheme_column(
+    target_x: f32,
+    clusters: &[(usize, f32, u32)],
+    left_margin: f32,
+) -> u32 {
     if clusters.is_empty() {
         return 0;
     }
@@ -315,97 +319,97 @@ mod tests {
         assert!((x - 0.0).abs() < 0.01);
     }
 
-    // ── unichar_to_x tests ──
+    // ── grapheme_column_to_x tests ──
 
     #[test]
-    fn unichar_to_x_ascii_trailing() {
+    fn grapheme_column_to_x_ascii_trailing() {
         let clusters = vec![(1usize, 10.0f32, 0u32), (2, 20.0, 1), (3, 30.0, 2)];
         let lm = 0.0;
         // trailing=true: end of grapheme N = c_x of cluster with g_idx >= N
-        assert!((unichar_to_x(0, &clusters, lm, true) - 10.0).abs() < 0.01);
-        assert!((unichar_to_x(1, &clusters, lm, true) - 20.0).abs() < 0.01);
-        assert!((unichar_to_x(2, &clusters, lm, true) - 30.0).abs() < 0.01);
+        assert!((grapheme_column_to_x(0, &clusters, lm, true) - 10.0).abs() < 0.01);
+        assert!((grapheme_column_to_x(1, &clusters, lm, true) - 20.0).abs() < 0.01);
+        assert!((grapheme_column_to_x(2, &clusters, lm, true) - 30.0).abs() < 0.01);
     }
 
     #[test]
-    fn unichar_to_x_ascii_leading() {
+    fn grapheme_column_to_x_ascii_leading() {
         let clusters = vec![(1usize, 10.0f32, 0u32), (2, 20.0, 1), (3, 30.0, 2)];
         let lm = 0.0;
         // trailing=false: start of grapheme N = prev_x of cluster with g_idx >= N
-        assert!((unichar_to_x(0, &clusters, lm, false) - 0.0).abs() < 0.01);
-        assert!((unichar_to_x(1, &clusters, lm, false) - 10.0).abs() < 0.01);
-        assert!((unichar_to_x(2, &clusters, lm, false) - 20.0).abs() < 0.01);
+        assert!((grapheme_column_to_x(0, &clusters, lm, false) - 0.0).abs() < 0.01);
+        assert!((grapheme_column_to_x(1, &clusters, lm, false) - 10.0).abs() < 0.01);
+        assert!((grapheme_column_to_x(2, &clusters, lm, false) - 20.0).abs() < 0.01);
     }
 
     #[test]
-    fn unichar_to_x_past_end() {
+    fn grapheme_column_to_x_past_end() {
         let clusters = vec![(1usize, 10.0f32, 0u32), (2, 20.0, 1)];
         let lm = 0.0;
-        assert!((unichar_to_x(100, &clusters, lm, true) - 20.0).abs() < 0.01);
-        assert!((unichar_to_x(100, &clusters, lm, false) - 20.0).abs() < 0.01);
+        assert!((grapheme_column_to_x(100, &clusters, lm, true) - 20.0).abs() < 0.01);
+        assert!((grapheme_column_to_x(100, &clusters, lm, false) - 20.0).abs() < 0.01);
     }
 
     #[test]
-    fn unichar_to_x_empty() {
+    fn grapheme_column_to_x_empty() {
         let clusters: Vec<(usize, f32, u32)> = vec![];
-        assert!((unichar_to_x(0, &clusters, 42.0, false) - 42.0).abs() < 0.01);
-        assert!((unichar_to_x(0, &clusters, 42.0, true) - 42.0).abs() < 0.01);
+        assert!((grapheme_column_to_x(0, &clusters, 42.0, false) - 42.0).abs() < 0.01);
+        assert!((grapheme_column_to_x(0, &clusters, 42.0, true) - 42.0).abs() < 0.01);
     }
 
     #[test]
-    fn unichar_to_x_single_cluster() {
+    fn grapheme_column_to_x_single_cluster() {
         let clusters = vec![(3usize, 30.0f32, 0u32)];
         let lm = 100.0;
-        assert!((unichar_to_x(0, &clusters, lm, false) - 100.0).abs() < 0.01);
-        assert!((unichar_to_x(0, &clusters, lm, true) - 30.0).abs() < 0.01);
+        assert!((grapheme_column_to_x(0, &clusters, lm, false) - 100.0).abs() < 0.01);
+        assert!((grapheme_column_to_x(0, &clusters, lm, true) - 30.0).abs() < 0.01);
     }
 
-    // ── x_to_unichar tests ──
+    // ── x_to_grapheme_column tests ──
 
     #[test]
-    fn x_to_unichar_roundtrip() {
+    fn x_to_grapheme_column_roundtrip() {
         let clusters = vec![(1usize, 10.0f32, 0u32), (2, 20.0, 1), (3, 30.0, 2)];
         // For each grapheme, the trailing x maps back to the same grapheme
-        assert_eq!(x_to_unichar(10.0, &clusters, 0.0), 0);
-        assert_eq!(x_to_unichar(20.0, &clusters, 0.0), 1);
-        assert_eq!(x_to_unichar(30.0, &clusters, 0.0), 2);
+        assert_eq!(x_to_grapheme_column(10.0, &clusters, 0.0), 0);
+        assert_eq!(x_to_grapheme_column(20.0, &clusters, 0.0), 1);
+        assert_eq!(x_to_grapheme_column(30.0, &clusters, 0.0), 2);
     }
 
     #[test]
-    fn x_to_unichar_midpoint() {
+    fn x_to_grapheme_column_midpoint() {
         // 3 clusters at x=10, 20, 30
         let clusters = vec![(1usize, 10.0f32, 0u32), (2, 20.0, 1), (3, 30.0, 2)];
         // Between cluster 0 (x=10) and cluster 1 (x=20), midpoint=15
         // x=14 → before midpoint → grapheme 0
-        assert_eq!(x_to_unichar(14.0, &clusters, 0.0), 0);
+        assert_eq!(x_to_grapheme_column(14.0, &clusters, 0.0), 0);
         // x=16 → after midpoint → grapheme 1
-        assert_eq!(x_to_unichar(16.0, &clusters, 0.0), 1);
+        assert_eq!(x_to_grapheme_column(16.0, &clusters, 0.0), 1);
     }
 
     #[test]
-    fn x_to_unichar_before_first() {
+    fn x_to_grapheme_column_before_first() {
         let clusters = vec![(1usize, 10.0f32, 0u32), (2, 20.0, 1)];
-        assert_eq!(x_to_unichar(0.0, &clusters, 0.0), 0);
-        assert_eq!(x_to_unichar(5.0, &clusters, 0.0), 0);
+        assert_eq!(x_to_grapheme_column(0.0, &clusters, 0.0), 0);
+        assert_eq!(x_to_grapheme_column(5.0, &clusters, 0.0), 0);
     }
 
     #[test]
-    fn x_to_unichar_empty() {
+    fn x_to_grapheme_column_empty() {
         let clusters: Vec<(usize, f32, u32)> = vec![];
-        assert_eq!(x_to_unichar(50.0, &clusters, 0.0), 0);
+        assert_eq!(x_to_grapheme_column(50.0, &clusters, 0.0), 0);
     }
 
     #[test]
-    fn x_to_unichar_past_last() {
+    fn x_to_grapheme_column_past_last() {
         let clusters = vec![(1usize, 10.0f32, 0u32), (2, 20.0, 1)];
-        assert_eq!(x_to_unichar(100.0, &clusters, 0.0), 1);
+        assert_eq!(x_to_grapheme_column(100.0, &clusters, 0.0), 1);
     }
 
     #[test]
-    fn x_to_unichar_single_cluster() {
+    fn x_to_grapheme_column_single_cluster() {
         let clusters = vec![(3usize, 30.0f32, 0u32)];
-        assert_eq!(x_to_unichar(15.0, &clusters, 0.0), 0);
-        assert_eq!(x_to_unichar(0.0, &clusters, 0.0), 0);
-        assert_eq!(x_to_unichar(100.0, &clusters, 0.0), 0);
+        assert_eq!(x_to_grapheme_column(15.0, &clusters, 0.0), 0);
+        assert_eq!(x_to_grapheme_column(0.0, &clusters, 0.0), 0);
+        assert_eq!(x_to_grapheme_column(100.0, &clusters, 0.0), 0);
     }
 }
