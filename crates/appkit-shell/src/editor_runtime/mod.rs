@@ -1052,8 +1052,23 @@ impl EditorRuntime {
         self.model_session.execute_semantic_edit(command, self.editor_line_height())
     }
 
-    pub fn apply_active_mindmap_theme(&mut self, theme_id: String) -> EditorOutcome {
-        self.model_session.apply_active_mindmap_theme(theme_id, self.editor_line_height())
+    pub fn active_inspector_available(&self) -> bool {
+        self.model_session.active_inspector_available()
+    }
+
+    pub fn active_inspector_panel(&self) -> Option<crate::inspector_panel::MountedInspectorPanel> {
+        self.model_session.active_inspector_panel()
+    }
+
+    pub fn toggle_active_inspector_panel(&mut self) -> EditorOutcome {
+        self.model_session.toggle_active_inspector_panel()
+    }
+
+    pub fn dispatch_inspector_panel_action(
+        &mut self,
+        action: crate::inspector_panel::StampedInspectorPanelAction,
+    ) -> EditorOutcome {
+        self.model_session.dispatch_inspector_panel_action(action, self.editor_line_height())
     }
 
     pub fn scroll_editor(

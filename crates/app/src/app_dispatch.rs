@@ -90,7 +90,7 @@ fn projected_editor_rect(
     screen_w: f32,
     screen_h: f32,
     inputs: &crate::ui_shell::ShellInputs,
-    mindmap_style_panel_thickness: f32,
+    inspector_panel_thickness: f32,
 ) -> ui::core::geom::Rect {
     let mut rect = ui::core::geom::Rect::new(0.0, 0.0, screen_w, screen_h);
 
@@ -114,7 +114,7 @@ fn projected_editor_rect(
         take_top(&mut rect, inputs.search_thickness);
     }
     take_bottom(&mut rect, inputs.status_thickness);
-    take_right(&mut rect, mindmap_style_panel_thickness);
+    take_right(&mut rect, inspector_panel_thickness);
     take_right(&mut rect, inputs.scrollbar_thickness);
 
     rect
@@ -322,9 +322,21 @@ impl App {
             AppAction::SetThemeMode(mode) => {
                 self.dispatch_settings_action(SettingsDispatchAction::SetThemeMode(mode))
             }
-            AppAction::ToggleMindmapStylePanel => self.toggle_active_mindmap_style_panel(),
-            AppAction::MindmapStylePanel(action) => {
-                self.dispatch_mindmap_style_panel_action(action)
+            AppAction::ToggleInspectorPanel => {
+                self.editor_runtime.toggle_active_inspector_panel().shell_effect
+            }
+            AppAction::InspectorPanel(action) => {
+                let outcome = self.editor_runtime.dispatch_inspector_panel_action(action);
+                for notification in outcome.notifications {
+                    if let appkit_shell::editor_runtime::EditorNotification::DirtyChanged {
+                        dirty,
+                        ..
+                    } = notification
+                    {
+                        self.update_document_edited(dirty);
+                    }
+                }
+                outcome.shell_effect
             }
             AppAction::TablePicker(action) => self.dispatch_table_picker_action(action),
             AppAction::TableStructureEdit { command, cursor_byte, source_generation } => {
@@ -352,57 +364,6 @@ impl App {
 
     fn open_settings_from_sidebar(&mut self) -> AppEffect {
         self.open_settings_overlay()
-    }
-
-    fn toggle_active_mindmap_style_panel(&mut self) -> AppEffect {
-        if self.active_plugin_name() != Some(ui::plugin::PLUGIN_MINDMAP) {
-            return AppEffect::NONE;
-        }
-        let Some(mut tab) = self.active_tab_session_mut() else {
-            return AppEffect::NONE;
-        };
-
-        tab.toggle_mindmap_style_panel();
-        AppEffect::REDRAW
-    }
-
-    fn dispatch_mindmap_style_panel_action(
-        &mut self,
-        action: ui::core::widget::MindmapStylePanelAction,
-    ) -> AppEffect {
-        use ui::core::widget::MindmapStylePanelAction;
-
-        match action {
-            MindmapStylePanelAction::Close => {
-                if self.active_plugin_name() != Some(ui::plugin::PLUGIN_MINDMAP) {
-                    return AppEffect::NONE;
-                }
-                let Some(mut tab) = self.active_tab_session_mut() else {
-                    return AppEffect::NONE;
-                };
-                if !tab.mindmap_style_panel().is_visible() {
-                    return AppEffect::NONE;
-                }
-                tab.close_mindmap_style_panel();
-                AppEffect::REDRAW
-            }
-            MindmapStylePanelAction::TogglePresets => {
-                if self.active_plugin_name() != Some(ui::plugin::PLUGIN_MINDMAP) {
-                    return AppEffect::NONE;
-                }
-                let Some(mut tab) = self.active_tab_session_mut() else {
-                    return AppEffect::NONE;
-                };
-                if !tab.mindmap_style_panel().is_visible() {
-                    return AppEffect::NONE;
-                }
-                tab.toggle_mindmap_style_presets();
-                AppEffect::REDRAW
-            }
-            MindmapStylePanelAction::SelectTheme(theme_id) => {
-                self.apply_active_mindmap_theme(theme_id)
-            }
-        }
     }
 
     fn dispatch_table_picker_action(
@@ -467,15 +428,6 @@ impl App {
             tab.document_mut().cursor_move_to_offset(cursor_byte);
         }
         self.dispatch_semantic_edit(ui::plugin::SemanticEditCommand::TableStructure(command))
-    }
-
-    fn apply_active_mindmap_theme(&mut self, theme_id: String) -> AppEffect {
-        let outcome = self.editor_runtime.apply_active_mindmap_theme(theme_id);
-        if outcome.shell_effect != AppEffect::NONE {
-            let dirty = self.active_tab_session().is_some_and(|tab| tab.document().dirty);
-            self.update_document_edited(dirty);
-        }
-        outcome.shell_effect
     }
 
     pub(crate) fn dispatch_settings_view_action(
@@ -781,7 +733,7 @@ impl App {
             self.screen_width(),
             self.screen_height(),
             &inputs,
-            self.ui_shell.mindmap_style_panel_thickness(),
+            self.ui_shell.inspector_panel_thickness(),
         )
     }
 }
@@ -940,9 +892,6 @@ mod tests {
     use super::*;
     use crate::document_fixture::DocumentFixture;
 
-    use std::cell::RefCell;
-    use std::rc::Rc;
-
     fn app_with_focused_search(replace: bool) -> App {
         let mut app = App::new(None);
         let document = DocumentFixture::new(vec!["正文保持原样".to_owned()], 80, 10.0);
@@ -1038,228 +987,116 @@ mod tests {
         )));
     }
 
-    #[derive(Clone, Copy)]
-    enum MindmapThemePlanMode {
-        Current(&'static str),
-        Stale,
-    }
-
-    #[derive(Default)]
-    struct MindmapStyleDispatchState {
-        plan_queries: RefCell<Vec<(String, u32)>>,
-        synchronized_sources: RefCell<Vec<String>>,
-        synchronized_generation: std::cell::Cell<Option<u32>>,
-    }
-
-    struct MindmapStyleDispatchPlugin {
-        name: &'static str,
-        mode: MindmapThemePlanMode,
-        state: Rc<MindmapStyleDispatchState>,
-    }
-
-    impl ui::plugin::ViewPlugin for MindmapStyleDispatchPlugin {
-        fn name(&self) -> &str {
-            self.name
-        }
-
-        fn mode(&self) -> ui::plugin::PluginMode {
-            ui::plugin::PluginMode::Source
-        }
-
-        fn render(
-            &mut self,
-            _doc: &dyn textora_core::document::DocView,
-            _bounds: ui::core::geom::Rect,
-            _theme: &ui::Theme,
-            _shaper: &mut shaping::Shaper,
-            _dpi_scale: f32,
-        ) -> ui::core::paint::DrawList {
-            ui::core::paint::DrawList::new()
-        }
-
-        fn sync_document(
-            &mut self,
-            generation: u32,
-            reason: ui::plugin::SyncReason,
-            load_source: &mut dyn FnMut() -> String,
-        ) -> ui::plugin::SyncOutcome {
-            if reason == ui::plugin::SyncReason::Normal
-                && self.state.synchronized_generation.get() == Some(generation)
-            {
-                return ui::plugin::SyncOutcome::Unchanged;
-            }
-            self.state.synchronized_sources.borrow_mut().push(load_source());
-            self.state.synchronized_generation.set(Some(generation));
-            ui::plugin::SyncOutcome::Updated
-        }
-    }
-
-    impl ui::plugin::ViewPluginCapabilities for MindmapStyleDispatchPlugin {
-        fn query(
-            &self,
-            query: ui::plugin::PluginQuery,
-            _doc: &dyn textora_core::document::DocView,
-        ) -> ui::plugin::PluginResponse {
-            use ui::plugin::{EditPlan, EditTransaction, PluginQuery, PluginResponse};
-
-            match query {
-                PluginQuery::PlanMindmapTheme { theme_id, source_generation } => {
-                    self.state
-                        .plan_queries
-                        .borrow_mut()
-                        .push((theme_id.clone(), source_generation));
-                    let plan = match self.mode {
-                        MindmapThemePlanMode::Current(current) if theme_id == current => {
-                            EditPlan::Consume
-                        }
-                        MindmapThemePlanMode::Current(_) => {
-                            let replacement = format!("theme={theme_id}");
-                            let cursor_after = replacement.len();
-                            EditPlan::Apply(EditTransaction::replace(
-                                source_generation,
-                                0..4,
-                                replacement,
-                                cursor_after,
-                            ))
-                        }
-                        MindmapThemePlanMode::Stale => {
-                            let replacement = format!("theme={theme_id}");
-                            let cursor_after = replacement.len();
-                            EditPlan::Apply(EditTransaction::replace(
-                                source_generation.wrapping_sub(1),
-                                0..4,
-                                replacement,
-                                cursor_after,
-                            ))
-                        }
-                    };
-                    PluginResponse::EditPlan(plan)
-                }
-                _ => PluginResponse::None,
-            }
-        }
-    }
-
-    fn app_with_mindmap_style_plugin(
-        name: &'static str,
-        mode: MindmapThemePlanMode,
-    ) -> (App, Rc<MindmapStyleDispatchState>) {
-        let state = Rc::new(MindmapStyleDispatchState::default());
-        let plugin = MindmapStyleDispatchPlugin { name, mode, state: state.clone() };
+    #[cfg(feature = "markdown")]
+    fn app_with_mindmap_inspector(source: &str) -> App {
         let mut app = App::new(None);
-        let document = DocumentFixture::new(vec!["root".to_owned()], 80, 10.0);
-        app.push_entry_for_test(document, Box::new(plugin));
+        push_mindmap_inspector_tab(&mut app, source);
         app.switch_workspace_for_test(0);
-        state.synchronized_sources.borrow_mut().clear();
-        (app, state)
+        app.sync_plugin_state();
+        app
     }
 
-    fn reduce_mindmap_style_action(
-        app: &mut App,
-        action: ui::core::widget::MindmapStylePanelAction,
-    ) -> AppEffect {
-        app.reduce_action(AppAction::MindmapStylePanel(action), None)
+    #[cfg(feature = "markdown")]
+    fn push_mindmap_inspector_tab(app: &mut App, source: &str) {
+        app.push_entry_for_test(
+            DocumentFixture::new(source.lines().map(str::to_owned).collect(), 80, 10.0),
+            Box::new(textora_mindmap::mindmap_view::MindmapView::new()),
+        );
     }
 
+    fn inspector_action(
+        app: &App,
+        intent: impl FnOnce(
+            &ui::inspector_panel::InspectorPanelDescriptor,
+        ) -> ui::inspector_panel::InspectorPanelIntent,
+    ) -> AppAction {
+        use ui::inspector_panel::InspectorPanelAction;
+
+        let panel = app.editor_runtime.active_inspector_panel().expect("inspector must be open");
+        let action = InspectorPanelAction {
+            panel_id: panel.descriptor.id.clone(),
+            intent: intent(&panel.descriptor),
+        };
+        AppAction::InspectorPanel(panel.stamp.stamp(action).expect("action uses mounted panel ID"))
+    }
+
+    fn inspector_select(app: &App, item_id: &str) -> AppAction {
+        use ui::inspector_panel::{InspectorItemTarget, InspectorPanelIntent, ItemId};
+
+        inspector_action(app, |descriptor| {
+            InspectorPanelIntent::SelectItem(InspectorItemTarget {
+                group_id: descriptor.presets.id.clone(),
+                item_id: ItemId(item_id.to_owned()),
+            })
+        })
+    }
+
+    #[cfg(feature = "markdown")]
     #[test]
-    fn mindmap_style_title_toggle_opens_expanded_and_closes_active_panel() {
-        let (mut app, _) = app_with_mindmap_style_plugin(
-            ui::plugin::PLUGIN_MINDMAP,
-            MindmapThemePlanMode::Current("warm-night"),
-        );
+    fn mindmap_inspector_toggle_opens_expanded_and_closes_active_panel() {
+        let mut app = app_with_mindmap_inspector("# Root");
+        assert_eq!(app.reduce_action(AppAction::ToggleInspectorPanel, None), AppEffect::REDRAW);
+        let panel = app.editor_runtime.active_inspector_panel().expect("opened panel");
+        assert!(panel.presentation.presets_expanded);
 
-        assert_eq!(app.reduce_action(AppAction::ToggleMindmapStylePanel, None), AppEffect::REDRAW);
-        assert_eq!(
-            app.active_tab_session().expect("active mmap tab").mindmap_style_panel(),
-            appkit_shell::mindmap_style_panel::MindmapStylePanelSession::Open {
-                presets_expanded: true
-            }
-        );
-
-        assert_eq!(app.reduce_action(AppAction::ToggleMindmapStylePanel, None), AppEffect::REDRAW);
-        assert_eq!(
-            app.active_tab_session().expect("active mmap tab").mindmap_style_panel(),
-            appkit_shell::mindmap_style_panel::MindmapStylePanelSession::Closed
-        );
+        assert_eq!(app.reduce_action(AppAction::ToggleInspectorPanel, None), AppEffect::REDRAW);
+        assert!(app.editor_runtime.active_inspector_panel().is_none());
     }
 
+    #[cfg(feature = "markdown")]
     #[test]
-    fn mindmap_style_close_and_preset_toggle_change_only_open_active_session() {
-        let (mut app, _) = app_with_mindmap_style_plugin(
-            ui::plugin::PLUGIN_MINDMAP,
-            MindmapThemePlanMode::Current("warm-night"),
-        );
-        let second_state = Rc::new(MindmapStyleDispatchState::default());
-        let second_tab_id = app.push_entry_for_test(
-            DocumentFixture::new(vec!["root".to_owned()], 80, 10.0),
-            Box::new(MindmapStyleDispatchPlugin {
-                name: ui::plugin::PLUGIN_MINDMAP,
-                mode: MindmapThemePlanMode::Current("warm-night"),
-                state: second_state,
-            }),
-        );
-        let first_tab_id = app.editor_tab_id_at(0).expect("first tab id");
-        app.tab_session_mut(first_tab_id).expect("first tab").toggle_mindmap_style_panel();
-        app.tab_session_mut(second_tab_id).expect("second tab").toggle_mindmap_style_panel();
+    fn switching_tabs_restores_each_inspector_panel_session() {
+        use ui::inspector_panel::InspectorPanelIntent;
+
+        let mut app = app_with_mindmap_inspector("# First");
+        push_mindmap_inspector_tab(&mut app, "# Second");
+        app.switch_workspace_for_test(0);
+        let _ = app.reduce_action(AppAction::ToggleInspectorPanel, None);
+        let collapse = inspector_action(&app, |descriptor| {
+            InspectorPanelIntent::ToggleGroup(descriptor.presets.id.clone())
+        });
+        assert_eq!(app.reduce_action(collapse, None), AppEffect::REDRAW);
+
         app.switch_workspace_for_test(1);
+        assert!(app.editor_runtime.active_inspector_panel().is_none());
+        let _ = app.reduce_action(AppAction::ToggleInspectorPanel, None);
+        let second = app.editor_runtime.active_inspector_panel().expect("second panel");
+        assert!(second.presentation.presets_expanded);
+        let close = inspector_action(&app, |_| InspectorPanelIntent::Close);
+        assert_eq!(app.reduce_action(close, None), AppEffect::REDRAW);
+        assert!(app.editor_runtime.active_inspector_panel().is_none());
 
-        assert_eq!(
-            reduce_mindmap_style_action(
-                &mut app,
-                ui::core::widget::MindmapStylePanelAction::TogglePresets,
-            ),
-            AppEffect::REDRAW
-        );
-        assert_eq!(
-            app.active_tab_session().expect("second active tab").mindmap_style_panel(),
-            appkit_shell::mindmap_style_panel::MindmapStylePanelSession::Open {
-                presets_expanded: false
-            }
-        );
-        assert_eq!(
-            reduce_mindmap_style_action(&mut app, ui::core::widget::MindmapStylePanelAction::Close,),
-            AppEffect::REDRAW
-        );
-        assert_eq!(
-            app.tab_session(first_tab_id).expect("first tab").mindmap_style_panel(),
-            appkit_shell::mindmap_style_panel::MindmapStylePanelSession::Open {
-                presets_expanded: true
-            }
-        );
-        assert_eq!(
-            app.tab_session(second_tab_id).expect("second tab").mindmap_style_panel(),
-            appkit_shell::mindmap_style_panel::MindmapStylePanelSession::Closed
-        );
-        assert_eq!(
-            reduce_mindmap_style_action(
-                &mut app,
-                ui::core::widget::MindmapStylePanelAction::TogglePresets,
-            ),
-            AppEffect::NONE
-        );
+        app.switch_workspace_for_test(0);
+        let first = app.editor_runtime.active_inspector_panel().expect("first panel restored");
+        assert!(!first.presentation.presets_expanded);
     }
 
+    #[cfg(feature = "markdown")]
     #[test]
-    fn mindmap_style_selection_executes_one_transaction_and_syncs_after_text_change() {
-        let (mut app, state) = app_with_mindmap_style_plugin(
-            ui::plugin::PLUGIN_MINDMAP,
-            MindmapThemePlanMode::Current("warm-night"),
-        );
-        let generation_before =
-            app.active_tab_session().expect("active mmap tab").document().generation();
+    fn mindmap_inspector_selection_commits_once_refreshes_panel_and_undoes_once() {
+        let source = "# Root";
+        let mut app = app_with_mindmap_inspector(source);
+        let _ = app.reduce_action(AppAction::ToggleInspectorPanel, None);
+        let before = app.active_tab_session().expect("active tab").document().generation();
+        let selection = inspector_select(&app, "tide");
+        let repeated_selection = inspector_select(&app, "tide");
 
-        let effect = reduce_mindmap_style_action(
-            &mut app,
-            ui::core::widget::MindmapStylePanelAction::SelectTheme("tide".into()),
+        let effect = app.reduce_action(selection, None);
+        assert!(effect.redraw && effect.reshape);
+        assert_eq!(app.reduce_action(repeated_selection, None), AppEffect::NONE);
+        let tab = app.active_tab_session().expect("active tab");
+        assert!(tab.document().full_text().contains("theme = \"tide\""));
+        assert_eq!(tab.document().generation(), before + 1);
+        assert!(tab.document().dirty);
+        let panel = app.editor_runtime.active_inspector_panel().expect("panel stays open");
+        assert_eq!(
+            panel.descriptor.presets.selected_item,
+            Some(ui::inspector_panel::ItemId("tide".into()))
         );
 
-        let entry = app.active_tab_session().expect("active mmap tab");
-        assert_eq!(effect, AppEffect::REDRAW);
-        assert_eq!(entry.document().full_text(), "theme=tide");
-        assert_eq!(entry.document().generation(), generation_before + 1);
-        assert!(entry.document().dirty);
-        assert_eq!(state.plan_queries.borrow().as_slice(), &[("tide".into(), generation_before)]);
-        assert_eq!(*state.synchronized_sources.borrow(), ["theme=tide"]);
+        let _ = app.dispatch_semantic_edit(ui::plugin::SemanticEditCommand::Undo);
+        let tab = app.active_tab_session().expect("active tab");
+        assert_eq!(tab.document().full_text(), source);
     }
 
     #[test]
@@ -1422,105 +1259,160 @@ mod tests {
         assert!(effect.redraw);
     }
 
+    #[cfg(feature = "markdown")]
     #[test]
-    fn mindmap_style_current_theme_is_consumed_without_document_change_or_sync() {
-        let (mut app, state) = app_with_mindmap_style_plugin(
-            ui::plugin::PLUGIN_MINDMAP,
-            MindmapThemePlanMode::Current("tide"),
-        );
-        let generation_before =
-            app.active_tab_session().expect("active mmap tab").document().generation();
+    fn mindmap_inspector_unknown_invalid_and_current_selections_do_not_write() {
+        use ui::inspector_panel::ItemId;
 
-        let effect = reduce_mindmap_style_action(
-            &mut app,
-            ui::core::widget::MindmapStylePanelAction::SelectTheme("tide".into()),
-        );
+        for (source, disabled, selected, item) in [
+            ("```toml mindmap\ntheme = \"retired\"\n```\n# Root", false, None, "retired"),
+            ("```toml mindmap\ntheme = [\n```\n# Root", true, None, "tide"),
+            ("```toml mindmap\ntheme = \"tide\"\n```\n# Root", false, Some("tide"), "tide"),
+        ] {
+            let mut app = app_with_mindmap_inspector(source);
+            let _ = app.reduce_action(AppAction::ToggleInspectorPanel, None);
+            let panel = app.editor_runtime.active_inspector_panel().expect("panel opens");
+            assert_eq!(panel.descriptor.selection_disabled, disabled);
+            assert_eq!(
+                panel.descriptor.presets.selected_item,
+                selected.map(|id| ItemId(id.into()))
+            );
+            if selected.is_none() {
+                assert!(panel.descriptor.notice.is_some());
+                assert!(panel.descriptor.presets.fallback_summary_item.is_some());
+            }
+            let generation = app.active_tab_session().expect("active tab").document().generation();
+            let action = inspector_select(&app, item);
 
-        let entry = app.active_tab_session().expect("active mmap tab");
-        assert_eq!(effect, AppEffect::NONE);
-        assert_eq!(entry.document().full_text(), "root");
-        assert_eq!(entry.document().generation(), generation_before);
-        assert!(!entry.document().dirty);
-        assert!(state.synchronized_sources.borrow().is_empty());
+            assert_eq!(app.reduce_action(action, None), AppEffect::NONE);
+            let tab = app.active_tab_session().expect("active tab");
+            assert_eq!(tab.document().full_text(), source);
+            assert_eq!(tab.document().generation(), generation);
+            assert!(!tab.document().dirty);
+        }
+    }
+
+    #[cfg(feature = "markdown")]
+    #[test]
+    fn mindmap_inspector_rejects_expired_layout_action_after_reopening() {
+        let source = "# Root";
+        let mut app = app_with_mindmap_inspector(source);
+        let _ = app.reduce_action(AppAction::ToggleInspectorPanel, None);
+        let stale = inspector_select(&app, "tide");
+        let generation = app.active_tab_session().expect("active tab").document().generation();
+        let _ = app.reduce_action(AppAction::ToggleInspectorPanel, None);
+        let _ = app.reduce_action(AppAction::ToggleInspectorPanel, None);
+
+        assert_eq!(app.reduce_action(stale, None), AppEffect::NONE);
+        let tab = app.active_tab_session().expect("active tab");
+        assert_eq!(tab.document().full_text(), source);
+        assert_eq!(tab.document().generation(), generation);
+        assert!(!tab.document().dirty);
     }
 
     #[test]
-    fn mindmap_style_stale_plan_and_non_mmap_plugin_leave_documents_unchanged() {
-        let (mut stale_app, stale_state) =
-            app_with_mindmap_style_plugin(ui::plugin::PLUGIN_MINDMAP, MindmapThemePlanMode::Stale);
-        let stale_generation =
-            stale_app.active_tab_session().expect("active stale mmap tab").document().generation();
-        assert_eq!(
-            reduce_mindmap_style_action(
-                &mut stale_app,
-                ui::core::widget::MindmapStylePanelAction::SelectTheme("tide".into()),
-            ),
-            AppEffect::NONE
-        );
-        let stale_entry = stale_app.active_tab_session().expect("active stale mmap tab");
-        assert_eq!(stale_entry.document().full_text(), "root");
-        assert_eq!(stale_entry.document().generation(), stale_generation);
-        assert!(!stale_entry.document().dirty);
-        assert!(stale_state.synchronized_sources.borrow().is_empty());
-
-        let (mut editor_app, editor_state) = app_with_mindmap_style_plugin(
-            ui::plugin::PLUGIN_EDITOR,
-            MindmapThemePlanMode::Current("warm-night"),
-        );
-        assert_eq!(
-            reduce_mindmap_style_action(
-                &mut editor_app,
-                ui::core::widget::MindmapStylePanelAction::SelectTheme("tide".into()),
-            ),
-            AppEffect::NONE
-        );
-        assert_eq!(
-            editor_app.active_tab_session().expect("active editor tab").document().full_text(),
-            "root"
-        );
-        assert!(editor_state.plan_queries.borrow().is_empty());
-    }
-
-    #[test]
-    fn mindmap_style_selection_updates_only_the_active_mmap_tab() {
-        let (mut app, first_state) = app_with_mindmap_style_plugin(
-            ui::plugin::PLUGIN_MINDMAP,
-            MindmapThemePlanMode::Current("warm-night"),
-        );
-        let second_state = Rc::new(MindmapStyleDispatchState::default());
+    fn source_view_has_no_inspector_permission() {
+        let mut app = App::new(None);
         app.push_entry_for_test(
-            DocumentFixture::new(vec!["root".to_owned()], 80, 10.0),
-            Box::new(MindmapStyleDispatchPlugin {
-                name: ui::plugin::PLUGIN_MINDMAP,
-                mode: MindmapThemePlanMode::Current("warm-night"),
-                state: second_state.clone(),
-            }),
+            DocumentFixture::new(vec!["source".into()], 80, 10.0),
+            Box::new(crate::plugins::editor::EditorPlugin::new()),
         );
-        app.switch_workspace_for_test(1);
+        app.switch_workspace_for_test(0);
 
-        assert_eq!(
-            reduce_mindmap_style_action(
-                &mut app,
-                ui::core::widget::MindmapStylePanelAction::SelectTheme("tide".into()),
-            ),
-            AppEffect::REDRAW
+        assert!(!app.editor_runtime.active_inspector_available());
+        assert_eq!(app.reduce_action(AppAction::ToggleInspectorPanel, None), AppEffect::NONE);
+        assert!(app.editor_runtime.active_inspector_panel().is_none());
+    }
+
+    struct StaleInspectorPlanPlugin;
+
+    impl ui::plugin::ViewPlugin for StaleInspectorPlanPlugin {
+        fn name(&self) -> &str {
+            "stale-inspector-plan"
+        }
+
+        fn mode(&self) -> ui::plugin::PluginMode {
+            ui::plugin::PluginMode::Source
+        }
+
+        fn render(
+            &mut self,
+            _document: &dyn textora_core::document::DocView,
+            _bounds: ui::Rect,
+            _theme: &ui::Theme,
+            _shaper: &mut shaping::Shaper,
+            _dpi: f32,
+        ) -> ui::DrawList {
+            ui::DrawList::new()
+        }
+    }
+
+    impl ui::plugin::ViewPluginCapabilities for StaleInspectorPlanPlugin {
+        fn inspector_panel_provider(&self) -> Option<&dyn ui::plugin::InspectorPanelProvider> {
+            Some(self)
+        }
+    }
+
+    impl ui::plugin::InspectorPanelProvider for StaleInspectorPlanPlugin {
+        fn inspector_descriptor(
+            &self,
+            _source_generation: u32,
+        ) -> Option<ui::inspector_panel::InspectorPanelDescriptor> {
+            use ui::inspector_panel::{
+                GroupId, InspectorPanelDescriptor, InspectorPresetGroup, InspectorPresetItem,
+                ItemId, PanelId,
+            };
+
+            Some(InspectorPanelDescriptor {
+                id: PanelId("appearance".into()),
+                presets: InspectorPresetGroup {
+                    id: GroupId("colors".into()),
+                    items: vec![InspectorPresetItem {
+                        id: ItemId("tide".into()),
+                        display_name: "Tide".into(),
+                        canvas_background: [0.0; 4],
+                        root_fill: [0.0; 4],
+                        branch_colors: Vec::new(),
+                        disabled: false,
+                    }],
+                    ..InspectorPresetGroup::default()
+                },
+                ..InspectorPanelDescriptor::default()
+            })
+        }
+
+        fn plan_inspector_action(
+            &self,
+            _panel_id: &ui::inspector_panel::PanelId,
+            _target: &ui::inspector_panel::InspectorItemTarget,
+            source_generation: u32,
+        ) -> ui::plugin::EditPlan {
+            ui::plugin::EditPlan::Apply(ui::plugin::EditTransaction::replace(
+                source_generation.wrapping_sub(1),
+                0..4,
+                "changed".into(),
+                7,
+            ))
+        }
+    }
+
+    #[test]
+    fn inspector_rejects_a_stale_transaction_from_the_active_provider() {
+        let mut app = App::new(None);
+        app.push_entry_for_test(
+            DocumentFixture::new(vec!["root".into()], 80, 10.0),
+            Box::new(StaleInspectorPlanPlugin),
         );
-        assert_eq!(
-            app.tab_session(app.editor_tab_id_at(0).expect("first tab id"))
-                .expect("first tab")
-                .document()
-                .full_text(),
-            "root"
-        );
-        assert_eq!(
-            app.tab_session(app.editor_tab_id_at(1).expect("second tab id"))
-                .expect("second tab")
-                .document()
-                .full_text(),
-            "theme=tide"
-        );
-        assert!(first_state.plan_queries.borrow().is_empty());
-        assert_eq!(second_state.plan_queries.borrow().len(), 1);
+        app.switch_workspace_for_test(0);
+        let _ = app.reduce_action(AppAction::ToggleInspectorPanel, None);
+        let generation = app.active_tab_session().expect("active tab").document().generation();
+        let action = inspector_select(&app, "tide");
+
+        assert_eq!(app.reduce_action(action, None), AppEffect::NONE);
+        let document = app.active_tab_session().expect("active tab").document();
+        assert_eq!(document.full_text(), "root");
+        assert_eq!(document.generation(), generation);
+        assert!(!document.dirty);
     }
 
     struct WysiwygBoundsPlugin;
@@ -1543,7 +1435,7 @@ mod tests {
         };
 
         let without_panel = projected_editor_rect(1_200.0, 800.0, &inputs, 0.0);
-        let panel_thickness = appkit_shell::mindmap_style_panel::PANEL_WIDTH_LOGICAL;
+        let panel_thickness = ui::inspector_panel::PANEL_WIDTH_LOGICAL;
         let with_panel = projected_editor_rect(1_200.0, 800.0, &inputs, panel_thickness);
 
         assert_eq!(without_panel, ui::core::geom::Rect::new(0.0, 36.0, 1_188.0, 740.0));

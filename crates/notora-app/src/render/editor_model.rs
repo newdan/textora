@@ -252,6 +252,8 @@ fn editor_tag_suggestion_key(tag_id: notora_core::TagId) -> String {
     format!("{EDITOR_TAG_SUGGESTION_KEY_PREFIX}{tag_id}")
 }
 
+const INSPECTOR_PANEL_COMMAND_KEY: &str = "inspector_panel";
+
 fn editor_toolbar_input(mode: EditorPaneMode) -> ui::editor_toolbar::EditorToolbarInput {
     match mode {
         EditorPaneMode::WorkspaceNote => markdown_toolbar_input(),
@@ -265,15 +267,24 @@ fn editor_toolbar_input(mode: EditorPaneMode) -> ui::editor_toolbar::EditorToolb
 pub(crate) fn editor_toolbar_input_for_plugin(
     mode: EditorPaneMode,
     plugin_name: &str,
+    inspector_available: bool,
 ) -> ui::editor_toolbar::EditorToolbarInput {
     if mode != EditorPaneMode::WorkspaceNote {
         return editor_toolbar_input(mode);
     }
-    match plugin_name {
-        ui::plugin::PLUGIN_MARKDOWN_EDITOR => markdown_toolbar_input(),
-        ui::plugin::PLUGIN_MINDMAP => mindmap_toolbar_input(),
-        _ => history_toolbar_input(),
+    let inspector_command = inspector_available.then_some((INSPECTOR_PANEL_COMMAND_KEY, "主题", 0));
+    if plugin_name == ui::plugin::PLUGIN_MINDMAP {
+        return mindmap_toolbar_input(inspector_command);
     }
+    let mut toolbar = if plugin_name == ui::plugin::PLUGIN_MARKDOWN_EDITOR {
+        markdown_toolbar_input()
+    } else {
+        history_toolbar_input()
+    };
+    if let Some(command) = inspector_command {
+        toolbar.groups.push(toolbar_group("属性", &[command]));
+    }
+    toolbar
 }
 
 pub(crate) fn add_compact_editor_toolbar_commands(
@@ -372,18 +383,17 @@ pub(super) fn markdown_toolbar_input() -> ui::editor_toolbar::EditorToolbarInput
     }
 }
 
-pub(super) fn mindmap_toolbar_input() -> ui::editor_toolbar::EditorToolbarInput {
+pub(super) fn mindmap_toolbar_input(
+    inspector_command: Option<(&str, &str, u8)>,
+) -> ui::editor_toolbar::EditorToolbarInput {
+    let mindmap_commands = inspector_command
+        .into_iter()
+        .chain([("promote", "提升层级", 3), ("demote", "降低层级", 4)])
+        .collect::<Vec<_>>();
     ui::editor_toolbar::EditorToolbarInput {
         groups: vec![
             toolbar_group("历史", &[("undo", "撤销", 0), ("redo", "重做", 0)]),
-            toolbar_group(
-                "脑图",
-                &[
-                    ("mindmap_style", "主题", 0),
-                    ("promote", "提升层级", 3),
-                    ("demote", "降低层级", 4),
-                ],
-            ),
+            toolbar_group("脑图", &mindmap_commands),
             toolbar_group(
                 "视图",
                 &[
@@ -440,7 +450,7 @@ pub(super) fn editor_command_actions() -> HashMap<String, NotoraAction> {
     .chain([
         (DOCUMENT_SEARCH_COMMAND_KEY.to_owned(), NotoraAction::DocumentSearchRequested),
         ("toggle_source".to_owned(), NotoraAction::ToggleSourceViewRequested),
-        ("mindmap_style".to_owned(), NotoraAction::ToggleMindmapStylePanelRequested),
+        (INSPECTOR_PANEL_COMMAND_KEY.to_owned(), NotoraAction::ToggleInspectorPanelRequested),
     ])
     .collect()
 }

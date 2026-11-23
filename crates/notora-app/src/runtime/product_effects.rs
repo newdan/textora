@@ -26,9 +26,9 @@ impl NotoraRuntime {
             }
             NotoraEffect::CommitTitle(title) => self.commit_title(title),
             NotoraEffect::ToggleEditorView => self.toggle_editor_view(),
-            NotoraEffect::ToggleMindmapStylePanel => self.toggle_mindmap_style_panel(),
-            NotoraEffect::DispatchMindmapStylePanel(action) => {
-                self.dispatch_mindmap_style_panel(action);
+            NotoraEffect::ToggleInspectorPanel => self.toggle_inspector_panel(),
+            NotoraEffect::DispatchInspectorPanel(action) => {
+                self.dispatch_inspector_panel(action);
             }
             NotoraEffect::ExecuteSemanticEdit(command) => self.execute_semantic_edit(command),
             NotoraEffect::ExecuteMetadataMutation(mutation) => {

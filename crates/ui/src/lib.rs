@@ -27,6 +27,7 @@ pub mod typography;
 pub mod view_mode;
 pub mod viewport;
 mod widgets;
+pub use widgets::inspector_panel;
 
 // 语义根级 re-export：稳定路径
 pub use widgets::{

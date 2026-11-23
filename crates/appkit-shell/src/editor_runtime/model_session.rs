@@ -12,6 +12,11 @@ use crate::editor_runtime::{
     EditorDocumentSummary, EditorNotification, EditorOutcome, EditorTabSnapshot,
     EditorWorkspaceSnapshot, OpenDisposition, SemanticEditResult,
 };
+use crate::inspector_panel::{
+    InspectorPanelSession, MountedInspectorPanel, StampedInspectorPanelAction,
+};
+use ui::inspector_panel::InspectorPanelIntent;
+
 use crate::prepared_tab::{PreparedTab, placeholder_display_entries};
 use crate::tab_runtime::{DocumentEditingAccess, TabRuntime, TabRuntimeStore};
 use crate::tab_session::{TabSession, TabSessionMut};
@@ -22,6 +27,10 @@ use appkit_core::edit_command::EditCommand;
 pub(crate) struct ModelSession {
     workspace: Workspace,
     runtimes: TabRuntimeStore,
+}
+
+fn inspector_redraw() -> EditorOutcome {
+    EditorOutcome { shell_effect: crate::event::ShellEffect::REDRAW, ..EditorOutcome::default() }
 }
 
 impl ModelSession {
@@ -675,33 +684,95 @@ impl ModelSession {
         self.apply_semantic_edit_plan(tab_id, ui::plugin::EditPlan::Apply(transaction), line_height)
     }
 
-    pub(crate) fn apply_active_mindmap_theme(
+    pub(crate) fn active_inspector_available(&self) -> bool {
+        self.active_tab_id()
+            .and_then(|tab_id| self.tab_session(tab_id))
+            .is_some_and(|tab| tab.plugin().inspector_panel_provider().is_some())
+    }
+
+    pub(crate) fn active_inspector_panel(&self) -> Option<MountedInspectorPanel> {
+        let tab_id = self.active_tab_id()?;
+        let tab = self.tab_session(tab_id)?;
+        let InspectorPanelSession::Open(panel) = &tab.runtime.inspector_panel else {
+            return None;
+        };
+        let generation = tab.document.generation();
+        let mut descriptor =
+            tab.plugin().inspector_panel_provider()?.inspector_descriptor(generation)?;
+        descriptor.selection_disabled |= !tab.allows_editing();
+        let stamp =
+            panel.stamp(tab_id, generation, tab.document.content_revision(), descriptor.id.clone());
+        Some(MountedInspectorPanel { descriptor, presentation: panel.presentation.clone(), stamp })
+    }
+
+    pub(crate) fn toggle_active_inspector_panel(&mut self) -> EditorOutcome {
+        if !self.active_inspector_available() {
+            return EditorOutcome::default();
+        }
+        let Some(tab) = self.active_tab_id().and_then(|tab_id| self.tab_session_mut(tab_id)) else {
+            return EditorOutcome::default();
+        };
+        tab.runtime.inspector_panel.toggle();
+        inspector_redraw()
+    }
+
+    pub(crate) fn dispatch_inspector_panel_action(
         &mut self,
-        theme_id: String,
+        stamped: StampedInspectorPanelAction,
         line_height: f32,
     ) -> EditorOutcome {
-        let Some(tab_id) = self.active_tab_id() else {
+        let Some(mounted) = self.active_inspector_panel() else {
             return EditorOutcome::default();
         };
-        let plan = {
-            let Some(tab) = self.tab_session(tab_id) else {
+        if mounted.stamp != stamped.stamp {
+            return EditorOutcome::default();
+        }
+        let tab_id = stamped.stamp.tab_id;
+        let group = &mounted.descriptor.presets;
+        if let InspectorPanelIntent::SelectItem(target) = &stamped.action.intent {
+            if mounted.descriptor.selection_disabled
+                || !mounted.presentation.presets_expanded
+                || target.group_id != group.id
+                || !group.items.iter().any(|item| item.id == target.item_id && !item.disabled)
+            {
+                return EditorOutcome::default();
+            }
+            let plan = self.tab_session(tab_id).and_then(|tab| {
+                Some(tab.plugin().inspector_panel_provider()?.plan_inspector_action(
+                    &mounted.descriptor.id,
+                    target,
+                    stamped.stamp.generation,
+                ))
+            });
+            let Some(plan @ ui::plugin::EditPlan::Apply(_)) = plan else {
                 return EditorOutcome::default();
             };
-            if tab.plugin_name() != ui::plugin::PLUGIN_MINDMAP || !tab.allows_editing() {
-                return EditorOutcome::default();
-            }
-            let source_generation = tab.document.generation();
-            match tab
-                .query(ui::plugin::PluginQuery::PlanMindmapTheme { theme_id, source_generation })
-            {
-                ui::plugin::PluginResponse::EditPlan(plan) => Some(plan),
-                _ => None,
-            }
-        };
-        let Some(plan) = plan else {
+            return self.apply_session_edit(tab_id, plan, line_height).unwrap_or_default();
+        }
+
+        let Some(tab) = self.tab_session_mut(tab_id) else {
             return EditorOutcome::default();
         };
-        self.apply_session_edit(tab_id, plan, line_height).unwrap_or_default()
+        let InspectorPanelSession::Open(panel) = &mut tab.runtime.inspector_panel else {
+            return EditorOutcome::default();
+        };
+        match stamped.action.intent {
+            InspectorPanelIntent::Close => {
+                tab.runtime.inspector_panel = InspectorPanelSession::Closed
+            }
+            InspectorPanelIntent::ToggleGroup(group_id) if group_id == group.id => {
+                panel.presentation.presets_expanded = !panel.presentation.presets_expanded;
+            }
+            InspectorPanelIntent::FocusItem(target)
+                if panel.presentation.presets_expanded
+                    && target.group_id == group.id
+                    && group.items.iter().any(|item| item.id == target.item_id) =>
+            {
+                panel.presentation.focused_item = Some(target.item_id);
+            }
+            _ => return EditorOutcome::default(),
+        }
+        inspector_redraw()
     }
 
     fn apply_semantic_edit_plan(
@@ -972,6 +1043,9 @@ impl ModelSession {
             WorkspaceEffect::None => None,
         };
         if let Some(tab_id) = activated_tab_id {
+            if let Some(runtime) = self.runtimes.get_mut(tab_id) {
+                runtime.inspector_panel.renew_mount();
+            }
             self.synchronize_plugin_source(tab_id);
         }
         effect
@@ -1108,7 +1182,7 @@ mod tests {
 
     use appkit_core::document::DocumentModel;
     use textora_core::buffer::TextBuffer;
-    use ui::plugin::{PLUGIN_EDITOR, PLUGIN_MINDMAP, SemanticEditCommand};
+    use ui::plugin::{PLUGIN_EDITOR, SemanticEditCommand};
 
     use super::*;
     use crate::editor_plugin::EditorPluginFactory;
@@ -1146,11 +1220,11 @@ mod tests {
         sources: Rc<RefCell<Vec<(String, u32)>>>,
     }
 
-    struct MindmapThemeProbePlugin;
+    struct InspectorPlanProbePlugin;
 
-    impl ui::plugin::ViewPlugin for MindmapThemeProbePlugin {
+    impl ui::plugin::ViewPlugin for InspectorPlanProbePlugin {
         fn name(&self) -> &str {
-            PLUGIN_MINDMAP
+            "inspector-plan-probe"
         }
 
         fn mode(&self) -> ui::plugin::PluginMode {
@@ -1169,23 +1243,51 @@ mod tests {
         }
     }
 
-    impl ui::plugin::ViewPluginCapabilities for MindmapThemeProbePlugin {
-        fn query(
+    impl ui::plugin::ViewPluginCapabilities for InspectorPlanProbePlugin {
+        fn inspector_panel_provider(&self) -> Option<&dyn ui::plugin::InspectorPanelProvider> {
+            Some(self)
+        }
+    }
+
+    impl ui::plugin::InspectorPanelProvider for InspectorPlanProbePlugin {
+        fn inspector_descriptor(
             &self,
-            query: ui::plugin::PluginQuery,
-            _document: &dyn textora_core::document::DocView,
-        ) -> ui::plugin::PluginResponse {
-            let ui::plugin::PluginQuery::PlanMindmapTheme { theme_id, source_generation } = query
-            else {
-                return ui::plugin::PluginResponse::None;
+            _source_generation: u32,
+        ) -> Option<ui::inspector_panel::InspectorPanelDescriptor> {
+            use ui::inspector_panel::{
+                GroupId, InspectorPanelDescriptor, InspectorPresetGroup, InspectorPresetItem,
+                ItemId, PanelId,
             };
-            ui::plugin::PluginResponse::EditPlan(ui::plugin::EditPlan::Apply(
-                ui::plugin::EditTransaction::replace(
-                    source_generation,
-                    0..0,
-                    format!("theme={theme_id}\n"),
-                    0,
-                ),
+
+            Some(InspectorPanelDescriptor {
+                id: PanelId("appearance".into()),
+                presets: InspectorPresetGroup {
+                    id: GroupId("schemes".into()),
+                    items: vec![InspectorPresetItem {
+                        id: ItemId("tide".into()),
+                        display_name: "Tide".into(),
+                        canvas_background: [0.0; 4],
+                        root_fill: [0.0; 4],
+                        branch_colors: Vec::new(),
+                        disabled: false,
+                    }],
+                    ..InspectorPresetGroup::default()
+                },
+                ..InspectorPanelDescriptor::default()
+            })
+        }
+
+        fn plan_inspector_action(
+            &self,
+            _panel_id: &ui::inspector_panel::PanelId,
+            target: &ui::inspector_panel::InspectorItemTarget,
+            source_generation: u32,
+        ) -> ui::plugin::EditPlan {
+            ui::plugin::EditPlan::Apply(ui::plugin::EditTransaction::replace(
+                source_generation,
+                0..0,
+                format!("theme={}\n", target.item_id.0),
+                0,
             ))
         }
     }
@@ -1512,26 +1614,51 @@ mod tests {
     }
 
     #[test]
-    fn active_mindmap_theme_applies_the_plugin_plan_and_reports_content_change() {
+    fn inspector_action_uses_one_transaction_and_rejects_replay_after_edit() {
+        use ui::inspector_panel::{InspectorItemTarget, InspectorPanelAction};
+
         let mut session = model_session();
         let prepared = PreparedTab::new(
             prepared_text("root").document,
-            TabRuntime::new(Box::new(MindmapThemeProbePlugin)),
+            TabRuntime::new(Box::new(InspectorPlanProbePlugin)),
         );
         let _ = session.install_prepared_tab(prepared, None, OpenDisposition::Persistent);
+        assert!(session.active_inspector_available());
+        session.toggle_active_inspector_panel();
+        let mounted = session.active_inspector_panel().expect("probe panel should be mounted");
+        let action = mounted
+            .stamp
+            .stamp(InspectorPanelAction {
+                panel_id: mounted.descriptor.id,
+                intent: InspectorPanelIntent::SelectItem(InspectorItemTarget {
+                    group_id: mounted.descriptor.presets.id,
+                    item_id: mounted.descriptor.presets.items[0].id.clone(),
+                }),
+            })
+            .expect("probe action should match its mounted panel");
 
-        let outcome = session.apply_active_mindmap_theme("tide".to_owned(), 20.0);
-        let tab_id = session.active_tab_id().expect("mindmap tab should remain active");
-
+        let outcome = session.dispatch_inspector_panel_action(action.clone(), 20.0);
+        let tab_id = session.active_tab_id().expect("inspector tab should remain active");
+        let edited = session.document_text_snapshot(tab_id).expect("edited snapshot must exist");
+        assert_eq!(edited.text, "theme=tide\nroot");
         assert_eq!(
-            session.document_text_snapshot(tab_id).expect("mindmap snapshot should exist").text,
-            "theme=tide\nroot"
+            outcome
+                .notifications
+                .iter()
+                .filter(|notification| matches!(
+                    notification,
+                    EditorNotification::ContentChanged { tab_id: changed_tab_id, .. }
+                        if *changed_tab_id == tab_id
+                ))
+                .count(),
+            1
         );
-        assert!(outcome.notifications.iter().any(|notification| matches!(
-            notification,
-            EditorNotification::ContentChanged { tab_id: changed_tab_id, .. }
-                if *changed_tab_id == tab_id
-        )));
+
+        let replay = session.dispatch_inspector_panel_action(action, 20.0);
+        assert!(replay.notifications.is_empty());
+        let current = session.document_text_snapshot(tab_id).expect("document must remain");
+        assert_eq!(current.text, edited.text);
+        assert_eq!(current.content_revision, edited.content_revision);
     }
 
     #[test]

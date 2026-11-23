@@ -34,10 +34,10 @@ mod event_runtime;
 pub mod frame_cache;
 pub mod gpu;
 pub mod image_atlas;
+pub mod inspector_panel;
 #[cfg(target_os = "macos")]
 pub mod macos;
 pub mod measure_adapter;
-pub mod mindmap_style_panel;
 pub mod paint_backend;
 pub mod pointer_capture;
 pub mod prepared_tab;

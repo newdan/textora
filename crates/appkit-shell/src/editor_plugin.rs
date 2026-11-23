@@ -67,13 +67,6 @@ impl ui::plugin::ViewPluginCapabilities for EditorPlugin {
     fn set_view_render_settings(&mut self, settings: ui::plugin::ViewRenderSettings) {
         self.line_height = settings.line_height;
     }
-    fn query(
-        &self,
-        _query: ui::plugin::PluginQuery,
-        _doc: &dyn DocView,
-    ) -> ui::plugin::PluginResponse {
-        ui::plugin::PluginResponse::None
-    }
 }
 
 #[cfg(test)]

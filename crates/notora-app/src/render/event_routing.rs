@@ -192,7 +192,7 @@ impl NotoraShell {
         {
             return route;
         }
-        if let Some(route) = self.route_mindmap_style_panel_event(event, event_context) {
+        if let Some(route) = self.route_inspector_panel_event(event, event_context) {
             return route;
         }
         if self.editor_pane.has_open_popup() {
@@ -237,12 +237,11 @@ impl NotoraShell {
         if self.editor_pane.has_open_popup() {
             return None;
         }
-        if self.mindmap_style_panel_open && self.mindmap_style_panel_rect.contains(px, py) {
-            let hint = self.mindmap_style_panel.tooltip_at(
-                px - self.mindmap_style_panel_rect.x,
-                py - self.mindmap_style_panel_rect.y,
-            )?;
-            return Some(offset_tooltip_hint(hint, self.mindmap_style_panel_rect));
+        if self.inspector_panel_stamp.is_some() && self.inspector_panel_rect.contains(px, py) {
+            let hint = self
+                .inspector_panel
+                .tooltip_at(px - self.inspector_panel_rect.x, py - self.inspector_panel_rect.y)?;
+            return Some(offset_tooltip_hint(hint, self.inspector_panel_rect));
         }
         self.new_note_button
             .tooltip_at(px, py)
@@ -355,23 +354,18 @@ impl NotoraShell {
             .unwrap_or_else(|| NotoraEventRoute::consumed(None))
     }
 
-    fn route_mindmap_style_panel_event(
+    fn route_inspector_panel_event(
         &mut self,
         event: &Event,
         event_context: &mut EventCtx,
     ) -> Option<NotoraEventRoute> {
-        if !self.mindmap_style_panel_open {
-            return None;
-        }
-        let local_event = translate_event(
-            event,
-            self.mindmap_style_panel_rect.x,
-            self.mindmap_style_panel_rect.y,
-        );
-        let widget_action = self.mindmap_style_panel.on_event(&local_event, event_context);
+        self.inspector_panel_stamp.as_ref()?;
+        let local_event =
+            translate_event(event, self.inspector_panel_rect.x, self.inspector_panel_rect.y);
+        let widget_action = self.inspector_panel.on_event(&local_event, event_context);
         let action = widget_action.as_ref().and_then(|action| self.translate_widget_action(action));
         let pointer_inside = event_pointer_position(event)
-            .is_some_and(|(px, py)| self.mindmap_style_panel_rect.contains(px, py));
+            .is_some_and(|(px, py)| self.inspector_panel_rect.contains(px, py));
         if widget_action.is_some() || event_is_keyboard(event) || pointer_inside {
             return Some(NotoraEventRoute::consumed(action));
         }

@@ -394,14 +394,6 @@ pub struct MindmapColorScheme {
     pub semantic: MindmapSemanticTheme,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum MindmapThemeSelection {
-    Default,
-    Selected(String),
-    Unknown(String),
-    InvalidMetadata,
-}
-
 #[derive(Clone, Copy)]
 pub struct MindmapRenderTheme<'a> {
     pub canvas: &'a MindmapCanvasTheme,
@@ -617,19 +609,6 @@ pub fn built_in_mindmap_color_schemes() -> &'static [MindmapColorScheme] {
 
 pub fn find_mindmap_color_scheme(id: &str) -> Option<&'static MindmapColorScheme> {
     built_in_mindmap_color_schemes().iter().find(|scheme| scheme.id == id)
-}
-
-pub fn resolve_mindmap_theme_selection(id: Option<&str>) -> MindmapThemeSelection {
-    match id {
-        None => MindmapThemeSelection::Default,
-        Some(id) => {
-            if find_mindmap_color_scheme(id).is_some() {
-                MindmapThemeSelection::Selected(id.to_string())
-            } else {
-                MindmapThemeSelection::Unknown(id.to_string())
-            }
-        }
-    }
 }
 
 fn build_warm_night_scheme() -> MindmapColorScheme {
@@ -896,19 +875,6 @@ mod tests {
         let background_luma =
             scheme.canvas.background[0] + scheme.canvas.background[1] + scheme.canvas.background[2];
         assert!(background_luma > 1.5, "default scheme should be light, got {background_luma}");
-    }
-
-    #[test]
-    fn absent_and_unknown_theme_ids_have_distinct_selection_states() {
-        assert_eq!(resolve_mindmap_theme_selection(None), MindmapThemeSelection::Default);
-        assert_eq!(
-            resolve_mindmap_theme_selection(Some("tide")),
-            MindmapThemeSelection::Selected("tide".into())
-        );
-        assert_eq!(
-            resolve_mindmap_theme_selection(Some("future-theme")),
-            MindmapThemeSelection::Unknown("future-theme".into())
-        );
     }
 
     #[test]

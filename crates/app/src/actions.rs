@@ -135,10 +135,10 @@ pub(crate) enum AppAction {
     ToggleStatusBar,
     /// Set theme mode (System / Dark / Light).
     SetThemeMode(ui::settings::ThemeMode),
-    /// Toggle the active mmap tab's style panel.
-    ToggleMindmapStylePanel,
-    /// Handle an action emitted by the mmap style panel.
-    MindmapStylePanel(ui::core::widget::MindmapStylePanelAction),
+    /// Toggle the active view's inspector panel.
+    ToggleInspectorPanel,
+    /// Dispatch an action associated with the layout that produced it.
+    InspectorPanel(appkit_shell::inspector_panel::StampedInspectorPanelAction),
     /// Handle a typed table picker result.
     TablePicker(ui::table_picker::TablePickerAction),
 

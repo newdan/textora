@@ -35,10 +35,10 @@ pub enum WindowChrome {
     Custom { maximized: bool },
 }
 
-/// mmap 风格按钮的标题栏输入。
+/// 属性面板按钮的标题栏输入。
 #[derive(Clone, Copy, Debug)]
-pub struct MindmapStyleButtonInput {
-    /// 右侧风格面板当前是否可见。
+pub struct InspectorButtonInput {
+    /// 右侧属性面板当前是否可见。
     pub panel_visible: bool,
 }
 
@@ -67,8 +67,8 @@ pub struct TitleBarInput {
     pub toc_visible: bool,
     /// Whether the TOC toggle button should be shown (only in markdown preview mode).
     pub toc_enabled: bool,
-    /// mmap 风格按钮；非 mmap 视图传入 `None`。
-    pub mindmap_style: Option<MindmapStyleButtonInput>,
+    /// 属性面板按钮；不提供面板的视图传入 `None`。
+    pub inspector: Option<InspectorButtonInput>,
     pub window_chrome: WindowChrome,
     pub show_hamburger: bool,
 }
@@ -85,8 +85,8 @@ pub enum TitleBarAction {
     ToggleView,
     /// Toggle the table of contents panel.
     ToggleToc,
-    /// Toggle the mmap style panel.
-    ToggleMindmapStylePanel,
+    /// Toggle the active view inspector.
+    ToggleInspectorPanel,
 }
 
 pub struct TitleBarWidget {
@@ -104,8 +104,8 @@ pub struct TitleBarWidget {
     name_width: f32,
     /// Precomputed toggle button rect (for hit testing).
     toggle_rect: Rect,
-    /// Precomputed mmap style button rect (for hit testing).
-    mindmap_style_rect: Rect,
+    /// Precomputed inspector button rect (for hit testing).
+    inspector_rect: Rect,
     /// Precomputed TOC toggle button rect (for hit testing).
     toc_rect: Rect,
     hamburger_rect: Rect,
@@ -113,7 +113,7 @@ pub struct TitleBarWidget {
     hovered_window_button: Option<usize>,
     hamburger_hovered: bool,
     toggle_hovered: bool,
-    mindmap_style_hovered: bool,
+    inspector_hovered: bool,
     toc_hovered: bool,
 }
 
@@ -134,14 +134,14 @@ impl TitleBarWidget {
             text_hit_rect: Rect::ZERO,
             name_width: 0.0,
             toggle_rect: Rect::ZERO,
-            mindmap_style_rect: Rect::ZERO,
+            inspector_rect: Rect::ZERO,
             toc_rect: Rect::ZERO,
             hamburger_rect: Rect::ZERO,
             window_button_rects: [Rect::ZERO; 3],
             hovered_window_button: None,
             hamburger_hovered: false,
             toggle_hovered: false,
-            mindmap_style_hovered: false,
+            inspector_hovered: false,
             toc_hovered: false,
         }
     }
@@ -156,8 +156,8 @@ impl TitleBarWidget {
     }
 
     #[cfg(test)]
-    fn mindmap_style_rect_for_test(&self) -> Rect {
-        self.mindmap_style_rect
+    fn inspector_rect_for_test(&self) -> Rect {
+        self.inspector_rect
     }
 
     fn layout_text(&mut self, input: &TitleBarInput, dpi: f32, measure: &mut dyn TextMeasure) {
@@ -297,8 +297,8 @@ impl Widget for TitleBarWidget {
                 self.toggle_rect = Rect::ZERO;
             }
 
-            if input.mindmap_style.is_some() {
-                self.mindmap_style_rect = next_action_rect(
+            if input.inspector.is_some() {
+                self.inspector_rect = next_action_rect(
                     &mut next_action_right,
                     background_x,
                     btn_size,
@@ -306,7 +306,7 @@ impl Widget for TitleBarWidget {
                     action_gap,
                 );
             } else {
-                self.mindmap_style_rect = Rect::ZERO;
+                self.inspector_rect = Rect::ZERO;
             }
 
             if input.can_toggle && input.toc_enabled {
@@ -323,7 +323,7 @@ impl Widget for TitleBarWidget {
 
             let text_x =
                 self.hamburger_rect.right().max(background_x) + TEXT_HORIZONTAL_INSET_LOGICAL * dpi;
-            let first_action_x = [self.toc_rect, self.mindmap_style_rect, self.toggle_rect]
+            let first_action_x = [self.toc_rect, self.inspector_rect, self.toggle_rect]
                 .into_iter()
                 .filter(|action_rect| action_rect.w > 0.0)
                 .map(|action_rect| action_rect.x)
@@ -342,14 +342,14 @@ impl Widget for TitleBarWidget {
             self.layout_text(&input, dpi, measure);
 
             debug_assert!(
-                self.mindmap_style_rect == Rect::ZERO
+                self.inspector_rect == Rect::ZERO
                     || self.toggle_rect == Rect::ZERO
-                    || self.mindmap_style_rect.right() <= self.toggle_rect.x
+                    || self.inspector_rect.right() <= self.toggle_rect.x
             );
             debug_assert!(
                 self.toc_rect == Rect::ZERO
-                    || self.mindmap_style_rect == Rect::ZERO
-                    || self.toc_rect.right() <= self.mindmap_style_rect.x
+                    || self.inspector_rect == Rect::ZERO
+                    || self.toc_rect.right() <= self.inspector_rect.x
             );
         } else {
             self.displayed_name.clear();
@@ -358,7 +358,7 @@ impl Widget for TitleBarWidget {
             self.text_hit_rect = Rect::ZERO;
             self.name_width = 0.0;
             self.toggle_rect = Rect::ZERO;
-            self.mindmap_style_rect = Rect::ZERO;
+            self.inspector_rect = Rect::ZERO;
             self.toc_rect = Rect::ZERO;
             self.hamburger_rect = Rect::ZERO;
             self.window_button_rects = [Rect::ZERO; 3];
@@ -491,20 +491,20 @@ impl Widget for TitleBarWidget {
             draw_icon(ctx.list, "eye", icon_x, icon_y, icon_size, icon_color);
         }
 
-        // 5) mmap style button
-        if let Some(style_input) = input.mindmap_style
-            && self.mindmap_style_rect.w > 0.0
+        // 5) Inspector button
+        if let Some(inspector_input) = input.inspector
+            && self.inspector_rect.w > 0.0
         {
-            let r = &self.mindmap_style_rect;
+            let r = &self.inspector_rect;
             let btn_bg =
-                if self.mindmap_style_hovered { hover_color } else { ctx.theme.editor.background };
+                if self.inspector_hovered { hover_color } else { ctx.theme.editor.background };
             ctx.list.fill_rounded(
                 Rect::new(r.x, r.y, r.w, r.h),
                 btn_bg,
                 ctx.theme.control_metrics().compact_corner_radius_logical * dpi,
             );
 
-            let icon_color = if style_input.panel_visible {
+            let icon_color = if inspector_input.panel_visible {
                 ctx.theme.palette.accent_text
             } else {
                 let mut color = ctx.theme.palette.text_muted;
@@ -563,13 +563,13 @@ impl Widget for TitleBarWidget {
                     .iter()
                     .position(|rect| rect.w > 0.0 && rect.contains(*px, *py));
                 self.toc_hovered = self.toc_rect.w > 0.0 && self.toc_rect.contains(*px, *py);
-                self.mindmap_style_hovered =
-                    self.mindmap_style_rect.w > 0.0 && self.mindmap_style_rect.contains(*px, *py);
+                self.inspector_hovered =
+                    self.inspector_rect.w > 0.0 && self.inspector_rect.contains(*px, *py);
                 self.toggle_hovered =
                     self.toggle_rect.w > 0.0 && self.toggle_rect.contains(*px, *py);
 
                 if self.toc_hovered
-                    || self.mindmap_style_hovered
+                    || self.inspector_hovered
                     || self.toggle_hovered
                     || self.hamburger_hovered
                     || self.hovered_window_button.is_some()
@@ -583,7 +583,7 @@ impl Widget for TitleBarWidget {
                     Some(WidgetAction::Consumed)
                 } else {
                     self.toc_hovered = false;
-                    self.mindmap_style_hovered = false;
+                    self.inspector_hovered = false;
                     self.toggle_hovered = false;
                     self.hamburger_hovered = false;
                     self.hovered_window_button = None;
@@ -614,10 +614,10 @@ impl Widget for TitleBarWidget {
                     return Some(WidgetAction::TitleBar(TitleBarAction::ToggleView));
                 }
                 if *button == MouseButton::Left
-                    && self.mindmap_style_rect.w > 0.0
-                    && self.mindmap_style_rect.contains(*px, *py)
+                    && self.inspector_rect.w > 0.0
+                    && self.inspector_rect.contains(*px, *py)
                 {
-                    return Some(WidgetAction::TitleBar(TitleBarAction::ToggleMindmapStylePanel));
+                    return Some(WidgetAction::TitleBar(TitleBarAction::ToggleInspectorPanel));
                 }
                 if *button == MouseButton::Left
                     && self.toc_rect.w > 0.0
@@ -675,10 +675,10 @@ impl Widget for TitleBarWidget {
                 return Some(TooltipHint { label: label.to_owned(), target_rect: *rect });
             }
         }
-        if self.mindmap_style_rect.w > 0.0 && self.mindmap_style_rect.contains(px, py) {
+        if self.inspector_rect.w > 0.0 && self.inspector_rect.contains(px, py) {
             return Some(TooltipHint {
                 label: "思维导图风格".to_string(),
-                target_rect: self.mindmap_style_rect,
+                target_rect: self.inspector_rect,
             });
         }
         if self.toc_rect.w > 0.0 && self.toc_rect.contains(px, py) {
@@ -747,7 +747,7 @@ mod tests {
             toggle_label: Some("源码".into()),
             toc_visible: false,
             toc_enabled: false,
-            mindmap_style: None,
+            inspector: None,
             window_chrome: WindowChrome::Native,
             show_hamburger: false,
         }
@@ -804,7 +804,7 @@ mod tests {
             TitleBarInput {
                 file_path: Some(full_path.clone()),
                 toc_enabled: true,
-                mindmap_style: Some(MindmapStyleButtonInput { panel_visible: false }),
+                inspector: Some(InspectorButtonInput { panel_visible: false }),
                 ..test_title_bar_input()
             },
             220.0,
@@ -896,7 +896,7 @@ mod tests {
                 let mut widget = laid_out_title_bar_at(
                     TitleBarInput {
                         toc_enabled: true,
-                        mindmap_style: Some(MindmapStyleButtonInput { panel_visible: false }),
+                        inspector: Some(InspectorButtonInput { panel_visible: false }),
                         ..test_title_bar_input()
                     },
                     width,
@@ -905,7 +905,7 @@ mod tests {
                     theme,
                 );
 
-                for rect in [widget.toggle_rect, widget.mindmap_style_rect, widget.toc_rect] {
+                for rect in [widget.toggle_rect, widget.inspector_rect, widget.toc_rect] {
                     assert!(rect.x >= 0.0 && rect.y >= 0.0 && rect.w >= 0.0 && rect.h >= 0.0);
                     assert!(rect.right() <= width && rect.bottom() <= height);
                 }
@@ -953,7 +953,7 @@ mod tests {
                 sidebar_left: reserved_hamburger_width,
                 titlebar_x: 0.0,
                 toc_enabled: true,
-                mindmap_style: Some(MindmapStyleButtonInput { panel_visible: false }),
+                inspector: Some(InspectorButtonInput { panel_visible: false }),
                 ..test_title_bar_input()
             },
             120.0,
@@ -962,7 +962,7 @@ mod tests {
             &theme,
         );
 
-        for rect in [widget.toggle_rect, widget.mindmap_style_rect, widget.toc_rect] {
+        for rect in [widget.toggle_rect, widget.inspector_rect, widget.toc_rect] {
             assert!(
                 rect == Rect::ZERO || rect.x >= reserved_hamburger_width,
                 "按钮不得进入汉堡保留区：{rect:?}"
@@ -971,29 +971,29 @@ mod tests {
     }
 
     #[test]
-    fn mmap_style_button_is_left_of_view_toggle_and_does_not_overlap() {
+    fn inspector_button_is_left_of_view_toggle_and_does_not_overlap() {
         let widget = laid_out_title_bar(TitleBarInput {
-            mindmap_style: Some(MindmapStyleButtonInput { panel_visible: false }),
+            inspector: Some(InspectorButtonInput { panel_visible: false }),
             ..test_title_bar_input()
         });
 
-        assert!(widget.mindmap_style_rect_for_test().right() <= widget.toggle_rect_for_test().x);
+        assert!(widget.inspector_rect_for_test().right() <= widget.toggle_rect_for_test().x);
     }
 
     #[test]
-    fn mmap_style_button_is_absent_when_input_is_none() {
+    fn inspector_button_is_absent_when_input_is_none() {
         let widget =
-            laid_out_title_bar(TitleBarInput { mindmap_style: None, ..test_title_bar_input() });
+            laid_out_title_bar(TitleBarInput { inspector: None, ..test_title_bar_input() });
 
-        assert_eq!(widget.mindmap_style_rect_for_test(), Rect::ZERO);
+        assert_eq!(widget.inspector_rect_for_test(), Rect::ZERO);
     }
 
     #[test]
-    fn active_mmap_style_button_uses_readable_accent_foreground() {
+    fn active_inspector_button_uses_readable_accent_foreground() {
         let theme = Theme::from_definition(&crate::theme::ThemeDefinition::default_light());
         let widget = laid_out_title_bar_at(
             TitleBarInput {
-                mindmap_style: Some(MindmapStyleButtonInput { panel_visible: true }),
+                inspector: Some(InspectorButtonInput { panel_visible: true }),
                 can_toggle: false,
                 ..test_title_bar_input()
             },
@@ -1031,12 +1031,12 @@ mod tests {
     }
 
     #[test]
-    fn mmap_style_button_click_emits_toggle_action() {
+    fn inspector_button_click_emits_toggle_action() {
         let mut widget = laid_out_title_bar(TitleBarInput {
-            mindmap_style: Some(MindmapStyleButtonInput { panel_visible: false }),
+            inspector: Some(InspectorButtonInput { panel_visible: false }),
             ..test_title_bar_input()
         });
-        let rect = widget.mindmap_style_rect_for_test();
+        let rect = widget.inspector_rect_for_test();
         let theme = test_theme();
         let mut event_ctx = EventCtx::new(&theme, 1.0);
 
@@ -1049,7 +1049,7 @@ mod tests {
                 },
                 &mut event_ctx,
             ),
-            Some(WidgetAction::TitleBar(TitleBarAction::ToggleMindmapStylePanel))
+            Some(WidgetAction::TitleBar(TitleBarAction::ToggleInspectorPanel))
         );
     }
 
@@ -1087,7 +1087,7 @@ mod tests {
             toggle_label: None,
             toc_visible: false,
             toc_enabled: false,
-            mindmap_style: None,
+            inspector: None,
             window_chrome: WindowChrome::Native,
             show_hamburger: false,
         });
@@ -1129,7 +1129,7 @@ mod tests {
             toggle_label: None,
             toc_visible: false,
             toc_enabled: false,
-            mindmap_style: None,
+            inspector: None,
             window_chrome: WindowChrome::Native,
             show_hamburger: false,
         });
@@ -1178,7 +1178,7 @@ mod tests {
             toggle_label: None,
             toc_visible: false,
             toc_enabled: false,
-            mindmap_style: None,
+            inspector: None,
             window_chrome: WindowChrome::Native,
             show_hamburger: false,
         });
@@ -1220,7 +1220,7 @@ mod tests {
             toggle_label: None,
             toc_visible: false,
             toc_enabled: false,
-            mindmap_style: None,
+            inspector: None,
             window_chrome: WindowChrome::Native,
             show_hamburger: false,
         });
@@ -1270,7 +1270,7 @@ mod tests {
             toggle_label: None,
             toc_visible: false,
             toc_enabled: false,
-            mindmap_style: None,
+            inspector: None,
             window_chrome: WindowChrome::Native,
             show_hamburger: false,
         });
@@ -1298,7 +1298,7 @@ mod tests {
             toggle_label: None,
             toc_visible: false,
             toc_enabled: false,
-            mindmap_style: None,
+            inspector: None,
             window_chrome: WindowChrome::Native,
             show_hamburger: false,
         });
@@ -1325,7 +1325,7 @@ mod tests {
             toggle_label: None,
             toc_visible: false,
             toc_enabled: false,
-            mindmap_style: None,
+            inspector: None,
             window_chrome: WindowChrome::Native,
             show_hamburger: false,
         });
@@ -1356,7 +1356,7 @@ mod tests {
             toggle_label: None,
             toc_visible: false,
             toc_enabled: false,
-            mindmap_style: None,
+            inspector: None,
             window_chrome: WindowChrome::Native,
             show_hamburger: false,
         });
@@ -1384,7 +1384,7 @@ mod tests {
             toggle_label: None,
             toc_visible: false,
             toc_enabled: false,
-            mindmap_style: None,
+            inspector: None,
             window_chrome: WindowChrome::Native,
             show_hamburger: false,
         });
@@ -1412,7 +1412,7 @@ mod tests {
             toggle_label: None,
             toc_visible: false,
             toc_enabled: false,
-            mindmap_style: None,
+            inspector: None,
             window_chrome: WindowChrome::Native,
             show_hamburger: false,
         });
@@ -1441,7 +1441,7 @@ mod tests {
             toggle_label: None,
             toc_visible: false,
             toc_enabled: false,
-            mindmap_style: None,
+            inspector: None,
             window_chrome: WindowChrome::Native,
             show_hamburger: false,
         });
@@ -1466,7 +1466,7 @@ mod tests {
             toggle_label: None,
             toc_visible: false,
             toc_enabled: false,
-            mindmap_style: None,
+            inspector: None,
             window_chrome: WindowChrome::Native,
             show_hamburger: false,
         });
@@ -1489,7 +1489,7 @@ mod tests {
             toggle_label: Some("预览".into()),
             toc_visible: false,
             toc_enabled: false,
-            mindmap_style: None,
+            inspector: None,
             window_chrome: WindowChrome::Native,
             show_hamburger: false,
         });
@@ -1513,7 +1513,7 @@ mod tests {
             toggle_label: Some("预览".into()),
             toc_visible: false,
             toc_enabled: false,
-            mindmap_style: None,
+            inspector: None,
             window_chrome: WindowChrome::Native,
             show_hamburger: false,
         });
@@ -1542,7 +1542,7 @@ mod tests {
             toggle_label: Some("预览".into()),
             toc_visible: false,
             toc_enabled: false,
-            mindmap_style: None,
+            inspector: None,
             window_chrome: WindowChrome::Native,
             show_hamburger: false,
         });
@@ -1572,7 +1572,7 @@ mod tests {
             toggle_label: Some("预览".into()),
             toc_visible: false,
             toc_enabled: false,
-            mindmap_style: None,
+            inspector: None,
             window_chrome: WindowChrome::Native,
             show_hamburger: false,
         });
@@ -1602,7 +1602,7 @@ mod tests {
             toggle_label: Some("预览".into()),
             toc_visible: false,
             toc_enabled: false,
-            mindmap_style: None,
+            inspector: None,
             window_chrome: WindowChrome::Native,
             show_hamburger: false,
         });
@@ -1632,7 +1632,7 @@ mod tests {
             toggle_label: Some("预览".into()),
             toc_visible: false,
             toc_enabled: false,
-            mindmap_style: None,
+            inspector: None,
             window_chrome: WindowChrome::Native,
             show_hamburger: false,
         });
@@ -1661,7 +1661,7 @@ mod tests {
             toggle_label: Some("预览".into()),
             toc_visible: false,
             toc_enabled: false,
-            mindmap_style: None,
+            inspector: None,
             window_chrome: WindowChrome::Native,
             show_hamburger: false,
         });
@@ -1697,7 +1697,7 @@ mod tests {
             toggle_label: Some("预览".into()),
             toc_visible: false,
             toc_enabled: false,
-            mindmap_style: None,
+            inspector: None,
             window_chrome: WindowChrome::Native,
             show_hamburger: false,
         });
@@ -1733,7 +1733,7 @@ mod tests {
             toggle_label: Some("预览".into()),
             toc_visible: false,
             toc_enabled: false,
-            mindmap_style: None,
+            inspector: None,
             window_chrome: WindowChrome::Native,
             show_hamburger: false,
         });
@@ -1747,7 +1747,7 @@ mod tests {
             toggle_label: Some("预览".into()),
             toc_visible: false,
             toc_enabled: false,
-            mindmap_style: None,
+            inspector: None,
             window_chrome: WindowChrome::Native,
             show_hamburger: false,
         });
@@ -1806,7 +1806,7 @@ mod tests {
             toggle_label: Some("预览 ⌘⇧M".into()),
             toc_visible: false,
             toc_enabled: false,
-            mindmap_style: None,
+            inspector: None,
             window_chrome: WindowChrome::Native,
             show_hamburger: false,
         });
@@ -1834,7 +1834,7 @@ mod tests {
             toggle_label: Some("编辑 ⌘⇧M".into()),
             toc_visible: false,
             toc_enabled: false,
-            mindmap_style: None,
+            inspector: None,
             window_chrome: WindowChrome::Native,
             show_hamburger: false,
         });
@@ -1862,7 +1862,7 @@ mod tests {
             toggle_label: Some("预览".into()),
             toc_visible: false,
             toc_enabled: false,
-            mindmap_style: None,
+            inspector: None,
             window_chrome: WindowChrome::Native,
             show_hamburger: false,
         });
@@ -1887,7 +1887,7 @@ mod tests {
             toggle_label: None,
             toc_visible: false,
             toc_enabled: false,
-            mindmap_style: None,
+            inspector: None,
             window_chrome: WindowChrome::Native,
             show_hamburger: false,
         });

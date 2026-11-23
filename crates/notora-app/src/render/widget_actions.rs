@@ -52,9 +52,11 @@ impl NotoraShell {
                 id: ui::editor_toolbar::EDITOR_TOOLBAR_COMMAND_ID,
                 value: TextPayload::Plain(command_key),
             }) => self.editor_command_actions.get(command_key).cloned(),
-            WidgetAction::MindmapStylePanel(action) => {
-                Some(NotoraAction::MindmapStylePanel(action.clone()))
-            }
+            WidgetAction::InspectorPanel(action) => self
+                .inspector_panel_stamp
+                .as_ref()?
+                .stamp(action.clone())
+                .map(NotoraAction::InspectorPanel),
             WidgetAction::Control(ControlAction::TextEdited {
                 id: ui::editor_header::EDITOR_HEADER_TITLE_ID,
                 value,

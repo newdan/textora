@@ -255,7 +255,7 @@ impl NotoraShell {
             || self.new_document_menu_open
             || self.editor_pane.has_open_popup()
             || pointer.is_some_and(|(px, py)| {
-                self.mindmap_style_panel_open && self.mindmap_style_panel_rect.contains(px, py)
+                self.inspector_panel_stamp.is_some() && self.inspector_panel_rect.contains(px, py)
             })
         {
             return false;
@@ -319,6 +319,8 @@ fn is_permanent_deletion(action: &NotoraAction) -> bool {
 
 #[cfg(test)]
 mod tests {
+    use ui::Widget;
+
     use super::super::*;
 
     fn synchronize_buttons(shell: &mut NotoraShell, theme: &ui::Theme) {

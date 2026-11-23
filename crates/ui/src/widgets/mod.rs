@@ -26,6 +26,7 @@ pub mod editor_toolbar;
 pub mod form;
 pub mod icon;
 pub mod inline_group;
+pub mod inspector_panel;
 pub mod label;
 pub mod location_picker;
 pub mod modal_frame;

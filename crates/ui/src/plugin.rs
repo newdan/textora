@@ -7,21 +7,13 @@ use std::path::Path;
 
 use shaping::Shaper;
 use textora_core::buffer::EditHistoryKind;
-use textora_core::document::{DocView, DocViewMut};
+use textora_core::document::DocView;
 pub use textora_core::types::CursorAffinity;
 
 use crate::canvas::{CanvasPoint, CanvasViewportSnapshot};
 use crate::core::geom::Rect;
 use crate::core::paint::DrawList;
 use crate::theme::Theme;
-
-// ---------------------------------------------------------------------------
-// Messages & Queries
-// ---------------------------------------------------------------------------
-
-/// Commands sent from the host to a plugin.
-#[derive(Debug)]
-pub enum PluginMessage {}
 
 // ---------------------------------------------------------------------------
 // Directional / augmentation types (WYSIWYG)
@@ -92,26 +84,6 @@ pub trait KeyIntentMapper {
         key: &crate::core::widget::KeyCode,
         modifiers: &crate::core::widget::Modifiers,
     ) -> Option<EditIntent>;
-}
-
-/// Synchronous queries from the host into a plugin.
-#[derive(Debug)]
-pub enum PluginQuery {
-    /// Report the file-level mindmap theme selection for the current document.
-    MindmapThemeSelection,
-    /// Plan an edit that sets the file-level mindmap theme.
-    PlanMindmapTheme { theme_id: String, source_generation: u32 },
-}
-
-/// Responses returned from [`PluginQuery`].
-#[derive(Debug)]
-pub enum PluginResponse {
-    /// No meaningful result (e.g. query not applicable).
-    None,
-    /// Declarative edit plan for a canvas control.
-    EditPlan(EditPlan),
-    /// The file-level mindmap theme selection reported by the plugin.
-    MindmapThemeSelection(crate::theme::MindmapThemeSelection),
 }
 
 // ---------------------------------------------------------------------------
@@ -588,8 +560,28 @@ pub trait ScrollableView {
     }
 }
 
+/// Optional inspector UI capability backed by a synchronized view.
+pub trait InspectorPanelProvider {
+    /// 描述符和动作都绑定到已同步的源码快照。
+    fn inspector_descriptor(
+        &self,
+        source_generation: u32,
+    ) -> Option<crate::widgets::inspector_panel::InspectorPanelDescriptor>;
+
+    fn plan_inspector_action(
+        &self,
+        panel_id: &crate::widgets::inspector_panel::PanelId,
+        target: &crate::widgets::inspector_panel::InspectorItemTarget,
+        source_generation: u32,
+    ) -> EditPlan;
+}
+
 /// Discovers capabilities borrowed from the same instance that renders the view.
 pub trait ViewPluginCapabilities: ViewPlugin {
+    fn inspector_panel_provider(&self) -> Option<&dyn InspectorPanelProvider> {
+        None
+    }
+
     fn set_view_render_settings(&mut self, _settings: ViewRenderSettings) {}
 
     fn set_view_text_spacing_mode(&mut self, _mode: crate::typography::TextSpacingMode) {}
@@ -648,18 +640,6 @@ pub trait ViewPluginCapabilities: ViewPlugin {
 
     fn search_mut(&mut self) -> Option<&mut dyn SearchView> {
         None
-    }
-
-    /// Handle a command message. Returns `true` if the message was consumed.
-    fn handle_message(&mut self, msg: PluginMessage, doc: &mut dyn DocViewMut) -> bool {
-        let _ = (msg, doc);
-        false
-    }
-
-    /// Answer a synchronous query.
-    fn query(&self, query: PluginQuery, doc: &dyn DocView) -> PluginResponse {
-        let _ = (query, doc);
-        PluginResponse::None
     }
 
     /// Whether the app should still handle cursor blink wakeups for this plugin.

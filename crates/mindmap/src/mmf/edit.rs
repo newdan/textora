@@ -199,11 +199,12 @@ pub fn plan_set_mindmap_theme(
     source_generation: u32,
     cursor_byte: usize,
 ) -> EditPlan {
+    let current_theme = tree.global_props.get("theme").map(String::as_str);
+    if current_theme.unwrap_or(ui::theme::DEFAULT_MINDMAP_COLOR_SCHEME_ID) == theme_id {
+        return EditPlan::Consume;
+    }
     match crate::mmf::parser::parse_global_property_source(source) {
         Err(_) => EditPlan::Consume,
-        Ok(Some(_)) if tree.global_props.get("theme").is_some_and(|id| id == theme_id) => {
-            EditPlan::Consume
-        }
         Ok(Some(property_source)) => plan_existing_global_block(
             source,
             property_source,

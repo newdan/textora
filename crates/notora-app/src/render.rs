@@ -16,12 +16,14 @@ use crate::encrypted_note_dialog::EncryptedNoteDialog;
 pub use crate::encrypted_note_dialog::{EncryptedNoteDialogInput, EncryptedNoteDialogMode};
 use crate::encrypted_note_unlock::EncryptedNoteUnlock;
 pub use crate::encrypted_note_unlock::EncryptedNoteUnlockInput;
-use appkit_shell::mindmap_style_panel::MindmapStylePanelWidget;
+use appkit_shell::inspector_panel::InspectorPanelStamp;
 #[cfg(test)]
 use notora_core::NavigationScope;
 use notora_core::{DocumentIdentity, DocumentKind, NoteId};
+use ui::Rect;
 use ui::canvas_scrollbars::{CanvasScrollbarsInput, CanvasScrollbarsWidget};
 use ui::core::widget::WidgetId;
+use ui::inspector_panel::InspectorPanelWidget;
 use ui::popup_menu::PopupMenuWidget;
 use ui::split_button::{SplitButtonInput, SplitButtonWidget};
 use ui::splitter::SplitterWidget;
@@ -34,7 +36,6 @@ use ui::virtual_card_list::{
 };
 #[cfg(test)]
 use ui::{Event, EventCtx};
-use ui::{Rect, Widget};
 
 use crate::action::{NotoraAction, TrashOperation};
 use crate::editor_pane::EditorPaneChrome;
@@ -56,6 +57,7 @@ pub(crate) use self::editor_model::{
 };
 pub use self::event_routing::{CanvasViewCommand, NotoraEventRoute};
 pub use self::model::{ConfirmationOverlayInput, NotoraRenderModel, SaveConflictOverlayInput};
+pub(crate) use self::painting::editor_inspector_rects;
 
 const GLOBAL_SEARCH_BOX_ID: WidgetId = WidgetId(9_000);
 const SETTINGS_BUTTON_ID: WidgetId = WidgetId(9_001);
@@ -97,9 +99,9 @@ pub struct NotoraShell {
     editor_location_actions: HashMap<String, NotoraAction>,
     editor_tag_actions: HashMap<String, NotoraAction>,
     editor_command_actions: HashMap<String, NotoraAction>,
-    mindmap_style_panel: MindmapStylePanelWidget,
-    mindmap_style_panel_open: bool,
-    mindmap_style_panel_rect: Rect,
+    inspector_panel: InspectorPanelWidget,
+    inspector_panel_stamp: Option<InspectorPanelStamp>,
+    inspector_panel_rect: Rect,
     settings_overlay: SettingsOverlay,
     settings_overlay_open: bool,
     new_workspace_dialog: Option<NewWorkspaceDialog>,
@@ -177,9 +179,9 @@ impl NotoraShell {
             editor_location_actions: HashMap::new(),
             editor_tag_actions: HashMap::new(),
             editor_command_actions: HashMap::new(),
-            mindmap_style_panel: MindmapStylePanelWidget::new(),
-            mindmap_style_panel_open: false,
-            mindmap_style_panel_rect: Rect::ZERO,
+            inspector_panel: InspectorPanelWidget::new(),
+            inspector_panel_stamp: None,
+            inspector_panel_rect: Rect::ZERO,
             settings_overlay: SettingsOverlay::new(),
             settings_overlay_open: false,
             new_workspace_dialog: None,
@@ -307,13 +309,6 @@ impl NotoraShell {
         self.editor_location_actions.clone_from(&model.editor_location_actions);
         self.editor_tag_actions.clone_from(&model.editor_tag_actions);
         self.editor_command_actions.clone_from(&model.editor_command_actions);
-        self.mindmap_style_panel_open = model.mindmap_style_panel.is_some();
-        if let Some(input) = model.mindmap_style_panel.as_ref() {
-            self.mindmap_style_panel.set_input(input.clone());
-        }
-        self.mindmap_style_panel.set_keyboard_focus(
-            self.mindmap_style_panel_open.then_some(ui::core::widget::ids::MINDMAP_STYLE_PANEL),
-        );
         self.card_empty_state.set_input(model.card_empty_state.clone());
         self.card_empty_state_visible = model.cards.is_empty();
         self.editor_empty_state.set_input(StatusStateInput {

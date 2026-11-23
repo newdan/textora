@@ -5,7 +5,7 @@ use ui::plugin::ViewPluginCapabilities;
 
 use crate::canvas_viewport::CanvasViewportSession;
 use crate::document_presentation::DocumentPresentation;
-use crate::mindmap_style_panel::MindmapStylePanelSession;
+use crate::inspector_panel::InspectorPanelSession;
 
 const UNMEASURED_VISIBLE_ROWS: usize = 0;
 const UNMEASURED_VIEWPORT_HEIGHT: f64 = 0.0;
@@ -24,7 +24,7 @@ pub struct TabRuntime {
     pub toc_visible: bool,
     pub presentation: DocumentPresentation,
     pub canvas_viewport: CanvasViewportSession,
-    pub(crate) mindmap_style_panel: MindmapStylePanelSession,
+    pub(crate) inspector_panel: InspectorPanelSession,
     editing_access: DocumentEditingAccess,
 }
 
@@ -40,7 +40,7 @@ impl TabRuntime {
                 UNMEASURED_VIEWPORT_HEIGHT,
             ),
             canvas_viewport: CanvasViewportSession::default(),
-            mindmap_style_panel: MindmapStylePanelSession::Closed,
+            inspector_panel: InspectorPanelSession::default(),
             editing_access: DocumentEditingAccess::Editable,
         }
     }
@@ -50,6 +50,14 @@ impl TabRuntime {
         presentation: DocumentPresentation,
     ) -> Self {
         Self { presentation, ..Self::new(plugin) }
+    }
+
+    pub fn replace_plugin(
+        &mut self,
+        plugin: Box<dyn ViewPluginCapabilities>,
+    ) -> Box<dyn ViewPluginCapabilities> {
+        self.inspector_panel.renew_mount();
+        std::mem::replace(&mut self.plugin, plugin)
     }
 
     pub fn editing_access(&self) -> DocumentEditingAccess {

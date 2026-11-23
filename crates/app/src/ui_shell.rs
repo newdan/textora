@@ -4,10 +4,8 @@
 
 use crate::editor_host::EditorHostWidget;
 use appkit_shell::SystemClipboard;
+use appkit_shell::inspector_panel::{MountedInspectorPanel, StampedInspectorPanelAction};
 use appkit_shell::measure_adapter::MeasureFromShaper;
-use appkit_shell::mindmap_style_panel::{
-    MindmapStylePanelInput, MindmapStylePanelWidget, PANEL_WIDTH_LOGICAL,
-};
 use std::any::Any;
 use std::time::Instant;
 use ui::Theme;
@@ -18,6 +16,7 @@ use ui::core::measure::TextMeasure;
 use ui::core::overlay::{DismissPolicy, OverlayAction, OverlayInputPolicy, OverlayLayout};
 use ui::core::paint::DrawList;
 use ui::core::widget::{Event, EventCtx, KeyCode, LayoutCtx, PaintCtx, Widget, WidgetAction};
+use ui::inspector_panel::{InspectorPanelAction, InspectorPanelWidget, PANEL_WIDTH_LOGICAL};
 use ui::scrollbar::ScrollbarWidget;
 use ui::search_bar::{SearchBarSnapshot, SearchBarWidget};
 use ui::sidebar::SidebarWidget;
@@ -98,10 +97,10 @@ pub struct UiShell {
     title_bar_input: Option<TitleBarInput>,
     /// TOC 的输入数据（app 在 update_frame 前注入）。
     toc_input: Option<ui::toc::TocInput>,
-    /// mmap 风格面板的输入数据；`None` 表示当前帧隐藏。
-    mindmap_style_panel_input: Option<MindmapStylePanelInput>,
-    mindmap_style_panel_thickness: f32,
-    last_mindmap_style_panel_thickness: f32,
+    /// 当前 Dock 布局挂载的属性面板与事件戳。
+    inspector_panel: Option<MountedInspectorPanel>,
+    inspector_panel_thickness: f32,
+    last_inspector_panel_thickness: f32,
     /// Phase 4：当前键盘焦点目标。
     keyboard_focus: KeyboardFocusTarget,
     /// Phase 5：Scrollbar 输入数据（app 在 update_frame 前注入）。
@@ -166,9 +165,9 @@ impl UiShell {
             search_input: None,
             title_bar_input: None,
             toc_input: None,
-            mindmap_style_panel_input: None,
-            mindmap_style_panel_thickness: 0.0,
-            last_mindmap_style_panel_thickness: 0.0,
+            inspector_panel: None,
+            inspector_panel_thickness: 0.0,
+            last_inspector_panel_thickness: 0.0,
             keyboard_focus: KeyboardFocusTarget::Editor,
             scrollbar_viewport_height: 0.0,
             scrollbar_total_display_rows: 0,
@@ -236,45 +235,47 @@ impl UiShell {
         self.keyboard_focus = KeyboardFocusTarget::Widget(widget_id);
     }
 
-    pub fn set_mindmap_style_panel_input(
-        &mut self,
-        input: Option<MindmapStylePanelInput>,
-        dpi: f32,
-    ) {
-        let was_visible = self.mindmap_style_panel_input.is_some();
+    pub fn set_inspector_panel(&mut self, input: Option<MountedInspectorPanel>, dpi: f32) {
+        let was_visible = self.inspector_panel.is_some();
         let is_visible = input.is_some();
         let thickness = if is_visible { PANEL_WIDTH_LOGICAL * dpi } else { 0.0 };
         let structure_changed = was_visible != is_visible
-            || (thickness - self.last_mindmap_style_panel_thickness).abs() > 0.1;
+            || (thickness - self.last_inspector_panel_thickness).abs() > 0.1;
 
-        self.mindmap_style_panel_input = input;
-        self.mindmap_style_panel_thickness = thickness;
-        self.last_mindmap_style_panel_thickness = thickness;
+        self.inspector_panel = input;
+        self.inspector_panel_thickness = thickness;
+        self.last_inspector_panel_thickness = thickness;
 
         if structure_changed {
             self.dock_dirty = true;
-        } else if let Some(ref input) = self.mindmap_style_panel_input {
+        } else if let Some(ref input) = self.inspector_panel {
             for child in &mut self.dock.children {
-                let Some(panel) =
-                    child.widget.as_any_mut().downcast_mut::<MindmapStylePanelWidget>()
+                let Some(panel) = child.widget.as_any_mut().downcast_mut::<InspectorPanelWidget>()
                 else {
                     continue;
                 };
-                panel.set_input(input.clone());
+                panel.set_input(input.descriptor.clone(), &input.presentation);
                 break;
             }
         }
 
         if !is_visible
             && self.keyboard_focus
-                == KeyboardFocusTarget::Widget(ui::core::widget::ids::MINDMAP_STYLE_PANEL)
+                == KeyboardFocusTarget::Widget(ui::core::widget::ids::INSPECTOR_PANEL)
         {
             self.keyboard_focus = KeyboardFocusTarget::Editor;
         }
     }
 
-    pub fn mindmap_style_panel_thickness(&self) -> f32 {
-        self.mindmap_style_panel_thickness
+    pub fn stamp_inspector_panel_action(
+        &self,
+        action: InspectorPanelAction,
+    ) -> Option<StampedInspectorPanelAction> {
+        self.inspector_panel.as_ref()?.stamp.stamp(action)
+    }
+
+    pub fn inspector_panel_thickness(&self) -> f32 {
+        self.inspector_panel_thickness
     }
 
     /// Scroll the TOC panel by delta pixels.
@@ -836,10 +837,9 @@ impl UiShell {
                 tbw.set_input(tab_input.clone(), None);
                 continue;
             }
-            if let Some(panel) = child.widget.as_any_mut().downcast_mut::<MindmapStylePanelWidget>()
-            {
-                if let Some(ref input) = self.mindmap_style_panel_input {
-                    panel.set_input(input.clone());
+            if let Some(panel) = child.widget.as_any_mut().downcast_mut::<InspectorPanelWidget>() {
+                if let Some(ref input) = self.inspector_panel {
+                    panel.set_input(input.descriptor.clone(), &input.presentation);
                 }
                 continue;
             }
@@ -1003,12 +1003,12 @@ impl UiShell {
             });
         }
 
-        // mmap style panel: right, after status bar so it occupies content height only.
-        if self.mindmap_style_panel_thickness > 0.0 {
-            let thickness = self.mindmap_style_panel_thickness;
-            let mut panel = MindmapStylePanelWidget::new();
-            if let Some(ref input) = self.mindmap_style_panel_input {
-                panel.set_input(input.clone());
+        // The inspector occupies the content height between title and status bars.
+        if self.inspector_panel_thickness > 0.0 {
+            let thickness = self.inspector_panel_thickness;
+            let mut panel = InspectorPanelWidget::new();
+            if let Some(ref input) = self.inspector_panel {
+                panel.set_input(input.descriptor.clone(), &input.presentation);
             }
             self.dock.children.push(DockChild {
                 widget: Box::new(panel),
@@ -1695,6 +1695,19 @@ fn set_accessibility_focus(
         }
     }
     false
+}
+
+#[cfg(all(test, feature = "markdown"))]
+pub(crate) fn mounted_inspector_for_test() -> MountedInspectorPanel {
+    let mut app = crate::app::App::new(None);
+    app.push_entry_for_test(
+        crate::document_fixture::DocumentFixture::new(vec!["# Root".into()], 80, 10.0),
+        Box::new(textora_mindmap::mindmap_view::MindmapView::new()),
+    );
+    app.switch_workspace_for_test(0);
+    app.sync_plugin_state();
+    app.editor_runtime.toggle_active_inspector_panel();
+    app.editor_runtime.active_inspector_panel().expect("Mindmap mounts an inspector")
 }
 
 #[cfg(test)]
@@ -3351,22 +3364,20 @@ mod tests {
         assert_eq!(toc.input().active_index, Some(1));
     }
 
-    fn default_mindmap_style_panel_input() -> MindmapStylePanelInput {
-        MindmapStylePanelInput::from_selection(ui::theme::MindmapThemeSelection::Default, true)
-    }
-
-    fn mindmap_style_panel_rect(shell: &UiShell) -> Rect {
+    #[cfg(feature = "markdown")]
+    fn inspector_panel_rect(shell: &UiShell) -> Rect {
         shell
             .dock
             .children
             .iter()
-            .find(|child| child.widget.as_any().is::<MindmapStylePanelWidget>())
+            .find(|child| child.widget.as_any().is::<InspectorPanelWidget>())
             .map(|child| child.layout_rect)
             .expect("visible mmap style panel must have a dock child")
     }
 
+    #[cfg(feature = "markdown")]
     #[test]
-    fn mindmap_style_panel_reserves_scaled_right_dock_below_title_and_above_status() {
+    fn inspector_panel_reserves_scaled_right_dock_below_title_and_above_status() {
         let theme = test_theme();
         let mut measure = NoopMeasure;
         let mut shell = UiShell::new();
@@ -3379,101 +3390,107 @@ mod tests {
 
         shell.update_frame(Screen::new(1_400.0, 900.0), &theme, &mut measure, &inputs);
         let editor_width_without_panel = shell.editor_rect().w;
-        shell.set_mindmap_style_panel_input(Some(default_mindmap_style_panel_input()), 2.0);
+        shell.set_inspector_panel(Some(mounted_inspector_for_test()), 2.0);
         shell.update_frame(Screen::new(1_400.0, 900.0), &theme, &mut measure, &inputs);
 
         let editor_rect = shell.editor_rect();
-        let panel_rect = mindmap_style_panel_rect(&shell);
+        let panel_rect = inspector_panel_rect(&shell);
         assert_eq!(editor_width_without_panel - editor_rect.w, PANEL_WIDTH_LOGICAL * 2.0);
         assert_eq!(panel_rect.w, PANEL_WIDTH_LOGICAL * 2.0);
         assert!(panel_rect.x >= editor_rect.right());
         assert_eq!(panel_rect.y, ui::title_bar::title_bar_height(2.0));
         assert_eq!(panel_rect.bottom(), 900.0 - inputs.status_thickness);
-        assert_eq!(shell.mindmap_style_panel_thickness(), PANEL_WIDTH_LOGICAL * 2.0);
+        assert_eq!(shell.inspector_panel_thickness(), PANEL_WIDTH_LOGICAL * 2.0);
     }
 
+    #[cfg(feature = "markdown")]
     #[test]
-    fn mindmap_style_panel_clear_restores_width_and_editor_focus() {
+    fn inspector_panel_clear_restores_width_and_editor_focus() {
         let theme = test_theme();
         let mut measure = NoopMeasure;
         let mut shell = UiShell::new();
         shell.frames_rendered = 1;
         let inputs = shell_inputs();
 
-        shell.set_mindmap_style_panel_input(Some(default_mindmap_style_panel_input()), 1.0);
+        shell.set_inspector_panel(Some(mounted_inspector_for_test()), 1.0);
         shell.update_frame(Screen::new(1_200.0, 800.0), &theme, &mut measure, &inputs);
         assert_eq!(shell.editor_rect().w, 1_200.0 - PANEL_WIDTH_LOGICAL);
-        shell.keyboard_focus =
-            KeyboardFocusTarget::Widget(ui::core::widget::ids::MINDMAP_STYLE_PANEL);
+        shell.keyboard_focus = KeyboardFocusTarget::Widget(ui::core::widget::ids::INSPECTOR_PANEL);
 
-        shell.set_mindmap_style_panel_input(None, 1.0);
+        shell.set_inspector_panel(None, 1.0);
         shell.update_frame(Screen::new(1_200.0, 800.0), &theme, &mut measure, &inputs);
 
         assert_eq!(shell.editor_rect().w, 1_200.0);
         assert_eq!(shell.keyboard_focus, KeyboardFocusTarget::Editor);
-        assert_eq!(shell.mindmap_style_panel_thickness(), 0.0);
+        assert_eq!(shell.inspector_panel_thickness(), 0.0);
     }
 
+    #[cfg(feature = "markdown")]
     #[test]
-    fn mindmap_style_panel_forward_key_routes_by_focused_widget_id() {
+    fn inspector_panel_forward_key_routes_by_focused_widget_id() {
         let theme = test_theme();
         let mut measure = NoopMeasure;
         let mut shell = UiShell::new();
         shell.frames_rendered = 1;
         let inputs = shell_inputs();
-        shell.set_mindmap_style_panel_input(Some(default_mindmap_style_panel_input()), 1.0);
+        shell.set_inspector_panel(Some(mounted_inspector_for_test()), 1.0);
         shell.update_frame(Screen::new(1_200.0, 800.0), &theme, &mut measure, &inputs);
-        shell.keyboard_focus =
-            KeyboardFocusTarget::Widget(ui::core::widget::ids::MINDMAP_STYLE_PANEL);
+        shell.keyboard_focus = KeyboardFocusTarget::Widget(ui::core::widget::ids::INSPECTOR_PANEL);
 
-        assert_eq!(
-            shell.forward_key(KeyCode::Right, Modifiers::NONE, &theme, 1.0),
-            Some(WidgetAction::Consumed)
-        );
-        assert_eq!(
-            shell.forward_key(KeyCode::Enter, Modifiers::NONE, &theme, 1.0),
-            Some(WidgetAction::MindmapStylePanel(
-                ui::core::widget::MindmapStylePanelAction::SelectTheme("dawn".into())
-            ))
-        );
-        assert_eq!(
-            shell.forward_key(KeyCode::Escape, Modifiers::NONE, &theme, 1.0),
-            Some(WidgetAction::MindmapStylePanel(ui::core::widget::MindmapStylePanelAction::Close))
-        );
+        use ui::inspector_panel::{InspectorItemTarget, InspectorPanelIntent, ItemId};
+
+        let panel = mounted_inspector_for_test();
+        let target = InspectorItemTarget {
+            group_id: panel.descriptor.presets.id.clone(),
+            item_id: ItemId("dawn".into()),
+        };
+        for (key, intent) in [
+            (KeyCode::Right, InspectorPanelIntent::FocusItem(target.clone())),
+            (KeyCode::Enter, InspectorPanelIntent::SelectItem(target)),
+            (KeyCode::Escape, InspectorPanelIntent::Close),
+        ] {
+            assert_eq!(
+                shell.forward_key(key, Modifiers::NONE, &theme, 1.0),
+                Some(WidgetAction::InspectorPanel(InspectorPanelAction {
+                    panel_id: panel.descriptor.id.clone(),
+                    intent,
+                }))
+            );
+        }
 
         shell.keyboard_focus = KeyboardFocusTarget::Editor;
         assert_eq!(shell.forward_key(KeyCode::Enter, Modifiers::NONE, &theme, 1.0), None);
     }
 
     #[test]
-    fn mindmap_style_panel_input_updates_existing_widget_without_rebuild() {
+    fn inspector_panel_updates_existing_widget_without_rebuild() {
         let theme = test_theme();
         let mut measure = NoopMeasure;
         let mut shell = UiShell::new();
         shell.frames_rendered = 1;
         let inputs = shell_inputs();
-        shell.set_mindmap_style_panel_input(Some(default_mindmap_style_panel_input()), 1.0);
+        shell.set_inspector_panel(Some(mounted_inspector_for_test()), 1.0);
         shell.update_frame(Screen::new(1_200.0, 800.0), &theme, &mut measure, &inputs);
         let widget_address_before = shell
             .dock
             .children
             .iter()
-            .find(|child| child.widget.id() == Some(ui::core::widget::ids::MINDMAP_STYLE_PANEL))
+            .find(|child| child.widget.id() == Some(ui::core::widget::ids::INSPECTOR_PANEL))
             .map(|child| child.widget.as_ref() as *const dyn Widget as *const ())
             .expect("mmap style panel widget must exist");
 
-        let selected = MindmapStylePanelInput::from_selection(
-            ui::theme::MindmapThemeSelection::Selected("dawn".to_owned()),
-            false,
-        );
-        shell.set_mindmap_style_panel_input(Some(selected), 1.0);
+        let mut selected = mounted_inspector_for_test();
+        selected.descriptor.presets.selected_item =
+            Some(ui::inspector_panel::ItemId("dawn".into()));
+        selected.presentation.presets_expanded = false;
+        shell.set_inspector_panel(Some(selected), 1.0);
         assert!(!shell.dock_dirty, "same visibility and thickness must not rebuild dock");
         shell.update_frame(Screen::new(1_200.0, 800.0), &theme, &mut measure, &inputs);
         let widget_address_after = shell
             .dock
             .children
             .iter()
-            .find(|child| child.widget.id() == Some(ui::core::widget::ids::MINDMAP_STYLE_PANEL))
+            .find(|child| child.widget.id() == Some(ui::core::widget::ids::INSPECTOR_PANEL))
             .map(|child| child.widget.as_ref() as *const dyn Widget as *const ())
             .expect("mmap style panel widget must remain present");
 

@@ -424,8 +424,10 @@ impl FrameRuntime {
         }
         let frame_state = super::window_runtime::frame_state(editor.window());
         self.paint_frame_underlay(&mut frame, &input, frame_state);
+        let editor_body_rect =
+            crate::render::editor_inspector_rects(input.layout, model.inspector_panel.is_some()).0;
         let editor_surface = if input.editor_is_active {
-            editor.paint_active_editor(&mut frame, resources, input.layout.editor_body_rect)?
+            editor.paint_active_editor(&mut frame, resources, editor_body_rect)?
         } else {
             EditorSurfacePaint::Empty
         };
@@ -436,7 +438,7 @@ impl FrameRuntime {
         frame.with_layout_context(|context| {
             self.shell.set_canvas_scrollbars_input(
                 editor_scrollbars_input,
-                input.layout.editor_body_rect,
+                editor_body_rect,
                 context,
             );
         });
@@ -552,12 +554,16 @@ impl FrameRuntime {
         );
         model.editor_chrome.header.compact =
             editor_header_is_compact(layout, model.editor_chrome.mode.shows_property_row());
+        if model.editor_pane == EditorPaneState::Active {
+            model.inspector_panel = document_runtime.editor().active_inspector_panel();
+        }
         if let Some(plugin_name) =
             document_runtime.editor().tab_session(tab_id).map(|tab| tab.plugin_name())
         {
             model.editor_chrome.toolbar = crate::render::editor_toolbar_input_for_plugin(
                 model.editor_chrome.mode,
                 plugin_name,
+                document_runtime.editor().active_inspector_available(),
             );
             if document_runtime.editor().toggle_target().is_some() {
                 let showing_source = document_runtime.editor().active_is_toggled(plugin_name);
@@ -573,19 +579,6 @@ impl FrameRuntime {
             }
             if plugin_name != ui::plugin::PLUGIN_MINDMAP {
                 crate::render::add_document_search_command(&mut model.editor_chrome.toolbar);
-            }
-            if plugin_name == ui::plugin::PLUGIN_MINDMAP
-                && let Some(tab) = document_runtime.editor().tab_session(tab_id)
-            {
-                let panel = tab.mindmap_style_panel();
-                if panel.is_visible() {
-                    model.mindmap_style_panel = Some(
-                        appkit_shell::mindmap_style_panel::MindmapStylePanelInput::from_selection(
-                            tab.mindmap_theme_selection(),
-                            panel.presets_expanded(),
-                        ),
-                    );
-                }
             }
         }
     }

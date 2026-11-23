@@ -1016,6 +1016,15 @@ fn set_theme_preserves_crlf_newlines() {
 }
 
 #[test]
+fn selecting_default_without_a_theme_key_returns_consume() {
+    let default = ui::theme::DEFAULT_MINDMAP_COLOR_SCHEME_ID;
+    for source in ["# Root\n", "```toml mindmap\nversion = 1\n```\n# Root\n"] {
+        let tree = parser::parse(source).expect("fixture must be valid");
+        assert_eq!(plan_set_mindmap_theme(&tree, source, default, 1, 0), EditPlan::Consume);
+    }
+}
+
+#[test]
 fn selecting_current_theme_returns_consume() {
     let source = "```toml mindmap\ntheme = \"dawn\"\n```\n\n# Root\n";
     let tree = parser::parse(source).expect("fixture must parse");

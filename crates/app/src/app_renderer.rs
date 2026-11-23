@@ -162,22 +162,6 @@ fn plugin_selection_pull_is_safe(mouse_is_down: bool, source_updated: bool) -> b
     !mouse_is_down && !source_updated
 }
 
-fn active_mindmap_style_input(
-    session: Option<appkit_shell::tab_session::TabSession<'_>>,
-) -> Option<appkit_shell::mindmap_style_panel::MindmapStylePanelInput> {
-    let session = session?;
-    let panel = session.mindmap_style_panel();
-    if session.plugin_name() != ui::plugin::PLUGIN_MINDMAP || !panel.is_visible() {
-        return None;
-    }
-
-    let selection = session.mindmap_theme_selection();
-    Some(appkit_shell::mindmap_style_panel::MindmapStylePanelInput::from_selection(
-        selection,
-        panel.presets_expanded(),
-    ))
-}
-
 fn file_safety_notice_label(notice: &appkit_core::file_safety::FileSafetyNotice) -> &'static str {
     match notice {
         appkit_core::file_safety::FileSafetyNotice::CleanDocumentReloaded { .. } => {
@@ -194,17 +178,13 @@ fn file_safety_notice_label(notice: &appkit_core::file_safety::FileSafetyNotice)
 
 #[cfg(test)]
 mod tests {
-    use appkit_core::workspace::types::TabIdAllocator;
     use std::cell::RefCell;
     use std::rc::Rc;
 
-    use super::{
-        App, active_mindmap_style_input, needs_redraw_after_render, plugin_selection_pull_is_safe,
-    };
+    use super::{App, needs_redraw_after_render, plugin_selection_pull_is_safe};
     use crate::document_fixture::DocumentFixture;
-    use appkit_shell::tab_runtime::TabRuntime;
     use ui::canvas::CanvasPoint;
-    use ui::plugin::{CanvasContentMetrics, PluginQuery, PluginResponse, ViewPlugin};
+    use ui::plugin::{CanvasContentMetrics, ViewPlugin};
 
     #[test]
     fn first_frame_queues_background_services_after_present() {
@@ -256,81 +236,6 @@ mod tests {
     #[test]
     fn plugin_selection_pull_gate_blocks_mouse_drag() {
         assert!(!plugin_selection_pull_is_safe(true, false));
-    }
-
-    #[test]
-    fn open_mmap_tab_builds_selected_theme_input() {
-        let mut entry = theme_query_entry(
-            ui::plugin::PLUGIN_MINDMAP,
-            ui::theme::MindmapThemeSelection::Selected("tide".into()),
-        );
-        {
-            let mut session = appkit_shell::tab_session::TabSessionMut::new(
-                entry.id,
-                &mut entry.document,
-                &mut entry.runtime,
-            );
-            session.toggle_mindmap_style_panel();
-        }
-
-        let session =
-            appkit_shell::tab_session::TabSession::new(entry.id, &entry.document, &entry.runtime);
-        let input = active_mindmap_style_input(Some(session)).expect("open mmap panel input");
-
-        assert!(input.options.iter().any(|option| option.id == "tide" && option.selected));
-    }
-
-    #[test]
-    fn non_mmap_tab_hides_button_and_clears_right_panel() {
-        let mut entry = theme_query_entry(
-            ui::plugin::PLUGIN_EDITOR,
-            ui::theme::MindmapThemeSelection::Selected("tide".into()),
-        );
-        {
-            let mut session = appkit_shell::tab_session::TabSessionMut::new(
-                entry.id,
-                &mut entry.document,
-                &mut entry.runtime,
-            );
-            session.toggle_mindmap_style_panel();
-        }
-
-        let session =
-            appkit_shell::tab_session::TabSession::new(entry.id, &entry.document, &entry.runtime);
-        assert!(active_mindmap_style_input(Some(session)).is_none());
-    }
-
-    #[test]
-    fn switching_tabs_restores_each_style_panel_session() {
-        let mut first = theme_query_entry(
-            ui::plugin::PLUGIN_MINDMAP,
-            ui::theme::MindmapThemeSelection::Default,
-        );
-        let second = theme_query_entry(
-            ui::plugin::PLUGIN_MINDMAP,
-            ui::theme::MindmapThemeSelection::Default,
-        );
-        {
-            let mut session = appkit_shell::tab_session::TabSessionMut::new(
-                first.id,
-                &mut first.document,
-                &mut first.runtime,
-            );
-            session.toggle_mindmap_style_panel();
-        }
-
-        let first_session =
-            appkit_shell::tab_session::TabSession::new(first.id, &first.document, &first.runtime);
-        let second_session = appkit_shell::tab_session::TabSession::new(
-            second.id,
-            &second.document,
-            &second.runtime,
-        );
-        assert!(active_mindmap_style_input(Some(first_session)).is_some());
-        assert!(active_mindmap_style_input(Some(second_session)).is_none());
-        let first_session =
-            appkit_shell::tab_session::TabSession::new(first.id, &first.document, &first.runtime);
-        assert!(active_mindmap_style_input(Some(first_session)).is_some());
     }
 
     #[test]
@@ -462,69 +367,6 @@ mod tests {
 
     struct CanvasSequencePlugin {
         events: Rc<RefCell<Vec<&'static str>>>,
-    }
-
-    struct ThemeQueryPlugin {
-        name: &'static str,
-        selection: ui::theme::MindmapThemeSelection,
-    }
-
-    impl ViewPlugin for ThemeQueryPlugin {
-        fn name(&self) -> &str {
-            self.name
-        }
-
-        fn mode(&self) -> ui::plugin::PluginMode {
-            ui::plugin::PluginMode::Source
-        }
-
-        fn render(
-            &mut self,
-            _doc: &dyn textora_core::document::DocView,
-            _bounds: ui::core::geom::Rect,
-            _theme: &ui::theme::Theme,
-            _shaper: &mut shaping::Shaper,
-            _dpi_scale: f32,
-        ) -> ui::core::paint::DrawList {
-            ui::core::paint::DrawList::new()
-        }
-    }
-
-    impl ui::plugin::ViewPluginCapabilities for ThemeQueryPlugin {
-        fn query(
-            &self,
-            query: PluginQuery,
-            _doc: &dyn textora_core::document::DocView,
-        ) -> PluginResponse {
-            match query {
-                PluginQuery::MindmapThemeSelection => {
-                    PluginResponse::MindmapThemeSelection(self.selection.clone())
-                }
-                _ => PluginResponse::None,
-            }
-        }
-    }
-
-    struct ThemeQueryEntry {
-        id: appkit_core::workspace::types::TabId,
-        document: appkit_core::document::DocumentModel,
-        runtime: TabRuntime,
-    }
-
-    fn theme_query_entry(
-        name: &'static str,
-        selection: ui::theme::MindmapThemeSelection,
-    ) -> ThemeQueryEntry {
-        let document = DocumentFixture::new(vec!["# Root".into()], 80, 10.0);
-        let (document, presentation) = document.into_parts();
-        ThemeQueryEntry {
-            id: TabIdAllocator::new().allocate(),
-            document,
-            runtime: TabRuntime::with_presentation(
-                Box::new(ThemeQueryPlugin { name, selection }),
-                presentation,
-            ),
-        }
     }
 
     impl ViewPlugin for CanvasSequencePlugin {
@@ -1285,6 +1127,7 @@ impl App {
                 }
             }
 
+            let inspector_panel = self.editor_runtime.active_inspector_panel();
             // Phase 6：注入 tab bar 数据
             {
                 let tab_infos: Vec<ui::tab_bar::TabInfo> = self
@@ -1350,12 +1193,11 @@ impl App {
                     0.0
                 };
                 let toc_enabled = is_plugin_rendered;
-                let active_is_mindmap = self.active_is_mindmap();
-                let mindmap_style = self.active_tab_session().and_then(|session| {
-                    active_is_mindmap.then_some(ui::title_bar::MindmapStyleButtonInput {
-                        panel_visible: session.mindmap_style_panel().is_visible(),
-                    })
-                });
+                let inspector = self.editor_runtime.active_inspector_available().then_some(
+                    ui::title_bar::InspectorButtonInput {
+                        panel_visible: inspector_panel.is_some(),
+                    },
+                );
                 self.ui_shell.set_title_bar_input(ui::title_bar::TitleBarInput {
                     file_path,
                     sidebar_left,
@@ -1365,7 +1207,7 @@ impl App {
                     toggle_label,
                     toc_visible: self.active_toc_visible(),
                     toc_enabled,
-                    mindmap_style,
+                    inspector,
                     window_chrome: if cfg!(target_os = "windows") {
                         ui::title_bar::WindowChrome::Custom {
                             maximized: self
@@ -1381,8 +1223,7 @@ impl App {
             }
 
             let inputs = self.build_shell_inputs();
-            let mindmap_style_panel_input = active_mindmap_style_input(self.active_tab_session());
-            self.ui_shell.set_mindmap_style_panel_input(mindmap_style_panel_input, metrics.dpi);
+            self.ui_shell.set_inspector_panel(inspector_panel, metrics.dpi);
 
             // Update TOC input before update_frame so dock rebuild has fresh data
             if self.active_toc_visible() {

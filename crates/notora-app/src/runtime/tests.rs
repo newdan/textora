@@ -2681,7 +2681,10 @@ fn markdown_and_mindmap_toolbar_actions_toggle_real_source_views() {
 }
 
 #[test]
-fn mindmap_style_actions_open_the_panel_and_write_theme_metadata() {
+fn inspector_selection_writes_one_revision_and_schedules_autosave() {
+    use ui::inspector_panel::{InspectorPanelIntent, ItemId};
+    use ui::plugin::SemanticEditCommand;
+
     let workspace_directory =
         tempfile::tempdir().expect("workspace test directory should be created");
     let mut app = app();
@@ -2702,39 +2705,319 @@ fn mindmap_style_actions_open_the_panel_and_write_theme_metadata() {
         thread::sleep(Duration::from_millis(10));
     };
 
-    app.dispatch_action(NotoraAction::ToggleMindmapStylePanelRequested);
-    app.render().expect("open mmap style panel should render");
-    assert!(
-        app.document_runtime
-            .editor_runtime
-            .tab_session(tab_id)
-            .expect("mmap runtime session should exist")
-            .mindmap_style_panel()
-            .is_visible()
-    );
-
-    app.dispatch_action(NotoraAction::MindmapStylePanel(
-        ui::core::widget::MindmapStylePanelAction::SelectTheme("tide".to_owned()),
-    ));
-    app.render().expect("selected mmap theme should render");
-    let snapshot = app
+    app.document_runtime.set_autosave_idle_delay(Duration::ZERO);
+    app.dispatch_action(NotoraAction::ToggleInspectorPanelRequested);
+    app.render().expect("open inspector should render");
+    let panel = app
         .document_runtime
-        .editor_runtime
+        .editor()
+        .active_inspector_panel()
+        .expect("inspector should be mounted");
+    let original = app
+        .document_runtime
+        .editor()
         .document_text_snapshot(tab_id)
-        .expect("themed mmap source should exist");
-    assert!(snapshot.text.contains("theme = \"tide\""));
+        .expect("original source should exist");
+    assert_eq!(app.document_runtime.autosave_state(tab_id), None);
 
-    app.dispatch_action(NotoraAction::MindmapStylePanel(
-        ui::core::widget::MindmapStylePanelAction::Close,
+    let select_tide = inspector_selection_action(&app, &panel, "tide");
+    let stale_select_dawn = inspector_selection_action(&app, &panel, "dawn");
+    app.dispatch_action(select_tide);
+    let themed = app
+        .document_runtime
+        .editor()
+        .document_text_snapshot(tab_id)
+        .expect("themed source should exist");
+    assert!(themed.text.contains("theme = \"tide\""));
+    assert_eq!(themed.content_revision, original.content_revision + 1);
+    let scheduled = app.document_runtime.autosave_state(tab_id);
+    assert!(matches!(
+        scheduled,
+        Some(AutoSaveState::Scheduled { content_revision, .. })
+            if content_revision == themed.content_revision
     ));
-    assert!(
-        !app.document_runtime
-            .editor_runtime
-            .tab_session(tab_id)
-            .expect("mmap runtime session should remain available")
-            .mindmap_style_panel()
-            .is_visible()
+
+    app.dispatch_action(stale_select_dawn);
+    app.render().expect("themed inspector should render");
+    let panel = app
+        .document_runtime
+        .editor()
+        .active_inspector_panel()
+        .expect("inspector should remain mounted");
+    assert_eq!(panel.descriptor.presets.selected_item, Some(ItemId("tide".into())));
+    let select_current = inspector_selection_action(&app, &panel, "tide");
+    app.dispatch_action(select_current);
+    assert_eq!(app.document_runtime.editor().document_text_snapshot(tab_id), Some(themed.clone()));
+    assert_eq!(app.document_runtime.autosave_state(tab_id), scheduled);
+    assert_eq!(
+        app.document_runtime.take_due_autosaves(),
+        vec![AutoSaveRequest { tab_id, content_revision: themed.content_revision }]
     );
+    assert!(app.document_runtime.take_due_autosaves().is_empty());
+
+    app.dispatch_action(NotoraAction::SemanticEditRequested(SemanticEditCommand::Undo));
+    let restored = app
+        .document_runtime
+        .editor()
+        .document_text_snapshot(tab_id)
+        .expect("restored source should exist");
+    assert_eq!(restored.text, original.text);
+    assert_eq!(restored.content_revision, original.content_revision + 2);
+
+    app.render().expect("restored inspector should render");
+    let restored_panel = app
+        .document_runtime
+        .editor()
+        .active_inspector_panel()
+        .expect("restored inspector should remain mounted");
+    let close = inspector_action(&app, &restored_panel, InspectorPanelIntent::Close);
+    app.dispatch_action(close);
+    assert!(app.document_runtime.editor().active_inspector_panel().is_none());
+}
+
+fn inspector_selection_action(
+    app: &NotoraRuntime,
+    panel: &appkit_shell::inspector_panel::MountedInspectorPanel,
+    item: &str,
+) -> NotoraAction {
+    use ui::inspector_panel::{InspectorItemTarget, InspectorPanelIntent, ItemId};
+
+    inspector_action(
+        app,
+        panel,
+        InspectorPanelIntent::SelectItem(InspectorItemTarget {
+            group_id: panel.descriptor.presets.id.clone(),
+            item_id: ItemId(item.into()),
+        }),
+    )
+}
+
+fn inspector_action(
+    app: &NotoraRuntime,
+    panel: &appkit_shell::inspector_panel::MountedInspectorPanel,
+    intent: ui::inspector_panel::InspectorPanelIntent,
+) -> NotoraAction {
+    app.frame_runtime
+        .shell
+        .translate_widget_action(&ui::WidgetAction::InspectorPanel(
+            ui::inspector_panel::InspectorPanelAction {
+                panel_id: panel.descriptor.id.clone(),
+                intent,
+            },
+        ))
+        .expect("the rendered inspector should stamp its widget action")
+}
+
+#[test]
+fn inspector_reports_metadata_without_writing_rejected_actions() {
+    use ui::inspector_panel::ItemId;
+    use ui::theme::DEFAULT_MINDMAP_COLOR_SCHEME_ID;
+
+    let default_item = ItemId(DEFAULT_MINDMAP_COLOR_SCHEME_ID.into());
+    for (source, selection, selection_disabled, notice_fragment, rejected_item) in [
+        ("# Diagram\n", Some(default_item.clone()), false, None, DEFAULT_MINDMAP_COLOR_SCHEME_ID),
+        (
+            "```toml mindmap\ntheme = \"some-old-theme\"\n```\n# Diagram\n",
+            None,
+            false,
+            Some("some-old-theme"),
+            "unknown-action",
+        ),
+        ("```toml mindmap\ntheme = [\n```\n# Diagram\n", None, true, Some("元数据"), "tide"),
+    ] {
+        let mut app = app();
+        let (_, tab_id) = install_registered_note(&mut app, "diagram.mmap.md", source);
+        let original = app
+            .document_runtime
+            .editor()
+            .document_text_snapshot(tab_id)
+            .expect("source fixture should exist");
+        app.dispatch_action(NotoraAction::ToggleInspectorPanelRequested);
+        app.render().expect("inspector should render");
+        let panel = app
+            .document_runtime
+            .editor()
+            .active_inspector_panel()
+            .expect("mindmap supports the inspector");
+        assert_eq!(panel.descriptor.presets.selected_item, selection);
+        assert_eq!(panel.descriptor.presets.fallback_summary_item, Some(default_item.clone()));
+        assert_eq!(panel.descriptor.selection_disabled, selection_disabled);
+        assert_eq!(panel.descriptor.notice.is_some(), notice_fragment.is_some());
+        if let Some(notice_fragment) = notice_fragment {
+            assert!(
+                panel
+                    .descriptor
+                    .notice
+                    .as_deref()
+                    .is_some_and(|notice| notice.contains(notice_fragment))
+            );
+        }
+
+        let rejected_selection = inspector_selection_action(&app, &panel, rejected_item);
+        app.dispatch_action(rejected_selection);
+        assert_eq!(app.document_runtime.editor().document_text_snapshot(tab_id), Some(original));
+        assert!(
+            !app.document_runtime
+                .editor()
+                .document_summary(tab_id)
+                .expect("document should be open")
+                .dirty
+        );
+        assert_eq!(app.document_runtime.autosave_state(tab_id), None);
+    }
+}
+
+#[test]
+fn inspector_can_replace_an_unknown_theme_with_the_default_and_undo_it() {
+    use ui::plugin::SemanticEditCommand;
+    use ui::theme::DEFAULT_MINDMAP_COLOR_SCHEME_ID;
+
+    const ORIGINAL: &str = "```toml mindmap\ntheme = \"legacy-scheme\" # keep\n```\n# Diagram\n";
+    let mut app = app();
+    let (_, tab_id) = install_registered_note(&mut app, "diagram.mmap.md", ORIGINAL);
+    app.dispatch_action(NotoraAction::ToggleInspectorPanelRequested);
+    app.render().expect("inspector should render unknown theme fallback");
+    let panel =
+        app.document_runtime.editor().active_inspector_panel().expect("inspector should mount");
+    assert!(panel.descriptor.presets.selected_item.is_none());
+    let select_default = inspector_selection_action(&app, &panel, DEFAULT_MINDMAP_COLOR_SCHEME_ID);
+    app.dispatch_action(select_default);
+
+    let themed = app
+        .document_runtime
+        .editor()
+        .document_text_snapshot(tab_id)
+        .expect("themed source should exist");
+    assert_eq!(themed.text, ORIGINAL.replace("legacy-scheme", DEFAULT_MINDMAP_COLOR_SCHEME_ID));
+
+    app.dispatch_action(NotoraAction::SemanticEditRequested(SemanticEditCommand::Undo));
+    let restored = app
+        .document_runtime
+        .editor()
+        .document_text_snapshot(tab_id)
+        .expect("restored source should exist");
+    assert_eq!(restored.text, ORIGINAL);
+}
+
+#[test]
+fn inspector_keyboard_focus_and_ime_follow_the_active_tab() {
+    let mut app = app();
+    let (first_identity, first_tab_id) =
+        install_registered_note(&mut app, "first.mmap.md", "# First\n");
+    app.dispatch_action(NotoraAction::ToggleInspectorPanelRequested);
+    app.render().expect("first inspector should render");
+    let first_panel = app
+        .document_runtime
+        .editor()
+        .active_inspector_panel()
+        .expect("first inspector should mount");
+    let replay = inspector_selection_action(&app, &first_panel, "tide");
+    let first_source = app.document_runtime.editor().document_text_snapshot(first_tab_id);
+
+    assert!(
+        app.route_product_event(&ui::Event::KeyDown(ui::KeyCode::Right, ui::Modifiers::default(),))
+    );
+    let focused_item = app
+        .document_runtime
+        .editor()
+        .active_inspector_panel()
+        .expect("first inspector should remain open")
+        .presentation
+        .focused_item;
+    assert!(focused_item.is_some());
+    for event in [
+        ui::Event::ImeEnable,
+        ui::Event::ImePreedit { text: "输入法".into(), cursor: None },
+        ui::Event::ImeCommit("输入法".into()),
+        ui::Event::ImeDisable,
+        ui::Event::KeyDown(ui::KeyCode::Char('k'), ui::Modifiers::default()),
+    ] {
+        assert!(app.route_product_event(&event), "inspector should consume {event:?}");
+    }
+    assert_eq!(app.document_runtime.editor().document_text_snapshot(first_tab_id), first_source);
+
+    let (_, second_tab_id) = install_registered_note(&mut app, "second.mmap.md", "# Second\n");
+    assert!(app.document_runtime.editor().active_inspector_panel().is_none());
+    app.dispatch_action(NotoraAction::ToggleInspectorPanelRequested);
+    app.render().expect("second inspector should render");
+    let second_source = app.document_runtime.editor().document_text_snapshot(second_tab_id);
+    app.dispatch_action(replay.clone());
+    assert_eq!(app.document_runtime.editor().document_text_snapshot(second_tab_id), second_source);
+    assert_eq!(
+        app.document_runtime
+            .editor()
+            .active_inspector_panel()
+            .expect("second inspector should mount")
+            .presentation
+            .focused_item,
+        None
+    );
+
+    app.action_runtime.state.library.selected_card = Some(first_identity);
+    let outcome = app.document_runtime.editor_mut().activate(first_tab_id);
+    app.apply_editor_outcome(outcome);
+    app.render().expect("first inspector should remount");
+    app.dispatch_action(replay);
+    assert_eq!(app.document_runtime.editor().document_text_snapshot(first_tab_id), first_source);
+    assert_eq!(
+        app.document_runtime
+            .editor()
+            .active_inspector_panel()
+            .expect("first inspector should remount")
+            .presentation
+            .focused_item,
+        focused_item
+    );
+
+    let escape = ui::Event::KeyDown(ui::KeyCode::Escape, ui::Modifiers::NONE);
+    app.dispatch_action(NotoraAction::OpenSettings);
+    assert!(app.route_product_event(&escape));
+    assert_eq!(app.state().layout.overlay, OverlayState::None);
+    assert!(app.document_runtime.editor().active_inspector_panel().is_some());
+    assert!(app.route_product_event(&escape));
+    assert!(app.document_runtime.editor().active_inspector_panel().is_none());
+}
+
+#[test]
+fn inspector_rejects_replayed_actions_after_switching_to_plain_document() {
+    let mut app = app();
+    let (_, mindmap_tab_id) = install_registered_note(&mut app, "diagram.mmap.md", "# Diagram\n");
+    app.dispatch_action(NotoraAction::ToggleInspectorPanelRequested);
+    app.render().expect("mindmap inspector should render");
+    let panel = app
+        .document_runtime
+        .editor()
+        .active_inspector_panel()
+        .expect("mindmap inspector should mount");
+    let replay = inspector_selection_action(&app, &panel, "tide");
+    let mindmap_original = app.document_runtime.editor().document_text_snapshot(mindmap_tab_id);
+
+    let (_, markdown_tab_id) = install_registered_note(&mut app, "plain.md", "plain document");
+    let markdown_original = app.document_runtime.editor().document_text_snapshot(markdown_tab_id);
+    app.dispatch_action(NotoraAction::ToggleInspectorPanelRequested);
+    app.dispatch_action(replay);
+    app.render().expect("plain document should render");
+    assert!(!app.document_runtime.editor().active_inspector_available());
+    assert!(app.document_runtime.editor().active_inspector_panel().is_none());
+    assert_eq!(
+        app.frame_runtime.shell.translate_widget_action(&ui::WidgetAction::InspectorPanel(
+            ui::inspector_panel::InspectorPanelAction {
+                panel_id: panel.descriptor.id,
+                intent: ui::inspector_panel::InspectorPanelIntent::Close,
+            }
+        )),
+        None
+    );
+    assert_eq!(
+        app.document_runtime.editor().document_text_snapshot(mindmap_tab_id),
+        mindmap_original
+    );
+    assert_eq!(
+        app.document_runtime.editor().document_text_snapshot(markdown_tab_id),
+        markdown_original
+    );
+    assert_eq!(app.document_runtime.autosave_state(mindmap_tab_id), None);
+    assert_eq!(app.document_runtime.autosave_state(markdown_tab_id), None);
 }
 
 #[test]
@@ -3985,8 +4268,8 @@ fn editor_runtime_routes_text_markdown_and_mindmap_documents_to_product_plugins(
 
 #[test]
 fn switching_back_to_mindmap_after_reload_refreshes_reused_generation() {
+    use ui::inspector_panel::ItemId;
     use ui::plugin::{PLUGIN_EDITOR, PLUGIN_MINDMAP};
-    use ui::theme::MindmapThemeSelection;
 
     const PATH: &str = "diagram.mmap.md";
     const ORIGINAL_SOURCE: &str = "```toml mindmap\ntheme = \"warm-night\"\n```\n# Original\n";
@@ -3996,9 +4279,11 @@ fn switching_back_to_mindmap_after_reload_refreshes_reused_generation() {
     let editor = app.document_runtime.editor_mut();
     let tab = editor.tab_session(tab_id).expect("mindmap tab should be installed");
     assert_eq!(tab.plugin_name(), PLUGIN_MINDMAP);
-    assert_eq!(tab.mindmap_theme_selection(), MindmapThemeSelection::Selected("warm-night".into()));
     let generation = tab.document().generation();
     let content_revision = tab.document().content_revision();
+    let _ = editor.toggle_active_inspector_panel();
+    let initial_panel = editor.active_inspector_panel().expect("initial inspector should mount");
+    assert_eq!(initial_panel.descriptor.presets.selected_item, Some(ItemId("warm-night".into())));
     editor.switch_active_plugin();
     assert_eq!(
         editor.tab_session(tab_id).expect("source tab should exist").plugin_name(),
@@ -4021,7 +4306,8 @@ fn switching_back_to_mindmap_after_reload_refreshes_reused_generation() {
 
     let tab = editor.tab_session(tab_id).expect("restored mindmap tab should exist");
     assert_eq!(tab.plugin_name(), PLUGIN_MINDMAP);
-    assert_eq!(tab.mindmap_theme_selection(), MindmapThemeSelection::Selected("dawn".into()));
+    let restored_panel = editor.active_inspector_panel().expect("inspector should remount");
+    assert_eq!(restored_panel.descriptor.presets.selected_item, Some(ItemId("dawn".into())));
 }
 
 #[test]

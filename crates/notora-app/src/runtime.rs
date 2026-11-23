@@ -2187,46 +2187,23 @@ impl NotoraRuntime {
         self.document_runtime.editor_mut().switch_active_plugin();
     }
 
-    fn toggle_mindmap_style_panel(&mut self) {
-        let editor = self.document_runtime.editor_mut();
-        let Some(tab_id) = editor.active_tab_id() else {
+    fn toggle_inspector_panel(&mut self) {
+        if !self.active_editor_matches_selection() {
             return;
-        };
-        let Some(mut tab) = editor.tab_session_mut(tab_id) else {
-            return;
-        };
-        if tab.plugin_name() == ui::plugin::PLUGIN_MINDMAP {
-            tab.toggle_mindmap_style_panel();
         }
+        let outcome = self.document_runtime.editor_mut().toggle_active_inspector_panel();
+        self.apply_editor_outcome(outcome);
     }
 
-    fn dispatch_mindmap_style_panel(&mut self, action: ui::core::widget::MindmapStylePanelAction) {
-        use ui::core::widget::MindmapStylePanelAction;
-
-        match action {
-            MindmapStylePanelAction::SelectTheme(theme_id) => {
-                let outcome =
-                    self.document_runtime.editor_mut().apply_active_mindmap_theme(theme_id);
-                self.apply_editor_outcome(outcome);
-            }
-            MindmapStylePanelAction::Close | MindmapStylePanelAction::TogglePresets => {
-                let editor = self.document_runtime.editor_mut();
-                let Some(tab_id) = editor.active_tab_id() else {
-                    return;
-                };
-                let Some(mut tab) = editor.tab_session_mut(tab_id) else {
-                    return;
-                };
-                if tab.plugin_name() != ui::plugin::PLUGIN_MINDMAP {
-                    return;
-                }
-                match action {
-                    MindmapStylePanelAction::Close => tab.close_mindmap_style_panel(),
-                    MindmapStylePanelAction::TogglePresets => tab.toggle_mindmap_style_presets(),
-                    MindmapStylePanelAction::SelectTheme(_) => unreachable!(),
-                }
-            }
+    fn dispatch_inspector_panel(
+        &mut self,
+        action: appkit_shell::inspector_panel::StampedInspectorPanelAction,
+    ) {
+        if !self.active_editor_matches_selection() {
+            return;
         }
+        let outcome = self.document_runtime.editor_mut().dispatch_inspector_panel_action(action);
+        self.apply_editor_outcome(outcome);
     }
 
     fn execute_semantic_edit(&mut self, command: ui::plugin::SemanticEditCommand) {

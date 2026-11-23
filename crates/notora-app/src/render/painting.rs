@@ -3,9 +3,9 @@
 use crate::encrypted_note_dialog::{EncryptedNoteDialog, EncryptedNoteDialogInput};
 use crate::encrypted_note_unlock::{EncryptedNoteUnlock, EncryptedNoteUnlockInput};
 use appkit_shell::editor_runtime::{EditorFrame, RenderError};
-use appkit_shell::mindmap_style_panel::PANEL_WIDTH_LOGICAL;
 use ui::canvas_scrollbars::CanvasScrollbarsInput;
 use ui::icon::draw_icon;
+use ui::inspector_panel::PANEL_WIDTH_LOGICAL;
 use ui::popup_menu::PopupMenuWidget;
 use ui::splitter::SplitterInput;
 use ui::tooltip::TooltipWidget;
@@ -58,6 +58,18 @@ pub(super) struct CardHeaderLayout {
     pub(super) content_top_y: f32,
 }
 
+pub(crate) fn editor_inspector_rects(layout: ShellLayout, inspector_open: bool) -> (Rect, Rect) {
+    let body = layout.editor_body_rect;
+    if !inspector_open {
+        return (body, Rect::ZERO);
+    }
+    let panel_width = (PANEL_WIDTH_LOGICAL * layout.dpi).min(body.w.max(0.0));
+    (
+        Rect::new(body.x, body.y, (body.w - panel_width).max(0.0), body.h),
+        Rect::new(body.right() - panel_width, body.y, panel_width, body.h),
+    )
+}
+
 impl NotoraShell {
     pub fn render(
         &mut self,
@@ -107,29 +119,28 @@ impl NotoraShell {
         self.navigation_tree_rect = tree_rect;
         self.search_rect = search_rect;
         self.editor_rect = layout.editor_rect;
-        let mindmap_panel_width =
-            (PANEL_WIDTH_LOGICAL * dpi).min(layout.editor_body_rect.w.max(0.0));
-        self.mindmap_style_panel_rect = if self.mindmap_style_panel_open {
-            Rect::new(
-                layout.editor_body_rect.right() - mindmap_panel_width,
-                layout.editor_body_rect.y,
-                mindmap_panel_width,
-                layout.editor_body_rect.h,
-            )
-        } else {
-            Rect::ZERO
-        };
+        let (editor_body_rect, inspector_panel_rect) =
+            editor_inspector_rects(layout, model.inspector_panel.is_some());
+        self.inspector_panel_rect = inspector_panel_rect;
+        if let Some(panel) = &model.inspector_panel {
+            self.inspector_panel.set_input(panel.descriptor.clone(), &panel.presentation);
+        }
+        self.inspector_panel.set_keyboard_focus(
+            model.inspector_panel.as_ref().map(|_| ui::core::widget::ids::INSPECTOR_PANEL),
+        );
         frame.with_layout_context(|context| {
             self.editor_pane.set_rects(
                 EditorPaneRects {
                     header: layout.editor_header_rect,
                     toolbar: layout.editor_toolbar_rect,
-                    body: layout.editor_body_rect,
+                    body: editor_body_rect,
                 },
                 context,
             );
-            self.mindmap_style_panel.set_rect(local_rect(self.mindmap_style_panel_rect), context);
+            self.inspector_panel.set_rect(local_rect(inspector_panel_rect), context);
         });
+        self.inspector_panel_stamp =
+            model.inspector_panel.as_ref().map(|panel| panel.stamp.clone());
         self.settings_rect = settings_rect;
         let card_header = card_header_layout(
             layout.card_list_rect,
@@ -308,7 +319,7 @@ impl NotoraShell {
                     self.editor_empty_state.paint(context)
                 })?;
             }
-            EditorPaneState::Active => frame.paint_editor(layout.editor_body_rect)?,
+            EditorPaneState::Active => frame.paint_editor(editor_body_rect)?,
             EditorPaneState::EncryptedUnlock => {
                 frame.paint_editor_with(layout.editor_body_rect, |context| {
                     if let Some(unlock) = self.encrypted_note_unlock.as_ref() {
@@ -331,10 +342,10 @@ impl NotoraShell {
             }
             .paint(context);
         });
-        if self.mindmap_style_panel_open {
+        if self.inspector_panel_stamp.is_some() {
             frame.with_paint_context(|context| {
-                paint_at(context, self.mindmap_style_panel_rect, |context| {
-                    self.mindmap_style_panel.paint(context)
+                paint_at(context, self.inspector_panel_rect, |context| {
+                    self.inspector_panel.paint(context)
                 });
             });
         }

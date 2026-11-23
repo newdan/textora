@@ -417,10 +417,6 @@ impl App {
             .is_some_and(|session| session.plugin().mode() == ui::plugin::PluginMode::Reading)
     }
 
-    pub(crate) fn active_is_mindmap(&self) -> bool {
-        self.active_plugin_name().is_some_and(|name| name == ui::plugin::PLUGIN_MINDMAP)
-    }
-
     pub(crate) fn active_is_toggled(&mut self) -> bool {
         let Some(plugin_name) = self.active_plugin_name().map(str::to_owned) else {
             return false;

@@ -7,7 +7,7 @@ use ui::canvas::{
     CanvasPoint, CanvasViewPosition, CanvasViewportConfig, CanvasViewportInput, resolve_viewport,
 };
 use ui::core::paint::DrawCmd;
-use ui::theme::{MindmapThemeSelection, ThemeDefinition};
+use ui::theme::ThemeDefinition;
 
 const DROP_BEYOND_NODE_RIGHT_EDGE: f32 = 8.0;
 const ONE_PIXEL_BEYOND_NODE_RIGHT_EDGE: f32 = 1.0;
@@ -1381,48 +1381,18 @@ fn mindmap_is_an_editable_custom_renderer() {
 }
 
 #[test]
-fn theme_query_distinguishes_default_selected_unknown_and_invalid_metadata() {
+fn inspector_reports_the_explicit_or_default_theme() {
     for (source, expected) in [
-        ("# Root\n", MindmapThemeSelection::Default),
-        (
-            "```toml mindmap\ntheme = \"tide\"\n```\n# Root\n",
-            MindmapThemeSelection::Selected("tide".into()),
-        ),
-        (
-            "```toml mindmap\ntheme = \"future\"\n```\n# Root\n",
-            MindmapThemeSelection::Unknown("future".into()),
-        ),
-        ("```toml mindmap\ntheme = [\n```\n# Root\n", MindmapThemeSelection::InvalidMetadata),
+        ("# Root\n", DEFAULT_MINDMAP_COLOR_SCHEME_ID),
+        ("```toml mindmap\ntheme = \"tide\"\n```\n# Root\n", "tide"),
     ] {
-        let (view, doc) = view_with_source(source);
-        assert!(matches!(
-            view.query(PluginQuery::MindmapThemeSelection, &doc),
-            PluginResponse::MindmapThemeSelection(actual) if actual == expected
-        ));
+        let (view, _) = view_with_source(source);
+        let descriptor =
+            view.inspector_descriptor(1).expect("inspector should describe the current generation");
+        assert_eq!(descriptor.presets.selected_item, Some(ItemId(expected.into())));
+        assert!(descriptor.notice.is_none());
+        assert!(!descriptor.selection_disabled);
     }
-}
-
-#[test]
-fn theme_plan_query_rejects_unknown_scheme_and_plans_known_scheme() {
-    let (view, doc) = view_with_source("# Root\n");
-    assert!(matches!(
-        view.query(
-            PluginQuery::PlanMindmapTheme { theme_id: "future".into(), source_generation: 1 },
-            &doc,
-        ),
-        PluginResponse::EditPlan(EditPlan::Consume)
-    ));
-    assert!(matches!(
-        view.query(
-            PluginQuery::PlanMindmapTheme {
-                theme_id: "tide".into(),
-                source_generation: 1,
-            },
-            &doc,
-        ),
-        PluginResponse::EditPlan(EditPlan::Apply(transaction))
-            if transaction.source_generation == 1
-    ));
 }
 
 fn rendered_card_rects(draw_list: &DrawList) -> Vec<Rect> {
@@ -2208,4 +2178,58 @@ fn control_hover_highlights_its_card_and_control() {
         control_screen_rect,
         control_hover_color,
     ));
+}
+
+#[test]
+fn inspector_rejects_stale_and_unknown_actions_and_accepts_one_replacement() {
+    use ui::inspector_panel::{InspectorItemTarget, ItemId};
+    use ui::plugin::ViewPluginCapabilities;
+
+    let (view, _) = view_with_source("# Root\n");
+    let provider = view.inspector_panel_provider().expect("mindmap has an inspector");
+    assert!(provider.inspector_descriptor(0).is_none());
+    let descriptor = provider.inspector_descriptor(1).expect("current source is available");
+    let target = |id: &str| InspectorItemTarget {
+        group_id: descriptor.presets.id.clone(),
+        item_id: ItemId(id.into()),
+    };
+
+    assert_eq!(
+        provider.plan_inspector_action(&descriptor.id, &target("tide"), 0),
+        EditPlan::Consume,
+    );
+    assert_eq!(
+        provider.plan_inspector_action(&descriptor.id, &target("future"), 1),
+        EditPlan::Consume,
+    );
+    assert!(matches!(
+        provider.plan_inspector_action(&descriptor.id, &target("tide"), 1),
+        EditPlan::Apply(transaction)
+            if transaction.source_generation == 1 && transaction.replacements.len() == 1
+    ));
+}
+
+#[test]
+fn inspector_distinguishes_unknown_theme_from_invalid_metadata() {
+    use ui::plugin::ViewPluginCapabilities;
+
+    let unknown_source = "```toml mindmap\ntheme = \"future\"\n```\n# Root\n";
+    let invalid_source = "```toml mindmap\ntheme = [\n```\n# Root\n";
+    let (unknown, _) = view_with_source(unknown_source);
+    let (invalid, _) = view_with_source(invalid_source);
+    let descriptor = |view: &MindmapView| {
+        view.inspector_panel_provider()
+            .and_then(|provider| provider.inspector_descriptor(1))
+            .expect("both documents have an inspector")
+    };
+
+    let unknown = descriptor(&unknown);
+    assert!(!unknown.selection_disabled);
+    assert!(unknown.notice.as_deref().is_some_and(|notice| notice.contains("future")));
+    assert_eq!(unknown.presets.selected_item, None);
+    assert!(unknown.presets.fallback_summary_item.is_some());
+
+    let invalid = descriptor(&invalid);
+    assert!(invalid.selection_disabled);
+    assert!(invalid.notice.is_some());
 }

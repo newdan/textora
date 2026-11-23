@@ -3,14 +3,13 @@ use std::borrow::Cow;
 use appkit_core::document::DocumentModel;
 use appkit_core::workspace::types::TabId;
 use shaping::Shaper;
-use textora_core::document::{DocView, DocViewMut};
+use textora_core::document::DocView;
 use ui::canvas::CanvasViewportSnapshot;
 use ui::core::geom::Rect;
 use ui::core::paint::DrawList;
 use ui::core::widget::{KeyCode, Modifiers};
 use ui::plugin::{
-    CanvasContentMetrics, CanvasDragRequest, CanvasDragResponse, PluginMessage, PluginQuery,
-    PluginResponse, ViewPluginCapabilities,
+    CanvasContentMetrics, CanvasDragRequest, CanvasDragResponse, ViewPluginCapabilities,
 };
 use ui::theme::Theme;
 
@@ -77,8 +76,6 @@ impl DocView for PresentedDocument<'_> {
     }
 }
 
-impl DocViewMut for PresentedDocument<'_> {}
-
 pub struct TabSession<'a> {
     pub id: TabId,
     pub(crate) document: &'a DocumentModel,
@@ -132,12 +129,6 @@ impl<'a> TabSession<'a> {
 
     pub fn needs_cursor_blink_wakeup(&self) -> bool {
         self.runtime.plugin.needs_cursor_blink_wakeup()
-    }
-
-    pub fn query(&self, query: PluginQuery) -> PluginResponse {
-        let document =
-            PresentedDocument { document: self.document, presentation: &self.runtime.presentation };
-        self.runtime.plugin.query(query, &document)
     }
 
     pub fn content_height(&self) -> f32 {
@@ -309,17 +300,6 @@ impl<'a> TabSession<'a> {
             .table_structure_capabilities(self.document.generation(), cursor_byte)
     }
 
-    fn plan_mindmap_theme(
-        &self,
-        theme_id: String,
-        source_generation: u32,
-    ) -> Option<ui::plugin::EditPlan> {
-        match self.query(PluginQuery::PlanMindmapTheme { theme_id, source_generation }) {
-            PluginResponse::EditPlan(plan) => Some(plan),
-            _ => None,
-        }
-    }
-
     pub fn plan_edit_request(&self, request: &ui::plugin::EditRequest) -> ui::plugin::EditPlan {
         self.runtime
             .plugin
@@ -371,13 +351,6 @@ impl<'a> TabSession<'a> {
         })
     }
 
-    pub fn mindmap_theme_selection(&self) -> ui::theme::MindmapThemeSelection {
-        match self.query(PluginQuery::MindmapThemeSelection) {
-            PluginResponse::MindmapThemeSelection(selection) => selection,
-            _ => ui::theme::MindmapThemeSelection::InvalidMetadata,
-        }
-    }
-
     fn selection_byte_range(&self) -> Option<(usize, usize)> {
         if let Some(selection) = self.runtime.plugin.selection() {
             return selection.selection_source_range().map(|range| (range.start, range.end));
@@ -415,10 +388,6 @@ impl<'a> TabSession<'a> {
 
     pub fn cursor_render_state(&self) -> &CursorRenderState {
         &self.presentation().cursor_render_state
-    }
-
-    pub fn mindmap_style_panel(&self) -> crate::mindmap_style_panel::MindmapStylePanelSession {
-        self.runtime.mindmap_style_panel
     }
 
     pub fn display_map_entry(
@@ -691,14 +660,6 @@ impl<'a> TabSessionMut<'a> {
         self.as_ref().hit_test_edit_target(x, y, offset_x, offset_y)
     }
 
-    pub fn plan_mindmap_theme(
-        &self,
-        theme_id: String,
-        source_generation: u32,
-    ) -> Option<ui::plugin::EditPlan> {
-        self.as_ref().plan_mindmap_theme(theme_id, source_generation)
-    }
-
     fn presentation(&self) -> &DocumentPresentation {
         &self.runtime.presentation
     }
@@ -744,22 +705,6 @@ impl<'a> TabSessionMut<'a> {
 
     pub fn cursor_render_state_mut(&mut self) -> &mut CursorRenderState {
         &mut self.presentation_mut().cursor_render_state
-    }
-
-    pub fn mindmap_style_panel(&self) -> crate::mindmap_style_panel::MindmapStylePanelSession {
-        self.runtime.mindmap_style_panel
-    }
-
-    pub fn toggle_mindmap_style_panel(&mut self) {
-        self.runtime.mindmap_style_panel.toggle_visibility();
-    }
-
-    pub fn close_mindmap_style_panel(&mut self) {
-        self.runtime.mindmap_style_panel.close();
-    }
-
-    pub fn toggle_mindmap_style_presets(&mut self) {
-        self.runtime.mindmap_style_panel.toggle_presets();
     }
 
     pub fn display_map_entry(
@@ -1041,20 +986,13 @@ impl<'a> TabSessionMut<'a> {
         self.runtime.plugin.scrollable_mut().is_some_and(|view| view.restore_anchor(text, offset))
     }
 
-    pub fn send_message(&mut self, message: PluginMessage) -> bool {
-        let mut document =
-            PresentedDocument { document: self.document, presentation: &self.runtime.presentation };
-        self.runtime.plugin.handle_message(message, &mut document)
-    }
-
     pub fn toggle_toc_visible(&mut self) {
         self.runtime.toc_visible = !self.runtime.toc_visible;
     }
 
     pub fn swap_in_toggle_plugin(&mut self, replacement: Box<dyn ViewPluginCapabilities>) {
         self.runtime.toggle_source_scroll_y = self.scroll_y();
-        self.runtime.cached_toggle_source =
-            Some(std::mem::replace(&mut self.runtime.plugin, replacement));
+        self.runtime.cached_toggle_source = Some(self.runtime.replace_plugin(replacement));
     }
 
     pub fn restore_cached_toggle_source(&mut self) -> bool {
@@ -1065,7 +1003,7 @@ impl<'a> TabSessionMut<'a> {
         if let Some(scrollable) = cached.scrollable_mut() {
             scrollable.restore_y(scroll_y);
         }
-        self.runtime.plugin = cached;
+        self.runtime.replace_plugin(cached);
         true
     }
 
@@ -1074,7 +1012,7 @@ impl<'a> TabSessionMut<'a> {
     }
 
     pub fn replace_plugin(&mut self, plugin: Box<dyn ViewPluginCapabilities>) {
-        self.runtime.plugin = plugin;
+        self.runtime.replace_plugin(plugin);
     }
 
     pub fn prepare_canvas_viewport(
@@ -1449,37 +1387,5 @@ mod tests {
 
         assert!(!scroll_changed, "未移动的光标不能覆盖用户滚动");
         assert_eq!(session.scroll_top(), 0.0);
-    }
-
-    #[test]
-    fn style_panel_state_is_owned_and_mutated_through_runtime_session() {
-        let mut ids = TabIdAllocator::new();
-        let id = ids.allocate();
-        let mut document = document("# Root");
-        let mut runtime = TabRuntime::new(Box::new(EditorPlugin::new()));
-        let mut session = TabSessionMut::new(id, &mut document, &mut runtime);
-
-        assert_eq!(
-            session.mindmap_style_panel(),
-            crate::mindmap_style_panel::MindmapStylePanelSession::Closed
-        );
-
-        session.toggle_mindmap_style_panel();
-        assert_eq!(
-            session.mindmap_style_panel(),
-            crate::mindmap_style_panel::MindmapStylePanelSession::Open { presets_expanded: true }
-        );
-
-        session.toggle_mindmap_style_presets();
-        assert_eq!(
-            session.mindmap_style_panel(),
-            crate::mindmap_style_panel::MindmapStylePanelSession::Open { presets_expanded: false }
-        );
-
-        session.close_mindmap_style_panel();
-        assert_eq!(
-            session.mindmap_style_panel(),
-            crate::mindmap_style_panel::MindmapStylePanelSession::Closed
-        );
     }
 }

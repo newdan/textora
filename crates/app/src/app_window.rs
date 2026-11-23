@@ -955,7 +955,7 @@ mod ui_shell_alignment_tests {
             toggle_label: None,
             toc_visible: false,
             toc_enabled: false,
-            mindmap_style: None,
+            inspector: None,
             window_chrome: ui::title_bar::WindowChrome::Native,
             show_hamburger: !inputs.sidebar_visible,
         });

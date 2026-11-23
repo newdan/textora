@@ -237,9 +237,7 @@ fn dispatch_mouse(app: &mut App, ev: Event) -> (Vec<AppAction>, bool, Option<Cur
         if matches!(&ev, Event::MouseDown { .. }) {
             let focus_id = match &action {
                 WidgetAction::SearchBar(_) => Some(ui::core::widget::ids::SEARCH_BAR),
-                WidgetAction::MindmapStylePanel(_) => {
-                    Some(ui::core::widget::ids::MINDMAP_STYLE_PANEL)
-                }
+                WidgetAction::InspectorPanel(_) => Some(ui::core::widget::ids::INSPECTOR_PANEL),
                 _ => None,
             };
             if let Some(focus_id) = focus_id {
@@ -317,8 +315,10 @@ pub(crate) fn translate_widget_action(
         WidgetAction::Splitter(_) => {}
         WidgetAction::TitleBar(ta) => translate_title_bar_action(ta, actions),
         WidgetAction::Toc(ta) => translate_toc_action(ta, actions),
-        WidgetAction::MindmapStylePanel(action) => {
-            actions.push(AppAction::MindmapStylePanel(action.clone()));
+        WidgetAction::InspectorPanel(action) => {
+            if let Some(stamped) = app.ui_shell.stamp_inspector_panel_action(action.clone()) {
+                actions.push(AppAction::InspectorPanel(stamped));
+            }
         }
         WidgetAction::TablePicker(table_action) => {
             actions.push(AppAction::TablePicker(table_action.clone()));
@@ -352,7 +352,7 @@ fn widget_action_consumes_editor_fallthrough(action: &WidgetAction) -> bool {
             | WidgetAction::Popup(_)
             | WidgetAction::List(_)
             | WidgetAction::TitleBar(_)
-            | WidgetAction::MindmapStylePanel(_)
+            | WidgetAction::InspectorPanel(_)
             | WidgetAction::TablePicker(_)
             | WidgetAction::Consumed
     )
@@ -380,8 +380,8 @@ fn translate_title_bar_action(ta: &ui::title_bar::TitleBarAction, actions: &mut 
                 appkit_core::edit_command::EditCommand::ToggleToc,
             )]));
         }
-        TitleBarAction::ToggleMindmapStylePanel => {
-            actions.push(AppAction::ToggleMindmapStylePanel);
+        TitleBarAction::ToggleInspectorPanel => {
+            actions.push(AppAction::ToggleInspectorPanel);
         }
     }
 }
@@ -565,7 +565,7 @@ pub(crate) fn handle_mouse_input_left(
         app.ui_shell.keyboard_focus(),
         crate::ui_shell::KeyboardFocusTarget::Widget(id)
             if id == ui::core::widget::ids::SEARCH_BAR
-                || id == ui::core::widget::ids::MINDMAP_STYLE_PANEL
+                || id == ui::core::widget::ids::INSPECTOR_PANEL
     );
     if state.is_pressed() && dock_widget_has_focus {
         app.ui_shell.focus_editor();
@@ -1367,35 +1367,46 @@ mod tests {
     }
 
     #[test]
-    fn mindmap_style_title_action_translates_to_panel_toggle() {
+    fn inspector_title_action_translates_to_panel_toggle() {
         let mut actions = Vec::new();
 
         translate_title_bar_action(
-            &ui::title_bar::TitleBarAction::ToggleMindmapStylePanel,
+            &ui::title_bar::TitleBarAction::ToggleInspectorPanel,
             &mut actions,
         );
 
-        assert!(matches!(actions.as_slice(), [AppAction::ToggleMindmapStylePanel]));
+        assert!(matches!(actions.as_slice(), [AppAction::ToggleInspectorPanel]));
     }
 
+    #[cfg(feature = "markdown")]
     #[test]
-    fn mindmap_style_widget_actions_preserve_close_and_selected_theme() {
-        let app = App::new(None);
-        let fixtures = [
-            ui::core::widget::MindmapStylePanelAction::Close,
-            ui::core::widget::MindmapStylePanelAction::SelectTheme("tide".into()),
-        ];
+    fn inspector_widget_actions_keep_the_mounted_layout_stamp() {
+        use ui::inspector_panel::{
+            InspectorItemTarget, InspectorPanelAction, InspectorPanelIntent, ItemId,
+        };
 
-        for panel_action in fixtures {
-            let widget_action = WidgetAction::MindmapStylePanel(panel_action.clone());
+        let mut app = App::new(None);
+        let panel = crate::ui_shell::mounted_inspector_for_test();
+        let intents = [
+            InspectorPanelIntent::Close,
+            InspectorPanelIntent::SelectItem(InspectorItemTarget {
+                group_id: panel.descriptor.presets.id.clone(),
+                item_id: ItemId("tide".into()),
+            }),
+        ];
+        app.ui_shell.set_inspector_panel(Some(panel.clone()), 1.0);
+        for intent in intents {
+            let action = InspectorPanelAction { panel_id: panel.descriptor.id.clone(), intent };
+            let expected = panel.stamp.stamp(action.clone()).expect("mounted action");
+            let widget_action = WidgetAction::InspectorPanel(action);
             let mut actions = Vec::new();
 
             translate_widget_action(&widget_action, &app, &mut actions);
 
-            assert!(matches!(
-                actions.as_slice(),
-                [AppAction::MindmapStylePanel(mapped)] if mapped == &panel_action
-            ));
+            assert!(widget_action_consumes_editor_fallthrough(&widget_action));
+            assert!(
+                matches!(actions.as_slice(), [AppAction::InspectorPanel(mapped)] if mapped == &expected)
+            );
         }
     }
 
@@ -2058,28 +2069,31 @@ mod tests {
     }
 
     #[test]
-    fn left_click_editor_clears_mindmap_style_keyboard_focus() {
+    fn left_click_editor_clears_inspector_keyboard_focus() {
         let mut app = App::new(None);
-        app.ui_shell.focus_widget(ui::core::widget::ids::MINDMAP_STYLE_PANEL);
+        app.ui_shell.focus_widget(ui::core::widget::ids::INSPECTOR_PANEL);
 
         let _ = handle_mouse_input_left(&mut app, ElementState::Pressed, 100.0, 100.0);
 
         assert_eq!(app.ui_shell.keyboard_focus(), crate::ui_shell::KeyboardFocusTarget::Editor);
     }
 
+    #[cfg(feature = "markdown")]
     #[test]
-    fn left_click_consumed_by_mindmap_style_panel_keeps_panel_focus() {
+    fn left_click_consumed_by_inspector_panel_keeps_panel_focus() {
         let mut app = App::new(None);
         let theme = ui::theme::test_theme();
         let mut measure = ui::core::NoopMeasure;
         app.ui_shell.mark_layout_initialized_for_test();
-        app.ui_shell.set_mindmap_style_panel_input(
-            Some(appkit_shell::mindmap_style_panel::MindmapStylePanelInput::from_selection(
-                ui::theme::MindmapThemeSelection::Default,
-                true,
-            )),
-            1.0,
-        );
+        let panel = crate::ui_shell::mounted_inspector_for_test();
+        let close = panel
+            .stamp
+            .stamp(ui::inspector_panel::InspectorPanelAction {
+                panel_id: panel.descriptor.id.clone(),
+                intent: ui::inspector_panel::InspectorPanelIntent::Close,
+            })
+            .expect("close belongs to the mounted inspector");
+        app.ui_shell.set_inspector_panel(Some(panel), 1.0);
         let inputs = app.build_shell_inputs();
         app.ui_shell.update_frame(
             ui::core::Screen::new(1_200.0, 800.0),
@@ -2087,17 +2101,23 @@ mod tests {
             &mut measure,
             &inputs,
         );
-        app.ui_shell.focus_widget(ui::core::widget::ids::MINDMAP_STYLE_PANEL);
-        let panel_x = 1_200.0 - appkit_shell::mindmap_style_panel::PANEL_WIDTH_LOGICAL + 8.0;
+        app.ui_shell.focus_widget(ui::core::widget::ids::INSPECTOR_PANEL);
+        let panel_x = 1_200.0 - ui::inspector_panel::PANEL_WIDTH_LOGICAL + 8.0;
 
         let actions = handle_mouse_input_left(&mut app, ElementState::Pressed, panel_x, 400.0);
 
         assert_eq!(
             app.ui_shell.keyboard_focus(),
-            crate::ui_shell::KeyboardFocusTarget::Widget(
-                ui::core::widget::ids::MINDMAP_STYLE_PANEL
-            )
+            crate::ui_shell::KeyboardFocusTarget::Widget(ui::core::widget::ids::INSPECTOR_PANEL)
         );
+        assert!(!actions.iter().any(|action| matches!(action, AppAction::EditorMouseInput { .. })));
+
+        let close_x = 1_200.0 - 22.0;
+        let close_y = ui::title_bar::title_bar_height(1.0) + 24.0;
+        let actions = handle_mouse_input_left(&mut app, ElementState::Pressed, close_x, close_y);
+        assert!(actions.iter().any(|action| {
+            matches!(action, AppAction::InspectorPanel(stamped) if stamped == &close)
+        }));
         assert!(!actions.iter().any(|action| matches!(action, AppAction::EditorMouseInput { .. })));
     }
 

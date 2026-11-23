@@ -4,7 +4,7 @@ use std::collections::HashMap;
 
 use crate::encrypted_note_dialog::EncryptedNoteDialogInput;
 use crate::encrypted_note_unlock::EncryptedNoteUnlockInput;
-use appkit_shell::mindmap_style_panel::MindmapStylePanelInput;
+use appkit_shell::inspector_panel::MountedInspectorPanel;
 use notora_core::{DocumentIdentity, NavigationScope, NoteId};
 use ui::status_state::StatusStateInput;
 use ui::tree_list::{
@@ -72,7 +72,7 @@ pub struct NotoraRenderModel {
     pub editor_location_actions: HashMap<String, NotoraAction>,
     pub editor_tag_actions: HashMap<String, NotoraAction>,
     pub editor_command_actions: HashMap<String, NotoraAction>,
-    pub mindmap_style_panel: Option<MindmapStylePanelInput>,
+    pub inspector_panel: Option<MountedInspectorPanel>,
     pub editor_pane: EditorPaneState,
 }
 
@@ -340,7 +340,7 @@ impl NotoraRenderModel {
             editor_location_actions,
             editor_tag_actions,
             editor_command_actions,
-            mindmap_style_panel: None,
+            inspector_panel: None,
             editor_pane: EditorPaneState::Empty,
         }
     }

@@ -51,6 +51,30 @@ use super::{
 };
 
 #[test]
+fn inspector_dock_reserves_the_scaled_right_edge_of_the_editor_body() {
+    use ui::inspector_panel::PANEL_WIDTH_LOGICAL;
+
+    let layout = ShellLayout {
+        dpi: 1.5,
+        editor_body_rect: Rect::new(100.0, 150.0, 600.0, 480.0),
+        ..ShellLayout::default()
+    };
+    let (editor, panel) = super::editor_inspector_rects(layout, true);
+    assert_eq!(panel.w, PANEL_WIDTH_LOGICAL * layout.dpi);
+    assert_eq!(panel.right(), layout.editor_body_rect.right());
+    assert_eq!(panel.y, layout.editor_body_rect.y);
+    assert_eq!(panel.h, layout.editor_body_rect.h);
+    assert_eq!(editor.right(), panel.x);
+    assert_eq!(editor.x, layout.editor_body_rect.x);
+    assert_eq!(super::editor_inspector_rects(layout, false), (layout.editor_body_rect, Rect::ZERO));
+
+    let narrow = ShellLayout { editor_body_rect: Rect::new(100.0, 150.0, 100.0, 480.0), ..layout };
+    let (editor, panel) = super::editor_inspector_rects(narrow, true);
+    assert_eq!(editor.w, 0.0);
+    assert_eq!(panel, narrow.editor_body_rect);
+}
+
+#[test]
 fn three_panes_share_rounded_surfaces_with_native_or_immersive_title_bar() {
     let config_directory = tempfile::tempdir().expect("surface test config should be created");
     let paths = crate::NotoraPaths::from_config_directory(config_directory.path())
@@ -2036,7 +2060,7 @@ fn canvas_toolbar_routes_viewport_commands_without_document_actions() {
 
 #[test]
 fn mindmap_toolbar_exposes_view_controls_without_editing_commands() {
-    let toolbar = mindmap_toolbar_input();
+    let toolbar = mindmap_toolbar_input(None);
     let keys = toolbar
         .groups
         .iter()
@@ -2064,6 +2088,7 @@ fn editor_toolbar_commands_follow_the_active_plugin_capabilities() {
         command_keys(editor_toolbar_input_for_plugin(
             EditorPaneMode::WorkspaceNote,
             ui::plugin::PLUGIN_MARKDOWN_EDITOR,
+            false,
         ))
         .contains(&"bold".to_owned())
     );
@@ -2071,6 +2096,7 @@ fn editor_toolbar_commands_follow_the_active_plugin_capabilities() {
         command_keys(editor_toolbar_input_for_plugin(
             EditorPaneMode::WorkspaceNote,
             ui::plugin::PLUGIN_EDITOR,
+            false,
         )),
         vec!["undo".to_owned(), "redo".to_owned()]
     );
@@ -2078,11 +2104,12 @@ fn editor_toolbar_commands_follow_the_active_plugin_capabilities() {
         command_keys(editor_toolbar_input_for_plugin(
             EditorPaneMode::WorkspaceNote,
             ui::plugin::PLUGIN_MINDMAP,
+            true,
         )),
         vec![
             "undo".to_owned(),
             "redo".to_owned(),
-            "mindmap_style".to_owned(),
+            "inspector_panel".to_owned(),
             "promote".to_owned(),
             "demote".to_owned(),
             "canvas_zoom_out".to_owned(),
@@ -2093,6 +2120,7 @@ fn editor_toolbar_commands_follow_the_active_plugin_capabilities() {
     let mut compact_toolbar = editor_toolbar_input_for_plugin(
         EditorPaneMode::WorkspaceNote,
         ui::plugin::PLUGIN_MARKDOWN_EDITOR,
+        false,
     );
     add_compact_editor_toolbar_commands(&mut compact_toolbar);
     assert!(command_keys(compact_toolbar).contains(&"delete".to_owned()));
@@ -2103,6 +2131,7 @@ fn source_toggle_command_stays_visible_and_reflects_the_current_view() {
     let mut visual_toolbar = editor_toolbar_input_for_plugin(
         EditorPaneMode::WorkspaceNote,
         ui::plugin::PLUGIN_MARKDOWN_EDITOR,
+        false,
     );
     add_source_toggle_command(&mut visual_toolbar, false);
     let source_command = visual_toolbar.groups[0]
@@ -2201,17 +2230,9 @@ fn editor_widget_keys_translate_to_typed_note_actions() {
     assert_eq!(
         shell.translate_widget_action(&WidgetAction::Control(ControlAction::TextCommitted {
             id: ui::editor_toolbar::EDITOR_TOOLBAR_COMMAND_ID,
-            value: TextPayload::Plain("mindmap_style".to_owned()),
+            value: TextPayload::Plain("inspector_panel".to_owned()),
         })),
-        Some(NotoraAction::ToggleMindmapStylePanelRequested)
-    );
-    assert_eq!(
-        shell.translate_widget_action(&WidgetAction::MindmapStylePanel(
-            ui::core::widget::MindmapStylePanelAction::SelectTheme("tide".to_owned()),
-        )),
-        Some(NotoraAction::MindmapStylePanel(
-            ui::core::widget::MindmapStylePanelAction::SelectTheme("tide".to_owned()),
-        ))
+        Some(NotoraAction::ToggleInspectorPanelRequested)
     );
     assert_eq!(
         shell.translate_widget_action(&WidgetAction::Control(ControlAction::TextEdited {

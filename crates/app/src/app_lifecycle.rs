@@ -152,7 +152,7 @@ fn route_modal_keyboard_input(
     ui_shell.forward_key(key_code, modifiers, theme, dpi).map(|action| modal_input_route(&action))
 }
 
-fn route_mindmap_style_panel_keyboard_input(
+fn route_inspector_panel_keyboard_input(
     ui_shell: &mut crate::ui_shell::UiShell,
     key_code: Option<KeyCode>,
     modifiers: Modifiers,
@@ -160,7 +160,7 @@ fn route_mindmap_style_panel_keyboard_input(
     dpi: f32,
 ) -> Option<FocusedWidgetInputRoute> {
     if ui_shell.keyboard_focus()
-        != crate::ui_shell::KeyboardFocusTarget::Widget(ui::core::widget::ids::MINDMAP_STYLE_PANEL)
+        != crate::ui_shell::KeyboardFocusTarget::Widget(ui::core::widget::ids::INSPECTOR_PANEL)
     {
         return None;
     }
@@ -168,16 +168,17 @@ fn route_mindmap_style_panel_keyboard_input(
     let action =
         key_code.and_then(|key_code| ui_shell.forward_key(key_code, modifiers, theme, dpi));
     Some(match action {
-        Some(WidgetAction::MindmapStylePanel(action)) => {
-            FocusedWidgetInputRoute::Dispatch(AppAction::MindmapStylePanel(action))
-        }
+        Some(WidgetAction::InspectorPanel(action)) => ui_shell
+            .stamp_inspector_panel_action(action)
+            .map(|stamped| FocusedWidgetInputRoute::Dispatch(AppAction::InspectorPanel(stamped)))
+            .unwrap_or(FocusedWidgetInputRoute::Consumed),
         Some(WidgetAction::Consumed) => FocusedWidgetInputRoute::Redraw,
         Some(_) => FocusedWidgetInputRoute::Redraw,
         None => FocusedWidgetInputRoute::Consumed,
     })
 }
 
-fn mindmap_style_panel_should_receive_keyboard(
+fn inspector_panel_should_receive_keyboard(
     ui_shell: &crate::ui_shell::UiShell,
     logical_key: &Key,
     sup: bool,
@@ -186,7 +187,7 @@ fn mindmap_style_panel_should_receive_keyboard(
     ctrl: bool,
 ) -> bool {
     if ui_shell.keyboard_focus()
-        != crate::ui_shell::KeyboardFocusTarget::Widget(ui::core::widget::ids::MINDMAP_STYLE_PANEL)
+        != crate::ui_shell::KeyboardFocusTarget::Widget(ui::core::widget::ids::INSPECTOR_PANEL)
     {
         return false;
     }
@@ -211,12 +212,12 @@ fn mindmap_style_panel_should_receive_keyboard(
     key_to_command(logical_key, modifiers).is_none()
 }
 
-fn mindmap_style_panel_consumes_ime(
+fn inspector_panel_consumes_ime(
     ui_shell: &crate::ui_shell::UiShell,
     event: &ui::core::Event,
 ) -> bool {
     ui_shell.keyboard_focus()
-        == crate::ui_shell::KeyboardFocusTarget::Widget(ui::core::widget::ids::MINDMAP_STYLE_PANEL)
+        == crate::ui_shell::KeyboardFocusTarget::Widget(ui::core::widget::ids::INSPECTOR_PANEL)
         && matches!(event, ui::core::Event::ImePreedit { .. } | ui::core::Event::ImeCommit(_))
 }
 
@@ -530,7 +531,7 @@ impl App {
                     );
                 } else {
                     let panel_event = ui::core::Event::ImePreedit { text: text.clone(), cursor };
-                    if mindmap_style_panel_consumes_ime(&self.ui_shell, &panel_event) {
+                    if inspector_panel_consumes_ime(&self.ui_shell, &panel_event) {
                         let _ = self.editor_runtime.update_preedit(
                             self.editor_input_context(),
                             String::new(),
@@ -602,7 +603,7 @@ impl App {
                     }
                 } else {
                     let panel_event = ui::core::Event::ImeCommit(text.clone());
-                    if mindmap_style_panel_consumes_ime(&self.ui_shell, &panel_event) {
+                    if inspector_panel_consumes_ime(&self.ui_shell, &panel_event) {
                         self.needs_redraw = true;
                         return;
                     }
@@ -647,7 +648,7 @@ impl App {
                 let shift = input_modifiers.shift_key();
                 let alt = input_modifiers.alt_key();
                 let ctrl = input_modifiers.control_key();
-                if mindmap_style_panel_should_receive_keyboard(
+                if inspector_panel_should_receive_keyboard(
                     &self.ui_shell,
                     &event.logical_key,
                     sup,
@@ -659,7 +660,7 @@ impl App {
                         winit_key_to_keycode(&event.logical_key, event.text.as_deref());
                     let focused_widget_modifiers = ui_modifiers(input_modifiers);
                     let dpi = self.editor_runtime.scale_factor() as f32;
-                    if let Some(route) = route_mindmap_style_panel_keyboard_input(
+                    if let Some(route) = route_inspector_panel_keyboard_input(
                         &mut self.ui_shell,
                         focused_widget_key_code,
                         focused_widget_modifiers,
@@ -1868,18 +1869,13 @@ mod tests {
         );
     }
 
-    fn shell_with_mindmap_style_panel_focus() -> crate::ui_shell::UiShell {
+    #[cfg(feature = "markdown")]
+    fn shell_with_inspector_panel_focus() -> crate::ui_shell::UiShell {
         let theme = ui::theme::test_theme();
         let mut measure = ui::core::NoopMeasure;
         let mut app = App::new(None);
         app.ui_shell.mark_layout_initialized_for_test();
-        app.ui_shell.set_mindmap_style_panel_input(
-            Some(appkit_shell::mindmap_style_panel::MindmapStylePanelInput::from_selection(
-                ui::theme::MindmapThemeSelection::Default,
-                true,
-            )),
-            1.0,
-        );
+        app.ui_shell.set_inspector_panel(Some(crate::ui_shell::mounted_inspector_for_test()), 1.0);
         let inputs = app.build_shell_inputs();
         app.ui_shell.update_frame(
             ui::core::Screen::new(1_200.0, 800.0),
@@ -1887,60 +1883,56 @@ mod tests {
             &mut measure,
             &inputs,
         );
-        app.ui_shell.focus_widget(ui::core::widget::ids::MINDMAP_STYLE_PANEL);
+        app.ui_shell.focus_widget(ui::core::widget::ids::INSPECTOR_PANEL);
         app.ui_shell
     }
 
+    #[cfg(feature = "markdown")]
     #[test]
-    fn mindmap_style_panel_keyboard_route_dispatches_panel_actions_before_editor() {
+    fn inspector_panel_keyboard_route_dispatches_panel_actions_before_editor() {
         let theme = ui::theme::test_theme();
-        let mut shell = shell_with_mindmap_style_panel_focus();
+        let mut shell = shell_with_inspector_panel_focus();
 
-        let move_route = route_mindmap_style_panel_keyboard_input(
-            &mut shell,
-            Some(KeyCode::Right),
-            Modifiers::NONE,
-            &theme,
-            1.0,
-        );
-        assert!(matches!(move_route, Some(FocusedWidgetInputRoute::Redraw)));
+        use ui::inspector_panel::{InspectorItemTarget, InspectorPanelIntent, ItemId};
 
-        let select_route = route_mindmap_style_panel_keyboard_input(
-            &mut shell,
-            Some(KeyCode::Enter),
-            Modifiers::NONE,
-            &theme,
-            1.0,
-        );
-        assert!(matches!(
-            select_route,
-            Some(FocusedWidgetInputRoute::Dispatch(AppAction::MindmapStylePanel(
-                ui::core::widget::MindmapStylePanelAction::SelectTheme(theme_id)
-            ))) if theme_id == "dawn"
-        ));
-
-        let close_route = route_mindmap_style_panel_keyboard_input(
-            &mut shell,
-            Some(KeyCode::Escape),
-            Modifiers::NONE,
-            &theme,
-            1.0,
-        );
-        assert!(matches!(
-            close_route,
-            Some(FocusedWidgetInputRoute::Dispatch(AppAction::MindmapStylePanel(
-                ui::core::widget::MindmapStylePanelAction::Close
-            )))
-        ));
+        let panel = crate::ui_shell::mounted_inspector_for_test();
+        let target = InspectorItemTarget {
+            group_id: panel.descriptor.presets.id.clone(),
+            item_id: ItemId("dawn".into()),
+        };
+        for (key, intent) in [
+            (KeyCode::Right, InspectorPanelIntent::FocusItem(target.clone())),
+            (KeyCode::Enter, InspectorPanelIntent::SelectItem(target)),
+            (KeyCode::Escape, InspectorPanelIntent::Close),
+        ] {
+            let action = ui::inspector_panel::InspectorPanelAction {
+                panel_id: panel.descriptor.id.clone(),
+                intent,
+            };
+            let expected = shell.stamp_inspector_panel_action(action).expect("layout is mounted");
+            let route = route_inspector_panel_keyboard_input(
+                &mut shell,
+                Some(key),
+                Modifiers::NONE,
+                &theme,
+                1.0,
+            );
+            assert!(matches!(
+                route,
+                Some(FocusedWidgetInputRoute::Dispatch(AppAction::InspectorPanel(actual)))
+                    if actual == expected
+            ));
+        }
     }
 
+    #[cfg(feature = "markdown")]
     #[test]
-    fn mindmap_style_panel_keyboard_route_consumes_unhandled_keys_but_not_editor_focus() {
+    fn inspector_panel_keyboard_route_consumes_unhandled_keys_but_not_editor_focus() {
         let theme = ui::theme::test_theme();
-        let mut shell = shell_with_mindmap_style_panel_focus();
+        let mut shell = shell_with_inspector_panel_focus();
 
         assert!(matches!(
-            route_mindmap_style_panel_keyboard_input(
+            route_inspector_panel_keyboard_input(
                 &mut shell,
                 Some(KeyCode::Char('x')),
                 Modifiers::NONE,
@@ -1952,7 +1944,7 @@ mod tests {
 
         shell.focus_editor();
         assert!(
-            route_mindmap_style_panel_keyboard_input(
+            route_inspector_panel_keyboard_input(
                 &mut shell,
                 Some(KeyCode::Enter),
                 Modifiers::NONE,
@@ -1963,11 +1955,12 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "markdown")]
     #[test]
-    fn mindmap_style_panel_keyboard_route_bypasses_global_shortcuts() {
-        let mut shell = shell_with_mindmap_style_panel_focus();
+    fn inspector_panel_keyboard_route_bypasses_global_shortcuts() {
+        let mut shell = shell_with_inspector_panel_focus();
 
-        assert!(mindmap_style_panel_should_receive_keyboard(
+        assert!(inspector_panel_should_receive_keyboard(
             &shell,
             &Key::Character("x".into()),
             false,
@@ -1983,7 +1976,7 @@ mod tests {
             Key::Character("1".into()),
             Key::Character("b".into()),
         ] {
-            assert!(!mindmap_style_panel_should_receive_keyboard(
+            assert!(!inspector_panel_should_receive_keyboard(
                 &shell,
                 &logical_key,
                 true,
@@ -1992,7 +1985,7 @@ mod tests {
                 false,
             ));
         }
-        assert!(!mindmap_style_panel_should_receive_keyboard(
+        assert!(!inspector_panel_should_receive_keyboard(
             &shell,
             &Key::Character("p".into()),
             true,
@@ -2000,7 +1993,7 @@ mod tests {
             false,
             false,
         ));
-        assert!(mindmap_style_panel_should_receive_keyboard(
+        assert!(inspector_panel_should_receive_keyboard(
             &shell,
             &Key::Character("q".into()),
             true,
@@ -2008,7 +2001,7 @@ mod tests {
             false,
             false,
         ));
-        assert!(!mindmap_style_panel_should_receive_keyboard(
+        assert!(!inspector_panel_should_receive_keyboard(
             &shell,
             &Key::Named(NamedKey::ArrowLeft),
             false,
@@ -2016,7 +2009,7 @@ mod tests {
             true,
             false,
         ));
-        assert!(!mindmap_style_panel_should_receive_keyboard(
+        assert!(!inspector_panel_should_receive_keyboard(
             &shell,
             &Key::Character("z".into()),
             false,
@@ -2026,7 +2019,7 @@ mod tests {
         ));
 
         shell.focus_editor();
-        assert!(!mindmap_style_panel_should_receive_keyboard(
+        assert!(!inspector_panel_should_receive_keyboard(
             &shell,
             &Key::Character("x".into()),
             false,
@@ -2036,11 +2029,12 @@ mod tests {
         ));
     }
 
+    #[cfg(feature = "markdown")]
     #[test]
-    fn mindmap_style_panel_keyboard_route_bypasses_uppercase_pin_shortcut() {
-        let shell = shell_with_mindmap_style_panel_focus();
+    fn inspector_panel_keyboard_route_bypasses_uppercase_pin_shortcut() {
+        let shell = shell_with_inspector_panel_focus();
 
-        assert!(!mindmap_style_panel_should_receive_keyboard(
+        assert!(!inspector_panel_should_receive_keyboard(
             &shell,
             &Key::Character("P".into()),
             true,
@@ -2050,20 +2044,21 @@ mod tests {
         ));
     }
 
+    #[cfg(feature = "markdown")]
     #[test]
-    fn mindmap_style_panel_ime_route_consumes_preedit_and_commit_only() {
-        let mut shell = shell_with_mindmap_style_panel_focus();
+    fn inspector_panel_ime_route_consumes_preedit_and_commit_only() {
+        let mut shell = shell_with_inspector_panel_focus();
         let preedit = Event::ImePreedit { text: "拼".into(), cursor: Some((0, 3)) };
         let commit = Event::ImeCommit("拼".into());
 
-        assert!(mindmap_style_panel_consumes_ime(&shell, &preedit));
-        assert!(mindmap_style_panel_consumes_ime(&shell, &commit));
-        assert!(!mindmap_style_panel_consumes_ime(&shell, &Event::ImeEnable));
-        assert!(!mindmap_style_panel_consumes_ime(&shell, &Event::ImeDisable));
+        assert!(inspector_panel_consumes_ime(&shell, &preedit));
+        assert!(inspector_panel_consumes_ime(&shell, &commit));
+        assert!(!inspector_panel_consumes_ime(&shell, &Event::ImeEnable));
+        assert!(!inspector_panel_consumes_ime(&shell, &Event::ImeDisable));
 
         shell.focus_editor();
-        assert!(!mindmap_style_panel_consumes_ime(&shell, &preedit));
-        assert!(!mindmap_style_panel_consumes_ime(&shell, &commit));
+        assert!(!inspector_panel_consumes_ime(&shell, &preedit));
+        assert!(!inspector_panel_consumes_ime(&shell, &commit));
     }
 
     #[test]

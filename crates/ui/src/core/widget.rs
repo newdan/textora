@@ -28,7 +28,8 @@ pub mod ids {
     /// 搜索栏
     pub const SEARCH_BAR: WidgetId = WidgetId(1);
     /// mmap 风格面板
-    pub const MINDMAP_STYLE_PANEL: WidgetId = WidgetId(2);
+    /// 通用属性面板
+    pub const INSPECTOR_PANEL: WidgetId = WidgetId(3);
 }
 
 /// 鼠标按键
@@ -426,13 +427,6 @@ impl ControlAction {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum MindmapStylePanelAction {
-    Close,
-    TogglePresets,
-    SelectTheme(String),
-}
-
 /// 统一的 Widget Action 类型。
 /// 替换 `Box<dyn Any>` downcast，提供编译期穷尽检查。
 #[derive(Debug, Clone, PartialEq)]
@@ -452,7 +446,7 @@ pub enum WidgetAction {
     TreeList(crate::widgets::tree_list::TreeListAction),
     VirtualCardList(crate::widgets::virtual_card_list::VirtualCardListAction),
     Splitter(crate::widgets::splitter::SplitterAction),
-    MindmapStylePanel(MindmapStylePanelAction),
+    InspectorPanel(crate::widgets::inspector_panel::InspectorPanelAction),
     TablePicker(TablePickerAction),
     /// 事件已消费但无需 AppAction（如 hover 更新）
     Consumed,
@@ -634,17 +628,6 @@ mod tests {
 
     fn dummy_theme() -> Theme {
         crate::theme::test_theme()
-    }
-
-    #[test]
-    fn mindmap_style_panel_select_theme_action_keeps_theme_id() {
-        let action =
-            WidgetAction::MindmapStylePanel(MindmapStylePanelAction::SelectTheme("tide".into()));
-
-        assert!(matches!(
-            action,
-            WidgetAction::MindmapStylePanel(MindmapStylePanelAction::SelectTheme(id)) if id == "tide"
-        ));
     }
 
     #[test]

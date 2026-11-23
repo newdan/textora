@@ -22,13 +22,21 @@ pub(in crate::mindmap_view) use ui::core::widget::{KeyCode, Modifiers};
 pub(in crate::mindmap_view) use ui::plugin::{
     CanvasContentMetrics, CanvasDragPhase, CanvasDragPreview, CanvasDragRequest,
     CanvasDragResponse, CanvasView, EditHitTarget, EditIntent, EditPlan, EditPolicy, EditRequest,
-    KeyIntentMapper, MoveDirection, PluginFactory, PluginQuery, PluginResponse, ViewPlugin,
-    ViewPluginCapabilities,
+    KeyIntentMapper, MoveDirection, PluginFactory, ViewPlugin, ViewPluginCapabilities,
 };
 pub(in crate::mindmap_view) use ui::theme::{
     DEFAULT_MINDMAP_COLOR_SCHEME_ID, MindmapRenderTheme, Theme, find_mindmap_color_scheme,
-    resolve_mindmap_theme_selection,
 };
+
+use ui::inspector_panel::{
+    GroupId, InspectorItemTarget, InspectorPanelDescriptor, InspectorPresetGroup,
+    InspectorPresetItem, ItemId, PanelId,
+};
+use ui::plugin::InspectorPanelProvider;
+use ui::theme::built_in_mindmap_color_schemes;
+
+const APPEARANCE_PANEL_ID: &str = "mindmap.appearance";
+const COLOR_PRESETS_GROUP_ID: &str = "color_presets";
 
 pub(in crate::mindmap_view) fn mindmap_render_theme<'a>(
     theme: &'a Theme,
@@ -709,6 +717,85 @@ impl KeyIntentMapper for MindmapView {
     }
 }
 
+impl InspectorPanelProvider for MindmapView {
+    fn inspector_descriptor(&self, source_generation: u32) -> Option<InspectorPanelDescriptor> {
+        let (selected_item, notice, selection_disabled) = match &self.document_state {
+            MindmapDocumentState::Ready { tree, generation, .. }
+                if *generation == source_generation =>
+            {
+                match tree.global_props.get("theme").map(String::as_str) {
+                    None => (Some(ItemId(DEFAULT_MINDMAP_COLOR_SCHEME_ID.into())), None, false),
+                    Some(id) if find_mindmap_color_scheme(id).is_some() => {
+                        (Some(ItemId(id.into())), None, false)
+                    }
+                    Some(id) => (None, Some(format!("找不到主题：{id}，已使用默认主题")), false),
+                }
+            }
+            MindmapDocumentState::Invalid { generation, .. }
+                if *generation == source_generation =>
+            {
+                (None, Some("请先修复文件元数据".into()), true)
+            }
+            _ => return None,
+        };
+        let items = built_in_mindmap_color_schemes()
+            .iter()
+            .map(|scheme| InspectorPresetItem {
+                id: ItemId(scheme.id.into()),
+                display_name: scheme.display_name.into(),
+                canvas_background: scheme.canvas.background,
+                root_fill: scheme.node.root.fill,
+                branch_colors: scheme.canvas.branch_palette.clone(),
+                disabled: false,
+            })
+            .collect();
+        Some(InspectorPanelDescriptor {
+            id: PanelId(APPEARANCE_PANEL_ID.into()),
+            title: "风格".into(),
+            presets: InspectorPresetGroup {
+                id: GroupId(COLOR_PRESETS_GROUP_ID.into()),
+                title: "配色方案".into(),
+                items,
+                selected_item,
+                fallback_summary_item: Some(ItemId(DEFAULT_MINDMAP_COLOR_SCHEME_ID.into())),
+            },
+            notice,
+            selection_disabled,
+        })
+    }
+
+    fn plan_inspector_action(
+        &self,
+        panel_id: &PanelId,
+        target: &InspectorItemTarget,
+        source_generation: u32,
+    ) -> EditPlan {
+        if panel_id.0 != APPEARANCE_PANEL_ID || target.group_id.0 != COLOR_PRESETS_GROUP_ID {
+            return EditPlan::Consume;
+        }
+        self.plan_theme_selection(&target.item_id.0, source_generation)
+    }
+}
+
+impl MindmapView {
+    fn plan_theme_selection(&self, theme_id: &str, source_generation: u32) -> EditPlan {
+        let MindmapDocumentState::Ready { generation, source, tree, .. } = &self.document_state
+        else {
+            return EditPlan::Consume;
+        };
+        if source_generation != *generation || find_mindmap_color_scheme(theme_id).is_none() {
+            return EditPlan::Consume;
+        }
+        mmf::edit::plan_set_mindmap_theme(
+            tree,
+            source,
+            theme_id,
+            source_generation,
+            self.cursor_byte.unwrap_or(source.len()),
+        )
+    }
+}
+
 impl ViewPlugin for MindmapView {
     fn name(&self) -> &str {
         "mindmap"
@@ -769,47 +856,12 @@ impl ViewPlugin for MindmapView {
 }
 
 impl ui::plugin::ViewPluginCapabilities for MindmapView {
-    fn selection_mut(&mut self) -> Option<&mut dyn ui::plugin::SelectionView> {
+    fn inspector_panel_provider(&self) -> Option<&dyn InspectorPanelProvider> {
         Some(self)
     }
 
-    fn query(&self, query: PluginQuery, _doc: &dyn DocView) -> PluginResponse {
-        match query {
-            PluginQuery::MindmapThemeSelection => {
-                let selection = match &self.document_state {
-                    MindmapDocumentState::Invalid { .. } => {
-                        ui::theme::MindmapThemeSelection::InvalidMetadata
-                    }
-                    MindmapDocumentState::Ready { tree, .. } => resolve_mindmap_theme_selection(
-                        tree.global_props.get("theme").map(|s| s.as_str()),
-                    ),
-                    MindmapDocumentState::Uninitialized => {
-                        ui::theme::MindmapThemeSelection::Default
-                    }
-                };
-                PluginResponse::MindmapThemeSelection(selection)
-            }
-            PluginQuery::PlanMindmapTheme { theme_id, source_generation } => {
-                let MindmapDocumentState::Ready { generation, source, tree, .. } =
-                    &self.document_state
-                else {
-                    return PluginResponse::EditPlan(EditPlan::Consume);
-                };
-                if source_generation != *generation {
-                    return PluginResponse::EditPlan(EditPlan::Consume);
-                }
-                if find_mindmap_color_scheme(&theme_id).is_none() {
-                    return PluginResponse::EditPlan(EditPlan::Consume);
-                }
-                PluginResponse::EditPlan(mmf::edit::plan_set_mindmap_theme(
-                    tree,
-                    source,
-                    &theme_id,
-                    source_generation,
-                    self.cursor_byte.unwrap_or(source.len()),
-                ))
-            }
-        }
+    fn selection_mut(&mut self) -> Option<&mut dyn ui::plugin::SelectionView> {
+        Some(self)
     }
 
     fn needs_cursor_blink_wakeup(&self) -> bool {
