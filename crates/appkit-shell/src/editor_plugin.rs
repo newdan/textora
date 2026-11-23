@@ -4,7 +4,7 @@ use shaping::Shaper;
 use textora_core::document::DocView;
 use ui::core::geom::Rect;
 use ui::core::paint::DrawList;
-use ui::plugin::{PluginFactory, ViewPlugin};
+use ui::plugin::{PluginFactory, ViewPlugin, ViewPluginCapabilities};
 use ui::theme::Theme;
 
 /// 标准编辑器插件。Phase 1 仅作为占位 stub；
@@ -36,7 +36,7 @@ impl PluginFactory for EditorPluginFactory {
         false
     }
 
-    fn create(&self) -> Box<dyn ViewPlugin> {
+    fn create(&self) -> Box<dyn ViewPluginCapabilities> {
         Box::new(EditorPlugin::new())
     }
 }
@@ -44,6 +44,10 @@ impl PluginFactory for EditorPluginFactory {
 impl ViewPlugin for EditorPlugin {
     fn name(&self) -> &str {
         "editor"
+    }
+
+    fn mode(&self) -> ui::plugin::PluginMode {
+        ui::plugin::PluginMode::Source
     }
 
     fn render(
@@ -57,26 +61,12 @@ impl ViewPlugin for EditorPlugin {
         // Phase 1 stub: 返回空 DrawList，渲染仍由 app 层处理。
         DrawList::new()
     }
+}
 
-    fn shows_cursor(&self) -> bool {
-        true
+impl ui::plugin::ViewPluginCapabilities for EditorPlugin {
+    fn set_view_render_settings(&mut self, settings: ui::plugin::ViewRenderSettings) {
+        self.line_height = settings.line_height;
     }
-
-    fn shows_gutter(&self) -> bool {
-        true
-    }
-
-    fn handle_message(
-        &mut self,
-        msg: ui::plugin::PluginMessage,
-        _doc: &mut dyn textora_core::document::DocViewMut,
-    ) -> bool {
-        if let ui::plugin::PluginMessage::SetRenderSettings { line_height, .. } = msg {
-            self.line_height = line_height;
-        }
-        false
-    }
-
     fn query(
         &self,
         _query: ui::plugin::PluginQuery,

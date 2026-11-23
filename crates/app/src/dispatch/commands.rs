@@ -294,16 +294,11 @@ impl App {
 
         self.sync_plugin_state();
         let Some(active_tab) = self.active_tab_session() else { return AppEffect::NONE };
-        let insert_table_probe = active_tab.query(ui::plugin::PluginQuery::PlanSemanticEdit {
-            command: ui::plugin::SemanticEditCommand::InsertTable { columns: 1, rows: 2 },
-            source_generation: active_tab.document().generation(),
-            cursor_byte: active_tab.document().cursor_offset().to_usize(),
-            selection: None,
-        });
-        if !matches!(
-            insert_table_probe,
-            ui::plugin::PluginResponse::SemanticEdit(ui::plugin::SemanticEditPlan::Apply(_))
-        ) {
+        let insert_table_probe = active_tab.plan_semantic_edit(
+            ui::plugin::SemanticEditCommand::InsertTable { columns: 1, rows: 2 },
+            None,
+        );
+        if !matches!(insert_table_probe, ui::plugin::SemanticEditPlan::Apply(_)) {
             return AppEffect::NONE;
         }
 
@@ -578,6 +573,10 @@ mod tests {
             "canvas_command"
         }
 
+        fn mode(&self) -> ui::plugin::PluginMode {
+            ui::plugin::PluginMode::Canvas
+        }
+
         fn render(
             &mut self,
             _doc: &dyn textora_core::document::DocView,
@@ -588,11 +587,9 @@ mod tests {
         ) -> ui::core::paint::DrawList {
             ui::core::paint::DrawList::new()
         }
-
-        fn is_canvas(&self) -> bool {
-            true
-        }
     }
+
+    impl ui::plugin::ViewPluginCapabilities for CanvasCommandPlugin {}
 
     fn app_with_prepared_canvas_viewport() -> App {
         let mut app = App::new(None);

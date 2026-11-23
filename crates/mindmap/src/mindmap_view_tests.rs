@@ -1,4 +1,5 @@
 use std::{borrow::Cow, sync::Arc};
+use ui::plugin::EditableView;
 
 use super::*;
 use textora_core::document::{DocView, DocViewMut};
@@ -57,11 +58,8 @@ impl DocViewMut for MindmapTestDoc {}
 
 fn view_with_source(source: &str) -> (MindmapView, MindmapTestDoc) {
     let mut view = MindmapView::new();
-    let mut doc = MindmapTestDoc::new(source);
-    view.handle_message(
-        PluginMessage::UpdateSource { text: source.to_owned(), generation: 1 },
-        &mut doc,
-    );
+    let doc = MindmapTestDoc::new(source);
+    view.sync_document(1, ui::plugin::SyncReason::Normal, &mut || source.to_owned());
     (view, doc)
 }
 
@@ -176,14 +174,11 @@ fn mmap_layout_invalidation_drops_connector_mesh_cache() {
 #[test]
 fn mmap_non_geometry_render_changes_keep_connector_mesh_cache() {
     let source = "# Root\n## Child\n";
-    let (mut view, mut doc) = view_with_source(source);
+    let (mut view, doc) = view_with_source(source);
     let first = first_tapered_mesh(&render_test_draw_list(&mut view, &doc));
 
-    view.handle_message(PluginMessage::SetCursorVisible(false), &mut doc);
-    view.handle_message(
-        PluginMessage::SetCanvasPointer(Some(CanvasPoint::new(200.0, 120.0))),
-        &mut doc,
-    );
+    view.set_cursor_visible(false);
+    view.set_canvas_pointer(Some(CanvasPoint::new(200.0, 120.0)));
     let after_pointer = first_tapered_mesh(&render_test_draw_list(&mut view, &doc));
     assert!(Arc::ptr_eq(&first, &after_pointer));
 
@@ -355,12 +350,12 @@ fn canvas_snapshot_round_trips_hit_cursor_and_drag_at_zoom_and_scroll() {
     const SCROLL: CanvasPoint = CanvasPoint::new(60.0, 45.0);
     let viewport = Rect::new(120.0, 80.0, 60.0, 40.0);
     let source = "# Root\n## A\n## B\n## C\n";
-    let (mut view, mut doc) = view_with_source(source);
+    let (mut view, doc) = view_with_source(source);
     let theme = Theme::from_definition(&ui::theme::ThemeDefinition::default_dark());
     let mut shaper = Shaper::new().expect("test shaper should initialize");
     let title_start = node_by_title(view.ready_tree(), "B").title_byte_range.start;
     let source_range = node_by_title(view.ready_tree(), "B").subtree_source_range.clone();
-    view.handle_message(PluginMessage::SetCursorByte(title_start), &mut doc);
+    view.set_cursor_byte(title_start);
 
     for zoom in [0.5, 2.0] {
         let metrics = view
@@ -395,8 +390,8 @@ fn canvas_snapshot_round_trips_hit_cursor_and_drag_at_zoom_and_scroll() {
             geometry.title_rect.h,
         ));
         assert!(matches!(
-            view.query(PluginQuery::CursorScreenPos(title_start), &doc),
-            PluginResponse::CursorScreenRect(Some((x, y, width, height)))
+            view.cursor_screen_rect(title_start),
+            Some((x, y, width, height))
                 if (x - (expected_cursor.x - snapshot.viewport.x)).abs() < f32::EPSILON
                     && (y - (expected_cursor.y - snapshot.viewport.y)).abs() < f32::EPSILON
                     && (width - expected_cursor.w).abs() < f32::EPSILON
@@ -441,10 +436,7 @@ fn canvas_snapshot_round_trips_hit_cursor_and_drag_at_zoom_and_scroll() {
             pointer_content.y
         );
 
-        view.handle_message(
-            PluginMessage::SetPreedit { text: "你".into(), cursor: Some((0, 3)) },
-            &mut doc,
-        );
+        view.set_preedit("你".into(), Some((0, 3)));
         let preedit_metrics = view
             .prepare_canvas(&doc, &theme, &mut shaper, 1.0)
             .expect("mindmap must report content metrics while composing");
@@ -463,8 +455,8 @@ fn canvas_snapshot_round_trips_hit_cursor_and_drag_at_zoom_and_scroll() {
             composition_geometry.title_rect.h,
         ));
         assert!(matches!(
-            view.query(PluginQuery::CursorScreenPos(title_start), &doc),
-            PluginResponse::CursorScreenRect(Some((x, y, width, height)))
+            view.cursor_screen_rect(title_start),
+            Some((x, y, width, height))
                 if (x - (composition_rect.x - preedit_snapshot.viewport.x)).abs()
                     < f32::EPSILON
                     && (y - (composition_rect.y - preedit_snapshot.viewport.y)).abs()
@@ -481,10 +473,7 @@ fn canvas_snapshot_round_trips_hit_cursor_and_drag_at_zoom_and_scroll() {
             Some(EditHitTarget::TextCaret { byte_offset, .. })
                 if byte_offset == title_start
         ));
-        view.handle_message(
-            PluginMessage::SetPreedit { text: String::new(), cursor: None },
-            &mut doc,
-        );
+        view.set_preedit(String::new(), None);
     }
 }
 
@@ -1358,7 +1347,7 @@ fn drag_drop_applies_the_previewed_same_level_move() {
 #[test]
 fn cancel_and_source_update_clear_drag_preview() {
     let source = "# Root\n## A\n## B\n";
-    let (mut view, mut doc) = view_with_source(source);
+    let (mut view, doc) = view_with_source(source);
     render_test_view(&mut view, &doc);
     let source_range = node_by_title(view.ready_tree(), "B").subtree_source_range.clone();
     let request = drag_request_after_node(&view, source_range.clone(), "A", 1);
@@ -1370,10 +1359,7 @@ fn cancel_and_source_update_clear_drag_preview() {
     assert!(view.build_render_projection().drag_preview.is_none());
 
     let _ = view.handle_canvas_drag(request, &doc);
-    view.handle_message(
-        PluginMessage::UpdateSource { text: source.to_owned(), generation: 2 },
-        &mut doc,
-    );
+    view.sync_document(2, ui::plugin::SyncReason::Normal, &mut || source.to_owned());
     assert!(view.build_render_projection().drag_preview.is_none());
 }
 
@@ -1389,8 +1375,8 @@ fn laid_out_child_card_padding() -> (MindmapView, MindmapTestDoc, (f32, f32)) {
 fn mindmap_is_an_editable_custom_renderer() {
     let view = MindmapView::new();
     assert!(view.allows_editing());
-    assert!(view.handles_own_rendering());
-    assert!(!view.shows_cursor());
+    assert!(view.mode().renders_content());
+    assert!(!view.mode().uses_host_cursor());
     assert!(view.needs_cursor_blink_wakeup());
 }
 
@@ -1480,21 +1466,10 @@ fn file_theme_rendering_is_fixed_across_application_theme_modes() {
 #[test]
 fn generation_zero_requests_initial_source_update_only_once() {
     let mut view = MindmapView::new();
-    let mut doc = MindmapTestDoc::new("# Root\n");
+    assert!(view.needs_source_update(0));
 
-    assert!(matches!(
-        view.query(PluginQuery::NeedsSourceUpdate(0), &doc),
-        PluginResponse::Bool(true)
-    ));
-
-    view.handle_message(
-        PluginMessage::UpdateSource { text: "# Root\n".into(), generation: 0 },
-        &mut doc,
-    );
-    assert!(matches!(
-        view.query(PluginQuery::NeedsSourceUpdate(0), &doc),
-        PluginResponse::Bool(false)
-    ));
+    view.sync_document(0, ui::plugin::SyncReason::Normal, &mut || "# Root\n".into());
+    assert!(!view.needs_source_update(0));
     assert!(matches!(view.document_state, MindmapDocumentState::Ready { .. }));
 }
 
@@ -1546,10 +1521,10 @@ fn blank_space_to_the_right_of_title_selects_node() {
 
 #[test]
 fn empty_title_projects_placeholder_without_changing_source_range() {
-    let (mut view, mut doc) = view_with_source("# Root\n##\n");
+    let (mut view, doc) = view_with_source("# Root\n##\n");
     render_test_view(&mut view, &doc);
     let empty_title_byte = view.ready_tree().root.children[0].title_byte_range.start;
-    view.handle_message(PluginMessage::SetCursorByte(empty_title_byte), &mut doc);
+    view.set_cursor_byte(empty_title_byte);
 
     let projection = view.build_render_projection();
     assert_eq!(projection.projected_title(1), mmf::canvas::EMPTY_TITLE_PLACEHOLDER);
@@ -1559,10 +1534,10 @@ fn empty_title_projects_placeholder_without_changing_source_range() {
 
 #[test]
 fn empty_placeholder_navigation_stays_at_the_zero_length_source_range() {
-    let (mut view, mut doc) = view_with_source("# Root\n##\n");
+    let (mut view, doc) = view_with_source("# Root\n##\n");
     render_test_view(&mut view, &doc);
     let title_start = view.ready_tree().root.children[0].title_byte_range.start;
-    view.handle_message(PluginMessage::SetCursorByte(title_start), &mut doc);
+    view.set_cursor_byte(title_start);
 
     assert!(matches!(
         view.move_edit_target(title_start, MoveDirection::Right),
@@ -1572,11 +1547,15 @@ fn empty_placeholder_navigation_stays_at_the_zero_length_source_range() {
 
 #[test]
 fn node_selection_projects_card_highlight_without_text_caret() {
-    let (mut view, mut doc) = view_with_source("# Root\n## Child\n");
+    let (mut view, _) = view_with_source("# Root\n## Child\n");
     let range = view.ready_tree().root.children[0].subtree_source_range.clone();
-    view.handle_message(PluginMessage::SetSelAnchorByte(Some(range.start)), &mut doc);
-    view.handle_message(PluginMessage::SetSelCursorByte(Some(range.end)), &mut doc);
-    view.handle_message(PluginMessage::SetCursorByte(range.end), &mut doc);
+    view.selection_mut()
+        .expect("test view exposes selection")
+        .set_selection_anchor_byte(Some(range.start));
+    view.selection_mut()
+        .expect("test view exposes selection")
+        .set_selection_cursor_byte(Some(range.end));
+    view.set_cursor_byte(range.end);
 
     let projection = view.build_render_projection();
     assert_eq!(projection.selected_node_index(), Some(1));
@@ -1585,30 +1564,32 @@ fn node_selection_projects_card_highlight_without_text_caret() {
 
 #[test]
 fn selected_node_preedit_replaces_visual_title() {
-    let (mut view, mut doc) = view_with_source("# Root\n## Original\n");
+    let (mut view, _) = view_with_source("# Root\n## Original\n");
     let range = view.ready_tree().root.children[0].subtree_source_range.clone();
-    view.handle_message(PluginMessage::SetSelAnchorByte(Some(range.start)), &mut doc);
-    view.handle_message(PluginMessage::SetSelCursorByte(Some(range.end)), &mut doc);
-    view.handle_message(
-        PluginMessage::SetPreedit { text: "ni".into(), cursor: Some((2, 2)) },
-        &mut doc,
-    );
+    view.selection_mut()
+        .expect("test view exposes selection")
+        .set_selection_anchor_byte(Some(range.start));
+    view.selection_mut()
+        .expect("test view exposes selection")
+        .set_selection_cursor_byte(Some(range.end));
+    view.set_preedit("ni".into(), Some((2, 2)));
 
     assert_eq!(view.build_render_projection().projected_title(1), "ni");
 }
 
 #[test]
 fn selected_node_preedit_exposes_the_projected_composition_caret() {
-    let (mut view, mut doc) = view_with_source("# Root\n## Child\n");
+    let (mut view, doc) = view_with_source("# Root\n## Child\n");
     let child = &view.ready_tree().root.children[0];
     let selection = child.subtree_source_range.clone();
-    view.handle_message(PluginMessage::SetSelAnchorByte(Some(selection.start)), &mut doc);
-    view.handle_message(PluginMessage::SetSelCursorByte(Some(selection.end)), &mut doc);
-    view.handle_message(PluginMessage::SetCursorByte(selection.end), &mut doc);
-    view.handle_message(
-        PluginMessage::SetPreedit { text: "你".into(), cursor: Some((0, 3)) },
-        &mut doc,
-    );
+    view.selection_mut()
+        .expect("test view exposes selection")
+        .set_selection_anchor_byte(Some(selection.start));
+    view.selection_mut()
+        .expect("test view exposes selection")
+        .set_selection_cursor_byte(Some(selection.end));
+    view.set_cursor_byte(selection.end);
+    view.set_preedit("你".into(), Some((0, 3)));
     render_test_view(&mut view, &doc);
 
     let projection = view.build_render_projection();
@@ -1616,21 +1597,18 @@ fn selected_node_preedit_exposes_the_projected_composition_caret() {
     let geometry = &view.ready_hit_map().nodes[1];
     let expected_x = screen_point(&view, geometry.grapheme_edges[1], geometry.title_rect.y).x;
     assert!(matches!(
-        view.query(PluginQuery::CursorScreenPos(selection.end), &doc),
-        PluginResponse::CursorScreenRect(Some((x, _, _, _)))
+        view.cursor_screen_rect(selection.end),
+        Some((x, _, _, _))
             if (x - expected_x).abs() < f32::EPSILON
     ));
 }
 
 #[test]
 fn preedit_cursor_screen_position_uses_projected_grapheme_geometry() {
-    let (mut view, mut doc) = view_with_source("# Root\n## Child\n");
+    let (mut view, doc) = view_with_source("# Root\n## Child\n");
     let title_start = view.ready_tree().root.children[0].title_byte_range.start;
-    view.handle_message(PluginMessage::SetCursorByte(title_start + 1), &mut doc);
-    view.handle_message(
-        PluginMessage::SetPreedit { text: "你".into(), cursor: Some((0, 3)) },
-        &mut doc,
-    );
+    view.set_cursor_byte(title_start + 1);
+    view.set_preedit("你".into(), Some((0, 3)));
     render_test_view(&mut view, &doc);
 
     let projection = view.build_render_projection();
@@ -1638,8 +1616,8 @@ fn preedit_cursor_screen_position_uses_projected_grapheme_geometry() {
     let geometry = &view.ready_hit_map().nodes[1];
     let expected_x = screen_point(&view, geometry.grapheme_edges[2], geometry.title_rect.y).x;
     assert!(matches!(
-        view.query(PluginQuery::CursorScreenPos(title_start + 1), &doc),
-        PluginResponse::CursorScreenRect(Some((x, _, _, _))) if (x - expected_x).abs() < f32::EPSILON
+        view.cursor_screen_rect(title_start + 1),
+        Some((x, _, _, _)) if (x - expected_x).abs() < f32::EPSILON
     ));
 }
 
@@ -1647,9 +1625,9 @@ fn preedit_cursor_screen_position_uses_projected_grapheme_geometry() {
 fn title_caret_geometry_uses_the_same_font_as_the_drawn_text() {
     let title = "iiiiiiii";
     let source = format!("# {title}\n");
-    let (mut view, mut doc) = view_with_source(&source);
+    let (mut view, doc) = view_with_source(&source);
     let title_end = view.ready_tree().root.title_byte_range.end;
-    view.handle_message(PluginMessage::SetCursorByte(title_end), &mut doc);
+    view.set_cursor_byte(title_end);
     let mut shaper = Shaper::new().expect("test shaper should initialize");
     shaper.set_font_family(Some("monospace"));
     let theme = Theme::from_definition(&ThemeDefinition::default_dark());
@@ -1682,9 +1660,9 @@ fn title_caret_geometry_uses_the_same_font_as_the_drawn_text() {
 #[test]
 fn root_title_editing_caret_follows_the_blink_visibility_phase() {
     let source = "# Root\n## Child\n";
-    let (mut view, mut doc) = view_with_source(source);
+    let (mut view, doc) = view_with_source(source);
     let root_title_end = view.ready_tree().root.title_byte_range.end;
-    view.handle_message(PluginMessage::SetCursorByte(root_title_end), &mut doc);
+    view.set_cursor_byte(root_title_end);
     let visible_draw_list = render_test_draw_list(&mut view, &doc);
     let root_geometry = &view.ready_hit_map().nodes[0];
     let caret_x = *root_geometry
@@ -1713,7 +1691,7 @@ fn root_title_editing_caret_follows_the_blink_visibility_phase() {
             if *rect == expected_caret_rect && *color == caret_color
     )));
 
-    view.handle_message(PluginMessage::SetCursorVisible(false), &mut doc);
+    view.set_cursor_visible(false);
     let hidden_draw_list = render_test_draw_list(&mut view, &doc);
 
     assert!(!hidden_draw_list.cmds.iter().any(|command| matches!(
@@ -1725,16 +1703,17 @@ fn root_title_editing_caret_follows_the_blink_visibility_phase() {
 
 #[test]
 fn selected_title_preedit_projects_a_caret_and_local_candidate_position() {
-    let (mut view, mut doc) = view_with_source("# Root\n## Child\n");
+    let (mut view, doc) = view_with_source("# Root\n## Child\n");
     let title_start = view.ready_tree().root.children[0].title_byte_range.start;
     let selection = title_start + 1..title_start + 4;
-    view.handle_message(PluginMessage::SetSelAnchorByte(Some(selection.start)), &mut doc);
-    view.handle_message(PluginMessage::SetSelCursorByte(Some(selection.end)), &mut doc);
-    view.handle_message(PluginMessage::SetCursorByte(selection.end), &mut doc);
-    view.handle_message(
-        PluginMessage::SetPreedit { text: "你".into(), cursor: Some((0, 3)) },
-        &mut doc,
-    );
+    view.selection_mut()
+        .expect("test view exposes selection")
+        .set_selection_anchor_byte(Some(selection.start));
+    view.selection_mut()
+        .expect("test view exposes selection")
+        .set_selection_cursor_byte(Some(selection.end));
+    view.set_cursor_byte(selection.end);
+    view.set_preedit("你".into(), Some((0, 3)));
     let mut shaper = Shaper::new().expect("test shaper");
     let theme = Theme::from_definition(&ui::theme::ThemeDefinition::default_dark());
     let _ = view.render(&doc, Rect::new(100.0, 80.0, 800.0, 600.0), &theme, &mut shaper, 1.0);
@@ -1753,8 +1732,8 @@ fn selected_title_preedit_projects_a_caret_and_local_candidate_position() {
     );
     let viewport = rendered_viewport(&view);
     assert!(matches!(
-        view.query(PluginQuery::CursorScreenPos(selection.end), &doc),
-        PluginResponse::CursorScreenRect(Some((x, y, _, _)))
+        view.cursor_screen_rect(selection.end),
+        Some((x, y, _, _))
             if (x - (expected.x - viewport.viewport.x)).abs() < f32::EPSILON
                 && (y - (expected.y - viewport.viewport.y)).abs() < f32::EPSILON
     ));
@@ -1762,25 +1741,26 @@ fn selected_title_preedit_projects_a_caret_and_local_candidate_position() {
 
 #[test]
 fn hidden_blink_keeps_selected_title_preedit_candidate_position_projected() {
-    let (mut view, mut doc) = view_with_source("# Root\n## Child\n");
+    let (mut view, doc) = view_with_source("# Root\n## Child\n");
     let title_start = view.ready_tree().root.children[0].title_byte_range.start;
     let selection = title_start + 1..title_start + 2;
-    view.handle_message(PluginMessage::SetSelAnchorByte(Some(selection.start)), &mut doc);
-    view.handle_message(PluginMessage::SetSelCursorByte(Some(selection.end)), &mut doc);
-    view.handle_message(PluginMessage::SetCursorByte(selection.end), &mut doc);
-    view.handle_message(
-        PluginMessage::SetPreedit { text: "你".into(), cursor: Some((0, 3)) },
-        &mut doc,
-    );
-    view.handle_message(PluginMessage::SetCursorVisible(false), &mut doc);
+    view.selection_mut()
+        .expect("test view exposes selection")
+        .set_selection_anchor_byte(Some(selection.start));
+    view.selection_mut()
+        .expect("test view exposes selection")
+        .set_selection_cursor_byte(Some(selection.end));
+    view.set_cursor_byte(selection.end);
+    view.set_preedit("你".into(), Some((0, 3)));
+    view.set_cursor_visible(false);
     render_test_view(&mut view, &doc);
 
     assert!(view.build_render_projection().caret().is_none());
     let geometry = &view.ready_hit_map().nodes[1];
     let expected_x = screen_point(&view, geometry.grapheme_edges[2], geometry.title_rect.y).x;
     assert!(matches!(
-        view.query(PluginQuery::CursorScreenPos(selection.end), &doc),
-        PluginResponse::CursorScreenRect(Some((x, _, _, _)))
+        view.cursor_screen_rect(selection.end),
+        Some((x, _, _, _))
             if (x - expected_x).abs() < f32::EPSILON
     ));
 }
@@ -1806,8 +1786,8 @@ fn cursor_screen_position_is_relative_to_plugin_bounds() {
     );
     let viewport = rendered_viewport(&view);
     assert!(matches!(
-        view.query(PluginQuery::CursorScreenPos(title_start), &doc),
-        PluginResponse::CursorScreenRect(Some((x, y, _, _)))
+        view.cursor_screen_rect(title_start),
+        Some((x, y, _, _))
             if (x - (expected.x - viewport.viewport.x)).abs() < f32::EPSILON
                 && (y - (expected.y - viewport.viewport.y)).abs() < f32::EPSILON
     ));
@@ -1815,13 +1795,10 @@ fn cursor_screen_position_is_relative_to_plugin_bounds() {
 
 #[test]
 fn preedit_title_hit_keeps_the_source_caret_in_range() {
-    let (mut view, mut doc) = view_with_source("# Root\n## A\n");
+    let (mut view, doc) = view_with_source("# Root\n## A\n");
     let title_start = view.ready_tree().root.children[0].title_byte_range.start;
-    view.handle_message(PluginMessage::SetCursorByte(title_start), &mut doc);
-    view.handle_message(
-        PluginMessage::SetPreedit { text: "你".into(), cursor: Some((0, 3)) },
-        &mut doc,
-    );
+    view.set_cursor_byte(title_start);
+    view.set_preedit("你".into(), Some((0, 3)));
     render_test_view(&mut view, &doc);
     let geometry = &view.ready_hit_map().nodes[1];
 
@@ -1836,11 +1813,11 @@ fn preedit_title_hit_keeps_the_source_caret_in_range() {
 
 #[test]
 fn down_from_a_title_moves_to_the_next_visible_dfs_node() {
-    let (mut view, mut doc) = view_with_source("# Root\n## Parent\n### Child\n## Next\n");
+    let (mut view, _) = view_with_source("# Root\n## Parent\n### Child\n## Next\n");
     let tree = view.ready_tree();
     let child_start = tree.root.children[0].children[0].title_byte_range.start;
     let next_range = tree.root.children[1].subtree_source_range.clone();
-    view.handle_message(PluginMessage::SetCursorByte(child_start), &mut doc);
+    view.set_cursor_byte(child_start);
 
     assert_eq!(
         view.move_edit_target(child_start, MoveDirection::Down),
@@ -1850,12 +1827,9 @@ fn down_from_a_title_moves_to_the_next_visible_dfs_node() {
 
 #[test]
 fn invalid_source_discards_previous_layout() {
-    let (mut view, mut doc) = view_with_source("# Root\n");
+    let (mut view, doc) = view_with_source("# Root\n");
     render_test_view(&mut view, &doc);
-    view.handle_message(
-        PluginMessage::UpdateSource { text: String::new(), generation: 2 },
-        &mut doc,
-    );
+    view.sync_document(2, ui::plugin::SyncReason::Normal, &mut || String::new());
 
     assert!(matches!(view.document_state, MindmapDocumentState::Invalid { .. }));
 }
@@ -1865,23 +1839,17 @@ fn invalid_mmap_reports_no_canvas_metrics_and_valid_recovery_restores_them() {
     const INVALID_SOURCE: &str = "## Orphan\n";
     const VALID_SOURCE: &str = "# Root\n## Recovered\n";
 
-    let (mut view, mut doc) = view_with_source("# Root\n");
+    let (mut view, doc) = view_with_source("# Root\n");
     let theme = Theme::from_definition(&ui::theme::ThemeDefinition::default_dark());
     let mut shaper = Shaper::new().expect("test shaper should initialize");
-    view.handle_message(
-        PluginMessage::UpdateSource { text: INVALID_SOURCE.to_owned(), generation: 2 },
-        &mut doc,
-    );
+    view.sync_document(2, ui::plugin::SyncReason::Normal, &mut || INVALID_SOURCE.to_owned());
 
     assert!(
         view.prepare_canvas(&doc, &theme, &mut shaper, 1.0).is_none(),
         "an invalid mmap must not expose stale canvas metrics or scrollbars"
     );
 
-    view.handle_message(
-        PluginMessage::UpdateSource { text: VALID_SOURCE.to_owned(), generation: 3 },
-        &mut doc,
-    );
+    view.sync_document(3, ui::plugin::SyncReason::Normal, &mut || VALID_SOURCE.to_owned());
     let metrics = view
         .prepare_canvas(&doc, &theme, &mut shaper, 1.0)
         .expect("a corrected mmap must restore valid canvas metrics");
@@ -1890,19 +1858,19 @@ fn invalid_mmap_reports_no_canvas_metrics_and_valid_recovery_restores_them() {
 
 #[test]
 fn clear_edit_focus_detaches_from_a_final_title_without_a_newline() {
-    let (mut view, mut doc) = view_with_source("# Root");
+    let (mut view, _) = view_with_source("# Root");
     let title_end = view.ready_tree().root.title_byte_range.end;
-    view.handle_message(PluginMessage::SetCursorByte(title_end), &mut doc);
+    view.set_cursor_byte(title_end);
     assert!(matches!(view.render_focus(), MindmapFocus::TitleEditing { .. }));
 
-    view.handle_message(PluginMessage::ClearEditFocus, &mut doc);
+    view.clear_edit_focus();
 
     assert_eq!(view.render_focus(), MindmapFocus::None);
     assert_eq!(view.move_edit_target(title_end, MoveDirection::Left), None);
 }
 
 #[test]
-fn collapse_control_hit_precedes_card_hit_testing() {
+fn collapse_control_has_a_separate_hit_target() {
     let (mut view, doc) = view_with_source("# Root\n## Branch\n### Child\n");
     render_test_view(&mut view, &doc);
     let control =
@@ -1913,10 +1881,7 @@ fn collapse_control_hit_precedes_card_hit_testing() {
         control.bounds.y + control.bounds.h * 0.5,
     );
 
-    assert!(matches!(
-        view.semantic_hit_target(point.x, point.y),
-        Some(EditHitTarget::CanvasControl { .. })
-    ));
+    assert!(view.hit_test_canvas_control(point).is_some());
 }
 
 #[test]
@@ -1955,10 +1920,7 @@ fn nested_control_does_not_mask_parent_or_child_card_edges() {
         view.semantic_hit_target(child_edge.x, child_edge.y),
         Some(EditHitTarget::SourceObject { source_range: child_range })
     );
-    assert!(matches!(
-        view.semantic_hit_target(control_center.x, control_center.y),
-        Some(EditHitTarget::CanvasControl { .. })
-    ));
+    assert!(view.hit_test_canvas_control(control_center).is_some());
 }
 
 #[test]
@@ -1971,13 +1933,7 @@ fn collapsed_projection_records_full_descendant_count_and_control_plan() {
     assert!(view.ready_hit_map().controls.iter().all(|control| control.source_node_index != 0));
 
     let child_range = view.ready_tree().root.children[0].subtree_source_range.clone();
-    assert!(matches!(
-        view.query(
-            PluginQuery::PlanCanvasControl { source_range: child_range, source_generation: 1 },
-            &doc,
-        ),
-        PluginResponse::EditPlan(EditPlan::Apply(_))
-    ));
+    assert!(matches!(view.plan_canvas_control(child_range, 1), EditPlan::Apply(_)));
 }
 
 #[test]
@@ -1999,31 +1955,19 @@ fn collapse_end_to_end() {
         parent_control.bounds.x + parent_control.bounds.w * 0.5,
         parent_control.bounds.y + parent_control.bounds.h * 0.5,
     );
-    assert_eq!(
-        view.semantic_hit_target(parent_control_point.x, parent_control_point.y),
-        Some(EditHitTarget::CanvasControl { source_range: parent_range.clone() })
-    );
+    assert_eq!(view.hit_test_canvas_control(parent_control_point), Some(parent_range.clone()));
 
     let root_range = view.ready_tree().root.subtree_source_range.clone();
     assert!(view.ready_hit_map().controls.iter().all(|control| control.source_node_index != 0));
-    assert!(matches!(
-        view.query(
-            PluginQuery::PlanCanvasControl { source_range: root_range, source_generation: 1 },
-            &doc,
-        ),
-        PluginResponse::EditPlan(EditPlan::Consume)
-    ));
+    assert!(matches!(view.plan_canvas_control(root_range, 1), EditPlan::Consume));
 
-    let PluginResponse::EditPlan(EditPlan::Apply(transaction)) = view.query(
-        PluginQuery::PlanCanvasControl { source_range: parent_range, source_generation: 1 },
-        &doc,
-    ) else {
+    let EditPlan::Apply(transaction) = view.plan_canvas_control(parent_range, 1) else {
         panic!("parent control must produce a toggle transaction");
     };
     let next_source = apply_transaction_to_text(source, &transaction);
     assert!(next_source.contains("collapsed = true"));
     doc = MindmapTestDoc::new(&next_source);
-    view.handle_message(PluginMessage::UpdateSource { text: next_source, generation: 2 }, &mut doc);
+    view.sync_document(2, ui::plugin::SyncReason::Normal, &mut || next_source.clone());
     render_test_view(&mut view, &doc);
 
     let visible_source_indices = view
@@ -2181,7 +2125,7 @@ fn drag_preview_width_uses_the_canvas_font_for_the_subtree_label() {
 
 #[test]
 fn card_hover_highlights_fill_border_and_control_symbol() {
-    let (mut view, mut doc) = view_with_source("# Root\n## Branch\n### Child\n");
+    let (mut view, doc) = view_with_source("# Root\n## Branch\n### Child\n");
     render_test_view(&mut view, &doc);
     let branch = view
         .ready_hit_map()
@@ -2195,7 +2139,7 @@ fn card_hover_highlights_fill_border_and_control_symbol() {
         branch_card.x + branch_card.w * 0.5,
         branch_card.y + branch_card.h * 0.5,
     );
-    view.handle_message(PluginMessage::SetCanvasPointer(Some(branch_center)), &mut doc);
+    view.set_canvas_pointer(Some(branch_center));
     let theme = Theme::from_definition(&ui::theme::ThemeDefinition::default_dark());
     let draw_list = render_test_draw_list_with_theme(&mut view, &doc, &theme);
     let branch_screen_rect =
@@ -2228,7 +2172,7 @@ fn card_hover_highlights_fill_border_and_control_symbol() {
 
 #[test]
 fn control_hover_highlights_its_card_and_control() {
-    let (mut view, mut doc) = view_with_source("# Root\n## Branch\n### Child\n");
+    let (mut view, doc) = view_with_source("# Root\n## Branch\n### Child\n");
     render_test_view(&mut view, &doc);
     let control = view.ready_hit_map().controls[0].bounds;
     let branch_card = view
@@ -2239,7 +2183,7 @@ fn control_hover_highlights_its_card_and_control() {
         .expect("branch geometry")
         .card_rect;
     let pointer = screen_point(&view, control.x + control.w * 0.5, control.y + control.h * 0.5);
-    view.handle_message(PluginMessage::SetCanvasPointer(Some(pointer)), &mut doc);
+    view.set_canvas_pointer(Some(pointer));
     let theme = Theme::from_definition(&ui::theme::ThemeDefinition::default_dark());
     let draw_list = render_test_draw_list_with_theme(&mut view, &doc, &theme);
     let branch_screen_rect =

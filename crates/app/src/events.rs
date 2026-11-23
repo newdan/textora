@@ -81,11 +81,13 @@ fn mmap_cursor_icon(app: &mut App, px: f32, py: f32) -> Option<CursorIcon> {
         return Some(CursorIcon::Grabbing);
     }
 
+    if app.hit_test_canvas_control(px, py).is_some() {
+        return Some(CursorIcon::Pointer);
+    }
     let target = app.query_plugin_edit_hit_target(px, py)?;
     match target {
         Some(EditHitTarget::TextCaret { .. }) => Some(CursorIcon::Text),
         Some(EditHitTarget::SourceObject { .. }) => Some(CursorIcon::Grab),
-        Some(EditHitTarget::CanvasControl { .. }) => Some(CursorIcon::Pointer),
         Some(EditHitTarget::ClearFocus) | None => Some(CursorIcon::Default),
     }
 }
@@ -649,14 +651,7 @@ fn table_structure_context_menu(
     };
     let tab = app.active_tab_session()?;
     let source_generation = tab.document().generation();
-    let ui::plugin::PluginResponse::TableStructureCapabilities(Some(capabilities)) =
-        tab.query(ui::plugin::PluginQuery::TableStructureCapabilities {
-            source_generation,
-            cursor_byte: byte_offset,
-        })
-    else {
-        return None;
-    };
+    let capabilities = tab.table_structure_capabilities(byte_offset)?;
     Some(table_structure_menu(
         capabilities,
         source_generation,
@@ -1022,7 +1017,7 @@ mod tests {
         {
             let mut tab = app.active_tab_session_mut().expect("Markdown tab should be active");
             tab.document_mut().cursor_move_to_offset(next_cell);
-            tab.send_message(ui::plugin::PluginMessage::SetCursorByte(next_cell));
+            tab.set_cursor_byte(next_cell);
         }
 
         assert!(dispatch_tab_key(
@@ -1146,7 +1141,7 @@ mod tests {
             two_columns.rfind("---").expect("second alignment cell exists")
         );
     }
-    use ui::plugin::{EditHitTarget, PluginQuery, PluginResponse, ViewPlugin};
+    use ui::plugin::{EditHitTarget, ViewPlugin};
     use winit::window::CursorIcon;
 
     #[test]
@@ -1236,6 +1231,10 @@ mod tests {
             ui::plugin::PLUGIN_MINDMAP
         }
 
+        fn mode(&self) -> ui::plugin::PluginMode {
+            ui::plugin::PluginMode::RichText
+        }
+
         fn render(
             &mut self,
             _doc: &dyn textora_core::document::DocView,
@@ -1246,26 +1245,33 @@ mod tests {
         ) -> ui::core::paint::DrawList {
             ui::core::paint::DrawList::new()
         }
+    }
+
+    impl ui::plugin::EditPolicy for MmapCursorTestPlugin {
+        fn plan_edit(&self, _: &ui::plugin::EditRequest) -> ui::plugin::EditPlan {
+            ui::plugin::EditPlan::UseDefault
+        }
+    }
+
+    impl ui::plugin::EditableView for MmapCursorTestPlugin {
+        fn hit_test_edit_target(
+            &self,
+            _x: f32,
+            _y: f32,
+            _offset_x: f32,
+            _offset_y: f32,
+        ) -> Option<Option<ui::plugin::EditHitTarget>> {
+            Some(self.target.borrow().clone())
+        }
+    }
+
+    impl ui::plugin::ViewPluginCapabilities for MmapCursorTestPlugin {
+        fn editable(&self) -> Option<&dyn ui::plugin::EditableView> {
+            Some(self)
+        }
 
         fn allows_editing(&self) -> bool {
             true
-        }
-
-        fn handles_own_rendering(&self) -> bool {
-            true
-        }
-
-        fn query(
-            &self,
-            query: PluginQuery,
-            _doc: &dyn textora_core::document::DocView,
-        ) -> PluginResponse {
-            match query {
-                PluginQuery::HitTestEditTarget { .. } => {
-                    PluginResponse::EditHitTarget(self.target.borrow().clone())
-                }
-                _ => PluginResponse::None,
-            }
         }
     }
 

@@ -1,6 +1,7 @@
 //! 文档模型与 tab runtime 的集中所有权。
 
 use std::path::Path;
+use ui::plugin::{SyncOutcome, SyncReason};
 
 use appkit_core::workspace::types::TabId;
 
@@ -304,7 +305,7 @@ impl ModelSession {
         }
         refresh_transaction_presentation(&mut tab, &edit, line_height);
         if previous_revision != tab.document.content_revision() {
-            synchronize_plugin_source(&mut tab);
+            synchronize_plugin_source(&mut tab, SyncReason::Normal);
         }
         let mut outcome = edit_outcome(
             tab_id,
@@ -383,7 +384,7 @@ impl ModelSession {
         }
         refresh_transaction_presentation(tab, &edit.edit_outcome, line_height);
         if edit.content_revision != previous_revision {
-            synchronize_plugin_source(tab);
+            synchronize_plugin_source(tab, SyncReason::Normal);
         } else {
             synchronize_plugin_caret(tab);
         }
@@ -554,7 +555,7 @@ impl ModelSession {
             tab.document.undo();
         }
         refresh_presentation_after_edit(&mut tab, line_height);
-        synchronize_plugin_source(&mut tab);
+        synchronize_plugin_source(&mut tab, SyncReason::Force);
         edit_outcome(
             tab_id,
             previous_summary.content_revision,
@@ -591,13 +592,7 @@ impl ModelSession {
 
     pub(crate) fn scroll_active_plugin(&mut self, pixels: f32, viewport_height: f32) -> bool {
         self.active_tab_id().and_then(|tab_id| self.tab_session_mut(tab_id)).is_some_and(
-            |mut tab| {
-                tab.handles_own_rendering()
-                    && tab.send_message(ui::plugin::PluginMessage::Scroll {
-                        delta: pixels,
-                        viewport_h: viewport_height,
-                    })
-            },
+            |mut tab| tab.handles_own_rendering() && tab.scroll_plugin(pixels, viewport_height),
         )
     }
 
@@ -665,16 +660,7 @@ impl ModelSession {
                 .document
                 .selection_range()
                 .and_then(|(start, end)| (start < end).then_some(start..end));
-            let query = ui::plugin::PluginQuery::PlanSemanticEdit {
-                command,
-                source_generation: tab.document.generation(),
-                cursor_byte: tab.document.cursor_offset().to_usize(),
-                selection,
-            };
-            match tab.query(query) {
-                ui::plugin::PluginResponse::SemanticEdit(plan) => plan,
-                _ => ui::plugin::SemanticEditPlan::Unsupported,
-            }
+            tab.plan_semantic_edit(command, selection)
         };
         let ui::plugin::SemanticEditPlan::Apply(transaction) = plan else {
             return (
@@ -788,7 +774,7 @@ impl ModelSession {
         *current = document;
         if let Some(mut tab) = self.tab_session_mut(tab_id) {
             tab.runtime.presentation.source_spacing = Default::default();
-            synchronize_plugin_source(&mut tab);
+            synchronize_plugin_source(&mut tab, SyncReason::Force);
         }
         true
     }
@@ -964,14 +950,17 @@ impl ModelSession {
         self.workspace.restore_pinned(paths);
     }
 
-    pub(crate) fn create_plugin_for_path(&self, path: &Path) -> Box<dyn ui::plugin::ViewPlugin> {
+    pub(crate) fn create_plugin_for_path(
+        &self,
+        path: &Path,
+    ) -> Box<dyn ui::plugin::ViewPluginCapabilities> {
         self.workspace.create_plugin_for_path(path)
     }
 
     pub(crate) fn create_plugin_by_name(
         &self,
         plugin_name: &str,
-    ) -> Box<dyn ui::plugin::ViewPlugin> {
+    ) -> Box<dyn ui::plugin::ViewPluginCapabilities> {
         self.workspace.create_plugin_by_name(plugin_name)
     }
 
@@ -997,18 +986,16 @@ impl ModelSession {
         let Some(mut tab) = self.tab_session_mut(tab_id) else {
             return;
         };
-        synchronize_plugin_source(&mut tab);
+        synchronize_plugin_source(&mut tab, SyncReason::Force);
     }
 
     fn synchronize_plugin_source_if_stale(&mut self, tab_id: TabId) {
         let Some(mut tab) = self.tab_session_mut(tab_id) else {
             return;
         };
-        let source_generation = tab.document.generation();
-        if !tab.needs_source_update(source_generation) {
-            return;
+        if tab.sync_document(SyncReason::Normal) == SyncOutcome::Updated {
+            synchronize_plugin_caret(&mut tab);
         }
-        synchronize_plugin_source(&mut tab);
     }
 }
 
@@ -1077,27 +1064,20 @@ fn refresh_presentation_after_edit(tab: &mut TabSessionMut<'_>, line_height: f32
     }
 }
 
-fn synchronize_plugin_source(tab: &mut TabSessionMut<'_>) {
-    use ui::plugin::PluginMessage;
-
-    if tab.plugin_name() == ui::plugin::PLUGIN_EDITOR {
-        return;
-    }
-    let source = tab.document.full_text();
-    let generation = tab.document.generation();
-    tab.send_message(PluginMessage::UpdateSource { text: source, generation });
+fn synchronize_plugin_source(tab: &mut TabSessionMut<'_>, reason: SyncReason) {
+    tab.sync_document(reason);
     synchronize_plugin_caret(tab);
 }
 
 fn synchronize_plugin_caret(tab: &mut TabSessionMut<'_>) {
-    use ui::plugin::{PluginMessage, VisualCaretPosition};
+    use ui::plugin::VisualCaretPosition;
     let byte_offset = tab.document.cursor_offset().to_usize();
     let affinity = tab.document.tb().cursor_affinity();
     let anchor = tab.document.cursor().selection_anchor;
-    tab.send_message(PluginMessage::SetSelAnchorByte(anchor));
-    tab.send_message(PluginMessage::SetSelCursorByte(anchor.map(|_| byte_offset)));
-    tab.send_message(PluginMessage::SetCursorByte(byte_offset));
-    tab.send_message(PluginMessage::SetVisualCaret(VisualCaretPosition { byte_offset, affinity }));
+    tab.set_plugin_selection_anchor_byte(anchor);
+    tab.set_plugin_selection_cursor_byte(anchor.map(|_| byte_offset));
+    tab.set_cursor_byte(byte_offset);
+    tab.set_visual_caret(VisualCaretPosition { byte_offset, affinity });
 }
 
 fn edit_outcome(
@@ -1173,6 +1153,10 @@ mod tests {
             PLUGIN_MINDMAP
         }
 
+        fn mode(&self) -> ui::plugin::PluginMode {
+            ui::plugin::PluginMode::Source
+        }
+
         fn render(
             &mut self,
             _document: &dyn textora_core::document::DocView,
@@ -1183,7 +1167,9 @@ mod tests {
         ) -> ui::DrawList {
             ui::DrawList::new()
         }
+    }
 
+    impl ui::plugin::ViewPluginCapabilities for MindmapThemeProbePlugin {
         fn query(
             &self,
             query: ui::plugin::PluginQuery,
@@ -1209,6 +1195,10 @@ mod tests {
             "source-sync-probe"
         }
 
+        fn mode(&self) -> ui::plugin::PluginMode {
+            ui::plugin::PluginMode::Source
+        }
+
         fn render(
             &mut self,
             _document: &dyn textora_core::document::DocView,
@@ -1220,18 +1210,23 @@ mod tests {
             ui::DrawList::new()
         }
 
-        fn handle_message(
+        fn sync_document(
             &mut self,
-            message: ui::plugin::PluginMessage,
-            _document: &mut dyn textora_core::document::DocViewMut,
-        ) -> bool {
-            let ui::plugin::PluginMessage::UpdateSource { text, generation } = message else {
-                return false;
-            };
-            self.sources.borrow_mut().push((text, generation));
-            true
+            generation: u32,
+            reason: ui::plugin::SyncReason,
+            load_source: &mut dyn FnMut() -> String,
+        ) -> ui::plugin::SyncOutcome {
+            if reason == ui::plugin::SyncReason::Normal
+                && self.sources.borrow().last().is_some_and(|(_, cached)| *cached == generation)
+            {
+                return ui::plugin::SyncOutcome::Unchanged;
+            }
+            self.sources.borrow_mut().push((load_source(), generation));
+            ui::plugin::SyncOutcome::Updated
         }
     }
+
+    impl ui::plugin::ViewPluginCapabilities for SourceSyncProbePlugin {}
 
     struct PlanSyncProbePlugin {
         sources: Rc<RefCell<Vec<(String, u32)>>>,
@@ -1258,6 +1253,10 @@ mod tests {
             "plan-sync-probe"
         }
 
+        fn mode(&self) -> ui::plugin::PluginMode {
+            ui::plugin::PluginMode::Source
+        }
+
         fn render(
             &mut self,
             _document: &dyn textora_core::document::DocView,
@@ -1269,31 +1268,27 @@ mod tests {
             ui::DrawList::new()
         }
 
-        fn edit_policy(&self) -> &dyn ui::plugin::EditPolicy {
-            self
-        }
-
-        fn query(
-            &self,
-            query: ui::plugin::PluginQuery,
-            _document: &dyn textora_core::document::DocView,
-        ) -> ui::plugin::PluginResponse {
-            let ui::plugin::PluginQuery::NeedsSourceUpdate(generation) = query else {
-                return ui::plugin::PluginResponse::None;
-            };
-            ui::plugin::PluginResponse::Bool(self.synced_generation() != Some(generation))
-        }
-
-        fn handle_message(
+        fn sync_document(
             &mut self,
-            message: ui::plugin::PluginMessage,
-            _document: &mut dyn textora_core::document::DocViewMut,
-        ) -> bool {
-            let ui::plugin::PluginMessage::UpdateSource { text, generation } = message else {
-                return false;
-            };
-            self.sources.borrow_mut().push((text, generation));
-            true
+            generation: u32,
+            reason: ui::plugin::SyncReason,
+            load_source: &mut dyn FnMut() -> String,
+        ) -> ui::plugin::SyncOutcome {
+            if reason == ui::plugin::SyncReason::Normal
+                && self.synced_generation() == Some(generation)
+            {
+                return ui::plugin::SyncOutcome::Unchanged;
+            }
+            self.sources.borrow_mut().push((load_source(), generation));
+            ui::plugin::SyncOutcome::Updated
+        }
+    }
+
+    impl ui::plugin::EditableView for PlanSyncProbePlugin {}
+
+    impl ui::plugin::ViewPluginCapabilities for PlanSyncProbePlugin {
+        fn editable(&self) -> Option<&dyn ui::plugin::EditableView> {
+            Some(self)
         }
     }
 

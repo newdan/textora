@@ -1,6 +1,5 @@
 use appkit_shell::document_search::{recompute_matches, select_match};
 use appkit_shell::editor_runtime::EditorRuntime;
-use ui::plugin::PluginMessage;
 
 const MAXIMUM_QUERY_BYTES: usize = 2_048;
 
@@ -112,9 +111,9 @@ fn reveal_active_match(editor: &mut EditorRuntime) {
         return;
     };
     select_match(&mut tab, &matched);
-    tab.send_message(PluginMessage::SetCursorByte(matched.end));
-    tab.send_message(PluginMessage::SetSelAnchorByte(Some(matched.start)));
-    tab.send_message(PluginMessage::SetSelCursorByte(Some(matched.end)));
+    tab.set_cursor_byte(matched.end);
+    tab.set_plugin_selection_anchor_byte(Some(matched.start));
+    tab.set_plugin_selection_cursor_byte(Some(matched.end));
     tab.ensure_cursor_visible(line_height);
 }
 

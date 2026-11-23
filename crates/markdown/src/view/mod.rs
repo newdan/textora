@@ -29,10 +29,7 @@ use textora_core::document::DocView;
 use textora_core::highlight::{Highlighter, find_language, highlight_kind_scope};
 use ui::Theme;
 use ui::core::paint::DrawList;
-use ui::plugin::{
-    PastePreference, PluginFactory, PluginMessage, PluginQuery, PluginResponse, ViewPlugin,
-    VisualCaretPosition,
-};
+use ui::plugin::{PastePreference, PluginFactory, ViewPlugin, ViewPluginCapabilities};
 
 mod preedit;
 

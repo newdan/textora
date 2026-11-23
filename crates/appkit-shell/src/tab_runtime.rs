@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 
 use appkit_core::workspace::types::TabId;
-use ui::plugin::ViewPlugin;
+use ui::plugin::ViewPluginCapabilities;
 
 use crate::canvas_viewport::CanvasViewportSession;
 use crate::document_presentation::DocumentPresentation;
@@ -18,8 +18,8 @@ pub enum DocumentEditingAccess {
 }
 
 pub struct TabRuntime {
-    pub plugin: Box<dyn ViewPlugin>,
-    pub(crate) cached_toggle_source: Option<Box<dyn ViewPlugin>>,
+    pub plugin: Box<dyn ViewPluginCapabilities>,
+    pub(crate) cached_toggle_source: Option<Box<dyn ViewPluginCapabilities>>,
     pub(crate) toggle_source_scroll_y: f32,
     pub toc_visible: bool,
     pub presentation: DocumentPresentation,
@@ -29,7 +29,7 @@ pub struct TabRuntime {
 }
 
 impl TabRuntime {
-    pub fn new(plugin: Box<dyn ViewPlugin>) -> Self {
+    pub fn new(plugin: Box<dyn ViewPluginCapabilities>) -> Self {
         Self {
             plugin,
             cached_toggle_source: None,
@@ -46,7 +46,7 @@ impl TabRuntime {
     }
 
     pub fn with_presentation(
-        plugin: Box<dyn ViewPlugin>,
+        plugin: Box<dyn ViewPluginCapabilities>,
         presentation: DocumentPresentation,
     ) -> Self {
         Self { presentation, ..Self::new(plugin) }

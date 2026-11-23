@@ -1,10 +1,11 @@
 use std::borrow::Cow;
+use ui::plugin::EditableView;
 
-use textora_core::document::{DocView, DocViewMut, StringDocView};
+use textora_core::document::{DocView, StringDocView};
 use textora_markdown::style::MarkdownStyle;
 use textora_markdown::view::{MarkdownEditorView, MarkdownRenderSettings, MarkdownView};
 use ui::core::paint::{DrawCmd, DrawList};
-use ui::plugin::{PluginMessage, ViewPlugin};
+use ui::plugin::{ViewPlugin, ViewPluginCapabilities};
 
 const VIEWPORT_WIDTH: f32 = 480.0;
 const VIEWPORT_HEIGHT: f32 = 700.0;
@@ -207,8 +208,6 @@ impl DocView for EditableDocument {
     }
 }
 
-impl DocViewMut for EditableDocument {}
-
 fn render_editor(
     view: &mut MarkdownEditorView,
     document: &EditableDocument,
@@ -226,33 +225,33 @@ fn render_editor(
 #[test]
 fn cursor_entering_formula_expands_source_and_leaving_restores_image() {
     let source = "before $x^2$ after";
-    let mut document = EditableDocument(source.into());
+    let document = EditableDocument(source.into());
     let mut view = MarkdownEditorView::new();
     let mut shaper = shaping::Shaper::new().expect("editor rendering requires a shaper");
     view.set_source(source.into(), 1);
     assert_eq!(images(&render_editor(&mut view, &document, &mut shaper)).len(), 1);
 
     let math_byte = source.find('x').expect("fixture contains math");
-    view.handle_message(PluginMessage::SetCursorByte(math_byte), &mut document);
+    view.set_cursor_byte(math_byte);
     let expanded = render_editor(&mut view, &document, &mut shaper);
     assert!(images(&expanded).is_empty());
     assert!(visible_text(&expanded).contains("x^2"));
 
-    view.handle_message(PluginMessage::SetCursorByte(0), &mut document);
+    view.set_cursor_byte(0);
     assert_eq!(images(&render_editor(&mut view, &document, &mut shaper)).len(), 1);
 }
 
 #[test]
 fn cursor_entering_mermaid_expands_source_and_leaving_restores_image() {
     let source = "before\n\n```mermaid\nflowchart LR\nA --> B\n```\n\nafter";
-    let mut document = EditableDocument(source.into());
+    let document = EditableDocument(source.into());
     let mut view = MarkdownEditorView::new();
     let mut shaper = shaping::Shaper::new().expect("editor rendering requires a shaper");
     view.set_source(source.into(), 1);
     assert_eq!(images(&render_editor(&mut view, &document, &mut shaper)).len(), 1);
 
     let diagram_byte = source.find("flowchart").expect("fixture contains Mermaid source");
-    view.handle_message(PluginMessage::SetCursorByte(diagram_byte), &mut document);
+    view.set_cursor_byte(diagram_byte);
     let expanded = render_editor(&mut view, &document, &mut shaper);
     assert!(images(&expanded).is_empty());
     let text = visible_text(&expanded);
@@ -260,7 +259,7 @@ fn cursor_entering_mermaid_expands_source_and_leaving_restores_image() {
     assert!(text.contains("```mermaid"));
     assert!(text.matches("```").count() >= 2);
 
-    view.handle_message(PluginMessage::SetCursorByte(0), &mut document);
+    view.set_cursor_byte(0);
     assert_eq!(images(&render_editor(&mut view, &document, &mut shaper)).len(), 1);
 }
 
@@ -273,15 +272,19 @@ fn selection_crossing_embedded_elements_expands_and_clear_restores_images() {
     ];
 
     for (source, expanded_source) in cases {
-        let mut document = EditableDocument(source.into());
+        let document = EditableDocument(source.into());
         let mut view = MarkdownEditorView::new();
         let mut shaper = shaping::Shaper::new().expect("editor rendering requires a shaper");
         view.set_source(source.into(), 1);
-        view.handle_message(PluginMessage::SetCursorByte(0), &mut document);
+        view.set_cursor_byte(0);
         assert_eq!(images(&render_editor(&mut view, &document, &mut shaper)).len(), 1);
 
-        view.handle_message(PluginMessage::SetSelAnchorByte(Some(0)), &mut document);
-        view.handle_message(PluginMessage::SetSelCursorByte(Some(source.len())), &mut document);
+        view.selection_mut()
+            .expect("test view exposes selection")
+            .set_selection_anchor_byte(Some(0));
+        view.selection_mut()
+            .expect("test view exposes selection")
+            .set_selection_cursor_byte(Some(source.len()));
         assert_eq!(view.engine().selection_source_range(), Some((0, source.len())));
         let selected = render_editor(&mut view, &document, &mut shaper);
         assert!(images(&selected).is_empty(), "selected source still shows an image: {source:?}");
@@ -290,7 +293,7 @@ fn selection_crossing_embedded_elements_expands_and_clear_restores_images() {
             "selected source is unreadable: {source:?}"
         );
 
-        view.handle_message(PluginMessage::ClearSelection, &mut document);
+        view.selection_mut().expect("test view exposes selection").clear_selection();
         assert_eq!(
             images(&render_editor(&mut view, &document, &mut shaper)).len(),
             1,

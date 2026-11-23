@@ -11,7 +11,7 @@ pub(in crate::mindmap_view) use shaping::Shaper;
 pub(in crate::mindmap_view) use std::borrow::Cow;
 pub(in crate::mindmap_view) use std::ops::Range;
 pub(in crate::mindmap_view) use std::path::Path;
-pub(in crate::mindmap_view) use textora_core::document::{DocView, DocViewMut};
+pub(in crate::mindmap_view) use textora_core::document::DocView;
 pub(in crate::mindmap_view) use ui::canvas::{
     CanvasPoint, CanvasViewportConfig, CanvasViewportInput, CanvasViewportSnapshot,
     resolve_viewport,
@@ -21,9 +21,9 @@ pub(in crate::mindmap_view) use ui::core::paint::DrawList;
 pub(in crate::mindmap_view) use ui::core::widget::{KeyCode, Modifiers};
 pub(in crate::mindmap_view) use ui::plugin::{
     CanvasContentMetrics, CanvasDragPhase, CanvasDragPreview, CanvasDragRequest,
-    CanvasDragResponse, EditHitTarget, EditIntent, EditPlan, EditPolicy, EditRequest,
-    KeyIntentMapper, MoveDirection, PluginFactory, PluginMessage, PluginQuery, PluginResponse,
-    ViewPlugin,
+    CanvasDragResponse, CanvasView, EditHitTarget, EditIntent, EditPlan, EditPolicy, EditRequest,
+    KeyIntentMapper, MoveDirection, PluginFactory, PluginQuery, PluginResponse, ViewPlugin,
+    ViewPluginCapabilities,
 };
 pub(in crate::mindmap_view) use ui::theme::{
     DEFAULT_MINDMAP_COLOR_SCHEME_ID, MindmapRenderTheme, Theme, find_mindmap_color_scheme,
@@ -714,6 +714,10 @@ impl ViewPlugin for MindmapView {
         "mindmap"
     }
 
+    fn mode(&self) -> ui::plugin::PluginMode {
+        ui::plugin::PluginMode::Canvas
+    }
+
     fn render(
         &mut self,
         doc: &dyn DocView,
@@ -732,6 +736,185 @@ impl ViewPlugin for MindmapView {
             CanvasViewportConfig::for_dpi(dpi_scale),
         ));
         self.render_canvas(doc, &viewport, theme, shaper, dpi_scale)
+    }
+
+    fn sync_document(
+        &mut self,
+        generation: u32,
+        reason: ui::plugin::SyncReason,
+        load_source: &mut dyn FnMut() -> String,
+    ) -> ui::plugin::SyncOutcome {
+        if reason == ui::plugin::SyncReason::Normal && !self.needs_source_update(generation) {
+            return ui::plugin::SyncOutcome::Unchanged;
+        }
+        let text = load_source();
+        self.clear_focus_at = None;
+        self.drag_state = MindmapDragState::Idle;
+        self.canvas_viewport = None;
+        self.canvas_pointer = None;
+        self.document_state = match mmf::parser::parse(&text) {
+            Ok(tree) => MindmapDocumentState::Ready {
+                generation,
+                source: text,
+                tree: Box::new(tree),
+                layout: None,
+                drag_preview_cards: Vec::new(),
+                hit_map: None,
+                connector_mesh_cache: None,
+            },
+            Err(diagnostic) => MindmapDocumentState::Invalid { generation, diagnostic },
+        };
+        ui::plugin::SyncOutcome::Updated
+    }
+}
+
+impl ui::plugin::ViewPluginCapabilities for MindmapView {
+    fn selection_mut(&mut self) -> Option<&mut dyn ui::plugin::SelectionView> {
+        Some(self)
+    }
+
+    fn query(&self, query: PluginQuery, _doc: &dyn DocView) -> PluginResponse {
+        match query {
+            PluginQuery::MindmapThemeSelection => {
+                let selection = match &self.document_state {
+                    MindmapDocumentState::Invalid { .. } => {
+                        ui::theme::MindmapThemeSelection::InvalidMetadata
+                    }
+                    MindmapDocumentState::Ready { tree, .. } => resolve_mindmap_theme_selection(
+                        tree.global_props.get("theme").map(|s| s.as_str()),
+                    ),
+                    MindmapDocumentState::Uninitialized => {
+                        ui::theme::MindmapThemeSelection::Default
+                    }
+                };
+                PluginResponse::MindmapThemeSelection(selection)
+            }
+            PluginQuery::PlanMindmapTheme { theme_id, source_generation } => {
+                let MindmapDocumentState::Ready { generation, source, tree, .. } =
+                    &self.document_state
+                else {
+                    return PluginResponse::EditPlan(EditPlan::Consume);
+                };
+                if source_generation != *generation {
+                    return PluginResponse::EditPlan(EditPlan::Consume);
+                }
+                if find_mindmap_color_scheme(&theme_id).is_none() {
+                    return PluginResponse::EditPlan(EditPlan::Consume);
+                }
+                PluginResponse::EditPlan(mmf::edit::plan_set_mindmap_theme(
+                    tree,
+                    source,
+                    &theme_id,
+                    source_generation,
+                    self.cursor_byte.unwrap_or(source.len()),
+                ))
+            }
+        }
+    }
+
+    fn needs_cursor_blink_wakeup(&self) -> bool {
+        true
+    }
+
+    fn allows_editing(&self) -> bool {
+        true
+    }
+
+    fn editable(&self) -> Option<&dyn ui::plugin::EditableView> {
+        Some(self)
+    }
+
+    fn editable_mut(&mut self) -> Option<&mut dyn ui::plugin::EditableView> {
+        Some(self)
+    }
+
+    fn canvas(&self) -> Option<&dyn CanvasView> {
+        Some(self)
+    }
+
+    fn canvas_mut(&mut self) -> Option<&mut dyn CanvasView> {
+        Some(self)
+    }
+}
+
+impl ui::plugin::EditableView for MindmapView {
+    fn hit_test_edit_target(
+        &self,
+        x: f32,
+        y: f32,
+        _offset_x: f32,
+        _offset_y: f32,
+    ) -> Option<Option<ui::plugin::EditHitTarget>> {
+        Some(self.semantic_hit_target(x, y))
+    }
+
+    fn move_edit_target(
+        &self,
+        current_byte: usize,
+        direction: ui::plugin::MoveDirection,
+        _target_x: Option<f32>,
+    ) -> Option<ui::plugin::EditHitTarget> {
+        self.move_edit_target(current_byte, direction)
+    }
+
+    fn cursor_screen_rect(&self, cursor_byte: usize) -> Option<(f32, f32, f32, f32)> {
+        self.cursor_screen_pos(cursor_byte)
+    }
+
+    fn set_cursor_byte(&mut self, cursor_byte: usize) {
+        if self.clear_focus_at != Some(cursor_byte) {
+            self.clear_focus_at = None;
+        }
+        self.cursor_byte = Some(cursor_byte);
+        self.clear_layout_for_preedit();
+    }
+
+    fn set_preedit(&mut self, text: String, cursor: Option<(usize, usize)>) {
+        let next_preedit = (!text.is_empty()).then_some((text, cursor));
+        if self.preedit != next_preedit {
+            self.preedit = next_preedit;
+            self.clear_layout();
+        }
+    }
+
+    fn set_cursor_visible(&mut self, visible: bool) {
+        self.cursor_visible = visible;
+    }
+
+    fn clear_edit_focus(&mut self) {
+        self.clear_focus_at = self.cursor_byte;
+        self.drag_state = MindmapDragState::Idle;
+        self.clear_layout_for_preedit();
+    }
+
+    fn key_intent_mapper(&self) -> Option<&dyn KeyIntentMapper> {
+        Some(self)
+    }
+}
+
+impl CanvasView for MindmapView {
+    fn hit_test_canvas_control(&self, position: CanvasPoint) -> Option<std::ops::Range<usize>> {
+        self.canvas_control_source_range(position)
+    }
+
+    fn plan_canvas_control(
+        &self,
+        source_range: std::ops::Range<usize>,
+        source_generation: u32,
+    ) -> EditPlan {
+        let MindmapDocumentState::Ready { generation, source, tree, .. } = &self.document_state
+        else {
+            return EditPlan::Consume;
+        };
+        if source_generation != *generation {
+            return EditPlan::Consume;
+        }
+        mmf::edit::plan_toggle_collapsed(tree, source, source_range, source_generation)
+    }
+
+    fn set_canvas_pointer(&mut self, pointer: Option<CanvasPoint>) -> bool {
+        self.canvas_pointer = pointer;
+        true
     }
 
     fn prepare_canvas(
@@ -807,157 +990,6 @@ impl ViewPlugin for MindmapView {
         draw_list
     }
 
-    fn handle_message(&mut self, message: PluginMessage, doc: &mut dyn DocViewMut) -> bool {
-        match message {
-            PluginMessage::UpdateSource { text, generation } => {
-                self.clear_focus_at = None;
-                self.drag_state = MindmapDragState::Idle;
-                self.canvas_viewport = None;
-                self.canvas_pointer = None;
-                self.document_state = match mmf::parser::parse(&text) {
-                    Ok(tree) => MindmapDocumentState::Ready {
-                        generation,
-                        source: text,
-                        tree: Box::new(tree),
-                        layout: None,
-                        drag_preview_cards: Vec::new(),
-                        hit_map: None,
-                        connector_mesh_cache: None,
-                    },
-                    Err(diagnostic) => MindmapDocumentState::Invalid { generation, diagnostic },
-                };
-                true
-            }
-            PluginMessage::SetCursorByte(cursor_byte) => {
-                if self.clear_focus_at != Some(cursor_byte) {
-                    self.clear_focus_at = None;
-                }
-                self.cursor_byte = Some(cursor_byte);
-                self.clear_layout_for_preedit();
-                true
-            }
-            PluginMessage::SetSelAnchorByte(anchor) => {
-                self.selection_anchor_byte = anchor;
-                self.clear_layout_for_preedit();
-                true
-            }
-            PluginMessage::SetSelCursorByte(cursor) => {
-                self.selection_cursor_byte = cursor;
-                self.clear_layout_for_preedit();
-                true
-            }
-            PluginMessage::ClearSelection => {
-                self.selection_anchor_byte = None;
-                self.selection_cursor_byte = None;
-                self.clear_layout_for_preedit();
-                true
-            }
-            PluginMessage::SetSelCursor(position) => {
-                self.selection_cursor_byte =
-                    position.map(|(line, column)| doc.line_byte_offset(line) + column);
-                self.clear_layout_for_preedit();
-                true
-            }
-            PluginMessage::SetSelAnchor(position) => {
-                self.selection_anchor_byte =
-                    position.map(|(line, column)| doc.line_byte_offset(line) + column);
-                self.clear_layout_for_preedit();
-                true
-            }
-            PluginMessage::SetPreedit { text, cursor } => {
-                let next_preedit = (!text.is_empty()).then_some((text, cursor));
-                if self.preedit != next_preedit {
-                    self.preedit = next_preedit;
-                    self.clear_layout();
-                }
-                true
-            }
-            PluginMessage::SetCursorVisible(visible) => {
-                self.cursor_visible = visible;
-                true
-            }
-            PluginMessage::SetCanvasPointer(pointer) => {
-                self.canvas_pointer = pointer;
-                true
-            }
-            PluginMessage::ClearEditFocus => {
-                self.clear_focus_at = self.cursor_byte;
-                self.drag_state = MindmapDragState::Idle;
-                self.clear_layout_for_preedit();
-                true
-            }
-            _ => false,
-        }
-    }
-
-    fn query(&self, query: PluginQuery, _doc: &dyn DocView) -> PluginResponse {
-        match query {
-            PluginQuery::NeedsSourceUpdate(generation) => {
-                PluginResponse::Bool(self.needs_source_update(generation))
-            }
-            PluginQuery::HitTestEditTarget { x, y, .. } => {
-                PluginResponse::EditHitTarget(self.semantic_hit_target(x, y))
-            }
-            PluginQuery::MoveEditTarget { current_byte, direction, .. } => {
-                PluginResponse::EditHitTarget(self.move_edit_target(current_byte, direction))
-            }
-            PluginQuery::CursorScreenPos(byte_offset) => {
-                PluginResponse::CursorScreenRect(self.cursor_screen_pos(byte_offset))
-            }
-            PluginQuery::PlanCanvasControl { source_range, source_generation } => {
-                let MindmapDocumentState::Ready { generation, source, tree, .. } =
-                    &self.document_state
-                else {
-                    return PluginResponse::EditPlan(EditPlan::Consume);
-                };
-                if source_generation != *generation {
-                    return PluginResponse::EditPlan(EditPlan::Consume);
-                }
-                PluginResponse::EditPlan(mmf::edit::plan_toggle_collapsed(
-                    tree,
-                    source,
-                    source_range,
-                    source_generation,
-                ))
-            }
-            PluginQuery::MindmapThemeSelection => {
-                let selection = match &self.document_state {
-                    MindmapDocumentState::Invalid { .. } => {
-                        ui::theme::MindmapThemeSelection::InvalidMetadata
-                    }
-                    MindmapDocumentState::Ready { tree, .. } => resolve_mindmap_theme_selection(
-                        tree.global_props.get("theme").map(|s| s.as_str()),
-                    ),
-                    MindmapDocumentState::Uninitialized => {
-                        ui::theme::MindmapThemeSelection::Default
-                    }
-                };
-                PluginResponse::MindmapThemeSelection(selection)
-            }
-            PluginQuery::PlanMindmapTheme { theme_id, source_generation } => {
-                let MindmapDocumentState::Ready { generation, source, tree, .. } =
-                    &self.document_state
-                else {
-                    return PluginResponse::EditPlan(EditPlan::Consume);
-                };
-                if source_generation != *generation {
-                    return PluginResponse::EditPlan(EditPlan::Consume);
-                }
-                if find_mindmap_color_scheme(&theme_id).is_none() {
-                    return PluginResponse::EditPlan(EditPlan::Consume);
-                }
-                PluginResponse::EditPlan(mmf::edit::plan_set_mindmap_theme(
-                    tree,
-                    source,
-                    &theme_id,
-                    source_generation,
-                    self.cursor_byte.unwrap_or(source.len()),
-                ))
-            }
-            _ => PluginResponse::None,
-        }
-    }
-
     fn handle_canvas_drag(
         &mut self,
         request: CanvasDragRequest,
@@ -1030,38 +1062,6 @@ impl ViewPlugin for MindmapView {
             }
         }
     }
-
-    fn shows_cursor(&self) -> bool {
-        false
-    }
-
-    fn needs_cursor_blink_wakeup(&self) -> bool {
-        true
-    }
-
-    fn shows_gutter(&self) -> bool {
-        false
-    }
-
-    fn allows_editing(&self) -> bool {
-        true
-    }
-
-    fn handles_own_rendering(&self) -> bool {
-        true
-    }
-
-    fn edit_policy(&self) -> &dyn EditPolicy {
-        self
-    }
-
-    fn key_intent_mapper(&self) -> Option<&dyn KeyIntentMapper> {
-        Some(self)
-    }
-
-    fn is_canvas(&self) -> bool {
-        true
-    }
 }
 
 pub struct MindmapPluginFactory;
@@ -1075,7 +1075,7 @@ impl PluginFactory for MindmapPluginFactory {
         path.and_then(|path| path.to_str()).is_some_and(|path| path.ends_with(".mmap.md"))
     }
 
-    fn create(&self) -> Box<dyn ViewPlugin> {
+    fn create(&self) -> Box<dyn ViewPluginCapabilities> {
         Box::new(MindmapView::new())
     }
 }
@@ -1088,3 +1088,50 @@ pub(in crate::mindmap_view) use interaction::*;
 #[cfg(test)]
 #[path = "mindmap_view_tests.rs"]
 mod tests;
+
+impl ui::plugin::SelectionView for MindmapView {
+    fn set_selection_cursor(
+        &mut self,
+        position: Option<ui::plugin::ReadingPosition>,
+        document: &dyn DocView,
+    ) -> bool {
+        ui::plugin::SelectionView::set_selection_cursor_byte(
+            self,
+            position.map(|position| {
+                document.line_byte_offset(position.line_index) + position.grapheme_index
+            }),
+        )
+    }
+
+    fn set_selection_anchor(
+        &mut self,
+        position: Option<ui::plugin::ReadingPosition>,
+        document: &dyn DocView,
+    ) -> bool {
+        ui::plugin::SelectionView::set_selection_anchor_byte(
+            self,
+            position.map(|position| {
+                document.line_byte_offset(position.line_index) + position.grapheme_index
+            }),
+        )
+    }
+
+    fn set_selection_anchor_byte(&mut self, byte: Option<usize>) -> bool {
+        self.selection_anchor_byte = byte;
+        self.clear_layout_for_preedit();
+        true
+    }
+
+    fn set_selection_cursor_byte(&mut self, byte: Option<usize>) -> bool {
+        self.selection_cursor_byte = byte;
+        self.clear_layout_for_preedit();
+        true
+    }
+
+    fn clear_selection(&mut self) -> bool {
+        self.selection_anchor_byte = None;
+        self.selection_cursor_byte = None;
+        self.clear_layout_for_preedit();
+        true
+    }
+}

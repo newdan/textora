@@ -62,7 +62,7 @@ fn typed_untitled_spec(kind: NewDocumentKind) -> TypedUntitledSpec {
 fn prepare_document(
     document: DocumentModel,
     dimensions: ViewportDimensions,
-    plugin: Box<dyn ui::plugin::ViewPlugin>,
+    plugin: Box<dyn ui::plugin::ViewPluginCapabilities>,
     suggested_file_name: Option<String>,
 ) -> ProductPreparedTab {
     let presentation =
@@ -89,7 +89,7 @@ pub(crate) fn prepare_file(
 pub(crate) fn prepare_file_with_plugin(
     path: &Path,
     dimensions: ViewportDimensions,
-    plugin: Box<dyn ui::plugin::ViewPlugin>,
+    plugin: Box<dyn ui::plugin::ViewPluginCapabilities>,
 ) -> Result<ProductPreparedTab, String> {
     let document = DocumentModel::from_file(path)?;
     Ok(prepare_document(document, dimensions, plugin, None))
@@ -110,7 +110,7 @@ pub(crate) fn prepare_external_content_with_plugin(
     path: &Path,
     content: &str,
     dimensions: ViewportDimensions,
-    plugin: Box<dyn ui::plugin::ViewPlugin>,
+    plugin: Box<dyn ui::plugin::ViewPluginCapabilities>,
 ) -> ProductPreparedTab {
     let document = DocumentModel::from_external_content(path, content);
     prepare_document(document, dimensions, plugin, None)
@@ -127,7 +127,7 @@ pub(crate) fn prepare_untitled(
 
 pub(crate) fn prepare_untitled_with_plugin(
     dimensions: ViewportDimensions,
-    plugin: Box<dyn ui::plugin::ViewPlugin>,
+    plugin: Box<dyn ui::plugin::ViewPluginCapabilities>,
 ) -> ProductPreparedTab {
     let mut document = DocumentModel::from_lines(&[String::new()]);
     assign_untitled_snapshot(&mut document);
@@ -148,7 +148,7 @@ pub(crate) fn prepare_typed_untitled(
 pub(crate) fn prepare_typed_untitled_with_plugin(
     kind: NewDocumentKind,
     dimensions: ViewportDimensions,
-    plugin: Box<dyn ui::plugin::ViewPlugin>,
+    plugin: Box<dyn ui::plugin::ViewPluginCapabilities>,
 ) -> ProductPreparedTab {
     let specification = typed_untitled_spec(kind);
     let mut document = DocumentModel::from_lines(&[specification.initial_text.to_owned()]);

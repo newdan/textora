@@ -2031,6 +2031,10 @@ impl ui::plugin::ViewPlugin for RecordingWysiwygPlugin {
         "recording_wysiwyg"
     }
 
+    fn mode(&self) -> ui::plugin::PluginMode {
+        ui::plugin::PluginMode::RichText
+    }
+
     fn render(
         &mut self,
         _doc: &dyn textora_core::document::DocView,
@@ -2043,107 +2047,140 @@ impl ui::plugin::ViewPlugin for RecordingWysiwygPlugin {
         ui::core::paint::DrawList::new()
     }
 
+    fn sync_document(
+        &mut self,
+        generation: u32,
+        reason: ui::plugin::SyncReason,
+        load_source: &mut dyn FnMut() -> String,
+    ) -> ui::plugin::SyncOutcome {
+        if reason == ui::plugin::SyncReason::Normal && self.state.borrow().generation == generation
+        {
+            return ui::plugin::SyncOutcome::Unchanged;
+        }
+        let mut state = self.state.borrow_mut();
+        state.source_text = load_source();
+        state.generation = generation;
+        ui::plugin::SyncOutcome::Updated
+    }
+}
+
+impl ui::plugin::EditableView for RecordingWysiwygPlugin {
+    fn cursor_screen_rect(&self, byte: usize) -> Option<(f32, f32, f32, f32)> {
+        let state = self.state.borrow();
+        state
+            .cursor_rect_by_byte
+            .iter()
+            .find_map(|(candidate, rect)| (*candidate == byte).then_some(*rect))
+            .or(state.cursor_rect)
+    }
+
+    fn hit_test_caret(
+        &self,
+        _x: f32,
+        _y: f32,
+        _offset_x: f32,
+        _offset_y: f32,
+    ) -> Option<ui::plugin::VisualCaretPosition> {
+        self.state.borrow().hit_test_byte.map(|byte_offset| ui::plugin::VisualCaretPosition {
+            byte_offset,
+            affinity: ui::plugin::CursorAffinity::Downstream,
+        })
+    }
+
+    fn visual_move(
+        &self,
+        current_byte: usize,
+        direction: ui::plugin::MoveDirection,
+        target_x: Option<f32>,
+    ) -> Option<ui::plugin::VisualCaretPosition> {
+        let mut state = self.state.borrow_mut();
+        state.visual_move_query = Some((current_byte, direction, target_x));
+        state.visual_move_result.map(|byte_offset| ui::plugin::VisualCaretPosition {
+            byte_offset,
+            affinity: ui::plugin::CursorAffinity::Downstream,
+        })
+    }
+
+    fn set_cursor_byte(&mut self, byte: usize) {
+        self.state.borrow_mut().cursor_byte = Some(byte);
+    }
+
+    fn set_preedit(&mut self, text: String, cursor: Option<(usize, usize)>) {
+        let mut state = self.state.borrow_mut();
+        state.preedit_text = text;
+        state.preedit_cursor = cursor;
+    }
+}
+
+impl ui::plugin::ScrollableView for RecordingWysiwygPlugin {
+    fn content_height(&self) -> f32 {
+        self.state.borrow().content_height
+    }
+
+    fn scroll(&mut self, delta: f32, viewport_height: f32) -> bool {
+        self.state.borrow_mut().scroll_messages.push((delta, viewport_height));
+        true
+    }
+}
+
+impl ui::plugin::ViewPluginCapabilities for RecordingWysiwygPlugin {
+    fn scrollable(&self) -> Option<&dyn ui::plugin::ScrollableView> {
+        Some(self)
+    }
+
+    fn scrollable_mut(&mut self) -> Option<&mut dyn ui::plugin::ScrollableView> {
+        Some(self)
+    }
+
+    fn editable(&self) -> Option<&dyn ui::plugin::EditableView> {
+        Some(self)
+    }
+
+    fn editable_mut(&mut self) -> Option<&mut dyn ui::plugin::EditableView> {
+        Some(self)
+    }
+
     fn allows_editing(&self) -> bool {
         true
     }
 
-    fn handles_own_rendering(&self) -> bool {
+    fn selection_mut(&mut self) -> Option<&mut dyn ui::plugin::SelectionView> {
+        Some(self)
+    }
+
+    fn selection(&self) -> Option<&dyn ui::plugin::SelectionView> {
+        Some(self)
+    }
+}
+
+impl ui::plugin::SelectionView for RecordingWysiwygPlugin {
+    fn has_selection(&self) -> bool {
+        let state = self.state.borrow();
+        state.sel_anchor_byte.is_some()
+            && state.sel_cursor_byte.is_some()
+            && state.sel_anchor_byte != state.sel_cursor_byte
+    }
+
+    fn selection_source_range(&self) -> Option<std::ops::Range<usize>> {
+        let state = self.state.borrow();
+        state
+            .selection_range
+            .or_else(|| {
+                let start = state.sel_anchor_byte?;
+                let end = state.sel_cursor_byte?;
+                (start != end).then_some((start.min(end), start.max(end)))
+            })
+            .map(|(start, end)| start..end)
+    }
+
+    fn set_selection_anchor_byte(&mut self, byte: Option<usize>) -> bool {
+        self.state.borrow_mut().sel_anchor_byte = byte;
         true
     }
 
-    fn edit_policy(&self) -> &dyn ui::plugin::EditPolicy {
-        self
-    }
-
-    fn query(
-        &self,
-        query: ui::plugin::PluginQuery,
-        _doc: &dyn textora_core::document::DocView,
-    ) -> ui::plugin::PluginResponse {
-        match query {
-            ui::plugin::PluginQuery::NeedsSourceUpdate(generation) => {
-                ui::plugin::PluginResponse::Bool(generation != self.state.borrow().generation)
-            }
-            ui::plugin::PluginQuery::CursorScreenPos(byte) => {
-                let state = self.state.borrow();
-                let rect = state
-                    .cursor_rect_by_byte
-                    .iter()
-                    .find_map(|(candidate, rect)| (*candidate == byte).then_some(*rect))
-                    .or(state.cursor_rect);
-                ui::plugin::PluginResponse::CursorScreenRect(rect)
-            }
-            ui::plugin::PluginQuery::HitTestByte { .. } => {
-                let state = self.state.borrow();
-                ui::plugin::PluginResponse::BytePosition(state.hit_test_byte)
-            }
-            ui::plugin::PluginQuery::ContentHeight => {
-                ui::plugin::PluginResponse::Float(self.state.borrow().content_height)
-            }
-            ui::plugin::PluginQuery::VisualMove { current_byte, direction, target_x } => {
-                let mut state = self.state.borrow_mut();
-                state.visual_move_query = Some((current_byte, direction, target_x));
-                ui::plugin::PluginResponse::BytePosition(state.visual_move_result)
-            }
-            ui::plugin::PluginQuery::HasSelection => {
-                let state = self.state.borrow();
-                ui::plugin::PluginResponse::Bool(
-                    state.sel_anchor_byte.is_some()
-                        && state.sel_cursor_byte.is_some()
-                        && state.sel_anchor_byte != state.sel_cursor_byte,
-                )
-            }
-            ui::plugin::PluginQuery::SelectionRange => {
-                let state = self.state.borrow();
-                let range = state.selection_range.or_else(|| {
-                    let start = state.sel_anchor_byte?;
-                    let end = state.sel_cursor_byte?;
-                    (start != end).then_some((start.min(end), start.max(end)))
-                });
-                ui::plugin::PluginResponse::PositionPair(
-                    range.map(|(start, end)| ((start, 0), (end, 0))),
-                )
-            }
-            _ => ui::plugin::PluginResponse::None,
-        }
-    }
-
-    fn handle_message(
-        &mut self,
-        msg: ui::plugin::PluginMessage,
-        _doc: &mut dyn textora_core::document::DocViewMut,
-    ) -> bool {
-        match msg {
-            ui::plugin::PluginMessage::UpdateSource { text, generation } => {
-                let mut state = self.state.borrow_mut();
-                state.source_text = text;
-                state.generation = generation;
-                true
-            }
-            ui::plugin::PluginMessage::SetCursorByte(byte) => {
-                self.state.borrow_mut().cursor_byte = Some(byte);
-                true
-            }
-            ui::plugin::PluginMessage::SetSelAnchorByte(byte) => {
-                self.state.borrow_mut().sel_anchor_byte = byte;
-                true
-            }
-            ui::plugin::PluginMessage::SetSelCursorByte(byte) => {
-                self.state.borrow_mut().sel_cursor_byte = byte;
-                true
-            }
-            ui::plugin::PluginMessage::Scroll { delta, viewport_h } => {
-                self.state.borrow_mut().scroll_messages.push((delta, viewport_h));
-                true
-            }
-            ui::plugin::PluginMessage::SetPreedit { text, cursor } => {
-                let mut state = self.state.borrow_mut();
-                state.preedit_text = text;
-                state.preedit_cursor = cursor;
-                true
-            }
-            _ => false,
-        }
+    fn set_selection_cursor_byte(&mut self, byte: Option<usize>) -> bool {
+        self.state.borrow_mut().sel_cursor_byte = byte;
+        true
     }
 }
 
@@ -2290,6 +2327,10 @@ impl ui::plugin::ViewPlugin for RecordingPreviewPlugin {
         "recording_preview"
     }
 
+    fn mode(&self) -> ui::plugin::PluginMode {
+        ui::plugin::PluginMode::Reading
+    }
+
     fn render(
         &mut self,
         _doc: &dyn textora_core::document::DocView,
@@ -2300,59 +2341,76 @@ impl ui::plugin::ViewPlugin for RecordingPreviewPlugin {
     ) -> ui::core::paint::DrawList {
         ui::core::paint::DrawList::new()
     }
+}
 
+impl ui::plugin::ViewPluginCapabilities for RecordingPreviewPlugin {
     fn allows_editing(&self) -> bool {
         false
     }
 
-    fn query(
-        &self,
-        query: ui::plugin::PluginQuery,
-        _doc: &dyn textora_core::document::DocView,
-    ) -> ui::plugin::PluginResponse {
-        match query {
-            ui::plugin::PluginQuery::HitTest { offset_x, offset_y, .. } => {
-                let mut state = self.state.borrow_mut();
-                state.hit_test_offset = Some((offset_x, offset_y));
-                ui::plugin::PluginResponse::Position(state.hit_test_position)
-            }
-            ui::plugin::PluginQuery::SelCursor => {
-                ui::plugin::PluginResponse::Position(self.state.borrow().selection_cursor)
-            }
-            ui::plugin::PluginQuery::HasSelection => {
-                let state = self.state.borrow();
-                ui::plugin::PluginResponse::Bool(
-                    state.selection_anchor.is_some()
-                        && state.selection_cursor.is_some()
-                        && state.selection_anchor != state.selection_cursor,
-                )
-            }
-            _ => ui::plugin::PluginResponse::None,
-        }
+    fn selection_mut(&mut self) -> Option<&mut dyn ui::plugin::SelectionView> {
+        Some(self)
     }
 
-    fn handle_message(
+    fn selection(&self) -> Option<&dyn ui::plugin::SelectionView> {
+        Some(self)
+    }
+}
+
+impl ui::plugin::SelectionView for RecordingPreviewPlugin {
+    fn has_selection(&self) -> bool {
+        let state = self.state.borrow();
+        state.selection_anchor.is_some()
+            && state.selection_cursor.is_some()
+            && state.selection_anchor != state.selection_cursor
+    }
+
+    fn hit_test_position(
+        &self,
+        _x: f32,
+        _y: f32,
+        offset_x: f32,
+        offset_y: f32,
+    ) -> Option<ui::plugin::ReadingPosition> {
+        let mut state = self.state.borrow_mut();
+        state.hit_test_offset = Some((offset_x, offset_y));
+        state
+            .hit_test_position
+            .map(|(line, grapheme)| ui::plugin::ReadingPosition::new(line, grapheme))
+    }
+
+    fn selection_cursor(&self) -> Option<ui::plugin::ReadingPosition> {
+        self.state
+            .borrow()
+            .selection_cursor
+            .map(|(line, grapheme)| ui::plugin::ReadingPosition::new(line, grapheme))
+    }
+
+    fn set_selection_anchor(
         &mut self,
-        msg: ui::plugin::PluginMessage,
-        _doc: &mut dyn textora_core::document::DocViewMut,
+        position: Option<ui::plugin::ReadingPosition>,
+        _document: &dyn textora_core::document::DocView,
     ) -> bool {
-        match msg {
-            ui::plugin::PluginMessage::SetSelAnchor(position) => {
-                self.state.borrow_mut().selection_anchor = position;
-                true
-            }
-            ui::plugin::PluginMessage::SetSelCursor(position) => {
-                self.state.borrow_mut().selection_cursor = position;
-                true
-            }
-            ui::plugin::PluginMessage::ClearSelection => {
-                let mut state = self.state.borrow_mut();
-                state.selection_anchor = None;
-                state.selection_cursor = None;
-                true
-            }
-            _ => false,
-        }
+        self.state.borrow_mut().selection_anchor =
+            position.map(ui::plugin::ReadingPosition::indices);
+        true
+    }
+
+    fn set_selection_cursor(
+        &mut self,
+        position: Option<ui::plugin::ReadingPosition>,
+        _document: &dyn textora_core::document::DocView,
+    ) -> bool {
+        self.state.borrow_mut().selection_cursor =
+            position.map(ui::plugin::ReadingPosition::indices);
+        true
+    }
+
+    fn clear_selection(&mut self) -> bool {
+        let mut state = self.state.borrow_mut();
+        state.selection_anchor = None;
+        state.selection_cursor = None;
+        true
     }
 }
 
@@ -2407,17 +2465,13 @@ fn preview_tiny_mouse_move_does_not_start_selection() {
         let _ = app.dispatch_editor_cursor_moved(tiny_drag_x, click_y, None);
 
         assert!(
-            !app.active_tab_session()
-                .expect("active runtime session")
-                .query_bool(ui::plugin::PluginQuery::HasSelection),
+            !app.active_tab_session().expect("active runtime session").plugin_has_selection(),
             "tiny preview mouse movement should not start text selection"
         );
         let _ =
             app.dispatch_editor_cursor_moved(click_x + 6.0 * scale_factor as f32, click_y, None);
         assert!(
-            app.active_tab_session()
-                .expect("active runtime session")
-                .query_bool(ui::plugin::PluginQuery::HasSelection),
+            app.active_tab_session().expect("active runtime session").plugin_has_selection(),
             "deliberate preview dragging should still select text at every scale"
         );
     }
@@ -2574,9 +2628,7 @@ fn wysiwyg_backward_drag_keeps_plugin_selection_anchor() {
             "backward WYSIWYG drag should create a document selection"
         );
         assert!(
-            app.active_tab_session()
-                .expect("active runtime session")
-                .query_bool(ui::plugin::PluginQuery::HasSelection),
+            app.active_tab_session().expect("active runtime session").plugin_has_selection(),
             "backward WYSIWYG drag should keep the plugin selection visible"
         );
     }
@@ -2707,9 +2759,7 @@ fn wysiwyg_backward_drag_across_paragraph_keeps_plugin_selection_anchor() {
         "backward WYSIWYG drag across paragraphs should create a document selection"
     );
     assert!(
-        app.active_tab_session()
-            .expect("active runtime session")
-            .query_bool(ui::plugin::PluginQuery::HasSelection),
+        app.active_tab_session().expect("active runtime session").plugin_has_selection(),
         "backward WYSIWYG drag across paragraphs should keep the plugin selection visible"
     );
 }
@@ -4460,14 +4510,9 @@ fn wysiwyg_navigation_sends_snapped_cursor_byte_to_plugin() {
     // Phase 1: query plugin for target byte
     let new_byte = {
         let tab = app.active_tab_session().unwrap();
-        match tab.query(ui::plugin::PluginQuery::VisualMove {
-            current_byte: 0,
-            direction: ui::plugin::MoveDirection::Right,
-            target_x: None,
-        }) {
-            ui::plugin::PluginResponse::BytePosition(Some(b)) => b,
-            _ => panic!("plugin should return a byte"),
-        }
+        tab.visual_move(0, ui::plugin::MoveDirection::Right, None)
+            .expect("plugin should return a caret")
+            .byte_offset
     };
     assert_eq!(new_byte, 3);
 
@@ -4475,7 +4520,7 @@ fn wysiwyg_navigation_sends_snapped_cursor_byte_to_plugin() {
     let mut tab = app.active_tab_session_mut().unwrap();
     tab.document_mut().cursor_move_to_offset(new_byte);
     let snapped_byte = tab.document().cursor_offset().to_usize();
-    tab.send_message(ui::plugin::PluginMessage::SetCursorByte(snapped_byte));
+    tab.set_cursor_byte(snapped_byte);
 
     let recorded = state.borrow();
     assert!(recorded.cursor_byte.is_some(), "SetCursorByte should have been called");
@@ -4701,14 +4746,16 @@ fn wrapped_markdown_app_for_caret_test(
         &inputs,
     );
     let metrics = app.ui_metrics();
-    let settings_message = ui::plugin::PluginMessage::SetRenderSettings {
+    let render_settings = ui::plugin::ViewRenderSettings {
         font_family: app.settings.font_family.clone(),
         font_size: metrics.font_size / metrics.dpi,
         line_height: metrics.line_height / metrics.dpi,
         toc_max_depth: app.settings.toc_max_depth,
         markdown_first_line_indent: app.settings.markdown_first_line_indent,
     };
-    app.active_tab_session_mut().expect("wrapped Markdown fixture").send_message(settings_message);
+    app.active_tab_session_mut()
+        .expect("wrapped Markdown fixture")
+        .set_view_render_settings(render_settings);
     app
 }
 
@@ -5002,6 +5049,56 @@ fn wysiwyg_source_toggle_reveals_the_caret_moved_in_the_source_editor() {
             );
             assert_eq!(tab.document().full_text(), source);
         }
+    }
+}
+
+#[test]
+#[cfg(feature = "markdown")]
+fn source_view_round_trip_preserves_selection_generation_and_undo_history() {
+    use ui::plugin::{SemanticEditCommand, SemanticEditPlan};
+
+    let source = "Heading\n\n正文";
+    let heading_edited = "## Heading\n\n正文";
+    let source_edited = "## Heading\n\n正文新";
+    let directory = tempfile::tempdir().expect("source toggle requires a fixture directory");
+    let path = directory.path().join("source-toggle.md");
+    std::fs::write(&path, source).expect("write source toggle fixture");
+    let mut app = wrapped_markdown_app_for_caret_test(&path, 1.0, 800.0, 600.0);
+
+    assert!(app.dispatch_semantic_edit(SemanticEditCommand::SetHeadingLevel(2)).redraw);
+    let tab = app.active_tab_session().expect("Markdown editor after heading edit");
+    assert_eq!(tab.document().full_text(), heading_edited);
+    let heading_generation = tab.document().generation();
+
+    assert!(app.toggle_editor_view().redraw);
+    let mut tab = app.active_tab_session_mut().expect("source editor after toggling");
+    assert_eq!(tab.plugin_name(), ui::plugin::PLUGIN_EDITOR);
+    assert_eq!(tab.document().generation(), heading_generation);
+    tab.document_mut().cursor_move_to_offset(heading_edited.len());
+    assert!(app.dispatch_transactional_edit_for_test(EditCommand::InsertText("新".into())).redraw);
+    let mut tab = app.active_tab_session_mut().expect("source editor after typing");
+    let source_generation = tab.document().generation();
+    assert_ne!(source_generation, heading_generation);
+    let selection = heading_edited.len()..source_edited.len();
+    tab.document_mut().cursor_mut().selection_anchor = Some(selection.start);
+
+    assert!(app.toggle_editor_view().redraw);
+    let tab = app.active_tab_session().expect("restored Markdown editor");
+    assert_eq!(tab.plugin_name(), ui::plugin::PLUGIN_MARKDOWN_EDITOR);
+    assert_eq!(tab.document().full_text(), source_edited);
+    assert_eq!(tab.document().generation(), source_generation);
+    assert_eq!(tab.document().selection_range(), Some((selection.start, selection.end)));
+    let plan = tab.plan_semantic_edit(SemanticEditCommand::ToggleBold, Some(selection));
+    let SemanticEditPlan::Apply(transaction) = plan else {
+        panic!("restored Markdown editor must plan against source edits, got {plan:?}");
+    };
+    assert_eq!(transaction.source_generation, source_generation);
+    assert_eq!(transaction.replacements[0].text, "**新**");
+
+    for expected in [heading_edited, source] {
+        assert!(app.dispatch_semantic_edit(SemanticEditCommand::Undo).redraw);
+        let tab = app.active_tab_session().expect("Markdown editor after undo");
+        assert_eq!(tab.document().full_text(), expected);
     }
 }
 

@@ -364,6 +364,7 @@ fn build_composition_document(
 #[cfg(test)]
 mod tests {
     use super::super::*;
+    use ui::plugin::EditableView;
 
     #[test]
     fn standalone_preedit_preserves_body_font_and_caret_width() {
@@ -423,14 +424,10 @@ mod tests {
     fn composing_selection() -> MarkdownEditorView {
         let mut view = MarkdownEditorView::new();
         view.set_source("old tail".into(), 1);
-        for message in [
-            PluginMessage::SetCursorByte(3),
-            PluginMessage::SetSelAnchorByte(Some(0)),
-            PluginMessage::SetSelCursorByte(Some(3)),
-            PluginMessage::SetPreedit { text: "新".into(), cursor: Some((3, 3)) },
-        ] {
-            assert_eq!(view.engine.handle_message_common(&message), Some(true));
-        }
+        view.set_cursor_byte(3);
+        view.engine.set_sel_anchor_byte(Some(0));
+        view.engine.set_sel_cursor_byte(Some(3));
+        view.set_preedit("新".into(), Some((3, 3)));
         render(&mut view);
         assert_eq!(text(&view), "新 tail");
         view
@@ -440,16 +437,11 @@ mod tests {
     fn replacement_preedit_copies_text_spacing_mode() {
         let mut view = MarkdownEditorView::new();
         view.set_source("old tail".into(), 1);
-        view.engine.handle_message_common(&PluginMessage::SetCursorByte(3));
-        view.engine.handle_message_common(&PluginMessage::SetSelAnchorByte(Some(0)));
-        view.engine.handle_message_common(&PluginMessage::SetSelCursorByte(Some(3)));
-        view.engine.handle_message_common(&PluginMessage::SetPreedit {
-            text: "新".into(),
-            cursor: Some((3, 3)),
-        });
-        view.engine.handle_message_common(&PluginMessage::SetTextSpacingMode(
-            ui::typography::TextSpacingMode::Verbatim,
-        ));
+        view.set_cursor_byte(3);
+        view.engine.set_sel_anchor_byte(Some(0));
+        view.engine.set_sel_cursor_byte(Some(3));
+        view.set_preedit("新".into(), Some((3, 3)));
+        view.engine.set_view_text_spacing_mode(ui::typography::TextSpacingMode::Verbatim);
 
         render(&mut view);
 
@@ -472,10 +464,7 @@ mod tests {
             expected,
             "preview must follow current selection even before the next IME event"
         );
-        view.engine.handle_message_common(&PluginMessage::SetPreedit {
-            text: "新".into(),
-            cursor: Some((3, 3)),
-        });
+        view.set_preedit("新".into(), Some((3, 3)));
         render(view);
         assert_eq!(text(view), expected, "identical IME events must not retain a stale selection");
         let cursor_byte = view.engine.edit_ctx.as_ref().expect("active caret").cursor_byte;
@@ -506,12 +495,12 @@ mod tests {
                     .expect("visual navigation resolves");
                 assert_eq!(next, expected_cursor);
                 if cursor_first {
-                    view.engine.handle_message_common(&PluginMessage::SetCursorByte(next));
-                    view.engine.handle_message_common(&PluginMessage::SetSelAnchorByte(None));
-                    view.engine.handle_message_common(&PluginMessage::SetSelCursorByte(None));
+                    view.set_cursor_byte(next);
+                    view.engine.set_sel_anchor_byte(None);
+                    view.engine.set_sel_cursor_byte(None);
                 } else {
-                    view.engine.handle_message_common(&PluginMessage::ClearSelection);
-                    view.engine.handle_message_common(&PluginMessage::SetCursorByte(next));
+                    view.engine.clear_selection();
+                    view.set_cursor_byte(next);
                 }
                 assert_preedit_matches_commit(&mut view, expected);
             }
@@ -524,9 +513,9 @@ mod tests {
         {
             let mut view = composing_selection();
             // The host publishes cursor and selection as separate messages.
-            view.engine.handle_message_common(&PluginMessage::SetCursorByte(cursor));
-            view.engine.handle_message_common(&PluginMessage::SetSelAnchorByte(Some(anchor)));
-            view.engine.handle_message_common(&PluginMessage::SetSelCursorByte(Some(cursor)));
+            view.set_cursor_byte(cursor);
+            view.engine.set_sel_anchor_byte(Some(anchor));
+            view.engine.set_sel_cursor_byte(Some(cursor));
             assert_preedit_matches_commit(&mut view, expected);
         }
     }
@@ -534,7 +523,7 @@ mod tests {
     #[test]
     fn replacement_preedit_select_all_uses_authoritative_source_extent() {
         let mut view = composing_selection();
-        view.engine.handle_message_common(&PluginMessage::SelectAll);
+        view.engine.select_all();
         assert_eq!(view.engine.selection_source_range(), Some((0, 8)));
         assert_preedit_matches_commit(&mut view, "新");
     }
@@ -602,10 +591,7 @@ mod tests {
         let lines = view.engine.flat_lines();
         assert_eq!(lines.len(), 2);
         assert!(caret.1 > lines[0].rect.y + lines[0].font_size);
-        let query = view.engine.query_common(&PluginQuery::CursorScreenPos(6));
-        assert!(
-            matches!(query, Some(PluginResponse::CursorScreenRect(Some(rect))) if rect == caret)
-        );
+        assert_eq!(view.cursor_screen_rect(6), Some(caret));
         let line = &lines[1];
         let hit = view.engine.hit_test_byte(
             line.rect.x + crate::layout::grapheme_x(line, 3),

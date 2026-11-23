@@ -4025,6 +4025,73 @@ fn switching_back_to_mindmap_after_reload_refreshes_reused_generation() {
 }
 
 #[test]
+fn markdown_source_view_roundtrip_preserves_selection_and_undo_boundaries() {
+    use ui::plugin::{PluginMode, SemanticEditCommand, SemanticEditPlan};
+
+    const ORIGINAL: &str = "first second";
+    const AFTER_RICH_EDIT: &str = "first second!";
+    const AFTER_SOURCE_EDIT: &str = "first changed!";
+    let mut app = app();
+    let (_, tab_id) = install_registered_note(&mut app, "roundtrip.md", ORIGINAL);
+
+    let set_selection = |app: &mut NotoraRuntime, start, end| {
+        let mut tab = app
+            .document_runtime
+            .editor_runtime
+            .tab_session_mut(tab_id)
+            .expect("installed Markdown tab");
+        tab.document_mut().set_cursor_offset_synced(end);
+        tab.document_mut().cursor_mut().selection_anchor = (start < end).then_some(start);
+        tab.document().generation()
+    };
+    set_selection(&mut app, ORIGINAL.len(), ORIGINAL.len());
+    let outcome = app
+        .document_runtime
+        .editor_runtime
+        .commit_text(active_editor_input_context(), "!".to_owned());
+    app.apply_editor_outcome(outcome);
+    let rich_generation = set_selection(&mut app, "first ".len(), ORIGINAL.len());
+
+    app.dispatch_action(NotoraAction::ToggleSourceViewRequested);
+    let tab = app.document_runtime.editor_runtime.tab_session(tab_id).expect("source tab");
+    assert_eq!(tab.plugin().mode(), PluginMode::Source);
+    assert_eq!(tab.document().full_text(), AFTER_RICH_EDIT);
+    assert_eq!(tab.document().generation(), rich_generation);
+    assert_eq!(tab.document().selection_range(), Some(("first ".len(), ORIGINAL.len())));
+
+    let outcome = app
+        .document_runtime
+        .editor_runtime
+        .commit_text(active_editor_input_context(), "changed".to_owned());
+    app.apply_editor_outcome(outcome);
+    let source_generation = set_selection(&mut app, 0, "first".len());
+    assert_ne!(source_generation, rich_generation);
+
+    app.dispatch_action(NotoraAction::ToggleSourceViewRequested);
+    let tab =
+        app.document_runtime.editor_runtime.tab_session(tab_id).expect("restored Markdown tab");
+    assert_eq!(tab.plugin().mode(), PluginMode::RichText);
+    assert_eq!(tab.document().full_text(), AFTER_SOURCE_EDIT);
+    assert_eq!(tab.document().generation(), source_generation);
+    assert_eq!(tab.document().selection_range(), Some((0, "first".len())));
+    let editable = tab.plugin().editable().expect("Markdown supports semantic edits");
+    assert!(matches!(
+        editable.plan_semantic_edit(SemanticEditCommand::ToggleBold, source_generation, "first".len(), Some(0.."first".len())),
+        SemanticEditPlan::Apply(transaction) if transaction.source_generation == source_generation
+    ));
+
+    for expected in [AFTER_RICH_EDIT, ORIGINAL] {
+        app.dispatch_action(NotoraAction::SemanticEditRequested(SemanticEditCommand::Undo));
+        let tab = app
+            .document_runtime
+            .editor_runtime
+            .tab_session(tab_id)
+            .expect("Markdown tab after undo");
+        assert_eq!(tab.document().full_text(), expected);
+    }
+}
+
+#[test]
 fn semantic_edit_refreshes_stale_plugin_source_before_planning() {
     use appkit_shell::editor_runtime::SemanticEditResult;
     use ui::plugin::SemanticEditCommand;
@@ -4033,7 +4100,7 @@ fn semantic_edit_refreshes_stale_plugin_source_before_planning() {
     let (_, tab_id) = install_registered_note(&mut app, "note.md", "old");
     let editor = app.document_runtime.editor_mut();
     let mut tab = editor.tab_session_mut(tab_id).expect("Markdown tab should be installed");
-    // Change the document without sending UpdateSource to the active plugin.
+    // Change the document without synchronizing the active plugin.
     tab.document_mut().replace_range(0.."old".len(), "new");
 
     let (result, _) = editor.execute_semantic_edit(SemanticEditCommand::SetHeadingLevel(2));

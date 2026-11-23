@@ -86,3 +86,54 @@ impl MarkdownEditorView {
         self.source_search_highlights(&matches, active_idx, match_color, inactive_color)
     }
 }
+
+impl ui::plugin::SearchView for MarkdownEditorView {
+    fn search_highlights(&self, request: ui::plugin::SearchHighlightsRequest<'_>) -> DrawList {
+        if self.engine.replacement_preedit.is_some() {
+            return DrawList::new();
+        }
+        self.query_search_highlights(
+            request.query,
+            request.match_case,
+            request.use_regex,
+            request.active_idx,
+            request.match_color,
+            request.inactive_color,
+        )
+    }
+
+    fn source_search_highlights(
+        &self,
+        request: ui::plugin::SourceSearchHighlightsRequest<'_>,
+    ) -> Option<DrawList> {
+        if self.engine.replacement_preedit.is_some()
+            || self.needs_source_update(request.source_generation)
+        {
+            return Some(DrawList::new());
+        }
+        Some(MarkdownEditorView::source_search_highlights(
+            self,
+            request.matches,
+            request.active_idx,
+            request.match_color,
+            request.inactive_color,
+        ))
+    }
+}
+
+impl ui::plugin::SearchView for MarkdownView {
+    fn search_highlights(&self, request: ui::plugin::SearchHighlightsRequest<'_>) -> DrawList {
+        self.engine.search_highlights(
+            request.query,
+            request.match_case,
+            request.use_regex,
+            request.active_idx,
+            request.match_color,
+            request.inactive_color,
+        )
+    }
+
+    fn scroll_to_search_match(&mut self, query: &str, match_case: bool, active_idx: usize) {
+        self.engine.scroll_to_search_match(query, match_case, active_idx);
+    }
+}

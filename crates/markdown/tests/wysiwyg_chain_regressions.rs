@@ -1,7 +1,8 @@
 use std::borrow::Cow;
 use textora_core::document::{DocView, DocViewMut, StringDocView};
 use textora_markdown::view::MarkdownEditorView;
-use ui::plugin::{MoveDirection, PluginMessage, PluginQuery, PluginResponse, ViewPlugin};
+use ui::plugin::{EditPolicy, EditableView};
+use ui::plugin::{MoveDirection, ViewPlugin, ViewPluginCapabilities};
 struct Document(String);
 impl DocView for Document {
     fn line_count(&self) -> usize {
@@ -189,10 +190,10 @@ mod tests {
     }
 
     fn editor(source: &str, cursor: usize) -> (MarkdownEditorView, Document) {
-        let mut document = Document(source.to_owned());
+        let document = Document(source.to_owned());
         let mut view = MarkdownEditorView::new();
         view.set_source(source.to_owned(), 1);
-        view.handle_message(PluginMessage::SetCursorByte(cursor), &mut document);
+        view.set_cursor_byte(cursor);
         render(&mut view, &document);
         (view, document)
     }
@@ -206,24 +207,14 @@ mod tests {
     }
     #[test]
     fn image_preserves_unrelated_paragraph_caret_and_navigation() {
-        let (view, document) = editor("before\n\nabc ![x](y) tail\n\nafter", 0);
+        let (view, _document) = editor("before\n\nabc ![x](y) tail\n\nafter", 0);
         assert!(
-            matches!(
-                view.query(PluginQuery::CursorScreenPos(0), &document),
-                PluginResponse::CursorScreenRect(Some(_))
-            ),
+            view.cursor_screen_rect(0).is_some(),
             "image must not remove first paragraph caret"
         );
         assert!(matches!(
-            view.query(
-                PluginQuery::VisualMove {
-                    current_byte: 0,
-                    direction: MoveDirection::Right,
-                    target_x: None
-                },
-                &document
-            ),
-            PluginResponse::BytePosition(Some(1))
+            view.visual_move(0, MoveDirection::Right, None).map(|caret| caret.byte_offset),
+            Some(1)
         ));
     }
     #[test]
@@ -235,19 +226,16 @@ mod tests {
             "[![x](image.png)](link)",
         ] {
             let source = format!("前言\n\n{image}\n\n末尾");
-            let (view, document) = editor(&source, 0);
+            let (view, _document) = editor(&source, 0);
             let tail = source.find('末').expect("tail exists");
             for byte in [0, 3, tail, tail + 3, source.len()] {
                 assert!(
-                    matches!(
-                        view.query(PluginQuery::CursorScreenPos(byte), &document),
-                        PluginResponse::CursorScreenRect(Some(_))
-                    ),
+                    view.cursor_screen_rect(byte).is_some(),
                     "missing caret {byte} for {source:?}"
                 );
             }
             assert!(
-                matches!(view.query(PluginQuery::VisualMove{current_byte:tail,direction:MoveDirection::Right,target_x:None},&document),PluginResponse::BytePosition(Some(end)) if end==tail+3)
+                matches!(view.visual_move(tail, MoveDirection::Right, None).map(|caret| caret.byte_offset),Some(end) if end==tail+3)
             );
         }
     }
@@ -255,31 +243,28 @@ mod tests {
     fn decoded_entity_navigation_uses_its_complete_source_range() {
         for entity in ["&copy;", "&NotEqualTilde;", "&#x1F600;", "&fjlig;"] {
             let source = format!("a {entity} z");
-            let (view, document) = editor(&source, 0);
+            let (view, _document) = editor(&source, 0);
             assert!(
-                matches!(view.query(PluginQuery::VisualMove{current_byte:2,direction:MoveDirection::Right,target_x:None},&document),PluginResponse::BytePosition(Some(end)) if end==2+entity.len()),
+                matches!(view.visual_move(2, MoveDirection::Right, None).map(|caret| caret.byte_offset),Some(end) if end==2+entity.len()),
                 "entity must be a complete source unit: {source:?}"
             );
         }
     }
     #[test]
     fn inline_code_expands_both_delimiters_and_maps_chinese_caret() {
-        let (view, document) = editor("abc `中文` tail", 5);
+        let (view, _document) = editor("abc `中文` tail", 5);
         assert_eq!(
             rendered_text(&view),
             "abc `中文` tail",
             "active inline code must expose both delimiters"
         );
-        assert!(matches!(
-            view.query(PluginQuery::CursorScreenPos(5), &document),
-            PluginResponse::CursorScreenRect(Some(_))
-        ));
+        assert!(view.cursor_screen_rect(5).is_some());
     }
     #[test]
     fn inline_code_content_mapping_preserves_delimiters_and_padding() {
         for source in ["abc ``中`文`` tail", "abc `` `中` `` tail", "abc `  中文  ` tail"] {
             let cursor = source.find('中').expect("fixture has chinese code");
-            let (view, document) = editor(source, cursor);
+            let (view, _document) = editor(source, cursor);
             assert_eq!(
                 rendered_text(&view),
                 source,
@@ -288,10 +273,7 @@ mod tests {
             for (byte, character) in source.char_indices() {
                 if character == '中' || character == '文' {
                     assert!(
-                        matches!(
-                            view.query(PluginQuery::CursorScreenPos(byte), &document),
-                            PluginResponse::CursorScreenRect(Some(_))
-                        ),
+                        view.cursor_screen_rect(byte).is_some(),
                         "unmapped source boundary {byte} in {source:?}"
                     );
                 }
@@ -302,11 +284,8 @@ mod tests {
     fn adjacent_code_spans_retain_independent_source_delimiters() {
         let source = "```a```**`中`**";
         for cursor in [3, source.find('中').expect("Chinese code")] {
-            let (view, document) = editor(source, cursor);
-            assert!(matches!(
-                view.query(PluginQuery::CursorScreenPos(cursor), &document),
-                PluginResponse::CursorScreenRect(Some(_))
-            ));
+            let (view, _document) = editor(source, cursor);
+            assert!(view.cursor_screen_rect(cursor).is_some());
             let visible = rendered_text(&view);
             assert!(visible.contains('a') && visible.contains('中'));
         }
@@ -316,31 +295,25 @@ mod tests {
         for newline in ["\n", "\r\n"] {
             let source = format!("abc ``a{newline}中文`` tail");
             let cursor = source.find('中').expect("Chinese code content");
-            let (view, document) = editor(&source, cursor);
+            let (view, _document) = editor(&source, cursor);
             assert_eq!(
                 rendered_text(&view),
                 format!("abc ``a{}中文`` tail", " ".repeat(newline.len()))
             );
-            assert!(matches!(
-                view.query(PluginQuery::CursorScreenPos(cursor), &document),
-                PluginResponse::CursorScreenRect(Some(_))
-            ));
+            assert!(view.cursor_screen_rect(cursor).is_some());
         }
     }
     #[test]
     fn code_projection_preserves_parser_normalization_in_containers_and_tables() {
         for source in ["> ``a\n> >中文``", "| column |\n| --- |\n| `中\\|文` |"] {
             let cursor = source.find('中').expect("Chinese code");
-            let (view, document) = editor(source, cursor);
+            let (view, _document) = editor(source, cursor);
             let visible = rendered_text(&view);
             assert!(
                 visible.contains("中文``") || visible.contains("中|文"),
                 "code text differs from parser: {visible:?}"
             );
-            assert!(matches!(
-                view.query(PluginQuery::CursorScreenPos(cursor), &document),
-                PluginResponse::CursorScreenRect(Some(_))
-            ));
+            assert!(view.cursor_screen_rect(cursor).is_some());
         }
     }
     #[test]
@@ -348,18 +321,11 @@ mod tests {
         let (mut view, mut document) = editor("abc", 1);
         document.0 = "aXbc".into();
         view.set_source(document.0.clone(), 2);
-        view.handle_message(PluginMessage::SetCursorByte(2), &mut document);
+        view.set_cursor_byte(2);
         assert!(
             matches!(
-                view.query(
-                    PluginQuery::VisualMove {
-                        current_byte: 2,
-                        direction: MoveDirection::Right,
-                        target_x: None
-                    },
-                    &document
-                ),
-                PluginResponse::BytePosition(Some(3))
+                view.visual_move(2, MoveDirection::Right, None).map(|caret| caret.byte_offset),
+                Some(3)
             ),
             "next input event must see current source without requiring a paint"
         );
@@ -370,7 +336,7 @@ mod tests {
         for (generation, source) in [(2, "甲乙\n\n尾"), (3, "一二三\n\n末")] {
             document.0 = source.into();
             view.set_source(document.0.clone(), generation);
-            view.handle_message(PluginMessage::SetCursorByte(3), &mut document);
+            view.set_cursor_byte(3);
             for (direction, expected) in [
                 (MoveDirection::Left, 0),
                 (MoveDirection::Right, 6),
@@ -378,20 +344,18 @@ mod tests {
                 (MoveDirection::LineEnd, source.find('\n').expect("newline")),
             ] {
                 assert!(
-                    matches!(view.query(PluginQuery::VisualMove{current_byte:3,direction,target_x:None},&document),PluginResponse::BytePosition(Some(byte)) if byte==expected),
+                    matches!(view.visual_move(3, direction, None).map(|caret| caret.byte_offset),Some(byte) if byte==expected),
                     "generation {generation} must use its own source for {direction:?}"
                 );
             }
-            let PluginResponse::CursorScreenRect(Some((x, y, _, height))) =
-                view.query(PluginQuery::CursorScreenPos(3), &document)
-            else {
+            let Some((x, y, _, height)) = view.cursor_screen_rect(3) else {
                 panic!("current Unicode caret has geometry")
             };
             assert!(
-                matches!(view.query(PluginQuery::HitTestByte{x,y:y+height/2.0,offset_x:0.0,offset_y:0.0},&document),PluginResponse::BytePosition(Some(byte)) if byte<=source.len()&&source.is_char_boundary(byte))
+                matches!(view.hit_test_caret(x, y+height/2.0, 0.0, 0.0).map(|caret| caret.byte_offset),Some(byte) if byte<=source.len()&&source.is_char_boundary(byte))
             );
             assert!(
-                matches!(view.query(PluginQuery::VisualMove{current_byte:0,direction:MoveDirection::Down,target_x:Some(0.0)},&document),PluginResponse::BytePosition(Some(byte)) if byte>0&&source.is_char_boundary(byte))
+                matches!(view.visual_move(0, MoveDirection::Down, Some(0.0)).map(|caret| caret.byte_offset),Some(byte) if byte>0&&source.is_char_boundary(byte))
             );
         }
         render(&mut view, &document);
@@ -399,40 +363,36 @@ mod tests {
     }
     #[test]
     fn search_highlights_include_visible_matches() {
-        let (view, document) = editor("one two one", 0);
-        let response = view.query(
-            PluginQuery::SearchHighlights {
-                query: "one".into(),
+        let (view, _document) = editor("one two one", 0);
+        let response = view.search().expect("Markdown editor provides search").search_highlights(
+            ui::plugin::SearchHighlightsRequest {
+                query: "one",
                 match_case: true,
                 use_regex: false,
                 active_idx: 0,
                 match_color: ui::theme::test_theme().palette.highlight,
                 inactive_color: ui::theme::test_theme().palette.inactive_highlight,
             },
-            &document,
         );
-        assert!(
-            matches!(response,PluginResponse::DrawList(ref commands) if !commands.cmds.is_empty()),
-            "two visible matches need search highlight geometry"
-        );
+        assert!(!response.cmds.is_empty(), "two visible matches need search highlight geometry");
     }
     #[test]
     fn source_search_highlights_folded_markup_and_preserves_match_indices() {
         let source = "**one** two one";
-        let (view, document) = editor(source, source.len());
+        let (view, _document) = editor(source, source.len());
         let active = [1.0, 0.0, 0.0, 1.0];
         let inactive = [0.0, 1.0, 0.0, 1.0];
-        let response = view.query(
-            PluginQuery::SourceSearchHighlights {
-                matches: vec![0..7, 11..14],
+        let response = view
+            .search()
+            .expect("Markdown editor provides search")
+            .source_search_highlights(ui::plugin::SourceSearchHighlightsRequest {
+                matches: &[0..7, 11..14],
                 source_generation: 1,
                 active_idx: 1,
                 match_color: active,
                 inactive_color: inactive,
-            },
-            &document,
-        );
-        let PluginResponse::DrawList(highlights) = response else { panic!("highlights response") };
+            });
+        let highlights = response.expect("source geometry is supported");
         let colors = highlights
             .cmds
             .iter()
@@ -449,31 +409,32 @@ mod tests {
     }
     #[test]
     fn source_search_highlights_partial_grapheme_matches() {
-        let (view, document) = editor("xe\u{301}y", 0);
-        let response = view.query(
-            PluginQuery::SourceSearchHighlights {
-                matches: std::iter::once(2..4).collect(),
+        let (view, _document) = editor("xe\u{301}y", 0);
+        let response = view
+            .search()
+            .expect("Markdown editor provides search")
+            .source_search_highlights(ui::plugin::SourceSearchHighlightsRequest {
+                matches: std::slice::from_ref(&(2..4)),
                 source_generation: 1,
                 active_idx: 0,
                 match_color: [1.0; 4],
                 inactive_color: [0.5; 4],
-            },
-            &document,
-        );
+            });
         assert!(
-            matches!(response,PluginResponse::DrawList(ref highlights) if !highlights.cmds.is_empty()),
+            response.is_some_and(|highlights| !highlights.cmds.is_empty()),
             "a combining-mark match must highlight its containing grapheme"
         );
     }
     #[test]
     fn preedit_previews_replacement_at_selection_start() {
-        let (mut view, mut document) = editor("one two one", 3);
-        view.handle_message(PluginMessage::SetSelAnchorByte(Some(0)), &mut document);
-        view.handle_message(PluginMessage::SetSelCursorByte(Some(3)), &mut document);
-        view.handle_message(
-            PluginMessage::SetPreedit { text: "新".into(), cursor: Some((3, 3)) },
-            &mut document,
-        );
+        let (mut view, document) = editor("one two one", 3);
+        view.selection_mut()
+            .expect("test view exposes selection")
+            .set_selection_anchor_byte(Some(0));
+        view.selection_mut()
+            .expect("test view exposes selection")
+            .set_selection_cursor_byte(Some(3));
+        view.set_preedit("新".into(), Some((3, 3)));
         render(&mut view, &document);
         assert_eq!(
             rendered_text(&view),
@@ -486,7 +447,7 @@ mod tests {
         for source in ["```\n<br>\n```", "`<br>`"] {
             let cursor = source.find("<br>").expect("fixture has html text") + 4;
             let (view, _document) = editor(source, cursor);
-            let plan = view.edit_policy().plan_edit(&EditRequest {
+            let plan = view.plan_edit(&EditRequest {
                 source_generation: 1,
                 cursor_byte: cursor,
                 selection: None,
@@ -725,10 +686,7 @@ mod tests {
         let mut bold_view = MarkdownEditorView::new();
         bold_view.set_source(hard_break_bold.to_owned(), 1);
         let bold_doc = Document(hard_break_bold.to_owned());
-        bold_view.handle_message(
-            PluginMessage::SetCursorByte(3),
-            &mut Document(hard_break_bold.to_owned()),
-        );
+        bold_view.set_cursor_byte(3);
         render(&mut bold_view, &bold_doc);
         assert_eq!(bold_view.engine().flat_lines().len(), 2);
         assert!(bold_view.engine().flat_lines()[0].text.starts_with("**first"));

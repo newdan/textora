@@ -1,14 +1,13 @@
 use crate::app::App;
 use crate::app_effect::AppEffect;
 use crate::dispatch::wysiwyg::{
-    apply_edit_hit_target, query_visual_caret_hit, set_wysiwyg_cursor_and_selection,
-    set_wysiwyg_visual_caret_and_selection,
+    apply_edit_hit_target, set_wysiwyg_cursor_and_selection, set_wysiwyg_visual_caret_and_selection,
 };
 use appkit_shell::editor_runtime::{EditorNotification, EditorOutcome};
 use appkit_shell::pointer_capture::CanvasDragEligibility;
 use textora_core::types::UniCharOffset;
 use ui::canvas::CanvasPoint;
-use ui::plugin::{CursorAffinity, EditHitTarget, PluginMessage, VisualCaretPosition};
+use ui::plugin::{CursorAffinity, EditHitTarget, VisualCaretPosition};
 use winit::event::ElementState;
 
 const PLUGIN_SELECTION_DRAG_THRESHOLD_LOGICAL_PX: f32 = 5.0;
@@ -16,7 +15,7 @@ const PLUGIN_SELECTION_DRAG_THRESHOLD_LOGICAL_PX: f32 = 5.0;
 fn visual_caret_for_hit(app: &App, byte_offset: usize, x: f32, y: f32) -> VisualCaretPosition {
     let bounds = app.plugin_render_bounds();
     app.active_tab_session()
-        .and_then(|tab| query_visual_caret_hit(&tab, x, y, bounds.x, bounds.y))
+        .and_then(|tab| tab.hit_test_caret(x, y, bounds.x, bounds.y))
         .filter(|position| position.byte_offset == byte_offset)
         .unwrap_or(VisualCaretPosition { byte_offset, affinity: CursorAffinity::Downstream })
 }
@@ -77,38 +76,29 @@ impl App {
             };
             if !pressed {
                 if !tab.plugin_has_selection() {
-                    tab.send_message(PluginMessage::ClearSelection);
+                    tab.clear_plugin_selection();
                 }
                 return AppEffect::REDRAW;
             }
             if let Some((line_index, cluster_pos)) = preview_pos {
                 if shift_pressed {
-                    tab.send_message(ui::plugin::PluginMessage::SetSelCursor(Some((
-                        line_index,
-                        cluster_pos,
-                    ))));
+                    tab.set_plugin_selection_cursor(Some((line_index, cluster_pos)));
                 } else if click_count == 3 {
                     if let Some((start, end)) = tab.line_range_at_pos(line_index, cluster_pos) {
-                        tab.send_message(ui::plugin::PluginMessage::SetSelAnchor(Some(start)));
-                        tab.send_message(ui::plugin::PluginMessage::SetSelCursor(Some(end)));
+                        tab.set_plugin_selection_anchor(Some(start));
+                        tab.set_plugin_selection_cursor(Some(end));
                     }
                 } else if click_count == 2 {
                     if let Some((start, end)) = tab.word_range_at_pos(line_index, cluster_pos) {
-                        tab.send_message(ui::plugin::PluginMessage::SetSelAnchor(Some(start)));
-                        tab.send_message(ui::plugin::PluginMessage::SetSelCursor(Some(end)));
+                        tab.set_plugin_selection_anchor(Some(start));
+                        tab.set_plugin_selection_cursor(Some(end));
                     }
                 } else {
-                    tab.send_message(ui::plugin::PluginMessage::SetSelAnchor(Some((
-                        line_index,
-                        cluster_pos,
-                    ))));
-                    tab.send_message(ui::plugin::PluginMessage::SetSelCursor(Some((
-                        line_index,
-                        cluster_pos,
-                    ))));
+                    tab.set_plugin_selection_anchor(Some((line_index, cluster_pos)));
+                    tab.set_plugin_selection_cursor(Some((line_index, cluster_pos)));
                 }
             } else {
-                tab.send_message(ui::plugin::PluginMessage::ClearSelection);
+                tab.clear_plugin_selection();
             }
             AppEffect::REDRAW
         } else if is_custom_renderer {
@@ -123,6 +113,12 @@ impl App {
                 // where the last edit ended.
                 if let Some(mut tab) = self.active_tab_session_mut() {
                     tab.document_mut().break_edit_merge();
+                }
+                if let Some(source_range) = self.hit_test_canvas_control(px, py) {
+                    self.mouse.wysiwyg_selection_scope = None;
+                    self.mouse.is_down = false;
+                    let outcome = self.editor_runtime.handle_canvas_control(source_range);
+                    return self.apply_canvas_pointer_outcome(outcome);
                 }
                 match self.query_plugin_edit_hit_target(px, py) {
                     Some(Some(EditHitTarget::TextCaret { byte_offset, selection_scope })) => {
@@ -158,12 +154,6 @@ impl App {
                             self.editor_runtime.begin_text_selection(self.editor_input_context());
                         self.mouse.is_down = true;
                         return AppEffect::REDRAW;
-                    }
-                    Some(Some(EditHitTarget::CanvasControl { source_range })) => {
-                        self.mouse.wysiwyg_selection_scope = None;
-                        self.mouse.is_down = false;
-                        let outcome = self.editor_runtime.handle_canvas_control(source_range);
-                        return self.apply_canvas_pointer_outcome(outcome);
                     }
                     Some(Some(EditHitTarget::SourceObject { source_range })) => {
                         let _ = self.editor_runtime.begin_canvas_drag(self.editor_input_context());
@@ -219,13 +209,9 @@ impl App {
                         tab.document_mut().cursor_move_to_offset(word_end);
                         let snapped_end = tab.document().cursor_offset().to_usize();
                         tab.document_mut().cursor_mut().selection_anchor = Some(word_start);
-                        tab.send_message(ui::plugin::PluginMessage::SetCursorByte(snapped_end));
-                        tab.send_message(ui::plugin::PluginMessage::SetSelAnchorByte(Some(
-                            word_start,
-                        )));
-                        tab.send_message(ui::plugin::PluginMessage::SetSelCursorByte(Some(
-                            snapped_end,
-                        )));
+                        tab.set_cursor_byte(snapped_end);
+                        tab.set_plugin_selection_anchor_byte(Some(word_start));
+                        tab.set_plugin_selection_cursor_byte(Some(snapped_end));
                     } else {
                         set_wysiwyg_cursor_and_selection(&mut tab, byte, Some(byte));
                     }
@@ -249,8 +235,8 @@ impl App {
                 if let Some(mut tab) = self.active_tab_session_mut()
                     && tab.clear_collapsed_pointer_selection()
                 {
-                    tab.send_message(ui::plugin::PluginMessage::SetSelAnchorByte(None));
-                    tab.send_message(ui::plugin::PluginMessage::SetSelCursorByte(None));
+                    tab.set_plugin_selection_anchor_byte(None);
+                    tab.set_plugin_selection_cursor_byte(None);
                 }
             }
             AppEffect::REDRAW
@@ -315,7 +301,7 @@ impl App {
 
             tab.document_mut().cursor_move_to_offset(candidate);
             let snapped_candidate = tab.document().cursor_offset().to_usize();
-            tab.send_message(PluginMessage::SetCursorByte(snapped_candidate));
+            tab.set_cursor_byte(snapped_candidate);
             snapped_candidate
         };
 
@@ -342,7 +328,7 @@ impl App {
             let mut tab = self.active_tab_session_mut()?;
             tab.document_mut().cursor_move_to_offset(final_byte);
             let snapped_final = tab.document().cursor_offset().to_usize();
-            tab.send_message(PluginMessage::SetCursorByte(snapped_final));
+            tab.set_cursor_byte(snapped_final);
             snapped_final
         } else {
             snapped_candidate
@@ -355,6 +341,14 @@ impl App {
     fn hit_test_plugin_byte_from_point(&self, px: f32, py: f32) -> Option<usize> {
         let render_bounds = self.plugin_render_bounds();
         self.active_tab_session()?.hit_test_plugin_byte_or_end((px, py), render_bounds)
+    }
+
+    pub(crate) fn hit_test_canvas_control(
+        &self,
+        px: f32,
+        py: f32,
+    ) -> Option<std::ops::Range<usize>> {
+        self.active_tab_session()?.hit_test_canvas_control(CanvasPoint::new(px, py))
     }
 
     pub(crate) fn query_plugin_edit_hit_target(
@@ -430,31 +424,21 @@ impl App {
                         if click_count >= 3 {
                             if let Some((line_start, line_end)) = tab.line_range_at_pos(li, cp) {
                                 if (li, cp) >= anchor {
-                                    tab.send_message(ui::plugin::PluginMessage::SetSelCursor(
-                                        Some(line_end),
-                                    ));
+                                    tab.set_plugin_selection_cursor(Some(line_end));
                                 } else {
-                                    tab.send_message(ui::plugin::PluginMessage::SetSelCursor(
-                                        Some(line_start),
-                                    ));
+                                    tab.set_plugin_selection_cursor(Some(line_start));
                                 }
                             }
                         } else if click_count >= 2 {
                             if let Some((word_start, word_end)) = tab.word_range_at_pos(li, cp) {
                                 if (li, cp) >= anchor {
-                                    tab.send_message(ui::plugin::PluginMessage::SetSelCursor(
-                                        Some(word_end),
-                                    ));
+                                    tab.set_plugin_selection_cursor(Some(word_end));
                                 } else {
-                                    tab.send_message(ui::plugin::PluginMessage::SetSelCursor(
-                                        Some(word_start),
-                                    ));
+                                    tab.set_plugin_selection_cursor(Some(word_start));
                                 }
                             }
                         } else {
-                            tab.send_message(ui::plugin::PluginMessage::SetSelCursor(Some((
-                                li, cp,
-                            ))));
+                            tab.set_plugin_selection_cursor(Some((li, cp)));
                         }
                     }
                     return AppEffect::REDRAW;
@@ -464,7 +448,7 @@ impl App {
         } else if is_custom_renderer {
             // WYSIWYG drag: query semantic target first, then retain byte hit testing.
             if let Some(mut tab) = self.active_tab_session_mut() {
-                tab.send_message(PluginMessage::SetCanvasPointer(Some(CanvasPoint::new(px, py))));
+                tab.set_canvas_pointer(Some(CanvasPoint::new(px, py)));
             }
             if self.mouse.canvas_drag.is_some() {
                 return self.dispatch_canvas_drag_moved(px, py);
@@ -480,6 +464,9 @@ impl App {
                     py,
                     self.editor_runtime.scale_factor(),
                 ) {
+                    return AppEffect::NONE;
+                }
+                if self.hit_test_canvas_control(px, py).is_some() {
                     return AppEffect::NONE;
                 }
                 let selection_anchor = self
@@ -506,7 +493,6 @@ impl App {
                     }
                     Some(Some(EditHitTarget::SourceObject { .. } | EditHitTarget::ClearFocus))
                     | Some(None) => return AppEffect::NONE,
-                    Some(Some(EditHitTarget::CanvasControl { .. })) => return AppEffect::NONE,
                     None => {}
                 }
                 let Some(byte) = self.hit_test_plugin_byte_from_point(px, py) else {
@@ -541,7 +527,7 @@ mod tests {
     use ui::canvas::CanvasPoint;
     use ui::plugin::{
         CanvasDragPhase, CanvasDragRequest, CanvasDragResponse, EditHitTarget, EditPlan,
-        EditTransaction, PluginMessage, PluginQuery, PluginResponse, ViewPlugin,
+        EditTransaction, ViewPlugin,
     };
     use winit::event::ElementState;
 
@@ -585,6 +571,10 @@ mod tests {
             self.plugin_name
         }
 
+        fn mode(&self) -> ui::plugin::PluginMode {
+            ui::plugin::PluginMode::RichText
+        }
+
         fn render(
             &mut self,
             _doc: &dyn textora_core::document::DocView,
@@ -595,38 +585,51 @@ mod tests {
         ) -> ui::core::paint::DrawList {
             ui::core::paint::DrawList::new()
         }
+    }
+
+    impl ui::plugin::EditPolicy for CanvasDragTestPlugin {
+        fn plan_edit(&self, _: &ui::plugin::EditRequest) -> ui::plugin::EditPlan {
+            ui::plugin::EditPlan::UseDefault
+        }
+    }
+
+    impl ui::plugin::EditableView for CanvasDragTestPlugin {
+        fn hit_test_edit_target(
+            &self,
+            _x: f32,
+            _y: f32,
+            _offset_x: f32,
+            _offset_y: f32,
+        ) -> Option<Option<ui::plugin::EditHitTarget>> {
+            Some(Some(self.state.borrow().hit_target.clone()))
+        }
+    }
+
+    impl ui::plugin::ScrollableView for CanvasDragTestPlugin {
+        fn content_height(&self) -> f32 {
+            1_000.0
+        }
+    }
+
+    impl ui::plugin::ViewPluginCapabilities for CanvasDragTestPlugin {
+        fn scrollable(&self) -> Option<&dyn ui::plugin::ScrollableView> {
+            Some(self)
+        }
+
+        fn editable(&self) -> Option<&dyn ui::plugin::EditableView> {
+            Some(self)
+        }
 
         fn allows_editing(&self) -> bool {
             true
         }
 
-        fn handles_own_rendering(&self) -> bool {
-            true
+        fn canvas_mut(&mut self) -> Option<&mut dyn ui::plugin::CanvasView> {
+            Some(self)
         }
+    }
 
-        fn query(
-            &self,
-            query: PluginQuery,
-            _doc: &dyn textora_core::document::DocView,
-        ) -> PluginResponse {
-            match query {
-                PluginQuery::NeedsSourceUpdate(_) => PluginResponse::Bool(false),
-                PluginQuery::HitTestEditTarget { .. } => {
-                    PluginResponse::EditHitTarget(Some(self.state.borrow().hit_target.clone()))
-                }
-                PluginQuery::ContentHeight => PluginResponse::Float(1_000.0),
-                _ => PluginResponse::None,
-            }
-        }
-
-        fn handle_message(
-            &mut self,
-            _message: PluginMessage,
-            _doc: &mut dyn textora_core::document::DocViewMut,
-        ) -> bool {
-            false
-        }
-
+    impl ui::plugin::CanvasView for CanvasDragTestPlugin {
         fn handle_canvas_drag(
             &mut self,
             request: CanvasDragRequest,
@@ -641,7 +644,7 @@ mod tests {
 
     struct CanvasControlTestState {
         edit_plan: EditPlan,
-        hit_target: EditHitTarget,
+        control_range: std::ops::Range<usize>,
         planned_control_ranges: Vec<std::ops::Range<usize>>,
         pointer_positions: Vec<Option<CanvasPoint>>,
         drag_requests: Vec<CanvasDragRequest>,
@@ -656,6 +659,10 @@ mod tests {
             "canvas_control_test"
         }
 
+        fn mode(&self) -> ui::plugin::PluginMode {
+            ui::plugin::PluginMode::Canvas
+        }
+
         fn render(
             &mut self,
             _doc: &dyn textora_core::document::DocView,
@@ -666,45 +673,53 @@ mod tests {
         ) -> ui::core::paint::DrawList {
             ui::core::paint::DrawList::new()
         }
+    }
+
+    impl ui::plugin::ScrollableView for CanvasControlTestPlugin {
+        fn content_height(&self) -> f32 {
+            1_000.0
+        }
+    }
+
+    impl ui::plugin::ViewPluginCapabilities for CanvasControlTestPlugin {
+        fn scrollable(&self) -> Option<&dyn ui::plugin::ScrollableView> {
+            Some(self)
+        }
 
         fn allows_editing(&self) -> bool {
             true
         }
 
-        fn handles_own_rendering(&self) -> bool {
-            true
+        fn canvas(&self) -> Option<&dyn ui::plugin::CanvasView> {
+            Some(self)
         }
 
-        fn query(
+        fn canvas_mut(&mut self) -> Option<&mut dyn ui::plugin::CanvasView> {
+            Some(self)
+        }
+    }
+
+    impl ui::plugin::CanvasView for CanvasControlTestPlugin {
+        fn hit_test_canvas_control(
             &self,
-            query: PluginQuery,
-            _doc: &dyn textora_core::document::DocView,
-        ) -> PluginResponse {
-            match query {
-                PluginQuery::NeedsSourceUpdate(_) => PluginResponse::Bool(false),
-                PluginQuery::HitTestEditTarget { .. } => {
-                    PluginResponse::EditHitTarget(Some(self.state.borrow().hit_target.clone()))
-                }
-                PluginQuery::PlanCanvasControl { source_range, .. } => {
-                    let mut state = self.state.borrow_mut();
-                    state.planned_control_ranges.push(source_range);
-                    PluginResponse::EditPlan(state.edit_plan.clone())
-                }
-                PluginQuery::ContentHeight => PluginResponse::Float(1_000.0),
-                _ => PluginResponse::None,
-            }
+            _position: CanvasPoint,
+        ) -> Option<std::ops::Range<usize>> {
+            Some(self.state.borrow().control_range.clone())
         }
 
-        fn handle_message(
-            &mut self,
-            message: PluginMessage,
-            _doc: &mut dyn textora_core::document::DocViewMut,
-        ) -> bool {
-            if let PluginMessage::SetCanvasPointer(point) = message {
-                self.state.borrow_mut().pointer_positions.push(point);
-                return true;
-            }
-            false
+        fn plan_canvas_control(
+            &self,
+            source_range: std::ops::Range<usize>,
+            _source_generation: u32,
+        ) -> EditPlan {
+            let mut state = self.state.borrow_mut();
+            state.planned_control_ranges.push(source_range);
+            state.edit_plan.clone()
+        }
+
+        fn set_canvas_pointer(&mut self, point: Option<CanvasPoint>) -> bool {
+            self.state.borrow_mut().pointer_positions.push(point);
+            true
         }
 
         fn handle_canvas_drag(
@@ -774,7 +789,7 @@ mod tests {
     fn canvas_control_press_applies_edit_plan_without_starting_drag() {
         let state = Rc::new(RefCell::new(CanvasControlTestState {
             edit_plan: EditPlan::Apply(EditTransaction::replace(1, 1..2, "TRUE".into(), 5)),
-            hit_target: EditHitTarget::CanvasControl { source_range: 1..4 },
+            control_range: 1..4,
             planned_control_ranges: Vec::new(),
             pointer_positions: Vec::new(),
             drag_requests: Vec::new(),
@@ -801,7 +816,7 @@ mod tests {
     fn canvas_control_pointer_move_notifies_plugin() {
         let state = Rc::new(RefCell::new(CanvasControlTestState {
             edit_plan: EditPlan::Consume,
-            hit_target: EditHitTarget::CanvasControl { source_range: 1..4 },
+            control_range: 1..4,
             planned_control_ranges: Vec::new(),
             pointer_positions: Vec::new(),
             drag_requests: Vec::new(),
@@ -840,18 +855,7 @@ mod tests {
         for y in (0..=bounds.h.ceil() as usize).step_by(4) {
             for x in (0..=bounds.w.ceil() as usize).step_by(4) {
                 let point = (bounds.x + x as f32, bounds.y + y as f32);
-                let target = app.active_tab_session().expect("active mindmap tab").query(
-                    PluginQuery::HitTestEditTarget {
-                        x: point.0,
-                        y: point.1,
-                        offset_x: bounds.x,
-                        offset_y: bounds.y,
-                    },
-                );
-                let PluginResponse::EditHitTarget(Some(EditHitTarget::CanvasControl {
-                    source_range,
-                })) = target
-                else {
+                let Some(source_range) = app.hit_test_canvas_control(point.0, point.1) else {
                     continue;
                 };
                 if source_range == parent_range {
@@ -888,19 +892,10 @@ mod tests {
         for y in (0..=bounds.h.ceil() as usize).step_by(4) {
             for x in (0..=bounds.w.ceil() as usize).step_by(4) {
                 let point = (bounds.x + x as f32, bounds.y + y as f32);
-                let target = app.active_tab_session().expect("active mindmap tab").query(
-                    PluginQuery::HitTestEditTarget {
-                        x: point.0,
-                        y: point.1,
-                        offset_x: bounds.x,
-                        offset_y: bounds.y,
-                    },
-                );
+                let target = app.query_plugin_edit_hit_target(point.0, point.1);
                 if matches!(
                     target,
-                    PluginResponse::EditHitTarget(Some(EditHitTarget::SourceObject {
-                        source_range,
-                    })) if source_range == child_range
+                    Some(Some(EditHitTarget::SourceObject { source_range })) if source_range == child_range
                 ) {
                     child_target_seen = true;
                 }

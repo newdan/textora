@@ -1,5 +1,6 @@
 //! 产品无关的编辑器指针命中与选择会话。
 
+use ui::canvas::CanvasPoint;
 use ui::core::widget::PointerClickKind;
 use ui::plugin::{CanvasDragPhase, CanvasDragRequest, CanvasDragResponse, EditHitTarget, EditPlan};
 
@@ -41,7 +42,7 @@ impl EditorRuntime {
         };
         let editor = match phase {
             PointerPhase::Press if self.pointer_input_allowed(context, position) => {
-                if let Some(outcome) = self.activate_canvas_control(editor_bounds, position) {
+                if let Some(outcome) = self.activate_canvas_control(position) {
                     self.pointer_click_tracker.reset();
                     let cursor_icon = self.pointer_cursor_icon(context, editor_bounds, position);
                     return EditorPointerOutcome::from_editor(outcome, cursor_icon);
@@ -147,20 +148,22 @@ impl EditorRuntime {
         let Some(tab) = self.tab_session(tab_id) else {
             return Some(winit::window::CursorIcon::Default);
         };
-        if !tab.runtime.plugin.handles_own_rendering() {
+        if !tab.handles_own_rendering() {
             return Some(winit::window::CursorIcon::Text);
         }
         if !tab.allows_editing() {
             return Some(winit::window::CursorIcon::Default);
         }
 
+        if tab.hit_test_canvas_control(CanvasPoint::new(position.0, position.1)).is_some() {
+            return Some(winit::window::CursorIcon::Pointer);
+        }
         let dpi = self.scale_factor() as f32;
         let bounds = super::editor_painter::plugin_bounds(editor_bounds, dpi, tab.is_canvas());
         let target = tab.hit_test_edit_target(position.0, position.1, bounds.x, bounds.y);
         Some(match target {
             Some(Some(EditHitTarget::TextCaret { .. })) => winit::window::CursorIcon::Text,
             Some(Some(EditHitTarget::SourceObject { .. })) => winit::window::CursorIcon::Grab,
-            Some(Some(EditHitTarget::CanvasControl { .. })) => winit::window::CursorIcon::Pointer,
             Some(Some(EditHitTarget::ClearFocus)) | Some(None) | None => {
                 winit::window::CursorIcon::Default
             }
@@ -188,36 +191,20 @@ impl EditorRuntime {
         let Some(mut tab) = self.tab_session_mut(tab_id) else {
             return false;
         };
-        if !tab.is_canvas() || !tab.runtime.plugin.handles_own_rendering() {
+        if !tab.is_canvas() || !tab.handles_own_rendering() {
             return false;
         }
-        tab.send_message(ui::plugin::PluginMessage::SetCanvasPointer(pointer))
+        tab.set_canvas_pointer(pointer)
     }
 
     pub(crate) fn clear_active_canvas_pointer(&mut self) -> bool {
         self.set_active_canvas_pointer(None)
     }
 
-    fn activate_canvas_control(
-        &mut self,
-        editor_rect: ui::Rect,
-        position: (f32, f32),
-    ) -> Option<EditorOutcome> {
+    fn activate_canvas_control(&mut self, position: (f32, f32)) -> Option<EditorOutcome> {
         let tab_id = self.active_tab_id()?;
-        let dpi = self.scale_factor() as f32;
-        let bounds = super::editor_painter::plugin_bounds(editor_rect, dpi, true);
-        let source_range = {
-            let tab = self.tab_session(tab_id)?;
-            if !tab.is_canvas() || !tab.runtime.plugin.handles_own_rendering() {
-                return None;
-            }
-            let Some(Some(EditHitTarget::CanvasControl { source_range })) =
-                tab.hit_test_edit_target(position.0, position.1, bounds.x, bounds.y)
-            else {
-                return None;
-            };
-            source_range
-        };
+        let tab = self.tab_session(tab_id)?;
+        let source_range = tab.hit_test_canvas_control(CanvasPoint::new(position.0, position.1))?;
         Some(self.handle_canvas_control(source_range))
     }
 
@@ -250,7 +237,7 @@ impl EditorRuntime {
             let Some(tab) = self.tab_session_mut(tab_id) else {
                 return false;
             };
-            if !tab.is_canvas() || !tab.runtime.plugin.handles_own_rendering() {
+            if !tab.is_canvas() || !tab.handles_own_rendering() || !tab.allows_editing() {
                 return false;
             }
             let bounds = super::editor_painter::plugin_bounds(editor_bounds, dpi, true);
@@ -350,7 +337,7 @@ impl EditorRuntime {
         let settings = self.settings.clone();
         let metrics = ui::settings::UiMetrics::from_settings(&settings, dpi);
         let handles_own_rendering =
-            self.tab_session(tab_id).is_some_and(|tab| tab.runtime.plugin.handles_own_rendering());
+            self.tab_session(tab_id).is_some_and(|tab| tab.handles_own_rendering());
         if handles_own_rendering {
             return self.place_plugin_pointer_selection(
                 tab_id,
@@ -391,6 +378,9 @@ impl EditorRuntime {
             let Some(tab) = self.tab_session(tab_id) else {
                 return false;
             };
+            if tab.hit_test_canvas_control(CanvasPoint::new(position.0, position.1)).is_some() {
+                return false;
+            }
             tab.hit_test_edit_target(position.0, position.1, bounds.x, bounds.y)
         };
         match edit_target {
@@ -406,7 +396,7 @@ impl EditorRuntime {
                     initial_range,
                 );
                 let cursor_byte = tab.document.cursor_offset().to_usize();
-                tab.send_message(ui::plugin::PluginMessage::SetCursorByte(cursor_byte));
+                tab.set_cursor_byte(cursor_byte);
                 true
             }
             Some(Some(EditHitTarget::SourceObject { source_range })) if !extend => {
@@ -425,7 +415,7 @@ impl EditorRuntime {
                 tab.document.set_cursor_offset_synced(tab.document.buffer_len());
                 true
             }
-            Some(Some(EditHitTarget::CanvasControl { .. })) | Some(None) => false,
+            Some(None) => false,
             Some(Some(EditHitTarget::SourceObject { .. } | EditHitTarget::ClearFocus)) => false,
             None => self.place_plugin_byte_selection(
                 tab_id,
@@ -466,7 +456,7 @@ impl EditorRuntime {
                 place_text_caret(&mut tab, candidate, false);
             }
             let snapped_candidate = tab.document.cursor_offset().to_usize();
-            tab.send_message(ui::plugin::PluginMessage::SetCursorByte(snapped_candidate));
+            tab.set_cursor_byte(snapped_candidate);
             snapped_candidate
         };
         if extend {
@@ -485,7 +475,7 @@ impl EditorRuntime {
         };
         place_text_pointer_selection(&mut tab, final_byte, extend, click_kind, initial_range);
         let snapped_final = tab.document.cursor_offset().to_usize();
-        tab.send_message(ui::plugin::PluginMessage::SetCursorByte(snapped_final));
+        tab.set_cursor_byte(snapped_final);
         self.input_session.set_preferred_x(None);
         true
     }

@@ -21,62 +21,7 @@ use crate::theme::Theme;
 
 /// Commands sent from the host to a plugin.
 #[derive(Debug)]
-pub enum PluginMessage {
-    /// Scroll by a delta (pixels), clamped by viewport height.
-    Scroll { delta: f32, viewport_h: f32 },
-    /// Jump to the heading at the given index in the TOC.
-    ScrollToHeading(usize),
-    /// Jump to the N-th search match.
-    ScrollToSearchMatch { query: String, match_case: bool, active_idx: usize },
-    /// Advance to the next chapter marker.
-    ScrollToNextChapter,
-    /// Retreat to the previous chapter marker.
-    ScrollToPrevChapter,
-    /// Replace the cached source text (e.g. after an edit).
-    UpdateSource { text: String, generation: u32 },
-    /// Set the selection cursor position (flat_line_idx, grapheme_pos).
-    SetSelCursor(Option<(usize, usize)>),
-    /// Set the selection anchor position (flat_line_idx, grapheme_pos).
-    SetSelAnchor(Option<(usize, usize)>),
-    /// Set the selection cursor position by source byte offset.
-    SetSelCursorByte(Option<usize>),
-    /// Set the selection anchor position by source byte offset.
-    SetSelAnchorByte(Option<usize>),
-    /// Clear the current selection.
-    ClearSelection,
-    /// Select all text in the preview.
-    SelectAll,
-    /// Update host-controlled render settings.
-    SetRenderSettings {
-        font_family: String,
-        font_size: f32,
-        line_height: f32,
-        toc_max_depth: u8,
-        markdown_first_line_indent: bool,
-    },
-    /// Update the mixed CJK/Latin body text spacing policy independently.
-    SetTextSpacingMode(crate::typography::TextSpacingMode),
-    /// Restore absolute scroll position (for switching back from edit mode).
-    SetScrollY(f32),
-    /// Restore scroll position as a ratio (0.0~1.0) of content height.
-    SetScrollRatio(f32),
-    /// Restore scroll position by content anchor (text snippet + pixel offset).
-    RestoreScrollAnchor { text: String, offset: f32 },
-    /// Notify plugin that the cursor byte offset in source has changed.
-    SetCursorByte(usize),
-    /// Place a visual caret, retaining its side of a soft-wrap boundary.
-    SetVisualCaret(VisualCaretPosition),
-    /// Reveal this source caret once layout is available; manual scrolling cancels it.
-    RevealCursor(usize),
-    /// Notify plugin whether the cursor blink phase is currently visible.
-    SetCursorVisible(bool),
-    /// Leave the plugin's object-specific editing focus without changing source text.
-    ClearEditFocus,
-    /// Notify WYSIWYG plugins about the current IME composing text.
-    SetPreedit { text: String, cursor: Option<(usize, usize)> },
-    /// Notify canvas plugins about the latest pointer position in screen coordinates.
-    SetCanvasPointer(Option<CanvasPoint>),
-}
+pub enum PluginMessage {}
 
 // ---------------------------------------------------------------------------
 // Directional / augmentation types (WYSIWYG)
@@ -110,8 +55,6 @@ pub enum EditHitTarget {
     TextCaret { byte_offset: usize, selection_scope: Option<std::ops::Range<usize>> },
     /// Select the exact source range represented by a rendered object.
     SourceObject { source_range: std::ops::Range<usize> },
-    /// Activate a rendered canvas control backed by a source range.
-    CanvasControl { source_range: std::ops::Range<usize> },
     /// Leave object-specific editing and place the caret after the source.
     ClearFocus,
 }
@@ -131,7 +74,7 @@ pub enum AugmentKind {
 ///
 /// When a WYSIWYG plugin wants to override default edit behavior (e.g. continue
 /// a list on Enter, delete a paired delimiter on Backspace), it returns this
-/// struct from [`PluginQuery::AugmentEdit`].
+/// struct when planning the edit.
 #[derive(Debug, Clone, Default)]
 pub struct EditAugmentation {
     /// Replacement delete range (overrides default single-char backspace). `None` = no change.
@@ -154,94 +97,10 @@ pub trait KeyIntentMapper {
 /// Synchronous queries from the host into a plugin.
 #[derive(Debug)]
 pub enum PluginQuery {
-    /// Current vertical scroll position (pixels).
-    ScrollY,
-    /// Total content height (pixels).
-    ContentHeight,
-    /// Whether the source cache is stale for the given generation.
-    NeedsSourceUpdate(u32),
-    /// List all TOC headings.
-    TOCHeadings,
-    /// Which heading index is closest to the given scroll-y.
-    CurrentHeadingIndex(f32),
-    /// Whether the plugin has an active text selection.
-    HasSelection,
-    /// The currently selected text, if any.
-    SelectedText,
-    /// (line, column) of the selection cursor, if any.
-    SelCursor,
-    /// Byte range of the selection, if any.
-    SelectionRange,
-    /// Hit-test at screen coordinates.
-    HitTest { x: f32, y: f32, offset_x: f32, offset_y: f32 },
-    /// Collect search highlight quads.
-    SearchHighlights {
-        query: String,
-        match_case: bool,
-        use_regex: bool,
-        active_idx: usize,
-        match_color: [f32; 4],
-        inactive_color: [f32; 4],
-    },
-    /// Highlight authoritative source matches from the document search state.
-    SourceSearchHighlights {
-        matches: Vec<std::ops::Range<usize>>,
-        source_generation: u32,
-        active_idx: usize,
-        match_color: [f32; 4],
-        inactive_color: [f32; 4],
-    },
-    /// Collect selection highlight quads in the given color.
-    SelectionHighlights([f32; 4]),
-    /// Flatten visible lines into text for copy/search.
-    FlatLines,
-    /// Word boundaries at a position (flat_line_idx, grapheme_pos).
-    WordAtPos(usize, usize),
-    /// Line range at a position (flat_line_idx, grapheme_pos).
-    LineRangeAtPos(usize, usize),
-    /// Get content-anchored scroll position (text_snippet, pixel_offset).
-    ScrollAnchor,
-    /// Source byte offset → screen pixel rect (x, y, w, h). For IME positioning.
-    CursorScreenPos(usize),
-    /// Screen pixel → source byte offset. For mouse-click byte positioning.
-    HitTestByte { x: f32, y: f32, offset_x: f32, offset_y: f32 },
-    /// Screen pixel → semantic target for editing interactions.
-    HitTestEditTarget { x: f32, y: f32, offset_x: f32, offset_y: f32 },
-    /// Plan an edit for a canvas control represented by a source range.
-    PlanCanvasControl { source_range: std::ops::Range<usize>, source_generation: u32 },
     /// Report the file-level mindmap theme selection for the current document.
     MindmapThemeSelection,
     /// Plan an edit that sets the file-level mindmap theme.
     PlanMindmapTheme { theme_id: String, source_generation: u32 },
-    /// Visual direction navigation from `current_byte` (considering folded/invisible markers).
-    VisualMove {
-        current_byte: usize,
-        direction: MoveDirection,
-        /// Preferred X pixel position when moving up/down (sticky column).
-        target_x: Option<f32>,
-    },
-    /// Visual navigation retaining the destination's soft-wrap affinity.
-    VisualMoveCaret { current_byte: usize, direction: MoveDirection, target_x: Option<f32> },
-    /// Hit-test retaining the side of a shared soft-wrap source position.
-    HitTestVisualCaret { x: f32, y: f32, offset_x: f32, offset_y: f32 },
-    /// Semantic direction navigation from the current source byte.
-    MoveEditTarget {
-        current_byte: usize,
-        direction: MoveDirection,
-        /// Preferred X pixel position when moving up/down (sticky column).
-        target_x: Option<f32>,
-    },
-    /// Source ranges whose glyph spacing must remain literal.
-    SourceSpacingProtectedRanges { source_generation: u32 },
-    /// Available actions for the table at a source position.
-    TableStructureCapabilities { source_generation: u32, cursor_byte: usize },
-    /// Plan a product semantic editing command without mutating the document.
-    PlanSemanticEdit {
-        command: SemanticEditCommand,
-        source_generation: u32,
-        cursor_byte: usize,
-        selection: Option<std::ops::Range<usize>>,
-    },
 }
 
 /// Responses returned from [`PluginQuery`].
@@ -249,33 +108,10 @@ pub enum PluginQuery {
 pub enum PluginResponse {
     /// No meaningful result (e.g. query not applicable).
     None,
-    Float(f32),
-    Bool(bool),
-    String(String),
-    Headings(Vec<HeadingEntry>),
-    Position(Option<(usize, usize)>),
-    DrawList(DrawList),
-    FlatLines(Vec<FlatLine>),
-    /// A pair of positions (start, end).
-    PositionPair(Option<((usize, usize), (usize, usize))>),
-    /// Content-anchored scroll position (text_snippet, pixel_offset).
-    ScrollAnchor(String, f32),
-    /// Cursor rect in document coordinates (x, y, w, h).
-    CursorScreenRect(Option<(f32, f32, f32, f32)>),
-    /// Source byte offset.
-    BytePosition(Option<usize>),
-    /// Source position and side of a soft-wrap boundary.
-    VisualCaretPosition(Option<VisualCaretPosition>),
-    /// Semantic target for an editing interaction.
-    EditHitTarget(Option<EditHitTarget>),
     /// Declarative edit plan for a canvas control.
     EditPlan(EditPlan),
     /// The file-level mindmap theme selection reported by the plugin.
     MindmapThemeSelection(crate::theme::MindmapThemeSelection),
-    SourceSpacingProtectedRanges(std::sync::Arc<[std::ops::Range<usize>]>),
-    TableStructureCapabilities(Option<TableStructureCapabilities>),
-    /// Result of planning a product semantic editing command.
-    SemanticEdit(SemanticEditPlan),
 }
 
 // ---------------------------------------------------------------------------
@@ -288,6 +124,150 @@ pub struct HeadingEntry {
     pub title: String,
     pub y: f32,
     pub level: u8,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ChapterDirection {
+    Previous,
+    Next,
+}
+
+pub trait OutlineProvider {
+    fn headings(&self) -> Vec<HeadingEntry>;
+    fn current_heading_index(&self, scroll_y: f32) -> Option<usize>;
+    fn scroll_to_heading(&mut self, index: usize);
+
+    fn scroll_to_chapter(&mut self, _direction: ChapterDirection) {}
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ReadingPosition {
+    pub line_index: usize,
+    pub grapheme_index: usize,
+}
+
+impl ReadingPosition {
+    pub const fn new(line_index: usize, grapheme_index: usize) -> Self {
+        Self { line_index, grapheme_index }
+    }
+
+    pub const fn indices(self) -> (usize, usize) {
+        (self.line_index, self.grapheme_index)
+    }
+}
+
+pub trait SelectionView {
+    fn has_selection(&self) -> bool {
+        false
+    }
+
+    fn selected_text(&self) -> Option<String> {
+        None
+    }
+
+    fn selection_cursor(&self) -> Option<ReadingPosition> {
+        None
+    }
+
+    fn selection_source_range(&self) -> Option<std::ops::Range<usize>> {
+        None
+    }
+
+    fn hit_test_position(
+        &self,
+        _x: f32,
+        _y: f32,
+        _offset_x: f32,
+        _offset_y: f32,
+    ) -> Option<ReadingPosition> {
+        None
+    }
+
+    fn word_range(&self, _position: ReadingPosition) -> Option<std::ops::Range<ReadingPosition>> {
+        None
+    }
+
+    fn line_range(&self, _position: ReadingPosition) -> Option<std::ops::Range<ReadingPosition>> {
+        None
+    }
+
+    fn flat_lines(&self) -> Vec<FlatLine> {
+        Vec::new()
+    }
+
+    fn selection_highlights(&self, _color: [f32; 4]) -> DrawList {
+        DrawList::new()
+    }
+
+    fn set_selection_cursor(
+        &mut self,
+        _position: Option<ReadingPosition>,
+        _document: &dyn DocView,
+    ) -> bool {
+        false
+    }
+
+    fn set_selection_anchor(
+        &mut self,
+        _position: Option<ReadingPosition>,
+        _document: &dyn DocView,
+    ) -> bool {
+        false
+    }
+
+    fn set_selection_cursor_byte(&mut self, _byte: Option<usize>) -> bool {
+        false
+    }
+
+    fn set_selection_anchor_byte(&mut self, _byte: Option<usize>) -> bool {
+        false
+    }
+
+    fn clear_selection(&mut self) -> bool {
+        false
+    }
+
+    fn select_all(&mut self) -> bool {
+        false
+    }
+}
+
+pub struct SearchHighlightsRequest<'a> {
+    pub query: &'a str,
+    pub match_case: bool,
+    pub use_regex: bool,
+    pub active_idx: usize,
+    pub match_color: [f32; 4],
+    pub inactive_color: [f32; 4],
+}
+
+pub struct SourceSearchHighlightsRequest<'a> {
+    pub matches: &'a [std::ops::Range<usize>],
+    pub source_generation: u32,
+    pub active_idx: usize,
+    pub match_color: [f32; 4],
+    pub inactive_color: [f32; 4],
+}
+
+pub trait SearchView {
+    fn search_highlights(&self, request: SearchHighlightsRequest<'_>) -> DrawList;
+
+    fn source_search_highlights(
+        &self,
+        _request: SourceSearchHighlightsRequest<'_>,
+    ) -> Option<DrawList> {
+        None
+    }
+
+    fn scroll_to_search_match(&mut self, _query: &str, _match_case: bool, _active_idx: usize) {}
+}
+
+pub struct ViewRenderSettings {
+    pub font_family: String,
+    pub font_size: f32,
+    pub line_height: f32,
+    pub toc_max_depth: u8,
+    pub markdown_first_line_indent: bool,
 }
 
 /// A flattened visual line used for search-indexing, clipboard operations, and geometry queries.
@@ -512,20 +492,51 @@ pub enum PastePreference {
     SemanticMarkdown,
 }
 
-/// Trait implemented by pluggable view renderers.
-///
-/// A plugin is responsible for rendering a document region and optionally
-/// handling messages / queries from the host editor.
-pub trait ViewPlugin {
-    /// Human-readable name (e.g. `"reader"`, `"editor"`).
-    fn name(&self) -> &str;
+/// Determines which rendering pipeline owns the document content.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PluginMode {
+    Source,
+    Reading,
+    RichText,
+    Canvas,
+}
 
-    /// Clipboard representation this view prefers for regular paste.
-    fn paste_preference(&self) -> PastePreference {
-        PastePreference::PlainText
+impl PluginMode {
+    pub fn renders_content(self) -> bool {
+        self != Self::Source
     }
 
-    /// Render the visible portion of the document and return a draw list.
+    pub fn uses_host_gutter(self) -> bool {
+        self == Self::Source
+    }
+
+    pub fn uses_host_cursor(self) -> bool {
+        self == Self::Source
+    }
+
+    pub fn needs_cursor_blink_wakeup(self) -> bool {
+        self != Self::Reading
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SyncReason {
+    Normal,
+    Force,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SyncOutcome {
+    Unchanged,
+    Updated,
+}
+
+/// Core interface shared by all view plugins.
+pub trait ViewPlugin {
+    fn name(&self) -> &str;
+
+    fn mode(&self) -> PluginMode;
+
     fn render(
         &mut self,
         doc: &dyn DocView,
@@ -535,6 +546,232 @@ pub trait ViewPlugin {
         dpi_scale: f32,
     ) -> DrawList;
 
+    /// Request the exact source only when this view needs to refresh a local snapshot.
+    fn sync_document(
+        &mut self,
+        _generation: u32,
+        _reason: SyncReason,
+        _load_source: &mut dyn FnMut() -> String,
+    ) -> SyncOutcome {
+        SyncOutcome::Unchanged
+    }
+}
+
+/// Scroll state and restoration supported by a self-rendering view.
+pub trait ScrollableView {
+    fn scroll_y(&self, _document: &dyn DocView) -> f32 {
+        0.0
+    }
+
+    fn content_height(&self) -> f32 {
+        0.0
+    }
+
+    fn scroll(&mut self, _delta: f32, _viewport_height: f32) -> bool {
+        false
+    }
+
+    fn restore_y(&mut self, _y: f32) -> bool {
+        false
+    }
+
+    fn restore_ratio(&mut self, _ratio: f32) -> bool {
+        false
+    }
+
+    fn scroll_anchor(&self) -> Option<(String, f32)> {
+        None
+    }
+
+    fn restore_anchor(&mut self, _text: &str, _offset: f32) -> bool {
+        false
+    }
+}
+
+/// Discovers capabilities borrowed from the same instance that renders the view.
+pub trait ViewPluginCapabilities: ViewPlugin {
+    fn set_view_render_settings(&mut self, _settings: ViewRenderSettings) {}
+
+    fn set_view_text_spacing_mode(&mut self, _mode: crate::typography::TextSpacingMode) {}
+
+    fn scrollable(&self) -> Option<&dyn ScrollableView> {
+        None
+    }
+
+    fn scrollable_mut(&mut self) -> Option<&mut dyn ScrollableView> {
+        None
+    }
+
+    fn editable(&self) -> Option<&dyn EditableView> {
+        None
+    }
+
+    fn editable_mut(&mut self) -> Option<&mut dyn EditableView> {
+        None
+    }
+
+    fn canvas(&self) -> Option<&dyn CanvasView> {
+        None
+    }
+
+    /// Source ranges whose glyph spacing must remain literal.
+    fn source_spacing_protected_ranges(
+        &self,
+        _source_generation: u32,
+    ) -> Option<std::sync::Arc<[std::ops::Range<usize>]>> {
+        None
+    }
+
+    fn canvas_mut(&mut self) -> Option<&mut dyn CanvasView> {
+        None
+    }
+
+    fn outline(&self) -> Option<&dyn OutlineProvider> {
+        None
+    }
+
+    fn outline_mut(&mut self) -> Option<&mut dyn OutlineProvider> {
+        None
+    }
+
+    fn selection(&self) -> Option<&dyn SelectionView> {
+        None
+    }
+
+    fn selection_mut(&mut self) -> Option<&mut dyn SelectionView> {
+        None
+    }
+
+    fn search(&self) -> Option<&dyn SearchView> {
+        None
+    }
+
+    fn search_mut(&mut self) -> Option<&mut dyn SearchView> {
+        None
+    }
+
+    /// Handle a command message. Returns `true` if the message was consumed.
+    fn handle_message(&mut self, msg: PluginMessage, doc: &mut dyn DocViewMut) -> bool {
+        let _ = (msg, doc);
+        false
+    }
+
+    /// Answer a synchronous query.
+    fn query(&self, query: PluginQuery, doc: &dyn DocView) -> PluginResponse {
+        let _ = (query, doc);
+        PluginResponse::None
+    }
+
+    /// Whether the app should still handle cursor blink wakeups for this plugin.
+    ///
+    /// The mode supplies the default. A custom view can override its refresh policy.
+    fn needs_cursor_blink_wakeup(&self) -> bool {
+        self.mode().needs_cursor_blink_wakeup()
+    }
+
+    /// Whether the host should allow text editing when this plugin is active.
+    fn allows_editing(&self) -> bool {
+        self.mode() != PluginMode::Reading
+    }
+}
+
+/// Editing and input capabilities of the active rendered view.
+pub trait EditableView: EditPolicy {
+    /// Plan a semantic command against the requested source generation.
+    fn plan_semantic_edit(
+        &self,
+        _command: SemanticEditCommand,
+        _source_generation: u32,
+        _cursor_byte: usize,
+        _selection: Option<std::ops::Range<usize>>,
+    ) -> SemanticEditPlan {
+        SemanticEditPlan::Unsupported
+    }
+
+    /// Resolve a screen point to a source caret, retaining soft-wrap affinity.
+    fn hit_test_caret(
+        &self,
+        _x: f32,
+        _y: f32,
+        _offset_x: f32,
+        _offset_y: f32,
+    ) -> Option<VisualCaretPosition> {
+        None
+    }
+
+    /// Move through visual text, using the preferred x position for vertical navigation.
+    fn visual_move(
+        &self,
+        _current_byte: usize,
+        _direction: MoveDirection,
+        _target_x: Option<f32>,
+    ) -> Option<VisualCaretPosition> {
+        None
+    }
+
+    /// Outer `None` delegates to host caret hit-testing. `Some(None)` is a handled miss.
+    fn hit_test_edit_target(
+        &self,
+        _x: f32,
+        _y: f32,
+        _offset_x: f32,
+        _offset_y: f32,
+    ) -> Option<Option<EditHitTarget>> {
+        None
+    }
+
+    /// Find an object or scoped text target for directional editing.
+    fn move_edit_target(
+        &self,
+        _current_byte: usize,
+        _direction: MoveDirection,
+        _target_x: Option<f32>,
+    ) -> Option<EditHitTarget> {
+        None
+    }
+
+    /// Return the caret rectangle (x, y, width, height) for IME placement.
+    fn cursor_screen_rect(&self, _cursor_byte: usize) -> Option<(f32, f32, f32, f32)> {
+        None
+    }
+
+    fn set_cursor_byte(&mut self, _cursor_byte: usize) {}
+
+    /// Place a source caret, retaining the side of a soft-wrap boundary.
+    fn set_visual_caret(&mut self, _position: VisualCaretPosition) {}
+
+    fn clear_edit_focus(&mut self) {}
+
+    /// Schedule the caret to be revealed and return whether the view will handle it.
+    fn reveal_cursor(&mut self, _cursor_byte: usize) -> bool {
+        false
+    }
+
+    fn set_cursor_visible(&mut self, _visible: bool) {}
+
+    /// Update IME composition. Empty text clears the composition.
+    fn set_preedit(&mut self, _text: String, _cursor: Option<(usize, usize)>) {}
+
+    fn paste_preference(&self) -> PastePreference {
+        PastePreference::PlainText
+    }
+
+    fn key_intent_mapper(&self) -> Option<&dyn KeyIntentMapper> {
+        None
+    }
+
+    /// Return available actions for the table at the specified source byte.
+    fn table_structure_capabilities(
+        &self,
+        _source_generation: u32,
+        _cursor_byte: usize,
+    ) -> Option<TableStructureCapabilities> {
+        None
+    }
+}
+
+/// Interactive canvas behavior driven by the host's resolved viewport.
+pub trait CanvasView: ViewPlugin {
     /// Prepare optional canvas content metrics before the host resolves a viewport.
     ///
     /// Non-canvas plugins return `None` and retain their existing render path.
@@ -563,16 +800,23 @@ pub trait ViewPlugin {
         self.render(doc, viewport.viewport, theme, shaper, dpi_scale)
     }
 
-    /// Handle a command message. Returns `true` if the message was consumed.
-    fn handle_message(&mut self, msg: PluginMessage, doc: &mut dyn DocViewMut) -> bool {
-        let _ = (msg, doc);
-        false
+    /// Find a canvas control at a screen-space point.
+    fn hit_test_canvas_control(&self, _position: CanvasPoint) -> Option<std::ops::Range<usize>> {
+        None
     }
 
-    /// Answer a synchronous query.
-    fn query(&self, query: PluginQuery, doc: &dyn DocView) -> PluginResponse {
-        let _ = (query, doc);
-        PluginResponse::None
+    /// Plan activation of a canvas control identified by its source range.
+    fn plan_canvas_control(
+        &self,
+        _source_range: std::ops::Range<usize>,
+        _source_generation: u32,
+    ) -> EditPlan {
+        EditPlan::Consume
+    }
+
+    /// Update the canvas pointer and report whether to redraw.
+    fn set_canvas_pointer(&mut self, _pointer: Option<CanvasPoint>) -> bool {
+        false
     }
 
     /// Handle a canvas drag request using plugin-specific document semantics.
@@ -582,53 +826,6 @@ pub trait ViewPlugin {
         _doc: &dyn DocView,
     ) -> CanvasDragResponse {
         CanvasDragResponse::Ignore
-    }
-
-    /// Whether this plugin renders its own text cursor.
-    fn shows_cursor(&self) -> bool {
-        true
-    }
-
-    /// Whether the app should still handle cursor blink wakeups for this plugin.
-    ///
-    /// Returns `shows_cursor()` by default. Override when a plugin draws its own
-    /// cursor (e.g. WYSIWYG) but needs the app to compute and forward blink phase.
-    fn needs_cursor_blink_wakeup(&self) -> bool {
-        self.shows_cursor()
-    }
-
-    /// Whether this plugin renders its own gutter.
-    fn shows_gutter(&self) -> bool {
-        true
-    }
-
-    /// Whether the host should allow text editing when this plugin is active.
-    fn allows_editing(&self) -> bool {
-        true
-    }
-
-    /// Whether this plugin handles its own rendering via [`render()`].
-    ///
-    /// When `true`, the host delegates content rendering to [`render()`];
-    /// when `false`, the host uses the standard text-shaping pipeline.
-    fn handles_own_rendering(&self) -> bool {
-        !self.allows_editing()
-    }
-
-    /// Retrieve the edit policy for this plugin.
-    fn edit_policy(&self) -> &dyn EditPolicy {
-        &NoopEditPolicy
-    }
-
-    /// Retrieve the declarative key-to-edit-intent mapper for this plugin, if any.
-    fn key_intent_mapper(&self) -> Option<&dyn KeyIntentMapper> {
-        None
-    }
-
-    /// Whether this plugin acts as an infinite canvas and should occupy the full
-    /// available bounds (minus TOC), ignoring reading-mode max-width constraints.
-    fn is_canvas(&self) -> bool {
-        false
     }
 }
 
@@ -647,7 +844,7 @@ pub trait PluginFactory: Send + Sync {
     fn can_handle(&self, path: Option<&Path>) -> bool;
 
     /// Create a fresh plugin instance.
-    fn create(&self) -> Box<dyn ViewPlugin>;
+    fn create(&self) -> Box<dyn ViewPluginCapabilities>;
 }
 
 // ── 插件名常量 ──
@@ -684,8 +881,8 @@ impl PluginRegistry {
     pub fn create_for_file(
         &self,
         path: Option<&Path>,
-        editor_fallback: Box<dyn ViewPlugin>,
-    ) -> Box<dyn ViewPlugin> {
+        editor_fallback: Box<dyn ViewPluginCapabilities>,
+    ) -> Box<dyn ViewPluginCapabilities> {
         for factory in &self.factories {
             if factory.can_handle(path) {
                 return factory.create();
@@ -702,8 +899,8 @@ impl PluginRegistry {
     pub fn create_editor_for_file(
         &self,
         path: Option<&Path>,
-        editor_fallback: Box<dyn ViewPlugin>,
-    ) -> Box<dyn ViewPlugin> {
+        editor_fallback: Box<dyn ViewPluginCapabilities>,
+    ) -> Box<dyn ViewPluginCapabilities> {
         for factory in self.factories.iter().rev() {
             if factory.can_handle(path) {
                 return factory.create();
@@ -713,7 +910,11 @@ impl PluginRegistry {
     }
 
     /// 按插件名查找工厂并创建插件。找不到则返回 fallback。
-    pub fn create_by_name(&self, name: &str, fallback: Box<dyn ViewPlugin>) -> Box<dyn ViewPlugin> {
+    pub fn create_by_name(
+        &self,
+        name: &str,
+        fallback: Box<dyn ViewPluginCapabilities>,
+    ) -> Box<dyn ViewPluginCapabilities> {
         self.factories.iter().find(|f| f.name() == name).map(|f| f.create()).unwrap_or(fallback)
     }
 }
@@ -795,6 +996,11 @@ mod tests {
         fn name(&self) -> &str {
             self.name
         }
+
+        fn mode(&self) -> super::PluginMode {
+            super::PluginMode::Source
+        }
+
         fn render(
             &mut self,
             _: &dyn DocView,
@@ -807,11 +1013,98 @@ mod tests {
         }
     }
 
-    #[test]
-    fn view_plugin_defaults_to_plain_text_paste() {
-        let plugin = StubPlugin { name: "plain-text" };
+    impl super::ViewPluginCapabilities for StubPlugin {}
 
-        assert_eq!(plugin.paste_preference(), PastePreference::PlainText);
+    impl CanvasView for StubPlugin {}
+
+    #[test]
+    fn plugin_modes_route_content_and_host_cursor_explicitly() {
+        for (mode, renders_content, shows_gutter, wakes_cursor) in [
+            (PluginMode::Source, false, true, true),
+            (PluginMode::Reading, true, false, false),
+            (PluginMode::RichText, true, false, true),
+            (PluginMode::Canvas, true, false, true),
+        ] {
+            assert_eq!(mode.renders_content(), renders_content);
+            assert_eq!(mode.uses_host_gutter(), shows_gutter);
+            assert_eq!(mode.needs_cursor_blink_wakeup(), wakes_cursor);
+        }
+    }
+
+    #[test]
+    fn default_document_sync_does_not_load_source() {
+        let mut plugin = StubPlugin { name: "document-view" };
+        let mut load = || panic!("a plugin without a source cache must not load the document");
+        for reason in [SyncReason::Normal, SyncReason::Force] {
+            assert_eq!(plugin.sync_document(0, reason, &mut load), SyncOutcome::Unchanged);
+        }
+    }
+
+    #[test]
+    fn editable_capability_mutates_the_rendering_instance() {
+        struct EditableProbe {
+            caret: usize,
+        }
+
+        impl ViewPlugin for EditableProbe {
+            fn name(&self) -> &str {
+                "editable-probe"
+            }
+
+            fn mode(&self) -> PluginMode {
+                PluginMode::RichText
+            }
+
+            fn render(
+                &mut self,
+                _: &dyn DocView,
+                _: Rect,
+                _: &Theme,
+                _: &mut Shaper,
+                _: f32,
+            ) -> DrawList {
+                DrawList::new()
+            }
+        }
+
+        impl EditPolicy for EditableProbe {
+            fn plan_edit(&self, _: &EditRequest) -> EditPlan {
+                EditPlan::UseDefault
+            }
+        }
+
+        impl EditableView for EditableProbe {
+            fn set_cursor_byte(&mut self, caret: usize) {
+                self.caret = caret;
+            }
+
+            fn cursor_screen_rect(&self, caret: usize) -> Option<(f32, f32, f32, f32)> {
+                (caret == self.caret).then_some((0.0, 0.0, 1.0, 1.0))
+            }
+        }
+
+        impl ViewPluginCapabilities for EditableProbe {
+            fn editable(&self) -> Option<&dyn EditableView> {
+                Some(self)
+            }
+
+            fn editable_mut(&mut self) -> Option<&mut dyn EditableView> {
+                Some(self)
+            }
+        }
+
+        let mut plugin: Box<dyn ViewPluginCapabilities> = Box::new(EditableProbe { caret: 0 });
+        let caret = 4;
+
+        assert!(plugin.editable().and_then(|view| view.cursor_screen_rect(caret)).is_none());
+        plugin.editable_mut().expect("probe exposes editable state").set_cursor_byte(caret);
+        let view = plugin.editable().expect("probe exposes editable state");
+        assert!(view.cursor_screen_rect(caret).is_some());
+        assert_eq!(view.paste_preference(), PastePreference::PlainText);
+        assert_eq!(
+            view.plan_semantic_edit(SemanticEditCommand::ToggleBold, 7, caret, None),
+            SemanticEditPlan::Unsupported,
+        );
     }
 
     struct CanvasProtocolPlugin {
@@ -821,6 +1114,10 @@ mod tests {
     impl ViewPlugin for CanvasProtocolPlugin {
         fn name(&self) -> &str {
             "canvas-protocol"
+        }
+
+        fn mode(&self) -> super::PluginMode {
+            super::PluginMode::Source
         }
 
         fn render(
@@ -836,6 +1133,10 @@ mod tests {
         }
     }
 
+    impl super::ViewPluginCapabilities for CanvasProtocolPlugin {}
+
+    impl CanvasView for CanvasProtocolPlugin {}
+
     struct StubFactory {
         factory_name: &'static str,
         ext: &'static str,
@@ -848,7 +1149,7 @@ mod tests {
         fn can_handle(&self, path: Option<&Path>) -> bool {
             path.and_then(|p| p.extension()).is_some_and(|e| e == self.ext)
         }
-        fn create(&self) -> Box<dyn ViewPlugin> {
+        fn create(&self) -> Box<dyn ViewPluginCapabilities> {
             Box::new(StubPlugin { name: self.factory_name })
         }
     }
@@ -884,7 +1185,7 @@ mod tests {
     #[test]
     fn handles_own_rendering_defaults_to_false() {
         let plugin = StubPlugin { name: "test" };
-        assert!(!plugin.handles_own_rendering());
+        assert!(!plugin.mode().renders_content());
     }
 
     #[test]

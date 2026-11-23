@@ -105,14 +105,9 @@ impl ViewPlugin for MarkdownView {
     fn name(&self) -> &str {
         "markdown_view"
     }
-    fn allows_editing(&self) -> bool {
-        false
-    }
-    fn shows_cursor(&self) -> bool {
-        false
-    }
-    fn shows_gutter(&self) -> bool {
-        false
+
+    fn mode(&self) -> ui::plugin::PluginMode {
+        ui::plugin::PluginMode::Reading
     }
 
     fn render(
@@ -145,64 +140,69 @@ impl ViewPlugin for MarkdownView {
         dl
     }
 
-    fn handle_message(
+    fn sync_document(
         &mut self,
-        msg: PluginMessage,
-        _doc: &mut dyn textora_core::document::DocViewMut,
-    ) -> bool {
-        if let Some(result) = self.engine.handle_message_common(&msg) {
-            return result;
+        generation: u32,
+        reason: ui::plugin::SyncReason,
+        load_source: &mut dyn FnMut() -> String,
+    ) -> ui::plugin::SyncOutcome {
+        if reason == ui::plugin::SyncReason::Normal && !self.needs_source_update(generation) {
+            return ui::plugin::SyncOutcome::Unchanged;
         }
-        match msg {
-            PluginMessage::ScrollToSearchMatch { query, match_case, active_idx } => {
-                self.engine.scroll_to_search_match(&query, match_case, active_idx);
-                true
-            }
-            PluginMessage::UpdateSource { text, generation } => {
-                self.set_source(text, generation);
-                true
-            }
-            _ => false,
-        }
+        self.set_source(load_source(), generation);
+        ui::plugin::SyncOutcome::Updated
+    }
+}
+
+impl ui::plugin::ViewPluginCapabilities for MarkdownView {
+    fn scrollable(&self) -> Option<&dyn ui::plugin::ScrollableView> {
+        Some(&self.engine)
     }
 
-    fn query(&self, q: PluginQuery, _doc: &dyn DocView) -> PluginResponse {
-        if matches!(q, PluginQuery::SelectedText) {
-            return PluginResponse::String(
-                self.engine.selected_reading_text(&self.source).unwrap_or_default(),
-            );
-        }
-        if let Some(resp) = self.engine.query_common(&q) {
-            return resp;
-        }
-        match q {
-            PluginQuery::SourceSpacingProtectedRanges { source_generation }
-                if !self.needs_source_update(source_generation) =>
-            {
-                PluginResponse::SourceSpacingProtectedRanges(
-                    self.source.source_spacing_protected_ranges(),
-                )
-            }
-            PluginQuery::NeedsSourceUpdate(gen_id) => {
-                PluginResponse::Bool(self.needs_source_update(gen_id))
-            }
-            PluginQuery::SearchHighlights {
-                query,
-                match_case,
-                use_regex,
-                active_idx,
-                match_color,
-                inactive_color,
-            } => PluginResponse::DrawList(self.engine.search_highlights(
-                &query,
-                match_case,
-                use_regex,
-                active_idx,
-                match_color,
-                inactive_color,
-            )),
-            _ => PluginResponse::None,
-        }
+    fn scrollable_mut(&mut self) -> Option<&mut dyn ui::plugin::ScrollableView> {
+        Some(&mut self.engine)
+    }
+
+    fn outline(&self) -> Option<&dyn ui::plugin::OutlineProvider> {
+        Some(&self.engine)
+    }
+
+    fn outline_mut(&mut self) -> Option<&mut dyn ui::plugin::OutlineProvider> {
+        Some(&mut self.engine)
+    }
+
+    fn search(&self) -> Option<&dyn ui::plugin::SearchView> {
+        Some(self)
+    }
+
+    fn search_mut(&mut self) -> Option<&mut dyn ui::plugin::SearchView> {
+        Some(self)
+    }
+
+    fn selection(&self) -> Option<&dyn ui::plugin::SelectionView> {
+        Some(self)
+    }
+
+    fn selection_mut(&mut self) -> Option<&mut dyn ui::plugin::SelectionView> {
+        Some(self)
+    }
+    fn allows_editing(&self) -> bool {
+        false
+    }
+
+    fn set_view_render_settings(&mut self, settings: ui::plugin::ViewRenderSettings) {
+        self.engine.set_view_render_settings(settings);
+    }
+
+    fn set_view_text_spacing_mode(&mut self, mode: ui::typography::TextSpacingMode) {
+        self.engine.set_view_text_spacing_mode(mode);
+    }
+    fn source_spacing_protected_ranges(
+        &self,
+        source_generation: u32,
+    ) -> Option<std::sync::Arc<[std::ops::Range<usize>]>> {
+        (!self.needs_source_update(source_generation))
+            .then(|| self.source.source_spacing_protected_ranges())
     }
 }
 
@@ -217,7 +217,7 @@ impl PluginFactory for MarkdownViewFactory {
     fn can_handle(&self, path: Option<&Path>) -> bool {
         is_plain_markdown_path(path)
     }
-    fn create(&self) -> Box<dyn ViewPlugin> {
+    fn create(&self) -> Box<dyn ViewPluginCapabilities> {
         Box::new(MarkdownView::new())
     }
 }

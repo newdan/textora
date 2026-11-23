@@ -251,32 +251,21 @@ impl App {
                 return AppEffect::NONE;
             }
 
-            let scroll_msg = match cmd {
-                EditCommand::PageUp => {
-                    Some(ui::plugin::PluginMessage::Scroll { delta: -viewport_h, viewport_h })
-                }
-                EditCommand::PageDown => {
-                    Some(ui::plugin::PluginMessage::Scroll { delta: viewport_h, viewport_h })
-                }
-                EditCommand::MoveUp => Some(ui::plugin::PluginMessage::Scroll {
-                    delta: -line_height * 3.0,
-                    viewport_h,
-                }),
-                EditCommand::MoveDown => {
-                    Some(ui::plugin::PluginMessage::Scroll { delta: line_height * 3.0, viewport_h })
-                }
+            let consumed = match cmd {
+                EditCommand::PageUp => tab.scroll_plugin(-viewport_h, viewport_h),
+                EditCommand::PageDown => tab.scroll_plugin(viewport_h, viewport_h),
+                EditCommand::MoveUp => tab.scroll_plugin(-line_height * 3.0, viewport_h),
+                EditCommand::MoveDown => tab.scroll_plugin(line_height * 3.0, viewport_h),
                 EditCommand::MoveToDocStart => {
-                    tab.send_message(ui::plugin::PluginMessage::SetScrollY(0.0));
-                    None
+                    tab.restore_plugin_scroll_y(0.0);
+                    true
                 }
                 EditCommand::MoveToDocEnd => {
-                    tab.send_message(ui::plugin::PluginMessage::SetScrollRatio(1.0));
-                    None
+                    tab.restore_plugin_scroll_ratio(1.0);
+                    true
                 }
                 _ => return AppEffect::NONE,
             };
-
-            let consumed = if let Some(msg) = scroll_msg { tab.send_message(msg) } else { true };
 
             if consumed {
                 let content_h = tab.content_height();
@@ -392,15 +381,11 @@ mod tests {
         fn name(&self) -> &str {
             "reading_test"
         }
-        fn allows_editing(&self) -> bool {
-            false
+
+        fn mode(&self) -> ui::plugin::PluginMode {
+            ui::plugin::PluginMode::Reading
         }
-        fn shows_cursor(&self) -> bool {
-            false
-        }
-        fn shows_gutter(&self) -> bool {
-            false
-        }
+
         fn render(
             &mut self,
             _doc: &dyn textora_core::document::DocView,
@@ -411,42 +396,45 @@ mod tests {
         ) -> ui::core::paint::DrawList {
             ui::core::paint::DrawList::new()
         }
-        fn handle_message(
-            &mut self,
-            msg: ui::plugin::PluginMessage,
-            _doc: &mut dyn textora_core::document::DocViewMut,
-        ) -> bool {
-            match msg {
-                ui::plugin::PluginMessage::Scroll { delta, viewport_h } => {
-                    let max = (self.content_height - viewport_h).max(0.0);
-                    self.scroll_y = (self.scroll_y + delta).clamp(0.0, max);
-                    true
-                }
-                ui::plugin::PluginMessage::SetScrollY(y) => {
-                    self.scroll_y = y.clamp(0.0, self.content_height);
-                    true
-                }
-                ui::plugin::PluginMessage::SetScrollRatio(r) => {
-                    self.scroll_y = (r * self.content_height).clamp(0.0, self.content_height);
-                    true
-                }
-                _ => false,
-            }
+    }
+
+    impl ui::plugin::ScrollableView for ReadingPlugin {
+        fn scroll_y(&self, _document: &dyn textora_core::document::DocView) -> f32 {
+            self.scroll_y
         }
-        fn query(
-            &self,
-            q: ui::plugin::PluginQuery,
-            _doc: &dyn textora_core::document::DocView,
-        ) -> ui::plugin::PluginResponse {
-            match q {
-                ui::plugin::PluginQuery::ScrollY => {
-                    ui::plugin::PluginResponse::Float(self.scroll_y)
-                }
-                ui::plugin::PluginQuery::ContentHeight => {
-                    ui::plugin::PluginResponse::Float(self.content_height)
-                }
-                _ => ui::plugin::PluginResponse::None,
-            }
+
+        fn content_height(&self) -> f32 {
+            self.content_height
+        }
+
+        fn scroll(&mut self, delta: f32, viewport_height: f32) -> bool {
+            let max = (self.content_height - viewport_height).max(0.0);
+            self.scroll_y = (self.scroll_y + delta).clamp(0.0, max);
+            true
+        }
+
+        fn restore_y(&mut self, y: f32) -> bool {
+            self.scroll_y = y.clamp(0.0, self.content_height);
+            true
+        }
+
+        fn restore_ratio(&mut self, ratio: f32) -> bool {
+            self.scroll_y = (ratio * self.content_height).clamp(0.0, self.content_height);
+            true
+        }
+    }
+
+    impl ui::plugin::ViewPluginCapabilities for ReadingPlugin {
+        fn scrollable(&self) -> Option<&dyn ui::plugin::ScrollableView> {
+            Some(self)
+        }
+
+        fn scrollable_mut(&mut self) -> Option<&mut dyn ui::plugin::ScrollableView> {
+            Some(self)
+        }
+
+        fn allows_editing(&self) -> bool {
+            false
         }
     }
 
@@ -484,12 +472,8 @@ mod tests {
             app.plugin_scroll_by_command(&appkit_core::edit_command::EditCommand::PageDown);
         assert_eq!(effect, AppEffect::REDRAW);
         let tab = app.active_tab_session().unwrap();
-        match tab.query(ui::plugin::PluginQuery::ScrollY) {
-            ui::plugin::PluginResponse::Float(y) => {
-                assert!(y > 0.0, "scroll_y should advance on PageDown, got {y}");
-            }
-            other => panic!("expected Float, got {other:?}"),
-        }
+        let y = tab.scroll_y();
+        assert!(y > 0.0, "scroll_y should advance on PageDown, got {y}");
     }
 
     #[test]
@@ -582,21 +566,14 @@ mod tests {
     }
 
     impl ui::plugin::ViewPlugin for WysiwygPlugin {
-        fn handles_own_rendering(&self) -> bool {
-            true
-        }
         fn name(&self) -> &str {
             "wysiwyg_test"
         }
-        fn allows_editing(&self) -> bool {
-            true
+
+        fn mode(&self) -> ui::plugin::PluginMode {
+            ui::plugin::PluginMode::RichText
         }
-        fn shows_cursor(&self) -> bool {
-            true
-        }
-        fn shows_gutter(&self) -> bool {
-            false
-        }
+
         fn render(
             &mut self,
             _doc: &dyn textora_core::document::DocView,
@@ -607,38 +584,40 @@ mod tests {
         ) -> ui::core::paint::DrawList {
             ui::core::paint::DrawList::new()
         }
-        fn handle_message(
-            &mut self,
-            msg: ui::plugin::PluginMessage,
-            _doc: &mut dyn textora_core::document::DocViewMut,
-        ) -> bool {
-            match msg {
-                ui::plugin::PluginMessage::Scroll { delta, viewport_h } => {
-                    let max = (self.content_height - viewport_h).max(0.0);
-                    self.scroll_y = (self.scroll_y + delta).clamp(0.0, max);
-                    true
-                }
-                ui::plugin::PluginMessage::SetScrollY(y) => {
-                    self.scroll_y = y.clamp(0.0, self.content_height);
-                    true
-                }
-                _ => false,
-            }
+    }
+
+    impl ui::plugin::ScrollableView for WysiwygPlugin {
+        fn scroll_y(&self, _document: &dyn textora_core::document::DocView) -> f32 {
+            self.scroll_y
         }
-        fn query(
-            &self,
-            q: ui::plugin::PluginQuery,
-            _doc: &dyn textora_core::document::DocView,
-        ) -> ui::plugin::PluginResponse {
-            match q {
-                ui::plugin::PluginQuery::ScrollY => {
-                    ui::plugin::PluginResponse::Float(self.scroll_y)
-                }
-                ui::plugin::PluginQuery::ContentHeight => {
-                    ui::plugin::PluginResponse::Float(self.content_height)
-                }
-                _ => ui::plugin::PluginResponse::None,
-            }
+
+        fn content_height(&self) -> f32 {
+            self.content_height
+        }
+
+        fn scroll(&mut self, delta: f32, viewport_height: f32) -> bool {
+            let max = (self.content_height - viewport_height).max(0.0);
+            self.scroll_y = (self.scroll_y + delta).clamp(0.0, max);
+            true
+        }
+
+        fn restore_y(&mut self, y: f32) -> bool {
+            self.scroll_y = y.clamp(0.0, self.content_height);
+            true
+        }
+    }
+
+    impl ui::plugin::ViewPluginCapabilities for WysiwygPlugin {
+        fn scrollable(&self) -> Option<&dyn ui::plugin::ScrollableView> {
+            Some(self)
+        }
+
+        fn scrollable_mut(&mut self) -> Option<&mut dyn ui::plugin::ScrollableView> {
+            Some(self)
+        }
+
+        fn allows_editing(&self) -> bool {
+            true
         }
     }
 
@@ -734,6 +713,10 @@ mod tests {
             "canvas_scroll"
         }
 
+        fn mode(&self) -> ui::plugin::PluginMode {
+            ui::plugin::PluginMode::Canvas
+        }
+
         fn render(
             &mut self,
             _doc: &dyn textora_core::document::DocView,
@@ -744,11 +727,9 @@ mod tests {
         ) -> ui::core::paint::DrawList {
             ui::core::paint::DrawList::new()
         }
-
-        fn is_canvas(&self) -> bool {
-            true
-        }
     }
+
+    impl ui::plugin::ViewPluginCapabilities for CanvasScrollPlugin {}
 
     fn app_with_prepared_canvas_viewport() -> App {
         let mut app = App::new(None);

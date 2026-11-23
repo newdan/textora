@@ -10,7 +10,7 @@ fn set_markdown_cursor(app: &mut App, cursor_byte: usize) {
         panic!("Markdown editor should be active");
     };
     tab.document_mut().cursor_move_to_offset(cursor_byte);
-    tab.send_message(ui::plugin::PluginMessage::SetCursorByte(cursor_byte));
+    tab.set_cursor_byte(cursor_byte);
 }
 
 fn active_markdown_source(app: &App) -> String {

@@ -220,7 +220,7 @@ impl App {
                 }
                 EditCommand::SelectAll => {
                     if let Some(mut tab) = self.active_tab_session_mut() {
-                        tab.send_message(ui::plugin::PluginMessage::SelectAll);
+                        tab.select_all_in_plugin();
                         effect = effect.merge(AppEffect::REDRAW);
                     }
                     return effect;
@@ -238,9 +238,7 @@ impl App {
                                 new_li -= 1;
                                 new_cp = flat_lines.get(new_li).map_or(0, |fl| fl.grapheme_count);
                             }
-                            tab.send_message(ui::plugin::PluginMessage::SetSelCursor(Some((
-                                new_li, new_cp,
-                            ))));
+                            tab.set_plugin_selection_cursor(Some((new_li, new_cp)));
                         }
                         effect = effect.merge(AppEffect::REDRAW);
                     }
@@ -260,9 +258,7 @@ impl App {
                                 new_li += 1;
                                 new_cp = 0;
                             }
-                            tab.send_message(ui::plugin::PluginMessage::SetSelCursor(Some((
-                                new_li, new_cp,
-                            ))));
+                            tab.set_plugin_selection_cursor(Some((new_li, new_cp)));
                         }
                         effect = effect.merge(AppEffect::REDRAW);
                     }
@@ -271,9 +267,7 @@ impl App {
                 EditCommand::ExtendToLineStart => {
                     if let Some(mut tab) = self.active_tab_session_mut() {
                         if let Some((li, _cp)) = tab.selection_cursor() {
-                            tab.send_message(ui::plugin::PluginMessage::SetSelCursor(Some((
-                                li, 0,
-                            ))));
+                            tab.set_plugin_selection_cursor(Some((li, 0)));
                         }
                         effect = effect.merge(AppEffect::REDRAW);
                     }
@@ -285,10 +279,7 @@ impl App {
                             let flat_lines = tab.flat_lines();
                             let grapheme_count =
                                 flat_lines.get(li).map_or(0, |fl| fl.grapheme_count);
-                            tab.send_message(ui::plugin::PluginMessage::SetSelCursor(Some((
-                                li,
-                                grapheme_count,
-                            ))));
+                            tab.set_plugin_selection_cursor(Some((li, grapheme_count)));
                         }
                         effect = effect.merge(AppEffect::REDRAW);
                     }
@@ -296,7 +287,7 @@ impl App {
                 }
                 EditCommand::ExtendToDocStart => {
                     if let Some(mut tab) = self.active_tab_session_mut() {
-                        tab.send_message(ui::plugin::PluginMessage::SetSelCursor(Some((0, 0))));
+                        tab.set_plugin_selection_cursor(Some((0, 0)));
                         effect = effect.merge(AppEffect::REDRAW);
                     }
                     return effect;
@@ -307,10 +298,7 @@ impl App {
                         let total = flat_lines.len();
                         if total > 0 {
                             let last_g = flat_lines.last().map_or(0, |fl| fl.grapheme_count);
-                            tab.send_message(ui::plugin::PluginMessage::SetSelCursor(Some((
-                                total - 1,
-                                last_g,
-                            ))));
+                            tab.set_plugin_selection_cursor(Some((total - 1, last_g)));
                         }
                         effect = effect.merge(AppEffect::REDRAW);
                     }
@@ -430,14 +418,14 @@ impl App {
             }
             EditCommand::NextChapter => {
                 if let Some(mut tab) = self.active_tab_session_mut() {
-                    tab.send_message(ui::plugin::PluginMessage::ScrollToNextChapter);
+                    tab.scroll_to_chapter(ui::plugin::ChapterDirection::Next);
                     effect = effect.merge(AppEffect::REDRAW);
                 }
                 return effect;
             }
             EditCommand::PrevChapter => {
                 if let Some(mut tab) = self.active_tab_session_mut() {
-                    tab.send_message(ui::plugin::PluginMessage::ScrollToPrevChapter);
+                    tab.scroll_to_chapter(ui::plugin::ChapterDirection::Previous);
                     effect = effect.merge(AppEffect::REDRAW);
                 }
                 return effect;

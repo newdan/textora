@@ -447,44 +447,12 @@ fn combine_erasure_and_literal_insert(
 }
 
 impl ViewPlugin for MarkdownEditorView {
-    fn paste_preference(&self) -> PastePreference {
-        PastePreference::SemanticMarkdown
-    }
-
-    fn handles_own_rendering(&self) -> bool {
-        true
-    }
-
-    fn edit_policy(&self) -> &dyn ui::plugin::EditPolicy {
-        self
-    }
-
-    fn key_intent_mapper(&self) -> Option<&dyn ui::plugin::KeyIntentMapper> {
-        Some(self)
-    }
-
     fn name(&self) -> &str {
         "markdown_editor"
     }
 
-    fn allows_editing(&self) -> bool {
-        // WYSIWYG editor — app_renderer will enable
-        // Copy/Paste/Undo context menu and scrollbar behaviour.
-        true
-    }
-
-    fn shows_cursor(&self) -> bool {
-        // WYSIWYG draws its own cursor via render() — app should not overlay one.
-        false
-    }
-
-    fn shows_gutter(&self) -> bool {
-        false
-    }
-
-    fn needs_cursor_blink_wakeup(&self) -> bool {
-        // App must still compute blink phase and forward it via SetCursorVisible.
-        true
+    fn mode(&self) -> ui::plugin::PluginMode {
+        ui::plugin::PluginMode::RichText
     }
 
     fn render(
@@ -498,107 +466,199 @@ impl ViewPlugin for MarkdownEditorView {
         preedit::render_editor(self, bounds, theme, shaper, dpi_scale)
     }
 
-    fn handle_message(
+    fn sync_document(
         &mut self,
-        msg: PluginMessage,
-        _doc: &mut dyn textora_core::document::DocViewMut,
-    ) -> bool {
-        if let Some(result) = self.engine.handle_message_common(&msg) {
-            return result;
+        generation: u32,
+        reason: ui::plugin::SyncReason,
+        load_source: &mut dyn FnMut() -> String,
+    ) -> ui::plugin::SyncOutcome {
+        if reason == ui::plugin::SyncReason::Normal && !self.needs_source_update(generation) {
+            return ui::plugin::SyncOutcome::Unchanged;
         }
-        match msg {
-            PluginMessage::UpdateSource { text, generation } => {
-                self.set_source(text, generation);
-                true
+        self.set_source(load_source(), generation);
+        ui::plugin::SyncOutcome::Updated
+    }
+}
+
+impl ui::plugin::ViewPluginCapabilities for MarkdownEditorView {
+    fn scrollable(&self) -> Option<&dyn ui::plugin::ScrollableView> {
+        Some(&self.engine)
+    }
+
+    fn scrollable_mut(&mut self) -> Option<&mut dyn ui::plugin::ScrollableView> {
+        Some(&mut self.engine)
+    }
+
+    fn outline(&self) -> Option<&dyn ui::plugin::OutlineProvider> {
+        Some(&self.engine)
+    }
+
+    fn outline_mut(&mut self) -> Option<&mut dyn ui::plugin::OutlineProvider> {
+        Some(&mut self.engine)
+    }
+
+    fn search(&self) -> Option<&dyn ui::plugin::SearchView> {
+        Some(self)
+    }
+
+    fn selection(&self) -> Option<&dyn ui::plugin::SelectionView> {
+        Some(self)
+    }
+
+    fn selection_mut(&mut self) -> Option<&mut dyn ui::plugin::SelectionView> {
+        Some(self)
+    }
+    fn editable(&self) -> Option<&dyn ui::plugin::EditableView> {
+        Some(self)
+    }
+
+    fn editable_mut(&mut self) -> Option<&mut dyn ui::plugin::EditableView> {
+        Some(self)
+    }
+
+    fn source_spacing_protected_ranges(
+        &self,
+        source_generation: u32,
+    ) -> Option<std::sync::Arc<[std::ops::Range<usize>]>> {
+        (!self.needs_source_update(source_generation))
+            .then(|| self.source.source_spacing_protected_ranges())
+    }
+
+    fn allows_editing(&self) -> bool {
+        // WYSIWYG editor — app_renderer will enable
+        // Copy/Paste/Undo context menu and scrollbar behaviour.
+        true
+    }
+
+    fn needs_cursor_blink_wakeup(&self) -> bool {
+        // App must still compute blink phase and forward it via SetCursorVisible.
+        true
+    }
+
+    fn set_view_render_settings(&mut self, settings: ui::plugin::ViewRenderSettings) {
+        self.engine.set_view_render_settings(settings);
+    }
+
+    fn set_view_text_spacing_mode(&mut self, mode: ui::typography::TextSpacingMode) {
+        self.engine.set_view_text_spacing_mode(mode);
+    }
+}
+
+impl ui::plugin::EditableView for MarkdownEditorView {
+    fn plan_semantic_edit(
+        &self,
+        command: ui::plugin::SemanticEditCommand,
+        source_generation: u32,
+        cursor_byte: usize,
+        selection: Option<std::ops::Range<usize>>,
+    ) -> ui::plugin::SemanticEditPlan {
+        if self.needs_source_update(source_generation) {
+            return ui::plugin::SemanticEditPlan::Unsupported;
+        }
+        crate::commands::plan_semantic_source(
+            &self.source,
+            source_generation,
+            cursor_byte,
+            selection,
+            command,
+        )
+    }
+
+    fn table_structure_capabilities(
+        &self,
+        source_generation: u32,
+        cursor_byte: usize,
+    ) -> Option<ui::plugin::TableStructureCapabilities> {
+        if self.needs_source_update(source_generation) {
+            return None;
+        }
+        crate::commands::snapshot_table_capabilities(&self.source, cursor_byte)
+    }
+
+    fn paste_preference(&self) -> PastePreference {
+        PastePreference::SemanticMarkdown
+    }
+
+    fn key_intent_mapper(&self) -> Option<&dyn ui::plugin::KeyIntentMapper> {
+        Some(self)
+    }
+
+    fn hit_test_caret(
+        &self,
+        x: f32,
+        y: f32,
+        offset_x: f32,
+        offset_y: f32,
+    ) -> Option<ui::plugin::VisualCaretPosition> {
+        self.engine.hit_test_anchor(x, y, offset_x, offset_y).map(|anchor| {
+            ui::plugin::VisualCaretPosition {
+                byte_offset: anchor.byte.get(),
+                affinity: anchor.affinity,
             }
-            _ => false,
+        })
+    }
+
+    fn visual_move(
+        &self,
+        current_byte: usize,
+        direction: ui::plugin::MoveDirection,
+        target_x: Option<f32>,
+    ) -> Option<ui::plugin::VisualCaretPosition> {
+        self.engine.visual_move_anchor(current_byte, direction, target_x).map(|anchor| {
+            ui::plugin::VisualCaretPosition {
+                byte_offset: anchor.byte.get(),
+                affinity: anchor.affinity,
+            }
+        })
+    }
+
+    fn hit_test_edit_target(
+        &self,
+        x: f32,
+        y: f32,
+        offset_x: f32,
+        offset_y: f32,
+    ) -> Option<Option<ui::plugin::EditHitTarget>> {
+        Some(self.engine.hit_test_byte(x, y, offset_x, offset_y).map(|byte_offset| {
+            ui::plugin::EditHitTarget::TextCaret { byte_offset, selection_scope: None }
+        }))
+    }
+
+    fn cursor_screen_rect(&self, cursor_byte: usize) -> Option<(f32, f32, f32, f32)> {
+        self.engine
+            .edit_ctx
+            .as_ref()
+            .filter(|ctx| ctx.cursor_byte == cursor_byte)
+            .and_then(|_| self.engine.visual_cursor_screen_pos())
+            .or_else(|| self.engine.cursor_screen_pos_for_byte(cursor_byte))
+    }
+
+    fn set_cursor_byte(&mut self, cursor_byte: usize) {
+        self.engine.handle_set_cursor_byte(cursor_byte);
+    }
+
+    fn set_visual_caret(&mut self, position: ui::plugin::VisualCaretPosition) {
+        self.engine.handle_set_cursor_byte(position.byte_offset);
+        if self.engine.cursor_affinity != position.affinity {
+            self.engine.cursor_affinity = position.affinity;
+            self.engine.cached_dl = None;
+            self.engine.cached_vertices = None;
         }
     }
 
-    fn query(&self, q: PluginQuery, _doc: &dyn DocView) -> PluginResponse {
-        if matches!(q, PluginQuery::SelectedText) {
-            return PluginResponse::String(
-                self.engine.selected_reading_text(&self.source).unwrap_or_default(),
-            );
-        }
-        if self.engine.replacement_preedit.is_some()
-            && matches!(
-                &q,
-                PluginQuery::SearchHighlights { .. } | PluginQuery::SourceSearchHighlights { .. }
-            )
-        {
-            return PluginResponse::DrawList(DrawList::new());
-        }
-        if let PluginQuery::HitTestEditTarget { x, y, offset_x, offset_y } = &q {
-            return PluginResponse::EditHitTarget(
-                self.engine.hit_test_byte(*x, *y, *offset_x, *offset_y).map(|byte_offset| {
-                    ui::plugin::EditHitTarget::TextCaret { byte_offset, selection_scope: None }
-                }),
-            );
-        }
-        if let Some(resp) = self.engine.query_common(&q) {
-            return resp;
-        }
-        match q {
-            PluginQuery::SourceSpacingProtectedRanges { source_generation }
-                if !self.needs_source_update(source_generation) =>
-            {
-                PluginResponse::SourceSpacingProtectedRanges(
-                    self.source.source_spacing_protected_ranges(),
-                )
-            }
-            PluginQuery::NeedsSourceUpdate(gen_id) => {
-                PluginResponse::Bool(self.needs_source_update(gen_id))
-            }
-            PluginQuery::SearchHighlights {
-                query,
-                match_case,
-                use_regex,
-                active_idx,
-                match_color,
-                inactive_color,
-            } => PluginResponse::DrawList(self.query_search_highlights(
-                &query,
-                match_case,
-                use_regex,
-                active_idx,
-                match_color,
-                inactive_color,
-            )),
-            PluginQuery::SourceSearchHighlights {
-                matches,
-                source_generation,
-                active_idx,
-                match_color,
-                inactive_color,
-            } => PluginResponse::DrawList(if !self.needs_source_update(source_generation) {
-                self.source_search_highlights(&matches, active_idx, match_color, inactive_color)
-            } else {
-                DrawList::new()
-            }),
-            PluginQuery::TableStructureCapabilities { source_generation, cursor_byte }
-                if !self.needs_source_update(source_generation) =>
-            {
-                PluginResponse::TableStructureCapabilities(
-                    crate::commands::snapshot_table_capabilities(&self.source, cursor_byte),
-                )
-            }
-            PluginQuery::PlanSemanticEdit {
-                command,
-                source_generation,
-                cursor_byte,
-                selection,
-            } if !self.needs_source_update(source_generation) => {
-                PluginResponse::SemanticEdit(crate::commands::plan_semantic_source(
-                    &self.source,
-                    source_generation,
-                    cursor_byte,
-                    selection,
-                    command,
-                ))
-            }
-            _ => PluginResponse::None,
-        }
+    fn reveal_cursor(&mut self, cursor_byte: usize) -> bool {
+        self.engine.pending_cursor_reveal = Some(cursor_byte);
+        self.engine.cached_dl = None;
+        self.engine.cached_vertices = None;
+        true
+    }
+
+    fn set_cursor_visible(&mut self, visible: bool) {
+        self.engine.cursor_visible = visible;
+    }
+
+    fn set_preedit(&mut self, text: String, cursor: Option<(usize, usize)>) {
+        self.engine.set_preedit_text(text, cursor);
     }
 }
 
@@ -614,7 +674,7 @@ impl PluginFactory for MarkdownEditorViewFactory {
         // .md files default to the editor view.
         path.is_some_and(|p| p.extension().is_some_and(|e| e == "md" || e == "markdown"))
     }
-    fn create(&self) -> Box<dyn ViewPlugin> {
+    fn create(&self) -> Box<dyn ViewPluginCapabilities> {
         Box::new(MarkdownEditorView::new())
     }
 }
@@ -631,7 +691,7 @@ impl PluginFactory for NotoraMarkdownEditorViewFactory {
         MarkdownEditorViewFactory.can_handle(path)
     }
 
-    fn create(&self) -> Box<dyn ViewPlugin> {
+    fn create(&self) -> Box<dyn ViewPluginCapabilities> {
         Box::new(MarkdownEditorView::new())
     }
 }

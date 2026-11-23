@@ -33,8 +33,8 @@ pub use editor_frame::{
     WindowCornerClip,
 };
 pub use editor_navigation::{
-    apply_edit_hit_target, apply_target_to_document, query_visual_caret_hit,
-    set_wysiwyg_cursor_and_selection, set_wysiwyg_visual_caret_and_selection,
+    apply_edit_hit_target, apply_target_to_document, set_wysiwyg_cursor_and_selection,
+    set_wysiwyg_visual_caret_and_selection,
 };
 pub use editor_painter::{
     EditorPaintStyle, EditorSurfacePaint, PluginContentTarget, PreeditAdvanceMeasure,
@@ -398,11 +398,17 @@ impl EditorRuntime {
         self.model_session.restore_pinned(paths);
     }
 
-    pub fn create_plugin_for_path(&self, path: &Path) -> Box<dyn ui::plugin::ViewPlugin> {
+    pub fn create_plugin_for_path(
+        &self,
+        path: &Path,
+    ) -> Box<dyn ui::plugin::ViewPluginCapabilities> {
         self.model_session.create_plugin_for_path(path)
     }
 
-    pub fn create_plugin_by_name(&self, plugin_name: &str) -> Box<dyn ui::plugin::ViewPlugin> {
+    pub fn create_plugin_by_name(
+        &self,
+        plugin_name: &str,
+    ) -> Box<dyn ui::plugin::ViewPluginCapabilities> {
         self.model_session.create_plugin_by_name(plugin_name)
     }
 
@@ -1209,22 +1215,16 @@ impl EditorRuntime {
         let Some(mut tab) = self.tab_session_mut(tab_id) else {
             return EditorOutcome::default();
         };
-        let handles_own_rendering = tab.runtime.plugin.handles_own_rendering();
+        let handles_own_rendering = tab.handles_own_rendering();
         match action.action {
             ScrollbarAction::DragTo(position) if handles_own_rendering => {
-                tab.send_message(ui::plugin::PluginMessage::SetScrollY(position as f32));
+                tab.restore_plugin_scroll_y(position as f32);
             }
             ScrollbarAction::PageUp if handles_own_rendering => {
-                tab.send_message(ui::plugin::PluginMessage::Scroll {
-                    delta: -plugin_viewport_height,
-                    viewport_h: plugin_viewport_height,
-                });
+                tab.scroll_plugin(-plugin_viewport_height, plugin_viewport_height);
             }
             ScrollbarAction::PageDown if handles_own_rendering => {
-                tab.send_message(ui::plugin::PluginMessage::Scroll {
-                    delta: plugin_viewport_height,
-                    viewport_h: plugin_viewport_height,
-                });
+                tab.scroll_plugin(plugin_viewport_height, plugin_viewport_height);
             }
             ScrollbarAction::DragTo(position) => tab.set_scroll_top_rows(position, line_height),
             ScrollbarAction::PageUp => tab.scroll_viewport_by_pages(-1.0, line_height),
@@ -1585,6 +1585,10 @@ mod tests {
             "canvas-control-probe"
         }
 
+        fn mode(&self) -> ui::plugin::PluginMode {
+            ui::plugin::PluginMode::Canvas
+        }
+
         fn render(
             &mut self,
             _document: &dyn textora_core::document::DocView,
@@ -1595,53 +1599,52 @@ mod tests {
         ) -> ui::DrawList {
             ui::DrawList::new()
         }
+    }
 
-        fn query(
+    impl ui::plugin::ScrollableView for CanvasControlProbePlugin {
+        fn content_height(&self) -> f32 {
+            1_000.0
+        }
+    }
+
+    impl ui::plugin::ViewPluginCapabilities for CanvasControlProbePlugin {
+        fn scrollable(&self) -> Option<&dyn ui::plugin::ScrollableView> {
+            Some(self)
+        }
+
+        fn canvas(&self) -> Option<&dyn ui::plugin::CanvasView> {
+            Some(self)
+        }
+
+        fn canvas_mut(&mut self) -> Option<&mut dyn ui::plugin::CanvasView> {
+            Some(self)
+        }
+    }
+
+    impl ui::plugin::CanvasView for CanvasControlProbePlugin {
+        fn hit_test_canvas_control(
             &self,
-            query: ui::plugin::PluginQuery,
-            _document: &dyn textora_core::document::DocView,
-        ) -> ui::plugin::PluginResponse {
-            match query {
-                ui::plugin::PluginQuery::HitTestEditTarget { .. } => {
-                    ui::plugin::PluginResponse::EditHitTarget(Some(
-                        ui::plugin::EditHitTarget::CanvasControl { source_range: 1..2 },
-                    ))
-                }
-                ui::plugin::PluginQuery::PlanCanvasControl { source_range, source_generation } => {
-                    self.planned_ranges.borrow_mut().push(source_range);
-                    ui::plugin::PluginResponse::EditPlan(ui::plugin::EditPlan::Apply(
-                        ui::plugin::EditTransaction::replace(
-                            source_generation,
-                            1..2,
-                            "expanded".to_owned(),
-                            8,
-                        ),
-                    ))
-                }
-                ui::plugin::PluginQuery::ContentHeight => {
-                    ui::plugin::PluginResponse::Float(1_000.0)
-                }
-                _ => ui::plugin::PluginResponse::None,
-            }
+            _position: ui::canvas::CanvasPoint,
+        ) -> Option<std::ops::Range<usize>> {
+            Some(1..2)
         }
 
-        fn handle_message(
-            &mut self,
-            message: ui::plugin::PluginMessage,
-            _document: &mut dyn textora_core::document::DocViewMut,
-        ) -> bool {
-            let ui::plugin::PluginMessage::SetCanvasPointer(pointer) = message else {
-                return false;
-            };
+        fn plan_canvas_control(
+            &self,
+            source_range: std::ops::Range<usize>,
+            source_generation: u32,
+        ) -> ui::plugin::EditPlan {
+            self.planned_ranges.borrow_mut().push(source_range);
+            ui::plugin::EditPlan::Apply(ui::plugin::EditTransaction::replace(
+                source_generation,
+                1..2,
+                "expanded".to_owned(),
+                8,
+            ))
+        }
+
+        fn set_canvas_pointer(&mut self, pointer: Option<ui::canvas::CanvasPoint>) -> bool {
             self.pointer_positions.borrow_mut().push(pointer);
-            true
-        }
-
-        fn handles_own_rendering(&self) -> bool {
-            true
-        }
-
-        fn is_canvas(&self) -> bool {
             true
         }
     }
@@ -1651,6 +1654,10 @@ mod tests {
             "canvas-drag-probe"
         }
 
+        fn mode(&self) -> ui::plugin::PluginMode {
+            ui::plugin::PluginMode::Canvas
+        }
+
         fn render(
             &mut self,
             _document: &dyn textora_core::document::DocView,
@@ -1661,22 +1668,37 @@ mod tests {
         ) -> ui::DrawList {
             ui::DrawList::new()
         }
+    }
 
-        fn query(
+    impl ui::plugin::EditPolicy for CanvasDragProbePlugin {
+        fn plan_edit(&self, _: &ui::plugin::EditRequest) -> ui::plugin::EditPlan {
+            ui::plugin::EditPlan::UseDefault
+        }
+    }
+
+    impl ui::plugin::EditableView for CanvasDragProbePlugin {
+        fn hit_test_edit_target(
             &self,
-            query: ui::plugin::PluginQuery,
-            _document: &dyn textora_core::document::DocView,
-        ) -> ui::plugin::PluginResponse {
-            match query {
-                ui::plugin::PluginQuery::HitTestEditTarget { .. } => {
-                    ui::plugin::PluginResponse::EditHitTarget(Some(
-                        ui::plugin::EditHitTarget::SourceObject { source_range: 0..5 },
-                    ))
-                }
-                _ => ui::plugin::PluginResponse::None,
-            }
+            _x: f32,
+            _y: f32,
+            _offset_x: f32,
+            _offset_y: f32,
+        ) -> Option<Option<ui::plugin::EditHitTarget>> {
+            Some(Some(ui::plugin::EditHitTarget::SourceObject { source_range: 0..5 }))
+        }
+    }
+
+    impl ui::plugin::ViewPluginCapabilities for CanvasDragProbePlugin {
+        fn editable(&self) -> Option<&dyn ui::plugin::EditableView> {
+            Some(self)
         }
 
+        fn canvas_mut(&mut self) -> Option<&mut dyn ui::plugin::CanvasView> {
+            Some(self)
+        }
+    }
+
+    impl ui::plugin::CanvasView for CanvasDragProbePlugin {
         fn handle_canvas_drag(
             &mut self,
             request: ui::plugin::CanvasDragRequest,
@@ -1695,14 +1717,6 @@ mod tests {
             }
             ui::plugin::CanvasDragResponse::Ignore
         }
-
-        fn handles_own_rendering(&self) -> bool {
-            true
-        }
-
-        fn is_canvas(&self) -> bool {
-            true
-        }
     }
 
     impl ui::plugin::ViewPlugin for CanvasViewportProbePlugin {
@@ -1710,6 +1724,10 @@ mod tests {
             "canvas-viewport-probe"
         }
 
+        fn mode(&self) -> ui::plugin::PluginMode {
+            ui::plugin::PluginMode::Canvas
+        }
+
         fn render(
             &mut self,
             _document: &dyn textora_core::document::DocView,
@@ -1720,21 +1738,19 @@ mod tests {
         ) -> ui::DrawList {
             ui::DrawList::new()
         }
-
-        fn handles_own_rendering(&self) -> bool {
-            true
-        }
-
-        fn is_canvas(&self) -> bool {
-            true
-        }
     }
+
+    impl ui::plugin::ViewPluginCapabilities for CanvasViewportProbePlugin {}
 
     impl ui::plugin::ViewPlugin for PointerProbePlugin {
         fn name(&self) -> &str {
             "pointer-probe"
         }
 
+        fn mode(&self) -> ui::plugin::PluginMode {
+            ui::plugin::PluginMode::RichText
+        }
+
         fn render(
             &mut self,
             _document: &dyn textora_core::document::DocView,
@@ -1745,35 +1761,36 @@ mod tests {
         ) -> ui::DrawList {
             ui::DrawList::new()
         }
+    }
 
-        fn query(
+    impl ui::plugin::EditPolicy for PointerProbePlugin {
+        fn plan_edit(&self, _: &ui::plugin::EditRequest) -> ui::plugin::EditPlan {
+            ui::plugin::EditPlan::UseDefault
+        }
+    }
+
+    impl ui::plugin::EditableView for PointerProbePlugin {
+        fn hit_test_edit_target(
             &self,
-            query: ui::plugin::PluginQuery,
-            _document: &dyn textora_core::document::DocView,
-        ) -> ui::plugin::PluginResponse {
-            match query {
-                ui::plugin::PluginQuery::HitTestEditTarget { x, .. } => {
-                    let byte_offset = if x < POINTER_PROBE_MIDDLE_HIT_X_PX {
-                        2
-                    } else if x < POINTER_PROBE_TRAILING_HIT_X_PX {
-                        8
-                    } else {
-                        14
-                    };
-                    ui::plugin::PluginResponse::EditHitTarget(Some(
-                        ui::plugin::EditHitTarget::TextCaret { byte_offset, selection_scope: None },
-                    ))
-                }
-                _ => ui::plugin::PluginResponse::None,
-            }
+            x: f32,
+            _y: f32,
+            _offset_x: f32,
+            _offset_y: f32,
+        ) -> Option<Option<ui::plugin::EditHitTarget>> {
+            let byte_offset = if x < POINTER_PROBE_MIDDLE_HIT_X_PX {
+                2
+            } else if x < POINTER_PROBE_TRAILING_HIT_X_PX {
+                8
+            } else {
+                14
+            };
+            Some(Some(ui::plugin::EditHitTarget::TextCaret { byte_offset, selection_scope: None }))
         }
+    }
 
-        fn handles_own_rendering(&self) -> bool {
-            true
-        }
-
-        fn needs_cursor_blink_wakeup(&self) -> bool {
-            true
+    impl ui::plugin::ViewPluginCapabilities for PointerProbePlugin {
+        fn editable(&self) -> Option<&dyn ui::plugin::EditableView> {
+            Some(self)
         }
     }
 
@@ -1782,6 +1799,10 @@ mod tests {
             "byte-hit-pointer-probe"
         }
 
+        fn mode(&self) -> ui::plugin::PluginMode {
+            ui::plugin::PluginMode::RichText
+        }
+
         fn render(
             &mut self,
             _document: &dyn textora_core::document::DocView,
@@ -1792,31 +1813,33 @@ mod tests {
         ) -> ui::DrawList {
             ui::DrawList::new()
         }
+    }
 
-        fn query(
+    impl ui::plugin::EditPolicy for ByteHitPointerProbePlugin {
+        fn plan_edit(&self, _: &ui::plugin::EditRequest) -> ui::plugin::EditPlan {
+            ui::plugin::EditPlan::UseDefault
+        }
+    }
+
+    impl ui::plugin::EditableView for ByteHitPointerProbePlugin {
+        fn hit_test_caret(
             &self,
-            query: ui::plugin::PluginQuery,
-            _document: &dyn textora_core::document::DocView,
-        ) -> ui::plugin::PluginResponse {
-            match query {
-                ui::plugin::PluginQuery::HitTestByte { x, .. } => {
-                    let byte_offset = if x < POINTER_PROBE_MIDDLE_HIT_X_PX { 2 } else { 8 };
-                    ui::plugin::PluginResponse::BytePosition(Some(byte_offset))
-                }
-                _ => ui::plugin::PluginResponse::None,
-            }
+            x: f32,
+            _y: f32,
+            _offset_x: f32,
+            _offset_y: f32,
+        ) -> Option<ui::plugin::VisualCaretPosition> {
+            let byte_offset = if x < POINTER_PROBE_MIDDLE_HIT_X_PX { 2 } else { 8 };
+            Some(ui::plugin::VisualCaretPosition {
+                byte_offset,
+                affinity: ui::plugin::CursorAffinity::Downstream,
+            })
         }
+    }
 
-        fn handle_message(
-            &mut self,
-            message: ui::plugin::PluginMessage,
-            _document: &mut dyn textora_core::document::DocViewMut,
-        ) -> bool {
-            matches!(message, ui::plugin::PluginMessage::SetCursorByte(_))
-        }
-
-        fn handles_own_rendering(&self) -> bool {
-            true
+    impl ui::plugin::ViewPluginCapabilities for ByteHitPointerProbePlugin {
+        fn editable(&self) -> Option<&dyn ui::plugin::EditableView> {
+            Some(self)
         }
     }
 
@@ -1825,6 +1848,10 @@ mod tests {
             "wysiwyg-input-probe"
         }
 
+        fn mode(&self) -> ui::plugin::PluginMode {
+            ui::plugin::PluginMode::RichText
+        }
+
         fn render(
             &mut self,
             _document: &dyn textora_core::document::DocView,
@@ -1835,46 +1862,58 @@ mod tests {
         ) -> ui::DrawList {
             ui::DrawList::new()
         }
+    }
 
-        fn handle_message(
-            &mut self,
-            message: ui::plugin::PluginMessage,
-            _document: &mut dyn textora_core::document::DocViewMut,
-        ) -> bool {
-            match message {
-                ui::plugin::PluginMessage::Scroll { delta, .. } => {
-                    self.scroll_y.set(self.scroll_y.get() + delta);
-                    true
-                }
-                ui::plugin::PluginMessage::SetCursorByte(_) => true,
-                _ => false,
-            }
+    impl ui::plugin::EditPolicy for WysiwygInputProbePlugin {
+        fn plan_edit(&self, _: &ui::plugin::EditRequest) -> ui::plugin::EditPlan {
+            ui::plugin::EditPlan::UseDefault
         }
+    }
 
-        fn query(
+    impl ui::plugin::EditableView for WysiwygInputProbePlugin {
+        fn hit_test_caret(
             &self,
-            query: ui::plugin::PluginQuery,
-            _document: &dyn textora_core::document::DocView,
-        ) -> ui::plugin::PluginResponse {
-            match query {
-                ui::plugin::PluginQuery::ScrollY => {
-                    ui::plugin::PluginResponse::Float(self.scroll_y.get())
-                }
-                ui::plugin::PluginQuery::HitTestByte { .. } => {
-                    let query_index = self.hit_test_count.get();
-                    self.hit_test_count.set(query_index + 1);
-                    let byte = if query_index == 0 { 2 } else { 3 };
-                    ui::plugin::PluginResponse::BytePosition(Some(byte))
-                }
-                ui::plugin::PluginQuery::CursorScreenPos(_) => {
-                    ui::plugin::PluginResponse::CursorScreenRect(Some((24.0, 12.0, 2.0, 18.0)))
-                }
-                _ => ui::plugin::PluginResponse::None,
-            }
+            _x: f32,
+            _y: f32,
+            _offset_x: f32,
+            _offset_y: f32,
+        ) -> Option<ui::plugin::VisualCaretPosition> {
+            let query_index = self.hit_test_count.get();
+            self.hit_test_count.set(query_index + 1);
+            let byte_offset = if query_index == 0 { 2 } else { 3 };
+            Some(ui::plugin::VisualCaretPosition {
+                byte_offset,
+                affinity: ui::plugin::CursorAffinity::Downstream,
+            })
         }
 
-        fn handles_own_rendering(&self) -> bool {
+        fn cursor_screen_rect(&self, _cursor_byte: usize) -> Option<(f32, f32, f32, f32)> {
+            Some((24.0, 12.0, 2.0, 18.0))
+        }
+    }
+
+    impl ui::plugin::ScrollableView for WysiwygInputProbePlugin {
+        fn scroll_y(&self, _document: &dyn textora_core::document::DocView) -> f32 {
+            self.scroll_y.get()
+        }
+
+        fn scroll(&mut self, delta: f32, _viewport_height: f32) -> bool {
+            self.scroll_y.set(self.scroll_y.get() + delta);
             true
+        }
+    }
+
+    impl ui::plugin::ViewPluginCapabilities for WysiwygInputProbePlugin {
+        fn scrollable(&self) -> Option<&dyn ui::plugin::ScrollableView> {
+            Some(self)
+        }
+
+        fn scrollable_mut(&mut self) -> Option<&mut dyn ui::plugin::ScrollableView> {
+            Some(self)
+        }
+
+        fn editable(&self) -> Option<&dyn ui::plugin::EditableView> {
+            Some(self)
         }
     }
 
@@ -2087,6 +2126,30 @@ mod tests {
             EditorNotification::ContentChanged { tab_id: changed_tab_id, .. }
                 if *changed_tab_id == tab_id
         )));
+        assert_eq!(runtime.pointer_capture(), MouseCapture::None);
+    }
+
+    #[test]
+    fn read_only_canvas_control_does_not_plan_an_edit() {
+        let mut runtime = runtime_with_clean_tab();
+        let planned_ranges = Rc::new(RefCell::new(Vec::new()));
+        let tab_id = runtime.active_tab_id().expect("test canvas control tab should be active");
+        let tab = runtime.tab_session_mut(tab_id).expect("test canvas control tab should exist");
+        tab.runtime.plugin = Box::new(CanvasControlProbePlugin {
+            planned_ranges: planned_ranges.clone(),
+            pointer_positions: Rc::new(RefCell::new(Vec::new())),
+        });
+        tab.runtime.set_editing_access(crate::tab_runtime::DocumentEditingAccess::ReadOnly);
+        let context = EditorInputContext { focus: EditorFocus::Active, modal_blocked: false };
+        paint_editor_surface(&mut runtime, ui::Rect::new(100.0, 50.0, 800.0, 600.0));
+
+        runtime.handle_pointer_event(
+            context,
+            &ui::Event::MouseDown { px: 300.0, py: 240.0, button: ui::MouseButton::Left },
+        );
+
+        assert!(planned_ranges.borrow().is_empty());
+        assert_eq!(runtime.workspace_snapshot().tabs[0].content_lines, vec!["clean"]);
         assert_eq!(runtime.pointer_capture(), MouseCapture::None);
     }
 

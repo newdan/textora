@@ -6,8 +6,7 @@ use appkit_core::edit_command::EditCommand;
 #[cfg(test)]
 use appkit_shell::editor_runtime::apply_target_to_document;
 pub(crate) use appkit_shell::editor_runtime::{
-    apply_edit_hit_target, query_visual_caret_hit, set_wysiwyg_cursor_and_selection,
-    set_wysiwyg_visual_caret_and_selection,
+    apply_edit_hit_target, set_wysiwyg_cursor_and_selection, set_wysiwyg_visual_caret_and_selection,
 };
 
 impl App {
@@ -35,7 +34,7 @@ pub(crate) mod semantic_test_support {
 
     use std::cell::RefCell;
     use std::rc::Rc;
-    use ui::plugin::{EditHitTarget, PluginMessage, PluginQuery, PluginResponse, ViewPlugin};
+    use ui::plugin::{EditHitTarget, ViewPlugin};
 
     #[derive(Clone, Debug, Default)]
     pub(crate) enum SemanticQueryResponse {
@@ -77,6 +76,10 @@ pub(crate) mod semantic_test_support {
             "semantic_test"
         }
 
+        fn mode(&self) -> ui::plugin::PluginMode {
+            ui::plugin::PluginMode::RichText
+        }
+
         fn render(
             &mut self,
             _doc: &dyn textora_core::document::DocView,
@@ -87,84 +90,124 @@ pub(crate) mod semantic_test_support {
         ) -> ui::core::paint::DrawList {
             ui::core::paint::DrawList::new()
         }
+    }
+
+    impl ui::plugin::EditPolicy for SemanticTestPlugin {
+        fn plan_edit(&self, _: &ui::plugin::EditRequest) -> ui::plugin::EditPlan {
+            ui::plugin::EditPlan::UseDefault
+        }
+    }
+
+    impl ui::plugin::EditableView for SemanticTestPlugin {
+        fn cursor_screen_rect(&self, byte: usize) -> Option<(f32, f32, f32, f32)> {
+            self.state
+                .borrow()
+                .cursor_screen_positions
+                .iter()
+                .find(|(position_byte, _)| *position_byte == byte)
+                .map(|(_, x)| (*x, 0.0, 2.0, 16.0))
+        }
+
+        fn hit_test_edit_target(
+            &self,
+            _x: f32,
+            _y: f32,
+            _offset_x: f32,
+            _offset_y: f32,
+        ) -> Option<Option<ui::plugin::EditHitTarget>> {
+            let mut state = self.state.borrow_mut();
+            state.queried_operations.push("hit_target");
+            match &state.hit_target_response {
+                SemanticQueryResponse::Unsupported => None,
+                SemanticQueryResponse::Target(target) => Some(target.clone()),
+            }
+        }
+
+        fn move_edit_target(
+            &self,
+            _current_byte: usize,
+            _direction: ui::plugin::MoveDirection,
+            _target_x: Option<f32>,
+        ) -> Option<ui::plugin::EditHitTarget> {
+            let mut state = self.state.borrow_mut();
+            state.queried_operations.push("move_target");
+            match &state.move_target_response {
+                SemanticQueryResponse::Unsupported => None,
+                SemanticQueryResponse::Target(target) => target.clone(),
+            }
+        }
+
+        fn hit_test_caret(
+            &self,
+            _x: f32,
+            _y: f32,
+            _offset_x: f32,
+            _offset_y: f32,
+        ) -> Option<ui::plugin::VisualCaretPosition> {
+            let mut state = self.state.borrow_mut();
+            state.queried_operations.push("hit_byte");
+            state.hit_test_byte_result.map(|byte_offset| ui::plugin::VisualCaretPosition {
+                byte_offset,
+                affinity: ui::plugin::CursorAffinity::Downstream,
+            })
+        }
+
+        fn visual_move(
+            &self,
+            _current_byte: usize,
+            _direction: ui::plugin::MoveDirection,
+            _target_x: Option<f32>,
+        ) -> Option<ui::plugin::VisualCaretPosition> {
+            let mut state = self.state.borrow_mut();
+            state.queried_operations.push("visual_move");
+            state.visual_move_result.map(|byte_offset| ui::plugin::VisualCaretPosition {
+                byte_offset,
+                affinity: ui::plugin::CursorAffinity::Downstream,
+            })
+        }
+
+        fn set_cursor_byte(&mut self, byte_offset: usize) {
+            self.state.borrow_mut().sync_messages.push(RecordedSyncMessage::Cursor(byte_offset));
+        }
+    }
+
+    impl ui::plugin::ScrollableView for SemanticTestPlugin {
+        fn content_height(&self) -> f32 {
+            1_000.0
+        }
+    }
+
+    impl ui::plugin::ViewPluginCapabilities for SemanticTestPlugin {
+        fn scrollable(&self) -> Option<&dyn ui::plugin::ScrollableView> {
+            Some(self)
+        }
+
+        fn editable(&self) -> Option<&dyn ui::plugin::EditableView> {
+            Some(self)
+        }
+
+        fn editable_mut(&mut self) -> Option<&mut dyn ui::plugin::EditableView> {
+            Some(self)
+        }
 
         fn allows_editing(&self) -> bool {
             true
         }
 
-        fn handles_own_rendering(&self) -> bool {
+        fn selection_mut(&mut self) -> Option<&mut dyn ui::plugin::SelectionView> {
+            Some(self)
+        }
+    }
+
+    impl ui::plugin::SelectionView for SemanticTestPlugin {
+        fn set_selection_anchor_byte(&mut self, byte: Option<usize>) -> bool {
+            self.state.borrow_mut().sync_messages.push(RecordedSyncMessage::Anchor(byte));
             true
         }
 
-        fn query(
-            &self,
-            query: PluginQuery,
-            _doc: &dyn textora_core::document::DocView,
-        ) -> PluginResponse {
-            let mut state = self.state.borrow_mut();
-            match query {
-                PluginQuery::NeedsSourceUpdate(_) => PluginResponse::Bool(false),
-                PluginQuery::MoveEditTarget { .. } => {
-                    state.queried_operations.push("move_target");
-                    match &state.move_target_response {
-                        SemanticQueryResponse::Unsupported => PluginResponse::None,
-                        SemanticQueryResponse::Target(target) => {
-                            PluginResponse::EditHitTarget(target.clone())
-                        }
-                    }
-                }
-                PluginQuery::VisualMove { .. } => {
-                    state.queried_operations.push("visual_move");
-                    PluginResponse::BytePosition(state.visual_move_result)
-                }
-                PluginQuery::HitTestEditTarget { .. } => {
-                    state.queried_operations.push("hit_target");
-                    match &state.hit_target_response {
-                        SemanticQueryResponse::Unsupported => PluginResponse::None,
-                        SemanticQueryResponse::Target(target) => {
-                            PluginResponse::EditHitTarget(target.clone())
-                        }
-                    }
-                }
-                PluginQuery::HitTestByte { .. } => {
-                    state.queried_operations.push("hit_byte");
-                    PluginResponse::BytePosition(state.hit_test_byte_result)
-                }
-                PluginQuery::CursorScreenPos(byte) => {
-                    let rect = state
-                        .cursor_screen_positions
-                        .iter()
-                        .find(|(position_byte, _)| *position_byte == byte)
-                        .map(|(_, x)| (*x, 0.0, 2.0, 16.0));
-                    PluginResponse::CursorScreenRect(rect)
-                }
-                PluginQuery::ContentHeight => PluginResponse::Float(1_000.0),
-                _ => PluginResponse::None,
-            }
-        }
-
-        fn handle_message(
-            &mut self,
-            message: PluginMessage,
-            _doc: &mut dyn textora_core::document::DocViewMut,
-        ) -> bool {
-            let recorded_message = match message {
-                PluginMessage::SetCursorByte(byte_offset) => {
-                    Some(RecordedSyncMessage::Cursor(byte_offset))
-                }
-                PluginMessage::SetSelAnchorByte(byte_offset) => {
-                    Some(RecordedSyncMessage::Anchor(byte_offset))
-                }
-                PluginMessage::SetSelCursorByte(byte_offset) => {
-                    Some(RecordedSyncMessage::SelectionCursor(byte_offset))
-                }
-                _ => None,
-            };
-            let consumed = recorded_message.is_some();
-            if let Some(recorded_message) = recorded_message {
-                self.state.borrow_mut().sync_messages.push(recorded_message);
-            }
-            consumed
+        fn set_selection_cursor_byte(&mut self, byte: Option<usize>) -> bool {
+            self.state.borrow_mut().sync_messages.push(RecordedSyncMessage::SelectionCursor(byte));
+            true
         }
     }
 

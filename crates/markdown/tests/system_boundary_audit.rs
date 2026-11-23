@@ -4,7 +4,8 @@ use editing_audit::*;
 use textora_core::document::StringDocView;
 use textora_core::unicode::{grapheme_byte_boundaries, grapheme_start_indices};
 use textora_markdown::view::MarkdownEditorView;
-use ui::plugin::{EditIntent, PluginMessage, ViewPlugin};
+use ui::plugin::EditableView;
+use ui::plugin::{EditIntent, ViewPlugin, ViewPluginCapabilities};
 
 #[test]
 fn end_enter_and_backspace_matrix() {
@@ -230,11 +231,7 @@ fn empty_slot_caret_geometry_is_stable_across_neighbors() {
                         .enumerate()
                         {
                             view.set_source(edited.clone(), generation as u32 + 1);
-                            let mut document = AuditDocument(edited.clone());
-                            view.handle_message(
-                                PluginMessage::SetCursorByte(*edited_cursor),
-                                &mut document,
-                            );
+                            view.set_cursor_byte(*edited_cursor);
                             view.render(
                                 &StringDocView::new(edited),
                                 ui::Rect::new(0.0, 0.0, VIEWPORT_WIDTH, VIEWPORT_HEIGHT),
@@ -579,7 +576,6 @@ fn line_break_and_literal_code_variants_use_exact_source_semantics() {
 
 #[test]
 fn resized_layout_hit_testing_and_ime_cancellation_restore_exact_caret_geometry() {
-    use ui::plugin::{PluginQuery, PluginResponse};
     let mut shaper = shaping::Shaper::new().expect("geometry audit requires font shaping");
     let mut checked = 0;
     for dpi in [1.0, 1.5, 2.0] {
@@ -598,19 +594,14 @@ fn resized_layout_hit_testing_and_ime_cancellation_restore_exact_caret_geometry(
                         let cursor = empty_anchors(&source)[0];
                         let mut session = EditingSession::new(&source, cursor);
                         let mut document = AuditDocument(source.clone());
-                        session.view.handle_message(
-                            PluginMessage::SetRenderSettings {
-                                font_family: ui::settings::platform_default_font_family().into(),
-                                font_size,
-                                line_height: font_size * 1.5,
-                                toc_max_depth: 3,
-                                markdown_first_line_indent: false,
-                            },
-                            &mut document,
-                        );
-                        session
-                            .view
-                            .handle_message(PluginMessage::SetCursorByte(cursor), &mut document);
+                        session.view.set_view_render_settings(ui::plugin::ViewRenderSettings {
+                            font_family: ui::settings::platform_default_font_family().into(),
+                            font_size,
+                            line_height: font_size * 1.5,
+                            toc_max_depth: 3,
+                            markdown_first_line_indent: false,
+                        });
+                        session.view.set_cursor_byte(cursor);
                         let bounds = ui::Rect::new(0.0, 0.0, width, VIEWPORT_HEIGHT);
                         session.view.render(&document, bounds, &theme, &mut shaper, dpi);
                         let original = session
@@ -618,33 +609,26 @@ fn resized_layout_hit_testing_and_ime_cancellation_restore_exact_caret_geometry(
                             .engine()
                             .cursor_screen_pos()
                             .expect("empty slot has a visible caret");
-                        let hit = session.view.query(
-                            PluginQuery::HitTestEditTarget {
-                                x: original.0,
-                                y: original.1 + original.3 * 0.5,
-                                offset_x: 0.0,
-                                offset_y: 0.0,
-                            },
-                            &document,
-                        );
+                        let hit = session
+                            .view
+                            .hit_test_edit_target(
+                                original.0,
+                                original.1 + original.3 * 0.5,
+                                0.0,
+                                0.0,
+                            )
+                            .flatten();
                         assert!(
-                            matches!(hit, PluginResponse::EditHitTarget(Some(ui::plugin::EditHitTarget::TextCaret { byte_offset, .. })) if byte_offset == cursor),
+                            matches!(hit, Some(ui::plugin::EditHitTarget::TextCaret { byte_offset, .. }) if byte_offset == cursor),
                             "mouse hit must resolve the empty slot: {hit:?}"
                         );
                         for preedit in ["拼音", "👩🏽‍💻", "e\u{301}"] {
-                            session.view.handle_message(
-                                PluginMessage::SetPreedit {
-                                    text: preedit.into(),
-                                    cursor: Some((preedit.len(), preedit.len())),
-                                },
-                                &mut document,
-                            );
+                            session
+                                .view
+                                .set_preedit(preedit.into(), Some((preedit.len(), preedit.len())));
                             session.view.render(&document, bounds, &theme, &mut shaper, dpi);
                             assert_eq!(session.source, source, "composition must not edit source");
-                            session.view.handle_message(
-                                PluginMessage::SetPreedit { text: String::new(), cursor: None },
-                                &mut document,
-                            );
+                            session.view.set_preedit(String::new(), None);
                             session.view.render(&document, bounds, &theme, &mut shaper, dpi);
                             assert_eq!(
                                 session.view.engine().cursor_screen_pos(),
@@ -657,10 +641,7 @@ fn resized_layout_hit_testing_and_ime_cancellation_restore_exact_caret_geometry(
                             session.apply(EditIntent::DeleteBackward);
                         }
                         document.0 = session.source.clone();
-                        session.view.handle_message(
-                            PluginMessage::SetCursorByte(session.cursor),
-                            &mut document,
-                        );
+                        session.view.set_cursor_byte(session.cursor);
                         session.view.render(&document, bounds, &theme, &mut shaper, dpi);
                         assert_eq!(
                             session.view.engine().cursor_screen_pos(),
@@ -916,8 +897,7 @@ fn code_body_end_enter_adds_a_visible_row_and_backspace_restores_geometry() {
         session: &mut EditingSession,
         shaper: &mut shaping::Shaper,
     ) -> (f32, f32, f32, f32) {
-        let mut document = AuditDocument(session.source.clone());
-        session.view.handle_message(PluginMessage::SetCursorByte(session.cursor), &mut document);
+        session.view.set_cursor_byte(session.cursor);
         session.view.render(
             &StringDocView::new(&session.source),
             ui::Rect::new(0.0, 0.0, VIEWPORT_WIDTH, VIEWPORT_HEIGHT),
@@ -967,7 +947,7 @@ fn code_body_end_enter_adds_a_visible_row_and_backspace_restores_geometry() {
 
 #[test]
 fn long_code_caret_remains_visible_and_hit_testable_after_navigation_and_resize() {
-    use ui::plugin::{EditHitTarget, PluginQuery, PluginResponse};
+    use ui::plugin::EditHitTarget;
     let mut shaper = shaping::Shaper::new().expect("long-code audit requires font shaping");
     let theme = ui::theme::test_theme();
     let mut violations = Vec::new();
@@ -977,14 +957,12 @@ fn long_code_caret_remains_visible_and_hit_testable_after_navigation_and_resize(
             let body = "let 中文 = \"é 👩🏽‍💻\"; ".repeat(20) + "VISIBLE_END";
             let source = format!("{prefix}{body}{newline}{continuation}```");
             let mut session = EditingSession::new(&source, prefix.len());
-            let mut document = AuditDocument(source.clone());
+            let document = AuditDocument(source.clone());
             let boundaries = grapheme_byte_boundaries(&body);
             let middle = boundaries[(boundaries.len() - 1) / 2];
             for width in [800.0, 240.0, 800.0] {
                 for cursor in [prefix.len() + body.len(), prefix.len() + middle, prefix.len()] {
-                    session
-                        .view
-                        .handle_message(PluginMessage::SetCursorByte(cursor), &mut document);
+                    session.view.set_cursor_byte(cursor);
                     session.view.render(
                         &document,
                         ui::Rect::new(0.0, 0.0, width, VIEWPORT_HEIGHT),
@@ -999,17 +977,12 @@ fn long_code_caret_remains_visible_and_hit_testable_after_navigation_and_resize(
                             "caret outside {width}px: {opening:?} {newline:?} @{cursor}: {caret:?}"
                         ));
                     }
-                    let hit = session.view.query(
-                        PluginQuery::HitTestEditTarget {
-                            x: caret.0,
-                            y: caret.1 + caret.3 * 0.5,
-                            offset_x: 0.0,
-                            offset_y: 0.0,
-                        },
-                        &document,
-                    );
+                    let hit = session
+                        .view
+                        .hit_test_edit_target(caret.0, caret.1 + caret.3 * 0.5, 0.0, 0.0)
+                        .flatten();
                     assert!(
-                        matches!(hit, PluginResponse::EditHitTarget(Some(EditHitTarget::TextCaret { byte_offset, .. })) if byte_offset == cursor),
+                        matches!(hit, Some(EditHitTarget::TextCaret { byte_offset, .. }) if byte_offset == cursor),
                         "shifted code geometry must hit the same source position: {hit:?}, expected {cursor}"
                     );
                     assert_eq!(
@@ -1034,11 +1007,11 @@ fn deferred_caret_reveal_waits_for_layout_and_preserves_later_manual_scrolling()
     const VIEWPORT_HEIGHT: f32 = 240.0;
     let source = "段落 English é\n\n---\n\n```rust\nlet value = 1;\n```\n\n".repeat(SECTION_COUNT);
     let mut session = EditingSession::new(&source, source.len());
-    let mut document = AuditDocument(source.clone());
+    let document = AuditDocument(source.clone());
     let mut shaper = shaping::Shaper::new().expect("deferred reveal needs font shaping");
     let theme = ui::theme::test_theme();
-    session.view.handle_message(PluginMessage::SetCursorByte(source.len()), &mut document);
-    session.view.handle_message(PluginMessage::RevealCursor(source.len()), &mut document);
+    session.view.set_cursor_byte(source.len());
+    session.view.reveal_cursor(source.len());
     session.view.render(
         &document,
         ui::Rect::new(0.0, 0.0, VIEWPORT_WIDTH, VIEWPORT_HEIGHT),
@@ -1050,13 +1023,14 @@ fn deferred_caret_reveal_waits_for_layout_and_preserves_later_manual_scrolling()
     assert!(y >= 0.0 && y + height <= VIEWPORT_HEIGHT + GEOMETRY_TOLERANCE);
     for cancel_pending in [false, true] {
         if cancel_pending {
-            session.view.handle_message(PluginMessage::RevealCursor(source.len()), &mut document);
+            session.view.reveal_cursor(source.len());
         }
         let delta = -session.view.engine().content_height;
-        session.view.handle_message(
-            PluginMessage::Scroll { delta, viewport_h: VIEWPORT_HEIGHT },
-            &mut document,
-        );
+        session
+            .view
+            .scrollable_mut()
+            .expect("editor scroll capability")
+            .scroll(delta, VIEWPORT_HEIGHT);
         session.view.render(
             &document,
             ui::Rect::new(0.0, 0.0, VIEWPORT_WIDTH, VIEWPORT_HEIGHT),
@@ -1080,17 +1054,25 @@ fn deferred_caret_reveal_waits_for_layout_and_preserves_later_manual_scrolling()
 #[test]
 fn horizontally_revealed_code_clips_selection_and_search_highlights() {
     use ui::core::paint::DrawCmd;
-    use ui::plugin::{PluginQuery, PluginResponse};
+
     let body = "let value = 1; ".repeat(30);
     let source = format!("```rust\n{body}\n```");
     let body_start = "```rust\n".len();
     let body_end = body_start + body.len();
     let mut session = EditingSession::new(&source, body_end);
-    let mut document = AuditDocument(source.clone());
+    let document = AuditDocument(source.clone());
     let mut shaper = shaping::Shaper::new().expect("code highlight audit requires font shaping");
-    session.view.handle_message(PluginMessage::SetCursorByte(body_end), &mut document);
-    session.view.handle_message(PluginMessage::SetSelAnchorByte(Some(body_start)), &mut document);
-    session.view.handle_message(PluginMessage::SetSelCursorByte(Some(body_end)), &mut document);
+    session.view.set_cursor_byte(body_end);
+    session
+        .view
+        .selection_mut()
+        .expect("test view exposes selection")
+        .set_selection_anchor_byte(Some(body_start));
+    session
+        .view
+        .selection_mut()
+        .expect("test view exposes selection")
+        .set_selection_cursor_byte(Some(body_end));
     session.view.render(
         &document,
         ui::Rect::new(0.0, 0.0, 240.0, VIEWPORT_HEIGHT),
@@ -1102,21 +1084,29 @@ fn horizontally_revealed_code_clips_selection_and_search_highlights() {
     for selection_end in [body_end, source.len()] {
         session
             .view
-            .handle_message(PluginMessage::SetSelCursorByte(Some(selection_end)), &mut document);
-        for query in [
-            PluginQuery::SelectionHighlights(color),
-            PluginQuery::SourceSearchHighlights {
-                matches: std::iter::once(body_start..selection_end).collect(),
+            .selection_mut()
+            .expect("test view exposes selection")
+            .set_selection_cursor_byte(Some(selection_end));
+        let selection_highlights = session
+            .view
+            .selection()
+            .expect("Markdown uses the selection view")
+            .selection_highlights(color);
+        let search_highlights = session
+            .view
+            .search()
+            .expect("Markdown editor provides search")
+            .source_search_highlights(ui::plugin::SourceSearchHighlightsRequest {
+                matches: std::slice::from_ref(&(body_start..selection_end)),
                 source_generation: session.generation,
                 active_idx: 0,
                 match_color: color,
                 inactive_color: color,
-            },
-        ] {
-            let description = format!("{query:?}");
-            let PluginResponse::DrawList(highlights) = session.view.query(query, &document) else {
-                panic!("highlight query must return drawing commands");
-            };
+            })
+            .expect("source search produces highlight geometry");
+        for (description, highlights) in
+            [("selection", selection_highlights), ("source search", search_highlights)]
+        {
             assert!(
                 !highlights.cmds.is_empty(),
                 "visible selected code must retain its highlight: {description}"
@@ -1135,7 +1125,7 @@ fn horizontally_revealed_code_clips_selection_and_search_highlights() {
 
 #[test]
 fn long_code_left_navigation_preserves_the_visible_horizontal_viewport() {
-    use ui::plugin::{EditHitTarget, PluginQuery, PluginResponse};
+    use ui::plugin::EditHitTarget;
     let source = format!("```rust\n{}END\n```", "let value = 1; ".repeat(30));
     let end = source.find("END").expect("fixture contains end marker") + "END".len();
     let mut session = EditingSession::new(&source, end);
@@ -1143,7 +1133,7 @@ fn long_code_left_navigation_preserves_the_visible_horizontal_viewport() {
     let mut shaper = shaping::Shaper::new().expect("horizontal navigation audit requires fonts");
     let mut positions = Vec::new();
     for cursor in [end, end - 1, end - 2] {
-        session.view.handle_message(PluginMessage::SetCursorByte(cursor), &mut document);
+        session.view.set_cursor_byte(cursor);
         session.view.render(
             &document,
             ui::Rect::new(0.0, 0.0, 240.0, VIEWPORT_HEIGHT),
@@ -1160,7 +1150,7 @@ fn long_code_left_navigation_preserves_the_visible_horizontal_viewport() {
     session.cursor = end - 2;
     session.apply(EditIntent::InsertText("x".into()));
     document.0 = session.source.clone();
-    session.view.handle_message(PluginMessage::SetCursorByte(session.cursor), &mut document);
+    session.view.set_cursor_byte(session.cursor);
     session.view.render(
         &document,
         ui::Rect::new(0.0, 0.0, 240.0, VIEWPORT_HEIGHT),
@@ -1174,21 +1164,15 @@ fn long_code_left_navigation_preserves_the_visible_horizontal_viewport() {
             && inserted.0 < positions[0] - GEOMETRY_TOLERANCE,
         "source rebuild must retain the horizontal viewport: {positions:?} -> {inserted:?}"
     );
-    let hit = session.view.query(
-        PluginQuery::HitTestEditTarget {
-            x: positions[2],
-            y: inserted.1 + inserted.3 * 0.5,
-            offset_x: 0.0,
-            offset_y: 0.0,
-        },
-        &document,
-    );
-    let PluginResponse::EditHitTarget(Some(EditHitTarget::TextCaret { byte_offset, .. })) = hit
-    else {
+    let hit = session
+        .view
+        .hit_test_edit_target(positions[2], inserted.1 + inserted.3 * 0.5, 0.0, 0.0)
+        .flatten();
+    let Some(EditHitTarget::TextCaret { byte_offset, .. }) = hit else {
         panic!("visible code must be hit-testable: {hit:?}");
     };
     assert_eq!(byte_offset, end - 2);
-    session.view.handle_message(PluginMessage::SetCursorByte(byte_offset), &mut document);
+    session.view.set_cursor_byte(byte_offset);
     session.view.render(
         &document,
         ui::Rect::new(0.0, 0.0, 240.0, VIEWPORT_HEIGHT),
@@ -1206,7 +1190,7 @@ fn long_code_left_navigation_preserves_the_visible_horizontal_viewport() {
 #[test]
 fn long_code_preedit_keeps_the_composition_caret_inside_the_viewport() {
     use ui::core::paint::DrawCmd;
-    use ui::plugin::{PluginQuery, PluginResponse};
+
     let mut shaper = shaping::Shaper::new().expect("code composition audit requires fonts");
     let theme = ui::theme::test_theme();
     for newline in ["\n", "\r\n"] {
@@ -1217,9 +1201,9 @@ fn long_code_preedit_keeps_the_composition_caret_inside_the_viewport() {
             );
             let cursor = source.find("END").expect("fixture contains end marker") + "END".len();
             let mut session = EditingSession::new(&source, cursor);
-            let mut document = AuditDocument(source.clone());
-            session.view.handle_message(PluginMessage::SetCursorByte(cursor), &mut document);
-            session.view.handle_message(PluginMessage::SetCursorVisible(true), &mut document);
+            let document = AuditDocument(source.clone());
+            session.view.set_cursor_byte(cursor);
+            session.view.set_cursor_visible(true);
             session.view.render(
                 &document,
                 ui::Rect::new(0.0, 0.0, 240.0, VIEWPORT_HEIGHT),
@@ -1231,13 +1215,7 @@ fn long_code_preedit_keeps_the_composition_caret_inside_the_viewport() {
                 session.view.engine().cursor_screen_pos().expect("original code caret exists");
             for preedit in ["拼音".to_owned(), "中文".repeat(20), "é👩🏽‍💻".to_owned()]
             {
-                session.view.handle_message(
-                    PluginMessage::SetPreedit {
-                        text: preedit.clone(),
-                        cursor: Some((preedit.len(), preedit.len())),
-                    },
-                    &mut document,
-                );
+                session.view.set_preedit(preedit.clone(), Some((preedit.len(), preedit.len())));
                 let drawing = session.view.render(
                     &document,
                     ui::Rect::new(0.0, 0.0, 240.0, VIEWPORT_HEIGHT),
@@ -1262,9 +1240,7 @@ fn long_code_preedit_keeps_the_composition_caret_inside_the_viewport() {
                     carets[0]
                 );
                 assert_eq!(document.0, source, "preedit must not modify source bytes");
-                let PluginResponse::CursorScreenRect(Some(candidate)) =
-                    session.view.query(PluginQuery::CursorScreenPos(cursor), &document)
-                else {
+                let Some(candidate) = session.view.cursor_screen_rect(cursor) else {
                     panic!("composition requires a candidate anchor")
                 };
                 assert!(
@@ -1282,10 +1258,7 @@ fn long_code_preedit_keeps_the_composition_caret_inside_the_viewport() {
                         );
                     }
                 }
-                session.view.handle_message(
-                    PluginMessage::SetPreedit { text: String::new(), cursor: None },
-                    &mut document,
-                );
+                session.view.set_preedit(String::new(), None);
                 session.view.render(
                     &document,
                     ui::Rect::new(0.0, 0.0, 240.0, VIEWPORT_HEIGHT),

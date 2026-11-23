@@ -162,11 +162,7 @@ impl App {
             } else {
                 (String::new(), false, 0)
             };
-        tab.send_message(ui::plugin::PluginMessage::ScrollToSearchMatch {
-            query,
-            match_case,
-            active_idx,
-        });
+        tab.scroll_to_search_match(&query, match_case, active_idx);
     }
 
     /// Run the SIMD search on the active document and update its SearchState.

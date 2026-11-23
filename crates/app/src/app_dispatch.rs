@@ -808,10 +808,7 @@ pub(crate) mod canvas_drag_test_support {
     use std::cell::RefCell;
     use std::rc::Rc;
 
-    use ui::plugin::{
-        CanvasDragRequest, CanvasDragResponse, EditHitTarget, PluginMessage, PluginQuery,
-        PluginResponse, ViewPlugin,
-    };
+    use ui::plugin::{CanvasDragRequest, CanvasDragResponse, EditHitTarget, ViewPlugin};
     use winit::event::ElementState;
 
     #[derive(Default)]
@@ -828,6 +825,10 @@ pub(crate) mod canvas_drag_test_support {
             "canvas_drag_lifecycle_test"
         }
 
+        fn mode(&self) -> ui::plugin::PluginMode {
+            ui::plugin::PluginMode::RichText
+        }
+
         fn render(
             &mut self,
             _doc: &dyn textora_core::document::DocView,
@@ -838,40 +839,51 @@ pub(crate) mod canvas_drag_test_support {
         ) -> ui::core::paint::DrawList {
             ui::core::paint::DrawList::new()
         }
+    }
+
+    impl ui::plugin::EditPolicy for CanvasDragPlugin {
+        fn plan_edit(&self, _: &ui::plugin::EditRequest) -> ui::plugin::EditPlan {
+            ui::plugin::EditPlan::UseDefault
+        }
+    }
+
+    impl ui::plugin::EditableView for CanvasDragPlugin {
+        fn hit_test_edit_target(
+            &self,
+            _x: f32,
+            _y: f32,
+            _offset_x: f32,
+            _offset_y: f32,
+        ) -> Option<Option<ui::plugin::EditHitTarget>> {
+            Some(Some(EditHitTarget::SourceObject { source_range: 1..2 }))
+        }
+    }
+
+    impl ui::plugin::ScrollableView for CanvasDragPlugin {
+        fn content_height(&self) -> f32 {
+            1_000.0
+        }
+    }
+
+    impl ui::plugin::ViewPluginCapabilities for CanvasDragPlugin {
+        fn scrollable(&self) -> Option<&dyn ui::plugin::ScrollableView> {
+            Some(self)
+        }
+
+        fn editable(&self) -> Option<&dyn ui::plugin::EditableView> {
+            Some(self)
+        }
 
         fn allows_editing(&self) -> bool {
             true
         }
 
-        fn handles_own_rendering(&self) -> bool {
-            true
+        fn canvas_mut(&mut self) -> Option<&mut dyn ui::plugin::CanvasView> {
+            Some(self)
         }
+    }
 
-        fn query(
-            &self,
-            query: PluginQuery,
-            _doc: &dyn textora_core::document::DocView,
-        ) -> PluginResponse {
-            match query {
-                PluginQuery::NeedsSourceUpdate(_) => PluginResponse::Bool(false),
-                PluginQuery::HitTestEditTarget { .. } => {
-                    PluginResponse::EditHitTarget(Some(EditHitTarget::SourceObject {
-                        source_range: 1..2,
-                    }))
-                }
-                PluginQuery::ContentHeight => PluginResponse::Float(1_000.0),
-                _ => PluginResponse::None,
-            }
-        }
-
-        fn handle_message(
-            &mut self,
-            _message: PluginMessage,
-            _doc: &mut dyn textora_core::document::DocViewMut,
-        ) -> bool {
-            false
-        }
-
+    impl ui::plugin::CanvasView for CanvasDragPlugin {
         fn handle_canvas_drag(
             &mut self,
             request: CanvasDragRequest,
@@ -1036,6 +1048,7 @@ mod tests {
     struct MindmapStyleDispatchState {
         plan_queries: RefCell<Vec<(String, u32)>>,
         synchronized_sources: RefCell<Vec<String>>,
+        synchronized_generation: std::cell::Cell<Option<u32>>,
     }
 
     struct MindmapStyleDispatchPlugin {
@@ -1049,6 +1062,10 @@ mod tests {
             self.name
         }
 
+        fn mode(&self) -> ui::plugin::PluginMode {
+            ui::plugin::PluginMode::Source
+        }
+
         fn render(
             &mut self,
             _doc: &dyn textora_core::document::DocView,
@@ -1060,18 +1077,24 @@ mod tests {
             ui::core::paint::DrawList::new()
         }
 
-        fn handle_message(
+        fn sync_document(
             &mut self,
-            message: ui::plugin::PluginMessage,
-            _document: &mut dyn textora_core::document::DocViewMut,
-        ) -> bool {
-            let ui::plugin::PluginMessage::UpdateSource { text, .. } = message else {
-                return false;
-            };
-            self.state.synchronized_sources.borrow_mut().push(text);
-            true
+            generation: u32,
+            reason: ui::plugin::SyncReason,
+            load_source: &mut dyn FnMut() -> String,
+        ) -> ui::plugin::SyncOutcome {
+            if reason == ui::plugin::SyncReason::Normal
+                && self.state.synchronized_generation.get() == Some(generation)
+            {
+                return ui::plugin::SyncOutcome::Unchanged;
+            }
+            self.state.synchronized_sources.borrow_mut().push(load_source());
+            self.state.synchronized_generation.set(Some(generation));
+            ui::plugin::SyncOutcome::Updated
         }
+    }
 
+    impl ui::plugin::ViewPluginCapabilities for MindmapStyleDispatchPlugin {
         fn query(
             &self,
             query: ui::plugin::PluginQuery,
@@ -1530,12 +1553,14 @@ mod tests {
     }
 
     impl ui::plugin::ViewPlugin for WysiwygBoundsPlugin {
-        fn handles_own_rendering(&self) -> bool {
-            true
-        }
         fn name(&self) -> &str {
             "wysiwyg_bounds"
         }
+
+        fn mode(&self) -> ui::plugin::PluginMode {
+            ui::plugin::PluginMode::RichText
+        }
+
         fn render(
             &mut self,
             _doc: &dyn textora_core::document::DocView,
@@ -1547,6 +1572,8 @@ mod tests {
             ui::core::paint::DrawList::new()
         }
     }
+
+    impl ui::plugin::ViewPluginCapabilities for WysiwygBoundsPlugin {}
 
     struct CanvasViewportRouterPlugin;
 
@@ -1555,6 +1582,10 @@ mod tests {
             "canvas_viewport_router"
         }
 
+        fn mode(&self) -> ui::plugin::PluginMode {
+            ui::plugin::PluginMode::Canvas
+        }
+
         fn render(
             &mut self,
             _doc: &dyn textora_core::document::DocView,
@@ -1565,11 +1596,9 @@ mod tests {
         ) -> ui::core::paint::DrawList {
             ui::core::paint::DrawList::new()
         }
-
-        fn is_canvas(&self) -> bool {
-            true
-        }
     }
+
+    impl ui::plugin::ViewPluginCapabilities for CanvasViewportRouterPlugin {}
 
     fn app_with_prepared_canvas_viewport() -> App {
         let mut app = App::new(None);

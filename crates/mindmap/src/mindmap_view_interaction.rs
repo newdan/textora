@@ -123,28 +123,35 @@ impl MindmapView {
         })
     }
 
+    pub(in crate::mindmap_view) fn canvas_control_source_range(
+        &self,
+        position: CanvasPoint,
+    ) -> Option<std::ops::Range<usize>> {
+        let MindmapDocumentState::Ready { tree, hit_map: Some(hit_map), .. } = &self.document_state
+        else {
+            return None;
+        };
+        let pointer = self.screen_to_content(position.x, position.y)?;
+        let control = hit_map
+            .controls
+            .iter()
+            .find(|control| control.bounds.contains(pointer.x, pointer.y))?;
+        let nodes = collect_nodes_dfs(&tree.root);
+        Some(nodes.get(control.source_node_index)?.subtree_source_range.clone())
+    }
+
     pub(in crate::mindmap_view) fn semantic_hit_target(
         &self,
         x: f32,
         y: f32,
     ) -> Option<EditHitTarget> {
-        let MindmapDocumentState::Ready { tree, hit_map: Some(hit_map), .. } = &self.document_state
+        let MindmapDocumentState::Ready { hit_map: Some(hit_map), .. } = &self.document_state
         else {
             return None;
         };
         let pointer = self.screen_to_content(x, y)?;
         let canvas_x = pointer.x;
         let canvas_y = pointer.y;
-        let nodes = collect_nodes_dfs(&tree.root);
-
-        for control in &hit_map.controls {
-            if control.bounds.contains(canvas_x, canvas_y) {
-                let node = nodes.get(control.source_node_index)?;
-                return Some(EditHitTarget::CanvasControl {
-                    source_range: node.subtree_source_range.clone(),
-                });
-            }
-        }
 
         for geometry in &hit_map.nodes {
             if geometry.contains_title(canvas_x, canvas_y) {

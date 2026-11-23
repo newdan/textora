@@ -802,6 +802,10 @@ mod build_shell_inputs_tests {
             "canvas_shell_inputs_test"
         }
 
+        fn mode(&self) -> ui::plugin::PluginMode {
+            ui::plugin::PluginMode::Canvas
+        }
+
         fn render(
             &mut self,
             _doc: &dyn textora_core::document::DocView,
@@ -812,11 +816,9 @@ mod build_shell_inputs_tests {
         ) -> ui::core::paint::DrawList {
             ui::core::paint::DrawList::new()
         }
-
-        fn is_canvas(&self) -> bool {
-            true
-        }
     }
+
+    impl ui::plugin::ViewPluginCapabilities for CanvasPlugin {}
 
     #[test]
     fn dpi_field_is_set() {

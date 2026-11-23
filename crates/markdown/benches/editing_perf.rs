@@ -2,10 +2,8 @@ use criterion::{
     BatchSize, BenchmarkId, Criterion, Throughput, black_box, criterion_group, criterion_main,
 };
 use shaping::Shaper;
-use std::borrow::Cow;
 use std::cell::RefCell;
-use std::ops::Range;
-use textora_core::document::{DocView, DocViewMut, StringDocView};
+use textora_core::document::StringDocView;
 use textora_markdown::augmenter::augment_edit;
 use textora_markdown::builder::MarkdownDoc;
 use textora_markdown::layout::layout_doc_for_rendering;
@@ -15,9 +13,9 @@ use textora_markdown::view::MarkdownEditorView;
 use ui::Rect;
 use ui::core::DrawList;
 use ui::plugin::{
-    AugmentKind, EditIntent, EditPlan, EditRequest, EditSelection, EditTransaction, PluginMessage,
-    ViewPlugin,
+    AugmentKind, EditIntent, EditPlan, EditRequest, EditSelection, EditTransaction, ViewPlugin,
 };
+use ui::plugin::{EditPolicy, EditableView};
 use ui::theme::Theme;
 
 const VIEWPORT_WIDTH: f32 = 720.0;
@@ -133,41 +131,6 @@ const INITIAL_GENERATION: u32 = 1;
 const INSERTED_TEXT: &str = "中";
 const TABLE_HEADER: &str = "| 名称 | 说明 |";
 
-// The plugin accepts a mutable viewport when receiving cursor messages.
-struct BenchmarkDocument<'a>(StringDocView<'a>);
-
-impl DocView for BenchmarkDocument<'_> {
-    fn line_count(&self) -> usize {
-        self.0.line_count()
-    }
-
-    fn doc_line_text(&self, line: usize) -> Cow<'_, str> {
-        self.0.doc_line_text(line)
-    }
-
-    fn doc_text_in_range(&self, range: Range<usize>) -> Cow<'_, str> {
-        self.0.doc_text_in_range(range)
-    }
-
-    fn line_byte_offset(&self, line: usize) -> usize {
-        self.0.line_byte_offset(line)
-    }
-
-    fn line_byte_length(&self, line: usize) -> usize {
-        self.0.line_byte_length(line)
-    }
-
-    fn scroll_y(&self) -> f32 {
-        self.0.scroll_y()
-    }
-
-    fn viewport_height(&self) -> f32 {
-        VIEWPORT_HEIGHT
-    }
-}
-
-impl DocViewMut for BenchmarkDocument<'_> {}
-
 struct EditorFrame {
     view: MarkdownEditorView,
     source: String,
@@ -183,8 +146,7 @@ impl EditorFrame {
     }
 
     fn set_caret(&mut self, caret: usize) {
-        let mut document = BenchmarkDocument(StringDocView::new(&self.source));
-        self.view.handle_message(PluginMessage::SetCursorByte(caret), &mut document);
+        self.view.set_cursor_byte(caret);
     }
 
     fn draw(&mut self, width: f32, theme: &Theme, shaper: &mut Shaper) -> DrawList {
@@ -194,7 +156,7 @@ impl EditorFrame {
     }
 
     fn apply_edit(&mut self, request: &EditRequest) {
-        let plan = self.view.edit_policy().plan_edit(request);
+        let plan = self.view.plan_edit(request);
         let transaction = match (plan, &request.intent) {
             (EditPlan::Apply(transaction), _) => transaction,
             (EditPlan::UseDefault, EditIntent::InsertText(text)) => EditTransaction::replace(

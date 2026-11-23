@@ -380,7 +380,7 @@ impl App {
     pub(crate) fn push_entry_for_test(
         &mut self,
         document: crate::document_fixture::DocumentFixture,
-        plugin: Box<dyn ui::plugin::ViewPlugin>,
+        plugin: Box<dyn ui::plugin::ViewPluginCapabilities>,
     ) -> TabId {
         let (document, presentation) = document.into_parts();
         let runtime = TabRuntime::with_presentation(plugin, presentation);
@@ -413,7 +413,8 @@ impl App {
     }
 
     pub(crate) fn active_is_reading_mode(&self) -> bool {
-        self.active_tab_session().is_some_and(|session| !session.allows_editing())
+        self.active_tab_session()
+            .is_some_and(|session| session.plugin().mode() == ui::plugin::PluginMode::Reading)
     }
 
     pub(crate) fn active_is_mindmap(&self) -> bool {
@@ -612,6 +613,10 @@ mod tests {
                 "app-tab-canvas-test"
             }
 
+            fn mode(&self) -> ui::plugin::PluginMode {
+                ui::plugin::PluginMode::Canvas
+            }
+
             fn render(
                 &mut self,
                 _: &dyn textora_core::document::DocView,
@@ -622,11 +627,9 @@ mod tests {
             ) -> DrawList {
                 DrawList::new()
             }
-
-            fn is_canvas(&self) -> bool {
-                true
-            }
         }
+
+        impl ui::plugin::ViewPluginCapabilities for CanvasPlugin {}
 
         let mut app = App::new(None);
         let tab_id = app.push_entry_for_test(
@@ -652,5 +655,12 @@ mod tests {
         assert!(snapshot.is_some(), "canvas viewport fixture should prepare a snapshot");
 
         assert!(app.active_has_canvas_viewport_snapshot());
+
+        app.tab_runtime_mut(tab_id)
+            .expect("canvas tab should have a runtime")
+            .set_editing_access(appkit_shell::tab_runtime::DocumentEditingAccess::ReadOnly);
+        assert!(!app.active_allows_editing());
+        assert!(!app.active_is_reading_mode(), "an immutable canvas remains a canvas");
+        assert!(app.active_handles_own_rendering());
     }
 }

@@ -20,203 +20,224 @@ impl<S: BlockSource> PreviewEngine<S> {
         crate::edit::cursor_in_span(span, ctx.cursor_byte)
     }
 
-    // ── Common query/message helpers ──
-
-    /// Handle queries common to all markdown views (preview + editor).
-    /// Returns `Some(response)` for recognized queries, `None` for view-specific ones.
-    pub fn query_common(&self, q: &PluginQuery) -> Option<PluginResponse> {
-        match q {
-            PluginQuery::ScrollY => Some(PluginResponse::Float(self.scroll_y)),
-            PluginQuery::ContentHeight => Some(PluginResponse::Float(self.content_height)),
-            PluginQuery::NeedsSourceUpdate(_) => None,
-            PluginQuery::TOCHeadings => Some(PluginResponse::Headings(
-                self.headings()
-                    .iter()
-                    .map(|h| ui::plugin::HeadingEntry {
-                        title: h.text.clone(),
-                        y: h.y_offset,
-                        level: h.level,
-                    })
-                    .collect(),
-            )),
-            PluginQuery::CurrentHeadingIndex(scroll_y) => Some(PluginResponse::Position(
-                self.current_heading_index(*scroll_y).map(|i| (i, 0)),
-            )),
-            PluginQuery::HasSelection => Some(PluginResponse::Bool(self.has_selection())),
-            PluginQuery::SelectedText => {
-                Some(PluginResponse::String(self.selected_text().unwrap_or_default()))
+    pub(in crate::view) fn set_view_render_settings(
+        &mut self,
+        settings: ui::plugin::ViewRenderSettings,
+    ) {
+        if self.base_font_family != settings.font_family {
+            self.base_font_family = settings.font_family;
+            if !matches!(self.dirty, EngineDirty::SourceChanged) {
+                self.dirty = EngineDirty::StyleChanged;
             }
-            PluginQuery::SelCursor => {
-                Some(PluginResponse::Position(self.sel.cursor.map(ViewPos::indices)))
-            }
-            PluginQuery::SelectionRange => Some(PluginResponse::PositionPair(
-                self.selection_source_range().map(|(start, end)| ((start, 0), (end, 0))),
-            )),
-            PluginQuery::HitTest { x, y, offset_x, offset_y } => Some(PluginResponse::Position(
-                self.hit_test(*x, *y, *offset_x, *offset_y).map(ViewPos::indices),
-            )),
-            PluginQuery::SelectionHighlights(color) => {
-                Some(PluginResponse::DrawList(self.selection_highlights(*color)))
-            }
-            PluginQuery::FlatLines => Some(PluginResponse::FlatLines(
-                self.flat_lines()
-                    .iter()
-                    .map(|line| {
-                        let grapheme_count = crate::grapheme_map::grapheme_count(&line.text);
-                        ui::plugin::FlatLine {
-                            text: line.text.clone(),
-                            grapheme_count,
-                            rect: line.rect,
-                            grapheme_x: (0..=grapheme_count)
-                                .map(|grapheme| crate::layout::grapheme_x(line, grapheme))
-                                .collect(),
-                        }
-                    })
-                    .collect(),
-            )),
-            PluginQuery::WordAtPos(li, gp) => {
-                let (s, e) = self.word_at_pos(ViewPos::from_indices(*li, *gp));
-                Some(PluginResponse::PositionPair(Some((s.indices(), e.indices()))))
-            }
-            PluginQuery::LineRangeAtPos(li, gp) => {
-                let (s, e) = self.line_range_at_pos(ViewPos::from_indices(*li, *gp));
-                Some(PluginResponse::PositionPair(Some((s.indices(), e.indices()))))
-            }
-            PluginQuery::CursorScreenPos(byte) => Some(PluginResponse::CursorScreenRect(
-                self.edit_ctx
-                    .as_ref()
-                    .filter(|ctx| ctx.cursor_byte == *byte)
-                    .and_then(|_| self.visual_cursor_screen_pos())
-                    .or_else(|| self.cursor_screen_pos_for_byte(*byte)),
-            )),
-            PluginQuery::HitTestByte { x, y, offset_x, offset_y } => {
-                Some(PluginResponse::BytePosition(self.hit_test_byte(*x, *y, *offset_x, *offset_y)))
-            }
-            PluginQuery::HitTestVisualCaret { x, y, offset_x, offset_y } => {
-                Some(PluginResponse::VisualCaretPosition(
-                    self.hit_test_anchor(*x, *y, *offset_x, *offset_y).map(|anchor| {
-                        VisualCaretPosition {
-                            byte_offset: anchor.byte.get(),
-                            affinity: anchor.affinity,
-                        }
-                    }),
-                ))
-            }
-            PluginQuery::VisualMove { current_byte, direction, target_x } => {
-                Some(PluginResponse::BytePosition(self.visual_move(
-                    *current_byte,
-                    *direction,
-                    *target_x,
-                )))
-            }
-            PluginQuery::VisualMoveCaret { current_byte, direction, target_x } => {
-                Some(PluginResponse::VisualCaretPosition(
-                    self.visual_move_anchor(*current_byte, *direction, *target_x).map(|anchor| {
-                        VisualCaretPosition {
-                            byte_offset: anchor.byte.get(),
-                            affinity: anchor.affinity,
-                        }
-                    }),
-                ))
-            }
-
-            _ => None,
+            self.cached_dl = None;
+            self.cached_vertices = None;
         }
+        self.base_font_size = settings.font_size;
+        self.base_line_height = settings.line_height;
+        self.toc_max_depth = settings.toc_max_depth;
+        self.markdown_first_line_indent = settings.markdown_first_line_indent;
     }
 
-    /// Handle messages common to all markdown views.
-    /// Returns `Some(result)` for recognized messages, `None` for view-specific ones.
-    pub fn handle_message_common(&mut self, msg: &PluginMessage) -> Option<bool> {
-        match msg {
-            PluginMessage::Scroll { delta, viewport_h } => Some(self.scroll(*delta, *viewport_h)),
-            PluginMessage::ScrollToHeading(index) => {
-                self.scroll_to_heading(*index);
-                Some(true)
-            }
-            PluginMessage::UpdateSource { .. } => None,
-            PluginMessage::SetSelCursor(pos) => {
-                self.set_sel_cursor(*pos);
-                Some(true)
-            }
-            PluginMessage::SetSelAnchor(pos) => {
-                self.set_sel_anchor(*pos);
-                Some(true)
-            }
-            PluginMessage::SetSelCursorByte(byte) => {
-                self.set_sel_cursor_byte(*byte);
-                Some(true)
-            }
-            PluginMessage::SetSelAnchorByte(byte) => {
-                self.set_sel_anchor_byte(*byte);
-                Some(true)
-            }
-            PluginMessage::ClearSelection => {
-                self.clear_selection();
-                Some(true)
-            }
-            PluginMessage::SelectAll => {
-                self.select_all();
-                Some(true)
-            }
-            PluginMessage::SetRenderSettings {
-                font_family,
-                font_size,
-                line_height,
-                toc_max_depth,
-                markdown_first_line_indent,
-            } => {
-                if self.base_font_family != *font_family {
-                    self.base_font_family.clone_from(font_family);
-                    if !matches!(self.dirty, EngineDirty::SourceChanged) {
-                        self.dirty = EngineDirty::StyleChanged;
-                    }
-                    self.cached_dl = None;
-                    self.cached_vertices = None;
-                }
-                self.base_font_size = *font_size;
-                self.base_line_height = *line_height;
-                self.toc_max_depth = *toc_max_depth;
-                self.markdown_first_line_indent = *markdown_first_line_indent;
-                Some(true)
-            }
-            PluginMessage::SetTextSpacingMode(mode) => {
-                if self.text_spacing_mode == *mode {
-                    return Some(true);
-                }
-                self.text_spacing_mode = *mode;
-                self.dirty = EngineDirty::StyleChanged;
-                self.cached_dl = None;
-                self.cached_vertices = None;
-                Some(true)
-            }
-            PluginMessage::SetCursorByte(byte) => {
-                self.handle_set_cursor_byte(*byte);
-                Some(true)
-            }
-            PluginMessage::SetVisualCaret(position) => {
-                self.handle_set_cursor_byte(position.byte_offset);
-                if self.cursor_affinity != position.affinity {
-                    self.cursor_affinity = position.affinity;
-                    self.cached_dl = None;
-                    self.cached_vertices = None;
-                }
-                Some(true)
-            }
-            PluginMessage::RevealCursor(byte) => {
-                self.pending_cursor_reveal = Some(*byte);
-                self.cached_dl = None;
-                self.cached_vertices = None;
-                Some(true)
-            }
-            PluginMessage::SetPreedit { text, cursor } => {
-                self.set_preedit_text(text.clone(), *cursor);
-                Some(true)
-            }
-            PluginMessage::SetCursorVisible(visible) => {
-                self.cursor_visible = *visible;
-                Some(true)
-            }
-            _ => None,
+    pub(in crate::view) fn set_view_text_spacing_mode(
+        &mut self,
+        mode: ui::typography::TextSpacingMode,
+    ) {
+        if self.text_spacing_mode == mode {
+            return;
         }
+        self.text_spacing_mode = mode;
+        self.dirty = EngineDirty::StyleChanged;
+        self.cached_dl = None;
+        self.cached_vertices = None;
+    }
+}
+
+impl<S: BlockSource> ui::plugin::OutlineProvider for PreviewEngine<S> {
+    fn headings(&self) -> Vec<ui::plugin::HeadingEntry> {
+        self.headings()
+            .iter()
+            .map(|heading| ui::plugin::HeadingEntry {
+                title: heading.text.clone(),
+                y: heading.y_offset,
+                level: heading.level,
+            })
+            .collect()
+    }
+
+    fn current_heading_index(&self, scroll_y: f32) -> Option<usize> {
+        PreviewEngine::current_heading_index(self, scroll_y)
+    }
+
+    fn scroll_to_heading(&mut self, index: usize) {
+        PreviewEngine::scroll_to_heading(self, index);
+    }
+}
+
+impl<S: BlockSource> ui::plugin::ScrollableView for PreviewEngine<S> {
+    fn scroll_y(&self, _document: &dyn DocView) -> f32 {
+        self.scroll_y
+    }
+
+    fn content_height(&self) -> f32 {
+        self.content_height
+    }
+
+    fn scroll(&mut self, delta: f32, viewport_height: f32) -> bool {
+        PreviewEngine::scroll(self, delta, viewport_height)
+    }
+}
+
+fn reading_position(position: ViewPos) -> ui::plugin::ReadingPosition {
+    let (line_index, grapheme_index) = position.indices();
+    ui::plugin::ReadingPosition::new(line_index, grapheme_index)
+}
+
+impl<S: BlockSource> PreviewEngine<S> {
+    fn reading_flat_lines(&self) -> Vec<ui::plugin::FlatLine> {
+        self.flat_lines()
+            .iter()
+            .map(|line| {
+                let grapheme_count = crate::grapheme_map::grapheme_count(&line.text);
+                ui::plugin::FlatLine {
+                    text: line.text.clone(),
+                    grapheme_count,
+                    rect: line.rect,
+                    grapheme_x: (0..=grapheme_count)
+                        .map(|grapheme| crate::layout::grapheme_x(line, grapheme))
+                        .collect(),
+                }
+            })
+            .collect()
+    }
+}
+
+macro_rules! markdown_selection_view {
+    ($view:ty) => {
+        impl ui::plugin::SelectionView for $view {
+            fn has_selection(&self) -> bool {
+                self.engine.has_selection()
+            }
+
+            fn selected_text(&self) -> Option<String> {
+                self.engine.selected_reading_text(&self.source)
+            }
+
+            fn selection_cursor(&self) -> Option<ui::plugin::ReadingPosition> {
+                self.engine.sel.cursor.map(reading_position)
+            }
+
+            fn selection_source_range(&self) -> Option<std::ops::Range<usize>> {
+                self.engine.selection_source_range().map(|(start, end)| start..end)
+            }
+
+            fn hit_test_position(
+                &self,
+                x: f32,
+                y: f32,
+                offset_x: f32,
+                offset_y: f32,
+            ) -> Option<ui::plugin::ReadingPosition> {
+                self.engine.hit_test(x, y, offset_x, offset_y).map(reading_position)
+            }
+
+            fn word_range(
+                &self,
+                position: ui::plugin::ReadingPosition,
+            ) -> Option<std::ops::Range<ui::plugin::ReadingPosition>> {
+                let (start, end) = self.engine.word_at_pos(ViewPos::from_indices(
+                    position.line_index,
+                    position.grapheme_index,
+                ));
+                Some(reading_position(start)..reading_position(end))
+            }
+
+            fn line_range(
+                &self,
+                position: ui::plugin::ReadingPosition,
+            ) -> Option<std::ops::Range<ui::plugin::ReadingPosition>> {
+                let (start, end) = self.engine.line_range_at_pos(ViewPos::from_indices(
+                    position.line_index,
+                    position.grapheme_index,
+                ));
+                Some(reading_position(start)..reading_position(end))
+            }
+
+            fn flat_lines(&self) -> Vec<ui::plugin::FlatLine> {
+                self.engine.reading_flat_lines()
+            }
+
+            fn selection_highlights(&self, color: [f32; 4]) -> DrawList {
+                self.engine.selection_highlights(color)
+            }
+
+            fn set_selection_cursor(
+                &mut self,
+                position: Option<ui::plugin::ReadingPosition>,
+                _document: &dyn DocView,
+            ) -> bool {
+                self.engine.set_sel_cursor(position.map(ui::plugin::ReadingPosition::indices));
+                true
+            }
+
+            fn set_selection_anchor(
+                &mut self,
+                position: Option<ui::plugin::ReadingPosition>,
+                _document: &dyn DocView,
+            ) -> bool {
+                self.engine.set_sel_anchor(position.map(ui::plugin::ReadingPosition::indices));
+                true
+            }
+
+            fn set_selection_cursor_byte(&mut self, byte: Option<usize>) -> bool {
+                self.engine.set_sel_cursor_byte(byte);
+                true
+            }
+
+            fn set_selection_anchor_byte(&mut self, byte: Option<usize>) -> bool {
+                self.engine.set_sel_anchor_byte(byte);
+                true
+            }
+
+            fn clear_selection(&mut self) -> bool {
+                self.engine.clear_selection();
+                true
+            }
+
+            fn select_all(&mut self) -> bool {
+                self.engine.select_all();
+                true
+            }
+        }
+    };
+}
+
+markdown_selection_view!(MarkdownEditorView);
+markdown_selection_view!(MarkdownView);
+
+impl ui::plugin::SelectionView for NovelView {
+    fn has_selection(&self) -> bool {
+        self.engine.has_selection()
+    }
+
+    fn selected_text(&self) -> Option<String> {
+        self.engine.selected_text()
+    }
+
+    fn selection_cursor(&self) -> Option<ui::plugin::ReadingPosition> {
+        self.engine.sel.cursor.map(reading_position)
+    }
+
+    fn hit_test_position(
+        &self,
+        x: f32,
+        y: f32,
+        offset_x: f32,
+        offset_y: f32,
+    ) -> Option<ui::plugin::ReadingPosition> {
+        self.engine.hit_test(x, y, offset_x, offset_y).map(reading_position)
+    }
+
+    fn flat_lines(&self) -> Vec<ui::plugin::FlatLine> {
+        self.engine.reading_flat_lines()
     }
 }

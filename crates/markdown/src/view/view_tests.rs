@@ -1,6 +1,7 @@
 use super::*;
 use crate::projection::SourceByte;
 use crate::selection::GraphemeIdx;
+use ui::plugin::EditableView;
 
 #[cfg(test)]
 mod dpi_style_tests {
@@ -14,10 +15,10 @@ mod dpi_style_tests {
         let mut engine: PreviewEngine = PreviewEngine::new();
         assert_eq!(engine.text_spacing_mode, ui::typography::TextSpacingMode::Natural);
 
-        let message = PluginMessage::SetTextSpacingMode(ui::typography::TextSpacingMode::Verbatim);
-        assert_eq!(engine.handle_message_common(&message), Some(true));
+        let mode = ui::typography::TextSpacingMode::Verbatim;
+        engine.set_view_text_spacing_mode(mode);
         assert_eq!(engine.text_spacing_mode, ui::typography::TextSpacingMode::Verbatim);
-        assert_eq!(engine.handle_message_common(&message), Some(true));
+        engine.set_view_text_spacing_mode(mode);
         assert_eq!(engine.text_spacing_mode, ui::typography::TextSpacingMode::Verbatim);
     }
 
@@ -427,7 +428,7 @@ mod wysiwyg_tests {
     #[test]
     fn novel_view_spacing_setting_changes_geometry_without_editing_source() {
         let source = "中文A,继续(说明)正文";
-        let mut document = StubDoc::new(source);
+        let document = StubDoc::new(source);
         let mut view = NovelView::new();
         let theme = ui::theme::test_theme();
         let bounds = ui::core::geom::Rect::new(0.0, 0.0, 800.0, 600.0);
@@ -438,17 +439,11 @@ mod wysiwyg_tests {
                 view.engine.flat_lines()[0].shaped.as_ref().expect("novel line must shape").width
             };
         let natural_width = render_width(&mut view, &mut shaper, &document);
-        assert!(view.handle_message(
-            PluginMessage::SetTextSpacingMode(ui::typography::TextSpacingMode::Verbatim),
-            &mut document,
-        ));
+        view.set_view_text_spacing_mode(ui::typography::TextSpacingMode::Verbatim);
         let verbatim_width = render_width(&mut view, &mut shaper, &document);
         assert!(natural_width > verbatim_width);
         assert_eq!(document.text, source);
-        assert!(view.handle_message(
-            PluginMessage::SetTextSpacingMode(ui::typography::TextSpacingMode::Natural),
-            &mut document,
-        ));
+        view.set_view_text_spacing_mode(ui::typography::TextSpacingMode::Natural);
         let restored_width = render_width(&mut view, &mut shaper, &document);
         assert!((restored_width - natural_width).abs() < 0.01);
         assert_eq!(document.text, source);
@@ -561,19 +556,15 @@ mod wysiwyg_tests {
 
     #[test]
     fn wysiwyg_can_scroll_to_trailing_empty_source_lines() {
-        use ui::plugin::{PluginMessage, ViewPlugin};
-
         let source = "paragraph\n\n\n";
         let viewport_height = 48.0;
-        let mut document = StubDoc::new(source);
+        let document = StubDoc::new(source);
         let mut view = MarkdownEditorView::new();
         view.set_source(source.to_string(), 1);
         render_editor_with_offset_y(&mut view, &document, viewport_height, 0.0);
 
-        let did_scroll = view.handle_message(
-            PluginMessage::Scroll { delta: 100.0, viewport_h: viewport_height },
-            &mut document,
-        );
+        let did_scroll =
+            view.scrollable_mut().expect("editor scroll capability").scroll(100.0, viewport_height);
 
         assert!(did_scroll, "trailing empty source lines must extend the scrollable range");
         assert!(view.engine().scroll_y > 0.0, "scroll position must advance past the text block");
@@ -631,8 +622,6 @@ mod wysiwyg_tests {
 
     #[test]
     fn promotion_blockquote_click_roundtrip_and_vertical_navigation_reach_line_three() {
-        use ui::plugin::{PluginMessage, ViewPlugin};
-
         const NARROW_VIEWPORT_WIDTH: f32 = 180.0;
         const WIDE_VIEWPORT_WIDTH: f32 = 800.0;
         let source = "# Promotion & Marketing\n\n> Applicable scenarios: Brand launches, marketing campaigns, art/fashion/culture showcases, product introductions, etc.\n> Style anchor: Apple Keynote / Xiaomi product launch / High-end fashion brands / Art exhibitions / Cultural promotion / Premium brand visual systems\n\n## Design Philosophy\n\n- **Top-tier visual impact**: Large images and bold typography, using extreme visual tension to convey brand tone, artistic quality, or cultural depth — every page should leave the audience breathless\n";
@@ -643,10 +632,10 @@ mod wysiwyg_tests {
         let title_start = source.find("Promotion").expect("fixture must contain title text");
 
         for width in [NARROW_VIEWPORT_WIDTH, WIDE_VIEWPORT_WIDTH] {
-            let mut document = StubDoc::new(source);
+            let document = StubDoc::new(source);
             let mut view = MarkdownEditorView::new();
             view.set_source(document.text.clone(), 1);
-            view.handle_message(PluginMessage::SetCursorByte(0), &mut document);
+            view.set_cursor_byte(0);
             render_editor_narrow(&mut view, &document, width);
 
             let (flat_idx, grapheme_idx) = view
@@ -668,7 +657,7 @@ mod wysiwyg_tests {
                 .engine()
                 .hit_test_byte(click_x, click_y, 0.0, 0.0)
                 .expect("first click on real line three must produce a source byte");
-            view.handle_message(PluginMessage::SetCursorByte(first_hit), &mut document);
+            view.set_cursor_byte(first_hit);
             render_editor_narrow(&mut view, &document, width);
 
             let (cursor_x, cursor_y, _cursor_width, cursor_height) = view
@@ -683,7 +672,7 @@ mod wysiwyg_tests {
             assert_eq!(first_hit, line_three_start);
             assert_eq!(second_hit, line_three_start);
 
-            view.handle_message(PluginMessage::SetCursorByte(title_start), &mut document);
+            view.set_cursor_byte(title_start);
             render_editor_narrow(&mut view, &document, width);
             let (title_x, _title_y, _title_width, _title_height) = view
                 .engine()
@@ -737,17 +726,15 @@ mod wysiwyg_tests {
 
     #[test]
     fn promotion_em_dash_click_roundtrip_never_lands_inside_utf8_sequence() {
-        use ui::plugin::{PluginMessage, ViewPlugin};
-
         let source = "# Promotion & Marketing\n\n> Applicable scenarios: Brand launches, marketing campaigns, art/fashion/culture showcases, product introductions, etc.\n> Style anchor: Apple Keynote / Xiaomi product launch / High-end fashion brands / Art exhibitions / Cultural promotion / Premium brand visual systems\n\n## Design Philosophy\n\n- **Top-tier visual impact**: Large images and bold typography, using extreme visual tension to convey brand tone, artistic quality, or cultural depth — every page should leave the audience breathless\n";
         let em_dash = source.find('—').expect("fixture must contain real line eight em dash");
         let after_em_dash = em_dash + '—'.len_utf8();
 
         for width in [180.0, 800.0] {
-            let mut document = StubDoc::new(source);
+            let document = StubDoc::new(source);
             let mut view = MarkdownEditorView::new();
             view.set_source(document.text.clone(), 1);
-            view.handle_message(PluginMessage::SetCursorByte(0), &mut document);
+            view.set_cursor_byte(0);
             render_editor_narrow(&mut view, &document, width);
 
             let (flat_idx, grapheme_idx) = view
@@ -769,7 +756,7 @@ mod wysiwyg_tests {
                 .engine()
                 .hit_test_byte(click_x, click_y, 0.0, 0.0)
                 .expect("first click after real em dash must produce a source byte");
-            view.handle_message(PluginMessage::SetCursorByte(first_hit), &mut document);
+            view.set_cursor_byte(first_hit);
             render_editor_narrow(&mut view, &document, width);
 
             let (cursor_x, cursor_y, _cursor_width, cursor_height) = view
@@ -840,14 +827,12 @@ mod wysiwyg_tests {
 
     #[test]
     fn styled_prefix_cursor_and_hit_test_use_rendered_advance() {
-        use ui::plugin::{PluginMessage, ViewPlugin};
-
         let source = "# Promotion & Marketing\n\n> Applicable scenarios: Brand launches, marketing campaigns, art/fashion/culture showcases, product introductions, etc.\n> Style anchor: Apple Keynote / Xiaomi product launch / High-end fashion brands / Art exhibitions / Cultural promotion / Premium brand visual systems\n\n## Design Philosophy\n\n- **Top-tier visual impact**: Large images and bold typography, using extreme visual tension to convey brand tone, artistic quality, or cultural depth — every page should leave the audience breathless\n";
         let colon_byte = source.find("**:").expect("fixture must contain bold closing marker") + 2;
-        let mut document = StubDoc::new(source);
+        let document = StubDoc::new(source);
         let mut view = MarkdownEditorView::new();
         view.set_source(document.text.clone(), 1);
-        view.handle_message(PluginMessage::SetCursorByte(colon_byte), &mut document);
+        view.set_cursor_byte(colon_byte);
         render_editor_once(&mut view, &document);
 
         let (flat_idx, grapheme_idx) = view
@@ -914,14 +899,12 @@ mod wysiwyg_tests {
 
     #[test]
     fn active_heading_marker_cursor_and_hit_test_use_heading_advance() {
-        use ui::plugin::{PluginMessage, ViewPlugin};
-
         let source = "# Title";
         let marker_end = "#".len();
-        let mut document = StubDoc::new(source);
+        let document = StubDoc::new(source);
         let mut view = MarkdownEditorView::new();
         view.set_source(document.text.clone(), 1);
-        view.handle_message(PluginMessage::SetCursorByte(marker_end), &mut document);
+        view.set_cursor_byte(marker_end);
         render_editor_once(&mut view, &document);
 
         let (flat_idx, grapheme_idx) = view
@@ -1767,7 +1750,7 @@ mod wysiwyg_tests {
             ("first\n\n\nsecond", vec!["first\n\n".len()]),
             ("first\n\n\n\nsecond", vec!["first\n\n".len(), "first\n\n\n".len()]),
         ] {
-            let mut doc = StubDoc::new(source);
+            let doc = StubDoc::new(source);
             let mut view = MarkdownEditorView::new();
             view.set_source(source.to_owned(), 1);
             render_editor_once(&mut view, &doc);
@@ -1783,7 +1766,7 @@ mod wysiwyg_tests {
             let expected_line_height = view.engine().base_line_height;
 
             for empty_paragraph_start in empty_paragraph_starts {
-                view.handle_message(PluginMessage::SetCursorByte(empty_paragraph_start), &mut doc);
+                view.set_cursor_byte(empty_paragraph_start);
                 render_editor_once(&mut view, &doc);
 
                 let (_cursor_x, cursor_y, _cursor_width, cursor_height) = view
@@ -1870,16 +1853,14 @@ mod wysiwyg_tests {
 
     #[test]
     fn cursor_leaving_offscreen_heading_clears_active_marker_when_scrolled_back() {
-        use ui::plugin::PluginMessage;
-
         let filler =
             (0..40).map(|i| format!("filler paragraph {i}")).collect::<Vec<_>>().join("\n\n");
         let source = format!("# Title\n\n{filler}\n\nlast paragraph");
         let last_byte = source.find("last paragraph").expect("fixture has a last paragraph");
-        let mut doc = StubDoc::new(&source);
+        let doc = StubDoc::new(&source);
         let mut view = MarkdownEditorView::new();
         view.set_source(source.clone(), 1);
-        view.handle_message(PluginMessage::SetCursorByte(1), &mut doc);
+        view.set_cursor_byte(1);
         render_editor_once(&mut view, &doc);
 
         fn heading_text(view: &MarkdownEditorView) -> String {
@@ -1896,7 +1877,7 @@ mod wysiwyg_tests {
         let bottom_scroll = (view.engine.content_height - 600.0).max(0.0);
         assert!(bottom_scroll > 0.0, "fixture document must exceed one viewport");
         view.engine.scroll_y = bottom_scroll;
-        view.handle_message(PluginMessage::SetCursorByte(last_byte), &mut doc);
+        view.set_cursor_byte(last_byte);
         render_editor_once(&mut view, &doc);
 
         // 滚回顶部：标题必须按非 active 重排，不得残留 `# ` 标记。
@@ -2190,91 +2171,96 @@ mod wysiwyg_tests {
 
     #[test]
     fn selection_endpoint_after_trailing_newline_preserves_empty_line_byte() {
-        use ui::plugin::{PluginMessage, PluginQuery, PluginResponse, ViewPlugin};
-
         let source = "hello\n";
-        let mut doc = StubDoc::new(source);
+        let doc = StubDoc::new(source);
         let mut view = MarkdownEditorView::new();
         view.set_source(source.to_string(), 1);
         render_editor_once(&mut view, &doc);
 
-        view.handle_message(PluginMessage::SetSelAnchorByte(Some(0)), &mut doc);
-        view.handle_message(PluginMessage::SetSelCursorByte(Some(source.len())), &mut doc);
+        view.selection_mut()
+            .expect("test view exposes selection")
+            .set_selection_anchor_byte(Some(0));
+        view.selection_mut()
+            .expect("test view exposes selection")
+            .set_selection_cursor_byte(Some(source.len()));
 
-        let selection_range = match view.query(PluginQuery::SelectionRange, &doc) {
-            PluginResponse::PositionPair(range) => range,
-            other => panic!("expected selection range, got {other:?}"),
-        };
+        let selection_range =
+            view.selection().expect("Markdown view provides selection").selection_source_range();
 
         assert_eq!(
             selection_range,
-            Some(((0, 0), (source.len(), 0))),
+            Some(0..source.len()),
             "selection endpoint on trailing empty line should preserve the source end byte"
         );
     }
 
     #[test]
     fn backward_selection_from_trailing_newline_preserves_empty_line_anchor() {
-        use ui::plugin::{PluginMessage, PluginQuery, PluginResponse, ViewPlugin};
-
         let source = "hello\n";
-        let mut doc = StubDoc::new(source);
+        let doc = StubDoc::new(source);
         let mut view = MarkdownEditorView::new();
         view.set_source(source.to_string(), 1);
         render_editor_once(&mut view, &doc);
 
-        view.handle_message(PluginMessage::SetSelAnchorByte(Some(source.len())), &mut doc);
-        view.handle_message(PluginMessage::SetSelCursorByte(Some(0)), &mut doc);
+        view.selection_mut()
+            .expect("test view exposes selection")
+            .set_selection_anchor_byte(Some(source.len()));
+        view.selection_mut()
+            .expect("test view exposes selection")
+            .set_selection_cursor_byte(Some(0));
 
-        let selection_range = match view.query(PluginQuery::SelectionRange, &doc) {
-            PluginResponse::PositionPair(range) => range,
-            other => panic!("expected selection range, got {other:?}"),
-        };
+        let selection_range =
+            view.selection().expect("Markdown view provides selection").selection_source_range();
 
         assert_eq!(
             selection_range,
-            Some(((0, 0), (source.len(), 0))),
+            Some(0..source.len()),
             "backward selection from trailing empty line should preserve the source end byte"
         );
     }
 
     #[test]
     fn set_selection_byte_clears_visual_endpoint_when_byte_cannot_map() {
-        use ui::plugin::{PluginMessage, PluginQuery, PluginResponse, ViewPlugin};
-
         let source = "hello";
-        let mut doc = StubDoc::new(source);
+        let doc = StubDoc::new(source);
         let mut view = MarkdownEditorView::new();
         view.set_source(source.to_string(), 1);
 
-        view.handle_message(PluginMessage::SetSelCursor(Some((0, 1))), &mut doc);
-        assert!(matches!(
-            view.query(PluginQuery::SelCursor, &doc),
-            PluginResponse::Position(Some((0, 1)))
-        ));
+        view.selection_mut()
+            .expect("test view exposes selection")
+            .set_selection_cursor(Some(ui::plugin::ReadingPosition::new(0, 1)), &doc);
+        assert!(
+            view.selection().expect("Markdown view provides selection").selection_cursor()
+                == Some(ui::plugin::ReadingPosition::new(0, 1))
+        );
 
-        view.handle_message(PluginMessage::SetSelCursorByte(Some(0)), &mut doc);
+        view.selection_mut()
+            .expect("test view exposes selection")
+            .set_selection_cursor_byte(Some(0));
 
-        assert!(matches!(view.query(PluginQuery::SelCursor, &doc), PluginResponse::Position(None)));
+        assert!(
+            view.selection()
+                .expect("Markdown view provides selection")
+                .selection_cursor()
+                .is_none()
+        );
     }
 
     #[test]
     fn cursor_screen_pos_query_uses_requested_byte() {
-        use ui::plugin::{PluginMessage, PluginQuery, PluginResponse, ViewPlugin};
-
         let source = "abc\n\ndef";
-        let mut doc = StubDoc::new(source);
+        let doc = StubDoc::new(source);
         let mut view = MarkdownEditorView::new();
         view.set_source(source.to_string(), 1);
-        view.handle_message(PluginMessage::SetCursorByte(0), &mut doc);
+        view.set_cursor_byte(0);
         render_editor_once(&mut view, &doc);
 
-        let first = match view.query(PluginQuery::CursorScreenPos(0), &doc) {
-            PluginResponse::CursorScreenRect(Some(rect)) => rect,
+        let first = match view.cursor_screen_rect(0) {
+            Some(rect) => rect,
             response => panic!("expected first cursor rect, got {response:?}"),
         };
-        let second = match view.query(PluginQuery::CursorScreenPos(5), &doc) {
-            PluginResponse::CursorScreenRect(Some(rect)) => rect,
+        let second = match view.cursor_screen_rect(5) {
+            Some(rect) => rect,
             response => panic!("expected second cursor rect, got {response:?}"),
         };
 
@@ -2284,37 +2270,37 @@ mod wysiwyg_tests {
     #[test]
     fn trailing_newline_selection_keeps_range_without_empty_line_highlight() {
         use ui::core::paint::DrawCmd;
-        use ui::plugin::{PluginMessage, PluginQuery, PluginResponse, ViewPlugin};
 
         let source = "hello\n";
-        let mut doc = StubDoc::new(source);
+        let doc = StubDoc::new(source);
         let mut view = MarkdownEditorView::new();
         view.set_source(source.to_string(), 1);
         render_editor_once(&mut view, &doc);
 
-        view.handle_message(PluginMessage::SetSelAnchorByte(Some(source.len() - 1)), &mut doc);
-        view.handle_message(PluginMessage::SetSelCursorByte(Some(source.len())), &mut doc);
+        view.selection_mut()
+            .expect("test view exposes selection")
+            .set_selection_anchor_byte(Some(source.len() - 1));
+        view.selection_mut()
+            .expect("test view exposes selection")
+            .set_selection_cursor_byte(Some(source.len()));
 
         assert!(
-            matches!(view.query(PluginQuery::HasSelection, &doc), PluginResponse::Bool(true)),
+            view.selection().expect("Markdown view provides selection").has_selection(),
             "trailing newline byte range should count as an active selection"
         );
 
-        let selection_range = match view.query(PluginQuery::SelectionRange, &doc) {
-            PluginResponse::PositionPair(range) => range,
-            other => panic!("expected selection range, got {other:?}"),
-        };
+        let selection_range =
+            view.selection().expect("Markdown view provides selection").selection_source_range();
         assert_eq!(
             selection_range,
-            Some(((source.len() - 1, 0), (source.len(), 0))),
+            Some(source.len() - 1..source.len()),
             "trailing newline selection should preserve the source byte range"
         );
 
-        let highlights =
-            match view.query(PluginQuery::SelectionHighlights([0.1, 0.2, 0.3, 1.0]), &doc) {
-                PluginResponse::DrawList(draw_list) => draw_list,
-                other => panic!("expected selection highlights, got {other:?}"),
-            };
+        let highlights = view
+            .selection()
+            .expect("Markdown view provides selection")
+            .selection_highlights([0.1, 0.2, 0.3, 1.0]);
         let has_empty_line_highlight = highlights.cmds.iter().any(|cmd| {
             matches!(
                 cmd,
@@ -2331,7 +2317,6 @@ mod wysiwyg_tests {
     #[test]
     fn select_all_highlights_last_physical_line_before_trailing_blanks() {
         use ui::core::paint::DrawCmd;
-        use ui::plugin::{PluginMessage, PluginQuery, PluginResponse, ViewPlugin};
 
         let source = "\
 first physical line
@@ -2342,26 +2327,29 @@ final visible physical line
 ";
         let final_line_byte =
             source.find("final visible").expect("fixture should contain final line");
-        let mut doc = StubDoc::new(source);
+        let doc = StubDoc::new(source);
         let mut view = MarkdownEditorView::new();
         view.set_source(source.to_string(), 1);
         render_editor_once(&mut view, &doc);
 
-        view.handle_message(PluginMessage::SetCursorByte(final_line_byte), &mut doc);
+        view.set_cursor_byte(final_line_byte);
         let (_cursor_x, cursor_y, _cursor_width, cursor_height) =
-            match view.query(PluginQuery::CursorScreenPos(final_line_byte), &doc) {
-                PluginResponse::CursorScreenRect(Some(rect)) => rect,
+            match view.cursor_screen_rect(final_line_byte) {
+                Some(rect) => rect,
                 other => panic!("expected cursor rect on final physical line, got {other:?}"),
             };
 
-        view.handle_message(PluginMessage::SetSelAnchorByte(Some(0)), &mut doc);
-        view.handle_message(PluginMessage::SetSelCursorByte(Some(source.len())), &mut doc);
+        view.selection_mut()
+            .expect("test view exposes selection")
+            .set_selection_anchor_byte(Some(0));
+        view.selection_mut()
+            .expect("test view exposes selection")
+            .set_selection_cursor_byte(Some(source.len()));
 
-        let highlights =
-            match view.query(PluginQuery::SelectionHighlights([0.1, 0.2, 0.3, 1.0]), &doc) {
-                PluginResponse::DrawList(draw_list) => draw_list,
-                other => panic!("expected selection highlights, got {other:?}"),
-            };
+        let highlights = view
+            .selection()
+            .expect("Markdown view provides selection")
+            .selection_highlights([0.1, 0.2, 0.3, 1.0]);
         let final_line_is_highlighted = highlights.cmds.iter().any(|cmd| {
             matches!(
                 cmd,
@@ -2380,7 +2368,6 @@ final visible physical line
     #[test]
     fn selecting_real_last_physical_text_line_reports_highlight() {
         use ui::core::paint::DrawCmd;
-        use ui::plugin::{PluginMessage, PluginQuery, PluginResponse, ViewPlugin};
 
         let source = "\
 C608-03 武昌职业第03组：2025 最低 389，且是民办、计划 4 人，不应太靠前，除非非常想去海军水面方向。
@@ -2396,31 +2383,34 @@ C608-01 武昌职业第01组：计划 68，历史低线较低，是表里最像�
             .map(|offset| line_start + offset)
             .expect("fixture should end final text line with newline");
         let probe_byte = source.find("要接受成本").expect("fixture should contain probe text");
-        let mut doc = StubDoc::new(source);
+        let doc = StubDoc::new(source);
         let mut view = MarkdownEditorView::new();
         view.set_source(source.to_string(), 1);
         render_editor_once(&mut view, &doc);
 
-        view.handle_message(PluginMessage::SetCursorByte(probe_byte), &mut doc);
+        view.set_cursor_byte(probe_byte);
         let (_cursor_x, cursor_y, _cursor_width, cursor_height) =
-            match view.query(PluginQuery::CursorScreenPos(probe_byte), &doc) {
-                PluginResponse::CursorScreenRect(Some(rect)) => rect,
+            match view.cursor_screen_rect(probe_byte) {
+                Some(rect) => rect,
                 other => panic!("expected cursor rect on final text line, got {other:?}"),
             };
 
-        view.handle_message(PluginMessage::SetSelAnchorByte(Some(line_start)), &mut doc);
-        view.handle_message(PluginMessage::SetSelCursorByte(Some(line_end)), &mut doc);
+        view.selection_mut()
+            .expect("test view exposes selection")
+            .set_selection_anchor_byte(Some(line_start));
+        view.selection_mut()
+            .expect("test view exposes selection")
+            .set_selection_cursor_byte(Some(line_end));
 
         assert!(
-            matches!(view.query(PluginQuery::HasSelection, &doc), PluginResponse::Bool(true)),
+            view.selection().expect("Markdown view provides selection").has_selection(),
             "the final physical text line byte range should count as an active selection"
         );
 
-        let highlights =
-            match view.query(PluginQuery::SelectionHighlights([0.1, 0.2, 0.3, 1.0]), &doc) {
-                PluginResponse::DrawList(draw_list) => draw_list,
-                other => panic!("expected selection highlights, got {other:?}"),
-            };
+        let highlights = view
+            .selection()
+            .expect("Markdown view provides selection")
+            .selection_highlights([0.1, 0.2, 0.3, 1.0]);
         let final_line_is_highlighted = highlights.cmds.iter().any(|cmd| {
             matches!(
                 cmd,
@@ -2439,7 +2429,6 @@ C608-01 武昌职业第01组：计划 68，历史低线较低，是表里最像�
     #[test]
     fn backward_selection_from_trailing_blank_highlights_real_final_text_line() {
         use ui::core::paint::DrawCmd;
-        use ui::plugin::{PluginMessage, PluginQuery, PluginResponse, ViewPlugin};
 
         let source = "\
 C608-03 武昌职业第03组：2025 最低 389，且是民办、计划 4 人，不应太靠前，除非非常想去海军水面方向。
@@ -2450,26 +2439,29 @@ C608-01 武昌职业第01组：计划 68，历史低线较低，是表里最像�
 
 ";
         let probe_byte = source.find("要接受成本").expect("fixture should contain probe text");
-        let mut doc = StubDoc::new(source);
+        let doc = StubDoc::new(source);
         let mut view = MarkdownEditorView::new();
         view.set_source(source.to_string(), 1);
         render_editor_once(&mut view, &doc);
 
-        view.handle_message(PluginMessage::SetCursorByte(probe_byte), &mut doc);
+        view.set_cursor_byte(probe_byte);
         let (_cursor_x, cursor_y, _cursor_width, cursor_height) =
-            match view.query(PluginQuery::CursorScreenPos(probe_byte), &doc) {
-                PluginResponse::CursorScreenRect(Some(rect)) => rect,
+            match view.cursor_screen_rect(probe_byte) {
+                Some(rect) => rect,
                 other => panic!("expected cursor rect on final text line, got {other:?}"),
             };
 
-        view.handle_message(PluginMessage::SetSelAnchorByte(Some(source.len())), &mut doc);
-        view.handle_message(PluginMessage::SetSelCursorByte(Some(probe_byte)), &mut doc);
+        view.selection_mut()
+            .expect("test view exposes selection")
+            .set_selection_anchor_byte(Some(source.len()));
+        view.selection_mut()
+            .expect("test view exposes selection")
+            .set_selection_cursor_byte(Some(probe_byte));
 
-        let highlights =
-            match view.query(PluginQuery::SelectionHighlights([0.1, 0.2, 0.3, 1.0]), &doc) {
-                PluginResponse::DrawList(draw_list) => draw_list,
-                other => panic!("expected selection highlights, got {other:?}"),
-            };
+        let highlights = view
+            .selection()
+            .expect("Markdown view provides selection")
+            .selection_highlights([0.1, 0.2, 0.3, 1.0]);
         let final_line_is_highlighted = highlights.cmds.iter().any(|cmd| {
             matches!(
                 cmd,
@@ -2488,7 +2480,6 @@ C608-01 武昌职业第01组：计划 68，历史低线较低，是表里最像�
     #[test]
     fn selection_highlight_at_bottom_respects_render_offset_y() {
         use ui::core::paint::DrawCmd;
-        use ui::plugin::{PluginMessage, PluginQuery, PluginResponse, ViewPlugin};
 
         let source = "top line\nbottom line\n\n";
         let bottom_byte = source.find("bottom").expect("fixture should contain bottom line");
@@ -2496,26 +2487,29 @@ C608-01 武昌职业第01组：计划 68，历史低线较低，是表里最像�
             .find('\n')
             .map(|offset| bottom_byte + offset)
             .expect("fixture should end bottom line with newline");
-        let mut doc = StubDoc::new(source);
+        let doc = StubDoc::new(source);
         let mut view = MarkdownEditorView::new();
         view.set_source(source.to_string(), 1);
-        view.handle_message(PluginMessage::Scroll { delta: 48.0, viewport_h: 48.0 }, &mut doc);
+        view.scrollable_mut().expect("editor scroll capability").scroll(48.0, 48.0);
         render_editor_with_offset_y(&mut view, &doc, 48.0, 80.0);
 
-        view.handle_message(PluginMessage::SetCursorByte(bottom_byte), &mut doc);
+        view.set_cursor_byte(bottom_byte);
         let (_cursor_x, cursor_y, _cursor_width, cursor_height) =
-            match view.query(PluginQuery::CursorScreenPos(bottom_byte), &doc) {
-                PluginResponse::CursorScreenRect(Some(rect)) => rect,
+            match view.cursor_screen_rect(bottom_byte) {
+                Some(rect) => rect,
                 other => panic!("expected cursor rect on bottom line, got {other:?}"),
             };
-        view.handle_message(PluginMessage::SetSelAnchorByte(Some(bottom_byte)), &mut doc);
-        view.handle_message(PluginMessage::SetSelCursorByte(Some(line_end)), &mut doc);
+        view.selection_mut()
+            .expect("test view exposes selection")
+            .set_selection_anchor_byte(Some(bottom_byte));
+        view.selection_mut()
+            .expect("test view exposes selection")
+            .set_selection_cursor_byte(Some(line_end));
 
-        let highlights =
-            match view.query(PluginQuery::SelectionHighlights([0.1, 0.2, 0.3, 1.0]), &doc) {
-                PluginResponse::DrawList(draw_list) => draw_list,
-                other => panic!("expected selection highlights, got {other:?}"),
-            };
+        let highlights = view
+            .selection()
+            .expect("Markdown view provides selection")
+            .selection_highlights([0.1, 0.2, 0.3, 1.0]);
         let cursor_screen_y = 80.0 + cursor_y + cursor_height * 0.5;
         let bottom_line_highlighted = highlights.cmds.iter().any(|cmd| {
             matches!(
@@ -2533,8 +2527,6 @@ C608-01 武昌职业第01组：计划 68，历史低线较低，是表里最像�
 
     #[test]
     fn blockquote_marker_byte_selection_highlight_reuses_source_line_index() {
-        use ui::plugin::{PluginMessage, PluginQuery, PluginResponse, ViewPlugin};
-
         let mut source = String::new();
         for index in 0..180 {
             source.push_str(&format!("paragraph {index}\n\n"));
@@ -2544,18 +2536,22 @@ C608-01 武昌职业第01组：计划 68，历史低线较低，是表里最像�
         }
         let first_quote = source.find("> quoted block 40").expect("fixture should contain quote");
         let second_quote = source.find("> quoted block 140").expect("fixture should contain quote");
-        let mut doc = StubDoc::new(&source);
+        let doc = StubDoc::new(&source);
         let mut view = MarkdownEditorView::new();
         view.set_source(source, 1);
         render_editor_once(&mut view, &doc);
 
         SOURCE_LINE_MAP_BUILD_COUNT.with(|count| count.set(0));
-        view.handle_message(PluginMessage::SetSelAnchorByte(Some(first_quote)), &mut doc);
-        view.handle_message(PluginMessage::SetSelCursorByte(Some(second_quote)), &mut doc);
-        match view.query(PluginQuery::SelectionHighlights([0.1, 0.2, 0.3, 1.0]), &doc) {
-            PluginResponse::DrawList(_) => {}
-            other => panic!("expected selection highlights, got {other:?}"),
-        }
+        view.selection_mut()
+            .expect("test view exposes selection")
+            .set_selection_anchor_byte(Some(first_quote));
+        view.selection_mut()
+            .expect("test view exposes selection")
+            .set_selection_cursor_byte(Some(second_quote));
+        let _ = view
+            .selection()
+            .expect("Markdown view provides selection")
+            .selection_highlights([0.1, 0.2, 0.3, 1.0]);
 
         assert_eq!(
             SOURCE_LINE_MAP_BUILD_COUNT.with(std::cell::Cell::get),
@@ -3309,26 +3305,21 @@ C608-01 武昌职业第01组：计划 68，历史低线较低，是表里最像�
 
     #[test]
     fn first_line_indent_plugin_setting_updates_cached_layout_caret_and_hit_testing() {
-        use ui::plugin::{PluginMessage, ViewPlugin};
-
         for source in ["普通段落内容", ""] {
-            let mut document = StubDoc::new(source);
+            let document = StubDoc::new(source);
             let mut view = MarkdownEditorView::new();
             view.set_source(source.to_owned(), 1);
-            view.handle_message(PluginMessage::SetCursorByte(0), &mut document);
+            view.set_cursor_byte(0);
             let font_size = 15.0;
             let dpi_scale = 2.0;
             for enabled in [false, true, false] {
-                view.handle_message(
-                    PluginMessage::SetRenderSettings {
-                        font_family: ui::settings::platform_default_font_family().to_string(),
-                        font_size,
-                        line_height: 24.0,
-                        toc_max_depth: 3,
-                        markdown_first_line_indent: enabled,
-                    },
-                    &mut document,
-                );
+                view.set_view_render_settings(ui::plugin::ViewRenderSettings {
+                    font_family: ui::settings::platform_default_font_family().to_string(),
+                    font_size,
+                    line_height: 24.0,
+                    toc_max_depth: 3,
+                    markdown_first_line_indent: enabled,
+                });
                 render_editor_draw_list_with_dpi(&mut view, &document, dpi_scale);
                 let first_line = &view.engine().flat_lines()[0];
                 let expected_x = if enabled {
@@ -3556,25 +3547,23 @@ C608-01 武昌职业第01组：计划 68，历史低线较低，是表里最像�
 
     #[test]
     fn preview_select_all_includes_final_line_outside_initial_lazy_viewport() {
-        use ui::plugin::{PluginMessage, PluginQuery, PluginResponse, ViewPlugin};
-
         let mut source = String::new();
         for idx in 0..80 {
             source.push_str(&format!("ordinary paragraph {idx}\n\n"));
         }
         source.push_str("final selectable line\n\n");
 
-        let mut doc = StubDoc::new(&source);
         let mut view = MarkdownView::new();
         view.set_source(source, 1);
         render_preview_narrow(&mut view, 800.0);
 
-        view.handle_message(PluginMessage::SelectAll, &mut doc);
+        view.selection_mut().expect("test view exposes selection").select_all();
 
-        let selected_text = match view.query(PluginQuery::SelectedText, &doc) {
-            PluginResponse::String(text) => text,
-            other => panic!("expected selected text, got {other:?}"),
-        };
+        let selected_text = view
+            .selection()
+            .expect("Markdown view provides selection")
+            .selected_text()
+            .expect("the fixture has selected text");
 
         assert!(
             selected_text.contains("final selectable line"),
@@ -3584,69 +3573,58 @@ C608-01 武昌职业第01组：计划 68，历史低线较低，是表里最像�
 
     #[test]
     fn preview_copy_preserves_paragraph_boundary() {
-        use ui::plugin::{PluginMessage, PluginQuery, PluginResponse, ViewPlugin};
-
         let source = "first paragraph\n\nsecond paragraph";
-        let mut doc = StubDoc::new(source);
         let mut view = MarkdownView::new();
         view.set_source(source.to_owned(), 1);
         render_preview_narrow(&mut view, 800.0);
-        view.handle_message(PluginMessage::SelectAll, &mut doc);
+        view.selection_mut().expect("test view exposes selection").select_all();
 
-        let copied = view.query(PluginQuery::SelectedText, &doc);
+        let copied = view.selection().expect("Markdown view provides selection").selected_text();
         assert!(matches!(
             copied,
-            PluginResponse::String(text) if text == "first paragraph\n\nsecond paragraph"
+            Some(text) if text == "first paragraph\n\nsecond paragraph"
         ));
     }
 
     #[test]
     fn preview_copy_preserves_extra_blank_line_without_copying_visual_wraps() {
-        use ui::plugin::{PluginMessage, PluginQuery, PluginResponse, ViewPlugin};
-
         let source = "first paragraph has enough words to wrap at a narrow width\n\n\nsecond";
-        let mut doc = StubDoc::new(source);
         let mut view = MarkdownView::new();
         view.set_source(source.to_owned(), 1);
         render_preview_narrow(&mut view, 180.0);
         assert!(view.engine().flat_lines().len() > 2, "first paragraph should wrap");
-        view.handle_message(PluginMessage::SelectAll, &mut doc);
+        view.selection_mut().expect("test view exposes selection").select_all();
 
-        let copied = view.query(PluginQuery::SelectedText, &doc);
-        assert!(matches!(copied, PluginResponse::String(text) if text == source));
+        let copied = view.selection().expect("Markdown view provides selection").selected_text();
+        assert!(matches!(copied, Some(text) if text == source));
     }
 
     #[test]
     fn editor_copy_uses_visible_text_and_paragraph_breaks() {
-        use ui::plugin::{PluginMessage, PluginQuery, PluginResponse, ViewPlugin};
-
         let source = "# Heading\n\nfirst **bold** paragraph\n\nsecond";
-        let mut doc = StubDoc::new(source);
+        let doc = StubDoc::new(source);
         let mut view = MarkdownEditorView::new();
         view.set_source(source.to_owned(), 1);
         render_editor_narrow(&mut view, &doc, 800.0);
-        view.handle_message(PluginMessage::SelectAll, &mut doc);
+        view.selection_mut().expect("test view exposes selection").select_all();
 
-        let copied = view.query(PluginQuery::SelectedText, &doc);
+        let copied = view.selection().expect("Markdown view provides selection").selected_text();
         assert!(matches!(
             copied,
-            PluginResponse::String(text) if text == "Heading\n\nfirst bold paragraph\n\nsecond"
+            Some(text) if text == "Heading\n\nfirst bold paragraph\n\nsecond"
         ));
     }
 
     #[test]
     fn preview_copy_excludes_fence_lines_from_paragraph_spacing() {
-        use ui::plugin::{PluginMessage, PluginQuery, PluginResponse, ViewPlugin};
-
         let source = "first\n\n```rust\ncode\n```\n\nlast";
-        let mut doc = StubDoc::new(source);
         let mut view = MarkdownView::new();
         view.set_source(source.to_owned(), 1);
         render_preview_narrow(&mut view, 800.0);
-        view.handle_message(PluginMessage::SelectAll, &mut doc);
+        view.selection_mut().expect("test view exposes selection").select_all();
 
-        let copied = view.query(PluginQuery::SelectedText, &doc);
-        assert!(matches!(copied, PluginResponse::String(text) if text == "first\n\ncode\n\nlast"));
+        let copied = view.selection().expect("Markdown view provides selection").selected_text();
+        assert!(matches!(copied, Some(text) if text == "first\n\ncode\n\nlast"));
     }
 
     fn visible_line_snapshots(engine: &PreviewEngine) -> Vec<(String, i32)> {
@@ -3669,7 +3647,10 @@ C608-01 武昌职业第01组：计划 68，历史低线较低，是表里最像�
     fn editor_view_cursor_blink_ownership() {
         use ui::plugin::ViewPlugin;
         let v = MarkdownEditorView::new();
-        assert!(!v.shows_cursor(), "WYSIWYG draws its own cursor — app must not overlay one");
+        assert!(
+            !v.mode().uses_host_cursor(),
+            "WYSIWYG draws its own cursor — app must not overlay one"
+        );
         assert!(
             v.needs_cursor_blink_wakeup(),
             "WYSIWYG needs app to compute and forward blink phase"
@@ -3688,7 +3669,7 @@ C608-01 武昌职业第01组：计划 68，历史低线较低，是表里最像�
         // First render to build the lazy layout (required for cursor_screen_pos).
         let bounds = ui::core::geom::Rect::new(0.0, 0.0, 800.0, 600.0);
         let mut shaper = shaping::Shaper::new().unwrap();
-        let mut doc = StubDoc::new("hello world");
+        let doc = StubDoc::new("hello world");
         let _ = <MarkdownEditorView as ViewPlugin>::render(
             &mut v,
             &doc,
@@ -3699,7 +3680,7 @@ C608-01 武昌职业第01组：计划 68，历史低线较低，是表里最像�
         );
 
         // Place cursor at byte 5 via plugin message.
-        v.handle_message(ui::plugin::PluginMessage::SetCursorByte(5), &mut doc);
+        v.set_cursor_byte(5);
         assert!(v.engine().cursor_screen_pos().is_some(), "cursor must be positioned after render");
 
         // Second render: should include the cursor rect.
@@ -3724,11 +3705,9 @@ C608-01 武昌职业第01组：计划 68，历史低线较低，是表里最像�
 
     #[test]
     fn new_empty_editor_draws_cursor_without_source_update() {
-        use ui::plugin::{PluginMessage, ViewPlugin};
-
-        let mut document = StubDoc::new("");
+        let document = StubDoc::new("");
         let mut view = MarkdownEditorView::new();
-        view.handle_message(PluginMessage::SetCursorByte(0), &mut document);
+        view.set_cursor_byte(0);
 
         let draw_list = render_editor_draw_list(&mut view, &document);
         let cursor_rect = editor_cursor_rect_from_draw_list(&draw_list);
@@ -3745,15 +3724,10 @@ C608-01 武昌职业第01组：计划 68，历史低线较低，是表里最像�
 
     #[test]
     fn new_empty_editor_renders_preedit_without_source_update() {
-        use ui::plugin::{PluginMessage, PluginQuery, PluginResponse, ViewPlugin};
-
-        let mut document = StubDoc::new("");
+        let document = StubDoc::new("");
         let mut view = MarkdownEditorView::new();
-        view.handle_message(PluginMessage::SetCursorByte(0), &mut document);
-        view.handle_message(
-            PluginMessage::SetPreedit { text: "拼音".into(), cursor: Some((6, 6)) },
-            &mut document,
-        );
+        view.set_cursor_byte(0);
+        view.set_preedit("拼音".into(), Some((6, 6)));
 
         let draw_list = render_editor_draw_list(&mut view, &document);
         let (preedit_x, preedit_width) = draw_list
@@ -3766,8 +3740,8 @@ C608-01 武昌职业第01组：计划 68，历史低线较低，是表里最像�
                 _ => None,
             })
             .expect("new empty editor should emit the IME preedit text layout");
-        let cursor_x = match view.query(PluginQuery::CursorScreenPos(0), &document) {
-            PluginResponse::CursorScreenRect(Some((x, _, _, _))) => x,
+        let cursor_x = match view.cursor_screen_rect(0) {
+            Some((x, _, _, _)) => x,
             other => panic!("expected preedit cursor rect, got {other:?}"),
         };
 
@@ -3780,15 +3754,10 @@ C608-01 武昌职业第01组：计划 68，历史低线较低，是表里最像�
 
     #[test]
     fn new_empty_editor_uses_physical_typography_at_high_dpi() {
-        use ui::plugin::{PluginMessage, PluginQuery, PluginResponse, ViewPlugin};
-
-        let mut document = StubDoc::new("");
+        let document = StubDoc::new("");
         let mut view = MarkdownEditorView::new();
-        view.handle_message(PluginMessage::SetCursorByte(0), &mut document);
-        view.handle_message(
-            PluginMessage::SetPreedit { text: "拼音".into(), cursor: Some((6, 6)) },
-            &mut document,
-        );
+        view.set_cursor_byte(0);
+        view.set_preedit("拼音".into(), Some((6, 6)));
 
         let dpi_scale = 2.0;
         let expected_font_size = view.engine().base_font_size * dpi_scale;
@@ -3804,8 +3773,8 @@ C608-01 武昌职业第01组：计划 68，历史低线较低，是表里最像�
                 _ => None,
             })
             .expect("new empty editor should emit the IME preedit text layout");
-        let queried_cursor_height = match view.query(PluginQuery::CursorScreenPos(0), &document) {
-            PluginResponse::CursorScreenRect(Some((_, _, _, height))) => height,
+        let queried_cursor_height = match view.cursor_screen_rect(0) {
+            Some((_, _, _, height)) => height,
             other => panic!("expected preedit cursor rect, got {other:?}"),
         };
 
@@ -3817,16 +3786,16 @@ C608-01 武昌职业第01组：计划 68，历史低线较低，是表里最像�
     #[test]
     fn editor_view_hides_cursor_when_blink_phase_hidden() {
         use ui::core::paint::DrawCmd;
-        use ui::plugin::{PluginMessage, ViewPlugin};
+        use ui::plugin::ViewPlugin;
 
         let theme = ui::theme::Theme::from_definition(&ui::theme::ThemeDefinition::default_dark());
-        let mut doc = StubDoc::new("hello world");
+        let doc = StubDoc::new("hello world");
         let mut view = MarkdownEditorView::new();
         view.set_source(doc.text.clone(), 1);
         render_editor_once(&mut view, &doc);
 
-        view.handle_message(PluginMessage::SetCursorByte(5), &mut doc);
-        view.handle_message(PluginMessage::SetCursorVisible(false), &mut doc);
+        view.set_cursor_byte(5);
+        view.set_cursor_visible(false);
 
         let bounds = ui::core::geom::Rect::new(0.0, 0.0, 800.0, 600.0);
         let mut shaper = shaping::Shaper::new().expect("test shaper should initialize");
@@ -3847,22 +3816,17 @@ C608-01 武昌职业第01组：计划 68，历史低线较低，是表里最像�
 
     #[test]
     fn editor_cursor_rect_uses_text_height_not_line_box() {
-        use ui::plugin::{PluginMessage, PluginQuery, PluginResponse, ViewPlugin};
-
         let source = "hello world";
-        let mut doc = StubDoc::new(source);
+        let doc = StubDoc::new(source);
         let mut view = MarkdownEditorView::new();
         view.set_source(source.into(), 1);
         render_editor_once(&mut view, &doc);
 
-        view.handle_message(PluginMessage::SetCursorByte(5), &mut doc);
+        view.set_cursor_byte(5);
         render_editor_once(&mut view, &doc);
 
-        let response = view.query(PluginQuery::CursorScreenPos(5), &doc);
-        let Some((_x, _y, _w, height)) = (match response {
-            PluginResponse::CursorScreenRect(rect) => rect,
-            other => panic!("expected CursorScreenRect, got {other:?}"),
-        }) else {
+        let response = view.cursor_screen_rect(5);
+        let Some((_x, _y, _w, height)) = response else {
             panic!("cursor rect should resolve");
         };
 
@@ -3874,29 +3838,21 @@ C608-01 武昌职业第01组：计划 68，历史低线较低，是表里最像�
 
     #[test]
     fn editor_preedit_cursor_follows_materialized_preedit_layout() {
-        use ui::plugin::{PluginMessage, ViewPlugin};
-
         let source = "hello world";
-        let mut doc = StubDoc::new(source);
+        let doc = StubDoc::new(source);
         let mut view = MarkdownEditorView::new();
         view.set_source(source.into(), 1);
         render_editor_once(&mut view, &doc);
 
-        view.handle_message(PluginMessage::SetCursorByte(5), &mut doc);
+        view.set_cursor_byte(5);
         let base_rect =
             editor_cursor_rect_from_draw_list(&render_editor_draw_list(&mut view, &doc));
 
-        view.handle_message(
-            PluginMessage::SetPreedit { text: "abcd".into(), cursor: Some((1, 1)) },
-            &mut doc,
-        );
+        view.set_preedit("abcd".into(), Some((1, 1)));
         let preedit_rect =
             editor_cursor_rect_from_draw_list(&render_editor_draw_list(&mut view, &doc));
 
-        view.handle_message(
-            PluginMessage::SetPreedit { text: "abcd".into(), cursor: Some((4, 4)) },
-            &mut doc,
-        );
+        view.set_preedit("abcd".into(), Some((4, 4)));
         let end_rect = editor_cursor_rect_from_draw_list(&render_editor_draw_list(&mut view, &doc));
 
         assert!(
@@ -3915,26 +3871,18 @@ C608-01 武昌职业第01组：计划 68，历史低线较低，是表里最像�
 
     #[test]
     fn editor_multiline_preedit_cursor_uses_the_virtual_second_line() {
-        use ui::plugin::{PluginMessage, ViewPlugin};
-
         let source = "hello world";
-        let mut doc = StubDoc::new(source);
+        let doc = StubDoc::new(source);
         let mut view = MarkdownEditorView::new();
         view.set_source(source.into(), 1);
         render_editor_once(&mut view, &doc);
 
-        view.handle_message(PluginMessage::SetCursorByte(5), &mut doc);
+        view.set_cursor_byte(5);
         let base_rect =
             editor_cursor_rect_from_draw_list(&render_editor_draw_list(&mut view, &doc));
 
         let preedit = "中\n文";
-        view.handle_message(
-            PluginMessage::SetPreedit {
-                text: preedit.into(),
-                cursor: Some((preedit.len(), preedit.len())),
-            },
-            &mut doc,
-        );
+        view.set_preedit(preedit.into(), Some((preedit.len(), preedit.len())));
         let preedit_rect =
             editor_cursor_rect_from_draw_list(&render_editor_draw_list(&mut view, &doc));
 
@@ -3946,24 +3894,19 @@ C608-01 武昌职业第01组：计划 68，历史低线较低，是表里最像�
 
     #[test]
     fn editor_preedit_cursor_uses_physical_font_size_at_high_dpi() {
-        use ui::plugin::{PluginMessage, ViewPlugin};
-
         fn actual_preedit_advance(dpi_scale: f32) -> f32 {
             let source = "hello world";
-            let mut doc = StubDoc::new(source);
+            let doc = StubDoc::new(source);
             let mut view = MarkdownEditorView::new();
             view.set_source(source.into(), 1);
 
             let _ = render_editor_draw_list_with_dpi(&mut view, &doc, dpi_scale);
-            view.handle_message(PluginMessage::SetCursorByte(5), &mut doc);
+            view.set_cursor_byte(5);
             let base_rect = editor_cursor_rect_from_draw_list(&render_editor_draw_list_with_dpi(
                 &mut view, &doc, dpi_scale,
             ));
 
-            view.handle_message(
-                PluginMessage::SetPreedit { text: "abcd".into(), cursor: Some((1, 1)) },
-                &mut doc,
-            );
+            view.set_preedit("abcd".into(), Some((1, 1)));
             let preedit_rect = editor_cursor_rect_from_draw_list(
                 &render_editor_draw_list_with_dpi(&mut view, &doc, dpi_scale),
             );
@@ -3980,34 +3923,23 @@ C608-01 武昌职业第01组：计划 68，历史低线较低，是表里最像�
 
     #[test]
     fn editor_cursor_screen_pos_includes_preedit_cursor_advance() {
-        use ui::plugin::{PluginMessage, PluginQuery, PluginResponse, ViewPlugin};
-
         let source = "hello world";
-        let mut doc = StubDoc::new(source);
+        let doc = StubDoc::new(source);
         let mut view = MarkdownEditorView::new();
         view.set_source(source.into(), 1);
         render_editor_once(&mut view, &doc);
 
-        view.handle_message(PluginMessage::SetCursorByte(5), &mut doc);
-        let base_response = view.query(PluginQuery::CursorScreenPos(5), &doc);
-        let Some((base_x, _base_y, _base_w, _base_h)) = (match base_response {
-            PluginResponse::CursorScreenRect(rect) => rect,
-            other => panic!("expected CursorScreenRect, got {other:?}"),
-        }) else {
+        view.set_cursor_byte(5);
+        let base_response = view.cursor_screen_rect(5);
+        let Some((base_x, _base_y, _base_w, _base_h)) = base_response else {
             panic!("cursor rect should resolve before preedit");
         };
 
-        view.handle_message(
-            PluginMessage::SetPreedit { text: "abcd".into(), cursor: Some((2, 2)) },
-            &mut doc,
-        );
+        view.set_preedit("abcd".into(), Some((2, 2)));
         render_editor_once(&mut view, &doc);
 
-        let preedit_response = view.query(PluginQuery::CursorScreenPos(5), &doc);
-        let Some((preedit_x, _preedit_y, _preedit_w, _preedit_h)) = (match preedit_response {
-            PluginResponse::CursorScreenRect(rect) => rect,
-            other => panic!("expected CursorScreenRect, got {other:?}"),
-        }) else {
+        let preedit_response = view.cursor_screen_rect(5);
+        let Some((preedit_x, _preedit_y, _preedit_w, _preedit_h)) = preedit_response else {
             panic!("cursor rect should resolve with preedit");
         };
 
@@ -4027,53 +3959,35 @@ C608-01 武昌职业第01组：计划 68，历史低线较低，是表里最像�
 
     #[test]
     fn editor_preedit_is_materialized_at_cursor() {
-        use ui::plugin::{PluginMessage, PluginQuery, PluginResponse, ViewPlugin};
-
         let source = "hello world";
-        let mut doc = StubDoc::new(source);
+        let doc = StubDoc::new(source);
         let mut view = MarkdownEditorView::new();
         view.set_source(source.into(), 1);
         render_editor_once(&mut view, &doc);
 
-        view.handle_message(PluginMessage::SetCursorByte(5), &mut doc);
-        view.handle_message(
-            PluginMessage::SetPreedit { text: "ni".into(), cursor: Some((2, 2)) },
-            &mut doc,
-        );
+        view.set_cursor_byte(5);
+        view.set_preedit("ni".into(), Some((2, 2)));
         render_editor_once(&mut view, &doc);
 
-        let response = view.query(PluginQuery::FlatLines, &doc);
-        let lines = match response {
-            PluginResponse::FlatLines(lines) => lines,
-            other => panic!("expected FlatLines, got {other:?}"),
-        };
+        let lines = view.selection().expect("Markdown view provides selection").flat_lines();
 
         assert_eq!(lines.first().map(|line| line.text.as_str()), Some("helloni world"));
     }
 
     #[test]
     fn editor_preedit_is_materialized_only_on_cursor_line() {
-        use ui::plugin::{PluginMessage, PluginQuery, PluginResponse, ViewPlugin};
-
         let source = "first line\n\nhello world\n\nthird line";
-        let mut doc = StubDoc::new(source);
+        let doc = StubDoc::new(source);
         let mut view = MarkdownEditorView::new();
         view.set_source(source.into(), 1);
         render_editor_once(&mut view, &doc);
 
         let cursor_byte = "first line\n\nhello".len();
-        view.handle_message(PluginMessage::SetCursorByte(cursor_byte), &mut doc);
-        view.handle_message(
-            PluginMessage::SetPreedit { text: "ni".into(), cursor: Some((2, 2)) },
-            &mut doc,
-        );
+        view.set_cursor_byte(cursor_byte);
+        view.set_preedit("ni".into(), Some((2, 2)));
         render_editor_once(&mut view, &doc);
 
-        let response = view.query(PluginQuery::FlatLines, &doc);
-        let lines = match response {
-            PluginResponse::FlatLines(lines) => lines,
-            other => panic!("expected FlatLines, got {other:?}"),
-        };
+        let lines = view.selection().expect("Markdown view provides selection").flat_lines();
         let texts = lines.iter().map(|line| line.text.as_str()).collect::<Vec<_>>();
 
         assert_eq!(texts, vec!["first line", "helloni world", "third line"]);
@@ -4081,19 +3995,14 @@ C608-01 武昌职业第01组：计划 68，历史低线较低，是表里最像�
 
     #[test]
     fn editor_renders_preedit_on_trailing_empty_source_line() {
-        use ui::plugin::{PluginMessage, ViewPlugin};
-
         let source = "hello\n";
-        let mut doc = StubDoc::new(source);
+        let doc = StubDoc::new(source);
         let mut view = MarkdownEditorView::new();
         view.set_source(source.into(), 1);
         render_editor_once(&mut view, &doc);
 
-        view.handle_message(PluginMessage::SetCursorByte(source.len()), &mut doc);
-        view.handle_message(
-            PluginMessage::SetPreedit { text: "拼音".into(), cursor: Some((6, 6)) },
-            &mut doc,
-        );
+        view.set_cursor_byte(source.len());
+        view.set_preedit("拼音".into(), Some((6, 6)));
 
         let draw_list = render_editor_draw_list(&mut view, &doc);
         let preedit_is_rendered = draw_list.cmds.iter().any(|command| {
@@ -4108,19 +4017,14 @@ C608-01 武昌职业第01组：计划 68，历史低线较低，是表里最像�
 
     #[test]
     fn editor_renders_preedit_after_trailing_space() {
-        use ui::plugin::{PluginMessage, ViewPlugin};
-
         let source = "hello ";
-        let mut doc = StubDoc::new(source);
+        let doc = StubDoc::new(source);
         let mut view = MarkdownEditorView::new();
         view.set_source(source.into(), 1);
         render_editor_once(&mut view, &doc);
 
-        view.handle_message(PluginMessage::SetCursorByte(source.len()), &mut doc);
-        view.handle_message(
-            PluginMessage::SetPreedit { text: "拼音".into(), cursor: Some((6, 6)) },
-            &mut doc,
-        );
+        view.set_cursor_byte(source.len());
+        view.set_preedit("拼音".into(), Some((6, 6)));
 
         let draw_list = render_editor_draw_list(&mut view, &doc);
         let rendered_text = draw_list
@@ -4141,19 +4045,14 @@ C608-01 武昌职业第01组：计划 68，历史低线较低，是表里最像�
 
     #[test]
     fn empty_line_preedit_cursor_uses_shaped_advance() {
-        use ui::plugin::{PluginMessage, PluginQuery, PluginResponse, ViewPlugin};
-
         let source = "hello\n";
-        let mut doc = StubDoc::new(source);
+        let doc = StubDoc::new(source);
         let mut view = MarkdownEditorView::new();
         view.set_source(source.into(), 1);
         render_editor_once(&mut view, &doc);
 
-        view.handle_message(PluginMessage::SetCursorByte(source.len()), &mut doc);
-        view.handle_message(
-            PluginMessage::SetPreedit { text: "拼音".into(), cursor: Some((6, 6)) },
-            &mut doc,
-        );
+        view.set_cursor_byte(source.len());
+        view.set_preedit("拼音".into(), Some((6, 6)));
 
         let draw_list = render_editor_draw_list(&mut view, &doc);
         let (preedit_x, preedit_width) = draw_list
@@ -4166,8 +4065,8 @@ C608-01 武昌职业第01组：计划 68，历史低线较低，是表里最像�
                 _ => None,
             })
             .expect("preedit text layout should be emitted");
-        let cursor_x = match view.query(PluginQuery::CursorScreenPos(source.len()), &doc) {
-            PluginResponse::CursorScreenRect(Some((x, _, _, _))) => x,
+        let cursor_x = match view.cursor_screen_rect(source.len()) {
+            Some((x, _, _, _)) => x,
             other => panic!("expected preedit cursor rect, got {other:?}"),
         };
 
@@ -4205,32 +4104,20 @@ C608-01 武昌职业第01组：计划 68，历史低线较低，是表里最像�
 
     #[test]
     fn editor_preedit_clear_restores_source_text() {
-        use ui::plugin::{PluginMessage, PluginQuery, PluginResponse, ViewPlugin};
-
         let source = "hello world";
-        let mut doc = StubDoc::new(source);
+        let doc = StubDoc::new(source);
         let mut view = MarkdownEditorView::new();
         view.set_source(source.into(), 1);
         render_editor_once(&mut view, &doc);
 
-        view.handle_message(PluginMessage::SetCursorByte(5), &mut doc);
-        view.handle_message(
-            PluginMessage::SetPreedit { text: "ni".into(), cursor: Some((2, 2)) },
-            &mut doc,
-        );
+        view.set_cursor_byte(5);
+        view.set_preedit("ni".into(), Some((2, 2)));
         render_editor_once(&mut view, &doc);
 
-        view.handle_message(
-            PluginMessage::SetPreedit { text: String::new(), cursor: None },
-            &mut doc,
-        );
+        view.set_preedit(String::new(), None);
         render_editor_once(&mut view, &doc);
 
-        let response = view.query(PluginQuery::FlatLines, &doc);
-        let lines = match response {
-            PluginResponse::FlatLines(lines) => lines,
-            other => panic!("expected FlatLines, got {other:?}"),
-        };
+        let lines = view.selection().expect("Markdown view provides selection").flat_lines();
 
         assert_eq!(lines.first().map(|line| line.text.as_str()), Some("hello world"));
     }
@@ -4239,19 +4126,17 @@ C608-01 武昌职业第01组：计划 68，历史低线较低，是表里最像�
     /// 剥离了尾部空白。
     #[test]
     fn editor_cursor_advances_past_trailing_source_space() {
-        use ui::plugin::{PluginMessage, ViewPlugin};
-
         let mut view = MarkdownEditorView::new();
         let mut doc = StubDoc::new("abc");
         view.set_source("abc".into(), 1);
         render_editor_once(&mut view, &doc);
-        view.handle_message(PluginMessage::SetCursorByte(3), &mut doc);
+        view.set_cursor_byte(3);
         let before_space =
             editor_cursor_rect_from_draw_list(&render_editor_draw_list(&mut view, &doc));
 
         doc = StubDoc::new("abc ");
         view.set_source("abc ".into(), 2);
-        view.handle_message(PluginMessage::SetCursorByte(4), &mut doc);
+        view.set_cursor_byte(4);
         let after_draw_list = render_editor_draw_list(&mut view, &doc);
         let after_space = editor_cursor_rect_from_draw_list(&after_draw_list);
 
@@ -4272,25 +4157,20 @@ C608-01 武昌职业第01组：计划 68，历史低线较低，是表里最像�
     /// 段落末尾输入 IME 时,光标应留在同一 flat_line,而非跳到下一段落。
     #[test]
     fn editor_preedit_cursor_at_paragraph_end_stays_on_same_line() {
-        use ui::plugin::{PluginMessage, ViewPlugin};
-
         let source = "hello\n\nworld";
-        let mut doc = StubDoc::new(source);
+        let doc = StubDoc::new(source);
         let mut view = MarkdownEditorView::new();
         view.set_source(source.into(), 1);
         render_editor_once(&mut view, &doc);
 
         let cursor_byte = "hello".len();
-        view.handle_message(PluginMessage::SetCursorByte(cursor_byte), &mut doc);
+        view.set_cursor_byte(cursor_byte);
         let base_rect =
             editor_cursor_rect_from_draw_list(&render_editor_draw_list(&mut view, &doc));
 
         for (preedit, cursor) in [("n", (1, 1)), ("ni", (2, 2)), ("nih", (3, 3)), ("nihao", (5, 5))]
         {
-            view.handle_message(
-                PluginMessage::SetPreedit { text: preedit.into(), cursor: Some(cursor) },
-                &mut doc,
-            );
+            view.set_preedit(preedit.into(), Some(cursor));
             let preedit_rect =
                 editor_cursor_rect_from_draw_list(&render_editor_draw_list(&mut view, &doc));
 
@@ -4311,37 +4191,40 @@ C608-01 武昌职业第01组：计划 68，历史低线较低，是表里最像�
 
     #[test]
     fn editor_selection_range_query_returns_source_bytes() {
-        use ui::plugin::{PluginMessage, PluginQuery, PluginResponse, ViewPlugin};
-
         let source = "hello world";
-        let mut doc = StubDoc::new(source);
+        let doc = StubDoc::new(source);
         let mut view = MarkdownEditorView::new();
         view.set_source(source.into(), 1);
         render_editor_once(&mut view, &doc);
 
-        view.handle_message(PluginMessage::SetSelAnchorByte(Some(6)), &mut doc);
-        view.handle_message(PluginMessage::SetSelCursorByte(Some(11)), &mut doc);
+        view.selection_mut()
+            .expect("test view exposes selection")
+            .set_selection_anchor_byte(Some(6));
+        view.selection_mut()
+            .expect("test view exposes selection")
+            .set_selection_cursor_byte(Some(11));
 
-        let response = view.query(PluginQuery::SelectionRange, &doc);
-        match response {
-            PluginResponse::PositionPair(Some(((start, _), (end, _)))) => {
-                assert_eq!((start, end), (6, 11));
-            }
-            other => panic!("expected source byte selection range, got {other:?}"),
-        }
+        assert_eq!(
+            view.selection().expect("Markdown view provides selection").selection_source_range(),
+            Some(6..11)
+        );
     }
 
     #[test]
     fn selection_intersecting_ascii_diagram_rebuilds_code_block_without_grid() {
         let source = "```\n┌────┐\n│中文│\n└────┘\n```\noutside";
-        let mut document = StubDoc::new(source);
+        let document = StubDoc::new(source);
         let mut view = MarkdownEditorView::new();
         view.set_source(source.to_string(), 1);
         render_editor_once(&mut view, &document);
 
         let selection_start = source.find("中文").expect("fixture has diagram text");
-        view.handle_message(PluginMessage::SetSelAnchorByte(Some(selection_start)), &mut document);
-        view.handle_message(PluginMessage::SetSelCursorByte(Some(source.len())), &mut document);
+        view.selection_mut()
+            .expect("test view exposes selection")
+            .set_selection_anchor_byte(Some(selection_start));
+        view.selection_mut()
+            .expect("test view exposes selection")
+            .set_selection_cursor_byte(Some(source.len()));
         render_editor_once(&mut view, &document);
 
         let lazy = view.engine.lazy.as_ref().expect("selection render must build layout");
@@ -4358,14 +4241,18 @@ C608-01 武昌职业第01组：计划 68，历史低线较低，是表里最像�
     #[test]
     fn reverse_selection_intersecting_ascii_diagram_rebuilds_code_block_without_grid() {
         let source = "```\n┌────┐\n│中文│\n└────┘\n```\noutside";
-        let mut document = StubDoc::new(source);
+        let document = StubDoc::new(source);
         let mut view = MarkdownEditorView::new();
         view.set_source(source.to_string(), 1);
         render_editor_once(&mut view, &document);
 
         let selection_end = source.find("中文").expect("fixture has diagram text");
-        view.handle_message(PluginMessage::SetSelAnchorByte(Some(source.len())), &mut document);
-        view.handle_message(PluginMessage::SetSelCursorByte(Some(selection_end)), &mut document);
+        view.selection_mut()
+            .expect("test view exposes selection")
+            .set_selection_anchor_byte(Some(source.len()));
+        view.selection_mut()
+            .expect("test view exposes selection")
+            .set_selection_cursor_byte(Some(selection_end));
         render_editor_once(&mut view, &document);
 
         let lazy = view.engine.lazy.as_ref().expect("selection render must build layout");
@@ -4442,8 +4329,6 @@ C608-01 武昌职业第01组：计划 68，历史低线较低，是表里最像�
 
     #[test]
     fn entering_editor_keeps_softbreak_paragraph_layout() {
-        use ui::plugin::PluginMessage;
-
         let source = "\
 你这个分数，别冲体育统考本科.
 
@@ -4487,10 +4372,7 @@ C608-01 武昌职业第01组：计划 68，历史低线较低，是表里最像�
         let before_click = visible_line_snapshots(editor.engine());
         for line_number in [3, 6, 8, 12, 16, 19, 23] {
             let byte_offset = byte_offset_for_line(source, line_number);
-            editor.handle_message(
-                PluginMessage::SetCursorByte(byte_offset),
-                &mut StubDoc::new(source),
-            );
+            editor.set_cursor_byte(byte_offset);
             render_editor_narrow(&mut editor, &doc, width);
             assert_eq!(
                 visible_line_snapshots(editor.engine()),
@@ -4502,8 +4384,6 @@ C608-01 武昌职业第01组：计划 68，历史低线较低，是表里最像�
 
     #[test]
     fn first_cursor_focus_keeps_softbreak_layout_in_short_viewport() {
-        use ui::plugin::PluginMessage;
-
         let source = "\
 你这个分数，别冲体育统考本科.
 
@@ -4538,10 +4418,7 @@ C608-01 武昌职业第01组：计划 68，历史低线较低，是表里最像�
             let before_focus = layout_snapshot(editor.engine());
 
             let byte_offset = byte_offset_for_line(source, line_number);
-            editor.handle_message(
-                PluginMessage::SetCursorByte(byte_offset),
-                &mut StubDoc::new(source),
-            );
+            editor.set_cursor_byte(byte_offset);
             render_editor_viewport(&mut editor, &doc, width, height);
 
             assert_eq!(
@@ -4554,21 +4431,15 @@ C608-01 武昌职业第01组：计划 68，历史低线较低，是表里最像�
 
     #[test]
     fn editor_render_expands_cursor_span_source_markers() {
-        use ui::plugin::{PluginMessage, PluginQuery, PluginResponse, ViewPlugin};
-
-        let mut doc = StubDoc::new("hello **world** here");
+        let doc = StubDoc::new("hello **world** here");
         let mut view = MarkdownEditorView::new();
         view.set_source(doc.text.clone(), 1);
         render_editor_once(&mut view, &doc);
 
-        view.handle_message(PluginMessage::SetCursorByte(10), &mut doc);
+        view.set_cursor_byte(10);
         render_editor_once(&mut view, &doc);
 
-        let response = view.query(PluginQuery::FlatLines, &doc);
-        let lines = match response {
-            PluginResponse::FlatLines(lines) => lines,
-            other => panic!("expected FlatLines, got {other:?}"),
-        };
+        let lines = view.selection().expect("Markdown view provides selection").flat_lines();
 
         let joined = lines.into_iter().map(|line| line.text).collect::<Vec<_>>().join("\n");
         assert!(
@@ -4595,18 +4466,15 @@ C608-01 武昌职业第01组：计划 68，历史低线较低，是表里最像�
 
     #[test]
     fn cursor_move_does_not_require_source_generation_change() {
-        use ui::plugin::{PluginMessage, PluginQuery, PluginResponse, ViewPlugin};
-
-        let mut doc = StubDoc::new("hello **world** here");
+        let doc = StubDoc::new("hello **world** here");
         let mut view = MarkdownEditorView::new();
         view.set_source(doc.text.clone(), 7);
         render_editor_once(&mut view, &doc);
 
-        view.handle_message(PluginMessage::SetCursorByte(10), &mut doc);
+        view.set_cursor_byte(10);
         render_editor_once(&mut view, &doc);
 
-        let response = view.query(PluginQuery::NeedsSourceUpdate(7), &doc);
-        assert!(matches!(response, PluginResponse::Bool(false)));
+        assert!(!view.needs_source_update(7));
     }
 
     // ── Two-phase hit test ─────────────────────────────────────────────────
@@ -4620,8 +4488,6 @@ C608-01 武昌职业第01组：计划 68，历史低线较低，是表里最像�
     /// the expanded layout shows the markdown markers.
     #[test]
     fn two_phase_hit_test_from_folded_to_expanded_span() {
-        use ui::plugin::{PluginMessage, PluginQuery, PluginResponse, ViewPlugin};
-
         // Source: "hello **world** here" (21 bytes)
         // "hello "  = bytes 0..6
         // "**"      = bytes 6..8  (markers, folded when cursor not inside)
@@ -4631,12 +4497,12 @@ C608-01 武昌职业第01组：计划 68，历史低线较低，是表里最像�
         let source = "hello **world** here";
         let world_source_range = 8..13;
 
-        let mut doc = StubDoc::new(source);
+        let doc = StubDoc::new(source);
         let mut view = MarkdownEditorView::new();
         view.set_source(doc.text.clone(), 1);
 
         // ---- Build FOLDED layout (cursor at byte 0, not in bold span) ----
-        view.handle_message(PluginMessage::SetCursorByte(0), &mut doc);
+        view.set_cursor_byte(0);
         render_editor_once(&mut view, &doc);
 
         // ---- Find pixel position of "world" inside the FOLDED layout ----
@@ -4661,15 +4527,11 @@ C608-01 武昌职业第01组：计划 68，历史低线较低，是表里最像�
             .expect("Phase 1 hit test on folded layout must find a byte");
 
         // ---- Phase 1.5: move cursor + sync refresh (expand the span) ----
-        view.handle_message(PluginMessage::SetCursorByte(candidate), &mut doc);
+        view.set_cursor_byte(candidate);
         render_editor_once(&mut view, &doc);
 
         // Verify expanded layout: markers must be visible.
-        let response = view.query(PluginQuery::FlatLines, &doc);
-        let lines = match response {
-            PluginResponse::FlatLines(lines) => lines,
-            other => panic!("expected FlatLines, got {other:?}"),
-        };
+        let lines = view.selection().expect("Markdown view provides selection").flat_lines();
         let joined = lines.into_iter().map(|line| line.text).collect::<Vec<_>>().join("\n");
         assert!(
             joined.contains("hello **world** here"),
@@ -4712,21 +4574,15 @@ C608-01 武昌职业第01组：计划 68，历史低线较低，是表里最像�
     /// (e.g. "# ") must become visible in FlatLines.
     #[test]
     fn heading_marker_visible_when_cursor_in_heading_source_range() {
-        use ui::plugin::{PluginMessage, PluginQuery, PluginResponse, ViewPlugin};
-
         let source = "# Title\n\nparagraph";
-        let mut doc = StubDoc::new(source);
+        let doc = StubDoc::new(source);
         let mut view = MarkdownEditorView::new();
         view.set_source(doc.text.clone(), 1);
 
         // Cursor in paragraph (byte 10) → heading marker NOT visible.
-        view.handle_message(PluginMessage::SetCursorByte(10), &mut doc);
+        view.set_cursor_byte(10);
         render_editor_once(&mut view, &doc);
-        let response = view.query(PluginQuery::FlatLines, &doc);
-        let lines = match response {
-            PluginResponse::FlatLines(lines) => lines,
-            other => panic!("expected FlatLines, got {other:?}"),
-        };
+        let lines = view.selection().expect("Markdown view provides selection").flat_lines();
         let joined = lines.into_iter().map(|l| l.text).collect::<Vec<_>>().join("\n");
         assert!(
             !joined.contains("# "),
@@ -4734,13 +4590,9 @@ C608-01 武昌职业第01组：计划 68，历史低线较低，是表里最像�
         );
 
         // Cursor at byte 1 (inside the heading prefix) → marker visible.
-        view.handle_message(PluginMessage::SetCursorByte(1), &mut doc);
+        view.set_cursor_byte(1);
         render_editor_once(&mut view, &doc);
-        let response = view.query(PluginQuery::FlatLines, &doc);
-        let lines = match response {
-            PluginResponse::FlatLines(lines) => lines,
-            other => panic!("expected FlatLines after cursor move, got {other:?}"),
-        };
+        let lines = view.selection().expect("Markdown view provides selection").flat_lines();
         let joined = lines.into_iter().map(|l| l.text).collect::<Vec<_>>().join("\n");
         assert!(
             joined.contains("# "),
@@ -4752,21 +4604,15 @@ C608-01 武昌职业第01组：计划 68，历史低线较低，是表里最像�
     /// become visible in FlatLines.
     #[test]
     fn blockquote_marker_visible_when_cursor_in_range() {
-        use ui::plugin::{PluginMessage, PluginQuery, PluginResponse, ViewPlugin};
-
         let source = "> quoted";
-        let mut doc = StubDoc::new(source);
+        let doc = StubDoc::new(source);
         let mut view = MarkdownEditorView::new();
         view.set_source(doc.text.clone(), 1);
 
         // Cursor at byte 3 (inside content "quoted") → marker visible.
-        view.handle_message(PluginMessage::SetCursorByte(3), &mut doc);
+        view.set_cursor_byte(3);
         render_editor_once(&mut view, &doc);
-        let response = view.query(PluginQuery::FlatLines, &doc);
-        let lines = match response {
-            PluginResponse::FlatLines(lines) => lines,
-            other => panic!("expected FlatLines, got {other:?}"),
-        };
+        let lines = view.selection().expect("Markdown view provides selection").flat_lines();
         let joined = lines.into_iter().map(|l| l.text).collect::<Vec<_>>().join("\n");
         assert!(joined.contains("> "), "blockquote marker '> ' must be visible, got: {joined:?}");
     }
@@ -4774,18 +4620,12 @@ C608-01 武昌职业第01组：计划 68，历史低线较低，是表里最像�
     /// Empty documents contain one editable paragraph with zero graphemes.
     #[test]
     fn empty_document_has_one_editable_layout_row() {
-        use ui::plugin::{PluginQuery, PluginResponse, ViewPlugin};
-
         let doc = StubDoc::new("");
         let mut view = MarkdownEditorView::new();
         view.set_source(String::new(), 1);
         render_editor_once(&mut view, &doc);
 
-        let response = view.query(PluginQuery::FlatLines, &doc);
-        let lines = match response {
-            PluginResponse::FlatLines(lines) => lines,
-            other => panic!("expected FlatLines, got {other:?}"),
-        };
+        let lines = view.selection().expect("Markdown view provides selection").flat_lines();
         assert_eq!(lines.len(), 1, "empty document must lay out its editable paragraph");
         assert!(lines[0].text.is_empty());
     }
@@ -4793,49 +4633,38 @@ C608-01 武昌职业第01组：计划 68，历史低线较低，是表里最像�
     /// Very long line: FlatLines still produces output without panic.
     #[test]
     fn very_long_line_does_not_panic() {
-        use ui::plugin::{PluginQuery, PluginResponse, ViewPlugin};
-
         let long = "x".repeat(10_000);
         let doc = StubDoc::new(&long);
         let mut view = MarkdownEditorView::new();
         view.set_source(long, 1);
         render_editor_once(&mut view, &doc);
 
-        let response = view.query(PluginQuery::FlatLines, &doc);
-        assert!(matches!(response, PluginResponse::FlatLines(_)));
+        let _ = view.selection().expect("Markdown view provides selection").flat_lines();
     }
 
     /// H2 heading marker "## " is visible.
     #[test]
     fn h2_marker_visible_when_cursor_in_range() {
-        use ui::plugin::{PluginMessage, PluginQuery, PluginResponse, ViewPlugin};
-
         let source = "## SubTitle";
-        let mut doc = StubDoc::new(source);
+        let doc = StubDoc::new(source);
         let mut view = MarkdownEditorView::new();
         view.set_source(doc.text.clone(), 1);
 
-        view.handle_message(PluginMessage::SetCursorByte(1), &mut doc);
+        view.set_cursor_byte(1);
         render_editor_once(&mut view, &doc);
-        let response = view.query(PluginQuery::FlatLines, &doc);
-        let lines = match response {
-            PluginResponse::FlatLines(lines) => lines,
-            other => panic!("expected FlatLines, got {other:?}"),
-        };
+        let lines = view.selection().expect("Markdown view provides selection").flat_lines();
         let joined = lines.into_iter().map(|l| l.text).collect::<Vec<_>>().join("\n");
         assert!(joined.contains("## "), "h2 marker must be visible, got: {joined:?}");
     }
 
     #[test]
     fn heading_content_click_keeps_prefix_hidden_and_caret_stable() {
-        use ui::plugin::{PluginMessage, ViewPlugin};
-
         let source = "## SubTitle\n\nparagraph";
-        let mut doc = StubDoc::new(source);
+        let doc = StubDoc::new(source);
         let mut view = MarkdownEditorView::new();
         view.set_source(doc.text.clone(), 1);
 
-        view.handle_message(PluginMessage::SetCursorByte(source.len()), &mut doc);
+        view.set_cursor_byte(source.len());
         render_editor_once(&mut view, &doc);
 
         let folded_line = view.engine().flat_lines()[0].clone();
@@ -4854,7 +4683,7 @@ C608-01 武昌职业第01组：计划 68，历史低线较低，是表里最像�
             .hit_test_byte(px, py, 0.0, 0.0)
             .expect("folded heading hit-test should return a source byte");
 
-        view.handle_message(PluginMessage::SetCursorByte(candidate), &mut doc);
+        view.set_cursor_byte(candidate);
         render_editor_once(&mut view, &doc);
 
         let expanded_line = view.engine().flat_lines()[0].clone();
@@ -4889,20 +4718,14 @@ C608-01 武昌职业第01组：计划 68，历史低线较低，是表里最像�
     /// H3 heading marker "### " is visible.
     #[test]
     fn h3_marker_visible_when_cursor_in_range() {
-        use ui::plugin::{PluginMessage, PluginQuery, PluginResponse, ViewPlugin};
-
         let source = "### Small";
-        let mut doc = StubDoc::new(source);
+        let doc = StubDoc::new(source);
         let mut view = MarkdownEditorView::new();
         view.set_source(doc.text.clone(), 1);
 
-        view.handle_message(PluginMessage::SetCursorByte(1), &mut doc);
+        view.set_cursor_byte(1);
         render_editor_once(&mut view, &doc);
-        let response = view.query(PluginQuery::FlatLines, &doc);
-        let lines = match response {
-            PluginResponse::FlatLines(lines) => lines,
-            other => panic!("expected FlatLines, got {other:?}"),
-        };
+        let lines = view.selection().expect("Markdown view provides selection").flat_lines();
         let joined = lines.into_iter().map(|l| l.text).collect::<Vec<_>>().join("\n");
         assert!(joined.contains("### "), "h3 marker must be visible, got: {joined:?}");
     }
@@ -4910,50 +4733,42 @@ C608-01 武昌职业第01组：计划 68，历史低线较低，是表里最像�
     /// Task list checked marker "- [x] " is visible.
     #[test]
     fn task_list_checked_marker_visible() {
-        use ui::plugin::{PluginMessage, PluginQuery, PluginResponse, ViewPlugin};
-
         let source = "- [x] done";
-        let mut doc = StubDoc::new(source);
+        let doc = StubDoc::new(source);
         let mut view = MarkdownEditorView::new();
         view.set_source(doc.text.clone(), 1);
 
-        view.handle_message(PluginMessage::SetCursorByte(8), &mut doc);
+        view.set_cursor_byte(8);
         render_editor_once(&mut view, &doc);
-        let response = view.query(PluginQuery::FlatLines, &doc);
-        let lines = match response {
-            PluginResponse::FlatLines(lines) => lines,
-            other => panic!("expected FlatLines, got {other:?}"),
-        };
+        let lines = view.selection().expect("Markdown view provides selection").flat_lines();
         let joined = lines.into_iter().map(|l| l.text).collect::<Vec<_>>().join("\n");
         assert!(joined.contains("- [x] "), "checked task marker must be visible, got: {joined:?}");
     }
 
     #[test]
     fn activating_ordered_list_replaces_preview_number_with_source_marker() {
-        use ui::plugin::{PluginMessage, ViewPlugin};
-
         for number in [0, 1, 7, 42] {
             let source = format!("# Title\n\n{number}. item");
             let preview_marker = format!("{number}.");
             let source_marker = format!("{number}. ");
             let item_cursor = source.find("item").expect("fixture must contain list item text");
-            let mut document = StubDoc::new(&source);
+            let document = StubDoc::new(&source);
             let mut view = MarkdownEditorView::new();
             view.set_source(document.text.clone(), 1);
-            view.handle_message(PluginMessage::SetCursorByte(2), &mut document);
+            view.set_cursor_byte(2);
 
             let preview_draw_list = render_editor_draw_list(&mut view, &document);
             let preview_text = rendered_text_commands(&preview_draw_list);
             assert!(preview_text.contains(&preview_marker.as_str()), "source: {source:?}");
             assert!(!preview_text.contains(&source_marker.as_str()), "source: {source:?}");
 
-            view.handle_message(PluginMessage::SetCursorByte(item_cursor), &mut document);
+            view.set_cursor_byte(item_cursor);
             let draw_list = render_editor_draw_list(&mut view, &document);
             let rendered_text = rendered_text_commands(&draw_list);
             assert!(rendered_text.contains(&source_marker.as_str()), "source: {source:?}");
             assert!(!rendered_text.contains(&preview_marker.as_str()), "source: {source:?}");
 
-            view.handle_message(PluginMessage::SetCursorByte(2), &mut document);
+            view.set_cursor_byte(2);
             let draw_list = render_editor_draw_list(&mut view, &document);
             let rendered_text = rendered_text_commands(&draw_list);
             assert!(rendered_text.contains(&preview_marker.as_str()), "source: {source:?}");
@@ -4964,15 +4779,13 @@ C608-01 武昌职业第01组：计划 68，历史低线较低，是表里最像�
 
     #[test]
     fn removing_middle_ordered_marker_recomputes_the_following_preview_number() {
-        use ui::plugin::{PluginMessage, ViewPlugin};
-
         let initial_source = "1. first\n2. second\n3. third";
         let mut document = StubDoc::new(initial_source);
         let mut view = MarkdownEditorView::new();
         view.set_source(document.text.clone(), 1);
         let initial_cursor =
             initial_source.find("second").expect("fixture must contain the middle item");
-        view.handle_message(PluginMessage::SetCursorByte(initial_cursor), &mut document);
+        view.set_cursor_byte(initial_cursor);
         render_editor_once(&mut view, &document);
 
         let updated_source = "1. first\nsecond\n3. third";
@@ -4980,7 +4793,7 @@ C608-01 武昌职业第01组：计划 68，历史低线较低，是表里最像�
         view.set_source(document.text.clone(), 2);
         let updated_cursor =
             updated_source.find("second").expect("fixture must contain the former middle item");
-        view.handle_message(PluginMessage::SetCursorByte(updated_cursor), &mut document);
+        view.set_cursor_byte(updated_cursor);
 
         let draw_list = render_editor_draw_list(&mut view, &document);
         let rendered_text = rendered_text_commands(&draw_list);
@@ -5014,7 +4827,7 @@ anchor 人物性格,背景描述,提示词来决定. 对他自己的了解和对
 
 viebcoding 用过吗?
 
-##  吴志全  
+##  吴志全
 ";
         let doc = StubDoc::new(source);
         let mut view = MarkdownEditorView::new();
@@ -5056,13 +4869,13 @@ viebcoding 用过吗?
 
 
 对 AI Agent 产品形态有实际演进经验，对记忆、上下文和幻觉控制有较多工程实践";
-        let mut doc = StubDoc::new(source);
+        let doc = StubDoc::new(source);
         let mut view = MarkdownEditorView::new();
         view.set_source(doc.text.clone(), 1);
         render_editor_once(&mut view, &doc);
 
         let editable_empty_line_byte = "## 李现民\n\n".len();
-        view.handle_message(PluginMessage::SetCursorByte(editable_empty_line_byte), &mut doc);
+        view.set_cursor_byte(editable_empty_line_byte);
         render_editor_once(&mut view, &doc);
 
         let (cursor_x, cursor_y, cursor_width, cursor_height) = view
@@ -5112,13 +4925,13 @@ viebcoding 用过吗?
 
     #[test]
     fn whitespace_and_crlf_blank_lines_keep_empty_line_cursor_and_navigation() {
-        use ui::plugin::{MoveDirection, PluginMessage, ViewPlugin};
+        use ui::plugin::MoveDirection;
 
         for (source, blank_byte) in [("first\n \n", 6), ("first\r\n\r\n", 7)] {
-            let mut doc = StubDoc::new(source);
+            let doc = StubDoc::new(source);
             let mut view = MarkdownEditorView::new();
             view.set_source(source.to_owned(), 1);
-            view.handle_message(PluginMessage::SetCursorByte(blank_byte), &mut doc);
+            view.set_cursor_byte(blank_byte);
             render_editor_once(&mut view, &doc);
 
             assert!(view.engine().cursor_screen_pos().is_some());
@@ -5155,15 +4968,15 @@ viebcoding 用过吗?
 
     #[test]
     fn visual_move_down_from_empty_source_line_goes_to_next_line_start() {
-        use ui::plugin::{MoveDirection, PluginMessage, ViewPlugin};
+        use ui::plugin::MoveDirection;
 
         let source = "first\n\nsecond";
-        let mut doc = StubDoc::new(source);
+        let doc = StubDoc::new(source);
         let mut view = MarkdownEditorView::new();
         view.set_source(doc.text.clone(), 1);
 
         let empty_line_start = 6;
-        view.handle_message(PluginMessage::SetCursorByte(empty_line_start), &mut doc);
+        view.set_cursor_byte(empty_line_start);
         render_editor_once(&mut view, &doc);
 
         let moved = view
@@ -5176,15 +4989,15 @@ viebcoding 用过吗?
 
     #[test]
     fn visual_move_up_from_empty_source_line_goes_to_previous_line_start() {
-        use ui::plugin::{MoveDirection, PluginMessage, ViewPlugin};
+        use ui::plugin::MoveDirection;
 
         let source = "first\n\nsecond";
-        let mut doc = StubDoc::new(source);
+        let doc = StubDoc::new(source);
         let mut view = MarkdownEditorView::new();
         view.set_source(doc.text.clone(), 1);
 
         let empty_line_start = 6;
-        view.handle_message(PluginMessage::SetCursorByte(empty_line_start), &mut doc);
+        view.set_cursor_byte(empty_line_start);
         render_editor_once(&mut view, &doc);
 
         let moved = view
@@ -5197,16 +5010,16 @@ viebcoding 用过吗?
 
     #[test]
     fn visual_move_from_second_editable_empty_line_reaches_adjacent_rendered_lines() {
-        use ui::plugin::{MoveDirection, PluginMessage, ViewPlugin};
+        use ui::plugin::MoveDirection;
 
         let source = "first\n\n\nsecond";
-        let mut doc = StubDoc::new(source);
+        let doc = StubDoc::new(source);
         let mut view = MarkdownEditorView::new();
         view.set_source(doc.text.clone(), 1);
 
         let second_empty_line_start = "first\n\n".len();
         let second_line_start = source.find("second").expect("fixture should contain second line");
-        view.handle_message(PluginMessage::SetCursorByte(second_empty_line_start), &mut doc);
+        view.set_cursor_byte(second_empty_line_start);
         render_editor_once(&mut view, &doc);
 
         assert_eq!(
@@ -5223,15 +5036,15 @@ viebcoding 用过吗?
 
     #[test]
     fn visual_move_up_from_trailing_editable_empty_line_reaches_previous_rendered_line() {
-        use ui::plugin::{MoveDirection, PluginMessage, ViewPlugin};
+        use ui::plugin::MoveDirection;
 
         let source = "first\n\n";
-        let mut doc = StubDoc::new(source);
+        let doc = StubDoc::new(source);
         let mut view = MarkdownEditorView::new();
         view.set_source(doc.text.clone(), 1);
 
         let trailing_empty_line_start = "first\n".len();
-        view.handle_message(PluginMessage::SetCursorByte(trailing_empty_line_start), &mut doc);
+        view.set_cursor_byte(trailing_empty_line_start);
         render_editor_once(&mut view, &doc);
 
         assert_eq!(
@@ -5243,15 +5056,15 @@ viebcoding 用过吗?
 
     #[test]
     fn visual_move_right_skips_inter_paragraph_empty_source_line() {
-        use ui::plugin::{MoveDirection, PluginMessage, ViewPlugin};
+        use ui::plugin::MoveDirection;
 
         let source = "first\n\nsecond";
-        let mut doc = StubDoc::new(source);
+        let doc = StubDoc::new(source);
         let mut view = MarkdownEditorView::new();
         view.set_source(doc.text.clone(), 1);
 
         let first_line_end = source.find('\n').expect("fixture should contain blank line");
-        view.handle_message(PluginMessage::SetCursorByte(first_line_end), &mut doc);
+        view.set_cursor_byte(first_line_end);
         render_editor_once(&mut view, &doc);
 
         let moved = view
@@ -5264,15 +5077,15 @@ viebcoding 用过吗?
 
     #[test]
     fn visual_move_left_skips_inter_paragraph_empty_source_line() {
-        use ui::plugin::{MoveDirection, PluginMessage, ViewPlugin};
+        use ui::plugin::MoveDirection;
 
         let source = "first\n\nsecond";
-        let mut doc = StubDoc::new(source);
+        let doc = StubDoc::new(source);
         let mut view = MarkdownEditorView::new();
         view.set_source(doc.text.clone(), 1);
 
         let second_line_start = source.find("second").expect("fixture should contain second line");
-        view.handle_message(PluginMessage::SetCursorByte(second_line_start), &mut doc);
+        view.set_cursor_byte(second_line_start);
         render_editor_once(&mut view, &doc);
 
         let moved = view
@@ -5285,15 +5098,15 @@ viebcoding 用过吗?
 
     #[test]
     fn visual_move_right_from_empty_source_line_goes_to_next_line_start() {
-        use ui::plugin::{MoveDirection, PluginMessage, ViewPlugin};
+        use ui::plugin::MoveDirection;
 
         let source = "first\n\nsecond";
-        let mut doc = StubDoc::new(source);
+        let doc = StubDoc::new(source);
         let mut view = MarkdownEditorView::new();
         view.set_source(doc.text.clone(), 1);
 
         let empty_line_start = 6;
-        view.handle_message(PluginMessage::SetCursorByte(empty_line_start), &mut doc);
+        view.set_cursor_byte(empty_line_start);
         render_editor_once(&mut view, &doc);
 
         let moved = view
@@ -5306,15 +5119,15 @@ viebcoding 用过吗?
 
     #[test]
     fn visual_move_left_from_empty_source_line_goes_to_previous_line_end() {
-        use ui::plugin::{MoveDirection, PluginMessage, ViewPlugin};
+        use ui::plugin::MoveDirection;
 
         let source = "first\n\nsecond";
-        let mut doc = StubDoc::new(source);
+        let doc = StubDoc::new(source);
         let mut view = MarkdownEditorView::new();
         view.set_source(doc.text.clone(), 1);
 
         let empty_line_start = 6;
-        view.handle_message(PluginMessage::SetCursorByte(empty_line_start), &mut doc);
+        view.set_cursor_byte(empty_line_start);
         render_editor_once(&mut view, &doc);
 
         let moved = view
@@ -5327,15 +5140,15 @@ viebcoding 用过吗?
 
     #[test]
     fn visual_move_line_start_and_end_preserve_empty_source_line() {
-        use ui::plugin::{MoveDirection, PluginMessage, ViewPlugin};
+        use ui::plugin::MoveDirection;
 
         let source = "first\n\nsecond";
-        let mut doc = StubDoc::new(source);
+        let doc = StubDoc::new(source);
         let mut view = MarkdownEditorView::new();
         view.set_source(doc.text.clone(), 1);
 
         let empty_line_start = 6;
-        view.handle_message(PluginMessage::SetCursorByte(empty_line_start), &mut doc);
+        view.set_cursor_byte(empty_line_start);
         render_editor_once(&mut view, &doc);
 
         assert_eq!(
@@ -5352,15 +5165,13 @@ viebcoding 用过吗?
 
     #[test]
     fn cursor_on_blank_line_inside_code_block_stays_on_that_line() {
-        use ui::plugin::{PluginMessage, ViewPlugin};
-
         let source = "```rust\nfn a() {}\n\nfn b() {}\n```\n";
-        let mut doc = StubDoc::new(source);
+        let doc = StubDoc::new(source);
         let mut view = MarkdownEditorView::new();
         view.set_source(doc.text.clone(), 1);
 
         let blank_line_start = source.find("\n\n").expect("fixture has blank line") + 1;
-        view.handle_message(PluginMessage::SetCursorByte(blank_line_start), &mut doc);
+        view.set_cursor_byte(blank_line_start);
         render_editor_once(&mut view, &doc);
 
         let (cursor_x, cursor_y, cursor_width, cursor_height) = view
@@ -5383,10 +5194,10 @@ viebcoding 用过吗?
 
     #[test]
     fn visual_move_down_passes_through_blank_line_inside_active_fenced_code_block() {
-        use ui::plugin::{MoveDirection, PluginMessage, ViewPlugin};
+        use ui::plugin::MoveDirection;
 
         let source = "```rust\nfn a() {}\n\nfn b() {}\n```\n";
-        let mut doc = StubDoc::new(source);
+        let doc = StubDoc::new(source);
         let mut view = MarkdownEditorView::new();
         view.set_source(doc.text.clone(), 1);
 
@@ -5394,7 +5205,7 @@ viebcoding 用过吗?
         let blank_line_start = source.find("\n\n").expect("fixture has blank line") + 1;
         let second_code_line_start =
             source.find("fn b() {}").expect("fixture has second code line");
-        view.handle_message(PluginMessage::SetCursorByte(first_code_line_start), &mut doc);
+        view.set_cursor_byte(first_code_line_start);
         render_editor_once(&mut view, &doc);
 
         assert_eq!(
@@ -5411,10 +5222,10 @@ viebcoding 用过吗?
 
     #[test]
     fn visual_move_up_passes_through_blank_line_inside_active_fenced_code_block() {
-        use ui::plugin::{MoveDirection, PluginMessage, ViewPlugin};
+        use ui::plugin::MoveDirection;
 
         let source = "```rust\nfn a() {}\n\nfn b() {}\n```\n";
-        let mut doc = StubDoc::new(source);
+        let doc = StubDoc::new(source);
         let mut view = MarkdownEditorView::new();
         view.set_source(doc.text.clone(), 1);
 
@@ -5422,7 +5233,7 @@ viebcoding 用过吗?
         let blank_line_start = source.find("\n\n").expect("fixture has blank line") + 1;
         let second_code_line_start =
             source.find("fn b() {}").expect("fixture has second code line");
-        view.handle_message(PluginMessage::SetCursorByte(second_code_line_start), &mut doc);
+        view.set_cursor_byte(second_code_line_start);
         render_editor_once(&mut view, &doc);
 
         assert_eq!(
@@ -5439,10 +5250,10 @@ viebcoding 用过吗?
 
     #[test]
     fn visual_move_passes_through_blank_line_inside_active_indented_code_block() {
-        use ui::plugin::{MoveDirection, PluginMessage, ViewPlugin};
+        use ui::plugin::MoveDirection;
 
         let source = "intro\n\n    first\n\n    second\n";
-        let mut doc = StubDoc::new(source);
+        let doc = StubDoc::new(source);
         let mut view = MarkdownEditorView::new();
         view.set_source(doc.text.clone(), 1);
 
@@ -5451,7 +5262,7 @@ viebcoding 用过吗?
         let blank_line_start =
             source.find("first\n\n").expect("fixture has blank line") + "first\n".len();
         let second_code_line_start = source.find("second").expect("fixture has second code line");
-        view.handle_message(PluginMessage::SetCursorByte(first_code_line_start), &mut doc);
+        view.set_cursor_byte(first_code_line_start);
         render_editor_once(&mut view, &doc);
 
         assert_eq!(
@@ -5473,10 +5284,10 @@ viebcoding 用过吗?
 
     #[test]
     fn visual_move_passes_through_blank_line_inside_crlf_code_block() {
-        use ui::plugin::{MoveDirection, PluginMessage, ViewPlugin};
+        use ui::plugin::MoveDirection;
 
         let source = "```\r\nalpha\r\n\r\nbeta\r\n```\r\n";
-        let mut doc = StubDoc::new(source);
+        let doc = StubDoc::new(source);
         let mut view = MarkdownEditorView::new();
         view.set_source(doc.text.clone(), 1);
 
@@ -5484,7 +5295,7 @@ viebcoding 用过吗?
         let blank_line_start =
             source.find("\r\n\r\n").expect("fixture has blank line") + "\r\n".len();
         let second_code_line_start = source.find("beta").expect("fixture has second code line");
-        view.handle_message(PluginMessage::SetCursorByte(first_code_line_start), &mut doc);
+        view.set_cursor_byte(first_code_line_start);
         render_editor_once(&mut view, &doc);
 
         assert_eq!(
@@ -5506,17 +5317,17 @@ viebcoding 用过吗?
 
     #[test]
     fn visual_move_passes_through_blank_line_inside_metadata_block() {
-        use ui::plugin::{MoveDirection, PluginMessage, ViewPlugin};
+        use ui::plugin::MoveDirection;
 
         let source = "---\ntitle: a\n\ndesc: b\n---\nbody\n";
-        let mut doc = StubDoc::new(source);
+        let doc = StubDoc::new(source);
         let mut view = MarkdownEditorView::new();
         view.set_source(doc.text.clone(), 1);
 
         let first_line_start = source.find("title: a").expect("fixture has first metadata line");
         let blank_line_start = source.find("\n\n").expect("fixture has blank line") + 1;
         let second_line_start = source.find("desc: b").expect("fixture has second metadata line");
-        view.handle_message(PluginMessage::SetCursorByte(first_line_start), &mut doc);
+        view.set_cursor_byte(first_line_start);
         render_editor_once(&mut view, &doc);
 
         assert_eq!(
@@ -5538,10 +5349,10 @@ viebcoding 用过吗?
 
     #[test]
     fn wysiwyg_cursor_y_aligns_to_text_baseline() {
-        let mut doc = StubDoc::new("hello markdown");
+        let doc = StubDoc::new("hello markdown");
         let mut view = MarkdownEditorView::new();
         view.set_source(doc.text.clone(), 1);
-        view.handle_message(PluginMessage::SetCursorByte(5), &mut doc);
+        view.set_cursor_byte(5);
 
         let draw_list = render_editor_draw_list(&mut view, &doc);
         let text_baseline = draw_list
@@ -5613,15 +5424,13 @@ viebcoding 用过吗?
 
     #[test]
     fn active_code_block_cursor_uses_shaped_code_font_geometry() {
-        use ui::plugin::{PluginMessage, ViewPlugin};
-
         let source = "```text\nabcdefghij\n```";
         let code_start = source.find("abcdefghij").expect("fixture must contain code text");
         let cursor_byte = code_start + 8;
-        let mut document = StubDoc::new(source);
+        let document = StubDoc::new(source);
         let mut view = MarkdownEditorView::new();
         view.set_source(document.text.clone(), 1);
-        view.handle_message(PluginMessage::SetCursorByte(cursor_byte), &mut document);
+        view.set_cursor_byte(cursor_byte);
         render_editor_once(&mut view, &document);
 
         let visual_position = view
@@ -5659,16 +5468,14 @@ viebcoding 用过吗?
 
     #[test]
     fn hit_test_byte_roundtrips_table_middle_and_right_cells() {
-        use ui::plugin::{PluginMessage, ViewPlugin};
-
         let source = "| left | middle | right |\n| --- | --- | --- |\n| left cell | middle cell | right cell |";
-        let mut document = StubDoc::new(source);
+        let document = StubDoc::new(source);
         let mut view = MarkdownEditorView::new();
         view.set_source(document.text.clone(), 1);
 
         for cell_text in ["middle cell", "right cell"] {
             let cell_byte = source.find(cell_text).expect("fixture must contain table cell text");
-            view.handle_message(PluginMessage::SetCursorByte(cell_byte), &mut document);
+            view.set_cursor_byte(cell_byte);
             render_editor_once(&mut view, &document);
 
             let (cursor_x, cursor_y, _cursor_width, cursor_height) =
@@ -5701,35 +5508,24 @@ viebcoding 用过吗?
 
     #[test]
     fn markdown_editor_hit_test_edit_target_exposes_table_cell_caret() {
-        use ui::plugin::{EditHitTarget, PluginMessage, PluginQuery, PluginResponse, ViewPlugin};
+        use ui::plugin::EditHitTarget;
 
         let source = "| first | second |\n| --- | --- |\n| left | right |";
         let target_byte = source.find("right").expect("fixture has a second-column cell");
-        let mut document = StubDoc::new(source);
+        let document = StubDoc::new(source);
         let mut view = MarkdownEditorView::new();
         view.set_source(document.text.clone(), 1);
-        view.handle_message(PluginMessage::SetCursorByte(target_byte), &mut document);
+        view.set_cursor_byte(target_byte);
         render_editor_once(&mut view, &document);
 
         let (cursor_x, cursor_y, _, cursor_height) = view
             .engine()
             .cursor_screen_pos()
             .expect("rendered second-column cell should expose its caret rect");
-        let response = view.query(
-            PluginQuery::HitTestEditTarget {
-                x: cursor_x,
-                y: cursor_y + cursor_height * 0.5,
-                offset_x: 0.0,
-                offset_y: 0.0,
-            },
-            &document,
-        );
+        let response =
+            view.hit_test_edit_target(cursor_x, cursor_y + cursor_height * 0.5, 0.0, 0.0).flatten();
 
-        let PluginResponse::EditHitTarget(Some(EditHitTarget::TextCaret {
-            byte_offset,
-            selection_scope,
-        })) = response
-        else {
+        let Some(EditHitTarget::TextCaret { byte_offset, selection_scope }) = response else {
             panic!("Markdown table hit-test should return a text caret target");
         };
         assert_eq!(byte_offset, target_byte);
@@ -5738,8 +5534,6 @@ viebcoding 用过吗?
 
     #[test]
     fn hit_test_byte_roundtrips_trailing_stripped_whitespace() {
-        use ui::plugin::{PluginMessage, ViewPlugin};
-
         let plain_source = "plain trailing \t";
         let table_source = "| left | right |\n| --- | --- |\n| left cell | right cell \t|";
         let table_trailing_whitespace =
@@ -5748,10 +5542,10 @@ viebcoding 用过吗?
         for (source, cursor_byte) in
             [(plain_source, plain_source.len()), (table_source, table_trailing_whitespace)]
         {
-            let mut document = StubDoc::new(source);
+            let document = StubDoc::new(source);
             let mut view = MarkdownEditorView::new();
             view.set_source(document.text.clone(), 1);
-            view.handle_message(PluginMessage::SetCursorByte(cursor_byte), &mut document);
+            view.set_cursor_byte(cursor_byte);
             render_editor_once(&mut view, &document);
 
             let expected = canonical_source_byte(&view, cursor_byte);
@@ -5810,10 +5604,10 @@ viebcoding 用过吗?
 
         for source in corpus {
             for width in [140.0, 320.0, 800.0] {
-                let mut document = StubDoc::new(source);
+                let document = StubDoc::new(source);
                 let mut view = MarkdownEditorView::new();
                 view.set_source(document.text.clone(), 1);
-                view.handle_message(PluginMessage::SetCursorByte(0), &mut document);
+                view.set_cursor_byte(0);
                 render_editor_narrow(&mut view, &document, width);
 
                 for source_byte in source_grapheme_boundaries(source) {
@@ -5828,10 +5622,7 @@ viebcoding 用过吗?
                             hit_test_source_byte_at_cursor(&view, source_byte),
                         ),
                         None => {
-                            view.handle_message(
-                                PluginMessage::SetCursorByte(source_byte),
-                                &mut document,
-                            );
+                            view.set_cursor_byte(source_byte);
                             render_editor_narrow(&mut view, &document, width);
                             (
                                 canonical_source_byte(&view, source_byte),
@@ -5841,10 +5632,7 @@ viebcoding 用过吗?
                     };
 
                     if has_static_position.is_some() && hit != expected {
-                        view.handle_message(
-                            PluginMessage::SetCursorByte(source_byte),
-                            &mut document,
-                        );
+                        view.set_cursor_byte(source_byte);
                         render_editor_narrow(&mut view, &document, width);
                         expected = canonical_source_byte(&view, source_byte);
                         hit = hit_test_source_byte_at_cursor(&view, source_byte);
@@ -5893,15 +5681,13 @@ viebcoding 用过吗?
 
     #[test]
     fn cursor_only_refresh_keeps_unaffected_block_projection_identical() {
-        use ui::plugin::{PluginMessage, ViewPlugin};
-
         let source = "# first heading\n\nmiddle paragraph stays stable\n\n> final quote";
         let first = source.find("first").expect("fixture must contain first heading text");
         let final_quote = source.find("final").expect("fixture must contain final quote text");
-        let mut document = StubDoc::new(source);
+        let document = StubDoc::new(source);
         let mut view = MarkdownEditorView::new();
         view.set_source(document.text.clone(), 1);
-        view.handle_message(PluginMessage::SetCursorByte(first), &mut document);
+        view.set_cursor_byte(first);
         render_editor_narrow(&mut view, &document, 320.0);
         let before = view
             .engine()
@@ -5913,7 +5699,7 @@ viebcoding 用过吗?
             .clone()
             .expect("middle paragraph must have a projection");
 
-        view.handle_message(PluginMessage::SetCursorByte(final_quote), &mut document);
+        view.set_cursor_byte(final_quote);
         render_editor_narrow(&mut view, &document, 320.0);
         let after = view
             .engine()
@@ -5930,14 +5716,12 @@ viebcoding 用过吗?
 
     #[test]
     fn hit_test_byte_roundtrip_inside_ordered_list_item_respects_marker_width() {
-        use ui::plugin::{PluginMessage, ViewPlugin};
-
         let source = "intro\n\n1. item";
-        let mut doc = StubDoc::new(source);
+        let doc = StubDoc::new(source);
         let mut view = MarkdownEditorView::new();
         view.set_source(doc.text.clone(), 1);
 
-        view.handle_message(PluginMessage::SetCursorByte(0), &mut doc);
+        view.set_cursor_byte(0);
         render_editor_once(&mut view, &doc);
 
         let folded_line = view
@@ -5956,7 +5740,7 @@ viebcoding 用过吗?
             .expect("folded ordered list hit-test should return a byte");
         assert_eq!(candidate, clicked_byte);
 
-        view.handle_message(PluginMessage::SetCursorByte(candidate), &mut doc);
+        view.set_cursor_byte(candidate);
         render_editor_once(&mut view, &doc);
 
         let expanded_line = view
@@ -5997,15 +5781,13 @@ viebcoding 用过吗?
 
     #[test]
     fn active_list_collapses_lazy_continuation_softbreaks() {
-        use ui::plugin::{PluginMessage, ViewPlugin};
-
         let source = "- 前 3-5 个：好学校好专业冲一下\n长沙航空、南京信息、江苏海事、成都航空、西安航空、重庆航天这类，有湖北计划就放前面。\n中间 5-8 个：本省或相邻省份务实型军士院校\n湖北交通、武汉船舶、长江工程、湖南汽车、湖南国防、张家界航空、江西航空等。";
-        let mut doc = StubDoc::new(source);
+        let doc = StubDoc::new(source);
         let mut view = MarkdownEditorView::new();
         view.set_source(doc.text.clone(), 1);
 
         let cursor_byte = source.find("好学校").expect("fixture should contain first line text");
-        view.handle_message(PluginMessage::SetCursorByte(cursor_byte), &mut doc);
+        view.set_cursor_byte(cursor_byte);
         render_editor_once(&mut view, &doc);
 
         let flat_texts =
@@ -6028,15 +5810,13 @@ viebcoding 用过吗?
 
     #[test]
     fn active_last_list_item_keeps_trailing_empty_paragraph_outside_item() {
-        use ui::plugin::{PluginMessage, ViewPlugin};
-
         let source = "- a\n- b\n\n";
-        let mut doc = StubDoc::new(source);
+        let doc = StubDoc::new(source);
         let mut view = MarkdownEditorView::new();
         view.set_source(doc.text.clone(), 1);
 
         let cursor_byte = source.find('b').expect("fixture should contain last item text");
-        view.handle_message(PluginMessage::SetCursorByte(cursor_byte), &mut doc);
+        view.set_cursor_byte(cursor_byte);
         render_editor_once(&mut view, &doc);
 
         let flat_texts =
@@ -6052,15 +5832,15 @@ viebcoding 用过吗?
 
     #[test]
     fn active_list_down_follows_visual_wrap_before_physical_softbreak() {
-        use ui::plugin::{MoveDirection, PluginMessage, ViewPlugin};
+        use ui::plugin::MoveDirection;
 
         let source = "- alpha beta gamma delta epsilon zeta eta theta iota kappa lambda\ncontinuation sentence";
-        let mut doc = StubDoc::new(source);
+        let doc = StubDoc::new(source);
         let mut view = MarkdownEditorView::new();
         view.set_source(doc.text.clone(), 1);
 
         let current_byte = source.find("alpha").expect("fixture should contain first line text");
-        view.handle_message(PluginMessage::SetCursorByte(current_byte), &mut doc);
+        view.set_cursor_byte(current_byte);
         render_editor_narrow(&mut view, &doc, 170.0);
 
         let continuation_start =
@@ -6078,15 +5858,15 @@ viebcoding 用过吗?
 
     #[test]
     fn active_styled_list_collapses_lazy_continuation_softbreak() {
-        use ui::plugin::{MoveDirection, PluginMessage, ViewPlugin};
+        use ui::plugin::MoveDirection;
 
         let source = "- 前 **好学校** 好专业冲一下\n长沙航空、南京 **信息**、江苏海事这类，有湖北计划就放前面。";
-        let mut doc = StubDoc::new(source);
+        let doc = StubDoc::new(source);
         let mut view = MarkdownEditorView::new();
         view.set_source(doc.text.clone(), 1);
 
         let current_byte = source.find("好专业").expect("fixture should contain first line text");
-        view.handle_message(PluginMessage::SetCursorByte(current_byte), &mut doc);
+        view.set_cursor_byte(current_byte);
         render_editor_once(&mut view, &doc);
 
         let flat_texts =
@@ -6112,15 +5892,15 @@ viebcoding 用过吗?
 
     #[test]
     fn visual_move_down_in_indented_soft_wrap_uses_screen_x_as_absolute_coordinate() {
-        use ui::plugin::{MoveDirection, PluginMessage, ViewPlugin};
+        use ui::plugin::MoveDirection;
 
         let source = "- alpha beta gamma delta epsilon zeta eta theta iota kappa lambda mu nu xi omicron pi rho sigma tau";
-        let mut doc = StubDoc::new(source);
+        let doc = StubDoc::new(source);
         let mut view = MarkdownEditorView::new();
         view.set_source(doc.text.clone(), 1);
 
         let current_byte = source.find("gamma").expect("fixture should contain current word");
-        view.handle_message(PluginMessage::SetCursorByte(current_byte), &mut doc);
+        view.set_cursor_byte(current_byte);
         render_editor_narrow(&mut view, &doc, 170.0);
 
         let flat_lines = view.engine().flat_lines();
@@ -6165,7 +5945,7 @@ viebcoding 用过吗?
 
     #[test]
     fn visual_move_up_from_empty_line_before_long_paragraph_returns_previous_source_line() {
-        use ui::plugin::{MoveDirection, PluginMessage, ViewPlugin};
+        use ui::plugin::MoveDirection;
 
         let source = "\
 # 版式部门 2026 OKR 战略陈述（新版）
@@ -6195,7 +5975,7 @@ viebcoding 用过吗?
 
 ## 1. 汇报逻辑重构
 ";
-        let mut doc = StubDoc::new(source);
+        let doc = StubDoc::new(source);
         let mut view = MarkdownEditorView::new();
         view.set_source(doc.text.clone(), 1);
 
@@ -6205,7 +5985,7 @@ viebcoding 用过吗?
         let line_26_start =
             source.find("## 1. 汇报逻辑重构").expect("fixture should contain line 26");
 
-        view.handle_message(PluginMessage::SetCursorByte(line_16_start), &mut doc);
+        view.set_cursor_byte(line_16_start);
         render_editor_narrow(&mut view, &doc, 420.0);
         let (line_16_x, _line_16_y, _line_16_w, _line_16_h) =
             view.engine().cursor_screen_pos().expect("line 16 cursor should resolve");
@@ -6222,15 +6002,13 @@ viebcoding 用过吗?
 
     #[test]
     fn inactive_list_lazy_continuation_keeps_fast_collapsed_layout() {
-        use ui::plugin::{PluginMessage, ViewPlugin};
-
         let source =
             "intro\n\n- 前 3-5 个：好学校好专业冲一下\n长沙航空、南京信息、江苏海事、成都航空。";
-        let mut doc = StubDoc::new(source);
+        let doc = StubDoc::new(source);
         let mut view = MarkdownEditorView::new();
         view.set_source(doc.text.clone(), 1);
 
-        view.handle_message(PluginMessage::SetCursorByte(0), &mut doc);
+        view.set_cursor_byte(0);
         render_editor_once(&mut view, &doc);
 
         let flat_texts =
@@ -6244,20 +6022,18 @@ viebcoding 用过吗?
 
     #[test]
     fn loose_list_items_do_not_render_parent_and_paragraph_twice() {
-        use ui::plugin::{PluginMessage, ViewPlugin};
-
         let source = "\
 - 前 3-4 个冲：武汉文理、荆州理工、湖北幼专、鄂州/咸宁等。
 
 - 中间 8-10 个稳：湖北体育职业学院、武汉体育学院体育科技学院、黄冈职院、荆州职院等。
 
 最后 6-8 个保：三峡旅游职院及其他往年线更低、计划数较多的体育专科组。";
-        let mut doc = StubDoc::new(source);
+        let doc = StubDoc::new(source);
         let mut view = MarkdownEditorView::new();
         view.set_source(doc.text.clone(), 1);
 
         let cursor_byte = source.find("武汉文理").expect("fixture should contain first list item");
-        view.handle_message(PluginMessage::SetCursorByte(cursor_byte), &mut doc);
+        view.set_cursor_byte(cursor_byte);
         render_editor_once(&mut view, &doc);
 
         let flat_texts =
@@ -6276,19 +6052,17 @@ viebcoding 用过吗?
 
     #[test]
     fn active_parent_list_item_does_not_duplicate_nested_list_items() {
-        use ui::plugin::{PluginMessage, ViewPlugin};
-
         let source = "\
 - parent
   - child one
   - child two
 - sibling";
-        let mut doc = StubDoc::new(source);
+        let doc = StubDoc::new(source);
         let mut view = MarkdownEditorView::new();
         view.set_source(doc.text.clone(), 1);
 
         let cursor_byte = source.find("parent").expect("fixture should contain parent item");
-        view.handle_message(PluginMessage::SetCursorByte(cursor_byte), &mut doc);
+        view.set_cursor_byte(cursor_byte);
         render_editor_once(&mut view, &doc);
 
         let flat_texts =
@@ -6307,12 +6081,10 @@ viebcoding 用过吗?
     /// soft-wrapped line (CJK+ASCII mixed content with a narrow viewport).
     #[test]
     fn wysiwyg_cursor_roundtrips_on_second_soft_wrapped_line() {
-        use ui::plugin::{PluginMessage, ViewPlugin};
-
         let source = "这是一段很长的中文测试文本 mixed with english and some more text that \
                       should definitely wrap across multiple visual lines when the viewport \
                       is narrow enough for testing purposes";
-        let mut doc = StubDoc::new(source);
+        let doc = StubDoc::new(source);
         let mut view = MarkdownEditorView::new();
         view.set_source(doc.text.clone(), 1);
 
@@ -6340,7 +6112,7 @@ viebcoding 用过吗?
         let mid_byte = bytes_1[mid_idx];
 
         // Set cursor to the middle byte of the second flat line.
-        view.handle_message(PluginMessage::SetCursorByte(mid_byte), &mut doc);
+        view.set_cursor_byte(mid_byte);
 
         // Re-render so cursor position is computed from the updated layout.
         render_editor_narrow(&mut view, &doc, 160.0);
@@ -6436,7 +6208,7 @@ viebcoding 用过吗?
         let source = "这是一段很长的中文测试文本 mixed with english and some more text that \
                       should definitely wrap across multiple visual lines when the viewport \
                       is narrow enough for testing purposes";
-        let mut doc = StubDoc::new(source);
+        let doc = StubDoc::new(source);
         let mut view = MarkdownEditorView::new();
         view.set_source(doc.text.clone(), 1);
 
@@ -6464,7 +6236,7 @@ viebcoding 用过吗?
         };
 
         // Set cursor and scroll to a non-zero position.
-        view.handle_message(PluginMessage::SetCursorByte(mid_byte), &mut doc);
+        view.set_cursor_byte(mid_byte);
 
         let scroll = 120.0;
         view.engine.scroll_y = scroll;
@@ -6530,13 +6302,13 @@ viebcoding 用过吗?
             let mut document = StubDoc::new(prefix);
             let mut view = MarkdownEditorView::new();
             view.set_source(document.text.clone(), 1);
-            view.handle_message(PluginMessage::SetCursorByte(prefix.len()), &mut document);
+            view.set_cursor_byte(prefix.len());
             render_editor_once(&mut view, &document);
             let before = view.engine().cursor_screen_pos().expect("empty line must have a caret");
 
             document.text.push_str(SOFT_TAB);
             view.set_source(document.text.clone(), 2);
-            view.handle_message(PluginMessage::SetCursorByte(document.text.len()), &mut document);
+            view.set_cursor_byte(document.text.len());
             let updated = view.engine().cursor_screen_pos().expect("indented line needs a caret");
             assert!(updated.0 > before.0, "Tab must move the caret before the next paint");
             render_editor_once(&mut view, &document);
@@ -6609,9 +6381,7 @@ viebcoding 用过吗?
         // We want to hit-test on 'e' in "def", which is byte 13.
 
         // Let's set cursor at 13, get screen pos, and hit_test it back.
-        let mut doc = StubDoc::new(src);
-        use ui::plugin::{PluginMessage, ViewPlugin};
-        v.handle_message(PluginMessage::SetCursorByte(13), &mut doc);
+        v.engine.handle_set_cursor_byte(13);
 
         let pos = v.engine().cursor_screen_pos().unwrap();
         let (cx, cy, _cw, ch) = pos;
@@ -6671,7 +6441,7 @@ viebcoding 用过吗?
         let content_start =
             source.find(OPENING_FENCE).expect("fixture must contain an opening fence")
                 + OPENING_FENCE.len();
-        let mut document = StubDoc::new(source);
+        let document = StubDoc::new(source);
         let mut view = MarkdownEditorView::new();
         view.set_source(source.to_owned(), 1);
         render_editor_once(&mut view, &document);
@@ -6695,7 +6465,7 @@ viebcoding 用过吗?
 
         assert_eq!(hit, Some(content_start));
 
-        view.handle_message(ui::plugin::PluginMessage::SetCursorByte(content_start), &mut document);
+        view.set_cursor_byte(content_start);
         render_editor_once(&mut view, &document);
         let (cursor_x, cursor_y, _cursor_width, cursor_height) = view
             .engine()
@@ -6712,7 +6482,7 @@ viebcoding 用过吗?
     fn internal_soft_break_trailing_whitespace_advances_cursor_x() {
         for source in ["hello \nworld", "hello\t\nworld"] {
             let mut view = MarkdownEditorView::new();
-            let mut doc = StubDoc::new(source);
+            let doc = StubDoc::new(source);
             view.set_source(source.into(), 1);
             render_editor_once(&mut view, &doc);
 
@@ -6728,7 +6498,7 @@ viebcoding 用过吗?
                 .cursor_screen_pos_for_byte(after_space)
                 .expect("after soft break trailing whitespace must have cursor pos")
                 .0;
-            view.handle_message(ui::plugin::PluginMessage::SetCursorByte(after_space), &mut doc);
+            view.set_cursor_byte(after_space);
             let x_after_cursor = view
                 .engine()
                 .cursor_screen_pos()
@@ -6773,13 +6543,13 @@ mod tests {
     use super::*;
     use ui::plugin::{
         EditAugmentation, EditIntent, EditPlan, EditPolicy, EditRequest, EditSelection,
-        EditTransaction, KeyIntentMapper, PastePreference, TextReplacement, ViewPlugin,
+        EditTransaction, KeyIntentMapper, PastePreference, TextReplacement,
     };
 
     #[test]
     fn markdown_editor_is_the_only_markdown_view_requesting_semantic_paste() {
         assert_eq!(MarkdownEditorView::new().paste_preference(), PastePreference::SemanticMarkdown);
-        assert_eq!(MarkdownView::new().paste_preference(), PastePreference::PlainText);
+        assert!(MarkdownView::new().editable().is_none());
     }
 
     fn test_enter_context(source: &str, byte: usize) -> EnterContext {

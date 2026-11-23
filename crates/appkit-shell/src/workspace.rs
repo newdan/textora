@@ -100,11 +100,17 @@ impl Workspace {
         self.view_routes.resolve(path).copied()
     }
 
-    pub fn create_plugin_by_name(&self, plugin_name: &str) -> Box<dyn ui::plugin::ViewPlugin> {
+    pub fn create_plugin_by_name(
+        &self,
+        plugin_name: &str,
+    ) -> Box<dyn ui::plugin::ViewPluginCapabilities> {
         self.registry.create_by_name(plugin_name, Box::new(EditorPlugin::new()))
     }
 
-    pub fn create_plugin_for_path(&self, path: &Path) -> Box<dyn ui::plugin::ViewPlugin> {
+    pub fn create_plugin_for_path(
+        &self,
+        path: &Path,
+    ) -> Box<dyn ui::plugin::ViewPluginCapabilities> {
         let plugin_name =
             self.plugin_route_for_path(path).map_or(PLUGIN_EDITOR, |route| route.default_plugin);
         self.create_plugin_by_name(plugin_name)
@@ -651,7 +657,7 @@ mod tests {
 
     fn prepared_tab(
         document: DocumentModel,
-        plugin: Box<dyn ui::plugin::ViewPlugin>,
+        plugin: Box<dyn ui::plugin::ViewPluginCapabilities>,
     ) -> PreparedTab {
         PreparedTab::new(document, TabRuntime::new(plugin))
     }
@@ -664,7 +670,7 @@ mod tests {
         workspace: &mut Workspace,
         runtimes: &mut TabRuntimeStore,
         document: DocumentModel,
-        plugin: Box<dyn ui::plugin::ViewPlugin>,
+        plugin: Box<dyn ui::plugin::ViewPluginCapabilities>,
     ) -> TabId {
         workspace.append_prepared_tab(runtimes, prepared_tab(document, plugin), None)
     }

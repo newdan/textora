@@ -1,8 +1,9 @@
 use std::borrow::Cow;
+use ui::plugin::EditableView;
 
-use textora_core::document::{DocView, DocViewMut, StringDocView};
+use textora_core::document::{DocView, StringDocView};
 use textora_markdown::view::MarkdownEditorView;
-use ui::plugin::{EditPolicy, PluginMessage, ViewPlugin};
+use ui::plugin::{EditPolicy, ViewPlugin};
 
 struct TestDocument(String);
 
@@ -35,8 +36,6 @@ impl DocView for TestDocument {
         600.0
     }
 }
-
-impl DocViewMut for TestDocument {}
 
 fn create_empty_table(columns: usize, rows: usize) -> (String, usize) {
     let plan = textora_markdown::commands::plan_semantic_edit(
@@ -79,7 +78,7 @@ fn created_blank_table_is_projected_and_each_cell_can_be_hit_and_edited() {
         ) if alignments.len() == 2
     )));
 
-    let mut document = TestDocument(source.clone());
+    let document = TestDocument(source.clone());
     let mut view = MarkdownEditorView::new();
     let mut shaper = shaping::Shaper::new().expect("shaper should initialize");
     view.set_source(source.clone(), 1);
@@ -93,7 +92,7 @@ fn created_blank_table_is_projected_and_each_cell_can_be_hit_and_edited() {
         assert_eq!(delimiter_bytes.len(), 3);
         for (column_index, delimiter_byte) in delimiter_bytes.iter().take(2).enumerate() {
             let cell_byte = document.line_byte_offset(row_index) + *delimiter_byte + 2;
-            view.handle_message(PluginMessage::SetCursorByte(cell_byte), &mut document);
+            view.set_cursor_byte(cell_byte);
             render(&mut view, &document, &mut shaper);
             let (cursor_x, cursor_y, _, cursor_height) = view
                 .engine()

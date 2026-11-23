@@ -5,7 +5,6 @@ use render::GlyphVertex;
 use std::ops::Deref;
 use std::sync::OnceLock;
 use std::time::Instant;
-use textora_core::document::ReadableDocument;
 
 use crate::app::App;
 use appkit_shell::editor_runtime::{
@@ -159,8 +158,8 @@ fn needs_redraw_after_render(
     redraw_requested_during_render || scrollbar_is_dragging
 }
 
-fn plugin_selection_pull_is_safe(mouse_is_down: bool, plugin_needs_source_update: bool) -> bool {
-    !mouse_is_down && !plugin_needs_source_update
+fn plugin_selection_pull_is_safe(mouse_is_down: bool, source_updated: bool) -> bool {
+    !mouse_is_down && !source_updated
 }
 
 fn active_mindmap_style_input(
@@ -205,9 +204,7 @@ mod tests {
     use crate::document_fixture::DocumentFixture;
     use appkit_shell::tab_runtime::TabRuntime;
     use ui::canvas::CanvasPoint;
-    use ui::plugin::{
-        CanvasContentMetrics, PluginMessage, PluginQuery, PluginResponse, ViewPlugin,
-    };
+    use ui::plugin::{CanvasContentMetrics, PluginQuery, PluginResponse, ViewPlugin};
 
     #[test]
     fn first_frame_queues_background_services_after_present() {
@@ -477,6 +474,10 @@ mod tests {
             self.name
         }
 
+        fn mode(&self) -> ui::plugin::PluginMode {
+            ui::plugin::PluginMode::Source
+        }
+
         fn render(
             &mut self,
             _doc: &dyn textora_core::document::DocView,
@@ -487,7 +488,9 @@ mod tests {
         ) -> ui::core::paint::DrawList {
             ui::core::paint::DrawList::new()
         }
+    }
 
+    impl ui::plugin::ViewPluginCapabilities for ThemeQueryPlugin {
         fn query(
             &self,
             query: PluginQuery,
@@ -529,6 +532,10 @@ mod tests {
             "canvas_frame_sequence_test"
         }
 
+        fn mode(&self) -> ui::plugin::PluginMode {
+            ui::plugin::PluginMode::Canvas
+        }
+
         fn render(
             &mut self,
             _doc: &dyn textora_core::document::DocView,
@@ -540,7 +547,15 @@ mod tests {
             self.events.borrow_mut().push("render");
             ui::core::paint::DrawList::new()
         }
+    }
 
+    impl ui::plugin::ViewPluginCapabilities for CanvasSequencePlugin {
+        fn canvas_mut(&mut self) -> Option<&mut dyn ui::plugin::CanvasView> {
+            Some(self)
+        }
+    }
+
+    impl ui::plugin::CanvasView for CanvasSequencePlugin {
         fn prepare_canvas(
             &mut self,
             _doc: &dyn textora_core::document::DocView,
@@ -565,10 +580,6 @@ mod tests {
         ) -> ui::core::paint::DrawList {
             self.events.borrow_mut().push("render_canvas");
             ui::core::paint::DrawList::new()
-        }
-
-        fn is_canvas(&self) -> bool {
-            true
         }
     }
 
@@ -605,6 +616,10 @@ mod tests {
             "source_synchronized_canvas_test"
         }
 
+        fn mode(&self) -> ui::plugin::PluginMode {
+            ui::plugin::PluginMode::Canvas
+        }
+
         fn render(
             &mut self,
             _doc: &dyn textora_core::document::DocView,
@@ -616,6 +631,32 @@ mod tests {
             ui::core::paint::DrawList::new()
         }
 
+        fn sync_document(
+            &mut self,
+            generation: u32,
+            reason: ui::plugin::SyncReason,
+            load_source: &mut dyn FnMut() -> String,
+        ) -> ui::plugin::SyncOutcome {
+            if reason == ui::plugin::SyncReason::Normal
+                && self.state.borrow().generation == Some(generation)
+            {
+                return ui::plugin::SyncOutcome::Unchanged;
+            }
+            let mut state = self.state.borrow_mut();
+            state.events.push("update_source");
+            state.source = load_source();
+            state.generation = Some(generation);
+            ui::plugin::SyncOutcome::Updated
+        }
+    }
+
+    impl ui::plugin::ViewPluginCapabilities for SourceSynchronizedCanvasPlugin {
+        fn canvas_mut(&mut self) -> Option<&mut dyn ui::plugin::CanvasView> {
+            Some(self)
+        }
+    }
+
+    impl ui::plugin::CanvasView for SourceSynchronizedCanvasPlugin {
         fn prepare_canvas(
             &mut self,
             _doc: &dyn textora_core::document::DocView,
@@ -646,37 +687,6 @@ mod tests {
         ) -> ui::core::paint::DrawList {
             self.state.borrow_mut().events.push("render_canvas");
             ui::core::paint::DrawList::new()
-        }
-
-        fn handle_message(
-            &mut self,
-            message: PluginMessage,
-            _doc: &mut dyn textora_core::document::DocViewMut,
-        ) -> bool {
-            let PluginMessage::UpdateSource { text, generation } = message else {
-                return false;
-            };
-
-            let mut state = self.state.borrow_mut();
-            state.events.push("update_source");
-            state.source = text;
-            state.generation = Some(generation);
-            true
-        }
-
-        fn query(
-            &self,
-            query: PluginQuery,
-            _doc: &dyn textora_core::document::DocView,
-        ) -> PluginResponse {
-            let PluginQuery::NeedsSourceUpdate(generation) = query else {
-                return PluginResponse::None;
-            };
-            PluginResponse::Bool(self.state.borrow().generation != Some(generation))
-        }
-
-        fn is_canvas(&self) -> bool {
-            true
         }
     }
 }
@@ -1377,19 +1387,11 @@ impl App {
             // Update TOC input before update_frame so dock rebuild has fresh data
             if self.active_toc_visible() {
                 let session = self.active_tab_session().expect("visible TOC needs active tab");
-                let headings = match session.query(ui::plugin::PluginQuery::TOCHeadings) {
-                    ui::plugin::PluginResponse::Headings(h) => h,
-                    _ => vec![],
-                };
-                let scroll_y = match session.query(ui::plugin::PluginQuery::ScrollY) {
-                    ui::plugin::PluginResponse::Float(v) => v,
-                    _ => 0.0,
-                };
-                let active_idx =
-                    match session.query(ui::plugin::PluginQuery::CurrentHeadingIndex(scroll_y)) {
-                        ui::plugin::PluginResponse::Position(Some((i, _))) => i,
-                        _ => 0,
-                    };
+                let outline = session.plugin().outline();
+                let headings = outline.map_or_else(Vec::new, |outline| outline.headings());
+                let active_idx = outline
+                    .and_then(|outline| outline.current_heading_index(session.scroll_y()))
+                    .unwrap_or(0);
                 let toc_input = ui::toc::TocInput {
                     headings: headings
                         .iter()
@@ -1487,9 +1489,6 @@ impl App {
     /// with the current gap buffer state. Called before hit-testing and after edits.
     pub(crate) fn sync_plugin_state(&mut self) {
         let sync_started_at = Instant::now();
-        let mut source_build_us = 0;
-        let mut update_source_us = 0;
-        let mut source_len = 0;
         let (preedit_text, preedit_cursor) = self.editor_runtime.preedit();
         let preedit_len = preedit_text.len();
         let should_sync_selection = !self.mouse.is_down;
@@ -1504,14 +1503,17 @@ impl App {
             String::new()
         };
 
-        let generation = tab.document().tb().gap_buffer().generation();
-        let needs_update = tab.needs_source_update(generation);
+        let generation = tab.document().generation();
+        let document_sync_started_at = Instant::now();
+        let source_updated =
+            tab.sync_document(ui::plugin::SyncReason::Normal) == ui::plugin::SyncOutcome::Updated;
+        let document_sync_us = document_sync_started_at.elapsed().as_micros();
         if should_log_wysiwyg_cursor {
             eprintln!(
-                "[wysiwyg:sync] begin plugin={} generation={} needs_update={} doc_cursor={} doc_selection={:?} mouse_down={} preedit_len={}",
+                "[wysiwyg:sync] begin plugin={} generation={} source_updated={} doc_cursor={} doc_selection={:?} mouse_down={} preedit_len={}",
                 plugin_name,
                 generation,
-                needs_update,
+                source_updated,
                 tab.document().cursor_offset().to_usize(),
                 tab.document().selection_range(),
                 mouse_is_down,
@@ -1519,31 +1521,16 @@ impl App {
             );
         }
 
-        if needs_update {
-            let source_build_started_at = Instant::now();
-            let gb = tab.document().tb().gap_buffer();
-            let c1 = gb.read_forward(0);
-            let c2 = gb.read_forward(c1.len());
-            source_len = c1.len() + c2.len();
-            let mut text = String::with_capacity(source_len);
-            text.push_str(&String::from_utf8_lossy(c1));
-            text.push_str(&String::from_utf8_lossy(c2));
-            source_build_us = source_build_started_at.elapsed().as_micros();
-            let update_source_started_at = Instant::now();
-            tab.send_message(ui::plugin::PluginMessage::UpdateSource { text, generation });
-            update_source_us = update_source_started_at.elapsed().as_micros();
-        }
-
         if should_sync_selection {
             if let Some((start, end)) = tab.document().selection_range() {
                 if start < end {
-                    tab.send_message(ui::plugin::PluginMessage::SetSelAnchorByte(Some(start)));
-                    tab.send_message(ui::plugin::PluginMessage::SetSelCursorByte(Some(end)));
+                    tab.set_plugin_selection_anchor_byte(Some(start));
+                    tab.set_plugin_selection_cursor_byte(Some(end));
                 } else {
-                    tab.send_message(ui::plugin::PluginMessage::SetSelAnchorByte(None));
-                    tab.send_message(ui::plugin::PluginMessage::SetSelCursorByte(None));
+                    tab.set_plugin_selection_anchor_byte(None);
+                    tab.set_plugin_selection_cursor_byte(None);
                 }
-            } else if plugin_selection_pull_is_safe(mouse_is_down, needs_update) {
+            } else if plugin_selection_pull_is_safe(mouse_is_down, source_updated) {
                 match tab.selection_byte_range() {
                     Some((start, end)) if start != end => {
                         if should_log_wysiwyg_cursor {
@@ -1562,21 +1549,19 @@ impl App {
                     None | Some(_) => {}
                 }
             } else {
-                tab.send_message(ui::plugin::PluginMessage::SetSelAnchorByte(None));
-                tab.send_message(ui::plugin::PluginMessage::SetSelCursorByte(None));
+                tab.set_plugin_selection_anchor_byte(None);
+                tab.set_plugin_selection_cursor_byte(None);
             }
         }
 
         let cursor_byte = tab.document().cursor_offset().to_usize();
-        tab.send_message(ui::plugin::PluginMessage::SetCursorByte(cursor_byte));
+        tab.set_cursor_byte(cursor_byte);
         let affinity = tab.document().tb().cursor_affinity();
-        tab.send_message(ui::plugin::PluginMessage::SetVisualCaret(
-            ui::plugin::VisualCaretPosition { byte_offset: cursor_byte, affinity },
-        ));
-        tab.send_message(ui::plugin::PluginMessage::SetPreedit {
-            text: preedit_text,
-            cursor: preedit_cursor,
+        tab.set_visual_caret(ui::plugin::VisualCaretPosition {
+            byte_offset: cursor_byte,
+            affinity,
         });
+        tab.set_preedit(preedit_text, preedit_cursor);
         if should_log_wysiwyg_cursor {
             eprintln!(
                 "[wysiwyg:sync] end plugin={} cursor={} selection={:?}",
@@ -1589,13 +1574,11 @@ impl App {
         let elapsed_us = sync_started_at.elapsed().as_micros();
         if should_log_perf(elapsed_us) {
             eprintln!(
-                "[perf:plugin_sync] plugin={} total={}us needs_update={} source_build={}us update_source={}us source_len={} cursor_byte={} selection_sync={} preedit_len={}",
+                "[perf:plugin_sync] plugin={} total={}us source_updated={} document_sync={}us cursor_byte={} selection_sync={} preedit_len={}",
                 plugin_name,
                 elapsed_us,
-                needs_update,
-                source_build_us,
-                update_source_us,
-                source_len,
+                source_updated,
+                document_sync_us,
                 cursor_byte,
                 should_sync_selection,
                 preedit_len,

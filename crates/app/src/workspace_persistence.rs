@@ -399,15 +399,12 @@ fn restore_runtime_state(
     session: &mut TabSessionMut<'_>,
     anchor_text: Option<&str>,
     anchor_offset: f32,
-    cached_toggle_source: Option<Box<dyn ui::plugin::ViewPlugin>>,
+    cached_toggle_source: Option<Box<dyn ui::plugin::ViewPluginCapabilities>>,
 ) {
     if !session.runtime.plugin.allows_editing()
         && let Some(text) = anchor_text
     {
-        session.send_message(ui::plugin::PluginMessage::RestoreScrollAnchor {
-            text: text.to_owned(),
-            offset: anchor_offset,
-        });
+        session.restore_plugin_scroll_anchor(text, anchor_offset);
     }
     if let Some(plugin) = cached_toggle_source {
         session.cache_toggle_source_plugin(plugin);

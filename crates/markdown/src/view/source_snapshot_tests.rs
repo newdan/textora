@@ -1,7 +1,9 @@
-use super::{MarkdownEditorView, MarkdownView, PluginQuery, PluginResponse, ViewPlugin};
+use super::{MarkdownEditorView, MarkdownView, ViewPlugin, ViewPluginCapabilities};
 use crate::parser::MARKDOWN_PARSE_COUNT;
 use textora_core::document::StringDocView;
-use ui::plugin::{EditIntent, EditPlan, EditRequest, EditSelection, EditTransaction};
+use ui::plugin::{
+    EditIntent, EditPlan, EditPolicy, EditRequest, EditSelection, EditTransaction, EditableView,
+};
 
 const EDIT_SOURCE: &str = "普通段落\n\n| first | second |";
 const SOURCE_GENERATION: u32 = 1;
@@ -58,7 +60,7 @@ fn plan_rendered_edit(request: EditRequest) -> (MarkdownEditorView, EditPlan, us
     view.set_source(EDIT_SOURCE.into(), SOURCE_GENERATION);
     view.engine.handle_set_cursor_byte(request.cursor_byte);
     render(&mut view);
-    let (plan, parses) = count_parses(|| view.edit_policy().plan_edit(&request));
+    let (plan, parses) = count_parses(|| view.plan_edit(&request));
     (view, plan, parses)
 }
 
@@ -188,32 +190,22 @@ fn selection_replacement_reuses_the_erased_candidate_in_fallback_rules() {
 }
 
 #[test]
-fn host_queries_use_the_current_snapshot_parse() {
+fn typed_edit_queries_use_the_current_snapshot_parse() {
     let mut view = MarkdownEditorView::new();
     let source = "| first | second |\n| --- | --- |\n| left | right |";
-    let doc = StringDocView::new(source);
     view.set_source(source.into(), 1);
     render(&mut view);
 
     MARKDOWN_PARSE_COUNT.with(|count| count.set(0));
-    assert!(matches!(
-        view.query(
-            PluginQuery::TableStructureCapabilities { source_generation: 1, cursor_byte: 2 },
-            &doc
-        ),
-        PluginResponse::TableStructureCapabilities(Some(ui::plugin::TableStructureCapabilities {
+    assert_eq!(
+        view.table_structure_capabilities(1, 2),
+        Some(ui::plugin::TableStructureCapabilities {
             can_delete_row: false,
             can_delete_column: true,
-        }))
-    ));
-    assert!(matches!(
-        view.query(PluginQuery::SourceSpacingProtectedRanges { source_generation: 1 }, &doc),
-        PluginResponse::SourceSpacingProtectedRanges(ranges) if !ranges.is_empty()
-    ));
-    assert!(matches!(
-        view.query(PluginQuery::SourceSpacingProtectedRanges { source_generation: 2 }, &doc),
-        PluginResponse::None
-    ));
+        })
+    );
+    assert!(view.source_spacing_protected_ranges(1).is_some_and(|ranges| !ranges.is_empty()));
+    assert!(view.source_spacing_protected_ranges(2).is_none());
     assert_eq!(MARKDOWN_PARSE_COUNT.with(std::cell::Cell::get), 0);
 }
 
@@ -221,79 +213,49 @@ fn host_queries_use_the_current_snapshot_parse() {
 fn editor_snapshot_requires_initial_generation_zero_sync() {
     let mut view = MarkdownEditorView::new();
     let source = "| first | second |\n| --- | --- |\n| left | right |";
-    let doc = StringDocView::new(source);
-    let table_query =
-        || PluginQuery::TableStructureCapabilities { source_generation: 0, cursor_byte: 2 };
 
-    assert!(matches!(view.query(table_query(), &doc), PluginResponse::None));
-    assert!(matches!(
-        view.query(PluginQuery::SourceSpacingProtectedRanges { source_generation: 0 }, &doc),
-        PluginResponse::None
-    ));
-    assert!(matches!(
-        view.query(PluginQuery::NeedsSourceUpdate(0), &doc),
-        PluginResponse::Bool(true)
-    ));
+    assert!(view.table_structure_capabilities(0, 2).is_none());
+    assert!(view.source_spacing_protected_ranges(0).is_none());
+    assert!(view.needs_source_update(0));
 
     view.set_source(source.into(), 0);
 
-    assert!(matches!(
-        view.query(table_query(), &doc),
-        PluginResponse::TableStructureCapabilities(Some(_))
-    ));
-    assert!(matches!(
-        view.query(PluginQuery::NeedsSourceUpdate(0), &doc),
-        PluginResponse::Bool(false)
-    ));
+    assert!(view.table_structure_capabilities(0, 2).is_some());
+    assert!(!view.needs_source_update(0));
 }
 
 #[test]
 fn preview_snapshot_requires_initial_generation_zero_sync() {
     let mut view = MarkdownView::new();
     let source = "`inline code`";
-    let doc = StringDocView::new(source);
-    let spacing_query = || PluginQuery::SourceSpacingProtectedRanges { source_generation: 0 };
 
-    assert!(matches!(view.query(spacing_query(), &doc), PluginResponse::None));
-    assert!(matches!(
-        view.query(PluginQuery::NeedsSourceUpdate(0), &doc),
-        PluginResponse::Bool(true)
-    ));
+    assert!(view.source_spacing_protected_ranges(0).is_none());
+    assert!(view.needs_source_update(0));
 
     view.set_source(source.into(), 0);
 
-    assert!(matches!(
-        view.query(spacing_query(), &doc),
-        PluginResponse::SourceSpacingProtectedRanges(ranges) if !ranges.is_empty()
-    ));
-    assert!(matches!(
-        view.query(PluginQuery::NeedsSourceUpdate(0), &doc),
-        PluginResponse::Bool(false)
-    ));
+    assert!(view.source_spacing_protected_ranges(0).is_some_and(|ranges| !ranges.is_empty()));
+    assert!(!view.needs_source_update(0));
 }
 
 #[test]
-fn semantic_edit_query_rejects_stale_snapshot() {
+fn semantic_edit_rejects_stale_snapshot() {
     use ui::plugin::{SemanticEditCommand, SemanticEditPlan};
 
     let mut view = MarkdownEditorView::new();
     view.set_source("old".into(), 1);
-    let doc = StringDocView::new("new");
-    let query = || PluginQuery::PlanSemanticEdit {
-        command: SemanticEditCommand::SetHeadingLevel(2),
-        source_generation: 2,
-        cursor_byte: 0,
-        selection: None,
+    let plan = |view: &MarkdownEditorView| {
+        view.plan_semantic_edit(SemanticEditCommand::SetHeadingLevel(2), 2, 0, None)
     };
 
-    assert!(matches!(view.query(query(), &doc), PluginResponse::None));
+    assert_eq!(plan(&view), SemanticEditPlan::Unsupported);
 
     view.set_source("new".into(), 2);
 
-    assert!(
-        matches!(view.query(query(), &doc), PluginResponse::SemanticEdit(SemanticEditPlan::Apply(transaction))
-        if transaction.replacements[0].text == "## new")
-    );
+    assert!(matches!(
+        plan(&view), SemanticEditPlan::Apply(transaction)
+        if transaction.replacements[0].text == "## new"
+    ));
 }
 
 #[test]
@@ -311,4 +273,37 @@ fn layout_reflow_reuses_the_current_source_parse() {
     render(&mut view);
     assert_eq!(MARKDOWN_PARSE_COUNT.with(std::cell::Cell::get), 0);
     assert_eq!(SOURCE_LINE_MAP_BUILD_COUNT.with(std::cell::Cell::get), 1);
+}
+
+#[test]
+fn document_sync_loads_only_initial_or_forced_markdown_snapshots() {
+    use ui::plugin::{SyncOutcome, SyncReason};
+
+    let mut editor = MarkdownEditorView::new();
+    let mut preview = MarkdownView::new();
+    for plugin in [&mut editor as &mut dyn ViewPlugin, &mut preview] {
+        assert_eq!(
+            plugin.sync_document(0, SyncReason::Normal, &mut || "first".into()),
+            SyncOutcome::Updated
+        );
+        assert_eq!(
+            plugin.sync_document(0, SyncReason::Normal, &mut || panic!("current snapshot")),
+            SyncOutcome::Unchanged
+        );
+        assert_eq!(
+            plugin.sync_document(0, SyncReason::Force, &mut || "replacement".into()),
+            SyncOutcome::Updated
+        );
+    }
+    assert_eq!(editor.source.as_str(), "replacement");
+}
+
+#[test]
+fn novel_document_sync_never_loads_the_document_snapshot() {
+    use ui::plugin::SyncReason;
+
+    let mut novel = super::NovelView::new();
+    for reason in [SyncReason::Normal, SyncReason::Force] {
+        novel.sync_document(0, reason, &mut || panic!("Novel reads through DocView"));
+    }
 }

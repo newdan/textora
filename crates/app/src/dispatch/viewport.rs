@@ -35,10 +35,7 @@ impl App {
                     let max_scroll = (content_h - viewport_height).max(0.0);
                     let pixel_scroll = (scroll_top as f32 * line_height).clamp(0.0, max_scroll);
                     let changed = (scroll_y - pixel_scroll).abs() > 0.5;
-                    tab.send_message(ui::plugin::PluginMessage::Scroll {
-                        delta: pixel_scroll - scroll_y,
-                        viewport_h: viewport_height,
-                    });
+                    tab.scroll_plugin(pixel_scroll - scroll_y, viewport_height);
                     return if changed { AppEffect::REDRAW } else { AppEffect::NONE };
                 }
                 let Some(mut tab) = self.active_tab_session_mut() else {
@@ -58,7 +55,7 @@ impl App {
                     let viewport_h = self.plugin_viewport_h();
                     let delta = if amount > 0.0 { viewport_h } else { -viewport_h };
                     if let Some(mut tab) = self.active_tab_session_mut() {
-                        tab.send_message(ui::plugin::PluginMessage::Scroll { delta, viewport_h });
+                        tab.scroll_plugin(delta, viewport_h);
                     }
                     // Sync scrollbar from plugin state.
                     let (content_h, scroll_y) = self
@@ -77,7 +74,7 @@ impl App {
             }
             ViewportDispatchAction::JumpToHeading(index) => {
                 if let Some(mut tab) = self.active_tab_session_mut() {
-                    tab.send_message(ui::plugin::PluginMessage::ScrollToHeading(index));
+                    tab.scroll_to_heading(index);
                     AppEffect::REDRAW
                 } else {
                     AppEffect::NONE

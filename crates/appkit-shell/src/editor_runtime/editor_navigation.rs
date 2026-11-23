@@ -2,10 +2,7 @@
 
 use appkit_core::{document::DocumentModel, workspace::types::TabId};
 use textora_core::types::ByteIndex;
-use ui::plugin::{
-    CursorAffinity, EditHitTarget, MoveDirection, PluginMessage, PluginQuery, PluginResponse,
-    VisualCaretPosition,
-};
+use ui::plugin::{CursorAffinity, EditHitTarget, MoveDirection, VisualCaretPosition};
 
 use super::{EditorOutcome, EditorRuntime};
 use crate::event::ShellEffect;
@@ -14,41 +11,6 @@ use appkit_core::edit_command::EditCommand;
 
 fn wysiwyg_cursor_x(tab: &TabSession<'_>, byte: usize) -> Option<f32> {
     tab.query_cursor_screen_rect(byte).map(|(x, _y, _w, _h)| x)
-}
-
-fn query_visual_caret_move(
-    tab: &TabSession<'_>,
-    current_byte: usize,
-    direction: MoveDirection,
-    target_x: Option<f32>,
-) -> Option<VisualCaretPosition> {
-    if let PluginResponse::VisualCaretPosition(position) =
-        tab.query(PluginQuery::VisualMoveCaret { current_byte, direction, target_x })
-    {
-        return position;
-    }
-    tab.visual_move_byte(current_byte, direction, target_x).map(|byte_offset| VisualCaretPosition {
-        byte_offset,
-        affinity: CursorAffinity::Downstream,
-    })
-}
-
-pub fn query_visual_caret_hit(
-    tab: &TabSession<'_>,
-    x: f32,
-    y: f32,
-    offset_x: f32,
-    offset_y: f32,
-) -> Option<VisualCaretPosition> {
-    if let PluginResponse::VisualCaretPosition(position) =
-        tab.query(PluginQuery::HitTestVisualCaret { x, y, offset_x, offset_y })
-    {
-        return position;
-    }
-    tab.hit_test_byte(x, y, offset_x, offset_y).map(|byte_offset| VisualCaretPosition {
-        byte_offset,
-        affinity: CursorAffinity::Downstream,
-    })
 }
 
 impl EditorRuntime {
@@ -139,7 +101,7 @@ impl EditorRuntime {
             .then(|| tab.document.cursor().selection_anchor.unwrap_or(current_byte));
         let semantic_target = tab.move_edit_target(current_byte, direction, vertical_anchor_x);
         let visual_target = if semantic_target.is_none() {
-            query_visual_caret_move(&tab, current_byte, direction, vertical_anchor_x)
+            tab.visual_move(current_byte, direction, vertical_anchor_x)
         } else {
             None
         };
@@ -180,7 +142,7 @@ impl EditorRuntime {
             return;
         }
         let cursor_byte = tab.document.cursor_offset().to_usize();
-        if tab.send_message(PluginMessage::RevealCursor(cursor_byte)) {
+        if tab.reveal_cursor(cursor_byte) {
             return;
         }
         let cursor_rect = TabSession::new(tab.id, &*tab.document, &*tab.runtime)
@@ -193,7 +155,7 @@ impl EditorRuntime {
             cursor_height,
             viewport_height,
         ) {
-            tab.send_message(PluginMessage::Scroll { delta, viewport_h: viewport_height });
+            tab.scroll_plugin(delta, viewport_height);
         }
     }
 
@@ -226,17 +188,16 @@ impl EditorRuntime {
         let Some(mut tab) = self.tab_session_mut(tab_id) else {
             return ShellEffect::NONE;
         };
-        tab.send_message(PluginMessage::Scroll { delta, viewport_h: viewport_height });
+        tab.scroll_plugin(delta, viewport_height);
 
         let Some(tab) = self.tab_session(tab_id) else {
             return ShellEffect::NONE;
         };
-        let position = query_visual_caret_hit(&tab, 0.0, 0.0, 0.0, 0.0).unwrap_or_else(|| {
-            VisualCaretPosition {
+        let position =
+            tab.hit_test_caret(0.0, 0.0, 0.0, 0.0).unwrap_or_else(|| VisualCaretPosition {
                 byte_offset: tab.document.cursor_offset().to_usize(),
                 affinity: tab.document.tb().cursor_affinity(),
-            }
-        });
+            });
         let Some(mut tab) = self.tab_session_mut(tab_id) else {
             return ShellEffect::NONE;
         };
@@ -325,15 +286,13 @@ pub fn set_wysiwyg_cursor_and_selection(
     tab.document.cursor_move_to_offset(requested_cursor_byte);
     let snapped_cursor_byte = tab.document.cursor_offset().to_usize();
     tab.document.cursor_mut().selection_anchor = selection_anchor;
-    tab.send_message(PluginMessage::SetCursorByte(snapped_cursor_byte));
-    tab.send_message(PluginMessage::SetVisualCaret(VisualCaretPosition {
+    tab.set_cursor_byte(snapped_cursor_byte);
+    tab.set_visual_caret(VisualCaretPosition {
         byte_offset: snapped_cursor_byte,
         affinity: CursorAffinity::Downstream,
-    }));
-    tab.send_message(PluginMessage::SetSelAnchorByte(selection_anchor));
-    tab.send_message(PluginMessage::SetSelCursorByte(
-        selection_anchor.map(|_| snapped_cursor_byte),
-    ));
+    });
+    tab.set_plugin_selection_anchor_byte(selection_anchor);
+    tab.set_plugin_selection_cursor_byte(selection_anchor.map(|_| snapped_cursor_byte));
     snapped_cursor_byte
 }
 
@@ -348,7 +307,7 @@ pub fn set_wysiwyg_visual_caret_and_selection(
         return;
     }
     tab.document.tb.set_cursor_affinity(position.affinity);
-    tab.send_message(PluginMessage::SetVisualCaret(position));
+    tab.set_visual_caret(position);
 }
 
 pub fn apply_target_to_document(doc: &mut DocumentModel, target: EditHitTarget) {
@@ -364,7 +323,6 @@ pub fn apply_target_to_document(doc: &mut DocumentModel, target: EditHitTarget) 
             doc.cursor_move_to_offset(source_range.end);
             doc.cursor_mut().selection_anchor = Some(source_range.start);
         }
-        EditHitTarget::CanvasControl { .. } => {}
         EditHitTarget::ClearFocus => {
             doc.cursor_move_to_offset(doc.buffer_len());
             doc.cursor_mut().selection_anchor = None;
@@ -399,10 +357,10 @@ pub fn apply_edit_hit_target(tab: &mut TabSessionMut<'_>, target: EditHitTarget)
     apply_target_to_document(tab.document, target);
     let cursor_byte = tab.document.cursor_offset().to_usize();
     let selection_anchor = tab.document.cursor().selection_anchor;
-    tab.send_message(PluginMessage::SetSelAnchorByte(selection_anchor));
-    tab.send_message(PluginMessage::SetSelCursorByte(Some(cursor_byte)));
-    tab.send_message(PluginMessage::SetCursorByte(cursor_byte));
+    tab.set_plugin_selection_anchor_byte(selection_anchor);
+    tab.set_plugin_selection_cursor_byte(Some(cursor_byte));
+    tab.set_cursor_byte(cursor_byte);
     if clears_edit_focus {
-        tab.send_message(PluginMessage::ClearEditFocus);
+        tab.clear_edit_focus();
     }
 }

@@ -4,7 +4,7 @@ const SOURCE_TEXT: &str = "Skill agent loop";
 const LOGICAL_FONT_SIZE: f32 = 16.0;
 
 fn set_engine_font(engine: &mut PreviewEngine, font_family: &str) {
-    engine.handle_message_common(&PluginMessage::SetRenderSettings {
+    engine.set_view_render_settings(ui::plugin::ViewRenderSettings {
         font_family: font_family.into(),
         font_size: LOGICAL_FONT_SIZE,
         line_height: 24.0,
@@ -13,7 +13,11 @@ fn set_engine_font(engine: &mut PreviewEngine, font_family: &str) {
     });
 }
 
-fn assert_plugin_matches_source_font(plugin: &mut dyn ViewPlugin, font_family: &str, dpi: f32) {
+fn assert_plugin_matches_source_font(
+    plugin: &mut dyn ViewPluginCapabilities,
+    font_family: &str,
+    dpi: f32,
+) {
     let theme = ui::theme::test_theme();
     let doc = textora_core::document::StringDocView::new(SOURCE_TEXT);
     let mut shaper = shaping::Shaper::new().expect("font consistency requires system fonts");
@@ -60,10 +64,9 @@ fn replacement_preedit_keeps_the_configured_body_font() {
     editor.engine.handle_set_cursor_byte(SOURCE_TEXT.len());
     editor.engine.set_sel_anchor_byte(Some(0));
     editor.engine.set_sel_cursor_byte(Some(SOURCE_TEXT.len()));
-    editor.engine.handle_message_common(&PluginMessage::SetPreedit {
-        text: SOURCE_TEXT.into(),
-        cursor: Some((SOURCE_TEXT.len(), SOURCE_TEXT.len())),
-    });
+    editor
+        .engine
+        .set_preedit_text(SOURCE_TEXT.into(), Some((SOURCE_TEXT.len(), SOURCE_TEXT.len())));
     for font_family in ["Helvetica", "Menlo"] {
         set_engine_font(&mut editor.engine, font_family);
         assert_plugin_matches_source_font(&mut editor, font_family, 2.0);

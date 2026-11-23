@@ -10,7 +10,7 @@ use ui::core::paint::DrawList;
 use ui::core::widget::{KeyCode, Modifiers};
 use ui::plugin::{
     CanvasContentMetrics, CanvasDragRequest, CanvasDragResponse, PluginMessage, PluginQuery,
-    PluginResponse, ViewPlugin,
+    PluginResponse, ViewPluginCapabilities,
 };
 use ui::theme::Theme;
 
@@ -94,7 +94,7 @@ impl<'a> TabSession<'a> {
         self.document
     }
 
-    pub fn plugin(&self) -> &'a dyn ViewPlugin {
+    pub fn plugin(&self) -> &'a dyn ViewPluginCapabilities {
         self.runtime.plugin.as_ref()
     }
 
@@ -103,7 +103,10 @@ impl<'a> TabSession<'a> {
     }
 
     pub fn paste_preference(&self) -> ui::plugin::PastePreference {
-        self.runtime.plugin.paste_preference()
+        self.runtime
+            .plugin
+            .editable()
+            .map_or(ui::plugin::PastePreference::PlainText, |view| view.paste_preference())
     }
 
     pub fn allows_editing(&self) -> bool {
@@ -116,15 +119,15 @@ impl<'a> TabSession<'a> {
     }
 
     pub fn handles_own_rendering(&self) -> bool {
-        self.runtime.plugin.handles_own_rendering()
+        self.runtime.plugin.mode().renders_content()
     }
 
     pub fn is_canvas(&self) -> bool {
-        self.runtime.plugin.is_canvas()
+        self.runtime.plugin.mode() == ui::plugin::PluginMode::Canvas
     }
 
     pub fn shows_gutter(&self) -> bool {
-        self.runtime.plugin.shows_gutter()
+        self.runtime.plugin.mode().uses_host_gutter()
     }
 
     pub fn needs_cursor_blink_wakeup(&self) -> bool {
@@ -137,59 +140,42 @@ impl<'a> TabSession<'a> {
         self.runtime.plugin.query(query, &document)
     }
 
-    fn query_float(&self, query: PluginQuery) -> f32 {
-        match self.query(query) {
-            PluginResponse::Float(value) => value,
-            _ => 0.0,
-        }
-    }
-
-    pub fn query_bool(&self, query: PluginQuery) -> bool {
-        match self.query(query) {
-            PluginResponse::Bool(value) => value,
-            _ => false,
-        }
-    }
-
-    fn query_position(&self, query: PluginQuery) -> Option<(usize, usize)> {
-        match self.query(query) {
-            PluginResponse::Position(position) => position,
-            _ => None,
-        }
-    }
-
-    fn query_string(&self, query: PluginQuery) -> String {
-        match self.query(query) {
-            PluginResponse::String(value) => value,
-            _ => String::new(),
-        }
-    }
-
     pub fn content_height(&self) -> f32 {
-        self.query_float(PluginQuery::ContentHeight)
+        self.runtime.plugin.scrollable().map_or(0.0, |view| view.content_height())
     }
 
     pub fn scroll_y(&self) -> f32 {
-        self.query_float(PluginQuery::ScrollY)
+        let document =
+            PresentedDocument { document: self.document, presentation: &self.runtime.presentation };
+        self.runtime.plugin.scrollable().map_or(0.0, |view| view.scroll_y(&document))
     }
 
     pub fn plugin_has_selection(&self) -> bool {
-        self.query_bool(PluginQuery::HasSelection)
+        if let Some(selection) = self.runtime.plugin.selection() {
+            return selection.has_selection();
+        }
+        false
     }
 
     pub fn selected_text(&self) -> String {
-        self.query_string(PluginQuery::SelectedText)
+        if let Some(selection) = self.runtime.plugin.selection() {
+            return selection.selected_text().unwrap_or_default();
+        }
+        String::new()
     }
 
     fn selection_cursor(&self) -> Option<(usize, usize)> {
-        self.query_position(PluginQuery::SelCursor)
+        if let Some(selection) = self.runtime.plugin.selection() {
+            return selection.selection_cursor().map(ui::plugin::ReadingPosition::indices);
+        }
+        None
     }
 
     pub fn flat_lines(&self) -> Vec<ui::plugin::FlatLine> {
-        match self.query(PluginQuery::FlatLines) {
-            PluginResponse::FlatLines(lines) => lines,
-            _ => Vec::new(),
+        if let Some(selection) = self.runtime.plugin.selection() {
+            return selection.flat_lines();
         }
+        Vec::new()
     }
 
     pub fn hit_test_position(
@@ -199,7 +185,12 @@ impl<'a> TabSession<'a> {
         offset_x: f32,
         offset_y: f32,
     ) -> Option<(usize, usize)> {
-        self.query_position(PluginQuery::HitTest { x, y, offset_x, offset_y })
+        if let Some(selection) = self.runtime.plugin.selection() {
+            return selection
+                .hit_test_position(x, y, offset_x, offset_y)
+                .map(ui::plugin::ReadingPosition::indices);
+        }
+        None
     }
 
     fn word_range_at_pos(
@@ -207,10 +198,12 @@ impl<'a> TabSession<'a> {
         line_index: usize,
         cluster_pos: usize,
     ) -> Option<((usize, usize), (usize, usize))> {
-        match self.query(PluginQuery::WordAtPos(line_index, cluster_pos)) {
-            PluginResponse::PositionPair(range) => range,
-            _ => None,
+        if let Some(selection) = self.runtime.plugin.selection() {
+            return selection
+                .word_range(ui::plugin::ReadingPosition::new(line_index, cluster_pos))
+                .map(|range| (range.start.indices(), range.end.indices()));
         }
+        None
     }
 
     fn line_range_at_pos(
@@ -218,24 +211,30 @@ impl<'a> TabSession<'a> {
         line_index: usize,
         cluster_pos: usize,
     ) -> Option<((usize, usize), (usize, usize))> {
-        match self.query(PluginQuery::LineRangeAtPos(line_index, cluster_pos)) {
-            PluginResponse::PositionPair(range) => range,
-            _ => None,
+        if let Some(selection) = self.runtime.plugin.selection() {
+            return selection
+                .line_range(ui::plugin::ReadingPosition::new(line_index, cluster_pos))
+                .map(|range| (range.start.indices(), range.end.indices()));
         }
+        None
+    }
+
+    pub fn hit_test_caret(
+        &self,
+        x: f32,
+        y: f32,
+        offset_x: f32,
+        offset_y: f32,
+    ) -> Option<ui::plugin::VisualCaretPosition> {
+        self.runtime.plugin.editable()?.hit_test_caret(x, y, offset_x, offset_y)
     }
 
     pub fn hit_test_byte(&self, x: f32, y: f32, offset_x: f32, offset_y: f32) -> Option<usize> {
-        match self.query(PluginQuery::HitTestByte { x, y, offset_x, offset_y }) {
-            PluginResponse::BytePosition(byte) => byte,
-            _ => None,
-        }
+        self.hit_test_caret(x, y, offset_x, offset_y).map(|caret| caret.byte_offset)
     }
 
     pub fn query_cursor_screen_rect(&self, cursor_byte: usize) -> Option<(f32, f32, f32, f32)> {
-        match self.query(PluginQuery::CursorScreenPos(cursor_byte)) {
-            PluginResponse::CursorScreenRect(rect) => rect,
-            _ => None,
-        }
+        self.runtime.plugin.editable()?.cursor_screen_rect(cursor_byte)
     }
 
     pub fn hit_test_edit_target(
@@ -245,10 +244,14 @@ impl<'a> TabSession<'a> {
         offset_x: f32,
         offset_y: f32,
     ) -> Option<Option<ui::plugin::EditHitTarget>> {
-        match self.query(PluginQuery::HitTestEditTarget { x, y, offset_x, offset_y }) {
-            PluginResponse::EditHitTarget(target) => Some(target),
-            _ => None,
-        }
+        self.runtime.plugin.editable()?.hit_test_edit_target(x, y, offset_x, offset_y)
+    }
+
+    pub fn hit_test_canvas_control(
+        &self,
+        position: ui::canvas::CanvasPoint,
+    ) -> Option<std::ops::Range<usize>> {
+        self.runtime.plugin.canvas()?.hit_test_canvas_control(position)
     }
 
     pub fn canvas_control_edit_plan(
@@ -256,10 +259,10 @@ impl<'a> TabSession<'a> {
         source_range: std::ops::Range<usize>,
         source_generation: u32,
     ) -> Option<ui::plugin::EditPlan> {
-        match self.query(PluginQuery::PlanCanvasControl { source_range, source_generation }) {
-            PluginResponse::EditPlan(plan) => Some(plan),
-            _ => None,
+        if !self.allows_editing() {
+            return None;
         }
+        Some(self.runtime.plugin.canvas()?.plan_canvas_control(source_range, source_generation))
     }
 
     pub fn move_edit_target(
@@ -268,22 +271,42 @@ impl<'a> TabSession<'a> {
         direction: ui::plugin::MoveDirection,
         target_x: Option<f32>,
     ) -> Option<ui::plugin::EditHitTarget> {
-        match self.query(PluginQuery::MoveEditTarget { current_byte, direction, target_x }) {
-            PluginResponse::EditHitTarget(Some(target)) => Some(target),
-            _ => None,
-        }
+        self.runtime.plugin.editable()?.move_edit_target(current_byte, direction, target_x)
     }
 
-    pub fn visual_move_byte(
+    pub fn visual_move(
         &self,
         current_byte: usize,
         direction: ui::plugin::MoveDirection,
         target_x: Option<f32>,
-    ) -> Option<usize> {
-        match self.query(PluginQuery::VisualMove { current_byte, direction, target_x }) {
-            PluginResponse::BytePosition(Some(byte)) => Some(byte),
-            _ => None,
-        }
+    ) -> Option<ui::plugin::VisualCaretPosition> {
+        self.runtime.plugin.editable()?.visual_move(current_byte, direction, target_x)
+    }
+
+    pub fn plan_semantic_edit(
+        &self,
+        command: ui::plugin::SemanticEditCommand,
+        selection: Option<std::ops::Range<usize>>,
+    ) -> ui::plugin::SemanticEditPlan {
+        let Some(view) = self.runtime.plugin.editable() else {
+            return ui::plugin::SemanticEditPlan::Unsupported;
+        };
+        view.plan_semantic_edit(
+            command,
+            self.document.generation(),
+            self.document.cursor_offset().to_usize(),
+            selection,
+        )
+    }
+
+    pub fn table_structure_capabilities(
+        &self,
+        cursor_byte: usize,
+    ) -> Option<ui::plugin::TableStructureCapabilities> {
+        self.runtime
+            .plugin
+            .editable()?
+            .table_structure_capabilities(self.document.generation(), cursor_byte)
     }
 
     fn plan_mindmap_theme(
@@ -298,14 +321,17 @@ impl<'a> TabSession<'a> {
     }
 
     pub fn plan_edit_request(&self, request: &ui::plugin::EditRequest) -> ui::plugin::EditPlan {
-        self.runtime.plugin.edit_policy().plan_edit(request)
+        self.runtime
+            .plugin
+            .editable()
+            .map_or(ui::plugin::EditPlan::UseDefault, |policy| policy.plan_edit(request))
     }
 
     pub fn selection_highlights(&self, color: [f32; 4]) -> DrawList {
-        match self.query(PluginQuery::SelectionHighlights(color)) {
-            PluginResponse::DrawList(draw_list) => draw_list,
-            _ => DrawList::new(),
+        if let Some(selection) = self.runtime.plugin.selection() {
+            return selection.selection_highlights(color);
         }
+        DrawList::new()
     }
 
     pub fn search_highlights(
@@ -317,13 +343,16 @@ impl<'a> TabSession<'a> {
         match_color: [f32; 4],
         inactive_color: [f32; 4],
     ) -> DrawList {
+        let Some(view) = self.runtime.plugin.search() else {
+            return DrawList::new();
+        };
         let search = self.search_state();
         if query == search.query
             && match_case == search.options.match_case
             && use_regex == search.options.use_regex
-            && let PluginResponse::DrawList(draw_list) =
-                self.query(PluginQuery::SourceSearchHighlights {
-                    matches: search.matches.clone(),
+            && let Some(draw_list) =
+                view.source_search_highlights(ui::plugin::SourceSearchHighlightsRequest {
+                    matches: &search.matches,
                     source_generation: search.buffer_generation,
                     active_idx,
                     match_color,
@@ -332,17 +361,14 @@ impl<'a> TabSession<'a> {
         {
             return draw_list;
         }
-        match self.query(PluginQuery::SearchHighlights {
-            query,
+        view.search_highlights(ui::plugin::SearchHighlightsRequest {
+            query: &query,
             match_case,
             use_regex,
             active_idx,
             match_color,
             inactive_color,
-        }) {
-            PluginResponse::DrawList(draw_list) => draw_list,
-            _ => DrawList::new(),
-        }
+        })
     }
 
     pub fn mindmap_theme_selection(&self) -> ui::theme::MindmapThemeSelection {
@@ -352,22 +378,15 @@ impl<'a> TabSession<'a> {
         }
     }
 
-    fn needs_source_update(&self, generation: u32) -> bool {
-        self.query_bool(PluginQuery::NeedsSourceUpdate(generation))
-    }
-
     fn selection_byte_range(&self) -> Option<(usize, usize)> {
-        match self.query(PluginQuery::SelectionRange) {
-            PluginResponse::PositionPair(Some(((start, _), (end, _)))) => Some((start, end)),
-            _ => None,
+        if let Some(selection) = self.runtime.plugin.selection() {
+            return selection.selection_source_range().map(|range| (range.start, range.end));
         }
+        None
     }
 
     pub fn scroll_anchor(&self) -> Option<(String, f32)> {
-        match self.query(PluginQuery::ScrollAnchor) {
-            PluginResponse::ScrollAnchor(text, offset) => Some((text, offset)),
-            _ => None,
-        }
+        self.runtime.plugin.scrollable()?.scroll_anchor()
     }
 
     pub fn has_canvas_viewport_snapshot(&self) -> bool {
@@ -470,6 +489,7 @@ impl<'a> TabSession<'a> {
     ) -> Option<ui::plugin::EditIntent> {
         self.runtime
             .plugin
+            .editable()?
             .key_intent_mapper()
             .and_then(|mapper| mapper.map_key(key_code, modifiers))
     }
@@ -498,8 +518,20 @@ impl<'a> TabSessionMut<'a> {
         self.document
     }
 
-    pub fn plugin(&self) -> &dyn ViewPlugin {
+    pub fn plugin(&self) -> &dyn ViewPluginCapabilities {
         self.runtime.plugin.as_ref()
+    }
+
+    pub fn scroll_to_heading(&mut self, index: usize) {
+        if let Some(outline) = self.runtime.plugin.outline_mut() {
+            outline.scroll_to_heading(index);
+        }
+    }
+
+    pub fn scroll_to_chapter(&mut self, direction: ui::plugin::ChapterDirection) {
+        if let Some(outline) = self.runtime.plugin.outline_mut() {
+            outline.scroll_to_chapter(direction);
+        }
     }
 
     pub fn plugin_name(&self) -> &str {
@@ -515,7 +547,7 @@ impl<'a> TabSessionMut<'a> {
     }
 
     pub fn is_canvas(&self) -> bool {
-        self.runtime.plugin.is_canvas()
+        self.runtime.plugin.mode() == ui::plugin::PluginMode::Canvas
     }
 
     pub fn has_canvas_viewport_snapshot(&self) -> bool {
@@ -532,12 +564,7 @@ impl<'a> TabSessionMut<'a> {
     pub fn source_spacing_protected_ranges(
         &self,
     ) -> Option<std::sync::Arc<[std::ops::Range<usize>]>> {
-        match self.as_ref().query(PluginQuery::SourceSpacingProtectedRanges {
-            source_generation: self.document.generation(),
-        }) {
-            PluginResponse::SourceSpacingProtectedRanges(ranges) => Some(ranges),
-            _ => None,
-        }
+        self.runtime.plugin.source_spacing_protected_ranges(self.document.generation())
     }
 
     pub fn content_height(&self) -> f32 {
@@ -546,6 +573,70 @@ impl<'a> TabSessionMut<'a> {
 
     pub fn scroll_y(&self) -> f32 {
         self.as_ref().scroll_y()
+    }
+
+    pub fn set_view_render_settings(&mut self, settings: ui::plugin::ViewRenderSettings) {
+        self.runtime.plugin.set_view_render_settings(settings);
+    }
+
+    pub fn set_view_text_spacing_mode(&mut self, mode: ui::typography::TextSpacingMode) {
+        self.runtime.plugin.set_view_text_spacing_mode(mode);
+    }
+
+    pub fn scroll_to_search_match(&mut self, query: &str, match_case: bool, active_idx: usize) {
+        if let Some(search) = self.runtime.plugin.search_mut() {
+            search.scroll_to_search_match(query, match_case, active_idx);
+        }
+    }
+
+    pub fn set_plugin_selection_cursor(&mut self, position: Option<(usize, usize)>) -> bool {
+        let Some(selection) = self.runtime.plugin.selection_mut() else {
+            return false;
+        };
+        let document =
+            PresentedDocument { document: self.document, presentation: &self.runtime.presentation };
+        let position =
+            position.map(|(line, grapheme)| ui::plugin::ReadingPosition::new(line, grapheme));
+        selection.set_selection_cursor(position, &document)
+    }
+
+    pub fn set_plugin_selection_cursor_byte(&mut self, byte: Option<usize>) -> bool {
+        if let Some(selection) = self.runtime.plugin.selection_mut() {
+            return selection.set_selection_cursor_byte(byte);
+        }
+        false
+    }
+
+    pub fn set_plugin_selection_anchor(&mut self, position: Option<(usize, usize)>) -> bool {
+        let Some(selection) = self.runtime.plugin.selection_mut() else {
+            return false;
+        };
+        let document =
+            PresentedDocument { document: self.document, presentation: &self.runtime.presentation };
+        let position =
+            position.map(|(line, grapheme)| ui::plugin::ReadingPosition::new(line, grapheme));
+        selection.set_selection_anchor(position, &document)
+    }
+
+    pub fn set_plugin_selection_anchor_byte(&mut self, byte: Option<usize>) -> bool {
+        if let Some(selection) = self.runtime.plugin.selection_mut() {
+            return selection.set_selection_anchor_byte(byte);
+        }
+        false
+    }
+
+    pub fn clear_plugin_selection(&mut self) -> bool {
+        if let Some(selection) = self.runtime.plugin.selection_mut() {
+            return selection.clear_selection();
+        }
+        false
+    }
+
+    pub fn select_all_in_plugin(&mut self) -> bool {
+        if let Some(selection) = self.runtime.plugin.selection_mut() {
+            return selection.select_all();
+        }
+        false
     }
 
     pub fn plugin_has_selection(&self) -> bool {
@@ -889,12 +980,65 @@ impl<'a> TabSessionMut<'a> {
         });
     }
 
-    pub fn needs_source_update(&self, generation: u32) -> bool {
-        self.as_ref().needs_source_update(generation)
+    pub fn sync_document(&mut self, reason: ui::plugin::SyncReason) -> ui::plugin::SyncOutcome {
+        let document = &*self.document;
+        self.runtime
+            .plugin
+            .sync_document(document.generation(), reason, &mut || document.full_text())
     }
 
     pub fn selection_byte_range(&self) -> Option<(usize, usize)> {
         self.as_ref().selection_byte_range()
+    }
+
+    pub fn set_cursor_byte(&mut self, cursor_byte: usize) {
+        if let Some(view) = self.runtime.plugin.editable_mut() {
+            view.set_cursor_byte(cursor_byte);
+        }
+    }
+
+    pub fn set_visual_caret(&mut self, position: ui::plugin::VisualCaretPosition) {
+        if let Some(view) = self.runtime.plugin.editable_mut() {
+            view.set_visual_caret(position);
+        }
+    }
+
+    pub fn clear_edit_focus(&mut self) {
+        if let Some(view) = self.runtime.plugin.editable_mut() {
+            view.clear_edit_focus();
+        }
+    }
+
+    pub fn reveal_cursor(&mut self, cursor_byte: usize) -> bool {
+        self.runtime.plugin.editable_mut().is_some_and(|view| view.reveal_cursor(cursor_byte))
+    }
+
+    pub fn set_cursor_visible(&mut self, visible: bool) {
+        if let Some(view) = self.runtime.plugin.editable_mut() {
+            view.set_cursor_visible(visible);
+        }
+    }
+
+    pub fn set_preedit(&mut self, text: String, cursor: Option<(usize, usize)>) {
+        if let Some(view) = self.runtime.plugin.editable_mut() {
+            view.set_preedit(text, cursor);
+        }
+    }
+
+    pub fn scroll_plugin(&mut self, delta: f32, viewport_height: f32) -> bool {
+        self.runtime.plugin.scrollable_mut().is_some_and(|view| view.scroll(delta, viewport_height))
+    }
+
+    pub fn restore_plugin_scroll_y(&mut self, y: f32) -> bool {
+        self.runtime.plugin.scrollable_mut().is_some_and(|view| view.restore_y(y))
+    }
+
+    pub fn restore_plugin_scroll_ratio(&mut self, ratio: f32) -> bool {
+        self.runtime.plugin.scrollable_mut().is_some_and(|view| view.restore_ratio(ratio))
+    }
+
+    pub fn restore_plugin_scroll_anchor(&mut self, text: &str, offset: f32) -> bool {
+        self.runtime.plugin.scrollable_mut().is_some_and(|view| view.restore_anchor(text, offset))
     }
 
     pub fn send_message(&mut self, message: PluginMessage) -> bool {
@@ -907,7 +1051,7 @@ impl<'a> TabSessionMut<'a> {
         self.runtime.toc_visible = !self.runtime.toc_visible;
     }
 
-    pub fn swap_in_toggle_plugin(&mut self, replacement: Box<dyn ViewPlugin>) {
+    pub fn swap_in_toggle_plugin(&mut self, replacement: Box<dyn ViewPluginCapabilities>) {
         self.runtime.toggle_source_scroll_y = self.scroll_y();
         self.runtime.cached_toggle_source =
             Some(std::mem::replace(&mut self.runtime.plugin, replacement));
@@ -918,18 +1062,18 @@ impl<'a> TabSessionMut<'a> {
             return false;
         };
         let scroll_y = self.runtime.toggle_source_scroll_y;
-        let mut document =
-            PresentedDocument { document: self.document, presentation: &self.runtime.presentation };
-        cached.handle_message(PluginMessage::SetScrollY(scroll_y), &mut document);
+        if let Some(scrollable) = cached.scrollable_mut() {
+            scrollable.restore_y(scroll_y);
+        }
         self.runtime.plugin = cached;
         true
     }
 
-    pub fn cache_toggle_source_plugin(&mut self, plugin: Box<dyn ViewPlugin>) {
+    pub fn cache_toggle_source_plugin(&mut self, plugin: Box<dyn ViewPluginCapabilities>) {
         self.runtime.cached_toggle_source = Some(plugin);
     }
 
-    pub fn replace_plugin(&mut self, plugin: Box<dyn ViewPlugin>) {
+    pub fn replace_plugin(&mut self, plugin: Box<dyn ViewPluginCapabilities>) {
         self.runtime.plugin = plugin;
     }
 
@@ -972,7 +1116,7 @@ impl<'a> TabSessionMut<'a> {
     ) -> Option<CanvasContentMetrics> {
         let document =
             PresentedDocument { document: self.document, presentation: &self.runtime.presentation };
-        self.runtime.plugin.prepare_canvas(&document, theme, shaper, dpi_scale)
+        self.runtime.plugin.canvas_mut()?.prepare_canvas(&document, theme, shaper, dpi_scale)
     }
 
     pub fn render_canvas_plugin(
@@ -984,13 +1128,21 @@ impl<'a> TabSessionMut<'a> {
     ) -> DrawList {
         let document =
             PresentedDocument { document: self.document, presentation: &self.runtime.presentation };
-        self.runtime.plugin.render_canvas(&document, snapshot, theme, shaper, dpi_scale)
+        self.runtime.plugin.canvas_mut().map_or_else(DrawList::new, |canvas| {
+            canvas.render_canvas(&document, snapshot, theme, shaper, dpi_scale)
+        })
+    }
+
+    pub fn set_canvas_pointer(&mut self, pointer: Option<ui::canvas::CanvasPoint>) -> bool {
+        self.runtime.plugin.canvas_mut().is_some_and(|canvas| canvas.set_canvas_pointer(pointer))
     }
 
     pub fn handle_canvas_drag_plugin(&mut self, request: CanvasDragRequest) -> CanvasDragResponse {
         let document =
             PresentedDocument { document: self.document, presentation: &self.runtime.presentation };
-        self.runtime.plugin.handle_canvas_drag(request, &document)
+        self.runtime.plugin.canvas_mut().map_or(CanvasDragResponse::Ignore, |canvas| {
+            canvas.handle_canvas_drag(request, &document)
+        })
     }
 }
 
@@ -1000,7 +1152,7 @@ mod tests {
     use appkit_core::workspace::types::TabIdAllocator;
     use textora_core::buffer::TextBuffer;
     use textora_core::document::DocView;
-    use ui::plugin::{PastePreference, PluginQuery, PluginResponse, ViewPlugin};
+    use ui::plugin::{PastePreference, ViewPlugin};
 
     use crate::tab_runtime::TabRuntime;
 
@@ -1021,8 +1173,8 @@ mod tests {
             "scroll-probe"
         }
 
-        fn paste_preference(&self) -> PastePreference {
-            PastePreference::SemanticMarkdown
+        fn mode(&self) -> ui::plugin::PluginMode {
+            ui::plugin::PluginMode::Source
         }
 
         fn render(
@@ -1035,12 +1187,96 @@ mod tests {
         ) -> ui::core::paint::DrawList {
             ui::core::paint::DrawList::new()
         }
+    }
 
-        fn query(&self, query: PluginQuery, document: &dyn DocView) -> PluginResponse {
-            match query {
-                PluginQuery::ScrollY => PluginResponse::Float(document.scroll_y()),
-                _ => PluginResponse::None,
+    impl ui::plugin::ScrollableView for ScrollProbePlugin {
+        fn scroll_y(&self, document: &dyn DocView) -> f32 {
+            document.scroll_y()
+        }
+    }
+
+    impl ui::plugin::EditPolicy for ScrollProbePlugin {
+        fn plan_edit(&self, _: &ui::plugin::EditRequest) -> ui::plugin::EditPlan {
+            ui::plugin::EditPlan::UseDefault
+        }
+    }
+
+    impl ui::plugin::EditableView for ScrollProbePlugin {
+        fn paste_preference(&self) -> PastePreference {
+            PastePreference::SemanticMarkdown
+        }
+    }
+
+    impl ui::plugin::ViewPluginCapabilities for ScrollProbePlugin {
+        fn editable(&self) -> Option<&dyn ui::plugin::EditableView> {
+            Some(self)
+        }
+
+        fn scrollable(&self) -> Option<&dyn ui::plugin::ScrollableView> {
+            Some(self)
+        }
+    }
+
+    struct ModeProbe(ui::plugin::PluginMode);
+
+    impl ViewPlugin for ModeProbe {
+        fn name(&self) -> &str {
+            "mode-probe"
+        }
+
+        fn mode(&self) -> ui::plugin::PluginMode {
+            self.0
+        }
+
+        fn render(
+            &mut self,
+            _document: &dyn DocView,
+            _bounds: ui::Rect,
+            _theme: &ui::Theme,
+            _shaper: &mut shaping::Shaper,
+            _dpi_scale: f32,
+        ) -> ui::DrawList {
+            ui::DrawList::new()
+        }
+    }
+
+    impl ui::plugin::ViewPluginCapabilities for ModeProbe {}
+
+    #[test]
+    fn view_mode_routes_rendering_and_document_access_gates_editing() {
+        use crate::tab_runtime::DocumentEditingAccess::ReadOnly;
+        use ui::plugin::{EditIntent, EditPlan, EditRequest, PluginMode};
+
+        let id = TabIdAllocator::new().allocate();
+        let document = document("hello");
+        for (mode, draws_content, editable) in [
+            (PluginMode::Source, false, true),
+            (PluginMode::Reading, true, false),
+            (PluginMode::RichText, true, true),
+            (PluginMode::Canvas, true, true),
+        ] {
+            let mut runtime = TabRuntime::new(Box::new(ModeProbe(mode)));
+            let session = TabSession::new(id, &document, &runtime);
+            assert_eq!(session.handles_own_rendering(), draws_content);
+            assert_eq!(session.is_canvas(), mode == PluginMode::Canvas);
+            assert_eq!(session.shows_gutter(), mode == PluginMode::Source);
+            assert_eq!(session.allows_editing(), editable);
+
+            if mode == PluginMode::Source {
+                let request = EditRequest {
+                    source_generation: document.generation(),
+                    cursor_byte: 0,
+                    selection: None,
+                    intent: EditIntent::InsertText("text".into()),
+                };
+                assert_eq!(session.plan_edit_request(&request), EditPlan::UseDefault);
             }
+
+            runtime.set_editing_access(ReadOnly);
+            let session = TabSession::new(id, &document, &runtime);
+            assert!(!session.allows_editing());
+            assert_eq!(session.handles_own_rendering(), draws_content);
+            assert_eq!(session.is_canvas(), mode == PluginMode::Canvas);
         }
     }
 
@@ -1082,7 +1318,7 @@ mod tests {
 
         let session = TabSession::new(id, &document, &runtime);
 
-        assert_eq!(session.query_float(PluginQuery::ScrollY), RUNTIME_SCROLL as f32);
+        assert_eq!(session.scroll_y(), RUNTIME_SCROLL as f32);
     }
 
     #[test]

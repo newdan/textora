@@ -3,7 +3,6 @@
 use render::GlyphVertex;
 use std::time::Instant;
 use ui::canvas::CanvasViewportSnapshot;
-use ui::plugin::PluginMessage;
 
 use super::{EditorFrame, EditorRuntime, RenderError, RenderResources};
 use crate::tab_session::{TabSession, TabSessionMut};
@@ -280,17 +279,17 @@ fn render_plugin_content(
 ) -> ui::DrawList {
     let EditorPaintStyle { theme, settings, metrics } = style;
     let dpi = metrics.dpi;
-    tab.send_message(PluginMessage::SetRenderSettings {
+    tab.set_view_render_settings(ui::plugin::ViewRenderSettings {
         font_family: settings.font_family.clone(),
         font_size: metrics.font_size / dpi,
         line_height: metrics.line_height / dpi,
         toc_max_depth: settings.toc_max_depth,
         markdown_first_line_indent: settings.markdown_first_line_indent,
     });
-    tab.send_message(PluginMessage::SetTextSpacingMode(settings.text_spacing_mode));
+    tab.set_view_text_spacing_mode(settings.text_spacing_mode);
     let cursor_visible = cursor_paint_enabled
         && super::cursor_blink_phase(tab.cursor_blink_instant(), Instant::now()).visible;
-    tab.send_message(PluginMessage::SetCursorVisible(cursor_visible));
+    tab.set_cursor_visible(cursor_visible);
 
     let Some(shaper) = shaper else {
         return ui::DrawList::new();
@@ -396,7 +395,7 @@ fn render_plugin_with_visible_cursor(
     let Some(scroll_delta) = scroll_delta else {
         return draw_list;
     };
-    if !tab.send_message(PluginMessage::Scroll { delta: scroll_delta, viewport_h: bounds.h }) {
+    if !tab.scroll_plugin(scroll_delta, bounds.h) {
         return draw_list;
     }
 
@@ -429,22 +428,19 @@ fn synchronize_plugin_document(
     tab: &mut crate::tab_session::TabSessionMut<'_>,
     preedit: (String, Option<(usize, usize)>),
 ) {
-    let generation = tab.document.tb().gap_buffer().generation();
-    if tab.needs_source_update(generation) {
-        tab.send_message(PluginMessage::UpdateSource {
-            text: tab.document.full_text(),
-            generation,
-        });
-    }
+    tab.sync_document(ui::plugin::SyncReason::Normal);
     if let Some((start, end)) = tab.document.selection_range().filter(|(start, end)| start < end) {
-        tab.send_message(PluginMessage::SetSelAnchorByte(Some(start)));
-        tab.send_message(PluginMessage::SetSelCursorByte(Some(end)));
+        tab.set_plugin_selection_anchor_byte(Some(start));
+        tab.set_plugin_selection_cursor_byte(Some(end));
     } else {
-        tab.send_message(PluginMessage::SetSelAnchorByte(None));
-        tab.send_message(PluginMessage::SetSelCursorByte(None));
+        tab.set_plugin_selection_anchor_byte(None);
+        tab.set_plugin_selection_cursor_byte(None);
     }
-    tab.send_message(PluginMessage::SetCursorByte(tab.document.cursor_offset().to_usize()));
-    tab.send_message(PluginMessage::SetPreedit { text: preedit.0, cursor: preedit.1 });
+    let byte_offset = tab.document.cursor_offset().to_usize();
+    tab.set_cursor_byte(byte_offset);
+    let affinity = tab.document.tb().cursor_affinity();
+    tab.set_visual_caret(ui::plugin::VisualCaretPosition { byte_offset, affinity });
+    tab.set_preedit(preedit.0, preedit.1);
 }
 
 fn paint_text_editor(
