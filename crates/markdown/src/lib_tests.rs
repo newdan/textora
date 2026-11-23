@@ -5,8 +5,8 @@ mod lite_tests {
     use crate::paste::{PasteFallbackReason, PasteRepresentations, PreparedPaste, prepare_paste};
 
     #[test]
-    fn basic_markdown_keeps_math_and_html_as_text() {
-        let source = "# Heading\n\n**bold** $x$ <br>";
+    fn basic_markdown_renders_inline_breaks_and_keeps_math_and_other_html_literal() {
+        let source = "# Heading\n\n**bold** $x$ <br><span>text</span>";
         let parsed = parse_markdown(source);
         assert!(!parsed.events.iter().any(|event| {
             matches!(event, MarkdownEvent::InlineMath(_) | MarkdownEvent::DisplayMath(_))
@@ -14,7 +14,7 @@ mod lite_tests {
 
         let document = MarkdownDoc::build(&parsed, &crate::test_utils::default_style());
         assert!(matches!(document.blocks[0].kind, BlockKind::Heading { .. }));
-        assert_eq!(document.blocks[1].text_lines, ["bold $x$ <br>"]);
+        assert_eq!(document.blocks[1].text_lines, ["bold $x$ ", "<span>text</span>"]);
     }
 
     #[test]
@@ -49,6 +49,134 @@ mod lite_tests {
 mod integration_tests {
     use crate::test_utils::default_style;
     use crate::*;
+
+    use crate::builder::{BlockKind, MarkdownDoc};
+    use crate::parser::parse_markdown;
+    use textora_core::buffer::TextBuffer;
+    use textora_core::types::ByteIndex;
+    use ui::plugin::{EditIntent, EditPlan, EditPolicy, EditRequest, EditSelection};
+
+    fn inline_break_source(buffer: &mut TextBuffer) -> String {
+        let mut source = String::new();
+        buffer.save_as_string(&mut source);
+        source
+    }
+
+    fn apply_inline_break_edit(buffer: &mut TextBuffer, intent: EditIntent) {
+        let source = inline_break_source(buffer);
+        let generation = buffer.generation();
+        let mut view = crate::view::MarkdownEditorView::new();
+        view.set_source(source, generation);
+        let EditPlan::Apply(transaction) = view.plan_edit(&EditRequest {
+            source_generation: generation,
+            cursor_byte: buffer.cursor_offset().to_usize(),
+            selection: None,
+            intent,
+        }) else {
+            panic!("inline break editing must produce a replacement transaction");
+        };
+        let [replacement] = transaction.replacements.as_slice() else {
+            panic!("an inline break edit must use one replacement");
+        };
+        let EditSelection::Caret(cursor) = transaction.selection_after else {
+            panic!("an inline break edit must leave a single caret");
+        };
+        buffer.edit_begin_grouping();
+        buffer.replace_range(replacement.range.clone(), replacement.text.as_bytes());
+        buffer.edit_end_grouping();
+        buffer.cursor_move_to_byte(ByteIndex(cursor));
+    }
+
+    fn assert_inline_break_container(source: &str, container: &BlockKind, expected_lines: &[&str]) {
+        let doc = MarkdownDoc::build(&parse_markdown(source), &default_style());
+        let [block] = doc.blocks.as_slice() else {
+            panic!("the source must retain exactly one top-level block");
+        };
+        let leaf = if matches!(container, BlockKind::TableCell_ { .. }) {
+            assert!(matches!(block.kind, BlockKind::TableWrapper { columns: 1, .. }));
+            let [header_cell, body_row] = block.children.as_slice() else {
+                panic!("the table must retain its header cell and body row");
+            };
+            assert_eq!(header_cell.kind, BlockKind::TableCell_ { col: 0, row: 0, is_header: true });
+            assert_eq!(header_cell.text_lines, ["header"]);
+            assert_eq!(body_row.kind, BlockKind::TableRow_);
+            let [body_cell] = body_row.children.as_slice() else {
+                panic!("the body row must retain its single cell");
+            };
+            body_cell
+        } else {
+            block
+        };
+        assert_eq!(&leaf.kind, container);
+        assert_eq!(leaf.text_lines, expected_lines);
+    }
+
+    fn assert_inline_break_roundtrip(
+        original: &str,
+        split: &str,
+        insertion_byte: usize,
+        container: BlockKind,
+    ) {
+        let end_byte = insertion_byte + "<br>".len();
+        for (intent, deletion_byte) in
+            [(EditIntent::DeleteBackward, end_byte), (EditIntent::DeleteForward, insertion_byte)]
+        {
+            let mut buffer = TextBuffer::new(false).expect("test buffer must be created");
+            buffer.set_crlf(false);
+            buffer.set_insert_final_newline(false);
+            buffer.write_raw(original.as_bytes());
+            buffer.cursor_move_to_byte(ByteIndex(insertion_byte));
+
+            apply_inline_break_edit(&mut buffer, EditIntent::InsertLineBreak);
+            let edited = inline_break_source(&mut buffer);
+            assert_eq!(edited, split);
+            assert_eq!(buffer.cursor_offset(), ByteIndex(end_byte));
+            assert_inline_break_container(&edited, &container, &["前", "后"]);
+
+            buffer.cursor_move_to_byte(ByteIndex(deletion_byte));
+            apply_inline_break_edit(&mut buffer, intent);
+            let restored = inline_break_source(&mut buffer);
+            assert_eq!(restored, original);
+            assert_eq!(buffer.cursor_offset(), ByteIndex(insertion_byte));
+            assert_inline_break_container(&restored, &container, &["前后"]);
+
+            buffer.undo();
+            let undone = inline_break_source(&mut buffer);
+            assert_eq!(undone, split);
+            assert_eq!(buffer.cursor_offset(), ByteIndex(deletion_byte));
+            assert_inline_break_container(&undone, &container, &["前", "后"]);
+        }
+    }
+
+    #[test]
+    fn inline_break_roundtrips_in_atx_heading() {
+        assert_inline_break_roundtrip(
+            "# 前后",
+            "# 前<br>后",
+            "# 前".len(),
+            BlockKind::Heading { level: 1 },
+        );
+    }
+
+    #[test]
+    fn inline_break_roundtrips_in_setext_heading() {
+        assert_inline_break_roundtrip(
+            "前后\n---",
+            "前<br>后\n---",
+            "前".len(),
+            BlockKind::Heading { level: 2 },
+        );
+    }
+
+    #[test]
+    fn inline_break_roundtrips_in_table_cell() {
+        assert_inline_break_roundtrip(
+            "| header |\n| --- |\n| 前后 |",
+            "| header |\n| --- |\n| 前<br>后 |",
+            "| header |\n| --- |\n| 前".len(),
+            BlockKind::TableCell_ { col: 0, row: 0, is_header: false },
+        );
+    }
 
     const Q4_LIST_SOURCE: &str = r#"Q4的几件事是一定要完成的:
 1. Office一定要完成Agent转型,Q4要做完.尤其是表格一堆的分析助手.

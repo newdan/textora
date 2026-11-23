@@ -220,10 +220,9 @@ fn builder_preserves_hard_break_lines() {
     assert_eq!(doc.blocks[0].text_lines, ["first", "second"]);
 }
 
-#[cfg(feature = "rich-markdown")]
 #[test]
 fn builder_renders_inline_html_break_as_a_hard_break() {
-    for html_break in ["<br>", "<br/>", "<br />"] {
+    for html_break in ["<br>", "<br/>", "<br />", "<BR            />"] {
         let source = format!("# first{html_break}second");
         let doc = MarkdownDoc::build(&parse_markdown(&source), &default_style());
 
@@ -232,6 +231,37 @@ fn builder_renders_inline_html_break_as_a_hard_break() {
             ["first", "second"],
             "inline HTML break {html_break:?} must create two visual lines"
         );
+    }
+}
+
+#[test]
+fn builder_keeps_inline_style_across_an_html_break() {
+    let source = "前**before<br            />after**后";
+    let doc = MarkdownDoc::build(&parse_markdown(source), &default_style());
+    let paragraph = &doc.blocks[0];
+
+    assert_eq!(paragraph.text_lines, ["前before", "after后"]);
+    for (line, bold) in paragraph.text_styles.iter().zip(["before", "after"]) {
+        let span = line
+            .iter()
+            .find(|span| span.style == InlineStyle::Bold)
+            .expect("each line must retain its bold span");
+        assert_eq!(span.len, bold.len());
+    }
+    for line in &paragraph.projected_lines {
+        line.validate(source).expect("both projections must respect UTF-8 boundaries");
+    }
+}
+
+#[test]
+fn builder_keeps_non_break_html_and_code_literal() {
+    for (source, expected) in [
+        ("before<br class=\"x\">after", vec!["before<br class=\"x\">after"]),
+        ("before`<br>`after", vec!["before<br>after"]),
+        ("<div>\n<br>\n</div>", vec!["<div>", "<br>", "</div>"]),
+    ] {
+        let doc = MarkdownDoc::build(&parse_markdown(source), &default_style());
+        assert_eq!(doc.blocks[0].text_lines, expected, "source={source:?}");
     }
 }
 
@@ -734,7 +764,6 @@ fn nested_inline_styles_expand_outer_and_inner_delimiters() {
     assert_eq!(expanded.text, "ab**cd**");
 }
 
-#[cfg(feature = "rich-markdown")]
 #[test]
 fn soft_break_before_hard_break_or_br_keeps_text_and_projection_in_sync() {
     for source in ["hello\n<br>\nworld", "hello\n\\\nworld"] {
@@ -760,7 +789,6 @@ fn soft_break_before_hard_break_or_br_keeps_text_and_projection_in_sync() {
     }
 }
 
-#[cfg(feature = "rich-markdown")]
 #[test]
 fn tight_list_item_preserves_inline_html_break_as_logical_line_break() {
     for br in ["<br>", "<BR/>", "<br />"] {
@@ -789,7 +817,6 @@ fn tight_list_item_preserves_inline_html_break_as_logical_line_break() {
     assert_eq!(nested_doc.blocks[0].children.len(), 1);
 }
 
-#[cfg(feature = "rich-markdown")]
 #[test]
 fn consecutive_hard_breaks_and_br_preserve_empty_logical_lines() {
     fn leaf_lines(block: &BlockNode) -> &[String] {
@@ -833,7 +860,6 @@ fn consecutive_hard_breaks_and_br_preserve_empty_logical_lines() {
     }
 }
 
-#[cfg(feature = "rich-markdown")]
 #[test]
 fn trailing_inline_html_break_retains_editable_continuation_line() {
     let heading = "# Title<br>";

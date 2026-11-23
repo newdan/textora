@@ -7,8 +7,8 @@ use crate::builder::{
     BlockKind, BlockNode, EditableParagraphMap, EditableParagraphRun, InlineStyle,
 };
 use crate::source_snapshot::MarkdownSource;
+use textora_core::unicode::grapheme_start_indices;
 use ui::plugin::EditAugmentation;
-use unicode_segmentation::UnicodeSegmentation;
 
 pub(super) fn insert_text(
     source: &MarkdownSource<'_>,
@@ -118,13 +118,18 @@ pub(super) fn erase_last_grapheme(
     source: &MarkdownSource<'_>,
     current_byte: usize,
 ) -> Option<EditAugmentation> {
-    let (_, _, line_end) = super::locate_source_line_bounds(source, current_byte)?;
+    let (line_start, _, line_end) = super::locate_source_line_bounds(source, current_byte)?;
     let content_end = super::source_line_content_end(source, line_end);
     let suffix = source.get(current_byte..content_end)?;
     if suffix.trim_start_matches([' ', '\t']).chars().next().is_some_and(char::is_alphanumeric) {
         return None;
     }
-    let (grapheme_start, _) = source.get(..current_byte)?.grapheme_indices(true).next_back()?;
+    let grapheme_start = if line_start == current_byte {
+        current_byte - super::newline_sequence_width_before(source, current_byte)?
+    } else {
+        let (_, start) = grapheme_start_indices(&source[line_start..current_byte]).last()?;
+        line_start + start
+    };
     erase_range(source, grapheme_start..current_byte)
 }
 

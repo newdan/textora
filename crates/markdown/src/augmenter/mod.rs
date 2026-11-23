@@ -22,7 +22,6 @@ use crate::builder::ListBullet;
 use crate::parser::{MarkdownEvent, MarkdownTag, MarkdownTagEnd};
 use crate::source_snapshot::MarkdownSource;
 use ui::plugin::{AugmentKind, EditAugmentation};
-use unicode_segmentation::UnicodeSegmentation;
 
 pub(in crate::augmenter) const LF_SEQUENCE: &str = "\n";
 pub(in crate::augmenter) const CRLF_SEQUENCE: &str = "\r\n";
@@ -94,13 +93,7 @@ fn line_break_encoding_for_context(
         }
         EnterContext::Heading { .. }
         | EnterContext::SetextHeading { .. }
-        | EnterContext::TableCell { .. } => {
-            if cfg!(feature = "rich-markdown") {
-                LineBreakEncoding::InlineHtml
-            } else {
-                LineBreakEncoding::PlainNewline
-            }
-        }
+        | EnterContext::TableCell { .. } => LineBreakEncoding::InlineHtml,
         EnterContext::HorizontalRuleEnd
         | EnterContext::EmptyBlockSeparatorLine
         | EnterContext::Other => LineBreakEncoding::PlainNewline,

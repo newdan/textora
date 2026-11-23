@@ -66,9 +66,8 @@ impl<S: BlockSource> PreviewEngine<S> {
         let inserted_len = preedit_text.len();
         let mut preview_source = source.as_str().to_owned();
         preview_source.replace_range(selection.clone(), preedit_text);
-        let caret_byte = preview_source
-            .grapheme_indices(true)
-            .map(|(byte, _)| byte)
+        let caret_byte = textora_core::unicode::grapheme_start_indices(&preview_source)
+            .map(|(_, byte)| byte)
             .chain(std::iter::once(preview_source.len()))
             .take_while(|byte| *byte <= requested_caret)
             .last()

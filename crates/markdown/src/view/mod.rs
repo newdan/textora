@@ -5,6 +5,7 @@
 //! (from_theme vs. novel).
 
 use crate::builder::{CodeHighlighter, HighlightSpan, MarkdownDoc};
+use crate::grapheme_map::grapheme_slices;
 use crate::layout::{BlockSource, HeadingEntry, LazyLayout};
 use crate::projection::{
     CursorAffinity, HorizontalDirection, LineBoundary, SourceAnchor, SourceProjectionIndex,
@@ -29,7 +30,6 @@ use ui::plugin::{
     PastePreference, PluginFactory, PluginMessage, PluginQuery, PluginResponse, ViewPlugin,
     VisualCaretPosition,
 };
-use unicode_segmentation::UnicodeSegmentation;
 
 mod preedit;
 
@@ -161,7 +161,7 @@ impl NavigationFontMetrics {
     }
 
     fn grapheme_x(&self, text: &str, grapheme_position: usize, font_size: f32) -> f32 {
-        UnicodeSegmentation::graphemes(text, true)
+        grapheme_slices(text)
             .take(grapheme_position)
             .map(|grapheme| self.grapheme_advance(grapheme, font_size))
             .sum()
@@ -169,7 +169,7 @@ impl NavigationFontMetrics {
 
     fn grapheme_at_x(&self, text: &str, relative_x: f32, font_size: f32) -> usize {
         let mut cumulative_x = 0.0;
-        for (grapheme_index, grapheme) in UnicodeSegmentation::graphemes(text, true).enumerate() {
+        for (grapheme_index, grapheme) in grapheme_slices(text).enumerate() {
             let advance = self.grapheme_advance(grapheme, font_size);
             if relative_x < cumulative_x + advance * 0.5 {
                 return grapheme_index;

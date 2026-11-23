@@ -94,14 +94,14 @@ fn apply_policy_erasure(
         EditPlan::UseDefault => {
             let erased = request.selection.unwrap_or_else(|| match request.intent {
                 ui::plugin::EditIntent::DeleteBackward => {
-                    let start = source[..cursor]
-                        .grapheme_indices(true)
-                        .next_back()
-                        .map_or(cursor, |(start, _)| start);
+                    let start = grapheme_start_indices(&source[..cursor])
+                        .last()
+                        .map_or(cursor, |(_, byte)| byte);
                     start..cursor
                 }
                 ui::plugin::EditIntent::DeleteForward => {
-                    cursor..cursor + source[cursor..].graphemes(true).next().map_or(0, str::len)
+                    cursor
+                        ..cursor + crate::grapheme_map::byte_at_grapheme_index(&source[cursor..], 1)
                 }
                 _ => panic!("test helper only supports erasure"),
             });

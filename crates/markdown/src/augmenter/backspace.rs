@@ -209,7 +209,8 @@ pub(crate) fn augment_delete_forward(
         .or_else(|| delete_forward_join_reopened_inline_elements(source, current_byte))
         .or_else(|| delete_forward_join_hard_break_line(source, current_byte))
         .or_else(|| {
-            let grapheme = source.get(current_byte..)?.graphemes(true).next()?;
+            let grapheme =
+                crate::grapheme_map::grapheme_slices(source.get(current_byte..)?).next()?;
             editable_paragraph_edit::erase_last_grapheme(source, current_byte + grapheme.len())
         })
         .or_else(|| delete_forward_block_boundary(source, current_byte))
@@ -454,8 +455,6 @@ fn merge_disjoint_erasure_ranges(
     augmentation
 }
 
-const MAX_INLINE_HTML_BREAK_LEN: usize = 16;
-
 fn cursor_preceded_by_inline_opening(source: &str, cursor: usize) -> bool {
     let Some(prev) = source.as_bytes().get(cursor.wrapping_sub(1)).copied() else {
         return false;
@@ -472,46 +471,40 @@ fn cursor_followed_by_inline_closing(source: &str, cursor: usize) -> bool {
         || (next == b' ' && source[cursor..].trim_start_matches(' ').starts_with('`'))
 }
 
+// Keep ordinary punctuation edits on the unparsed path. Only the parsed
+// inline event can establish that a matching spelling is a Markdown break.
+const INLINE_HTML_BREAK_TAG_START: &[u8] = b"<br";
+const INLINE_HTML_BREAK_WHITESPACE: [char; 2] = [' ', '\t'];
+
 pub(in crate::augmenter) fn inline_html_break_ending_at(
     source: &MarkdownSource<'_>,
     current_byte: usize,
 ) -> Option<std::ops::Range<usize>> {
-    if !cfg!(feature = "rich-markdown") {
+    let prefix = source.get(..current_byte)?.strip_suffix('>')?;
+    let prefix = prefix.strip_suffix('/').unwrap_or(prefix);
+    let prefix = prefix.trim_end_matches(INLINE_HTML_BREAK_WHITESPACE);
+    let tag_start = prefix.len().checked_sub(INLINE_HTML_BREAK_TAG_START.len())?;
+    if !prefix.as_bytes()[tag_start..].eq_ignore_ascii_case(INLINE_HTML_BREAK_TAG_START) {
         return None;
     }
-    let prefix = source.get(..current_byte)?;
-    if !prefix.ends_with('>') {
-        return None;
-    }
-    let scan_start = prefix.len().saturating_sub(MAX_INLINE_HTML_BREAK_LEN);
-    let open_rel = prefix.as_bytes()[scan_start..].iter().rposition(|&byte| byte == b'<')?;
-    let break_start = scan_start + open_rel;
-    if !crate::parser::is_inline_html_break(&source[break_start..current_byte]) {
-        return None;
-    }
-    let candidate = break_start..current_byte;
-    is_inline_html_break_range(source, candidate.clone()).then_some(candidate)
+    source.parsed().inline_html_break_ending_at(current_byte)
 }
 
 pub(in crate::augmenter) fn inline_html_break_starting_at(
     source: &MarkdownSource<'_>,
     current_byte: usize,
 ) -> Option<std::ops::Range<usize>> {
-    if !cfg!(feature = "rich-markdown") {
-        return None;
-    }
     let suffix = source.get(current_byte..)?;
-    if !suffix.starts_with('<') {
+    let tag_length = INLINE_HTML_BREAK_TAG_START.len();
+    if !suffix.as_bytes().get(..tag_length)?.eq_ignore_ascii_case(INLINE_HTML_BREAK_TAG_START) {
         return None;
     }
-    let scan_end = suffix.len().min(MAX_INLINE_HTML_BREAK_LEN);
-    let close_rel = suffix.as_bytes()[..scan_end].iter().position(|&byte| byte == b'>')?;
-    let break_end = current_byte + close_rel + 1;
-    if !crate::parser::is_inline_html_break(&source[current_byte..break_end]) {
+    let suffix = suffix[tag_length..].trim_start_matches(INLINE_HTML_BREAK_WHITESPACE);
+    let suffix = suffix.strip_prefix('/').unwrap_or(suffix);
+    if !suffix.starts_with('>') {
         return None;
     }
-    let candidate = current_byte..break_end;
-    is_inline_html_break_range(source, candidate.clone()).then_some(candidate)
+    source.parsed().inline_html_break_starting_at(current_byte)
 }
 
 pub(in crate::augmenter) fn delete_forward_remove_inline_html_break(
@@ -1029,23 +1022,6 @@ pub(in crate::augmenter) fn backspace_remove_inline_html_break(
     };
     debug_assert_augmentation(&augmentation, source);
     Some(augmentation)
-}
-
-pub(in crate::augmenter) fn is_inline_html_break_range(
-    source: &MarkdownSource<'_>,
-    candidate_range: std::ops::Range<usize>,
-) -> bool {
-    if !cfg!(feature = "rich-markdown") {
-        return false;
-    }
-    let parsed = source.parsed();
-    parsed.events.iter().zip(&parsed.event_ranges).any(|(event, event_range)| {
-        matches!(
-            event,
-            crate::parser::MarkdownEvent::InlineHtml(html)
-                if crate::parser::is_inline_html_break(html)
-        ) && *event_range == candidate_range
-    })
 }
 
 pub(in crate::augmenter) fn backspace_join_reopened_inline_elements(

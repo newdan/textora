@@ -2840,6 +2840,89 @@ C608-01 武昌职业第01组：计划 68，历史低线较低，是表里最像�
     }
 
     #[test]
+    fn unshaped_line_end_uses_core_grapheme_boundaries() {
+        for source in ["a\u{1ACF}b", "a\u{00AD}b"] {
+            let mut view = make_projected_view(source);
+            let engine = view.engine_mut();
+            engine.lazy.as_mut().expect("projected layout").flat_lines[0].shaped = None;
+            let line = &engine.flat_lines()[0];
+            let boundaries = textora_core::unicode::grapheme_byte_boundaries(source);
+            let metrics = engine.navigation_font_metrics_for_line(line);
+            let line_end_x = boundaries
+                .windows(2)
+                .map(|cluster| {
+                    metrics.grapheme_advance(&source[cluster[0]..cluster[1]], line.font_size)
+                })
+                .sum::<f32>();
+            let grapheme_count = boundaries.len() - 1;
+            assert_eq!(engine.grapheme_x_for_line(line, grapheme_count), line_end_x, "{source:?}");
+            assert_eq!(
+                engine.grapheme_at_x_for_line(line, line_end_x),
+                grapheme_count,
+                "{source:?}"
+            );
+            assert_eq!(
+                engine.hit_test_byte(
+                    line.rect.x + line_end_x,
+                    line.rect.y + line.rect.h * 0.5,
+                    0.0,
+                    0.0
+                ),
+                Some(source.len()),
+                "{source:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn projected_navigation_and_deletion_follow_core_grapheme_boundaries() {
+        for source in ["a\u{1ACF}b", "a\u{00AD}b"] {
+            let boundaries = textora_core::unicode::grapheme_byte_boundaries(source);
+            let view = make_editor_view_with_cursor(source, 0);
+            for cluster in boundaries.windows(2) {
+                let (start, end) = (cluster[0], cluster[1]);
+                assert_eq!(view.engine().visual_move(start, MoveDirection::Right, None), Some(end));
+                assert_eq!(view.engine().visual_move(end, MoveDirection::Left, None), Some(start));
+                let mut expected = source.to_owned();
+                expected.replace_range(start..end, "");
+                for (cursor, backward) in [(end, true), (start, false)] {
+                    assert_eq!(
+                        delete_grapheme(&view, source, cursor, backward),
+                        (expected.clone(), start)
+                    );
+                }
+            }
+        }
+    }
+
+    fn delete_grapheme(
+        view: &MarkdownEditorView,
+        source: &str,
+        cursor: usize,
+        backward: bool,
+    ) -> (String, usize) {
+        use textora_core::buffer::TextBuffer;
+        use textora_core::buffer::text_buffer::CursorMovement;
+        use textora_core::types::ByteIndex;
+        use ui::plugin::{EditIntent, EditPlan, EditPolicy, EditRequest};
+
+        let intent = if backward { EditIntent::DeleteBackward } else { EditIntent::DeleteForward };
+        let request =
+            EditRequest { source_generation: 1, cursor_byte: cursor, selection: None, intent };
+        let plan = view.plan_edit(&request);
+        if !matches!(plan, EditPlan::UseDefault) {
+            return super::tests::apply_single_replacement(source, &plan);
+        }
+        let mut buffer = TextBuffer::new(true).expect("test buffer must initialize");
+        buffer.write_raw(source.as_bytes());
+        buffer.cursor_move_to_byte(ByteIndex(cursor));
+        buffer.delete(CursorMovement::Grapheme, if backward { -1 } else { 1 });
+        let mut edited = String::new();
+        buffer.save_as_string(&mut edited);
+        (edited, buffer.cursor_offset().to_usize())
+    }
+
+    #[test]
     fn unshaped_navigation_preserves_proportional_font_advances() {
         let mut view = make_projected_view("Wi");
         let settings = MarkdownRenderSettings { font_family: "PingFang SC", ..default_settings() };

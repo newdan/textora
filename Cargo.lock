@@ -4138,7 +4138,6 @@ dependencies = [
  "textora-render",
  "textora-shaping",
  "textora-ui",
- "unicode-segmentation",
  "unicode-width 0.1.14",
  "url",
 ]

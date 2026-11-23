@@ -1186,6 +1186,26 @@ fn detects_light_box_diagram_with_cjk_label() {
 }
 
 #[test]
+fn diagram_cells_use_core_boundaries_and_existing_width_policy() {
+    let (row, _, _) = grid_row("│a\u{1ACF}b│");
+    assert_eq!(
+        row.cells
+            .iter()
+            .map(|cell| (cell.text.as_str(), cell.column, cell.column_width))
+            .collect::<Vec<_>>(),
+        [("│", 0, 1), ("a", 1, 1), ("\u{1ACF}", 2, 1), ("b", 3, 1), ("│", 4, 1)]
+    );
+    let (row, _, _) = grid_row("│a\u{00AD}b│");
+    assert_eq!(
+        row.cells
+            .iter()
+            .map(|cell| (cell.text.as_str(), cell.column, cell.column_width))
+            .collect::<Vec<_>>(),
+        [("│", 0, 1), ("a\u{00AD}", 1, 1), ("b", 2, 1), ("│", 3, 1)]
+    );
+}
+
+#[test]
 fn assigns_zero_columns_to_standalone_combining_mark_graphemes() {
     assert_eq!(grapheme_column_width("\u{0301}"), 0);
 }

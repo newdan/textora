@@ -36,7 +36,6 @@ textora_core.workspace = true
 stdext.workspace = true
 render.workspace = true
 regex = "1"
-unicode-segmentation.workspace = true
 unicode-width.workspace = true
 url.workspace = true
 

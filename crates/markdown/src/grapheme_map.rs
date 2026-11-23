@@ -5,10 +5,7 @@
 //! never split a UAX#29 grapheme cluster (combining marks, ZWJ emoji, etc.).
 
 pub(crate) use textora_core::unicode::grapheme_byte_boundaries;
-use textora_core::unicode::{
-    grapheme_start_indices, ucd_grapheme_cluster_joins, ucd_grapheme_cluster_joins_done,
-    ucd_grapheme_cluster_lookup,
-};
+use textora_core::unicode::grapheme_start_indices;
 
 /// Maps visual grapheme indices to absolute source byte offsets.
 ///
@@ -62,41 +59,23 @@ impl VisualGraphemeMap {
 /// falls inside a multi-char grapheme cluster, returns the index of that
 /// cluster's start.
 pub(crate) fn grapheme_index_at_byte(text: &str, target_byte: usize) -> usize {
-    let target_byte = target_byte.min(text.len());
-    let mut grapheme_idx = 0usize;
-    let mut chars = text.char_indices().peekable();
-
-    while let Some((byte_start, ch)) = chars.next() {
-        // Target is at or before this cluster's start.
-        if target_byte <= byte_start {
-            return grapheme_idx;
-        }
-
-        // Determine where this grapheme cluster ends.
-        let mut prev_props = ucd_grapheme_cluster_lookup(ch);
-        let mut state = 0u32;
-        let mut cluster_end = byte_start + ch.len_utf8();
-
-        while let Some(&(next_byte, next_ch)) = chars.peek() {
-            let next_props = ucd_grapheme_cluster_lookup(next_ch);
-            state = ucd_grapheme_cluster_joins(state, prev_props, next_props);
-            if ucd_grapheme_cluster_joins_done(state) {
-                break;
-            }
-            prev_props = next_props;
-            chars.next();
-            cluster_end = next_byte + next_ch.len_utf8();
-        }
-
-        // Target falls inside this cluster.
-        if target_byte < cluster_end {
-            return grapheme_idx;
-        }
-
-        grapheme_idx += 1;
+    if target_byte >= text.len() {
+        return grapheme_count(text);
     }
+    grapheme_start_indices(text).skip(1).take_while(|&(_, byte)| byte <= target_byte).count()
+}
 
-    grapheme_idx
+/// Yield slices at the same grapheme boundaries used by source and visual coordinates.
+pub(crate) fn grapheme_slices(text: &str) -> impl Iterator<Item = &str> {
+    grapheme_start_indices(text)
+        .map(|(_, byte)| byte)
+        .chain(std::iter::once(text.len()))
+        .skip(1)
+        .scan(0, |start, end| {
+            let grapheme = &text[*start..end];
+            *start = end;
+            Some(grapheme)
+        })
 }
 
 /// Build a [`VisualGraphemeMap`] from a visual text string and a parallel
@@ -122,49 +101,14 @@ pub(crate) fn build_visual_grapheme_map(
 
 /// Count grapheme clusters in `text` using UAX#29 extended grapheme cluster rules.
 pub(crate) fn grapheme_count(text: &str) -> usize {
-    let mut count = 0;
-    let mut state = 0u32;
-    let mut prev_props = 0usize;
-    for ch in text.chars() {
-        let props = ucd_grapheme_cluster_lookup(ch);
-        let joins = ucd_grapheme_cluster_joins(state, prev_props, props);
-        if ucd_grapheme_cluster_joins_done(joins) {
-            count += 1;
-            state = 0;
-        } else {
-            state = joins;
-        }
-        prev_props = props;
-    }
-    count
+    grapheme_start_indices(text).count()
 }
 
 /// Find the byte position at the start of grapheme `target_grapheme` within `text`.
 ///
 /// Returns `text.len()` if `target_grapheme` is past the end.
 pub(crate) fn byte_at_grapheme_index(text: &str, target_grapheme: usize) -> usize {
-    if target_grapheme == 0 {
-        return 0;
-    }
-    let mut gi = 0usize;
-    let mut state = 0u32;
-    let mut prev_props = 0usize;
-    for (byte, ch) in text.char_indices() {
-        let props = ucd_grapheme_cluster_lookup(ch);
-        let joins = ucd_grapheme_cluster_joins(state, prev_props, props);
-        let is_boundary = ucd_grapheme_cluster_joins_done(joins);
-        if is_boundary {
-            if gi == target_grapheme {
-                return byte;
-            }
-            gi += 1;
-            state = 0;
-        } else {
-            state = joins;
-        }
-        prev_props = props;
-    }
-    text.len()
+    grapheme_start_indices(text).nth(target_grapheme).map_or(text.len(), |(_, byte)| byte)
 }
 
 #[cfg(test)]
@@ -183,6 +127,8 @@ mod tests {
         let cases: &[(&str, &[usize])] = &[
             ("", &[0]),
             ("a中b", &[0, 1, 4, 5]),
+            ("a\u{1ACF}b", &[0, 1, 4, 5]),
+            ("a\u{00AD}b", &[0, 3, 4]),
             ("xe\u{0301}y", &[0, 1, 4, 5]),
             ("A👨\u{200D}👩\u{200D}👧中", &[0, 1, 19, 22]),
             ("🇨🇳🇺🇸🇯", &[0, 8, 16, 20]),
@@ -192,6 +138,11 @@ mod tests {
         ];
         for &(text, expected) in cases {
             assert_eq!(grapheme_byte_boundaries(text), expected, "text: {text:?}");
+            assert_eq!(grapheme_count(text), expected.len() - 1, "text: {text:?}");
+            for (index, &byte) in expected.iter().enumerate() {
+                assert_eq!(byte_at_grapheme_index(text, index), byte, "text: {text:?}");
+                assert_eq!(grapheme_index_at_byte(text, byte), index, "text: {text:?}");
+            }
             assert_eq!(
                 build_visual_grapheme_map(text, &char_sentinel_map(text)).as_slice(),
                 expected,

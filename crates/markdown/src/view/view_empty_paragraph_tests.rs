@@ -1,6 +1,6 @@
 use super::*;
+use textora_core::unicode::grapheme_start_indices;
 use ui::plugin::AugmentKind;
-use unicode_segmentation::UnicodeSegmentation;
 
 const VIEWPORT_WIDTH: f32 = 800.0;
 const VIEWPORT_HEIGHT: f32 = 1600.0;
@@ -13,10 +13,8 @@ fn apply_edit(source: &str, cursor: usize, kind: AugmentKind) -> (String, usize)
         AugmentKind::InsertText(text) => (cursor..cursor, text.clone()),
         AugmentKind::Enter | AugmentKind::LineBreak => (cursor..cursor, String::from("\n")),
         AugmentKind::Backspace => {
-            let start = source[..cursor]
-                .grapheme_indices(true)
-                .next_back()
-                .map_or(cursor, |(start, _)| start);
+            let start =
+                grapheme_start_indices(&source[..cursor]).last().map_or(cursor, |(_, byte)| byte);
             (start..cursor, String::new())
         }
         AugmentKind::Tab | AugmentKind::ShiftTab => (cursor..cursor, String::from("\t")),

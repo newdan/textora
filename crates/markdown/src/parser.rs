@@ -74,15 +74,13 @@ pub struct ParsedMarkdown {
     /// Ranges emitted as pulldown-cmark HTML block events. These ranges are
     /// opaque HTML and must not be rescanned as inline markup.
     pub(crate) html_block_ranges: Vec<Range<usize>>,
+    inline_html_break_ranges: Vec<Range<usize>>,
     fenced_code_starts: Vec<usize>,
     original_paragraphs: Vec<ReplacedParagraph>,
 }
 
 /// 是否为可映射为块内硬换行的内联 HTML `<br>` 标签（大小写及可选空白不敏感）。
-pub(crate) fn is_inline_html_break(html: &str) -> bool {
-    if !cfg!(feature = "rich-markdown") {
-        return false;
-    }
+fn is_inline_html_break(html: &str) -> bool {
     let trimmed = html.trim();
     let Some(inner) = trimmed.strip_prefix('<').and_then(|s| s.strip_suffix('>')) else {
         return false;
@@ -138,6 +136,18 @@ impl ParsedMarkdown {
                     }))
             },
         )
+    }
+
+    pub(crate) fn inline_html_break_starting_at(&self, byte: usize) -> Option<Range<usize>> {
+        let index =
+            self.inline_html_break_ranges.binary_search_by_key(&byte, |range| range.start).ok()?;
+        Some(self.inline_html_break_ranges[index].clone())
+    }
+
+    pub(crate) fn inline_html_break_ending_at(&self, byte: usize) -> Option<Range<usize>> {
+        let index =
+            self.inline_html_break_ranges.binary_search_by_key(&byte, |range| range.end).ok()?;
+        Some(self.inline_html_break_ranges[index].clone())
     }
 
     pub(crate) fn is_fenced_code_start(&self, byte: usize) -> bool {
@@ -237,11 +247,22 @@ pub(crate) fn parse_shared_markdown(source: Arc<String>) -> ParsedMarkdown {
 
     detect_list_properties(&mut events, src, &event_ranges);
 
+    // Inline HTML events do not overlap and retain source order after normalization.
+    let inline_html_break_ranges = events
+        .iter()
+        .zip(&event_ranges)
+        .filter(|(event, _)| {
+            matches!(event, MarkdownEvent::InlineHtml(html) if is_inline_html_break(html))
+        })
+        .map(|(_, range)| range.clone())
+        .collect();
+
     ParsedMarkdown {
         source,
         events,
         event_ranges,
         html_block_ranges,
+        inline_html_break_ranges,
         fenced_code_starts,
         original_paragraphs,
     }
@@ -708,7 +729,6 @@ title: hello
         assert!(has_link);
     }
 
-    #[cfg(feature = "rich-markdown")]
     #[test]
     fn inline_html_break_recognizer_handles_case_whitespace_and_rejects_invalid() {
         for valid in ["<br>", "<BR>", "<Br/>", "<br />", "<BR  />", "<br >", " <br\t/> "] {
@@ -719,7 +739,6 @@ title: hello
         }
     }
 
-    #[cfg(feature = "rich-markdown")]
     #[test]
     fn parser_distinguishes_html_block_from_inline_html_in_tight_list() {
         let block_parsed = parse_markdown("<div>\nblock\n</div>");

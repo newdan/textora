@@ -1,11 +1,11 @@
 use std::borrow::Cow;
 use textora_core::document::{DocView, DocViewMut, StringDocView};
+use textora_core::unicode::grapheme_start_indices;
 use textora_markdown::builder::{BlockNode, MarkdownDoc};
 use textora_markdown::parser::{MarkdownEvent, MarkdownTag, parse_markdown};
 use textora_markdown::style::MarkdownStyle;
 use textora_markdown::view::MarkdownEditorView;
 use ui::plugin::{EditIntent, EditPlan, EditPolicy, EditRequest, EditSelection};
-use unicode_segmentation::UnicodeSegmentation;
 
 pub const PARAGRAPH: &str = "前段";
 pub const RULE: &str = "---";
@@ -56,7 +56,7 @@ impl EditingSession {
         assert!(self.source.is_char_boundary(cursor));
         assert!(
             cursor == self.source.len()
-                || self.source.grapheme_indices(true).any(|(offset, _)| offset == cursor),
+                || grapheme_start_indices(&self.source).any(|(_, byte)| byte == cursor),
             "caret must remain on a grapheme boundary"
         );
         (self.source.clone(), self.cursor)
@@ -88,14 +88,16 @@ fn apply_plan(source: &str, request: &EditRequest, plan: EditPlan) -> (String, u
                     (selection.clone().unwrap_or(cursor..cursor), newline.to_owned())
                 }
                 EditIntent::DeleteBackward => {
-                    let previous = source[..cursor]
-                        .grapheme_indices(true)
-                        .next_back()
-                        .map_or(cursor, |(start, _)| start);
+                    let previous = grapheme_start_indices(&source[..cursor])
+                        .last()
+                        .map_or(cursor, |(_, byte)| byte);
                     (selection.clone().unwrap_or(previous..cursor), String::new())
                 }
                 EditIntent::DeleteForward => {
-                    let width = source[cursor..].graphemes(true).next().map_or(0, str::len);
+                    let suffix = &source[cursor..];
+                    let width = grapheme_start_indices(suffix)
+                        .nth(1)
+                        .map_or(suffix.len(), |(_, byte)| byte);
                     (selection.clone().unwrap_or(cursor..cursor + width), String::new())
                 }
                 EditIntent::InsertText(text) => (selection.unwrap_or(cursor..cursor), text.clone()),

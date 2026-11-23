@@ -59,7 +59,7 @@ impl MarkdownEditorView {
                 let range = anchors[0].byte..anchors[1].byte;
                 (range.start < byte
                     && byte < range.end
-                    && self.source.get(range)?.graphemes(true).count() == 1)
+                    && crate::grapheme_map::grapheme_count(self.source.get(range)?) == 1)
                     .then_some((line_index, grapheme + usize::from(is_end)))
             })
         })

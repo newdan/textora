@@ -3,10 +3,10 @@ pub(in crate::layout::ascii_diagram) use std::ops::Range;
 pub(in crate::layout::ascii_diagram) use std::sync::LazyLock;
 
 pub(in crate::layout::ascii_diagram) use regex::Regex;
-pub(in crate::layout::ascii_diagram) use unicode_segmentation::UnicodeSegmentation;
 pub(in crate::layout::ascii_diagram) use unicode_width::UnicodeWidthChar;
 
 pub(in crate::layout::ascii_diagram) use super::types::LaidOutLine;
+use crate::grapheme_map::grapheme_slices;
 
 pub(in crate::layout::ascii_diagram) const MINIMUM_BOX_DRAWING_CHARACTERS: usize = 6;
 pub(in crate::layout::ascii_diagram) const MINIMUM_BOX_DRAWING_LINES: usize = 2;
@@ -227,7 +227,7 @@ pub(in crate::layout::ascii_diagram) fn grid_row(line: &str) -> (AsciiDiagramRow
     let mut box_count = 0usize;
     let mut has_corner = false;
 
-    for grapheme in UnicodeSegmentation::graphemes(line, true) {
+    for grapheme in grapheme_slices(line) {
         let connections = box_connections(grapheme);
         if connections.is_some() {
             box_count += 1;

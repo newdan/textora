@@ -2,9 +2,9 @@
 mod editing_audit;
 use editing_audit::*;
 use textora_core::document::StringDocView;
+use textora_core::unicode::{grapheme_byte_boundaries, grapheme_start_indices};
 use textora_markdown::view::MarkdownEditorView;
 use ui::plugin::{EditIntent, PluginMessage, ViewPlugin};
-use unicode_segmentation::UnicodeSegmentation;
 
 #[test]
 fn end_enter_and_backspace_matrix() {
@@ -283,11 +283,9 @@ fn code_body_backspace_only_edits_literal_text() {
             } else {
                 line_start + line.find("value").expect("marker fixture has content")
             };
-            let start = source[..cursor]
-                .grapheme_indices(true)
-                .next_back()
-                .expect("cursor follows a grapheme")
-                .0;
+            let (_, start) = grapheme_start_indices(&source[..cursor])
+                .last()
+                .expect("cursor follows a grapheme");
             let mut expected = source.clone();
             expected.replace_range(start..cursor, "");
             let edited = apply(&source, cursor, EditIntent::DeleteBackward);
@@ -457,7 +455,7 @@ fn persistent_splits_survive_typing_erasure_and_multiple_enters() {
                     session.apply(EditIntent::InsertParagraphBreak);
                 }
                 session.apply(EditIntent::InsertText(typed.to_owned()));
-                for _ in typed.graphemes(true) {
+                for _ in grapheme_start_indices(typed) {
                     session.apply(EditIntent::DeleteBackward);
                 }
                 for _ in 0..3 {
@@ -655,7 +653,7 @@ fn resized_layout_hit_testing_and_ime_cancellation_restore_exact_caret_geometry(
                             );
                         }
                         session.apply(EditIntent::InsertText("中文👩🏽‍💻e\u{301}".into()));
-                        for _ in "中文👩🏽‍💻e\u{301}".graphemes(true) {
+                        for _ in grapheme_start_indices("中文👩🏽‍💻e\u{301}") {
                             session.apply(EditIntent::DeleteBackward);
                         }
                         document.0 = session.source.clone();
@@ -980,11 +978,8 @@ fn long_code_caret_remains_visible_and_hit_testable_after_navigation_and_resize(
             let source = format!("{prefix}{body}{newline}{continuation}```");
             let mut session = EditingSession::new(&source, prefix.len());
             let mut document = AuditDocument(source.clone());
-            let middle = body
-                .grapheme_indices(true)
-                .nth(body.graphemes(true).count() / 2)
-                .expect("long code body has a middle grapheme")
-                .0;
+            let boundaries = grapheme_byte_boundaries(&body);
+            let middle = boundaries[(boundaries.len() - 1) / 2];
             for width in [800.0, 240.0, 800.0] {
                 for cursor in [prefix.len() + body.len(), prefix.len() + middle, prefix.len()] {
                     session

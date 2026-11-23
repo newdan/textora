@@ -1183,7 +1183,10 @@ impl MarkdownDoc {
                     builder.push_html_block_lines(html);
                 }
                 MarkdownEvent::InlineHtml(html) => {
-                    if crate::parser::is_inline_html_break(html) {
+                    if parsed
+                        .inline_html_break_starting_at(builder.current_event_range.start)
+                        .is_some_and(|range| range == builder.current_event_range)
+                    {
                         builder.push_hard_break();
                     } else {
                         // Other inline HTML remains literal text until the renderer has a

@@ -1,4 +1,5 @@
 use super::*;
+use textora_core::unicode::grapheme_start_indices;
 use ui::plugin::EditPolicy;
 
 fn parsed_table_count(source: &str, columns: usize) -> usize {
@@ -348,8 +349,8 @@ fn apply_backspace_with_default(source: &str, current_byte: usize) -> (String, u
         );
     }
 
-    let (grapheme_start, _) = UnicodeSegmentation::grapheme_indices(&source[..current_byte], true)
-        .next_back()
+    let (_, grapheme_start) = grapheme_start_indices(&source[..current_byte])
+        .last()
         .expect("Backspace fixture must have a preceding grapheme");
     let mut edited_source = source.to_owned();
     edited_source.replace_range(grapheme_start..current_byte, "");
@@ -364,11 +365,11 @@ fn apply_delete_forward_with_default(source: &str, current_byte: usize) -> (Stri
         );
     }
 
-    let grapheme = UnicodeSegmentation::graphemes(&source[current_byte..], true)
-        .next()
-        .expect("Delete fixture must have a following grapheme");
+    let suffix = &source[current_byte..];
+    assert!(!suffix.is_empty(), "Delete fixture must have a following grapheme");
+    let grapheme_end = grapheme_start_indices(suffix).nth(1).map_or(suffix.len(), |(_, byte)| byte);
     let mut edited_source = source.to_owned();
-    edited_source.replace_range(current_byte..current_byte + grapheme.len(), "");
+    edited_source.replace_range(current_byte..current_byte + grapheme_end, "");
     (edited_source, current_byte)
 }
 
@@ -396,13 +397,50 @@ fn code_html_literal_delete_removes_one_character() {
     }
 }
 
-#[cfg(feature = "rich-markdown")]
+#[test]
+fn inline_html_break_end_check_keeps_a_bare_closing_bracket_cold() {
+    let closing_source = MarkdownSource::borrowed("alpha > beta");
+    reset_classify_parse_count();
+    assert_eq!(inline_html_break_ending_at(&closing_source, "alpha >".len()), None);
+    assert_eq!(
+        classify_parse_count(),
+        0,
+        "a bare closing bracket must not trigger Markdown parsing"
+    );
+}
+
+#[test]
+fn inline_html_break_start_check_keeps_a_bare_opening_bracket_cold() {
+    let opening_source = MarkdownSource::borrowed("alpha < beta");
+    reset_classify_parse_count();
+    assert_eq!(inline_html_break_starting_at(&opening_source, "alpha ".len()), None);
+    assert_eq!(
+        classify_parse_count(),
+        0,
+        "a bare opening bracket must not trigger Markdown parsing"
+    );
+}
+
+#[test]
+fn bare_closing_angle_bracket_backspace_keeps_the_source_cold() {
+    reset_classify_parse_count();
+    assert!(augment_edit("alpha > beta", "alpha >".len(), AugmentKind::Backspace).is_none());
+    assert_eq!(classify_parse_count(), 0);
+}
+
 #[test]
 fn inline_html_break_deletion_removes_the_complete_element() {
-    for html_break in ["<br>", "<br/>", "<br />"] {
+    for html_break in ["<br>", "<br/>", "<br />", "<br            />"] {
         let source = format!("before{html_break}after");
         let break_start = "before".len();
         let break_end = break_start + html_break.len();
+
+        let backspace = augment_edit(&source, break_end, AugmentKind::Backspace)
+            .expect("Backspace must remove the parsed inline break");
+        assert_eq!(backspace.replace_range, Some(break_start..break_end));
+        let delete = augment_delete_forward(&source, break_start)
+            .expect("Delete must remove the parsed inline break");
+        assert_eq!(delete.replace_range, Some(break_start..break_end));
 
         let (backspaced, backspace_cursor) = apply_backspace_with_default(&source, break_end);
         assert_eq!(backspaced, "beforeafter");
@@ -2235,7 +2273,6 @@ fn styled_line_break_is_backspace_reversible() {
     assert_eq!(backspace.cursor_byte_after, reversible_split_point(source, current_byte));
 }
 
-#[cfg(feature = "rich-markdown")]
 #[test]
 fn inline_html_line_break_is_backspace_reversible() {
     let source = "# left right";
@@ -2357,7 +2394,6 @@ fn paragraph_backspace_into_tabbed_list_aligns_to_content_column() {
     );
 }
 
-#[cfg(feature = "rich-markdown")]
 #[test]
 fn line_break_uses_inline_html_where_a_physical_line_would_end_the_leaf() {
     for (source, current_byte) in [
@@ -3563,7 +3599,6 @@ fn indented_code_block_line_break_inserts_literal_newline_without_backslash() {
     }
 }
 
-#[cfg(feature = "rich-markdown")]
 #[test]
 fn heading_and_table_line_break_splits_inline_code_only() {
     let heading_code = "# `foobar`";
@@ -3639,7 +3674,6 @@ fn enter_at_line_start_after_hard_break_promotes_to_clean_boundary() {
     assert_eq!(apply_augmentation_at(escaped, "left\\\\\n".len(), &esc_aug), "left\\\\\n\nright");
 }
 
-#[cfg(feature = "rich-markdown")]
 #[test]
 fn inline_html_break_case_insensitive_deletion_and_html_block_exclusion() {
     for html_break in ["<BR>", "<Br/>", "<BR  />", "<br >"] {
@@ -3674,7 +3708,6 @@ fn inline_html_break_case_insensitive_deletion_and_html_block_exclusion() {
     }
 }
 
-#[cfg(feature = "rich-markdown")]
 #[test]
 fn inline_code_across_inline_html_break_joins_atomically_in_both_directions() {
     for (source, br_token) in
