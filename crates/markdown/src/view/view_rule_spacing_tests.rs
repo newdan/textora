@@ -101,7 +101,7 @@ fn editable_empty_paragraphs_beside_rule_keep_their_hit_targets() {
             assert_eq!(
                 view.engine()
                     .hit_test_byte(line.rect.x, line.rect.y + line.rect.h * 0.5, 0.0, 0.0,),
-                Some(anchor.byte)
+                Some(anchor.byte.get())
             );
         }
     }

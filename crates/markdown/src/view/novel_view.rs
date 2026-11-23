@@ -148,13 +148,13 @@ impl ViewPlugin for NovelView {
                 PluginResponse::String(self.engine.selected_text().unwrap_or_default())
             }
             PluginQuery::SelCursor => PluginResponse::Position(
-                self.engine.sel.cursor.map(|p| (p.flat_line_idx, p.grapheme_pos)),
+                self.engine.sel.cursor.map(crate::selection::ViewPos::indices),
             ),
             PluginQuery::SelectionRange => PluginResponse::PositionPair(None),
             PluginQuery::HitTest { x, y, offset_x, offset_y } => PluginResponse::Position(
                 self.engine
                     .hit_test(x, y, offset_x, offset_y)
-                    .map(|p| (p.flat_line_idx, p.grapheme_pos)),
+                    .map(crate::selection::ViewPos::indices),
             ),
             PluginQuery::FlatLines => PluginResponse::FlatLines(
                 self.engine

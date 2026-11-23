@@ -61,8 +61,8 @@ impl<S: BlockSource> PreviewEngine<S> {
         }
         let Some(ref lazy) = self.lazy else {
             return (
-                ViewPos { flat_line_idx: pos.flat_line_idx, grapheme_pos: 0 },
-                ViewPos { flat_line_idx: pos.flat_line_idx, grapheme_pos: 0 },
+                ViewPos { flat_line_idx: pos.flat_line_idx, grapheme_pos: GraphemeIdx::new(0) },
+                ViewPos { flat_line_idx: pos.flat_line_idx, grapheme_pos: GraphemeIdx::new(0) },
             );
         };
         selection::line_range_at_pos(&lazy.flat_lines, pos)
@@ -126,13 +126,15 @@ impl<S: BlockSource> PreviewEngine<S> {
     }
 
     pub fn set_sel_cursor(&mut self, pos: Option<(usize, usize)>) {
-        self.sel.cursor = pos.map(|(l, c)| ViewPos { flat_line_idx: l, grapheme_pos: c });
+        self.sel.cursor =
+            pos.map(|(line_idx, grapheme_pos)| ViewPos::from_indices(line_idx, grapheme_pos));
         self.sel_cursor_byte = None;
         self.mark_selection_changed();
     }
 
     pub fn set_sel_anchor(&mut self, pos: Option<(usize, usize)>) {
-        self.sel.anchor = pos.map(|(l, c)| ViewPos { flat_line_idx: l, grapheme_pos: c });
+        self.sel.anchor =
+            pos.map(|(line_idx, grapheme_pos)| ViewPos::from_indices(line_idx, grapheme_pos));
         self.sel_anchor_byte = None;
         self.mark_selection_changed();
     }
@@ -140,9 +142,7 @@ impl<S: BlockSource> PreviewEngine<S> {
     pub fn set_sel_cursor_byte(&mut self, byte: Option<usize>) {
         if let Some(b) = byte {
             self.sel_cursor_byte = Some(b);
-            self.sel.cursor = self
-                .find_flat_and_grapheme_for_byte(b)
-                .map(|(l, c)| ViewPos { flat_line_idx: l, grapheme_pos: c });
+            self.sel.cursor = self.find_flat_and_grapheme_for_byte(b);
         } else {
             self.sel.cursor = None;
             self.sel_cursor_byte = None;
@@ -153,9 +153,7 @@ impl<S: BlockSource> PreviewEngine<S> {
     pub fn set_sel_anchor_byte(&mut self, byte: Option<usize>) {
         if let Some(b) = byte {
             self.sel_anchor_byte = Some(b);
-            self.sel.anchor = self
-                .find_flat_and_grapheme_for_byte(b)
-                .map(|(l, c)| ViewPos { flat_line_idx: l, grapheme_pos: c });
+            self.sel.anchor = self.find_flat_and_grapheme_for_byte(b);
         } else {
             self.sel.anchor = None;
             self.sel_anchor_byte = None;
@@ -264,7 +262,7 @@ impl<S: BlockSource> PreviewEngine<S> {
                                 boundaries: projection
                                     .boundaries
                                     .iter()
-                                    .map(|anchor| anchor.byte)
+                                    .map(|anchor| anchor.byte.get())
                                     .collect(),
                             }
                         })

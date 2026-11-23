@@ -95,6 +95,19 @@ pub(in crate::augmenter) fn locate_source_line_bounds(
     Some((start, byte, end))
 }
 
+pub(in crate::augmenter) fn locate_snapshot_line_bounds(
+    source: &MarkdownSource<'_>,
+    byte: usize,
+) -> Option<(usize, usize, usize)> {
+    let Some(lines) = source.cached_physical_lines() else {
+        return locate_source_line_bounds(source, byte);
+    };
+    let line = lines.line_at_byte(byte)?;
+    // Punctuation rules use the LF byte and account for any preceding CR.
+    let line_feed_or_eof = line.newline_end - usize::from(line.content_end < line.newline_end);
+    Some((line.start, byte, line_feed_or_eof))
+}
+
 pub(crate) fn parse_list_marker(source: &str, marker_start: usize) -> Option<(ListBullet, usize)> {
     let bytes = source.as_bytes();
     if matches!(bytes.get(marker_start), Some(b'-' | b'+' | b'*')) {
@@ -306,8 +319,8 @@ pub(in crate::augmenter) fn augment_list_item_tab(
     reverse: bool,
 ) -> Option<EditAugmentation> {
     let context = find_active_list_item_context(source, current_byte)?;
-    let (first_line_start, _, _) = locate_source_line_bounds(source, context.item_range.start)?;
-    let first_line_end = locate_source_line_bounds(source, context.marker_start)?.2;
+    let (first_line_start, _, _) = locate_snapshot_line_bounds(source, context.item_range.start)?;
+    let first_line_end = locate_snapshot_line_bounds(source, context.marker_start)?.2;
     let first_origin = first_line_start
         + line_indent_origin(&source[first_line_start..first_line_end], context.outer_quote_depth);
     let curr_marker_col = markdown_column_after(&source[first_origin..context.marker_start], 0);
@@ -334,7 +347,8 @@ pub(in crate::augmenter) fn augment_list_item_tab(
     let Some(prev_marker_start) = context.prev_sibling_marker_start else {
         return Some(consume_edit(current_byte));
     };
-    let (prev_line_start, _, prev_line_end) = locate_source_line_bounds(source, prev_marker_start)?;
+    let (prev_line_start, _, prev_line_end) =
+        locate_snapshot_line_bounds(source, prev_marker_start)?;
     let prev_origin = prev_line_start
         + line_indent_origin(&source[prev_line_start..prev_line_end], context.outer_quote_depth);
     let prev_content_start = list_item_structural_content_start(source, prev_marker_start)?;
@@ -401,7 +415,7 @@ fn find_active_list_item_context(
                 finish_item_frame(source, &mut frames, range, current_byte, &mut matched);
             }
             MarkdownEvent::Start(MarkdownTag::CodeBlock { .. } | MarkdownTag::Table(_)) => {
-                let start = locate_source_line_bounds(source, range.start)
+                let start = locate_snapshot_line_bounds(source, range.start)
                     .map_or(range.start, |(line_start, _, _)| line_start);
                 protected_block_starts.push(start);
             }

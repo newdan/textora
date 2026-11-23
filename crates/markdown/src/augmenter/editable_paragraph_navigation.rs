@@ -173,7 +173,7 @@ pub(super) fn backspace_boundary(
     source: &MarkdownSource<'_>,
     current_byte: usize,
 ) -> Option<EditAugmentation> {
-    let (line_start, _, _) = super::locate_source_line_bounds(source, current_byte)?;
+    let (line_start, _, _) = super::locate_snapshot_line_bounds(source, current_byte)?;
     if line_start == 0 || !boundary_prefix_candidate(source.get(line_start..current_byte)?) {
         return None;
     }
@@ -209,7 +209,7 @@ pub(super) fn delete_forward(
     if current_byte >= source.len() {
         return None;
     }
-    let (_, _, line_end) = super::locate_source_line_bounds(source, current_byte)?;
+    let (_, _, line_end) = super::locate_snapshot_line_bounds(source, current_byte)?;
     let content_end = super::source_line_content_end(source, line_end);
     let suffix = source.get(current_byte..content_end)?;
     if !boundary_suffix_candidate(suffix) && !is_blank_or_quote_only_line(source, current_byte) {

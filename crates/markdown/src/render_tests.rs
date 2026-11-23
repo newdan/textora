@@ -1384,7 +1384,7 @@ fn table_inline_code_delimiters_follow_focus_and_keep_source_anchors() {
         let projection = line.source_projection.as_ref().expect("editable cell needs anchors");
         for byte in (code_start..=code_end).filter(|&byte| source.is_char_boundary(byte)) {
             assert!(
-                projection.boundaries.iter().any(|anchor| anchor.byte == byte),
+                projection.boundaries.iter().any(|anchor| anchor.byte.get() == byte),
                 "expanded table code must retain source boundary {byte}"
             );
         }

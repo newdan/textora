@@ -3,6 +3,7 @@ use crate::builder::InlineStyle;
 use crate::builder::MarkdownDoc;
 use crate::layout::LazyLayout;
 use crate::parser::parse_markdown;
+use crate::projection::SourceByte;
 use crate::test_utils::default_style;
 
 #[cfg(feature = "rich-markdown")]
@@ -921,7 +922,7 @@ fn empty_quote_marker_preserves_physical_source_boundaries() {
             for source_byte in marker_start..=cursor {
                 let position = index
                     .visual_position_for_source(
-                        source_byte,
+                        SourceByte::new(source_byte),
                         crate::projection::CursorAffinity::Downstream,
                     )
                     .expect("every actual quote marker boundary must have a visual position");
@@ -929,7 +930,8 @@ fn empty_quote_marker_preserves_physical_source_boundaries() {
                     index
                         .source_anchor_at(0, position)
                         .expect("current projection generation must resolve")
-                        .byte,
+                        .byte
+                        .get(),
                     source_byte
                 );
             }
@@ -1258,7 +1260,8 @@ fn multiline_list_item_projection_collapses_continuation_indent() {
     );
     let marker_projection = list_lines[0].source_projection.as_ref().expect("marker projection");
     assert_eq!(
-        marker_projection.boundaries[0].byte, 0,
+        marker_projection.boundaries[0].byte.get(),
+        0,
         "the active list marker must anchor to its source byte"
     );
     let continuation_boundary = marker_projection
@@ -1283,7 +1286,7 @@ fn multiline_list_item_projection_collapses_continuation_indent() {
             .expect("projection")
             .boundaries
             .iter()
-            .any(|anchor| anchor.byte == continuation)
+            .any(|anchor| anchor.byte.get() == continuation)
     );
 }
 
@@ -1381,7 +1384,7 @@ fn styled_list_continuation_retains_collapsed_source_boundary() {
             .expect("continuation projection")
             .boundaries
             .iter()
-            .any(|anchor| anchor.byte == second),
+            .any(|anchor| anchor.byte.get() == second),
         "continuation projection must retain the continuation source anchor"
     );
     let continuation_projection =
@@ -1444,7 +1447,7 @@ fn metadata_projection_starts_at_content_event_range() {
         .expect("metadata lines require a source projection");
 
     assert_eq!(
-        projection.boundaries[0].byte,
+        projection.boundaries[0].byte.get(),
         source.find("title: hello").expect("fixture must contain metadata content"),
     );
 }
@@ -1472,7 +1475,7 @@ fn metadata_projection_uses_each_physical_line_event_range() {
         let projection =
             line.source_projection.as_ref().expect("metadata lines require a source projection");
         assert_eq!(
-            projection.boundaries[0].byte,
+            projection.boundaries[0].byte.get(),
             source.find(&line.text).expect("metadata line must occur in source"),
         );
     }

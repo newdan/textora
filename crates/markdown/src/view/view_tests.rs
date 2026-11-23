@@ -1,4 +1,6 @@
 use super::*;
+use crate::projection::SourceByte;
+use crate::selection::GraphemeIdx;
 
 #[cfg(test)]
 mod dpi_style_tests {
@@ -470,7 +472,7 @@ mod wysiwyg_tests {
             view.engine()
                 .projection_index()
                 .visual_position_for_source(
-                    source.find("正文内容").expect("body must exist"),
+                    SourceByte::new(source.find("正文内容").expect("body must exist")),
                     CursorAffinity::Downstream
                 )
                 .is_some(),
@@ -528,12 +530,13 @@ mod wysiwyg_tests {
         let position = view
             .engine()
             .projection_index()
-            .visual_position_for_source(second_empty, CursorAffinity::Downstream)
+            .visual_position_for_source(SourceByte::new(second_empty), CursorAffinity::Downstream)
             .expect("editable empty line must be projected");
-        let line = &view.engine().projection_index().visual_lines()[position.flat_line_idx];
+        let line =
+            &view.engine().projection_index().visual_lines()[position.projection_line_idx.get()];
 
         assert_eq!(line.owner, ProjectionOwnerId::EmptyLine { source_byte: second_empty });
-        assert_eq!(line.boundaries, vec![SourceAnchor::downstream(second_empty)]);
+        assert_eq!(line.boundaries, vec![SourceAnchor::downstream(SourceByte::new(second_empty))]);
     }
 
     #[test]
@@ -544,12 +547,16 @@ mod wysiwyg_tests {
         let position = view
             .engine()
             .projection_index()
-            .visual_position_for_source(trailing_empty, CursorAffinity::Downstream)
+            .visual_position_for_source(SourceByte::new(trailing_empty), CursorAffinity::Downstream)
             .expect("trailing editable empty line must be projected");
-        let line = &view.engine().projection_index().visual_lines()[position.flat_line_idx];
+        let line =
+            &view.engine().projection_index().visual_lines()[position.projection_line_idx.get()];
 
         assert_eq!(line.owner, ProjectionOwnerId::EmptyLine { source_byte: trailing_empty });
-        assert_eq!(line.boundaries, vec![SourceAnchor::downstream(trailing_empty)]);
+        assert_eq!(
+            line.boundaries,
+            vec![SourceAnchor::downstream(SourceByte::new(trailing_empty))]
+        );
     }
 
     #[test]
@@ -612,8 +619,14 @@ mod wysiwyg_tests {
             .engine()
             .cursor_visual_position_for_byte(line_three, CursorAffinity::Downstream)
             .expect("line three source byte must have a visual position");
-        assert_eq!(position.flat_line_idx, visible_line);
-        assert_eq!(position.grapheme_pos, 0);
+        let rendered = view
+            .engine()
+            .lazy
+            .as_ref()
+            .expect("layout must be published")
+            .flat_line_for_projection(position.projection_line_idx);
+        assert_eq!(rendered, Some(crate::selection::FlatLineIdx::new(visible_line)));
+        assert_eq!(position.grapheme_pos.get(), 0);
     }
 
     #[test]
@@ -794,7 +807,7 @@ mod wysiwyg_tests {
         ) -> Option<&crate::layout::LaidOutLine> {
             lines.iter().find(|line| {
                 line.source_projection.as_ref().is_some_and(|projection| {
-                    projection.boundaries.iter().any(|anchor| anchor.byte == source_byte)
+                    projection.boundaries.iter().any(|anchor| anchor.byte.get() == source_byte)
                 })
             })
         }
@@ -815,7 +828,7 @@ mod wysiwyg_tests {
             crate::layout::LaidOutBlockKind::Table { header, rows, .. } => {
                 header.iter().flatten().chain(rows.iter().flatten().flatten()).find(|line| {
                     line.source_projection.as_ref().is_some_and(|projection| {
-                        projection.boundaries.iter().any(|anchor| anchor.byte == source_byte)
+                        projection.boundaries.iter().any(|anchor| anchor.byte.get() == source_byte)
                     })
                 })
             }
@@ -1506,13 +1519,19 @@ mod wysiwyg_tests {
         let source = "para1\n\npara2";
         let view = make_view(source);
         let lazy = view.engine().lazy.as_ref().expect("layout should be built");
-        let separator = source_line_at_byte(source, "para1\n".len())
+        let separator = view
+            .engine()
+            .edit_source
+            .as_ref()
+            .expect("a projected view must retain its source")
+            .physical_lines()
+            .line_at_byte("para1\n".len())
             .expect("fixture has a separator source line");
         assert_eq!(
-            view.engine().empty_source_line_role(separator, lazy, source),
+            view.engine().empty_source_line_role(separator, lazy),
             EmptySourceLineRole::HiddenBlockSeparator
         );
-        assert!(view.engine().empty_source_line_metrics(separator, lazy, source).is_none());
+        assert!(view.engine().empty_source_line_metrics(separator, lazy).is_none());
     }
 
     #[test]
@@ -1953,12 +1972,15 @@ mod wysiwyg_tests {
         view.engine.handle_set_cursor_byte(cursor_byte);
         render_editor_once(&mut view, &doc);
 
-        let source_line =
-            source_line_at_byte(source, cursor_byte).expect("cursor should be on an empty line");
+        let source_line = view
+            .source
+            .physical_lines()
+            .line_at_byte(cursor_byte)
+            .expect("cursor should be on an empty line");
         let lazy = view.engine.lazy.as_ref().expect("layout should be built");
         let (_x, line_top, _font_size, line_height) = view
             .engine
-            .empty_source_line_metrics(source_line, lazy, source)
+            .empty_source_line_metrics(source_line, lazy)
             .expect("editable source line must have an explicit layout row");
         let next_y = flat_line_y_for_source_byte(&view, next_byte)
             .expect("following paragraph should be laid out");
@@ -2510,7 +2532,7 @@ C608-01 武昌职业第01组：计划 68，历史低线较低，是表里最像�
     }
 
     #[test]
-    fn blockquote_marker_byte_selection_highlight_uses_constant_source_line_lookups() {
+    fn blockquote_marker_byte_selection_highlight_reuses_source_line_index() {
         use ui::plugin::{PluginMessage, PluginQuery, PluginResponse, ViewPlugin};
 
         let mut source = String::new();
@@ -2527,7 +2549,7 @@ C608-01 武昌职业第01组：计划 68，历史低线较低，是表里最像�
         view.set_source(source, 1);
         render_editor_once(&mut view, &doc);
 
-        reset_source_line_at_byte_call_count();
+        SOURCE_LINE_MAP_BUILD_COUNT.with(|count| count.set(0));
         view.handle_message(PluginMessage::SetSelAnchorByte(Some(first_quote)), &mut doc);
         view.handle_message(PluginMessage::SetSelCursorByte(Some(second_quote)), &mut doc);
         match view.query(PluginQuery::SelectionHighlights([0.1, 0.2, 0.3, 1.0]), &doc) {
@@ -2535,10 +2557,10 @@ C608-01 武昌职业第01组：计划 68，历史低线较低，是表里最像�
             other => panic!("expected selection highlights, got {other:?}"),
         }
 
-        assert!(
-            source_line_at_byte_call_count() <= 4,
-            "blockquote marker byte fallback should not rescan source lines per mapped byte; calls={}",
-            source_line_at_byte_call_count()
+        assert_eq!(
+            SOURCE_LINE_MAP_BUILD_COUNT.with(std::cell::Cell::get),
+            0,
+            "blockquote selection must reuse the snapshot's physical line index"
         );
     }
 
@@ -2829,7 +2851,7 @@ C608-01 武昌职业第01组：计划 68，历史低线较低，是表里最像�
         let position = view
             .engine()
             .projection_index()
-            .visual_position_for_source(source.len(), CursorAffinity::Downstream)
+            .visual_position_for_source(SourceByte::new(source.len()), CursorAffinity::Downstream)
             .expect("trailing empty line should have a projection position");
         let previous_line_x =
             view.engine().flat_lines().first().expect("quoted paragraph should render").rect.x;
@@ -3089,7 +3111,7 @@ C608-01 武昌职业第01组：计划 68，历史低线较低，是表里最像�
             let line = &view.engine.flat_lines()[0];
             assert_eq!(line.text, expected_text, "source={source:?}");
             assert!(line.source_projection.as_ref().is_some_and(|projection| {
-                projection.boundaries.last().is_some_and(|anchor| anchor.byte == source.len())
+                projection.boundaries.last().is_some_and(|anchor| anchor.byte.get() == source.len())
             }));
             let has_placeholder = commands.cmds.iter().any(|command| {
                 matches!(command, ui::DrawCmd::TextLayout { layout, .. } if layout.text == "三级标题")
@@ -3175,7 +3197,8 @@ C608-01 武昌职业第01组：计划 68，历史低线较低，是表里最像�
                             .as_ref()
                             .expect("empty heading projection")
                             .boundaries[0]
-                            .byte,
+                            .byte
+                            .get(),
                         prefix.len()
                     );
                 }
@@ -3383,7 +3406,7 @@ C608-01 武昌职业第01组：计划 68，历史低线较低，是表里最像�
         let lazy = view.engine.lazy.as_ref()?;
         for flat_line in &lazy.flat_lines {
             if flat_line.source_projection.as_ref().is_some_and(|projection| {
-                projection.boundaries.first().is_some_and(|anchor| anchor.byte == source_byte)
+                projection.boundaries.first().is_some_and(|anchor| anchor.byte.get() == source_byte)
             }) {
                 return Some(flat_line.rect.y);
             }
@@ -4166,11 +4189,14 @@ C608-01 武昌职业第01组：计划 68，历史低线较低，是表里最像�
         render_editor_once(&mut view, &doc);
 
         let lazy = view.engine.lazy.as_ref().expect("layout should be built");
-        let source_line = source_line_at_byte(source, source.len())
+        let source_line = view
+            .source
+            .physical_lines()
+            .line_at_byte(source.len())
             .expect("document end should resolve to the trailing empty source line");
         let (_, _, font_size, line_height) = view
             .engine
-            .empty_source_line_metrics(source_line, lazy, source)
+            .empty_source_line_metrics(source_line, lazy)
             .expect("editable source line must have an explicit layout row");
 
         assert_eq!(font_size, view.engine.rendered_body_font_size);
@@ -5606,9 +5632,9 @@ viebcoding 用过吗?
             .engine()
             .lazy
             .as_ref()
-            .and_then(|lazy| lazy.flat_line_idx_for_projection(visual_position.flat_line_idx))
+            .and_then(|lazy| lazy.flat_line_for_projection(visual_position.projection_line_idx))
             .expect("active code projection must map to a flat line");
-        let flat_line = &view.engine().flat_lines()[flat_line_idx];
+        let flat_line = &view.engine().flat_lines()[flat_line_idx.get()];
         let shaped = flat_line.shaped.as_ref().expect("active code line must retain shaping");
         let local_byte = cursor_byte - code_start;
         let expected_advance: f32 = shaped
@@ -5653,7 +5679,7 @@ viebcoding 用过吗?
                 .iter()
                 .find(|line| {
                     line.source_projection.as_ref().is_some_and(|projection| {
-                        projection.boundaries.iter().any(|anchor| anchor.byte == cell_byte)
+                        projection.boundaries.iter().any(|anchor| anchor.byte.get() == cell_byte)
                     })
                 })
                 .expect("table cell source byte must own a rendered line");
@@ -5750,13 +5776,14 @@ viebcoding 用过吗?
         let position = view
             .engine()
             .projection_index()
-            .visual_position_for_source(source_byte, CursorAffinity::Downstream)
+            .visual_position_for_source(SourceByte::new(source_byte), CursorAffinity::Downstream)
             .expect("every source grapheme boundary must have a canonical position");
         view.engine()
             .projection_index()
             .source_anchor_at(1, position)
             .expect("canonical position must map back to source")
             .byte
+            .get()
     }
 
     fn hit_test_source_byte_at_cursor(view: &MarkdownEditorView, source_byte: usize) -> usize {
@@ -5790,10 +5817,11 @@ viebcoding 用过吗?
                 render_editor_narrow(&mut view, &document, width);
 
                 for source_byte in source_grapheme_boundaries(source) {
-                    let has_static_position = view
-                        .engine()
-                        .projection_index()
-                        .visual_position_for_source(source_byte, CursorAffinity::Downstream);
+                    let has_static_position =
+                        view.engine().projection_index().visual_position_for_source(
+                            SourceByte::new(source_byte),
+                            CursorAffinity::Downstream,
+                        );
                     let (mut expected, mut hit) = match has_static_position {
                         Some(_) => (
                             canonical_source_byte(&view, source_byte),
@@ -6101,11 +6129,11 @@ viebcoding 用过吗?
             "narrow list item should soft-wrap into at least 3 visual lines, got {}",
             flat_lines.len()
         );
-        let (current_flat_idx, _) = view
+        let current_position = view
             .engine()
             .find_flat_and_grapheme_for_byte(current_byte)
             .expect("current byte should map to a flat line");
-        let target_flat_idx = current_flat_idx + 1;
+        let target_flat_idx = current_position.flat_line_idx.get() + 1;
         let target_line = flat_lines.get(target_flat_idx).expect("next soft-wrap line must exist");
         assert!(
             target_line.rect.x > 0.0,
@@ -6119,7 +6147,10 @@ viebcoding 用过吗?
             view.engine().grapheme_at_x_for_line(target_line, cursor_x - target_line.rect.x);
         let expected_byte = view
             .engine()
-            .byte_from_flat_line_and_visual_grapheme(target_flat_idx, expected_grapheme)
+            .byte_from_flat_line_and_visual_grapheme(
+                crate::selection::FlatLineIdx::new(target_flat_idx),
+                GraphemeIdx::new(expected_grapheme),
+            )
             .expect("expected target grapheme should map to source byte");
         let moved = view
             .engine()
@@ -6456,7 +6487,7 @@ viebcoding 用过吗?
                 let mut found = None;
                 for (fi, flat_line) in lazy.flat_lines.iter().enumerate() {
                     if flat_line.source_projection.as_ref().is_some_and(|projection| {
-                        projection.boundaries.iter().any(|anchor| anchor.byte == mid_byte)
+                        projection.boundaries.iter().any(|anchor| anchor.byte.get() == mid_byte)
                     }) {
                         found = Some(fi);
                         break;
@@ -6557,8 +6588,9 @@ viebcoding 用过吗?
                     .as_ref()
                     .expect("code line must retain its source projection");
                 assert!(projection.boundaries.iter().all(|anchor| {
-                    source.is_char_boundary(anchor.byte)
-                        && (content_start..=content_start + content.len()).contains(&anchor.byte)
+                    source.is_char_boundary(anchor.byte.get())
+                        && (content_start..=content_start + content.len())
+                            .contains(&anchor.byte.get())
                 }));
             }
         }
@@ -6650,7 +6682,7 @@ viebcoding 用过吗?
             .iter()
             .find(|line| {
                 line.source_projection.as_ref().is_some_and(|projection| {
-                    projection.boundaries.iter().any(|anchor| anchor.byte == content_start)
+                    projection.boundaries.iter().any(|anchor| anchor.byte.get() == content_start)
                 })
             })
             .expect("empty fenced code block must retain an editable content projection");
@@ -6848,7 +6880,7 @@ mod tests {
     }
 
     #[test]
-    fn blockquote_marker_byte_selection_highlight_uses_bounded_source_line_lookups() {
+    fn blockquote_marker_byte_selection_highlight_reuses_prepared_source_line_index() {
         let text = "> quoted text\n\nparagraph";
         let mut engine = PreviewEngine::<crate::builder::MarkdownDoc>::new();
         engine.set_edit_source(Some(text.to_string()));
@@ -6867,16 +6899,16 @@ mod tests {
             true,
         );
 
-        reset_source_line_at_byte_call_count();
+        SOURCE_LINE_MAP_BUILD_COUNT.with(|count| count.set(0));
         // Select 'q' at byte index 2 (between > and q)
         engine.set_sel_anchor_byte(Some(2));
         engine.set_sel_cursor_byte(Some(2));
         engine.selection_highlights([1.0; 4]);
 
-        assert!(
-            source_line_at_byte_call_count() <= 2,
-            "Bounded binary searches should strictly limit source_line_at_byte fallback calls (was {})",
-            source_line_at_byte_call_count()
+        assert_eq!(
+            SOURCE_LINE_MAP_BUILD_COUNT.with(std::cell::Cell::get),
+            0,
+            "blockquote selection must reuse the snapshot's physical line index"
         );
     }
 
@@ -7069,7 +7101,7 @@ mod tests {
             .expect("Down within wrapped cell (0, 0)");
         let step1_owner = view.engine().flat_lines().iter().find_map(|line| {
             let proj = line.source_projection.as_ref()?;
-            proj.boundaries.iter().any(|b| b.byte == step1).then_some(proj.owner)
+            proj.boundaries.iter().any(|b| b.byte.get() == step1).then_some(proj.owner)
         });
         assert!(
             matches!(
@@ -7086,7 +7118,8 @@ mod tests {
             .as_ref()
             .and_then(|p| p.boundaries.first())
             .expect("wrapped line start")
-            .byte;
+            .byte
+            .get();
         let step_to_r1c0 = view
             .engine()
             .visual_move(last_wrap_start, MoveDirection::Down, None)

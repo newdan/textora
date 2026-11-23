@@ -5,7 +5,8 @@ use std::ops::Range;
 pub struct SourceLineSpan {
     pub index: usize,
     pub start: usize,
-    pub end: usize,
+    pub content_end: usize,
+    pub newline_end: usize,
     pub is_blank: bool,
 }
 
@@ -57,7 +58,7 @@ impl SourceLineMap {
             return None;
         }
         let candidate = self.lines[insertion - 1];
-        if byte <= candidate.end { Some(candidate) } else { None }
+        (byte <= candidate.newline_end).then_some(candidate)
     }
 
     pub fn empty_run_position(&self, index: usize) -> Option<EmptyRunPosition> {
@@ -77,14 +78,13 @@ impl SourceLineMap {
             }
             let next_range = source_ranges.partition_point(|range| range.start < line.start);
             let has_own_layout =
-                source_ranges.get(next_range).is_some_and(|range| range.start <= line.end);
+                source_ranges.get(next_range).is_some_and(|range| range.start <= line.content_end);
             if has_own_layout {
                 continue;
             }
-            let next_start = self.lines.get(index + 1).map_or(line.end, |next| next.start);
             separators.push(HiddenBlockSeparator {
-                source_range: line.start..next_start,
-                previous_anchor: self.lines[index - 1].end,
+                source_range: line.start..line.newline_end,
+                previous_anchor: self.lines[index - 1].content_end,
             });
         }
         separators
@@ -92,35 +92,27 @@ impl SourceLineMap {
 }
 
 fn collect_lines(source: &str) -> Vec<SourceLineSpan> {
-    if source.is_empty() {
-        return vec![SourceLineSpan { index: 0, start: 0, end: 0, is_blank: true }];
-    }
-
     let mut lines = Vec::new();
-    let mut line_start = 0usize;
-    let bytes = source.as_bytes();
-
-    for (byte_idx, &b) in bytes.iter().enumerate() {
-        if b == b'\n' {
-            let is_blank = source[line_start..byte_idx].chars().all(|c| c.is_whitespace());
-            lines.push(SourceLineSpan {
-                index: lines.len(),
-                start: line_start,
-                end: byte_idx,
-                is_blank,
-            });
-            line_start = byte_idx + 1;
-        }
+    let mut line_start = 0;
+    for (line_feed, _) in source.match_indices('\n') {
+        let raw_content = &source[line_start..line_feed];
+        let content = raw_content.strip_suffix('\r').unwrap_or(raw_content);
+        let newline_end = line_feed + 1;
+        lines.push(line_span(lines.len(), line_start, content, newline_end));
+        line_start = newline_end;
     }
-
-    let is_blank = source[line_start..source.len()].chars().all(|c| c.is_whitespace());
-    lines.push(SourceLineSpan {
-        index: lines.len(),
-        start: line_start,
-        end: source.len(),
-        is_blank,
-    });
+    lines.push(line_span(lines.len(), line_start, &source[line_start..], source.len()));
     lines
+}
+
+fn line_span(index: usize, start: usize, content: &str, newline_end: usize) -> SourceLineSpan {
+    SourceLineSpan {
+        index,
+        start,
+        content_end: start + content.len(),
+        newline_end,
+        is_blank: content.chars().all(char::is_whitespace),
+    }
 }
 
 fn collect_empty_runs(lines: &[SourceLineSpan]) -> Vec<Option<EmptyRunPosition>> {
@@ -176,5 +168,44 @@ mod tests {
             map.hidden_separators_for_rendered_lines(&[0..1, 3..3, 4..5]),
             vec![HiddenBlockSeparator { source_range: 2..3, previous_anchor: 1 }]
         );
+    }
+
+    #[test]
+    fn hidden_separator_folds_before_the_entire_preceding_crlf() {
+        let map = SourceLineMap::from_source("a\r\n\r\n\r\nb");
+        assert_eq!(
+            map.hidden_separators_for_rendered_lines(&[0..1, 5..5, 7..8]),
+            vec![HiddenBlockSeparator { source_range: 3..5, previous_anchor: 1 }]
+        );
+    }
+
+    #[test]
+    fn physical_source_line_map_distinguishes_content_and_newline_ends() {
+        for (source, expected) in [
+            ("", &[(0, 0, 0)][..]),
+            ("前\n\n", &[(0, 3, 4), (4, 4, 5), (5, 5, 5)][..]),
+            ("前\r\n\r\n", &[(0, 3, 5), (5, 5, 7), (7, 7, 7)][..]),
+            ("> 引\r\n| a |", &[(0, 5, 7), (7, 12, 12)][..]),
+        ] {
+            let map = SourceLineMap::from_source(source);
+            assert_eq!(map.lines().len(), expected.len(), "{source:?}");
+            for (index, &(start, content_end, newline_end)) in expected.iter().enumerate() {
+                let line = map.line_at_index(index).expect("physical line exists");
+                assert_eq!(
+                    (line.start, line.content_end, line.newline_end),
+                    (start, content_end, newline_end)
+                );
+                assert_eq!(map.line_at_byte(start), Some(line));
+                if content_end < newline_end {
+                    assert_eq!(map.line_at_byte(content_end), Some(line));
+                    assert_eq!(map.line_at_byte(newline_end - 1), Some(line));
+                }
+            }
+            assert_eq!(
+                map.line_at_byte(source.len()).map(|line| line.index),
+                Some(expected.len() - 1)
+            );
+            assert!(map.line_at_byte(source.len() + 1).is_none());
+        }
     }
 }

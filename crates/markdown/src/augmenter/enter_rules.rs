@@ -288,7 +288,7 @@ fn base_list_item_enter_augmentation(
         return Some(emit_marker_break_replacing(source, replaced, indent, continuation_marker));
     }
     if let Some(boundary) = hard_break_boundary_before(source, current_byte)
-        && let Some((line_start, _, _)) = locate_source_line_bounds(source, current_byte)
+        && let Some((line_start, _, _)) = locate_snapshot_line_bounds(source, current_byte)
         && !next_source_line_has_list_marker(source, line_start, indent)
     {
         return Some(emit_marker_break_replacing(source, boundary, indent, continuation_marker));

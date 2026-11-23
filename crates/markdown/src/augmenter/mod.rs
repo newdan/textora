@@ -223,7 +223,7 @@ pub(in crate::augmenter) fn pipe_header_table_augmentation(
     current_byte: usize,
     context: &EnterContext,
 ) -> Option<EditAugmentation> {
-    let (line_start, _, line_end) = locate_source_line_bounds(source, current_byte)?;
+    let (line_start, _, line_end) = locate_snapshot_line_bounds(source, current_byte)?;
     let content_end = source_line_content_end(source, line_end);
     if current_byte != content_end {
         return None;
@@ -493,14 +493,15 @@ fn empty_fenced_code_insert_text(
         return None;
     }
     let (closing_line_start, _, closing_line_end) =
-        locate_source_line_bounds(source, current_byte)?;
+        locate_snapshot_line_bounds(source, current_byte)?;
     let closing_content_end = source_line_content_end(source, closing_line_end);
     let closing_line = &source[closing_line_start..closing_content_end];
     if !closing_line.contains("```") && !closing_line.contains("~~~") {
         return None;
     }
     let boundary = enclosing_fenced_boundary(source, current_byte)?;
-    let (_, _, opening_line_end) = locate_source_line_bounds(source, boundary.frame.marker_start)?;
+    let (_, _, opening_line_end) =
+        locate_snapshot_line_bounds(source, boundary.frame.marker_start)?;
     if closing_line_start != opening_line_end + LF_SEQUENCE.len() {
         return None;
     }

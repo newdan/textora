@@ -1,7 +1,9 @@
 use super::*;
 use crate::builder::InlineStyle;
 use crate::layout::types::{CollapsedBoundary, VisualLineProjection};
+use crate::projection::SourceByte;
 use crate::projection::{ProjectionError, ProjectionOwnerId, TextProjectionBuilder};
+use crate::selection::GraphemeIdx;
 
 #[cfg(feature = "rich-markdown")]
 #[test]
@@ -39,7 +41,7 @@ fn make_span(
 
 fn slice_visual_line_linear_reference(
     projected: &ProjectedText,
-    flat_line_idx: usize,
+    logical_line: usize,
     visual_byte_range: Range<usize>,
 ) -> Result<VisualLineProjection, ProjectionError> {
     if visual_byte_range.start > visual_byte_range.end
@@ -47,7 +49,9 @@ fn slice_visual_line_linear_reference(
         || !projected.text.is_char_boundary(visual_byte_range.start)
         || !projected.text.is_char_boundary(visual_byte_range.end)
     {
-        return Err(ProjectionError::InvalidSourceBoundary { byte: visual_byte_range.start });
+        return Err(ProjectionError::InvalidVisualBoundary {
+            visual_byte: visual_byte_range.start,
+        });
     }
 
     let start_grapheme =
@@ -59,7 +63,12 @@ fn slice_visual_line_linear_reference(
         .first()
         .expect("a projected visual line always has a sentinel boundary")
         .byte
-        ..boundaries.last().expect("a projected visual line always has a sentinel boundary").byte;
+        .get()
+        ..boundaries
+            .last()
+            .expect("a projected visual line always has a sentinel boundary")
+            .byte
+            .get();
     let mut collapsed = Vec::new();
 
     for span in &projected.spans {
@@ -87,10 +96,9 @@ fn slice_visual_line_linear_reference(
     }
 
     Ok(VisualLineProjection {
-        flat_line_idx,
         owner: ProjectionOwnerId::Block {
             block_start: projected.source_extent().start,
-            logical_line: flat_line_idx,
+            logical_line,
         },
         boundaries,
         source_extent,
@@ -401,7 +409,7 @@ fn materialized_heading_marker_keeps_absolute_source_anchors() {
 
     assert_eq!(projected.text, "# Title");
     assert_eq!(
-        projected.boundaries.iter().map(|anchor| anchor.byte).collect::<Vec<_>>(),
+        projected.boundaries.iter().map(|anchor| anchor.byte.get()).collect::<Vec<_>>(),
         vec![0, 1, 2, 3, 4, 5, 6, 7]
     );
 }
@@ -410,12 +418,12 @@ fn materialized_heading_marker_keeps_absolute_source_anchors() {
 fn preedit_visual_text_anchors_every_boundary_to_cursor_byte() {
     let base = crate::projection::ProjectedText::direct("ab", 10);
 
-    let projected = base.insert_virtual(1, "中文", 11);
+    let projected = base.insert_virtual(GraphemeIdx::new(1), "中文", SourceByte::new(11));
 
     assert_eq!(projected.text, "a中文b");
-    assert_eq!(projected.boundaries[1].byte, 11);
-    assert_eq!(projected.boundaries[2].byte, 11);
-    assert_eq!(projected.boundaries[3].byte, 11);
+    assert_eq!(projected.boundaries[1].byte.get(), 11);
+    assert_eq!(projected.boundaries[2].byte.get(), 11);
+    assert_eq!(projected.boundaries[3].byte.get(), 11);
 }
 
 // ===== ActiveBlockMarker tests =====
@@ -640,8 +648,8 @@ fn cross_hard_break_bold_and_br_expand_delimiters_per_logical_line() {
         line1.validate(source).expect("line1 projection must be valid");
 
         let mut all_bytes = Vec::new();
-        all_bytes.extend(line0.boundaries.iter().map(|anchor| anchor.byte));
-        all_bytes.extend(line1.boundaries.iter().map(|anchor| anchor.byte));
+        all_bytes.extend(line0.boundaries.iter().map(|anchor| anchor.byte.get()));
+        all_bytes.extend(line1.boundaries.iter().map(|anchor| anchor.byte.get()));
         assert!(
             all_bytes.windows(2).all(|pair| pair[0] <= pair[1]),
             "cross-line boundaries must be monotonically non-decreasing in {source:?}: {all_bytes:?}"
@@ -704,5 +712,5 @@ fn cross_hard_break_preedit_preserves_monotonic_anchors_and_caret() {
     visual1.owner = ProjectionOwnerId::Block { block_start: line2_start, logical_line: 1 };
     let index = SourceProjectionIndex::build(1, 1, vec![visual0, visual1])
         .expect("cross-line preedit index must satisfy monotonically non-decreasing anchors");
-    assert!(index.virtual_position_for_source(cursor_byte, 1).is_some());
+    assert!(index.virtual_position_for_source(SourceByte::new(cursor_byte), 1).is_some());
 }

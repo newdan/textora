@@ -1,3 +1,4 @@
+use crate::selection::GraphemeIdx;
 use std::collections::BTreeMap;
 use std::ops::Range;
 use std::sync::Arc;
@@ -90,8 +91,8 @@ pub(crate) fn expose_failed_math(
         let end_grapheme =
             crate::grapheme_map::grapheme_index_at_byte(&projected.text, span.start + span.len);
         *projected = projected.clone().replace_graphemes_with_direct(
-            start_grapheme,
-            end_grapheme,
+            GraphemeIdx::new(start_grapheme),
+            GraphemeIdx::new(end_grapheme),
             &spelling,
             span.source_range,
         );

@@ -293,7 +293,7 @@ pub(in crate::augmenter) fn backspace_paragraph_boundary(
     source: &MarkdownSource<'_>,
     current_byte: usize,
 ) -> Option<EditAugmentation> {
-    let (line_start, _, line_end) = locate_source_line_bounds(source, current_byte)?;
+    let (line_start, _, line_end) = locate_snapshot_line_bounds(source, current_byte)?;
     if line_start == 0 || line_start == line_end {
         return None;
     }

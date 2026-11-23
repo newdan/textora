@@ -1,7 +1,11 @@
 //! Layout output types and LazyLayout implementation.
 
 use crate::builder::StyleSpan;
-use crate::projection::{ProjectionError, ProjectionOwnerId, SourceAnchor, SourceProjectionIndex};
+use crate::projection::{
+    ProjectionError, ProjectionLineIdx, ProjectionOwnerId, SourceAnchor, SourceProjectionIndex,
+};
+use crate::selection::FlatLineIdx;
+use crate::source_snapshot::{MarkdownSource, SourceSnapshot};
 use shaping::Weight;
 use std::ops::Range;
 use std::sync::Arc;
@@ -28,7 +32,6 @@ pub(crate) struct CollapsedBoundary {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct VisualLineProjection {
-    pub flat_line_idx: usize,
     pub owner: ProjectionOwnerId,
     pub boundaries: Vec<SourceAnchor>,
     pub source_extent: Range<usize>,
@@ -110,17 +113,18 @@ pub struct LazyLayout<S: BlockSource> {
     /// when the block hasn't been materialized yet.
     pub(in crate::layout::types) cached_viewport_w: f32,
     /// Full source text for WYSIWYG span expansion via materialize_line.
-    pub(in crate::layout::types) source_text: Option<Arc<String>>,
+    pub(in crate::layout::types) source_snapshot: Option<SourceSnapshot>,
     /// Empty paragraph geometry derived from the same rows exposed in `flat_lines`.
     pub(in crate::layout::types) projected_empty_lines: Vec<ProjectedEmptyLine>,
     /// Hidden source ranges represented as collapsed boundaries in the index.
     pub(in crate::layout::types) hidden_block_separators: Vec<HiddenBlockSeparator>,
-    /// Projection visual-line id → rendered `flat_lines` index. `None` denotes
-    /// a zero-grapheme editable empty source line.
-    pub(in crate::layout::types) projection_flat_line_indices: Vec<Option<usize>>,
+    /// Projection line → rendered line. Retained rows outside the viewport have no rendered line.
+    pub(in crate::layout::types) projection_flat_line_indices: Vec<Option<FlatLineIdx>>,
+    /// Rendered line → projection line. Atomic rows have no editable projection.
+    pub(in crate::layout::types) flat_line_projection_indices: Vec<Option<ProjectionLineIdx>>,
     /// Projection visual-line id → geometry for an explicitly laid out empty paragraph.
     pub(in crate::layout::types) projected_empty_line_geometry:
-        std::collections::BTreeMap<usize, ProjectedEmptyLine>,
+        std::collections::BTreeMap<ProjectionLineIdx, ProjectedEmptyLine>,
     /// WYSIWYG edit context; None means pure preview (no cursor span expansion).
     pub(in crate::layout::types) edit_ctx: Option<crate::edit::EditContext>,
     pub(crate) code_viewport: Option<super::code_viewport::CodeViewport>,

@@ -11,10 +11,10 @@ pub(super) struct ReplacementPreedit<S: BlockSource> {
 
 impl<S: BlockSource> ReplacementPreedit<S> {
     pub(super) fn source_anchor(&self, anchor: SourceAnchor) -> SourceAnchor {
-        let byte = self.source_byte(anchor.byte);
+        let byte = self.source_byte(anchor.byte.get());
         match anchor.affinity {
-            CursorAffinity::Upstream => SourceAnchor::upstream(byte),
-            CursorAffinity::Downstream => SourceAnchor::downstream(byte),
+            CursorAffinity::Upstream => SourceAnchor::upstream(SourceByte::new(byte)),
+            CursorAffinity::Downstream => SourceAnchor::downstream(SourceByte::new(byte)),
         }
     }
 
@@ -158,7 +158,8 @@ fn draw_replacement_underline(
             .windows(2)
             .enumerate()
             .filter_map(|(grapheme, anchors)| {
-                (anchors[0].byte < composing_range.end && anchors[1].byte > composing_range.start)
+                (anchors[0].byte.get() < composing_range.end
+                    && anchors[1].byte.get() > composing_range.start)
                     .then_some(grapheme)
             })
             .collect::<Vec<_>>();
@@ -271,7 +272,7 @@ fn empty_heading_placeholder_target(
                 projection
                     .boundaries
                     .first()
-                    .is_some_and(|anchor| anchor.byte == context.cursor_byte)
+                    .is_some_and(|anchor| anchor.byte.get() == context.cursor_byte)
             })
     })?;
     Some((level, line))

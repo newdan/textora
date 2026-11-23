@@ -3,6 +3,7 @@ use super::super::reconcile::BlockReconcilePlan;
 use super::super::shaping::populate_style_segments;
 use super::super::{apply_deltas, flatten_blocks};
 use super::*;
+use crate::projection::SourceByte;
 use crate::style::MarkdownStyle;
 
 pub(in crate::layout::types) const VIEWPORT_BUFFER_RATIO: f32 = 0.5;
@@ -174,7 +175,7 @@ pub(in crate::layout::types) fn shift_projection_source(
         },
     };
     for boundary in &mut projection.boundaries {
-        boundary.byte = shift_source_byte(boundary.byte, source_byte_delta);
+        boundary.byte = SourceByte::new(shift_source_byte(boundary.byte.get(), source_byte_delta));
     }
     shift_source_range(&mut projection.source_extent, source_byte_delta);
     for collapsed_boundary in &mut projection.collapsed {
@@ -309,10 +310,11 @@ impl<S: BlockSource> LazyLayout<S> {
             laid_to_doc,
             viewport_range: 0..0,
             cached_viewport_w: viewport_w,
-            source_text: None,
+            source_snapshot: None,
             projected_empty_lines: Vec::new(),
             hidden_block_separators: Vec::new(),
             projection_flat_line_indices: Vec::new(),
+            flat_line_projection_indices: Vec::new(),
             projected_empty_line_geometry: std::collections::BTreeMap::new(),
             edit_ctx: None,
             code_viewport: None,
@@ -323,10 +325,13 @@ impl<S: BlockSource> LazyLayout<S> {
     }
 
     pub(crate) fn reuse_unchanged_blocks_from(&mut self, mut previous: Self) -> usize {
-        let Some(previous_source_text) = previous.source_text.as_deref().map(String::as_str) else {
+        let Some(previous_source_text) =
+            previous.source_snapshot.as_deref().map(MarkdownSource::as_str)
+        else {
             return 0;
         };
-        let Some(current_source_text) = self.source_text.as_deref().map(String::as_str) else {
+        let Some(current_source_text) = self.source_snapshot.as_deref().map(MarkdownSource::as_str)
+        else {
             return 0;
         };
         let reconcile_plan = BlockReconcilePlan::between(
@@ -428,11 +433,11 @@ impl<S: BlockSource> LazyLayout<S> {
 
     /// Set the full source text for WYSIWYG span expansion.
     pub fn set_edit_source(&mut self, source_text: Option<String>) {
-        self.set_shared_source(source_text.map(Arc::new));
+        self.set_source_snapshot(source_text.map(MarkdownSource::snapshot));
     }
 
-    pub(crate) fn set_shared_source(&mut self, source_text: Option<Arc<String>>) {
-        self.source_text = source_text;
+    pub(crate) fn set_source_snapshot(&mut self, source: Option<SourceSnapshot>) {
+        self.source_snapshot = source;
     }
 
     /// Set the WYSIWYG edit context (cursor position for span expansion).
@@ -626,7 +631,7 @@ impl<S: BlockSource> LazyLayout<S> {
                 viewport_w,
                 Some(shaper),
                 highlighter,
-                self.source_text.as_deref().map(String::as_str),
+                self.source_snapshot.as_deref().map(MarkdownSource::as_str),
                 self.edit_ctx.as_ref(),
             );
             ctx.selection_range = self.selection_range.as_ref();
@@ -721,7 +726,7 @@ impl<S: BlockSource> LazyLayout<S> {
                 viewport_w,
                 shaper.as_deref_mut(),
                 highlighter,
-                self.source_text.as_deref().map(String::as_str),
+                self.source_snapshot.as_deref().map(MarkdownSource::as_str),
                 self.edit_ctx.as_ref(),
             );
             ctx.selection_range = self.selection_range.as_ref();
@@ -934,7 +939,7 @@ impl<S: BlockSource> LazyLayout<S> {
             self.cached_viewport_w,
             shaper.as_deref_mut(),
             highlighter,
-            self.source_text.as_deref().map(String::as_str),
+            self.source_snapshot.as_deref().map(MarkdownSource::as_str),
             self.edit_ctx.as_ref(),
         );
         ctx.selection_range = self.selection_range.as_ref();
@@ -1022,7 +1027,7 @@ impl<S: BlockSource> LazyLayout<S> {
             estimated_w,
             Some(shaper),
             highlighter,
-            self.source_text.as_deref().map(String::as_str),
+            self.source_snapshot.as_deref().map(MarkdownSource::as_str),
             self.edit_ctx.as_ref(),
         );
         ctx.selection_range = self.selection_range.as_ref();

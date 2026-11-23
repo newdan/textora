@@ -298,12 +298,17 @@ fn semantic_edit_query_rejects_stale_snapshot() {
 
 #[test]
 fn layout_reflow_reuses_the_current_source_parse() {
+    use crate::source_snapshot::SOURCE_LINE_MAP_BUILD_COUNT;
+
+    SOURCE_LINE_MAP_BUILD_COUNT.with(|count| count.set(0));
     let mut view = MarkdownEditorView::new();
     view.set_source(EDIT_SOURCE.into(), SOURCE_GENERATION);
     render(&mut view);
+    assert_eq!(SOURCE_LINE_MAP_BUILD_COUNT.with(std::cell::Cell::get), 1);
 
     MARKDOWN_PARSE_COUNT.with(|count| count.set(0));
     view.engine.base_font_size *= 2.0;
     render(&mut view);
     assert_eq!(MARKDOWN_PARSE_COUNT.with(std::cell::Cell::get), 0);
+    assert_eq!(SOURCE_LINE_MAP_BUILD_COUNT.with(std::cell::Cell::get), 1);
 }

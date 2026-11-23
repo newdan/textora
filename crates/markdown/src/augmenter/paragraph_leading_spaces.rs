@@ -12,7 +12,7 @@ pub(super) fn insert_selected_text(
     text: &str,
     erased_source: Option<&MarkdownSource<'_>>,
 ) -> Option<EditAugmentation> {
-    let (line_start, _, line_end) = super::locate_source_line_bounds(source, selection.start)?;
+    let (line_start, _, line_end) = super::locate_snapshot_line_bounds(source, selection.start)?;
     let prefix = source.get(line_start..selection.start)?;
     let suffix = source.get(selection.end..)?.split(['\r', '\n']).next().unwrap_or_default();
     if !requires_space_protection(prefix, text, suffix) {
@@ -33,7 +33,7 @@ pub(super) fn insert_text(
     current_byte: usize,
     text: &str,
 ) -> Option<EditAugmentation> {
-    let (line_start, _, line_end) = super::locate_source_line_bounds(source, current_byte)?;
+    let (line_start, _, line_end) = super::locate_snapshot_line_bounds(source, current_byte)?;
     let content_end = super::source_line_content_end(source, line_end);
     let prefix = source.get(line_start..current_byte)?;
     let suffix = source.get(current_byte..content_end)?;

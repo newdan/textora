@@ -886,7 +886,8 @@ pub(in crate::layout::block) fn metadata_projected_line_starts(
             .boundaries
             .get(grapheme_start)
             .expect("a projected metadata line must have a source boundary")
-            .byte;
+            .byte
+            .get();
         lines.push((line_text.to_string(), source_start));
         visual_byte_start += line_text.len() + 1;
     }

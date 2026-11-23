@@ -171,7 +171,7 @@ fn terminal_hard_break(
     let projection = block.projected_lines.last()?;
     if projection.text.ends_with('\\') {
         let marker_start =
-            projection.boundaries.get(projection.boundaries.len().checked_sub(2)?)?.byte;
+            projection.boundaries.get(projection.boundaries.len().checked_sub(2)?)?.byte.get();
         let after_marker = source.get(marker_start..)?.strip_prefix('\\')?;
         let after_newline =
             after_marker.strip_prefix("\r\n").or_else(|| after_marker.strip_prefix('\n'))?;
@@ -717,7 +717,7 @@ mod tests {
         let projected = &paragraph.projected_lines[0];
         assert!(projected.text.is_empty());
         assert_eq!(projected.boundaries.len(), 1);
-        assert_eq!(projected.boundaries[0].byte, 6);
+        assert_eq!(projected.boundaries[0].byte.get(), 6);
         assert_eq!(projected.source_extent(), 6..6);
     }
 }

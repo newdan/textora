@@ -13,10 +13,11 @@ impl<S: BlockSource> PreviewEngine<S> {
             .as_ref()
             .and_then(|projection| projection.boundaries.last())
             .map_or(0.0, |anchor| {
+                let anchor_byte = anchor.byte.get();
                 let trailing_space_end =
-                    self.edit_source.as_deref().map_or(anchor.byte, |source| {
-                        source.get(anchor.byte..).map_or(anchor.byte, |suffix| {
-                            anchor.byte
+                    self.edit_source.as_deref().map_or(anchor_byte, |source| {
+                        source.get(anchor_byte..).map_or(anchor_byte, |suffix| {
+                            anchor_byte
                                 + suffix
                                     .chars()
                                     .take_while(|character| matches!(character, ' ' | '\t'))
@@ -24,7 +25,10 @@ impl<S: BlockSource> PreviewEngine<S> {
                                     .sum::<usize>()
                         })
                     });
-                self.trailing_stripped_space_advance(flat_line.flat_idx, trailing_space_end)
+                self.trailing_stripped_space_advance(
+                    FlatLineIdx::new(flat_line.flat_idx),
+                    trailing_space_end,
+                )
             });
         (flat_line.rect.x + flat_line.rect.w).max(text_right) + trailing_space_advance
     }
@@ -34,10 +38,13 @@ impl<S: BlockSource> PreviewEngine<S> {
         flat_line: &crate::layout::FlatLine,
     ) -> Option<SourceAnchor> {
         if let Some(source_range) = &flat_line.atomic_source_range {
-            return Some(SourceAnchor::downstream(source_range.start));
+            return Some(SourceAnchor::downstream(SourceByte::new(source_range.start)));
         }
 
-        self.anchor_from_flat_line_and_visual_grapheme(flat_line.flat_idx, 0)
+        self.anchor_from_flat_line_and_visual_grapheme(
+            FlatLineIdx::new(flat_line.flat_idx),
+            GraphemeIdx::new(0),
+        )
     }
 
     pub(in crate::view) fn flat_line_end_anchor(
@@ -45,12 +52,12 @@ impl<S: BlockSource> PreviewEngine<S> {
         flat_line: &crate::layout::FlatLine,
     ) -> Option<SourceAnchor> {
         if let Some(source_range) = &flat_line.atomic_source_range {
-            return Some(SourceAnchor::downstream(source_range.end));
+            return Some(SourceAnchor::downstream(SourceByte::new(source_range.end)));
         }
 
         self.anchor_from_flat_line_and_visual_grapheme(
-            flat_line.flat_idx,
-            crate::grapheme_map::grapheme_count(&flat_line.text),
+            FlatLineIdx::new(flat_line.flat_idx),
+            GraphemeIdx::new(crate::grapheme_map::grapheme_count(&flat_line.text)),
         )
     }
 
@@ -62,23 +69,24 @@ impl<S: BlockSource> PreviewEngine<S> {
     ) -> Option<SourceAnchor> {
         if let Some(source_range) = &flat_line.atomic_source_range {
             let vertical_midpoint = flat_line.rect.y + flat_line.rect.h * 0.5;
-            return Some(SourceAnchor::downstream(if doc_y < vertical_midpoint {
-                source_range.start
-            } else {
-                source_range.end
-            }));
+            let byte =
+                if doc_y < vertical_midpoint { source_range.start } else { source_range.end };
+            return Some(SourceAnchor::downstream(SourceByte::new(byte)));
         }
 
         let line_x = doc_x - flat_line.rect.x;
-        let visual_grapheme = crate::layout::grapheme_at_x(flat_line, line_x);
-        self.anchor_from_flat_line_and_visual_grapheme(flat_line.flat_idx, visual_grapheme)
+        let visual_grapheme = GraphemeIdx::new(crate::layout::grapheme_at_x(flat_line, line_x));
+        self.anchor_from_flat_line_and_visual_grapheme(
+            FlatLineIdx::new(flat_line.flat_idx),
+            visual_grapheme,
+        )
     }
 
     /// 屏幕坐标 → 源码字节偏移。用于鼠标点击。
     /// 输入 y/offset_y 为插件渲染空间坐标；内部加回 scroll_y 以匹配
     /// flat_line 的文档绝对 y（与 render_line_with_offset 的投影互逆）。
     pub fn hit_test_byte(&self, x: f32, y: f32, offset_x: f32, offset_y: f32) -> Option<usize> {
-        self.hit_test_anchor(x, y, offset_x, offset_y).map(|anchor| anchor.byte)
+        self.hit_test_anchor(x, y, offset_x, offset_y).map(|anchor| anchor.byte.get())
     }
 
     pub(in crate::view) fn hit_test_anchor(
@@ -176,17 +184,17 @@ impl<S: BlockSource> PreviewEngine<S> {
 
     pub(in crate::view) fn byte_from_flat_line_and_visual_grapheme(
         &self,
-        flat_line_idx: usize,
-        visual_grapheme: usize,
+        flat_line_idx: FlatLineIdx,
+        visual_grapheme: GraphemeIdx,
     ) -> Option<usize> {
         self.anchor_from_flat_line_and_visual_grapheme(flat_line_idx, visual_grapheme)
-            .map(|anchor| anchor.byte)
+            .map(|anchor| anchor.byte.get())
     }
 
     pub(in crate::view) fn anchor_from_flat_line_and_visual_grapheme(
         &self,
-        flat_line_idx: usize,
-        visual_grapheme: usize,
+        flat_line_idx: FlatLineIdx,
+        visual_grapheme: GraphemeIdx,
     ) -> Option<SourceAnchor> {
         if let Some(composition) = &self.replacement_preedit {
             return composition
@@ -196,20 +204,16 @@ impl<S: BlockSource> PreviewEngine<S> {
         }
         let lazy = self.lazy.as_ref()?;
         let index = lazy.source_projection_index.as_ref()?;
-        let projection_flat_line_idx =
-            lazy.projection_visual_line_idx_for_flat_line(flat_line_idx)?;
+        let projection_line_idx = lazy.projection_line_for_flat_line(flat_line_idx)?;
         let position = VisualPosition {
             layout_revision: index.layout_revision(),
-            flat_line_idx: projection_flat_line_idx,
+            projection_line_idx,
             grapheme_pos: visual_grapheme,
         };
         index.source_anchor_at(self.source_generation, position).ok()
     }
 
-    pub(in crate::view) fn find_flat_and_grapheme_for_byte(
-        &self,
-        byte: usize,
-    ) -> Option<(usize, usize)> {
+    pub(in crate::view) fn find_flat_and_grapheme_for_byte(&self, byte: usize) -> Option<ViewPos> {
         if let Some(composition) = &self.replacement_preedit {
             return composition
                 .engine
@@ -218,16 +222,14 @@ impl<S: BlockSource> PreviewEngine<S> {
         let position =
             self.cursor_visual_position_for_byte(byte, self.cursor_affinity_for_byte(byte))?;
         let flat_line_idx =
-            self.lazy.as_ref()?.flat_line_idx_for_projection(position.flat_line_idx)?;
-        Some((flat_line_idx, position.grapheme_pos))
+            self.lazy.as_ref()?.flat_line_for_projection(position.projection_line_idx)?;
+        Some(ViewPos { flat_line_idx, grapheme_pos: position.grapheme_pos })
     }
 
     pub(in crate::view) fn visual_range_for_byte_selection(&self) -> Option<(ViewPos, ViewPos)> {
         let (start_byte, end_byte) = self.byte_selection_range()?;
-        let start = self.selection_position_for_byte(start_byte, false)?;
-        let end = self.selection_position_for_byte(end_byte, true)?;
-        let start = ViewPos { flat_line_idx: start.0, grapheme_pos: start.1 };
-        let end = ViewPos { flat_line_idx: end.0, grapheme_pos: end.1 };
+        let start = self.selection_position_for_byte(SourceByte::new(start_byte), false)?;
+        let end = self.selection_position_for_byte(SourceByte::new(end_byte), true)?;
         if (start.flat_line_idx, start.grapheme_pos) <= (end.flat_line_idx, end.grapheme_pos) {
             Some((start, end))
         } else {
@@ -237,31 +239,40 @@ impl<S: BlockSource> PreviewEngine<S> {
 
     pub(in crate::view) fn selection_position_for_byte(
         &self,
-        source_byte: usize,
+        source_byte: SourceByte,
         prefer_previous_rendered_line: bool,
-    ) -> Option<(usize, usize)> {
+    ) -> Option<ViewPos> {
         let lazy = self.lazy.as_ref()?;
         let index = lazy.source_projection_index.as_ref()?;
         let position = index.visual_position_for_source(source_byte, CursorAffinity::Downstream)?;
-        if let Some(flat_line_idx) = lazy.flat_line_idx_for_projection(position.flat_line_idx) {
-            return Some((flat_line_idx, position.grapheme_pos));
+        if let Some(flat_line_idx) = lazy.flat_line_for_projection(position.projection_line_idx) {
+            return Some(ViewPos { flat_line_idx, grapheme_pos: position.grapheme_pos });
         }
 
         if prefer_previous_rendered_line {
-            for projection_idx in (0..position.flat_line_idx).rev() {
-                let Some(flat_line_idx) = lazy.flat_line_idx_for_projection(projection_idx) else {
+            for projection_idx in (0..position.projection_line_idx.get()).rev() {
+                let Some(flat_line_idx) =
+                    lazy.flat_line_for_projection(ProjectionLineIdx::new(projection_idx))
+                else {
                     continue;
                 };
                 let grapheme_pos =
                     index.visual_lines()[projection_idx].boundaries.len().saturating_sub(1);
-                return Some((flat_line_idx, grapheme_pos));
+                return Some(ViewPos {
+                    flat_line_idx,
+                    grapheme_pos: GraphemeIdx::new(grapheme_pos),
+                });
             }
             return None;
         }
 
-        for projection_idx in position.flat_line_idx.saturating_add(1)..index.visual_lines().len() {
-            if let Some(flat_line_idx) = lazy.flat_line_idx_for_projection(projection_idx) {
-                return Some((flat_line_idx, 0));
+        for projection_idx in
+            position.projection_line_idx.get().saturating_add(1)..index.visual_lines().len()
+        {
+            if let Some(flat_line_idx) =
+                lazy.flat_line_for_projection(ProjectionLineIdx::new(projection_idx))
+            {
+                return Some(ViewPos { flat_line_idx, grapheme_pos: GraphemeIdx::new(0) });
             }
         }
         None
@@ -275,7 +286,7 @@ impl<S: BlockSource> PreviewEngine<S> {
         direction: ui::plugin::MoveDirection,
         target_x: Option<f32>,
     ) -> Option<usize> {
-        self.visual_move_anchor(current_byte, direction, target_x).map(|anchor| anchor.byte)
+        self.visual_move_anchor(current_byte, direction, target_x).map(|anchor| anchor.byte.get())
     }
 
     pub(in crate::view) fn visual_move_anchor(
@@ -292,17 +303,17 @@ impl<S: BlockSource> PreviewEngine<S> {
                 .map(|anchor| composition.source_anchor(anchor));
         }
         let lazy = self.lazy.as_ref()?;
-        let source = self.edit_source.as_ref();
-        let current_source_line = source.and_then(|text| source_line_at_byte(text, current_byte));
+        let current_source_line = self
+            .edit_source
+            .as_deref()
+            .and_then(|source| source.physical_lines().line_at_byte(current_byte));
 
         if matches!(
             direction,
             MoveDirection::Left | MoveDirection::Right | MoveDirection::Up | MoveDirection::Down
         ) && current_source_line.is_some_and(|source_line| {
-            source.is_some_and(|source| {
-                self.empty_source_line_role(source_line, lazy, source)
-                    == EmptySourceLineRole::HiddenBlockSeparator
-            })
+            self.empty_source_line_role(source_line, lazy)
+                == EmptySourceLineRole::HiddenBlockSeparator
         }) {
             return self.move_from_hidden_block_separator(current_byte, direction);
         }
@@ -312,21 +323,22 @@ impl<S: BlockSource> PreviewEngine<S> {
         match direction {
             MoveDirection::Left => {
                 if current_byte == 0 {
-                    return Some(SourceAnchor::downstream(0));
+                    return Some(SourceAnchor::downstream(SourceByte::new(0)));
                 }
-                if let Some(anchor) =
-                    index.move_horizontal(current_byte, HorizontalDirection::Previous)
+                if let Some(anchor) = index
+                    .move_horizontal(SourceByte::new(current_byte), HorizontalDirection::Previous)
                 {
                     return Some(anchor);
                 }
-                Some(SourceAnchor::downstream(0))
+                Some(SourceAnchor::downstream(SourceByte::new(0)))
             }
             MoveDirection::Right => {
-                if let Some(anchor) = index.move_horizontal(current_byte, HorizontalDirection::Next)
+                if let Some(anchor) =
+                    index.move_horizontal(SourceByte::new(current_byte), HorizontalDirection::Next)
                 {
                     return Some(anchor);
                 }
-                Some(SourceAnchor::downstream(current_byte))
+                Some(SourceAnchor::downstream(SourceByte::new(current_byte)))
             }
             MoveDirection::Up | MoveDirection::Down => self.visual_move_in_projection_sequence(
                 lazy,
@@ -339,10 +351,10 @@ impl<S: BlockSource> PreviewEngine<S> {
                 if let Some(line) = current_source_line
                     && line.is_empty()
                 {
-                    return Some(SourceAnchor::downstream(line.start));
+                    return Some(SourceAnchor::downstream(SourceByte::new(line.start)));
                 }
                 index.line_boundary_with_affinity(
-                    current_byte,
+                    SourceByte::new(current_byte),
                     self.cursor_affinity_for_byte(current_byte),
                     LineBoundary::Start,
                 )
@@ -351,10 +363,10 @@ impl<S: BlockSource> PreviewEngine<S> {
                 if let Some(line) = current_source_line
                     && line.is_empty()
                 {
-                    return Some(SourceAnchor::downstream(line.start));
+                    return Some(SourceAnchor::downstream(SourceByte::new(line.start)));
                 }
                 index.line_boundary_with_affinity(
-                    current_byte,
+                    SourceByte::new(current_byte),
                     self.cursor_affinity_for_byte(current_byte),
                     LineBoundary::End,
                 )
@@ -374,16 +386,18 @@ impl<S: BlockSource> PreviewEngine<S> {
             self.projection_position_for_vertical_move(lazy, index, current_byte)?;
         let target_visual_line_idx = match vertical_move_target(
             index.visual_lines(),
-            current_position.flat_line_idx,
+            current_position.projection_line_idx,
             direction,
         )? {
-            VerticalMoveTarget::VisualLine(target) => target,
-            VerticalMoveTarget::DocumentStart => return Some(SourceAnchor::downstream(0)),
+            VerticalMoveTarget::ProjectionLine(target) => target,
+            VerticalMoveTarget::DocumentStart => {
+                return Some(SourceAnchor::downstream(SourceByte::new(0)));
+            }
             VerticalMoveTarget::DocumentEnd => {
                 return self
                     .edit_source
                     .as_deref()
-                    .map(|source| SourceAnchor::downstream(source.len()));
+                    .map(|source| SourceAnchor::downstream(SourceByte::new(source.len())));
             }
         };
         let screen_x = match target_x {
@@ -394,7 +408,7 @@ impl<S: BlockSource> PreviewEngine<S> {
             self.projection_grapheme_at_screen_x(lazy, target_visual_line_idx, screen_x)?;
         let target_position = VisualPosition {
             layout_revision: index.layout_revision(),
-            flat_line_idx: target_visual_line_idx,
+            projection_line_idx: target_visual_line_idx,
             grapheme_pos: target_grapheme,
         };
         index.source_anchor_at(self.source_generation, target_position).ok()
@@ -409,19 +423,22 @@ impl<S: BlockSource> PreviewEngine<S> {
         let source_line = self
             .edit_source
             .as_deref()
-            .and_then(|source| source_line_at_byte(source, current_byte));
+            .and_then(|source| source.physical_lines().line_at_byte(current_byte));
         if let Some(source_line) = source_line.filter(|line| line.is_empty())
             && let Some(visual_line_idx) =
-                lazy.projection_visual_line_idx_for_empty_source_byte(source_line.start)
+                lazy.projection_line_for_empty_source_byte(source_line.start)
         {
             return Some(VisualPosition {
                 layout_revision: index.layout_revision(),
-                flat_line_idx: visual_line_idx,
-                grapheme_pos: 0,
+                projection_line_idx: visual_line_idx,
+                grapheme_pos: GraphemeIdx::new(0),
             });
         }
 
-        index.visual_position_for_source(current_byte, self.cursor_affinity_for_byte(current_byte))
+        index.visual_position_for_source(
+            SourceByte::new(current_byte),
+            self.cursor_affinity_for_byte(current_byte),
+        )
     }
 
     pub(in crate::view) fn projection_screen_x(
@@ -429,20 +446,20 @@ impl<S: BlockSource> PreviewEngine<S> {
         lazy: &LazyLayout<S>,
         position: VisualPosition,
     ) -> Option<f32> {
-        let flat_line_idx = lazy.flat_line_idx_for_projection(position.flat_line_idx)?;
-        let line = lazy.flat_lines.get(flat_line_idx)?;
-        Some(line.rect.x + self.grapheme_x_for_line(line, position.grapheme_pos))
+        let flat_line_idx = lazy.flat_line_for_projection(position.projection_line_idx)?;
+        let line = lazy.flat_lines.get(flat_line_idx.get())?;
+        Some(line.rect.x + self.grapheme_x_for_line(line, position.grapheme_pos.get()))
     }
 
     pub(in crate::view) fn projection_grapheme_at_screen_x(
         &self,
         lazy: &LazyLayout<S>,
-        visual_line_idx: usize,
+        visual_line_idx: ProjectionLineIdx,
         screen_x: f32,
-    ) -> Option<usize> {
-        let flat_line_idx = lazy.flat_line_idx_for_projection(visual_line_idx)?;
-        let line = lazy.flat_lines.get(flat_line_idx)?;
-        Some(self.grapheme_at_x_for_line(line, screen_x - line.rect.x))
+    ) -> Option<GraphemeIdx> {
+        let flat_line_idx = lazy.flat_line_for_projection(visual_line_idx)?;
+        let line = lazy.flat_lines.get(flat_line_idx.get())?;
+        Some(GraphemeIdx::new(self.grapheme_at_x_for_line(line, screen_x - line.rect.x)))
     }
 
     pub(in crate::view) fn move_from_hidden_block_separator(
@@ -452,24 +469,25 @@ impl<S: BlockSource> PreviewEngine<S> {
     ) -> Option<SourceAnchor> {
         let index = self.lazy.as_ref()?.source_projection_index.as_ref()?;
         match direction {
-            ui::plugin::MoveDirection::Left => index.line_boundary(current_byte, LineBoundary::End),
+            ui::plugin::MoveDirection::Left => {
+                index.line_boundary(SourceByte::new(current_byte), LineBoundary::End)
+            }
             ui::plugin::MoveDirection::Up | ui::plugin::MoveDirection::LineStart => {
-                index.line_boundary(current_byte, LineBoundary::Start)
+                index.line_boundary(SourceByte::new(current_byte), LineBoundary::Start)
             }
             ui::plugin::MoveDirection::Right | ui::plugin::MoveDirection::Down => {
-                index.move_horizontal(current_byte, HorizontalDirection::Next)
+                index.move_horizontal(SourceByte::new(current_byte), HorizontalDirection::Next)
             }
             ui::plugin::MoveDirection::LineEnd => {
-                index.line_boundary(current_byte, LineBoundary::End)
+                index.line_boundary(SourceByte::new(current_byte), LineBoundary::End)
             }
         }
     }
 
     pub(in crate::view) fn empty_source_line_role(
         &self,
-        source_line: SourceLineAtByte,
+        source_line: SourceLineSpan,
         lazy: &LazyLayout<S>,
-        _source: &str,
     ) -> EmptySourceLineRole {
         if !source_line.is_empty() {
             return EmptySourceLineRole::EditableLine;
@@ -483,19 +501,19 @@ impl<S: BlockSource> PreviewEngine<S> {
 }
 
 enum VerticalMoveTarget {
-    VisualLine(usize),
+    ProjectionLine(ProjectionLineIdx),
     DocumentStart,
     DocumentEnd,
 }
 
 fn vertical_move_target(
     visual_lines: &[crate::layout::types::VisualLineProjection],
-    current_idx: usize,
+    current_idx: ProjectionLineIdx,
     direction: ui::plugin::MoveDirection,
 ) -> Option<VerticalMoveTarget> {
     if let Some(crate::projection::ProjectionOwnerId::TableCell {
         table_start, row, column, ..
-    }) = visual_lines.get(current_idx).map(|line| line.owner)
+    }) = visual_lines.get(current_idx.get()).map(|line| line.owner)
     {
         return table_cell_vertical_target(
             visual_lines,
@@ -510,15 +528,18 @@ fn vertical_move_target(
     match direction {
         ui::plugin::MoveDirection::Up => Some(
             current_idx
+                .get()
                 .checked_sub(1)
-                .map_or(VerticalMoveTarget::DocumentStart, VerticalMoveTarget::VisualLine),
+                .map_or(VerticalMoveTarget::DocumentStart, |line_idx| {
+                    VerticalMoveTarget::ProjectionLine(ProjectionLineIdx::new(line_idx))
+                }),
         ),
         ui::plugin::MoveDirection::Down => {
-            let target = current_idx.checked_add(1)?;
+            let target = current_idx.get().checked_add(1)?;
             Some(if target >= visual_lines.len() {
                 VerticalMoveTarget::DocumentEnd
             } else {
-                VerticalMoveTarget::VisualLine(target)
+                VerticalMoveTarget::ProjectionLine(ProjectionLineIdx::new(target))
             })
         }
         _ => None,
@@ -527,7 +548,7 @@ fn vertical_move_target(
 
 fn table_cell_vertical_target(
     visual_lines: &[crate::layout::types::VisualLineProjection],
-    current_idx: usize,
+    current_idx: ProjectionLineIdx,
     table_start: usize,
     row: usize,
     column: usize,
@@ -546,46 +567,48 @@ fn table_cell_vertical_target(
 
 fn table_cell_vertical_up(
     visual_lines: &[crate::layout::types::VisualLineProjection],
-    current_idx: usize,
+    current_idx: ProjectionLineIdx,
     table_start: usize,
     row: usize,
     column: usize,
 ) -> Option<VerticalMoveTarget> {
-    if let Some(prev_idx) = current_idx.checked_sub(1)
+    if let Some(prev_idx) = current_idx.get().checked_sub(1)
         && visual_lines
             .get(prev_idx)
             .is_some_and(|line| is_table_cell(line.owner, table_start, row, column))
     {
-        return Some(VerticalMoveTarget::VisualLine(prev_idx));
+        return Some(VerticalMoveTarget::ProjectionLine(ProjectionLineIdx::new(prev_idx)));
     }
-    if let Some(above_idx) = visual_lines[..current_idx].iter().rposition(|line| {
+    if let Some(above_idx) = visual_lines[..current_idx.get()].iter().rposition(|line| {
         matches!(
             line.owner,
             crate::projection::ProjectionOwnerId::TableCell { table_start: t, row: r, column: c, .. }
                 if t == table_start && r < row && c == column
         )
     }) {
-        return Some(VerticalMoveTarget::VisualLine(above_idx));
+        return Some(VerticalMoveTarget::ProjectionLine(ProjectionLineIdx::new(above_idx)));
     }
-    let before_table = visual_lines[..current_idx]
+    let before_table = visual_lines[..current_idx.get()]
         .iter()
         .rposition(|line| !belongs_to_table(line.owner, table_start));
-    Some(before_table.map_or(VerticalMoveTarget::DocumentStart, VerticalMoveTarget::VisualLine))
+    Some(before_table.map_or(VerticalMoveTarget::DocumentStart, |line_idx| {
+        VerticalMoveTarget::ProjectionLine(ProjectionLineIdx::new(line_idx))
+    }))
 }
 
 fn table_cell_vertical_down(
     visual_lines: &[crate::layout::types::VisualLineProjection],
-    current_idx: usize,
+    current_idx: ProjectionLineIdx,
     table_start: usize,
     row: usize,
     column: usize,
 ) -> Option<VerticalMoveTarget> {
-    let next_idx = current_idx.checked_add(1)?;
+    let next_idx = current_idx.get().checked_add(1)?;
     if visual_lines
         .get(next_idx)
         .is_some_and(|line| is_table_cell(line.owner, table_start, row, column))
     {
-        return Some(VerticalMoveTarget::VisualLine(next_idx));
+        return Some(VerticalMoveTarget::ProjectionLine(ProjectionLineIdx::new(next_idx)));
     }
     let tail = visual_lines.get(next_idx..).unwrap_or(&[]);
     if let Some(offset) = tail.iter().position(|line| {
@@ -595,11 +618,11 @@ fn table_cell_vertical_down(
                 if t == table_start && r > row && c == column
         )
     }) {
-        return Some(VerticalMoveTarget::VisualLine(next_idx + offset));
+        return Some(VerticalMoveTarget::ProjectionLine(ProjectionLineIdx::new(next_idx + offset)));
     }
     let after_offset = tail.iter().position(|line| !belongs_to_table(line.owner, table_start));
     Some(after_offset.map_or(VerticalMoveTarget::DocumentEnd, |offset| {
-        VerticalMoveTarget::VisualLine(next_idx + offset)
+        VerticalMoveTarget::ProjectionLine(ProjectionLineIdx::new(next_idx + offset))
     }))
 }
 

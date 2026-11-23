@@ -46,15 +46,14 @@ impl<S: BlockSource> PreviewEngine<S> {
             PluginQuery::SelectedText => {
                 Some(PluginResponse::String(self.selected_text().unwrap_or_default()))
             }
-            PluginQuery::SelCursor => Some(PluginResponse::Position(
-                self.sel.cursor.map(|p| (p.flat_line_idx, p.grapheme_pos)),
-            )),
+            PluginQuery::SelCursor => {
+                Some(PluginResponse::Position(self.sel.cursor.map(ViewPos::indices)))
+            }
             PluginQuery::SelectionRange => Some(PluginResponse::PositionPair(
                 self.selection_source_range().map(|(start, end)| ((start, 0), (end, 0))),
             )),
             PluginQuery::HitTest { x, y, offset_x, offset_y } => Some(PluginResponse::Position(
-                self.hit_test(*x, *y, *offset_x, *offset_y)
-                    .map(|p| (p.flat_line_idx, p.grapheme_pos)),
+                self.hit_test(*x, *y, *offset_x, *offset_y).map(ViewPos::indices),
             )),
             PluginQuery::SelectionHighlights(color) => {
                 Some(PluginResponse::DrawList(self.selection_highlights(*color)))
@@ -76,19 +75,12 @@ impl<S: BlockSource> PreviewEngine<S> {
                     .collect(),
             )),
             PluginQuery::WordAtPos(li, gp) => {
-                let (s, e) = self.word_at_pos(ViewPos { flat_line_idx: *li, grapheme_pos: *gp });
-                Some(PluginResponse::PositionPair(Some((
-                    (s.flat_line_idx, s.grapheme_pos),
-                    (e.flat_line_idx, e.grapheme_pos),
-                ))))
+                let (s, e) = self.word_at_pos(ViewPos::from_indices(*li, *gp));
+                Some(PluginResponse::PositionPair(Some((s.indices(), e.indices()))))
             }
             PluginQuery::LineRangeAtPos(li, gp) => {
-                let (s, e) =
-                    self.line_range_at_pos(ViewPos { flat_line_idx: *li, grapheme_pos: *gp });
-                Some(PluginResponse::PositionPair(Some((
-                    (s.flat_line_idx, s.grapheme_pos),
-                    (e.flat_line_idx, e.grapheme_pos),
-                ))))
+                let (s, e) = self.line_range_at_pos(ViewPos::from_indices(*li, *gp));
+                Some(PluginResponse::PositionPair(Some((s.indices(), e.indices()))))
             }
             PluginQuery::CursorScreenPos(byte) => Some(PluginResponse::CursorScreenRect(
                 self.edit_ctx
@@ -103,7 +95,10 @@ impl<S: BlockSource> PreviewEngine<S> {
             PluginQuery::HitTestVisualCaret { x, y, offset_x, offset_y } => {
                 Some(PluginResponse::VisualCaretPosition(
                     self.hit_test_anchor(*x, *y, *offset_x, *offset_y).map(|anchor| {
-                        VisualCaretPosition { byte_offset: anchor.byte, affinity: anchor.affinity }
+                        VisualCaretPosition {
+                            byte_offset: anchor.byte.get(),
+                            affinity: anchor.affinity,
+                        }
                     }),
                 ))
             }
@@ -117,7 +112,10 @@ impl<S: BlockSource> PreviewEngine<S> {
             PluginQuery::VisualMoveCaret { current_byte, direction, target_x } => {
                 Some(PluginResponse::VisualCaretPosition(
                     self.visual_move_anchor(*current_byte, *direction, *target_x).map(|anchor| {
-                        VisualCaretPosition { byte_offset: anchor.byte, affinity: anchor.affinity }
+                        VisualCaretPosition {
+                            byte_offset: anchor.byte.get(),
+                            affinity: anchor.affinity,
+                        }
                     }),
                 ))
             }

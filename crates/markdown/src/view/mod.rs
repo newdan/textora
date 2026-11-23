@@ -6,20 +6,23 @@
 
 use crate::builder::{CodeHighlighter, HighlightSpan, MarkdownDoc};
 use crate::grapheme_map::grapheme_slices;
+use crate::layout::source_line_map::SourceLineSpan;
 use crate::layout::{BlockSource, HeadingEntry, LazyLayout};
+use crate::projection::SourceByte;
 use crate::projection::{
-    CursorAffinity, HorizontalDirection, LineBoundary, SourceAnchor, SourceProjectionIndex,
-    VisualPosition,
+    CursorAffinity, HorizontalDirection, LineBoundary, ProjectionLineIdx, SourceAnchor,
+    SourceProjectionIndex, VisualPosition,
 };
 use crate::search::SearchHighlightCache;
-use crate::selection::{self, SelectionState, ViewPos};
+use crate::selection::GraphemeIdx;
+use crate::selection::{self, FlatLineIdx, SelectionState, ViewPos};
+#[cfg(test)]
+use crate::source_snapshot::SOURCE_LINE_MAP_BUILD_COUNT;
 use crate::source_snapshot::{MarkdownSource, SourceSnapshot};
 use crate::style::MarkdownStyle;
 use render::GlyphVertex;
 use std::path::Path;
 use std::sync::OnceLock;
-#[cfg(test)]
-use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Instant;
 use stdext::arena::scratch_arena;
 use textora_core::document::DocView;
@@ -212,30 +215,9 @@ fn should_log_perf(elapsed_us: u128) -> bool {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(in crate::view) struct SourceLineAtByte {
-    index: usize,
-    start: usize,
-    end: usize,
-    is_blank: bool,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(in crate::view) enum EmptySourceLineRole {
     HiddenBlockSeparator,
     EditableLine,
-}
-
-#[cfg(test)]
-static SOURCE_LINE_AT_BYTE_CALLS: AtomicUsize = AtomicUsize::new(0);
-
-#[cfg(test)]
-pub(in crate::view) fn reset_source_line_at_byte_call_count() {
-    SOURCE_LINE_AT_BYTE_CALLS.store(0, Ordering::Relaxed);
-}
-
-#[cfg(test)]
-pub(in crate::view) fn source_line_at_byte_call_count() -> usize {
-    SOURCE_LINE_AT_BYTE_CALLS.load(Ordering::Relaxed)
 }
 
 pub(in crate::view) struct StandalonePreeditRenderData<'a> {
@@ -251,12 +233,6 @@ pub(in crate::view) struct StandalonePreeditRenderData<'a> {
 pub struct FlatLineProjectionBoundaries {
     pub flat_idx: usize,
     pub boundaries: Vec<usize>,
-}
-
-impl SourceLineAtByte {
-    pub(in crate::view) fn is_empty(self) -> bool {
-        self.is_blank
-    }
 }
 
 impl<'a> CodeHighlighter for AppCodeHighlighter<'a> {
@@ -453,31 +429,6 @@ pub(in crate::view) fn is_plain_markdown_path(path: Option<&Path>) -> bool {
     path.and_then(|p| p.to_str()).is_some_and(|s| {
         (s.ends_with(".md") || s.ends_with(".markdown")) && !s.ends_with(".mmap.md")
     })
-}
-
-pub(in crate::view) fn source_line_at_byte(source: &str, byte: usize) -> Option<SourceLineAtByte> {
-    #[cfg(test)]
-    SOURCE_LINE_AT_BYTE_CALLS.fetch_add(1, Ordering::Relaxed);
-
-    let source_bytes = source.as_bytes();
-    if byte > source_bytes.len() {
-        return None;
-    }
-
-    // 单次 lookup 场景仍走原地扫描，避免为一次调用现造 SourceLineMap。
-    let line_start = source_bytes[..byte]
-        .iter()
-        .rposition(|&source_byte| source_byte == b'\n')
-        .map_or(0, |newline_index| newline_index + 1);
-    let line_end = source_bytes[line_start..]
-        .iter()
-        .position(|&source_byte| source_byte == b'\n')
-        .map_or(source_bytes.len(), |newline_offset| line_start + newline_offset);
-    let line_index =
-        source_bytes[..line_start].iter().filter(|&&source_byte| source_byte == b'\n').count();
-    let is_blank = source[line_start..line_end].chars().all(char::is_whitespace);
-
-    Some(SourceLineAtByte { index: line_index, start: line_start, end: line_end, is_blank })
 }
 
 // `augment_enter` / `augment_backspace` / `augment_insert_text` 及分类器与

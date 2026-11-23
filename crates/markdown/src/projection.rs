@@ -2,8 +2,37 @@ use std::collections::BTreeMap;
 use std::ops::Range;
 
 use crate::layout::types::VisualLineProjection;
+use crate::selection::GraphemeIdx;
 
 pub(crate) use ui::plugin::CursorAffinity;
+
+/// Index in the current layout's canonical source projection order.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub(crate) struct ProjectionLineIdx(usize);
+
+impl ProjectionLineIdx {
+    pub(crate) const fn new(index: usize) -> Self {
+        Self(index)
+    }
+
+    pub(crate) const fn get(self) -> usize {
+        self.0
+    }
+}
+
+/// Byte offset in the Markdown source.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub(crate) struct SourceByte(usize);
+
+impl SourceByte {
+    pub(crate) const fn new(index: usize) -> Self {
+        Self(index)
+    }
+
+    pub(crate) const fn get(self) -> usize {
+        self.0
+    }
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub(crate) enum ProjectionOwnerId {
@@ -14,21 +43,21 @@ pub(crate) enum ProjectionOwnerId {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub(crate) struct SourceAnchor {
-    pub byte: usize,
+    pub byte: SourceByte,
     pub affinity: CursorAffinity,
     virtual_grapheme_ordinal: Option<usize>,
 }
 
 impl SourceAnchor {
-    pub(crate) const fn upstream(byte: usize) -> Self {
+    pub(crate) const fn upstream(byte: SourceByte) -> Self {
         Self { byte, affinity: CursorAffinity::Upstream, virtual_grapheme_ordinal: None }
     }
 
-    pub(crate) const fn downstream(byte: usize) -> Self {
+    pub(crate) const fn downstream(byte: SourceByte) -> Self {
         Self { byte, affinity: CursorAffinity::Downstream, virtual_grapheme_ordinal: None }
     }
 
-    const fn virtual_boundary(byte: usize, virtual_grapheme_ordinal: usize) -> Self {
+    const fn virtual_boundary(byte: SourceByte, virtual_grapheme_ordinal: usize) -> Self {
         Self {
             byte,
             affinity: CursorAffinity::Downstream,
@@ -52,7 +81,7 @@ pub(crate) enum ProjectionSpanKind {
     Verbatim,
     Collapsed,
     Virtual {
-        anchor_byte: usize,
+        anchor_byte: SourceByte,
         virtual_grapheme_start: usize,
     },
 }
@@ -86,8 +115,9 @@ impl TextProjectionBuilder {
         self.flush_pending_gap(source_range.start);
         let visual_start = self.text.len();
         self.text.push_str(text);
-        self.char_anchors
-            .extend(text.chars().map(|_| SourceAnchor::downstream(source_range.start)));
+        self.char_anchors.extend(
+            text.chars().map(|_| SourceAnchor::downstream(SourceByte::new(source_range.start))),
+        );
         self.spans.push(ProjectionSpan {
             source_range,
             visual_range: visual_start..self.text.len(),
@@ -112,10 +142,9 @@ impl TextProjectionBuilder {
         self.flush_pending_gap(source_range.start);
         let visual_start = self.text.len();
         self.text.push_str(text);
-        self.char_anchors.extend(
-            text.char_indices()
-                .map(|(offset, _)| SourceAnchor::downstream(source_range.start + offset)),
-        );
+        self.char_anchors.extend(text.char_indices().map(|(offset, _)| {
+            SourceAnchor::downstream(SourceByte::new(source_range.start + offset))
+        }));
         if let Some(previous) = self.spans.last_mut()
             && previous.kind == kind
             && previous.source_range.end == source_range.start
@@ -137,7 +166,7 @@ impl TextProjectionBuilder {
         if let Some(gap) = self.pending_gap.take() {
             let visual_start = self.text.len();
             self.text.push(' ');
-            self.char_anchors.push(SourceAnchor::upstream(gap.start));
+            self.char_anchors.push(SourceAnchor::upstream(SourceByte::new(gap.start)));
             self.spans.push(ProjectionSpan {
                 source_range: gap.start..next_source_start.max(gap.end),
                 visual_range: visual_start..self.text.len(),
@@ -167,7 +196,7 @@ impl TextProjectionBuilder {
 
         self.text.truncate(newline_start);
         span.visual_range.end = newline_start;
-        span.source_range.end = anchor.byte;
+        span.source_range.end = anchor.byte.get();
         self.truncated_terminal_anchor = Some(anchor);
     }
 
@@ -177,7 +206,7 @@ impl TextProjectionBuilder {
         }
         let last_span_source_end = self.spans.last().map(|span| span.source_range.end);
         let terminal_anchor = self.truncated_terminal_anchor.take().unwrap_or_else(|| {
-            SourceAnchor::downstream(last_span_source_end.unwrap_or(source_end))
+            SourceAnchor::downstream(SourceByte::new(last_span_source_end.unwrap_or(source_end)))
         });
         self.char_anchors.push(terminal_anchor);
         let boundaries = grapheme_boundary_anchors(&self.text, &self.char_anchors);
@@ -187,19 +216,42 @@ impl TextProjectionBuilder {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum ProjectionError {
-    BoundaryCountMismatch { expected: usize, actual: usize },
-    InvalidSourceBoundary { byte: usize },
-    NonMonotonicSourceOrder { previous: usize, current: usize },
-    StaleGeneration { expected: u32, actual: u32 },
-    StaleLayoutRevision { expected: u64, actual: u64 },
-    MissingEditableProjection { flat_line_idx: usize },
+    BoundaryCountMismatch {
+        expected: usize,
+        actual: usize,
+    },
+    #[cfg(test)]
+    InvalidSourceBoundary {
+        byte: SourceByte,
+    },
+    InvalidVisualBoundary {
+        visual_byte: usize,
+    },
+    NonMonotonicSourceOrder {
+        previous: SourceByte,
+        current: SourceByte,
+    },
+    StaleGeneration {
+        expected: u32,
+        actual: u32,
+    },
+    StaleLayoutRevision {
+        expected: u64,
+        actual: u64,
+    },
+    MissingEditableProjection {
+        projection_line_idx: ProjectionLineIdx,
+    },
+    MissingRenderedLineProjection {
+        flat_line_idx: crate::selection::FlatLineIdx,
+    },
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct VisualPosition {
     pub layout_revision: u64,
-    pub flat_line_idx: usize,
-    pub grapheme_pos: usize,
+    pub projection_line_idx: ProjectionLineIdx,
+    pub grapheme_pos: GraphemeIdx,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -222,7 +274,7 @@ pub(crate) enum LineBoundary {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct CollapsedSourceRange {
-    pub source_range: Range<usize>,
+    pub source_range: Range<SourceByte>,
     pub upstream: VisualPosition,
     pub downstream: VisualPosition,
 }
@@ -288,20 +340,19 @@ impl SourceProjectionIndex {
         };
 
         grapheme_pos + 1 == line.boundaries.len()
-            && line.flat_line_idx.checked_add(1) == Some(next_line.flat_line_idx)
             && next_line.boundaries.first() == Some(&source)
-            && line.source_extent.end == source.byte
-            && next_line.source_extent.start == source.byte
+            && line.source_extent.end == source.byte.get()
+            && next_line.source_extent.start == source.byte.get()
             && previous_boundary.byte < source.byte
             && source.byte < next_boundary.byte
     }
 
+    /// Build from rows already ordered for the published source projection.
     pub(crate) fn build(
         source_generation: u32,
         layout_revision: u64,
-        mut visual_lines: Vec<VisualLineProjection>,
+        visual_lines: Vec<VisualLineProjection>,
     ) -> Result<Self, ProjectionError> {
-        visual_lines.sort_by_key(|line| line.flat_line_idx);
         let mut reverse = Vec::new();
         let mut visual_order = Vec::new();
         let mut collapsed = Vec::new();
@@ -310,7 +361,7 @@ impl SourceProjectionIndex {
         for (line_idx, line) in visual_lines.iter().enumerate() {
             if line.boundaries.is_empty() {
                 return Err(ProjectionError::MissingEditableProjection {
-                    flat_line_idx: line.flat_line_idx,
+                    projection_line_idx: ProjectionLineIdx::new(line_idx),
                 });
             }
 
@@ -330,8 +381,8 @@ impl SourceProjectionIndex {
                     source,
                     visual: VisualPosition {
                         layout_revision,
-                        flat_line_idx: line.flat_line_idx,
-                        grapheme_pos,
+                        projection_line_idx: ProjectionLineIdx::new(line_idx),
+                        grapheme_pos: GraphemeIdx::new(grapheme_pos),
                     },
                 };
                 reverse.push(SourceVisualAnchor {
@@ -343,16 +394,17 @@ impl SourceProjectionIndex {
 
             for collapsed_boundary in &line.collapsed {
                 collapsed.push(CollapsedSourceRange {
-                    source_range: collapsed_boundary.source_range.clone(),
+                    source_range: SourceByte::new(collapsed_boundary.source_range.start)
+                        ..SourceByte::new(collapsed_boundary.source_range.end),
                     upstream: VisualPosition {
                         layout_revision,
-                        flat_line_idx: line.flat_line_idx,
-                        grapheme_pos: collapsed_boundary.upstream_grapheme,
+                        projection_line_idx: ProjectionLineIdx::new(line_idx),
+                        grapheme_pos: GraphemeIdx::new(collapsed_boundary.upstream_grapheme),
                     },
                     downstream: VisualPosition {
                         layout_revision,
-                        flat_line_idx: line.flat_line_idx,
-                        grapheme_pos: collapsed_boundary.downstream_grapheme,
+                        projection_line_idx: ProjectionLineIdx::new(line_idx),
+                        grapheme_pos: GraphemeIdx::new(collapsed_boundary.downstream_grapheme),
                     },
                 });
             }
@@ -362,7 +414,7 @@ impl SourceProjectionIndex {
             (
                 entry.source.byte,
                 entry.source.affinity,
-                entry.visual.flat_line_idx,
+                entry.visual.projection_line_idx,
                 entry.visual.grapheme_pos,
             )
         });
@@ -397,32 +449,27 @@ impl SourceProjectionIndex {
             });
         }
 
-        let line_idx = self
-            .visual_lines
-            .binary_search_by_key(&position.flat_line_idx, |line| line.flat_line_idx)
-            .map_err(|_| ProjectionError::MissingEditableProjection {
-                flat_line_idx: position.flat_line_idx,
-            })?;
-        self.visual_lines[line_idx]
-            .boundaries
-            .get(position.grapheme_pos)
+        let line_idx = position.projection_line_idx.get();
+        self.visual_lines
+            .get(line_idx)
+            .and_then(|line| line.boundaries.get(position.grapheme_pos.get()))
             .copied()
             .map(|source| {
                 Self::canonical_source_anchor(
                     &self.visual_lines,
                     line_idx,
-                    position.grapheme_pos,
+                    position.grapheme_pos.get(),
                     source,
                 )
             })
             .ok_or(ProjectionError::MissingEditableProjection {
-                flat_line_idx: position.flat_line_idx,
+                projection_line_idx: position.projection_line_idx,
             })
     }
 
     pub(crate) fn visual_position_for_source(
         &self,
-        source_byte: usize,
+        source_byte: SourceByte,
         affinity: CursorAffinity,
     ) -> Option<VisualPosition> {
         let range_start = self.reverse.partition_point(|entry| entry.source.byte < source_byte);
@@ -454,7 +501,7 @@ impl SourceProjectionIndex {
 
     pub(crate) fn virtual_position_for_source(
         &self,
-        source_byte: usize,
+        source_byte: SourceByte,
         virtual_grapheme: usize,
     ) -> Option<VisualPosition> {
         self.virtual_boundaries
@@ -468,28 +515,25 @@ impl SourceProjectionIndex {
 
     pub(crate) fn move_horizontal(
         &self,
-        current_byte: usize,
+        current_byte: SourceByte,
         direction: HorizontalDirection,
     ) -> Option<SourceAnchor> {
         let current = self.visual_position_for_source(current_byte, CursorAffinity::Downstream)?;
-        let line_idx = self
-            .visual_lines
-            .binary_search_by_key(&current.flat_line_idx, |line| line.flat_line_idx)
-            .ok()?;
+        let line_idx = current.projection_line_idx.get();
 
         match direction {
             HorizontalDirection::Previous => {
-                self.previous_distinct_boundary(line_idx, current.grapheme_pos, current_byte)
+                self.previous_distinct_boundary(line_idx, current.grapheme_pos.get(), current_byte)
             }
             HorizontalDirection::Next => {
-                self.next_distinct_boundary(line_idx, current.grapheme_pos, current_byte)
+                self.next_distinct_boundary(line_idx, current.grapheme_pos.get(), current_byte)
             }
         }
     }
 
     pub(crate) fn line_boundary(
         &self,
-        current_byte: usize,
+        current_byte: SourceByte,
         boundary: LineBoundary,
     ) -> Option<SourceAnchor> {
         self.line_boundary_with_affinity(current_byte, CursorAffinity::Downstream, boundary)
@@ -497,29 +541,28 @@ impl SourceProjectionIndex {
 
     pub(crate) fn line_boundary_with_affinity(
         &self,
-        current_byte: usize,
+        current_byte: SourceByte,
         affinity: CursorAffinity,
         boundary: LineBoundary,
     ) -> Option<SourceAnchor> {
         let position = self.visual_position_for_source(current_byte, affinity)?;
-        let line = self
-            .visual_lines
-            .binary_search_by_key(&position.flat_line_idx, |line| line.flat_line_idx)
-            .ok()
-            .and_then(|line_idx| self.visual_lines.get(line_idx))?;
+        let line = self.visual_lines.get(position.projection_line_idx.get())?;
         let grapheme_pos = match boundary {
             LineBoundary::Start => 0,
             LineBoundary::End => line.boundaries.len().checked_sub(1)?,
         };
-        self.source_anchor_at(self.source_generation, VisualPosition { grapheme_pos, ..position })
-            .ok()
+        self.source_anchor_at(
+            self.source_generation,
+            VisualPosition { grapheme_pos: GraphemeIdx::new(grapheme_pos), ..position },
+        )
+        .ok()
     }
 
     fn previous_distinct_boundary(
         &self,
         current_line_idx: usize,
         current_grapheme: usize,
-        current_byte: usize,
+        current_byte: SourceByte,
     ) -> Option<SourceAnchor> {
         let current_line = self.visual_lines.get(current_line_idx)?;
         if let Some(anchor) = current_line.boundaries[..current_grapheme]
@@ -539,7 +582,7 @@ impl SourceProjectionIndex {
         &self,
         current_line_idx: usize,
         current_grapheme: usize,
-        current_byte: usize,
+        current_byte: SourceByte,
     ) -> Option<SourceAnchor> {
         let current_line = self.visual_lines.get(current_line_idx)?;
         if let Some(remaining_boundaries) =
@@ -568,9 +611,11 @@ impl ProjectedText {
     pub(crate) fn direct(text: &str, source_start: usize) -> Self {
         let mut boundaries = text
             .char_indices()
-            .map(|(relative_byte, _)| SourceAnchor::downstream(source_start + relative_byte))
+            .map(|(relative_byte, _)| {
+                SourceAnchor::downstream(SourceByte::new(source_start + relative_byte))
+            })
             .collect::<Vec<_>>();
-        boundaries.push(SourceAnchor::downstream(source_start + text.len()));
+        boundaries.push(SourceAnchor::downstream(SourceByte::new(source_start + text.len())));
         let boundaries = grapheme_boundary_anchors(text, &boundaries);
 
         Self {
@@ -591,10 +636,18 @@ impl ProjectedText {
     /// Returns the full source extent represented by this visual text,
     /// including collapsed Markdown syntax between direct text spans.
     pub(crate) fn source_extent(&self) -> Range<usize> {
-        let boundary_start =
-            self.boundaries.first().expect("a projected text always has a sentinel boundary").byte;
-        let boundary_end =
-            self.boundaries.last().expect("a projected text always has a sentinel boundary").byte;
+        let boundary_start = self
+            .boundaries
+            .first()
+            .expect("a projected text always has a sentinel boundary")
+            .byte
+            .get();
+        let boundary_end = self
+            .boundaries
+            .last()
+            .expect("a projected text always has a sentinel boundary")
+            .byte
+            .get();
         self.spans.iter().fold(boundary_start..boundary_end, |extent, span| {
             extent.start.min(span.source_range.start)..extent.end.max(span.source_range.end)
         })
@@ -624,15 +677,15 @@ impl ProjectedText {
 
     pub(crate) fn insert_virtual(
         mut self,
-        grapheme_index: usize,
+        grapheme_index: GraphemeIdx,
         text: &str,
-        anchor_byte: usize,
+        anchor_byte: SourceByte,
     ) -> Self {
         if text.is_empty() {
             return self;
         }
 
-        let grapheme_index = grapheme_index.min(self.grapheme_count());
+        let grapheme_index = grapheme_index.get().min(self.grapheme_count());
         let visual_byte = crate::grapheme_map::byte_at_grapheme_index(&self.text, grapheme_index);
         let virtual_grapheme_count = crate::grapheme_map::grapheme_count(text);
         let virtual_grapheme_start = self.next_virtual_grapheme_ordinal();
@@ -670,18 +723,18 @@ impl ProjectedText {
 
     pub(crate) fn replace_graphemes_with_direct(
         mut self,
-        start_grapheme: usize,
-        end_grapheme: usize,
+        start_grapheme: GraphemeIdx,
+        end_grapheme: GraphemeIdx,
         text: &str,
         source_range: Range<usize>,
     ) -> Self {
         let grapheme_count = self.grapheme_count();
-        let start_grapheme = start_grapheme.min(grapheme_count);
-        let end_grapheme = end_grapheme.clamp(start_grapheme, grapheme_count);
+        let start_grapheme = start_grapheme.get().min(grapheme_count);
+        let end_grapheme = end_grapheme.get().clamp(start_grapheme, grapheme_count);
         let visual_start = crate::grapheme_map::byte_at_grapheme_index(&self.text, start_grapheme);
         let visual_end = crate::grapheme_map::byte_at_grapheme_index(&self.text, end_grapheme);
         let replaced_source_range =
-            self.boundaries[start_grapheme].byte..self.boundaries[end_grapheme].byte;
+            self.boundaries[start_grapheme].byte.get()..self.boundaries[end_grapheme].byte.get();
         let direct = Self::direct_with_source_range(text, source_range);
 
         self.text.replace_range(visual_start..visual_end, text);
@@ -716,7 +769,7 @@ impl ProjectedText {
 
         let mut previous = None;
         for anchor in &self.boundaries {
-            if anchor.byte > source.len() || !source.is_char_boundary(anchor.byte) {
+            if anchor.byte.get() > source.len() || !source.is_char_boundary(anchor.byte.get()) {
                 return Err(ProjectionError::InvalidSourceBoundary { byte: anchor.byte });
             }
             if let Some(previous_byte) = previous
@@ -736,9 +789,11 @@ impl ProjectedText {
     fn direct_with_source_range(text: &str, source_range: Range<usize>) -> Self {
         let mut char_anchors = text
             .char_indices()
-            .map(|(relative_byte, _)| SourceAnchor::downstream(source_range.start + relative_byte))
+            .map(|(relative_byte, _)| {
+                SourceAnchor::downstream(SourceByte::new(source_range.start + relative_byte))
+            })
             .collect::<Vec<_>>();
-        char_anchors.push(SourceAnchor::downstream(source_range.end));
+        char_anchors.push(SourceAnchor::downstream(SourceByte::new(source_range.end)));
 
         Self {
             text: text.to_string(),
@@ -756,7 +811,7 @@ fn insert_virtual_span(
     spans: &mut Vec<ProjectionSpan>,
     visual_byte: usize,
     inserted_len: usize,
-    anchor_byte: usize,
+    anchor_byte: SourceByte,
     virtual_grapheme_start: usize,
 ) {
     let mut transformed = Vec::with_capacity(spans.len() + 2);
@@ -772,7 +827,8 @@ fn insert_virtual_span(
             continue;
         }
 
-        let split_source_byte = anchor_byte.clamp(span.source_range.start, span.source_range.end);
+        let split_source_byte =
+            anchor_byte.get().clamp(span.source_range.start, span.source_range.end);
         transformed.push(ProjectionSpan {
             source_range: span.source_range.start..split_source_byte,
             visual_range: span.visual_range.start..visual_byte,
@@ -785,7 +841,7 @@ fn insert_virtual_span(
         });
     }
     transformed.push(ProjectionSpan {
-        source_range: anchor_byte..anchor_byte,
+        source_range: anchor_byte.get()..anchor_byte.get(),
         visual_range: visual_byte..visual_byte + inserted_len,
         kind: ProjectionSpanKind::Virtual { anchor_byte, virtual_grapheme_start },
     });
@@ -864,19 +920,19 @@ mod tests {
     fn shared_boundary_fixture() -> Vec<VisualLineProjection> {
         vec![
             VisualLineProjection {
-                flat_line_idx: 0,
                 owner: ProjectionOwnerId::Block { block_start: 0, logical_line: 0 },
                 boundaries: (0..5)
-                    .map(SourceAnchor::downstream)
-                    .chain(std::iter::once(SourceAnchor::upstream(5)))
+                    .map(|byte| SourceAnchor::downstream(SourceByte::new(byte)))
+                    .chain(std::iter::once(SourceAnchor::upstream(SourceByte::new(5))))
                     .collect(),
                 source_extent: 0..5,
                 collapsed: Vec::new(),
             },
             VisualLineProjection {
-                flat_line_idx: 1,
                 owner: ProjectionOwnerId::Block { block_start: 0, logical_line: 0 },
-                boundaries: (5..=9).map(SourceAnchor::downstream).collect(),
+                boundaries: (5..=9)
+                    .map(|byte| SourceAnchor::downstream(SourceByte::new(byte)))
+                    .collect(),
                 source_extent: 5..9,
                 collapsed: Vec::new(),
             },
@@ -890,16 +946,23 @@ mod tests {
         const WRAP_BYTE: usize = 5;
         let mut lines = shared_boundary_fixture();
         *lines[0].boundaries.last_mut().expect("first fixture row has a sentinel") =
-            SourceAnchor::downstream(WRAP_BYTE);
+            SourceAnchor::downstream(SourceByte::new(WRAP_BYTE));
         let index = SourceProjectionIndex::build(GENERATION, REVISION, lines)
             .expect("raw shared-boundary fixture is valid");
-        let position =
-            VisualPosition { layout_revision: REVISION, flat_line_idx: 0, grapheme_pos: WRAP_BYTE };
+        let position = VisualPosition {
+            layout_revision: REVISION,
+            projection_line_idx: ProjectionLineIdx::new(0),
+            grapheme_pos: GraphemeIdx::new(WRAP_BYTE),
+        };
         let anchor = index.source_anchor_at(GENERATION, position).expect("visual line end anchor");
-        assert_eq!(anchor, SourceAnchor::upstream(WRAP_BYTE));
+        assert_eq!(anchor, SourceAnchor::upstream(SourceByte::new(WRAP_BYTE)));
         assert_eq!(index.visual_position_for_source(anchor.byte, anchor.affinity), Some(position));
         assert_eq!(
-            index.line_boundary_with_affinity(2, CursorAffinity::Downstream, LineBoundary::End),
+            index.line_boundary_with_affinity(
+                SourceByte::new(2),
+                CursorAffinity::Downstream,
+                LineBoundary::End
+            ),
             Some(anchor)
         );
     }
@@ -909,12 +972,20 @@ mod tests {
         let lines = shared_boundary_fixture();
         let index = SourceProjectionIndex::build(7, 3, lines).expect("fixture is valid");
         assert_eq!(
-            index.visual_position_for_source(5, CursorAffinity::Upstream),
-            Some(VisualPosition { layout_revision: 3, flat_line_idx: 0, grapheme_pos: 5 })
+            index.visual_position_for_source(SourceByte::new(5), CursorAffinity::Upstream),
+            Some(VisualPosition {
+                layout_revision: 3,
+                projection_line_idx: ProjectionLineIdx::new(0),
+                grapheme_pos: GraphemeIdx::new(5)
+            })
         );
         assert_eq!(
-            index.visual_position_for_source(5, CursorAffinity::Downstream),
-            Some(VisualPosition { layout_revision: 3, flat_line_idx: 1, grapheme_pos: 0 })
+            index.visual_position_for_source(SourceByte::new(5), CursorAffinity::Downstream),
+            Some(VisualPosition {
+                layout_revision: 3,
+                projection_line_idx: ProjectionLineIdx::new(1),
+                grapheme_pos: GraphemeIdx::new(0)
+            })
         );
     }
 
@@ -925,21 +996,24 @@ mod tests {
         assert_eq!(
             index.source_anchor_at(
                 8,
-                VisualPosition { layout_revision: 3, flat_line_idx: 0, grapheme_pos: 0 },
+                VisualPosition {
+                    layout_revision: 3,
+                    projection_line_idx: ProjectionLineIdx::new(0),
+                    grapheme_pos: GraphemeIdx::new(0)
+                },
             ),
             Err(ProjectionError::StaleGeneration { expected: 7, actual: 8 })
         );
     }
 
     #[test]
-    fn index_reads_anchor_from_matching_flat_line_index() {
+    fn index_rejects_missing_editable_projection() {
         let index = SourceProjectionIndex::build(
             7,
             3,
             vec![VisualLineProjection {
-                flat_line_idx: 4,
                 owner: ProjectionOwnerId::Block { block_start: 9, logical_line: 0 },
-                boundaries: vec![SourceAnchor::downstream(9)],
+                boundaries: vec![SourceAnchor::downstream(SourceByte::new(9))],
                 source_extent: 9..9,
                 collapsed: Vec::new(),
             }],
@@ -949,15 +1023,43 @@ mod tests {
         assert_eq!(
             index.source_anchor_at(
                 7,
-                VisualPosition { layout_revision: 3, flat_line_idx: 4, grapheme_pos: 0 },
+                VisualPosition {
+                    layout_revision: 3,
+                    projection_line_idx: ProjectionLineIdx::new(4),
+                    grapheme_pos: GraphemeIdx::new(0)
+                },
             ),
-            Ok(SourceAnchor::downstream(9))
+            Err(ProjectionError::MissingEditableProjection {
+                projection_line_idx: ProjectionLineIdx::new(4),
+            })
+        );
+    }
+
+    #[test]
+    fn projection_rejects_an_out_of_range_grapheme_boundary() {
+        let index = SourceProjectionIndex::build(7, 3, shared_boundary_fixture())
+            .expect("fixture is valid");
+        let typed_source_byte = SourceByte::new(5);
+        let position = index
+            .visual_position_for_source(typed_source_byte, CursorAffinity::Upstream)
+            .expect("fixture maps the shared source boundary");
+        let missing_boundary = VisualPosition { grapheme_pos: GraphemeIdx::new(6), ..position };
+
+        assert_eq!(
+            index.source_anchor_at(7, missing_boundary),
+            Err(ProjectionError::MissingEditableProjection {
+                projection_line_idx: position.projection_line_idx,
+            }),
         );
     }
 
     #[test]
     fn index_classifies_virtual_preedit_boundaries_for_navigation() {
-        let projected = ProjectedText::direct("ab", 10).insert_virtual(1, "中文", 11);
+        let projected = ProjectedText::direct("ab", 10).insert_virtual(
+            GraphemeIdx::new(1),
+            "中文",
+            SourceByte::new(11),
+        );
         let virtual_line = projected
             .slice_visual_line(0, 0..projected.text.len())
             .expect("the virtual projection must slice at its visual boundaries");
@@ -971,27 +1073,38 @@ mod tests {
             .expect("virtual preedit is valid");
 
         assert_eq!(
-            index.move_horizontal(11, HorizontalDirection::Previous),
-            Some(SourceAnchor::downstream(10))
+            index.move_horizontal(SourceByte::new(11), HorizontalDirection::Previous),
+            Some(SourceAnchor::downstream(SourceByte::new(10)))
         );
         assert_eq!(
-            index.move_horizontal(11, HorizontalDirection::Next),
-            Some(SourceAnchor::downstream(12))
+            index.move_horizontal(SourceByte::new(11), HorizontalDirection::Next),
+            Some(SourceAnchor::downstream(SourceByte::new(12)))
         );
         assert_eq!(
-            index.line_boundary(11, LineBoundary::Start),
-            Some(SourceAnchor::downstream(10))
+            index.line_boundary(SourceByte::new(11), LineBoundary::Start),
+            Some(SourceAnchor::downstream(SourceByte::new(10)))
         );
-        assert_eq!(index.line_boundary(11, LineBoundary::End), Some(SourceAnchor::downstream(12)));
         assert_eq!(
-            index.virtual_position_for_source(11, 2),
-            Some(VisualPosition { layout_revision: 3, flat_line_idx: 0, grapheme_pos: 3 })
+            index.line_boundary(SourceByte::new(11), LineBoundary::End),
+            Some(SourceAnchor::downstream(SourceByte::new(12)))
+        );
+        assert_eq!(
+            index.virtual_position_for_source(SourceByte::new(11), 2),
+            Some(VisualPosition {
+                layout_revision: 3,
+                projection_line_idx: ProjectionLineIdx::new(0),
+                grapheme_pos: GraphemeIdx::new(3)
+            })
         );
     }
 
     #[test]
     fn virtual_preedit_cursor_uses_second_grapheme_after_soft_wrap() {
-        let projected = ProjectedText::direct("ab", 10).insert_virtual(1, "中文", 11);
+        let projected = ProjectedText::direct("ab", 10).insert_virtual(
+            GraphemeIdx::new(1),
+            "中文",
+            SourceByte::new(11),
+        );
         let first_line_end = "a中".len();
         let first_line = projected
             .slice_visual_line(0, 0..first_line_end)
@@ -1004,8 +1117,12 @@ mod tests {
             .expect("wrapped virtual preedit is valid");
 
         assert_eq!(
-            index.virtual_position_for_source(11, 2),
-            Some(VisualPosition { layout_revision: 3, flat_line_idx: 1, grapheme_pos: 1 }),
+            index.virtual_position_for_source(SourceByte::new(11), 2),
+            Some(VisualPosition {
+                layout_revision: 3,
+                projection_line_idx: ProjectionLineIdx::new(1),
+                grapheme_pos: GraphemeIdx::new(1)
+            }),
             "the second preedit grapheme cursor must be at the visual end, not the next line start"
         );
     }
@@ -1015,23 +1132,23 @@ mod tests {
         let previous = SourceProjectionIndex::build(7, 3, shared_boundary_fixture())
             .expect("fixture is valid");
         let stale_position = previous
-            .visual_position_for_source(3, CursorAffinity::Downstream)
+            .visual_position_for_source(SourceByte::new(3), CursorAffinity::Downstream)
             .expect("fixture must map source byte 3");
         let reflowed_lines = vec![
             VisualLineProjection {
-                flat_line_idx: 0,
                 owner: ProjectionOwnerId::Block { block_start: 0, logical_line: 0 },
                 boundaries: (0..3)
-                    .map(SourceAnchor::downstream)
-                    .chain(std::iter::once(SourceAnchor::upstream(3)))
+                    .map(|byte| SourceAnchor::downstream(SourceByte::new(byte)))
+                    .chain(std::iter::once(SourceAnchor::upstream(SourceByte::new(3))))
                     .collect(),
                 source_extent: 0..3,
                 collapsed: Vec::new(),
             },
             VisualLineProjection {
-                flat_line_idx: 1,
                 owner: ProjectionOwnerId::Block { block_start: 0, logical_line: 0 },
-                boundaries: (3..=9).map(SourceAnchor::downstream).collect(),
+                boundaries: (3..=9)
+                    .map(|byte| SourceAnchor::downstream(SourceByte::new(byte)))
+                    .collect(),
                 source_extent: 3..9,
                 collapsed: Vec::new(),
             },
@@ -1050,7 +1167,7 @@ mod tests {
         let projected = ProjectedText::direct("abc", 5);
         assert_eq!(projected.text, "abc");
         assert_eq!(
-            projected.boundaries.iter().map(|anchor| anchor.byte).collect::<Vec<_>>(),
+            projected.boundaries.iter().map(|anchor| anchor.byte.get()).collect::<Vec<_>>(),
             vec![5, 6, 7, 8]
         );
         assert_eq!(projected.validate(".....abc"), Ok(()));
@@ -1058,11 +1175,15 @@ mod tests {
 
     #[test]
     fn virtual_insertion_splits_direct_projection_spans_without_overlap() {
-        let projected = ProjectedText::direct("ab", 10).insert_virtual(1, "中文", 11);
+        let projected = ProjectedText::direct("ab", 10).insert_virtual(
+            GraphemeIdx::new(1),
+            "中文",
+            SourceByte::new(11),
+        );
 
         assert_eq!(projected.text, "a中文b");
         assert_eq!(
-            projected.boundaries.iter().map(|anchor| anchor.byte).collect::<Vec<_>>(),
+            projected.boundaries.iter().map(|anchor| anchor.byte.get()).collect::<Vec<_>>(),
             vec![10, 11, 11, 11, 12]
         );
         assert_eq!(projected.spans.len(), 3);
@@ -1071,7 +1192,7 @@ mod tests {
         assert_eq!(projected.spans[1].visual_range, 1.."a中文".len());
         assert!(matches!(
             projected.spans[1].kind,
-            ProjectionSpanKind::Virtual { anchor_byte: 11, .. }
+            ProjectionSpanKind::Virtual { anchor_byte, .. } if anchor_byte == SourceByte::new(11)
         ));
         assert_eq!(projected.spans[2].visual_range, "a中文".len().."a中文b".len());
         assert!(matches!(projected.spans[2].kind, ProjectionSpanKind::Direct));
@@ -1083,14 +1204,17 @@ mod tests {
             text: "ab".to_string(),
             spans: Vec::new(),
             boundaries: vec![
-                SourceAnchor::downstream(4),
-                SourceAnchor::downstream(3),
-                SourceAnchor::downstream(5),
+                SourceAnchor::downstream(SourceByte::new(4)),
+                SourceAnchor::downstream(SourceByte::new(3)),
+                SourceAnchor::downstream(SourceByte::new(5)),
             ],
         };
         assert_eq!(
             projected.validate("....."),
-            Err(ProjectionError::NonMonotonicSourceOrder { previous: 4, current: 3 })
+            Err(ProjectionError::NonMonotonicSourceOrder {
+                previous: SourceByte::new(4),
+                current: SourceByte::new(3)
+            })
         );
     }
 
@@ -1099,7 +1223,7 @@ mod tests {
         let projected = ProjectedText {
             text: "👨\u{200d}👩".to_string(),
             spans: Vec::new(),
-            boundaries: vec![SourceAnchor::downstream(0)],
+            boundaries: vec![SourceAnchor::downstream(SourceByte::new(0))],
         };
         assert!(matches!(
             projected.validate("👨\u{200d}👩"),

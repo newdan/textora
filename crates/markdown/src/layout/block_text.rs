@@ -180,6 +180,7 @@ pub(in crate::layout::block) fn projected_style_source_range(
         projected.boundaries
             [crate::grapheme_map::grapheme_index_at_byte(&projected.text, visual_range.start)]
         .byte
+        .get()
     };
     let source_end = if visual_range.end == style_end {
         style_span.source_range.end
@@ -187,6 +188,7 @@ pub(in crate::layout::block) fn projected_style_source_range(
         projected.boundaries
             [crate::grapheme_map::grapheme_index_at_byte(&projected.text, visual_range.end)]
         .byte
+        .get()
     };
     source_start..source_end
 }
@@ -195,8 +197,12 @@ pub(in crate::layout::block) fn marker_source_range_for_projected_line(
     projected: &crate::projection::ProjectedText,
     marker: &crate::edit::ActiveBlockMarker,
 ) -> std::ops::Range<usize> {
-    let content_start =
-        projected.boundaries.first().expect("a projected line always has a sentinel boundary").byte;
+    let content_start = projected
+        .boundaries
+        .first()
+        .expect("a projected line always has a sentinel boundary")
+        .byte
+        .get();
     let marker_len = marker.marker_text.len();
     content_start.saturating_sub(marker_len)..content_start
 }
@@ -209,7 +215,7 @@ pub(in crate::layout::block) fn source_marker_for_projected_line(
     if !marker.marker_text.starts_with('>') {
         return Some(marker.clone());
     }
-    let content_start = projected.boundaries.first()?.byte;
+    let content_start = projected.boundaries.first()?.byte.get();
     let preceding_source = source?.get(..content_start)?;
     let line_start = preceding_source.rfind('\n').map_or(0, |newline| newline + 1);
     let line_prefix = &preceding_source[line_start..];
@@ -587,10 +593,10 @@ pub(in crate::layout::block) fn append_trailing_whitespace_projection(
     let Some(last_boundary) = projected.boundaries.last() else {
         return;
     };
-    let source_line_end = source_text[last_boundary.byte..]
+    let source_line_end = source_text[last_boundary.byte.get()..]
         .find('\n')
-        .map_or(source_text.len(), |newline_offset| last_boundary.byte + newline_offset);
-    let trailing_range = last_boundary.byte..source_line_end;
+        .map_or(source_text.len(), |newline_offset| last_boundary.byte.get() + newline_offset);
+    let trailing_range = last_boundary.byte.get()..source_line_end;
     let Some(trailing_text) = source_text.get(trailing_range.clone()) else {
         return;
     };

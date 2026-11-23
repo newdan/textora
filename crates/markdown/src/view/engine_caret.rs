@@ -94,11 +94,11 @@ impl<S: BlockSource> PreviewEngine<S> {
                 cursor_byte,
                 self.cursor_affinity_for_byte(cursor_byte),
             )
-            .map(|position| (position.flat_line_idx, position.grapheme_pos))?;
-        let flat_idx = lazy.flat_line_idx_for_projection(visual_line_idx)?;
-        let fl = lazy.flat_lines.get(flat_idx)?;
+            .map(|position| (position.projection_line_idx, position.grapheme_pos))?;
+        let flat_idx = lazy.flat_line_for_projection(visual_line_idx)?;
+        let fl = lazy.flat_lines.get(flat_idx.get())?;
         let x = fl.rect.x
-            + crate::layout::grapheme_x(fl, visual_grapheme)
+            + crate::layout::grapheme_x(fl, visual_grapheme.get())
             + self.trailing_stripped_space_advance(flat_idx, cursor_byte);
         let cursor_height = fl.font_size.min(fl.rect.h);
         let text_baseline_y = fl.rect.y + fl.font_size - self.scroll_y;
@@ -123,7 +123,7 @@ impl<S: BlockSource> PreviewEngine<S> {
             .as_ref()?
             .source_projection_index
             .as_ref()?
-            .visual_position_for_source(source_byte, affinity)
+            .visual_position_for_source(SourceByte::new(source_byte), affinity)
     }
 
     /// Extra x advance when the cursor sits past bytes that were present in the
@@ -132,31 +132,30 @@ impl<S: BlockSource> PreviewEngine<S> {
     /// stops the cursor at the end of the last shaped grapheme.
     pub(in crate::view) fn trailing_stripped_space_advance(
         &self,
-        flat_idx: usize,
+        flat_idx: FlatLineIdx,
         cursor_byte: usize,
     ) -> f32 {
         let Some(lazy) = self.lazy.as_ref() else { return 0.0 };
-        let Some(fl) = lazy.flat_lines.get(flat_idx) else { return 0.0 };
+        let Some(fl) = lazy.flat_lines.get(flat_idx.get()) else { return 0.0 };
         let Some(projection) = fl.source_projection.as_ref() else { return 0.0 };
-        let Some(sentinel) = projection.boundaries.last().map(|anchor| anchor.byte) else {
+        let Some(sentinel) = projection.boundaries.last().map(|anchor| anchor.byte.get()) else {
             return 0.0;
         };
         let Some(source) = self.edit_source.as_deref() else { return 0.0 };
+        let Some(projection_line_idx) = lazy.projection_line_for_flat_line(flat_idx) else {
+            return 0.0;
+        };
 
         let missing_space_count = if cursor_byte >= sentinel {
             self.terminal_stripped_space_count(
                 source,
                 fl,
-                projection.flat_line_idx,
+                projection_line_idx,
                 sentinel,
                 cursor_byte,
             )
         } else {
-            self.internal_soft_break_stripped_space_count(
-                source,
-                projection.flat_line_idx,
-                cursor_byte,
-            )
+            self.internal_soft_break_stripped_space_count(source, projection_line_idx, cursor_byte)
         };
         if missing_space_count == 0 {
             return 0.0;
@@ -181,7 +180,7 @@ impl<S: BlockSource> PreviewEngine<S> {
         &self,
         source: &str,
         fl: &crate::layout::FlatLine,
-        expected_proj_idx: usize,
+        expected_proj_idx: ProjectionLineIdx,
         sentinel: usize,
         cursor_byte: usize,
     ) -> usize {
@@ -213,7 +212,7 @@ impl<S: BlockSource> PreviewEngine<S> {
     fn internal_soft_break_stripped_space_count(
         &self,
         source: &str,
-        expected_proj_idx: usize,
+        expected_proj_idx: ProjectionLineIdx,
         cursor_byte: usize,
     ) -> usize {
         let before_ws_start = horizontal_whitespace_start_before(source, cursor_byte);
@@ -235,7 +234,7 @@ impl<S: BlockSource> PreviewEngine<S> {
         &self,
         ws_before: &str,
         before_ws_start: usize,
-        expected_proj_idx: usize,
+        expected_proj_idx: ProjectionLineIdx,
         cursor_byte: usize,
     ) -> usize {
         let Some(before_pos) = self.cursor_visual_position_for_byte(
@@ -250,12 +249,13 @@ impl<S: BlockSource> PreviewEngine<S> {
         ) else {
             return 0;
         };
-        if cursor_pos.flat_line_idx != expected_proj_idx
-            || before_pos.flat_line_idx != expected_proj_idx
+        if cursor_pos.projection_line_idx != expected_proj_idx
+            || before_pos.projection_line_idx != expected_proj_idx
         {
             return 0;
         }
-        let advanced_graphemes = cursor_pos.grapheme_pos.saturating_sub(before_pos.grapheme_pos);
+        let advanced_graphemes =
+            cursor_pos.grapheme_pos.get().saturating_sub(before_pos.grapheme_pos.get());
         ws_before.chars().count().saturating_sub(advanced_graphemes)
     }
 
@@ -271,7 +271,7 @@ impl<S: BlockSource> PreviewEngine<S> {
         let virtual_position = lazy
             .source_projection_index
             .as_ref()?
-            .virtual_position_for_source(ctx.cursor_byte, preedit_cursor_grapheme);
+            .virtual_position_for_source(SourceByte::new(ctx.cursor_byte), preedit_cursor_grapheme);
         let Some(virtual_position) = virtual_position else {
             let (x, y, width, height) = self.cursor_screen_pos_for_byte(ctx.cursor_byte)?;
             return Some((
@@ -281,10 +281,10 @@ impl<S: BlockSource> PreviewEngine<S> {
                 height,
             ));
         };
-        let flat_idx = lazy.flat_line_idx_for_projection(virtual_position.flat_line_idx)?;
-        let fl = lazy.flat_lines.get(flat_idx)?;
+        let flat_idx = lazy.flat_line_for_projection(virtual_position.projection_line_idx)?;
+        let fl = lazy.flat_lines.get(flat_idx.get())?;
         let x = fl.rect.x
-            + crate::layout::grapheme_x(fl, virtual_position.grapheme_pos)
+            + crate::layout::grapheme_x(fl, virtual_position.grapheme_pos.get())
             + self.trailing_stripped_space_advance(flat_idx, ctx.cursor_byte);
         let cursor_height = fl.font_size.min(fl.rect.h);
         let text_baseline_y = fl.rect.y + fl.font_size - self.scroll_y;
@@ -299,8 +299,8 @@ impl<S: BlockSource> PreviewEngine<S> {
         let preedit_text = ctx.preedit_text.as_deref().filter(|text| !text.is_empty())?;
         let lazy = self.lazy.as_ref()?;
         let source = self.edit_source.as_deref()?;
-        let source_line = source_line_at_byte(source, ctx.cursor_byte)?;
-        if self.empty_source_line_role(source_line, lazy, source)
+        let source_line = source.physical_lines().line_at_byte(ctx.cursor_byte)?;
+        if self.empty_source_line_role(source_line, lazy)
             == EmptySourceLineRole::HiddenBlockSeparator
         {
             return None;
@@ -310,7 +310,7 @@ impl<S: BlockSource> PreviewEngine<S> {
         if lazy
             .source_projection_index
             .as_ref()?
-            .virtual_position_for_source(ctx.cursor_byte, preedit_cursor_grapheme)
+            .virtual_position_for_source(SourceByte::new(ctx.cursor_byte), preedit_cursor_grapheme)
             .is_some()
         {
             return None;
@@ -334,20 +334,20 @@ impl<S: BlockSource> PreviewEngine<S> {
         cursor_byte: usize,
     ) -> Option<(f32, f32, f32, f32)> {
         let source = self.edit_source.as_ref()?;
-        let source_line = source_line_at_byte(source, cursor_byte)?;
+        let source_line = source.physical_lines().line_at_byte(cursor_byte)?;
         if !source_line.is_empty() {
             return None;
         }
 
         let lazy = self.lazy.as_ref()?;
-        if self.empty_source_line_role(source_line, lazy, source)
+        if self.empty_source_line_role(source_line, lazy)
             == EmptySourceLineRole::HiddenBlockSeparator
         {
             return None;
         }
 
         let line = self.own_rendered_line(source_line, lazy)?;
-        let source_start = line.source_projection.as_ref()?.boundaries.first()?.byte;
+        let source_start = line.source_projection.as_ref()?.boundaries.first()?.byte.get();
         let whitespace_before_cursor = source.get(source_start..cursor_byte)?;
         let whitespace_graphemes = crate::grapheme_map::grapheme_count(whitespace_before_cursor);
         let whitespace_advance = if line.text.starts_with(whitespace_before_cursor) {
@@ -369,9 +369,8 @@ impl<S: BlockSource> PreviewEngine<S> {
     #[cfg(test)]
     pub(in crate::view) fn empty_source_line_metrics(
         &self,
-        source_line: SourceLineAtByte,
+        source_line: SourceLineSpan,
         lazy: &LazyLayout<S>,
-        _source: &str,
     ) -> Option<(f32, f32, f32, f32)> {
         let line = self.own_rendered_line(source_line, lazy)?;
         Some((line.rect.x, line.rect.y, line.font_size, line.rect.h))
@@ -381,13 +380,13 @@ impl<S: BlockSource> PreviewEngine<S> {
     /// 判定依据：投影的源码范围完整落在该空行的源码区间内。
     pub(in crate::view) fn own_rendered_line<'a>(
         &self,
-        source_line: SourceLineAtByte,
+        source_line: SourceLineSpan,
         lazy: &'a LazyLayout<S>,
     ) -> Option<&'a crate::layout::FlatLine> {
         lazy.flat_lines.iter().find(|flat_line| {
             flat_line.source_projection.as_ref().is_some_and(|projection| {
                 projection.source_extent.start >= source_line.start
-                    && projection.source_extent.end <= source_line.end
+                    && projection.source_extent.end <= source_line.content_end
             })
         })
     }

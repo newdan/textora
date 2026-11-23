@@ -17,19 +17,15 @@ impl MarkdownEditorView {
             if matched.is_empty() || self.source.get(matched.clone()).is_none() {
                 continue;
             }
-            let Some((start_line, start_grapheme)) =
-                self.search_position_for_byte(matched.start, false)
+            let Some(start) = self.search_position_for_byte(SourceByte::new(matched.start), false)
             else {
                 continue;
             };
-            let Some((end_line, end_grapheme)) = self.search_position_for_byte(matched.end, true)
+            let Some(end) = self.search_position_for_byte(SourceByte::new(matched.end), true)
             else {
                 continue;
             };
-            let selection = SelectionState {
-                anchor: Some(ViewPos { flat_line_idx: start_line, grapheme_pos: start_grapheme }),
-                cursor: Some(ViewPos { flat_line_idx: end_line, grapheme_pos: end_grapheme }),
-            };
+            let selection = SelectionState { anchor: Some(start), cursor: Some(end) };
             let color = if index == active_idx { match_color } else { inactive_color };
             highlights.cmds.extend(
                 selection
@@ -47,7 +43,7 @@ impl MarkdownEditorView {
         engine.clip_code_highlights(highlights)
     }
 
-    fn search_position_for_byte(&self, byte: usize, is_end: bool) -> Option<(usize, usize)> {
+    fn search_position_for_byte(&self, byte: SourceByte, is_end: bool) -> Option<ViewPos> {
         if let Some(position) = self.engine.selection_position_for_byte(byte, is_end) {
             return Some(position);
         }
@@ -59,8 +55,10 @@ impl MarkdownEditorView {
                 let range = anchors[0].byte..anchors[1].byte;
                 (range.start < byte
                     && byte < range.end
-                    && crate::grapheme_map::grapheme_count(self.source.get(range)?) == 1)
-                    .then_some((line_index, grapheme + usize::from(is_end)))
+                    && crate::grapheme_map::grapheme_count(
+                        self.source.get(range.start.get()..range.end.get())?,
+                    ) == 1)
+                    .then(|| ViewPos::from_indices(line_index, grapheme + usize::from(is_end)))
             })
         })
     }

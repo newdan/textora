@@ -58,7 +58,7 @@ pub(in crate::augmenter) fn backspace_literal_context(
     source: &MarkdownSource<'_>,
     cursor: usize,
 ) -> EnterContext {
-    let Some((line_start, _, _)) = locate_source_line_bounds(source, cursor) else {
+    let Some((line_start, _, _)) = locate_snapshot_line_bounds(source, cursor) else {
         return EnterContext::Other;
     };
     let prefix = &source[line_start..cursor];
@@ -73,7 +73,7 @@ pub(in crate::augmenter) fn backspace_code_boundary(
     source: &MarkdownSource<'_>,
     cursor: usize,
 ) -> Option<EditAugmentation> {
-    let (line_start, _, line_end) = locate_source_line_bounds(source, cursor)?;
+    let (line_start, _, line_end) = locate_snapshot_line_bounds(source, cursor)?;
     let boundary = enclosing_fenced_boundary(source, cursor)?;
     let position = matching_container_position(
         source,
@@ -129,7 +129,7 @@ pub(in crate::augmenter) fn delete_forward_code_row_join(
     next_line_start: usize,
 ) -> Option<EditAugmentation> {
     let boundary = enclosing_fenced_boundary(source, cursor)?;
-    let (_, _, line_end) = locate_source_line_bounds(source, next_line_start)?;
+    let (_, _, line_end) = locate_snapshot_line_bounds(source, next_line_start)?;
     let position = matching_container_position(
         source,
         next_line_start,
@@ -154,7 +154,7 @@ struct FencedLineSpan {
 }
 
 fn fenced_line_span(source: &MarkdownSource<'_>, current_byte: usize) -> Option<FencedLineSpan> {
-    let (line_start, _, line_end) = locate_source_line_bounds(source, current_byte)?;
+    let (line_start, _, line_end) = locate_snapshot_line_bounds(source, current_byte)?;
     let current_line = &source[line_start..source_line_content_end(source, line_end)];
     if !current_line.contains("```") && !current_line.contains("~~~") {
         return None;
@@ -551,7 +551,7 @@ pub(in crate::augmenter) fn delete_forward_join_reopened_inline_elements(
         inline_html_break_starting_at(source, boundary_start)
     {
         let opening_start = br_range.end;
-        let (_, _, line_end) = locate_source_line_bounds(source, opening_start)?;
+        let (_, _, line_end) = locate_snapshot_line_bounds(source, opening_start)?;
         (line_end, opening_start)
     } else {
         let next_line_start =
@@ -569,7 +569,7 @@ pub(in crate::augmenter) fn delete_forward_join_reopened_inline_elements(
                 }
                 probe
             };
-        let (_, _, next_line_end) = locate_source_line_bounds(source, next_line_start)?;
+        let (_, _, next_line_end) = locate_snapshot_line_bounds(source, next_line_start)?;
         let opening_start = container_content_start_on_line(source, next_line_start, next_line_end);
         (next_line_end, opening_start)
     };
@@ -612,12 +612,12 @@ fn delete_forward_join_hard_break_line(
     if boundary.end < source.len() && newline_sequence_width_at(source, boundary.end).is_some() {
         return None;
     }
-    let (cur_line_start, _, _) = locate_source_line_bounds(source, current_byte)?;
+    let (cur_line_start, _, _) = locate_snapshot_line_bounds(source, current_byte)?;
     let current_content_start =
         container_content_start_on_line(source, cur_line_start, current_byte);
     let current_prefix = canonical_container_prefix(source, current_content_start);
     if boundary.end < source.len() {
-        let (_, _, next_line_end) = locate_source_line_bounds(source, boundary.end)?;
+        let (_, _, next_line_end) = locate_snapshot_line_bounds(source, boundary.end)?;
         let next_is_blank = blank_source_line_width(source, boundary.end).is_some();
         let is_terminal_container_continuation =
             next_line_end == source.len() && !current_prefix.is_empty();
@@ -652,7 +652,7 @@ fn delete_forward_join_hard_break_line(
     }
 
     let next_line_start = boundary.end;
-    let (_, _, next_line_end) = locate_source_line_bounds(source, next_line_start)?;
+    let (_, _, next_line_end) = locate_snapshot_line_bounds(source, next_line_start)?;
     let next_content_end = source_line_content_end(source, next_line_end);
     let container_path = container_path(&current_prefix);
     if line_starts_new_sibling_block(source, next_line_start)
@@ -782,7 +782,7 @@ pub(in crate::augmenter) fn delete_forward_block_boundary(
             if line_starts_independent_block(source, newline_run_end, &container_path) {
                 return consume_boundary();
             }
-            let (_, _, next_line_end) = locate_source_line_bounds(source, newline_run_end)?;
+            let (_, _, next_line_end) = locate_snapshot_line_bounds(source, newline_run_end)?;
             let next_content_end = source_line_content_end(source, next_line_end);
             let container_content = matching_container_position(
                 source,
@@ -837,7 +837,7 @@ pub(in crate::augmenter) fn text_block_source_end(
     source: &MarkdownSource<'_>,
     current_byte: usize,
 ) -> Option<usize> {
-    let (line_start, _, line_end) = locate_source_line_bounds(source, current_byte)?;
+    let (line_start, _, line_end) = locate_snapshot_line_bounds(source, current_byte)?;
     let boundary_end = source_line_content_end(source, line_end);
     if line_start == current_byte {
         return None;
@@ -1031,7 +1031,7 @@ pub(in crate::augmenter) fn backspace_join_reopened_inline_elements(
     if !cursor_preceded_by_inline_opening(source, current_byte) {
         return None;
     }
-    let (line_start, _, line_end) = locate_source_line_bounds(source, current_byte)?;
+    let (line_start, _, line_end) = locate_snapshot_line_bounds(source, current_byte)?;
     if current_byte == line_start {
         return None;
     }

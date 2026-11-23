@@ -1,7 +1,9 @@
 //! 编辑上下文——WYSIWYG 展开机制的核心数据类型和纯函数。
 
 use crate::builder::{InlineStyle, StyleSpan};
+use crate::projection::SourceByte;
 use crate::projection::{ProjectedText, ProjectionSpanKind, SourceAnchor};
+use crate::selection::GraphemeIdx;
 use std::ops::Range;
 
 /// 编辑器光标上下文。传入 LazyLayout 控制哪些 span 展开源码。
@@ -181,8 +183,8 @@ pub(crate) fn materialize_projected_line(
             if is_atomic_source_expansion(base, cursor_span, source) {
                 if let Some(spelling) = source.get(cursor_span.source_range.clone()) {
                     projected = projected.replace_graphemes_with_direct(
-                        start_grapheme,
-                        end_grapheme,
+                        GraphemeIdx::new(start_grapheme),
+                        GraphemeIdx::new(end_grapheme),
                         spelling,
                         cursor_span.source_range.clone(),
                     );
@@ -190,16 +192,16 @@ pub(crate) fn materialize_projected_line(
             } else if let Some(expansion) = inline_expansion(base, cursor_span, source) {
                 if !expansion.suffix.is_empty() {
                     projected = projected.replace_graphemes_with_direct(
-                        end_grapheme,
-                        end_grapheme,
+                        GraphemeIdx::new(end_grapheme),
+                        GraphemeIdx::new(end_grapheme),
                         &source[expansion.suffix.clone()],
                         expansion.suffix,
                     );
                 }
                 if !expansion.prefix.is_empty() {
                     projected = projected.replace_graphemes_with_direct(
-                        start_grapheme,
-                        start_grapheme,
+                        GraphemeIdx::new(start_grapheme),
+                        GraphemeIdx::new(start_grapheme),
                         &source[expansion.prefix.clone()],
                         expansion.prefix,
                     );
@@ -224,9 +226,13 @@ pub(crate) fn materialize_projected_line(
     let insertion_grapheme = projected
         .boundaries
         .iter()
-        .position(|anchor| anchor.byte >= ctx.cursor_byte)
+        .position(|anchor| anchor.byte.get() >= ctx.cursor_byte)
         .unwrap_or_else(|| projected.grapheme_count());
-    projected.insert_virtual(insertion_grapheme, preedit_text, ctx.cursor_byte)
+    projected.insert_virtual(
+        GraphemeIdx::new(insertion_grapheme),
+        preedit_text,
+        SourceByte::new(ctx.cursor_byte),
+    )
 }
 
 #[derive(Clone, Debug)]
@@ -260,9 +266,9 @@ fn inline_expansion(
     let start_grapheme = crate::grapheme_map::grapheme_index_at_byte(&base.text, span.start);
     let end_grapheme =
         crate::grapheme_map::grapheme_index_at_byte(&base.text, span.start + span.len);
-    let content_start = base.boundaries.get(start_grapheme)?.byte;
+    let content_start = base.boundaries.get(start_grapheme)?.byte.get();
     let projected_content_end = direct_span_content_end(base, start_grapheme, end_grapheme, source)
-        .unwrap_or(base.boundaries.get(end_grapheme)?.byte);
+        .unwrap_or(base.boundaries.get(end_grapheme)?.byte.get());
     let content_end = if projected_content_end == span.source_range.end {
         inferred_inline_suffix_start(&span.style, &source[span.source_range.clone()])
             .map_or(projected_content_end, |relative_start| {
@@ -320,7 +326,7 @@ fn direct_span_content_end(
         return None;
     }
     let last_grapheme = end_grapheme - 1;
-    let last_start_byte = base.boundaries.get(last_grapheme)?.byte;
+    let last_start_byte = base.boundaries.get(last_grapheme)?.byte.get();
     let last_visual_start = crate::grapheme_map::byte_at_grapheme_index(&base.text, last_grapheme);
     let last_visual_end = crate::grapheme_map::byte_at_grapheme_index(&base.text, end_grapheme);
     let last_grapheme_str = base.text.get(last_visual_start..last_visual_end)?;
@@ -543,18 +549,18 @@ pub(crate) fn materialized_spans_for_projected_line(
 impl ProjectedText {
     pub(crate) fn slice_visual_line(
         &self,
-        flat_line_idx: usize,
+        logical_line: usize,
         visual_byte_range: Range<usize>,
     ) -> Result<crate::layout::types::VisualLineProjection, crate::projection::ProjectionError>
     {
         let visual_grapheme_bytes = crate::grapheme_map::grapheme_byte_boundaries(&self.text);
-        self.slice_visual_line_indexed(&visual_grapheme_bytes, flat_line_idx, visual_byte_range)
+        self.slice_visual_line_indexed(&visual_grapheme_bytes, logical_line, visual_byte_range)
     }
 
     pub(crate) fn slice_visual_line_indexed(
         &self,
         visual_grapheme_bytes: &[usize],
-        flat_line_idx: usize,
+        logical_line: usize,
         visual_byte_range: Range<usize>,
     ) -> Result<crate::layout::types::VisualLineProjection, crate::projection::ProjectionError>
     {
@@ -563,8 +569,8 @@ impl ProjectedText {
             || !self.text.is_char_boundary(visual_byte_range.start)
             || !self.text.is_char_boundary(visual_byte_range.end)
         {
-            return Err(crate::projection::ProjectionError::InvalidSourceBoundary {
-                byte: visual_byte_range.start,
+            return Err(crate::projection::ProjectionError::InvalidVisualBoundary {
+                visual_byte: visual_byte_range.start,
             });
         }
         if visual_grapheme_bytes.len() != self.boundaries.len() {
@@ -583,10 +589,12 @@ impl ProjectedText {
             .first()
             .expect("a projected visual line always has a sentinel boundary")
             .byte
+            .get()
             ..boundaries
                 .last()
                 .expect("a projected visual line always has a sentinel boundary")
-                .byte;
+                .byte
+                .get();
         let mut collapsed = Vec::new();
 
         for span in &self.spans {
@@ -615,10 +623,9 @@ impl ProjectedText {
         }
 
         Ok(crate::layout::types::VisualLineProjection {
-            flat_line_idx,
             owner: crate::projection::ProjectionOwnerId::Block {
                 block_start: self.source_extent().start,
-                logical_line: flat_line_idx,
+                logical_line,
             },
             boundaries,
             source_extent,
@@ -666,15 +673,14 @@ fn project_folded_line(
         source_byte += trailing.len();
     }
 
-    char_anchors.push(SourceAnchor::downstream(source_byte));
+    char_anchors.push(SourceAnchor::downstream(SourceByte::new(source_byte)));
     ProjectedText::from_char_anchors(line_text.to_string(), char_anchors, Vec::new())
 }
 
 fn push_char_anchors(anchors: &mut Vec<SourceAnchor>, text: &str, source_start: usize) {
-    anchors.extend(
-        text.char_indices()
-            .map(|(relative_byte, _)| SourceAnchor::downstream(source_start + relative_byte)),
-    );
+    anchors.extend(text.char_indices().map(|(relative_byte, _)| {
+        SourceAnchor::downstream(SourceByte::new(source_start + relative_byte))
+    }));
 }
 
 fn materialized_spans(
@@ -838,7 +844,7 @@ pub(crate) fn materialize_line_with_source_context(
         visual_grapheme_to_source_byte: projected
             .boundaries
             .iter()
-            .map(|anchor| anchor.byte)
+            .map(|anchor| anchor.byte.get())
             .collect(),
     }
 }

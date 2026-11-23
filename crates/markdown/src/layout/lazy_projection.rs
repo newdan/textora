@@ -1,5 +1,6 @@
-use super::super::source_line_map::{HiddenBlockSeparator, SourceLineMap};
+use super::super::source_line_map::HiddenBlockSeparator;
 use super::*;
+use crate::projection::SourceByte;
 use crate::projection::{ProjectionError, SourceAnchor, SourceProjectionIndex};
 
 impl<S: BlockSource> LazyLayout<S> {
@@ -28,8 +29,8 @@ impl<S: BlockSource> LazyLayout<S> {
 
         for line in &self.flat_lines {
             if line.requires_source_projection && line.source_projection.is_none() {
-                return Err(ProjectionError::MissingEditableProjection {
-                    flat_line_idx: line.flat_idx,
+                return Err(ProjectionError::MissingRenderedLineProjection {
+                    flat_line_idx: FlatLineIdx::new(line.flat_idx),
                 });
             }
         }
@@ -123,9 +124,6 @@ impl<S: BlockSource> LazyLayout<S> {
                 for line in &mut reconciled_lines {
                     line.flat_idx = flat_idx;
                     line.rect.y += y_delta;
-                    if let Some(projection) = &mut line.source_projection {
-                        projection.flat_line_idx = flat_idx;
-                    }
                     flat_idx += 1;
                 }
                 lines.append(&mut reconciled_lines);
@@ -141,7 +139,7 @@ impl<S: BlockSource> LazyLayout<S> {
                 &mut flat_idx,
                 current_line_base,
                 doc_block,
-                self.source_text.as_deref().map(String::as_str),
+                self.source_snapshot.as_deref().map(MarkdownSource::as_str),
             );
         }
         self.flat_lines = lines;
@@ -171,22 +169,20 @@ impl<S: BlockSource> LazyLayout<S> {
                 })
             })
             .collect();
-        let hidden_separators =
-            self.source_text.as_deref().map(String::as_str).map_or_else(Vec::new, |source| {
-                let mut source_ranges = self
-                    .flat_lines
-                    .iter()
-                    .filter_map(|line| {
-                        line.source_projection
-                            .as_ref()
-                            .map(|projection| projection.source_extent.clone())
-                            .or_else(|| line.atomic_source_range.clone())
-                    })
-                    .collect::<Vec<_>>();
-                source_ranges.sort_by_key(|range| range.start);
-                SourceLineMap::from_source(source)
-                    .hidden_separators_for_rendered_lines(&source_ranges)
-            });
+        let hidden_separators = self.source_snapshot.as_deref().map_or_else(Vec::new, |source| {
+            let mut source_ranges = self
+                .flat_lines
+                .iter()
+                .filter_map(|line| {
+                    line.source_projection
+                        .as_ref()
+                        .map(|projection| projection.source_extent.clone())
+                        .or_else(|| line.atomic_source_range.clone())
+                })
+                .collect::<Vec<_>>();
+            source_ranges.sort_by_key(|range| range.start);
+            source.physical_lines().hidden_separators_for_rendered_lines(&source_ranges)
+        });
         (empty_lines, hidden_separators)
     }
 
@@ -203,9 +199,10 @@ impl<S: BlockSource> LazyLayout<S> {
                 continue;
             };
             if let Some(last_boundary) = previous_line.boundaries.last_mut()
-                && last_boundary.byte >= separator.source_range.start
+                && last_boundary.byte.get() >= separator.source_range.start
             {
-                *last_boundary = SourceAnchor::downstream(separator.previous_anchor);
+                *last_boundary =
+                    SourceAnchor::downstream(SourceByte::new(separator.previous_anchor));
                 previous_line.source_extent.end = separator.previous_anchor;
             }
             let boundary = previous_line.boundaries.len().saturating_sub(1);
@@ -235,7 +232,7 @@ impl<S: BlockSource> LazyLayout<S> {
             }
 
             previous.collapsed.push(CollapsedBoundary {
-                source_range: previous_boundary.byte..next_boundary.byte,
+                source_range: previous_boundary.byte.get()..next_boundary.byte.get(),
                 upstream_grapheme: previous.boundaries.len().saturating_sub(1),
                 downstream_grapheme: previous.boundaries.len().saturating_sub(1),
             });
@@ -252,9 +249,9 @@ impl<S: BlockSource> LazyLayout<S> {
         let Some(first_boundary) = first_line.boundaries.first() else {
             return;
         };
-        if first_boundary.byte > 0 {
+        if first_boundary.byte.get() > 0 {
             first_line.collapsed.push(CollapsedBoundary {
-                source_range: 0..first_boundary.byte,
+                source_range: 0..first_boundary.byte.get(),
                 upstream_grapheme: 0,
                 downstream_grapheme: 0,
             });
@@ -266,10 +263,10 @@ impl<S: BlockSource> LazyLayout<S> {
         let Some(last_boundary) = last_line.boundaries.last() else {
             return;
         };
-        if last_boundary.byte < source_len {
+        if last_boundary.byte.get() < source_len {
             let terminal_grapheme = last_line.boundaries.len().saturating_sub(1);
             last_line.collapsed.push(CollapsedBoundary {
-                source_range: last_boundary.byte..source_len,
+                source_range: last_boundary.byte.get()..source_len,
                 upstream_grapheme: terminal_grapheme,
                 downstream_grapheme: terminal_grapheme,
             });
@@ -288,7 +285,7 @@ impl<S: BlockSource> LazyLayout<S> {
                     line.source_projection
                         .as_ref()
                         .filter(|current| Self::same_visual_line_identity(current, &projection))
-                        .map(|_| line.flat_idx)
+                        .map(|_| FlatLineIdx::new(line.flat_idx))
                 });
                 (projection, flat_line_idx, y)
             })
@@ -301,14 +298,18 @@ impl<S: BlockSource> LazyLayout<S> {
                 .iter()
                 .any(|(candidate, _, _)| Self::same_visual_line_identity(candidate, &projection));
             if !retained {
-                projection_candidates.push((projection, Some(line.flat_idx), line.rect.y));
+                projection_candidates.push((
+                    projection,
+                    Some(FlatLineIdx::new(line.flat_idx)),
+                    line.rect.y,
+                ));
             }
         }
         let mut visual_lines = projection_candidates
             .iter_mut()
             .map(|(projection, _, _)| projection)
             .collect::<Vec<_>>();
-        if let Some(source_text) = self.source_text.as_deref().map(String::as_str) {
+        if let Some(source_text) = self.source_snapshot.as_deref().map(MarkdownSource::as_str) {
             for projection in &mut visual_lines {
                 // A zero-width projection is an insertion anchor, not a line-terminal boundary.
                 if projection.source_extent.is_empty() {
@@ -317,11 +318,13 @@ impl<S: BlockSource> LazyLayout<S> {
                 let Some(last_boundary) = projection.boundaries.last_mut() else {
                     continue;
                 };
-                let previous_boundary = last_boundary.byte;
-                last_boundary.byte =
-                    Self::source_line_terminal_boundary(source_text, previous_boundary);
+                let previous_boundary = last_boundary.byte.get();
+                last_boundary.byte = SourceByte::new(Self::source_line_terminal_boundary(
+                    source_text,
+                    previous_boundary,
+                ));
                 if projection.source_extent.end == previous_boundary {
-                    projection.source_extent.end = last_boundary.byte;
+                    projection.source_extent.end = last_boundary.byte.get();
                 }
             }
         }
@@ -334,12 +337,14 @@ impl<S: BlockSource> LazyLayout<S> {
                 .then_with(|| left.2.total_cmp(&right.2))
         });
         self.projection_flat_line_indices.clear();
+        self.flat_line_projection_indices.clear();
+        self.flat_line_projection_indices.resize(self.flat_lines.len(), None);
         self.projected_empty_line_geometry.clear();
         let mut visual_lines = Vec::with_capacity(projection_candidates.len());
-        for (visual_line_idx, (mut projection, flat_line_idx, _)) in
+        for (visual_line_idx, (projection, flat_line_idx, _)) in
             projection_candidates.into_iter().enumerate()
         {
-            projection.flat_line_idx = visual_line_idx;
+            let projection_line_idx = ProjectionLineIdx::new(visual_line_idx);
             if let ProjectionOwnerId::EmptyLine { source_byte } = projection.owner
                 && let Some(empty_line) = self
                     .projected_empty_lines
@@ -347,9 +352,13 @@ impl<S: BlockSource> LazyLayout<S> {
                     .copied()
                     .find(|empty_line| empty_line.source_byte == source_byte)
             {
-                self.projected_empty_line_geometry.insert(visual_line_idx, empty_line);
+                self.projected_empty_line_geometry.insert(projection_line_idx, empty_line);
             }
             self.projection_flat_line_indices.push(flat_line_idx);
+            if let Some(flat_line_idx) = flat_line_idx {
+                self.flat_line_projection_indices[flat_line_idx.get()]
+                    .get_or_insert(projection_line_idx);
+            }
             visual_lines.push(projection);
         }
         Self::add_hidden_separator_collapsed_ranges(
@@ -357,7 +366,7 @@ impl<S: BlockSource> LazyLayout<S> {
             self.hidden_block_separators.iter().cloned(),
         );
         Self::add_inter_line_collapsed_ranges(&mut visual_lines);
-        if let Some(source_text) = self.source_text.as_deref().map(String::as_str) {
+        if let Some(source_text) = self.source_snapshot.as_deref().map(MarkdownSource::as_str) {
             Self::add_document_edge_collapsed_ranges(&mut visual_lines, source_text.len());
         }
         self.publish_source_projection_index(visual_lines)
@@ -373,25 +382,26 @@ impl<S: BlockSource> LazyLayout<S> {
             && left.collapsed == right.collapsed
     }
 
-    pub(crate) fn flat_line_idx_for_projection(&self, visual_line_idx: usize) -> Option<usize> {
-        self.projection_flat_line_indices.get(visual_line_idx).copied().flatten()
-    }
-
-    pub(crate) fn projection_visual_line_idx_for_flat_line(
+    pub(crate) fn flat_line_for_projection(
         &self,
-        flat_line_idx: usize,
-    ) -> Option<usize> {
-        self.projection_flat_line_indices
-            .iter()
-            .position(|candidate| *candidate == Some(flat_line_idx))
+        projection_line_idx: ProjectionLineIdx,
+    ) -> Option<FlatLineIdx> {
+        self.projection_flat_line_indices.get(projection_line_idx.get()).copied().flatten()
     }
 
-    pub(crate) fn projection_visual_line_idx_for_empty_source_byte(
+    pub(crate) fn projection_line_for_flat_line(
+        &self,
+        flat_line_idx: FlatLineIdx,
+    ) -> Option<ProjectionLineIdx> {
+        self.flat_line_projection_indices.get(flat_line_idx.get()).copied().flatten()
+    }
+
+    pub(crate) fn projection_line_for_empty_source_byte(
         &self,
         source_byte: usize,
-    ) -> Option<usize> {
-        self.projected_empty_line_geometry.iter().find_map(|(&visual_line_idx, empty_line)| {
-            (empty_line.source_byte == source_byte).then_some(visual_line_idx)
+    ) -> Option<ProjectionLineIdx> {
+        self.projected_empty_line_geometry.iter().find_map(|(&projection_line_idx, empty_line)| {
+            (empty_line.source_byte == source_byte).then_some(projection_line_idx)
         })
     }
 
@@ -533,11 +543,7 @@ impl<S: BlockSource> LazyLayout<S> {
             is_code: line.is_code,
             shaped,
             requires_source_projection: true,
-            source_projection: line.source_projection.as_ref().map(|projection| {
-                let mut projection = projection.clone();
-                projection.flat_line_idx = *flat_idx;
-                projection
-            }),
+            source_projection: line.source_projection.clone(),
             atomic_source_range: None,
         });
         *flat_idx += 1;

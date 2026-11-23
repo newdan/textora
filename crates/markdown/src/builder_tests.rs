@@ -179,14 +179,14 @@ fn builder_collapses_explicit_blockquote_softbreak_and_preserves_source_jump() {
     assert_eq!(paragraph.projected_lines.len(), 1);
     assert_eq!(paragraph.projected_lines[0].text, "first second");
     assert_eq!(
-        paragraph.projected_lines[0].boundaries.last().expect("collapsed line boundary").byte,
+        paragraph.projected_lines[0].boundaries.last().expect("collapsed line boundary").byte.get(),
         source.len()
     );
     assert!(paragraph.projected_lines[0].boundaries.iter().any(|boundary| {
-        boundary.byte == source.find("second").expect("fixture must contain second")
+        boundary.byte.get() == source.find("second").expect("fixture must contain second")
     }));
     assert!(paragraph.projected_lines[0].boundaries.iter().any(|boundary| {
-        boundary.byte == source.find('\n').expect("fixture must contain newline")
+        boundary.byte.get() == source.find('\n').expect("fixture must contain newline")
     }));
     assert_eq!(
         paragraph.projected_lines[0].source_extent().end,
@@ -324,7 +324,7 @@ fn builder_nested_list_parent_projection_ends_at_parent_content() {
 
     assert_eq!(projection.spans[0].source_range.end, parent_content_end);
     assert_eq!(
-        projection.boundaries.last().expect("projection needs a terminal anchor").byte,
+        projection.boundaries.last().expect("projection needs a terminal anchor").byte.get(),
         parent_content_end,
         "parent terminal anchor must not include nested child source"
     );
@@ -338,7 +338,7 @@ fn builder_plain_softbreak_maps_newline_to_one_visual_space() {
     let doc = MarkdownDoc::build(&parsed, &style);
     let projected = &doc.blocks[0].projected_lines[0];
     assert_eq!(projected.text, "first second");
-    assert_eq!(projected.boundaries[6].byte, 6);
+    assert_eq!(projected.boundaries[6].byte.get(), 6);
 }
 
 #[test]
@@ -383,7 +383,7 @@ fn builder_trims_fenced_code_projection_trailing_newline() {
     assert_eq!(code_block.text_lines, ["hello"]);
     assert_eq!(projected.text, "hello");
     assert_eq!(
-        projected.boundaries.last().expect("projection needs a sentinel").byte,
+        projected.boundaries.last().expect("projection needs a sentinel").byte.get(),
         source.find("\n```").expect("fixture must contain closing fence")
     );
 }
@@ -399,7 +399,7 @@ fn builder_empty_heading_has_an_empty_projection_line() {
     assert_eq!(heading.text_lines, [""]);
     assert_eq!(heading.projected_lines.len(), heading.text_lines.len());
     assert_eq!(heading.projected_lines[0].text, "");
-    assert_eq!(heading.projected_lines[0].boundaries[0].byte, source.len());
+    assert_eq!(heading.projected_lines[0].boundaries[0].byte.get(), source.len());
 }
 
 #[test]
@@ -740,7 +740,7 @@ fn nested_inline_styles_expand_outer_and_inner_delimiters() {
         );
         expanded.validate(source).expect("nested expanded projection must validate");
         assert!(
-            expanded.boundaries.windows(2).all(|pair| pair[0].byte <= pair[1].byte),
+            expanded.boundaries.windows(2).all(|pair| pair[0].byte.get() <= pair[1].byte.get()),
             "nested expanded boundaries must remain non-decreasing for {source:?}"
         );
     }
@@ -851,7 +851,7 @@ fn consecutive_hard_breaks_and_br_preserve_empty_logical_lines() {
         for (line_idx, projected) in projections.iter().enumerate() {
             assert_eq!(projected.text, expected[line_idx], "source={source:?}");
             projected.validate(source).expect("projected line must be valid");
-            all_bytes.extend(projected.boundaries.iter().map(|anchor| anchor.byte));
+            all_bytes.extend(projected.boundaries.iter().map(|anchor| anchor.byte.get()));
         }
         assert!(
             all_bytes.windows(2).all(|pair| pair[0] <= pair[1]),

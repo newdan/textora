@@ -18,7 +18,7 @@ pub(super) fn insert_text(
     if text.trim_matches([' ', '\t', '\r', '\n']).is_empty() {
         return None;
     }
-    let (line_start, _, line_end) = super::locate_source_line_bounds(source, current_byte)?;
+    let (line_start, _, line_end) = super::locate_snapshot_line_bounds(source, current_byte)?;
     if !source[line_start..line_end]
         .chars()
         .all(|character| character.is_whitespace() || character == '>')
@@ -118,7 +118,7 @@ pub(super) fn erase_last_grapheme(
     source: &MarkdownSource<'_>,
     current_byte: usize,
 ) -> Option<EditAugmentation> {
-    let (line_start, _, line_end) = super::locate_source_line_bounds(source, current_byte)?;
+    let (line_start, _, line_end) = super::locate_snapshot_line_bounds(source, current_byte)?;
     let content_end = super::source_line_content_end(source, line_end);
     let suffix = source.get(current_byte..content_end)?;
     if suffix.trim_start_matches([' ', '\t']).chars().next().is_some_and(char::is_alphanumeric) {

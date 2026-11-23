@@ -914,7 +914,7 @@ pub(crate) fn classify_source(source: &MarkdownSource<'_>, current_byte: usize) 
                             .last()
                             .map(|item| container_path(&item.content_prefix))
                             .unwrap_or_default();
-                        let opening_line_start = locate_source_line_bounds(source, range.start)
+                        let opening_line_start = locate_snapshot_line_bounds(source, range.start)
                             .map_or(range.start, |bounds| bounds.0);
                         source_container_path(source, opening_line_start, range.start, &base)
                     },
@@ -1052,7 +1052,7 @@ pub(crate) fn classify_source(source: &MarkdownSource<'_>, current_byte: usize) 
                     } else {
                         last_cell_end.saturating_sub(1)
                     };
-                    let row_line_end = locate_source_line_bounds(source, row_probe)
+                    let row_line_end = locate_snapshot_line_bounds(source, row_probe)
                         .map(|(_, _, line_end)| source_line_content_end(source, line_end))
                         .unwrap_or(last_cell_end);
                     return EnterContext::TableCell {

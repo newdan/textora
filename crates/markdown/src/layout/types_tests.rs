@@ -4,6 +4,7 @@ use crate::builder::MarkdownDoc;
 use crate::layout::apply_deltas;
 use crate::parser::parse_markdown;
 use crate::projection::CursorAffinity;
+use crate::projection::SourceByte;
 use crate::test_utils::default_style;
 
 fn make_doc(md: &str) -> (&str, MarkdownDoc) {
@@ -137,11 +138,11 @@ fn assert_flat_layout_equivalent(
     for source_byte in (0..=source.len()).filter(|byte| source.is_char_boundary(*byte)) {
         for affinity in [CursorAffinity::Upstream, CursorAffinity::Downstream] {
             let actual_position = actual_projection_index
-                .visual_position_for_source(source_byte, affinity)
-                .map(|position| (position.flat_line_idx, position.grapheme_pos));
+                .visual_position_for_source(SourceByte::new(source_byte), affinity)
+                .map(|position| (position.projection_line_idx, position.grapheme_pos));
             let expected_position = expected_projection_index
-                .visual_position_for_source(source_byte, affinity)
-                .map(|position| (position.flat_line_idx, position.grapheme_pos));
+                .visual_position_for_source(SourceByte::new(source_byte), affinity)
+                .map(|position| (position.projection_line_idx, position.grapheme_pos));
             assert_eq!(actual_position, expected_position, "source byte {source_byte}");
         }
     }
@@ -1684,6 +1685,50 @@ fn local_viewport_rebuild_retains_stable_projection_identity_and_geometry() {
 }
 
 #[test]
+fn offscreen_projection_remains_addressable_without_a_rendered_line() {
+    use crate::projection::ProjectionLineIdx;
+
+    let source = "first paragraph\n\nsecond paragraph\n\nthird paragraph";
+    let mut lazy = layout_with_cursor_and_width(source, 0, 240.0);
+    lazy.evict_outside(&(1..2));
+    lazy.viewport_range = 1..2;
+    lazy.build_flat_lines(&textora_core::document::StringDocView::new(source));
+
+    let index = lazy.source_projection_index.as_ref().expect("viewport layout has an index");
+    let offscreen = index
+        .visual_position_for_source(SourceByte::new(0), CursorAffinity::Downstream)
+        .expect("the first paragraph remains in the projection index");
+    assert_eq!(offscreen.projection_line_idx, ProjectionLineIdx::new(0));
+    assert_eq!(lazy.flat_line_for_projection(offscreen.projection_line_idx), None);
+    assert_eq!(
+        index.source_anchor_at(lazy.source_generation, offscreen),
+        Ok(SourceAnchor::downstream(SourceByte::new(0))),
+    );
+
+    let rendered = lazy.flat_lines.first().expect("the second paragraph is rendered");
+    let rendered_idx = crate::selection::FlatLineIdx::new(rendered.flat_idx);
+    let visible = lazy
+        .projection_line_for_flat_line(rendered_idx)
+        .expect("the visible paragraph has an editable projection");
+    assert_ne!(visible, offscreen.projection_line_idx);
+    assert_eq!(lazy.flat_line_for_projection(visible), Some(rendered_idx));
+}
+
+#[test]
+fn atomic_flat_line_has_no_editable_projection() {
+    let lazy = layout_with_cursor_and_width("first paragraph\n\n---\n\nthird paragraph", 0, 240.0);
+    let rule = lazy
+        .flat_lines
+        .iter()
+        .find(|line| line.atomic_source_range.is_some())
+        .expect("the horizontal rule is rendered as an atomic line");
+    assert_eq!(
+        lazy.projection_line_for_flat_line(crate::selection::FlatLineIdx::new(rule.flat_idx)),
+        None,
+    );
+}
+
+#[test]
 fn wrapped_layout_publishes_upstream_and_downstream_positions_at_shared_boundary() {
     let source = "a plain paragraph that is deliberately long enough to wrap several times";
     let lazy = layout_with_cursor_and_width(source, 0, 80.0);
@@ -1692,13 +1737,19 @@ fn wrapped_layout_publishes_upstream_and_downstream_positions_at_shared_boundary
         .as_ref()
         .expect("a real wrapped layout must publish its projection index");
     let visual_lines = index.visual_lines();
-    let (previous, next, shared_byte) = visual_lines
+    let (line_idx, previous, next, shared_byte) = visual_lines
         .windows(2)
-        .find_map(|lines| {
+        .enumerate()
+        .find_map(|(line_idx, lines)| {
             let previous = &lines[0];
             let next = &lines[1];
             let shared_byte = previous.boundaries.last()?.byte;
-            (shared_byte == next.boundaries.first()?.byte).then_some((previous, next, shared_byte))
+            (shared_byte == next.boundaries.first()?.byte).then_some((
+                line_idx,
+                previous,
+                next,
+                shared_byte,
+            ))
         })
         .expect("fixture must contain an automatic wrap boundary");
 
@@ -1718,10 +1769,10 @@ fn wrapped_layout_publishes_upstream_and_downstream_positions_at_shared_boundary
     let downstream = index
         .visual_position_for_source(shared_byte, CursorAffinity::Downstream)
         .expect("the following visual line must be addressable downstream");
-    assert_eq!(upstream.flat_line_idx, previous.flat_line_idx);
-    assert_eq!(upstream.grapheme_pos, previous.boundaries.len() - 1);
-    assert_eq!(downstream.flat_line_idx, next.flat_line_idx);
-    assert_eq!(downstream.grapheme_pos, 0);
+    assert_eq!(upstream.projection_line_idx.get(), line_idx);
+    assert_eq!(upstream.grapheme_pos.get(), previous.boundaries.len() - 1);
+    assert_eq!(downstream.projection_line_idx.get(), line_idx + 1);
+    assert_eq!(downstream.grapheme_pos.get(), 0);
 }
 
 #[test]
@@ -1753,8 +1804,8 @@ fn consecutive_blockquote_projection_jumps_over_second_marker() {
         .find(|line| line.text.contains("second"))
         .expect("second text must be visible");
     let projection = second_line.source_projection.as_ref().expect("projection required");
-    assert!(projection.boundaries.iter().any(|anchor| anchor.byte == second));
-    assert!(!projection.boundaries.iter().any(|anchor| anchor.byte == 0));
+    assert!(projection.boundaries.iter().any(|anchor| anchor.byte.get() == second));
+    assert!(!projection.boundaries.iter().any(|anchor| anchor.byte.get() == 0));
 }
 
 #[test]
@@ -1768,7 +1819,12 @@ fn nested_blockquote_syntax_gap_has_canonical_projection() {
 
     for source_byte in 7..14 {
         assert!(
-            index.visual_position_for_source(source_byte, CursorAffinity::Downstream).is_some(),
+            index
+                .visual_position_for_source(
+                    SourceByte::new(source_byte),
+                    CursorAffinity::Downstream
+                )
+                .is_some(),
             "nested blockquote syntax byte {source_byte} must resolve canonically"
         );
     }
@@ -1900,7 +1956,7 @@ fn heading_active_marker_projection_correct() {
         .expect("should have projection")
         .boundaries
         .iter()
-        .map(|anchor| anchor.byte)
+        .map(|anchor| anchor.byte.get())
         .collect::<Vec<_>>();
     // Visual chars: '#' (0), ' ' (1), 'T' (2), 'i' (3), 't' (4), 'l' (5), 'e' (6), sentinel (7)
     assert!(
@@ -1928,7 +1984,7 @@ fn list_item_active_marker_projection_correct() {
         .expect("should have projection")
         .boundaries
         .iter()
-        .map(|anchor| anchor.byte)
+        .map(|anchor| anchor.byte.get())
         .collect::<Vec<_>>();
     assert!(
         map.len() >= 7,
@@ -1952,7 +2008,7 @@ fn heading_with_inline_bold_keeps_hidden_prefix_projection() {
         .expect("heading projection")
         .boundaries
         .iter()
-        .map(|anchor| anchor.byte)
+        .map(|anchor| anchor.byte.get())
         .collect::<Vec<_>>();
     assert_eq!(boundaries, (2..=10).collect::<Vec<_>>());
 }
