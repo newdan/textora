@@ -3,8 +3,8 @@
 
 use crate::app::App;
 use crate::app_effect::AppEffect;
-use crate::canvas_viewport::CanvasViewportAction;
-use crate::cursor_motion::PageDirection;
+use appkit_shell::canvas_viewport::CanvasViewportAction;
+use appkit_shell::cursor_motion::PageDirection;
 use ui::canvas::CanvasPoint;
 use winit::event::MouseScrollDelta;
 
@@ -234,9 +234,9 @@ impl App {
     /// Used for PageUp/PageDown/Arrow keys/Home/End in preview/novel mode.
     pub(crate) fn plugin_scroll_by_command(
         &mut self,
-        cmd: &appkit_shell::input_mapper::EditCommand,
+        cmd: &appkit_core::edit_command::EditCommand,
     ) -> AppEffect {
-        use appkit_shell::input_mapper::EditCommand;
+        use appkit_core::edit_command::EditCommand;
 
         let metrics = self.ui_metrics();
         let line_height = metrics.line_height;
@@ -300,7 +300,7 @@ mod tests {
     use super::*;
     use crate::document_fixture::DocumentFixture;
     use crate::plugins::editor::EditorPlugin;
-    use crate::snap_tree::DisplayLineEntry;
+    use appkit_shell::snap_tree::DisplayLineEntry;
 
     use winit::dpi::PhysicalPosition;
     use winit::keyboard::ModifiersState;
@@ -341,7 +341,7 @@ mod tests {
         app.switch_workspace_for_test(0);
         app.active_tab_session_mut().unwrap().display_mut().display_map.set_entries(
             (0..100)
-                .map(|i| crate::snap_tree::DisplayLineEntry::placeholder(i, 10, 0, 1))
+                .map(|i| appkit_shell::snap_tree::DisplayLineEntry::placeholder(i, 10, 0, 1))
                 .collect(),
         );
         app.update_scale_factor(2.0);
@@ -481,7 +481,7 @@ mod tests {
     fn plugin_page_down_scrolls_by_viewport() {
         let mut app = make_reading_app(5000.0);
         let effect =
-            app.plugin_scroll_by_command(&appkit_shell::input_mapper::EditCommand::PageDown);
+            app.plugin_scroll_by_command(&appkit_core::edit_command::EditCommand::PageDown);
         assert_eq!(effect, AppEffect::REDRAW);
         let tab = app.active_tab_session().unwrap();
         match tab.query(ui::plugin::PluginQuery::ScrollY) {
@@ -496,11 +496,11 @@ mod tests {
     fn plugin_page_up_scrolls_back() {
         let mut app = make_reading_app(5000.0);
         // Scroll down first.
-        let _ = app.plugin_scroll_by_command(&appkit_shell::input_mapper::EditCommand::PageDown);
+        let _ = app.plugin_scroll_by_command(&appkit_core::edit_command::EditCommand::PageDown);
         let y_after_down = app.active_tab_session().unwrap().scroll_y();
         assert!(y_after_down > 0.0);
         // Scroll back up.
-        let _ = app.plugin_scroll_by_command(&appkit_shell::input_mapper::EditCommand::PageUp);
+        let _ = app.plugin_scroll_by_command(&appkit_core::edit_command::EditCommand::PageUp);
         let y_after_up = app.active_tab_session().unwrap().scroll_y();
         assert!(y_after_up < y_after_down, "PageUp should reduce scroll_y");
     }
@@ -508,7 +508,7 @@ mod tests {
     #[test]
     fn plugin_move_down_scrolls_small_amount() {
         let mut app = make_reading_app(5000.0);
-        let _ = app.plugin_scroll_by_command(&appkit_shell::input_mapper::EditCommand::MoveDown);
+        let _ = app.plugin_scroll_by_command(&appkit_core::edit_command::EditCommand::MoveDown);
         let y = app.active_tab_session().unwrap().scroll_y();
         assert!(y > 0.0 && y < 100.0, "MoveDown should scroll a small amount, got {y}");
     }
@@ -517,11 +517,11 @@ mod tests {
     fn plugin_move_to_doc_start_resets_scroll() {
         let mut app = make_reading_app(5000.0);
         // Scroll down first.
-        let _ = app.plugin_scroll_by_command(&appkit_shell::input_mapper::EditCommand::PageDown);
-        let _ = app.plugin_scroll_by_command(&appkit_shell::input_mapper::EditCommand::PageDown);
+        let _ = app.plugin_scroll_by_command(&appkit_core::edit_command::EditCommand::PageDown);
+        let _ = app.plugin_scroll_by_command(&appkit_core::edit_command::EditCommand::PageDown);
         // Go to start.
         let _ =
-            app.plugin_scroll_by_command(&appkit_shell::input_mapper::EditCommand::MoveToDocStart);
+            app.plugin_scroll_by_command(&appkit_core::edit_command::EditCommand::MoveToDocStart);
         let y = app.active_tab_session().unwrap().scroll_y();
         assert!(y.abs() < 1.0, "MoveToDocStart should reset scroll_y to 0, got {y}");
     }
@@ -529,8 +529,7 @@ mod tests {
     #[test]
     fn plugin_move_to_doc_end_scrolls_to_bottom() {
         let mut app = make_reading_app(5000.0);
-        let _ =
-            app.plugin_scroll_by_command(&appkit_shell::input_mapper::EditCommand::MoveToDocEnd);
+        let _ = app.plugin_scroll_by_command(&appkit_core::edit_command::EditCommand::MoveToDocEnd);
         let y = app.active_tab_session().unwrap().scroll_y();
         assert!(y > 0.0, "MoveToDocEnd should scroll near bottom, got {y}");
     }
@@ -563,7 +562,7 @@ mod tests {
         // Standard editor: allows_editing=true, handles_own_rendering=false.
         // Plugin scroll is a no-op; scrolling falls through to DocumentFixture.
         let effect =
-            app.plugin_scroll_by_command(&appkit_shell::input_mapper::EditCommand::PageDown);
+            app.plugin_scroll_by_command(&appkit_core::edit_command::EditCommand::PageDown);
         assert_eq!(effect, AppEffect::NONE);
     }
 
@@ -676,7 +675,7 @@ mod tests {
     fn wysiwyg_plugin_receives_scroll_by_command_page_down() {
         let mut app = make_wysiwyg_app(5000.0);
         let effect =
-            app.plugin_scroll_by_command(&appkit_shell::input_mapper::EditCommand::PageDown);
+            app.plugin_scroll_by_command(&appkit_core::edit_command::EditCommand::PageDown);
         assert_eq!(effect, AppEffect::REDRAW);
         let y = app.active_tab_session().unwrap().scroll_y();
         assert!(y > 0.0, "scroll_y should advance on PageDown, got {y}");
@@ -870,10 +869,11 @@ mod tests {
     #[test]
     fn canvas_shift_scroll_converts_vertical_line_delta_to_horizontal_pan() {
         let mut app = app_with_prepared_canvas_viewport();
-        let _ =
-            app.apply_canvas_viewport_action(crate::canvas_viewport::CanvasViewportAction::PanBy(
+        let _ = app.apply_canvas_viewport_action(
+            appkit_shell::canvas_viewport::CanvasViewportAction::PanBy(
                 ui::canvas::CanvasPoint::new(100.0, 100.0),
-            ));
+            ),
+        );
         let before = app
             .active_tab_session()
             .expect("test canvas tab must be active")

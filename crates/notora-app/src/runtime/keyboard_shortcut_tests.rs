@@ -77,13 +77,13 @@ fn selected_markdown() -> (NotoraRuntime, appkit_core::workspace::types::TabId) 
     let mut runtime = app();
     let (_, tab_id) = install_registered_note(&mut runtime, "shortcuts.md", "正文");
     runtime.dispatch_action(NotoraAction::FocusRequested(FocusTarget::Editor));
-    let tab = runtime
+    let mut tab = runtime
         .document_runtime
         .editor_mut()
         .tab_session_mut(tab_id)
         .expect("shortcut fixture should retain its Markdown tab");
-    tab.document.cursor_move_to_offset("正文".len());
-    tab.document.cursor_mut().selection_anchor = Some(0);
+    tab.document_mut().cursor_move_to_offset("正文".len());
+    tab.document_mut().cursor_mut().selection_anchor = Some(0);
     (runtime, tab_id)
 }
 
@@ -255,13 +255,13 @@ fn formatting_edge_cases_execute_as_real_transactions() {
         let (_, tab_id) = install_registered_note(&mut runtime, "edges.md", source);
         let loaded_source = document_text(&runtime, tab_id);
         runtime.dispatch_action(NotoraAction::FocusRequested(FocusTarget::Editor));
-        let tab = runtime
+        let mut tab = runtime
             .document_runtime
             .editor_mut()
             .tab_session_mut(tab_id)
             .expect("edge case should retain its document");
-        tab.document.cursor_move_to_offset(selection_end);
-        tab.document.cursor_mut().selection_anchor = Some(0);
+        tab.document_mut().cursor_move_to_offset(selection_end);
+        tab.document_mut().cursor_mut().selection_anchor = Some(0);
         runtime.handle_key_input(KeyCode::Char(character), modifiers, None);
         assert_eq!(document_text(&runtime, tab_id), expected, "{source:?}: {character}");
         runtime.handle_key_input(KeyCode::Char('z'), PRIMARY, None);

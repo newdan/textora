@@ -1403,11 +1403,11 @@ impl DocumentRuntime {
         let Ok(tree) = textora_mindmap::mmf::parser::parse(&snapshot.text) else {
             return;
         };
-        let Some(tab) = self.editor_runtime.tab_session_mut(tab_id) else {
+        let Some(mut tab) = self.editor_runtime.tab_session_mut(tab_id) else {
             return;
         };
-        tab.document.cursor_mut().selection_anchor = None;
-        tab.document.cursor_move_to_offset(tree.root.title_byte_range.end);
+        tab.document_mut().cursor_mut().selection_anchor = None;
+        tab.document_mut().cursor_move_to_offset(tree.root.title_byte_range.end);
     }
 
     pub(super) fn drain_save_completions(&mut self) -> Vec<DocumentOutcome> {

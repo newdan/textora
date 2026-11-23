@@ -9,18 +9,18 @@ fn set_markdown_cursor(app: &mut App, cursor_byte: usize) {
     let Some(mut tab) = app.active_tab_session_mut() else {
         panic!("Markdown editor should be active");
     };
-    tab.document.cursor_move_to_offset(cursor_byte);
+    tab.document_mut().cursor_move_to_offset(cursor_byte);
     tab.send_message(ui::plugin::PluginMessage::SetCursorByte(cursor_byte));
 }
 
 fn active_markdown_source(app: &App) -> String {
-    app.active_tab_session().expect("Markdown editor should remain active").document.full_text()
+    app.active_tab_session().expect("Markdown editor should remain active").document().full_text()
 }
 
 fn active_markdown_cursor(app: &App) -> usize {
     app.active_tab_session()
         .expect("Markdown editor should remain active")
-        .document
+        .document()
         .cursor_offset()
         .0
 }

@@ -6,6 +6,62 @@
 use std::ops::Range;
 
 use textora_core::buffer::search::SearchOptions;
+use textora_core::buffer::simd_search;
+
+use super::DocumentModel;
+
+/// Find non-overlapping literal matches without copying the entire document.
+/// Case-insensitive matching folds ASCII letters and leaves other bytes unchanged.
+pub fn find_literal_matches(
+    document: &DocumentModel,
+    query: &str,
+    match_case: bool,
+) -> Vec<Range<usize>> {
+    if query.is_empty() {
+        return Vec::new();
+    }
+
+    let needle = query.as_bytes();
+    let scan: fn(&[u8], &[u8]) -> Vec<Range<usize>> = if match_case {
+        simd_search::find_all
+    } else {
+        simd_search::find_all_case_insensitive_ascii
+    };
+    let buffer = document.tb();
+    let before_gap = buffer.read_forward(0);
+    let after_gap = buffer.read_forward(before_gap.len());
+    let mut matches = scan(needle, before_gap);
+
+    let mut after_start = 0;
+    if !before_gap.is_empty() && !after_gap.is_empty() && needle.len() > 1 {
+        // A cross-gap match can only start in the last needle.len() - 1 bytes
+        // before the gap, and it cannot overlap the preceding match.
+        let window_width = needle.len() - 1;
+        let window_start = before_gap
+            .len()
+            .saturating_sub(window_width)
+            .max(matches.last().map_or(0, |range| range.end));
+        let before_suffix = &before_gap[window_start..];
+        let after_prefix = &after_gap[..window_width.min(after_gap.len())];
+        let mut window = Vec::with_capacity(before_suffix.len() + after_prefix.len());
+        window.extend_from_slice(before_suffix);
+        window.extend_from_slice(after_prefix);
+
+        if let Some(range) = scan(needle, &window).into_iter().next() {
+            let match_end = window_start + range.end;
+            matches.push(window_start + range.start..match_end);
+            after_start = match_end - before_gap.len();
+        }
+    }
+
+    let after_offset = before_gap.len() + after_start;
+    matches.extend(
+        scan(needle, &after_gap[after_start..])
+            .into_iter()
+            .map(|range| range.start + after_offset..range.end + after_offset),
+    );
+    matches
+}
 
 /// Holds the state of an active search for a single document.
 #[derive(Debug, Clone, Default)]
@@ -149,6 +205,27 @@ impl SearchState {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use textora_core::buffer::{GapBuffer, TextBuffer};
+
+    #[test]
+    fn literal_search_preserves_nonoverlapping_offsets_at_every_gap_position() {
+        let source = "AaAAa 中Aa中";
+        for gap_offset in 0..=source.len() {
+            let mut gap = GapBuffer::new(true).expect("search test needs a gap buffer");
+            gap.replace(0..0, source.as_bytes());
+            gap.allocate_gap(gap_offset, 0, 0);
+            let buffer = TextBuffer::from_gap_buffer(gap).expect("search test needs a text buffer");
+            let document = DocumentModel::new(buffer);
+
+            assert_eq!(find_literal_matches(&document, "Aa", false), [0..2, 2..4, 9..11]);
+            assert_eq!(find_literal_matches(&document, "Aa", true), [0..2, 3..5, 9..11]);
+            assert_eq!(
+                find_literal_matches(&document, "中Aa中", true).as_slice(),
+                std::slice::from_ref(&(6..14))
+            );
+            assert!(find_literal_matches(&document, "", false).is_empty());
+        }
+    }
 
     #[test]
     fn match_counter_empty_query() {

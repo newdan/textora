@@ -5,6 +5,7 @@ use std::ops::Range;
 
 use crate::app::App;
 use crate::app_effect::AppEffect;
+use appkit_shell::document_search::{recompute_matches, select_match};
 use appkit_shell::editor_runtime::EditorNotification;
 use textora_core::types::ByteIndex;
 use textora_core::unicode::{CursorNav, grapheme_start_indices};
@@ -144,107 +145,45 @@ impl App {
 
     /// Scroll the viewport to center the currently active search match.
     pub(crate) fn scroll_to_active_match(&mut self) {
-        let lh = self.ui_metrics().line_height;
-        let mut active_idx = 0;
-        let mut query = String::new();
-        let mut match_case = false;
+        let line_height = self.ui_metrics().line_height;
+        let Some(mut tab) = self.active_tab_session_mut() else {
+            return;
+        };
+        let (query, match_case, active_idx) =
+            if let Some(matched) = tab.search_state().active_match() {
+                // Jumping to a match is user-driven caret movement and splits the undo run.
+                tab.document_mut().break_edit_merge();
+                tab.document_mut().set_cursor_offset_synced(matched.start);
+                select_match(&mut tab, &matched);
+                tab.ensure_cursor_visible(line_height);
 
-        if let Some(mut tab) = self.active_tab_session_mut()
-            && let Some(range) = tab.search_state().active_match()
-        {
-            // Jumping to a match is user-driven caret movement: split any
-            // ongoing undo coalescing run.
-            tab.document.break_edit_merge();
-            tab.document.set_cursor_offset_synced(range.start);
-            tab.document.cursor_mut().selection_anchor = Some(range.start);
-            tab.document.set_cursor_offset_synced(range.end);
-            tab.ensure_cursor_visible(lh);
-
-            active_idx = tab.search_state().active_match_idx;
-            query = tab.search_state().query.clone();
-            match_case = tab.search_state().options.match_case;
-        }
-
-        if let Some(mut tab) = self.active_tab_session_mut() {
-            tab.send_message(ui::plugin::PluginMessage::ScrollToSearchMatch {
-                query: query.clone(),
-                match_case,
-                active_idx,
-            });
-        }
+                let search = tab.search_state();
+                (search.query.clone(), search.options.match_case, search.active_match_idx)
+            } else {
+                (String::new(), false, 0)
+            };
+        tab.send_message(ui::plugin::PluginMessage::ScrollToSearchMatch {
+            query,
+            match_case,
+            active_idx,
+        });
     }
 
     /// Run the SIMD search on the active document and update its SearchState.
     pub(crate) fn perform_search_for_active_doc(&mut self) {
-        if let Some(mut tab) = self.active_tab_session_mut() {
-            let query = tab.search_state().query.clone();
-            if query.is_empty() {
-                let generation = tab.document.tb.gap_buffer().generation();
-                let search_state = tab.search_state_mut();
-                search_state.matches.clear();
-                search_state.active_match_idx = 0;
-                search_state.buffer_generation = generation;
-                return;
-            }
-
-            use textora_core::document::ReadableDocument;
-            let chunk1 = tab.document.tb.gap_buffer().read_forward(0);
-            let chunk2 = tab.document.tb.gap_buffer().read_forward(chunk1.len());
-
-            let query_bytes = query.as_bytes();
-            let search_fn: fn(&[u8], &[u8]) -> Vec<std::ops::Range<usize>> =
-                if tab.search_state().options.match_case {
-                    textora_core::buffer::simd_search::find_all
-                } else {
-                    textora_core::buffer::simd_search::find_all_case_insensitive_ascii
-                };
-
-            let mut matches = Vec::new();
-
-            // Search first chunk
-            if !chunk1.is_empty() {
-                matches.extend(search_fn(query_bytes, chunk1));
-            }
-
-            // Search across the gap without overlapping a match in either chunk.
-            let mut second_chunk_start = 0;
-            if !chunk1.is_empty() && !chunk2.is_empty() && query_bytes.len() > 1 {
-                let cross_len = query_bytes.len() - 1;
-                let cross_start = chunk1
-                    .len()
-                    .saturating_sub(cross_len)
-                    .max(matches.last().map_or(0, |range| range.end));
-                let second_prefix = &chunk2[..cross_len.min(chunk2.len())];
-                let mut cross_buf =
-                    Vec::with_capacity(chunk1.len() - cross_start + second_prefix.len());
-                cross_buf.extend_from_slice(&chunk1[cross_start..]);
-                cross_buf.extend_from_slice(second_prefix);
-
-                if let Some(range) = search_fn(query_bytes, &cross_buf).into_iter().next() {
-                    let match_end = cross_start + range.end;
-                    matches.push(cross_start + range.start..match_end);
-                    second_chunk_start = match_end - chunk1.len();
-                }
-            }
-
-            // Search second chunk
-            let second_chunk_offset = chunk1.len() + second_chunk_start;
-            matches.extend(
-                search_fn(query_bytes, &chunk2[second_chunk_start..]).into_iter().map(|range| {
-                    range.start + second_chunk_offset..range.end + second_chunk_offset
-                }),
-            );
-
-            let generation = tab.document.tb.gap_buffer().generation();
-            tab.search_state_mut().update_matches(matches, generation);
-
-            // Jump to first match
-            if tab.search_state().active_match().is_some() {
-                let range = tab.search_state().matches[0].clone();
-                tab.document.set_cursor_offset_synced(range.start);
-                tab.document.cursor_mut().selection_anchor = Some(range.start);
-                tab.document.set_cursor_offset_synced(range.end);
-            }
+        let Some(mut tab) = self.active_tab_session_mut() else {
+            return;
+        };
+        let match_case = tab.search_state().options.match_case;
+        recompute_matches(&mut tab, match_case);
+        let search = tab.search_state();
+        if search.query.is_empty() {
+            tab.search_state_mut().active_match_idx = 0;
+            return;
+        }
+        if let Some(matched) = search.matches.first().cloned() {
+            tab.document_mut().set_cursor_offset_synced(matched.start);
+            select_match(&mut tab, &matched);
         }
     }
 
@@ -253,7 +192,7 @@ impl App {
             return AppEffect::NONE;
         };
         let search = tab.search_state();
-        if search.is_stale(tab.document.generation()) {
+        if search.is_stale(tab.document().generation()) {
             self.perform_search_for_active_doc();
             return AppEffect::REDRAW;
         }
@@ -269,7 +208,7 @@ impl App {
         }
         let replacement = crate::search_escape::parse_escapes(&search.replace_query);
         let Some((transaction, inserted_end)) = search_replacement_transaction(
-            &tab.document.full_text(),
+            &tab.document().full_text(),
             search.buffer_generation,
             matches,
             &replacement,

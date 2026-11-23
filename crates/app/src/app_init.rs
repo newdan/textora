@@ -5,12 +5,12 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
 use crate::app::App;
-use crate::file_history::FileHistory;
 use crate::product_paths::ProductPaths;
 use crate::ui_shell::UiShell;
-use crate::view_route::{ViewPathMatcher, ViewRouteRule, ViewRouteTable};
-use crate::workspace::Workspace;
+use appkit_core::file_history::FileHistory;
 use appkit_shell::editor_runtime::{EditorRuntime, EditorRuntimeConfig, EditorRuntimeError};
+use appkit_shell::view_route::{ViewPathMatcher, ViewRouteRule, ViewRouteTable};
+use appkit_shell::workspace::Workspace;
 
 #[cfg(feature = "markdown")]
 const MINDMAP_ROUTE_PRIORITY: u16 = 400;
@@ -307,7 +307,7 @@ impl App {
             running: false,
             needs_redraw: true,
             sidebar_animating: false,
-            tab_scroll: crate::smooth_scroll::SmoothScroll::new(),
+            tab_scroll: appkit_shell::smooth_scroll::SmoothScroll::new(),
             mouse: crate::mouse::MouseState::new(),
             last_scroll_time: std::time::Instant::now(),
             last_cursor_visible: true,
@@ -356,7 +356,7 @@ impl App {
         // Early-out: collect metadata first so we can release dv borrow before shaping.
         let (_vc, viewport_width, lh, _font_size, _pre_start, _pre_end, viewport_line_data) = {
             let Some(tab) = self.tab_session(tab_id) else { return };
-            let dv = tab.document;
+            let dv = tab.document();
 
             // Skip rebuild if display map is already up-to-date
             if tab.display().display_map.line_count() == dv.line_count() && dv.line_count() > 1 {
@@ -371,7 +371,7 @@ impl App {
                         - metrics.scrollbar_reserve
                         - self.editor_left_margin(dv.line_count());
                     let anchor_bytes = dv.doc_line_bytes(anchor_doc).unwrap_or_default();
-                    let expected_hash = crate::content_hash::content_hash(
+                    let expected_hash = appkit_core::content_hash::content_hash(
                         anchor_bytes.as_ref(),
                         aoff,
                         vp_w,
@@ -431,8 +431,10 @@ impl App {
         }; // dv borrow released
 
         // Phase 2: shape viewport lines with main-thread shaper
-        let mut pre_entries: std::collections::HashMap<usize, crate::snap_tree::DisplayLineEntry> =
-            std::collections::HashMap::new();
+        let mut pre_entries: std::collections::HashMap<
+            usize,
+            appkit_shell::snap_tree::DisplayLineEntry,
+        > = std::collections::HashMap::new();
         self.editor_runtime.with_render_resources(|_, resources| {
             let Some(text) = resources.text.as_mut() else {
                 return;
@@ -456,10 +458,10 @@ impl App {
                         viewport_width,
                         0.5,
                     );
-                    let mut breaks: smallvec::SmallVec<[crate::snap_tree::VisualBreak; 1]> =
+                    let mut breaks: smallvec::SmallVec<[appkit_shell::snap_tree::VisualBreak; 1]> =
                         smallvec::SmallVec::new();
                     if visual_lines.is_empty() {
-                        breaks.push(crate::snap_tree::VisualBreak {
+                        breaks.push(appkit_shell::snap_tree::VisualBreak {
                             byte_start: 0,
                             byte_end: *len,
                             pixel_width: 0.0,
@@ -468,7 +470,7 @@ impl App {
                         for (vs, ve, pw) in &visual_lines {
                             let bs = shaped.clusters[*vs].byte_range.start as u32;
                             let be = shaped.clusters[*ve - 1].byte_range.end as u32;
-                            breaks.push(crate::snap_tree::VisualBreak {
+                            breaks.push(appkit_shell::snap_tree::VisualBreak {
                                 byte_start: bs,
                                 byte_end: be,
                                 pixel_width: *pw,
@@ -476,7 +478,7 @@ impl App {
                         }
                     }
                     let vl = breaks.len().max(1) as u16;
-                    let hash = crate::content_hash::content_hash(
+                    let hash = appkit_core::content_hash::content_hash(
                         line_str.as_bytes(),
                         *off,
                         viewport_width,
@@ -484,7 +486,7 @@ impl App {
                     );
                     pre_entries.insert(
                         *dl,
-                        crate::snap_tree::DisplayLineEntry {
+                        appkit_shell::snap_tree::DisplayLineEntry {
                             visual_line_count: vl,
                             visual_breaks: breaks,
                             byte_offset: *off,
@@ -498,10 +500,10 @@ impl App {
 
         // Phase 3: build all entries and commit
         if let Some(mut tab) = self.tab_session_mut(tab_id) {
-            let dv = &mut tab.document;
+            let dv = tab.document();
             let est_cpl = (viewport_width / (font_size * 0.6)).max(40.0);
 
-            let entries: Vec<crate::snap_tree::DisplayLineEntry> = (0..dv.line_count())
+            let entries: Vec<appkit_shell::snap_tree::DisplayLineEntry> = (0..dv.line_count())
                 .map(|i| {
                     if let Some(entry) = pre_entries.get(&i) {
                         entry.clone()
@@ -509,14 +511,14 @@ impl App {
                         let len = dv.line_byte_length(i).unwrap_or(0);
                         let off = dv.line_byte_offset(i).unwrap_or(0);
                         let line_bytes = dv.doc_line_bytes(i).unwrap_or_default();
-                        let hash = crate::content_hash::content_hash(
+                        let hash = appkit_core::content_hash::content_hash(
                             line_bytes.as_ref(),
                             off,
                             viewport_width,
                             font_size,
                         );
                         let est_vl = (len as f32 / est_cpl).ceil() as u16;
-                        crate::snap_tree::DisplayLineEntry::placeholder(
+                        appkit_shell::snap_tree::DisplayLineEntry::placeholder(
                             off, len as u32, hash, est_vl,
                         )
                     }

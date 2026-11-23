@@ -1,8 +1,8 @@
 use crate::app::App;
 use crate::app_effect::AppEffect;
 use crate::ui_shell::KeyboardFocusTarget;
+use appkit_core::edit_command::EditCommand;
 use appkit_shell::editor_runtime::{EditorNotification, EditorOutcome};
-use appkit_shell::input_mapper::EditCommand;
 use appkit_shell::{DocumentClipboard, SystemClipboard};
 use winit::event_loop::ActiveEventLoop;
 
@@ -115,7 +115,7 @@ impl App {
         self.sync_plugin_state();
 
         let (_result, outcome) = self.editor_runtime.execute_semantic_edit(command);
-        let current_dirty = self.active_tab_session().is_some_and(|tab| tab.document.dirty);
+        let current_dirty = self.active_tab_session().is_some_and(|tab| tab.document().dirty);
         apply_editor_dirty_notifications(self, &outcome.notifications, current_dirty);
         self.sync_plugin_state();
 
@@ -151,8 +151,8 @@ impl App {
         if !is_cursor_navigation_command(cmd) {
             return;
         }
-        if let Some(tab) = self.active_tab_session_mut() {
-            tab.document.break_edit_merge();
+        if let Some(mut tab) = self.active_tab_session_mut() {
+            tab.document_mut().break_edit_merge();
         }
     }
 
@@ -591,7 +591,7 @@ impl App {
         effect = effect.merge(self.handle_nav_effect(ws_effect));
 
         let outcome = self.editor_runtime.execute_source_command(&cmd);
-        let dirty = self.active_tab_session().is_some_and(|tab| tab.document.dirty);
+        let dirty = self.active_tab_session().is_some_and(|tab| tab.document().dirty);
         apply_editor_dirty_notifications(self, &outcome.notifications, dirty);
         if self.active_allows_editing() {
             self.sync_plugin_state();
@@ -649,7 +649,7 @@ impl App {
             self.ensure_wysiwyg_cursor_visible();
         }
 
-        let dirty = self.active_tab_session().is_some_and(|tab| tab.document.dirty);
+        let dirty = self.active_tab_session().is_some_and(|tab| tab.document().dirty);
         apply_editor_dirty_notifications(self, &outcome.notifications, dirty);
         outcome.shell_effect
     }
@@ -683,7 +683,7 @@ impl App {
         }
         let Some((preference, previous_content_revision)) = self
             .active_tab_session()
-            .map(|tab| (tab.paste_preference(), tab.document.content_revision()))
+            .map(|tab| (tab.paste_preference(), tab.document().content_revision()))
         else {
             return AppEffect::NONE;
         };
@@ -693,17 +693,17 @@ impl App {
             return AppEffect::NONE;
         };
 
-        if let Some(tab) = self.active_tab_session_mut() {
-            tab.document.break_edit_merge();
+        if let Some(mut tab) = self.active_tab_session_mut() {
+            tab.document_mut().break_edit_merge();
         }
         let effect =
             self.dispatch_transactional_edit(ui::plugin::EditIntent::InsertText(text), event_loop);
-        if let Some(tab) = self.active_tab_session_mut() {
-            tab.document.break_edit_merge();
+        if let Some(mut tab) = self.active_tab_session_mut() {
+            tab.document_mut().break_edit_merge();
         }
         if self
             .active_tab_session()
-            .is_some_and(|tab| tab.document.content_revision() != previous_content_revision)
+            .is_some_and(|tab| tab.document().content_revision() != previous_content_revision)
         {
             effect.merge(AppEffect::RESHAPE)
         } else {
@@ -732,7 +732,7 @@ impl App {
     #[cfg(test)]
     pub(crate) fn dispatch_transactional_edit_for_test(
         &mut self,
-        command: appkit_shell::input_mapper::EditCommand,
+        command: appkit_core::edit_command::EditCommand,
     ) -> AppEffect {
         let intent = crate::edit_transaction::edit_intent_for_command(&command)
             .expect("Command should resolve to EditIntent");
@@ -749,9 +749,9 @@ mod edit_tests {
     };
     use crate::clipboard::TestDocumentClipboard;
     use crate::document_fixture::DocumentFixture;
+    use appkit_core::edit_command::EditCommand;
     use appkit_shell::edit_transaction::EditOutcome;
     use appkit_shell::editor_commands::edit_requires_reshape;
-    use appkit_shell::input_mapper::EditCommand;
 
     fn app_with_text(text: &str) -> App {
         let mut app = App::new(None);
@@ -817,33 +817,33 @@ mod edit_tests {
     }
 
     fn set_active_selection(app: &mut App, anchor: usize, cursor: usize) {
-        let tab = app.active_tab_session_mut().expect("active tab should exist");
-        tab.document.cursor_move_to_offset(cursor);
-        tab.document.cursor_mut().selection_anchor = Some(anchor);
+        let mut tab = app.active_tab_session_mut().expect("active tab should exist");
+        tab.document_mut().cursor_move_to_offset(cursor);
+        tab.document_mut().cursor_mut().selection_anchor = Some(anchor);
     }
 
     fn active_text(app: &App) -> String {
-        app.active_tab_session().expect("active tab should exist").document.full_text()
+        app.active_tab_session().expect("active tab should exist").document().full_text()
     }
 
     fn active_cursor(app: &App) -> usize {
         app.active_tab_session()
             .expect("active tab should exist")
-            .document
+            .document()
             .cursor_offset()
             .to_usize()
     }
 
     fn active_selection(app: &App) -> Option<(usize, usize)> {
-        app.active_tab_session().expect("active tab should exist").document.selection_range()
+        app.active_tab_session().expect("active tab should exist").document().selection_range()
     }
 
     fn dispatch_undo(app: &mut App) {
-        app.active_tab_session_mut().expect("active tab should exist").document.undo();
+        app.active_tab_session_mut().expect("active tab should exist").document_mut().undo();
     }
 
     fn dispatch_redo(app: &mut App) {
-        app.active_tab_session_mut().expect("active tab should exist").document.redo();
+        app.active_tab_session_mut().expect("active tab should exist").document_mut().redo();
     }
 
     #[derive(Debug, PartialEq, Eq)]
@@ -858,20 +858,20 @@ mod edit_tests {
     fn active_document_snapshot(app: &App) -> ActiveDocumentSnapshot {
         let tab = app.active_tab_session().expect("active tab should exist");
         ActiveDocumentSnapshot {
-            text: tab.document.full_text(),
-            cursor: tab.document.cursor_offset().to_usize(),
-            selection: tab.document.selection_range(),
-            content_revision: tab.document.content_revision(),
-            dirty: tab.document.dirty,
+            text: tab.document().full_text(),
+            cursor: tab.document().cursor_offset().to_usize(),
+            selection: tab.document().selection_range(),
+            content_revision: tab.document().content_revision(),
+            dirty: tab.document().dirty,
         }
     }
 
     fn active_content_revision(app: &App) -> u64 {
-        app.active_tab_session().expect("active tab should exist").document.content_revision()
+        app.active_tab_session().expect("active tab should exist").document().content_revision()
     }
 
     fn select_all_active_text(app: &mut App) {
-        app.active_tab_session_mut().expect("active tab should exist").document.select_all();
+        app.active_tab_session_mut().expect("active tab should exist").document_mut().select_all();
     }
 
     #[test]
@@ -1218,8 +1218,8 @@ mod edit_tests {
         let effect = app.dispatch_semantic_edit(ui::plugin::SemanticEditCommand::ToggleBold);
 
         let tab = app.active_tab_session().expect("Markdown tab should remain active");
-        assert_eq!(tab.full_text(), "**hello**");
-        assert!(tab.document.dirty);
+        assert_eq!(tab.document().full_text(), "**hello**");
+        assert!(tab.document().dirty);
         assert!(effect.redraw);
     }
 
@@ -1386,32 +1386,32 @@ mod edit_tests {
         // The caret leaves and returns to the exact byte where typing ended.
         app.break_edit_merge_for_navigation(&EditCommand::MoveLeft);
         {
-            let Some(tab) = app.active_tab_session_mut() else {
+            let Some(mut tab) = app.active_tab_session_mut() else {
                 panic!("source editor tab should be active");
             };
-            tab.document.cursor_move_left();
+            tab.document_mut().cursor_move_left();
         }
         app.break_edit_merge_for_navigation(&EditCommand::MoveRight);
         {
-            let Some(tab) = app.active_tab_session_mut() else {
+            let Some(mut tab) = app.active_tab_session_mut() else {
                 panic!("source editor tab should be active");
             };
-            tab.document.cursor_move_right();
+            tab.document_mut().cursor_move_right();
         }
         let _ = app.dispatch_transactional_edit_for_test(EditCommand::InsertText("b".into()));
 
-        let Some(tab) = app.active_tab_session_mut() else {
+        let Some(mut tab) = app.active_tab_session_mut() else {
             panic!("source editor tab should be active");
         };
-        assert_eq!(tab.document.full_text(), "ab");
-        tab.document.undo();
+        assert_eq!(tab.document().full_text(), "ab");
+        tab.document_mut().undo();
         assert_eq!(
-            tab.document.full_text(),
+            tab.document().full_text(),
             "a",
             "first undo must only remove the text typed after navigating"
         );
-        tab.document.undo();
-        assert_eq!(tab.document.full_text(), "");
+        tab.document_mut().undo();
+        assert_eq!(tab.document().full_text(), "");
     }
 
     #[test]
@@ -1460,7 +1460,7 @@ mod edit_tests {
                             let mut app = app_with_editing_audit_document(&source);
                             app.active_tab_session_mut()
                                 .expect("audit tab must exist")
-                                .document
+                                .document_mut()
                                 .cursor_move_to_offset(cursor);
                             assert_editing_audit_history(&mut app, command);
                         }
@@ -1550,12 +1550,12 @@ mod edit_tests {
             let mut app = app_with_editing_audit_document(&source);
             app.active_tab_session_mut()
                 .expect("audit document exists")
-                .document
+                .document_mut()
                 .cursor_move_to_offset(source.len());
             let _ = app.dispatch_transactional_edit_for_test(EditCommand::InsertText("新".into()));
             app.active_tab_session_mut()
                 .expect("audit document exists")
-                .document
+                .document_mut()
                 .cursor_move_to_offset("---".len());
             for _ in 0..3 {
                 let _ = app.dispatch_transactional_edit_for_test(EditCommand::DeleteForward);

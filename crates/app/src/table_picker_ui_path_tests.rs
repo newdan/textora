@@ -180,12 +180,12 @@ fn right_click_and_choose_alignment_updates_the_clicked_second_column_once() {
         }
     ));
     let generation_before =
-        app.active_tab_session().expect("Markdown tab should be active").document.generation();
+        app.active_tab_session().expect("Markdown tab should be active").document().generation();
 
     click_popup_item(&mut app, 9, popup_rect);
 
     let active = app.active_tab_session().expect("Markdown tab should remain active");
-    let updated_source = active.document.full_text();
+    let updated_source = active.document().full_text();
     assert!(
         updated_source.contains("| --- | ---: |"),
         "second delimiter cell should align right: {updated_source:?}"
@@ -196,7 +196,7 @@ fn right_click_and_choose_alignment_updates_the_clicked_second_column_once() {
         "only the clicked second-column delimiter cell should change"
     );
     assert_eq!(
-        active.document.generation(),
+        active.document().generation(),
         generation_before + 1,
         "one popup click should create one transaction"
     );
@@ -207,15 +207,15 @@ fn right_click_and_choose_alignment_updates_the_clicked_second_column_once() {
 fn picker_keyboard_events_reach_the_modal_widget_and_confirm_one_table_transaction() {
     let (mut app, _directory) = open_markdown_app("existing paragraph");
     let generation_before =
-        app.active_tab_session().expect("Markdown tab should be active").document.generation();
+        app.active_tab_session().expect("Markdown tab should be active").document().generation();
     push_table_picker_overlay(&mut app);
     send_picker_key(&mut app, ui::KeyCode::Right);
     send_picker_key(&mut app, ui::KeyCode::Down);
     send_picker_key(&mut app, ui::KeyCode::Enter);
 
     let active = app.active_tab_session().expect("Markdown tab should remain active");
-    assert_eq!(active.document.generation(), generation_before + 1);
-    let parsed = textora_markdown::parser::parse_markdown(&active.document.full_text());
+    assert_eq!(active.document().generation(), generation_before + 1);
+    let parsed = textora_markdown::parser::parse_markdown(&active.document().full_text());
     assert!(parsed.events.iter().any(|event| matches!(
         event,
         textora_markdown::parser::MarkdownEvent::Start(
@@ -243,7 +243,7 @@ fn picker_keyboard_events_reach_the_modal_widget_and_confirm_one_table_transacti
 fn picker_drag_events_confirm_only_after_release_and_create_one_transaction() {
     let (mut app, _directory) = open_markdown_app("existing paragraph");
     let generation_before =
-        app.active_tab_session().expect("Markdown tab should be active").document.generation();
+        app.active_tab_session().expect("Markdown tab should be active").document().generation();
     let (overlay, content) = push_table_picker_overlay(&mut app);
     let start = picker_grid_point(overlay, content, 0.5, 0.5);
     let target = picker_grid_point(overlay, content, 2.5, 2.5);
@@ -251,7 +251,10 @@ fn picker_drag_events_confirm_only_after_release_and_create_one_transaction() {
     let hover = crate::events::handle_cursor_moved(&mut app, target.0, target.1);
     apply_event_actions(&mut app, hover);
     assert_eq!(
-        app.active_tab_session().expect("Markdown tab should remain active").document.generation(),
+        app.active_tab_session()
+            .expect("Markdown tab should remain active")
+            .document()
+            .generation(),
         generation_before,
         "hover preview must not edit the document"
     );
@@ -261,7 +264,10 @@ fn picker_drag_events_confirm_only_after_release_and_create_one_transaction() {
     let drag = crate::events::handle_cursor_moved(&mut app, target.0, target.1);
     apply_event_actions(&mut app, drag);
     assert_eq!(
-        app.active_tab_session().expect("Markdown tab should remain active").document.generation(),
+        app.active_tab_session()
+            .expect("Markdown tab should remain active")
+            .document()
+            .generation(),
         generation_before,
         "dragging should update only the preview"
     );
@@ -274,8 +280,8 @@ fn picker_drag_events_confirm_only_after_release_and_create_one_transaction() {
     apply_event_actions(&mut app, release);
 
     let active = app.active_tab_session().expect("Markdown tab should remain active");
-    assert_eq!(active.document.generation(), generation_before + 1);
-    let parsed = textora_markdown::parser::parse_markdown(&active.document.full_text());
+    assert_eq!(active.document().generation(), generation_before + 1);
+    let parsed = textora_markdown::parser::parse_markdown(&active.document().full_text());
     assert!(parsed.events.iter().any(|event| matches!(
         event,
         textora_markdown::parser::MarkdownEvent::Start(
@@ -302,7 +308,7 @@ fn picker_drag_events_confirm_only_after_release_and_create_one_transaction() {
 fn picker_numeric_input_and_enter_confirm_the_selected_dimensions_once() {
     let (mut app, _directory) = open_markdown_app("existing paragraph");
     let generation_before =
-        app.active_tab_session().expect("Markdown tab should be active").document.generation();
+        app.active_tab_session().expect("Markdown tab should be active").document().generation();
     let (overlay, content) = push_table_picker_overlay(&mut app);
     let initial_hover = picker_grid_point(overlay, content, 1.5, 1.5);
     let hover = crate::events::handle_cursor_moved(&mut app, initial_hover.0, initial_hover.1);
@@ -330,8 +336,8 @@ fn picker_numeric_input_and_enter_confirm_the_selected_dimensions_once() {
     send_picker_key(&mut app, ui::KeyCode::Enter);
 
     let active = app.active_tab_session().expect("Markdown tab should remain active");
-    assert_eq!(active.document.generation(), generation_before + 1);
-    let parsed = textora_markdown::parser::parse_markdown(&active.document.full_text());
+    assert_eq!(active.document().generation(), generation_before + 1);
+    let parsed = textora_markdown::parser::parse_markdown(&active.document().full_text());
     assert!(parsed.events.iter().any(|event| matches!(
         event,
         textora_markdown::parser::MarkdownEvent::Start(

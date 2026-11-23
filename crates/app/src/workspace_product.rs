@@ -4,9 +4,9 @@ use std::path::Path;
 use appkit_core::document::DocumentModel;
 
 #[cfg(test)]
-use crate::file_history::FileHistoryEntry;
+use appkit_core::file_history::FileHistoryEntry;
 #[cfg(test)]
-use crate::workspace::Workspace;
+use appkit_shell::workspace::Workspace;
 
 #[cfg(test)]
 const RECOVERY_TITLE_PREFIX: &str = "恢复：";
@@ -109,8 +109,8 @@ mod tests {
     use crate::app_init::build_product_workspace;
     use crate::document_fixture::DocumentFixture;
     use crate::plugins::editor::EditorPlugin;
-    use crate::tab_runtime::{TabRuntime, TabRuntimeStore};
-    use crate::workspace::Workspace;
+    use appkit_shell::tab_runtime::{TabRuntime, TabRuntimeStore};
+    use appkit_shell::workspace::Workspace;
 
     fn append_document(
         workspace: &mut Workspace,

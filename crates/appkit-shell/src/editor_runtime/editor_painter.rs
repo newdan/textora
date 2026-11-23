@@ -328,7 +328,7 @@ fn paint_plugin_layers(
     if let (Some(text), Some(gpu)) = (resources.text.as_mut(), gpu) {
         crate::paint_backend::drain_into(content, screen, Some(text), Some(gpu), vertices);
     }
-    if tab.handles_own_rendering() && tab.has_selection() {
+    if tab.handles_own_rendering() && tab.plugin_has_selection() {
         let selection = tab.selection_highlights(theme.editor.selection);
         if !selection.cmds.is_empty() {
             crate::paint_backend::drain_into(

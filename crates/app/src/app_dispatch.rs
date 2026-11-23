@@ -4,12 +4,12 @@
 use crate::actions::AppAction;
 use crate::app::App;
 use crate::app_effect::AppEffect;
-use crate::canvas_viewport::CanvasViewportAction;
 use crate::dispatch::chrome::{ChromeDispatchAction, SettingsDispatchAction, TabScrollDirection};
 use crate::dispatch::viewport::ViewportDispatchAction;
 use crate::sync_settings_types::SyncSettingsAction;
 use appkit_core::workspace::types::TabId;
 use appkit_shell::DrainStart;
+use appkit_shell::canvas_viewport::CanvasViewportAction;
 use textora_sync::{DeviceId, LoopbackEndpoint, RemoteDeviceSpec, StaticSyncAddress};
 
 const PREVIEW_TOP_PAD_LOGICAL: f32 = 16.0;
@@ -455,16 +455,16 @@ impl App {
             return AppEffect::NONE;
         }
         {
-            let Some(tab) = self.active_tab_session_mut() else {
+            let Some(mut tab) = self.active_tab_session_mut() else {
                 return AppEffect::NONE;
             };
-            if tab.document.generation() != source_generation
-                || cursor_byte > tab.document.buffer_len()
-                || !tab.document.full_text().is_char_boundary(cursor_byte)
+            if tab.document().generation() != source_generation
+                || cursor_byte > tab.document().buffer_len()
+                || !tab.document().full_text().is_char_boundary(cursor_byte)
             {
                 return AppEffect::NONE;
             }
-            tab.document.cursor_move_to_offset(cursor_byte);
+            tab.document_mut().cursor_move_to_offset(cursor_byte);
         }
         self.dispatch_semantic_edit(ui::plugin::SemanticEditCommand::TableStructure(command))
     }
@@ -472,7 +472,7 @@ impl App {
     fn apply_active_mindmap_theme(&mut self, theme_id: String) -> AppEffect {
         let outcome = self.editor_runtime.apply_active_mindmap_theme(theme_id);
         if outcome.shell_effect != AppEffect::NONE {
-            let dirty = self.active_tab_session().is_some_and(|tab| tab.document.dirty);
+            let dirty = self.active_tab_session().is_some_and(|tab| tab.document().dirty);
             self.update_document_edited(dirty);
         }
         outcome.shell_effect
@@ -915,7 +915,7 @@ pub(crate) mod canvas_drag_test_support {
     pub(crate) fn document_texts(app: &App) -> Vec<String> {
         app.editor_tab_ids_in_order()
             .into_iter()
-            .map(|tab_id| app.tab_session(tab_id).expect("tab session").full_text())
+            .map(|tab_id| app.tab_session(tab_id).expect("tab session").document().full_text())
             .collect()
     }
 }
@@ -1223,7 +1223,7 @@ mod tests {
             MindmapThemePlanMode::Current("warm-night"),
         );
         let generation_before =
-            app.active_tab_session().expect("active mmap tab").document.generation();
+            app.active_tab_session().expect("active mmap tab").document().generation();
 
         let effect = reduce_mindmap_style_action(
             &mut app,
@@ -1232,9 +1232,9 @@ mod tests {
 
         let entry = app.active_tab_session().expect("active mmap tab");
         assert_eq!(effect, AppEffect::REDRAW);
-        assert_eq!(entry.document.full_text(), "theme=tide");
-        assert_eq!(entry.document.generation(), generation_before + 1);
-        assert!(entry.document.dirty);
+        assert_eq!(entry.document().full_text(), "theme=tide");
+        assert_eq!(entry.document().generation(), generation_before + 1);
+        assert!(entry.document().dirty);
         assert_eq!(state.plan_queries.borrow().as_slice(), &[("tide".into(), generation_before)]);
         assert_eq!(*state.synchronized_sources.borrow(), ["theme=tide"]);
     }
@@ -1247,8 +1247,11 @@ mod tests {
             .expect("table-picker fixture should be writable");
         let mut app = App::new(None);
         let _ = app.open_file(&path).expect("Markdown fixture should open");
-        let generation_before =
-            app.active_tab_session().expect("Markdown tab should be active").document.generation();
+        let generation_before = app
+            .active_tab_session()
+            .expect("Markdown tab should be active")
+            .document()
+            .generation();
         let mut picker = ui::table_picker::TablePickerWidget::new();
         picker.set_input(ui::table_picker::TablePickerInput { open: true });
         app.ui_shell.push_overlay_with_policy(
@@ -1271,10 +1274,10 @@ mod tests {
         );
 
         let active_document = app.active_tab_session().expect("Markdown tab should remain active");
-        assert_eq!(active_document.document.generation(), generation_before + 1);
+        assert_eq!(active_document.document().generation(), generation_before + 1);
         assert!(!app.ui_shell.active_overlay_is_modal());
         let parsed =
-            textora_markdown::parser::parse_markdown(&active_document.document.full_text());
+            textora_markdown::parser::parse_markdown(&active_document.document().full_text());
         assert!(parsed.events.iter().any(|event| matches!(
             event,
             textora_markdown::parser::MarkdownEvent::Start(
@@ -1293,8 +1296,11 @@ mod tests {
         std::fs::write(&path, original).expect("table-structure fixture should be writable");
         let mut app = App::new(None);
         let _ = app.open_file(&path).expect("Markdown fixture should open");
-        let generation_before =
-            app.active_tab_session().expect("Markdown tab should be active").document.generation();
+        let generation_before = app
+            .active_tab_session()
+            .expect("Markdown tab should be active")
+            .document()
+            .generation();
         let cursor_byte = original.find("right").expect("clicked second-column cell exists");
 
         let effect = app.reduce_action(
@@ -1310,18 +1316,18 @@ mod tests {
 
         let expected = "| first | second |\n| --- | ---: |\n| left | right |";
         let active = app.active_tab_session().expect("Markdown tab should remain active");
-        assert_eq!(active.document.full_text(), expected);
-        assert_eq!(active.document.generation(), generation_before + 1);
+        assert_eq!(active.document().full_text(), expected);
+        assert_eq!(active.document().generation(), generation_before + 1);
         assert!(effect.redraw);
 
         let _ = app.dispatch_semantic_edit(ui::plugin::SemanticEditCommand::Undo);
         assert_eq!(
-            app.active_tab_session().expect("Markdown tab remains").document.full_text(),
+            app.active_tab_session().expect("Markdown tab remains").document().full_text(),
             original
         );
         let _ = app.dispatch_semantic_edit(ui::plugin::SemanticEditCommand::Redo);
         assert_eq!(
-            app.active_tab_session().expect("Markdown tab remains").document.full_text(),
+            app.active_tab_session().expect("Markdown tab remains").document().full_text(),
             expected
         );
 
@@ -1335,7 +1341,7 @@ mod tests {
         let reopened = reopened_app
             .active_tab_session()
             .expect("reopened Markdown tab should be active")
-            .document
+            .document()
             .full_text();
         assert_eq!(reopened, expected);
         let parsed = textora_markdown::parser::parse_markdown(&reopened);
@@ -1355,12 +1361,15 @@ mod tests {
             .expect("table-picker fixture should be writable");
         let mut app = App::new(None);
         let _ = app.open_file(&path).expect("Markdown fixture should open");
-        let generation_before =
-            app.active_tab_session().expect("Markdown tab should be active").document.generation();
+        let generation_before = app
+            .active_tab_session()
+            .expect("Markdown tab should be active")
+            .document()
+            .generation();
         let source_before = app
             .active_tab_session()
             .expect("Markdown tab should be active")
-            .document
+            .document()
             .full_text()
             .to_owned();
         app.ui_shell.push_overlay_with_policy(
@@ -1385,8 +1394,8 @@ mod tests {
 
         assert!(!app.ui_shell.active_overlay_is_modal());
         let active_document = app.active_tab_session().expect("Markdown tab should remain active");
-        assert_eq!(active_document.document.full_text(), source_before);
-        assert_eq!(active_document.document.generation(), generation_before);
+        assert_eq!(active_document.document().full_text(), source_before);
+        assert_eq!(active_document.document().generation(), generation_before);
         assert!(effect.redraw);
     }
 
@@ -1397,7 +1406,7 @@ mod tests {
             MindmapThemePlanMode::Current("tide"),
         );
         let generation_before =
-            app.active_tab_session().expect("active mmap tab").document.generation();
+            app.active_tab_session().expect("active mmap tab").document().generation();
 
         let effect = reduce_mindmap_style_action(
             &mut app,
@@ -1406,9 +1415,9 @@ mod tests {
 
         let entry = app.active_tab_session().expect("active mmap tab");
         assert_eq!(effect, AppEffect::NONE);
-        assert_eq!(entry.document.full_text(), "root");
-        assert_eq!(entry.document.generation(), generation_before);
-        assert!(!entry.document.dirty);
+        assert_eq!(entry.document().full_text(), "root");
+        assert_eq!(entry.document().generation(), generation_before);
+        assert!(!entry.document().dirty);
         assert!(state.synchronized_sources.borrow().is_empty());
     }
 
@@ -1417,7 +1426,7 @@ mod tests {
         let (mut stale_app, stale_state) =
             app_with_mindmap_style_plugin(ui::plugin::PLUGIN_MINDMAP, MindmapThemePlanMode::Stale);
         let stale_generation =
-            stale_app.active_tab_session().expect("active stale mmap tab").document.generation();
+            stale_app.active_tab_session().expect("active stale mmap tab").document().generation();
         assert_eq!(
             reduce_mindmap_style_action(
                 &mut stale_app,
@@ -1426,9 +1435,9 @@ mod tests {
             AppEffect::NONE
         );
         let stale_entry = stale_app.active_tab_session().expect("active stale mmap tab");
-        assert_eq!(stale_entry.document.full_text(), "root");
-        assert_eq!(stale_entry.document.generation(), stale_generation);
-        assert!(!stale_entry.document.dirty);
+        assert_eq!(stale_entry.document().full_text(), "root");
+        assert_eq!(stale_entry.document().generation(), stale_generation);
+        assert!(!stale_entry.document().dirty);
         assert!(stale_state.synchronized_sources.borrow().is_empty());
 
         let (mut editor_app, editor_state) = app_with_mindmap_style_plugin(
@@ -1443,7 +1452,7 @@ mod tests {
             AppEffect::NONE
         );
         assert_eq!(
-            editor_app.active_tab_session().expect("active editor tab").document.full_text(),
+            editor_app.active_tab_session().expect("active editor tab").document().full_text(),
             "root"
         );
         assert!(editor_state.plan_queries.borrow().is_empty());
@@ -1476,12 +1485,14 @@ mod tests {
         assert_eq!(
             app.tab_session(app.editor_tab_id_at(0).expect("first tab id"))
                 .expect("first tab")
+                .document()
                 .full_text(),
             "root"
         );
         assert_eq!(
             app.tab_session(app.editor_tab_id_at(1).expect("second tab id"))
                 .expect("second tab")
+                .document()
                 .full_text(),
             "theme=tide"
         );

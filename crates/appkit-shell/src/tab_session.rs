@@ -81,16 +81,8 @@ impl DocViewMut for PresentedDocument<'_> {}
 
 pub struct TabSession<'a> {
     pub id: TabId,
-    pub document: &'a DocumentModel,
+    pub(crate) document: &'a DocumentModel,
     pub runtime: &'a TabRuntime,
-}
-
-impl std::ops::Deref for TabSession<'_> {
-    type Target = DocumentModel;
-
-    fn deref(&self) -> &Self::Target {
-        self.document
-    }
 }
 
 impl<'a> TabSession<'a> {
@@ -98,8 +90,16 @@ impl<'a> TabSession<'a> {
         Self { id, document, runtime }
     }
 
+    pub fn document(&self) -> &'a DocumentModel {
+        self.document
+    }
+
+    pub fn plugin(&self) -> &'a dyn ViewPlugin {
+        self.runtime.plugin.as_ref()
+    }
+
     pub fn plugin_name(&self) -> &'a str {
-        self.runtime.plugin.name()
+        self.plugin().name()
     }
 
     pub fn paste_preference(&self) -> ui::plugin::PastePreference {
@@ -173,7 +173,7 @@ impl<'a> TabSession<'a> {
         self.query_float(PluginQuery::ScrollY)
     }
 
-    pub fn has_selection(&self) -> bool {
+    pub fn plugin_has_selection(&self) -> bool {
         self.query_bool(PluginQuery::HasSelection)
     }
 
@@ -477,22 +477,8 @@ impl<'a> TabSession<'a> {
 
 pub struct TabSessionMut<'a> {
     pub id: TabId,
-    pub document: &'a mut DocumentModel,
+    pub(crate) document: &'a mut DocumentModel,
     pub runtime: &'a mut TabRuntime,
-}
-
-impl std::ops::Deref for TabSessionMut<'_> {
-    type Target = DocumentModel;
-
-    fn deref(&self) -> &Self::Target {
-        self.document
-    }
-}
-
-impl std::ops::DerefMut for TabSessionMut<'_> {
-    fn deref_mut(&mut self) -> &mut Self::Target {
-        self.document
-    }
 }
 
 impl<'a> TabSessionMut<'a> {
@@ -504,8 +490,20 @@ impl<'a> TabSessionMut<'a> {
         TabSession::new(self.id, self.document, self.runtime)
     }
 
+    pub fn document(&self) -> &DocumentModel {
+        self.document
+    }
+
+    pub fn document_mut(&mut self) -> &mut DocumentModel {
+        self.document
+    }
+
+    pub fn plugin(&self) -> &dyn ViewPlugin {
+        self.runtime.plugin.as_ref()
+    }
+
     pub fn plugin_name(&self) -> &str {
-        self.runtime.plugin.name()
+        self.plugin().name()
     }
 
     pub fn allows_editing(&self) -> bool {
@@ -550,8 +548,8 @@ impl<'a> TabSessionMut<'a> {
         self.as_ref().scroll_y()
     }
 
-    pub fn has_selection(&self) -> bool {
-        self.as_ref().has_selection()
+    pub fn plugin_has_selection(&self) -> bool {
+        self.as_ref().plugin_has_selection()
     }
 
     pub fn selection_cursor(&self) -> Option<(usize, usize)> {
@@ -673,10 +671,6 @@ impl<'a> TabSessionMut<'a> {
         self.runtime.mindmap_style_panel.toggle_presets();
     }
 
-    pub fn display_map_clone(&self) -> crate::display_line_map::DisplayLineMap {
-        self.display().display_map.clone()
-    }
-
     pub fn display_map_entry(
         &self,
         doc_line: usize,
@@ -726,9 +720,9 @@ impl<'a> TabSessionMut<'a> {
     }
 
     pub fn set_scroll_top_rows(&mut self, scroll_top: f64, line_height: f32) {
-        let display_map = self.display_map_clone();
-        self.display_mut().viewport.set_scroll_top(scroll_top, &display_map, line_height);
-        self.display_mut().viewport.derive_scroll_top(&display_map, line_height);
+        let DisplayState { viewport, display_map, .. } = self.display_mut();
+        viewport.set_scroll_top(scroll_top, display_map, line_height);
+        viewport.derive_scroll_top(display_map, line_height);
     }
 
     pub fn scroll_viewport_by_pages(&mut self, amount: f64, line_height: f32) {
@@ -738,19 +732,19 @@ impl<'a> TabSessionMut<'a> {
     }
 
     pub fn scroll_viewport_by_pixels(&mut self, pixels: f32, line_height: f32) {
-        let display_map = self.display_map_clone();
-        self.display_mut().viewport.scroll_pixels(pixels, &display_map, line_height);
+        let DisplayState { viewport, display_map, .. } = self.display_mut();
+        viewport.scroll_pixels(pixels, display_map, line_height);
         self.refresh_scroll_metrics(line_height);
     }
 
     pub fn clamp_scroll_anchor(&mut self, line_height: f32) {
-        let display_map = self.display_map_clone();
-        self.display_mut().viewport.clamp_anchor(&display_map, line_height);
+        let DisplayState { viewport, display_map, .. } = self.display_mut();
+        viewport.clamp_anchor(display_map, line_height);
     }
 
     pub fn derive_scroll_top(&mut self, line_height: f32) {
-        let display_map = self.display_map_clone();
-        self.display_mut().viewport.derive_scroll_top(&display_map, line_height);
+        let DisplayState { viewport, display_map, .. } = self.display_mut();
+        viewport.derive_scroll_top(display_map, line_height);
     }
 
     pub fn visible_doc_range_from_anchor(&self, line_height: f32) -> std::ops::Range<usize> {
@@ -844,10 +838,8 @@ impl<'a> TabSessionMut<'a> {
             return false;
         }
 
-        let display_map = self.display_map_clone();
         self.cursor_render_state_mut().click_hint = None;
-        self.display_mut().viewport.scroll_pixels(overflow_px, &display_map, line_height);
-        self.refresh_scroll_metrics(line_height);
+        self.scroll_viewport_by_pixels(overflow_px, line_height);
         true
     }
 
@@ -871,7 +863,6 @@ impl<'a> TabSessionMut<'a> {
     pub(crate) fn move_cursor_visual(
         &mut self,
         delta: isize,
-        display_map: &crate::display_line_map::DisplayLineMap,
         frame_cache: &crate::frame_cache::FrameCache,
         dpi_scale: f32,
     ) {
@@ -879,7 +870,7 @@ impl<'a> TabSessionMut<'a> {
             let viewport = &presentation.display.viewport;
             let cursor = &mut presentation.cursor_render_state;
             let context = crate::cursor_motion::CursorContext {
-                display_map,
+                display_map: &presentation.display.display_map,
                 cursor_visual_line: cursor.cursor_visual_line,
                 advance_cache: &presentation.display.advance_cache,
                 first_line: &frame_cache.first_line,
@@ -1062,8 +1053,22 @@ mod tests {
         let session = TabSession::new(id, &document, &runtime);
 
         assert_eq!(session.id, id);
-        assert_eq!(session.document.full_text(), "hello");
-        assert_eq!(session.runtime.plugin.name(), ui::plugin::PLUGIN_EDITOR);
+        assert_eq!(session.document().full_text(), "hello");
+        assert_eq!(session.plugin().name(), ui::plugin::PLUGIN_EDITOR);
+    }
+
+    #[test]
+    fn document_selection_is_independent_of_plugin_selection() {
+        let id = TabIdAllocator::new().allocate();
+        let mut document = document("hello");
+        let mut runtime = TabRuntime::new(Box::new(ScrollProbePlugin));
+        let mut session = TabSessionMut::new(id, &mut document, &mut runtime);
+
+        session.document_mut().select_all();
+
+        assert!(session.document().has_selection());
+        assert!(!session.plugin_has_selection());
+        assert_eq!(session.plugin().name(), "scroll-probe");
     }
 
     #[test]

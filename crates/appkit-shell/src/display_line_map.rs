@@ -29,7 +29,7 @@ pub struct DisplayPatch {
 }
 
 /// 持久化映射。
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub struct DisplayLineMap {
     tree: SnapTree,
     /// O(1) parallel array for doc_line → entry access.

@@ -164,7 +164,7 @@ fn plugin_selection_pull_is_safe(mouse_is_down: bool, plugin_needs_source_update
 }
 
 fn active_mindmap_style_input(
-    session: Option<crate::tab_session::TabSession<'_>>,
+    session: Option<appkit_shell::tab_session::TabSession<'_>>,
 ) -> Option<appkit_shell::mindmap_style_panel::MindmapStylePanelInput> {
     let session = session?;
     let panel = session.mindmap_style_panel();
@@ -179,15 +179,17 @@ fn active_mindmap_style_input(
     ))
 }
 
-fn file_safety_notice_label(notice: &crate::file_safety::FileSafetyNotice) -> &'static str {
+fn file_safety_notice_label(notice: &appkit_core::file_safety::FileSafetyNotice) -> &'static str {
     match notice {
-        crate::file_safety::FileSafetyNotice::CleanDocumentReloaded { .. } => "已同步远端修改",
-        crate::file_safety::FileSafetyNotice::ConflictCopyCreated { .. } => "已保留冲突副本",
-        crate::file_safety::FileSafetyNotice::DocumentDetachedAfterDeletion { .. } => {
+        appkit_core::file_safety::FileSafetyNotice::CleanDocumentReloaded { .. } => {
+            "已同步远端修改"
+        }
+        appkit_core::file_safety::FileSafetyNotice::ConflictCopyCreated { .. } => "已保留冲突副本",
+        appkit_core::file_safety::FileSafetyNotice::DocumentDetachedAfterDeletion { .. } => {
             "文件已删除，内容已恢复"
         }
-        crate::file_safety::FileSafetyNotice::ConflictCopyFailed { .. } => "冲突保护失败",
-        crate::file_safety::FileSafetyNotice::AmbiguousRename { .. } => "检测到歧义重命名",
+        appkit_core::file_safety::FileSafetyNotice::ConflictCopyFailed { .. } => "冲突保护失败",
+        appkit_core::file_safety::FileSafetyNotice::AmbiguousRename { .. } => "检测到歧义重命名",
     }
 }
 
@@ -201,7 +203,7 @@ mod tests {
         App, active_mindmap_style_input, needs_redraw_after_render, plugin_selection_pull_is_safe,
     };
     use crate::document_fixture::DocumentFixture;
-    use crate::tab_runtime::TabRuntime;
+    use appkit_shell::tab_runtime::TabRuntime;
     use ui::canvas::CanvasPoint;
     use ui::plugin::{
         CanvasContentMetrics, PluginMessage, PluginQuery, PluginResponse, ViewPlugin,
@@ -266,7 +268,7 @@ mod tests {
             ui::theme::MindmapThemeSelection::Selected("tide".into()),
         );
         {
-            let mut session = crate::tab_session::TabSessionMut::new(
+            let mut session = appkit_shell::tab_session::TabSessionMut::new(
                 entry.id,
                 &mut entry.document,
                 &mut entry.runtime,
@@ -275,7 +277,7 @@ mod tests {
         }
 
         let session =
-            crate::tab_session::TabSession::new(entry.id, &entry.document, &entry.runtime);
+            appkit_shell::tab_session::TabSession::new(entry.id, &entry.document, &entry.runtime);
         let input = active_mindmap_style_input(Some(session)).expect("open mmap panel input");
 
         assert!(input.options.iter().any(|option| option.id == "tide" && option.selected));
@@ -288,7 +290,7 @@ mod tests {
             ui::theme::MindmapThemeSelection::Selected("tide".into()),
         );
         {
-            let mut session = crate::tab_session::TabSessionMut::new(
+            let mut session = appkit_shell::tab_session::TabSessionMut::new(
                 entry.id,
                 &mut entry.document,
                 &mut entry.runtime,
@@ -297,7 +299,7 @@ mod tests {
         }
 
         let session =
-            crate::tab_session::TabSession::new(entry.id, &entry.document, &entry.runtime);
+            appkit_shell::tab_session::TabSession::new(entry.id, &entry.document, &entry.runtime);
         assert!(active_mindmap_style_input(Some(session)).is_none());
     }
 
@@ -312,7 +314,7 @@ mod tests {
             ui::theme::MindmapThemeSelection::Default,
         );
         {
-            let mut session = crate::tab_session::TabSessionMut::new(
+            let mut session = appkit_shell::tab_session::TabSessionMut::new(
                 first.id,
                 &mut first.document,
                 &mut first.runtime,
@@ -321,13 +323,16 @@ mod tests {
         }
 
         let first_session =
-            crate::tab_session::TabSession::new(first.id, &first.document, &first.runtime);
-        let second_session =
-            crate::tab_session::TabSession::new(second.id, &second.document, &second.runtime);
+            appkit_shell::tab_session::TabSession::new(first.id, &first.document, &first.runtime);
+        let second_session = appkit_shell::tab_session::TabSession::new(
+            second.id,
+            &second.document,
+            &second.runtime,
+        );
         assert!(active_mindmap_style_input(Some(first_session)).is_some());
         assert!(active_mindmap_style_input(Some(second_session)).is_none());
         let first_session =
-            crate::tab_session::TabSession::new(first.id, &first.document, &first.runtime);
+            appkit_shell::tab_session::TabSession::new(first.id, &first.document, &first.runtime);
         assert!(active_mindmap_style_input(Some(first_session)).is_some());
     }
 
@@ -1042,7 +1047,7 @@ impl App {
                             let cursor_x = tab.cursor_pixel_x();
                             let cursor_y =
                                 content_top + cursor_vl as f32 * line_height + sub_line_offset;
-                            vertices.extend(crate::render_pipeline::preedit_text_vertices(
+                            vertices.extend(appkit_shell::render_pipeline::preedit_text_vertices(
                                 &metrics,
                                 &preedit_text,
                                 cursor_x,
@@ -1054,7 +1059,7 @@ impl App {
                                 self.current_theme.editor.foreground,
                             ));
                         } else {
-                            vertices.extend(crate::render_pipeline::preedit_text_vertices(
+                            vertices.extend(appkit_shell::render_pipeline::preedit_text_vertices(
                                 &metrics,
                                 &preedit_text,
                                 ime_fallback_x,
@@ -1234,7 +1239,7 @@ impl App {
             let conflict_label = self.file_safety_status_label();
             let (preedit_text, _) = self.editor_runtime.preedit();
             let active_shell_input = self.active_tab_session().map(|entry| {
-                let document = entry.document;
+                let document = entry.document();
                 let status = StatusBarInput {
                     buffer_len: document.buffer_len(),
                     selection_range: document.selection_range(),
@@ -1397,7 +1402,7 @@ impl App {
 
             self.refresh_sync_settings_overlay();
 
-            let mut measure = crate::measure_adapter::MeasureFromShaper(shaper);
+            let mut measure = appkit_shell::measure_adapter::MeasureFromShaper(shaper);
             self.ui_shell.update_frame(screen, &self.current_theme, &mut measure, &inputs);
             if self.ui_shell.dock_is_dirty() {
                 self.needs_redraw = true;
@@ -1499,7 +1504,7 @@ impl App {
             String::new()
         };
 
-        let generation = tab.document.tb().gap_buffer().generation();
+        let generation = tab.document().tb().gap_buffer().generation();
         let needs_update = tab.needs_source_update(generation);
         if should_log_wysiwyg_cursor {
             eprintln!(
@@ -1507,8 +1512,8 @@ impl App {
                 plugin_name,
                 generation,
                 needs_update,
-                tab.document.cursor_offset().to_usize(),
-                tab.document.selection_range(),
+                tab.document().cursor_offset().to_usize(),
+                tab.document().selection_range(),
                 mouse_is_down,
                 preedit_len
             );
@@ -1516,7 +1521,7 @@ impl App {
 
         if needs_update {
             let source_build_started_at = Instant::now();
-            let gb = tab.document.tb().gap_buffer();
+            let gb = tab.document().tb().gap_buffer();
             let c1 = gb.read_forward(0);
             let c2 = gb.read_forward(c1.len());
             source_len = c1.len() + c2.len();
@@ -1530,7 +1535,7 @@ impl App {
         }
 
         if should_sync_selection {
-            if let Some((start, end)) = tab.document.selection_range() {
+            if let Some((start, end)) = tab.document().selection_range() {
                 if start < end {
                     tab.send_message(ui::plugin::PluginMessage::SetSelAnchorByte(Some(start)));
                     tab.send_message(ui::plugin::PluginMessage::SetSelCursorByte(Some(end)));
@@ -1546,13 +1551,13 @@ impl App {
                                 "[wysiwyg:sync] pull_plugin_selection start={} end={} doc_len={}",
                                 start,
                                 end,
-                                tab.document.buffer_len()
+                                tab.document().buffer_len()
                             );
                         }
-                        let selection_start = start.min(end).min(tab.document.buffer_len());
-                        let selection_end = start.max(end).min(tab.document.buffer_len());
-                        tab.document.cursor_mut().selection_anchor = Some(selection_start);
-                        tab.document.set_cursor_offset_synced(selection_end);
+                        let selection_start = start.min(end).min(tab.document().buffer_len());
+                        let selection_end = start.max(end).min(tab.document().buffer_len());
+                        tab.document_mut().cursor_mut().selection_anchor = Some(selection_start);
+                        tab.document_mut().set_cursor_offset_synced(selection_end);
                     }
                     None | Some(_) => {}
                 }
@@ -1562,9 +1567,9 @@ impl App {
             }
         }
 
-        let cursor_byte = tab.document.cursor_offset().to_usize();
+        let cursor_byte = tab.document().cursor_offset().to_usize();
         tab.send_message(ui::plugin::PluginMessage::SetCursorByte(cursor_byte));
-        let affinity = tab.document.tb().cursor_affinity();
+        let affinity = tab.document().tb().cursor_affinity();
         tab.send_message(ui::plugin::PluginMessage::SetVisualCaret(
             ui::plugin::VisualCaretPosition { byte_offset: cursor_byte, affinity },
         ));
@@ -1576,8 +1581,8 @@ impl App {
             eprintln!(
                 "[wysiwyg:sync] end plugin={} cursor={} selection={:?}",
                 plugin_name,
-                tab.document.cursor_offset().to_usize(),
-                tab.document.selection_range()
+                tab.document().cursor_offset().to_usize(),
+                tab.document().selection_range()
             );
         }
 
@@ -1640,7 +1645,7 @@ mod toc_left_offset_tests {
 #[cfg(test)]
 mod file_safety_status_label_tests {
     use super::file_safety_notice_label;
-    use crate::file_safety::FileSafetyNotice;
+    use appkit_core::file_safety::FileSafetyNotice;
     use std::path::PathBuf;
 
     #[test]

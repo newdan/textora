@@ -4,8 +4,8 @@ use crate::dispatch::wysiwyg::{
     apply_edit_hit_target, query_visual_caret_hit, set_wysiwyg_cursor_and_selection,
     set_wysiwyg_visual_caret_and_selection,
 };
-use crate::mouse::CanvasDragEligibility;
 use appkit_shell::editor_runtime::{EditorNotification, EditorOutcome};
+use appkit_shell::pointer_capture::CanvasDragEligibility;
 use textora_core::types::UniCharOffset;
 use ui::canvas::CanvasPoint;
 use ui::plugin::{CursorAffinity, EditHitTarget, PluginMessage, VisualCaretPosition};
@@ -76,7 +76,7 @@ impl App {
                 return AppEffect::NONE;
             };
             if !pressed {
-                if !tab.has_selection() {
+                if !tab.plugin_has_selection() {
                     tab.send_message(PluginMessage::ClearSelection);
                 }
                 return AppEffect::REDRAW;
@@ -121,8 +121,8 @@ impl App {
                 // Pointer-driven caret placement splits any ongoing undo
                 // coalescing run, even if the click lands back on the byte
                 // where the last edit ended.
-                if let Some(tab) = self.active_tab_session_mut() {
-                    tab.document.break_edit_merge();
+                if let Some(mut tab) = self.active_tab_session_mut() {
+                    tab.document_mut().break_edit_merge();
                 }
                 match self.query_plugin_edit_hit_target(px, py) {
                     Some(Some(EditHitTarget::TextCaret { byte_offset, selection_scope })) => {
@@ -132,7 +132,7 @@ impl App {
                         if let Some(mut tab) = self.active_tab_session_mut() {
                             if click_count == 2 {
                                 let (word_start, word_end) =
-                                    tab.document.word_select_at(byte_offset);
+                                    tab.document().word_select_at(byte_offset);
                                 set_wysiwyg_visual_caret_and_selection(
                                     &mut tab,
                                     VisualCaretPosition {
@@ -169,18 +169,19 @@ impl App {
                         let _ = self.editor_runtime.begin_canvas_drag(self.editor_input_context());
                         self.mouse.wysiwyg_selection_scope = None;
                         if let Some(mut tab) = self.active_tab_session_mut() {
-                            let source_generation = tab.document.generation();
+                            let source_generation = tab.document().generation();
                             apply_edit_hit_target(
                                 &mut tab,
                                 EditHitTarget::SourceObject { source_range: source_range.clone() },
                             );
-                            self.mouse.canvas_drag = Some(crate::mouse::CanvasDragSession {
-                                source_range,
-                                pressed_at: (px, py),
-                                source_generation,
-                                eligibility: CanvasDragEligibility::Enabled,
-                                started: false,
-                            });
+                            self.mouse.canvas_drag =
+                                Some(appkit_shell::pointer_capture::CanvasDragSession {
+                                    source_range,
+                                    pressed_at: (px, py),
+                                    source_generation,
+                                    eligibility: CanvasDragEligibility::Enabled,
+                                    started: false,
+                                });
                         }
                         self.editor_runtime.set_preferred_x(None);
                         self.mouse.is_down = true;
@@ -214,10 +215,10 @@ impl App {
                 let click_count = self.mouse.click_count;
                 if let Some(mut tab) = self.active_tab_session_mut() {
                     if click_count == 2 {
-                        let (word_start, word_end) = tab.document.word_select_at(byte);
-                        tab.document.cursor_move_to_offset(word_end);
-                        let snapped_end = tab.document.cursor_offset().to_usize();
-                        tab.document.cursor_mut().selection_anchor = Some(word_start);
+                        let (word_start, word_end) = tab.document().word_select_at(byte);
+                        tab.document_mut().cursor_move_to_offset(word_end);
+                        let snapped_end = tab.document().cursor_offset().to_usize();
+                        tab.document_mut().cursor_mut().selection_anchor = Some(word_start);
                         tab.send_message(ui::plugin::PluginMessage::SetCursorByte(snapped_end));
                         tab.send_message(ui::plugin::PluginMessage::SetSelAnchorByte(Some(
                             word_start,
@@ -261,14 +262,7 @@ impl App {
             } else {
                 self.editor_runtime.end_pointer_capture();
             }
-            if self.editor_runtime.handle_source_pointer_button(
-                state,
-                (px, py),
-                &mut self.mouse,
-                modifiers,
-                hit,
-                line_height,
-            ) {
+            if self.handle_source_pointer_button(state, (px, py), modifiers, hit, line_height) {
                 return AppEffect::REDRAW;
             }
             AppEffect::NONE
@@ -313,14 +307,14 @@ impl App {
                 Some(byte) => byte,
                 None => {
                     if py - offset_y > tab.content_height() {
-                        return Some(tab.document.buffer_len());
+                        return Some(tab.document().buffer_len());
                     }
                     return None;
                 }
             };
 
-            tab.document.cursor_move_to_offset(candidate);
-            let snapped_candidate = tab.document.cursor_offset().to_usize();
+            tab.document_mut().cursor_move_to_offset(candidate);
+            let snapped_candidate = tab.document().cursor_offset().to_usize();
             tab.send_message(PluginMessage::SetCursorByte(snapped_candidate));
             snapped_candidate
         };
@@ -346,8 +340,8 @@ impl App {
 
         let snapped_final = if final_byte != snapped_candidate {
             let mut tab = self.active_tab_session_mut()?;
-            tab.document.cursor_move_to_offset(final_byte);
-            let snapped_final = tab.document.cursor_offset().to_usize();
+            tab.document_mut().cursor_move_to_offset(final_byte);
+            let snapped_final = tab.document().cursor_offset().to_usize();
             tab.send_message(PluginMessage::SetCursorByte(snapped_final));
             snapped_final
         } else {
@@ -490,7 +484,7 @@ impl App {
                 }
                 let selection_anchor = self
                     .active_tab_session()
-                    .and_then(|tab| tab.document.cursor().selection_anchor);
+                    .and_then(|tab| tab.document().cursor().selection_anchor);
                 match self.query_plugin_edit_hit_target(px, py) {
                     Some(Some(EditHitTarget::TextCaret { byte_offset, selection_scope })) => {
                         let position = visual_caret_for_hit(self, byte_offset, px, py);
@@ -525,7 +519,7 @@ impl App {
             }
             AppEffect::NONE
         } else {
-            if self.editor_runtime.move_source_pointer_selection(&mut self.mouse, hit) {
+            if self.move_source_pointer_selection(hit) {
                 return AppEffect::REDRAW;
             }
             AppEffect::NONE
@@ -757,7 +751,7 @@ mod tests {
     }
 
     fn active_text(app: &App) -> String {
-        app.active_tab_session().expect("active entry").document.full_text()
+        app.active_tab_session().expect("active entry").document().full_text()
     }
 
     #[cfg(feature = "markdown")]
@@ -923,11 +917,11 @@ mod tests {
         let mut app = app_with_mindmap_drag_plugin("abc", state.clone());
         let bounds = app.plugin_render_bounds();
 
-        let Some(entry) = app.active_tab_session_mut() else {
+        let Some(mut entry) = app.active_tab_session_mut() else {
             panic!("canvas drag test requires an active entry");
         };
-        entry.document.cursor_move_to_offset(2);
-        entry.document.cursor_mut().selection_anchor = Some(1);
+        entry.document_mut().cursor_move_to_offset(2);
+        entry.document_mut().cursor_mut().selection_anchor = Some(1);
 
         let _ = app.dispatch_editor_mouse_input(
             ElementState::Pressed,
@@ -1146,7 +1140,7 @@ mod tests {
         let _ = app.dispatch_editor_cursor_moved(press_x + 10.0, press_y, None);
 
         let entry = app.active_tab_session().expect("active entry");
-        assert_eq!(entry.document.selection_range(), Some((1, 5)));
+        assert_eq!(entry.document().selection_range(), Some((1, 5)));
         let state = state.borrow();
         assert_eq!(state.queried_operations, ["hit_target"]);
         assert!(state.sync_messages.ends_with(&[
@@ -1165,9 +1159,9 @@ mod tests {
         }));
         let mut app = app_with_semantic_plugin("abcdef", state.clone());
         {
-            let entry = app.active_tab_session_mut().expect("active entry");
-            entry.document.cursor_move_to_offset(3);
-            entry.document.cursor_mut().selection_anchor = Some(1);
+            let mut entry = app.active_tab_session_mut().expect("active entry");
+            entry.document_mut().cursor_move_to_offset(3);
+            entry.document_mut().cursor_mut().selection_anchor = Some(1);
         }
         let bounds = app.plugin_render_bounds();
 
@@ -1179,7 +1173,7 @@ mod tests {
         );
 
         let entry = app.active_tab_session().expect("active entry");
-        assert_eq!(entry.document.selection_range(), Some((1, 3)));
+        assert_eq!(entry.document().selection_range(), Some((1, 3)));
         let state = state.borrow();
         assert_eq!(state.queried_operations, ["hit_target"]);
         assert!(!state.sync_messages.contains(&RecordedSyncMessage::Cursor(4)));
@@ -1202,8 +1196,8 @@ mod tests {
         );
 
         let entry = app.active_tab_session().expect("active entry");
-        assert_eq!(entry.document.cursor_offset().to_usize(), 4);
-        assert_eq!(entry.document.cursor().selection_anchor, Some(4));
+        assert_eq!(entry.document().cursor_offset().to_usize(), 4);
+        assert_eq!(entry.document().cursor().selection_anchor, Some(4));
         let state = state.borrow();
         assert!(state.queried_operations.starts_with(&["hit_target", "hit_byte"]));
         assert!(state.sync_messages.contains(&RecordedSyncMessage::Cursor(4)));
@@ -1229,8 +1223,8 @@ mod tests {
         );
 
         let entry = app.active_tab_session().expect("active entry");
-        assert_eq!(entry.document.cursor_offset().to_usize(), 1);
-        assert_eq!(entry.document.cursor().selection_anchor, Some(1));
+        assert_eq!(entry.document().cursor_offset().to_usize(), 1);
+        assert_eq!(entry.document().cursor().selection_anchor, Some(1));
     }
 
     #[test]
@@ -1252,6 +1246,6 @@ mod tests {
         let _ = app.dispatch_editor_mouse_input(ElementState::Pressed, x, y, None);
 
         let entry = app.active_tab_session().expect("active entry");
-        assert_eq!(entry.document.selection_range(), Some((0, "title".len())));
+        assert_eq!(entry.document().selection_range(), Some((0, "title".len())));
     }
 }

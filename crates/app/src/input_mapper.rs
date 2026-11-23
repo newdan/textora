@@ -4,10 +4,7 @@
 
 use winit::keyboard::{Key, ModifiersState, NamedKey};
 
-pub use appkit_core::edit_command::EditCommand;
-
-/// Map a key + modifiers to an `EditCommand`.
-///
+use appkit_core::edit_command::EditCommand;
 
 /// Translate a winit key event into an EditCommand.
 ///
@@ -17,7 +14,7 @@ pub use appkit_core::edit_command::EditCommand;
 /// `events::handle_keyboard` for the canonical IME guard implementation.
 /// Ime::Commit is the authoritative insertion path during composition.
 /// Returns `None` if the key combination is not bound to any command.
-pub fn key_to_command(key: &Key, mods: ModifiersState) -> Option<EditCommand> {
+pub(crate) fn key_to_command(key: &Key, mods: ModifiersState) -> Option<EditCommand> {
     let ctrl = mods.control_key();
     let super_ = mods.super_key();
     let alt = mods.alt_key();

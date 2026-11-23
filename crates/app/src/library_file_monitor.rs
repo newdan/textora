@@ -2,10 +2,10 @@ use std::collections::BTreeSet;
 use std::fmt;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, mpsc};
-use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
-use notify::{Config, RecommendedWatcher, RecursiveMode, Watcher};
+use file_watch::{WatchWorker, recommended_watcher};
+use notify::{RecursiveMode, Watcher};
 
 const DEBOUNCE_WINDOW: Duration = Duration::from_millis(200);
 const WORKER_POLL_INTERVAL: Duration = Duration::from_millis(20);
@@ -43,21 +43,17 @@ enum RequestedRoots {
 }
 
 pub(crate) struct LibraryFileMonitor {
-    command_sender: mpsc::Sender<WorkerMessage>,
+    worker: WatchWorker<WorkerMessage>,
     result_receiver: mpsc::Receiver<MonitorEvent>,
     requested_roots: Arc<Mutex<RequestedRoots>>,
-    worker: Option<JoinHandle<()>>,
 }
 
 impl LibraryFileMonitor {
     pub(crate) fn spawn(wake: impl Fn() + Send + 'static) -> Result<Self, MonitorError> {
         Self::spawn_with_backend(wake, |event_sender| {
-            RecommendedWatcher::new(
-                move |event| {
-                    let _ = event_sender.send(WorkerMessage::Notify(event));
-                },
-                Config::default(),
-            )
+            recommended_watcher(move |event| {
+                let _ = event_sender.send(WorkerMessage::Notify(event));
+            })
         })
     }
 
@@ -65,23 +61,23 @@ impl LibraryFileMonitor {
         wake: impl Fn() + Send + 'static,
         create_watcher: impl FnOnce(mpsc::Sender<WorkerMessage>) -> notify::Result<W> + Send + 'static,
     ) -> Result<Self, MonitorError> {
-        let (command_sender, command_receiver) = mpsc::channel();
-        let (result_sender, result_receiver) = mpsc::channel();
         let requested_roots = Arc::new(Mutex::new(RequestedRoots::Active(BTreeSet::new())));
         let worker_roots = Arc::clone(&requested_roots);
-        let event_sender = command_sender.clone();
-        let worker = thread::Builder::new()
-            .name("textora-library-file-monitor".to_owned())
-            .spawn(move || match create_watcher(event_sender) {
+        let (worker, result_receiver) = WatchWorker::spawn(
+            "textora-library-file-monitor",
+            WorkerMessage::Shutdown,
+            move |commands| create_watcher(commands.clone()),
+            move |watcher, command_receiver, result_sender| match watcher {
                 Ok(watcher) => {
                     monitor_loop(watcher, command_receiver, worker_roots, result_sender, wake);
                 }
                 Err(error) => {
                     publish_event(&result_sender, &wake, MonitorEvent::Failed(error.into()))
                 }
-            })
-            .map_err(|error| MonitorError::WatchFailed { message: error.to_string() })?;
-        Ok(Self { command_sender, result_receiver, requested_roots, worker: Some(worker) })
+            },
+        )
+        .map_err(|error| MonitorError::WatchFailed { message: error.to_string() })?;
+        Ok(Self { worker, result_receiver, requested_roots })
     }
 
     pub(crate) fn replace_roots(&self, roots: Vec<PathBuf>) -> Result<(), MonitorError> {
@@ -93,38 +89,23 @@ impl LibraryFileMonitor {
             };
             *current = roots.into_iter().collect();
         }
-        self.command_sender
-            .send(WorkerMessage::RefreshRoots)
-            .map_err(|_| MonitorError::WorkerUnavailable)
+        self.worker.send(WorkerMessage::RefreshRoots).map_err(|_| MonitorError::WorkerUnavailable)
     }
 
     pub(crate) fn try_recv(&self) -> Option<MonitorEvent> {
         self.result_receiver.try_recv().ok()
     }
 
-    pub(crate) fn shutdown(mut self) {
-        self.stop();
-    }
-
-    fn stop(&mut self) {
-        *self.requested_roots.lock().expect("root request lock must be healthy") =
-            RequestedRoots::Stopped;
-        let _ = self.command_sender.send(WorkerMessage::Shutdown);
-        // A platform registration/destructor can block inside the OS. The worker owns
-        // its backend and exits after that call returns; window teardown must not join it.
-        if let Some(worker) = self.worker.take()
-            && worker.is_finished()
-        {
-            let _ = worker.join();
-        }
+    pub(crate) fn shutdown(self) {
+        drop(self);
     }
 }
 
 impl Drop for LibraryFileMonitor {
     fn drop(&mut self) {
-        if self.worker.is_some() {
-            self.stop();
-        }
+        *self.requested_roots.lock().expect("root request lock must be healthy") =
+            RequestedRoots::Stopped;
+        self.worker.shutdown();
     }
 }
 
@@ -280,8 +261,9 @@ impl PendingPaths {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use notify::PollWatcher;
+    use notify::{Config, PollWatcher};
     use std::path::PathBuf;
+    use std::thread;
     use std::time::{Duration, Instant};
 
     #[derive(Default)]
@@ -529,7 +511,7 @@ mod tests {
                 "production monitor must not contain {forbidden}"
             );
         }
-        assert!(source.contains("RecommendedWatcher"));
+        assert!(source.contains("recommended_watcher("));
     }
 
     fn wait_for_path(monitor: &LibraryFileMonitor, path: &PathBuf) -> bool {

@@ -1,14 +1,13 @@
 use std::collections::HashSet;
 use std::path::Path;
-use std::sync::Arc;
 use std::thread;
 use std::time::{Duration, Instant};
 
-use appkit_shell::document_presentation::SourceSpacingState;
 use appkit_shell::editor_runtime::{
     EditorFrame, EditorRuntime, EditorSurfacePaint, EmptyFrameTarget, RenderError, RenderResources,
     SurfaceFrameOptions, WindowCornerClip,
 };
+use appkit_shell::source_spacing;
 use ui::Widget;
 use ui::document_search_bar::{
     DocumentSearchBarEvent, DocumentSearchBarInput, DocumentSearchBarWidget,
@@ -30,10 +29,6 @@ const SAVE_STATUS_UNSAVED: &str = "未保存";
 const SAVE_STATUS_PENDING: &str = "待保存";
 const SAVE_STATUS_SAVING: &str = "保存中";
 const SAVE_STATUS_FAILED: &str = "保存失败";
-const MARKDOWN_LANGUAGE_ID: &str = "markdown";
-const MARKDOWN_PLUGIN_ID: &str = ui::plugin::PLUGIN_MARKDOWN_EDITOR;
-const MARKDOWN_FILE_EXTENSIONS: &[&str] = &["md", "markdown", "mdown", "mkd"];
-const SOURCE_SPACING_SEMANTIC_VERSION: u64 = 1;
 
 fn refresh_source_spacing_state(editor: &mut EditorRuntime) {
     let Some(tab_id) = editor.active_tab_id() else {
@@ -42,43 +37,8 @@ fn refresh_source_spacing_state(editor: &mut EditorRuntime) {
     let Some(mut tab) = editor.tab_session_mut(tab_id) else {
         return;
     };
-    let is_markdown = tab.plugin_name() == MARKDOWN_PLUGIN_ID
-        || tab
-            .document
-            .language
-            .is_some_and(|language| language.id.eq_ignore_ascii_case(MARKDOWN_LANGUAGE_ID))
-        || tab.document.file_path.as_deref().and_then(|path| path.extension()).is_some_and(
-            |extension| {
-                extension.to_str().is_some_and(|extension| {
-                    MARKDOWN_FILE_EXTENSIONS
-                        .iter()
-                        .any(|candidate| extension.eq_ignore_ascii_case(candidate))
-                })
-            },
-        );
-    let source_revision = tab.document.content_revision();
-    let spacing = tab.source_spacing();
-    if spacing.source_revision == source_revision && spacing.is_markdown == is_markdown {
-        return;
-    }
-
-    let protected_ranges = if is_markdown {
-        tab.source_spacing_protected_ranges().unwrap_or_else(|| {
-            let parsed = textora_markdown::parser::parse_markdown(&tab.document.full_text());
-            textora_markdown::typography::extract_prose_ranges(&parsed)
-                .protected_ranges()
-                .iter()
-                .map(|range| range.start..range.end)
-                .collect()
-        })
-    } else {
-        Arc::default()
-    };
-    tab.set_source_spacing(SourceSpacingState {
-        protected_ranges,
-        semantic_version: SOURCE_SPACING_SEMANTIC_VERSION,
-        source_revision,
-        is_markdown,
+    source_spacing::refresh(&mut tab, Some(ui::plugin::PLUGIN_MARKDOWN_EDITOR), |document| {
+        textora_markdown::typography::source_spacing_protected_ranges(&document.full_text())
     });
 }
 
@@ -734,8 +694,8 @@ mod spacing_tests {
             .replace_plugin(Box::new(appkit_shell::editor_plugin::EditorPlugin::new()));
         super::refresh_source_spacing_state(editor);
         let tab = editor.tab_session(tab_id).expect("source tab should exist");
-        assert!(tab.document.file_path.is_none());
-        assert_eq!(tab.document.full_text(), source);
+        assert!(tab.document().file_path.is_none());
+        assert_eq!(tab.document().full_text(), source);
         let source_spacing = tab.source_spacing();
         let code_start = source.find('`').expect("fixture has inline code");
         assert!(source_spacing.is_markdown);

@@ -15,11 +15,11 @@ use winit::window::{CursorIcon, ResizeDirection};
 use crate::actions::AppAction;
 use crate::app::App;
 use crate::app_effect::AppEffect;
+use crate::input_mapper::key_to_command;
 use crate::menu_handler::AppCommand;
-use crate::mouse::hit_test_with_sub_line_offset as mouse_hit_test;
+use crate::source_pointer::hit_test_with_sub_line_offset as mouse_hit_test;
 use appkit_core::workspace::types::TabId;
 use appkit_shell::editor_runtime::MouseCapture;
-use appkit_shell::input_mapper::key_to_command;
 use appkit_shell::window_input::{
     command_allowed_during_preedit, is_ime_process_key, ui_modifiers,
 };
@@ -199,8 +199,8 @@ pub(crate) fn handle_keyboard(app: &mut App, event: &winit::event::KeyEvent) -> 
     let is_reading_mode = app.active_is_reading_mode();
     let fallback_cmd = if is_reading_mode {
         match fallback_cmd {
-            Some(appkit_shell::input_mapper::EditCommand::InsertChar(s)) if s == " " => {
-                Some(appkit_shell::input_mapper::EditCommand::PageDown)
+            Some(appkit_core::edit_command::EditCommand::InsertChar(s)) if s == " " => {
+                Some(appkit_core::edit_command::EditCommand::PageDown)
             }
             other => other,
         }
@@ -370,12 +370,12 @@ fn translate_title_bar_action(ta: &ui::title_bar::TitleBarAction, actions: &mut 
         TitleBarAction::CloseWindow => actions.push(AppAction::CloseWindow),
         TitleBarAction::ToggleView => {
             actions.push(AppAction::ExecuteAppCommands(vec![AppCommand::Edit(
-                appkit_shell::input_mapper::EditCommand::ToggleView,
+                appkit_core::edit_command::EditCommand::ToggleView,
             )]));
         }
         TitleBarAction::ToggleToc => {
             actions.push(AppAction::ExecuteAppCommands(vec![AppCommand::Edit(
-                appkit_shell::input_mapper::EditCommand::ToggleToc,
+                appkit_core::edit_command::EditCommand::ToggleToc,
             )]));
         }
         TitleBarAction::ToggleMindmapStylePanel => {
@@ -461,7 +461,7 @@ pub(crate) fn handle_cursor_moved(app: &mut App, px: f32, py: f32) -> Vec<AppAct
     let hit = {
         let metrics = app.ui_metrics();
         app.active_tab_session().map(|tab| (tab, metrics)).and_then(|(tab, metrics)| {
-            let document = tab.document;
+            let document = tab.document();
             let li = &document.line_index;
             mouse_hit_test(
                 px,
@@ -572,7 +572,7 @@ pub(crate) fn handle_mouse_input_left(
     let hit = {
         let metrics = app.ui_metrics();
         app.active_tab_session().map(|tab| (tab, metrics)).and_then(|(tab, metrics)| {
-            let document = tab.document;
+            let document = tab.document();
             let left_margin = app.editor_left_margin(document.line_count());
             let li = &document.line_index;
             mouse_hit_test(
@@ -648,7 +648,7 @@ fn table_structure_context_menu(
         return None;
     };
     let tab = app.active_tab_session()?;
-    let source_generation = tab.document.generation();
+    let source_generation = tab.document().generation();
     let ui::plugin::PluginResponse::TableStructureCapabilities(Some(capabilities)) =
         tab.query(ui::plugin::PluginQuery::TableStructureCapabilities {
             source_generation,
@@ -999,8 +999,8 @@ mod tests {
     use crate::document_fixture::DocumentFixture;
     use crate::sync_settings_types::SyncSettingsInput;
     use crate::textora_settings_overlay::TextoraSettingsOverlay;
-    use crate::workspace::ViewportDimensions;
     use crate::workspace_tab_factory::ProductPreparedTab;
+    use crate::workspace_tab_factory::ViewportDimensions;
 
     use std::cell::RefCell;
     use std::rc::Rc;
@@ -1021,7 +1021,7 @@ mod tests {
         let next_cell = source.find("two").expect("next table cell should exist");
         {
             let mut tab = app.active_tab_session_mut().expect("Markdown tab should be active");
-            tab.document.cursor_move_to_offset(next_cell);
+            tab.document_mut().cursor_move_to_offset(next_cell);
             tab.send_message(ui::plugin::PluginMessage::SetCursorByte(next_cell));
         }
 
@@ -1033,7 +1033,7 @@ mod tests {
         assert_eq!(
             app.active_tab_session()
                 .expect("Markdown tab should remain active")
-                .document
+                .document()
                 .cursor_offset()
                 .0,
             first_cell,
@@ -1042,7 +1042,7 @@ mod tests {
         assert_eq!(
             app.active_tab_session()
                 .expect("Markdown tab should remain active")
-                .document
+                .document()
                 .full_text(),
             source,
             "cell navigation must not modify the table"
@@ -1062,7 +1062,7 @@ mod tests {
         assert_eq!(
             app.active_tab_session()
                 .expect("Markdown tab should remain active")
-                .document
+                .document()
                 .cursor_offset()
                 .0,
             first_cell,
@@ -1071,7 +1071,7 @@ mod tests {
         assert_eq!(
             app.active_tab_session()
                 .expect("Markdown tab should remain active")
-                .document
+                .document()
                 .full_text(),
             source,
             "IME preedit must not mutate the table source"
@@ -1497,23 +1497,23 @@ mod tests {
         );
 
         let source_generation = {
-            let Some(entry) = app.active_tab_session_mut() else {
+            let Some(mut entry) = app.active_tab_session_mut() else {
                 panic!("mmap cursor test requires an active entry");
             };
-            entry.document.cursor_move_to_offset(2);
-            entry.document.cursor_mut().selection_anchor = Some(1);
-            entry.document.generation()
+            entry.document_mut().cursor_move_to_offset(2);
+            entry.document_mut().cursor_mut().selection_anchor = Some(1);
+            entry.document().generation()
         };
         assert_eq!(
             last_cursor_icon(&handle_cursor_moved(&mut app, pointer.0, pointer.1)),
             CursorIcon::Grab
         );
 
-        app.mouse.canvas_drag = Some(crate::mouse::CanvasDragSession {
+        app.mouse.canvas_drag = Some(appkit_shell::pointer_capture::CanvasDragSession {
             source_range: 1..2,
             pressed_at: pointer,
             source_generation,
-            eligibility: crate::mouse::CanvasDragEligibility::Enabled,
+            eligibility: appkit_shell::pointer_capture::CanvasDragEligibility::Enabled,
             started: true,
         });
         assert_eq!(
@@ -1807,7 +1807,7 @@ mod tests {
             app.close_editor_tab(closed_id).expect("closing tab 0 should reorder remaining tabs");
         assert_eq!(
             effect,
-            crate::workspace::WorkspaceEffect::Closed { closed: closed_id, activated: None }
+            appkit_shell::workspace::WorkspaceEffect::Closed { closed: closed_id, activated: None }
         );
         assert_eq!(
             app.editor_tab_ids_in_order().into_iter().collect::<std::collections::HashSet<_>>(),

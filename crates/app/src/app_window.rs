@@ -5,11 +5,11 @@ use std::time::{Duration, Instant};
 
 use crate::app::{App, compute_cursor_phase};
 use crate::app_init::build_product_workspace;
-use crate::gpu::GpuError;
 use crate::ui_shell::ShellInputs;
 use crate::workspace_persistence::restore_workspace;
 use appkit_shell::ProductHost;
 use appkit_shell::accessibility_adapter::PlatformAccessibilityAdapter;
+use appkit_shell::gpu::GpuError;
 use winit::dpi::{LogicalSize, PhysicalPosition, PhysicalSize, Size};
 #[cfg(target_os = "windows")]
 use winit::window::Icon;
@@ -316,7 +316,7 @@ impl App {
                     );
                 }
             } else if let Some(tab) = self.active_tab_session() {
-                let cursor_byte = tab.document.cursor_offset().to_usize();
+                let cursor_byte = tab.document().cursor_offset().to_usize();
                 let handles_own_rendering = self.active_handles_own_rendering();
                 if let Some(rect) = self.plugin_cursor_window_rect(cursor_byte) {
                     let cursor_x =

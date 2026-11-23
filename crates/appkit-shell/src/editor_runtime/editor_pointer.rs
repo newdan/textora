@@ -7,7 +7,7 @@ use super::input_session::TextSelectionGranularity;
 use super::{EditorInputContext, EditorOutcome, EditorPointerOutcome, EditorRuntime, MouseCapture};
 use crate::cursor_motion::{hit_test_row_byte, hit_test_visual_row};
 use crate::event::ShellEffect;
-use crate::mouse_state::{CanvasDragEligibility, CanvasDragSession};
+use crate::pointer_capture::{CanvasDragEligibility, CanvasDragSession};
 use crate::tab_session::{TabSession, TabSessionMut};
 
 const CANVAS_DRAG_THRESHOLD_PX: f32 = 5.0;

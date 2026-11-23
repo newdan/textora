@@ -87,7 +87,7 @@ fn library_search_and_document_queries_are_independent() {
             .editor()
             .tab_session(second_tab)
             .expect("second document remains loaded")
-            .document
+            .document()
             .full_text(),
         "新文档"
     );

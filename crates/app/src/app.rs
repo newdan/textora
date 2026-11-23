@@ -6,10 +6,10 @@ use appkit_shell::accessibility_adapter::PlatformAccessibilityAdapter;
 use appkit_shell::editor_runtime::{EditorFocus, EditorInputContext, EditorRuntime};
 use appkit_shell::{EventPump, ProductHost, ProductWakeHandle};
 
-use crate::file_history::FileHistory;
 use crate::mouse::MouseState;
 use crate::native_menu::NativeMenu;
 use crate::ui_shell::UiShell;
+use appkit_core::file_history::FileHistory;
 use ui::theme::Theme;
 
 // Font size and line height are now in Settings
@@ -58,14 +58,14 @@ pub struct App {
     pub(crate) ui_shell: UiShell,
     pub(crate) file_history: FileHistory,
     pub(crate) library_file_monitor: Option<crate::library_file_monitor::LibraryFileMonitor>,
-    pub(crate) file_safety_notices: Vec<crate::file_safety::FileSafetyNotice>,
+    pub(crate) file_safety_notices: Vec<appkit_core::file_safety::FileSafetyNotice>,
     pub(crate) pending_close_after_save: HashSet<appkit_core::workspace::types::TabId>,
     pub(crate) pending_quit_after_save: bool,
     pub(crate) running: bool,
     pub(crate) needs_redraw: bool,
     pub(crate) sidebar_animating: bool,
     /// Tab bar smooth-scroll animation.
-    pub(crate) tab_scroll: crate::smooth_scroll::SmoothScroll,
+    pub(crate) tab_scroll: appkit_shell::smooth_scroll::SmoothScroll,
     /// Mouse state for click/drag handling.
     pub(crate) mouse: MouseState,
     /// 上次滚轮事件的时间，用于快速滚动时不渲染、停手后再渲染。
@@ -224,8 +224,8 @@ impl App {
     pub(crate) fn viewport_dimensions(
         &self,
         screen_height: f32,
-    ) -> crate::workspace::ViewportDimensions {
-        crate::workspace::ViewportDimensions {
+    ) -> crate::workspace_tab_factory::ViewportDimensions {
+        crate::workspace_tab_factory::ViewportDimensions {
             visible_rows: self.visible_rows(screen_height),
             viewport_height: self.visible_height_lines(screen_height),
         }
@@ -527,7 +527,7 @@ mod settings_boundary_tests;
 
 #[cfg(test)]
 mod edit_reset_tests {
-    use crate::cursor_motion::CursorRenderState;
+    use appkit_shell::cursor_motion::CursorRenderState;
 
     #[test]
     fn cursor_reset_does_not_own_reshape_generation() {

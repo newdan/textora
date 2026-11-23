@@ -5,10 +5,8 @@ mod macos_titlebar;
 
 #[cfg(target_os = "macos")]
 fn main() {
-    use objc2::rc::Retained;
-    use objc2_app_kit::NSView;
+    use appkit_shell::macos::native_window;
     use winit::platform::macos::WindowAttributesExtMacOS;
-    use winit::raw_window_handle::{HasWindowHandle, RawWindowHandle};
 
     let event_loop = winit::event_loop::EventLoop::new()
         .expect("native titlebar regression must initialize on the main thread");
@@ -24,14 +22,8 @@ fn main() {
     let dpi = window.scale_factor() as f32;
     macos_titlebar::synchronize_pointer_dragging(&window, (94.0 * dpi, 18.0 * dpi));
     macos_titlebar::align_traffic_lights(&window);
-    let handle = window.window_handle().expect("the hidden window must have an AppKit handle");
-    let RawWindowHandle::AppKit(handle) = handle.as_raw() else {
-        panic!("macOS regression requires an AppKit window");
-    };
-    // SAFETY: 窗口在调用期间存活；此无默认测试 harness 的测试运行在 macOS 主线程。
-    let view = unsafe { Retained::<NSView>::retain(handle.ns_view.as_ptr().cast()) }
-        .expect("winit must own a valid content view");
-    let native_window = view.window().expect("the view must belong to the hidden window");
+    let native_window =
+        native_window(&window).expect("the hidden window must have an AppKit window");
     assert!(
         !native_window.isMovable(),
         "native titlebar dragging must not swallow client button presses"

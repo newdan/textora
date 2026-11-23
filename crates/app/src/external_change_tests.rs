@@ -5,7 +5,7 @@ use appkit_shell::prepared_tab::PreparedTab;
 use crate::app_init::build_product_workspace;
 use crate::document_fixture::DocumentFixture;
 use crate::plugins::editor::EditorPlugin;
-use crate::tab_runtime::{TabRuntime, TabRuntimeStore};
+use appkit_shell::tab_runtime::{TabRuntime, TabRuntimeStore};
 
 #[test]
 fn deleted_document_becomes_dirty_recovery_without_losing_content() {

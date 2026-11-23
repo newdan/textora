@@ -1,8 +1,9 @@
 //! Markdown source ranges that may receive natural typography spacing.
 
-use crate::parser::{MarkdownEvent, MarkdownTag, MarkdownTagEnd, ParsedMarkdown};
+use crate::parser::{MarkdownEvent, MarkdownTag, MarkdownTagEnd, ParsedMarkdown, parse_markdown};
 use std::collections::HashMap;
 use std::ops::Range;
+use std::sync::Arc;
 
 /// A UTF-8 byte range in the original Markdown source.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd)]
@@ -102,6 +103,21 @@ impl LocalSourceRanges {
     pub fn protected_ranges(&self) -> &[SourceRange] {
         &self.protected
     }
+}
+
+/// Return byte ranges whose exact Markdown source spacing must be preserved.
+pub fn source_spacing_protected_ranges(source: &str) -> Arc<[Range<usize>]> {
+    parsed_source_spacing_protected_ranges(&parse_markdown(source))
+}
+
+pub(crate) fn parsed_source_spacing_protected_ranges(
+    parsed: &ParsedMarkdown,
+) -> Arc<[Range<usize>]> {
+    extract_prose_ranges(parsed)
+        .protected_ranges()
+        .iter()
+        .map(|range| range.start..range.end)
+        .collect()
 }
 
 /// Extract source ranges that represent visible Markdown prose.

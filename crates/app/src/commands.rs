@@ -1,7 +1,7 @@
 //! Product tests for the shared source-editor commands.
 
 use crate::document_fixture::DocumentFixture;
-use appkit_shell::input_mapper::EditCommand;
+use appkit_core::edit_command::EditCommand;
 use ui::core::Clipboard;
 use ui::render_geom::AdvanceCacheEntry;
 
@@ -36,7 +36,7 @@ pub(crate) fn execute_edit_command(
 #[cfg(test)]
 mod command_tests {
     use super::*;
-    use crate::line_index::LineIndex;
+    use appkit_core::line_index::LineIndex;
     use textora_core::types::ByteIndex;
 
     struct TestClipboard {

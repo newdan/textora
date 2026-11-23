@@ -28,10 +28,10 @@ fn batch_close_save_target(
 impl App {
     pub(crate) fn apply_workspace_effect(
         &mut self,
-        effect: crate::workspace::WorkspaceEffect,
+        effect: appkit_shell::workspace::WorkspaceEffect,
     ) -> AppEffect {
         let effect = match effect {
-            crate::workspace::WorkspaceEffect::Closed { activated: None, .. }
+            appkit_shell::workspace::WorkspaceEffect::Closed { activated: None, .. }
                 if self.editor_is_empty() =>
             {
                 let viewport = self.viewport_dimensions(self.screen_height());
@@ -72,14 +72,19 @@ impl App {
             .merge(AppEffect::PERSIST_WORKSPACE)
     }
 
-    pub(crate) fn handle_nav_effect(&mut self, effect: crate::navigator::NavEffect) -> AppEffect {
+    pub(crate) fn handle_nav_effect(
+        &mut self,
+        effect: appkit_core::navigator::NavEffect,
+    ) -> AppEffect {
         let app_effect = match effect {
-            crate::navigator::NavEffect::ActiveChanged => self.finish_active_workspace_change(),
-            crate::navigator::NavEffect::ItemsChanged => {
+            appkit_core::navigator::NavEffect::ActiveChanged => {
+                self.finish_active_workspace_change()
+            }
+            appkit_core::navigator::NavEffect::ItemsChanged => {
                 let layout_effect = self.update_entry_layout();
                 layout_effect.merge(AppEffect::REDRAW).merge(AppEffect::PERSIST_WORKSPACE)
             }
-            crate::navigator::NavEffect::None => AppEffect::NONE,
+            appkit_core::navigator::NavEffect::None => AppEffect::NONE,
         };
         self.refresh_file_monitor_roots();
         app_effect
@@ -92,7 +97,8 @@ impl App {
     pub(crate) fn open_file(&mut self, path: &std::path::Path) -> Result<AppEffect, String> {
         let viewport = self.viewport_dimensions(self.screen_height());
         let effect = if let Some(tab_id) = self.editor_tab_id_for_path(path) {
-            self.activate_editor_tab(tab_id).unwrap_or(crate::workspace::WorkspaceEffect::None)
+            self.activate_editor_tab(tab_id)
+                .unwrap_or(appkit_shell::workspace::WorkspaceEffect::None)
         } else {
             let ProductPreparedTab { prepared, suggested_file_name } =
                 self.prepare_editor_file(path, viewport)?;
@@ -216,7 +222,7 @@ impl App {
         let Some(idx) = self.editor_tab_index(id) else {
             return AppEffect::NONE;
         };
-        use crate::workspace::CloseTabDecision;
+        use appkit_shell::workspace::CloseTabDecision;
         let mut app_effect = AppEffect::NONE;
         let decision = self
             .editor_close_decision(id)
@@ -464,7 +470,7 @@ impl App {
     fn load_file_with_dimensions(
         &mut self,
         path: &std::path::Path,
-        dimensions: crate::workspace::ViewportDimensions,
+        dimensions: crate::workspace_tab_factory::ViewportDimensions,
     ) -> Result<TabId, String> {
         let ProductPreparedTab { prepared, suggested_file_name } =
             self.prepare_editor_file(path, dimensions)?;
@@ -489,7 +495,8 @@ impl App {
         };
         let visible_rows = self.visible_rows(screen_height as f32);
         let viewport_height = self.visible_height_lines(screen_height as f32);
-        let dimensions = crate::workspace::ViewportDimensions { visible_rows, viewport_height };
+        let dimensions =
+            crate::workspace_tab_factory::ViewportDimensions { visible_rows, viewport_height };
         let _ = self.load_file_with_dimensions(&path, dimensions);
     }
 }
@@ -525,7 +532,7 @@ mod tests {
     use super::*;
     use crate::document_fixture::DocumentFixture;
     use crate::plugins::editor::EditorPlugin;
-    use crate::workspace::ViewportDimensions;
+    use crate::workspace_tab_factory::ViewportDimensions;
 
     fn test_viewport() -> ViewportDimensions {
         ViewportDimensions { visible_rows: 22, viewport_height: 22.0 }
@@ -561,13 +568,16 @@ mod tests {
 
         let nav_effect = app.navigate_editor_back();
 
-        assert_eq!(nav_effect, crate::navigator::NavEffect::ActiveChanged);
-        assert_eq!(app.active_tab_session().expect("stub should become active").buffer_len(), 0);
+        assert_eq!(nav_effect, appkit_core::navigator::NavEffect::ActiveChanged);
+        assert_eq!(
+            app.active_tab_session().expect("stub should become active").document().buffer_len(),
+            0
+        );
 
         let app_effect = app.handle_nav_effect(nav_effect);
 
         assert_eq!(
-            app.active_tab_session().expect("active stub should hydrate").full_text(),
+            app.active_tab_session().expect("active stub should hydrate").document().full_text(),
             "loaded by back navigation"
         );
         assert!(app_effect.reshape);
@@ -586,12 +596,15 @@ mod tests {
             .close_editor_tab(app.editor_tab_id_at(1).expect("active tab index"))
             .expect("active document should close cleanly");
 
-        assert_eq!(app.active_tab_session().expect("stub should become active").buffer_len(), 0);
+        assert_eq!(
+            app.active_tab_session().expect("stub should become active").document().buffer_len(),
+            0
+        );
 
         let app_effect = app.apply_workspace_effect(workspace_effect);
 
         assert_eq!(
-            app.active_tab_session().expect("active stub should hydrate").full_text(),
+            app.active_tab_session().expect("active stub should hydrate").document().full_text(),
             "loaded after close"
         );
         assert!(app_effect.reshape);
@@ -686,7 +699,7 @@ mod tests {
         assert_eq!(
             app.active_tab_session()
                 .expect("existing file runtime should remain")
-                .document
+                .document()
                 .full_text(),
             "# Product tab"
         );
@@ -728,11 +741,11 @@ mod tests {
         assert_eq!(appended_index, app.editor_tab_count() - 1);
         let appended =
             app.tab_session(appended_id).expect("startup file model and runtime should be paired");
-        assert_eq!(appended.document.file_path.as_deref(), Some(path.as_path()));
-        assert_eq!(appended.document.full_text(), "startup");
+        assert_eq!(appended.document().file_path.as_deref(), Some(path.as_path()));
+        assert_eq!(appended.document().full_text(), "startup");
         assert_eq!(appended.plugin_name(), ui::plugin::PLUGIN_EDITOR);
         assert_eq!(appended_title.as_deref(), Some("startup.txt"));
-        assert_eq!(appended.display().display_map.line_count(), appended.document.line_count());
+        assert_eq!(appended.display().display_map.line_count(), appended.document().line_count());
         assert_eq!(
             app.editor_tab_ids_in_order().into_iter().collect::<std::collections::HashSet<_>>(),
             app.editor_runtime_tab_ids()
@@ -810,16 +823,17 @@ mod tests {
             app.editor_save_context(replacement_id).map(|context| context.title);
         let default_entry = app.active_tab_session().expect("a default document should remain");
         assert_eq!(replacement_title.as_deref(), Some("untitled"));
-        assert_eq!(default_entry.buffer_len(), 0);
-        assert!(default_entry.file_path.is_none());
-        assert!(!default_entry.dirty);
+        assert_eq!(default_entry.document().buffer_len(), 0);
+        assert!(default_entry.document().file_path.is_none());
+        assert!(!default_entry.document().dirty);
 
         app.active_tab_session_mut()
             .expect("the default document should be editable")
+            .document_mut()
             .insert_at_cursor(b"x");
         let edited_document = app.active_tab_session().expect("default document exists");
-        assert_eq!(edited_document.buffer_len(), 1);
-        assert!(edited_document.dirty);
+        assert_eq!(edited_document.document().buffer_len(), 1);
+        assert!(edited_document.document().dirty);
     }
 
     #[test]
@@ -833,7 +847,7 @@ mod tests {
 
         assert!(effect.redraw);
         assert_eq!(active_title.as_deref(), Some("未命名.md"));
-        assert!(entry.file_path.is_none());
+        assert!(entry.document().file_path.is_none());
         assert_eq!(
             app.active_tab_session().expect("active runtime").plugin_name(),
             ui::plugin::PLUGIN_MARKDOWN_EDITOR
@@ -862,7 +876,7 @@ mod tests {
         for (kind, expected_name) in cases {
             let mut app = App::new(None);
             let _ = app.new_typed_untitled_doc(kind);
-            app.active_tab_session_mut().expect("typed entry exists").document.dirty = true;
+            app.active_tab_session_mut().expect("typed entry exists").document_mut().dirty = true;
 
             let target = app.editor_tab_id_at(0).and_then(|tab_id| app.editor_save_context(tab_id));
             let target = batch_close_save_target(target);
@@ -885,9 +899,9 @@ mod tests {
         );
 
         {
-            let session = app.active_tab_session_mut().expect("untitled entry exists");
-            session.document.file_path = Some(std::path::PathBuf::from("/tmp/existing.txt"));
-            session.document.dirty = true;
+            let mut session = app.active_tab_session_mut().expect("untitled entry exists");
+            session.document_mut().file_path = Some(std::path::PathBuf::from("/tmp/existing.txt"));
+            session.document_mut().dirty = true;
         }
         assert_eq!(
             batch_close_save_target(
@@ -913,7 +927,7 @@ mod tests {
         let effect = app.close_editor_tab(closed_id).expect("close clean tab 0");
         assert_eq!(
             effect,
-            crate::workspace::WorkspaceEffect::Closed { closed: closed_id, activated: None }
+            appkit_shell::workspace::WorkspaceEffect::Closed { closed: closed_id, activated: None }
         );
         assert_eq!(
             app.editor_tab_ids_in_order().into_iter().collect::<std::collections::HashSet<_>>(),
@@ -949,7 +963,7 @@ mod tests {
         let effect = app.close_editor_tab(stale_id).expect("closing the target tab should succeed");
         assert_eq!(
             effect,
-            crate::workspace::WorkspaceEffect::Closed { closed: closed_id, activated: None }
+            appkit_shell::workspace::WorkspaceEffect::Closed { closed: closed_id, activated: None }
         );
         assert_eq!(
             app.editor_tab_ids_in_order().into_iter().collect::<std::collections::HashSet<_>>(),

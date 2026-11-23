@@ -1,6 +1,6 @@
-use crate::input_mapper::EditCommand;
 use appkit_core::document::DocumentModel;
 use appkit_core::edit::{TextEdit, apply_text_edit};
+use appkit_core::edit_command::EditCommand;
 use textora_core::buffer::EditHistoryKind;
 use ui::plugin::{
     EditIntent, EditPlan, EditRequest, EditSelection, EditTransaction, TextReplacement,

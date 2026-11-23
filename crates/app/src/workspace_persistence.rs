@@ -7,13 +7,13 @@ use appkit_shell::editor_runtime::{EditorTabSnapshot, EditorWorkspaceSnapshot};
 use appkit_shell::prepared_tab::PreparedTab;
 use ui::plugin::PLUGIN_EDITOR;
 
-use crate::document_presentation::DocumentPresentation;
-use crate::tab_runtime::{TabRuntime, TabRuntimeStore};
-#[cfg(test)]
-use crate::tab_session::TabSession;
-use crate::tab_session::TabSessionMut;
-use crate::workspace::Workspace;
 use crate::workspace_tab_factory::ViewportDimensions;
+use appkit_shell::document_presentation::DocumentPresentation;
+use appkit_shell::tab_runtime::{TabRuntime, TabRuntimeStore};
+#[cfg(test)]
+use appkit_shell::tab_session::TabSession;
+use appkit_shell::tab_session::TabSessionMut;
+use appkit_shell::workspace::Workspace;
 
 const WORKSPACE_VERSION: u32 = 1;
 const RECOVERY_TITLE_PREFIX: &str = "恢复：";
@@ -76,7 +76,7 @@ fn snapshot_dirty_state(document: &DocumentModel, snapshots_dir: &Path) -> Persi
     let (filename, original_lines, file_size, modified_time, disk_revision) =
         if let Some(path) = document.file_path.as_deref() {
             let filename = appkit_core::snapshot::snapshot_id_for_path(path);
-            let disk_revision = crate::file_safety::capture_revision(path).ok();
+            let disk_revision = appkit_core::file_safety::capture_revision(path).ok();
             let (original_lines, file_size, modified_time) = read_disk_baseline(path);
             (filename, original_lines, file_size, modified_time, disk_revision)
         } else {
@@ -136,7 +136,7 @@ fn snapshot_dirty_state_from_runtime(
     let (filename, original_lines, file_size, modified_time, disk_revision) =
         if let Some(path) = tab.path.as_deref() {
             let filename = appkit_core::snapshot::snapshot_id_for_path(path);
-            let disk_revision = crate::file_safety::capture_revision(path).ok();
+            let disk_revision = appkit_core::file_safety::capture_revision(path).ok();
             let (original_lines, file_size, modified_time) = read_disk_baseline(path);
             (filename, original_lines, file_size, modified_time, disk_revision)
         } else {
@@ -523,12 +523,12 @@ mod tests {
     use crate::app_init::build_product_workspace;
     use crate::document_fixture::DocumentFixture;
     use crate::plugins::editor::EditorPlugin;
-    use crate::tab_runtime::{TabRuntime, TabRuntimeStore};
-    use crate::tab_session::{TabSession, TabSessionMut};
     use crate::workspace_tab_factory::ViewportDimensions;
+    use appkit_shell::tab_runtime::{TabRuntime, TabRuntimeStore};
+    use appkit_shell::tab_session::{TabSession, TabSessionMut};
 
     fn append_document(
-        workspace: &mut crate::workspace::Workspace,
+        workspace: &mut appkit_shell::workspace::Workspace,
         runtimes: &mut TabRuntimeStore,
         document: DocumentFixture,
     ) -> appkit_core::workspace::types::TabId {

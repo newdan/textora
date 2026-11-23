@@ -20,10 +20,10 @@ use winit::keyboard::{Key, ModifiersState, NamedKey};
 use winit::window::WindowId;
 
 use crate::actions::AppAction;
-use crate::file_history::compute_workspace_root;
+use crate::input_mapper::key_to_command;
 use crate::native_menu::{MenuAction, NativeMenu};
 use crate::textora_product::ProductEventSender;
-use appkit_shell::input_mapper::key_to_command;
+use appkit_core::file_history::compute_workspace_root;
 use ui::core::overlay::OverlayAction;
 use ui::core::widget::{KeyCode, Modifiers, WidgetAction};
 
@@ -68,19 +68,19 @@ fn is_search_bar_whitelist(
 }
 
 fn load_recent_file_paths(
-    file_history: &crate::file_history::FileHistory,
+    file_history: &appkit_core::file_history::FileHistory,
     workspace_root: Option<&Path>,
 ) -> Vec<PathBuf> {
     let entries = match workspace_root {
-        Some(root) => file_history.get_by_workspace(root, crate::file_history::MENU_LIMIT),
-        None => file_history.get_valid_entries(crate::file_history::MENU_LIMIT),
+        Some(root) => file_history.get_by_workspace(root, appkit_core::file_history::MENU_LIMIT),
+        None => file_history.get_valid_entries(appkit_core::file_history::MENU_LIMIT),
     };
     entries.into_iter().map(|entry| entry.file_path.clone()).collect()
 }
 
 fn spawn_recent_file_loader(
     product_event_sender: ProductEventSender,
-    file_history: crate::file_history::FileHistory,
+    file_history: appkit_core::file_history::FileHistory,
     workspace_root: Option<PathBuf>,
 ) {
     std::thread::spawn(move || {
@@ -279,7 +279,8 @@ impl App {
         content: &str,
     ) -> crate::app_effect::AppEffect {
         let effect = if let Some(tab_id) = self.editor_tab_id_for_path(path) {
-            self.activate_editor_tab(tab_id).unwrap_or(crate::workspace::WorkspaceEffect::None)
+            self.activate_editor_tab(tab_id)
+                .unwrap_or(appkit_shell::workspace::WorkspaceEffect::None)
         } else {
             let dimensions = self.viewport_dimensions(self.screen_height());
             let crate::workspace_tab_factory::ProductPreparedTab { prepared, suggested_file_name } =
@@ -441,9 +442,9 @@ impl App {
     }
 
     pub(crate) fn close_window(&mut self, event_loop: &ActiveEventLoop) {
-        let dirty = self.active_tab_session().is_some_and(|tab| tab.document.dirty);
+        let dirty = self.active_tab_session().is_some_and(|tab| tab.document().dirty);
         let file_backed =
-            self.active_tab_session().is_some_and(|tab| tab.document.file_path.is_some());
+            self.active_tab_session().is_some_and(|tab| tab.document().file_path.is_some());
         if dirty && file_backed {
             let Some(tab_id) = self.active_tab_id() else {
                 self.quit_app(event_loop);
@@ -937,7 +938,7 @@ impl App {
             }
             if self.pending_quit_after_save
                 && completed_tab.is_some_and(|tab_id| self.active_tab_id() == Some(tab_id))
-                && self.active_tab_session().is_none_or(|tab| !tab.document.dirty)
+                && self.active_tab_session().is_none_or(|tab| !tab.document().dirty)
             {
                 self.pending_quit_after_save = false;
                 should_quit = true;
@@ -953,19 +954,24 @@ impl App {
         path: std::path::PathBuf,
         expected_dirty: bool,
         expected_content_revision: u64,
-        outcome: Result<crate::file_safety::FileSafetyOutcome, crate::file_safety::FileSafetyError>,
+        outcome: Result<
+            appkit_core::file_safety::FileSafetyOutcome,
+            appkit_core::file_safety::FileSafetyError,
+        >,
     ) {
         let Some(tab) = self.tab_session(tab_id) else {
             self.editor_runtime.forget_file_safety_tab(tab_id);
             return;
         };
-        let is_current = tab.document.dirty == expected_dirty
-            && tab.document.file_path.as_ref() == Some(&path)
-            && tab.document.content_revision() == expected_content_revision;
+        let is_current = tab.document().dirty == expected_dirty
+            && tab.document().file_path.as_ref() == Some(&path)
+            && tab.document().content_revision() == expected_content_revision;
         if !is_current {
-            if let Ok(crate::file_safety::FileSafetyOutcome::Conflict { conflict, .. }) = outcome {
+            if let Ok(appkit_core::file_safety::FileSafetyOutcome::Conflict { conflict, .. }) =
+                outcome
+            {
                 self.file_safety_notices.push(
-                    crate::file_safety::FileSafetyNotice::ConflictCopyCreated {
+                    appkit_core::file_safety::FileSafetyNotice::ConflictCopyCreated {
                         original: path.clone(),
                         conflict,
                     },
@@ -976,13 +982,13 @@ impl App {
             return;
         }
         match outcome {
-            Ok(crate::file_safety::FileSafetyOutcome::Unchanged) => {}
-            Ok(crate::file_safety::FileSafetyOutcome::Reload { content, .. }) => {
-                if !expected_dirty && tab.document.full_text() == content {
+            Ok(appkit_core::file_safety::FileSafetyOutcome::Unchanged) => {}
+            Ok(appkit_core::file_safety::FileSafetyOutcome::Reload { content, .. }) => {
+                if !expected_dirty && tab.document().full_text() == content {
                     return;
                 }
-                let cursor_offset = tab.document.cursor_offset().to_usize();
-                let selection_anchor = tab.document.cursor().selection_anchor;
+                let cursor_offset = tab.document().cursor_offset().to_usize();
+                let selection_anchor = tab.document().cursor().selection_anchor;
                 let mut document = DocumentModel::from_external_content(&path, &content);
                 let buffer_length = document.buffer_len();
                 document.set_cursor_offset_synced(cursor_offset.min(buffer_length));
@@ -995,10 +1001,11 @@ impl App {
                     self.init_display_map(active_index);
                 }
                 self.refresh_file_monitor_roots();
-                self.file_safety_notices
-                    .push(crate::file_safety::FileSafetyNotice::CleanDocumentReloaded { path });
+                self.file_safety_notices.push(
+                    appkit_core::file_safety::FileSafetyNotice::CleanDocumentReloaded { path },
+                );
             }
-            Ok(crate::file_safety::FileSafetyOutcome::Conflict {
+            Ok(appkit_core::file_safety::FileSafetyOutcome::Conflict {
                 conflict,
                 conflict_revision,
                 content,
@@ -1007,7 +1014,7 @@ impl App {
                 self.update_editor_document_path(tab_id, conflict.clone(), Some(conflict_revision));
                 self.editor_runtime.forget_file_safety_tab(tab_id);
                 self.file_safety_notices.push(
-                    crate::file_safety::FileSafetyNotice::ConflictCopyCreated {
+                    appkit_core::file_safety::FileSafetyNotice::ConflictCopyCreated {
                         original: path.clone(),
                         conflict,
                     },
@@ -1016,24 +1023,24 @@ impl App {
                     let _ = self.open_external_content_tab(&path, &content);
                 }
             }
-            Ok(crate::file_safety::FileSafetyOutcome::Renamed { new_path, revision }) => {
+            Ok(appkit_core::file_safety::FileSafetyOutcome::Renamed { new_path, revision }) => {
                 self.update_editor_document_path(tab_id, new_path.clone(), Some(revision));
                 self.editor_runtime.forget_file_safety_tab(tab_id);
                 self.refresh_file_monitor_roots();
             }
-            Ok(crate::file_safety::FileSafetyOutcome::AmbiguousRename { original }) => {
+            Ok(appkit_core::file_safety::FileSafetyOutcome::AmbiguousRename { original }) => {
                 self.editor_runtime.forget_file_safety_tab(tab_id);
                 self.detach_deleted_editor_document(tab_id, &original);
                 self.refresh_file_monitor_roots();
                 self.file_safety_notices
-                    .push(crate::file_safety::FileSafetyNotice::AmbiguousRename { original });
+                    .push(appkit_core::file_safety::FileSafetyNotice::AmbiguousRename { original });
             }
-            Ok(crate::file_safety::FileSafetyOutcome::Deleted) => {
+            Ok(appkit_core::file_safety::FileSafetyOutcome::Deleted) => {
                 self.editor_runtime.forget_file_safety_tab(tab_id);
                 self.detach_deleted_editor_document(tab_id, &path);
                 self.refresh_file_monitor_roots();
                 self.file_safety_notices.push(
-                    crate::file_safety::FileSafetyNotice::DocumentDetachedAfterDeletion {
+                    appkit_core::file_safety::FileSafetyNotice::DocumentDetachedAfterDeletion {
                         original: path,
                     },
                 );
@@ -1041,7 +1048,7 @@ impl App {
             Err(error) => {
                 if expected_dirty {
                     self.file_safety_notices.push(
-                        crate::file_safety::FileSafetyNotice::ConflictCopyFailed {
+                        appkit_core::file_safety::FileSafetyNotice::ConflictCopyFailed {
                             original: path,
                             message: error.to_string(),
                         },
@@ -1171,8 +1178,8 @@ impl ApplicationHandler<AppEvent> for App {
 mod file_safety_race_tests {
     use super::App;
     use crate::document_fixture::DocumentFixture;
-    use crate::file_safety::{FileSafetyOutcome, capture_revision};
     use crate::plugins::editor::EditorPlugin;
+    use appkit_core::file_safety::{FileSafetyOutcome, capture_revision};
 
     use std::fs;
     use std::time::Instant;
@@ -1220,18 +1227,18 @@ mod file_safety_race_tests {
         );
 
         let tab = app.tab_session(tab_id).expect("reload must keep the same tab");
-        assert_eq!(tab.document.full_text(), content);
-        assert_eq!(tab.document.cursor_offset().to_usize(), 2);
-        assert_eq!(tab.document.cursor().selection_anchor, Some(content.len()));
+        assert_eq!(tab.document().full_text(), content);
+        assert_eq!(tab.document().cursor_offset().to_usize(), 2);
+        assert_eq!(tab.document().cursor().selection_anchor, Some(content.len()));
         assert_eq!(tab.scroll_anchor_doc_line(), scroll_anchor.doc_line);
         assert_eq!(tab.scroll_anchor_pixel_offset(), scroll_anchor.pixel_offset);
-        assert_eq!(tab.document.file_path.as_deref(), Some(path.as_path()));
-        assert_eq!(tab.document.disk_revision.as_ref(), Some(&revision));
-        assert_ne!(tab.document.disk_revision, old_revision);
-        assert!(!tab.document.dirty);
+        assert_eq!(tab.document().file_path.as_deref(), Some(path.as_path()));
+        assert_eq!(tab.document().disk_revision.as_ref(), Some(&revision));
+        assert_ne!(tab.document().disk_revision, old_revision);
+        assert!(!tab.document().dirty);
         assert!(app.file_safety_notices.iter().any(|notice| matches!(
             notice,
-            crate::file_safety::FileSafetyNotice::CleanDocumentReloaded { path: reloaded } if reloaded == &path
+            appkit_core::file_safety::FileSafetyNotice::CleanDocumentReloaded { path: reloaded } if reloaded == &path
         )));
     }
 
@@ -1259,9 +1266,9 @@ mod file_safety_race_tests {
         );
 
         let entry = app.active_tab_session().expect("active entry should remain");
-        assert_eq!(entry.document.full_text(), "local edit");
-        assert_eq!(entry.document.file_path, Some(path.clone()));
-        assert!(entry.document.dirty);
+        assert_eq!(entry.document().full_text(), "local edit");
+        assert_eq!(entry.document().file_path, Some(path.clone()));
+        assert!(entry.document().dirty);
         assert!(app.editor_runtime.file_safety_should_check(Instant::now()));
     }
 
@@ -1297,12 +1304,12 @@ mod file_safety_race_tests {
         );
 
         let entry = app.active_tab_session().expect("active entry should remain");
-        assert_eq!(entry.document.file_path, Some(path.clone()));
-        assert_eq!(entry.document.full_text(), "latest local edit");
+        assert_eq!(entry.document().file_path, Some(path.clone()));
+        assert_eq!(entry.document().full_text(), "latest local edit");
         assert!(app.file_safety_notices.iter().any(|notice| {
             matches!(
                 notice,
-                crate::file_safety::FileSafetyNotice::ConflictCopyCreated {
+                appkit_core::file_safety::FileSafetyNotice::ConflictCopyCreated {
                     original,
                     conflict: notice_conflict,
                 } if original == &path && notice_conflict == &conflict
@@ -1323,8 +1330,8 @@ mod file_safety_race_tests {
         assert!(effect.redraw);
         assert!(effect.update_title);
         assert!(effect.persist_workspace);
-        assert_eq!(active.document.file_path.as_ref(), Some(&path));
-        assert_eq!(active.document.full_text(), "# Shared");
+        assert_eq!(active.document().file_path.as_ref(), Some(&path));
+        assert_eq!(active.document().full_text(), "# Shared");
         assert_eq!(active.plugin_name(), ui::plugin::PLUGIN_MARKDOWN_EDITOR);
         assert_eq!(
             app.editor_tab_ids_in_order().into_iter().collect::<std::collections::HashSet<_>>(),
@@ -1345,7 +1352,7 @@ mod file_safety_race_tests {
         assert!(reopen_effect.persist_workspace);
         assert_eq!(app.editor_tab_count(), len_before_reopen);
         assert_eq!(app.active_tab_id(), Some(external_tab_id));
-        assert_eq!(reopened.document.full_text(), "# Shared");
+        assert_eq!(reopened.document().full_text(), "# Shared");
         assert_eq!(
             app.editor_tab_ids_in_order().into_iter().collect::<std::collections::HashSet<_>>(),
             app.editor_runtime_tab_ids()
@@ -1357,7 +1364,7 @@ mod file_safety_race_tests {
         let directory = tempfile::tempdir().expect("conflict save fixture directory");
         let path = directory.path().join("notes.md");
         fs::write(&path, "baseline").expect("write conflict baseline");
-        let mut monitor = crate::file_safety::FileSafetyMonitor::new();
+        let mut monitor = appkit_core::file_safety::FileSafetyMonitor::new();
         monitor.track(&path).expect("track conflict baseline");
         let mut document =
             DocumentFixture::from_file(&path, 10, 10.0).expect("load conflict fixture");
@@ -1373,12 +1380,15 @@ mod file_safety_race_tests {
         let conflict_path = app
             .tab_session(tab_id)
             .expect("conflict tab")
-            .document
+            .document()
             .file_path
             .clone()
             .expect("conflict path");
         assert_ne!(conflict_path, path);
-        app.tab_session_mut(tab_id).expect("conflict tab").document.insert_at_cursor(b"later ");
+        app.tab_session_mut(tab_id)
+            .expect("conflict tab")
+            .document_mut()
+            .insert_at_cursor(b"later ");
         let prepared = app.editor_runtime.prepare_save(tab_id).expect("prepare conflict copy save");
         let completion = appkit_shell::editor_runtime::execute_prepared_save(prepared);
         assert!(
@@ -1559,7 +1569,7 @@ mod tests {
     use crate::app_dispatch::canvas_drag_test_support::{
         app_with_canvas_drag_tabs, cancel_request_count, document_texts, start_canvas_drag,
     };
-    use crate::file_history::{FileHistory, FileHistoryEntry};
+    use appkit_core::file_history::{FileHistory, FileHistoryEntry};
     use std::any::Any;
     use std::cell::{Cell, RefCell};
     use std::rc::Rc;
@@ -2549,7 +2559,7 @@ mod tests {
         let mut app = App::new(None);
         app.replace_editor_model(
             crate::app_init::build_product_workspace(),
-            crate::tab_runtime::TabRuntimeStore::default(),
+            appkit_shell::tab_runtime::TabRuntimeStore::default(),
         );
 
         app.open_document_sender()
@@ -2559,7 +2569,7 @@ mod tests {
 
         assert_eq!(app.editor_tab_count(), 1);
         assert_eq!(
-            app.active_tab_session().and_then(|session| session.document.file_path.as_deref()),
+            app.active_tab_session().and_then(|session| session.document().file_path.as_deref()),
             Some(valid_path.as_path())
         );
     }
@@ -2586,7 +2596,7 @@ mod tests {
         let mut app = App::new(None);
         app.replace_editor_model(
             crate::app_init::build_product_workspace(),
-            crate::tab_runtime::TabRuntimeStore::default(),
+            appkit_shell::tab_runtime::TabRuntimeStore::default(),
         );
         let context = app.editor_input_context();
         assert!(app.editor_runtime.begin_text_selection(context));

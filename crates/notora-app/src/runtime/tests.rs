@@ -1370,13 +1370,13 @@ fn markdown_bold_shortcut_formats_selection_and_undo_restores_it() {
     let mut app = app();
     let (_, tab_id) = install_registered_note(&mut app, "bold.md", "中文正文");
     app.dispatch_action(NotoraAction::FocusRequested(FocusTarget::Editor));
-    let tab = app
+    let mut tab = app
         .document_runtime
         .editor_runtime
         .tab_session_mut(tab_id)
         .expect("Markdown shortcut fixture should retain its tab");
-    tab.document.cursor_move_to_offset("中文".len());
-    tab.document.cursor_mut().selection_anchor = Some(0);
+    tab.document_mut().cursor_move_to_offset("中文".len());
+    tab.document_mut().cursor_mut().selection_anchor = Some(0);
     let modifiers = ui::core::Modifiers { cmd: true, ..ui::core::Modifiers::NONE };
 
     app.handle_key_input(ui::KeyCode::Char('b'), modifiers, None);
@@ -1386,8 +1386,8 @@ fn markdown_bold_shortcut_formats_selection_and_undo_restores_it() {
         .editor_runtime
         .tab_session(tab_id)
         .expect("formatted Markdown should retain its tab");
-    assert_eq!(tab.full_text(), "**中文**正文");
-    assert!(tab.document.dirty);
+    assert_eq!(tab.document().full_text(), "**中文**正文");
+    assert!(tab.document().dirty);
 
     app.handle_key_input(ui::KeyCode::Char('z'), modifiers, None);
 
@@ -1410,7 +1410,7 @@ fn markdown_bold_shortcut_supports_control_without_a_selection() {
         .editor_runtime
         .tab_session_mut(tab_id)
         .expect("Markdown shortcut fixture should retain its tab")
-        .document
+        .document_mut()
         .cursor_move_to_offset(0);
 
     app.handle_key_input(
@@ -1424,8 +1424,8 @@ fn markdown_bold_shortcut_supports_control_without_a_selection() {
         .editor_runtime
         .tab_session(tab_id)
         .expect("Markdown shortcut fixture should retain its tab");
-    assert_eq!(tab.full_text(), "****正文");
-    assert_eq!(tab.document.cursor_offset().to_usize(), "**".len());
+    assert_eq!(tab.document().full_text(), "****正文");
+    assert_eq!(tab.document().cursor_offset().to_usize(), "**".len());
 }
 
 #[test]
@@ -2335,7 +2335,7 @@ fn tab_in_empty_markdown_body_immediately_moves_the_caret() {
         .editor_runtime
         .tab_session(tab_id)
         .expect("indented body must retain its session");
-    assert_eq!(session.document.cursor_offset().to_usize(), TAB_SPACES.len());
+    assert_eq!(session.document().cursor_offset().to_usize(), TAB_SPACES.len());
     let after = session
         .query_cursor_screen_rect(TAB_SPACES.len())
         .expect("Tab must expose the updated caret before another paint");
@@ -2367,11 +2367,11 @@ fn tab_after_typing_into_an_empty_mindmap_root_creates_a_child() {
     };
     app.render().expect("created mmap should render its empty root");
     app.dispatch_action(NotoraAction::FocusRequested(FocusTarget::Editor));
-    let Some(tab) = app.document_runtime.editor_runtime.tab_session_mut(tab_id) else {
+    let Some(mut tab) = app.document_runtime.editor_runtime.tab_session_mut(tab_id) else {
         panic!("created mmap should keep its runtime session");
     };
-    tab.document.cursor_mut().selection_anchor = Some(0);
-    tab.document.cursor_move_to_offset(1);
+    tab.document_mut().cursor_mut().selection_anchor = Some(0);
+    tab.document_mut().cursor_move_to_offset(1);
 
     app.commit_editor_text("kk".to_owned());
     assert_eq!(
@@ -2444,7 +2444,7 @@ fn tab_from_an_untitled_new_mindmap_root_creates_a_child_without_spaces() {
             .editor_runtime
             .tab_session(tab_id)
             .expect("created mmap should retain its runtime session")
-            .document
+            .document()
             .cursor_offset()
             .to_usize(),
         "# 无标题".len()
@@ -2605,7 +2605,7 @@ fn source_view_backspace_and_delete_edit_graphemes_through_product_routing() {
         .editor_runtime
         .tab_session_mut(tab_id)
         .expect("source view should keep the mutable runtime session")
-        .document
+        .document_mut()
         .cursor_move_to_offset("# ".len());
     let delete_event = ui::Event::KeyDown(ui::KeyCode::Delete, ui::core::Modifiers::NONE);
     if !app.route_product_event(&delete_event) {
@@ -3615,7 +3615,7 @@ fn first_editor_drag_from_card_list_depends_on_window_focus() {
     let row_left = bounds.x + gutter;
     let glyph_width = 24.0;
     let mut tab = editor.tab_session_mut(tab_id).expect("external text fixture should have a tab");
-    let original_cursor = tab.document.cursor_offset().to_usize();
+    let original_cursor = tab.document().cursor_offset().to_usize();
     tab.display_mut().advance_cache = vec![ui::render_geom::AdvanceCacheEntry {
         doc_line: 0,
         vl_byte_start: 0,
@@ -3643,7 +3643,7 @@ fn first_editor_drag_from_card_list_depends_on_window_focus() {
         let editor = app.document_runtime.editor();
         let tab = editor.tab_session(tab_id).expect("external text fixture should stay open");
         assert_eq!(
-            (tab.document.cursor().selection_anchor, tab.document.cursor_offset().to_usize()),
+            (tab.document().cursor().selection_anchor, tab.document().cursor_offset().to_usize()),
             expected_position
         );
         assert!(!app.editor_pointer_is_captured());
@@ -3997,8 +3997,8 @@ fn switching_back_to_mindmap_after_reload_refreshes_reused_generation() {
     let tab = editor.tab_session(tab_id).expect("mindmap tab should be installed");
     assert_eq!(tab.plugin_name(), PLUGIN_MINDMAP);
     assert_eq!(tab.mindmap_theme_selection(), MindmapThemeSelection::Selected("warm-night".into()));
-    let generation = tab.document.generation();
-    let content_revision = tab.document.content_revision();
+    let generation = tab.document().generation();
+    let content_revision = tab.document().content_revision();
     editor.switch_active_plugin();
     assert_eq!(
         editor.tab_session(tab_id).expect("source tab should exist").plugin_name(),
@@ -4014,8 +4014,8 @@ fn switching_back_to_mindmap_after_reload_refreshes_reused_generation() {
 
     let editor = app.document_runtime.editor_mut();
     let tab = editor.tab_session(tab_id).expect("reloaded tab should exist");
-    assert!(tab.document.full_text().contains("# Reloaded"));
-    assert_eq!(tab.document.generation(), generation);
+    assert!(tab.document().full_text().contains("# Reloaded"));
+    assert_eq!(tab.document().generation(), generation);
 
     editor.switch_active_plugin();
 
@@ -4032,15 +4032,15 @@ fn semantic_edit_refreshes_stale_plugin_source_before_planning() {
     let mut app = app();
     let (_, tab_id) = install_registered_note(&mut app, "note.md", "old");
     let editor = app.document_runtime.editor_mut();
-    let tab = editor.tab_session_mut(tab_id).expect("Markdown tab should be installed");
+    let mut tab = editor.tab_session_mut(tab_id).expect("Markdown tab should be installed");
     // Change the document without sending UpdateSource to the active plugin.
-    tab.document.replace_range(0.."old".len(), "new");
+    tab.document_mut().replace_range(0.."old".len(), "new");
 
     let (result, _) = editor.execute_semantic_edit(SemanticEditCommand::SetHeadingLevel(2));
 
     assert_eq!(result, SemanticEditResult::Applied);
     let tab = editor.tab_session(tab_id).expect("edited Markdown tab should exist");
-    assert_eq!(tab.document.full_text(), "## new");
+    assert_eq!(tab.document().full_text(), "## new");
 }
 
 #[test]

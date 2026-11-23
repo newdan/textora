@@ -1,11 +1,11 @@
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 use std::sync::mpsc;
-use std::thread::{self, JoinHandle};
 use std::time::Duration;
 
+use file_watch::{WatchWorker, recommended_watcher};
 use notify::event::{ModifyKind, RenameMode};
-use notify::{Config, Event, EventKind, RecommendedWatcher, RecursiveMode, Watcher};
+use notify::{Event, EventKind, RecursiveMode, Watcher};
 
 use crate::WORKSPACE_METADATA_DIRECTORY_NAME;
 
@@ -35,8 +35,7 @@ pub enum WorkspaceFileMonitorEvent {
 }
 
 pub struct WorkspaceFileMonitor {
-    command_sender: mpsc::Sender<MonitorCommand>,
-    worker: Option<JoinHandle<()>>,
+    worker: WatchWorker<MonitorCommand>,
 }
 
 #[derive(Debug)]
@@ -62,14 +61,7 @@ impl WorkspaceFileMonitor {
     pub fn start(
         root: PathBuf,
     ) -> Result<(Self, mpsc::Receiver<WorkspaceFileMonitorEvent>), WorkspaceFileMonitorError> {
-        Self::start_with_backend(root, |event_sender| {
-            RecommendedWatcher::new(
-                move |event| {
-                    let _ = event_sender.send(event);
-                },
-                Config::default(),
-            )
-        })
+        Self::start_with_backend(root, recommended_watcher)
     }
 
     fn start_with_backend<W: Watcher + 'static>(
@@ -78,31 +70,22 @@ impl WorkspaceFileMonitor {
         + Send
         + 'static,
     ) -> Result<(Self, mpsc::Receiver<WorkspaceFileMonitorEvent>), WorkspaceFileMonitorError> {
-        let (command_sender, command_receiver) = mpsc::channel();
-        let (result_sender, result_receiver) = mpsc::channel();
-        let worker = thread::Builder::new()
-            .name("notora-file-monitor".to_owned())
-            .spawn(move || run_worker(root, command_receiver, result_sender, create_watcher))
-            .map_err(|_| WorkspaceFileMonitorError::WorkerDisconnected)?;
+        let (event_sender, event_receiver) = mpsc::channel();
+        let (worker, result_receiver) = WatchWorker::spawn(
+            "notora-file-monitor",
+            MonitorCommand::Shutdown,
+            move |_| create_watcher(event_sender),
+            move |watcher, command_receiver, result_sender| {
+                run_worker(root, watcher, command_receiver, event_receiver, result_sender);
+            },
+        )
+        .map_err(|_| WorkspaceFileMonitorError::WorkerDisconnected)?;
 
-        Ok((Self { command_sender, worker: Some(worker) }, result_receiver))
+        Ok((Self { worker }, result_receiver))
     }
 
     pub fn shutdown(&mut self) {
-        let _ = self.command_sender.send(MonitorCommand::Shutdown);
-        // Platform registration and backend destruction may wait inside the OS.
-        // The worker owns those resources; callers only request its eventual exit.
-        if let Some(worker) = self.worker.take()
-            && worker.is_finished()
-        {
-            let _ = worker.join();
-        }
-    }
-}
-
-impl Drop for WorkspaceFileMonitor {
-    fn drop(&mut self) {
-        self.shutdown();
+        self.worker.shutdown();
     }
 }
 
@@ -112,12 +95,12 @@ enum MonitorCommand {
 
 fn run_worker<W: Watcher>(
     root: PathBuf,
+    watcher: notify::Result<W>,
     command_receiver: mpsc::Receiver<MonitorCommand>,
+    event_receiver: mpsc::Receiver<notify::Result<Event>>,
     result_sender: mpsc::Sender<WorkspaceFileMonitorEvent>,
-    create_watcher: impl FnOnce(mpsc::Sender<notify::Result<Event>>) -> notify::Result<W>,
 ) {
-    let (event_sender, event_receiver) = mpsc::channel();
-    let mut watcher = match create_watcher(event_sender) {
+    let mut watcher = match watcher {
         Ok(watcher) => watcher,
         Err(error) => {
             let _ = result_sender

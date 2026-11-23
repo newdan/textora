@@ -129,7 +129,7 @@ pub(crate) fn load(path: &Path) -> std::io::Result<PersistedSettings> {
 pub(crate) fn save(path: &Path, settings: &PersistedSettings) -> std::io::Result<()> {
     let toml_str = toml::to_string_pretty(settings)
         .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
-    crate::persistence::atomic_write(path, toml_str.as_bytes())
+    appkit_core::persistence::atomic_write(path, toml_str.as_bytes())
 }
 
 pub(crate) fn save_editor_settings(

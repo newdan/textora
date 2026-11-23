@@ -17,7 +17,7 @@ mod render_session;
 #[allow(dead_code, reason = "ER3-1 wires reshape results into the App lifecycle")]
 mod reshape_session;
 
-pub use crate::mouse_state::MouseCapture;
+pub use crate::pointer_capture::MouseCapture;
 pub use contract::{
     CloseConfirmation, DocumentTextEditError, DocumentTextReplacement, DocumentTextSnapshot,
     EditorDocumentSummary, EditorFocus, EditorInputContext, EditorNotification, EditorOutcome,
@@ -886,7 +886,7 @@ impl EditorRuntime {
     /// Applies a source-editor command after product shortcuts and view-specific navigation.
     pub fn execute_source_command(
         &mut self,
-        command: &crate::input_mapper::EditCommand,
+        command: &appkit_core::edit_command::EditCommand,
     ) -> EditorOutcome {
         self.model_session.execute_source_command(command, self.editor_line_height())
     }

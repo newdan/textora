@@ -9,8 +9,8 @@ use ui::plugin::{
 
 use super::{EditorOutcome, EditorRuntime};
 use crate::event::ShellEffect;
-use crate::input_mapper::EditCommand;
 use crate::tab_session::{TabSession, TabSessionMut};
+use appkit_core::edit_command::EditCommand;
 
 fn wysiwyg_cursor_x(tab: &TabSession<'_>, byte: usize) -> Option<f32> {
     tab.query_cursor_screen_rect(byte).map(|(x, _y, _w, _h)| x)

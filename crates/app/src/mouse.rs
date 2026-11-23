@@ -1,13 +1,221 @@
-pub(crate) use appkit_shell::mouse_state::{CanvasDragEligibility, CanvasDragSession, MouseState};
+use std::ops::Range;
+use std::time::Instant;
+
 #[cfg(test)]
-pub(crate) use appkit_shell::source_pointer::handle_mouse_input_with_cursor_state;
-pub(crate) use appkit_shell::source_pointer::hit_test_with_sub_line_offset;
+use appkit_shell::pointer_capture::CanvasDragEligibility;
+use appkit_shell::pointer_capture::{CanvasDragSession, MouseCapture};
+
+const HOVER_REDRAW_THRESHOLD_PX_SQUARED: f32 = 4.0;
+const MULTI_CLICK_MAXIMUM_WHOLE_MILLIS: u128 = 500;
+const MULTI_CLICK_MAXIMUM_DISTANCE_PX_SQUARED: f32 = 25.0;
+const MAXIMUM_CLICK_COUNT: u8 = 3;
+
+/// Mouse-related state.
+pub(crate) struct MouseState {
+    pub pos: (f64, f64),
+    pub is_down: bool,
+    pub down_byte_offset: Option<usize>,
+    /// Semantic source range that bounds the current custom-renderer text drag.
+    pub wysiwyg_selection_scope: Option<Range<usize>>,
+    pub canvas_drag: Option<CanvasDragSession>,
+    pub last_click_time: Instant,
+    pub last_click_pos: (f32, f32),
+    pub click_count: u8,
+    /// 上一次因 overlay hover 而触发 RequestRedraw 时的鼠标位置。用于
+    /// 方案 2026-07-06 阶段 4a：鼠标未跨越阈值时不重复触发 redraw。
+    /// None 表示尚未推过 hover redraw，或 overlay 已关闭。
+    pub last_hover_redraw_pos: Option<(f32, f32)>,
+    /// 上一次推送的 HoverTab 值。用于去重（None → None 时不再推送）。
+    pub last_hover_tab: Option<usize>,
+}
+
+impl MouseState {
+    pub fn record_editor_press(&mut self, position: (f32, f32)) {
+        self.record_editor_press_at(Instant::now(), position);
+    }
+
+    fn record_editor_press_at(&mut self, pressed_at: Instant, position: (f32, f32)) {
+        let elapsed = pressed_at.duration_since(self.last_click_time);
+        let horizontal_distance = position.0 - self.last_click_pos.0;
+        let vertical_distance = position.1 - self.last_click_pos.1;
+        let distance_squared =
+            horizontal_distance * horizontal_distance + vertical_distance * vertical_distance;
+        if elapsed.as_millis() > MULTI_CLICK_MAXIMUM_WHOLE_MILLIS
+            || distance_squared > MULTI_CLICK_MAXIMUM_DISTANCE_PX_SQUARED
+        {
+            self.click_count = 0;
+        }
+        self.click_count = (self.click_count + 1).min(MAXIMUM_CLICK_COUNT);
+        self.last_click_time = pressed_at;
+        self.last_click_pos = position;
+    }
+
+    pub fn capture(&self) -> MouseCapture {
+        if self.canvas_drag.is_some() {
+            MouseCapture::CanvasDrag
+        } else if self.is_down {
+            MouseCapture::TextSelection
+        } else {
+            MouseCapture::None
+        }
+    }
+
+    pub fn captures_pointer(&self) -> bool {
+        self.capture() != MouseCapture::None
+    }
+
+    pub fn new() -> Self {
+        Self {
+            pos: (0.0, 0.0),
+            is_down: false,
+            down_byte_offset: None,
+            wysiwyg_selection_scope: None,
+            canvas_drag: None,
+            last_click_time: Instant::now(),
+            last_click_pos: (0.0, 0.0),
+            click_count: 0,
+            last_hover_redraw_pos: None,
+            last_hover_tab: None,
+        }
+    }
+
+    /// 判断距上次 hover redraw 是否越过阈值（默认 2 px），或状态需要刷新。
+    /// 阈值内的移动通常是 sub-pixel jitter 或跨相同 overlay 元素的移动，
+    /// 无需重绘。
+    pub fn overlay_hover_needs_redraw(&self, px: f32, py: f32) -> bool {
+        match self.last_hover_redraw_pos {
+            None => true,
+            Some((last_x, last_y)) => {
+                let dx = px - last_x;
+                let dy = py - last_y;
+                dx * dx + dy * dy >= HOVER_REDRAW_THRESHOLD_PX_SQUARED
+            }
+        }
+    }
+}
+
+impl Default for MouseState {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+#[cfg(test)]
+mod state_tests {
+    use std::time::{Duration, Instant};
+
+    use super::MouseState;
+
+    #[test]
+    fn editor_press_preserves_the_whole_millisecond_cutoff() {
+        let mut mouse = MouseState::new();
+        let initial_press = Instant::now();
+        let position = (10.0, 20.0);
+        let exact_limit = initial_press + Duration::from_millis(500);
+        let fractional_limit = exact_limit + Duration::from_micros(500_999);
+        let expired = fractional_limit + Duration::from_millis(501);
+
+        for (press_time, expected_count) in
+            [(initial_press, 1), (exact_limit, 2), (fractional_limit, 3), (expired, 1)]
+        {
+            mouse.record_editor_press_at(press_time, position);
+            assert_eq!(mouse.click_count, expected_count);
+        }
+        assert_eq!(mouse.last_click_time, expired);
+        assert_eq!(mouse.last_click_pos, position);
+    }
+
+    #[test]
+    fn editor_press_measures_distance_from_the_last_press_and_caps_at_three() {
+        let mut mouse = MouseState::new();
+        let press_time = Instant::now();
+
+        for (position, expected_count) in [
+            ((10.0, 20.0), 1),
+            ((13.0, 24.0), 2),
+            ((16.0, 28.0), 3),
+            ((19.0, 32.0), 3),
+            ((22.0, 36.25), 1),
+            ((22.0, 36.25), 2),
+        ] {
+            mouse.record_editor_press_at(press_time, position);
+            assert_eq!(mouse.click_count, expected_count);
+            assert_eq!(mouse.last_click_pos, position);
+        }
+    }
+
+    #[test]
+    fn overlay_hover_needs_redraw_first_time_returns_true() {
+        let mouse = MouseState::new();
+        assert!(mouse.overlay_hover_needs_redraw(100.0, 200.0));
+    }
+
+    #[test]
+    fn overlay_hover_needs_redraw_within_threshold_returns_false() {
+        let mut mouse = MouseState::new();
+        mouse.last_hover_redraw_pos = Some((100.0, 200.0));
+
+        assert!(!mouse.overlay_hover_needs_redraw(100.5, 200.5));
+        assert!(!mouse.overlay_hover_needs_redraw(101.0, 200.0));
+        assert!(!mouse.overlay_hover_needs_redraw(100.0, 201.0));
+    }
+
+    #[test]
+    fn overlay_hover_needs_redraw_past_threshold_returns_true() {
+        let mut mouse = MouseState::new();
+        mouse.last_hover_redraw_pos = Some((100.0, 200.0));
+
+        assert!(mouse.overlay_hover_needs_redraw(102.0, 200.0));
+        assert!(mouse.overlay_hover_needs_redraw(105.0, 200.0));
+    }
+
+    #[test]
+    fn default_matches_new_for_complete_mouse_state() {
+        let new_state = MouseState::new();
+        let default_state = MouseState::default();
+
+        assert_eq!(default_state.pos, new_state.pos);
+        assert_eq!(default_state.is_down, new_state.is_down);
+        assert_eq!(default_state.down_byte_offset, new_state.down_byte_offset);
+        assert_eq!(default_state.wysiwyg_selection_scope, new_state.wysiwyg_selection_scope);
+        assert!(default_state.canvas_drag.is_none());
+        assert!(new_state.canvas_drag.is_none());
+        assert!(default_state.last_click_time >= new_state.last_click_time);
+        assert_eq!(default_state.last_click_pos, new_state.last_click_pos);
+        assert_eq!(default_state.click_count, new_state.click_count);
+        assert_eq!(default_state.last_hover_redraw_pos, new_state.last_hover_redraw_pos);
+        assert_eq!(default_state.last_hover_tab, new_state.last_hover_tab);
+    }
+
+    #[test]
+    fn capture_query_prioritizes_canvas_drag_over_text_selection() {
+        let mut mouse = MouseState::new();
+        assert_eq!(mouse.capture(), super::MouseCapture::None);
+        assert!(!mouse.captures_pointer());
+
+        mouse.is_down = true;
+        assert_eq!(mouse.capture(), super::MouseCapture::TextSelection);
+        assert!(mouse.captures_pointer());
+
+        mouse.canvas_drag = Some(super::CanvasDragSession {
+            source_range: 0..1,
+            pressed_at: (0.0, 0.0),
+            source_generation: 1,
+            eligibility: super::CanvasDragEligibility::Enabled,
+            started: false,
+        });
+        assert_eq!(mouse.capture(), super::MouseCapture::CanvasDrag);
+    }
+}
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::source_pointer::{
+        handle_cursor_moved as move_selection, handle_mouse_input_with_cursor_state,
+        hit_test_with_sub_line_offset,
+    };
     use appkit_core::line_index::LineIndex;
-    use appkit_shell::source_pointer::handle_cursor_moved as move_selection;
     use textora_core::types::{ByteIndex, UniCharOffset};
     use ui::render_geom::AdvanceCacheEntry;
     use ui::settings::UiMetrics;

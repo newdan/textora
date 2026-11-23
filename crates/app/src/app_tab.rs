@@ -2,16 +2,16 @@
 //! Methods on `impl App`, extracted from app.rs.
 
 use crate::app::App;
-use crate::file_history::{FileHistoryEntry, compute_workspace_root};
-#[cfg(test)]
-use crate::tab_runtime::TabRuntime;
-use crate::tab_session::{TabSession, TabSessionMut};
-use crate::workspace::Workspace;
 use crate::workspace_persistence::snapshot_runtime_workspace;
+use appkit_core::file_history::{FileHistoryEntry, compute_workspace_root};
 use appkit_core::workspace::types::TabId;
 use appkit_shell::editor_runtime::OpenDisposition;
 #[cfg(test)]
 use appkit_shell::prepared_tab::PreparedTab;
+#[cfg(test)]
+use appkit_shell::tab_runtime::TabRuntime;
+use appkit_shell::tab_session::{TabSession, TabSessionMut};
+use appkit_shell::workspace::Workspace;
 
 pub(crate) struct EditorSaveContext {
     pub(crate) dirty: bool,
@@ -26,7 +26,7 @@ impl App {
         prepared: appkit_shell::prepared_tab::PreparedTab,
         suggested_file_name: Option<String>,
         disposition: OpenDisposition,
-    ) -> crate::workspace::WorkspaceEffect {
+    ) -> appkit_shell::workspace::WorkspaceEffect {
         self.editor_runtime.install_prepared_tab_for_product(
             prepared,
             suggested_file_name,
@@ -37,7 +37,7 @@ impl App {
     pub(crate) fn activate_editor_tab(
         &mut self,
         tab_id: TabId,
-    ) -> Option<crate::workspace::WorkspaceEffect> {
+    ) -> Option<appkit_shell::workspace::WorkspaceEffect> {
         self.editor_runtime.activate_for_product(tab_id)
     }
 
@@ -53,14 +53,14 @@ impl App {
     pub(crate) fn editor_close_decision(
         &mut self,
         tab_id: TabId,
-    ) -> Option<crate::workspace::CloseTabDecision> {
+    ) -> Option<appkit_shell::workspace::CloseTabDecision> {
         self.editor_runtime.close_decision(tab_id)
     }
 
     pub(crate) fn close_editor_tab(
         &mut self,
         tab_id: TabId,
-    ) -> Option<crate::workspace::WorkspaceEffect> {
+    ) -> Option<appkit_shell::workspace::WorkspaceEffect> {
         self.editor_runtime.close_for_product(tab_id)
     }
 
@@ -114,7 +114,7 @@ impl App {
     }
 
     pub(crate) fn active_editor_file_path(&self) -> Option<std::path::PathBuf> {
-        self.active_tab_session().and_then(|tab| tab.document.file_path.clone())
+        self.active_tab_session().and_then(|tab| tab.document().file_path.clone())
     }
 
     pub(crate) fn active_editor_toggle_target(&mut self) -> Option<&'static str> {
@@ -122,7 +122,7 @@ impl App {
     }
 
     pub(crate) fn active_document_line_count(&self) -> usize {
-        self.active_tab_session().map_or(0, |tab| tab.document.line_count())
+        self.active_tab_session().map_or(0, |tab| tab.document().line_count())
     }
 
     pub(crate) fn active_editor_title(&mut self) -> Option<String> {
@@ -133,7 +133,7 @@ impl App {
     pub(crate) fn prepare_editor_file(
         &mut self,
         path: &std::path::Path,
-        viewport: crate::workspace::ViewportDimensions,
+        viewport: crate::workspace_tab_factory::ViewportDimensions,
     ) -> Result<crate::workspace_tab_factory::ProductPreparedTab, String> {
         let plugin = self.editor_runtime.create_plugin_for_path(path);
         crate::workspace_tab_factory::prepare_file_with_plugin(path, viewport, plugin)
@@ -141,7 +141,7 @@ impl App {
 
     pub(crate) fn prepare_editor_untitled(
         &mut self,
-        viewport: crate::workspace::ViewportDimensions,
+        viewport: crate::workspace_tab_factory::ViewportDimensions,
     ) -> crate::workspace_tab_factory::ProductPreparedTab {
         let plugin = self.editor_runtime.create_plugin_by_name(ui::plugin::PLUGIN_EDITOR);
         crate::workspace_tab_factory::prepare_untitled_with_plugin(viewport, plugin)
@@ -150,7 +150,7 @@ impl App {
     pub(crate) fn prepare_typed_editor_untitled(
         &mut self,
         kind: ui::sidebar::NewDocumentKind,
-        viewport: crate::workspace::ViewportDimensions,
+        viewport: crate::workspace_tab_factory::ViewportDimensions,
     ) -> crate::workspace_tab_factory::ProductPreparedTab {
         let plugin_name = match kind {
             ui::sidebar::NewDocumentKind::Text => ui::plugin::PLUGIN_EDITOR,
@@ -201,7 +201,7 @@ impl App {
         &mut self,
         path: &std::path::Path,
         content: &str,
-        viewport: crate::workspace::ViewportDimensions,
+        viewport: crate::workspace_tab_factory::ViewportDimensions,
     ) -> crate::workspace_tab_factory::ProductPreparedTab {
         let plugin = self.editor_runtime.create_plugin_for_path(path);
         crate::workspace_tab_factory::prepare_external_content_with_plugin(
@@ -226,16 +226,16 @@ impl App {
         let Some(tab_id) = self.active_tab_id() else {
             return false;
         };
-        let Some(tab) = self.tab_session_mut(tab_id) else {
+        let Some(mut tab) = self.tab_session_mut(tab_id) else {
             return false;
         };
-        crate::workspace_product::hydrate_stub_document(tab.document)
+        crate::workspace_product::hydrate_stub_document(tab.document_mut())
     }
 
     pub(crate) fn toggle_editor_pin(
         &mut self,
         tab_id: TabId,
-    ) -> Option<crate::navigator::NavEffect> {
+    ) -> Option<appkit_core::navigator::NavEffect> {
         self.editor_runtime.toggle_pin(tab_id)
     }
 
@@ -243,7 +243,7 @@ impl App {
         let Some(tab) = self.tab_session(tab_id) else {
             return false;
         };
-        crate::workspace_product::copy_document_path(tab.document);
+        crate::workspace_product::copy_document_path(tab.document());
         true
     }
 
@@ -277,26 +277,26 @@ impl App {
         self.editor_runtime.detach_document(tab_id, suggested_file_name, dirty_snapshot_id)
     }
 
-    pub(crate) fn toggle_active_editor_pin(&mut self) -> crate::navigator::NavEffect {
+    pub(crate) fn toggle_active_editor_pin(&mut self) -> appkit_core::navigator::NavEffect {
         self.editor_runtime.toggle_active_pin()
     }
 
-    pub(crate) fn navigate_editor_back(&mut self) -> crate::navigator::NavEffect {
+    pub(crate) fn navigate_editor_back(&mut self) -> appkit_core::navigator::NavEffect {
         self.editor_runtime.navigate_back()
     }
 
-    pub(crate) fn navigate_editor_forward(&mut self) -> crate::navigator::NavEffect {
+    pub(crate) fn navigate_editor_forward(&mut self) -> appkit_core::navigator::NavEffect {
         self.editor_runtime.navigate_forward()
     }
 
-    pub(crate) fn upgrade_active_editor_preview(&mut self) -> crate::navigator::NavEffect {
+    pub(crate) fn upgrade_active_editor_preview(&mut self) -> appkit_core::navigator::NavEffect {
         self.editor_runtime.upgrade_active_preview()
     }
 
     pub(crate) fn switch_editor_tab(
         &mut self,
         tab_id: TabId,
-    ) -> Option<crate::workspace::WorkspaceEffect> {
+    ) -> Option<appkit_shell::workspace::WorkspaceEffect> {
         if self.active_tab_id() == Some(tab_id) {
             return None;
         }
@@ -306,7 +306,7 @@ impl App {
     pub(crate) fn replace_editor_model(
         &mut self,
         workspace: Workspace,
-        runtimes: crate::tab_runtime::TabRuntimeStore,
+        runtimes: appkit_shell::tab_runtime::TabRuntimeStore,
     ) {
         self.editor_runtime.replace_model_state(workspace, runtimes);
     }
@@ -342,8 +342,8 @@ impl App {
         ) -> R,
     ) -> Option<R> {
         let App { editor_runtime, mouse, .. } = self;
-        let tab = editor_runtime.tab_session_mut(tab_id)?;
-        Some(callback(mouse, tab.document))
+        let mut tab = editor_runtime.tab_session_mut(tab_id)?;
+        Some(callback(mouse, tab.document_mut()))
     }
 
     #[cfg(test)]
@@ -558,7 +558,7 @@ impl App {
     pub(crate) fn rebuild_native_menu(&mut self) {
         let recent: Vec<std::path::PathBuf> = self
             .file_history
-            .get_valid_entries(crate::file_history::MENU_LIMIT)
+            .get_valid_entries(appkit_core::file_history::MENU_LIMIT)
             .iter()
             .map(|e| e.file_path.clone())
             .collect();

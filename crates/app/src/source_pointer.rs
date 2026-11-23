@@ -10,11 +10,11 @@ use ui::settings::UiMetrics;
 use winit::event::ElementState;
 use winit::keyboard::ModifiersState;
 
-use crate::cursor_motion::{CursorRenderState, hit_test_row_grapheme, hit_test_visual_row};
-use crate::editor_runtime::EditorRuntime;
-use crate::mouse_state::MouseState;
+use crate::app::App;
+use crate::mouse::MouseState;
+use appkit_shell::cursor_motion::{CursorRenderState, hit_test_row_grapheme, hit_test_visual_row};
 
-pub fn hit_test_with_sub_line_offset(
+pub(crate) fn hit_test_with_sub_line_offset(
     px: f32,
     py: f32,
     advance_cache: &[AdvanceCacheEntry],
@@ -31,7 +31,7 @@ pub fn hit_test_with_sub_line_offset(
     Some((doc_unichar, entry.doc_line, vis_line))
 }
 
-pub fn handle_cursor_moved(
+pub(crate) fn handle_cursor_moved(
     mouse: &mut MouseState,
     dv: &mut DocumentModel,
     hit: Option<(UniCharOffset, usize, usize)>,
@@ -71,7 +71,7 @@ pub fn handle_cursor_moved(
     true
 }
 
-pub fn handle_mouse_input_with_cursor_state(
+pub(crate) fn handle_mouse_input_with_cursor_state(
     state: ElementState,
     px: f32,
     py: f32,
@@ -144,30 +144,35 @@ pub fn handle_mouse_input_with_cursor_state(
     false
 }
 
-impl EditorRuntime {
+impl App {
     /// Applies a source pointer button after the product has resolved the hit and focus.
-    pub fn handle_source_pointer_button(
+    pub(crate) fn handle_source_pointer_button(
         &mut self,
         state: ElementState,
         position: (f32, f32),
-        mouse: &mut MouseState,
         modifiers: ModifiersState,
         hit: Option<(UniCharOffset, usize, usize)>,
         line_height: f32,
     ) -> bool {
-        let Some(mut tab) = self.active_tab_id().and_then(|id| self.tab_session_mut(id)) else {
+        let Some(mut tab) = self
+            .editor_runtime
+            .active_tab_id()
+            .and_then(|id| self.editor_runtime.tab_session_mut(id))
+        else {
             return false;
         };
-        let handled = handle_mouse_input_with_cursor_state(
-            state,
-            position.0,
-            position.1,
-            mouse,
-            tab.document,
-            &mut tab.runtime.presentation.cursor_render_state,
-            modifiers,
-            hit,
-        );
+        let handled = tab.with_presentation(|document, presentation| {
+            handle_mouse_input_with_cursor_state(
+                state,
+                position.0,
+                position.1,
+                &mut self.mouse,
+                document,
+                &mut presentation.cursor_render_state,
+                modifiers,
+                hit,
+            )
+        });
         if handled {
             tab.ensure_cursor_visible(line_height);
         }
@@ -175,14 +180,17 @@ impl EditorRuntime {
     }
 
     /// Updates the selection of a captured source pointer.
-    pub fn move_source_pointer_selection(
+    pub(crate) fn move_source_pointer_selection(
         &mut self,
-        mouse: &mut MouseState,
         hit: Option<(UniCharOffset, usize, usize)>,
     ) -> bool {
-        let Some(tab) = self.active_tab_id().and_then(|id| self.tab_session_mut(id)) else {
+        let Some(mut tab) = self
+            .editor_runtime
+            .active_tab_id()
+            .and_then(|id| self.editor_runtime.tab_session_mut(id))
+        else {
             return false;
         };
-        handle_cursor_moved(mouse, tab.document, hit)
+        handle_cursor_moved(&mut self.mouse, tab.document_mut(), hit)
     }
 }

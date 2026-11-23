@@ -6,10 +6,10 @@ use appkit_shell::prepared_tab::PreparedTab;
 use ui::plugin::{PLUGIN_EDITOR, PLUGIN_MARKDOWN_EDITOR, PLUGIN_MINDMAP};
 use ui::sidebar::NewDocumentKind;
 
-use crate::document_presentation::DocumentPresentation;
-use crate::tab_runtime::TabRuntime;
+use appkit_shell::document_presentation::DocumentPresentation;
+use appkit_shell::tab_runtime::TabRuntime;
 #[cfg(test)]
-use crate::workspace::Workspace;
+use appkit_shell::workspace::Workspace;
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub(crate) struct ViewportDimensions {
@@ -175,8 +175,8 @@ mod tests {
         prepare_typed_untitled, prepare_untitled,
     };
     use crate::app_init::build_product_workspace;
-    use crate::tab_runtime::TabRuntimeStore;
     use crate::workspace_persistence::{restore_workspace, snapshot_workspace};
+    use appkit_shell::tab_runtime::TabRuntimeStore;
 
     fn test_dimensions() -> ViewportDimensions {
         ViewportDimensions { visible_rows: 22, viewport_height: 440.0 }

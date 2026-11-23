@@ -11,12 +11,12 @@ use crate::editor_runtime::{
     EditorDocumentSummary, EditorNotification, EditorOutcome, EditorTabSnapshot,
     EditorWorkspaceSnapshot, OpenDisposition, SemanticEditResult,
 };
-use crate::input_mapper::EditCommand;
 use crate::prepared_tab::{PreparedTab, placeholder_display_entries};
 use crate::tab_runtime::{DocumentEditingAccess, TabRuntime, TabRuntimeStore};
 use crate::tab_session::{TabSession, TabSessionMut};
 use crate::view_route::ViewRouteTable;
 use crate::workspace::{CloseTabDecision, Workspace, WorkspaceEffect};
+use appkit_core::edit_command::EditCommand;
 
 pub(crate) struct ModelSession {
     workspace: Workspace,
@@ -495,7 +495,6 @@ impl ModelSession {
         else {
             return EditorOutcome::default();
         };
-        let display_map = tab.display_map_clone();
         let previous_visual_line = tab.cursor_visual_line();
         let previous_document_line = tab.document.cursor_line();
         if extend_selection {
@@ -503,15 +502,14 @@ impl ModelSession {
         } else {
             tab.document.cursor_mut().selection_anchor = None;
         }
-        tab.move_cursor_visual(delta, &display_map, frame_cache, dpi_scale);
+        tab.move_cursor_visual(delta, frame_cache, dpi_scale);
         tab.ensure_cursor_visible(line_height);
         // A wrapped line can extend past the viewport without crossing a document line.
         if delta > 0
             && previous_document_line == tab.document.cursor_line()
             && previous_visual_line.is_some_and(|line| line + 1 >= tab.visible_rows())
         {
-            tab.display_mut().viewport.scroll_pixels(line_height, &display_map, line_height);
-            tab.refresh_scroll_metrics(line_height);
+            tab.scroll_viewport_by_pixels(line_height, line_height);
         }
         EditorOutcome {
             shell_effect: crate::event::ShellEffect::REDRAW,

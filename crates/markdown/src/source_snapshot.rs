@@ -61,11 +61,7 @@ impl<'a> MarkdownSource<'a> {
     }
 
     pub(crate) fn source_spacing_protected_ranges(&self) -> Arc<[Range<usize>]> {
-        crate::typography::extract_prose_ranges(self.parsed())
-            .protected_ranges()
-            .iter()
-            .map(|range| range.start..range.end)
-            .collect()
+        crate::typography::parsed_source_spacing_protected_ranges(self.parsed())
     }
 
     pub(crate) fn structure(&self) -> &MarkdownDoc {

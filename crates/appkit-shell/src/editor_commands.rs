@@ -4,8 +4,8 @@
 
 use crate::SystemClipboard;
 use crate::cursor_motion::find_visual_line_index;
-use crate::input_mapper::EditCommand;
 use appkit_core::document::DocumentModel;
+use appkit_core::edit_command::EditCommand;
 use ui::core::Clipboard;
 use ui::render_geom::AdvanceCacheEntry;
 

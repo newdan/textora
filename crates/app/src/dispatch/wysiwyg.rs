@@ -2,13 +2,13 @@
 
 use crate::app::App;
 use crate::app_effect::AppEffect;
+use appkit_core::edit_command::EditCommand;
 #[cfg(test)]
 use appkit_shell::editor_runtime::apply_target_to_document;
 pub(crate) use appkit_shell::editor_runtime::{
     apply_edit_hit_target, query_visual_caret_hit, set_wysiwyg_cursor_and_selection,
     set_wysiwyg_visual_caret_and_selection,
 };
-use appkit_shell::input_mapper::EditCommand;
 
 impl App {
     pub(crate) fn dispatch_wysiwyg_navigation(&mut self, command: &EditCommand) -> AppEffect {
@@ -185,7 +185,7 @@ mod tests {
     use crate::app::App;
     use crate::commands::execute_edit_command_v2;
     use crate::document_fixture::DocumentFixture;
-    use appkit_shell::input_mapper::EditCommand;
+    use appkit_core::edit_command::EditCommand;
 
     #[test]
     fn replace_range_empty_moves_insert_point_without_selecting_text() {
@@ -227,7 +227,7 @@ mod tests {
 
         let effect = app.dispatch_transactional_edit_for_test(EditCommand::InsertText("中".into()));
 
-        let doc = &app.active_tab_session().expect("active entry").document;
+        let doc = app.active_tab_session().expect("active entry").document();
         assert!(effect.redraw, "WYSIWYG content must redraw after augmented text input");
         assert_eq!(doc.full_text(), "para1\n\n中\n\npara2");
         assert_eq!(doc.cursor_offset().to_usize(), "para1\n\n中".len());
@@ -253,7 +253,7 @@ mod tests {
 
         let _ = app.dispatch_transactional_edit_for_test(EditCommand::InsertText("中".into()));
 
-        let doc = &app.active_tab_session().expect("active entry").document;
+        let doc = app.active_tab_session().expect("active entry").document();
         assert!(
             doc.cursor().selection_anchor.is_none(),
             "augment must leave no selection anchor; found {:?}",
@@ -289,13 +289,13 @@ mod semantic_target_tests {
         app.editor_runtime.handle_key_input(context, ui::KeyCode::Right, ui::core::Modifiers::NONE);
 
         let tab = app.active_tab_session().expect("active visual tab");
-        assert_eq!(tab.document.cursor_offset().to_usize(), 4);
+        assert_eq!(tab.document().cursor_offset().to_usize(), 4);
 
         state.borrow_mut().visual_move_result = None;
         app.editor_runtime.handle_key_input(context, ui::KeyCode::Right, ui::core::Modifiers::NONE);
 
         let tab = app.active_tab_session().expect("active visual tab");
-        assert_eq!(tab.document.cursor_offset().to_usize(), 5);
+        assert_eq!(tab.document().cursor_offset().to_usize(), 5);
     }
 
     #[test]
@@ -370,7 +370,7 @@ mod semantic_target_tests {
 
         assert_eq!(effect, AppEffect::REDRAW);
         let entry = app.active_tab_session().expect("active entry");
-        assert_eq!(entry.document.selection_range(), Some((1, 5)));
+        assert_eq!(entry.document().selection_range(), Some((1, 5)));
         let state = state.borrow();
         assert_eq!(state.queried_operations, ["move_target"]);
         assert!(state.sync_messages.ends_with(&[
@@ -400,7 +400,7 @@ mod semantic_target_tests {
 
         assert_eq!(effect, AppEffect::REDRAW);
         let entry = app.active_tab_session().expect("active entry");
-        assert_eq!(entry.document.cursor_offset().to_usize(), 4);
+        assert_eq!(entry.document().cursor_offset().to_usize(), 4);
         let state = state.borrow();
         assert_eq!(state.queried_operations, ["move_target", "visual_move"]);
         assert!(state.sync_messages.ends_with(&[

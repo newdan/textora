@@ -11,10 +11,14 @@ fn inserted_empty_table_undo_redo_and_save_reopen_preserve_source_cursor_and_str
 
     let mut app = App::new(None);
     let _ = app.open_file(&path).expect("Markdown fixture should open");
-    let cursor_before =
-        app.active_tab_session().expect("Markdown tab should be active").document.cursor_offset().0;
+    let cursor_before = app
+        .active_tab_session()
+        .expect("Markdown tab should be active")
+        .document()
+        .cursor_offset()
+        .0;
     let generation_before =
-        app.active_tab_session().expect("Markdown tab should be active").document.generation();
+        app.active_tab_session().expect("Markdown tab should be active").document().generation();
     let mut picker = ui::table_picker::TablePickerWidget::new();
     picker.set_input(ui::table_picker::TablePickerInput { open: true });
     app.ui_shell.push_overlay_with_policy(
@@ -37,16 +41,19 @@ fn inserted_empty_table_undo_redo_and_save_reopen_preserve_source_cursor_and_str
     );
     assert!(effect.redraw);
     let inserted_source =
-        app.active_tab_session().expect("Markdown tab should remain active").document.full_text();
+        app.active_tab_session().expect("Markdown tab should remain active").document().full_text();
     assert_eq!(
-        app.active_tab_session().expect("Markdown tab should remain active").document.generation(),
+        app.active_tab_session()
+            .expect("Markdown tab should remain active")
+            .document()
+            .generation(),
         generation_before + 1,
         "one picker confirmation should produce one document generation"
     );
     let inserted_cursor = app
         .active_tab_session()
         .expect("Markdown tab should remain active")
-        .document
+        .document()
         .cursor_offset()
         .0;
     assert!(inserted_source.contains("| --- | --- |"));
@@ -54,13 +61,13 @@ fn inserted_empty_table_undo_redo_and_save_reopen_preserve_source_cursor_and_str
 
     let _ = app.dispatch_semantic_edit(SemanticEditCommand::Undo);
     let active = app.active_tab_session().expect("Markdown tab should remain active");
-    assert_eq!(active.document.full_text(), original_source);
-    assert_eq!(active.document.cursor_offset().0, cursor_before);
+    assert_eq!(active.document().full_text(), original_source);
+    assert_eq!(active.document().cursor_offset().0, cursor_before);
 
     let _ = app.dispatch_semantic_edit(SemanticEditCommand::Redo);
     let active = app.active_tab_session().expect("Markdown tab should remain active");
-    assert_eq!(active.document.full_text(), inserted_source);
-    assert_eq!(active.document.cursor_offset().0, inserted_cursor);
+    assert_eq!(active.document().full_text(), inserted_source);
+    assert_eq!(active.document().cursor_offset().0, inserted_cursor);
 
     let tab_id = app.editor_tab_id_at(0).expect("saved Markdown tab should have an id");
     let save =
@@ -73,7 +80,7 @@ fn inserted_empty_table_undo_redo_and_save_reopen_preserve_source_cursor_and_str
     let reopened_source = reopened_app
         .active_tab_session()
         .expect("reopened Markdown tab should be active")
-        .document
+        .document()
         .full_text();
     assert_eq!(reopened_source, inserted_source);
     let parsed = textora_markdown::parser::parse_markdown(&reopened_source);

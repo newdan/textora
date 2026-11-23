@@ -3,7 +3,7 @@
 use std::ops::Range;
 
 use crate::editor_runtime::{EditorFocus, EditorInputContext};
-use crate::mouse_state::{CanvasDragSession, MouseCapture};
+use crate::pointer_capture::{CanvasDragSession, MouseCapture};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum PreeditUpdate {

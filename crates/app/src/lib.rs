@@ -70,37 +70,23 @@ mod app_scroll;
 mod app_search;
 mod app_tab;
 mod app_window;
-pub(crate) use appkit_shell::canvas_viewport;
 mod cli;
 #[cfg(test)]
 mod commands;
-pub(crate) use appkit_core::content_hash;
-pub(crate) use appkit_shell::cursor_motion;
-#[cfg(test)]
-pub(crate) use appkit_shell::display_line_map;
-pub(crate) use appkit_shell::document_presentation;
 #[cfg(test)]
 mod document_fixture;
 pub(crate) mod edit_transaction;
 mod editor_host;
 #[cfg(test)]
 mod external_change_tests;
-pub(crate) use appkit_shell::gpu;
+mod input_mapper;
 mod library_file_monitor;
 mod library_registry;
-#[cfg(test)]
-pub(crate) use appkit_core::line_index;
 #[cfg(target_os = "macos")]
 mod macos_open_documents;
 mod mouse;
-pub(crate) use appkit_core::persistence;
 mod product_paths;
-#[cfg(test)]
-pub(crate) use appkit_shell::render_cache;
-pub(crate) use appkit_shell::render_pipeline;
 pub(crate) mod settings_io;
-pub(crate) use appkit_shell::smooth_scroll;
-pub(crate) use appkit_shell::snap_tree;
 mod sync_connection_store;
 mod sync_controller;
 mod sync_secret_store;
@@ -108,29 +94,19 @@ mod sync_settings_page;
 mod sync_settings_types;
 mod sync_view_model;
 pub(crate) mod sys;
-pub(crate) use appkit_shell::tab_runtime;
-pub(crate) use appkit_shell::tab_session;
 mod textora_product;
 mod textora_settings_overlay;
 pub(crate) mod theme_loader;
-pub(crate) use appkit_shell::view_route;
 
 mod events;
-pub(crate) use appkit_core::file_history;
-pub(crate) use appkit_core::file_safety;
 
-pub(crate) use appkit_shell::measure_adapter;
 mod menu_handler;
 mod native_menu;
-pub(crate) use appkit_core::navigator;
 pub(crate) mod plugins;
 mod search_escape;
 mod settings_overlay;
+mod source_pointer;
 mod ui_shell;
-pub(crate) mod workspace {
-    pub(crate) use crate::workspace_tab_factory::ViewportDimensions;
-    pub(crate) use appkit_shell::workspace::*;
-}
 mod workspace_persistence;
 mod workspace_product;
 mod workspace_tab_factory;
@@ -147,8 +123,8 @@ pub use textora_product::OpenDocumentSender;
 /// Not part of the public API — may change without notice.
 #[doc(hidden)]
 pub mod dev_support {
-    pub use crate::measure_adapter::MeasureFromShaper;
-    pub use crate::snap_tree::{DisplayLineEntry, SnapTree};
+    pub use appkit_shell::measure_adapter::MeasureFromShaper;
+    pub use appkit_shell::snap_tree::{DisplayLineEntry, SnapTree};
 }
 
 pub mod clipboard;

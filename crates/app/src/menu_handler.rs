@@ -5,7 +5,7 @@
 //! The caller (`App`) executes the returned commands in its own context.
 
 use crate::native_menu::MenuAction;
-use appkit_shell::input_mapper::EditCommand;
+use appkit_core::edit_command::EditCommand;
 
 /// Commands that menu actions can produce.
 /// Executed by `App::execute_commands`.
@@ -106,7 +106,7 @@ pub(crate) fn dispatch_menu_action(action: MenuAction) -> Vec<AppCommand> {
 mod tests {
     use super::{AppCommand, dispatch_menu_action};
     use crate::native_menu::MenuAction;
-    use appkit_shell::input_mapper::EditCommand;
+    use appkit_core::edit_command::EditCommand;
 
     #[test]
     fn paste_plain_text_menu_maps_to_edit_command() {

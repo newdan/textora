@@ -1,7 +1,7 @@
 use super::*;
 use crate::document_fixture::DocumentFixture;
+use appkit_core::edit_command::EditCommand;
 use appkit_shell::editor_runtime::{EditorFocus, EditorInputContext};
-use appkit_shell::input_mapper::EditCommand;
 use textora_core::types::ByteIndex;
 use textora_core::types::UniCharOffset;
 use ui::layout::compute_visual_lines;
@@ -21,16 +21,16 @@ fn set_editor_preedit_for_test(
     assert!(app.editor_runtime.update_preedit(context, text.into(), cursor));
 }
 
-fn editor_document_for_test(
+fn editor_tab_for_test(
     app: &mut App,
     index: usize,
-) -> &mut appkit_core::document::DocumentModel {
+) -> appkit_shell::tab_session::TabSessionMut<'_> {
     let tab_id = app.editor_tab_id_at(index).expect("test tab index should be valid");
-    app.tab_session_mut(tab_id).expect("test tab session should exist").document
+    app.tab_session_mut(tab_id).expect("test tab session should exist")
 }
 
 fn active_document_text(app: &App) -> String {
-    app.active_tab_session().expect("active document should exist").full_text()
+    app.active_tab_session().expect("active document should exist").document().full_text()
 }
 
 fn close_editor_tab_for_test(app: &mut App, index: usize) {
@@ -131,16 +131,16 @@ fn app_with_content(lines: Vec<&str>) -> App {
     app.switch_workspace_for_test(0);
     app.tab_session_mut(tab_id).unwrap().display_mut().display_map.set_entries(
         (0..line_count)
-            .map(|i| crate::snap_tree::DisplayLineEntry::placeholder(i, 10, 0, 1))
+            .map(|i| appkit_shell::snap_tree::DisplayLineEntry::placeholder(i, 10, 0, 1))
             .collect(),
     );
     app
 }
 
-fn cached_line_for_test(content_hash: u64) -> crate::render_cache::CachedLine {
+fn cached_line_for_test(content_hash: u64) -> appkit_shell::render_cache::CachedLine {
     const SINGLE_VISUAL_LINE: u16 = 1;
 
-    crate::render_cache::CachedLine {
+    appkit_shell::render_cache::CachedLine {
         instances: Vec::new(),
         line_number_glyphs: Vec::new(),
         atlas_generation: 0,
@@ -159,21 +159,22 @@ fn line_end_enter_invalidates_cache_for_inserted_line() {
 
     let mut app = app_with_content(vec!["alpha", "beta"]);
     let mut tab = app.active_tab_session_mut().unwrap();
-    tab.document.cursor_move_to_offset("alpha".len());
+    tab.document_mut().cursor_move_to_offset("alpha".len());
     tab.display_mut().render_cache.insert(0, cached_line_for_test(STALE_LINE_HASH));
     tab.display_mut().render_cache.insert(1, cached_line_for_test(STALE_LINE_HASH));
     tab.display_mut().render_cache.insert(2, cached_line_for_test(STALE_LINE_HASH));
 
-    let presentation = &mut tab.runtime.presentation;
-    let page_step_rows = presentation.display.viewport.visible_rows.saturating_sub(1).max(1);
-    let outcome = crate::commands::execute_edit_command_v2_with_presentation(
-        &appkit_shell::input_mapper::EditCommand::InsertNewline,
-        tab.document,
-        &[],
-        &mut presentation.cursor_render_state,
-        page_step_rows,
-    );
-    assert_eq!(tab.document.full_text(), "alpha\n\nbeta");
+    let outcome = tab.with_presentation(|document, presentation| {
+        let page_step_rows = presentation.display.viewport.visible_rows.saturating_sub(1).max(1);
+        crate::commands::execute_edit_command_v2_with_presentation(
+            &EditCommand::InsertNewline,
+            document,
+            &[],
+            &mut presentation.cursor_render_state,
+            page_step_rows,
+        )
+    });
+    assert_eq!(tab.document().full_text(), "alpha\n\nbeta");
 
     if outcome.new_line_count != outcome.old_line_count {
         let Some(dirty_lines) = outcome.dirty_lines.clone() else {
@@ -183,26 +184,26 @@ fn line_end_enter_invalidates_cache_for_inserted_line() {
         let replacement_line_count = dirty_lines.len() + line_delta;
         let mut replacements = Vec::with_capacity(replacement_line_count);
         for doc_line in dirty_lines.start..dirty_lines.start + replacement_line_count {
-            let offset = tab.document.line_byte_offset(doc_line).unwrap_or(0);
-            let length = tab.document.line_byte_length(doc_line).unwrap_or(0) as u32;
+            let offset = tab.document().line_byte_offset(doc_line).unwrap_or(0);
+            let length = tab.document().line_byte_length(doc_line).unwrap_or(0) as u32;
             replacements
-                .push(crate::snap_tree::DisplayLineEntry::placeholder(offset, length, 0, 1));
+                .push(appkit_shell::snap_tree::DisplayLineEntry::placeholder(offset, length, 0, 1));
         }
-        let _ = presentation.display.display_map.sync(dirty_lines.clone(), replacements);
+        let _ = tab.display_mut().display_map.sync(dirty_lines.clone(), replacements);
     }
     if outcome.invalidates_all_render_cache() {
-        presentation.display.render_cache.invalidate_all();
+        tab.display_mut().render_cache.invalidate_all();
     } else if let Some(cache_invalidation_range) = outcome.render_cache_invalidation_range() {
-        presentation.display.render_cache.invalidate_range(cache_invalidation_range);
+        tab.display_mut().render_cache.invalidate_range(cache_invalidation_range);
     }
 
-    assert_eq!(presentation.display.display_map.line_count(), tab.document.line_count());
+    assert_eq!(tab.display().display_map.line_count(), tab.document().line_count());
     assert!(
-        !presentation.display.render_cache.contains(1),
+        !tab.display().render_cache.contains(1),
         "line 1 becomes the inserted empty line, so its stale cached content must be invalidated"
     );
     assert!(
-        !presentation.display.render_cache.contains(2),
+        !tab.display().render_cache.contains(2),
         "line-count changes must clear stale cache keys beyond the old document range"
     );
 }
@@ -213,16 +214,19 @@ fn mouse_drag_creates_range_via_app_state() {
 
     // Simulate mouse down at offset 3 (single click)
     // This is what happens in the MouseInput handler
-    app.active_tab_session_mut().expect("active tab session").cursor_move_to_offset(3);
+    app.active_tab_session_mut()
+        .expect("active tab session")
+        .document_mut()
+        .cursor_move_to_offset(3);
     app.mouse.down_byte_offset = Some(3);
     app.mouse.is_down = true;
 
     // Verify: cursor at 3, no selection yet (anchor cleared by cursor_move_to_offset)
     {
         let document = app.active_tab_session().expect("active tab session");
-        assert_eq!(document.cursor().offset, ByteIndex(3));
+        assert_eq!(document.document().cursor().offset, ByteIndex(3));
         assert!(
-            document.cursor().selection_anchor.is_none(),
+            document.document().cursor().selection_anchor.is_none(),
             "anchor should be None after single click"
         );
     }
@@ -230,18 +234,28 @@ fn mouse_drag_creates_range_via_app_state() {
     // Simulate mouse drag to offset 8
     // This is what happens in the CursorMoved handler
     if let Some(anchor) = app.mouse.down_byte_offset.take() {
-        app.active_tab_session_mut().expect("active tab session").cursor_mut().selection_anchor =
-            Some(anchor);
+        app.active_tab_session_mut()
+            .expect("active tab session")
+            .document_mut()
+            .cursor_mut()
+            .selection_anchor = Some(anchor);
     }
-    app.active_tab_session_mut().expect("active tab session").set_cursor_offset_synced(8);
+    app.active_tab_session_mut()
+        .expect("active tab session")
+        .document_mut()
+        .set_cursor_offset_synced(8);
 
     // Verify: selection from 3 to 8
     let (start, end) =
-        app.active_tab_session().expect("active tab session").selection_range().unwrap();
+        app.active_tab_session().expect("active tab session").document().selection_range().unwrap();
     assert_eq!(start, 3, "anchor should be at mouse down position");
     assert_eq!(end, 8, "cursor should be at drag position");
     assert!(
-        app.active_tab_session().expect("active tab session").selection_range().is_some(),
+        app.active_tab_session()
+            .expect("active tab session")
+            .document()
+            .selection_range()
+            .is_some(),
         "should have selection after drag"
     );
 
@@ -251,7 +265,7 @@ fn mouse_drag_creates_range_via_app_state() {
 
     // Selection should persist after mouse up
     let (start, end) =
-        app.active_tab_session().expect("active tab session").selection_range().unwrap();
+        app.active_tab_session().expect("active tab session").document().selection_range().unwrap();
     assert_eq!(start, 3);
     assert_eq!(end, 8);
 }
@@ -277,7 +291,7 @@ fn mouse_drag_backward_creates_range() {
 
     // Selection should be min..max
     let (start, end) =
-        app.active_tab_session().expect("active tab session").selection_range().unwrap();
+        app.active_tab_session().expect("active tab session").document().selection_range().unwrap();
     assert_eq!(start, 3, "start should be min(anchor, cursor)");
     assert_eq!(end, 8, "end should be max(anchor, cursor)");
 }
@@ -301,8 +315,12 @@ fn mouse_click_without_drag_no_selection() {
 
     // No selection should exist
     let document = app.active_tab_session().expect("active tab session");
-    assert!(!document.has_selection(), "click without drag should not create selection");
-    assert_eq!(document.cursor().offset, ByteIndex(5), "cursor should stay at click position");
+    assert!(!document.document().has_selection(), "click without drag should not create selection");
+    assert_eq!(
+        document.document().cursor().offset,
+        ByteIndex(5),
+        "cursor should stay at click position"
+    );
 }
 
 #[test]
@@ -354,7 +372,7 @@ fn move_up_into_skipped_area_moves_cursor_byte() {
         tab.display_mut().viewport.scroll_top = 1.0; // visual line 1 (skip first visual line)
         tab.cursor_render_state_mut().sticky_x = 47.6; // closest to byte 2 at x=32.0+2*7.8=47.6 = 23.4 → best_rel = byte 3
         tab.cursor_render_state_mut().cursor_visual_line = Some(0);
-        tab.document.cursor_move_to_offset(3);
+        tab.document_mut().cursor_move_to_offset(3);
     }
 
     // Clusters: 20 chars, each (start+1, start+2, 7.8), 3 visual lines of 7/7/6
@@ -380,7 +398,8 @@ fn move_up_into_skipped_area_moves_cursor_byte() {
 
     let _ = app.move_cursor_visual(-1);
 
-    let dv = editor_document_for_test(&mut app, 0);
+    let mut tab = editor_tab_for_test(&mut app, 0);
+    let dv = tab.document_mut();
     assert_eq!(
         dv.cursor().offset,
         ByteIndex(2),
@@ -403,7 +422,7 @@ fn move_down_past_visible_preserves_sticky_x() {
         // Set up wrap_index so 4c can read visual_line_count
         tab.display_mut().display_map.update_entry_in_place(
             0,
-            crate::snap_tree::DisplayLineEntry {
+            appkit_shell::snap_tree::DisplayLineEntry {
                 visual_line_count: 2,
                 visual_breaks: smallvec::SmallVec::new(),
                 byte_offset: 0,
@@ -414,7 +433,7 @@ fn move_down_past_visible_preserves_sticky_x() {
         tab.display_mut().display_map.rebuild_tree();
         tab.cursor_render_state_mut().sticky_x = 47.6; // on visual line 1: closest to byte 9 at x=32.0+2*7.8=47.6 closest to cluster[3].x=23.4 → byte 10
         tab.cursor_render_state_mut().cursor_visual_line = Some(0);
-        tab.document.cursor_move_to_offset(7);
+        tab.document_mut().cursor_move_to_offset(7);
     }
 
     app.active_tab_session_mut().unwrap().display_mut().advance_cache = vec![AdvanceCacheEntry {
@@ -430,7 +449,8 @@ fn move_down_past_visible_preserves_sticky_x() {
 
     let _ = app.move_cursor_visual(1);
 
-    let dv = editor_document_for_test(&mut app, 0);
+    let mut tab = editor_tab_for_test(&mut app, 0);
+    let dv = tab.document_mut();
     assert_eq!(
         dv.cursor().offset,
         ByteIndex(9),
@@ -469,12 +489,13 @@ fn move_down_wrapped_line_uses_correct_byte_offset() {
         ];
         tab.cursor_render_state_mut().sticky_x = 8.0; // left margin
         tab.cursor_render_state_mut().cursor_visual_line = Some(0);
-        tab.document.cursor_move_to_offset(0);
+        tab.document_mut().cursor_move_to_offset(0);
     }
 
     let _ = app.move_cursor_visual(1);
 
-    let dv = editor_document_for_test(&mut app, 0);
+    let mut tab = editor_tab_for_test(&mut app, 0);
+    let dv = tab.document_mut();
     assert_eq!(
         dv.cursor().offset,
         ByteIndex(7),
@@ -494,7 +515,7 @@ fn move_down_wrapped_line_boundary_no_stall() {
         tab.display_mut().viewport.scroll_top = 0.0;
         tab.cursor_render_state_mut().sticky_x = 8.0;
         tab.cursor_render_state_mut().cursor_visual_line = Some(0);
-        tab.document.cursor_move_to_offset(0);
+        tab.document_mut().cursor_move_to_offset(0);
     }
 
     // Only VL0 visible, VL1 is off-screen
@@ -512,7 +533,8 @@ fn move_down_wrapped_line_boundary_no_stall() {
 
     let _ = app.move_cursor_visual(1);
 
-    let dv = editor_document_for_test(&mut app, 0);
+    let mut tab = editor_tab_for_test(&mut app, 0);
+    let dv = tab.document_mut();
     // Should move to VL1 (byte 7), not stay at byte 0
     assert_eq!(dv.cursor().offset, ByteIndex(7), "cursor should advance to VL1 start (byte 7)");
 }
@@ -974,10 +996,10 @@ fn autoscroll_not_in_vli_updates_anchor() {
     assert_eq!(vp.scroll_anchor.doc_line, 0);
 
     // Populate DisplayLineMap with 101 lines (0..100)
-    let mut dm = crate::display_line_map::DisplayLineMap::new();
+    let mut dm = appkit_shell::display_line_map::DisplayLineMap::new();
     dm.set_entries(
         (0..101)
-            .map(|i| crate::snap_tree::DisplayLineEntry::placeholder(i * 80, 80, 0, 1))
+            .map(|i| appkit_shell::snap_tree::DisplayLineEntry::placeholder(i * 80, 80, 0, 1))
             .collect(),
     );
 
@@ -1012,10 +1034,13 @@ fn autoscroll_in_vli_no_scroll() {
     tab.display_mut().viewport.visible_rows = 10;
 
     // Move cursor to line 5 (within visible range)
-    tab.document.cursor_move_to_offset(tab.document.line_byte_offset(5).unwrap());
+    let line_start = tab.document().line_byte_offset(5).expect("line 5 must exist");
+    tab.document_mut().cursor_move_to_offset(line_start);
     let old_scroll = tab.display().viewport.scroll_top;
-    let range = tab.display().viewport.visible_doc_line_range_approx(tab.document.line_count());
-    assert!(tab.document.cursor_line() >= range.start && tab.document.cursor_line() < range.end);
+    let range = tab.display().viewport.visible_doc_line_range_approx(tab.document().line_count());
+    assert!(
+        tab.document().cursor_line() >= range.start && tab.document().cursor_line() < range.end
+    );
     // No scroll needed — scroll_top should stay the same
     assert_eq!(tab.display().viewport.scroll_top, old_scroll);
 }
@@ -1101,7 +1126,7 @@ fn first_visible_dr_captured_with_scroll_offset() {
     // Simulate: doc line 3 starts at DisplayRow 6 (lines 0-2 wrapped to 2 each)
     tab.display_mut().display_map.update_entry_in_place(
         0,
-        crate::snap_tree::DisplayLineEntry {
+        appkit_shell::snap_tree::DisplayLineEntry {
             visual_line_count: 2,
             visual_breaks: smallvec::SmallVec::new(),
             byte_offset: 0,
@@ -1111,7 +1136,7 @@ fn first_visible_dr_captured_with_scroll_offset() {
     );
     tab.display_mut().display_map.update_entry_in_place(
         1,
-        crate::snap_tree::DisplayLineEntry {
+        appkit_shell::snap_tree::DisplayLineEntry {
             visual_line_count: 2,
             visual_breaks: smallvec::SmallVec::new(),
             byte_offset: 0,
@@ -1121,7 +1146,7 @@ fn first_visible_dr_captured_with_scroll_offset() {
     );
     tab.display_mut().display_map.update_entry_in_place(
         2,
-        crate::snap_tree::DisplayLineEntry {
+        appkit_shell::snap_tree::DisplayLineEntry {
             visual_line_count: 2,
             visual_breaks: smallvec::SmallVec::new(),
             byte_offset: 0,
@@ -1156,8 +1181,8 @@ fn regression_drag_then_page_down() {
     let lines: Vec<&str> =
         (0..50).map(|i| Box::leak(format!("line {i}").into_boxed_str()) as &str).collect();
     let mut app = app_with_content(lines);
-    let tab = app.active_tab_session_mut().expect("active tab session");
-    let crate::tab_session::TabSessionMut { document: dv, runtime, .. } = tab;
+    let mut tab = app.active_tab_session_mut().expect("active tab session");
+    let dv = tab.document_mut();
 
     // 先把光标移到第 1 行
     dv.cursor_move_to_offset(0);
@@ -1174,13 +1199,16 @@ fn regression_drag_then_page_down() {
 
     // 立即 PageDown
     let old_offset = dv.cursor().offset;
-    let _ = crate::commands::execute_edit_command_v2_with_presentation(
-        &EditCommand::PageDown,
-        dv,
-        &[],
-        &mut runtime.presentation.cursor_render_state,
-        9,
-    );
+    tab.with_presentation(|document, presentation| {
+        let _ = crate::commands::execute_edit_command_v2_with_presentation(
+            &EditCommand::PageDown,
+            document,
+            &[],
+            &mut presentation.cursor_render_state,
+            9,
+        );
+    });
+    let dv = tab.document();
 
     // cursor 应该从 drag 终点往下跳，而不是从 drag 起点
     assert!(
@@ -1199,8 +1227,8 @@ fn regression_shift_click_then_page_up() {
     let lines: Vec<&str> =
         (0..50).map(|i| Box::leak(format!("line {i}").into_boxed_str()) as &str).collect();
     let mut app = app_with_content(lines);
-    let tab = app.active_tab_session_mut().expect("active tab session");
-    let crate::tab_session::TabSessionMut { document: dv, runtime, .. } = tab;
+    let mut tab = app.active_tab_session_mut().expect("active tab session");
+    let dv = tab.document_mut();
 
     // 先移到第 30 行
     let start_line = 30;
@@ -1218,13 +1246,16 @@ fn regression_shift_click_then_page_up() {
 
     // 立即 PageUp
     let old_offset = dv.cursor().offset;
-    let _ = crate::commands::execute_edit_command_v2_with_presentation(
-        &EditCommand::PageUp,
-        dv,
-        &[],
-        &mut runtime.presentation.cursor_render_state,
-        9,
-    );
+    tab.with_presentation(|document, presentation| {
+        let _ = crate::commands::execute_edit_command_v2_with_presentation(
+            &EditCommand::PageUp,
+            document,
+            &[],
+            &mut presentation.cursor_render_state,
+            9,
+        );
+    });
+    let dv = tab.document();
 
     // cursor 应该从 shift-click 位置往上跳
     assert!(
@@ -1249,12 +1280,12 @@ fn regression_wrap_shift_down_extends_by_visual_line() {
     let offset_before;
     {
         let mut tab = app.active_tab_session_mut().unwrap();
-        tab.document.cursor_move_to_offset(0);
+        tab.document_mut().cursor_move_to_offset(0);
 
         // 设置 wrap_index 使得 doc line 0 有多个 visual 行
         tab.display_mut().display_map.update_entry_in_place(
             0,
-            crate::snap_tree::DisplayLineEntry {
+            appkit_shell::snap_tree::DisplayLineEntry {
                 visual_line_count: 5,
                 visual_breaks: smallvec::SmallVec::new(),
                 byte_offset: 0,
@@ -1267,7 +1298,7 @@ fn regression_wrap_shift_down_extends_by_visual_line() {
         tab.cursor_render_state_mut().cursor_visual_line = Some(0);
         tab.cursor_render_state_mut().sticky_x = 0.0;
 
-        offset_before = tab.document.cursor().offset;
+        offset_before = tab.document().cursor().offset;
     }
 
     // 设置 advance_cache 来模拟 visual 行（clusters 使用 vl-local 偏移）
@@ -1291,7 +1322,8 @@ fn regression_wrap_shift_down_extends_by_visual_line() {
     let _ = app.extend_selection_visual(1);
 
     // cursor 应该移动到下一个 visual 行，而不是跳到 doc line 末尾
-    let dv = editor_document_for_test(&mut app, 0);
+    let mut tab = editor_tab_for_test(&mut app, 0);
+    let dv = tab.document_mut();
     assert!(
         dv.cursor().offset > offset_before,
         "Shift+Down should move to next visual line (before={}, after={})",
@@ -1570,7 +1602,7 @@ fn tab_session_borrows_document_and_store_runtime_for_exact_id() {
     let session = app.tab_session(second_id).expect("second tab session");
 
     assert_eq!(session.id, second_id);
-    assert_eq!(session.document.full_text(), "doc2");
+    assert_eq!(session.document().full_text(), "doc2");
     assert!(session.runtime.toc_visible, "session must prefer the runtime store");
 }
 
@@ -1598,7 +1630,7 @@ fn active_tab_session_tracks_workspace_activation_by_tab_id() {
     let session = app.active_tab_session().expect("active tab session");
 
     assert_eq!(session.id, second_id);
-    assert_eq!(session.document.full_text(), "doc2");
+    assert_eq!(session.document().full_text(), "doc2");
 }
 
 // --- Phase 1 Bug Fix Tests ---
@@ -1608,11 +1640,11 @@ fn test_double_click_spatial_proximity() {
     let mut app = app_with_content(vec!["hello world this is a test"]);
     let tab_id = app.editor_tab_id_at(0).expect("test tab index should be valid");
     let modifiers = winit::keyboard::ModifiersState::empty();
-    let mut cursor_render_state = crate::cursor_motion::CursorRenderState::new();
+    let mut cursor_render_state = appkit_shell::cursor_motion::CursorRenderState::new();
 
     // First click at position (10, 10)
     app.with_editor_document_and_mouse_for_test(tab_id, |mouse, document| {
-        crate::mouse::handle_mouse_input_with_cursor_state(
+        crate::source_pointer::handle_mouse_input_with_cursor_state(
             winit::event::ElementState::Pressed,
             10.0,
             10.0,
@@ -1629,7 +1661,7 @@ fn test_double_click_spatial_proximity() {
 
     // Release
     app.with_editor_document_and_mouse_for_test(tab_id, |mouse, document| {
-        crate::mouse::handle_mouse_input_with_cursor_state(
+        crate::source_pointer::handle_mouse_input_with_cursor_state(
             winit::event::ElementState::Released,
             10.0,
             10.0,
@@ -1644,7 +1676,7 @@ fn test_double_click_spatial_proximity() {
 
     // Second click within 500ms but FAR AWAY (100, 100) -> distance squared is large
     app.with_editor_document_and_mouse_for_test(tab_id, |mouse, document| {
-        crate::mouse::handle_mouse_input_with_cursor_state(
+        crate::source_pointer::handle_mouse_input_with_cursor_state(
             winit::event::ElementState::Pressed,
             100.0,
             100.0,
@@ -1669,11 +1701,11 @@ fn test_mouse_release_clears_empty_selection() {
     let mut app = app_with_content(vec!["hello world"]);
     let tab_id = app.editor_tab_id_at(0).expect("test tab index should be valid");
     let modifiers = winit::keyboard::ModifiersState::empty();
-    let mut cursor_render_state = crate::cursor_motion::CursorRenderState::new();
+    let mut cursor_render_state = appkit_shell::cursor_motion::CursorRenderState::new();
 
     // Single click
     app.with_editor_document_and_mouse_for_test(tab_id, |mouse, document| {
-        crate::mouse::handle_mouse_input_with_cursor_state(
+        crate::source_pointer::handle_mouse_input_with_cursor_state(
             winit::event::ElementState::Pressed,
             10.0,
             10.0,
@@ -1689,13 +1721,17 @@ fn test_mouse_release_clears_empty_selection() {
     // Simulate drag but cursor hasn't moved (so selection anchor == cursor)
     app.tab_session_mut(tab_id)
         .expect("test tab session should exist")
+        .document_mut()
         .cursor_mut()
         .selection_anchor = Some(5);
-    app.tab_session_mut(tab_id).expect("test tab session should exist").cursor_move_to_offset(5);
+    app.tab_session_mut(tab_id)
+        .expect("test tab session should exist")
+        .document_mut()
+        .cursor_move_to_offset(5);
 
     // Release
     app.with_editor_document_and_mouse_for_test(tab_id, |mouse, document| {
-        crate::mouse::handle_mouse_input_with_cursor_state(
+        crate::source_pointer::handle_mouse_input_with_cursor_state(
             winit::event::ElementState::Released,
             10.0,
             10.0,
@@ -1711,7 +1747,7 @@ fn test_mouse_release_clears_empty_selection() {
     // Empty selection should be cleared on release
     let dv = app.active_tab_session().expect("active tab session");
     assert_eq!(
-        dv.cursor().selection_anchor,
+        dv.document().cursor().selection_anchor,
         None,
         "Empty selection should be cleared on mouse release"
     );
@@ -1720,13 +1756,14 @@ fn test_mouse_release_clears_empty_selection() {
 #[test]
 fn test_backspace_with_empty_selection() {
     let mut app = app_with_content(vec!["hello world"]);
-    let dv = editor_document_for_test(&mut app, 0);
+    let mut tab = editor_tab_for_test(&mut app, 0);
+    let dv = tab.document_mut();
 
     dv.cursor_move_to_offset(5);
     dv.cursor_mut().selection_anchor = Some(5); // Empty selection
 
     // Execute Backspace
-    let mut cursor_render_state = crate::cursor_motion::CursorRenderState::new();
+    let mut cursor_render_state = appkit_shell::cursor_motion::CursorRenderState::new();
     crate::commands::execute_edit_command_v2_with_presentation(
         &EditCommand::Backspace,
         dv,
@@ -1810,7 +1847,7 @@ fn viewport_dimensions_use_instance_line_height_and_chrome() {
     let mut app = App::new(None);
     app.replace_editor_model(
         crate::app_init::build_product_workspace(),
-        crate::tab_runtime::TabRuntimeStore::default(),
+        appkit_shell::tab_runtime::TabRuntimeStore::default(),
     );
     let dv = crate::document_fixture::DocumentFixture::new(vec!["".into()], 80, 10.0);
     app.push_entry_for_test(dv, Box::new(EditorPlugin::new()));
@@ -2137,7 +2174,7 @@ fn selected_enter_still_queries_plugin_edit_policy() {
     assert_eq!(recorded.recorded_edit_requests.len(), 1);
     assert_eq!(recorded.recorded_edit_requests[0].selection, Some(2..3));
     let tab = app.active_tab_session().expect("active tab should exist");
-    assert_eq!(tab.full_text(), "| a | b |");
+    assert_eq!(tab.document().full_text(), "| a | b |");
     assert!(effect.redraw);
 }
 
@@ -2181,9 +2218,9 @@ fn markdown_enter_then_backspace_removes_generated_item_before_horizontal_rule()
         generated_item_source.find("4.  ").expect("generated source must contain fourth item") + 4;
     {
         let tab = app.active_tab_session().expect("active Markdown tab");
-        assert_eq!(tab.full_text(), generated_item_source);
-        assert_eq!(tab.document.cursor_offset().to_usize(), generated_item_end);
-        assert_eq!(tab.document.selection_range(), None);
+        assert_eq!(tab.document().full_text(), generated_item_source);
+        assert_eq!(tab.document().cursor_offset().to_usize(), generated_item_end);
+        assert_eq!(tab.document().selection_range(), None);
     }
 
     let _ = app.dispatch_transactional_edit_for_test(EditCommand::Backspace);
@@ -2205,7 +2242,7 @@ fn markdown_table_enter_keeps_moved_cursor_visible() {
     let generation_before = doc.generation();
     doc.presentation.display.display_map.set_entries(
         (0..doc.line_count())
-            .map(|line| crate::snap_tree::DisplayLineEntry::placeholder(line, 10, 0, 1))
+            .map(|line| appkit_shell::snap_tree::DisplayLineEntry::placeholder(line, 10, 0, 1))
             .collect(),
     );
     app.push_entry_for_test(doc, Box::new(textora_markdown::view::MarkdownEditorView::new()));
@@ -2214,18 +2251,18 @@ fn markdown_table_enter_keeps_moved_cursor_visible() {
     let effect = app.dispatch_transactional_edit_for_test(EditCommand::InsertNewline);
 
     let tab = app.active_tab_session().expect("active tab");
-    assert_eq!(tab.document.cursor_offset().to_usize(), expected_cursor);
-    assert_eq!(tab.document.generation(), generation_before);
-    assert!(!tab.document.dirty);
+    assert_eq!(tab.document().cursor_offset().to_usize(), expected_cursor);
+    assert_eq!(tab.document().generation(), generation_before);
+    assert!(!tab.document().dirty);
     assert!(!effect.reshape);
     let visible_range = tab
         .display()
         .viewport
         .visible_doc_range_from_anchor(&tab.display().display_map, app.ui_metrics().line_height);
     assert!(
-        visible_range.contains(&tab.document.cursor_line()),
+        visible_range.contains(&tab.document().cursor_line()),
         "cursor line {} must be visible in {visible_range:?}",
-        tab.document.cursor_line()
+        tab.document().cursor_line()
     );
     assert!(tab.cursor_render_state().sticky_x_dirty);
 }
@@ -2441,8 +2478,8 @@ fn wysiwyg_missing_projection_keeps_cursor_and_selection_unchanged() {
     );
 
     let entry = app.active_tab_session().expect("active entry");
-    assert_eq!(entry.cursor_offset().to_usize(), 3);
-    assert_eq!(entry.cursor().selection_anchor, Some(1));
+    assert_eq!(entry.document().cursor_offset().to_usize(), 3);
+    assert_eq!(entry.document().cursor().selection_anchor, Some(1));
 }
 
 #[test]
@@ -2480,7 +2517,7 @@ fn wysiwyg_tiny_mouse_move_after_click_does_not_create_selection() {
 
         let active_entry = app.active_tab_session().expect("active entry");
         assert_eq!(
-            active_entry.selection_range(),
+            active_entry.document().selection_range(),
             None,
             "tiny WYSIWYG mouse movement after a click should not create a document selection"
         );
@@ -2532,7 +2569,7 @@ fn wysiwyg_backward_drag_keeps_plugin_selection_anchor() {
 
         let active_entry = app.active_tab_session().expect("active entry");
         assert_eq!(
-            active_entry.selection_range(),
+            active_entry.document().selection_range(),
             Some((3, 8)),
             "backward WYSIWYG drag should create a document selection"
         );
@@ -2574,7 +2611,7 @@ fn wysiwyg_backward_drag_keeps_initial_anchor_across_moves() {
 
     let active_entry = app.active_tab_session().expect("active entry");
     assert_eq!(
-        active_entry.selection_range(),
+        active_entry.document().selection_range(),
         Some((3, 8)),
         "backward WYSIWYG drag should keep the original press point as the selection anchor"
     );
@@ -2619,7 +2656,7 @@ fn wysiwyg_drag_move_does_not_synchronously_render_plugin() {
 
     let active_entry = app.active_tab_session().expect("active entry");
     assert_eq!(
-        active_entry.selection_range(),
+        active_entry.document().selection_range(),
         Some((2, 8)),
         "WYSIWYG drag should still update the document selection"
     );
@@ -2665,7 +2702,7 @@ fn wysiwyg_backward_drag_across_paragraph_keeps_plugin_selection_anchor() {
 
     let active_entry = app.active_tab_session().expect("active entry");
     assert_eq!(
-        active_entry.selection_range(),
+        active_entry.document().selection_range(),
         Some((cursor_byte, anchor_byte)),
         "backward WYSIWYG drag across paragraphs should create a document selection"
     );
@@ -2686,7 +2723,7 @@ fn render_active_wysiwyg_plugin_for_test(app: &mut App) -> ui::core::paint::Draw
 #[test]
 #[cfg(feature = "markdown")]
 fn wysiwyg_edit_then_navigation_does_not_require_an_intervening_paint() {
-    use appkit_shell::input_mapper::EditCommand;
+    use appkit_core::edit_command::EditCommand;
     let mut app = App::new(None);
     let mut document = DocumentFixture::new(vec!["abc".into()], 80, 10.0);
     document.cursor_move_to_offset(1);
@@ -2698,24 +2735,27 @@ fn wysiwyg_edit_then_navigation_does_not_require_an_intervening_paint() {
     assert!(app.dispatch_transactional_edit_for_test(EditCommand::InsertText("中".into())).redraw);
     assert!(app.dispatch_wysiwyg_navigation(&EditCommand::MoveRight).redraw);
     let tab = app.active_tab_session().expect("active Markdown editor");
-    assert_eq!(tab.full_text(), "a中bc");
-    assert_eq!(tab.cursor_offset().to_usize(), 5);
+    assert_eq!(tab.document().full_text(), "a中bc");
+    assert_eq!(tab.document().cursor_offset().to_usize(), 5);
     assert!(tab.query_cursor_screen_rect(5).is_some());
 
-    app.active_tab_session_mut().expect("active editor").document.undo();
+    app.active_tab_session_mut().expect("active editor").document_mut().undo();
     app.sync_plugin_state();
     assert!(app.dispatch_wysiwyg_navigation(&EditCommand::MoveRight).redraw);
     let tab = app.active_tab_session().expect("active editor after undo");
-    assert_eq!(tab.full_text(), "abc");
-    assert_eq!(tab.cursor_offset().to_usize(), 2);
+    assert_eq!(tab.document().full_text(), "abc");
+    assert_eq!(tab.document().cursor_offset().to_usize(), 2);
 
-    app.active_tab_session_mut().expect("active editor").document.redo();
+    app.active_tab_session_mut().expect("active editor").document_mut().redo();
     app.sync_plugin_state();
-    assert_eq!(app.active_tab_session().expect("restored caret").cursor_offset().to_usize(), 5);
+    assert_eq!(
+        app.active_tab_session().expect("restored caret").document().cursor_offset().to_usize(),
+        5
+    );
     assert!(app.dispatch_wysiwyg_navigation(&EditCommand::MoveRight).redraw);
     let tab = app.active_tab_session().expect("active editor after redo");
-    assert_eq!(tab.full_text(), "a中bc");
-    assert_eq!(tab.cursor_offset().to_usize(), 6);
+    assert_eq!(tab.document().full_text(), "a中bc");
+    assert_eq!(tab.document().cursor_offset().to_usize(), 6);
 }
 
 #[test]
@@ -2729,7 +2769,7 @@ fn wysiwyg_search_geometry_uses_the_document_match_list() {
     render_active_wysiwyg_plugin_for_test(&mut app);
     {
         let mut tab = app.active_tab_session_mut().expect("active Markdown editor");
-        let generation = tab.document.tb().gap_buffer().generation();
+        let generation = tab.document().tb().gap_buffer().generation();
         let search = tab.search_state_mut();
         search.query = "one".into();
         search.options.match_case = true;
@@ -2750,7 +2790,7 @@ fn wysiwyg_search_geometry_uses_the_document_match_list() {
 #[test]
 #[cfg(feature = "markdown")]
 fn wysiwyg_ime_navigation_preview_matches_commit() {
-    use appkit_shell::input_mapper::EditCommand;
+    use appkit_core::edit_command::EditCommand;
     let mut app = App::new(None);
     let mut document = DocumentFixture::new(vec!["old tail".into()], 80, 10.0);
     document.cursor_move_to_offset(3);
@@ -2773,7 +2813,7 @@ fn wysiwyg_ime_navigation_preview_matches_commit() {
     app.sync_plugin_state();
     render_active_wysiwyg_plugin_for_test(&mut app);
     let tab = app.active_tab_session().expect("committed editor");
-    assert_eq!(tab.full_text(), preview);
+    assert_eq!(tab.document().full_text(), preview);
     assert_eq!(tab.flat_lines()[0].text, preview);
 }
 
@@ -2852,10 +2892,10 @@ fn app_with_mmap_source(source: &str) -> App {
 #[cfg(feature = "markdown")]
 fn select_mmap_source_object(app: &mut App, source_range: std::ops::Range<usize>) {
     let mut tab = app.active_tab_session_mut().expect("active mmap tab");
-    tab.cursor_move_to_offset(source_range.end);
-    tab.cursor_mut().selection_anchor = Some(source_range.start);
+    tab.document_mut().cursor_move_to_offset(source_range.end);
+    tab.document_mut().cursor_mut().selection_anchor = Some(source_range.start);
     assert_eq!(
-        tab.selection_range(),
+        tab.document().selection_range(),
         Some((source_range.start, source_range.end)),
         "mmap object selection must match the requested subtree source range"
     );
@@ -2865,14 +2905,14 @@ fn select_mmap_source_object(app: &mut App, source_range: std::ops::Range<usize>
 #[cfg(feature = "markdown")]
 fn undo_active_mmap_edit(app: &mut App) {
     let mut tab = app.active_tab_session_mut().expect("active mmap tab");
-    tab.undo();
+    tab.document_mut().undo();
     app.sync_plugin_state();
 }
 
 #[cfg(feature = "markdown")]
 fn redo_active_mmap_edit(app: &mut App) {
     let mut tab = app.active_tab_session_mut().expect("active mmap tab");
-    tab.redo();
+    tab.document_mut().redo();
     app.sync_plugin_state();
 }
 
@@ -3049,24 +3089,24 @@ fn mmap_drag_reorders_siblings_and_undo_restores_the_original_source() {
     drag_mmap_node(&mut app, "B", DragTarget::After("C"));
 
     let tab = app.active_tab_session().expect("active mmap tab");
-    assert_eq!(tab.full_text(), expected);
+    assert_eq!(tab.document().full_text(), expected);
     let moved_node_range = mmap_node_subtree_range_by_title(expected, "B");
     assert_eq!(
-        tab.selection_range(),
+        tab.document().selection_range(),
         Some((moved_node_range.start, moved_node_range.end)),
         "the moved node must remain selected after the drag transaction"
     );
-    assert!(tab.dirty, "a completed mmap drag must mark the document dirty");
+    assert!(tab.document().dirty, "a completed mmap drag must mark the document dirty");
 
     undo_active_mmap_edit(&mut app);
     let tab = app.active_tab_session().expect("active mmap tab");
-    assert_eq!(tab.full_text(), source);
-    assert!(!tab.dirty, "undo back to the clean source must clear the dirty state");
+    assert_eq!(tab.document().full_text(), source);
+    assert!(!tab.document().dirty, "undo back to the clean source must clear the dirty state");
 
     redo_active_mmap_edit(&mut app);
     let tab = app.active_tab_session().expect("active mmap tab");
-    assert_eq!(tab.full_text(), expected);
-    assert!(tab.dirty, "redo must restore the dirty mmap drag state");
+    assert_eq!(tab.document().full_text(), expected);
+    assert!(tab.document().dirty, "redo must restore the dirty mmap drag state");
 }
 
 #[test]
@@ -3094,15 +3134,15 @@ fn mmap_dragging_to_a_long_sibling_right_edge_stays_same_level_and_undoes() {
 
     let tab = app.active_tab_session().expect("active mmap tab");
     assert_eq!(
-        tab.full_text(),
+        tab.document().full_text(),
         expected,
         "dropping on a wide card's right edge must create a sibling move"
     );
 
     undo_active_mmap_edit(&mut app);
     let tab = app.active_tab_session().expect("active mmap tab");
-    assert_eq!(tab.full_text(), source);
-    assert!(!tab.dirty, "undo must restore the clean long-title source");
+    assert_eq!(tab.document().full_text(), source);
+    assert!(!tab.document().dirty, "undo must restore the clean long-title source");
 }
 
 #[test]
@@ -3115,14 +3155,14 @@ fn mmap_drag_to_left_anchor_makes_the_source_a_child_with_its_subtree() {
     drag_mmap_node(&mut app, "A", DragTarget::LastChildOf("B"));
 
     let tab = app.active_tab_session().expect("active mmap tab");
-    assert_eq!(tab.full_text(), expected);
+    assert_eq!(tab.document().full_text(), expected);
     let moved_subtree_range = mmap_node_subtree_range_by_title(expected, "A");
     assert_eq!(
-        tab.selection_range(),
+        tab.document().selection_range(),
         Some((moved_subtree_range.start, moved_subtree_range.end)),
         "the moved subtree must remain selected after becoming a child"
     );
-    assert!(tab.dirty, "a completed mmap subtree drag must mark the document dirty");
+    assert!(tab.document().dirty, "a completed mmap subtree drag must mark the document dirty");
 }
 
 #[test]
@@ -3134,8 +3174,8 @@ fn mmap_dragging_the_root_keeps_the_source_unchanged() {
     drag_mmap_node(&mut app, "Root", DragTarget::After("B"));
 
     let tab = app.active_tab_session().expect("active mmap tab");
-    assert_eq!(tab.full_text(), source);
-    assert!(!tab.dirty, "an invalid root drag must not dirty the document");
+    assert_eq!(tab.document().full_text(), source);
+    assert!(!tab.document().dirty, "an invalid root drag must not dirty the document");
 }
 
 #[test]
@@ -3163,9 +3203,9 @@ fn mmap_dragging_title_text_selects_text_without_moving_the_node() {
     );
 
     let tab = app.active_tab_session().expect("active mmap tab");
-    assert_eq!(tab.full_text(), source);
-    assert_eq!(tab.selection_range(), Some((alpha_range.start, alpha_range.end)));
-    assert!(!tab.dirty, "title text selection must not dirty the mmap source");
+    assert_eq!(tab.document().full_text(), source);
+    assert_eq!(tab.document().selection_range(), Some((alpha_range.start, alpha_range.end)));
+    assert!(!tab.document().dirty, "title text selection must not dirty the mmap source");
 }
 
 #[test]
@@ -3188,7 +3228,7 @@ fn mmap_drag_between_titles_does_not_create_a_document_selection() {
         None,
     );
     assert_eq!(
-        app.active_tab_session().expect("active mmap tab").cursor_offset().to_usize(),
+        app.active_tab_session().expect("active mmap tab").document().cursor_offset().to_usize(),
         alpha_range.start,
         "fixture must press the first title's semantic text caret"
     );
@@ -3202,7 +3242,7 @@ fn mmap_drag_between_titles_does_not_create_a_document_selection() {
 
     let tab = app.active_tab_session().expect("active mmap tab");
     assert_eq!(
-        tab.selection_range(),
+        tab.document().selection_range(),
         None,
         "dragging from one mmap title to another must not create a cross-title document selection"
     );
@@ -3229,7 +3269,7 @@ fn mmap_drag_within_a_title_selects_its_source_range() {
     let _ = app.dispatch_editor_cursor_moved(alpha_end_point.0, alpha_end_point.1, None);
 
     let tab = app.active_tab_session().expect("active mmap tab");
-    assert_eq!(tab.selection_range(), Some((alpha_range.start, alpha_range.end)));
+    assert_eq!(tab.document().selection_range(), Some((alpha_range.start, alpha_range.end)));
 }
 
 #[test]
@@ -3263,7 +3303,7 @@ fn mmap_title_double_click_selects_the_title_word() {
     );
 
     let tab = app.active_tab_session().expect("active mmap tab");
-    assert_eq!(tab.selection_range(), Some((alpha_range.start, alpha_range.end)));
+    assert_eq!(tab.document().selection_range(), Some((alpha_range.start, alpha_range.end)));
 }
 
 #[test]
@@ -3275,12 +3315,12 @@ fn mmap_selected_node_typing_replaces_title_then_undo_and_redo_restore_it() {
     let mut app = app_with_mmap_source(source);
     select_mmap_source_object(&mut app, parent_range);
     let generation_before =
-        app.active_tab_session().expect("active document").document.generation();
+        app.active_tab_session().expect("active document").document().generation();
 
     let _ = app.dispatch_transactional_edit_for_test(EditCommand::InsertChar("Renamed".into()));
     assert_eq!(active_document_text(&app), "# Root\n## Renamed\n### Child\n## Next\n");
     assert!(
-        app.active_tab_session().expect("active document").document.generation()
+        app.active_tab_session().expect("active document").document().generation()
             > generation_before,
         "replacing a selected mmap title must advance the source generation"
     );
@@ -3300,8 +3340,8 @@ fn mmap_tab_creates_empty_child_and_enter_creates_empty_sibling() {
     let mut app = app_with_mmap_source(source);
     {
         let mut tab = app.active_tab_session_mut().expect("active mmap tab");
-        tab.cursor_move_to_offset(tree.root.children[0].title_byte_range.end);
-        tab.cursor_mut().selection_anchor = None;
+        tab.document_mut().cursor_move_to_offset(tree.root.children[0].title_byte_range.end);
+        tab.document_mut().cursor_mut().selection_anchor = None;
     }
     app.sync_plugin_state();
 
@@ -3375,9 +3415,9 @@ fn mmap_invalid_source_exposes_no_edit_target() {
     let mut app = app_with_mmap_source("# Root\n");
     {
         let mut tab = app.active_tab_session_mut().expect("active mmap tab");
-        tab.select_all();
-        tab.delete_selection();
-        tab.insert_at_cursor(INVALID_SOURCE.as_bytes());
+        tab.document_mut().select_all();
+        tab.document_mut().delete_selection();
+        tab.document_mut().insert_at_cursor(INVALID_SOURCE.as_bytes());
     }
     app.sync_plugin_state();
     let draw_list = render_active_wysiwyg_plugin_for_test(&mut app);
@@ -3393,14 +3433,14 @@ fn mmap_invalid_source_exposes_no_edit_target() {
     );
 
     let tab = app.active_tab_session().expect("active mmap tab");
-    assert_eq!(tab.full_text(), INVALID_SOURCE);
+    assert_eq!(tab.document().full_text(), INVALID_SOURCE);
     assert!(tab.hit_test_edit_target(10.0, 10.0, 0.0, 0.0).flatten().is_none());
 }
 
 #[test]
 #[cfg(feature = "markdown")]
 fn mmap_canvas_tab_switch_restores_each_session_and_new_doc_item_refits() {
-    use crate::canvas_viewport::CanvasViewportAction;
+    use appkit_shell::canvas_viewport::CanvasViewportAction;
     use ui::canvas::{CanvasPoint, CanvasViewportConfig, CanvasViewportInput, resolve_viewport};
     use ui::plugin::CanvasContentMetrics;
 
@@ -3527,7 +3567,7 @@ fn mmap_canvas_mmap_layout_long_title_keeps_active_node_center_stable() {
     let mut app = app_with_mmap_source(&source);
     {
         let mut tab = app.active_tab_session_mut().expect("active mmap tab");
-        tab.cursor_move_to_offset(active_title_start);
+        tab.document_mut().cursor_move_to_offset(active_title_start);
     }
     app.sync_plugin_state();
     let _ = prepare_and_render_active_mmap_canvas_for_test(&mut app);
@@ -3539,18 +3579,22 @@ fn mmap_canvas_mmap_layout_long_title_keeps_active_node_center_stable() {
     );
     let zoomed_snapshot = {
         let tab = app.active_tab_session_mut().expect("active mmap tab");
-        tab.runtime.canvas_viewport.apply(crate::canvas_viewport::CanvasViewportAction::ZoomBy {
-            factor: 2.0,
-            screen_anchor: zoom_anchor,
-        });
+        tab.runtime.canvas_viewport.apply(
+            appkit_shell::canvas_viewport::CanvasViewportAction::ZoomBy {
+                factor: 2.0,
+                screen_anchor: zoom_anchor,
+            },
+        );
         let zoomed_snapshot = tab.runtime.canvas_viewport.snapshot().expect("zoomed mmap viewport");
         assert!(
             zoomed_snapshot.max_scroll.x > 0.0 && zoomed_snapshot.max_scroll.y > 0.0,
             "fixture must establish a genuinely two-axis scrollable canvas"
         );
-        tab.runtime.canvas_viewport.apply(crate::canvas_viewport::CanvasViewportAction::PanBy(
-            ui::canvas::CanvasPoint::new(VISIBLE_SCROLL_OFFSET_PX, VISIBLE_SCROLL_OFFSET_PX),
-        ));
+        tab.runtime.canvas_viewport.apply(
+            appkit_shell::canvas_viewport::CanvasViewportAction::PanBy(
+                ui::canvas::CanvasPoint::new(VISIBLE_SCROLL_OFFSET_PX, VISIBLE_SCROLL_OFFSET_PX),
+            ),
+        );
         let positioned_snapshot =
             tab.runtime.canvas_viewport.snapshot().expect("positioned mmap viewport");
         assert!(
@@ -3569,7 +3613,7 @@ fn mmap_canvas_mmap_layout_long_title_keeps_active_node_center_stable() {
 
     {
         let mut tab = app.active_tab_session_mut().expect("active mmap tab");
-        tab.replace_range(
+        tab.document_mut().replace_range(
             resize_target_start..resize_target_start + "Resize Target".len(),
             &replacement_title,
         );
@@ -3608,7 +3652,7 @@ fn mmap_canvas_initial_fit_to_overflow_keeps_viewport_state_finite_and_clamped()
     let mut app = app_with_mmap_source(SOURCE);
     {
         let mut tab = app.active_tab_session_mut().expect("active mmap tab");
-        tab.cursor_move_to_offset(active_title_start);
+        tab.document_mut().cursor_move_to_offset(active_title_start);
     }
     app.sync_plugin_state();
     let initial_snapshot = prepare_and_render_active_mmap_canvas_for_test(&mut app);
@@ -3618,7 +3662,7 @@ fn mmap_canvas_initial_fit_to_overflow_keeps_viewport_state_finite_and_clamped()
     );
     {
         let mut tab = app.active_tab_session_mut().expect("active mmap tab");
-        tab.replace_range(
+        tab.document_mut().replace_range(
             sibling_title_start..sibling_title_start + "Sibling".len(),
             &long_sibling_title,
         );
@@ -3656,7 +3700,7 @@ fn non_canvas_plugin_editor_and_preview_keep_scroll_and_global_font_zoom() {
         );
         document.presentation.display.display_map.set_entries(
             (0..LINE_COUNT)
-                .map(|line| crate::snap_tree::DisplayLineEntry::placeholder(line, 1, 0, 1))
+                .map(|line| appkit_shell::snap_tree::DisplayLineEntry::placeholder(line, 1, 0, 1))
                 .collect(),
         );
         document.presentation.display.viewport.set_scroll_top(
@@ -3697,10 +3741,14 @@ fn move_left_reaches_range_without_cycle(
     start_byte: usize,
     target: std::ops::Range<usize>,
 ) -> bool {
-    app.active_tab_session_mut().expect("active entry").cursor_move_to_offset(start_byte);
+    app.active_tab_session_mut()
+        .expect("active entry")
+        .document_mut()
+        .cursor_move_to_offset(start_byte);
     let mut visited = std::collections::BTreeSet::new();
     for _ in 0..=start_byte + 1 {
-        let current = app.active_tab_session().expect("active entry").cursor_offset().to_usize();
+        let current =
+            app.active_tab_session().expect("active entry").document().cursor_offset().to_usize();
         if target.contains(&current) {
             return true;
         }
@@ -3708,7 +3756,7 @@ fn move_left_reaches_range_without_cycle(
             return false;
         }
         let effect =
-            app.dispatch_wysiwyg_navigation(&appkit_shell::input_mapper::EditCommand::MoveLeft);
+            app.dispatch_wysiwyg_navigation(&appkit_core::edit_command::EditCommand::MoveLeft);
         if !effect.redraw {
             return false;
         }
@@ -3736,7 +3784,7 @@ fn interior_x_for_visible_grapheme(grapheme_x: &[f32], grapheme_index: usize) ->
 #[test]
 #[cfg(feature = "markdown")]
 fn wysiwyg_promotion_blockquote_line_three_click_and_up_navigation_reach_its_source_range() {
-    use appkit_shell::input_mapper::EditCommand;
+    use appkit_core::edit_command::EditCommand;
 
     let source = "# Promotion & Marketing\n\n> Applicable scenarios: Brand launches, marketing campaigns, art/fashion/culture showcases, product introductions, etc.\n> Style anchor: Apple Keynote / Xiaomi product launch / High-end fashion brands / Art exhibitions / Cultural promotion / Premium brand visual systems\n\n## Design Philosophy\n";
     let line_three_start =
@@ -3755,7 +3803,7 @@ fn wysiwyg_promotion_blockquote_line_three_click_and_up_navigation_reach_its_sou
 
     {
         let mut tab = app.active_tab_session_mut().expect("active entry");
-        tab.cursor_move_to_offset(line_three_start);
+        tab.document_mut().cursor_move_to_offset(line_three_start);
     }
     app.sync_plugin_state();
     render_active_wysiwyg_plugin_for_test(&mut app);
@@ -3774,7 +3822,7 @@ fn wysiwyg_promotion_blockquote_line_three_click_and_up_navigation_reach_its_sou
 
     {
         let mut tab = app.active_tab_session_mut().expect("active entry");
-        tab.cursor_move_to_offset(line_four_content);
+        tab.document_mut().cursor_move_to_offset(line_four_content);
     }
     app.sync_plugin_state();
     render_active_wysiwyg_plugin_for_test(&mut app);
@@ -3791,7 +3839,8 @@ fn wysiwyg_promotion_blockquote_line_three_click_and_up_navigation_reach_its_sou
         None,
     );
 
-    let clicked_byte = app.active_tab_session().expect("active entry").cursor_offset().to_usize();
+    let clicked_byte =
+        app.active_tab_session().expect("active entry").document().cursor_offset().to_usize();
     assert!(
         (line_three_start..line_four_start).contains(&clicked_byte),
         "clicking line three must land in its source range {line_three_start}..{line_four_start}, got {clicked_byte}"
@@ -3799,14 +3848,15 @@ fn wysiwyg_promotion_blockquote_line_three_click_and_up_navigation_reach_its_sou
 
     {
         let mut tab = app.active_tab_session_mut().expect("active entry");
-        tab.cursor_move_to_offset(line_four_content);
+        tab.document_mut().cursor_move_to_offset(line_four_content);
     }
     app.sync_plugin_state();
     render_active_wysiwyg_plugin_for_test(&mut app);
     let effect = app.dispatch_wysiwyg_navigation(&EditCommand::MoveUp);
     assert!(effect.redraw, "Up from line four should redraw the WYSIWYG view");
 
-    let moved_byte = app.active_tab_session().expect("active entry").cursor_offset().to_usize();
+    let moved_byte =
+        app.active_tab_session().expect("active entry").document().cursor_offset().to_usize();
     assert!(
         (line_three_start..line_four_start).contains(&moved_byte),
         "Up from line four must land in line three source range {line_three_start}..{line_four_start}, got {moved_byte}"
@@ -3843,19 +3893,19 @@ C608-01 武昌职业第01组：计划 68，历史低线较低，是表里最像�
 
     {
         let mut tab = app.active_tab_session_mut().expect("active entry");
-        tab.select_all();
+        tab.document_mut().select_all();
     }
     app.sync_plugin_state();
     app.sync_plugin_state();
 
     let tab = app.active_tab_session().expect("active entry");
     assert_eq!(
-        tab.selection_range(),
-        Some((0, tab.buffer_len())),
+        tab.document().selection_range(),
+        Some((0, tab.document().buffer_len())),
         "copy-time WYSIWYG sync should not shrink a full-document selection"
     );
     let selected = String::from_utf8(
-        tab.extract_selected_text().expect("document selection should contain text"),
+        tab.document().extract_selected_text().expect("document selection should contain text"),
     )
     .expect("selected text should be valid UTF-8");
     assert!(
@@ -3903,10 +3953,11 @@ C608-01 武昌职业第01组：计划 68，历史低线较低，是表里最像�
 
     let tab = app.active_tab_session().expect("active entry");
     assert!(
-        tab.selection_range()
-            .is_some_and(|(start, end)| start <= probe_byte && end == tab.buffer_len()),
+        tab.document()
+            .selection_range()
+            .is_some_and(|(start, end)| start <= probe_byte && end == tab.document().buffer_len()),
         "dragging from trailing blank to final text should create a document selection, got {:?}",
-        tab.selection_range()
+        tab.document().selection_range()
     );
 
     let highlights = tab.selection_highlights(app.current_theme.editor.selection);
@@ -3925,7 +3976,7 @@ C608-01 武昌职业第01组：计划 68，历史低线较低，是表里最像�
     assert!(
         final_text_line_highlighted,
         "mouse drag selection should visibly highlight the final text line; selection={:?}, probe_y={}, highlights={:?}",
-        tab.selection_range(),
+        tab.document().selection_range(),
         current_probe_y,
         highlights.cmds
     );
@@ -3954,7 +4005,7 @@ C608-01 武昌职业第01组：计划 68，历史低线较低，是表里最像�
     let probe_rect = wysiwyg_cursor_rect_for_byte_for_test(&mut app, probe_byte);
     {
         let mut tab = app.active_tab_session_mut().expect("active entry");
-        tab.select_all();
+        tab.document_mut().select_all();
     }
     app.sync_plugin_state();
     render_active_wysiwyg_plugin_for_test(&mut app);
@@ -3997,12 +4048,12 @@ fn wysiwyg_paragraph_end_enter_then_typing_inserts_at_new_paragraph_start() {
 
     {
         let mut tab = app.active_tab_session_mut().expect("active entry");
-        tab.insert_at_cursor(b"X");
+        tab.document_mut().insert_at_cursor(b"X");
     }
 
     let tab = app.active_tab_session().expect("active entry");
     assert_eq!(
-        tab.full_text(),
+        tab.document().full_text(),
         "hello\n\nX",
         "typing after paragraph-end Enter must insert at the new paragraph start"
     );
@@ -4031,8 +4082,8 @@ fn wysiwyg_enter_after_horizontal_rule_places_cursor_in_paragraph_below() {
     render_active_wysiwyg_plugin_for_test(&mut app);
 
     let tab = app.active_tab_session().expect("active Markdown editor");
-    assert_eq!(tab.full_text(), "---\n\n");
-    assert_eq!(tab.cursor_offset().to_usize(), "---\n\n".len());
+    assert_eq!(tab.document().full_text(), "---\n\n");
+    assert_eq!(tab.document().cursor_offset().to_usize(), "---\n\n".len());
     let paragraph_cursor_y =
         tab.query_cursor_screen_rect("---\n\n".len()).expect("paragraph cursor rect").1;
     assert!(paragraph_cursor_y > rule_cursor_y);
@@ -4059,16 +4110,16 @@ fn wysiwyg_paragraph_end_before_existing_newline_typing_stays_in_new_paragraph()
 
     {
         let mut tab = app.active_tab_session_mut().expect("active entry");
-        tab.insert_at_cursor(b"X");
+        tab.document_mut().insert_at_cursor(b"X");
     }
 
     let tab = app.active_tab_session().expect("active entry");
     assert_eq!(
-        tab.full_text(),
+        tab.document().full_text(),
         "hello\n\nX\n",
         "typing must stay in the new paragraph while preserving the original EOF empty paragraph"
     );
-    assert_eq!(tab.document.cursor_offset().to_usize(), "hello\n\nX".len());
+    assert_eq!(tab.document().cursor_offset().to_usize(), "hello\n\nX".len());
 }
 
 #[test]
@@ -4092,12 +4143,12 @@ fn wysiwyg_paragraph_end_enter_then_typing_keeps_following_line_below() {
 
     {
         let mut tab = app.active_tab_session_mut().expect("active entry");
-        tab.insert_at_cursor(b"X");
+        tab.document_mut().insert_at_cursor(b"X");
     }
 
     let tab = app.active_tab_session().expect("active entry");
     assert_eq!(
-        tab.full_text(),
+        tab.document().full_text(),
         "hello\n\nX\nnext",
         "typing on the new paragraph line must not pull the following source line upward"
     );
@@ -4107,7 +4158,7 @@ fn wysiwyg_paragraph_end_enter_then_typing_keeps_following_line_below() {
 fn wysiwyg_cursor_rect_for_byte_for_test(app: &mut App, byte: usize) -> (f32, f32, f32, f32) {
     {
         let mut tab = app.active_tab_session_mut().expect("active entry");
-        tab.cursor_move_to_offset(byte);
+        tab.document_mut().cursor_move_to_offset(byte);
     }
     app.sync_plugin_state();
     render_active_wysiwyg_plugin_for_test(app);
@@ -4128,7 +4179,8 @@ fn search_replacement_synchronizes_editor_document_and_plugin() {
         let doc = DocumentFixture::new(vec![original.to_owned()], 80, 10.0);
         app.push_entry_for_test(doc, Box::new(RecordingWysiwygPlugin::new(state.clone())));
         app.switch_workspace_for_test(0);
-        let revision = app.active_tab_session().expect("active entry").document.content_revision();
+        let revision =
+            app.active_tab_session().expect("active entry").document().content_revision();
         app.sync_plugin_state();
 
         assert!(app.dispatch_search_action(SearchBarAction::QueryChanged("old".into())).redraw);
@@ -4139,17 +4191,17 @@ fn search_replacement_synchronizes_editor_document_and_plugin() {
         let effect = app.dispatch_search_action(action);
 
         let tab = app.active_tab_session().expect("active entry");
-        assert_eq!(tab.document.full_text(), expected);
-        assert_eq!(tab.document.content_revision(), revision + 1);
-        assert_eq!(tab.document.line_count(), expected.lines().count());
-        assert_eq!(tab.document.selection_range(), None);
-        assert!(tab.document.dirty);
+        assert_eq!(tab.document().full_text(), expected);
+        assert_eq!(tab.document().content_revision(), revision + 1);
+        assert_eq!(tab.document().line_count(), expected.lines().count());
+        assert_eq!(tab.document().selection_range(), None);
+        assert!(tab.document().dirty);
         assert!(effect.reshape);
         assert_eq!(state.borrow().source_text, expected);
 
-        let tab = app.active_tab_session_mut().expect("active entry");
-        tab.document.undo();
-        assert_eq!(tab.document.full_text(), original);
+        let mut tab = app.active_tab_session_mut().expect("active entry");
+        tab.document_mut().undo();
+        assert_eq!(tab.document().full_text(), original);
     }
 
     #[cfg(feature = "markdown")]
@@ -4166,7 +4218,7 @@ fn search_replacement_synchronizes_editor_document_and_plugin() {
         );
         assert!(app.dispatch_search_action(SearchBarAction::Replace).redraw);
         assert_eq!(
-            app.active_tab_session().expect("preview entry").document.full_text(),
+            app.active_tab_session().expect("preview entry").document().full_text(),
             "**new**"
         );
     }
@@ -4180,9 +4232,9 @@ fn search_replace_all_handles_nonoverlapping_matches_across_the_buffer_gap() {
     let doc = DocumentFixture::new(vec!["aaaaaa".to_owned()], 80, 10.0);
     app.push_entry_for_test(doc, Box::new(crate::plugins::editor::EditorPlugin::new()));
     app.switch_workspace_for_test(0);
-    let tab = app.active_tab_session_mut().expect("active entry");
-    tab.document.cursor_move_to_offset(3);
-    tab.document.insert_at_cursor(b"a");
+    let mut tab = app.active_tab_session_mut().expect("active entry");
+    tab.document_mut().cursor_move_to_offset(3);
+    tab.document_mut().insert_at_cursor(b"a");
 
     assert!(app.dispatch_search_action(SearchBarAction::QueryChanged("aaa".into())).redraw);
     let tab = app.active_tab_session().expect("active entry");
@@ -4190,7 +4242,7 @@ fn search_replace_all_handles_nonoverlapping_matches_across_the_buffer_gap() {
 
     assert!(app.dispatch_search_action(SearchBarAction::ReplaceQueryChanged("X".into())).redraw);
     assert!(app.dispatch_search_action(SearchBarAction::ReplaceAll).redraw);
-    assert_eq!(app.active_tab_session().expect("active entry").document.full_text(), "XXa");
+    assert_eq!(app.active_tab_session().expect("active entry").document().full_text(), "XXa");
 }
 
 #[test]
@@ -4210,15 +4262,15 @@ fn search_replacement_keeps_graphemes_and_caret_valid() {
         assert!(app.dispatch_search_action(action).redraw);
 
         let tab = app.active_tab_session().expect("active entry");
-        assert_eq!(tab.document.full_text(), expected);
-        assert_eq!(tab.document.cursor_offset().to_usize(), expected_cursor);
+        assert_eq!(tab.document().full_text(), expected);
+        assert_eq!(tab.document().cursor_offset().to_usize(), expected_cursor);
 
-        let tab = app.active_tab_session_mut().expect("active entry");
-        tab.document.cursor_move_to_offset(0);
-        tab.document.undo();
-        assert_eq!(tab.document.full_text(), original);
-        tab.document.redo();
-        assert_eq!(tab.document.full_text(), expected);
+        let mut tab = app.active_tab_session_mut().expect("active entry");
+        tab.document_mut().cursor_move_to_offset(0);
+        tab.document_mut().undo();
+        assert_eq!(tab.document().full_text(), original);
+        tab.document_mut().redo();
+        assert_eq!(tab.document().full_text(), expected);
     }
 }
 
@@ -4257,7 +4309,7 @@ fn sync_plugin_state_pulls_selection_range_into_document() {
     app.sync_plugin_state();
 
     let doc = &app.active_tab_session().expect("active entry");
-    assert_eq!(doc.selection_range(), Some((1, 4)));
+    assert_eq!(doc.document().selection_range(), Some((1, 4)));
 }
 
 #[test]
@@ -4275,7 +4327,7 @@ fn sync_plugin_state_does_not_pull_selection_when_plugin_needs_source_update() {
     app.sync_plugin_state();
 
     let doc = &app.active_tab_session().expect("active entry");
-    assert_eq!(doc.selection_range(), None);
+    assert_eq!(doc.document().selection_range(), None);
 }
 
 #[test]
@@ -4313,13 +4365,13 @@ fn wysiwyg_selection_delete_clears_plugin_highlight() {
 
     {
         let mut tab = app.active_tab_session_mut().expect("active entry");
-        assert!(tab.delete_selection(), "selected text should be deleted");
+        assert!(tab.document_mut().delete_selection(), "selected text should be deleted");
     }
     app.sync_plugin_state();
 
     let tab = app.active_tab_session().expect("active entry");
-    assert_eq!(tab.full_text(), "aef");
-    assert_eq!(tab.selection_range(), None);
+    assert_eq!(tab.document().full_text(), "aef");
+    assert_eq!(tab.document().selection_range(), None);
     let recorded = state.borrow();
     assert_eq!(recorded.sel_anchor_byte, None);
     assert_eq!(recorded.sel_cursor_byte, None);
@@ -4341,7 +4393,7 @@ fn ime_commit_syncs_wysiwyg_source_and_snapped_cursor() {
     // Simulate IME commit inserting "中" at cursor
     {
         let mut tab = app.active_tab_session_mut().unwrap();
-        tab.insert_at_cursor("中".as_bytes());
+        tab.document_mut().insert_at_cursor("中".as_bytes());
     }
 
     // Sync — this is what the IME commit handler does after insertion
@@ -4372,7 +4424,7 @@ fn ime_commit_clears_preedit_and_preferred_x() {
     // Simulate the commit path: insert char, sync, clear
     {
         let mut tab = app.active_tab_session_mut().unwrap();
-        tab.insert_at_cursor("中".as_bytes());
+        tab.document_mut().insert_at_cursor("中".as_bytes());
     }
     app.sync_plugin_state();
 
@@ -4421,8 +4473,8 @@ fn wysiwyg_navigation_sends_snapped_cursor_byte_to_plugin() {
 
     // Phase 2: move cursor, read back, notify plugin
     let mut tab = app.active_tab_session_mut().unwrap();
-    tab.cursor_move_to_offset(new_byte);
-    let snapped_byte = tab.cursor_offset().to_usize();
+    tab.document_mut().cursor_move_to_offset(new_byte);
+    let snapped_byte = tab.document().cursor_offset().to_usize();
     tab.send_message(ui::plugin::PluginMessage::SetCursorByte(snapped_byte));
 
     let recorded = state.borrow();
@@ -4572,7 +4624,7 @@ fn wysiwyg_document_boundary_navigation_reveals_the_actual_markdown_caret() {
             assert!(app.dispatch_wysiwyg_navigation(&command).redraw);
             render_active_wysiwyg_plugin_for_test(&mut app);
             let tab = app.active_tab_session().expect("Markdown boundary fixture remains active");
-            let byte = tab.document.cursor_offset().to_usize();
+            let byte = tab.document().cursor_offset().to_usize();
             let (_, y, _, height) =
                 tab.query_cursor_screen_rect(byte).expect("boundary caret geometry");
             let viewport_height = app.plugin_render_bounds().h;
@@ -4582,7 +4634,7 @@ fn wysiwyg_document_boundary_navigation_reveals_the_actual_markdown_caret() {
                 y + height,
                 viewport_height
             );
-            assert_eq!(tab.full_text(), source, "navigation must preserve source bytes");
+            assert_eq!(tab.document().full_text(), source, "navigation must preserve source bytes");
         }
     }
 }
@@ -4599,6 +4651,7 @@ fn wysiwyg_edit_at_an_offscreen_caret_reveals_the_actual_markdown_caret() {
     render_active_wysiwyg_plugin_for_test(&mut app);
     app.active_tab_session_mut()
         .expect("Markdown edit fixture")
+        .document_mut()
         .cursor_move_to_offset(source.len());
     app.sync_plugin_state();
     assert!(
@@ -4606,9 +4659,9 @@ fn wysiwyg_edit_at_an_offscreen_caret_reveals_the_actual_markdown_caret() {
     );
     render_active_wysiwyg_plugin_for_test(&mut app);
     let tab = app.active_tab_session().expect("Markdown edit fixture remains active");
-    assert_eq!(tab.full_text(), source + "尾部");
+    assert_eq!(tab.document().full_text(), source + "尾部");
     let (_, y, _, height) =
-        tab.query_cursor_screen_rect(tab.document.buffer_len()).expect("edited caret geometry");
+        tab.query_cursor_screen_rect(tab.document().buffer_len()).expect("edited caret geometry");
     assert!(
         y >= 0.0 && y + height <= app.plugin_render_bounds().h + 1.0,
         "edited caret {y}..{} must be visible",
@@ -4666,7 +4719,7 @@ fn assert_wysiwyg_navigation_caret_row(app: &mut App, command: &EditCommand, exp
     render_active_wysiwyg_plugin_for_test(app);
     let tab = app.active_tab_session().expect("soft-wrap navigation fixture");
     let (_, caret_y, _, _) = tab
-        .query_cursor_screen_rect(tab.document.cursor_offset().to_usize())
+        .query_cursor_screen_rect(tab.document().cursor_offset().to_usize())
         .expect("visual boundary caret");
     assert!(
         (caret_y - expected_y).abs() <= GEOMETRY_TOLERANCE,
@@ -4702,6 +4755,7 @@ fn wysiwyg_soft_wrap_line_end_preserves_the_visible_caret_row() {
             .expect("fixture has a second visual row");
         app.active_tab_session_mut()
             .expect("soft-wrap navigation fixture")
+            .document_mut()
             .cursor_move_to_offset(byte);
         app.sync_plugin_state();
         render_active_wysiwyg_plugin_for_test(&mut app);
@@ -4710,7 +4764,7 @@ fn wysiwyg_soft_wrap_line_end_preserves_the_visible_caret_row() {
             assert_eq!(
                 app.active_tab_session()
                     .expect("selected visual line")
-                    .document
+                    .document()
                     .cursor()
                     .selection_anchor,
                 Some(byte),
@@ -4721,7 +4775,10 @@ fn wysiwyg_soft_wrap_line_end_preserves_the_visible_caret_row() {
         assert_wysiwyg_navigation_caret_row(&mut app, &EditCommand::MoveUp, first_y);
         assert_wysiwyg_navigation_caret_row(&mut app, &EditCommand::MoveDown, row_y);
         assert_wysiwyg_navigation_caret_row(&mut app, &EditCommand::MoveToLineStart, row_y);
-        assert_eq!(app.active_tab_session().expect("unchanged source").full_text(), source);
+        assert_eq!(
+            app.active_tab_session().expect("unchanged source").document().full_text(),
+            source
+        );
     }
 }
 
@@ -4736,9 +4793,9 @@ fn assert_wysiwyg_history_caret(
     const GEOMETRY_TOLERANCE: f32 = 1.0;
     render_active_wysiwyg_plugin_for_test(app);
     let tab = app.active_tab_session().expect("restored soft-wrap history fixture");
-    assert_eq!(tab.full_text(), source);
-    assert_eq!(tab.document.cursor_offset().to_usize(), byte);
-    assert_eq!(tab.document.cursor().selection_anchor, anchor);
+    assert_eq!(tab.document().full_text(), source);
+    assert_eq!(tab.document().cursor_offset().to_usize(), byte);
+    assert_eq!(tab.document().cursor().selection_anchor, anchor);
     let actual = tab.query_cursor_screen_rect(byte).expect("restored visual caret");
     assert!(
         (actual.0 - expected_rect.0).abs() <= GEOMETRY_TOLERANCE
@@ -4771,8 +4828,8 @@ fn wysiwyg_soft_wrap_edit_history_restores_visual_line_end_caret() {
         assert!(app.dispatch_wysiwyg_navigation(&command).redraw);
         render_active_wysiwyg_plugin_for_test(&mut app);
         let tab = app.active_tab_session().expect("soft-wrap history fixture");
-        let byte = tab.document.cursor_offset().to_usize();
-        let anchor = tab.document.cursor().selection_anchor;
+        let byte = tab.document().cursor_offset().to_usize();
+        let anchor = tab.document().cursor().selection_anchor;
         let before = tab.query_cursor_screen_rect(byte).expect("visual line-end caret");
         let insertion_start = anchor.unwrap_or(byte).min(byte);
         let edited = source[..insertion_start].to_owned() + "X" + &source[byte..];
@@ -4814,7 +4871,7 @@ fn wysiwyg_mouse_click_preserves_the_requested_soft_wrap_side() {
         assert!(app.dispatch_wysiwyg_navigation(&EditCommand::MoveToLineEnd).redraw);
         render_active_wysiwyg_plugin_for_test(&mut app);
         let tab = app.active_tab_session().expect("soft-wrap pointer fixture");
-        let byte = tab.document.cursor_offset().to_usize();
+        let byte = tab.document().cursor_offset().to_usize();
         let before = tab.query_cursor_screen_rect(byte).expect("line-end click geometry");
         let bounds = app.plugin_render_bounds();
         let click_x = bounds.x + before.0;
@@ -4833,14 +4890,14 @@ fn wysiwyg_mouse_click_preserves_the_requested_soft_wrap_side() {
         );
         render_active_wysiwyg_plugin_for_test(&mut app);
         let tab = app.active_tab_session().expect("clicked soft-wrap pointer fixture");
-        assert_eq!(tab.document.cursor_offset().to_usize(), byte);
+        assert_eq!(tab.document().cursor_offset().to_usize(), byte);
         let after = tab.query_cursor_screen_rect(byte).expect("clicked line-end geometry");
         assert!(
             (after.0 - before.0).abs() <= GEOMETRY_TOLERANCE
                 && (after.1 - before.1).abs() <= GEOMETRY_TOLERANCE,
             "Click must retain visual wrap side {before:?}, got {after:?}"
         );
-        assert_eq!(tab.full_text(), source);
+        assert_eq!(tab.document().full_text(), source);
     }
 }
 
@@ -4873,6 +4930,7 @@ fn wysiwyg_long_wrapped_document_reveals_caret_after_precise_layout() {
         assert!(app.toggle_editor_view().redraw);
         app.active_tab_session_mut()
             .expect("wrapped source editor fixture")
+            .document_mut()
             .cursor_move_to_offset(code_end);
         assert!(app.toggle_editor_view().redraw);
         for command in [None, Some(EditCommand::MoveToDocStart), Some(EditCommand::MoveToDocEnd)] {
@@ -4882,7 +4940,7 @@ fn wysiwyg_long_wrapped_document_reveals_caret_after_precise_layout() {
             app.sync_plugin_state();
             render_active_wysiwyg_plugin_for_test(&mut app);
             let tab = app.active_tab_session().expect("wrapped Markdown fixture remains active");
-            let byte = tab.document.cursor_offset().to_usize();
+            let byte = tab.document().cursor_offset().to_usize();
             let (_, y, _, height) =
                 tab.query_cursor_screen_rect(byte).expect("wrapped caret geometry");
             let viewport_height = app.plugin_render_bounds().h;
@@ -4891,7 +4949,7 @@ fn wysiwyg_long_wrapped_document_reveals_caret_after_precise_layout() {
                 "dpi={dpi}, {command:?}, byte={byte}: caret {y}..{} exceeds viewport {viewport_height}",
                 y + height,
             );
-            assert_eq!(tab.full_text(), source);
+            assert_eq!(tab.document().full_text(), source);
         }
     }
 }
@@ -4928,6 +4986,7 @@ fn wysiwyg_source_toggle_reveals_the_caret_moved_in_the_source_editor() {
             assert_eq!(app.active_plugin_name(), Some(ui::plugin::PLUGIN_EDITOR));
             app.active_tab_session_mut()
                 .expect("source editor fixture")
+                .document_mut()
                 .cursor_move_to_offset(byte);
             assert!(app.toggle_editor_view().redraw);
             assert_eq!(app.active_plugin_name(), Some(ui::plugin::PLUGIN_MARKDOWN_EDITOR));
@@ -4941,7 +5000,7 @@ fn wysiwyg_source_toggle_reveals_the_caret_moved_in_the_source_editor() {
                 "source toggle @{byte}: caret {y}..{} must be visible",
                 y + height
             );
-            assert_eq!(tab.full_text(), source);
+            assert_eq!(tab.document().full_text(), source);
         }
     }
 }
@@ -5026,7 +5085,7 @@ fn wysiwyg_extend_right_preserves_anchor_and_notifies_plugin_selection() {
 
     assert!(effect.redraw, "selection extension should redraw WYSIWYG content");
     let tab = app.active_tab_session().expect("active tab");
-    assert_eq!(tab.selection_range(), Some((2, 5)));
+    assert_eq!(tab.document().selection_range(), Some((2, 5)));
     let recorded = state.borrow();
     assert_eq!(
         recorded.visual_move_query,
@@ -5078,8 +5137,8 @@ fn wysiwyg_single_click_uses_snapped_byte_for_selection_anchor() {
     let _ = app.dispatch_editor_mouse_input(winit::event::ElementState::Pressed, 40.0, 24.0, None);
 
     let tab = app.active_tab_session().expect("active tab should exist");
-    let snapped = tab.cursor_offset().to_usize();
-    assert_eq!(tab.cursor().selection_anchor, Some(snapped));
+    let snapped = tab.document().cursor_offset().to_usize();
+    assert_eq!(tab.document().cursor().selection_anchor, Some(snapped));
     let recorded = state.borrow();
     assert_eq!(recorded.cursor_byte, Some(snapped));
     assert_eq!(recorded.sel_anchor_byte, Some(snapped));
@@ -5103,7 +5162,7 @@ fn wysiwyg_double_click_selects_word_at_hit_byte() {
     let _ = app.dispatch_editor_mouse_input(winit::event::ElementState::Released, 40.0, 24.0, None);
 
     let tab = app.active_tab_session().expect("active tab");
-    assert_eq!(tab.selection_range(), Some((6, 11)));
+    assert_eq!(tab.document().selection_range(), Some((6, 11)));
     let recorded = state.borrow();
     assert_eq!(recorded.sel_anchor_byte, Some(6));
     assert_eq!(recorded.sel_cursor_byte, Some(11));
@@ -5125,8 +5184,8 @@ fn wysiwyg_single_click_moves_cursor_without_leaving_empty_selection() {
     let _ = app.dispatch_editor_mouse_input(winit::event::ElementState::Released, 40.0, 24.0, None);
 
     let tab = app.active_tab_session().expect("active tab");
-    assert_eq!(tab.cursor_offset().to_usize(), 5);
-    assert_eq!(tab.selection_range(), None);
+    assert_eq!(tab.document().cursor_offset().to_usize(), 5);
+    assert_eq!(tab.document().selection_range(), None);
     let recorded = state.borrow();
     assert_eq!(recorded.sel_anchor_byte, None);
     assert_eq!(recorded.sel_cursor_byte, None);
@@ -5238,7 +5297,7 @@ fn wysiwyg_preedit_cursor_rect_resolves_with_cursor_window_rect() {
     let tab = app.active_tab_session().expect("active tab should exist");
 
     // The cursor window rect should resolve through the plugin query
-    let cursor_byte = tab.cursor_offset().to_usize();
+    let cursor_byte = tab.document().cursor_offset().to_usize();
     let rect = app.plugin_cursor_window_rect(cursor_byte).expect("cursor rect should resolve");
     assert_eq!(rect.w, 2.0);
     assert_eq!(rect.h, 18.0);
@@ -5368,26 +5427,34 @@ fn markdown_paragraph_transactions_restore_source_and_cursor_through_history() {
         let _ = app.dispatch_transactional_edit_for_test(case.command);
         {
             let mut tab = app.active_tab_session_mut().expect("active Markdown tab");
-            assert_eq!(tab.full_text(), case.expected, "original source: {:?}", case.source);
-            assert_eq!(tab.document.cursor_offset().to_usize(), case.expected_cursor_prefix.len());
-            tab.undo();
+            assert_eq!(
+                tab.document().full_text(),
+                case.expected,
+                "original source: {:?}",
+                case.source
+            );
+            assert_eq!(
+                tab.document().cursor_offset().to_usize(),
+                case.expected_cursor_prefix.len()
+            );
+            tab.document_mut().undo();
         }
         app.sync_plugin_state();
         {
             let mut tab = app.active_tab_session_mut().expect("active Markdown tab after undo");
-            assert_eq!(tab.full_text(), case.source);
-            assert_eq!(tab.document.cursor_offset().to_usize(), case.cursor_prefix.len());
+            assert_eq!(tab.document().full_text(), case.source);
+            assert_eq!(tab.document().cursor_offset().to_usize(), case.cursor_prefix.len());
             assert_eq!(
-                tab.document.selection_range(),
+                tab.document().selection_range(),
                 case.selection.as_ref().map(|selection| (selection.start, selection.end)),
                 "Undo must restore the original selection as well as its caret"
             );
-            tab.redo();
+            tab.document_mut().redo();
         }
         app.sync_plugin_state();
         let tab = app.active_tab_session().expect("active Markdown tab after redo");
-        assert_eq!(tab.full_text(), case.expected);
-        assert_eq!(tab.document.cursor_offset().to_usize(), case.expected_cursor_prefix.len());
-        assert_eq!(tab.document.selection_range(), None);
+        assert_eq!(tab.document().full_text(), case.expected);
+        assert_eq!(tab.document().cursor_offset().to_usize(), case.expected_cursor_prefix.len());
+        assert_eq!(tab.document().selection_range(), None);
     }
 }

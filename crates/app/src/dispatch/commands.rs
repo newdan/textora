@@ -1,8 +1,8 @@
 use crate::app::App;
 use crate::app_effect::AppEffect;
-use crate::canvas_viewport::CanvasViewportAction;
 use crate::dispatch::chrome::SettingsDispatchAction;
 use crate::workspace_tab_factory::ProductPreparedTab;
+use appkit_shell::canvas_viewport::CanvasViewportAction;
 use appkit_shell::editor_runtime::OpenDisposition;
 use winit::event_loop::ActiveEventLoop;
 
@@ -22,7 +22,7 @@ struct RecentFileViewState {
 }
 
 impl RecentFileViewState {
-    fn from_history_entry(entry: Option<&crate::file_history::FileHistoryEntry>) -> Self {
+    fn from_history_entry(entry: Option<&appkit_core::file_history::FileHistoryEntry>) -> Self {
         let Some(entry) = entry else {
             return Self::default();
         };
@@ -54,7 +54,8 @@ impl App {
             self.file_history.entries.iter().find(|entry| entry.file_path == path),
         );
         let workspace_effect = if let Some(tab_id) = self.editor_tab_id_for_path(path) {
-            self.activate_editor_tab(tab_id).unwrap_or(crate::workspace::WorkspaceEffect::None)
+            self.activate_editor_tab(tab_id)
+                .unwrap_or(appkit_shell::workspace::WorkspaceEffect::None)
         } else {
             let viewport = self.viewport_dimensions(self.screen_height());
             let ProductPreparedTab { prepared, suggested_file_name } =
@@ -64,7 +65,7 @@ impl App {
         let app_effect = self.apply_workspace_effect(workspace_effect);
 
         if let Some(mut tab) = self.active_tab_session_mut() {
-            let document = &mut tab.document;
+            let document = tab.document_mut();
             let target_line = view_state.cursor_line.min(document.line_count().saturating_sub(1));
             if let Some(line_offset) = document.line_byte_offset(target_line) {
                 let column_offset = document
@@ -287,7 +288,7 @@ impl App {
         }
 
         let Some(active_tab) = self.active_tab_session() else { return AppEffect::NONE };
-        if active_tab.document.selection_range().is_some_and(|(start, end)| start < end) {
+        if active_tab.document().selection_range().is_some_and(|(start, end)| start < end) {
             return AppEffect::NONE;
         }
 
@@ -295,8 +296,8 @@ impl App {
         let Some(active_tab) = self.active_tab_session() else { return AppEffect::NONE };
         let insert_table_probe = active_tab.query(ui::plugin::PluginQuery::PlanSemanticEdit {
             command: ui::plugin::SemanticEditCommand::InsertTable { columns: 1, rows: 2 },
-            source_generation: active_tab.document.generation(),
-            cursor_byte: active_tab.document.cursor_offset().to_usize(),
+            source_generation: active_tab.document().generation(),
+            cursor_byte: active_tab.document().cursor_offset().to_usize(),
             selection: None,
         });
         if !matches!(
@@ -391,8 +392,8 @@ mod recent_file_tests {
             let tab = app
                 .active_tab_session()
                 .expect("recent file should have a matching product runtime");
-            assert_eq!(tab.document.cursor_line(), 2);
-            assert_eq!(tab.document.cursor_column(), 2);
+            assert_eq!(tab.document().cursor_line(), 2);
+            assert_eq!(tab.document().cursor_column(), 2);
             assert_eq!(tab.scroll_anchor_doc_line(), 3);
             assert_eq!(tab.scroll_anchor_pixel_offset(), 8.5);
             assert_eq!(tab.plugin_name(), ui::plugin::PLUGIN_MARKDOWN_EDITOR);
@@ -431,9 +432,9 @@ mod recent_file_tests {
         assert_eq!(app.active_tab_id(), Some(existing_id));
         {
             let tab = app.active_tab_session().expect("existing runtime should remain installed");
-            assert_eq!(tab.document.full_text(), "first\nsecond\nthird");
-            assert_eq!(tab.document.cursor_line(), 1);
-            assert_eq!(tab.document.cursor_column(), 3);
+            assert_eq!(tab.document().full_text(), "first\nsecond\nthird");
+            assert_eq!(tab.document().cursor_line(), 1);
+            assert_eq!(tab.document().cursor_column(), 3);
             assert_eq!(tab.scroll_anchor_doc_line(), 2);
             assert_eq!(tab.scroll_anchor_pixel_offset(), 4.25);
         }
@@ -454,8 +455,11 @@ mod recent_file_tests {
         std::fs::write(&path, "existing text").expect("table-picker fixture should be writable");
         let mut app = App::new(None);
         let _ = app.open_file(&path).expect("Markdown fixture should open");
-        let generation_before =
-            app.active_tab_session().expect("Markdown tab should be active").document.generation();
+        let generation_before = app
+            .active_tab_session()
+            .expect("Markdown tab should be active")
+            .document()
+            .generation();
 
         let effect = app.open_table_picker();
 
@@ -478,8 +482,8 @@ mod recent_file_tests {
             ))
         ));
         let active_document = app.active_tab_session().expect("Markdown tab should remain active");
-        assert_eq!(active_document.document.full_text(), "existing text");
-        assert_eq!(active_document.document.generation(), generation_before);
+        assert_eq!(active_document.document().full_text(), "existing text");
+        assert_eq!(active_document.document().generation(), generation_before);
     }
 
     #[test]
@@ -490,17 +494,20 @@ mod recent_file_tests {
             .expect("Markdown runtime should be active")
             .set_editing_access(appkit_shell::tab_runtime::DocumentEditingAccess::ReadOnly);
         let source_before =
-            app.active_tab_session().expect("Markdown tab should be active").document.full_text();
-        let generation_before =
-            app.active_tab_session().expect("Markdown tab should be active").document.generation();
+            app.active_tab_session().expect("Markdown tab should be active").document().full_text();
+        let generation_before = app
+            .active_tab_session()
+            .expect("Markdown tab should be active")
+            .document()
+            .generation();
 
         let effect = app.open_table_picker();
 
         assert_eq!(effect, crate::app_effect::AppEffect::NONE);
         assert!(!app.ui_shell.active_overlay_is_modal());
         let active = app.active_tab_session().expect("Markdown tab should remain active");
-        assert_eq!(active.document.full_text(), source_before);
-        assert_eq!(active.document.generation(), generation_before);
+        assert_eq!(active.document().full_text(), source_before);
+        assert_eq!(active.document().generation(), generation_before);
     }
 
     #[test]
@@ -511,21 +518,24 @@ mod recent_file_tests {
         let selection_start = source.find("selected").expect("fixture has selected text");
         let selection_end = selection_start + "selected".len();
         {
-            let tab = app.active_tab_session_mut().expect("Markdown tab should be active");
-            tab.document.cursor_move_to_offset(selection_end);
-            tab.document.cursor_mut().selection_anchor = Some(selection_start);
+            let mut tab = app.active_tab_session_mut().expect("Markdown tab should be active");
+            tab.document_mut().cursor_move_to_offset(selection_end);
+            tab.document_mut().cursor_mut().selection_anchor = Some(selection_start);
         }
-        let generation_before =
-            app.active_tab_session().expect("Markdown tab should be active").document.generation();
+        let generation_before = app
+            .active_tab_session()
+            .expect("Markdown tab should be active")
+            .document()
+            .generation();
 
         let effect = app.open_table_picker();
 
         assert_eq!(effect, crate::app_effect::AppEffect::NONE);
         assert!(!app.ui_shell.active_overlay_is_modal());
         let active = app.active_tab_session().expect("Markdown tab should remain active");
-        assert_eq!(active.document.full_text(), source);
-        assert_eq!(active.document.selection_range(), Some((selection_start, selection_end)));
-        assert_eq!(active.document.generation(), generation_before);
+        assert_eq!(active.document().full_text(), source);
+        assert_eq!(active.document().selection_range(), Some((selection_start, selection_end)));
+        assert_eq!(active.document().generation(), generation_before);
     }
 
     #[test]
@@ -536,27 +546,30 @@ mod recent_file_tests {
         let cursor = source.find("inside").expect("fixture has code-block content") + 2;
         app.active_tab_session_mut()
             .expect("Markdown tab should be active")
-            .document
+            .document_mut()
             .cursor_move_to_offset(cursor);
-        let generation_before =
-            app.active_tab_session().expect("Markdown tab should be active").document.generation();
+        let generation_before = app
+            .active_tab_session()
+            .expect("Markdown tab should be active")
+            .document()
+            .generation();
 
         let effect = app.open_table_picker();
 
         assert_eq!(effect, crate::app_effect::AppEffect::NONE);
         assert!(!app.ui_shell.active_overlay_is_modal());
         let active = app.active_tab_session().expect("Markdown tab should remain active");
-        assert_eq!(active.document.full_text(), source);
-        assert_eq!(active.document.cursor_offset().0, cursor);
-        assert_eq!(active.document.generation(), generation_before);
+        assert_eq!(active.document().full_text(), source);
+        assert_eq!(active.document().cursor_offset().0, cursor);
+        assert_eq!(active.document().generation(), generation_before);
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::canvas_viewport::CanvasViewportAction;
     use crate::document_fixture::DocumentFixture;
+    use appkit_shell::canvas_viewport::CanvasViewportAction;
 
     struct CanvasCommandPlugin;
 

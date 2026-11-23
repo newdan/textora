@@ -1,5 +1,5 @@
+use appkit_shell::document_search::{recompute_matches, select_match};
 use appkit_shell::editor_runtime::EditorRuntime;
-use appkit_shell::tab_session::TabSessionMut;
 use ui::plugin::PluginMessage;
 
 const MAXIMUM_QUERY_BYTES: usize = 2_048;
@@ -15,10 +15,10 @@ pub(crate) fn open(editor: &mut EditorRuntime) -> bool {
         return false;
     }
     let selected_query = tab
-        .document
+        .document()
         .selection_range()
         .filter(|(start, end)| end - start <= MAXIMUM_QUERY_BYTES)
-        .and_then(|_| tab.document.extract_selected_text())
+        .and_then(|_| tab.document().extract_selected_text())
         .and_then(|selected| String::from_utf8(selected).ok())
         .filter(|selected| !selected.contains(['\n', '\r']));
     let search = tab.search_state_mut();
@@ -28,7 +28,7 @@ pub(crate) fn open(editor: &mut EditorRuntime) -> bool {
         search.query = query;
     }
     search.active_match_idx = 0;
-    recompute_matches(&mut tab);
+    recompute_matches(&mut tab, false);
     reveal_active_match(editor);
     true
 }
@@ -60,7 +60,7 @@ pub(crate) fn set_query(editor: &mut EditorRuntime, query: String) {
     let search = tab.search_state_mut();
     search.query = query[..query_end].to_owned();
     search.active_match_idx = 0;
-    recompute_matches(&mut tab);
+    recompute_matches(&mut tab, false);
     reveal_active_match(editor);
 }
 
@@ -72,12 +72,10 @@ pub(crate) fn refresh(editor: &mut EditorRuntime) -> bool {
         return false;
     };
     let search = tab.search_state();
-    if !search.panel_visible
-        || search.buffer_generation == tab.document.tb.gap_buffer().generation()
-    {
+    if !search.panel_visible || search.buffer_generation == tab.document().generation() {
         return false;
     }
-    recompute_matches(&mut tab);
+    recompute_matches(&mut tab, false);
     true
 }
 
@@ -100,16 +98,6 @@ pub(crate) fn navigate(editor: &mut EditorRuntime, backwards: bool) {
     reveal_active_match(editor);
 }
 
-fn recompute_matches(tab: &mut TabSessionMut<'_>) {
-    let source = tab.document.full_text();
-    let matches = textora_core::buffer::simd_search::find_all_case_insensitive_ascii(
-        tab.search_state().query.as_bytes(),
-        source.as_bytes(),
-    );
-    let generation = tab.document.tb.gap_buffer().generation();
-    tab.search_state_mut().update_matches(matches, generation);
-}
-
 fn reveal_active_match(editor: &mut EditorRuntime) {
     let line_height =
         ui::UiMetrics::from_settings(&editor.settings_snapshot(), editor.scale_factor() as f32)
@@ -123,8 +111,7 @@ fn reveal_active_match(editor: &mut EditorRuntime) {
     let Some(matched) = tab.search_state().active_match() else {
         return;
     };
-    tab.document.set_cursor_offset_synced(matched.end);
-    tab.document.cursor_mut().selection_anchor = Some(matched.start);
+    select_match(&mut tab, &matched);
     tab.send_message(PluginMessage::SetCursorByte(matched.end));
     tab.send_message(PluginMessage::SetSelAnchorByte(Some(matched.start)));
     tab.send_message(PluginMessage::SetSelCursorByte(Some(matched.end)));
@@ -201,7 +188,7 @@ mod tests {
         editor
             .tab_session_mut(tab_id)
             .expect("test tab session")
-            .document
+            .document_mut()
             .replace_range(0..3, "two");
         assert!(refresh(&mut editor));
         assert_eq!(search(&editor).matches, vec![4..7]);
@@ -212,7 +199,7 @@ mod tests {
         editor
             .tab_session_mut(tab_id)
             .expect("test tab session")
-            .document
+            .document_mut()
             .cursor_mut()
             .selection_anchor = None;
         open(&mut editor);
@@ -228,9 +215,9 @@ mod tests {
         let mut editor = editor("one two\nthree");
         let first = editor.active_tab_id().expect("first tab");
         {
-            let tab = editor.tab_session_mut(first).expect("first session");
-            tab.document.set_cursor_offset_synced(3);
-            tab.document.cursor_mut().selection_anchor = Some(0);
+            let mut tab = editor.tab_session_mut(first).expect("first session");
+            tab.document_mut().set_cursor_offset_synced(3);
+            tab.document_mut().cursor_mut().selection_anchor = Some(0);
             tab.runtime
                 .set_editing_access(appkit_shell::tab_runtime::DocumentEditingAccess::ReadOnly);
         }
@@ -238,7 +225,7 @@ mod tests {
         assert_eq!(search(&editor).query, "one");
         assert_eq!(search(&editor).matches, vec![0..3]);
         assert_eq!(
-            editor.tab_session(first).expect("first session").document.full_text(),
+            editor.tab_session(first).expect("first session").document().full_text(),
             "one two\nthree"
         );
         install(&mut editor, "two two");
@@ -248,9 +235,9 @@ mod tests {
         editor.activate(first);
         assert_eq!(search(&editor).query, "one");
         {
-            let tab = editor.tab_session_mut(first).expect("first session");
-            tab.document.set_cursor_offset_synced(9);
-            tab.document.cursor_mut().selection_anchor = Some(0);
+            let mut tab = editor.tab_session_mut(first).expect("first session");
+            tab.document_mut().set_cursor_offset_synced(9);
+            tab.document_mut().cursor_mut().selection_anchor = Some(0);
         }
         open(&mut editor);
         assert_eq!(search(&editor).query, "one");
@@ -260,7 +247,11 @@ mod tests {
     fn document_search_matches_across_gap_once() {
         let mut editor = editor("ABC abc abc");
         let tab_id = editor.active_tab_id().expect("active test tab");
-        editor.tab_session_mut(tab_id).expect("test session").document.replace_range(5..5, "x");
+        editor
+            .tab_session_mut(tab_id)
+            .expect("test session")
+            .document_mut()
+            .replace_range(5..5, "x");
         open(&mut editor);
         set_query(&mut editor, "axbc".into());
         assert_eq!(search(&editor).matches, vec![4..8]);
@@ -273,9 +264,9 @@ mod tests {
         let mut editor = editor(&"a".repeat(2049));
         let tab_id = editor.active_tab_id().expect("active test tab");
         {
-            let tab = editor.tab_session_mut(tab_id).expect("test session");
-            tab.document.set_cursor_offset_synced(2049);
-            tab.document.cursor_mut().selection_anchor = Some(0);
+            let mut tab = editor.tab_session_mut(tab_id).expect("test session");
+            tab.document_mut().set_cursor_offset_synced(2049);
+            tab.document_mut().cursor_mut().selection_anchor = Some(0);
         }
         assert!(open(&mut editor));
         assert!(search(&editor).query.is_empty());

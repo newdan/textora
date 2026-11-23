@@ -2,68 +2,22 @@
 //! Methods on `impl App`, extracted from app.rs.
 
 use crate::app::App;
-use appkit_shell::document_presentation::SourceSpacingState;
+use appkit_core::document::DocumentModel;
 #[cfg(test)]
 use appkit_shell::reshape_worker::content_hash_for_layout;
+use appkit_shell::source_spacing;
+use std::ops::Range;
 use std::sync::Arc;
 #[cfg(test)]
 use ui::typography::TextSpacingMode;
 
-const MARKDOWN_LANGUAGE_ID: &str = "markdown";
-const MARKDOWN_FILE_EXTENSIONS: &[&str] = &["md", "markdown", "mdown", "mkd"];
-const SOURCE_SPACING_SEMANTIC_VERSION: u64 = 1;
-
-fn document_is_markdown_source(document: &appkit_core::document::DocumentModel) -> bool {
-    document.language.is_some_and(|language| language.id.eq_ignore_ascii_case(MARKDOWN_LANGUAGE_ID))
-        || document.file_path.as_deref().and_then(|path| path.extension()).is_some_and(
-            |extension| {
-                extension.to_str().is_some_and(|extension| {
-                    MARKDOWN_FILE_EXTENSIONS
-                        .iter()
-                        .any(|candidate| extension.eq_ignore_ascii_case(candidate))
-                })
-            },
-        )
-}
-
-fn refresh_source_spacing_state(tab: &mut appkit_shell::tab_session::TabSessionMut<'_>) {
-    let document = &*tab.document;
-    let source_revision = document.content_revision();
-    let is_markdown = document_is_markdown_source(document);
-    let spacing = tab.source_spacing();
-    if spacing.source_revision == source_revision && spacing.is_markdown == is_markdown {
-        return;
-    }
-
-    let protected_ranges = if is_markdown {
-        tab.source_spacing_protected_ranges().unwrap_or_else(|| markdown_protected_ranges(document))
-    } else {
-        Arc::default()
-    };
-    tab.set_source_spacing(SourceSpacingState {
-        protected_ranges,
-        semantic_version: SOURCE_SPACING_SEMANTIC_VERSION,
-        source_revision,
-        is_markdown,
-    });
-}
-
 #[cfg(feature = "markdown")]
-fn markdown_protected_ranges(
-    document: &appkit_core::document::DocumentModel,
-) -> Arc<[std::ops::Range<usize>]> {
-    let parsed = textora_markdown::parser::parse_markdown(&document.full_text());
-    textora_markdown::typography::extract_prose_ranges(&parsed)
-        .protected_ranges()
-        .iter()
-        .map(|range| range.start..range.end)
-        .collect()
+fn markdown_protected_ranges(document: &DocumentModel) -> Arc<[Range<usize>]> {
+    textora_markdown::typography::source_spacing_protected_ranges(&document.full_text())
 }
 
 #[cfg(not(feature = "markdown"))]
-fn markdown_protected_ranges(
-    document: &appkit_core::document::DocumentModel,
-) -> Arc<[std::ops::Range<usize>]> {
+fn markdown_protected_ranges(document: &DocumentModel) -> Arc<[Range<usize>]> {
     let source_length = document.buffer_len();
     if source_length == 0 {
         return Arc::default();
@@ -79,7 +33,7 @@ impl App {
         let Some(mut tab) = self.tab_session_mut(tab_id) else {
             return;
         };
-        refresh_source_spacing_state(&mut tab);
+        source_spacing::refresh(&mut tab, None, markdown_protected_ranges);
     }
 
     pub(crate) fn invalidate_reshape(&mut self) {
@@ -123,8 +77,9 @@ impl App {
         if self.editor_runtime.has_reshape_worker() {
             self.refresh_active_source_spacing_state();
         }
-        let width =
-            self.active_tab_session().map_or(1.0, |tab| self.viewport_content_width(tab.document));
+        let width = self
+            .active_tab_session()
+            .map_or(1.0, |tab| self.viewport_content_width(tab.document()));
         self.editor_runtime.submit_active_reshape_ahead(width);
     }
 
@@ -137,7 +92,7 @@ impl App {
 mod zoom_tests {
     use super::*;
     use crate::plugins::editor::EditorPlugin;
-    use crate::render_cache::{CachedLine, GlyphInstance};
+    use appkit_shell::render_cache::{CachedLine, GlyphInstance};
 
     use crate::ui_shell::ShellInputs;
     use ui::core::{NoopMeasure, Screen};
@@ -277,7 +232,7 @@ mod zoom_tests {
 
         let dv = crate::document_fixture::DocumentFixture::new(vec!["line".to_string()], 40, 40.0);
         let left_margin = app.editor_left_margin(dv.line_count());
-        let expected = crate::render_pipeline::render_viewport_width(
+        let expected = appkit_shell::render_pipeline::render_viewport_width(
             screen.w,
             left_margin,
             &app.ui_metrics(),
