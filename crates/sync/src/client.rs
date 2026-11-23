@@ -247,8 +247,8 @@ impl SyncthingClient {
     }
 
     pub fn scan_folder(&self, folder_id: &FolderId) -> Result<(), SyncError> {
-        let path = format!("/rest/db/scan?folder={}", folder_id.as_str());
-        let response = self.send_request(Method::POST, "scan folder", &path, None)?;
+        let url = self.url_with_folder("/rest/db/scan", folder_id)?;
+        let response = self.send_request_url(Method::POST, "scan folder", url, None)?;
         ensure_success("scan folder", response).map(|_| ())
     }
 
@@ -415,7 +415,16 @@ impl SyncthingClient {
         path: &str,
         body: Option<Value>,
     ) -> Result<Response, SyncError> {
-        let url = self.endpoint.join(path)?;
+        self.send_request_url(method, operation, self.endpoint.join(path)?, body)
+    }
+
+    fn send_request_url(
+        &self,
+        method: Method,
+        operation: &'static str,
+        url: reqwest::Url,
+        body: Option<Value>,
+    ) -> Result<Response, SyncError> {
         let mut request =
             self.http.request(method, url).header(API_KEY_HEADER, self.api_key.expose_for_header());
         if let Some(body) = body {
@@ -430,8 +439,9 @@ impl SyncthingClient {
         paused: bool,
     ) -> Result<DeviceConfig, SyncError> {
         let action = if paused { "pause" } else { "resume" };
-        let path = format!("/rest/system/{action}?device={}", device_id.as_str());
-        let response = self.send_request(Method::POST, "set device pause state", &path, None)?;
+        let mut url = self.endpoint.join(&format!("/rest/system/{action}"))?;
+        url.query_pairs_mut().append_pair("device", device_id.as_str());
+        let response = self.send_request_url(Method::POST, "set device pause state", url, None)?;
         ensure_success("set device pause state", response)?;
         let actual = self.device_config(device_id)?.ok_or_else(|| {
             SyncError::ConfigurationMismatch { operation: "verify device pause state" }
@@ -637,8 +647,8 @@ mod tests {
 
     use super::SyncthingClient;
     use crate::{
-        ApiKey, DeviceId, EventCursor, FolderPhase, LoopbackEndpoint, SyncError, SyncEvent,
-        SyncEventKind,
+        ApiKey, DeviceId, EventCursor, FolderId, FolderPhase, LoopbackEndpoint, SyncError,
+        SyncEvent, SyncEventKind,
     };
 
     const DEVICE_ID: &str = "ABCDEFG-ABCDEFG-ABCDEFG-ABCDEFG-ABCDEFG-ABCDEFG-ABCDEFG-ABCDEFG";
@@ -711,6 +721,26 @@ mod tests {
             body.len()
         );
         stream.write_all(response.as_bytes()).expect("mock server should write");
+    }
+
+    #[test]
+    fn regression_scan_folder_encodes_id_as_one_query_value() {
+        let server = MockServer::start(vec![(200, String::new())]);
+        let client = SyncthingClient::new(
+            server.endpoint.clone(),
+            ApiKey::new("test-api-key".to_owned()).expect("test key should parse"),
+        )
+        .expect("client should initialize");
+        let folder_id = FolderId::new("work?notes&drafts#中文".to_owned())
+            .expect("folder IDs permit URL reserved characters");
+
+        client.scan_folder(&folder_id).expect("folder scan should succeed");
+        let requests = server.join();
+        let request_target = requests[0].split_whitespace().nth(1).expect("request has a target");
+        let url = reqwest::Url::parse(&format!("http://127.0.0.1{request_target}"))
+            .expect("target should form a valid URL");
+        let pairs = url.query_pairs().collect::<Vec<_>>();
+        assert_eq!(pairs, vec![("folder".into(), folder_id.as_str().into())]);
     }
 
     #[test]

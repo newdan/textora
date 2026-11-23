@@ -4,7 +4,7 @@ use std::collections::HashSet;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use appkit_core::workspace::types::TabId;
+use appkit_core::tab_set::types::TabId;
 
 use crate::reshape_worker::{ReshapeRequest, ReshapeResult, ReshapeWorker};
 

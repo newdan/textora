@@ -1036,7 +1036,6 @@ impl App {
             if let Some(text) = resources.text.as_mut() {
                 text.atlas.clear();
                 text.preview_cache.invalidate_all();
-                text.atlas_generation += 1;
             }
             let tab_ids = self.editor_tab_ids_in_order();
             for tab_id in tab_ids {

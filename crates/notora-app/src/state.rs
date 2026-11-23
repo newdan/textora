@@ -1,4 +1,7 @@
+mod title_focus;
+
 use std::collections::BTreeSet;
+use std::path::Path;
 
 use notora_core::{
     CatalogCard, CatalogCardCursor, CatalogNavigationTree, DocumentIdentity, DocumentKind,
@@ -888,11 +891,12 @@ impl NotoraState {
             self.library.selected_document_generation.wrapping_add(1);
     }
 
+    fn can_open_new_document_menu(&self) -> bool {
+        self.can_request_note_creation() && self.library.navigation_scope != NavigationScope::Trash
+    }
+
     fn open_new_document_menu(&mut self) -> Vec<NotoraEffect> {
-        if (self.workspace_root == WorkspaceRootState::Missing
-            && self.library.navigation_scope != NavigationScope::ExternalFiles)
-            || self.library.navigation_scope == NavigationScope::Trash
-        {
+        if !self.can_open_new_document_menu() {
             return vec![NotoraEffect::Redraw];
         }
         self.library.last_command_error = None;
@@ -901,10 +905,13 @@ impl NotoraState {
         vec![NotoraEffect::Redraw]
     }
 
+    fn can_request_note_creation(&self) -> bool {
+        self.workspace_root != WorkspaceRootState::Missing
+            || self.library.navigation_scope == NavigationScope::ExternalFiles
+    }
+
     fn request_note_creation(&mut self, kind: DocumentKind) -> Vec<NotoraEffect> {
-        if self.workspace_root == WorkspaceRootState::Missing
-            && self.library.navigation_scope != NavigationScope::ExternalFiles
-        {
+        if !self.can_request_note_creation() {
             return vec![NotoraEffect::Redraw];
         }
         if self.layout.overlay == OverlayState::NewDocumentMenu {
@@ -921,10 +928,16 @@ impl NotoraState {
         vec![NotoraEffect::RequestNoteCreation { kind, target }, NotoraEffect::Redraw]
     }
 
+    fn can_begin_encrypted_note_creation(&self) -> bool {
+        self.workspace_root != WorkspaceRootState::Missing
+            && !matches!(
+                self.library.navigation_scope,
+                NavigationScope::ExternalFiles | NavigationScope::Trash
+            )
+    }
+
     fn begin_encrypted_note_creation(&mut self) -> Vec<NotoraEffect> {
-        if self.workspace_root == WorkspaceRootState::Missing
-            || self.library.navigation_scope == NavigationScope::ExternalFiles
-        {
+        if !self.can_begin_encrypted_note_creation() {
             return vec![NotoraEffect::Redraw];
         }
         let Some(target) = creation_target(&self.library.navigation_scope) else {
@@ -1215,9 +1228,7 @@ impl NotoraState {
         metadata: NoteEditorMetadata,
         tags: Vec<TagSummary>,
     ) -> Vec<NotoraEffect> {
-        if self.library.selected_card != Some(request.identity)
-            || self.library.selected_document_generation != request.selection_generation
-        {
+        if !self.is_current_document(request) {
             return vec![NotoraEffect::Redraw];
         }
         self.library.active_editor_metadata = Some(ActiveEditorMetadata {
@@ -1415,7 +1426,20 @@ impl NotoraState {
         vec![NotoraEffect::QueryCards(query), NotoraEffect::Redraw]
     }
 
+    fn navigation_scope_exists(&self, tree: &CatalogNavigationTree) -> bool {
+        match &self.library.navigation_scope {
+            NavigationScope::Directory { relative_path } => {
+                tree.directories.contains(relative_path)
+            }
+            NavigationScope::Tag { tag_id } => {
+                tree.tags.iter().any(|tag| tag.tag_id == *tag_id && tag.active_note_count > 0)
+            }
+            _ => true,
+        }
+    }
+
     fn apply_navigation_tree(&mut self, tree: CatalogNavigationTree) -> Vec<NotoraEffect> {
+        let scope_is_valid = self.navigation_scope_exists(&tree);
         self.library.navigation_tree = NavigationTreeState {
             workspace_root_expanded: self.library.navigation_tree.workspace_root_expanded,
             tag_root_expanded: self.library.navigation_tree.tag_root_expanded,
@@ -1429,21 +1453,6 @@ impl NotoraState {
                 .collect(),
             directories: tree.directories,
             tags: tree.tags,
-        };
-        let scope_is_valid = match &self.library.navigation_scope {
-            NavigationScope::Directory { relative_path } => self
-                .library
-                .navigation_tree
-                .directories
-                .iter()
-                .any(|directory| directory == relative_path),
-            NavigationScope::Tag { tag_id } => self
-                .library
-                .navigation_tree
-                .tags
-                .iter()
-                .any(|tag| tag.tag_id == *tag_id && tag.active_note_count > 0),
-            _ => true,
         };
         if scope_is_valid {
             return vec![NotoraEffect::Redraw];
@@ -1464,13 +1473,22 @@ impl NotoraState {
         vec![NotoraEffect::Redraw]
     }
 
+    fn can_begin_directory_creation(&self, parent_relative_path: &Path) -> bool {
+        self.workspace_root != WorkspaceRootState::Missing
+            && (parent_relative_path.as_os_str().is_empty()
+                || self
+                    .library
+                    .navigation_tree
+                    .directories
+                    .iter()
+                    .any(|path| path == parent_relative_path))
+    }
+
     fn begin_directory_creation(
         &mut self,
         parent_relative_path: std::path::PathBuf,
     ) -> Vec<NotoraEffect> {
-        let parent_is_valid = parent_relative_path.as_os_str().is_empty()
-            || self.library.navigation_tree.directories.contains(&parent_relative_path);
-        if self.workspace_root == WorkspaceRootState::Missing || !parent_is_valid {
+        if !self.can_begin_directory_creation(&parent_relative_path) {
             return vec![NotoraEffect::Redraw];
         }
         self.library.last_command_error = None;
@@ -1522,21 +1540,24 @@ impl NotoraState {
         ]
     }
 
+    fn completed_directory_parent(&self, relative_path: &Path) -> Option<&Path> {
+        let DirectoryCreationState::Submitting { parent_relative_path, .. } =
+            &self.directory_creation
+        else {
+            return None;
+        };
+        let completed_parent = relative_path.parent().unwrap_or_else(|| Path::new(""));
+        (completed_parent == parent_relative_path).then_some(parent_relative_path)
+    }
+
     fn complete_directory_creation(
         &mut self,
         relative_path: std::path::PathBuf,
     ) -> Vec<NotoraEffect> {
-        let DirectoryCreationState::Submitting { parent_relative_path, .. } =
-            &self.directory_creation
-        else {
+        let Some(parent_relative_path) = self.completed_directory_parent(&relative_path) else {
             return vec![NotoraEffect::Redraw];
         };
-        if relative_path.parent().unwrap_or_else(|| std::path::Path::new(""))
-            != parent_relative_path
-        {
-            return vec![NotoraEffect::Redraw];
-        }
-        let parent_relative_path = parent_relative_path.clone();
+        let parent_relative_path = parent_relative_path.to_path_buf();
         self.directory_creation = DirectoryCreationState::Inactive;
         self.library.last_command_error = None;
         self.library.navigation_tree.workspace_root_expanded = true;
@@ -1695,6 +1716,11 @@ impl NotoraState {
         }
     }
 
+    fn is_current_document(&self, request: DocumentLoadRequest) -> bool {
+        self.library.selected_card == Some(request.identity)
+            && self.library.selected_document_generation == request.selection_generation
+    }
+
     fn select_document(&mut self, identity: DocumentIdentity) -> DocumentLoadRequest {
         let encrypted_unlock_was_active =
             !matches!(&self.encrypted_note_unlock, EncryptedNoteUnlockState::Inactive);
@@ -1722,10 +1748,7 @@ impl NotoraState {
         let DocumentIdentity::Note(note_id) = request.identity else {
             return vec![NotoraEffect::Redraw];
         };
-        if self.library.selected_card != Some(request.identity)
-            || self.library.selected_document_generation != request.selection_generation
-            || metadata.note_id != note_id
-        {
+        if !self.is_current_document(request) || metadata.note_id != note_id {
             return vec![NotoraEffect::Redraw];
         }
         self.library.active_editor_metadata = Some(ActiveEditorMetadata {

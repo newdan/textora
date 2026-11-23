@@ -230,7 +230,7 @@ impl EditorRuntime {
 
 fn paint_plugin_editor(
     runtime: &mut EditorRuntime,
-    tab_id: appkit_core::workspace::types::TabId,
+    tab_id: appkit_core::tab_set::types::TabId,
     resources: &mut RenderResources,
     editor_rect: ui::Rect,
     screen: ui::Screen,
@@ -445,7 +445,7 @@ fn synchronize_plugin_document(
 
 fn paint_text_editor(
     runtime: &mut EditorRuntime,
-    tab_id: appkit_core::workspace::types::TabId,
+    tab_id: appkit_core::tab_set::types::TabId,
     resources: &mut RenderResources,
     editor_rect: ui::Rect,
     screen: ui::Screen,
@@ -727,7 +727,7 @@ mod tests {
             .presentation
             .search_state
             .update_matches(vec![0..6, 7..13], document.tb.gap_buffer().generation());
-        let mut ids = appkit_core::workspace::types::TabIdAllocator::new();
+        let mut ids = appkit_core::tab_set::types::TabIdAllocator::new();
         let tab_id = ids.allocate();
         let theme = ui::Theme::resolve_builtin(ui::ThemeMode::Dark, winit::window::Theme::Dark);
         let settings = ui::Settings::new();

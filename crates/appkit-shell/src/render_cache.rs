@@ -57,6 +57,7 @@ pub struct RenderCache {
     cache: LruCache<usize, CachedLine>,
     /// 每行典型内存占用（字节），用于估算总内存。
     estimated_bytes: usize,
+    checked_atlas_generation: Option<u64>,
 }
 
 #[allow(dead_code)]
@@ -163,12 +164,16 @@ impl Default for RenderCache {
 
 impl RenderCache {
     pub fn new() -> Self {
-        Self { cache: LruCache::new(MAX_CACHED_LINES), estimated_bytes: 0 }
+        Self {
+            cache: LruCache::new(MAX_CACHED_LINES),
+            estimated_bytes: 0,
+            checked_atlas_generation: None,
+        }
     }
 
     /// 获取缓存的行数据（提升到 MRU）。
-    pub fn get(&self, doc_line: usize) -> Option<&CachedLine> {
-        self.cache.peek(&doc_line)
+    pub fn get(&mut self, doc_line: usize) -> Option<&CachedLine> {
+        self.cache.get(&doc_line)
     }
 
     /// 检查缓存中是否存在指定行。
@@ -178,6 +183,9 @@ impl RenderCache {
 
     /// 插入缓存行。
     pub fn insert(&mut self, doc_line: usize, line: CachedLine) {
+        if self.checked_atlas_generation != Some(line.atlas_generation) {
+            self.checked_atlas_generation = None;
+        }
         let entry_bytes = line.instances.len() * std::mem::size_of::<GlyphInstance>()
             + line.line_number_glyphs.len() * std::mem::size_of::<GlyphInstance>();
         self.estimated_bytes += entry_bytes;
@@ -203,6 +211,10 @@ impl RenderCache {
 
     /// 使 atlas generation 不匹配的条目失效（atlas 驱逐后调用）。
     pub fn invalidate_stale_atlas(&mut self, current_generation: u64) {
+        if self.checked_atlas_generation == Some(current_generation) {
+            return;
+        }
+        self.checked_atlas_generation = Some(current_generation);
         let stale: Vec<usize> = self
             .cache
             .iter()
@@ -371,6 +383,24 @@ mod tests {
     }
 
     #[test]
+    fn regression_atlas_clear_discards_old_line_and_caches_its_replacement() {
+        let mut atlas = render::GlyphAtlas::new(64, 64, 16, 1);
+        let mut cache = RenderCache::new();
+        cache.insert(0, make_line(atlas.generation(), 1));
+
+        atlas.clear();
+        cache.invalidate_stale_atlas(atlas.generation());
+        assert!(cache.get(0).is_none());
+
+        cache.insert(0, make_line(atlas.generation(), 2));
+        cache.invalidate_stale_atlas(atlas.generation());
+        assert_eq!(
+            cache.get(0).expect("replacement should use the reset atlas").instances.len(),
+            2
+        );
+    }
+
+    #[test]
     fn stale_atlas_invalidation() {
         let mut rc = RenderCache::new();
         rc.insert(0, make_line(1, 3));
@@ -378,6 +408,20 @@ mod tests {
         rc.invalidate_stale_atlas(3);
         assert!(rc.get(0).is_none()); // gen 1 ≠ 3
         assert!(rc.get(1).is_none()); // gen 5 ≠ 3
+    }
+
+    #[test]
+    fn regression_get_promotes_line_to_most_recently_used() {
+        let mut cache = RenderCache::new();
+        for line in 0..MAX_CACHED_LINES {
+            cache.insert(line, make_line(1, 1));
+        }
+
+        assert!(cache.get(0).is_some());
+        cache.insert(MAX_CACHED_LINES, make_line(1, 1));
+
+        assert!(cache.contains(0));
+        assert!(!cache.contains(1));
     }
 
     #[test]

@@ -2,7 +2,7 @@
 
 use std::sync::Arc;
 
-use appkit_core::workspace::types::TabId;
+use appkit_core::tab_set::types::TabId;
 use ui::inspector_panel::{
     InspectorPanelAction, InspectorPanelDescriptor, InspectorPanelPresentation, PanelId,
 };
@@ -104,7 +104,7 @@ impl OpenInspectorPanel {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use appkit_core::workspace::types::TabIdAllocator;
+    use appkit_core::tab_set::types::TabIdAllocator;
 
     #[test]
     fn mount_renewal_invalidates_old_events_without_clearing_presentation() {

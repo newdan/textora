@@ -3,12 +3,12 @@
 use std::ops::Range;
 use std::path::PathBuf;
 
-use appkit_core::workspace::types::TabId;
+use appkit_core::tab_set::types::TabId;
 use smallvec::SmallVec;
 
+use crate::editor_tab_set::CloseTabDecision;
 use crate::event::ShellEffect;
 use crate::view_route::{ViewRouteError, ViewRouteTable};
-use crate::workspace::CloseTabDecision;
 
 /// Runtime 的构造输入，由产品层负责解析并注入。
 pub struct EditorRuntimeConfig {
@@ -201,7 +201,7 @@ impl std::error::Error for EditorRuntimeError {}
 #[cfg(test)]
 mod tests {
     use super::*;
-    use appkit_core::workspace::types::TabIdAllocator;
+    use appkit_core::tab_set::types::TabIdAllocator;
 
     fn runtime_config() -> EditorRuntimeConfig {
         let registry = ui::plugin::PluginRegistry::new();

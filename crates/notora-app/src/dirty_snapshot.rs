@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 use appkit_core::snapshot::{
     snapshot_id_for_path, snapshot_id_for_untitled, write_snapshot, write_snapshot_with_revision,
 };
-use appkit_core::workspace::types::TabId;
+use appkit_core::tab_set::types::TabId;
 use appkit_shell::editor_runtime::EditorWorkspaceSnapshot;
 
 /// 可在后台写入的单个 dirty tab 快照。
@@ -108,7 +108,7 @@ pub fn list_recoverable_snapshots(
 
 #[cfg(test)]
 mod tests {
-    use appkit_core::workspace::types::TabIdAllocator;
+    use appkit_core::tab_set::types::TabIdAllocator;
     use appkit_shell::editor_runtime::{EditorTabSnapshot, EditorWorkspaceSnapshot};
 
     use super::{
@@ -116,10 +116,7 @@ mod tests {
         write_dirty_snapshot,
     };
 
-    fn tab_snapshot(
-        tab_id: appkit_core::workspace::types::TabId,
-        dirty: bool,
-    ) -> EditorTabSnapshot {
+    fn tab_snapshot(tab_id: appkit_core::tab_set::types::TabId, dirty: bool) -> EditorTabSnapshot {
         EditorTabSnapshot {
             tab_id,
             path: Some("/workspace/note.md".into()),

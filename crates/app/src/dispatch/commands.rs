@@ -55,7 +55,7 @@ impl App {
         );
         let workspace_effect = if let Some(tab_id) = self.editor_tab_id_for_path(path) {
             self.activate_editor_tab(tab_id)
-                .unwrap_or(appkit_shell::workspace::WorkspaceEffect::None)
+                .unwrap_or(appkit_shell::editor_tab_set::WorkspaceEffect::None)
         } else {
             let viewport = self.viewport_dimensions(self.screen_height());
             let ProductPreparedTab { prepared, suggested_file_name } =

@@ -314,6 +314,7 @@ impl<S: BlockSource> LazyLayout<S> {
             laid_out: vec![None; n],
             precise: vec![false; n],
             flat_lines: Vec::new(),
+            flat_line_revision: 0,
             reconciled_flat_lines: std::iter::repeat_with(|| None).take(n).collect(),
             retained_block_projections: vec![Vec::new(); n],
             source_projection_index: None,

@@ -111,7 +111,8 @@ Markdown 文档可在编辑和预览视图间切换。思维导图使用后缀�
 | [`crates/app`](crates/app) | `textora-app` | Textora 产品层：窗口、命令路由、文件工作区与同步集成 |
 | [`crates/notora-app`](crates/notora-app) | `notora-app` | Notora 产品层：笔记库界面、笔记操作、自动保存与编辑器适配 |
 | [`crates/notora-core`](crates/notora-core) | `notora-core` | 笔记域：笔记库目录、SQLite 索引、笔记命令和文件监控 |
-| [`crates/appkit-core`](crates/appkit-core) | `textora-appkit-core` | 无界面的 `DocumentModel`、标签工作区模型、会话持久化与文件安全 |
+| [`crates/file-watch`](crates/file-watch) | `textora-file-watch` | 共享文件监听基础层，基于 `notify`，由 Textora 应用层和 Notora 笔记域使用 |
+| [`crates/appkit-core`](crates/appkit-core) | `textora-appkit-core` | 无界面的 `DocumentModel`、标签集合 `TabSet`、会话持久化与文件安全 |
 | [`crates/appkit-shell`](crates/appkit-shell) | `textora-appkit-shell` | 共享桌面宿主：`EditorRuntime`、标签运行态、输入和绘制管线、保存任务 |
 | [`crates/core`](crates/core) | `textora-core` | 文本缓冲区、撤销历史、Unicode 导航、搜索、高亮和文件读写原语 |
 | [`crates/ui`](crates/ui) | `textora-ui` | 可复用控件、主题和视口几何；定义编辑器视图的插件协议 |

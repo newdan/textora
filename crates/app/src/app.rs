@@ -53,13 +53,13 @@ pub struct App {
     pub(crate) action_pump: EventPump<crate::actions::AppAction>,
     pub(crate) editor_runtime: EditorRuntime,
     pub(crate) accessibility_adapter: Option<PlatformAccessibilityAdapter>,
-    pub(crate) popup_tab_id_snapshot: Vec<appkit_core::workspace::types::TabId>,
-    pub(crate) workspace_store: appkit_core::workspace::store::WorkspaceStore,
+    pub(crate) popup_tab_id_snapshot: Vec<appkit_core::tab_set::types::TabId>,
+    pub(crate) workspace_store: appkit_core::tab_set::store::WorkspaceStore,
     pub(crate) ui_shell: UiShell,
     pub(crate) file_history: FileHistory,
     pub(crate) library_file_monitor: Option<crate::library_file_monitor::LibraryFileMonitor>,
     pub(crate) file_safety_notices: Vec<appkit_core::file_safety::FileSafetyNotice>,
-    pub(crate) pending_close_after_save: HashSet<appkit_core::workspace::types::TabId>,
+    pub(crate) pending_close_after_save: HashSet<appkit_core::tab_set::types::TabId>,
     pub(crate) pending_quit_after_save: bool,
     pub(crate) running: bool,
     pub(crate) needs_redraw: bool,
@@ -127,7 +127,7 @@ impl App {
     pub(crate) fn popup_tab_id_for_index(
         &self,
         index: usize,
-    ) -> Option<appkit_core::workspace::types::TabId> {
+    ) -> Option<appkit_core::tab_set::types::TabId> {
         self.popup_tab_id_snapshot.get(index).copied().or_else(|| self.editor_tab_id_at(index))
     }
 

@@ -107,6 +107,8 @@ impl AtlasPage {
 ///
 /// Uses a simple shelf-packing algorithm with LRU eviction.
 pub struct GlyphAtlas {
+    /// Revision of the GPU locations represented by cached glyphs.
+    generation: u64,
     /// Atlas pages.
     pages: Vec<AtlasPage>,
     /// Glyph key → slot mapping with O(1) LRU eviction.
@@ -129,6 +131,7 @@ impl GlyphAtlas {
         let mut first_page = AtlasPage::new(0, page_width, page_height);
         first_page.reserve(1, 1);
         Self {
+            generation: 1,
             max_pages: max_pages.max(1),
             pages: vec![first_page],
             slots: LruCache::new(capacity),
@@ -225,10 +228,15 @@ impl GlyphAtlas {
     pub fn glyph_count(&self) -> usize {
         self.slots.len()
     }
+    pub fn generation(&self) -> u64 {
+        self.generation
+    }
+
     /// Clear all atlas pages, slot cache, and oversized set.
     /// Resets the allocator state. GPU texture pixels are overwritten
     /// on the next rasterize pass — no GPU resource is recreated.
     pub fn clear(&mut self) {
+        self.generation = self.generation.wrapping_add(1);
         let mut first_page = AtlasPage::new(0, self.page_width, self.page_height);
         first_page.reserve(1, 1); // preserve cursor white pixel at origin
         self.pages = vec![first_page];

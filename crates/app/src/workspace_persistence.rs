@@ -2,18 +2,18 @@ use std::io;
 use std::path::Path;
 
 use appkit_core::document::DocumentModel;
-use appkit_core::workspace::types::{PersistedTab, PersistedWorkspace, TabId};
+use appkit_core::tab_set::types::{PersistedTab, PersistedWorkspace, TabId};
 use appkit_shell::editor_runtime::{EditorTabSnapshot, EditorWorkspaceSnapshot};
 use appkit_shell::prepared_tab::PreparedTab;
 use ui::plugin::PLUGIN_EDITOR;
 
 use crate::workspace_tab_factory::ViewportDimensions;
 use appkit_shell::document_presentation::DocumentPresentation;
+use appkit_shell::editor_tab_set::EditorTabSet;
 use appkit_shell::tab_runtime::{TabRuntime, TabRuntimeStore};
 #[cfg(test)]
 use appkit_shell::tab_session::TabSession;
 use appkit_shell::tab_session::TabSessionMut;
-use appkit_shell::workspace::EditorTabSet;
 
 const WORKSPACE_VERSION: u32 = 1;
 const RECOVERY_TITLE_PREFIX: &str = "恢复：";
@@ -208,7 +208,7 @@ fn persisted_runtime_tab(tab: &EditorTabSnapshot, snapshots_dir: &Path) -> Persi
 fn persisted_tab(
     workspace: &EditorTabSet,
     runtimes: &TabRuntimeStore,
-    entry: &appkit_core::workspace::model::TabEntry<appkit_core::document::DocumentModel>,
+    entry: &appkit_core::tab_set::TabEntry<appkit_core::document::DocumentModel>,
     snapshots_dir: &Path,
 ) -> PersistedTab {
     let document = &entry.value;
@@ -313,15 +313,19 @@ fn restore_dirty_lines(
     let original_lines = std::fs::read(path)
         .map(|bytes| String::from_utf8_lossy(&bytes).lines().map(str::to_owned).collect::<Vec<_>>())
         .unwrap_or_default();
-    let restored =
-        appkit_core::snapshot::read_and_apply(snapshots_dir, snapshot_filename, &original_lines)
-            .map(|(lines, header)| {
-                if snapshot_baseline.is_none() {
-                    *snapshot_baseline = header.baseline_revision;
-                }
-                lines
-            })
-            .ok();
+    let restored = appkit_core::snapshot::read_and_apply_for_path(
+        snapshots_dir,
+        snapshot_filename,
+        path,
+        &original_lines,
+    )
+    .map(|(lines, header)| {
+        if snapshot_baseline.is_none() {
+            *snapshot_baseline = header.baseline_revision;
+        }
+        lines
+    })
+    .ok();
     let legacy_without_baseline = restored.is_some() && snapshot_baseline.is_none();
     (restored, legacy_without_baseline)
 }
@@ -525,10 +529,10 @@ mod tests {
     use appkit_shell::tab_session::{TabSession, TabSessionMut};
 
     fn append_document(
-        workspace: &mut appkit_shell::workspace::EditorTabSet,
+        workspace: &mut appkit_shell::editor_tab_set::EditorTabSet,
         runtimes: &mut TabRuntimeStore,
         document: DocumentFixture,
-    ) -> appkit_core::workspace::types::TabId {
+    ) -> appkit_core::tab_set::types::TabId {
         let (document, presentation) = document.into_parts();
         let prepared = PreparedTab::new(
             document,
@@ -549,7 +553,7 @@ cursor_offset = 5
 dirty = false
 "#;
 
-        let parsed: appkit_core::workspace::types::PersistedWorkspace =
+        let parsed: appkit_core::tab_set::types::PersistedWorkspace =
             toml::from_str(serialized).expect("legacy workspace snapshot should deserialize");
 
         assert_eq!(parsed.entries[0].suggested_file_name, None);

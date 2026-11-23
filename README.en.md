@@ -111,7 +111,8 @@ Markdown documents can be switched between editing and preview-oriented views. M
 | [`crates/app`](crates/app) | `textora-app` | Textora product layer: windows, command routing, file workspaces, and sync integration |
 | [`crates/notora-app`](crates/notora-app) | `notora-app` | Notora product layer: library UI, note actions, autosave, and editor integration |
 | [`crates/notora-core`](crates/notora-core) | `notora-core` | Notes domain: library directories, SQLite index, note commands, and file monitoring |
-| [`crates/appkit-core`](crates/appkit-core) | `textora-appkit-core` | Headless `DocumentModel`, tab workspace model, session persistence, and file safety |
+| [`crates/file-watch`](crates/file-watch) | `textora-file-watch` | Shared file watching backed by `notify`, used by the Textora app and Notora notes domain |
+| [`crates/appkit-core`](crates/appkit-core) | `textora-appkit-core` | Headless `DocumentModel`, `TabSet`, session persistence, and file safety |
 | [`crates/appkit-shell`](crates/appkit-shell) | `textora-appkit-shell` | Shared desktop host: `EditorRuntime`, tab runtime, input and painting pipelines, and save jobs |
 | [`crates/core`](crates/core) | `textora-core` | Text buffer, undo history, Unicode navigation, search, highlighting, and file I/O primitives |
 | [`crates/ui`](crates/ui) | `textora-ui` | Reusable widgets, themes, viewport geometry, and the editor view plugin protocol |

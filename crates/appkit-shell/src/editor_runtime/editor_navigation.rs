@@ -1,6 +1,6 @@
 //! Shared visual keyboard navigation and plugin caret synchronization.
 
-use appkit_core::{document::DocumentModel, workspace::types::TabId};
+use appkit_core::{document::DocumentModel, tab_set::types::TabId};
 use textora_core::types::ByteIndex;
 use ui::plugin::{CursorAffinity, EditHitTarget, MoveDirection, VisualCaretPosition};
 

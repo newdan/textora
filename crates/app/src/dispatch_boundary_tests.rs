@@ -54,7 +54,7 @@ fn dispatch_domains_do_not_apply_global_followups_directly() {
 
 #[test]
 fn workspace_stores_document_models_without_doc_item_runtime_fallback() {
-    let workspace_source = include_str!("../../appkit-shell/src/workspace.rs");
+    let workspace_source = include_str!("../../appkit-shell/src/editor_tab_set.rs");
 
     assert!(
         workspace_source.contains("TabSet<DocumentModel>"),

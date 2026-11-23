@@ -7,7 +7,6 @@ pub use document::{DocView, DocViewMut};
 
 pub mod buffer;
 #[allow(unused)]
-mod cell;
 pub mod disk_revision;
 pub mod document;
 pub mod file;

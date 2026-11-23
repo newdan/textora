@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 
-use appkit_core::workspace::types::TabId;
+use appkit_core::tab_set::types::TabId;
 
 use super::document_runtime::WorkspaceNoteSaveCandidate;
 use crate::action::WorkspaceTransitionRequest;
@@ -66,7 +66,7 @@ impl WorkspaceTransitionRuntime {
 
 #[cfg(test)]
 mod tests {
-    use appkit_core::workspace::types::TabIdAllocator;
+    use appkit_core::tab_set::types::TabIdAllocator;
 
     use super::WorkspaceTransitionRuntime;
     use crate::action::WorkspaceTransitionRequest;

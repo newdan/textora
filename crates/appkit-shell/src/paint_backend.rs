@@ -108,9 +108,13 @@ pub fn drain(
                     continue;
                 };
                 let cache_key = preview_text_cache_key(layout.id, x);
+                let atlas_generation = text_state.atlas_generation();
 
                 // 尝试从预览 cache 获取
-                let cached = text_state.preview_cache.get(cache_key);
+                let cached = text_state
+                    .preview_cache
+                    .get(cache_key)
+                    .filter(|line| line.atlas_generation == atlas_generation);
 
                 if let Some(cached_line) = cached {
                     // Cache hit — 从 GlyphInstance 直接发射
@@ -126,8 +130,11 @@ pub fn drain(
                     );
                     vertices.extend(verts);
                 } else {
-                    let mut cached_line =
-                        build_cached_text_line(&layout, x, |cluster, requested_x| {
+                    let cached_line = build_cached_text_line(
+                        &layout,
+                        x,
+                        atlas_generation,
+                        |cluster, requested_x| {
                             let (glyph_x, phase) = crate::text_rasterize::glyph_position(
                                 &mut text_state.shaper,
                                 cluster.font_id,
@@ -143,12 +150,9 @@ pub fn drain(
                                 &text_state.atlas_texture,
                                 &gpu.ctx.queue,
                             );
-                            if slot.is_some() {
-                                text_state.track_glyph_resolve();
-                            }
                             slot.map(|slot| (glyph_x, slot))
-                        });
-                    cached_line.atlas_generation = text_state.atlas_generation;
+                        },
+                    );
                     vertices.extend(emit_from_instances(
                         &cached_line.instances,
                         x,
@@ -260,6 +264,7 @@ fn preview_text_cache_key(layout_id: u64, origin_x: f32) -> u64 {
 fn build_cached_text_line(
     layout: &ui::core::text_layout::UiTextLayout,
     origin_x: f32,
+    atlas_generation: u64,
     mut resolve: impl FnMut(&shaping::GlyphCluster, f32) -> Option<(f32, render::GlyphSlot)>,
 ) -> CachedLine {
     let mut instances = Vec::new();
@@ -283,7 +288,7 @@ fn build_cached_text_line(
     CachedLine {
         instances,
         line_number_glyphs: vec![],
-        atlas_generation: 0,
+        atlas_generation,
         visual_line_count: 1,
         content_hash: layout.id,
         visual_lines: vec![(0, layout.shaped.clusters.len(), x_cursor - origin_x)],

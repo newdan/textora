@@ -2,7 +2,7 @@
 
 use std::path::PathBuf;
 
-use appkit_core::workspace::types::TabId;
+use appkit_core::tab_set::types::TabId;
 use appkit_shell::ShellEffect;
 
 use crate::action::{NotoraAction, NotoraEffect};

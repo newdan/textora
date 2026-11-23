@@ -2,7 +2,7 @@
 
 use std::num::NonZeroUsize;
 
-use appkit_core::workspace::types::TabId;
+use appkit_core::tab_set::types::TabId;
 use notora_core::DocumentIdentity;
 
 use crate::document_registry::{DocumentRegistry, RegisteredDocument};
@@ -79,7 +79,7 @@ fn is_evictable(document: RegisteredDocument, runtime_tabs: &[RuntimeTabState]) 
 mod tests {
     use std::num::NonZeroUsize;
 
-    use appkit_core::workspace::types::TabIdAllocator;
+    use appkit_core::tab_set::types::TabIdAllocator;
     use notora_core::{DocumentIdentity, NoteId};
 
     use super::{RuntimeLru, RuntimeTabState};

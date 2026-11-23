@@ -185,6 +185,8 @@ impl<S: BlockSource> BlockViewEngine<S> {
         viewport_width: f32,
         document_view: &dyn DocView,
     ) -> LazyLayout<S> {
+        // A replacement layout starts its revision sequence over.
+        self.search.invalidate();
         let mut layout = LazyLayout::new(document, style, viewport_width, document_view);
         layout.code_viewport = self.lazy.as_ref().and_then(|previous| previous.code_viewport);
         layout.set_source_generation(self.source_generation);

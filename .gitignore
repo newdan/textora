@@ -34,3 +34,7 @@
 /.screenshots/
 /.edit+/
 /debug.log
+
+# Local design tools and snapshots
+/.dsh/
+/designs/

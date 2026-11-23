@@ -75,7 +75,6 @@ mod cli;
 mod commands;
 #[cfg(test)]
 mod document_fixture;
-pub(crate) mod edit_transaction;
 mod editor_host;
 #[cfg(test)]
 mod external_change_tests;

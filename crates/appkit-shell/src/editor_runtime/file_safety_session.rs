@@ -8,7 +8,7 @@ use appkit_core::file_safety::{
     DiskRevision, FileSafetyCommand, FileSafetyError, FileSafetyOutcome, FileSafetyResult,
     FileSafetyWorker,
 };
-use appkit_core::workspace::types::TabId;
+use appkit_core::tab_set::types::TabId;
 
 const FILE_SAFETY_CHECK_INTERVAL: Duration = Duration::from_secs(2);
 
@@ -281,7 +281,7 @@ impl Drop for FileSafetySession {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use appkit_core::workspace::types::TabIdAllocator;
+    use appkit_core::tab_set::types::TabIdAllocator;
     use std::path::Path;
 
     fn candidate(tab_id: TabId, path: &Path) -> FileSafetyCandidate {

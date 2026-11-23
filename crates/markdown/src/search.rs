@@ -1,21 +1,21 @@
 //! Search highlight state for markdown preview.
 //!
 //! Encapsulates the search-match rectangle cache and highlight generation,
-//! isolating interior mutability from [`super::preview::MarkdownView`].
+//! isolating interior mutability from [`crate::view::MarkdownView`].
 
 use crate::layout::{FlatLine, grapheme_x};
 use std::cell::{Cell, RefCell};
+use textora_core::unicode::grapheme_byte_boundaries;
 use ui::core::geom::Rect;
 use ui::core::paint::{DrawCmd, DrawList};
 
 /// Cached search match rectangles for global indexing and viewport culling.
 ///
-/// Uses interior mutability because [`ViewPlugin::query()`](`ui::plugin::ViewPlugin::query`)
-/// takes `&self`, but the rect cache needs updating when the query changes.
+/// The search view queries highlights through a shared reference.
 pub(crate) struct SearchHighlightCache {
     query: RefCell<String>,
     case_sensitive: Cell<bool>,
-    generation: Cell<u32>,
+    version: Cell<Option<(u32, u64)>>,
     rects: RefCell<Vec<Rect>>,
 }
 
@@ -30,7 +30,7 @@ impl SearchHighlightCache {
         Self {
             query: RefCell::new(String::new()),
             case_sensitive: Cell::new(false),
-            generation: Cell::new(0),
+            version: Cell::new(None),
             rects: RefCell::new(Vec::new()),
         }
     }
@@ -40,56 +40,33 @@ impl SearchHighlightCache {
         &self,
         query: &str,
         case_sensitive: bool,
-        generation: u32,
+        version: (u32, u64),
         flat_lines: &[FlatLine],
     ) {
         if *self.query.borrow() == query
             && self.case_sensitive.get() == case_sensitive
-            && self.generation.get() == generation
+            && self.version.get() == Some(version)
         {
             return;
         }
 
         *self.query.borrow_mut() = query.to_string();
         self.case_sensitive.set(case_sensitive);
-        self.generation.set(generation);
+        self.version.set(Some(version));
 
-        let q_chars: Vec<char> = query.chars().collect();
-        if q_chars.is_empty() {
-            self.rects.borrow_mut().clear();
+        let mut rects = self.rects.borrow_mut();
+        rects.clear();
+        if query.is_empty() {
             return;
         }
 
-        let mut new_rects = Vec::new();
         for line in flat_lines {
-            let chars: Vec<char> = line.text.chars().collect();
-            let mut start_ch_idx = 0;
-
-            while start_ch_idx + q_chars.len() <= chars.len() {
-                let is_match = if case_sensitive {
-                    chars[start_ch_idx..start_ch_idx + q_chars.len()] == q_chars[..]
-                } else {
-                    chars[start_ch_idx..start_ch_idx + q_chars.len()]
-                        .iter()
-                        .zip(&q_chars)
-                        .all(|(c1, c2)| c1.to_lowercase().eq(c2.to_lowercase()))
-                };
-
-                if is_match {
-                    let end_ch_idx = start_ch_idx + q_chars.len();
-                    let x0 = line.rect.x + grapheme_x(line, start_ch_idx);
-                    let x1 = line.rect.x + grapheme_x(line, end_ch_idx);
-                    let w = (x1 - x0).max(0.0);
-                    if w > 0.0 {
-                        new_rects.push(Rect::new(x0, line.rect.y, w, line.rect.h));
-                    }
-                    start_ch_idx = end_ch_idx;
-                } else {
-                    start_ch_idx += 1;
-                }
-            }
+            append_match_rectangles(&mut rects, line, query, case_sensitive);
         }
-        *self.rects.borrow_mut() = new_rects;
+    }
+
+    pub fn invalidate(&self) {
+        self.version.set(None);
     }
 
     /// Generate [`DrawList`] commands for search match highlights.
@@ -110,7 +87,7 @@ impl SearchHighlightCache {
 
         for (idx, rect) in rects.iter().enumerate() {
             let rect_y = rect.y - scroll_y + offset_y;
-            if rect_y + rect.h < 0.0 || rect_y > viewport_h {
+            if rect_y + rect.h < offset_y || rect_y > offset_y + viewport_h {
                 continue;
             }
 
@@ -147,5 +124,103 @@ impl SearchHighlightCache {
         } else {
             current_scroll_y
         }
+    }
+}
+
+fn append_match_rectangles(
+    rects: &mut Vec<Rect>,
+    line: &FlatLine,
+    query: &str,
+    case_sensitive: bool,
+) {
+    let mut boundaries = None;
+    let mut remaining = line.text.as_str();
+    while let Some(first) = remaining.chars().next() {
+        let Some(matched_bytes) = matching_prefix_bytes(remaining, query, case_sensitive) else {
+            remaining = &remaining[first.len_utf8()..];
+            continue;
+        };
+
+        let start_byte = line.text.len() - remaining.len();
+        let end_byte = start_byte + matched_bytes;
+        remaining = &remaining[matched_bytes..];
+
+        let boundaries = boundaries.get_or_insert_with(|| grapheme_byte_boundaries(&line.text));
+        let start = boundaries.partition_point(|&byte| byte <= start_byte) - 1;
+        let end = boundaries.partition_point(|&byte| byte < end_byte);
+        let x0 = grapheme_x(line, start);
+        let x1 = grapheme_x(line, end);
+        if x1 > x0 {
+            rects.push(Rect::new(line.rect.x + x0, line.rect.y, x1 - x0, line.rect.h));
+        }
+    }
+}
+
+fn matching_prefix_bytes(candidate: &str, query: &str, case_sensitive: bool) -> Option<usize> {
+    if case_sensitive {
+        return candidate.starts_with(query).then_some(query.len());
+    }
+
+    let mut chars = candidate.chars();
+    for expected in query.chars() {
+        let actual = chars.next()?;
+        if !actual.to_lowercase().eq(expected.to_lowercase()) {
+            return None;
+        }
+    }
+    Some(candidate.len() - chars.as_str().len())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn line(text: &str, y: f32) -> FlatLine {
+        FlatLine {
+            flat_idx: 0,
+            rect: Rect::new(20.0, y, 400.0, 10.0),
+            text: text.to_owned(),
+            font_size: 10.0,
+            is_code: false,
+            shaped: None,
+            requires_source_projection: false,
+            source_projection: None,
+            atomic_source_range: None,
+        }
+    }
+
+    #[test]
+    fn regression_search_uses_grapheme_indices_for_match_geometry() {
+        let cache = SearchHighlightCache::new();
+        let lines = [line("a\u{0301}👩🏽‍🔬 hit trailing", 0.0)];
+        cache.update_if_needed("hit", true, (1, 1), &lines);
+        let rects = cache.rects.borrow();
+
+        assert_eq!(rects.len(), 1);
+        assert_eq!(rects[0].x, lines[0].rect.x + grapheme_x(&lines[0], 3));
+        assert_eq!(rects[0].w, grapheme_x(&lines[0], 6) - grapheme_x(&lines[0], 3));
+    }
+
+    #[test]
+    fn regression_search_culls_against_the_offset_viewport() {
+        let cache = SearchHighlightCache::new();
+        let lines = [line("hit", 5.0), line("hit", 20.0), line("hit", 115.0)];
+        cache.update_if_needed("hit", true, (1, 1), &lines);
+
+        let commands = cache.highlights(20.0, 100.0, 0.0, 40.0, 0, [1.0; 4], [0.0; 4]);
+        let positions = commands.cmds.iter().filter_map(|command| match command {
+            DrawCmd::FillRect { rect, .. } => Some(rect.y),
+            _ => None,
+        });
+        assert_eq!(positions.collect::<Vec<_>>(), [40.0, 135.0]);
+    }
+
+    #[test]
+    fn search_rebuilds_match_geometry_for_a_new_generation() {
+        let cache = SearchHighlightCache::new();
+        cache.update_if_needed("hit", true, (1, 1), &[line("hit", 10.0)]);
+        cache.update_if_needed("hit", true, (1, 2), &[line("hit", 50.0)]);
+
+        assert_eq!(cache.rects.borrow()[0].y, 50.0);
     }
 }

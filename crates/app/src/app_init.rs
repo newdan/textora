@@ -9,8 +9,8 @@ use crate::product_paths::ProductPaths;
 use crate::ui_shell::UiShell;
 use appkit_core::file_history::FileHistory;
 use appkit_shell::editor_runtime::{EditorRuntime, EditorRuntimeConfig, EditorRuntimeError};
+use appkit_shell::editor_tab_set::EditorTabSet;
 use appkit_shell::view_route::{ViewPathMatcher, ViewRouteRule, ViewRouteTable};
-use appkit_shell::workspace::EditorTabSet;
 
 #[cfg(feature = "markdown")]
 const MINDMAP_ROUTE_PRIORITY: u16 = 400;
@@ -249,7 +249,7 @@ impl App {
         // scale factor is known.  We store None here and spawn the worker
         // after scale setup in init_window.
 
-        let workspace_store = appkit_core::workspace::store::WorkspaceStore::new(
+        let workspace_store = appkit_core::tab_set::store::WorkspaceStore::new(
             paths.workspace_file.clone(),
             paths.pinned_paths_file.clone(),
             paths.snapshots_dir.clone(),

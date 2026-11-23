@@ -18,7 +18,7 @@ use crate::app_effect::AppEffect;
 use crate::input_mapper::key_to_app_command;
 use crate::menu_handler::AppCommand;
 use crate::source_pointer::hit_test_with_sub_line_offset as mouse_hit_test;
-use appkit_core::workspace::types::TabId;
+use appkit_core::tab_set::types::TabId;
 use appkit_shell::editor_runtime::MouseCapture;
 use appkit_shell::window_input::{
     command_allowed_during_preedit, is_ime_process_key, ui_modifiers,
@@ -1820,7 +1820,10 @@ mod tests {
             app.close_editor_tab(closed_id).expect("closing tab 0 should reorder remaining tabs");
         assert_eq!(
             effect,
-            appkit_shell::workspace::WorkspaceEffect::Closed { closed: closed_id, activated: None }
+            appkit_shell::editor_tab_set::WorkspaceEffect::Closed {
+                closed: closed_id,
+                activated: None
+            }
         );
         assert_eq!(
             app.editor_tab_ids_in_order().into_iter().collect::<std::collections::HashSet<_>>(),

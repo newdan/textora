@@ -3,7 +3,7 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
-use appkit_core::workspace::types::TabId;
+use appkit_core::tab_set::types::TabId;
 use notora_core::{DocumentIdentity, ExternalFileId};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -207,7 +207,7 @@ impl DocumentRegistry {
 
 #[cfg(test)]
 mod tests {
-    use appkit_core::workspace::types::TabIdAllocator;
+    use appkit_core::tab_set::types::TabIdAllocator;
     use notora_core::{DocumentIdentity, NoteId};
 
     use super::DocumentRegistry;

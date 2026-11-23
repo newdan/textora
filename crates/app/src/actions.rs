@@ -1,4 +1,4 @@
-use appkit_core::workspace::types::TabId;
+use appkit_core::tab_set::types::TabId;
 use textora_core::types::GraphemeOffset;
 use ui::canvas::{CanvasAxis, CanvasPoint};
 use winit::event::{ElementState, MouseScrollDelta};

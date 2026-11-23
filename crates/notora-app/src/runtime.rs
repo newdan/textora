@@ -62,9 +62,7 @@ use crate::dirty_snapshot::{collect_dirty_snapshots, write_dirty_snapshot};
 use crate::editor_adapter::{LoadedDocument, build_editor_plugins, load_document};
 use crate::effect_executor::{EffectExecutor, ExternalOpenRequest, ManualSaveRequest};
 use crate::events;
-use crate::external_files::{
-    CanonicalExternalPath, ExternalFileSession, validate_external_text_file,
-};
+use crate::external_files::{CanonicalExternalPath, ExternalFileSession, read_external_text_file};
 use crate::product::{
     DocumentCompletion, NotoraProduct, NotoraProductEvent, WorkspaceCompletion,
     WorkspaceEventScope, WorkspaceEventSender,
@@ -468,7 +466,7 @@ impl NotoraRuntime {
     pub fn document_tab_for(
         &self,
         identity: DocumentIdentity,
-    ) -> Option<appkit_core::workspace::types::TabId> {
+    ) -> Option<appkit_core::tab_set::types::TabId> {
         self.document_runtime.tab_for(identity)
     }
 
@@ -501,7 +499,7 @@ impl NotoraRuntime {
 
     fn manual_save_request_for_tab(
         &self,
-        tab_id: appkit_core::workspace::types::TabId,
+        tab_id: appkit_core::tab_set::types::TabId,
     ) -> Option<ManualSaveRequest> {
         let summary = self.document_runtime.editor().document_summary(tab_id)?;
         let origin = self.document_origin_for_tab(tab_id)?;
@@ -709,7 +707,7 @@ impl NotoraRuntime {
             self.open_document_search();
             return;
         }
-        if self.action_will_leave_title_focus(&action)
+        if self.action_runtime.state().will_leave_title_focus(&action)
             && let Some(title_commit) = self.title_commit_action()
         {
             self.action_runtime.enqueue(title_commit);
@@ -742,24 +740,6 @@ impl NotoraRuntime {
         if reduction.should_persist_session {
             self.schedule_session_persistence();
         }
-    }
-
-    fn action_will_leave_title_focus(&self, action: &NotoraAction) -> bool {
-        if self.action_runtime.state().layout.focus_target != crate::FocusTarget::EditorTitle
-            || self.action_runtime.state().library.title_draft.is_none()
-            || matches!(
-                action,
-                NotoraAction::TitleTextChanged(_) | NotoraAction::TitleCommitRequested(_)
-            )
-        {
-            return false;
-        }
-
-        let selected_document = self.action_runtime.state().library.selected_card;
-        let mut next_state = self.action_runtime.state().clone();
-        let _ = next_state.reduce(action.clone());
-        next_state.layout.focus_target != crate::FocusTarget::EditorTitle
-            || next_state.library.selected_card != selected_document
     }
 
     fn synchronize_product_focus(&mut self) {
@@ -1553,7 +1533,7 @@ impl NotoraRuntime {
         }
     }
 
-    fn promote_preview_for_tab(&mut self, tab_id: appkit_core::workspace::types::TabId) {
+    fn promote_preview_for_tab(&mut self, tab_id: appkit_core::tab_set::types::TabId) {
         let outcome = self.document_runtime.promote_preview_for_tab(tab_id);
         self.apply_document_outcome(outcome);
     }
@@ -1631,10 +1611,7 @@ impl NotoraRuntime {
         }
     }
 
-    fn complete_pending_external_file_close(
-        &mut self,
-        tab_id: appkit_core::workspace::types::TabId,
-    ) {
+    fn complete_pending_external_file_close(&mut self, tab_id: appkit_core::tab_set::types::TabId) {
         let Some(DocumentIdentity::ExternalFile(external_file_id)) =
             self.document_runtime.identity_for(tab_id)
         else {
@@ -1658,7 +1635,7 @@ impl NotoraRuntime {
         self.dispatch_action(NotoraAction::ExternalFileCloseRequested(external_file_id));
     }
 
-    fn cancel_pending_external_file_close(&mut self, tab_id: appkit_core::workspace::types::TabId) {
+    fn cancel_pending_external_file_close(&mut self, tab_id: appkit_core::tab_set::types::TabId) {
         let Some(DocumentIdentity::ExternalFile(external_file_id)) =
             self.document_runtime.identity_for(tab_id)
         else {
@@ -1682,7 +1659,7 @@ impl NotoraRuntime {
     #[cfg(test)]
     fn pending_trash_move_has_current_saved_document(
         &self,
-        tab_id: appkit_core::workspace::types::TabId,
+        tab_id: appkit_core::tab_set::types::TabId,
         pending_trash_move: PendingTrashMove,
     ) -> bool {
         self.document_runtime
@@ -1692,7 +1669,7 @@ impl NotoraRuntime {
     #[cfg(test)]
     fn pending_note_move_has_current_saved_document(
         &self,
-        tab_id: appkit_core::workspace::types::TabId,
+        tab_id: appkit_core::tab_set::types::TabId,
         pending_note_move: &PendingNoteMove,
     ) -> bool {
         self.document_runtime
@@ -1702,7 +1679,7 @@ impl NotoraRuntime {
     #[cfg(test)]
     fn pending_title_update_has_current_saved_document(
         &self,
-        tab_id: appkit_core::workspace::types::TabId,
+        tab_id: appkit_core::tab_set::types::TabId,
         pending_title_update: &PendingTitleUpdate,
     ) -> bool {
         self.document_runtime
@@ -1711,7 +1688,7 @@ impl NotoraRuntime {
 
     fn save_untitled_external_file(
         &mut self,
-        tab_id: appkit_core::workspace::types::TabId,
+        tab_id: appkit_core::tab_set::types::TabId,
         external_file_id: notora_core::ExternalFileId,
     ) {
         let default_file_name =
@@ -1733,7 +1710,7 @@ impl NotoraRuntime {
 
     fn start_external_save_as_canonicalization(
         &mut self,
-        tab_id: appkit_core::workspace::types::TabId,
+        tab_id: appkit_core::tab_set::types::TabId,
         external_file_id: notora_core::ExternalFileId,
         content_revision: u64,
         saved_path: std::path::PathBuf,
@@ -1767,22 +1744,27 @@ impl NotoraRuntime {
 
     fn request_catalog_reindex_after_note_save(
         &mut self,
-        tab_id: appkit_core::workspace::types::TabId,
+        tab_id: appkit_core::tab_set::types::TabId,
+        saved_path: Option<&std::path::Path>,
     ) {
-        if !matches!(
-            self.document_origin_for_tab(tab_id),
-            Some(notora_core::DocumentOrigin::Note { .. })
-        ) {
+        if !matches!(self.document_runtime.identity_for(tab_id), Some(DocumentIdentity::Note(_))) {
             return;
         }
-        if self.workspace_controller.request_catalog_reindex().is_err() {
+        let relative_path = self.workspace_controller.active_workspace().and_then(|workspace| {
+            let saved_path = saved_path?;
+            saved_path
+                .strip_prefix(&workspace.descriptor.root)
+                .ok()
+                .map(std::path::Path::to_path_buf)
+        });
+        if self.workspace_controller.request_catalog_reindex(relative_path).is_err() {
             self.document_runtime.record_catalog_reconciliation(true);
         }
     }
 
     fn document_origin_for_tab(
         &self,
-        tab_id: appkit_core::workspace::types::TabId,
+        tab_id: appkit_core::tab_set::types::TabId,
     ) -> Option<notora_core::DocumentOrigin> {
         let identity = self.document_runtime.identity_for(tab_id)?;
         match identity {
@@ -1837,7 +1819,7 @@ impl NotoraRuntime {
 
     fn submit_document_title_initialization(
         &mut self,
-        tab_id: appkit_core::workspace::types::TabId,
+        tab_id: appkit_core::tab_set::types::TabId,
         saved_content_revision: u64,
     ) {
         let identity = self.document_runtime.identity_for(tab_id);
@@ -2051,17 +2033,17 @@ impl NotoraRuntime {
             return ExternalFileCloseOutcome::SavePending;
         }
         match self.document_runtime.editor().close_decision(tab_id) {
-            Some(appkit_shell::workspace::CloseTabDecision::NeedsSavePrompt) => {
+            Some(appkit_shell::editor_tab_set::CloseTabDecision::NeedsSavePrompt) => {
                 return self.resolve_unsaved_external_file_close(
                     identity,
                     tab_id,
                     unsaved_handling,
                 );
             }
-            Some(appkit_shell::workspace::CloseTabDecision::Pinned) => {
+            Some(appkit_shell::editor_tab_set::CloseTabDecision::Pinned) => {
                 return ExternalFileCloseOutcome::Blocked(ExternalFileCloseBlocker::PinnedTab);
             }
-            Some(appkit_shell::workspace::CloseTabDecision::CanClose) | None => {}
+            Some(appkit_shell::editor_tab_set::CloseTabDecision::CanClose) | None => {}
         }
         self.close_document_runtime(identity);
         ExternalFileCloseOutcome::Closed
@@ -2070,7 +2052,7 @@ impl NotoraRuntime {
     fn resolve_unsaved_external_file_close(
         &mut self,
         identity: DocumentIdentity,
-        tab_id: appkit_core::workspace::types::TabId,
+        tab_id: appkit_core::tab_set::types::TabId,
         unsaved_handling: UnsavedExternalFileCloseHandling,
     ) -> ExternalFileCloseOutcome {
         if unsaved_handling == UnsavedExternalFileCloseHandling::Block {
@@ -2091,7 +2073,7 @@ impl NotoraRuntime {
     fn save_external_file_before_close(
         &mut self,
         identity: DocumentIdentity,
-        tab_id: appkit_core::workspace::types::TabId,
+        tab_id: appkit_core::tab_set::types::TabId,
     ) -> ExternalFileCloseOutcome {
         let DocumentIdentity::ExternalFile(external_file_id) = identity else {
             return ExternalFileCloseOutcome::Cancelled;
@@ -2122,7 +2104,7 @@ impl NotoraRuntime {
 
     fn save_external_file_as_before_close(
         &mut self,
-        tab_id: appkit_core::workspace::types::TabId,
+        tab_id: appkit_core::tab_set::types::TabId,
         external_file_id: notora_core::ExternalFileId,
     ) -> bool {
         let default_file_name =
@@ -2146,7 +2128,7 @@ impl NotoraRuntime {
     fn discard_external_file_changes(
         &mut self,
         identity: DocumentIdentity,
-        tab_id: appkit_core::workspace::types::TabId,
+        tab_id: appkit_core::tab_set::types::TabId,
     ) -> ExternalFileCloseOutcome {
         let outcome = self
             .document_runtime
@@ -2249,7 +2231,7 @@ impl NotoraRuntime {
     fn relock_conflicted_document(
         &mut self,
         identity: DocumentIdentity,
-        tab_id: appkit_core::workspace::types::TabId,
+        tab_id: appkit_core::tab_set::types::TabId,
     ) {
         if self.document_runtime.tab_for(identity) != Some(tab_id) {
             return;
@@ -2836,7 +2818,7 @@ impl NotoraRuntime {
     fn start_conflict_retry_revision_capture(
         &mut self,
         identity: DocumentIdentity,
-        tab_id: appkit_core::workspace::types::TabId,
+        tab_id: appkit_core::tab_set::types::TabId,
         content_revision: u64,
         path: std::path::PathBuf,
     ) {
@@ -2933,7 +2915,7 @@ impl NotoraRuntime {
     fn start_conflict_reload(
         &mut self,
         identity: DocumentIdentity,
-        tab_id: appkit_core::workspace::types::TabId,
+        tab_id: appkit_core::tab_set::types::TabId,
         content_revision: u64,
         path: std::path::PathBuf,
         session: Option<std::sync::Arc<textora_encryption::UnlockedNoteSession>>,
@@ -3000,22 +2982,23 @@ impl NotoraRuntime {
             .name("notora-external-open".to_owned())
             .spawn(move || {
                 for (path, activate) in requests {
-                    let result = validate_external_text_file(&path)
-                        .map_err(|error| error.to_string())
-                        .and_then(|validated| {
-                            load_document(validated.canonical_path.as_path())
-                                .map(|document| (validated.canonical_path, document))
-                                .map_err(|error| error.to_string())
-                        });
-                    let completion = match result {
-                        Ok((canonical_path, document)) => {
+                    let completion = match read_external_text_file(&path) {
+                        Ok((validated, contents, revision)) => {
+                            let canonical_path = validated.canonical_path;
+                            let document = LoadedDocument {
+                                path: canonical_path.as_path().to_path_buf(),
+                                contents,
+                                disk_revision: Some(revision),
+                            };
                             DocumentCompletion::ExternalFileOpenCompleted {
                                 canonical_path,
                                 document,
                                 activate,
                             }
                         }
-                        Err(message) => DocumentCompletion::ExternalFileOpenFailed { message },
+                        Err(error) => DocumentCompletion::ExternalFileOpenFailed {
+                            message: error.to_string(),
+                        },
                     };
                     let _ = sender.send(NotoraProductEvent::Document(completion));
                 }

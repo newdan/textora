@@ -1,7 +1,7 @@
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use appkit_core::workspace::types::TabIdAllocator;
+use appkit_core::tab_set::types::TabIdAllocator;
 use notora_app::autosave::{AUTO_SAVE_IDLE_DELAY, AutoSaveClock, AutoSaveScheduler, AutoSaveState};
 use notora_core::{DocumentKind, DocumentOrigin, ExternalFileId, NoteId, WorkspaceId};
 

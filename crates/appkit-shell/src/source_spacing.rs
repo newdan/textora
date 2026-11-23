@@ -59,7 +59,7 @@ fn document_is_markdown_source(document: &DocumentModel) -> bool {
 mod tests {
     use std::cell::Cell;
 
-    use appkit_core::workspace::types::TabIdAllocator;
+    use appkit_core::tab_set::types::TabIdAllocator;
 
     use super::*;
     use crate::editor_plugin::EditorPlugin;

@@ -1,7 +1,7 @@
 use std::borrow::Cow;
 
 use appkit_core::document::DocumentModel;
-use appkit_core::workspace::types::TabId;
+use appkit_core::tab_set::types::TabId;
 use shaping::Shaper;
 use textora_core::document::DocView;
 use ui::canvas::CanvasViewportSnapshot;
@@ -1087,7 +1087,7 @@ impl<'a> TabSessionMut<'a> {
 #[cfg(test)]
 mod tests {
     use appkit_core::document::DocumentModel;
-    use appkit_core::workspace::types::TabIdAllocator;
+    use appkit_core::tab_set::types::TabIdAllocator;
     use textora_core::buffer::TextBuffer;
     use textora_core::document::DocView;
     use ui::plugin::{PastePreference, ViewPlugin};

@@ -174,7 +174,9 @@ impl<'a> Generator<'a> {
         output.push_str("// This file is auto-generated. Do not edit it manually.\n\n");
         output.push_str("use lsh::runtime::Language;\n\n");
 
-        output.push_str("#[derive(Debug, Clone, Copy, PartialEq, Eq)]\npub enum HighlightKind {\n");
+        output.push_str(
+            "#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]\npub enum HighlightKind {\n",
+        );
         let members: Vec<_> = assembly
             .highlight_kinds
             .iter()
@@ -182,6 +184,9 @@ impl<'a> Generator<'a> {
             .collect();
         let width = members.iter().map(|s| s.1.len()).max().unwrap_or(0);
         for (hk, member) in members {
+            if hk.value == 0 {
+                output.push_str("    #[default]\n");
+            }
             _ = writeln!(output, "    {member:<width$} // {}", hk.identifier);
         }
         output.push_str("}\n");

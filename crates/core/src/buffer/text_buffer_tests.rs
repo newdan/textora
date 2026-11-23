@@ -587,3 +587,17 @@ fn grapheme_boundary_query_rejects_middle_of_cluster() {
     assert!(buffer.is_grapheme_boundary(ByteIndex(emoji.len())));
     assert!(!buffer.is_grapheme_boundary(ByteIndex(4)));
 }
+
+#[test]
+fn regression_initial_line_count_includes_text_after_the_gap() {
+    use crate::document::ReadableDocument;
+
+    let mut gap = super::GapBuffer::new(true).expect("test gap buffer should allocate");
+    gap.replace(0..0, b"first\nsecond\nthird");
+    gap.replace(6..7, b"");
+    assert_eq!(gap.read_forward(0), b"first\n");
+    assert_eq!(gap.read_forward(6), b"econd\nthird");
+
+    let buffer = TextBuffer::from_gap_buffer(gap).expect("existing gap buffer should be adopted");
+    assert_eq!(buffer.logical_line_count(), 3);
+}

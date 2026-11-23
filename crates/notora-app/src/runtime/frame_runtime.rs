@@ -106,7 +106,7 @@ enum DocumentSearchComposition {
 pub(super) struct FrameRuntime {
     pub(super) document_search_bar: SearchBarWidget,
     document_search_rect: ui::Rect,
-    document_search_tab: Option<appkit_core::workspace::types::TabId>,
+    document_search_tab: Option<appkit_core::tab_set::types::TabId>,
     document_search_composition: DocumentSearchComposition,
     window_frame: ui::window_frame::WindowFrameWidget,
     #[cfg(not(test))]
@@ -198,7 +198,7 @@ impl FrameRuntime {
 
     pub(super) fn synchronize_document_search(
         &mut self,
-        tab: Option<appkit_core::workspace::types::TabId>,
+        tab: Option<appkit_core::tab_set::types::TabId>,
         input: SearchBarSnapshot,
         focused: bool,
         rect: ui::Rect,
@@ -591,7 +591,7 @@ impl FrameRuntime {
     fn update_editor_render_model(
         document_runtime: &DocumentRuntime,
         model: &mut NotoraRenderModel,
-        tab_id: appkit_core::workspace::types::TabId,
+        tab_id: appkit_core::tab_set::types::TabId,
         layout: ShellLayout,
     ) {
         let Some(summary) = document_runtime.editor().document_summary(tab_id) else {

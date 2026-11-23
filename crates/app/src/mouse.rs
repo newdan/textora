@@ -286,9 +286,9 @@ mod tests {
 
     fn type_default_text(dv: &mut DocumentFixture, text: &str) {
         let intent = ui::plugin::EditIntent::InsertText(text.to_owned());
-        let request = crate::edit_transaction::build_edit_request(&dv.model, intent);
-        let plan = crate::edit_transaction::default_edit_plan(&request, &dv.model);
-        crate::edit_transaction::execute_edit_plan(plan, &mut dv.model)
+        let request = appkit_shell::edit_transaction::build_edit_request(&dv.model, intent);
+        let plan = appkit_shell::edit_transaction::default_edit_plan(&request, &dv.model);
+        appkit_shell::edit_transaction::execute_edit_plan(plan, &mut dv.model)
             .expect("typing must execute in the mouse coalescing test");
     }
 

@@ -3,6 +3,7 @@
 use std::path::{Path, PathBuf};
 
 use notora_core::{DocumentIdentity, DocumentKind, ExternalFileId};
+use textora_core::disk_revision::{DiskRevision, read_file_with_revision};
 
 /// 已被规范化的外部文件绝对路径。
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
@@ -39,23 +40,30 @@ pub struct ValidatedExternalTextFile {
 pub fn validate_external_text_file(
     path: &Path,
 ) -> Result<ValidatedExternalTextFile, ExternalFileOpenError> {
+    read_external_text_file(path).map(|(validated, _, _)| validated)
+}
+
+pub(crate) fn read_external_text_file(
+    path: &Path,
+) -> Result<(ValidatedExternalTextFile, String, DiskRevision), ExternalFileOpenError> {
     let canonical_path =
         CanonicalExternalPath::canonicalize(path).map_err(ExternalFileOpenError::Path)?;
     let kind = DocumentKind::from_external_path(canonical_path.as_path()).ok_or_else(|| {
         ExternalFileOpenError::UnsupportedKind { path: canonical_path.as_path().to_path_buf() }
     })?;
-    let bytes = std::fs::read(canonical_path.as_path()).map_err(|source| {
-        ExternalFileOpenError::Read { path: canonical_path.as_path().to_path_buf(), source }
-    })?;
+    let (bytes, revision) =
+        read_file_with_revision(canonical_path.as_path()).map_err(|source| {
+            ExternalFileOpenError::Read { path: canonical_path.as_path().to_path_buf(), source }
+        })?;
     if bytes.contains(&0) {
         return Err(ExternalFileOpenError::BinaryContent {
             path: canonical_path.as_path().to_path_buf(),
         });
     }
-    std::str::from_utf8(&bytes).map_err(|_| ExternalFileOpenError::InvalidUtf8 {
+    let contents = String::from_utf8(bytes).map_err(|_| ExternalFileOpenError::InvalidUtf8 {
         path: canonical_path.as_path().to_path_buf(),
     })?;
-    Ok(ValidatedExternalTextFile { canonical_path, kind })
+    Ok((ValidatedExternalTextFile { canonical_path, kind }, contents, revision))
 }
 
 /// 外部文件无法作为 text session 打开。
@@ -349,7 +357,7 @@ mod tests {
     use super::{
         CanonicalExternalPath, ExternalFileOpenError, ExternalFileSession, ExternalFileSessions,
         OpenExistingExternalFile, RelocateExternalFile, SaveExternalFileAs,
-        validate_external_text_file,
+        read_external_text_file, validate_external_text_file,
     };
 
     fn canonical_fixture(name: &str) -> CanonicalExternalPath {
@@ -519,6 +527,24 @@ mod tests {
             validate_external_text_file(&invalid_utf8_path),
             Err(ExternalFileOpenError::InvalidUtf8 { .. })
         ));
+    }
+
+    #[test]
+    fn external_document_read_returns_a_revision_for_the_loaded_contents() {
+        let directory = tempfile::tempdir().expect("external document directory should exist");
+        let path = directory.path().join("document.txt");
+        let original = "原始内容\r\n";
+        fs::write(&path, original).expect("external document should be written");
+
+        let (validated, contents, revision) =
+            read_external_text_file(&path).expect("external document should load");
+        assert_eq!(contents, original);
+        assert_eq!(revision.path, validated.canonical_path.as_path());
+        assert_eq!(
+            revision,
+            appkit_core::file_safety::capture_revision(validated.canonical_path.as_path())
+                .expect("unmodified document should have the same disk revision")
+        );
     }
 
     #[test]

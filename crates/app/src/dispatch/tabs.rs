@@ -1,7 +1,7 @@
 use crate::app::App;
 use crate::app_effect::AppEffect;
 use crate::workspace_tab_factory::ProductPreparedTab;
-use appkit_core::workspace::types::TabId;
+use appkit_core::tab_set::types::TabId;
 use appkit_shell::editor_runtime::OpenDisposition;
 
 #[derive(Debug, PartialEq, Eq)]
@@ -28,10 +28,10 @@ fn batch_close_save_target(
 impl App {
     pub(crate) fn apply_workspace_effect(
         &mut self,
-        effect: appkit_shell::workspace::WorkspaceEffect,
+        effect: appkit_shell::editor_tab_set::WorkspaceEffect,
     ) -> AppEffect {
         let effect = match effect {
-            appkit_shell::workspace::WorkspaceEffect::Closed { activated: None, .. }
+            appkit_shell::editor_tab_set::WorkspaceEffect::Closed { activated: None, .. }
                 if self.editor_is_empty() =>
             {
                 let viewport = self.viewport_dimensions(self.screen_height());
@@ -98,7 +98,7 @@ impl App {
         let viewport = self.viewport_dimensions(self.screen_height());
         let effect = if let Some(tab_id) = self.editor_tab_id_for_path(path) {
             self.activate_editor_tab(tab_id)
-                .unwrap_or(appkit_shell::workspace::WorkspaceEffect::None)
+                .unwrap_or(appkit_shell::editor_tab_set::WorkspaceEffect::None)
         } else {
             let ProductPreparedTab { prepared, suggested_file_name } =
                 self.prepare_editor_file(path, viewport)?;
@@ -222,7 +222,7 @@ impl App {
         let Some(idx) = self.editor_tab_index(id) else {
             return AppEffect::NONE;
         };
-        use appkit_shell::workspace::CloseTabDecision;
+        use appkit_shell::editor_tab_set::CloseTabDecision;
         let mut app_effect = AppEffect::NONE;
         let decision = self
             .editor_close_decision(id)
@@ -927,7 +927,10 @@ mod tests {
         let effect = app.close_editor_tab(closed_id).expect("close clean tab 0");
         assert_eq!(
             effect,
-            appkit_shell::workspace::WorkspaceEffect::Closed { closed: closed_id, activated: None }
+            appkit_shell::editor_tab_set::WorkspaceEffect::Closed {
+                closed: closed_id,
+                activated: None
+            }
         );
         assert_eq!(
             app.editor_tab_ids_in_order().into_iter().collect::<std::collections::HashSet<_>>(),
@@ -963,7 +966,10 @@ mod tests {
         let effect = app.close_editor_tab(stale_id).expect("closing the target tab should succeed");
         assert_eq!(
             effect,
-            appkit_shell::workspace::WorkspaceEffect::Closed { closed: closed_id, activated: None }
+            appkit_shell::editor_tab_set::WorkspaceEffect::Closed {
+                closed: closed_id,
+                activated: None
+            }
         );
         assert_eq!(
             app.editor_tab_ids_in_order().into_iter().collect::<std::collections::HashSet<_>>(),

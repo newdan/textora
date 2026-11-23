@@ -23,7 +23,6 @@
 //!   as used by the backend's relocation system.
 
 use std::fmt::{self, Debug};
-use std::mem;
 
 use stdext::arena::Arena;
 use stdext::arena_write_fmt;
@@ -114,19 +113,19 @@ impl<'pa, 'ps, 'pc> Runtime<'pa, 'ps, 'pc> {
     /// # Returns
     /// A vector of [`Highlight`] spans. Always contains at least two spans:
     /// one at offset 0 and one at `line.len()` as a sentinel.
-    pub fn parse_next_line<'a, T: PartialEq + TryFrom<u32>>(
+    pub fn parse_next_line<'a, T: PartialEq + Default + TryFrom<u32>>(
         &mut self,
         arena: &'a Arena,
         line: &[u8],
     ) -> BVec<'a, Highlight<T>> {
-        let mut res: BVec<'a, Highlight<T>> = BVec::empty();
+        let mut highlights: BVec<'a, Highlight<T>> = BVec::empty();
 
         self.registers.off = 0;
         self.registers.hs = 0;
 
         // By default, any line starts with HighlightKind::Other.
         // If the DSL yields anything, this will be overwritten.
-        res.push(arena, Highlight { start: 0, kind: unsafe { mem::zeroed() } });
+        highlights.push(arena, Highlight { start: 0, kind: T::default() });
 
         loop {
             instruction_decode!(self.assembly, self.registers.pc, {
@@ -237,15 +236,15 @@ impl<'pa, 'ps, 'pc> Runtime<'pa, 'ps, 'pc> {
 
                 FlushHighlight { kind } => {
                     let kind = self.registers.get(kind);
-                    let kind = unsafe { kind.try_into().unwrap_unchecked() };
+                    let kind = T::try_from(kind).unwrap_or_default();
                     let start = (self.registers.hs as usize).min(line.len());
 
-                    if let Some(last) = res.last_mut()
+                    if let Some(last) = highlights.last_mut()
                         && (last.start == start || last.kind == kind)
                     {
                         last.kind = kind;
                     } else {
-                        res.push(arena, Highlight { start, kind });
+                        highlights.push(arena, Highlight { start, kind });
                     }
 
                     self.registers.hs = self.registers.off;
@@ -262,11 +261,11 @@ impl<'pa, 'ps, 'pc> Runtime<'pa, 'ps, 'pc> {
         }
 
         // Ensure that there's a past-the-end highlight.
-        if res.last().is_none_or(|last| last.start < line.len()) {
-            res.push(arena, Highlight { start: line.len(), kind: unsafe { mem::zeroed() } });
+        if highlights.last().is_none_or(|last| last.start < line.len()) {
+            highlights.push(arena, Highlight { start: line.len(), kind: T::default() });
         }
 
-        res
+        highlights
     }
 
     // TODO: http://0x80.pl/notesen/2018-10-18-simd-byte-lookup.html#alternative-implementation
@@ -1025,4 +1024,53 @@ pub struct MnemonicFormattingConfig<'a> {
     // Color used for highlighting an immediate value.
     pub numeric_prefix: &'a str,
     pub numeric_suffix: &'a str,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use stdext::arena::scratch_arena;
+
+    #[derive(Debug, PartialEq)]
+    struct HighlightPreference(u32);
+
+    impl Default for HighlightPreference {
+        fn default() -> Self {
+            Self(1)
+        }
+    }
+
+    impl TryFrom<u32> for HighlightPreference {
+        type Error = ();
+
+        fn try_from(value: u32) -> Result<Self, Self::Error> {
+            (value <= 1).then_some(Self(value)).ok_or(())
+        }
+    }
+
+    #[test]
+    fn regression_default_highlight_at_both_line_boundaries() {
+        let arena = scratch_arena(None);
+        let assembly = Instruction::Return.encode(&arena);
+        let mut runtime = Runtime::new(&assembly, &[], &[], 0);
+        let highlights = runtime.parse_next_line::<HighlightPreference>(&arena, b"x");
+        assert_eq!(highlights[0].kind, HighlightPreference::default());
+        assert_eq!(highlights[1].kind, HighlightPreference::default());
+    }
+
+    #[test]
+    fn invalid_highlight_register_falls_back_to_default() {
+        let arena = scratch_arena(None);
+        let assembly = [
+            Instruction::MovImm { dst: Register::X3, imm: u32::MAX },
+            Instruction::FlushHighlight { kind: Register::X3 },
+            Instruction::Return,
+        ]
+        .iter()
+        .flat_map(|instruction| instruction.encode(&arena).to_vec())
+        .collect::<Vec<_>>();
+        let mut runtime = Runtime::new(&assembly, &[], &[], 0);
+        let highlights = runtime.parse_next_line::<HighlightPreference>(&arena, b"x");
+        assert_eq!(highlights[0].kind, HighlightPreference::default());
+    }
 }

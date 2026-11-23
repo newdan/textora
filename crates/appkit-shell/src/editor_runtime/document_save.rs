@@ -6,7 +6,7 @@ use std::thread;
 
 use appkit_core::document::DocumentSaveError;
 use appkit_core::file_safety::DiskRevision;
-use appkit_core::workspace::types::TabId;
+use appkit_core::tab_set::types::TabId;
 
 type PayloadTransform = dyn Fn(&[u8]) -> Result<Vec<u8>, String> + Send + Sync + 'static;
 
@@ -220,7 +220,7 @@ mod tests {
     use ui::plugin::PluginFactory;
 
     fn tab_id() -> TabId {
-        let mut allocator = appkit_core::workspace::types::TabIdAllocator::new();
+        let mut allocator = appkit_core::tab_set::types::TabIdAllocator::new();
         allocator.allocate()
     }
 

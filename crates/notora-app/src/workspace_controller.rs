@@ -375,12 +375,15 @@ impl WorkspaceController {
     }
 
     /// 保存成功后的派生 catalog 字段由既有 worker 重建，绝不在主线程读取正文或执行 SQL。
-    pub fn request_catalog_reindex(&self) -> Result<(), WorkspaceControllerError> {
+    pub fn request_catalog_reindex(
+        &self,
+        relative_path: Option<PathBuf>,
+    ) -> Result<(), WorkspaceControllerError> {
         let session =
             self.active_session.as_ref().ok_or(WorkspaceControllerError::NoActiveWorkspace)?;
         session
             .indexer
-            .send(IndexWorkerCommand::ReindexCatalog)
+            .send(IndexWorkerCommand::ReindexCatalog { relative_path })
             .map_err(|_| WorkspaceControllerError::CommandWorkerDisconnected)
     }
 
@@ -858,7 +861,13 @@ fn execute_workspace_command(
                 event_sender,
             )
         }
-        IndexWorkerCommand::ReindexCatalog => {
+        IndexWorkerCommand::ReindexCatalog { relative_path } => {
+            if let Some(path) = relative_path
+                && workspace.resolve_relative_path(&path).is_ok_and(|path| path.is_file())
+            {
+                index_workspace_paths(workspace, catalog, &[path], event_sender);
+                return;
+            }
             index_workspace(workspace, catalog, event_sender);
         }
     }

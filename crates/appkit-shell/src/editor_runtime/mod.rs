@@ -62,10 +62,10 @@ use std::sync::{Arc, Mutex};
 use winit::event_loop::ActiveEventLoop;
 use winit::window::{Window, WindowAttributes};
 
+use crate::editor_tab_set::EditorTabSet;
 use crate::prepared_tab::PreparedTab;
 use crate::reshape_worker::{ReshapeResult, ReshapeWorker};
 use crate::tab_runtime::TabRuntimeStore;
-use crate::workspace::EditorTabSet;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum ClipboardCommand {
@@ -168,7 +168,6 @@ pub struct EditorRuntime {
     pointer_click_tracker: ui::core::widget::PointerClickTracker,
     painted_editor_bounds: PaintedEditorBounds,
     ui_shaper: Option<Arc<Mutex<shaping::Shaper>>>,
-    _snapshots_directory: PathBuf,
 }
 
 impl EditorRuntime {
@@ -178,7 +177,7 @@ impl EditorRuntime {
             view_routes,
             initial_settings,
             initial_theme,
-            snapshots_directory,
+            ..
         } = config;
         Ok(Self {
             model_session: model_session::ModelSession::new(plugin_registry, view_routes),
@@ -194,7 +193,6 @@ impl EditorRuntime {
             pointer_click_tracker: ui::core::widget::PointerClickTracker::default(),
             painted_editor_bounds: Rc::new(Cell::new(None)),
             ui_shaper: None,
-            _snapshots_directory: snapshots_directory,
         })
     }
 
@@ -224,7 +222,7 @@ impl EditorRuntime {
         prepared: PreparedTab,
         suggested_file_name: Option<String>,
         disposition: OpenDisposition,
-    ) -> crate::workspace::WorkspaceEffect {
+    ) -> crate::editor_tab_set::WorkspaceEffect {
         let effect =
             self.model_session.install_prepared_tab(prepared, suggested_file_name, disposition);
         let _ = self.outcome_for_workspace_effect(effect);
@@ -235,7 +233,7 @@ impl EditorRuntime {
         &mut self,
         prepared: PreparedTab,
         suggested_file_name: Option<String>,
-    ) -> appkit_core::workspace::types::TabId {
+    ) -> appkit_core::tab_set::types::TabId {
         self.model_session.append_prepared_tab(prepared, suggested_file_name)
     }
 
@@ -243,7 +241,7 @@ impl EditorRuntime {
         self.model_session.replace_parts(workspace, runtimes);
     }
 
-    pub fn activate(&mut self, tab_id: appkit_core::workspace::types::TabId) -> EditorOutcome {
+    pub fn activate(&mut self, tab_id: appkit_core::tab_set::types::TabId) -> EditorOutcome {
         self.model_session
             .activate(tab_id)
             .map_or_else(EditorOutcome::default, |effect| self.outcome_for_workspace_effect(effect))
@@ -251,18 +249,18 @@ impl EditorRuntime {
 
     pub fn activate_for_product(
         &mut self,
-        tab_id: appkit_core::workspace::types::TabId,
-    ) -> Option<crate::workspace::WorkspaceEffect> {
+        tab_id: appkit_core::tab_set::types::TabId,
+    ) -> Option<crate::editor_tab_set::WorkspaceEffect> {
         let effect = self.model_session.activate(tab_id)?;
         let _ = self.outcome_for_workspace_effect(effect);
         Some(effect)
     }
 
-    pub fn request_close(&mut self, tab_id: appkit_core::workspace::types::TabId) -> EditorOutcome {
+    pub fn request_close(&mut self, tab_id: appkit_core::tab_set::types::TabId) -> EditorOutcome {
         let Some(decision) = self.model_session.close_decision(tab_id) else {
             return EditorOutcome::default();
         };
-        if decision == crate::workspace::CloseTabDecision::CanClose {
+        if decision == crate::editor_tab_set::CloseTabDecision::CanClose {
             return self
                 .model_session
                 .close(tab_id)
@@ -281,7 +279,7 @@ impl EditorRuntime {
 
     pub fn confirm_close(
         &mut self,
-        tab_id: appkit_core::workspace::types::TabId,
+        tab_id: appkit_core::tab_set::types::TabId,
         confirmation: CloseConfirmation,
     ) -> EditorOutcome {
         self.model_session
@@ -291,22 +289,22 @@ impl EditorRuntime {
 
     pub fn close_for_product(
         &mut self,
-        tab_id: appkit_core::workspace::types::TabId,
-    ) -> Option<crate::workspace::WorkspaceEffect> {
+        tab_id: appkit_core::tab_set::types::TabId,
+    ) -> Option<crate::editor_tab_set::WorkspaceEffect> {
         let effect = self.model_session.close(tab_id)?;
         let _ = self.outcome_for_workspace_effect(effect);
         Some(effect)
     }
 
-    pub fn active_tab_id(&self) -> Option<appkit_core::workspace::types::TabId> {
+    pub fn active_tab_id(&self) -> Option<appkit_core::tab_set::types::TabId> {
         self.model_session.active_tab_id()
     }
 
-    pub fn tab_index(&self, tab_id: appkit_core::workspace::types::TabId) -> Option<usize> {
+    pub fn tab_index(&self, tab_id: appkit_core::tab_set::types::TabId) -> Option<usize> {
         self.model_session.tab_index(tab_id)
     }
 
-    pub fn tab_id_at(&self, index: usize) -> Option<appkit_core::workspace::types::TabId> {
+    pub fn tab_id_at(&self, index: usize) -> Option<appkit_core::tab_set::types::TabId> {
         self.model_session.tab_id_at(index)
     }
 
@@ -314,13 +312,11 @@ impl EditorRuntime {
         self.model_session.tab_count()
     }
 
-    pub fn tab_ids_in_order(&self) -> Vec<appkit_core::workspace::types::TabId> {
+    pub fn tab_ids_in_order(&self) -> Vec<appkit_core::tab_set::types::TabId> {
         self.model_session.tab_ids_in_order()
     }
 
-    pub fn runtime_tab_ids(
-        &self,
-    ) -> std::collections::HashSet<appkit_core::workspace::types::TabId> {
+    pub fn runtime_tab_ids(&self) -> std::collections::HashSet<appkit_core::tab_set::types::TabId> {
         self.model_session.runtime_tab_ids()
     }
 
@@ -328,22 +324,22 @@ impl EditorRuntime {
         self.model_session.is_empty()
     }
 
-    pub fn is_pinned(&self, tab_id: appkit_core::workspace::types::TabId) -> bool {
+    pub fn is_pinned(&self, tab_id: appkit_core::tab_set::types::TabId) -> bool {
         self.model_session.is_pinned(tab_id)
     }
 
     pub fn close_decision(
         &self,
-        tab_id: appkit_core::workspace::types::TabId,
-    ) -> Option<crate::workspace::CloseTabDecision> {
+        tab_id: appkit_core::tab_set::types::TabId,
+    ) -> Option<crate::editor_tab_set::CloseTabDecision> {
         self.model_session.close_decision(tab_id)
     }
 
-    pub fn tab_title(&self, tab_id: appkit_core::workspace::types::TabId) -> Option<String> {
+    pub fn tab_title(&self, tab_id: appkit_core::tab_set::types::TabId) -> Option<String> {
         self.model_session.tab_title(tab_id)
     }
 
-    pub fn clear_suggested_file_name(&mut self, tab_id: appkit_core::workspace::types::TabId) {
+    pub fn clear_suggested_file_name(&mut self, tab_id: appkit_core::tab_set::types::TabId) {
         self.model_session.clear_suggested_file_name(tab_id);
     }
 
@@ -361,7 +357,7 @@ impl EditorRuntime {
 
     pub fn toggle_pin(
         &mut self,
-        tab_id: appkit_core::workspace::types::TabId,
+        tab_id: appkit_core::tab_set::types::TabId,
     ) -> Option<appkit_core::navigator::NavEffect> {
         self.model_session.toggle_pin(tab_id)
     }
@@ -414,43 +410,43 @@ impl EditorRuntime {
 
     pub fn tab_session(
         &self,
-        tab_id: appkit_core::workspace::types::TabId,
+        tab_id: appkit_core::tab_set::types::TabId,
     ) -> Option<TabSession<'_>> {
         self.model_session.tab_session(tab_id)
     }
 
     pub fn tab_session_mut(
         &mut self,
-        tab_id: appkit_core::workspace::types::TabId,
+        tab_id: appkit_core::tab_set::types::TabId,
     ) -> Option<TabSessionMut<'_>> {
         self.model_session.tab_session_mut(tab_id)
     }
 
-    pub fn tab_runtime(&self, tab_id: appkit_core::workspace::types::TabId) -> Option<&TabRuntime> {
+    pub fn tab_runtime(&self, tab_id: appkit_core::tab_set::types::TabId) -> Option<&TabRuntime> {
         self.model_session.tab_runtime(tab_id)
     }
 
     pub fn tab_runtime_mut(
         &mut self,
-        tab_id: appkit_core::workspace::types::TabId,
+        tab_id: appkit_core::tab_set::types::TabId,
     ) -> Option<&mut TabRuntime> {
         self.model_session.tab_runtime_mut(tab_id)
     }
 
-    pub fn tab_id_for_path(&self, path: &Path) -> Option<appkit_core::workspace::types::TabId> {
+    pub fn tab_id_for_path(&self, path: &Path) -> Option<appkit_core::tab_set::types::TabId> {
         self.model_session.tab_id_for_path(path)
     }
 
     pub fn document_summary(
         &self,
-        tab_id: appkit_core::workspace::types::TabId,
+        tab_id: appkit_core::tab_set::types::TabId,
     ) -> Option<EditorDocumentSummary> {
         self.model_session.document_summary(tab_id)
     }
 
     pub fn document_text_snapshot(
         &self,
-        tab_id: appkit_core::workspace::types::TabId,
+        tab_id: appkit_core::tab_set::types::TabId,
     ) -> Option<DocumentTextSnapshot> {
         self.model_session.document_text_snapshot(tab_id)
     }
@@ -472,7 +468,7 @@ impl EditorRuntime {
 
     pub fn replace_document(
         &mut self,
-        tab_id: appkit_core::workspace::types::TabId,
+        tab_id: appkit_core::tab_set::types::TabId,
         document: appkit_core::document::DocumentModel,
     ) -> bool {
         let replaced = self.model_session.replace_document(tab_id, document);
@@ -484,7 +480,7 @@ impl EditorRuntime {
 
     pub fn update_document_path(
         &mut self,
-        tab_id: appkit_core::workspace::types::TabId,
+        tab_id: appkit_core::tab_set::types::TabId,
         path: PathBuf,
         disk_revision: Option<appkit_core::file_safety::DiskRevision>,
     ) -> bool {
@@ -493,7 +489,7 @@ impl EditorRuntime {
 
     pub fn detach_document(
         &mut self,
-        tab_id: appkit_core::workspace::types::TabId,
+        tab_id: appkit_core::tab_set::types::TabId,
         suggested_file_name: Option<String>,
         dirty_snapshot_id: Option<String>,
     ) -> bool {
@@ -502,7 +498,7 @@ impl EditorRuntime {
 
     pub fn prepare_save(
         &self,
-        tab_id: appkit_core::workspace::types::TabId,
+        tab_id: appkit_core::tab_set::types::TabId,
     ) -> Result<PreparedDocumentSave, SavePrepareError> {
         if self.model_session.document_summary(tab_id).is_none() {
             return Err(SavePrepareError::UnknownTab { tab_id });
@@ -523,7 +519,7 @@ impl EditorRuntime {
 
     pub fn prepare_save_as(
         &self,
-        tab_id: appkit_core::workspace::types::TabId,
+        tab_id: appkit_core::tab_set::types::TabId,
         path: &Path,
     ) -> Result<PreparedDocumentSave, SavePrepareError> {
         if self.model_session.document_summary(tab_id).is_none() {
@@ -668,7 +664,7 @@ impl EditorRuntime {
         self.file_safety_session.drain_observations()
     }
 
-    pub fn forget_file_safety_tab(&mut self, tab_id: appkit_core::workspace::types::TabId) {
+    pub fn forget_file_safety_tab(&mut self, tab_id: appkit_core::tab_set::types::TabId) {
         self.file_safety_session.forget_tab(tab_id);
     }
 
@@ -1213,7 +1209,7 @@ impl EditorRuntime {
 
     fn apply_document_scrollbar_action(
         &mut self,
-        tab_id: appkit_core::workspace::types::TabId,
+        tab_id: appkit_core::tab_set::types::TabId,
         action: ui::canvas_scrollbars::CanvasScrollbarsAction,
         editor_rect: ui::Rect,
     ) -> EditorOutcome {
@@ -1509,9 +1505,9 @@ impl EditorRuntime {
 
     fn outcome_for_workspace_effect(
         &mut self,
-        effect: crate::workspace::WorkspaceEffect,
+        effect: crate::editor_tab_set::WorkspaceEffect,
     ) -> EditorOutcome {
-        if let crate::workspace::WorkspaceEffect::Closed { closed, .. } = effect {
+        if let crate::editor_tab_set::WorkspaceEffect::Closed { closed, .. } = effect {
             self.reshape_session.invalidate();
             self.file_safety_session.forget_tab(closed);
         }
@@ -1521,13 +1517,13 @@ impl EditorRuntime {
             notifications: smallvec::SmallVec::new(),
         };
         match effect {
-            crate::workspace::WorkspaceEffect::None => {}
-            crate::workspace::WorkspaceEffect::Activated(tab_id) => {
+            crate::editor_tab_set::WorkspaceEffect::None => {}
+            crate::editor_tab_set::WorkspaceEffect::Activated(tab_id) => {
                 outcome
                     .notifications
                     .push(EditorNotification::ActiveDocumentChanged { tab_id: Some(tab_id) });
             }
-            crate::workspace::WorkspaceEffect::Closed { activated, .. } => {
+            crate::editor_tab_set::WorkspaceEffect::Closed { activated, .. } => {
                 if activated.is_some() || self.active_tab_id().is_none() {
                     outcome
                         .notifications

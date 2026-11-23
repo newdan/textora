@@ -199,7 +199,7 @@ fn late_search_composition_commit_cannot_edit_the_new_editor() {
 fn switch_search_tab(
     runtime: &mut NotoraRuntime,
     identity: notora_core::DocumentIdentity,
-    tab_id: appkit_core::workspace::types::TabId,
+    tab_id: appkit_core::tab_set::types::TabId,
 ) {
     runtime.action_runtime.state.library.selected_card = Some(identity);
     let outcome = runtime.document_runtime.editor_mut().activate(tab_id);

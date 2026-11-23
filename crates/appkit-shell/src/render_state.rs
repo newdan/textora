@@ -37,11 +37,6 @@ pub struct TextState {
     cached_gamma: render::GammaUniform,
     /// Preview render cache keyed by UiTextLayout.id
     pub preview_cache: PreviewRenderCache,
-    /// Atlas generation counter — increments when atlas evictions are likely.
-    /// Used to invalidate stale CachedLine entries.
-    pub atlas_generation: u64,
-    /// Counter for periodic generation bumps.
-    glyph_resolve_count: u64,
 }
 
 impl TextState {
@@ -154,8 +149,6 @@ impl TextState {
             gamma_buffer,
             cached_gamma: gamma_uniform,
             preview_cache: PreviewRenderCache::new(),
-            atlas_generation: 1,
-            glyph_resolve_count: 0,
         };
         eprintln!(
             "[startup:text_init] renderer={:.2}ms glyph_atlas={:.2}ms image_atlas={:.2}ms bindings={:.2}ms shaper={:.2}ms total={:.2}ms",
@@ -191,15 +184,7 @@ impl TextState {
         true
     }
 
-    /// Track glyph resolution — bumps atlas generation every 5000 calls.
-    /// This ensures stale PreviewRenderCache entries are eventually invalidated
-    /// after atlas evictions.
-    pub fn track_glyph_resolve(&mut self) {
-        self.glyph_resolve_count += 1;
-        if self.glyph_resolve_count >= 5000 {
-            self.atlas_generation += 1;
-            self.glyph_resolve_count = 0;
-            self.preview_cache.invalidate_stale_atlas(self.atlas_generation);
-        }
+    pub fn atlas_generation(&self) -> u64 {
+        self.atlas.generation()
     }
 }

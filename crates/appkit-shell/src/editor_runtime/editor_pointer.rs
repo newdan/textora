@@ -360,7 +360,7 @@ impl EditorRuntime {
 
     fn place_plugin_pointer_selection(
         &mut self,
-        tab_id: appkit_core::workspace::types::TabId,
+        tab_id: appkit_core::tab_set::types::TabId,
         editor_rect: ui::Rect,
         position: (f32, f32),
         dpi: f32,
@@ -430,7 +430,7 @@ impl EditorRuntime {
 
     fn place_plugin_byte_selection(
         &mut self,
-        tab_id: appkit_core::workspace::types::TabId,
+        tab_id: appkit_core::tab_set::types::TabId,
         bounds: ui::Rect,
         position: (f32, f32),
         extend: bool,
@@ -482,7 +482,7 @@ impl EditorRuntime {
 
     fn refresh_plugin_layout_for_pointer_hit(
         &mut self,
-        tab_id: appkit_core::workspace::types::TabId,
+        tab_id: appkit_core::tab_set::types::TabId,
         bounds: ui::Rect,
     ) {
         let metrics =

@@ -19,13 +19,13 @@
 
 pub use super::gap_buffer::GapBuffer;
 use super::history::*;
+use std::cell::RefCell;
 use std::collections::VecDeque;
 use std::io;
 use std::mem;
 use std::rc::Rc;
 
 use crate::buffer::edit::ActiveEditLineInfo;
-use crate::cell::SemiRefCell;
 use crate::document::{ReadableDocument, WriteableDocument};
 use crate::helpers::*;
 use crate::highlight::HighlighterCache;
@@ -55,7 +55,7 @@ pub struct RenderResult {
 }
 
 /// A [`TextBuffer`] with inner mutability.
-pub type TextBufferCell = SemiRefCell<TextBuffer>;
+pub type TextBufferCell = RefCell<TextBuffer>;
 
 /// A [`TextBuffer`] inside an [`Rc`].
 ///
@@ -67,8 +67,8 @@ pub type RcTextBuffer = Rc<TextBufferCell>;
 pub struct TextBuffer {
     pub(crate) buffer: GapBuffer,
 
-    pub(crate) undo_stack: VecDeque<SemiRefCell<HistoryEntry>>,
-    pub(crate) redo_stack: VecDeque<SemiRefCell<HistoryEntry>>,
+    pub(crate) undo_stack: VecDeque<RefCell<HistoryEntry>>,
+    pub(crate) redo_stack: VecDeque<RefCell<HistoryEntry>>,
     pub(crate) last_history_type: HistoryType,
     pub(crate) edit_merge_anchor: Option<EditMergeAnchor>,
     pub(crate) last_save_generation: u32,
@@ -104,7 +104,7 @@ impl TextBuffer {
     /// See [`TextBuffer::new()`].
     pub fn new_rc(small: bool) -> io::Result<RcTextBuffer> {
         let buffer = Self::new(small)?;
-        Ok(Rc::new(SemiRefCell::new(buffer)))
+        Ok(Rc::new(RefCell::new(buffer)))
     }
 
     /// Creates a new text buffer. With `small` you can control
@@ -161,15 +161,11 @@ impl TextBuffer {
     /// Used by DocumentView to avoid a double copy when loading files
     /// (file::load_file already built the GapBuffer).
     pub fn from_gap_buffer(gap_buffer: GapBuffer) -> io::Result<Self> {
-        let total = gap_buffer.len();
-        let logical_lines = if total > 0 {
-            let chunk = gap_buffer.read_forward(0);
-            let _end = chunk.len().min(total);
-            let (_, lines) = simd::lines_fwd(chunk, 0, 0, CoordType::MAX);
-            lines + 1
-        } else {
-            1
-        };
+        let before_gap = gap_buffer.read_forward(0);
+        let after_gap = gap_buffer.read_forward(before_gap.len());
+        let (_, lines_before_gap) = simd::lines_fwd(before_gap, 0, 0, CoordType::MAX);
+        let (_, line_breaks) = simd::lines_fwd(after_gap, 0, lines_before_gap, CoordType::MAX);
+        let logical_lines = line_breaks.saturating_add(1);
         Ok(Self {
             buffer: gap_buffer,
             undo_stack: Default::default(),
@@ -181,10 +177,7 @@ impl TextBuffer {
             active_edit_line_info: None,
             active_edit_depth: 0,
             active_edit_off: 0,
-            stats: TextBufferStatistics {
-                logical_lines: logical_lines.min(CoordType::MAX),
-                visual_lines: logical_lines.min(CoordType::MAX),
-            },
+            stats: TextBufferStatistics { logical_lines, visual_lines: logical_lines },
             cursor: Default::default(),
             cursor_affinity: Default::default(),
             cursor_for_rendering: None,

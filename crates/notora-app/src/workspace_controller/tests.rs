@@ -1311,3 +1311,47 @@ fn active_workspace_worker_moves_only_the_requested_note_to_trash() {
     }
     assert!(!directory.path().join("无标题.md").exists());
 }
+
+#[test]
+fn regression_save_reindex_scans_only_the_saved_note() {
+    let directory = tempfile::tempdir().expect("workspace test directory should exist");
+    let workspace =
+        Workspace::open_or_initialize(directory.path()).expect("workspace should initialize");
+    let catalog = Catalog::open(&workspace.root().join(".notora").join(CATALOG_FILE_NAME))
+        .expect("catalog should open");
+    let saved_path = PathBuf::from("saved.md");
+    let unrelated_path = PathBuf::from("unrelated.md");
+    fs::write(workspace.root().join(&saved_path), "# Saved note").expect("saved note should exist");
+    fs::write(workspace.root().join(&unrelated_path), "# Unrelated note")
+        .expect("unrelated note should exist");
+    let product = NotoraProduct::new();
+    let events = WorkspaceEventSender::new(
+        product.event_sender(),
+        WorkspaceEventScope { workspace_id: workspace.descriptor().workspace_id, generation: 1 },
+    );
+
+    super::execute_workspace_command(
+        &workspace,
+        &catalog,
+        IndexWorkerCommand::ReindexCatalog { relative_path: Some(saved_path.clone()) },
+        &events,
+    );
+
+    let indexed = catalog.active_notes().expect("catalog should list indexed notes");
+    let paths = indexed.into_iter().map(|note| note.relative_path).collect::<Vec<_>>();
+    assert_eq!(paths, [saved_path]);
+
+    super::execute_workspace_command(
+        &workspace,
+        &catalog,
+        IndexWorkerCommand::ReindexCatalog { relative_path: Some(PathBuf::from("missing.md")) },
+        &events,
+    );
+    assert!(
+        catalog
+            .active_notes()
+            .expect("full fallback should refresh unrelated notes")
+            .iter()
+            .any(|note| note.relative_path == unrelated_path)
+    );
+}

@@ -12,7 +12,7 @@ path = "src/lib.rs"
 
 [dependencies]
 blake3.workspace = true
-file-watch = { path = "../file-watch" }
+file-watch = { package = "textora-file-watch", path = "../file-watch" }
 notify.workspace = true
 percent-encoding = "2"
 pulldown-cmark = { version = "0.13.0", default-features = false }

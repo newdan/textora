@@ -1,7 +1,7 @@
 use std::cell::Cell;
 use std::time::{Duration, Instant};
 
-use appkit_core::{snapshot::SNAPSHOT_EXT, workspace::types::TabIdAllocator};
+use appkit_core::{snapshot::SNAPSHOT_EXT, tab_set::types::TabIdAllocator};
 use notora_app::autosave::{AutoSaveClock, AutoSaveScheduler, AutoSaveState};
 use notora_app::dirty_snapshot::{
     DirtySnapshotPlan, RecoverableDirtySnapshot, list_recoverable_snapshots, write_dirty_snapshot,

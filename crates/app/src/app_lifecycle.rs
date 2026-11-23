@@ -281,7 +281,7 @@ impl App {
     ) -> crate::app_effect::AppEffect {
         let effect = if let Some(tab_id) = self.editor_tab_id_for_path(path) {
             self.activate_editor_tab(tab_id)
-                .unwrap_or(appkit_shell::workspace::WorkspaceEffect::None)
+                .unwrap_or(appkit_shell::editor_tab_set::WorkspaceEffect::None)
         } else {
             let dimensions = self.viewport_dimensions(self.screen_height());
             let crate::workspace_tab_factory::ProductPreparedTab { prepared, suggested_file_name } =
@@ -951,7 +951,7 @@ impl App {
 
     fn apply_file_safety_outcome(
         &mut self,
-        tab_id: appkit_core::workspace::types::TabId,
+        tab_id: appkit_core::tab_set::types::TabId,
         path: std::path::PathBuf,
         expected_dirty: bool,
         expected_content_revision: u64,

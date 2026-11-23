@@ -44,13 +44,31 @@ pub fn read_disk_revision(path: &Path) -> Result<Option<DiskRevision>, FileError
         hasher.update(&buffer[..bytes_read]);
     }
 
-    Ok(Some(DiskRevision {
+    Ok(Some(revision_from_hash(path, &metadata, hasher.finalize())))
+}
+
+/// Read a regular file once and fingerprint the exact bytes returned to the caller.
+pub fn read_file_with_revision(path: &Path) -> io::Result<(Vec<u8>, DiskRevision)> {
+    let mut file = fs::File::open(path)?;
+    let metadata = file.metadata()?;
+    if !metadata.is_file() {
+        return Err(io::Error::new(io::ErrorKind::InvalidInput, "path is not a regular file"));
+    }
+
+    let mut contents = Vec::new();
+    file.read_to_end(&mut contents)?;
+    let revision = revision_from_hash(path, &metadata, blake3::hash(&contents));
+    Ok((contents, revision))
+}
+
+fn revision_from_hash(path: &Path, metadata: &fs::Metadata, hash: blake3::Hash) -> DiskRevision {
+    DiskRevision {
         path: path.to_owned(),
         size: metadata.len(),
         modified: metadata.modified().ok(),
-        content_hash: hasher.finalize(),
-        file_identity: file_identity(&metadata),
-    }))
+        content_hash: hash,
+        file_identity: file_identity(metadata),
+    }
 }
 
 #[cfg(unix)]

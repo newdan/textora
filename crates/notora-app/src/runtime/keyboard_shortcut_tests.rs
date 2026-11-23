@@ -73,7 +73,7 @@ fn physical_shortcuts_survive_shift_alt_and_keyboard_layout_translation() {
     }
 }
 
-fn selected_markdown() -> (NotoraRuntime, appkit_core::workspace::types::TabId) {
+fn selected_markdown() -> (NotoraRuntime, appkit_core::tab_set::types::TabId) {
     let mut runtime = app();
     let (_, tab_id) = install_registered_note(&mut runtime, "shortcuts.md", "正文");
     runtime.dispatch_action(NotoraAction::FocusRequested(FocusTarget::Editor));
@@ -87,7 +87,7 @@ fn selected_markdown() -> (NotoraRuntime, appkit_core::workspace::types::TabId) 
     (runtime, tab_id)
 }
 
-fn document_text(runtime: &NotoraRuntime, tab_id: appkit_core::workspace::types::TabId) -> String {
+fn document_text(runtime: &NotoraRuntime, tab_id: appkit_core::tab_set::types::TabId) -> String {
     runtime
         .document_runtime
         .editor()
@@ -166,7 +166,7 @@ enum FormattingBlocker {
 
 fn block_formatting(
     runtime: &mut NotoraRuntime,
-    tab_id: appkit_core::workspace::types::TabId,
+    tab_id: appkit_core::tab_set::types::TabId,
     blocker: FormattingBlocker,
 ) {
     match blocker {

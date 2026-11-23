@@ -3,7 +3,7 @@
 use std::path::Path;
 use ui::plugin::{SyncOutcome, SyncReason};
 
-use appkit_core::workspace::types::TabId;
+use appkit_core::tab_set::types::TabId;
 
 use crate::cursor_motion::PageDirection;
 use crate::edit_transaction::{build_edit_request, default_edit_plan, execute_edit_plan};
@@ -17,11 +17,11 @@ use crate::inspector_panel::{
 };
 use ui::inspector_panel::InspectorPanelIntent;
 
+use crate::editor_tab_set::{CloseTabDecision, EditorTabSet, WorkspaceEffect};
 use crate::prepared_tab::{PreparedTab, placeholder_display_entries};
 use crate::tab_runtime::{DocumentEditingAccess, TabRuntime, TabRuntimeStore};
 use crate::tab_session::{TabSession, TabSessionMut};
 use crate::view_route::ViewRouteTable;
-use crate::workspace::{CloseTabDecision, EditorTabSet, WorkspaceEffect};
 use appkit_core::edit_command::EditCommand;
 
 pub(crate) struct ModelSession {
@@ -1085,8 +1085,7 @@ fn valid_document_boundary(document: &appkit_core::document::DocumentModel, byte
     if byte > document.buffer_len() {
         return false;
     }
-    let source = document.full_text();
-    textora_core::unicode::CursorNav::new(&source)
+    textora_core::unicode::CursorNav::new(document.text_buffer())
         .goto_byte(textora_core::types::ByteIndex(byte))
         .offset
         == textora_core::types::ByteIndex(byte)
@@ -1544,7 +1543,7 @@ mod tests {
     #[test]
     fn unknown_lifecycle_ids_are_safe_no_ops() {
         let mut session = model_session();
-        let mut allocator = appkit_core::workspace::types::TabIdAllocator::new();
+        let mut allocator = appkit_core::tab_set::types::TabIdAllocator::new();
         let unknown = allocator.allocate();
 
         assert!(session.activate(unknown).is_none());

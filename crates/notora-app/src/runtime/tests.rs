@@ -100,7 +100,7 @@ pub(super) fn install_registered_note(
     app: &mut NotoraRuntime,
     path: &str,
     contents: &str,
-) -> (DocumentIdentity, appkit_core::workspace::types::TabId) {
+) -> (DocumentIdentity, appkit_core::tab_set::types::TabId) {
     let identity = DocumentIdentity::Note(notora_core::NoteId::generate());
     let prepared = crate::editor_adapter::prepare_loaded_document(
         &app.document_runtime.editor_runtime,
@@ -387,7 +387,7 @@ fn create_encrypted_note_for_test(
     app: &mut NotoraRuntime,
     workspace_root: &std::path::Path,
     password: &str,
-) -> (DocumentIdentity, appkit_core::workspace::types::TabId) {
+) -> (DocumentIdentity, appkit_core::tab_set::types::TabId) {
     use ui::core::widget::SensitiveText;
 
     app.execute_workspace_command(WorkspaceCommand::OpenExisting {
@@ -635,7 +635,13 @@ fn encrypted_note_plaintext_and_password_never_reach_workspace_catalog_or_snapsh
         appkit_shell::editor_runtime::execute_prepared_save_with_transform(prepared, transform);
     assert!(completion.result.is_ok());
     let _ = app.document_runtime.editor_runtime.apply_save_completion(completion);
-    app.request_catalog_reindex_after_note_save(tab_id);
+    let saved_path = app
+        .document_runtime
+        .editor()
+        .document_summary(tab_id)
+        .and_then(|summary| summary.path)
+        .expect("encrypted workspace note should have a saved path");
+    app.request_catalog_reindex_after_note_save(tab_id, Some(&saved_path));
     for _ in 0..50 {
         app.drain_product_events();
         std::thread::sleep(Duration::from_millis(10));
@@ -802,7 +808,7 @@ fn encrypted_conflict_reload_relocks_when_the_external_document_identity_changes
 fn install_registered_external(
     app: &mut NotoraRuntime,
     path: &std::path::Path,
-) -> (DocumentIdentity, appkit_core::workspace::types::TabId) {
+) -> (DocumentIdentity, appkit_core::tab_set::types::TabId) {
     let identity = DocumentIdentity::ExternalFile(notora_core::ExternalFileId::generate());
     let prepared = crate::editor_adapter::prepare_loaded_document(
         &app.document_runtime.editor_runtime,
@@ -829,7 +835,7 @@ fn install_registered_external(
 
 fn install_registered_untitled_external(
     app: &mut NotoraRuntime,
-) -> (DocumentIdentity, appkit_core::workspace::types::TabId) {
+) -> (DocumentIdentity, appkit_core::tab_set::types::TabId) {
     let identity = app.action_runtime.create_untitled_external(DocumentKind::Markdown);
     app.dispatch_action(NotoraAction::ExternalFileOpened(identity));
     let tab_id =
@@ -1114,7 +1120,7 @@ fn note_origin(relative_path: &str) -> notora_core::DocumentOrigin {
 
 fn drain_until_document_text(
     app: &mut NotoraRuntime,
-    tab_id: appkit_core::workspace::types::TabId,
+    tab_id: appkit_core::tab_set::types::TabId,
     expected_text: &str,
     deadline: Instant,
 ) {
@@ -1143,7 +1149,7 @@ fn notora_title_normalization_does_not_depend_on_document_source() {
 #[test]
 fn autosave_failure_retains_the_diagnostic_for_the_editor_header() {
     let mut app = app();
-    let tab_id = appkit_core::workspace::types::TabIdAllocator::new().allocate();
+    let tab_id = appkit_core::tab_set::types::TabIdAllocator::new().allocate();
     let request = AutoSaveRequest { tab_id, content_revision: 7 };
     let origin = notora_core::DocumentOrigin::Note {
         workspace_id: notora_core::WorkspaceId::generate(),
@@ -3862,7 +3868,7 @@ fn open_external_path_switches_to_files_and_reuses_the_existing_tab() {
 fn open_plain_text_fixture(
     directory: &std::path::Path,
     contents: &str,
-) -> (NotoraRuntime, appkit_core::workspace::types::TabId, std::path::PathBuf) {
+) -> (NotoraRuntime, appkit_core::tab_set::types::TabId, std::path::PathBuf) {
     let path = directory.join("outside.txt");
     std::fs::write(&path, contents).expect("external text fixture should be written");
     let paths = NotoraPaths::from_config_directory(directory.join("notora"))
@@ -3965,6 +3971,58 @@ fn shutting_down_with_dirty_external_text_preserves_source_and_writes_recovery()
         ),
         "shutdown should preserve the edited text in exactly one recoverable snapshot: {snapshots:?}"
     );
+}
+
+#[test]
+fn regression_closed_tab_releases_pending_document_workflows() {
+    use super::document_runtime::{PendingConflictRetry, PendingExternalSaveAs};
+
+    let mut app = app();
+    let (identity, tab_id) = install_registered_untitled_external(&mut app);
+    let DocumentIdentity::ExternalFile(external_file_id) = identity else {
+        panic!("fixture should be an external file");
+    };
+    let note_id = notora_core::NoteId::generate();
+    let content_revision = 1;
+    let documents = &mut app.document_runtime;
+    documents
+        .pending_external_save_as
+        .insert(tab_id, PendingExternalSaveAs { external_file_id, content_revision });
+    documents
+        .pending_conflict_retries
+        .insert(tab_id, PendingConflictRetry { identity, content_revision });
+    documents.pending_trash_moves.insert(tab_id, PendingTrashMove { note_id, content_revision });
+    documents.pending_note_moves.insert(
+        tab_id,
+        PendingNoteMove {
+            request: notora_core::note_command::MoveNoteRequest {
+                note_id,
+                target_directory: "archive".into(),
+            },
+            content_revision,
+        },
+    );
+    documents.pending_title_updates.insert(
+        tab_id,
+        PendingTitleUpdate {
+            request: notora_core::UpdateNoteTitleRequest {
+                note_id,
+                expected_title_revision: 0,
+                title: "renamed".to_owned(),
+            },
+            content_revision,
+        },
+    );
+
+    app.dispatch_action(NotoraAction::ExternalFileCloseRequested(external_file_id));
+
+    let documents = &app.document_runtime;
+    assert!(documents.tab_for(identity).is_none());
+    assert!(documents.pending_external_save_as.is_empty());
+    assert!(documents.pending_conflict_retries.is_empty());
+    assert!(documents.pending_trash_moves.is_empty());
+    assert!(documents.pending_note_moves.is_empty());
+    assert!(documents.pending_title_updates.is_empty());
 }
 
 #[test]

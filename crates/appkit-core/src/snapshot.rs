@@ -15,9 +15,44 @@ use similar::{ChangeTag, TextDiff};
 
 // ─── Path helpers ────────────────────────────────────────────────────────────
 
-/// Deterministic filename-safe identifier derived from a file path.
-/// Same path always produces the same id (within one binary version).
+const PATH_ID_HEX_LENGTH: usize = 16;
+
+/// Deterministic filename-safe identifier derived from the path's native bytes.
 pub fn path_id(path: &Path) -> String {
+    let digest = hash_path(path).to_hex();
+    digest[..PATH_ID_HEX_LENGTH].to_owned()
+}
+
+#[cfg(unix)]
+fn hash_path(path: &Path) -> blake3::Hash {
+    use std::os::unix::ffi::OsStrExt;
+
+    blake3::hash(path.as_os_str().as_bytes())
+}
+
+#[cfg(windows)]
+fn hash_path(path: &Path) -> blake3::Hash {
+    use std::os::windows::ffi::OsStrExt;
+
+    if let Some(utf8) = path.to_str() {
+        return blake3::hash(utf8.as_bytes());
+    }
+
+    let mut hasher = blake3::Hasher::new();
+    // An invalid UTF-8 prefix distinguishes paths with unpaired UTF-16 surrogates.
+    hasher.update(&[0xff]);
+    for code_unit in path.as_os_str().encode_wide() {
+        hasher.update(&code_unit.to_le_bytes());
+    }
+    hasher.finalize()
+}
+
+#[cfg(not(any(unix, windows)))]
+fn hash_path(path: &Path) -> blake3::Hash {
+    blake3::hash(path.as_os_str().as_encoded_bytes())
+}
+
+fn legacy_path_id(path: &Path) -> String {
     let mut hasher = std::collections::hash_map::DefaultHasher::new();
     path.hash(&mut hasher);
     format!("{:016x}", hasher.finish())
@@ -589,6 +624,25 @@ pub fn read_and_apply(
     Ok((restored, header))
 }
 
+/// Restore a named tab, including snapshots from the previous path hash.
+pub fn read_and_apply_for_path(
+    dir: &Path,
+    filename: &str,
+    document_path: &Path,
+    original: &[String],
+) -> std::io::Result<(Vec<String>, SnapshotHeader)> {
+    match read_and_apply(dir, filename, original) {
+        Err(error)
+            if error.kind() == std::io::ErrorKind::NotFound
+                && filename == snapshot_id_for_path(document_path) =>
+        {
+            let legacy_filename = snapshot_filename(&legacy_path_id(document_path));
+            read_and_apply(dir, &legacy_filename, original)
+        }
+        result => result,
+    }
+}
+
 /// Delete snapshot files that are no longer referenced by any open tab.
 ///
 /// `dir` — snapshot directory.
@@ -625,6 +679,38 @@ pub fn snapshot_id_for_untitled(existing_id: Option<&str>) -> String {
 mod tests {
     use super::*;
     use std::collections::HashSet;
+
+    #[test]
+    fn regression_path_id_matches_stable_blake3_prefix() {
+        let path = Path::new("/tmp/笔记.txt");
+        let digest = blake3::hash("/tmp/笔记.txt".as_bytes()).to_hex();
+        assert_eq!(path_id(path), &digest[..16]);
+    }
+
+    #[test]
+    fn read_named_snapshot_uses_legacy_filename_when_stable_filename_is_missing() {
+        let directory = tempfile::tempdir().expect("snapshot directory should exist");
+        let document_path = Path::new("/tmp/legacy-note.md");
+        let legacy_filename = snapshot_filename(&legacy_path_id(document_path));
+        let filename = snapshot_id_for_path(document_path);
+        let original = vec!["old".to_owned()];
+        let edited = vec!["unsaved".to_owned()];
+        write_snapshot(directory.path(), &legacy_filename, 0, 0, &original, &edited)
+            .expect("legacy snapshot should be written");
+
+        let (restored, _) =
+            read_and_apply_for_path(directory.path(), &filename, document_path, &original)
+                .expect("legacy snapshot should be restored via the new name");
+        assert_eq!(restored, edited);
+
+        let newer = vec!["newer".to_owned()];
+        write_snapshot(directory.path(), &filename, 0, 0, &original, &newer)
+            .expect("stable snapshot should be written");
+        let (restored, _) =
+            read_and_apply_for_path(directory.path(), &filename, document_path, &original)
+                .expect("stable snapshot should take precedence");
+        assert_eq!(restored, newer);
+    }
 
     #[test]
     fn test_path_id_deterministic() {

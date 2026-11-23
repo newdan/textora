@@ -92,6 +92,7 @@ pub struct LazyLayout<S: BlockSource> {
     pub precise: Vec<bool>,
     /// Flattened lines in reading order, for selection indexing.
     pub flat_lines: Vec<FlatLine>,
+    pub(in crate::layout::types) flat_line_revision: u64,
     /// Reconciled uncorrected flat-line groups waiting for their next publication.
     pub(in crate::layout::types) reconciled_flat_lines: Vec<Option<Vec<FlatLine>>>,
     /// Lightweight source projections retained after shaped blocks are evicted.

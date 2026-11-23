@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 
-use appkit_core::workspace::types::TabId;
+use appkit_core::tab_set::types::TabId;
 use ui::plugin::ViewPluginCapabilities;
 
 use crate::canvas_viewport::CanvasViewportSession;
@@ -106,7 +106,7 @@ mod tests {
     use crate::document_presentation::DocumentPresentation;
     use crate::editor_plugin::EditorPlugin;
     use appkit_core::document::DocumentModel;
-    use appkit_core::workspace::types::TabIdAllocator;
+    use appkit_core::tab_set::types::TabIdAllocator;
     use textora_core::buffer::TextBuffer;
 
     #[test]

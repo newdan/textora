@@ -7,9 +7,9 @@ use ui::plugin::{PLUGIN_EDITOR, PLUGIN_MARKDOWN_EDITOR, PLUGIN_MINDMAP};
 use ui::sidebar::NewDocumentKind;
 
 use appkit_shell::document_presentation::DocumentPresentation;
-use appkit_shell::tab_runtime::TabRuntime;
 #[cfg(test)]
-use appkit_shell::workspace::EditorTabSet;
+use appkit_shell::editor_tab_set::EditorTabSet;
+use appkit_shell::tab_runtime::TabRuntime;
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub(crate) struct ViewportDimensions {
@@ -434,7 +434,7 @@ mod tests {
 
     #[test]
     fn production_tab_creation_does_not_call_workspace_product_constructors() {
-        let workspace_source = include_str!("../../appkit-shell/src/workspace.rs");
+        let workspace_source = include_str!("../../appkit-shell/src/editor_tab_set.rs");
         let tab_dispatch_source = include_str!("dispatch/tabs.rs")
             .split("#[cfg(test)]")
             .next()

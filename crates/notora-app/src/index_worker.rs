@@ -39,7 +39,9 @@ pub(crate) enum IndexWorkerCommand {
         generation: u64,
         source: WorkspaceDocumentSource,
     },
-    ReindexCatalog,
+    ReindexCatalog {
+        relative_path: Option<PathBuf>,
+    },
 }
 
 /// 通过断开 command sender 自然退出的后台 worker。

@@ -3,11 +3,11 @@ use crate::buffer::history::{
     TextBufferSelection,
 };
 use crate::buffer::text_buffer::{CursorMovement, MoveLineDirection, TextBuffer};
-use crate::cell::SemiRefCell;
 use crate::helpers::CoordType;
 use crate::simd::memchr2;
 use crate::types::{ByteIndex, LogicalPoint};
 use crate::unicode::Cursor;
+use std::cell::RefCell;
 use std::mem;
 use stdext::arena::scratch_arena;
 use stdext::collections::BString;
@@ -526,7 +526,7 @@ impl TextBuffer {
             }
 
             self.last_history_type = history_type;
-            self.undo_stack.push_back(SemiRefCell::new(HistoryEntry {
+            self.undo_stack.push_back(RefCell::new(HistoryEntry {
                 cursor_before: cursor_before.logical_pos,
                 cursor_affinity_before,
                 selection_before: self.selection,

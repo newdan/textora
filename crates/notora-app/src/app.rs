@@ -51,7 +51,7 @@ impl NotoraApp {
     pub fn document_tab_for(
         &self,
         identity: notora_core::DocumentIdentity,
-    ) -> Option<appkit_core::workspace::types::TabId> {
+    ) -> Option<appkit_core::tab_set::types::TabId> {
         self.runtime.document_tab_for(identity)
     }
 

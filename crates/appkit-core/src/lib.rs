@@ -13,4 +13,4 @@ pub mod line_index;
 pub mod navigator;
 pub mod persistence;
 pub mod snapshot;
-pub mod workspace;
+pub mod tab_set;

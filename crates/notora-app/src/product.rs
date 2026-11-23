@@ -173,14 +173,14 @@ pub enum DocumentCompletion {
         message: String,
     },
     ExternalSaveAsCanonicalized {
-        tab_id: appkit_core::workspace::types::TabId,
+        tab_id: appkit_core::tab_set::types::TabId,
         external_file_id: notora_core::ExternalFileId,
         content_revision: u64,
         result: Result<crate::external_files::CanonicalExternalPath, String>,
     },
     ConflictReloadCompleted {
         identity: notora_core::DocumentIdentity,
-        tab_id: appkit_core::workspace::types::TabId,
+        tab_id: appkit_core::tab_set::types::TabId,
         content_revision: u64,
         document: crate::editor_adapter::LoadedDocument,
     },
@@ -190,11 +190,11 @@ pub enum DocumentCompletion {
     },
     ConflictReloadRequiresUnlock {
         identity: notora_core::DocumentIdentity,
-        tab_id: appkit_core::workspace::types::TabId,
+        tab_id: appkit_core::tab_set::types::TabId,
     },
     ConflictRetryRevisionCaptured {
         identity: notora_core::DocumentIdentity,
-        tab_id: appkit_core::workspace::types::TabId,
+        tab_id: appkit_core::tab_set::types::TabId,
         content_revision: u64,
         path: std::path::PathBuf,
         disk_revision: appkit_core::file_safety::DiskRevision,

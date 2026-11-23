@@ -1050,13 +1050,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "file-watch"
-version = "0.0.0"
-dependencies = [
- "notify",
-]
-
-[[package]]
 name = "find-msvc-tools"
 version = "0.1.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2232,7 +2225,6 @@ name = "notora-core"
 version = "0.1.0"
 dependencies = [
  "blake3",
- "file-watch",
  "notify",
  "percent-encoding",
  "pulldown-cmark",
@@ -2241,6 +2233,7 @@ dependencies = [
  "serde",
  "tempfile",
  "textora-encryption",
+ "textora-file-watch",
  "toml",
  "unicode-normalization",
  "unicode-segmentation",
@@ -4016,7 +4009,6 @@ dependencies = [
  "cc",
  "criterion",
  "dirs",
- "file-watch",
  "hashlink 0.12.0",
  "image",
  "notify",
@@ -4037,6 +4029,7 @@ dependencies = [
  "textora-appkit-core",
  "textora-appkit-shell",
  "textora-core",
+ "textora-file-watch",
  "textora-markdown",
  "textora-mindmap",
  "textora-render",
@@ -4115,6 +4108,13 @@ dependencies = [
  "rand_core",
  "uuid",
  "zeroize",
+]
+
+[[package]]
+name = "textora-file-watch"
+version = "0.0.0"
+dependencies = [
+ "notify",
 ]
 
 [[package]]

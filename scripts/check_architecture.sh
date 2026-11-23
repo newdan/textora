@@ -14,6 +14,10 @@ check_forbidden_dependency() {
   done
 }
 
+check_forbidden_dependency textora-file-watch \
+  textora-core textora-ui winit wgpu textora-render textora-shaping textora-appkit-core \
+  textora-appkit-shell textora-markdown textora-mindmap textora-sync textora-encryption \
+  textora-app notora-core notora-app
 check_forbidden_dependency textora-appkit-core \
   textora-ui winit wgpu textora-render textora-shaping textora-markdown textora-mindmap textora-sync \
   notora-core notora-app

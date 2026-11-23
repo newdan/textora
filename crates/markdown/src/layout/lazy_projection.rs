@@ -74,6 +74,10 @@ impl<S: BlockSource> LazyLayout<S> {
             }
         }
     }
+    pub(crate) fn flat_line_revision(&self) -> u64 {
+        self.flat_line_revision
+    }
+
     /// Build the flat line array from the laid-out blocks.
     /// Must be called after layout/precision changes.
     ///
@@ -143,6 +147,10 @@ impl<S: BlockSource> LazyLayout<S> {
             );
         }
         self.flat_lines = lines;
+        self.flat_line_revision = self
+            .flat_line_revision
+            .checked_add(1)
+            .expect("flattened layout revision must not overflow");
 
         let (projected_empty_lines, hidden_block_separators) = self.collect_empty_line_layout();
         self.projected_empty_lines = projected_empty_lines;

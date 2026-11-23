@@ -2592,6 +2592,35 @@ C608-01 武昌职业第01组：计划 68，历史低线较低，是表里最像�
     }
 
     #[test]
+    fn regression_search_refreshes_geometry_on_reflow_and_source_edit() {
+        let source = "many words that wrap over multiple visual rows before the needle";
+        let doc = StubDoc::new(source);
+        let mut view = MarkdownEditorView::new();
+        view.set_source(source.to_owned(), 1);
+        let highlight_position = |view: &MarkdownEditorView| {
+            view.engine()
+                .search_highlights("needle", true, false, 0, [1.0; 4], [0.0; 4])
+                .cmds
+                .into_iter()
+                .find_map(|command| match command {
+                    ui::core::paint::DrawCmd::FillRect { rect, .. } => Some((rect.x, rect.y)),
+                    _ => None,
+                })
+        };
+
+        render_editor_narrow(&mut view, &doc, 180.0);
+        let narrow_position = highlight_position(&view).expect("narrow view should show the hit");
+        render_editor_narrow(&mut view, &doc, 800.0);
+        let wide_position = highlight_position(&view).expect("wide view should show the hit");
+        assert_ne!(wide_position, narrow_position);
+
+        let updated = StubDoc::new("needle at the start of the line");
+        view.set_source(updated.text.clone(), 2);
+        render_editor_narrow(&mut view, &updated, 800.0);
+        assert_ne!(highlight_position(&view), Some(wide_position));
+    }
+
+    #[test]
     fn markdown_editor_reflows_immediately_when_viewport_width_changes() {
         let source = "这是一段很长的中文测试文本 mixed with english and some more text that \
                       should wrap narrowly but fit into fewer lines in a wide editor viewport.";

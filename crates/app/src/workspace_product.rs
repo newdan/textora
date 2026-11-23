@@ -6,7 +6,7 @@ use appkit_core::document::DocumentModel;
 #[cfg(test)]
 use appkit_core::file_history::FileHistoryEntry;
 #[cfg(test)]
-use appkit_shell::workspace::EditorTabSet;
+use appkit_shell::editor_tab_set::EditorTabSet;
 
 #[cfg(test)]
 const RECOVERY_TITLE_PREFIX: &str = "恢复：";
@@ -109,8 +109,8 @@ mod tests {
     use crate::app_init::build_product_workspace;
     use crate::document_fixture::DocumentFixture;
     use crate::plugins::editor::EditorPlugin;
+    use appkit_shell::editor_tab_set::EditorTabSet;
     use appkit_shell::tab_runtime::{TabRuntime, TabRuntimeStore};
-    use appkit_shell::workspace::EditorTabSet;
 
     fn append_document(
         workspace: &mut EditorTabSet,
@@ -251,7 +251,7 @@ mod tests {
 
     #[test]
     fn workspace_source_has_no_product_dependencies() {
-        let workspace_source = include_str!("../../appkit-shell/src/workspace.rs");
+        let workspace_source = include_str!("../../appkit-shell/src/editor_tab_set.rs");
         for forbidden in [
             "crate::document_view",
             "crate::dirty_snapshot",

@@ -15,8 +15,8 @@ impl NotoraRuntime {
             DocumentCommand::RetryTitleUpdate(request) => {
                 self.submit_or_defer_title_update(request)
             }
-            DocumentCommand::RequestCatalogReindex(tab_id) => {
-                self.request_catalog_reindex_after_note_save(tab_id);
+            DocumentCommand::RequestCatalogReindex { tab_id, saved_path } => {
+                self.request_catalog_reindex_after_note_save(tab_id, saved_path.as_deref());
             }
             DocumentCommand::CompleteExternalSaveAs { request, save_succeeded, saved_path } => {
                 let outcome = self.document_runtime.complete_pending_external_save_as(

@@ -1,7 +1,7 @@
 use std::fs;
 use std::time::Duration;
 
-use appkit_core::workspace::types::TabIdAllocator;
+use appkit_core::tab_set::types::TabIdAllocator;
 use criterion::{BatchSize, Criterion, criterion_group, criterion_main};
 use notora_app::document_registry::DocumentRegistry;
 use notora_core::{

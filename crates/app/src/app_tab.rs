@@ -4,14 +4,14 @@
 use crate::app::App;
 use crate::workspace_persistence::snapshot_runtime_workspace;
 use appkit_core::file_history::{FileHistoryEntry, compute_workspace_root};
-use appkit_core::workspace::types::TabId;
+use appkit_core::tab_set::types::TabId;
 use appkit_shell::editor_runtime::OpenDisposition;
+use appkit_shell::editor_tab_set::EditorTabSet;
 #[cfg(test)]
 use appkit_shell::prepared_tab::PreparedTab;
 #[cfg(test)]
 use appkit_shell::tab_runtime::TabRuntime;
 use appkit_shell::tab_session::{TabSession, TabSessionMut};
-use appkit_shell::workspace::EditorTabSet;
 
 pub(crate) struct EditorSaveContext {
     pub(crate) dirty: bool,
@@ -26,7 +26,7 @@ impl App {
         prepared: appkit_shell::prepared_tab::PreparedTab,
         suggested_file_name: Option<String>,
         disposition: OpenDisposition,
-    ) -> appkit_shell::workspace::WorkspaceEffect {
+    ) -> appkit_shell::editor_tab_set::WorkspaceEffect {
         self.editor_runtime.install_prepared_tab_for_product(
             prepared,
             suggested_file_name,
@@ -37,7 +37,7 @@ impl App {
     pub(crate) fn activate_editor_tab(
         &mut self,
         tab_id: TabId,
-    ) -> Option<appkit_shell::workspace::WorkspaceEffect> {
+    ) -> Option<appkit_shell::editor_tab_set::WorkspaceEffect> {
         self.editor_runtime.activate_for_product(tab_id)
     }
 
@@ -53,14 +53,14 @@ impl App {
     pub(crate) fn editor_close_decision(
         &mut self,
         tab_id: TabId,
-    ) -> Option<appkit_shell::workspace::CloseTabDecision> {
+    ) -> Option<appkit_shell::editor_tab_set::CloseTabDecision> {
         self.editor_runtime.close_decision(tab_id)
     }
 
     pub(crate) fn close_editor_tab(
         &mut self,
         tab_id: TabId,
-    ) -> Option<appkit_shell::workspace::WorkspaceEffect> {
+    ) -> Option<appkit_shell::editor_tab_set::WorkspaceEffect> {
         self.editor_runtime.close_for_product(tab_id)
     }
 
@@ -296,7 +296,7 @@ impl App {
     pub(crate) fn switch_editor_tab(
         &mut self,
         tab_id: TabId,
-    ) -> Option<appkit_shell::workspace::WorkspaceEffect> {
+    ) -> Option<appkit_shell::editor_tab_set::WorkspaceEffect> {
         if self.active_tab_id() == Some(tab_id) {
             return None;
         }

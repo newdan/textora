@@ -630,7 +630,7 @@ impl App {
         if matches!(command, EditCommand::Paste | EditCommand::PastePlainText) {
             return Some(self.dispatch_document_paste(command, clipboard, event_loop));
         }
-        let intent = crate::edit_transaction::edit_intent_for_command(command)?;
+        let intent = appkit_shell::edit_transaction::edit_intent_for_command(command)?;
         Some(self.dispatch_transactional_edit(intent, event_loop))
     }
 
@@ -701,7 +701,7 @@ impl App {
         &mut self,
         command: appkit_core::edit_command::EditCommand,
     ) -> AppEffect {
-        let intent = crate::edit_transaction::edit_intent_for_command(&command)
+        let intent = appkit_shell::edit_transaction::edit_intent_for_command(&command)
             .expect("Command should resolve to EditIntent");
         self.dispatch_transactional_edit(intent, None)
     }
@@ -1119,7 +1119,7 @@ mod edit_tests {
     fn execute_default_transaction_for_editor_test(
         command: &EditCommand,
         document: &mut DocumentFixture,
-    ) -> crate::edit_transaction::TransactionalEditOutcome {
+    ) -> appkit_shell::edit_transaction::TransactionalEditOutcome {
         let intent = match command {
             EditCommand::InsertChar(text) | EditCommand::InsertText(text) => {
                 ui::plugin::EditIntent::InsertText(text.clone())
@@ -1129,10 +1129,10 @@ mod edit_tests {
             EditCommand::DeleteForward => ui::plugin::EditIntent::DeleteForward,
             _ => panic!("editor transaction test requires a text edit command"),
         };
-        let request = crate::edit_transaction::build_edit_request(&document.model, intent);
-        let plan = crate::edit_transaction::default_edit_plan(&request, &document.model);
+        let request = appkit_shell::edit_transaction::build_edit_request(&document.model, intent);
+        let plan = appkit_shell::edit_transaction::default_edit_plan(&request, &document.model);
 
-        crate::edit_transaction::execute_edit_plan(plan, &mut document.model)
+        appkit_shell::edit_transaction::execute_edit_plan(plan, &mut document.model)
             .expect("default transaction plan must execute for supported editor test commands")
     }
 

@@ -7,7 +7,7 @@ use crate::app_effect::AppEffect;
 use crate::dispatch::chrome::{ChromeDispatchAction, SettingsDispatchAction, TabScrollDirection};
 use crate::dispatch::viewport::ViewportDispatchAction;
 use crate::sync_settings_types::SyncSettingsAction;
-use appkit_core::workspace::types::TabId;
+use appkit_core::tab_set::types::TabId;
 use appkit_shell::DrainStart;
 use appkit_shell::canvas_viewport::CanvasViewportAction;
 use textora_sync::{DeviceId, LoopbackEndpoint, RemoteDeviceSpec, StaticSyncAddress};

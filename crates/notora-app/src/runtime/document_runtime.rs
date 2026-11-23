@@ -2,7 +2,7 @@ use std::collections::{HashMap, HashSet, VecDeque};
 use std::num::NonZeroUsize;
 use std::sync::Arc;
 
-use appkit_core::workspace::types::TabId;
+use appkit_core::tab_set::types::TabId;
 use appkit_shell::editor_runtime::{
     DocumentTextEditError, DocumentTextReplacement, EditorNotification, EditorOutcome,
     EditorRuntime, OpenDisposition, PreparedDocumentSave,
@@ -66,7 +66,10 @@ pub(super) enum DocumentCommand {
     ExecuteNote(NoteCommand),
     ExecuteTrash(crate::action::TrashOperation),
     RetryTitleUpdate(UpdateNoteTitleRequest),
-    RequestCatalogReindex(TabId),
+    RequestCatalogReindex {
+        tab_id: TabId,
+        saved_path: Option<std::path::PathBuf>,
+    },
     CompleteExternalSaveAs {
         request: AutoSaveRequest,
         save_succeeded: bool,
@@ -329,6 +332,11 @@ impl DocumentRuntime {
         {
             self.pending_external_file_closes.remove(&external_file_id);
         }
+        self.pending_external_save_as.remove(&tab_id);
+        self.pending_conflict_retries.remove(&tab_id);
+        self.pending_trash_moves.remove(&tab_id);
+        self.pending_note_moves.remove(&tab_id);
+        self.pending_title_updates.remove(&tab_id);
         self.unlocked_note_sessions.remove(&tab_id);
         self.encrypted_note_tabs.remove(&tab_id);
         self.document_registry.remove_tab(tab_id);
@@ -427,10 +435,6 @@ impl DocumentRuntime {
         for tab_id in note_tabs {
             self.autosave.cancel(tab_id);
             self.save_failure_messages.remove(&tab_id);
-            self.pending_conflict_retries.remove(&tab_id);
-            self.pending_trash_moves.remove(&tab_id);
-            self.pending_note_moves.remove(&tab_id);
-            self.pending_title_updates.remove(&tab_id);
             let _ = self.editor_runtime.close_for_product(tab_id);
             self.unregister_tab(tab_id);
         }
@@ -1455,7 +1459,7 @@ impl DocumentRuntime {
                 outcome.commands.push(DocumentCommand::CompleteExternalSaveAs {
                     request,
                     save_succeeded,
-                    saved_path,
+                    saved_path: saved_path.clone(),
                 });
                 if save_succeeded {
                     self.finish_successful_save(
@@ -1463,6 +1467,7 @@ impl DocumentRuntime {
                         completed_conflict_retry,
                         pending_trash_move,
                         pending_note_move,
+                        saved_path,
                         &mut outcome,
                     );
                 } else {
@@ -1525,11 +1530,14 @@ impl DocumentRuntime {
         completed_conflict_retry: Option<PendingConflictRetry>,
         pending_trash_move: Option<PendingTrashMove>,
         pending_note_move: Option<PendingNoteMove>,
+        saved_path: Option<std::path::PathBuf>,
         outcome: &mut DocumentOutcome,
     ) {
         self.save_failure_messages.remove(&request.tab_id);
         self.autosave.on_save_completed(request);
-        outcome.commands.push(DocumentCommand::RequestCatalogReindex(request.tab_id));
+        outcome
+            .commands
+            .push(DocumentCommand::RequestCatalogReindex { tab_id: request.tab_id, saved_path });
         if let Some(pending) = pending_trash_move {
             if self.pending_trash_move_has_current_saved_document(request.tab_id, pending) {
                 self.pending_trash_moves.remove(&request.tab_id);

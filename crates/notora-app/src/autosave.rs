@@ -3,7 +3,7 @@
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
 
-use appkit_core::workspace::types::TabId;
+use appkit_core::tab_set::types::TabId;
 use notora_core::DocumentOrigin;
 
 /// 用户停止编辑后开始自动保存的空闲时长。
@@ -212,7 +212,7 @@ mod tests {
     use std::cell::Cell;
     use std::time::{Duration, Instant};
 
-    use appkit_core::workspace::types::TabIdAllocator;
+    use appkit_core::tab_set::types::TabIdAllocator;
     use notora_core::{DocumentKind, DocumentOrigin, ExternalFileId, NoteId, WorkspaceId};
 
     use super::{

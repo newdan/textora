@@ -343,39 +343,15 @@ pub fn shape_visible_lines(
     tree_dirty: &mut bool,
     word_wrap: bool,
 ) -> Vec<GlyphVertex> {
-    let mut _cache_hits = 0usize;
-    let mut _cache_misses = 0usize;
-    // ── detailed perf probes ──
-    let mut _wi_setup_us = 0u128;
-    let mut _wi_skip_us = 0u128;
-    let mut _vertex_hit_us = 0u128;
-    let mut _vertex_miss_us = 0u128;
-    let mut _rc_populate_us = 0u128;
-    let mut _ln_shape_us = 0u128;
-    let mut _cursor_us = 0u128;
-    let mut _skip_lines = 0usize;
-    let mut _shaped_lines = 0usize;
-    let mut _hit_lines = 0usize;
-    let mut _doc_read_us = 0u128;
-    let mut _dm_check_us = 0u128;
-    let mut _dm_sync_us = 0u128;
-    let mut _tree_break_hits = 0usize;
-    let mut _vtx_atlas_hits = 0usize;
-    let mut _vtx_skip_raster = 0usize;
-    let mut _vtx_raster_actual = 0usize;
-    let mut _hl_nonzero = 0usize;
+    let atlas_generation = text.atlas_generation();
+    presentation.display.render_cache.invalidate_stale_atlas(atlas_generation);
 
-    let mut _lines_visited = 0usize;
-    let mut _atlas_get_us = 0u128;
-    let mut _font_hash_us = 0u128;
-    // ── end probes ──
     let _perf_t0 = std::time::Instant::now();
     let mut _perf_cache_hits = 0usize;
     let mut _perf_cache_misses = 0usize;
     let mut _perf_hl_time_us = 0u128;
     let mut _perf_shape_time_us = 0u128;
     let mut _perf_vertex_time_us = 0u128;
-    let mut _perf_rc_populate_us = 0u128;
 
     // Notify WrapIndex of viewport width for dirty tracking
     presentation.display.display_map.set_viewport_size(
@@ -397,7 +373,6 @@ pub fn shape_visible_lines(
 
     let mut all_vertices = Vec::new();
     let mut visual_line_counter: usize = 0;
-    let mut _miss_count: usize = 0;
     let mut tree_dirty_local = false;
 
     // Start doc line from anchor — while loop renders until viewport is full,
@@ -895,7 +870,6 @@ pub fn shape_visible_lines(
             continue;
         }
 
-        _miss_count += 1;
         _perf_cache_misses += 1;
 
         let _hl_t0 = std::time::Instant::now();
@@ -1483,12 +1457,11 @@ pub fn shape_visible_lines(
         }
 
         _perf_vertex_time_us += _vtx_t0.elapsed().as_micros();
-        let _rc_t0 = std::time::Instant::now();
         // ── Populate RenderCache ──
         // Skip caching during IME preedit on the cursor line (positions are shifted)
         let cache_doc_line = doc_idx;
         let shaped_line_scope = ShapedLineScope::from_subset_flag(shape_subset_only);
-        let cache_exists = presentation.display.render_cache.get(cache_doc_line).is_some();
+        let cache_exists = presentation.display.render_cache.contains(cache_doc_line);
         if should_store_shaped_line_in_render_cache(
             shaped_line_scope,
             preedit_on_cursor_line,
@@ -1641,7 +1614,7 @@ pub fn shape_visible_lines(
                 CachedLine {
                     instances: all_instances,
                     line_number_glyphs: vec![],
-                    atlas_generation: 0,
+                    atlas_generation,
                     visual_line_count: cache_metadata.visual_line_count,
                     content_hash,
                     visual_lines: visual_lines.clone(),
@@ -1669,7 +1642,7 @@ pub fn shape_visible_lines(
     let _perf_total = _perf_t0.elapsed().as_micros();
     if should_perf_log(_perf_total) {
         eprintln!(
-            "[perf:shape] total={}us setup={}us hits={} misses={} hit_block={}us empty={}us hl={}us shape={}us vtx={}us rc_pop={}us",
+            "[perf:shape] total={}us setup={}us hits={} misses={} hit_block={}us empty={}us hl={}us shape={}us vtx={}us",
             _perf_total,
             _perf_setup_us,
             _perf_cache_hits,
@@ -1679,7 +1652,6 @@ pub fn shape_visible_lines(
             _perf_hl_time_us,
             _perf_shape_time_us,
             _perf_vertex_time_us,
-            _perf_rc_populate_us,
         );
     }
     all_vertices

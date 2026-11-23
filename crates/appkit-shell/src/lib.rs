@@ -29,6 +29,7 @@ pub mod edit_transaction;
 pub mod editor_commands;
 pub mod editor_plugin;
 pub mod editor_runtime;
+pub mod editor_tab_set;
 pub mod event;
 mod event_runtime;
 pub mod frame_cache;
@@ -55,7 +56,6 @@ pub mod tab_session;
 pub mod text_rasterize;
 pub mod view_route;
 pub mod window_input;
-pub mod workspace;
 
 pub use event::{ShellEffect, ShellEffectStep, ShellEvent};
 pub use event_runtime::{

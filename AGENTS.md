@@ -36,7 +36,7 @@ crates/ui (纯 UI 组件库)
 crates/appkit-core (产品无关文档与工作区内核)
   ├── 依赖: core, serde, toml, similar, blake3, dirs, notify
   ├── 不依赖: ui, winit, wgpu, render, shaping, 产品 crate
-  └── 职责: DocumentModel, 通用 Workspace, 持久化, 文件历史与文件安全
+  └── 职责: DocumentModel, 通用 TabSet, 持久化, 文件历史与文件安全
 
 crates/appkit-shell (跨产品编辑器宿主与渲染壳层)
   ├── 依赖: appkit-core, ui, core, render, shaping, winit, wgpu
@@ -47,14 +47,18 @@ crates/markdown / crates/mindmap (编辑器视图实现)
   ├── 通过 ui 的 ViewPlugin 接入宿主，两个 crate 不互相依赖
   └── 职责: Markdown 流式排版与编辑 / MMF 画布布局与交互
 
+crates/file-watch (textora-file-watch，共享文件监听基础层)
+  ├── 依赖: notify
+  └── 职责: 平台文件监听器的后台线程与启停生命周期
+
 crates/notora-core (Notora 笔记域内核)
-  ├── 依赖: blake3, notify, rusqlite, textora-encryption, serde, toml 等
-  ├── 不依赖: ui, winit, wgpu, appkit-core, appkit-shell, textora-*
+  ├── 依赖: blake3, notify, textora-file-watch, rusqlite, textora-encryption, serde, toml 等
+  ├── 不依赖: ui, winit, wgpu, appkit-core, appkit-shell, Textora 产品 crate
   └── 职责: 笔记库索引, SQLite 持久化, 加密笔记与文件监控
 
 crates/app (Textora 应用层)
   ├── 依赖: appkit-core, appkit-shell, ui, core, render, shaping,
-  │         textora-markdown, textora-mindmap, textora-sync, wgpu, winit
+  │         textora-markdown, textora-mindmap, textora-sync, textora-file-watch, wgpu, winit
   └── 职责: 从 DocumentModel / EditorRuntime 提取数据 → 构造 Widget 输入 → 调用 ui::render()
 
 crates/notora-app (Notora 应用层)

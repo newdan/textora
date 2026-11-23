@@ -182,16 +182,14 @@ impl<S: BlockSource> BlockViewEngine<S> {
         match_color: [f32; 4],
         inactive_color: [f32; 4],
     ) -> DrawList {
-        if query.is_empty() || self.lazy.is_none() {
+        let Some(lazy) = self.lazy.as_ref().filter(|_| !query.is_empty()) else {
             return DrawList::new();
-        }
-        // Search uses its own internal update; we pass generation=0 as search
-        // invalidation is handled by the view layer.
+        };
         self.search.update_if_needed(
             query,
             case_sensitive,
-            0,
-            &self.lazy.as_ref().expect("lazy layout must exist for search").flat_lines,
+            (self.source_generation, lazy.flat_line_revision()),
+            &lazy.flat_lines,
         );
         self.clip_code_highlights(self.search.highlights(
             self.scroll_y,
@@ -208,9 +206,15 @@ impl<S: BlockSource> BlockViewEngine<S> {
         if query.is_empty() {
             return;
         }
-        if let Some(ref lazy) = self.lazy {
-            self.search.update_if_needed(query, case_sensitive, 0, &lazy.flat_lines);
-        }
+        let Some(lazy) = self.lazy.as_ref() else {
+            return;
+        };
+        self.search.update_if_needed(
+            query,
+            case_sensitive,
+            (self.source_generation, lazy.flat_line_revision()),
+            &lazy.flat_lines,
+        );
         let viewport_h = self.cached_dl_viewport.1;
         self.scroll_y = self.search.scroll_to(active_idx, viewport_h, self.scroll_y);
     }

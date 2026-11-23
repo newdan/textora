@@ -3,6 +3,8 @@ use shaping::{GlyphCluster, ShapedRun};
 use ui::core::text_layout::UiTextLayout;
 use ui::typography::{TextSpacingMode, TypographyCluster, TypographyInput};
 
+const TEST_ATLAS_GENERATION: u64 = 1;
+
 const FONT_SIZE: f32 = 32.0;
 const LATIN_ADVANCE: f32 = 16.0;
 const POSITION_TOLERANCE: f32 = 0.001;
@@ -63,9 +65,11 @@ fn natural_spacing_preserves_every_letter_position_inside_agent() {
         &gaps,
         &[(0, raw.clusters.len(), raw.width + gaps[0].advance)],
     );
-    let raw_cache = build_cached_text_line(&layout(text, raw), 0.0, proportional_slot);
+    let raw_cache =
+        build_cached_text_line(&layout(text, raw), 0.0, TEST_ATLAS_GENERATION, proportional_slot);
     let natural_layout = layout(text, natural);
-    let natural_cache = build_cached_text_line(&natural_layout, 0.0, proportional_slot);
+    let natural_cache =
+        build_cached_text_line(&natural_layout, 0.0, TEST_ATLAS_GENERATION, proportional_slot);
     let latin_start = natural_layout.shaped.clusters.len() - "agent".len();
     for index in latin_start..natural_cache.instances.len() {
         let shift = natural_cache.instances[index].x - raw_cache.instances[index].x;
@@ -82,11 +86,12 @@ fn raster_phase_includes_offset_without_applying_fraction_twice() {
     let mut shaped = raw_run("a");
     shaped.clusters[0].x_offset = 2.5;
     let mut phases = Vec::new();
-    let cached = build_cached_text_line(&layout("a", shaped), 10.0, |_, x| {
-        let (glyph_x, phase) = render::split_subpixel(x);
-        phases.push(phase);
-        Some((glyph_x, glyph_slot()))
-    });
+    let cached =
+        build_cached_text_line(&layout("a", shaped), 10.0, TEST_ATLAS_GENERATION, |_, x| {
+            let (glyph_x, phase) = render::split_subpixel(x);
+            phases.push(phase);
+            Some((glyph_x, glyph_slot()))
+        });
     assert_eq!(phases, vec![2], "rasterization must use the displaced glyph position");
     assert_eq!(cached.instances[0].x, 2.0, "fraction is already in the rasterized bitmap");
 }
@@ -97,7 +102,12 @@ fn zero_and_fractional_advances_survive_preview_cache() {
     shaped.clusters[0].advance = 0.0;
     shaped.clusters[1].advance = 0.25;
     shaped.width = LATIN_ADVANCE + 0.25;
-    let cached = build_cached_text_line(&layout("abc", shaped.clone()), 0.0, proportional_slot);
+    let cached = build_cached_text_line(
+        &layout("abc", shaped.clone()),
+        0.0,
+        TEST_ATLAS_GENERATION,
+        proportional_slot,
+    );
     assert_eq!(cached.cluster_data[0].2, 0.0);
     assert_eq!(cached.cluster_data[1].2, 0.25);
     assert_eq!(cached.instances[1].x, 0.0);
@@ -108,7 +118,8 @@ fn zero_and_fractional_advances_survive_preview_cache() {
 fn vertical_offset_survives_cache_and_vertex_emission() {
     let mut shaped = raw_run("a");
     shaped.clusters[0].y_offset = 3.0;
-    let cached = build_cached_text_line(&layout("a", shaped), 0.0, proportional_slot);
+    let cached =
+        build_cached_text_line(&layout("a", shaped), 0.0, TEST_ATLAS_GENERATION, proportional_slot);
     let vertices =
         emit_from_instances(&cached.instances, 0.0, 40.0, 100.0, 100.0, [1.0; 4], &[], false);
     let top = (1.0 - vertices[0].position[1]) * 50.0;
@@ -123,7 +134,8 @@ fn cached_text_preserves_spacing_after_integer_translation() {
     let mut shaped = raw_run("ab");
     shaped.clusters[0].x_offset = 2.0;
     let text_layout = layout("ab", shaped);
-    let cached = build_cached_text_line(&text_layout, 10.0, proportional_slot);
+    let cached =
+        build_cached_text_line(&text_layout, 10.0, TEST_ATLAS_GENERATION, proportional_slot);
     let cold =
         emit_from_instances(&cached.instances, 10.0, 40.0, 200.0, 100.0, [1.0; 4], &[], false);
     let warm =
@@ -144,12 +156,13 @@ fn monospace_preview_preserves_advances_but_uses_integer_glyph_positions() {
     let text_layout = layout("agent", shaped.clone());
     let origin = 10.25;
     let mut phases = Vec::new();
-    let cached = build_cached_text_line(&text_layout, origin, |cluster, x| {
-        let (glyph_x, phase) =
-            crate::text_rasterize::glyph_position(&mut shaper, cluster.font_id, x);
-        phases.push(phase);
-        Some((glyph_x, glyph_slot()))
-    });
+    let cached =
+        build_cached_text_line(&text_layout, origin, TEST_ATLAS_GENERATION, |cluster, x| {
+            let (glyph_x, phase) =
+                crate::text_rasterize::glyph_position(&mut shaper, cluster.font_id, x);
+            phases.push(phase);
+            Some((glyph_x, glyph_slot()))
+        });
     assert!(
         phases.iter().all(|&phase| phase == 0),
         "monospace glyphs must resolve zero-phase bitmaps: {phases:?}"
@@ -184,12 +197,13 @@ fn monospace_preview_cache_matches_fresh_geometry_after_origin_changes() {
     let mut cache = crate::render_cache::PreviewRenderCache::new();
     let mut hits = 0;
     for origin in [0.5, -0.5, 10.25, 10.75, 10.25] {
-        let fresh = build_cached_text_line(&text_layout, origin, |cluster, x| {
-            let (glyph_x, phase) =
-                crate::text_rasterize::glyph_position(&mut shaper, cluster.font_id, x);
-            assert_eq!(phase, 0);
-            Some((glyph_x, glyph_slot()))
-        });
+        let fresh =
+            build_cached_text_line(&text_layout, origin, TEST_ATLAS_GENERATION, |cluster, x| {
+                let (glyph_x, phase) =
+                    crate::text_rasterize::glyph_position(&mut shaper, cluster.font_id, x);
+                assert_eq!(phase, 0);
+                Some((glyph_x, glyph_slot()))
+            });
         let key = preview_text_cache_key(text_layout.id, origin);
         if cache.get(key).is_some() {
             hits += 1;
